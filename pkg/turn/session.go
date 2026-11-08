@@ -140,8 +140,14 @@ type CancelledTurn struct {
 	PartialText string
 	// PartialReasoning is stored as its own reasoning row, as on a normal turn.
 	PartialReasoning string
-	Model            string
-	End              RunEnd
+	// PartialCarry is the reasoning the interrupted response had completed, and
+	// PartialCarryModel is the model that produced it. They ride the partial
+	// answer's message, so the reply that was cut is replayed to that model with
+	// its thinking, the way a finished reply carries its own.
+	PartialCarry      string
+	PartialCarryModel string
+	Model             string
+	End               RunEnd
 	// OnRepairError reports a failed RepairDanglingToolResults call. The repair
 	// itself stays best-effort -- a failure here must not abort the cancel
 	// path, which is why the call site below discards the error rather than
@@ -186,7 +192,16 @@ func PersistCancelledTurn(ctx context.Context, store CancelledTurnStore, in Canc
 	// otherwise come between them.
 	toPersist = append(toPersist, CancelledToolAnswers(toPersist)...)
 	if partialText != "" {
-		toPersist = append(toPersist, llm.AssistantMessage([]llm.ContentPart{llm.Text(partialText)}))
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text(partialText)})
+		// The answer was cut, so it is finished from what streamed. The
+		// reasoning complete at the cut belongs with it: without it the next
+		// request hands the model its half answer and no memory of the thinking
+		// it was written from.
+		if strings.HasPrefix(in.PartialCarry, llm.Prefix) {
+			msg.Name = in.PartialCarry
+			msg.ReasoningModel = in.PartialCarryModel
+		}
+		toPersist = append(toPersist, msg)
 	}
 	if len(toPersist) > 0 {
 		// A store that refuses the write is not a reason to abort the turn the
@@ -545,9 +560,11 @@ func cancelledToolAnswer(call llm.ToolCall) llm.Message {
 // reasoning, so a cancelled turn can keep the partial answer the user already
 // saw (CancelledTurn.PartialText). Every surface that streams a turn keeps one.
 type StreamPartial struct {
-	mu        sync.Mutex
-	content   strings.Builder
-	reasoning strings.Builder
+	mu         sync.Mutex
+	content    strings.Builder
+	reasoning  strings.Builder
+	carry      string
+	carryModel string
 }
 
 func (p *StreamPartial) AppendContent(text string) {
@@ -568,23 +585,53 @@ func (p *StreamPartial) AppendReasoning(text string) {
 	p.mu.Unlock()
 }
 
+// SetReasoningCarry records the reasoning the response in flight has completed
+// so far: the carry its finished message will hold, replaced by every later
+// complete reasoning unit. A cancelled turn hands it to the partial answer it
+// stores, so the reply that was cut goes to its model with the thinking behind
+// it.
+func (p *StreamPartial) SetReasoningCarry(carry, model string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.carry, p.carryModel = carry, model
+	p.mu.Unlock()
+}
+
+// ReasoningCarry is the reasoning the interrupted response had completed, and
+// the model that produced it. Both are empty when the response completed no
+// reasoning unit before it was cut.
+func (p *StreamPartial) ReasoningCarry() (string, string) {
+	if p == nil {
+		return "", ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.carry, p.carryModel
+}
+
 // ResponseCompleted drops the answer text collected so far: a finished
 // response has entered the session, where the run's partial session capture
-// owns it. Reasoning is kept: a block that has not ended yet still reaches the
-// transcript only through the cancel path's reasoning row.
+// owns it — its reasoning too, which it carries on its own message. Reasoning
+// is kept: a block that has not ended yet still reaches the transcript only
+// through the cancel path's reasoning row.
 func (p *StreamPartial) ResponseCompleted() {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	p.content.Reset()
+	p.carry, p.carryModel = "", ""
 	p.mu.Unlock()
 }
 
 // ResponseReasoningDone drops the reasoning collected so far: the block it
 // holds just ended and was written to the transcript as its own row, so
 // keeping it would make a later cancel write that block a second time. What
-// remains is only the thinking of a block still in flight.
+// remains is only the thinking of a block still in flight. The carry stays: a
+// finished reasoning block is exactly when the reply's carry became complete,
+// and a cancel from here on stores it with the partial answer.
 func (p *StreamPartial) ResponseReasoningDone() {
 	if p == nil {
 		return
@@ -594,10 +641,11 @@ func (p *StreamPartial) ResponseReasoningDone() {
 	p.mu.Unlock()
 }
 
-// Reset drops both the answer text and the reasoning collected so far: the
-// attempt that was streaming them died on the network and the retry re-streams
-// from the first token, so both buffers must go in one step. It is the
-// transport-retry discard boundary for surfaces that hold a StreamPartial.
+// Reset drops the answer text, the reasoning and the reasoning carry collected
+// so far: the attempt that was streaming them died on the network and the retry
+// re-streams from the first token, publishing its own carry as it goes, so all
+// of it must go in one step. It is the transport-retry discard boundary for
+// surfaces that hold a StreamPartial.
 func (p *StreamPartial) Reset() {
 	if p == nil {
 		return
@@ -605,6 +653,7 @@ func (p *StreamPartial) Reset() {
 	p.mu.Lock()
 	p.content.Reset()
 	p.reasoning.Reset()
+	p.carry, p.carryModel = "", ""
 	p.mu.Unlock()
 }
 

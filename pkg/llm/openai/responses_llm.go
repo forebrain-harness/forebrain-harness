@@ -612,14 +612,32 @@ func (c *openAIResponsesLLM) Execute(ctx context.Context, messages []llm.Message
 	// Every error leaving this package is normalized here rather than at each
 	// return, so a path added later cannot leak a raw SDK error to Layer 0.
 	defer func() { outErr = normalizeError(outErr) }()
-	ctx, finish := llm.WithRawCacheUsage(ctx)
 	// The sink's end fires once per Execute, not once per request: a
 	// continuation round is the same answer still being produced, and ending
-	// between rounds made the UI treat the fragment as a finished reply.
+	// between rounds made the UI treat the fragment as a finished reply. The
+	// resend a refused request gets is that same answer too.
 	endSink := llm.StreamSinkFrom(ctx)
 	if endSink != nil && endSink.OnEnd != nil {
 		defer endSink.OnEnd()
 	}
+	res, replayed, err := c.execute(ctx, messages, tools)
+	if err != nil && replayed && llm.ReasoningReplayRefused(normalizeError(err),
+		[]int{http.StatusBadRequest, http.StatusNotFound}, "reasoning", "encrypted", "rs_") {
+		// An encrypted reasoning item the endpoint no longer accepts — another
+		// account, an endpoint that never stored it — fails every request of
+		// the conversation from here on, because the same item goes back each
+		// time. One resend without it keeps the turn alive; anything it then
+		// fails on is another cause and is returned as it is.
+		slog.Warn("openai responses: provider refused the replayed reasoning; resending without it", "model", c.model, "err", err)
+		res, _, err = c.execute(ctx, llm.WithoutReasoningCarries(messages), tools)
+	}
+	return res, err
+}
+
+// execute runs one request loop for Execute, reporting whether the request
+// replayed reasoning — which is what makes a refusal worth a resend without it.
+func (c *openAIResponsesLLM) execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, bool, error) {
+	ctx, finish := llm.WithRawCacheUsage(ctx)
 	// The branch is stable across rounds: streaming unless the client is
 	// configured non-streaming or this attempt carries the non-streaming
 	// switch (whose round replays the whole answer to the sink in stream
@@ -641,9 +659,17 @@ func (c *openAIResponsesLLM) Execute(ctx context.Context, messages []llm.Message
 	var usage *llm.Usage
 	var billedIn, billedOut, billedCacheRead int
 	var settledIn, settledCacheRead int
+	// replayed reports that the request this loop sends includes reasoning an
+	// earlier reply carried, not only that some message has a carry: a carry
+	// another model produced, or one this endpoint already refuses to hear
+	// about, never reaches the wire.
+	replayed := false
 	for {
 		rounds++
 		params := c.newResponseParams(ctx, conversation, tools, false)
+		if responsesParamsReplayReasoning(params) {
+			replayed = true
+		}
 		var res *llm.Result
 		var err error
 		if streaming {
@@ -654,7 +680,7 @@ func (c *openAIResponsesLLM) Execute(ctx context.Context, messages []llm.Message
 			res, err = c.executeSync(ctx, params)
 		}
 		if err != nil {
-			return finish(nil), err
+			return finish(nil), replayed, err
 		}
 		lastResult = res
 		// Occupancy is the settled round's prompt side; the output is every
@@ -687,7 +713,7 @@ func (c *openAIResponsesLLM) Execute(ctx context.Context, messages []llm.Message
 	if rounds == 1 {
 		// No continuation ran: the settled round's own result is this call's,
 		// byte-identical to the pre-recovery shape (thinking fences included).
-		return finishUsage(lastResult, finish), nil
+		return finishUsage(lastResult, finish), replayed, nil
 	}
 	// One assistant message carries the whole answer: each round was its own
 	// request, but this call is one reply. Reasoning stays in the carry, not
@@ -709,7 +735,7 @@ func (c *openAIResponsesLLM) Execute(ctx context.Context, messages []llm.Message
 			CacheReadInputTokens: billedCacheRead,
 		}
 	}
-	return finishUsage(out, finish), nil
+	return finishUsage(out, finish), replayed, nil
 }
 
 // executeSyncReplayRound runs one non-streaming round under the non-streaming
@@ -737,6 +763,12 @@ func (c *openAIResponsesLLM) executeSyncReplayRound(ctx context.Context, params 
 	if content != "" {
 		texts = []string{content}
 	}
+	// The whole reply is finished here, so its carry is complete: hand it over
+	// before the replay, whose tool-call callbacks are what can start a
+	// provisional message for this reply.
+	if result != nil && result.Message != nil {
+		publishReasoningCarry(sink, result.Message.Name, result.Message.ReasoningModel)
+	}
 	llm.ReplayToSink(sink, llm.ReplayedResponse{
 		Reasoning:  llm.SummaryText(reasoningItems),
 		Text:       texts,
@@ -760,12 +792,39 @@ func responsesAnswerText(m *llm.Message) string {
 		if p.Type != llm.ContentTypeText {
 			continue
 		}
-		if strings.HasPrefix(p.Text, "```thinking\n") && strings.HasSuffix(p.Text, "\n```") {
+		if llm.IsThinkingFence(p.Text) {
 			continue
 		}
 		b.WriteString(p.Text)
 	}
 	return b.String()
+}
+
+// responsesAssistantText is the text an assistant message sends back: its
+// text parts joined as llm.TextContent joins them, without the thinking fence.
+// The fence duplicates the reasoning items the same model is replayed, and
+// handing it to another model would pass this model's reasoning off as an
+// answer.
+func responsesAssistantText(m llm.Message) string {
+	kept := make([]llm.ContentPart, 0, len(m.Parts))
+	for _, p := range m.Parts {
+		if p.Type == llm.ContentTypeText && llm.IsThinkingFence(p.Text) {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return llm.TextContent(kept...)
+}
+
+// responsesParamsReplayReasoning reports whether a request sends reasoning back
+// to the model: any of its input items is a reasoning item of an earlier reply.
+func responsesParamsReplayReasoning(params responses.ResponseNewParams) bool {
+	for i := range params.Input.OfInputItemList {
+		if params.Input.OfInputItemList[i].OfReasoning != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *openAIResponsesLLM) ExecuteStructured(ctx context.Context, messages []llm.Message, spec llm.StructuredOutputSpec) (outResult *llm.Result, outErr error) {
@@ -779,8 +838,22 @@ func (c *openAIResponsesLLM) ExecuteStructured(ctx context.Context, messages []l
 	if strings.TrimSpace(spec.Name) == "" || len(spec.Schema) == 0 {
 		return nil, fmt.Errorf("structured output name and schema are required")
 	}
+	res, replayed, err := c.executeStructured(ctx, messages, spec)
+	if err != nil && replayed && llm.ReasoningReplayRefused(normalizeError(err),
+		[]int{http.StatusBadRequest, http.StatusNotFound}, "reasoning", "encrypted", "rs_") {
+		// Same one resend Execute makes: see there.
+		slog.Warn("openai responses: provider refused the replayed reasoning; resending without it", "model", c.model, "err", err)
+		res, _, err = c.executeStructured(ctx, llm.WithoutReasoningCarries(messages), spec)
+	}
+	return res, err
+}
+
+// executeStructured runs one structured-output request for ExecuteStructured,
+// reporting whether it replayed reasoning the way execute does.
+func (c *openAIResponsesLLM) executeStructured(ctx context.Context, messages []llm.Message, spec llm.StructuredOutputSpec) (*llm.Result, bool, error) {
 	ctx, finish := llm.WithRawCacheUsage(ctx)
 	params := c.newResponseParams(ctx, messages, nil, false)
+	replayed := responsesParamsReplayReasoning(params)
 	params.Text = responses.ResponseTextConfigParam{
 		Format: responses.ResponseFormatTextConfigUnionParam{
 			OfJSONSchema: &responses.ResponseFormatTextJSONSchemaConfigParam{
@@ -793,7 +866,7 @@ func (c *openAIResponsesLLM) ExecuteStructured(ctx context.Context, messages []l
 	}
 	// Internal structured calls must not emit deltas into the user-facing stream.
 	result, err := c.executeSync(ctx, params)
-	return finish(result), err
+	return finish(result), replayed, err
 }
 
 func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []llm.Message, tools []*llm.Tool, compactionTrigger bool) responses.ResponseNewParams {
@@ -834,17 +907,22 @@ func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []l
 			}
 			input = append(input, responses.ResponseInputItemParamOfMessage(content, responses.EasyInputMessageRoleDeveloper))
 		case llm.RoleAssistant:
-			if len(msg.ToolCalls) > 0 {
-				for _, tc := range msg.ToolCalls {
-					if strings.TrimSpace(tc.Function.Name) == "" || strings.TrimSpace(tc.ID) == "" {
-						continue
-					}
-					input = append(input, responses.ResponseInputItemParamOfFunctionCall(llm.SanitizeToolCallArguments(tc.Function.Arguments), tc.ID, tc.Function.Name))
-				}
-			} else if items := responseReasoningInputItemsFromMessage(msg, c.model); len(items) > 0 {
-				input = append(input, items...)
-			} else if content := msg.TextContent(); content != "" {
+			// An assistant message goes back as the items the model produced,
+			// in the order it produced them: its reasoning (to the model that
+			// wrote it only), its text, then its calls. These used to be
+			// alternatives — a message with calls lost its reasoning and its
+			// text, and an answer with reasoning lost the answer — so a model
+			// re-derived every step of a tool loop and never saw what it had
+			// replied the turn before.
+			input = append(input, responseReasoningInputItemsFromMessage(msg, c.model)...)
+			if content := responsesAssistantText(msg); content != "" {
 				input = append(input, responses.ResponseInputItemParamOfMessage(content, responses.EasyInputMessageRoleAssistant))
+			}
+			for _, tc := range msg.ToolCalls {
+				if strings.TrimSpace(tc.Function.Name) == "" || strings.TrimSpace(tc.ID) == "" {
+					continue
+				}
+				input = append(input, responses.ResponseInputItemParamOfFunctionCall(llm.SanitizeToolCallArguments(tc.Function.Arguments), tc.ID, tc.Function.Name))
 			}
 		case llm.RoleTool:
 			content := msg.TextContent()
@@ -1293,15 +1371,11 @@ func (c *openAIResponsesLLM) executeSyncDetail(ctx context.Context, params respo
 		return nil, "", nil, "", err
 	}
 
-	var content string
+	content := responseOutputText(resp.Output)
 	var reasoningItems []llm.Item
 	var toolCalls []llm.ToolCall
 	if len(resp.Output) > 0 {
 		for _, item := range resp.Output {
-			// Extract text content
-			if text := extractTextFromOutputItem(item); text != "" && content == "" {
-				content = text
-			}
 			if reasoningItem, ok := extractReasoningCarryItem(item); ok {
 				reasoningItems = appendOrReplaceReasoningItem(reasoningItems, reasoningItem)
 			}
@@ -1324,7 +1398,7 @@ func (c *openAIResponsesLLM) executeSyncDetail(ctx context.Context, params respo
 	if content != "" {
 		parts = append(parts, llm.Text(content))
 	} else if len(toolCalls) == 0 && strings.TrimSpace(reasoning) != "" {
-		parts = append(parts, llm.Text("```thinking\n"+reasoning+"\n```"))
+		parts = append(parts, llm.Text(llm.ThinkingFence(reasoning)))
 	}
 
 	msg := llm.Message{
@@ -1579,6 +1653,13 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 			if reasoningItem, ok := extractReasoningCarryItem(done.Item); ok {
 				reasoningItems = appendOrReplaceReasoningItem(reasoningItems, reasoningItem)
 				mergeReasoningSummaryState(streamedReasoningByItem, reasoningItem)
+				// A done reasoning item is complete — its encrypted content has
+				// arrived — and it appears in the stream before the calls that
+				// follow it. That makes this the moment the reply's reasoning is
+				// complete as it stands, and it goes out before those calls'
+				// OnToolCallReady, which is where a provisional message is
+				// written from the sink.
+				publishReasoningCarry(sink, llm.Encode(reasoningItems), c.model)
 			}
 		case "error":
 			streamErr := evt.AsError()
@@ -1622,14 +1703,11 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 			}
 			// Extract final output if text buffer is empty
 			if textBuf.Len() == 0 {
-				for _, item := range evt.Response.Output {
-					if content := extractTextFromOutputItem(item); content != "" {
-						llm.NotifyResponseStarted(sink, &responseStarted)
-						textBuf.WriteString(content)
-						if sink != nil && sink.OnDelta != nil {
-							sink.OnDelta(content)
-						}
-						break
+				if content := responseOutputText(evt.Response.Output); content != "" {
+					llm.NotifyResponseStarted(sink, &responseStarted)
+					textBuf.WriteString(content)
+					if sink != nil && sink.OnDelta != nil {
+						sink.OnDelta(content)
 					}
 				}
 			}
@@ -1695,14 +1773,11 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 			}
 			// Extract final output if text buffer is empty
 			if textBuf.Len() == 0 {
-				for _, item := range incomplete.Response.Output {
-					if content := extractTextFromOutputItem(item); content != "" {
-						llm.NotifyResponseStarted(sink, &responseStarted)
-						textBuf.WriteString(content)
-						if sink != nil && sink.OnDelta != nil {
-							sink.OnDelta(content)
-						}
-						break
+				if content := responseOutputText(incomplete.Response.Output); content != "" {
+					llm.NotifyResponseStarted(sink, &responseStarted)
+					textBuf.WriteString(content)
+					if sink != nil && sink.OnDelta != nil {
+						sink.OnDelta(content)
 					}
 				}
 			}
@@ -1762,7 +1837,7 @@ func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params respon
 	if textBuf.Len() > 0 {
 		parts = append(parts, llm.Text(textBuf.String()))
 	} else if len(toolCalls) == 0 && strings.TrimSpace(reasoningText) != "" {
-		parts = append(parts, llm.Text("```thinking\n"+reasoningText+"\n```"))
+		parts = append(parts, llm.Text(llm.ThinkingFence(reasoningText)))
 	}
 
 	msg := llm.Message{
@@ -1828,19 +1903,36 @@ func newOpenAIResponsesStreamError(eventType, code, message string) error {
 	}
 }
 
+// extractTextFromOutputItem returns the text of one output item: every text
+// segment of a message item, in order. A message item can hold several
+// segments and a refusal segment (which is not text), and the streamed path
+// appends every delta it receives, so keeping only the first segment made one
+// response read differently depending on how it arrived.
 func extractTextFromOutputItem(item responses.ResponseOutputItemUnion) string {
-	// Check if this is a message type output
-	if item.Type == "message" && len(item.Content) > 0 {
-		// Extract text from the first content item
-		for _, content := range item.Content {
-			// Content is also a union type, check for text or output_text
-			llm.LogDebug("openai_responses", fmt.Sprintf("content.Type=%s text_length=%d", content.Type, len(content.Text)))
-			if content.Type == "text" || content.Type == "output_text" {
-				return content.Text
-			}
+	if item.Type != "message" || len(item.Content) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, content := range item.Content {
+		// Content is also a union type, check for text or output_text
+		llm.LogDebug("openai_responses", fmt.Sprintf("content.Type=%s text_length=%d", content.Type, len(content.Text)))
+		if content.Type == "text" || content.Type == "output_text" {
+			b.WriteString(content.Text)
 		}
 	}
-	return ""
+	return b.String()
+}
+
+// responseOutputText is a response's whole answer text: every text segment of
+// every message item, in order, joined exactly as the streamed text deltas
+// join — with nothing between them — so a response reads the same whether it
+// arrived streamed or not. Only the first segment used to be kept.
+func responseOutputText(items []responses.ResponseOutputItemUnion) string {
+	var b strings.Builder
+	for _, item := range items {
+		b.WriteString(extractTextFromOutputItem(item))
+	}
+	return b.String()
 }
 
 type streamedReasoningState struct {
@@ -1878,7 +1970,11 @@ func responseReasoningInputItemsFromMessage(msg llm.Message, model string) []res
 			}
 			summaryParts = append(summaryParts, responses.ResponseReasoningItemSummaryParam{Text: text})
 		}
-		if len(summaryParts) == 0 && strings.TrimSpace(item.EncryptedContent) == "" {
+		// An item without encrypted content cannot be replayed: every request
+		// sets Store false, so the service kept nothing to resolve an id and a
+		// summary against, and sending one makes the whole request fail. The
+		// summary alone carries no state the model could resume from.
+		if strings.TrimSpace(item.EncryptedContent) == "" {
 			continue
 		}
 		param := responses.ResponseInputItemParamOfReasoning(item.ID, summaryParts)

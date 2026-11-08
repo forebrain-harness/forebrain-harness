@@ -590,3 +590,85 @@ func TestStreamPartialReset(t *testing.T) {
 	partial.AppendContent("full answer")
 	require.Equal(t, "full answer", partial.Content())
 }
+
+// TestStreamPartialKeepsTheReasoningCarry pins which boundaries do and do not
+// drop the reasoning a response had completed: a finished reasoning block is
+// exactly when the carry became complete, so the thinking-done boundary keeps
+// it, while a finished response and a transport retry both discard it — the
+// first because the reply entered the session with its own carry, the second
+// because the retry publishes its own as it streams.
+func TestStreamPartialKeepsTheReasoningCarry(t *testing.T) {
+	carry := llm.EncodeThinking([]llm.ThinkingBlock{{Thinking: "step one", Signature: "sig-1"}})
+	partial := &StreamPartial{}
+	partial.SetReasoningCarry(carry, "claude-opus-4-6")
+	got, model := partial.ReasoningCarry()
+	require.Equal(t, carry, got)
+	require.Equal(t, "claude-opus-4-6", model)
+
+	partial.ResponseReasoningDone()
+	got, _ = partial.ReasoningCarry()
+	require.Equal(t, carry, got, "the thinking-done boundary is when the carry completed")
+
+	partial.ResponseCompleted()
+	got, model = partial.ReasoningCarry()
+	require.Equal(t, "", got, "a finished reply entered the session with its own carry")
+	require.Equal(t, "", model)
+
+	partial.SetReasoningCarry(carry, "claude-opus-4-6")
+	partial.Reset()
+	got, model = partial.ReasoningCarry()
+	require.Equal(t, "", got, "a retry re-streams from the first token and publishes its own carry")
+	require.Equal(t, "", model)
+
+	// A surface that never receives a carry keeps none, and the nil receiver
+	// is safe like every other method here.
+	var nilPartial *StreamPartial
+	nilPartial.SetReasoningCarry(carry, "claude-opus-4-6")
+	got, model = nilPartial.ReasoningCarry()
+	require.Equal(t, "", got)
+	require.Equal(t, "", model)
+}
+
+// TestPersistCancelledTurnGivesThePartialAnswerItsCarry pins that the half
+// answer a cancel keeps goes back to its model with the reasoning that was
+// complete when it was cut: without it the next request carries an answer the
+// model has no memory of reasoning through.
+func TestPersistCancelledTurnGivesThePartialAnswerItsCarry(t *testing.T) {
+	carry := llm.EncodeThinking([]llm.ThinkingBlock{{Thinking: "step one", Signature: "sig-1"}})
+	cases := []struct {
+		name      string
+		carry     string
+		model     string
+		wantCarry string
+		wantModel string
+	}{
+		{name: "a carry rides the partial answer", carry: carry, model: "claude-opus-4-6", wantCarry: carry, wantModel: "claude-opus-4-6"},
+		{name: "no carry", wantCarry: "", wantModel: ""},
+		{name: "something that is not a carry", carry: "plain reasoning text", model: "claude-opus-4-6", wantCarry: "", wantModel: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeCancelStore{}
+			PersistCancelledTurn(context.Background(), store, CancelledTurn{
+				SessionID:         "s1",
+				Captured:          []llm.Message{llm.UserMessage(llm.Text("do it"))},
+				PartialText:       "half an answer",
+				PartialCarry:      tc.carry,
+				PartialCarryModel: tc.model,
+			})
+			if len(store.seqs) != 1 || len(store.seqs[0]) != 2 {
+				t.Fatalf("persisted %v, want the captured message and the half answer", store.seqs)
+			}
+			half := store.seqs[0][1]
+			if half.Role != llm.RoleAssistant || half.TextContent() != "half an answer" {
+				t.Fatalf("half answer = %+v, want the streamed text", half)
+			}
+			if half.Name != tc.wantCarry {
+				t.Fatalf("carry = %q, want %q", half.Name, tc.wantCarry)
+			}
+			if half.ReasoningModel != tc.wantModel {
+				t.Fatalf("ReasoningModel = %q, want %q", half.ReasoningModel, tc.wantModel)
+			}
+		})
+	}
+}

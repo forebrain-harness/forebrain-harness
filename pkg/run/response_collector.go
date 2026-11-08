@@ -20,13 +20,18 @@ func (e *responseIncompleteError) Error() string { return e.sentence }
 func (e *responseIncompleteError) Unwrap() error { return e.err }
 
 // responseCollector keeps what one model request has completed so far: the
-// finished answer-text blocks and the tool calls whose arguments are complete.
-// It is what a request that failed mid-stream is finished from.
+// finished answer-text blocks, the tool calls whose arguments are complete, and
+// the reasoning the response had completed as it stood. It is what a request
+// that failed mid-stream is finished from, and the message it builds carries
+// that reasoning, so a reply cut off by an interruption keeps the thinking
+// behind it when it goes back to the model as history.
 type responseCollector struct {
-	mu        sync.Mutex
-	current   strings.Builder // the text block being streamed
-	completed []string        // finished text blocks, in order
-	ready     []llm.ToolCall  // finished tool calls, in order
+	mu         sync.Mutex
+	current    strings.Builder // the text block being streamed
+	completed  []string        // finished text blocks, in order
+	ready      []llm.ToolCall  // finished tool calls, in order
+	carry      string          // the reasoning carry as of the last complete reasoning unit
+	carryModel string          // the model that produced carry
 }
 
 type responseCollectorCtxKey struct{}
@@ -35,9 +40,9 @@ type responseCollectorCtxKey struct{}
 // returned context, observing the context's stream sink. OnDelta is chained
 // only when the sink already had one — a muted stream must not start
 // producing output — while the block boundaries (OnTextBlockDone,
-// OnToolCallReady) and the transport-retry notices get record-only versions
-// when they were nil, so the collected state is complete even when nobody
-// listens.
+// OnToolCallReady), the reasoning carry and the transport-retry notices get
+// record-only versions when they were nil, so the collected state is complete
+// even when nobody listens.
 func withResponseCollector(ctx context.Context) (context.Context, *responseCollector) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -64,6 +69,12 @@ func withResponseCollector(ctx context.Context) (context.Context, *responseColle
 		collector.noteToolCall(call)
 		if sink.OnToolCallReady != nil {
 			sink.OnToolCallReady(call)
+		}
+	}
+	wrapped.OnReasoningCarry = func(carry, model string) {
+		collector.noteReasoningCarry(carry, model)
+		if sink.OnReasoningCarry != nil {
+			sink.OnReasoningCarry(carry, model)
 		}
 	}
 	wrapped.OnTransportRetry = func(tr llm.TransportRetry) {
@@ -108,10 +119,29 @@ func (c *responseCollector) noteToolCall(call llm.ToolCall) {
 	c.ready = append(c.ready, call)
 }
 
+// noteReasoningCarry records the reasoning the response has completed so far.
+// It replaces what an earlier unit published: the carry is always the reply's
+// reasoning up to its last complete unit, never a sum of them.
+func (c *responseCollector) noteReasoningCarry(carry, model string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.carry, c.carryModel = carry, model
+}
+
+// reasoningCarry is the reasoning the response had completed when it stopped,
+// and the model that produced it. Both are empty when it held no complete
+// reasoning unit.
+func (c *responseCollector) reasoningCarry() (carry, model string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.carry, c.carryModel
+}
+
 // noteTransportRetry takes back what the dead attempt produced: a resend
-// (non-Cleared, or one that withdraws finished thinking) clears everything;
-// the catch-up Cleared only drops the block still being streamed, which is
-// all an announcement that does not precede a resend can mean here.
+// (non-Cleared, or one that withdraws finished thinking) clears everything —
+// the carry included, because the resend publishes its own as it streams; the
+// catch-up Cleared only drops the block still being streamed, which is all an
+// announcement that does not precede a resend can mean here.
 func (c *responseCollector) noteTransportRetry(tr llm.TransportRetry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -119,6 +149,7 @@ func (c *responseCollector) noteTransportRetry(tr llm.TransportRetry) {
 		c.current.Reset()
 		c.completed = nil
 		c.ready = nil
+		c.carry, c.carryModel = "", ""
 		return
 	}
 	c.current.Reset()
@@ -134,7 +165,16 @@ func (c *responseCollector) result() *llm.Result {
 		parts = append(parts, llm.Text(block))
 	}
 	calls := append([]llm.ToolCall(nil), c.ready...)
-	return &llm.Result{Message: &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: calls}}
+	msg := &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: calls}
+	// The reply is finished from what arrived, so it records the reasoning that
+	// was complete when it was cut: the next request hands that reasoning back
+	// to the model that produced it, which would otherwise see its own calls
+	// and their results with no memory of why it made them.
+	if c.carry != "" {
+		msg.Name = c.carry
+		msg.ReasoningModel = c.carryModel
+	}
+	return &llm.Result{Message: msg}
 }
 
 // completedParts returns the finished answer-text blocks, in order: the body a

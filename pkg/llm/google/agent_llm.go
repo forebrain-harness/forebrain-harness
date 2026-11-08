@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -76,11 +77,32 @@ func (c *agentLLM) Execute(ctx context.Context, messages []llm.Message, tools []
 	}
 	// The sink's end fires once per Execute, not once per request: a
 	// continuation round is the same answer still being produced, and ending
-	// between rounds made the UI treat the fragment as a finished reply.
+	// between rounds made the UI treat the fragment as a finished reply. The
+	// resend a refused request gets is that same answer too.
 	endSink := llm.StreamSinkFrom(ctx)
 	if endSink != nil && endSink.OnEnd != nil {
 		defer endSink.OnEnd()
 	}
+	res, replayed, err := c.execute(ctx, messages, tools)
+	if err != nil && replayed && llm.ReasoningReplayRefused(err, []int{http.StatusBadRequest},
+		"thought_signature", "thoughtsignature", "signature") {
+		// The signatures of a reply belong to the model that wrote them and to
+		// the account that stored them: once Google refuses them, every request
+		// of this conversation carries the same ones and fails the same way.
+		// The resend without them sends the reply as ordinary history, and the
+		// current turn's first call gets the placeholder buildRequest gives a
+		// call that lost its signature — so a refusal of the signatures is
+		// answered, while anything else it then fails on is returned as it is.
+		slog.Warn("google: provider refused the replayed thought signatures; resending without them", "model", c.model, "err", err)
+		res, _, err = c.execute(ctx, llm.WithoutReasoningCarries(messages), tools)
+	}
+	return res, err
+}
+
+// execute runs the request loop for Execute, reporting whether the requests it
+// sent replayed reasoning — a thought summary or a signature a reply carried —
+// which is what makes a refusal worth a resend without it.
+func (c *agentLLM) execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, bool, error) {
 	nonStreaming := llm.NonStreamingRequestFrom(ctx)
 	// conversation is what the next round sends: the caller's messages plus,
 	// from the second round on, the recovery's resume pair. It is rebuilt
@@ -97,14 +119,22 @@ func (c *agentLLM) Execute(ctx context.Context, messages []llm.Message, tools []
 	var usage *llm.Usage
 	var billedIn, billedOut int
 	var settledIn int
+	// replayed reports that a request this loop sends includes reasoning a
+	// reply carried: a thought summary, or a signature that came from the
+	// model rather than from the placeholder. A signature-less projection
+	// replays nothing, so a refusal of it is not this fallback's business.
+	replayed := false
 	for {
-		body, err := buildRequest(conversation, tools, c.maxTokens)
+		body, err := buildRequest(conversation, tools, c.maxTokens, c.model)
 		if err != nil {
-			return nil, err
+			return nil, replayed, err
+		}
+		if requestReplaysGeminiReasoning(body) {
+			replayed = true
 		}
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("google: encode request: %w", err)
+			return nil, replayed, fmt.Errorf("google: encode request: %w", err)
 		}
 		var res *llm.Result
 		if nonStreaming {
@@ -113,7 +143,7 @@ func (c *agentLLM) Execute(ctx context.Context, messages []llm.Message, tools []
 			res, err = c.executeStreaming(ctx, raw)
 		}
 		if err != nil {
-			return nil, err
+			return nil, replayed, err
 		}
 		rounds++
 		lastResult = res
@@ -138,23 +168,45 @@ func (c *agentLLM) Execute(ctx context.Context, messages []llm.Message, tools []
 	}
 	if rounds == 1 {
 		// No continuation ran: the settled round's own result is this call's.
-		return lastResult, nil
+		return lastResult, replayed, nil
 	}
 	// One assistant message carries the whole answer: each round was its own
-	// request, but this call is one reply.
+	// request, but this call is one reply. A Gemini carry survives only in part —
+	// the merged text is rounds stitched together and no signature was issued
+	// for it, so it goes back unsigned, while the last round's calls keep their
+	// own signatures because a current-turn call without one is refused. A last
+	// round cut by the output limit carries nothing: that answer is unfinished.
 	parts := []llm.ContentPart{}
 	if answer.Len() > 0 {
 		parts = append(parts, llm.Text(answer.String()))
 	}
+	merged := &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: lastToolCalls}
+	if lastResult != nil && lastResult.Message != nil && !llm.OutputLimitReached(stopReason) {
+		if layout, ok := llm.DecodeGeminiParts(lastResult.Message.Name); ok {
+			mergedLayout := make([]llm.GeminiPart, 0, len(layout)+1)
+			if answer.Len() > 0 {
+				mergedLayout = append(mergedLayout, llm.GeminiPart{Kind: "text", Text: answer.String()})
+			}
+			for _, p := range layout {
+				if p.Kind == "call" {
+					mergedLayout = append(mergedLayout, p)
+				}
+			}
+			if len(mergedLayout) > 0 {
+				merged.Name = llm.EncodeGeminiParts(mergedLayout)
+				merged.ReasoningModel = lastResult.Message.ReasoningModel
+			}
+		}
+	}
 	out := &llm.Result{
-		Message:    &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: lastToolCalls},
+		Message:    merged,
 		StopReason: stopReason,
 		Usage:      usage,
 	}
 	if billedIn != settledIn {
 		out.BilledUsage = &llm.Usage{InputTokens: billedIn, OutputTokens: billedOut}
 	}
-	return out, nil
+	return out, replayed, nil
 }
 
 // executeUnaryRound runs one non-streaming round under the non-streaming
@@ -188,7 +240,21 @@ func (c *agentLLM) executeUnaryRound(ctx context.Context, raw []byte) (*llm.Resu
 			texts = append(texts, p.Text)
 		}
 	}
+	// The thought summaries the response carried are the thinking the person
+	// sees; the layout is the one place they are kept, so the replay reads them
+	// from there rather than from a second copy.
+	reasoning := ""
+	if layout, ok := llm.DecodeGeminiParts(result.Message.Name); ok {
+		reasoning = geminiThoughtText(layout)
+	}
+	// The whole reply is finished here, so its carry is complete: hand it over
+	// before the replay, whose tool-call callbacks are what can start a
+	// provisional message for this reply.
+	if sink != nil && sink.OnReasoningCarry != nil && result.Message.Name != "" {
+		sink.OnReasoningCarry(result.Message.Name, result.Message.ReasoningModel)
+	}
 	llm.ReplayToSink(sink, llm.ReplayedResponse{
+		Reasoning:  reasoning,
 		Text:       texts,
 		ToolCalls:  result.Message.ToolCalls,
 		StopReason: finishReason,
@@ -227,7 +293,7 @@ func (c *agentLLM) executeUnary(ctx context.Context, raw []byte) (*llm.Result, s
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", newAPIError(resp.StatusCode, payload, resp.Header.Get("Retry-After"))
 	}
-	return parseResponse(resp.StatusCode, payload, resp.Header.Get("Retry-After"))
+	return parseResponse(resp.StatusCode, payload, resp.Header.Get("Retry-After"), c.model)
 }
 
 // generateContentRequest is the request body. Only the fields this client
@@ -251,6 +317,34 @@ type part struct {
 	InlineData       *inlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *functionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *functionResponse `json:"functionResponse,omitempty"`
+	// Thought marks a thought-summary part: the model's reasoning, never its answer.
+	Thought bool `json:"thought,omitempty"`
+	// ThoughtSignature is the encrypted reasoning state the model attached to
+	// this part. It goes back in this same part, to the model that wrote it.
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
+}
+
+// partJSON is part without its MarshalJSON method, so every part that is not
+// signature-only serializes exactly as the struct did before the method
+// existed.
+type partJSON part
+
+// MarshalJSON keeps a signature-only part legal. A part carrying nothing but a
+// signature has to state the field it belongs to, and text is the field Gemini
+// returns such a part under (streaming may deliver a signature in a part with
+// empty text); "thoughtSignature" alone is not a part the API accepts. An empty
+// thought summary — the model may return one with no text — needs the same,
+// because a "thought" marker with no data field of its own is no more a part.
+func (p part) MarshalJSON() ([]byte, error) {
+	if p.Text != "" || (p.ThoughtSignature == "" && !p.Thought) ||
+		p.InlineData != nil || p.FunctionCall != nil || p.FunctionResponse != nil {
+		return json.Marshal(partJSON(p))
+	}
+	return json.Marshal(struct {
+		Text             string `json:"text"`
+		Thought          bool   `json:"thought,omitempty"`
+		ThoughtSignature string `json:"thoughtSignature,omitempty"`
+	}{Text: p.Text, Thought: p.Thought, ThoughtSignature: p.ThoughtSignature})
 }
 
 type inlineData struct {
@@ -283,13 +377,19 @@ type generationConfig struct {
 }
 
 // buildRequest projects llm messages and tools onto the generateContent shape.
-func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64) (*generateContentRequest, error) {
+// model is the model the request is addressed to, which decides whether a
+// reply that was only reasoning may be sent at all.
+func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64, model string) (*generateContentRequest, error) {
 	req := &generateContentRequest{}
 	// toolNames maps a call id back to its function name. Gemini pairs a
 	// functionResponse with its functionCall by name, while an llm tool-result
 	// message carries only the id.
 	toolNames := map[string]string{}
 	var systemParts []string
+	// turnStart is where the current turn begins in req.Contents. Google
+	// validates thought signatures for the current turn only, and a turn begins
+	// with the most recent user message that is not a tool result.
+	turnStart := 0
 	for _, m := range messages {
 		switch m.Role {
 		case llm.RoleSystem, llm.RoleDeveloper:
@@ -304,7 +404,33 @@ func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64) (*
 			if len(parts) > 0 {
 				req.Contents = append(req.Contents, content{Role: roleUser, Parts: parts})
 			}
+			turnStart = len(req.Contents)
 		case llm.RoleAssistant:
+			// A reply that was only reasoning goes back to the model that
+			// produced it, and to no other: the fence would hand that model's
+			// reasoning to another one as an answer this conversation gave.
+			if llm.ThinkingFenceOnly(m) && !llm.ThinkingFenceGoesTo(m, model) {
+				continue
+			}
+			if layout, ok := geminiReplayLayout(m, model); ok {
+				// The model that wrote this reply gets its parts back as it
+				// returned them: in their order, thought summaries included,
+				// each signature in its own part. The signatures are its
+				// reasoning; without them Gemini 3 and later refuse the
+				// current turn's calls, and earlier models re-derive it.
+				parts, ok := geminiPartsFromLayout(m, layout, toolNames)
+				if !ok {
+					// The layout names a call the message does not have, so it is
+					// damaged: send the ordinary projection rather than a reply
+					// with a hole in it.
+					llm.LogDebug("google", "gemini carry for an assistant message names a missing tool call; projecting it without the carry")
+					parts = assistantParts(m, toolNames)
+				}
+				if len(parts) > 0 {
+					req.Contents = append(req.Contents, content{Role: roleModel, Parts: parts})
+				}
+				continue
+			}
 			parts := assistantParts(m, toolNames)
 			if len(parts) > 0 {
 				req.Contents = append(req.Contents, content{Role: roleModel, Parts: parts})
@@ -320,6 +446,26 @@ func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64) (*
 			return nil, fmt.Errorf("google: unsupported role %q", m.Role)
 		}
 	}
+	// A current-turn call with no signature at all is a request Gemini 3 and
+	// later refuse, and such a call reaches here whenever the reply lost its
+	// signature (an older session's call, a call some other producer made). The
+	// placeholder below is the last resort: a call carrying its own signature
+	// keeps it, and so does every earlier turn.
+	for i := turnStart; i < len(req.Contents); i++ {
+		c := &req.Contents[i]
+		if c.Role != roleModel {
+			continue
+		}
+		for j := range c.Parts {
+			if c.Parts[j].FunctionCall == nil {
+				continue
+			}
+			if c.Parts[j].ThoughtSignature == "" {
+				c.Parts[j].ThoughtSignature = geminiSkipSignatureValidator
+			}
+			break
+		}
+	}
 	// generateContent takes one instruction block, so several system messages
 	// become one text, the same way the Anthropic projection joins them.
 	if joined := strings.TrimSpace(strings.Join(systemParts, "\n\n")); joined != "" {
@@ -332,6 +478,25 @@ func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64) (*
 		req.Tools = []toolGroup{{FunctionDeclarations: decls}}
 	}
 	return req, nil
+}
+
+// requestReplaysGeminiReasoning reports whether a request sends reasoning back
+// to the model: a thought summary, or a thought signature that came from the
+// model's own reply. The placeholder buildRequest puts on a current-turn call
+// that lost its signature is not reasoning — no reply ever carried it — and a
+// request that holds only that one replays nothing worth dropping.
+func requestReplaysGeminiReasoning(req *generateContentRequest) bool {
+	for _, c := range req.Contents {
+		for _, p := range c.Parts {
+			if p.Thought {
+				return true
+			}
+			if p.ThoughtSignature != "" && p.ThoughtSignature != geminiSkipSignatureValidator {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // userParts projects user content. Image bytes become inlineData; an image URL
@@ -409,6 +574,127 @@ func toolResponse(parts []llm.ContentPart) map[string]any {
 	return map[string]any{"result": text}
 }
 
+// geminiSkipSignatureValidator is the placeholder signature Google's thought
+// signatures guide names for a function call the model did not write itself.
+// Gemini 3 and later reject a current-turn call that carries no signature at
+// all, so a call that lost its own — an older session's, or one another producer
+// made — is given this value instead. It degrades the model's output, so it is a
+// fallback only: a call that carries its real signature never gets it.
+const geminiSkipSignatureValidator = "skip_thought_signature_validator"
+
+// geminiReplayLayout returns the part layout m carries for replay to model: its
+// own reply, for the model that wrote it. A carry recorded without a producer is
+// not replayed either, for the same reason a thinking block is not: only the
+// model the signatures belong to is given them.
+func geminiReplayLayout(m llm.Message, model string) ([]llm.GeminiPart, bool) {
+	if strings.TrimSpace(m.ReasoningModel) == "" || !llm.ReplaysReasoningTo(m, model) {
+		return nil, false
+	}
+	return llm.DecodeGeminiParts(m.Name)
+}
+
+// geminiPartsFromLayout rebuilds a reply's parts as the model returned them,
+// followed by the parts the layout does not cover. ok is false when the layout
+// names a call the message does not hold: the layout is then unusable, and the
+// caller sends the ordinary projection instead of a reply with a missing call.
+func geminiPartsFromLayout(m llm.Message, layout []llm.GeminiPart, toolNames map[string]string) ([]part, bool) {
+	out := make([]part, 0, len(layout)+len(m.ToolCalls))
+	// coveredText counts the answer-text parts the layout rebuilt, and
+	// coveredCall marks the calls it referenced: together they are how much of
+	// the reply the layout speaks for.
+	coveredText := 0
+	coveredCall := make([]bool, len(m.ToolCalls))
+	for _, lp := range layout {
+		switch lp.Kind {
+		case "thought":
+			out = append(out, part{Text: lp.Text, Thought: true, ThoughtSignature: lp.Signature})
+		case "call":
+			if lp.Call < 0 || lp.Call >= len(m.ToolCalls) {
+				return nil, false
+			}
+			coveredCall[lp.Call] = true
+			tc := m.ToolCalls[lp.Call]
+			name := strings.TrimSpace(tc.Function.Name)
+			if name == "" {
+				// A call with no name cannot be replayed: Gemini would reject it
+				// and there is nothing to pair its result with.
+				continue
+			}
+			if id := strings.TrimSpace(tc.ID); id != "" {
+				toolNames[id] = name
+			}
+			out = append(out, part{
+				FunctionCall:     &functionCall{Name: name, Args: argumentsValue(tc.Function.Arguments)},
+				ThoughtSignature: lp.Signature,
+			})
+		default:
+			// An empty text part carrying a signature is legal only because
+			// part's marshaler states the text field it belongs to. Such a part
+			// covers no answer text: it holds none.
+			if lp.Text != "" {
+				coveredText++
+			}
+			out = append(out, part{Text: lp.Text, ThoughtSignature: lp.Signature})
+		}
+	}
+	// A reply that was interrupted only recorded its prefix in the layout: the
+	// answer text still open at the cut is sealed by the engine afterwards, and
+	// a call the adapter never got to append is missing from it entirely. What
+	// the layout does not cover goes after it, in the message's own order —
+	// answer text first, then calls — without a signature: none ever arrived
+	// for those parts, and inventing one would fail the model's own check.
+	texts := 0
+	for _, p := range m.Parts {
+		if p.Type != llm.ContentTypeText {
+			continue
+		}
+		texts++
+		if texts <= coveredText || strings.TrimSpace(p.Text) == "" {
+			continue
+		}
+		out = append(out, part{Text: p.Text})
+	}
+	for i, tc := range m.ToolCalls {
+		if coveredCall[i] {
+			continue
+		}
+		name := strings.TrimSpace(tc.Function.Name)
+		if name == "" {
+			continue
+		}
+		if id := strings.TrimSpace(tc.ID); id != "" {
+			toolNames[id] = name
+		}
+		out = append(out, part{FunctionCall: &functionCall{Name: name, Args: argumentsValue(tc.Function.Arguments)}})
+	}
+	return out, true
+}
+
+// geminiLayoutHasReasoning reports a layout worth carrying: one that holds a
+// thought-signature or a thought summary. Without either, the layout says
+// nothing the ordinary projection does not already send.
+func geminiLayoutHasReasoning(layout []llm.GeminiPart) bool {
+	for _, p := range layout {
+		if p.Kind == "thought" || p.Signature != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// geminiThoughtText returns the reasoning a layout carries: its thought-summary
+// texts, in order, as one string. A surface shows this as thinking; it is never
+// part of the answer.
+func geminiThoughtText(layout []llm.GeminiPart) string {
+	var sb strings.Builder
+	for _, p := range layout {
+		if p.Kind == "thought" {
+			sb.WriteString(p.Text)
+		}
+	}
+	return sb.String()
+}
+
 // argumentsValue decodes a call's arguments for the request body. Arguments that
 // are empty or not valid JSON become an empty object: a model that emitted a
 // truncated object must not abort the whole request, and the tool handler has
@@ -459,8 +745,10 @@ type generateContentResponse struct {
 
 // parseResponse turns a generateContent response into a result, also
 // returning the candidate's finish reason so the non-streaming replay can
-// report it as the stop reason.
-func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, string, error) {
+// report it as the stop reason. model is the one the request was addressed to;
+// it is recorded as the producer of the reasoning the response carries, which
+// is what lets the replay hand that reasoning back to it alone.
+func parseResponse(status int, payload []byte, retryAfter, model string) (*llm.Result, string, error) {
 	var parsed generateContentResponse
 	if err := json.Unmarshal(payload, &parsed); err != nil {
 		return nil, "", fmt.Errorf("google: decode response: %w", err)
@@ -486,14 +774,39 @@ func parseResponse(status int, payload []byte, retryAfter string) (*llm.Result, 
 	candidate := parsed.Candidates[0]
 	msg := &llm.Message{Role: llm.RoleAssistant}
 	// Text and calls are collected in the order they arrived, so a response that
-	// interleaves them keeps its sequence within each of the two shapes.
+	// interleaves them keeps its sequence within each of the two shapes. The
+	// layout records those same parts in arrival order — thought summaries
+	// included, each with the signature it came with — because Gemini wants its
+	// own reply replayed exactly as it returned it: the signature inside its
+	// original part, and the thought summaries are reasoning, never answer text.
+	layout := make([]llm.GeminiPart, 0, len(candidate.Content.Parts))
 	for _, p := range candidate.Content.Parts {
 		switch {
 		case p.FunctionCall != nil:
 			msg.ToolCalls = append(msg.ToolCalls, googleToolCallFromPart(p))
+			layout = append(layout, llm.GeminiPart{Kind: "call", Call: len(msg.ToolCalls) - 1, Signature: p.ThoughtSignature})
+		case p.Thought:
+			// A thought summary is the model thinking out loud, not its answer:
+			// sending it as answer text would hand the person (and, after a
+			// model switch, another model) reasoning as this reply.
+			layout = append(layout, llm.GeminiPart{Kind: "thought", Text: p.Text, Signature: p.ThoughtSignature})
 		case p.Text != "":
 			msg.Parts = append(msg.Parts, llm.Text(p.Text))
+			layout = append(layout, llm.GeminiPart{Kind: "text", Text: p.Text, Signature: p.ThoughtSignature})
+		case p.ThoughtSignature != "":
+			// A part that is only a signature still has to come back: the API may
+			// deliver one in an empty text part, and it belongs to this reply.
+			layout = append(layout, llm.GeminiPart{Kind: "text", Signature: p.ThoughtSignature})
 		}
+	}
+	if geminiLayoutHasReasoning(layout) {
+		// The layout rides the reasoning carry, so the next request gives this
+		// model its own signatures and thought summaries back
+		// (geminiReplayLayout). Without them Gemini 3 and later refuse the
+		// current turn's calls, and earlier models re-derive their plan on every
+		// step of a tool loop.
+		msg.Name = llm.EncodeGeminiParts(layout)
+		msg.ReasoningModel = strings.TrimSpace(model)
 	}
 	if len(msg.Parts) == 0 && len(msg.ToolCalls) == 0 {
 		if llm.OutputLimitReached(candidate.FinishReason) {

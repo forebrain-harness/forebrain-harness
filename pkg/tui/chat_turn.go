@@ -486,6 +486,12 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			accum.ResponseReasoningDone()
 			s.notifyUIForSession(sessionID, ReasoningDoneMsg{turn: foreground})
 		},
+		// The reply's reasoning as far as it is complete: a cancel stores it
+		// with the half answer, so the reply the person watched being cut is
+		// replayed to its model with the thinking it was written from.
+		OnReasoningCarry: func(carry, model string) {
+			accum.SetReasoningCarry(carry, model)
+		},
 		// An answer-text block ended inside the response: seal the streamed
 		// assistant block; later text opens a new one.
 		OnTextBlockDone: func() {

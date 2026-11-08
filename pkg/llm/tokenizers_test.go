@@ -865,6 +865,34 @@ func TestEstimateMessageCountsCarriedReasoning(t *testing.T) {
 	}
 }
 
+// A Gemini carry holds the reply's whole part layout, whose text parts repeat
+// the answer text Parts already carries; the request sends that answer once,
+// from the layout or from Parts, never twice. Counting the layout whole read a
+// reasoning-heavy history high and compacted a turn early.
+func TestEstimateMessageCountsOnlyWhatACarrySends(t *testing.T) {
+	t.Parallel()
+
+	est := DefaultEstimator()
+	answer := strings.Repeat("an answer line the layout holds again ", 20)
+	thought := strings.Repeat("a thought summary ", 10)
+	signature := strings.Repeat("c2lnbmF0dXJl", 8)
+	msg := AssistantMessage([]ContentPart{Text(answer)})
+	msg.Name = EncodeGeminiParts([]GeminiPart{
+		{Kind: "thought", Text: thought, Signature: signature},
+		{Kind: "text", Text: answer, Signature: signature},
+	})
+
+	// What the wire carries of the carry: the thought summary and both
+	// signatures. The layout's JSON and its repeated answer text are not sent.
+	want := 4 + EstimateTextWith(est, answer) + EstimateTextWith(est, thought+"\n"+signature+"\n"+signature)
+	if got := EstimateMessageWith(est, msg); got != want {
+		t.Fatalf("estimate = %d tokens, want %d (answer plus thought summary and signatures)", got, want)
+	}
+	if whole := 4 + EstimateTextWith(est, answer) + EstimateTextWith(est, msg.Name); want >= whole {
+		t.Fatalf("counting only what a carry sends (%d) is not below the whole carry (%d)", want, whole)
+	}
+}
+
 func TestEmptyHubsMeansDefaultHubs(t *testing.T) {
 	ResetTokenizersForTest()
 	t.Cleanup(ResetTokenizersForTest)

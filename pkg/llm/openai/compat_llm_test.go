@@ -51,7 +51,7 @@ func TestCompatMessageToOpenAIExcludesInternalToolTiming(t *testing.T) {
 	msg := llm.ToolResultMessage("call-1", llm.Text("done"))
 	msg.ToolExecutionTiming = &timing
 
-	projected := compatMessageToOpenAI(msg, "test")
+	projected, _ := compatMessageToOpenAI(msg, "test")
 	raw, err := json.Marshal(projected)
 	if err != nil {
 		t.Fatalf("marshal projected message: %v", err)
@@ -74,28 +74,44 @@ func TestCompatReasoningReplaysOnlyToItsOwnModel(t *testing.T) {
 		Role:             openaiclient.ChatMessageRoleAssistant,
 		ReasoningContent: "check the list first",
 		ToolCalls:        []openaiclient.ToolCall{{ID: "call-1", Type: "function", Function: openaiclient.FunctionCall{Name: "shell", Arguments: "{}"}}},
-	}, "glm-5.3-flash")
+	}, "glm-5.3-flash", "")
 	if answer.ReasoningModel != "glm-5.3-flash" {
 		t.Fatalf("answer reasoning model = %q, want glm-5.3-flash", answer.ReasoningModel)
 	}
-	if got := compatMessageToOpenAI(answer, "glm-5.3-flash").ReasoningContent; got != "check the list first" {
-		t.Fatalf("own model got reasoning %q", got)
+	if got, _ := compatMessageToOpenAI(answer, "glm-5.3-flash"); got.ReasoningContent != "check the list first" {
+		t.Fatalf("own model got reasoning %q", got.ReasoningContent)
 	}
-	other := compatMessageToOpenAI(answer, "deepseek-v4.1-flash")
+	other, _ := compatMessageToOpenAI(answer, "deepseek-v4.1-flash")
 	if other.ReasoningContent != "" || other.Name != "" {
 		t.Fatalf("another model got reasoning %q name %q", other.ReasoningContent, other.Name)
 	}
 
 	legacy := answer
 	legacy.ReasoningModel = ""
-	if got := compatMessageToOpenAI(legacy, "deepseek-v4.1-flash").ReasoningContent; got != "check the list first" {
-		t.Fatalf("unstamped carry got reasoning %q, want it replayed as before", got)
+	if got, _ := compatMessageToOpenAI(legacy, "deepseek-v4.1-flash"); got.ReasoningContent != "check the list first" {
+		t.Fatalf("unstamped carry got reasoning %q, want it replayed as before", got.ReasoningContent)
 	}
 
 	payload := llm.AssistantMessage([]llm.ContentPart{llm.Text("hi")})
 	payload.Name = llm.Encode([]llm.Item{{ID: "rs_1", EncryptedContent: "opaque"}})
-	if got := compatMessageToOpenAI(payload, "test"); got.ReasoningContent != "" || got.Name != "" {
+	if got, _ := compatMessageToOpenAI(payload, "test"); got.ReasoningContent != "" || got.Name != "" {
 		t.Fatalf("a Responses payload was projected: reasoning %q name %q", got.ReasoningContent, got.Name)
+	}
+}
+
+// An Anthropic thinking payload is another protocol's blocks, not reasoning
+// this model ever said: it never becomes reasoning_content, and it never leaks
+// into the wire message as a participant name either.
+func TestCompatNeverProjectsAnthropicThinking(t *testing.T) {
+	msg := llm.Message{
+		Role:           llm.RoleAssistant,
+		Parts:          []llm.ContentPart{llm.Text("answer")},
+		Name:           llm.EncodeThinking([]llm.ThinkingBlock{{Thinking: "thought", Signature: "sig=="}}),
+		ReasoningModel: "glm-5.3-flash",
+	}
+	projected, _ := compatMessageToOpenAI(msg, "glm-5.3-flash")
+	if projected.ReasoningContent != "" || projected.Name != "" {
+		t.Fatalf("thinking payload was projected: reasoning %q name %q", projected.ReasoningContent, projected.Name)
 	}
 }
 
@@ -367,8 +383,123 @@ func TestOpenAICompatLLMSurfacesReasoningOnlyResponseAsContent(t *testing.T) {
 	if !strings.HasPrefix(text, "```thinking") || !strings.HasSuffix(text, "```") {
 		t.Fatalf("expected reasoning wrapped in fenced code block, got %q", text)
 	}
-	if strings.HasPrefix(res.Message.Name, openAIReasoningCarryPrefix) {
-		t.Fatalf("expected reasoning carry cleared once promoted, got %q", res.Message.Name)
+	// The carry stays: it is what records which model produced this reasoning,
+	// and the fence is sent back to that model and to no other.
+	if !strings.HasPrefix(res.Message.Name, openAIReasoningCarryPrefix) {
+		t.Fatalf("expected reasoning carry kept to record the producer, got %q", res.Message.Name)
+	}
+	if got := res.Message.ReasoningModel; got != "gpt-test" {
+		t.Fatalf("reasoning model = %q, want the client's own model gpt-test", got)
+	}
+}
+
+// A fence reply goes back to the model that produced it and to no other: to
+// another model the fence would pass that reasoning off as an answer this
+// conversation gave. The producer gets the fence as content and nothing else —
+// repeating the reasoning as reasoning_content would send it twice.
+func TestCompatThinkingFenceGoesOnlyToItsProducer(t *testing.T) {
+	fence := compatMessageFromOpenAI(openaiclient.ChatCompletionMessage{
+		Role:             openaiclient.ChatMessageRoleAssistant,
+		ReasoningContent: "weigh A against B",
+	}, "glm-5.3", "")
+	if !llm.ThinkingFenceOnly(fence) {
+		t.Fatalf("promoted reasoning-only reply is not a bare fence: %#v", fence.Parts)
+	}
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("which one?")),
+		fence,
+		llm.UserMessage(llm.Text("answer anyway")),
+	}
+
+	own := compatMessagesToOpenAI(history, "glm-5.3", nil)
+	if len(own) != 3 {
+		t.Fatalf("own model got %d messages, want 3", len(own))
+	}
+	middle := own[1]
+	if want := llm.ThinkingFence("weigh A against B"); middle.Content != want {
+		t.Fatalf("own model got content %q, want %q", middle.Content, want)
+	}
+	if middle.ReasoningContent != "" {
+		t.Fatalf("own model got the reasoning twice as reasoning_content %q", middle.ReasoningContent)
+	}
+	if middle.Name != "" {
+		t.Fatalf("own model got a participant name %q", middle.Name)
+	}
+
+	other := compatMessagesToOpenAI(history, "deepseek-v4-flash", nil)
+	if len(other) != 2 {
+		t.Fatalf("another model got %d messages, want 2", len(other))
+	}
+	for _, m := range other {
+		if m.Role == string(openaiclient.ChatMessageRoleAssistant) {
+			t.Fatalf("another model received the fence reply: %#v", m)
+		}
+	}
+}
+
+// What the producing model receives must not change: the fence as content, no
+// reasoning_content, no name. This pins the wire bytes of that message.
+func TestCompatProducerFenceBytesUnchanged(t *testing.T) {
+	fence := compatMessageFromOpenAI(openaiclient.ChatCompletionMessage{
+		Role:             openaiclient.ChatMessageRoleAssistant,
+		ReasoningContent: "weigh A against B",
+	}, "glm-5.3", "")
+	projected := compatMessagesToOpenAI([]llm.Message{fence}, "glm-5.3", nil)
+	if len(projected) != 1 {
+		t.Fatalf("producer got %d messages, want 1", len(projected))
+	}
+	got, err := json.Marshal(projected[0])
+	if err != nil {
+		t.Fatalf("marshal projected message: %v", err)
+	}
+	// The shape the producer received before this change: a role and the fence
+	// as content, and no other field at all.
+	want, err := json.Marshal(struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}{Role: "assistant", Content: llm.ThinkingFence("weigh A against B")})
+	if err != nil {
+		t.Fatalf("marshal expected message: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("producer bytes changed:\n got %s\nwant %s", got, want)
+	}
+}
+
+// A fence that records no producer — every one stored before producers were
+// kept — and a fence another protocol produced for a different model are sent
+// to nobody: nothing proves whose reasoning it is.
+func TestCompatDropsUnattributedAndForeignFences(t *testing.T) {
+	unattributed := llm.Message{
+		Role:  llm.RoleAssistant,
+		Parts: []llm.ContentPart{llm.Text(llm.ThinkingFence("old reasoning"))},
+	}
+	responsesFence := llm.Message{
+		Role:           llm.RoleAssistant,
+		Parts:          []llm.ContentPart{llm.Text(llm.ThinkingFence("responses reasoning"))},
+		Name:           llm.Encode([]llm.Item{{ID: "rs_1", Summary: []string{"x"}}}),
+		ReasoningModel: "gpt-5.4-mini",
+	}
+	for _, tc := range []struct {
+		name string
+		msg  llm.Message
+	}{
+		{"unattributed", unattributed},
+		{"another protocol's producer", responsesFence},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := compatMessagesToOpenAI([]llm.Message{tc.msg}, "glm-5.3", nil); len(got) != 0 {
+				t.Fatalf("fence was sent to a model that did not produce it: %#v", got)
+			}
+		})
+	}
+	// The model that did produce it still gets it, as content only.
+	own := compatMessagesToOpenAI([]llm.Message{responsesFence}, "gpt-5.4-mini", nil)
+	if len(own) != 1 {
+		t.Fatalf("producer got %d messages, want 1", len(own))
+	}
+	if want := llm.ThinkingFence("responses reasoning"); own[0].Content != want || own[0].ReasoningContent != "" || own[0].Name != "" {
+		t.Fatalf("producer got content %q reasoning %q name %q, want %q and neither", own[0].Content, own[0].ReasoningContent, own[0].Name, want)
 	}
 }
 
@@ -1332,7 +1463,7 @@ func TestCompatMessageProjectionDoesNotDependOnLaterMessages(t *testing.T) {
 		llm.UserMessage(llm.Text("go on")),
 	}
 
-	projected := compatMessagesToOpenAI(messages, "test")
+	projected := compatMessagesToOpenAI(messages, "test", nil)
 	if len(projected) != len(messages) {
 		t.Fatalf("projected %d messages, want %d", len(projected), len(messages))
 	}
@@ -1348,7 +1479,7 @@ func TestCompatMessageProjectionDoesNotDependOnLaterMessages(t *testing.T) {
 
 	// Growing the conversation must leave every earlier message byte-identical.
 	grown := append(append([]llm.Message{}, messages...), carry("thinking three"))
-	after := compatMessagesToOpenAI(grown, "test")
+	after := compatMessagesToOpenAI(grown, "test", nil)
 	for i := range projected {
 		before, err := json.Marshal(projected[i])
 		if err != nil {
@@ -2004,5 +2135,396 @@ func TestOpenAICompatLLMNonStreamingTimeoutIsRetryable(t *testing.T) {
 	}
 	if !llm.IsRetryableNetworkError(err) {
 		t.Fatalf("IsRetryableNetworkError(%v) = false, want true", err)
+	}
+}
+
+// The compat stream has no thinking-end frame, so the thinking is complete
+// where it stops being extendable: the first tool fragment. The carry has to be
+// there before the call it precedes is reported ready, because that notice
+// starts a provisional message written from the sink, and the carry carries the
+// whole thinking verbatim, the way the finished message stamps it.
+func TestCompatStreamHandsOverReasoningWhenItEnds(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		var body bytes.Buffer
+		for _, chunk := range []string{
+			`{"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" Plan: "},"finish_reason":null}]}`,
+			`{"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"reasoning_content":"look first"},"finish_reason":null}]}`,
+			`{"id":"3","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]},"finish_reason":null}]}`,
+			`{"id":"4","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]},"finish_reason":null}]}`,
+			`{"id":"5","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		} {
+			body.WriteString("data: ")
+			body.WriteString(chunk)
+			body.WriteString("\n\n")
+		}
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = rec.Write(body.Bytes())
+		return rec.response(), nil
+	})
+
+	var order []string
+	var carries []string
+	var carryModel string
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnReasoningCarry: func(carry, model string) {
+			order = append(order, "carry")
+			carries = append(carries, carry)
+			carryModel = model
+		},
+		OnReasoningDone: func() { order = append(order, "reasoning-done") },
+		OnToolCallReady: func(llm.ToolCall) { order = append(order, "ready") },
+	})
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(carries) != 1 {
+		t.Fatalf("carries = %d (order %v), want exactly 1", len(carries), order)
+	}
+	if want := []string{"carry", "ready"}; !reflect.DeepEqual(order[:min(2, len(order))], want) {
+		t.Fatalf("first callbacks = %v (all %v), want %v", order[:min(2, len(order))], order, want)
+	}
+	if want := openAIReasoningCarryPrefix + " Plan: look first"; carries[0] != want {
+		t.Fatalf("handed-over carry = %q, want %q", carries[0], want)
+	}
+	if carryModel != "gpt-test" {
+		t.Fatalf("carry model = %q, want this client's model", carryModel)
+	}
+	// The streamed carry is the one the finished reply holds: one format, so a
+	// provisional message and this reply replay the same reasoning.
+	if res.Message.Name != carries[0] {
+		t.Fatalf("finished reply carry = %q, want the streamed one %q", res.Message.Name, carries[0])
+	}
+}
+
+// The non-streaming path replays a whole reply at once, so its reasoning is
+// complete before the first replayed callback: the carry has to be handed over
+// ahead of the replay, whose tool call starts a provisional message.
+func TestCompatUnaryHandsOverCarryBeforeReplay(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": 1,
+			"model":   "gpt-test",
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role":              "assistant",
+					"content":           "on it",
+					"reasoning_content": " Plan: look first",
+					"tool_calls": []any{map[string]any{
+						"id":   "call_1",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "lookup",
+							"arguments": `{"q":"x"}`,
+						},
+					}},
+				},
+				"finish_reason": "tool_calls",
+			}},
+			"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+		}
+		if err := json.NewEncoder(&rec).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+		return rec.response(), nil
+	})
+
+	var order []string
+	var carry string
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnReasoningCarry: func(c, model string) {
+			order = append(order, "carry")
+			carry = c
+		},
+		OnToolCallReady: func(llm.ToolCall) { order = append(order, "ready") },
+	}))
+	if _, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if want := []string{"carry", "ready"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("callback order = %v, want %v", order, want)
+	}
+	if want := openAIReasoningCarryPrefix + " Plan: look first"; carry != want {
+		t.Fatalf("handed-over carry = %q, want %q", carry, want)
+	}
+}
+
+// compatReasoningRefusal responds the way a provider that does not accept a
+// replayed reasoning field does: a 400 naming the field it refused.
+func compatReasoningRefusal(field string) *http.Response {
+	body := `{"error":{"message":"` + field + ` is not supported by this model","type":"invalid_request_error"}}`
+	return &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Status:     http.StatusText(http.StatusBadRequest),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+// compatRequestCarries reports whether a captured request body sends reasoning
+// at all, under either name a provider is known to use.
+func compatRequestCarries(body map[string]any) bool {
+	messages, _ := body["messages"].([]any)
+	for _, m := range messages {
+		message, _ := m.(map[string]any)
+		if _, ok := message[llm.CompatReasoningField]; ok {
+			return true
+		}
+		if _, ok := message["reasoning"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// A provider that refuses the replayed reasoning refuses it on every request of
+// the conversation, because the same reasoning goes back each time: the refusal
+// buys one resend without it, and everything the person said stays. Firing the
+// sink's end twice would make the surface draw the one reply as two.
+func TestCompatResendsWithoutReasoningWhenRefused(t *testing.T) {
+	t.Parallel()
+
+	var (
+		requests int
+		bodies   []map[string]any
+	)
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		var body map[string]any
+		if err := json.Unmarshal(payload, &body); err != nil {
+			return nil, err
+		}
+		requests++
+		bodies = append(bodies, body)
+		if compatRequestCarries(body) {
+			return compatReasoningRefusal(llm.CompatReasoningField), nil
+		}
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		_, _ = rec.Write([]byte("data: " + `{"id":"1","object":"chat.completion.chunk","created":1,"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = rec.Write([]byte("data: " + `{"id":"2","object":"chat.completion.chunk","created":1,"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		_, _ = rec.Write([]byte("data: [DONE]\n\n"))
+		return rec.response(), nil
+	})
+
+	earlier := compatMessageFromOpenAI(openaiclient.ChatCompletionMessage{
+		Role:             openaiclient.ChatMessageRoleAssistant,
+		ReasoningContent: "look at the list first",
+		Content:          "reading it",
+	}, "gpt-test", "")
+	history := []llm.Message{llm.UserMessage(llm.Text("what is on the list?")), earlier}
+
+	ends := 0
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{OnEnd: func() { ends++ }})
+	res, err := client.Execute(ctx, history, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want the refusal and one resend", requests)
+	}
+	if got := res.Message.TextContent(); got != "ok" {
+		t.Fatalf("answer = %q, want the resend's own answer", got)
+	}
+	if compatRequestCarries(bodies[1]) {
+		t.Fatalf("resend still sent reasoning: %#v", bodies[1])
+	}
+	// The resend drops the reasoning and keeps the conversation: the question
+	// and the answer it produced are both still there.
+	messages, _ := bodies[1]["messages"].([]any)
+	if len(messages) != len(history) {
+		t.Fatalf("resend sent %d messages, want the conversation's %d", len(messages), len(history))
+	}
+	if ends != 1 {
+		t.Fatalf("OnEnd calls = %d, want 1: one Execute is one reply", ends)
+	}
+}
+
+// The resend only follows a refusal of the reasoning: a 400 about something
+// else costs one request, and so does a 400 that names reasoning on a request
+// that replayed none.
+func TestCompatDoesNotResendUnrelatedFailures(t *testing.T) {
+	t.Parallel()
+
+	earlier := compatMessageFromOpenAI(openaiclient.ChatCompletionMessage{
+		Role:             openaiclient.ChatMessageRoleAssistant,
+		ReasoningContent: "look at the list first",
+		Content:          "reading it",
+	}, "gpt-test", "")
+	withReasoning := []llm.Message{llm.UserMessage(llm.Text("what is on the list?")), earlier}
+	withoutReasoning := []llm.Message{llm.UserMessage(llm.Text("what is on the list?"))}
+
+	tests := []struct {
+		name     string
+		messages []llm.Message
+		response *http.Response
+	}{
+		{
+			name:     "a 400 that does not name reasoning",
+			messages: withReasoning,
+			response: &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Status:     http.StatusText(http.StatusBadRequest),
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"unknown field temperature","type":"invalid_request_error"}}`)),
+			},
+		},
+		{
+			name:     "a reasoning 400 on a request that replayed none",
+			messages: withoutReasoning,
+			response: compatReasoningRefusal(llm.CompatReasoningField),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			requests := 0
+			client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+				requests++
+				return tc.response, nil
+			})
+			_, err := client.Execute(context.Background(), tc.messages, nil)
+			if err == nil {
+				t.Fatal("Execute succeeded, want the provider's 400")
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want 1: this failure is not the reasoning's", requests)
+			}
+		})
+	}
+}
+
+// A provider that names its reasoning field "reasoning" ignores
+// reasoning_content, so the reply has to go back under that name — and the
+// providers that use reasoning_content keep the plain carry, byte for byte, so
+// their requests do not move.
+func TestCompatReplaysReasoningUnderTheFieldItCameIn(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":false}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "application/json")
+		_, _ = rec.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","reasoning":"look at the list first","content":"reading it","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`))
+		return rec.response(), nil
+	})
+	result, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("what is on the list?"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if _, ok := llm.Decode(result.Message.Name); ok {
+		t.Fatalf("carry %q was recorded as a Responses payload", result.Message.Name)
+	}
+	field, text, ok := llm.DecodeCompatReasoning(result.Message.Name)
+	if !ok || field != "reasoning" || text != "look at the list first" {
+		t.Fatalf("carry decoded to (%q, %q, %v), want the provider's own field", field, text, ok)
+	}
+
+	// One history, two providers' replies: the one that named its field goes
+	// back under that name, the one that used reasoning_content does not move.
+	defaultField := compatMessageFromOpenAI(openaiclient.ChatCompletionMessage{
+		Role:             openaiclient.ChatMessageRoleAssistant,
+		ReasoningContent: "earlier thinking",
+		Content:          "earlier answer",
+	}, "gpt-test", "")
+	var body map[string]any
+	second := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":false}`), func(r *http.Request) (*http.Response, error) {
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(payload, &body); err != nil {
+			return nil, err
+		}
+		rec := httptestResponseRecorder{header: http.Header{}}
+		writeOpenAICompatTestResponse(t, &rec)
+		return rec.response(), nil
+	})
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("what is on the list?")),
+		*result.Message,
+		llm.ToolResultMessage("call_1", llm.Text(`{"items":1}`)),
+		defaultField,
+		llm.UserMessage(llm.Text("and the earlier answer?")),
+	}
+	if _, err := second.Execute(context.Background(), history, nil); err != nil {
+		t.Fatalf("second Execute returned error: %v", err)
+	}
+	messages, _ := body["messages"].([]any)
+	if len(messages) != len(history) {
+		t.Fatalf("request sent %d messages, want %d", len(messages), len(history))
+	}
+	own, _ := messages[1].(map[string]any)
+	if own["reasoning"] != "look at the list first" {
+		t.Fatalf("reply that named its field replayed as %#v, want it under reasoning", own)
+	}
+	if _, present := own[llm.CompatReasoningField]; present {
+		t.Fatalf("reply carried both names: %#v", own)
+	}
+	other, _ := messages[3].(map[string]any)
+	if other[llm.CompatReasoningField] != "earlier thinking" {
+		t.Fatalf("reasoning_content reply replayed as %#v, want the default field", other)
+	}
+	if _, present := other["reasoning"]; present {
+		t.Fatalf("reasoning_content reply gained a second field: %#v", other)
+	}
+}
+
+// The stream assembles the same carry the finished message holds, so a reply cut
+// off mid-stream is finished from a carry that records the field name the
+// provider used — otherwise the provisional message would replay it under a
+// name that provider does not read.
+func TestCompatStreamRecordsTheReasoningField(t *testing.T) {
+	t.Parallel()
+
+	client := newTestOpenAICompatLLMWithParams(t, "/v1", "", []byte(`{"stream":true}`), func(r *http.Request) (*http.Response, error) {
+		rec := httptestResponseRecorder{header: http.Header{}}
+		rec.Header().Set("Content-Type", "text/event-stream")
+		var body bytes.Buffer
+		for _, chunk := range []string{
+			`{"id":"1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","reasoning":" Plan: "},"finish_reason":null}]}`,
+			`{"id":"2","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"reasoning":"look first"},"finish_reason":null}]}`,
+			`{"id":"3","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":null}]}`,
+			`{"id":"4","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		} {
+			body.WriteString("data: ")
+			body.WriteString(chunk)
+			body.WriteString("\n\n")
+		}
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = rec.Write(body.Bytes())
+		return rec.response(), nil
+	})
+
+	var handed []string
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnReasoningCarry: func(carry, model string) { handed = append(handed, carry) },
+	})
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(handed) != 1 {
+		t.Fatalf("handed-over carries = %d, want 1", len(handed))
+	}
+	if handed[0] != res.Message.Name {
+		t.Fatalf("streamed carry = %q, finished reply carry = %q, want one carry", handed[0], res.Message.Name)
+	}
+	field, text, ok := llm.DecodeCompatReasoning(res.Message.Name)
+	if !ok || field != "reasoning" || text != " Plan: look first" {
+		t.Fatalf("carry decoded to (%q, %q, %v), want the streamed field and text", field, text, ok)
 	}
 }

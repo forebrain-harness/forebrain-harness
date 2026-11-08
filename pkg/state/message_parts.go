@@ -91,10 +91,10 @@ type attachmentParsePart struct {
 }
 
 // ExtractReasoningText scans a message list for reasoning/thinking content.
-// It checks each assistant message's Name for reasoningcarry-encoded data
-// (OpenAI/DeepSeek reasoning summaries).  Anthropic thinking blocks are
-// converted to fenced text parts upstream and appear as normal text content
-// rather than a separate field.
+// It checks each assistant message's Name for reasoningcarry-encoded data —
+// OpenAI/DeepSeek reasoning summaries and Anthropic thinking blocks alike,
+// both riding the same carry under their own payload version — and reads the
+// text back out of it; llm.ExtractSummary knows each version.
 //
 // Only the current turn is read — the assistant messages after the last user
 // message — because the history before it carries every earlier turn's

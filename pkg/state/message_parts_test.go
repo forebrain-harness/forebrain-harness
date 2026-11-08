@@ -219,6 +219,34 @@ func TestMessagePartsRoundTripPreservesReasoningCarry(t *testing.T) {
 	}
 }
 
+// Anthropic thinking blocks ride the same carry as every other protocol's
+// reasoning, so they survive the store byte for byte — signature included —
+// with the model that wrote them, and stay out of what the message says.
+func TestMessagePartsRoundTripPreservesThinkingCarry(t *testing.T) {
+	const thinkingText = "he said \"go\"\n then <left> 中文 🧠"
+	original := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer")},
+		llm.ToolCall{ID: "call-1", Type: "function", Function: llm.FunctionCall{Name: "shell", Arguments: "{}"}})
+	original.Name = llm.EncodeThinking([]llm.ThinkingBlock{
+		{Thinking: thinkingText, Signature: "sig-abc+/=="},
+		{Redacted: true, Data: "opaque-data+/=="},
+	})
+	if original.Name == "" {
+		t.Fatal("EncodeThinking returned no carry")
+	}
+	original.ReasoningModel = "qwen3.8-max"
+	partsJSON := MessagePartsJSON(original, original.TextContent())
+	parsed, ok := ParseMessage(original.Role, original.TextContent(), partsJSON)
+	if !ok || parsed.Name != original.Name || parsed.ReasoningModel != "qwen3.8-max" {
+		t.Fatalf("carry after round trip: name=%q model=%q parts=%s", parsed.Name, parsed.ReasoningModel, partsJSON)
+	}
+	if parsed.TextContent() != "answer" || len(parsed.ToolCalls) != 1 || parsed.ToolCalls[0].ID != "call-1" {
+		t.Fatalf("carry leaked into the message body: %+v", parsed)
+	}
+	if got := llm.ExtractSummary(parsed.Name); got != thinkingText {
+		t.Fatalf("reasoning text read back = %q, want %q", got, thinkingText)
+	}
+}
+
 // The reasoning a turn falls back to reading is that turn's alone: the history
 // before its user message carries every earlier turn's reasoning to the model
 // too, and that is not what this turn thought.

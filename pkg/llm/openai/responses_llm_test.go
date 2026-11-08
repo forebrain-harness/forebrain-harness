@@ -322,7 +322,7 @@ func TestExtractTextFromOutputItem_WrongType(t *testing.T) {
 }
 
 func TestExtractTextFromOutputItem_MultipleContent(t *testing.T) {
-	// Test case: multiple content items, should return first matching one
+	// Test case: multiple content items: every text segment is kept, refusal is not text
 	item := responses.ResponseOutputItemUnion{
 		Type: "message",
 		Content: []responses.ResponseOutputMessageContentUnion{
@@ -342,7 +342,7 @@ func TestExtractTextFromOutputItem_MultipleContent(t *testing.T) {
 	}
 
 	result := extractTextFromOutputItem(item)
-	expected := "This should be extracted"
+	expected := "This should be extractedThis should be skipped"
 
 	if result != expected {
 		t.Errorf("extractTextFromOutputItem() with multiple content failed\ngot:  %q\nwant: %q", result, expected)
@@ -1480,6 +1480,17 @@ func TestOpenAIResponsesReasoningCarryReplaysOnlyToItsOwnModel(t *testing.T) {
 	}
 }
 
+// Thinking blocks belong to the Anthropic protocol: the Responses client
+// replays only the items of its own payload version, so a thinking carry is
+// never sent — not even to the model that wrote it.
+func TestOpenAIResponsesNeverReplaysAnthropicThinking(t *testing.T) {
+	msg := llm.Message{Role: llm.RoleAssistant, Name: llm.EncodeThinking([]llm.ThinkingBlock{{Thinking: "thought", Signature: "sig=="}})}
+	msg.ReasoningModel = "gpt-test"
+	if items := responseReasoningInputItemsFromMessage(msg, "gpt-test"); len(items) != 0 {
+		t.Fatalf("own model got %d reasoning items from a thinking carry, want none", len(items))
+	}
+}
+
 func TestOpenAIResponsesParamsOverlayDoesNotTranslateLegacyReasoningEffort(t *testing.T) {
 	overlay := normalizeOpenAIResponsesParamsOverlay(map[string]any{
 		"reasoning_effort": "high",
@@ -2229,5 +2240,544 @@ func jsonResponseBody(body string) *http.Response {
 		Status:     http.StatusText(http.StatusOK),
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+// responsesProjectedInput runs one request through a non-streaming client and
+// returns the input items its body carried. The stub's answer is irrelevant
+// here; only the projection of the history is under test.
+func responsesProjectedInput(t *testing.T, messages []llm.Message) []map[string]any {
+	t.Helper()
+	var capturedBody map[string]any
+	testLLM := newTestOpenAIResponsesLLMWithStream(t, false, func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		return jsonResponseBody(`{"id":"resp_1","object":"response","status":"completed","model":"gpt-test","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`), nil
+	})
+	if _, err := testLLM.Execute(context.Background(), messages, nil); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	raw, ok := capturedBody["input"].([]any)
+	if !ok {
+		t.Fatalf("input = %#v, want a list", capturedBody["input"])
+	}
+	items := make([]map[string]any, 0, len(raw))
+	for _, entry := range raw {
+		item, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("input item = %#v, want an object", entry)
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+// responsesReasoningCarry is the carry one reasoning item leaves on a message.
+// Every item carries encrypted content because the client always asks for it;
+// an item without it cannot be replayed.
+func responsesReasoningCarry(id string) string {
+	return llm.Encode([]llm.Item{{ID: id, Summary: []string{"why " + id}, EncryptedContent: "enc_" + id}})
+}
+
+func assertResponsesReasoningItem(t *testing.T, item map[string]any, id, encrypted string) {
+	t.Helper()
+	if item["type"] != "reasoning" || item["id"] != id {
+		t.Fatalf("input item = %#v, want the reasoning item %s", item, id)
+	}
+	if item["encrypted_content"] != encrypted {
+		t.Fatalf("reasoning %s encrypted_content = %v, want %s", id, item["encrypted_content"], encrypted)
+	}
+}
+
+// A tool step is one assistant message holding reasoning, text and a call at
+// once. All three go back, in the order the model produced them, so the model
+// reading the history sees what it thought, wrote and called on every earlier
+// step instead of re-deriving them.
+func TestResponsesHistoryKeepsEveryAssistantItem(t *testing.T) {
+	call := llm.AssistantMessage([]llm.ContentPart{llm.Text("I will run ls")}, llm.ToolCall{
+		ID:       "call_1",
+		Type:     llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: "shell", Arguments: `{"cmd":"ls"}`},
+	})
+	call.Name, call.ReasoningModel = responsesReasoningCarry("rs_call"), "gpt-test"
+	answer := llm.AssistantMessage([]llm.ContentPart{llm.Text("Final answer of turn one")})
+	answer.Name, answer.ReasoningModel = responsesReasoningCarry("rs_answer"), "gpt-test"
+
+	items := responsesProjectedInput(t, []llm.Message{
+		llm.UserMessage(llm.Text("turn one")),
+		call,
+		llm.ToolResultMessage("call_1", llm.Text("a.txt")),
+		answer,
+		llm.UserMessage(llm.Text("turn two")),
+	})
+	if len(items) != 8 {
+		t.Fatalf("input items = %d (%#v), want 8", len(items), items)
+	}
+	if items[0]["role"] != "user" {
+		t.Fatalf("input[0] = %#v, want the first user message", items[0])
+	}
+	assertResponsesReasoningItem(t, items[1], "rs_call", "enc_rs_call")
+	if items[2]["role"] != "assistant" || items[2]["content"] != "I will run ls" {
+		t.Fatalf("input[2] = %#v, want the tool step's text", items[2])
+	}
+	if items[3]["type"] != "function_call" || items[3]["call_id"] != "call_1" ||
+		items[3]["name"] != "shell" || items[3]["arguments"] != `{"cmd":"ls"}` {
+		t.Fatalf("input[3] = %#v, want the tool step's call", items[3])
+	}
+	if items[4]["type"] != "function_call_output" || items[4]["call_id"] != "call_1" || items[4]["output"] != "a.txt" {
+		t.Fatalf("input[4] = %#v, want the tool result", items[4])
+	}
+	assertResponsesReasoningItem(t, items[5], "rs_answer", "enc_rs_answer")
+	if items[6]["role"] != "assistant" || items[6]["content"] != "Final answer of turn one" {
+		t.Fatalf("input[6] = %#v, want the previous answer's text", items[6])
+	}
+	if items[7]["role"] != "user" {
+		t.Fatalf("input[7] = %#v, want the second user message", items[7])
+	}
+}
+
+// Encrypted reasoning items belong to the model that produced them, so another
+// model gets the text and the calls only — never the reasoning.
+func TestResponsesHistoryToAnotherModelKeepsTextAndCalls(t *testing.T) {
+	call := llm.AssistantMessage([]llm.ContentPart{llm.Text("I will run ls")}, llm.ToolCall{
+		ID:       "call_1",
+		Type:     llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: "shell", Arguments: `{"cmd":"ls"}`},
+	})
+	call.Name, call.ReasoningModel = responsesReasoningCarry("rs_call"), "gpt-other"
+	answer := llm.AssistantMessage([]llm.ContentPart{llm.Text("Final answer of turn one")})
+	answer.Name, answer.ReasoningModel = responsesReasoningCarry("rs_answer"), "gpt-other"
+
+	items := responsesProjectedInput(t, []llm.Message{
+		llm.UserMessage(llm.Text("turn one")),
+		call,
+		llm.ToolResultMessage("call_1", llm.Text("a.txt")),
+		answer,
+		llm.UserMessage(llm.Text("turn two")),
+	})
+	if len(items) != 6 {
+		t.Fatalf("input items = %d (%#v), want 6", len(items), items)
+	}
+	if items[1]["role"] != "assistant" || items[1]["content"] != "I will run ls" {
+		t.Fatalf("input[1] = %#v, want the tool step's text", items[1])
+	}
+	if items[2]["type"] != "function_call" || items[2]["call_id"] != "call_1" {
+		t.Fatalf("input[2] = %#v, want the tool step's call", items[2])
+	}
+	if items[3]["type"] != "function_call_output" {
+		t.Fatalf("input[3] = %#v, want the tool result", items[3])
+	}
+	if items[4]["role"] != "assistant" || items[4]["content"] != "Final answer of turn one" {
+		t.Fatalf("input[4] = %#v, want the previous answer's text", items[4])
+	}
+	if items[5]["role"] != "user" {
+		t.Fatalf("input[5] = %#v, want the second user message", items[5])
+	}
+}
+
+// The thinking fence is a display form of the reasoning, not an answer: the
+// same model already gets the reasoning items, and another model must never be
+// handed this model's reasoning as text.
+func TestResponsesReasoningOnlyMessageNeverSendsItsFence(t *testing.T) {
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text(llm.ThinkingFence("why"))})
+	msg.Name, msg.ReasoningModel = responsesReasoningCarry("rs_1"), "gpt-test"
+
+	items := responsesProjectedInput(t, []llm.Message{llm.UserMessage(llm.Text("hi")), msg})
+	if len(items) != 2 {
+		t.Fatalf("own model input items = %d (%#v), want the user message and the reasoning item", len(items), items)
+	}
+	assertResponsesReasoningItem(t, items[1], "rs_1", "enc_rs_1")
+
+	msg.ReasoningModel = "gpt-other"
+	items = responsesProjectedInput(t, []llm.Message{llm.UserMessage(llm.Text("hi")), msg})
+	if len(items) != 1 || items[0]["role"] != "user" {
+		t.Fatalf("another model input items = %#v, want only the user message", items)
+	}
+}
+
+// A history with no carry at all projects byte for byte as it did before the
+// fix, so no existing session's prompt prefix shifts and its cache survives.
+// The expectation below is written from the old rule by hand.
+func TestResponsesPlainHistoryProjectionIsUnchanged(t *testing.T) {
+	plain := llm.AssistantMessage([]llm.ContentPart{llm.Text("line one"), llm.Text("line two")})
+	call := llm.AssistantMessage(nil, llm.ToolCall{
+		ID:       "call_1",
+		Type:     llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: "shell", Arguments: `{"cmd":"ls"}`},
+	})
+	items := responsesProjectedInput(t, []llm.Message{
+		llm.UserMessage(llm.Text("turn one")),
+		plain,
+		call,
+		llm.ToolResultMessage("call_1", llm.Text("a.txt")),
+		llm.UserMessage(llm.Text("turn two")),
+	})
+	got, err := json.Marshal(items)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	const want = `[{"content":[{"text":"turn one","type":"input_text"}],"role":"user"},{"content":"line one\nline two","role":"assistant"},{"arguments":"{\"cmd\":\"ls\"}","call_id":"call_1","name":"shell","type":"function_call"},{"call_id":"call_1","output":"a.txt","type":"function_call_output"},{"content":[{"text":"turn two","type":"input_text"}],"role":"user"}]`
+	if string(got) != want {
+		t.Fatalf("plain history projection = %s\nwant (old rule)                 %s", got, want)
+	}
+}
+
+// A message with text and calls but no reasoning used to send the calls only
+// and drop its text, which is the shape of every tool step the model writes
+// while explaining itself.
+func TestResponsesAssistantTextAndCallsWithoutReasoning(t *testing.T) {
+	call := llm.AssistantMessage([]llm.ContentPart{llm.Text("I will run ls")}, llm.ToolCall{
+		ID:       "call_1",
+		Type:     llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: "shell", Arguments: `{"cmd":"ls"}`},
+	})
+	items := responsesProjectedInput(t, []llm.Message{
+		llm.UserMessage(llm.Text("hi")),
+		call,
+		llm.ToolResultMessage("call_1", llm.Text("a.txt")),
+	})
+	if len(items) != 4 {
+		t.Fatalf("input items = %d (%#v), want 4", len(items), items)
+	}
+	if items[1]["role"] != "assistant" || items[1]["content"] != "I will run ls" {
+		t.Fatalf("input[1] = %#v, want the text before the call", items[1])
+	}
+	if items[2]["type"] != "function_call" || items[2]["call_id"] != "call_1" {
+		t.Fatalf("input[2] = %#v, want the call after the text", items[2])
+	}
+	if items[3]["type"] != "function_call_output" {
+		t.Fatalf("input[3] = %#v, want the tool result", items[3])
+	}
+}
+
+// Every request sets Store false, so the service keeps nothing to resolve an
+// item's id and summary against: an item without encrypted content cannot be
+// replayed and would make the whole request fail.
+func TestResponsesNeverReplaysReasoningWithoutEncryptedContent(t *testing.T) {
+	msg := llm.AssistantMessage(nil)
+	msg.Name = llm.Encode([]llm.Item{
+		{ID: "rs_a", Summary: []string{"x"}},
+		{ID: "rs_b", Summary: []string{"y"}, EncryptedContent: "enc_b"},
+	})
+	msg.ReasoningModel = "gpt-test"
+
+	items := responsesProjectedInput(t, []llm.Message{llm.UserMessage(llm.Text("hi")), msg})
+	if len(items) != 2 {
+		t.Fatalf("input items = %d (%#v), want the user message and rs_b only", len(items), items)
+	}
+	assertResponsesReasoningItem(t, items[1], "rs_b", "enc_b")
+}
+
+// A response may answer in several message items, each with several text
+// segments, and the streamed path appends every delta it receives. The unary
+// path must read the same answer, so the interface replay shows all of it.
+func TestResponsesSyncKeepsEveryTextSegment(t *testing.T) {
+	const body = `{"id":"resp_1","object":"response","status":"completed","model":"gpt-test","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}]},{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"A"},{"type":"refusal","text":"R"},{"type":"output_text","text":"B"}]},{"type":"message","id":"msg_2","role":"assistant","content":[{"type":"output_text","text":"C"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`
+	testLLM := newTestOpenAIResponsesLLMWithStream(t, true, func(*http.Request) (*http.Response, error) {
+		return jsonResponseBody(body), nil
+	})
+	var deltas []string
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnDelta: func(text string) { deltas = append(deltas, text) },
+	}))
+	res, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if got := res.Message.TextContent(); got != "ABC" {
+		t.Fatalf("message text = %q, want ABC", got)
+	}
+	if got := strings.Join(deltas, ""); got != "ABC" {
+		t.Fatalf("replayed text = %q, want ABC", got)
+	}
+}
+
+// The terminal frames are the fallback for a stream that carried no text
+// delta at all. They must read the same answer the deltas would have.
+func TestResponsesStreamingFallbackKeepsEveryTextSegment(t *testing.T) {
+	const output = `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"A"}]},{"type":"message","id":"msg_2","role":"assistant","content":[{"type":"output_text","text":"BC"}]}]`
+	for name, frame := range map[string]string{
+		"completed":  `data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":` + output + `,"usage":{"input_tokens":1,"output_tokens":1}}}` + "\n\n",
+		"incomplete": `data: {"type":"response.incomplete","response":{"id":"resp_1","object":"response","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":` + output + `,"usage":{"input_tokens":1,"output_tokens":1}}}` + "\n\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			testLLM := newTestOpenAIResponsesLLM(t, func(*http.Request) (*http.Response, error) {
+				return sseResponse(frame), nil
+			})
+			res, err := testLLM.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+			if err != nil {
+				t.Fatalf("Execute failed: %v", err)
+			}
+			if got := res.Message.TextContent(); got != "ABC" {
+				t.Fatalf("message text = %q, want ABC", got)
+			}
+		})
+	}
+}
+
+// One response must read the same however it arrived: the deltas the stream
+// appends and the segments the unary body lists are joined the same way.
+func TestResponsesStreamingAndSyncReadTheSameText(t *testing.T) {
+	const output = `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"A"},{"type":"output_text","text":"B"}]},{"type":"message","id":"msg_2","role":"assistant","content":[{"type":"output_text","text":"C"}]}]`
+	streamBody := strings.Join([]string{
+		`data: {"type":"response.output_text.delta","delta":"A"}`,
+		"",
+		`data: {"type":"response.output_text.delta","delta":"B"}`,
+		"",
+		`data: {"type":"response.output_text.delta","delta":"C"}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":` + output + `,"usage":{"input_tokens":1,"output_tokens":1}}}`,
+		"",
+	}, "\n")
+	streamLLM := newTestOpenAIResponsesLLM(t, func(*http.Request) (*http.Response, error) {
+		return sseResponse(streamBody), nil
+	})
+	streamed, err := streamLLM.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("streaming Execute failed: %v", err)
+	}
+
+	syncBody := `{"id":"resp_1","object":"response","status":"completed","model":"gpt-test","output":` + output + `,"usage":{"input_tokens":1,"output_tokens":1}}`
+	syncLLM := newTestOpenAIResponsesLLMWithStream(t, false, func(*http.Request) (*http.Response, error) {
+		return jsonResponseBody(syncBody), nil
+	})
+	sync, err := syncLLM.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("unary Execute failed: %v", err)
+	}
+
+	if got := streamed.Message.TextContent(); got != "ABC" {
+		t.Fatalf("streamed text = %q, want ABC", got)
+	}
+	if got, want := sync.Message.TextContent(), streamed.Message.TextContent(); got != want {
+		t.Fatalf("unary text = %q, streamed text = %q, want the same", got, want)
+	}
+}
+
+// A reply's reasoning has to reach the sink while it streams: a reasoning item
+// is complete at its done frame, where the encrypted content arrives, and the
+// call that follows starts a provisional message, so the carry must be there
+// first. The added frame carries no encrypted content this model can replay.
+func TestResponsesStreamHandsOverReasoningItemsWhenDone(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","encrypted_content":"enc_added","summary":[]},"output_index":0,"sequence_number":1}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"Need another pass.","item_id":"rs_1","output_index":0,"summary_index":0,"sequence_number":2}`,
+		"",
+		`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","encrypted_content":"enc_done","summary":[{"type":"summary_text","text":"Need another pass."}],"status":"completed"},"output_index":0,"sequence_number":3}`,
+		"",
+		`data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","status":"in_progress","arguments":"","call_id":"call_1","name":"lookup"},"output_index":1}`,
+		"",
+		`data: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"q\":\"x\"}"}`,
+		"",
+		`data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","status":"completed","arguments":"{\"q\":\"x\"}","call_id":"call_1","name":"lookup"},"output_index":2}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_test","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		"",
+	}, "\n")
+	testLLM := newTestOpenAIResponsesLLM(t, func(req *http.Request) (*http.Response, error) {
+		return sseResponse(body), nil
+	})
+
+	var order []string
+	var carries []string
+	var carryModel string
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnReasoningCarry: func(carry, model string) {
+			order = append(order, "carry")
+			carries = append(carries, carry)
+			carryModel = model
+		},
+		OnToolCallReady: func(llm.ToolCall) { order = append(order, "ready") },
+	})
+	result, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("test"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if want := []string{"carry", "ready"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("callback order = %v, want %v", order, want)
+	}
+	if len(carries) != 1 {
+		t.Fatalf("carries = %d, want exactly 1: only the done item is complete", len(carries))
+	}
+	payload, ok := llm.Decode(carries[0])
+	if !ok {
+		t.Fatalf("handed-over carry is not a Responses payload: %q", carries[0])
+	}
+	if len(payload.Items) != 1 || payload.Items[0].EncryptedContent != "enc_done" {
+		t.Fatalf("handed-over items = %#v, want the done item with its encrypted content", payload.Items)
+	}
+	// The streamed carry is the one the finished reply holds: one format, so a
+	// provisional message and this reply replay the same reasoning.
+	if carries[0] != result.Message.Name {
+		t.Fatalf("finished reply carry = %q, want the streamed one %q", result.Message.Name, carries[0])
+	}
+	if carryModel != result.Message.ReasoningModel {
+		t.Fatalf("carry model = %q, want the reply's own %q", carryModel, result.Message.ReasoningModel)
+	}
+}
+
+// The non-streaming path replays a whole response at once, so its reasoning is
+// complete before the first replayed callback: the carry has to be handed over
+// ahead of the replay, whose tool call starts a provisional message.
+func TestResponsesUnaryHandsOverCarryBeforeReplay(t *testing.T) {
+	const body = `{"id":"resp_1","object":"response","status":"completed","model":"gpt-test","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"enc_sync"},{"type":"function_call","id":"fc_1","status":"completed","arguments":"{\"q\":\"x\"}","call_id":"call_1","name":"lookup"}],"usage":{"input_tokens":1,"output_tokens":1}}`
+	testLLM := newTestOpenAIResponsesLLMWithStream(t, true, func(*http.Request) (*http.Response, error) {
+		return jsonResponseBody(body), nil
+	})
+
+	var order []string
+	var carry string
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnReasoningCarry: func(c, model string) {
+			order = append(order, "carry")
+			carry = c
+		},
+		OnToolCallReady: func(llm.ToolCall) { order = append(order, "ready") },
+	}))
+	if _, err := testLLM.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if want := []string{"carry", "ready"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("callback order = %v, want %v", order, want)
+	}
+	payload, ok := llm.Decode(carry)
+	if !ok || len(payload.Items) != 1 || payload.Items[0].EncryptedContent != "enc_sync" {
+		t.Fatalf("handed-over carry = %q (ok=%v), want the reply's reasoning item", carry, ok)
+	}
+}
+
+// responsesReasoningRefusal answers the way an endpoint that cannot resolve a
+// replayed reasoning item does: a status and a message naming the item.
+func responsesReasoningRefusal(status int, message string) *http.Response {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"message": message,
+		"type":    "invalid_request_error",
+	}})
+	return &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(payload)),
+	}
+}
+
+// responsesRequestReplaysReasoning reports whether a captured request body
+// sends reasoning items back to the model.
+func responsesRequestReplaysReasoning(body map[string]any) bool {
+	input, _ := body["input"].([]any)
+	for _, item := range input {
+		entry, _ := item.(map[string]any)
+		if entry["type"] == "reasoning" {
+			return true
+		}
+	}
+	return false
+}
+
+// An encrypted reasoning item that the endpoint no longer accepts — another
+// account, an endpoint that never stored it — fails every request of the
+// conversation, because the same item goes back each time. The refusal buys one
+// resend without it, and the sink's end still fires once.
+func TestResponsesResendsWithoutReasoningWhenRefused(t *testing.T) {
+	t.Parallel()
+
+	var (
+		requests int
+		bodies   []map[string]any
+	)
+	client := newTestOpenAIResponsesLLMWithStream(t, false, func(req *http.Request) (*http.Response, error) {
+		payload, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		var body map[string]any
+		if err := json.Unmarshal(payload, &body); err != nil {
+			return nil, err
+		}
+		requests++
+		bodies = append(bodies, body)
+		if responsesRequestReplaysReasoning(body) {
+			return responsesReasoningRefusal(http.StatusNotFound, "Item with id 'rs_prev' not found"), nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     http.StatusText(http.StatusOK),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(syncResponsesBody("ok"))),
+		}, nil
+	})
+
+	carry := llm.Encode([]llm.Item{{ID: "rs_prev", Summary: []string{"step one"}, EncryptedContent: "enc_prev"}})
+	earlier := llm.Message{Role: llm.RoleAssistant, Parts: []llm.ContentPart{llm.Text("reading it")}, Name: carry, ReasoningModel: "gpt-test"}
+	history := []llm.Message{llm.UserMessage(llm.Text("what is on the list?")), earlier}
+
+	ends := 0
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{OnEnd: func() { ends++ }})
+	res, err := client.Execute(ctx, history, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want the refusal and one resend", requests)
+	}
+	if got := res.Message.TextContent(); got != "ok" {
+		t.Fatalf("answer = %q, want the resend's own answer", got)
+	}
+	if responsesRequestReplaysReasoning(bodies[1]) {
+		t.Fatalf("resend still sent reasoning items: %#v", bodies[1]["input"])
+	}
+	input, _ := bodies[1]["input"].([]any)
+	if len(input) != len(history) {
+		t.Fatalf("resend sent %d input items, want the conversation's %d", len(input), len(history))
+	}
+	if ends != 1 {
+		t.Fatalf("OnEnd calls = %d, want 1: one Execute is one reply", ends)
+	}
+}
+
+// Only a refusal of the replayed reasoning buys a resend: any other failure, and
+// a reasoning-shaped failure on a request that replayed no reasoning, is the
+// provider's answer as it stands.
+func TestResponsesDoesNotResendUnrelatedFailures(t *testing.T) {
+	t.Parallel()
+
+	carry := llm.Encode([]llm.Item{{ID: "rs_prev", EncryptedContent: "enc_prev"}})
+	earlier := llm.Message{Role: llm.RoleAssistant, Parts: []llm.ContentPart{llm.Text("reading it")}, Name: carry, ReasoningModel: "gpt-test"}
+	withReasoning := []llm.Message{llm.UserMessage(llm.Text("what is on the list?")), earlier}
+	withoutReasoning := []llm.Message{llm.UserMessage(llm.Text("what is on the list?"))}
+
+	tests := []struct {
+		name     string
+		messages []llm.Message
+		response *http.Response
+	}{
+		{
+			name:     "a 400 that does not name reasoning",
+			messages: withReasoning,
+			response: responsesReasoningRefusal(http.StatusBadRequest, "unknown parameter: temperature"),
+		},
+		{
+			name:     "a reasoning 404 on a request that replayed none",
+			messages: withoutReasoning,
+			response: responsesReasoningRefusal(http.StatusNotFound, "Item with id 'rs_prev' not found"),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			requests := 0
+			client := newTestOpenAIResponsesLLMWithStream(t, false, func(*http.Request) (*http.Response, error) {
+				requests++
+				return tc.response, nil
+			})
+			_, err := client.Execute(context.Background(), tc.messages, nil)
+			if err == nil {
+				t.Fatal("Execute succeeded, want the provider's error")
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want 1: this failure is not the reasoning's", requests)
+			}
+		})
 	}
 }

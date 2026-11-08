@@ -13,6 +13,15 @@ type StreamSink struct {
 	OnDelta          func(string)
 	OnReasoningDelta func(string)
 	OnReasoningDone  func()
+	// OnReasoningCarry hands over the reasoning carry of the response still
+	// being streamed, as it stands now: the same carry the finished message
+	// will hold in Name, limited to the reasoning that is already complete
+	// and safe to replay — a thinking block whose signature arrived, a
+	// reasoning item whose encrypted content arrived. model is the model that
+	// produced it. Each call replaces the previous one. A reply that is cut
+	// off is finished from what the stream delivered; this is what keeps that
+	// reply's reasoning with it.
+	OnReasoningCarry func(carry, model string)
 	// OnResponseStarted fires before the first output-bearing event from the
 	// current provider response is forwarded to the other callbacks. It is the
 	// acknowledgement boundary for input provisionally attached to that request:

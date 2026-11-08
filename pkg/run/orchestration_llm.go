@@ -528,6 +528,15 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 						}
 					}
 					prov := llm.AssistantMessage(collector.completedParts(), readyUpTo...)
+					// The tool starts while the model is still writing, so this
+					// provisional message is written first. When an interruption
+					// leaves it in the history it is the record of that step of
+					// the model's work, so the reasoning complete at this moment
+					// has to travel with it: without it the model later sees the
+					// call it made and no memory of why it made it.
+					if carry, carryModel := collector.reasoningCarry(); carry != "" {
+						prov.Name, prov.ReasoningModel = carry, carryModel
+					}
 					provSession := append(append([]llm.Message(nil), session...), prov)
 					partialCapture.Set(provSession)
 					transcript.flush(ctx, provSession, modelForTranscript(), nil)

@@ -1763,3 +1763,82 @@ func TestSubagentInterruptToSendLeavesTheStreamedCallsNotRun(t *testing.T) {
 		t.Fatalf("tool rows = %q, want the call that ran and the not-run answer", results)
 	}
 }
+
+// A tool starts while the model is still writing, so the assistant message the
+// engine writes first is provisional. When an interruption leaves that row in
+// the history it is the record of that step of the model's work, so it carries
+// the reasoning complete at the moment the call started — the collector both
+// keeps and publishes it. Without the carry the next request hands the model a
+// call and no memory of why it made it.
+func TestProvisionalAssistantRowCarriesTheReasoning(t *testing.T) {
+	ctx := context.Background()
+	const sid = "streamtools-prov-carry"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_a", ReadOnly: true, ConcurrencySafe: true})
+
+	// The reasoning that completed before the call was reported ready, in the
+	// format the finished reply carries it.
+	carry := llm.EncodeThinking([]llm.ThinkingBlock{{Thinking: "think first, then read", Signature: "sig-1"}})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	toolObj, err := llm.NewTool("read_a", "safe test tool", func(context.Context, *struct{}) (string, error) {
+		startOnce.Do(func() { close(started) })
+		<-release
+		return "read_a done", nil
+	})
+	if err != nil {
+		t.Fatalf("new tool read_a: %v", err)
+	}
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("working")
+			sink.OnTextBlockDone()
+			// The reasoning completed before the call: the provisional message is
+			// written from the sink when the call starts, so it must know it.
+			sink.OnReasoningCarry(carry, "gpt-main")
+			sink.OnToolCallReady(streamCall("call-a", "read_a"))
+			// Hold the response open while the call runs, as a provider does.
+			<-started
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("working")}, streamCall("call-a", "read_a"))
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid), streamTestSink())
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{toolObj})
+		done <- err
+	}()
+	<-started
+	// The call is running, and the provisional row was written just before it
+	// started: this is the row an interruption would leave behind.
+	rows, err := store.ListTranscriptMessages(context.Background(), sid, 100)
+	if err != nil {
+		close(release)
+		t.Fatalf("list rows: %v", err)
+	}
+	close(release)
+	if len(rows) < 2 {
+		t.Fatalf("rows = %d (%+v), want the user message and the provisional assistant row", len(rows), rows)
+	}
+	if rows[1].Role != llm.RoleAssistant || len(rows[1].ToolCalls) != 1 || rows[1].ToolCalls[0].ID != "call-a" {
+		t.Fatalf("provisional row = %+v, want the assistant row with the call", rows[1])
+	}
+	if rows[1].Name != carry {
+		t.Fatalf("provisional carry = %q, want %q", rows[1].Name, carry)
+	}
+	if rows[1].ReasoningModel != "gpt-main" {
+		t.Fatalf("provisional ReasoningModel = %q, want the producing model", rows[1].ReasoningModel)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+}

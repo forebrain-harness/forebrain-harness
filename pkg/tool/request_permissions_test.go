@@ -3294,7 +3294,6 @@ func TestCountLinesWithoutTrailingNewlineAddsLastLine(t *testing.T) {
 	}
 }
 
-
 func TestVisibleToolsForSubagentSubtype(t *testing.T) {
 	explore := VisibleToolsForSubagentSubtype("explore", []string{"read_file", "shell", "write_file"})
 	if containsTool(explore, "write_file") {

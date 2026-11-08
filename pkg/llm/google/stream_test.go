@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,13 @@ type recordingSink struct {
 	ready     *llm.ToolCall
 	usage     [][2]int
 	snapshots [][2]int
+	// reasoning holds every thinking delta in order, and reasoningDone counts
+	// the thinking blocks the adapter declared finished. carries holds every
+	// reasoning carry the adapter handed over, in order, with its producer.
+	reasoning     []string
+	reasoningDone int
+	carries       []string
+	carryModels   []string
 }
 
 func newRecordingSink() *recordingSink {
@@ -33,7 +41,13 @@ func (r *recordingSink) sink() *llm.StreamSink {
 	return &llm.StreamSink{
 		OnResponseStarted: func() { r.trace = append(r.trace, "started") },
 		OnDelta:           func(s string) { r.trace = append(r.trace, "delta:"+s) },
-		OnTextBlockDone:   func() { r.trace = append(r.trace, "text-block-done") },
+		OnReasoningDelta:  func(s string) { r.reasoning = append(r.reasoning, s) },
+		OnReasoningDone:   func() { r.reasoningDone++ },
+		OnReasoningCarry: func(carry, model string) {
+			r.carries = append(r.carries, carry)
+			r.carryModels = append(r.carryModels, model)
+		},
+		OnTextBlockDone: func() { r.trace = append(r.trace, "text-block-done") },
 		OnToolCallReady: func(c llm.ToolCall) {
 			r.ready = &c
 			r.trace = append(r.trace, "tool-ready:"+c.Function.Name)
@@ -383,5 +397,183 @@ func TestGoogleStreamingSafetyEmptyIsNotBlankOutput(t *testing.T) {
 	}
 	if errors.Is(err, llm.ErrBlankModelOutput) {
 		t.Fatalf("error = %v, a refusal must not read as a blank output", err)
+	}
+}
+
+// A streamed thought summary is thinking, not answer text, and the signature that
+// closes it stays on that thought's own part. The answer text and the call are
+// recorded in arrival order, and a signature delivered on an empty text part is
+// kept too: it belongs to this reply and must come back with it.
+func TestGoogleStreamingKeepsThoughtSignatures(t *testing.T) {
+	result, err, rec := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveSSE(w,
+			`{"candidates":[{"content":{"parts":[{"text":"pla","thought":true}]}}]}`,
+			`{"candidates":[{"content":{"parts":[{"text":"n","thought":true,"thoughtSignature":"A"}]}}]}`,
+			`{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}`,
+			`{"candidates":[{"content":{"parts":[{"text":"lo"}]}}]}`,
+			`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather"},"thoughtSignature":"B"}]}}]}`,
+			`{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"C"}]},"finishReason":"STOP"}]}`,
+		)
+	}))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if text := result.Message.TextContent(); text != "Hello" {
+		t.Fatalf("answer = %q, want the answer text alone", text)
+	}
+	if fmt.Sprint(rec.reasoning) != fmt.Sprint([]string{"pla", "n"}) {
+		t.Fatalf("reasoning deltas = %v, want the thought summary in two deltas", rec.reasoning)
+	}
+	if rec.reasoningDone != 1 {
+		t.Fatalf("OnReasoningDone fired %d times, want 1", rec.reasoningDone)
+	}
+	layout, ok := llm.DecodeGeminiParts(result.Message.Name)
+	if !ok {
+		t.Fatalf("carry = %q, want a Gemini part layout", result.Message.Name)
+	}
+	want := []llm.GeminiPart{
+		{Kind: "thought", Text: "plan", Signature: "A"},
+		{Kind: "text", Text: "Hello"},
+		{Kind: "call", Call: 0, Signature: "B"},
+		{Kind: "text", Signature: "C"},
+	}
+	if !reflect.DeepEqual(layout, want) {
+		t.Fatalf("layout = %#v\nwant      %#v", layout, want)
+	}
+	if result.Message.ReasoningModel != "gemini-3.5-pro" {
+		t.Fatalf("ReasoningModel = %q, want the client's model", result.Message.ReasoningModel)
+	}
+}
+
+// Two signed text chunks are two parts: Gemini cannot merge two signatures, so
+// each keeps its own and the answer still reads as both chunks.
+func TestGoogleStreamingNeverMergesSignedParts(t *testing.T) {
+	result, err, _ := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveSSE(w,
+			`{"candidates":[{"content":{"parts":[{"text":"A","thoughtSignature":"S1"}]}}]}`,
+			`{"candidates":[{"content":{"parts":[{"text":"B","thoughtSignature":"S2"}]},"finishReason":"STOP"}]}`,
+		)
+	}))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	layout, ok := llm.DecodeGeminiParts(result.Message.Name)
+	if !ok {
+		t.Fatalf("carry = %q, want a Gemini part layout", result.Message.Name)
+	}
+	want := []llm.GeminiPart{
+		{Kind: "text", Text: "A", Signature: "S1"},
+		{Kind: "text", Text: "B", Signature: "S2"},
+	}
+	if !reflect.DeepEqual(layout, want) {
+		t.Fatalf("layout = %#v\nwant      %#v", layout, want)
+	}
+	// Both chunks are answer text, one part each: TextContent joins parts with
+	// a newline.
+	if text := result.Message.TextContent(); text != "A\nB" {
+		t.Fatalf("answer = %q, want both chunks", text)
+	}
+}
+
+// A signed function-call part arrives complete, so the layout the stream has
+// built is replayable from that moment: the carry has to be handed over before
+// the call is reported ready, because that notice starts a provisional message
+// written from the sink. The handed-over layout is the one the finished reply
+// carries.
+func TestGoogleStreamHandsOverSignedParts(t *testing.T) {
+	result, err, rec := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveSSE(w,
+			`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Paris"}},"thoughtSignature":"B"}]}}]}`,
+			`{"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}]}`,
+		)
+	}))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(rec.carries) != 1 {
+		t.Fatalf("carries = %d, want exactly 1: the signed call is the one complete part", len(rec.carries))
+	}
+	layout, ok := llm.DecodeGeminiParts(rec.carries[0])
+	if !ok || len(layout) != 1 {
+		t.Fatalf("handed-over carry = %q, want a layout holding the call", rec.carries[0])
+	}
+	want := llm.GeminiPart{Kind: "call", Call: 0, Signature: "B"}
+	if layout[0] != want {
+		t.Fatalf("handed-over part = %#v, want %#v", layout[0], want)
+	}
+	if rec.carryModels[0] != "gemini-3.5-pro" {
+		t.Fatalf("carry model = %q, want the client's model", rec.carryModels[0])
+	}
+	// The call was reported ready after the carry: the ready entry is in the
+	// trace, and the carry was the only one before it.
+	if rec.ready == nil || rec.ready.Function.Name != "weather" {
+		t.Fatalf("ready = %+v, want the weather call", rec.ready)
+	}
+	// The finished reply carries the whole layout: the call the stream handed
+	// over, then the answer text that followed it.
+	finished, ok := llm.DecodeGeminiParts(result.Message.Name)
+	if !ok {
+		t.Fatalf("finished reply carry = %q, want a layout carry", result.Message.Name)
+	}
+	wantLayout := []llm.GeminiPart{want, {Kind: "text", Text: "done"}}
+	if !reflect.DeepEqual(finished, wantLayout) {
+		t.Fatalf("finished layout = %#v\nwant           %#v", finished, wantLayout)
+	}
+}
+
+// A part that carries no signature and no thought is not reasoning: nothing is
+// handed over until the reply really has some.
+func TestGoogleStreamHandsOverNothingWithoutSignedParts(t *testing.T) {
+	_, err, rec := runStream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveSSE(w,
+			`{"candidates":[{"content":{"parts":[{"text":"plain"}]},"finishReason":"STOP"}]}`,
+		)
+	}))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(rec.carries) != 0 {
+		t.Fatalf("carries = %v, want none: the reply held no reasoning", rec.carries)
+	}
+}
+
+// The non-streaming path replays a whole reply at once, so its layout is
+// complete before the first replayed callback: the carry has to be handed over
+// ahead of the replay, whose tool call starts a provisional message.
+func TestGoogleUnaryHandsOverCarryBeforeReplay(t *testing.T) {
+	const body = `{"candidates":[{"content":{"parts":[{"text":"plan","thought":true,"thoughtSignature":"A"},{"functionCall":{"name":"weather","args":{"city":"Paris"}},"thoughtSignature":"B"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	rec := newRecordingSink()
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), rec.sink()))
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil)
+	if _, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(rec.carries) != 1 {
+		t.Fatalf("carries = %d, want exactly 1", len(rec.carries))
+	}
+	layout, ok := llm.DecodeGeminiParts(rec.carries[0])
+	if !ok {
+		t.Fatalf("handed-over carry = %q, want a layout", rec.carries[0])
+	}
+	want := []llm.GeminiPart{
+		{Kind: "thought", Text: "plan", Signature: "A"},
+		{Kind: "call", Call: 0, Signature: "B"},
+	}
+	if !reflect.DeepEqual(layout, want) {
+		t.Fatalf("handed-over layout = %#v\nwant                %#v", layout, want)
+	}
+	if rec.carryModels[0] != "gemini-3.5-pro" {
+		t.Fatalf("carry model = %q, want the client's model", rec.carryModels[0])
+	}
+	// The carry came before the replayed call: the trace holds the ready entry
+	// and nothing but the carry preceded it.
+	if rec.ready == nil || rec.ready.Function.Name != "weather" {
+		t.Fatalf("ready = %+v, want the weather call", rec.ready)
 	}
 }

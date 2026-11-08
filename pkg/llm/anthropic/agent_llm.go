@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -178,35 +179,28 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 	var billedIn, billedOut, billedCacheWrite, billedCacheRead int
 	var settledIn, settledCacheWrite, settledCacheRead int
 	rounds := 0
+	// replayTo is the model this call's thinking is replayed to, and "" replays
+	// none. Once a provider refuses the replayed thinking it stays "" for the
+	// rest of this Execute: the continuation rounds would carry the same blocks
+	// and collect the same rejection, one extra request each.
+	replayTo := c.model
+	var lastRound *llm.Message
 	for {
-		system, anthropicMessages, err := agentAnthropicMessagesToAPI(conversation)
+		params, err := c.messageParams(ctx, conversation, tools, replayTo)
 		if err != nil {
 			return nil, err
 		}
-		params := anthropicapi.MessageNewParams{
-			Model:     anthropicapi.Model(strings.TrimSpace(c.model)),
-			MaxTokens: c.maxTokens,
-			Messages:  anthropicMessages,
-			System:    system,
-		}
-		if c.effort != "" {
-			params.OutputConfig.Effort = c.effort
-		}
-		if llm.Fast(ctx) {
-			params.ServiceTier = anthropicapi.MessageNewParamsServiceTierAuto
-		}
-		if len(tools) > 0 {
-			params.Tools = agentAnthropicTools(tools)
-		}
-		// Must run after Tools is populated: the breakpoint on the system block
-		// caches the tool definitions with it, so the tools have to be part of the
-		// request the markers describe.
-		ApplyPromptCache(params.System, params.Messages)
-		var res *llm.Result
-		if nonStreaming {
-			res, err = c.executeUnary(ctx, params)
-		} else {
-			res, err = c.executeStream(ctx, params)
+		res, err := c.send(ctx, params, nonStreaming)
+		if err != nil && replayTo != "" && anthropicParamsCarryThinking(params.Messages) && isThinkingRejection(err) {
+			// Claude Code does the same: a provider that refuses the replayed
+			// thinking gets the request again without it, rather than a
+			// conversation that fails on every request from here on.
+			slog.Warn("anthropic: provider refused the replayed thinking; resending without it", "model", c.model, "err", err)
+			replayTo = ""
+			if params, err = c.messageParams(ctx, conversation, tools, replayTo); err != nil {
+				return nil, err
+			}
+			res, err = c.send(ctx, params, nonStreaming)
 		}
 		if err != nil {
 			return nil, err
@@ -230,6 +224,9 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 				CacheReadInputTokens:     settledCacheRead,
 			}
 		}
+		// Unconditional: a round that carries no message must not leave the
+		// previous round's thinking on offer for the final answer.
+		lastRound = res.Message
 		if res.Message != nil {
 			answer.WriteString(res.Message.TextContent())
 			lastToolCalls = res.Message.ToolCalls
@@ -241,14 +238,21 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 		conversation = append(append([]llm.Message(nil), messages...), recovery.Resume(answer.String())...)
 	}
 	// One assistant message carries the whole answer: each round was its own
-	// request, but this call is one reply. Thinking never enters it — the
-	// recovery prompt already tells the model its reasoning was not kept.
+	// request, but this call is one reply. Its thinking is the last round's —
+	// the reasoning behind the calls it hands back. An earlier round's thinking
+	// was never sent again in the rounds after it, and a round cut by the
+	// output limit may hold a block cut before its signature arrived, which a
+	// provider refuses on replay.
 	parts := make([]llm.ContentPart, 0)
 	if answer.Len() > 0 {
 		parts = append(parts, llm.Text(answer.String()))
 	}
+	msg := &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: lastToolCalls}
+	if lastRound != nil && !llm.OutputLimitReached(stopReason) {
+		msg.Name, msg.ReasoningModel = lastRound.Name, lastRound.ReasoningModel
+	}
 	out := &llm.Result{
-		Message:    &llm.Message{Role: llm.RoleAssistant, Parts: parts, ToolCalls: lastToolCalls},
+		Message:    msg,
 		StopReason: stopReason,
 		Usage:      usage,
 	}
@@ -263,9 +267,71 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 	return out, nil
 }
 
+// messageParams builds one Messages request for conversation. replayTo is the
+// model the conversation's thinking is replayed to; "" replays none.
+func (c *anthropicAgentLLM) messageParams(ctx context.Context, conversation []llm.Message, tools []*llm.Tool, replayTo string) (anthropicapi.MessageNewParams, error) {
+	system, anthropicMessages, err := agentAnthropicMessagesToAPI(conversation, replayTo)
+	if err != nil {
+		return anthropicapi.MessageNewParams{}, err
+	}
+	params := anthropicapi.MessageNewParams{
+		Model:     anthropicapi.Model(strings.TrimSpace(c.model)),
+		MaxTokens: c.maxTokens,
+		Messages:  anthropicMessages,
+		System:    system,
+	}
+	if c.effort != "" {
+		params.OutputConfig.Effort = c.effort
+	}
+	if llm.Fast(ctx) {
+		params.ServiceTier = anthropicapi.MessageNewParamsServiceTierAuto
+	}
+	if len(tools) > 0 {
+		params.Tools = agentAnthropicTools(tools)
+	}
+	// Must run after Tools is populated: the breakpoint on the system block
+	// caches the tool definitions with it, so the tools have to be part of the
+	// request the markers describe.
+	ApplyPromptCache(params.System, params.Messages)
+	return params, nil
+}
+
+// send runs one request: streamed, or as a single unary call when the caller
+// asked for that.
+func (c *anthropicAgentLLM) send(ctx context.Context, params anthropicapi.MessageNewParams, nonStreaming bool) (*llm.Result, error) {
+	if nonStreaming {
+		return c.executeUnary(ctx, params)
+	}
+	return c.executeStream(ctx, params)
+}
+
+// anthropicParamsCarryThinking reports whether a request replays any thinking.
+func anthropicParamsCarryThinking(messages []anthropicapi.MessageParam) bool {
+	for _, m := range messages {
+		for _, b := range m.Content {
+			if b.OfThinking != nil || b.OfRedactedThinking != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isThinkingRejection reports a 400 that names the thinking or its signature —
+// the provider refusing replayed blocks. A 400 that only mentions thinking for
+// another reason costs one extra request that fails the same way.
+//
+// The judgment itself is llm.ReasoningReplayRefused, shared with the other three
+// adapters: normalizeError's Message is the response body the SDK kept, which is
+// what names the refused block.
+func isThinkingRejection(err error) bool {
+	return llm.ReasoningReplayRefused(normalizeError(err), []int{http.StatusBadRequest}, "thinking", "signature")
+}
+
 // executeStream runs one streaming Messages request and returns its result;
-// thinking blocks reach only the sink, never the message. It is one round of
-// Execute's output-limit loop.
+// thinking blocks stream to the sink as they arrive and also reach the message
+// as a reasoning carry, which is how the next request returns them to the model
+// that wrote them. It is one round of Execute's output-limit loop.
 func (c *anthropicAgentLLM) executeStream(ctx context.Context, params anthropicapi.MessageNewParams) (*llm.Result, error) {
 	ctx = llm.WithStreamingRequest(ctx)
 	stream := c.client.Messages.NewStreaming(ctx, params)
@@ -450,6 +516,14 @@ func (c *anthropicAgentLLM) executeStream(ctx context.Context, params anthropica
 		// carries.
 		if event.Type == "content_block_stop" && int(event.Index) < len(res.Content) {
 			switch res.Content[event.Index].Type {
+			case "thinking", "redacted_thinking":
+				// A thinking block is only replayable once it is closed: the
+				// signature arrives with its stop, and a block without one is
+				// refused. Every block in res.Content has had its stop by now,
+				// so this is the moment the reply's reasoning is complete as it
+				// stands — a call cut off from here on is finished from a
+				// message that still carries it.
+				publishReasoningCarry(sink, llm.EncodeThinking(anthropicThinkingBlocks(res.Content)), strings.TrimSpace(c.model))
 			case "tool_use":
 				if sink != nil && sink.OnToolCallReady != nil {
 					sink.OnToolCallReady(anthropicToolCallFromBlock(res.Content[event.Index]))
@@ -472,7 +546,7 @@ func (c *anthropicAgentLLM) executeStream(ctx context.Context, params anthropica
 		// that billing rides the error into the retry loop's accounting.
 		return nil, llm.NewExecuteError(fmt.Errorf("anthropic: %w", llm.ErrStreamNoEvents), attemptUsage())
 	}
-	msg, err := agentAnthropicMessageFromAPI(&res)
+	msg, err := agentAnthropicMessageFromAPI(&res, c.model)
 	if err != nil {
 		return nil, err
 	}
@@ -506,7 +580,7 @@ func (c *anthropicAgentLLM) executeUnary(ctx context.Context, params anthropicap
 	if err != nil {
 		return nil, llm.NonStreamingError(ctx, err)
 	}
-	message, err := agentAnthropicMessageFromAPI(msg)
+	message, err := agentAnthropicMessageFromAPI(msg, c.model)
 	if err != nil {
 		return nil, err
 	}
@@ -544,6 +618,10 @@ func (c *anthropicAgentLLM) executeUnary(ctx context.Context, params anthropicap
 			texts = append(texts, b.Text)
 		}
 	}
+	// The whole reply is finished here, so its carry is complete: hand it over
+	// before the replay, whose tool-call callbacks are what can start a
+	// provisional message for this reply.
+	publishReasoningCarry(sink, message.Name, message.ReasoningModel)
 	llm.ReplayToSink(sink, llm.ReplayedResponse{
 		Reasoning:  strings.Join(reasoning, ""),
 		Text:       texts,
@@ -553,7 +631,7 @@ func (c *anthropicAgentLLM) executeUnary(ctx context.Context, params anthropicap
 	return result, nil
 }
 
-func agentAnthropicMessagesToAPI(messages []llm.Message) ([]anthropicapi.TextBlockParam, []anthropicapi.MessageParam, error) {
+func agentAnthropicMessagesToAPI(messages []llm.Message, replayTo string) ([]anthropicapi.TextBlockParam, []anthropicapi.MessageParam, error) {
 	var systemParts []string
 	out := make([]anthropicapi.MessageParam, 0, len(messages))
 	for _, m := range messages {
@@ -569,7 +647,19 @@ func agentAnthropicMessagesToAPI(messages []llm.Message) ([]anthropicapi.TextBlo
 				out = append(out, anthropicapi.NewUserMessage(blocks...))
 			}
 		case llm.RoleAssistant:
-			blocks := make([]anthropicapi.ContentBlockParamUnion, 0, len(m.Parts)+len(m.ToolCalls))
+			// A reply that was only reasoning goes back to the model that
+			// produced it, and to no other: the fence would hand that model's
+			// reasoning to another one as an answer this conversation gave.
+			// A retry that replays no reasoning at all (replayTo empty) drops
+			// it too, for the same reason it replays no thinking.
+			if llm.ThinkingFenceOnly(m) && !llm.ThinkingFenceGoesTo(m, replayTo) {
+				continue
+			}
+			// Thinking comes first because the model thought before it wrote,
+			// and because the provider checks the blocks in the order they
+			// were returned.
+			thinking := anthropicThinkingParams(m, replayTo)
+			blocks := thinking
 			for _, p := range m.Parts {
 				if p.Type == llm.ContentTypeText && strings.TrimSpace(p.Text) != "" {
 					blocks = append(blocks, anthropicapi.NewTextBlock(p.Text))
@@ -596,8 +686,13 @@ func agentAnthropicMessagesToAPI(messages []llm.Message) ([]anthropicapi.TextBlo
 				}
 				blocks = append(blocks, anthropicapi.NewToolUseBlock(id, input, tc.Function.Name))
 			}
-			// An assistant message with nothing this protocol can express contributes nothing and must not be sent: an empty content array is a request error.
-			if len(blocks) == 0 {
+			// An assistant message with nothing this protocol can express
+			// contributes nothing and must not be sent: an empty content array
+			// is a request error. Thinking does not count as something: it is
+			// context for the answer, and a message that holds only thinking is
+			// the message Claude Code drops, whose last block it would leave
+			// the thinking as.
+			if len(blocks) == len(thinking) {
 				continue
 			}
 			out = append(out, anthropicapi.NewAssistantMessage(blocks...))
@@ -624,6 +719,30 @@ func agentAnthropicMessagesToAPI(messages []llm.Message) ([]anthropicapi.TextBlo
 		system = []anthropicapi.TextBlockParam{{Text: joined}}
 	}
 	return system, out, nil
+}
+
+// anthropicThinkingParams renders the thinking m carries for replayTo, in the
+// order the model wrote it, or nothing. Only the model that produced the
+// blocks gets them back: their signatures are bound to it. A carry recorded
+// without a producer is not replayed either — this format never existed
+// without one.
+func anthropicThinkingParams(m llm.Message, replayTo string) []anthropicapi.ContentBlockParamUnion {
+	if strings.TrimSpace(replayTo) == "" || strings.TrimSpace(m.ReasoningModel) == "" || !llm.ReplaysReasoningTo(m, replayTo) {
+		return nil
+	}
+	blocks, ok := llm.DecodeThinking(m.Name)
+	if !ok {
+		return nil
+	}
+	out := make([]anthropicapi.ContentBlockParamUnion, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Redacted {
+			out = append(out, anthropicapi.NewRedactedThinkingBlock(b.Data))
+			continue
+		}
+		out = append(out, anthropicapi.NewThinkingBlock(b.Signature, b.Thinking))
+	}
+	return out
 }
 
 func agentAnthropicContentBlocks(parts []llm.ContentPart) []anthropicapi.ContentBlockParamUnion {
@@ -704,12 +823,38 @@ func anthropicToolCallFromBlock(b anthropicapi.ContentBlockUnion) llm.ToolCall {
 	}
 }
 
-func agentAnthropicMessageFromAPI(m *anthropicapi.Message) (*llm.Message, error) {
+// publishReasoningCarry hands the reply's reasoning, as far as it is complete
+// and safe to replay, to the sink. It does nothing when nobody listens or there
+// is no carry yet.
+func publishReasoningCarry(sink *llm.StreamSink, carry, model string) {
+	if sink == nil || sink.OnReasoningCarry == nil || carry == "" {
+		return
+	}
+	sink.OnReasoningCarry(carry, model)
+}
+
+// anthropicThinkingBlocks collects the reply's thinking and redacted_thinking
+// blocks in the order the model returned them, byte for byte.
+func anthropicThinkingBlocks(content []anthropicapi.ContentBlockUnion) []llm.ThinkingBlock {
+	thinking := make([]llm.ThinkingBlock, 0, len(content))
+	for _, b := range content {
+		switch b.Type {
+		case "thinking":
+			thinking = append(thinking, llm.ThinkingBlock{Thinking: b.Thinking, Signature: b.Signature})
+		case "redacted_thinking":
+			thinking = append(thinking, llm.ThinkingBlock{Redacted: true, Data: b.Data})
+		}
+	}
+	return thinking
+}
+
+func agentAnthropicMessageFromAPI(m *anthropicapi.Message, model string) (*llm.Message, error) {
 	if m == nil {
 		return nil, &anthropicNilResponseError{}
 	}
 	parts := make([]llm.ContentPart, 0)
 	toolCalls := make([]llm.ToolCall, 0)
+	thinking := anthropicThinkingBlocks(m.Content)
 	for _, b := range m.Content {
 		switch b.Type {
 		case "text":
@@ -724,6 +869,14 @@ func agentAnthropicMessageFromAPI(m *anthropicapi.Message) (*llm.Message, error)
 		Role:      llm.RoleAssistant,
 		Parts:     parts,
 		ToolCalls: toolCalls,
+	}
+	// The thinking rides the reasoning carry, so the next request gives this
+	// model its own reasoning back (agentAnthropicMessagesToAPI). Without it a
+	// thinking model saw only its calls and their results, never why it made
+	// them, and re-derived the same plan on every step of a tool loop.
+	if carry := llm.EncodeThinking(thinking); carry != "" {
+		msg.Name = carry
+		msg.ReasoningModel = strings.TrimSpace(model)
 	}
 	return msg, nil
 }

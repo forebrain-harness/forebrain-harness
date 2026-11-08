@@ -2211,19 +2211,22 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, compl
 	if cap := s.tuiPartialCapture; cap != nil {
 		captured = cap.Snapshot()
 	}
-	var partialText, partialReasoning string
+	var partialText, partialReasoning, partialCarry, partialCarryModel string
 	if acc := s.tuiStreamAccum; acc != nil {
 		partialText = acc.Content()
 		partialReasoning = acc.Reasoning()
+		partialCarry, partialCarryModel = acc.ReasoningCarry()
 	}
 	turn.PersistCancelledTurn(context.Background(), s.sessStore(), turn.CancelledTurn{
-		SessionID:        sessionID,
-		RunID:            runID,
-		Captured:         captured,
-		PartialText:      partialText,
-		PartialReasoning: partialReasoning,
-		Model:            cliResultModel(s, sessionID),
-		End:              completion.runEnd(),
+		SessionID:         sessionID,
+		RunID:             runID,
+		Captured:          captured,
+		PartialText:       partialText,
+		PartialReasoning:  partialReasoning,
+		PartialCarry:      partialCarry,
+		PartialCarryModel: partialCarryModel,
+		Model:             cliResultModel(s, sessionID),
+		End:               completion.runEnd(),
 		OnRepairError: func(err error) {
 			if s.chatLog != nil {
 				s.chatLog.Debugf("forebrain chat dangling tool_calls repair failed session=%s err=%v", sessionID, err)

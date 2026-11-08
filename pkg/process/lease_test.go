@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/channel"
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
@@ -117,11 +117,11 @@ func TestLeaseReleaseGivesTheAccountBack(t *testing.T) {
 // stubChannel is a long-connection adapter double: like every real adapter it
 // starts a loop of its own and returns, and it records when it is connected.
 type stubChannel struct {
-	mu         sync.Mutex
-	connects   int
-	live       int
-	cancel     context.CancelFunc
-	done       chan struct{}
+	mu       sync.Mutex
+	connects int
+	live     int
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 func (s *stubChannel) ID() string { return "stub" }

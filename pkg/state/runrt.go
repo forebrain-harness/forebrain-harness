@@ -1911,7 +1911,6 @@ func (s *RunStore) LiveRunPeer(ctx context.Context, sessionID string) (*ReplicaP
 	return &ReplicaPeer{Owner: owner, InternalAddr: strings.TrimSpace(addr), Kind: kind}, nil
 }
 
-
 // HoldOwnerLease created: what it is (RunOwnerKindGateway or
 // RunOwnerKindTerminal), which machine it runs on, and — for a gateway — the
 // address the other replicas reach it at. A terminal passes an empty

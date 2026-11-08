@@ -1003,11 +1003,11 @@ func bindGatewayEnv(t *testing.T, home string) *process.Environment {
 // the bind a relay forwards, reports what it was sent afterwards, and can end the
 // run when the test says so.
 type relayStub struct {
-	url     string
-	got     chan wsClientMsg
-	ended   chan struct{}
-	connMu  sync.Mutex
-	conn    *websocket.Conn
+	url    string
+	got    chan wsClientMsg
+	ended  chan struct{}
+	connMu sync.Mutex
+	conn   *websocket.Conn
 }
 
 func newRelayStub(t *testing.T) *relayStub {

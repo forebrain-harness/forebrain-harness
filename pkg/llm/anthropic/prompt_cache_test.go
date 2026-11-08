@@ -23,7 +23,7 @@ import (
 func TestAnthropicConversionRejectsToolMessageWithoutToolCallID(t *testing.T) {
 	_, _, err := agentAnthropicMessagesToAPI([]llm.Message{
 		{Role: llm.RoleTool, Parts: []llm.ContentPart{llm.Text("result")}},
-	})
+	}, "")
 	if !errors.Is(err, errAnthropicToolMessageMissingToolCallID) {
 		t.Fatalf("err = %v, want errAnthropicToolMessageMissingToolCallID", err)
 	}
@@ -35,7 +35,7 @@ func TestAnthropicConversionRejectsToolMessageWithoutToolCallID(t *testing.T) {
 func TestAnthropicConversionReportsUnsupportedRole(t *testing.T) {
 	_, _, err := agentAnthropicMessagesToAPI([]llm.Message{
 		{Role: "moderator", Parts: []llm.ContentPart{llm.Text("hello")}},
-	})
+	}, "")
 	var unsupported *anthropicUnsupportedRoleError
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("err = %T (%v), want *anthropicUnsupportedRoleError", err, err)
@@ -52,7 +52,7 @@ func TestAnthropicConversionSplitsSystemFromConversation(t *testing.T) {
 		llm.SystemMessage("you are forebrain"),
 		{Role: llm.RoleDeveloper, Parts: []llm.ContentPart{llm.Text("remember this")}},
 		llm.UserMessage(llm.Text("hello")),
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

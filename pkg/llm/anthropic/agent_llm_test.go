@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	anthropicapi "github.com/anthropics/anthropic-sdk-go"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
@@ -887,4 +888,663 @@ func anthropicMessageText(t *testing.T, msg map[string]any) string {
 		}
 	}
 	return b.String()
+}
+
+// anthropicMessageStartData opens every scripted streaming response: no content
+// yet, output_tokens seeded at 1.
+const anthropicMessageStartData = `{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}`
+
+// anthropicNthMessage returns message i of one recorded request body.
+func anthropicNthMessage(t *testing.T, body map[string]any, i int) map[string]any {
+	t.Helper()
+	msgs, _ := body["messages"].([]any)
+	if i >= len(msgs) {
+		t.Fatalf("request carries %d messages, want at least %d", len(msgs), i+1)
+	}
+	msg, _ := msgs[i].(map[string]any)
+	return msg
+}
+
+// anthropicMessageBlocks returns the content blocks of one recorded message.
+func anthropicMessageBlocks(t *testing.T, msg map[string]any) []map[string]any {
+	t.Helper()
+	raw, _ := msg["content"].([]any)
+	blocks := make([]map[string]any, 0, len(raw))
+	for _, b := range raw {
+		block, _ := b.(map[string]any)
+		blocks = append(blocks, block)
+	}
+	return blocks
+}
+
+// anthropicRequestCarriesThinking reports whether any message of a recorded
+// request body replays a thinking or redacted_thinking block.
+func anthropicRequestCarriesThinking(body map[string]any) bool {
+	msgs, _ := body["messages"].([]any)
+	for _, m := range msgs {
+		msg, _ := m.(map[string]any)
+		blocks, _ := msg["content"].([]any)
+		for _, b := range blocks {
+			block, _ := b.(map[string]any)
+			if block["type"] == "thinking" || block["type"] == "redacted_thinking" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// anthropicThinkingRoundScript is one SSE response that thinks, then answers with
+// text and stops for reason. signature is optional: a block cut by the output
+// limit never received one.
+func anthropicThinkingRoundScript(thinking, signature, text, reason string, input, output int) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf(`message_start|{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":%d,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}`+"\n", input))
+	b.WriteString(`content_block_start|{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}` + "\n")
+	b.WriteString(fmt.Sprintf(`content_block_delta|{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":%q}}`+"\n", thinking))
+	if signature != "" {
+		b.WriteString(fmt.Sprintf(`content_block_delta|{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":%q}}`+"\n", signature))
+	}
+	b.WriteString(`content_block_stop|{"type":"content_block_stop","index":0}` + "\n")
+	b.WriteString(`content_block_start|{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}` + "\n")
+	b.WriteString(fmt.Sprintf(`content_block_delta|{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":%q}}`+"\n", text))
+	b.WriteString(`content_block_stop|{"type":"content_block_stop","index":1}` + "\n")
+	b.WriteString(fmt.Sprintf(`message_delta|{"type":"message_delta","delta":{"stop_reason":%q,"stop_sequence":null},"usage":{"input_tokens":%d,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":%d}}`+"\n", reason, input, output))
+	b.WriteString(`message_stop|{"type":"message_stop"}`)
+	return b.String()
+}
+
+// Thinking goes back to the model that produced it and to nobody else: the
+// signature is bound to that model, a request that replays none is the only
+// shape a conversation can put on the wire for anyone else, and a carry
+// recorded without a producer is not replayed either — this format never
+// existed without one.
+func TestAnthropicThinkingReplaysOnlyToItsOwnModel(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	const responseBody = `{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-6","content":[` +
+		`{"type":"thinking","thinking":"  weigh the options\n","signature":"sig-abc+/=="},` +
+		`{"type":"redacted_thinking","data":"opaque-data+/=="},` +
+		`{"type":"text","text":"Answer"},` +
+		`{"type":"tool_use","id":"toolu_1","name":"shell","input":{"cmd":"ls"}}],` +
+		`"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`
+	var apiResponse anthropicapi.Message
+	if err := json.Unmarshal([]byte(responseBody), &apiResponse); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	const model = "claude-opus-4-6"
+	answer, err := agentAnthropicMessageFromAPI(&apiResponse, model)
+	if err != nil {
+		t.Fatalf("agentAnthropicMessageFromAPI: %v", err)
+	}
+	if answer.ReasoningModel != model {
+		t.Fatalf("ReasoningModel = %q, want %q", answer.ReasoningModel, model)
+	}
+	wantThinking := []llm.ThinkingBlock{
+		{Thinking: "  weigh the options\n", Signature: "sig-abc+/=="},
+		{Redacted: true, Data: "opaque-data+/=="},
+	}
+	if blocks, ok := llm.DecodeThinking(answer.Name); !ok || !reflect.DeepEqual(blocks, wantThinking) {
+		t.Fatalf("carry = %#v (ok=%v), want %#v", blocks, ok, wantThinking)
+	}
+
+	// The producing model sees its thinking first, then what it said and called.
+	_, messages, err := agentAnthropicMessagesToAPI([]llm.Message{llm.UserMessage(llm.Text("hi")), *answer}, model)
+	if err != nil {
+		t.Fatalf("agentAnthropicMessagesToAPI: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages = %d, want the user turn and the answer", len(messages))
+	}
+	blocks := messages[1].Content
+	if len(blocks) != 4 {
+		t.Fatalf("answer blocks = %d, want thinking, redacted thinking, text and the call", len(blocks))
+	}
+	if got := blocks[0].OfThinking; got == nil || got.Thinking != "  weigh the options\n" || got.Signature != "sig-abc+/==" {
+		t.Fatalf("first block = %#v, want the thinking block verbatim", blocks[0])
+	}
+	if got := blocks[1].OfRedactedThinking; got == nil || got.Data != "opaque-data+/==" {
+		t.Fatalf("second block = %#v, want the redacted block verbatim", blocks[1])
+	}
+	if got := blocks[2].OfText; got == nil || got.Text != "Answer" {
+		t.Fatalf("third block = %#v, want the text", blocks[2])
+	}
+	if got := blocks[3].OfToolUse; got == nil || got.ID != "toolu_1" || got.Name != "shell" {
+		t.Fatalf("fourth block = %#v, want the call", blocks[3])
+	}
+
+	for _, tc := range []struct {
+		name       string
+		replayTo   string
+		clearModel bool
+	}{
+		{name: "another model", replayTo: "glm-5.3"},
+		{name: "no replay", replayTo: ""},
+		{name: "carry without a producer", replayTo: model, clearModel: true},
+	} {
+		history := *answer
+		if tc.clearModel {
+			history.ReasoningModel = ""
+		}
+		_, messages, err := agentAnthropicMessagesToAPI([]llm.Message{llm.UserMessage(llm.Text("hi")), history}, tc.replayTo)
+		if err != nil {
+			t.Fatalf("%s: agentAnthropicMessagesToAPI: %v", tc.name, err)
+		}
+		if len(messages) != 2 {
+			t.Fatalf("%s: messages = %d, want the user turn and the answer", tc.name, len(messages))
+		}
+		blocks := messages[1].Content
+		if len(blocks) != 2 || blocks[0].OfText == nil || blocks[1].OfToolUse == nil {
+			t.Fatalf("%s: answer blocks = %#v, want text and the call only", tc.name, blocks)
+		}
+	}
+}
+
+// The other protocols' carries ride the same Name field: a Responses payload
+// and plain reasoning text are never Anthropic thinking blocks.
+func TestAnthropicForeignCarriesAreNeverThinking(t *testing.T) {
+	foreign := map[string]string{
+		"Responses payload": llm.Encode([]llm.Item{{ID: "rs_1", EncryptedContent: "opaque"}}),
+		"plain reasoning":   llm.Prefix + "plain reasoning",
+	}
+	for name, carry := range foreign {
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer")})
+		msg.Name = carry
+		msg.ReasoningModel = "claude-opus-4-6"
+		_, messages, err := agentAnthropicMessagesToAPI([]llm.Message{llm.UserMessage(llm.Text("hi")), msg}, "claude-opus-4-6")
+		if err != nil {
+			t.Fatalf("%s: agentAnthropicMessagesToAPI: %v", name, err)
+		}
+		if anthropicParamsCarryThinking(messages) {
+			t.Fatalf("%s: the request replayed it as thinking", name)
+		}
+		if blocks := messages[1].Content; len(blocks) != 1 || blocks[0].OfText == nil || blocks[0].OfText.Text != "answer" {
+			t.Fatalf("%s: answer blocks = %#v, want the text alone", name, blocks)
+		}
+	}
+}
+
+// An assistant message that holds only thinking has nothing the model said in
+// it: it is dropped rather than sent, exactly as Claude Code drops it, and
+// certainly never as a message whose last block is thinking.
+func TestAnthropicThinkingAloneIsNotSent(t *testing.T) {
+	msg := llm.Message{
+		Role:           llm.RoleAssistant,
+		Name:           llm.EncodeThinking([]llm.ThinkingBlock{{Thinking: "only a thought", Signature: "sig=="}}),
+		ReasoningModel: "claude-opus-4-6",
+	}
+	_, messages, err := agentAnthropicMessagesToAPI([]llm.Message{llm.UserMessage(llm.Text("hi")), msg}, "claude-opus-4-6")
+	if err != nil {
+		t.Fatalf("agentAnthropicMessagesToAPI: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Role != "user" {
+		t.Fatalf("messages = %#v, want the user turn alone", messages)
+	}
+}
+
+// A reply that was only reasoning is a fence, and the fence reaches the model
+// that produced it as that text. No other model sees it — it would read that
+// reasoning as an answer this conversation gave — and a retry that replays no
+// reasoning drops it along with the thinking.
+func TestAnthropicSendsThinkingFenceOnlyToItsProducer(t *testing.T) {
+	fenceText := llm.ThinkingFence("weigh A against B")
+	fence := llm.Message{
+		Role:           llm.RoleAssistant,
+		Parts:          []llm.ContentPart{llm.Text(fenceText)},
+		ReasoningModel: "claude-opus-4-6",
+	}
+	_, messages, err := agentAnthropicMessagesToAPI([]llm.Message{llm.UserMessage(llm.Text("hi")), fence}, "claude-opus-4-6")
+	if err != nil {
+		t.Fatalf("agentAnthropicMessagesToAPI: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages = %d, want the user turn and the fence", len(messages))
+	}
+	if blocks := messages[1].Content; len(blocks) != 1 || blocks[0].OfText == nil || blocks[0].OfText.Text != fenceText {
+		t.Fatalf("fence blocks = %#v, want the fence text alone", blocks)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		replayTo string
+		producer string
+	}{
+		{name: "another model", replayTo: "glm-5.3", producer: "claude-opus-4-6"},
+		{name: "no producer", replayTo: "claude-opus-4-6"},
+		{name: "no replay", producer: "claude-opus-4-6"},
+	} {
+		history := fence
+		history.ReasoningModel = tc.producer
+		_, messages, err := agentAnthropicMessagesToAPI([]llm.Message{llm.UserMessage(llm.Text("hi")), history}, tc.replayTo)
+		if err != nil {
+			t.Fatalf("%s: agentAnthropicMessagesToAPI: %v", tc.name, err)
+		}
+		if len(messages) != 1 || messages[0].Role != "user" {
+			t.Fatalf("%s: messages = %#v, want the user turn alone", tc.name, messages)
+		}
+	}
+}
+
+// Thinking that arrived as a stream goes back byte for byte: the deltas the
+// provider sent are what the next request carries, and the same history sent
+// to another model carries none of it.
+func TestAnthropicStreamedThinkingGoesBackVerbatim(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	const thinkingText = " Plan:\n  step one "
+	const signature = "sig-abc=="
+	var mu sync.Mutex
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		i := len(bodies)
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		writeAnthropicSSEEvent(t, w, "message_start", anthropicMessageStartData)
+		if i == 0 {
+			writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
+			writeAnthropicSSEEvent(t, w, "content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":%q}}`, thinkingText))
+			writeAnthropicSSEEvent(t, w, "content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":%q}}`, signature))
+			writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
+			writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"shell","input":{}}}`)
+			writeAnthropicSSEEvent(t, w, "content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"ls\"}"}}`)
+			writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":1}`)
+			writeAnthropicSSEEvent(t, w, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}`)
+		} else {
+			writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"done"}}`)
+			writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
+			writeAnthropicSSEEvent(t, w, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}`)
+		}
+		writeAnthropicSSEEvent(t, w, "message_stop", `{"type":"message_stop"}`)
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	ctx := context.Background()
+	first, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+	want := []llm.ThinkingBlock{{Thinking: thinkingText, Signature: signature}}
+	if blocks, ok := llm.DecodeThinking(first.Message.Name); !ok || !reflect.DeepEqual(blocks, want) {
+		t.Fatalf("streamed carry = %#v (ok=%v), want %#v", blocks, ok, want)
+	}
+
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("hi")),
+		*first.Message,
+		llm.ToolResultMessage("toolu_1", llm.Text("listed")),
+	}
+	if _, err := client.Execute(ctx, history, nil); err != nil {
+		t.Fatalf("second Execute: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2", len(bodies))
+	}
+	content := anthropicMessageBlocks(t, anthropicNthMessage(t, bodies[1], 1))
+	if len(content) < 2 {
+		t.Fatalf("replayed answer blocks = %#v, want thinking and the call", content)
+	}
+	wantBlock := map[string]any{"type": "thinking", "thinking": thinkingText, "signature": signature}
+	if !reflect.DeepEqual(content[0], wantBlock) {
+		t.Fatalf("replayed block = %#v\nwant           %#v", content[0], wantBlock)
+	}
+	if content[1]["type"] != "tool_use" || content[1]["id"] != "toolu_1" {
+		t.Fatalf("second replayed block = %#v, want the tool call", content[1])
+	}
+
+	other := NewAgentLLM("test-key", server.URL, "glm-5.3", 64_000)
+	if _, err := other.Execute(ctx, history, nil); err != nil {
+		t.Fatalf("third Execute: %v", err)
+	}
+	if len(bodies) != 3 {
+		t.Fatalf("requests = %d, want 3", len(bodies))
+	}
+	if anthropicRequestCarriesThinking(bodies[2]) {
+		t.Fatalf("another model was sent thinking: %#v", bodies[2]["messages"])
+	}
+}
+
+// The non-streaming path carries thinking too; it reads the whole response
+// rather than accumulating deltas, and the carry must be identical.
+func TestAnthropicNonStreamingKeepsThinkingCarry(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	const responseBody = `{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-6","content":[{"type":"thinking","thinking":"unary thinking","signature":"sig-unary=="},{"type":"text","text":"Hello"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	want := []llm.ThinkingBlock{{Thinking: "unary thinking", Signature: "sig-unary=="}}
+	if blocks, ok := llm.DecodeThinking(res.Message.Name); !ok || !reflect.DeepEqual(blocks, want) {
+		t.Fatalf("carry = %#v (ok=%v), want %#v", blocks, ok, want)
+	}
+	if res.Message.ReasoningModel != "claude-opus-4-6" {
+		t.Fatalf("ReasoningModel = %q, want this client's model", res.Message.ReasoningModel)
+	}
+}
+
+// A continuation is a second request for the same reply, and the reply's
+// thinking is the last round's: the reasoning behind the calls it hands back.
+// The rounds after a cut were told the earlier reasoning was not kept, so they
+// are not sent it either.
+func TestAnthropicContinuationCarriesLastRoundThinking(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	var bodies []map[string]any
+	server := anthropicLimitScriptServer(t, []string{
+		anthropicThinkingRoundScript("first thought", "", "Half of a sentence.", "max_tokens", 10, 50),
+		anthropicThinkingRoundScript("second thought", "sig-second==", "The rest.", "end_turn", 25, 7),
+	}, &bodies)
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2 (the cut round and its continuation)", len(bodies))
+	}
+	want := []llm.ThinkingBlock{{Thinking: "second thought", Signature: "sig-second=="}}
+	if blocks, ok := llm.DecodeThinking(res.Message.Name); !ok || !reflect.DeepEqual(blocks, want) {
+		t.Fatalf("carry = %#v (ok=%v), want only the last round's thinking %#v", blocks, ok, want)
+	}
+	if anthropicRequestCarriesThinking(bodies[1]) {
+		t.Fatalf("the continuation request replayed thinking the resume prompt says was not kept: %#v", bodies[1]["messages"])
+	}
+}
+
+// A round the output limit cut may hold a thinking block that never received
+// its signature, which a provider refuses on replay. When the continuation
+// budget is spent the fragment is handed back with no carry at all.
+func TestAnthropicExhaustedCutCarriesNoThinking(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	var bodies []map[string]any
+	server := anthropicLimitScriptServer(t, []string{
+		anthropicThinkingRoundScript("cut one", "sig-one==", "Part one.", "max_tokens", 10, 50),
+		anthropicThinkingRoundScript("cut two", "", "Part two.", "max_tokens", 20, 50),
+		anthropicThinkingRoundScript("cut three", "", "Part three.", "max_tokens", 30, 50),
+		anthropicThinkingRoundScript("cut four", "", "Part four.", "max_tokens", 40, 50),
+	}, &bodies)
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.StopReason != llm.StopReasonOutputLimit {
+		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
+	}
+	if res.Message.Name != "" || res.Message.ReasoningModel != "" {
+		t.Fatalf("carry = %q/%q, want none: the last round was cut before its signature",
+			res.Message.Name, res.Message.ReasoningModel)
+	}
+}
+
+// A provider that refuses the replayed thinking gets the request again without
+// it — Claude Code does the same — rather than a conversation that fails on
+// every later request, because the refused blocks stay in the history.
+func TestAnthropicThinkingRejectionResendsWithoutIt(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	const rejection = `{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid ` + "`signature`" + ` in ` + "`thinking`" + ` block"}}`
+	var mu sync.Mutex
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		if anthropicRequestCarriesThinking(body) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(rejection))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		writeAnthropicSSEEvent(t, w, "message_start", anthropicMessageStartData)
+		writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"recovered"}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
+		writeAnthropicSSEEvent(t, w, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":2}}`)
+		writeAnthropicSSEEvent(t, w, "message_stop", `{"type":"message_stop"}`)
+	}))
+	defer server.Close()
+
+	carried := llm.AssistantMessage([]llm.ContentPart{llm.Text("checking")},
+		llm.ToolCall{ID: "toolu_1", Type: "function", Function: llm.FunctionCall{Name: "shell", Arguments: "{}"}})
+	carried.Name = llm.EncodeThinking([]llm.ThinkingBlock{{Thinking: "a thought", Signature: "sig=="}})
+	carried.ReasoningModel = "claude-opus-4-6"
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("hi")),
+		carried,
+		llm.ToolResultMessage("toolu_1", llm.Text("ok")),
+	}
+
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	res, err := client.Execute(context.Background(), history, nil)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want the request resent without the thinking", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2 (the refused one and the resend)", len(bodies))
+	}
+	if !anthropicRequestCarriesThinking(bodies[0]) {
+		t.Fatalf("the first request did not replay the thinking: %#v", bodies[0]["messages"])
+	}
+	if anthropicRequestCarriesThinking(bodies[1]) {
+		t.Fatalf("the resend still replayed thinking: %#v", bodies[1]["messages"])
+	}
+	if got := res.Message.TextContent(); got != "recovered" {
+		t.Fatalf("answer = %q, want the resent request's answer", got)
+	}
+}
+
+// The resend is for the replayed thinking alone: a 400 about anything else is
+// returned as it is, and so is a 400 that names thinking on a request that
+// never carried any — that one has nothing to strip.
+func TestAnthropicUnrelatedBadRequestIsNotResent(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	carried := llm.AssistantMessage([]llm.ContentPart{llm.Text("checking")})
+	carried.Name = llm.EncodeThinking([]llm.ThinkingBlock{{Thinking: "a thought", Signature: "sig=="}})
+	carried.ReasoningModel = "claude-opus-4-6"
+	cases := []struct {
+		name    string
+		message string
+		history []llm.Message
+	}{
+		{
+			name:    "400 about something else",
+			message: "max_tokens: must be greater than 0",
+			history: []llm.Message{llm.UserMessage(llm.Text("hi")), carried},
+		},
+		{
+			name:    "400 naming thinking on a request that carried none",
+			message: "messages.0.content.0: Unexpected `signature` field",
+			history: []llm.Message{llm.UserMessage(llm.Text("hi"))},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				requests++
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":` + fmt.Sprintf("%q", tc.message) + `}}`))
+			}))
+			defer server.Close()
+
+			client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+			if _, err := client.Execute(context.Background(), tc.history, nil); err == nil {
+				t.Fatal("Execute succeeded, want the provider's 400")
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want exactly 1: this rejection is not about the replayed thinking", requests)
+			}
+		})
+	}
+}
+
+// A reply that is still streaming has to hand its reasoning over at every point
+// where that reasoning is complete: a thinking block becomes replayable only at
+// its stop, where its signature arrives. The provisional message a tool call
+// starts is written from the sink, so the carry has to be there before that
+// call is reported ready.
+func TestAnthropicStreamHandsOverCompleteThinking(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	const thinkingText = " Plan:\n  step one "
+	const signature = "sig-abc=="
+	newServer := func(seal bool) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			writeAnthropicSSEEvent(t, w, "message_start", anthropicMessageStartData)
+			writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
+			writeAnthropicSSEEvent(t, w, "content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":%q}}`, thinkingText))
+			writeAnthropicSSEEvent(t, w, "content_block_delta", fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":%q}}`, signature))
+			if !seal {
+				// The stream dies before the block is closed: the signature is
+				// half a block, and replaying it would be refused.
+				return
+			}
+			writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
+			writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"shell","input":{}}}`)
+			writeAnthropicSSEEvent(t, w, "content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"ls\"}"}}`)
+			writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":1}`)
+			writeAnthropicSSEEvent(t, w, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}`)
+			writeAnthropicSSEEvent(t, w, "message_stop", `{"type":"message_stop"}`)
+		}))
+	}
+
+	t.Run("sealed block is handed over before the call it precedes", func(t *testing.T) {
+		server := newServer(true)
+		defer server.Close()
+
+		var order []string
+		var carries []string
+		var carryModel string
+		ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+			OnReasoningCarry: func(carry, model string) {
+				order = append(order, "carry")
+				carries = append(carries, carry)
+				carryModel = model
+			},
+			OnToolCallReady: func(llm.ToolCall) { order = append(order, "tool-ready") },
+		})
+		client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+		res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if want := []string{"carry", "tool-ready"}; !reflect.DeepEqual(order, want) {
+			t.Fatalf("callback order = %v, want %v", order, want)
+		}
+		if len(carries) != 1 {
+			t.Fatalf("carries = %d, want exactly 1 (once, at the block's stop)", len(carries))
+		}
+		want := []llm.ThinkingBlock{{Thinking: thinkingText, Signature: signature}}
+		if blocks, ok := llm.DecodeThinking(carries[0]); !ok || !reflect.DeepEqual(blocks, want) {
+			t.Fatalf("handed-over carry = %#v (ok=%v), want %#v", blocks, ok, want)
+		}
+		if carryModel != "claude-opus-4-6" {
+			t.Fatalf("carry model = %q, want this client's model", carryModel)
+		}
+		// The streamed carry is the one the finished reply holds: one format,
+		// so a provisional message and this reply replay the same blocks.
+		if res.Message.Name != carries[0] {
+			t.Fatalf("finished reply carry = %q, want the streamed one %q", res.Message.Name, carries[0])
+		}
+	})
+
+	t.Run("block cut before its stop is never handed over", func(t *testing.T) {
+		server := newServer(false)
+		defer server.Close()
+
+		carries := 0
+		ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+			OnReasoningCarry: func(carry, model string) {
+				carries++
+				if blocks, ok := llm.DecodeThinking(carry); ok {
+					for _, b := range blocks {
+						if b.Signature == signature {
+							t.Fatalf("handed over the unsealed block %#v", b)
+						}
+					}
+				}
+			},
+		})
+		client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+		// Whichever way the cut surfaces — an error or a reply finished from
+		// what arrived — the block never became complete, so no carry holds it.
+		_, _ = client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+		if carries != 0 {
+			t.Fatalf("carries = %d, want none: the block never reached its stop", carries)
+		}
+	})
+}
+
+// The non-streaming path replays a whole answer at once, so its reasoning is
+// complete before the first replayed callback: the carry has to be handed over
+// ahead of the replay, whose tool call is what starts a provisional message.
+func TestAnthropicUnaryHandsOverCarryBeforeReplay(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(anthropicNonStreamingBody))
+	}))
+	defer server.Close()
+
+	var order []string
+	var carry string
+	var carryModel string
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnReasoningCarry: func(c, model string) {
+			order = append(order, "carry")
+			carry, carryModel = c, model
+		},
+		OnToolCallReady: func(llm.ToolCall) { order = append(order, "tool-ready") },
+	}))
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	if _, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if want := []string{"carry", "tool-ready"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("callback order = %v, want %v", order, want)
+	}
+	want := []llm.ThinkingBlock{{Thinking: "Think it "}, {Thinking: "through"}}
+	if blocks, ok := llm.DecodeThinking(carry); !ok || !reflect.DeepEqual(blocks, want) {
+		t.Fatalf("handed-over carry = %#v (ok=%v), want %#v", blocks, ok, want)
+	}
+	if carryModel != "claude-opus-4-6" {
+		t.Fatalf("carry model = %q, want this client's model", carryModel)
+	}
 }

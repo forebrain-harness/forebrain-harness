@@ -11706,3 +11706,90 @@ func TestFragmentAfterOutputLimitEndsTurnWithNotice(t *testing.T) {
 		t.Fatalf("notices = %#v, want the output-limit exhausted notice", notices)
 	}
 }
+
+// interruptWithCarryLLM is interruptDuringCallLLM with reasoning: the call Esc
+// abandons publishes the thinking it had completed before the interrupt.
+type interruptWithCarryLLM struct {
+	rt    *TurnInputRuntime
+	q     *InputQueue
+	carry string
+	calls [][]llm.Message
+	// interrupted records that the second call observed its own cancellation.
+	interrupted bool
+}
+
+func (m *interruptWithCarryLLM) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls = append(m.calls, append([]llm.Message(nil), messages...))
+	switch len(m.calls) {
+	case 1:
+		msg := llm.AssistantMessage(nil, llm.ToolCall{ID: "call-read", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"server.go"}`}})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	case 2:
+		if sink := llm.StreamSinkFrom(ctx); sink != nil {
+			sink.OnDelta("half an answer")
+			// The thinking was complete when the model started answering: the
+			// adapter publishes it, and the interrupt below cuts the call here.
+			sink.OnReasoningCarry(m.carry, "claude-opus-4-6")
+		}
+		if !m.q.Steer(Input{Text: "keep going", Parts: []llm.ContentPart{llm.Text("keep going")}}) {
+			return nil, errors.New("steer refused while the turn was running")
+		}
+		if !m.rt.InterruptToSend() {
+			return nil, errors.New("InterruptToSend refused a queued steer")
+		}
+		<-ctx.Done()
+		m.interrupted = true
+		return nil, ctx.Err()
+	default:
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+}
+
+// The reply Esc abandons stays in the turn, so it also stays in the request the
+// same turn makes next: the model has to see its own thinking behind the half
+// answer and the steer, or it reads a reply it never reasoned through.
+func TestInterruptToSendKeepsTheAbandonedReplysReasoning(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+
+	carry := llm.EncodeThinking([]llm.ThinkingBlock{{Thinking: "read the file first", Signature: "sig-2"}})
+	inner := &interruptWithCarryLLM{q: q, rt: rt, carry: carry}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		llm.WithStreamSink(WithTurnInputRuntime(context.Background(), rt), streamTestSink()),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))},
+		[]*llm.Tool{readFileTestTool(t)},
+	)
+	if err != nil {
+		t.Fatalf("an interrupted call ended the turn: %v", err)
+	}
+	if !inner.interrupted {
+		t.Fatal("the abandoned call never observed its own cancellation")
+	}
+	if len(inner.calls) != 3 {
+		t.Fatalf("model calls=%d want 3 (tool call, abandoned call, call carrying the steer)", len(inner.calls))
+	}
+	third := inner.calls[2]
+	abandoned := -1
+	for i, msg := range third {
+		if msg.Role == llm.RoleAssistant && msg.TextContent() == "half an answer" {
+			abandoned = i
+		}
+	}
+	if abandoned < 0 {
+		t.Fatalf("the next request lost the abandoned reply, got %v", roles(third))
+	}
+	if got := third[abandoned].Name; got != carry {
+		t.Fatalf("abandoned reply carry = %q, want %q", got, carry)
+	}
+	if got := third[abandoned].ReasoningModel; got != "claude-opus-4-6" {
+		t.Fatalf("abandoned reply ReasoningModel = %q, want the model that produced it", got)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("unexpected result: %#v", res)
+	}
+}

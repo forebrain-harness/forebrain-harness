@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	openaiclient "github.com/sashabaranov/go-openai"
@@ -28,6 +30,18 @@ const (
 )
 
 var errOpenAINoChoices = errors.New("openai: response contained no choices")
+
+// publishReasoningCarry hands the reply's reasoning, as far as it is complete
+// and safe to replay, to the sink. Both of this package's adapters call it at
+// every point where a reasoning unit closes, so a reply that is cut off is
+// finished from a message that still carries it. It does nothing when nobody
+// listens or there is no carry yet.
+func publishReasoningCarry(sink *llm.StreamSink, carry, model string) {
+	if sink == nil || sink.OnReasoningCarry == nil || carry == "" {
+		return
+	}
+	sink.OnReasoningCarry(carry, model)
+}
 
 type openAICompatLLM struct {
 	client      *openaiclient.Client
@@ -201,10 +215,159 @@ type normalizeOpenAICompatReasoningRoundTripper struct {
 	inner http.RoundTripper
 }
 
+// compatReasoningExchange is what one request learns from the bytes on the
+// wire. field is the name the provider returned reasoning under, empty while
+// nothing was observed and for the providers that use reasoning_content;
+// renames are the message indices whose reasoning has to go out under another
+// name, because the provider named the field itself and does not read
+// reasoning_content at all.
+//
+// It lives in the request context so both halves reach the one place that can
+// act on them: the round tripper below renames the inbound field of every
+// response, and is the only layer that can rewrite the serialized request,
+// which go-openai builds from a struct spelled reasoning_content.
+type compatReasoningExchange struct {
+	mu      sync.Mutex
+	field   string
+	renames map[int]string
+}
+
+// requestField is the field name the provider used for this request's
+// reasoning, "" when it used the default.
+func (e *compatReasoningExchange) requestField() string {
+	if e == nil {
+		return ""
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.field
+}
+
+// observeField records the field name a response returned reasoning under.
+func (e *compatReasoningExchange) observeField(field string) {
+	if e == nil || field == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.field = field
+}
+
+// rename records that message index of the request's messages array carries its
+// reasoning under field rather than reasoning_content.
+func (e *compatReasoningExchange) rename(index int, field string) {
+	if e == nil || field == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.renames == nil {
+		e.renames = map[int]string{}
+	}
+	e.renames[index] = field
+}
+
+// outboundRenames returns the renames recorded so far, nil when there are none
+// — the common case, where the request is sent exactly as go-openai wrote it.
+func (e *compatReasoningExchange) outboundRenames() map[int]string {
+	if e == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.renames) == 0 {
+		return nil
+	}
+	out := make(map[int]string, len(e.renames))
+	for index, field := range e.renames {
+		out[index] = field
+	}
+	return out
+}
+
+type compatReasoningExchangeKey struct{}
+
+// withCompatReasoningExchange gives one request — one Execute attempt — its own
+// exchange. A resend starts a fresh one, since it carries no reasoning to
+// rename.
+func withCompatReasoningExchange(ctx context.Context, ex *compatReasoningExchange) context.Context {
+	return context.WithValue(ctx, compatReasoningExchangeKey{}, ex)
+}
+
+func compatReasoningExchangeFrom(ctx context.Context) *compatReasoningExchange {
+	ex, _ := ctx.Value(compatReasoningExchangeKey{}).(*compatReasoningExchange)
+	return ex
+}
+
+// compatReasoningRequestWithFields renames the reasoning field of the messages
+// the projection marked, and leaves every other request untouched: the rename
+// exists only for a provider that reads reasoning under a field of its own, so
+// the body of every request to every other provider stays exactly the bytes
+// go-openai wrote.
+func compatReasoningRequestWithFields(req *http.Request, ex *compatReasoningExchange) (*http.Request, bool) {
+	renames := ex.outboundRenames()
+	if len(renames) == 0 || req == nil || req.Method != http.MethodPost || req.Body == nil || req.URL == nil ||
+		!strings.Contains(req.URL.Path, "chat/completions") {
+		return nil, false
+	}
+	body, err := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	// The request is sent as it was when nothing below matches, so its body is
+	// put back before any of the ways out.
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	if err != nil {
+		return nil, false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, false
+	}
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return nil, false
+	}
+	renamed := false
+	for index, field := range renames {
+		if index < 0 || index >= len(messages) {
+			continue
+		}
+		message, ok := messages[index].(map[string]any)
+		if !ok {
+			continue
+		}
+		reasoning, present := message[llm.CompatReasoningField]
+		if !present {
+			continue
+		}
+		delete(message, llm.CompatReasoningField)
+		message[field] = reasoning
+		renamed = true
+	}
+	if !renamed {
+		return nil, false
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false
+	}
+	clone := req.Clone(req.Context())
+	clone.Body = io.NopCloser(bytes.NewReader(encoded))
+	clone.ContentLength = int64(len(encoded))
+	clone.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(encoded)), nil
+	}
+	return clone, true
+}
+
 func (t *normalizeOpenAICompatReasoningRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	inner := t.inner
 	if inner == nil {
 		inner = http.DefaultTransport
+	}
+	ex := compatReasoningExchangeFrom(req.Context())
+	if renamed, ok := compatReasoningRequestWithFields(req, ex); ok {
+		req = renamed
 	}
 	resp, err := inner.RoundTrip(req)
 	if err != nil || resp == nil || resp.Body == nil {
@@ -235,7 +398,7 @@ func (t *normalizeOpenAICompatReasoningRoundTripper) RoundTrip(req *http.Request
 		return resp, nil
 	}
 	if isEventStream {
-		resp.Body = normalizeOpenAICompatReasoningEventStreamBody(resp.Body)
+		resp.Body = normalizeOpenAICompatReasoningEventStreamBody(resp.Body, ex)
 		resp.ContentLength = -1
 		resp.Header.Del("Content-Length")
 		return resp, nil
@@ -245,7 +408,7 @@ func (t *normalizeOpenAICompatReasoningRoundTripper) RoundTrip(req *http.Request
 	if readErr != nil {
 		return nil, readErr
 	}
-	normalized := normalizeOpenAICompatReasoningJSON(body)
+	normalized := normalizeOpenAICompatReasoningJSON(body, ex)
 	resp.Body = io.NopCloser(bytes.NewReader(normalized))
 	resp.ContentLength = int64(len(normalized))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(normalized)))
@@ -359,7 +522,7 @@ func rawProviderErrorMessage(resp *http.Response, body []byte, truncated bool) s
 	return msg
 }
 
-func normalizeOpenAICompatReasoningEventStreamBody(body io.ReadCloser) io.ReadCloser {
+func normalizeOpenAICompatReasoningEventStreamBody(body io.ReadCloser, ex *compatReasoningExchange) io.ReadCloser {
 	pr, pw := io.Pipe()
 	go func() {
 		defer func() {
@@ -373,7 +536,7 @@ func normalizeOpenAICompatReasoningEventStreamBody(body io.ReadCloser) io.ReadCl
 				if errors.Is(err, io.EOF) && !bytes.HasSuffix(line, []byte("\n")) {
 					line = append(line, '\n')
 				}
-				out := normalizeOpenAICompatReasoningEventStreamLine(line)
+				out := normalizeOpenAICompatReasoningEventStreamLine(line, ex)
 				if _, writeErr := pw.Write(out); writeErr != nil {
 					_ = pw.CloseWithError(writeErr)
 					return
@@ -422,7 +585,7 @@ func salvageSSEBodyAfterErrorPrefix(body io.ReadCloser) (io.ReadCloser, bool) {
 	return io.NopCloser(bytes.NewReader(data[idx:])), true
 }
 
-func normalizeOpenAICompatReasoningEventStreamLine(line []byte) []byte {
+func normalizeOpenAICompatReasoningEventStreamLine(line []byte, ex *compatReasoningExchange) []byte {
 	trimmed := strings.TrimSpace(string(line))
 	if !strings.HasPrefix(trimmed, "data:") {
 		return line
@@ -435,7 +598,7 @@ func normalizeOpenAICompatReasoningEventStreamLine(line []byte) []byte {
 	if errPayload, ok := normalizeOpenAIProviderErrorForSDK(normalized); ok {
 		normalized = errPayload
 	} else {
-		normalized = normalizeOpenAICompatReasoningJSON(normalized)
+		normalized = normalizeOpenAICompatReasoningJSON(normalized, ex)
 	}
 	if bytes.Equal(normalized, []byte(payload)) {
 		return line
@@ -453,12 +616,12 @@ func normalizeOpenAICompatReasoningEventStreamLine(line []byte) []byte {
 	return []byte(prefix + "data: " + string(normalized) + suffix)
 }
 
-func normalizeOpenAICompatReasoningJSON(body []byte) []byte {
+func normalizeOpenAICompatReasoningJSON(body []byte, ex *compatReasoningExchange) []byte {
 	var raw any
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return body
 	}
-	if !normalizeReasoningAliases(raw) {
+	if !normalizeReasoningAliases(raw, ex) {
 		return body
 	}
 	normalized, err := json.Marshal(raw)
@@ -468,7 +631,7 @@ func normalizeOpenAICompatReasoningJSON(body []byte) []byte {
 	return normalized
 }
 
-func normalizeReasoningAliases(v any) bool {
+func normalizeReasoningAliases(v any, ex *compatReasoningExchange) bool {
 	changed := false
 	switch x := v.(type) {
 	case map[string]any:
@@ -483,18 +646,22 @@ func normalizeReasoningAliases(v any) bool {
 				raw := anyToString(reasoning)
 				if strings.TrimSpace(raw) != "" {
 					x["reasoning_content"] = raw
+					// The provider calls its reasoning field "reasoning", so a
+					// replay has to use that name: it is the only one this
+					// endpoint reads.
+					ex.observeField("reasoning")
 					changed = true
 				}
 			}
 		}
 		for _, child := range x {
-			if normalizeReasoningAliases(child) {
+			if normalizeReasoningAliases(child, ex) {
 				changed = true
 			}
 		}
 	case []any:
 		for _, child := range x {
-			if normalizeReasoningAliases(child) {
+			if normalizeReasoningAliases(child, ex) {
 				changed = true
 			}
 		}
@@ -816,6 +983,9 @@ func compatStreamIDSuffix() string {
 
 func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req openaiclient.ChatCompletionRequest) (*llm.Result, error) {
 	sink := llm.StreamSinkFrom(ctx)
+	// ex is this request's reasoning exchange, installed by execute: the field
+	// the provider names its reasoning with, and the messages to rename.
+	ex := compatReasoningExchangeFrom(ctx)
 	baseMsgs := append([]openaiclient.ChatCompletionMessage(nil), req.Messages...)
 	// roundMsgs is what one round sends: the caller's messages, plus — from
 	// the second round on — the recovery's resume pair (the accumulated
@@ -826,6 +996,44 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 	// square of the rounds.
 	roundMsgs := baseMsgs
 	var reasoningAcc, contentAcc strings.Builder
+	// reasoningCarry is the carry this reply would hold if it ended right now:
+	// the thinking accumulated so far, stamped exactly as
+	// compatMessageFromOpenAI stamps the finished message. The compat stream has
+	// no thinking-end frame of its own, so every place that decides the thinking
+	// ended is also a place the carry is complete.
+	reasoningCarry := func() string {
+		if reasoningAcc.Len() == 0 {
+			return ""
+		}
+		// The same carry the finished message holds, field name included: a
+		// reply that is cut off is finished from it, and it has to go back
+		// under the name the provider used.
+		return llm.EncodeCompatReasoning(ex.requestField(), reasoningAcc.String())
+	}
+	// carryPublished is the reasoning already handed to the sink: a later
+	// boundary that found nothing new does not publish the same carry twice.
+	carryPublished := ""
+	carryReasoning := func() {
+		carry := reasoningCarry()
+		if carry == "" || carry == carryPublished {
+			return
+		}
+		carryPublished = carry
+		publishReasoningCarry(sink, carry, c.model)
+	}
+	// The compat stream has no thinking-end frame: the thinking stops being
+	// extendable at the first answer text or tool fragment, which is where the
+	// carry is complete. It is published there, before that output's own
+	// callbacks — the tool call it precedes is what starts the provisional
+	// message written from the sink.
+	reasoningEnded := false
+	carryFinishedThinking := func() {
+		if reasoningEnded || reasoningAcc.Len() == 0 {
+			return
+		}
+		reasoningEnded = true
+		carryReasoning()
+	}
 	var toolBuf []openaiclient.ToolCall
 	var role string
 	var lastFinish openaiclient.FinishReason
@@ -881,9 +1089,6 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		ctx = llm.WithStreamingRequest(ctx)
 		stream, err := c.client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
-			if sink != nil && sink.OnEnd != nil {
-				sink.OnEnd()
-			}
 			// Earlier length-continue rounds were already billed; that
 			// billing rides the error into the retry loop's accounting.
 			return nil, llm.NewExecuteErrorWithLastAttempt(err, openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), refusedRoundUsage(roundIn, roundOut, roundCached))
@@ -905,11 +1110,13 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				// in-flight boundaries left them: a later index confirmed
 				// what completed, and nothing else is ready.
 				_ = stream.Close()
+				// The death of the stream is the boundary the compat stream
+				// lacks in flight: the thinking that streamed and never turned
+				// into answer text is complete at this death, so the carry goes
+				// out beside the thinking-done notice.
+				carryReasoning()
 				if reasoningAcc.Len() > 0 && sink != nil && sink.OnReasoningDone != nil {
 					sink.OnReasoningDone()
-				}
-				if sink != nil && sink.OnEnd != nil {
-					sink.OnEnd()
 				}
 				// The usage chunks that arrived before the cut were billed;
 				// that billing rides the error into the retry loop's
@@ -969,12 +1176,18 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 				}
 			}
 			if d.Content != "" {
+				// Answer text is where the thinking ended, so its carry is
+				// complete here.
+				carryFinishedThinking()
 				contentAcc.WriteString(d.Content)
 				if sink != nil && sink.OnDelta != nil {
 					sink.OnDelta(d.Content)
 				}
 			}
 			if len(d.ToolCalls) > 0 {
+				// A tool fragment is the thinking's other end, and the call it
+				// belongs to may be reported ready below.
+				carryFinishedThinking()
 				// The answer text is finished the moment the first tool
 				// fragment arrives: the compat stream has no text boundary
 				// of its own.
@@ -1039,18 +1252,15 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		// its half-merged arguments to itself instead of being reported
 		// ready at its own death.
 		if lastFinish == "" && (contentAcc.Len() > 0 || reasoningAcc.Len() > 0 || len(toolBuf) > 0) {
+			// The cut ends the thinking as much as it ends the answer, so the
+			// carry goes out beside the thinking-done notice.
+			carryReasoning()
 			if reasoningAcc.Len() > 0 && sink != nil && sink.OnReasoningDone != nil {
 				sink.OnReasoningDone()
-			}
-			if sink != nil && sink.OnEnd != nil {
-				sink.OnEnd()
 			}
 			return nil, llm.NewExecuteErrorWithLastAttempt(fmt.Errorf("%s: %w", c.model, llm.ErrStreamTruncated), openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
 		}
 		if lastFinish == "" {
-			if sink != nil && sink.OnEnd != nil {
-				sink.OnEnd()
-			}
 			return nil, llm.NewExecuteErrorWithLastAttempt(fmt.Errorf("%s: %w", c.model, llm.ErrStreamNoEvents), openAIUsage(int64(tokIn), int64(tokOut), int64(tokCached)), lastAttemptUsage())
 		}
 		// Clean exit without truncation: any call the finish frame did not
@@ -1060,20 +1270,19 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		if !recovery.ShouldContinue(llm.NormalizeStopReason(string(lastFinish)), contentAcc.Len(), len(toolBuf)) {
 			break
 		}
-		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), compatMessagesToOpenAI(recovery.Resume(contentAcc.String()), c.model)...)
+		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), compatMessagesToOpenAI(recovery.Resume(contentAcc.String()), c.model, ex)...)
 		round++
 	}
 
-	if sink != nil && sink.OnEnd != nil {
-		sink.OnEnd()
-	}
 	// Fire OnReasoningDone so the TUI reducer can finalize the thinking block
 	// (emit FrameThinking{Final:true}).  The Responses API path fires this
 	// from a dedicated SSE event, but the Chat Completions API has no such
 	// event — reasoning deltas just stop arriving when the model switches to
 	// content output.  Without this the thinking block stays in the streaming
 	// (▸) state until the next assistant-text or tool frame arrives, which
-	// could be much later.
+	// could be much later.  The thinking is as complete as it will get for this
+	// reply here, so the carry goes out beside that notice.
+	carryReasoning()
 	if reasoningAcc.Len() > 0 && sink != nil && sink.OnReasoningDone != nil {
 		sink.OnReasoningDone()
 	}
@@ -1088,7 +1297,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 	if len(toolBuf) > 0 {
 		openMsg.ToolCalls = toolBuf
 	}
-	msg := compatMessageFromOpenAI(openMsg, c.model)
+	msg := compatMessageFromOpenAI(openMsg, c.model, ex.requestField())
 	out := &llm.Result{Message: &msg, StopReason: llm.NormalizeStopReason(string(lastFinish))}
 	// Occupancy is the settled round's prompt; the output is every round's,
 	// because the model really did produce it and this Result's answer carries
@@ -1104,19 +1313,54 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 	// Every error leaving this package is normalized here rather than at each
 	// return, so a path added later cannot leak a raw SDK error to Layer 0.
 	defer func() { outErr = normalizeError(outErr) }()
+	// The sink's end fires once per Execute, not once per request: a
+	// length-continue round, and the resend a refused request gets, are the
+	// same answer still being produced.
+	endSink := llm.StreamSinkFrom(ctx)
+	if endSink != nil && endSink.OnEnd != nil {
+		defer endSink.OnEnd()
+	}
+	res, replayed, err := c.execute(ctx, messages, tools)
+	if err != nil && replayed && llm.ReasoningReplayRefused(normalizeError(err), []int{http.StatusBadRequest}, "reasoning") {
+		// A provider that refuses the replayed reasoning refuses it on every
+		// request of this conversation — the same reasoning goes back each
+		// time — so one resend without it is what keeps the turn alive. A
+		// refusal after that is some other cause and is returned as it is.
+		slog.Warn("openai compat: provider refused the replayed reasoning; resending without it", "model", c.model, "err", err)
+		res, _, err = c.execute(ctx, llm.WithoutReasoningCarries(messages), tools)
+	}
+	return res, err
+}
+
+// execute runs one request for Execute: the projection, the request loop and
+// the sink callbacks. replayed reports whether that request sent reasoning back
+// to the model, which is what makes a refusal worth a resend without it.
+func (c *openAICompatLLM) execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, bool, error) {
+	// One request gets one exchange: what the provider called its reasoning
+	// field, and which messages must go back under that name. A resend starts a
+	// fresh one — it carries no reasoning to rename.
+	ctx = withCompatReasoningExchange(ctx, &compatReasoningExchange{})
+	ex := compatReasoningExchangeFrom(ctx)
 	ctx, finish := llm.WithRawCacheUsage(ctx)
 	// Fingerprint the exact prompt shape this call renders so the cache usage
 	// that comes back can be attributed: fork (our prefix changed) vs
 	// anomaly (provider-side miss). See pkg/llm/prefix_fingerprint.go.
 	prefix := llm.BeginPrefixObservation(ctx, c.model, tools, messages)
-	msgs := compatMessagesToOpenAI(messages, c.model)
+	msgs := compatMessagesToOpenAI(messages, c.model, ex)
+	replayed := false
+	for _, msg := range msgs {
+		if msg.ReasoningContent != "" {
+			replayed = true
+			break
+		}
+	}
 	var otools []openaiclient.Tool
 	if len(tools) > 0 {
 		otools = compatOpenAITools(tools)
 	}
 	req, err := openAIChatCompletionRequestMerged(c.model, c.temperature, c.maxTokens, c.paramsJSON, msgs, otools)
 	if err != nil {
-		return nil, err
+		return nil, replayed, err
 	}
 	if llm.NonStreamingRequestFrom(ctx) {
 		// The request context switched this call to one non-streaming
@@ -1127,17 +1371,14 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 		ctx, cancel := llm.WithNonStreamingDeadline(ctx)
 		defer cancel()
 		sink := llm.StreamSinkFrom(ctx)
-		if sink != nil && sink.OnEnd != nil {
-			defer sink.OnEnd()
-		}
 		openMsg, finishReason, usage, billed, err := c.executeChatCompletionUnaryParts(ctx, req, true)
 		if err != nil {
 			err = llm.NonStreamingError(ctx, err)
 			result := finish(nil)
 			prefix.Finish(nil)
-			return result, err
+			return result, replayed, err
 		}
-		msg := compatMessageFromOpenAI(openMsg, c.model)
+		msg := compatMessageFromOpenAI(openMsg, c.model, ex.requestField())
 		result := &llm.Result{Message: &msg, StopReason: llm.NormalizeStopReason(string(finishReason)), Usage: usage, BilledUsage: billed}
 		result = finishUsage(result, finish)
 		prefix.Finish(resultBilledUsage(result))
@@ -1153,24 +1394,30 @@ func (c *openAICompatLLM) Execute(ctx context.Context, messages []llm.Message, t
 				sink.OnUsageSnapshot(result.Usage.InputTokens, result.Usage.OutputTokens)
 			}
 		}
+		// The whole reply is finished here, so its carry is complete: hand it
+		// over before the replay, whose tool-call callbacks are what can start a
+		// provisional message for this reply.
+		if strings.HasPrefix(msg.Name, openAIReasoningCarryPrefix) {
+			publishReasoningCarry(sink, msg.Name, msg.ReasoningModel)
+		}
 		llm.ReplayToSink(sink, llm.ReplayedResponse{
 			Reasoning:  openMsg.ReasoningContent,
 			Text:       []string{openMsg.Content},
 			ToolCalls:  result.Message.ToolCalls,
 			StopReason: string(finishReason),
 		})
-		return result, nil
+		return result, replayed, nil
 	}
 	if req.Stream {
 		result, err := c.executeChatCompletionStream(ctx, req)
 		result = finishUsage(result, finish)
 		prefix.Finish(resultBilledUsage(result))
-		return result, err
+		return result, replayed, err
 	}
 	result, err := c.executeChatCompletionUnary(ctx, req, true)
 	result = finishUsage(result, finish)
 	prefix.Finish(resultBilledUsage(result))
-	return result, err
+	return result, replayed, err
 }
 
 // finishUsage folds the raw transport's reading into result without letting it
@@ -1223,11 +1470,33 @@ func (c *openAICompatLLM) ExecuteStructured(ctx context.Context, messages []llm.
 	if strings.TrimSpace(spec.Name) == "" || len(spec.Schema) == 0 {
 		return nil, fmt.Errorf("structured output name and schema are required")
 	}
+	res, replayed, err := c.executeStructured(ctx, messages, spec)
+	if err != nil && replayed && llm.ReasoningReplayRefused(normalizeError(err), []int{http.StatusBadRequest}, "reasoning") {
+		// Same one resend Execute makes: see there.
+		slog.Warn("openai compat: provider refused the replayed reasoning; resending without it", "model", c.model, "err", err)
+		res, _, err = c.executeStructured(ctx, llm.WithoutReasoningCarries(messages), spec)
+	}
+	return res, err
+}
+
+// executeStructured runs one structured-output request for ExecuteStructured,
+// reporting whether it replayed reasoning the way execute does.
+func (c *openAICompatLLM) executeStructured(ctx context.Context, messages []llm.Message, spec llm.StructuredOutputSpec) (*llm.Result, bool, error) {
+	// See execute: one request, one exchange.
+	ctx = withCompatReasoningExchange(ctx, &compatReasoningExchange{})
 	ctx, finish := llm.WithRawCacheUsage(ctx)
 	prefix := llm.BeginPrefixObservation(ctx, c.model, nil, messages)
-	req, err := openAIChatCompletionRequestMerged(c.model, c.temperature, c.maxTokens, c.paramsJSON, compatMessagesToOpenAI(messages, c.model), nil)
+	msgs := compatMessagesToOpenAI(messages, c.model, compatReasoningExchangeFrom(ctx))
+	replayed := false
+	for _, msg := range msgs {
+		if msg.ReasoningContent != "" {
+			replayed = true
+			break
+		}
+	}
+	req, err := openAIChatCompletionRequestMerged(c.model, c.temperature, c.maxTokens, c.paramsJSON, msgs, nil)
 	if err != nil {
-		return nil, err
+		return nil, replayed, err
 	}
 	// Structured output is always a unary call. Stream is forced off after the
 	// merge, which means normalizeOpenAIStreamUsage already ran while stream was
@@ -1251,7 +1520,7 @@ func (c *openAICompatLLM) ExecuteStructured(ctx context.Context, messages []llm.
 	result, err := c.executeChatCompletionUnary(ctx, req, false)
 	result = finishUsage(result, finish)
 	prefix.Finish(resultBilledUsage(result))
-	return result, err
+	return result, replayed, err
 }
 
 type rawJSONSchema map[string]any
@@ -1261,11 +1530,12 @@ func (s rawJSONSchema) MarshalJSON() ([]byte, error) {
 }
 
 func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req openaiclient.ChatCompletionRequest, continueOnLimit bool) (*llm.Result, error) {
+	ex := compatReasoningExchangeFrom(ctx)
 	openMsg, finishReason, usage, billed, err := c.executeChatCompletionUnaryParts(ctx, req, continueOnLimit)
 	if err != nil {
 		return nil, err
 	}
-	msg := compatMessageFromOpenAI(openMsg, c.model)
+	msg := compatMessageFromOpenAI(openMsg, c.model, ex.requestField())
 	return &llm.Result{Message: &msg, StopReason: llm.NormalizeStopReason(string(finishReason)), Usage: usage, BilledUsage: billed}, nil
 }
 
@@ -1278,6 +1548,8 @@ func (c *openAICompatLLM) executeChatCompletionUnary(ctx context.Context, req op
 // output path, which must not continue: JSON can only be continued by
 // re-sending the same document, not by a resume instruction that restarts it.
 func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, req openaiclient.ChatCompletionRequest, continueOnLimit bool) (openaiclient.ChatCompletionMessage, openaiclient.FinishReason, *llm.Usage, *llm.Usage, error) {
+	// See executeChatCompletionStream.
+	ex := compatReasoningExchangeFrom(ctx)
 	baseMsgs := append([]openaiclient.ChatCompletionMessage(nil), req.Messages...)
 	// See executeChatCompletionStream: each round replaces the carried answer.
 	roundMsgs := baseMsgs
@@ -1346,7 +1618,7 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 		// The same resume pair the streaming loop sends: the accumulated
 		// answer as an assistant turn, the resume instruction as a user turn.
 		// Reasoning is never sent back.
-		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), compatMessagesToOpenAI(recovery.Resume(contentAcc.String()), c.model)...)
+		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), compatMessagesToOpenAI(recovery.Resume(contentAcc.String()), c.model, ex)...)
 	}
 
 	if role == "" {
@@ -1380,26 +1652,52 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 // message that has any" is exactly such a rule: each new reasoning block
 // silently rewrites the previous holder. The request's model is the one other
 // input, and it is the same for every message of a request.
-func compatMessagesToOpenAI(messages []llm.Message, model string) []openaiclient.ChatCompletionMessage {
+func compatMessagesToOpenAI(messages []llm.Message, model string, ex *compatReasoningExchange) []openaiclient.ChatCompletionMessage {
 	out := make([]openaiclient.ChatCompletionMessage, 0, len(messages))
 	for _, m := range messages {
-		out = append(out, compatMessageToOpenAI(m, model))
+		// A reply that was only reasoning goes back to the model that produced
+		// it, and to no other: the fence would hand that model's reasoning to
+		// another one as an answer this conversation gave.
+		if llm.ThinkingFenceOnly(m) && !llm.ThinkingFenceGoesTo(m, model) {
+			continue
+		}
+		msg, field := compatMessageToOpenAI(m, model)
+		if field != "" {
+			// The index is the message's place in the array actually sent: the
+			// loop skips messages, so it is not the message's place in the
+			// conversation.
+			ex.rename(len(out), field)
+		}
+		out = append(out, msg)
 	}
 	return out
 }
 
-func compatMessageToOpenAI(m llm.Message, model string) openaiclient.ChatCompletionMessage {
+// compatMessageToOpenAI projects one message. Its second result is the request
+// field name the reasoning must go back under when the provider named its own,
+// "" when reasoning_content carries it.
+func compatMessageToOpenAI(m llm.Message, model string) (openaiclient.ChatCompletionMessage, string) {
 	msg := openaiclient.ChatCompletionMessage{
 		Role:       compatRoleToOpenAI(m.Role),
 		ToolCallID: m.ToolCallID,
 	}
+	field := ""
 	if strings.HasPrefix(m.Name, openAIReasoningCarryPrefix) {
 		// The carry is reasoning, never a participant name. It goes back as
-		// reasoning_content only to the model that wrote it, and only when it
-		// is plain text: a Responses payload is another protocol's encrypted
-		// items, not something this model ever said.
-		if _, isPayload := llm.Decode(m.Name); !isPayload && llm.ReplaysReasoningTo(m, model) {
-			msg.ReasoningContent = strings.TrimPrefix(m.Name, openAIReasoningCarryPrefix)
+		// reasoning_content only to the model that wrote it, and only when the
+		// carry is this protocol's own: a Responses payload or an Anthropic
+		// thinking payload is another protocol's blocks, not something this
+		// model ever said. A fence reply does not take it either — its content
+		// already is that reasoning, and repeating it as reasoning_content
+		// would send it twice. A provider that named its reasoning field gets
+		// the text under that name instead, because reasoning_content is a
+		// field it does not read.
+		if name, text, ok := llm.DecodeCompatReasoning(m.Name); ok &&
+			llm.ReplaysReasoningTo(m, model) && !llm.ThinkingFenceOnly(m) {
+			msg.ReasoningContent = text
+			if name != llm.CompatReasoningField {
+				field = name
+			}
 		}
 		msg.Name = ""
 	} else {
@@ -1419,11 +1717,11 @@ func compatMessageToOpenAI(m llm.Message, model string) openaiclient.ChatComplet
 		}
 	}
 	if len(m.Parts) == 0 {
-		return msg
+		return msg, field
 	}
 	if len(m.Parts) == 1 && m.Parts[0].Type == llm.ContentTypeText {
 		msg.Content = m.Parts[0].Text
-		return msg
+		return msg, field
 	}
 	multi := make([]openaiclient.ChatMessagePart, 0, len(m.Parts))
 	for _, p := range m.Parts {
@@ -1453,7 +1751,7 @@ func compatMessageToOpenAI(m llm.Message, model string) openaiclient.ChatComplet
 		}
 	}
 	msg.MultiContent = multi
-	return msg
+	return msg, field
 }
 
 func compatRoleToOpenAI(role string) string {
@@ -1466,8 +1764,11 @@ func compatRoleToOpenAI(role string) string {
 }
 
 // compatMessageFromOpenAI converts model's answer. Reasoning it carries is
-// stamped with model, the only model it is ever sent back to.
-func compatMessageFromOpenAI(m openaiclient.ChatCompletionMessage, model string) llm.Message {
+// stamped with model, the only model it is ever sent back to, and with field,
+// the request field the provider returned it under, so the replay can use that
+// name — "" and reasoning_content both mean the plain carry every provider but
+// a few reads.
+func compatMessageFromOpenAI(m openaiclient.ChatCompletionMessage, model, field string) llm.Message {
 	msg := llm.Message{
 		Role:       m.Role,
 		ToolCallID: m.ToolCallID,
@@ -1480,7 +1781,7 @@ func compatMessageFromOpenAI(m openaiclient.ChatCompletionMessage, model string)
 	reasoning := m.ReasoningContent
 	hasReasoning := strings.TrimSpace(reasoning) != ""
 	if hasReasoning {
-		msg.Name = openAIReasoningCarryPrefix + reasoning
+		msg.Name = llm.EncodeCompatReasoning(field, reasoning)
 	} else {
 		msg.Name = m.Name
 	}
@@ -1511,14 +1812,15 @@ func compatMessageFromOpenAI(m openaiclient.ChatCompletionMessage, model string)
 	// If the model returned only reasoning content — no real content, no native
 	// tool calls, and no synthesizable tool calls — surface the reasoning as
 	// visible content so the user sees the model's thinking instead of getting
-	// an "empty assistant response" error. Clear the carry so this text is not
-	// also re-sent as reasoning_content on the next API call. Wrap in a fenced
-	// code block (language "thinking") so the CLI renderer preserves the
-	// original whitespace and newlines instead of collapsing them as Markdown
-	// inline text would.
+	// an "empty assistant response" error. Wrap in a fenced code block
+	// (language "thinking") so the CLI renderer preserves the original
+	// whitespace and newlines instead of collapsing them as Markdown inline
+	// text would. The carry stays: it is how this message records the model
+	// that produced the reasoning, and the projection above sends the message
+	// only to that model — which receives the fence as content and no
+	// reasoning_content, so the reasoning is not sent twice.
 	if len(msg.Parts) == 0 && len(msg.ToolCalls) == 0 && hasReasoning {
-		msg.Parts = []llm.ContentPart{llm.Text("```thinking\n" + reasoning + "\n```")}
-		msg.Name = ""
+		msg.Parts = []llm.ContentPart{llm.Text(llm.ThinkingFence(reasoning))}
 	}
 	if strings.HasPrefix(msg.Name, openAIReasoningCarryPrefix) {
 		msg.ReasoningModel = model

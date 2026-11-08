@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -744,4 +746,510 @@ func TestRetryAttemptAccounting(t *testing.T) {
 			t.Fatalf("LastAttemptUsageFromError = %+v, want the last attempt's own usage (120/14)", last)
 		}
 	})
+}
+
+// A thinking block's text and signature go back to the provider exactly as it
+// returned them: it verifies the block against the signature, so a trimmed
+// space or a normalized quote is a rejected request.
+func TestThinkingCarryRoundTripsByteForByte(t *testing.T) {
+	blocks := []ThinkingBlock{
+		{
+			Thinking:  "  Plan:\n\tstep \"one\" — back\\slash <>& 中文 🧠  ",
+			Signature: "sig-abc+/==",
+		},
+		{Thinking: "second block", Signature: "sig-def+/=="},
+		{Redacted: true, Data: "redacted-opaque-data+/=="},
+	}
+	carry := EncodeThinking(blocks)
+	if !strings.HasPrefix(carry, Prefix) {
+		t.Fatalf("carry = %q, want the reasoning carry prefix", carry)
+	}
+	decoded, ok := DecodeThinking(carry)
+	if !ok {
+		t.Fatalf("DecodeThinking(%q) = false, want true", carry)
+	}
+	if !reflect.DeepEqual(decoded, blocks) {
+		t.Fatalf("decoded = %#v\nwant      %#v", decoded, blocks)
+	}
+}
+
+// A block that carries nothing is dropped rather than sent as an empty block;
+// a block with a signature and no text is kept, because the provider wrote it
+// that way.
+func TestEncodeThinkingDropsEmptyBlocks(t *testing.T) {
+	if got := EncodeThinking(nil); got != "" {
+		t.Fatalf("EncodeThinking(nil) = %q, want empty", got)
+	}
+	if got := EncodeThinking([]ThinkingBlock{{}, {Redacted: true}, {Thinking: ""}}); got != "" {
+		t.Fatalf("EncodeThinking(all empty) = %q, want empty", got)
+	}
+	signatureOnly := ThinkingBlock{Signature: "sig-only=="}
+	got := EncodeThinking([]ThinkingBlock{{}, signatureOnly, {Redacted: true}})
+	decoded, ok := DecodeThinking(got)
+	if !ok || len(decoded) != 1 || decoded[0] != signatureOnly {
+		t.Fatalf("decoded = %#v (ok=%v), want exactly the signature-only block", decoded, ok)
+	}
+}
+
+// The two payload versions never read as each other, and StructuredCarry is the
+// one answer to "is this a protocol's structured payload". Plain text is what
+// every protocol can replay.
+func TestThinkingCarryIsNotAResponsesPayload(t *testing.T) {
+	thinking := EncodeThinking([]ThinkingBlock{{Thinking: "thought", Signature: "sig=="}})
+	if _, ok := Decode(thinking); ok {
+		t.Fatal("Decode read a thinking carry as a Responses payload")
+	}
+	responses := Encode([]Item{{ID: "rs_1", EncryptedContent: "x"}})
+	if _, ok := DecodeThinking(responses); ok {
+		t.Fatal("DecodeThinking read a Responses payload as thinking")
+	}
+	if _, ok := DecodeThinking(Prefix + "plain"); ok {
+		t.Fatal("DecodeThinking read plain reasoning text as thinking")
+	}
+	for _, name := range []string{thinking, responses} {
+		if !StructuredCarry(name) {
+			t.Fatalf("StructuredCarry(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{Prefix + "plain", ""} {
+		if StructuredCarry(name) {
+			t.Fatalf("StructuredCarry(%q) = true, want false", name)
+		}
+	}
+}
+
+// What a surface shows of a thinking carry is the reasoning text: no payload
+// JSON, no signature and no redacted ciphertext.
+func TestExtractSummaryReadsThinkingText(t *testing.T) {
+	carry := EncodeThinking([]ThinkingBlock{
+		{Thinking: "first thought", Signature: "sig-one=="},
+		{Redacted: true, Data: "secret-ciphertext"},
+		{Thinking: "second thought", Signature: "sig-two=="},
+	})
+	got := ExtractSummary(carry)
+	if got != "first thought\nsecond thought" {
+		t.Fatalf("ExtractSummary = %q, want the thinking text joined by newlines", got)
+	}
+	for _, unwanted := range []string{"anthropic_thinking_v1", "sig-one==", "sig-two==", "secret-ciphertext"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("ExtractSummary leaked %q: %q", unwanted, got)
+		}
+	}
+}
+
+// The compatible providers that use the default field name keep the bytes this
+// protocol has always written: the common case must not move, because every
+// provider's cached prefix and every stored session's carry is that shape.
+func TestCompatReasoningCarryKeepsTheCommonCaseBytes(t *testing.T) {
+	const text = " plan:\n1. look  "
+	for _, field := range []string{"", CompatReasoningField} {
+		if got, want := EncodeCompatReasoning(field, text), Prefix+text; got != want {
+			t.Fatalf("EncodeCompatReasoning(%q, text) = %q, want the plain carry %q", field, got, want)
+		}
+	}
+	// Another name goes into a payload, and comes back byte for byte: the text
+	// is what the provider wrote, and a replay is refused for a changed byte as
+	// much as for a wrong field.
+	carry := EncodeCompatReasoning("reasoning", text)
+	field, got, ok := DecodeCompatReasoning(carry)
+	if !ok {
+		t.Fatalf("DecodeCompatReasoning(%q) = false, want true", carry)
+	}
+	if field != "reasoning" || got != text {
+		t.Fatalf("decoded (%q, %q), want (%q, %q)", field, got, "reasoning", text)
+	}
+	if came := EncodeCompatReasoning(field, got); came != carry {
+		t.Fatalf("re-encoded %q, want %q", came, carry)
+	}
+	if got := EncodeCompatReasoning("reasoning", " \n\t "); got != "" {
+		t.Fatalf("EncodeCompatReasoning of empty reasoning = %q, want empty", got)
+	}
+}
+
+// The compatible payload is its own shape: another protocol never reads it as
+// its blocks, and it is never mistaken for plain reasoning text — which is the
+// only shape every protocol may replay.
+func TestCompatReasoningPayloadIsItsOwn(t *testing.T) {
+	carry := EncodeCompatReasoning("reasoning", "first thought\nsecond thought")
+	if !StructuredCarry(carry) {
+		t.Fatalf("StructuredCarry(%q) = false, want true", carry)
+	}
+	if _, ok := Decode(carry); ok {
+		t.Fatal("Decode read the compatible payload as a Responses payload")
+	}
+	if _, ok := DecodeThinking(carry); ok {
+		t.Fatal("DecodeThinking read the compatible payload as thinking blocks")
+	}
+	if _, ok := DecodeGeminiParts(carry); ok {
+		t.Fatal("DecodeGeminiParts read the compatible payload as a part layout")
+	}
+	if got := ExtractSummary(carry); got != "first thought\nsecond thought" {
+		t.Fatalf("ExtractSummary = %q, want the reasoning text", got)
+	}
+	for _, unwanted := range []string{compatReasoningPayloadVersion, "{", "reasoning\\"} {
+		if strings.Contains(ExtractSummary(carry), unwanted) {
+			t.Fatalf("ExtractSummary leaked %q: %q", unwanted, ExtractSummary(carry))
+		}
+	}
+
+	plain := Prefix + "just thinking out loud"
+	if field, text, ok := DecodeCompatReasoning(plain); !ok || field != CompatReasoningField || text != "just thinking out loud" {
+		t.Fatalf("DecodeCompatReasoning(%q) = (%q, %q, %v), want the plain field", plain, field, text, ok)
+	}
+	others := []string{
+		Encode([]Item{{ID: "rs_1", EncryptedContent: "opaque"}}),
+		EncodeThinking([]ThinkingBlock{{Thinking: "thought", Signature: "sig=="}}),
+		EncodeGeminiParts([]GeminiPart{{Kind: "thought", Text: "plan", Signature: "sig=="}}),
+		"",
+		"peer-session",
+	}
+	for _, name := range others {
+		if field, text, ok := DecodeCompatReasoning(name); ok {
+			t.Fatalf("DecodeCompatReasoning(%q) = (%q, %q, true), want false", name, field, text)
+		}
+	}
+}
+
+// The estimate may only count what a request sends: a carry's JSON envelope
+// never reaches the wire, and a Gemini layout repeats answer text that Parts
+// already holds.
+func TestCarryEstimateText(t *testing.T) {
+	const answer = "the answer text"
+	gemini := EncodeGeminiParts([]GeminiPart{
+		{Kind: "thought", Text: "first thought", Signature: "sig-thought=="},
+		{Kind: "text", Text: answer, Signature: "sig-text=="},
+		{Kind: "call", Call: 0, Signature: "sig-call=="},
+	})
+	tests := []struct {
+		name     string
+		carry    string
+		want     []string
+		unwanted []string
+	}{
+		{
+			name:     "plain text",
+			carry:    Prefix + "plain reasoning",
+			want:     []string{"plain reasoning"},
+			unwanted: []string{Prefix},
+		},
+		{
+			name:     "compatible field",
+			carry:    EncodeCompatReasoning("reasoning", "reasoning body"),
+			want:     []string{"reasoning body"},
+			unwanted: []string{compatReasoningPayloadVersion, "reasoning_content"},
+		},
+		{
+			name:     "responses items",
+			carry:    Encode([]Item{{ID: "rs_1", Summary: []string{"step one"}, EncryptedContent: "enc_one"}}),
+			want:     []string{"step one", "enc_one"},
+			unwanted: []string{payloadVersion, "rs_1", "items"},
+		},
+		{
+			name:     "thinking blocks",
+			carry:    EncodeThinking([]ThinkingBlock{{Thinking: "think", Signature: "sig-one=="}, {Redacted: true, Data: "cipher"}}),
+			want:     []string{"think", "sig-one==", "cipher"},
+			unwanted: []string{thinkingPayloadVersion, "redacted"},
+		},
+		{
+			name:     "gemini parts",
+			carry:    gemini,
+			want:     []string{"first thought", "sig-thought==", "sig-text==", "sig-call=="},
+			unwanted: []string{geminiPartsPayloadVersion, answer},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CarryEstimateText(tc.carry)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("CarryEstimateText = %q, want it to contain %q", got, want)
+				}
+			}
+			for _, unwanted := range tc.unwanted {
+				if strings.Contains(got, unwanted) {
+					t.Fatalf("CarryEstimateText leaked %q: %q", unwanted, got)
+				}
+			}
+		})
+	}
+
+	// A Name that is not a carry is a participant name, and a request sends it.
+	for _, name := range []string{"peer-session", ""} {
+		if got := CarryEstimateText(name); got != name {
+			t.Fatalf("CarryEstimateText(%q) = %q, want it unchanged", name, got)
+		}
+	}
+}
+
+func TestGeminiPartsCarryRoundTripsByteForByte(t *testing.T) {
+	parts := []GeminiPart{
+		{Kind: "thought", Text: "  Plan:\n\tstep \"one\" — back\\slash <>& 中文 🧠  ", Signature: "sig-thought+/=="},
+		{Kind: "text", Text: "answer text", Signature: "sig-text+/=="},
+		{Kind: "call", Call: 0, Signature: "sig-call-zero+/=="},
+		{Kind: "call", Call: 2},
+		{Kind: "text", Signature: "sig-only+/=="},
+	}
+	carry := EncodeGeminiParts(parts)
+	if !strings.HasPrefix(carry, Prefix) {
+		t.Fatalf("carry = %q, want the reasoning carry prefix", carry)
+	}
+	decoded, ok := DecodeGeminiParts(carry)
+	if !ok {
+		t.Fatalf("DecodeGeminiParts(%q) = false, want true", carry)
+	}
+	if !reflect.DeepEqual(decoded, parts) {
+		t.Fatalf("decoded = %#v\nwant      %#v", decoded, parts)
+	}
+}
+
+// The Gemini payload is a third structured format: never read as another
+// protocol's payload, and its summary is the thought text alone.
+func TestGeminiPartsCarryIsStructured(t *testing.T) {
+	gemini := EncodeGeminiParts([]GeminiPart{
+		{Kind: "thought", Text: "first thought", Signature: "sig-thought=="},
+		{Kind: "text", Text: "the answer"},
+		{Kind: "call", Call: 0, Signature: "sig-call=="},
+	})
+	if !StructuredCarry(gemini) {
+		t.Fatalf("StructuredCarry(%q) = false, want true", gemini)
+	}
+	if _, ok := Decode(gemini); ok {
+		t.Fatal("Decode read a Gemini payload as a Responses payload")
+	}
+	if _, ok := DecodeThinking(gemini); ok {
+		t.Fatal("DecodeThinking read a Gemini payload as thinking blocks")
+	}
+	responses := Encode([]Item{{ID: "rs_1", EncryptedContent: "x"}})
+	thinking := EncodeThinking([]ThinkingBlock{{Thinking: "thought", Signature: "sig=="}})
+	for _, name := range []string{responses, thinking, Prefix + "plain", ""} {
+		if _, ok := DecodeGeminiParts(name); ok {
+			t.Fatalf("DecodeGeminiParts(%q) = true, want false", name)
+		}
+	}
+	if got := ExtractSummary(gemini); got != "first thought" {
+		t.Fatalf("ExtractSummary = %q, want the thought text alone", got)
+	}
+	for _, unwanted := range []string{"gemini_parts_v1", "sig-thought==", "sig-call==", "{", "the answer"} {
+		if strings.Contains(ExtractSummary(gemini), unwanted) {
+			t.Fatalf("ExtractSummary leaked %q: %q", unwanted, ExtractSummary(gemini))
+		}
+	}
+	if got := ExtractSummary(EncodeGeminiParts([]GeminiPart{{Kind: "text", Text: "only an answer"}})); got != "" {
+		t.Fatalf("ExtractSummary without a thought part = %q, want empty", got)
+	}
+}
+
+// The fence is a stored form: sessions on disk already hold replies whose only
+// text part is this exact block, so its bytes are pinned and must keep round
+// tripping through the predicate every adapter now shares.
+func TestThinkingFenceRoundTrip(t *testing.T) {
+	if got, want := ThinkingFence("a"), "```thinking\na\n```"; got != want {
+		t.Fatalf("ThinkingFence(\"a\") = %q, want %q", got, want)
+	}
+	for _, reasoning := range []string{"a", "多行\n思考", ""} {
+		if !IsThinkingFence(ThinkingFence(reasoning)) {
+			t.Fatalf("IsThinkingFence(ThinkingFence(%q)) = false, want true", reasoning)
+		}
+	}
+	for _, text := range []string{"plain answer", "```thinking\nno close", "```go\nx\n```"} {
+		if IsThinkingFence(text) {
+			t.Fatalf("IsThinkingFence(%q) = true, want false", text)
+		}
+	}
+}
+
+// Only a reply whose entire content is the fence is the reply the model
+// produced by reasoning alone. Anything else it said — a second part, an
+// image, a tool call — makes it an answer, and an answer is always sent.
+func TestThinkingFenceOnly(t *testing.T) {
+	fence := Text(ThinkingFence("weigh A against B"))
+	cases := []struct {
+		name string
+		msg  Message
+		want bool
+	}{
+		{"fence alone", Message{Role: RoleAssistant, Parts: []ContentPart{fence}}, true},
+		{"fence with tool call", Message{Role: RoleAssistant, Parts: []ContentPart{fence}, ToolCalls: []ToolCall{{ID: "call-1", Type: ToolTypeFunction}}}, false},
+		{"fence with a second part", Message{Role: RoleAssistant, Parts: []ContentPart{fence, Text("so: A")}}, false},
+		{"plain answer", Message{Role: RoleAssistant, Parts: []ContentPart{Text("A wins")}}, false},
+		{"user wrote a fence", Message{Role: RoleUser, Parts: []ContentPart{fence}}, false},
+		{"no parts", Message{Role: RoleAssistant}, false},
+		{"fence with an image", Message{Role: RoleAssistant, Parts: []ContentPart{fence, ImageURL("https://example.invalid/x.png")}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ThinkingFenceOnly(tc.msg); got != tc.want {
+				t.Fatalf("ThinkingFenceOnly(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// The producer is compared as a model id, so case and surrounding spaces do
+// not matter; an absent producer is not a wildcard but the opposite — the
+// fence goes to nobody, because nothing proves whose reasoning it is.
+func TestThinkingFenceGoesTo(t *testing.T) {
+	cases := []struct {
+		name     string
+		producer string
+		model    string
+		want     bool
+	}{
+		{"same model", "glm-5.3", "glm-5.3", true},
+		{"same model, other case and spacing", "  GLM-5.3 ", "glm-5.3", true},
+		{"another model", "glm-5.3", "deepseek-v4-flash", false},
+		{"no producer", "", "glm-5.3", false},
+		{"no requested model", "glm-5.3", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := Message{Role: RoleAssistant, Parts: []ContentPart{Text(ThinkingFence("weigh A against B"))}, ReasoningModel: tc.producer}
+			if got := ThinkingFenceGoesTo(m, tc.model); got != tc.want {
+				t.Fatalf("ThinkingFenceGoesTo(producer %q, model %q) = %v, want %v", tc.producer, tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+// A refusal is recognized by status and keyword together: the status alone
+// covers every 400 a provider sends, and the keyword alone covers failures at
+// other statuses that happen to mention reasoning. Only both make a resend
+// without the reasoning worthwhile.
+func TestReasoningReplayRefused(t *testing.T) {
+	apiErr := func(status int, message string) error {
+		return &APIError{StatusCode: status, Message: message}
+	}
+	tests := []struct {
+		name     string
+		err      error
+		statuses []int
+		keywords []string
+		want     bool
+	}{
+		{
+			name:     "400 naming thinking",
+			err:      apiErr(http.StatusBadRequest, `{"error":{"message":"messages.1.content.0.thinking: unsupported"}}`),
+			statuses: []int{http.StatusBadRequest},
+			keywords: []string{"thinking", "signature"},
+			want:     true,
+		},
+		{
+			name:     "status not in the set",
+			err:      apiErr(http.StatusUnprocessableEntity, "reasoning is not supported"),
+			statuses: []int{http.StatusBadRequest},
+			keywords: []string{"reasoning"},
+			want:     false,
+		},
+		{
+			name:     "no keyword in the message",
+			err:      apiErr(http.StatusBadRequest, "unknown field temperature"),
+			statuses: []int{http.StatusBadRequest},
+			keywords: []string{"reasoning"},
+			want:     false,
+		},
+		{
+			name:     "keyword in the code",
+			err:      &APIError{StatusCode: http.StatusBadRequest, Code: "Encrypted_Content_Invalid"},
+			statuses: []int{http.StatusBadRequest},
+			keywords: []string{"encrypted", "rs_"},
+			want:     true,
+		},
+		{
+			name:     "keyword in the type",
+			err:      &APIError{StatusCode: http.StatusBadRequest, Type: "invalid_request_thought_signature"},
+			statuses: []int{http.StatusBadRequest},
+			keywords: []string{"thought_signature"},
+			want:     true,
+		},
+		{
+			name:     "second status matches",
+			err:      apiErr(http.StatusNotFound, "Item with id 'rs_abc' not found"),
+			statuses: []int{http.StatusBadRequest, http.StatusNotFound},
+			keywords: []string{"rs_"},
+			want:     true,
+		},
+		{
+			name:     "not an API error",
+			err:      errors.New("400 thinking"),
+			statuses: []int{http.StatusBadRequest},
+			keywords: []string{"thinking"},
+			want:     false,
+		},
+		{
+			name:     "no error",
+			err:      nil,
+			statuses: []int{http.StatusBadRequest},
+			keywords: []string{"thinking"},
+			want:     false,
+		},
+		{
+			name:     "wrapped by the execute error",
+			err:      NewExecuteError(apiErr(http.StatusBadRequest, "signature mismatch"), &Usage{InputTokens: 1}),
+			statuses: []int{http.StatusBadRequest},
+			keywords: []string{"signature"},
+			want:     true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ReasoningReplayRefused(tc.err, tc.statuses, tc.keywords...); got != tc.want {
+				t.Fatalf("ReasoningReplayRefused(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// The resend drops the reasoning and keeps everything else: every protocol's
+// carry goes, the producer that other rules read stays, and a participant name
+// was never reasoning. The caller's slice is untouched — the request that was
+// refused is the one it built, and the retry layers above read it again.
+func TestWithoutReasoningCarries(t *testing.T) {
+	carries := []string{
+		Prefix + "plain reasoning",
+		Encode([]Item{{ID: "rs_1", Summary: []string{"step"}, EncryptedContent: "opaque"}}),
+		EncodeThinking([]ThinkingBlock{{Thinking: "thought", Signature: "sig=="}}),
+		EncodeGeminiParts([]GeminiPart{{Kind: "thought", Text: "plan", Signature: "sig=="}}),
+	}
+	messages := []Message{
+		{Role: RoleSystem, Parts: []ContentPart{Text("be brief")}},
+		UserMessage(Text("hi")),
+	}
+	for i, carry := range carries {
+		messages = append(messages, Message{
+			Role:           RoleAssistant,
+			Parts:          []ContentPart{Text(fmt.Sprintf("answer %d", i))},
+			Name:           carry,
+			ReasoningModel: "glm-5.3",
+		})
+	}
+	messages = append(messages,
+		Message{Role: RoleAssistant, Parts: []ContentPart{Text("named")}, Name: "peer-session"},
+		Message{Role: RoleTool, ToolCallID: "call-1", Parts: []ContentPart{Text("ok")}},
+	)
+	before := make([]Message, len(messages))
+	copy(before, messages)
+
+	stripped := WithoutReasoningCarries(messages)
+	if len(stripped) != len(messages) {
+		t.Fatalf("message count = %d, want %d", len(stripped), len(messages))
+	}
+	for i, msg := range stripped {
+		if !strings.HasPrefix(before[i].Name, Prefix) {
+			if msg.Name != before[i].Name {
+				t.Fatalf("message %d name = %q, want %q untouched", i, msg.Name, before[i].Name)
+			}
+			continue
+		}
+		if msg.Name != "" {
+			t.Fatalf("message %d kept carry %q", i, msg.Name)
+		}
+		if msg.ReasoningModel != "glm-5.3" {
+			t.Fatalf("message %d reasoning model = %q, want the producer kept", i, msg.ReasoningModel)
+		}
+	}
+	for i := range messages {
+		if messages[i].Name != before[i].Name {
+			t.Fatalf("input message %d was modified: %q, want %q", i, messages[i].Name, before[i].Name)
+		}
+	}
 }

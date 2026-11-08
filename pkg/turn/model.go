@@ -1214,5 +1214,5 @@ func isReasoningOnlyAssistantEcho(outText string, reasoningText string) bool {
 	if outText == "" || reasoningText == "" {
 		return false
 	}
-	return outText == "```thinking\n"+reasoningText+"\n```"
+	return outText == llm.ThinkingFence(reasoningText)
 }

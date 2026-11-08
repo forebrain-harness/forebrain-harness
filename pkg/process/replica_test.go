@@ -28,13 +28,13 @@ func TestOpenRefusesASharedSQLiteDatabaseFromAnotherHost(t *testing.T) {
 	launchDir := t.TempDir()
 	gatewayOpts := func() OpenOptions {
 		return OpenOptions{
-			Home:          home,
-			ConfigPath:    configPath,
-			LaunchDir:     launchDir,
-			EnableUploads: true,
+			Home:           home,
+			ConfigPath:     configPath,
+			LaunchDir:      launchDir,
+			EnableUploads:  true,
 			EnableChannels: true,
-			SessionSource: "webchat",
-			ReplicaKind:   state.RunOwnerKindGateway,
+			SessionSource:  "webchat",
+			ReplicaKind:    state.RunOwnerKindGateway,
 		}
 	}
 

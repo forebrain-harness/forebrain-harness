@@ -935,6 +935,7 @@ func (s *Server) withAnswerStream(ctx context.Context, runID, sessionID string, 
 	s.streamParts().registerPrimary(runID, sessionID, partial)
 	publishDelta, publishReasoning := stream.OnDelta, stream.OnReasoningDelta
 	publishReasoningDone := stream.OnReasoningDone
+	publishReasoningCarry := stream.OnReasoningCarry
 	stream.OnDelta = func(text string) {
 		partial.AppendContent(text)
 		publishDelta(text)
@@ -950,6 +951,15 @@ func (s *Server) withAnswerStream(ctx context.Context, runID, sessionID string, 
 		partial.ResponseReasoningDone()
 		if publishReasoningDone != nil {
 			publishReasoningDone()
+		}
+	}
+	stream.OnReasoningCarry = func(carry, model string) {
+		// The reply's reasoning as far as it is complete: a cancel stores it
+		// with the half answer, so the reply the page watched being cut is
+		// replayed to its model with the thinking it was written from.
+		partial.SetReasoningCarry(carry, model)
+		if publishReasoningCarry != nil {
+			publishReasoningCarry(carry, model)
 		}
 	}
 	stream.OnResponseCompleted = partial.ResponseCompleted
@@ -985,13 +995,16 @@ func (s *Server) persistCancelledGatewayTurn(sessionID, runID string, end turn.R
 	if capture != nil {
 		captured = capture.Snapshot()
 	}
+	partialCarry, partialCarryModel := partial.ReasoningCarry()
 	turn.PersistCancelledTurn(context.Background(), s.Sessions, turn.CancelledTurn{
-		SessionID:        sessionID,
-		RunID:            runID,
-		End:              end,
-		Captured:         captured,
-		PartialText:      partial.Content(),
-		PartialReasoning: partial.Reasoning(),
+		SessionID:         sessionID,
+		RunID:             runID,
+		End:               end,
+		Captured:          captured,
+		PartialText:       partial.Content(),
+		PartialReasoning:  partial.Reasoning(),
+		PartialCarry:      partialCarry,
+		PartialCarryModel: partialCarryModel,
 		OnRepairError: func(err error) {
 			slog.Error("cancelled turn: dangling tool_calls repair failed", "session", sessionID, "err", err)
 		},

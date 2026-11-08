@@ -1,9 +1,12 @@
-// Retry and rate-limiting middleware.
+// Retry and rate-limiting middleware, and the reasoning carry: the formats a
+// reply's reasoning is stored in, who may be given it back, and the fence that
+// stands in for a reply that was only reasoning.
 package llm
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math/rand"
 	"strings"
 	"sync/atomic"
@@ -363,6 +366,147 @@ func Decode(name string) (Payload, bool) {
 	return payload, true
 }
 
+// thinkingPayloadVersion marks a carry holding Anthropic-protocol thinking
+// blocks. It is its own payload rather than an Item list: a thinking block's
+// text and signature must go back byte for byte, and the Responses items'
+// normalization trims the fields an Item would hold them in.
+const thinkingPayloadVersion = "anthropic_thinking_v1"
+
+// ThinkingBlock is one thinking or redacted_thinking block of an
+// Anthropic-protocol response, exactly as the model returned it. Nothing in it
+// is ever trimmed or rewritten: the provider verifies the block against its
+// signature, and a changed byte is a rejected request.
+type ThinkingBlock struct {
+	// Redacted marks a redacted_thinking block, whose whole content is Data.
+	Redacted  bool   `json:"redacted,omitempty"`
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
+}
+
+type thinkingPayload struct {
+	Version string          `json:"version"`
+	Blocks  []ThinkingBlock `json:"blocks"`
+}
+
+// EncodeThinking packs blocks into a carry, keeping their order. It returns ""
+// when no block carries anything, and never falls back to plain text: a plain
+// carry is what the OpenAI-compatible client replays as reasoning_content.
+func EncodeThinking(blocks []ThinkingBlock) string {
+	kept := make([]ThinkingBlock, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Redacted {
+			if b.Data != "" {
+				kept = append(kept, ThinkingBlock{Redacted: true, Data: b.Data})
+			}
+			continue
+		}
+		if b.Thinking != "" || b.Signature != "" {
+			kept = append(kept, ThinkingBlock{Thinking: b.Thinking, Signature: b.Signature})
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(thinkingPayload{Version: thinkingPayloadVersion, Blocks: kept})
+	if err != nil {
+		return ""
+	}
+	return Prefix + string(data)
+}
+
+// DecodeThinking reads the blocks EncodeThinking packed. It reports false for
+// every other carry, Responses payloads and plain reasoning text included.
+func DecodeThinking(name string) ([]ThinkingBlock, bool) {
+	if !strings.HasPrefix(name, Prefix) {
+		return nil, false
+	}
+	var payload thinkingPayload
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(name, Prefix)), &payload); err != nil {
+		return nil, false
+	}
+	if payload.Version != thinkingPayloadVersion || len(payload.Blocks) == 0 {
+		return nil, false
+	}
+	return payload.Blocks, true
+}
+
+// geminiPartsPayloadVersion marks a carry holding a Gemini response's parts
+// as the model returned them: their order, the thought-summary parts, and the
+// thoughtSignature each part carried. Gemini has no thinking blocks of its
+// own; its reasoning rides those signatures, and the API wants every part
+// back exactly as it came — the signature in its original part.
+const geminiPartsPayloadVersion = "gemini_parts_v1"
+
+// GeminiPart is one part of a Gemini response, as replayed to the model that
+// produced it.
+type GeminiPart struct {
+	// Kind is "text" (answer text, possibly empty when the part only
+	// carried a signature), "thought" (a thought summary) or "call".
+	Kind string `json:"kind"`
+	// Text is the part's text, byte for byte; empty for a call.
+	Text string `json:"text,omitempty"`
+	// Call indexes the message's ToolCalls for a "call" part.
+	Call int `json:"call,omitempty"`
+	// Signature is the part's thoughtSignature, byte for byte.
+	Signature string `json:"signature,omitempty"`
+}
+
+type geminiPartsPayload struct {
+	Version string       `json:"version"`
+	Parts   []GeminiPart `json:"parts"`
+}
+
+// EncodeGeminiParts packs parts into a carry, keeping their order. It returns
+// "" when parts is empty. It never falls back to plain text: a plain carry is
+// reasoning text, not a part layout, and another protocol would replay it as
+// reasoning_content.
+func EncodeGeminiParts(parts []GeminiPart) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(geminiPartsPayload{Version: geminiPartsPayloadVersion, Parts: parts})
+	if err != nil {
+		return ""
+	}
+	return Prefix + string(data)
+}
+
+// DecodeGeminiParts reads what EncodeGeminiParts packed. It reports false for
+// every other carry, Responses payloads, thinking blocks and plain reasoning
+// text included.
+func DecodeGeminiParts(name string) ([]GeminiPart, bool) {
+	if !strings.HasPrefix(name, Prefix) {
+		return nil, false
+	}
+	var payload geminiPartsPayload
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(name, Prefix)), &payload); err != nil {
+		return nil, false
+	}
+	if payload.Version != geminiPartsPayloadVersion || len(payload.Parts) == 0 {
+		return nil, false
+	}
+	return payload.Parts, true
+}
+
+// StructuredCarry reports whether name holds a protocol's structured reasoning
+// payload — Responses items, Anthropic thinking blocks, Gemini part layouts or
+// an OpenAI-compatible replay field — rather than plain reasoning text. Only
+// plain text is something every protocol can replay.
+func StructuredCarry(name string) bool {
+	if _, ok := Decode(name); ok {
+		return true
+	}
+	if _, ok := DecodeThinking(name); ok {
+		return true
+	}
+	if _, ok := DecodeGeminiParts(name); ok {
+		return true
+	}
+	_, ok := decodeCompatReasoningPayload(name)
+	return ok
+}
+
 // ReplaysReasoningTo reports whether the reasoning m carries may be sent back
 // to model: m carries some, and either the model that produced it is the one
 // being asked or it was recorded without a model. The rule depends on the
@@ -376,6 +520,155 @@ func ReplaysReasoningTo(m Message, model string) bool {
 	return producer == "" || strings.EqualFold(producer, strings.TrimSpace(model))
 }
 
+// CompatReasoningField is the field name OpenAI-compatible providers return
+// reasoning under by default, and the one go-openai's message struct serializes
+// it to. A provider that names the field something else gets its reasoning back
+// under that name — see EncodeCompatReasoning.
+const CompatReasoningField = "reasoning_content"
+
+// compatReasoningPayloadVersion marks the reasoning of an OpenAI-compatible
+// reply whose provider named the field something other than reasoning_content.
+// The common case stays a plain carry, byte for byte as before; only another
+// field name needs recording, so the reasoning can be replayed under the name
+// the provider reads.
+const compatReasoningPayloadVersion = "openai_compat_reasoning_v1"
+
+// compatReasoningPayload is one reply's reasoning for a provider that reads it
+// under a field of its own.
+type compatReasoningPayload struct {
+	Version string `json:"version"`
+	Field   string `json:"field"`
+	Text    string `json:"text"`
+}
+
+// EncodeCompatReasoning returns the carry for reasoning an OpenAI-compatible
+// provider returned under field: a plain carry for reasoning_content (or ""
+// field), a payload naming the field otherwise; "" when text is empty.
+//
+// The plain carry is what every provider but a few gets, and it is exactly the
+// bytes this protocol always wrote — the prefix followed by the reasoning text.
+// The payload exists only for a provider that names its field something else:
+// go-openai serializes reasoning_content and nothing else, so that name has to
+// be recorded here to be replayed under the one the provider reads.
+func EncodeCompatReasoning(field, text string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	field = strings.TrimSpace(field)
+	if field == "" || field == CompatReasoningField {
+		return Prefix + text
+	}
+	data, err := json.Marshal(compatReasoningPayload{Version: compatReasoningPayloadVersion, Field: field, Text: text})
+	if err != nil {
+		return ""
+	}
+	return Prefix + string(data)
+}
+
+// DecodeCompatReasoning reads an OpenAI-compatible reasoning carry: the payload
+// above, or a plain carry, which is reasoning_content. It reports false for
+// every other carry — another protocol's blocks are not reasoning this model
+// ever said, and a participant name is not a carry at all.
+func DecodeCompatReasoning(name string) (field, text string, ok bool) {
+	if !strings.HasPrefix(name, Prefix) {
+		return "", "", false
+	}
+	if payload, ok := decodeCompatReasoningPayload(name); ok {
+		return payload.Field, payload.Text, true
+	}
+	// Plain text is the one shape no protocol claims: each of the others writes
+	// a payload and checks its own version, so a carry none of them reads as
+	// its own is reasoning text written without a field name.
+	if _, ok := Decode(name); ok {
+		return "", "", false
+	}
+	if _, ok := DecodeThinking(name); ok {
+		return "", "", false
+	}
+	if _, ok := DecodeGeminiParts(name); ok {
+		return "", "", false
+	}
+	return CompatReasoningField, strings.TrimPrefix(name, Prefix), true
+}
+
+// decodeCompatReasoningPayload reads the payload EncodeCompatReasoning writes
+// for a provider that names its reasoning field. It reports false for the plain
+// carry and for every other protocol's payload.
+func decodeCompatReasoningPayload(name string) (compatReasoningPayload, bool) {
+	if !strings.HasPrefix(name, Prefix) {
+		return compatReasoningPayload{}, false
+	}
+	var payload compatReasoningPayload
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(name, Prefix)), &payload); err != nil {
+		return compatReasoningPayload{}, false
+	}
+	if payload.Version != compatReasoningPayloadVersion || strings.TrimSpace(payload.Field) == "" {
+		return compatReasoningPayload{}, false
+	}
+	return payload, true
+}
+
+// CarryEstimateText is the part of a Name that a request can actually carry,
+// for estimating its size: a carry's replayable content without its JSON
+// envelope, and without answer text a Gemini layout repeats from Parts. A Name
+// that is not a carry is returned as it is.
+//
+// The estimate it feeds decides when a conversation is compacted, so counting
+// the envelope and the repeated text read the prompt high and compacted a turn
+// early: neither byte is ever sent.
+func CarryEstimateText(name string) string {
+	if !strings.HasPrefix(name, Prefix) {
+		return name
+	}
+	if payload, ok := Decode(name); ok {
+		kept := make([]string, 0, len(payload.Items)*2)
+		for _, item := range payload.Items {
+			kept = append(kept, item.Summary...)
+			if item.EncryptedContent != "" {
+				kept = append(kept, item.EncryptedContent)
+			}
+		}
+		return strings.Join(kept, "\n")
+	}
+	if blocks, ok := DecodeThinking(name); ok {
+		kept := make([]string, 0, len(blocks)*2)
+		for _, b := range blocks {
+			if b.Redacted {
+				if b.Data != "" {
+					kept = append(kept, b.Data)
+				}
+				continue
+			}
+			if b.Thinking != "" {
+				kept = append(kept, b.Thinking)
+			}
+			if b.Signature != "" {
+				kept = append(kept, b.Signature)
+			}
+		}
+		return strings.Join(kept, "\n")
+	}
+	if parts, ok := DecodeGeminiParts(name); ok {
+		// A text part's body is the answer text Parts already holds, and the
+		// replay sends that body from one place or the other, never both. The
+		// thought summaries and the signatures are what the carry adds.
+		kept := make([]string, 0, len(parts)*2)
+		for _, p := range parts {
+			if p.Kind == "thought" && p.Text != "" {
+				kept = append(kept, p.Text)
+			}
+			if p.Signature != "" {
+				kept = append(kept, p.Signature)
+			}
+		}
+		return strings.Join(kept, "\n")
+	}
+	if payload, ok := decodeCompatReasoningPayload(name); ok {
+		return payload.Text
+	}
+	return strings.TrimPrefix(name, Prefix)
+}
+
 func ExtractSummary(name string) string {
 	if !strings.HasPrefix(name, Prefix) {
 		return ""
@@ -383,7 +676,146 @@ func ExtractSummary(name string) string {
 	if payload, ok := Decode(name); ok {
 		return SummaryText(payload.Items)
 	}
+	if blocks, ok := DecodeThinking(name); ok {
+		// A redacted block's data is ciphertext, not something to show; the
+		// thinking text of the rest is. Falling through to the plain-text
+		// return below would hand a caller this payload's JSON as reasoning.
+		texts := make([]string, 0, len(blocks))
+		for _, b := range blocks {
+			if b.Redacted || b.Thinking == "" {
+				continue
+			}
+			texts = append(texts, b.Thinking)
+		}
+		return strings.Join(texts, "\n")
+	}
+	if parts, ok := DecodeGeminiParts(name); ok {
+		// A Gemini thought summary is the reasoning the person may see; the
+		// signatures on any part are ciphertext, and the payload's own JSON is
+		// never text. Falling through to the plain-text return below would
+		// hand a caller that JSON as the model's thinking.
+		texts := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if p.Kind != "thought" || p.Text == "" {
+				continue
+			}
+			texts = append(texts, p.Text)
+		}
+		return strings.Join(texts, "\n")
+	}
+	if payload, ok := decodeCompatReasoningPayload(name); ok {
+		// The compatible provider's own field name is wire detail; the
+		// reasoning text beside it is what a surface shows.
+		return payload.Text
+	}
 	return strings.TrimPrefix(name, Prefix)
+}
+
+// thinkingFenceOpen and thinkingFenceClose bracket the block a client shows
+// when a reply held reasoning and nothing else.
+const (
+	thinkingFenceOpen  = "```thinking\n"
+	thinkingFenceClose = "\n```"
+)
+
+// ThinkingFence wraps reasoning as the ```thinking block a client puts in a
+// reply's text when the model returned reasoning and nothing else, so the
+// person sees the thinking instead of an empty answer. The block is a display
+// form of the reasoning, never an answer the model wrote.
+func ThinkingFence(reasoning string) string {
+	return thinkingFenceOpen + reasoning + thinkingFenceClose
+}
+
+// IsThinkingFence reports text that is such a block.
+func IsThinkingFence(text string) bool {
+	return strings.HasPrefix(text, thinkingFenceOpen) && strings.HasSuffix(text, thinkingFenceClose)
+}
+
+// ThinkingFenceOnly reports an assistant message that is a thinking fence and
+// nothing else: no tool calls, no non-text parts, and every text part — at
+// least one — a fence. It is a reply in which the model only reasoned.
+func ThinkingFenceOnly(m Message) bool {
+	if m.Role != RoleAssistant || len(m.ToolCalls) > 0 || len(m.Parts) == 0 {
+		return false
+	}
+	for _, p := range m.Parts {
+		if p.Type != ContentTypeText || !IsThinkingFence(p.Text) {
+			return false
+		}
+	}
+	return true
+}
+
+// ThinkingFenceGoesTo reports whether a ThinkingFenceOnly message may be sent
+// to model. Only the model recorded as having produced its reasoning gets it:
+// to any other model the fence would pass that reasoning off as an answer
+// this conversation gave. A message that records no producer — every such
+// message stored before producers were kept — goes to no model.
+func ThinkingFenceGoesTo(m Message, model string) bool {
+	producer := strings.TrimSpace(m.ReasoningModel)
+	to := strings.TrimSpace(model)
+	return producer != "" && to != "" && strings.EqualFold(producer, to)
+}
+
+// ReasoningReplayRefused reports a request the provider refused because of
+// the reasoning it replayed: an APIError whose status is one of statuses and
+// whose message, code or type names one of keywords (case-insensitive). The
+// adapter that sent the reasoning decides the statuses and keywords, and
+// resends once without it — a refusal that otherwise fails every request of
+// the conversation from here on, since the same reasoning is replayed on every
+// one of them.
+//
+// The status and the keyword both have to match: a provider refuses a hundred
+// things with a 400, and resending each of them without the reasoning would
+// spend a request on a failure that has nothing to do with it.
+func ReasoningReplayRefused(err error, statuses []int, keywords ...string) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return false
+	}
+	refused := false
+	for _, status := range statuses {
+		if apiErr.StatusCode == status {
+			refused = true
+			break
+		}
+	}
+	if !refused {
+		return false
+	}
+	for _, text := range []string{apiErr.Message, apiErr.Code, apiErr.Type} {
+		if text == "" {
+			continue
+		}
+		lower := strings.ToLower(text)
+		for _, keyword := range keywords {
+			if keyword != "" && strings.Contains(lower, strings.ToLower(keyword)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// WithoutReasoningCarries returns a copy of messages in which no message
+// carries reasoning for the model: every Prefix carry in Name is cleared.
+// ReasoningModel is kept — it records who produced the message, which rules
+// other than reasoning replay still read.
+//
+// It is the resend a provider that refused the replayed reasoning gets: the
+// conversation without the reasoning, not without the turn that held it.
+func WithoutReasoningCarries(messages []Message) []Message {
+	out := make([]Message, len(messages))
+	copy(out, messages)
+	for i := range out {
+		if strings.HasPrefix(out[i].Name, Prefix) {
+			out[i].Name = ""
+		}
+	}
+	return out
 }
 
 func SummaryText(items []Item) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -719,5 +720,577 @@ func TestGoogleStopEmptyIsBlankOutput(t *testing.T) {
 	defer mu.Unlock()
 	if requests != 1 {
 		t.Fatalf("requests = %d, want exactly 1", requests)
+	}
+}
+
+// A reply that was only reasoning is a fence, and the fence reaches the model
+// that produced it as that text. No other model sees it: it would read that
+// reasoning as an answer this conversation gave.
+func TestGoogleSendsThinkingFenceOnlyToItsProducer(t *testing.T) {
+	fenceText := llm.ThinkingFence("weigh A against B")
+	fence := llm.Message{
+		Role:           llm.RoleAssistant,
+		Parts:          []llm.ContentPart{llm.Text(fenceText)},
+		ReasoningModel: "gemini-3.5-pro",
+	}
+	req, err := buildRequest([]llm.Message{llm.UserMessage(llm.Text("hi")), fence}, nil, 0, "gemini-3.5-pro")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if len(req.Contents) != 2 || req.Contents[1].Role != roleModel {
+		t.Fatalf("contents = %#v, want the prompt and the fence", req.Contents)
+	}
+	if parts := req.Contents[1].Parts; len(parts) != 1 || parts[0].Text != fenceText {
+		t.Fatalf("fence parts = %#v, want the fence text alone", parts)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		model    string
+		producer string
+	}{
+		{name: "another model", model: "glm-5.3", producer: "gemini-3.5-pro"},
+		{name: "no producer", model: "gemini-3.5-pro"},
+		{name: "no requested model", producer: "gemini-3.5-pro"},
+	} {
+		history := fence
+		history.ReasoningModel = tc.producer
+		req, err := buildRequest([]llm.Message{llm.UserMessage(llm.Text("hi")), history}, nil, 0, tc.model)
+		if err != nil {
+			t.Fatalf("%s: buildRequest: %v", tc.name, err)
+		}
+		if len(req.Contents) != 1 || req.Contents[0].Role != roleUser {
+			t.Fatalf("%s: contents = %#v, want the prompt alone", tc.name, req.Contents)
+		}
+	}
+}
+
+// Every part the request builder emits serializes as it did before the
+// signature fields existed, except the one shape that had no valid form: a
+// part carrying a signature and no other field, which must say it is text.
+func TestGooglePartJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		part part
+		want map[string]any
+	}{
+		{
+			name: "signature only",
+			part: part{ThoughtSignature: "S"},
+			want: map[string]any{"text": "", "thoughtSignature": "S"},
+		},
+		{
+			name: "text",
+			part: part{Text: "hi"},
+			want: map[string]any{"text": "hi"},
+		},
+		{
+			name: "call with a signature",
+			part: part{FunctionCall: &functionCall{Name: "f"}, ThoughtSignature: "S"},
+			want: map[string]any{"functionCall": map[string]any{"name": "f"}, "thoughtSignature": "S"},
+		},
+		{
+			name: "thought summary",
+			part: part{Text: "t", Thought: true, ThoughtSignature: "S"},
+			want: map[string]any{"text": "t", "thought": true, "thoughtSignature": "S"},
+		},
+		{
+			name: "empty thought summary",
+			part: part{Thought: true},
+			want: map[string]any{"text": "", "thought": true},
+		},
+	} {
+		raw, err := json.Marshal(tc.part)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", tc.name, err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("%s: unmarshal %s: %v", tc.name, raw, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s: json = %s, want %#v", tc.name, raw, tc.want)
+		}
+		if tc.name == "signature only" && !strings.Contains(string(raw), `"text":""`) {
+			t.Fatalf("signature-only part = %s, want an explicit empty text field", raw)
+		}
+	}
+}
+
+// A reply's thought summaries and signatures are kept in arrival order: the
+// summary is reasoning the surface shows as thinking, and every part keeps the
+// signature it came with so this reply can be given back to its model intact.
+func TestGoogleUnaryKeepsThoughtSignatures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"candidates": [{
+				"content": {"role": "model", "parts": [
+					{"text": "plan", "thought": true, "thoughtSignature": "A"},
+					{"text": "ok"},
+					{"functionCall": {"name": "weather", "args": {"city": "Paris"}}, "thoughtSignature": "B"},
+					{"functionCall": {"name": "clock"}},
+					{"text": "", "thoughtSignature": "C"}
+				]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 7}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil)
+	rec := newRecordingSink()
+	ctx := llm.WithNonStreamingRequest(llm.WithStreamSink(context.Background(), rec.sink()))
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if text := result.Message.TextContent(); text != "ok" {
+		t.Fatalf("answer = %q, want the answer text alone", text)
+	}
+	if len(result.Message.ToolCalls) != 2 {
+		t.Fatalf("tool calls = %#v, want both", result.Message.ToolCalls)
+	}
+	if result.Message.ReasoningModel != "gemini-3.5-pro" {
+		t.Fatalf("ReasoningModel = %q, want the client's model", result.Message.ReasoningModel)
+	}
+	layout, ok := llm.DecodeGeminiParts(result.Message.Name)
+	if !ok {
+		t.Fatalf("carry = %q, want a Gemini part layout", result.Message.Name)
+	}
+	want := []llm.GeminiPart{
+		{Kind: "thought", Text: "plan", Signature: "A"},
+		{Kind: "text", Text: "ok"},
+		{Kind: "call", Call: 0, Signature: "B"},
+		{Kind: "call", Call: 1},
+		{Kind: "text", Signature: "C"},
+	}
+	if !reflect.DeepEqual(layout, want) {
+		t.Fatalf("layout = %#v\nwant      %#v", layout, want)
+	}
+	// The non-streaming replay shows the thought summary as thinking and the
+	// answer as the answer.
+	if fmt.Sprint(rec.reasoning) != fmt.Sprint([]string{"plan"}) || rec.reasoningDone != 1 {
+		t.Fatalf("reasoning = %v (done %d), want the thought summary once", rec.reasoning, rec.reasoningDone)
+	}
+	if fmt.Sprint(rec.trace) != fmt.Sprint([]string{"started", "delta:ok", "text-block-done", "tool-ready:weather", "tool-ready:clock", "stop:STOP", "message-stop"}) {
+		t.Fatalf("trace = %v, want the thought summary outside the answer text", rec.trace)
+	}
+}
+
+// googleSignedLayout is the reply the replay tests below send back: one thought
+// summary, one answer text, two calls (the first signed), and a signature on its
+// own empty text part.
+func googleSignedLayout() []llm.GeminiPart {
+	return []llm.GeminiPart{
+		{Kind: "thought", Text: "plan", Signature: "A"},
+		{Kind: "text", Text: "ok"},
+		{Kind: "call", Call: 0, Signature: "B"},
+		{Kind: "call", Call: 1},
+		{Kind: "text", Signature: "C"},
+	}
+}
+
+// googleSignedReply is the assistant message those parts belong to: the answer
+// text and the two calls the layout indexes.
+func googleSignedReply(producer string) llm.Message {
+	return llm.Message{
+		Role:  llm.RoleAssistant,
+		Parts: []llm.ContentPart{llm.Text("ok")},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call-a", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "weather", Arguments: `{"city":"Paris"}`}},
+			{ID: "call-b", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "clock"}},
+		},
+		Name:           llm.EncodeGeminiParts(googleSignedLayout()),
+		ReasoningModel: producer,
+	}
+}
+
+// googleSignedHistory is the reply plus the tool results it asked for, which is
+// what the next request of the same turn carries.
+func googleSignedHistory(producer string) []llm.Message {
+	reply := googleSignedReply(producer)
+	return []llm.Message{
+		llm.UserMessage(llm.Text("hi")),
+		reply,
+		{Role: llm.RoleTool, ToolCallID: "call-a", Parts: []llm.ContentPart{llm.Text(`{"temp_c":21}`)}},
+		{Role: llm.RoleTool, ToolCallID: "call-b", Parts: []llm.ContentPart{llm.Text("12:00")}},
+	}
+}
+
+// The reply goes back to the model that wrote it exactly as it returned it, and
+// to no other model: the signatures are that model's reasoning, and another
+// model neither wrote them nor can verify them.
+func TestGoogleReplaysLayoutOnlyToItsProducer(t *testing.T) {
+	req, err := buildRequest(googleSignedHistory("gemini-3.5-pro"), nil, 0, "gemini-3.5-pro")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if len(req.Contents) < 2 || req.Contents[1].Role != roleModel {
+		t.Fatalf("contents = %#v, want the prompt then the reply", req.Contents)
+	}
+	wantParts := []part{
+		{Text: "plan", Thought: true, ThoughtSignature: "A"},
+		{Text: "ok"},
+		{FunctionCall: &functionCall{Name: "weather", Args: map[string]any{"city": "Paris"}}, ThoughtSignature: "B"},
+		{FunctionCall: &functionCall{Name: "clock", Args: map[string]any{}}},
+		{ThoughtSignature: "C"},
+	}
+	if !reflect.DeepEqual(req.Contents[1].Parts, wantParts) {
+		t.Fatalf("producer parts = %#v\nwant            %#v", req.Contents[1].Parts, wantParts)
+	}
+
+	// Another model gets the answer and the calls, no reasoning, and the
+	// placeholder on the current turn's first call so Gemini 3 and later still
+	// accept the request.
+	wantOther := []part{
+		{Text: "ok"},
+		{FunctionCall: &functionCall{Name: "weather", Args: map[string]any{"city": "Paris"}}, ThoughtSignature: geminiSkipSignatureValidator},
+		{FunctionCall: &functionCall{Name: "clock", Args: map[string]any{}}},
+	}
+	for _, tc := range []struct {
+		name     string
+		model    string
+		producer string
+	}{
+		{name: "another model", model: "glm-5.3", producer: "gemini-3.5-pro"},
+		{name: "no producer", model: "gemini-3.5-pro"},
+	} {
+		req, err := buildRequest(googleSignedHistory(tc.producer), nil, 0, tc.model)
+		if err != nil {
+			t.Fatalf("%s: buildRequest: %v", tc.name, err)
+		}
+		if len(req.Contents) < 2 || req.Contents[1].Role != roleModel {
+			t.Fatalf("%s: contents = %#v, want the prompt then the reply", tc.name, req.Contents)
+		}
+		if !reflect.DeepEqual(req.Contents[1].Parts, wantOther) {
+			t.Fatalf("%s: parts = %#v\nwant            %#v", tc.name, req.Contents[1].Parts, wantOther)
+		}
+	}
+}
+
+// The placeholder signature covers exactly one case: the current turn's first
+// call of a model content that has none. Earlier turns are history Google does
+// not validate, and a call with its own signature keeps it.
+func TestGoogleCurrentTurnUnsignedCallGetsPlaceholder(t *testing.T) {
+	call := func(id, name string) llm.ToolCall {
+		return llm.ToolCall{ID: id, Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: name}}
+	}
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("hi")),
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{call("c1", "weather"), call("c2", "clock")}},
+		{Role: llm.RoleTool, ToolCallID: "c1", Parts: []llm.ContentPart{llm.Text(`{"temp_c":21}`)}},
+		{Role: llm.RoleTool, ToolCallID: "c2", Parts: []llm.ContentPart{llm.Text("12:00")}},
+		llm.UserMessage(llm.Text("and now?")),
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{call("c3", "weather"), call("c4", "clock")}},
+		{Role: llm.RoleTool, ToolCallID: "c3", Parts: []llm.ContentPart{llm.Text(`{"temp_c":22}`)}},
+	}
+	req, err := buildRequest(history, nil, 0, "gemini-3.5-pro")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	var modelContents []content
+	for _, c := range req.Contents {
+		if c.Role == roleModel {
+			modelContents = append(modelContents, c)
+		}
+	}
+	if len(modelContents) != 2 {
+		t.Fatalf("model contents = %#v, want the two replies", modelContents)
+	}
+	for i, p := range modelContents[0].Parts {
+		if p.ThoughtSignature != "" {
+			t.Fatalf("earlier turn call %d got signature %q, want it untouched", i, p.ThoughtSignature)
+		}
+	}
+	if got := modelContents[1].Parts[0].ThoughtSignature; got != geminiSkipSignatureValidator {
+		t.Fatalf("current turn first call signature = %q, want the placeholder", got)
+	}
+	if got := modelContents[1].Parts[1].ThoughtSignature; got != "" {
+		t.Fatalf("current turn second call signature = %q, want it untouched", got)
+	}
+}
+
+// A thought summary is never an answer: it is not answer text, it is not what a
+// surface renders as the reply, and another model never receives it.
+func TestGoogleThoughtSummaryIsNeverAnswer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"candidates": [{
+				"content": {"role": "model", "parts": [
+					{"text": "secret plan", "thought": true, "thoughtSignature": "A"},
+					{"functionCall": {"name": "weather", "args": {"city": "Paris"}}}
+				]},
+				"finishReason": "STOP"
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil)
+	ctx := llm.WithNonStreamingRequest(context.Background())
+	result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(result.Message.Parts) != 0 || result.Message.TextContent() != "" {
+		t.Fatalf("parts = %#v, want no answer text from a thought summary", result.Message.Parts)
+	}
+	layout, ok := llm.DecodeGeminiParts(result.Message.Name)
+	if !ok || len(layout) != 2 || layout[0].Kind != "thought" || layout[0].Text != "secret plan" {
+		t.Fatalf("carry = %q, want the thought summary kept for its own model", result.Message.Name)
+	}
+
+	history := []llm.Message{llm.UserMessage(llm.Text("hi")), *result.Message}
+	req, err := buildRequest(history, nil, 0, "glm-5.3")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, unwanted := range []string{"secret plan", `"thought":true`, `"signature":"A"`} {
+		if strings.Contains(string(raw), unwanted) {
+			t.Fatalf("request leaked %q to another model: %s", unwanted, raw)
+		}
+	}
+}
+
+// A continued answer is one reply assembled from several rounds: its text is
+// unsigned (no signature was issued for the merge), while the last round's calls
+// keep their signatures, because a current-turn call without one is refused. A
+// last round cut by the output limit carries nothing at all.
+func TestGoogleContinuationKeepsCallSignatures(t *testing.T) {
+	serve := func(t *testing.T, lastRound string) *llm.Result {
+		t.Helper()
+		rounds := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rounds++
+			w.Header().Set("Content-Type", "application/json")
+			if rounds == 1 {
+				_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"Half"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}`))
+				return
+			}
+			_, _ = w.Write([]byte(lastRound))
+		}))
+		t.Cleanup(server.Close)
+		client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil)
+		ctx := llm.WithNonStreamingRequest(context.Background())
+		result, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		return result
+	}
+
+	t.Run("stop with a signed call", func(t *testing.T) {
+		result := serve(t, `{"candidates":[{"content":{"role":"model","parts":[{"text":" rest"},{"functionCall":{"name":"weather"},"thoughtSignature":"S"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":5}}`)
+		if text := result.Message.TextContent(); text != "Half rest" {
+			t.Fatalf("answer = %q, want both rounds", text)
+		}
+		layout, ok := llm.DecodeGeminiParts(result.Message.Name)
+		if !ok {
+			t.Fatalf("carry = %q, want the merged layout", result.Message.Name)
+		}
+		want := []llm.GeminiPart{
+			{Kind: "text", Text: "Half rest"},
+			{Kind: "call", Call: 0, Signature: "S"},
+		}
+		if !reflect.DeepEqual(layout, want) {
+			t.Fatalf("layout = %#v\nwant      %#v", layout, want)
+		}
+		if result.Message.ReasoningModel != "gemini-3.5-pro" {
+			t.Fatalf("ReasoningModel = %q, want the model copied from the last round", result.Message.ReasoningModel)
+		}
+	})
+
+	t.Run("exhausted on the output limit", func(t *testing.T) {
+		result := serve(t, `{"candidates":[{"content":{"role":"model","parts":[{"text":" and more"},{"functionCall":{"name":"weather"},"thoughtSignature":"S"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":5}}`)
+		if result.StopReason != llm.StopReasonOutputLimit {
+			t.Fatalf("StopReason = %q, want the output limit", result.StopReason)
+		}
+		if result.Message.Name != "" || result.Message.ReasoningModel != "" {
+			t.Fatalf("carry = %q (producer %q), want none on an unfinished answer", result.Message.Name, result.Message.ReasoningModel)
+		}
+	})
+}
+
+// An interrupted reply only recorded the prefix of itself in its layout: the
+// answer text still open at the cut was sealed by the engine afterwards, and a
+// call the adapter never got to append is missing from it. Both go after the
+// layout, in the message's own order, without a signature — none ever arrived
+// for them, and the placeholder covers only the current turn's first call.
+func TestGoogleReplaysALayoutPrefixAndAppendsTheRest(t *testing.T) {
+	layout := []llm.GeminiPart{
+		{Kind: "text", Text: "first", Signature: "S1"},
+		{Kind: "call", Call: 0, Signature: "S2"},
+	}
+	reply := llm.Message{
+		Role:  llm.RoleAssistant,
+		Parts: []llm.ContentPart{llm.Text("first"), llm.Text("second")},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call-a", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "weather", Arguments: `{"city":"Paris"}`}},
+			{ID: "call-b", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "clock"}},
+		},
+		Name:           llm.EncodeGeminiParts(layout),
+		ReasoningModel: "gemini-3.5-pro",
+	}
+	req, err := buildRequest([]llm.Message{llm.UserMessage(llm.Text("hi")), reply}, nil, 0, "gemini-3.5-pro")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if len(req.Contents) < 2 || req.Contents[1].Role != roleModel {
+		t.Fatalf("contents = %#v, want the prompt then the reply", req.Contents)
+	}
+	want := []part{
+		{Text: "first", ThoughtSignature: "S1"},
+		{FunctionCall: &functionCall{Name: "weather", Args: map[string]any{"city": "Paris"}}, ThoughtSignature: "S2"},
+		{Text: "second"},
+		{FunctionCall: &functionCall{Name: "clock", Args: map[string]any{}}},
+	}
+	if !reflect.DeepEqual(req.Contents[1].Parts, want) {
+		t.Fatalf("parts = %#v\nwant    %#v", req.Contents[1].Parts, want)
+	}
+}
+
+// googleSignatureRefusal answers the way Google does when it will not accept the
+// thought signatures it was given.
+func googleSignatureRefusal(message string) string {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"code":    400,
+		"message": message,
+		"status":  "INVALID_ARGUMENT",
+	}})
+	return string(payload)
+}
+
+// googleCapturedReasoning reads what a captured request replays of the model's
+// reasoning: every thought signature it sends, and whether it sends a thought
+// summary.
+func googleCapturedReasoning(body map[string]any) (signatures []string, thought bool) {
+	contents, _ := body["contents"].([]any)
+	for _, c := range contents {
+		entry, _ := c.(map[string]any)
+		parts, _ := entry["parts"].([]any)
+		for _, p := range parts {
+			part, _ := p.(map[string]any)
+			if signature, ok := part["thoughtSignature"].(string); ok && signature != "" {
+				signatures = append(signatures, signature)
+			}
+			if asBool, ok := part["thought"].(bool); ok && asBool {
+				thought = true
+			}
+		}
+	}
+	return signatures, thought
+}
+
+// The signatures in a reply belong to the model and account that wrote them:
+// once Google refuses them, every request of the conversation carries the same
+// ones and fails the same way. The refusal buys one resend without them, and the
+// current turn's first call still gets the placeholder that keeps a signature-less
+// call acceptable — otherwise the retry would fail too.
+func TestGoogleResendsWithoutSignaturesWhenRefused(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		bodies = append(bodies, body)
+		if len(bodies) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, googleSignatureRefusal("Thought signature is not valid for this request"))
+			return
+		}
+		serveSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":2}}`)
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil)
+	ends := 0
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{OnEnd: func() { ends++ }})
+	result, err := client.Execute(ctx, googleSignedHistory("gemini-3.5-pro"), []*llm.Tool{weatherTool(t)})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want the refusal and one resend", len(bodies))
+	}
+	if signatures, thought := googleCapturedReasoning(bodies[0]); !thought || len(signatures) == 0 {
+		t.Fatalf("first request replayed signatures %v (thought %v), want the reply's own layout", signatures, thought)
+	}
+	signatures, thought := googleCapturedReasoning(bodies[1])
+	if thought {
+		t.Fatalf("resend still sent a thought summary: %v", signatures)
+	}
+	for _, unwanted := range []string{"A", "B", "C"} {
+		for _, signature := range signatures {
+			if signature == unwanted {
+				t.Fatalf("resend still sent the refused signature %q: %v", unwanted, signatures)
+			}
+		}
+	}
+	placeholders := 0
+	for _, signature := range signatures {
+		if signature == geminiSkipSignatureValidator {
+			placeholders++
+		}
+	}
+	if placeholders != 1 {
+		t.Fatalf("resend carried %d placeholder signatures %v, want exactly the current turn's first call", placeholders, signatures)
+	}
+	if got := result.Message.TextContent(); got != "ok" {
+		t.Fatalf("answer = %q, want the resend's own answer", got)
+	}
+	if ends != 1 {
+		t.Fatalf("OnEnd calls = %d, want 1: one Execute is one reply", ends)
+	}
+}
+
+// Only a refusal of the replayed signatures buys a resend: any other failure,
+// and a signature-shaped failure on a request that replayed no reasoning, is the
+// provider's answer as it stands.
+func TestGoogleDoesNotResendUnrelatedFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []llm.Message
+		message  string
+	}{
+		{
+			name:     "a 400 that does not name the signature",
+			messages: googleSignedHistory("gemini-3.5-pro"),
+			message:  "API key not valid. Please pass a valid API key.",
+		},
+		{
+			name:     "a signature 400 on a request that replayed none",
+			messages: []llm.Message{llm.UserMessage(llm.Text("hi"))},
+			message:  "Thought signature is not valid for this request",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, googleSignatureRefusal(tc.message))
+			}))
+			defer server.Close()
+
+			client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil)
+			if _, err := client.Execute(context.Background(), tc.messages, nil); err == nil {
+				t.Fatal("Execute succeeded, want the provider's 400")
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want 1: this failure is not the signatures'", requests)
+			}
+		})
 	}
 }
