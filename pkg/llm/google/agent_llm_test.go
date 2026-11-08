@@ -1012,6 +1012,155 @@ func TestGoogleCurrentTurnUnsignedCallGetsPlaceholder(t *testing.T) {
 	}
 }
 
+// A tool round is one model content and one user content: Gemini refuses a
+// request whose function-call turn does not hold exactly as many
+// functionResponse parts as functionCall parts ("Please ensure that the number
+// of function response parts is equal to the number of function call parts of
+// the function call turn"). Parallel calls arrive here as one result message
+// each, so the results must share the user content that answers that turn —
+// while a user message with text of its own keeps a content of its own.
+func TestGoogleProjectsOneToolRoundIntoOneUserContent(t *testing.T) {
+	call := func(id, name string) llm.ToolCall {
+		return llm.ToolCall{ID: id, Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: name}}
+	}
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("go")),
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{call("c1", "weather"), call("c2", "clock")}},
+		{Role: llm.RoleTool, ToolCallID: "c1", Parts: []llm.ContentPart{llm.Text(`{"temp_c":21}`)}},
+		{Role: llm.RoleTool, ToolCallID: "c2", Parts: []llm.ContentPart{llm.Text("12:00")}},
+		llm.UserMessage(llm.Text("steer")),
+	}
+	req, err := buildRequest(history, nil, 0, "gemini-3.5-pro")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if len(req.Contents) != 4 {
+		t.Fatalf("contents = %#v, want the prompt, the reply, one user turn of results and the steer", req.Contents)
+	}
+	if got, want := []string{req.Contents[0].Role, req.Contents[1].Role, req.Contents[2].Role, req.Contents[3].Role}, []string{roleUser, roleModel, roleUser, roleUser}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("roles = %v, want %v", got, want)
+	}
+	calls, results := req.Contents[1].Parts, req.Contents[2].Parts
+	if len(calls) != 2 || len(results) != 2 {
+		t.Fatalf("model holds %d parts, the user turn %d; want the two calls answered by the two results", len(calls), len(results))
+	}
+	for i, wantName := range []string{"weather", "clock"} {
+		if calls[i].FunctionCall == nil || calls[i].FunctionCall.Name != wantName {
+			t.Fatalf("model part %d = %#v, want the %s call", i, calls[i], wantName)
+		}
+		if results[i].FunctionResponse == nil || results[i].FunctionResponse.Name != wantName {
+			t.Fatalf("user part %d = %#v, want the %s result", i, results[i], wantName)
+		}
+	}
+	// The steer is the conversation's own words: it keeps a content of its
+	// own rather than being absorbed into the results.
+	var steer []string
+	for _, c := range req.Contents {
+		if c.Role != roleUser || allToolResults(c.Parts) {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p.Text != "" {
+				steer = append(steer, p.Text)
+			}
+		}
+	}
+	if want := []string{"go", "steer"}; !reflect.DeepEqual(steer, want) {
+		t.Fatalf("user text parts = %v, want %v: the conversation's own words keep a content of their own", steer, want)
+	}
+}
+
+// The gateway's own rule, enforced on the wire: a function-call turn must be
+// answered by exactly one functionResponse per functionCall in the content that
+// follows it, which is the 400 a parallel round used to earn ("Please ensure
+// that the number of function response parts is equal to the number of function
+// call parts of the function call turn"). A single-call round keeps its own one
+// result — the merge is a round's, not every user content's.
+func TestGoogleGatewayAcceptsOneToolRoundAsOneUserContent(t *testing.T) {
+	call := func(id, name string) llm.ToolCall {
+		return llm.ToolCall{ID: id, Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: name}}
+	}
+	type wireContent struct {
+		Role  string           `json:"role"`
+		Parts []map[string]any `json:"parts"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Contents []wireContent `json:"contents"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		for i, c := range body.Contents {
+			if c.Role != "model" {
+				continue
+			}
+			calls := 0
+			for _, p := range c.Parts {
+				if _, ok := p["functionCall"]; ok {
+					calls++
+				}
+			}
+			if calls == 0 {
+				continue
+			}
+			responses := 0
+			if i+1 < len(body.Contents) && body.Contents[i+1].Role == "user" {
+				for _, p := range body.Contents[i+1].Parts {
+					if _, ok := p["functionResponse"]; ok {
+						responses++
+					}
+				}
+			}
+			if responses != calls {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"Please ensure that the number of function response parts is equal to the number of function call parts of the function call turn."}}`)
+				return
+			}
+		}
+		serveSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"both"}]},"finishReason":"STOP"}]}`)
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("test-key", server.URL, "gemini-3.5-pro", 4096, nil)
+	for _, tc := range []struct {
+		name    string
+		calls   []llm.ToolCall
+		results []llm.Message
+	}{
+		{
+			name:  "parallel round",
+			calls: []llm.ToolCall{call("c1", "weather"), call("c2", "clock")},
+			results: []llm.Message{
+				{Role: llm.RoleTool, ToolCallID: "c1", Parts: []llm.ContentPart{llm.Text(`{"temp_c":21}`)}},
+				{Role: llm.RoleTool, ToolCallID: "c2", Parts: []llm.ContentPart{llm.Text("12:00")}},
+			},
+		},
+		{
+			name:  "single call",
+			calls: []llm.ToolCall{call("c1", "weather")},
+			results: []llm.Message{
+				{Role: llm.RoleTool, ToolCallID: "c1", Parts: []llm.ContentPart{llm.Text(`{"temp_c":21}`)}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			history := append([]llm.Message{
+				llm.UserMessage(llm.Text("go")),
+				{Role: llm.RoleAssistant, ToolCalls: tc.calls},
+			}, tc.results...)
+			res, err := client.Execute(context.Background(), history, nil)
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if got := res.Message.TextContent(); got != "both" {
+				t.Fatalf("answer = %q, want the gateway's reply", got)
+			}
+		})
+	}
+}
+
 // A thought summary is never an answer: it is not answer text, it is not what a
 // surface renders as the reply, and another model never receives it.
 func TestGoogleThoughtSummaryIsNeverAnswer(t *testing.T) {

@@ -440,8 +440,20 @@ func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64, mo
 			if err != nil {
 				return nil, err
 			}
-			// A tool result is a user turn in generateContent's model.
-			req.Contents = append(req.Contents, content{Role: roleUser, Parts: []part{resultPart}})
+			// A tool round's results are one user turn: Gemini requires as many
+			// functionResponse parts as the model content it answers has
+			// functionCall parts ("Please ensure that the number of function
+			// response parts is equal to the number of function call parts of
+			// the function call turn"), and a round of parallel calls arrives
+			// here as one message per result. Only a turn that holds nothing
+			// but results is extended; a user message with text of its own is
+			// never merged into.
+			if n := len(req.Contents); n > 0 && req.Contents[n-1].Role == roleUser && allToolResults(req.Contents[n-1].Parts) {
+				req.Contents[n-1].Parts = append(req.Contents[n-1].Parts, resultPart)
+			} else {
+				// A tool result is a user turn in generateContent's model.
+				req.Contents = append(req.Contents, content{Role: roleUser, Parts: []part{resultPart}})
+			}
 		default:
 			return nil, fmt.Errorf("google: unsupported role %q", m.Role)
 		}
@@ -540,6 +552,21 @@ func assistantParts(m llm.Message, toolNames map[string]string) []part {
 		out = append(out, part{FunctionCall: &functionCall{Name: name, Args: argumentsValue(tc.Function.Arguments)}})
 	}
 	return out
+}
+
+// allToolResults reports whether every part of a user content is a tool result,
+// which is what makes that content a tool round's answer rather than a turn of
+// the conversation: one round's results share the content.
+func allToolResults(parts []part) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	for _, p := range parts {
+		if p.FunctionResponse == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // toolResultPart projects a tool-result message. Its name is recovered from the

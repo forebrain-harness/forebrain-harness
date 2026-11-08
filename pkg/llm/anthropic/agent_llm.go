@@ -634,6 +634,23 @@ func (c *anthropicAgentLLM) executeUnary(ctx context.Context, params anthropicap
 func agentAnthropicMessagesToAPI(messages []llm.Message, replayTo string) ([]anthropicapi.TextBlockParam, []anthropicapi.MessageParam, error) {
 	var systemParts []string
 	out := make([]anthropicapi.MessageParam, 0, len(messages))
+	// appendUser adds blocks to the conversation as user content, merging them
+	// into the user message that is already last. A tool round's results belong
+	// in one user message — the API pairs the assistant turn with exactly the
+	// one user turn after it — and steering and reminders follow those results
+	// in the same turn. The official endpoint merges consecutive user turns on
+	// its own, so this changes nothing there; a compatible gateway keeps the
+	// pairing and drops the extra messages, which is how results went missing.
+	appendUser := func(blocks []anthropicapi.ContentBlockParamUnion) {
+		if len(blocks) == 0 {
+			return
+		}
+		if n := len(out); n > 0 && out[n-1].Role == anthropicapi.MessageParamRoleUser {
+			out[n-1].Content = append(out[n-1].Content, blocks...)
+			return
+		}
+		out = append(out, anthropicapi.NewUserMessage(blocks...))
+	}
 	for _, m := range messages {
 		switch m.Role {
 		case llm.RoleSystem, llm.RoleDeveloper:
@@ -642,10 +659,7 @@ func agentAnthropicMessagesToAPI(messages []llm.Message, replayTo string) ([]ant
 				systemParts = append(systemParts, text)
 			}
 		case llm.RoleUser:
-			blocks := agentAnthropicContentBlocks(m.Parts)
-			if len(blocks) > 0 {
-				out = append(out, anthropicapi.NewUserMessage(blocks...))
-			}
+			appendUser(agentAnthropicContentBlocks(m.Parts))
 		case llm.RoleAssistant:
 			// A reply that was only reasoning goes back to the model that
 			// produced it, and to no other: the fence would hand that model's
@@ -706,9 +720,7 @@ func agentAnthropicMessagesToAPI(messages []llm.Message, replayTo string) ([]ant
 				ToolUseID: toolUseID,
 				Content:   content,
 			}
-			out = append(out, anthropicapi.NewUserMessage(
-				anthropicapi.ContentBlockParamUnion{OfToolResult: &toolBlock},
-			))
+			appendUser([]anthropicapi.ContentBlockParamUnion{{OfToolResult: &toolBlock}})
 		default:
 			return nil, nil, &anthropicUnsupportedRoleError{Role: m.Role}
 		}

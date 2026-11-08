@@ -772,13 +772,19 @@ message_stop|{"type":"message_stop"}`
 		t.Fatalf("requests = %d, want 2", len(bodies))
 	}
 	msgs, _ := bodies[1]["messages"].([]any)
-	if len(msgs) != 2 {
-		t.Fatalf("second request carries %d messages, want 2 (the caller's user message and the prompt)", len(msgs))
+	// One user turn: the caller's message and the resume prompt follow each
+	// other with no assistant reply between them, and the protocol pairs a
+	// reply with exactly one user turn after it.
+	if len(msgs) != 1 {
+		t.Fatalf("second request carries %d messages, want 1 (the caller's message and the prompt in one user turn)", len(msgs))
 	}
 	for i, m := range msgs {
 		msg, _ := m.(map[string]any)
 		if msg["role"] == "assistant" {
 			t.Fatalf("message %d of the second request is an assistant message; the thinking-only resume must carry none", i)
+		}
+		if !strings.Contains(anthropicMessageText(t, msg), "hi") {
+			t.Fatalf("message %d = %q, want the caller's message kept", i, anthropicMessageText(t, msg))
 		}
 	}
 	last, _ := msgs[len(msgs)-1].(map[string]any)
@@ -1546,5 +1552,107 @@ func TestAnthropicUnaryHandsOverCarryBeforeReplay(t *testing.T) {
 	}
 	if carryModel != "claude-opus-4-6" {
 		t.Fatalf("carry model = %q, want this client's model", carryModel)
+	}
+}
+
+// A tool round — the parallel calls one reply made and the results that answer
+// them — is one assistant turn and one user turn. The results stay in the order
+// the replies came in, and what follows them in the same turn (a steering
+// message) is part of that user turn: consecutive user messages are a request
+// the official endpoint only accepts because it merges them itself, and a
+// compatible gateway pairs one user turn with the reply before it, dropping the
+// rest. That is how every result after the first went missing.
+func TestAnthropicProjectsOneToolRoundIntoOneUserMessage(t *testing.T) {
+	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
+
+	var mu sync.Mutex
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		writeAnthropicSSEEvent(t, w, "message_start", anthropicMessageStartData)
+		writeAnthropicSSEEvent(t, w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"done"}}`)
+		writeAnthropicSSEEvent(t, w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
+		writeAnthropicSSEEvent(t, w, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}`)
+		writeAnthropicSSEEvent(t, w, "message_stop", `{"type":"message_stop"}`)
+	}))
+	defer server.Close()
+
+	history := []llm.Message{
+		llm.SystemMessage("be brief"),
+		llm.UserMessage(llm.Text("go")),
+		llm.AssistantMessage([]llm.ContentPart{llm.Text("two at once")},
+			llm.ToolCall{ID: "toolu_aaa", Type: llm.ToolTypeFunction,
+				Function: llm.FunctionCall{Name: "peer_list", Arguments: `{}`}},
+			llm.ToolCall{ID: "toolu_bbb", Type: llm.ToolTypeFunction,
+				Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"ls"}`}}),
+		llm.ToolResultMessage("toolu_aaa", llm.Text("peers")),
+		llm.ToolResultMessage("toolu_bbb", llm.Text("pkg")),
+		llm.UserMessage(llm.Text("steer")),
+	}
+	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
+	if _, err := client.Execute(context.Background(), history, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("requests = %d, want 1", len(bodies))
+	}
+	body := bodies[0]
+
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %d, want the prompt, the reply and one user turn: %#v", len(msgs), msgs)
+	}
+	roles := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		msg, _ := m.(map[string]any)
+		role, _ := msg["role"].(string)
+		roles = append(roles, role)
+	}
+	if want := []string{"user", "assistant", "user"}; !reflect.DeepEqual(roles, want) {
+		t.Fatalf("roles = %v, want %v", roles, want)
+	}
+
+	answer := anthropicMessageBlocks(t, anthropicNthMessage(t, body, 1))
+	if len(answer) != 3 {
+		t.Fatalf("answer blocks = %#v, want text and both calls", answer)
+	}
+	if answer[0]["type"] != "text" {
+		t.Fatalf("first answer block = %#v, want the text", answer[0])
+	}
+	for i, wantID := range []string{"toolu_aaa", "toolu_bbb"} {
+		block := answer[i+1]
+		if block["type"] != "tool_use" || block["id"] != wantID {
+			t.Fatalf("answer block %d = %#v, want tool_use %s", i+1, block, wantID)
+		}
+	}
+
+	results := anthropicMessageBlocks(t, anthropicNthMessage(t, body, 2))
+	if len(results) != 3 {
+		t.Fatalf("user blocks = %#v, want both results and the steer", results)
+	}
+	for i, wantID := range []string{"toolu_aaa", "toolu_bbb"} {
+		block := results[i]
+		if block["type"] != "tool_result" || block["tool_use_id"] != wantID {
+			t.Fatalf("user block %d = %#v, want tool_result %s", i, block, wantID)
+		}
+	}
+	if block := results[2]; block["type"] != "text" || block["text"] != "steer" {
+		t.Fatalf("user block 2 = %#v, want the steer text after the results", block)
+	}
+
+	// The invariant behind the shape: no user turn ever directly follows one.
+	for i := 1; i < len(roles); i++ {
+		if roles[i] == "user" && roles[i-1] == "user" {
+			t.Fatalf("messages %d and %d are consecutive user turns: %#v", i-1, i, msgs)
+		}
 	}
 }
