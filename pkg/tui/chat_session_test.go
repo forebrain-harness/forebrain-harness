@@ -21148,6 +21148,102 @@ func TestFoldedMultiLineToolHeaderKeepsEveryRowColoured(t *testing.T) {
 	}
 }
 
+// TestToolCardRuleIsDrawnInTheHeaderColour pins the card's left rule — the "│"
+// a wrapped header continues under and the "└" its body opens on — to the
+// header's colour on every row, with the text beside it unchanged. A heredoc
+// command makes every one of its lines its own styled segment, so some cuts
+// land on a segment boundary: the gutter used to take whatever style was open
+// at the cut, drawing those rows' "│" terminal-white and the others in the
+// header colour, and the "└" took the output's grey.
+func TestToolCardRuleIsDrawnInTheHeaderColour(t *testing.T) {
+	forceColorProfile(t)
+	command := "cd /Users/someone/workspace/project && python3 - <<'PY'\nimport re\n" +
+		"src=open('pkg/tui/setup.go',encoding='utf-8').read()\ni=src.index('func x')\n" +
+		"j=src.index('\\n}\\n', i)\nbody=src[i:j]\nfor m in re.finditer(r'Hint: \"([^\"]+)\"', body):\n" +
+		"    print(m.group(1))\nprint(\"--- labels (top-level) ---\")\n" +
+		"for m in re.finditer(r'^\\t+Label: \"([^\"]+)\"', body, re.M):\n    print(\"GROUP:\", m.group(1))\nPY"
+	var long strings.Builder
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&long, "Label: thing %d\n", i)
+	}
+	cases := []struct {
+		name     string
+		status   string
+		output   string
+		expanded bool
+		header   string
+	}{
+		{"folded", "completed", long.String(), false, "38;5;214"},
+		{"expanded", "completed", long.String(), true, "38;5;214"},
+		{"short", "completed", "Label: one\n", false, "38;5;214"},
+		{"failed", "failed", "exit status 1\n", false, "38;5;203"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := viewModel{}
+			vm.append(Frame{Kind: FrameTool, Title: "shell", Content: tc.output, Final: true, StepID: "s1",
+				ToolMeta: tool.ToolMeta{ToolName: "shell", Status: tc.status, Input: map[string]any{"command": command}}})
+			vm.blocks[0].expanded = tc.expanded
+			vr := renderViewport(&vm, 100, 200, 1<<30, DiffThemeDark)
+
+			continuations, corners := 0, 0
+			for i, row := range vr.lines {
+				plain := stripANSI(row)
+				cells, _ := rowColumnStates(row, "")
+				switch {
+				case i > 0 && strings.HasPrefix(plain, "  │ "):
+					continuations++
+					if cells[2] != tc.header {
+						t.Fatalf("row %d: the header's rule is drawn in SGR %q, want %q: %q", i, cells[2], tc.header, row)
+					}
+					if cells[4] != tc.header {
+						t.Fatalf("row %d: the header text beside the rule lost its colour, SGR %q: %q", i, cells[4], row)
+					}
+				case strings.HasPrefix(plain, "  └ "):
+					corners++
+					if cells[2] != tc.header {
+						t.Fatalf("row %d: the body's corner is drawn in SGR %q, want the header's %q: %q", i, cells[2], tc.header, row)
+					}
+					if cells[4] != "38;5;244" {
+						t.Fatalf("row %d: the output beside the corner changed colour, SGR %q: %q", i, cells[4], row)
+					}
+				}
+			}
+			if continuations < 4 || corners != 1 {
+				t.Fatalf("expected a header wrapped onto several rows and one body corner, got %d continuations and %d corners:\n%s",
+					continuations, corners, stripANSI(strings.Join(vr.lines, "\n")))
+			}
+			assertRowsDrawIndependently(t, vr.lines)
+		})
+	}
+}
+
+// TestCheckpointCardRuleIsDrawnInItsTitleColour: a settled checkpoint draws the
+// same rule a tool card does, in its own title's colour.
+func TestCheckpointCardRuleIsDrawnInItsTitleColour(t *testing.T) {
+	forceColorProfile(t)
+	f := Frame{Kind: FrameMemoryCompact, Title: compactTitleDone, Final: true,
+		Summary: strings.Repeat("history 182k tokens → 31k tokens ", 6), Content: "The session so far."}
+	lines, _ := renderFrameLinesWithAgents(f, 80, DiffThemeDark, 0)
+	corners := 0
+	for i, row := range lines {
+		plain := stripANSI(row)
+		if !(i > 0 && strings.HasPrefix(plain, "  │ ")) && !strings.HasPrefix(plain, "  └ ") {
+			continue
+		}
+		cells, _ := rowColumnStates(row, "")
+		if cells[2] != "38;5;75" {
+			t.Fatalf("row %d: the checkpoint's rule is drawn in SGR %q, want its title's 38;5;75: %q", i, cells[2], row)
+		}
+		if strings.HasPrefix(plain, "  └ ") {
+			corners++
+		}
+	}
+	if corners != 1 || !strings.HasPrefix(stripANSI(lines[1]), "  │ ") {
+		t.Fatalf("expected a wrapped header and one body corner:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+}
+
 // opensSGRBeforeVisibleText reports whether row carries an SGR sequence before
 // its first visible rune, so the row opens the style it is drawn in.
 func opensSGRBeforeVisibleText(row string) bool {

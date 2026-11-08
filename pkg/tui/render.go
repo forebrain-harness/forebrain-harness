@@ -138,24 +138,7 @@ func selfContainedRows(rows []string) []string {
 					continue
 				}
 				if seq[len(seq)-1] == 'm' {
-					params := seq[2 : len(seq)-1]
-					if params == "" || params == "0" {
-						open = open[:0]
-					} else {
-						dup := false
-						for _, s := range open {
-							if s == seq {
-								dup = true
-								break
-							}
-						}
-						if !dup {
-							// Applying the same SGR twice is the same as
-							// applying it once, so deduplication keeps the
-							// replay identical and the list short.
-							open = append(open, seq)
-						}
-					}
+					open = applySGR(open, seq)
 				}
 				j += n
 				continue
@@ -186,6 +169,44 @@ func selfContainedRows(rows []string) []string {
 		return rows
 	}
 	return out
+}
+
+// applySGR applies one SGR sequence to open, the ordered list of sequences
+// seen since the last full reset (selfContainedRows' state model): a reset
+// empties it, anything else joins it once.
+func applySGR(open []string, seq string) []string {
+	params := seq[2 : len(seq)-1]
+	if params == "" || params == "0" {
+		return open[:0]
+	}
+	for _, s := range open {
+		if s == seq {
+			// Applying the same SGR twice is the same as applying it once, so
+			// deduplication keeps the replay identical and the list short.
+			return open
+		}
+	}
+	return append(open, seq)
+}
+
+// sgrStateThrough is open after every SGR sequence in s has been applied.
+func sgrStateThrough(open []string, s string) []string {
+	for j := 0; j < len(s); {
+		if s[j] != 0x1b {
+			j++
+			continue
+		}
+		seq, n := paintEscapeSequence(s[j:])
+		if n == 0 {
+			j++
+			continue
+		}
+		if seq[len(seq)-1] == 'm' {
+			open = applySGR(open, seq)
+		}
+		j += n
+	}
+	return open
 }
 
 // spinnerGlyphs are Braille spinner characters used for the running-tool
@@ -2119,7 +2140,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		// header foldBlock rebuilds always wraps under that gutter, so a running
 		// card that continued under bare spaces instead lost its rule, or grew
 		// one mid-run, depending on which of the two paths painted it.
-		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(line, "  │ ", r.layoutTermWidth()))
+		_, _ = fmt.Fprintln(r.out, wrapCardHeader(line, lineColor, r.layoutTermWidth()))
 	} else {
 		line := bulletStyle.Render(markerGlyph)
 		if title != "" {
@@ -2128,7 +2149,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		if summary != "" {
 			line += " " + summaryStyle.Render(summary)
 		}
-		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(line, "  │ ", r.layoutTermWidth()))
+		_, _ = fmt.Fprintln(r.out, wrapCardHeader(line, lineColor, r.layoutTermWidth()))
 	}
 
 	if f.Kind == FrameTool && strings.EqualFold(strings.TrimSpace(f.ToolMeta.PreviewKind), "image") {
@@ -2994,8 +3015,127 @@ func wrapToolDisplayLine(line string, continuationPrefix string) string {
 // display-cell-based character wrapping for oversized tokens and CJK text.
 func wrapToolDisplayLineWidth(line string, continuationPrefix string, width int) string {
 	line = strings.TrimRight(line, "\n")
+	rows := wrapToolDisplayRows(line, displayLineWidth(continuationPrefix), width)
+	if len(rows) == 0 {
+		return line
+	}
+	return strings.Join(rows, "\n"+continuationPrefix)
+}
+
+// wrapCardHeader wraps a card's header under the card's rule: every
+// continuation row opens on "  │ ", the "│" drawn in ruleColor — the colour of
+// the header text, so the rule and the "└" its body opens on (paintCardCorner)
+// read as one stroke with the header.
+//
+// The gutter used to be plain text spliced in at the cut, so it took whatever
+// style happened to be open there: a cut inside a styled segment drew it in
+// the header colour, a cut on a segment boundary — every line of a heredoc
+// command is its own segment, and so is each header part — drew it in the
+// terminal's own white. The rule now carries its own colour, and the style
+// open at the cut is reopened after it, so the header text reads exactly as
+// before.
+func wrapCardHeader(line, ruleColor string, width int) string {
+	line = strings.TrimRight(line, "\n")
+	rows := wrapToolDisplayRows(line, displayLineWidth(cardHeaderGutter), width)
+	if len(rows) == 0 {
+		return line
+	}
+	var b strings.Builder
+	var open []string
+	for i, row := range rows {
+		if i > 0 {
+			b.WriteString("\n  ")
+			b.WriteString(cardRuleGlyph("│", ruleColor, open))
+			b.WriteByte(' ')
+		}
+		b.WriteString(row)
+		open = sgrStateThrough(open, row)
+	}
+	return b.String()
+}
+
+// cardHeaderGutter is the indent a wrapped card header continues under, as it
+// measures: wrapCardHeader draws its "│" in the card's rule colour.
+const cardHeaderGutter = "  │ "
+
+// cardRuleGlyph draws one glyph of a card's rule in color, on a row where the
+// SGR sequences open hold: the glyph gets only its own colour, and open is
+// replayed after it so whatever follows draws as it would have.
+func cardRuleGlyph(glyph, color string, open []string) string {
+	var b strings.Builder
+	if len(open) > 0 {
+		b.WriteString(sharedBlockReset)
+	}
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(glyph))
+	for _, seq := range open {
+		b.WriteString(seq)
+	}
+	return b.String()
+}
+
+// paintCardCorner draws the "└" a card's body opens on in the card's rule
+// colour, so the rule wrapCardHeader draws turns the corner in the same colour
+// instead of taking the body's. A body is drawn by a dozen producers — output
+// blocks, Markdown, diff and diagnostics cards — and every one opens on
+// "  └ " (the contract toolBodyLines folds by), so the corner is painted here,
+// once, over the card's freshly captured rows. Only the glyph changes: the
+// style open around it is replayed after it.
+func paintCardCorner(rows []string, color string) []string {
+	var open []string
+	for i, row := range rows {
+		if !strings.HasPrefix(sgrPattern.ReplaceAllString(row, ""), "  └ ") {
+			open = sgrStateThrough(open, row)
+			continue
+		}
+		for j := 0; j < len(row); {
+			if row[j] == 0x1b {
+				seq, n := paintEscapeSequence(row[j:])
+				if n == 0 {
+					j++
+					continue
+				}
+				if seq[len(seq)-1] == 'm' {
+					open = applySGR(open, seq)
+				}
+				j += n
+				continue
+			}
+			if strings.HasPrefix(row[j:], "└") {
+				rows[i] = row[:j] + cardRuleGlyph("└", color, open) + row[j+len("└"):]
+				return rows
+			}
+			j++
+		}
+		return rows
+	}
+	return rows
+}
+
+// cardRuleColor is the colour a card's rule is drawn in: its header text's.
+// "" for a card that draws no rule — a subagent card's "└" rows are its tree,
+// not a rule.
+func cardRuleColor(f Frame) string {
+	switch f.Kind {
+	case FrameTool:
+		return toolHeaderColor(f)
+	case FrameMemoryCompact:
+		return compactTitleColor(f)
+	case FrameMigration:
+		_, color := migrationMarker(f, 0)
+		return color
+	case FrameSkillInstall:
+		_, color := skillInstallMarker(f, 0)
+		return color
+	}
+	return ""
+}
+
+// wrapToolDisplayRows is the rows wrapToolDisplayLineWidth joins: the first
+// fits the content width, each further one the width left after a
+// continuation prefix prefixWidth columns wide. nil for a line with no words.
+func wrapToolDisplayRows(line string, prefixWidth int, width int) []string {
 	if line == "" {
-		return ""
+		return nil
 	}
 	if width <= 0 {
 		width = 80
@@ -3004,7 +3144,6 @@ func wrapToolDisplayLineWidth(line string, continuationPrefix string, width int)
 	if firstWidth < 20 {
 		firstWidth = 20
 	}
-	prefixWidth := displayLineWidth(continuationPrefix)
 	continuationWidth := width - contentRightMargin - prefixWidth
 	if continuationWidth < 20 {
 		continuationWidth = 20
@@ -3012,7 +3151,7 @@ func wrapToolDisplayLineWidth(line string, continuationPrefix string, width int)
 
 	words := strings.Fields(line)
 	if len(words) == 0 {
-		return line
+		return nil
 	}
 
 	out := make([]string, 0, len(words))
@@ -3065,19 +3204,7 @@ func wrapToolDisplayLineWidth(line string, continuationPrefix string, width int)
 		}
 	}
 	flushCurrent()
-
-	if len(out) == 0 {
-		return line
-	}
-
-	var result strings.Builder
-	result.WriteString(out[0])
-	for _, wrappedLine := range out[1:] {
-		result.WriteByte('\n')
-		result.WriteString(continuationPrefix)
-		result.WriteString(wrappedLine)
-	}
-	return result.String()
+	return out
 }
 
 func summaryToolBody(f Frame, title string) string {
@@ -5462,29 +5589,46 @@ const (
 // while the compaction runs, its state in bold, and the detail — the phase and
 // the history size while running, the before → after banner once done.
 func compactHeaderLine(f Frame, spinnerPhase int) string {
-	title := strings.TrimSpace(f.Title)
-	if title == "" {
-		title = compactTitleRunning
-	}
-	marker, color := "●", "70"
-	switch {
-	case !f.Final:
-		marker, color = spinnerGlyphs[spinnerPhase%len(spinnerGlyphs)], "75"
-	case title == compactTitleFailed:
-		marker, color = "✗", "203"
-	case title == compactTitleCancelled:
-		marker, color = "○", "250"
-	}
+	title := compactCardTitle(f)
+	marker, color := compactMarker(f, spinnerPhase)
 	markerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true)
-	titleColor := color
-	if f.Final && title == compactTitleDone {
-		titleColor = "75"
-	}
-	line := markerStyle.Render(marker) + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(titleColor)).Bold(true).Render(title)
+	line := markerStyle.Render(marker) + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(compactTitleColor(f))).Bold(true).Render(title)
 	if detail := strings.TrimSpace(f.Summary); detail != "" {
 		line += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" · " + detail)
 	}
 	return line
+}
+
+// compactMarker is a compaction card's marker and its colour: a spinner while
+// it runs, then the state's glyph.
+func compactMarker(f Frame, spinnerPhase int) (string, string) {
+	switch title := compactCardTitle(f); {
+	case !f.Final:
+		return spinnerGlyphs[spinnerPhase%len(spinnerGlyphs)], "75"
+	case title == compactTitleFailed:
+		return "✗", "203"
+	case title == compactTitleCancelled:
+		return "○", "250"
+	}
+	return "●", "70"
+}
+
+// compactTitleColor is the colour a compaction card's title is drawn in: its
+// marker's, except a finished compaction's title, which stays blue beside the
+// green dot.
+func compactTitleColor(f Frame) string {
+	if f.Final && compactCardTitle(f) == compactTitleDone {
+		return "75"
+	}
+	_, color := compactMarker(f, 0)
+	return color
+}
+
+func compactCardTitle(f Frame) string {
+	if title := strings.TrimSpace(f.Title); title != "" {
+		return title
+	}
+	return compactTitleRunning
 }
 
 func (r *Renderer) renderMemoryCompact(f Frame) {
@@ -5496,7 +5640,7 @@ func (r *Renderer) renderMemoryCompact(f Frame) {
 		_, _ = fmt.Fprintln(r.out, "  "+renderCompactProgressBar(f.Progress, r.spinnerPhase, compactProgressBarWidth(r.layoutTermWidth())))
 		return
 	}
-	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(header, "  │ ", r.layoutTermWidth()))
+	_, _ = fmt.Fprintln(r.out, wrapCardHeader(header, compactTitleColor(f), r.layoutTermWidth()))
 	content := strings.TrimSpace(f.Content)
 	if content == "" {
 		_, _ = fmt.Fprintln(r.out)
@@ -5544,7 +5688,8 @@ func (r *Renderer) renderMigration(f Frame) {
 		_, _ = fmt.Fprintln(r.out, "  "+renderCompactProgressBar(f.Progress, r.spinnerPhase, compactProgressBarWidth(r.layoutTermWidth())))
 		return
 	}
-	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(header, "  │ ", r.layoutTermWidth()))
+	_, ruleColor := migrationMarker(f, r.spinnerPhase)
+	_, _ = fmt.Fprintln(r.out, wrapCardHeader(header, ruleColor, r.layoutTermWidth()))
 	content := strings.TrimSpace(f.Content)
 	if content == "" {
 		_, _ = fmt.Fprintln(r.out)
@@ -5568,21 +5713,27 @@ func migrationHeaderLine(f Frame, spinnerPhase int) string {
 	if title == "" {
 		title = migrationTitleMigrating
 	}
-	marker, color := "✓", "78"
-	switch {
-	case !f.Final:
-		marker, color = spinnerGlyphs[spinnerPhase%len(spinnerGlyphs)], "75"
-	case title == migrationTitleFailed:
-		marker, color = "✗", "203"
-	case title == migrationTitleCancelled:
-		marker, color = "○", "250"
-	}
+	marker, color := migrationMarker(f, spinnerPhase)
 	line := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(marker) +
 		" " + lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(title)
 	if detail := strings.TrimSpace(f.Summary); detail != "" {
 		line += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" · " + detail)
 	}
 	return line
+}
+
+// migrationMarker is a migration card's marker and the colour its marker and
+// title share: a spinner while the import runs, then the state's glyph.
+func migrationMarker(f Frame, spinnerPhase int) (string, string) {
+	switch title := strings.TrimSpace(f.Title); {
+	case !f.Final:
+		return spinnerGlyphs[spinnerPhase%len(spinnerGlyphs)], "75"
+	case title == migrationTitleFailed:
+		return "✗", "203"
+	case title == migrationTitleCancelled:
+		return "○", "250"
+	}
+	return "✓", "78"
 }
 
 // renderGoal draws one of a /goal's lines: a marker and title in the goal's
@@ -5687,22 +5838,24 @@ const skillInstallFailedSummary = "install failed"
 // dominates the wall clock reports nothing while it runs), so liveness is a
 // spinner and progress is the phase plus the elapsed time, not a bar pretending
 // to know how far along the fetch is.
+// skillInstallMarker is a skill install card's marker and the colour its
+// header is drawn in: a spinner while it installs, then a dot, or a cross when
+// it failed.
+func skillInstallMarker(f Frame, spinnerPhase int) (string, string) {
+	switch {
+	case !f.Final:
+		return spinnerGlyphs[spinnerPhase%len(spinnerGlyphs)], "117"
+	case strings.EqualFold(strings.TrimSpace(f.Summary), skillInstallFailedSummary):
+		return "✗", "203"
+	}
+	return "●", "75"
+}
+
 func (r *Renderer) renderSkillInstall(f Frame) {
 	source := strings.TrimSpace(f.Title)
 	summary := strings.TrimSpace(f.Summary)
 	content := strings.TrimSpace(f.Content)
-	failed := f.Final && strings.EqualFold(summary, skillInstallFailedSummary)
-
-	color := "75"
-	markerGlyph := "●"
-	switch {
-	case !f.Final:
-		markerGlyph = spinnerGlyphs[r.spinnerPhase%len(spinnerGlyphs)]
-		color = "117"
-	case failed:
-		markerGlyph = "✗"
-		color = "203"
-	}
+	markerGlyph, color := skillInstallMarker(f, r.spinnerPhase)
 	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true)
 	detailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 
@@ -5729,7 +5882,7 @@ func (r *Renderer) renderSkillInstall(f Frame) {
 		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(line, "   ", r.layoutTermWidth()))
 		return
 	}
-	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(line, "  │ ", r.layoutTermWidth()))
+	_, _ = fmt.Fprintln(r.out, wrapCardHeader(line, color, r.layoutTermWidth()))
 	if content == "" {
 		_, _ = fmt.Fprintln(r.out)
 		return

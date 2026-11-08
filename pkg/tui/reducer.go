@@ -3089,7 +3089,7 @@ func foldBlockLines(b *viewBlock, full []string, width int, spinnerPhase int, cw
 	// Wrap the fold header so long tool summaries don't exceed the viewport
 	// width and trigger terminal autowrap, which shifts the pinned layout and
 	// visually duplicates content.
-	header = wrapToolDisplayLineWidth(header, "  │ ", width)
+	header = wrapCardHeader(header, headerColorForFrame(b.frame), width)
 	// wrapToolDisplayLineWidth may produce multiple lines joined by "\n"; split
 	// them so each rendered row is a separate viewport line.
 	headerLines := strings.Split(header, "\n")
@@ -3414,6 +3414,9 @@ func renderFrameLinesWithAgents(f Frame, width int, theme DiffTheme, spinnerPhas
 		sr.renderCompactFrame(f, "system", "244")
 	}
 	lines := splitCapturedLines(buf.String())
+	if color := cardRuleColor(f); color != "" {
+		lines = paintCardCorner(lines, color)
+	}
 	if f.Kind != FrameFanout {
 		return lines, nil
 	}
@@ -3540,19 +3543,25 @@ func defaultFrameTitle(f Frame) string {
 }
 
 func headerStyleForFrame(f Frame) lipgloss.Style {
-	color := "244"
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(headerColorForFrame(f)))
+}
+
+// headerColorForFrame is the colour a folded header is drawn in, which its
+// wrapped rows' rule shares.
+func headerColorForFrame(f Frame) string {
 	switch f.Kind {
 	case FrameTool:
-		color = toolHeaderColor(f)
+		return toolHeaderColor(f)
 	case FrameError:
-		color = "203"
+		return "203"
 	case FramePlan:
-		color = "141"
+		return "141"
 	case FrameMemoryCompact:
-		// Matches renderMemoryCompact's final-state colour.
-		color = "75"
+		// The folded checkpoint draws renderMemoryCompact's own header, so
+		// its rule takes that header's title colour.
+		return compactTitleColor(f)
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+	return "244"
 }
 
 // maxFoldSummaryRunes caps the plain-text length of a fold header summary. A
