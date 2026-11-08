@@ -2263,6 +2263,16 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 				return
 			}
 		}
+		// peer_list's answer is a roster in JSON: the card draws it as one
+		// aligned row per agent, in full-body and compact mode alike, and never
+		// as the JSON itself.
+		if strings.EqualFold(title, "peer_list") && !toolStatusFailed(f) {
+			if block, ok := renderPeerListCard(f.Content, r.layoutTermWidth()); ok {
+				_, _ = fmt.Fprintln(r.out, block)
+				_, _ = fmt.Fprintln(r.out)
+				return
+			}
+		}
 		// MCP tool results carry their payload as a JSON transport envelope whose
 		// text blocks are Markdown. Extract every text block from the RAW frame
 		// content once and render it as Markdown here, before the generic
@@ -2845,11 +2855,17 @@ func formatToolContentWithInput(title, content, cwd string, input map[string]any
 		return formatShellOutput(content)
 	}
 
-	// All other tools (read, edit, write, webfetch, mcp, etc.):
-	// strip metadata labels and extract fenced content.
+	// All other tools (read, edit, write, webfetch, mcp, etc.). A body that is
+	// the tool's answer — the generic formatter's "output:" block on a live
+	// card, the answer verbatim on a replayed row — reads as its text or as
+	// "Field: value" rows, never as the JSON it arrived in.
+	if body, ok := readableToolPayload(content); ok {
+		return body
+	}
+	// Otherwise strip metadata labels and extract fenced content.
 	if clean := stripToolMetadataSections(content); clean != "" {
-		if out := formatJSONOutput(clean); out != "" {
-			return out
+		if body, ok := readableToolPayload(clean); ok {
+			return body
 		}
 		return clean
 	}
@@ -2887,29 +2903,27 @@ func formatEnterPlanModeOutput(content string) string {
 	return strings.TrimSpace(v.Reason)
 }
 
-// formatJSONOutput pretty-prints JSON content with indentation. Returns empty
-// string if content is not valid JSON.
-func formatJSONOutput(content string) string {
-	if !isToolOutputJSON(content) {
-		return ""
-	}
-	var v any
-	if err := json.Unmarshal([]byte(content), &v); err != nil {
-		return ""
-	}
-	pretty, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return ""
-	}
-	return string(pretty)
-}
-
 // isToolOutputJSON reports whether content looks like a JSON value (object or
 // array at the top level).
 func isToolOutputJSON(content string) bool {
 	content = strings.TrimSpace(content)
 	return (strings.HasPrefix(content, "{") && strings.HasSuffix(content, "}")) ||
 		(strings.HasPrefix(content, "[") && strings.HasSuffix(content, "]"))
+}
+
+// readableToolPayload shows a tool's answer when the card's content is that
+// answer rather than text a renderer already shaped (tool.ReadToolAnswer): an
+// answer that is text reads as that text, one that is data as the
+// "Field: value" lines every surface writes a value with — the approval
+// overlay writes a call's arguments the same way — never as the JSON or the
+// envelope it arrived in. ok is false for any other content, which the caller
+// shows as it is.
+func readableToolPayload(content string) (string, bool) {
+	answer, ok := tool.ReadToolAnswer(content)
+	if !ok {
+		return "", false
+	}
+	return answer.String(), true
 }
 
 // formatShellOutput extracts human-readable stdout from shell tool output.
@@ -3283,22 +3297,18 @@ func retrieveOutputMarkdownBody(content string) string {
 // other tool body does.
 const peerSendBodyLines = 3
 
-// peerSendAnswer is the engine's answer to peer_send, as the model received it
-// (pkg/run/peer_tools.go). The card turns it into one footnote line instead of
-// showing the JSON.
-type peerSendAnswer struct {
-	Status     string `json:"status"`
-	To         string `json:"to"`
-	PeerStatus string `json:"peer_status"`
-}
-
 // peerSendCardBody is the peer_send card's body (plan 199 §3.2): the message
 // the agent sent — at most its first three lines — and the delivery result as a
-// footnote on its own line. The engine's answer is JSON, which a reader should
-// never see; when it cannot be read the message stands alone.
+// footnote on its own line. The engine reads both out of the call
+// (tool.ReadablePeerSend), so the terminal and the page show the same two
+// facts; when the answer cannot be read the message stands alone.
 func peerSendCardBody(input map[string]any, content string) string {
-	lines := peerSendMessageLines(input["message"])
-	footnote := peerSendFootnote(content)
+	answer, ok := tool.ReadableToolAnswer("peer_send", content, input)
+	if !ok || answer.Send == nil {
+		return strings.Join(peerSendMessageLines(input["message"]), "\n")
+	}
+	lines := peerSendMessageLines(answer.Send.Message)
+	footnote := peerSendFootnote(answer.Send)
 	switch {
 	case len(lines) == 0:
 		return footnote
@@ -3325,19 +3335,18 @@ func peerSendMessageLines(message any) []string {
 }
 
 // peerSendFootnote is the delivery result as one sentence, or empty when the
-// answer cannot be read.
-func peerSendFootnote(content string) string {
-	answer, ok := parsePeerSendAnswer(content)
-	if !ok {
+// answer names no delivery.
+func peerSendFootnote(send *tool.ReadablePeerSend) string {
+	if send == nil {
 		return ""
 	}
-	if to := strings.TrimSpace(answer.To); to != "" {
-		if status := strings.TrimSpace(answer.PeerStatus); status != "" {
+	if to := strings.TrimSpace(send.To); to != "" {
+		if status := strings.TrimSpace(send.PeerStatus); status != "" {
 			return "Sent to " + to + " (" + status + ")."
 		}
 		return "Sent to " + to + "."
 	}
-	if status := strings.TrimSpace(answer.Status); status != "" {
+	if status := strings.TrimSpace(send.Status); status != "" {
 		runes := []rune(status)
 		runes[0] = unicode.ToUpper(runes[0])
 		return string(runes) + "."
@@ -3345,36 +3354,292 @@ func peerSendFootnote(content string) string {
 	return ""
 }
 
-// parsePeerSendAnswer reads the engine's answer from a card's content. The
-// model received the answer as JSON, and a replayed row keeps it verbatim; the
-// live card carries the generic formatter envelope around it. Both are
-// accepted, and anything else is not an answer.
-func parsePeerSendAnswer(content string) (peerSendAnswer, bool) {
-	trimmed := strings.TrimSpace(content)
-	if trimmed == "" {
-		return peerSendAnswer{}, false
-	}
-	var answer peerSendAnswer
-	if err := json.Unmarshal([]byte(trimmed), &answer); err == nil && answer.namesADelivery() {
-		return answer, true
-	}
-	if body := extractAnyFencedBody(trimmed); body != "" {
-		var envelope struct {
-			Output string `json:"output"`
-		}
-		if err := json.Unmarshal([]byte(body), &envelope); err == nil {
-			if err := json.Unmarshal([]byte(strings.TrimSpace(envelope.Output)), &answer); err == nil && answer.namesADelivery() {
-				return answer, true
-			}
-		}
-	}
-	return peerSendAnswer{}, false
+// The peer_list card's columns: two cells between columns, a name never
+// wider than peerListNameMaxWidth, a work tree path never wider than
+// peerListPlaceMaxWidth, and a task never squeezed below peerListTaskMinWidth —
+// past that the task gives way to where the agent works — nor a path below
+// peerListPathMinWidth beside its kind.
+const (
+	peerListColumnGap     = "  "
+	peerListNameMaxWidth  = 32
+	peerListPlaceMaxWidth = 32
+	peerListTaskMinWidth  = 12
+	peerListPathMinWidth  = 8
+	// peerListNameHeadMinWidth is the least of a parent's name a cut keeps.
+	peerListNameHeadMinWidth = 8
+)
+
+// peerListCardRow is one agent as the card draws it.
+type peerListCardRow struct {
+	glyph  string
+	color  string
+	name   string
+	state  string
+	ago    string
+	task   string
+	kind   string
+	place  string
+	path   bool
+	nameW  int
+	stateW int
 }
 
-// namesADelivery reports whether the answer carries the one fact a footnote
-// needs: where the message went, or at least what happened to it.
-func (a peerSendAnswer) namesADelivery() bool {
-	return strings.TrimSpace(a.Status) != "" || strings.TrimSpace(a.To) != ""
+// renderPeerListCard draws a peer_list card's body as an aligned roster: per
+// agent one row — a status mark, the agent's name, its state, then what it is
+// doing and where. The mark is coloured by what the state says (at work,
+// waiting on someone, idle or done) in the slash panels' palette; the name
+// keeps the terminal's own foreground, the rest is the grey of tool output.
+// Rows never wrap: the columns hold their alignment, and what does not fit is
+// cut with an ellipsis. ok is false when the content is not peer_list's
+// answer, and the card falls back to the ordinary rendering.
+func renderPeerListCard(content string, termWidth int) (string, bool) {
+	answer, ok := tool.ReadableToolAnswer("peer_list", content, nil)
+	if !ok {
+		return "", false
+	}
+	grey := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	prefix := func(i int) string { return grey.Render(toolOutputLinePrefix("", i == 0, true)) }
+	if len(answer.Peers) == 0 {
+		note := strings.TrimSpace(answer.Note)
+		if note == "" {
+			note = toolNoOutputText
+		}
+		return prefix(0) + lipgloss.NewStyle().Faint(true).Render(note), true
+	}
+	rows := peerListCardRows(answer.Peers)
+	nameW, stateW := 0, 0
+	for _, row := range rows {
+		nameW = maxInt(nameW, runewidth.StringWidth(row.name))
+		stateW = maxInt(stateW, row.stateW)
+	}
+	nameW = min(nameW, peerListNameMaxWidth)
+	width := termWidth - contentRightMargin
+	if width < 40 {
+		width = 40
+	}
+	// Prefix, mark and its space, the name and state columns, two gaps.
+	detailW := width - 4 - 2 - nameW - stateW - 2*len(peerListColumnGap)
+	lines := make([]string, 0, len(rows))
+	for i, row := range rows {
+		mark := lipgloss.NewStyle().Foreground(lipgloss.Color(row.color))
+		name := truncateMiddle(row.name, nameW)
+		line := mark.Render(row.glyph) + " " + runewidth.FillRight(name, nameW) + peerListColumnGap
+		state := mark.Render(row.state)
+		if row.ago != "" {
+			state += " " + grey.Render(row.ago)
+		}
+		line += state + strings.Repeat(" ", stateW-row.stateW)
+		if detail := fitPeerListDetail(row, detailW); detail != "" {
+			line += peerListColumnGap + grey.Render(detail)
+		}
+		lines = append(lines, prefix(i)+strings.TrimRight(line, " "))
+	}
+	return strings.Join(lines, "\n"), true
+}
+
+// peerListCardRows turns the engine's roster into the card's rows. The names
+// come from the engine (tool.ReadablePeer): a subagent of this conversation by
+// its type, with the short key a second one of the same type is told by; every
+// other agent by the name peer_send takes, with what it is and where it works.
+func peerListCardRows(peers []tool.ReadablePeer) []peerListCardRow {
+	sameLabel := map[string]int{}
+	for _, peer := range peers {
+		sameLabel[peerRowDisplay(peer)]++
+	}
+	rows := make([]peerListCardRow, 0, len(peers))
+	for _, peer := range peers {
+		row := peerListCardRow{}
+		row.glyph, row.color = peerListStatusMark(peer.Status)
+		row.state = strings.TrimSpace(peer.Status)
+		if row.state == "" {
+			row.state = "unknown"
+		}
+		// How long an idle agent has been idle; for an agent at work the last
+		// activity is now, and saying so is noise.
+		if ago := strings.TrimSpace(peer.ActiveAgo); strings.EqualFold(row.state, "idle") && ago != "" && ago != "just now" {
+			row.ago = ago
+		}
+		row.stateW = runewidth.StringWidth(row.state)
+		if row.ago != "" {
+			row.stateW += 1 + runewidth.StringWidth(row.ago)
+		}
+		row.task = tool.DisplayLine(peer.Task)
+		row.name = peerRowDisplay(peer)
+		if sameLabel[row.name] > 1 && peer.Short != "" {
+			row.name += " · " + peer.Short
+		}
+		if !peer.Own {
+			row.kind = peer.Kind
+			row.place, row.path = peerListPlace(peer)
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// peerRowDisplay is the name a roster row shows, before the short key a
+// duplicate of the same type needs.
+func peerRowDisplay(peer tool.ReadablePeer) string {
+	if display := strings.TrimSpace(peer.Display); display != "" {
+		return display
+	}
+	return strings.TrimSpace(peer.Name)
+}
+
+// peerListPlace is where an agent of another process works: "same tree" when
+// that is this agent's own work tree — the one fact that decides whether the
+// two can step on each other — or else its directory with the home prefix
+// shortened. path reports the second case, which the row may elide further.
+func peerListPlace(a tool.ReadablePeer) (place string, path bool) {
+	switch cwd := strings.TrimSpace(a.Cwd); {
+	case a.SameTree:
+		return "same tree", false
+	case cwd != "":
+		return elidePathHead(tildePath(cwd), peerListPlaceMaxWidth), true
+	default:
+		return "", false
+	}
+}
+
+// peerListStatusMark is the mark and colour a state draws its row with: a
+// filled green dot for an agent at work, an amber one for an agent waiting on
+// an approval, a hollow dot for an idle one and a check for a finished one.
+// Without colour the glyph and the state word still say it.
+func peerListStatusMark(status string) (glyph, color string) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running", "busy", "shell":
+		return "●", "70"
+	case "waiting":
+		return "●", "214"
+	case "idle":
+		return "○", "245"
+	case "finished":
+		return "✓", "245"
+	default:
+		return "·", "245"
+	}
+}
+
+// fitPeerListDetail fits a row's detail — what the agent is doing, what kind
+// of session it is, where it works — into width cells, giving up the least
+// telling part first. The kind goes first: the name already says most of it.
+// Then the path loses its head, never the end that names the project; then
+// the task is cut, down to peerListTaskMinWidth; and only then does the place
+// stand alone.
+func fitPeerListDetail(row peerListCardRow, width int) string {
+	if width < peerListTaskMinWidth {
+		return ""
+	}
+	const sep = " · "
+	sepW := runewidth.StringWidth(sep)
+	fits := func(text string) bool { return runewidth.StringWidth(text) <= width }
+	if full := joinNonEmpty(sep, row.task, row.kind, row.place); fits(full) {
+		return full
+	}
+	if row.place == "" {
+		// Nothing but a task and a kind: the task is what the reader wants.
+		if row.task != "" {
+			return runewidth.Truncate(row.task, width, "…")
+		}
+		return runewidth.Truncate(row.kind, width, "…")
+	}
+	if short := joinNonEmpty(sep, row.task, row.place); fits(short) {
+		return short
+	}
+	if row.task == "" {
+		return fitPeerListPlace(row, width)
+	}
+	taskW := runewidth.StringWidth(row.task)
+	if room := width - taskW - sepW; row.path && room >= peerListPathMinWidth {
+		return row.task + sep + elidePathHead(row.place, room)
+	}
+	place := row.place
+	if row.path {
+		place = elidePathHead(place, peerListPathMinWidth+len("…/"))
+	}
+	if room := width - runewidth.StringWidth(place) - sepW; room >= peerListTaskMinWidth {
+		return runewidth.Truncate(row.task, room, "…") + sep + place
+	}
+	return fitPeerListPlace(row, width)
+}
+
+// fitPeerListPlace is the place alone in width cells: a path elided at its
+// head, anything else cut at its end.
+func fitPeerListPlace(row peerListCardRow, width int) string {
+	if row.path {
+		return elidePathHead(row.place, width)
+	}
+	return runewidth.Truncate(row.place, width, "…")
+}
+
+// joinNonEmpty joins the parts that hold text with sep.
+func joinNonEmpty(sep string, parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, sep)
+}
+
+// truncateMiddle shortens text wider than width cells by cutting its middle,
+// keeping both ends: a name's start says whose it is and its end tells it
+// from its siblings, and cutting either end would lose one of the two. A
+// subagent of another process is named "<parent>.<subagent>": its own part is
+// kept whole when that still leaves the parent peerListNameHeadMinWidth
+// cells ("forebrain-harn…Plan-263-executor").
+func truncateMiddle(text string, width int) string {
+	if runewidth.StringWidth(text) <= width {
+		return text
+	}
+	if width <= 1 {
+		return runewidth.Truncate(text, width, "")
+	}
+	if dot := strings.LastIndex(text, "."); dot > 0 {
+		own := text[dot+1:]
+		if headW := width - 1 - runewidth.StringWidth(own); own != "" && headW >= peerListNameHeadMinWidth {
+			return runewidth.Truncate(text[:dot], headW, "") + "…" + own
+		}
+	}
+	runes := []rune(text)
+	headW := (width - 1) / 2
+	tailW := width - 1 - headW
+	tail := ""
+	for i := len(runes) - 1; i >= 0; i-- {
+		next := string(runes[i:])
+		if runewidth.StringWidth(next) > tailW {
+			break
+		}
+		tail = next
+	}
+	return runewidth.Truncate(text, headW, "") + "…" + tail
+}
+
+// elidePathHead shortens a path wider than width cells by dropping leading
+// directories behind "…/", so what is left is the end of the path — the part
+// that names the project. A last element wider than width on its own is cut
+// at its end instead.
+func elidePathHead(path string, width int) string {
+	if runewidth.StringWidth(path) <= width {
+		return path
+	}
+	parts := strings.Split(path, "/")
+	kept := ""
+	for i := len(parts) - 1; i >= 0; i-- {
+		next := parts[i]
+		if kept != "" {
+			next += "/" + kept
+		}
+		if runewidth.StringWidth("…/"+next) > width {
+			break
+		}
+		kept = next
+	}
+	if kept == "" {
+		return runewidth.Truncate(parts[len(parts)-1], width, "…")
+	}
+	return "…/" + kept
 }
 
 // Query and line-range recovery responses start with a Markdown heading and
@@ -5228,8 +5493,8 @@ func fanoutClockSuffix(f Frame, contentLine int) string {
 	if clock.End.IsZero() {
 		return " · " + formatWorkingElapsed(fanoutClockNow().Sub(clock.Start))
 	}
-	if d := clock.End.Sub(clock.Start); d > 0 {
-		return " · " + formatDuration(d)
+	if ds := formatDuration(clock.End.Sub(clock.Start)); ds != "" {
+		return " · " + ds
 	}
 	return ""
 }
@@ -5356,18 +5621,7 @@ func agentRosterRowSuffix(row AgentRosterRow) string {
 // agents apart: the first group of the uuid behind the "subagent-" prefix. The
 // roster panel and the subagent view's footer both use it, so an agent is
 // called the same thing wherever it is named.
-func shortAgentID(id string) string {
-	id = strings.TrimSpace(id)
-	id = strings.TrimPrefix(id, "subagent-")
-	id = strings.TrimPrefix(id, "plan-review-")
-	if id == "" {
-		return ""
-	}
-	if runes := []rune(id); len(runes) > 4 {
-		return string(runes[:4])
-	}
-	return id
-}
+func shortAgentID(id string) string { return tool.ShortAgentID(id) }
 
 // agentRosterRowDetail is what the row's agent is working on, shown to the
 // right of its name: the task this agent was dispatched to do, by the same

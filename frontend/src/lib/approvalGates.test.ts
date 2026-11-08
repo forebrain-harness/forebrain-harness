@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { setLocale } from '@/locales'
-import { approvalFacts, approvalFamily, approvalQuestion, parseApprovalPayload } from './approvalGates'
+import { approvalFacts, approvalFamily, approvalQuestion, mcpFieldLabel, parseApprovalPayload } from './approvalGates'
 
 /**
  * The family a pending approval belongs to decides the question it asks and
@@ -284,6 +284,15 @@ describe('approvalGates', () => {
     expect(multi.facts).toEqual(['Notes: two spaces', 'Patch: *** Begin Patch'])
     expect(multi.facts.some((line) => line.includes('\n'))).toBe(false)
     expect(approvalQuestion('mcp_tool', 'mcp__github__create_issue', payload)).toBe('要调用 github 的 create_issue 吗？')
+  })
+
+  it('labels a key as words, snake_case and camelCase alike, as the terminal does', () => {
+    // pkg/tool readableFieldLabel: the same key reads the same on both surfaces.
+    expect(mcpFieldLabel('task_id')).toBe('Task id')
+    expect(mcpFieldLabel('resumedAgentId')).toBe('Resumed agent id')
+    expect(mcpFieldLabel('HTTPStatus')).toBe('HTTP status')
+    expect(mcpFieldLabel('repo')).toBe('Repo')
+    expect(mcpFieldLabel('  ')).toBe('Value')
   })
 
   it('quotes the search and its cap, falling back to the tool default', () => {

@@ -24,8 +24,15 @@ func TestDisplayHeaderIsTheTerminalsWording(t *testing.T) {
 	read.Meta.Input = map[string]any{"file_path": "/etc/hosts"}
 	require.Equal(t, "Read /etc/hosts lines 1-96", header(read))
 
+	// A call under 100ms has no time worth reading: the header says nothing
+	// about it rather than "<0.1s".
 	read.Duration = 40 * time.Millisecond
-	require.Equal(t, "Read /etc/hosts lines 1-96 · <0.1s", header(read))
+	require.Equal(t, "Read /etc/hosts lines 1-96", header(read))
+	read.Duration = 1200 * time.Millisecond
+	require.Equal(t, "Read /etc/hosts lines 1-96 · 1.2s", header(read))
+	// The time itself is still a fact where one is stated for the model.
+	require.Equal(t, "<0.1s", FormatDuration(40*time.Millisecond))
+	require.Equal(t, "", FormatCardDuration(40*time.Millisecond))
 
 	shell := frame("shell", ToolMeta{Status: "completed", Input: map[string]any{"command": "ls plans/"}})
 	require.Equal(t, "Ran ls plans/", header(shell))

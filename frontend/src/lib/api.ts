@@ -156,6 +156,11 @@ export interface ChatMessageRecord {
    */
   shellCard?: import('@/composables/useChatStream').ShellCard | null
   fileDiff?: import('@/composables/useChatStream').FileDiffFacts | null
+  /**
+   * A tool row whose stored body is the tool's answer itself, read by the
+   * engine as its fields or its text (pkg/tool ReadableAnswer).
+   */
+  readableAnswer?: import('@/composables/useChatStream').ReadableAnswer | null
   memoryCitation?: MemoryCitation | null
 }
 

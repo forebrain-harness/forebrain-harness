@@ -1823,136 +1823,20 @@ func approvalBashCommand(req turn.ToolApprovalRequest) string {
 
 // approvalInputLines renders a tool's JSON arguments as the lines the approval
 // overlay shows: one "Field: value" row per argument, nested objects indented,
-// arrays as comma lists (or "- " blocks when they hold objects). The overlay
-// must never print the call's JSON itself: braces, quoted keys and escaped
-// newlines are the model's wire format, not a description of what the tool is
-// about to do.
+// arrays as comma lists (or "- " blocks when they hold objects), fields in key
+// order — tool.ReadableJSONLines, the one way every surface writes a value, so
+// a call's arguments here and a tool's answer on its card never read
+// differently. The overlay must never print the call's JSON itself: braces,
+// quoted keys and escaped newlines are the model's wire format, not a
+// description of what the tool is about to do. ToolInputJSON is serialized
+// from a structured input (pkg/turn/approval.go approvalInputJSON), so it
+// parses; a value that does not parse carries no readable argument.
 func approvalInputLines(raw string) []string {
 	input := strings.TrimSpace(raw)
 	if input == "" || input == "{}" {
 		return nil
 	}
-	decoder := json.NewDecoder(strings.NewReader(input))
-	decoder.UseNumber()
-	var payload any
-	if err := decoder.Decode(&payload); err != nil {
-		// ToolInputJSON is the tool call's arguments, serialized from a
-		// structured input (pkg/turn/approval.go approvalInputJSON), so it
-		// parses. A value that does not parse carries no readable argument, and
-		// printing it would put wire format back in front of the user.
-		return nil
-	}
-	return approvalValueLines(payload, "")
-}
-
-func approvalValueLines(value any, indent string) []string {
-	switch v := value.(type) {
-	case map[string]any:
-		keys := make([]string, 0, len(v))
-		for key := range v {
-			keys = append(keys, key)
-		}
-		// Sorted so the same input renders identically on every frame of the
-		// overlay's repaint.
-		sort.Strings(keys)
-		lines := make([]string, 0, len(keys))
-		for _, key := range keys {
-			lines = append(lines, approvalFieldLines(approvalFieldLabel(key), v[key], indent)...)
-		}
-		return lines
-	case []any:
-		lines := make([]string, 0, len(v))
-		for _, item := range v {
-			block := approvalValueLines(item, indent)
-			if len(block) == 0 {
-				continue
-			}
-			block[0] = indent + "- " + strings.TrimPrefix(block[0], indent)
-			lines = append(lines, block...)
-		}
-		return lines
-	case string:
-		return approvalStringLines(v, indent)
-	default:
-		return []string{indent + approvalScalarText(v)}
-	}
-}
-
-func approvalFieldLines(label string, value any, indent string) []string {
-	switch v := value.(type) {
-	case map[string]any:
-		if len(v) == 0 {
-			return []string{indent + label + ": (none)"}
-		}
-		return append([]string{indent + label + ":"}, approvalValueLines(v, indent+"  ")...)
-	case []any:
-		// An empty list says the same thing an empty object does: there is
-		// nothing in it. Without this the label printed with no value at all,
-		// which reads as a value the overlay failed to draw.
-		if len(v) == 0 {
-			return []string{indent + label + ": (none)"}
-		}
-		if scalars, ok := approvalScalarList(v); ok {
-			return []string{indent + label + ": " + strings.Join(scalars, ", ")}
-		}
-		return append([]string{indent + label + ":"}, approvalValueLines(v, indent+"  ")...)
-	case string:
-		lines := approvalStringLines(v, indent)
-		lines[0] = indent + label + ": " + strings.TrimPrefix(lines[0], indent)
-		return lines
-	default:
-		return []string{indent + label + ": " + approvalScalarText(v)}
-	}
-}
-
-// approvalStringLines keeps a value's own line breaks, so a multi-line prompt
-// reads as prose instead of an escaped one-liner.
-func approvalStringLines(text, indent string) []string {
-	if strings.TrimSpace(text) == "" {
-		return []string{indent + "(empty)"}
-	}
-	raw := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	lines := make([]string, 0, len(raw))
-	for i, line := range raw {
-		if i == 0 {
-			lines = append(lines, indent+line)
-			continue
-		}
-		lines = append(lines, indent+"  "+line)
-	}
-	return lines
-}
-
-func approvalScalarList(items []any) ([]string, bool) {
-	parts := make([]string, 0, len(items))
-	for _, item := range items {
-		switch item.(type) {
-		case map[string]any, []any:
-			return nil, false
-		}
-		parts = append(parts, approvalScalarText(item))
-	}
-	if len(parts) == 0 {
-		return nil, false
-	}
-	return parts, true
-}
-
-func approvalScalarText(value any) string {
-	if value == nil {
-		return "(none)"
-	}
-	return fmt.Sprint(value) // json.Number (UseNumber) keeps 1048576 as "1048576", never 1.048576e+06
-}
-
-func approvalFieldLabel(key string) string {
-	label := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(key), "_", " ")), " ")
-	if label == "" {
-		return "Value"
-	}
-	runes := []rune(label)
-	runes[0] = unicode.ToUpper(runes[0])
-	return string(runes)
+	return tool.ReadableJSONLines(input)
 }
 
 func isApprovalEnterPlanMode(req turn.ToolApprovalRequest) bool {

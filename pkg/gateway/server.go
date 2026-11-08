@@ -488,6 +488,11 @@ func gatewayToolCompletedStepData(stepID, description, toolName string, output m
 	if diff := fileDiffFor(toolName, displayBody); diff != nil {
 		data["file_diff"] = diff
 	}
+	// A body that is the tool's answer itself rides as its fields or its text,
+	// so the page never prints the JSON it arrived in.
+	if answer := readableAnswerFor(toolName, displayBody, meta.Input); answer != nil {
+		data["readable_answer"] = answer
+	}
 	return data
 }
 

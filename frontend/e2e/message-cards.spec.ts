@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { expect, test } from '@playwright/test'
 
-import { seedProjectSession, signIn, shot } from './support'
+import { expectAssistantReply, seedProjectSession, signIn, shot } from './support'
 
 /**
  * The conversation's message cards, proven on the real page: a call's header
@@ -439,6 +439,101 @@ test('the composer’s view mode keeps the answers and hides the run’s cards, 
 // unified diff rows. The rows are seeded in the engine's own card format
 // (formatShellStep / turnDiffSection), so the gateway reads the same facts
 // back a live card would carry.
+test('a tool with no card of its own lists its answer, never the JSON it arrived in', async ({ page }) => {
+  test.info().setTimeout(180_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  // Replay: what a live generic card stored (the formatter's "output:" block),
+  // and what a session migrated from Claude Code keeps — a bare JSON answer
+  // and a WebSearch answer with its links in JSON arrays.
+  const session = await seedProjectSession(page, 'message-cards-answers')
+  const now = Math.floor(Date.now() / 1000)
+  const roster = '{"self":"parent","agents":[{"name":"proj-99","kind":"terminal","status":"idle","cwd":"/work/proj","same_tree":true,"active_ago":"20m"}]}'
+  const envelope = ['output:', '', '```json', JSON.stringify({ output: roster }, null, 2), '```'].join('\n')
+  const sent = '{"success":true,"message":"Resuming agent aacb0c9","resumedAgentId":"aacb0c98b12b26520","pin":{"id":"aacb0c98b12b26520","ref":"13d70d"}}'
+  const links = 'Web search results for query: "kimi caching"\n\nLinks: [{"title":"Context Caching 正式公测","url":"https://platform.kimi.com/blog/posts/context-caching"}]\n\nKimi caches a prefix.'
+  sqlite(`
+    INSERT INTO fb_runs (id, session_id, input_text, status, created_at, updated_at)
+      VALUES ('run-e2e-answers', '${session}', 'who is around', 'done', ${now - 60}, ${now - 60});
+    INSERT INTO fb_messages(session_id, run_id, role, content, created_at)
+      VALUES('${session}', 'run-e2e-answers', 'user', 'who is around', ${now - 60});
+    ${assistantRow(session, 'run-e2e-answers', [
+      { id: 'call-roster', name: 'peer_list', args: {} },
+      { id: 'call-peer-send', name: 'peer_send', args: { to: 'proj-ff', message: '还在改 open.go 第 146 行附近的 Close()\n大约 10 分钟' } },
+      { id: 'call-send', name: 'SendMessage', args: { to: 'aacb0c9' } },
+      { id: 'call-search', name: 'web_search', args: { query: 'kimi caching' } },
+    ], now - 50)}
+    ${toolRow(session, 'run-e2e-answers', 'call-roster', 'peer_list', 'ran peer_list', envelope, now - 45)}
+    ${toolRow(session, 'run-e2e-answers', 'call-peer-send', 'peer_send', 'ran peer_send', '{"status":"delivered","to":"proj-ff","peer_status":"busy"}', now - 44, { to: 'proj-ff', message: '还在改 open.go 第 146 行附近的 Close()\n大约 10 分钟' })}
+    ${toolRow(session, 'run-e2e-answers', 'call-send', 'SendMessage', 'SendMessage', sent, now - 43)}
+    ${toolRow(session, 'run-e2e-answers', 'call-search', 'web_search', 'searched kimi caching', links, now - 42)}
+  `)
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await expect(headers(page)).toHaveCount(4)
+  for (let i = 0; i < 4; i += 1) await headers(page).nth(i).click()
+  const main = page.locator('.chat-shell main')
+
+  // peer_list is the machine's roster: an identity block, the agent's name,
+  // its status in the reader's words, and where it works — never its JSON.
+  const rosterCard = main.locator('[data-testid="peer-roster"]')
+  await expect(rosterCard).toHaveCount(1)
+  const rosterRow = rosterCard.locator('[data-testid="peer-roster-row"]')
+  await expect(rosterRow).toHaveCount(1)
+  await expect(rosterRow).toContainText('proj-99')
+  await expect(rosterRow).toContainText('空闲')
+  await expect(rosterRow).toContainText('终端 · 同目录 · 20 分钟前')
+  await expect(rosterRow.locator('[data-testid="peer-mark"]')).toHaveText('99')
+
+  // peer_send is the message that left, and what a busy recipient does with
+  // it, on the recipient's own block.
+  const sentCard = main.locator('[data-testid="peer-send"]')
+  await expect(sentCard).toHaveCount(1)
+  await expect(sentCard).toContainText('还在改 open.go 第 146 行附近的 Close()')
+  await expect(sentCard).toContainText('大约 10 分钟')
+  await expect(sentCard.locator('[data-testid="peer-send-foot"]')).toContainText('proj-ff')
+  await expect(sentCard.locator('[data-testid="peer-send-foot"]')).toContainText('对方正忙，会在下一步读到')
+
+  // Everything else keeps the generic reading: a migrated answer's fields, a
+  // search's links.
+  const answers = main.locator('[data-testid="tool-answer"]')
+  await expect(answers).toHaveCount(2)
+  await expect(answers.nth(0)).toContainText('Resumed agent id')
+  await expect(answers.nth(0)).toContainText('aacb0c98b12b26520')
+  await expect(answers.nth(1).locator('a', { hasText: 'Context Caching 正式公测' })).toHaveAttribute('href', 'https://platform.kimi.com/blog/posts/context-caching')
+  const replayed = await main.innerText()
+  for (const leak of ['output:', '{"', '"self"', '"success"', 'Links: [', '"peer_status"']) expect(replayed).not.toContain(leak)
+  // The last card has finished opening before the picture is taken.
+  await expect(answers.nth(1).locator('a', { hasText: 'Context Caching 正式公测' })).toBeVisible()
+  await page.waitForTimeout(400)
+  await shot(page, 'message-cards-answers-replayed')
+
+  // Live: the model calls a tool with no card of its own; the card lists its
+  // answer as it lands and again after a reload.
+  const live = await seedProjectSession(page, 'message-cards-answers-live')
+  await page.goto(`/?session=${live}`, { waitUntil: 'networkidle' })
+  await page.fill('textarea', `[[e2e:tool-call]]${JSON.stringify({ name: 'peer_list', arguments: {} })}\n\n谁在线？`)
+  await page.press('textarea', 'Enter')
+  const allow = main.locator('[data-testid="pending-decision-accept"]')
+  await allow.or(main.locator('[data-testid="peer-roster"]')).or(page.getByText(process.env.E2E_REPLY_OK ?? 'E2E_REPLY_OK')).first().waitFor({ timeout: 60_000 })
+  if (await allow.isVisible()) await allow.click()
+  await expectAssistantReply(page)
+  // Live and replayed, the card is the roster — an isolated machine may have
+  // nobody to list, and its empty state is the roster's own sentence.
+  const liveCard = page.locator('.tool-card').filter({ hasText: /列出|Listed agents|peer_list/ }).first()
+  if (!(await liveCard.locator('[data-testid="peer-roster"]').isVisible())) await liveCard.locator('[data-slot="collapsible-trigger"]').click()
+  await expect(liveCard.locator('[data-testid="peer-roster"]')).toBeVisible()
+  expect(await liveCard.innerText()).not.toContain('output:')
+  expect(await liveCard.innerText()).not.toContain('{"')
+  await shot(page, 'message-cards-answers-live')
+  await page.reload({ waitUntil: 'networkidle' })
+  const reloaded = page.locator('.tool-card').filter({ hasText: /列出|Listed agents|peer_list/ }).first()
+  if (!(await reloaded.locator('[data-testid="peer-roster"]').isVisible())) await reloaded.locator('[data-slot="collapsible-trigger"]').click()
+  await expect(reloaded.locator('[data-testid="peer-roster"]')).toBeVisible()
+  expect(await reloaded.innerText()).not.toContain('{"')
+  await shot(page, 'message-cards-answers-live-reloaded')
+})
+
 test('a shell card shows only its output, and a truncated one opens the whole of it', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))

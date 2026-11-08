@@ -205,7 +205,7 @@ func TestImageMarkerRowPredicateSkipsEveryHintRow(t *testing.T) {
 		{"wrapped marker continuation", "    4 KB · click to open", true},
 		{"streaming hint", "    … 3 earlier lines", false},
 		{"fold hint", "    ··· 12 more lines (click to expand)", false},
-		{"card title", "● Read shot.png <0.1s", false},
+		{"card title", "● Read shot.png 0.3s", false},
 		{"empty row", "", false},
 		// A text read's body row carries the same prefix; only the block type
 		// distinguishes it, which the vm-level test above covers.

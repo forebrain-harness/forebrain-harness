@@ -238,11 +238,16 @@ function dangerousRuleFact(rule: string): string {
   return key ? t(key) : ''
 }
 
-/** A payload key as a label: underscores read as spaces, the first letter
- * capitalised — the rule the terminal's approval block applies
- * (pkg/tui/overlays.go approvalFieldLabel). */
-function mcpFieldLabel(key: string): string {
-  const label = String(key ?? '').replace(/_/g, ' ').split(/\s+/).filter(Boolean).join(' ')
+/** A payload key as a label: snake_case and camelCase read as lowercase
+ * words, the first letter capitalised ("resumedAgentId" reads "Resumed agent
+ * id") — the rule every terminal value applies (pkg/tool readableFieldLabel). */
+export function mcpFieldLabel(key: string): string {
+  const words = String(key ?? '')
+    .trim()
+    .replace(/_/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, (_, prev: string, upper: string) => `${prev} ${upper.toLowerCase()}`)
+    .replace(/([A-Z])([A-Z])(?=[a-z])/g, (_, prev: string, upper: string) => `${prev} ${upper.toLowerCase()}`)
+  const label = words.split(/\s+/).filter(Boolean).join(' ')
   if (!label) return 'Value'
   return label.charAt(0).toUpperCase() + label.slice(1)
 }

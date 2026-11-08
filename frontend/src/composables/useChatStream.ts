@@ -314,6 +314,13 @@ export interface SubagentToolStep {
   /** A file tool's diff (plan 135): edit_file / write_file. */
   fileDiff?: FileDiffFacts
   /**
+   * The call's answer for a reader, when its body is the answer itself rather
+   * than text a renderer shaped: the answer's fields, or its text, read by the
+   * engine (pkg/tool ReadToolAnswer) — the card lists them where it would
+   * otherwise print the JSON the answer arrived in.
+   */
+  readableAnswer?: ReadableAnswer
+  /**
    * The call's structured result, when the socket carried one (plan 153): a
    * `present_files` completion's `presented[]`, the `exit_plan_mode` envelope
    * with its `artifact`. A reloaded row carries only its display body, so a
@@ -811,6 +818,142 @@ function shellCardFromPayload(payload: Record<string, unknown>): ShellCard | und
 }
 
 /**
+ * A tool's answer as the engine reads it for a reader (pkg/tool
+ * ReadableAnswer): fields as rows, in the answer's order, and its text.
+ */
+export interface ReadableAnswer {
+  rows: ReadableRow[]
+  text?: string
+  /** A peer_list answer's roster, in the answer's own order. */
+  peers?: ReadablePeer[]
+  /** The one line a roster with nobody in it carries. */
+  note?: string
+  /** A peer_send answer: the message that went out, and where it went. */
+  send?: ReadablePeerSend
+}
+
+/**
+ * One agent of a peer_list roster (pkg/tool ReadablePeer). display, short and
+ * own are the engine's naming rules — a subagent of this conversation by its
+ * type with the short key that tells it from its siblings, every other agent
+ * by the name peer_send takes; mark and tone are the identity block the
+ * gateway derives, which a surface only maps to a colour.
+ */
+export interface ReadablePeer {
+  name: string
+  ref?: string
+  kind?: string
+  status?: string
+  task?: string
+  cwd?: string
+  sameTree?: boolean
+  activeAgo?: string
+  display?: string
+  short?: string
+  own?: boolean
+  mark?: string
+  tone?: number
+}
+
+/** A peer_send answer's card facts (pkg/tool ReadablePeerSend). */
+export interface ReadablePeerSend {
+  message?: string
+  status?: string
+  to?: string
+  peerStatus?: string
+  hint?: string
+  mark?: string
+  tone?: number
+}
+
+/**
+ * One row of a ReadableAnswer: a field (label and value), a field heading the
+ * rows nested under it (label alone), or a list item's value or a further line
+ * of a multi-line value (value alone). depth is how far it sits in; bullet
+ * marks the first row of a list item.
+ */
+export interface ReadableRow {
+  depth: number
+  bullet?: boolean
+  label?: string
+  value?: string
+}
+
+/**
+ * readableAnswerFrom shapes the readable_answer a live completion or a stored
+ * row carries (camel-cased on both paths). An object that is not the engine's
+ * shape, or one with nothing in it, is no answer.
+ */
+export function readableAnswerFrom(raw: unknown): ReadableAnswer | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const answer = raw as Record<string, unknown>
+  const rows = Array.isArray(answer.rows)
+    ? answer.rows.flatMap((item): ReadableRow[] => {
+      if (!item || typeof item !== 'object') return []
+      const row = item as Record<string, unknown>
+      const label = String(row.label ?? '')
+      const value = String(row.value ?? '')
+      if (!label && !value) return []
+      return [{
+        depth: Math.max(0, Number(row.depth) || 0),
+        ...(row.bullet === true ? { bullet: true } : {}),
+        ...(label ? { label } : {}),
+        ...(value ? { value } : {}),
+      }]
+    })
+    : []
+  const peers = Array.isArray(answer.peers)
+    ? answer.peers.flatMap((item): ReadablePeer[] => {
+      if (!item || typeof item !== 'object') return []
+      const peer = item as Record<string, unknown>
+      const name = String(peer.name ?? '').trim()
+      if (!name) return []
+      const own = peer.own === true
+      return [{
+        name,
+        ...(stringOrUndefined(peer.ref) ? { ref: String(peer.ref) } : {}),
+        ...(stringOrUndefined(peer.kind) ? { kind: String(peer.kind) } : {}),
+        ...(stringOrUndefined(peer.status) ? { status: String(peer.status) } : {}),
+        ...(stringOrUndefined(peer.task) ? { task: String(peer.task) } : {}),
+        ...(stringOrUndefined(peer.cwd) ? { cwd: String(peer.cwd) } : {}),
+        ...(peer.sameTree === true ? { sameTree: true } : {}),
+        ...(stringOrUndefined(peer.activeAgo) ? { activeAgo: String(peer.activeAgo) } : {}),
+        ...(stringOrUndefined(peer.display) ? { display: String(peer.display) } : {}),
+        ...(stringOrUndefined(peer.short) ? { short: String(peer.short) } : {}),
+        ...(own ? { own: true } : {}),
+        ...(stringOrUndefined(peer.mark) ? { mark: String(peer.mark) } : {}),
+        ...(Number.isFinite(Number(peer.tone)) ? { tone: Number(peer.tone) } : {}),
+      }]
+    })
+    : []
+  const note = String(answer.note ?? '').trim()
+  const rawSend = answer.send && typeof answer.send === 'object' && !Array.isArray(answer.send)
+    ? answer.send as Record<string, unknown>
+    : null
+  const sendFields: ReadablePeerSend | undefined = rawSend
+    ? {
+      ...(stringOrUndefined(rawSend.message) ? { message: String(rawSend.message) } : {}),
+      ...(stringOrUndefined(rawSend.status) ? { status: String(rawSend.status) } : {}),
+      ...(stringOrUndefined(rawSend.to) ? { to: String(rawSend.to) } : {}),
+      ...(stringOrUndefined(rawSend.peerStatus) ? { peerStatus: String(rawSend.peerStatus) } : {}),
+      ...(stringOrUndefined(rawSend.hint) ? { hint: String(rawSend.hint) } : {}),
+      ...(stringOrUndefined(rawSend.mark) ? { mark: String(rawSend.mark) } : {}),
+      ...(Number.isFinite(Number(rawSend.tone)) ? { tone: Number(rawSend.tone) } : {}),
+    }
+    : undefined
+  const send = sendFields && Object.keys(sendFields).length > 0 ? sendFields : undefined
+  const text = String(answer.text ?? '').trim()
+  if (rows.length === 0 && !text && peers.length === 0 && !note && !send) return undefined
+  return {
+    rows,
+    ...(text ? { text } : {}),
+    ...(peers.length ? { peers } : {}),
+    ...(note ? { note } : {}),
+    ...(send ? { send } : {}),
+  }
+}
+
+/**
  * fileDiffFromPayload reads the file_diff an edit_file / write_file row or
  * completion carries: the turn diff the card opens with, and the rest of the
  * body after it (diagnostics and the like) for the surface to render as it
@@ -883,6 +1026,7 @@ export function toolStepFromPayload(
   // the merge in upsert spreads this object over the started card.
   const shellCard = completed ? shellCardFromPayload(payload) : undefined
   const fileDiff = completed ? fileDiffFromPayload(payload) : undefined
+  const readableAnswer = completed ? readableAnswerFrom(payload.readableAnswer) : undefined
   // The structured result rides the completion only, and only when the engine
   // sent a map (plan 153): the card draws its files from it, and everything
   // else about the call comes from the body.
@@ -906,6 +1050,7 @@ export function toolStepFromPayload(
     subagentCall: subagentCallFromMeta(meta),
     ...(shellCard ? { shellCard } : {}),
     ...(fileDiff ? { fileDiff } : {}),
+    ...(readableAnswer ? { readableAnswer } : {}),
     ...(result ? { result } : {}),
     ...(metaBool(meta, 'plan_only') || result?.plan_only === true || result?.planOnly === true ? { planOnly: true } : {}),
     durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : undefined,
@@ -938,7 +1083,7 @@ function stepHoldsNoCard(step: { toolName: string; status: string }): boolean {
  * When a row carries none, the card is left without a body rather than
  * falling back to the model-facing result, which was never meant to be read.
  */
-export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?: string | null; partsJson?: string | null; subagentCall?: SubagentCall | null; header?: string; headerParts?: HeaderParts | null; shellCard?: ShellCard | null; fileDiff?: FileDiffFacts | null }, call?: StoredToolCall): SubagentToolStep {
+export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?: string | null; partsJson?: string | null; subagentCall?: SubagentCall | null; header?: string; headerParts?: HeaderParts | null; shellCard?: ShellCard | null; fileDiff?: FileDiffFacts | null; readableAnswer?: unknown }, call?: StoredToolCall): SubagentToolStep {
   const display = parseToolDisplayPart(row.partsJson)
   const meta = { ...toolMetaRecord(row.toolMetaJson), ...toolMetaRecord(display.toolMetaJson) }
   const toolName = metaString(meta, 'tool_name') || String(call?.name ?? '').trim()
@@ -951,6 +1096,7 @@ export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?
   const input = meta.input && typeof meta.input === 'object' && !Array.isArray(meta.input)
     ? meta.input as Record<string, unknown>
     : undefined
+  const readableAnswer = readableAnswerFrom(row.readableAnswer)
   const denyFeedback = metaString(meta, 'deny_feedback')
   return {
     stepId: String(row.toolStepId ?? '').trim() || String(call?.id ?? '').trim(),
@@ -969,6 +1115,7 @@ export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?
     subagentCall: row.subagentCall ?? undefined,
     ...(row.shellCard ? { shellCard: row.shellCard } : {}),
     ...(row.fileDiff ? { fileDiff: row.fileDiff } : {}),
+    ...(readableAnswer ? { readableAnswer } : {}),
     // A kept-plan exit says so on the row's own meta (plans 148/153), so a
     // reloaded card keeps the fact the live one showed.
     ...(metaBool(meta, 'plan_only') ? { planOnly: true } : {}),
@@ -2407,14 +2554,13 @@ export function formatRuntimeDuration(durationMs: number): string {
 }
 
 /**
- * The final elapsed of an ended task — the terminal's formatDuration
- * (pkg/tui/render.go), spelled the same so both surfaces say "4.2s", "14m3s"
- * and "<0.1s" about the same work. Zero renders nothing: a task that never
- * ran has no elapsed time to claim.
+ * The final elapsed of an ended task — the engine's FormatCardDuration
+ * (pkg/tool/display_header.go), spelled the same so both surfaces say "4.2s"
+ * and "14m3s" about the same work. Under 100ms renders nothing, like zero: a
+ * call that fast has no time worth reading.
  */
 export function formatToolDuration(durationMs: number): string {
-  if (!(durationMs > 0)) return ''
-  if (durationMs < 100) return '<0.1s'
+  if (!(durationMs >= 100)) return ''
   const seconds = durationMs / 1000
   if (seconds >= 60) return `${Math.floor(seconds / 60)}m${Math.floor(seconds) % 60}s`
   if (seconds >= 10) return `${Math.floor(seconds)}s`

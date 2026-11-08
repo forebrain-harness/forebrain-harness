@@ -58,7 +58,7 @@ func inputString(tm tool.ToolMeta, key string) string { return tool.InputString(
 
 func failedActionPhrase(toolName string) string { return tool.FailedActionPhrase(toolName) }
 
-func formatDuration(d time.Duration) string { return tool.FormatDuration(d) }
+func formatDuration(d time.Duration) string { return tool.FormatCardDuration(d) }
 
 func formatWorkingElapsed(elapsed time.Duration) string { return tool.FormatWorkingElapsed(elapsed) }
 

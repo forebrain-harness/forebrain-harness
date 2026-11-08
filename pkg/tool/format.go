@@ -3,10 +3,12 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1608,6 +1610,12 @@ func formatWebSearchStep(evt StepEvent, maxBytes int) (string, bool) {
 // reading the TUI transcript.
 func FormatWebSearchResult(content string) (string, bool) {
 	raw := strings.TrimSpace(content)
+	// Read before the fence below: the model's notes between the lines may
+	// hold a code block, and taking that block for the answer would lose
+	// every link.
+	if results := webSearchLinksLines(raw); len(results) > 0 {
+		return renderWebSearchDisplay(webSearchDisplay{Results: results}), true
+	}
 	if fenced := firstFencedBody(raw); fenced != "" {
 		raw = fenced
 	}
@@ -1620,6 +1628,39 @@ func FormatWebSearchResult(content string) (string, bool) {
 		return "", false
 	}
 	return renderWebSearchDisplay(display), true
+}
+
+// webSearchLinksPrefix opens each line of results in a Claude Code WebSearch
+// answer, the text a session migrated from Claude Code keeps: a
+// "Web search results for query: …" line, then "Links: " lines each carrying
+// a JSON array of {title, url}, with the model's own notes between them.
+const webSearchLinksPrefix = "Links: "
+
+// webSearchLinksLines reads the results of a Claude Code WebSearch answer
+// from its "Links: " lines, so a migrated session's card lists them the way a
+// native search does instead of printing the arrays. Each array is read one
+// link at a time: a row cut short when it was stored still holds every link
+// before the cut. A text with no such line holds none.
+func webSearchLinksLines(text string) []webSearchDisplayResult {
+	var items []any
+	for _, line := range strings.Split(text, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), webSearchLinksPrefix)
+		if !ok {
+			continue
+		}
+		decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(rest)))
+		if open, err := decoder.Token(); err != nil || open != json.Delim('[') {
+			continue
+		}
+		for decoder.More() {
+			var link any
+			if decoder.Decode(&link) != nil {
+				break
+			}
+			items = append(items, link)
+		}
+	}
+	return webSearchResultsFromItems(items)
 }
 
 const maxWebSearchEnvelopeDepth = 5
@@ -2550,24 +2591,13 @@ func subagentTaskStatusPhrase(task event.SubagentCallTask) string {
 }
 
 // subagentElapsedLabel formats an ended execution's elapsed time the way the
-// terminal's settled tool cards do (pkg/tui render.go's formatDuration);
-// anything without both clocks, or a non-positive span, has none.
+// settled tool cards do (FormatCardDuration); anything without both clocks, or
+// a non-positive span, has none.
 func subagentElapsedLabel(startedAt, finishedAt int64) string {
-	d := time.Duration(finishedAt-startedAt) * time.Second
-	if startedAt <= 0 || finishedAt <= 0 || d <= 0 {
+	if startedAt <= 0 || finishedAt <= 0 {
 		return ""
 	}
-	if d < 100*time.Millisecond {
-		return "<0.1s"
-	}
-	sec := d.Seconds()
-	if sec >= 60 {
-		return fmt.Sprintf("%dm%ds", int(sec)/60, int(sec)%60)
-	}
-	if sec >= 10 {
-		return fmt.Sprintf("%ds", int(sec))
-	}
-	return fmt.Sprintf("%.1fs", sec)
+	return FormatCardDuration(time.Duration(finishedAt-startedAt) * time.Second)
 }
 
 // ToolStepHoldsNoCard reports whether a tool step's transcript card is
@@ -3886,4 +3916,739 @@ func ProviderWebSearchMeta(detail string, completed bool, agentID string) ToolMe
 		meta.Invocation = ProviderWebSearchToolName + " " + detail
 	}
 	return meta
+}
+
+// ReadableAnswer is a tool's answer written for a reader: the answer's fields
+// as rows, and its text. A card whose body is the answer itself — a tool with
+// no renderer of its own, or a row a migrated session recorded — shows this
+// instead of the JSON the answer arrived in. Every surface reads the same
+// rows: the terminal writes them as "Field: value" lines (String), the page
+// lays them out as a field list.
+type ReadableAnswer struct {
+	// Rows are the answer's fields, in the order the answer gave them.
+	Rows []ReadableRow `json:"rows,omitempty"`
+	// Text is an answer that is text, or the prose an answer goes on with
+	// after its leading object. It is Markdown as often as not.
+	Text string `json:"text,omitempty"`
+	// Peers is a peer_list answer's roster, in the order the answer gave it.
+	Peers []ReadablePeer `json:"peers,omitempty"`
+	// Note is the one line a roster with nobody in it carries.
+	Note string `json:"note,omitempty"`
+	// Send is a peer_send answer: the message that went out, and where it went.
+	Send *ReadablePeerSend `json:"send,omitempty"`
+}
+
+// ReadablePeer is one agent of a peer_list answer, as a card shows it. The
+// fields are the answer's own facts; Display, Short, Own, Mark and Tone are
+// what a surface draws it with — derived once here, so no surface has to know
+// the naming rule. Mark and Tone are the identity block's two characters and
+// palette index; the engine leaves them empty and the gateway fills them from
+// the process's own derivation (process.PeerMark), because a surface never
+// derives an identity block.
+type ReadablePeer struct {
+	Name      string `json:"name"`
+	Ref       string `json:"ref,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Task      string `json:"task,omitempty"`
+	Cwd       string `json:"cwd,omitempty"`
+	SameTree  bool   `json:"same_tree,omitempty"`
+	ActiveAgo string `json:"active_ago,omitempty"`
+	// Display is what a card calls the agent: a subagent of this conversation
+	// by its type ("explore"), every other agent by the name peer_send takes,
+	// with its ref when two share it.
+	Display string `json:"display,omitempty"`
+	// Short is the part of a roster key that tells this conversation's
+	// subagents apart, for a card that has to name two of one type.
+	Short string `json:"short,omitempty"`
+	// Own marks one of this conversation's own agents — a subagent the
+	// dispatcher can address — rather than an agent of another process.
+	Own  bool   `json:"own,omitempty"`
+	Mark string `json:"mark,omitempty"`
+	Tone int    `json:"tone,omitempty"`
+}
+
+// ReadablePeerSend is a peer_send answer's card: the message that went out,
+// where it went, and what the recipient said of itself. Mark and Tone are the
+// recipient's identity block, filled the same way a roster row's is.
+type ReadablePeerSend struct {
+	Message    string `json:"message,omitempty"`
+	Status     string `json:"status,omitempty"`
+	To         string `json:"to,omitempty"`
+	PeerStatus string `json:"peer_status,omitempty"`
+	Hint       string `json:"hint,omitempty"`
+	Mark       string `json:"mark,omitempty"`
+	Tone       int    `json:"tone,omitempty"`
+}
+
+// ReadableRow is one row of a ReadableAnswer. Depth is how far it sits in: a
+// field of a nested object, an item of a list, a further line of a value. A
+// row with a Label is a field; Value alone is a list item's value or a further
+// line of a multi-line one; a Label without a Value heads the rows nested
+// under it. Bullet marks the first row of a list item.
+type ReadableRow struct {
+	Depth  int    `json:"depth,omitempty"`
+	Bullet bool   `json:"bullet,omitempty"`
+	Label  string `json:"label,omitempty"`
+	Value  string `json:"value,omitempty"`
+}
+
+// String writes the answer the way the terminal shows it: one "Field: value"
+// line per row, two cells of indent per level, "- " before a list item's first
+// row, and the text a blank line below the rows. A roster is one line per
+// agent, and a send is its message and where it went.
+func (a ReadableAnswer) String() string {
+	if len(a.Peers) > 0 || (a.Note != "" && a.Send == nil) {
+		lines := make([]string, 0, len(a.Peers)+1)
+		for _, peer := range a.Peers {
+			name := peer.Display
+			if name == "" {
+				name = peer.Name
+			}
+			line := strings.Join(nonEmptyText(name, peer.Status, peer.Task), " · ")
+			lines = append(lines, line)
+		}
+		if note := strings.TrimSpace(a.Note); note != "" {
+			lines = append(lines, note)
+		}
+		return strings.Join(lines, "\n")
+	}
+	if send := a.Send; send != nil {
+		lines := make([]string, 0, 2)
+		if message := strings.TrimSpace(send.Message); message != "" {
+			lines = append(lines, message)
+		}
+		switch {
+		case send.To != "" && send.PeerStatus != "":
+			lines = append(lines, "Sent to "+send.To+" ("+send.PeerStatus+").")
+		case send.To != "":
+			lines = append(lines, "Sent to "+send.To+".")
+		case send.Status != "":
+			lines = append(lines, strings.ToUpper(send.Status[:1])+send.Status[1:]+".")
+		}
+		return strings.Join(lines, "\n")
+	}
+	lines := make([]string, 0, len(a.Rows)+2)
+	for _, row := range a.Rows {
+		lines = append(lines, row.line())
+	}
+	if text := strings.TrimSpace(a.Text); text != "" {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, text)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (r ReadableRow) line() string {
+	var b strings.Builder
+	b.WriteString(strings.Repeat("  ", r.Depth))
+	if r.Bullet {
+		b.WriteString("- ")
+	}
+	switch {
+	case r.Label != "" && r.Value != "":
+		b.WriteString(r.Label + ": " + r.Value)
+	case r.Label != "":
+		b.WriteString(r.Label + ":")
+	default:
+		b.WriteString(r.Value)
+	}
+	return b.String()
+}
+
+// ReadToolAnswer reads a tool's answer out of a card's content when that
+// content is the answer rather than text a renderer already shaped: a JSON
+// value — bare, as a replayed row keeps it, or under the generic formatter's
+// "output:" label, as a live card carries it — or a record of
+// <tag>value</tag> fields. The generic formatter wraps a tool's text in
+// {"output": "…"}: an answer that is text comes back as Text, and one that is
+// JSON text as the Rows of the data it holds. An answer that opens with a JSON
+// object and goes on in prose — a status object with a report after it —
+// comes back as both. ok is false for any other content, which a surface shows
+// as it is.
+func ReadToolAnswer(content string) (ReadableAnswer, bool) {
+	trimmed := strings.TrimSpace(content)
+	if record, ok := tagRecordAnswer(trimmed); ok {
+		return ReadableAnswer{Rows: readableRows(record, 0)}, true
+	}
+	answer, enveloped := genericOutputAnswer(trimmed)
+	if !enveloped {
+		answer = trimmed
+	}
+	text, isText := answer.(string)
+	if !isText {
+		return ReadableAnswer{Rows: readableRows(answer, 0)}, true
+	}
+	text = strings.TrimSpace(text)
+	if isJSONDocument(text) {
+		if value, ok := decodeOrderedJSON(text); ok {
+			return ReadableAnswer{Rows: readableRows(value, 0)}, true
+		}
+	}
+	if lead, rest, ok := leadingJSONObject(text); ok {
+		return ReadableAnswer{Rows: readableRows(lead, 0), Text: rest}, true
+	}
+	return ReadableAnswer{Text: text}, enveloped
+}
+
+// nonEmptyText keeps the parts that hold text, joined by sep.
+func nonEmptyText(parts ...string) []string {
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if text := strings.TrimSpace(part); text != "" {
+			kept = append(kept, text)
+		}
+	}
+	return kept
+}
+
+// ReadableToolAnswer is ReadToolAnswer for a card named by its tool. A tool
+// whose body has a reading of its own on every surface — a shell's streams, a
+// file's content or diff, a fetched page, a recovered output, a memory or LSP
+// result, a question's answers, a subagent's facts, an MCP result, a plan's
+// exit — is never re-read as data, even when that body happens to be JSON: a
+// read .json file is the file. A search's results read as the native search
+// card lists them (FormatWebSearchResult), which a session migrated from
+// another agent keeps as text with its links in JSON arrays. ok is false when
+// there is nothing to read.
+func ReadableToolAnswer(toolName, body string, input map[string]any) (ReadableAnswer, bool) {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	switch {
+	case name == "peer_list":
+		return readPeerRoster(body)
+	case name == "peer_send":
+		return readPeerSend(input, body)
+	case name == "web_search" || name == "websearch":
+		if formatted, ok := FormatWebSearchResult(body); ok && formatted != strings.TrimSpace(body) {
+			return ReadableAnswer{Text: formatted}, true
+		}
+		return ReadableAnswer{}, false
+	case toolBodyHasOwnReading(name):
+		return ReadableAnswer{}, false
+	}
+	return ReadToolAnswer(body)
+}
+
+// toolBodyHasOwnReading reports whether a tool's card body is read by a
+// renderer of its own rather than as the tool's answer.
+func toolBodyHasOwnReading(name string) bool {
+	switch name {
+	case "shell", "bash", "read_file", "read", "write_file", "write", "edit_file", "edit",
+		"web_fetch", "webfetch", "retrieve_output", "lsp", "intermediate_tool",
+		"user_interaction", "request_permissions", "exit_plan_mode", "present_files",
+		"subagent_run", "subagent_fanout", "subagent_send", "subagent_status",
+		"subagent_wait", "subagent_continue", "subagent_close", "subagent_list":
+		return true
+	}
+	return strings.HasPrefix(name, "memories_") || strings.HasPrefix(name, "mcp__")
+}
+
+// toolAnswerCandidates is where a tool's answer can sit in a card's content:
+// the content itself, which is what a replayed row keeps, and the text of the
+// generic formatter's {"output": …} envelope, which is what the live card
+// carries (GenericOutputText). The caller decides which one is its answer.
+func toolAnswerCandidates(content string) []string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return nil
+	}
+	candidates := []string{trimmed}
+	if text, ok := GenericOutputText(trimmed); ok {
+		candidates = append(candidates, strings.TrimSpace(text))
+	}
+	return candidates
+}
+
+// peerRosterAnswer is peer_list's answer as pkg/run writes it: the caller's
+// own name, the agents it can address, and the note an empty roster carries.
+type peerRosterAnswer struct {
+	Agents []peerRosterAgent `json:"agents"`
+	Note   string            `json:"note"`
+}
+
+// peerRosterAgent is one row of that answer.
+type peerRosterAgent struct {
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	Status    string `json:"status"`
+	Task      string `json:"task"`
+	Ref       string `json:"ref"`
+	Cwd       string `json:"cwd"`
+	SameTree  bool   `json:"same_tree"`
+	ActiveAgo string `json:"active_ago"`
+}
+
+// readPeerRoster reads a peer_list card's roster. An answer always carries its
+// agents array, even an empty one, or else the note that says why nobody is in
+// it; anything else is not a roster.
+func readPeerRoster(content string) (ReadableAnswer, bool) {
+	for _, candidate := range toolAnswerCandidates(content) {
+		var raw peerRosterAnswer
+		if json.Unmarshal([]byte(candidate), &raw) != nil {
+			continue
+		}
+		if raw.Agents == nil && strings.TrimSpace(raw.Note) == "" {
+			continue
+		}
+		answer := ReadableAnswer{Note: strings.TrimSpace(raw.Note)}
+		for _, agent := range raw.Agents {
+			peer := ReadablePeer{
+				Name:      strings.TrimSpace(agent.Name),
+				Ref:       strings.TrimSpace(agent.Ref),
+				Kind:      strings.TrimSpace(agent.Kind),
+				Status:    strings.TrimSpace(agent.Status),
+				Task:      strings.TrimSpace(agent.Task),
+				Cwd:       strings.TrimSpace(agent.Cwd),
+				SameTree:  agent.SameTree,
+				ActiveAgo: strings.TrimSpace(agent.ActiveAgo),
+			}
+			peer.Display, peer.Short, peer.Own = peerDisplayName(peer)
+			answer.Peers = append(answer.Peers, peer)
+		}
+		return answer, true
+	}
+	return ReadableAnswer{}, false
+}
+
+// peerSendAnswer is peer_send's answer as pkg/run writes it: what became of the
+// message, where it went, and the recipient's own status when it left this
+// process.
+type peerSendAnswer struct {
+	Status     string `json:"status"`
+	To         string `json:"to"`
+	PeerStatus string `json:"peer_status"`
+	Hint       string `json:"hint"`
+}
+
+// readPeerSend reads a peer_send card: the message the call carried, and the
+// engine's answer about its delivery. The message alone is still the card when
+// the answer cannot be read — a failed call draws its own error.
+func readPeerSend(input map[string]any, body string) (ReadableAnswer, bool) {
+	send := &ReadablePeerSend{Message: peerSendMessageText(input)}
+	read := false
+	for _, candidate := range toolAnswerCandidates(body) {
+		var raw peerSendAnswer
+		if json.Unmarshal([]byte(candidate), &raw) != nil {
+			continue
+		}
+		if raw.Status == "" && raw.To == "" && raw.Hint == "" {
+			continue
+		}
+		send.Status = strings.TrimSpace(raw.Status)
+		send.To = strings.TrimSpace(raw.To)
+		send.PeerStatus = strings.TrimSpace(raw.PeerStatus)
+		send.Hint = strings.TrimSpace(raw.Hint)
+		read = true
+		break
+	}
+	if !read && send.Message == "" {
+		return ReadableAnswer{}, false
+	}
+	return ReadableAnswer{Send: send}, true
+}
+
+// peerSendMessageText is the message a peer_send call carried, as the engine
+// sent it: trimmed, with its own line breaks. The answer is what this call did;
+// the message is the call's input.
+func peerSendMessageText(input map[string]any) string {
+	message, _ := input["message"].(string)
+	return strings.TrimSpace(strings.ReplaceAll(message, "\r\n", "\n"))
+}
+
+// peerDisplayName is what a card calls one agent of a roster: this
+// conversation's own subagent by its type, with the short key that tells it
+// from its siblings — the name it is addressed by is a uuid — and every other
+// agent by the name peer_send takes, with its ref when two share it.
+func peerDisplayName(peer ReadablePeer) (display, short string, own bool) {
+	name := strings.TrimSpace(peer.Name)
+	if IsAgentRosterKey(name) {
+		short = ShortAgentID(name)
+		display = strings.TrimSpace(peer.Kind)
+		if display == "" {
+			display = short
+			short = ""
+		}
+		if display == "" {
+			display = name
+		}
+		return display, short, true
+	}
+	if ref := strings.TrimSpace(peer.Ref); ref != "" {
+		return name + " [" + ref + "]", "", false
+	}
+	return name, "", false
+}
+
+// IsAgentRosterKey reports whether a peer_list name is one of this
+// conversation's own agents rather than an agent of another process: a
+// subagent's roster key is its task id ("subagent-…"), a plan reviewer's its
+// own prefix.
+func IsAgentRosterKey(name string) bool {
+	name = strings.TrimSpace(name)
+	return strings.HasPrefix(name, "subagent-") || strings.HasPrefix(name, "plan-review-")
+}
+
+// ShortAgentID is the shortest piece of a roster key that still tells two
+// agents apart: the first group of the uuid behind the "subagent-" prefix. The
+// terminal's roster panel, the subagent view's footer and every card that names
+// an agent use it, so an agent is called the same thing wherever it is named.
+func ShortAgentID(id string) string {
+	id = strings.TrimSpace(id)
+	id = strings.TrimPrefix(id, "subagent-")
+	id = strings.TrimPrefix(id, "plan-review-")
+	if id == "" {
+		return ""
+	}
+	if runes := []rune(id); len(runes) > 4 {
+		return string(runes[:4])
+	}
+	return id
+}
+
+// GenericOutputText is the text inside a content that is nothing but the
+// generic formatter's "output:" block carrying {"output": "<text>"}: what the
+// tool answered, as the model read it.
+func GenericOutputText(content string) (string, bool) {
+	answer, ok := genericOutputAnswer(strings.TrimSpace(content))
+	if !ok {
+		return "", false
+	}
+	text, isText := answer.(string)
+	return text, isText
+}
+
+// ReadableJSONLines writes a call's JSON arguments as the "Field: value"
+// lines ReadableAnswer.String writes an answer with. The fields are in key
+// order — the order the page's approval facts list them in — so one call
+// reads the same on every surface however the model happened to order them.
+// A value that does not parse has no readable line, and gives none.
+func ReadableJSONLines(raw string) []string {
+	value, ok := decodeOrderedJSON(strings.TrimSpace(raw))
+	if !ok {
+		return nil
+	}
+	rows := readableRows(sortedPayload(value), 0)
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		lines = append(lines, row.line())
+	}
+	return lines
+}
+
+// sortedPayload is a decoded value with every object's fields in key order.
+func sortedPayload(value any) any {
+	switch v := value.(type) {
+	case payloadObject:
+		sorted := make(payloadObject, len(v))
+		for i, field := range v {
+			sorted[i] = payloadField{key: field.key, value: sortedPayload(field.value)}
+		}
+		sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].key < sorted[j].key })
+		return sorted
+	case []any:
+		items := make([]any, len(v))
+		for i, item := range v {
+			items[i] = sortedPayload(item)
+		}
+		return items
+	default:
+		return value
+	}
+}
+
+// payloadField is one field of a JSON object, in the order the answer wrote it.
+type payloadField struct {
+	key   string
+	value any
+}
+
+// payloadObject is a JSON object that keeps its field order: an answer's
+// fields read in the order its author put them, which a Go map would lose.
+type payloadObject []payloadField
+
+// payloadTagField matches one <tag>value</tag> field at the start of a record.
+var payloadTagField = regexp.MustCompile(`(?s)^<([a-z][a-z0-9_]*)>(.*?)</([a-z][a-z0-9_]*)>`)
+
+// isJSONDocument reports whether text looks like one JSON object or array.
+func isJSONDocument(text string) bool {
+	return (strings.HasPrefix(text, "{") && strings.HasSuffix(text, "}")) ||
+		(strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]"))
+}
+
+// genericOutputAnswer is the answer inside a content that is nothing but the
+// generic formatter's "output:" block: the text its {"output": …} envelope
+// carries, or the data the block holds when it is not that envelope.
+func genericOutputAnswer(content string) (any, bool) {
+	body, ok := genericOutputBlock(content)
+	if !ok {
+		return nil, false
+	}
+	value, ok := decodeOrderedJSON(body)
+	if !ok {
+		return nil, false
+	}
+	if object, isObject := value.(payloadObject); isObject && len(object) == 1 && object[0].key == "output" {
+		return object[0].value, true
+	}
+	return value, true
+}
+
+// genericOutputBlock is the fenced body of a content that is nothing but the
+// generic formatter's "output:" label and the block under it.
+func genericOutputBlock(content string) (string, bool) {
+	lines := strings.Split(strings.ReplaceAll(content, "\r", ""), "\n")
+	i := 0
+	next := func() (string, bool) {
+		for ; i < len(lines); i++ {
+			if line := strings.TrimSpace(lines[i]); line != "" {
+				i++
+				return line, true
+			}
+		}
+		return "", false
+	}
+	if label, ok := next(); !ok || !strings.EqualFold(label, "output:") {
+		return "", false
+	}
+	if fence, ok := next(); !ok || !strings.HasPrefix(fence, "```") {
+		return "", false
+	}
+	start := i
+	for ; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```") {
+			body := strings.Join(lines[start:i], "\n")
+			i++
+			if _, more := next(); more {
+				return "", false
+			}
+			return body, true
+		}
+	}
+	return "", false
+}
+
+// leadingJSONObject splits a text that opens with a JSON object and goes on
+// in prose into the object and the prose after it. ok is false for a text
+// that is not exactly that.
+func leadingJSONObject(text string) (payloadObject, string, bool) {
+	if !strings.HasPrefix(text, "{") {
+		return nil, "", false
+	}
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	value, err := decodeOrderedValue(dec)
+	if err != nil {
+		return nil, "", false
+	}
+	object, ok := value.(payloadObject)
+	rest := strings.TrimSpace(text[dec.InputOffset():])
+	if !ok || len(object) == 0 || rest == "" {
+		return nil, "", false
+	}
+	return object, rest, true
+}
+
+// tagRecordAnswer reads a record made of <tag>value</tag> fields and nothing
+// else — at least two of them, so a body that merely opens with a tag is not
+// taken for one.
+func tagRecordAnswer(content string) (payloadObject, bool) {
+	var record payloadObject
+	for rest := strings.TrimSpace(content); rest != ""; {
+		m := payloadTagField.FindStringSubmatch(rest)
+		if m == nil || m[1] != m[3] {
+			return nil, false
+		}
+		record = append(record, payloadField{key: m[1], value: strings.Trim(m[2], "\r\n")})
+		rest = strings.TrimSpace(rest[len(m[0]):])
+	}
+	return record, len(record) >= 2
+}
+
+// decodeOrderedJSON decodes exactly one JSON document into payloadObject,
+// []any and scalars (string, json.Number, bool, nil).
+func decodeOrderedJSON(text string) (any, bool) {
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	value, err := decodeOrderedValue(dec)
+	if err != nil {
+		return nil, false
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	return value, true
+}
+
+func decodeOrderedValue(dec *json.Decoder) (any, error) {
+	token, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return token, nil
+	}
+	switch delim {
+	case '{':
+		object := payloadObject{}
+		for dec.More() {
+			keyToken, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, _ := keyToken.(string)
+			value, err := decodeOrderedValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			object = append(object, payloadField{key: key, value: value})
+		}
+		_, err := dec.Token()
+		return object, err
+	case '[':
+		list := []any{}
+		for dec.More() {
+			value, err := decodeOrderedValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			list = append(list, value)
+		}
+		_, err := dec.Token()
+		return list, err
+	default:
+		return nil, fmt.Errorf("unexpected %q", delim)
+	}
+}
+
+// readableRows writes a decoded value as rows at depth: one field per row, a
+// nested object under its field, a list of scalars as one comma row, a list of
+// anything else as bulleted items whose further rows sit under the text after
+// the bullet, a multi-line string with its own line breaks.
+func readableRows(value any, depth int) []ReadableRow {
+	switch v := value.(type) {
+	case payloadObject:
+		rows := make([]ReadableRow, 0, len(v))
+		for _, field := range v {
+			rows = append(rows, readableFieldRows(readableFieldLabel(field.key), field.value, depth)...)
+		}
+		return rows
+	case []any:
+		rows := make([]ReadableRow, 0, len(v))
+		for _, item := range v {
+			block := readableRows(item, depth)
+			if len(block) == 0 {
+				continue
+			}
+			block[0].Bullet = true
+			for i := 1; i < len(block); i++ {
+				block[i].Depth++
+			}
+			rows = append(rows, block...)
+		}
+		return rows
+	case string:
+		return readableStringRows(v, depth)
+	default:
+		return []ReadableRow{{Depth: depth, Value: readableScalarText(v)}}
+	}
+}
+
+func readableFieldRows(label string, value any, depth int) []ReadableRow {
+	switch v := value.(type) {
+	case payloadObject:
+		if len(v) == 0 {
+			return []ReadableRow{{Depth: depth, Label: label, Value: "(none)"}}
+		}
+		return append([]ReadableRow{{Depth: depth, Label: label}}, readableRows(v, depth+1)...)
+	case []any:
+		// An empty list says the same thing an empty object does: there is
+		// nothing in it. Without this the label printed with no value at all,
+		// which reads as a value the surface failed to draw.
+		if len(v) == 0 {
+			return []ReadableRow{{Depth: depth, Label: label, Value: "(none)"}}
+		}
+		if scalars, ok := readableScalarList(v); ok {
+			return []ReadableRow{{Depth: depth, Label: label, Value: strings.Join(scalars, ", ")}}
+		}
+		return append([]ReadableRow{{Depth: depth, Label: label}}, readableRows(v, depth+1)...)
+	case string:
+		rows := readableStringRows(v, depth)
+		rows[0].Label = label
+		return rows
+	default:
+		return []ReadableRow{{Depth: depth, Label: label, Value: readableScalarText(v)}}
+	}
+}
+
+// readableStringRows keeps a value's own line breaks, so a multi-line prompt
+// reads as prose instead of an escaped one-liner.
+func readableStringRows(text string, depth int) []ReadableRow {
+	if strings.TrimSpace(text) == "" {
+		return []ReadableRow{{Depth: depth, Value: "(empty)"}}
+	}
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	rows := make([]ReadableRow, 0, len(lines))
+	for i, line := range lines {
+		if i == 0 {
+			rows = append(rows, ReadableRow{Depth: depth, Value: line})
+			continue
+		}
+		rows = append(rows, ReadableRow{Depth: depth + 1, Value: line})
+	}
+	return rows
+}
+
+func readableScalarList(items []any) ([]string, bool) {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		switch item.(type) {
+		case payloadObject, []any:
+			return nil, false
+		}
+		parts = append(parts, readableScalarText(item))
+	}
+	if len(parts) == 0 {
+		return nil, false
+	}
+	return parts, true
+}
+
+func readableScalarText(value any) string {
+	if value == nil {
+		return "(none)"
+	}
+	return fmt.Sprint(value) // json.Number (UseNumber) keeps 1048576 as "1048576", never 1.048576e+06
+}
+
+// readableFieldLabel writes a field's key as words with a capital: snake_case
+// and camelCase alike, so "resumedAgentId" reads "Resumed agent id" and
+// "task_id" reads "Task id".
+func readableFieldLabel(key string) string {
+	runes := []rune(strings.TrimSpace(key))
+	var b strings.Builder
+	for i, r := range runes {
+		if r == '_' {
+			b.WriteRune(' ')
+			continue
+		}
+		if i > 0 && unicode.IsUpper(r) {
+			prev := runes[i-1]
+			nextLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextLower) {
+				b.WriteRune(' ')
+				r = unicode.ToLower(r)
+			}
+		}
+		b.WriteRune(r)
+	}
+	label := strings.Join(strings.Fields(b.String()), " ")
+	if label == "" {
+		return "Value"
+	}
+	labelRunes := []rune(label)
+	labelRunes[0] = unicode.ToUpper(labelRunes[0])
+	return string(labelRunes)
 }

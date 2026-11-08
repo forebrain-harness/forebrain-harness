@@ -121,6 +121,25 @@
       <div v-else-if="isKeptPlan" class="tool-kept-plan" data-testid="tool-kept-plan">
         <p>{{ t('chat.toolKeptPlan') }}</p>
       </div>
+      <!-- A peer_list answer is the machine's roster, drawn in the peer
+           design language (plan 200 §3): identity blocks, status, what each
+           agent is doing and where. -->
+      <PeerRosterCard
+        v-else-if="peerRoster && !step.error"
+        :answer="step.readableAnswer!"
+      />
+      <!-- A peer_send answer is the message that left and where it went. -->
+      <PeerSendCard
+        v-else-if="peerSend && !step.error"
+        :send="step.readableAnswer!.send!"
+      />
+      <!-- A call whose body is its answer itself — a tool with no card of its
+           own, a row a migrated session recorded — lists the answer's fields
+           and its text, read by the engine; never the JSON it arrived in. -->
+      <ToolAnswerBody
+        v-else-if="step.readableAnswer && !step.error"
+        :answer="step.readableAnswer"
+      />
       <!-- A skill card's display_body is the whole user-facing text ("Loaded
            from …" / "Failed to load from …" plus the raw error), so the
            separate error line would repeat what the body already says. -->
@@ -198,6 +217,9 @@ import { parseUnifiedDiff } from '@/lib/unifiedDiff'
 import AskDoneCard from './AskDoneCard.vue'
 import DiffBlock from './DiffBlock.vue'
 import ShellCardBody from './ShellCardBody.vue'
+import ToolAnswerBody from './ToolAnswerBody.vue'
+import PeerRosterCard from './PeerRosterCard.vue'
+import PeerSendCard from './PeerSendCard.vue'
 import ToolGateFacts from './ToolGateFacts.vue'
 import ToolGateFooter from './ToolGateFooter.vue'
 
@@ -448,6 +470,16 @@ const isShellBody = computed(() => (
 ))
 
 /** A non-zero exit rides the head left of the duration; 0 and absent are the same. */
+/** A peer_list answer draws the roster; an empty roster still draws its own
+ * empty state, which is why the note counts. */
+const peerRoster = computed(() => {
+  const answer = props.step.readableAnswer
+  return Boolean(answer && ((answer.peers?.length ?? 0) > 0 || answer.note))
+})
+
+/** A peer_send answer draws the message and its delivery. */
+const peerSend = computed(() => Boolean(props.step.readableAnswer?.send))
+
 const exitCode = computed(() => props.step.shellCard?.exitCode ?? null)
 
 /** Where the drawer's output page reads a truncated call's whole output from. */

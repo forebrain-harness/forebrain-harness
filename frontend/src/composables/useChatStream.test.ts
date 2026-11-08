@@ -38,6 +38,7 @@ import {
   timelineBlockKey,
   toolStepFromPayload,
   toolStepFromRow,
+  readableAnswerFrom,
   type ChatMessage,
   type SubagentCall,
   type SubagentToolStep,
@@ -2859,6 +2860,38 @@ describe('skill message cards', () => {
     skill_path: '/Users/u/.codex/skills/.system/review-agent/SKILL.md',
   }
 
+  it('carries a peer roster and a sent message as their own facts', () => {
+    const readableAnswer = {
+      rows: [],
+      peers: [{ name: 'proj-99', kind: 'terminal', status: 'idle', display: 'proj-99', short: '99', own: true, sameTree: true, mark: '99', tone: 2 }],
+      note: 'No other agents are reachable right now.',
+      send: { message: 'hello', status: 'delivered', to: 'proj-ff', peerStatus: 'busy', mark: 'ff', tone: 3 },
+    }
+    const live = toolStepFromPayload({ stepId: 'c1', toolName: 'peer_list', displayBody: 'output:', readableAnswer }, true, 'fallback')
+    expect(live.readableAnswer).toEqual(readableAnswer)
+    const row = toolStepFromRow({ toolStepId: 'c2', toolMetaJson: JSON.stringify({ tool_name: 'peer_send', status: 'completed' }), readableAnswer })
+    expect(row.readableAnswer).toEqual(readableAnswer)
+    // A roster row without a name is not a row; a send with nothing in it is
+    // not a send.
+    expect(readableAnswerFrom({ rows: [], peers: [{ kind: 'terminal' }] })).toBeUndefined()
+    expect(readableAnswerFrom({ rows: [], send: {} })).toBeUndefined()
+    expect(readableAnswerFrom({ rows: [], note: '  ' })).toBeUndefined()
+  })
+
+  it('carries the answer the engine read on a live completion and on a reloaded row', () => {
+    const readableAnswer = { rows: [{ depth: 0, label: 'Success', value: 'true' }, { depth: 1, bullet: true, value: 'x' }], text: 'report' }
+    const live = toolStepFromPayload({ stepId: 'c1', toolName: 'SendMessage', displayBody: 'output:', readableAnswer }, true, 'fallback')
+    expect(live.readableAnswer).toEqual(readableAnswer)
+    // A step still running has no answer yet.
+    expect(toolStepFromPayload({ stepId: 'c1', toolName: 'SendMessage', readableAnswer }, false, 'fallback').readableAnswer).toBeUndefined()
+    const row = toolStepFromRow({ toolStepId: 'c2', toolMetaJson: JSON.stringify({ tool_name: 'TaskStop', status: 'completed' }), readableAnswer })
+    expect(row.readableAnswer).toEqual(readableAnswer)
+    // Junk is no answer: nothing in it, or not the engine's shape.
+    expect(readableAnswerFrom({ rows: [{ depth: 0 }] })).toBeUndefined()
+    expect(readableAnswerFrom('rows')).toBeUndefined()
+    expect(readableAnswerFrom(null)).toBeUndefined()
+  })
+
   it('parses the skill identity from a live WS payload', () => {
     const step = toolStepFromPayload(
       {
@@ -4938,9 +4971,11 @@ describe('subagent_* call cards', () => {
   }
 
   it('formats a task clock exactly as the terminal does', () => {
-    // The branches of pkg/tui formatDuration, one value each.
+    // The branches of the engine's FormatCardDuration, one value each: under
+    // 100ms there is no time worth reading, so nothing is said.
     expect(formatToolDuration(0)).toBe('')
-    expect(formatToolDuration(50)).toBe('<0.1s')
+    expect(formatToolDuration(50)).toBe('')
+    expect(formatToolDuration(99)).toBe('')
     expect(formatToolDuration(4200)).toBe('4.2s')
     expect(formatToolDuration(59_000)).toBe('59s')
     expect(formatToolDuration(84_3000)).toBe('14m3s')
@@ -5038,7 +5073,7 @@ describe('subagent_* call cards', () => {
     }, undefined, (1_799_223_000 + 192) * 1000)
     expect(statusView.headerKey).toBe('subagentCard.status.done')
     expect(statusView.headerCount).toMatchObject({ count: 1, type: 'general-purpose' })
-    expect(statusView.headerDuration).toBe('<0.1s')
+    expect(statusView.headerDuration).toBe('')
     expect(statusView.rows[0]).toMatchObject({ status: 'running', clock: { kind: 'running', startedAtMs: 1_799_223_000_000, label: '3m 12s' } })
 
     // A wait that timed out says so, and does not claim the agent ended.

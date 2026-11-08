@@ -13,6 +13,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -865,6 +866,20 @@ func withStepHeader(data map[string]any, header string, parts tool.HeaderParts) 
 // data is read back from (the display body and the tool name).
 func storedToolRowHeaderParts(root, partsJSON, toolMetaJSON string, took time.Duration) (string, tool.HeaderParts, string, string) {
 	display, _ := state.ParseToolDisplayPart(partsJSON)
+	meta := storedToolRowMeta(partsJSON, toolMetaJSON)
+	if strings.TrimSpace(meta.ToolName) == "" {
+		return "", tool.HeaderParts{}, "", ""
+	}
+	return toolHeaderFor(root, meta.ToolName, display.Summary, display.Body, meta, true, took),
+		toolHeaderPartsFor(root, meta.ToolName, display.Summary, display.Body, meta, true, took),
+		display.Body, meta.ToolName
+}
+
+// storedToolRowMeta is a stored tool row's own meta: the display part's copy
+// when it carries one, the row's tool_meta_json otherwise. Its input is what a
+// card needs besides its body — the message a peer_send call carried, say.
+func storedToolRowMeta(partsJSON, toolMetaJSON string) tool.ToolMeta {
+	display, _ := state.ParseToolDisplayPart(partsJSON)
 	var meta tool.ToolMeta
 	for _, raw := range []string{display.ToolMetaJSON, toolMetaJSON} {
 		if strings.TrimSpace(raw) == "" {
@@ -874,12 +889,7 @@ func storedToolRowHeaderParts(root, partsJSON, toolMetaJSON string, took time.Du
 			break
 		}
 	}
-	if strings.TrimSpace(meta.ToolName) == "" {
-		return "", tool.HeaderParts{}, "", ""
-	}
-	return toolHeaderFor(root, meta.ToolName, display.Summary, display.Body, meta, true, took),
-		toolHeaderPartsFor(root, meta.ToolName, display.Summary, display.Body, meta, true, took),
-		display.Body, meta.ToolName
+	return meta
 }
 
 // storedToolRowHeader is storedToolRowHeaderParts' joined header alone.
@@ -960,6 +970,32 @@ func shellCardFor(toolName, body string) *tool.ShellCard {
 	return &card
 }
 
+// readableAnswerFor is a card's answer for a reader, read back from the body
+// the card shows when that body is the tool's answer rather than text a
+// renderer shaped (tool.ReadableToolAnswer) — so the page lists the answer's
+// fields, or its text, where it would otherwise print the JSON or the
+// generic formatter's envelope it arrived in. nil when there is nothing to
+// read.
+func readableAnswerFor(toolName, body string, input map[string]any) *tool.ReadableAnswer {
+	answer, ok := tool.ReadableToolAnswer(toolName, body, input)
+	// A roster with nobody in it is still the card: its note is the answer.
+	if !ok || (len(answer.Rows) == 0 && len(answer.Peers) == 0 && answer.Send == nil &&
+		strings.TrimSpace(answer.Text) == "" && strings.TrimSpace(answer.Note) == "") {
+		return nil
+	}
+	// The identity block's two characters and tone are this process's own
+	// derivation (process.PeerMark), the same one the drawer and the letters
+	// use, so one agent wears one block everywhere. A surface never derives
+	// them; a roster row and a send's recipient get theirs here.
+	for i := range answer.Peers {
+		answer.Peers[i].Mark, answer.Peers[i].Tone = process.PeerMark(answer.Peers[i].Name, "")
+	}
+	if send := answer.Send; send != nil && send.To != "" {
+		send.Mark, send.Tone = process.PeerMark(send.To, "")
+	}
+	return &answer
+}
+
 // fileDiffFor is a file tool card's turn diff, read back from the body the
 // card shows — nil for anything that is not an edit_file or write_file card.
 func fileDiffFor(toolName, body string) *tool.FileDiff {
@@ -1011,6 +1047,9 @@ func toolEventPayloadWithHeader(root, eventType string, payload json.RawMessage)
 		}
 		if diff := fileDiffFor(name, body); diff != nil {
 			fields["file_diff"] = diff
+		}
+		if answer := readableAnswerFor(name, body, meta.Input); answer != nil {
+			fields["readable_answer"] = answer
 		}
 	}
 	out, err := json.Marshal(fields)

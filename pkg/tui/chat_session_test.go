@@ -10734,6 +10734,42 @@ func TestApprovalConfirmationTextWebSearchNeverShowsJSON(t *testing.T) {
 	}
 }
 
+// A tool with no command of its own — peer_list — carries its gate facts as a
+// JSON object, and a subagent's request adds its ids to it. The confirmation
+// names the tool, in both views and for a remembered rule alike, and never
+// prints that object.
+func TestApprovalConfirmationTextNamesAToolWhoseInputIsJSON(t *testing.T) {
+	primary := turn.ToolApprovalRequest{ToolName: "peer_list", PermissionInput: `{"category":"session"}`}
+	subagent := turn.ToolApprovalRequest{
+		ToolName:        "peer_list",
+		AgentID:         "subagent-67fad623-5159-431e-a1c4-503e8b72931f",
+		PermissionInput: `{"agent_id":"subagent-67fad623-5159-431e-a1c4-503e8b72931f","category":"session","subagent_type":"general-purpose"}`,
+	}
+	always := turn.ToolApprovalDecision{Approved: true, Update: &safety.PermissionUpdate{
+		Type: safety.UpdateAddRules, Behavior: safety.BehaviorAllow, Destination: safety.DestinationSession,
+		Rules: []safety.PermissionRuleValue{{ToolName: "peer_list", RuleContent: `{"category":"session"}`}},
+	}}
+	tests := []struct {
+		name     string
+		req      turn.ToolApprovalRequest
+		decision turn.ToolApprovalDecision
+		want     string
+	}{
+		{"primary approved", primary, turn.ToolApprovalDecision{Approved: true}, "You approved forebrain to run peer_list this time"},
+		{"subagent approved", subagent, turn.ToolApprovalDecision{Approved: true}, "You approved forebrain to run peer_list this time"},
+		{"denied", primary, turn.ToolApprovalDecision{Denied: true}, "You did not approve forebrain to run peer_list"},
+		{"always this session", primary, always, "You approved forebrain to run peer_list every time this session"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := approvalConfirmationText(tt.req, tt.decision)
+			if got != tt.want {
+				t.Fatalf("confirmation=%q; want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApprovalConfirmationTextRetrieveOutputNeverShowsJSON(t *testing.T) {
 	req := turn.ToolApprovalRequest{
 		ToolName:           "retrieve_output",
@@ -17714,12 +17750,12 @@ func TestRendererSkillReadCardUsesDedicatedHeaderAndProjectRelativeSource(t *tes
 		Title:    "read_file",
 		Content:  body,
 		Final:    true,
-		Duration: 50 * time.Millisecond,
+		Duration: 1200 * time.Millisecond,
 		ToolMeta: tool.BuildToolMeta(evt),
 	}, "tool", "214")
 	plain := stripANSI(out.String())
 	compact := strings.Join(strings.Fields(plain), "")
-	for _, want := range []string{"●Skillreview<0.1s", "└Loadedfrom" + filepath.Join(".forebrain", "skills", "review", "SKILL.md")} {
+	for _, want := range []string{"●Skillreview1.2s", "└Loadedfrom" + filepath.Join(".forebrain", "skills", "review", "SKILL.md")} {
 		if !strings.Contains(compact, want) {
 			t.Fatalf("skill card missing %q:\n%s", want, plain)
 		}
@@ -17837,13 +17873,13 @@ func explicitSkillStep(kind string, errorText string, duration time.Duration) to
 // fabricated completed step ({"explicit":true} plus the whole activation body),
 // which painted the raw JSON envelope instead of a Skill card.
 func TestExplicitSkillInvocationRendersDedicatedCard(t *testing.T) {
-	rendered, category := renderExplicitSkillStepCard(t, explicitSkillStep(tool.StepKindToolCompleted, "", 50*time.Millisecond))
+	rendered, category := renderExplicitSkillStepCard(t, explicitSkillStep(tool.StepKindToolCompleted, "", 1200*time.Millisecond))
 	plain := stripANSI(rendered)
 	compact := strings.Join(strings.Fields(plain), "")
 	if category != "skill" {
 		t.Fatalf("explicit invocation lost its Skill category (got %q):\n%s", category, plain)
 	}
-	if !strings.Contains(compact, "●Skillreview-agent<0.1s") {
+	if !strings.Contains(compact, "●Skillreview-agent1.2s") {
 		t.Fatalf("explicit skill card header = %q, want a completed Skill header", plain)
 	}
 	if !strings.Contains(compact, "└Loadedfrom/Users/doudou/.codex/skills/.system/review-agent/SKILL.md") {
@@ -17882,10 +17918,10 @@ func TestExplicitSkillLoadingCardIsHeaderOnlyAndGray(t *testing.T) {
 // the past-tense failure body naming the source, and the error text verbatim.
 func TestExplicitSkillFailureCardPinsRawError(t *testing.T) {
 	rawErr := "open /Users/doudou/.codex/skills/.system/review-agent/SKILL.md: permission denied"
-	rendered, _ := renderExplicitSkillStepCard(t, explicitSkillStep(tool.StepKindToolCompleted, rawErr, 50*time.Millisecond))
+	rendered, _ := renderExplicitSkillStepCard(t, explicitSkillStep(tool.StepKindToolCompleted, rawErr, 1200*time.Millisecond))
 	plain := stripANSI(rendered)
 	compact := strings.Join(strings.Fields(plain), "")
-	if !strings.Contains(compact, "✗Skillreview-agent<0.1s") {
+	if !strings.Contains(compact, "✗Skillreview-agent1.2s") {
 		t.Fatalf("failed card header = %q, want ✗ Skill review-agent with duration", plain)
 	}
 	if !strings.Contains(compact, "└Failedtoloadfrom/Users/doudou/.codex/skills/.system/review-agent/SKILL.md") {
@@ -24808,10 +24844,10 @@ func TestToolDurationTerminalStatusRules(t *testing.T) {
 			Kind:     FrameTool,
 			Title:    "shell",
 			Final:    tc.status != "running",
-			Duration: 50 * time.Millisecond,
+			Duration: 1200 * time.Millisecond,
 			ToolMeta: tool.ToolMeta{ToolName: "shell", Status: tc.status},
 		}, "")
-		if got := strings.Contains(header, "<0.1s"); got != tc.want {
+		if got := strings.Contains(header, "1.2s"); got != tc.want {
 			t.Fatalf("status=%q header=%q durationVisible=%v want %v", tc.status, header, got, tc.want)
 		}
 	}

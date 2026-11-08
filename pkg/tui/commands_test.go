@@ -4199,7 +4199,7 @@ func TestReplayedQueryRowSettlesWhenItsEndCameFirst(t *testing.T) {
 	record := `{"task_id":"subagent-6e5c","agent_type":"general-purpose","title":"读 README",` +
 		`"status":"running","execution_id":"exec-1","started_at":1790000000}`
 	statusRow := state.Message{
-		RowID: 3, Role: "tool", Content: record, ExecDurationMs: 16,
+		RowID: 3, Role: "tool", Content: record, ExecDurationMs: 1600,
 		PartsJSON: state.MessagePartsJSON(llm.ToolResultMessage("call-status", llm.Text(record)), ""),
 		CreatedAt: 101,
 	}
@@ -4233,11 +4233,11 @@ func TestReplayedQueryRowSettlesWhenItsEndCameFirst(t *testing.T) {
 	if card.Summary != "Checked 1 general-purpose task" {
 		t.Fatalf("summary = %q, want Checked 1 general-purpose task", card.Summary)
 	}
-	if card.Duration != 16*time.Millisecond {
-		t.Fatalf("replayed call duration = %v, want the row's 16ms", card.Duration)
+	if card.Duration != 1600*time.Millisecond {
+		t.Fatalf("replayed call duration = %v, want the row's 1600ms", card.Duration)
 	}
 	rendered := strings.Join(renderFanoutForTest(*card), "\n")
-	if !strings.Contains(rendered, "Checked 1 general-purpose task · <0.1s") {
+	if !strings.Contains(rendered, "Checked 1 general-purpose task · 1.6s") {
 		t.Fatalf("replayed header lost the call duration:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "✓ 读 README · 42s") {

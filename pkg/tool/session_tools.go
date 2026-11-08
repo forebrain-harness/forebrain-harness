@@ -173,7 +173,7 @@ func normalizeSessionTodoItems(in sessionTodoInput) []sessionTodoItem {
 func newSessionTodoTool(st *State, stateRoot string) (*llm.Tool, error) {
 	return llm.NewTool(
 		"session_todo",
-		"Track step-by-step progress as a checklist that drives the progress UI. Every write replaces the whole list: send every row that still applies and leave out the rest. Keep exactly one row in_progress. The plan's prose belongs in the plan file, not here.",
+		"Track step-by-step progress as a checklist that drives the progress UI. Every write replaces the whole list: send every row that still applies and leave out the rest. Keep exactly one row in_progress. Update it as you work: mark a row completed as soon as its work is fully done, not in a batch later. Before your final answer, bring the list up to date: finished rows completed, dropped rows cancelled; only a row you could not finish stays open, and your reply says why. The plan's prose belongs in the plan file, not here.",
 		func(ctx context.Context, in *sessionTodoInput) (string, error) {
 			if st == nil {
 				return "", fmt.Errorf("nil state")

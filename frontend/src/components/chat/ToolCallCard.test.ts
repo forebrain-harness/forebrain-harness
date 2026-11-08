@@ -60,6 +60,109 @@ describe('ToolCallCard', () => {
     expect(wrapper.find('a').attributes('target')).toBe('_blank')
   })
 
+  it('lists an answer the engine read instead of printing the JSON it arrived in', () => {
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'SendMessage',
+          summary: 'SendMessage',
+          output: '{"success":true,"message":"Resuming agent aacb0c9","pin":{"id":"aacb","ref":"13d70d"}}',
+          readableAnswer: {
+            rows: [
+              { depth: 0, label: 'Success', value: 'true' },
+              { depth: 0, label: 'Message', value: 'Resuming agent aacb0c9' },
+              { depth: 0, label: 'Pin' },
+              { depth: 1, label: 'Id', value: 'aacb' },
+              { depth: 1, label: 'Ref', value: '13d70d' },
+            ],
+          },
+        }),
+      },
+    })
+
+    const rows = wrapper.findAll('[data-testid="tool-answer-row"]')
+    expect(rows.map((row) => [row.find('dt').text(), row.find('dd').exists() ? row.find('dd').text() : ''])).toEqual([
+      ['Success', 'true'],
+      ['Message', 'Resuming agent aacb0c9'],
+      ['Pin', ''],
+      ['Id', 'aacb'],
+      ['Ref', '13d70d'],
+    ])
+    expect(rows[0].find('dt').text()).toBe('Success')
+    expect(rows[0].find('dd').text()).toBe('true')
+    expect(rows[2].find('dd').exists()).toBe(false)
+    expect(rows[3].attributes('style')).toContain('--depth: 1')
+    expect(wrapper.text()).not.toContain('{')
+    expect(wrapper.text()).not.toContain('"success"')
+  })
+
+  it('draws the peer tools as their own cards, never as field rows', () => {
+    const roster = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'peer_list',
+          summary: 'peer_list',
+          output: 'output:',
+          readableAnswer: {
+            rows: [],
+            peers: [{ name: 'proj-99', kind: 'terminal', status: 'idle', display: 'proj-99', mark: '99', tone: 1 }],
+          },
+        }),
+      },
+    })
+    expect(roster.find('[data-testid="peer-roster"]').exists()).toBe(true)
+    expect(roster.find('[data-testid="tool-answer"]').exists()).toBe(false)
+    expect(roster.text()).toContain('proj-99')
+
+    const sent = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'peer_send',
+          summary: 'peer_send',
+          output: 'output:',
+          readableAnswer: { rows: [], send: { message: 'hello', status: 'delivered', to: 'proj-ff', peerStatus: 'busy' } },
+        }),
+      },
+    })
+    expect(sent.find('[data-testid="peer-send"]').exists()).toBe(true)
+    expect(sent.find('.message').text()).toBe('hello')
+    expect(sent.find('[data-testid="tool-answer"]').exists()).toBe(false)
+
+    // A failed call keeps its error, whatever facts it carried.
+    const failed = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'peer_send',
+          summary: 'peer_send',
+          status: 'failed',
+          error: 'no agent named "x"',
+          readableAnswer: { rows: [], send: { message: 'hello' } },
+        }),
+      },
+    })
+    expect(failed.find('[data-testid="peer-send"]').exists()).toBe(false)
+    expect(failed.text()).toContain('no agent named')
+  })
+
+  it('reads an answer that is text as Markdown, and a failed call keeps its error', async () => {
+    const text = mount(ToolCallCard, {
+      props: { open: true, step: stepOf({ toolName: 'TaskCreate', summary: 'TaskCreate', output: 'output:', readableAnswer: { rows: [], text: 'Task **#6** created' } }) },
+    })
+    await vi.waitFor(() => expect(text.find('[data-testid="tool-answer"] strong').exists()).toBe(true), { timeout: 2000 })
+    expect(text.find('[data-testid="tool-answer"] strong').text()).toBe('#6')
+    expect(text.text()).not.toContain('output:')
+
+    const failed = mount(ToolCallCard, {
+      props: { open: true, step: stepOf({ toolName: 'TaskStop', summary: 'TaskStop', status: 'failed', error: 'no such task', readableAnswer: { rows: [{ depth: 0, label: 'Task id', value: 'b1' }] } }) },
+    })
+    expect(failed.find('[data-testid="tool-answer"]').exists()).toBe(false)
+    expect(failed.text()).toContain('no such task')
+  })
+
   it('renders no thumbnail for a text step', () => {
     const wrapper = mount(ToolCallCard, {
       props: { open: true, scope: { sessionId: 's1' }, step: stepOf() },

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -1863,10 +1865,11 @@ func TestToolHeadersSayWhatTheTerminalSays(t *testing.T) {
 	}
 
 	// A file in the project reads relative to it, with the lines it showed.
-	require.Equal(t, "Read plans/100.md lines 1-96 · <0.1s",
+	// A call under 100ms carries no time, as the terminal's card does not.
+	require.Equal(t, "Read plans/100.md lines 1-96",
 		headerOf(t, root, event.RunEventToolCompleted, read("/work/proj/plans/100.md")))
 	// One outside the project keeps its absolute path.
-	require.Equal(t, "Read /etc/hosts lines 1-96 · <0.1s",
+	require.Equal(t, "Read /etc/hosts lines 1-96",
 		headerOf(t, root, event.RunEventToolCompleted, read("/etc/hosts")))
 
 	// "Ran" belongs to the shell alone.
@@ -2139,6 +2142,101 @@ func TestFileDiffRidesTheStepTheEventAndTheStoredRow(t *testing.T) {
 	shellData := gatewayToolCompletedStepData("call-2", "tool shell", "shell", shellEvt.Output, "", shellBody, "", "", tool.BuildToolMeta(shellEvt))
 	require.NotContains(t, shellData, "file_diff")
 	require.Contains(t, shellData, "shell_card")
+}
+
+// TestReadableAnswerRidesTheStepTheEventAndTheStoredRow: a tool with no card of
+// its own answers through the generic formatter's "output:" envelope, and a
+// migrated session keeps its answer as bare JSON. Either way the page is
+// handed the answer — the peer tools as their own facts, everything else as
+// its fields — on the live step, the canonical tool event and the reloaded row
+// alike, so it never prints the JSON; a body a renderer of its own reads (a
+// shell, a read .json file) carries none.
+func TestReadableAnswerRidesTheStepTheEventAndTheStoredRow(t *testing.T) {
+	evt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "peer_list",
+		Output:   map[string]any{"output": `{"self":"parent","agents":[{"name":"proj-99","kind":"terminal","status":"idle"}]}`},
+	}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	meta := tool.BuildToolMeta(evt)
+	// The identity block is this process's own derivation, so the test asks it
+	// for the block the page will be handed.
+	mark, tone := process.PeerMark("proj-99", "")
+	want := `{"peers":[{"name":"proj-99","kind":"terminal","status":"idle","display":"proj-99","mark":"` +
+		mark + `","tone":` + strconv.Itoa(tone) + `}]}`
+
+	// The live step.
+	stepData := gatewayToolCompletedStepData("call-1", "tool peer_list", "peer_list", evt.Output, "", body, "", "", meta)
+	answer, ok := stepData["readable_answer"].(*tool.ReadableAnswer)
+	require.True(t, ok, "the live step carries no readable_answer: %v", stepData)
+	got, err := json.Marshal(answer)
+	require.NoError(t, err)
+	require.JSONEq(t, want, string(got))
+
+	// The canonical tool event (a subagent's card, live or replayed).
+	raw, err := json.Marshal(map[string]any{
+		"tool_name": "peer_list", "summary": "ran peer_list", "display_body": body,
+		"tool_meta": map[string]any{"tool_name": "peer_list", "status": "completed"},
+	})
+	require.NoError(t, err)
+	var eventOut struct {
+		ReadableAnswer json.RawMessage `json:"readable_answer"`
+	}
+	require.NoError(t, json.Unmarshal(toolEventPayloadWithHeader("/w", event.RunEventToolCompleted, raw), &eventOut))
+	require.JSONEq(t, want, string(eventOut.ReadableAnswer))
+
+	// peer_send is the message the call carried and where it went; its
+	// recipient wears the same identity block.
+	sendEvt := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "peer_send",
+		Input:    map[string]any{"to": "proj-ff", "message": "hello"},
+		Output:   map[string]any{"output": `{"status":"delivered","to":"proj-ff","peer_status":"idle"}`},
+	}
+	sendBody, _ := tool.FormatToolStepResult(sendEvt, tool.DefaultMaxFormattedBody)
+	sendMark, sendTone := process.PeerMark("proj-ff", "")
+	sendWant := `{"send":{"message":"hello","status":"delivered","to":"proj-ff","peer_status":"idle","mark":"` +
+		sendMark + `","tone":` + strconv.Itoa(sendTone) + `}}`
+	sendData := gatewayToolCompletedStepData("call-send", "tool peer_send", "peer_send", sendEvt.Output, "", sendBody, "", "", tool.BuildToolMeta(sendEvt))
+	sendAnswer, ok := sendData["readable_answer"].(*tool.ReadableAnswer)
+	require.True(t, ok, "the live peer_send step carries no readable_answer: %v", sendData)
+	got, err = json.Marshal(sendAnswer)
+	require.NoError(t, err)
+	require.JSONEq(t, sendWant, string(got))
+
+	// The reloaded rows: the live bodies as stored, and a migrated session's
+	// bare JSON answer.
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	require.NoError(t, seedToolRow(ctx, sessions, "s1", "peer_list", body, meta))
+	require.NoError(t, seedToolRow(ctx, sessions, "s1", "peer_send", sendBody, tool.BuildToolMeta(sendEvt)))
+	require.NoError(t, seedToolRow(ctx, sessions, "s1", "SendMessage",
+		`{"success":true,"message":"Resuming agent aacb0c9"}`, tool.ToolMeta{ToolName: "SendMessage", Status: "completed"}))
+	s := &Server{Sessions: sessions}
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var rows []struct {
+		ReadableAnswer json.RawMessage `json:"readable_answer"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 3)
+	require.JSONEq(t, want, string(rows[0].ReadableAnswer))
+	require.JSONEq(t, sendWant, string(rows[1].ReadableAnswer))
+	require.JSONEq(t, `{"rows":[{"label":"Success","value":"true"},{"label":"Message","value":"Resuming agent aacb0c9"}]}`, string(rows[2].ReadableAnswer))
+
+	// A body with a renderer of its own carries none, JSON or not.
+	shellEvt := tool.StepEvent{
+		Kind: event.RunEventToolCompleted, ToolName: "shell",
+		Input:  map[string]any{"command": "ls"},
+		Output: map[string]any{"stdout": "x", "exit_code": 0},
+	}
+	shellBody, _ := tool.FormatToolStepResult(shellEvt, tool.DefaultMaxFormattedBody)
+	require.NotContains(t, gatewayToolCompletedStepData("call-2", "tool shell", "shell", shellEvt.Output, "", shellBody, "", "", tool.BuildToolMeta(shellEvt)), "readable_answer")
+	require.NotContains(t, gatewayToolCompletedStepData("call-3", "tool read_file", "read_file", nil, "", `{"name":"pkg"}`, "", "", tool.ToolMeta{ToolName: "read_file"}), "readable_answer")
 }
 
 // TestGatewayToolMetaPayloadCarriesTheRefusalWords: the live step's tool_meta

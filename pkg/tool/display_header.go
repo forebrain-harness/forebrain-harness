@@ -257,9 +257,11 @@ func FailedActionPhrase(toolName string) string {
 	}
 }
 
-// FormatDuration formats a time.Duration for display in tool headers.
-// Durations under 100ms return empty string (too fast to be useful).
-// >= 60s renders as "1m23s"; >= 10s as "12s"; else "1.2s".
+// FormatDuration formats a time.Duration for reading: under 100ms as "<0.1s",
+// >= 60s as "1m23s", >= 10s as "12s", else "1.2s". It states the fact — a
+// subagent's ran_for tells its dispatcher the agent did run, however briefly —
+// so a card's header, which has no use for a time that short, reads
+// FormatCardDuration instead.
 func FormatDuration(d time.Duration) string {
 	if d <= 0 {
 		return ""
@@ -412,6 +414,16 @@ func DisplayLine(s string) string {
 // which would silently skew the budget it is asked to enforce.
 func TruncateForDisplay(s string, maxLen int) string {
 	return runewidth.Truncate(DisplayLine(s), maxLen, "…")
+}
+
+// FormatCardDuration is the time a settled card's header shows: none for a
+// call under 100ms — "<0.1s" on every quick card was noise, live and replayed
+// alike — and FormatDuration's reading otherwise.
+func FormatCardDuration(d time.Duration) string {
+	if d < 100*time.Millisecond {
+		return ""
+	}
+	return FormatDuration(d)
 }
 
 func FormatWorkingElapsed(elapsed time.Duration) string {

@@ -2180,6 +2180,10 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		// read the same way.
 		ShellCard *tool.ShellCard `json:"shell_card,omitempty"`
 		FileDiff  *tool.FileDiff  `json:"file_diff,omitempty"`
+		// ReadableAnswer is a row whose stored body is the tool's answer
+		// itself — the generic formatter's envelope, or what a migrated
+		// session recorded — read as its fields or its text.
+		ReadableAnswer *tool.ReadableAnswer `json:"readable_answer,omitempty"`
 		// SubagentCall is a tool row's card facts: what the subagent_* call
 		// it answered was about, derived once by the engine so the reloaded
 		// card says what the live one said. Transport only; the derivation
@@ -2354,6 +2358,7 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 				if diff := fileDiffFor(toolName, body); diff != nil {
 					m.FileDiff = diff
 				}
+				m.ReadableAnswer = readableAnswerFor(toolName, body, storedToolRowMeta(t.PartsJSON, t.ToolMetaJSON).Input)
 			case "assistant":
 				m.CallHeaderList = canceledCallHeaderList(displayRoot, t.PartsJSON)
 			}

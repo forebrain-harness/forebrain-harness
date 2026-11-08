@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +219,182 @@ func TestFormatToolStepResultWebFetchMalformedPayloadFailsReadably(t *testing.T)
 	if strings.Contains(body, "output:") || strings.Contains(body, "final_url") || strings.Contains(body, "```json") {
 		t.Fatalf("malformed web fetch exposed its transport envelope: %q", body)
 	}
+}
+
+// ReadToolAnswer reads a tool's answer — the generic formatter's envelope on a
+// live card, the answer verbatim on a replayed row — as rows a reader can
+// take in: fields in the answer's own order with keys as words, nested
+// objects under their field, list items bulleted with their further rows one
+// level in, multi-line values on their own lines, a text answer as text, and
+// prose after a leading object kept below the rows. String is the terminal's
+// form of the same rows.
+func TestReadToolAnswerWritesTheAnswerForAReader(t *testing.T) {
+	t.Parallel()
+	live := func(output map[string]any) string {
+		body, _ := FormatToolStepResult(StepEvent{Kind: StepKindToolCompleted, ToolName: "SendMessage", Output: output}, DefaultMaxFormattedBody)
+		return body
+	}
+	answer := `{"success":true,"resumedAgentId":"aacb0c98","pin":{"id":"aacb","ref":"13d70d"},"links":[{"title":"Docs","url":"https://x/docs"}],"note":"two\nlines","tags":["a","b"],"empty":[]}`
+	wantRows := []ReadableRow{
+		{Label: "Success", Value: "true"},
+		{Label: "Resumed agent id", Value: "aacb0c98"},
+		{Label: "Pin"},
+		{Depth: 1, Label: "Id", Value: "aacb"},
+		{Depth: 1, Label: "Ref", Value: "13d70d"},
+		{Label: "Links"},
+		{Depth: 1, Bullet: true, Label: "Title", Value: "Docs"},
+		{Depth: 2, Label: "Url", Value: "https://x/docs"},
+		{Label: "Note", Value: "two"},
+		{Depth: 1, Value: "lines"},
+		{Label: "Tags", Value: "a, b"},
+		{Label: "Empty", Value: "(none)"},
+	}
+	for name, content := range map[string]string{"live": live(map[string]any{"output": answer}), "replayed": answer} {
+		got, ok := ReadToolAnswer(content)
+		require.True(t, ok, name)
+		require.Equal(t, wantRows, got.Rows, name)
+		require.Empty(t, got.Text, name)
+	}
+	got, _ := ReadToolAnswer(answer)
+	require.Equal(t, "Success: true\nResumed agent id: aacb0c98\nPin:\n  Id: aacb\n  Ref: 13d70d\nLinks:\n  - Title: Docs\n    Url: https://x/docs\nNote: two\n  lines\nTags: a, b\nEmpty: (none)", got.String())
+
+	text, ok := ReadToolAnswer(live(map[string]any{"output": "hello\nworld"}))
+	require.True(t, ok)
+	require.Equal(t, ReadableAnswer{Text: "hello\nworld"}, text)
+
+	prose, ok := ReadToolAnswer(`{"success":true}` + "\n[Subagent hand-back] The report.")
+	require.True(t, ok)
+	require.Equal(t, "Success: true\n\n[Subagent hand-back] The report.", prose.String())
+
+	record, ok := ReadToolAnswer("<task_id>b0i1</task_id>\n\n<exit_code>0</exit_code>")
+	require.True(t, ok)
+	require.Equal(t, "Task id: b0i1\nExit code: 0", record.String())
+
+	_, ok = ReadToolAnswer("plain prose a renderer already shaped")
+	require.False(t, ok, "text that is not the answer itself is not read")
+
+	// Keys read as words the same way on the page (approvalGates mcpFieldLabel).
+	for key, want := range map[string]string{"task_id": "Task id", "resumedAgentId": "Resumed agent id", "HTTPStatus": "HTTP status", "repo": "Repo", " ": "Value"} {
+		require.Equal(t, want, readableFieldLabel(key), key)
+	}
+	// A call's arguments read in key order, whatever order the model wrote.
+	require.Equal(t, []string{"Path: a.go", "Query: x"}, ReadableJSONLines(`{"query":"x","path":"a.go"}`))
+}
+
+// ReadableToolAnswer reads the two peer tools' answers as the facts their
+// cards draw — a roster of agents, and a message that went out — so the
+// terminal and the page show the same names and the same delivery. A subagent
+// of this conversation is named by its type with the short key that tells it
+// from its siblings; every other agent by the name peer_send takes.
+func TestReadableToolAnswerReadsThePeerTools(t *testing.T) {
+	t.Parallel()
+	roster := `{"self":"parent","agents":[` +
+		`{"name":"subagent-da6bdfef-1497-4777-84c3-1edc74086e9e","kind":"explore","status":"finished","task":"Extract UI semantics"},` +
+		`{"name":"subagent-7fe93f3a-5e61-4f3a-aa12-3d12600a0db0","kind":"explore","status":"finished","task":"Extract structure"},` +
+		`{"name":"proj-99","kind":"terminal","status":"idle","cwd":"/work/proj","same_tree":true,"active_ago":"20m"},` +
+		`{"name":"proj-7","ref":"3c1a","kind":"gateway conversation","status":"busy","task":"fix login"}]}`
+	live := `output:
+
+` + "```json" + `
+{
+  "output": ` + strconv.Quote(roster) + `
+}
+` + "```"
+	for name, body := range map[string]string{"live": live, "replayed": roster} {
+		answer, ok := ReadableToolAnswer("peer_list", body, nil)
+		require.True(t, ok, name)
+		require.Len(t, answer.Peers, 4, name)
+		first, third, fourth := answer.Peers[0], answer.Peers[2], answer.Peers[3]
+		require.Equal(t, "explore", first.Display, name)
+		require.Equal(t, "da6b", first.Short, name)
+		require.True(t, first.Own, name)
+		require.Equal(t, "proj-99", third.Display, name)
+		require.False(t, third.Own, name)
+		require.True(t, third.SameTree, name)
+		require.Equal(t, "proj-7 [3c1a]", fourth.Display, name)
+		require.Equal(t, "", fourth.Short, name)
+	}
+
+	// The card's fallback text names each agent once, and an empty roster
+	// says why it is empty.
+	answer, _ := ReadableToolAnswer("peer_list", roster, nil)
+	require.Equal(t, "explore · finished · Extract UI semantics\nexplore · finished · Extract structure\nproj-99 · idle\nproj-7 [3c1a] · busy · fix login", answer.String())
+	empty, ok := ReadableToolAnswer("peer_list", `{"self":"parent","agents":[],"note":"No other agents are reachable right now."}`, nil)
+	require.True(t, ok)
+	require.Empty(t, empty.Peers)
+	require.Equal(t, "No other agents are reachable right now.", empty.Note)
+
+	// peer_send: the message the call carried, and what became of it.
+	sendInput := map[string]any{"to": "proj-ff", "message": "first line\nsecond line"}
+	send, ok := ReadableToolAnswer("peer_send", `{"status":"delivered","to":"proj-ff","peer_status":"idle"}`, sendInput)
+	require.True(t, ok)
+	require.NotNil(t, send.Send)
+	require.Equal(t, "first line\nsecond line", send.Send.Message)
+	require.Equal(t, "delivered", send.Send.Status)
+	require.Equal(t, "proj-ff", send.Send.To)
+	require.Equal(t, "idle", send.Send.PeerStatus)
+	// A message with no readable answer is still the card.
+	only, ok := ReadableToolAnswer("peer_send", "not an answer", sendInput)
+	require.True(t, ok)
+	require.Equal(t, "first line\nsecond line", only.Send.Message)
+	require.Empty(t, only.Send.Status)
+	// Nothing at all is not a card.
+	_, ok = ReadableToolAnswer("peer_send", "", nil)
+	require.False(t, ok)
+}
+
+// ReadableToolAnswer leaves alone a body some renderer reads on its own, even
+// when that body is JSON — a read .json file is the file — and reads a
+// migrated search's links the way the native search card lists them.
+func TestReadableToolAnswerLeavesOwnReadingsAlone(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"read_file", "shell", "web_fetch", "retrieve_output", "subagent_run", "memories_search", "mcp__fs__read", "user_interaction"} {
+		_, ok := ReadableToolAnswer(name, `{"name":"pkg","version":"1.0.0"}`, nil)
+		require.False(t, ok, name)
+	}
+	_, ok := ReadableToolAnswer("TaskStop", `{"task_id":"b2043zpt4"}`, nil)
+	require.True(t, ok)
+
+	search, ok := ReadableToolAnswer("web_search", "Web search results for query: \"x\"\n\n"+`Links: [{"title":"Docs","url":"https://x/docs"}]`, nil)
+	require.True(t, ok)
+	require.Contains(t, search.Text, "1. [Docs](https://x/docs)")
+	_, ok = ReadableToolAnswer("web_search", "**1 search result**\n\n1. [Docs](https://x/docs)", nil)
+	require.False(t, ok, "a search the engine already formatted has nothing to read")
+}
+
+// A session migrated from Claude Code keeps its WebSearch answers as text:
+// the query line, then "Links: " lines each holding a JSON array, with the
+// model's notes between them. The card lists those links the way a native
+// search lists its results, and no array reaches the reader.
+func TestFormatWebSearchResultReadsClaudeCodeLinks(t *testing.T) {
+	t.Parallel()
+	raw := "Web search results for query: \"kimi context caching\"\n\n" +
+		`Links: [{"title":"快速开始 - Kimi API 开放平台","url":"https://platform.moonshot.cn/docs/api/caching"},{"title":"Context Caching 正式公测","url":"https://platform.kimi.com/blog/posts/context-caching"}]` +
+		"\n\nKimi caches a prefix you create explicitly.\n\n" +
+		`Links: [{"title":"Kimi K2 API","url":"https://www.chatbase.co/blog/kimi-k2-api"}]`
+	body, recognized := FormatWebSearchResult(raw)
+	require.True(t, recognized)
+	for _, want := range []string{
+		"**3 search results**",
+		"1. [快速开始 - Kimi API 开放平台](https://platform.moonshot.cn/docs/api/caching)",
+		"3. [Kimi K2 API](https://www.chatbase.co/blog/kimi-k2-api)",
+	} {
+		require.Contains(t, body, want)
+	}
+	require.NotContains(t, body, `{"title"`)
+
+	// A row cut short when it was stored keeps every link before the cut, and
+	// a code block among the model's notes does not hide the links.
+	cut := "Web search results for query: \"x\"\n\n" +
+		`Links: [{"title":"Kept","url":"https://example.com/kept"},{"title":"Cut","url":"https://exa` +
+		"\n\n```go\nfmt.Println(1)\n```"
+	body, recognized = FormatWebSearchResult(cut)
+	require.True(t, recognized)
+	require.Contains(t, body, "1. [Kept](https://example.com/kept)")
+	require.NotContains(t, body, "Cut")
+
+	_, recognized = FormatWebSearchResult("Web search results for query: \"x\"\n\nNo links found.")
+	require.False(t, recognized, "a text with no Links line holds no results")
 }
 
 func TestFormatWebSearchResultSupportsProviderShapes(t *testing.T) {

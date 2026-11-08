@@ -1143,6 +1143,273 @@ func TestPeerSendCardBodyRendersMessageAndResult(t *testing.T) {
 	}
 }
 
+// peerListRosterAnswer is a peer_list answer as the engine writes it: two
+// finished subagents of this conversation, one terminal in this work tree and
+// one elsewhere.
+const peerListRosterAnswer = `{"self":"parent","agents":[` +
+	`{"name":"subagent-da6bdfef-1497-4777-84c3-1edc74086e9e","kind":"explore","status":"finished","task":"Extract plans 259-269 UI semantics"},` +
+	`{"name":"subagent-7fe93f3a-5e61-4f3a-aa12-3d12600a0db0","kind":"explore","status":"finished","task":"Extract confirmed web prototype structure"},` +
+	`{"name":"forebrain-harness-c9","kind":"terminal","status":"idle","cwd":"/Users/doudou/workspace/unionj-cloud/forebrain-harness","same_tree":true,"active_ago":"45m"},` +
+	`{"name":"proj-99","kind":"terminal","status":"busy","task":"Fix the login form","cwd":"/private/var/folders/kw/mf8l2_c564b0m8qzhj073s940000gn/T/fb-proto-run/proj","active_ago":"just now"}]}`
+
+// peerListCardLines renders a completed peer_list card whose answer is
+// output, as the live card carries it (the generic formatter's envelope) and
+// as a replayed row keeps it (the answer verbatim), and returns both paints
+// with their styling stripped.
+func peerListCardLines(t *testing.T, output string, width int) (live, replayed []string) {
+	t.Helper()
+	evt := tool.StepEvent{Kind: tool.StepKindToolCompleted, ToolName: "peer_list", Output: map[string]any{"output": output}}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	meta := tool.BuildToolMeta(evt)
+	for _, content := range []string{body, output} {
+		f := Frame{Kind: FrameTool, Title: "peer_list", Final: true, Content: content, ToolMeta: meta}
+		painted := make([]string, 0)
+		for _, line := range renderFrameLines(f, width, DiffThemeDark, 0) {
+			painted = append(painted, stripANSI(line))
+		}
+		if live == nil {
+			live = painted
+		} else {
+			replayed = painted
+		}
+	}
+	return live, replayed
+}
+
+// TestPeerListCardDrawsAnAlignedRoster pins the peer_list card a reader sees:
+// one row per agent — mark, name, state, then what it does and where — with
+// the columns aligned, this conversation's subagents named the way the agent
+// roster names them, and never the answer's JSON.
+func TestPeerListCardDrawsAnAlignedRoster(t *testing.T) {
+	live, replayed := peerListCardLines(t, peerListRosterAnswer, 140)
+	if strings.Join(live, "\n") != strings.Join(replayed, "\n") {
+		t.Fatalf("live and replayed cards differ:\nlive:\n%s\nreplayed:\n%s", strings.Join(live, "\n"), strings.Join(replayed, "\n"))
+	}
+	want := []string{
+		"  └ ✓ explore · da6b        finished  Extract plans 259-269 UI semantics",
+		"    ✓ explore · 7fe9        finished  Extract confirmed web prototype structure",
+		"    ○ forebrain-harness-c9  idle 45m  terminal · same tree",
+		"    ● proj-99               busy      Fix the login form · terminal · …/T/fb-proto-run/proj",
+	}
+	var rows []string
+	for _, line := range live {
+		if strings.HasPrefix(line, "  └ ") || strings.HasPrefix(line, "    ") {
+			rows = append(rows, strings.TrimRight(line, " "))
+		}
+	}
+	if strings.Join(rows, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("roster rows:\n%s\nwant:\n%s", strings.Join(rows, "\n"), strings.Join(want, "\n"))
+	}
+	joined := strings.Join(live, "\n")
+	for _, leak := range []string{`"agents"`, `"output"`, "{", "subagent-da6bdfef", "```"} {
+		if strings.Contains(joined, leak) {
+			t.Fatalf("card exposed %q from the raw answer:\n%s", leak, joined)
+		}
+	}
+}
+
+// TestPeerListCardFitsANarrowTerminal pins what a narrow card gives up: the
+// task is cut first, a path loses its head and never its end, and no row is
+// wider than the terminal's content width.
+func TestPeerListCardFitsANarrowTerminal(t *testing.T) {
+	const width = 70
+	live, _ := peerListCardLines(t, peerListRosterAnswer, width)
+	joined := strings.Join(live, "\n")
+	for _, want := range []string{"Extract plans 259-269…", "terminal · same tree", "…/proj"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("narrow card missing %q:\n%s", want, joined)
+		}
+	}
+	for _, line := range live {
+		if w := runewidth.StringWidth(line); w > width-contentRightMargin {
+			t.Fatalf("row is %d cells wide, past the %d-cell content width: %q", w, width-contentRightMargin, line)
+		}
+	}
+}
+
+// TestPeerListCardKeepsWhatTellsAgentsApart pins the roster as a real machine
+// answers it: a subagent of another process is named after its parent, so a
+// name too wide for its column is cut in the middle, keeping the parent and
+// the part that tells the subagent from its siblings; and a detail too wide
+// for its column drops the kind, which that name already says, before the
+// task.
+func TestPeerListCardKeepsWhatTellsAgentsApart(t *testing.T) {
+	answer := `{"self":"parent","agents":[` +
+		`{"name":"forebrain-harness-b4","kind":"terminal","status":"idle","cwd":"/Users/doudou/workspace/unionj-cloud/forebrain-harness","active_ago":"31m"},` +
+		`{"name":"forebrain-harness-43.Plan-263-executor","kind":"subagent in another process","status":"busy","task":"Plan 263 executor","cwd":"/Users/doudou/workspace/unionj-cloud/forebrain-harness","active_ago":"2h"}]}`
+	live, _ := peerListCardLines(t, answer, 120)
+	joined := strings.Join(live, "\n")
+	for _, want := range []string{
+		"○ forebrain-harness-b4",
+		"● forebrain-harn…Plan-263-executor  busy      Plan 263 executor · …/unionj-cloud/forebrain-harness",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("roster missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+// TestPeerListCardSaysWhenNobodyIsReachable pins the empty roster: the
+// answer's own note, not an empty card or its JSON.
+func TestPeerListCardSaysWhenNobodyIsReachable(t *testing.T) {
+	live, replayed := peerListCardLines(t, `{"self":"parent","agents":[],"note":"No other agents are reachable right now."}`, 120)
+	for _, painted := range [][]string{live, replayed} {
+		joined := strings.Join(painted, "\n")
+		if !strings.Contains(joined, "  └ No other agents are reachable right now.") {
+			t.Fatalf("empty roster lost its note:\n%s", joined)
+		}
+		if strings.Contains(joined, "{") {
+			t.Fatalf("empty roster exposed its JSON:\n%s", joined)
+		}
+	}
+}
+
+// TestPeerListCardShowsTheRosterUnfolded pins the card the viewport paints: a
+// roster of a few agents is shown whole, not cut to the three rows an ordinary
+// tool body previews behind a click.
+func TestPeerListCardShowsTheRosterUnfolded(t *testing.T) {
+	evt := tool.StepEvent{Kind: tool.StepKindToolCompleted, ToolName: "peer_list", Output: map[string]any{"output": peerListRosterAnswer}}
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	vm := viewModel{}
+	b := vm.append(Frame{Kind: FrameTool, Title: "peer_list", Final: true, Content: body, ToolMeta: tool.BuildToolMeta(evt)})
+	full := renderBlockFull(b, 120, DiffThemeDark, 0)
+	lines, _ := foldBlock(b, full, 120, 0)
+	painted := stripANSI(strings.Join(lines, "\n"))
+	for _, want := range []string{"explore · da6b", "explore · 7fe9", "forebrain-harness-c9", "proj-99"} {
+		if !strings.Contains(painted, want) {
+			t.Fatalf("viewport card is missing %q:\n%s", want, painted)
+		}
+	}
+	if strings.Contains(painted, "more line") || strings.Contains(painted, "click to") {
+		t.Fatalf("a four-agent roster was folded:\n%s", painted)
+	}
+}
+
+// toolCardBody renders a completed card of a tool that has no renderer of its
+// own and returns its body rows with their styling stripped.
+func toolCardBody(t *testing.T, title, content string, width int) []string {
+	t.Helper()
+	f := Frame{Kind: FrameTool, Title: title, Final: true, Content: content,
+		ToolMeta: tool.ToolMeta{ToolName: title, Status: "completed"}}
+	var rows []string
+	for _, line := range renderFrameLines(f, width, DiffThemeDark, 0) {
+		if plain := stripANSI(line); strings.HasPrefix(plain, "  └ ") || strings.HasPrefix(plain, "    ") {
+			rows = append(rows, strings.TrimRight(plain, " "))
+		}
+	}
+	return rows
+}
+
+// TestGenericToolCardReadsItsAnswer pins the card of a tool with no renderer
+// of its own — a new tool, or one a migrated session recorded: whatever shape
+// its answer arrived in, live under the generic formatter's "output:" block or
+// replayed verbatim, the card reads the answer — its text, or its fields as
+// the "Field: value" rows the approval overlay writes a call's arguments with
+// — and never shows the JSON or the envelope around it.
+func TestGenericToolCardReadsItsAnswer(t *testing.T) {
+	live := func(output map[string]any) string {
+		body, _ := tool.FormatToolStepResult(tool.StepEvent{Kind: tool.StepKindToolCompleted, ToolName: "SendMessage", Output: output}, tool.DefaultMaxFormattedBody)
+		return body
+	}
+	sendAnswer := `{"success":true,"message":"Resuming agent aacb0c9","resumedAgentId":"aacb0c98b12b26520","pin":{"id":"aacb0c98b12b26520","ref":"13d70d"}}`
+	sendRows := []string{
+		"  └ Success: true",
+		"    Message: Resuming agent aacb0c9",
+		"    Resumed agent id: aacb0c98b12b26520",
+		"    Pin:",
+		"      Id: aacb0c98b12b26520",
+		"      Ref: 13d70d",
+	}
+	cases := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{"live text", live(map[string]any{"output": "hello\nworld"}), []string{"  └ hello", "    world"}},
+		{"live JSON text", live(map[string]any{"output": sendAnswer}), sendRows},
+		{"replayed JSON", sendAnswer, sendRows},
+		{"live data", live(map[string]any{"status": "ok", "items": []any{"a", "b"}}), []string{
+			"  └ Items: a, b",
+			"    Status: ok",
+		}},
+		{"list of objects", `{"links":[{"title":"Docs","url":"https://example.com/docs"},{"title":"API","url":"https://example.com/api"}]}`, []string{
+			"  └ Links:",
+			"      - Title: Docs",
+			"        Url: https://example.com/docs",
+			"      - Title: API",
+			"        Url: https://example.com/api",
+		}},
+		{"object then prose", `{"success":true,"message":"Resumed agent."}` + "\n[Subagent hand-back] The report follows.", []string{
+			"  └ Success: true",
+			"    Message: Resumed agent.",
+			"",
+			"    [Subagent hand-back] The report follows.",
+		}},
+		{"tag record", "<retrieval_status>success</retrieval_status>\n\n<task_id>b0i122q3l</task_id>\n\n<exit_code>0</exit_code>", []string{
+			"  └ Retrieval status: success",
+			"    Task id: b0i122q3l",
+			"    Exit code: 0",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := toolCardBody(t, "SendMessage", tc.content, 120)
+			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+				t.Fatalf("body:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
+			}
+		})
+	}
+}
+
+// TestFastToolCardHeadersCarryNoTime pins the header of a call that took
+// under 100ms: it says nothing about the time — no "<0.1s", and no dangling
+// " · " where the time was — on the live card, folded or not, on a subagent
+// task row, and on the card a resume replays; a slower call still says its
+// time.
+func TestFastToolCardHeadersCarryNoTime(t *testing.T) {
+	read := func(d time.Duration) Frame {
+		return Frame{Kind: FrameTool, Title: "read_file", Final: true, Content: "1|package main", Duration: d,
+			ToolMeta: tool.ToolMeta{ToolName: "read_file", Status: "completed", Input: map[string]any{"file_path": "/work/a.go"}}}
+	}
+	header := func(f Frame) string {
+		vm := viewModel{}
+		b := vm.append(f)
+		full := renderBlockFull(b, 100, DiffThemeDark, 0)
+		lines, _ := foldBlock(b, full, 100, 0, "/work")
+		return stripANSI(full[0]) + "\n" + stripANSI(lines[0])
+	}
+	if got := header(read(40 * time.Millisecond)); strings.Contains(got, "0.1s") || strings.Contains(got, " · ") || !strings.Contains(got, "● Read /work/a.go") {
+		t.Fatalf("a 40ms call's header shows a time:\n%s", got)
+	}
+	if got := header(read(1200 * time.Millisecond)); !strings.Contains(got, "1.2s") {
+		t.Fatalf("a 1.2s call's header lost its time:\n%s", got)
+	}
+
+	start := time.Unix(1_800_000_000, 0)
+	fanout := Frame{FanoutLineClocks: []fanoutLineClock{{Start: start, End: start.Add(40 * time.Millisecond)}}}
+	if got := fanoutClockSuffix(fanout, 0); got != "" {
+		t.Fatalf("a 40ms task row suffix = %q, want none", got)
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	replayTurnsToRenderer(renderer, []state.Message{
+		assistantToolCallRow("", "read-1", "read_file", `{"file_path":"/work/a.go"}`),
+		{Role: "tool", ToolStepID: "read-1", Content: "1|package main", ExecDurationMs: 40,
+			PartsJSON: `[{"type":"tool_result_meta","tool_call_id":"read-1"}]`},
+	})
+	var replayed string
+	for _, b := range renderer.vm.blocks {
+		if b.frame.Kind == FrameTool {
+			replayed = stripANSI(renderBlockFull(b, 100, DiffThemeDark, 0)[0])
+		}
+	}
+	if replayed == "" || strings.Contains(replayed, "0.1s") || strings.Contains(replayed, " · ") {
+		t.Fatalf("the replayed 40ms call's header = %q, want no time", replayed)
+	}
+}
+
 // ---- migrated from migration_card_test.go (tests for this file's production code) ----
 
 // migration_card_test.go pins the /migrate progress card: the compact card's

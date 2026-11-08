@@ -434,7 +434,9 @@ func approvalConfirmationText(req turn.ToolApprovalRequest, decision turn.ToolAp
 	commandPrefix := update.Rules[0].CommandPrefix
 	rule := strings.TrimSpace(update.Rules[0].RuleContent)
 	switch {
-	case rule != "":
+	// Rule content that is a JSON object is a tool's gate facts, not a
+	// command; like approvalConfirmationTarget, the tool's name stands in.
+	case rule != "" && !isToolOutputJSON(rule):
 	case literalCommand != "":
 		rule = literalCommand
 	case len(commandPrefix) > 0:
@@ -559,17 +561,14 @@ func fileRuleIsPattern(req turn.ToolApprovalRequest, rule string) bool {
 }
 
 func approvalConfirmationTarget(req turn.ToolApprovalRequest) string {
-	if cmd := approvalBashCommand(req); cmd != "" {
-		return cmd
-	}
-	if input := strings.TrimSpace(req.PermissionInput); input != "" {
-		return input
-	}
-	if exact := strings.TrimSpace(req.ExactRuleContent); exact != "" {
-		return exact
-	}
-	if prefix := strings.TrimSpace(req.PrefixRuleContent); prefix != "" {
-		return prefix
+	// A tool with no command of its own carries its gate facts as a JSON
+	// object ({"category":"session"}, and a subagent's ids beside it): that
+	// is not something forebrain runs, and printing it showed the user raw
+	// JSON. Such a call is named by its tool.
+	for _, target := range []string{approvalBashCommand(req), req.ExactRuleContent, req.PrefixRuleContent} {
+		if target = strings.TrimSpace(target); target != "" && !isToolOutputJSON(target) {
+			return target
+		}
 	}
 	if tool := approvalToolName(req); tool != "" {
 		return tool

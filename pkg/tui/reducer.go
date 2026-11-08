@@ -2908,7 +2908,10 @@ func toolSpecificMaxLines(title string) int {
 		strings.EqualFold(title, "edit_file") {
 		return 30
 	}
-	if isMemoryQueryTool(title) {
+	// A roster is one short row per agent: the usual handful of agents reads
+	// at a glance instead of behind a click, the same budget a memory listing
+	// gets.
+	if isMemoryQueryTool(title) || strings.EqualFold(title, "peer_list") {
 		return 10
 	}
 	return toolOutputMaxLines

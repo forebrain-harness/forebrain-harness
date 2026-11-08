@@ -417,7 +417,7 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 	// actual execution. Pending, denied, and canceled cards intentionally omit it.
 	duration := ""
 	if !isRunning && !isPending && !isDenied && !isCanceled && (isFailed || isCompleted) {
-		duration = FormatDuration(f.Duration)
+		duration = FormatCardDuration(f.Duration)
 	}
 
 	// A tool that is still executing shows how long it has been running; the

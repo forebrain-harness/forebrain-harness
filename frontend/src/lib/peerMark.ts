@@ -66,6 +66,10 @@ export function peerStatusLabel(
       return t('chat.peerStatusWaiting')
     case 'shell':
       return t('chat.peerStatusShell')
+    case 'running':
+      return t('chat.peerStatusRunning')
+    case 'finished':
+      return t('chat.peerStatusFinished')
     case 'idle':
       return t('chat.peerStatusIdle')
     default:
