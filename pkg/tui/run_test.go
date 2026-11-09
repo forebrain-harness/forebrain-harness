@@ -3398,14 +3398,57 @@ func TestPostTurnCompletionNotificationUsesBELOnlyWhenWaitingUnfocused(t *testin
 
 func TestStreamStateTracksTerminalFocusReports(t *testing.T) {
 	state := streamState{terminalFocused: true}
-	if !state.updateTerminalFocus(inputEvent{kind: inputEventFocusLost}) || state.terminalFocused {
+	if !state.updateTerminalFocus(inputEvent{kind: inputEventFocusLost}, nil) || state.terminalFocused {
 		t.Fatal("focus-lost report was not applied")
 	}
-	if !state.updateTerminalFocus(inputEvent{kind: inputEventFocusGained}) || !state.terminalFocused {
+	if !state.updateTerminalFocus(inputEvent{kind: inputEventFocusGained}, nil) || !state.terminalFocused {
 		t.Fatal("focus-gained report was not applied")
 	}
-	if state.updateTerminalFocus(inputEvent{kind: inputEventDraft}) {
+	if state.updateTerminalFocus(inputEvent{kind: inputEventDraft}, nil) {
 		t.Fatal("non-focus input was consumed as a focus report")
+	}
+}
+
+// A window that is re-exposed is a screen whose pixels the terminal may have
+// refilled from its own damaged backing store: macOS Terminal.app, on a tab or
+// window switch, paints the rects it repaints with its window background, which
+// then shows through every cell carrying no background of its own (the empty
+// spacer row between the status line and the composer) and through the strip
+// outside the grid. The shadow still calls those pixels current, so without a
+// repaint the band stays until that row's bytes happen to change - the reported
+// white bar under the agent roster, which no later tab switch removed. The
+// focus report is the terminal's own signal for the switch, so it must erase
+// the display and write every row again; a focus loss must write nothing.
+func TestTerminalFocusGainRepaintsEveryRow(t *testing.T) {
+	forceColorProfile(t)
+	r := newComposerRenderer(t, 80, 24)
+	out := r.out.(*bytes.Buffer)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "", Cursor: &cursor})
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "an answer already on screen", Final: true})
+	state := streamState{terminalFocused: false}
+
+	out.Reset()
+	if !state.updateTerminalFocus(inputEvent{kind: inputEventFocusGained}, r) {
+		t.Fatal("focus-gained report was not applied")
+	}
+	paint := out.String()
+	if !strings.Contains(paint, "\x1b[2J") {
+		t.Fatalf("focus gain did not erase the display before repainting: %q", paint)
+	}
+	// The last screen row (the composer footer) is only written when the whole
+	// frame is, so its address proves no row was skipped as unchanged.
+	lastRow := fmt.Sprintf("\x1b[%d;1H", 24)
+	if !strings.Contains(paint, lastRow) {
+		t.Fatalf("focus gain did not rewrite the last row (%q): %q", lastRow, paint)
+	}
+
+	out.Reset()
+	if !state.updateTerminalFocus(inputEvent{kind: inputEventFocusLost}, r) {
+		t.Fatal("focus-lost report was not applied")
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("focus loss repainted the screen: %q", got)
 	}
 }
 

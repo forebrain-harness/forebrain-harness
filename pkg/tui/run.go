@@ -813,7 +813,7 @@ func Run(ctx context.Context, opts Options) error {
 			if ev.kind == inputEventWake {
 				continue
 			}
-			if state.updateTerminalFocus(ev) {
+			if state.updateTerminalFocus(ev, renderer) {
 				continue
 			}
 			if copySelectionOnHotkey(renderer, ev) {
@@ -1505,7 +1505,7 @@ func handleBlockingSlashInput(session Session, renderer *Renderer, state *stream
 	if state == nil {
 		return false
 	}
-	if state.updateTerminalFocus(ev) {
+	if state.updateTerminalFocus(ev, renderer) {
 		return false
 	}
 	if copySelectionOnHotkey(renderer, ev) {
@@ -4426,7 +4426,23 @@ func postTurnCompletionNotification(out io.Writer, disposition runTurnDispositio
 	return err == nil
 }
 
-func (s *streamState) updateTerminalFocus(ev inputEvent) bool {
+// updateTerminalFocus follows the terminal's focus reports (CSI I / CSI O).
+// Besides the state they carry, gaining focus is the one signal a terminal
+// gives for having just re-exposed its window, so the screen is repainted from
+// a blank display then.
+//
+// Re-exposure is when a terminal can hand back pixels it filled from its own
+// damaged backing store rather than from our bytes. macOS Terminal.app, on a
+// tab or window switch, paints the rects it repaints with its window background
+// (a light grey, not the profile background), which then shows through every
+// cell that carries no background of its own — an empty spacer row between the
+// live status line and the composer card, say — and through the strip outside
+// the character grid. Nothing in our stream can paint those cells, and the
+// shadow still calls them current, so a band left like that stays on screen for
+// as long as that row's bytes do not change: the reported "white bar under the
+// agent roster", which survived every later tab switch. Erasing the display and
+// writing every row again refills those rects with the profile background.
+func (s *streamState) updateTerminalFocus(ev inputEvent, renderer *Renderer) bool {
 	if s == nil {
 		return false
 	}
@@ -4434,6 +4450,7 @@ func (s *streamState) updateTerminalFocus(ev inputEvent) bool {
 	case inputEventFocusGained:
 		s.terminalFocused = true
 		s.clipboardWatch.SetFocused(true)
+		renderer.ForceRepaint()
 		return true
 	case inputEventFocusLost:
 		s.terminalFocused = false
@@ -4826,7 +4843,7 @@ func formatTokensCompact(n int) string {
 }
 
 func handleActiveRunInput(ctx context.Context, session Session, renderer *Renderer, tracker *Tracker, state *streamState, clipboard ClipboardImageReader, ev inputEvent, cmds *commandController) {
-	if state.updateTerminalFocus(ev) {
+	if state.updateTerminalFocus(ev, renderer) {
 		return
 	}
 	if copySelectionOnHotkey(renderer, ev) {
