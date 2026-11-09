@@ -65,9 +65,33 @@ describe('SubagentConfigDrawer', () => {
 
   beforeEach(() => {
     vi.spyOn(forebrainApi, 'subagentConfig').mockResolvedValue(detail())
-    vi.spyOn(forebrainApi, 'subagentModelOptions').mockResolvedValue([
-      { provider: 'deepseek', model: 'deepseek-v4', label: 'deepseek/deepseek-v4', efforts: ['low', 'medium', 'high'] },
-      { provider: 'openai', model: 'gpt-5.4', label: 'openai/gpt-5.4', efforts: ['low', 'high'] },
+    // One list for every picker (plan 266): the install's rows, by id, each with
+    // the endpoint it calls.
+    vi.spyOn(forebrainApi, 'llmModelChoices').mockResolvedValue([
+      {
+        id: 'm-deepseek',
+        provider: 'deepseek',
+        providerName: '深度求索',
+        model: 'deepseek-v4',
+        baseUrl: 'https://api.deepseek.com',
+        apiPath: '/chat/completions',
+        endpoint: 'https://api.deepseek.com/chat/completions',
+        label: 'deepseek/deepseek-v4',
+        efforts: ['low', 'medium', 'high'],
+        supportsImages: false,
+      },
+      {
+        id: 'm-openai',
+        provider: 'openai',
+        providerName: 'OpenAI',
+        model: 'gpt-5.4',
+        baseUrl: 'https://api.openai.com/v1',
+        apiPath: '/chat/completions',
+        endpoint: 'https://api.openai.com/v1/chat/completions',
+        label: 'openai/gpt-5.4',
+        efforts: ['low', 'high'],
+        supportsImages: true,
+      },
     ])
     vi.spyOn(forebrainApi, 'toolsPage').mockResolvedValue({
       rows: [tool('read_file'), tool('subagent_run'), tool('grep')],
@@ -97,7 +121,7 @@ describe('SubagentConfigDrawer', () => {
 
   it('disables the effort while the model follows the primary agent', async () => {
     vi.mocked(forebrainApi.subagentConfig).mockResolvedValue(
-      detail({ modelProvider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'high', modelSource: 'agent' }),
+      detail({ modelProvider: 'deepseek', model: 'm-deepseek', reasoningEffort: 'high', modelSource: 'agent' }),
     )
     const wrapper = await openDrawer()
 
@@ -252,7 +276,7 @@ describe('SubagentConfigDrawer', () => {
 
   it('writes an empty effort tier as the empty string, not the select’s marker', async () => {
     vi.mocked(forebrainApi.subagentConfig).mockResolvedValue(
-      detail({ modelProvider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'high', modelSource: 'agent' }),
+      detail({ modelProvider: 'deepseek', model: 'm-deepseek', reasoningEffort: 'high', modelSource: 'agent' }),
     )
     const wrapper = await openDrawer()
 
@@ -267,7 +291,7 @@ describe('SubagentConfigDrawer', () => {
     await flushPromises()
 
     expect(forebrainApi.updateSubagentConfig).toHaveBeenCalledWith('main', 'explore', {
-      model: 'deepseek/deepseek-v4',
+      model: 'm-deepseek',
       reasoningEffort: '',
     })
   })

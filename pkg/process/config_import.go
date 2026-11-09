@@ -17,13 +17,11 @@ import (
 	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
-	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
 	openaiauth "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
-	"github.com/joho/godotenv"
 	"go.yaml.in/yaml/v2"
 )
 
@@ -63,8 +61,8 @@ const legacyImportMarkerSection = "meta.legacy_yaml_imported"
 //
 // The sections are read by the one whole-file reader the codebase keeps
 // (appcfg.LoadLegacyFileSections): the file's runtime sections, with ${ENV}
-// references still references, so they reach the resolver as references rather
-// than values a load already expanded.
+// references still references, so what the database stores is the reference and
+// not one machine's expanded value.
 //
 // A failure fails the startup: an install whose configuration did not make
 // it into the database must not come up silently running on defaults.
@@ -160,14 +158,6 @@ func storedRootSectionPresent(sections map[string]json.RawMessage) bool {
 // was nothing to import (no runtime section carried a value), in which case
 // the file is left untouched.
 func importLegacyYAMLSections(ctx context.Context, store *state.ConfigStore, home, cfgPath string, persisted appcfg.Root) (*legacyImportResult, error) {
-	envValues, err := godotenv.Read(homepkg.DefaultEnvPath(home))
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("read %s: %w", homepkg.DefaultEnvPath(home), err)
-		}
-		envValues = map[string]string{}
-	}
-
 	sections := make(map[string]json.RawMessage)
 	names := make([]string, 0, len(rootConfigSections))
 	src := reflect.ValueOf(&persisted).Elem()
@@ -183,14 +173,10 @@ func importLegacyYAMLSections(ctx context.Context, store *state.ConfigStore, hom
 		if err != nil {
 			return nil, fmt.Errorf("marshal section %s: %w", name, err)
 		}
-		// The owner's 2026-10-30 ruling: credentials live in the database in
-		// plaintext. A ${NAME} reference the home's .env can resolve is
-		// replaced by the plaintext value on the way in; one it cannot stays
-		// a reference, which compose-time expansion still resolves.
-		raw, err = resolveSectionEnvReferences(raw, envValues)
-		if err != nil {
-			return nil, fmt.Errorf("resolve section %s references: %w", name, err)
-		}
+		// A ${NAME} reference reaches the database as the reference it is:
+		// compose-time expansion resolves it from the operator's variables and
+		// the process environment, and the model table's own migration moves
+		// the values a model row needs (plans 262, 268).
 		sections[name] = raw
 		names = append(names, name)
 	}
@@ -208,109 +194,6 @@ func importLegacyYAMLSections(ctx context.Context, store *state.ConfigStore, hom
 		return nil, err
 	}
 	return &legacyImportResult{sections: names, backup: backup}, nil
-}
-
-// resolveSectionEnvReferences walks a section's JSON and replaces every
-// single ${NAME} reference inside the credential fields — an api_key, a
-// string under an MCP server's headers or oauth — with the value the home's
-// .env holds for NAME. Anything else, including a reference .env cannot
-// resolve, passes through unchanged.
-func resolveSectionEnvReferences(raw json.RawMessage, envValues map[string]string) (json.RawMessage, error) {
-	if len(envValues) == 0 {
-		return raw, nil
-	}
-	var doc interface{}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, err
-	}
-	if !resolveEnvReferencesIn(doc, envValues) {
-		return raw, nil
-	}
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// resolveEnvReferencesIn mutates the decoded document in place and reports
-// whether anything changed. Secret-bearing places are recognized by key:
-// "api_key" (a provider's key) is a string leaf, while "headers" and "oauth"
-// (an MCP server's credentials) name whole objects whose every string leaf
-// is a credential — an arbitrary header name cannot be matched by key rule.
-func resolveEnvReferencesIn(doc interface{}, envValues map[string]string) bool {
-	changed := false
-	switch v := doc.(type) {
-	case map[string]interface{}:
-		for key, val := range v {
-			switch key {
-			case "api_key":
-				if s, ok := val.(string); ok {
-					if resolved, ok := resolveEnvRef(s, envValues); ok {
-						v[key] = resolved
-						changed = true
-					}
-				}
-			case "headers", "oauth":
-				if resolveAllStringLeaves(val, envValues) {
-					changed = true
-				}
-			default:
-				if resolveEnvReferencesIn(val, envValues) {
-					changed = true
-				}
-			}
-		}
-	case []interface{}:
-		for _, item := range v {
-			if resolveEnvReferencesIn(item, envValues) {
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
-// resolveAllStringLeaves replaces every single ${NAME} reference in any
-// string under a headers or oauth object — at any depth — with the value the
-// home's .env holds for NAME.
-func resolveAllStringLeaves(doc interface{}, envValues map[string]string) bool {
-	changed := false
-	switch v := doc.(type) {
-	case string:
-		return false
-	case map[string]interface{}:
-		for key, val := range v {
-			if s, ok := val.(string); ok {
-				if resolved, ok := resolveEnvRef(s, envValues); ok {
-					v[key] = resolved
-					changed = true
-				}
-				continue
-			}
-			if resolveAllStringLeaves(val, envValues) {
-				changed = true
-			}
-		}
-	case []interface{}:
-		for _, item := range v {
-			if resolveAllStringLeaves(item, envValues) {
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
-func resolveEnvRef(s string, envValues map[string]string) (string, bool) {
-	if !isEnvReference(s) {
-		return s, false
-	}
-	name := strings.TrimSuffix(strings.TrimPrefix(s, "${"), "}")
-	if v, ok := envValues[name]; ok && strings.TrimSpace(v) != "" {
-		return v, true
-	}
-	return s, false
 }
 
 // rewriteMinimalConfigFile backs the config file up and rewrites it holding

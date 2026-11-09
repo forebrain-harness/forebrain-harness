@@ -8,7 +8,8 @@ import { flushPromises } from '@vue/test-utils'
  *
  * The element is passed in rather than a test id: a component test owns its own
  * wrapper (a modal may render into the document, a page may not), so only the
- * caller knows where to look. `ProvidersView.test.ts` is the reference caller.
+ * caller knows where to look. `SubagentConfigDrawer.test.ts` is the reference
+ * caller.
  */
 export async function openSelect(el: HTMLElement): Promise<void> {
   el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))

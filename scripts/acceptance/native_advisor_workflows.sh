@@ -1245,14 +1245,11 @@ REAL_LIMIT_CALLS=150
 
 resolve_real_key() {
   # Resolution order, mirroring where this owner actually keeps the credential:
-  # an exported FOREBRAIN_E2E_ZHIPU_KEY, then the ZHIPUAI_API_KEY that
-  # ~/.forebrain/forebrain.yaml itself references (its .env beside the config),
-  # then the older e2e env file. The key only ever reaches a 0600 file the
-  # launched TUI sources; it is never printed, logged or put on a command line.
+  # an exported FOREBRAIN_E2E_ZHIPU_KEY, then the older e2e env file. The key
+  # only ever reaches a 0600 file the launched TUI sources; it is never printed,
+  # logged or put on a command line. The home's .env is not consulted: it is
+  # gone (plan 268), and a key lives in the model table, not the environment.
   local key="${FOREBRAIN_E2E_ZHIPU_KEY:-}"
-  if [ -z "$key" ] && [ -f "$HOME/.forebrain/.env" ]; then
-    key="$(set -a; . "$HOME/.forebrain/.env"; set +a; printf '%s' "${ZHIPUAI_API_KEY:-}")"
-  fi
   if [ -z "$key" ] && [ -f "$HOME/.forebrain/e2e-zhipu.env" ]; then
     key="$(set -a; . "$HOME/.forebrain/e2e-zhipu.env"; set +a; printf '%s' "${FOREBRAIN_E2E_ZHIPU_KEY:-}")"
   fi

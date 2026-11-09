@@ -56,9 +56,9 @@ func scanPlaintextConfigSecrets(path string, keyPath []string, v interface{}) er
 			key := fmt.Sprint(rawKey)
 			nextPath := appendKeyPath(keyPath, key)
 			if isSecretLikeConfigKey(key) {
-				if !isAllowedConfigSecretValue(rawValue) {
+				if !isAllowedConfigSecretValue(nextPath, rawValue) {
 					return fmt.Errorf(
-						"%s: plaintext secret is not allowed at %s; use ${ENV_NAME} or ~/.forebrain/.env",
+						"%s: plaintext secret is not allowed at %s; use ${ENV_NAME} and set it under Settings · Variables",
 						path,
 						strings.Join(nextPath, "."),
 					)
@@ -135,7 +135,16 @@ func isNonSecretConfigKey(k string) bool {
 	}
 }
 
-func isAllowedConfigSecretValue(v interface{}) bool {
+// configSecretPlaintextKeys names the keys whose plaintext value is the
+// operator's own secret in the file rather than a mistake: the gateway's token
+// is the only authentication the gateway has and there is nowhere else for a
+// home to keep it but the file, which only its owner can read (owner
+// 2026-11-07, plan 268).
+var configSecretPlaintextKeys = map[string]bool{
+	"gateway.auth.token": true,
+}
+
+func isAllowedConfigSecretValue(keyPath []string, v interface{}) bool {
 	if v == nil {
 		return true
 	}
@@ -144,6 +153,9 @@ func isAllowedConfigSecretValue(v interface{}) bool {
 		return false
 	}
 	s = strings.TrimSpace(s)
+	if configSecretPlaintextKeys[strings.Join(keyPath, ".")] {
+		return true
+	}
 	return s == "" || isSingleEnvReference(s)
 }
 

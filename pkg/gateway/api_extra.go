@@ -35,7 +35,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
-	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
 )
 
@@ -408,8 +407,30 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	// knows. The version and the address the browser reached are the
 	// browser's own.
 	api.Get("/runtime", s.handleRuntimeInfo)
-	api.Get("/providers", s.handleProviders)
-	api.Put("/providers", s.handleProviders)
+	// The models page (plan 265): the install-wide model table by row id, the one
+	// list every model picker reads, the built-in providers a form is built from,
+	// the live capability lookup, and the two things the page tests a row with.
+	api.Get("/llm-models", s.handleLLMModels)
+	api.Post("/llm-models", s.handleLLMModels)
+	api.Get("/llm-models/choices", s.handleLLMModelChoices)
+	api.Get("/llm-models/catalog-caps", s.handleLLMModelCatalogCaps)
+	api.Post("/llm-models/catalog-caps", s.handleLLMModelCatalogCaps)
+	api.Post("/llm-models/test", s.handleLLMModelTest)
+	api.Put("/llm-models/:id", s.handleLLMModelByID)
+	api.Delete("/llm-models/:id", s.handleLLMModelByID)
+	api.Put("/llm-models/:id/default", s.handleLLMModelSetDefault)
+	api.Post("/llm-models/:id/refresh-key", s.handleLLMModelRefreshKey)
+	api.Get("/llm-providers", s.handleLLMProviders)
+	// The subscriptions the page signs in to: the registry, what a finished
+	// sign-in offers, and the write that turns chosen offers into model rows.
+	api.Get("/subscriptions", s.handleSubscriptions)
+	api.Get("/subscriptions/:id/offers", s.handleSubscriptionOffers)
+	api.Post("/subscriptions/:id/provision", s.handleSubscriptionProvision)
+	// The operator's variables (plan 259), which took over from the home .env:
+	// MCP and LSP entries resolve them as ${NAME}.
+	api.Get("/env-vars", s.handleEnvVars)
+	api.Put("/env-vars/:name", s.handleEnvVar)
+	api.Delete("/env-vars/:name", s.handleEnvVar)
 	api.Get("/hooks", s.handleHooks)
 	api.Put("/hooks", s.handleHooks)
 	api.Get("/cron-settings", s.handleCronSettings)
@@ -1791,13 +1812,17 @@ func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // sessionModelOption is one model this conversation's primary agent is
-// configured with, as the session's model chip offers it: the configured pair
-// plus the reasoning levels and image support the shared catalog reports for
-// it.
+// configured with, as the session's model chip offers it: the configured row's
+// id and endpoint, plus the reasoning levels and image support the shared
+// catalog reports for it. The id is what tells twin rows of one provider/model
+// apart; the endpoint is what a picker has to show to tell them apart.
 type sessionModelOption struct {
+	ID             string   `json:"id"`
 	Provider       string   `json:"provider"`
 	Model          string   `json:"model"`
 	Label          string   `json:"label"`
+	BaseURL        string   `json:"base_url,omitempty"`
+	APIPath        string   `json:"api_path,omitempty"`
 	Efforts        []string `json:"efforts"`
 	SupportsImages bool     `json:"supports_images"`
 }
@@ -1855,9 +1880,12 @@ func (s *Server) sessionModelOptions(cfg *config.Root, agentName string) []sessi
 	options := make([]sessionModelOption, 0, len(choices))
 	for _, choice := range choices {
 		options = append(options, sessionModelOption{
+			ID:             choice.ID,
 			Provider:       choice.Provider,
 			Model:          choice.Model,
 			Label:          choice.Label,
+			BaseURL:        choice.BaseURL,
+			APIPath:        choice.APIPath,
 			Efforts:        sessionModelEfforts(records, choice.ReasoningEfforts, choice.Provider, choice.Model),
 			SupportsImages: sessionModelSupportsImages(records, choice),
 		})
@@ -1907,6 +1935,7 @@ func (s *Server) handleChatSessionModelGet(w http.ResponseWriter, r *http.Reques
 	}
 	sel := s.sessionModelSelection(runner, sid)
 	writeJSON(w, map[string]any{
+		"model_id": sel.ModelID,
 		"provider": sel.Provider,
 		"model":    sel.Model,
 		"effort":   sel.Effort,
@@ -1947,6 +1976,7 @@ func (s *Server) handleChatModelDefault(w http.ResponseWriter, r *http.Request) 
 		sel = run.PrimaryModelSelection(runner)
 	}
 	writeJSON(w, map[string]any{
+		"model_id": sel.ModelID,
 		"provider": sel.Provider,
 		"model":    sel.Model,
 		"effort":   sel.Effort,
@@ -1981,6 +2011,7 @@ func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var body struct {
+		ModelID  string  `json:"model_id"`
 		Provider string  `json:"provider"`
 		Model    string  `json:"model"`
 		Effort   *string `json:"effort"`
@@ -2005,11 +2036,33 @@ func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Reques
 	}
 	provider := strings.TrimSpace(body.Provider)
 	model := strings.TrimSpace(body.Model)
+	options := s.sessionModelOptions(cfg, agentName)
 	var chosen turn.ModelChoice
-	for _, option := range s.sessionModelOptions(cfg, agentName) {
-		if strings.EqualFold(option.Provider, provider) && strings.EqualFold(option.Model, model) {
-			chosen = turn.ModelChoice{Label: option.Label, Provider: option.Provider, Model: option.Model}
-			break
+	if modelID := strings.TrimSpace(body.ModelID); modelID != "" {
+		// The id is the row the user picked: a row that is not offered cannot
+		// be reached, and a twin of the same pair is a different row.
+		for _, option := range options {
+			if option.ID == modelID {
+				chosen = turn.ModelChoice{ID: option.ID, Label: option.Label, Provider: option.Provider, Model: option.Model}
+				break
+			}
+		}
+	} else {
+		// A client that sends only the pair: one option answers, several mean
+		// the pair alone cannot name the row, so nothing is written.
+		matches := 0
+		for _, option := range options {
+			if !strings.EqualFold(option.Provider, provider) || !strings.EqualFold(option.Model, model) {
+				continue
+			}
+			matches++
+			if matches == 1 {
+				chosen = turn.ModelChoice{ID: option.ID, Label: option.Label, Provider: option.Provider, Model: option.Model}
+			}
+		}
+		if matches > 1 {
+			http.Error(w, "several models match this provider and model; send model_id", http.StatusBadRequest)
+			return
 		}
 	}
 	if chosen.Model == "" {
@@ -2030,6 +2083,7 @@ func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Reques
 	}
 	sel := s.sessionModelSelection(runner, sid)
 	writeJSON(w, map[string]any{
+		"model_id": sel.ModelID,
 		"provider": sel.Provider,
 		"model":    sel.Model,
 		"effort":   sel.Effort,
@@ -5737,7 +5791,7 @@ func (s *Server) configPath() string {
 
 // persistedConfig reads the configuration as written — the startup sections
 // from forebrain.yaml plus the stored sections from the state database —
-// without the .env merge or the ${ENV} expansion the composed load performs.
+// without the ${ENV} expansion the composed load performs.
 // Every read-modify-write starts here so a stored section never bakes an
 // expanded secret back in. A home with no file yet reads as the empty
 // configuration, the same reading startup gives it.
@@ -5914,7 +5968,7 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 			}
 			// The hints are read from the stored values, so they are taken
 			// before the fields are masked.
-			secretKeys, hints := projectChannelSecrets(s.Home, fields)
+			secretKeys, hints := projectChannelSecrets(fields)
 			redactChannelFields(fields)
 			enabled, _ := fields["enabled"].(bool)
 			labelZh, labelEn := channelLabel(kind)
@@ -6019,7 +6073,7 @@ func projectChannelFields(kind string, row state.ProjectChannel, saved bool) (fi
 // projectChannelSecrets names the secret fields of one kind's configuration and
 // the hint a page shows for each one that holds a value. It reads the stored
 // values, so it runs before the fields are masked.
-func projectChannelSecrets(home string, fields map[string]any) ([]string, map[string]string) {
+func projectChannelSecrets(fields map[string]any) ([]string, map[string]string) {
 	keys := make([]string, 0, 2)
 	hints := map[string]string{}
 	for key, value := range fields {
@@ -6031,7 +6085,7 @@ func projectChannelSecrets(home string, fields map[string]any) ([]string, map[st
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		hints[key] = channelSecretHint(home, text)
+		hints[key] = channelSecretHint(text)
 	}
 	sort.Strings(keys)
 	return keys, hints
@@ -6041,8 +6095,8 @@ func projectChannelSecrets(home string, fields map[string]any) ([]string, map[st
 // the value's last four characters, or the mask alone when the value cannot be
 // read back (a short one, or a ${VAR} reference with nothing behind it). It is
 // the model-service page's hint with its mask, so the two read alike.
-func channelSecretHint(home, value string) string {
-	hint := providerKeyHint(home, value)
+func channelSecretHint(value string) string {
+	hint := providerKeyHint(value)
 	if hint == providerSecretMask {
 		return providerSecretMask
 	}
@@ -6070,10 +6124,10 @@ func (s *Server) saveProjectChannels(ctx context.Context, store *state.ProjectCh
 		mergeRedactedChannelFields(fields, prior.ConfigJSON, hasPrior)
 		enabled, _ := fields["enabled"].(bool)
 		delete(fields, "enabled")
-		// Every secret the page typed is moved to ~/.forebrain/.env and left in
-		// the stored config only as a ${VAR} reference, so the state database
-		// carries no plaintext credential.
-		s.storeChannelSecretRefs(projectID, kind, fields)
+		// A secret the page typed is stored as it was typed: channels keep
+		// their credentials in the state database in plaintext like every other
+		// credential (owner rulings 2026-10-30 and 2026-11-07), and the page
+		// only ever reads a mask.
 		raw, merr := json.Marshal(fields)
 		if merr != nil {
 			return merr
@@ -6147,35 +6201,11 @@ func mergeRedactedChannelFields(fields map[string]any, priorJSON string, hasPrio
 	}
 }
 
-// storeChannelSecretRefs moves every plaintext secret a page typed into the
-// home's .env and replaces it in place with the ${VAR} reference the state
-// database stores. A field that already holds a reference is left as it is.
-func (s *Server) storeChannelSecretRefs(projectID, kind string, fields map[string]any) {
-	for k, v := range fields {
-		if !config.IsSecretLikeConfigKey(k) {
-			continue
-		}
-		str, ok := v.(string)
-		if !ok || strings.TrimSpace(str) == "" {
-			continue
-		}
-		ref, err := process.SecretConfigReferenceForOnboard(s.Home, process.ChannelSecretEnvNameForProject(projectID, kind, k), str)
-		if err != nil {
-			continue
-		}
-		fields[k] = ref
-	}
-}
-
 // channelAccountKey computes the account identity a project channel's stored
 // config speaks as, resolving its ${VAR} secrets the way a bind would, so one
 // bot account cannot silently belong to two projects.
 func channelAccountKey(kind string, rawJSON []byte) string {
-	section, err := config.ParseChannelsSectionJSON(`{"` + kind + `":` + string(rawJSON) + `}`)
-	if err != nil {
-		return ""
-	}
-	return channel.AccountKey(kind, section)
+	return channel.AccountKeyJSON(kind, rawJSON)
 }
 
 // projectScope resolves the project a route's :id names, on behalf of the
@@ -6199,372 +6229,19 @@ func (s *Server) projectScope(w http.ResponseWriter, r *http.Request) (state.Pro
 	return project, active.ID, true
 }
 
-// handleProviders reads and writes the active agent's model providers. The
-// list's order is pure storage — user data no operation reorders; the default
-// model is stated by agents.definitions.<agent>.default_model (absent = the
-// first entry) and travels as the agent-level "default_model" field so the
-// page never has to recompute it.
-// The providers DTO: the web surface's shape for one model service row. The
-// engine stores one entry per model (yaml model is a scalar after expansion);
-// adjacent entries sharing a signature fold into one row with a models list,
-// which is the shape the user edits. api_key carries the stored value in
-// plaintext — the owner's 2026-10-30 ruling: credentials in the database are
-// read and written in plaintext — and a PUT with no key field at all means
-// "leave the stored key alone". params travels as its JSON text: its keys
-// are the provider's request fields, verbatim, and an object would have them
-// re-cased by a client that normalizes response keys — then saved back under
-// names the provider does not know.
-type providerRowDTO struct {
-	Provider string   `json:"provider"`
-	BaseURL  string   `json:"base_url,omitempty"`
-	APIPath  string   `json:"api_path,omitempty"`
-	Params   string   `json:"params,omitempty"`
-	Models   []string `json:"models"`
-	// The key itself never leaves the gateway (plan 191 §3.3, §0.20): the page
-	// is told whether one is set and its last four characters, and that is what
-	// the masked field shows. The value stays in the section, in plaintext,
-	// exactly as the owner ruling stores it.
-	APIKeySet   bool   `json:"api_key_set"`
-	APIKeyLast4 string `json:"api_key_last4,omitempty"`
-}
-
-// providerListRow is one row of the model-services table: the stored row plus
-// its position in the whole stored list. The table pages, and the position is
-// a stable row id across pages — the list's order is storage, not priority.
-type providerListRow struct {
-	providerRowDTO
-	Index int `json:"index"`
-}
-
-// effectiveDefaultModelID returns the "provider/model" an empty model
-// selection for this agent resolves to: default_model when set, otherwise the
-// first llm_providers entry. Both GET branches send it so the page's default
-// badge matches the engine's resolution exactly.
-func effectiveDefaultModelID(def config.AgentDefinition) string {
-	if entry := config.EffectiveDefaultLLM(def); entry != nil {
-		return strings.TrimSpace(entry.Provider) + "/" + strings.TrimSpace(entry.Model)
-	}
-	return ""
-}
-
-// effectiveNonPlaceholderDefault is the effective default with normalize's
-// empty slot (the bare entry main carries before first setup, dropped on
-// save) not counting as a default row: deleting it is not deleting a model.
-func effectiveNonPlaceholderDefault(def config.AgentDefinition) *config.AgentLLMProviderConfig {
-	entry := config.EffectiveDefaultLLM(def)
-	if entry == nil ||
-		(strings.TrimSpace(entry.Provider) == "" && strings.TrimSpace(entry.Model) == "") {
-		return nil
-	}
-	return entry
-}
-
-// providerRowMatches is the model-services search box: it reads the service
-// name, the models it serves and the endpoint they are reached at.
-func providerRowMatches(row providerRowDTO, q string) bool {
-	needle := strings.ToLower(q)
-	for _, value := range append([]string{row.Provider, row.BaseURL}, row.Models...) {
-		if strings.Contains(strings.ToLower(value), needle) {
-			return true
-		}
-	}
-	return false
-}
-
-// providerPutRow is one row of the PUT. params decodes through the engine's
-// own type, so anything but a JSON object is refused here rather than
-// written into a config the loader would then reject.
-type providerPutRow struct {
-	Provider string                  `json:"provider"`
-	BaseURL  string                  `json:"base_url,omitempty"`
-	APIPath  string                  `json:"api_path,omitempty"`
-	Params   config.LLMRequestParams `json:"params,omitempty"`
-	Model    string                  `json:"model,omitempty"`
-	Models   []string                `json:"models,omitempty"`
-	// APIKey is the client *stating* the row's key, which is why the wire
-	// separates present from absent: absent means the user did not touch the
-	// field and the stored key is kept; present is the value — plaintext or a
-	// ${ENV} reference — stored as sent (owner ruling 2026-10-30: plaintext
-	// keys belong in the section), and present and empty is the user having
-	// emptied the field, the delete semantics.
-	APIKey *string `json:"api_key,omitempty"`
-	// Replaces is set only on a row the page edited. See providerReplaces.
-	Replaces *providerReplaces `json:"replaces,omitempty"`
-}
-
-// providerReplaces is the row an edit started from, exactly as the page loaded
-// it. It lets the merge replace that row's stored entries in place; without it
-// an edit looks like "these entries vanished, these new ones appeared" and the
-// merge would delete the old ones and append the new ones at the end.
-type providerReplaces struct {
-	Provider string   `json:"provider"`
-	BaseURL  string   `json:"base_url,omitempty"`
-	APIPath  string   `json:"api_path,omitempty"`
-	Models   []string `json:"models,omitempty"`
-}
-
-// providerSignature is what two adjacent entries must share to fold into one
-// row: same service pointed at the same endpoint, same tuning. The key is
-// part of it too — two rows of one provider hold the same key by construction
-// (the env name is provider-scoped), so including it changes nothing but
-// keeps the fold honest.
-func providerSignature(item config.AgentLLMProviderConfig) string {
-	return strings.Join([]string{
-		strings.TrimSpace(item.Provider),
-		strings.TrimSpace(item.BaseURL),
-		strings.TrimSpace(item.APIPath),
-		strings.TrimSpace(string(item.Params)),
-		strings.TrimSpace(item.APIKey),
-	}, "\x00")
-}
-
-// providerEntryIdentity is the merge identity of one expanded llm_providers
-// entry: provider+model at one endpoint. provider and model compare
-// case-insensitively (the engine resolves them that way); base_url and
-// api_path compare exactly — the same provider+model at a different endpoint
-// is a legal separate entry, so provider+model alone must not be the identity.
-func providerEntryIdentity(item config.AgentLLMProviderConfig) string {
-	return strings.Join([]string{
-		strings.ToLower(strings.TrimSpace(item.Provider)),
-		strings.TrimSpace(item.BaseURL),
-		strings.TrimSpace(item.APIPath),
-		strings.ToLower(strings.TrimSpace(item.Model)),
-	}, "\x00")
-}
-
-// storedKeyForRow is the key the stored list already carries for this request
-// row's models, matched by providerEntryIdentity — provider+model at one
-// endpoint. A second entry of the same provider at another endpoint therefore
-// never inherits the first one's key: the key the user typed for b.example is
-// the only one that may be sent there. Empty means "no stored entry for these
-// models at this endpoint", and the caller's own api_key validation refuses the
-// write rather than guessing; two stored keys that disagree for one row are the
-// same "do not guess".
-func storedKeyForRow(stored []config.AgentLLMProviderConfig, row providerPutRow, models []string) string {
-	byIdentity := make(map[string]string, len(stored))
-	for _, item := range stored {
-		if key := strings.TrimSpace(item.APIKey); key != "" {
-			byIdentity[providerEntryIdentity(item)] = key
-		}
-	}
-	key := ""
-	for _, model := range models {
-		want := providerEntryIdentity(config.AgentLLMProviderConfig{
-			Provider: strings.TrimSpace(row.Provider),
-			Model:    strings.TrimSpace(model),
-			BaseURL:  strings.TrimSpace(row.BaseURL),
-			APIPath:  strings.TrimSpace(row.APIPath),
-		})
-		got := byIdentity[want]
-		if got == "" {
-			continue
-		}
-		if key != "" && key != got {
-			return ""
-		}
-		key = got
-	}
-	return key
-}
-
-// providerListHasEntry reports whether the expanded list carries the
-// provider+model pair, matching the way the engine resolves a default.
-func providerListHasEntry(entries []config.AgentLLMProviderConfig, provider, model string) bool {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	model = strings.ToLower(strings.TrimSpace(model))
-	for _, item := range entries {
-		if strings.ToLower(strings.TrimSpace(item.Provider)) == provider &&
-			strings.ToLower(strings.TrimSpace(item.Model)) == model {
-			return true
-		}
-	}
-	return false
-}
-
-// indexOfProviderModel is providerListHasEntry's position: the first entry for
-// the provider+model pair (the one EffectiveDefaultLLM resolves), or -1.
-func indexOfProviderModel(entries []config.AgentLLMProviderConfig, provider, model string) int {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	model = strings.ToLower(strings.TrimSpace(model))
-	for i, item := range entries {
-		if strings.ToLower(strings.TrimSpace(item.Provider)) == provider &&
-			strings.ToLower(strings.TrimSpace(item.Model)) == model {
-			return i
-		}
-	}
-	return -1
-}
-
-// providerMergeRow is one request row after expansion: its entries (one per
-// model, in the row's order) and, for an edited row, where it started.
-type providerMergeRow struct {
-	Entries  []config.AgentLLMProviderConfig
-	Replaces *providerReplaces
-}
-
-// providerMergeResult is the merged list plus what every replaced stored slot
-// became. A nil value means the edit removed that slot's model.
-type providerMergeResult struct {
-	Merged   []config.AgentLLMProviderConfig
-	Replaced map[int]*config.AgentLLMProviderConfig
-}
-
-// mergeProviderEntries merges the request into the stored (expanded) list
-// while keeping the stored order, which is user data:
-//
-//  1. An edited row (Replaces set) claims the stored slots its old entries
-//     occupy. Its i-th new entry takes its i-th slot; extra entries go right
-//     after its last slot (so the row stays adjacent and folds into one row on
-//     read); slots it no longer fills are deleted.
-//  2. Every other stored entry is kept when an unused request entry has the
-//     same identity (updated in place), and dropped otherwise.
-//  3. Request entries nobody used are new rows, appended in request order.
-//
-// A Replaces that finds none of its entries in the stored list (the page was
-// stale) claims nothing and the row falls back to identity matching.
-func mergeProviderEntries(stored []config.AgentLLMProviderConfig, rows []providerMergeRow) providerMergeResult {
-	owner := make([]int, len(stored))
-	for i := range owner {
-		owner[i] = -1
-	}
-	slots := make([][]int, len(rows))
-	for r, row := range rows {
-		if row.Replaces == nil {
-			continue
-		}
-		models := row.Replaces.Models
-		if len(models) == 0 {
-			models = []string{""}
-		}
-		for _, model := range models {
-			want := providerEntryIdentity(config.AgentLLMProviderConfig{
-				Provider: row.Replaces.Provider,
-				BaseURL:  row.Replaces.BaseURL,
-				APIPath:  row.Replaces.APIPath,
-				Model:    model,
-			})
-			for p := range stored {
-				if owner[p] == -1 && providerEntryIdentity(stored[p]) == want {
-					owner[p] = r
-					slots[r] = append(slots[r], p)
-					break
-				}
-			}
-		}
-		sort.Ints(slots[r])
-	}
-
-	used := make([][]bool, len(rows))
-	for r := range rows {
-		used[r] = make([]bool, len(rows[r].Entries))
-	}
-	replaced := map[int]*config.AgentLLMProviderConfig{}
-	after := map[int][]config.AgentLLMProviderConfig{}
-	for r, row := range rows {
-		n := len(slots[r])
-		for i, p := range slots[r] {
-			if i < len(row.Entries) {
-				entry := row.Entries[i]
-				replaced[p] = &entry
-				used[r][i] = true
-			} else {
-				replaced[p] = nil
-			}
-		}
-		if n > 0 && len(row.Entries) > n {
-			last := slots[r][n-1]
-			for i := n; i < len(row.Entries); i++ {
-				after[last] = append(after[last], row.Entries[i])
-				used[r][i] = true
-			}
-		}
-	}
-
-	merged := make([]config.AgentLLMProviderConfig, 0, len(stored))
-	for p, item := range stored {
-		if owner[p] >= 0 {
-			if entry := replaced[p]; entry != nil {
-				merged = append(merged, *entry)
-			}
-			merged = append(merged, after[p]...)
-			continue
-		}
-		found := false
-		for r := range rows {
-			for i, entry := range rows[r].Entries {
-				if !used[r][i] && providerEntryIdentity(entry) == providerEntryIdentity(item) {
-					used[r][i] = true
-					merged = append(merged, entry)
-					found = true
-					break
-				}
-			}
-			if found {
-				break
-			}
-		}
-	}
-	for r := range rows {
-		for i, entry := range rows[r].Entries {
-			if !used[r][i] {
-				merged = append(merged, entry)
-			}
-		}
-	}
-	return providerMergeResult{Merged: merged, Replaced: replaced}
-}
-
-func providerRowsFor(entries []config.AgentLLMProviderConfig) []providerRowDTO {
-	rows := make([]providerRowDTO, 0, len(entries))
-	prevSig := ""
-	for _, item := range entries {
-		models := []string{}
-		if len(item.Models) > 0 {
-			models = append(models, item.Models...)
-		} else if strings.TrimSpace(item.Model) != "" {
-			models = append(models, item.Model)
-		}
-		key := strings.TrimSpace(item.APIKey)
-		row := providerRowDTO{
-			Provider:    strings.TrimSpace(item.Provider),
-			BaseURL:     strings.TrimSpace(item.BaseURL),
-			APIPath:     strings.TrimSpace(item.APIPath),
-			Params:      strings.TrimSpace(string(item.Params)),
-			Models:      models,
-			APIKeySet:   key != "",
-			APIKeyLast4: secretLast4(key),
-		}
-		// Fold only adjacent rows: an interleaved order (deepseek, openai,
-		// deepseek) is stored as three rows on purpose, not one service.
-		if sig := providerSignature(item); len(rows) > 0 && sig == prevSig && rows[len(rows)-1].Provider == row.Provider {
-			rows[len(rows)-1].Models = append(rows[len(rows)-1].Models, models...)
-			continue
-		} else {
-			prevSig = providerSignature(item)
-		}
-		rows = append(rows, row)
-	}
-	return rows
-}
-
 // providerSecretMask is what a page shows instead of a secret it may not
-// read. The model-services page reads its keys in plaintext now (plan 188
-// W4); the mask remains the channel pages' own, below.
+// read. The mask remains the channel pages' own.
 const providerSecretMask = "\u2022\u2022\u2022\u2022"
 
 // providerKeyHint is the last four characters of a stored channel secret. A
-// stored ${ENV} reference is resolved through the home's .env — the hint is
-// meant for the user who typed the key, and "KEY}" would be noise. A
-// reference with no stored value, and any value four characters or shorter,
-// is masked whole.
-func providerKeyHint(home string, key string) string {
-	if name := strings.TrimSpace(key); strings.HasPrefix(name, "${") && strings.HasSuffix(name, "}") {
-		envName := strings.TrimSuffix(strings.TrimPrefix(name, "${"), "}")
-		if env, err := godotenv.Read(filepath.Join(strings.TrimSpace(home), ".env")); err == nil {
-			key = strings.TrimSpace(env[envName])
-		} else {
-			return providerSecretMask
-		}
+// value that is still a ${ENV} reference names nothing a hint could show —
+// "KEY}" would be noise — so it is masked whole, and so is any value four
+// characters or shorter (plan 268: a channel's secret is the plaintext the
+// state database holds).
+func providerKeyHint(key string) string {
+	key = strings.TrimSpace(key)
+	if isWholeEnvReference(key) {
+		return providerSecretMask
 	}
 	if key == "" || len(key) <= 4 {
 		return providerSecretMask
@@ -6572,193 +6249,13 @@ func providerKeyHint(home string, key string) string {
 	return key[len(key)-4:]
 }
 
-func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
-	active, err := s.activePrimarySummary()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
+// isWholeEnvReference reports whether value is exactly one ${NAME} reference.
+func isWholeEnvReference(value string) bool {
+	v := strings.TrimSpace(value)
+	if !strings.HasPrefix(v, "${") || !strings.HasSuffix(v, "}") {
+		return false
 	}
-	switch r.Method {
-	case http.MethodGet:
-		cfg, err := s.persistedConfig(r.Context())
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		def := cfg.Agents.Definitions[active.ID]
-		providers := providerRowsFor(def.LLMProviders)
-		defaultModel := effectiveDefaultModelID(def)
-		q := readListQuery(r)
-		if !q.Paged {
-			writeAgentsJSON(w, map[string]any{
-				"agent_id":      active.ID,
-				"default_model": defaultModel,
-				"providers":     providers,
-			})
-			return
-		}
-		matched := make([]providerListRow, 0, len(providers))
-		for index, row := range providers {
-			if q.Q != "" && !providerRowMatches(row, q.Q) {
-				continue
-			}
-			matched = append(matched, providerListRow{providerRowDTO: row, Index: index})
-		}
-		// The order is pure storage order and never changes here: the table
-		// pages through it as it stands, and every row carries its position
-		// in the whole list as a stable row id.
-		page, servedPage := pageOf(matched, q)
-		writeListPage(w, "providers", page, len(matched), servedPage, q, map[string]any{
-			"agent_id":      active.ID,
-			"default_model": defaultModel,
-		})
-	case http.MethodPut:
-		var req struct {
-			Providers    []providerPutRow `json:"providers"`
-			DefaultModel *string          `json:"default_model"`
-		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		// The whole merge runs inside the agents section's read-modify-write:
-		// the store's transaction is what keeps a concurrent write from being
-		// overwritten, and the composed validation is what refuses a value the
-		// loader would not take.
-		err = s.withConfigSection(r.Context(), "agents", func(cfg *config.Root) error {
-			if cfg.Agents.Definitions == nil {
-				cfg.Agents.Definitions = map[string]config.AgentDefinition{}
-			}
-			def := cfg.Agents.Definitions[active.ID]
-			// The expanded list as it stands in storage: the base the merge
-			// below works on, and the source of the keys a request row without
-			// one carries forward (storedKeyForRow).
-			stored := config.ResolvedLLMConfigs(def)
-			entries := make([]config.AgentLLMProviderConfig, 0, len(req.Providers))
-			mergeRows := make([]providerMergeRow, 0, len(req.Providers))
-			for _, row := range req.Providers {
-				// The engine builds a client only for a provider its model
-				// catalog knows; any other name would save and then fail the
-				// next runner load (an agent switch, a restart). Setup refuses
-				// it the same way.
-				if err := process.VerifyProvider(row.Provider); err != nil {
-					return configBadRequest("%v", err)
-				}
-				models := row.Models
-				if len(models) == 0 && strings.TrimSpace(row.Model) != "" {
-					models = []string{row.Model}
-				}
-				if len(models) == 0 {
-					models = []string{""}
-				}
-				apiKey := ""
-				if row.APIKey != nil {
-					// Present on the wire means the client states the value —
-					// a plaintext key or a ${ENV} reference, stored as sent
-					// (owner ruling 2026-10-30): plaintext belongs in the
-					// section, a reference still expands at compose time. ""
-					// is the user having emptied the field, and that removes
-					// the key.
-					apiKey = strings.TrimSpace(*row.APIKey)
-				} else {
-					// No key on the wire means the user did not touch it:
-					// carry the stored key of this entry — the same
-					// provider+model at this endpoint — never another
-					// endpoint's.
-					apiKey = storedKeyForRow(stored, row, models)
-				}
-				startIdx := len(entries)
-				for _, model := range models {
-					entries = append(entries, config.AgentLLMProviderConfig{
-						Provider: strings.TrimSpace(row.Provider),
-						Model:    strings.TrimSpace(model),
-						APIKey:   apiKey,
-						BaseURL:  strings.TrimSpace(row.BaseURL),
-						APIPath:  strings.TrimSpace(row.APIPath),
-						Params:   row.Params,
-					})
-				}
-				// Remember which entries this row expanded into: an edited row
-				// claims the stored slots its own entries occupy.
-				mergeRows = append(mergeRows, providerMergeRow{Entries: entries[startIdx:], Replaces: row.Replaces})
-			}
-			// Order-preserving merge. The list's order is user data, so the
-			// stored order is the base: a request row that maps onto a stored
-			// entry by identity updates that entry in place; a row the request
-			// no longer names is deleted; a genuinely new row is appended at
-			// the end in request order. A row that carries the shape it was
-			// edited from (replaces) claims those stored slots instead, so an
-			// edit of a row stays an edit of that row. Without this, a page
-			// opened before some other surface appended a row would write its
-			// stale snapshot back and both rewind the order and swallow the
-			// new row.
-			prevDefault := effectiveNonPlaceholderDefault(def)
-			prevSlot := -1
-			if prevDefault != nil {
-				prevSlot = indexOfProviderModel(stored, prevDefault.Provider, prevDefault.Model)
-			}
-			result := mergeProviderEntries(stored, mergeRows)
-			merged := config.DropLentLoginKeys(result.Merged)
-			def.LLMProviders = merged
-			// The default model must survive the write and stay resolvable. An
-			// explicit default_model is validated against the merged list; an
-			// untouched one means the row it resolved to before the write (the
-			// default_model row, or the first row when unset) must still be
-			// there after the merge.
-			if req.DefaultModel != nil {
-				if strings.TrimSpace(*req.DefaultModel) == "" {
-					return configBadRequest("default_model 不能清空：请将其他模型服务设为默认")
-				}
-				def.DefaultModel = strings.TrimSpace(*req.DefaultModel)
-				if config.EffectiveDefaultLLM(def) == nil {
-					return configBadRequest("default_model %s 不在模型服务列表中，请先对该列表中的模型设为默认", def.DefaultModel)
-				}
-			} else if prevDefault != nil {
-				if moved, replacedHere := result.Replaced[prevSlot]; prevSlot >= 0 && replacedHere {
-					if moved == nil {
-						// The edit removed the very model that is the default.
-						return configBadRequest("该模型服务当前是默认模型，请先将其他模型设为默认再删除")
-					}
-					// The default row was edited in place: the default follows
-					// the edit. An implicit default (first row) needs nothing —
-					// the slot kept its position — an explicit one is retargeted.
-					if strings.TrimSpace(def.DefaultModel) != "" {
-						def.DefaultModel = strings.TrimSpace(moved.Provider) + "/" + strings.TrimSpace(moved.Model)
-					}
-				} else if !providerListHasEntry(def.LLMProviders, prevDefault.Provider, prevDefault.Model) {
-					return configBadRequest("该模型服务当前是默认模型，请先将其他模型设为默认再删除")
-				}
-			}
-			cfg.Agents.Definitions[active.ID] = def
-			// The default model service is what an empty selection resolves to.
-			// Startup refuses a default missing any of these, so a table that
-			// leaves one out would save fine and then keep the gateway from
-			// starting again.
-			if missing := config.ValidateAgentLLMConfigured(cfg, active.ID).MissingFields(); len(missing) > 0 {
-				return configBadRequest("the default model service needs %s", strings.Join(missing, ", "))
-			}
-			// Every key-mode row needs its own key, not only the default: a
-			// keyless row saves fine and then answers 401 the moment a session
-			// selects it. So emptying such a row's field is refused here, not
-			// written. The login-backed providers are the exception — their
-			// credential is the login itself, and an empty api_key is
-			// their normal shape.
-			for _, entry := range merged {
-				if config.CredentialsBackedProvider(entry.Provider) || strings.TrimSpace(entry.APIKey) != "" {
-					continue
-				}
-				return configBadRequest("%s needs api_key: this model service authenticates with a key, not a login", strings.TrimSpace(entry.Provider))
-			}
-			return nil
-		})
-		if err != nil {
-			failConfigSection(w, err)
-			return
-		}
-		writeAgentsJSON(w, s.nextTurnConfigWriteResult(active.ID))
-	default:
-		http.Error(w, "method", http.StatusMethodNotAllowed)
-	}
+	return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(v, "${"), "}")) != ""
 }
 
 // hookRow is one row of the settings page's hooks table: one command under one
@@ -10033,6 +9530,10 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// The clone is a JSON round trip, and the model table rides on the root as a
+	// runtime field — so put the rows back: a setting that names a model (the two
+	// memory choices) resolves against the table this install actually has.
+	candidate.LLMModels = base.LLMModels
 
 	applied := make([]*settingsResolvedField, 0, len(req.Values)+len(req.Secrets))
 	for _, path := range settingsOrder {
@@ -10055,6 +9556,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: "取值格式不正确"})
+			return
+		}
+		// The memory pipeline's two model choices name a configured model or
+		// "current" (the conversation's own): a legacy label is translated to
+		// the row id it names, and a reference nothing carries is refused here
+		// rather than by a memory run much later (plan 265).
+		if err := normalizeMemoryModelPath(&candidate, path); err != nil {
+			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: err.Error()})
 			return
 		}
 		// The item just written is the one a value-domain refusal names: the
@@ -10088,6 +9597,45 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeSettingsJSON(w, http.StatusOK, wrote)
+}
+
+// memoryModelPaths are the two settings that name a configured model instead of
+// a budget: the model the memory pipeline extracts and consolidates on.
+const (
+	memoryExtractModelPath       = "memories.extract_model"
+	memoryConsolidationModelPath = "memories.consolidation_model"
+)
+
+// normalizeMemoryModelPath puts one memory model setting into the form the
+// pipeline runs with: "current" (the conversation's own model, and the empty
+// value, which the page shows as that default), or the id of a configured model
+// row. A legacy "provider/model" label resolves to the row it names, so a page
+// written before plan 262 keeps working; a value that names no configured model
+// is refused — the memory stages run on that row, and a stale reference is not a
+// preference. A path that is not one of the two is left alone.
+func normalizeMemoryModelPath(cfg *config.Root, path string) error {
+	if cfg == nil {
+		return nil
+	}
+	var value *string
+	switch path {
+	case memoryExtractModelPath:
+		value = &cfg.Memories.ExtractModel
+	case memoryConsolidationModelPath:
+		value = &cfg.Memories.ConsolidationModel
+	default:
+		return nil
+	}
+	ref := strings.TrimSpace(*value)
+	if ref == "" || ref == config.MemoryModelCurrent {
+		return nil
+	}
+	entry, ok := config.ResolveModelRef(cfg, "main", ref)
+	if !ok {
+		return fmt.Errorf("这个设置项要选一个已配置的模型")
+	}
+	*value = strings.TrimSpace(entry.ID)
+	return nil
 }
 
 // settingsCandidateLoads runs the loader's own checks over the candidate

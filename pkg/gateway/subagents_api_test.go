@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
 )
@@ -617,4 +619,34 @@ func TestSubagentRowSwitchesDoNotLoseUpdates(t *testing.T) {
 	def := f.mainDefinition(t)
 	require.NotNil(t, def.EnableSubagent)
 	require.False(t, *def.EnableSubagent, "every public row off means the feature is off for the agent")
+}
+
+// TestSubagentModelIsStoredAsARowID pins plan 265's Step 2: a subagent's model
+// choice is a configured row, so the write accepts the legacy "provider/model"
+// label and stores the id, and the row reports the id, the label and the
+// endpoint its requests go to.
+func TestSubagentModelIsStoredAsARowID(t *testing.T) {
+	f := newSubagentFixture(t, nil)
+	id, err := process.UpsertLLMModel(context.Background(), f.server.Env.SQL, process.LLMModelInput{
+		Provider: "openai", Model: "gpt-4o", BaseURL: "https://api.openai.com/v1",
+		APIPath: appcfg.APIPathChatCompletions, APIKey: stringPtr("sk-subagent"),
+	})
+	require.NoError(t, err)
+
+	rec := f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{
+		"model": "openai/gpt-4o", "reasoning_effort": "high",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	entry := findSubagentEntry(t, f.subagentEntries(t), "explore")
+	require.Equal(t, id, entry.Model, "the stored reference is the row id")
+
+	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	row := subagentRowByName(t, decodeSubagentPage(t, rec).Rows, "explore")
+	require.Equal(t, id, row.ModelID)
+	require.Equal(t, "openai", row.ModelProvider)
+	require.Equal(t, "gpt-4o", row.Model)
+	require.Equal(t, "openai/gpt-4o", row.ModelLabel)
+	require.Equal(t, "https://api.openai.com/v1/chat/completions", row.ModelEndpoint)
+	require.Equal(t, "high", row.ReasoningEffort)
 }

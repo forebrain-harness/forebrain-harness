@@ -69,11 +69,54 @@ export function listParams(query: ListQuery): URLSearchParams {
   return params
 }
 
+/**
+ * The sentence a refused request answered with: the gateway's `{"error": …}`
+ * reply (with the names a batch could not find, when it lists them), or the
+ * plain text `http.Error` writes. Never the raw JSON, which a reader cannot use.
+ */
+function refusalMessage(body: string): string {
+  try {
+    const data: unknown = JSON.parse(body)
+    if (data !== null && typeof data === 'object' && 'error' in data) {
+      const { error, missing } = data as { error?: unknown; missing?: unknown }
+      const names = Array.isArray(missing) ? missing.map(String).filter(Boolean) : []
+      const message = String(error ?? '').trim()
+      if (message) return names.length ? `${message}: ${names.join(', ')}` : message
+    }
+  } catch {
+    // Not JSON: the plain-text reply is already the message.
+  }
+  return body.trim()
+}
+
 /** A request the gateway answered with an error status. */
 export class GatewayHttpError extends Error {
+  /**
+   * The response body, parsed and camelCased when it was a JSON object, and
+   * `null` when it was text. A refusal carries fields a page reads structurally
+   * — the row a duplicate names, the agents a default belongs to, the key
+   * choices a plan holds — and they must survive the trip as data rather than
+   * as a sentence to be picked apart. Existing callers only read `status` and
+   * the message, which is unchanged.
+   */
+  readonly payload: Record<string, unknown> | null
+
   constructor(readonly status: number, body: string) {
-    super(body || `HTTP ${status}`)
+    // The message is the gateway's own sentence whether the caller handed in the
+    // raw body or a text already reduced to it: the refusal's data and the
+    // reader's sentence come from the same reply.
+    super(refusalMessage(body) || `HTTP ${status}`)
     this.name = 'GatewayHttpError'
+    let parsed: unknown = null
+    try {
+      parsed = JSON.parse(body)
+    } catch {
+      parsed = null
+    }
+    this.payload =
+      parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (toCamelCase(parsed) as Record<string, unknown>)
+        : null
   }
 }
 
@@ -1333,41 +1376,162 @@ export interface SettingsSnapshot {
   }
 }
 
-/** One model-service row as the web surface edits it. The key never travels
- * back: apiKeySet says whether one is stored and apiKeyLast4 is its last four
- * characters (plan 191 §0.20); a save carries a key only when the user typed
- * one. */
-export interface ProviderRecord {
+/**
+ * One model's capability data, as the add/edit form's advanced section edits
+ * it. Every field is optional: an absent one is the catalog's own value, which
+ * is what makes "the same as the default" storable without copying it.
+ */
+export interface LlmModelCaps {
+  images?: boolean
+  pdf?: boolean
+  video?: boolean
+  audio?: boolean
+  reasoning?: boolean
+  reasoningOff?: boolean
+  /** The thinking levels this model accepts, when its source does not list
+   *  them itself. */
+  efforts?: string[]
+  /** The level a request gets when none is pinned. */
+  defaultEffort?: string
+  contextWindow?: number
+  maxOutput?: number
+}
+
+/** What the gateway's capability lookup answers for a form whose values may not
+ *  be stored yet: the catalog's values plus the levels a source listed. */
+export interface LlmModelCatalogCaps extends LlmModelCaps {
+  /** False when no source lists this model's levels: the form offers the
+   *  checkboxes instead. */
+  effortsKnown: boolean
+  /** Which source answered ('chatgpt', 'volcengine', 'modelsdev'). */
+  effortsSource?: string
+}
+
+/** One row of the install-wide models table (plan 265). */
+export interface LlmModelRow {
+  id: string
   provider: string
-  models: string[]
+  providerName: string
+  custom: boolean
+  model: string
+  baseUrl: string
+  apiPath: string
+  /** 「自定义协议」: requests go to the base URL as stored, no path appended. */
+  urlVerbatim: boolean
+  protocol: string
+  endpoint: string
+  apiKeySet: boolean
+  apiKeyLast4?: string
+  /** The stored key in plaintext: the edit drawer reveals it. Never logged. */
+  apiKey?: string
+  loginBacked: boolean
+  /** The subscription that wrote the row ('' when added by hand). */
+  source?: string
+  sourcePlan?: string
+  sourceName?: string
+  /** How that sign-in stands right now: usable / missing / dead / unreachable. */
+  sourceState?: string
+  /** The row's request-parameter JSON text, keys verbatim. */
+  params?: string
+  caps: LlmModelCaps
+  /** A source listed this model's thinking levels. */
+  effortsKnown: boolean
+  catalogCaps: LlmModelCaps
+  isDefault: boolean
+  /** The agents that name this row as their default model. */
+  defaultFor?: string[]
+  createdAt: number
+}
+
+/** One write: a field left out keeps the stored value on an update. */
+export interface LlmModelWrite {
+  provider?: string
+  model?: string
   baseUrl?: string
   apiPath?: string
-  /** The provider request params as JSON text, keys verbatim. */
-  params?: string
-  apiKeySet?: boolean
-  apiKeyLast4?: string
-  /**
-   * The row's position in the whole stored list — a stable row id across
-   * pages, not a priority.
-   */
-  index?: number
-}
-
-/** The PUT shape: apiKey is the row's key as the wire's one key field states
- * it — a pointer, so absent is "keep the stored key", a value is stored as
- * sent (plaintext or a ${ENV} reference), and empty is the clear. The page's
- * draft keeps a freshly typed key under apiKeyPlain until toBody puts it in
- * apiKey; it never travels under its own name. */
-export interface ProviderSaveRecord extends ProviderRecord {
-  model?: string
   apiKey?: string
-  apiKeyPlain?: string
+  params?: string
+  caps?: LlmModelCaps
+  urlVerbatim?: boolean
 }
 
-/** The two providers a browser can sign in to. The gateway runs the flow —
- * the terminal's /connect cannot, because the browser is not on the machine
- * the flow would print to or open a window on. */
-export type ProviderLoginProvider = 'opencode' | 'chatgpt'
+/** One entry of the list every model picker reads (`/api/llm-models/choices`). */
+export interface LlmModelChoice {
+  id: string
+  provider: string
+  providerName: string
+  model: string
+  baseUrl: string
+  apiPath: string
+  endpoint: string
+  label: string
+  efforts: string[]
+  supportsImages: boolean
+}
+
+/** One endpoint a built-in provider serves, as the form offers it. */
+export interface LlmProviderEndpoint {
+  name: string
+  baseUrl: string
+  apiPath: string
+}
+
+/** One entry of the form's provider picker. */
+export interface LlmProviderOption {
+  id: string
+  name: string
+  loginBacked: boolean
+  endpoints: LlmProviderEndpoint[]
+}
+
+/** `GET /api/llm-providers`: the built-in registry in display order, the
+ *  protocols any model can speak, and the id the custom entry carries. */
+export interface LlmProvidersListing {
+  providers: LlmProviderOption[]
+  protocols: { apiPath: string; name: string }[]
+  customId: string
+}
+
+/** One subscription the page can sign in to. */
+export interface SubscriptionRow {
+  id: string
+  name: string
+  /** The flows it can drive on a gateway: 'device_code', 'paste_callback'. */
+  flows: string[]
+  /** usable / missing / dead / unreachable. */
+  state: string
+}
+
+/** One model a finished sign-in unlocked. */
+export interface SubscriptionOffer {
+  plan: string
+  planName: string
+  provider: string
+  model: string
+  baseUrl: string
+  apiPath: string
+  endpoint: string
+  contextWindow?: number
+  supportsImages: boolean
+  default: boolean
+  /** The vendor's list is a shipped table rather than its own endpoint. */
+  fromStaticList: boolean
+}
+
+/** One row of the variables table. The value never comes back: only whether one
+ *  is set and its last four characters (plan 265). */
+export interface EnvVarRow {
+  name: string
+  valueSet: boolean
+  valueLast4?: string
+  updatedAt: number
+}
+
+/** One provider a browser can sign in to: a subscription id, as the registry
+ *  names it (`chatgpt`, `opencode-go`, and the ones a later plan adds). The
+ *  gateway runs the flow — the terminal's /connect cannot, because the browser
+ *  is not on the machine the flow would print to or open a window on. */
+export type ProviderLoginProvider = string
 
 /** One poll of a running login. `status` only ever moves from pending to one of
  * the two endings; url and userCode appear a beat after the start, and baseUrl
@@ -1379,6 +1543,11 @@ export interface ProviderLoginStatus {
   userCode: string
   error: string
   baseUrl: string
+  /** The flow this login drives: 'device_code' (a code to type on the
+   *  authorization page, advanced by polling) or 'paste_callback' (an address
+   *  pasted back). The page renders one branch per kind; a gateway that names
+   *  none leaves the page on the subscription's own declared flow. */
+  flow?: string
 }
 
 export interface PermissionUpdateBody {
@@ -1514,9 +1683,20 @@ export interface SessionModeResponse {
 /** One model the conversation may be switched to, with the reasoning levels
  *  the shared catalog reports for it (empty when the model cannot reason). */
 export interface SessionModelOption {
+  /** The configured row this option is. The same provider/model may be
+   *  configured more than once (another base url, api path or key), so this is
+   *  what a pick names and what a selection is matched against. */
+  id?: string
   provider: string
+  /** The provider's display name, when the list carries one: a picker shows
+   *  「火山方舟」 where the id says `volcengine`. */
+  providerName?: string
   model: string
   label: string
+  /** The endpoint this row's requests go to: a picker shows the two to tell
+   *  twin rows apart. Absent for a login-backed provider. */
+  baseUrl?: string
+  apiPath?: string
   efforts: string[]
   /** True when the catalog knows this model takes image input; an unknown
    *  model reports false, so a picker marks only what it knows. */
@@ -1524,8 +1704,10 @@ export interface SessionModelOption {
 }
 
 /** The conversation's effective model choice. An empty effort is the explicit
- *  "model default" pin. */
+ *  "model default" pin. modelId names the configured row and is absent for a
+ *  choice recorded before ids existed, which reads by provider+model. */
 export interface SessionModelSelection {
+  modelId?: string
   provider: string
   model: string
   effort: string
@@ -2241,23 +2423,35 @@ async function gatewayFetch(input: string, init?: RequestInit): Promise<Response
  * text http.Error writes. Never the raw JSON body.
  */
 async function gatewayErrorText(res: Response): Promise<string> {
-  const body = await res.text()
-  try {
-    const data: unknown = JSON.parse(body)
-    if (data !== null && typeof data === 'object' && 'error' in data) {
-      const { error, missing } = data as { error?: unknown; missing?: unknown }
-      const names = Array.isArray(missing) ? missing.map(String).filter(Boolean) : []
-      const message = String(error ?? '').trim() || `HTTP ${res.status}`
-      return names.length ? `${message}: ${names.join(', ')}` : message
-    }
-  } catch {
-    // Not JSON: the plain-text reply is already the message.
-  }
-  return body.trim() || `HTTP ${res.status}`
+  return refusalMessage(await res.text()) || `HTTP ${res.status}`
 }
 
-/** The file name an attachment header carried, unquoted; empty when absent. */
-function filenameFromContentDisposition(header: string | null): string {
+/**
+ * One write over native fetch, answered as the gateway's camelCased JSON. This
+ * exists for the writes whose refusals a page reads as data — a duplicate names
+ * its row, a delete names the agents that still default to it, a plan asks
+ * which key — because axios unwraps a refusal into an AxiosError whose body the
+ * page cannot smell: here the body is parsed into `GatewayHttpError.payload`.
+ * A 204 answer (a delete) is `undefined`.
+ */
+async function sendJSON<T>(method: 'POST' | 'PUT' | 'DELETE', url: string, body?: unknown): Promise<T> {
+  const res = await gatewayFetch(`${API_BASE}${url}`, {
+    method,
+    ...(body === undefined
+      ? {}
+      : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(toSnakeCase(body)) }),
+  })
+  if (!res.ok) {
+    // The raw body, not just its sentence: a refusal names fields the page reads
+    // structurally (the row a duplicate names, the keys a plan holds).
+    throw new GatewayHttpError(res.status, await res.text())
+  }
+  const text = (await res.text()).trim()
+  if (!text) return undefined as T
+  return toCamelCase(JSON.parse(text)) as T
+}
+
+/** The file name an attachment header carried, unquoted; empty when absent. */function filenameFromContentDisposition(header: string | null): string {
   if (!header) return ''
   const match = header.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)
   return match ? decodeURIComponent(match[1]) : ''
@@ -2779,9 +2973,11 @@ export const forebrainApi = {
   },
 
   /** Records the conversation's own model choice. An empty effort is the
-   *  explicit "model default" pin; the change rides the next turn. */
-  saveSessionModel(sessionId: string, choice: { provider: string; model: string; effort: string }) {
-    return putRaw<SessionModelSelection>(`/chat/sessions/${encodeURIComponent(sessionId)}/model`, choice)
+   *  explicit "model default" pin; the change rides the next turn. modelId
+   *  names the configured row a pick chose — the same pair may be configured
+   *  more than once, and the server refuses a pair it cannot tell apart. */
+  saveSessionModel(sessionId: string, choice: { modelId?: string; provider: string; model: string; effort: string }) {
+    return putRaw<SessionModelSelection>(`/chat/sessions/${encodeURIComponent(sessionId)}/model`, toSnakeCase(choice))
   },
 
   slashCommands(surface = 'webchat', q = '', opts?: { duringRun?: boolean; sideConversation?: boolean; subagentView?: boolean }) {
@@ -4253,39 +4449,137 @@ export const forebrainApi = {
     ).then((res) => res.data)
   },
 
-  /** The whole model-services list plus the agent's effective default
-   * ("provider/model" — default_model when set, otherwise the first row), the
-   * way the engine resolves an empty selection. */
-  providers() {
-    return api.get<{ agentId?: string; defaultModel?: string; providers: ProviderRecord[] }>('/providers')
-      .then((res) => ({
-        providers: Array.isArray(res.data?.providers) ? res.data.providers : [],
-        defaultModel: String(res.data?.defaultModel ?? ''),
-      }))
-  },
-
-  /** One page of the model-services table: searched over service, models and
-   * endpoint, in stored order, counted on the server. Each row keeps its
-   * position in the whole list as a stable row id. */
-  providersPage(query: ListQuery) {
+  /** One page of the install-wide models table (plan 265): searched over
+   * service, model and endpoint on the server, in storage order, and answered
+   * with the agent's current default row. */
+  llmModelsPage(query: ListQuery) {
     return api
-      .get<{ providers?: ProviderRecord[]; agentId?: string; defaultModel?: string } & ListPageMeta>('/providers', {
+      .get<{ models?: LlmModelRow[]; defaultModelId?: string; agentId?: string } & ListPageMeta>('/llm-models', {
         params: listParams(query),
       })
       .then((res) => ({
-        rows: Array.isArray(res.data?.providers) ? res.data.providers : [],
+        rows: Array.isArray(res.data?.models) ? res.data.models : [],
         total: Number(res.data?.total ?? 0),
         page: Number(res.data?.page ?? 1),
         pageSize: Number(res.data?.pageSize ?? query.pageSize),
-        defaultModel: String(res.data?.defaultModel ?? ''),
+        defaultModelId: String(res.data?.defaultModelId ?? ''),
       }))
   },
 
-  /** Saves the model-services list. `defaultModel` ("provider/model") is sent
-   * only when the write retargets the default; an omitted field means "leave
-   * the stored default_model alone". */
-  saveProviders(providers: Array<Record<string, unknown>>, defaultModel?: string) {
-    return putRaw<{ applied: boolean }>('/providers', { providers, default_model: defaultModel })
+  /** The one list every model picker reads: the install's rows in configured
+   * order, each with the endpoint its requests go to and its thinking levels.
+   * It carries nothing about a key. */
+  llmModelChoices() {
+    return api
+      .get<LlmModelChoice[] | { choices?: LlmModelChoice[] }>('/llm-models/choices')
+      .then((res) => (Array.isArray(res.data) ? res.data : (res.data?.choices ?? [])))
+  },
+
+  /** Adds one row. A duplicate of four fields is refused with the row that
+   * already has them (the refusal's `existingId`). */
+  createLlmModel(body: LlmModelWrite) {
+    return sendJSON<LlmModelRow>('POST', '/llm-models', body)
+  },
+
+  /** Rewrites one row. A field left out keeps the stored value — the drawer
+   * that edits only the advanced settings sends no identity. */
+  updateLlmModel(id: string, body: LlmModelWrite) {
+    return sendJSON<LlmModelRow>('PUT', `/llm-models/${encodeURIComponent(id)}`, body)
+  },
+
+  /** Removes one row. A model an agent defaults to is refused with the agents
+   * it belongs to (the refusal's `defaultFor`). */
+  deleteLlmModel(id: string) {
+    return sendJSON<void>('DELETE', `/llm-models/${encodeURIComponent(id)}`)
+  },
+
+  /** Makes one row the current agent's default model. */
+  setDefaultLlmModel(id: string) {
+    return sendJSON<{ agentId: string; defaultModelId: string }>(
+      'PUT',
+      `/llm-models/${encodeURIComponent(id)}/default`,
+    )
+  },
+
+  /** Fetches a plan's key again for one subscription row — the user rotated it
+   *  in the provider's console. A row whose sign-in stores no key answers that
+   *  the sign-in is the credential. */
+  refreshLlmModelKey(id: string) {
+    return sendJSON<{ ok: boolean }>('POST', `/llm-models/${encodeURIComponent(id)}/refresh-key`)
+  },
+
+  /** Sends the smallest real request a configured model accepts. A failed probe
+   * is an answer, not an HTTP error: the page shows the sentence beside the
+   * button. */
+  testLlmModel(body: LlmModelWrite & { id?: string }) {
+    return sendJSON<{ ok: boolean; error?: string }>('POST', '/llm-models/test', body)
+  },
+
+  /** What a model can do by default, for a form whose values may not be stored
+   * yet. `effortsKnown` false means no source lists its levels. */
+  llmModelCatalogCaps(query: { provider: string; model: string; baseUrl?: string; id?: string }) {
+    return api.get<LlmModelCatalogCaps>('/llm-models/catalog-caps', { params: toSnakeCase(query) }).then((res) => res.data)
+  },
+
+  /** The built-in providers the form is built from, the protocols a model can
+   * speak, and the id the custom entry carries. */
+  llmProviders() {
+    return api.get<LlmProvidersListing>('/llm-providers').then((res) => ({
+      providers: Array.isArray(res.data?.providers) ? res.data.providers : [],
+      protocols: Array.isArray(res.data?.protocols) ? res.data.protocols : [],
+      customId: String(res.data?.customId ?? 'custom'),
+    }))
+  },
+
+  /** The subscriptions a surface can sign in to, in display order, each with
+   * how its sign-in stands today. */
+  subscriptions() {
+    return api
+      .get<SubscriptionRow[] | { subscriptions?: SubscriptionRow[] }>('/subscriptions')
+      .then((res) => (Array.isArray(res.data) ? res.data : (res.data?.subscriptions ?? [])))
+  },
+
+  /** What a finished sign-in unlocked: one entry per model per plan. */
+  subscriptionOffers(id: string) {
+    return api
+      .get<SubscriptionOffer[] | { offers?: SubscriptionOffer[] }>(`/subscriptions/${encodeURIComponent(id)}/offers`)
+      .then((res) => (Array.isArray(res.data) ? res.data : (res.data?.offers ?? [])))
+  },
+
+  /** Writes the chosen offers as model rows. A plan holding several keys asks
+   * which one (409 `keyChoice`), an empty pool asks for consent to create one
+   * (409 `needsKeyConsent`). */
+  provisionSubscription(
+    id: string,
+    body: {
+      offers: { provider: string; model: string; baseUrl: string; apiPath: string }[]
+      keyId?: string
+      createKey?: boolean
+    },
+  ) {
+    return sendJSON<{ ids: string[] }>('POST', `/subscriptions/${encodeURIComponent(id)}/provision`, body)
+  },
+
+  /** One page of the operator's variables table. The value never comes back:
+   * only whether one is set and its last four characters. */
+  envVarsPage(query: ListQuery) {
+    return api
+      .get<{ vars?: EnvVarRow[] } & ListPageMeta>('/env-vars', { params: listParams(query) })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.vars) ? res.data.vars : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
+  },
+
+  /** Sets one variable. An empty value is refused: "nothing" is the delete. */
+  setEnvVar(name: string, value: string) {
+    return sendJSON<{ name: string }>('PUT', `/env-vars/${encodeURIComponent(name)}`, { value })
+  },
+
+  deleteEnvVar(name: string) {
+    return sendJSON<void>('DELETE', `/env-vars/${encodeURIComponent(name)}`)
   },
 
   /** Begins a browser sign-in for one provider and answers the id to poll. The

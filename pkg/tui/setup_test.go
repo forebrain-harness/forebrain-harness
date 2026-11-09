@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -18,10 +19,12 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
-func TestStartupConfigErrorReportsMissingDotEnvForCopiedConfig(t *testing.T) {
+func TestStartupConfigErrorReportsUnconfiguredModel(t *testing.T) {
 	process.ResetResolve()
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
@@ -47,8 +50,11 @@ func TestStartupConfigErrorReportsMissingDotEnvForCopiedConfig(t *testing.T) {
 		t.Fatal("StartupConfigError = nil, want diagnostic")
 	}
 	msg := startupErr.Error()
-	if !strings.Contains(msg, "api_key") || !strings.Contains(msg, filepath.Join(home, ".env")) {
-		t.Fatalf("diagnostic should mention api_key and custom .env path, got %q", msg)
+	if !strings.Contains(msg, "api_key") || !strings.Contains(msg, "Add a model with /connect") {
+		t.Fatalf("diagnostic should name the missing field and where to add a model, got %q", msg)
+	}
+	if strings.Contains(msg, ".env") {
+		t.Fatalf("diagnostic must not name a retired storage location, got %q", msg)
 	}
 }
 
@@ -236,300 +242,407 @@ func useSetupTestCatalog(t *testing.T) {
 	}
 }
 
-// stubChatGPTModels replaces account model discovery with a fixed answer.
-func stubChatGPTModels(t *testing.T, records []turn.ModelRecord, discoverErr error) {
-	t.Helper()
-	previous := discoverChatGPTModels
-	discoverChatGPTModels = func(context.Context, string) ([]turn.ModelRecord, error) {
-		return records, discoverErr
+// fakeLogin is one running sign-in the setup drives: the registry hands it back
+// before the flow has finished, and every answer it learns is readable while it
+// runs, exactly as pkg/subscription's own handle behaves.
+type fakeLogin struct {
+	url     string
+	code    string
+	waitErr error
+	// submitErr rejects the next pasted address, so a test can prove a rejected
+	// paste leaves the sign-in running.
+	submitErr error
+
+	submitted []string
+	canceled  bool
+}
+
+func newFakeLogin(url, code string) *fakeLogin {
+	return &fakeLogin{url: url, code: code}
+}
+
+func (l *fakeLogin) AuthorizeURL() string { return l.url }
+func (l *fakeLogin) UserCode() string     { return l.code }
+
+func (l *fakeLogin) Submit(_ context.Context, pasted string) error {
+	l.submitted = append(l.submitted, pasted)
+	if l.submitErr != nil {
+		err := l.submitErr
+		l.submitErr = nil
+		return err
 	}
-	t.Cleanup(func() { discoverChatGPTModels = previous })
+	return nil
 }
 
-func stubChatGPTBrowserLogin(t *testing.T) {
-	t.Helper()
-	previous := chatGPTLogin
-	chatGPTLogin = func(context.Context, string, io.Writer) (openai.Credentials, error) {
-		return openai.Credentials{Email: "dev@example.com"}, nil
+func (l *fakeLogin) Wait(ctx context.Context) error {
+	// The test's flow is already finished: nothing waits for a person here.
+	if err := ctx.Err(); err != nil {
+		return nil
 	}
-	t.Cleanup(func() { chatGPTLogin = previous })
+	return l.waitErr
 }
 
-func chatGPTProviderChoice() providerChoice {
-	return providerGroups[0].Options[0]
+func (l *fakeLogin) Cancel() { l.canceled = true }
+
+// fakeSubscription is one registry entry the setup lists and drives: the probe,
+// the flow, the listing and the write are all the test's to answer.
+type fakeSubscription struct {
+	id    string
+	label string
+	flows []string
+	check turn.SignInCheck
+	login *fakeLogin
+
+	offers      []subscription.Offer
+	offersFn    func(call int) ([]subscription.Offer, error)
+	provisionFn func(call int) error
+
+	probeCalls  int
+	startCalls  int
+	startedFlow string
+	offerCalls  int
+	provisioned [][]subscription.Offer
+	envs        []subscription.Env
 }
 
-// runChatGPTSetup runs the model setup from its sign-in page with ChatGPT
-// already chosen, saving at the review.
-func runChatGPTSetup(cfg PromptConfig) (process.Options, bool, error) {
+func (s *fakeSubscription) ID() string              { return s.id }
+func (s *fakeSubscription) Label() (string, string) { return s.label, s.label }
+func (s *fakeSubscription) Flows() []string         { return s.flows }
+
+func (s *fakeSubscription) Probe(context.Context, subscription.Env) turn.SignInCheck {
+	s.probeCalls++
+	return s.check
+}
+
+func (s *fakeSubscription) Start(_ context.Context, _ subscription.Env, flow string) (subscription.Login, error) {
+	s.startCalls++
+	s.startedFlow = flow
+	if s.login == nil {
+		s.login = newFakeLogin("https://signin.example.test/authorize", "")
+	}
+	return s.login, nil
+}
+
+func (s *fakeSubscription) Offers(context.Context, subscription.Env) ([]subscription.Offer, error) {
+	s.offerCalls++
+	if s.offersFn != nil {
+		return s.offersFn(s.offerCalls)
+	}
+	return s.offers, nil
+}
+
+func (s *fakeSubscription) Provision(_ context.Context, env subscription.Env, offers []subscription.Offer, _ subscription.ProvisionOptions) ([]string, error) {
+	s.envs = append(s.envs, env)
+	s.provisioned = append(s.provisioned, offers)
+	if s.provisionFn != nil {
+		if err := s.provisionFn(len(s.provisioned)); err != nil {
+			return nil, err
+		}
+	}
+	ids := make([]string, len(offers))
+	for i := range offers {
+		ids[i] = s.id + "-row-" + strconv.Itoa(i)
+	}
+	return ids, nil
+}
+
+func (s *fakeSubscription) RefreshKey(context.Context, subscription.Env, string) error {
+	return subscription.ErrNoKeyToRefresh
+}
+
+// chatGPTLike is the ChatGPT shape: a loopback callback flow, with the paste flow
+// as its headless backup, and the Codex endpoint for every model it unlocks.
+func chatGPTLike() *fakeSubscription {
+	return &fakeSubscription{
+		id: "chatgpt", label: "ChatGPT",
+		flows: []string{subscription.FlowBrowserCallback, subscription.FlowPasteCallback},
+		check: turn.SignInCheck{State: turn.SignInMissing},
+		login: newFakeLogin("https://auth.openai.com/authorize?state=abc", ""),
+		offers: []subscription.Offer{
+			{Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-future", BaseURL: openai.CodexBaseURL, APIPath: "/responses", PlanLabel: "ChatGPT plan", Default: true},
+			{Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-second", BaseURL: openai.CodexBaseURL, APIPath: "/responses", PlanLabel: "ChatGPT plan"},
+		},
+	}
+}
+
+// openCodeLike is the OpenCode Go shape: a device code and nothing else.
+func openCodeLike() *fakeSubscription {
+	base := opencode.ProviderBaseURL("opencode-go")
+	return &fakeSubscription{
+		id: "opencode-go", label: "OpenCode",
+		flows: []string{subscription.FlowDeviceCode},
+		check: turn.SignInCheck{State: turn.SignInMissing},
+		login: newFakeLogin("https://opencode.ai/auth", "QK7M-2PLX"),
+		offers: []subscription.Offer{
+			{Subscription: "opencode-go", Provider: "opencode-go", Model: "glm-5.3", BaseURL: base, APIPath: "/chat/completions", Plan: "go", PlanLabel: "Go", Default: true},
+			{Subscription: "opencode-go", Provider: "opencode-go", Model: "kimi-k3", BaseURL: base, APIPath: "/chat/completions", Plan: "go", PlanLabel: "Go"},
+		},
+	}
+}
+
+// withSubscriptions replaces the sign-in registry the setup lists and drives,
+// for one test.
+func withSubscriptions(t *testing.T, subs ...subscription.Subscription) {
+	t.Helper()
+	previous := subscriptions
+	subscriptions = func() []subscription.Subscription { return subs }
+	t.Cleanup(func() { subscriptions = previous })
+}
+
+// browserMachine makes this machine one with a browser the user can see, and
+// records every URL handed to it instead of opening anything.
+func browserMachine(t *testing.T) *[]string {
+	t.Helper()
+	opened := []string{}
+	previousOpener, previousBrowser := browserOpener, localBrowser
+	browserOpener = func(url string, _ func(error)) error {
+		opened = append(opened, url)
+		return nil
+	}
+	localBrowser = func() bool { return true }
+	t.Cleanup(func() { browserOpener, localBrowser = previousOpener, previousBrowser })
+	return &opened
+}
+
+// headlessMachine makes this machine one with no browser of its own — an SSH
+// session — and records anything that would have been opened.
+func headlessMachine(t *testing.T) *[]string {
+	t.Helper()
+	opened := browserMachine(t)
+	localBrowser = func() bool { return false }
+	return opened
+}
+
+// setupTestConfig is a throwaway install: the home the setup reads, and the
+// config whose state database the rows land in. Every flow that reaches the save
+// needs one — the review asks that database whether the row already exists.
+func setupTestConfig(t *testing.T, selector SetupSelector) PromptConfig {
+	t.Helper()
+	home := t.TempDir()
+	return PromptConfig{Selector: selector, Output: io.Discard, Home: home, ConfigPath: filepath.Join(home, "forebrain.yaml")}
+}
+
+// runSubscriptionSetup runs the model setup from its sign-in page with a
+// subscription already chosen, saving at the offers page.
+func runSubscriptionSetup(t *testing.T, cfg PromptConfig, sub *fakeSubscription) (process.Options, bool, error) {
+	t.Helper()
+	withSubscriptions(t, sub)
 	setup := newLLMSetup(cfg)
-	setup.setChoice(chatGPTProviderChoice())
+	setup.setChoice(subscriptionChoice(sub))
 	setup.page = setupPageCredentials
 	return setup.run()
 }
 
-func discoveredFixture() []turn.ModelRecord {
-	return []turn.ModelRecord{
-		{APIModel: "gpt-future", Provider: "chatgpt", IsDefault: true,
-			ReasoningEfforts: []string{"low", "medium", "max"}, DefaultReasoningEffort: "low"},
-		{APIModel: "gpt-second", Provider: "chatgpt",
-			ReasoningEfforts: []string{"low", "medium", "max"}, DefaultReasoningEffort: "medium"},
+// The first page is three groups in this order: the sign-ins the registry
+// lists, the providers reached with a key, and the custom form. The sign-in
+// group is the registry's alone — a provider that only takes a key never
+// appears in it.
+func TestProviderPageListsThreeGroups(t *testing.T) {
+	sub := chatGPTLike()
+	withSubscriptions(t, sub)
+	setup := newLLMSetup(PromptConfig{Selector: &fakeSelector{}, Output: io.Discard, Home: t.TempDir()})
+	rows := setup.providerRows()
+
+	var categories []string
+	for _, row := range rows {
+		if len(categories) == 0 || categories[len(categories)-1] != row.item.Category {
+			categories = append(categories, row.item.Category)
+		}
+	}
+	want := []string{providerSignInCategory, providerAPIKeyCategory, providerCustomCategory}
+	if !reflect.DeepEqual(categories, want) {
+		t.Fatalf("first page groups = %#v, want %#v", categories, want)
+	}
+	if rows[0].item.Label != "ChatGPT" {
+		t.Fatalf("first sign-in row = %q", rows[0].item.Label)
+	}
+	// The row says what signing in gets the user, in the registry's own words.
+	if got := rows[0].item.Description; got != "Use Codex included with your ChatGPT plan" {
+		t.Fatalf("sign-in row description = %q", got)
+	}
+	last := rows[len(rows)-1]
+	if last.item.Label != "Custom model" || last.choice.Provider != appcfg.CustomProvider || !last.choice.Custom {
+		t.Fatalf("custom row = %+v", last)
+	}
+	if got := last.item.Description; got != "OpenAI- or Anthropic-compatible, or custom protocol" {
+		t.Fatalf("custom row description = %q", got)
+	}
+	// No sign-in provider is reachable from the API key group.
+	for _, row := range rows {
+		if row.item.Category != providerAPIKeyCategory {
+			continue
+		}
+		options := []providerChoice{row.choice}
+		if row.group != nil {
+			options = row.group.Options
+		}
+		for _, option := range options {
+			if appcfg.CredentialsBackedProvider(option.Provider) {
+				t.Fatalf("api key group offers the sign-in-backed provider %q", option.Provider)
+			}
+			if option.APIKeyLabel == "" {
+				t.Fatalf("api key choice %+v asks for no key", option)
+			}
+		}
 	}
 }
 
-// The picker must offer exactly what the account returned, in backend order,
-// labeled with the exact slug that will be saved.
-func TestConfigureChatGPTProviderOffersDiscoveredModels(t *testing.T) {
-	stubChatGPTBrowserLogin(t)
-	stubChatGPTModels(t, discoveredFixture(), nil)
-	selector := &fakeSelector{
-		selects:  []string{"gpt-second", "max"},
-		confirms: []bool{true, true},
+// A subscription this machine is already signed in to says so on its row, and
+// the answer is asked once: the sign-in page reads it again from the same probe.
+func TestProviderPageMarksASubscriptionAlreadySignedIn(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	withSubscriptions(t, sub)
+	setup := newLLMSetup(PromptConfig{Selector: &fakeSelector{}, Output: io.Discard, Home: t.TempDir()})
+	rows := setup.providerRows()
+	if !strings.HasSuffix(rows[0].item.Description, "· Signed in") {
+		t.Fatalf("signed-in row = %q, want the badge", rows[0].item.Description)
 	}
-	opts, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	})
+	if sub.probeCalls != 1 {
+		t.Fatalf("probe calls = %d, want one", sub.probeCalls)
+	}
+	// The page shown again does not pay for the vendor's listing twice.
+	setup.providerRows()
+	if sub.probeCalls != 1 {
+		t.Fatalf("probe calls = %d, want the cached answer", sub.probeCalls)
+	}
+}
+
+// Choosing a subscription signs in, shows the models it unlocked with the
+// endpoint each one sends to, and writes only the rows the user ticks. The first
+// ticked row is the model the agent takes.
+func TestConfigureSubscriptionAddsTheModelsTheUserTicks(t *testing.T) {
+	sub := chatGPTLike()
+	opened := browserMachine(t)
+	selector := &fakeSelector{confirms: []bool{true}, multiSelects: [][]int{{1}}}
+	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
-	modelSelect := 0
-	if got := selector.selectOptions[modelSelect]; !reflect.DeepEqual(got, []string{
-		"gpt-future", "gpt-second", manualModelInput,
-	}) {
-		t.Fatalf("model options = %#v", got)
+	if sub.startCalls != 1 || sub.startedFlow != subscription.FlowBrowserCallback {
+		t.Fatalf("starts = %d flow %q, want the browser callback", sub.startCalls, sub.startedFlow)
 	}
-	if got := selector.selectDefaults[modelSelect]; got != "gpt-future" {
-		t.Fatalf("model default = %q, want the account's priority-first default", got)
+	if len(*opened) != 1 || (*opened)[0] != sub.login.url {
+		t.Fatalf("opened %v, want the flow's authorize URL %q", *opened, sub.login.url)
 	}
-	if got := selector.selectOptions[1]; !reflect.DeepEqual(got, []string{"low", "medium", "max", reasoningEffortUnset}) {
-		t.Fatalf("effort options = %#v, want the record's own levels", got)
+	if len(sub.provisioned) != 1 || len(sub.provisioned[0]) != 1 || sub.provisioned[0][0].Model != "gpt-second" {
+		t.Fatalf("provisioned %+v, want the one row ticked", sub.provisioned)
 	}
-	if got := selector.selectDefaults[1]; got != "medium" {
-		t.Fatalf("effort default = %q, want the record's backend default", got)
+	if sub.envs[0].DB == nil || sub.envs[0].Home == "" {
+		t.Fatalf("provision env = %+v, want the home and its state database", sub.envs[0])
 	}
-	if opts.Model != "gpt-second" {
-		t.Fatalf("model = %q, want the slug behind the chosen label", opts.Model)
-	}
-	if opts.ParamsJSON != `{"reasoning":{"effort":"max"}}` {
-		t.Fatalf("params = %q", opts.ParamsJSON)
-	}
-	if opts.BaseURL != openai.CodexBaseURL || opts.APIPath != "/responses" || opts.Provider != "chatgpt" {
+	if opts.Provider != "chatgpt" || opts.Model != "gpt-second" || opts.BaseURL != openai.CodexBaseURL || opts.APIPath != "/responses" {
 		t.Fatalf("options = %+v", opts)
 	}
+	// The offers page names each model with the request URL its plan sends to.
+	if got := selector.multiOptions[0]; !reflect.DeepEqual(got, []string{"gpt-future", "gpt-second"}) {
+		t.Fatalf("offer rows = %#v", got)
+	}
+	// It opens on the row the registry marks as the plan's default.
+	if got := selector.multiDefaults[0]; !reflect.DeepEqual(got, []int{0}) {
+		t.Fatalf("checked rows = %#v, want the plan's default", got)
+	}
+	if !strings.HasPrefix(selector.multiLabels[0], "ChatGPT\nChoose the models to add; each row shows where requests go.") {
+		t.Fatalf("offers page title = %q", selector.multiLabels[0])
+	}
 }
 
-// A still-listed configured model stays the default; a configured model the
-// account no longer offers gives way to the account's own default, not to the
-// stale name and not to Manual input.
-func TestConfigureChatGPTProviderCurrentModelDefaultRules(t *testing.T) {
-	stubChatGPTBrowserLogin(t)
-	stubChatGPTModels(t, discoveredFixture(), nil)
-	selector := &fakeSelector{confirms: []bool{true, true, true}}
-	_, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-		Defaults: process.AgentLLMDefaults{Provider: "chatgpt", Model: "gpt-second"},
-	})
+// A saved sign-in that can list its models IS the finished sign-in: no
+// confirmation panel, no browser, and the offers page opens directly.
+func TestConfigureSubscriptionReusesTheSavedSignIn(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	opened := browserMachine(t)
+	selector := &fakeSelector{}
+	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
-	if got := selector.selectDefaults[0]; got != "gpt-second" {
-		t.Fatalf("still-listed model default = %q", got)
+	if sub.startCalls != 0 {
+		t.Fatalf("sign-ins = %d; a usable saved login must not sign in again", sub.startCalls)
 	}
-
-	selector = &fakeSelector{confirms: []bool{true, true}}
-	_, ok, err = runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-		Defaults: process.AgentLLMDefaults{Provider: "chatgpt", Model: "gpt-retired"},
-	})
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if got := selector.selectDefaults[0]; got != "gpt-future" {
-		t.Fatalf("retired model default = %q, want the account's default", got)
-	}
-}
-
-// A configured effort the model no longer supports must not be preselected;
-// the record's own default takes over.
-func TestConfigureChatGPTProviderEffortMismatchFallsToRecordDefault(t *testing.T) {
-	stubChatGPTBrowserLogin(t)
-	stubChatGPTModels(t, discoveredFixture(), nil)
-	selector := &fakeSelector{confirms: []bool{true, true}}
-	_, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-		Defaults: process.AgentLLMDefaults{Provider: "chatgpt", Model: "gpt-future",
-			ParamsJSON: `{"reasoning":{"effort":"xhigh"}}`},
-	})
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if got := selector.selectDefaults[1]; got != "low" {
-		t.Fatalf("effort default = %q, want the record default after an unsupported xhigh", got)
-	}
-}
-
-// A failed fetch offers a retry that skips the browser login; declining it
-// aborts with an actionable error — the login stands, but no model picker runs
-// and no provider options are produced.
-func TestConfigureChatGPTProviderFetchFailureAborts(t *testing.T) {
-	stubChatGPTBrowserLogin(t)
-	attempts := 0
-	previous := discoverChatGPTModels
-	discoverChatGPTModels = func(context.Context, string) ([]turn.ModelRecord, error) {
-		attempts++
-		return nil, errors.New("fetch ChatGPT models: http 401: token expired")
-	}
-	t.Cleanup(func() { discoverChatGPTModels = previous })
-	selector := &fakeSelector{confirms: []bool{true, false}, failUnexpectedSelect: true}
-	opts, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	})
-	if err == nil || ok {
-		t.Fatalf("err=%v ok=%t, want the flow to abort", err, ok)
-	}
-	if !strings.Contains(err.Error(), "could not be fetched") || !strings.Contains(err.Error(), "401") {
-		t.Fatalf("err = %v, want an actionable fetch failure", err)
-	}
-	if opts.Provider != "" {
-		t.Fatalf("options = %+v, want none written", opts)
-	}
-	if attempts != 1 {
-		t.Fatalf("attempts = %d, want the declined retry to stop fetching", attempts)
-	}
-}
-
-// stubChatGPTProbe replaces the saved-login probe with a fixed answer and
-// reports how many times the page probed.
-func stubChatGPTProbe(t *testing.T, check turn.SignInCheck) *int {
-	t.Helper()
-	calls := 0
-	previous := probeChatGPTLogin
-	probeChatGPTLogin = func(context.Context, string) turn.SignInCheck {
-		calls++
-		return check
-	}
-	t.Cleanup(func() { probeChatGPTLogin = previous })
-	return &calls
-}
-
-// countedChatGPTLogin replaces the browser login with a counter, so a test
-// can prove the flow never started.
-func countedChatGPTLogin(t *testing.T) *int {
-	t.Helper()
-	calls := 0
-	previous := chatGPTLogin
-	chatGPTLogin = func(context.Context, string, io.Writer) (openai.Credentials, error) {
-		calls++
-		return openai.Credentials{Email: "dev@example.com"}, nil
-	}
-	t.Cleanup(func() { chatGPTLogin = previous })
-	return &calls
-}
-
-// A saved sign-in that can list its models is the finished sign-in: no
-// browser flow, no confirmation panel, and the picker opens directly on the
-// probe's records. This is the /connect behavior the reuse fix exists for.
-func TestConfigureChatGPTProviderReusesSavedSignIn(t *testing.T) {
-	loginCalls := countedChatGPTLogin(t)
-	probeCalls := stubChatGPTProbe(t, turn.SignInCheck{State: turn.SignInUsable, Records: discoveredFixture()})
-	selector := &fakeSelector{
-		selects: []string{"gpt-second", "max"},
-	}
-	opts, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	})
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if *loginCalls != 0 {
-		t.Fatalf("browser login ran %d times; a usable saved sign-in must not log in again", *loginCalls)
-	}
-	if *probeCalls != 1 {
-		t.Fatalf("probe calls = %d, want exactly one", *probeCalls)
+	if len(*opened) != 0 {
+		t.Fatalf("opened %v, want no browser for a saved login", *opened)
 	}
 	if selector.confirmIdx != 0 {
-		t.Fatalf("%d confirmation panels appeared, want the picker to open directly", selector.confirmIdx)
-	}
-	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{
-		"gpt-future", "gpt-second", manualModelInput,
-	}) {
-		t.Fatalf("model options = %#v, want the probe's records in the picker", got)
-	}
-	if opts.Model != "gpt-second" {
-		t.Fatalf("model = %q, want the chosen slug", opts.Model)
-	}
-}
-
-// Missing — this machine holds no login — keeps the OAuth path exactly as it
-// was: the confirmation panel, then the browser flow.
-func TestConfigureChatGPTProviderMissingLoginRunsOAuth(t *testing.T) {
-	loginCalls := countedChatGPTLogin(t)
-	stubChatGPTProbe(t, turn.SignInCheck{State: turn.SignInMissing})
-	stubChatGPTModels(t, discoveredFixture(), nil)
-	selector := &fakeSelector{
-		selects:  []string{"gpt-future"},
-		confirms: []bool{true},
-	}
-	opts, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	})
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if *loginCalls != 1 {
-		t.Fatalf("browser logins = %d, want the OAuth flow to run", *loginCalls)
+		t.Fatalf("%d confirmation panels appeared, want none", selector.confirmIdx)
 	}
 	if opts.Model != "gpt-future" {
-		t.Fatalf("model = %q", opts.Model)
+		t.Fatalf("model = %q, want the row the offers page opened on", opts.Model)
 	}
 }
 
-// Dead — the server refused the stored login — runs the OAuth flow too: only
-// a new sign-in restores what the refresh token lost.
-func TestConfigureChatGPTProviderDeadLoginRunsOAuth(t *testing.T) {
-	loginCalls := countedChatGPTLogin(t)
-	stubChatGPTProbe(t, turn.SignInCheck{
-		State: turn.SignInDead,
-		Err:   errors.New("ChatGPT login expired; sign in again"),
-	})
-	stubChatGPTModels(t, discoveredFixture(), nil)
-	selector := &fakeSelector{
-		selects:  []string{"gpt-future"},
-		confirms: []bool{true},
-	}
-	_, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	})
+// No login on this machine means the flow runs: the confirmation first, then the
+// browser.
+func TestConfigureSubscriptionMissingLoginRunsTheFlow(t *testing.T) {
+	sub := chatGPTLike()
+	opened := browserMachine(t)
+	selector := &fakeSelector{confirms: []bool{true}}
+	_, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
-	if *loginCalls != 1 {
-		t.Fatalf("browser logins = %d, want the OAuth flow to run", *loginCalls)
+	if sub.startCalls != 1 || len(*opened) != 1 {
+		t.Fatalf("starts = %d opened %v, want exactly one of each", sub.startCalls, *opened)
+	}
+	if !strings.Contains(selector.confirmLabels[0], "Sign in with ChatGPT") ||
+		!strings.Contains(selector.confirmLabels[0], "opens your browser to sign in") {
+		t.Fatalf("sign-in prompt = %q", selector.confirmLabels[0])
 	}
 }
 
-// Unreachable never pushes a working login back through the browser: the
-// saved sign-in stands, the fetch panel owns the retry, and declining it
-// aborts with the actionable error. No OAuth anywhere in this path.
-func TestConfigureChatGPTProviderUnreachableKeepsSavedLogin(t *testing.T) {
-	loginCalls := countedChatGPTLogin(t)
-	stubChatGPTProbe(t, turn.SignInCheck{
-		State: turn.SignInUnreachable,
-		Err:   errors.New("resolve client version: registry unreachable"),
-	})
-	stubChatGPTModels(t, nil, errors.New("fetch ChatGPT models: connection refused"))
+// Declining the confirmation never starts a sign-in.
+func TestConfigureSubscriptionDeclinedNeverSignsIn(t *testing.T) {
+	sub := chatGPTLike()
+	opened := browserMachine(t)
+	selector := &fakeSelector{confirms: []bool{false}}
+	_, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil {
+		t.Fatalf("configure err=%v", err)
+	}
+	if ok {
+		t.Fatal("the setup saved after the sign-in was declined")
+	}
+	if sub.startCalls != 0 || len(*opened) != 0 {
+		t.Fatalf("starts = %d opened %v, want nothing started", sub.startCalls, *opened)
+	}
+}
+
+// A dead login runs the flow too: only a new sign-in restores what the refresh
+// token lost.
+func TestConfigureSubscriptionDeadLoginRunsTheFlow(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInDead, Err: errors.New("ChatGPT login expired; sign in again")}
+	browserMachine(t)
+	selector := &fakeSelector{confirms: []bool{true}}
+	if _, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub); err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if sub.startCalls != 1 {
+		t.Fatalf("sign-ins = %d, want the flow to run", sub.startCalls)
+	}
+}
+
+// A listing that failed never pushes a working login back through a browser: the
+// retry reuses the saved login, and declining it aborts with an actionable error
+// and nothing written.
+func TestConfigureSubscriptionUnreachableKeepsSavedLogin(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUnreachable, Err: errors.New("resolve client version: registry unreachable")}
+	sub.offersFn = func(int) ([]subscription.Offer, error) {
+		return nil, errors.New("fetch ChatGPT models: connection refused")
+	}
+	opened := browserMachine(t)
 	selector := &fakeSelector{confirms: []bool{false}, failUnexpectedSelect: true}
-	opts, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	})
+	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err == nil || ok {
 		t.Fatalf("err=%v ok=%t, want the declined retry to abort", err, ok)
 	}
-	if *loginCalls != 0 {
-		t.Fatalf("browser logins = %d, an unreachable listing must not log in", *loginCalls)
-	}
 	if !strings.Contains(err.Error(), "could not be fetched") {
 		t.Fatalf("err = %v, want the actionable fetch failure", err)
+	}
+	if sub.startCalls != 0 || len(*opened) != 0 {
+		t.Fatalf("starts = %d opened %v, an unreachable listing must not sign in", sub.startCalls, *opened)
 	}
 	if selector.confirmIdx != 1 {
 		t.Fatalf("confirmations = %d, want only the retry panel", selector.confirmIdx)
@@ -537,106 +650,465 @@ func TestConfigureChatGPTProviderUnreachableKeepsSavedLogin(t *testing.T) {
 	if opts.Provider != "" {
 		t.Fatalf("options = %+v, want none written", opts)
 	}
+	if len(sub.provisioned) != 0 {
+		t.Fatalf("provisioned %+v, want nothing written", sub.provisioned)
+	}
 }
 
-// Accepting the retry refetches on the saved login — no second browser flow —
-// and the flow then continues with the fresh listing.
-func TestConfigureChatGPTProviderFetchRetrySkipsRelogin(t *testing.T) {
-	stubChatGPTBrowserLogin(t)
-	loginCalls := 0
-	previousLogin := chatGPTLogin
-	chatGPTLogin = func(context.Context, string, io.Writer) (openai.Credentials, error) {
-		loginCalls++
-		return openai.Credentials{Email: "dev@example.com"}, nil
-	}
-	t.Cleanup(func() { chatGPTLogin = previousLogin })
-	fetchCalls := 0
-	previous := discoverChatGPTModels
-	discoverChatGPTModels = func(context.Context, string) ([]turn.ModelRecord, error) {
-		fetchCalls++
-		if fetchCalls == 1 {
+// Accepting the retry refetches on the saved login — no second sign-in — and the
+// flow then continues with the fresh listing.
+func TestConfigureSubscriptionFetchRetrySkipsRelogin(t *testing.T) {
+	sub := chatGPTLike()
+	first := chatGPTLike()
+	sub.offersFn = func(call int) ([]subscription.Offer, error) {
+		if call == 1 {
 			return nil, errors.New("fetch ChatGPT models: http 429: slow down")
 		}
-		return discoveredFixture(), nil
+		return first.offers, nil
 	}
-	t.Cleanup(func() { discoverChatGPTModels = previous })
-	selector := &fakeSelector{
-		selects:  []string{"gpt-future", "low"},
-		confirms: []bool{true, true, true},
-	}
-	opts, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	})
+	browserMachine(t)
+	selector := &fakeSelector{confirms: []bool{true, true}}
+	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
-	if loginCalls != 1 {
-		t.Fatalf("login calls = %d, want the retry to reuse the saved login", loginCalls)
+	if sub.startCalls != 1 {
+		t.Fatalf("sign-ins = %d, want the retry to reuse the saved login", sub.startCalls)
 	}
-	if fetchCalls != 2 {
-		t.Fatalf("fetch calls = %d, want exactly one retry", fetchCalls)
+	if sub.offerCalls != 2 {
+		t.Fatalf("listing calls = %d, want exactly one retry", sub.offerCalls)
 	}
 	if opts.Model != "gpt-future" {
 		t.Fatalf("model = %q", opts.Model)
 	}
 }
 
-// Manual input stays reachable and stores the typed id; a model neither the
-// account nor the catalog knows gets no effort page at all, and therefore no
-// pinned level — the picker never invents a scale for it.
-func TestConfigureChatGPTProviderManualInputDefaultsEffortUnset(t *testing.T) {
-	stubChatGPTBrowserLogin(t)
-	stubChatGPTModels(t, discoveredFixture(), nil)
-	selector := &fakeSelector{
-		selects:  []string{manualModelInput},
-		inputs:   []string{"gpt-typed"},
-		confirms: []bool{true, true},
-	}
-	opts, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	})
+// A terminal with no browser of its own cannot finish a loopback callback, so it
+// takes the flow that pastes the address back, opens nothing, and hands the
+// address to the flow.
+func TestConfigureSubscriptionPastesTheCallbackWhenHeadless(t *testing.T) {
+	sub := chatGPTLike()
+	opened := headlessMachine(t)
+	const pasted = "http://127.0.0.1:54623/auth/callback?code=abc"
+	selector := &fakeSelector{confirms: []bool{true}, inputs: []string{pasted}}
+	_, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
-	if opts.Model != "gpt-typed" {
-		t.Fatalf("model = %q", opts.Model)
+	if sub.startedFlow != subscription.FlowPasteCallback {
+		t.Fatalf("flow = %q, want the paste flow on a headless machine", sub.startedFlow)
 	}
-	for _, label := range selector.selectLabels {
-		if strings.HasPrefix(label, "Reasoning effort\n") {
-			t.Fatalf("an unverified model must not be asked for an effort: %#v", selector.selectLabels)
+	if len(*opened) != 0 {
+		t.Fatalf("opened %v, want no browser on a headless machine", *opened)
+	}
+	if len(sub.login.submitted) != 1 || sub.login.submitted[0] != pasted {
+		t.Fatalf("pasted %v, want the address handed to the flow", sub.login.submitted)
+	}
+}
+
+// A rejected paste leaves the sign-in running: the person who pasted it tries
+// again.
+func TestConfigureSubscriptionRejectedPasteTriesAgain(t *testing.T) {
+	sub := chatGPTLike()
+	headlessMachine(t)
+	sub.login.submitErr = errors.New("that address did not belong to this sign-in")
+	selector := &fakeSelector{confirms: []bool{true}, inputs: []string{"http://localhost/wrong", "http://127.0.0.1:54623/auth/callback?code=abc"}}
+	if _, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub); err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if len(sub.login.submitted) != 2 {
+		t.Fatalf("submitted %v, want the rejected address and the corrected one", sub.login.submitted)
+	}
+}
+
+// The device code is the whole page: the address to open and the code to confirm.
+// A device flow opens no browser — the plan's browser-opened device flow arrives
+// with the first key-backed plan, not here.
+func TestConfigureSubscriptionDeviceFlowShowsTheCode(t *testing.T) {
+	sub := openCodeLike()
+	opened := browserMachine(t)
+	out := &bytes.Buffer{}
+	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}})
+	cfg.Output = out
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if sub.startedFlow != subscription.FlowDeviceCode {
+		t.Fatalf("flow = %q", sub.startedFlow)
+	}
+	if len(*opened) != 0 {
+		t.Fatalf("opened %v, want no browser for a device code", *opened)
+	}
+	for _, want := range []string{
+		"Open https://opencode.ai/auth and enter this code.",
+		"QK7M-2PLX",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("sign-in page = %q, want it to carry %q", out.String(), want)
 		}
 	}
-	if opts.ParamsJSON != "" {
-		t.Fatalf("params = %q, want no pinned effort", opts.ParamsJSON)
+	if opts.Provider != "opencode-go" || opts.BaseURL != opencode.ProviderBaseURL("opencode-go") || opts.APIKey != "" {
+		t.Fatalf("options = %+v", opts)
 	}
 }
 
-// A successful fetch of an empty catalog says so and falls back to manual
-// entry — never to a baked-in list.
-func TestConfigureChatGPTProviderEmptyCatalogSaysSo(t *testing.T) {
-	stubChatGPTBrowserLogin(t)
-	stubChatGPTModels(t, nil, nil)
-	out := &bytes.Buffer{}
-	selector := &fakeSelector{
-		inputs:   []string{"gpt-typed", ""},
-		confirms: []bool{true, true},
+// A sign-in that unlocks no model this build can run says so instead of saving
+// nothing silently.
+func TestConfigureSubscriptionWithoutModelsSaysSo(t *testing.T) {
+	sub := chatGPTLike()
+	sub.offers = nil
+	browserMachine(t)
+	_, ok, err := runSubscriptionSetup(t, setupTestConfig(t, &fakeSelector{confirms: []bool{true}}), sub)
+	if err == nil || ok {
+		t.Fatalf("err=%v ok=%t, want the empty listing refused", err, ok)
 	}
-	opts, ok, err := runChatGPTSetup(PromptConfig{
-		Selector: selector, Output: out, Home: t.TempDir(),
-	})
+	if !strings.Contains(err.Error(), "no models this build can run") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A refused write shows the registry's own sentence on the page and writes
+// nothing; the user can then choose again.
+func TestConfigureSubscriptionProvisionFailureKeepsThePage(t *testing.T) {
+	sub := chatGPTLike()
+	sub.provisionFn = func(call int) error {
+		if call == 1 {
+			return subscription.ErrNoKey
+		}
+		return nil
+	}
+	browserMachine(t)
+	out := &bytes.Buffer{}
+	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}, multiSelects: [][]int{{0}, {1}}})
+	cfg.Output = out
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
-	if len(selector.inputLabels) == 0 || !strings.Contains(selector.inputLabels[0], "no selectable models") {
-		t.Fatalf("input labels = %q, want the empty catalog named", selector.inputLabels)
+	if len(sub.provisioned) != 2 {
+		t.Fatalf("provision calls = %d, want the second attempt after the refusal", len(sub.provisioned))
 	}
-	if opts.Model != "gpt-typed" {
-		t.Fatalf("model = %q", opts.Model)
+	if !strings.Contains(out.String(), subscription.ErrNoKey.Error()) {
+		t.Fatalf("page = %q, want the registry's sentence", out.String())
+	}
+	if opts.Model != "gpt-second" {
+		t.Fatalf("model = %q, want the row chosen on the second attempt", opts.Model)
 	}
 }
 
-// Other providers list their models from the shared catalog, with the typed
-// ID appended by the prompt itself.
+// connectProgressSelector is a fakeSelector whose ConnectProgress delegates to a
+// real rawSelector wired to a renderer, so a test can prove both that the line is
+// installed through the production path and that it is taken off the screen at
+// the end.
+type connectProgressSelector struct {
+	*fakeSelector
+	raw *rawSelector
+
+	installs int
+	stage    func() string
+	ended    bool
+}
+
+func (s *connectProgressSelector) ConnectProgress(stage func() string) func() {
+	s.installs++
+	s.stage = stage
+	rawEnd := s.raw.ConnectProgress(stage)
+	return func() {
+		s.ended = true
+		rawEnd()
+	}
+}
+
+// The sign-in installs one live line, and it is gone once the flow returns —
+// including its renderer-side source, so no orphaned row keeps counting.
+func TestSignInShowsALiveProgressLine(t *testing.T) {
+	sub := openCodeLike()
+	browserMachine(t)
+	renderer := NewRenderer(nil, nil)
+	sel := &connectProgressSelector{
+		fakeSelector: &fakeSelector{confirms: []bool{true}},
+		raw:          newRawSelector(nil, renderer),
+	}
+	cfg := setupTestConfig(t, sel)
+	if _, ok, err := runSubscriptionSetup(t, cfg, sub); err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if sel.installs != 1 {
+		t.Fatalf("ConnectProgress installs = %d, want exactly one line for the whole sign-in", sel.installs)
+	}
+	if text := sel.stage(); !strings.Contains(text, "Waiting for you to confirm the code in OpenCode") {
+		t.Fatalf("live line = %q", text)
+	}
+	if !sel.ended {
+		t.Fatal("the live line was never ended after the sign-in")
+	}
+	if renderer.TransientStatusSourceLive(transientSourceConnect) {
+		t.Fatal("the connect source outlived its line: the row would keep counting on screen")
+	}
+}
+
+// stubLLMProbe replaces the connection test: each call answers the next scripted
+// error, and a call past the script succeeds.
+func stubLLMProbe(t *testing.T, errs ...error) *int {
+	t.Helper()
+	calls := 0
+	previous := probeLLMModel
+	probeLLMModel = func(context.Context, process.LLMModelInput) error {
+		calls++
+		if calls <= len(errs) {
+			return errs[calls-1]
+		}
+		return nil
+	}
+	t.Cleanup(func() { probeLLMModel = previous })
+	return &calls
+}
+
+// customAnswers is one pass through the custom form: the address, the protocol,
+// the key and the model name.
+type customAnswers struct {
+	baseURL  string
+	protocol string
+	key      string
+	model    string
+}
+
+// The custom form asks for the address, the protocol, the key and the model name,
+// and saves the model it describes: provider custom, the protocol's own path, and
+// the name sent verbatim.
+func TestCustomModelFlowSavesTheProviderItDescribes(t *testing.T) {
+	useSetupTestCatalog(t)
+	probes := stubLLMProbe(t)
+	selector := &fakeSelector{confirms: []bool{false}, multiSelects: [][]int{{2, 3}}}
+	cfg := setupTestConfig(t, selector)
+	opts, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+		baseURL:  "https://api.example.com/v1",
+		protocol: "OpenAI Chat Completions",
+		key:      "sk-custom",
+		model:    "gpt-4o-vendor",
+	}))
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if *probes != 0 {
+		t.Fatalf("probes = %d, want the declined test to send nothing", *probes)
+	}
+	if opts.Provider != appcfg.CustomProvider || opts.Model != "gpt-4o-vendor" || opts.APIKey != "sk-custom" {
+		t.Fatalf("options = %+v", opts)
+	}
+	if opts.BaseURL != "https://api.example.com/v1" || opts.APIPath != appcfg.APIPathChatCompletions || opts.URLVerbatim {
+		t.Fatalf("endpoint = %+v", opts)
+	}
+	if !reflect.DeepEqual(opts.CapEfforts, []string{"medium", "high"}) {
+		t.Fatalf("levels = %#v (pages: %v)", opts.CapEfforts, selector.multiLabels)
+	}
+	// The key page names where the requests go before the key is typed, and says
+	// only the fact that matters here.
+	keyPage := selector.inputLabels[1]
+	if !strings.Contains(keyPage, "Requests go to https://api.example.com/v1/chat/completions") ||
+		!strings.Contains(keyPage, "Saved on this machine only.") {
+		t.Fatalf("key page = %q", keyPage)
+	}
+	// The review lists what the row will be, provider and protocol included.
+	facts := map[string]string{}
+	for _, fact := range selector.reviewFacts[0] {
+		facts[fact.Label] = fact.Value
+	}
+	want := map[string]string{
+		"Provider": appcfg.CustomProvider,
+		"Model":    "gpt-4o-vendor",
+		"Protocol": "OpenAI Chat Completions",
+		"Endpoint": "https://api.example.com/v1/chat/completions",
+		"Thinking": "medium, high",
+	}
+	for label, value := range want {
+		if facts[label] != value {
+			t.Fatalf("review %s = %q, want %q (all: %+v)", label, facts[label], value, facts)
+		}
+	}
+	if !strings.HasPrefix(selector.reviewTitles[0], "Review\nCheck the details, then save.") {
+		t.Fatalf("review title = %q", selector.reviewTitles[0])
+	}
+}
+
+// 「自定义协议」 sends the request to the address as stored: the path only names
+// the wire protocol, and the key page shows the address alone.
+func TestCustomModelCustomProtocolSendsToTheURLAsIs(t *testing.T) {
+	stubLLMProbe(t)
+	selector := &fakeSelector{confirms: []bool{false}, multiSelects: [][]int{{}}}
+	cfg := setupTestConfig(t, selector)
+	opts, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+		baseURL:  "http://127.0.0.1:8731/v1",
+		protocol: "Custom protocol",
+		key:      "sk-local",
+		model:    "qwen3-coder",
+	}))
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if !opts.URLVerbatim || opts.APIPath != appcfg.APIPathChatCompletions {
+		t.Fatalf("options = %+v, want the verbatim protocol", opts)
+	}
+	if got := selector.inputLabels[1]; !strings.Contains(got, "Requests go to http://127.0.0.1:8731/v1\n") {
+		t.Fatalf("key page = %q, want the address alone", got)
+	}
+	facts := map[string]string{}
+	for _, fact := range selector.reviewFacts[0] {
+		facts[fact.Label] = fact.Value
+	}
+	if facts["Endpoint"] != "http://127.0.0.1:8731/v1" || facts["Protocol"] != "Custom protocol" {
+		t.Fatalf("review = %+v", facts)
+	}
+	if facts["Thinking"] != "Not set" {
+		t.Fatalf("review thinking = %q, want Not set", facts["Thinking"])
+	}
+}
+
+// A model a source already documents carries its own levels, so the form never
+// asks for them.
+func TestCustomModelKnownLevelsSkipTheQuestion(t *testing.T) {
+	useSetupTestCatalog(t)
+	stubLLMProbe(t)
+	selector := &fakeSelector{confirms: []bool{false}}
+	cfg := setupTestConfig(t, selector)
+	opts, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+		baseURL:  "https://api.openai.com/v1",
+		protocol: "OpenAI Chat Completions",
+		key:      "sk-known",
+		model:    "openai/gpt-5.5",
+	}))
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if len(selector.multiLabels) != 0 {
+		t.Fatalf("multi-select pages = %v, want no thinking-levels page", selector.multiLabels)
+	}
+	if len(opts.CapEfforts) != 0 {
+		t.Fatalf("levels = %#v, want none written for a documented model", opts.CapEfforts)
+	}
+}
+
+// withCustomAnswers scripts a custom run's text answers onto a config.
+func withCustomAnswers(cfg PromptConfig, answers customAnswers) PromptConfig {
+	selector := cfg.Selector.(*fakeSelector)
+	selector.inputs = append([]string{answers.baseURL, answers.key, answers.model}, selector.inputs...)
+	selector.selects = append([]string{answers.protocol}, selector.selects...)
+	return cfg
+}
+
+// The connection test sends one real request before anything is saved: a failure
+// says so in a short sentence, saves nothing, and goes back a page so the answer
+// can be fixed.
+func TestCustomModelTestConnectionFailureSavesNothing(t *testing.T) {
+	stubLLMProbe(t, errors.New("the API key was refused"))
+	out := &bytes.Buffer{}
+	cfg := setupTestConfig(t, &fakeSelector{multiSelects: [][]int{{}}})
+	cfg.Output = out
+	opts, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+		baseURL:  "https://api.example.com/v1",
+		protocol: "OpenAI Chat Completions",
+		key:      "sk-wrong",
+		model:    "gpt-4o",
+	}))
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	for _, want := range []string{"Connection failed", "the API key was refused", "Nothing was saved."} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("report = %q, want it to carry %q", out.String(), want)
+		}
+	}
+	if opts.Model != "gpt-4o" {
+		t.Fatalf("options = %+v", opts)
+	}
+}
+
+// A connection that answers says how long it took, once, and then the review
+// follows.
+func TestCustomModelTestConnectionSuccess(t *testing.T) {
+	probes := stubLLMProbe(t)
+	out := &bytes.Buffer{}
+	cfg := setupTestConfig(t, &fakeSelector{multiSelects: [][]int{{}}})
+	cfg.Output = out
+	if _, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+		baseURL:  "https://api.example.com/v1",
+		protocol: "Anthropic Messages",
+		key:      "sk-good",
+		model:    "claude-sonnet-4-6",
+	})); err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if *probes != 1 {
+		t.Fatalf("probes = %d, want one", *probes)
+	}
+	if !strings.Contains(out.String(), "claude-sonnet-4-6 answered in") {
+		t.Fatalf("report = %q, want the answering model and its time", out.String())
+	}
+}
+
+// Saving an identity this install already holds asks before replacing its key —
+// and answering no writes nothing and comes back to the review.
+func TestSaveAsksBeforeReplacingAKey(t *testing.T) {
+	cfg := setupTestConfig(t, &fakeSelector{
+		confirms:     []bool{false, false, true}, // no test, decline, replace
+		multiSelects: [][]int{{}},
+		reviews:      []string{"Save", "Save"},
+	})
+	db, err := process.StateDB(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath})
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	store := &state.LLMModelStore{DB: db}
+	existing, err := store.Create(context.Background(), state.LLMModel{
+		Provider: appcfg.CustomProvider, Model: "gpt-4o", BaseURL: "https://api.example.com/v1",
+		APIPath: appcfg.APIPathChatCompletions, APIKey: "sk-old",
+	})
+	if err != nil {
+		t.Fatalf("seed the row: %v", err)
+	}
+	_ = db.Close()
+
+	_, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+		baseURL:  "https://api.example.com/v1",
+		protocol: "OpenAI Chat Completions",
+		key:      "sk-new",
+		model:    "gpt-4o",
+	}))
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	selector := cfg.Selector.(*fakeSelector)
+	if len(selector.confirmLabels) != 3 {
+		t.Fatalf("confirmations = %v, want the test, the decline and the replacement", selector.confirmLabels)
+	}
+	if !strings.Contains(selector.confirmLabels[1], "already configured") ||
+		!strings.Contains(selector.confirmLabels[1], "Replace its key?") {
+		t.Fatalf("duplicate prompt = %q", selector.confirmLabels[1])
+	}
+	if len(selector.reviewFacts) != 2 {
+		t.Fatalf("review pages = %d, want the page shown again after the decline", len(selector.reviewFacts))
+	}
+
+	// The row the install held was never touched by the setup: the write is the
+	// caller's, and it only happens after the yes.
+	db, err = process.StateDB(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath})
+	if err != nil {
+		t.Fatalf("reopen state database: %v", err)
+	}
+	defer db.Close()
+	row, found, err := (&state.LLMModelStore{DB: db}).FindByIdentity(context.Background(),
+		appcfg.CustomProvider, "gpt-4o", "https://api.example.com/v1", appcfg.APIPathChatCompletions)
+	if err != nil || !found {
+		t.Fatalf("find the row: found=%t err=%v", found, err)
+	}
+	if row.ID != existing.ID || row.APIKey != "sk-old" {
+		t.Fatalf("row = %+v, want the untouched one %q", row, existing.ID)
+	}
+}
+
+// Other providers list their models from the shared catalog, with the typed ID
+// appended by the prompt itself.
 func TestCatalogModelOptionsComeFromTheSharedCatalog(t *testing.T) {
 	useSetupTestCatalog(t)
 	options := catalogModelOptions("anthropic")
@@ -653,8 +1125,8 @@ func TestCatalogModelOptionsComeFromTheSharedCatalog(t *testing.T) {
 	}
 }
 
-// Every model the catalog holds for the provider is listed: the picker's
-// filter finds one among them, so nothing is left out to keep the list short.
+// Every model the catalog holds for the provider is listed: the picker's filter
+// finds one among them, so nothing is left out to keep the list short.
 func TestCatalogModelOptionsListTheWholeCatalog(t *testing.T) {
 	raw := map[string]any{}
 	for i := 0; i < 45; i++ {
@@ -679,517 +1151,6 @@ func TestCatalogModelOptionsListTheWholeCatalog(t *testing.T) {
 	}
 	if got := len(catalogModelOptions("openai")); got != 45 {
 		t.Fatalf("options = %d, want all 45", got)
-	}
-}
-
-// stubOpenCodeDeviceLogin replaces the device flow with a fixed login and
-// records the path each run was asked to save to, so a test can prove a path
-// never starts the flow at all.
-func stubOpenCodeDeviceLogin(t *testing.T) *[]string {
-	t.Helper()
-	paths := []string{}
-	previous := openCodeLogin
-	openCodeLogin = func(_ context.Context, path string, _ io.Writer, _ func(opencode.LoginInfo), _ func(opencode.LoginStage)) (opencode.Credentials, error) {
-		paths = append(paths, path)
-		return opencode.Credentials{AccessToken: "go-token", RefreshToken: "go-refresh", Email: "dev@example.com"}, nil
-	}
-	t.Cleanup(func() { openCodeLogin = previous })
-	return &paths
-}
-
-// stubOpenCodeModels replaces gateway catalog discovery with a fixed answer.
-func stubOpenCodeModels(t *testing.T, records []turn.ModelRecord, discoverErr error) {
-	t.Helper()
-	previous := discoverOpenCodeModels
-	discoverOpenCodeModels = func(_ context.Context, _ string) ([]turn.ModelRecord, error) {
-		return records, discoverErr
-	}
-	t.Cleanup(func() { discoverOpenCodeModels = previous })
-}
-
-// tuiOpenCodeSource stands in for the gateway's Go catalog, so a test can build
-// its fixture through the real projection instead of hand-writing records that
-// the production path would never produce.
-type tuiOpenCodeSource struct {
-	models []opencode.ModelInfo
-}
-
-func (s tuiOpenCodeSource) OpenCodeModels(context.Context, bool) ([]opencode.ModelInfo, error) {
-	return s.models, nil
-}
-
-func (s tuiOpenCodeSource) OpenCodeSignedIn() bool { return true }
-
-// openCodeGoProjection projects ids through turn.DiscoverOpenCodeModels, the
-// same call production makes, so the effort levels in a fixture are the ones
-// the setup would really see.
-func openCodeGoProjection(t *testing.T, ids ...string) []turn.ModelRecord {
-	t.Helper()
-	models := make([]opencode.ModelInfo, 0, len(ids))
-	for _, id := range ids {
-		models = append(models, opencode.ModelInfo{ID: id})
-	}
-	records, err := turn.DiscoverOpenCodeModels(context.Background(), tuiOpenCodeSource{models: models}, true)
-	if err != nil {
-		t.Fatalf("project the Go catalog: %v", err)
-	}
-	return records
-}
-
-// openCodeProviderChoice finds the OpenCode choice for a provider, so the tests
-// do not depend on where in the group it sits.
-func openCodeProviderChoice(t *testing.T, provider string) providerChoice {
-	t.Helper()
-	for _, group := range providerGroups {
-		for _, option := range group.Options {
-			if option.Provider == provider && option.OpenCodeDevice {
-				return option
-			}
-		}
-	}
-	t.Fatalf("no OpenCode choice for provider %q", provider)
-	return providerChoice{}
-}
-
-func openCodeGoFixture() []turn.ModelRecord {
-	return []turn.ModelRecord{
-		{APIModel: "glm-5.3", Provider: "opencode-go", IsDefault: true},
-		{APIModel: "kimi-k3", Provider: "opencode-go"},
-	}
-}
-
-// runOpenCodeSetup runs the model setup from its credentials page with an
-// OpenCode choice already picked, saving at the review.
-func runOpenCodeSetup(t *testing.T, cfg PromptConfig, provider string) (process.Options, bool, error) {
-	t.Helper()
-	setup := newLLMSetup(cfg)
-	setup.setChoice(openCodeProviderChoice(t, provider))
-	setup.page = setupPageCredentials
-	return setup.run()
-}
-
-// The OpenCode group has exactly one way in — the Go subscription's device-code
-// login. Every OpenCode model, the free ones included, needs a login with a Go
-// or Go Plus subscription, so there is no way in without one.
-func TestProviderGroupsOfferOpenCodeGoOnly(t *testing.T) {
-	group := providerGroups[1]
-	if group.Label != "OpenCode" {
-		t.Fatalf("second group = %q, want OpenCode right after ChatGPT", group.Label)
-	}
-	if got := providerGroupBlurb(group); got != "Device-code login; use your Go/Go Plus quota" {
-		t.Fatalf("blurb = %q, want the Go login described on the row itself", got)
-	}
-	if !hasSubscriptionSignIn(group) {
-		t.Fatal("the OpenCode group belongs under the sign-in providers")
-	}
-	if len(group.Options) != 1 {
-		t.Fatalf("options = %+v, want only the Go subscription", group.Options)
-	}
-	goChoice := group.Options[0]
-	if !goChoice.OpenCodeDevice {
-		t.Fatalf("Go choice = %+v", goChoice)
-	}
-	if got := goChoice.DefaultBaseURL; got != opencode.ProviderBaseURL("opencode-go") || got == "" {
-		t.Fatalf("Go base_url = %q", got)
-	}
-	// The Console provider must not be reachable from the provider page at all.
-	for _, group := range providerGroups {
-		for _, option := range group.Options {
-			if option.Provider == "opencode" {
-				t.Fatalf("provider page offers the OpenCode Console surface: %+v", option)
-			}
-		}
-	}
-}
-
-// Picking the OpenCode group from the provider page goes straight into the Go
-// login — one page, no plan picker, no key page.
-func TestPromptMainLLMSetupReachesOpenCodeFromTheProviderPage(t *testing.T) {
-	loginPaths := stubOpenCodeDeviceLogin(t)
-	stubOpenCodeModels(t, openCodeGoProjection(t, "glm-5.3", "kimi-k3"), nil)
-	selector := &fakeSelector{selects: []string{"OpenCode", "glm-5.3"}, confirms: []bool{true}}
-	opts, ok, err := PromptMainLLMSetup(PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	})
-	if err != nil || !ok {
-		t.Fatalf("PromptMainLLMSetup ok=%t err=%v", ok, err)
-	}
-	if len(*loginPaths) != 1 {
-		t.Fatalf("device logins = %d, want the Go login", len(*loginPaths))
-	}
-	if got := selector.selectLabels; len(got) == 0 || strings.Contains(got[0], "Which plan") {
-		t.Fatalf("select labels = %v, want no plan page before the login", got)
-	}
-	if opts.Provider != "opencode-go" || opts.Model != "glm-5.3" {
-		t.Fatalf("options = %+v", opts)
-	}
-	if opts.BaseURL != opencode.ProviderBaseURL("opencode-go") || opts.APIKey != "" {
-		t.Fatalf("options = %+v", opts)
-	}
-}
-
-// The Go subscription signs in through the device flow, saves the login where
-// every other surface reads it, and then offers the Go catalog.
-func TestConfigureOpenCodeGoSignsInAndOffersTheGoCatalog(t *testing.T) {
-	loginPaths := stubOpenCodeDeviceLogin(t)
-	stubOpenCodeModels(t, openCodeGoFixture(), nil)
-	home := t.TempDir()
-	selector := &fakeSelector{confirms: []bool{true}}
-	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: selector, Output: io.Discard, Home: home,
-	}, "opencode-go")
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if len(*loginPaths) != 1 || (*loginPaths)[0] != opencode.DefaultPath(home) {
-		t.Fatalf("login paths = %v, want the login file in home", *loginPaths)
-	}
-	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{
-		"glm-5.3", "kimi-k3", manualModelInput,
-	}) {
-		t.Fatalf("model options = %#v", got)
-	}
-	if opts.Provider != "opencode-go" || opts.Model != "glm-5.3" {
-		t.Fatalf("options = %+v", opts)
-	}
-	if opts.BaseURL != opencode.ProviderBaseURL("opencode-go") {
-		t.Fatalf("base_url = %q, want the canonical Go endpoint", opts.BaseURL)
-	}
-	for _, fact := range selector.reviewFacts[0] {
-		if fact.Label == "Endpoint" && fact.Value != opencode.ProviderBaseURL("opencode-go") {
-			t.Fatalf("review endpoint = %q", fact.Value)
-		}
-	}
-}
-
-// stubOpenCodeProbe replaces the OpenCode saved-login probe with a fixed
-// answer and reports how many times the page probed.
-func stubOpenCodeProbe(t *testing.T, check turn.SignInCheck) *int {
-	t.Helper()
-	calls := 0
-	previous := probeOpenCodeLogin
-	probeOpenCodeLogin = func(context.Context, string) turn.SignInCheck {
-		calls++
-		return check
-	}
-	t.Cleanup(func() { probeOpenCodeLogin = previous })
-	return &calls
-}
-
-// countedOpenCodeDeviceLogin replaces the device flow with a counter, so a
-// test can prove the flow never started.
-func countedOpenCodeDeviceLogin(t *testing.T) *int {
-	t.Helper()
-	calls := 0
-	previous := openCodeLogin
-	openCodeLogin = func(_ context.Context, path string, _ io.Writer, _ func(opencode.LoginInfo), _ func(opencode.LoginStage)) (opencode.Credentials, error) {
-		calls++
-		return opencode.Credentials{AccessToken: "go-token", RefreshToken: "go-refresh", Email: "dev@example.com"}, nil
-	}
-	t.Cleanup(func() { openCodeLogin = previous })
-	return &calls
-}
-
-// The Go subscription's saved login is reused the same way ChatGPT's is: the
-// device flow never runs, no confirmation panel, the picker opens on the
-// probe's Go catalog records.
-func TestConfigureOpenCodeGoReusesSavedSignIn(t *testing.T) {
-	loginCalls := countedOpenCodeDeviceLogin(t)
-	probeCalls := stubOpenCodeProbe(t, turn.SignInCheck{State: turn.SignInUsable, Records: openCodeGoFixture()})
-	selector := &fakeSelector{}
-	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	}, "opencode-go")
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if *loginCalls != 0 {
-		t.Fatalf("device logins = %d; a usable saved sign-in must not log in again", *loginCalls)
-	}
-	if *probeCalls != 1 {
-		t.Fatalf("probe calls = %d, want exactly one", *probeCalls)
-	}
-	if selector.confirmIdx != 0 {
-		t.Fatalf("%d confirmation panels appeared, want the picker to open directly", selector.confirmIdx)
-	}
-	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{
-		"glm-5.3", "kimi-k3", manualModelInput,
-	}) {
-		t.Fatalf("model options = %#v, want the probe's records in the picker", got)
-	}
-	if opts.Provider != "opencode-go" || opts.Model != "glm-5.3" {
-		t.Fatalf("options = %+v", opts)
-	}
-}
-
-// Unreachable keeps the OpenCode Go login too: the fetch panel owns the
-// retry, the device flow never starts, and declining aborts with the
-// actionable error.
-func TestConfigureOpenCodeGoUnreachableKeepsSavedLogin(t *testing.T) {
-	loginCalls := countedOpenCodeDeviceLogin(t)
-	stubOpenCodeProbe(t, turn.SignInCheck{
-		State: turn.SignInUnreachable,
-		Err:   errors.New("fetch OpenCode models: connection refused"),
-	})
-	stubOpenCodeModels(t, nil, errors.New("fetch OpenCode models: gateway 503"))
-	selector := &fakeSelector{confirms: []bool{false}, failUnexpectedSelect: true}
-	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	}, "opencode-go")
-	if err == nil || ok {
-		t.Fatalf("err=%v ok=%t, want the declined retry to abort", err, ok)
-	}
-	if *loginCalls != 0 {
-		t.Fatalf("device logins = %d, an unreachable listing must not log in", *loginCalls)
-	}
-	if !strings.Contains(err.Error(), "could not be fetched") {
-		t.Fatalf("err = %v, want the actionable fetch failure", err)
-	}
-	if selector.confirmIdx != 1 {
-		t.Fatalf("confirmations = %d, want only the retry panel", selector.confirmIdx)
-	}
-	if opts.Provider != "" {
-		t.Fatalf("options = %+v, want none written", opts)
-	}
-}
-
-// Each stage the engine names has its own words in the TUI, so the live line
-// says what changed. A stage added later without its own line falls to the
-// generic wording — a fixed table like this cannot catch that, it only pins
-// the three stages the engine has today as distinct and non-empty.
-func TestConnectStageTextNamesEveryStage(t *testing.T) {
-	stages := []opencode.LoginStage{
-		opencode.LoginStageRequestingCode,
-		opencode.LoginStageWaitingAuthorization,
-		opencode.LoginStageFinishing,
-	}
-	seen := make(map[string]bool, len(stages))
-	for _, stage := range stages {
-		text := connectStageText(stage)
-		if text == "" {
-			t.Fatalf("connectStageText(%q) is empty", stage)
-		}
-		if seen[text] {
-			t.Fatalf("connectStageText(%q) = %q, already the wording of another stage", stage, text)
-		}
-		seen[text] = true
-	}
-}
-
-// connectProgressSelector is a fakeSelector whose ConnectProgress delegates to
-// a real rawSelector wired to a renderer, so a test can prove both that the
-// line is installed through the production path and that it is taken off the
-// screen at the end.
-type connectProgressSelector struct {
-	*fakeSelector
-	raw *rawSelector
-
-	installs int
-	stage    func() string
-	ended    bool
-}
-
-func (s *connectProgressSelector) ConnectProgress(stage func() string) func() {
-	s.installs++
-	s.stage = stage
-	rawEnd := s.raw.ConnectProgress(stage)
-	return func() {
-		s.ended = true
-		rawEnd()
-	}
-}
-
-// The sign-in installs one live line whose text follows the stage, and the
-// line is gone once the login is over — including its renderer-side source, so
-// no orphaned row keeps counting after the flow returns.
-func TestSignInOpenCodeShowsALiveProgressLine(t *testing.T) {
-	stubOpenCodeModels(t, openCodeGoFixture(), nil)
-	renderer := NewRenderer(nil, nil)
-	sel := &connectProgressSelector{
-		fakeSelector: &fakeSelector{confirms: []bool{true}},
-		raw:          newRawSelector(nil, renderer),
-	}
-
-	// The stub walks the engine's stages and samples the live stage closure
-	// once per stage, the way the renderer's paint would.
-	var stageTexts []string
-	previous := openCodeLogin
-	openCodeLogin = func(_ context.Context, path string, _ io.Writer, _ func(opencode.LoginInfo), onStage func(opencode.LoginStage)) (opencode.Credentials, error) {
-		for _, stage := range []opencode.LoginStage{
-			opencode.LoginStageRequestingCode,
-			opencode.LoginStageWaitingAuthorization,
-			opencode.LoginStageFinishing,
-		} {
-			onStage(stage)
-			stageTexts = append(stageTexts, sel.stage())
-		}
-		return opencode.Credentials{AccessToken: "go-token", RefreshToken: "go-refresh"}, nil
-	}
-	t.Cleanup(func() { openCodeLogin = previous })
-
-	_, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: sel, Output: io.Discard, Home: t.TempDir(),
-	}, "opencode-go")
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if sel.installs != 1 {
-		t.Fatalf("ConnectProgress installs = %d, want exactly one line for the whole login", sel.installs)
-	}
-	if len(stageTexts) != 3 {
-		t.Fatalf("stage samples = %v, want one per stage", stageTexts)
-	}
-	for i := 1; i < len(stageTexts); i++ {
-		if stageTexts[i] == stageTexts[i-1] {
-			t.Fatalf("stage samples = %v, want the wording to change with each stage", stageTexts)
-		}
-	}
-	if !sel.ended {
-		t.Fatal("the live line was never ended after the login")
-	}
-	if renderer.TransientStatusSourceLive(transientSourceConnect) {
-		t.Fatal("the connect source outlived its line: the row would keep counting on screen")
-	}
-}
-
-// A Go model that publishes thinking levels asks for one on its own scale — the
-// levels this build can send for that model, not a global list — and the flow
-// then saves. The save is the point: the wizard used to walk the whole OpenCode
-// login and be rejected at the last step because the provider carries no
-// api_key.
-func TestConfigureOpenCodeGoOffersPerModelEffortLevels(t *testing.T) {
-	stubOpenCodeDeviceLogin(t)
-	stubOpenCodeModels(t, openCodeGoProjection(t, "glm-5.3", "minimax-m3"), nil)
-	home := t.TempDir()
-	selector := &fakeSelector{
-		selects:  []string{"glm-5.3", "high"},
-		confirms: []bool{true},
-	}
-	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: selector, Output: io.Discard, Home: home,
-	}, "opencode-go")
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if len(selector.selectOptions) < 2 {
-		t.Fatalf("select pages = %#v, want a model page and an effort page", selector.selectOptions)
-	}
-	if got := selector.selectOptions[1]; !reflect.DeepEqual(got, []string{"low", "high", "max", reasoningEffortUnset}) {
-		t.Fatalf("effort options = %#v, want glm-5.3's own levels", got)
-	}
-	if got := selector.selectDefaults[1]; got != reasoningEffortUnset {
-		t.Fatalf("effort default = %q, want the provider default", got)
-	}
-	if opts.Model != "glm-5.3" || opts.ParamsJSON != `{"reasoning":{"effort":"high"}}` {
-		t.Fatalf("options = %+v", opts)
-	}
-	// The review shows the chosen level rather than "Provider default".
-	effortShown := false
-	for _, fact := range selector.reviewFacts[0] {
-		if fact.Label == "Reasoning" {
-			effortShown = fact.Value == "high"
-		}
-	}
-	if !effortShown {
-		t.Fatalf("review facts = %+v, want Reasoning high", selector.reviewFacts[0])
-	}
-
-	// And the answers save: the OpenCode provider writes no api_key, so the
-	// gate must not demand one.
-	cfgPath := filepath.Join(home, "forebrain.yaml")
-	rt := process.Context{Home: home, ConfigPath: cfgPath, Config: appcfg.Root{}}
-	if _, err := process.Execute(rt, opts); err != nil {
-		t.Fatalf("save the OpenCode Go setup: %v", err)
-	}
-	saved := composedConfigForTest(t, home)
-	validation := appcfg.ValidateAgentLLMConfigured(&saved, "main")
-	if validation.Provider != "opencode-go" || validation.Model != "glm-5.3" {
-		t.Fatalf("saved provider/model = %q/%q", validation.Provider, validation.Model)
-	}
-	if validation.BaseURL != opencode.ProviderBaseURL("opencode-go") {
-		t.Fatalf("saved base_url = %q", validation.BaseURL)
-	}
-	if validation.APIKey != "" {
-		t.Fatalf("saved api_key = %q, want none for a login-backed provider", validation.APIKey)
-	}
-	if !validation.Complete() {
-		t.Fatalf("saved configuration is incomplete: %+v", validation.MissingFields())
-	}
-}
-
-// A model that reasons with no discrete level (a toggle or a token budget) gets
-// no effort page: there is nothing to pick.
-func TestConfigureOpenCodeGoSkipsEffortForToggleOnlyModel(t *testing.T) {
-	stubOpenCodeDeviceLogin(t)
-	stubOpenCodeModels(t, openCodeGoProjection(t, "minimax-m3"), nil)
-	selector := &fakeSelector{selects: []string{"minimax-m3"}, confirms: []bool{true}}
-	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	}, "opencode-go")
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if len(selector.selectOptions) != 1 {
-		t.Fatalf("select pages = %#v, want only the model page", selector.selectOptions)
-	}
-	if opts.Model != "minimax-m3" || opts.ParamsJSON != "" {
-		t.Fatalf("options = %+v, want no effort written", opts)
-	}
-}
-
-// A catalog fetch that fails after a successful login offers a retry that reuses
-// the saved login; declining aborts with an actionable error and writes no
-// provider configuration.
-func TestConfigureOpenCodeGoFetchFailureAborts(t *testing.T) {
-	loginPaths := stubOpenCodeDeviceLogin(t)
-	stubOpenCodeModels(t, nil, errors.New("fetch OpenCode models: http 401: token expired"))
-	selector := &fakeSelector{confirms: []bool{true, false}, failUnexpectedSelect: true}
-	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	}, "opencode-go")
-	if err == nil || ok {
-		t.Fatalf("err=%v ok=%t, want the flow to abort", err, ok)
-	}
-	if !strings.Contains(err.Error(), "could not be fetched") || !strings.Contains(err.Error(), "401") {
-		t.Fatalf("err = %v, want an actionable fetch failure", err)
-	}
-	if opts.Provider != "" {
-		t.Fatalf("options = %+v, want none written", opts)
-	}
-	if len(*loginPaths) != 1 {
-		t.Fatalf("device logins = %d, want exactly the one that succeeded", len(*loginPaths))
-	}
-}
-
-// Accepting the retry refetches on the saved login — no second device flow —
-// and the flow then continues with the fresh listing.
-func TestConfigureOpenCodeGoFetchRetrySkipsRelogin(t *testing.T) {
-	loginPaths := stubOpenCodeDeviceLogin(t)
-	fetchCalls := 0
-	previous := discoverOpenCodeModels
-	discoverOpenCodeModels = func(_ context.Context, _ string) ([]turn.ModelRecord, error) {
-		fetchCalls++
-		if fetchCalls == 1 {
-			return nil, errors.New("fetch OpenCode models: http 429: slow down")
-		}
-		return openCodeGoFixture(), nil
-	}
-	t.Cleanup(func() { discoverOpenCodeModels = previous })
-	selector := &fakeSelector{confirms: []bool{true, true}}
-	opts, ok, err := runOpenCodeSetup(t, PromptConfig{
-		Selector: selector, Output: io.Discard, Home: t.TempDir(),
-	}, "opencode-go")
-	if err != nil || !ok {
-		t.Fatalf("configure err=%v ok=%t", err, ok)
-	}
-	if len(*loginPaths) != 1 {
-		t.Fatalf("device logins = %d, want the retry to reuse the saved login", len(*loginPaths))
-	}
-	if fetchCalls != 2 {
-		t.Fatalf("fetch calls = %d, want exactly one retry", fetchCalls)
-	}
-	if opts.Model != "glm-5.3" {
-		t.Fatalf("model = %q", opts.Model)
 	}
 }
 
@@ -1251,7 +1212,7 @@ func TestConfigureEffortPageUsesTheModelsLevels(t *testing.T) {
 	} {
 		t.Run(tc.provider+"/"+tc.model, func(t *testing.T) {
 			selector := &fakeSelector{selects: tc.selects}
-			got, ok, err := promptReasoningEffort(PromptConfig{Selector: selector}, providerChoice{Provider: tc.provider}, tc.model, nil, "")
+			got, ok, err := promptReasoningEffort(PromptConfig{Selector: selector}, providerChoice{Provider: tc.provider}, tc.model, "")
 			if err != nil || !ok {
 				t.Fatalf("promptReasoningEffort ok=%t err=%v", ok, err)
 			}
@@ -1277,5 +1238,285 @@ func TestConfigureEffortPageUsesTheModelsLevels(t *testing.T) {
 				t.Fatalf("params = %q, want %q", got, tc.wantJSON)
 			}
 		})
+	}
+}
+
+// providerGroupsBeforeTheRegistry is the API-key half of the list this screen
+// offered while it kept its own copy of every provider, endpoint and label. It
+// is the expectation for the generated list: generating must change nothing a
+// person already sees, because the list is where they recognize their provider.
+// Only the four providers owner added on 2026-11-07 may appear beyond it. The two
+// sign-ins are not here: they are pkg/subscription's, and the first page lists
+// them under their own group.
+var providerGroupsBeforeTheRegistry = []providerGroup{
+	{
+		Label: "OpenAI",
+		Hint:  "API key",
+		Options: []providerChoice{{
+			Group:           "OpenAI",
+			Label:           "OpenAI API key",
+			Hint:            "GPT models via OpenAI API",
+			Provider:        "openai",
+			DefaultBaseURL:  "https://api.openai.com/v1",
+			SupportsAPIPath: true,
+			APIKeyLabel:     "OpenAI API key",
+		}},
+	},
+	{
+		Label: "Anthropic",
+		Hint:  "API key",
+		Options: []providerChoice{{
+			Group:           "Anthropic",
+			Label:           "Anthropic API key",
+			Hint:            "Claude models via Anthropic API",
+			Provider:        "anthropic",
+			DefaultBaseURL:  "https://api.anthropic.com",
+			SupportsAPIPath: false,
+			APIKeyLabel:     "Anthropic API key",
+		}},
+	},
+	{
+		Label: "Qwen Cloud",
+		Hint:  "API key",
+		Options: []providerChoice{
+			{
+				Group:           "Qwen Cloud",
+				Label:           "Standard · China",
+				Hint:            "dashscope.aliyuncs.com",
+				Provider:        "alibaba",
+				DefaultBaseURL:  "https://dashscope.aliyuncs.com/compatible-mode/v1",
+				SupportsAPIPath: true,
+				APIKeyLabel:     "Qwen API key",
+			},
+			{
+				Group:           "Qwen Cloud",
+				Label:           "Standard · Global",
+				Hint:            "dashscope-intl.aliyuncs.com",
+				Provider:        "alibaba",
+				DefaultBaseURL:  "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+				SupportsAPIPath: true,
+				APIKeyLabel:     "Qwen API key",
+			},
+			{
+				Group:           "Qwen Cloud",
+				Label:           "Coding Plan · China",
+				Hint:            "coding.dashscope.aliyuncs.com",
+				Provider:        "alibaba",
+				DefaultBaseURL:  "https://coding.dashscope.aliyuncs.com/v1",
+				SupportsAPIPath: true,
+				APIKeyLabel:     "Qwen API key",
+			},
+			{
+				Group:           "Qwen Cloud",
+				Label:           "Coding Plan · Global",
+				Hint:            "coding-intl.dashscope.aliyuncs.com",
+				Provider:        "alibaba",
+				DefaultBaseURL:  "https://coding-intl.dashscope.aliyuncs.com/v1",
+				SupportsAPIPath: true,
+				APIKeyLabel:     "Qwen API key",
+			},
+		},
+	},
+	{
+		Label: "Google",
+		Hint:  "Gemini API key",
+		Options: []providerChoice{{
+			Group:           "Google",
+			Label:           "Google Gemini API key",
+			Hint:            "Gemini via OpenAI-compatible endpoint",
+			Provider:        "google",
+			DefaultBaseURL:  "https://generativelanguage.googleapis.com/v1beta/openai",
+			SupportsAPIPath: true,
+			APIKeyLabel:     "Google Gemini API key",
+		}},
+	},
+	{
+		Label: "DeepSeek",
+		Hint:  "API key",
+		Options: []providerChoice{{
+			Group:           "DeepSeek",
+			Label:           "DeepSeek API key",
+			Hint:            "DeepSeek chat/reasoner models",
+			Provider:        "deepseek",
+			DefaultBaseURL:  "https://api.deepseek.com",
+			SupportsAPIPath: true,
+			APIKeyLabel:     "DeepSeek API key",
+		}},
+	},
+	{
+		Label: "xAI",
+		Hint:  "API key",
+		Options: []providerChoice{{
+			Group:           "xAI",
+			Label:           "xAI API key",
+			Hint:            "Grok via OpenAI-compatible endpoint",
+			Provider:        "xai",
+			DefaultBaseURL:  "https://api.x.ai/v1",
+			SupportsAPIPath: true,
+			APIKeyLabel:     "xAI API key",
+		}},
+	},
+	{
+		Label: "Mistral AI",
+		Hint:  "API key",
+		Options: []providerChoice{{
+			Group:           "Mistral AI",
+			Label:           "Mistral API key",
+			Hint:            "Mistral via OpenAI-compatible endpoint",
+			Provider:        "mistral",
+			DefaultBaseURL:  "https://api.mistral.ai/v1",
+			SupportsAPIPath: true,
+			APIKeyLabel:     "Mistral API key",
+		}},
+	},
+	{
+		Label: "Moonshot AI",
+		Hint:  "Kimi API key",
+		Options: []providerChoice{{
+			Group:           "Moonshot AI",
+			Label:           "Kimi API key",
+			Hint:            "Moonshot/Kimi OpenAI-compatible endpoint",
+			Provider:        "moonshotai",
+			DefaultBaseURL:  "https://api.moonshot.ai/v1",
+			SupportsAPIPath: true,
+			APIKeyLabel:     "Moonshot API key",
+		}},
+	},
+	{
+		Label: "Z.AI",
+		Hint:  "API key",
+		Options: []providerChoice{{
+			Group:           "Z.AI",
+			Label:           "Z.AI API key",
+			Hint:            "GLM via OpenAI-compatible endpoint",
+			Provider:        "zhipuai",
+			DefaultBaseURL:  "https://api.z.ai/api/paas/v4",
+			SupportsAPIPath: true,
+			APIKeyLabel:     "Z.AI API key",
+		}},
+	},
+	{
+		Label: "MiniMax",
+		Hint:  "API key",
+		Options: []providerChoice{{
+			Group:           "MiniMax",
+			Label:           "MiniMax API key (Global)",
+			Hint:            "Endpoint: api.minimax.io",
+			Provider:        "minimax",
+			DefaultBaseURL:  "https://api.minimax.io/anthropic",
+			SupportsAPIPath: false,
+			APIKeyLabel:     "MiniMax API key",
+		}, {
+			Group:           "MiniMax",
+			Label:           "MiniMax API key (CN)",
+			Hint:            "Endpoint: api.minimaxi.com",
+			Provider:        "minimax",
+			DefaultBaseURL:  "https://api.minimaxi.com/anthropic",
+			SupportsAPIPath: false,
+			APIKeyLabel:     "MiniMax API key",
+		}},
+	},
+}
+
+// TestProviderGroupsGeneratedFromTheRegistryKeepTheOldList is the regression
+// guard for the generated provider list: every group and choice a person sees
+// today must come out identical, field by field. The only additions allowed are
+// the providers owner added on 2026-11-07.
+func TestProviderGroupsGeneratedFromTheRegistryKeepTheOldList(t *testing.T) {
+	old := providerGroupsBeforeTheRegistry
+	if len(providerGroups) < len(old) {
+		t.Fatalf("generated %d groups, the old list had %d", len(providerGroups), len(old))
+	}
+	for i, want := range old {
+		got := providerGroups[i]
+		if got.Label != want.Label || got.Hint != want.Hint {
+			t.Fatalf("group %d header = %q/%q, want %q/%q", i, got.Label, got.Hint, want.Label, want.Hint)
+		}
+		if len(got.Options) < len(want.Options) {
+			t.Fatalf("group %d offers %d choices, the old list had %d", i, len(got.Options), len(want.Options))
+		}
+		for j, wantChoice := range want.Options {
+			if !reflect.DeepEqual(got.Options[j], wantChoice) {
+				t.Fatalf("group %d choice %d differs from the list users know:\n got: %+v\nwant: %+v", i, j, got.Options[j], wantChoice)
+			}
+		}
+		// A provider may gain endpoints (Z.AI's Coding Plan hosts, 2026-11-07);
+		// nothing else may grow.
+		for _, extra := range got.Options[len(want.Options):] {
+			if extra.Provider != "zhipuai" {
+				t.Fatalf("group %d gained an endpoint nobody asked for: %+v", i, extra)
+			}
+		}
+	}
+	// The four new providers, in the registry's order.
+	wantNew := []string{"meituan", "tencent", "volcengine", "byteplus"}
+	generated := providerGroups[len(old):]
+	if len(generated) != len(wantNew) {
+		t.Fatalf("generated %d new groups %+v, want %v", len(generated), generated, wantNew)
+	}
+	for i, provider := range wantNew {
+		group := generated[i]
+		if len(group.Options) == 0 || group.Options[0].Provider != provider {
+			t.Fatalf("new group %d = %+v, want provider %q", i, group, provider)
+		}
+		for _, option := range group.Options {
+			if option.Provider != provider || option.DefaultBaseURL == "" || option.APIKeyLabel == "" {
+				t.Fatalf("%s choice is incomplete: %+v", provider, option)
+			}
+			if option.Subscription != "" || option.Custom {
+				t.Fatalf("%s is a key provider, not a sign-in: %+v", provider, option)
+			}
+		}
+	}
+	// Z.AI's Coding Plan endpoints are offered (owner 2026-11-07), with the
+	// protocol each host speaks.
+	var zhipuaiChoices []providerChoice
+	for _, group := range providerGroups {
+		for _, option := range group.Options {
+			if option.Provider == "zhipuai" {
+				zhipuaiChoices = append(zhipuaiChoices, option)
+			}
+		}
+	}
+	if len(zhipuaiChoices) != 6 {
+		t.Fatalf("zhipuai choices = %d, want 6", len(zhipuaiChoices))
+	}
+	anthropicProtocol := 0
+	for _, option := range zhipuaiChoices {
+		if !option.SupportsAPIPath {
+			anthropicProtocol++
+		}
+	}
+	if anthropicProtocol != 2 {
+		t.Fatalf("zhipuai Messages endpoints = %d, want 2", anthropicProtocol)
+	}
+}
+
+// TestRegistryCarriesTheClientConstants pins the two endpoint values pkg/config
+// had to copy (it may not import the provider packages): the sign-in endpoints
+// must stay the ones the clients build against.
+func TestRegistryCarriesTheClientConstants(t *testing.T) {
+	chatgpt, ok := appcfg.BuiltinProviderByID("chatgpt")
+	if !ok || chatgpt.Endpoints[0].BaseURL != openai.CodexBaseURL {
+		t.Fatalf("chatgpt endpoint = %+v, want %q", chatgpt.Endpoints, openai.CodexBaseURL)
+	}
+	openCode, ok := appcfg.BuiltinProviderByID("opencode-go")
+	if !ok || openCode.Endpoints[0].BaseURL != opencode.ProviderBaseURL("opencode-go") {
+		t.Fatalf("opencode-go endpoint = %+v, want %q", openCode.Endpoints, opencode.ProviderBaseURL("opencode-go"))
+	}
+	// The first page's sign-in rows are generated from those same registry
+	// endpoints: the wording under each one is the endpoint's own.
+	chatGPTRow := subscriptionChoice(chatGPTLike())
+	if chatGPTRow.Provider != "chatgpt" || chatGPTRow.Hint != "Use Codex included with your ChatGPT plan" {
+		t.Fatalf("generated chatgpt row = %+v", chatGPTRow)
+	}
+	openCodeRow := subscriptionChoice(openCodeLike())
+	if openCodeRow.Provider != "opencode-go" || openCodeRow.Hint != "Device-code login; use your Go/Go Plus quota" {
+		t.Fatalf("generated opencode-go row = %+v", openCodeRow)
+	}
+	// A sign-in's endpoint comes from the login, never from the row, so the row
+	// itself names no base url (the offers page shows the real one per model).
+	if chatGPTRow.DefaultBaseURL != "" || openCodeRow.DefaultBaseURL != "" {
+		t.Fatalf("sign-in rows carry %q/%q, want no base url of their own", chatGPTRow.DefaultBaseURL, openCodeRow.DefaultBaseURL)
 	}
 }

@@ -15,7 +15,6 @@ const PAGES = [
   '/skills',
   '/workshop',
   '/subagents',
-  '/providers',
   '/tools',
   '/permissions',
   '/memories',

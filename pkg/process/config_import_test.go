@@ -48,6 +48,17 @@ func importOpenForTest(t *testing.T, home string) *Environment {
 	return env
 }
 
+// importedModelsForTest reads the model table of a home an Open has migrated
+// (plan 262).
+func importedModelsForTest(t *testing.T, env *Environment) []state.LLMModel {
+	t.Helper()
+	rows, err := (&state.LLMModelStore{DB: env.SQL}).List(context.Background())
+	if err != nil {
+		t.Fatalf("list the model table: %v", err)
+	}
+	return rows
+}
+
 // resetProcessWideInstalls clears the process-wide installs Open makes — the
 // section validator and the database-backed credential stores — so a later
 // test in this binary works against its own home rather than the one this
@@ -154,10 +165,15 @@ func TestImportLegacyConfigRewritesYAMLAndSeedsDB(t *testing.T) {
 		t.Fatalf("backup does not hold the original file verbatim:\n%s", backupBytes)
 	}
 
-	// The composed runtime still resolves the agents the import moved: the
-	// provider chain Open loaded carries the imported key.
-	if got := env.RawConfig.Agents.Definitions["main"].LLMProviders[0].APIKey; got != "sk-import" {
-		t.Fatalf("composed api_key = %q, want the imported plaintext value", got)
+	// The composed runtime still resolves the agent the import moved: plan 262
+	// stored the imported key in the model table and gave the definition that
+	// row as its default.
+	models := importedModelsForTest(t, env)
+	if len(models) != 1 || models[0].APIKey != "sk-import" {
+		t.Fatalf("model rows = %+v, want the imported plaintext value", models)
+	}
+	if got := env.RawConfig.Agents.Definitions["main"].DefaultModel; got != models[0].ID {
+		t.Fatalf("composed default_model = %q, want the imported row %q", got, models[0].ID)
 	}
 
 	// Second startup: fb_config is no longer empty, so nothing imports again
@@ -195,13 +211,14 @@ func listBackupsForTest(t *testing.T, home string) []string {
 	return matches
 }
 
-// TestImportLegacyConfigResolvesEnvReferencesToPlaintext pins the owner's
-// plaintext-credentials ruling on the import path: a ${NAME} reference the
-// home's .env resolves becomes the plaintext value in fb_config; one it
-// cannot resolve stays a reference for compose-time expansion.
-func TestImportLegacyConfigResolvesEnvReferencesToPlaintext(t *testing.T) {
+// TestImportLegacyConfigKeepsEnvReferences pins what the import stores now
+// that the home's .env is retired (plan 268): a ${NAME} reference reaches
+// fb_config as the reference it is, and the model table is the one place the
+// .env still supplies a value to (plan 262's reader runs before the .env is
+// renamed aside).
+func TestImportLegacyConfigKeepsEnvReferences(t *testing.T) {
 	home := importHomeForTest(t)
-	if err := os.WriteFile(filepath.Join(homepkg.DefaultEnvPath(home)), []byte(
+	if err := os.WriteFile(filepath.Join(homepkg.LegacyEnvPath(home)), []byte(
 		"FOREBRAIN_IMPORT_TEST_KEY=sk-legacy-plain\nFOREBRAIN_IMPORT_MCP_HDR=hdr-plain\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -233,18 +250,38 @@ agents:
 	env := importOpenForTest(t, home)
 	defer env.Close()
 
+	// A header's reference is stored as the reference: compose-time expansion
+	// resolves it from the operator's variables and the process environment,
+	// and nothing bakes one machine's value into the database on the way in.
 	agents := configRowsForTest(t, env.SQL)["agents"]
-	if !strings.Contains(agents, "sk-legacy-plain") {
-		t.Fatalf("provider key was not resolved to plaintext in fb_config:\n%s", agents)
+	if !strings.Contains(agents, "${FOREBRAIN_IMPORT_MCP_HDR}") {
+		t.Fatalf("mcp header reference did not survive in fb_config:\n%s", agents)
 	}
-	if !strings.Contains(agents, "hdr-plain") {
-		t.Fatalf("mcp header secret was not resolved to plaintext in fb_config:\n%s", agents)
+	if strings.Contains(agents, "hdr-plain") {
+		t.Fatalf("the import baked one machine's value into fb_config:\n%s", agents)
 	}
-	if strings.Contains(agents, "${FOREBRAIN_IMPORT_TEST_KEY}") {
-		t.Fatalf("resolvable reference survived in fb_config:\n%s", agents)
+	// The LLM half moved with the models themselves (plan 262): the key the
+	// .env resolves is plaintext in the row, and it is nowhere in fb_config.
+	models := importedModelsForTest(t, env)
+	byModel := map[string]state.LLMModel{}
+	for _, row := range models {
+		byModel[row.Model] = row
 	}
-	if !strings.Contains(agents, "${FOREBRAIN_IMPORT_NOWHERE}") {
-		t.Fatalf("unresolvable reference must stay a reference:\n%s", agents)
+	if got := byModel["gpt-import"].APIKey; got != "sk-legacy-plain" {
+		t.Fatalf("row key = %q, want the .env's plaintext value", got)
+	}
+	if strings.Contains(agents, "sk-legacy-plain") {
+		t.Fatalf("the key is still duplicated into fb_config:\n%s", agents)
+	}
+	// A reference nothing resolves keeps its literal text: the start must not
+	// fail over it (that test reaching here is the proof), and the models page
+	// shows exactly what is missing (plan 268 revision).
+	if got := byModel["gpt-fallback"].APIKey; got != "${FOREBRAIN_IMPORT_NOWHERE}" {
+		t.Fatalf("unresolvable reference produced key %q, want the reference as written", got)
+	}
+	// The .env itself is out of reach after this start (plan 268).
+	if _, err := os.Stat(filepath.Join(home, ".env")); !os.IsNotExist(err) {
+		t.Fatalf("the home still has a .env: err=%v", err)
 	}
 }
 
@@ -505,8 +542,8 @@ func TestImportLegacyConfigSkipsWhenDBHoldsSections(t *testing.T) {
 	if env.RawConfig.ApprovalPreset != appcfg.ApprovalPresetFullAccess {
 		t.Fatalf("composed approval_preset = %q, want the database's full_access", env.RawConfig.ApprovalPreset)
 	}
-	if got := env.RawConfig.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-seeded" {
-		t.Fatalf("composed provider model = %q, want the database's gpt-seeded", got)
+	if models := importedModelsForTest(t, env); len(models) != 1 || models[0].Model != "gpt-seeded" {
+		t.Fatalf("composed model rows = %+v, want the database's gpt-seeded", models)
 	}
 }
 

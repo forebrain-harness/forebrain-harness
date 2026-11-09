@@ -7,14 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
-	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
@@ -100,136 +100,219 @@ func awaitTerminal(t *testing.T, do gatewayDo, provider, id string) authLoginSta
 	return body
 }
 
-// openCodeLoginStub stands in for the device flow. It reports the device code
-// the way the real flow does, then waits for the test to release it or for the
-// flow's context to end, so a test can observe the session while it is pending.
-type openCodeLoginStub struct {
+// The two subscription ids the login endpoints are driven with: pkg/subscription's
+// own ids, so the base URL a completed login answers with is the registry's.
+const (
+	authLoginChatGPT  = "chatgpt"
+	authLoginOpenCode = "opencode-go"
+)
+
+// loginSubscription is one stand-in sign-in. The real flows are covered by
+// pkg/subscription's own tests; what these tests drive is the gateway's half —
+// start, poll, cancel, hand a callback over — so the sign-in itself never reaches
+// a vendor here.
+type loginSubscription struct {
+	id    string
+	label string
+	flows []string
+	// state is the probe's answer: what this machine's login can do.
+	state turn.SignInCheck
+	// url and code are what the page reads while the sign-in runs.
+	url  string
+	code string
+	// answer decides a pasted callback: nil accepts it, an error refuses it.
+	answer func(pasted string) error
+	// offers is what a finished sign-in unlocked, and provisionErr the answer a
+	// provision attempt gets instead of writing them. refreshErr is what
+	// RefreshKey answers; nil reports a key fetched again.
+	offers       []subscription.Offer
+	provisionErr error
+	refreshErr   error
+	// handle is the sign-in this subscription hands the gateway. A test sets url,
+	// code and answer before starting it.
+	handle *loginHandle
+
+	mu sync.Mutex
+	// starts counts the flows begun, refreshed the rows RefreshKey was asked
+	// about.
+	starts    int
+	refreshed []string
+}
+
+// newLoginSubscription builds one stand-in at its defaults: a sign-in with no
+// login saved (Missing), whose flow the test ends itself.
+func newLoginSubscription(id string, flows ...string) *loginSubscription {
+	return &loginSubscription{
+		id:    id,
+		flows: flows,
+		state: turn.SignInCheck{State: turn.SignInMissing},
+		// Both real subscriptions are sign-in-backed, so their rows carry no key
+		// to fetch again until a plan with a key pool (plan 281) says otherwise.
+		refreshErr: subscription.ErrNoKeyToRefresh,
+		handle:     &loginHandle{release: make(chan struct{}), stopped: make(chan struct{})},
+	}
+}
+
+func (sub *loginSubscription) ID() string { return sub.id }
+
+func (sub *loginSubscription) Label() (en, zh string) { return sub.label, sub.label }
+
+func (sub *loginSubscription) Flows() []string { return sub.flows }
+
+func (sub *loginSubscription) Probe(context.Context, subscription.Env) turn.SignInCheck {
+	return sub.state
+}
+
+func (sub *loginSubscription) Start(context.Context, subscription.Env, string) (subscription.Login, error) {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	sub.starts++
+	sub.handle.url, sub.handle.code, sub.handle.answer = sub.url, sub.code, sub.answer
+	return sub.handle, nil
+}
+
+// startCount is how many flows this stand-in began.
+func (sub *loginSubscription) startCount() int {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	return sub.starts
+}
+
+func (sub *loginSubscription) Offers(context.Context, subscription.Env) ([]subscription.Offer, error) {
+	return sub.offers, nil
+}
+
+// Provision writes the chosen offers the way a real subscription does — one row
+// per offer, under this sign-in's source — so the default-model rule and the row
+// shape are exercised rather than mocked.
+func (sub *loginSubscription) Provision(ctx context.Context, env subscription.Env,
+	offers []subscription.Offer, _ subscription.ProvisionOptions) ([]string, error) {
+	if sub.provisionErr != nil {
+		return nil, sub.provisionErr
+	}
+	ids := make([]string, 0, len(offers))
+	for _, offer := range offers {
+		empty := ""
+		id, err := process.UpsertLLMModel(ctx, env.DB, process.LLMModelInput{
+			Provider:   offer.Provider,
+			Model:      offer.Model,
+			BaseURL:    offer.BaseURL,
+			APIPath:    offer.APIPath,
+			APIKey:     &empty,
+			Source:     sub.id,
+			SourcePlan: offer.Plan,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (sub *loginSubscription) RefreshKey(_ context.Context, _ subscription.Env, modelID string) error {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	sub.refreshed = append(sub.refreshed, modelID)
+	return sub.refreshErr
+}
+
+// loginHandle is one running stand-in sign-in: what the page polls, the address
+// it pastes back, and the two ways a test ends it.
+type loginHandle struct {
+	url    string
+	code   string
+	answer func(pasted string) error
+
 	release chan struct{}
 	stopped chan struct{}
-	// finished is closed when the stand-in returns. Cleanup waits for it before
-	// putting the real flow back: a login the test left running would otherwise
-	// still be inside the function while the package variable is rewritten, and
-	// that read and write are a data race.
-	finished chan struct{}
-	once     sync.Once
+	once    sync.Once
 
-	mu       sync.Mutex
-	path     string
-	browser  func(string) error
-	noopOK   bool
-	reported opencode.LoginInfo
+	mu     sync.Mutex
+	pasted string
 }
 
-// releaseOnce ends the stand-in. Safe from the test and from cleanup.
-func (s *openCodeLoginStub) releaseOnce() { s.once.Do(func() { close(s.release) }) }
+// releaseOnce ends the sign-in as completed. Safe from the test and from Submit.
+func (h *loginHandle) releaseOnce() { h.once.Do(func() { close(h.release) }) }
 
-func newOpenCodeLoginStub(t *testing.T) *openCodeLoginStub {
-	t.Helper()
-	stub := &openCodeLoginStub{release: make(chan struct{}), stopped: make(chan struct{}), finished: make(chan struct{})}
-	info := opencode.LoginInfo{
-		VerificationURL: "https://opencode.ai/console/device?user_code=ABCD-EFGH",
-		UserCode:        "ABCD-EFGH",
+func (h *loginHandle) AuthorizeURL() string { return h.url }
+
+func (h *loginHandle) UserCode() string { return h.code }
+
+// Submit hands over the address a user pasted: the test's verdict decides
+// whether it was this sign-in's, and an accepted one ends the sign-in the way a
+// real callback would.
+func (h *loginHandle) Submit(_ context.Context, pasted string) error {
+	h.mu.Lock()
+	h.pasted = pasted
+	answer := h.answer
+	h.mu.Unlock()
+	if answer != nil {
+		if err := answer(pasted); err != nil {
+			return err
+		}
 	}
-	previous := openCodeLoginRun
-	openCodeLoginRun = func(ctx context.Context, path string, out io.Writer,
-		openBrowser func(url string) error, onStart func(opencode.LoginInfo), onStage func(opencode.LoginStage)) (opencode.Credentials, error) {
-		defer close(stub.finished)
-		stub.mu.Lock()
-		stub.path = path
-		stub.browser = openBrowser
-		stub.reported = info
-		// The flow must not be handed nil: nil means "open the system browser",
-		// which a gateway on a headless host must never do. A no-op that answers
-		// nil proves the endpoint passed one.
-		stub.noopOK = openBrowser != nil && openBrowser(info.VerificationURL) == nil
-		stub.mu.Unlock()
-		if onStart != nil {
-			onStart(info)
-		}
-		select {
-		case <-stub.release:
-			return opencode.Credentials{AccessToken: "pc-access", RefreshToken: "pc-refresh"}, nil
-		case <-ctx.Done():
-			close(stub.stopped)
-			return opencode.Credentials{}, ctx.Err()
-		}
+	h.releaseOnce()
+	return nil
+}
+
+// Wait ends when the test releases the sign-in, or with the gateway's own
+// context — its timeout, or a page that canceled.
+func (h *loginHandle) Wait(ctx context.Context) error {
+	select {
+	case <-h.release:
+		return nil
+	case <-ctx.Done():
+		close(h.stopped)
+		return ctx.Err()
+	}
+}
+
+func (h *loginHandle) Cancel() { h.releaseOnce() }
+
+// loginStubs installs one test's stand-in sign-ins into the registry the login
+// endpoints read: the ChatGPT-style flow (a pasted callback) and the
+// OpenCode-style one (a device code). The real registry goes back when the test
+// ends, and both stand-ins end so no flow outlives it.
+func loginStubs(t *testing.T) (chatGPT, openCode *loginSubscription) {
+	t.Helper()
+	chatGPT = newLoginSubscription(authLoginChatGPT, subscription.FlowBrowserCallback, subscription.FlowPasteCallback)
+	chatGPT.label = "ChatGPT"
+	chatGPT.url = "https://auth.openai.com/oauth/authorize?state=st-1"
+	openCode = newLoginSubscription(authLoginOpenCode, subscription.FlowDeviceCode)
+	openCode.label = "OpenCode"
+	openCode.url = "https://opencode.ai/console/device?user_code=ABCD-EFGH"
+	openCode.code = "ABCD-EFGH"
+	previous := gatewaySubscriptionByID
+	byID := map[string]subscription.Subscription{authLoginChatGPT: chatGPT, authLoginOpenCode: openCode}
+	gatewaySubscriptionByID = func(id string) (subscription.Subscription, bool) {
+		sub, ok := byID[strings.ToLower(strings.TrimSpace(id))]
+		return sub, ok
 	}
 	t.Cleanup(func() {
-		stub.releaseOnce()
-		select {
-		case <-stub.finished:
-		case <-time.After(5 * time.Second):
-		}
-		openCodeLoginRun = previous
+		chatGPT.handle.releaseOnce()
+		openCode.handle.releaseOnce()
+		gatewaySubscriptionByID = previous
 	})
-	return stub
-}
-
-// chatGPTLoginStub stands in for the loopback PKCE flow, whose only outward
-// step a web login cares about is handing over the authorization URL.
-type chatGPTLoginStub struct {
-	release  chan struct{}
-	stopped  chan struct{}
-	finished chan struct{}
-	once     sync.Once
-
-	mu      sync.Mutex
-	path    string
-	auth    string
-	browser func(string) error
-}
-
-func (s *chatGPTLoginStub) releaseOnce() { s.once.Do(func() { close(s.release) }) }
-
-func newChatGPTLoginStub(t *testing.T, authURL string) *chatGPTLoginStub {
-	t.Helper()
-	stub := &chatGPTLoginStub{release: make(chan struct{}), stopped: make(chan struct{}), finished: make(chan struct{}), auth: authURL}
-	previous := chatGPTLoginRun
-	chatGPTLoginRun = func(ctx context.Context, path string, out io.Writer, openBrowser func(url string) error, _ <-chan openai.ManualCallback) (openai.Credentials, error) {
-		defer close(stub.finished)
-		stub.mu.Lock()
-		stub.path = path
-		stub.browser = openBrowser
-		open := openBrowser
-		stub.mu.Unlock()
-		if open != nil {
-			_ = open(authURL)
-		}
-		select {
-		case <-stub.release:
-			return openai.Credentials{AccessToken: "web-access", RefreshToken: "web-refresh", ExpiresAt: time.Now().Add(time.Hour)}, nil
-		case <-ctx.Done():
-			close(stub.stopped)
-			return openai.Credentials{}, ctx.Err()
-		}
-	}
-	t.Cleanup(func() {
-		stub.releaseOnce()
-		select {
-		case <-stub.finished:
-		case <-time.After(5 * time.Second):
-		}
-		chatGPTLoginRun = previous
-	})
-	return stub
+	return chatGPT, openCode
 }
 
 // The whole flow a page drives: start, read the device code while the user is
 // still in the browser, then read the completion with the base URL the page
 // writes into the provider row.
 func TestAuthLoginOpenCodeRunsFromStartToComplete(t *testing.T) {
-	stub := newOpenCodeLoginStub(t)
-	s, do := loginAPIServer(t)
+	_, stub := loginStubs(t)
+	_, do := loginAPIServer(t)
 
 	id := startLogin(t, do, authLoginOpenCode)
 
 	pending := awaitPending(t, do, authLoginOpenCode, id)
 	require.Equal(t, authLoginPending, pending.Status)
 	require.Equal(t, "ABCD-EFGH", pending.UserCode)
-	require.Equal(t, stub.reported.VerificationURL, pending.URL)
+	require.Equal(t, stub.url, pending.URL)
 	require.Empty(t, pending.Error)
 
-	stub.releaseOnce()
+	stub.handle.releaseOnce()
 
 	done := awaitTerminal(t, do, authLoginOpenCode, id)
 	require.Equal(t, authLoginComplete, done.Status)
@@ -242,20 +325,16 @@ func TestAuthLoginOpenCodeRunsFromStartToComplete(t *testing.T) {
 	require.Equal(t, "https://opencode.ai/inference/go", done.BaseURL)
 	require.Empty(t, done.Error)
 	require.Equal(t, "ABCD-EFGH", done.UserCode, "the code stays readable so a late page still shows it")
-
-	stub.mu.Lock()
-	defer stub.mu.Unlock()
-	require.Equal(t, filepath.Join(s.Home, opencode.CredentialsFile), stub.path,
-		"the web login writes the same login file /connect does")
-	require.True(t, stub.noopOK, "the endpoint must pass an explicit no-op browser opener, never nil")
+	require.Equal(t, subscription.FlowDeviceCode, done.Flow, "the page has to know it shows a device code")
 }
 
 // The ChatGPT flow reports its authorization URL through the browser callback,
 // and completes with the Codex base URL.
 func TestAuthLoginChatGPTReportsTheAuthorizationURLAndCompletes(t *testing.T) {
 	const authURL = "https://auth.openai.com/oauth/authorize?client_id=test&state=abc"
-	stub := newChatGPTLoginStub(t, authURL)
-	s, do := loginAPIServer(t)
+	chatGPT, _ := loginStubs(t)
+	chatGPT.url = authURL
+	_, do := loginAPIServer(t)
 
 	id := startLogin(t, do, authLoginChatGPT)
 
@@ -263,23 +342,20 @@ func TestAuthLoginChatGPTReportsTheAuthorizationURLAndCompletes(t *testing.T) {
 	require.Equal(t, authURL, pending.URL)
 	require.Empty(t, pending.UserCode, "the loopback flow has no user code")
 
-	stub.releaseOnce()
+	chatGPT.handle.releaseOnce()
 
 	done := awaitTerminal(t, do, authLoginChatGPT, id)
 	require.Equal(t, authLoginComplete, done.Status)
 	require.Equal(t, openai.CodexBaseURL, done.BaseURL)
 	require.Equal(t, authURL, done.URL)
-
-	stub.mu.Lock()
-	defer stub.mu.Unlock()
-	require.Equal(t, filepath.Join(s.Home, openai.CredentialsFile), stub.path)
-	require.NotNil(t, stub.browser, "the URL has to reach the page somehow")
+	require.Equal(t, subscription.FlowPasteCallback, done.Flow,
+		"the gateway drives the paste flow, never the browser one")
 }
 
 // Two logins for one provider would fight over the same device code and the
 // same loopback ports, so the second is refused while the first is running.
 func TestAuthLoginRefusesASecondLoginForTheSameProvider(t *testing.T) {
-	newOpenCodeLoginStub(t)
+	loginStubs(t)
 	_, do := loginAPIServer(t)
 
 	startLogin(t, do, authLoginOpenCode)
@@ -291,7 +367,7 @@ func TestAuthLoginRefusesASecondLoginForTheSameProvider(t *testing.T) {
 // Closing the dialog cancels the login: the session reads canceled straight
 // away, and the flow's goroutine is told to stop.
 func TestAuthLoginCancelEndsTheLogin(t *testing.T) {
-	stub := newOpenCodeLoginStub(t)
+	_, stub := loginStubs(t)
 	_, do := loginAPIServer(t)
 
 	id := startLogin(t, do, authLoginOpenCode)
@@ -308,7 +384,7 @@ func TestAuthLoginCancelEndsTheLogin(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		select {
-		case <-stub.stopped:
+		case <-stub.handle.stopped:
 			return true
 		default:
 			return false
@@ -322,7 +398,7 @@ func TestAuthLoginTimesOutAsExpired(t *testing.T) {
 	previous := authLoginTimeout
 	authLoginTimeout = 80 * time.Millisecond
 	t.Cleanup(func() { authLoginTimeout = previous })
-	newOpenCodeLoginStub(t)
+	loginStubs(t)
 	_, do := loginAPIServer(t)
 
 	id := startLogin(t, do, authLoginOpenCode)
@@ -335,7 +411,7 @@ func TestAuthLoginTimesOutAsExpired(t *testing.T) {
 // A session the gateway no longer has — a restart, a pruned id — is not
 // "still pending": the page has to start over.
 func TestAuthLoginUnknownIDsAreNotFound(t *testing.T) {
-	newOpenCodeLoginStub(t)
+	loginStubs(t)
 	_, do := loginAPIServer(t)
 
 	require.Equal(t, http.StatusNotFound, do(http.MethodGet, "/api/auth/login/opencode/does-not-exist").Code)
@@ -359,7 +435,6 @@ func TestAuthLoginStateLivesOnTheServerAndToleratesAnEmptyOne(t *testing.T) {
 	require.False(t, ok)
 	_, ok = nilServer.authLoginAbort(authLoginOpenCode, "anything", time.Now())
 	require.False(t, ok)
-	nilServer.authLoginUpdate("anything", func(*gatewayAuthLogin) {})
 	nilServer.authLoginFinish("anything", nil, "", time.Now())
 
 	// A bare server starts with no map, records its first login into one, and
@@ -375,44 +450,11 @@ func TestAuthLoginStateLivesOnTheServerAndToleratesAnEmptyOne(t *testing.T) {
 
 	// A finished login is readable until its retention runs out and is pruned
 	// after that, so the map does not grow for the life of the server.
-	bare.authLoginFinish(id, nil, opencode.ProviderBaseURL("opencode-go"), time.Now().Add(-time.Second))
+	bare.authLoginFinish(id, nil, authLoginBaseURL(authLoginOpenCode), time.Now().Add(-time.Second))
 	require.False(t, func() bool {
 		_, ok := bare.authLoginGet(authLoginOpenCode, id)
 		return ok
 	}(), "an expired login is pruned on the next read")
-}
-
-// stubAuthLoginProbe pins the probe's answer, so a start request can be driven
-// through one branch without a login file or a network.
-func stubAuthLoginProbe(t *testing.T, check turn.SignInCheck) {
-	t.Helper()
-	previous := authLoginProbe
-	authLoginProbe = func(context.Context, string, string) turn.SignInCheck {
-		return check
-	}
-	t.Cleanup(func() { authLoginProbe = previous })
-}
-
-// countingBothLogins replaces both flows with counters, so a probe test can
-// prove neither one started.
-func countingBothLogins(t *testing.T) *int {
-	t.Helper()
-	calls := 0
-	previousOC := openCodeLoginRun
-	openCodeLoginRun = func(context.Context, string, io.Writer, func(string) error, func(opencode.LoginInfo), func(opencode.LoginStage)) (opencode.Credentials, error) {
-		calls++
-		return opencode.Credentials{}, nil
-	}
-	previousCG := chatGPTLoginRun
-	chatGPTLoginRun = func(context.Context, string, io.Writer, func(string) error, <-chan openai.ManualCallback) (openai.Credentials, error) {
-		calls++
-		return openai.Credentials{}, nil
-	}
-	t.Cleanup(func() {
-		openCodeLoginRun = previousOC
-		chatGPTLoginRun = previousCG
-	})
-	return &calls
 }
 
 // A login this machine already holds answers the start request the way a
@@ -421,8 +463,9 @@ func countingBothLogins(t *testing.T) *int {
 func TestAuthLoginStartCompletesOnAUsableSavedLogin(t *testing.T) {
 	for _, provider := range []string{authLoginChatGPT, authLoginOpenCode} {
 		t.Run(provider, func(t *testing.T) {
-			loginCalls := countingBothLogins(t)
-			stubAuthLoginProbe(t, turn.SignInCheck{State: turn.SignInUsable})
+			chatGPT, openCode := loginStubs(t)
+			chatGPT.state = turn.SignInCheck{State: turn.SignInUsable}
+			openCode.state = turn.SignInCheck{State: turn.SignInUsable}
 			s, do := loginAPIServer(t)
 			rec := do(http.MethodPost, "/api/auth/login/"+provider)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -437,7 +480,8 @@ func TestAuthLoginStartCompletesOnAUsableSavedLogin(t *testing.T) {
 			require.Equal(t, authLoginComplete, body.Status)
 			require.Equal(t, authLoginBaseURL(provider), body.BaseURL)
 			require.Empty(t, body.LoginID)
-			require.Zero(t, *loginCalls, "a usable saved login must not start a flow")
+			require.Zero(t, chatGPT.startCount()+openCode.startCount(),
+				"a usable saved login must not start a flow")
 			require.Empty(t, s.authLogins, "no login session may be registered")
 		})
 	}
@@ -449,11 +493,9 @@ func TestAuthLoginStartCompletesOnAUsableSavedLogin(t *testing.T) {
 func TestAuthLoginStartCompletesOnAnUnreachableListing(t *testing.T) {
 	for _, provider := range []string{authLoginChatGPT, authLoginOpenCode} {
 		t.Run(provider, func(t *testing.T) {
-			loginCalls := countingBothLogins(t)
-			stubAuthLoginProbe(t, turn.SignInCheck{
-				State: turn.SignInUnreachable,
-				Err:   errors.New("registry unreachable"),
-			})
+			chatGPT, openCode := loginStubs(t)
+			unreachable := turn.SignInCheck{State: turn.SignInUnreachable, Err: errors.New("registry unreachable")}
+			chatGPT.state, openCode.state = unreachable, unreachable
 			_, do := loginAPIServer(t)
 			rec := do(http.MethodPost, "/api/auth/login/"+provider)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -464,7 +506,8 @@ func TestAuthLoginStartCompletesOnAnUnreachableListing(t *testing.T) {
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 			require.Equal(t, authLoginComplete, body.Status)
 			require.Equal(t, authLoginBaseURL(provider), body.BaseURL)
-			require.Zero(t, *loginCalls, "an unreachable listing must not start a flow")
+			require.Zero(t, chatGPT.startCount()+openCode.startCount(),
+				"an unreachable listing must not start a flow")
 		})
 	}
 }
@@ -472,89 +515,29 @@ func TestAuthLoginStartCompletesOnAnUnreachableListing(t *testing.T) {
 // Missing keeps the flow exactly as it was: 202 with a login id to poll, and
 // the flow running in the background.
 func TestAuthLoginStartRunsTheFlowWhenNoLoginIsSaved(t *testing.T) {
-	stub := newOpenCodeLoginStub(t)
-	stubAuthLoginProbe(t, turn.SignInCheck{State: turn.SignInMissing})
+	_, stub := loginStubs(t)
 	_, do := loginAPIServer(t)
 
 	id := startLogin(t, do, authLoginOpenCode)
 
 	awaitPending(t, do, authLoginOpenCode, id)
-	stub.releaseOnce()
+	stub.handle.releaseOnce()
 	done := awaitTerminal(t, do, authLoginOpenCode, id)
 	require.Equal(t, authLoginComplete, done.Status)
-	require.Equal(t, opencode.ProviderBaseURL("opencode-go"), done.BaseURL)
+	require.Equal(t, "https://opencode.ai/inference/go", done.BaseURL)
 }
 
 // Dead keeps the flow too: only a new sign-in restores a login the server
 // refused.
 func TestAuthLoginStartRunsTheFlowWhenTheLoginIsDead(t *testing.T) {
-	stubAuthLoginProbe(t, turn.SignInCheck{
-		State: turn.SignInDead,
-		Err:   errors.New("OpenCode login expired; run /connect again"),
-	})
-	newOpenCodeLoginStub(t)
+	chatGPT, openCode := loginStubs(t)
+	dead := turn.SignInCheck{State: turn.SignInDead, Err: errors.New("OpenCode login expired; run /connect again")}
+	chatGPT.state, openCode.state = dead, dead
 	s, do := loginAPIServer(t)
 
 	rec := do(http.MethodPost, "/api/auth/login/"+authLoginOpenCode)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	require.NotEmpty(t, s.authLogins, "the flow must be registered and pollable")
-}
-
-// manualLoginStub stands in for the flow that takes a pasted callback: it hands
-// the page its authorization URL, then answers each callback with the test's
-// verdict — nil completes the login, an error is the paste's refusal and keeps
-// it waiting.
-type manualLoginStub struct {
-	release  chan struct{}
-	stopped  chan struct{}
-	finished chan struct{}
-	once     sync.Once
-
-	mu     sync.Mutex
-	answer func(openai.ManualCallback) error
-}
-
-func (s *manualLoginStub) releaseOnce() { s.once.Do(func() { close(s.release) }) }
-
-func newManualLoginStub(t *testing.T, answer func(openai.ManualCallback) error) *manualLoginStub {
-	t.Helper()
-	stub := &manualLoginStub{release: make(chan struct{}), stopped: make(chan struct{}), finished: make(chan struct{}), answer: answer}
-	previous := chatGPTLoginRun
-	chatGPTLoginRun = func(ctx context.Context, path string, out io.Writer, openBrowser func(string) error,
-		manual <-chan openai.ManualCallback) (openai.Credentials, error) {
-		defer close(stub.finished)
-		if openBrowser != nil {
-			_ = openBrowser("https://auth.openai.com/oauth/authorize?state=st-1")
-		}
-		for {
-			select {
-			case m := <-manual:
-				stub.mu.Lock()
-				verdict := stub.answer(m)
-				stub.mu.Unlock()
-				if m.Reply != nil {
-					m.Reply <- verdict
-				}
-				if verdict == nil {
-					return openai.Credentials{AccessToken: "web-access", RefreshToken: "web-refresh"}, nil
-				}
-			case <-stub.release:
-				return openai.Credentials{AccessToken: "web-access", RefreshToken: "web-refresh"}, nil
-			case <-ctx.Done():
-				close(stub.stopped)
-				return openai.Credentials{}, ctx.Err()
-			}
-		}
-	}
-	t.Cleanup(func() {
-		stub.releaseOnce()
-		select {
-		case <-stub.finished:
-		case <-time.After(5 * time.Second):
-		}
-		chatGPTLoginRun = previous
-	})
-	return stub
 }
 
 func pastedCallback(do gatewayDo, provider, id, pasted string) *httptest.ResponseRecorder {
@@ -566,7 +549,7 @@ func pastedCallback(do gatewayDo, provider, id, pasted string) *httptest.Respons
 // which takes it as this sign-in's answer: the login finishes exactly as a
 // loopback callback would have finished it.
 func TestAuthLoginChatGPTAcceptsAPastedCallback(t *testing.T) {
-	stub := newManualLoginStub(t, func(openai.ManualCallback) error { return nil })
+	loginStubs(t)
 	_, do := loginAPIServer(t)
 
 	id := startLogin(t, do, authLoginChatGPT)
@@ -577,7 +560,6 @@ func TestAuthLoginChatGPTAcceptsAPastedCallback(t *testing.T) {
 
 	done := awaitTerminal(t, do, authLoginChatGPT, id)
 	require.Equal(t, authLoginComplete, done.Status)
-	stub.releaseOnce()
 }
 
 // A refused paste is reported to the person who pasted it, and the login goes
@@ -593,7 +575,8 @@ func TestAuthLoginPastedCallbackRejectionIsReportedAndKeepsTheLoginPending(t *te
 		{"no code", openai.ErrCallbackNoCode, "no_code"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stub := newManualLoginStub(t, func(openai.ManualCallback) error { return tc.reply })
+			chatGPT, _ := loginStubs(t)
+			chatGPT.answer = func(string) error { return tc.reply }
 			_, do := loginAPIServer(t)
 
 			id := startLogin(t, do, authLoginChatGPT)
@@ -606,7 +589,6 @@ func TestAuthLoginPastedCallbackRejectionIsReportedAndKeepsTheLoginPending(t *te
 			code, status := loginStatus(t, do, authLoginChatGPT, id)
 			require.Equal(t, http.StatusOK, code)
 			require.Equal(t, authLoginPending, status.Status, "a refused paste must not end the login")
-			stub.releaseOnce()
 		})
 	}
 }
@@ -616,8 +598,7 @@ func TestAuthLoginPastedCallbackRejectionIsReportedAndKeepsTheLoginPending(t *te
 // from guessing.
 func TestAuthLoginPastedCallbackNeedsAPendingChatGPTLogin(t *testing.T) {
 	t.Run("another provider's login", func(t *testing.T) {
-		newOpenCodeLoginStub(t)
-		newManualLoginStub(t, func(openai.ManualCallback) error { return nil })
+		loginStubs(t)
 		_, do := loginAPIServer(t)
 
 		openCodeID := startLogin(t, do, authLoginOpenCode)
@@ -626,7 +607,7 @@ func TestAuthLoginPastedCallbackNeedsAPendingChatGPTLogin(t *testing.T) {
 	})
 
 	t.Run("a login that already ended", func(t *testing.T) {
-		newManualLoginStub(t, func(openai.ManualCallback) error { return nil })
+		loginStubs(t)
 		_, do := loginAPIServer(t)
 
 		id := startLogin(t, do, authLoginChatGPT)
@@ -641,14 +622,14 @@ func TestAuthLoginPastedCallbackNeedsAPendingChatGPTLogin(t *testing.T) {
 	})
 
 	t.Run("an unknown id", func(t *testing.T) {
-		newManualLoginStub(t, func(openai.ManualCallback) error { return nil })
+		loginStubs(t)
 		_, do := loginAPIServer(t)
 		rec := pastedCallback(do, authLoginChatGPT, "nosuchlogin", "http://localhost:1455/auth/callback?code=c&state=s")
 		require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	})
 
 	t.Run("not a POST", func(t *testing.T) {
-		newManualLoginStub(t, func(openai.ManualCallback) error { return nil })
+		loginStubs(t)
 		_, do := loginAPIServer(t)
 		id := startLogin(t, do, authLoginChatGPT)
 		awaitPending(t, do, authLoginChatGPT, id)
@@ -657,7 +638,7 @@ func TestAuthLoginPastedCallbackNeedsAPendingChatGPTLogin(t *testing.T) {
 	})
 
 	t.Run("a body with no url", func(t *testing.T) {
-		newManualLoginStub(t, func(openai.ManualCallback) error { return nil })
+		loginStubs(t)
 		_, do := loginAPIServer(t)
 		id := startLogin(t, do, authLoginChatGPT)
 		awaitPending(t, do, authLoginChatGPT, id)
@@ -670,7 +651,7 @@ func TestAuthLoginPastedCallbackNeedsAPendingChatGPTLogin(t *testing.T) {
 	})
 
 	t.Run("a body past the limit", func(t *testing.T) {
-		newManualLoginStub(t, func(openai.ManualCallback) error { return nil })
+		loginStubs(t)
 		_, do := loginAPIServer(t)
 		id := startLogin(t, do, authLoginChatGPT)
 		awaitPending(t, do, authLoginChatGPT, id)
@@ -687,7 +668,8 @@ func TestAuthLoginPastedCallbackNeedsAPendingChatGPTLogin(t *testing.T) {
 // input, so it must not come back out in a response the page or its log keeps,
 // and it must not appear in what a poll reports either.
 func TestAuthLoginPastedCallbackNeverLeaksTheAddress(t *testing.T) {
-	stub := newManualLoginStub(t, func(openai.ManualCallback) error { return openai.ErrCallbackStateMismatch })
+	chatGPT, _ := loginStubs(t)
+	chatGPT.answer = func(string) error { return openai.ErrCallbackStateMismatch }
 	_, do := loginAPIServer(t)
 
 	id := startLogin(t, do, authLoginChatGPT)
@@ -701,7 +683,7 @@ func TestAuthLoginPastedCallbackNeverLeaksTheAddress(t *testing.T) {
 	require.Equal(t, http.StatusOK, statusRec.Code)
 	require.NotContains(t, statusRec.Body.String(), "SECRET-MARKER")
 
-	stub.releaseOnce()
+	chatGPT.handle.releaseOnce()
 	final := awaitTerminal(t, do, authLoginChatGPT, id)
 	require.NotContains(t, final.URL, "SECRET-MARKER")
 	require.NotContains(t, final.Error, "SECRET-MARKER")

@@ -26,6 +26,7 @@
           <SettingsApprovalTab v-else-if="activeTab === 'approval'" tab="approval" :form="form" />
           <SettingsSubagentsTab v-else-if="activeTab === 'subagents'" tab="subagents" :form="form" />
           <SettingsWebToolsTab v-else-if="activeTab === 'net'" tab="net" :form="form" />
+          <ModelsTab v-else-if="activeTab === 'models'" />
           <McpTab v-else-if="activeTab === 'mcp'" />
           <LspTab v-else-if="activeTab === 'lsp'" />
           <HooksTab v-else-if="activeTab === 'hooks'" />
@@ -34,6 +35,7 @@
           <ConfigTab v-else-if="activeTab === 'config'" />
           <RuntimeStatusTab v-else-if="activeTab === 'runtime'" />
           <SettingsSharedSkillsTab v-else-if="activeTab === 'shared-skills'" />
+          <EnvVarsTab v-else-if="activeTab === 'vars'" />
         </section>
       </div>
     </div>
@@ -44,10 +46,11 @@
 /**
  * Settings is the global scope: everything that is not bound to a primary agent
  * or a project lives behind these tabs. The tabs and their groups are the
- * prototype's (plan 191 §0, §4.2) — 常规〔外观 / 会话 / 审批与沙箱 / 子代理 /
- * 联网工具〕· 全局服务〔MCP / 语言服务器 / 钩子 / 定时任务 / 记忆 / 共享技能〕·
- * 高级〔配置文件 / 运行状态〕 — and the ones built from the schema share one
- * form, so a value read once serves every tab.
+ * prototype's (plan 191 §0, §4.2; the models table and the variables joined the
+ * global group in plan 266) — 常规〔外观 / 会话 / 审批与沙箱 / 子代理 /
+ * 联网工具〕· 全局服务〔模型 / MCP / 语言服务器 / 钩子 / 定时任务 / 记忆 / 共享技能 /
+ * 变量〕· 高级〔配置文件 / 运行状态〕 — and the ones built from the schema share
+ * one form, so a value read once serves every tab.
  *
  * `?tab=<key>` is the tab's key, not its position. Narrow screens turn the
  * sub-navigation into a horizontal strip of tabs instead of a column.
@@ -55,11 +58,13 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppearanceTab from '@/components/settings/AppearanceTab.vue'
+import EnvVarsTab from '@/components/settings/EnvVarsTab.vue'
 import ConfigTab from '@/components/settings/ConfigTab.vue'
 import CronSettingsTab from '@/components/settings/CronSettingsTab.vue'
 import HooksTab from '@/components/settings/HooksTab.vue'
 import { useSettingsForm } from '@/components/settings/form/useSettingsForm'
 import McpTab from '@/components/settings/McpTab.vue'
+import ModelsTab from '@/components/settings/ModelsTab.vue'
 import LspTab from '@/components/settings/LspTab.vue'
 import MemorySwitchesTab from '@/components/settings/MemorySwitchesTab.vue'
 import RuntimeStatusTab from '@/components/settings/RuntimeStatusTab.vue'
@@ -95,12 +100,17 @@ const tabGroups = computed(() => [
     key: 'services',
     label: t('settings.groupServices'),
     tabs: [
+      // The models table and the variables are global configuration: every
+      // primary agent shares them, so they live here rather than on a page of
+      // their own (owner rule, plan 266).
+      { key: 'models', label: t('settings.tabModels') },
       { key: 'mcp', label: t('settings.tabMcp') },
       { key: 'lsp', label: t('settings.tabLsp') },
       { key: 'hooks', label: t('settings.tabHooks') },
       { key: 'cron', label: t('settings.tabCron') },
       { key: 'memory', label: t('settings.tabMemory') },
       { key: 'shared-skills', label: t('settings.tabSharedSkills') },
+      { key: 'vars', label: t('settings.tabVars') },
     ],
   },
   {

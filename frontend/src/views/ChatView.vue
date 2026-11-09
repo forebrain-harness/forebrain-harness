@@ -919,7 +919,7 @@ import { useWorkspaceTree, migrateWorkspaceTree } from '@/composables/useWorkspa
 import { useChatSessions } from '@/composables/useChatSessions'
 import { useSessionInfo, sessionHeaderTitle } from '@/composables/useSessionInfo'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
-import { getErrorMessage, forebrainApi, type AgentRosterRow, type PeerHeldRow, type ProjectRecord, type ProjectServerPendingRow, type RewindPreview, type SessionContextDebug, type SessionModelResponse, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
+import { getErrorMessage, forebrainApi, type AgentRosterRow, type PeerHeldRow, type ProjectRecord, type ProjectServerPendingRow, type RewindPreview, type SessionContextDebug, type SessionModelOption, type SessionModelResponse, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
 import { targetFromFolder, targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
 import { formatProviderError } from '@/lib/providerError'
 import type { ComposerSubmission, PickedFile, SubmittedAttachment } from '@/lib/composerSubmission'
@@ -1859,7 +1859,7 @@ const approvalPickerRef = ref<InstanceType<typeof ApprovalPresetPicker> | null>(
  * own choice. The chips themselves work before there is a session: they read
  * the agent's default (`chatModelDefault`) and the pick is held here.
  */
-const draftModel = ref<{ provider: string; model: string; effort: string } | null>(null)
+const draftModel = ref<{ modelId?: string; provider: string; model: string; effort: string } | null>(null)
 
 async function loadSessionModel(sid: string | null) {
   const generation = ++sessionModelGeneration
@@ -1876,11 +1876,11 @@ async function loadSessionModel(sid: string | null) {
 }
 
 /** A model picked on a new chat: held, with the effort back at the model's default. */
-function pickDraftModel(option: { provider: string; model: string }) {
+function pickDraftModel(option: SessionModelOption) {
   const data = sessionModelData.value
   if (!data) return
-  draftModel.value = { provider: option.provider, model: option.model, effort: '' }
-  sessionModelData.value = { ...data, provider: option.provider, model: option.model, effort: '' }
+  draftModel.value = { modelId: option.id, provider: option.provider, model: option.model, effort: '' }
+  sessionModelData.value = { ...data, modelId: option.id, provider: option.provider, model: option.model, effort: '' }
 }
 
 watch(sessionId, (sid) => {
@@ -1891,7 +1891,10 @@ watch(sessionId, (sid) => {
 const sessionEfforts = computed(() => {
   const data = sessionModelData.value
   if (!data) return []
-  return data.options.find((option) => option.provider === data.provider && option.model === data.model)?.efforts ?? []
+  const option = data.modelId
+    ? data.options.find((candidate) => candidate.id === data.modelId)
+    : data.options.find((candidate) => candidate.provider === data.provider && candidate.model === data.model)
+  return option?.efforts ?? []
 })
 
 /** The effort pick writes the session's own row; the model stays as it is. */
@@ -1900,13 +1903,13 @@ async function selectEffort(effort: string) {
   const data = sessionModelData.value
   if (!data) return
   if (!sid) {
-    draftModel.value = { provider: data.provider, model: data.model, effort }
+    draftModel.value = { modelId: data.modelId, provider: data.provider, model: data.model, effort }
     sessionModelData.value = { ...data, effort }
     return
   }
   try {
-    const saved = await forebrainApi.saveSessionModel(sid, { provider: data.provider, model: data.model, effort })
-    sessionModelData.value = { ...data, provider: saved.provider, model: saved.model, effort: saved.effort }
+    const saved = await forebrainApi.saveSessionModel(sid, { modelId: data.modelId, provider: data.provider, model: data.model, effort })
+    sessionModelData.value = { ...data, modelId: saved.modelId, provider: saved.provider, model: saved.model, effort: saved.effort }
   } catch {
     // The chip keeps the state it had; the next load reconciles with the row.
   }

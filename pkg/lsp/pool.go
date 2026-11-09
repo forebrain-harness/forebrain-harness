@@ -313,9 +313,9 @@ type launchPlan struct {
 // environment, the binary detection, the cache directory and the placeholder
 // expansion (spec §9.3, §6.4, §6.2). Callbacks are left nil; the caller fills
 // the ones it needs before StartInstance.
-func planLaunch(ctx context.Context, srv ServerConfig, root, home, agentWorkspace string) (launchPlan, error) {
+func planLaunch(ctx context.Context, srv ServerConfig, root string, vars map[string]string, agentWorkspace string) (launchPlan, error) {
 	id := srv.ID
-	env, missing := BuildEnv(EnvSpec{Passthrough: srv.EnvPassthrough, Env: srv.Env, FromProject: srv.EnvFromProject, Home: home})
+	env, missing := BuildEnv(EnvSpec{Passthrough: srv.EnvPassthrough, Env: srv.Env, FromProject: srv.EnvFromProject, Vars: vars})
 	if len(missing) > 0 {
 		// Written before the server opens its log, so the note leads it.
 		logFirstLine(LogPath(agentWorkspace, id, root), "missing environment variables: "+strings.Join(missing, ", "))
@@ -369,7 +369,7 @@ func (p *Pool) start(entry *poolInstance, m *Manager) {
 	id, root := srv.ID, entry.root
 	ws := m.opts.AgentWorkspace
 
-	plan, err := planLaunch(context.Background(), srv, root, m.opts.Home, ws)
+	plan, err := planLaunch(context.Background(), srv, root, m.opts.Vars, ws)
 	if err != nil {
 		p.settle(entry, nil, err)
 		return

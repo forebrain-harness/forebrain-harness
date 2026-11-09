@@ -32,6 +32,25 @@ var interactiveNeedsFirstSetup = tui.NeedsFirstSetup
 var onboardRunner = tui.RunOnboarding
 var interactiveRunOnboard = onboardRunner
 var interactiveStartupConfigError = tui.StartupConfigError
+
+// interactiveMigrateLegacyHome runs the pre-plan-268 migrations before the
+// startup gate judges the configuration: a home that kept its model key in .env
+// reads as keyless until they have run (plan 268).
+var interactiveMigrateLegacyHome = func(ctx context.Context) error {
+	root, err := home.Root()
+	if err != nil {
+		return err
+	}
+	cfgPath, err := home.ResolveConfigPath(root)
+	if err != nil {
+		return nil
+	}
+	if err := process.MigrateLegacyHome(ctx, root, cfgPath); err != nil {
+		return err
+	}
+	process.ResetResolve()
+	return nil
+}
 var interactiveOpenChatSession = func(ctx context.Context, cwd string) (*tui.ChatSession, error) {
 	// The session composes its own configuration from the file's startup
 	// sections and the database's runtime sections (plan 187); handing
@@ -77,6 +96,12 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 	defer caret.restore()
 	restoreLog := tui.RedirectProcessLoggingForTUI(root)
 	defer restoreLog()
+	// The .env a pre-plan-268 home kept its values in is retired by the
+	// migrations, and the gates below judge the configuration before anything
+	// opens one (plan 268).
+	if err := interactiveMigrateLegacyHome(cmd.Context()); err != nil {
+		return err
+	}
 	if needs, err := interactiveNeedsFirstSetup(); err != nil {
 		return err
 	} else if needs {

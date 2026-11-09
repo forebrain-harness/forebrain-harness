@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -45,6 +46,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
+	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/testutil"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -1861,10 +1863,14 @@ func TestAvailableModelOptionsUseConfiguredLLMProvidersOnly(t *testing.T) {
 	for _, item := range res.Picker.Items {
 		labels = append(labels, item.Label)
 	}
+	// The terminal's list ends with the row that opens the custom form (plan 267);
+	// it names no model, so it is the one row that is not configured.
 	require.Equal(t, []string{
 		"zhipuai/glm-5.1",
 		"openai/" + codeModel,
+		"Add a custom model…",
 	}, labels)
+	require.Equal(t, turn.ModelAddCustomValue, res.Picker.Items[2].Value)
 	require.True(t, res.Picker.Items[0].Current)
 }
 
@@ -14131,10 +14137,10 @@ func TestPlanReviewShowsInTheAgentRosterAndCanBeStoppedFromIt(t *testing.T) {
 	}
 }
 
+// The provider page offers every mainstream provider reached with a key, plus —
+// from the subscription registry, not from this list — the two sign-ins.
 func TestSupportedProvidersMatchMainstreamSet(t *testing.T) {
 	want := []string{
-		"chatgpt",
-		"opencode-go",
 		"openai",
 		"anthropic",
 		"alibaba",
@@ -14145,10 +14151,23 @@ func TestSupportedProvidersMatchMainstreamSet(t *testing.T) {
 		"moonshotai",
 		"zhipuai",
 		"minimax",
+		// Owner 2026-11-07: Meituan LongCat, Tencent Cloud TokenHub,
+		// Volcengine Ark and BytePlus ModelArk are offered by every surface.
+		"meituan",
+		"tencent",
+		"volcengine",
+		"byteplus",
 	}
 	got := SupportedProviders()
 	if len(got) != len(want) {
 		t.Fatalf("providers = %#v, want %#v", got, want)
+	}
+	var signIns []string
+	for _, sub := range subscription.Registry() {
+		signIns = append(signIns, sub.ID())
+	}
+	if !reflect.DeepEqual(signIns, []string{"chatgpt", "opencode-go"}) {
+		t.Fatalf("sign-ins = %#v, want the registry's two", signIns)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -14188,7 +14207,7 @@ func TestPromptMainLLMSetupQwenMethodsUseDistinctEndpoints(t *testing.T) {
 				inputs:   []string{"sk-qwen", "", "", ""},
 				confirms: []bool{true},
 			}
-			opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector})
+			opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
 			if err != nil {
 				t.Fatalf("PromptMainLLMSetup error: %v", err)
 			}
@@ -14212,7 +14231,7 @@ func TestPromptMainLLMSetupGoogleUsesCanonicalProviderID(t *testing.T) {
 		inputs:   []string{"sk-google", "", "", ""},
 		confirms: []bool{true},
 	}
-	opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector})
+	opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
 	if err != nil {
 		t.Fatalf("PromptMainLLMSetup error: %v", err)
 	}
@@ -14227,55 +14246,51 @@ func TestPromptMainLLMSetupGoogleUsesCanonicalProviderID(t *testing.T) {
 	}
 }
 
+// Choosing the sign-in row on the first page signs in through the registry and
+// saves the model the plan unlocked — no api_key anywhere in it, because the
+// login is the credential.
 func TestPromptMainLLMSetupChatGPTUsesOAuthWithoutAPIKey(t *testing.T) {
-	previous := chatGPTLogin
-	t.Cleanup(func() { chatGPTLogin = previous })
-	loginCalled := false
-	chatGPTLogin = func(context.Context, string, io.Writer) (openai.Credentials, error) {
-		loginCalled = true
-		return openai.Credentials{Email: "dev@example.com"}, nil
-	}
-	stubChatGPTModels(t, []turn.ModelRecord{
-		{APIModel: "gpt-future", Provider: "chatgpt", IsDefault: true,
-			ReasoningEfforts: []string{"low", "medium"}, DefaultReasoningEffort: "low"},
-	}, nil)
+	sub := chatGPTLike()
+	withSubscriptions(t, sub)
+	opened := browserMachine(t)
 	selector := &fakeSelector{
-		selects: []string{"ChatGPT", "gpt-future"},
-		// First confirm opts into the browser login, second accepts the account.
-		confirms: []bool{true, true},
+		selects:  []string{"ChatGPT"},
+		confirms: []bool{true},
 	}
-	opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector, Home: t.TempDir()})
+	opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok || !loginCalled {
-		t.Fatalf("ok=%t loginCalled=%t", ok, loginCalled)
+	if !ok || sub.startCalls != 1 || len(*opened) != 1 {
+		t.Fatalf("ok=%t sign-ins=%d opened=%v", ok, sub.startCalls, *opened)
 	}
 	if opts.Provider != "chatgpt" || opts.APIKey != "" || opts.BaseURL != openai.CodexBaseURL || opts.APIPath != "/responses" {
 		t.Fatalf("options = %+v", opts)
 	}
 	if opts.Model != "gpt-future" {
-		t.Fatalf("model = %q, want the discovered slug", opts.Model)
+		t.Fatalf("model = %q, want the plan's default row", opts.Model)
 	}
 }
 
+// Declining the sign-in stops the setup before anything starts: no browser, no
+// flow, nothing saved.
 func TestPromptMainLLMSetupChatGPTRequiresExplicitLoginOptIn(t *testing.T) {
-	previous := chatGPTLogin
-	t.Cleanup(func() { chatGPTLogin = previous })
-	chatGPTLogin = func(context.Context, string, io.Writer) (openai.Credentials, error) {
-		t.Fatal("browser login must not start without an explicit confirmation")
-		return openai.Credentials{}, nil
-	}
+	sub := chatGPTLike()
+	withSubscriptions(t, sub)
+	opened := browserMachine(t)
 	selector := &fakeSelector{
 		selects:  []string{"ChatGPT"},
 		confirms: []bool{false},
 	}
-	_, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector, Home: t.TempDir()})
+	_, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
 	if err != nil {
 		t.Fatalf("PromptMainLLMSetup error: %v", err)
 	}
 	if ok {
-		t.Fatal("expected setup to abort when the ChatGPT login is declined")
+		t.Fatal("expected setup to abort when the sign-in is declined")
+	}
+	if sub.startCalls != 0 || len(*opened) != 0 {
+		t.Fatalf("sign-ins=%d opened=%v, want nothing started", sub.startCalls, *opened)
 	}
 }
 
@@ -14286,7 +14301,7 @@ func TestPromptMainLLMSetupMiniMaxUsesAnthropicEndpoint(t *testing.T) {
 		inputs:   []string{"sk-minimax", "", ""},
 		confirms: []bool{true},
 	}
-	opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector})
+	opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
 	if err != nil {
 		t.Fatalf("PromptMainLLMSetup error: %v", err)
 	}
@@ -14296,7 +14311,10 @@ func TestPromptMainLLMSetupMiniMaxUsesAnthropicEndpoint(t *testing.T) {
 	if opts.Provider != "minimax" {
 		t.Fatalf("provider = %q", opts.Provider)
 	}
-	if opts.BaseURL != "https://api.minimax.io/anthropic/" {
+	// No trailing slash: one normalized endpoint per provider, the same rule
+	// the row's identity follows (plan 259/260). The Messages client appends
+	// "/v1/messages" under it either way.
+	if opts.BaseURL != "https://api.minimax.io/anthropic" {
 		t.Fatalf("base_url = %q", opts.BaseURL)
 	}
 	if opts.APIPath != "" {
@@ -14315,10 +14333,49 @@ type fakeSelector struct {
 	inputLabels          []string
 	confirms             []bool
 	confirmIdx           int
+	confirmLabels        []string
+	multiSelects         [][]int
+	multiIdx             int
+	multiLabels          []string
+	multiOptions         [][]string
+	multiDefaults        [][]int
 	reviews              []string
 	reviewIdx            int
 	reviewFacts          [][]turn.StatusFact
+	reviewTitles         []string
 	failUnexpectedSelect bool
+}
+
+// SelectRichTabbed answers the tabbed picker from the same script as SelectRich:
+// the tabs are a shape, not a different answer.
+func (s *fakeSelector) SelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error) {
+	return s.SelectRich(label, items, opts.DefaultIdx)
+}
+
+// MultiSelectRichTabbed answers the offers page from the script: the next
+// selection of row indices, or — once the script is spent — the rows the page
+// opened on, the way pressing Enter on the defaults would.
+func (s *fakeSelector) MultiSelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
+	s.multiLabels = append(s.multiLabels, label)
+	options := make([]string, len(items))
+	for i, item := range items {
+		options[i] = item.Label
+	}
+	s.multiOptions = append(s.multiOptions, options)
+	s.multiDefaults = append(s.multiDefaults, append([]int(nil), opts.Checked...))
+	if s.multiIdx >= len(s.multiSelects) {
+		return append([]int(nil), opts.Checked...), true, nil
+	}
+	chosen := s.multiSelects[s.multiIdx]
+	s.multiIdx++
+	return append([]int(nil), chosen...), true, nil
+}
+
+// MultiSelect satisfies the selector contract; the setup drives the tabbed
+// form, so this answers the same rows the check boxes opened on.
+func (s *fakeSelector) MultiSelect(label string, options []string, defaultOptions []string) ([]string, bool, error) {
+	s.multiLabels = append(s.multiLabels, label)
+	return defaultOptions, true, nil
 }
 
 func (s *fakeSelector) Select(label string, options []string, defaultOption string) (string, bool, error) {
@@ -14385,6 +14442,7 @@ func (s *fakeSelector) SelectRich(label string, items []SelectItem, defaultIdx i
 // Review answers with the next scripted action, or the first — saving — when
 // the script names none.
 func (s *fakeSelector) Review(label string, facts []turn.StatusFact, actions []string, _ int) (int, bool, error) {
+	s.reviewTitles = append(s.reviewTitles, label)
 	s.reviewFacts = append(s.reviewFacts, facts)
 	if s.reviewIdx >= len(s.reviews) {
 		return 0, true, nil
@@ -14410,6 +14468,7 @@ func scriptedItem(items []SelectItem, value string) (int, bool, error) {
 }
 
 func (s *fakeSelector) Confirm(label string, defaultValue bool) (bool, bool, error) {
+	s.confirmLabels = append(s.confirmLabels, label)
 	if s.confirmIdx >= len(s.confirms) {
 		return defaultValue, true, nil
 	}
@@ -14424,7 +14483,7 @@ func TestPromptMainLLMSetupPersistsReasoningEffort(t *testing.T) {
 		selects: []string{"Anthropic", "claude-sonnet-4-6", "high"},
 		inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 	}
-	opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector})
+	opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
 	if err != nil || !ok {
 		t.Fatalf("PromptMainLLMSetup ok=%t err=%v", ok, err)
 	}
@@ -14448,7 +14507,7 @@ func TestPromptMainLLMSetupProviderDefaultLeavesEffortUnset(t *testing.T) {
 		selects: []string{"Anthropic", "claude-sonnet-4-6", reasoningEffortUnset},
 		inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 	}
-	opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector})
+	opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
 	if err != nil || !ok {
 		t.Fatalf("PromptMainLLMSetup ok=%t err=%v", ok, err)
 	}
@@ -14463,37 +14522,13 @@ func TestPromptMainLLMSetupKeepsOtherParamsWhenSettingEffort(t *testing.T) {
 		selects: []string{"Anthropic", "claude-sonnet-4-6", "low"},
 		inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 	}
-	opts, ok, err := PromptMainLLMSetup(PromptConfig{
-		Selector: selector,
-		Defaults: process.AgentLLMDefaults{Provider: "anthropic", ParamsJSON: `{"temperature":0.2}`},
-	})
+	cfg := setupTestConfig(t, selector)
+	cfg.Defaults = process.AgentLLMDefaults{Provider: "anthropic", ParamsJSON: `{"temperature":0.2}`}
+	opts, ok, err := PromptMainLLMSetup(cfg)
 	if err != nil || !ok {
 		t.Fatalf("PromptMainLLMSetup ok=%t err=%v", ok, err)
 	}
 	if !strings.Contains(opts.ParamsJSON, `"temperature":0.2`) || !strings.Contains(opts.ParamsJSON, `"effort":"low"`) {
-		t.Fatalf("params = %q", opts.ParamsJSON)
-	}
-}
-
-func TestPromptMainLLMSetupChatGPTAsksForReasoningEffort(t *testing.T) {
-	previous := chatGPTLogin
-	t.Cleanup(func() { chatGPTLogin = previous })
-	chatGPTLogin = func(context.Context, string, io.Writer) (openai.Credentials, error) {
-		return openai.Credentials{Email: "dev@example.com"}, nil
-	}
-	stubChatGPTModels(t, []turn.ModelRecord{
-		{APIModel: "gpt-future", Provider: "chatgpt", IsDefault: true,
-			ReasoningEfforts: []string{"low", "medium", "high", "xhigh"}, DefaultReasoningEffort: "low"},
-	}, nil)
-	selector := &fakeSelector{
-		selects:  []string{"ChatGPT", "gpt-future", "xhigh"},
-		confirms: []bool{true, true},
-	}
-	opts, ok, err := PromptMainLLMSetup(PromptConfig{Selector: selector, Home: t.TempDir()})
-	if err != nil || !ok {
-		t.Fatalf("PromptMainLLMSetup ok=%t err=%v", ok, err)
-	}
-	if opts.ParamsJSON != `{"reasoning":{"effort":"xhigh"}}` {
 		t.Fatalf("params = %q", opts.ParamsJSON)
 	}
 }
@@ -28835,17 +28870,27 @@ func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 	}
 }
 
+// configuredMainLLMTestConfig is a configuration whose main agent already runs
+// on a model — the shape a stored model table and its default_model leave in
+// the loaded root.
 func configuredMainLLMTestConfig(t *testing.T) appcfg.Root {
 	t.Helper()
-	cfg := appcfg.Root{}
 	params, err := appcfg.ParseLLMRequestParamsJSON("")
 	if err != nil {
 		t.Fatalf("parse params: %v", err)
 	}
-	if err := process.ApplyAgentLLMToConfigForAgent(&cfg, "", "openai", "gpt-5.5", "${OPENAI_API_KEY}", "https://api.openai.com/v1", "", true, params); err != nil {
-		t.Fatalf("apply agent llm: %v", err)
+	entry := appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "gpt-5.5",
+		APIKey:   "${OPENAI_API_KEY}",
+		BaseURL:  "https://api.openai.com/v1",
 	}
-	return cfg
+	if len(params) > 0 {
+		entry.Params = params
+	}
+	return appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{entry}},
+	}}}
 }
 
 func TestOnboardShowsConfiguredLLMAsDone(t *testing.T) {
@@ -28875,6 +28920,7 @@ func TestOnboardShowsConfiguredLLMAsDone(t *testing.T) {
 
 func TestSelectLLMProviderUsesSelectorLabels(t *testing.T) {
 	useSetupTestCatalog(t)
+	home := t.TempDir()
 	choice, ok, err := PromptMainLLMSetup(PromptConfig{
 		Selector: &wizardSelector{
 			selects: []string{"Anthropic", "claude-sonnet-4-6", "high"},
@@ -28883,6 +28929,8 @@ func TestSelectLLMProviderUsesSelectorLabels(t *testing.T) {
 				true,
 			},
 		},
+		Home:       home,
+		ConfigPath: filepath.Join(home, "forebrain.yaml"),
 	})
 	if err != nil {
 		t.Fatalf("PromptMainLLMSetup error: %v", err)
@@ -28944,7 +28992,13 @@ func TestOnboardEscGoesBackAPage(t *testing.T) {
 		t.Fatalf("effort default on the way back = %q, want the effort chosen before", got)
 	}
 	loaded := composedConfigForTest(t, home)
-	if params := fmt.Sprintf("%s", loaded.Agents.Definitions["main"].LLMProviders[0].Params); !strings.Contains(params, `"effort":"low"`) {
+	// The configured model is one row of the model table (plan 262), and the
+	// effort the wizard picked travels in its params.
+	entry := appcfg.EffectiveDefaultLLMFor(&loaded, "main")
+	if entry == nil {
+		t.Fatal("the configured model does not resolve")
+	}
+	if params := fmt.Sprintf("%s", entry.Params); !strings.Contains(params, `"effort":"low"`) {
 		t.Fatalf("params = %s, want the effort chosen on the second pass", params)
 	}
 }
@@ -28968,7 +29022,7 @@ func TestSetupBackOnProvidersOpensOnTheChoiceMade(t *testing.T) {
 				title = "Qwen API key"
 			}
 			selector := &backtrackSelector{fakeSelector: fakeSelector{selects: tc.selects, inputs: []string{"sk-test"}}, backAt: map[string]int{title: 1}}
-			if _, _, err := PromptMainLLMSetup(PromptConfig{Selector: selector}); err != nil {
+			if _, _, err := PromptMainLLMSetup(setupTestConfig(t, selector)); err != nil {
 				t.Fatalf("setup: %v", err)
 			}
 			if got := selector.selectDefaults[:len(tc.want)]; strings.Join(got, "|") != strings.Join(tc.want, "|") {
@@ -31113,6 +31167,10 @@ func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, "gpt-m2", sel.Model)
+	// The row names the configured row the pick chose, not just the pair it
+	// carries: two rows of one provider/model are told apart only by the id
+	// (plan 261), which is what a later read routes the conversation by.
+	require.Equal(t, appcfg.LegacyLLMModelID("openai", "gpt-m2", "http://m2.test/v1", ""), sel.ModelID)
 
 	// The shared file is byte-identical: this is the channel that used to
 	// carry A's pick into every other process, every fresh runner, and every

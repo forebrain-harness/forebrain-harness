@@ -19,6 +19,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/spf13/cobra"
 )
 
@@ -94,6 +95,9 @@ type lspEnv struct {
 	home, workspace, projectRoot string
 	trusted                      bool
 	cfg                          *appcfg.Root
+	// vars is the operator's variables table: the values a server entry's
+	// ${NAME} references resolve from (plan 268).
+	vars map[string]string
 }
 
 // loadLSPEnv resolves the runtime context and the project a subcommand acts
@@ -113,7 +117,7 @@ func loadLSPEnv(projectDir string) (lspEnv, error) {
 			return lspEnv{}, err
 		}
 	}
-	env := lspEnv{home: rt.Home, workspace: workspace, cfg: &rt.Config}
+	env := lspEnv{home: rt.Home, workspace: workspace, cfg: &rt.Config, vars: operatorEnvVars(rt)}
 	launch, err := safety.ResolveProjectContext(rt.Home, projectDir)
 	if err != nil {
 		return env, nil
@@ -149,13 +153,29 @@ func findServer(env lspEnv, id string) (lsp.ServerConfig, error) {
 	return lsp.ServerConfig{}, fmt.Errorf("unknown language server %q; run forebrain lsp list", id)
 }
 
+// operatorEnvVars reads the operator's variables for this home. A home without
+// a state database, or one it cannot read, has no variables: every ${NAME} a
+// server entry carries then reports as missing, which is what the surface shows.
+func operatorEnvVars(rt process.Context) map[string]string {
+	db, err := process.StateDB(rt)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	vars, err := (&state.EnvVarStore{DB: db}).Map(context.Background())
+	if err != nil {
+		return nil
+	}
+	return vars
+}
+
 // serverEnv is the environment a server's binary detection runs with.
 func serverEnv(env lspEnv, sc lsp.ServerConfig) []string {
 	built, _ := lsp.BuildEnv(lsp.EnvSpec{
 		Passthrough: sc.EnvPassthrough,
 		Env:         sc.Env,
 		FromProject: sc.EnvFromProject,
-		Home:        env.home,
+		Vars:        env.vars,
 	})
 	return built
 }
@@ -248,6 +268,7 @@ func runLSPDoctor(cmd *cobra.Command, _ []string) error {
 	reports, err := lsp.Doctor(cmd.Context(), lsp.DoctorInput{
 		Config:         env.cfg,
 		Home:           env.home,
+		Vars:           env.vars,
 		AgentWorkspace: env.workspace,
 		ProjectRoot:    env.projectRoot,
 		Trusted:        env.trusted,

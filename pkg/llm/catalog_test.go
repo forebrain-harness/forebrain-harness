@@ -525,11 +525,15 @@ func TestResolveReportsABrokenOverlayPrecisely(t *testing.T) {
 		t.Fatalf("InitGlobalCatalog error %q does not name the overlay", err)
 	}
 
-	// The genuinely absent case keeps its own message.
+	// The genuinely absent case keeps its own message: one sentence a surface
+	// can show, naming neither models.json nor this machine's layout (owner
+	// 2026-11-07).
 	empty := t.TempDir()
 	t.Setenv(AssetsDirEnv, t.TempDir())
-	if _, err := Resolve(empty); err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("Resolve with no catalog anywhere = %v, want a not-found error", err)
+	if _, err := Resolve(empty); err == nil || !strings.Contains(err.Error(), "model data not found; reinstall forebrain") {
+		t.Fatalf("Resolve with no catalog anywhere = %v, want the model-data sentence", err)
+	} else if strings.Contains(err.Error(), "models.json") {
+		t.Fatalf("error %q names models.json: a surface never shows that file", err)
 	}
 }
 
@@ -629,5 +633,194 @@ func TestCatalogKeepsTextOnlyDeepseekModelsAsTextOnly(t *testing.T) {
 		if hasModality(entry.Modalities.Input, "image") {
 			t.Fatalf("%s modalities.input=%v; a text-only model must not name image", id, entry.Modalities.Input)
 		}
+	}
+}
+
+// installCatalogForOverrideTest points the global lookup at a small catalog and
+// restores both the catalog and the override layer afterwards, so the override
+// tests cannot leak into any other test in this package.
+func installCatalogForOverrideTest(t *testing.T, raw string) {
+	t.Helper()
+	cat, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	restoreGlobalCatalog(t)
+	SetGlobalCatalogForTest(cat)
+	SetModelOverrides(nil)
+	t.Cleanup(func() { SetModelOverrides(nil) })
+}
+
+const overrideTestCatalog = `{
+	"openai/gpt-4o": {"id":"openai/gpt-4o","limit":{"context":128000,"input":128000,"output":16384},"attachment":true,"reasoning":true,
+		"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]},
+	"anthropic/claude-sonnet-5": {"id":"anthropic/claude-sonnet-5","limit":{"context":200000,"output":64000},
+		"reasoning_options":[{"type":"effort","values":["low","high"]}]}
+}`
+
+// TestModelOverrideAbsentLeavesTheCatalog pins the no-override case: the
+// layers above the catalog must change nothing for a row that carries no
+// capabilities.
+func TestModelOverrideAbsentLeavesTheCatalog(t *testing.T) {
+	installCatalogForOverrideTest(t, overrideTestCatalog)
+	hit, ok := Lookup("openai", "gpt-4o")
+	if !ok {
+		t.Fatal("openai/gpt-4o did not resolve")
+	}
+	want := Hit{CatalogID: "openai/gpt-4o", ContextWindow: 128000, InputTokenLimit: 128000, DefaultMaxTokens: 16384,
+		CanReason: true, SupportsAttachments: true, ReasoningKnown: true,
+		ReasoningOptions: []ReasoningOption{{Type: "effort", Values: []string{"low", "medium", "high"}}}}
+	if !reflect.DeepEqual(hit, want) {
+		t.Fatalf("hit = %+v, want %+v", hit, want)
+	}
+	if levels, known := ReasoningEfforts("openai", "gpt-4o"); !known || !reflect.DeepEqual(levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("levels = %v known=%v", levels, known)
+	}
+}
+
+// TestModelOverrideReplacesCapabilities pins the row-level override of the
+// fields the model dialog asks about (images, context window, output limit).
+func TestModelOverrideReplacesCapabilities(t *testing.T) {
+	installCatalogForOverrideTest(t, overrideTestCatalog)
+	no := false
+	context := int64(64000)
+	output := int64(4096)
+	SetModelOverrides(map[string]ModelOverride{
+		"openai/gpt-4o": {SupportsImages: &no, ContextWindow: &context, MaxOutput: &output},
+	})
+	hit, ok := Lookup("openai", "gpt-4o")
+	if !ok {
+		t.Fatal("openai/gpt-4o did not resolve")
+	}
+	if hit.SupportsAttachments {
+		t.Fatal("SupportsImages=false did not clear the catalog's attachment support")
+	}
+	if hit.ContextWindow != 64000 || hit.DefaultMaxTokens != 4096 {
+		t.Fatalf("window/output = %d/%d, want 64000/4096", hit.ContextWindow, hit.DefaultMaxTokens)
+	}
+	if !hit.CanReason || !reflect.DeepEqual(hit.ReasoningOptions, []ReasoningOption{{Type: "effort", Values: []string{"low", "medium", "high"}}}) {
+		t.Fatalf("a row that names no levels must keep the catalog's: %+v", hit)
+	}
+}
+
+// TestModelOverrideEffortsAndReasoningOff pins the levels a row names, with
+// "none" first when the row allows turning reasoning off.
+func TestModelOverrideEffortsAndReasoningOff(t *testing.T) {
+	installCatalogForOverrideTest(t, overrideTestCatalog)
+	off := true
+	SetModelOverrides(map[string]ModelOverride{
+		"anthropic/claude-sonnet-5": {Efforts: []string{"low", "high"}, ReasoningOff: &off},
+	})
+	if levels, known := ReasoningEfforts("anthropic", "claude-sonnet-5"); !known || !reflect.DeepEqual(levels, []string{"none", "low", "high"}) {
+		t.Fatalf("levels = %v known=%v; want [none low high]", levels, known)
+	}
+}
+
+// TestModelOverrideCanReasonFalseDropsLevels pins "this model does not
+// reason": no levels at all, and that answer is known rather than missing.
+func TestModelOverrideCanReasonFalseDropsLevels(t *testing.T) {
+	installCatalogForOverrideTest(t, overrideTestCatalog)
+	no := false
+	SetModelOverrides(map[string]ModelOverride{"anthropic/claude-sonnet-5": {CanReason: &no, Efforts: []string{"low", "high"}}})
+	hit, ok := Lookup("anthropic", "claude-sonnet-5")
+	if !ok {
+		t.Fatal("anthropic/claude-sonnet-5 did not resolve")
+	}
+	if hit.CanReason || hit.ReasoningOptions != nil || !hit.ReasoningKnown {
+		t.Fatalf("hit = %+v, want no reasoning and no levels", hit)
+	}
+	if levels, known := ReasoningEfforts("anthropic", "claude-sonnet-5"); !known || len(levels) != 0 {
+		t.Fatalf("levels = %v known=%v", levels, known)
+	}
+}
+
+// TestModelOverrideCustomModelBorrowsCatalogEntry pins the custom-model rule: a
+// name that is itself a catalog id borrows that entry's capabilities, a name
+// with no slash does not, and a row's own overrides still apply to either.
+func TestModelOverrideCustomModelBorrowsCatalogEntry(t *testing.T) {
+	installCatalogForOverrideTest(t, overrideTestCatalog)
+	hit, ok := Lookup("custom", "openai/gpt-4o")
+	if !ok {
+		t.Fatal("custom/openai/gpt-4o did not borrow the catalog entry")
+	}
+	if hit.ContextWindow != 128000 || !hit.SupportsAttachments {
+		t.Fatalf("borrowed hit = %+v", hit)
+	}
+	if _, ok := Lookup("custom", "my-model"); ok {
+		t.Fatal("a custom model with no slash and no override must not resolve")
+	}
+	if _, ok := Lookup("custom", "nobody/unknown-model"); ok {
+		t.Fatal("a custom model the catalog does not know must not resolve")
+	}
+	// An override makes a model the catalog cannot name resolve anyway.
+	context := int64(8000)
+	SetModelOverrides(map[string]ModelOverride{"custom/my-model": {ContextWindow: &context}})
+	if hit, ok := Lookup("custom", "my-model"); !ok || hit.ContextWindow != 8000 {
+		t.Fatalf("a row-level override must resolve on its own: %+v ok=%v", hit, ok)
+	}
+}
+
+// TestModelOverrideClearRestoresTheCatalog pins SetModelOverrides(nil): the
+// process clears the layer when a configuration carries no capabilities.
+func TestModelOverrideClearRestoresTheCatalog(t *testing.T) {
+	installCatalogForOverrideTest(t, overrideTestCatalog)
+	context := int64(1)
+	SetModelOverrides(map[string]ModelOverride{"openai/gpt-4o": {ContextWindow: &context}})
+	if hit, _ := Lookup("openai", "gpt-4o"); hit.ContextWindow != 1 {
+		t.Fatalf("override not applied: %+v", hit)
+	}
+	SetModelOverrides(nil)
+	if hit, ok := Lookup("openai", "gpt-4o"); !ok || hit.ContextWindow != 128000 {
+		t.Fatalf("cleared override left %+v ok=%v", hit, ok)
+	}
+	if _, ok := Lookup("custom", "my-model"); ok {
+		t.Fatal("a cleared layer must not keep resolving custom names")
+	}
+}
+
+// TestBuiltinModelsFillProvidersTheCatalogMisses pins SetBuiltinModels: a
+// provider models.json has no rows for (volcengine, byteplus) still answers
+// with the plan table, and KnownProvider accepts it.
+func TestBuiltinModelsFillProvidersTheCatalogMisses(t *testing.T) {
+	installCatalogForOverrideTest(t, overrideTestCatalog)
+	t.Cleanup(func() { SetBuiltinModels("volcengine", nil) })
+	if KnownProvider("volcengine") {
+		t.Fatal("volcengine is not in this test's catalog")
+	}
+	SetBuiltinModels("volcengine", []Model{
+		{ID: "doubao-seed-evolving", ContextWindow: 1024000, DefaultMaxTokens: 256000, SupportsAttachments: true},
+	})
+	if !KnownProvider("volcengine") {
+		t.Fatal("an installed built-in model table must make its provider known")
+	}
+	hit, ok := Lookup("volcengine", "doubao-seed-evolving")
+	if !ok || hit.ContextWindow != 1024000 || hit.DefaultMaxTokens != 256000 {
+		t.Fatalf("hit = %+v ok=%v", hit, ok)
+	}
+	// The catalog still outranks the table, and a row's overrides outrank
+	// both.
+	if hit, ok := Lookup("openai", "gpt-4o"); !ok || hit.ContextWindow != 128000 {
+		t.Fatalf("catalog lookup changed: %+v ok=%v", hit, ok)
+	}
+	output := int64(1024)
+	SetModelOverrides(map[string]ModelOverride{"volcengine/doubao-seed-evolving": {MaxOutput: &output}})
+	if hit, _ := Lookup("volcengine", "doubao-seed-evolving"); hit.DefaultMaxTokens != 1024 {
+		t.Fatalf("a row override must outrank the built-in table: %+v", hit)
+	}
+	SetBuiltinModels("volcengine", nil)
+	if KnownProvider("volcengine") {
+		t.Fatal("clearing the table must make the provider unknown again")
+	}
+}
+
+// TestCustomProviderIDIsTheConfigOne pins the one constant llm restates because
+// it sits below pkg/config; pkg/process's TestCustomProviderIDsAgree holds the
+// other side of it.
+func TestCustomProviderIDIsTheConfigOne(t *testing.T) {
+	if customModelProvider != "custom" {
+		t.Fatalf("customModelProvider = %q", customModelProvider)
+	}
+	if !KnownProvider("custom") {
+		t.Fatal("the custom-model provider must always be known")
 	}
 }

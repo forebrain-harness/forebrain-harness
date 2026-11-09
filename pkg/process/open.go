@@ -397,6 +397,29 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 			return nil, fmt.Errorf("sync legacy credential files: %w", err)
 		}
 	}
+	// The pre-table model configuration moves into fb_llm_models before
+	// anything reads the configuration (plan 262): the agents section stops
+	// carrying llm_providers, and every reference names a row instead of a
+	// "provider/model" label. Gated on content, so a legacy yaml imported into
+	// a fresh home later is migrated on the next start.
+	if opts.Config == nil {
+		if err := migrateLegacyLLMModels(ctx, sqlDB, root); err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("move model configurations into the state database: %w", err)
+		}
+	}
+	// The home's .env is retired (owner 2026-11-07, plan 268): what it held
+	// moves into the state database and the configuration file, and the file is
+	// renamed aside. It runs after the model migration, which is the one reader
+	// that still wants the file's values, and before anything composes the
+	// configuration, so the composed ${ENV} references resolve from what this
+	// step stored.
+	if opts.Config == nil {
+		if err := migrateLegacyDotEnv(ctx, sqlDB, root, cfgPath); err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("move .env values into the state database: %w", err)
+		}
+	}
 	var configFingerprint []byte
 	if opts.Config == nil {
 		// OpenOptions.Config keeps its bypass semantics: it supplies the
@@ -409,6 +432,10 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		}
 		loaded = composed
 	}
+	// The model layers the catalog lookup reads come from the configuration
+	// this process starts on — composed from the database, or handed in whole
+	// through OpenOptions.Config (plan 263).
+	installModelOverrides(loaded)
 	// The fingerprint of the configuration that starts the process: every
 	// later SyncConfigFromDB compares against it, so the first turn does not
 	// re-apply what Open just applied.
@@ -563,10 +590,17 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// A Runner that cannot be built is a startup failure, not a log line: the
 	// alternative was an environment that came up with no agent behind it, and
 	// every later symptom (no tools, no skills, an empty model) pointed at the
-	// surface instead of at the load that actually failed.
+	// surface instead of at the load that actually failed. The one exception is
+	// a home with no usable model yet: the gateway serves, and the first model
+	// is added on the web's Settings › Models page — refusing to start would
+	// leave that page unreachable (owner 2026-11-07, plan 268 revision). A turn
+	// before that lands reports the missing model with that same pointer.
 	if err := runner.Load(); err != nil {
-		_ = env.LSP.Close()
-		return nil, fmt.Errorf("process agent load: %w", err)
+		if !run.IsModelSetupIncomplete(err) {
+			_ = env.LSP.Close()
+			return nil, fmt.Errorf("process agent load: %w", err)
+		}
+		slog.Warn("no model is configured yet; sign in to the web UI and add one under Settings › Models", "err", err)
 	}
 	safety.UpdateManagerWithLocalConfig(env.Sandbox, root, cfgRoot, runner.PermissionSnapshot(), nil, runner.ProjectRoot)
 	// Deny the other primaries' workspaces before the first turn: the file

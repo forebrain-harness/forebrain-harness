@@ -574,6 +574,38 @@ func TestLoadRejectsInvalidAgentSubagents(t *testing.T) {
 	}
 }
 
+// A model value without the legacy "provider/model" shape is a model reference
+// — a fb_llm_models row id, which is what a write stores from plan 262 on — and
+// is accepted exactly when the caller can resolve it. Anything else keeps the
+// shape sentence, so a bare model name is still refused.
+func TestValidateAgentSubagentsAcceptsAResolvableModelReference(t *testing.T) {
+	def := AgentDefinition{Primary: true, Subagents: []SubagentConfig{{Name: "explore", Model: "llm-0f3a9c"}}}
+	resolves := func(ref string) bool { return ref == "llm-0f3a9c" }
+	if err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, resolves); err != nil {
+		t.Fatalf("a resolvable row id was refused: %v", err)
+	}
+	err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, func(string) bool { return false })
+	if err == nil || !strings.Contains(err.Error(), `model "llm-0f3a9c" must be provider/model`) {
+		t.Fatalf("err = %v, want the shape sentence for a value that resolves to nothing", err)
+	}
+	// A nil checker is the shape-only verdict a caller without a configuration
+	// gets: an id has no such shape, so it is refused rather than guessed at.
+	if err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, nil); err == nil {
+		t.Fatal("a nil resolver accepted a value that only a row id could name")
+	}
+	// A "provider/model" label is accepted without resolving it: deleting a
+	// provider must not make an existing configuration unloadable.
+	label := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", Model: "openai/gone"}}}
+	if err := ValidateAgentSubagents("main", label, builtInPublicSubagentNames, builtInSystemSubagentNames, func(string) bool { return false }); err != nil {
+		t.Fatalf("a dangling label was refused: %v", err)
+	}
+	// The effort rule is unchanged: it needs a model next to it.
+	effort := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", ReasoningEffort: "low"}}}
+	if err := ValidateAgentSubagents("main", effort, builtInPublicSubagentNames, builtInSystemSubagentNames, resolves); err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
+		t.Fatalf("err = %v, want the effort rule", err)
+	}
+}
+
 // The loader's name lists decide whether an entry overrides a built-in or
 // declares a custom subagent, so they must be the definitions' own lists. A
 // built-in missing from the copy would silently become a configurable custom

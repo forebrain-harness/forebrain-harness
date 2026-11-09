@@ -651,10 +651,23 @@ func (s *Service) ListRunSubagents(ctx context.Context, parentRunID string, limi
 
 // ModelChoice is one model an agent is configured with, as /model offers it.
 type ModelChoice struct {
-	// Label is what a picker shows and a choice names: "provider/model".
+	// ID names the configured row this choice is — the fb_llm_models row's id,
+	// or the deterministic id a pre-table entry got. It is what a picker's
+	// value and a session row carry: the same provider/model may be configured
+	// several times (a different base url, api path or key) and only the id
+	// tells those rows apart.
+	ID string
+	// Label is what a picker shows and what a choice named before ids existed:
+	// "provider/model".
 	Label    string
 	Provider string
 	Model    string
+	// BaseURL, APIPath and URLVerbatim are the endpoint this row's requests go
+	// to: the picker's description column shows it (ModelEndpointLabel), which
+	// is the other half of telling twin rows apart.
+	BaseURL     string
+	APIPath     string
+	URLVerbatim bool
 	// ReasoningEfforts are the thinking levels this model offers that this
 	// build can send; empty means the picker has nothing to ask, either
 	// because the model does not reason or because it has no discrete level.
@@ -664,29 +677,39 @@ type ModelChoice struct {
 	SupportsImages bool
 }
 
-// agentDefinition is the configured definition of agentName, falling back to
-// main the way the runtime does.
-func agentDefinition(cfg *appcfg.Root, agentName string) appcfg.AgentDefinition {
-	if cfg == nil || cfg.Agents.Definitions == nil {
-		return appcfg.AgentDefinition{}
+// ModelEndpointLabel is the request URL a configured row sends to, as a picker
+// shows it: base url and api path joined exactly as the client joins them
+// (https://api.deepseek.com/chat/completions). A URLVerbatim row (「自定义协议」)
+// sends to its base url as stored, so the path only names the protocol; a row
+// with no endpoint at all (a login-backed provider) has nothing to show.
+func ModelEndpointLabel(baseURL, apiPath string, urlVerbatim bool) string {
+	base := strings.TrimSpace(baseURL)
+	if urlVerbatim {
+		return base
 	}
-	if def, ok := cfg.Agents.Definitions[strings.TrimSpace(agentName)]; ok {
-		return def
-	}
-	return cfg.Agents.Definitions["main"]
+	return base + strings.TrimSpace(apiPath)
 }
 
-// ModelChoices lists the models agentName is configured with, in their
+// ModelChoices lists the models the install has configured, in their
 // configured order — storage order, not priority: the one in force is the
-// effective default (default_model when set, otherwise the first).
+// effective default (the agent's default_model reference, else its first
+// legacy entry, else main's, else the view's first row).
 func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 	var out []ModelChoice
-	for _, configured := range appcfg.ResolvedLLMConfigs(agentDefinition(cfg, agentName)) {
+	for _, configured := range appcfg.ConfiguredLLMs(cfg) {
 		provider, model := strings.TrimSpace(configured.Provider), strings.TrimSpace(configured.Model)
 		if provider == "" && model == "" {
 			continue
 		}
-		choice := ModelChoice{Label: llm.FormatProviderModel(provider, model), Provider: provider, Model: model}
+		choice := ModelChoice{
+			ID:          strings.TrimSpace(configured.ID),
+			Label:       llm.FormatProviderModel(provider, model),
+			Provider:    provider,
+			Model:       model,
+			BaseURL:     strings.TrimSpace(configured.BaseURL),
+			APIPath:     strings.TrimSpace(configured.APIPath),
+			URLVerbatim: configured.URLVerbatim,
+		}
 		if hit, ok := llm.Lookup(provider, model); ok {
 			choice.SupportsImages = hit.SupportsAttachments
 		}
@@ -702,13 +725,26 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 // against index zero. -1 when nothing resolves (empty list, or a hot-edited
 // dangling default_model the loader would refuse).
 func defaultModelIndex(cfg *appcfg.Root, agentName string, choices []ModelChoice) int {
-	entry := appcfg.EffectiveDefaultLLM(agentDefinition(cfg, agentName))
+	entry := appcfg.EffectiveDefaultLLMFor(cfg, agentName)
 	if entry == nil {
 		return -1
 	}
+	// The view names every entry by its row id, so the default is the choice
+	// with that id — a twin row of the same provider/model is a different row.
+	ref := strings.TrimSpace(entry.ID)
+	if ref == "" {
+		// A config assembled by hand with no ids: the pair is all there is to
+		// compare, the rule this function used before ids existed.
+		for i, choice := range choices {
+			if strings.EqualFold(strings.TrimSpace(choice.Provider), strings.TrimSpace(entry.Provider)) &&
+				strings.EqualFold(strings.TrimSpace(choice.Model), strings.TrimSpace(entry.Model)) {
+				return i
+			}
+		}
+		return -1
+	}
 	for i, choice := range choices {
-		if strings.EqualFold(strings.TrimSpace(choice.Provider), strings.TrimSpace(entry.Provider)) &&
-			strings.EqualFold(strings.TrimSpace(choice.Model), strings.TrimSpace(entry.Model)) {
+		if strings.TrimSpace(choice.ID) == ref {
 			return i
 		}
 	}

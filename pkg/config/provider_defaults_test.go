@@ -7,9 +7,11 @@ import (
 
 func TestProviderDefaultBaseURL(t *testing.T) {
 	cases := map[string]string{
-		"deepseek":    "https://api.deepseek.com",
-		"  OpenAI  ":  "https://api.openai.com/v1",
-		"minimax":     "https://api.minimax.io/anthropic/",
+		"deepseek":   "https://api.deepseek.com",
+		"  OpenAI  ": "https://api.openai.com/v1",
+		// No trailing slash: one normalized endpoint per provider, the way
+		// appcfg.NormalizeLLMModelIdentity stores an identity (plan 259/260).
+		"minimax":     "https://api.minimax.io/anthropic",
 		"arcee-ai":    "",
 		"chatgpt":     "",
 		"opencode-go": "",

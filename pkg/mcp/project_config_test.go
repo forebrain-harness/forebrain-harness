@@ -224,28 +224,39 @@ func TestClampProjectRuntimePolicy(t *testing.T) {
 	}
 }
 
+// A project entry resolves ${NAME} from the operator's variables and nowhere
+// else: a repository checkout must not be able to read the host's environment
+// (owner 2026-11-07, plan 268).
 func TestProjectEnvReferencesDoNotReadHostEnv(t *testing.T) {
 	t.Setenv("MCP_HOST_ONLY_SECRET", "host-value")
-	// A .env file under a fake home carries the operator's value.
-	fakeHome := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeHome, ".env"), []byte("MCP_DOTENV_ONLY=dotenv-value\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	srv := appcfg.MCPServerConfig{
 		Name: "p", Transport: "stdio", Command: "/bin/x",
 		Scope: appcfg.MCPServerScopeProject, ProjectKey: "pk",
 		Env: map[string]string{
-			"FROM_HOST":   "${MCP_HOST_ONLY_SECRET}",
-			"FROM_DOTENV": "${MCP_DOTENV_ONLY}",
+			"FROM_HOST":  "${MCP_HOST_ONLY_SECRET}",
+			"FROM_TABLE": "${MCP_TABLE_ONLY}",
 		},
 	}
-	env := mcpStdioEnv(fakeHome, srv)
+	env := mcpStdioEnv(map[string]string{"MCP_TABLE_ONLY": "table-value"}, srv)
 	joined := strings.Join(env, "\n")
 	if strings.Contains(joined, "host-value") {
 		t.Fatalf("project entry must not read host environment: %s", joined)
 	}
-	if !strings.Contains(joined, "FROM_DOTENV=dotenv-value") {
-		t.Fatalf("project entry should resolve from ~/.forebrain/.env: %s", joined)
+	if !strings.Contains(joined, "FROM_TABLE=table-value") {
+		t.Fatalf("project entry should resolve from the operator's variables: %s", joined)
+	}
+
+	// A global entry reads the table first and the host second.
+	global := appcfg.MCPServerConfig{
+		Name: "g", Transport: "stdio", Command: "/bin/x",
+		Env: map[string]string{
+			"FROM_HOST":  "${MCP_HOST_ONLY_SECRET}",
+			"FROM_TABLE": "${MCP_TABLE_ONLY}",
+		},
+	}
+	joined = strings.Join(mcpStdioEnv(map[string]string{"MCP_TABLE_ONLY": "table-value"}, global), "\n")
+	if !strings.Contains(joined, "FROM_HOST=host-value") || !strings.Contains(joined, "FROM_TABLE=table-value") {
+		t.Fatalf("global entry resolution: %s", joined)
 	}
 }
 
@@ -257,7 +268,7 @@ func TestProjectInheritParentEnvForcedOff(t *testing.T) {
 	inherit := true
 	srv := appcfg.MCPServerConfig{Name: "p", Transport: "stdio", Command: "/bin/x",
 		Scope: appcfg.MCPServerScopeProject, ProjectKey: "pk", InheritParentEnv: &inherit}
-	env := mcpStdioEnv(t.TempDir(), srv)
+	env := mcpStdioEnv(nil, srv)
 	if strings.Contains(strings.Join(env, "\n"), "leak-me") {
 		t.Fatalf("project entry must not inherit parent env even when the file asks: %s", strings.Join(env, "\n"))
 	}
@@ -479,20 +490,25 @@ func TestOAuthOverlayScopeNamespacing(t *testing.T) {
 
 func TestEnvLookupForServerRestrictsProjectScope(t *testing.T) {
 	t.Setenv("PROBE_HOST", "host-value")
-	fakeHome := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeHome, ".env"), []byte("PROBE_DOTENV=dotenv-value\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	globalLookup := envLookupForServer(fakeHome, appcfg.MCPServerConfig{Name: "g"})
+	vars := map[string]string{"PROBE_TABLE": "table-value"}
+	globalLookup := envLookupForServer(vars, appcfg.MCPServerConfig{Name: "g"})
 	if v, ok := globalLookup("PROBE_HOST"); !ok || v != "host-value" {
 		t.Fatalf("global lookup should read host env")
 	}
-	projectLookup := envLookupForServer(fakeHome, appcfg.MCPServerConfig{Name: "p", Scope: appcfg.MCPServerScopeProject, ProjectKey: "pk"})
+	if v, ok := globalLookup("PROBE_TABLE"); !ok || v != "table-value" {
+		t.Fatalf("global lookup should read the operator's variables")
+	}
+	projectLookup := envLookupForServer(vars, appcfg.MCPServerConfig{Name: "p", Scope: appcfg.MCPServerScopeProject, ProjectKey: "pk"})
 	if _, ok := projectLookup("PROBE_HOST"); ok {
 		t.Fatalf("project lookup must not read host env")
 	}
-	if v, ok := projectLookup("PROBE_DOTENV"); !ok || v != "dotenv-value" {
-		t.Fatalf("project lookup should read ~/.forebrain/.env")
+	if v, ok := projectLookup("PROBE_TABLE"); !ok || v != "table-value" {
+		t.Fatalf("project lookup should read the operator's variables")
+	}
+	// The table wins over the environment for a name both carry.
+	t.Setenv("PROBE_BOTH", "host-value")
+	if v, ok := envLookupForServer(map[string]string{"PROBE_BOTH": "table-value"}, appcfg.MCPServerConfig{Name: "g"})("PROBE_BOTH"); !ok || v != "table-value" {
+		t.Fatalf("global lookup should prefer the table, got %q", v)
 	}
 }
 

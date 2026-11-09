@@ -341,11 +341,23 @@ type modelSelectionFixture struct {
 	live *ModelSelectionState
 }
 
+// modelSelectionFixtureConfig is the /model fixture's configuration: two
+// distinct providers, so a picker has something to switch between.
+const modelSelectionFixtureConfig = "agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-5\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://a.test/v1\n        - provider: deepseek\n          model: deepseek-chat\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://b.test/v1\n"
+
 func newModelSelectionFixture(t *testing.T, selection ModelSelectionState) *modelSelectionFixture {
+	t.Helper()
+	return newModelSelectionFixtureWith(t, modelSelectionFixtureConfig, selection)
+}
+
+// newModelSelectionFixtureWith is newModelSelectionFixture over a configuration
+// document of the test's own: twin rows of one provider/model, each with its
+// own endpoint, need a document nothing else in the fixture assumes.
+func newModelSelectionFixtureWith(t *testing.T, doc string, selection ModelSelectionState) *modelSelectionFixture {
 	t.Helper()
 	cfgPath := filepath.Join(t.TempDir(), "forebrain.yaml")
 	t.Setenv("FOREBRAIN_TURN_MODEL_TEST_KEY", "test-key")
-	if err := os.WriteFile(cfgPath, []byte("agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-5\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://a.test/v1\n        - provider: deepseek\n          model: deepseek-chat\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://b.test/v1\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	h := &recordingSlashHandlers{selection: selection}
@@ -395,6 +407,21 @@ func (f *modelSelectionFixture) choiceLabel(t *testing.T, provider, model string
 	return ""
 }
 
+// choiceID names the configured row a model is, the way /model's picker and an
+// effort choice do.
+func (f *modelSelectionFixture) choiceID(t *testing.T, provider, model string) string {
+	t.Helper()
+	settings, err := f.modelSettings("")
+	require.NoError(t, err)
+	for _, choice := range ModelChoices(settings.Config, settings.AgentName) {
+		if strings.EqualFold(choice.Provider, provider) && strings.EqualFold(choice.Model, model) {
+			return choice.ID
+		}
+	}
+	t.Fatalf("no configured choice for %s/%s", provider, model)
+	return ""
+}
+
 func (f *modelSelectionFixture) reloadConfig(t *testing.T) *appcfg.Root {
 	t.Helper()
 	cfg, err := loadPersistedDocumentForTest(f.cfgPath)
@@ -418,7 +445,7 @@ func TestExecModelMarksCurrentByLiveSelection(t *testing.T) {
 		}
 	}
 	require.NotEqual(t, -1, current, "no current item")
-	require.True(t, strings.Contains(res.Picker.Items[current].Value, "deepseek"), "current item = %s", res.Picker.Items[current].Value)
+	require.Equal(t, "deepseek/deepseek-chat", res.Picker.Items[current].Label, "current item = %+v", res.Picker.Items[current])
 }
 
 // TestChooseModelAppliesLiveSelectionWithoutWritingTheConfigFile pins the
@@ -472,7 +499,7 @@ func TestExecModelMarksWhatTheRuntimeCarries(t *testing.T) {
 		}
 	}
 	require.NotEqual(t, -1, current, "no current item: %v", res.Picker.Items)
-	require.Contains(t, res.Picker.Items[current].Value, "deepseek-chat", "current = %s", res.Picker.Items[current].Value)
+	require.Equal(t, "deepseek/deepseek-chat", res.Picker.Items[current].Label, "current = %+v", res.Picker.Items[current])
 }
 
 func TestChooseModelInForceModelIsNotASwitch(t *testing.T) {
@@ -542,7 +569,9 @@ func TestChooseModelEffortPickerMarksLiveEffort(t *testing.T) {
 	m := reasoningCapableModel(t)
 	f := newModelSelectionFixture(t, ModelSelectionState{Provider: "openai", Model: m.APIModel, Effort: "medium", Set: true})
 	f.addConfigEntry(t, "openai", m.APIModel)
-	res := Choose(f.ctx, SlashChoice{Command: "model", Value: f.choiceLabel(t, "openai", m.APIModel)})
+	// The row, not the label: this fixture configures openai/gpt-5 twice (the
+	// base entry and the catalog one added below), so a label names neither.
+	res := Choose(f.ctx, SlashChoice{Command: "model", Value: f.choiceID(t, "openai", m.APIModel)})
 	require.True(t, res.Handled)
 	require.NotNil(t, res.Picker)
 	require.Equal(t, "model-effort", res.Picker.Command)
@@ -592,11 +621,133 @@ func TestChooseModelUsesTheModelsOwnEffortLevels(t *testing.T) {
 	}
 
 	// A level this model does not offer is refused rather than written.
-	stale := encodeEffortChoice(f.choiceLabel(t, "opencode-go", "glm-5.3"), "xhigh", false)
+	stale := encodeEffortChoice(f.choiceID(t, "opencode-go", "glm-5.3"), f.choiceLabel(t, "opencode-go", "glm-5.3"), "xhigh", false)
 	res := Choose(f.ctx, SlashChoice{Command: "model-effort", Value: stale})
 	require.True(t, res.Handled)
 	require.Equal(t, "That reasoning effort is no longer offered for this model.", res.Reply)
 	require.Equal(t, -1, slices.Index(f.calls(), "select-effort("), "a rejected effort still reached the runtime: %v", f.calls())
+}
+
+// twinModelFixture configures deepseek/deepseek-v4-flash twice: one provider
+// and model reaching two endpoints, the configuration a pair alone could not
+// tell apart.
+func twinModelFixture(t *testing.T, selection ModelSelectionState) *modelSelectionFixture {
+	t.Helper()
+	return newModelSelectionFixtureWith(t, "agents:\n  definitions:\n    main:\n      llm_providers:\n"+
+		"        - provider: deepseek\n          model: deepseek-v4-flash\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://one.test\n"+
+		"        - provider: deepseek\n          model: deepseek-v4-flash\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://two.test\n          api_path: /beta/chat/completions\n", selection)
+}
+
+// TestModelPickerTellsTwinRowsApart pins plan 261's first item: two rows of one
+// provider/model are two choices — a row id each and each row's own request URL
+// in the description column — and picking the second selects that row, which is
+// what a surface records on the session row.
+func TestModelPickerTellsTwinRowsApart(t *testing.T) {
+	f := twinModelFixture(t, ModelSelectionState{})
+	res := execModel(f.ctx)
+	require.NotNil(t, res.Picker)
+	// The two configured rows, then the terminal's row that opens the custom
+	// form (plan 267).
+	require.Len(t, res.Picker.Items, 3)
+	require.Equal(t, ModelAddCustomValue, res.Picker.Items[2].Value)
+	first, second := res.Picker.Items[0], res.Picker.Items[1]
+	require.NotEmpty(t, first.Value)
+	require.NotEmpty(t, second.Value)
+	require.NotEqual(t, first.Value, second.Value, "twin rows share a picker value: %+v", res.Picker.Items)
+	require.Equal(t, "deepseek/deepseek-v4-flash", first.Label)
+	require.Equal(t, "deepseek/deepseek-v4-flash", second.Label)
+	require.Equal(t, "http://one.test/chat/completions", first.Description)
+	require.Equal(t, "http://two.test/beta/chat/completions", second.Description)
+	// Each row names the end of its description a narrow column must keep: the
+	// api path, so a shortened URL still says which protocol it speaks.
+	require.Equal(t, "/chat/completions", first.EndpointTail)
+	require.Equal(t, "/beta/chat/completions", second.EndpointTail)
+
+	// The description is base_url + api_path joined exactly as the client joins
+	// them; a 「自定义协议」 row sends to its base url and shows that alone; a
+	// row with no endpoint (a login-backed provider) has nothing to show.
+	require.Equal(t, "http://two.test/beta/chat/completions", ModelEndpointLabel("http://two.test", "/beta/chat/completions", false))
+	require.Equal(t, "http://one.test", ModelEndpointLabel("http://one.test", "/chat/completions", true))
+	require.Equal(t, "", ModelEndpointLabel("", "", false))
+
+	// The second row is what the pick selects and records — id included.
+	res = Choose(f.ctx, SlashChoice{Command: "model", Value: second.Value})
+	require.True(t, res.Handled)
+	require.Equal(t, "Switched to deepseek/deepseek-v4-flash.", res.Reply)
+	require.Len(t, f.handler.chosen, 1, "calls = %v", f.calls())
+	require.Equal(t, second.Value, f.handler.chosen[0].ID, "the record kept the first twin")
+}
+
+// TestChooseReasoningEffortKeepsTheTwinRowItPicked pins plan 261's second item:
+// the effort picker's value carries the row (four segments), so picking a level
+// for the second twin keeps the second twin; a value drawn before values named
+// the row, whose label two rows share, switches nothing.
+func TestChooseReasoningEffortKeepsTheTwinRowItPicked(t *testing.T) {
+	f := twinModelFixture(t, ModelSelectionState{})
+	items := execModel(f.ctx).Picker.Items
+	require.Len(t, items, 3)
+	second := items[1]
+
+	res := Choose(f.ctx, SlashChoice{Command: "model", Value: second.Value})
+	require.True(t, res.Handled)
+	require.NotNil(t, res.Picker)
+	require.Equal(t, "model-effort", res.Picker.Command)
+	high := ""
+	for _, item := range res.Picker.Items {
+		if item.Label == "high" {
+			high = item.Value
+		}
+	}
+	require.NotEmpty(t, high, "the model's own levels: %+v", res.Picker.Items)
+	require.Len(t, strings.Split(high, "\n"), 4, "effort value = %q", high)
+	require.Equal(t, second.Value, strings.SplitN(high, "\n", 2)[0], "the effort value names no row")
+
+	res = Choose(f.ctx, SlashChoice{Command: "model-effort", Value: high})
+	require.True(t, res.Handled)
+	require.Equal(t, "Reasoning effort set to high.", res.Reply)
+	require.Len(t, f.handler.chosen, 2, "calls = %v", f.calls())
+	require.Equal(t, second.Value, f.handler.chosen[1].ID, "the effort moved the conversation to the first twin")
+	require.NotEqual(t, items[0].Value, f.handler.chosen[1].ID)
+	require.NotEqual(t, -1, slices.Index(f.calls(), "select-effort(s1,high)"), "the level did not reach the runtime: %v", f.calls())
+
+	// A picker drawn before its values named the row sends three segments; a
+	// label two rows share names neither, so nothing switches.
+	res = Choose(f.ctx, SlashChoice{Command: "model-effort", Value: second.Label + "\nhigh\nfalse"})
+	require.True(t, res.Handled)
+	require.Equal(t, "Several models are configured as deepseek/deepseek-v4-flash; pick one from /model.", res.Reply)
+	require.Len(t, f.handler.chosen, 2, "a value naming twins switched anyway: %v", f.calls())
+}
+
+// TestChooseModelRefusesALabelThatNamesTwins pins plan 261's third item: a
+// client that still sends the label (an unrefreshed web page, an old picker)
+// names neither row when two rows share it, so nothing switches and the answer
+// says how to pick one.
+func TestChooseModelRefusesALabelThatNamesTwins(t *testing.T) {
+	f := twinModelFixture(t, ModelSelectionState{})
+	res := Choose(f.ctx, SlashChoice{Command: "model", Value: "deepseek/deepseek-v4-flash"})
+	require.True(t, res.Handled)
+	require.Equal(t, "Several models are configured as deepseek/deepseek-v4-flash; pick one from /model.", res.Reply)
+	require.Nil(t, res.Picker, "a value that names neither row must not open the effort page")
+	require.Empty(t, f.handler.chosen, "a label naming twins switched anyway: %v", f.calls())
+}
+
+// TestExecModelMarksALegacyRowByItsPair pins plan 261's fourth item: a session
+// row written before ids existed names no row, so the picker marks the row its
+// provider+model pair is — and the marked item still carries that row's id.
+func TestExecModelMarksALegacyRowByItsPair(t *testing.T) {
+	f := newModelSelectionFixture(t, ModelSelectionState{Provider: "deepseek", Model: "deepseek-chat", Effort: "high", Set: true})
+	res := execModel(f.ctx)
+	require.NotNil(t, res.Picker)
+	current := -1
+	for i, item := range res.Picker.Items {
+		if item.Current {
+			require.Equal(t, -1, current, "more than one current item: %+v", res.Picker.Items)
+			current = i
+		}
+	}
+	require.NotEqual(t, -1, current, "no current item: %+v", res.Picker.Items)
+	require.Equal(t, "deepseek/deepseek-chat", res.Picker.Items[current].Label)
+	require.Equal(t, f.choiceID(t, "deepseek", "deepseek-chat"), res.Picker.Items[current].Value)
 }
 
 // TestChooseReasoningEffortDoesNotWriteTheConfigFile pins the same contract for
@@ -608,7 +759,7 @@ func TestChooseReasoningEffortDoesNotWriteTheConfigFile(t *testing.T) {
 	f.addConfigEntry(t, "openai", m.APIModel)
 	before, err := os.ReadFile(f.cfgPath)
 	require.NoError(t, err)
-	value := encodeEffortChoice(f.choiceLabel(t, "openai", m.APIModel), "high", false)
+	value := encodeEffortChoice(f.choiceID(t, "openai", m.APIModel), f.choiceLabel(t, "openai", m.APIModel), "high", false)
 	res := Choose(f.ctx, SlashChoice{Command: "model-effort", Value: value})
 	require.True(t, res.Handled)
 	require.Equal(t, "Reasoning effort set to high.", res.Reply)
@@ -769,7 +920,7 @@ func TestModelPickerMarksTheDefaultModelEntry(t *testing.T) {
 		}
 	}
 	require.NotEqual(t, -1, current, "no current item")
-	require.True(t, strings.Contains(res.Picker.Items[current].Value, "deepseek"), "current item = %s, want the default_model entry", res.Picker.Items[current].Value)
+	require.Equal(t, "deepseek/deepseek-chat", res.Picker.Items[current].Label, "current item = %+v, want the default_model entry", res.Picker.Items[current])
 
 	// Choosing the default_model entry is a no-op, not a switch.
 	label := f.choiceLabel(t, "deepseek", "deepseek-chat")

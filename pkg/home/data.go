@@ -12,7 +12,11 @@ const (
 	SkillsDir         = "skills"
 	WorkspaceDirName  = "workspace"
 	DefaultConfigFile = "forebrain.yaml"
-	DefaultEnvFile    = ".env"
+	// LegacyEnvFile is the file a home used to keep its ${NAME} values in. Its
+	// semantics and every reader are gone (owner 2026-11-07, plan 268); the
+	// name survives only so the one-time migration can find the file, read it
+	// once and move its values into the state database.
+	LegacyEnvFile = ".env"
 )
 
 var layoutDirs = []string{
@@ -43,14 +47,6 @@ func Ensure(root string) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return err
 	}
-	envPath := DefaultEnvPath(root)
-	if _, err := os.Stat(envPath); os.IsNotExist(err) {
-		if err := os.WriteFile(envPath, nil, 0o600); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	}
 	for _, rel := range layoutDirs {
 		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
 			return err
@@ -66,8 +62,10 @@ func DefaultConfigPath(root string) string {
 	return filepath.Join(root, DefaultConfigFile)
 }
 
-func DefaultEnvPath(root string) string {
-	return filepath.Join(root, DefaultEnvFile)
+// LegacyEnvPath is where a home used to keep its .env. Only the one-time
+// migration reads it (plan 268).
+func LegacyEnvPath(root string) string {
+	return filepath.Join(root, LegacyEnvFile)
 }
 
 func ConfigPath(root string) string {

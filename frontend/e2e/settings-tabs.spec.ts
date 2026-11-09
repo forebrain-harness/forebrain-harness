@@ -46,7 +46,6 @@ const MENU_PAGES = [
   '/skills',
   '/mcp',
   '/subagents',
-  '/providers',
   '/tools',
   '/permissions',
   '/memories',

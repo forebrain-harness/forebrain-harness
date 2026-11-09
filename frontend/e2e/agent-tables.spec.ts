@@ -32,7 +32,6 @@ const PAGES = [
   { path: '/rules', name: 'rules' },
   { path: '/skills', name: 'skills' },
   { path: '/subagents', name: 'subagents' },
-  { path: '/providers', name: 'providers' },
   { path: '/tools', name: 'tools' },
   { path: '/permissions', name: 'permissions' },
   { path: '/memories', name: 'memories' },

@@ -68,8 +68,8 @@ CREATE TABLE fb_projects (
   UNIQUE KEY idx_fb_projects_agent_root_unique (agent_id, (SHA2(root, 256)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
--- One delivery channel a project owns. Credentials never land in this table: a
--- secret field holds a reference like ${FOREBRAIN_CH_<project>_<FIELD>}.
+-- One delivery channel a project owns. A secret field is stored in plaintext
+-- (owner 2026-11-07, plan 268); a page only ever sees a mask of it.
 CREATE TABLE fb_project_channels (
   project_id VARCHAR(191) NOT NULL,
   kind VARCHAR(64) NOT NULL CHECK (TRIM(kind) <> ''),
@@ -235,6 +235,7 @@ CREATE TABLE fb_session_model_state (
   provider VARCHAR(191) NOT NULL,
   model VARCHAR(191) NOT NULL,
   effort VARCHAR(64) NOT NULL DEFAULT '',
+  model_id VARCHAR(191) NOT NULL DEFAULT '',
   updated_at BIGINT NOT NULL,
   PRIMARY KEY (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
@@ -600,6 +601,52 @@ CREATE TABLE fb_task_executions (
 CREATE TABLE fb_config (
   section VARCHAR(191) NOT NULL PRIMARY KEY,
   value_json LONGTEXT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- The install's model configurations: one row per (provider, model, base_url,
+-- api_path), shared by every primary agent (owner 2026-11-07). The same model
+-- may be configured several times — behind different endpoints, paths or keys —
+-- so a model is referred to by this row's id, never by "provider/model".
+-- api_key is stored in plaintext (owner ruling) and never leaves the gateway.
+-- The cap_* columns override the model catalog for this row; NULL (or '')
+-- means "use the catalog".
+CREATE TABLE fb_llm_models (
+  id VARCHAR(191) NOT NULL PRIMARY KEY,
+  provider VARCHAR(191) NOT NULL CHECK (TRIM(provider) <> ''),
+  model VARCHAR(191) NOT NULL CHECK (TRIM(model) <> ''),
+  base_url TEXT NOT NULL DEFAULT (''),
+  api_path VARCHAR(191) NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT (''),
+  params_json LONGTEXT NOT NULL DEFAULT (''),
+  cap_images BIGINT CHECK (cap_images IN (0, 1)),
+  cap_pdf BIGINT CHECK (cap_pdf IN (0, 1)),
+  cap_video BIGINT CHECK (cap_video IN (0, 1)),
+  cap_audio BIGINT CHECK (cap_audio IN (0, 1)),
+  cap_reasoning BIGINT CHECK (cap_reasoning IN (0, 1)),
+  cap_reasoning_off BIGINT CHECK (cap_reasoning_off IN (0, 1)),
+  cap_efforts_json TEXT NOT NULL DEFAULT (''),
+  cap_default_effort VARCHAR(32) NOT NULL DEFAULT '',
+  cap_context_window BIGINT,
+  cap_max_output BIGINT,
+  source VARCHAR(64) NOT NULL DEFAULT '',
+  source_plan VARCHAR(64) NOT NULL DEFAULT '',
+  url_verbatim BIGINT NOT NULL DEFAULT 0 CHECK (url_verbatim IN (0, 1)),
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  -- base_url has no length the store can promise: keyed over its SHA-256,
+  -- exactly as unique (the fb_projects root precedent).
+  UNIQUE KEY idx_fb_llm_models_identity (provider, model, (SHA2(base_url, 256)), api_path),
+  KEY idx_fb_llm_models_created (created_at, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- Operator-owned variables that ${NAME} references in MCP and LSP server
+-- entries resolve from (owner 2026-11-07, replacing ~/.forebrain/.env). A
+-- project-scoped entry resolves only from here — never from the process
+-- environment — so a repository cannot read the host's secrets.
+CREATE TABLE fb_env_vars (
+  name VARCHAR(191) NOT NULL PRIMARY KEY,
+  value LONGTEXT NOT NULL,
   updated_at_ms BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 

@@ -425,7 +425,10 @@ async function loadSessionModel(sid: string | null) {
 const sessionEfforts = computed(() => {
   const data = sessionModelData.value
   if (!data) return []
-  return data.options.find((option) => option.provider === data.provider && option.model === data.model)?.efforts ?? []
+  const option = data.modelId
+    ? data.options.find((candidate) => candidate.id === data.modelId)
+    : data.options.find((candidate) => candidate.provider === data.provider && candidate.model === data.model)
+  return option?.efforts ?? []
 })
 
 async function selectEffort(effort: string) {
@@ -433,8 +436,8 @@ async function selectEffort(effort: string) {
   const data = sessionModelData.value
   if (!sid || !data) return
   try {
-    const saved = await forebrainApi.saveSessionModel(sid, { provider: data.provider, model: data.model, effort })
-    sessionModelData.value = { ...data, provider: saved.provider, model: saved.model, effort: saved.effort }
+    const saved = await forebrainApi.saveSessionModel(sid, { modelId: data.modelId, provider: data.provider, model: data.model, effort })
+    sessionModelData.value = { ...data, modelId: saved.modelId, provider: saved.provider, model: saved.model, effort: saved.effort }
   } catch {
     /* the chip keeps its state; the next load reconciles */
   }

@@ -31,9 +31,11 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
 // The three kinds a subagent row can be.
@@ -101,9 +103,15 @@ type subagentRow struct {
 	Kind        string `json:"kind"`
 	Description string `json:"description"`
 	// ModelProvider and Model are the model the subagent runs on, empty when it
-	// follows the conversation's model.
+	// follows the conversation's model. ModelID is the configured row the
+	// subagent is pinned to — what the drawer's picker selects and what a write
+	// stores (plan 262) — and ModelLabel/ModelEndpoint are what the form shows
+	// without recomputing them.
 	ModelProvider   string `json:"model_provider"`
 	Model           string `json:"model"`
+	ModelID         string `json:"model_id"`
+	ModelLabel      string `json:"model_label"`
+	ModelEndpoint   string `json:"model_endpoint"`
 	ReasoningEffort string `json:"reasoning_effort"`
 	// ModelSource says where the model above came from: "agent" for this
 	// agent's own subagent configuration, "global" for the legacy per-type
@@ -176,9 +184,9 @@ func subagentRowFor(cfg *config.Root, agentID, name string) (subagentRow, bool) 
 	case subagentKindSystem:
 		return systemSubagentRow(key), true
 	case subagentKindBuiltin:
-		return builtinSubagentRow(cfg, key, subagentEntry(def, key)), true
+		return builtinSubagentRow(cfg, agentID, key, subagentEntry(def, key)), true
 	case subagentKindCustom:
-		return customSubagentRow(cfg, key, subagentEntry(def, key)), true
+		return customSubagentRow(cfg, agentID, key, subagentEntry(def, key)), true
 	}
 	return subagentRow{}, false
 }
@@ -186,7 +194,7 @@ func subagentRowFor(cfg *config.Root, agentID, name string) (subagentRow, bool) 
 // builtinSubagentRow describes a built-in the model may dispatch. Everything
 // but the model, the effort, the prompt and the switch is the definition's:
 // a built-in's description and tools are its type, not its configuration.
-func builtinSubagentRow(cfg *config.Root, name string, entry config.SubagentConfig) subagentRow {
+func builtinSubagentRow(cfg *config.Root, agentID, name string, entry config.SubagentConfig) subagentRow {
 	// The name comes from the list this walks, so the definition is there.
 	def, _ := agent.ResolvePublicSubtype(name)
 	row := subagentRow{
@@ -199,12 +207,12 @@ func builtinSubagentRow(cfg *config.Root, name string, entry config.SubagentConf
 		Enabled:          config.BoolPtr(subagentEnabled(entry)),
 		PromptOverridden: strings.TrimSpace(entry.SystemPrompt) != "",
 	}
-	row.ModelProvider, row.Model, row.ReasoningEffort, row.ModelSource = subagentRowModel(cfg, name, entry)
+	subagentRowModel(cfg, agentID, name, &row, entry)
 	return row
 }
 
 // customSubagentRow describes one of this agent's own subagents.
-func customSubagentRow(cfg *config.Root, name string, entry config.SubagentConfig) subagentRow {
+func customSubagentRow(cfg *config.Root, agentID, name string, entry config.SubagentConfig) subagentRow {
 	allowed := make([]string, 0, len(entry.AllowedTools))
 	if customSubagentTools(entry) == config.SubagentToolsPick {
 		allowed = append(allowed, entry.AllowedTools...)
@@ -218,7 +226,7 @@ func customSubagentRow(cfg *config.Root, name string, entry config.SubagentConfi
 		Continuable:  entry.Continuable == nil || *entry.Continuable,
 		Enabled:      config.BoolPtr(subagentEnabled(entry)),
 	}
-	row.ModelProvider, row.Model, row.ReasoningEffort, row.ModelSource = subagentRowModel(cfg, name, entry)
+	subagentRowModel(cfg, agentID, name, &row, entry)
 	return row
 }
 
@@ -247,35 +255,57 @@ func systemSubagentRow(name string) subagentRow {
 	}
 }
 
-// subagentRowModel resolves the model a subagent runs on, in the order
-// dispatch uses it: this agent's own entry for it, then — for a built-in the
-// model may dispatch — the legacy per-type definition
+// subagentRowModel fills a row's model fields with the model a subagent runs on,
+// in the order dispatch uses it: this agent's own entry for it, then — for a
+// built-in the model may dispatch — the legacy per-type definition
 // agents.definitions.<type>.llm_providers, and otherwise the conversation's
-// model. pkg/run's SubagentOwnModel is the same order; a row that described a
-// different one would be telling the user the wrong thing about what will run.
-func subagentRowModel(cfg *config.Root, name string, entry config.SubagentConfig) (provider, model, effort, source string) {
+// model. pkg/run's SubagentOwnModel is the same order and resolves the entry the
+// same way; a row that described a different one would be telling the user the
+// wrong thing about what will run.
+//
+// The entry names a model row (plan 262) or a legacy "provider/model" label. A
+// reference nothing carries has no id and no endpoint to report, and its own
+// halves are all there is to show; the runner falls back to the conversation's
+// model for it.
+func subagentRowModel(cfg *config.Root, agentID, name string, row *subagentRow, entry config.SubagentConfig) {
 	if configured := strings.TrimSpace(entry.Model); configured != "" {
-		provider, model, _ = strings.Cut(configured, "/")
-		return strings.TrimSpace(provider), strings.TrimSpace(model), strings.TrimSpace(entry.ReasoningEffort), subagentModelFromAgent
+		row.ReasoningEffort = strings.TrimSpace(entry.ReasoningEffort)
+		row.ModelSource = subagentModelFromAgent
+		if resolved, found := config.ResolveModelRef(cfg, agentID, configured); found {
+			subagentRowModelFields(row, resolved)
+			return
+		}
+		row.ModelProvider, row.Model, _ = strings.Cut(configured, "/")
+		row.ModelProvider = strings.TrimSpace(row.ModelProvider)
+		row.Model = strings.TrimSpace(row.Model)
+		row.ModelLabel = llm.FormatProviderModel(row.ModelProvider, row.Model)
+		return
 	}
 	if !slices.Contains(agent.PublicSubagentNames, name) {
-		return "", "", "", ""
+		return
 	}
-	def, defined := cfg.Agents.Definitions[name]
-	if !defined {
-		return "", "", "", ""
+	// The same resolution run.SubagentOwnModel answers with: a type that names
+	// no model of its own runs on the conversation's model, never on main's
+	// default dressed up as the type's own.
+	if !config.HasOwnModelChoice(cfg, name) {
+		return
 	}
-	// The same resolution run.SubagentOwnModel answers with: the effective
-	// default (default_model when set, otherwise the first entry), never a
-	// bare first-entry read.
-	defEntry := config.EffectiveDefaultLLM(def)
+	defEntry := config.EffectiveDefaultLLMFor(cfg, name)
 	if defEntry == nil {
-		return "", "", "", ""
+		return
 	}
-	return strings.TrimSpace(defEntry.Provider),
-		strings.TrimSpace(defEntry.Model),
-		config.ReasoningEffort(defEntry.Params),
-		subagentModelFromGlobal
+	row.ReasoningEffort = config.ReasoningEffort(defEntry.Params)
+	row.ModelSource = subagentModelFromGlobal
+	subagentRowModelFields(row, *defEntry)
+}
+
+// subagentRowModelFields names one configured row on the subagent row.
+func subagentRowModelFields(row *subagentRow, entry config.AgentLLMProviderConfig) {
+	row.ModelID = strings.TrimSpace(entry.ID)
+	row.ModelProvider = strings.TrimSpace(entry.Provider)
+	row.Model = strings.TrimSpace(entry.Model)
+	row.ModelLabel = llm.FormatProviderModel(entry.Provider, entry.Model)
+	row.ModelEndpoint = turn.ModelEndpointLabel(entry.BaseURL, entry.APIPath, entry.URLVerbatim)
 }
 
 // subagentRowMatches is the page's search box: the name a person types and the
@@ -506,6 +536,11 @@ type subagentWrite struct {
 	cfg     config.Root
 	agentID string
 	def     config.AgentDefinition
+	// models is the persisted configuration the model references are resolved
+	// against. The section callback's root carries the agents section alone, and
+	// a subagent's model names a row of the install-wide table, which that root
+	// does not have.
+	models *config.Root
 }
 
 // store writes the handler's changes back into the configuration, so a mutation
@@ -539,12 +574,19 @@ func (s *Server) writeAgentSubagents(w http.ResponseWriter, r *http.Request, mut
 		failSubagentWrite(w, err)
 		return
 	}
+	// Read before the write: the resolved references and the validator both need
+	// the model table, which only a full persisted read carries.
+	persisted, err := s.persistedConfig(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	var payload any
 	err = s.withConfigSection(r.Context(), "agents", func(cfg *config.Root) error {
 		if cfg.Agents.Definitions == nil {
 			cfg.Agents.Definitions = map[string]config.AgentDefinition{}
 		}
-		write := &subagentWrite{cfg: *cfg, agentID: id, def: cfg.Agents.Definitions[id]}
+		write := &subagentWrite{cfg: *cfg, agentID: id, def: cfg.Agents.Definitions[id], models: &persisted}
 		var err error
 		payload, err = mutate(write)
 		if err != nil {
@@ -553,8 +595,13 @@ func (s *Server) writeAgentSubagents(w http.ResponseWriter, r *http.Request, mut
 		write.store()
 		// The validator is the loader's own: a configuration the CLI would
 		// reject must not reach the section, and its sentence names the entry
-		// and the rule.
-		if err := config.ValidateAgentSubagents(id, write.def, agent.PublicSubagentNames, agent.SystemSubagentNames); err != nil {
+		// and the rule. A model without the legacy "provider/model" shape is a
+		// model reference (a fb_llm_models row id, plan 262), and resolves
+		// against the same root the write is landing in.
+		if err := config.ValidateAgentSubagents(id, write.def, agent.PublicSubagentNames, agent.SystemSubagentNames, func(ref string) bool {
+			_, ok := config.ResolveModelRef(write.models, id, ref)
+			return ok
+		}); err != nil {
 			return subagentBadRequest("%v", err)
 		}
 		*cfg = write.cfg
@@ -706,19 +753,19 @@ func (s *Server) handleAgentSubagentCreate(w http.ResponseWriter, r *http.Reques
 		}
 		// A new subagent goes to the front: the list is what the user just
 		// changed, and the row they created is the row they want to look at.
-		write.def.Subagents = append([]config.SubagentConfig{subagentEntryFrom(name, in, nil)}, write.def.Subagents...)
+		write.def.Subagents = append([]config.SubagentConfig{subagentEntryFrom(write, name, in, nil)}, write.def.Subagents...)
 		return map[string]any{"name": name}, nil
 	})
 }
 
 // subagentEntryFrom builds a custom entry from a request, with the route's name
 // and the stored switch carried forward.
-func subagentEntryFrom(name string, in config.SubagentConfig, stored *bool) config.SubagentConfig {
+func subagentEntryFrom(write *subagentWrite, name string, in config.SubagentConfig, stored *bool) config.SubagentConfig {
 	entry := config.SubagentConfig{
 		Name:            subagentKey(name),
 		Description:     strings.TrimSpace(in.Description),
 		SystemPrompt:    strings.TrimSpace(in.SystemPrompt),
-		Model:           strings.TrimSpace(in.Model),
+		Model:           subagentModelRef(write, in.Model),
 		ReasoningEffort: strings.TrimSpace(in.ReasoningEffort),
 		Tools:           strings.TrimSpace(in.Tools),
 		Continuable:     in.Continuable,
@@ -728,6 +775,22 @@ func subagentEntryFrom(name string, in config.SubagentConfig, stored *bool) conf
 		entry.AllowedTools = subagentAllowedTools(in.AllowedTools)
 	}
 	return entry
+}
+
+// subagentModelRef puts a subagent's model choice into the form the
+// configuration stores: the id of the model row it names. A page that still
+// sends a legacy "provider/model" label is translated, so the stored reference
+// survives a row's endpoint changing; a value nothing carries is left as it is
+// for the validator to refuse with its own sentence.
+func subagentModelRef(write *subagentWrite, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if entry, found := config.ResolveModelRef(write.models, write.agentID, ref); found {
+		return strings.TrimSpace(entry.ID)
+	}
+	return ref
 }
 
 // subagentAllowedTools normalises a chosen tool set: trimmed, de-duplicated, and
@@ -760,7 +823,7 @@ func (s *Server) handleAgentSubagentUpdate(w http.ResponseWriter, r *http.Reques
 			// never moves here, and the stored switch stands unless the request
 			// carried one.
 			index := subagentEntryIndex(write.def.Subagents, name)
-			write.def.Subagents[index] = subagentEntryFrom(name, in, write.def.Subagents[index].Enabled)
+			write.def.Subagents[index] = subagentEntryFrom(write, name, in, write.def.Subagents[index].Enabled)
 			return map[string]any{"name": name}, nil
 		case subagentKindBuiltin:
 			var in subagentBuiltinWrite
@@ -770,7 +833,7 @@ func (s *Server) handleAgentSubagentUpdate(w http.ResponseWriter, r *http.Reques
 			stored := subagentEntry(write.def, name)
 			entry := config.SubagentConfig{
 				Name:            name,
-				Model:           strings.TrimSpace(in.Model),
+				Model:           subagentModelRef(write, in.Model),
 				ReasoningEffort: strings.TrimSpace(in.ReasoningEffort),
 				SystemPrompt:    strings.TrimSpace(in.SystemPrompt),
 				Enabled:         subagentEnabledAfterUpdate(stored.Enabled, in.Enabled),

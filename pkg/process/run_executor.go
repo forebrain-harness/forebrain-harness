@@ -432,12 +432,15 @@ func (r *PlanReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanR
 	if _, err := run.ConfiguredModelClient(r.Config, r.AgentName, r.Model.Provider, r.Model.Model); err != nil {
 		return turn.PlanReviewResult{}, err
 	}
+	// The reviewer model is chosen as a pair; the row it means is resolved
+	// here so a twin row of the same pair cannot serve the review instead.
+	modelID := run.ModelIDForAgentModel(r.Config, r.AgentName, r.Model.Provider, r.Model.Model)
 	runCtx := tool.WithStepHook(ctx, r.StepHook)
 	started := time.Now()
 	text, err := r.Runner.RunPlanReviewSubagent(
 		runCtx,
 		turn.BuildPrompt(req),
-		run.SubagentModelOverride{Provider: r.Model.Provider, Model: r.Model.Model},
+		run.SubagentModelOverride{ModelID: modelID, Provider: r.Model.Provider, Model: r.Model.Model},
 		r.Approve,
 	)
 	if err != nil {

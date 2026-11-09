@@ -250,31 +250,7 @@ func resolveCacheAddr(ctx Context) string {
 	return ctx.Config.Gateway.HTTPAddr
 }
 
-// Two primary agents can run the same kind of channel with different
-// credentials, so the variable each secret is stored under carries the agent's
-// id. A shared name would let one agent's token silently become the other's.
-func TestChannelSecretEnvNameIsScopedToTheAgent(t *testing.T) {
-	cases := []struct {
-		agent  string
-		suffix string
-		want   string
-	}{
-		{"main", "TELEGRAM_BOT_TOKEN", "FOREBRAIN_MAIN_TELEGRAM_BOT_TOKEN"},
-		{"acme", "feishu_app_secret", "FOREBRAIN_ACME_FEISHU_APP_SECRET"},
-		{"code-review", "SLACK_SECRET", "FOREBRAIN_CODE_REVIEW_SLACK_SECRET"},
-		{" ", "SLACK_SECRET", "FOREBRAIN_SLACK_SECRET"},
-	}
-	for _, tc := range cases {
-		if got := ChannelSecretEnvName(tc.agent, tc.suffix); got != tc.want {
-			t.Errorf("ChannelSecretEnvName(%q, %q) = %q, want %q", tc.agent, tc.suffix, got, tc.want)
-		}
-	}
-	if ChannelSecretEnvName("main", "SLACK_SECRET") == ChannelSecretEnvName("acme", "SLACK_SECRET") {
-		t.Fatal("two agents share one variable for the same channel secret")
-	}
-}
-
-func TestExecuteStoresAPIKeyReferenceInConfig(t *testing.T) {
+func TestExecuteStoresAPIKeyInTheModelTable(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	rt := Context{
@@ -295,13 +271,15 @@ func TestExecuteStoresAPIKeyReferenceInConfig(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	// The key is stored in plaintext in the agents section (owner ruling
-	// 2026-10-30, plan 188 W9/W14): neither the home's .env nor any other
-	// file receives it.
+	// The key is stored in plaintext in the model table (owner ruling
+	// 2026-10-30, plans 188 W9/W14 and 262): neither the home's .env nor any
+	// file receives it, and the agents section carries a row id instead.
 	cfg := executeStoredConfig(t, rt)
-	entries := cfg.Agents.Definitions["main"].LLMProviders
-	if len(entries) == 0 || entries[0].APIKey != "sk-live-secret" {
-		t.Fatalf("stored agents section = %+v, want the plaintext key", entries)
+	if len(cfg.LLMModels) != 1 || cfg.LLMModels[0].APIKey != "sk-live-secret" {
+		t.Fatalf("model rows = %+v, want the plaintext key", cfg.LLMModels)
+	}
+	if got := cfg.Agents.Definitions["main"].DefaultModel; got != cfg.LLMModels[0].ID {
+		t.Fatalf("default_model = %q, want the row id %q", got, cfg.LLMModels[0].ID)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".env")); !os.IsNotExist(err) {
 		t.Fatalf(".env stat error = %v, want not exists", err)

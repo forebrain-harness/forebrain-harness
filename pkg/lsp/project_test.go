@@ -69,7 +69,7 @@ func TestLoadProjectServers(t *testing.T) {
 		if len(m) != 0 {
 			t.Fatalf("m=%v", m)
 		}
-		want := "lsp_servers.yaml contains a plaintext secret; use ${ENV_NAME} resolved from ~/.forebrain/.env"
+		want := "lsp_servers.yaml contains a plaintext secret; use ${ENV_NAME} and set it under Settings · Variables"
 		if len(notes) != 1 || notes[0] != want {
 			t.Fatalf("notes=%q", notes)
 		}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -112,6 +114,18 @@ func SetSectionValidator(fn SectionValidator) {
 		return
 	}
 	sectionValidator.Store(sectionValidatorHolder{fn: fn})
+}
+
+// CurrentSectionValidator is the validator SetSectionValidator installed last,
+// nil when none is installed. A caller that binds the gate to a database of its
+// own for one write — a setup flow that opens its own handle — reads this first
+// and puts it back afterwards, so the process keeps the gate over the database
+// it actually keeps instead of one that closed with the call.
+func CurrentSectionValidator() SectionValidator {
+	if h, ok := sectionValidator.Load().(sectionValidatorHolder); ok {
+		return h.fn
+	}
+	return nil
 }
 
 // InvalidSectionError marks a write the section validator refused: the value
@@ -395,5 +409,471 @@ func (s *ConfigStore) SaveMCPOAuthRow(ctx context.Context, projectKey, serverNam
 	}
 	_, err := dbx.Exec(ctx, s.DB, mcpOAuthRowUpsertSQL.For(dbx.DialectOf(s.DB)),
 		projectKey, serverName, string(value), time.Now().UnixMilli())
+	return err
+}
+
+// The install-wide model configurations, the sibling table of fb_config and
+// shared by every primary agent.
+//
+// LLMModel is one fb_llm_models row: one way this install can reach a model.
+// The same provider+model may be configured several times — different
+// base_url, api_path or key — so callers name a row by its ID, never by
+// "provider/model". A nil capability field means "use the model catalog"; a
+// non-nil one overrides it for this row only (owner 2026-11-07).
+type LLMModel struct {
+	ID         string
+	Provider   string
+	Model      string
+	BaseURL    string
+	APIPath    string
+	APIKey     string
+	ParamsJSON string
+
+	CapImages       *bool // nil = catalog
+	CapPDF          *bool
+	CapVideo        *bool
+	CapAudio        *bool
+	CapReasoning    *bool
+	CapReasoningOff *bool
+
+	CapEfforts       []string // nil = catalog; empty (non-nil) = explicitly no levels
+	CapDefaultEffort string   // '' = catalog / request default
+	CapContextWindow *int64   // nil = catalog
+	CapMaxOutput     *int64   // nil = catalog
+
+	// Source is the subscription id that wrote the row ('' = added by hand);
+	// SourcePlan the plan inside it. Neither is part of the identity.
+	Source     string
+	SourcePlan string
+
+	// URLVerbatim sends requests to BaseURL exactly as stored (「自定义协议」);
+	// APIPath still names the wire protocol. Not part of the identity.
+	URLVerbatim bool
+
+	CreatedAt int64 // unix ms
+	UpdatedAt int64 // unix ms
+}
+
+// ErrLLMModelExists reports that another row already has this identity.
+type ErrLLMModelExists struct{ ID string }
+
+func (e ErrLLMModelExists) Error() string {
+	return "a model with this provider, model, base URL and API path is already configured (" + e.ID + ")"
+}
+
+// ErrLLMModelNotFound reports a row id that no configuration carries.
+var ErrLLMModelNotFound = errors.New("model configuration not found")
+
+// LLMModelStore reads and writes the install's model configurations. The table
+// is global — every primary agent shares it — so this store takes no agent id.
+type LLMModelStore struct{ DB *sql.DB }
+
+// NormalizeLLMModelIdentity puts the four identity fields into the one form
+// the unique index and the lookups use, so "OpenAI" and "openai", or a
+// base_url with a trailing slash, cannot slip two rows past a duplicate check.
+// Provider is case-folded; Model keeps its case (some services compare it
+// case-sensitively and custom models may carry a vendor prefix). An empty
+// api_path stays empty: filling in a protocol's default path needs provider
+// knowledge this layer does not have.
+func NormalizeLLMModelIdentity(m *LLMModel) {
+	if m == nil {
+		return
+	}
+	m.Provider = strings.ToLower(strings.TrimSpace(m.Provider))
+	m.Model = strings.TrimSpace(m.Model)
+	m.BaseURL = strings.TrimRight(strings.TrimSpace(m.BaseURL), "/")
+	m.APIPath = strings.TrimSpace(m.APIPath)
+	if m.APIPath != "" && !strings.HasPrefix(m.APIPath, "/") {
+		m.APIPath = "/" + m.APIPath
+	}
+	m.APIPath = strings.TrimRight(m.APIPath, "/")
+}
+
+const llmModelColumns = `id, provider, model, base_url, api_path, api_key, params_json,
+cap_images, cap_pdf, cap_video, cap_audio, cap_reasoning, cap_reasoning_off,
+cap_efforts_json, cap_default_effort, cap_context_window, cap_max_output,
+source, source_plan, url_verbatim, created_at, updated_at`
+
+var (
+	llmModelListSQL = dbx.SQL{
+		SQLite:   `SELECT ` + llmModelColumns + ` FROM fb_llm_models ORDER BY created_at, id`,
+		MySQL:    `SELECT ` + llmModelColumns + ` FROM fb_llm_models ORDER BY created_at, id`,
+		Postgres: `SELECT ` + llmModelColumns + ` FROM fb_llm_models ORDER BY created_at, id`,
+	}
+	llmModelGetSQL = dbx.SQL{
+		SQLite:   `SELECT ` + llmModelColumns + ` FROM fb_llm_models WHERE id=?`,
+		MySQL:    `SELECT ` + llmModelColumns + ` FROM fb_llm_models WHERE id=?`,
+		Postgres: `SELECT ` + llmModelColumns + ` FROM fb_llm_models WHERE id=$1`,
+	}
+	llmModelFindIdentityPlaceholders = dbx.SQL{
+		SQLite:   `SELECT ` + llmModelColumns + ` FROM fb_llm_models WHERE provider=? AND model=? AND base_url=? AND api_path=?`,
+		MySQL:    `SELECT ` + llmModelColumns + ` FROM fb_llm_models WHERE provider=? AND model=? AND base_url=? AND api_path=?`,
+		Postgres: `SELECT ` + llmModelColumns + ` FROM fb_llm_models WHERE provider=$1 AND model=$2 AND base_url=$3 AND api_path=$4`,
+	}
+	llmModelInsertSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL:  `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		Postgres: `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES
+		($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+	}
+	llmModelUpdateSQL = dbx.SQL{
+		SQLite: `UPDATE fb_llm_models SET provider=?, model=?, base_url=?, api_path=?, api_key=?, params_json=?,
+		cap_images=?, cap_pdf=?, cap_video=?, cap_audio=?, cap_reasoning=?, cap_reasoning_off=?,
+		cap_efforts_json=?, cap_default_effort=?, cap_context_window=?, cap_max_output=?,
+		source=?, source_plan=?, url_verbatim=?, updated_at=? WHERE id=?`,
+		MySQL: `UPDATE fb_llm_models SET provider=?, model=?, base_url=?, api_path=?, api_key=?, params_json=?,
+		cap_images=?, cap_pdf=?, cap_video=?, cap_audio=?, cap_reasoning=?, cap_reasoning_off=?,
+		cap_efforts_json=?, cap_default_effort=?, cap_context_window=?, cap_max_output=?,
+		source=?, source_plan=?, url_verbatim=?, updated_at=? WHERE id=?`,
+		Postgres: `UPDATE fb_llm_models SET provider=$1, model=$2, base_url=$3, api_path=$4, api_key=$5, params_json=$6,
+		cap_images=$7, cap_pdf=$8, cap_video=$9, cap_audio=$10, cap_reasoning=$11, cap_reasoning_off=$12,
+		cap_efforts_json=$13, cap_default_effort=$14, cap_context_window=$15, cap_max_output=$16,
+		source=$17, source_plan=$18, url_verbatim=$19, updated_at=$20 WHERE id=$21`,
+	}
+	llmModelDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_llm_models WHERE id=?`,
+		MySQL:    `DELETE FROM fb_llm_models WHERE id=?`,
+		Postgres: `DELETE FROM fb_llm_models WHERE id=$1`,
+	}
+)
+
+func (s *LLMModelStore) ok() bool { return s != nil && s.DB != nil }
+
+// List returns every configuration, oldest first, with id breaking ties.
+func (s *LLMModelStore) List(ctx context.Context) ([]LLMModel, error) {
+	if !s.ok() {
+		return nil, fmt.Errorf("model store unavailable")
+	}
+	rows, err := s.DB.QueryContext(ctx, llmModelListSQL.For(dbx.DialectOf(s.DB)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LLMModel
+	for rows.Next() {
+		m, err := scanLLMModel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// Get returns one configuration by id.
+func (s *LLMModelStore) Get(ctx context.Context, id string) (LLMModel, error) {
+	if !s.ok() {
+		return LLMModel{}, fmt.Errorf("model store unavailable")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return LLMModel{}, ErrLLMModelNotFound
+	}
+	m, err := scanLLMModel(s.DB.QueryRowContext(ctx, llmModelGetSQL.For(dbx.DialectOf(s.DB)), id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return LLMModel{}, ErrLLMModelNotFound
+	}
+	if err != nil {
+		return LLMModel{}, err
+	}
+	return m, nil
+}
+
+// FindByIdentity returns the row with this normalized identity, if any. The
+// values are normalized here, so a caller may pass what a person typed.
+func (s *LLMModelStore) FindByIdentity(ctx context.Context, provider, model, baseURL, apiPath string) (LLMModel, bool, error) {
+	if !s.ok() {
+		return LLMModel{}, false, fmt.Errorf("model store unavailable")
+	}
+	candidate := LLMModel{Provider: provider, Model: model, BaseURL: baseURL, APIPath: apiPath}
+	NormalizeLLMModelIdentity(&candidate)
+	m, err := scanLLMModel(s.DB.QueryRowContext(ctx, llmModelFindIdentityPlaceholders.For(dbx.DialectOf(s.DB)),
+		candidate.Provider, candidate.Model, candidate.BaseURL, candidate.APIPath))
+	if errors.Is(err, sql.ErrNoRows) {
+		return LLMModel{}, false, nil
+	}
+	if err != nil {
+		return LLMModel{}, false, err
+	}
+	return m, true, nil
+}
+
+// Create stores a new configuration, filling its id and timestamps. The
+// duplicate check is the normal path; the unique index is the race-free
+// authority behind it, and a concurrent insert is translated into the same
+// ErrLLMModelExists.
+func (s *LLMModelStore) Create(ctx context.Context, m LLMModel) (LLMModel, error) {
+	if !s.ok() {
+		return LLMModel{}, fmt.Errorf("model store unavailable")
+	}
+	NormalizeLLMModelIdentity(&m)
+	if m.Provider == "" || m.Model == "" {
+		return LLMModel{}, fmt.Errorf("a model configuration requires a provider and a model")
+	}
+	if hit, found, err := s.FindByIdentity(ctx, m.Provider, m.Model, m.BaseURL, m.APIPath); err != nil {
+		return LLMModel{}, err
+	} else if found {
+		return LLMModel{}, ErrLLMModelExists{ID: hit.ID}
+	}
+	m.ID = strings.TrimSpace(m.ID)
+	if m.ID == "" {
+		m.ID = NewID("llm")
+	}
+	now := time.Now().UnixMilli()
+	m.CreatedAt, m.UpdatedAt = now, now
+	if _, err := dbx.Exec(ctx, s.DB, llmModelInsertSQL.For(dbx.DialectOf(s.DB)), llmModelInsertArgs(m)...); err != nil {
+		if dbx.IsUniqueViolation(err) {
+			if hit, found, cerr := s.FindByIdentity(ctx, m.Provider, m.Model, m.BaseURL, m.APIPath); cerr == nil && found {
+				return LLMModel{}, ErrLLMModelExists{ID: hit.ID}
+			}
+		}
+		return LLMModel{}, err
+	}
+	return m, nil
+}
+
+// Update rewrites the row named by m.ID, keeping its creation time. Changing
+// the identity onto another row's is refused the same way Create refuses a
+// duplicate.
+func (s *LLMModelStore) Update(ctx context.Context, m LLMModel) (LLMModel, error) {
+	if !s.ok() {
+		return LLMModel{}, fmt.Errorf("model store unavailable")
+	}
+	id := strings.TrimSpace(m.ID)
+	existing, err := s.Get(ctx, id)
+	if err != nil {
+		return LLMModel{}, err
+	}
+	NormalizeLLMModelIdentity(&m)
+	m.ID = id
+	if m.Provider == "" || m.Model == "" {
+		return LLMModel{}, fmt.Errorf("a model configuration requires a provider and a model")
+	}
+	if hit, found, ferr := s.FindByIdentity(ctx, m.Provider, m.Model, m.BaseURL, m.APIPath); ferr != nil {
+		return LLMModel{}, ferr
+	} else if found && hit.ID != m.ID {
+		return LLMModel{}, ErrLLMModelExists{ID: hit.ID}
+	}
+	m.CreatedAt = existing.CreatedAt
+	m.UpdatedAt = time.Now().UnixMilli()
+	if _, err := dbx.Exec(ctx, s.DB, llmModelUpdateSQL.For(dbx.DialectOf(s.DB)),
+		llmModelUpdateArgs(m)...); err != nil {
+		if dbx.IsUniqueViolation(err) {
+			if hit, found, cerr := s.FindByIdentity(ctx, m.Provider, m.Model, m.BaseURL, m.APIPath); cerr == nil && found {
+				return LLMModel{}, ErrLLMModelExists{ID: hit.ID}
+			}
+		}
+		return LLMModel{}, err
+	}
+	return m, nil
+}
+
+// Delete removes the row, reporting ErrLLMModelNotFound when it is not there.
+func (s *LLMModelStore) Delete(ctx context.Context, id string) error {
+	if !s.ok() {
+		return fmt.Errorf("model store unavailable")
+	}
+	id = strings.TrimSpace(id)
+	res, err := dbx.Exec(ctx, s.DB, llmModelDeleteSQL.For(dbx.DialectOf(s.DB)), id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrLLMModelNotFound
+	}
+	return nil
+}
+
+func llmModelInsertArgs(m LLMModel) []any {
+	return []any{
+		m.ID, m.Provider, m.Model, m.BaseURL, m.APIPath, m.APIKey, m.ParamsJSON,
+		boolPtrToInt(m.CapImages), boolPtrToInt(m.CapPDF), boolPtrToInt(m.CapVideo),
+		boolPtrToInt(m.CapAudio), boolPtrToInt(m.CapReasoning), boolPtrToInt(m.CapReasoningOff),
+		llmModelEffortsJSON(m.CapEfforts), m.CapDefaultEffort,
+		int64PtrToNull(m.CapContextWindow), int64PtrToNull(m.CapMaxOutput),
+		m.Source, m.SourcePlan, boolToInt(m.URLVerbatim), m.CreatedAt, m.UpdatedAt,
+	}
+}
+
+func llmModelUpdateArgs(m LLMModel) []any {
+	return []any{
+		m.Provider, m.Model, m.BaseURL, m.APIPath, m.APIKey, m.ParamsJSON,
+		boolPtrToInt(m.CapImages), boolPtrToInt(m.CapPDF), boolPtrToInt(m.CapVideo),
+		boolPtrToInt(m.CapAudio), boolPtrToInt(m.CapReasoning), boolPtrToInt(m.CapReasoningOff),
+		llmModelEffortsJSON(m.CapEfforts), m.CapDefaultEffort,
+		int64PtrToNull(m.CapContextWindow), int64PtrToNull(m.CapMaxOutput),
+		m.Source, m.SourcePlan, boolToInt(m.URLVerbatim), m.UpdatedAt, m.ID,
+	}
+}
+
+func llmModelEffortsJSON(efforts []string) any {
+	if efforts == nil {
+		return ""
+	}
+	raw, err := json.Marshal(efforts)
+	if err != nil {
+		// Only strings reach the encoder; a failure is impossible and the
+		// catalog's default is the safe answer.
+		return ""
+	}
+	return string(raw)
+}
+
+func scanLLMModel(scanner interface{ Scan(...any) error }) (LLMModel, error) {
+	var (
+		m                                                  LLMModel
+		images, pdf, video, audio, reasoning, reasoningOff sql.NullInt64
+		effortsJSON                                        string
+		contextWindow, maxOutput                           sql.NullInt64
+		urlVerbatim                                        int
+	)
+	if err := scanner.Scan(
+		&m.ID, &m.Provider, &m.Model, &m.BaseURL, &m.APIPath, &m.APIKey, &m.ParamsJSON,
+		&images, &pdf, &video, &audio, &reasoning, &reasoningOff,
+		&effortsJSON, &m.CapDefaultEffort, &contextWindow, &maxOutput,
+		&m.Source, &m.SourcePlan, &urlVerbatim, &m.CreatedAt, &m.UpdatedAt,
+	); err != nil {
+		return LLMModel{}, err
+	}
+	m.CapImages = boolFromNull(images)
+	m.CapPDF = boolFromNull(pdf)
+	m.CapVideo = boolFromNull(video)
+	m.CapAudio = boolFromNull(audio)
+	m.CapReasoning = boolFromNull(reasoning)
+	m.CapReasoningOff = boolFromNull(reasoningOff)
+	m.CapContextWindow = int64FromNull(contextWindow)
+	m.CapMaxOutput = int64FromNull(maxOutput)
+	m.URLVerbatim = urlVerbatim != 0
+	if strings.TrimSpace(effortsJSON) != "" {
+		if err := json.Unmarshal([]byte(effortsJSON), &m.CapEfforts); err != nil {
+			return LLMModel{}, fmt.Errorf("decode model reasoning levels: %w", err)
+		}
+		if m.CapEfforts == nil {
+			m.CapEfforts = []string{}
+		}
+	}
+	return m, nil
+}
+
+func boolFromNull(v sql.NullInt64) *bool {
+	if !v.Valid {
+		return nil
+	}
+	b := v.Int64 != 0
+	return &b
+}
+
+func int64FromNull(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	n := v.Int64
+	return &n
+}
+
+// The operator's variables, the other sibling table of fb_config: the ${NAME}
+// values MCP and LSP server entries resolve (plan 259, replacing the home .env).
+//
+// EnvVar is one operator-owned variable. MCP and LSP server entries reference
+// these as ${NAME}; the table is the only source for a project-scoped entry,
+// so a repository cannot read the host's environment (owner 2026-11-07).
+type EnvVar struct {
+	Name        string
+	Value       string
+	UpdatedAtMs int64
+}
+
+// ErrEnvVarName reports a name that is not a usable ${NAME} reference.
+var ErrEnvVarName = errors.New("variable name must match [A-Za-z_][A-Za-z0-9_]*")
+
+// envVarNamePattern is the same character set the LSP's envRefPattern accepts,
+// so a name stored here is one a server entry can reference.
+var envVarNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// EnvVarStore reads and writes the operator's variables.
+type EnvVarStore struct{ DB *sql.DB }
+
+var (
+	envVarListSQL = dbx.SQL{
+		SQLite:   `SELECT name, value, updated_at_ms FROM fb_env_vars ORDER BY name`,
+		MySQL:    `SELECT name, value, updated_at_ms FROM fb_env_vars ORDER BY name`,
+		Postgres: `SELECT name, value, updated_at_ms FROM fb_env_vars ORDER BY name`,
+	}
+	envVarSetSQL = dbx.SQL{
+		SQLite: `INSERT INTO fb_env_vars(name, value, updated_at_ms) VALUES (?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at_ms=excluded.updated_at_ms`,
+		MySQL: `INSERT INTO fb_env_vars(name, value, updated_at_ms) VALUES (?, ?, ?)
+		ON DUPLICATE KEY UPDATE value=VALUES(value), updated_at_ms=VALUES(updated_at_ms)`,
+		Postgres: `INSERT INTO fb_env_vars(name, value, updated_at_ms) VALUES ($1, $2, $3)
+		ON CONFLICT (name) DO UPDATE SET value=excluded.value, updated_at_ms=excluded.updated_at_ms`,
+	}
+	envVarDeleteSQL = dbx.SQL{
+		SQLite:   `DELETE FROM fb_env_vars WHERE name=?`,
+		MySQL:    `DELETE FROM fb_env_vars WHERE name=?`,
+		Postgres: `DELETE FROM fb_env_vars WHERE name=$1`,
+	}
+)
+
+func (s *EnvVarStore) ok() bool { return s != nil && s.DB != nil }
+
+// List returns every variable, ordered by name.
+func (s *EnvVarStore) List(ctx context.Context) ([]EnvVar, error) {
+	if !s.ok() {
+		return nil, fmt.Errorf("variable store unavailable")
+	}
+	rows, err := s.DB.QueryContext(ctx, envVarListSQL.For(dbx.DialectOf(s.DB)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []EnvVar
+	for rows.Next() {
+		var v EnvVar
+		if err := rows.Scan(&v.Name, &v.Value, &v.UpdatedAtMs); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// Map returns every variable as name → value.
+func (s *EnvVarStore) Map(ctx context.Context) (map[string]string, error) {
+	list, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(list))
+	for _, v := range list {
+		out[v.Name] = v.Value
+	}
+	return out, nil
+}
+
+// Set stores one variable, overwriting the value a previous Set wrote. Only a
+// name matching the ${NAME} character set is accepted.
+func (s *EnvVarStore) Set(ctx context.Context, name, value string) error {
+	if !s.ok() {
+		return fmt.Errorf("variable store unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if !envVarNamePattern.MatchString(name) {
+		return ErrEnvVarName
+	}
+	_, err := dbx.Exec(ctx, s.DB, envVarSetSQL.For(dbx.DialectOf(s.DB)),
+		name, value, time.Now().UnixMilli())
+	return err
+}
+
+// Delete removes one variable; a name that is not there is not an error.
+func (s *EnvVarStore) Delete(ctx context.Context, name string) error {
+	if !s.ok() {
+		return fmt.Errorf("variable store unavailable")
+	}
+	_, err := dbx.Exec(ctx, s.DB, envVarDeleteSQL.For(dbx.DialectOf(s.DB)), strings.TrimSpace(name))
 	return err
 }

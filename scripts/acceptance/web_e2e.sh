@@ -135,12 +135,10 @@ wait "$UI_BUILD_PID" || { cat "$WORK/ui-build.log" >&2; die "frontend build fail
 "$REPO/scripts/install-dictionary.sh" "$WORK"
 "$REPO/scripts/install-assets.sh" "$WORK"
 
-# 3. This run's gateway token. The yaml references it via ${ENV}: plaintext
-#    secrets in config are rejected at startup by design.
+# 3. This run's gateway token. The yaml references it via ${ENV}, and the
+#    process environment is the only thing that resolves it (the home has no
+#    .env any more, plan 268): the gateway below is started with it exported.
 TOKEN="$(openssl rand -hex 32)"
-umask 077
-printf 'FOREBRAIN_GATEWAY_TOKEN=%s\n' "$TOKEN" > "$HOME_DIR/.env"
-umask 022
 
 # 4. Gateway + agent config.
 if [ "$REAL_LLM" = "1" ]; then
@@ -269,6 +267,7 @@ fi
 #    kills only the wrapper, and the orphaned gateway poisons the next run
 #    (bind panic here, and a stale token answering every request).
 ( cd "$PROJ" && exec env FAKE_LLM_KEY=sk-local-fake FOREBRAIN_HOME="$HOME_DIR" \
+    FOREBRAIN_GATEWAY_TOKEN="$TOKEN" \
     FOREBRAIN_STATIC_DIST="$WEBUI" "$BIN" gateway start \
     > "$WORK/gateway.out" 2> "$WORK/gateway.err" ) &
 GW_PID=$!

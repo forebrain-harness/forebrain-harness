@@ -810,8 +810,8 @@ describe('ChatView conversation bubbles', () => {
       model: 'deepseek-chat',
       effort: '',
       options: [
-        { provider: 'zhipuai', model: 'glm-5.3-flash', label: 'GLM 5.3 Flash', efforts: [], supportsImages: true },
-        { provider: 'deepseek', model: 'deepseek-chat', label: 'DeepSeek Chat', efforts: [], supportsImages: false },
+        { id: 'm-glm', provider: 'zhipuai', model: 'glm-5.3-flash', label: 'GLM 5.3 Flash', efforts: [], supportsImages: true },
+        { id: 'm-chat', provider: 'deepseek', model: 'deepseek-chat', label: 'DeepSeek Chat', efforts: [], supportsImages: false },
       ],
     })
     const bySession = vi.spyOn(forebrainApi, 'sessionModel')
@@ -840,8 +840,8 @@ describe('ChatView conversation bubbles', () => {
       model: 'deepseek-v4-pro',
       effort: '',
       options: [
-        { provider: 'deepseek', model: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', efforts: [], supportsImages: false },
-        { provider: 'deepseek', model: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', efforts: [], supportsImages: true },
+        { id: 'm-pro', provider: 'deepseek', model: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', efforts: [], supportsImages: false },
+        { id: 'm-flash', provider: 'deepseek', model: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', efforts: [], supportsImages: true },
       ],
     })
     try {

@@ -8,7 +8,7 @@
 #     never consulted — so a Service name or hostname cannot substitute.
 #   - The internal endpoints are paths on the SAME listener the browser
 #     uses (port 6060); there is no second port to expose.
-#   - The init container copies the Secret's forebrain.yaml/.env only when
+#   - The init container copies the Secret's forebrain.yaml only when
 #     the shared home has none: two replicas booting a brand-new home would
 #     otherwise race, and the gateway token on a brand-new home is
 #     last-writer-wins.
@@ -83,10 +83,8 @@ spec:
               # never read a half-written file (plan 213 §3.6).
               cp /seed/forebrain.yaml "$home/forebrain.yaml.tmp"
               mv "$home/forebrain.yaml.tmp" "$home/forebrain.yaml"
-              cp /seed/env "$home/.env.tmp"
-              mv "$home/.env.tmp" "$home/.env"
-              chmod 600 "$home/forebrain.yaml" "$home/.env"
-              echo "seed-home: wrote first-boot $home/forebrain.yaml and .env"
+              chmod 600 "$home/forebrain.yaml"
+              echo "seed-home: wrote first-boot $home/forebrain.yaml"
           resources:
             requests:
               memory: 32Mi
@@ -112,6 +110,13 @@ spec:
               containerPort: 6060
               protocol: TCP
           env:
+            # The gateway token comes from the Secret (plan 268): the seeded
+            # config references it, and no .env carries it.
+            - name: FOREBRAIN_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: forebrain-config
+                  key: gateway-token
             - name: POD_IP
               valueFrom:
                 fieldRef:

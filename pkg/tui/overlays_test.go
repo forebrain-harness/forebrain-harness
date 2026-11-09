@@ -1964,6 +1964,63 @@ func TestShortSelectIgnoresTypingAndKeepsTheKeyboardOnTheRows(t *testing.T) {
 	}
 }
 
+// A /model row whose endpoint does not fit the description column keeps its api
+// path and elides the base URL: the path is what tells two endpoints of one
+// provider apart, so a narrow terminal must not cut it off (plan 267).
+func TestModelPickerKeepsTheEndpointPathWhenTheColumnIsNarrow(t *testing.T) {
+	const url = "https://ark.cn-beijing.volces.com/api/coding/v1/messages"
+	const tail = "/v1/messages"
+	elided := elideEndpoint(url, tail, 40)
+	if len(elided) != 1 {
+		t.Fatalf("rows = %#v, want one", elided)
+	}
+	if !strings.HasSuffix(elided[0], tail) {
+		t.Fatalf("elided = %q, want the path kept", elided[0])
+	}
+	if !strings.Contains(elided[0], "…") {
+		t.Fatalf("elided = %q, want the cut marked", elided[0])
+	}
+	if got := displayLineWidth(elided[0]); got > 40 {
+		t.Fatalf("elided %q is %d cells, want it to fit 40", elided[0], got)
+	}
+	if !strings.HasPrefix(url, strings.TrimSuffix(elided[0], "…"+tail)) {
+		t.Fatalf("elided = %q, want a prefix of the address", elided[0])
+	}
+
+	// An endpoint that fits is shown as it is.
+	if got := elideEndpoint(url, tail, displayLineWidth(url)); !reflect.DeepEqual(got, []string{url}) {
+		t.Fatalf("fit = %#v", got)
+	}
+
+	// A 「自定义协议」 row names no path, so its whole address takes the cut.
+	if got := elideEndpoint("http://127.0.0.1:8731/v1", "", 20); !reflect.DeepEqual(got, []string{"http://127.0.0.1:873"}) {
+		t.Fatalf("verbatim = %#v", got)
+	}
+
+	// The two-column row hands the description column its width, so the same
+	// rule holds where the row is laid out.
+	line := panelLine{col: "custom/qwen3-coder", colWidth: 20, text: url, elideTail: tail}
+	rows := line.rows(60)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %#v, want one line", rows)
+	}
+	if !strings.HasSuffix(strings.TrimRight(rows[0], " "), tail) {
+		t.Fatalf("row = %q, want the path at its end", rows[0])
+	}
+
+	// A name too wide for its column stacks the row, and the description under
+	// it keeps the path the same way.
+	stacked := panelLine{col: "custom/a-very-long-model-name-that-cannot-fit", colWidth: 12, text: url, elideTail: tail}
+	rows = stacked.rowsStacks(40, true)
+	if len(rows) < 2 {
+		t.Fatalf("stacked rows = %#v, want the name and the description", rows)
+	}
+	last := strings.TrimRight(rows[len(rows)-1], " ")
+	if !strings.HasSuffix(last, tail) || !strings.Contains(last, "…") {
+		t.Fatalf("stacked description = %q, want the path kept and the cut marked", last)
+	}
+}
+
 func TestSelectRichKeyboardMovesBetweenTheFilterAndTheRows(t *testing.T) {
 	// ↓ → row 1, ↑ → row 0, ↑ → the filter, ↓ → row 0, ↓ → row 1.
 	sel := pickerKeys(t, keyDown+keyUp+keyUp+keyDown+keyDown+keyEnter)

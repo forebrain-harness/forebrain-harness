@@ -20,7 +20,7 @@ func TestTestConnectionConnectsListsToolsAndLetsGo(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	res, err := TestConnection(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(0))
+	res, err := TestConnection(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(0))
 	if err != nil {
 		t.Fatalf("TestConnection: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestTestConnectionReportsAServerThatWillNotStart(t *testing.T) {
 	defer cancel()
 
 	missing := filepath.Join(t.TempDir(), "not-a-command")
-	res, err := TestConnection(ctx, t.TempDir(), t.TempDir(), appcfg.MCPServerConfig{
+	res, err := TestConnection(ctx, t.TempDir(), nil, t.TempDir(), appcfg.MCPServerConfig{
 		Name:      "broken",
 		Transport: "stdio",
 		Command:   missing,
@@ -76,7 +76,7 @@ func TestTestConnectionReclaimsTheChildWhenTheListingFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	res, err := TestConnection(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(0))
+	res, err := TestConnection(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(0))
 	if err != nil {
 		t.Fatalf("TestConnection: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestTestConnectionRejectsAnEntryThatIsNotAConnection(t *testing.T) {
 		{Name: "no-url", Transport: "streamable_http"},
 	}
 	for _, srv := range cases {
-		res, err := TestConnection(ctx, t.TempDir(), t.TempDir(), srv)
+		res, err := TestConnection(ctx, t.TempDir(), nil, t.TempDir(), srv)
 		if err == nil || !IsTestConnectionInputError(err) {
 			t.Fatalf("%s: err = %v, want an input error", srv.Name, err)
 		}
@@ -116,7 +116,7 @@ func TestRequestTimeoutBoundsOneToolCall(t *testing.T) {
 
 	srv := fixture.serverConfig(0)
 	srv.RequestTimeout = 0.3
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), srv)
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), srv)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestNoRequestTimeoutKeepsWaiting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(0))
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(0))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

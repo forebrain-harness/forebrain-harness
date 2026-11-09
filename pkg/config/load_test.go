@@ -390,8 +390,9 @@ func TestSaveHonoursAClearedKeyWithNoOtherProviderToBlame(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadPersisted: %v", err)
 			}
-			// What pkg/process.applyAgentLLMFields leaves behind for a
-			// login-configured write: no key, and the marker saying so.
+			// What a login-configured write leaves behind for the
+			// pre-table shape this test saves: no key, and the marker
+			// saying so.
 			def := cfg.Agents.Definitions["main"]
 			def.LLMProviders[0].APIKey = ""
 			def.LLMProviders[0].APIKeyCleared = true
@@ -650,8 +651,8 @@ func TestTokenEstimateDownloadAndEmptyHubsSurviveSave(t *testing.T) {
 	load := func(t *testing.T, body string) (TokenEstimateConfig, string) {
 		t.Helper()
 		dir := t.TempDir()
-		// Isolate the data-dir home so Load does not merge the real
-		// ~/.forebrain/.env (see TestSavePreservesSecretEnvRefs).
+		// Isolate the data-dir home so Load reads nothing of the developer's
+		// own home (see TestSavePreservesSecretEnvRefs).
 		t.Setenv("FOREBRAIN_HOME", dir)
 		path := filepath.Join(dir, "forebrain.yaml")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

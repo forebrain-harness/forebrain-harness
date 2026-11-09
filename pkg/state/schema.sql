@@ -47,13 +47,11 @@ CREATE UNIQUE INDEX idx_fb_projects_agent_root_unique ON fb_projects(agent_id, r
 -- channel belongs to a project the way its conversations do, so deleting the
 -- project takes its channels with it.
 --
--- Credentials never land in this table. A secret field holds a reference like
--- ${FOREBRAIN_CH_<project>_<FIELD>} whose value lives in ~/.forebrain/.env, the
--- same mechanism provider API keys use, so the state database and its backups
--- carry no plaintext secret. account_key is the account's identity (a bot
--- token's hash, an app id): one account belongs to exactly one project, so it
--- is unique where it is set — an empty key (a channel with no account yet) is
--- not constrained.
+-- A secret field is stored in plaintext (owner 2026-11-07, plan 268): the pages
+-- only ever see a mask, and the value is the one the channel speaks with.
+-- account_key is the account's identity (a bot token's hash, an app id): one
+-- account belongs to exactly one project, so it is unique where it is set — an
+-- empty key (a channel with no account yet) is not constrained.
 CREATE TABLE fb_project_channels (
   project_id TEXT NOT NULL REFERENCES fb_projects(id) ON DELETE CASCADE,
   kind TEXT NOT NULL CHECK (TRIM(kind) <> ''),
@@ -192,14 +190,19 @@ CREATE TABLE fb_session_ui_state (
 ) STRICT, WITHOUT ROWID;
 
 -- One session's own effective primary-model choice. It is restored whenever
--- that session becomes active; updates are last-write-wins. Identity and
--- reasoning effort only: credentials, base URLs and other provider params
--- always refresh from the shared config file.
+-- that session becomes active; updates are last-write-wins. The model row id
+-- names which configuration (two rows can share provider+model), provider/model
+-- stay for display and as the fallback for rows written before ids existed,
+-- and credentials, base URLs and other provider params always refresh from the
+-- live model table.
 CREATE TABLE fb_session_model_state (
   session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
   effort TEXT NOT NULL DEFAULT '',
+  -- The fb_llm_models row this selection names. '' for a row written before
+  -- model ids existed; readers fall back to provider+model for those.
+  model_id TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (session_id)
 ) STRICT, WITHOUT ROWID;
@@ -699,6 +702,56 @@ CREATE TABLE fb_task_executions (
 CREATE TABLE fb_config (
   section TEXT PRIMARY KEY,
   value_json TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+) STRICT;
+
+-- The install's model configurations: one row per (provider, model, base_url,
+-- api_path), shared by every primary agent (owner 2026-11-07). The same model
+-- may be configured several times — behind different endpoints, paths or keys —
+-- so a model is referred to by this row's id, never by "provider/model".
+-- api_key is stored in plaintext (owner ruling) and never leaves the gateway.
+-- The cap_* columns override the model catalog for this row; NULL (or '')
+-- means "use the catalog".
+CREATE TABLE fb_llm_models (
+  id TEXT PRIMARY KEY CHECK (TRIM(id) <> ''),
+  provider TEXT NOT NULL CHECK (TRIM(provider) <> ''),
+  model TEXT NOT NULL CHECK (TRIM(model) <> ''),
+  base_url TEXT NOT NULL DEFAULT '',
+  api_path TEXT NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT '',
+  params_json TEXT NOT NULL DEFAULT '',
+  cap_images INTEGER CHECK (cap_images IN (0, 1)),
+  cap_pdf INTEGER CHECK (cap_pdf IN (0, 1)),
+  cap_video INTEGER CHECK (cap_video IN (0, 1)),
+  cap_audio INTEGER CHECK (cap_audio IN (0, 1)),
+  cap_reasoning INTEGER CHECK (cap_reasoning IN (0, 1)),
+  cap_reasoning_off INTEGER CHECK (cap_reasoning_off IN (0, 1)),
+  cap_efforts_json TEXT NOT NULL DEFAULT '',
+  cap_default_effort TEXT NOT NULL DEFAULT '',
+  cap_context_window INTEGER,
+  cap_max_output INTEGER,
+  -- Which subscription sign-in wrote this row ('' = added by hand) and the
+  -- plan inside it ('coding-plan', 'agent-plan-team', …). A subscription row's
+  -- identity and key belong to the subscription: pages edit only its cap_*.
+  source TEXT NOT NULL DEFAULT '',
+  source_plan TEXT NOT NULL DEFAULT '',
+  -- 「自定义协议」（owner 2026-11-07，参考 workbuddy）：1 = base_url 即完整请求
+  -- 地址，不拼接任何协议路径；只允许 provider='custom' 的行，api_path 存
+  -- '/chat/completions'（请求体格式）。不参与唯一性。
+  url_verbatim INTEGER NOT NULL DEFAULT 0 CHECK (url_verbatim IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE UNIQUE INDEX idx_fb_llm_models_identity ON fb_llm_models(provider, model, base_url, api_path);
+CREATE INDEX idx_fb_llm_models_created ON fb_llm_models(created_at, id);
+
+-- Operator-owned variables that ${NAME} references in MCP and LSP server
+-- entries resolve from (owner 2026-11-07, replacing ~/.forebrain/.env). A
+-- project-scoped entry resolves only from here — never from the process
+-- environment — so a repository cannot read the host's secrets.
+CREATE TABLE fb_env_vars (
+  name TEXT PRIMARY KEY CHECK (TRIM(name) <> ''),
+  value TEXT NOT NULL,
   updated_at_ms INTEGER NOT NULL
 ) STRICT;
 

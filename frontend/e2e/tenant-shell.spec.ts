@@ -13,7 +13,7 @@ test('final menu matches the approved order', async ({ page }) => {
   const hrefs = await page.locator('.forebrain-rail-group a.forebrain-rail-link').evaluateAll((nodes) => nodes.map((n) => (n as HTMLAnchorElement).getAttribute('href')))
   // MCP joined the menu (plan 074) between 技能 and 子代理: the shared list is
   // edited in the settings tab, a primary agent's own list on its own page.
-  expect(hrefs).toEqual(['/projects', '/rules', '/skills', '/mcp', '/subagents', '/providers', '/tools', '/permissions', '/memories'])
+  expect(hrefs).toEqual(['/projects', '/rules', '/skills', '/mcp', '/subagents', '/tools', '/permissions', '/memories'])
   await page.screenshot({ path: `${process.env.E2E_SHOTS}/shell-menu.png`, fullPage: true })
 })
 

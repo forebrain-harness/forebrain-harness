@@ -63,9 +63,10 @@ up() {
 # below was verified to match at least one test name at the planning baseline.
 engine_arms=(
   "./pkg/state/dbx/...|Dialect|Open|Tx|Lock"
-  "./pkg/state/|Dialect|Schema|Open|Reap|SearchBackslash|StoreRepairs|Repair|Parts|Output|Events|Artifact|Project"
-  "./pkg/process|Lease|ImportLegacy|ConfigDB|Startup|PeerInbound"
-  "./pkg/gateway|ControlPlane|RunControl|Channels"
+  "./pkg/state/|Dialect|Schema|Open|Reap|SearchBackslash|StoreRepairs|Repair|Parts|Output|Events|Artifact|Project|LLMModel|EnvVar"
+  "./pkg/process|Lease|ImportLegacy|ConfigDB|Startup|PeerInbound|LLMModelsMigrate|UpsertLLMModel"
+  "./pkg/gateway|ControlPlane|RunControl|Channels|LLMModelsAPI|SubscriptionsAPI|EnvVarsAPI"
+  "./pkg/subscription|ChatGPT|OpenCode|Registry|ByID|Login|ErrKeyChoice"
   "./pkg/memory|Search|Index|Consolidation"
   "./pkg/migrate|Codex|Sessions|LSP"
   "./pkg/tool|ShellOutput|Artifact"

@@ -919,7 +919,7 @@ func (s *Server) testMCPServer(w http.ResponseWriter, r *http.Request, resolve m
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), mcp.StartupTimeoutFor(srv)+5*time.Second)
 	defer cancel()
-	res, err := mcp.TestConnection(ctx, s.Home, dir, srv)
+	res, err := mcp.TestConnection(ctx, s.Home, s.operatorEnvVars(ctx), dir, srv)
 	if err != nil {
 		// The entry never became a connection attempt: that is the caller's
 		// input to fix, not a server's answer.

@@ -5268,6 +5268,12 @@ func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Rend
 	current := -1
 	for i, item := range picker.Items {
 		items[i] = SelectItem{Label: item.Label, Description: item.Description}
+		if picker.Command == "model" {
+			// The model list names a request URL, and a narrow column must not
+			// cut its path off the end: the path is what tells two rows of one
+			// provider apart (plan 267).
+			items[i].ElideTail = item.EndpointTail
+		}
 		if item.Current {
 			current = i
 		}
@@ -5282,6 +5288,13 @@ func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Rend
 		return true, false, ComposerSubmission{}, false
 	}
 	if !ok || idx < 0 || idx >= len(picker.Items) {
+		return true, false, ComposerSubmission{}, false
+	}
+	// The model list's last row opens the custom form instead of naming a
+	// model; that form writes the row and switches this session to it, exactly
+	// as /connect does.
+	if picker.Items[idx].Value == turn.ModelAddCustomValue {
+		cmds.handleConnectCustom(ctx, state.sessionID)
 		return true, false, ComposerSubmission{}, false
 	}
 	outcome := cmds.session.ChooseSurfaceSlash(ctx, state.sessionID, turn.SlashChoice{Command: picker.Command, Value: picker.Items[idx].Value})

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 )
@@ -91,8 +92,8 @@ func setDefault(dst *string, fallback string) {
 
 // ParseChannelsSectionJSON reads one project's channel section from the JSON
 // the state database stores: it fills in the kind defaults and resolves the
-// ${VAR} references a secret field carries against the process environment,
-// which the loader has already merged ~/.forebrain/.env into.
+// ${VAR} references a field still carries against the process environment (a
+// channel's secret is plaintext in the table; a reference is an operator's own).
 func ParseChannelsSectionJSON(s string) (ChannelsSection, error) {
 	var sec ChannelsSection
 	if raw := strings.TrimSpace(s); raw != "" && raw != "{}" {
@@ -196,14 +197,15 @@ func zeroChannelField(t reflect.Type) any {
 }
 
 // ExpandChannelEnvReferences replaces the ${VAR} references a channel section
-// carries with the values of the process environment, the same expansion the
-// loader applies to forebrain.yaml. A channel read back from the state
-// database resolves its secrets by this path.
+// carries with the values the process environment holds. A channel's secret is
+// now the plaintext the state database stores (owner 2026-11-07, plan 268); a
+// reference still there is one an operator typed, and the environment is where
+// such a value comes from.
 func ExpandChannelEnvReferences(ch *ChannelsSection) {
 	if ch == nil {
 		return
 	}
-	expandStringEnvReferences(reflect.ValueOf(ch))
+	expandStringEnvReferences(reflect.ValueOf(ch), os.LookupEnv)
 }
 
 type Feishu struct {

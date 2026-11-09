@@ -416,13 +416,36 @@ func (r *Runner) Load() error {
 	err := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil, false)
 	r.mu.load.Unlock()
 	if err != nil {
-		return err
+		return addModelSetupHint(err)
 	}
 	// Resolve filesystem policy onto the in-process tools after releasing the
 	// load lock: RefreshFilesystemPolicy takes r.mu.load.RLock itself (to
 	// read r.tools) and Go's RWMutex is not reentrant.
 	r.RefreshFilesystemPolicy()
 	return nil
+}
+
+// IsModelSetupIncomplete reports whether a load failed because there is no
+// usable model yet — none configured at all, or one with no key. It is the one
+// failure a surface may serve through and let the person fix on the web's
+// Settings › Models page; everything else a load reports is a real failure
+// (owner 2026-11-07, plan 268 revision).
+func IsModelSetupIncomplete(err error) bool {
+	return err != nil && (errors.Is(err, errModelNotConfigured) || errors.Is(err, errLLMKeyMissing))
+}
+
+// addModelSetupHint makes "there is nothing to run a turn with" actionable: a
+// surface prints this error verbatim, and the answer to it is where models are
+// added (owner 2026-11-07, plan 268 revision). Every other failure is returned
+// untouched.
+func addModelSetupHint(err error) error {
+	if err == nil {
+		return nil
+	}
+	if IsModelSetupIncomplete(err) {
+		return fmt.Errorf("%w — add a model under Settings › Models (web), or run /connect (terminal)", err)
+	}
+	return err
 }
 
 func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (string, bool, error) {
@@ -764,14 +787,7 @@ func (r *Runner) approvalHookModel(ctx context.Context) string {
 // default — default_model when set, otherwise the first entry — the same way
 // the runtime does, so the two cannot disagree.
 func (r *Runner) unloadedPrimaryModelFallback() (appcfg.AgentLLMProviderConfig, bool) {
-	def, ok := r.AppCfg.Agents.Definitions[r.activeAgentNameForModel()]
-	if !ok || len(appcfg.ResolvedLLMConfigs(def)) == 0 {
-		def, ok = r.AppCfg.Agents.Definitions["main"]
-	}
-	if !ok {
-		return appcfg.AgentLLMProviderConfig{}, false
-	}
-	entry := appcfg.EffectiveDefaultLLM(def)
+	entry := appcfg.EffectiveDefaultLLMFor(r.AppCfg, r.activeAgentNameForModel())
 	if entry == nil {
 		return appcfg.AgentLLMProviderConfig{}, false
 	}
@@ -878,16 +894,6 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	if name == "" {
 		name = "main"
 	}
-	// Merge ~/.forebrain/.env into os.Environ before resolving any ${ENV_VAR}
-	// LLM api_key/base_url placeholders below. Callers that reach loadLocked
-	// via config.LoadPersisted (e.g. the /model slash command's
-	// ApplyModelSelection, a configuration application) intentionally do NOT
-	// merge .env,
-	// so without this the placeholder resolves to empty and the LLM call fails
-	// with an auth error. Idempotent: re-reads the on-disk .env each call.
-	if _, envErr := appcfg.MergeDotEnvToProcess(); envErr != nil {
-		slog.Warn("merge dotenv to process for agent load", "err", envErr)
-	}
 	cfgMap, err := LoadAgentConfigsFromRoot(r.AppCfg)
 	if err != nil {
 		return err
@@ -939,8 +945,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// via the typedSubagentProviderLLM wrapper.
 	typeLLMs := make(map[string]llm.LLM)
 	for _, typeName := range agent.PublicTypeNames() {
-		def, ok := r.AppCfg.Agents.Definitions[typeName]
-		if !ok || len(appcfg.ResolvedLLMConfigs(def)) == 0 {
+		if !appcfg.HasOwnModelChoice(r.AppCfg, typeName) {
 			continue
 		}
 		typedLLM, terr := NewLLMForAgentType(r.AppCfg, typeName)
@@ -963,7 +968,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// a configured subagent pins its own), which outranks both the per-type
 	// provider above and the main agent's model.
 	llmClient = wrapSubagentModelOverrideLLM(llmClient, func(override SubagentModelOverride) (llm.LLM, error) {
-		return ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.Provider, override.Model, override.Effort)
+		return ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
 	})
 	// The prompt a typed run reaches the model with is this primary agent's
 	// answer: its rewrite of a built-in, or a custom subagent's own text.
@@ -1760,9 +1765,11 @@ func PrimaryEndpoint(r *Runner) string {
 	return ""
 }
 
-// SubagentOwnModel names the provider, model and reasoning effort a subagent
-// type runs on when that type has an LLM chain of its own, and reports false
-// when it has none.
+// SubagentOwnModel names the configured row, the provider, model and reasoning
+// effort a subagent type runs on when that type has an LLM chain of its own,
+// and reports false when it has none. The row id is what a client built for
+// this type must resolve, because the same pair may be configured more than
+// once.
 //
 // It answers exactly the question the runtime answers when it routes a child's
 // call: a type this primary agent pins a model to runs on it (custom subagents,
@@ -1773,26 +1780,29 @@ func PrimaryEndpoint(r *Runner) string {
 // than re-reading the config, so the display cannot claim a model the runtime
 // is not using; false means "whatever the primary agent is on", which the
 // surface already knows.
-func SubagentOwnModel(r *Runner, agentType string) (provider, model, effort string, ok bool) {
+func SubagentOwnModel(r *Runner, agentType string) (modelID, provider, model, effort string, ok bool) {
 	agentType = strings.TrimSpace(agentType)
 	if r == nil || r.AppCfg == nil || agentType == "" {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	if provider, model, effort, ok := SubagentCatalogFor(r.AppCfg, r.activeAgentNameForModel()).Model(agentType); ok {
-		return provider, model, effort, true
+	if modelID, provider, model, effort, ok := SubagentCatalogFor(r.AppCfg, r.activeAgentNameForModel()).Model(agentType); ok {
+		return modelID, provider, model, effort, true
 	}
 	if !slices.Contains(agent.PublicTypeNames(), agentType) {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	def, defined := r.AppCfg.Agents.Definitions[agentType]
-	if !defined {
-		return "", "", "", false
+	// "Inherits the primary agent's model" is no longer a list lookup: a type
+	// that names no model of its own runs on whatever the primary agent runs
+	// on, and reporting main's default as the type's own would be a lie.
+	if !appcfg.HasOwnModelChoice(r.AppCfg, agentType) {
+		return "", "", "", "", false
 	}
-	entry := appcfg.EffectiveDefaultLLM(def)
+	entry := appcfg.EffectiveDefaultLLMFor(r.AppCfg, agentType)
 	if entry == nil {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	return strings.TrimSpace(entry.Provider),
+	return strings.TrimSpace(entry.ID),
+		strings.TrimSpace(entry.Provider),
 		strings.TrimSpace(entry.Model),
 		reasoningEffortFromParams(entry.Params),
 		true
@@ -2775,7 +2785,7 @@ func (ld *mcpLoad) run() {
 func (ld *mcpLoad) runTask(t *mcpLoadTask) {
 	ctx, cancel := context.WithTimeout(t.ctx, t.timeout)
 	defer cancel()
-	cli, err := mcp.Start(ctx, ld.r.Home, t.dir, t.srv)
+	cli, err := mcp.Start(ctx, ld.r.Home, ld.r.operatorEnvVars(ctx), t.dir, t.srv)
 	if err != nil {
 		t.finishError(ld, err)
 		return
@@ -3675,6 +3685,23 @@ func (r *Runner) launchProjectRoot() string {
 		return root
 	}
 	return strings.TrimSpace(r.ProjectRoot)
+}
+
+// operatorEnvVars reads the operator's variables for a path that resolves
+// ${NAME} references: the table is where an MCP entry's values live (plan 259,
+// plan 268), with the process environment behind it for a container. An
+// unreadable table is no variables rather than a failed MCP start — the server
+// entry's own report already names the reference that did not resolve.
+func (r *Runner) operatorEnvVars(ctx context.Context) map[string]string {
+	if r == nil || r.SessionStore == nil || r.SessionStore.DB() == nil {
+		return nil
+	}
+	vars, err := (&state.EnvVarStore{DB: r.SessionStore.DB()}).Map(ctx)
+	if err != nil {
+		slog.Warn("the operator's variables could not be read; MCP references resolve from the environment only", "err", err)
+		return nil
+	}
+	return vars
 }
 
 // StateRoot returns the per-agent state root (the runner's workspace root) onto

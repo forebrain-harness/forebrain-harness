@@ -24,9 +24,9 @@ func TestParseChannelsSectionJSONFillsDefaults(t *testing.T) {
 	}
 }
 
-// A stored section's secret fields hold ${VAR} references; reading it back
-// resolves them from the process environment the loader merged ~/.forebrain/.env
-// into.
+// A stored section's secret field may still hold a ${VAR} reference (an
+// operator's own, written by hand); reading it back resolves it from the
+// process environment.
 func TestParseChannelsSectionJSONResolvesEnvReferences(t *testing.T) {
 	t.Setenv("FOREBRAIN_CH_ACME_TELEGRAM_BOT_TOKEN", "acme-secret")
 	sec, err := ParseChannelsSectionJSON(`{"telegram":{"enabled":true,"bot_token":"${FOREBRAIN_CH_ACME_TELEGRAM_BOT_TOKEN}"}}`)

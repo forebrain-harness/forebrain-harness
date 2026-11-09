@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
-	"github.com/joho/godotenv"
 )
 
 // quietPeriod is how long progress readiness waits for a silent work-done
@@ -41,17 +40,21 @@ const serverLogRotateBytes = 5 << 20
 type EnvSpec struct {
 	Passthrough []string          // parent variables allowed through
 	Env         map[string]string // explicit variables; values may reference ${VAR}
-	FromProject bool              // ${VAR} resolves only from ~/.forebrain/.env
-	Home        string            // FOREBRAIN_HOME
+	FromProject bool              // ${VAR} resolves only from the operator's variables
+	// Vars is the operator's variables table, which is where a ${VAR}
+	// reference is resolved from (plan 259, plan 268). A project entry reads it
+	// and nothing else; any other entry reads it first and the process
+	// environment second.
+	Vars map[string]string
 }
 
 // BuildEnv returns the environment a server process runs with, and the
 // ${VAR} references that did not resolve. Passthrough names the parent
 // variables the server additionally needs (GOPATH, JAVA_HOME, ...); values
-// of Env may reference ${VAR}, resolved from the process environment or —
-// for project-scoped entries — only from ~/.forebrain/.env, exactly like
-// pkg/mcp's stdio servers. Secret-looking names are filtered by
-// home.SafeSubprocessEnv either way.
+// of Env may reference ${VAR}, resolved from the operator's variables table,
+// which is the only source — for project-scoped entries — a repository
+// checkout can read, exactly like pkg/mcp's stdio servers. Secret-looking names
+// are filtered by home.SafeSubprocessEnv either way.
 func BuildEnv(spec EnvSpec) (env []string, missing []string) {
 	explicit := make(map[string]string)
 	for _, name := range spec.Passthrough {
@@ -59,10 +62,7 @@ func BuildEnv(spec EnvSpec) (env []string, missing []string) {
 			explicit[name] = v
 		}
 	}
-	lookup := os.LookupEnv
-	if spec.FromProject {
-		lookup = projectEnvLookup(spec.Home)
-	}
+	lookup := envVarLookup(spec.Vars, spec.FromProject)
 	for name, value := range spec.Env {
 		expanded, miss := expandEnvRefs(value, lookup)
 		explicit[name] = expanded
@@ -95,19 +95,24 @@ func expandEnvRefs(value string, lookup func(string) (string, bool)) (string, []
 	return expanded, missing
 }
 
-// projectEnvLookup resolves ${VAR} only from ~/.forebrain/.env (spec §9.3):
-// a project checkout must not probe the host process environment. A missing
-// or unreadable file resolves nothing.
-func projectEnvLookup(forebrainHome string) func(string) (string, bool) {
-	m := map[string]string{}
-	if forebrainHome != "" {
-		if parsed, err := godotenv.Read(home.DefaultEnvPath(forebrainHome)); err == nil {
-			m = parsed
-		}
+// envVarLookup resolves ${VAR} from the operator's variables, and — unless the
+// entry is project-scoped — from the process environment behind them
+// (spec §9.3, plan 268). A project checkout must not probe the host process
+// environment, so its lookup is the table alone; a variable that is not there
+// resolves nothing, and the caller reports it as missing.
+func envVarLookup(vars map[string]string, fromProject bool) func(string) (string, bool) {
+	fromTable := func(name string) (string, bool) {
+		v, ok := vars[strings.TrimSpace(name)]
+		return v, ok
+	}
+	if fromProject {
+		return fromTable
 	}
 	return func(name string) (string, bool) {
-		v, ok := m[name]
-		return v, ok
+		if v, ok := fromTable(name); ok {
+			return v, true
+		}
+		return os.LookupEnv(name)
 	}
 }
 

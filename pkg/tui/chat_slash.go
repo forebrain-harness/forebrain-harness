@@ -649,14 +649,14 @@ func (s *ChatSession) ModelSettings(sessionID string) (turn.ModelSettings, error
 	// current marker for such a row, which is the truth: it is not on offer.
 	sel := turn.ModelSelectionState{}
 	if row, ok, err := s.sessStore().SessionModelSelection(context.Background(), strings.TrimSpace(sessionID)); err == nil && ok {
-		sel = turn.ModelSelectionState{Provider: row.Provider, Model: row.Model, Effort: row.Effort, Set: true}
+		sel = turn.ModelSelectionState{ModelID: row.ModelID, Provider: row.Provider, Model: row.Model, Effort: row.Effort, Set: true}
 	}
 	live := s.sessionModelState(sessionID)
 	return turn.ModelSettings{
 		Config:        modelConfigFromChatSession(s),
 		AgentName:     chatSessionActiveAgentName(s),
 		Selection:     sel,
-		LiveSelection: turn.ModelSelectionState{Provider: live.Provider, Model: live.Model, Effort: live.Effort, Set: live.Set},
+		LiveSelection: turn.ModelSelectionState{ModelID: live.ModelID, Provider: live.Provider, Model: live.Model, Effort: live.Effort, Set: live.Set},
 	}, nil
 }
 
@@ -694,7 +694,18 @@ func (s *ChatSession) SelectModel(ctx context.Context, sessionID string, choice 
 		return err
 	}
 	published := run.PrimaryModelSelection(r)
+	// The row records which configured row the user picked, not just the pair
+	// it names: the same provider/model may be configured more than once. A
+	// caller that named only the pair (an old surface, a live selection
+	// published before ids) still records the row the pair resolves to.
+	modelID := strings.TrimSpace(choice.ID)
+	if modelID == "" {
+		if entry, ok := appcfg.ResolveModelRef(modelConfigFromChatSession(s), chatSessionActiveAgentName(s), published.Provider+"/"+published.Model); ok {
+			modelID = strings.TrimSpace(entry.ID)
+		}
+	}
 	stored, err := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
+		ModelID:  modelID,
 		Provider: published.Provider,
 		Model:    published.Model,
 		Effort:   published.Effort,

@@ -137,10 +137,14 @@ func TestEnsure_CreatesDefaultConfig(t *testing.T) {
 		t.Error("default config should not be empty")
 	}
 	text := string(data)
+	// The seed carries no model placeholder any more: the models live in the
+	// state database's table (plan 262), and a seeded llm_providers stub is a
+	// list the migration would only have to strip.
+	if strings.Contains(text, "llm_providers") {
+		t.Fatalf("default config seeds a pre-table provider list:\n%s", text)
+	}
 	for _, want := range []string{
 		"warn_remaining_percent: 12",
-		"provider: \"\"",
-		"model: \"\"",
 		"approval_policy: \"on-request\"",
 		"approvals_reviewer: \"user\"",
 	} {

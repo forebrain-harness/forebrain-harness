@@ -262,8 +262,12 @@ type ModelSlashHandler interface {
 
 // ModelSelectionState is the live runtime selection a surface reports: the
 // provider/model in force and the concrete reasoning effort it runs at. Set
-// is false only when no runtime selection has been published.
+// is false only when no runtime selection has been published. ModelID names
+// the configured row it is, and is empty for a selection recorded before ids
+// existed (or published by a runtime that never carried one), which readers
+// resolve by provider+model.
 type ModelSelectionState struct {
+	ModelID  string
 	Provider string
 	Model    string
 	Effort   string
@@ -392,6 +396,10 @@ type PickerItem struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
 	Current     bool   `json:"current,omitempty"`
+	// EndpointTail is the end of Description a picker must never cut: the row's
+	// api path, so an endpoint narrowed to "https://ark…/v1/messages" still
+	// names its protocol. "" leaves the description as it is.
+	EndpointTail string `json:"endpoint_tail,omitempty"`
 }
 
 // SlashChoice is a choice made in a Picker: the command that offered it and

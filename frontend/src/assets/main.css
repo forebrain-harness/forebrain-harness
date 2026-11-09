@@ -16,6 +16,13 @@
   --forebrain-divider: #E4E7EC;
   --forebrain-divider-strong: #D0D5DD;
   --forebrain-rule-line: #D0D5DD;
+  /* The API-path block a model's address is written with (plan 266): the path
+     is the one part of an address a reader compares between rows, so it sits on
+     a tint of the brand's own soft, its ink on the brand. The fill is one notch
+     deeper than that scheme's --forebrain-brand-soft so the block still reads
+     as a block on white; each scheme below states its own. */
+  --path-bg: #E9EEF8;
+  --path-ink: var(--forebrain-brand-1);
   --forebrain-text: #101828;
   --forebrain-text-2: #475467;
   --forebrain-muted-text: #667085;
@@ -83,6 +90,8 @@
   --forebrain-brand-border-strong: #8FA9DA;
   --forebrain-focus-border: #1F4A9E;
   --forebrain-ring-soft: #C3D2EC;
+  --path-bg: #E9EEF8;
+  --path-ink: #1F4A9E;
 }
 
 :root {
@@ -99,6 +108,8 @@
   --forebrain-brand-border-strong: #6FB5BF;
   --forebrain-focus-border: #0E6E7E;
   --forebrain-ring-soft: #B7DDE2;
+  --path-bg: #E2EEF0;
+  --path-ink: #0E6E7E;
 }
 
 :root[data-brand="graphite"] {
@@ -110,6 +121,8 @@
   --forebrain-brand-border-strong: #A1A1AA;
   --forebrain-focus-border: #1C1C1F;
   --forebrain-ring-soft: #D4D4D8;
+  --path-bg: #EAEAEC;
+  --path-ink: #1C1C1F;
 }
 
 /* Rail themes, scoped to the shell root — not the rail element itself —
@@ -1237,6 +1250,43 @@ textarea.forebrain-field {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A model's API path, as the one thing a reader compares between rows
+   (plan 266): the block in the brand's own tint, and a grey statement for a row
+   whose address is the whole request address (「自定义协议」) or whose endpoint
+   its sign-in decides (「原生协议」). One rule for the table, the pickers and
+   the drawer, so the same path never looks like two things. */
+.forebrain-path {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-family: var(--forebrain-mono-font);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  background: var(--path-bg);
+  color: var(--path-ink);
+}
+.forebrain-path--na {
+  font-family: var(--forebrain-ui-font);
+  background: var(--forebrain-button-alt-bg);
+  color: var(--forebrain-muted-text);
+}
+
+/* The API key column: bullets for every character that is not one of the last
+   four, the tail in the text colour. Fixed-cased digits line up. */
+.forebrain-keymask {
+  font-family: var(--forebrain-mono-font);
+  font-size: 11.5px;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  color: var(--forebrain-muted-text);
+  font-variant-numeric: tabular-nums;
+}
+.forebrain-keymask b {
+  color: var(--forebrain-text-2);
+  font-weight: 500;
 }
 .forebrain-table--fixed td.forebrain-num {
   font-variant-numeric: tabular-nums;

@@ -17,7 +17,7 @@ func TestMCPStdioEnvStripsSecretLikeOverrides(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "outer-secret")
 	t.Setenv("SAFE_VISIBLE", "from-parent")
 	inherit := true
-	env := mcpStdioEnv("", appcfg.MCPServerConfig{
+	env := mcpStdioEnv(nil, appcfg.MCPServerConfig{
 		InheritParentEnv: &inherit,
 		Env: map[string]string{
 			"SAFE_VISIBLE":     "override-visible",
@@ -46,7 +46,7 @@ func TestStartStdioConnectsRealMCPServerProcess(t *testing.T) {
 	workspaceDir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), workspaceDir, appcfg.MCPServerConfig{
+	sess, err := Start(ctx, t.TempDir(), nil, workspaceDir, appcfg.MCPServerConfig{
 		Name:      "fixture",
 		Transport: "stdio",
 		Command:   exe,
@@ -115,7 +115,7 @@ func TestStartStdioConnectsInstalledCodeReviewGraph(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), repoRootForTest(t), appcfg.MCPServerConfig{
+	sess, err := Start(ctx, t.TempDir(), nil, repoRootForTest(t), appcfg.MCPServerConfig{
 		Name:      "code-review-graph",
 		Transport: "stdio",
 		Command:   exe,

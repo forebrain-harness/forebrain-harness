@@ -5330,7 +5330,7 @@ func (p *richPickerState) panel(label string) slashPanel {
 			b.group(item.Category)
 			category = item.Category
 		}
-		b.selectableColumns(ci == p.cursor, "", item.Label, nameWidth, strings.TrimSpace(item.Description))
+		b.selectableColumns(ci == p.cursor, "", item.Label, nameWidth, strings.TrimSpace(item.Description), item.ElideTail)
 	}
 	if len(p.selectable) == 0 {
 		b.text(panelIndent, "No matches", nil)

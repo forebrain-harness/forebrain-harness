@@ -101,7 +101,9 @@ func NewLLMForAgentConfig(cfg *AgentConfigYAML) (llm.LLM, error) {
 		}
 	}
 	if len(cfg.LLMChain) == 0 {
-		return nil, fmt.Errorf("no llm chain")
+		// The same fact as an unresolvable selection: this agent has no model
+		// to run a turn on.
+		return nil, errModelNotConfigured
 	}
 	return NewLLMFromYAML(cfg.LLMChain[0])
 }

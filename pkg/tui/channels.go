@@ -596,6 +596,11 @@ type SelectItem struct {
 	Description string
 	Category    string
 	Disabled    bool
+	// ElideTail is the end of Description a two-column row must keep visible
+	// when the column is too narrow: the /model picker sets the endpoint's api
+	// path here, so a shortened URL still names its protocol (plan 267). ""
+	// means the description wraps as every other list's does.
+	ElideTail string
 }
 
 type Selector interface {

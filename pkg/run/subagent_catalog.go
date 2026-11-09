@@ -35,6 +35,11 @@ var publicSubagentEnumSentences = map[string]string{
 // everywhere — and this is the layer that says which of them this agent's model
 // may dispatch, under which prompt and with which model.
 type SubagentCatalog struct {
+	// cfg and agentName are the configuration this catalog was read from and
+	// the primary agent that owns it: a configured subagent's model is a
+	// reference into that agent's model view, and only the pair resolves it.
+	cfg       *appcfg.Root
+	agentName string
 	// entries are this agent's configured subagents by name: overrides of the
 	// public built-ins and its own custom subagents alike.
 	entries map[string]appcfg.SubagentConfig
@@ -50,7 +55,7 @@ type SubagentCatalog struct {
 // unknown or unnamed agent has none: the catalog then offers exactly the
 // built-in types, all of them enabled.
 func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
-	catalog := SubagentCatalog{entries: map[string]appcfg.SubagentConfig{}}
+	catalog := SubagentCatalog{cfg: cfg, agentName: agentName, entries: map[string]appcfg.SubagentConfig{}}
 	if cfg == nil {
 		return catalog
 	}
@@ -149,18 +154,28 @@ func (c SubagentCatalog) Prompt(name string) (string, bool) {
 }
 
 // Model is the model this agent pins name to; ok false when it follows the
-// conversation.
-func (c SubagentCatalog) Model(name string) (provider, model, effort string, ok bool) {
+// conversation. The configured value is a model reference — a configured row
+// id, or the legacy "provider/model" label — so a value that names no
+// configured model pins nothing: the type follows the conversation rather than
+// pinning a run to a model this agent cannot build a client for. The id comes
+// back with the pair, because the same pair may be configured more than once.
+func (c SubagentCatalog) Model(name string) (modelID, provider, model, effort string, ok bool) {
 	entry, found := c.entries[subagentKey(name)]
 	if !found {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
 	configured := strings.TrimSpace(entry.Model)
 	if configured == "" {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	provider, model, _ = strings.Cut(configured, "/")
-	return provider, model, strings.TrimSpace(entry.ReasoningEffort), true
+	resolved, found := appcfg.ResolveModelRef(c.cfg, c.agentName, configured)
+	if !found {
+		return "", "", "", "", false
+	}
+	return strings.TrimSpace(resolved.ID),
+		strings.TrimSpace(resolved.Provider),
+		strings.TrimSpace(resolved.Model),
+		strings.TrimSpace(entry.ReasoningEffort), true
 }
 
 // ToolPolicy is a custom subagent's tool policy; ok false for built-ins (their

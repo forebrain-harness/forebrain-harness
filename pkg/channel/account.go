@@ -82,6 +82,18 @@ func wecomIdentity(corpID, corpSecret string, agentID int64) string {
 	return corp + "|" + strconv.FormatInt(agentID, 10)
 }
 
+// AccountKeyJSON is AccountKey over the JSON a project's channel is stored as:
+// the section the state database holds parses back into the kind's fields, and
+// the account identity is read from the result. A section that cannot be
+// parsed has no identity.
+func AccountKeyJSON(kind string, rawJSON []byte) string {
+	section, err := appcfg.ParseChannelsSectionJSON(`{"` + strings.TrimSpace(kind) + `":` + string(rawJSON) + `}`)
+	if err != nil {
+		return ""
+	}
+	return AccountKey(kind, section)
+}
+
 // LeaseName is the fb_leases row one account's long connection is held behind:
 // the "channel:" prefix over the same account identity AccountKey computes, so
 // two projects sharing one bot share one lease too — an account can only be

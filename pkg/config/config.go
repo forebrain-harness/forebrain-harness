@@ -101,8 +101,7 @@ type PeersSection struct {
 
 type Root struct {
 	// SourceFiles lists the files this configuration was read from, in read
-	// order: the config file itself, then the forebrain home's .env when one was
-	// applied. Runtime-only — set by Load, never persisted.
+	// order. Runtime-only — set by Load, never persisted.
 	SourceFiles []string `yaml:"-" json:"-"`
 	// ApprovalPreset is the one approval setting a user chooses (plan 203).
 	// The approval policy and the sandbox mode below are derived from it by
@@ -119,14 +118,18 @@ type Root struct {
 	Compact               CompactSection        `yaml:"compact,omitempty" json:"compact,omitempty"`
 	Cron                  CronSection           `yaml:"cron,omitempty" json:"cron,omitempty"`
 	Gateway               Gateway               `yaml:"gateway,omitempty" json:"gateway,omitempty"`
-	Agents                AgentsSection         `yaml:"agents,omitempty" json:"agents,omitempty"`
-	Hooks                 HooksSettings         `yaml:"hooks,omitempty" json:"hooks,omitempty"`
-	Memories              MemorySection         `yaml:"memories,omitempty" json:"memories,omitempty"`
-	Batch                 BatchSection          `yaml:"batch,omitempty" json:"batch,omitempty"`
-	Features              FeaturesSection       `yaml:"features,omitempty" json:"features,omitempty"`
-	LSP                   LSPSection            `yaml:"lsp,omitempty" json:"lsp,omitempty"`
-	Peers                 PeersSection          `yaml:"peers,omitempty" json:"peers,omitempty"`
-	Credentials           CredentialsSection    `yaml:"credentials,omitempty" json:"credentials,omitempty"`
+	// LLMModels is the install's model table (fb_llm_models), composed in by
+	// pkg/process; never persisted as a section and never marshaled — it
+	// carries plaintext keys. ConfiguredLLMs is the one reader.
+	LLMModels   []LLMModelConfig   `yaml:"-" json:"-"`
+	Agents      AgentsSection      `yaml:"agents,omitempty" json:"agents,omitempty"`
+	Hooks       HooksSettings      `yaml:"hooks,omitempty" json:"hooks,omitempty"`
+	Memories    MemorySection      `yaml:"memories,omitempty" json:"memories,omitempty"`
+	Batch       BatchSection       `yaml:"batch,omitempty" json:"batch,omitempty"`
+	Features    FeaturesSection    `yaml:"features,omitempty" json:"features,omitempty"`
+	LSP         LSPSection         `yaml:"lsp,omitempty" json:"lsp,omitempty"`
+	Peers       PeersSection       `yaml:"peers,omitempty" json:"peers,omitempty"`
+	Credentials CredentialsSection `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 }
 
 // CredentialsSection points at credential files kept outside forebrain.yaml.

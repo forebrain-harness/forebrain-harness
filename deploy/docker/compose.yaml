@@ -2,19 +2,22 @@
 # deployment the Dockerfile exists for.
 #
 #   FOREBRAIN_GATEWAY_TOKEN=$(openssl rand -hex 32) \
-#   FOREBRAIN_LLM_PROVIDER=deepseek FOREBRAIN_LLM_MODEL=… \
-#   FOREBRAIN_LLM_API_KEY=… FOREBRAIN_LLM_BASE_URL=https://… \
 #   docker compose -f deploy/docker/compose.yaml up -d
 #
-# State is one named volume, forebrain-home: config, .env, SQLite state,
-# workspace, logs. Everything survives `docker compose down`; only
-# `down -v` deletes it. The gateway serves only once the main agent's LLM is
-# configured (the gateway start command refuses to run otherwise), so the
-# seed service below writes forebrain.yaml and .env on the FIRST up only — a
-# home that already has forebrain.yaml is left exactly as it is, and after
-# that the file belongs to the web's configuration editor. The LLM variables
-# exist for that one write; nothing reads them afterwards (the api_key lands
-# in .env as FOREBRAIN_LLM_API_KEY and forebrain.yaml references it).
+# Then open http://<host>:6060, sign in with that token, and add a model under
+# Settings › Models (or sign in to a subscription there). The gateway serves
+# before a model exists — a home with no model is a home whose first model is
+# about to be added on that page (owner 2026-11-07, plan 268).
+#
+# State is one named volume, forebrain-home: config, SQLite state, workspace,
+# logs. Everything survives `docker compose down`; only `down -v` deletes it.
+# There is no .env (plan 268): the gateway token is either the environment
+# variable below or gateway.auth.token in forebrain.yaml, and a model's key
+# lives in the model table, entered on the Models page.
+#
+# The seed service below writes forebrain.yaml on the FIRST up only — a home
+# that already has one is left exactly as it is, and after that the file
+# belongs to the web's pages.
 #
 # The security_opt block on the gateway is the sandbox (plan 214 §3.2):
 # seccomp lets the uid-10001 process create a user namespace,
@@ -45,10 +48,6 @@ services:
     environment:
       FOREBRAIN_GATEWAY_TOKEN: ${FOREBRAIN_GATEWAY_TOKEN:?set FOREBRAIN_GATEWAY_TOKEN, e.g. `openssl rand -hex 32`}
       FOREBRAIN_DATABASE_URL: ${FOREBRAIN_DATABASE_URL:-}
-      FOREBRAIN_LLM_PROVIDER: ${FOREBRAIN_LLM_PROVIDER:-}
-      FOREBRAIN_LLM_MODEL: ${FOREBRAIN_LLM_MODEL:-}
-      FOREBRAIN_LLM_API_KEY: ${FOREBRAIN_LLM_API_KEY:-}
-      FOREBRAIN_LLM_BASE_URL: ${FOREBRAIN_LLM_BASE_URL:-}
     volumes:
       - forebrain-home:/data/forebrain
     entrypoint: ["/bin/sh", "-c"]
@@ -61,36 +60,15 @@ services:
           echo "seed: keeping the existing $$home/forebrain.yaml"
           exit 0
         fi
-        if [ -z "$${FOREBRAIN_LLM_PROVIDER:-}" ] || [ -z "$${FOREBRAIN_LLM_MODEL:-}" ] \
-           || [ -z "$${FOREBRAIN_LLM_API_KEY:-}" ] || [ -z "$${FOREBRAIN_LLM_BASE_URL:-}" ]; then
-          # The gateway refuses to start until the main agent's LLM is
-          # configured; fail the first 'up' with the variables it needs
-          # rather than write a config that cannot boot.
-          echo "seed: FOREBRAIN_LLM_PROVIDER / FOREBRAIN_LLM_MODEL / FOREBRAIN_LLM_API_KEY / FOREBRAIN_LLM_BASE_URL must all be set on the first 'up' (afterwards the web's configuration editor owns forebrain.yaml)" >&2
-          exit 1
-        fi
-        printf 'FOREBRAIN_GATEWAY_TOKEN=%s\nFOREBRAIN_LLM_API_KEY=%s\n' \
-          "$$FOREBRAIN_GATEWAY_TOKEN" "$$FOREBRAIN_LLM_API_KEY" > "$$home/.env"
-        chmod 600 "$$home/.env"
         {
           printf 'gateway:\n'
           printf '  http_addr: "0.0.0.0:6060"\n'
           printf '  auth:\n'
-          printf '    mode: token\n'
           printf '    token: "$${FOREBRAIN_GATEWAY_TOKEN}"\n'
           if [ -n "$${FOREBRAIN_DATABASE_URL:-}" ]; then
             printf 'database:\n'
             printf '  url: "%s"\n' "$$FOREBRAIN_DATABASE_URL"
           fi
-          printf 'agents:\n'
-          printf '  definitions:\n'
-          printf '    main:\n'
-          printf '      primary: true\n'
-          printf '      llm_providers:\n'
-          printf '        - provider: %s\n' "$$FOREBRAIN_LLM_PROVIDER"
-          printf '          model: %s\n' "$$FOREBRAIN_LLM_MODEL"
-          printf '          api_key: "$${FOREBRAIN_LLM_API_KEY}"\n'
-          printf '          base_url: %s\n' "$$FOREBRAIN_LLM_BASE_URL"
         } > "$$home/forebrain.yaml.tmp"
         # The config arrives whole: the gateway must never read a
         # half-written file (plan 213 §3.6).
@@ -108,7 +86,8 @@ services:
       - "6060:6060"
     environment:
       # The shared secret every request carries (web sign-in and peer
-      # replicas alike); it is also what seed wrote into the home's .env.
+      # replicas alike). It is the only place the token comes from here, so
+      # the config's ${FOREBRAIN_GATEWAY_TOKEN} keeps resolving.
       FOREBRAIN_GATEWAY_TOKEN: ${FOREBRAIN_GATEWAY_TOKEN:?set FOREBRAIN_GATEWAY_TOKEN, e.g. `openssl rand -hex 32`}
       # mysql://… or postgres://…; empty (the default) is the SQLite file in
       # the forebrain-home volume. Set it only together with --profile pg
@@ -131,7 +110,7 @@ services:
 
   # Optional PostgreSQL (plan 214 §3.3), started with --profile pg:
   #
-  #   FOREBRAIN_GATEWAY_TOKEN=… FOREBRAIN_LLM_*=… \
+  #   FOREBRAIN_GATEWAY_TOKEN=… \
   #   FOREBRAIN_DATABASE_URL='postgres://forebrain:forebrain@postgres:5432/forebrain?sslmode=disable' \
   #   docker compose -f deploy/docker/compose.yaml --profile pg up -d
   #

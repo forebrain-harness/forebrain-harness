@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -509,7 +510,9 @@ func Resolve(home string) (*Catalog, error) {
 		return cat, nil
 	}
 	if errors.Is(err, errNoCatalog) {
-		return nil, fmt.Errorf("modelcatalog: models.json not found (home=%q)", home)
+		// The home is for a log line; the error is what a surface may show.
+		slog.Debug("model data not found", "home", home)
+		return nil, errModelDataNotFound
 	}
 	return nil, err
 }
@@ -597,29 +600,202 @@ func InitGlobalCatalog(home, version string) error {
 
 // Lookup returns the model entry for a (provider, apiModel) pair using the global catalog.
 // The global catalog is initialized by InitGlobalCatalog at startup.
+//
+// Three layers answer, in order. The catalog (models.json) is the base; the
+// built-in model table covers providers it has no rows for (volcengine,
+// byteplus) and ranks below it; a configured row's own overrides win over
+// both. A custom model the catalog does not list borrows the capabilities of
+// the catalog entry its name happens to be (a user typing "openai/gpt-4o"
+// gets gpt-4o's context window), and a custom model that matches nothing has
+// no entry at all.
 func Lookup(provider, apiModel string) (Hit, bool) {
+	hit, ok := LookupCatalog(provider, apiModel)
+	if override, found := modelOverride(JoinProviderModel(provider, apiModel)); found {
+		return applyModelOverride(hit, override), true
+	}
+	return hit, ok
+}
+
+// LookupCatalog is Lookup without the configured-row override layer: the
+// catalog, the built-in model table, and the entry a custom model's name
+// borrows. A surface asking what a model can do *by default* reads this — the
+// models page compares a row's overrides against these values, so an override
+// of the row being edited must not become part of the answer (plan 265).
+func LookupCatalog(provider, apiModel string) (Hit, bool) {
 	globalCatMu.RLock()
 	cat := globalCat
 	globalCatMu.RUnlock()
-	if cat == nil {
-		return Hit{}, false
-	}
 	key := JoinProviderModel(provider, apiModel)
-	if m, ok := cat.LookupModel(key); ok {
-		return Hit{
-			CatalogID:           m.ID,
-			CompHash:            m.CompHash,
-			ContextWindow:       m.ContextWindow,
-			InputTokenLimit:     m.InputTokenLimit,
-			DefaultMaxTokens:    m.DefaultMaxTokens,
-			CanReason:           m.CanReason,
-			SupportsAttachments: m.SupportsAttachments,
-			Kind:                m.Kind,
-			ReasoningOptions:    m.ReasoningOptions,
-			ReasoningKnown:      m.ReasoningKnown,
-		}, true
+	var hit Hit
+	ok := false
+	if cat != nil {
+		if m, found := cat.LookupModel(key); found {
+			hit, ok = hitFromModel(m), true
+		}
 	}
-	return Hit{}, false
+	if !ok {
+		if m, found := builtinModel(provider, apiModel); found {
+			hit, ok = hitFromModel(m), true
+		}
+	}
+	if !ok && cat != nil && strings.EqualFold(strings.TrimSpace(provider), customModelProvider) && strings.Contains(apiModel, "/") {
+		if m, found := cat.LookupModel(apiModel); found {
+			hit, ok = hitFromModel(m), true
+		}
+	}
+	return hit, ok
+}
+
+func hitFromModel(m Model) Hit {
+	return Hit{
+		CatalogID:           m.ID,
+		CompHash:            m.CompHash,
+		ContextWindow:       m.ContextWindow,
+		InputTokenLimit:     m.InputTokenLimit,
+		DefaultMaxTokens:    m.DefaultMaxTokens,
+		CanReason:           m.CanReason,
+		SupportsAttachments: m.SupportsAttachments,
+		Kind:                m.Kind,
+		ReasoningOptions:    m.ReasoningOptions,
+		ReasoningKnown:      m.ReasoningKnown,
+	}
+}
+
+// customModelProvider is pkg/config's CustomProvider, restated here because
+// llm sits below it and may not import it. pkg/process's
+// TestCustomProviderIDsAgree pins the two spellings together.
+const customModelProvider = "custom"
+
+// ModelOverride is one configured row's capability overrides (the
+// fb_llm_models cap_* columns). A nil pointer, a nil slice or "" leaves the
+// catalog's value.
+type ModelOverride struct {
+	SupportsImages, SupportsPDF, SupportsVideo, SupportsAudio, CanReason, ReasoningOff *bool
+	// Efforts replaces the levels a model offers when non-nil. PDF, Video and
+	// Audio are carried for the surfaces that consume those capabilities;
+	// nothing here reads them yet.
+	Efforts []string
+	// ContextWindow and MaxOutput replace the windows the catalog carries;
+	// MaxOutput is the row's own output limit.
+	ContextWindow, MaxOutput *int64
+}
+
+var (
+	overrideMu sync.RWMutex
+	overrides  map[string]ModelOverride
+
+	builtinModelMu sync.RWMutex
+	builtinModels  map[string][]Model
+)
+
+// SetModelOverrides installs the overrides the configured rows carry, keyed
+// by JoinProviderModel(provider, model). The process installs them every time
+// it adopts a configuration; nil clears them.
+func SetModelOverrides(m map[string]ModelOverride) {
+	installed := make(map[string]ModelOverride, len(m))
+	for key, override := range m {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		override.Efforts = append([]string(nil), override.Efforts...)
+		installed[key] = override
+	}
+	overrideMu.Lock()
+	overrides = installed
+	overrideMu.Unlock()
+}
+
+func modelOverride(key string) (ModelOverride, bool) {
+	overrideMu.RLock()
+	defer overrideMu.RUnlock()
+	if len(overrides) == 0 {
+		return ModelOverride{}, false
+	}
+	o, ok := overrides[strings.ToLower(strings.TrimSpace(key))]
+	return o, ok
+}
+
+// applyModelOverride lays one configured row's capabilities over a hit. A row
+// that says nothing about a field leaves the catalog's value in place.
+func applyModelOverride(hit Hit, override ModelOverride) Hit {
+	if override.SupportsImages != nil {
+		hit.SupportsAttachments = *override.SupportsImages
+	}
+	if override.CanReason != nil {
+		hit.CanReason = *override.CanReason
+	}
+	if override.ContextWindow != nil {
+		hit.ContextWindow = *override.ContextWindow
+	}
+	if override.MaxOutput != nil {
+		hit.DefaultMaxTokens = *override.MaxOutput
+	}
+	switch {
+	case override.CanReason != nil && !*override.CanReason:
+		// A model the row says does not reason: no levels to pick from, and
+		// that is known rather than missing.
+		hit.ReasoningOptions = nil
+		hit.ReasoningKnown = true
+	case override.Efforts != nil || override.ReasoningOff != nil:
+		var levels []string
+		if override.Efforts != nil {
+			levels = override.Efforts
+		} else {
+			levels, _ = effortsFromOptions(hit.ReasoningOptions, hit.ReasoningKnown)
+		}
+		if override.ReasoningOff != nil && *override.ReasoningOff {
+			levels = append([]string{"none"}, levels...)
+		}
+		hit.ReasoningOptions = []ReasoningOption{{Type: "effort", Values: levels}}
+		hit.ReasoningKnown = true
+	}
+	return hit
+}
+
+// SetBuiltinModels installs capability rows for providers the catalog has no
+// entries for (pkg/config's registry Models: volcengine, byteplus). They rank
+// below the catalog and above nothing: a configured row's overrides still win.
+// provider is the catalog prefix; an empty model list removes what it had.
+func SetBuiltinModels(provider string, models []Model) {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	if p == "" {
+		return
+	}
+	builtinModelMu.Lock()
+	defer builtinModelMu.Unlock()
+	if builtinModels == nil {
+		builtinModels = map[string][]Model{}
+	}
+	if len(models) == 0 {
+		delete(builtinModels, p)
+		return
+	}
+	installed := make([]Model, 0, len(models))
+	for _, m := range models {
+		if strings.TrimSpace(m.ID) == "" {
+			continue
+		}
+		m.Provider = p
+		installed = append(installed, m)
+	}
+	builtinModels[p] = installed
+}
+
+func builtinModel(provider, apiModel string) (Model, bool) {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	model := strings.ToLower(strings.TrimSpace(apiModel))
+	if p == "" || model == "" {
+		return Model{}, false
+	}
+	builtinModelMu.RLock()
+	defer builtinModelMu.RUnlock()
+	for _, m := range builtinModels[p] {
+		if strings.EqualFold(strings.TrimSpace(m.ID), model) || strings.EqualFold(strings.TrimSpace(m.APIModel), model) {
+			return m, true
+		}
+	}
+	return Model{}, false
 }
 
 // ReasoningEfforts names the discrete thinking levels the catalog's merged data
@@ -663,13 +839,18 @@ func AllModels() []Model {
 
 // KnownProvider reports whether provider is a known LLM provider. The set of
 // known providers is derived entirely from models.json (each catalog key's
-// prefix before the first '/'). When the global catalog is not loaded the
-// function is permissive (returns true) so callers without a catalog are not
-// blocked.
+// prefix before the first '/'), plus the built-in model table a provider with
+// no catalog rows is installed through (volcengine, byteplus), plus the
+// reserved custom-model provider, which by definition accepts anything. When
+// the global catalog is not loaded the function is permissive (returns true)
+// so callers without a catalog are not blocked.
 func KnownProvider(provider string) bool {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	if p == "" {
 		return false
+	}
+	if p == customModelProvider {
+		return true
 	}
 	globalCatMu.RLock()
 	cat := globalCat
@@ -677,7 +858,12 @@ func KnownProvider(provider string) bool {
 	if cat == nil {
 		return true // permissive when catalog unavailable
 	}
-	return cat.HasProvider(p)
+	if cat.HasProvider(p) {
+		return true
+	}
+	builtinModelMu.RLock()
+	defer builtinModelMu.RUnlock()
+	return len(builtinModels[p]) > 0
 }
 
 // SetGlobalCatalogForTest installs a catalog as the global catalog for testing.

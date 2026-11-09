@@ -1095,7 +1095,13 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentProvider, curren
 		if model == "" {
 			continue
 		}
-		key := strings.ToLower(provider + "/" + model)
+		// Twin rows of one provider/model are two offers, so the grouping key
+		// is the row id when the view gives one; the pair only answers for a
+		// config assembled without ids.
+		key := strings.TrimSpace(entry.ID)
+		if key == "" {
+			key = strings.ToLower(provider + "/" + model)
+		}
 		if _, dup := seen[key]; dup {
 			continue
 		}

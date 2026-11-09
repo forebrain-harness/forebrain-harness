@@ -8,49 +8,12 @@ import (
 	"strings"
 )
 
-// GatewayTokenEnvVar is the environment variable that supplies
-// gateway.auth.token. The seeded config references it as
-// ${FOREBRAIN_GATEWAY_TOKEN} so the secret lives in ~/.forebrain/.env rather than in
-// plaintext inside forebrain.yaml.
-const GatewayTokenEnvVar = "FOREBRAIN_GATEWAY_TOKEN"
-
 func generateGatewayToken() (string, error) {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(buf[:]), nil
-}
-
-// UpsertEnvVar writes key=value into ~/.forebrain/.env, replacing an existing
-// assignment for key when present and otherwise appending it. Unrelated lines
-// (comments and other keys) are preserved verbatim and the file is kept at
-// 0600 because it holds secrets.
-func UpsertEnvVar(root, key, value string) error {
-	path := DefaultEnvPath(root)
-	var lines []string
-	if b, err := os.ReadFile(path); err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-	} else if content := strings.TrimRight(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n"); content != "" {
-		lines = strings.Split(content, "\n")
-	}
-	assignment := key + "=" + value
-	prefix := key + "="
-	replaced := false
-	for i, ln := range lines {
-		trimmed := strings.TrimPrefix(strings.TrimSpace(ln), "export ")
-		if strings.HasPrefix(trimmed, prefix) {
-			lines[i] = assignment
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		lines = append(lines, assignment)
-	}
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }
 
 func seedWorkspace(root string) error {
@@ -67,13 +30,13 @@ func seedWorkspace(root string) error {
 		if err != nil {
 			return err
 		}
-		// Keep the secret out of forebrain.yaml: store it in ~/.forebrain/.env and
-		// leave a ${FOREBRAIN_GATEWAY_TOKEN} reference in the config so the
-		// plaintext-secret guard in config.Load accepts it.
-		if err := UpsertEnvVar(root, GatewayTokenEnvVar, tok); err != nil {
-			return err
-		}
-		if err := writeSeedFile(cfgPath, []byte(defaultForebrainYAML), 0o600); err != nil {
+		// The token is the file's own secret: the gateway's only authentication
+		// lives in gateway.auth.token, inside a file only its owner can read
+		// (owner 2026-11-07, plan 268). A container supplies the same value
+		// through the process environment instead, and a seeded
+		// `${FOREBRAIN_GATEWAY_TOKEN}` then resolves from there.
+		seed := strings.ReplaceAll(defaultForebrainYAML, gatewayTokenPlaceholder, tok)
+		if err := writeSeedFile(cfgPath, []byte(seed), 0o600); err != nil {
 			return err
 		}
 	}
@@ -110,10 +73,15 @@ func writeSeedFile(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmpName, path)
 }
 
-const defaultForebrainYAML = `gateway:
+// gatewayTokenPlaceholder is where the seeded configuration carries the token
+// it was born with; the seed substitutes the generated value for it before the
+// file is written.
+const gatewayTokenPlaceholder = "__FOREBRAIN_GATEWAY_TOKEN__"
+
+var defaultForebrainYAML = `gateway:
   http_addr: "127.0.0.1:6060"
   auth:
-    token: "${FOREBRAIN_GATEWAY_TOKEN}"
+    token: "` + gatewayTokenPlaceholder + `"
 # Channels (telegram, slack, feishu, wecom, ...) are not seeded. Add one during
 # first-run setup or by writing its section here by hand; only enabled channels
 # are persisted back to this file.
@@ -124,11 +92,6 @@ features:
   request_permissions_tool: false
   memories: true
 agents:
-  definitions:
-    main:
-      llm_providers:
-        - provider: ""
-          model: ""
   defaults:
     context_inject:
       warn_remaining_percent: 12

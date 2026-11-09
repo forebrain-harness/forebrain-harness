@@ -183,18 +183,44 @@ func TestSubagentCatalogEnumDescriptionNamesCustomSubagents(t *testing.T) {
 	}
 }
 
-func TestSubagentCatalogModelSplitsProviderAndModel(t *testing.T) {
-	catalog := SubagentCatalogFor(catalogTestConfig(), "main")
-	provider, model, effort, ok := catalog.Model("explore")
-	if !ok || provider != "deepseek" || model != "deepseek-v4-flash" || effort != "low" {
-		t.Fatalf("Model(explore) = %q %q %q %v", provider, model, effort, ok)
+// TestSubagentCatalogModelResolvesTheConfiguredRow pins that a subagent's
+// `model:` is a reference into the agent's model view, not two strings cut on a
+// slash: the legacy label resolves to the configured row and the row's id comes
+// back with the pair, because the same pair may be configured more than once.
+func TestSubagentCatalogModelResolvesTheConfiguredRow(t *testing.T) {
+	cfg := catalogTestConfig()
+	cfg.LLMModels = []appcfg.LLMModelConfig{{
+		ID: "llm-deepseek-flash", Provider: "deepseek", Model: "deepseek-v4-flash",
+		BaseURL: "http://flash.test/v1", APIKey: "key",
+	}}
+	catalog := SubagentCatalogFor(cfg, "main")
+	modelID, provider, model, effort, ok := catalog.Model("explore")
+	if !ok || modelID != "llm-deepseek-flash" || provider != "deepseek" || model != "deepseek-v4-flash" || effort != "low" {
+		t.Fatalf("Model(explore) = %q %q %q %q %v", modelID, provider, model, effort, ok)
 	}
-	if _, _, _, ok := catalog.Model("plan"); ok {
+	if _, _, _, _, ok := catalog.Model("plan"); ok {
 		t.Fatal("a built-in with no model override must follow the conversation")
 	}
-	if _, _, _, ok := catalog.Model("repo-scout"); ok {
+	if _, _, _, _, ok := catalog.Model("repo-scout"); ok {
 		t.Fatal("a custom subagent with no model must follow the conversation")
 	}
+	// A reference that names no configured row pins nothing: the type follows
+	// the conversation rather than pinning a run to a model no client can build.
+	cfg.Agents.Definitions["main"] = withSubagentModel(cfg.Agents.Definitions["main"], "explore", "deepseek/deepseek-v9-absent")
+	if _, _, _, _, ok := SubagentCatalogFor(cfg, "main").Model("explore"); ok {
+		t.Fatal("a model reference the view does not hold must not pin a run")
+	}
+}
+
+// withSubagentModel rewrites one subagent's configured model, since a
+// definition is read out of the map by value.
+func withSubagentModel(def appcfg.AgentDefinition, name, model string) appcfg.AgentDefinition {
+	for i := range def.Subagents {
+		if def.Subagents[i].Name == name {
+			def.Subagents[i].Model = model
+		}
+	}
+	return def
 }
 
 func mustSystemPrompt(t *testing.T, name string) string {

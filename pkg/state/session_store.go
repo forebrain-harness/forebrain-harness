@@ -439,15 +439,15 @@ SELECT CASE WHEN EXISTS(
 		 ON CONFLICT DO NOTHING`,
 	}
 	sessionModelSelectionSelectSQL = dbx.SQL{
-		SQLite: `SELECT m.provider, m.model, m.effort
+		SQLite: `SELECT m.provider, m.model, m.effort, m.model_id
 		FROM fb_session_model_state m
 		JOIN fb_sessions s ON s.id=m.session_id AND s.agent_id=?
 		WHERE m.session_id=?`,
-		MySQL: `SELECT m.provider, m.model, m.effort
+		MySQL: `SELECT m.provider, m.model, m.effort, m.model_id
 		FROM fb_session_model_state m
 		JOIN fb_sessions s ON s.id=m.session_id AND s.agent_id=?
 		WHERE m.session_id=?`,
-		Postgres: `SELECT m.provider, m.model, m.effort
+		Postgres: `SELECT m.provider, m.model, m.effort, m.model_id
 		FROM fb_session_model_state m
 		JOIN fb_sessions s ON s.id=m.session_id AND s.agent_id=$1
 		WHERE m.session_id=$2`,
@@ -478,15 +478,15 @@ SELECT CASE WHEN EXISTS(
 		) THEN 1 ELSE 0 END`,
 	}
 	latestSessionModelSelectionSQL = dbx.SQL{
-		SQLite: `SELECT p.provider, p.model, p.effort
+		SQLite: `SELECT p.provider, p.model, p.effort, p.model_id
 		FROM fb_session_model_state p JOIN fb_sessions s ON s.id = p.session_id
 		WHERE s.agent_id = ? AND s.source IN (?, ?)
 		ORDER BY p.updated_at DESC, p.session_id DESC LIMIT 1`,
-		MySQL: `SELECT p.provider, p.model, p.effort
+		MySQL: `SELECT p.provider, p.model, p.effort, p.model_id
 		FROM fb_session_model_state p JOIN fb_sessions s ON s.id = p.session_id
 		WHERE s.agent_id = ? AND s.source IN (?, ?)
 		ORDER BY p.updated_at DESC, p.session_id DESC LIMIT 1`,
-		Postgres: `SELECT p.provider, p.model, p.effort
+		Postgres: `SELECT p.provider, p.model, p.effort, p.model_id
 		FROM fb_session_model_state p JOIN fb_sessions s ON s.id = p.session_id
 		WHERE s.agent_id = $1 AND s.source IN ($2, $3)
 		ORDER BY p.updated_at DESC, p.session_id DESC LIMIT 1`,
@@ -550,23 +550,23 @@ func sessionModelStampFor(d dbx.Dialect, n int) string {
 func saveSessionModelSelectionSQL(d dbx.Dialect) string {
 	switch d {
 	case dbx.Postgres:
-		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT $1, $2, $3, $4, ` + sessionModelStampFor(dbx.Postgres, 5) + `
-		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=$6 AND agent_id=$7)
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, model_id, updated_at)
+		SELECT $1, $2, $3, $4, $5, ` + sessionModelStampFor(dbx.Postgres, 6) + `
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=$7 AND agent_id=$8)
 		ON CONFLICT(session_id) DO UPDATE SET
-			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`
+			provider=excluded.provider, model=excluded.model, effort=excluded.effort, model_id=excluded.model_id, updated_at=excluded.updated_at`
 	case dbx.MySQL:
-		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT ?, ?, ?, ?, ` + sessionModelStampFor(dbx.MySQL, 5) + `
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, model_id, updated_at)
+		SELECT ?, ?, ?, ?, ?, ` + sessionModelStampFor(dbx.MySQL, 6) + `
 		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
 		ON DUPLICATE KEY UPDATE
-			provider=VALUES(provider), model=VALUES(model), effort=VALUES(effort), updated_at=VALUES(updated_at)`
+			provider=VALUES(provider), model=VALUES(model), effort=VALUES(effort), model_id=VALUES(model_id), updated_at=VALUES(updated_at)`
 	default:
-		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT ?, ?, ?, ?, ` + sessionModelStampFor(dbx.SQLite, 5) + `
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, model_id, updated_at)
+		SELECT ?, ?, ?, ?, ?, ` + sessionModelStampFor(dbx.SQLite, 6) + `
 		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
 		ON CONFLICT(session_id) DO UPDATE SET
-			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`
+			provider=excluded.provider, model=excluded.model, effort=excluded.effort, model_id=excluded.model_id, updated_at=excluded.updated_at`
 	}
 }
 
@@ -574,32 +574,32 @@ func saveSessionModelSelectionSQL(d dbx.Dialect) string {
 func copySessionModelSelectionSQL(d dbx.Dialect) string {
 	switch d {
 	case dbx.Postgres:
-		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT $1, src.provider, src.model, src.effort, ` + sessionModelStampFor(dbx.Postgres, 2) + `
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, model_id, updated_at)
+		SELECT $1, src.provider, src.model, src.effort, src.model_id, ` + sessionModelStampFor(dbx.Postgres, 2) + `
 		FROM fb_session_model_state src
 		WHERE src.session_id=$3 AND EXISTS (
 			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=$4
 		)
 		ON CONFLICT(session_id) DO UPDATE SET
-			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`
+			provider=excluded.provider, model=excluded.model, effort=excluded.effort, model_id=excluded.model_id, updated_at=excluded.updated_at`
 	case dbx.MySQL:
-		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT ?, src.provider, src.model, src.effort, ` + sessionModelStampFor(dbx.MySQL, 2) + `
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, model_id, updated_at)
+		SELECT ?, src.provider, src.model, src.effort, src.model_id, ` + sessionModelStampFor(dbx.MySQL, 2) + `
 		FROM fb_session_model_state src
 		WHERE src.session_id=? AND EXISTS (
 			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
 		)
 		ON DUPLICATE KEY UPDATE
-			provider=VALUES(provider), model=VALUES(model), effort=VALUES(effort), updated_at=VALUES(updated_at)`
+			provider=VALUES(provider), model=VALUES(model), effort=VALUES(effort), model_id=VALUES(model_id), updated_at=VALUES(updated_at)`
 	default:
-		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, updated_at)
-		SELECT ?, src.provider, src.model, src.effort, ` + sessionModelStampFor(dbx.SQLite, 2) + `
+		return `INSERT INTO fb_session_model_state(session_id, provider, model, effort, model_id, updated_at)
+		SELECT ?, src.provider, src.model, src.effort, src.model_id, ` + sessionModelStampFor(dbx.SQLite, 2) + `
 		FROM fb_session_model_state src
 		WHERE src.session_id=? AND EXISTS (
 			SELECT 1 FROM fb_sessions s WHERE s.id=src.session_id AND s.agent_id=?
 		)
 		ON CONFLICT(session_id) DO UPDATE SET
-			provider=excluded.provider, model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`
+			provider=excluded.provider, model=excluded.model, effort=excluded.effort, model_id=excluded.model_id, updated_at=excluded.updated_at`
 	}
 }
 
@@ -3935,9 +3935,12 @@ func (s *SessionStore) FreezeSessionPromptState(ctx context.Context, sessionID, 
 }
 
 // SessionModelSelection is one session's own effective primary-model choice.
+// ModelID names the fb_llm_models row the session runs on; empty is a row
+// written before model ids existed, which readers resolve by provider+model.
 // Effort is the concrete pinned value; empty means explicitly no effort, never
 // "re-read the file next time".
 type SessionModelSelection struct {
+	ModelID  string
 	Provider string
 	Model    string
 	Effort   string
@@ -3968,6 +3971,7 @@ func (s *SessionStore) SaveSessionModelSelection(
 		return false, nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
+	sel.ModelID = strings.TrimSpace(sel.ModelID)
 	sel.Provider = strings.TrimSpace(sel.Provider)
 	sel.Model = strings.TrimSpace(sel.Model)
 	sel.Effort = strings.TrimSpace(sel.Effort)
@@ -3984,7 +3988,7 @@ func (s *SessionStore) SaveSessionModelSelection(
 		// Milliseconds for the wall clock, lifted past the table's maximum
 		// when needed: updated_at orders "most recently used", so two writes
 		// inside one millisecond must still order by the later one.
-		sessionID, sel.Provider, sel.Model, sel.Effort, time.Now().UnixMilli(), sessionID, s.AgentID(),
+		sessionID, sel.Provider, sel.Model, sel.Effort, sel.ModelID, time.Now().UnixMilli(), sessionID, s.AgentID(),
 	)
 	if err != nil {
 		return false, err
@@ -4015,7 +4019,7 @@ func (s *SessionStore) SessionModelSelection(
 	var sel SessionModelSelection
 	err := s.db.QueryRowContext(ctx, sessionModelSelectionSelectSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), sessionID,
-	).Scan(&sel.Provider, &sel.Model, &sel.Effort)
+	).Scan(&sel.Provider, &sel.Model, &sel.Effort, &sel.ModelID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SessionModelSelection{}, false, nil
 	}
@@ -4172,7 +4176,7 @@ func (s *SessionStore) LatestSessionModelSelection(ctx context.Context) (Session
 	var sel SessionModelSelection
 	err := s.db.QueryRowContext(ctx, latestSessionModelSelectionSQL.For(dbx.DialectOf(s.db)),
 		s.AgentID(), SessionSourceConversation, SessionSourceWorkshop,
-	).Scan(&sel.Provider, &sel.Model, &sel.Effort)
+	).Scan(&sel.Provider, &sel.Model, &sel.Effort, &sel.ModelID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SessionModelSelection{}, false, nil
 	}

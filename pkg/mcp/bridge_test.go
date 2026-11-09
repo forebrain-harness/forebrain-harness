@@ -56,7 +56,7 @@ func TestStdioSessionCloseReapsTheChildProcess(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(0))
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(0))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestStdioStartFailureReclaimsTheChildProcess(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			defer cancel()
-			sess, err := Start(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(tc.timeout))
+			sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(tc.timeout))
 			if err == nil {
 				_ = sess.Close()
 				t.Fatal("Start succeeded against a server that cannot complete a handshake")
@@ -118,7 +118,7 @@ func TestStdioAbortReclaimsTheChildAfterToolsListFails(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(0))
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(0))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestStdioSessionCloseIsIdempotent(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(0))
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(0))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestReconnectRebuildsOnTheSessionLifetimeContext(t *testing.T) {
 	// cancelled. A reconnect that inherited it could not rebuild anything.
 	upstream, cancelUpstream := context.WithCancel(context.Background())
 	defer cancelUpstream()
-	sess, err := Start(upstream, t.TempDir(), t.TempDir(), fixture.serverConfig(5))
+	sess, err := Start(upstream, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(5))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestReconnectRebuildsOnTheSessionLifetimeContext(t *testing.T) {
 		mu.Lock()
 		factoryCtx = handshake
 		mu.Unlock()
-		return Start(handshake, t.TempDir(), t.TempDir(), spare.serverConfig(5))
+		return Start(handshake, t.TempDir(), nil, t.TempDir(), spare.serverConfig(5))
 	}
 	if err := sess.reconnectSession(); err != nil {
 		t.Fatalf("reconnectSession: %v", err)
@@ -287,12 +287,12 @@ func TestConcurrentCallToolAndClose(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(5))
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(5))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	sess.reconnect = func(reconnectCtx context.Context) (*Session, error) {
-		return Start(reconnectCtx, t.TempDir(), t.TempDir(), fixture.serverConfig(5))
+		return Start(reconnectCtx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(5))
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
@@ -626,7 +626,7 @@ func TestExpiredSessionRetriesOnTheReconnectedConnection(t *testing.T) {
 	cfg := appcfg.MCPServerConfig{Name: "expiring", Transport: "streamable_http", URL: httpSrv.URL, StartupTimeout: 10}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), cfg)
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), cfg)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -662,7 +662,7 @@ func TestSecondReconnectRebuildsFromTheLiveChildsLifetime(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), first.serverConfig(5))
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), first.serverConfig(5))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -671,7 +671,7 @@ func TestSecondReconnectRebuildsFromTheLiveChildsLifetime(t *testing.T) {
 
 	next := second
 	sess.reconnect = func(handshake context.Context) (*Session, error) {
-		return Start(handshake, t.TempDir(), t.TempDir(), next.serverConfig(5))
+		return Start(handshake, t.TempDir(), nil, t.TempDir(), next.serverConfig(5))
 	}
 	if err := sess.reconnectSession(); err != nil {
 		t.Fatalf("first reconnect: %v", err)
@@ -705,7 +705,7 @@ func TestReleaseReclaimsTheChildAndTheNextCallGrowsItBack(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(5))
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(5))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -832,12 +832,12 @@ func TestConcurrentReleaseCallReconnectClose(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	sess, err := Start(ctx, t.TempDir(), t.TempDir(), fixture.serverConfig(5))
+	sess, err := Start(ctx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(5))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	sess.reconnect = func(reconnectCtx context.Context) (*Session, error) {
-		return Start(reconnectCtx, t.TempDir(), t.TempDir(), fixture.serverConfig(5))
+		return Start(reconnectCtx, t.TempDir(), nil, t.TempDir(), fixture.serverConfig(5))
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {

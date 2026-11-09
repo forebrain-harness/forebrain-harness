@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 func openConfigStoreForTest(t *testing.T) (*ConfigStore, context.Context) {
@@ -304,5 +306,381 @@ func TestConfigStoreUpdateSectionRunsValidator(t *testing.T) {
 		return json.RawMessage(`{}`), nil
 	}); err != nil {
 		t.Fatalf("accepted write: %v", err)
+	}
+}
+
+// The install-wide model configurations' store, the sibling of ConfigStore.
+func newLLMModelStoreForTest(t *testing.T) *LLMModelStore {
+	t.Helper()
+	db, err := OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return &LLMModelStore{DB: db}
+}
+
+func boolPointer(v bool) *bool { return &v }
+
+func int64Pointer(v int64) *int64 { return &v }
+
+func TestLLMModelCreateListRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	want := LLMModel{
+		Provider:         "OpenAI",
+		Model:            "gpt-5.5",
+		BaseURL:          "https://api.openai.com/v1/",
+		APIPath:          "chat/completions",
+		APIKey:           "sk-test",
+		ParamsJSON:       `{"temperature":0.2}`,
+		CapImages:        boolPointer(true),
+		CapPDF:           boolPointer(false),
+		CapReasoning:     boolPointer(true),
+		CapContextWindow: int64Pointer(262144),
+		Source:           "",
+		SourcePlan:       "",
+		URLVerbatim:      true,
+	}
+	created, err := store.Create(ctx, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" {
+		t.Fatal("Create must assign an id")
+	}
+	if created.CreatedAt <= 0 || created.UpdatedAt <= 0 {
+		t.Fatalf("timestamps not filled: %+v", created)
+	}
+	list, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("List returned %d rows, want 1", len(list))
+	}
+	got := list[0]
+	if got.ID != created.ID {
+		t.Fatalf("id = %q, want %q", got.ID, created.ID)
+	}
+	if got.Provider != "openai" || got.Model != "gpt-5.5" {
+		t.Fatalf("identity = %q/%q, want normalized openai/gpt-5.5", got.Provider, got.Model)
+	}
+	if got.BaseURL != "https://api.openai.com/v1" {
+		t.Fatalf("base_url = %q, want the trailing slash trimmed", got.BaseURL)
+	}
+	if got.APIPath != "/chat/completions" {
+		t.Fatalf("api_path = %q, want the leading slash added", got.APIPath)
+	}
+	if got.APIKey != "sk-test" || got.ParamsJSON != want.ParamsJSON {
+		t.Fatalf("key/params not stored: %+v", got)
+	}
+	if got.CapImages == nil || !*got.CapImages {
+		t.Fatal("cap_images did not survive")
+	}
+	if got.CapPDF == nil || *got.CapPDF {
+		t.Fatal("cap_pdf did not survive")
+	}
+	if got.CapVideo != nil || got.CapAudio != nil || got.CapReasoningOff != nil {
+		t.Fatal("unset capability columns must read back nil")
+	}
+	if got.CapReasoning == nil || !*got.CapReasoning {
+		t.Fatal("cap_reasoning did not survive")
+	}
+	if got.CapContextWindow == nil || *got.CapContextWindow != 262144 {
+		t.Fatal("cap_context_window did not survive")
+	}
+	if got.CapMaxOutput != nil {
+		t.Fatal("cap_max_output must read back nil")
+	}
+	if got.CapEfforts != nil {
+		t.Fatal("unset reasoning levels must read back nil")
+	}
+	if !got.URLVerbatim {
+		t.Fatal("url_verbatim did not survive")
+	}
+}
+
+func TestLLMModelEffortsTriState(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+
+	// nil stays nil: catalog decides the levels.
+	none, err := store.Create(ctx, LLMModel{Provider: "p1", Model: "m1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotNone, err := store.Get(ctx, none.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotNone.CapEfforts != nil {
+		t.Fatalf("nil levels read back %#v", gotNone.CapEfforts)
+	}
+
+	// An empty slice means "explicitly no levels", not "use the catalog".
+	empty, err := store.Create(ctx, LLMModel{Provider: "p2", Model: "m2", CapEfforts: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotEmpty, err := store.Get(ctx, empty.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotEmpty.CapEfforts == nil || len(gotEmpty.CapEfforts) != 0 {
+		t.Fatalf("empty levels read back %#v, want non-nil empty", gotEmpty.CapEfforts)
+	}
+
+	levels, err := store.Create(ctx, LLMModel{Provider: "p3", Model: "m3", CapEfforts: []string{"low", "high"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLevels, err := store.Get(ctx, levels.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotLevels.CapEfforts) != 2 || gotLevels.CapEfforts[0] != "low" || gotLevels.CapEfforts[1] != "high" {
+		t.Fatalf("levels read back %#v", gotLevels.CapEfforts)
+	}
+}
+
+func TestLLMModelSameModelDifferentEndpoints(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	first, err := store.Create(ctx, LLMModel{Provider: "openai", Model: "gpt-5.5", BaseURL: "https://direct.example", APIPath: "/v1/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(ctx, LLMModel{Provider: "openai", Model: "gpt-5.5", BaseURL: "https://proxy.example", APIPath: "/v1/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID == second.ID {
+		t.Fatal("two endpoints of one model must be two rows")
+	}
+	if got, err := store.Get(ctx, second.ID); err != nil || got.BaseURL != "https://proxy.example" {
+		t.Fatalf("second row = %+v, %v", got, err)
+	}
+}
+
+func TestLLMModelSameModelDifferentProviders(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	for _, provider := range []string{"vendor-a", "vendor-b"} {
+		if _, err := store.Create(ctx, LLMModel{Provider: provider, Model: "shared-model"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("List returned %d rows, want 2", len(list))
+	}
+}
+
+func TestLLMModelDuplicateIdentityRejected(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	first, err := store.Create(ctx, LLMModel{Provider: "openai", Model: "gpt-5.5", BaseURL: "https://api.openai.com", APIPath: "/v1/chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Create(ctx, LLMModel{Provider: "openai", Model: "gpt-5.5", BaseURL: "https://api.openai.com", APIPath: "/v1/chat"})
+	var exists ErrLLMModelExists
+	if !errors.As(err, &exists) {
+		t.Fatalf("err = %v, want ErrLLMModelExists", err)
+	}
+	if exists.ID != first.ID {
+		t.Fatalf("conflict id = %q, want the first row %q", exists.ID, first.ID)
+	}
+}
+
+func TestLLMModelNormalizedIdentityCollides(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	first, err := store.Create(ctx, LLMModel{Provider: "OpenAI", Model: "gpt-5.5", BaseURL: "https://api.example.com/", APIPath: "v1/messages"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same identity written differently: provider case, trailing slashes and a
+	// missing leading slash.
+	_, err = store.Create(ctx, LLMModel{Provider: " openai ", Model: "gpt-5.5", BaseURL: "https://api.example.com//", APIPath: "/v1/messages/"})
+	var exists ErrLLMModelExists
+	if !errors.As(err, &exists) || exists.ID != first.ID {
+		t.Fatalf("err = %v (exists %+v), want the first row's id %q", err, exists, first.ID)
+	}
+}
+
+func TestLLMModelModelCaseIsPartOfTheIdentity(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	if _, err := store.Create(ctx, LLMModel{Provider: "longcat", Model: "LongCat-2.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, LLMModel{Provider: "longcat", Model: "longcat-2.0"}); err != nil {
+		t.Fatalf("model names differing only by case must both be accepted: %v", err)
+	}
+}
+
+func TestLLMModelUpdateKeepsCreationAndRefusesConflicts(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	first, err := store.Create(ctx, LLMModel{Provider: "one", Model: "m", APIKey: "k1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(ctx, LLMModel{Provider: "two", Model: "m", APIKey: "k2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated := first
+	updated.APIKey = "rotated"
+	updated.CapImages = boolPointer(true)
+	updated.CreatedAt = 1 // a caller cannot move the creation time
+	if _, err := store.Update(ctx, updated); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CreatedAt != first.CreatedAt {
+		t.Fatalf("created_at moved: %d → %d", first.CreatedAt, got.CreatedAt)
+	}
+	if got.APIKey != "rotated" || got.CapImages == nil || !*got.CapImages {
+		t.Fatalf("update did not land: %+v", got)
+	}
+
+	ontoSecond := got
+	ontoSecond.Provider = second.Provider
+	if _, err := store.Update(ctx, ontoSecond); err == nil {
+		t.Fatal("moving a row onto another row's identity must fail")
+	} else {
+		var exists ErrLLMModelExists
+		if !errors.As(err, &exists) || exists.ID != second.ID {
+			t.Fatalf("err = %v, want a conflict naming %q", err, second.ID)
+		}
+	}
+
+	if _, err := store.Update(ctx, LLMModel{ID: "llm-missing", Provider: "one", Model: "m"}); !errors.Is(err, ErrLLMModelNotFound) {
+		t.Fatalf("update of a missing row = %v, want ErrLLMModelNotFound", err)
+	}
+}
+
+func TestLLMModelUniqueIndexGuardsDirectInsert(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	if _, err := store.Create(ctx, LLMModel{Provider: "openai", Model: "gpt-5.5", BaseURL: "https://api.example.com", APIPath: "/v1/chat"}); err != nil {
+		t.Fatal(err)
+	}
+	// Bypass the store's duplicate check: the index itself must refuse.
+	_, err := store.DB.ExecContext(ctx, `INSERT INTO fb_llm_models(id, provider, model, base_url, api_path, created_at, updated_at)
+		VALUES ('llm-direct', 'openai', 'gpt-5.5', 'https://api.example.com', '/v1/chat', 1, 1)`)
+	if err == nil {
+		t.Fatal("a duplicate identity must violate the unique index")
+	}
+	if !dbx.IsUniqueViolation(err) {
+		t.Fatalf("err = %v, want a uniqueness violation", err)
+	}
+}
+
+func TestLLMModelDeleteMissing(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	created, err := store.Create(ctx, LLMModel{Provider: "p", Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(ctx, created.ID); !errors.Is(err, ErrLLMModelNotFound) {
+		t.Fatalf("Get after delete = %v, want ErrLLMModelNotFound", err)
+	}
+	if err := store.Delete(ctx, created.ID); !errors.Is(err, ErrLLMModelNotFound) {
+		t.Fatalf("second delete = %v, want ErrLLMModelNotFound", err)
+	}
+}
+
+// The operator's variables' store, the other sibling of ConfigStore.
+func newEnvVarStoreForTest(t *testing.T) *EnvVarStore {
+	t.Helper()
+	db, err := OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return &EnvVarStore{DB: db}
+}
+
+func TestEnvVarSetListMapDelete(t *testing.T) {
+	ctx := context.Background()
+	store := newEnvVarStoreForTest(t)
+	if err := store.Set(ctx, "Z_API_TOKEN", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set(ctx, "A_BASE_URL", "https://example.test"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].Name != "A_BASE_URL" || list[1].Name != "Z_API_TOKEN" {
+		t.Fatalf("List = %+v, want name order", list)
+	}
+	for _, v := range list {
+		if v.UpdatedAtMs <= 0 {
+			t.Fatalf("variable %s has no timestamp", v.Name)
+		}
+	}
+	asMap, err := store.Map(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asMap["A_BASE_URL"] != "https://example.test" || asMap["Z_API_TOKEN"] != "first" {
+		t.Fatalf("Map = %#v", asMap)
+	}
+	if err := store.Set(ctx, "Z_API_TOKEN", "second"); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustEnvVarValue(t, store, "Z_API_TOKEN"); got != "second" {
+		t.Fatalf("overwrite = %q, want second", got)
+	}
+	if err := store.Delete(ctx, "A_BASE_URL"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Map(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, "A_BASE_URL"); err != nil {
+		t.Fatalf("deleting a missing variable must not fail: %v", err)
+	}
+}
+
+func mustEnvVarValue(t *testing.T, store *EnvVarStore, name string) string {
+	t.Helper()
+	asMap, err := store.Map(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return asMap[name]
+}
+
+func TestEnvVarRejectsInvalidNames(t *testing.T) {
+	ctx := context.Background()
+	store := newEnvVarStoreForTest(t)
+	for _, name := range []string{"", "1starts_with_digit", "has-dash", "has space", "has.dot", "${X}"} {
+		if err := store.Set(ctx, name, "v"); !errors.Is(err, ErrEnvVarName) {
+			t.Fatalf("Set(%q) = %v, want ErrEnvVarName", name, err)
+		}
+	}
+	for _, name := range []string{"_underscore", "A1", "lower_case_9"} {
+		if err := store.Set(ctx, name, "v"); err != nil {
+			t.Fatalf("Set(%q) = %v, want success", name, err)
+		}
 	}
 }

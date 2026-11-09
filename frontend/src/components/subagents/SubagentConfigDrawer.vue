@@ -32,16 +32,33 @@
           <Select :model-value="toChoice(form.model)" @update:model-value="onModelChange">
             <SelectTrigger
               id="subagent-model"
-              class="forebrain-field !h-[34px] w-full"
+              class="forebrain-field !h-auto w-full min-h-[34px] py-1"
               :disabled="readonly"
               data-testid="subagent-model"
+              :title="selectedModel ? endpointOf(selectedModel) : ''"
             >
-              <SelectValue />
+              <ModelSignature
+                v-if="selectedModel"
+                :model="selectedModel.model"
+                :provider-name="selectedModel.providerName ?? selectedModel.provider"
+                :base-url="selectedModel.baseUrl ?? ''"
+                :api-path="selectedModel.apiPath ?? ''"
+                class="sa-model-trigger"
+              />
+              <span v-else class="sa-model-trigger">{{ followLabel }}</span>
             </SelectTrigger>
             <SelectContent>
+              <!-- The first entry is this agent's own default; every other row is
+                   one configured model, named by the address it calls so two rows
+                   for one model are two choices. -->
               <SelectItem :value="EMPTY_CHOICE">{{ followLabel }}</SelectItem>
-              <SelectItem v-for="option in modelChoices" :key="modelKey(option)" :value="modelKey(option)">
-                {{ modelKey(option) }}
+              <SelectItem v-for="option in modelChoices" :key="rowValue(option)" :value="rowValue(option)">
+                <ModelSignature
+                  :model="option.model"
+                  :provider-name="option.providerName ?? option.provider"
+                  :base-url="option.baseUrl ?? ''"
+                  :api-path="option.apiPath ?? ''"
+                />
               </SelectItem>
             </SelectContent>
           </Select>
@@ -265,6 +282,7 @@ import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainDrawer from '@/components/common/ForebrainDrawer.vue'
 import RadioField from '@/components/common/RadioField.vue'
+import ModelSignature from '@/components/models/ModelSignature.vue'
 import { effortLevelLabel } from '@/lib/effortLabel'
 import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import {
@@ -364,8 +382,18 @@ const title = computed(() => {
 
 const nameValid = computed(() => NAME_PATTERN.test(form.name.trim()))
 
-function modelKey(option: SessionModelOption): string {
-  return `${option.provider}/${option.model}`
+/** The value a model option carries: the configured row's id, never the pair.
+ *  Two rows may serve one provider and model, so only the id names the one a
+ *  person picked (plan 261); every option in this list is a row, and the pinned
+ *  one is the row the record already names. */
+function rowValue(option: SessionModelOption): string {
+  return option.id ?? ''
+}
+
+/** The address a row calls: the trigger's tooltip, since the trigger itself is
+ *  one line and truncates. */
+function endpointOf(option: SessionModelOption): string {
+  return `${option.baseUrl ?? ''}${option.apiPath ?? ''}`
 }
 
 /** The models the select offers. A row may pin a model this agent no longer
@@ -373,14 +401,20 @@ function modelKey(option: SessionModelOption): string {
  * opening the record and saving it leaves that pin where it was. */
 const modelChoices = computed<SessionModelOption[]>(() => {
   const pinned = detail.value
-  const key = pinned && pinned.model ? `${pinned.modelProvider}/${pinned.model}` : ''
-  if (key === '' || options.value.some((option) => modelKey(option) === key)) return options.value
-  return [...options.value, { provider: pinned?.modelProvider ?? '', model: pinned?.model ?? '', label: key, efforts: [] }]
+  const key = pinned?.model ? pinned.model : ''
+  if (key === '' || options.value.some((option) => rowValue(option) === key)) return options.value
+  // The row is gone from the list (the model was deleted, or this is a legacy
+  // entry): it stays offered so opening the record and saving it leaves the pin
+  // where it was.
+  return [
+    ...options.value,
+    { id: key, provider: pinned?.modelProvider ?? '', model: pinned?.model ?? '', label: key, efforts: [] },
+  ]
 })
 
 const canPickEffort = computed(() => form.model !== '')
 
-const selectedModel = computed(() => modelChoices.value.find((option) => modelKey(option) === form.model) ?? null)
+const selectedModel = computed(() => modelChoices.value.find((option) => rowValue(option) === form.model) ?? null)
 
 /** The efforts the chosen model takes; a stored effort the catalog no longer
  * names stays on the list, so it cannot silently turn into the default. */
@@ -395,8 +429,13 @@ const effortTip = computed(() => (canPickEffort.value || readonly.value ? '' : t
 /** 跟随主代理, naming the model the conversation runs on when the agent lists one. */
 const followLabel = computed(() => {
   const first = options.value[0]
-  return first ? t('subagents.modelFollowPrimary', { model: modelKey(first) }) : t('subagents.followPrimary')
+  return first ? t('subagents.modelFollowPrimary', { model: labelOf(first) }) : t('subagents.followPrimary')
 })
+
+/** A model as a sentence names it: 服务商/模型. */
+function labelOf(option: SessionModelOption): string {
+  return `${option.provider}/${option.model}`
+}
 
 const toolTiers = computed(() => [
   { value: 'read_only', label: t('subagents.toolsReadOnly'), description: t('subagents.toolsReadOnlyHint') },
@@ -462,7 +501,7 @@ function toggleTool(name: string) {
  * too. */
 function onModelChange(choice: unknown) {
   form.model = fromChoice(choice)
-  const efforts = modelChoices.value.find((option) => modelKey(option) === form.model)?.efforts ?? []
+  const efforts = modelChoices.value.find((option) => rowValue(option) === form.model)?.efforts ?? []
   if (form.reasoningEffort !== '' && !efforts.includes(form.reasoningEffort)) form.reasoningEffort = ''
 }
 
@@ -476,7 +515,9 @@ function restoreDefault() {
 function applyDetail(record: SubagentConfigDetail) {
   form.name = record.name
   form.description = record.description
-  form.model = record.model ? `${record.modelProvider}/${record.model}` : ''
+  // The stored value is the configured row's id (plan 261 rewrote the legacy
+  // label): a pair could not tell two configured rows apart.
+  form.model = record.model ?? ''
   form.reasoningEffort = record.reasoningEffort
   form.tools = record.tools
   form.allowedTools = [...record.allowedTools]
@@ -502,8 +543,20 @@ async function load() {
     const record: Promise<SubagentConfigDetail | null> = creating.value
       ? Promise.resolve(null)
       : forebrainApi.subagentConfig(props.agentId, subject.value)
-    const [loadedRecord, models] = await Promise.all([record, forebrainApi.subagentModelOptions(props.agentId)])
-    options.value = Array.isArray(models) ? models : []
+    // One list for every picker (plan 265/266): the install's configured rows,
+    // each with the endpoint it calls, so a pin can name the row it means.
+    const [loadedRecord, models] = await Promise.all([record, forebrainApi.llmModelChoices()])
+    options.value = (Array.isArray(models) ? models : []).map((choice) => ({
+      id: choice.id,
+      provider: choice.provider,
+      providerName: choice.providerName,
+      model: choice.model,
+      label: choice.label,
+      baseUrl: choice.baseUrl,
+      apiPath: choice.apiPath,
+      efforts: choice.efforts,
+      supportsImages: choice.supportsImages,
+    }))
     if (loadedRecord) {
       detail.value = loadedRecord
       applyDetail(loadedRecord)

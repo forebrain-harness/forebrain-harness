@@ -7569,6 +7569,11 @@ type panelLine struct {
 	// the name of a two-column row. See columnRows.
 	col      string
 	colWidth int
+	// elideTail, when set, is the end of text the description column must keep
+	// visible: the two-column row elides the text's middle around it instead of
+	// wrapping. Only the /model picker sets it — an endpoint whose path names
+	// the protocol — so every other list still wraps.
+	elideTail string
 }
 
 // rows wraps the line at width.

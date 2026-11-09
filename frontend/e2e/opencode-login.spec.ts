@@ -1,23 +1,19 @@
 import { expect, test, type Page } from '@playwright/test'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 
 import { shot, signIn } from './support'
 
 /**
- * Signing a model service in from the model-settings page. The flows themselves
- * run in the gateway (they need a device code and, for ChatGPT, a loopback
- * callback — neither belongs to a browser page), so this spec stubs the three
- * login endpoints and the catalog listing and drives the page: the device code,
- * the authorization link, the catalog the finished login unlocks, and the row
- * that lands in the config once a model is chosen.
+ * Subscription sign-in from the models page (plan 266): one modal for every
+ * subscription, three steps — pick it, sign in to it, choose the models it
+ * unlocked.
  *
- * The stubs answer in the gateway's own shape (snake_case JSON, 202 for a start,
- * 404 for an unknown id), so the page's polling is exercised as it really runs.
+ * The flows themselves run in the gateway (they need a device code and, for
+ * ChatGPT, a loopback callback — neither belongs to a browser page), so this
+ * spec stubs the registry, the login endpoints, the offers and the write, and
+ * drives the page through both flow kinds. The stubs answer in the gateway's own
+ * shape (snake_case JSON, 202 for a start, 409 with the keys a plan holds), so
+ * the page's polling and its refusal branches are exercised as they really run.
  */
-
-const home = process.env.E2E_HOME ?? ''
-const configPath = home ? join(home, 'forebrain.yaml') : ''
 
 test.describe.configure({ mode: 'serial' })
 
@@ -27,22 +23,36 @@ type LoginBody = {
   user_code: string
   error: string
   base_url: string
+  flow: string
 }
 
 function pending(overrides: Partial<LoginBody> = {}): LoginBody {
-  return { status: 'pending', url: '', user_code: '', error: '', base_url: '', ...overrides }
+  return { status: 'pending', url: '', user_code: '', error: '', base_url: '', flow: '', ...overrides }
 }
 
-function complete(baseUrl: string): LoginBody {
-  return { status: 'complete', url: '', user_code: '', error: '', base_url: baseUrl }
+function complete(baseUrl: string, flow: string): LoginBody {
+  return { status: 'complete', url: '', user_code: '', error: '', base_url: baseUrl, flow }
+}
+
+/** One subscription as the registry lists it. */
+type Sub = { id: string; name: string; flows: string[]; state: string }
+
+async function stubSubscriptions(page: Page, subs: Sub[]): Promise<void> {
+  await page.route('**/api/subscriptions', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(subs) })
+  })
 }
 
 /**
- * Answers the three login endpoints for one provider: a 202 with an id, then the
- * given statuses in order (the last one repeats, so a slow poll never runs off
- * the end), and a 204 for the cancel a closed modal sends.
+ * Answers one subscription's login endpoints: a 202 with an id, then the given
+ * statuses in order (the last one repeats, so a slow poll never runs off the
+ * end), and a 204 for the cancel a closed modal sends.
  */
-async function stubLogin(page: Page, provider: string, statuses: LoginBody[]): Promise<void> {
+async function stubLogin(page: Page, id: string, statuses: LoginBody[]): Promise<void> {
   let polls = 0
   await page.route('**/api/auth/login/**', async (route) => {
     const url = new URL(route.request().url())
@@ -50,11 +60,20 @@ async function stubLogin(page: Page, provider: string, statuses: LoginBody[]): P
       await route.fulfill({ status: 204, body: '' })
       return
     }
+    if (url.pathname.endsWith('/callback')) {
+      await route.fallback()
+      return
+    }
+    const asked = url.pathname.split('/api/auth/login/')[1]?.split('/')[0] ?? ''
+    if (asked !== id) {
+      await route.fallback()
+      return
+    }
     if (route.request().method() === 'POST') {
       await route.fulfill({
         status: 202,
         contentType: 'application/json',
-        body: JSON.stringify({ login_id: `${provider}-login-1`, provider }),
+        body: JSON.stringify({ login_id: `${id}-login-1`, provider: id }),
       })
       return
     }
@@ -64,27 +83,35 @@ async function stubLogin(page: Page, provider: string, statuses: LoginBody[]): P
   })
 }
 
-/** Answers the catalog listing for one provider and lets every other listing
- * through to the gateway. */
-async function stubCatalog(page: Page, provider: string, ids: string[]): Promise<void> {
-  await page.route('**/api/models**', async (route) => {
-    const asked = new URL(route.request().url()).searchParams.get('provider') ?? ''
-    if (asked !== provider) {
-      await route.fallback()
-      return
-    }
-    const records = ids.map((id, index) => ({
-      model_id: `${provider}/${id}`,
-      provider,
-      api_model: id,
-      context_window: 128000,
-      can_reason: false,
-      supports_attachments: false,
-      is_default: index === 0,
-      source: 'opencode-account',
-    }))
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ records, status: [] }) })
+/** What a finished sign-in offers: one group per plan, one row per model. */
+async function stubOffers(page: Page, id: string, offers: Record<string, unknown>[]): Promise<void> {
+  await page.route(`**/api/subscriptions/${id}/offers`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(offers) })
   })
+}
+
+/** The write that turns chosen offers into rows. */
+async function stubProvision(page: Page, id: string, ids: string[]): Promise<void> {
+  await page.route(`**/api/subscriptions/${id}/provision`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ids }) })
+  })
+}
+
+function offer(plan: string, model: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    plan,
+    plan_name: plan,
+    provider: 'opencode-go',
+    model,
+    base_url: 'https://opencode.ai/zen/go/v1',
+    api_path: '/chat/completions',
+    endpoint: 'https://opencode.ai/zen/go/v1/chat/completions',
+    context_window: 1_000_000,
+    supports_images: false,
+    default: false,
+    from_static_list: false,
+    ...extra,
+  }
 }
 
 /** The page opens the authorization URL through window.open; the run must not
@@ -100,152 +127,143 @@ async function recordWindowOpen(page: Page): Promise<void> {
   })
 }
 
-test('signing in to OpenCode shows the device code, then the catalog it unlocks', async ({ page }) => {
-  test.skip(!home, 'E2E_HOME missing')
-  await recordWindowOpen(page)
-  // The answer the gateway gives for this login: the Go subscription's root,
-  // because that is the surface the row it writes talks to. The page writes the
-  // answer as it is, so the spec has to stub it faithfully.
-  await stubLogin(page, 'opencode', [
-    pending(),
-    pending({ url: 'https://opencode.ai/console/device?user_code=ABCD-1234', user_code: 'ABCD-1234' }),
-    complete('https://opencode.ai/inference/go'),
-  ])
-  await stubCatalog(page, 'opencode-go', ['glm-5.3', 'kimi-k3'])
+async function openSignIn(page: Page): Promise<void> {
+  // The product's own copy is Chinese-first; these assertions quote it.
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('forebrain-locale', 'zh')
+    } catch {
+      // A context with no storage still gets the page's own default.
+    }
+  })
   await signIn(page)
-  await page.goto('/providers', { waitUntil: 'networkidle' })
+  await page.goto('/settings?tab=models', { waitUntil: 'networkidle' })
+  await page.click('[data-testid="models-subscribe"]')
+}
 
-  await page.click('[data-testid="providers-connect-opencode"]')
-  // One way in: the Go device flow starts with the modal.
+test('a device-code sign-in shows its code, then the models it unlocked', async ({ page }) => {
+  await recordWindowOpen(page)
+  await stubSubscriptions(page, [{ id: 'opencode-go', name: 'OpenCode Go', flows: ['device_code'], state: 'missing' }])
+  await stubLogin(page, 'opencode-go', [
+    pending(),
+    pending({ url: 'https://opencode.ai/console/device?user_code=ABCD-1234', user_code: 'ABCD-1234', flow: 'device_code' }),
+    complete('https://opencode.ai/zen/go/v1', 'device_code'),
+  ])
+  await stubOffers(page, 'opencode-go', [offer('Go 订阅', 'glm-5.3'), offer('Go 订阅', 'kimi-k3')])
+  await stubProvision(page, 'opencode-go', ['row-glm', 'row-kimi'])
 
-  const code = page.locator('[data-testid="provider-login-code"]')
-  await expect(code).toHaveText('ABCD-1234', { timeout: 15_000 })
-  await shot(page, 'providers-open-login-code')
+  let provisioned: { offers?: { model: string }[] } = {}
+  page.on('request', (request) => {
+    if (request.url().includes('/provision') && request.method() === 'POST') {
+      provisioned = JSON.parse(request.postData() ?? '{}') as { offers?: { model: string }[] }
+    }
+  })
 
-  await page.click('[data-testid="provider-login-open"]')
+  await openSignIn(page)
+  await expect(page.locator('[data-testid="models-subscribe-step"]')).toContainText('第 1 步')
+  await shot(page, 'models-subscribe-step1')
+
+  // Choosing it starts the flow and moves to step 2.
+  await page.click('[data-subscription="opencode-go"]')
+  await expect(page.locator('[data-testid="models-subscribe-step"]')).toContainText('第 2 步')
+  await expect(page.locator('[data-testid="models-login-code"]')).toHaveText('ABCD-1234', { timeout: 15_000 })
+  await shot(page, 'models-subscribe-device-code')
+
+  await page.click('[data-testid="models-login-open"]')
   expect(await page.evaluate(() => (window as unknown as { __openedAuthorizations: string[] }).__openedAuthorizations))
     .toEqual(['https://opencode.ai/console/device?user_code=ABCD-1234'])
 
-  const model = page.locator('[data-testid="provider-login-model-kimi-k3"]')
-  await expect(model).toBeVisible({ timeout: 15_000 })
-  await model.click()
-  await shot(page, 'providers-open-login-catalog')
-  await page.click('[data-testid="provider-login-save"]')
+  // The poll's complete answer lands on step 3: the vendor's own listing.
+  await expect(page.locator('[data-testid="models-subscribe-step"]')).toContainText('第 3 步', { timeout: 15_000 })
+  await expect(page.locator('[data-offer="0"]')).toBeVisible()
+  await expect(page.locator('[data-plan]')).toContainText('Go 订阅')
+  await shot(page, 'models-subscribe-offers')
 
-  // The row the sign-in wrote, and the Go root its catalog is served from.
-  const row = page.locator('[data-provider-row="opencode-go"]')
-  await expect(row).toBeVisible({ timeout: 15_000 })
-  await expect(row).toContainText('kimi-k3')
-  await expect(row).toContainText('https://opencode.ai/inference/go')
-  // A signed-in service carries no API key: the credential is the login's.
-  await expect(row.locator('[data-testid^="provider-key-unset-"]')).toBeVisible()
+  await page.click('[data-offer="1"]')
+  await page.click('[data-testid="models-provision"]')
 
-  // Written to the config, not only to the page.
-  await expect.poll(() => readFileSync(configPath, 'utf8'), { timeout: 15_000 }).toContain('opencode-go')
-  expect(readFileSync(configPath, 'utf8')).toContain('https://opencode.ai/inference/go')
-
-  // And it survives a reload: the write round-tripped through the gateway.
-  await page.reload({ waitUntil: 'networkidle' })
-  await expect(page.locator('[data-provider-row="opencode-go"]')).toContainText('kimi-k3')
+  // The modal closes on success and the write carried exactly the chosen rows.
+  await expect(page.locator('[data-testid="models-provision"]')).toHaveCount(0, { timeout: 15_000 })
+  expect(provisioned.offers?.map((chosen) => chosen.model)).toEqual(['kimi-k3'])
 })
 
-test('signing in to ChatGPT shows the authorization link, then its account catalog', async ({ page }) => {
-  test.skip(!home, 'E2E_HOME missing')
+test('a paste-callback sign-in asks for the address from the address bar', async ({ page }) => {
   await recordWindowOpen(page)
-  const authorize = 'https://auth.openai.com/oauth/authorize?client_id=app_e2e&state=xyz'
-  await stubLogin(page, 'chatgpt', [pending({ url: authorize }), complete('https://chatgpt.com/backend-api/codex')])
-  await stubCatalog(page, 'chatgpt', ['gpt-5.6'])
-  await signIn(page)
-  await page.goto('/providers', { waitUntil: 'networkidle' })
+  await stubSubscriptions(page, [{ id: 'chatgpt', name: 'ChatGPT', flows: ['paste_callback'], state: 'missing' }])
+  await stubLogin(page, 'chatgpt', [
+    pending({ url: 'https://auth.openai.com/oauth/authorize?client_id=app_e2e', flow: 'paste_callback' }),
+  ])
+  let pasted = ''
+  await page.route('**/api/auth/login/chatgpt/**/callback', async (route) => {
+    pasted = String((JSON.parse(route.request().postData() ?? '{}') as { url?: string }).url ?? '')
+    await route.fulfill({ status: 202, body: '' })
+  })
 
-  await page.click('[data-testid="providers-connect-chatgpt"]')
-  // ChatGPT has one way in, so the flow starts with the modal.
-  await expect(page.locator('[data-testid="provider-login-open"]')).toBeEnabled({ timeout: 15_000 })
-  await page.click('[data-testid="provider-login-open"]')
+  await openSignIn(page)
+  await page.click('[data-subscription="chatgpt"]')
+
+  await expect(page.locator('[data-testid="models-login-open"]')).toBeEnabled({ timeout: 15_000 })
+  await page.click('[data-testid="models-login-open"]')
   expect(await page.evaluate(() => (window as unknown as { __openedAuthorizations: string[] }).__openedAuthorizations))
-    .toEqual([authorize])
+    .toEqual(['https://auth.openai.com/oauth/authorize?client_id=app_e2e'])
 
-  const model = page.locator('[data-testid="provider-login-model-gpt-5.6"]')
-  await expect(model).toBeVisible({ timeout: 15_000 })
-  await page.click('[data-testid="provider-login-save"]')
-
-  const row = page.locator('[data-provider-row="chatgpt"]')
-  await expect(row).toBeVisible({ timeout: 15_000 })
-  await expect(row).toContainText('gpt-5.6')
-  // The endpoint comes from the login's own completion answer.
-  await expect(row).toContainText('https://chatgpt.com/backend-api/codex')
+  // No device code for this flow, and the address has somewhere to go.
+  await expect(page.locator('[data-testid="models-login-code"]')).toHaveCount(0)
+  await page.fill('[data-testid="models-login-paste"]', 'http://localhost:1455/auth/callback?code=abc')
+  await shot(page, 'models-subscribe-paste')
+  await page.click('[data-testid="models-login-paste-submit"]')
+  await expect.poll(() => pasted).toBe('http://localhost:1455/auth/callback?code=abc')
 })
 
-test('a reusable saved login skips the flow and opens the catalog directly', async ({ page }) => {
-  test.skip(!home, 'E2E_HOME missing')
-  await recordWindowOpen(page)
-  // The start answer a machine with a live login gets: complete with the base
-  // URL and no login_id — there is nothing to poll and no code to confirm.
-  await page.route('**/api/auth/login/opencode', async (route) => {
-    if (route.request().method() !== 'POST') {
-      await route.fallback()
+test('a plan holding several keys asks which one under its own group', async ({ page }) => {
+  await stubSubscriptions(page, [{ id: 'opencode-go', name: 'OpenCode Go', flows: ['device_code'], state: 'usable' }])
+  await stubOffers(page, 'opencode-go', [offer('Go 订阅', 'glm-5.3')])
+  let asked = 0
+  await page.route('**/api/subscriptions/opencode-go/provision', async (route) => {
+    asked += 1
+    if (asked === 1) {
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: '这个套餐里有多把 Key，请选择一把',
+          key_choice: [
+            { id: 'key-1', name: 'api-key-20261102', tail: 'd410' },
+            { id: 'key-2', name: 'team-ci', tail: '7b03' },
+          ],
+        }),
+      })
       return
     }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ids: ['row-glm'] }) })
+  })
+
+  await openSignIn(page)
+  // Already signed in: the modal opens on the models it unlocked, not on a flow.
+  await page.click('[data-subscription="opencode-go"]')
+  await expect(page.locator('[data-testid="models-subscribe-step"]')).toContainText('第 3 步')
+  await expect(page.locator('[data-offer="0"]')).toBeVisible()
+
+  await page.click('[data-offer="0"]')
+  await page.click('[data-testid="models-provision"]')
+
+  // The refusal names the keys, and the choice is made where the plan is drawn.
+  await expect(page.locator('[data-testid="models-key-choice"]')).toBeVisible()
+  await shot(page, 'models-subscribe-key-choice')
+})
+
+test('a signed-in subscription whose listing fails says so instead of showing models', async ({ page }) => {
+  await stubSubscriptions(page, [{ id: 'opencode-go', name: 'OpenCode Go', flows: ['device_code'], state: 'usable' }])
+  await page.route('**/api/subscriptions/opencode-go/offers', async (route) => {
     await route.fulfill({
-      status: 200,
+      status: 503,
       contentType: 'application/json',
-      body: JSON.stringify({ provider: 'opencode', status: 'complete', base_url: 'https://opencode.ai/inference/go' }),
+      body: JSON.stringify({ error: '读取订阅的模型列表失败，请重新登录' }),
     })
   })
-  await stubCatalog(page, 'opencode-go', ['glm-5.3', 'kimi-k3'])
-  await signIn(page)
-  await page.goto('/providers', { waitUntil: 'networkidle' })
 
-  await page.click('[data-testid="providers-connect-opencode"]')
-
-  // No device code step, no authorization to open — the catalog is the first
-  // thing on the screen, holding the listing the page itself fetched.
-  await expect(page.locator('[data-testid="provider-login-models"]')).toBeVisible({ timeout: 15_000 })
-  await expect(page.locator('[data-testid="provider-login-code"]')).toHaveCount(0)
-  expect(await page.evaluate(() => (window as unknown as { __openedAuthorizations: string[] }).__openedAuthorizations))
-    .toEqual([])
-  await expect(page.locator('[data-testid="provider-login-model-glm-5.3"]')).toBeVisible()
-
-  await page.click('[data-testid="provider-login-model-kimi-k3"]')
-  await page.click('[data-testid="provider-login-save"]')
-  const row = page.locator('[data-provider-row="opencode-go"]')
-  await expect(row).toBeVisible({ timeout: 15_000 })
-  await expect(row).toContainText('kimi-k3')
-  await expect(row).toContainText('https://opencode.ai/inference/go')
-})
-
-test('a complete answer whose catalog fetch fails offers the same retry, not a login', async ({ page }) => {
-  test.skip(!home, 'E2E_HOME missing')
-  await recordWindowOpen(page)
-  await page.route('**/api/auth/login/opencode', async (route) => {
-    if (route.request().method() !== 'POST') {
-      await route.fallback()
-      return
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ provider: 'opencode', status: 'complete', base_url: 'https://opencode.ai/inference/go' }),
-    })
-  })
-  await page.route('**/api/models**', async (route) => {
-    const asked = new URL(route.request().url()).searchParams.get('provider') ?? ''
-    if (asked !== 'opencode-go') {
-      await route.fallback()
-      return
-    }
-    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'unavailable' }) })
-  })
-  await signIn(page)
-  await page.goto('/providers', { waitUntil: 'networkidle' })
-
-  await page.click('[data-testid="providers-connect-opencode"]')
-
-  // The listing failed, but the login stands: the page reports the failure
-  // with its own retry — no device code, no authorization link.
-  await expect(page.locator('[data-testid="provider-login-error"]')).toBeVisible({ timeout: 15_000 })
-  await expect(page.locator('[data-testid="provider-login-retry"]')).toBeVisible()
-  await expect(page.locator('[data-testid="provider-login-code"]')).toHaveCount(0)
-  expect(await page.evaluate(() => (window as unknown as { __openedAuthorizations: string[] }).__openedAuthorizations))
-    .toEqual([])
+  await openSignIn(page)
+  await page.click('[data-subscription="opencode-go"]')
+  await expect(page.locator('[data-testid="models-offers-error"]')).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('[data-testid="models-offers-error"]')).toContainText('重新登录')
 })

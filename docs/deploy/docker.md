@@ -52,17 +52,18 @@ CREATE DATABASE forebrain OWNER forebrain;
 
 ## forebrain.yaml 配置与环境变量
 
-网关只有在主代理的 LLM 配好之后才会对外服务，所以**第一次 `up`** 由 `seed`
-服务把 `forebrain.yaml` 和 `.env` 写进卷（之后就不再动，文件归网页配置编辑器管）。
-LLM 四项（provider/model/api_key/base_url）通过环境变量交给 seed：
+**第一次 `up`** 由 `seed` 服务把 `forebrain.yaml` 写进卷（之后就不再动，文件归网页
+配置编辑器管）。home 里没有 `.env`：令牌就是 `FOREBRAIN_GATEWAY_TOKEN` 环境变量
+（配置里以 `${FOREBRAIN_GATEWAY_TOKEN}` 引用）。
 
 ```bash
 export FOREBRAIN_GATEWAY_TOKEN=$(openssl rand -hex 32)   # 网页登录与副本间共享的令牌
-export FOREBRAIN_LLM_PROVIDER=deepseek                   # 或内网 OpenAI 兼容端点
-export FOREBRAIN_LLM_MODEL=<模型名>
-export FOREBRAIN_LLM_API_KEY=<模型 API key>
-export FOREBRAIN_LLM_BASE_URL=https://api.deepseek.com   # 内网部署换成内网端点
+docker compose -f deploy/docker/compose.yaml up -d
 ```
+
+起来之后：浏览器打开 `http://<主机>:6060` → 用这个 token 登录 → 在「设置 · 模型」里
+添加一个模型（或做订阅登录）。网关没有模型也照常对外服务，就是为了让人能打开这一页；
+模型与密钥之后也都在那一页维护。
 
 改配置在网页里做（配置页写回 `forebrain.yaml`），或直接编辑卷里的文件后
 `docker compose restart gateway`。
@@ -164,9 +165,9 @@ curl -fsS http://127.0.0.1:6060/healthz
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| `seed` 报四个 `FOREBRAIN_LLM_*` 未设 | 首次 `up` 必须带 LLM 四项；这是设计（网关没配好 LLM 不服务）。 |
+| 登录后对话报「还没有模型」类错误 | 还没在「设置 · 模型」里添加模型（或订阅登录）；添加后即可对话。 |
 | gateway 反复重启报 `startup config incomplete` | 卷里的 `forebrain.yaml` 缺 LLM 配置：进网页前请先看 `logs gateway`；直接改卷里文件后 `restart gateway`。 |
-| 网页登录 401 | token 与卷里 `.env` 的 `FOREBRAIN_GATEWAY_TOKEN` 不一致。 |
+| 网页登录 401 | token 与 `FOREBRAIN_GATEWAY_TOKEN`（compose 环境变量）不一致；改过要重启容器。 |
 | `bwrap: Can't mount proc on /newroot/proc` | 少了 `systempaths=unconfined`（或宿主不允许用户命名空间）。前者照 compose 补上；后者属宿主限制，网关以无沙箱模式运行。 |
 | `--profile pg` 起动时 gateway 反复重启 | 数据库还没就绪，`restart: unless-stopped` 会自己恢复；持续失败查 `FOREBRAIN_DATABASE_URL` 与数据库本身。 |
 | 代理执行 npm/pip/go 拉包失败 | 内网源变量没加进 `gateway.environment`，或证书没挂进容器。 |

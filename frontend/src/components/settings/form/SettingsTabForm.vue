@@ -32,7 +32,6 @@
       :draft="form.draft.value"
       :dirty="form.groupDirty(group)"
       :secrets="form.secrets.value"
-      :models="models"
       :disabled="form.loading.value"
       :saving="saving === group.id"
       :refusal="refusals[group.id] ?? null"
@@ -77,16 +76,11 @@ import forebrainApi, { getErrorMessage } from '@/lib/api'
 import { useI18n, type I18nKey } from '@/locales'
 import type { useSettingsForm } from '@/components/settings/form/useSettingsForm'
 
-const props = withDefaults(
-  defineProps<{
-    tab: string
-    /** The page's form: one draft, one save per group. */
-    form: ReturnType<typeof useSettingsForm>
-    /** The models a 模型 row offers. */
-    models?: string[]
-  }>(),
-  { models: () => [] },
-)
+const props = defineProps<{
+  tab: string
+  /** The page's form: one draft, one save per group. */
+  form: ReturnType<typeof useSettingsForm>
+}>()
 
 const { t: translate } = useI18n()
 const t = (key: string) => translate(key as I18nKey)

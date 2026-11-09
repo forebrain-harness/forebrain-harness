@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+// Legacy: reads one definition's own pre-table list. Only the providers handler and agentyaml (both replaced by plan 262) and the plan 262 migration may call it.
+//
 // FindLLMProviderIndex returns the index of the first llm_providers entry
 // whose provider matches provider (case-insensitive, trimmed) and, when model
 // is non-empty, whose model also matches model, or -1 when none matches or the
@@ -35,6 +37,7 @@ func FindLLMProviderIndex(def AgentDefinition, provider, model string) int {
 	return -1
 }
 
+// Legacy: reads one definition's own pre-table list. Only the providers handler and agentyaml (both replaced by plan 262) and the plan 262 migration may call it.
 func ResolvedLLMConfigs(def AgentDefinition) []AgentLLMProviderConfig {
 	if len(def.LLMProviders) == 0 {
 		return nil
@@ -46,6 +49,8 @@ func ResolvedLLMConfigs(def AgentDefinition) []AgentLLMProviderConfig {
 	return out
 }
 
+// Legacy: reads one definition's own pre-table list. Only the providers handler and agentyaml (both replaced by plan 262) and the plan 262 migration may call it.
+//
 // EffectiveDefaultLLM resolves the provider entry an empty (default) model
 // selection uses for this agent: def.DefaultModel when set, otherwise the
 // first llm_providers entry. DefaultModel is "provider/model" split on the
@@ -383,31 +388,6 @@ func ParseLLMRequestParamsJSON(s string) (LLMRequestParams, error) {
 	return p, nil
 }
 
-// providerEnvKey returns the environment variable name for a provider's API
-// key: UPPERCASE(provider)_API_KEY. Every provider follows this uniform
-// scheme, derived from the provider name — no provider-specific exceptions.
-func providerEnvKey(provider string) string {
-	return strings.ToUpper(strings.TrimSpace(provider)) + "_API_KEY"
-}
-
-// providerEnvBaseURL returns the environment variable name for a provider's
-// base URL: UPPERCASE(provider)_BASE_URL.
-func providerEnvBaseURL(provider string) string {
-	return strings.ToUpper(strings.TrimSpace(provider)) + "_BASE_URL"
-}
-
-// ProviderAPIKeyLookup resolves the API key for a provider from environment
-// variables using the uniform UPPERCASE(provider)_API_KEY scheme.
-func ProviderAPIKeyLookup(get func(string) string, provider string) string {
-	return strings.TrimSpace(get(providerEnvKey(strings.ToLower(strings.TrimSpace(provider)))))
-}
-
-// ProviderBaseURLLookup resolves the base URL for a provider from environment
-// variables using the uniform UPPERCASE(provider)_BASE_URL scheme.
-func ProviderBaseURLLookup(get func(string) string, provider string) string {
-	return strings.TrimSpace(get(providerEnvBaseURL(strings.ToLower(strings.TrimSpace(provider)))))
-}
-
 type MainAgentLLMValidation struct {
 	Provider string
 	Model    string
@@ -420,10 +400,11 @@ func ValidateMainAgentLLMConfigured(root *Root) MainAgentLLMValidation {
 }
 
 // ValidateAgentLLMConfigured reports the LLM fields of the entry an empty
-// model selection for this agent resolves to — the effective default
-// (agents.definitions.<name>.default_model when set, otherwise the first
-// llm_providers entry). Every primary agent has its own definition and its
-// own provider, so a flow that configures the active one has to check the
+// model selection for this agent resolves to — the effective default of the
+// install-wide model view (EffectiveDefaultLLMFor: the agent's default_model
+// reference, else the first entry of its own legacy list, else main's, else
+// the view's first row). Every primary agent has its own definition and its
+// own default, so a flow that configures the active one has to check the
 // definition it wrote rather than main's, or configuring a second primary
 // agent would be judged by whether the first is set up.
 func ValidateAgentLLMConfigured(root *Root, agentName string) MainAgentLLMValidation {
@@ -435,11 +416,10 @@ func ValidateAgentLLMConfigured(root *Root, agentName string) MainAgentLLMValida
 	if name == "" {
 		name = "main"
 	}
-	def, ok := root.Agents.Definitions[name]
-	if !ok {
+	if _, ok := root.Agents.Definitions[name]; !ok {
 		return out
 	}
-	p := EffectiveDefaultLLM(def)
+	p := EffectiveDefaultLLMFor(root, name)
 	if p == nil {
 		return out
 	}

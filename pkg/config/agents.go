@@ -103,6 +103,22 @@ type AgentLLMProviderConfig struct {
 	// Save must not restore the value still on disk. Runtime-only; it
 	// disappears with the next load.
 	APIKeyCleared bool `yaml:"-" json:"-"`
+	// ID is the global fb_llm_models row this entry is: ConfiguredLLMs projects
+	// rows with it and hands pre-table entries a LegacyLLMModelID, so a stored
+	// reference survives plan 262's migration. Empty for an entry read straight
+	// from a definition's legacy list.
+	ID string `yaml:"-" json:"-"`
+	// URLVerbatim (「自定义协议」) sends requests to BaseURL exactly as stored;
+	// APIPath only names the protocol. ConfiguredLLMs projects it from the table
+	// row; a legacy entry never carries it. Runtime-only.
+	URLVerbatim bool `yaml:"-" json:"-"`
+
+	// MaxOutputTokens is the row's own output limit (fb_llm_models
+	// cap_max_output), 0 when the row names none. It is the exact value the
+	// client builds with, rather than the window the catalog lookup would
+	// guess for a provider/model pair. Runtime-only: it is a projection of the
+	// row, not configuration a definition carries.
+	MaxOutputTokens int64 `yaml:"-" json:"-"`
 }
 
 type AgentDefaults struct {
@@ -216,10 +232,13 @@ var subagentConfigNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
 // definitions.
 //
 // The model a subagent entry names is deliberately not checked against the
-// agent's model list: deleting a provider must not make an existing
-// configuration unloadable, and dispatch reports the unknown model when the
-// subagent is actually started.
-func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins, systemBuiltins []string) error {
+// agent's model list while it has the "provider/model" shape: deleting a
+// provider must not make an existing configuration unloadable, and dispatch
+// reports the unknown model when the subagent is actually started. A value
+// without that shape is a model reference — a fb_llm_models row id, which is
+// what a write stores from plan 262 on — and has to resolve through
+// refResolves; a nil refResolves checks the shape alone.
+func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins, systemBuiltins []string, refResolves func(string) bool) error {
 	public := make(map[string]struct{}, len(publicBuiltins))
 	for _, name := range publicBuiltins {
 		public[name] = struct{}{}
@@ -269,7 +288,7 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 				}
 			}
 		}
-		if err := validateSubagentModel(where, entry); err != nil {
+		if err := validateSubagentModel(where, entry, refResolves); err != nil {
 			return err
 		}
 	}
@@ -277,8 +296,10 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 }
 
 // validateSubagentModel enforces the "provider/model" shape and the rule that
-// a reasoning effort only means something next to an explicit model.
-func validateSubagentModel(where string, entry SubagentConfig) error {
+// a reasoning effort only means something next to an explicit model. A value
+// without that shape must name a configured model reference (a row id);
+// anything else keeps the shape error, so a bare model name is still refused.
+func validateSubagentModel(where string, entry SubagentConfig, refResolves func(string) bool) error {
 	model := strings.TrimSpace(entry.Model)
 	if model == "" {
 		if strings.TrimSpace(entry.ReasoningEffort) != "" {
@@ -286,11 +307,20 @@ func validateSubagentModel(where string, entry SubagentConfig) error {
 		}
 		return nil
 	}
-	provider, name, found := strings.Cut(model, "/")
-	if !found || strings.TrimSpace(provider) == "" || strings.TrimSpace(name) == "" || strings.Contains(name, "/") {
-		return fmt.Errorf("%s: model %q must be provider/model", where, entry.Model)
+	if subagentModelShape(model) {
+		return nil
 	}
-	return nil
+	if refResolves != nil && refResolves(model) {
+		return nil
+	}
+	return fmt.Errorf("%s: model %q must be provider/model", where, entry.Model)
+}
+
+// subagentModelShape reports whether a model value has the legacy
+// "provider/model" shape: exactly one non-empty part on each side of a slash.
+func subagentModelShape(model string) bool {
+	provider, name, found := strings.Cut(model, "/")
+	return found && strings.TrimSpace(provider) != "" && strings.TrimSpace(name) != "" && !strings.Contains(name, "/")
 }
 
 func DefaultMaxParallelSubagents() int {

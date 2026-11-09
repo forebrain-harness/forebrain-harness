@@ -16,10 +16,17 @@ func selectRichTabbed(sel Selector, label string, items []SelectItem, opts Tabbe
 	return sel.SelectRich(label, items, opts.DefaultIdx)
 }
 
+// multiSelectSelector is what a multi-select needs of a selector: one
+// implementation of the check-box list for every caller, whether or not the
+// caller carries the setup's own prompt set.
+type multiSelectSelector interface {
+	MultiSelect(label string, options []string, defaultOptions []string) ([]string, bool, error)
+}
+
 // multiSelectRichTabbed opens the tabbed multi-select, falling back to a plain
 // MultiSelect whose options name each row's category so the tabs' information
 // survives even without the tabbed picker.
-func multiSelectRichTabbed(sel Selector, label string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
+func multiSelectRichTabbed(sel multiSelectSelector, label string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
 	if tabbed, ok := sel.(TabbedRichSelector); ok {
 		return tabbed.MultiSelectRichTabbed(label, items, opts)
 	}
@@ -272,7 +279,7 @@ func (p *tabbedPickerState) panel(label string) slashPanel {
 				lead = selectorCheckedGlyph + " "
 			}
 		}
-		b.selectableColumns(ci == p.cursor, lead, p.items[idx].Label, p.nameWidth, strings.TrimSpace(p.items[idx].Description))
+		b.selectableColumns(ci == p.cursor, lead, p.items[idx].Label, p.nameWidth, strings.TrimSpace(p.items[idx].Description), "")
 	}
 	if len(p.visible) == 0 {
 		b.text(panelIndent, "No matches", nil)

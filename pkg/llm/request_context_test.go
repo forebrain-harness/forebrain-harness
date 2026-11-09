@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -924,5 +925,75 @@ func TestLeadingTokenLooksLikeFilesystemPath(t *testing.T) {
 					tt.token, got, tt.want)
 			}
 		})
+	}
+}
+
+// recordingTransport answers every request and remembers what it was handed, so
+// a wrapper's effect on the request is observable without a network.
+type recordingTransport struct {
+	got *http.Request
+}
+
+func (r *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.got = req
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}")), Header: http.Header{}}, nil
+}
+
+// TestExactURLRoundTripperRewritesOnlyPost pins 「自定义协议」's transport: a POST
+// goes to the configured URL exactly, headers untouched, and a GET passes
+// through.
+func TestExactURLRoundTripperRewritesOnlyPost(t *testing.T) {
+	target, err := url.Parse("https://llm.example/v2/chat?tenant=acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := &recordingTransport{}
+	rt := &ExactURLRoundTripper{Target: target}
+	rt.SetBase(inner)
+
+	body := io.NopCloser(strings.NewReader("{}"))
+	req, err := http.NewRequest(http.MethodPost, "https://api.base/v1/chat/completions", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer sk-test")
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	if got := inner.got.URL.String(); got != "https://llm.example/v2/chat?tenant=acme" {
+		t.Fatalf("POST went to %q, want the exact target", got)
+	}
+	if got := inner.got.Header.Get("Authorization"); got != "Bearer sk-test" {
+		t.Fatalf("authorization header = %q, want it untouched", got)
+	}
+	// The caller's own request is not mutated: the wrapper clones.
+	if got := req.URL.String(); got != "https://api.base/v1/chat/completions" {
+		t.Fatalf("the caller's request was rewritten to %q", got)
+	}
+
+	get, err := http.NewRequest(http.MethodGet, "https://api.base/v1/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.RoundTrip(get); err != nil {
+		t.Fatalf("get round trip: %v", err)
+	}
+	if got := inner.got.URL.String(); got != "https://api.base/v1/models" {
+		t.Fatalf("GET went to %q, want it untouched", got)
+	}
+}
+
+// TestExactURLRoundTripperSubstitutesTheDefaultTransport pins the nil-Inner
+// case: a wrapper built before a client wires its chain must not dereference a
+// nil transport. The request names a scheme no transport serves, so the
+// default transport answers without a network call.
+func TestExactURLRoundTripperSubstitutesTheDefaultTransport(t *testing.T) {
+	rt := &ExactURLRoundTripper{}
+	req, err := http.NewRequest(http.MethodPost, "data:text/plain,body", strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.RoundTrip(req); err == nil {
+		t.Fatal("want the default transport's unsupported-scheme error")
 	}
 }

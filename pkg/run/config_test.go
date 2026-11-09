@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -164,28 +165,11 @@ func TestNewLLMForAgentTypeNilConfig(t *testing.T) {
 	}
 }
 
-// TestResolvedAgentProvidersFallsBackToMain verifies that an absent or
-// provider-less named definition falls back to the main agent's providers, so
-// auxiliary callers work out of the box when no dedicated definition is configured.
-func TestResolvedAgentProvidersFallsBackToMain(t *testing.T) {
-	mainProv := appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"}
-	cfg := &appcfg.Root{
-		Agents: appcfg.AgentsSection{
-			Definitions: map[string]appcfg.AgentDefinition{
-				"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{mainProv}},
-			},
-		},
-	}
-	got := resolvedAgentProviders(cfg, "goal-evaluator")
-	if len(got) != 1 || got[0].Provider != mainProv.Provider || got[0].Model != mainProv.Model {
-		t.Fatalf("expected fallback to main providers, got %+v", got)
-	}
-}
-
-// TestResolvedAgentProvidersPrefersDedicated verifies that a dedicated
-// definition takes precedence over main, so users can route the extractor to a
-// cheaper model.
-func TestResolvedAgentProvidersPrefersDedicated(t *testing.T) {
+// TestResolvedAgentProvidersIsInstallWide pins the owner's 2026-11-07 ruling
+// (plan 260): one install-wide model list, so the agent type no longer narrows
+// it — main's models and a dedicated definition's are both in the chain, in
+// view order (main's list, then the other definitions by name).
+func TestResolvedAgentProvidersIsInstallWide(t *testing.T) {
 	mainProv := appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"}
 	dedProv := appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o-mini"}
 	cfg := &appcfg.Root{
@@ -196,9 +180,12 @@ func TestResolvedAgentProvidersPrefersDedicated(t *testing.T) {
 			},
 		},
 	}
-	got := resolvedAgentProviders(cfg, "goal-evaluator")
-	if len(got) != 1 || got[0].Provider != dedProv.Provider || got[0].Model != dedProv.Model {
-		t.Fatalf("expected dedicated providers, got %+v", got)
+	for _, agentType := range []string{"main", "goal-evaluator", "goal-evaluator-unconfigured"} {
+		got := resolvedAgentProviders(cfg, agentType)
+		if len(got) != 2 || got[0].Model != mainProv.Model || got[1].Model != dedProv.Model {
+			t.Fatalf("agent %q: expected the install-wide chain [%s %s], got %+v",
+				agentType, mainProv.Model, dedProv.Model, got)
+		}
 	}
 }
 
@@ -1021,7 +1008,12 @@ func TestPrimaryModelStateForSessionPrefersTheConversationsRow(t *testing.T) {
 	// conv-pinned re-saved — the same pair a /model re-selection writes — is
 	// now the newest row, with its effort.
 	save("conv-pinned", "openai", "gpt-b", "high")
-	adopted := PrimaryModelState{Provider: "openai", Model: "gpt-b", Effort: "high", Set: true}
+	// Adopting a row adopts the configured row it resolves to, id included: a
+	// row written before ids existed still names one (plan 261).
+	adopted := PrimaryModelState{
+		ModelID:  appcfg.LegacyLLMModelID("openai", "gpt-b", "http://b.test/v1", ""),
+		Provider: "openai", Model: "gpt-b", Effort: "high", Set: true,
+	}
 	if got := PrimaryModelStateForSession(runner, store, "conv-never-pinned"); got != adopted {
 		t.Fatalf("state for a fresh conversation = %+v, want the most recently used %+v", got, adopted)
 	}
@@ -1052,11 +1044,15 @@ func TestRowLessSessionModelMirrorsTurnEntry(t *testing.T) {
 		t.Fatalf("save used-b's row: %v", err)
 	}
 
-	// A conversation that never ran adopts the most recently used model.
+	// A conversation that never ran adopts the most recently used model, and
+	// with it the configured row that model is.
 	if err := store.Ensure(ctx, "fresh", "fresh"); err != nil {
 		t.Fatalf("Ensure fresh: %v", err)
 	}
-	if got := RowLessSessionModel(runner, store, "fresh"); got != (PrimaryModelState{Provider: "openai", Model: "gpt-b", Effort: "high", Set: true}) {
+	if got := RowLessSessionModel(runner, store, "fresh"); got != (PrimaryModelState{
+		ModelID:  appcfg.LegacyLLMModelID("openai", "gpt-b", "http://b.test/v1", ""),
+		Provider: "openai", Model: "gpt-b", Effort: "high", Set: true,
+	}) {
 		t.Fatalf("row-less rule for a fresh conversation = %+v, want the most recently used openai/gpt-b/high", got)
 	}
 
@@ -1098,6 +1094,44 @@ func TestRowLessSessionModelMirrorsTurnEntry(t *testing.T) {
 	}
 	if got := RowLessSessionModel(runner, nil, "fresh"); got.Set {
 		t.Fatalf("row-less rule without a store = %+v, want the zero state", got)
+	}
+}
+
+// TestSessionModelRowFallsBackWhenItsRowIsGone pins plan 261's fifth item: a
+// session row names the configured row the user picked, so a row the model page
+// has since deleted must not end the conversation's model — the provider+model
+// pair the same row still carries answers, and what answers says which row it
+// is now.
+func TestSessionModelRowFallsBackWhenItsRowIsGone(t *testing.T) {
+	runner, store := newSessionRoutingRunner(t, nil)
+	ctx := context.Background()
+	surviving := appcfg.LegacyLLMModelID("openai", "gpt-b", "http://b.test/v1", "")
+
+	if err := store.Ensure(ctx, "deleted-id", "deleted-id"); err != nil {
+		t.Fatalf("Ensure deleted-id: %v", err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "deleted-id", state.SessionModelSelection{
+		ModelID: "llm-row-the-page-deleted", Provider: "openai", Model: "gpt-b", Effort: "low",
+	}); err != nil {
+		t.Fatalf("save deleted-id's row: %v", err)
+	}
+	got := PrimaryModelStateForSession(runner, store, "deleted-id")
+	if got != (PrimaryModelState{ModelID: surviving, Provider: "openai", Model: "gpt-b", Effort: "low", Set: true}) {
+		t.Fatalf("state for a session whose row id was deleted = %+v, want the pair's row %q", got, surviving)
+	}
+
+	// An id with no pair to fall back to stays unanswerable: nothing invents a
+	// model the configuration does not hold.
+	if err := store.Ensure(ctx, "deleted-both", "deleted-both"); err != nil {
+		t.Fatalf("Ensure deleted-both: %v", err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "deleted-both", state.SessionModelSelection{
+		ModelID: "llm-row-the-page-deleted", Provider: "openai", Model: "gpt-gone",
+	}); err != nil {
+		t.Fatalf("save deleted-both's row: %v", err)
+	}
+	if _, ok := sessionModelRowState(runner, store, "deleted-both"); ok {
+		t.Fatal("a row whose id and pair are both gone must not answer as a row")
 	}
 }
 
@@ -1161,6 +1195,51 @@ func runOpenCodeClient(t *testing.T, cfg *LLMProviderYAML) {
 // appends its own path suffix to the base URL it is given. The two models that
 // flip between surfaces (qwen3.8-max, minimax-m3) are the reason the provider
 // is part of the decision.
+// A runner with nothing to run a turn on says where a model comes from: the
+// surfaces print this error verbatim (owner 2026-11-07, plan 268 revision).
+func TestRunnerLoadPointsAtTheModelsPageWhenThereIsNoModel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FORBRAIN_HOME", home)
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true},
+	}}}
+	r := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: state.NewSessionStore(db, "main")}, FileResolver: PathResolver{}}
+	err = r.Load()
+	if err == nil {
+		t.Fatal("Load with no model succeeded, want an error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "model is not configured") || !strings.Contains(msg, "Settings › Models") || !strings.Contains(msg, "/connect") {
+		t.Fatalf("error = %q, want the missing model and where to add one", msg)
+	}
+}
+
+// A model row without a key keeps its own sentence and gains the same pointer.
+func TestAddModelSetupHintCoversAMissingKey(t *testing.T) {
+	_, err := NewLLMFromYAML(&LLMProviderYAML{Provider: "openai", Model: "gpt-5", BaseURL: "https://api.example/v1"})
+	if err == nil {
+		t.Fatal("NewLLMFromYAML accepted a model with no key")
+	}
+	if !strings.Contains(err.Error(), "llm api_key is required for provider openai") {
+		t.Fatalf("constructor error = %q, want its own sentence", err)
+	}
+	hinted := addModelSetupHint(err)
+	if !strings.Contains(hinted.Error(), "Settings › Models") {
+		t.Fatalf("hinted error = %q, want the models-page pointer", hinted)
+	}
+	// Anything else is left alone.
+	plain := errors.New("database refused")
+	if got := addModelSetupHint(plain); got != plain {
+		t.Fatalf("addModelSetupHint(%v) = %v, want it untouched", plain, got)
+	}
+}
+
 func TestNewLLMFromYAMLOpenCodeRoutesByProtocol(t *testing.T) {
 	t.Setenv("OPENCODE_API_KEY", "")
 	for _, tc := range []struct {
@@ -1292,9 +1371,10 @@ func TestNewLLMFromYAMLOpenCodeCredentialChain(t *testing.T) {
 	t.Run("config key wins over the environment", func(t *testing.T) {
 		t.Setenv("FOREBRAIN_HOME", t.TempDir())
 		t.Setenv("OPENCODE_API_KEY", "sk-env")
-		t.Setenv("OPENCODE_TEST_KEY", "sk-config")
 		srv, calls := openCodeGateway(t)
-		runOpenCodeClient(t, &LLMProviderYAML{Provider: "opencode", Model: paidModel, APIKey: "${OPENCODE_TEST_KEY}", BaseURL: srv.URL})
+		// The row's key is the plaintext the model table holds; a ${ENV}
+		// reference is expanded by the loader, never here (plans 262, 268).
+		runOpenCodeClient(t, &LLMProviderYAML{Provider: "opencode", Model: paidModel, APIKey: "sk-config", BaseURL: srv.URL})
 		got := calls()
 		if len(got) != 1 || got[0].Auth != "Bearer sk-config" {
 			t.Fatalf("requests = %+v, want one with Bearer sk-config", got)
@@ -1371,8 +1451,8 @@ func TestOpenCodeLoginTokenIsWhatLeavesAfterConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPersisted: %v", err)
 	}
-	// The write /connect performs (pkg/process.applyAgentLLMFields, which this
-	// package cannot import: pkg/process depends on pkg/run): the login
+	// The shape a login write leaves in a pre-table list, which this package
+	// writes by hand because it cannot import pkg/process: the login
 	// provider's entry carries no key and is promoted to the primary slot.
 	def := cfg.Agents.Definitions["main"]
 	def.LLMProviders = append([]appcfg.AgentLLMProviderConfig{{
@@ -2366,5 +2446,204 @@ func TestPeerAwarenessReminderWithoutAClosureIsTheIdentity(t *testing.T) {
 	inner := &lspRecordingLLM{}
 	if got := wrapPeerAwarenessReminderLLM(inner, nil); got != inner {
 		t.Fatalf("a nil closure must leave the chain unchanged, got %T", got)
+	}
+}
+
+// captureLLMRequest runs one client against a server that records the request
+// it produced and answers with an empty event stream: every client returns from
+// that (with an error this ignores), and the request is the point.
+type capturedLLMRequest struct {
+	Method string
+	Path   string
+	Query  string
+	Body   string
+}
+
+func captureLLMRequest(t *testing.T, cfg *LLMProviderYAML) capturedLLMRequest {
+	t.Helper()
+	var (
+		mu  sync.Mutex
+		got capturedLLMRequest
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		got = capturedLLMRequest{Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, Body: string(body)}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	cfg.BaseURL = strings.ReplaceAll(cfg.BaseURL, "SRV", srv.URL)
+	client, err := NewLLMFromYAML(cfg)
+	if err != nil {
+		t.Fatalf("NewLLMFromYAML(%s/%s) error = %v", cfg.Provider, cfg.Model, err)
+	}
+	if _, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err == nil {
+		t.Logf("Execute(%s/%s) returned no error against an empty stream", cfg.Provider, cfg.Model)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return got
+}
+
+// TestNewLLMFromYAMLCustomModelSpeaksTheProtocolItNames pins the custom-model
+// rule: the provider id is a placeholder, so the api_path is what decides the
+// protocol — and the model name travels verbatim, vendor prefix and all.
+func TestNewLLMFromYAMLCustomModelSpeaksTheProtocolItNames(t *testing.T) {
+	t.Setenv("CUSTOM_API_KEY", "")
+	for _, tc := range []struct {
+		name    string
+		apiPath string
+		want    string
+	}{
+		{name: "chat completions", apiPath: appcfg.APIPathChatCompletions, want: "/chat/completions"},
+		{name: "responses", apiPath: appcfg.APIPathResponses, want: "/responses"},
+		{name: "anthropic messages", apiPath: appcfg.APIPathAnthropicMessages, want: "/v1/messages"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := captureLLMRequest(t, &LLMProviderYAML{
+				Provider: appcfg.CustomProvider,
+				Model:    "openai/gpt-4o",
+				APIKey:   "sk-custom",
+				BaseURL:  "SRV",
+				APIPath:  tc.apiPath,
+			})
+			if got.Path != tc.want {
+				t.Fatalf("request path = %q, want %q", got.Path, tc.want)
+			}
+			if !strings.Contains(got.Body, `"openai/gpt-4o"`) {
+				t.Fatalf("request body does not carry the model verbatim: %s", got.Body)
+			}
+		})
+	}
+}
+
+// TestNewLLMFromYAMLCustomModelNeedsAProtocol pins the required protocol: a
+// custom model cannot infer one from a catalog that does not know it.
+func TestNewLLMFromYAMLCustomModelNeedsAProtocol(t *testing.T) {
+	_, err := NewLLMFromYAML(&LLMProviderYAML{
+		Provider: appcfg.CustomProvider,
+		Model:    "my-model",
+		APIKey:   "sk-custom",
+		BaseURL:  "https://example.test/v1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "a custom model needs an API protocol") {
+		t.Fatalf("error = %v, want the missing-protocol sentence", err)
+	}
+}
+
+// TestNewLLMFromYAMLMinimaxBaseURLWithoutTrailingSlash pins the normalized
+// endpoint: the registry stores no trailing slash, and the Messages client
+// still reaches /v1/messages under it.
+func TestNewLLMFromYAMLMinimaxBaseURLWithoutTrailingSlash(t *testing.T) {
+	got := captureLLMRequest(t, &LLMProviderYAML{
+		Provider: "minimax",
+		Model:    "minimax-m2",
+		APIKey:   "sk-minimax",
+		BaseURL:  "SRV/anthropic",
+	})
+	if got.Path != "/anthropic/v1/messages" {
+		t.Fatalf("request path = %q, want /anthropic/v1/messages", got.Path)
+	}
+}
+
+// TestNewLLMFromYAMLMaxOutputTokens pins the row's own output limit: it is the
+// exact value the request carries, above any catalog default.
+func TestNewLLMFromYAMLMaxOutputTokens(t *testing.T) {
+	got := captureLLMRequest(t, &LLMProviderYAML{
+		Provider:        appcfg.CustomProvider,
+		Model:           "my-model",
+		APIKey:          "sk-custom",
+		BaseURL:         "SRV",
+		APIPath:         appcfg.APIPathChatCompletions,
+		MaxOutputTokens: 1234,
+	})
+	var body struct {
+		MaxTokens int `json:"max_tokens"`
+	}
+	if err := json.Unmarshal([]byte(got.Body), &body); err != nil {
+		t.Fatalf("request body is not JSON: %v (%s)", err, got.Body)
+	}
+	if body.MaxTokens != 1234 {
+		t.Fatalf("max_tokens = %d, want the row's 1234", body.MaxTokens)
+	}
+}
+
+// TestNewLLMFromYAMLVerbatimSendsToTheExactURL pins 「自定义协议」: the base URL
+// is the complete request URL, nothing is appended to it, and the body is Chat
+// Completions shape.
+func TestNewLLMFromYAMLVerbatimSendsToTheExactURL(t *testing.T) {
+	got := captureLLMRequest(t, &LLMProviderYAML{
+		Provider:    appcfg.CustomProvider,
+		Model:       "my/model",
+		APIKey:      "sk-custom",
+		BaseURL:     "SRV/llm/v2/chat",
+		APIPath:     appcfg.APIPathChatCompletions,
+		URLVerbatim: true,
+	})
+	if got.Method != http.MethodPost {
+		t.Fatalf("method = %q, want POST", got.Method)
+	}
+	if got.Path != "/llm/v2/chat" {
+		t.Fatalf("request path = %q, want the exact /llm/v2/chat", got.Path)
+	}
+	if !strings.Contains(got.Body, `"messages"`) || !strings.Contains(got.Body, `"my/model"`) {
+		t.Fatalf("request body is not a Chat Completions request: %s", got.Body)
+	}
+
+	// The same row without the flag appends the protocol's path.
+	appended := captureLLMRequest(t, &LLMProviderYAML{
+		Provider: appcfg.CustomProvider,
+		Model:    "my/model",
+		APIKey:   "sk-custom",
+		BaseURL:  "SRV/v2",
+		APIPath:  appcfg.APIPathChatCompletions,
+	})
+	if appended.Path != "/v2/chat/completions" {
+		t.Fatalf("request path = %q, want /v2/chat/completions", appended.Path)
+	}
+}
+
+// TestNewLLMFromYAMLVerbatimRefusesAnythingButACustomChatModel pins the guard:
+// the custom protocol belongs to a custom model speaking Chat Completions.
+func TestNewLLMFromYAMLVerbatimRefusesAnythingButACustomChatModel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *LLMProviderYAML
+	}{
+		{name: "another provider", cfg: &LLMProviderYAML{
+			Provider: "openai", Model: "gpt-5", APIKey: "k", BaseURL: "https://example.test/v1",
+			APIPath: appcfg.APIPathChatCompletions, URLVerbatim: true,
+		}},
+		{name: "another protocol", cfg: &LLMProviderYAML{
+			Provider: appcfg.CustomProvider, Model: "my-model", APIKey: "k", BaseURL: "https://example.test/v1",
+			APIPath: appcfg.APIPathAnthropicMessages, URLVerbatim: true,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewLLMFromYAML(tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), "custom protocol is only for custom models") {
+				t.Fatalf("error = %v, want the custom-protocol guard", err)
+			}
+		})
+	}
+}
+
+// TestNewLLMFromYAMLVolcengineCodingPlanSpeaksMessages pins the registry row
+// owner added: an Anthropic-protocol Coding Plan client posts to
+// /api/coding/v1/messages.
+func TestNewLLMFromYAMLVolcengineCodingPlanSpeaksMessages(t *testing.T) {
+	llm.SetBuiltinModels("volcengine", []llm.Model{{ID: "doubao-seed-evolving", ContextWindow: 1024000, DefaultMaxTokens: 256000}})
+	t.Cleanup(func() { llm.SetBuiltinModels("volcengine", nil) })
+	got := captureLLMRequest(t, &LLMProviderYAML{
+		Provider: "volcengine",
+		Model:    "doubao-seed-evolving",
+		APIKey:   "ark-key",
+		BaseURL:  "SRV/api/coding",
+		APIPath:  appcfg.APIPathAnthropicMessages,
+	})
+	if got.Path != "/api/coding/v1/messages" {
+		t.Fatalf("request path = %q, want /api/coding/v1/messages", got.Path)
 	}
 }

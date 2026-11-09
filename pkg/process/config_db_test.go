@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -469,10 +470,17 @@ func TestComposedStartupConfigTransitionCases(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("migrated home = (ok=%v, err=%v), want (true, nil)", ok, err)
 	}
-	// The import stored the ${ENV} reference (this home has no .env) and
-	// compose-time expansion resolved it from the process environment.
-	if got := composed.Agents.Definitions["main"].LLMProviders[0].APIKey; got != "sk-gate" {
+	// The import stored the ${ENV} reference (this home has no .env); the model
+	// migration moved the entry into fb_llm_models and resolved the reference
+	// there, and the definition names the row instead of carrying a list.
+	if len(composed.LLMModels) != 1 {
+		t.Fatalf("model rows = %+v, want the imported model", composed.LLMModels)
+	}
+	if got := composed.LLMModels[0].APIKey; got != "sk-gate" {
 		t.Fatalf("composed api_key = %q, want the process environment's value", got)
+	}
+	if got := composed.Agents.Definitions["main"].DefaultModel; got != composed.LLMModels[0].ID {
+		t.Fatalf("default_model = %q, want the imported row %q", got, composed.LLMModels[0].ID)
 	}
 	if composed.Gateway.HTTPAddr != "127.0.0.1:6060" {
 		t.Fatalf("composed gateway.http_addr = %q, want the file's section", composed.Gateway.HTTPAddr)
@@ -644,9 +652,10 @@ func TestSyncConfigFromDBComposesFromDatabase(t *testing.T) {
 		t.Fatalf("applied approval_preset = %q, want the database's full_access", env.RawConfig.ApprovalPreset)
 	}
 	// The runtime sections the import moved are still there after the sync:
-	// the file holds none of them.
-	if got := env.RawConfig.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-import" {
-		t.Fatalf("reloaded provider model = %q, want the imported gpt-import", got)
+	// the file holds none of them. The model itself is a row (plan 262), and
+	// the definition names it.
+	if got := appcfg.EffectiveDefaultLLMFor(&env.RawConfig, "main"); got == nil || got.Model != "gpt-import" {
+		t.Fatalf("reloaded provider model = %+v, want the imported gpt-import", got)
 	}
 }
 
@@ -783,4 +792,92 @@ func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
 		return appcfg.Root{}, err
 	}
 	return appcfg.ParseRootYAML(body)
+}
+
+// TestConfigDBComposesModelRows pins the install-wide model table's half of
+// the composition (plan 260): fb_llm_models is not a section, so its rows are
+// read straight into Root.LLMModels and the view every agent reads starts with
+// them.
+func TestConfigDBComposesModelRows(t *testing.T) {
+	env, ctx := composeEnvForTest(t, "gateway:\n  http_addr: 127.0.0.1:6060\n")
+	images, reasoning := true, false
+	window := int64(200000)
+	row, err := (&state.LLMModelStore{DB: env.SQL}).Create(ctx, state.LLMModel{
+		Provider:         "OpenAI",
+		Model:            "gpt-4o",
+		BaseURL:          "https://table.test/",
+		APIPath:          "/responses",
+		APIKey:           "row-key",
+		ParamsJSON:       `{"temperature":0.2}`,
+		CapImages:        &images,
+		CapReasoning:     &reasoning,
+		CapEfforts:       []string{"low", "high"},
+		CapContextWindow: &window,
+	})
+	if err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	composed, err := composeConfig(ctx, env)
+	if err != nil {
+		t.Fatalf("composeConfig: %v", err)
+	}
+	if len(composed.LLMModels) != 1 {
+		t.Fatalf("LLMModels = %d rows (%+v), want the one stored row", len(composed.LLMModels), composed.LLMModels)
+	}
+	got := composed.LLMModels[0]
+	if got.ID != row.ID || got.Provider != "openai" || got.Model != "gpt-4o" || got.BaseURL != "https://table.test" {
+		t.Fatalf("composed row = %+v, want the store's normalized row %s", got, row.ID)
+	}
+	if got.APIPath != "/responses" || got.APIKey != "row-key" {
+		t.Fatalf("composed row endpoint = %+v, want the stored api_path and key", got)
+	}
+	if string(got.Params) != `{"temperature":0.2}` {
+		t.Fatalf("composed params = %q, want the row's params JSON", string(got.Params))
+	}
+	if got.Caps.Images == nil || !*got.Caps.Images || got.Caps.Reasoning == nil || *got.Caps.Reasoning {
+		t.Fatalf("composed caps = %+v, want images true and reasoning false", got.Caps)
+	}
+	if len(got.Caps.Efforts) != 2 || got.Caps.Efforts[0] != "low" || got.Caps.ContextWindow == nil || *got.Caps.ContextWindow != 200000 {
+		t.Fatalf("composed caps = %+v, want the stored levels and context window", got.Caps)
+	}
+	if view := appcfg.ConfiguredLLMs(&composed); len(view) == 0 || view[0].ID != row.ID {
+		t.Fatalf("ConfiguredLLMs = %+v, want the table row first", view)
+	}
+}
+
+// TestConfigDBFingerprintMovesWithAModelRow pins that a model-page edit
+// reaches the next turn: Root.LLMModels is json:"-" and therefore outside the
+// root's own encoding, so the fingerprint has to cover it explicitly. Nothing
+// changed must still hash the same, or every turn would re-apply the config.
+func TestConfigDBFingerprintMovesWithAModelRow(t *testing.T) {
+	env, ctx := composeEnvForTest(t, "gateway:\n  http_addr: 127.0.0.1:6060\n")
+	row, err := (&state.LLMModelStore{DB: env.SQL}).Create(ctx, state.LLMModel{
+		Provider: "openai", Model: "gpt-4o", BaseURL: "https://table.test", APIKey: "first-key",
+	})
+	if err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	fingerprint := func() []byte {
+		t.Helper()
+		composed, err := composeConfig(ctx, env)
+		if err != nil {
+			t.Fatalf("composeConfig: %v", err)
+		}
+		fp, err := configSnapshotFingerprint(composed)
+		if err != nil {
+			t.Fatalf("configSnapshotFingerprint: %v", err)
+		}
+		return fp
+	}
+	before := fingerprint()
+	if again := fingerprint(); !bytes.Equal(before, again) {
+		t.Fatal("the fingerprint moved with nothing changed; every turn would re-apply the configuration")
+	}
+	row.APIKey = "second-key"
+	if _, err := (&state.LLMModelStore{DB: env.SQL}).Update(ctx, row); err != nil {
+		t.Fatalf("update model row: %v", err)
+	}
+	if after := fingerprint(); bytes.Equal(before, after) {
+		t.Fatal("an api_key edit left the fingerprint unchanged; the next turn would run on the old row")
+	}
 }

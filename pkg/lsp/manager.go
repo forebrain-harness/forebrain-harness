@@ -25,9 +25,13 @@ import (
 type ManagerOptions struct {
 	Home           string // FOREBRAIN_HOME
 	AgentWorkspace string // the primary agent's workspace root; state lives in <AgentWorkspace>/state/lsp
-	ProjectRoot    string // the launch project root; "" when the runner has no project
-	ProjectKey     string
-	Trusted        bool // safety.TrustedRoot(launch) != ""
+	// Vars is the operator's variables table: the values a server entry's
+	// ${NAME} references resolve from (plan 259, plan 268). The composition
+	// root reads it; pkg/lsp may not import the store.
+	Vars        map[string]string
+	ProjectRoot string // the launch project root; "" when the runner has no project
+	ProjectKey  string
+	Trusted     bool // safety.TrustedRoot(launch) != ""
 	// AutoAllowProject reports the project's "always allow" switch. The
 	// composition root supplies it; pkg/lsp does not read that store itself.
 	// Nil reads as off.

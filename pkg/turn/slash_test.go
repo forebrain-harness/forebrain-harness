@@ -76,6 +76,9 @@ type recordingSlashHandlers struct {
 	calls     []string
 	selection ModelSelectionState
 	selectErr error
+	// chosen is what each SelectModel was handed, whole: a surface persists the
+	// row id it carries, which the call log's "provider/model" note cannot show.
+	chosen []ModelChoice
 	// settings, when set, answers ModelSettings in place of the built-in
 	// fixture config (tests that drive the file-writing half install it).
 	settings func(sessionID string) (ModelSettings, error)
@@ -124,6 +127,7 @@ func (r *recordingSlashHandlers) ModelSettings(sessionID string) (ModelSettings,
 	return ModelSettings{Config: cfg, AgentName: "main", Selection: r.selection}, nil
 }
 func (r *recordingSlashHandlers) SelectModel(_ context.Context, sessionID string, choice ModelChoice, effort *string) error {
+	r.chosen = append(r.chosen, choice)
 	r.record("select", sessionID, []string{choice.Provider + "/" + choice.Model})
 	if effort != nil {
 		r.record("select-effort", sessionID, []string{*effort})
@@ -203,13 +207,33 @@ func TestSharedSlashCommandsDispatchIdenticallyOnBothSurfaces(t *testing.T) {
 			if !slices.Equal(term.calls, web.calls) {
 				t.Fatalf("%q dispatched differently: terminal=%v web=%v", input, term.calls, web.calls)
 			}
+			// /model is the one command whose picker may differ, and only by the
+			// terminal's last row: the custom-model form is a terminal surface, so
+			// a channel or the web is never offered a row it cannot open (plan
+			// 267). Every other row, and the picker itself, must match.
+			termPicker, webPicker := termRes.Picker, webRes.Picker
+			if input == "/model" {
+				if termPicker == nil || webPicker == nil {
+					t.Fatalf("/model pickers: terminal=%+v web=%+v", termPicker, webPicker)
+				}
+				if len(termPicker.Items) != len(webPicker.Items)+1 {
+					t.Fatalf("/model rows: terminal=%d web=%d, want the terminal's one extra row",
+						len(termPicker.Items), len(webPicker.Items))
+				}
+				last := termPicker.Items[len(termPicker.Items)-1]
+				if last.Value != ModelAddCustomValue {
+					t.Fatalf("/model last row = %+v, want the custom-model row", last)
+				}
+				termPicker = &Picker{Command: termPicker.Command, Title: termPicker.Title, Hint: termPicker.Hint,
+					Items: termPicker.Items[:len(termPicker.Items)-1]}
+			}
 			if termRes.ShouldContinueRun != webRes.ShouldContinueRun ||
 				termRes.ContinueInput != webRes.ContinueInput ||
 				termRes.SessionChanged != webRes.SessionChanged ||
 				termRes.ModeChanged != webRes.ModeChanged ||
 				termRes.Mode != webRes.Mode ||
 				termRes.ForcePlan != webRes.ForcePlan ||
-				!reflect.DeepEqual(termRes.Picker, webRes.Picker) {
+				!reflect.DeepEqual(termPicker, webPicker) {
 				t.Fatalf("%q canonical outcome differs:\n terminal=%+v\n web=%+v", input, termRes, webRes)
 			}
 		})
@@ -344,9 +368,11 @@ func TestUnknownCommandSuggestionsAndBareSlashCatalog(t *testing.T) {
 	require.Equal(t, "There is no /zzzq; type / to see every command.", UnknownCommandReply(SurfaceWebChat, "zzzq", DiscoveryOptions{}))
 }
 
-// /model offers the agent's configured models in their configured order —
-// a model array expanded into one choice each — the first one in force.
-func TestModelChoicesAreTheAgentsConfiguredModels(t *testing.T) {
+// /model offers every model the install has configured, in configured order —
+// a model array expanded into one choice each — the agent's own default in
+// force. One install-wide list (owner 2026-11-07, plan 260): the agent a
+// picker is drawn for no longer narrows it, only its default differs.
+func TestModelChoicesAreTheInstallWideModels(t *testing.T) {
 	codex := "gpt-5.3-co" + "dex"
 	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
@@ -356,15 +382,17 @@ func TestModelChoicesAreTheAgentsConfiguredModels(t *testing.T) {
 		}},
 		"writer": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "anthropic", Model: "claude-sonnet-4-5"}}},
 	}}}
-	var got []string
-	for _, choice := range ModelChoices(&cfg, "main") {
-		got = append(got, choice.Provider+"/"+choice.Model)
+	want := []string{"zhipuai/glm-5.1", "openai/" + codex, "openai/gpt-5.4", "openai/gpt-5.5", "anthropic/claude-sonnet-4-5"}
+	labels := func(choices []ModelChoice) []string {
+		out := make([]string, 0, len(choices))
+		for _, choice := range choices {
+			out = append(out, choice.Provider+"/"+choice.Model)
+		}
+		return out
 	}
-	require.Equal(t, []string{"zhipuai/glm-5.1", "openai/" + codex, "openai/gpt-5.4", "openai/gpt-5.5"}, got)
-	writer := ModelChoices(&cfg, "writer")
-	require.Len(t, writer, 1)
-	require.Equal(t, "claude-sonnet-4-5", writer[0].Model)
-	require.Equal(t, ModelChoices(&cfg, "main"), ModelChoices(&cfg, "no-such-agent"), "an unknown agent runs on main's models")
+	require.Equal(t, want, labels(ModelChoices(&cfg, "main")))
+	require.Equal(t, want, labels(ModelChoices(&cfg, "writer")), "every agent reads the same install-wide list")
+	require.Equal(t, ModelChoices(&cfg, "main"), ModelChoices(&cfg, "no-such-agent"), "an unknown agent runs on the same list")
 }
 
 // /lsp is a tools-category panel command on both surfaces, next to /mcp.

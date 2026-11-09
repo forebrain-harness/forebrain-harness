@@ -1113,11 +1113,11 @@ func TestProjectEntryAppliesAfterConsent(t *testing.T) {
 	})
 }
 
-// A project entry's ${VAR} resolves only from ~/.forebrain/.env (spec §9.3):
-// a variable that exists in the process environment but not in .env reaches
-// the server as empty, because the project overlay marks the merged entry
-// EnvFromProject.
-func TestProjectEntryEnvFromDotEnvOnly(t *testing.T) {
+// A project entry's ${VAR} resolves only from the operator's variables (spec
+// §9.3, plan 268): a variable that exists in the process environment but not in
+// that table reaches the server as empty, because the project overlay marks the
+// merged entry EnvFromProject.
+func TestProjectEntryEnvFromVariablesOnly(t *testing.T) {
 	project := t.TempDir()
 	home := t.TempDir()
 	exe := buildFakeServer(t)
@@ -1146,7 +1146,7 @@ func TestProjectEntryEnvFromDotEnvOnly(t *testing.T) {
 	}
 	srv := findServer(t, m.servers(), "fake")
 	if !srv.EnvFromProject {
-		t.Fatalf("project entry must resolve ${VAR} from .env only: %+v", srv)
+		t.Fatalf("project entry must resolve ${VAR} from the variables only: %+v", srv)
 	}
 
 	file := filepath.Join(project, "a.fk")

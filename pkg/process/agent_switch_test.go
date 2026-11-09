@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
 // executeStoredConfig reads the configuration a setup or /connect Execute
@@ -41,145 +43,11 @@ func executeStoredConfig(t *testing.T, rt Context) appcfg.Root {
 	return cfg
 }
 
-// /connect is add-or-replace by provider+model identity, not an overwrite of
-// the primary slot or of a same-provider entry's model. Connecting a second
-// model of a provider the agent already carries adds its own entry and
-// promotes it to primary; the provider's other models are preserved.
-func TestExecuteConnectSecondModelSameProviderKeepsFirstEntry(t *testing.T) {
-	home := t.TempDir()
-	rt := Context{
-		Home:       home,
-		ConfigPath: home + "/forebrain.yaml",
-		Config: appcfg.Root{
-			Agents: appcfg.AgentsSection{
-				Definitions: map[string]appcfg.AgentDefinition{
-					"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-						{Provider: "openai", Model: "gpt-old", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1"},
-						{Provider: "anthropic", Model: "claude-old", APIKey: "${ANTHROPIC_API_KEY}", BaseURL: "https://api.anthropic.com"},
-					}},
-				},
-			},
-		},
-	}
-
-	if _, err := Execute(rt, Options{
-		Provider: "anthropic",
-		Model:    "claude-new",
-		APIKey:   "sk-live-secret",
-		BaseURL:  "https://api.anthropic.com",
-	}); err != nil {
-		t.Fatalf("Execute error: %v", err)
-	}
-
-	cfg := executeStoredConfig(t, rt)
-	def := cfg.Agents.Definitions["main"]
-	if len(def.LLMProviders) != 3 {
-		t.Fatalf("provider count = %d, want 3 (openai and claude-old preserved, claude-new added)", len(def.LLMProviders))
-	}
-	// The configured provider+model must be APPENDED at the end — the list
-	// order is user data and /connect never reorders it; the session-level
-	// switch (not the config) governs the next turn.
-	last := def.LLMProviders[len(def.LLMProviders)-1]
-	if !strings.EqualFold(last.Provider, "anthropic") || last.Model != "claude-new" {
-		t.Fatalf("last entry = %+v, want anthropic/claude-new appended", last)
-	}
-	if def.LLMProviders[0].Provider != "openai" || def.LLMProviders[0].Model != "gpt-old" {
-		t.Fatalf("first entry = %+v, want openai/gpt-old untouched", def.LLMProviders[0])
-	}
-	// openai must still be present, unchanged.
-	var openai *appcfg.AgentLLMProviderConfig
-	for i := range def.LLMProviders {
-		if strings.EqualFold(def.LLMProviders[i].Provider, "openai") {
-			openai = &def.LLMProviders[i]
-		}
-	}
-	if openai == nil {
-		t.Fatalf("openai provider was lost; providers = %+v", def.LLMProviders)
-	}
-	if openai.Model != "gpt-old" || openai.BaseURL != "https://api.openai.com/v1" {
-		t.Fatalf("openai entry changed: %+v", openai)
-	}
-	// The provider's previously configured model must not be overwritten.
-	var claudeOld *appcfg.AgentLLMProviderConfig
-	claudeNewCount := 0
-	for i := range def.LLMProviders {
-		entry := &def.LLMProviders[i]
-		if strings.EqualFold(entry.Provider, "anthropic") && entry.Model == "claude-old" {
-			claudeOld = entry
-		}
-		if entry.Model == "claude-new" {
-			claudeNewCount++
-		}
-	}
-	if claudeOld == nil {
-		t.Fatalf("anthropic/claude-old was overwritten; providers = %+v", def.LLMProviders)
-	}
-	if claudeOld.BaseURL != "https://api.anthropic.com" {
-		t.Fatalf("anthropic/claude-old lost its connection settings: %+v", claudeOld)
-	}
-	if claudeNewCount != 1 {
-		t.Fatalf("claude-new entries = %d, want 1", claudeNewCount)
-	}
-}
-
-// Connecting a provider the agent does not yet carry appends a new entry at
-// the END, leaving existing providers intact and in place.
-func TestExecuteConnectAddsNewProvider(t *testing.T) {
-	home := t.TempDir()
-	rt := Context{
-		Home:       home,
-		ConfigPath: home + "/forebrain.yaml",
-		Config: appcfg.Root{
-			Agents: appcfg.AgentsSection{
-				Definitions: map[string]appcfg.AgentDefinition{
-					"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-						{Provider: "openai", Model: "gpt-old", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1"},
-					}},
-				},
-			},
-		},
-	}
-
-	if _, err := Execute(rt, Options{
-		Provider: "anthropic",
-		Model:    "claude-new",
-		APIKey:   "sk-live-secret",
-		BaseURL:  "https://api.anthropic.com",
-	}); err != nil {
-		t.Fatalf("Execute error: %v", err)
-	}
-
-	cfg := executeStoredConfig(t, rt)
-	def := cfg.Agents.Definitions["main"]
-	if len(def.LLMProviders) != 2 {
-		t.Fatalf("provider count = %d, want 2 (openai kept, anthropic added)", len(def.LLMProviders))
-	}
-	if def.LLMProviders[0].Provider != "openai" || def.LLMProviders[0].Model != "gpt-old" {
-		t.Fatalf("first entry = %+v, want openai/gpt-old untouched", def.LLMProviders[0])
-	}
-	if def.LLMProviders[1].Provider != "anthropic" || def.LLMProviders[1].Model != "claude-new" {
-		t.Fatalf("last entry = %+v, want anthropic/claude-new appended", def.LLMProviders[1])
-	}
-}
-
-// Re-connecting the same provider+model only updates that entry in place (no
-// reorder, no duplicate), so a credential refresh does not shuffle the list or
-// grow it.
-func TestExecuteConnectUpdatesCurrentPrimaryInPlace(t *testing.T) {
-	home := t.TempDir()
-	rt := Context{
-		Home:       home,
-		ConfigPath: home + "/forebrain.yaml",
-		Config: appcfg.Root{
-			Agents: appcfg.AgentsSection{
-				Definitions: map[string]appcfg.AgentDefinition{
-					"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-						{Provider: "openai", Model: "gpt-old", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1"},
-					}},
-				},
-			},
-		},
-	}
+// /connect stores one row per configured model: a second model under the same
+// provider becomes its own row beside the first, and it never takes the default
+// away from the model the agent already runs on.
+func TestExecuteSecondModelOfAProviderKeepsTheFirst(t *testing.T) {
+	rt := newAgentTargetRuntime(t)
 
 	if _, err := Execute(rt, Options{
 		Provider: "openai",
@@ -189,57 +57,120 @@ func TestExecuteConnectUpdatesCurrentPrimaryInPlace(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
+	rep, err := Execute(rt, Options{
+		Provider: "openai",
+		Model:    "gpt-new",
+		APIKey:   "sk-live-secret",
+		BaseURL:  "https://api.openai.com/v1",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if rep.Provider != "openai" || rep.Model != "gpt-old" {
+		t.Fatalf("report = %s/%s, want the agent's unchanged default", rep.Provider, rep.Model)
+	}
 
 	cfg := executeStoredConfig(t, rt)
-	def := cfg.Agents.Definitions["main"]
-	if len(def.LLMProviders) != 1 {
-		t.Fatalf("provider count = %d, want 1 (updated in place)", len(def.LLMProviders))
+	if len(cfg.LLMModels) != 2 {
+		t.Fatalf("model rows = %+v, want one per configured model", cfg.LLMModels)
 	}
-	if def.LLMProviders[0].Model != "gpt-old" {
-		t.Fatalf("model = %q, want gpt-old", def.LLMProviders[0].Model)
+	for _, row := range cfg.LLMModels {
+		if row.APIKey != "sk-live-secret" {
+			t.Fatalf("row %+v does not carry the key", row)
+		}
+	}
+	if entry := appcfg.EffectiveDefaultLLMFor(&cfg, "main"); entry == nil || entry.Model != "gpt-old" {
+		t.Fatalf("main default = %+v, want the pre-existing model kept", entry)
 	}
 }
 
-// Provider and model matching is case-insensitive, so reconnecting "OpenAI"
-// with a case-variant of the entry's existing model updates that entry instead
-// of adding a second one.
-func TestExecuteConnectMatchesProviderCaseInsensitively(t *testing.T) {
-	home := t.TempDir()
-	rt := Context{
-		Home:       home,
-		ConfigPath: home + "/forebrain.yaml",
-		Config: appcfg.Root{
-			Agents: appcfg.AgentsSection{
-				Definitions: map[string]appcfg.AgentDefinition{
-					"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-						{Provider: "anthropic", Model: "claude-old", APIKey: "${ANTHROPIC_API_KEY}", BaseURL: "https://api.anthropic.com"},
-						{Provider: "openai", Model: "gpt-old", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1"},
-					}},
-				},
-			},
-		},
+// Re-connecting the same model only refreshes its row: no duplicate, and the
+// row id the session may already name stays the same.
+func TestExecuteConnectUpdatesCurrentPrimaryInPlace(t *testing.T) {
+	rt := newAgentTargetRuntime(t)
+	before := seedModelRowForTest(t, rt, "openai", "gpt-old", "https://api.openai.com/v1", "sk-old")
+
+	rep, err := Execute(rt, Options{
+		Provider: "openai",
+		Model:    "gpt-old",
+		APIKey:   "sk-live-secret",
+		BaseURL:  "https://api.openai.com/v1",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
 	}
+	if rep.ModelID != before.ID {
+		t.Fatalf("model id = %q, want the row it updated %q", rep.ModelID, before.ID)
+	}
+
+	rows := modelRowsForTest(t, rt)
+	if len(rows) != 1 {
+		t.Fatalf("model rows = %+v, want exactly one", rows)
+	}
+	if rows[0].ID != before.ID || rows[0].APIKey != "sk-live-secret" {
+		t.Fatalf("row = %+v, want the same row with the new key", rows[0])
+	}
+}
+
+// The provider half of the identity is case-insensitive, so reconnecting
+// "OpenAI" updates the stored openai row instead of adding a second one.
+func TestExecuteConnectMatchesProviderCaseInsensitively(t *testing.T) {
+	rt := newAgentTargetRuntime(t)
+	seedModelRowForTest(t, rt, "openai", "gpt-old", "https://api.openai.com/v1", "sk-old")
 
 	if _, err := Execute(rt, Options{
 		Provider: "OpenAI",
-		Model:    "GPT-OLD",
+		Model:    "gpt-old",
 		APIKey:   "sk-live-secret",
 		BaseURL:  "https://api.openai.com/v1",
 	}); err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	cfg := executeStoredConfig(t, rt)
-	def := cfg.Agents.Definitions["main"]
-	if len(def.LLMProviders) != 2 {
-		t.Fatalf("provider count = %d, want 2 (openai matched, not duplicated)", len(def.LLMProviders))
+	rows := modelRowsForTest(t, rt)
+	if len(rows) != 1 {
+		t.Fatalf("model rows = %+v, want the case-variant to match the stored row", rows)
 	}
-	if def.LLMProviders[0].Provider != "anthropic" || def.LLMProviders[0].Model != "claude-old" {
-		t.Fatalf("first entry = %+v, want anthropic/claude-old untouched", def.LLMProviders[0])
+	if rows[0].Provider != "openai" || rows[0].APIKey != "sk-live-secret" {
+		t.Fatalf("row = %+v, want the stored row with the new key", rows[0])
 	}
-	if !strings.EqualFold(def.LLMProviders[1].Provider, "openai") || def.LLMProviders[1].Model != "GPT-OLD" {
-		t.Fatalf("second entry = %+v, want openai/GPT-OLD updated in place", def.LLMProviders[1])
+}
+
+// modelRowsForTest reads the model table of the database the setup flow wrote.
+func modelRowsForTest(t *testing.T, rt Context) []state.LLMModel {
+	t.Helper()
+	db, err := openStateForWrite(rt)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
 	}
+	defer db.Close()
+	rows, err := (&state.LLMModelStore{DB: db}).List(context.Background())
+	if err != nil {
+		t.Fatalf("list the model table: %v", err)
+	}
+	return rows
+}
+
+// seedModelRowForTest stores one model row before the flow runs — what a
+// previous /connect leaves behind, written the way that flow writes it.
+func seedModelRowForTest(t *testing.T, rt Context, provider, model, baseURL, key string) state.LLMModel {
+	t.Helper()
+	db, err := openStateForWrite(rt)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+	id, err := UpsertLLMModel(context.Background(), db, LLMModelInput{
+		Provider: provider, Model: model, BaseURL: baseURL, APIKey: &key,
+	})
+	if err != nil {
+		t.Fatalf("store the seed row: %v", err)
+	}
+	row, err := (&state.LLMModelStore{DB: db}).Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("read the seed row: %v", err)
+	}
+	return row
 }
 
 // twoPrimaryConfig defines a main and a non-main primary agent, each loadable
@@ -533,26 +464,39 @@ func TestSwitchRebindsTenantScopedStores(t *testing.T) {
 	}
 }
 
+// newAgentTargetRuntime is a home whose stored agents section carries a main
+// and a review definition, each with a pre-table model list of its own — the
+// shape an install has before the model table took over.
 func newAgentTargetRuntime(t *testing.T) Context {
 	t.Helper()
 	home := t.TempDir()
-	return Context{
-		Home:       home,
-		ConfigPath: home + "/forebrain.yaml",
-		Config: appcfg.Root{
-			Agents: appcfg.AgentsSection{
-				Definitions: map[string]appcfg.AgentDefinition{
-					"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai", Model: "gpt-old",
-						APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1",
-					}}},
-					"review": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai", Model: "review-old",
-						APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1",
-					}}},
-				},
-			},
-		},
+	rt := Context{Home: home, ConfigPath: home + "/forebrain.yaml"}
+	seedAgentsSectionForTest(t, rt, `{"definitions":{
+		"main":{"primary":true,
+			"llm_providers":[{"provider":"openai","model":"gpt-old","api_key":"${OPENAI_API_KEY}","base_url":"https://api.openai.com/v1"}]},
+		"review":{"primary":true,
+			"llm_providers":[{"provider":"openai","model":"review-old","api_key":"${OPENAI_API_KEY}","base_url":"https://api.openai.com/v1"}]}}}`)
+	cfg, err := StartupConfig(context.Background(), home)
+	if err != nil {
+		t.Fatalf("read the stored configuration: %v", err)
+	}
+	rt.Config = cfg
+	return rt
+}
+
+// seedAgentsSectionForTest writes the agents section straight into the state
+// database: the store's write path validates candidates, and these tests need a
+// pre-table list exactly the way an earlier binary left it.
+func seedAgentsSectionForTest(t *testing.T, rt Context, doc string) {
+	t.Helper()
+	db, err := openStateForWrite(rt)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(context.Background(), dbx.Rebind(dbx.DialectOf(db),
+		`INSERT INTO fb_config (section, value_json, updated_at_ms) VALUES ('agents', ?, 0)`), doc); err != nil {
+		t.Fatalf("seed the agents section: %v", err)
 	}
 }
 
@@ -574,22 +518,49 @@ func TestExecuteConfiguresNamedAgentOnly(t *testing.T) {
 	if rep.AgentName != "review" {
 		t.Fatalf("report agent = %q, want review", rep.AgentName)
 	}
+	if rep.Model != "review-old" {
+		t.Fatalf("report model = %q, want the review agent's unchanged default", rep.Model)
+	}
 
 	cfg := executeStoredConfig(t, rt)
-	reviewDef := cfg.Agents.Definitions["review"]
-	if len(reviewDef.LLMProviders) != 2 {
-		t.Fatalf("review providers = %+v, want 2 (review-old kept, claude-opus-4-7 appended)", reviewDef.LLMProviders)
+	if len(cfg.LLMModels) != 1 {
+		t.Fatalf("model rows = %+v, want only the one just configured", cfg.LLMModels)
 	}
-	if appended := reviewDef.LLMProviders[1]; appended.Provider != "anthropic" || appended.Model != "claude-opus-4-7" {
-		t.Fatalf("review agent not configured: %+v", appended)
+	if row := cfg.LLMModels[0]; row.Provider != "anthropic" || row.Model != "claude-opus-4-7" || row.APIKey != "sk-live-secret" {
+		t.Fatalf("row = %+v, want the review agent's new model", row)
 	}
-	if review := appcfg.EffectiveDefaultLLM(reviewDef); review == nil || review.Model != "review-old" {
+	if review := appcfg.EffectiveDefaultLLMFor(&cfg, "review"); review == nil || review.Model != "review-old" {
 		t.Fatalf("review default changed by an append-only write: %+v", review)
 	}
-	main := appcfg.EffectiveDefaultLLM(cfg.Agents.Definitions["main"])
+	main := appcfg.EffectiveDefaultLLMFor(&cfg, "main")
 	if main == nil || main.Model != "gpt-old" {
 		t.Fatalf("main agent was rewritten by a setup aimed at review: %+v", main)
 	}
+	stored := executeStoredConfigDefinition(t, rt, "main")
+	if stored.DefaultModel != "" {
+		t.Fatalf("main default_model = %q, want it untouched", stored.DefaultModel)
+	}
+}
+
+// executeStoredConfigDefinition reads one definition out of the stored agents
+// section — the bytes, not the composed view.
+func executeStoredConfigDefinition(t *testing.T, rt Context, agent string) appcfg.AgentDefinition {
+	t.Helper()
+	db, err := openStateForWrite(rt)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+	var raw string
+	if err := db.QueryRowContext(context.Background(),
+		dbx.Rebind(dbx.DialectOf(db), `SELECT value_json FROM fb_config WHERE section = 'agents'`)).Scan(&raw); err != nil {
+		t.Fatalf("read the agents section: %v", err)
+	}
+	var agents appcfg.AgentsSection
+	if err := json.Unmarshal([]byte(raw), &agents); err != nil {
+		t.Fatalf("read the agents section: %v", err)
+	}
+	return agents.Definitions[agent]
 }
 
 // An empty agent name stays main, so onboarding and `forebrain setup` are unchanged.
@@ -608,16 +579,18 @@ func TestExecuteDefaultsToMainAgent(t *testing.T) {
 	if rep.AgentName != "main" {
 		t.Fatalf("report agent = %q, want main", rep.AgentName)
 	}
+	if rep.ModelID == "" {
+		t.Fatal("the report carries no model id")
+	}
 
 	cfg := executeStoredConfig(t, rt)
-	mainDef := cfg.Agents.Definitions["main"]
-	if len(mainDef.LLMProviders) != 2 {
-		t.Fatalf("main providers = %+v, want 2 (gpt-old kept, gpt-new appended)", mainDef.LLMProviders)
+	if len(cfg.LLMModels) != 1 {
+		t.Fatalf("model rows = %+v, want only the one just configured", cfg.LLMModels)
 	}
-	if appended := mainDef.LLMProviders[1]; appended.Provider != "openai" || appended.Model != "gpt-new" {
-		t.Fatalf("main agent not configured: %+v", appended)
+	if row := cfg.LLMModels[0]; row.Provider != "openai" || row.Model != "gpt-new" {
+		t.Fatalf("row = %+v, want main's new model", row)
 	}
-	if review := appcfg.EffectiveDefaultLLM(cfg.Agents.Definitions["review"]); review == nil || review.Model != "review-old" {
+	if review := appcfg.EffectiveDefaultLLMFor(&cfg, "review"); review == nil || review.Model != "review-old" {
 		t.Fatalf("review agent was rewritten: %+v", review)
 	}
 }

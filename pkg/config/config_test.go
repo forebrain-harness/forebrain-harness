@@ -19,199 +19,6 @@ func (badYAMLValue) MarshalYAML() (interface{}, error) {
 	return nil, errors.New("boom")
 }
 
-func TestEnvFileHelpers(t *testing.T) {
-	t.Run("merge missing and CRLF env file", func(t *testing.T) {
-		dir := t.TempDir()
-		env := map[string]string{"KEEP": "old"}
-		if err := mergeEnvFileInto(env, filepath.Join(dir, "missing.env")); err != nil {
-			t.Fatalf("missing env file error = %v", err)
-		}
-		path := filepath.Join(dir, ".env")
-		if err := os.WriteFile(path, []byte("A=1\r\nB=two\r\n"), 0o600); err != nil {
-			t.Fatalf("write env: %v", err)
-		}
-		if err := mergeEnvFileInto(env, path); err != nil {
-			t.Fatalf("merge env file: %v", err)
-		}
-		if env["KEEP"] != "old" || env["A"] != "1" || env["B"] != "two" {
-			t.Fatalf("merged env = %#v", env)
-		}
-	})
-
-	t.Run("invalid env file returns path error", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), ".env")
-		if err := os.WriteFile(path, []byte("BAD-KEY=value"), 0o600); err != nil {
-			t.Fatalf("write env: %v", err)
-		}
-		err := mergeEnvFileInto(map[string]string{}, path)
-		if err == nil || !strings.Contains(err.Error(), path) {
-			t.Fatalf("mergeEnvFileInto error = %v, want path context", err)
-		}
-	})
-
-	t.Run("read error", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), ".env")
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatalf("mkdir env path: %v", err)
-		}
-		if err := mergeEnvFileInto(map[string]string{}, path); err == nil {
-			t.Fatal("mergeEnvFileInto directory read error = nil")
-		}
-	})
-
-	t.Run("apply process env", func(t *testing.T) {
-		t.Setenv("FOREBRAIN_TEST_ENV_APPLY", "")
-		if err := applyMergedEnvToProcess(map[string]string{"FOREBRAIN_TEST_ENV_APPLY": "ok"}); err != nil {
-			t.Fatalf("applyMergedEnvToProcess: %v", err)
-		}
-		if got := os.Getenv("FOREBRAIN_TEST_ENV_APPLY"); got != "ok" {
-			t.Fatalf("process env = %q, want ok", got)
-		}
-		if err := applyMergedEnvToProcess(map[string]string{"BAD=KEY": "x"}); err == nil {
-			t.Fatal("applyMergedEnvToProcess invalid key error = nil")
-		}
-	})
-
-	t.Run("apply llm providers from map", func(t *testing.T) {
-		chain := []AgentLLMProviderConfig{
-			{Provider: "openai"},
-			{Provider: "deepseek"},
-		}
-		got := applyLLMProvidersFromMap(chain, map[string]string{
-			"OPENAI_API_KEY":    "openai-key",
-			"OPENAI_BASE_URL":   "http://openai.test/v1",
-			"DEEPSEEK_API_KEY":  "deepseek-key",
-			"DEEPSEEK_BASE_URL": "http://deepseek.test/v1",
-		})
-		if got[0].APIKey != "openai-key" || got[0].BaseURL != "http://openai.test/v1" {
-			t.Fatalf("openai provider env = %+v", got[0])
-		}
-		if got[1].APIKey != "deepseek-key" || got[1].BaseURL != "http://deepseek.test/v1" {
-			t.Fatalf("deepseek provider env = %+v", got[1])
-		}
-		got = applyLLMProvidersFromMap(got, nil)
-		if got[0].APIKey != "openai-key" {
-			t.Fatalf("nil env map should preserve existing config, got %+v", got[0])
-		}
-	})
-
-	t.Run("apply merged env returns process error", func(t *testing.T) {
-		want := errors.New("boom")
-		err := applyMergedEnvForLoad(&Root{}, map[string]string{"FEISHU_APP_ID": "app-id"}, func(map[string]string) error {
-			return want
-		})
-		if !errors.Is(err, want) {
-			t.Fatalf("applyMergedEnvForLoad error = %v, want %v", err, want)
-		}
-	})
-}
-
-func TestMergeDotEnvFromForebrainHomeBranches(t *testing.T) {
-	t.Run("home lookup error", func(t *testing.T) {
-		t.Setenv("FOREBRAIN_HOME", "")
-		t.Setenv("HOME", "")
-		if _, _, err := mergeDotEnvFromForebrainHome(); err == nil {
-			t.Fatal("mergeDotEnvFromForebrainHome home lookup error = nil")
-		}
-	})
-
-	t.Run("loads default env from forebrain home", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("FOREBRAIN_HOME", dir)
-		path := filepath.Join(dir, ".env")
-		if err := os.WriteFile(path, []byte("A=1\n"), 0o600); err != nil {
-			t.Fatalf("write default env: %v", err)
-		}
-		got, gotPath, err := mergeDotEnvFromForebrainHome()
-		if err != nil {
-			t.Fatalf("mergeDotEnvFromForebrainHome: %v", err)
-		}
-		if gotPath != path {
-			t.Fatalf("mergeDotEnvFromForebrainHome path = %q, want %q", gotPath, path)
-		}
-		if got["A"] != "1" {
-			t.Fatalf("mergeDotEnvFromForebrainHome env = %#v", got)
-		}
-	})
-}
-
-// TestApplyLLMProvidersFromMapDoesNotClobberExplicitPlaceholder is the regression
-// test for the reported TUI LLM auth bug. When a provider (e.g. "deepseek") has
-// an explicit api_key: ${OPENAI_API_KEY} placeholder, and ~/.forebrain/.env contains
-// BOTH OPENAI_API_KEY and DEEPSEEK_API_KEY, applyLLMProvidersFromMap must NOT
-// overwrite the explicit placeholder with the provider-name-derived
-// DEEPSEEK_API_KEY. Otherwise the wrong key is sent to the LLM endpoint at
-// startup (causing an auth error), while the /model path (which uses
-// LoadPersisted and skips this map) resolves the placeholder correctly - exactly
-// the "startup fails, /model succeeds" symptom the user observed.
-func TestApplyLLMProvidersFromMapDoesNotClobberExplicitPlaceholder(t *testing.T) {
-	chain := []AgentLLMProviderConfig{
-		{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://ark.cn-beijing.volces.com/api/coding/v3"},
-	}
-	got := applyLLMProvidersFromMap(chain, map[string]string{
-		"OPENAI_API_KEY":   "sk-openai",
-		"DEEPSEEK_API_KEY": "sk-deepseek",
-	})
-	if got[0].APIKey != "${OPENAI_API_KEY}" {
-		t.Fatalf("explicit ${OPENAI_API_KEY} placeholder was clobbered to %q; must be preserved so expandRootEnvReferences resolves it", got[0].APIKey)
-	}
-	if got[0].BaseURL != "https://ark.cn-beijing.volces.com/api/coding/v3" {
-		t.Fatalf("explicit base_url was clobbered to %q", got[0].BaseURL)
-	}
-
-	// Empty api_key still falls back to the provider-name-derived env var.
-	empty := []AgentLLMProviderConfig{{Provider: "deepseek"}}
-	gotEmpty := applyLLMProvidersFromMap(empty, map[string]string{"DEEPSEEK_API_KEY": "sk-deepseek"})
-	if gotEmpty[0].APIKey != "sk-deepseek" {
-		t.Fatalf("empty api_key should fall back to DEEPSEEK_API_KEY, got %q", gotEmpty[0].APIKey)
-	}
-}
-
-func TestApplyMergedEnvOverridesCoversGatewaySearchAndLLM(t *testing.T) {
-	root := &Root{
-		Agents: AgentsSection{
-			Definitions: map[string]AgentDefinition{
-				"main": {
-					LLMProviders: []AgentLLMProviderConfig{{Provider: "openai"}},
-				},
-			},
-		},
-	}
-	env := map[string]string{
-		"FOREBRAIN_GATEWAY_TOKEN":  "gw-token",
-		"TAVILY_API_KEY":           "tavily",
-		"BRAVE_SEARCH_API_KEY":     "brave",
-		"BAIDU_WEB_SEARCH_API_KEY": "baidu",
-		"OPENAI_API_KEY":           "openai",
-		"OPENAI_BASE_URL":          "http://openai.test/v1",
-		"DEEPSEEK_API_KEY":         "deepseek",
-		"DEEPSEEK_BASE_URL":        "http://deepseek.test",
-	}
-	applyMergedEnvOverrides(root, env)
-
-	if root.Gateway.Auth.Token != "gw-token" {
-		t.Fatalf("gateway env overrides not applied: %+v", root.Gateway.Auth)
-	}
-	if root.Agents.Defaults.WebSearch.Tavily.APIKey != "tavily" ||
-		root.Agents.Defaults.WebSearch.Brave.APIKey != "brave" ||
-		root.Agents.Defaults.WebSearch.Baidu.APIKey != "baidu" {
-		t.Fatalf("web search env overrides not applied: %+v", root.Agents.Defaults.WebSearch)
-	}
-	// One DeepSeek key fills both the search and the fetch provider block.
-	if root.Agents.Defaults.WebSearch.DeepSeek == nil ||
-		root.Agents.Defaults.WebSearch.DeepSeek.APIKey != "deepseek" {
-		t.Fatalf("web search deepseek override not applied: %+v", root.Agents.Defaults.WebSearch.DeepSeek)
-	}
-	if root.Agents.Defaults.WebFetch.DeepSeek == nil ||
-		root.Agents.Defaults.WebFetch.DeepSeek.APIKey != "deepseek" {
-		t.Fatalf("web fetch deepseek override not applied: %+v", root.Agents.Defaults.WebFetch.DeepSeek)
-	}
-	def := root.Agents.Definitions["main"]
-	if def.LLMProviders[0].APIKey != "openai" {
-		t.Fatalf("llm provider env overrides not applied: %+v", def)
-	}
-}
-
 func TestLoadAndSaveJSONYAML(t *testing.T) {
 	dir := t.TempDir()
 
@@ -548,69 +355,6 @@ agents:
 	}
 }
 
-func TestProviderEnvLookups(t *testing.T) {
-	env := map[string]string{
-		"OPENAI_API_KEY":      " openai ",
-		"ANTHROPIC_API_KEY":   "anthropic",
-		"DEEPSEEK_API_KEY":    "deepseek",
-		"GOOGLE_API_KEY":      "google",
-		"ALIBABA_API_KEY":     "alibaba",
-		"MINIMAX_API_KEY":     "minimax",
-		"XAI_API_KEY":         "xai",
-		"MISTRAL_API_KEY":     "mistral",
-		"MOONSHOTAI_API_KEY":  "moonshotai",
-		"ZHIPUAI_API_KEY":     "zhipuai",
-		"OPENAI_BASE_URL":     "http://openai",
-		"DEEPSEEK_BASE_URL":   "http://deepseek",
-		"ALIBABA_BASE_URL":    "http://alibaba",
-		"GOOGLE_BASE_URL":     "http://google",
-		"XAI_BASE_URL":        "http://xai",
-		"MISTRAL_BASE_URL":    "http://mistral",
-		"MINIMAX_BASE_URL":    "http://minimax",
-		"MOONSHOTAI_BASE_URL": "http://moonshotai",
-		"ZHIPUAI_BASE_URL":    "http://zhipuai",
-	}
-	get := func(k string) string { return env[k] }
-	keyCases := map[string]string{
-		"openai":     "openai",
-		"anthropic":  "anthropic",
-		"deepseek":   "deepseek",
-		"google":     "google",
-		"alibaba":    "alibaba",
-		"minimax":    "minimax",
-		"xai":        "xai",
-		"mistral":    "mistral",
-		"moonshotai": "moonshotai",
-		"zhipuai":    "zhipuai",
-		"unknown":    "",
-	}
-	for provider, want := range keyCases {
-		if got := ProviderAPIKeyLookup(get, provider); got != want {
-			t.Fatalf("ProviderAPIKeyLookup(%q) = %q, want %q", provider, got, want)
-		}
-	}
-	if got := ProviderAPIKeyLookup(func(string) string { return "" }, "unknown"); got != "" {
-		t.Fatalf("empty unknown key = %q", got)
-	}
-	baseCases := map[string]string{
-		"openai":     "http://openai",
-		"deepseek":   "http://deepseek",
-		"alibaba":    "http://alibaba",
-		"google":     "http://google",
-		"xai":        "http://xai",
-		"mistral":    "http://mistral",
-		"minimax":    "http://minimax",
-		"moonshotai": "http://moonshotai",
-		"zhipuai":    "http://zhipuai",
-		"unknown":    "",
-	}
-	for provider, want := range baseCases {
-		if got := ProviderBaseURLLookup(get, provider); got != want {
-			t.Fatalf("ProviderBaseURLLookup(%q) = %q, want %q", provider, got, want)
-		}
-	}
-}
-
 func TestGatewayWebhookInboundPathsAndAnonymousGET(t *testing.T) {
 	if got := WebhookInboundPaths(ChannelsSection{}); got != nil {
 		t.Fatalf("nil gateway webhook paths = %#v", got)
@@ -735,8 +479,15 @@ func TestSecretScanBranches(t *testing.T) {
 	if !isSecretLikeConfigKey("my-api-key") || isSecretLikeConfigKey("max_tokens") {
 		t.Fatal("secret key classification failed")
 	}
-	if isAllowedConfigSecretValue(123) || !isAllowedConfigSecretValue(nil) || !isAllowedConfigSecretValue(" ${ENV_1} ") {
+	if isAllowedConfigSecretValue(nil, 123) || !isAllowedConfigSecretValue(nil, nil) || !isAllowedConfigSecretValue(nil, " ${ENV_1} ") {
 		t.Fatal("allowed secret value classification failed")
+	}
+	// The gateway's token is the one secret the file may hold in plaintext.
+	if !isAllowedConfigSecretValue([]string{"gateway", "auth", "token"}, "abc123") {
+		t.Fatal("a plaintext gateway token must pass the scan")
+	}
+	if isAllowedConfigSecretValue([]string{"channels", "telegram"}, "abc123") {
+		t.Fatal("a plaintext channel token must not pass the scan")
 	}
 	for _, s := range []string{"${}", "$ENV", "${BAD-NAME}", "${1BAD}"} {
 		if isSingleEnvReference(s) {
@@ -750,39 +501,6 @@ func TestContextInjectDefaultBranches(t *testing.T) {
 	if cfg.MaxPreHookRulesCharsOr(10) != 10 {
 		t.Fatal("context inject max default branches failed")
 	}
-}
-
-func TestDotEnvAfterNormalizeBranches(t *testing.T) {
-	rootDir := t.TempDir()
-	t.Setenv("FOREBRAIN_HOME", rootDir)
-	if err := os.WriteFile(filepath.Join(rootDir, ".env"), []byte("WEBHOOK_TOKEN=from-dotenv\n"), 0o600); err != nil {
-		t.Fatalf("write dotenv: %v", err)
-	}
-	var root Root
-	if err := applyDotEnvAfterNormalize("", &root); err != nil {
-		t.Fatalf("applyDotEnvAfterNormalize: %v", err)
-	}
-	// .env is merged into the process environment, where ${WEBHOOK_TOKEN}
-	// references in any agent's channels resolve from. It no longer writes
-	// into the configuration itself.
-	if os.Getenv("WEBHOOK_TOKEN") != "from-dotenv" {
-		t.Fatalf("dotenv not applied to the process env: %q", os.Getenv("WEBHOOK_TOKEN"))
-	}
-	_ = root
-
-	fileRoot := filepath.Join(t.TempDir(), "not-dir")
-	if err := os.WriteFile(fileRoot, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write file root: %v", err)
-	}
-	t.Setenv("FOREBRAIN_HOME", fileRoot)
-	if err := applyDotEnvAfterNormalize("", &Root{}); err == nil {
-		t.Fatal("applyDotEnvAfterNormalize with file root error = nil")
-	}
-	if err := applyMergedEnvForLoad(&Root{}, map[string]string{"WEBHOOK_TOKEN": "x"}, nil); err != nil {
-		t.Fatalf("nil apply process should not error: %v", err)
-	}
-	applyMergedEnvOverrides(nil, map[string]string{"WEBHOOK_TOKEN": "x"})
-	applyMergedEnvOverrides(&Root{}, nil)
 }
 
 func TestLoadNormalizeAndErrorBranches(t *testing.T) {
@@ -854,18 +572,6 @@ func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 		t.Fatal("Save yaml to directory error = nil")
 	}
 
-	envRoot := t.TempDir()
-	t.Setenv("FOREBRAIN_HOME", envRoot)
-	if err := os.WriteFile(filepath.Join(envRoot, ".env"), []byte("BAD-KEY=value"), 0o600); err != nil {
-		t.Fatalf("write bad dotenv: %v", err)
-	}
-	loadPath := filepath.Join(dir, "with-bad-env.yaml")
-	if err := os.WriteFile(loadPath, []byte("gateway:\n  http_addr: 127.0.0.1:6060\n"), 0o600); err != nil {
-		t.Fatalf("write load config: %v", err)
-	}
-	if _, err := loadDocumentForTest(loadPath); err == nil {
-		t.Fatal("Load with bad dotenv error = nil")
-	}
 }
 
 func TestSecretScanArrayBranch(t *testing.T) {
@@ -883,8 +589,8 @@ func TestSecretScanArrayBranch(t *testing.T) {
 // "plaintext secret is not allowed at gateway.auth.token".
 func TestSavePreservesSecretEnvRefs(t *testing.T) {
 	dir := t.TempDir()
-	// Isolate the data-dir home so Load does not merge the real ~/.forebrain/.env,
-	// which would shadow our process env with the on-disk token.
+	// Isolate the data-dir home so Load reads nothing of the developer's own
+	// home, which would shadow our process env with the on-disk token.
 	t.Setenv("FOREBRAIN_HOME", dir)
 	t.Setenv("FOREBRAIN_GATEWAY_TOKEN", "deadbeefsecret")
 
@@ -1276,15 +982,18 @@ func TestSkillOfferIsPartOfTheResolvedFeatureSet(t *testing.T) {
 }
 
 // TestLoadRecordsTheFilesTheConfigurationCameFrom pins /status's "Config
-// files" row: the configuration names the file it was read from and the .env
-// it applied, on the loaded value itself rather than in process-wide state.
+// files" row: the configuration names the file it was read from, on the loaded
+// value itself rather than in process-wide state. It is the only file a
+// configuration comes from (plan 268: the home's .env is gone).
 func TestLoadRecordsTheFilesTheConfigurationCameFrom(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", dir)
-	// Load applies .env to the process; registering the key restores it.
-	t.Setenv("FOREBRAIN_SOURCE_FILES_TEST", "")
 	cfgPath := filepath.Join(dir, "forebrain.yaml")
 	if err := os.WriteFile(cfgPath, []byte("sandbox_mode: workspace-write\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A .env a previous version left behind takes no part in the load.
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("FOREBRAIN_SOURCE_FILES_TEST=1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	r, err := Load(cfgPath)
@@ -1293,17 +1002,6 @@ func TestLoadRecordsTheFilesTheConfigurationCameFrom(t *testing.T) {
 	}
 	if len(r.SourceFiles) != 1 || r.SourceFiles[0] != cfgPath {
 		t.Fatalf("SourceFiles = %v, want just the config file", r.SourceFiles)
-	}
-	envPath := filepath.Join(dir, ".env")
-	if err := os.WriteFile(envPath, []byte("FOREBRAIN_SOURCE_FILES_TEST=1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r, err = Load(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(r.SourceFiles) != 2 || r.SourceFiles[1] != envPath {
-		t.Fatalf("SourceFiles = %v, want the config file then the applied .env", r.SourceFiles)
 	}
 }
 

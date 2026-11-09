@@ -272,26 +272,53 @@ func TestBuildEnvPassthroughAndSecrets(t *testing.T) {
 	}
 }
 
-func TestBuildEnvProjectScopedReadsOnlyDotEnv(t *testing.T) {
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".env"), []byte("FOO=file\n"), 0o600); err != nil {
-		t.Fatalf("write .env: %v", err)
-	}
+// A project entry's ${VAR} resolves from the operator's variables and nothing
+// else: a repository checkout must not be able to read the host's environment
+// (owner 2026-11-07, plan 268).
+func TestBuildEnvProjectScopedReadsOnlyTheVariables(t *testing.T) {
 	t.Setenv("FOO", "proc")
 	env, missing := BuildEnv(EnvSpec{
 		FromProject: true,
-		Home:        home,
+		Vars:        map[string]string{"FOO": "table"},
 		Env:         map[string]string{"X": "${FOO}"},
 	})
 	joined := strings.Join(env, "\n")
-	if !strings.Contains(joined, "X=file") {
-		t.Errorf("env missing X=file:\n%s", joined)
+	if !strings.Contains(joined, "X=table") {
+		t.Errorf("env missing X=table:\n%s", joined)
 	}
 	if strings.Contains(joined, "X=proc") {
 		t.Errorf("project entry resolved from the process environment:\n%s", joined)
 	}
 	if len(missing) != 0 {
 		t.Errorf("missing = %v, want empty", missing)
+	}
+
+	// Nothing in the table: the reference does not resolve, and the process
+	// environment does not stand in for it.
+	env, missing = BuildEnv(EnvSpec{
+		FromProject: true,
+		Env:         map[string]string{"Y": "${FOO}"},
+	})
+	if strings.Contains(strings.Join(env, "\n"), "Y=proc") {
+		t.Errorf("a project entry fell back to the process environment:\n%s", strings.Join(env, "\n"))
+	}
+	if len(missing) != 1 || missing[0] != "FOO" {
+		t.Errorf("missing = %v, want [FOO]", missing)
+	}
+
+	// A global entry reads the table first and the environment second.
+	env, _ = BuildEnv(EnvSpec{
+		Vars: map[string]string{"FOO": "table"},
+		Env:  map[string]string{"X": "${FOO}", "Y": "${BAR}"},
+	})
+	t.Setenv("BAR", "proc-bar")
+	env, _ = BuildEnv(EnvSpec{
+		Vars: map[string]string{"FOO": "table"},
+		Env:  map[string]string{"X": "${FOO}", "Y": "${BAR}"},
+	})
+	joined = strings.Join(env, "\n")
+	if !strings.Contains(joined, "X=table") || !strings.Contains(joined, "Y=proc-bar") {
+		t.Errorf("global entry resolution = \n%s", joined)
 	}
 }
 

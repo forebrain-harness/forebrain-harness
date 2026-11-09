@@ -54,10 +54,13 @@ CREATE DATABASE forebrain OWNER forebrain;
 
 ## forebrain.yaml 配置与环境变量
 
-配置在 `deploy/k8s/manifests/secret.yaml`：`forebrain.yaml`（首启内容）加 `env`
-（`.env` 内容，`${…}` 引用的密钥都在这里）。**apply 之前把所有占位值换成真值**：
-`FOREBRAIN_GATEWAY_TOKEN`、`FOREBRAIN_LLM_API_KEY`、`database.url`、
-provider/model/base_url。
+配置在 `deploy/k8s/manifests/secret.yaml`：`forebrain.yaml`（首启内容）加一个取值
+`gateway-token`（以 `secretKeyRef` 注入容器环境，`${FOREBRAIN_GATEWAY_TOKEN}` 从这里
+解析；home 里不再有 `.env`）。**apply 之前把所有占位值换成真值**：`gateway-token`、
+`database.url`。
+
+模型不在清单里：Pod 起来后浏览器打开服务地址 → 用这个 token 登录 → 在「设置 · 模型」
+里添加模型（或做订阅登录）。网关没有模型也照常对外服务，正是为了这一步。
 
 Deployment 的 init 容器只在共享卷里**没有** `forebrain.yaml` 时把它们拷进去
 （两个副本同时首启不会各写一份 token——全新共享 home 上 token 是后写覆盖）；
@@ -160,9 +163,9 @@ spec:
 | --- | --- |
 | Pod 卡 `ContainerCreating`，事件报 seccomp profile 不存在 | 节点上没有 `/var/lib/kubelet/seccomp/profiles/forebrain-bubblewrap.json`：按「沙箱」分发；不想要沙箱就改 `RuntimeDefault`。 |
 | init 容器 `seed-home` 失败 | 看 `kubectl logs <pod> -c seed-home`；通常是 Secret key 缺失或卷未绑好。 |
-| 起动报 `startup config incomplete` | Secret 里 LLM 占位值没换真值，或旧卷里已有残缺 `forebrain.yaml`（清掉该文件让它重播种）。 |
+| 起动报 `startup config incomplete` | 旧卷里已有残缺 `forebrain.yaml`（清掉该文件让它重播种）；也可以登录网页在「设置 · 模型」里添加一个模型。 |
 | 第二个副本 Pending | PVC 不是 RWX（默认存储类是 RWO）：换支持 RWX 的 `storageClassName`。 |
-| 网页登录 401 | token 与 Secret `env` 里的 `FOREBRAIN_GATEWAY_TOKEN` 不一致（首播之后改 Secret 不生效，需同时改卷里 `.env`）。 |
+| 网页登录 401 | 浏览器里的 token 与 Secret 的 `gateway-token`（`FOREBRAIN_GATEWAY_TOKEN`）不一致；改过 Secret 要重启 Pod 才生效。 |
 | 副本互相注册不上 / 转发失败 | `FOREBRAIN_INTERNAL_ADDR` 必须是 Pod IP（清单已用 downward API）；别改成 Service 名。源 IP 鉴权不读 X-Forwarded-For。 |
 | 文件写入报错 / rename 失败 | NFS 服务端或挂载选项破坏原子 rename（配置与状态文件整写后改名）：修 NFS（`nfsvers=4`、不锁死写入语义）。 |
 | Ingress 上一小时后断线 | `proxy-read-timeout` 注解被移除；必须保持 3600。 |

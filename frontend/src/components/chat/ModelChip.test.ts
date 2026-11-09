@@ -25,15 +25,15 @@ afterAll(async () => {
 afterEach(() => vi.restoreAllMocks())
 
 const options: SessionModelOption[] = [
-  { provider: 'deepseek', model: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', efforts: ['low', 'medium', 'high', 'xhigh'], supportsImages: false },
-  { provider: 'deepseek', model: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', efforts: [], supportsImages: true },
+  { id: 'm-pro', provider: 'deepseek', model: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', efforts: ['low', 'medium', 'high', 'xhigh'], supportsImages: false },
+  { id: 'm-flash', provider: 'deepseek', model: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', efforts: [], supportsImages: true },
 ]
 
 function mountChip(props: Record<string, unknown> = {}) {
   return mount(ModelChip, {
     props: {
       sessionId: 's1',
-      selection: { provider: 'deepseek', model: 'deepseek-v4-pro', effort: '' },
+      selection: { modelId: 'm-pro', provider: 'deepseek', model: 'deepseek-v4-pro', effort: '' },
       options,
       ...props,
     },
@@ -95,5 +95,85 @@ describe('ModelChip', () => {
     expect(save).not.toHaveBeenCalled()
     expect(wrapper.emitted('pick')?.[0]?.[0]).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' })
     expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+
+  // Past eight rows the menu is no longer scannable: the page puts a filter
+  // above the list (plan 266), and typing in it narrows by model, provider or
+  // address.
+  it('offers a filter once the list is long, and narrows on what is typed', async () => {
+    const many: SessionModelOption[] = Array.from({ length: 9 }, (_, i) => ({
+      id: `row-${i}`,
+      provider: 'deepseek',
+      providerName: '深度求索',
+      model: `deepseek-v4-${i}`,
+      label: `deepseek/deepseek-v4-${i}`,
+      baseUrl: `https://eu-${i}.test/v1`,
+      apiPath: '/chat/completions',
+      efforts: [],
+    }))
+    const wrapper = mountChip({ options: many, selection: { modelId: 'row-0', provider: 'deepseek', model: 'deepseek-v4-0', effort: '' } })
+    await wrapper.find('[data-testid="model-chip"]').trigger('click')
+
+    const filter = wrapper.find('[data-testid="model-filter"]')
+    expect(filter.exists()).toBe(true)
+
+    await filter.setValue('eu-7')
+    const options = wrapper.findAll('[role="option"]')
+    expect(options).toHaveLength(1)
+    expect(options[0].text()).toContain('eu-7.test')
+  })
+
+  it('has no filter for a short list', async () => {
+    const wrapper = mountChip()
+    await wrapper.find('[data-testid="model-chip"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="model-filter"]').exists()).toBe(false)
+  })
+
+  // Each option is the model's whole address (plan 266): the name alone cannot
+  // tell two configured rows apart.
+  it('writes every option as the model’s signature', async () => {
+    const twins: SessionModelOption[] = [
+      { id: 'row-eu', provider: 'deepseek', providerName: '深度求索', model: 'deepseek-v4-flash', label: 'eu', baseUrl: 'https://eu.test/v1', apiPath: '/chat/completions', efforts: [] },
+      { id: 'row-us', provider: 'deepseek', providerName: '深度求索', model: 'deepseek-v4-flash', label: 'us', baseUrl: 'https://us.test/v1', apiPath: '/chat/completions', efforts: [] },
+    ]
+    const wrapper = mountChip({ options: twins, selection: { modelId: 'row-eu', provider: 'deepseek', model: 'deepseek-v4-flash', effort: '' } })
+    await wrapper.find('[data-testid="model-chip"]').trigger('click')
+
+    const options = wrapper.findAll('[role="option"]')
+    expect(options[0].text()).toContain('eu.test/v1')
+    expect(options[0].find('.forebrain-path').text()).toBe('/chat/completions')
+    expect(options[1].text()).toContain('us.test/v1')
+  })
+
+  // The same provider+model may be configured more than once (another base
+  // url, api path or key). The row id is the identity: only the row the
+  // selection names is current, and a pick sends that id — a pair alone cannot
+  // tell the two apart, and the server refuses one it cannot tell apart.
+  it('names the configured row, not just the pair, for twin models', async () => {
+    const twins: SessionModelOption[] = [
+      { id: 'row-eu', provider: 'deepseek', model: 'deepseek-v4-flash', label: 'deepseek/deepseek-v4-flash', baseUrl: 'https://eu.test/v1', apiPath: '/chat/completions', efforts: [] },
+      { id: 'row-us', provider: 'deepseek', model: 'deepseek-v4-flash', label: 'deepseek/deepseek-v4-flash', baseUrl: 'https://us.test/v1', apiPath: '/chat/completions', efforts: [] },
+    ]
+    const save = vi.spyOn(forebrainApi, 'saveSessionModel').mockResolvedValue({ modelId: 'row-us', provider: 'deepseek', model: 'deepseek-v4-flash', effort: '' })
+    const wrapper = mountChip({
+      options: twins,
+      selection: { modelId: 'row-us', provider: 'deepseek', model: 'deepseek-v4-flash', effort: '' },
+    })
+    await wrapper.find('[data-testid="model-chip"]').trigger('click')
+
+    const options = wrapper.findAll('[role="option"]')
+    expect(options).toHaveLength(2)
+    expect(options[0].attributes('aria-selected')).toBe('false')
+    expect(options[1].attributes('aria-selected')).toBe('true')
+
+    await options[0].trigger('click')
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(save.mock.calls[0][1]).toMatchObject({
+      modelId: 'row-eu',
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      effort: '',
+    })
   })
 })

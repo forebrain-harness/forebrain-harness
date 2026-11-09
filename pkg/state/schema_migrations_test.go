@@ -4066,3 +4066,70 @@ func TestLeasesMigrationReachesAnOlderDatabase(t *testing.T) {
 		t.Fatalf("migrated lease holder = %q, want the replica that took it over", holder)
 	}
 }
+
+// TestLLMModelTablesMigrationReachesAnOlderDatabase pins the v33 migration on
+// every engine: the current schema script already carries both tables and the
+// model_id column, so the migration's own path is exercised only by taking a
+// fresh database back to v32's shape first.
+func TestLLMModelTablesMigrationReachesAnOlderDatabase(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	dialect := dbx.DialectOf(db)
+
+	for _, table := range []string{"fb_llm_models", "fb_env_vars"} {
+		if _, err := db.ExecContext(ctx, `DROP TABLE `+table); err != nil {
+			t.Fatalf("drop %s: %v", table, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE fb_session_model_state DROP COLUMN model_id`); err != nil {
+		t.Fatalf("drop fb_session_model_state.model_id: %v", err)
+	}
+	if dialect == dbx.SQLite {
+		if _, err := db.ExecContext(ctx, `PRAGMA user_version = 32`); err != nil {
+			t.Fatalf("lower user_version: %v", err)
+		}
+	} else if err := writeDialectSchemaVersion(ctx, db, dialect, 32); err != nil {
+		t.Fatalf("lower the version row: %v", err)
+	}
+
+	if err := migrateStateSchema(ctx, db, ""); err != nil {
+		t.Fatalf("%s migrate to v%d: %v", dialect, stateSchemaVersion, err)
+	}
+	if dialect == dbx.SQLite {
+		requireSchemaVersion(ctx, t, db, stateSchemaVersion)
+	} else {
+		version, err := readDialectSchemaVersion(ctx, db, dialect)
+		if err != nil {
+			t.Fatalf("read %s schema version: %v", dialect, err)
+		}
+		if version != stateSchemaVersion {
+			t.Fatalf("%s schema version = %d, want %d", dialect, version, stateSchemaVersion)
+		}
+	}
+
+	// The tables the migration created are the ones the stores write.
+	models := &LLMModelStore{DB: db}
+	if _, err := models.Create(ctx, LLMModel{Provider: "migrated", Model: "m"}); err != nil {
+		t.Fatalf("insert on the migrated model table: %v", err)
+	}
+	env := &EnvVarStore{DB: db}
+	if err := env.Set(ctx, "MIGRATED_VAR", "v"); err != nil {
+		t.Fatalf("insert on the migrated variable table: %v", err)
+	}
+
+	// The added column exists and defaults to '' for a row written without it.
+	sessions := NewSessionStore(db, "main")
+	if err := sessions.EnsureAt(ctx, "v33-session", "v33-session", SessionBirth{}); err != nil {
+		t.Fatalf("create the session: %v", err)
+	}
+	if _, err := sessions.SaveSessionModelSelection(ctx, "v33-session", SessionModelSelection{Provider: "migrated", Model: "m"}); err != nil {
+		t.Fatalf("write the model row without an id: %v", err)
+	}
+	sel, ok, err := sessions.SessionModelSelection(ctx, "v33-session")
+	if err != nil || !ok {
+		t.Fatalf("read the model row: %v (ok=%v)", err, ok)
+	}
+	if sel.ModelID != "" {
+		t.Fatalf("model_id = %q for a row written without one, want ''", sel.ModelID)
+	}
+}

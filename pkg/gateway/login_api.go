@@ -1,16 +1,14 @@
-// Web login for the OAuth providers the model settings page can sign in to.
+// Web login for the subscriptions the models page signs in to.
 //
-// The terminal's /connect runs these flows in-process: it prints a status line
-// and opens a browser on the machine it is sitting in front of. A browser page
-// can do neither, so the flow runs here instead and the page polls it. What the
-// page needs — the authorization URL, a device flow's user code — is handed over
-// as soon as the flow learns it, and the ending (complete, or failed with a
-// reason) plus the base URL to write into the provider row comes back from the
-// same endpoint.
+// pkg/subscription owns the flows (plan 264): which sign-ins exist, how each one
+// is driven, and what a finished one unlocks. This file is the gateway's half of
+// it — start a flow, let the page poll it, take a pasted callback, cancel it —
+// and it names no subscription of its own. A browser page can neither print a
+// status line nor open a browser on the machine the user is sitting in front of,
+// so the flow runs here and the page renders what the handle reports.
 //
-// The credentials themselves are not touched here: the flows save them the same
-// way the terminal does, so one login serves both surfaces and the last login
-// wins.
+// The credentials themselves are not touched here: a flow saves them the way the
+// terminal does, so one login serves both surfaces and the last login wins.
 package gateway
 
 import (
@@ -19,22 +17,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
-	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
-	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
-)
-
-// The two providers with a web login, spelled as the provider ids in
-// configuration so the page can write the row without translating.
-const (
-	authLoginOpenCode = "opencode"
-	authLoginChatGPT  = "chatgpt"
 )
 
 // Login states. A login only ever moves from pending to one of the two terminal
@@ -58,24 +48,14 @@ var authLoginTimeout = 10 * time.Minute
 // ends, so the page's last poll gets the answer instead of a 404.
 const authLoginRetention = 5 * time.Minute
 
-// The two flows, as variables so a test can drive these endpoints without
-// talking to opencode.ai or auth.openai.com.
+// The subscriptions this gateway offers, and the one a path or a stored row
+// names. They are pkg/subscription's own registry in production; a variable
+// because a test drives these endpoints with sign-ins of its own rather than
+// reaching a vendor.
 var (
-	openCodeLoginRun = opencode.LoginDeviceFlow
-	chatGPTLoginRun  = openai.LoginWithManualCallback
+	gatewaySubscriptions    = subscription.Registry
+	gatewaySubscriptionByID = subscription.ByID
 )
-
-// authLoginProbe is a package var like the two login flows above: tests stub
-// it, production probes through the same turn helper the terminal's /connect
-// uses. The answer decides whether a login flow is needed at all — one login
-// serves both surfaces, and a login the machine already holds that can list
-// its models completes the request the way a finished flow's poll would.
-var authLoginProbe = func(ctx context.Context, home, provider string) turn.SignInCheck {
-	if provider == authLoginChatGPT {
-		return turn.ProbeChatGPTModels(ctx, openai.CredentialsPath(home), process.NewChatGPTModelsSource(home))
-	}
-	return turn.ProbeOpenCodeGoModels(ctx, process.NewOpenCodeModelsSource(home))
-}
 
 // errAuthLoginInProgress is the answer to a second login for the same provider.
 // Both flows own fixed resources — a device code, and the loopback ports 1455
@@ -83,41 +63,38 @@ var authLoginProbe = func(ctx context.Context, home, provider string) turn.SignI
 var errAuthLoginInProgress = errors.New("another login is in progress")
 
 // gatewayAuthLogin is one web login as the page sees it. It is the login
-// analogue of gatewayMcpPKCE: per-server state, guarded by the server's own
+// analogue of gatewayMcpPKCE: per-subscription state, guarded by the server's own
 // mutex, and dropped once it can no longer be read.
 type gatewayAuthLogin struct {
 	provider string
 	status   string
-	// url is the authorization URL: a device verification page, or the ChatGPT
-	// authorize link the loopback flow will accept a callback for.
-	url string
-	// userCode is the device flow's short code the user confirms in the browser.
-	userCode string
+	// flow is the flow kind this login runs, so the page knows whether it shows
+	// a device code or asks for a pasted address.
+	flow string
 	// errText is the failure reason phrase, empty unless status is failed.
 	errText string
-	// baseURL is the provider base URL to write into the provider row, set when
-	// the login completes.
+	// baseURL is the model row's base URL, set when the login completes: the
+	// endpoint the subscription's provider serves.
 	baseURL string
 	// keepUntil is when the login stops being readable. Zero while pending: the
 	// flow's own timeout already bounds that.
 	keepUntil time.Time
 	cancel    context.CancelFunc
-	// manual carries the callbacks a user pastes back when the browser's
-	// redirect cannot reach this machine. Only a ChatGPT login has one: the
-	// device flow it does not apply to, so it stays nil and the endpoint
-	// refuses rather than pretending.
-	manual chan openai.ManualCallback
+	// login is the running sign-in. Every answer it learns — the authorization
+	// URL, a device code — is read from it while it runs, and a pasted callback
+	// is handed to it. Nil only for a login registered by a test double.
+	login subscription.Login
 }
 
 // authLoginStart records a new pending login for provider and returns its id.
 // cancel stops the flow and is stored with the login before the caller can
-// observe the id, so a cancel request can never arrive before there is
-// something to cancel.
+// observe the id, so a cancel request can never arrive before there is something
+// to cancel.
 //
-// One login per provider: both flows own fixed resources — a device code, and
-// the loopback ports 1455 and 1457 — so two at once would fight over them.
+// One login per provider: a device code and the loopback ports are fixed
+// resources, so two at once would fight over them.
 func (s *Server) authLoginStart(provider string, keepUntil time.Time, cancel context.CancelFunc,
-	manual chan openai.ManualCallback) (string, error) {
+	login subscription.Login) (string, error) {
 	if s == nil {
 		return "", errors.New("no server")
 	}
@@ -128,42 +105,32 @@ func (s *Server) authLoginStart(provider string, keepUntil time.Time, cancel con
 	s.authLoginMu.Lock()
 	defer s.authLoginMu.Unlock()
 	s.pruneAuthLoginsLocked(time.Now())
-	for _, login := range s.authLogins {
-		if login.provider == provider && login.status == authLoginPending {
+	for _, running := range s.authLogins {
+		if running.provider == provider && running.status == authLoginPending {
 			return "", errAuthLoginInProgress
 		}
 	}
 	if s.authLogins == nil {
 		s.authLogins = make(map[string]*gatewayAuthLogin)
 	}
+	flow := ""
+	if sub, ok := gatewaySubscriptionByID(provider); ok {
+		flow, _ = authLoginFlow(sub)
+	}
 	s.authLogins[id] = &gatewayAuthLogin{
 		provider:  provider,
 		status:    authLoginPending,
+		flow:      flow,
 		keepUntil: keepUntil,
 		cancel:    cancel,
-		manual:    manual,
+		login:     login,
 	}
 	return id, nil
 }
 
-// authLoginUpdate records what the flow has learned so far. A login that
-// already ended keeps its answer.
-func (s *Server) authLoginUpdate(id string, apply func(*gatewayAuthLogin)) {
-	if s == nil {
-		return
-	}
-	s.authLoginMu.Lock()
-	defer s.authLoginMu.Unlock()
-	login, ok := s.authLogins[id]
-	if !ok || login.status != authLoginPending {
-		return
-	}
-	apply(login)
-}
-
 // authLoginFinish records the end of a flow. It never rewrites a login that
-// already ended: a page's cancel and the goroutine's own error race here, and
-// the answer the page already saw is the one that counts.
+// already ended: a page's cancel and the goroutine's own error race here, and the
+// answer the page already saw is the one that counts.
 func (s *Server) authLoginFinish(id string, runErr error, baseURL string, keepUntil time.Time) {
 	if s == nil {
 		return
@@ -184,10 +151,10 @@ func (s *Server) authLoginFinish(id string, runErr error, baseURL string, keepUn
 	login.baseURL = baseURL
 }
 
-// authLoginAbort ends a pending login as canceled and returns the flow's
-// cancel, so a handler can stop the goroutine after the state is already what
-// the page will read. An already finished login is left alone, and its cancel
-// is still returned (a completed flow has nothing left to stop).
+// authLoginAbort ends a pending login as canceled and returns the flow's cancel,
+// so a handler can stop the goroutine after the state is already what the page
+// will read. An already finished login is left alone, and its cancel is still
+// returned (a completed flow has nothing left to stop).
 func (s *Server) authLoginAbort(provider, id string, keepUntil time.Time) (context.CancelFunc, bool) {
 	if s == nil {
 		return nil, false
@@ -206,27 +173,9 @@ func (s *Server) authLoginAbort(provider, id string, keepUntil time.Time) (conte
 	return login.cancel, true
 }
 
-// authLoginManual hands out the channel a pasted callback goes into, together
-// with the login's status so the caller can tell "no such login" from "this
-// login cannot take one any more". The channel itself is never copied: the
-// flow owns its receiving end.
-func (s *Server) authLoginManual(provider, id string) (chan openai.ManualCallback, string, bool) {
-	if s == nil {
-		return nil, "", false
-	}
-	s.authLoginMu.Lock()
-	defer s.authLoginMu.Unlock()
-	s.pruneAuthLoginsLocked(time.Now())
-	login, ok := s.authLogins[id]
-	if !ok || login.provider != provider {
-		return nil, "", false
-	}
-	return login.manual, login.status, true
-}
-
-// authLoginGet returns a copy of a login, or false when the id is unknown to
-// this provider — a gateway restart clears the map, and a pruned id is as good
-// as unknown.
+// authLoginGet returns a copy of a login, or false when the id is unknown to this
+// provider — a gateway restart clears the map, and a pruned id is as good as
+// unknown.
 func (s *Server) authLoginGet(provider, id string) (gatewayAuthLogin, bool) {
 	if s == nil {
 		return gatewayAuthLogin{}, false
@@ -241,9 +190,9 @@ func (s *Server) authLoginGet(provider, id string) (gatewayAuthLogin, bool) {
 	return *login, true
 }
 
-// pruneAuthLoginsLocked drops finished logins whose retention has run out, so
-// the map does not grow for the life of the server. A pending login is never
-// pruned: the flow's own timeout ends it.
+// pruneAuthLoginsLocked drops finished logins whose retention has run out, so the
+// map does not grow for the life of the server. A pending login is never pruned:
+// the flow's own timeout ends it.
 func (s *Server) pruneAuthLoginsLocked(now time.Time) {
 	for id, login := range s.authLogins {
 		if !login.keepUntil.IsZero() && now.After(login.keepUntil) {
@@ -252,10 +201,38 @@ func (s *Server) pruneAuthLoginsLocked(now time.Time) {
 	}
 }
 
+// authLoginFlow picks the flow this surface can drive, best first: a device code
+// it shows and polls, or the paste-a-callback pair a remote browser needs. It
+// never picks browser_callback — opening a browser belongs to the surface sitting
+// in front of the user, and the gateway may be running where nobody is.
+func authLoginFlow(sub subscription.Subscription) (string, bool) {
+	for _, flow := range sub.Flows() {
+		switch flow {
+		case subscription.FlowDeviceCode, subscription.FlowPasteCallback:
+			return flow, true
+		}
+	}
+	return "", false
+}
+
+// subscriptionEnv is what a subscription reads and writes: the home its
+// credentials live under, and the state database its model rows go into.
+func (s *Server) subscriptionEnv() subscription.Env {
+	env := subscription.Env{}
+	if s == nil {
+		return env
+	}
+	env.Home = s.Home
+	if s.Env != nil {
+		env.DB = s.Env.SQL
+	}
+	return env
+}
+
 // handleAuthLoginStart begins a web login and answers 202 with the id to poll.
 // The flow runs in the background — the response cannot wait for a human to
-// finish in a browser — and the provider's canonical base URL is part of the
-// completion answer, ready to write into the provider row.
+// finish in a browser — and the subscription's provider endpoint is part of the
+// completion answer, ready to write into the model row.
 func (s *Server) handleAuthLoginStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -265,20 +242,21 @@ func (s *Server) handleAuthLoginStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nil", http.StatusInternalServerError)
 		return
 	}
-	provider := authLoginProvider(pathParam(r, "provider"))
-	if provider == "" {
+	sub, ok := gatewaySubscriptionByID(pathParam(r, "provider"))
+	if !ok {
 		http.Error(w, "unknown login provider", http.StatusNotFound)
 		return
 	}
-	// Before starting a flow, ask whether this machine's login already
-	// answers the request. Usable and Unreachable both complete: the model
-	// fetch the page runs next is the same fact source and reports its own
-	// failures — a registry being unreachable is not a dead login, and
-	// pushing a working login back through the browser would be the very
-	// bug this fixes. Missing and dead start the flow; the page is the
-	// progress display and the flow reports its own failures.
+	provider := sub.ID()
+	// Before starting a flow, ask whether this machine's login already answers
+	// the request. Usable and Unreachable both complete: the model fetch the page
+	// runs next is the same fact source and reports its own failures — a registry
+	// being unreachable is not a dead login, and pushing a working login back
+	// through the browser would be the very bug this fixes. Missing and dead
+	// start the flow; the page is the progress display and the flow reports its
+	// own failures.
 	probeCtx, probeCancel := context.WithTimeout(r.Context(), modelsDiscoveryTimeout)
-	check := authLoginProbe(probeCtx, s.Home, provider)
+	check := sub.Probe(probeCtx, s.subscriptionEnv())
 	probeCancel()
 	if check.State == turn.SignInUsable || check.State == turn.SignInUnreachable {
 		w.Header().Set("Content-Type", "application/json")
@@ -289,17 +267,23 @@ func (s *Server) handleAuthLoginStart(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	flow, ok := authLoginFlow(sub)
+	if !ok {
+		http.Error(w, "this sign-in has no flow a gateway can drive", http.StatusNotFound)
+		return
+	}
 	now := time.Now()
 	keepUntil := now.Add(authLoginTimeout + authLoginRetention)
+	// The flow outlives this request: its context is the login's own timeout, so
+	// a page that walks away still ends the goroutine and its listener.
 	ctx, cancel := context.WithTimeout(context.Background(), authLoginTimeout)
-	// Only the ChatGPT flow has a second way in: its redirect goes to localhost
-	// on the browser's machine, which is the gateway's own machine only when the
-	// two are the same one.
-	var manual chan openai.ManualCallback
-	if provider == authLoginChatGPT {
-		manual = make(chan openai.ManualCallback)
+	login, err := sub.Start(ctx, s.subscriptionEnv(), flow)
+	if err != nil {
+		cancel()
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	id, err := s.authLoginStart(provider, keepUntil, cancel, manual)
+	id, err := s.authLoginStart(provider, keepUntil, cancel, login)
 	if err != nil {
 		cancel()
 		status := http.StatusConflict
@@ -309,47 +293,17 @@ func (s *Server) handleAuthLoginStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	// The goroutine keeps its own reference to the server: it is the owner of
-	// the login state, and the handler's request may end long before the human
+	// The goroutine keeps its own reference to the server: it is the owner of the
+	// login state, and the handler's request may end long before the human
 	// finishes in a browser.
 	owner := s
 	go func() {
 		defer cancel()
-		runErr := owner.runAuthLogin(ctx, provider, id, manual)
-		owner.authLoginFinish(id, runErr, authLoginBaseURL(provider), keepUntil)
+		owner.authLoginFinish(id, login.Wait(ctx), authLoginBaseURL(provider), keepUntil)
 	}()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]any{"login_id": id, "provider": provider})
-}
-
-// runAuthLogin runs one provider's flow to completion. The URL and the device
-// user code reach the page through the login as soon as the flow knows them;
-// out is discarded because the page is the progress display, and the browser is
-// never opened here — the gateway may be running where nobody can see one, and
-// opening it there would be a window onto a terminal nobody is watching.
-func (s *Server) runAuthLogin(ctx context.Context, provider, id string, manual chan openai.ManualCallback) error {
-	if provider == authLoginChatGPT {
-		_, err := chatGPTLoginRun(ctx, openai.CredentialsPath(s.Home), io.Discard, func(url string) error {
-			s.authLoginUpdate(id, func(login *gatewayAuthLogin) { login.url = url })
-			return nil
-		}, manual)
-		return err
-	}
-	_, err := openCodeLoginRun(ctx, opencode.DefaultPath(s.Home), io.Discard,
-		// Explicitly not nil: nil would mean "open the system browser", which is
-		// the one thing this path must not do.
-		func(string) error { return nil },
-		func(info opencode.LoginInfo) {
-			s.authLoginUpdate(id, func(login *gatewayAuthLogin) {
-				login.url = info.VerificationURL
-				login.userCode = info.UserCode
-			})
-		},
-		// The web has its own progress UI, so it asks for no stage reports.
-		nil,
-	)
-	return err
 }
 
 // authLoginStatusBody is the poll answer. Every field is always present so the
@@ -361,6 +315,9 @@ type authLoginStatusBody struct {
 	UserCode string `json:"user_code"`
 	Error    string `json:"error"`
 	BaseURL  string `json:"base_url"`
+	// Flow is the flow kind being driven, so the page knows whether to show a
+	// device code or ask for a pasted address.
+	Flow string `json:"flow"`
 }
 
 // handleAuthLoginStatus answers one poll.
@@ -373,31 +330,39 @@ func (s *Server) handleAuthLoginStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nil", http.StatusInternalServerError)
 		return
 	}
-	provider := authLoginProvider(pathParam(r, "provider"))
-	if provider == "" {
+	sub, ok := gatewaySubscriptionByID(pathParam(r, "provider"))
+	if !ok {
 		http.Error(w, "unknown login provider", http.StatusNotFound)
 		return
 	}
-	login, ok := s.authLoginGet(provider, pathParam(r, "loginId"))
+	login, ok := s.authLoginGet(sub.ID(), pathParam(r, "loginId"))
 	if !ok {
 		// The login is gone, not unfinished: the page starts a new one rather
 		// than polling forever.
 		http.Error(w, "unknown login", http.StatusNotFound)
 		return
 	}
+	body := authLoginStatusBody{
+		Status:  login.status,
+		Error:   login.errText,
+		BaseURL: login.baseURL,
+		Flow:    login.flow,
+	}
+	// What the flow has learned so far is read from the handle itself, outside
+	// the server's lock: the handle is the owner of those two answers and keeps
+	// them readable after the flow ends, so a late poll still shows the code the
+	// user was asked to confirm.
+	if login.login != nil {
+		body.URL = login.login.AuthorizeURL()
+		body.UserCode = login.login.UserCode()
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(authLoginStatusBody{
-		Status:   login.status,
-		URL:      login.url,
-		UserCode: login.userCode,
-		Error:    login.errText,
-		BaseURL:  login.baseURL,
-	})
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // handleAuthLoginCallback takes the address a user pasted from their browser's
-// address bar after approving a ChatGPT sign-in whose redirect could not reach
-// this machine. The flow decides whether it is theirs; the answer is a short
+// address bar after approving a sign-in whose redirect could not reach this
+// machine. The flow decides whether it is theirs; the answer is a short
 // machine-readable reason the page words itself. The address carries a one-time
 // authorization code, so it is never logged or echoed.
 func (s *Server) handleAuthLoginCallback(w http.ResponseWriter, r *http.Request) {
@@ -409,8 +374,18 @@ func (s *Server) handleAuthLoginCallback(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "nil", http.StatusInternalServerError)
 		return
 	}
-	provider := authLoginProvider(pathParam(r, "provider"))
-	if provider != authLoginChatGPT {
+	sub, ok := gatewaySubscriptionByID(pathParam(r, "provider"))
+	if !ok {
+		http.Error(w, "unknown login provider", http.StatusNotFound)
+		return
+	}
+	login, ok := s.authLoginGet(sub.ID(), pathParam(r, "loginId"))
+	if !ok {
+		http.Error(w, "unknown login", http.StatusNotFound)
+		return
+	}
+	// Only the flow that asks for a pasted address has anywhere to put one.
+	if login.flow != subscription.FlowPasteCallback {
 		http.Error(w, "unknown login provider", http.StatusNotFound)
 		return
 	}
@@ -421,35 +396,15 @@ func (s *Server) handleAuthLoginCallback(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "bad_request", http.StatusBadRequest)
 		return
 	}
-	manual, status, ok := s.authLoginManual(provider, pathParam(r, "loginId"))
-	if !ok {
-		http.Error(w, "unknown login", http.StatusNotFound)
-		return
-	}
-	if status != authLoginPending || manual == nil {
+	if login.status != authLoginPending || login.login == nil {
 		http.Error(w, "login not pending", http.StatusConflict)
 		return
 	}
-	reply := make(chan error, 1)
-	select {
-	case manual <- openai.ManualCallback{URL: body.URL, Reply: reply}:
-	case <-time.After(5 * time.Second):
-		http.Error(w, "login not pending", http.StatusConflict)
-		return
-	case <-r.Context().Done():
+	if err := login.login.Submit(r.Context(), body.URL); err != nil {
+		http.Error(w, callbackReason(err), http.StatusBadRequest)
 		return
 	}
-	select {
-	case err := <-reply:
-		if err != nil {
-			http.Error(w, callbackReason(err), http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusAccepted)
-	case <-time.After(5 * time.Second):
-		http.Error(w, "login not pending", http.StatusConflict)
-	case <-r.Context().Done():
-	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // callbackReason maps the flow's refusal to the short code the page words.
@@ -476,13 +431,13 @@ func (s *Server) handleAuthLoginCancel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nil", http.StatusInternalServerError)
 		return
 	}
-	provider := authLoginProvider(pathParam(r, "provider"))
-	if provider == "" {
+	sub, ok := gatewaySubscriptionByID(pathParam(r, "provider"))
+	if !ok {
 		http.Error(w, "unknown login provider", http.StatusNotFound)
 		return
 	}
 	now := time.Now()
-	cancel, ok := s.authLoginAbort(provider, pathParam(r, "loginId"), now.Add(authLoginRetention))
+	cancel, ok := s.authLoginAbort(sub.ID(), pathParam(r, "loginId"), now.Add(authLoginRetention))
 	if !ok {
 		http.Error(w, "unknown login", http.StatusNotFound)
 		return
@@ -493,46 +448,26 @@ func (s *Server) handleAuthLoginCancel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// authLoginProvider normalizes the provider path segment. An empty answer means
-// this endpoint does not serve that provider, which is a 404 like an unknown
-// login id.
-func authLoginProvider(raw string) string {
-	switch provider := strings.ToLower(strings.TrimSpace(raw)); provider {
-	case authLoginOpenCode, authLoginChatGPT:
-		return provider
-	default:
+// authLoginBaseURL is the base URL the page writes into the model row when a
+// login completes: the endpoint the subscription's provider serves. A login and
+// the provider its rows carry are the same registry entry (plan 264), so this is
+// the one place that value is decided and the page writes the answer rather than
+// one of its own — OpenCode's Console root, for instance, is not a substitute for
+// the Go subscription's own inference root, and a row carrying the wrong root
+// keeps routing while describing a surface other than the one it talks to.
+func authLoginBaseURL(provider string) string {
+	builtin, ok := config.BuiltinProviderByID(provider)
+	if !ok || len(builtin.Endpoints) == 0 {
 		return ""
 	}
-}
-
-// authLoginBaseURL is the provider base URL the page writes into the provider
-// row when a login completes: configuration validation requires one, and the
-// login decides which surface it belongs to — so this is the only place that
-// value is decided, and the page writes the answer rather than one of its own.
-//
-// The OpenCode device flow runs against the Console, which is why the login is
-// started as "opencode", but what it unlocks is the Go subscription's catalog:
-// the row it writes is "opencode-go" and the base URL has to be that
-// subscription's own root. The Console root is not a substitute. A non-empty
-// base_url is the inference root as far as pkg/run/config.go is concerned, and
-// the Go models are served under /go — opencode.ClientBaseURL strips and
-// re-adds that segment per provider, so a row carrying the wrong root keeps
-// routing while describing a surface other than the one it talks to.
-//
-// ChatGPT's endpoint is fixed by its transport, so it stays the one the openai
-// package owns.
-func authLoginBaseURL(provider string) string {
-	if provider == authLoginChatGPT {
-		return openai.CodexBaseURL
-	}
-	return opencode.ProviderBaseURL("opencode-go")
+	return builtin.Endpoints[0].BaseURL
 }
 
 // authLoginReason turns a flow error into the phrase the page shows. The OAuth
 // vocabulary the flows report is kept as it is: "canceled", "denied" and
-// "expired" say what happened, and the page renders them as a sentence. An
-// error that fits none of them is passed through, because a wrapped message
-// still tells the user more than a generic one.
+// "expired" say what happened, and the page renders them as a sentence. An error
+// that fits none of them is passed through, because a wrapped message still tells
+// the user more than a generic one.
 func authLoginReason(err error) string {
 	if err == nil {
 		return ""

@@ -20,7 +20,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 32
+const stateSchemaVersion = 33
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -95,6 +95,12 @@ var stateSchemaMigrations = []schemaMigration{
 		apply:         migrateStateV31ToV32,
 		applyMySQL:    migrateStateV31ToV32MySQL,
 		applyPostgres: migrateStateV31ToV32Postgres,
+	},
+	{
+		version:       33,
+		apply:         migrateStateV32ToV33,
+		applyMySQL:    migrateStateV32ToV33MySQL,
+		applyPostgres: migrateStateV32ToV33Postgres,
 	},
 }
 
@@ -1523,6 +1529,196 @@ CREATE TABLE IF NOT EXISTS fb_leases (
   expires_at_ms BIGINT NOT NULL
 )`); err != nil {
 		return fmt.Errorf("create fb_leases: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV32ToV33 adds the install's model table and the operator's
+// variable table (owner 2026-11-07), and gives every session's model choice a
+// row id: two configurations may share provider+model, so the string alone no
+// longer names one. Every object is skipped when the database already carries
+// it, so a fixture built from the current schema with a lowered version
+// migrates instead of failing on a duplicate.
+func migrateStateV32ToV33(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fb_llm_models'`).Scan(&present); err != nil {
+		return err
+	}
+	if present == 0 {
+		if _, err := conn.ExecContext(ctx, `
+CREATE TABLE fb_llm_models (
+  id TEXT PRIMARY KEY CHECK (TRIM(id) <> ''),
+  provider TEXT NOT NULL CHECK (TRIM(provider) <> ''),
+  model TEXT NOT NULL CHECK (TRIM(model) <> ''),
+  base_url TEXT NOT NULL DEFAULT '',
+  api_path TEXT NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT '',
+  params_json TEXT NOT NULL DEFAULT '',
+  cap_images INTEGER CHECK (cap_images IN (0, 1)),
+  cap_pdf INTEGER CHECK (cap_pdf IN (0, 1)),
+  cap_video INTEGER CHECK (cap_video IN (0, 1)),
+  cap_audio INTEGER CHECK (cap_audio IN (0, 1)),
+  cap_reasoning INTEGER CHECK (cap_reasoning IN (0, 1)),
+  cap_reasoning_off INTEGER CHECK (cap_reasoning_off IN (0, 1)),
+  cap_efforts_json TEXT NOT NULL DEFAULT '',
+  cap_default_effort TEXT NOT NULL DEFAULT '',
+  cap_context_window INTEGER,
+  cap_max_output INTEGER,
+  source TEXT NOT NULL DEFAULT '',
+  source_plan TEXT NOT NULL DEFAULT '',
+  url_verbatim INTEGER NOT NULL DEFAULT 0 CHECK (url_verbatim IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT`); err != nil {
+			return fmt.Errorf("create fb_llm_models: %w", err)
+		}
+		if _, err := conn.ExecContext(ctx,
+			`CREATE UNIQUE INDEX idx_fb_llm_models_identity ON fb_llm_models(provider, model, base_url, api_path)`); err != nil {
+			return fmt.Errorf("index fb_llm_models identity: %w", err)
+		}
+		if _, err := conn.ExecContext(ctx,
+			`CREATE INDEX idx_fb_llm_models_created ON fb_llm_models(created_at, id)`); err != nil {
+			return fmt.Errorf("index fb_llm_models created: %w", err)
+		}
+	}
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fb_env_vars'`).Scan(&present); err != nil {
+		return err
+	}
+	if present == 0 {
+		if _, err := conn.ExecContext(ctx, `
+CREATE TABLE fb_env_vars (
+  name TEXT PRIMARY KEY CHECK (TRIM(name) <> ''),
+  value TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+) STRICT`); err != nil {
+			return fmt.Errorf("create fb_env_vars: %w", err)
+		}
+	}
+	var column int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_session_model_state') WHERE name='model_id'`).Scan(&column); err != nil {
+		return err
+	}
+	if column == 0 {
+		if _, err := conn.ExecContext(ctx,
+			`ALTER TABLE fb_session_model_state ADD COLUMN model_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_session_model_state.model_id: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateStateV32ToV33MySQL is the same objects in MySQL's types. A database
+// that already carries the table skips the creation with its keys; the column
+// is checked in information_schema, then added.
+func migrateStateV32ToV33MySQL(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_llm_models (
+  id VARCHAR(191) NOT NULL PRIMARY KEY,
+  provider VARCHAR(191) NOT NULL CHECK (TRIM(provider) <> ''),
+  model VARCHAR(191) NOT NULL CHECK (TRIM(model) <> ''),
+  base_url TEXT NOT NULL DEFAULT (''),
+  api_path VARCHAR(191) NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT (''),
+  params_json LONGTEXT NOT NULL DEFAULT (''),
+  cap_images BIGINT CHECK (cap_images IN (0, 1)),
+  cap_pdf BIGINT CHECK (cap_pdf IN (0, 1)),
+  cap_video BIGINT CHECK (cap_video IN (0, 1)),
+  cap_audio BIGINT CHECK (cap_audio IN (0, 1)),
+  cap_reasoning BIGINT CHECK (cap_reasoning IN (0, 1)),
+  cap_reasoning_off BIGINT CHECK (cap_reasoning_off IN (0, 1)),
+  cap_efforts_json TEXT NOT NULL DEFAULT (''),
+  cap_default_effort VARCHAR(32) NOT NULL DEFAULT '',
+  cap_context_window BIGINT,
+  cap_max_output BIGINT,
+  source VARCHAR(64) NOT NULL DEFAULT '',
+  source_plan VARCHAR(64) NOT NULL DEFAULT '',
+  url_verbatim BIGINT NOT NULL DEFAULT 0 CHECK (url_verbatim IN (0, 1)),
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  UNIQUE KEY idx_fb_llm_models_identity (provider, model, (SHA2(base_url, 256)), api_path),
+  KEY idx_fb_llm_models_created (created_at, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`); err != nil {
+		return fmt.Errorf("create fb_llm_models: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_env_vars (
+  name VARCHAR(191) NOT NULL PRIMARY KEY,
+  value LONGTEXT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`); err != nil {
+		return fmt.Errorf("create fb_env_vars: %w", err)
+	}
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'fb_session_model_state' AND column_name = 'model_id'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_session_model_state ADD COLUMN model_id VARCHAR(191) NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_session_model_state.model_id: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV32ToV33Postgres is the same objects in PostgreSQL's types.
+func migrateStateV32ToV33Postgres(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_llm_models (
+  id TEXT NOT NULL PRIMARY KEY,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  base_url TEXT NOT NULL DEFAULT '',
+  api_path TEXT NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT '',
+  params_json TEXT NOT NULL DEFAULT '',
+  cap_images BIGINT CHECK (cap_images IN (0, 1)),
+  cap_pdf BIGINT CHECK (cap_pdf IN (0, 1)),
+  cap_video BIGINT CHECK (cap_video IN (0, 1)),
+  cap_audio BIGINT CHECK (cap_audio IN (0, 1)),
+  cap_reasoning BIGINT CHECK (cap_reasoning IN (0, 1)),
+  cap_reasoning_off BIGINT CHECK (cap_reasoning_off IN (0, 1)),
+  cap_efforts_json TEXT NOT NULL DEFAULT '',
+  cap_default_effort TEXT NOT NULL DEFAULT '',
+  cap_context_window BIGINT,
+  cap_max_output BIGINT,
+  source TEXT NOT NULL DEFAULT '',
+  source_plan TEXT NOT NULL DEFAULT '',
+  url_verbatim BIGINT NOT NULL DEFAULT 0,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  CHECK (TRIM(id) <> ''),
+  CHECK (TRIM(provider) <> ''),
+  CHECK (TRIM(model) <> ''),
+  CHECK (url_verbatim IN (0, 1))
+)`); err != nil {
+		return fmt.Errorf("create fb_llm_models: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fb_llm_models_identity ON fb_llm_models (provider, model, base_url, api_path)`); err != nil {
+		return fmt.Errorf("index fb_llm_models identity: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_fb_llm_models_created ON fb_llm_models (created_at, id)`); err != nil {
+		return fmt.Errorf("index fb_llm_models created: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_env_vars (
+  name TEXT NOT NULL PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at_ms BIGINT NOT NULL,
+  CHECK (TRIM(name) <> '')
+)`); err != nil {
+		return fmt.Errorf("create fb_env_vars: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_session_model_state ADD COLUMN IF NOT EXISTS model_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_session_model_state.model_id: %w", err)
 	}
 	return nil
 }

@@ -68,17 +68,12 @@ go build -tags fts5 -o "$work/forebrain" ./cmd/forebrain
 write_home() {
   local home=$1 port=$2
   # Secrets never live in forebrain.yaml: the gateway token and the provider key
-  # are ${ENV_NAME} references resolved from the home's .env.
-  cat > "$home/.env" <<ENV
-FOREBRAIN_GATEWAY_TOKEN=$token
-FAKE_LLM_KEY=fake-key
-ENV
-  chmod 600 "$home/.env"
+  # are ${ENV_NAME} references resolved from the environment the replica is
+  # started with — the home has no .env any more (plan 268).
   cat > "$home/forebrain.yaml" <<YAML
 gateway:
   http_addr: 127.0.0.1:$port
   auth:
-    mode: token
     token: \${FOREBRAIN_GATEWAY_TOKEN}
 database:
   url: "$url"
@@ -139,6 +134,7 @@ start_replica() {
   local home=$1 port=$2 name=$3
   echo "== replica $name on 127.0.0.1:$port"
   FOREBRAIN_HOME="$home" FOREBRAIN_INTERNAL_ADDR="http://127.0.0.1:$port" \
+    FOREBRAIN_GATEWAY_TOKEN="$token" FAKE_LLM_KEY=fake-key \
     "$work/forebrain" gateway start >> "$work/$name.log" 2>&1 &
   local pid=$!
   pids+=("$pid")

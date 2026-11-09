@@ -158,8 +158,14 @@ func TestOpenSeedsEveryStoredSectionWithDefaults(t *testing.T) {
 	require.Equal(t, wantParallel, *agents.Defaults.Execution.MaxParallelSubagents)
 	require.Equal(t, appcfg.WebSearchProviderNone, agents.Defaults.WebSearch.Provider)
 	require.Equal(t, appcfg.WebFetchProviderBuiltin, agents.Defaults.WebFetch.Provider)
-	// The imported provider survived the top-up untouched.
-	require.Equal(t, "gpt-main", agents.Definitions["main"].LLMProviders[0].Model)
+	// The imported model survived the top-up untouched: plan 262 moved it into
+	// the model table and resolved its ${ENV} reference into the row.
+	require.Nil(t, agents.Definitions["main"].LLMProviders, "the migration strips the pre-table list")
+	models, err := (&state.LLMModelStore{DB: env.SQL}).List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, models, 1)
+	require.Equal(t, "gpt-main", models[0].Model)
+	require.Equal(t, "sk-defaults-test", models[0].APIKey)
 
 	var compact appcfg.CompactSection
 	require.NoError(t, json.Unmarshal([]byte(rows["compact"]), &compact))

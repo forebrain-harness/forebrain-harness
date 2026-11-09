@@ -48,20 +48,17 @@ func Load(path string) (Root, error) {
 		path = abs
 	}
 	r.SourceFiles = []string{path}
-	if err := applyDotEnvAfterNormalize(path, &r); err != nil {
-		return Root{}, err
-	}
-	expandRootEnvReferences(&r)
+	expandRootEnvReferences(&r, os.LookupEnv)
 	if err := validateLoadedRoot(&r); err != nil {
 		return Root{}, err
 	}
 	return r, nil
 }
 
-// LoadPersisted reads the on-disk configuration without merging runtime
-// environment secrets into the returned value. Use it for read-modify-write
-// operations so a UI setting change cannot persist API keys sourced from
-// ~/.forebrain/.env or process environment variables back into forebrain.yaml.
+// LoadPersisted reads the on-disk configuration without expanding the
+// ${ENV} references it carries. Use it for read-modify-write operations so a UI
+// setting change cannot persist the values behind those references back into
+// forebrain.yaml.
 func LoadPersisted(path string) (Root, error) {
 	r, err := loadPersisted(path)
 	if err != nil {
@@ -74,18 +71,28 @@ func LoadPersisted(path string) (Root, error) {
 }
 
 // FinishLoad runs the tail of Load on a root the caller assembled by hand:
-// the home .env merge, ${ENV} expansion, and validation, in Load's order. The
-// composed runtime configuration — the YAML's startup sections plus the
-// database's runtime sections (plan 187) — runs through the same steps a root
-// read from one file did, so both behave identically.
+// ${ENV} expansion and validation, in Load's order, resolving every reference
+// from the process environment. The composed runtime configuration — the YAML's
+// startup sections plus the database's runtime sections (plan 187) — runs
+// through the same steps a root read from one file did, so both behave
+// identically.
 func FinishLoad(r *Root) error {
+	return FinishLoadWith(r, os.LookupEnv)
+}
+
+// FinishLoadWith is FinishLoad with the lookup the ${ENV} references resolve
+// from. The composed configuration resolves them from the operator's variables
+// first and the process environment second (plan 259, plan 268): a container
+// still supplies values through its environment, and a value the operator
+// stored in the variables table wins over an inherited one of the same name.
+func FinishLoadWith(r *Root, lookup func(string) (string, bool)) error {
 	if r == nil {
 		return fmt.Errorf("finish load: nil root")
 	}
-	if err := applyDotEnvAfterNormalize("", r); err != nil {
-		return err
+	if lookup == nil {
+		lookup = os.LookupEnv
 	}
-	expandRootEnvReferences(r)
+	expandRootEnvReferences(r, lookup)
 	return validateLoadedRoot(r)
 }
 
@@ -179,14 +186,25 @@ func ValidateCronSection(c CronSection) error {
 	return nil
 }
 
-func expandRootEnvReferences(r *Root) {
+// expandRootEnvReferences replaces every ${NAME} reference the configuration
+// carries with the value lookup reports. Root.LLMModels is skipped: a model
+// row's key is the plaintext the model table holds, and no environment
+// variable supplies a model's key any more (owner 2026-11-07, plans 262, 268).
+func expandRootEnvReferences(r *Root, lookup func(string) (string, bool)) {
 	if r == nil {
 		return
 	}
-	expandStringEnvReferences(reflect.ValueOf(r))
+	v := reflect.ValueOf(r).Elem()
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		if t.Field(i).Name == "LLMModels" {
+			continue
+		}
+		expandStringEnvReferences(v.Field(i), lookup)
+	}
 }
 
-func expandStringEnvReferences(v reflect.Value) {
+func expandStringEnvReferences(v reflect.Value, lookup func(string) (string, bool)) {
 	if !v.IsValid() {
 		return
 	}
@@ -194,35 +212,35 @@ func expandStringEnvReferences(v reflect.Value) {
 		if v.IsNil() {
 			return
 		}
-		expandStringEnvReferences(v.Elem())
+		expandStringEnvReferences(v.Elem(), lookup)
 		return
 	}
 	switch v.Kind() {
 	case reflect.String:
 		if v.CanSet() {
-			v.SetString(expandBracedEnvReferences(v.String()))
+			v.SetString(expandBracedEnvReferences(v.String(), lookup))
 		}
 	case reflect.Struct:
 		for i := 0; i < v.NumField(); i++ {
-			expandStringEnvReferences(v.Field(i))
+			expandStringEnvReferences(v.Field(i), lookup)
 		}
 	case reflect.Slice, reflect.Array:
 		for i := 0; i < v.Len(); i++ {
-			expandStringEnvReferences(v.Index(i))
+			expandStringEnvReferences(v.Index(i), lookup)
 		}
 	case reflect.Map:
-		expandMapStringEnvReferences(v)
+		expandMapStringEnvReferences(v, lookup)
 	}
 }
 
-func expandMapStringEnvReferences(v reflect.Value) {
+func expandMapStringEnvReferences(v reflect.Value, lookup func(string) (string, bool)) {
 	if v.IsNil() {
 		return
 	}
 	for _, key := range v.MapKeys() {
 		value := v.MapIndex(key)
 		if value.Kind() == reflect.String {
-			v.SetMapIndex(key, reflect.ValueOf(expandBracedEnvReferences(value.String())))
+			v.SetMapIndex(key, reflect.ValueOf(expandBracedEnvReferences(value.String(), lookup)))
 			continue
 		}
 		if value.Kind() == reflect.Pointer && value.IsNil() {
@@ -232,19 +250,26 @@ func expandMapStringEnvReferences(v reflect.Value) {
 			value.Kind() == reflect.Slice || value.Kind() == reflect.Array || value.Kind() == reflect.Map {
 			next := reflect.New(value.Type()).Elem()
 			next.Set(value)
-			expandStringEnvReferences(next)
+			expandStringEnvReferences(next, lookup)
 			v.SetMapIndex(key, next)
 		}
 	}
 }
 
-func expandBracedEnvReferences(s string) string {
+func expandBracedEnvReferences(s string, lookup func(string) (string, bool)) string {
 	return envReferencePattern.ReplaceAllStringFunc(s, func(match string) string {
 		if !isSingleEnvReference(match) {
 			return match
 		}
 		name := strings.TrimSuffix(strings.TrimPrefix(match, "${"), "}")
-		return os.Getenv(name)
+		if lookup == nil {
+			return ""
+		}
+		v, ok := lookup(name)
+		if !ok {
+			return ""
+		}
+		return v
 	})
 }
 
@@ -278,10 +303,10 @@ func Save(path string, r Root) error {
 }
 
 // dropPlaceholderLLMProviders removes provider entries that carry no settings.
-// normalize keeps an empty entry in memory so the primary provider always has a
-// slot to merge .env values into, but persisting it writes a bare `- {}` that
-// documents nothing. Load recreates the slot, so removing it is round-trip
-// safe. It runs last, after validation has seen the in-memory shape.
+// A configuration written before the model table existed keeps one empty entry
+// in memory as the slot its model fills in, but persisting it writes a bare
+// `- {}` that documents nothing. Load recreates the slot, so removing it is
+// round-trip safe. It runs last, after validation has seen the in-memory shape.
 func dropPlaceholderLLMProviders(r *Root) {
 	if r == nil {
 		return
@@ -301,10 +326,11 @@ func dropPlaceholderLLMProviders(r *Root) {
 	}
 }
 
-// restorePersistedSecrets removes runtime-only environment values from a
-// configuration about to be written. Load merges .env values for runtime use;
-// a following Save must retain only the corresponding persisted secret value
-// (usually a ${ENV_NAME} reference) or clear the field when none was stored.
+// restorePersistedSecrets keeps the persisted form of every secret in a
+// configuration about to be written: the value the file already holds (a
+// ${ENV_NAME} reference, or now a plaintext one) survives the write, and a
+// field the file does not carry is cleared rather than written with an
+// expanded runtime value.
 func restorePersistedSecrets(dst *Root, src Root) {
 	if dst == nil {
 		return
@@ -461,11 +487,11 @@ func keyClearedByWrite(v reflect.Value) bool {
 	return ok && c.APIKeyCleared
 }
 
-// providerKeyEnvName is the variable name the write paths give a provider's
-// key: UPPERCASE(provider) with dashes as underscores, then _API_KEY. It
-// mirrors pkg/process.ProviderKeyEnvMap, which is what actually names the
-// variable when a key is stored; pkg/config cannot import it (pkg/process
-// imports this package), so the two spellings have to be kept in step here.
+// providerKeyEnvName is the variable name a ${ENV} reference names when it
+// belongs to a provider: UPPERCASE(provider) with dashes as underscores, then
+// _API_KEY. A model's key is plaintext in the model table (plans 262, 268), so
+// this spelling only has to recognize the references a file-era configuration
+// still carries.
 func providerKeyEnvName(provider string) string {
 	p := strings.ReplaceAll(strings.ToUpper(strings.TrimSpace(provider)), "-", "_")
 	return p + "_API_KEY"
@@ -855,13 +881,24 @@ func validatePrimaryAgents(r *Root) error {
 		// an unresolvable default as an error (no fall-back to the first
 		// entry), so load, configuration application and every structured write
 		// path share
-		// this one verdict via validateLoadedRoot/Save.
-		if strings.TrimSpace(def.DefaultModel) != "" && EffectiveDefaultLLM(def) == nil {
-			return fmt.Errorf(
-				"agents.definitions.%s.default_model: %q does not match any llm_providers entry on this agent's list",
-				id, def.DefaultModel)
+		// this one verdict via validateLoadedRoot/Save. Only a legacy
+		// "provider/model" label that matches nothing is that error; a row id
+		// nothing carries is skipped by the runtime (the model page may delete
+		// it), so a stale id cannot keep the install from starting (plan 260).
+		if dm := strings.TrimSpace(def.DefaultModel); strings.Contains(dm, "/") {
+			if _, ok := ResolveModelRef(r, id, dm); !ok {
+				return fmt.Errorf(
+					"agents.definitions.%s.default_model: %q does not match any llm_providers entry on this agent's list",
+					id, def.DefaultModel)
+			}
 		}
-		if err := ValidateAgentSubagents(id, def, builtInPublicSubagentNames, builtInSystemSubagentNames); err != nil {
+		if err := ValidateAgentSubagents(id, def, builtInPublicSubagentNames, builtInSystemSubagentNames, func(ref string) bool {
+			// The same resolution a default_model reference gets: a row id this
+			// install carries (plan 262), or a legacy label. A label keeps its
+			// own rule inside the check, so a dangling one still loads.
+			_, ok := ResolveModelRef(r, id, ref)
+			return ok
+		}); err != nil {
 			return err
 		}
 	}

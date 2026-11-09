@@ -59,13 +59,10 @@ services:
         home=/home/forebrain
         mkdir -p "$$home/workspace"
         test -f "$$home/forebrain.yaml" && exit 0
-        printf 'FOREBRAIN_GATEWAY_TOKEN=%s\n' "$$FOREBRAIN_GATEWAY_TOKEN" > "$$home/.env"
-        chmod 600 "$$home/.env"
         cat > "$$home/forebrain.yaml.tmp" <<'YAML'
         gateway:
           http_addr: "0.0.0.0:6060"
           auth:
-            mode: token
             token: $${FOREBRAIN_GATEWAY_TOKEN}
         database:
           url: "postgres://postgres:fb@db:5432/forebrain?sslmode=disable"
@@ -102,6 +99,11 @@ services:
     environment:
       FOREBRAIN_HOME: /home/forebrain
       FOREBRAIN_INTERNAL_ADDR: http://gateway-a:6060
+      # The seeded config references the token, and the first boot's model
+      # references this key (plan 268): the process environment is where both
+      # resolve from now that the home has no .env.
+      FOREBRAIN_GATEWAY_TOKEN: ${FOREBRAIN_GATEWAY_TOKEN:?set FOREBRAIN_GATEWAY_TOKEN}
+      FAKE_LLM_KEY: ${FAKE_LLM_KEY:-sk-local-fake}
     ports:
       - "6061:6060"
     volumes:
@@ -116,6 +118,11 @@ services:
     environment:
       FOREBRAIN_HOME: /home/forebrain
       FOREBRAIN_INTERNAL_ADDR: http://gateway-b:6060
+      # The seeded config references the token, and the first boot's model
+      # references this key (plan 268): the process environment is where both
+      # resolve from now that the home has no .env.
+      FOREBRAIN_GATEWAY_TOKEN: ${FOREBRAIN_GATEWAY_TOKEN:?set FOREBRAIN_GATEWAY_TOKEN}
+      FAKE_LLM_KEY: ${FAKE_LLM_KEY:-sk-local-fake}
     ports:
       - "6062:6060"
     volumes:

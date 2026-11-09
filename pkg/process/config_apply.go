@@ -29,6 +29,12 @@ func (env *Environment) applyComposedConfigLocked(loaded appcfg.Root) error {
 	// re-derive their own effective config from it (each project from its own
 	// trust), so the base runner's derived values must not be what they receive.
 	env.RawConfig = loaded
+	// The model layers the catalog lookup reads follow the configuration this
+	// process is adopting (plan 263). Installing them is data-only inline and
+	// the live lookups run in the background, so a turn boundary stays fast;
+	// a rollback below re-derives from the old pointer, and the next adoption
+	// installs that configuration's layers in turn.
+	installModelOverrides(loaded)
 	next := effectiveFor(loaded, env.LaunchProject)
 	if env.Sandbox == nil {
 		env.Sandbox = safety.NewManager()

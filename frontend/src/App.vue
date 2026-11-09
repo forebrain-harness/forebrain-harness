@@ -338,7 +338,6 @@
 import {
   ScrollText,
   Users,
-  Boxes,
   Brain,
   Check,
   ChevronDown,
@@ -616,7 +615,6 @@ const navItems = computed(() => {
     { to: '/skills', label: L.skills, icon: Sparkles, scope: 'agent' as const },
     { to: '/mcp', label: L.mcp, icon: Plug, scope: 'agent' as const },
     { to: '/subagents', label: L.subagents, icon: Users, scope: 'agent' as const },
-    { to: '/providers', label: L.providers, icon: Boxes, scope: 'agent' as const },
     { to: '/tools', label: L.tools, icon: Wrench, scope: 'agent' as const },
     { to: '/permissions', label: L.permissions, icon: ShieldCheck, scope: 'agent' as const },
     { to: '/memories', label: L.memories, icon: Brain, scope: 'agent' as const },

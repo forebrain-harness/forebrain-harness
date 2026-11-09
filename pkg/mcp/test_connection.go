@@ -43,7 +43,7 @@ type TestConnectionResult struct {
 // at all (an empty command, an unknown transport) — the caller's problem to
 // report as bad input. Everything a server said about itself comes back inside
 // the result.
-func TestConnection(ctx context.Context, home, dir string, srv appcfg.MCPServerConfig) (TestConnectionResult, error) {
+func TestConnection(ctx context.Context, home string, vars map[string]string, dir string, srv appcfg.MCPServerConfig) (TestConnectionResult, error) {
 	started := time.Now()
 	res := TestConnectionResult{Tools: nil}
 	finish := func() TestConnectionResult {
@@ -67,7 +67,7 @@ func TestConnection(ctx context.Context, home, dir string, srv appcfg.MCPServerC
 	}
 	startCtx, cancel := context.WithTimeout(ctx, StartupTimeoutFor(srv))
 	defer cancel()
-	sess, err := Start(startCtx, home, dir, srv)
+	sess, err := Start(startCtx, home, vars, dir, srv)
 	if err != nil {
 		res.Error = err.Error()
 		return finish(), nil

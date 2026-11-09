@@ -792,6 +792,12 @@ func execContext(ctx Context, toks []string) Result {
 	return Result{Handled: handled, Reply: reply}
 }
 
+// ModelAddCustomValue is the /model picker's last row on the terminal: the one
+// value that names no model, because choosing it opens the custom-model setup
+// instead. Only a surface with that form offers it, so no other surface ever
+// sees this value.
+const ModelAddCustomValue = "__add_custom__"
+
 // execModel is /model on every surface: the models the session's agent is
 // configured with, the one in force marked, as a choice.
 func execModel(ctx Context) Result {
@@ -810,22 +816,46 @@ func execModel(ctx Context) Result {
 	// selection resolves to; index zero only matches it by coincidence.
 	defaultAt := defaultModelIndex(settings.Config, settings.AgentName, choices)
 	currentSel := currentSelection(settings)
-	items := make([]PickerItem, len(choices))
+	items := make([]PickerItem, len(choices), len(choices)+1)
 	for i, choice := range choices {
 		// The session's own row marks the current model; a session without one
 		// marks what its runtime carries (the effort picker's rule); the config
 		// default is only the fallback for a runtime that published nothing.
-		items[i] = PickerItem{Value: choice.Label, Label: choice.Label,
-			Current: selectionMatches(currentSel, choice) || (!currentSel.Set && i == defaultAt)}
+		// The value is the row's id, and the description column its endpoint:
+		// twin rows of one provider/model are told apart by both.
+		items[i] = PickerItem{Value: choice.ID, Label: choice.Label,
+			Description:  ModelEndpointLabel(choice.BaseURL, choice.APIPath, choice.URLVerbatim),
+			EndpointTail: endpointTail(choice),
+			Current:      selectionMatches(currentSel, choice) || (!currentSel.Set && i == defaultAt)}
+	}
+	// The terminal can open the model setup from here; a channel or the web
+	// cannot, so the row that does is the terminal's alone.
+	if ctx.Surface == SurfaceTUI {
+		items = append(items, PickerItem{Value: ModelAddCustomValue, Label: "Add a custom model…",
+			Description: "OpenAI- or Anthropic-compatible, or custom protocol"})
 	}
 	return Result{Handled: true, Picker: &Picker{Command: "model", Title: "Model", Hint: "The model this agent runs on", Items: items}}
 }
 
-// selectionMatches reports whether the live selection is exactly choice
-// (case-insensitive provider+model).
+// endpointTail is what a picker keeps of a row's endpoint when the description
+// column is too narrow: the api path, which names the protocol. A 「自定义协议」
+// row sends to its base url as stored, so it has no path to keep.
+func endpointTail(choice ModelChoice) string {
+	if choice.URLVerbatim {
+		return ""
+	}
+	return strings.TrimSpace(choice.APIPath)
+}
+
+// selectionMatches reports whether the live selection is exactly choice: by
+// row id when both name one, else by provider+model (a selection recorded
+// before ids existed).
 func selectionMatches(sel ModelSelectionState, choice ModelChoice) bool {
 	if !sel.Set {
 		return false
+	}
+	if id := strings.TrimSpace(sel.ModelID); id != "" && strings.TrimSpace(choice.ID) != "" {
+		return id == strings.TrimSpace(choice.ID)
 	}
 	return strings.EqualFold(strings.TrimSpace(sel.Provider), strings.TrimSpace(choice.Provider)) &&
 		strings.EqualFold(strings.TrimSpace(sel.Model), strings.TrimSpace(choice.Model))
@@ -865,7 +895,7 @@ func modelSelectionFailureReply(name string, err error) string {
 // runtime and records it as this session's own row. Nothing is written to the
 // shared configuration file, which every process on the machine watches — a
 // selection written there would silently retarget other processes' sessions.
-func chooseModel(ctx Context, label string) Result {
+func chooseModel(ctx Context, value string) Result {
 	if ctx.Model == nil {
 		return Result{Handled: true, Reply: "The model cannot be changed here."}
 	}
@@ -874,7 +904,16 @@ func chooseModel(ctx Context, label string) Result {
 		return Result{Handled: true, Reply: "Could not read the model settings: " + err.Error()}
 	}
 	choices := ModelChoices(settings.Config, settings.AgentName)
-	at := slices.IndexFunc(choices, func(c ModelChoice) bool { return c.Label == label })
+	at := choiceByID(choices, value)
+	if at < 0 {
+		// A value that is not a row id: a picker drawn before its values were
+		// ids — an unrefreshed web page, an old client — still names its pick
+		// by the label. A label two rows share names neither of them.
+		if matches := countChoicesByLabel(choices, value); matches > 1 {
+			return Result{Handled: true, Reply: severalModelsForLabel(value)}
+		}
+		at = slices.IndexFunc(choices, func(c ModelChoice) bool { return c.Label == value })
+	}
 	if at < 0 {
 		return Result{Handled: true, Reply: "That model is no longer configured for this agent."}
 	}
@@ -921,7 +960,7 @@ func chooseModel(ctx Context, label string) Result {
 	}
 	items := make([]PickerItem, len(chosen.ReasoningEfforts))
 	for i, effort := range chosen.ReasoningEfforts {
-		items[i] = PickerItem{Value: encodeEffortChoice(chosen.Label, effort, changed), Label: effort, Current: effort == current}
+		items[i] = PickerItem{Value: encodeEffortChoice(chosen.ID, chosen.Label, effort, changed), Label: effort, Current: effort == current}
 	}
 	return Result{Handled: true, Reply: reply, Picker: &Picker{Command: "model-effort", Title: "Reasoning effort", Hint: "How long " + name + " thinks before it answers", Items: items}}
 }
@@ -931,7 +970,7 @@ func chooseModel(ctx Context, label string) Result {
 // write /model makes — the session's live runtime and its row — and never
 // reaches the shared configuration file.
 func chooseReasoningEffort(ctx Context, value string) Result {
-	label, effort, modelChanged := decodeEffortChoice(value)
+	modelID, label, effort, modelChanged := decodeEffortChoice(value)
 	if ctx.Model == nil {
 		return Result{Handled: true, Reply: "The model cannot be changed here."}
 	}
@@ -940,7 +979,17 @@ func chooseReasoningEffort(ctx Context, value string) Result {
 		return Result{Handled: true, Reply: "Could not read the model settings: " + err.Error()}
 	}
 	choices := ModelChoices(settings.Config, settings.AgentName)
-	at := slices.IndexFunc(choices, func(c ModelChoice) bool { return c.Label == label })
+	at := choiceByID(choices, modelID)
+	if at < 0 {
+		// A value rendered before the effort picker named the row — an
+		// unrefreshed web page, an old client — names the model by its label.
+		// A label two rows share names neither of them: picking the level
+		// would move the conversation to whichever row came first.
+		if matches := countChoicesByLabel(choices, label); matches > 1 {
+			return Result{Handled: true, Reply: severalModelsForLabel(label)}
+		}
+		at = slices.IndexFunc(choices, func(c ModelChoice) bool { return c.Label == label })
+	}
 	if at < 0 || !slices.Contains(choices[at].ReasoningEfforts, effort) {
 		return Result{Handled: true, Reply: "That reasoning effort is no longer offered for this model."}
 	}
@@ -962,19 +1011,57 @@ func chooseReasoningEffort(ctx Context, value string) Result {
 	return Result{Handled: true, Reply: "Reasoning effort set to " + effort + "."}
 }
 
-// An effort choice carries the model it is for and whether picking that model
-// just switched to it, so the answer can say what actually changed.
-func encodeEffortChoice(label, effort string, modelChanged bool) string {
-	return strings.Join([]string{label, effort, strconv.FormatBool(modelChanged)}, "\n")
+// An effort choice carries the row it is for, the label it showed and whether
+// picking that model just switched to it, so the answer can say what actually
+// changed and the level lands on the row the user picked.
+func encodeEffortChoice(modelID, label, effort string, modelChanged bool) string {
+	return strings.Join([]string{modelID, label, effort, strconv.FormatBool(modelChanged)}, "\n")
 }
 
-func decodeEffortChoice(value string) (label, effort string, modelChanged bool) {
-	parts := strings.SplitN(value, "\n", 3)
-	if len(parts) != 3 {
-		return "", "", false
+func decodeEffortChoice(value string) (modelID, label, effort string, modelChanged bool) {
+	parts := strings.SplitN(value, "\n", 4)
+	switch len(parts) {
+	case 4:
+		changed, _ := strconv.ParseBool(parts[3])
+		return parts[0], parts[1], parts[2], changed
+	case 3:
+		// A picker drawn before the value named the row: label, effort,
+		// changed. An unrefreshed web page or an old client still sends one;
+		// its row is resolved by the label it carries.
+		changed, _ := strconv.ParseBool(parts[2])
+		return "", parts[0], parts[1], changed
+	default:
+		return "", "", "", false
 	}
-	changed, _ := strconv.ParseBool(parts[2])
-	return parts[0], parts[1], changed
+}
+
+// choiceByID reports the index of the choice that row id names, -1 when no
+// choice is that row.
+func choiceByID(choices []ModelChoice, modelID string) int {
+	id := strings.TrimSpace(modelID)
+	if id == "" {
+		return -1
+	}
+	return slices.IndexFunc(choices, func(c ModelChoice) bool { return strings.TrimSpace(c.ID) == id })
+}
+
+// countChoicesByLabel reports how many configured rows a label names. One is
+// a pick; none is a stale value; several are twins a label cannot choose
+// between.
+func countChoicesByLabel(choices []ModelChoice, label string) int {
+	count := 0
+	for _, choice := range choices {
+		if choice.Label == label {
+			count++
+		}
+	}
+	return count
+}
+
+// severalModelsForLabel is the one answer for a value that names twin rows:
+// it switches nothing and tells the user how to pick one.
+func severalModelsForLabel(label string) string {
+	return "Several models are configured as " + label + "; pick one from /model."
 }
 
 func execSkills(ctx Context, _ string) Result {
@@ -1081,7 +1168,11 @@ func copySlashModelSelection(ctx Context, sourceSessionID, targetSessionID strin
 		// file default like any new session.
 		return nil
 	}
-	choice := ModelChoice{Provider: settings.LiveSelection.Provider, Model: settings.LiveSelection.Model}
+	choice := ModelChoice{
+		ID:       settings.LiveSelection.ModelID,
+		Provider: settings.LiveSelection.Provider,
+		Model:    settings.LiveSelection.Model,
+	}
 	effort := settings.LiveSelection.Effort
 	// A Runner no-op for the live runtime; what it makes durable is the
 	// source session's row, so the copy below has something to copy.

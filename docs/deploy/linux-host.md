@@ -76,35 +76,25 @@ database:
 
 ## forebrain.yaml 配置与环境变量
 
-配置文件是 `$FOREBRAIN_HOME/forebrain.yaml`，密钥放 `$FOREBRAIN_HOME/.env`
-（0600），配置里用 `${变量名}` 引用，两者都改完重启生效。首次在终端里运行
-`forebrain gateway start` 会进入交互式引导（配置 provider/model/api key），也
-可以手写：
+配置文件是 `$FOREBRAIN_HOME/forebrain.yaml`（0600）。home 里**没有** `.env`：网关
+令牌要么是这个文件里的 `gateway.auth.token` 明文，要么是进程环境变量
+`FOREBRAIN_GATEWAY_TOKEN`（容器/systemd 用后者）；模型密钥存在状态库的模型表里，在
+网页「模型」页添加或修改。首次在终端里运行 `forebrain gateway start` 会进入交互式
+引导（配置 provider/model/api key），也可以手写：
 
 ```yaml
 gateway:
   http_addr: "0.0.0.0:6060"
   auth:
-    mode: token
-    token: "${FOREBRAIN_GATEWAY_TOKEN}"
+    token: "<openssl rand -hex 32 的输出>"   # 或 systemd 里设 FOREBRAIN_GATEWAY_TOKEN 并写 ${FOREBRAIN_GATEWAY_TOKEN}
 database:                      # 不用外部数据库就删掉这一段
   url: "mysql://forebrain:<口令>@mysql.internal:3306/forebrain"
-agents:
-  definitions:
-    main:
-      primary: true
-      llm_providers:
-        - provider: deepseek          # 或内网 OpenAI 兼容端点对应的 provider
-          model: <模型名>
-          api_key: "${FOREBRAIN_LLM_API_KEY}"
-          base_url: https://api.deepseek.com   # 内网部署换成内网端点
 ```
 
-```bash
-# /var/lib/forebrain/.env
-FOREBRAIN_GATEWAY_TOKEN=<openssl rand -hex 32 的输出>
-FOREBRAIN_LLM_API_KEY=<模型 API key>
-```
+模型不用写在配置里：起服务 → 浏览器打开 `http://<主机>:6060` → 用上面的 token 登录 →
+在「设置 · 模型」里添加一个模型（或在那里做订阅登录）。网关在没有模型时也照常对外
+服务，正是为了让人能打开这一页。旧配置里若还留着 `agents.definitions.main.llm_providers`，
+启动时会把它搬进模型表（密钥也在那时解析进去），之后只在网页里维护。
 
 **项目根目录放在 FOREBRAIN_HOME 之外**（网关拒绝 `$FOREBRAIN_HOME` 内部路径作为项目
 根，例如 `/var/lib/forebrain/workspace/...` 会报 `root must not be inside the forebrain
@@ -172,7 +162,8 @@ journalctl -u forebrain-gateway -f          # 控制台日志；文件日志在 
 curl -fsS http://127.0.0.1:6060/healthz     # 健康检查
 ```
 
-浏览器打开 `http://<主机>:6060`，用 `.env` 里的 `FOREBRAIN_GATEWAY_TOKEN` 登录。
+浏览器打开 `http://<主机>:6060`，用 `forebrain.yaml` 里（或 `FOREBRAIN_GATEWAY_TOKEN`
+环境变量）的 token 登录。部署后到网页「模型」页添加模型（或订阅登录），再开始对话。
 
 ## 反向代理与 HTTPS
 
@@ -221,14 +212,14 @@ server {
 - 升级：停服务 → 解压新版到 `/opt/forebrain`（覆盖）→ 起服务。状态库结构随启动
   自动迁移；跨大版本前先备份。
 - 备份：停服务后 `tar -C /var/lib -czf forebrain-home.tgz forebrain/`；外部数据库
-  用 `mysqldump` / `pg_dump`。`.env` 与 `forebrain.yaml` 都在 home 里，一并备份。
+  用 `mysqldump` / `pg_dump`。`forebrain.yaml`、状态库与 workspace 都在 home 里，一并备份。
 
 ## 排障表
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| 启动报 `startup config incomplete` | 主代理 LLM 没配全（provider/model/api_key/base_url）。补 `forebrain.yaml` 的 `agents.definitions.main` 与 `.env`。 |
-| 网页登录 401 / 一直未授权 | 浏览器里的 token 与 `.env` 的 `FOREBRAIN_GATEWAY_TOKEN` 不一致；改过 `.env` 要重启服务。 |
+| 启动报 `startup config incomplete` | 主代理还没有可用模型。在终端重跑 `forebrain gateway start` 走引导，或启动后到网页「模型」页添加模型（或订阅登录）。 |
+| 网页登录 401 / 一直未授权 | 浏览器里的 token 与 `forebrain.yaml` 的 `gateway.auth.token`（或 `FOREBRAIN_GATEWAY_TOKEN` 环境变量）不一致；改过之后要重启服务。 |
 | `bwrap: No permissions to create new namespace` | 内核不允许非特权用户命名空间：见「沙箱」节的 sysctl。此时网关以无沙箱模式运行（全访问、无审批预设）。 |
 | `Can't mount proc on /newroot/proc` | 容器里挂 seccomp 才会遇到；主机形态出现说明 /proc 挂载异常，检查是否在嵌套容器里运行。 |
 | 数据库连不上 / 建表失败 | 检查 `database.url`、账号权限与网络；日志在 `/var/lib/forebrain/logs/`。 |

@@ -266,7 +266,7 @@ func (m *Manager) detectInfo(sc ServerConfig) *DetectResult {
 	if refresh {
 		go func() {
 			defer m.bg.Done()
-			env, _ := BuildEnv(EnvSpec{Passthrough: sc.EnvPassthrough, Env: sc.Env, FromProject: sc.EnvFromProject, Home: m.opts.Home})
+			env, _ := BuildEnv(EnvSpec{Passthrough: sc.EnvPassthrough, Env: sc.Env, FromProject: sc.EnvFromProject, Vars: m.opts.Vars})
 			det := Detect(context.Background(), sc, env, runtime.GOOS, filepath.Join(StateDir(m.opts.AgentWorkspace), "detect.json"))
 			m.mu.Lock()
 			m.detected[sc.ID] = detectEntry{at: time.Now(), det: det}

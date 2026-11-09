@@ -129,7 +129,7 @@ func (p *projectServersPanelState) panel() slashPanel {
 				sawLSP = true
 			}
 		}
-		b.selectableColumns(i == p.cursor, checkLead(p.checked[i]), item.Name, nameWidth, item.Detail)
+		b.selectableColumns(i == p.cursor, checkLead(p.checked[i]), item.Name, nameWidth, item.Detail, "")
 	}
 	b.blank()
 	b.selectable(p.cursor == len(p.items), checkLead(p.always), "Always allow this project's servers")

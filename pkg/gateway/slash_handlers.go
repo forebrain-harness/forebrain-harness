@@ -237,13 +237,13 @@ func (s *Server) ModelSettings(sessionID string) (turn.ModelSettings, error) {
 	}
 	if s.Sessions != nil {
 		if row, ok, err := s.Sessions.SessionModelSelection(context.Background(), strings.TrimSpace(sessionID)); err == nil && ok {
-			sel = turn.ModelSelectionState{Provider: row.Provider, Model: row.Model, Effort: row.Effort, Set: true}
+			sel = turn.ModelSelectionState{ModelID: row.ModelID, Provider: row.Provider, Model: row.Model, Effort: row.Effort, Set: true}
 		}
 	}
 	var live turn.ModelSelectionState
 	if r := s.runnerFor(context.Background(), sessionID); r != nil {
 		state := s.sessionModelSelection(r, sessionID)
-		live = turn.ModelSelectionState{Provider: state.Provider, Model: state.Model, Effort: state.Effort, Set: state.Set}
+		live = turn.ModelSelectionState{ModelID: state.ModelID, Provider: state.Provider, Model: state.Model, Effort: state.Effort, Set: state.Set}
 	}
 	return turn.ModelSettings{Config: cfg, AgentName: agentName, Selection: sel, LiveSelection: live}, nil
 }
@@ -276,7 +276,7 @@ func (s *Server) SelectModel(ctx context.Context, sessionID string, choice turn.
 		return fmt.Errorf("no session store is bound to this surface")
 	}
 	sid := strings.TrimSpace(sessionID)
-	resolved, err := run.ResolveSessionModelChoice(r, choice.Provider, choice.Model, effort)
+	resolved, err := run.ResolveSessionModelChoiceRef(r, choice.ID, choice.Provider, choice.Model, effort)
 	if err != nil {
 		return err
 	}
@@ -285,7 +285,15 @@ func (s *Server) SelectModel(ctx context.Context, sessionID string, choice turn.
 	if err := s.Sessions.Ensure(ctx, sid, sid); err != nil {
 		return err
 	}
+	// The row names the configured row the user picked, not just the pair it
+	// carries: the same provider/model may be configured more than once. A
+	// caller that named only the pair records the row it resolved to.
+	modelID := strings.TrimSpace(choice.ID)
+	if modelID == "" {
+		modelID = strings.TrimSpace(resolved.ModelID)
+	}
 	stored, err := s.Sessions.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
+		ModelID:  modelID,
 		Provider: resolved.Provider,
 		Model:    resolved.Model,
 		Effort:   resolved.Effort,

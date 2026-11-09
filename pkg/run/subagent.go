@@ -1804,8 +1804,8 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	pin := SubagentModelOverride{}
 	if override, ok := SubagentModelOverrideFromContext(baseCtx); ok {
 		pin = override
-	} else if provider, model, effort, ok := cat.Model(agentType); ok {
-		pin = SubagentModelOverride{Provider: provider, Model: model, Effort: effort}
+	} else if modelID, provider, model, effort, ok := cat.Model(agentType); ok {
+		pin = SubagentModelOverride{ModelID: modelID, Provider: provider, Model: model, Effort: effort}
 	} else if provider, model, effort := AgentModel(own, sid, &agent.HistoryEntry{
 		AgentType: agentType, AgentKind: agentKind,
 	}); strings.TrimSpace(model) != "" {
@@ -1817,6 +1817,12 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 			effort = strings.TrimSpace(sel.Effort)
 		}
 		pin = SubagentModelOverride{Provider: provider, Model: model, Effort: effort}
+		if sel, ok := SessionModelSelectionFromContext(baseCtx); ok && strings.TrimSpace(sel.Model) == strings.TrimSpace(model) {
+			pin.ModelID = strings.TrimSpace(sel.ModelID)
+		}
+		if pin.ModelID == "" {
+			pin.ModelID = ModelIDForAgentModel(own.AppCfg, own.activeAgentNameForModel(), provider, model)
+		}
 	}
 	if pin.valid() {
 		entry.ModelProvider = strings.TrimSpace(pin.Provider)
@@ -2215,9 +2221,12 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 	}
 	// A dispatch-time model choice is a property of the record now: the
 	// continuation runs on the same model the user picked for it, not on the
-	// conversation's default.
+	// conversation's default. The record carries the pair, not the row, so the
+	// row id is resolved here; a pair that names none leaves readers on the
+	// pair, the way a row written before ids is read.
 	if strings.TrimSpace(record.Model) != "" {
 		hostCtx = WithSubagentModelOverride(hostCtx, SubagentModelOverride{
+			ModelID:  ModelIDForAgentModel(fac.appConfig(), fac.AgentName, record.ModelProvider, record.Model),
 			Provider: record.ModelProvider, Model: record.Model, Effort: record.ReasoningEffort,
 		})
 	}
@@ -3882,21 +3891,31 @@ func subagentExecContext(prep preparedSubagent) context.Context {
 	// The record, not a fresh resolution, names the model: one decision at
 	// dispatch, read by everything downstream. A record with no model — a
 	// dispatch whose configuration leaves nothing to resolve — pins nothing,
-	// and the routing wrappers answer as they did before.
-	hostCtx = WithSubagentModelOverride(hostCtx, SubagentModelOverride{
+	// and the routing wrappers answer as they did before. The row id is the
+	// same decision: the record has no id column, so it rides the pin the
+	// dispatch already put on the prepared context rather than being resolved
+	// a second time here.
+	pin := SubagentModelOverride{
 		Provider: prep.entry.ModelProvider,
 		Model:    prep.entry.Model,
 		Effort:   prep.entry.ReasoningEffort,
-	})
+	}
+	if dispatched, ok := SubagentModelOverrideFromContext(prep.ctx); ok && strings.TrimSpace(dispatched.Model) == strings.TrimSpace(pin.Model) {
+		pin.ModelID = dispatched.ModelID
+	}
+	hostCtx = WithSubagentModelOverride(hostCtx, pin)
 	return tool.WithHookAgentID(hostCtx, subagentRosterKey(prep.entry))
 }
 
 // SubagentModelOverride names the model one subagent run must use: chosen at
 // dispatch time (plan review lets the user pick the reviewing model in the
 // approval overlay) or configured for the type by the primary agent that owns
-// it. Effort is the reasoning effort that model runs at, empty when the model's
-// own configuration decides.
+// it. ModelID names the configured row that model is — the same pair may be
+// configured more than once — and is empty for a pin recorded before ids
+// existed, which reads by provider+model. Effort is the reasoning effort that
+// model runs at, empty when the model's own configuration decides.
 type SubagentModelOverride struct {
+	ModelID  string
 	Provider string
 	Model    string
 	Effort   string
@@ -3904,6 +3923,23 @@ type SubagentModelOverride struct {
 
 func (o SubagentModelOverride) valid() bool {
 	return strings.TrimSpace(o.Model) != ""
+}
+
+// ModelIDForAgentModel names the configured row a provider+model pair is for
+// this agent, "" when the pair names no configured model. It is how a pin
+// that was decided as a pair — a recorded dispatch, a live selection
+// published before ids existed — still records which row it means; an empty
+// answer leaves readers on the pair, the way an old row is read.
+func ModelIDForAgentModel(cfg *appcfg.Root, agentName, provider, model string) string {
+	ref := strings.TrimSpace(provider) + "/" + strings.TrimSpace(model)
+	if strings.TrimSpace(model) == "" {
+		return ""
+	}
+	entry, ok := appcfg.ResolveModelRef(cfg, agentName, ref)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(entry.ID)
 }
 
 type subagentModelOverrideKey struct{}
@@ -3972,9 +4008,10 @@ func (w *subagentModelOverrideLLM) Execute(ctx context.Context, messages []llm.M
 
 // clientFor reuses one client per model for the life of the runner: a review is
 // a whole agent run, and building a fresh HTTP client for every step of its
-// tool loop would throw away connection reuse for no reason.
+// tool loop would throw away connection reuse for no reason. The row id is
+// part of the key: twin rows of one pair are different clients.
 func (w *subagentModelOverrideLLM) clientFor(override SubagentModelOverride) (llm.LLM, error) {
-	key := strings.ToLower(strings.TrimSpace(override.Provider) + "/" + strings.TrimSpace(override.Model))
+	key := strings.ToLower(strings.TrimSpace(override.ModelID) + "/" + strings.TrimSpace(override.Provider) + "/" + strings.TrimSpace(override.Model))
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if client, ok := w.clients[key]; ok && client != nil {
@@ -4000,19 +4037,21 @@ func subagentModelDisplay(override SubagentModelOverride) string {
 // agent: a model the session holds no credentials for is an error, never a
 // silent fallback to a different model — the user picked this one on purpose.
 func ConfiguredModelClient(cfg *appcfg.Root, agentType, provider, model string) (llm.LLM, error) {
-	return ConfiguredModelClientWithEffort(cfg, agentType, provider, model, "")
+	return ConfiguredModelClientWithEffort(cfg, agentType, "", provider, model, "")
 }
 
 // ConfiguredModelClientWithEffort is ConfiguredModelClient with the reasoning
 // effort the pin also names, overlaid the way a session's own selection
-// overlays it. An empty effort leaves the effort the chain entry configures for
-// that model in place: a pin that names only a model is a statement about the
-// model, not about how hard it should think.
-func ConfiguredModelClientWithEffort(cfg *appcfg.Root, agentType, provider, model, effort string) (llm.LLM, error) {
+// overlays it, and with the configured row the pin names. modelID is empty for
+// a pin recorded before ids existed, which resolves by provider+model. An
+// empty effort leaves the effort the chain entry configures for that model in
+// place: a pin that names only a model is a statement about the model, not
+// about how hard it should think.
+func ConfiguredModelClientWithEffort(cfg *appcfg.Root, agentType, modelID, provider, model, effort string) (llm.LLM, error) {
 	if strings.TrimSpace(model) == "" {
 		return nil, fmt.Errorf("a model is required")
 	}
-	entry, err := resolveAgentProvider(cfg, agentType, modelSelector{provider: provider, model: model})
+	entry, err := resolveAgentProvider(cfg, agentType, modelSelector{id: modelID, provider: provider, model: model})
 	if errors.Is(err, errModelNotConfigured) {
 		return nil, fmt.Errorf("model %s is not configured for this session",
 			subagentModelDisplay(SubagentModelOverride{Provider: provider, Model: model}))

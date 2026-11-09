@@ -85,8 +85,17 @@ func TestInstallWithoutAssetsOnDevBuildFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when the catalog is missing on a dev build")
 	}
-	if !strings.Contains(err.Error(), "install-assets.sh") {
-		t.Fatalf("error %q must name the install script", err)
+	// The script name and the directory moved to the debug log: a surface
+	// shows one sentence (owner 2026-11-07), so this asserts the sentence and
+	// that neither the script nor the path leaked into it.
+	if want := "model data is missing beside the binary; reinstall forebrain"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q must carry %q", err, want)
+	}
+	if strings.Contains(err.Error(), "install-assets.sh") {
+		t.Fatalf("error %q still names the install script", err)
+	}
+	if strings.Contains(err.Error(), home) {
+		t.Fatalf("error %q names a path", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 0 {
 		t.Fatalf("dev build made %d network requests; want 0", got)

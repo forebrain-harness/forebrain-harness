@@ -2010,8 +2010,8 @@ func TestSessionModelSelectionIsTenantData(t *testing.T) {
 func TestSessionModelSelectionCopyAndCascade(t *testing.T) {
 	ctx := context.Background()
 	store := NewSessionStore(openStateDB(t), "owner")
-	saveModelSelectionWithSession(t, store, "src", SessionModelSelection{Provider: "openai", Model: "gpt-a", Effort: ""})
-	saveModelSelectionWithSession(t, store, "dst", SessionModelSelection{Provider: "old", Model: "stale", Effort: "low"})
+	saveModelSelectionWithSession(t, store, "src", SessionModelSelection{ModelID: "llm-row-src", Provider: "openai", Model: "gpt-a", Effort: ""})
+	saveModelSelectionWithSession(t, store, "dst", SessionModelSelection{ModelID: "llm-row-old", Provider: "old", Model: "stale", Effort: "low"})
 
 	copied, err := store.CopySessionModelSelection(ctx, "src", "dst")
 	if err != nil {
@@ -2024,7 +2024,7 @@ func TestSessionModelSelectionCopyAndCascade(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("read copied selection: ok=%v err=%v", ok, err)
 	}
-	if got.Provider != "openai" || got.Model != "gpt-a" || got.Effort != "" {
+	if got.ModelID != "llm-row-src" || got.Provider != "openai" || got.Model != "gpt-a" || got.Effort != "" {
 		t.Fatalf("copied selection = %+v", got)
 	}
 
@@ -2050,6 +2050,36 @@ func TestSessionModelSelectionCopyAndCascade(t *testing.T) {
 	}
 	if _, ok, err := store.SessionModelSelection(ctx, "dst"); err != nil || ok {
 		t.Fatalf("model state survived its session: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestSessionModelSelectionCarriesTheModelRowID pins the new column: a save
+// writes the row id and both readers return it, so a session can name one of
+// two configurations sharing provider+model.
+func TestSessionModelSelectionCarriesTheModelRowID(t *testing.T) {
+	ctx := context.Background()
+	store := NewSessionStore(openStateDB(t), "owner")
+	if err := store.EnsureAt(ctx, "with-id", "with-id", SessionBirth{Source: SessionSourceConversation}); err != nil {
+		t.Fatal(err)
+	}
+	want := SessionModelSelection{ModelID: "llm-row-1", Provider: "openai", Model: "gpt-a", Effort: "high"}
+	stored, err := store.SaveSessionModelSelection(ctx, "with-id", want)
+	if err != nil || !stored {
+		t.Fatalf("save: stored=%v err=%v", stored, err)
+	}
+	got, ok, err := store.SessionModelSelection(ctx, "with-id")
+	if err != nil || !ok {
+		t.Fatalf("read: ok=%v err=%v", ok, err)
+	}
+	if got != want {
+		t.Fatalf("selection = %+v, want %+v", got, want)
+	}
+	latest, ok, err := store.LatestSessionModelSelection(ctx)
+	if err != nil || !ok {
+		t.Fatalf("latest: ok=%v err=%v", ok, err)
+	}
+	if latest.ModelID != "llm-row-1" {
+		t.Fatalf("latest model_id = %q, want llm-row-1", latest.ModelID)
 	}
 }
 

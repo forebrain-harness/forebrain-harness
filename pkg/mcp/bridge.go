@@ -547,7 +547,11 @@ func Connect(ctx context.Context, tr mcp.Transport, workspaceRoots []string) (*S
 	return &Session{client: cl, session: sess}, nil
 }
 
-func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCPServerConfig) (*Session, error) {
+// Start connects one configured server. home locates the per-home stores
+// (credentials, OAuth overlays); vars is the operator's variables table, which
+// is where a project-scoped entry's ${NAME} references resolve from and a
+// global entry's resolve from first (plan 268).
+func Start(ctx context.Context, home string, vars map[string]string, workspaceDir string, srv appcfg.MCPServerConfig) (*Session, error) {
 	if strings.TrimSpace(home) != "" {
 		srv = MergeMCPServerOAuth(home, srv)
 	}
@@ -556,7 +560,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		return nil, fmt.Errorf("mcp server name empty")
 	}
 	projectKey := OverlayProjectKey(srv)
-	lookup := envLookupForServer(home, srv)
+	lookup := envLookupForServer(vars, srv)
 	switch normalizeTransport(srv) {
 	case "stdio":
 		cmd := strings.TrimSpace(srv.Command)
@@ -578,7 +582,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		if wd := strings.TrimSpace(workspaceDir); wd != "" {
 			c.Dir = wd
 		}
-		c.Env = mcpStdioEnv(home, srv)
+		c.Env = mcpStdioEnv(vars, srv)
 		proc := &stdioProcess{
 			cmd:       c,
 			cancel:    cancelProc,
@@ -600,7 +604,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		sess.baseCtx = procCtx
 		sess.reconnectTimeout = StartupTimeoutFor(srv)
 		sess.requestTimeout = RequestTimeoutFor(srv)
-		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, workspaceDir, srv) }
+		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, vars, workspaceDir, srv) }
 		return sess, nil
 	case "streamable_http":
 		u, missing := ExpandEnvVarsInString(strings.TrimSpace(srv.URL), lookup)
@@ -639,7 +643,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		sess.baseCtx = context.WithoutCancel(ctx)
 		sess.reconnectTimeout = StartupTimeoutFor(srv)
 		sess.requestTimeout = RequestTimeoutFor(srv)
-		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, workspaceDir, srv) }
+		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, vars, workspaceDir, srv) }
 		return sess, nil
 	case "sse":
 		u, missing := ExpandEnvVarsInString(strings.TrimSpace(srv.URL), lookup)
@@ -669,7 +673,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		sess.baseCtx = context.WithoutCancel(ctx)
 		sess.reconnectTimeout = StartupTimeoutFor(srv)
 		sess.requestTimeout = RequestTimeoutFor(srv)
-		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, workspaceDir, srv) }
+		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, vars, workspaceDir, srv) }
 		return sess, nil
 	case "websocket":
 		u, missing := ExpandEnvVarsInString(strings.TrimSpace(srv.URL), lookup)
@@ -698,7 +702,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		sess.baseCtx = context.WithoutCancel(ctx)
 		sess.reconnectTimeout = StartupTimeoutFor(srv)
 		sess.requestTimeout = RequestTimeoutFor(srv)
-		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, workspaceDir, srv) }
+		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, vars, workspaceDir, srv) }
 		return sess, nil
 	default:
 		return nil, fmt.Errorf("mcp %q: unknown transport %q", nm, strings.TrimSpace(srv.Transport))

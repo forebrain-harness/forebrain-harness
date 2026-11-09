@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -188,6 +189,14 @@ func downloadClient(overall time.Duration) *http.Client {
 	}
 }
 
+// Model-data failures a surface may show: one sentence each, no machine layout
+// and no script name (owner 2026-11-07: the person meets model data, not
+// models.json, and is not expected to arrange it by hand).
+var (
+	errModelDataMissing  = errors.New("model data is missing beside the binary; reinstall forebrain")
+	errModelDataNotFound = errors.New("model data not found; reinstall forebrain")
+)
+
 // sourceModelsJSON returns the bytes to seed $FOREBRAIN_HOME/models.json with:
 // the catalog beside the binary when it is there, otherwise a download from
 // this version's release. A build that is not a release version has no release
@@ -207,7 +216,11 @@ func sourceModelsJSON(version string) ([]byte, error) {
 		return nil, fmt.Errorf("modelcatalog: read %q: %w", path, err)
 	}
 	if !modelsReleaseVersion.MatchString(version) {
-		return nil, fmt.Errorf("models.json is missing beside the binary (%s); install it with scripts/install-assets.sh %s", dir, dir)
+		// The path and the install script are for whoever is debugging this
+		// build; the error is what a surface may show, so it says what the
+		// person can do and nothing about this machine's layout.
+		slog.Debug("model data is missing beside the binary", "dir", dir, "hint", "scripts/install-assets.sh "+dir)
+		return nil, errModelDataMissing
 	}
 	return downloadModelsJSON(version)
 }

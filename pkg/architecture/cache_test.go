@@ -228,11 +228,15 @@ var fanOutBudgets = map[string]fanOutBudget{
 	"process": {current: 20, target: -1}, // §3.7 sets no limit for the composition root
 
 	// The P4–P7 gap. Both may import only process, turn, event, config, llm
-	// and channel; both currently reach eighteen. TUI is at nineteen: /migrate
-	// is terminal-only and drives the migrate package directly, a dependency
-	// the gateway deliberately does not take.
-	"tui":     {current: 19, target: 6},
-	"gateway": {current: 18, target: 6},
+	// and channel; both currently reach twenty. TUI is at twenty: /migrate is
+	// terminal-only and drives the migrate package directly, a dependency the
+	// gateway deliberately does not take, and plan 267 made the terminal's model
+	// setup drive pkg/subscription's registry — the sign-ins and the models they
+	// offer — because the terminal is the machine with the user's browser.
+	"tui": {current: 20, target: 6},
+	// 18 → 19 with plan 265: the models page drives pkg/subscription's registry
+	// (the sign-ins) instead of spelling them out itself.
+	"gateway": {current: 19, target: 6},
 }
 
 func TestFanOutOnlyShrinks(t *testing.T) {
@@ -563,7 +567,6 @@ var sameLayerEdges = map[string][]string{
 
 	// Layer 1.
 	"channel":   {"config"},
-	"config":    {"home"},
 	"state":     {"config"},
 	"telemetry": {"home"},
 
@@ -689,15 +692,23 @@ func TestSameLayerEdgesAreEnumerated(t *testing.T) {
 // packages (pkg/llm/opencode, pkg/llm/google) raised it from 30; pkg/state/dbx
 // raised it from 32, the dialect layer plan 209 requires (one statement per
 // dialect, the write lock, the error classification) so that pkg/state itself
-// does not grow a second axis inside the store it already is.
-const maxPackageCount = 33
+// does not grow a second axis inside the store it already is. pkg/llm/modelinfo
+// raised it from 33: the live reasoning-level sources (ChatGPT's backend,
+// Volcengine Ark's plan data plane, models.dev) are their own leaf in the llm
+// layer, and putting them inside pkg/llm would have crossed its file ceiling
+// (plan 263). pkg/subscription raised it from 34: the sign-in registry is its
+// own layer between the composition root and the provider packages — every
+// surface drives the subscriptions through it, so putting it inside pkg/tui or
+// pkg/gateway would have made one surface's copy the other's contract (plan
+// 264).
+const maxPackageCount = 35
 
 // allowedSubpackage reports whether a depth-2 path under pkg/ is one of the
 // packages a layer is allowed to split into: the llm layer's provider adapters
-// and the state layer's database dialect layer.
+// and its live model-info sources, and the state layer's database dialect layer.
 func allowedSubpackage(rel string) bool {
 	switch rel {
-	case "llm/anthropic", "llm/openai", "llm/opencode", "llm/google", "llm/hftok":
+	case "llm/anthropic", "llm/openai", "llm/opencode", "llm/google", "llm/hftok", "llm/modelinfo":
 		return true
 	case "state/dbx":
 		return true
@@ -1507,11 +1518,14 @@ func TestTestFilesCorrespondToProductionFiles(t *testing.T) {
 
 // maxProductionFilesPerPackage is the cap on how many production files one
 // package may hold. Raised from 30 to 31 when the web sign-in endpoints
-// (pkg/gateway/login_api.go) took pkg/gateway over the old number: the file is a
-// concern of that package — the HTTP surface — and not the start of a second
-// domain. The cap stays a ratchet: the next file pkg/gateway wants should merge
-// with one it already has, or the package should split.
-const maxProductionFilesPerPackage = 31
+// (pkg/gateway/login_api.go) took pkg/gateway over the old number, and from 31
+// to 34 for plan 265's three new surfaces — llm_models_api.go,
+// subscriptions_api.go and env_vars_api.go. Each is one HTTP endpoint family the
+// models page drives (the model table, the sign-in registry, the variables
+// table), so they belong to that package's domain — the HTTP surface — rather
+// than starting a second one. The cap stays a ratchet: the next file pkg/gateway
+// wants should merge with one it already has, or the package should split.
+const maxProductionFilesPerPackage = 34
 
 // TestSurfacesGetToolStateFromTheEnvironment enforces the call-site half of R4:
 // a surface asks the composition root which tool state this process uses, and

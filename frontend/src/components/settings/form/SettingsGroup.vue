@@ -25,7 +25,6 @@
       :secret-set="secrets[field.path]?.set === true"
       :secret-last4="secrets[field.path]?.last4 ?? ''"
       :just-saved="savedNotice"
-      :models="models"
       :error="errorFor(field.path)"
       :disabled="disabled"
       :restore-disabled="restoreDisabled(field)"
@@ -80,8 +79,6 @@ const props = withDefaults(
     dirty: boolean
     /** Everything the page knows about the credentials. */
     secrets: Record<string, { set: boolean; last4: string }>
-    /** The models a 模型 row offers. */
-    models?: string[]
     disabled?: boolean
     saving?: boolean
     /** The refusal to show under the field it names, or under the bar. */
@@ -96,7 +93,6 @@ const props = withDefaults(
     loneTab?: boolean
   }>(),
   {
-    models: () => [],
     disabled: false,
     saving: false,
     refusal: null,

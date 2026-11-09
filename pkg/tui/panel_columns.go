@@ -1,6 +1,10 @@
 package tui
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/mattn/go-runewidth"
+)
 
 // panelChipGap is the room between two tabs, as /status spaces its tabs.
 const panelChipGap = 3
@@ -56,6 +60,45 @@ func (l panelLine) chipRows(width int) []string {
 	return rows
 }
 
+// descriptionRows lays one two-column row's description into width cells: a
+// row with an elideTail keeps that tail whole and cuts the text around it, and
+// every other row wraps.
+func (l panelLine) descriptionRows(width int) []string {
+	if l.elideTail != "" {
+		return elideEndpoint(strings.TrimSpace(l.text), l.elideTail, width)
+	}
+	return wrapPanelWords(strings.TrimSpace(l.text), width)
+}
+
+// elideEndpoint lays one endpoint into a description column narrower than the
+// URL, keeping the api path whole: the base URL is cut from its right end and…
+// marks the cut, so https://ark…/v1/messages still names the protocol it speaks.
+// A row that names no path — 「自定义协议」, which sends to its base url as stored
+// — has nothing to keep, so its whole URL takes the same cut.
+func elideEndpoint(url, tail string, width int) []string {
+	if width < 1 {
+		return []string{url}
+	}
+	if displayLineWidth(url) <= width {
+		return []string{url}
+	}
+	tail = strings.TrimSpace(tail)
+	if tail == "" || displayLineWidth(tail)+1 >= width {
+		return []string{runewidth.Truncate(firstNonEmpty(tail, url), width, "")}
+	}
+	room := width - displayLineWidth(tail) - 1
+	front, used := "", 0
+	for _, r := range strings.TrimSuffix(url, tail) {
+		runes := runewidth.RuneWidth(r)
+		if used+runes > room {
+			break
+		}
+		front += string(r)
+		used += runes
+	}
+	return []string{front + "…" + tail}
+}
+
 // columnRows lays one two-column row: the name in its own column, the
 // description panelColumnGap cells right of it, each left-aligned and the
 // description wrapping inside its column. A name too wide for the column
@@ -71,7 +114,7 @@ func (l panelLine) columnRows(width int) []string {
 	colW := min(l.colWidth, maxInt(1, (width-leadW)*2/5))
 	nameW := displayLineWidth(l.col)
 	pad := strings.Repeat(" ", leadW+colW+panelColumnGap)
-	texts := wrapPanelWords(strings.TrimSpace(l.text), maxInt(1, width-leadW-colW-panelColumnGap))
+	texts := l.descriptionRows(maxInt(1, width-leadW-colW-panelColumnGap))
 	render := func(chunk string) string {
 		if l.style != nil && chunk != "" {
 			return l.style.Render(chunk)
@@ -91,7 +134,7 @@ func (l panelLine) columnRows(width int) []string {
 }
 
 // columnRowsStacked lays a two-column row that ran out of column as a
-// vertical pair: the name wrapped at the row's width, the description wrapped
+// vertical pair: the name wrapped at the row's width, the description laid out
 // the same way directly under it, both hung at the name's left edge. A row
 // without a description is laid out exactly like a plain row.
 func (l panelLine) columnRowsStacked(width int) []string {
@@ -114,7 +157,7 @@ func (l panelLine) columnRowsStacked(width int) []string {
 		}
 		rows = append(rows, hang+chunk)
 	}
-	for _, chunk := range wrapPanelWords(strings.TrimSpace(l.text), maxInt(1, width-leadW)) {
+	for _, chunk := range l.descriptionRows(maxInt(1, width-leadW)) {
 		rows = append(rows, hang+render(chunk))
 	}
 	return rows
@@ -128,7 +171,9 @@ func (b *panelBuilder) tabs(chips []string) {
 // selectableColumns adds one cursor-addressable row in two columns: name in
 // a column nameWidth cells wide (at most two fifths of the row), desc in the
 // column panelColumnGap cells right of it — each left-aligned, the
-// description wrapping inside its own column.
-func (b *panelBuilder) selectableColumns(selected bool, lead, name string, nameWidth int, desc string) {
-	b.addSelectable(selected, panelLine{lead: lead, col: name, colWidth: nameWidth, text: desc})
+// description wrapping inside its own column. elideTail, when set, is the end
+// of desc that column must keep visible (an endpoint's api path); every other
+// row passes "" and wraps.
+func (b *panelBuilder) selectableColumns(selected bool, lead, name string, nameWidth int, desc, elideTail string) {
+	b.addSelectable(selected, panelLine{lead: lead, col: name, colWidth: nameWidth, text: desc, elideTail: elideTail})
 }

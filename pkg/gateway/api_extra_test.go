@@ -3979,495 +3979,13 @@ func TestSessionScopedPermissionWritesRefuseAnotherAgentsSession(t *testing.T) {
 	}
 }
 
+// stringPtr is an address for a field whose "unset" and "empty" differ — a
+// request body that says "clear this" versus one that says nothing at all
+// (plan 265's model writes, and a subagent's model pin).
+func stringPtr(value string) *string { return &value }
+
 func withParamName(r *http.Request, value string) *http.Request {
 	return withNamedParam(r, "name", value)
-}
-
-// providersDTOServer builds a server whose active agent owns an empty
-// provider table, with a config file to persist into.
-func providersDTOServer(t *testing.T) (*Server, string) {
-	t.Helper()
-	s, home, _ := rulesServer(t)
-	require.NoError(t, os.WriteFile(filepath.Join(home, "workspace", "skills"), nil, 0o644|os.ModeDir))
-	return s, home
-}
-
-func providersGet(t *testing.T, s *Server) []map[string]any {
-	t.Helper()
-	rr := httptest.NewRecorder()
-	s.handleProviders(rr, httptest.NewRequest(http.MethodGet, "/api/providers", nil))
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	var out struct {
-		Providers []map[string]any `json:"providers"`
-	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
-	return out.Providers
-}
-
-// persistedConfigEntryKeys lists the stored api_key of each of the active
-// agent's expanded provider entries — where a row's real value still lives now
-// that the wire only carries a mask (plan 191 §3.3).
-func persistedConfigEntryKeys(t *testing.T, s *Server) []string {
-	t.Helper()
-	cfg, err := s.persistedConfig(context.Background())
-	require.NoError(t, err)
-	entries := cfg.Agents.Definitions["main"].LLMProviders
-	out := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, entry.APIKey)
-	}
-	return out
-}
-
-func providersPut(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "/api/providers", strings.NewReader(body))
-	s.handleProviders(rr, req)
-	return rr
-}
-
-// The plaintext key a page submits is stored in the agents section as sent,
-// the file and the .env are not touched, and the GET answers the same
-// plaintext back (owner ruling 2026-10-30, plan 188 W4).
-func TestProvidersDTORoundTripStoresKeyInPlaintext(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := filepath.Join(home, "forebrain.yaml")
-	before := mustRead(t, cfgPath)
-
-	created := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4","deepseek-v4-flash"],"base_url":"https://api.deepseek.com","api_key":"sk-live-plain-9876"}
-	]}`)
-	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
-	require.Contains(t, created.Body.String(), `"applies":"next_turn"`, created.Body.String())
-
-	// The plaintext key is in the stored agents section, verbatim.
-	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "sk-live-plain-9876")
-	// Neither forebrain.yaml nor .env was written: the key belongs in the
-	// section, not in the user's files.
-	require.Equal(t, before, mustRead(t, cfgPath))
-	if _, err := os.Stat(filepath.Join(home, ".env")); !os.IsNotExist(err) {
-		t.Fatal("a provider key write must not create .env")
-	}
-
-	rows := providersGet(t, s)
-	require.Len(t, rows, 1)
-	require.Equal(t, "deepseek", rows[0]["provider"])
-	// The key itself never travels back (plan 191 §3.3): the row answers
-	// whether one is set and its last four characters, and the page draws the
-	// masked field with that tail.
-	require.NotContains(t, rows[0], "api_key", "the GET must not answer a key")
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, "9876", rows[0]["api_key_last4"])
-	models := rows[0]["models"].([]any)
-	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, models)
-}
-
-func TestProviderKeyBackfillFollowsTheEntryNotTheProvider(t *testing.T) {
-	s, home := providersDTOServer(t)
-	require.NoError(t, os.WriteFile(filepath.Join(home, ".env"),
-		[]byte("ZHIPUAI_A_KEY=sk-aaaa-1111\nZHIPUAI_B_KEY=sk-bbbb-2222\n"), 0o600))
-	created := providersPut(t, s, `{"providers":[
-		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://a.example","api_key":"${ZHIPUAI_A_KEY}"},
-		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://b.example","api_key":"${ZHIPUAI_B_KEY}"}
-	]}`)
-	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
-
-	// 同两行再存一次，api_key 都不在线上 —— "用户没动 key"。
-	untouched := providersPut(t, s, `{"providers":[
-		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://a.example"},
-		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://b.example"}
-	]}`)
-	require.Equal(t, http.StatusOK, untouched.Code, untouched.Body.String())
-
-	rows := providersGet(t, s)
-	require.Len(t, rows, 2)
-	require.Equal(t, "https://a.example", rows[0]["base_url"])
-	require.Equal(t, "https://b.example", rows[1]["base_url"])
-	// The keys themselves never travel back; what tells the two endpoints
-	// apart is what is stored, so that is what is asserted here (plan 191
-	// §3.3). Each row reports a key is set.
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, true, rows[1]["api_key_set"])
-	entries := persistedConfigEntryKeys(t, s)
-	require.Equal(t, "${ZHIPUAI_A_KEY}", entries[0], "a.example 必须还是 A 的 key")
-	require.Equal(t, "${ZHIPUAI_B_KEY}", entries[1], "b.example 不许继承 A 的 key")
-}
-
-func TestProviderKeyBackfillNeverCrossesEndpoints(t *testing.T) {
-	s, home := providersDTOServer(t)
-	require.NoError(t, os.WriteFile(filepath.Join(home, ".env"),
-		[]byte("ZHIPUAI_A_KEY=sk-aaaa-1111\n"), 0o600))
-	created := providersPut(t, s, `{"providers":[
-		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://a.example","api_key":"${ZHIPUAI_A_KEY}"}
-	]}`)
-	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
-
-	// 同一批请求里再加一个**新 endpoint**，仍然不带 key：它没有任何已存身份可继承。
-	added := providersPut(t, s, `{"providers":[
-		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://a.example"},
-		{"provider":"zhipuai","models":["glm-4"],"base_url":"https://c.example"}
-	]}`)
-	require.Equal(t, http.StatusBadRequest, added.Code,
-		"a new endpoint must not inherit another endpoint's key; the write is refused instead: %s", added.Body.String())
-	require.Contains(t, added.Body.String(), "needs api_key")
-}
-
-// params keys are the provider's own request fields: the GET hands them back
-// as JSON text so no client-side key normalization can rename them, and the
-// PUT refuses anything but an object.
-func TestProvidersDTOParamsRoundTripKeepsProviderFieldNames(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key":"sk-params-1111","params":{"max_tokens":512,"reasoning_effort":"high"}}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	rows := providersGet(t, s)
-	require.Len(t, rows, 1)
-	text, ok := rows[0]["params"].(string)
-	require.True(t, ok, "params must travel as JSON text, got %T", rows[0]["params"])
-	require.JSONEq(t, `{"max_tokens":512,"reasoning_effort":"high"}`, text)
-
-	rr = providersPut(t, s, `{"providers":[{"provider":"deepseek","models":["deepseek-v4"],"params":["not","an","object"]}]}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code)
-}
-
-// The first row is the agent's primary model, which startup requires to be
-// complete; a table that would leave it incomplete is refused instead of
-// saved into a config the gateway could not start with again.
-func TestProvidersDTORefusesAnIncompletePrimary(t *testing.T) {
-	s, home := providersDTOServer(t)
-	rr := providersPut(t, s, `{"providers":[{"provider":"moonshotai","models":[],"api_key":"sk-e2e-7788"}]}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), "model")
-	require.Contains(t, rr.Body.String(), "base_url")
-	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	require.NotContains(t, string(cfgRaw), "moonshotai")
-
-	// An incomplete row is fine as a fallback behind a complete primary.
-	rr = providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key":"sk-primary-1234"},
-		{"provider":"moonshotai","models":[],"api_key":"sk-e2e-7788"}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-}
-
-// A provider the engine's model catalog does not know has no client: the
-// row is refused at save time, the way setup refuses it, rather than written
-// into a config whose next runner load (a switch, a restart) would fail.
-func TestProvidersDTORefusesAProviderTheEngineCannotBuild(t *testing.T) {
-	s, home := providersDTOServer(t)
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key":"sk-primary-1234"},
-		{"provider":"made-up-svc","base_url":"https://llm.example.test/v1","models":["m"],"api_key":"sk-x-9999"}
-	]}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), "unsupported provider: made-up-svc")
-	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	require.NotContains(t, string(cfgRaw), "made-up-svc")
-}
-
-// The config file holds one entry per model (the engine's expanded form);
-// adjacent same-signature entries fold back into one editable row.
-func TestProvidersDTOFoldsAdjacentSameSignatureEntries(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := filepath.Join(home, "forebrain.yaml")
-	seed := `agents:
-  definitions:
-    main:
-      primary: true
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-v4
-        api_key: ${DEEPSEEK_API_KEY}
-      - provider: deepseek
-        model: deepseek-v4-flash
-        api_key: ${DEEPSEEK_API_KEY}
-      - provider: openai
-        model: gpt-test
-`
-	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
-	seedConfigDocument(t, s.Env.SQL, seed)
-
-	rows := providersGet(t, s)
-	require.Len(t, rows, 2)
-	require.Equal(t, "deepseek", rows[0]["provider"])
-	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, rows[0]["models"].([]any))
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, "openai", rows[1]["provider"])
-
-	// An interleaved order is a fallback order, not one service: it stays
-	// three rows.
-	interleaved := `agents:
-  definitions:
-    main:
-      primary: true
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-v4
-      - provider: openai
-        model: gpt-test
-      - provider: deepseek
-        model: deepseek-v4-flash
-`
-	require.NoError(t, os.WriteFile(cfgPath, []byte(interleaved), 0o600))
-	seedConfigDocument(t, s.Env.SQL, interleaved)
-	require.Len(t, providersGet(t, s), 3)
-}
-
-func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	created := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key":"sk-live-keep-4321"}
-	]}`)
-	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
-
-	before := configSectionRow(t, s.Env.SQL, "agents")
-
-	// A PUT that touches only the model list carries no key fields: the
-	// stored key is exactly what it was.
-	updated := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-r2"]}
-	]}`)
-	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
-	rows := providersGet(t, s)
-	require.Len(t, rows, 1)
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, "4321", rows[0]["api_key_last4"], "the kept key is the one the page shows a tail of")
-	require.Equal(t, []any{"deepseek-v4", "deepseek-r2"}, rows[0]["models"].([]any))
-
-	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "sk-live-keep-4321")
-	_ = before
-}
-
-// A key-mode fallback cannot lose its key either. The row would save and then
-// answer 401 the moment the chain fell back to it, so an empty api_key is
-// refused wherever the row sits, and nothing is written.
-func TestProvidersDTOKeyClearOnAFallbackIsRefused(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := filepath.Join(home, "forebrain.yaml")
-	seed := `agents:
-  definitions:
-    main:
-      primary: true
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-chat
-        api_key: ${DEEPSEEK_API_KEY}
-        base_url: https://api.deepseek.com
-      - provider: arcee-ai
-        model: e2e-model
-        api_key: ${ARCEE_AI_API_KEY}
-        base_url: https://api.arcee.ai/v1
-`
-	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
-	seedConfigDocument(t, s.Env.SQL, seed)
-	before := mustRead(t, cfgPath)
-
-	cleared := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"]},
-		{"provider":"arcee-ai","base_url":"https://api.arcee.ai/v1","models":["e2e-model"],"api_key":""}
-	]}`)
-	require.Equal(t, http.StatusBadRequest, cleared.Code, cleared.Body.String())
-	require.Contains(t, cleared.Body.String(), "arcee-ai needs api_key")
-
-	require.Equal(t, before, mustRead(t, cfgPath), "a refused clear writes nothing")
-
-	// The untouched table still reads back with both keys.
-	rows := providersGet(t, s)
-	require.Len(t, rows, 2)
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, true, rows[1]["api_key_set"])
-}
-
-// The login-backed services are the one shape an empty key is correct for:
-// their credential is the file the login writes, so a keyless row of theirs is
-// saved rather than refused.
-func TestProvidersDTOLoginBackedFallbackMayStayKeyless(t *testing.T) {
-	s, home := providersDTOServer(t)
-	seed := `agents:
-  definitions:
-    main:
-      primary: true
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-chat
-        api_key: ${DEEPSEEK_API_KEY}
-        base_url: https://api.deepseek.com
-      - provider: chatgpt
-        model: gpt-5
-        base_url: https://chatgpt.com/backend-api/codex
-`
-	require.NoError(t, os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(seed), 0o600))
-	seedConfigDocument(t, s.Env.SQL, seed)
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"]},
-		{"provider":"chatgpt","base_url":"https://chatgpt.com/backend-api/codex","models":["gpt-5"],"api_key":""}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	saved, err := s.persistedConfig(context.Background())
-	require.NoError(t, err)
-	entries := saved.Agents.Definitions["main"].LLMProviders
-	require.Len(t, entries, 2)
-	require.Empty(t, entries[1].APIKey, "a login-backed row carries no key")
-	rows := providersGet(t, s)
-	require.Len(t, rows, 2)
-	require.Equal(t, false, rows[1]["api_key_set"], "a login-backed row reports no key")
-}
-
-// A key-mode provider cannot be left keyless when it is the primary: the
-// gateway would save and then refuse to start. The existing completeness rule
-// answers it — the page must not grow a copy of it — and the file stays as it
-// was.
-func TestProvidersDTOKeyClearOnThePrimaryIsRefused(t *testing.T) {
-	s, home := providersDTOServer(t)
-	cfgPath := filepath.Join(home, "forebrain.yaml")
-	seed := `agents:
-  definitions:
-    main:
-      primary: true
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-chat
-        api_key: ${DEEPSEEK_API_KEY}
-        base_url: https://api.deepseek.com
-`
-	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
-	seedConfigDocument(t, s.Env.SQL, seed)
-	before := mustRead(t, cfgPath)
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"],"api_key":""}
-	]}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code)
-	require.Contains(t, rr.Body.String(), "needs api_key")
-
-	require.Equal(t, before, mustRead(t, cfgPath), "a refused clear writes nothing")
-	require.NotContains(t, configSectionRow(t, s.Env.SQL, "agents"), `"api_key":""`)
-}
-
-// The value a client states is stored as sent (plan 188 W4): a plaintext key
-// lands in the agents section, and neither file nor .env is involved.
-func TestProvidersDTOTypedSecretWinsOverAnEmptyReference(t *testing.T) {
-	s, home := providersDTOServer(t)
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"","api_key":"sk-typed-1234"}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "sk-typed-1234")
-	require.NoFileExists(t, filepath.Join(home, ".env"))
-
-	rows := providersGet(t, s)
-	require.Len(t, rows, 1)
-	require.Equal(t, "1234", rows[0]["api_key_last4"])
-}
-
-func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"sk-old-aaaa"}]}`).Code)
-
-	rotated := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"sk-new-bbbb"}
-	]}`)
-	require.Equal(t, http.StatusOK, rotated.Code, rotated.Body.String())
-	row := configSectionRow(t, s.Env.SQL, "agents")
-	require.Contains(t, row, "sk-new-bbbb")
-	require.NotContains(t, row, "sk-old-aaaa")
-	rows := providersGet(t, s)
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.Equal(t, "bbbb", rows[0]["api_key_last4"], "the rotated key's tail is what the page shows")
-}
-
-// A key shorter than four characters has no tail to show: the row is reported
-// set with an empty hint, never with the key (plan 191 §3.3).
-func TestProvidersDTOShortKeyHintIsEmpty(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key":"ab"}]}`).Code)
-	rows := providersGet(t, s)
-	require.Equal(t, true, rows[0]["api_key_set"])
-	require.NotContains(t, rows[0], "api_key_last4", "a key too short to have a tail shows bullets only")
-}
-
-// An explicit api_key value (a pasted ${ENV} reference) is stored as sent and
-// masked on the way back like any other credential: what the page shows is a
-// tail, not the reference.
-func TestProvidersDTOExplicitReferencePassesThrough(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"openai","base_url":"https://llm.example.test/v1","models":["m"],"api_key":"${MY_CUSTOM_KEY}"}]}`).Code)
-	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), "${MY_CUSTOM_KEY}")
-	rows := providersGet(t, s)
-	require.NotContains(t, rows[0], "api_key")
-	require.Equal(t, true, rows[0]["api_key_set"])
-}
-
-// The settings page never sees a stored key — it shows a hint and sends
-// api_key_plain only for a key the user just typed — so its rows carry no key
-// and the handler keeps the stored one per provider. For a login-backed row
-// that stored value is a credential lent by another provider (the /connect bug),
-// and keeping it alive would keep the login disabled: the save must drop it
-// while the provider that owns the reference keeps its own.
-func TestProvidersDTOHealsALoginRowCarryingAnotherProvidersKey(t *testing.T) {
-	s, home := providersDTOServer(t)
-	seed := `agents:
-  definitions:
-    main:
-      primary: true
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-chat
-        api_key: ${DEEPSEEK_API_KEY}
-        base_url: https://api.deepseek.com
-      - provider: opencode-go
-        model: minimax-m3.1-flash-free
-        api_key: ${DEEPSEEK_API_KEY}
-        base_url: https://opencode.ai/inference/go
-`
-	require.NoError(t, os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(seed), 0o600))
-	seedConfigDocument(t, s.Env.SQL, seed)
-
-	// What the table sends for rows whose key the user did not touch.
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-chat"]},
-		{"provider":"opencode-go","base_url":"https://opencode.ai/inference/go","models":["minimax-m3.1-flash-free"]}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	saved, err := s.persistedConfig(context.Background())
-	require.NoError(t, err)
-	entries := saved.Agents.Definitions["main"].LLMProviders
-	require.Len(t, entries, 2)
-	require.Equal(t, "deepseek", entries[0].Provider)
-	require.Equal(t, "${DEEPSEEK_API_KEY}", entries[0].APIKey, "the owner keeps its own key")
-	require.Equal(t, "opencode-go", entries[1].Provider)
-	require.Empty(t, entries[1].APIKey, "the login row must not keep the lent key")
-	// The healed row reads as keyless to the next page load.
-	rows := providersGet(t, s)
-	require.Len(t, rows, 2)
-	require.Equal(t, false, rows[1]["api_key_set"])
-}
-
-// The expanded per-model entries the DTO writes are what the engine itself
-// expands — no yaml model list, so nothing is lost on the next save.
-func TestProvidersDTOPersistedShapeIsEngineExpanded(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	require.Equal(t, http.StatusOK, providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["a","b"],"api_key":"sk-x-1234"}
-	]}`).Code)
-	// One stored entry per model — the engine's own expanded shape — with no
-	// yaml model list anywhere in the section.
-	row := configSectionRow(t, s.Env.SQL, "agents")
-	require.Contains(t, row, `"model":"a"`)
-	require.Contains(t, row, `"model":"b"`)
-	require.Contains(t, row, `"api_key":"sk-x-1234"`)
 }
 
 // workspaceTreeServer builds a Server whose file view is one conversation's,
@@ -6789,7 +6307,14 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	row, hasRow, err := sess.SessionModelSelection(context.Background(), "s1")
 	require.NoError(t, err)
 	require.True(t, hasRow)
-	require.Equal(t, state.SessionModelSelection{Provider: "zhipuai", Model: "glm-5.3-flash", Effort: "high"}, row)
+	// The write resolves the pair to the row it names (plan 261 Step 2): a pair
+	// alone cannot tell two configured rows apart, so the session stores which
+	// one it chose. The row id is the migration's own derivation, not a value a
+	// test can invent, so the write and the read are compared field by field.
+	require.NotEmpty(t, row.ModelID, "a pair that resolves to a row stores that row's id")
+	require.Equal(t, "zhipuai", row.Provider)
+	require.Equal(t, "glm-5.3-flash", row.Model)
+	require.Equal(t, "high", row.Effort)
 	require.Equal(t, publishedBefore, run.PrimaryModelSelection(runner), "the runner's published default must stay untouched")
 
 	// An empty effort is the explicit "model default" pin, not a level.
@@ -6798,6 +6323,110 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	row, _, err = sess.SessionModelSelection(context.Background(), "s1")
 	require.NoError(t, err)
 	require.Equal(t, "", row.Effort)
+}
+
+// The conversation's model write names the configured row, not the pair (plan
+// 261): the same provider and model may be configured more than once — another
+// endpoint, another key — so a request carrying only the pair cannot say which
+// row it means, and the server refuses it instead of guessing. An id it does not
+// offer is refused too: a picker can only reach what it was offered.
+func TestChatSessionModelEndpointsPickTheRow(t *testing.T) {
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	t.Setenv("FOREBRAIN_WEB_MODEL_TWIN_KEY", "test-key")
+	// Two rows for one provider and model, told apart only by their endpoint.
+	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_TWIN_KEY}", BaseURL: "http://eu.test/v1"},
+			{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_TWIN_KEY}", BaseURL: "http://us.test/v1"},
+		}},
+	}}}
+	require.NoError(t, appcfg.Save(cfgPath, cfg))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	require.NoError(t, sess.Ensure(context.Background(), "s1", "s1"))
+	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sess}}
+	runner := &run.Runner{Deps: &env.Deps}
+	env.Runner = runner
+	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
+	// The fixture states its configuration directly (the file is a restart-time
+	// source, not a watched one — plan 189).
+	s.Env.AdoptConfig(&cfg)
+
+	modelCall := func(method string, body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		var reader io.Reader
+		if body != nil {
+			raw, err := json.Marshal(body)
+			require.NoError(t, err)
+			reader = bytes.NewReader(raw)
+		}
+		req := httptest.NewRequest(method, "/api/chat/sessions/s1/model", reader)
+		req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{
+			{Key: "id", Value: "s1"},
+		}))
+		rec := httptest.NewRecorder()
+		if method == http.MethodGet {
+			s.handleChatSessionModelGet(rec, req)
+		} else {
+			s.handleChatSessionModelPut(rec, req)
+		}
+		return rec
+	}
+
+	// Both rows are offered, each with its own id and its own endpoint.
+	rec := modelCall(http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got struct {
+		ModelID string `json:"model_id"`
+		Options []struct {
+			ID      string `json:"id"`
+			Model   string `json:"model"`
+			BaseURL string `json:"base_url"`
+		} `json:"options"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.Options, 2, rec.Body.String())
+	eu, us := got.Options[0], got.Options[1]
+	require.NotEmpty(t, eu.ID)
+	require.NotEmpty(t, us.ID)
+	require.NotEqual(t, eu.ID, us.ID, "one model configured twice is two rows")
+	require.Equal(t, []string{"http://eu.test/v1", "http://us.test/v1"}, []string{eu.BaseURL, us.BaseURL})
+
+	// The pair alone names both rows: nothing is written and the refusal says
+	// which field would name one.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "deepseek", "model": "deepseek-v4-pro"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "several models match this provider and model; send model_id")
+	_, hasRow, err := sess.SessionModelSelection(context.Background(), "s1")
+	require.NoError(t, err)
+	require.False(t, hasRow, "a refused write must not store a row")
+
+	// An id picks the row, and the stored selection names it — not the pair it
+	// happens to share with its twin.
+	rec = modelCall(http.MethodPut, map[string]any{
+		"model_id": us.ID, "provider": "deepseek", "model": "deepseek-v4-pro", "effort": "",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), us.ID)
+	stored, hasRow, err := sess.SessionModelSelection(context.Background(), "s1")
+	require.NoError(t, err)
+	require.True(t, hasRow)
+	require.Equal(t, us.ID, stored.ModelID)
+	require.Equal(t, "deepseek", stored.Provider)
+
+	// An id the agent is not offered cannot be reached, and the row that was
+	// there stays where it was.
+	rec = modelCall(http.MethodPut, map[string]any{
+		"model_id": "llm-no-such-row", "provider": "deepseek", "model": "deepseek-v4-pro", "effort": "",
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "model is not offered for this agent")
+	stored, _, err = sess.SessionModelSelection(context.Background(), "s1")
+	require.NoError(t, err)
+	require.Equal(t, us.ID, stored.ModelID)
 }
 
 // The web chip's levels come from the same capability question /model asks: an
@@ -8603,10 +8232,9 @@ func TestChannelsReportConfiguredOnlyForSavedKinds(t *testing.T) {
 // value, never the value itself.
 func TestChannelsPagedRowsCarrySecretHints(t *testing.T) {
 	s, p, _ := projectPagesServer(t)
-	require.NoError(t, os.WriteFile(filepath.Join(s.Home, ".env"), []byte("FEISHU_APP_SECRET=plain-secret-9876\n"), 0o600))
-	// A secret the page typed is stored as a ${VAR} reference, which is what the
-	// hint has to resolve through the home's .env.
-	channelSeed(t, s, p.ID, "feishu", `{"app_id":"cli_123","app_secret":"${FEISHU_APP_SECRET}"}`, true)
+	// A secret the page typed is stored as the plaintext it was typed as (plan
+	// 268), which is what the hint is read from.
+	channelSeed(t, s, p.ID, "feishu", `{"app_id":"cli_123","app_secret":"plain-secret-9876"}`, true)
 
 	rec := cronRequest(t, s, http.MethodGet, "/api/projects/"+p.ID+"/channels?page=1&page_size=40", nil, s.handleChannels, "id", p.ID)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -8970,84 +8598,6 @@ func TestWithConfigSectionSerialisesWriters(t *testing.T) {
 		"every writer's increment must have landed")
 }
 
-// providersGetPaged exercises the paged GET branch, which must carry the same
-// agent-level default_model the plain GET does.
-func providersGetPaged(t *testing.T, s *Server) (string, []map[string]any) {
-	t.Helper()
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/providers?page=1", nil)
-	s.handleProviders(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	var out struct {
-		DefaultModel string           `json:"default_model"`
-		Items        []map[string]any `json:"items"`
-	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
-	return out.DefaultModel, out.Items
-}
-
-func providersGetDefaultModel(t *testing.T, s *Server) string {
-	t.Helper()
-	rr := httptest.NewRecorder()
-	s.handleProviders(rr, httptest.NewRequest(http.MethodGet, "/api/providers", nil))
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	var out struct {
-		DefaultModel string `json:"default_model"`
-	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
-	return out.DefaultModel
-}
-
-// seedProvidersConfig seeds main's llm_providers (one entry per line,
-// provider/model pairs) into the stored agents section, in the exact order
-// given; the file copy it also writes stays as the untouched-file evidence.
-func seedProvidersConfig(t *testing.T, s *Server, extraTop string, pairs ...[2]string) string {
-	t.Helper()
-	home := s.Home
-	t.Helper()
-	var b strings.Builder
-	b.WriteString("agents:\n  definitions:\n    main:\n      primary: true\n")
-	b.WriteString(extraTop)
-	b.WriteString("      llm_providers:\n")
-	for _, p := range pairs {
-		b.WriteString("      - provider: " + p[0] + "\n        model: " + p[1] + "\n        api_key: ${DEEPSEEK_API_KEY}\n        base_url: https://api.deepseek.com\n")
-	}
-	cfgPath := filepath.Join(home, "forebrain.yaml")
-	require.NoError(t, os.WriteFile(cfgPath, []byte(b.String()), 0o600))
-	seedConfigDocument(t, s.Env.SQL, b.String())
-	return cfgPath
-}
-
-// The PUT must not write the client's row order into the config: the disk
-// order is the base, known rows update in place, dropped rows are deleted,
-// and genuinely new rows are appended at the end.
-func TestProvidersDTOPutPreservesDiskOrder(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	cfgPath := seedProvidersConfig(t, s, "",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"openai", "gpt-test"},
-		[2]string{"moonshotai", "kimi"},
-	)
-
-	// The page reorders two rows (moonshot first), drops openai, and adds a
-	// brand-new row — as a stale snapshot written back whole would.
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"moonshotai","models":["kimi"],"base_url":"https://api.deepseek.com","api_key":"sk-keep-1111"},
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-keep-2222"},
-		{"provider":"zhipuai","models":["glm-5.3"],"base_url":"https://open.bigmodel.cn/api/paas/v4","api_key":"sk-new-3333"}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	stored, err := s.persistedConfig(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, []string{"deepseek", "moonshotai", "zhipuai"}, providerOrder(t, stored), "stored order must be preserved: existing rows in place, new row appended at the end")
-	if _, err := os.Stat(cfgPath); err == nil {
-		if raw := mustRead(t, cfgPath); strings.Contains(raw, "zhipuai") {
-			t.Fatal("the section write must not touch the configuration file")
-		}
-	}
-}
-
 // providerOrder lists the stored llm_providers' providers, in storage order.
 func providerOrder(t *testing.T, cfg appcfg.Root) []string {
 	t.Helper()
@@ -9065,80 +8615,6 @@ func providerOrderInYAML(t *testing.T, cfg appcfg.Root) []string {
 		out = append(out, item.Provider)
 	}
 	return out
-}
-
-// default_model is the agent-level default: the PUT writes it, refuses a
-// dangling value, refuses clearing it, and both GET branches report the
-// effective value (default_model when set, otherwise the first row).
-func TestProvidersDTODefaultModel(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	_ = seedProvidersConfig(t, s, "",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"openai", "gpt-test"},
-	)
-
-	require.Equal(t, "deepseek/deepseek-v4", providersGetDefaultModel(t, s), "absent default_model reports the first row")
-	pagedDefault, _ := providersGetPaged(t, s)
-	require.Equal(t, "deepseek/deepseek-v4", pagedDefault, "paged GET reports the same default_model")
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
-	],"default_model":"openai/gpt-test"}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), `"default_model":"openai/gpt-test"`)
-	require.Equal(t, "openai/gpt-test", providersGetDefaultModel(t, s))
-
-	// A dangling default_model is refused, not saved.
-	rr = providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
-	],"default_model":"openai/gone"}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code)
-	require.Contains(t, rr.Body.String(), "default_model")
-
-	// Clearing is refused: switch the default, do not empty it.
-	rr = providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
-	],"default_model":""}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code)
-}
-
-// The row the default resolves to may not be deleted — explicitly pointed at
-// by default_model, or implicitly as the first row of an unset default.
-func TestProvidersDTORefusesDeletingTheDefaultRow(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	seedProvidersConfig(t, s, "      default_model: openai/gpt-test\n",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"openai", "gpt-test"},
-	)
-
-	// Dropping openai while default_model points at it: refused.
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"}
-	]}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code)
-	require.Contains(t, rr.Body.String(), "默认模型")
-
-	// Retargeting the default in the same write that drops openai: allowed.
-	rr = providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"}
-	],"default_model":"deepseek/deepseek-v4"}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	// Implicit default: with default_model unset, the first row cannot be
-	// deleted either.
-	s2, _ := providersDTOServer(t)
-	seedProvidersConfig(t, s2, "",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"openai", "gpt-test"},
-	)
-	rr = providersPut(t, s2, `{"providers":[
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
-	]}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code)
-	require.Contains(t, rr.Body.String(), "默认模型")
 }
 
 // providerModelOrderInYAML is the expanded provider/model order the file was
@@ -9160,318 +8636,6 @@ func providerBaseURLInYAML(t *testing.T, cfg appcfg.Root, provider string) strin
 		}
 	}
 	return ""
-}
-
-// An edit is an edit, not a delete plus an append: a row the page changed the
-// endpoint of keeps the position its stored entries occupy.
-func TestProvidersDTOPutEditsARowInPlace(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	_ = seedProvidersConfig(t, s, "",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"openai", "gpt-test"},
-		[2]string{"moonshotai", "kimi"},
-	)
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://mirror.example.com","api_key":"sk-b-2222",
-		 "replaces":{"provider":"openai","base_url":"https://api.deepseek.com","models":["gpt-test"]}},
-		{"provider":"moonshotai","models":["kimi"],"base_url":"https://api.deepseek.com","api_key":"sk-c-3333"}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	stored, err := s.persistedConfig(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, []string{"deepseek", "openai", "moonshotai"}, providerOrderInYAML(t, stored),
-		"the edited row must keep its stored slot instead of being appended at the end")
-	require.Equal(t, "https://mirror.example.com", providerBaseURLInYAML(t, stored, "openai"))
-}
-
-// Adding a model to an existing service must leave its entries adjacent: the
-// read path folds only adjacent same-signature entries into one row.
-func TestProvidersDTOPutAddsAModelNextToItsRow(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	_ = seedProvidersConfig(t, s, "",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"openai", "gpt-test"},
-	)
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4","deepseek-v4-flash"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111",
-		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	stored, err := s.persistedConfig(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, []string{"deepseek/deepseek-v4", "deepseek/deepseek-v4-flash", "openai/gpt-test"},
-		providerModelOrderInYAML(t, stored),
-		"the new model must sit next to the row it belongs to")
-
-	rows := providersGet(t, s)
-	require.Len(t, rows, 2, "the two deepseek models are one row, not two")
-	require.Equal(t, "deepseek", rows[0]["provider"])
-	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, rows[0]["models"].([]any))
-}
-
-func TestProvidersDTOPutRemovesAModelFromARow(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	_ = seedProvidersConfig(t, s, "",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"deepseek", "deepseek-v4-flash"},
-		[2]string{"openai", "gpt-test"},
-	)
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111",
-		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-v4-flash"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	stored, err := s.persistedConfig(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, []string{"deepseek/deepseek-v4", "openai/gpt-test"}, providerModelOrderInYAML(t, stored))
-	require.NotContains(t, configSectionRow(t, s.Env.SQL, "agents"), "deepseek-v4-flash")
-}
-
-// Editing the row the default resolves to must not hand the default to another
-// model: with default_model unset the first stored row is the default, so the
-// edited row has to keep its slot.
-func TestProvidersDTOEditingTheImplicitDefaultKeepsItDefault(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	seedProvidersConfig(t, s, "",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"openai", "gpt-test"},
-	)
-	require.Equal(t, "deepseek/deepseek-v4", providersGetDefaultModel(t, s))
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://mirror.example.com","api_key":"sk-a-1111",
-		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	require.Equal(t, "deepseek/deepseek-v4", providersGetDefaultModel(t, s),
-		"the user did not touch the default, so it must not move to another model")
-
-	rows := providersGet(t, s)
-	require.Len(t, rows, 2)
-	require.Equal(t, "deepseek", rows[0]["provider"])
-	require.Equal(t, "https://mirror.example.com", rows[0]["base_url"])
-	require.Equal(t, "openai", rows[1]["provider"])
-}
-
-// Editing the model an explicit default_model names is an edit of the default,
-// not a deletion of it: the default follows the edit.
-func TestProvidersDTOEditingTheExplicitDefaultFollowsTheEdit(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	_ = seedProvidersConfig(t, s, "      default_model: deepseek/deepseek-v4\n",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"openai", "gpt-test"},
-	)
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4-pro"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111",
-		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), `"default_model":"deepseek/deepseek-v4-pro"`)
-	require.Equal(t, "deepseek/deepseek-v4-pro", providersGetDefaultModel(t, s))
-}
-
-// A stale page (its row no longer on disk) claims no slot: the row falls back
-// to identity matching, which makes it a new row appended at the end.
-func TestProvidersDTOStaleReplacesFallsBackToIdentity(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	_ = seedProvidersConfig(t, s, "",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"openai", "gpt-test"},
-	)
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111"},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"},
-		{"provider":"zhipuai","models":["glm-5.3"],"base_url":"https://open.bigmodel.cn/api/paas/v4","api_key":"sk-c-3333",
-		 "replaces":{"provider":"ghost","base_url":"https://nowhere.example.com","models":["ghost-model"]}}
-	]}`)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	stored, err := s.persistedConfig(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, []string{"deepseek", "openai", "zhipuai"}, providerOrderInYAML(t, stored))
-}
-
-// Editing a row so that the model the default points at disappears is still a
-// deletion of the default model.
-func TestProvidersDTOEditThatRemovesTheDefaultModelIsRefused(t *testing.T) {
-	s, _ := providersDTOServer(t)
-	seedProvidersConfig(t, s, "      default_model: deepseek/deepseek-v4-flash\n",
-		[2]string{"deepseek", "deepseek-v4"},
-		[2]string{"deepseek", "deepseek-v4-flash"},
-		[2]string{"openai", "gpt-test"},
-	)
-
-	rr := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"base_url":"https://api.deepseek.com","api_key":"sk-a-1111",
-		 "replaces":{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-v4-flash"]}},
-		{"provider":"openai","models":["gpt-test"],"base_url":"https://api.deepseek.com","api_key":"sk-b-2222"}
-	]}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), "默认模型")
-}
-
-// mergeProviderEntries is the PUT's merge on its own: the slot-claiming rules
-// the HTTP tests above only reach one path at a time.
-func TestMergeProviderEntries(t *testing.T) {
-	entry := func(provider, baseURL, model string) appcfg.AgentLLMProviderConfig {
-		return appcfg.AgentLLMProviderConfig{Provider: provider, BaseURL: baseURL, Model: model}
-	}
-	labels := func(entries []appcfg.AgentLLMProviderConfig) []string {
-		out := []string{}
-		for _, item := range entries {
-			out = append(out, item.Provider+"/"+item.Model)
-		}
-		return out
-	}
-	slot := func(provider, model string) *string {
-		label := provider + "/" + model
-		return &label
-	}
-	const ds = "https://api.deepseek.com"
-
-	cases := []struct {
-		name string
-		// stored is the list on disk (already expanded, one entry per model).
-		// rows are the request's rows after the same expansion.
-		stored []appcfg.AgentLLMProviderConfig
-		rows   []providerMergeRow
-		// order is the merged provider/model order.
-		order []string
-		// replaced maps a stored slot to what the edit put there; a nil value
-		// means the edit removed that slot's model. A slot with no key was
-		// never claimed by an edited row.
-		replaced map[int]*string
-	}{
-		{
-			name:   "no replaces keeps the identity merge and the stored order",
-			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("openai", ds, "gpt-test")},
-			rows: []providerMergeRow{
-				{Entries: []appcfg.AgentLLMProviderConfig{
-					entry("openai", "https://mirror.example.com", "gpt-test"),
-					entry("deepseek", ds, "deepseek-v4"),
-				}},
-			},
-			order:    []string{"deepseek/deepseek-v4", "openai/gpt-test"},
-			replaced: map[int]*string{},
-		},
-		{
-			name:   "an edited row replaces its own slot in place",
-			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("openai", ds, "gpt-test"), entry("moonshotai", ds, "kimi")},
-			rows: []providerMergeRow{
-				{Entries: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")}},
-				{
-					Entries:  []appcfg.AgentLLMProviderConfig{entry("openai", "https://mirror.example.com", "gpt-test")},
-					Replaces: &providerReplaces{Provider: "openai", BaseURL: ds, Models: []string{"gpt-test"}},
-				},
-				{Entries: []appcfg.AgentLLMProviderConfig{entry("moonshotai", ds, "kimi")}},
-			},
-			order:    []string{"deepseek/deepseek-v4", "openai/gpt-test", "moonshotai/kimi"},
-			replaced: map[int]*string{1: slot("openai", "gpt-test")},
-		},
-		{
-			name:   "an added model lands right after the row's last slot",
-			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("openai", ds, "gpt-test")},
-			rows: []providerMergeRow{
-				{
-					Entries: []appcfg.AgentLLMProviderConfig{
-						entry("deepseek", ds, "deepseek-v4"),
-						entry("deepseek", ds, "deepseek-v4-flash"),
-					},
-					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds, Models: []string{"deepseek-v4"}},
-				},
-				{Entries: []appcfg.AgentLLMProviderConfig{entry("openai", ds, "gpt-test")}},
-			},
-			order:    []string{"deepseek/deepseek-v4", "deepseek/deepseek-v4-flash", "openai/gpt-test"},
-			replaced: map[int]*string{0: slot("deepseek", "deepseek-v4")},
-		},
-		{
-			name:   "a model the edit dropped deletes its slot",
-			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("deepseek", ds, "deepseek-v4-flash"), entry("openai", ds, "gpt-test")},
-			rows: []providerMergeRow{
-				{
-					Entries:  []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")},
-					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds, Models: []string{"deepseek-v4", "deepseek-v4-flash"}},
-				},
-				{Entries: []appcfg.AgentLLMProviderConfig{entry("openai", ds, "gpt-test")}},
-			},
-			order:    []string{"deepseek/deepseek-v4", "openai/gpt-test"},
-			replaced: map[int]*string{0: slot("deepseek", "deepseek-v4"), 1: nil},
-		},
-		{
-			name:   "a second claimant of a taken slot falls back to identity matching",
-			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4"), entry("openai", ds, "gpt-test")},
-			rows: []providerMergeRow{
-				{
-					Entries:  []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4-pro")},
-					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds, Models: []string{"deepseek-v4"}},
-				},
-				{
-					Entries:  []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4-flash")},
-					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds, Models: []string{"deepseek-v4"}},
-				},
-				{Entries: []appcfg.AgentLLMProviderConfig{entry("openai", ds, "gpt-test")}},
-			},
-			order:    []string{"deepseek/deepseek-v4-pro", "openai/gpt-test", "deepseek/deepseek-v4-flash"},
-			replaced: map[int]*string{0: slot("deepseek", "deepseek-v4-pro")},
-		},
-		{
-			name:   "an empty Replaces.Models claims the bare entry",
-			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, ""), entry("openai", ds, "gpt-test")},
-			rows: []providerMergeRow{
-				{
-					Entries:  []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")},
-					Replaces: &providerReplaces{Provider: "deepseek", BaseURL: ds},
-				},
-				{Entries: []appcfg.AgentLLMProviderConfig{entry("openai", ds, "gpt-test")}},
-			},
-			order:    []string{"deepseek/deepseek-v4", "openai/gpt-test"},
-			replaced: map[int]*string{0: slot("deepseek", "deepseek-v4")},
-		},
-		{
-			name:   "a Replaces that matches nothing claims nothing",
-			stored: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")},
-			rows: []providerMergeRow{
-				{Entries: []appcfg.AgentLLMProviderConfig{entry("deepseek", ds, "deepseek-v4")}},
-				{
-					Entries:  []appcfg.AgentLLMProviderConfig{entry("zhipuai", "https://open.bigmodel.cn/api/paas/v4", "glm-5.3")},
-					Replaces: &providerReplaces{Provider: "ghost", BaseURL: "https://nowhere.example.com", Models: []string{"ghost-model"}},
-				},
-			},
-			order:    []string{"deepseek/deepseek-v4", "zhipuai/glm-5.3"},
-			replaced: map[int]*string{},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := mergeProviderEntries(tc.stored, tc.rows)
-			require.Equal(t, tc.order, labels(result.Merged))
-
-			got := map[int]*string{}
-			for position, replaced := range result.Replaced {
-				if replaced == nil {
-					got[position] = nil
-					continue
-				}
-				got[position] = slot(replaced.Provider, replaced.Model)
-			}
-			require.Equal(t, tc.replaced, got, "Replaced must report what every claimed slot became")
-		})
-	}
 }
 
 // TestChatSessionsFiltersTheDrawerListByProject pins the drawer's project
@@ -10425,6 +9589,64 @@ func settingsPatch(t *testing.T, s *Server, values map[string]any, secrets map[s
 		body["secrets"] = secrets
 	}
 	return settingsCall(t, s, http.MethodPatch, body)
+}
+
+// The memory pipeline's two model choices name a configured row (plan 265): the
+// value is "current" (the conversation's own) or the id of a row this install
+// has, a legacy "provider/model" label from a page written before the table is
+// translated to the row it names, and anything else is refused with the field it
+// belongs to. A stale reference is not a preference: the extraction runs on that
+// row, so it would fail much later instead of here.
+func TestSettingsPatchKeepsMemoryModelsOnConfiguredRows(t *testing.T) {
+	s, db := settingsServer(t)
+	ctx := context.Background()
+	store := &state.LLMModelStore{DB: db}
+	pro, err := store.Create(ctx, state.LLMModel{
+		Provider: "deepseek", Model: "deepseek-v4-pro",
+		BaseURL: "https://api.deepseek.com", APIPath: "/chat/completions", APIKey: "sk-memory-pro",
+	})
+	require.NoError(t, err)
+	other, err := store.Create(ctx, state.LLMModel{
+		Provider: "openai", Model: "gpt-4o",
+		BaseURL: "https://api.openai.com/v1", APIPath: "/responses", APIKey: "sk-memory-other",
+	})
+	require.NoError(t, err)
+
+	stored := func(t *testing.T) appcfg.Root {
+		t.Helper()
+		cfg, err := s.persistedConfig(ctx)
+		require.NoError(t, err)
+		return cfg
+	}
+
+	// "current" is the conversation's own model, and it stays that word.
+	saved := settingsPatch(t, s, map[string]any{"memories.extract_model": "current"}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Equal(t, "current", stored(t).Memories.ExtractModel)
+
+	// A row id is the other accepted form.
+	saved = settingsPatch(t, s, map[string]any{"memories.extract_model": other.ID}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Equal(t, other.ID, stored(t).Memories.ExtractModel)
+
+	// A legacy label keeps an older page working: what is stored is the row it
+	// names, never the label.
+	saved = settingsPatch(t, s, map[string]any{"memories.consolidation_model": "deepseek/deepseek-v4-pro"}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Equal(t, pro.ID, stored(t).Memories.ConsolidationModel)
+
+	// A value no row carries is refused, naming the field, and the stored model
+	// does not move.
+	saved = settingsPatch(t, s, map[string]any{"memories.extract_model": "deepseek/no-such-model"}, nil)
+	require.Equal(t, http.StatusBadRequest, saved.Code, saved.Body.String())
+	var refusal struct {
+		Path    string `json:"path"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(saved.Body.Bytes(), &refusal))
+	require.Equal(t, "memories.extract_model", refusal.Path)
+	require.NotEmpty(t, refusal.Message)
+	require.Equal(t, other.ID, stored(t).Memories.ExtractModel, "a refused write must not move the stored model")
 }
 
 // TestSettingsGetMasksCredentials pins §0.20 on the wire: a credential the page

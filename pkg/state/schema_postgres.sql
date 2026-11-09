@@ -61,8 +61,8 @@ CREATE TABLE fb_projects (
 CREATE INDEX idx_fb_projects_agent_updated ON fb_projects (agent_id, updated_at DESC);
 CREATE UNIQUE INDEX idx_fb_projects_agent_root_unique ON fb_projects (agent_id, root);
 
--- One delivery channel a project owns. Credentials never land in this table: a
--- secret field holds a reference like ${FOREBRAIN_CH_<project>_<FIELD>}.
+-- One delivery channel a project owns. A secret field is stored in plaintext
+-- (owner 2026-11-07, plan 268); a page only ever sees a mask of it.
 CREATE TABLE fb_project_channels (
   project_id TEXT NOT NULL REFERENCES fb_projects (id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
@@ -250,6 +250,7 @@ CREATE TABLE fb_session_model_state (
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
   effort TEXT NOT NULL DEFAULT '',
+  model_id TEXT NOT NULL DEFAULT '',
   updated_at BIGINT NOT NULL,
   PRIMARY KEY (session_id)
 );
@@ -642,6 +643,55 @@ CREATE TABLE fb_config (
   section TEXT NOT NULL PRIMARY KEY,
   value_json TEXT NOT NULL,
   updated_at_ms BIGINT NOT NULL
+);
+
+-- The install's model configurations: one row per (provider, model, base_url,
+-- api_path), shared by every primary agent (owner 2026-11-07). The same model
+-- may be configured several times — behind different endpoints, paths or keys —
+-- so a model is referred to by this row's id, never by "provider/model".
+-- api_key is stored in plaintext (owner ruling) and never leaves the gateway.
+-- The cap_* columns override the model catalog for this row; NULL (or '')
+-- means "use the catalog".
+CREATE TABLE fb_llm_models (
+  id TEXT NOT NULL PRIMARY KEY,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  base_url TEXT NOT NULL DEFAULT '',
+  api_path TEXT NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT '',
+  params_json TEXT NOT NULL DEFAULT '',
+  cap_images BIGINT CHECK (cap_images IN (0, 1)),
+  cap_pdf BIGINT CHECK (cap_pdf IN (0, 1)),
+  cap_video BIGINT CHECK (cap_video IN (0, 1)),
+  cap_audio BIGINT CHECK (cap_audio IN (0, 1)),
+  cap_reasoning BIGINT CHECK (cap_reasoning IN (0, 1)),
+  cap_reasoning_off BIGINT CHECK (cap_reasoning_off IN (0, 1)),
+  cap_efforts_json TEXT NOT NULL DEFAULT '',
+  cap_default_effort TEXT NOT NULL DEFAULT '',
+  cap_context_window BIGINT,
+  cap_max_output BIGINT,
+  source TEXT NOT NULL DEFAULT '',
+  source_plan TEXT NOT NULL DEFAULT '',
+  url_verbatim BIGINT NOT NULL DEFAULT 0,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  CHECK (TRIM(id) <> ''),
+  CHECK (TRIM(provider) <> ''),
+  CHECK (TRIM(model) <> ''),
+  CHECK (url_verbatim IN (0, 1))
+);
+CREATE UNIQUE INDEX idx_fb_llm_models_identity ON fb_llm_models (provider, model, base_url, api_path);
+CREATE INDEX idx_fb_llm_models_created ON fb_llm_models (created_at, id);
+
+-- Operator-owned variables that ${NAME} references in MCP and LSP server
+-- entries resolve from (owner 2026-11-07, replacing ~/.forebrain/.env). A
+-- project-scoped entry resolves only from here — never from the process
+-- environment — so a repository cannot read the host's secrets.
+CREATE TABLE fb_env_vars (
+  name TEXT NOT NULL PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at_ms BIGINT NOT NULL,
+  CHECK (TRIM(name) <> '')
 );
 
 -- MCP OAuth refresh tokens, one row per (namespace, server). An empty

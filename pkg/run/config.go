@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -38,6 +38,14 @@ type LLMProviderYAML struct {
 	APIPath  string                  `yaml:"api_path,omitempty" json:"api_path,omitempty"`
 	Params   appcfg.LLMRequestParams `yaml:"params,omitempty" json:"params,omitempty"`
 	Models   appcfg.StringList       `yaml:"-" json:"-"`
+	// MaxOutputTokens is the row's own output limit, 0 when it names none.
+	// It is an exact value for this entry, so it wins over the catalog's
+	// per-provider/model default. Runtime-only: a config file never sets it.
+	MaxOutputTokens int64 `yaml:"-" json:"-"`
+	// URLVerbatim (「自定义协议」) sends a custom model's request to BaseURL
+	// exactly as stored instead of appending the protocol's path. APIPath
+	// then only names the protocol. Runtime-only.
+	URLVerbatim bool `yaml:"-" json:"-"`
 }
 
 type AgentConfigYAML struct {
@@ -99,8 +107,6 @@ func (p *LLMProviderYAML) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
-var envPlaceholderRe = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
-
 // LoadAgentConfigsFromRoot builds one entry per agent definition, resolving each
 // chain through resolvedAgentProviders so an agent that declares no providers
 // of its own inherits main's — the same fallback NewLLMForAgentType applies for
@@ -126,8 +132,12 @@ func LoadAgentConfigsFromRoot(cfg *appcfg.Root) (map[string]AgentConfigYAML, err
 // modelSelector picks one entry out of an agent's configured provider chain.
 // The zero value picks the chain's primary entry; naming a model picks that
 // model wherever it sits in the chain; naming both halves requires the pair to
-// match, which is what a user's explicit choice deserves.
+// match, which is what a user's explicit choice deserves; naming an id picks
+// the configured row that id is, and nothing else — the same provider/model
+// may be configured several times (another base url, api path or key), and an
+// id that names no row is a failure, never a quiet fall-back to a twin.
 type modelSelector struct {
+	id       string
 	provider string
 	model    string
 }
@@ -137,6 +147,11 @@ type modelSelector struct {
 // Callers that treat an absent model as "feature disabled" rather than as an
 // error say so at their own call site.
 var errModelNotConfigured = errors.New("model is not configured for this agent")
+
+// errLLMKeyMissing is "this model has no key", recognized by the run's entry
+// point so the failure can say where a key is entered. The sentence a person
+// reads is unchanged: "llm api_key is required for provider <x>".
+var errLLMKeyMissing = errors.New("llm api_key is required")
 
 // resolveAgentProvider finds the provider-chain entry a selector names.
 //
@@ -151,6 +166,16 @@ func resolveAgentProvider(cfg *appcfg.Root, agentType string, sel modelSelector)
 	}
 	providers := resolvedAgentProviders(cfg, agentType)
 	if len(providers) == 0 {
+		return appcfg.AgentLLMProviderConfig{}, errModelNotConfigured
+	}
+	// A named row id is the whole selection: the user picked that row, so a
+	// missing row is an error rather than another row of the same pair.
+	if wantID := strings.TrimSpace(sel.id); wantID != "" {
+		for _, provider := range providers {
+			if strings.TrimSpace(provider.ID) == wantID {
+				return provider, nil
+			}
+		}
 		return appcfg.AgentLLMProviderConfig{}, errModelNotConfigured
 	}
 	wantProvider := strings.TrimSpace(sel.provider)
@@ -280,44 +305,49 @@ func ProviderForAgentModel(cfg *appcfg.Root, agentType, model string) string {
 	return ""
 }
 
-// resolvedAgentProviders returns the resolved provider chain for the named agent
-// type, falling back to the main agent's providers when the definition is
-// absent or has no providers.
+// resolvedAgentProviders returns every configured model; agentType no longer
+// narrows the list (owner 2026-11-07: one install-wide table), so every agent
+// — the primary one and each typed subagent — reads the same view.
 func resolvedAgentProviders(cfg *appcfg.Root, agentType string) []appcfg.AgentLLMProviderConfig {
-	if def, ok := cfg.Agents.Definitions[agentType]; ok {
-		if p := appcfg.ResolvedLLMConfigs(def); len(p) > 0 {
-			return p
-		}
-	}
-	if def, ok := cfg.Agents.Definitions["main"]; ok {
-		return appcfg.ResolvedLLMConfigs(def)
-	}
-	return nil
+	return appcfg.ConfiguredLLMs(cfg)
 }
 
-// effectiveDefaultProvider resolves the entry an empty model selection uses.
-// The definition that owns the list decides: the agent's own definition when
-// it carries providers (its default_model, else its first entry), main's
-// otherwise — the same ownership resolvedAgentProviders gives the whole chain.
-// A dangling default_model is an error naming the value; there is no fall-back
-// to the first entry.
+// effectiveDefaultProvider resolves the entry an empty model selection uses:
+// the answer the install-wide view gives for this agent
+// (appcfg.EffectiveDefaultLLMFor — its own default_model and legacy list
+// first, then main's, then the first configured row). A default_model that is
+// a legacy "provider/model" label nothing resolves to is an error naming the
+// value, the same verdict the loader refuses; a row id the model page deleted
+// falls back inside the view, so a deleted row cannot stop a run.
 func effectiveDefaultProvider(cfg *appcfg.Root, agentType string) (appcfg.AgentLLMProviderConfig, error) {
-	def, ok := cfg.Agents.Definitions[agentType]
-	if !ok || len(appcfg.ResolvedLLMConfigs(def)) == 0 {
-		def, ok = cfg.Agents.Definitions["main"]
+	if entry := appcfg.EffectiveDefaultLLMFor(cfg, agentType); entry != nil {
+		return *entry, nil
 	}
-	if !ok {
-		return appcfg.AgentLLMProviderConfig{}, errModelNotConfigured
+	if ref := danglingDefaultModelLabel(cfg, agentType); ref != "" {
+		return appcfg.AgentLLMProviderConfig{}, fmt.Errorf("%w: agents.definitions.%s.default_model %q matches no llm_providers entry",
+			errModelNotConfigured, agentType, ref)
 	}
-	entry := appcfg.EffectiveDefaultLLM(def)
-	if entry == nil {
-		if strings.TrimSpace(def.DefaultModel) != "" {
-			return appcfg.AgentLLMProviderConfig{}, fmt.Errorf("%w: agents.definitions.%s.default_model %q matches no llm_providers entry",
-				errModelNotConfigured, agentType, def.DefaultModel)
+	return appcfg.AgentLLMProviderConfig{}, errModelNotConfigured
+}
+
+// danglingDefaultModelLabel returns the legacy label the effective default
+// failed on, or "". It follows the ownership EffectiveDefaultLLMFor does: the
+// agent's own default_model when its definition names one, main's otherwise —
+// and only a label (one carrying a slash), never a row id.
+func danglingDefaultModelLabel(cfg *appcfg.Root, agentType string) string {
+	if def, ok := cfg.Agents.Definitions[agentType]; ok {
+		if ref := strings.TrimSpace(def.DefaultModel); strings.Contains(ref, "/") {
+			return ref
 		}
-		return appcfg.AgentLLMProviderConfig{}, errModelNotConfigured
 	}
-	return *entry, nil
+	if agentType != "main" {
+		if def, ok := cfg.Agents.Definitions["main"]; ok {
+			if ref := strings.TrimSpace(def.DefaultModel); strings.Contains(ref, "/") {
+				return ref
+			}
+		}
+	}
+	return ""
 }
 
 func llmYAMLsFromResolved(cfgs []appcfg.AgentLLMProviderConfig) []*LLMProviderYAML {
@@ -328,12 +358,14 @@ func llmYAMLsFromResolved(cfgs []appcfg.AgentLLMProviderConfig) []*LLMProviderYA
 	for i := range cfgs {
 		c := cfgs[i]
 		out[i] = &LLMProviderYAML{
-			Provider: c.Provider,
-			Model:    c.Model,
-			APIKey:   c.APIKey,
-			BaseURL:  c.BaseURL,
-			APIPath:  c.APIPath,
-			Params:   append(appcfg.LLMRequestParams(nil), c.Params...),
+			Provider:        c.Provider,
+			Model:           c.Model,
+			APIKey:          c.APIKey,
+			BaseURL:         c.BaseURL,
+			APIPath:         c.APIPath,
+			Params:          append(appcfg.LLMRequestParams(nil), c.Params...),
+			MaxOutputTokens: c.MaxOutputTokens,
+			URLVerbatim:     c.URLVerbatim,
 		}
 	}
 	return out
@@ -388,19 +420,30 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 	}
 	prov := strings.ToLower(strings.TrimSpace(cfg.Provider))
 	model := strings.TrimSpace(cfg.Model)
-	apiKey := resolveConfigValue(cfg.APIKey)
-	baseURL := resolveConfigValue(cfg.BaseURL)
-	if apiKey == "" {
-		apiKey = appcfg.ProviderAPIKeyLookup(os.Getenv, prov)
-	}
-	if baseURL == "" {
-		baseURL = appcfg.ProviderBaseURLLookup(os.Getenv, prov)
-	}
+	// The row's key and endpoint are the values the model table holds: no
+	// environment variable supplies a model's key any more (owner 2026-11-07,
+	// plans 262 and 268), so a row is used exactly as it was stored.
+	apiKey := strings.TrimSpace(cfg.APIKey)
+	baseURL := strings.TrimSpace(cfg.BaseURL)
 	if prov == "" {
 		return nil, fmt.Errorf("llm provider is required")
 	}
 	if model == "" {
 		return nil, fmt.Errorf("llm model is required for provider %s", prov)
+	}
+	apiPath := strings.TrimSpace(cfg.APIPath)
+	// A user-defined model names its protocol (the custom form requires
+	// one): nothing here infers it from a catalog that does not know the
+	// model.
+	if prov == appcfg.CustomProvider && apiPath == "" {
+		return nil, fmt.Errorf("a custom model needs an API protocol")
+	}
+	// The custom protocol speaks Chat Completions to one exact URL. Anything
+	// else naming it — another provider, or a different protocol — is refused
+	// by the write path; a configuration that reached here anyway is refused
+	// too rather than quietly sent somewhere else.
+	if cfg.URLVerbatim && (prov != appcfg.CustomProvider || apiPath != appcfg.APIPathChatCompletions) {
+		return nil, errCustomProtocolMisuse
 	}
 	if prov == "chatgpt" {
 		home, err := home.Root()
@@ -412,7 +455,7 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 		if _, err := openai.Load(authPath); err != nil {
 			return nil, fmt.Errorf("ChatGPT login required; put a Codex auth.json at %s (or set credentials.chatgpt in forebrain.yaml), or run /connect: %w", authPath, err)
 		}
-		maxTokens := llm.OutputTokenCap("openai", model, 0) // TODO(plan 263): pass cfg.MaxOutputTokens
+		maxTokens := llm.OutputTokenCap("openai", model, cfg.MaxOutputTokens)
 		transport := &openai.Transport{Path: authPath}
 		return wrapUsageAccountingLLM(openai.NewResponsesLLMWithWebSearch(
 			"oauth", openai.CodexBaseURL, model, maxTokens, cfg.Params.Bytes(), "live", transport,
@@ -422,20 +465,22 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 		return newOpenCodeLLM(prov, model, apiKey, baseURL, cfg)
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("llm api_key is required for provider %s", prov)
+		// Same sentence as before, wrapped around a sentinel so the run's entry
+		// point can add where a key comes from (Settings › Models) without the
+		// constructor knowing about pages.
+		return nil, fmt.Errorf("%w for provider %s", errLLMKeyMissing, prov)
 	}
 	if baseURL == "" {
 		return nil, fmt.Errorf("llm base_url is required for provider %s", prov)
 	}
-	maxTokens := llm.OutputTokenCap(prov, model, 0) // TODO(plan 263): pass cfg.MaxOutputTokens
+	maxTokens := llm.OutputTokenCap(prov, model, cfg.MaxOutputTokens)
 	switch prov {
 	case "anthropic", "minimax":
 		return wrapUsageAccountingLLM(anthropic.NewAgentLLM(apiKey, baseURL, model, int64(maxTokens), requestReasoningEffort(cfg.Params))), nil
 	default:
 		if !llm.KnownProvider(prov) {
-			return nil, fmt.Errorf("unsupported llm provider: %s (not found in models.json)", prov)
+			return nil, fmt.Errorf("unsupported model provider: %s", prov)
 		}
-		apiPath := strings.TrimSpace(cfg.APIPath)
 		// The path names the protocol, and the client it picks appends its own
 		// endpoint to the base URL — so "/v1/messages" here selects the Anthropic
 		// Messages client rather than a URL anything is sent to, exactly as
@@ -448,6 +493,24 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 		}
 		if strings.Contains(apiPath, "/responses") {
 			return wrapUsageAccountingLLM(openai.NewResponsesLLMWithCache(apiKey, baseURL, model, maxTokens, cfg.Params.Bytes(), openAIPromptCaching(prov))), nil
+		}
+		if cfg.URLVerbatim {
+			// 「自定义协议」: the request goes to base_url exactly as the user
+			// wrote it, Chat Completions shape, no path appended.
+			target, err := url.Parse(baseURL)
+			if err != nil || target.Host == "" {
+				return nil, fmt.Errorf("llm base_url is not a request URL: %s", baseURL)
+			}
+			return wrapUsageAccountingLLM(openai.NewCompatLLMWithTransport(
+				apiKey,
+				baseURL,
+				model,
+				0,
+				maxTokens,
+				"",
+				cfg.Params.Bytes(),
+				&llm.ExactURLRoundTripper{Target: target},
+			)), nil
 		}
 		return wrapUsageAccountingLLM(openai.NewCompatLLMWithPromptCaching(
 			apiKey,
@@ -466,6 +529,11 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 		)), nil
 	}
 }
+
+// errCustomProtocolMisuse refuses the custom protocol anywhere but on a custom
+// model speaking Chat Completions. It is one error because it is one rule, and
+// the sentence is what a surface shows.
+var errCustomProtocolMisuse = errors.New("custom protocol is only for custom models")
 
 func openAIPromptCaching(provider string) bool {
 	return strings.EqualFold(strings.TrimSpace(provider), "openai")
@@ -580,7 +648,7 @@ func newOpenCodeLLM(prov, model, apiKey, baseURL string, cfg *LLMProviderYAML) (
 	// note here said OpenCode's table carried windows but no output limits;
 	// that stopped being true once the shipped catalog (assets/models.json,
 	// refreshed with each build) carried limit.output for these ids.
-	maxTokens := llm.OutputTokenCap(prov, model, 0) // TODO(plan 263): pass cfg.MaxOutputTokens
+	maxTokens := llm.OutputTokenCap(prov, model, cfg.MaxOutputTokens)
 	transport := &openCodeAuthTransport{inner: auth}
 
 	switch protocol {
@@ -614,17 +682,6 @@ func requestReasoningEffort(params appcfg.LLMRequestParams) string {
 	reasoning, _ := values["reasoning"].(map[string]any)
 	effort, _ := reasoning["effort"].(string)
 	return strings.TrimSpace(effort)
-}
-
-func resolveConfigValue(v string) string {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return ""
-	}
-	if m := envPlaceholderRe.FindStringSubmatch(v); len(m) == 2 {
-		return strings.TrimSpace(os.Getenv(m[1]))
-	}
-	return v
 }
 
 const planModeFullReminderEveryNTurns = 5
@@ -1689,10 +1746,12 @@ type primaryModelRuntime struct {
 }
 
 // PrimaryModelState is the exported, secret-free view of the effective
-// primary model. Set is false only for a Runner that never completed a load,
-// where the values fall back to the config's first resolved entry the way
-// PrimaryModel does for unloaded test fixtures.
+// primary model. ModelID names the configured row that model is. Set is false
+// only for a Runner that never completed a load, where the values fall back to
+// the config's first resolved entry the way PrimaryModel does for unloaded
+// test fixtures.
 type PrimaryModelState struct {
+	ModelID  string
 	Provider string
 	Model    string
 	Effort   string
@@ -2053,6 +2112,7 @@ func PrimaryModelSelection(r *Runner) PrimaryModelState {
 	}
 	if snap := r.primaryState.snapshot.Load(); snap != nil {
 		return PrimaryModelState{
+			ModelID:  strings.TrimSpace(snap.provider.ID),
 			Provider: strings.TrimSpace(snap.provider.Provider),
 			Model:    strings.TrimSpace(snap.provider.Model),
 			Effort:   appcfg.ReasoningEffort(snap.provider.Params),
@@ -2062,6 +2122,7 @@ func PrimaryModelSelection(r *Runner) PrimaryModelState {
 	provider, model := PrimaryModel(r)
 	state := PrimaryModelState{Provider: provider, Model: model}
 	if entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{}); err == nil {
+		state.ModelID = strings.TrimSpace(entry.ID)
 		state.Effort = appcfg.ReasoningEffort(entry.Params)
 	}
 	return state
@@ -2084,7 +2145,7 @@ func NewSessionModel(r *Runner, store *state.SessionStore) PrimaryModelState {
 	if err != nil || !hasRow {
 		return PrimaryModelState{}
 	}
-	resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &row.Effort)
+	resolved, err := resolveSessionModelRow(r, row)
 	if err != nil {
 		// The derived default never refuses anything: an unresolvable newest
 		// row is simply not a default, and the configuration default answers.
@@ -2172,18 +2233,21 @@ func SessionModelSelectionFromContext(ctx context.Context) (PrimaryModelState, b
 	return sel, true
 }
 
-// ResolveSessionModelChoice validates an exact provider+model pair against
-// the runner's config and overlays the effort, without touching the runner.
+// ResolveSessionModelChoiceRef validates one stored or requested selection
+// against the runner's config and overlays the effort, without touching the
+// runner. A non-empty modelID is the row the caller picked and must still
+// exist; an empty one falls back to the exact provider+model pair. The result
+// always carries the id of the row that answered.
+//
 // The pointer carries the same semantics SetPrimaryModel gives an explicit
 // selection: nil derives the entry's configured effort once, and an explicit
-// pointer — including "" — pins that exact value. It is the one resolution
-// every surface shares: a gateway selection validates through it, and turn
-// entry resolves the stored row through it.
-func ResolveSessionModelChoice(r *Runner, provider, model string, effort *string) (PrimaryModelState, error) {
+// pointer — including "" — pins that exact value.
+func ResolveSessionModelChoiceRef(r *Runner, modelID, provider, model string, effort *string) (PrimaryModelState, error) {
 	if r == nil || r.AppCfg == nil {
 		return PrimaryModelState{}, fmt.Errorf("select model: runner has no configuration")
 	}
 	entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{
+		id:       strings.TrimSpace(modelID),
 		provider: strings.TrimSpace(provider),
 		model:    strings.TrimSpace(model),
 	})
@@ -2194,11 +2258,34 @@ func ResolveSessionModelChoice(r *Runner, provider, model string, effort *string
 		entry.Params = appcfg.WithReasoningEffort(entry.Params, *effort)
 	}
 	return PrimaryModelState{
+		ModelID:  strings.TrimSpace(entry.ID),
 		Provider: strings.TrimSpace(entry.Provider),
 		Model:    strings.TrimSpace(entry.Model),
 		Effort:   appcfg.ReasoningEffort(entry.Params),
 		Set:      true,
 	}, nil
+}
+
+// ResolveSessionModelChoice is ResolveSessionModelChoiceRef for a selection
+// that names no row: the exact provider+model pair, which is everything a row
+// written before ids existed carries.
+func ResolveSessionModelChoice(r *Runner, provider, model string, effort *string) (PrimaryModelState, error) {
+	return ResolveSessionModelChoiceRef(r, "", provider, model, effort)
+}
+
+// resolveSessionModelRow resolves one session's stored row: the row id when it
+// still names a configured row, else the provider+model pair it also stores.
+// The pair is a row written before ids existed, or one whose row the model
+// page deleted — a conversation must keep running on the model it chose, so
+// the pair answers when a twin still carries it. What answers carries its own
+// row id.
+func resolveSessionModelRow(r *Runner, row state.SessionModelSelection) (PrimaryModelState, error) {
+	effort := row.Effort
+	resolved, err := ResolveSessionModelChoiceRef(r, row.ModelID, row.Provider, row.Model, &effort)
+	if err == nil || strings.TrimSpace(row.ModelID) == "" {
+		return resolved, err
+	}
+	return ResolveSessionModelChoiceRef(r, "", row.Provider, row.Model, &effort)
 }
 
 // sessionModelClient builds the client one carried selection names: the exact
@@ -2210,7 +2297,10 @@ func (r *Runner) sessionModelClient(sel PrimaryModelState) (llm.LLM, error) {
 	if llmOverrideForTest != nil {
 		return llmOverrideForTest, nil
 	}
+	// The selection's row id first: the same provider/model may be configured
+	// more than once, and the conversation must reach the row it picked.
 	entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{
+		id:       sel.ModelID,
 		provider: sel.Provider,
 		model:    sel.Model,
 	})
@@ -2263,10 +2353,11 @@ func (w *sessionModelLLM) Execute(ctx context.Context, messages []llm.Message, t
 
 // clientFor reuses one client per selection for the life of the wrapper: a
 // turn's tool loop calls repeatedly, and rebuilding the HTTP client every
-// step would throw away connection reuse for no reason. The wrapper is
+// step would throw away connection reuse for no reason. The row id is part of
+// the key — twin rows of one pair are different clients. The wrapper is
 // rebuilt on every load, so the cache never outlives its config generation.
 func (w *sessionModelLLM) clientFor(sel PrimaryModelState) (llm.LLM, error) {
-	key := strings.ToLower(strings.TrimSpace(sel.Provider) + "/" + strings.TrimSpace(sel.Model) + "/" + strings.TrimSpace(sel.Effort))
+	key := strings.ToLower(strings.TrimSpace(sel.ModelID) + "/" + strings.TrimSpace(sel.Provider) + "/" + strings.TrimSpace(sel.Model) + "/" + strings.TrimSpace(sel.Effort))
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if client, ok := w.clients[key]; ok && client != nil {
@@ -2304,8 +2395,7 @@ func (r *Runner) injectSessionModelSelection(ctx context.Context) (context.Conte
 		return ctx, nil
 	}
 	if hasRow {
-		effort := row.Effort
-		resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort)
+		resolved, err := resolveSessionModelRow(r, row)
 		if err == nil {
 			// The row is what the session runs on, so this turn makes it the
 			// agent's most recently used model. A refresh failure only logs:
@@ -2334,7 +2424,7 @@ func (r *Runner) injectSessionModelSelection(ctx context.Context) (context.Conte
 		return ctx, nil
 	}
 	if _, saveErr := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
-		Provider: sel.Provider, Model: sel.Model, Effort: sel.Effort,
+		ModelID: sel.ModelID, Provider: sel.Provider, Model: sel.Model, Effort: sel.Effort,
 	}); saveErr != nil {
 		slog.Warn("persist row-less session model row", "session_id", sid, "err", saveErr)
 	}
@@ -2353,8 +2443,7 @@ func (r *Runner) effectiveModelFor(ctx context.Context) (provider, model string)
 	if r != nil && r.Deps != nil && r.Deps.SessionStore != nil && ctx != nil {
 		if sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx)); sid != "" {
 			if row, hasRow, err := r.Deps.SessionStore.SessionModelSelection(ctx, sid); err == nil && hasRow {
-				effort := row.Effort
-				if resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort); err == nil {
+				if resolved, err := resolveSessionModelRow(r, row); err == nil {
 					return resolved.Provider, resolved.Model
 				}
 			}
@@ -2374,7 +2463,7 @@ func (r *Runner) agentModelFor(ctx context.Context) (provider, model string) {
 		if override, ok := SubagentModelOverrideFromContext(ctx); ok {
 			return strings.TrimSpace(override.Provider), strings.TrimSpace(override.Model)
 		}
-		if p, m, _, ok := SubagentOwnModel(r, tool.SubagentTypeFromContext(ctx)); ok {
+		if _, p, m, _, ok := SubagentOwnModel(r, tool.SubagentTypeFromContext(ctx)); ok {
 			return p, m
 		}
 	}
@@ -2390,7 +2479,7 @@ func (r *Runner) agentModelFor(ctx context.Context) (provider, model string) {
 func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
 	if !explicitMainThreadQuerySource(QuerySourceFromContext(ctx)) {
 		if override, ok := SubagentModelOverrideFromContext(ctx); ok {
-			client, err := ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.Provider, override.Model, override.Effort)
+			client, err := ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
 			if err != nil {
 				slog.Warn("build subagent compaction client", "err", err)
 				return nil
@@ -2398,8 +2487,8 @@ func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
 			return client
 		}
 		if subtype := strings.TrimSpace(tool.SubagentTypeFromContext(ctx)); subtype != "" {
-			if provider, model, effort, ok := SubagentOwnModel(r, subtype); ok {
-				client, err := ConfiguredModelClientWithEffort(r.AppCfg, subtype, provider, model, effort)
+			if modelID, provider, model, effort, ok := SubagentOwnModel(r, subtype); ok {
+				client, err := ConfiguredModelClientWithEffort(r.AppCfg, subtype, modelID, provider, model, effort)
 				if err != nil {
 					slog.Warn("build typed subagent compaction client", "type", subtype, "err", err)
 					return nil
@@ -2423,8 +2512,7 @@ func (r *Runner) sessionClientFor(ctx context.Context) llm.LLM {
 	if r != nil && r.Deps != nil && r.Deps.SessionStore != nil && ctx != nil {
 		if sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx)); sid != "" {
 			if row, hasRow, err := r.Deps.SessionStore.SessionModelSelection(ctx, sid); err == nil && hasRow {
-				effort := row.Effort
-				if resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort); err == nil {
+				if resolved, err := resolveSessionModelRow(r, row); err == nil {
 					if client, err := r.sessionModelClient(resolved); err == nil {
 						return client
 					}
@@ -2454,6 +2542,7 @@ func ConfiguredDefaultSelection(r *Runner) (PrimaryModelState, error) {
 		return PrimaryModelState{}, err
 	}
 	return PrimaryModelState{
+		ModelID:  strings.TrimSpace(entry.ID),
 		Provider: strings.TrimSpace(entry.Provider),
 		Model:    strings.TrimSpace(entry.Model),
 		Effort:   appcfg.ReasoningEffort(entry.Params),
@@ -2477,8 +2566,7 @@ func sessionModelRowState(r *Runner, store *state.SessionStore, sessionID string
 	if err != nil || !hasRow {
 		return PrimaryModelState{}, false
 	}
-	effort := row.Effort
-	resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort)
+	resolved, err := resolveSessionModelRow(r, row)
 	if err != nil {
 		return PrimaryModelState{}, false
 	}
@@ -2534,7 +2622,7 @@ func AgentModel(r *Runner, conversationSessionID string, subagent *agent.History
 		return provider, model, effort
 	}
 	if subagent != nil {
-		if p, m, e, ok := SubagentOwnModel(r, subagent.AgentType); ok {
+		if _, p, m, e, ok := SubagentOwnModel(r, subagent.AgentType); ok {
 			return p, m, e
 		}
 	}

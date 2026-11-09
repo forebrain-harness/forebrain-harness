@@ -384,22 +384,27 @@ func TestSubagentOwnModelMatchesWhatTheRuntimeRoutes(t *testing.T) {
 	}
 	r := &Runner{Deps: &Deps{AppCfg: cfg}}
 
-	provider, model, effort, ok := SubagentOwnModel(r, "explore")
+	modelID, provider, model, effort, ok := SubagentOwnModel(r, "explore")
 	if !ok || provider != "openai" || model != "gpt-4.1-mini" || effort != "low" {
-		t.Fatalf("explore = (%q, %q, %q, %v)", provider, model, effort, ok)
+		t.Fatalf("explore = (%q, %q, %q, %q, %v)", modelID, provider, model, effort, ok)
+	}
+	// The row id travels with the pair: that is what the client a run builds is
+	// resolved by, since the same pair may be configured more than once.
+	if want := appcfg.LegacyLLMModelID("openai", "gpt-4.1-mini", "", ""); modelID != want {
+		t.Fatalf("explore model id = %q, want %q", modelID, want)
 	}
 	// plan is a built-in type with no chain of its own: it runs on the primary
 	// agent's model, which the caller already knows.
-	if _, _, _, ok := SubagentOwnModel(r, "plan"); ok {
+	if _, _, _, _, ok := SubagentOwnModel(r, "plan"); ok {
 		t.Fatal("a built-in type with no providers must report no model of its own")
 	}
-	if _, _, _, ok := SubagentOwnModel(r, "reviewer"); ok {
+	if _, _, _, _, ok := SubagentOwnModel(r, "reviewer"); ok {
 		t.Fatal("a non-built-in definition must not be presented as a subagent model")
 	}
-	if _, _, _, ok := SubagentOwnModel(r, ""); ok {
+	if _, _, _, _, ok := SubagentOwnModel(r, ""); ok {
 		t.Fatal("an unnamed type has no model of its own")
 	}
-	if _, _, _, ok := SubagentOwnModel(nil, "explore"); ok {
+	if _, _, _, _, ok := SubagentOwnModel(nil, "explore"); ok {
 		t.Fatal("a nil runner has no model of its own")
 	}
 }

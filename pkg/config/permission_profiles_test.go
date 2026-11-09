@@ -73,46 +73,6 @@ func TestProjectExampleForebrainYAMLLoads(t *testing.T) {
 	}
 }
 
-func TestProviderLookups(t *testing.T) {
-	t.Parallel()
-	get := func(k string) string {
-		switch k {
-		case "OPENAI_API_KEY":
-			return " openai "
-		case "ANTHROPIC_API_KEY":
-			return " anthropic "
-		case "DEEPSEEK_API_KEY":
-			return " deepseek "
-		case "OPENAI_BASE_URL":
-			return " https://openai.example "
-		case "ANTHROPIC_BASE_URL":
-			return " https://anthropic.example "
-		case "DEEPSEEK_BASE_URL":
-			return " https://deepseek.example "
-		default:
-			return ""
-		}
-	}
-	if got := ProviderAPIKeyLookup(get, "openai"); got != "openai" {
-		t.Fatalf("ProviderAPIKeyLookup openai = %q", got)
-	}
-	if got := ProviderAPIKeyLookup(get, "anthropic"); got != "anthropic" {
-		t.Fatalf("ProviderAPIKeyLookup anthropic = %q", got)
-	}
-	if got := ProviderAPIKeyLookup(get, "deepseek"); got != "deepseek" {
-		t.Fatalf("ProviderAPIKeyLookup deepseek = %q", got)
-	}
-	if got := ProviderBaseURLLookup(get, "openai"); got != "https://openai.example" {
-		t.Fatalf("ProviderBaseURLLookup openai = %q", got)
-	}
-	if got := ProviderBaseURLLookup(get, "anthropic"); got != "https://anthropic.example" {
-		t.Fatalf("ProviderBaseURLLookup anthropic = %q", got)
-	}
-	if got := ProviderBaseURLLookup(get, "deepseek"); got != "https://deepseek.example" {
-		t.Fatalf("ProviderBaseURLLookup deepseek = %q", got)
-	}
-}
-
 func TestLLMRequestParamsAndProviderHelpers(t *testing.T) {
 	t.Parallel()
 	var p LLMRequestParams
@@ -473,8 +433,7 @@ func TestLoadAllowsEnvReferenceSecret(t *testing.T) {
 }
 
 func TestLoadExpandsYAMLEnvReferenceFromProcess(t *testing.T) {
-	// Isolate FOREBRAIN_HOME so Load does not merge the developer's real
-	// ~/.forebrain/.env, which would override the process env set below.
+	// Isolate FOREBRAIN_HOME so Load reads nothing of the developer's own home.
 	t.Setenv("FOREBRAIN_HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), "forebrain.yaml")
 	body := strings.Join([]string{
@@ -518,12 +477,10 @@ func TestLoadExpandsOnlyBracedYAMLEnvReference(t *testing.T) {
 	}
 }
 
-func TestLoadExpandsYAMLEnvReferenceFromForebrainDotEnv(t *testing.T) {
+func TestLoadExpandsYAMLEnvReferenceFromTheProcessEnvironment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
-	if err := os.WriteFile(filepath.Join(home, ".env"), []byte("CUSTOM_GATEWAY_ADDR=127.0.0.1:9191\n"), 0o600); err != nil {
-		t.Fatalf("write env: %v", err)
-	}
+	t.Setenv("CUSTOM_GATEWAY_ADDR", "127.0.0.1:9191")
 	path := filepath.Join(home, "forebrain.yaml")
 	body := strings.Join([]string{
 		"gateway:",
@@ -538,7 +495,7 @@ func TestLoadExpandsYAMLEnvReferenceFromForebrainDotEnv(t *testing.T) {
 		t.Fatalf("Load error: %v", err)
 	}
 	if got := cfg.Gateway.HTTPAddr; got != "127.0.0.1:9191" {
-		t.Fatalf("gateway http_addr = %q, want dotenv value", got)
+		t.Fatalf("gateway http_addr = %q, want the environment's value", got)
 	}
 }
 
@@ -582,20 +539,10 @@ func TestLoadAllowsGatewayAuthModeBoolFreeConfig(t *testing.T) {
 func TestLoadPersistedSkipsRuntimeEnvSecretsForReadModifyWrite(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
-	originalAPIKey := os.Getenv("OPENAI_API_KEY")
-	t.Cleanup(func() {
-		if originalAPIKey == "" {
-			_ = os.Unsetenv("OPENAI_API_KEY")
-			return
-		}
-		_ = os.Setenv("OPENAI_API_KEY", originalAPIKey)
-	})
+	t.Setenv("OPENAI_API_KEY", "runtime-only-not-for-yaml")
 
-	if err := os.WriteFile(filepath.Join(home, ".env"), []byte("OPENAI_API_KEY=runtime-only-not-for-yaml\n"), 0o600); err != nil {
-		t.Fatalf("write env: %v", err)
-	}
 	path := filepath.Join(home, "forebrain.yaml")
-	body := "agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-test\n"
+	body := "agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-test\n          api_key: ${OPENAI_API_KEY}\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -605,15 +552,15 @@ func TestLoadPersistedSkipsRuntimeEnvSecretsForReadModifyWrite(t *testing.T) {
 		t.Fatalf("Load error: %v", err)
 	}
 	if got := runtimeCfg.Agents.Definitions["main"].LLMProviders[0].APIKey; got != "runtime-only-not-for-yaml" {
-		t.Fatalf("runtime Load API key = %q, want env override", got)
+		t.Fatalf("runtime Load API key = %q, want the expansion of the reference", got)
 	}
 
 	persistedCfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted error: %v", err)
 	}
-	if got := persistedCfg.Agents.Definitions["main"].LLMProviders[0].APIKey; got != "" {
-		t.Fatalf("LoadPersisted API key = %q, want empty persisted value", got)
+	if got := persistedCfg.Agents.Definitions["main"].LLMProviders[0].APIKey; got != "${OPENAI_API_KEY}" {
+		t.Fatalf("LoadPersisted API key = %q, want the reference as written", got)
 	}
 	if err := Save(path, persistedCfg); err != nil {
 		t.Fatalf("Save error: %v", err)
@@ -627,14 +574,24 @@ func TestLoadPersistedSkipsRuntimeEnvSecretsForReadModifyWrite(t *testing.T) {
 	}
 }
 
-func TestSaveDoesNotPersistRuntimeEnvSecretsLoadedFromDotEnv(t *testing.T) {
+func TestSaveDoesNotPersistRuntimeEnvSecretsLoadedFromTheEnvironment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
-	if err := os.WriteFile(filepath.Join(home, ".env"), []byte("FOREBRAIN_GATEWAY_TOKEN=runtime-gateway-token\nTAVILY_API_KEY=runtime-tavily-key\n"), 0o600); err != nil {
-		t.Fatalf("write env: %v", err)
-	}
+	t.Setenv("FOREBRAIN_GATEWAY_TOKEN", "runtime-gateway-token")
+	t.Setenv("TAVILY_API_KEY", "runtime-tavily-key")
 	path := filepath.Join(home, "forebrain.yaml")
-	if err := os.WriteFile(path, []byte("sandbox_mode: read-only\n"), 0o600); err != nil {
+	body := strings.Join([]string{
+		"sandbox_mode: read-only",
+		"gateway:",
+		"  auth:",
+		"    token: ${FOREBRAIN_GATEWAY_TOKEN}",
+		"agents:",
+		"  defaults:",
+		"    web_search:",
+		"      tavily:",
+		"        api_key: ${TAVILY_API_KEY}",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 

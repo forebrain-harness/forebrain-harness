@@ -55,7 +55,7 @@ func TestStartSupportsWebSocketTransport(t *testing.T) {
 	defer httpServer.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http")
-	session, err := Start(ctx, t.TempDir(), t.TempDir(), appcfg.MCPServerConfig{
+	session, err := Start(ctx, t.TempDir(), nil, t.TempDir(), appcfg.MCPServerConfig{
 		Name:      "ws",
 		Transport: "websocket",
 		URL:       wsURL,

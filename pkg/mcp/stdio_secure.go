@@ -10,7 +10,6 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
-	"github.com/joho/godotenv"
 )
 
 func validateMCPStdioCommand(cmd string) error {
@@ -49,45 +48,31 @@ func verifyMCPCommandSHA256(cmd string, wantHex string) error {
 }
 
 // envLookupForServer picks the variable source one server entry may resolve
-// ${...} references from.
+// ${...} references from. vars is the operator's variables table, read once by
+// the caller.
 //
-// A global entry is operator-authored configuration: it resolves from the
-// process environment, as it always has. A project entry arrives with a
-// repository checkout, and a repository must not be able to probe the host
-// that cloned it — so its lookup is restricted to ~/.forebrain/.env, a file only
-// the operator can write. An unset variable in that file is simply missing;
-// the caller reports it like any other unresolved reference.
-func envLookupForServer(homeDir string, srv appcfg.MCPServerConfig) func(string) (string, bool) {
-	if !IsProjectScope(srv) {
-		return os.LookupEnv
-	}
-	m := projectScopedEnvMap(homeDir)
-	return func(name string) (string, bool) {
-		v, ok := m[strings.TrimSpace(name)]
+// A project entry arrives with a repository checkout, and a repository must not
+// be able to probe the host that cloned it — so its lookup is restricted to
+// that table, values only the operator can write. A global entry is
+// operator-authored configuration and resolves from the table first, then from
+// the process environment, as a container-supplied value has always worked.
+func envLookupForServer(vars map[string]string, srv appcfg.MCPServerConfig) func(string) (string, bool) {
+	fromTable := func(name string) (string, bool) {
+		v, ok := vars[strings.TrimSpace(name)]
 		return v, ok
 	}
+	if IsProjectScope(srv) {
+		return fromTable
+	}
+	return func(name string) (string, bool) {
+		if v, ok := fromTable(name); ok {
+			return v, true
+		}
+		return os.LookupEnv(name)
+	}
 }
 
-// projectScopedEnvMap reads ~/.forebrain/.env. A missing or unreadable file is
-// an empty map: no project reference resolves, which fails closed.
-func projectScopedEnvMap(homeDir string) map[string]string {
-	out := map[string]string{}
-	root := strings.TrimSpace(homeDir)
-	if root == "" {
-		return out
-	}
-	b, err := os.ReadFile(homepkg.DefaultEnvPath(root))
-	if err != nil {
-		return out
-	}
-	m, err := godotenv.Unmarshal(strings.ReplaceAll(string(b), "\r\n", "\n"))
-	if err != nil {
-		return out
-	}
-	return m
-}
-
-func mcpStdioEnv(homeDir string, srv appcfg.MCPServerConfig) []string {
+func mcpStdioEnv(vars map[string]string, srv appcfg.MCPServerConfig) []string {
 	inherit := srv.InheritParentEnv != nil && *srv.InheritParentEnv
 	// A project entry never inherits the parent environment, whatever its
 	// file says: inherit_parent_env in a checkout is repository-controlled
@@ -99,7 +84,7 @@ func mcpStdioEnv(homeDir string, srv appcfg.MCPServerConfig) []string {
 	if inherit {
 		base = homepkg.SafeSubprocessEnv(base, homepkg.Options{})
 	}
-	lookup := envLookupForServer(homeDir, srv)
+	lookup := envLookupForServer(vars, srv)
 	explicit := make(map[string]string, len(srv.Env))
 	for k, v := range srv.Env {
 		k = strings.TrimSpace(k)

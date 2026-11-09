@@ -2,9 +2,7 @@ package process
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,7 +10,6 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
-	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 // resolveCache caches the first Resolve() result so callers that check
@@ -35,7 +32,7 @@ var (
 
 // ResetResolve clears the cached Resolve() result so the next call
 // re-reads from disk. Call this when the config file is known to have
-// changed (e.g. after writing a new config via SaveConfig).
+// changed (e.g. after a setup flow stored a new model configuration).
 func ResetResolve() {
 	resolveMu.Lock()
 	defer resolveMu.Unlock()
@@ -116,46 +113,6 @@ func resolveUncachedWithHooks(hooks StartupHooks) (Context, error) {
 		return Context{}, err
 	}
 	return Context{Home: home, ConfigPath: cfgPath, Config: cfg}, nil
-}
-
-// SaveConfig persists the setup flow's configuration change (plan 188 W9):
-// the agents section — the only one a setup or /connect changes — goes into
-// the state database, the one write path every configuration surface shares.
-// forebrain.yaml is not written; a home whose file does not exist yet gets a
-// minimal startup-sections one created, because the gateway binds before a
-// database may exist and the file is where its startup sections live.
-func SaveConfig(ctx Context) error {
-	if ctx.ConfigPath == "" {
-		return fmt.Errorf("empty config path")
-	}
-	if ctx.Home == "" {
-		return fmt.Errorf("empty home")
-	}
-	if err := ensureStartupConfigFile(ctx.ConfigPath); err != nil {
-		return err
-	}
-	// The setup flow may run before anything else has laid the home out, so
-	// the state directory's existence cannot be assumed here.
-	if err := os.MkdirAll(filepath.Join(ctx.Home, "state"), 0o755); err != nil {
-		return err
-	}
-	// The state database opens where the configuration file's database section
-	// says it lives (plan 209); an empty URL is the home's own SQLite file.
-	databaseURL, err := appcfg.FileDatabaseURL(ctx.ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read database.url from %s: %w", ctx.ConfigPath, err)
-	}
-	db, err := state.OpenStateFromHome(context.Background(), ctx.Home, databaseURL)
-	if err != nil {
-		return fmt.Errorf("open state database: %w", err)
-	}
-	defer db.Close()
-	InstallConfigSectionValidator(ctx.ConfigPath, db)
-	env := &Environment{Root: ctx.Home, ConfigPath: ctx.ConfigPath, SQL: db}
-	return env.UpdateRootSection(context.Background(), "agents", func(cfg *appcfg.Root) error {
-		cfg.Agents = ctx.Config.Agents
-		return nil
-	})
 }
 
 // ErrorLogPath is where a forebrain home keeps its error log.

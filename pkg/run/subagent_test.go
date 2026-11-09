@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -6859,6 +6862,13 @@ func subagentCustomConfig() *appcfg.Root {
 		Definitions: map[string]appcfg.AgentDefinition{
 			"main": {
 				Primary: true,
+				// The model a subagent's `model:` reference names has to be a
+				// row this agent actually holds: a reference that resolves to
+				// nothing pins nothing (plan 261).
+				LLMProviders: []appcfg.AgentLLMProviderConfig{{
+					Provider: "deepseek", Model: "deepseek-v4-flash",
+					APIKey: "key", BaseURL: "http://flash.test/v1",
+				}},
 				Subagents: []appcfg.SubagentConfig{
 					{Name: "verification", Enabled: boolPtr(false)},
 					{
@@ -6956,11 +6966,112 @@ func TestCustomSubagentModelAndEffortReachTheEntry(t *testing.T) {
 	if !pinnedSet || pinned.Model != "deepseek-v4-flash" || pinned.Effort != "low" {
 		t.Fatalf("the run's context pinned %#v (set=%v), want the configured model and effort", pinned, pinnedSet)
 	}
+	// The pin carries the row, not just the pair: a client built for this run
+	// must reach the configured row, and the same pair may be configured twice.
+	if want := appcfg.LegacyLLMModelID("deepseek", "deepseek-v4-flash", "http://flash.test/v1", ""); pinned.ModelID != want {
+		t.Fatalf("the run's pinned model id = %q, want the configured row %q", pinned.ModelID, want)
+	}
 	if len(probe.spawned) != 1 {
 		t.Fatalf("spawn notifications = %#v", probe.spawned)
 	}
 	if got := probe.spawned[0]; got.Model != "deepseek-v4-flash" || got.Effort != "low" {
 		t.Fatalf("spawn announced %q/%q effort %q, want the configured model and effort", got.Provider, got.Model, got.Effort)
+	}
+}
+
+// TestSubagentModelPinReachesItsRowsEndpoint pins plan 261's sixth item: a
+// subagent type configured with `model: <row id>` pins that row, and the client
+// built for its runs requests that row's endpoint — two rows of one
+// provider/model reach two servers, and only the id tells them apart.
+func TestSubagentModelPinReachesItsRowsEndpoint(t *testing.T) {
+	var firstHits, secondHits int64
+	respond := func(hits *int64) http.HandlerFunc {
+		return func(rw http.ResponseWriter, r *http.Request) {
+			atomic.AddInt64(hits, 1)
+			rw.Header().Set("Content-Type", "text/event-stream")
+			frames := []string{
+				`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"gpt-5","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`,
+				`{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"gpt-5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			}
+			for _, frame := range frames {
+				_, _ = fmt.Fprintf(rw, "data: %s\n\n", frame)
+			}
+			_, _ = fmt.Fprint(rw, "data: [DONE]\n\n")
+		}
+	}
+	first := httptest.NewServer(respond(&firstHits))
+	defer first.Close()
+	second := httptest.NewServer(respond(&secondHits))
+	defer second.Close()
+	t.Setenv("FOREBRAIN_TWIN_PIN_TEST_KEY", "test-key")
+	key := "${FOREBRAIN_TWIN_PIN_TEST_KEY}"
+	secondID := appcfg.LegacyLLMModelID("openai", "gpt-5", second.URL+"/v1", "")
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+		Defaults: appcfg.AgentDefaults{EnableSubagent: boolPtr(true)},
+		Definitions: map[string]appcfg.AgentDefinition{
+			"main": {
+				Primary: true,
+				LLMProviders: []appcfg.AgentLLMProviderConfig{
+					{Provider: "openai", Model: "gpt-5", APIKey: key, BaseURL: first.URL + "/v1"},
+					{Provider: "openai", Model: "gpt-5", APIKey: key, BaseURL: second.URL + "/v1"},
+				},
+				Subagents: []appcfg.SubagentConfig{{
+					Name: "repo-scout", Description: "Finds the files a task touches", Model: secondID,
+				}},
+			},
+		},
+	}}
+	home := t.TempDir()
+	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
+
+	var pinned SubagentModelOverride
+	var pinnedSet bool
+	if _, _, err := dispatchSubagent(dispatchTestCtx(), fac, subagentDispatch{
+		taskID:  "task-twin-pin",
+		task:    "scout the repo",
+		subtype: "repo-scout",
+		resolve: SubagentCatalogFor(cfg, "main").ResolvePublic,
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			pinned, pinnedSet = SubagentModelOverrideFromContext(prep.ctx)
+			return "done", nil
+		},
+	}); err != nil {
+		t.Fatalf("dispatchSubagent: %v", err)
+	}
+	if !pinnedSet {
+		t.Fatal("the run's context pinned no model")
+	}
+	if pinned.ModelID != secondID || pinned.Provider != "openai" || pinned.Model != "gpt-5" {
+		t.Fatalf("pinned %#v, want the row %q", pinned, secondID)
+	}
+
+	// The client a run of this type builds requests the pinned row.
+	client, err := ConfiguredModelClientWithEffort(cfg, "repo-scout", pinned.ModelID, pinned.Provider, pinned.Model, pinned.Effort)
+	if err != nil {
+		t.Fatalf("ConfiguredModelClientWithEffort: %v", err)
+	}
+	if _, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := atomic.LoadInt64(&secondHits); got != 1 {
+		t.Fatalf("the pinned row's endpoint got %d requests, want 1", got)
+	}
+	if got := atomic.LoadInt64(&firstHits); got != 0 {
+		t.Fatalf("the first twin got %d requests, want 0", got)
+	}
+
+	// Without the row the same pair resolves to the first twin: the id is what
+	// routes this run, not the pair the two rows share.
+	client, err = ConfiguredModelClientWithEffort(cfg, "repo-scout", "", pinned.Provider, pinned.Model, pinned.Effort)
+	if err != nil {
+		t.Fatalf("ConfiguredModelClientWithEffort without the id: %v", err)
+	}
+	if _, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := atomic.LoadInt64(&firstHits); got != 1 {
+		t.Fatalf("the pair alone reached the first twin %d times, want 1", got)
 	}
 }
 
@@ -7025,6 +7136,7 @@ func TestDispatchPinsTheSameModelItRecords(t *testing.T) {
 		t.Fatalf("dispatchSubagent: %v", err)
 	}
 	want := SubagentModelOverride{
+		ModelID:  appcfg.LegacyLLMModelID("deepseek", "deepseek-v4-flash", "http://flash.test/v1", ""),
 		Provider: prep.entry.ModelProvider,
 		Model:    prep.entry.Model,
 		Effort:   prep.entry.ReasoningEffort,

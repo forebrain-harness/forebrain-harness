@@ -4,6 +4,7 @@ package llm
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 )
@@ -189,4 +190,44 @@ func LogDebug(topic, message string) {
 	if l := debugLogger.Load(); l != nil {
 		(*l)(topic, message)
 	}
+}
+
+// ExactURLRoundTripper sends a request to one exact endpoint (「自定义协议」):
+// a custom model whose configuration names a complete request URL, which no
+// protocol path is appended to. It replaces a POST's scheme, host, path and
+// query with the target's and leaves every header alone; a GET — the calls a
+// client makes for its own bookkeeping — passes through untouched.
+//
+// It lives here, beside WrapHTTPTransport, because it is transport wiring: the
+// Chat Completions client takes it as the outermost transport and calls
+// SetBase with the chain it built (watchdog, usage accounting, reasoning
+// normalization), so the exact URL decides where the request goes and nothing
+// about how it is observed.
+type ExactURLRoundTripper struct {
+	Target *url.URL
+	// Inner is the chain this wrapper sits outside of. The client installs it
+	// through SetBase; nil means http.DefaultTransport.
+	Inner http.RoundTripper
+}
+
+// SetBase installs the transport this wrapper delegates to. It is what makes
+// the type usable as the injected transport of a provider client, which wires
+// its own wrappers into whatever it is handed.
+func (t *ExactURLRoundTripper) SetBase(base http.RoundTripper) { t.Inner = base }
+
+func (t *ExactURLRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	inner := t.Inner
+	if inner == nil {
+		inner = http.DefaultTransport
+	}
+	if req == nil || req.URL == nil || t.Target == nil || req.Method != http.MethodPost {
+		return inner.RoundTrip(req)
+	}
+	next := req.Clone(req.Context())
+	if next == nil {
+		next = req
+	}
+	target := *t.Target
+	next.URL = &target
+	return inner.RoundTrip(next)
 }

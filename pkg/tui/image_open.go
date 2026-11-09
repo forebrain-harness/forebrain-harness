@@ -102,6 +102,24 @@ func imageViewerCommand(path string) (string, []string) {
 	}
 }
 
+// browserOpener hands a URL to this machine's browser. It is a variable so a
+// test drives a sign-in without opening one; production uses the platform's
+// own URL handler, the same launcher the image preview uses.
+var browserOpener = openInBrowser
+
+// openInBrowser opens url in the desktop's own handler. Starting rather than
+// waiting is deliberate, for the same reason the image viewer starts detached:
+// the browser owns the screen until the user closes it. A launcher that refuses
+// the URL reports it to failed, so the surface can say so and let the sign-in
+// continue with the address on screen.
+func openInBrowser(url string, failed func(error)) error {
+	name, args := imageViewerCommand(url)
+	if name == "" {
+		return fmt.Errorf("no system browser is available on this platform")
+	}
+	return startDetached(failed, name, args...)
+}
+
 // openImagePreview hands one already-resolved image step to the system viewer.
 // A click resolves it on the screen its press landed on (viewportRelease). A
 // miss is not an error worth a status line: the marker line is the affordance,

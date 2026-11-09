@@ -8,7 +8,6 @@ const PAGES = [
   '/subagents',
   '/permissions',
   '/tools',
-  '/providers',
   '/memories',
   '/settings',
 ]

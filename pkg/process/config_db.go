@@ -12,13 +12,18 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/modelinfo"
 	openaiauth "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
@@ -90,9 +95,8 @@ func (env *Environment) configStore() (*state.ConfigStore, error) {
 // runtime section it holds. A section the database does not hold reads as its
 // zero value: after the legacy import rewrote the file, the file's runtime
 // sections are dead and the database is the only source. The composed root
-// then runs through the same tail Load runs — .env merge, ${ENV} expansion,
-// validation — so a composed configuration and a file-loaded one behave
-// identically.
+// then runs through the same tail Load runs — ${ENV} expansion and validation
+// — so a composed configuration and a file-loaded one behave identically.
 func composeConfig(ctx context.Context, env *Environment) (appcfg.Root, error) {
 	if env == nil || strings.TrimSpace(env.ConfigPath) == "" {
 		return appcfg.Root{}, fmt.Errorf("compose config: no config path")
@@ -108,18 +112,41 @@ func composeConfigFrom(ctx context.Context, cfgPath string, db *sql.DB) (appcfg.
 	if err != nil {
 		return appcfg.Root{}, err
 	}
-	if err := appcfg.FinishLoad(&out); err != nil {
+	if err := appcfg.FinishLoadWith(&out, envLookup(ctx, db)); err != nil {
 		return appcfg.Root{}, fmt.Errorf("compose config: %w", err)
 	}
 	return out, nil
 }
 
+// envLookup is the lookup the composed configuration's ${ENV} references
+// resolve from: the operator's variables first — that table is where a value an
+// MCP or LSP entry names is kept (plan 259/268) — and the process environment
+// second, because a container supplies values that way. A variables table that
+// cannot be read leaves the process environment alone rather than failing the
+// composition; the read is logged and every reference falls through to it.
+func envLookup(ctx context.Context, db *sql.DB) func(string) (string, bool) {
+	vars := map[string]string{}
+	if db != nil {
+		if m, err := (&state.EnvVarStore{DB: db}).Map(ctx); err != nil {
+			slog.Warn("the operator's variables could not be read; ${NAME} references resolve from the environment only", "err", err)
+		} else {
+			vars = m
+		}
+	}
+	return func(name string) (string, bool) {
+		if v, ok := vars[strings.TrimSpace(name)]; ok {
+			return v, true
+		}
+		return os.LookupEnv(name)
+	}
+}
+
 // composeSectionsFrom assembles the persisted form of the composed source:
 // the YAML file's startup sections plus the database's stored sections, with
 // override substituting (or, for a nil value, removing) sections for this
-// one composition. No .env merge, no expansion, no validation run — this is
-// the layer a read-modify-write reads and the candidate validator composes,
-// the role LoadPersisted played for the file (plan 188 §1).
+// one composition. No ${ENV} expansion, no validation run — this is the layer a
+// read-modify-write reads and the candidate validator composes, the role
+// LoadPersisted played for the file (plan 188 §1).
 func composeSectionsFrom(ctx context.Context, cfgPath string, db *sql.DB, override map[string]json.RawMessage) (appcfg.Root, error) {
 	store := &state.ConfigStore{DB: db}
 	yamlRoot, err := appcfg.LoadPersisted(cfgPath)
@@ -154,7 +181,238 @@ func composeSectionsFrom(ctx context.Context, cfgPath string, db *sql.DB, overri
 			return appcfg.Root{}, fmt.Errorf("compose config: section %s: %w", name, err)
 		}
 	}
+	// The install-wide model table is not a section: it is one row per model,
+	// and every agent reads the one view (plan 260).
+	models, err := (&state.LLMModelStore{DB: db}).List(ctx)
+	if err != nil {
+		return appcfg.Root{}, fmt.Errorf("compose config: read model table: %w", err)
+	}
+	out.LLMModels, err = llmModelsFromRows(models)
+	if err != nil {
+		return appcfg.Root{}, fmt.Errorf("compose config: read model table: %w", err)
+	}
 	return out, nil
+}
+
+// llmModelsFromRows projects fb_llm_models rows into the configuration's model
+// view, field by field. A row's params are stored as the JSON text a request
+// carries; a row that does not parse names its id — never its key — because
+// the row is what an operator edits, and the error must send them to it.
+func llmModelsFromRows(rows []state.LLMModel) ([]appcfg.LLMModelConfig, error) {
+	out := make([]appcfg.LLMModelConfig, 0, len(rows))
+	for _, row := range rows {
+		params, err := appcfg.ParseLLMRequestParamsJSON(row.ParamsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("model %s: params: %w", row.ID, err)
+		}
+		out = append(out, appcfg.LLMModelConfig{
+			ID:       row.ID,
+			Provider: row.Provider,
+			Model:    row.Model,
+			BaseURL:  row.BaseURL,
+			APIPath:  row.APIPath,
+			APIKey:   row.APIKey,
+			Params:   params,
+			Caps: appcfg.LLMModelCaps{
+				Images:        row.CapImages,
+				PDF:           row.CapPDF,
+				Video:         row.CapVideo,
+				Audio:         row.CapAudio,
+				Reasoning:     row.CapReasoning,
+				ReasoningOff:  row.CapReasoningOff,
+				Efforts:       row.CapEfforts,
+				DefaultEffort: row.CapDefaultEffort,
+				ContextWindow: row.CapContextWindow,
+				MaxOutput:     row.CapMaxOutput,
+			},
+			URLVerbatim: row.URLVerbatim,
+		})
+	}
+	return out, nil
+}
+
+// installModelOverrides publishes what the composed configuration says about
+// models into the process-wide catalog lookup, and refreshes the live
+// capability answers in the background. It is called every time this process
+// adopts a configuration, and it never waits on a network: the two data-only
+// layers (the registry's plan tables and the rows' overrides) are installed
+// inline, and the live lookups run on their own goroutine with a per-source
+// timeout, so startup and every turn boundary stay untouched by a slow or
+// unreachable provider.
+func installModelOverrides(root appcfg.Root) {
+	installBuiltinModelTables()
+	llm.SetModelOverrides(modelOverridesFor(root.LLMModels))
+	if testing.Testing() {
+		// A test binary reaches no provider: the live refresh is exercised
+		// directly by the tests that install their own sources
+		// (TestRefreshModelCatalogCaps...). Production is the only caller that
+		// should depend on a network at all.
+		resetModelCatalogCaps()
+		return
+	}
+	refreshModelCatalogCaps(root.LLMModels, installedModelInfoResolver())
+}
+
+var (
+	modelInfoResolverOnce sync.Once
+	modelInfoResolver     *modelinfo.Resolver
+)
+
+// installedModelInfoResolver is the process's one live-lookup chain. It is
+// built once, not per adoption: models.dev's document is 6.5MB and its source
+// caches it for hours, so a resolver rebuilt on every configuration change
+// would re-download it on every turn boundary that moved the configuration.
+func installedModelInfoResolver() *modelinfo.Resolver {
+	modelInfoResolverOnce.Do(func() { modelInfoResolver = modelinfo.New() })
+	return modelInfoResolver
+}
+
+// installBuiltinModelTables teaches the catalog lookup the plan model tables
+// of providers models.json has no rows for (volcengine, byteplus). Every call
+// installs every table, so the layer always matches this build's registry.
+func installBuiltinModelTables() {
+	for _, provider := range appcfg.BuiltinProviders() {
+		if len(provider.Models) == 0 {
+			continue
+		}
+		models := make([]llm.Model, 0, len(provider.Models))
+		for _, m := range provider.Models {
+			models = append(models, llm.Model{
+				ID:                  m.ID,
+				Provider:            provider.ID,
+				APIModel:            m.ID,
+				ContextWindow:       m.ContextWindow,
+				DefaultMaxTokens:    m.MaxOutput,
+				SupportsAttachments: m.Images,
+			})
+		}
+		llm.SetBuiltinModels(provider.ID, models)
+	}
+}
+
+// modelOverridesFor builds the override layer from the configured rows: a row
+// that carries any capability becomes one entry under
+// JoinProviderModel(provider, model). Two rows naming the same provider and
+// model collapse to the first — the one the table lists first, which is the
+// oldest — because the global lookup has one answer per model; the client's
+// own output limit still applies per row (AgentLLMProviderConfig.MaxOutputTokens).
+func modelOverridesFor(rows []appcfg.LLMModelConfig) map[string]llm.ModelOverride {
+	out := make(map[string]llm.ModelOverride, len(rows))
+	for _, row := range rows {
+		override, ok := modelOverrideForRow(row)
+		if !ok {
+			continue
+		}
+		key := strings.ToLower(llm.JoinProviderModel(row.Provider, row.Model))
+		if key == "" {
+			continue
+		}
+		if _, exists := out[key]; exists {
+			continue
+		}
+		out[key] = override
+	}
+	return out
+}
+
+// modelOverrideForRow projects one row's capability columns into the lookup's
+// override type. ok is false for a row that names no capability at all.
+func modelOverrideForRow(row appcfg.LLMModelConfig) (llm.ModelOverride, bool) {
+	caps := row.Caps
+	if caps.Images == nil && caps.PDF == nil && caps.Video == nil && caps.Audio == nil &&
+		caps.Reasoning == nil && caps.ReasoningOff == nil && caps.Efforts == nil &&
+		caps.ContextWindow == nil && caps.MaxOutput == nil {
+		return llm.ModelOverride{}, false
+	}
+	return llm.ModelOverride{
+		SupportsImages: caps.Images,
+		SupportsPDF:    caps.PDF,
+		SupportsVideo:  caps.Video,
+		SupportsAudio:  caps.Audio,
+		CanReason:      caps.Reasoning,
+		ReasoningOff:   caps.ReasoningOff,
+		Efforts:        caps.Efforts,
+		ContextWindow:  caps.ContextWindow,
+		MaxOutput:      caps.MaxOutput,
+	}, true
+}
+
+var (
+	modelCatalogCapsMu  sync.RWMutex
+	modelCatalogCaps    map[string]modelinfo.Info
+	modelCatalogCapsGen uint64
+)
+
+// ModelCatalogCaps returns the live capability answer for one configured row,
+// keyed by row id. ok is false while the row's lookup is still running, after
+// it failed, or when the provider does not list the model — all three mean the
+// same thing to a surface: show the levels to pick from, never a spinner.
+func ModelCatalogCaps(rowID string) (modelinfo.Info, bool) {
+	modelCatalogCapsMu.RLock()
+	defer modelCatalogCapsMu.RUnlock()
+	info, ok := modelCatalogCaps[strings.TrimSpace(rowID)]
+	return info, ok
+}
+
+// ResolveModelInfo answers one model's live capability question — the thinking
+// levels its vendor's own list gives, else models.dev's — through the
+// process's one resolver chain, so the 6.5MB models.dev document is downloaded
+// once and serves every caller. source is the subscription that wrote (or will
+// write) the row, "" for a hand-entered one; it picks which source answers
+// first. It is what the models page asks for a model that is not in the table
+// yet — for a stored row ModelCatalogCaps answers without a request.
+func ResolveModelInfo(ctx context.Context, provider, model, source, apiKey string) (modelinfo.Info, error) {
+	return installedModelInfoResolver().Resolve(ctx,
+		modelinfo.Row{Provider: provider, Model: model}, source, apiKey)
+}
+
+func resetModelCatalogCaps() {
+	modelCatalogCapsMu.Lock()
+	modelCatalogCapsGen++
+	modelCatalogCaps = nil
+	modelCatalogCapsMu.Unlock()
+}
+
+// refreshModelCatalogCaps resolves every configured row in the background and
+// publishes each answer as it arrives. A newer sweep supersedes an older one:
+// the generation counter makes the stale sweep's answers land nowhere, so a
+// configuration adopted while a lookup was in flight cannot be overwritten by
+// the configuration it replaced.
+func refreshModelCatalogCaps(rows []appcfg.LLMModelConfig, resolver *modelinfo.Resolver) {
+	modelCatalogCapsMu.Lock()
+	modelCatalogCapsGen++
+	gen := modelCatalogCapsGen
+	modelCatalogCaps = map[string]modelinfo.Info{}
+	modelCatalogCapsMu.Unlock()
+	if len(rows) == 0 || resolver == nil {
+		return
+	}
+	pending := make([]appcfg.LLMModelConfig, 0, len(rows))
+	for _, row := range rows {
+		if strings.TrimSpace(row.ID) == "" {
+			continue
+		}
+		pending = append(pending, row)
+	}
+	go func() {
+		for _, row := range pending {
+			// One row at a time: a sweep must not open a connection per row
+			// at once, and the resolver already bounds each source.
+			info, err := resolver.Resolve(context.Background(), modelinfo.Row{Provider: row.Provider, Model: row.Model}, "", row.APIKey)
+			if err != nil {
+				// Silent by design: an unreachable source and a model it does
+				// not list are the same answer to the person — the levels are
+				// theirs to pick.
+				slog.Debug("live model capabilities unavailable", "model", row.Model, "provider", row.Provider, "err", err)
+				continue
+			}
+			modelCatalogCapsMu.Lock()
+			if gen == modelCatalogCapsGen {
+				modelCatalogCaps[row.ID] = info
+			}
+			modelCatalogCapsMu.Unlock()
+		}
+	}()
 }
 
 // validateRootSection is the write-side gate the state store runs on every
@@ -172,7 +430,7 @@ func validateRootSection(ctx context.Context, cfgPath string, db *sql.DB, sectio
 	if err != nil {
 		return err
 	}
-	return appcfg.FinishLoad(&composed)
+	return appcfg.FinishLoadWith(&composed, envLookup(ctx, db))
 }
 
 // InstallConfigSectionValidator installs the store's write-side gate for
@@ -257,8 +515,7 @@ func (env *Environment) ConfigStore() (*state.ConfigStore, error) {
 
 // ComposedPersistedConfig reads the persisted form of the runtime
 // configuration — the YAML's startup sections plus the stored sections, as
-// LoadPersisted composed them: no .env merge, no ${ENV} expansion, no
-// validation. It is the read-modify-write base for a surface changing one
+// LoadPersisted composed them: no ${ENV} expansion, no validation. It is the read-modify-write base for a surface changing one
 // section, the role file-era readers gave LoadPersisted.
 func (env *Environment) ComposedPersistedConfig(ctx context.Context) (appcfg.Root, error) {
 	if env == nil || strings.TrimSpace(env.ConfigPath) == "" {
@@ -370,10 +627,9 @@ func StartupConfig(ctx context.Context, home string) (appcfg.Root, error) {
 	if err != nil || !fromFile {
 		return root, err
 	}
-	// The file-era read takes the same tail Load gave it: the home's .env
-	// merge, ${ENV} expansion and validation, so a copied configuration whose
-	// secret is missing reads as missing rather than as a reference that looks
-	// set.
+	// The file-era read takes the same tail Load gave it: ${ENV} expansion and
+	// validation, so a copied configuration whose secret is missing reads as
+	// missing rather than as a reference that looks set.
 	if err := appcfg.FinishLoad(&root); err != nil {
 		return appcfg.Root{}, err
 	}
@@ -501,13 +757,86 @@ func ComposedStartupConfig(ctx context.Context, home string) (appcfg.Root, bool,
 // Go's encoder sorts map keys and emits struct fields in declaration order,
 // so the same configuration always hashes the same — and digests it. Source
 // files are runtime-only (json:"-") and stay out.
+//
+// LLMModels is json:"-" so it never leaves the process; it still has to move
+// the fingerprint, or a model-page edit would not reach the next turn. Its
+// wire shape is spelled out here rather than borrowed from the struct, which
+// carries no tags: a field added to LLMModelConfig or LLMModelCaps must be
+// added to these types too.
 func configSnapshotFingerprint(root appcfg.Root) ([]byte, error) {
 	b, err := json.Marshal(root)
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256(b)
-	return sum[:], nil
+	models, err := json.Marshal(llmModelsFingerprintWireFrom(root.LLMModels))
+	if err != nil {
+		return nil, err
+	}
+	h := sha256.New()
+	h.Write(b)
+	h.Write(models)
+	return h.Sum(nil), nil
+}
+
+// llmModelsFingerprintWire is the fingerprint's view of one model row.
+type llmModelsFingerprintWire struct {
+	ID          string                      `json:"id"`
+	Provider    string                      `json:"provider"`
+	Model       string                      `json:"model"`
+	BaseURL     string                      `json:"base_url"`
+	APIPath     string                      `json:"api_path"`
+	APIKey      string                      `json:"api_key"`
+	Params      appcfg.LLMRequestParams     `json:"params"`
+	Caps        llmModelCapsFingerprintWire `json:"caps"`
+	URLVerbatim bool                        `json:"url_verbatim"`
+}
+
+// llmModelCapsFingerprintWire is the fingerprint's view of a row's overrides:
+// a nil pointer and a nil slice mean "the catalog decides", and both are
+// distinguishable from an explicit false or an explicit empty list.
+type llmModelCapsFingerprintWire struct {
+	Images        *bool    `json:"images"`
+	PDF           *bool    `json:"pdf"`
+	Video         *bool    `json:"video"`
+	Audio         *bool    `json:"audio"`
+	Reasoning     *bool    `json:"reasoning"`
+	ReasoningOff  *bool    `json:"reasoning_off"`
+	Efforts       []string `json:"efforts"`
+	DefaultEffort string   `json:"default_effort"`
+	ContextWindow *int64   `json:"context_window"`
+	MaxOutput     *int64   `json:"max_output"`
+}
+
+func llmModelsFingerprintWireFrom(models []appcfg.LLMModelConfig) []llmModelsFingerprintWire {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]llmModelsFingerprintWire, 0, len(models))
+	for _, m := range models {
+		out = append(out, llmModelsFingerprintWire{
+			ID:          m.ID,
+			Provider:    m.Provider,
+			Model:       m.Model,
+			BaseURL:     m.BaseURL,
+			APIPath:     m.APIPath,
+			APIKey:      m.APIKey,
+			Params:      append(appcfg.LLMRequestParams(nil), m.Params...),
+			URLVerbatim: m.URLVerbatim,
+			Caps: llmModelCapsFingerprintWire{
+				Images:        m.Caps.Images,
+				PDF:           m.Caps.PDF,
+				Video:         m.Caps.Video,
+				Audio:         m.Caps.Audio,
+				Reasoning:     m.Caps.Reasoning,
+				ReasoningOff:  m.Caps.ReasoningOff,
+				Efforts:       m.Caps.Efforts,
+				DefaultEffort: m.Caps.DefaultEffort,
+				ContextWindow: m.Caps.ContextWindow,
+				MaxOutput:     m.Caps.MaxOutput,
+			},
+		})
+	}
+	return out
 }
 
 // SyncConfigFromDB re-reads the composed configuration and adopts it when it

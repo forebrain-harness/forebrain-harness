@@ -326,8 +326,10 @@ func TestHandEditedConfigFileIsNotPickedUp(t *testing.T) {
 	if env.Deps.AppCfg != before {
 		t.Fatal("the live config moved under a file edit")
 	}
-	if got := env.Deps.AppCfg.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-import" {
-		t.Fatalf("live provider model = %q, want the imported gpt-import", got)
+	// The live configuration still runs on the imported model, which plan 262
+	// moved into the model table: the definition names that row.
+	if got := appcfg.EffectiveDefaultLLMFor(env.Deps.AppCfg, "main"); got == nil || got.Model != "gpt-import" {
+		t.Fatalf("live provider model = %+v, want the imported gpt-import", got)
 	}
 
 	// Even an explicit turn-boundary sync keeps serving the database's runtime
@@ -335,8 +337,8 @@ func TestHandEditedConfigFileIsNotPickedUp(t *testing.T) {
 	if err := env.SyncConfigFromDB(context.Background()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if got := env.Deps.AppCfg.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-import" {
-		t.Fatalf("provider model after a sync = %q, want the database's gpt-import (a hand edit is not a source)", got)
+	if got := appcfg.EffectiveDefaultLLMFor(env.Deps.AppCfg, "main"); got == nil || got.Model != "gpt-import" {
+		t.Fatalf("provider model after a sync = %+v, want the database's gpt-import (a hand edit is not a source)", got)
 	}
 	if applied != 0 {
 		t.Fatalf("the unchanged composed configuration was applied %d times, want 0", applied)

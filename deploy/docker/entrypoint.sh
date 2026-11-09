@@ -15,15 +15,17 @@
 #   FOREBRAIN_HTTP_ADDR     the address the gateway binds (default 0.0.0.0:6060 —
 #                           inside a container 127.0.0.1 is reachable only from
 #                           inside that container).
-#   FOREBRAIN_GATEWAY_TOKEN the shared secret every request carries. Generated
-#                           and printed once when it is not supplied.
+#   FOREBRAIN_GATEWAY_TOKEN the shared secret every request carries.
 #   FOREBRAIN_DATABASE_URL  mysql://… or postgres://…; empty means the SQLite
 #                           file in the home's state directory.
 #
-# The token is written to $FOREBRAIN_HOME/.env (0600) and the config references
-# it as ${FOREBRAIN_GATEWAY_TOKEN}, so the secret is not in a file an operator
-# pastes into a ticket, and a replica that reads the same shared home gets the
-# same one (deploy/compose/multi-replica.yaml seeds it the same way).
+# The token has exactly two homes (owner 2026-11-07, plan 268): the environment,
+# which is what a container supplies, or gateway.auth.token in forebrain.yaml
+# itself, in plaintext, in a file only the container's user can read. Nothing
+# writes a .env any more.
+#
+# Models are added after the first boot, on the web's Models page (or by signing
+# in to a subscription there): a key is not an environment input any more.
 set -eu
 
 log() { printf 'forebrain-entrypoint: %s\n' "$*" >&2; }
@@ -32,19 +34,6 @@ log() { printf 'forebrain-entrypoint: %s\n' "$*" >&2; }
 # seeds itself (pkg/home/seed.go).
 generate_token() {
   od -An -tx1 -N32 /dev/urandom | tr -d ' \n'
-}
-
-# Put one assignment into .env, replacing an existing one rather than adding a
-# second: a home whose config was removed but whose .env survived must not end up
-# with two tokens, one of which nothing reads.
-set_env_var() {
-  file=$1 key=$2 value=$3
-  if [ -f "$file" ] && grep -q "^${key}=" "$file"; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
-  else
-    printf '%s=%s\n' "$key" "$value" >>"$file"
-  fi
-  chmod 0600 "$file"
 }
 
 seed_home() {
@@ -62,16 +51,24 @@ seed_home() {
     token=$(generate_token)
     generated=1
   fi
-  set_env_var "$home/.env" FOREBRAIN_GATEWAY_TOKEN "$token"
 
   http_addr=${FOREBRAIN_HTTP_ADDR:-0.0.0.0:6060}
+  # An operator-supplied token stays in the environment, and the config keeps
+  # the reference that reads it — restarting with another value just works. A
+  # generated one has nobody to hand it to through the environment, so it is
+  # written into the file, which only this container's user can read.
+  if [ "$generated" = 1 ]; then
+    token_line="    token: \"$token\""
+  else
+    token_line='    token: "${FOREBRAIN_GATEWAY_TOKEN}"'
+  fi
   # Written whole and then renamed, so a second replica starting against the
   # same shared home never reads a half-written config (plan 213 §3.6).
   {
     printf 'gateway:\n'
     printf '  http_addr: "%s"\n' "$http_addr"
     printf '  auth:\n'
-    printf '    token: "${FOREBRAIN_GATEWAY_TOKEN}"\n'
+    printf '%s\n' "$token_line"
     if [ -n "${FOREBRAIN_DATABASE_URL:-}" ]; then
       printf 'database:\n'
       printf '  url: "%s"\n' "$FOREBRAIN_DATABASE_URL"
@@ -79,11 +76,12 @@ seed_home() {
   } >"$cfg.tmp"
   mv "$cfg.tmp" "$cfg"
   chmod 0600 "$cfg"
-  log "wrote $cfg (http_addr $http_addr)"
+  log "wrote $cfg (http_addr $http_addr, token in the file)"
 
   if [ "$generated" = 1 ]; then
     # Printed once: the operator needs it to sign in, and there is no other way
-    # to learn a token nobody supplied. It is the same value that is now in .env.
+    # to learn a token nobody supplied. It is the same value that is now in the
+    # file, so a restart keeps it.
     log "no FOREBRAIN_GATEWAY_TOKEN was given; generated one: $token"
   fi
 }

@@ -397,8 +397,11 @@ func saveDetectEntry(cachePath, path string, mtime int64, version string, instal
 
 // DoctorInput names what forebrain lsp doctor checks.
 type DoctorInput struct {
-	Config         *appcfg.Root
-	Home           string
+	Config *appcfg.Root
+	Home   string
+	// Vars is the operator's variables table, the source of every ${NAME} a
+	// server entry references (plan 268).
+	Vars           map[string]string
 	AgentWorkspace string
 	ProjectRoot    string // absolute; "" when the directory is not inside a project
 	Trusted        bool   // safety.TrustedRoot(launch) != ""
@@ -502,7 +505,7 @@ func doctorServer(ctx context.Context, in DoctorInput, srv ServerConfig) DoctorR
 		Passthrough: srv.EnvPassthrough,
 		Env:         srv.Env,
 		FromProject: srv.EnvFromProject,
-		Home:        in.Home,
+		Vars:        in.Vars,
 	})
 	det := DetectResult{}
 	if failed == "" {
@@ -671,7 +674,7 @@ func doctorHandshake(ctx context.Context, in DoctorInput, srv ServerConfig) (sta
 	if !ok {
 		return "fail", "the workspace folder is outside the project", ""
 	}
-	plan, err := planLaunch(ctx, srv, root, in.Home, in.AgentWorkspace)
+	plan, err := planLaunch(ctx, srv, root, in.Vars, in.AgentWorkspace)
 	if err != nil {
 		return "fail", err.Error(), ""
 	}

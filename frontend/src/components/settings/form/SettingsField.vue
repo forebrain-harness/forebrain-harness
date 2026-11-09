@@ -62,20 +62,37 @@
         <span v-if="rangeText(field)" class="settings-num__range">{{ rangeText(field) }}</span>
       </span>
 
+      <!-- A model row offers the install's configured models by id (plan 266):
+           the same provider and model may be configured twice, so the row — not
+           the pair — is what a pick names, and the signature is what tells the
+           two apart. 「当前会话的模型」 is the empty string on the wire; a
+           SelectItem may not carry it, so the sentinel stands in on both sides. -->
       <Select
         v-else-if="field.kind === 'model'"
         :model-value="toChoice(String(value ?? ''))"
         :disabled="disabled"
         @update:model-value="(next) => emit('update:value', fromChoice(next))"
       >
-        <SelectTrigger class="settings-input" :aria-label="t(labelKey)">
-          <SelectValue :placeholder="field.placeholder" />
+        <SelectTrigger class="settings-input !h-auto min-h-[32px] py-1" :aria-label="t(labelKey)">
+          <ModelSignature
+            v-if="selectedChoice"
+            :model="selectedChoice.model"
+            :provider-name="selectedChoice.providerName || selectedChoice.provider"
+            :base-url="selectedChoice.baseUrl"
+            :api-path="selectedChoice.apiPath"
+          />
+          <span v-else class="settings-row__hint">{{ field.placeholder }}</span>
         </SelectTrigger>
         <SelectContent>
-          <!-- 「当前模型」 is the empty string on the wire; a SelectItem may not
-               carry it, so the sentinel stands in on both sides. -->
           <SelectItem :value="EMPTY_CHOICE">{{ field.placeholder }}</SelectItem>
-          <SelectItem v-for="model in models" :key="model" :value="model">{{ model }}</SelectItem>
+          <SelectItem v-for="choice in choices" :key="choice.id" :value="choice.id">
+            <ModelSignature
+              :model="choice.model"
+              :provider-name="choice.providerName || choice.provider"
+              :base-url="choice.baseUrl"
+              :api-path="choice.apiPath"
+            />
+          </SelectItem>
         </SelectContent>
       </Select>
 
@@ -252,7 +269,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { RadioGroup, RadioGroupItem } from '@repo/shadcn-vue/components/ui/radio-group'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@repo/shadcn-vue/components/ui/select'
 import {
   TagsInput,
   TagsInputInput,
@@ -261,8 +278,10 @@ import {
 } from '@repo/shadcn-vue/components/ui/tags-input'
 import { Label } from '@repo/shadcn-vue/components/ui/label'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
+import ModelSignature from '@/components/models/ModelSignature.vue'
 import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { APPROVAL_PRESETS, fieldLabelKey, numberOutOfRange, rangeText, type SettingsField } from '@/lib/settingsSchema'
+import { useModelChoices } from '@/composables/useModelChoices'
 import { useI18n, type I18nKey } from '@/locales'
 
 const props = withDefaults(
@@ -276,8 +295,6 @@ const props = withDefaults(
     /** Whether a credential is stored, and its tail. */
     secretSet?: boolean
     secretLast4?: string
-    /** The models the picker offers. */
-    models?: string[]
     /** The refusal the gateway answered for this path, if any. */
     error?: string
     disabled?: boolean
@@ -292,7 +309,6 @@ const props = withDefaults(
     titleLabel: false,
     secretSet: false,
     secretLast4: '',
-    models: () => [],
     error: '',
     disabled: false,
     restoreDisabled: false,
@@ -319,6 +335,16 @@ function t(key: string, params?: Record<string, string | number>): string {
 }
 
 const labelKey = computed(() => fieldLabelKey(props.field.path))
+
+/** The install's models, asked for once per page. Only a model row needs them. */
+const { choices, ensureChoices } = useModelChoices()
+if (props.field.kind === 'model') ensureChoices()
+
+/** The row this field's stored id names, or null for 「当前会话的模型」. */
+const selectedChoice = computed(() => {
+  const id = String(props.value ?? '')
+  return id ? (choices.value.find((choice) => choice.id === id) ?? null) : null
+})
 /** The grey explanation, or nothing when the prototype gives the row none. */
 const hint = computed(() => {
   const key = `settings.hint.${props.field.path}`

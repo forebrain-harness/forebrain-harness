@@ -1,5 +1,5 @@
 # One shared FOREBRAIN_HOME for every replica (plan 214 §3.4/§0.5): config,
-# .env, workspace, logs. State lives in the shared database; the database
+# workspace, logs. State lives in the shared database; the database
 # itself is NOT deployed here (docs/deploy/kubernetes.md has the CREATE
 # DATABASE statements).
 #

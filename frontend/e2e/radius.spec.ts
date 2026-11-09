@@ -81,12 +81,12 @@ const ROUTES = [
   '/permissions',
   '/tools',
   '/projects',
-  '/providers',
   '/memories',
 ]
 
 const SETTINGS_TABS = [
   'appearance',
+  'models',
   'approval',
   'agents',
   'mcp',
@@ -97,6 +97,7 @@ const SETTINGS_TABS = [
   'config',
   'runtime',
   'shared-skills',
+  'vars',
 ]
 
 const PROJECT_TABS = ['overview', 'rules', 'sessions', 'memory', 'perm', 'mcp', 'lsp', 'skills', 'cron', 'channels']
@@ -168,9 +169,9 @@ test('no retired border radius anywhere on the app surface', async ({ page }) =>
   // on the shared modal shell, whose radius is excluded above, so there is
   // nothing extra to sweep on its route.
 
-  // The provider add form is a shared modal now (its radius is the modal
-  // shell's, excluded above), so nothing extra to sweep on this route.
-  await page.goto('/providers', { waitUntil: 'networkidle' })
+  // The models table is the settings page's own tab now (plan 266): its drawer
+  // and dialogs are the shared shells, whose radius is excluded above.
+  await page.goto('/settings?tab=models', { waitUntil: 'networkidle' })
 
   // The memory file editor only exists when a memory file row exists.
   await page.goto('/memories', { waitUntil: 'networkidle' })

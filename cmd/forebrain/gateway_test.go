@@ -95,6 +95,73 @@ func TestRunGatewayEReturnsStartupConfigErrorWhenTTYUnavailable(t *testing.T) {
 	}
 }
 
+// A headless start with no model configured serves anyway (owner 2026-11-07,
+// plan 268 revision): the first model is added on the web's Settings › Models
+// page, and refusing to start is what kept that page unreachable.
+func TestRunGatewayEStartsWithoutAModelOnNonTTY(t *testing.T) {
+	prevNeeds := gatewayNeedsFirstSetup
+	prevOnboard := gatewayRunOnboard
+	prevStartupError := gatewayStartupConfigError
+	prevTTY := gatewayIsTerminal
+	prevRun := gatewayRunBlocking
+	t.Cleanup(func() {
+		gatewayNeedsFirstSetup = prevNeeds
+		gatewayRunOnboard = prevOnboard
+		gatewayStartupConfigError = prevStartupError
+		gatewayIsTerminal = prevTTY
+		gatewayRunBlocking = prevRun
+	})
+
+	gatewayNeedsFirstSetup = func() (bool, error) { return true, nil }
+	gatewayIsTerminal = func(*os.File) bool { return false }
+	gatewayRunOnboard = func(context.Context, io.Reader, io.Writer) error {
+		t.Fatal("onboard should not run without TTY")
+		return nil
+	}
+	gatewayStartupConfigError = func() error {
+		return fmt.Errorf("%w: main agent LLM is not fully configured", tui.ErrStartupConfigIncomplete)
+	}
+	runCalled := false
+	gatewayRunBlocking = func(context.Context, gateway.ServeOptions) error {
+		runCalled = true
+		return nil
+	}
+
+	if err := runGatewayE(&cobra.Command{Use: "start"}, nil); err != nil {
+		t.Fatalf("runGatewayE error = %v, want the gateway to serve without a model", err)
+	}
+	if !runCalled {
+		t.Fatal("expected the gateway to start")
+	}
+}
+
+// Every other startup failure still refuses to start.
+func TestRunGatewayERefusesOtherStartupFailuresOnNonTTY(t *testing.T) {
+	prevNeeds := gatewayNeedsFirstSetup
+	prevStartupError := gatewayStartupConfigError
+	prevTTY := gatewayIsTerminal
+	prevRun := gatewayRunBlocking
+	t.Cleanup(func() {
+		gatewayNeedsFirstSetup = prevNeeds
+		gatewayStartupConfigError = prevStartupError
+		gatewayIsTerminal = prevTTY
+		gatewayRunBlocking = prevRun
+	})
+
+	gatewayNeedsFirstSetup = func() (bool, error) { return true, nil }
+	gatewayIsTerminal = func(*os.File) bool { return false }
+	gatewayStartupConfigError = func() error { return fmt.Errorf("open the database: refused") }
+	gatewayRunBlocking = func(context.Context, gateway.ServeOptions) error {
+		t.Fatal("gateway serve should not start")
+		return nil
+	}
+
+	err := runGatewayE(&cobra.Command{Use: "start"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "open the database") {
+		t.Fatalf("error = %v, want the startup failure reported", err)
+	}
+}
+
 func TestRunGatewayEUsesStartupConfigErrorForIncompleteConfig(t *testing.T) {
 	prevNeeds := gatewayNeedsFirstSetup
 	prevOnboard := gatewayRunOnboard

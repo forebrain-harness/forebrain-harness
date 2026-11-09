@@ -124,7 +124,7 @@ func parseProjectMCPFile(path string) ([]appcfg.MCPServerConfig, []MCPFileNote) 
 		return nil, []MCPFileNote{{File: path, Reason: "file could not be read"}}
 	}
 	if err := appcfg.RejectPlaintextConfigSecrets(path, b); err != nil {
-		return nil, []MCPFileNote{{File: path, Reason: "file contains a plaintext secret; use ${ENV_NAME} resolved from ~/.forebrain/.env"}}
+		return nil, []MCPFileNote{{File: path, Reason: "file contains a plaintext secret; use ${ENV_NAME} and set it under Settings · Variables"}}
 	}
 	var doc projectMCPDocument
 	if err := yaml.Unmarshal(b, &doc); err != nil {

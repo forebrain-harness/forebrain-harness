@@ -613,6 +613,77 @@ func TestSlashPickerCancelAppliesNothing(t *testing.T) {
 	}
 }
 
+// Choosing the model list's last row opens the custom-model setup instead of
+// naming a model: the row names none, so no slash choice reaches the engine, and
+// the picker is handed each endpoint's path to keep (plan 267).
+func TestSlashPickerAddCustomOpensTheCustomSetup(t *testing.T) {
+	session := &fakeSession{}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	// The model picker answers with its last row; every page the setup opens
+	// after it cancels, so the test does not walk the whole form.
+	selector := &modelPickerThenCancel{stubSelector: &stubSelector{selectRichIdx: 1, selectRichOK: true}}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	picker := &turn.Picker{Command: "model", Title: "Model", Items: []turn.PickerItem{
+		{Value: "llm-1", Label: "deepseek/deepseek-v4-flash", Description: "https://api.deepseek.com/chat/completions",
+			EndpointTail: "/chat/completions", Current: true},
+		{Value: turn.ModelAddCustomValue, Label: "Add a custom model…", Description: "OpenAI- or Anthropic-compatible, or custom protocol"},
+	}}
+	handled, continueRun, _, _ := runSlashPicker(context.Background(), ctrl, renderer, nil, &streamState{sessionID: "s1"}, picker)
+	if !handled || continueRun {
+		t.Fatalf("handled=%v continueRun=%v", handled, continueRun)
+	}
+	if len(session.choices) != 0 {
+		t.Fatalf("choices = %+v, want the custom row to reach no engine choice", session.choices)
+	}
+	if len(selector.selectRichItems) != 2 {
+		t.Fatalf("picker rows = %+v", selector.selectRichItems)
+	}
+	if got := selector.selectRichItems[0].ElideTail; got != "/chat/completions" {
+		t.Fatalf("endpoint tail = %q, want the row's api path", got)
+	}
+	if got := selector.selectRichItems[1].ElideTail; got != "" {
+		t.Fatalf("the custom row carries %q, want no endpoint", got)
+	}
+}
+
+// modelPickerThenCancel answers the model picker from the stub and cancels the
+// setup the custom row opens, so a test can prove which way the row went without
+// filling in a whole form.
+type modelPickerThenCancel struct {
+	*stubSelector
+	answered bool
+}
+
+func (s *modelPickerThenCancel) SelectRich(label string, items []SelectItem, defaultIdx int) (int, bool, error) {
+	if s.answered {
+		return -1, false, nil
+	}
+	s.answered = true
+	return s.stubSelector.SelectRich(label, items, defaultIdx)
+}
+
+// A pick that names a model reaches the engine as before: the model list's own
+// rows are not the custom row.
+func TestSlashPickerModelRowStillReachesTheEngine(t *testing.T) {
+	session := &fakeSession{chooseFn: func(turn.SlashChoice) SlashOutcome {
+		return SlashOutcome{Handled: true, Reply: "Switched to deepseek/deepseek-v4-flash."}
+	}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	selector := &stubSelector{selectRichIdx: 0, selectRichOK: true}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	picker := &turn.Picker{Command: "model", Title: "Model", Items: []turn.PickerItem{
+		{Value: "llm-1", Label: "deepseek/deepseek-v4-flash", Current: true},
+		{Value: turn.ModelAddCustomValue, Label: "Add a custom model…"},
+	}}
+	runSlashPicker(context.Background(), ctrl, renderer, nil, &streamState{sessionID: "s1"}, picker)
+	if len(session.choices) != 1 || session.choices[0] != (turn.SlashChoice{Command: "model", Value: "llm-1"}) {
+		t.Fatalf("choices = %+v", session.choices)
+	}
+}
+
 // A slash command's picker — /model, its reasoning effort, /agent — opens on
 // the item in force.
 func TestSlashPickerOpensOnTheItemInForce(t *testing.T) {

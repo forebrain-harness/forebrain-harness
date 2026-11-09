@@ -107,12 +107,9 @@ const router = createRouter({
     // agent-level pages send the visitor to the project list.
     { path: '/cron', redirect: '/projects' },
     { path: '/channels', redirect: '/projects' },
-    {
-      path: '/providers',
-      name: 'providers',
-      component: () => import('@/views/ProvidersView.vue'),
-      meta: { title: () => t('routes.providersTitle') },
-    },
+    // The models table is global configuration and lives in settings (plan 266):
+    // the old page's address keeps working, pointing at the tab that replaced it.
+    { path: '/providers', redirect: { path: '/settings', query: { tab: 'models' } } },
     {
       path: '/memories',
       name: 'memories',

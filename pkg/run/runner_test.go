@@ -2694,7 +2694,7 @@ func TestRunContentKeepsSubagentProjectRoot(t *testing.T) {
 // Only download: false turns downloading off; hubs: [] keeps it on.
 func TestTokenEstimateOptionsMapsDownload(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("FOREBRAIN_HOME", home) // keep Load away from the real ~/.forebrain/.env
+	t.Setenv("FOREBRAIN_HOME", home) // keep Load away from the real home
 	for _, tc := range []struct {
 		name, tokenEstimate string
 		wantDisabled        bool
