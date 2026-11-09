@@ -419,20 +419,6 @@ func PromptMainLLMSetup(cfg PromptConfig) (process.Options, bool, error) {
 	return newLLMSetup(cfg).run()
 }
 
-// PromptCustomLLMSetup asks for a model the user describes themselves and
-// returns the options to save. It is the same flow the provider page's
-// «Custom model» row opens, entered at its first question: the /model picker's
-// «Add a custom model…» row starts here.
-func PromptCustomLLMSetup(cfg PromptConfig) (process.Options, bool, error) {
-	if cfg.Selector == nil {
-		return process.Options{}, false, fmt.Errorf("nil selector")
-	}
-	setup := newLLMSetup(cfg)
-	setup.setChoice(customChoice())
-	setup.page = setupPageBaseURL
-	return setup.run()
-}
-
 // llmSetup is the model setup as pages the user walks forward and back
 // through — the provider, then whatever its way in needs — keeping every
 // answer, so stepping back to a page shows what was chosen there.
@@ -1882,14 +1868,6 @@ const connectSetupTimeout = 10 * time.Minute
 
 func (c *commandController) handleConnect(ctx context.Context, sessionID string) bool {
 	return c.runConnect(ctx, sessionID, PromptMainLLMSetup)
-}
-
-// handleConnectCustom runs the model setup from the custom form's first
-// question instead of the provider page: the /model picker's «Add a custom
-// model…» row is the way in, and the answers, the write and the switch that
-// follows are /connect's own.
-func (c *commandController) handleConnectCustom(ctx context.Context, sessionID string) bool {
-	return c.runConnect(ctx, sessionID, PromptCustomLLMSetup)
 }
 
 // runConnect runs the model setup the caller named, saves its answers and makes

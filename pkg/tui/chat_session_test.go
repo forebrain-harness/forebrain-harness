@@ -1863,14 +1863,12 @@ func TestAvailableModelOptionsUseConfiguredLLMProvidersOnly(t *testing.T) {
 	for _, item := range res.Picker.Items {
 		labels = append(labels, item.Label)
 	}
-	// The terminal's list ends with the row that opens the custom form (plan 267);
-	// it names no model, so it is the one row that is not configured.
+	// The list is the configured models and nothing else: adding one is
+	// /connect's, so the picker offers no row that would name no model.
 	require.Equal(t, []string{
 		"zhipuai/glm-5.1",
 		"openai/" + codeModel,
-		"Add a custom model…",
 	}, labels)
-	require.Equal(t, turn.ModelAddCustomValue, res.Picker.Items[2].Value)
 	require.True(t, res.Picker.Items[0].Current)
 }
 
@@ -4637,7 +4635,10 @@ func TestPlanReviewPickerKeepsTheSelectionOnScreen(t *testing.T) {
 		return paintedScreen(r)
 	}
 	const question = "Which model should review this plan?"
-	selected := func(i int) string { return fmt.Sprintf("> %d. opencode-go/model-%02d", i, i) }
+	// The rows carry the picker's cursor and the name, in two columns, with no
+	// row number: a model is named, not numbered.
+	selected := func(i int) string { return fmt.Sprintf("%s opencode-go/model-%02d", selectorCursorGlyph, i) }
+	plainRow := func(i int) string { return fmt.Sprintf("  opencode-go/model-%02d", i) }
 
 	screen := press(parsedKey{kind: rawKeyRune, r: 'm'})
 	if !overlay.planReviewPicking {
@@ -4651,7 +4652,7 @@ func TestPlanReviewPickerKeepsTheSelectionOnScreen(t *testing.T) {
 	if !strings.Contains(screen, selected(2)) {
 		t.Fatalf("Down scrolled the selection off the overlay:\n%s", screen)
 	}
-	if !strings.Contains(screen, "1. opencode-go/model-01") || !strings.Contains(screen, question) {
+	if !strings.Contains(screen, plainRow(1)) || !strings.Contains(screen, question) {
 		t.Fatalf("Down moved a selection that was already on screen, hiding the rows above it:\n%s", screen)
 	}
 	for i := 3; i <= 21; i++ {
@@ -4670,10 +4671,6 @@ func TestPlanReviewPickerKeepsTheSelectionOnScreen(t *testing.T) {
 	}
 	if !strings.Contains(screen, question) || strings.Contains(screen, hint) {
 		t.Fatalf("the first model must scroll the key hint away and bring the question along:\n%s", screen)
-	}
-	// A jump lands on either end the same way the arrows do.
-	if screen = press(parsedKey{kind: rawKeyRune, r: '9'}); !strings.Contains(screen, selected(9)) {
-		t.Fatalf("model 9 selected but not on screen:\n%s", screen)
 	}
 }
 
@@ -10955,8 +10952,10 @@ func exitPlanReviewRequest(t *testing.T, plan string) turn.ToolApprovalRequest {
 		PermissionToolName: "exit_plan_mode",
 		PlanFilePath:       planFile,
 		PlanReviewModels: []turn.PlanReviewModelOption{
-			{Provider: "anthropic", Model: "claude-opus-4-1", Current: true},
-			{Provider: "openai", Model: "gpt-5.1"},
+			{Provider: "anthropic", Model: "claude-opus-4-1", Current: true,
+				Endpoint: "https://api.anthropic.com/v1/messages", EndpointTail: "/v1/messages"},
+			{Provider: "openai", Model: "gpt-5.1",
+				Endpoint: "https://api.openai.com/v1/chat/completions", EndpointTail: "/v1/chat/completions"},
 		},
 	}
 }
@@ -11092,7 +11091,7 @@ func TestExitPlanOverlayRendersPickerAndCollectedReviews(t *testing.T) {
 	plain = stripANSI(strings.Join(lines, "\n"))
 	for _, want := range []string{
 		"Which model should review this plan?",
-		"anthropic/claude-opus-4-1 (current)",
+		"anthropic/claude-opus-4-1 ●",
 		"openai/gpt-5.1",
 		"Enter to request the review",
 	} {
@@ -11102,6 +11101,182 @@ func TestExitPlanOverlayRendersPickerAndCollectedReviews(t *testing.T) {
 	}
 	if strings.Contains(plain, "Yes, proceed") {
 		t.Fatalf("picker must replace the verdict rows:\n%s", plain)
+	}
+}
+
+// exitPlanReviewPickerLines draws the reviewer picker the way the overlay does
+// and returns its lines with their styling stripped.
+func exitPlanReviewPickerLines(t *testing.T, req turn.ToolApprovalRequest, width int) []string {
+	t.Helper()
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	overlay.enterPlanReviewMode()
+	rendered, _ := overlay.buildApprovalContent(width)
+	lines := make([]string, len(rendered))
+	for i, line := range rendered {
+		lines[i] = stripANSI(line)
+	}
+	return lines
+}
+
+// The reviewer picker is the model list's two columns: the provider/model, then
+// where that model's requests go — two rows of one provider tell each other
+// apart by it — and every endpoint starts at the same display column.
+func TestExitPlanReviewPickerRendersTwoColumns(t *testing.T) {
+	lines := exitPlanReviewPickerLines(t, exitPlanReviewRequest(t, "# Plan\n\nStep one.\n"), 120)
+	endpoints := map[string]string{
+		"openai/gpt-5.1":            "https://api.openai.com/v1/chat/completions",
+		"anthropic/claude-opus-4-1": "https://api.anthropic.com/v1/messages",
+	}
+	column := -1
+	for name, endpoint := range endpoints {
+		line := ""
+		for _, candidate := range lines {
+			if strings.Contains(candidate, name) && strings.Contains(candidate, endpoint) {
+				line = candidate
+			}
+		}
+		if line == "" {
+			t.Fatalf("%q does not share a line with its endpoint %q:\n%s", name, endpoint, strings.Join(lines, "\n"))
+		}
+		at := displayLineWidth(line[:strings.Index(line, endpoint)])
+		if column == -1 {
+			column = at
+			continue
+		}
+		if at != column {
+			t.Fatalf("endpoint columns differ: %d and %d\n%s", column, at, strings.Join(lines, "\n"))
+		}
+	}
+	// The name column is the names alone: the endpoint column is the lead plus
+	// the widest name plus the fixed gap. The model in force here carries the
+	// widest name, so a ● that widened the column would show up as this
+	// number moving.
+	longest := "anthropic/claude-opus-4-1"
+	if want := displayLineWidth(panelIndent) + displayLineWidth(longest) + panelColumnGap; column != want {
+		t.Fatalf("endpoint column = %d, want %d (lead + widest name + gap)\n%s", column, want, strings.Join(lines, "\n"))
+	}
+	// …and the mark fills that gap rather than pushing the endpoint away: on
+	// the row it marks, the URL follows the ● immediately.
+	marked := ""
+	for _, line := range lines {
+		if strings.Contains(line, longest+" "+selectorCheckedGlyph) && strings.Contains(line, "https://") {
+			marked = line
+		}
+	}
+	if marked == "" {
+		t.Fatalf("no marked row names %q and its endpoint:\n%s", longest, strings.Join(lines, "\n"))
+	}
+	glyphAt := displayLineWidth(marked[:strings.Index(marked, selectorCheckedGlyph)])
+	urlAt := displayLineWidth(marked[:strings.Index(marked, "https://")])
+	if got := urlAt - glyphAt; got != displayLineWidth(selectorCheckedGlyph) {
+		t.Fatalf("%d cells stand between the ● and the URL, want the glyph's own width: %q", got, marked)
+	}
+}
+
+// The model in force carries the ● the pickers use, right after its name, in
+// the accent colour; no row spells out "(current)".
+func TestExitPlanReviewPickerMarksCurrentWithGlyph(t *testing.T) {
+	lines := exitPlanReviewPickerLines(t, exitPlanReviewRequest(t, "# Plan\n"), 120)
+	for _, line := range lines {
+		switch {
+		case strings.Contains(line, "anthropic/claude-opus-4-1"):
+			if !strings.Contains(line, "claude-opus-4-1 "+selectorCheckedGlyph) {
+				t.Fatalf("the model in force carries no ●: %q", line)
+			}
+		case strings.Contains(line, "openai/gpt-5.1"):
+			if strings.Contains(line, selectorCheckedGlyph) {
+				t.Fatalf("a model that is not in force carries the ●: %q", line)
+			}
+		}
+	}
+	if plain := strings.Join(lines, "\n"); strings.Contains(plain, "(current)") {
+		t.Fatalf("the picker spells out the current model instead of marking it:\n%s", plain)
+	}
+}
+
+// The picker has no row numbers: nothing left to number, and no digit to jump
+// to one.
+func TestExitPlanReviewPickerHasNoRowNumbers(t *testing.T) {
+	lines := exitPlanReviewPickerLines(t, exitPlanReviewRequest(t, "# Plan\n"), 120)
+	plain := strings.Join(lines, "\n")
+	if !strings.Contains(plain, "anthropic/claude-opus-4-1") || !strings.Contains(plain, "openai/gpt-5.1") {
+		t.Fatalf("the picker does not draw its models:\n%s", plain)
+	}
+	for _, numbered := range []string{"1. anthropic/claude-opus-4-1", "2. openai/gpt-5.1", "1. openai/gpt-5.1", "2. anthropic/claude-opus-4-1", "1. "} {
+		if strings.Contains(plain, numbered) {
+			t.Fatalf("the picker numbers its rows (%q):\n%s", numbered, plain)
+		}
+	}
+}
+
+// Narrow, the list stacks whole: each name takes its own line and its endpoint
+// hangs under it, at the cursor's width, never beside a name it cannot line up
+// with.
+func TestExitPlanReviewPickerStacksWhenNarrow(t *testing.T) {
+	req := exitPlanReviewRequest(t, "# Plan\n")
+	req.PlanReviewModels = []turn.PlanReviewModelOption{
+		{Provider: "anthropic", Model: "claude-opus-4-1-reasoning-long",
+			Endpoint: "https://api.anthropic.com/v1/messages", EndpointTail: "/v1/messages"},
+		{Provider: "openai", Model: "gpt-5.1",
+			Endpoint: "https://api.openai.com/v1/chat/completions", EndpointTail: "/v1/chat/completions"},
+	}
+	const width = 68
+	lines := exitPlanReviewPickerLines(t, req, width)
+	for _, name := range []string{"anthropic/claude-opus-4-1-reasoning-long", "openai/gpt-5.1"} {
+		at := -1
+		for i, line := range lines {
+			if strings.Contains(line, name) {
+				at = i
+			}
+		}
+		if at < 0 {
+			t.Fatalf("%q is not drawn:\n%s", name, strings.Join(lines, "\n"))
+		}
+		if strings.Contains(lines[at], "https://") {
+			t.Fatalf("%q shares its line with an endpoint:\n%s", name, strings.Join(lines, "\n"))
+		}
+		if at+1 >= len(lines) || !strings.Contains(lines[at+1], "https://") {
+			t.Fatalf("%q has no endpoint under it:\n%s", name, strings.Join(lines, "\n"))
+		}
+		if !strings.HasPrefix(lines[at+1], "  https://") {
+			t.Fatalf("the endpoint under %q is not hung at the cursor's width: %q", name, lines[at+1])
+		}
+	}
+	for _, line := range lines {
+		if got := displayLineWidth(line); got > width {
+			t.Fatalf("row %q is %d columns wide, want at most %d", line, got, width)
+		}
+	}
+}
+
+// The digits are no shortcuts here any more: only ↑/↓ and j/k move the
+// selection, so the number a user reads on a keyboard hints nothing it cannot do.
+func TestExitPlanReviewPickerIgnoresDigitKeys(t *testing.T) {
+	req := exitPlanReviewRequest(t, "# Plan\n")
+	req.PlanReviewModels = []turn.PlanReviewModelOption{
+		{Provider: "anthropic", Model: "claude-opus-4-1", Current: true},
+		{Provider: "zhipuai", Model: "glm-5.3"},
+		{Provider: "deepseek", Model: "deepseek-v4-flash"},
+	}
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	overlay.enterPlanReviewMode()
+	// The picker opens on the first model that is not the one in force.
+	if overlay.planReviewCursor != 1 {
+		t.Fatalf("cursor = %d, want the first model that is not in force", overlay.planReviewCursor)
+	}
+	for _, r := range []rune{'1', '2', '3', '9'} {
+		if _, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyRune, r: r}); done {
+			t.Fatalf("%q ended the picker", r)
+		}
+		if overlay.planReviewCursor != 1 {
+			t.Fatalf("%q moved the cursor to %d", r, overlay.planReviewCursor)
+		}
+	}
+	if _, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyDown}); done || overlay.planReviewCursor != 2 {
+		t.Fatalf("Down left the cursor at %d (done=%v)", overlay.planReviewCursor, done)
+	}
+	if _, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyUp}); done || overlay.planReviewCursor != 1 {
+		t.Fatalf("Up left the cursor at %d (done=%v)", overlay.planReviewCursor, done)
 	}
 }
 

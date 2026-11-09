@@ -207,33 +207,13 @@ func TestSharedSlashCommandsDispatchIdenticallyOnBothSurfaces(t *testing.T) {
 			if !slices.Equal(term.calls, web.calls) {
 				t.Fatalf("%q dispatched differently: terminal=%v web=%v", input, term.calls, web.calls)
 			}
-			// /model is the one command whose picker may differ, and only by the
-			// terminal's last row: the custom-model form is a terminal surface, so
-			// a channel or the web is never offered a row it cannot open (plan
-			// 267). Every other row, and the picker itself, must match.
-			termPicker, webPicker := termRes.Picker, webRes.Picker
-			if input == "/model" {
-				if termPicker == nil || webPicker == nil {
-					t.Fatalf("/model pickers: terminal=%+v web=%+v", termPicker, webPicker)
-				}
-				if len(termPicker.Items) != len(webPicker.Items)+1 {
-					t.Fatalf("/model rows: terminal=%d web=%d, want the terminal's one extra row",
-						len(termPicker.Items), len(webPicker.Items))
-				}
-				last := termPicker.Items[len(termPicker.Items)-1]
-				if last.Value != ModelAddCustomValue {
-					t.Fatalf("/model last row = %+v, want the custom-model row", last)
-				}
-				termPicker = &Picker{Command: termPicker.Command, Title: termPicker.Title, Hint: termPicker.Hint,
-					Items: termPicker.Items[:len(termPicker.Items)-1]}
-			}
 			if termRes.ShouldContinueRun != webRes.ShouldContinueRun ||
 				termRes.ContinueInput != webRes.ContinueInput ||
 				termRes.SessionChanged != webRes.SessionChanged ||
 				termRes.ModeChanged != webRes.ModeChanged ||
 				termRes.Mode != webRes.Mode ||
 				termRes.ForcePlan != webRes.ForcePlan ||
-				!reflect.DeepEqual(termPicker, webPicker) {
+				!reflect.DeepEqual(termRes.Picker, webRes.Picker) {
 				t.Fatalf("%q canonical outcome differs:\n terminal=%+v\n web=%+v", input, termRes, webRes)
 			}
 		})

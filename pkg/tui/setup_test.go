@@ -882,7 +882,7 @@ func TestCustomModelFlowSavesTheProviderItDescribes(t *testing.T) {
 	probes := stubLLMProbe(t)
 	selector := &fakeSelector{confirms: []bool{false}, multiSelects: [][]int{{2, 3}}}
 	cfg := setupTestConfig(t, selector)
-	opts, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+	opts, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
 		baseURL:  "https://api.example.com/v1",
 		protocol: "OpenAI Chat Completions",
 		key:      "sk-custom",
@@ -938,7 +938,7 @@ func TestCustomModelCustomProtocolSendsToTheURLAsIs(t *testing.T) {
 	stubLLMProbe(t)
 	selector := &fakeSelector{confirms: []bool{false}, multiSelects: [][]int{{}}}
 	cfg := setupTestConfig(t, selector)
-	opts, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+	opts, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
 		baseURL:  "http://127.0.0.1:8731/v1",
 		protocol: "Custom protocol",
 		key:      "sk-local",
@@ -972,7 +972,7 @@ func TestCustomModelKnownLevelsSkipTheQuestion(t *testing.T) {
 	stubLLMProbe(t)
 	selector := &fakeSelector{confirms: []bool{false}}
 	cfg := setupTestConfig(t, selector)
-	opts, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+	opts, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
 		baseURL:  "https://api.openai.com/v1",
 		protocol: "OpenAI Chat Completions",
 		key:      "sk-known",
@@ -989,11 +989,13 @@ func TestCustomModelKnownLevelsSkipTheQuestion(t *testing.T) {
 	}
 }
 
-// withCustomAnswers scripts a custom run's text answers onto a config.
+// withCustomAnswers scripts a custom run's answers onto a config, from the
+// /connect first page: the provider list's «Custom model» row, then the
+// protocol, the address, the key and the model name.
 func withCustomAnswers(cfg PromptConfig, answers customAnswers) PromptConfig {
 	selector := cfg.Selector.(*fakeSelector)
 	selector.inputs = append([]string{answers.baseURL, answers.key, answers.model}, selector.inputs...)
-	selector.selects = append([]string{answers.protocol}, selector.selects...)
+	selector.selects = append([]string{"Custom model", answers.protocol}, selector.selects...)
 	return cfg
 }
 
@@ -1005,7 +1007,7 @@ func TestCustomModelTestConnectionFailureSavesNothing(t *testing.T) {
 	out := &bytes.Buffer{}
 	cfg := setupTestConfig(t, &fakeSelector{multiSelects: [][]int{{}}})
 	cfg.Output = out
-	opts, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+	opts, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
 		baseURL:  "https://api.example.com/v1",
 		protocol: "OpenAI Chat Completions",
 		key:      "sk-wrong",
@@ -1031,7 +1033,7 @@ func TestCustomModelTestConnectionSuccess(t *testing.T) {
 	out := &bytes.Buffer{}
 	cfg := setupTestConfig(t, &fakeSelector{multiSelects: [][]int{{}}})
 	cfg.Output = out
-	if _, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+	if _, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
 		baseURL:  "https://api.example.com/v1",
 		protocol: "Anthropic Messages",
 		key:      "sk-good",
@@ -1069,7 +1071,7 @@ func TestSaveAsksBeforeReplacingAKey(t *testing.T) {
 	}
 	_ = db.Close()
 
-	_, ok, err := PromptCustomLLMSetup(withCustomAnswers(cfg, customAnswers{
+	_, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
 		baseURL:  "https://api.example.com/v1",
 		protocol: "OpenAI Chat Completions",
 		key:      "sk-new",

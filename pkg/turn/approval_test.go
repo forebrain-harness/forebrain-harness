@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -733,6 +734,35 @@ func TestPendingExitPlanRequestCarriesPlanReviewsAndModels(t *testing.T) {
 	require.Len(t, req.PlanReviews, 1)
 	require.Equal(t, "gpt-5.1", req.PlanReviewModels[0].Model)
 	require.Contains(t, req.PlanReviews[0].Text, "rework")
+}
+
+// Each reviewer offer names the endpoint its row sends to — the picker's second
+// column — and the api path that column keeps when it is too narrow for the
+// whole URL. Two rows of one provider/model are two offers, each naming its
+// own endpoint.
+func TestPlanReviewModelOptionsCarryEachRowsEndpoint(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{ID: "row-1", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://one.test"},
+			{ID: "row-2", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://two.test", APIPath: "/beta/chat/completions"},
+			{ID: "row-3", Provider: "openai", Model: "gpt-5.1", BaseURL: "http://three.test/v1", URLVerbatim: true},
+		}},
+	}}}
+	options := PlanReviewModelOptions(cfg, "main", "deepseek", "deepseek-v4-flash")
+	require.Len(t, options, 3)
+	require.Equal(t, "http://one.test/chat/completions", options[0].Endpoint)
+	require.Equal(t, "/chat/completions", options[0].EndpointTail)
+	require.True(t, options[0].Current)
+	require.Equal(t, "http://two.test/beta/chat/completions", options[1].Endpoint)
+	require.Equal(t, "/beta/chat/completions", options[1].EndpointTail)
+	// The mark follows the reviewer's identity — the provider/model pair — so
+	// both twin rows carry it, exactly as the pair is what a review request
+	// names.
+	require.True(t, options[1].Current)
+	// A 「自定义协议」 row sends to its base url as stored: its own endpoint, and
+	// no path to keep.
+	require.Equal(t, "http://three.test/v1", options[2].Endpoint)
+	require.Equal(t, "", options[2].EndpointTail)
 }
 
 // TestPendingExitPlanRequestResolvesOnlyItsOwnSessionPlan is the gate-layer

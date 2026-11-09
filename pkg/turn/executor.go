@@ -792,14 +792,9 @@ func execContext(ctx Context, toks []string) Result {
 	return Result{Handled: handled, Reply: reply}
 }
 
-// ModelAddCustomValue is the /model picker's last row on the terminal: the one
-// value that names no model, because choosing it opens the custom-model setup
-// instead. Only a surface with that form offers it, so no other surface ever
-// sees this value.
-const ModelAddCustomValue = "__add_custom__"
-
 // execModel is /model on every surface: the models the session's agent is
-// configured with, the one in force marked, as a choice.
+// configured with, the one in force marked, as a choice. The list names only
+// configured models; adding one (a custom endpoint included) is /connect's.
 func execModel(ctx Context) Result {
 	if ctx.Model == nil {
 		return Result{Handled: true, Reply: "The model cannot be changed here."}
@@ -816,7 +811,7 @@ func execModel(ctx Context) Result {
 	// selection resolves to; index zero only matches it by coincidence.
 	defaultAt := defaultModelIndex(settings.Config, settings.AgentName, choices)
 	currentSel := currentSelection(settings)
-	items := make([]PickerItem, len(choices), len(choices)+1)
+	items := make([]PickerItem, len(choices))
 	for i, choice := range choices {
 		// The session's own row marks the current model; a session without one
 		// marks what its runtime carries (the effort picker's rule); the config
@@ -827,12 +822,6 @@ func execModel(ctx Context) Result {
 			Description:  ModelEndpointLabel(choice.BaseURL, choice.APIPath, choice.URLVerbatim),
 			EndpointTail: endpointTail(choice),
 			Current:      selectionMatches(currentSel, choice) || (!currentSel.Set && i == defaultAt)}
-	}
-	// The terminal can open the model setup from here; a channel or the web
-	// cannot, so the row that does is the terminal's alone.
-	if ctx.Surface == SurfaceTUI {
-		items = append(items, PickerItem{Value: ModelAddCustomValue, Label: "Add a custom model…",
-			Description: "OpenAI- or Anthropic-compatible, or custom protocol"})
 	}
 	return Result{Handled: true, Picker: &Picker{Command: "model", Title: "Model", Hint: "The model this agent runs on", Items: items}}
 }

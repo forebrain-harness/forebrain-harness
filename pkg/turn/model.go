@@ -612,6 +612,12 @@ type PlanReviewModelOption struct {
 	Provider string
 	Model    string
 	Current  bool
+	// Endpoint is where this reviewer's requests go — the picker's second
+	// column; EndpointTail is the part a narrow column must keep, the api
+	// path (empty for a url-verbatim row). They are shown, never compared:
+	// a reviewer's identity is its provider/model pair.
+	Endpoint     string
+	EndpointTail string
 }
 
 // MatchesSelection reports whether this option is the provider/model pair a

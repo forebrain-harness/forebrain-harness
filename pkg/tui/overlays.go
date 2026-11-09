@@ -698,16 +698,19 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		o.planReviewTopRow = lineCount
 		writeLine("Which model should review this plan? (Esc to go back)")
 		models := o.req.PlanReviewModels
+		list := newPlanReviewList(models, width)
 		for i, model := range models {
-			marker := "  "
+			lead := panelIndent
 			if i == o.planReviewCursor {
-				marker = "\x1b[1m> \x1b[0m"
+				lead = panelCursor
 				o.focusStart = lineCount
 				if i == 0 {
 					o.focusStart = o.planReviewTopRow
 				}
 			}
-			writeLine("%s%d. %s", marker, i+1, planReviewModelRow(model))
+			for _, row := range list.rows(lead, i, model, width) {
+				writeLine("%s", row)
+			}
 			if i == o.planReviewCursor {
 				o.focusEnd = lineCount
 				focusToEnd = i == len(models)-1
@@ -1343,10 +1346,6 @@ func (o *approvalOverlay) handlePlanReviewKey(key parsedKey) (turn.ToolApprovalD
 			if o.planReviewCursor > 0 {
 				o.planReviewCursor--
 			}
-		case key.r >= '1' && key.r <= '9':
-			if idx := int(key.r - '1'); idx < len(models) {
-				o.planReviewCursor = idx
-			}
 		}
 	}
 	return turn.ToolApprovalDecision{}, false
@@ -1361,14 +1360,71 @@ func planReviewChoiceIndex(options []overlayChoice) int {
 	return -1
 }
 
-// planReviewModelRow renders one reviewer row: the provider/model pair the
-// decision carries.
-func planReviewModelRow(model turn.PlanReviewModelOption) string {
-	row := planReviewModelDisplay(model.Provider, model.Model)
-	if model.Current {
-		row += " (current)"
+// planReviewList is the reviewer list laid out once for the width it is drawn
+// at: each row's name — the provider/model pair — and the name column they all
+// share. A name too wide for that column stacks the whole list (names on one
+// line, endpoints hung under them) rather than pushing one row's endpoint out
+// of line with the others. The mark the model in force carries is measured out
+// of this layout: it is drawn inside the gap between the columns, so it can
+// neither widen the name column nor move an endpoint.
+type planReviewList struct {
+	names []string
+	colW  int
+	stack bool
+}
+
+// newPlanReviewList measures the list: the widest name, capped at
+// panelNameColumnMax and narrowed to two fifths of the row past the cursor
+// column — the two-column rule every list in this terminal shares
+// (panel_columns.go).
+func newPlanReviewList(models []turn.PlanReviewModelOption, width int) planReviewList {
+	list := planReviewList{names: make([]string, len(models))}
+	widest := 0
+	for i, model := range models {
+		list.names[i] = planReviewModelDisplay(model.Provider, model.Model)
+		widest = maxInt(widest, displayLineWidth(list.names[i]))
 	}
-	return row
+	room := (width - displayLineWidth(selectorCursorGlyph+" ")) * 2 / 5
+	list.colW = min(min(panelNameColumnMax, widest), maxInt(1, room))
+	list.stack = widest > list.colW
+	return list
+}
+
+// rows lays one row out: the cursor, the name, the mark the model in force
+// carries, then the endpoint panelColumnGap cells past the name column, cut
+// from the base of its URL so the api path a narrow column must keep stays
+// whole (elideEndpoint). The mark and the space before it fill that gap
+// instead of widening the name column, so a marked row's endpoint starts
+// exactly where every other row's does — flush after the ● when the name fills
+// its column. A stacked list keeps the mark on the name line and hangs the
+// endpoint under it, at the cursor's width.
+func (l planReviewList) rows(lead string, i int, model turn.PlanReviewModelOption, width int) []string {
+	leadW := displayLineWidth(selectorCursorGlyph + " ")
+	name := l.names[i]
+	mark, markW := "", 0
+	if model.Current {
+		mark = " " + panelAccentStyle.Render(selectorCheckedGlyph)
+		// Measured, never assumed: a locale may draw the ● two cells wide.
+		markW = displayLineWidth(" " + selectorCheckedGlyph)
+	}
+	endpoint := strings.TrimSpace(model.Endpoint)
+	if l.stack {
+		lines := []string{lead + name + mark}
+		if endpoint != "" {
+			// elideEndpoint keeps one segment: the cut endpoint, never wrapped.
+			for _, chunk := range elideEndpoint(endpoint, model.EndpointTail, maxInt(1, width-leadW)) {
+				lines = append(lines, strings.Repeat(" ", leadW)+chunk)
+			}
+		}
+		return lines
+	}
+	row := lead + name + mark
+	if endpoint != "" {
+		pad := maxInt(0, l.colW-displayLineWidth(name)-markW+panelColumnGap)
+		row += strings.Repeat(" ", pad) +
+			elideEndpoint(endpoint, model.EndpointTail, maxInt(1, width-leadW-l.colW-panelColumnGap))[0]
+	}
+	return []string{row}
 }
 
 func planReviewModelDisplay(provider, model string) string {

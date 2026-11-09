@@ -646,10 +646,8 @@ func TestModelPickerTellsTwinRowsApart(t *testing.T) {
 	f := twinModelFixture(t, ModelSelectionState{})
 	res := execModel(f.ctx)
 	require.NotNil(t, res.Picker)
-	// The two configured rows, then the terminal's row that opens the custom
-	// form (plan 267).
-	require.Len(t, res.Picker.Items, 3)
-	require.Equal(t, ModelAddCustomValue, res.Picker.Items[2].Value)
+	// Exactly the two configured rows.
+	require.Len(t, res.Picker.Items, 2)
 	first, second := res.Picker.Items[0], res.Picker.Items[1]
 	require.NotEmpty(t, first.Value)
 	require.NotEmpty(t, second.Value)
@@ -678,6 +676,28 @@ func TestModelPickerTellsTwinRowsApart(t *testing.T) {
 	require.Equal(t, second.Value, f.handler.chosen[0].ID, "the record kept the first twin")
 }
 
+// TestModelPickerOffersNoAddCustomRow pins the picker as a list of configured
+// models only: no row names anything but a model, and every surface is offered
+// exactly the same list. Adding a model — a custom endpoint included — is
+// /connect's, so nothing here opens it.
+func TestModelPickerOffersNoAddCustomRow(t *testing.T) {
+	f := twinModelFixture(t, ModelSelectionState{})
+	webCtx := f.ctx
+	webCtx.Surface = SurfaceWebChat
+
+	term := execModel(f.ctx).Picker
+	web := execModel(webCtx).Picker
+	require.NotNil(t, term)
+	require.NotNil(t, web)
+	require.Len(t, term.Items, 2)
+	require.Equal(t, len(web.Items), len(term.Items), "the two surfaces offer different lists")
+	for i, item := range term.Items {
+		require.NotEmpty(t, item.Value)
+		require.NotContains(t, item.Value, "add_custom", "a row offers to add a model: %+v", item)
+		require.Equal(t, web.Items[i].Value, item.Value)
+	}
+}
+
 // TestChooseReasoningEffortKeepsTheTwinRowItPicked pins plan 261's second item:
 // the effort picker's value carries the row (four segments), so picking a level
 // for the second twin keeps the second twin; a value drawn before values named
@@ -685,7 +705,7 @@ func TestModelPickerTellsTwinRowsApart(t *testing.T) {
 func TestChooseReasoningEffortKeepsTheTwinRowItPicked(t *testing.T) {
 	f := twinModelFixture(t, ModelSelectionState{})
 	items := execModel(f.ctx).Picker.Items
-	require.Len(t, items, 3)
+	require.Len(t, items, 2)
 	second := items[1]
 
 	res := Choose(f.ctx, SlashChoice{Command: "model", Value: second.Value})

@@ -5290,13 +5290,6 @@ func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Rend
 	if !ok || idx < 0 || idx >= len(picker.Items) {
 		return true, false, ComposerSubmission{}, false
 	}
-	// The model list's last row opens the custom form instead of naming a
-	// model; that form writes the row and switches this session to it, exactly
-	// as /connect does.
-	if picker.Items[idx].Value == turn.ModelAddCustomValue {
-		cmds.handleConnectCustom(ctx, state.sessionID)
-		return true, false, ComposerSubmission{}, false
-	}
 	outcome := cmds.session.ChooseSurfaceSlash(ctx, state.sessionID, turn.SlashChoice{Command: picker.Command, Value: picker.Items[idx].Value})
 	// A model, an effort or an agent may have changed under the footer.
 	refreshSessionFooter(renderer, cmds.session, state.sessionID)

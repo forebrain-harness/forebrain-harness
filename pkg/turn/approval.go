@@ -1082,6 +1082,11 @@ func Truncate(s string, max int) string {
 // the model spawns, so agents.defaults.enable_subagent does not govern it.
 // Returning no models — which removes the review row from the approval —
 // happens only when there is no configured model to ask.
+//
+// Each option carries the endpoint its row's requests go to — the picker's
+// description column, so two rows of one provider/model stay apart. It is
+// display only: a reviewer's identity is the provider/model pair
+// MatchesSelection compares, not the row its requests happen to land on.
 func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentProvider, currentModel string) []PlanReviewModelOption {
 	entries := ModelChoices(cfg, agentName)
 	if len(entries) == 0 {
@@ -1111,6 +1116,8 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentProvider, curren
 			Model:    model,
 			Current: strings.EqualFold(provider, strings.TrimSpace(currentProvider)) &&
 				strings.EqualFold(model, strings.TrimSpace(currentModel)),
+			Endpoint:     ModelEndpointLabel(entry.BaseURL, entry.APIPath, entry.URLVerbatim),
+			EndpointTail: endpointTail(entry),
 		})
 	}
 	return out
