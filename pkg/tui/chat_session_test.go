@@ -19603,11 +19603,13 @@ func TestRendererCompletedToolHeaderUsesOneForegroundColor(t *testing.T) {
 			duration: 250 * time.Millisecond,
 		},
 		{
+			// A tool this build has no words for is named by its own name; the
+			// invocation's argument JSON never reaches the head.
 			name:       "unknown tool",
 			title:      "future_lookup",
 			input:      map[string]any{"query": "palette"},
 			summary:    "completed",
-			target:     `{"query":"palette"}`,
+			target:     "future_lookup",
 			invocation: `future_lookup {"query":"palette"}`,
 			duration:   1100 * time.Millisecond,
 		},
@@ -20407,7 +20409,11 @@ func TestToolDisplayHeaderIncludesDurationWithoutOutputSuffix(t *testing.T) {
 	}
 }
 
-func TestToolDisplayHeaderUnknownToolUsesInvocationOnce(t *testing.T) {
+// A tool this build has no words for — in practice a row another agent
+// recorded — is named by what happened and by its own name: the head is a
+// sentence a surface can word ("Called unknown_tool" / "已调用 SendMessage"),
+// and the call's argument JSON never reaches it.
+func TestToolDisplayHeaderUnknownToolIsNamedByItsOwnName(t *testing.T) {
 	header := ToolDisplayHeader(Frame{
 		Kind:    FrameTool,
 		Title:   "unknown_tool",
@@ -20419,11 +20425,26 @@ func TestToolDisplayHeaderUnknownToolUsesInvocationOnce(t *testing.T) {
 			Invocation: `unknown_tool {"path":"/repo/demo"}`,
 		},
 	}, "")
-	if header != `unknown_tool {"path":"/repo/demo"}` {
+	if header != "Called unknown_tool" {
 		t.Fatalf("header = %q", header)
 	}
-	if strings.Contains(header, "42 bytes") {
-		t.Fatalf("unknown tool header leaked summary detail: %q", header)
+	if strings.Contains(header, "42 bytes") || strings.Contains(header, `{"path"`) {
+		t.Fatalf("unknown tool header leaked call detail: %q", header)
+	}
+	// A call still running, and a call that failed, say so in the same words.
+	running := ToolDisplayHeader(Frame{
+		Kind: FrameTool, Title: "unknown_tool",
+		ToolMeta: tool.ToolMeta{ToolName: "unknown_tool", Status: "running"},
+	}, "")
+	if running != "Calling unknown_tool" {
+		t.Fatalf("running header = %q", running)
+	}
+	failed := ToolDisplayHeader(Frame{
+		Kind: FrameTool, Title: "unknown_tool", Final: true,
+		ToolMeta: tool.ToolMeta{ToolName: "unknown_tool", Status: "failed"},
+	}, "")
+	if failed != "Failed to call unknown_tool" {
+		t.Fatalf("failed header = %q", failed)
 	}
 }
 

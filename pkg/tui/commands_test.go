@@ -2266,18 +2266,18 @@ func TestReplayTurnsToRendererUnknownToolUsesInvocationWithoutSummarySuffix(t *t
 	}
 	frame := renderer.vm.blocks[0].frame
 	header := ToolDisplayHeader(frame, "")
-	if header != `legacy_tool {"path":"/repo/demo"}` {
+	if header != "Called legacy_tool" {
 		t.Fatalf("header=%q", header)
 	}
 	if strings.Contains(header, "legacy result") {
 		t.Fatalf("header leaked body text: %q", header)
 	}
 	painted := stripANSI(strings.Join(renderViewport(&renderer.vm, 80, 20, 0, DiffThemeDark).lines, "\n"))
-	if !strings.Contains(painted, `legacy_tool {"path":"/repo/demo"}`) {
-		t.Fatalf("viewport missing invocation fallback:\n%s", painted)
+	if !strings.Contains(painted, "Called legacy_tool") {
+		t.Fatalf("viewport missing the unknown tool's named head:\n%s", painted)
 	}
-	if strings.Contains(painted, `legacy_tool {"path":"/repo/demo"} ·`) {
-		t.Fatalf("viewport reintroduced summary suffix:\n%s", painted)
+	if strings.Contains(painted, `{"path"`) {
+		t.Fatalf("viewport leaked the call's argument JSON:\n%s", painted)
 	}
 }
 

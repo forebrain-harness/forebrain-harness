@@ -2226,7 +2226,7 @@ func TestReadableAnswerRidesTheStepTheEventAndTheStoredRow(t *testing.T) {
 	require.Len(t, rows, 3)
 	require.JSONEq(t, want, string(rows[0].ReadableAnswer))
 	require.JSONEq(t, sendWant, string(rows[1].ReadableAnswer))
-	require.JSONEq(t, `{"rows":[{"label":"Success","value":"true"},{"label":"Message","value":"Resuming agent aacb0c9"}]}`, string(rows[2].ReadableAnswer))
+	require.JSONEq(t, `{"text":"Resuming agent aacb0c9"}`, string(rows[2].ReadableAnswer))
 
 	// A body with a renderer of its own carries none, JSON or not.
 	shellEvt := tool.StepEvent{

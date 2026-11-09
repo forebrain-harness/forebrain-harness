@@ -498,8 +498,14 @@ test('a tool with no card of its own lists its answer, never the JSON it arrived
   // search's links.
   const answers = main.locator('[data-testid="tool-answer"]')
   await expect(answers).toHaveCount(2)
-  await expect(answers.nth(0)).toContainText('Resumed agent id')
-  await expect(answers.nth(0)).toContainText('aacb0c98b12b26520')
+  // A migrated row's answer says one sentence to a person; its ids stay out of
+  // the card.
+  await expect(answers.nth(0)).toContainText('Resuming agent aacb0c9')
+  await expect(answers.nth(0)).not.toContainText('aacb0c98b12b26520')
+  // The head of a tool this build has no words for reads as a sentence in the
+  // reader's language, with the tool's own name kept as its object.
+  const migratedHead = page.locator('.tool-card').filter({ hasText: 'SendMessage' }).first()
+  await expect(migratedHead.locator('[data-slot="collapsible-trigger"]')).toContainText(/已调用\s*SendMessage/)
   await expect(answers.nth(1).locator('a', { hasText: 'Context Caching 正式公测' })).toHaveAttribute('href', 'https://platform.kimi.com/blog/posts/context-caching')
   const replayed = await main.innerText()
   for (const leak of ['output:', '{"', '"self"', '"success"', 'Links: [', '"peer_status"']) expect(replayed).not.toContain(leak)

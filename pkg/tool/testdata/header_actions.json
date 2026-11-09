@@ -1,6 +1,8 @@
 [
   "Asked user",
   "Asking user",
+  "Called",
+  "Calling",
   "Canceled",
   "Could not send a message",
   "Could not send a message to",
@@ -12,6 +14,7 @@
   "Entering plan mode",
   "Exited plan mode",
   "Failed to ask user",
+  "Failed to call",
   "Failed to edit",
   "Failed to enter plan mode",
   "Failed to exit plan mode",

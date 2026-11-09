@@ -1312,14 +1312,10 @@ func TestGenericToolCardReadsItsAnswer(t *testing.T) {
 		return body
 	}
 	sendAnswer := `{"success":true,"message":"Resuming agent aacb0c9","resumedAgentId":"aacb0c98b12b26520","pin":{"id":"aacb0c98b12b26520","ref":"13d70d"}}`
-	sendRows := []string{
-		"  └ Success: true",
-		"    Message: Resuming agent aacb0c9",
-		"    Resumed agent id: aacb0c98b12b26520",
-		"    Pin:",
-		"      Id: aacb0c98b12b26520",
-		"      Ref: 13d70d",
-	}
+	// The answer says one sentence to a person ("Resuming agent aacb0c9"); the
+	// ids and flags beside it are the tool's plumbing, and the card is the
+	// sentence.
+	sendRows := []string{"  └ Resuming agent aacb0c9"}
 	cases := []struct {
 		name    string
 		content string
@@ -1340,10 +1336,15 @@ func TestGenericToolCardReadsItsAnswer(t *testing.T) {
 			"        Url: https://example.com/api",
 		}},
 		{"object then prose", `{"success":true,"message":"Resumed agent."}` + "\n[Subagent hand-back] The report follows.", []string{
-			"  └ Success: true",
-			"    Message: Resumed agent.",
+			"  └ Resumed agent.",
 			"",
 			"    [Subagent hand-back] The report follows.",
+		}},
+		// An answer that carries a failure keeps its fields: the reason is what
+		// a reader needs, and hiding it behind a cheerful sentence would lie.
+		{"error keeps fields", `{"error":"no such agent","message":"failed"}`, []string{
+			"  └ Error: no such agent",
+			"    Message: failed",
 		}},
 		{"tag record", "<retrieval_status>success</retrieval_status>\n\n<task_id>b0i122q3l</task_id>\n\n<exit_code>0</exit_code>", []string{
 			"  └ Retrieval status: success",

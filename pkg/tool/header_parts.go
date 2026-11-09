@@ -400,8 +400,25 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 		}
 		suffix = MCPToolInputSummary(meta.Input)
 	default:
-		action = title
-		target = defaultToolInvocationTarget(title, meta)
+		// A tool this build has no words for — in practice a row another
+		// agent recorded, brought in by /migrate — is named by what happened
+		// to it and by its own name: a card head reads as a sentence the
+		// surface can word ("已调用 SendMessage") instead of a bare
+		// identifier, and the name itself is never translated, because it is
+		// another tool's identity, not one of ours.
+		switch {
+		case isFailed:
+			action = "Failed to call"
+		case isRunning || isPending:
+			action = "Calling"
+		default:
+			action = "Called"
+		}
+		if name := strings.TrimSpace(title); name != "" {
+			target = name
+		} else {
+			target = defaultToolInvocationTarget(title, meta)
+		}
 	}
 
 	if isCanceled && !toolStatesOwnCanceledLabel(lower) {
@@ -500,6 +517,8 @@ func HeaderActions() []string {
 		// Skill and MCP cards
 		"Loading skill", "Skill",
 		"MCP",
+		// Tools this build has no words for (migrated rows)
+		"Called", "Calling", "Failed to call",
 		// The generic refused and dismissed labels
 		"Denied", "Canceled",
 	}

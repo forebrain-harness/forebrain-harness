@@ -4079,18 +4079,66 @@ func ReadToolAnswer(content string) (ReadableAnswer, bool) {
 	}
 	text, isText := answer.(string)
 	if !isText {
+		if sentence, ok := humanSentence(answer); ok {
+			return ReadableAnswer{Text: sentence}, true
+		}
 		return ReadableAnswer{Rows: readableRows(answer, 0)}, true
 	}
 	text = strings.TrimSpace(text)
 	if isJSONDocument(text) {
 		if value, ok := decodeOrderedJSON(text); ok {
+			if sentence, ok := humanSentence(value); ok {
+				return ReadableAnswer{Text: sentence}, true
+			}
 			return ReadableAnswer{Rows: readableRows(value, 0)}, true
 		}
 	}
 	if lead, rest, ok := leadingJSONObject(text); ok {
+		if sentence, ok := humanSentence(lead); ok {
+			return ReadableAnswer{Text: sentence + "\n\n" + rest}, true
+		}
 		return ReadableAnswer{Rows: readableRows(lead, 0), Text: rest}, true
 	}
 	return ReadableAnswer{Text: text}, enveloped
+}
+
+// humanSentence is the one sentence an answer says to a person, when it says
+// one: a field named message, text, summary or description, in that order. An
+// answer with one is the card — the ids, refs, flags and nested records beside
+// it are plumbing the tool needed, not something a reader can use (a migrated
+// row's {"success":true,"message":"Resuming agent aacb0c9","pin":{…}} is the
+// sentence). An answer that also carries an error or a reason keeps its
+// fields: that is the failure a reader has to be able to see.
+func humanSentence(value any) (string, bool) {
+	object, ok := value.(payloadObject)
+	if !ok {
+		return "", false
+	}
+	for _, key := range []string{"error", "reason"} {
+		if text, ok := payloadStringField(object, key); ok && strings.TrimSpace(text) != "" {
+			return "", false
+		}
+	}
+	for _, key := range []string{"message", "text", "summary", "description"} {
+		if text, ok := payloadStringField(object, key); ok {
+			if text = strings.TrimSpace(text); text != "" {
+				return text, true
+			}
+		}
+	}
+	return "", false
+}
+
+// payloadStringField is one field's value when the field is a string.
+func payloadStringField(object payloadObject, key string) (string, bool) {
+	for _, field := range object {
+		if field.key != key {
+			continue
+		}
+		text, ok := field.value.(string)
+		return text, ok
+	}
+	return "", false
 }
 
 // nonEmptyText keeps the parts that hold text, joined by sep.

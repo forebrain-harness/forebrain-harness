@@ -47,6 +47,12 @@ export const HEADER_ACTION_ZH: Record<string, string> = {
   'Searched saved output': '已搜索保存的输出',
   'Searching saved output': '正在搜索保存的输出',
   'Todo': '待办',
+  // A tool this build has no words for — in practice a row another agent
+  // recorded, brought in by /migrate. The frame is the reader's language; the
+  // tool's own name stays as it was, because it is not one of ours.
+  'Called': '已调用',
+  'Calling': '正在调用',
+  'Failed to call': '调用失败',
   'Updating todo': '正在更新待办',
   'Failed to update todo': '更新待办失败',
   'Entered plan mode': '已进入计划模式',
