@@ -7925,22 +7925,18 @@ func newTestPNG(t *testing.T) string {
 // TestCharacterizationAttachmentRawDisplayModelInput covers P0-7's last
 // scenario: an image attachment has three representations — what the user
 // typed, what the transcript displays, and what the model actually
-// receives. Golden shape, confirmed empirically and correcting one wrong
-// assumption along the way: the "[Image #N]" marker surfaceTurnContentParts
-// appends is NOT display-only the way it might look from
-// buildSurfaceUserPartsJSON's "display vs model" framing in its own
-// comments. DispatchSurfaceTurn computes the LLM parts first, from the raw
-// text, but then separately recomputes modelInput from the marker-suffixed
-// display text — and modelInput, not the original parts[0], is what
-// actually becomes the text content part sent to the model. So:
+// receives. They are three, not two, and the model's never holds the marker
+// (owner, 2026-11-09): the "[Image #N]" display form belongs to the row, and
+// the only line about the picture that reaches the model is the request-only
+// one naming its file, after the image itself. So:
 //   - model input (what capturingLLM actually receives): a text part equal
-//     to the marker-suffixed display text, plus a base64 image part — the
-//     only place the raw image bytes travel.
-//   - persisted transcript Content: the same marker-suffixed text.
-//   - persisted PartsJSON (raw/replay form): a file_reference part carrying
-//     the attachment's path/label/mime type, never inlining the image bytes
-//     — replaying a session re-reads the file rather than duplicating it
-//     into the database.
+//     to the words the person typed, then a base64 image part — the only
+//     place the raw image bytes travel — then the note naming its file.
+//   - persisted transcript Content: the display form, marker appended.
+//   - persisted PartsJSON (raw/replay form): the words plus a file_reference
+//     part carrying the attachment's path/label/mime type, never inlining the
+//     image bytes — replaying a session re-reads the file rather than
+//     duplicating it into the database.
 func TestCharacterizationAttachmentRawDisplayModelInput(t *testing.T) {
 	llmDouble := &capturingLLM{text: "I see a small red square."}
 	s := newCharacterizationSession(t, llmDouble)
@@ -7973,24 +7969,23 @@ func TestCharacterizationAttachmentRawDisplayModelInput(t *testing.T) {
 		t.Fatalf("no user message in what the model received: %+v", received)
 	}
 	var sawText, sawImage bool
+	sourceNotes := 0
 	for i, part := range userMsg.Parts {
 		// The line naming the image's file follows the image.
 		if i > 0 && userMsg.Parts[i-1].Type == llm.ContentTypeImageBase64 {
 			if part.Text != llm.ImageSourceNote(imgPath) {
 				t.Fatalf("part after the image = %#v, want its source line", part)
 			}
+			sourceNotes++
 			continue
 		}
 		switch part.Type {
 		case llm.ContentTypeText:
-			// Corrected against a first failing assumption: the "[Image #1]"
-			// marker is NOT display-only. DispatchSurfaceTurn computes parts
-			// from the raw text before appending the marker, but then
-			// recomputes modelInput from the marker-suffixed display text
-			// and that — not the original parts[0] — is what actually
-			// becomes the text content part sent to the model.
-			if part.Text != "what color is this?\n[Image #1]" {
-				t.Fatalf("model text part = %q, want the marker-suffixed display text (confirmed to also be what the model receives)", part.Text)
+			if part.Text != "what color is this?" {
+				t.Fatalf("model text part = %q, want the words the person typed", part.Text)
+			}
+			if strings.Contains(part.Text, "[Image #") || strings.Contains(part.Text, "[Image: source:") {
+				t.Fatalf("model text part = %q, want neither the display marker nor the source note folded into it", part.Text)
 			}
 			sawText = true
 		case llm.ContentTypeImageBase64:
@@ -8002,6 +7997,9 @@ func TestCharacterizationAttachmentRawDisplayModelInput(t *testing.T) {
 	}
 	if !sawText || !sawImage {
 		t.Fatalf("model input parts = %+v, want one text part and one image part", userMsg.Parts)
+	}
+	if sourceNotes != 1 {
+		t.Fatalf("source notes in the request = %d, want exactly 1 (the one after the image)", sourceNotes)
 	}
 
 	// Persisted transcript: display form in Content, raw file_reference form
@@ -8019,6 +8017,19 @@ func TestCharacterizationAttachmentRawDisplayModelInput(t *testing.T) {
 	}
 	if strings.Contains(userRow.PartsJSON, "base64") || strings.Contains(userRow.PartsJSON, "image/png\",\"data\"") {
 		t.Fatalf("persisted PartsJSON = %q, want no inlined base64 image data (replay re-reads the file)", userRow.PartsJSON)
+	}
+	// The row's content and its parts' text differ now, and the dedup that
+	// keeps a replayed prompt from carrying the message twice compares the
+	// parts' text: the row must still be stored exactly once.
+	var rows int
+	if err := s.sessStore().DB().QueryRow(
+		dbx.Rebind(dbx.DialectOf(s.sessStore().DB()),
+			`SELECT count(*) FROM fb_messages WHERE session_id=? AND role='user'`),
+		sessionID).Scan(&rows); err != nil {
+		t.Fatalf("user row count: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("user rows = %d, want 1", rows)
 	}
 }
 

@@ -1687,6 +1687,40 @@ func TestHistoryRecallSubmissionRestoresImageAndLargePaste(t *testing.T) {
 	}
 }
 
+// TestComposerSubmissionPartsReadAsTheTypedWords pins what the composer puts
+// in each of its three texts: the parts the model is read from carry the words
+// the person typed (the paste expanded, the chip stripped), the source note
+// rides once after the image, and the display text keeps the chip the row and
+// the live frame show. A draft holding nothing but a picture has no words at
+// all — the sentence that stands in for them is the surface's, not the
+// composer's.
+func TestComposerSubmissionPartsReadAsTheTypedWords(t *testing.T) {
+	img := newTestPNG(t)
+	attachments := []InputAttachment{{Path: img, Label: "probe.png", MIMEType: "image/png"}}
+
+	draft := "[Image #1] 如截图所示"
+	state := &streamState{composer: ComposerState{
+		Text: draft, DraftText: draft, Cursor: len([]rune(draft)), Attachments: attachments,
+	}}
+	sub, ok := state.composerSubmission()
+	require.True(t, ok)
+	require.Equal(t, "如截图所示", strings.TrimSpace(llm.TextWithoutImageSourceNotes(sub.Parts)))
+	require.NotContains(t, llm.TextWithoutImageSourceNotes(sub.Parts), "[Image #")
+	require.NotContains(t, llm.TextWithoutImageSourceNotes(sub.Parts), "[Image: source:")
+	require.Len(t, sub.Parts, 3, "text part, image part, source note")
+	require.Equal(t, llm.ImageSourceNote(img), sub.Parts[2].Text, "the note rides once, after the image")
+	require.Contains(t, sub.DisplayText, "[Image #1]")
+
+	imageOnly := "[Image #1]"
+	state = &streamState{composer: ComposerState{
+		Text: imageOnly, DraftText: imageOnly, Cursor: len([]rune(imageOnly)), Attachments: attachments,
+	}}
+	sub, ok = state.composerSubmission()
+	require.True(t, ok)
+	require.Equal(t, "", llm.TextWithoutImageSourceNotes(sub.Parts))
+	require.Equal(t, imageOnly, sub.DisplayText)
+}
+
 func TestHistoryBrowseDownRestoresOriginalDraftMetadata(t *testing.T) {
 	originalAttachment := InputAttachment{Path: "/tmp/original.png", MIMEType: "image/png"}
 	originalPaste := PendingPaste{Content: "original", Placeholder: "[Pasted Content 8 chars]"}

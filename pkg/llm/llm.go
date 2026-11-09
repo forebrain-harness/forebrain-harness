@@ -124,6 +124,38 @@ func WithoutImageSourceNotes(parts []ContentPart) []ContentPart {
 	return out
 }
 
+// TextWithoutImageSourceNotes is parts' own text as a reader sees it: the text
+// parts joined, with the request-only line naming each image's file left out.
+// Anything that draws or measures a message from its parts uses it — the
+// subagent's delivered card, a queue preview — because that line belongs to
+// the request, not to the person.
+func TextWithoutImageSourceNotes(parts []ContentPart) string {
+	return TextContent(WithoutImageSourceNotes(parts)...)
+}
+
+// ImageOnlyUserText is what a message that attached images and said no words
+// sends the model, on every surface: a turn, a steer, a message to a subagent.
+const ImageOnlyUserText = "Please analyze the attached image."
+
+// CarriesOnlyImages reports whether parts is a message that carries images and
+// nothing the person typed: no text part but the line naming each image's file
+// (ImageSourceNote). It is what tells a surface to send ImageOnlyUserText
+// instead of the "[Image #N]" its queue shows.
+func CarriesOnlyImages(parts []ContentPart) bool {
+	hasImage := false
+	for _, p := range WithoutImageSourceNotes(parts) {
+		switch p.Type {
+		case ContentTypeImageBase64, ContentTypeImageURL:
+			hasImage = true
+		case ContentTypeText:
+			if strings.TrimSpace(p.Text) != "" {
+				return false
+			}
+		}
+	}
+	return hasImage
+}
+
 // ImageFile reads path and returns it as an image ContentPart under the same
 // budget the tool paths use: a file within FOREBRAIN_IMAGE_MAX_BYTES (default
 // 3 MiB) is sent byte-for-byte; a larger one is downscaled by the fixed

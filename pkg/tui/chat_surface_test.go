@@ -23,6 +23,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/session"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
@@ -630,8 +631,15 @@ func TestDispatchSurfaceTurnPassesResolvedMentionsThroughVerbatim(t *testing.T) 
 
 	// The mentioned path costs nothing but its own characters, and what is
 	// stored is byte-identical to what was sent, so the next turn replays this
-	// one from a cached prefix instead of a perturbed one.
-	require.Equal(t, "review notes.txt\n[Image #1]", msgs[0].Parts[0].Text)
+	// one from a cached prefix instead of a perturbed one. The marker is the
+	// row's display form: the model's own text is the typed words.
+	require.Equal(t, "review notes.txt", msgs[0].Parts[0].Text)
+	var rowContent string
+	require.NoError(t, s.sessStore().DB().QueryRow(
+		dbx.Rebind(dbx.DialectOf(s.sessStore().DB()),
+			`SELECT content FROM fb_messages WHERE session_id=? AND role='user' ORDER BY id DESC LIMIT 1`),
+		"linked-mention-image").Scan(&rowContent))
+	require.Equal(t, "review notes.txt\n[Image #1]", rowContent)
 	require.NotContains(t, llm.TextContent(msgs[0].Parts...), "mention context")
 
 	// The image still rides along as an attachment, since no tool reads pixels.

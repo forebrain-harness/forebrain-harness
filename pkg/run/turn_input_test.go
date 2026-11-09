@@ -853,3 +853,28 @@ func TestInputQueuePeerOriginReachesTheModel(t *testing.T) {
 		t.Fatalf("typed steer = %+v, want a plain user message", plain)
 	}
 }
+
+// A steer that carries pictures and no words sends the model the same sentence
+// a turn does: the queue's own text is the chip its popover shows, never the
+// prompt. Words the person typed are sent exactly as they are.
+func TestSteerPartsImageOnlyAddsTheSentence(t *testing.T) {
+	imageOnly := Input{
+		Text: "[Image #1]",
+		Parts: []llm.ContentPart{
+			llm.ImageBase64("image/png", "iVBORw0KGgo="),
+			llm.Text(llm.ImageSourceNote("/tmp/b.png")),
+		},
+	}
+	got := steerParts(imageOnly)
+	if len(got) != 3 || got[0].Type != llm.ContentTypeText || got[0].Text != llm.ImageOnlyUserText {
+		t.Fatalf("parts = %#v, want the image-only sentence in front", got)
+	}
+	if got[1] != imageOnly.Parts[0] || got[2] != imageOnly.Parts[1] {
+		t.Fatalf("parts = %#v, want the image and its note untouched behind the sentence", got)
+	}
+
+	typed := Input{Text: "make it blue", Parts: []llm.ContentPart{llm.Text("make it blue")}}
+	if got := steerParts(typed); len(got) != 1 || got[0].Text != "make it blue" {
+		t.Fatalf("typed steer parts = %#v, want them as given", got)
+	}
+}

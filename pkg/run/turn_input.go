@@ -825,7 +825,7 @@ func (q *InputQueue) steer(in Input, respectClosed bool) bool {
 	in = cloneInput(in)
 	in.Text = cleanInputText(in)
 	if in.Text == "" {
-		in.Text = strings.Join(strings.Fields(llm.TextContent(in.Parts...)), " ")
+		in.Text = strings.Join(strings.Fields(llm.TextWithoutImageSourceNotes(in.Parts)), " ")
 	}
 	in.Attachments = cleanAttachments(in.Attachments)
 	in.MentionImages = cleanAttachments(in.MentionImages)
@@ -851,10 +851,7 @@ func (q *InputQueue) steer(in Input, respectClosed bool) bool {
 		}
 		return false
 	}
-	parts := append([]llm.ContentPart(nil), in.Parts...)
-	if len(parts) == 0 {
-		parts = []llm.ContentPart{llm.Text(in.Text)}
-	}
+	parts := steerParts(in)
 	q.steers = append(q.steers, in)
 	q.rt.enqueueEntry(TurnInputEntry{
 		Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq,
@@ -867,6 +864,20 @@ func (q *InputQueue) steer(in Input, respectClosed bool) bool {
 		hook()
 	}
 	return true
+}
+
+// steerParts is what a steer sends the model: its parts as given, with the
+// image-only sentence in front when the person attached pictures and typed
+// nothing (the queue's own text is the chip the popover shows).
+func steerParts(in Input) []llm.ContentPart {
+	parts := append([]llm.ContentPart(nil), in.Parts...)
+	if len(parts) == 0 {
+		return []llm.ContentPart{llm.Text(in.Text)}
+	}
+	if llm.CarriesOnlyImages(parts) {
+		return append([]llm.ContentPart{llm.Text(llm.ImageOnlyUserText)}, parts...)
+	}
+	return parts
 }
 
 // FollowUp queues an input for after the current turn. An input marked

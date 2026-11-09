@@ -158,8 +158,8 @@ func TestMergedSteersKeepTheirImagesAndTheirFiles(t *testing.T) {
 	}
 
 	merged, _ := mergeSteers([]Input{first, second, imageOnly})
-	if merged.Text != "look at\nthis\n\nand fix it\n\n[Image #1]" {
-		t.Fatalf("text = %q", merged.Text)
+	if want := "look at\nthis\n\nand fix it\n\n" + llm.ImageOnlyUserText; merged.Text != want {
+		t.Fatalf("text = %q, want %q", merged.Text, want)
 	}
 	want := []llm.ContentPart{
 		llm.Text(merged.Text),
@@ -173,5 +173,24 @@ func TestMergedSteersKeepTheirImagesAndTheirFiles(t *testing.T) {
 		if merged.Parts[i] != want[i] {
 			t.Fatalf("part %d = %#v, want %#v", i, merged.Parts[i], want[i])
 		}
+	}
+}
+
+// A resume attempt runs on the same words a turn would send: the image-only
+// sentence when the message carries nothing but pictures — the queue's
+// "[Image #N]" chip is for people — and the parts' own text when the preview
+// text is empty.
+func TestSubagentAttemptTextImageOnly(t *testing.T) {
+	imageOnly := Input{
+		Text:  "[Image #1]",
+		Parts: []llm.ContentPart{llm.ImageBase64("image/png", sourceTestPNG), llm.Text(llm.ImageSourceNote("/tmp/b.png"))},
+	}
+	if got := subagentAttemptText(imageOnly); got != llm.ImageOnlyUserText {
+		t.Fatalf("image-only attempt text = %q, want %q", got, llm.ImageOnlyUserText)
+	}
+
+	typed := Input{Parts: []llm.ContentPart{llm.Text("make it blue")}}
+	if got := subagentAttemptText(typed); got != "make it blue" {
+		t.Fatalf("attempt text = %q, want the parts' own words", got)
 	}
 }

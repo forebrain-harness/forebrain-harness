@@ -23,6 +23,8 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 	"golang.org/x/term"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
 type inputEventKind int
@@ -2444,7 +2446,7 @@ func normalizeRawInputHistoryLine(line string) (string, bool) {
 const largePasteCharThreshold = 1000
 
 func imageAttachmentPlaceholder(index int) string {
-	return fmt.Sprintf("[Image #%d]", index+1)
+	return turn.ImageMarker(index)
 }
 
 // renderComposerImagePlaceholder draws an attachment's chip and ends in a full
@@ -2471,7 +2473,7 @@ func renderComposerPastePlaceholder(placeholder string) string {
 
 func buildComposerText(text string, pastes []PendingPaste, attachments []InputAttachment) string {
 	return buildComposerTextWithRenderers(text, pastes, attachments, func(i int) string {
-		return fmt.Sprintf("[Image #%d]", i+1)
+		return turn.ImageMarker(i)
 	}, nil)
 }
 

@@ -371,8 +371,9 @@ func TestWebTurnInputIsTheMessageItStores(t *testing.T) {
 	}
 }
 
-// A message that attaches only an image reads the way the terminal shows one:
-// the image's marker is its text, sent to the model and shown on the row.
+// A message that attaches only an image reads the way a terminal turn does:
+// the model is sent the same sentence for pictures alone, and the row shows
+// the image's marker.
 func TestWebTurnInputWithNothingTyped(t *testing.T) {
 	home, workspace := newMentionWorkspace(t)
 	s, sid := scopedMentionServer(t, home, workspace)
@@ -380,8 +381,53 @@ func TestWebTurnInputWithNothingTyped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareWebTurnInput: %v", err)
 	}
-	if in.text != "[Image #1]" || in.display != "[Image #1]" {
+	if in.text != llm.ImageOnlyUserText || in.display != "[Image #1]" {
 		t.Fatalf("text = %q, display = %q", in.text, in.display)
+	}
+}
+
+// An upload that is no picture and no words keeps an empty text: the blocks
+// naming the file and where it was saved are the whole message. The sentence
+// for pictures alone must not stand in for a document.
+func TestWebTurnInputWithOnlyAnUpload(t *testing.T) {
+	home, workspace := newMentionWorkspace(t)
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	files := &state.FileStore{DB: db, Home: home, WorkspaceRoot: workspace, Cfg: state.Config{FilesDirRel: "files", FilesTextDirRel: "files-text", TmpDirRel: "tmp"}}
+	sessions := state.NewSessionStore(db, "main")
+	if err := sessions.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "workspace", Root: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "s1", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	report, err := files.CreateFromReader(ctx, "s1", "report.pdf", strings.NewReader("%PDF-1.4"), 8, "application/pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Home: home, Files: files, Sessions: sessions, Projects: projects}
+
+	in, err := s.prepareWebTurnInput(ctx, "s1", "", []string{report.ID}, nil)
+	if err != nil {
+		t.Fatalf("prepareWebTurnInput: %v", err)
+	}
+	if !strings.HasPrefix(in.text, "[Attachment report.pdf (application/pdf)]\nSaved at: ") {
+		t.Fatalf("text = %q, want the attachment block alone", in.text)
+	}
+	if strings.Contains(in.text, llm.ImageOnlyUserText) {
+		t.Fatalf("text = %q, want no image-only sentence for a document", in.text)
+	}
+	if in.display != "[Attachment report.pdf]" {
+		t.Fatalf("display = %q", in.display)
 	}
 }
 

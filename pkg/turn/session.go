@@ -266,8 +266,9 @@ type UserTurn struct {
 	// the row once it does (SessionStore.BindMessageToRun): a run that ends
 	// before writing anything still has this row to close with its line.
 	RunID string
-	// ModelInput is the prompt actually fed to the model. For a slash command
-	// this is the expanded prompt, not what the user typed.
+	// ModelInput is the row's content: what the person is shown (display
+	// form). For a slash command this is the expanded prompt, not what the
+	// user typed. The model's text is Parts/PartsJSON.
 	ModelInput string
 	// RawInput is what the user actually typed, when it differs from
 	// ModelInput. Empty means the two are the same.

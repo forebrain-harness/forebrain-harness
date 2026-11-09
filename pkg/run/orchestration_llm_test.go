@@ -1906,8 +1906,12 @@ func TestInputQueueSteerKeepsRichParts(t *testing.T) {
 	if !q.Steer(Input{Parts: []llm.ContentPart{llm.ImageURL("https://example.com/image.png")}}) {
 		t.Fatal("rich steer")
 	}
-	if got := q.Runtime().Snapshot(); len(got) != 1 || got[0].Parts[0].ImageURL == "" {
+	got := q.Runtime().Snapshot()
+	if len(got) != 1 || len(got[0].Parts) != 2 || got[0].Parts[1].ImageURL == "" {
 		t.Fatalf("runtime = %#v", got)
+	}
+	if got[0].Parts[0].Text != llm.ImageOnlyUserText {
+		t.Fatalf("steer text part = %q, want %q", got[0].Parts[0].Text, llm.ImageOnlyUserText)
 	}
 }
 

@@ -518,7 +518,7 @@ func TestSurfaceTurnContentPartsNoteMatchesPersistedReference(t *testing.T) {
 	require.NoError(t, os.WriteFile(bad, []byte("not an image"), 0o600))
 	attachments := []turn.InputAttachment{{Path: bad, Label: "fake.png"}}
 
-	parts, _, warnings, err := turn.SurfaceTurnContentParts("look", "look", attachments)
+	parts, _, _, warnings, err := turn.SurfaceTurnContentParts("look", "look", attachments)
 	require.NoError(t, err)
 	require.Len(t, warnings, 1)
 	var live string

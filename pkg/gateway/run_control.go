@@ -1183,15 +1183,19 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 			blocks = append(blocks, llm.UnsendableImageNote(picked, "", err.Error()))
 			continue
 		}
-		imageMarkers = append(imageMarkers, fmt.Sprintf("[Image #%d]", len(imageMarkers)+1))
+		imageMarkers = append(imageMarkers, turn.ImageMarker(len(imageMarkers)))
 		parts = append(parts, state.FileReferencePartJSON(abs, picked, image.MIMEType))
 	}
 	markers = append(markers, imageMarkers...)
 	in := webTurnInput{display: text}
 	if text == "" {
-		// Nothing typed: the images stand for the text, as they do in the
-		// terminal, and the row shows what was attached.
-		text = strings.Join(imageMarkers, "\n")
+		// Nothing typed: the model reads the same sentence the terminal sends
+		// for pictures alone, and the row shows what was attached. An upload
+		// that is no picture keeps an empty text too — the blocks below say
+		// what it is and where it was saved.
+		if len(imageMarkers) > 0 {
+			text = llm.ImageOnlyUserText
+		}
 		in.display = strings.Join(markers, "\n")
 	}
 	in.text = strings.TrimSpace(strings.Join(append([]string{text}, blocks...), "\n\n"))

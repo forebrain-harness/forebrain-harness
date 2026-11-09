@@ -2224,7 +2224,7 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, compl
 	})
 }
 
-func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, input string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, imageRefusal error, goalObjective string, skillName string, skillPath string, skills []turn.SkillSelection, batchInput *turn.BatchTurnInput, callerRendersReturnedError bool, trigger string, out io.Writer) (retErr error) {
+func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, modelText string, content string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, imageRefusal error, goalObjective string, skillName string, skillPath string, skills []turn.SkillSelection, batchInput *turn.BatchTurnInput, callerRendersReturnedError bool, trigger string, out io.Writer) (retErr error) {
 	s.dispatchTurnMu.Lock()
 	defer s.dispatchTurnMu.Unlock()
 	foreground := foregroundTurnFrom(ctx)
@@ -2294,8 +2294,8 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		return err
 	}
 	if s.chatLog != nil {
-		prev := llm.TruncateBytes(input, 512, "...")
-		s.chatLog.Debugf("forebrain chat turn start session=%s channel=%s input_bytes=%d preview=%q", sessionID, channel, len(input), prev)
+		prev := llm.TruncateBytes(modelText, 512, "...")
+		s.chatLog.Debugf("forebrain chat turn start session=%s channel=%s input_bytes=%d preview=%q", sessionID, channel, len(modelText), prev)
 	}
 	if s.hasPendingToolApproval() {
 		return nil
@@ -2330,7 +2330,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	// A message whose image the session model refuses sends no request, so
 	// there is nothing to make room for; the next turn compacts as usual.
 	if imageRefusal == nil {
-		if cerr := s.maybeAutoCompactBeforeAppend(ctx, sessionID, channel, input, rawInput); cerr != nil && s.chatLog != nil {
+		if cerr := s.maybeAutoCompactBeforeAppend(ctx, sessionID, channel, modelText, rawInput); cerr != nil && s.chatLog != nil {
 			s.chatLog.Debugf("forebrain chat auto compact skipped session=%s err=%v", sessionID, cerr)
 		}
 	}
@@ -2350,12 +2350,12 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 				Cwd:            s.home(),
 				PermissionMode: "on-request",
 			},
-			Prompt: input,
+			Prompt: modelText,
 		})
 		if herr != nil {
 			return herr
 		}
-		input = hook.AppendAdditionalContext(input, hookOut.AdditionalContext)
+		modelText = hook.AppendAdditionalContext(modelText, hookOut.AdditionalContext)
 		if hookOut.Blocked {
 			msg := strings.TrimSpace(hookOut.StopReason)
 			if msg == "" {
@@ -2388,7 +2388,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	}
 	userRowID, persistErr = turn.PersistUserTurn(durable, s.sessStore(), turn.UserTurn{
 		SessionID:  sessionID,
-		ModelInput: input,
+		ModelInput: content,
 		RawInput:   rawInput,
 		Parts:      inputParts,
 		PartsJSON:  userPartsJSON,
@@ -2441,7 +2441,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	outcome, err := s.Core.Submit(agWrapped, turn.TurnRequest{
 		SessionID:     sessionID,
 		Origin:        turn.Origin{Surface: turn.SurfaceTUI, ChannelID: channel},
-		UserText:      input,
+		UserText:      modelText,
 		RawInput:      rawInput,
 		Parts:         inputParts,
 		GoalObjective: strings.TrimSpace(goalObjective),
@@ -2505,7 +2505,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			}
 			if rid != "" {
 				s.persistRequiresActionSnapshot(sessionID, rid, rae.SessionSnapshot)
-				s.attachRunWaitForRequiresAction(rid, sessionID, channel, input, rae, t0)
+				s.attachRunWaitForRequiresAction(rid, sessionID, channel, modelText, rae, t0)
 				s.emitPartialAssistantFromRAE(rae, streamAssistantViaTUI)
 				emitRunEnded = shouldEmitRunEndedOnRequiresAction(true)
 				if s.chatLog != nil {
@@ -2579,7 +2579,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		return err
 	}
 	s.clearPendingApproval()
-	s.appendAssistantOutcome(sessionID, runIDOut, channel, input, completion, res, streamAssistantViaTUI, out)
+	s.appendAssistantOutcome(sessionID, runIDOut, channel, modelText, completion, res, streamAssistantViaTUI, out)
 	return nil
 }
 

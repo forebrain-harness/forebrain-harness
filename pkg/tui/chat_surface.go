@@ -81,7 +81,7 @@ func (s *ChatSession) DispatchPeerTurn(ctx context.Context, sessionID, envelope 
 	row := llm.UserMessage(parts...)
 	row.IsMeta = true
 	row.Origin = state.MessageOriginPeer
-	return s.dispatchUserTurnContent(ctx, strings.TrimSpace(sessionID), "peer", text, text, parts,
+	return s.dispatchUserTurnContent(ctx, strings.TrimSpace(sessionID), "peer", text, text, text, parts,
 		state.MessagePartsJSON(row, text), nil, "", "", "", nil, nil, false, "peer", io.Discard)
 }
 
@@ -184,10 +184,11 @@ func (s *ChatSession) dispatchSurfaceContent(ctx context.Context, sessionID, ch 
 	parts := []llm.ContentPart(nil)
 	userPartsJSON := ""
 	displayText := strings.TrimSpace(submission.DisplayText)
+	modelText := strings.TrimSpace(userText)
 	if len(submission.Attachments) > 0 {
 		var err error
 		var warnings []string
-		parts, displayText, warnings, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments)
+		parts, modelText, displayText, warnings, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments)
 		if err != nil {
 			return err
 		}
@@ -201,15 +202,14 @@ func (s *ChatSession) dispatchSurfaceContent(ctx context.Context, sessionID, ch 
 				Timestamp: time.Now(),
 			}})
 		}
-		userPartsJSON = turn.BuildSurfaceUserPartsJSON(userText, submission.Attachments)
 	}
 	// Mentions add nothing to the prompt beyond the path the user typed, so
-	// the model input is the submitted text (plus any image placeholder) and
-	// nothing else. Persisting exactly that text is what lets the next turn
-	// replay this one from a cached prefix instead of a perturbed one.
-	modelInput := turn.DisplayTextOrUserText(userText, displayText)
+	// the model text is the submitted words and nothing else. Persisting
+	// exactly that text as the stored parts is what lets the next turn replay
+	// this one from a cached prefix instead of a perturbed one.
+	rowContent := turn.DisplayTextOrUserText(userText, displayText)
 	if len(submission.Attachments) > 0 {
-		userPartsJSON = turn.BuildSurfaceUserPartsJSON(modelInput, submission.Attachments)
+		userPartsJSON = turn.BuildSurfaceUserPartsJSON(modelText, submission.Attachments)
 	}
 	unlock := func() {}
 	if s.Env != nil && s.Env.Foreground != nil {
@@ -227,7 +227,7 @@ func (s *ChatSession) dispatchSurfaceContent(ctx context.Context, sessionID, ch 
 	// request is refused: the message is still stored, so after /model the
 	// conversation continues with every image in it.
 	imageRefusal := run.ImageTurnRefusal(ctx, s.runner(), sessionID, len(submission.Attachments) > 0)
-	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelInput, rawInput, parts, userPartsJSON, imageRefusal, goalObjective, skillName, skillPath, skills, batchInput, submission.CallerRendersReturnedError, "", io.Discard); err != nil {
+	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelText, rowContent, rawInput, parts, userPartsJSON, imageRefusal, goalObjective, skillName, skillPath, skills, batchInput, submission.CallerRendersReturnedError, "", io.Discard); err != nil {
 		return err
 	}
 	sink := s.toolApprovalSinkGet()

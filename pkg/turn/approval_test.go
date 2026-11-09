@@ -1200,13 +1200,23 @@ func TestPlanReviewTaskContextHandsOverEveryMessagesImages(t *testing.T) {
 	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
 		llm.UserMessage(llm.ImageBase64("image/png", "iVBORw0KGgo=")),
 	}, "", ""))
+	// A row written before the display form was split still carries the path
+	// note and the marker inside its content: the reviewer gets the image and
+	// its note after it, so neither line belongs in the message text again.
+	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
+		llm.UserMessage(llm.Text("and here\n[Image: source: /tmp/a.png]\n[Image #1]"), llm.ImageBase64("image/png", "iVBORw0KGgo=")),
+	}, "", ""))
 
 	got, images := planReviewTaskContext(ctx, store, "s1")
-	require.Contains(t, got, "<message n=\"2\">\n[Image #1] like this\n</message>")
+	require.Contains(t, got, "<message n=\"2\">\nlike this\n</message>")
 	require.Contains(t, got, "<message n=\"3\">\n"+planReviewImageOnly+"\n</message>")
-	require.Len(t, images, 2)
+	require.Contains(t, got, "<message n=\"4\">\nand here\n</message>")
+	require.NotContains(t, got, "[Image #1]")
+	require.NotContains(t, got, "[Image: source:")
+	require.Len(t, images, 3)
 	require.Equal(t, 2, images[0].Message)
 	require.Equal(t, 3, images[1].Message)
+	require.Equal(t, 4, images[2].Message)
 	require.Contains(t, images[0].PartsJSON, "iVBORw0KGgo=")
 }
 

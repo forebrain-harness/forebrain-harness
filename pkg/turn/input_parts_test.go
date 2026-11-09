@@ -67,12 +67,15 @@ func TestSurfaceTurnContentPartsIncludesImageAttachment(t *testing.T) {
 		t.Fatalf("write png: %v", err)
 	}
 
-	parts, display, warnings, err := SurfaceTurnContentParts("explain", "explain", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}})
+	parts, modelText, display, warnings, err := SurfaceTurnContentParts("explain", "explain", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}})
 	if err != nil {
 		t.Fatalf("SurfaceTurnContentParts: %v", err)
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v, want none for a sendable image", warnings)
+	}
+	if modelText != "explain" || parts[0].Text != "explain" {
+		t.Fatalf("model text = %q / parts[0] = %q, want the typed words only", modelText, parts[0].Text)
 	}
 	if len(parts) != 3 || parts[0].Type != llm.ContentTypeText || parts[1].Type != llm.ContentTypeImageBase64 {
 		t.Fatalf("unexpected parts: %#v", parts)
@@ -83,6 +86,34 @@ func TestSurfaceTurnContentPartsIncludesImageAttachment(t *testing.T) {
 	}
 	if !strings.Contains(display, "[Image #1]") {
 		t.Fatalf("display text missing attachment marker: %q", display)
+	}
+}
+
+// TestSurfaceTurnContentPartsImageOnlyText pins what a message that attached a
+// picture and typed nothing sends the model: the same sentence on every
+// surface, while its row keeps the marker alone.
+func TestSurfaceTurnContentPartsImageOnlyText(t *testing.T) {
+	img := filepath.Join(t.TempDir(), "clip.png")
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	if err := os.WriteFile(img, data, 0o600); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+
+	parts, modelText, display, _, err := SurfaceTurnContentParts("", "", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}})
+	if err != nil {
+		t.Fatalf("SurfaceTurnContentParts: %v", err)
+	}
+	if modelText != llm.ImageOnlyUserText {
+		t.Fatalf("model text = %q, want %q", modelText, llm.ImageOnlyUserText)
+	}
+	if parts[0].Type != llm.ContentTypeText || parts[0].Text != llm.ImageOnlyUserText {
+		t.Fatalf("parts[0] = %#v, want the image-only sentence", parts[0])
+	}
+	if display != "[Image #1]" {
+		t.Fatalf("display = %q, want the marker alone", display)
 	}
 }
 
@@ -98,7 +129,7 @@ func TestSurfaceTurnContentPartsDegradesUnsendableAttachment(t *testing.T) {
 		t.Fatalf("write fake.png: %v", err)
 	}
 
-	parts, display, warnings, err := SurfaceTurnContentParts(
+	parts, _, display, warnings, err := SurfaceTurnContentParts(
 		"explain", "explain",
 		[]InputAttachment{{Path: bad, Label: "fake.png"}},
 	)

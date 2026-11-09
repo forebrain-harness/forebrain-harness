@@ -4226,7 +4226,7 @@ func executeComposerSubmission(ctx context.Context, sigCh <-chan os.Signal, even
 	if turnWorkedStatus != nil {
 		*turnWorkedStatus = ""
 	}
-	actualText := llm.TextContent(submission.Parts...)
+	actualText := strings.TrimSpace(llm.TextWithoutImageSourceNotes(submission.Parts))
 	displayText := submission.DisplayText
 	attachments := append([]InputAttachment(nil), submission.Attachments...)
 	var foreground *foregroundTurn

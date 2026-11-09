@@ -5,20 +5,49 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
+// ImageMarker is the "[Image #N]" a message's display form carries for its Nth
+// image: the transcript row, and the chip the terminal composer shows while the
+// message is written. Display only — the model's text never holds it.
+func ImageMarker(index int) string { return fmt.Sprintf("[Image #%d]", index+1) }
+
+var imageMarkerPattern = regexp.MustCompile(`\[Image #\d+\]`)
+
+// withoutDisplayImageLines drops what a stored row carries only for display:
+// the "[Image #N]" markers, and a line that is nothing but the request's own
+// "[Image: source: <path>]" note — a review is sent that note again after the
+// labelled image, and the cache it rebuilds is its own. A marker inside words
+// is dropped in place, so what the person typed around it survives.
+func withoutDisplayImageLines(text string) string {
+	out := make([]string, 0, 8)
+	for _, line := range strings.Split(text, "\n") {
+		if llm.IsImageSourceNote(llm.Text(strings.TrimSpace(line))) {
+			continue
+		}
+		stripped := imageMarkerPattern.ReplaceAllString(line, "")
+		if strings.TrimSpace(line) != "" && strings.TrimSpace(stripped) == "" {
+			continue // a marker-only line leaves no empty line behind
+		}
+		out = append(out, stripped)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
 // SurfaceTurnContentParts builds the model-facing content parts for a turn
 // with attachments: the text part plus one image part per attachment, each
-// followed by the line naming its file (llm.ImageSourceNote). It
-// also returns the display form of the text, with an "[Image #N]" marker
-// appended per image actually sent — this is not display-only (see
-// DisplayTextOrUserText's doc comment): the caller uses the returned
-// display text to compute the actual model input too, so the marker
-// reaches both the persisted transcript and the model's own context.
+// followed by the line naming its file (llm.ImageSourceNote).
+//
+// display is the row's form — the words plus one "[Image #N]" per image
+// actually sent — and modelText is what the model's own request carries; the
+// two are different things and are never merged back into one. A message that
+// attached pictures and said nothing reads llm.ImageOnlyUserText to the model
+// while its row shows the markers alone.
 //
 // An attachment whose bytes cannot be sent does not fail the turn. It
 // degrades to an llm.UnsendableImageNote text part — the same sentence the
@@ -30,44 +59,43 @@ import (
 // It does not apply the image-input gate: a message refused for a text-only
 // session model is still kept in the conversation, so the caller needs its
 // display text and stored parts either way and refuses only the request.
-func SurfaceTurnContentParts(userText string, displayText string, attachments []InputAttachment) ([]llm.ContentPart, string, []string, error) {
+func SurfaceTurnContentParts(userText string, displayText string, attachments []InputAttachment) (parts []llm.ContentPart, modelText string, display string, warnings []string, err error) {
 	text := strings.TrimSpace(userText)
 	if text == "" {
-		text = "Please analyze the attached image."
+		text = llm.ImageOnlyUserText
 	}
-	parts := []llm.ContentPart{llm.Text(text)}
-	display := strings.TrimSpace(displayText)
+	parts = []llm.ContentPart{llm.Text(text)}
+	display = strings.TrimSpace(displayText)
 	if display == "" {
 		display = strings.TrimSpace(userText)
 	}
-	var warnings []string
 	sent := 0
 	for _, att := range attachments {
 		path := strings.TrimSpace(att.Path)
 		if path == "" {
 			continue
 		}
-		image, err := AttachmentImageParts(path)
-		if err != nil {
+		image, imageErr := AttachmentImageParts(path)
+		if imageErr != nil {
 			// Self-heal instead of failing the turn: the model is told which
 			// image could not be sent and why — the same sentence the replay of
 			// this row writes — and the rest of the message still runs. The
 			// file_reference stays in parts_json, so a later replay retries the
 			// image through the same ladder.
 			label, mimeType := attachmentLabelAndMIME(att)
-			note := llm.UnsendableImageNote(label, mimeType, err.Error())
+			note := llm.UnsendableImageNote(label, mimeType, imageErr.Error())
 			parts = append(parts, llm.Text(note))
 			warnings = append(warnings, note)
 			continue
 		}
 		sent++
 		parts = append(parts, image...)
-		display = strings.TrimSpace(display + "\n[Image #" + fmt.Sprintf("%d", sent) + "]")
+		display = strings.TrimSpace(display + "\n" + ImageMarker(sent-1))
 	}
 	if len(parts) == 1 {
-		return nil, "", nil, fmt.Errorf("no valid image attachments")
+		return nil, "", "", nil, fmt.Errorf("no valid image attachments")
 	}
-	return parts, display, warnings, nil
+	return parts, text, display, warnings, nil
 }
 
 // AttachmentImageParts is what one image attachment sends the model: the image,
@@ -158,10 +186,11 @@ func sniffImageMIMEType(path string) string {
 	return llm.ImageMIMEType(path, head[:n])
 }
 
-// DisplayTextOrUserText resolves the model input for a turn: displayText
-// when set, unless it is a TUI slash-command rendering hint (a leading "/")
-// while the actual model input (userText) is not itself a slash command, in
-// which case the raw command text must not override the real model input.
+// DisplayTextOrUserText resolves the text a turn is shown by: displayText when
+// set, unless it is a TUI slash-command rendering hint (a leading "/") while
+// the text the person submitted (userText) is not itself a slash command, in
+// which case the raw command text must not replace it. It resolves display
+// text only — the model's own text never comes from here.
 func DisplayTextOrUserText(userText string, displayText string) string {
 	if strings.HasPrefix(strings.TrimSpace(displayText), "/") && !strings.HasPrefix(strings.TrimSpace(userText), "/") {
 		return userText

@@ -1514,11 +1514,15 @@ func planReviewOmitted(n int) string {
 
 // planReviewEntryOf is one input as the reviewer reads it: a message as sent,
 // a form's answers as its card shows them, a sent-back plan's feedback as
-// typed. A denial the engine wrote to deliver a review is not the user's and
-// is skipped, as is anything with neither words nor images in it.
+// typed. A message keeps the words the person wrote and drops what its row
+// carries only for display — the "[Image #N]" markers, and the path note a
+// row written before this rule still holds — because the reviewer is sent each
+// image with that note already after it. A denial the engine wrote to deliver
+// a review is not the user's and is skipped, as is anything with neither words
+// nor images in it.
 func planReviewEntryOf(input state.UserInput) (planReviewEntry, bool) {
 	if input.Message != nil {
-		text := strings.TrimSpace(input.Message.Content)
+		text := withoutDisplayImageLines(input.Message.Content)
 		images := messageCarriesImages(input.Message.PartsJSON)
 		if text == "" && images {
 			text = planReviewImageOnly

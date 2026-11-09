@@ -826,7 +826,7 @@ func (ch *subagentChannel) publishInputDelivered(fac Factory, ex *subagentExecut
 		if entry.Mode != TurnInputModeSteer {
 			continue
 		}
-		text := strings.Join(strings.Fields(llm.TextContent(entry.Parts...)), " ")
+		text := strings.Join(strings.Fields(llm.TextWithoutImageSourceNotes(entry.Parts)), " ")
 		if text == "" {
 			continue
 		}
@@ -936,10 +936,7 @@ func (ch *subagentChannel) publishPaused(fac Factory, ex *subagentExecution) {
 func steerEntries(steers []Input) []TurnInputEntry {
 	out := make([]TurnInputEntry, 0, len(steers))
 	for _, in := range steers {
-		parts := append([]llm.ContentPart(nil), in.Parts...)
-		if len(parts) == 0 {
-			parts = []llm.ContentPart{llm.Text(in.Text)}
-		}
+		parts := steerParts(in)
 		out = append(out, TurnInputEntry{
 			Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq,
 			SkillName: strings.TrimSpace(in.SkillName), SkillPath: strings.TrimSpace(in.SkillPath),
@@ -991,13 +988,33 @@ func mergeSteers(steers []Input) (Input, []SkillSelection) {
 
 // steerTextAndCarried splits one steer into the words the model reads — its
 // leading text part as sent, not the preview its queue shows — and what
-// follows them. A steer with no text part of its own is its preview text and
-// all of its parts.
+// follows them. A steer with no text part of its own is the image-only
+// sentence when it carries nothing but pictures, and otherwise its preview
+// text, with all of its parts.
 func steerTextAndCarried(in Input) (string, []llm.ContentPart) {
 	if len(in.Parts) > 0 && in.Parts[0].Type == llm.ContentTypeText {
 		return strings.TrimSpace(in.Parts[0].Text), in.Parts[1:]
 	}
+	// A message with no words of its own shows the chip in its queue; the
+	// model reads the same sentence a turn would send for those pictures.
+	if llm.CarriesOnlyImages(in.Parts) {
+		return llm.ImageOnlyUserText, in.Parts
+	}
 	return strings.TrimSpace(in.Text), in.Parts
+}
+
+// subagentAttemptText is the words one resume attempt runs on: the image-only
+// sentence when the message carries nothing but pictures, else the queue's
+// preview text, else the parts' own text.
+func subagentAttemptText(in Input) string {
+	text := strings.TrimSpace(in.Text)
+	if llm.CarriesOnlyImages(in.Parts) {
+		text = llm.ImageOnlyUserText
+	}
+	if text == "" {
+		text = strings.Join(strings.Fields(llm.TextWithoutImageSourceNotes(in.Parts)), " ")
+	}
+	return text
 }
 
 // subagentResumeAttempt runs a subagent once more on its own conversation,
@@ -1005,10 +1022,7 @@ func steerTextAndCarried(in Input) (string, []llm.ContentPart) {
 // subagent through the executor with its worker session. skills are the
 // explicit skills the message selected; both paths load them (plan 141).
 func subagentResumeAttempt(fac Factory, record agent.HistoryEntry, in Input, skills []SkillSelection) func(context.Context) (string, error) {
-	text := strings.TrimSpace(in.Text)
-	if text == "" {
-		text = strings.Join(strings.Fields(llm.TextContent(in.Parts...)), " ")
-	}
+	text := subagentAttemptText(in)
 	parts := append([]llm.ContentPart(nil), in.Parts...)
 	subagentType := ""
 	if strings.TrimSpace(record.AgentKind) == "typed" {
