@@ -222,6 +222,7 @@ func TestCodingRulesReachEveryCodingRole(t *testing.T) {
 		bugDiagnosisPrompt:              {"general-purpose": true, "plan": true},
 		bugExecutionPrompt:              {"general-purpose": true},
 		codingReviewPrompt:              {},
+		GitWorktreePrompt:               {"general-purpose": true, "plan": true},
 	} {
 		for _, def := range ActiveDefinitions() {
 			if got := strings.Contains(def.SystemPrompt, part); got != carriers[def.Name] {
@@ -277,7 +278,7 @@ func TestPlanReviewerWriteWordingFollowsProjectType(t *testing.T) {
 		"new tests only":      "New test files in the project, named the way the project names its tests.",
 		"existing read-only":  "Existing files, tests included, are read-only; you may change only files you created in this review.",
 		"scratch":             "Anything in the scratch directory the task names.",
-		"worktree is free":    "a worktree you create in the scratch directory, where any file may change",
+		"worktree is free":    "a worktree you create in the worktree directory the task names, where any file may change",
 		"uncommitted changes": "carry over the uncommitted changes the problem depends on",
 		"read-only shell":     "The shell sees the project read-only",
 		"no commits":          "Do not commit, push or switch branches.",

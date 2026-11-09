@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -552,6 +554,45 @@ func TestTypedSubagentSessionModelWinsBelowTypedWrapper(t *testing.T) {
 	}
 }
 
+// TestPlanReviewBriefNamesTheWorktreeDirectory checks a coding review of a git
+// project is handed an empty worktree directory under the repository's
+// .worktrees — never one under its scratch directory in the OS temp
+// directory — and that a review that never used it leaves nothing there.
+func TestPlanReviewBriefNamesTheWorktreeDirectory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", project, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	r := &Runner{Deps: &Deps{ProjectType: state.ProjectTypeCoding}}
+	scope := r.planReviewWriteScope(toolpkg.WithProjectRoot(context.Background(), project))
+	if scope == nil {
+		t.Fatal("a coding review got no write scope")
+	}
+	worktree := scope.Worktree()
+	if filepath.Dir(worktree) != filepath.Join(project, toolpkg.WorktreesDirName) {
+		t.Fatalf("review worktree directory = %q, want one under %s", worktree, filepath.Join(project, toolpkg.WorktreesDirName))
+	}
+	brief := planReviewWorkspaceBrief(scope)
+	for _, want := range []string{"Worktree directory: " + worktree, "git worktree add --detach " + worktree + " HEAD"} {
+		if !strings.Contains(brief, want) {
+			t.Errorf("brief lacks %q: %q", want, brief)
+		}
+	}
+	if strings.Contains(brief, scope.Scratch()+string(filepath.Separator)) {
+		t.Errorf("brief still puts something under the scratch directory: %q", brief)
+	}
+	scope.Release()
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Errorf("an unused review worktree directory survived Release: %v", err)
+	}
+}
+
 // TestPlanReviewWriteScopeIsCodingOnly checks who gets a review write scope:
 // a coding conversation's reviewer gets one, with a fresh scratch directory and
 // its brief naming it; office and batch reviewers get none and stay read-only.
@@ -581,7 +622,7 @@ func TestPlanReviewWriteScopeIsCodingOnly(t *testing.T) {
 	if !strings.Contains(brief, "Scratch directory: "+scope.Scratch()) {
 		t.Errorf("brief does not name the scratch directory: %q", brief)
 	}
-	if !strings.Contains(brief, "not a git repository") {
+	if !strings.Contains(brief, "No git worktree is available") || scope.Worktree() != "" {
 		t.Errorf("a project outside git was offered a worktree: %q", brief)
 	}
 

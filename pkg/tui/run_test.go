@@ -5341,6 +5341,7 @@ func goldenStatusPanel(t *testing.T, width, tab int) []string {
 		Provider:    "deepseek",
 		Model:       "deepseek-chat",
 		Endpoint:    "https://api.deepseek.com",
+		FastOn:      true,
 		Permissions: turn.StatusPermissions{Preset: "Workspace", Matched: true, Rules: 3},
 		Sandbox:     "workspace-write · seatbelt",
 		MCP: turn.MCPInventorySource{
@@ -5402,7 +5403,7 @@ func TestStatusPanelGoldenWidths(t *testing.T) {
 		// A value longer than its column folds inside it: read the rows back
 		// with the folds and the alignment padding removed.
 		unfolded := strings.Join(strings.Fields(joined), "")
-		for _, want := range []string{"Status", "Usage", "Version:", "SessionID:", "d8f83e8d-c9ff-466d-9d60-3412e0d2d282", "Model:", "Permissions:", "1connected,1failed·/mcp", "deep/deeper", "fastoff"} {
+		for _, want := range []string{"Status", "Usage", "Version:", "SessionID:", "d8f83e8d-c9ff-466d-9d60-3412e0d2d282", "Model:", "Permissions:", "1connected,1failed·/mcp", "deep/deeper", "faston"} {
 			if !strings.Contains(unfolded, want) {
 				t.Fatalf("width %d: panel missing %q:\n%s", width, want, joined)
 			}

@@ -364,8 +364,8 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 			}
 		}
 		// A coding plan review keeps the project read-only and may write only
-		// its scratch directory and the worktrees registry `git worktree add`
-		// needs.
+		// its scratch and worktree directories and the worktrees registry
+		// `git worktree add` needs.
 		reviewRoots = ReviewWriteScopeFromContext(ctx).shellWritableRoots()
 		writablePaths = append(writablePaths, reviewRoots...)
 	}

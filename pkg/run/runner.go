@@ -1219,6 +1219,8 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// description says how to use it). The audit workflows are the built-in "audit" skill,
 	// loaded on demand rather than carried by every request. The user-may-address-a-subagent rule joins the two
 	// interactive types' base prompts — batch is unattended and never sees it.
+	// Coding also fixes where git worktrees go, and keeps that directory out of
+	// git status before the first one is made.
 	notesSuffix := ""
 	switch r.ProjectType() {
 	case state.ProjectTypeOffice:
@@ -1232,7 +1234,13 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		desc += agent.ScopeDisciplinePrompt
 		desc += agent.NonFunctionalRequirementsPrompt
 		desc += agent.BugRootCausePrompt
+		desc += agent.GitWorktreePrompt
 		desc += agent.SubagentUserRulingPrompt
+		// The project's own directory, never the agent's state workspace: a
+		// runtime without a project has no repository to keep tidy.
+		if root := r.launchProjectRoot(); root != "" {
+			tool.EnsureWorktreesIgnored(context.Background(), root)
+		}
 	}
 	desc += agent.PlanHandoffQualityPrompt
 	desc += notesSuffix

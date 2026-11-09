@@ -18,11 +18,12 @@ for s in "$@"; do
 done
 pkill -f fake_provider.py 2>/dev/null && echo "stopped fake providers" || true
 
-if [ -n "$WORK" ] && [ -e "$WORK/head-tree/.git" ]; then
+WT="$REPO/.worktrees/ab-head"
+if [ -e "$WT/.git" ]; then
   # A registered worktree left behind makes later `git worktree` commands fail
   # with "already registered", so remove it rather than just deleting the dir.
-  git -C "$REPO" worktree remove --force "$WORK/head-tree" >/dev/null 2>&1 \
-    && echo "removed worktree $WORK/head-tree" || true
+  git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1 \
+    && echo "removed worktree $WT" || true
 fi
 
 git -C "$REPO" worktree prune

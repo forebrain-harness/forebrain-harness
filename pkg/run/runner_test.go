@@ -2728,6 +2728,43 @@ func TestTokenEstimateOptionsMapsDownload(t *testing.T) {
 	}
 }
 
+// TestCodingLoadKeepsTheWorktreesDirectoryIgnored checks a coding runtime
+// readies the directory its system prompt sends git worktrees to: loading it
+// on a repository adds the exclude line that keeps .worktrees out of git
+// status, in the project's repository and not in the agent's state workspace.
+// An office runtime on a repository leaves it untouched.
+func TestCodingLoadKeepsTheWorktreesDirectoryIgnored(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	// The user's global ignore file must not answer for the repository.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	load := func(projectType string) string {
+		project := t.TempDir()
+		if out, err := exec.Command("git", "-C", project, "init", "-q").CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
+				Provider: "openai", Model: "qwen-test", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
+			}}},
+		}}}
+		r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: cfg, ProjectType: projectType, ProjectRoot: project}}
+		if err := r.Load(); err != nil {
+			t.Fatalf("Load(%s): %v", projectType, err)
+		}
+		exclude, _ := os.ReadFile(filepath.Join(project, ".git", "info", "exclude"))
+		return string(exclude)
+	}
+	if got := load(state.ProjectTypeCoding); !strings.Contains(got, "\n/"+tool.WorktreesDirName+"/\n") {
+		t.Errorf("a coding load left .worktrees unignored; exclude:\n%s", got)
+	}
+	if got := load(state.ProjectTypeOffice); strings.Contains(got, tool.WorktreesDirName) {
+		t.Errorf("an office load touched the repository's exclude:\n%s", got)
+	}
+}
+
 // TestSystemPromptFollowsProjectType pins the static main-agent system prompt
 // of each conversation type. Every type is its own base prompt plus the shared
 // native plan-workflow contract plus that type's working-notes suffix, in that
@@ -2752,7 +2789,7 @@ func TestSystemPromptFollowsProjectType(t *testing.T) {
 		return r
 	}
 	coding := newRunner(state.ProjectTypeCoding).MainAgentDescription()
-	wantCoding := "Forebrain Harness agent" + agent.ScopeDisciplinePrompt + agent.NonFunctionalRequirementsPrompt + agent.BugRootCausePrompt + agent.SubagentUserRulingPrompt + agent.PlanHandoffQualityPrompt
+	wantCoding := "Forebrain Harness agent" + agent.ScopeDisciplinePrompt + agent.NonFunctionalRequirementsPrompt + agent.BugRootCausePrompt + agent.GitWorktreePrompt + agent.SubagentUserRulingPrompt + agent.PlanHandoffQualityPrompt
 	if coding != wantCoding {
 		t.Errorf("coding system prompt changed:\n got: %q\nwant: %q", coding, wantCoding)
 	}
@@ -2777,6 +2814,12 @@ func TestSystemPromptFollowsProjectType(t *testing.T) {
 	}
 	if strings.Contains(office, agent.NonFunctionalRequirementsPrompt) || strings.Contains(batch, agent.NonFunctionalRequirementsPrompt) {
 		t.Error("the non-functional design rule is coding-only and must not reach office or batch")
+	}
+	if strings.Contains(office, agent.GitWorktreePrompt) || strings.Contains(batch, agent.GitWorktreePrompt) {
+		t.Error("the git worktree location rule is coding-only and must not reach office or batch")
+	}
+	if !strings.Contains(agent.GitWorktreePrompt, tool.WorktreesDirName+"/<name>") {
+		t.Errorf("the worktree rule does not name the %s directory the runtime ignores", tool.WorktreesDirName)
 	}
 	// The user-may-address-a-subagent rule is for the interactive types only:
 	// batch is unattended, so nobody can address its subagents directly.

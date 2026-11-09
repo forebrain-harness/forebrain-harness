@@ -92,8 +92,9 @@ if it fails there too, report it as a pre-existing order-dependent flake and
 move on. One identical retry confirms suspected flakiness; do not loop.
 
 ```
-git worktree add /tmp/baseline HEAD
-cd /tmp/baseline && CGO_ENABLED=1 go test -tags fts5 ./pkg/tui/ -count=1
+git worktree add --detach .worktrees/baseline HEAD
+(cd .worktrees/baseline && CGO_ENABLED=1 go test -tags fts5 ./pkg/tui/ -count=1)
+git worktree remove --force .worktrees/baseline
 ```
 
 ### 6. Verify bytes in tmux, then reason about Terminal.app

@@ -280,6 +280,43 @@ func pathUnderRoot(root, path string) bool {
 	return strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
+// workTree is one agent's directory as the peer guards see it: root and
+// everything inside it, except a linked git worktree that starts below root.
+// Such a worktree — one under the repository's .worktrees, where agents create
+// them — is a checkout of its own, so an agent there and one in the main
+// checkout never edit the same files (owner 2026-11-09). A submodule stays part
+// of the tree that contains it. The linked-worktree answers are memoized per
+// directory, so filtering a whole ledger costs one check per directory.
+type workTree struct {
+	root   string
+	linked map[string]bool
+}
+
+// newWorkTree is the work tree at root, already resolved.
+func newWorkTree(root string) *workTree {
+	return &workTree{root: root, linked: map[string]bool{}}
+}
+
+// contains reports whether path, already resolved, is in the tree: under root
+// with no linked worktree top between them. root itself may be a linked
+// worktree — that is the tree.
+func (w *workTree) contains(path string) bool {
+	if !pathUnderRoot(w.root, path) {
+		return false
+	}
+	for dir := path; dir != w.root && len(dir) > len(w.root); dir = filepath.Dir(dir) {
+		linked, seen := w.linked[dir]
+		if !seen {
+			linked = tool.IsLinkedWorktreeTop(dir)
+			w.linked[dir] = linked
+		}
+		if linked {
+			return false
+		}
+	}
+	return true
+}
+
 // guardIdentity is who is asking: the address this process answers on, the agent
 // inside it, and the name to print. The address is read from the running
 // registration, which remembers every address this process has answered on — so
@@ -380,9 +417,10 @@ func (o *peerOutbound) TouchesBetween(ctx context.Context, root string, from, to
 	}
 	tasks := o.peerTasksByAddress()
 	touches := agentTouchesBetween(from, to)
+	tree := newWorkTree(resolvedRoot)
 	out := make([]tool.PeerTouch, 0, len(touches))
 	for _, touch := range touches {
-		if o.isOwnTouch(touch, agentID) || !pathUnderRoot(resolvedRoot, touch.path) {
+		if o.isOwnTouch(touch, agentID) || !tree.contains(touch.path) {
 			continue
 		}
 		out = append(out, tool.PeerTouch{
@@ -424,9 +462,10 @@ func (env *Environment) RecentPeerFileTouches(root string) []PeerFileTouch {
 	}
 	now := time.Now()
 	touches := agentTouchesBetween(now.Add(-agentTouchRetention), now)
+	tree := newWorkTree(resolvedRoot)
 	list := make([]PeerFileTouch, 0, len(touches))
 	for _, touch := range touches {
-		if !pathUnderRoot(resolvedRoot, touch.path) {
+		if !tree.contains(touch.path) {
 			continue
 		}
 		list = append(list, PeerFileTouch{
@@ -595,8 +634,9 @@ type peerRecentFiles struct {
 func (o *peerOutbound) recentFilesByAddress(root string, now time.Time) map[string]peerRecentFiles {
 	paths := map[string][]string{}
 	seen := map[string]map[string]bool{}
+	tree := newWorkTree(root)
 	for _, touch := range agentTouchesBetween(now.Add(-agentTouchRetention), now) {
-		if !pathUnderRoot(root, touch.path) {
+		if !tree.contains(touch.path) {
 			continue
 		}
 		key := agentAddress(touch.addr, touch.agentID)

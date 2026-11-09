@@ -43,11 +43,16 @@ func TestIsTestFilePathFollowsTestRunnerConventions(t *testing.T) {
 }
 
 // reviewFixture is a project with one production file and one existing test,
-// and a scope over it with its own scratch directory.
+// and a scope over it with its own scratch directory and a worktree directory
+// under the project's .worktrees.
 func reviewFixture(t *testing.T) (project, scratch string, scope *ReviewWriteScope) {
 	t.Helper()
 	project = t.TempDir()
 	scratch = t.TempDir()
+	worktree := filepath.Join(project, WorktreesDirName, "plan-review-1")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for _, rel := range []string{"pkg/a.go", "pkg/a_test.go"} {
 		path := filepath.Join(project, rel)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -57,18 +62,19 @@ func reviewFixture(t *testing.T) (project, scratch string, scope *ReviewWriteSco
 			t.Fatal(err)
 		}
 	}
-	return project, scratch, NewReviewWriteScope(project, scratch, "")
+	return project, scratch, NewReviewWriteScope(project, scratch, filepath.Join(project, ".git", "worktrees"), worktree)
 }
 
 // TestReviewWriteScopeAdmitsOnlyNewTestsAndScratch pins the whole write set of
-// a coding review: its scratch directory (a worktree's production files
-// included), new test files in the project and its own files after that —
-// never production code, never a test that existed before, never anywhere else.
+// a coding review: its scratch directory, its worktree directory (a worktree's
+// production files included), new test files in the project and its own files
+// after that — never production code, never a test that existed before, never
+// another worktree, never anywhere else.
 func TestReviewWriteScopeAdmitsOnlyNewTestsAndScratch(t *testing.T) {
 	project, scratch, scope := reviewFixture(t)
 	admitted := []string{
 		filepath.Join(scratch, "repro.sh"),
-		filepath.Join(scratch, "worktree", "pkg", "a.go"),
+		filepath.Join(scope.Worktree(), "pkg", "a.go"),
 		filepath.Join(project, "pkg", "repro_test.go"),
 		// Its own file stays writable on a second write.
 		filepath.Join(project, "pkg", "repro_test.go"),
@@ -79,10 +85,11 @@ func TestReviewWriteScopeAdmitsOnlyNewTestsAndScratch(t *testing.T) {
 		}
 	}
 	refused := map[string]string{
-		filepath.Join(project, "pkg", "a.go"):      "not a test file",
-		filepath.Join(project, "pkg", "b.go"):      "not a test file",
-		filepath.Join(project, "pkg", "a_test.go"): "already exists",
-		filepath.Join(t.TempDir(), "elsewhere.sh"): "outside the project",
+		filepath.Join(project, "pkg", "a.go"):                                   "not a test file",
+		filepath.Join(project, "pkg", "b.go"):                                   "not a test file",
+		filepath.Join(project, "pkg", "a_test.go"):                              "already exists",
+		filepath.Join(project, WorktreesDirName, "someone-else", "pkg", "a.go"): "not a test file",
+		filepath.Join(t.TempDir(), "elsewhere.sh"):                              "outside the project",
 	}
 	for path, reason := range refused {
 		err := scope.admitWrite(path)
@@ -160,9 +167,16 @@ func TestReleaseKeepsOnlyWhatTheReviewerWrote(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(empty, "tmp", "go-build1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	NewReviewWriteScope(base, empty, "").Release()
+	unusedTree := filepath.Join(base, WorktreesDirName, "plan-review-1")
+	if err := os.MkdirAll(unusedTree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	NewReviewWriteScope(base, empty, filepath.Join(base, ".git", "worktrees"), unusedTree).Release()
 	if _, err := os.Stat(empty); !os.IsNotExist(err) {
 		t.Errorf("an unused scratch directory survived: %v", err)
+	}
+	if _, err := os.Stat(unusedTree); !os.IsNotExist(err) {
+		t.Errorf("an unused worktree directory survived: %v", err)
 	}
 	used := filepath.Join(base, "used")
 	if err := os.MkdirAll(filepath.Join(used, "tmp"), 0o755); err != nil {
@@ -172,9 +186,20 @@ func TestReleaseKeepsOnlyWhatTheReviewerWrote(t *testing.T) {
 	if err := os.WriteFile(script, []byte("echo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	NewReviewWriteScope(base, used, "").Release()
+	usedTree := filepath.Join(base, WorktreesDirName, "plan-review-2")
+	if err := os.MkdirAll(usedTree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(usedTree, "main.go")
+	if err := os.WriteFile(checkout, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	NewReviewWriteScope(base, used, filepath.Join(base, ".git", "worktrees"), usedTree).Release()
 	if _, err := os.Stat(script); err != nil {
 		t.Errorf("the reviewer's script was removed: %v", err)
+	}
+	if _, err := os.Stat(checkout); err != nil {
+		t.Errorf("the reviewer's worktree was removed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(used, "tmp")); !os.IsNotExist(err) {
 		t.Errorf("tmp/ survived: %v", err)
@@ -190,9 +215,10 @@ func TestPlanReviewerShellIsReadOnly(t *testing.T) {
 
 // TestPlanReviewShellWritesOnlyItsScratchAndWorktree runs real sandboxed
 // commands as a coding plan reviewer: the project refuses a write, the scratch
-// directory takes one, `git worktree add` registers a worktree there, the
-// worktree's production files are free to change, and temporary files land in
-// the scratch directory.
+// directory takes one, `git worktree add` registers a worktree in the review's
+// directory under the project's .worktrees — which git status does not show —
+// the worktree's production files are free to change, and temporary files land
+// in the scratch directory.
 func TestPlanReviewShellWritesOnlyItsScratchAndWorktree(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs real sandboxed commands")
@@ -224,6 +250,14 @@ func TestPlanReviewShellWritesOnlyItsScratchAndWorktree(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(scope.Scratch()) })
 	if scope.GitWorktrees() == "" {
 		t.Fatal("a git project got no worktrees registry")
+	}
+	resolvedProject, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := scope.Worktree()
+	if filepath.Dir(worktree) != filepath.Join(resolvedProject, WorktreesDirName) {
+		t.Fatalf("review worktree %q is not under the project's %s", worktree, WorktreesDirName)
 	}
 
 	st := NewState(project)
@@ -259,11 +293,13 @@ func TestPlanReviewShellWritesOnlyItsScratchAndWorktree(t *testing.T) {
 	if _, ok := run("echo ok > " + filepath.Join(scope.Scratch(), "probe.txt")); !ok {
 		t.Error("the reviewer's shell could not write its scratch directory")
 	}
-	worktree := filepath.Join(scope.Scratch(), "worktree")
 	if _, ok := run("git worktree add --detach " + worktree + " HEAD"); !ok {
 		t.Fatal("the reviewer could not add a worktree")
 	}
 	t.Cleanup(func() { _ = exec.Command("git", "-C", project, "worktree", "remove", "--force", worktree).Run() })
+	if status, err := exec.Command("git", "-C", project, "status", "--porcelain").Output(); err != nil || strings.TrimSpace(string(status)) != "" {
+		t.Errorf("git status after adding the review worktree = %q, %v; want a clean tree", status, err)
+	}
 	if _, ok := run("echo changed > " + filepath.Join(worktree, "main.go")); !ok {
 		t.Error("the reviewer could not change production code inside its worktree")
 	}

@@ -278,10 +278,10 @@ func resolveFileToolPath(ctx context.Context, st *State, requestedPath string, a
 		return "", fmt.Errorf("%w: denied by request_permissions grant: %s", ErrPathNotAllowed, absCandidate)
 	}
 	resolutionRoots := MergeAllowedRootPaths(st.AllowedRoots(), st.PermissionRoots(access))
-	// A plan review's scratch directory — and the worktree inside it — is part
+	// A plan review's scratch directory and its worktree directory are part
 	// of that run's workspace, for reads and writes alike.
 	if scope := ReviewWriteScopeFromContext(ctx); scope != nil {
-		resolutionRoots = MergeAllowedRootPaths(resolutionRoots, []string{scope.Scratch()})
+		resolutionRoots = MergeAllowedRootPaths(resolutionRoots, scope.ownRoots())
 	}
 	// Resolve the path the turn already anchored (absCandidate), not the raw
 	// spelling: ResolveWithinRoots calls filepath.Abs, which for a relative

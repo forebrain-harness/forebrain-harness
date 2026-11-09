@@ -8,13 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 )
 
 // ReviewWriteScope is the narrow write access a coding conversation's plan
 // reviewer holds so it can reproduce what a plan claims instead of judging it
 // from reading: new test files inside the project, anything inside the
-// review's own scratch directory — which is where a git worktree of the
+// review's own scratch directory, anything inside the review's worktree
+// directory under the repository's .worktrees — where a git worktree of the
 // project lives when the reviewer wants to change code freely — and nothing
 // else. Production code and every file that existed before the review stay
 // read-only.
@@ -27,11 +27,14 @@ import (
 type ReviewWriteScope struct {
 	projectRoot string
 	scratch     string
-	// gitWorktrees is <git common dir>/worktrees when the project is a git
-	// repository, "" otherwise. The shell may write there so `git worktree add`
-	// can register a worktree under scratch; the user's checkout stays
-	// read-only.
+	// gitWorktrees is <git common dir>/worktrees when the review has a
+	// worktree directory, "" otherwise. The shell may write there so `git
+	// worktree add` can register the review's worktree; the user's checkout
+	// stays read-only.
 	gitWorktrees string
+	// worktree is the empty directory under <main worktree>/.worktrees the
+	// review's git worktree goes in, "" outside a repository.
+	worktree string
 
 	mu sync.Mutex
 	// created holds the test files this review created, so it may keep
@@ -40,22 +43,30 @@ type ReviewWriteScope struct {
 }
 
 // NewReviewWriteScope builds the scope of one review. projectRoot is the
-// project the plan is about, scratch the review's own directory, and
-// gitWorktrees the repository's worktrees directory or "" outside a repository.
-func NewReviewWriteScope(projectRoot, scratch, gitWorktrees string) *ReviewWriteScope {
-	return &ReviewWriteScope{
-		projectRoot:  filepath.Clean(projectRoot),
-		scratch:      filepath.Clean(scratch),
-		gitWorktrees: strings.TrimSpace(gitWorktrees),
-		created:      map[string]struct{}{},
+// project the plan is about, scratch the review's own directory, gitWorktrees
+// the repository's worktrees registry and worktree the review's directory
+// under <main worktree>/.worktrees — both "" outside a repository.
+func NewReviewWriteScope(projectRoot, scratch, gitWorktrees, worktree string) *ReviewWriteScope {
+	scope := &ReviewWriteScope{
+		projectRoot: filepath.Clean(projectRoot),
+		scratch:     filepath.Clean(scratch),
+		created:     map[string]struct{}{},
 	}
+	// Either both or neither: a registry the shell may write is only there so
+	// a worktree can be added in the review's directory.
+	if gitWorktrees, worktree = strings.TrimSpace(gitWorktrees), strings.TrimSpace(worktree); gitWorktrees != "" && worktree != "" {
+		scope.gitWorktrees = filepath.Clean(gitWorktrees)
+		scope.worktree = filepath.Clean(worktree)
+	}
+	return scope
 }
 
 // PrepareReviewWriteScope builds a review's scope for the project at
 // projectRoot: a fresh scratch directory under the OS temp directory, and — in
-// a git repository — the repository's worktrees registry, created if git has
-// not made it yet, so `git worktree add` can run from a shell that may not
-// write anything else of the repository.
+// a git repository — an empty directory of its own under the repository's
+// .worktrees for the review's worktree, plus the repository's worktrees
+// registry, created if git has not made it yet, so `git worktree add` can run
+// from a shell that may not write anything else of the repository.
 func PrepareReviewWriteScope(ctx context.Context, projectRoot string) (*ReviewWriteScope, error) {
 	projectRoot = strings.TrimSpace(projectRoot)
 	if projectRoot == "" {
@@ -65,22 +76,32 @@ func PrepareReviewWriteScope(ctx context.Context, projectRoot string) (*ReviewWr
 	if err != nil {
 		return nil, err
 	}
-	worktrees := ""
-	if out, gitErr := shellDiffRun(ctx, shellDiffDiscoveryEnv(), 2*time.Second, nil,
+	registry, worktree := "", ""
+	if out, gitErr := shellDiffRun(ctx, shellDiffDiscoveryEnv(), worktreeGitTimeout, nil,
 		"-C", projectRoot, "rev-parse", "--path-format=absolute", "--git-common-dir"); gitErr == nil {
 		if common := strings.TrimSpace(out); common != "" {
 			dir := filepath.Join(filepath.Clean(common), "worktrees")
 			if os.MkdirAll(dir, 0o755) == nil {
-				worktrees = dir
+				registry = dir
 			}
 		}
 	}
-	return NewReviewWriteScope(projectRoot, scratch, worktrees), nil
+	if registry != "" {
+		if parent := WorktreesDir(ctx, projectRoot); parent != "" && os.MkdirAll(parent, 0o755) == nil {
+			EnsureWorktreesIgnored(ctx, projectRoot)
+			// git worktree add accepts an existing empty directory, and the
+			// sandbox can only open a write path that already exists.
+			if dir, mkErr := os.MkdirTemp(parent, "plan-review-"); mkErr == nil {
+				worktree = dir
+			}
+		}
+	}
+	return NewReviewWriteScope(projectRoot, scratch, registry, worktree), nil
 }
 
-// Release tidies a finished review's scratch directory. Its tmp/ only ever
-// held temporary files, and a directory the reviewer never wrote to is removed,
-// so a review that reproduced nothing leaves nothing behind. What the reviewer
+// Release tidies a finished review's directories. Its tmp/ only ever held
+// temporary files, and a directory the reviewer never wrote to is removed, so
+// a review that reproduced nothing leaves nothing behind. What the reviewer
 // did write - tests, scripts, a worktree - stays, as its report lists.
 func (s *ReviewWriteScope) Release() {
 	if s == nil || s.scratch == "" {
@@ -90,6 +111,9 @@ func (s *ReviewWriteScope) Release() {
 	// Remove only succeeds on an empty directory, which is exactly the case
 	// to clean up.
 	_ = os.Remove(s.scratch)
+	if s.worktree != "" {
+		_ = os.Remove(s.worktree)
+	}
 }
 
 // Scratch is the review's own directory.
@@ -100,7 +124,8 @@ func (s *ReviewWriteScope) Scratch() string {
 	return s.scratch
 }
 
-// GitWorktrees is the repository's worktrees directory, "" outside one.
+// GitWorktrees is the repository's worktrees registry, "" when the review has
+// no worktree directory.
 func (s *ReviewWriteScope) GitWorktrees() string {
 	if s == nil {
 		return ""
@@ -108,37 +133,63 @@ func (s *ReviewWriteScope) GitWorktrees() string {
 	return s.gitWorktrees
 }
 
-// shellWritableRoots are the only places the reviewer's shell may write: its
-// scratch directory and, in a repository, the worktrees registry `git worktree
-// add` writes to.
-func (s *ReviewWriteScope) shellWritableRoots() []string {
+// Worktree is the empty directory the review's git worktree goes in, under
+// the repository's .worktrees; "" outside a repository.
+func (s *ReviewWriteScope) Worktree() string {
+	if s == nil {
+		return ""
+	}
+	return s.worktree
+}
+
+// ownRoots are the directories that belong to the review alone: its scratch
+// directory and, in a repository, its worktree directory. Everything in them
+// may be read and written.
+func (s *ReviewWriteScope) ownRoots() []string {
 	if s == nil {
 		return nil
 	}
 	roots := []string{s.scratch}
-	if s.gitWorktrees != "" {
+	if s.worktree != "" {
+		roots = append(roots, s.worktree)
+	}
+	return roots
+}
+
+// shellWritableRoots are the only places the reviewer's shell may write: its
+// own directories and, in a repository, the worktrees registry `git worktree
+// add` writes to.
+func (s *ReviewWriteScope) shellWritableRoots() []string {
+	roots := s.ownRoots()
+	if s != nil && s.gitWorktrees != "" {
 		roots = append(roots, s.gitWorktrees)
 	}
 	return roots
 }
 
-// admitWrite answers one write: anything under scratch, a new test file in the
-// project, or a test file this review created. A test file it admits as new
-// is remembered as the review's own.
+// admitWrite answers one write: anything under the review's own directories,
+// a new test file in the project, or a test file this review created. A test
+// file it admits as new is remembered as the review's own.
 func (s *ReviewWriteScope) admitWrite(absPath string) error {
 	absPath = filepath.Clean(absPath)
-	if pathWithinRoot(absPath, s.scratch) {
-		return nil
+	for _, root := range s.ownRoots() {
+		if pathWithinRoot(absPath, root) {
+			return nil
+		}
+	}
+	free := s.scratch
+	if s.worktree != "" {
+		free += " or " + s.worktree + " (a git worktree there may change any file)"
 	}
 	if !pathWithinRoot(absPath, s.projectRoot) {
-		return fmt.Errorf("plan review: %s is outside the project and the review's scratch directory %s", absPath, s.scratch)
+		return fmt.Errorf("plan review: %s is outside the project and the review's own directories %s", absPath, free)
 	}
 	rel, err := filepath.Rel(normalizeRootPath(s.projectRoot), normalizeRootPath(absPath))
 	if err != nil {
 		return fmt.Errorf("plan review: %s: %w", absPath, err)
 	}
 	if !isTestFilePath(rel) {
-		return fmt.Errorf("plan review: %s is not a test file; production code is read-only — write new test files in the project, or anything under %s (a git worktree there may change any file)", rel, s.scratch)
+		return fmt.Errorf("plan review: %s is not a test file; production code is read-only — write new test files in the project, or anything under %s", rel, free)
 	}
 	key := normalizeRootPath(absPath)
 	s.mu.Lock()

@@ -1066,7 +1066,7 @@ func (s *State) GuardWrite(ctx context.Context, absPath string) error {
 		return fmt.Errorf("plan mode: write blocked (only the plan directory is writable); call exit_plan_mode first")
 	}
 	// A coding plan review may write only what reproduces the plan's claims:
-	// new test files, its scratch directory, and a worktree inside it.
+	// new test files, its scratch directory, and its worktree directory.
 	if scope := ReviewWriteScopeFromContext(ctx); scope != nil {
 		if err := scope.admitWrite(absPath); err != nil {
 			return err

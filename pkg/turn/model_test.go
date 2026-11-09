@@ -156,6 +156,32 @@ func TestBuildStatusReportOmitsEmptyRowsAndNamesSkillOfferOff(t *testing.T) {
 	}
 }
 
+// TestStatusLinesOmitTheDefaultState pins what /status stays silent about: the
+// default agent mode is not named beside the agent, and Fast mode off is not
+// named beside the model — the model row says only what changed.
+func TestStatusLinesOmitTheDefaultState(t *testing.T) {
+	stateRoot := t.TempDir()
+	require.NoError(t, state.Set(stateRoot, "s1", state.State{Mode: state.ModeAgent}))
+	defaults := BuildStatusReport(context.Background(), StatusSource{
+		StateRoot: stateRoot, SessionID: "s1", AgentID: "main",
+		Provider: "openai", Model: "gpt-main", SkillOffer: true,
+	})
+	if got := StatusAgentLine(defaults); got != "main" {
+		t.Fatalf("default agent line = %q, want the agent alone", got)
+	}
+	if got := defaults.ModelLine; got != "openai/gpt-main" {
+		t.Fatalf("default model line = %q, want no Fast marker", got)
+	}
+
+	fast := BuildStatusReport(context.Background(), StatusSource{
+		StateRoot: t.TempDir(), SessionID: "s1", AgentID: "main",
+		Provider: "openai", Model: "gpt-main", FastOn: true, SkillOffer: true,
+	})
+	if got := fast.ModelLine; got != "openai/gpt-main · fast on" {
+		t.Fatalf("fast model line = %q", got)
+	}
+}
+
 // TestStatusSideConversationSaysWhoseSessionItIs pins the side label: a side
 // conversation's report describes its own session and says so.
 func TestStatusSideConversationSaysWhoseSessionItIs(t *testing.T) {

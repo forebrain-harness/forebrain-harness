@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -4278,9 +4277,9 @@ func (r *Runner) RunPlanReviewSubagent(
 
 // planReviewWriteScope prepares the write scope a coding conversation's plan
 // reviewer reproduces problems with: new test files in the project, its own
-// scratch directory, and a git worktree inside it. Office and batch reviews
-// get none and stay read-only. A scope that cannot be prepared is logged and
-// the review runs read-only rather than not at all.
+// scratch directory, and a git worktree under the repository's .worktrees.
+// Office and batch reviews get none and stay read-only. A scope that cannot be
+// prepared is logged and the review runs read-only rather than not at all.
 func (r *Runner) planReviewWriteScope(ctx context.Context) *tool.ReviewWriteScope {
 	if r.ProjectType() != state.ProjectTypeCoding {
 		return nil
@@ -4303,10 +4302,10 @@ func planReviewWorkspaceBrief(scope *tool.ReviewWriteScope) string {
 	var b strings.Builder
 	b.WriteString("\n\n## Your reproduction workspace\n\nScratch directory: ")
 	b.WriteString(scope.Scratch())
-	if scope.GitWorktrees() != "" {
-		fmt.Fprintf(&b, "\nThe project is a git repository. To change any file freely, create a worktree inside the scratch directory: git worktree add --detach %s HEAD", filepath.Join(scope.Scratch(), "worktree"))
+	if worktree := scope.Worktree(); worktree != "" {
+		fmt.Fprintf(&b, "\nWorktree directory: %s\nTo change any file freely, create a worktree there: git worktree add --detach %s HEAD", worktree, worktree)
 	} else {
-		b.WriteString("\nThe project is not a git repository, so no worktree is available.")
+		b.WriteString("\nNo git worktree is available for this review.")
 	}
 	return b.String()
 }

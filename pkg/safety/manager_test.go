@@ -434,14 +434,22 @@ func TestRunHostCommandTimeout(t *testing.T) {
 
 // TestSandboxStatusLineReadsTheEffectiveStatus pins the /status sandbox row to
 // the status /sandbox reports: a full-access configuration is never shown as
-// enforced by the platform backend.
+// enforced by the platform backend, and its mode — which already means "no
+// sandbox" — is not repeated as "not enforced". A sandbox that should be
+// running and cannot still names why.
 func TestSandboxStatusLineReadsTheEffectiveStatus(t *testing.T) {
 	full := &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}
-	if got := SandboxStatusLine(full); got != "danger-full-access · not enforced" {
+	if got := SandboxStatusLine(full); got != "danger-full-access" {
 		t.Fatalf("full access line = %q", got)
 	}
 	if got := SandboxModeLabel(full); got != string(appcfg.SandboxModeDangerFullAccess) {
 		t.Fatalf("label = %q", got)
+	}
+
+	t.Setenv("PATH", "")
+	blocked := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}
+	if got := SandboxStatusLine(blocked); !strings.HasPrefix(got, "workspace-write · not enforced: ") {
+		t.Fatalf("unavailable sandbox line = %q, want the mode and the reason", got)
 	}
 }
 

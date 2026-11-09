@@ -22310,7 +22310,7 @@ func TestStatusMarkdownRendersMCPCountsAndTokens(t *testing.T) {
 	out := turn.RenderStatusMarkdown(turn.StatusReport{
 		SessionID:   "s1",
 		Mode:        "agent",
-		ModelLine:   "openai/gpt-main · fast off",
+		ModelLine:   "openai/gpt-main",
 		MCP:         turn.MCPCountLine{Total: 2, Connected: 1, Failed: 1},
 		Context:     turn.StatusContext{PercentLeft: 62, UsedTokens: 48_000, WindowTokens: 128_000, AutoCompactAt: 102_000},
 		Session:     turn.StatusUsageTotals{InputTokens: 1_900_000, OutputTokens: 42_000, Requests: 38},
@@ -22318,7 +22318,7 @@ func TestStatusMarkdownRendersMCPCountsAndTokens(t *testing.T) {
 	})
 	for _, want := range []string{
 		"MCP servers: 1 connected, 1 failed",
-		"Model: openai/gpt-main · fast off",
+		"Model: openai/gpt-main",
 		"Workspace · 3 rules",
 		"62% left · 48k of 128k",
 		"Auto-compact at: 102k",

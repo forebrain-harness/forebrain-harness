@@ -1184,17 +1184,17 @@ func (env *Environment) peerInboxState() *peerInbox {
 }
 
 // sameWorkTree reports whether two directories are one work tree: the same
-// directory once links are resolved, or one inside the other.
+// directory once links are resolved, or one inside the other with no linked
+// git worktree starting between them (see workTree).
 func sameWorkTree(a, b string) bool {
 	left, right := resolvePath(a), resolvePath(b)
 	if left == "" || right == "" {
 		return false
 	}
-	if left == right {
-		return true
+	if len(left) < len(right) {
+		left, right = right, left
 	}
-	return strings.HasPrefix(left, right+string(filepath.Separator)) ||
-		strings.HasPrefix(right, left+string(filepath.Separator))
+	return newWorkTree(right).contains(left)
 }
 
 // resolvePath is a directory with its links resolved, for comparing two

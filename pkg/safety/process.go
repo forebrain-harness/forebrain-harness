@@ -411,7 +411,9 @@ func SandboxModeLabel(cfg *appcfg.Root) string {
 
 // SandboxStatusLine is the one-line sandbox summary /status shows, read from
 // the same status /sandbox reports in full: the selected mode, then the
-// backend that is enforcing it — or, when nothing is, the reason.
+// backend that is enforcing it — or, when one should be and cannot, the
+// reason. A mode that already means "no sandbox" (danger-full-access) stands
+// alone; "not enforced" beside it only repeated the mode.
 func SandboxStatusLine(cfg *appcfg.Root) string {
 	st := NewManager().Status(cfg)
 	parts := make([]string, 0, 2)
@@ -423,8 +425,6 @@ func SandboxStatusLine(cfg *appcfg.Root) string {
 		parts = append(parts, string(st.Backend))
 	case strings.TrimSpace(st.UnavailableReason) != "":
 		parts = append(parts, "not enforced: "+SandboxReasonInWords(st.UnavailableReason))
-	default:
-		parts = append(parts, "not enforced")
 	}
 	return strings.Join(parts, " · ")
 }

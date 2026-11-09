@@ -39,7 +39,7 @@ $S/build-binary.sh old "$TMPDIR/forebrain-ab/old"   # clean HEAD -> forebrain.bi
 $S/build-binary.sh new "$TMPDIR/forebrain-ab/new"   # working tree -> forebrain.bin
 ```
 
-The `old` build creates a throwaway worktree of HEAD at `<work>/head-tree`. Do
+The `old` build creates a throwaway worktree of HEAD at `.worktrees/ab-head`. Do
 this **before** you keep editing, or re-run it after your edit to refresh.
 
 ### 2. Drive one card per build and capture it

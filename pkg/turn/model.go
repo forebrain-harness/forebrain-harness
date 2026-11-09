@@ -731,7 +731,7 @@ type StatusReport struct {
 	Mode         string
 	Phase        string // shown only in plan mode
 	Proxy        string // userinfo stripped
-	ModelLine    string // "provider / model · fast off"
+	ModelLine    string // "provider / model", "· fast on" once Fast mode is on
 	Endpoint     string // userinfo and query stripped
 	Permissions  StatusPermissions
 	Sandbox      string
@@ -965,6 +965,9 @@ func SanitizeEndpoint(raw string) string {
 	return u.String()
 }
 
+// statusModelLine names the model and says when Fast mode is on. Off is what
+// every session is by default, so the absence of the marker is the whole
+// answer — /status says nothing about a state the user never turned on.
 func statusModelLine(provider, model string, fastOn bool) string {
 	line := llm.FormatProviderModel(provider, model)
 	if line == "" {
@@ -972,8 +975,6 @@ func statusModelLine(provider, model string, fastOn bool) string {
 	}
 	if fastOn {
 		line += " · fast on"
-	} else {
-		line += " · fast off"
 	}
 	return line
 }
@@ -985,10 +986,12 @@ type StatusFact struct {
 	Value string
 }
 
-// StatusAgentLine joins the agent, its mode and — in plan mode — the phase.
+// StatusAgentLine joins the agent with its mode — named only when it is not
+// the default one, since "agent" is what a conversation is unless the user
+// switched — and, in plan mode, the phase.
 func StatusAgentLine(rep StatusReport) string {
 	agent := rep.AgentID
-	if rep.Mode != "" {
+	if rep.Mode != "" && rep.Mode != string(state.ModeAgent) {
 		if agent != "" {
 			agent += " · "
 		}

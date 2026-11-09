@@ -27,7 +27,7 @@ case "$SIDE" in
     echo "built working tree -> $BIN"
     ;;
   old)
-    WT="$WORK/head-tree"
+    WT="$REPO/.worktrees/ab-head"
     if [ ! -e "$WT/.git" ]; then
       # A worktree of HEAD, never of the dirty working tree: the "before" side
       # must be the committed baseline, not a mixture of the user's edits.

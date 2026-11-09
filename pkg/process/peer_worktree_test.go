@@ -13,6 +13,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -472,5 +473,96 @@ func TestPeerWorkTreePeersListOnlyTheAgentsInThisTree(t *testing.T) {
 		if len(p.RecentFiles) != 0 || p.MoreFiles != 0 {
 			t.Fatalf("%s reports %v/%d, want nothing: the ledger never saw it", p.Name, p.RecentFiles, p.MoreFiles)
 		}
+	}
+}
+
+// nestedWorktreeRepo makes root a repository with a linked worktree at
+// root/.worktrees/feature, where agents create them, and a submodule-shaped
+// checkout at root/vendor/lib. It returns the worktree's resolved path.
+func nestedWorktreeRepo(t *testing.T, root string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+	linked := filepath.Join(root, ".worktrees", "feature")
+	git("worktree", "add", "-q", "--detach", linked, "HEAD")
+	submodule := filepath.Join(root, "vendor", "lib")
+	for _, dir := range []string{filepath.Join(root, ".git", "modules", "lib"), submodule} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(submodule, ".git"), []byte("gitdir: ../../.git/modules/lib\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return resolvePath(linked)
+}
+
+// TestSameWorkTreeStopsAtALinkedWorktree pins the tree boundary (owner
+// 2026-11-09): path containment, except that a linked worktree checked out
+// below another agent's directory is a tree of its own, in both directions. A
+// submodule stays part of the checkout that contains it.
+func TestSameWorkTreeStopsAtALinkedWorktree(t *testing.T) {
+	root := resolvePath(t.TempDir())
+	linked := nestedWorktreeRepo(t, root)
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{root, root, true},
+		{root, filepath.Join(root, "pkg"), true},
+		{root, filepath.Join(root, "vendor", "lib"), true},
+		{root, linked, false},
+		{linked, root, false},
+		{filepath.Join(root, "pkg"), filepath.Join(linked, "pkg"), false},
+		{root, filepath.Join(linked, "pkg"), false},
+		{linked, filepath.Join(linked, "pkg"), true},
+		{filepath.Join(root, ".worktrees"), root, true},
+		{root, t.TempDir(), false},
+	} {
+		if got := sameWorkTree(tc.a, tc.b); got != tc.want {
+			t.Errorf("sameWorkTree(%s, %s) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// TestPeerTouchesLeaveOutANestedWorktree checks the ledger readers apply the
+// same boundary: another agent's write inside root/.worktrees/feature is not
+// news to an agent in root — not for failure attribution, not for the web
+// panel — and is news to an agent in that worktree.
+func TestPeerTouchesLeaveOutANestedWorktree(t *testing.T) {
+	dir := touchLedger(t)
+	f := startPeerOutbound(t, "cli-touch-nested", nil)
+	ctx := touchContext("cli-touch-nested")
+	root := resolvePath(f.env.LaunchDir)
+	linked := nestedWorktreeRepo(t, root)
+	now := time.Now()
+	writeForeignTouch(t, dir, filepath.Join(root, "main.go"), "cli-other", "in-main", now)
+	writeForeignTouch(t, dir, filepath.Join(linked, "main.go"), "cli-other", "in-worktree", now)
+
+	window := func(tree string) []string {
+		var names []string
+		for _, touch := range f.port.TouchesBetween(ctx, tree, now.Add(-time.Minute), now.Add(time.Minute)) {
+			names = append(names, touch.AgentName+":"+touch.Path)
+		}
+		return names
+	}
+	if got := window(root); len(got) != 1 || got[0] != "in-main:main.go" {
+		t.Errorf("touches in the main checkout = %v, want only the write there", got)
+	}
+	if got := window(linked); len(got) != 1 || got[0] != "in-worktree:main.go" {
+		t.Errorf("touches in the worktree = %v, want only the write there", got)
+	}
+	panel := f.env.RecentPeerFileTouches(root)
+	if len(panel) != 1 || panel[0].AgentName != "in-main" {
+		t.Errorf("panel for the main checkout = %#v, want only the write there", panel)
 	}
 }
