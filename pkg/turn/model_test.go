@@ -268,7 +268,7 @@ func TestCacheHitPercent(t *testing.T) {
 
 // TestStatusInstructionsLine pins the Instructions row: agent files carry the
 // (agent) marker, a file that did not make it into the body says why, and a
-// cut one says where it was cut.
+// cut one says how much of it arrived.
 func TestStatusInstructionsLine(t *testing.T) {
 	line := RenderInstructionsLine([]assembly.RuleSource{
 		{Name: "AGENTS.md", Agent: true, Loaded: true},
@@ -278,7 +278,7 @@ func TestStatusInstructionsLine(t *testing.T) {
 	for _, want := range []string{
 		"AGENTS.md (agent)",
 		"FOREBRAIN.md (not loaded: project not trusted)",
-		"docs/FOREBRAIN.md (truncated to 120k chars)",
+		"docs/FOREBRAIN.md (truncated to 120k runes)",
 	} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("instructions line %q missing %q", line, want)

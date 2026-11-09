@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
@@ -19,7 +20,7 @@ import (
 // RuleSource names one instruction file the merged rules body is built from,
 // with what became of it: whether its text made it into the merged body (a
 // project the user has not trusted is skipped, and a file that starts past the
-// body's size limit is dropped), and where it was cut when only part of it did
+// body's size limit is dropped), and how much of it arrived when only part did
 // (the per-file budget, or the body limit running out inside it).
 type RuleSource struct {
 	Name  string
@@ -28,8 +29,8 @@ type RuleSource struct {
 	// NotLoadedReason says why not when it is false.
 	Loaded          bool
 	NotLoadedReason string
-	// TruncatedTo is the character limit that cut the file's text, zero when
-	// the whole file is in.
+	// TruncatedTo is the runes of the file's own text that made it into the
+	// merged body; zero when the whole file is in.
 	TruncatedTo int
 }
 
@@ -194,15 +195,16 @@ func (p *PreHook) buildRules(wd string, agentFiles bool) rulesBuild {
 		return v
 	}
 	build := rulesBuild{}
-	perFile := bootstrapMaxPerFile(maxBody)
+	perFile := PerFileRulesBudget(maxBody)
 	// Source 1: active primary agent's bootstrap files (AGENTS/SOUL/USER.md).
 	var parts []string
 	var partSource []int // the source index each part came from
+	var partOffset []int // runes of synthesized header before the file's own text
 	if agentFiles {
 		if files, err := home.LoadWorkspaceBootstrapFilesFromRoot(root, home.LoadOptions{
 			CWD:             root,
 			Chain:           chain,
-			MaxBytesPerFile: perFile,
+			MaxRunesPerFile: perFile,
 		}); err == nil {
 			for _, f := range files {
 				if strings.TrimSpace(f.Body) == "" {
@@ -212,8 +214,10 @@ func (p *PreHook) buildRules(wd string, agentFiles bool) rulesBuild {
 				if f.Truncated {
 					src.TruncatedTo = perFile
 				}
+				header := "## " + f.Name + "\n\n"
 				partSource = append(partSource, len(build.sources))
-				parts = append(parts, "## "+f.Name+"\n\n"+f.Body)
+				partOffset = append(partOffset, utf8.RuneCountInString(header))
+				parts = append(parts, header+f.Body)
 				build.sources = append(build.sources, src)
 			}
 		}
@@ -232,27 +236,30 @@ func (p *PreHook) buildRules(wd string, agentFiles bool) rulesBuild {
 			src.TruncatedTo = perFile
 		}
 		partSource = append(partSource, len(build.sources))
+		partOffset = append(partOffset, 0)
 		parts = append(parts, f.Body)
 		build.sources = append(build.sources, src)
 	}
 	merged := strings.TrimSpace(strings.Join(parts, "\n\n"))
-	if maxBody > 0 && len(merged) > maxBody {
-		// The body limit cuts the merged text, not a file: a file starting at
-		// or past the cut contributes nothing, and the one the cut falls
-		// inside is truncated there.
+	if maxBody > 0 && utf8.RuneCountInString(merged) > maxBody {
+		// The body limit cuts the merged text, in runes. A file the cut lands
+		// inside keeps only the runes before it, and that kept count — not the
+		// limit — is what the report shows.
 		start := 0
 		for i, part := range parts {
-			end := start + len(part)
+			n := utf8.RuneCountInString(part)
+			own := n - partOffset[i] // the file's own runes, header excluded
+			kept := min(max(maxBody-(start+partOffset[i]), 0), own)
 			src := &build.sources[partSource[i]]
 			switch {
-			case start >= maxBody:
+			case kept == 0:
 				src.Loaded = false
-				src.NotLoadedReason = "over the " + FormatTokenCount(maxBody) + "-char rules limit"
+				src.NotLoadedReason = "over the " + FormatTokenCount(maxBody) + "-rune rules limit"
 				src.TruncatedTo = 0
-			case end > maxBody:
-				src.TruncatedTo = maxBody
+			case kept < own:
+				src.TruncatedTo = kept
 			}
-			start = end + len("\n\n")
+			start += n + 2 // the "\n\n" join between parts, two runes
 		}
 	}
 	build.merged = TruncateString(merged, maxBody)

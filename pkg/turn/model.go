@@ -1175,7 +1175,8 @@ func RenderPermissionsLine(p StatusPermissions) string {
 
 // RenderInstructionsLine lists the instruction files in load order, each with
 // what became of it: agent bootstrap files are marked, a file that did not
-// make it into the merged body says why, and a cut one says where it was cut.
+// make it into the merged body says why, and a cut one says how much of it
+// arrived.
 func RenderInstructionsLine(sources []StatusInstruction) string {
 	parts := make([]string, 0, len(sources))
 	for _, src := range sources {
@@ -1190,7 +1191,7 @@ func RenderInstructionsLine(sources []StatusInstruction) string {
 		case !src.Loaded:
 			name += " (not loaded: " + src.NotLoadedReason + ")"
 		case src.TruncatedTo > 0:
-			name += " (truncated to " + FormatTokens(src.TruncatedTo) + " chars)"
+			name += " (truncated to " + FormatTokens(src.TruncatedTo) + " runes)"
 		}
 		parts = append(parts, name)
 	}

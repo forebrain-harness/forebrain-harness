@@ -9,10 +9,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
-	DefaultMaxBytesPerFile = 12_000
+	DefaultMaxRunesPerFile = 12_000
 )
 
 //go:embed templates/*.md
@@ -55,7 +56,7 @@ type EnsureOptions struct{}
 type LoadOptions struct {
 	CWD                string
 	Chain              bool
-	MaxBytesPerFile    int
+	MaxRunesPerFile    int
 	IncludeDiagnostics bool
 }
 
@@ -64,7 +65,7 @@ type BootstrapFile struct {
 	Path       string
 	Body       string
 	Diagnostic string
-	// Truncated reports that Body was cut to the per-file byte budget.
+	// Truncated reports that Body was cut to the per-file rune budget.
 	Truncated bool
 }
 
@@ -193,9 +194,9 @@ func LoadWorkspaceBootstrapFilesFromDirs(workspaceRoot string, dirs []string, op
 	if err != nil {
 		return nil, err
 	}
-	maxBytes := opts.MaxBytesPerFile
-	if maxBytes <= 0 {
-		maxBytes = DefaultMaxBytesPerFile
+	maxRunes := opts.MaxRunesPerFile
+	if maxRunes <= 0 {
+		maxRunes = DefaultMaxRunesPerFile
 	}
 	var out []BootstrapFile
 	seenDirs := make(map[string]struct{})
@@ -212,7 +213,7 @@ func LoadWorkspaceBootstrapFilesFromDirs(workspaceRoot string, dirs []string, op
 		}
 		seenDirs[dir] = struct{}{}
 		for _, name := range orderedBootstrapFiles {
-			item, ok := readWorkspaceMarkdown(ws, dir, name, maxBytes, opts.IncludeDiagnostics)
+			item, ok := readWorkspaceMarkdown(ws, dir, name, maxRunes, opts.IncludeDiagnostics)
 			if ok {
 				out = append(out, item)
 			}
@@ -313,14 +314,14 @@ func dirChain(wsRoot, cwd string) []string {
 	return chain
 }
 
-func readWorkspaceMarkdown(ws, dir, name string, maxBytes int, diagnostics bool) (BootstrapFile, bool) {
+func readWorkspaceMarkdown(ws, dir, name string, maxRunes int, diagnostics bool) (BootstrapFile, bool) {
 	if strings.Contains(name, string(filepath.Separator)) || name == "." || strings.TrimSpace(name) == "" {
 		return BootstrapFile{}, false
 	}
-	return readWorkspaceMarkdownPath(ws, name, filepath.Join(dir, name), maxBytes, diagnostics)
+	return readWorkspaceMarkdownPath(ws, name, filepath.Join(dir, name), maxRunes, diagnostics)
 }
 
-func readWorkspaceMarkdownPath(ws, name, path string, maxBytes int, diagnostics bool) (BootstrapFile, bool) {
+func readWorkspaceMarkdownPath(ws, name, path string, maxRunes int, diagnostics bool) (BootstrapFile, bool) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return diagnosticFile(name, path, "outside workspace", diagnostics), diagnostics
@@ -358,15 +359,19 @@ func readWorkspaceMarkdownPath(ws, name, path string, maxBytes int, diagnostics 
 		return BootstrapFile{}, false
 	}
 	defer f.Close()
-	raw, err := readAllFn(io.LimitReader(f, int64(maxBytes)+1))
+	// The budget is in runes and a rune is at most utf8.UTFMax bytes: this
+	// prefix holds every rune the budget can keep, plus at least one more when
+	// the file is longer — enough to decide the cut without reading it whole.
+	raw, err := readAllFn(io.LimitReader(f, int64(maxRunes)*utf8.UTFMax+utf8.UTFMax))
 	if err != nil {
 		return BootstrapFile{}, false
 	}
-	truncated := len(raw) > maxBytes
+	runes := []rune(string(raw))
+	truncated := len(runes) > maxRunes
 	if truncated {
-		raw = append(raw[:maxBytes], []byte("\n…")...)
+		runes = append(runes[:maxRunes], '\n', '…')
 	}
-	body := strings.TrimSpace(StripFrontMatter(string(raw)))
+	body := strings.TrimSpace(StripFrontMatter(string(runes)))
 	if body == "" {
 		return BootstrapFile{}, false
 	}

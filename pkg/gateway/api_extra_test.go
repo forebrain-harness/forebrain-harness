@@ -3616,18 +3616,67 @@ func TestAgentRuleFileReadAnswersOneShape(t *testing.T) {
 
 func TestAgentRuleFileBudgetWarning(t *testing.T) {
 	s, _, _ := rulesServer(t)
-	big := bytes.Repeat([]byte("x"), assemblyBudgetBytes+1)
+	// 12001 CJK runes = 36003 bytes, well under the 64KB request cap: the
+	// warning is about the assembler's rune budget, not the body size.
+	big := bytes.NewReader([]byte(strings.Repeat("中", 12001)))
 	rr := httptest.NewRecorder()
-	req := withParamName(httptest.NewRequest(http.MethodPut, "/api/rules/agent/SOUL.md", bytes.NewReader(big)), "SOUL.md")
+	req := withParamName(httptest.NewRequest(http.MethodPut, "/api/rules/agent/SOUL.md", big), "SOUL.md")
 	s.handleAgentRuleFile(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Contains(t, rr.Body.String(), "exceeds_assembly_budget")
+	require.Contains(t, rr.Body.String(), `"budget":12000`)
 
+	atLimit := bytes.NewReader([]byte(strings.Repeat("中", 12000)))
 	rr = httptest.NewRecorder()
-	req = withParamName(httptest.NewRequest(http.MethodPut, "/api/rules/agent/SOUL.md", strings.NewReader("short")), "SOUL.md")
+	req = withParamName(httptest.NewRequest(http.MethodPut, "/api/rules/agent/SOUL.md", atLimit), "SOUL.md")
 	s.handleAgentRuleFile(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.NotContains(t, rr.Body.String(), "warning")
+}
+
+// TestRuleFileBudgetFollowsTheConfiguredTotal pins that the editor's warning
+// uses the same clamp the assembler applies: a total of 8000 leaves a per-file
+// budget of 2048, not 12000.
+func TestRuleFileBudgetFollowsTheConfiguredTotal(t *testing.T) {
+	s, _, _ := rulesServer(t)
+	ctx := context.Background()
+	require.Equal(t, 12_000, s.ruleFileBudgetRunes(ctx))
+
+	cfg, err := s.Env.ComposedPersistedConfig(ctx)
+	require.NoError(t, err)
+	cfg.Agents.Defaults.ContextInject.MaxPreHookRulesChars = 8000
+	require.NoError(t, s.Env.WriteRootSections(ctx, []string{"agents"}, cfg))
+	require.Equal(t, 2048, s.ruleFileBudgetRunes(ctx))
+}
+
+// The project PUT answers the same budget, so the project editor's warning
+// cannot drift from the agent editor's.
+func TestProjectRuleFileBudgetFollowsTheConfiguredTotal(t *testing.T) {
+	s, _, _ := rulesServer(t)
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s.Projects = state.NewProjectStore(db, "main")
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755))
+	p, err := s.Projects.Create(ctx, state.CreateProjectInput{Name: "p", Root: root})
+	require.NoError(t, err)
+
+	cfg, err := s.Env.ComposedPersistedConfig(ctx)
+	require.NoError(t, err)
+	cfg.Agents.Defaults.ContextInject.MaxPreHookRulesChars = 8000
+	require.NoError(t, s.Env.WriteRootSections(ctx, []string{"agents"}, cfg))
+
+	rr := httptest.NewRecorder()
+	req := withNamedParam(
+		httptest.NewRequest(http.MethodPut, "/api/rules/project/"+p.ID+"/file?dir=docs",
+			bytes.NewReader([]byte(strings.Repeat("中", 2049)))),
+		"projectId", p.ID)
+	s.handleProjectRuleFile(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "exceeds_assembly_budget")
+	require.Contains(t, rr.Body.String(), `"budget":2048`)
 }
 
 func TestProjectRuleDirValidationOnly(t *testing.T) {

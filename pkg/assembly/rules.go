@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
 // ProjectRoot resolves the project root for a CWD:
@@ -62,15 +64,15 @@ func hasGitMarker(dir string) bool {
 type ProjectRuleFile struct {
 	Path string
 	Body string
-	// Truncated reports that Body was cut to the per-file byte budget.
+	// Truncated reports that Body was cut to the per-file rune budget.
 	Truncated bool
 }
 
 // ProjectForebrainFiles reads FOREBRAIN.md from the CWD's project root (git root, or
 // the CWD itself). When chain is true it also reads any nested FOREBRAIN.md from
 // the project root down to the CWD, returned root-first. Bodies have front matter stripped, are trimmed, and are
-// truncated to maxBytes. Non-regular files and symlinks are skipped.
-func ProjectForebrainFiles(wd string, chain bool, maxBytes int) []ProjectRuleFile {
+// truncated to maxRunes. Non-regular files and symlinks are skipped.
+func ProjectForebrainFiles(wd string, chain bool, maxRunes int) []ProjectRuleFile {
 	wd = resolvePath(wd)
 	if wd == "" {
 		return nil
@@ -91,7 +93,7 @@ func ProjectForebrainFiles(wd string, chain bool, maxBytes int) []ProjectRuleFil
 			continue
 		}
 		seen[path] = struct{}{}
-		body, truncated, ok := readProjectMarkdown(path, maxBytes)
+		body, truncated, ok := readProjectMarkdown(path, maxRunes)
 		if !ok {
 			continue
 		}
@@ -131,7 +133,7 @@ func projectDirChain(root, cwd string) []string {
 	return chain
 }
 
-func readProjectMarkdown(path string, maxBytes int) (body string, truncated bool, ok bool) {
+func readProjectMarkdown(path string, maxRunes int) (body string, truncated bool, ok bool) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", false, false
@@ -147,12 +149,15 @@ func readProjectMarkdown(path string, maxBytes int) (body string, truncated bool
 	if body == "" {
 		return "", false, false
 	}
-	return TruncateString(body, maxBytes), maxBytes > 0 && len(body) > maxBytes, true
+	return TruncateString(body, maxRunes), maxRunes > 0 && utf8.RuneCountInString(body) > maxRunes, true
 }
 
+// TruncateString cuts s to at most max runes — Unicode code points, so a
+// Chinese, Japanese or Korean character counts once and is never split — and
+// marks the cut with an ellipsis. max <= 0 means no limit.
 func TruncateString(s string, max int) string {
-	if max <= 0 || len(s) <= max {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
 		return s
 	}
-	return s[:max] + "\n…"
+	return llm.TruncateRunes(s, max) + "\n…"
 }

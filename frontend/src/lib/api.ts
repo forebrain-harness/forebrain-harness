@@ -2133,6 +2133,8 @@ export interface RuleFileContent {
 
 export interface RuleFileSaveResponse {
   bytes: number
+  /** Per-file instruction budget in runes the assembler applies on this install. */
+  budget: number
   warning?: string
 }
 

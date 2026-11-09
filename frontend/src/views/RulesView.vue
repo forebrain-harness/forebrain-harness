@@ -85,7 +85,7 @@
 
     <ForebrainModal :open="editing !== ''" size="xl" :title="editing" @close="closeEdit">
       <div data-testid="rules-editor-modal">
-        <p v-if="warning" class="mb-2 text-[12px] text-[var(--forebrain-danger)]">{{ t('rules.budgetWarning') }}</p>
+        <p v-if="warning" class="mb-2 text-[12px] text-[var(--forebrain-danger)]">{{ t('rules.budgetWarning', { n: warningBudget }) }}</p>
         <div v-if="!loaded" class="min-h-[200px]">{{ t('common.loading') }}</div>
         <FileEditor v-else :key="editing" height="420px" :path="editing" v-model="draft" @dirty="dirty = $event" />
       </div>
@@ -163,6 +163,9 @@ const draft = ref('')
 const dirty = ref(false)
 const saving = ref(false)
 const warning = ref(false)
+// warningBudget is the per-file budget the server answered with, in runes: the
+// number the warning names is the one the assembler actually applies here.
+const warningBudget = ref(0)
 
 const purposes: Record<string, () => string> = {
   'AGENTS.md': () => t('rules.purposeAgents'),
@@ -231,6 +234,7 @@ async function save() {
   try {
     const res = await forebrainApi.saveAgentRuleFile(editing.value, draft.value)
     warning.value = res.warning === 'exceeds_assembly_budget'
+    warningBudget.value = res.budget
     notice.value = t('rules.savedNotice')
     dirty.value = false
     closeEdit()

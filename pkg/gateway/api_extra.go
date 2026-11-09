@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
@@ -7771,10 +7772,19 @@ var agentRuleFiles = []string{"AGENTS.md", "SOUL.md", "USER.md"}
 // projectRuleFile is the only instruction file a project layer carries.
 const projectRuleFile = "FOREBRAIN.md"
 
-// assemblyBudgetBytes mirrors pkg/home's per-file markdown budget: files
-// larger than this still save, but the assembler truncates them, and the
-// write answer says so.
-const assemblyBudgetBytes = 12_000
+// ruleFileBudgetRunes is the per-file instruction budget the assembler applies
+// to this install: the configured total divided by ten, clamped to
+// [2048, 12000] — the same rule pkg/assembly builds the rules body with, so
+// the editor's warning and the assembler's cut can never disagree.
+func (s *Server) ruleFileBudgetRunes(ctx context.Context) int {
+	total := 120_000
+	if s != nil && s.Env != nil {
+		if cfg, err := s.Env.ComposedPersistedConfig(ctx); err == nil {
+			total = cfg.Agents.Defaults.ContextInject.MaxPreHookRulesCharsOr(120_000)
+		}
+	}
+	return assembly.PerFileRulesBudget(total)
+}
 
 const rulesBodyLimit = 64 << 10
 
@@ -7854,8 +7864,9 @@ func (s *Server) handleAgentRuleFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		answer := map[string]any{"name": name, "bytes": len(body)}
-		if len(body) > assemblyBudgetBytes {
+		budget := s.ruleFileBudgetRunes(r.Context())
+		answer := map[string]any{"name": name, "bytes": len(body), "budget": budget}
+		if utf8.RuneCountInString(string(body)) > budget {
 			answer["warning"] = "exceeds_assembly_budget"
 		}
 		writeJSON(w, answer)
@@ -8020,8 +8031,9 @@ func (s *Server) handleProjectRuleFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		answer := map[string]any{"bytes": len(body)}
-		if len(body) > assemblyBudgetBytes {
+		budget := s.ruleFileBudgetRunes(r.Context())
+		answer := map[string]any{"bytes": len(body), "budget": budget}
+		if utf8.RuneCountInString(string(body)) > budget {
 			answer["warning"] = "exceeds_assembly_budget"
 		}
 		writeJSON(w, answer)

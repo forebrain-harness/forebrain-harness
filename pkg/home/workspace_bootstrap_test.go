@@ -8,7 +8,43 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+// TestReadWorkspaceMarkdownCountsRunes pins the owner contract: the per-file
+// budget counts Unicode code points, so a Chinese/Japanese/Korean file keeps
+// the budget's characters and the cut never splits one.
+func TestReadWorkspaceMarkdownCountsRunes(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "AGENTS.md")
+	// 13000 CJK runes = 39000 bytes: over the budget under either unit, but the
+	// kept prefix must be 12000 runes (36000 bytes), not 12000 bytes (4000 runes).
+	if err := os.WriteFile(path, []byte(strings.Repeat("中", 13000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item, ok := readWorkspaceMarkdownPath(ws, "AGENTS.md", path, 12_000, false)
+	if !ok || !item.Truncated {
+		t.Fatalf("item = %+v ok=%v, want truncated", item, ok)
+	}
+	if !utf8.ValidString(item.Body) || strings.ContainsRune(item.Body, '\uFFFD') {
+		t.Fatalf("body is not clean UTF-8: %q", item.Body)
+	}
+	body := strings.TrimSuffix(item.Body, "\n…")
+	if got := utf8.RuneCountInString(body); got != 12_000 {
+		t.Fatalf("kept %d runes, want 12000", got)
+	}
+	if got := len(body); got != 36_000 {
+		t.Fatalf("kept %d bytes, want 36000 (three bytes per rune)", got)
+	}
+
+	exact := filepath.Join(ws, "SOUL.md")
+	if err := os.WriteFile(exact, []byte(strings.Repeat("中", 12_000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if item, ok := readWorkspaceMarkdownPath(ws, "SOUL.md", exact, 12_000, false); !ok || item.Truncated {
+		t.Fatalf("exact fit = %+v ok=%v, want untouched", item, ok)
+	}
+}
 
 func TestOrderedBootstrapFilesAndPaths(t *testing.T) {
 	if got := OrderedBootstrapFiles(); strings.Join(got, ",") != "AGENTS.md,SOUL.md,USER.md" {

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
@@ -161,13 +162,13 @@ func TestInstructionSourcesMatchMergedBody(t *testing.T) {
 }
 
 // TestInstructionSourcesRecordWhereTheBodyLimitCuts pins the truncation facts:
-// the per-file budget and the whole body's limit are both recorded where they
-// cut, and a file that starts past the body limit is reported as not loaded —
-// all without moving a byte of the merged body.
+// the per-file budget and the whole body's limit are both recorded as the runes
+// the file actually kept, and a file that starts past the body limit is
+// reported as not loaded — all without moving a byte of the merged body.
 func TestInstructionSourcesRecordWhereTheBodyLimitCuts(t *testing.T) {
 	home := t.TempDir()
 	wsRoot := t.TempDir()
-	agents := strings.Repeat("a", 3000) // over the 2048-byte per-file floor
+	agents := strings.Repeat("a", 3000) // over the 2048-rune per-file floor
 	if err := os.WriteFile(filepath.Join(wsRoot, "AGENTS.md"), []byte(agents), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +186,7 @@ func TestInstructionSourcesRecordWhereTheBodyLimitCuts(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &appcfg.Root{}
-	cfg.Agents.Defaults.ContextInject.MaxPreHookRulesChars = 2070
+	cfg.Agents.Defaults.ContextInject.MaxPreHookRulesChars = 2080
 	p := NewPreHook(cfg, home, wsRoot)
 	t.Chdir(proj)
 	merged := p.loadRules(proj, hook.HookContext{}, true)
@@ -194,16 +195,19 @@ func TestInstructionSourcesRecordWhereTheBodyLimitCuts(t *testing.T) {
 		t.Fatalf("sources = %+v", sources)
 	}
 	if sources[0].TruncatedTo != 2048 || !sources[0].Loaded {
-		t.Fatalf("AGENTS.md = %+v, want cut at the per-file budget", sources[0])
+		t.Fatalf("AGENTS.md = %+v, want the per-file budget's 2048 runes kept", sources[0])
 	}
-	if sources[1].TruncatedTo != 2070 || !sources[1].Loaded {
-		t.Fatalf("SOUL.md = %+v, want cut at the body limit", sources[1])
+	if sources[1].TruncatedTo != 2 || !sources[1].Loaded {
+		t.Fatalf("SOUL.md = %+v, want the body limit keeping 2 runes", sources[1])
 	}
 	if sources[2].Loaded || !strings.Contains(sources[2].NotLoadedReason, "rules limit") {
 		t.Fatalf("FOREBRAIN.md = %+v, want not loaded past the body limit", sources[2])
 	}
 	if strings.Contains(merged, "PROJECT RULES") {
 		t.Fatalf("body past the limit leaked: %q", merged)
+	}
+	if !strings.HasSuffix(merged, "SO\n…") {
+		t.Fatalf("merged body = %q, want the cut inside SOUL.md", merged)
 	}
 }
 
@@ -254,5 +258,76 @@ func TestTruncateString(t *testing.T) {
 	t.Parallel()
 	if got := TruncateString("abcdef", 3); got != "abc\n…" {
 		t.Fatalf("got %q", got)
+	}
+	if got := TruncateString("abcdef", 0); got != "abcdef" {
+		t.Fatalf("0 must mean no limit, got %q", got)
+	}
+	if got := TruncateString("中文规则", 2); got != "中文\n…" {
+		t.Fatalf("rune cut = %q", got)
+	}
+	if got := TruncateString("中文规则", 4); got != "中文规则" {
+		t.Fatalf("exact fit = %q", got)
+	}
+}
+
+// TestRulesPerFileBudgetCountsRunes pins that a CJK file under 12000 runes is
+// injected whole even though it is far over 12000 bytes.
+func TestRulesPerFileBudgetCountsRunes(t *testing.T) {
+	home := t.TempDir()
+	wsRoot := t.TempDir()
+	proj := t.TempDir()
+	if err := os.Mkdir(filepath.Join(proj, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("中文规则。", 2000) // 10000 runes, 30000 bytes
+	if err := os.WriteFile(filepath.Join(proj, "FOREBRAIN.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: proj, VersionControlled: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPreHook(nil, home, wsRoot)
+	t.Chdir(proj)
+	if merged := p.loadRules(proj, hook.HookContext{}, true); merged != body {
+		t.Fatalf("merged body drifted: %d runes, want the whole 10000-rune file", utf8.RuneCountInString(merged))
+	}
+	sources := p.InstructionSources()
+	if len(sources) != 1 || sources[0].TruncatedTo != 0 || !sources[0].Loaded {
+		t.Fatalf("sources = %+v, want FOREBRAIN.md loaded whole", sources)
+	}
+}
+
+// TestRulesBodyLimitCountsRunes pins that the merged body's limit is measured
+// in Unicode code points and the cut never splits a character.
+func TestRulesBodyLimitCountsRunes(t *testing.T) {
+	home := t.TempDir()
+	wsRoot := t.TempDir()
+	proj := t.TempDir()
+	if err := os.Mkdir(filepath.Join(proj, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "FOREBRAIN.md"), []byte(strings.Repeat("中文规则。", 2000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: proj, VersionControlled: true}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &appcfg.Root{}
+	cfg.Agents.Defaults.ContextInject.MaxPreHookRulesChars = 100
+	p := NewPreHook(cfg, home, wsRoot)
+	t.Chdir(proj)
+	merged := p.loadRules(proj, hook.HookContext{}, true)
+	if !utf8.ValidString(merged) || strings.ContainsRune(merged, '\uFFFD') {
+		t.Fatalf("merged body is not clean UTF-8")
+	}
+	cut := strings.TrimSuffix(merged, "\n…")
+	if got := utf8.RuneCountInString(cut); got != 100 {
+		t.Fatalf("kept %d runes, want 100", got)
+	}
+	if got := len(cut); got != 300 {
+		t.Fatalf("kept %d bytes, want 300", got)
+	}
+	if sources := p.InstructionSources(); len(sources) != 1 || sources[0].TruncatedTo != 100 {
+		t.Fatalf("sources = %+v, want FOREBRAIN.md keeping 100 runes", sources)
 	}
 }
