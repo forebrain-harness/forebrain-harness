@@ -7680,3 +7680,150 @@ func TestSteerRunningSubagentLeavesTheSurfaceAlone(t *testing.T) {
 	}
 	ch.queue.Discard()
 }
+
+// subagentRecordRowFactory configures one provider/model twice — two rows that
+// differ by endpoint and key alone. The rows live in the install's model table
+// (cfg.LLMModels) because a definition's llm_providers list has its ids
+// rewritten to a content hash.
+func subagentRecordRowFactory() Factory {
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-1", Provider: "openai", Model: "gpt-4o", BaseURL: "http://one.test/v1", APIKey: "key-one"},
+		{ID: "row-2", Provider: "openai", Model: "gpt-4o", BaseURL: "http://two.test/v1", APIKey: "key-two"},
+	}}
+	return Factory{AgentName: "main", Owner: &Runner{Deps: &Deps{AppCfg: cfg}}}
+}
+
+// A continuation runs on the row its dispatch chose, not on the first row of
+// the pair: the record names the row, so rebuilding the override from it keeps
+// the second of two identical-looking rows.
+func TestSubagentRecordContextKeepsTheRowTheRecordNames(t *testing.T) {
+	t.Parallel()
+
+	record := agent.HistoryEntry{
+		SessionID: "conv-row", ModelProvider: "openai", Model: "gpt-4o", ModelID: "row-2",
+	}
+	pin, ok := SubagentModelOverrideFromContext(subagentRecordContext(context.Background(), subagentRecordRowFactory(), record))
+	if !ok {
+		t.Fatal("the record's model did not reach the continuation")
+	}
+	if pin.ModelID != "row-2" {
+		t.Fatalf("continuation runs on row %q, want row-2 — the row the dispatch chose", pin.ModelID)
+	}
+	if pin.Provider != "openai" || pin.Model != "gpt-4o" {
+		t.Fatalf("pin = %+v, want the recorded pair", pin)
+	}
+}
+
+// A record written before ids existed names the pair alone; the row it means is
+// resolved the way it always was — the first row of that pair.
+func TestSubagentRecordContextResolvesThePairOnlyWithoutARow(t *testing.T) {
+	t.Parallel()
+
+	record := agent.HistoryEntry{SessionID: "conv-row", ModelProvider: "openai", Model: "gpt-4o"}
+	pin, ok := SubagentModelOverrideFromContext(subagentRecordContext(context.Background(), subagentRecordRowFactory(), record))
+	if !ok {
+		t.Fatal("the record's model did not reach the continuation")
+	}
+	if pin.ModelID != "row-1" {
+		t.Fatalf("continuation runs on row %q, want row-1 — the pair's first row", pin.ModelID)
+	}
+}
+
+// newDispatchRowFixture is one agent whose model table holds one provider/model
+// twice, so a dispatch's record has a row to name.
+func newDispatchRowFixture(t *testing.T) (*Runner, *state.SessionStore) {
+	t.Helper()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	cfg := &appcfg.Root{
+		LLMModels: []appcfg.LLMModelConfig{
+			{ID: "row-1", Provider: "openai", Model: "gpt-4o", BaseURL: "http://one.test/v1", APIKey: "row-key"},
+			{ID: "row-2", Provider: "openai", Model: "gpt-4o", BaseURL: "http://two.test/v1", APIKey: "row-key"},
+		},
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true},
+		}},
+	}
+	runner := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: store}}
+	runner.SubagentExecutor = &fixedSubagentExecutor{output: "done"}
+	if err := runner.Load(); err != nil {
+		t.Fatalf("Runner.Load: %v", err)
+	}
+	return runner, store
+}
+
+// The row a dispatch runs on is written into the record, not only its
+// provider/model pair: a continuation rebuilt from the record has to keep
+// running on the row the conversation chose.
+func TestSubagentRecordKeepsTheRowTheConversationChose(t *testing.T) {
+	runner, store := newDispatchRowFixture(t)
+	ctx := context.Background()
+	if err := store.Ensure(ctx, "session-1", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	sel := state.SessionModelSelection{ModelID: "row-2", Provider: "openai", Model: "gpt-4o"}
+	if _, err := store.SaveSessionModelSelection(ctx, "session-1", sel); err != nil {
+		t.Fatal(err)
+	}
+	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+	baseCtx := WithSessionModelSelection(dispatchTestCtx(), PrimaryModelState{ModelID: sel.ModelID, Provider: sel.Provider, Model: sel.Model})
+	prep, _, err := dispatchSubagent(baseCtx, fac, subagentDispatch{
+		taskID:  "task-row",
+		task:    "look around",
+		subtype: "general-purpose",
+		resolve: agent.ResolvePublicSubtype,
+		run: func(context.Context, Factory, preparedSubagent) (string, error) {
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatchSubagent: %v", err)
+	}
+	if prep.entry.ModelID != "row-2" {
+		t.Fatalf("the dispatch recorded row %q, want row-2 — the row the conversation chose", prep.entry.ModelID)
+	}
+	record, ok, err := agent.GetMerged(fac.subagentScopeRoot(), agent.Query{SessionID: "session-1", TaskID: "task-row"})
+	if err != nil || !ok {
+		t.Fatalf("GetMerged: ok=%v err=%v", ok, err)
+	}
+	if record.ModelID != "row-2" {
+		t.Fatalf("the stored record carries row %q, want row-2", record.ModelID)
+	}
+}
+
+// A pin that names no configured row records no row: the pair is all there is,
+// and a reader of the record resolves it the way it always has.
+func TestSubagentRecordCarriesNoRowWhenThePinNamesNone(t *testing.T) {
+	runner, store := newDispatchRowFixture(t)
+	ctx := context.Background()
+	if err := store.Ensure(ctx, "session-1", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+	baseCtx := WithSubagentModelOverride(dispatchTestCtx(), SubagentModelOverride{
+		Provider: "openai", Model: "gpt-unlisted",
+	})
+	prep, _, err := dispatchSubagent(baseCtx, fac, subagentDispatch{
+		taskID:  "task-no-row",
+		task:    "look around",
+		subtype: "general-purpose",
+		resolve: agent.ResolvePublicSubtype,
+		run: func(context.Context, Factory, preparedSubagent) (string, error) {
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatchSubagent: %v", err)
+	}
+	if prep.entry.Model != "gpt-unlisted" || prep.entry.ModelProvider != "openai" {
+		t.Fatalf("the dispatch recorded %q/%q, want the pinned pair", prep.entry.ModelProvider, prep.entry.Model)
+	}
+	if prep.entry.ModelID != "" {
+		t.Fatalf("the dispatch recorded row %q, want none — the pin names no configured row", prep.entry.ModelID)
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/session"
@@ -919,4 +920,65 @@ type WorkDirObservation struct {
 	TaskContext   string
 	SessionID     string
 	Input         string
+}
+
+// planReviewRowConfig configures one provider/model twice — two rows that
+// differ by endpoint and key alone, the case a review request has to name a
+// row for. The rows come from the install's model table (cfg.LLMModels), the
+// one source whose ids are kept verbatim; ids written into a definition's
+// llm_providers list are rewritten to a content hash.
+func planReviewRowConfig() *appcfg.Root {
+	return &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-1", Provider: "openai", Model: "gpt-4o", BaseURL: "http://one.test/v1", APIKey: "key-one"},
+		{ID: "row-2", Provider: "openai", Model: "gpt-4o", BaseURL: "http://two.test/v1", APIKey: "key-two"},
+	}}
+}
+
+// TestPlanReviewRowIsTheRowTheSelectionNames is the review-path regression: the
+// user picked the second of two rows configured with one provider/model, so the
+// review runs on that row — its endpoint, its key — and not on the first row
+// the pair happens to name.
+func TestPlanReviewRowIsTheRowTheSelectionNames(t *testing.T) {
+	t.Parallel()
+
+	cfg := planReviewRowConfig()
+	modelID, err := planReviewModelRow(cfg, "main", turn.Model{ID: "row-2", Provider: "openai", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("planReviewModelRow: %v", err)
+	}
+	if modelID != "row-2" {
+		t.Fatalf("review runs on row %q, want row-2 — the row the user picked", modelID)
+	}
+}
+
+// TestPlanReviewRowFallsBackToThePairOnlyWithoutAnID pins the old shape: a
+// request recorded before ids existed names the pair only, and resolves to the
+// row that pair has always meant — the first one.
+func TestPlanReviewRowFallsBackToThePairOnlyWithoutAnID(t *testing.T) {
+	t.Parallel()
+
+	cfg := planReviewRowConfig()
+	modelID, err := planReviewModelRow(cfg, "main", turn.Model{Provider: "openai", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("planReviewModelRow: %v", err)
+	}
+	if modelID != "row-1" {
+		t.Fatalf("review runs on row %q, want row-1 — the first row of the pair", modelID)
+	}
+}
+
+// TestPlanReviewRowRefusesARowThatIsGone pins the failure: the row the user
+// picked is no longer configured, so the review says so instead of quietly
+// running the twin row of the same pair.
+func TestPlanReviewRowRefusesARowThatIsGone(t *testing.T) {
+	t.Parallel()
+
+	cfg := planReviewRowConfig()
+	_, err := planReviewModelRow(cfg, "main", turn.Model{ID: "row-gone", Provider: "openai", Model: "gpt-4o"})
+	if err == nil {
+		t.Fatal("a row that is not configured must fail the review, not fall back to its twin")
+	}
+	if !strings.Contains(err.Error(), "is not configured for this session") {
+		t.Fatalf("error = %q, want it to name the model as not configured", err)
+	}
 }

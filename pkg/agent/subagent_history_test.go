@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -118,5 +120,60 @@ func TestListMergedUnboundedMakesOldSubagentCardsReachable(t *testing.T) {
 	}
 	if got[0].TaskID != "task-299" || got[len(got)-1].TaskID != "task-000" {
 		t.Fatalf("unexpected endpoints: first=%q last=%q", got[0].TaskID, got[len(got)-1].TaskID)
+	}
+}
+
+// A dispatch-time model is remembered as the configured row it is, not only as
+// the provider/model pair: two rows of one pair are two rows, and a
+// continuation that re-resolved the pair would run on the first of them.
+func TestHistoryKeepsTheConfiguredRowOfADispatchTimeModel(t *testing.T) {
+	workspace := t.TempDir()
+	if err := AppendHistory(workspace, HistoryEntry{
+		TaskID:        "task-row",
+		RunID:         "child-row",
+		SessionID:     "session-row",
+		Task:          "review the plan",
+		Status:        StatusOK,
+		ModelProvider: "openai",
+		Model:         "gpt-4o",
+		ModelID:       "row-2",
+		UpdatedAt:     1,
+	}); err != nil {
+		t.Fatalf("AppendHistory: %v", err)
+	}
+	got, err := ListHistory(workspace, Query{SessionID: "session-row", Limit: 0})
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(got) != 1 || got[0].ModelID != "row-2" || got[0].Model != "gpt-4o" {
+		t.Fatalf("record = %+v, want the row id row-2 with its pair", got)
+	}
+	merged, err := ListMerged(workspace, Query{SessionID: "session-row", Limit: 0})
+	if err != nil {
+		t.Fatalf("ListMerged: %v", err)
+	}
+	if len(merged) != 1 || merged[0].ModelID != "row-2" {
+		t.Fatalf("merged = %+v, want the row id row-2", merged)
+	}
+}
+
+// A record written before ids existed carries the pair alone and still reads:
+// the row id is empty, which is what tells a reader to resolve the pair.
+func TestHistoryReadsARecordWrittenBeforeIds(t *testing.T) {
+	workspace := t.TempDir()
+	path := historyPath(workspace)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	line := `{"task_id":"task-old","run_id":"child-old","session_id":"session-old","task":"old","status":"ok","model_provider":"openai","model":"gpt-4o","updated_at":1}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatalf("write old record: %v", err)
+	}
+	got, err := ListHistory(workspace, Query{SessionID: "session-old", Limit: 0})
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(got) != 1 || got[0].Model != "gpt-4o" || got[0].ModelID != "" {
+		t.Fatalf("record = %+v, want the pair with no row id", got)
 	}
 }

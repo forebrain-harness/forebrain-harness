@@ -609,7 +609,7 @@ func (s *ChatSession) approvalGate() *turn.PendingApprovalGate {
 		ReviewModels: func(sessionID string) []turn.PlanReviewModelOption {
 			sel := s.sessionModelState(sessionID)
 			return turn.PlanReviewModelOptions(
-				modelConfigFromChatSession(s), chatSessionActiveAgentName(s), sel.Provider, sel.Model,
+				modelConfigFromChatSession(s), chatSessionActiveAgentName(s), sel.ModelID, sel.Provider, sel.Model,
 			)
 		},
 	}
@@ -905,8 +905,15 @@ func approvalDisplayRecord(actionID, actionKind string, decision turn.ToolApprov
 		return "", "", false
 	}
 	if review := decision.RequestPlanReview; review != nil {
-		return "approval-review:" + actionID + ":" +
-				strings.TrimSpace(review.Provider) + ":" + strings.TrimSpace(review.Model),
+		// The row the request names joins the chain when the view gave one, so
+		// asking twin rows of one provider/model for a review leaves two
+		// records rather than one; a selection recorded before ids existed
+		// keeps the chain it has always had.
+		id := "approval-review:" + actionID + ":"
+		if row := strings.TrimSpace(review.ID); row != "" {
+			id += row + ":"
+		}
+		return id + strings.TrimSpace(review.Provider) + ":" + strings.TrimSpace(review.Model),
 			approvalDisplayDecisionReviewRequested, true
 	}
 	status := approvalDecisionActionStatus(actionKind, decision)
@@ -1104,6 +1111,7 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 		return
 	}
 	model := turn.Model{
+		ID:       strings.TrimSpace(selection.ID),
 		Provider: strings.TrimSpace(selection.Provider),
 		Model:    strings.TrimSpace(selection.Model),
 	}

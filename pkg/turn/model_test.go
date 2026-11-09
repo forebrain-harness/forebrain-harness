@@ -994,3 +994,35 @@ func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
 	}
 	return appcfg.ParseRootYAML(body)
 }
+
+// A review request's identity is the configured row it names. The pair is
+// always required and must agree with the row — a request that names no model
+// is not a request — and the id, when it carries one, narrows that pair to the
+// exact row, so two rows of one provider/model stay apart.
+func TestPlanReviewSelectionMatchesTheRowItNames(t *testing.T) {
+	first := PlanReviewModelOption{ID: "row-1", Provider: "openai", Model: "gpt-4o"}
+	second := PlanReviewModelOption{ID: "row-2", Provider: "openai", Model: "gpt-4o"}
+
+	require.True(t, second.MatchesSelection("row-2", "openai", "gpt-4o"))
+	require.False(t, first.MatchesSelection("row-2", "openai", "gpt-4o"), "the twin row is not the row the request named")
+	require.False(t, second.MatchesSelection("row-2", "openai", "gpt-4o-mini"), "a row only answers for its own pair")
+
+	// A client that predates ids sends the pair alone: both rows answer, and
+	// the first one serves it, the way it always did.
+	require.True(t, first.MatchesSelection("", "openai", "gpt-4o"))
+	require.True(t, second.MatchesSelection("", "openai", "gpt-4o"))
+
+	// An id and a pair that disagree name no configured row at all.
+	require.False(t, first.MatchesSelection("row-2", "openai", "gpt-4o-mini"))
+	require.False(t, second.MatchesSelection("row-1", "openai", "gpt-4o-mini"))
+
+	// A request with no model is not a request: the id alone does not match.
+	require.False(t, first.MatchesSelection("row-1", "", ""))
+	require.False(t, first.MatchesSelection("row-1", "openai", ""))
+	require.False(t, first.MatchesSelection("row-1", "", "gpt-4o"))
+
+	// An offer built from a config that carries no ids cannot answer an id.
+	anonymous := PlanReviewModelOption{Provider: "openai", Model: "gpt-4o"}
+	require.True(t, anonymous.MatchesSelection("", "openai", "gpt-4o"))
+	require.False(t, anonymous.MatchesSelection("row-1", "openai", "gpt-4o"))
+}

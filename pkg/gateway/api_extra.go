@@ -4497,7 +4497,9 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 	models := make([]planReviewModelWire, 0, len(req.PlanReviewModels))
 	for _, option := range req.PlanReviewModels {
 		models = append(models, planReviewModelWire{
+			ID:       option.ID,
 			Provider: option.Provider, Model: option.Model, Current: option.Current,
+			Endpoint: option.Endpoint,
 		})
 	}
 	reviews := make([]planReviewNoteWire, 0, len(req.PlanReviews))
@@ -4536,9 +4538,14 @@ type sessionApprovalRequestWire struct {
 }
 
 type planReviewModelWire struct {
+	// ID names the configured row this offer is, and Endpoint where its
+	// requests go: two rows of one provider/model differ by these alone, so a
+	// card that shows neither offers two identical buttons.
+	ID       string `json:"id,omitempty"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	Current  bool   `json:"current,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 type planReviewNoteWire struct {
@@ -4574,6 +4581,9 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var body struct {
+		// ModelID names the configured row the user picked; a client that
+		// predates ids sends the pair alone, which resolves to its first row.
+		ModelID  string `json:"model_id"`
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 	}
@@ -4608,10 +4618,10 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 	}
 	// The model must be one the session is configured with: a reviewer has to
 	// run on credentials the session already has.
-	model := turn.Model{Provider: strings.TrimSpace(body.Provider), Model: strings.TrimSpace(body.Model)}
+	model := turn.Model{ID: strings.TrimSpace(body.ModelID), Provider: strings.TrimSpace(body.Provider), Model: strings.TrimSpace(body.Model)}
 	allowed := false
 	for _, option := range s.approvalGate().ReviewModels(sid) {
-		if option.MatchesSelection(model.Provider, model.Model) {
+		if option.MatchesSelection(model.ID, model.Provider, model.Model) {
 			allowed = true
 			break
 		}

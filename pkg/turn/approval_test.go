@@ -741,28 +741,38 @@ func TestPendingExitPlanRequestCarriesPlanReviewsAndModels(t *testing.T) {
 // whole URL. Two rows of one provider/model are two offers, each naming its
 // own endpoint.
 func TestPlanReviewModelOptionsCarryEachRowsEndpoint(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{ID: "row-1", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://one.test"},
-			{ID: "row-2", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://two.test", APIPath: "/beta/chat/completions"},
-			{ID: "row-3", Provider: "openai", Model: "gpt-5.1", BaseURL: "http://three.test/v1", URLVerbatim: true},
-		}},
-	}}}
-	options := PlanReviewModelOptions(cfg, "main", "deepseek", "deepseek-v4-flash")
+	// The rows come from the install's model table, the one source whose ids
+	// are kept verbatim; an id written into a definition's llm_providers list
+	// is rewritten to a content hash.
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-1", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://one.test"},
+		{ID: "row-2", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://two.test", APIPath: "/beta/chat/completions"},
+		{ID: "row-3", Provider: "openai", Model: "gpt-5.1", BaseURL: "http://three.test/v1", URLVerbatim: true},
+	}}
+	options := PlanReviewModelOptions(cfg, "main", "", "deepseek", "deepseek-v4-flash")
 	require.Len(t, options, 3)
+	require.Equal(t, "row-1", options[0].ID)
 	require.Equal(t, "http://one.test/chat/completions", options[0].Endpoint)
 	require.Equal(t, "/chat/completions", options[0].EndpointTail)
 	require.True(t, options[0].Current)
+	require.Equal(t, "row-2", options[1].ID)
 	require.Equal(t, "http://two.test/beta/chat/completions", options[1].Endpoint)
 	require.Equal(t, "/beta/chat/completions", options[1].EndpointTail)
-	// The mark follows the reviewer's identity — the provider/model pair — so
-	// both twin rows carry it, exactly as the pair is what a review request
-	// names.
+	// A selection that names no row — one recorded before ids existed — is a
+	// statement about the pair, so both twin rows carry the mark, exactly as
+	// they always did.
 	require.True(t, options[1].Current)
 	// A 「自定义协议」 row sends to its base url as stored: its own endpoint, and
 	// no path to keep.
+	require.Equal(t, "row-3", options[2].ID)
 	require.Equal(t, "http://three.test/v1", options[2].Endpoint)
 	require.Equal(t, "", options[2].EndpointTail)
+
+	// A selection that names a row marks that row alone: the conversation runs
+	// on row-2, so row-1 — same provider/model — is not what it is on.
+	picked := PlanReviewModelOptions(cfg, "main", "row-2", "deepseek", "deepseek-v4-flash")
+	require.False(t, picked[0].Current, "the twin row the conversation is not on must not be marked")
+	require.True(t, picked[1].Current, "the row the conversation runs on is the marked one")
 }
 
 // TestPendingExitPlanRequestResolvesOnlyItsOwnSessionPlan is the gate-layer
@@ -1274,4 +1284,52 @@ func TestRunPlanReviewHandsTheRequestToTheReviewer(t *testing.T) {
 	require.Contains(t, reviewer.task, "Add S3 sync to the skill installer.")
 	require.Contains(t, reviewer.plan, "# Plan")
 	require.Equal(t, state.PlanPathForSession(stateRoot, "proj", "s1"), reviewer.planPath)
+}
+
+// The row a review runs on is part of its record, and it survives the round
+// trip: both events name it, and reading the conversation's reviews back says
+// which row answered — the pair alone cannot, when it is configured twice.
+func TestRunPlanReviewRecordsTheRowItRanOn(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	stateRoot := t.TempDir()
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", sessionID, "# Plan"))
+
+	var events []event.RunEvent
+	require.NoError(t, RunPlanReview(ctx, PlanReviewRun{
+		ActionID: "act-row", Model: Model{ID: "row-2", Provider: "openai", Model: "gpt-4o"},
+		SessionID: sessionID, StateRoot: stateRoot, ProjectKey: "proj",
+		Reviewer: &recordingReviewer{},
+		Publish: func(ctx context.Context, evt event.RunEvent) error {
+			events = append(events, evt)
+			// The bus writes the event where every reader of the conversation
+			// finds it; this stub is that write.
+			_, err := runs.AppendSessionEvent(ctx, state.SessionEvent{
+				ID: evt.ID, SessionID: sessionID, Type: evt.Type, Payload: evt.Payload,
+			})
+			return err
+		},
+	}))
+
+	var started event.PlanReviewStartedPayload
+	var reviewed event.PlanReviewedPayload
+	for _, evt := range events {
+		switch evt.Type {
+		case event.RunEventPlanReviewStarted:
+			require.NoError(t, json.Unmarshal(evt.Payload, &started))
+		case event.RunEventPlanReviewed:
+			require.NoError(t, json.Unmarshal(evt.Payload, &reviewed))
+		}
+	}
+	require.Equal(t, "row-2", started.ModelID, "the opening event names the row the review runs on")
+	require.Equal(t, "row-2", reviewed.ModelID)
+	require.Equal(t, started.ReviewID, reviewed.ReviewID)
+	require.Equal(t, planReviewOutcomeDone, reviewed.Outcome)
+
+	results, err := PlanReviewsForAction(ctx, runs, sessionID, "act-row")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, Model{ID: "row-2", Provider: "openai", Model: "gpt-4o"}, results[0].Model)
 }

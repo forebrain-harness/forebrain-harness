@@ -51,6 +51,10 @@ type HistoryEntry struct {
 	// conversation's model.
 	ModelProvider string `json:"model_provider,omitempty"`
 	Model         string `json:"model,omitempty"`
+	// ModelID is the configured row the dispatch-time model is; empty for a
+	// record written before ids existed, which continuation resolves by the
+	// pair, the way a row written before ids is read.
+	ModelID string `json:"model_id,omitempty"`
 	// ReasoningEffort is the effort that model runs at, when the configuration
 	// pinned one; empty lets the model's own configuration decide.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`

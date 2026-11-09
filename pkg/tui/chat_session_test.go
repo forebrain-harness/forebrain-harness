@@ -10766,9 +10766,9 @@ func exitPlanReviewRequest(t *testing.T, plan string) turn.ToolApprovalRequest {
 		PermissionToolName: "exit_plan_mode",
 		PlanFilePath:       planFile,
 		PlanReviewModels: []turn.PlanReviewModelOption{
-			{Provider: "anthropic", Model: "claude-opus-4-1", Current: true,
+			{ID: "row-a", Provider: "anthropic", Model: "claude-opus-4-1", Current: true,
 				Endpoint: "https://api.anthropic.com/v1/messages", EndpointTail: "/v1/messages"},
-			{Provider: "openai", Model: "gpt-5.1",
+			{ID: "row-b", Provider: "openai", Model: "gpt-5.1",
 				Endpoint: "https://api.openai.com/v1/chat/completions", EndpointTail: "/v1/chat/completions"},
 		},
 	}
@@ -10821,6 +10821,37 @@ func TestExitPlanOverlayPicksReviewerWithoutDecidingApproval(t *testing.T) {
 	}
 	if got := *decision.RequestPlanReview; got.Provider != "openai" || got.Model != "gpt-5.1" {
 		t.Fatalf("selected reviewer=%#v", got)
+	}
+	if got := decision.RequestPlanReview.ID; got != "row-b" {
+		t.Fatalf("selected row=%q, want the id the picker drew", got)
+	}
+}
+
+// The picker hands over the row it was on, not the first row of the pair it
+// shares: two rows of one provider/model are two reviewers, and the row is what
+// decides which endpoint and key serve the review.
+func TestExitPlanReviewPickerPassesTheRowItChose(t *testing.T) {
+	req := exitPlanReviewRequest(t, "# Plan\n")
+	req.PlanReviewModels = []turn.PlanReviewModelOption{
+		{ID: "row-1", Provider: "openai", Model: "gpt-4o",
+			Endpoint: "http://one.test/v1", EndpointTail: "/v1"},
+		{ID: "row-2", Provider: "openai", Model: "gpt-4o",
+			Endpoint: "http://two.test/v1", EndpointTail: "/v1"},
+	}
+	// "4" selects the review row, Enter opens the picker on the first row, "j"
+	// moves to the second, Enter requests the review from that one.
+	decision, err := runOverlayWithKeys(t, req, []byte{'4', '\r', 'j', '\r'})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.RequestPlanReview == nil {
+		t.Fatalf("expected a plan review request, got %#v", decision)
+	}
+	if got := decision.RequestPlanReview.ID; got != "row-2" {
+		t.Fatalf("selected row=%q, want row-2 — the row the cursor was on", got)
+	}
+	if got := decision.RequestPlanReview.Endpoint; got != "http://two.test/v1" {
+		t.Fatalf("selected endpoint=%q, want the second row's", got)
 	}
 }
 
@@ -12956,7 +12987,7 @@ func TestPlanReviewAutoDeliversAndALateUserDenyConverges(t *testing.T) {
 	cs, actions, actionID := newPlanReviewSession(t, reviewer)
 
 	err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
-		RequestPlanReview: &turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5.1"},
+		RequestPlanReview: &turn.PlanReviewModelOption{ID: "row-2", Provider: "openai", Model: "gpt-5.1"},
 	})
 	if err != nil {
 		t.Fatalf("requesting a review failed: %v", err)
@@ -12966,6 +12997,9 @@ func TestPlanReviewAutoDeliversAndALateUserDenyConverges(t *testing.T) {
 	}
 	if reviewer.seen.Model.Model != "gpt-5.1" {
 		t.Fatalf("reviewer model = %#v", reviewer.seen.Model)
+	}
+	if reviewer.seen.Model.ID != "row-2" {
+		t.Fatalf("reviewer row = %q, want the row the picker chose", reviewer.seen.Model.ID)
 	}
 	act, err := actions.Get(ctx, actionID)
 	if err != nil {
@@ -13567,7 +13601,9 @@ func TestPlanReviewIsOfferedRegardlessOfSubagentSwitch(t *testing.T) {
 // passes, gathered for the tests that used to call the surface's own method.
 func planReviewOptionsFor(cs *ChatSession) []turn.PlanReviewModelOption {
 	provider, model := run.PrimaryModel(cs.runner())
-	return turn.PlanReviewModelOptions(modelConfigFromChatSession(cs), chatSessionActiveAgentName(cs), provider, model)
+	// No row id: these tests read the offer list by provider/model, the way a
+	// selection recorded before row ids existed does.
+	return turn.PlanReviewModelOptions(modelConfigFromChatSession(cs), chatSessionActiveAgentName(cs), "", provider, model)
 }
 
 // runSharedReview drives one review through turn.RunPlanReview with the
@@ -30003,6 +30039,32 @@ func TestPlanReviewRequestIsRecordedAsItselfNotAsAResolution(t *testing.T) {
 	if resolved != string(state.ActionApproved) {
 		t.Fatalf("resolution decision = %q", resolved)
 	}
+}
+
+// Two rows of one provider/model are two reviewers, so asking each of them for
+// a review leaves two records rather than one; a selection recorded before ids
+// existed keeps the id it has always had.
+func TestPlanReviewRequestRecordNamesTheRow(t *testing.T) {
+	const actionID = "act-1"
+	first := turn.PlanReviewModelOption{ID: "row-1", Provider: "openai", Model: "gpt-5"}
+	second := turn.PlanReviewModelOption{ID: "row-2", Provider: "openai", Model: "gpt-5"}
+
+	firstID, _, ok := approvalDisplayRecord(actionID, "exit_plan_mode", turn.ToolApprovalDecision{RequestPlanReview: &first})
+	require.True(t, ok)
+	secondID, _, ok := approvalDisplayRecord(actionID, "exit_plan_mode", turn.ToolApprovalDecision{RequestPlanReview: &second})
+	require.True(t, ok)
+	if firstID == secondID {
+		t.Fatalf("the twin rows share one record id: %q", firstID)
+	}
+	require.Contains(t, firstID, "row-1")
+	require.Contains(t, secondID, "row-2")
+
+	// A selection with no row id — an approval replayed from before ids — keeps
+	// the chain it has always had.
+	anonymous := turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5"}
+	anonymousID, _, ok := approvalDisplayRecord(actionID, "exit_plan_mode", turn.ToolApprovalDecision{RequestPlanReview: &anonymous})
+	require.True(t, ok)
+	require.Equal(t, "approval-review:"+actionID+":openai:gpt-5", anonymousID)
 }
 
 // The record is written by the same function that prints the line, so "shown

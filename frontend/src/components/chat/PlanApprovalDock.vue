@@ -53,14 +53,17 @@
         <span class="cap">{{ t('chat.exitPlanReviewChoose') }}</span>
         <button
           v-for="model in reviewModels"
-          :key="`${action.id}-model-${model.provider}-${model.model}`"
+          :key="`${action.id}-model-${model.id || model.provider + '/' + model.model}-${model.provider}-${model.model}`"
           type="button"
           class="xp-model"
           :disabled="submitting"
           data-testid="plan-review-model"
           @click="requestReview(action, model)"
         >
-          <span class="m">{{ modelLabel(model) }}</span>
+          <span class="ml">
+            <span class="m">{{ modelLabel(model) }}</span>
+            <span v-if="model.endpoint" class="ep">{{ model.endpoint }}</span>
+          </span>
           <span v-if="model.current" class="cur">{{ t('chat.exitPlanReviewCurrent') }}</span>
         </button>
       </div>
@@ -561,12 +564,31 @@ async function onEsc() {
   background: var(--forebrain-bg-alt);
 }
 
+/* The name and, under it, where that row's requests go: two rows of one
+   provider/model are one name twice, and the endpoint is what tells them
+   apart. The current chip stays on its own line at the right. */
+.xp-model .ml {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .xp-model .m {
   font-family: var(--forebrain-mono-font);
   font-size: 12px;
 }
 
+.xp-model .ep {
+  font-family: var(--forebrain-mono-font);
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .xp-model .cur {
+  flex: none;
   font-size: 11.5px;
   color: var(--forebrain-muted-text);
 }

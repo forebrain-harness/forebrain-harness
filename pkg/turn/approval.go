@@ -894,6 +894,9 @@ const (
 
 // Model identifies the reviewing model.
 type Model struct {
+	// ID is the configured row this reviewer is (fb_llm_models id); empty for
+	// a pin recorded before ids existed, which resolves by provider+model.
+	ID       string
 	Provider string
 	Model    string
 }
@@ -1166,10 +1169,10 @@ func Truncate(s string, max int) string {
 // happens only when there is no configured model to ask.
 //
 // Each option carries the endpoint its row's requests go to — the picker's
-// description column, so two rows of one provider/model stay apart. It is
-// display only: a reviewer's identity is the provider/model pair
-// MatchesSelection compares, not the row its requests happen to land on.
-func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentProvider, currentModel string) []PlanReviewModelOption {
+// description column, so two rows of one provider/model stay apart — and the
+// row id, which is the reviewer's identity: a review request names the row the
+// user picked, and that row's endpoint and key serve it.
+func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvider, currentModel string) []PlanReviewModelOption {
 	entries := ModelChoices(cfg, agentName)
 	if len(entries) == 0 {
 		return nil
@@ -1193,11 +1196,22 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentProvider, curren
 			continue
 		}
 		seen[key] = struct{}{}
+		// The mark follows the row the conversation runs on, not the pair: two
+		// rows of one provider/model are two different rows in the list. A
+		// selection recorded before ids existed names the pair only, and then
+		// every row of that pair is marked, the way it always was.
+		current := false
+		if id, want := strings.TrimSpace(entry.ID), strings.TrimSpace(currentID); id != "" && want != "" {
+			current = strings.EqualFold(id, want)
+		} else {
+			current = strings.EqualFold(provider, strings.TrimSpace(currentProvider)) &&
+				strings.EqualFold(model, strings.TrimSpace(currentModel))
+		}
 		out = append(out, PlanReviewModelOption{
-			Provider: provider,
-			Model:    model,
-			Current: strings.EqualFold(provider, strings.TrimSpace(currentProvider)) &&
-				strings.EqualFold(model, strings.TrimSpace(currentModel)),
+			ID:           strings.TrimSpace(entry.ID),
+			Provider:     provider,
+			Model:        model,
+			Current:      current,
 			Endpoint:     ModelEndpointLabel(entry.BaseURL, entry.APIPath, entry.URLVerbatim),
 			EndpointTail: endpointTail(entry),
 		})
@@ -1248,6 +1262,7 @@ func PlanReviewsForAction(ctx context.Context, log PlanReviewLog, sessionID, act
 		}
 		out = append(out, PlanReviewResult{
 			Model: Model{
+				ID:       strings.TrimSpace(payload.ModelID),
 				Provider: strings.TrimSpace(payload.Provider),
 				Model:    strings.TrimSpace(payload.Model),
 			},
@@ -1612,6 +1627,7 @@ type PlanReviewRun struct {
 // reported through the closing event.
 func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 	model := Model{
+		ID:       strings.TrimSpace(in.Model.ID),
 		Provider: strings.TrimSpace(in.Model.Provider),
 		Model:    strings.TrimSpace(in.Model.Model),
 	}
@@ -1628,12 +1644,12 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 	publish(event.NewRunEvent("plan-review:"+reviewID+":started", runID, sessionID,
 		event.RunEventPlanReviewStarted, event.PlanReviewStartedPayload{
 			ActionID: actionID, ReviewID: reviewID,
-			Provider: model.Provider, Model: model.Model,
+			ModelID: model.ID, Provider: model.Provider, Model: model.Model,
 		}, time.Now()))
 	finish := func(outcome string, err error, text string, duration time.Duration) {
 		reviewed := event.PlanReviewedPayload{
 			ActionID: actionID, ReviewID: reviewID,
-			Provider: model.Provider, Model: model.Model,
+			ModelID: model.ID, Provider: model.Provider, Model: model.Model,
 			Text: text, DurationMs: duration.Milliseconds(), Outcome: outcome,
 		}
 		if err != nil && outcome == planReviewOutcomeFailed {

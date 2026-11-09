@@ -597,24 +597,44 @@ type ToolApprovalRequest struct {
 }
 
 type PlanReviewModelOption struct {
+	// ID is the configured row this offer is — the fb_llm_models id /model's
+	// picker also uses. Two rows of one provider/model differ by it alone,
+	// so it is the reviewer's identity; empty only for an offer built from a
+	// config that carries no ids.
+	ID       string
 	Provider string
 	Model    string
 	Current  bool
 	// Endpoint is where this reviewer's requests go — the picker's second
 	// column; EndpointTail is the part a narrow column must keep, the api
 	// path (empty for a url-verbatim row). They are shown, never compared:
-	// a reviewer's identity is its provider/model pair.
+	// a reviewer's identity is its row, ID.
 	Endpoint     string
 	EndpointTail string
 }
 
-// MatchesSelection reports whether this option is the provider/model pair a
-// review request named — the one comparison a surface validates a requested
-// reviewer with, shared so the web cannot accept a model the terminal would
-// refuse.
-func (o PlanReviewModelOption) MatchesSelection(provider, model string) bool {
-	return strings.EqualFold(strings.TrimSpace(o.Provider), strings.TrimSpace(provider)) &&
-		strings.EqualFold(strings.TrimSpace(o.Model), strings.TrimSpace(model))
+// MatchesSelection reports whether this option is what a review request
+// named: the pair is always required and must match — a request that names no
+// model is not a request — and an id, when the request carries one, narrows the
+// pair to the exact row. Two rows of one provider/model differ only by that id;
+// a request without one (a client that predates ids) matches by the pair and
+// then resolves to the first row, the way it always has.
+//
+// It is the one comparison a surface validates a requested reviewer with,
+// shared so the web cannot accept a model the terminal would refuse.
+func (o PlanReviewModelOption) MatchesSelection(id, provider, model string) bool {
+	provider, model = strings.TrimSpace(provider), strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(o.Provider), provider) ||
+		!strings.EqualFold(strings.TrimSpace(o.Model), model) {
+		return false
+	}
+	if want := strings.TrimSpace(id); want != "" {
+		return o.ID != "" && strings.EqualFold(strings.TrimSpace(o.ID), want)
+	}
+	return true
 }
 
 type PlanReviewNote struct {

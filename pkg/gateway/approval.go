@@ -55,7 +55,7 @@ func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *sta
 		if agentName == "" {
 			agentName = "main"
 		}
-		return turn.PlanReviewModelOptions(cfg, agentName, sel.Provider, sel.Model)
+		return turn.PlanReviewModelOptions(cfg, agentName, sel.ModelID, sel.Provider, sel.Model)
 	}
 	return gate
 }

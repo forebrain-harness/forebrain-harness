@@ -192,15 +192,18 @@ test('asking for a review hands it to the planner: the card closes silently', as
   await expect(card).toBeVisible()
 
   // Ask the configured model to review; the request itself must name the
-  // pending approval it is about.
+  // pending approval it is about, and the row the click picked — two rows of
+  // one provider/model are two reviewers, and the id is what tells them apart.
   await page.locator('[data-testid="exit-plan-ask-review"]').click()
   const model = page.locator('[data-testid="plan-review-model"]').first()
   await expect(model).toBeVisible()
+  // The row shows where its requests go, so twin rows are telling apart.
+  await expect(model).toContainText('http')
   const request = page.waitForRequest((req) => req.url().includes('/plan-review') && req.method() === 'POST')
   await model.click()
   const reviewRequest = await request
   expect(reviewRequest.url()).toContain('act-e2e-exitplan-live')
-  expect(await reviewRequest.postDataJSON()).toMatchObject({ model: expect.any(String) })
+  expect(await reviewRequest.postDataJSON()).toMatchObject({ model: expect.any(String), model_id: expect.any(String) })
 
   // The review runs as its own subagent on the conversation's timeline…
   await expect(page.locator('[data-testid="subagent-call-card"]').first()).toBeVisible({ timeout: 120_000 })

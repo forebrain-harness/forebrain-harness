@@ -428,14 +428,10 @@ func (r *PlanReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanR
 	if strings.TrimSpace(req.Plan) == "" {
 		return turn.PlanReviewResult{}, turn.ErrNoPlan
 	}
-	// Fail before the run starts when the chosen model cannot be built, rather
-	// than opening a roster row for a run that dies on its first LLM call.
-	if _, err := run.ConfiguredModelClient(r.Config, r.AgentName, r.Model.Provider, r.Model.Model); err != nil {
+	modelID, err := planReviewModelRow(r.Config, r.AgentName, r.Model)
+	if err != nil {
 		return turn.PlanReviewResult{}, err
 	}
-	// The reviewer model is chosen as a pair; the row it means is resolved
-	// here so a twin row of the same pair cannot serve the review instead.
-	modelID := run.ModelIDForAgentModel(r.Config, r.AgentName, r.Model.Provider, r.Model.Model)
 	override := run.SubagentModelOverride{ModelID: modelID, Provider: r.Model.Provider, Model: r.Model.Model}
 	task := turn.BuildPrompt(req)
 	// The images the user attached reach the reviewer the way they reach the
@@ -459,4 +455,21 @@ func (r *PlanReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanR
 		return turn.PlanReviewResult{}, fmt.Errorf("%s returned an empty review", r.Model.Display())
 	}
 	return turn.PlanReviewResult{Model: r.Model, Text: text, Duration: time.Since(started)}, nil
+}
+
+// planReviewModelRow names the configured row one review runs on: the row the
+// user picked, or — for a request that carries no id (an approval recorded or
+// a client built before ids existed) — the row its provider/model pair has
+// always resolved to. The row is checked here, before the run opens, so a row
+// that is no longer configured fails the review instead of quietly running a
+// twin.
+func planReviewModelRow(cfg *appcfg.Root, agentName string, model turn.Model) (string, error) {
+	modelID := strings.TrimSpace(model.ID)
+	if modelID == "" {
+		modelID = run.ModelIDForAgentModel(cfg, agentName, model.Provider, model.Model)
+	}
+	if _, err := run.ConfiguredModelClientWithEffort(cfg, agentName, modelID, model.Provider, model.Model, ""); err != nil {
+		return "", err
+	}
+	return modelID, nil
 }

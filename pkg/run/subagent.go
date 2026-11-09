@@ -1837,6 +1837,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	if pin.valid() {
 		entry.ModelProvider = strings.TrimSpace(pin.Provider)
 		entry.Model = strings.TrimSpace(pin.Model)
+		entry.ModelID = strings.TrimSpace(pin.ModelID)
 		entry.ReasoningEffort = strings.TrimSpace(pin.Effort)
 		cctx = WithSubagentModelOverride(cctx, pin)
 	}
@@ -2231,12 +2232,16 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 	}
 	// A dispatch-time model choice is a property of the record now: the
 	// continuation runs on the same model the user picked for it, not on the
-	// conversation's default. The record carries the pair, not the row, so the
-	// row id is resolved here; a pair that names none leaves readers on the
-	// pair, the way a row written before ids is read.
+	// conversation's default. The record names the row the dispatch chose; only
+	// a record written before ids existed carries the pair alone, and that pair
+	// is resolved the way it always was.
 	if strings.TrimSpace(record.Model) != "" {
+		modelID := strings.TrimSpace(record.ModelID)
+		if modelID == "" {
+			modelID = ModelIDForAgentModel(fac.appConfig(), fac.AgentName, record.ModelProvider, record.Model)
+		}
 		hostCtx = WithSubagentModelOverride(hostCtx, SubagentModelOverride{
-			ModelID:  ModelIDForAgentModel(fac.appConfig(), fac.AgentName, record.ModelProvider, record.Model),
+			ModelID:  modelID,
 			Provider: record.ModelProvider, Model: record.Model, Effort: record.ReasoningEffort,
 		})
 	}

@@ -594,6 +594,10 @@ type SubagentEndedPayload struct {
 type PlanReviewStartedPayload struct {
 	ActionID string `json:"action_id"`
 	ReviewID string `json:"review_id"`
+	// ModelID is the configured row (fb_llm_models id) the review runs on —
+	// the user picked that row, so two rows of one provider/model are two
+	// reviewers. Empty for a review recorded before ids were carried.
+	ModelID  string `json:"model_id,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model"`
 }
@@ -603,6 +607,7 @@ type PlanReviewStartedPayload struct {
 type PlanReviewedPayload struct {
 	ActionID   string `json:"action_id"`
 	ReviewID   string `json:"review_id"`
+	ModelID    string `json:"model_id,omitempty"`
 	Provider   string `json:"provider,omitempty"`
 	Model      string `json:"model"`
 	Text       string `json:"text,omitempty"`

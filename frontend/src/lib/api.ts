@@ -1600,9 +1600,15 @@ export interface ActionApprovalBody {
 
 /** One model a pending exit-plan approval may be handed to for a review. */
 export interface PlanReviewModelOption {
+  /** The configured row this offer is; two rows of one provider/model differ
+   * by it alone, and it is what the request names back. */
+  id?: string
   provider: string
   model: string
   current?: boolean
+  /** Where this row's requests go — shown under the name so two rows of one
+   * provider/model are telling apart; never compared. */
+  endpoint?: string
 }
 
 /** One completed review a pending exit-plan approval already collected. */
@@ -3665,7 +3671,7 @@ export const forebrainApi = {
 
   /** Ask one configured model to review a pending exit-plan approval. The
    * review runs in the background; its events are its progress. */
-  actionPlanReview(id: string, body: { provider: string; model: string }) {
+  actionPlanReview(id: string, body: { provider: string; model: string; modelId?: string }) {
     return gatewayFetch(`/api/actions/${encodeURIComponent(id)}/plan-review`, {
       method: 'POST',
       headers: {

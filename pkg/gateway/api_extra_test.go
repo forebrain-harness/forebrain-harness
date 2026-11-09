@@ -5307,9 +5307,12 @@ func exitPlanServer(t *testing.T, cfg *appcfg.Root) (*Server, *state.RunStore, *
 // overlay: for a parked exit-plan gate it carries the plan itself, the models
 // a review may be handed to, and nothing when no gate is open.
 func TestSessionApprovalRequestCarriesTheExitPlanCard(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test"}}},
-	}}}
+	// The rows come from the install's model table, the one source whose ids
+	// are kept verbatim; an id written into a definition's llm_providers list
+	// is rewritten to a content hash.
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-1", Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://one.test/v1"},
+	}}
 	s, runs, _, actionID, _ := exitPlanServer(t, cfg)
 	// One completed review on the conversation: the card shows it above the
 	// choices, in the wire's own units and field names.
@@ -5332,9 +5335,11 @@ func TestSessionApprovalRequestCarriesTheExitPlanCard(t *testing.T) {
 		Kind             string `json:"kind"`
 		PlanText         string `json:"plan_text"`
 		PlanReviewModels []struct {
+			ID       string `json:"id"`
 			Provider string `json:"provider"`
 			Model    string `json:"model"`
 			Current  bool   `json:"current"`
+			Endpoint string `json:"endpoint"`
 		} `json:"plan_review_models"`
 		PlanReviews []struct {
 			Provider   string `json:"provider"`
@@ -5349,6 +5354,10 @@ func TestSessionApprovalRequestCarriesTheExitPlanCard(t *testing.T) {
 	require.Contains(t, out.PlanText, "1. Ship it.")
 	require.Len(t, out.PlanReviewModels, 1)
 	require.Equal(t, "gpt-5.1", out.PlanReviewModels[0].Model)
+	// The card needs the row and its endpoint: two rows of one provider/model
+	// are one name twice, and these are what tell them apart.
+	require.Equal(t, "row-1", out.PlanReviewModels[0].ID)
+	require.Equal(t, "http://one.test/v1/chat/completions", out.PlanReviewModels[0].Endpoint)
 	require.True(t, out.PlanReviewModels[0].Current, "the model in force is the one marked current")
 	require.Len(t, out.PlanReviews, 1)
 	require.Equal(t, "gpt-5.1", out.PlanReviews[0].Model)
@@ -5395,6 +5404,75 @@ func TestActionPlanReviewValidatesBeforeStarting(t *testing.T) {
 		return err == nil && len(reviewed) == 1
 	}, 5*time.Second, 50*time.Millisecond, "the review must close itself on the conversation")
 	require.Contains(t, string(reviewed[0].Payload), actionID)
+}
+
+// twinRowPlanReviewConfig configures one provider/model twice: the case a
+// review request has to name a row for. The rows come from the install's model
+// table, the one source whose ids are kept verbatim.
+func twinRowPlanReviewConfig() *appcfg.Root {
+	return &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-1", Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://one.test/v1"},
+		{ID: "row-2", Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://two.test/v1"},
+	}}
+}
+
+// The row a review request names is the row the review runs on: the request
+// carries it, the surface accepts it, and the review records it — so two rows
+// of one provider/model are two reviewers all the way down.
+func TestPlanReviewAcceptsTheRowTheBodyNames(t *testing.T) {
+	ctx := context.Background()
+	s, runs, _, actionID, _ := exitPlanServer(t, twinRowPlanReviewConfig())
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1", "model_id": "row-2"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var reviewed []state.SessionEvent
+	require.Eventually(t, func() bool {
+		var err error
+		reviewed, err = runs.ListSessionEventsOfType(ctx, "s1", event.RunEventPlanReviewed, 0)
+		return err == nil && len(reviewed) == 1
+	}, 5*time.Second, 50*time.Millisecond, "the review must close itself on the conversation")
+	var payload event.PlanReviewedPayload
+	require.NoError(t, json.Unmarshal(reviewed[0].Payload, &payload))
+	require.Equal(t, "row-2", payload.ModelID, "the review runs on the row the request named, not the pair's first row")
+	require.Equal(t, "openai", payload.Provider)
+	require.Equal(t, "gpt-5.1", payload.Model)
+}
+
+// A request names a row the card offered, and the pair has to agree with it: a
+// row that is not on offer, or an id that contradicts the model it travels with,
+// is refused before anything starts. A client that predates ids sends the pair
+// alone and still works — the first row of that pair, the way it always ran.
+func TestPlanReviewRejectsAModelIdThatIsNotAnOffer(t *testing.T) {
+	ctx := context.Background()
+	s, runs, _, actionID, _ := exitPlanServer(t, twinRowPlanReviewConfig())
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1", "model_id": "row-9"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-4o", "model_id": "row-2"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var reviewed []state.SessionEvent
+	require.Eventually(t, func() bool {
+		var err error
+		reviewed, err = runs.ListSessionEventsOfType(ctx, "s1", event.RunEventPlanReviewed, 0)
+		return err == nil && len(reviewed) == 1
+	}, 5*time.Second, 50*time.Millisecond, "the pair-only request must still run")
+	var payload event.PlanReviewedPayload
+	require.NoError(t, json.Unmarshal(reviewed[0].Payload, &payload))
+	// The record names what the request named: a client that sends no row
+	// leaves the pair, and a reader resolves it the way it always has. (The
+	// row such a review runs on is pinned in pkg/process.)
+	require.Equal(t, "", payload.ModelID)
+	require.Equal(t, "gpt-5.1", payload.Model)
 }
 
 // fakeGatewaySubagentExecutor stands in for the reviewer's execution: plan

@@ -411,7 +411,11 @@ export function usePendingActions(options: {
    * the conversation's events. */
   async function requestReview(a: ActionRow, model: PlanReviewModelOption) {
     modelPicking.value = { ...modelPicking.value, [a.id]: false }
-    await submitAction(a.id, () => forebrainApi.actionPlanReview(a.id, { provider: model.provider, model: model.model }))
+    // The row the user picked goes with the pair: two rows of one
+    // provider/model are two reviewers, and the row decides endpoint and key.
+    await submitAction(a.id, () =>
+      forebrainApi.actionPlanReview(a.id, { provider: model.provider, model: model.model, modelId: model.id }),
+    )
   }
 
   /** Stopping a review is stopping the reviewer subagent, the same way any
