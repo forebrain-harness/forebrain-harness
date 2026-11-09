@@ -2965,11 +2965,11 @@ func buildComposerSubmission(actualText string, displayText string, attachments 
 		if strings.TrimSpace(att.Path) == "" {
 			continue
 		}
-		part, err := llm.ImageFile(strings.TrimSpace(att.Path))
+		image, err := turn.AttachmentImageParts(att.Path)
 		if err != nil {
 			continue
 		}
-		parts = append(parts, part)
+		parts = append(parts, image...)
 	}
 	if len(parts) == 0 {
 		return ComposerSubmission{}, false
@@ -3548,11 +3548,11 @@ func mergeComposerSubmissions(items []ComposerSubmission) ComposerSubmission {
 		if strings.TrimSpace(att.Path) == "" {
 			continue
 		}
-		part, err := llm.ImageFile(strings.TrimSpace(att.Path))
+		image, err := turn.AttachmentImageParts(att.Path)
 		if err != nil {
 			continue
 		}
-		merged.Parts = append(merged.Parts, part)
+		merged.Parts = append(merged.Parts, image...)
 	}
 	return merged
 }

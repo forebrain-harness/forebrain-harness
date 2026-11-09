@@ -971,7 +971,7 @@ func BuildPrompt(req Request) string {
 		b.WriteString("The request is what the user said in this conversation, oldest first: their messages, their answers to questions they were asked, and their feedback on plans they sent back. ")
 		b.WriteString("The newest message is what this plan is for; an earlier one still holds unless a later one changed it.")
 		if len(req.Images) > 0 {
-			b.WriteString(" The images the user attached follow this text, each labelled with the number of the message that carried it and the file it is stored in; they are part of the request. ")
+			b.WriteString(" The images the user attached follow this text, each labelled with the number of the message that carried it and followed by the file it is stored in; they are part of the request. ")
 			b.WriteString("When an image is too small or dense to read as sent, open its file with your tools - crop or enlarge it with a script - rather than guessing what it shows.")
 		}
 		b.WriteString("\n\n")

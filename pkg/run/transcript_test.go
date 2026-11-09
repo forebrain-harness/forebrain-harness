@@ -250,10 +250,13 @@ func TestBuildTranscriptSessionReplacesRawImageUserWithEnriched(t *testing.T) {
 	_, err = sess.AppendStructuredMessage(ctx, "s1", "user", userText, "", rawParts, "", "", "", "", state.MessageExecTiming{})
 	require.NoError(t, err)
 
-	// Enriched parts the pipeline hands to the runner keep the user text intact.
-	imgPart, err := llm.ImageFile(img)
+	// Enriched parts the pipeline hands to the runner keep the user text intact
+	// and carry the image as the live turn sends it: the picture, then the
+	// line naming its file — the same line the replay writes, which is what
+	// keeps the stored turn recognisable as this one.
+	image, err := turn.AttachmentImageParts(img)
 	require.NoError(t, err)
-	enriched := []llm.ContentPart{llm.Text(userText), imgPart}
+	enriched := append([]llm.ContentPart{llm.Text(userText)}, image...)
 
 	builder := transcriptSession{store: sess, systemPrompt: "sys", resolver: PathResolver{}, projectInstructions: nil}.build
 	msgs, _, err := builder(ctx, enriched)
@@ -263,7 +266,7 @@ func TestBuildTranscriptSessionReplacesRawImageUserWithEnriched(t *testing.T) {
 	require.Len(t, msgs, 2)
 	require.Equal(t, llm.RoleSystem, msgs[0].Role)
 	require.Equal(t, llm.RoleUser, msgs[1].Role)
-	require.Equal(t, userText, msgs[1].TextContent())
+	require.Equal(t, userText+"\n"+llm.ImageSourceNote(img), msgs[1].TextContent())
 
 	userCount := 0
 	for _, m := range msgs {
@@ -585,7 +588,11 @@ func TestUserImageAttachmentRehydratesIdenticallyToLiveImageFile(t *testing.T) {
 		}
 	}
 	require.NotNil(t, rehydrated, "user message missing after reload")
-	require.Equal(t, []llm.ContentPart{llm.Text(userText), live}, rehydrated.Parts)
+	require.Equal(t, []llm.ContentPart{llm.Text(userText), live, llm.Text(llm.ImageSourceNote(imgPath))}, rehydrated.Parts)
+	// And it is exactly what the live terminal turn sends for that attachment.
+	liveTurn, err := turn.AttachmentImageParts(imgPath)
+	require.NoError(t, err)
+	require.Equal(t, liveTurn, rehydrated.Parts[1:])
 }
 
 // A terminal image picked with @ was stored by bare path with no type. Such a

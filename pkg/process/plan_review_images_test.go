@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -18,9 +17,7 @@ const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN
 
 // Every image the reviewer is sent comes with the file it is stored in, so it
 // can look closer than the picture: a referenced file by its own path, an
-// inline image by a file written once under the project's attachments
-// directory. Both are persisted by reference, so the review's transcript does
-// not store the bytes again.
+// inline image by a file written from its bytes (run.ImageSource).
 func TestPlanReviewImagePartsLabelEveryImageWithItsFile(t *testing.T) {
 	ctx := context.Background()
 	project := t.TempDir()
@@ -40,35 +37,31 @@ func TestPlanReviewImagePartsLabelEveryImageWithItsFile(t *testing.T) {
 		{"type": "text", "text": "and this"},
 		{"type": "file_reference", "file_id": attached, "label": "shot.png", "mime_type": "image/png"},
 	})
+	t.Setenv("TMPDIR", t.TempDir())
 	runner := &run.Runner{Deps: &run.Deps{ProjectRoot: project}, FileResolver: run.PathResolver{}}
 	sources := []turn.RequestImage{{Message: 2, PartsJSON: string(inline)}, {Message: 5, PartsJSON: string(referenced)}}
 
 	parts := planReviewImageParts(ctx, runner, sources)
-	if len(parts) != 4 {
-		t.Fatalf("parts=%d, want a label and an image per image", len(parts))
+	if len(parts) != 6 {
+		t.Fatalf("parts=%d, want a label, the image and its source line per image", len(parts))
 	}
-	written := parts[1].SourcePath
-	if filepath.Dir(written) != filepath.Join(project, ".forebrain", "attachments") {
-		t.Fatalf("inline image written to %q, want the project's attachments directory", written)
+	written := run.ImageSource(parts[1])
+	if filepath.Dir(written) != filepath.Join(os.TempDir(), "forebrain-images") {
+		t.Fatalf("inline image named %q, want a file written from its bytes", written)
 	}
 	if got, err := os.ReadFile(written); err != nil || string(got) != string(raw) {
 		t.Fatalf("written file: err=%v, same bytes=%v", err, string(got) == string(raw))
 	}
-	if parts[0].Text != "Image 1 of message 2, stored at "+written+":" {
-		t.Fatalf("label=%q", parts[0].Text)
+	if parts[0].Text != "Image 1 of message 2:" || parts[2].Text != "[Image: source: "+written+"]" {
+		t.Fatalf("inline image: label=%q source=%q", parts[0].Text, parts[2].Text)
 	}
-	if parts[3].SourcePath != attached || !strings.Contains(parts[2].Text, "of message 5, stored at "+attached) {
-		t.Fatalf("referenced image: label=%q source=%q", parts[2].Text, parts[3].SourcePath)
+	if parts[3].Text != "Image 1 of message 5:" || parts[4].SourcePath != attached || parts[5].Text != "[Image: source: "+attached+"]" {
+		t.Fatalf("referenced image: label=%q source=%q line=%q", parts[3].Text, parts[4].SourcePath, parts[5].Text)
 	}
 
-	// Every review of the conversation names the same file and writes it once.
-	again := planReviewImageParts(ctx, runner, sources[:1])
-	if again[1].SourcePath != written {
-		t.Fatalf("second review wrote %q, want %q", again[1].SourcePath, written)
-	}
-	entries, err := os.ReadDir(filepath.Dir(written))
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("attachments dir holds %d entries (err=%v), want the one file", len(entries), err)
+	// Every review of the conversation names the same file.
+	if again := planReviewImageParts(ctx, runner, sources[:1]); again[2].Text != parts[2].Text {
+		t.Fatalf("second review named %q, first %q", again[2].Text, parts[2].Text)
 	}
 
 	if got := planReviewImageParts(ctx, runner, nil); got != nil {

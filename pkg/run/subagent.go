@@ -950,20 +950,20 @@ func steerEntries(steers []Input) []TurnInputEntry {
 }
 
 // mergeSteers is the one message an interrupt resumes the subagent with — the
-// steers in the order the user wrote them, joined by a blank line — and every
-// skill they selected.
+// steers in the order the user wrote them, joined by a blank line, then what
+// each of them carried after its words (its images, each followed by the line
+// naming its file) — and every skill they selected.
 func mergeSteers(steers []Input) (Input, []SkillSelection) {
 	texts := make([]string, 0, len(steers))
+	var carried []llm.ContentPart
 	var selections []SkillSelection
 	merged := Input{}
 	for i, in := range steers {
-		text := strings.TrimSpace(in.Text)
-		if text == "" {
-			text = strings.Join(strings.Fields(llm.TextContent(in.Parts...)), " ")
-		}
+		text, rest := steerTextAndCarried(in)
 		if text != "" {
 			texts = append(texts, text)
 		}
+		carried = append(carried, rest...)
 		if i == 0 {
 			merged = in
 			continue
@@ -982,11 +982,22 @@ func mergeSteers(steers []Input) (Input, []SkillSelection) {
 		}
 	}
 	merged.Text = strings.Join(texts, "\n\n")
-	merged.Parts = []llm.ContentPart{llm.Text(merged.Text)}
+	merged.Parts = append([]llm.ContentPart{llm.Text(merged.Text)}, carried...)
 	merged.Payload = nil
 	merged.SkillName = ""
 	merged.SkillPath = ""
 	return merged, selections
+}
+
+// steerTextAndCarried splits one steer into the words the model reads — its
+// leading text part as sent, not the preview its queue shows — and what
+// follows them. A steer with no text part of its own is its preview text and
+// all of its parts.
+func steerTextAndCarried(in Input) (string, []llm.ContentPart) {
+	if len(in.Parts) > 0 && in.Parts[0].Type == llm.ContentTypeText {
+		return strings.TrimSpace(in.Parts[0].Text), in.Parts[1:]
+	}
+	return strings.TrimSpace(in.Text), in.Parts
 }
 
 // subagentResumeAttempt runs a subagent once more on its own conversation,

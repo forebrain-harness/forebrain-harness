@@ -101,7 +101,16 @@ func (s *SessionStore) AppendNewMessages(ctx context.Context, sessionID, runID s
 // append and the in-place completion of a row cannot disagree about it. The
 // parts JSON built from the same text is repaired by MessagePartsJSON.
 func storedContent(msg llm.Message) string {
-	return dbx.ValidText(strings.TrimSpace(msg.TextContent()))
+	return dbx.ValidText(strings.TrimSpace(llm.TextContent(storedParts(msg)...)))
+}
+
+// storedParts is what of a message's parts a row keeps: a user message's
+// image source lines (llm.ImageSourceNote) are the request's, never stored.
+func storedParts(msg llm.Message) []llm.ContentPart {
+	if strings.TrimSpace(msg.Role) == llm.RoleUser {
+		return llm.WithoutImageSourceNotes(msg.Parts)
+	}
+	return msg.Parts
 }
 
 func (s *SessionStore) appendMessage(ctx context.Context, q dbtx, sessionID, runID string, msg llm.Message, model string, usageJSON string) error {
@@ -367,7 +376,7 @@ func messagesAlign(stored, message llm.Message) bool {
 // the run's canonical message still carries the bytes a tool or a person handed
 // over, and comparing those two directly never matches.
 func messageText(msg llm.Message) string {
-	return dbx.ValidText(strings.TrimSpace(llm.TextContent(msg.Parts...)))
+	return dbx.ValidText(strings.TrimSpace(llm.TextContent(storedParts(msg)...)))
 }
 
 // canonicalMessageIndex finds a stored row's counterpart in a run's message

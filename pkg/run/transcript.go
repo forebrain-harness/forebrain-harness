@@ -308,8 +308,8 @@ func rehydrateImageReferences(ctx context.Context, resolver FileReferenceResolve
 }
 
 // UserInputParts is what the model is sent for a user message stored as
-// partsJSON: parsed, and its images rehydrated, exactly as the conversation's
-// history is. A surface that builds a turn's input from the row it stores for
+// partsJSON: parsed, its images rehydrated and each followed by the line
+// naming its file, exactly as the conversation's history is. A surface that builds a turn's input from the row it stores for
 // it sends the same message now as every later request replays, so the
 // request's prefix stays cached and the turn's own message is never written
 // to the transcript a second time.
@@ -323,7 +323,18 @@ func UserInputParts(ctx context.Context, resolver FileReferenceResolver, partsJS
 // through resolver. User rows send the file's bytes as-is; tool rows re-run
 // the ImagePartWithin ladder, because a tool image was budgeted and possibly
 // downscaled when the live turn sent it.
+//
+// A user row's images are then each followed by the line naming the file they
+// are stored in (withImageSourceNotes), so the model can open it itself.
 func rehydrateMessageImages(ctx context.Context, resolver FileReferenceResolver, msg llm.Message, refs []state.FileRefInfo) llm.Message {
+	msg = rehydrateMessageFileImages(ctx, resolver, msg, refs)
+	if msg.Role == llm.RoleUser {
+		msg.Parts = withImageSourceNotes(msg.Parts)
+	}
+	return msg
+}
+
+func rehydrateMessageFileImages(ctx context.Context, resolver FileReferenceResolver, msg llm.Message, refs []state.FileRefInfo) llm.Message {
 	if resolver == nil || len(refs) == 0 || (msg.Role != llm.RoleUser && msg.Role != llm.RoleTool) {
 		return msg
 	}

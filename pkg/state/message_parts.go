@@ -309,7 +309,7 @@ func MessagePartsJSON(msg llm.Message, fallbackText string) string {
 			return string(b)
 		}
 	}
-	parts := contentBlocksJSON(msg.Parts, fallbackText)
+	parts := contentBlocksJSON(storedParts(msg), fallbackText)
 	if msg.IsMeta {
 		parts = append(parts, map[string]any{"type": PartTypeIsMeta})
 	}

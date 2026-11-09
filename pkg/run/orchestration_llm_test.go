@@ -1722,10 +1722,14 @@ func TestRehydrateImageReferences_ImageReplaced(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
-	// The text placeholder should be replaced by an ImageBase64 part
+	// The text placeholder should be replaced by an ImageBase64 part, followed
+	// by the line naming its file.
 	parts := msgs[0].Parts
-	if len(parts) != 1 {
-		t.Fatalf("expected 1 part, got %d: %v", len(parts), parts)
+	if len(parts) != 2 {
+		t.Fatalf("expected the image and its source line, got %d: %v", len(parts), parts)
+	}
+	if parts[1].Text != llm.ImageSourceNote(imgPath) {
+		t.Fatalf("source line = %q", parts[1].Text)
 	}
 	if parts[0].Type != llm.ContentTypeImageBase64 {
 		t.Fatalf("expected ImageBase64 part, got type=%s", parts[0].Type)
@@ -1799,14 +1803,17 @@ func TestRehydrateImageReferences_MultipleImages(t *testing.T) {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
 	parts := msgs[0].Parts
-	if len(parts) != 2 {
-		t.Fatalf("expected 2 parts, got %d: %v", len(parts), parts)
+	if len(parts) != 4 {
+		t.Fatalf("expected each image followed by its source line, got %d: %v", len(parts), parts)
 	}
 	if parts[0].Type != llm.ContentTypeImageBase64 {
 		t.Fatalf("part 0: expected ImageBase64, got %s", parts[0].Type)
 	}
-	if parts[1].Type != llm.ContentTypeImageBase64 {
-		t.Fatalf("part 1: expected ImageBase64, got %s", parts[1].Type)
+	if parts[2].Type != llm.ContentTypeImageBase64 {
+		t.Fatalf("part 2: expected ImageBase64, got %s", parts[2].Type)
+	}
+	if !strings.HasPrefix(parts[1].Text, "[Image: source: ") || !strings.HasPrefix(parts[3].Text, "[Image: source: ") {
+		t.Fatalf("source lines = %q, %q", parts[1].Text, parts[3].Text)
 	}
 }
 

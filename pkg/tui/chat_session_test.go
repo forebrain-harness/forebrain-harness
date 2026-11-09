@@ -7973,7 +7973,14 @@ func TestCharacterizationAttachmentRawDisplayModelInput(t *testing.T) {
 		t.Fatalf("no user message in what the model received: %+v", received)
 	}
 	var sawText, sawImage bool
-	for _, part := range userMsg.Parts {
+	for i, part := range userMsg.Parts {
+		// The line naming the image's file follows the image.
+		if i > 0 && userMsg.Parts[i-1].Type == llm.ContentTypeImageBase64 {
+			if part.Text != llm.ImageSourceNote(imgPath) {
+				t.Fatalf("part after the image = %#v, want its source line", part)
+			}
+			continue
+		}
 		switch part.Type {
 		case llm.ContentTypeText:
 			// Corrected against a first failing assumption: the "[Image #1]"

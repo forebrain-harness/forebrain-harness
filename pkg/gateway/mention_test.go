@@ -341,9 +341,16 @@ func TestWebTurnInputIsTheMessageItStores(t *testing.T) {
 	for _, part := range sent {
 		kinds = append(kinds, string(part.Type))
 	}
-	// The text, then the two images; the pdf is named in the text only.
-	if strings.Join(kinds, ",") != string(llm.ContentTypeText)+","+string(llm.ContentTypeImageBase64)+","+string(llm.ContentTypeImageBase64) || sent[0].Text != in.text {
+	// The text, then the two images, each followed by the line naming its
+	// file; the pdf is named in the text only.
+	text, image := string(llm.ContentTypeText), string(llm.ContentTypeImageBase64)
+	if strings.Join(kinds, ",") != strings.Join([]string{text, image, text, image, text}, ",") || sent[0].Text != in.text {
 		t.Fatalf("sent parts = %v", kinds)
+	}
+	for _, note := range []llm.ContentPart{sent[2], sent[4]} {
+		if !strings.HasPrefix(note.Text, "[Image: source: /") {
+			t.Fatalf("image source line = %q, want the file's absolute path", note.Text)
+		}
 	}
 
 	if _, err := turn.PersistUserTurn(ctx, sessions, turn.UserTurn{SessionID: "s1", ModelInput: in.text, RawInput: "look at these", PartsJSON: in.partsJSON}); err != nil {

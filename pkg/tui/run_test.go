@@ -1681,8 +1681,9 @@ func TestHistoryRecallSubmissionRestoresImageAndLargePaste(t *testing.T) {
 	if strings.Contains(submission.Text, "[Image #1]") {
 		t.Fatalf("image placeholder leaked into model text: %q", submission.Text)
 	}
-	if len(submission.Parts) != 2 || submission.Parts[1].Type != llm.ContentTypeImageBase64 || submission.Parts[1].MIMEType != "image/png" {
-		t.Fatalf("recalled image was not restored as an image part: %#v", submission.Parts)
+	if len(submission.Parts) != 3 || submission.Parts[1].Type != llm.ContentTypeImageBase64 || submission.Parts[1].MIMEType != "image/png" ||
+		!strings.HasPrefix(submission.Parts[2].Text, "[Image: source: ") {
+		t.Fatalf("recalled image was not restored as an image part and its source line: %#v", submission.Parts)
 	}
 }
 
@@ -6198,8 +6199,9 @@ func TestQueueSemantics_Q1_ImageBearingSteerWaitsInPendingMirror(t *testing.T) {
 		t.Fatal("expected the pending steer to be recallable")
 	}
 	submission := recalled.Payload.(ComposerSubmission)
-	if len(submission.Parts) != 2 || submission.Parts[1].Type != llm.ContentTypeImageBase64 || submission.Parts[1].MIMEType != "image/png" {
-		t.Fatalf("expected text+image parts carried into the steer, got %#v", submission.Parts)
+	if len(submission.Parts) != 3 || submission.Parts[1].Type != llm.ContentTypeImageBase64 || submission.Parts[1].MIMEType != "image/png" ||
+		submission.Parts[2].Text != llm.ImageSourceNote(imagePath) {
+		t.Fatalf("expected text, image and its source line carried into the steer, got %#v", submission.Parts)
 	}
 	if len(submission.Attachments) != 1 || submission.Attachments[0].Path != imagePath {
 		t.Fatalf("expected attachment preserved for a whole restore, got %#v", submission.Attachments)

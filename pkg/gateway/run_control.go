@@ -146,7 +146,12 @@ func (s *Server) handleRunInput(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	accepted := q.Steer(req.input())
+	in, err := s.withWebInputParts(r.Context(), s.runnerFor(r.Context(), sessionID), sessionID, req.input())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	accepted := q.Steer(in)
 	preview := toPendingInputPreview(q.Preview())
 	if accepted {
 		s.appendPendingInputUpdated(r.Context(), runID, sessionID, preview)
@@ -1194,6 +1199,28 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 	for _, part := range parts {
 		in.partsJSON = state.AppendRawPartJSON(in.partsJSON, part)
 	}
+	return in, nil
+}
+
+// withWebInputParts gives a message that joins a running turn — a steer into
+// the conversation's run, a message to one of its subagents — what a new turn
+// sends for the same words and attachments: the text naming each attached file
+// and where it was saved, each image, and the line naming the image's file
+// (run.UserInputParts). The message keeps its own text and attachment lists,
+// which are what its queue shows and hands back for editing.
+func (s *Server) withWebInputParts(ctx context.Context, runner *run.Runner, sessionID string, in run.Input) (run.Input, error) {
+	if len(in.Attachments) == 0 && len(in.MentionImages) == 0 {
+		return in, nil
+	}
+	turnInput, err := s.prepareWebTurnInput(ctx, sessionID, in.Text, in.Attachments, in.MentionImages)
+	if err != nil {
+		return in, err
+	}
+	var resolver run.FileReferenceResolver = run.PathResolver{}
+	if runner != nil && runner.FileResolver != nil {
+		resolver = runner.FileResolver
+	}
+	in.Parts = run.UserInputParts(ctx, resolver, turnInput.partsJSON)
 	return in, nil
 }
 

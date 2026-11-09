@@ -374,8 +374,8 @@ func TestHandleRunQueuedInputEditLastQueuedMessageFallsBackToRejectedSteer(t *te
 // TestHandleRunQueuedInputKeepsWhatTheMessageAttached pins that a message
 // queued during a run comes back whole when the user recalls it to edit — its
 // text, its uploaded files and the workspace images its @ picker attached —
-// that recalling the only queued message leaves the run taking input, and
-// that a steer is refused rather than sent without what it attached.
+// and that recalling the only queued message leaves the run taking input. A
+// steer's attachments are pinned by TestWebSteerCarriesItsImagesAndTheirFiles.
 func TestHandleRunQueuedInputKeepsWhatTheMessageAttached(t *testing.T) {
 	post := func(s *Server, runID, path, body string, handler func(http.ResponseWriter, *http.Request)) map[string]any {
 		req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+path, strings.NewReader(body))
@@ -390,12 +390,6 @@ func TestHandleRunQueuedInputKeepsWhatTheMessageAttached(t *testing.T) {
 	const attached = `{"message":"look at these","attachments":["file-1"],"mention_images":["shots/a.png","shots/b.png"]}`
 
 	s := &Server{}
-	queue(t, s, "run-steer-images")
-	steer := post(s, "run-steer-images", "/input", attached, s.handleRunInput)
-	// A message with parts steers whatever it attached (D7): what it attached
-	// travels in the queue's record of it, so it comes back whole on recall.
-	require.Equal(t, true, steer["accepted"], "a steer carries what the message attached")
-
 	runID := "run-recall"
 	queue(t, s, runID)
 	post(s, runID, "/queued-input", attached, s.handleRunQueuedInput)
@@ -2798,4 +2792,50 @@ func TestCancelAllFoldsInWhatEveryReplicaCancelled(t *testing.T) {
 	require.True(t, answer.OK)
 	require.Equal(t, 1, answer.Main, "the peer's cancels must be in the answer")
 	require.Equal(t, 2, answer.Subagents)
+}
+
+// A steer joins the running turn as the message a new turn would send for the
+// same words and attachments: each image, and the line naming its file so the
+// model can open it and look closer. It used to reach the model as its words
+// alone.
+func TestWebSteerCarriesItsImagesAndTheirFiles(t *testing.T) {
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
+	ctl := s.runController()
+	require.True(t, ctl.Track("run-images", sid, func() {}))
+	t.Cleanup(func() { ctl.Untrack("run-images") })
+	q, _, ok := ctl.Queue("run-images")
+	require.True(t, ok)
+	rt := run.NewTurnInputRuntime()
+	q.Attach(rt)
+
+	steer := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/runs/run-images/input", strings.NewReader(body))
+		req.SetPathValue("id", "run-images")
+		rr := httptest.NewRecorder()
+		s.handleRunInput(rr, req)
+		return rr
+	}
+	rr := steer(`{"message":"look at this","mention_images":["docs/shot.png"]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	entries := rt.Snapshot()
+	require.Len(t, entries, 1)
+	parts := entries[0].Parts
+	require.Len(t, parts, 3, "%#v", parts)
+	require.Equal(t, "look at this", parts[0].Text)
+	require.Equal(t, llm.ContentTypeImageBase64, parts[1].Type)
+	require.True(t, strings.HasPrefix(parts[2].Text, "[Image: source: /") && strings.HasSuffix(parts[2].Text, filepath.Join("docs", "shot.png")+"]"), parts[2].Text)
+
+	// The queue still shows the message the user wrote.
+	require.Equal(t, []string{"look at this"}, toPendingInputPreview(q.Preview()).PendingSteers)
+
+	// An image that cannot be read does not lose the message, as with a new
+	// turn: the steer says which picture is missing and why.
+	missing := steer(`{"message":"and this","mention_images":["docs/missing.png"]}`)
+	require.Equal(t, http.StatusOK, missing.Code, missing.Body.String())
+	entries = rt.Snapshot()
+	require.Len(t, entries, 2)
+	require.Contains(t, entries[1].Parts[0].Text, "docs/missing.png")
+	require.Contains(t, entries[1].Parts[0].Text, "not sent")
 }

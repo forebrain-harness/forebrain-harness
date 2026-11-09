@@ -3479,6 +3479,11 @@ func (s *Server) handleSubagentInput(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "empty message", http.StatusBadRequest)
 		return
 	}
+	in, err := s.withWebInputParts(r.Context(), runner, sid, in)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	delivery, err := run.SendToSubagent(r.Context(), runner, s.subagentConversationSurface(sid), sid, agentKey, in)
 	if err != nil {
 		switch {

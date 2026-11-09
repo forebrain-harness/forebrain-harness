@@ -83,6 +83,47 @@ func ImageBase64(mimeType, data string) ContentPart {
 	return ContentPart{Type: ContentTypeImageBase64, MIMEType: mimeType, ImageBase64: data}
 }
 
+// ImageSourceNote is the line that follows an image a user sent, naming where
+// it is stored — "[Image: source: <path>]", the line Claude Code writes — so
+// the model can open the file itself: crop or enlarge it with a script when
+// the picture as sent is too small to read. Every path that sends a user's
+// image writes it from the same source, so a turn and its replay match.
+func ImageSourceNote(source string) string {
+	return imageSourceNotePrefix + strings.TrimSpace(source) + "]"
+}
+
+const imageSourceNotePrefix = "[Image: source: "
+
+// IsImageSourceNote reports whether part is an ImageSourceNote line.
+func IsImageSourceNote(part ContentPart) bool {
+	text := part.Text
+	return part.Type == ContentTypeText && strings.HasPrefix(text, imageSourceNotePrefix) &&
+		strings.HasSuffix(text, "]") && !strings.Contains(text, "\n")
+}
+
+// WithoutImageSourceNotes drops the ImageSourceNote lines that follow images.
+// The line belongs to the request only: it is derived from the image every
+// time a message is sent or replayed, so a stored message never holds it — a
+// stored copy would show in the transcript and be followed by a second line on
+// replay.
+func WithoutImageSourceNotes(parts []ContentPart) []ContentPart {
+	var out []ContentPart
+	for i, part := range parts {
+		note := i > 0 && IsImageSourceNote(part) &&
+			(parts[i-1].Type == ContentTypeImageBase64 || parts[i-1].Type == ContentTypeImageURL)
+		if note && out == nil {
+			out = append(make([]ContentPart, 0, len(parts)), parts[:i]...)
+		}
+		if out != nil && !note {
+			out = append(out, part)
+		}
+	}
+	if out == nil {
+		return parts
+	}
+	return out
+}
+
 // ImageFile reads path and returns it as an image ContentPart under the same
 // budget the tool paths use: a file within FOREBRAIN_IMAGE_MAX_BYTES (default
 // 3 MiB) is sent byte-for-byte; a larger one is downscaled by the fixed

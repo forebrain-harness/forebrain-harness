@@ -12,7 +12,8 @@ import (
 )
 
 // SurfaceTurnContentParts builds the model-facing content parts for a turn
-// with attachments: the text part plus one image part per attachment. It
+// with attachments: the text part plus one image part per attachment, each
+// followed by the line naming its file (llm.ImageSourceNote). It
 // also returns the display form of the text, with an "[Image #N]" marker
 // appended per image actually sent — this is not display-only (see
 // DisplayTextOrUserText's doc comment): the caller uses the returned
@@ -46,7 +47,7 @@ func SurfaceTurnContentParts(userText string, displayText string, attachments []
 		if path == "" {
 			continue
 		}
-		part, err := llm.ImageFile(path)
+		image, err := AttachmentImageParts(path)
 		if err != nil {
 			// Self-heal instead of failing the turn: the model is told which
 			// image could not be sent and why — the same sentence the replay of
@@ -60,13 +61,29 @@ func SurfaceTurnContentParts(userText string, displayText string, attachments []
 			continue
 		}
 		sent++
-		parts = append(parts, part)
+		parts = append(parts, image...)
 		display = strings.TrimSpace(display + "\n[Image #" + fmt.Sprintf("%d", sent) + "]")
 	}
 	if len(parts) == 1 {
 		return nil, "", nil, fmt.Errorf("no valid image attachments")
 	}
 	return parts, display, warnings, nil
+}
+
+// AttachmentImageParts is what one image attachment sends the model: the image,
+// then the line naming its file (llm.ImageSourceNote), so the model can open
+// the file itself when the picture as sent is too small to read. Every path
+// that turns a terminal attachment into model input — the turn, a steer, a
+// message to a subagent — goes through here, and run's rehydration writes the
+// same line from the same path, so a message and its replay carry the same
+// text.
+func AttachmentImageParts(path string) ([]llm.ContentPart, error) {
+	path = strings.TrimSpace(path)
+	part, err := llm.ImageFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return []llm.ContentPart{part, llm.Text(llm.ImageSourceNote(path))}, nil
 }
 
 // attachmentLabelAndMIME names an attachment exactly the way it is stored: the

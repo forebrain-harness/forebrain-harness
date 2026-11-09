@@ -74,8 +74,12 @@ func TestSurfaceTurnContentPartsIncludesImageAttachment(t *testing.T) {
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v, want none for a sendable image", warnings)
 	}
-	if len(parts) != 2 || parts[0].Type != llm.ContentTypeText || parts[1].Type != llm.ContentTypeImageBase64 {
+	if len(parts) != 3 || parts[0].Type != llm.ContentTypeText || parts[1].Type != llm.ContentTypeImageBase64 {
 		t.Fatalf("unexpected parts: %#v", parts)
+	}
+	// The image's file follows it, so the model can open it itself.
+	if parts[2].Type != llm.ContentTypeText || parts[2].Text != "[Image: source: "+img+"]" {
+		t.Fatalf("image source line = %#v", parts[2])
 	}
 	if !strings.Contains(display, "[Image #1]") {
 		t.Fatalf("display text missing attachment marker: %q", display)
