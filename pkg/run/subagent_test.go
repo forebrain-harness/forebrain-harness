@@ -410,7 +410,7 @@ func TestRunPlanReviewSubagentRunsWithSubagentsDisabled(t *testing.T) {
 	probe := &dispatchProbe{}
 	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "verdict"}}
 
-	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", SubagentModelOverride{
+	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", nil, SubagentModelOverride{
 		Provider: "openai", Model: "gpt-4o",
 	}, nil); err != nil {
 		t.Fatalf("plan review must run with subagents disabled: %v", err)
@@ -440,7 +440,7 @@ func TestPlanReviewSpawnEventNamesTheChosenModel(t *testing.T) {
 	probe := &dispatchProbe{}
 	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "verdict"}}
 
-	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", SubagentModelOverride{
+	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", nil, SubagentModelOverride{
 		Provider: "zhipuai", Model: "glm-5.3-flash",
 	}, nil); err != nil {
 		t.Fatalf("plan review: %v", err)
@@ -5230,7 +5230,7 @@ func TestSubagentUsageSnapshotIsPublishedForItsOwnView(t *testing.T) {
 		Events:           reviewProbe,
 		SubagentExecutor: &snapshotReportingSubagentExecutor{input: 29000, output: 491},
 	}
-	if _, err := reviewer.RunPlanReviewSubagent(toolpkg.WithConversationSessionID(dispatchTestCtx(), "session-1"), "review the plan", SubagentModelOverride{
+	if _, err := reviewer.RunPlanReviewSubagent(toolpkg.WithConversationSessionID(dispatchTestCtx(), "session-1"), "review the plan", nil, SubagentModelOverride{
 		Provider: "zhipuai", Model: "glm-4.5",
 	}, nil); err != nil {
 		t.Fatalf("plan review: %v", err)

@@ -883,10 +883,12 @@ func LastToolCallMessage(messages []llm.Message) (llm.Message, bool) {
 
 // Bounds on the material sent to the reviewer and on the review sent back to
 // the planning model. A plan is normally a few KB; these caps stop a runaway
-// plan or a rambling reviewer from displacing the conversation itself.
+// plan or a rambling reviewer from displacing the conversation itself. The
+// request gets the plan's room: everything the user said in a conversation is
+// usually far less, and only a pasted document fills it.
 const (
 	MaxPlanChars   = 24000
-	MaxTaskChars   = 8000
+	MaxTaskChars   = 24000
 	MaxReviewChars = 12000
 )
 
@@ -906,11 +908,29 @@ func (m Model) Display() string {
 type Request struct {
 	// Plan is the plan file's content as the user is being asked to approve it.
 	Plan string
-	// Task is a condensed record of what the user asked for, so the reviewer
-	// judges the plan against the actual request rather than in the abstract.
+	// PlanPath is the plan file's absolute path. The prompt always names it:
+	// the plan lives in the conversation's plan directory, not in the
+	// project, and a plan longer than the prompt carries is read from there.
+	PlanPath string
+	// Task is what the user said in the conversation the plan serves, so the
+	// reviewer judges the plan against the actual request rather than in the
+	// abstract; planReviewTaskContext renders it.
 	Task string
+	// Images are the user's messages that attached images, in request order:
+	// the reviewer is handed every image they carry along with the prompt.
+	Images []RequestImage
 	// Model is the reviewer the user picked.
 	Model Model
+}
+
+// RequestImage is one user message whose images go to the reviewer.
+type RequestImage struct {
+	// Message is the message's number in the request, the n its <message> tag
+	// carries, so each image can say which message it came with.
+	Message int
+	// PartsJSON is the message row's stored parts; the reviewer's side reads
+	// its images back through run.UserInputParts, the way history is read.
+	PartsJSON string
 }
 
 // PlanReviewResult is one completed review.
@@ -935,22 +955,84 @@ var ErrNoPlan = fmt.Errorf("no plan to review")
 // cannot mistake the plan's own prose for an instruction addressed to it, and
 // states the order of work — investigate the project sources the plan touches
 // first, judge the plan second.
+//
+// The plan is copied in up to MaxPlanChars and its file is always named. A
+// longer plan is cut at a line, and the prompt says so where it starts, where
+// the copy stops and in the closing instruction: the reviewer reads the rest
+// from the file, because a review of an excerpt reports the cut as the plan's
+// own gap.
 func BuildPrompt(req Request) string {
 	var b strings.Builder
 	b.WriteString("Review the plan below before the user decides whether to approve it.\n\n")
-	b.WriteString("<request>\n")
 	task := strings.TrimSpace(Truncate(req.Task, MaxTaskChars))
 	if task == "" {
 		task = "(The originating request is not available. Work out what the plan is trying to achieve from the plan and the project sources it touches.)"
+	} else {
+		b.WriteString("The request is what the user said in this conversation, oldest first: their messages, their answers to questions they were asked, and their feedback on plans they sent back. ")
+		b.WriteString("The newest message is what this plan is for; an earlier one still holds unless a later one changed it.")
+		if len(req.Images) > 0 {
+			b.WriteString(" The images the user attached follow this text, each labelled with the number of the message that carried it and the file it is stored in; they are part of the request. ")
+			b.WriteString("When an image is too small or dense to read as sent, open its file with your tools - crop or enlarge it with a script - rather than guessing what it shows.")
+		}
+		b.WriteString("\n\n")
 	}
+	b.WriteString("<request>\n")
 	b.WriteString(task)
-	b.WriteString("\n</request>\n\n<plan>\n")
-	b.WriteString(strings.TrimSpace(Truncate(req.Plan, MaxPlanChars)))
+	b.WriteString("\n</request>\n\n")
+	plan := strings.TrimSpace(req.Plan)
+	excerpt, cut := planExcerpt(plan)
+	path := strings.TrimSpace(req.PlanPath)
+	if path != "" {
+		fmt.Fprintf(&b, "The plan file is %s: the conversation's own plan file, kept outside the project, and the document the user is asked to approve.", path)
+	}
+	if cut {
+		if path != "" {
+			b.WriteString(" ")
+		}
+		fmt.Fprintf(&b, "The plan is %d characters and only its first %d are copied below. ", len([]rune(plan)), len([]rune(excerpt)))
+		if path != "" {
+			b.WriteString("Read the whole file with your read tools before you judge anything: the rest of it is part of the plan, and a review of the excerpt alone is not a review of the plan.")
+		} else {
+			b.WriteString("The rest is not available here; do not report the cut as a gap in the plan.")
+		}
+	}
+	if path != "" || cut {
+		b.WriteString("\n\n")
+	}
+	b.WriteString("<plan>\n")
+	b.WriteString(excerpt)
+	if cut {
+		if path != "" {
+			fmt.Fprintf(&b, "\n[truncated: the plan continues in %s]", path)
+		} else {
+			b.WriteString("\n[truncated]")
+		}
+	}
 	b.WriteString("\n</plan>\n\n")
-	b.WriteString("Investigate the project sources this plan touches before judging it: work out for yourself what the request requires, ")
+	if cut && path != "" {
+		b.WriteString("Read the whole plan file first. Then investigate")
+	} else {
+		b.WriteString("Investigate")
+	}
+	b.WriteString(" the project sources this plan touches before judging it: work out for yourself what the request requires, ")
 	b.WriteString("then check the plan against that understanding, the actual sources, and the handoff quality bar. ")
 	b.WriteString("Report your verdict, evidence-backed problems, and concrete corrections.")
 	return b.String()
+}
+
+// planExcerpt is the part of a plan the prompt copies in: all of it when it
+// fits MaxPlanChars, otherwise the lines that fit, so the copy never stops in
+// the middle of a line — or a hard cut when one line alone is longer.
+func planExcerpt(plan string) (string, bool) {
+	runes := []rune(plan)
+	if len(runes) <= MaxPlanChars {
+		return plan, false
+	}
+	head := string(runes[:MaxPlanChars])
+	if at := strings.LastIndex(head, "\n"); at > 0 {
+		head = head[:at]
+	}
+	return strings.TrimRight(head, " \t\r\n"), true
 }
 
 // ComposeDenyFeedback builds the text the planning model receives when the user
@@ -1279,52 +1361,190 @@ func planReviewerAgentID(ctx context.Context, log PlanReviewLog, sessionID, revi
 }
 
 // PlanReviewTranscripts is the transcript half of the reviewer's task
-// context: the user turns of the conversation the plan serves, read from the
-// conversation itself.
+// context: the person's side of the conversation the plan serves, read from
+// the conversation itself.
 type PlanReviewTranscripts interface {
-	// ListVisibleUserMessages returns the conversation's newest visible user
-	// turns, newest first, with the runtime's injected meta rows left out.
-	ListVisibleUserMessages(ctx context.Context, sessionID string, limit int) ([]state.UserMessageRef, error)
+	// ListUserInputs returns, oldest first, every visible message the person
+	// sent and every user_interaction or exit_plan_mode form they decided,
+	// with the runtime's injected meta rows left out.
+	ListUserInputs(ctx context.Context, sessionID string) ([]state.UserInput, error)
 }
 
-// planReviewTaskMessages bounds how far back the reviewer's task context
-// reaches. Only user turns are kept, so this is a window over the request the
-// plan is meant to serve, not over the agent's own work.
-const planReviewTaskMessages = 6
-
-// planReviewTaskContext condenses what the user asked for out of the
-// conversation's last user turns, so the reviewer judges the plan against the
-// actual request rather than in the abstract.
-func planReviewTaskContext(ctx context.Context, transcripts PlanReviewTranscripts, sessionID string) string {
+// planReviewTaskContext renders everything the person said in the
+// conversation the plan serves, oldest first, so the reviewer judges the plan
+// against the whole request — the message that started it, the constraints
+// added since, the questions the user settled and the plans they sent back —
+// and not only against the latest words. A plan-mode turn writes hundreds of
+// the agent's own rows after the request, and the runtime injects meta user
+// rows between turns; neither is read here.
+//
+// When it all does not fit MaxTaskChars, the newest message is kept first —
+// it is what the plan is for — then the first one, which usually states the
+// task, then the rest from newest back; what is left out is said so where it
+// was, never dropped silently.
+//
+// Messages are numbered, and every message that attached an image is
+// returned with its number, whether or not its text fit: the images go to the
+// reviewer beside the text, each labelled with the message it came with.
+func planReviewTaskContext(ctx context.Context, transcripts PlanReviewTranscripts, sessionID string) (string, []RequestImage) {
 	if transcripts == nil {
-		return ""
+		return "", nil
 	}
-	// The user turns themselves, not the newest rows of the transcript: a
-	// plan-mode turn writes hundreds of the agent's own rows after the
-	// request, and a window that counted them swallowed the request.
-	turns, err := transcripts.ListVisibleUserMessages(ctx, strings.TrimSpace(sessionID), planReviewTaskMessages)
+	inputs, err := transcripts.ListUserInputs(ctx, strings.TrimSpace(sessionID))
 	if err != nil {
-		return ""
+		return "", nil
 	}
-	// Newest first is also the order the budget is spent in: the newest turn
-	// is the request the plan is meant to serve, so a long earlier turn can
-	// never crowd it out of the reviewer's material.
-	kept := make([]string, 0, len(turns))
-	budget := MaxTaskChars
-	for _, turn := range turns {
-		if budget <= 0 {
-			break
-		}
-		text := strings.TrimSpace(turn.Content)
-		if text == "" {
+	entries := make([]planReviewEntry, 0, len(inputs))
+	var images []RequestImage
+	first, newest, messages := -1, -1, 0
+	for _, input := range inputs {
+		entry, ok := planReviewEntryOf(input)
+		if !ok {
 			continue
 		}
-		text = Truncate(text, budget)
-		kept = append(kept, text)
-		budget -= len([]rune(text))
+		if entry.tag == planReviewMessageTag {
+			messages++
+			entry.attrs = fmt.Sprintf(` n="%d"`, messages)
+			if entry.carriesImages {
+				images = append(images, RequestImage{Message: messages, PartsJSON: input.Message.PartsJSON})
+			}
+			if first < 0 {
+				first = len(entries)
+			}
+			newest = len(entries)
+		}
+		entries = append(entries, entry)
 	}
-	slices.Reverse(kept)
-	return strings.Join(kept, "\n\n")
+	if len(entries) == 0 {
+		return "", nil
+	}
+	order := make([]int, 0, len(entries))
+	if newest >= 0 {
+		order = append(order, newest)
+	}
+	if first >= 0 && first != newest {
+		order = append(order, first)
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if i != newest && i != first {
+			order = append(order, i)
+		}
+	}
+	// Two omission notes at most: everything the budget leaves out lies
+	// before the first message or between it and the newest entries kept.
+	budget := MaxTaskChars - 2*(len([]rune(planReviewOmitted(len(entries))))+len("\n\n"))
+	kept := make([]string, len(entries))
+	for _, i := range order {
+		room := budget - entries[i].overhead() - len([]rune(truncatedMarker))
+		if room <= 0 {
+			break
+		}
+		kept[i] = entries[i].render(Truncate(entries[i].text, room))
+		budget -= len([]rune(kept[i])) + len("\n\n")
+	}
+	parts := make([]string, 0, len(entries))
+	omitted := 0
+	for i := range entries {
+		if kept[i] == "" {
+			omitted++
+			continue
+		}
+		if omitted > 0 {
+			parts = append(parts, planReviewOmitted(omitted))
+			omitted = 0
+		}
+		parts = append(parts, kept[i])
+	}
+	if omitted > 0 {
+		parts = append(parts, planReviewOmitted(omitted))
+	}
+	return strings.Join(parts, "\n\n"), images
+}
+
+// The tags one request entry is wrapped in. Each names who said it and in
+// answer to what, so the reviewer can tell a constraint the user set from a
+// choice they made between the planner's options.
+const (
+	planReviewMessageTag      = "message"
+	planReviewAnswersTag      = "answers"
+	planReviewPlanFeedbackTag = "plan_feedback"
+)
+
+// truncatedMarker is what Truncate appends to a cut text.
+const truncatedMarker = "\n[truncated]"
+
+// planReviewImageOnly stands in for the text of a message that sent only
+// images, so the message keeps its place and its number in the request.
+const planReviewImageOnly = "[images only]"
+
+type planReviewEntry struct {
+	tag   string
+	attrs string
+	text  string
+	// carriesImages marks a message that attached images.
+	carriesImages bool
+}
+
+func (e planReviewEntry) render(text string) string {
+	return "<" + e.tag + e.attrs + ">\n" + text + "\n</" + e.tag + ">"
+}
+
+func (e planReviewEntry) overhead() int {
+	return len([]rune(e.render("")))
+}
+
+func planReviewOmitted(n int) string {
+	return fmt.Sprintf("[%d entries left out to fit the length limit]", n)
+}
+
+// planReviewEntryOf is one input as the reviewer reads it: a message as sent,
+// a form's answers as its card shows them, a sent-back plan's feedback as
+// typed. A denial the engine wrote to deliver a review is not the user's and
+// is skipped, as is anything with neither words nor images in it.
+func planReviewEntryOf(input state.UserInput) (planReviewEntry, bool) {
+	if input.Message != nil {
+		text := strings.TrimSpace(input.Message.Content)
+		images := messageCarriesImages(input.Message.PartsJSON)
+		if text == "" && images {
+			text = planReviewImageOnly
+		}
+		return planReviewEntry{tag: planReviewMessageTag, text: text, carriesImages: images}, text != ""
+	}
+	action := input.Action
+	if action == nil {
+		return planReviewEntry{}, false
+	}
+	switch {
+	case strings.EqualFold(strings.TrimSpace(action.Kind), "user_interaction") && action.Status == state.ActionAnswered:
+		text, ok := tool.FormatAskAnswer(action.PayloadJSON, action.AnswerJSON)
+		text = strings.TrimSpace(text)
+		return planReviewEntry{tag: planReviewAnswersTag, text: text}, ok && text != ""
+	case strings.EqualFold(strings.TrimSpace(action.Kind), "exit_plan_mode") && action.Status == state.ActionDenied:
+		if ActionIsReviewDelivered(action) {
+			return planReviewEntry{}, false
+		}
+		text := strings.TrimSpace(action.Error)
+		return planReviewEntry{tag: planReviewPlanFeedbackTag, text: text}, text != ""
+	}
+	return planReviewEntry{}, false
+}
+
+// messageCarriesImages reports whether a stored user message attached an
+// image: inline, or as a file reference the history reader turns back into
+// one. A reference stored without its type counts, as it does there.
+func messageCarriesImages(partsJSON string) bool {
+	parts, _, _, _ := state.ParseMessageParts(partsJSON, "")
+	for _, part := range parts {
+		if part.Type == llm.ContentTypeImageBase64 || part.Type == llm.ContentTypeImageURL {
+			return true
+		}
+	}
+	for _, ref := range state.ExtractFileRefInfos(partsJSON) {
+		if mime := strings.TrimSpace(ref.MIMEType); mime == "" || strings.HasPrefix(mime, "image/") {
+			return true
+		}
+	}
+	return false
 }
 
 const (
@@ -1418,6 +1638,10 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 		}
 		if err != nil && outcome == planReviewOutcomeFailed {
 			reviewed.Error = strings.TrimSpace(err.Error())
+			var coded interface{ Code() string }
+			if errors.As(err, &coded) {
+				reviewed.Code = strings.TrimSpace(coded.Code())
+			}
 		}
 		publish(event.NewRunEvent("plan-review:"+reviewID+":reviewed", runID, sessionID,
 			event.RunEventPlanReviewed, reviewed, time.Now()))
@@ -1440,10 +1664,13 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 		reviewCtx = tool.WithRunID(reviewCtx, runID)
 	}
 	reviewCtx = tool.WithToolUseID(reviewCtx, reviewID)
+	task, images := planReviewTaskContext(ctx, in.Transcripts, sessionID)
 	result, err := in.Reviewer.Review(reviewCtx, Request{
-		Plan:  plan,
-		Task:  planReviewTaskContext(ctx, in.Transcripts, sessionID),
-		Model: model,
+		Plan:     plan,
+		PlanPath: state.PlanPathForSession(strings.TrimSpace(in.StateRoot), strings.TrimSpace(in.ProjectKey), sessionID),
+		Task:     task,
+		Images:   images,
+		Model:    model,
 	})
 	if err != nil {
 		finish(planReviewOutcomeOf(err), err, "", 0)

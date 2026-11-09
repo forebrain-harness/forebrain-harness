@@ -22,34 +22,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSessionFastAvailableNilSession(t *testing.T) {
-	if sessionFastAvailable(nil) {
-		t.Fatalf("expected false for nil session, got true")
-	}
-}
-
-func TestSessionFastAvailableModelGating(t *testing.T) {
-	cases := []struct {
-		name  string
-		model string
-		want  bool
-	}{
-		{"opus", "anthropic/claude-opus-4-7", true},
-		{"sonnet", "anthropic/claude-sonnet-4-6", false},
-		{"haiku", "anthropic/claude-haiku-4-5", false},
-		{"openai", "openai/gpt-5.3", false},
-		{"empty", "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			session := &fakeSession{model: tc.model}
-			if got := sessionFastAvailable(session); got != tc.want {
-				t.Fatalf("sessionFastAvailable(%q)=%v want %v", tc.model, got, tc.want)
-			}
-		})
-	}
-}
-
 type stubSelector struct {
 	selectValue   string
 	selectOK      bool

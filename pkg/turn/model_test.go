@@ -91,7 +91,6 @@ func TestBuildStatusReportAssemblesThePanel(t *testing.T) {
 		Provider:     "openai",
 		Model:        "gpt-main",
 		Endpoint:     "https://user:secret@api.example.com/v1?key=k",
-		FastOn:       true,
 		MCP:          MCPInventorySource{Servers: []appcfg.MCPServerConfig{{Name: "docs"}}},
 		Permissions:  StatusPermissions{Preset: "Workspace", Matched: true, Rules: 3},
 		Sandbox:      "workspace-write · seatbelt",
@@ -102,7 +101,7 @@ func TestBuildStatusReportAssemblesThePanel(t *testing.T) {
 	for _, want := range []string{
 		"Session ID: s1",
 		"Agent: plan (draft)",
-		"Model: openai/gpt-main · fast on",
+		"Model: openai/gpt-main",
 		// URL sanitization: credentials and query strings never render.
 		"https://api.example.com/v1",
 		"Workspace · 3 rules",
@@ -156,10 +155,9 @@ func TestBuildStatusReportOmitsEmptyRowsAndNamesSkillOfferOff(t *testing.T) {
 	}
 }
 
-// TestStatusLinesOmitTheDefaultState pins what /status stays silent about: the
-// default agent mode is not named beside the agent, and Fast mode off is not
-// named beside the model — the model row says only what changed.
-func TestStatusLinesOmitTheDefaultState(t *testing.T) {
+// TestStatusAgentLineOmitsTheDefaultMode pins what /status stays silent about:
+// the default agent mode is not named beside the agent.
+func TestStatusAgentLineOmitsTheDefaultMode(t *testing.T) {
 	stateRoot := t.TempDir()
 	require.NoError(t, state.Set(stateRoot, "s1", state.State{Mode: state.ModeAgent}))
 	defaults := BuildStatusReport(context.Background(), StatusSource{
@@ -170,15 +168,7 @@ func TestStatusLinesOmitTheDefaultState(t *testing.T) {
 		t.Fatalf("default agent line = %q, want the agent alone", got)
 	}
 	if got := defaults.ModelLine; got != "openai/gpt-main" {
-		t.Fatalf("default model line = %q, want no Fast marker", got)
-	}
-
-	fast := BuildStatusReport(context.Background(), StatusSource{
-		StateRoot: t.TempDir(), SessionID: "s1", AgentID: "main",
-		Provider: "openai", Model: "gpt-main", FastOn: true, SkillOffer: true,
-	})
-	if got := fast.ModelLine; got != "openai/gpt-main · fast on" {
-		t.Fatalf("fast model line = %q", got)
+		t.Fatalf("model line = %q, want the bare provider/model", got)
 	}
 }
 

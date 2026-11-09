@@ -127,7 +127,6 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 		Provider:     provider,
 		Model:        model,
 		Endpoint:     run.PrimaryEndpoint(r),
-		FastOn:       s.IsFastMode(),
 		Permissions:  perm,
 		Sandbox:      safety.SandboxStatusLine(cfg),
 		MCP:          s.mcpInventorySource(),
@@ -550,55 +549,6 @@ func readAllowedToolsFromSkillMarkdown(rootPath string) string {
 	return ""
 }
 
-// HandleFastSlash routes /fast invocations from the slash executor.
-// Recognizes: /fast (toggle), /fast on, /fast off, /fast status.
-// Rejects when the active model is not Anthropic Opus.
-func (s *ChatSession) HandleFastSlash(sessionID, channel string, args []string) (string, bool) {
-	_, _ = sessionID, channel
-	if !llm.IsOpusLabel(s.CurrentModelOption()) {
-		return "fast: unavailable (current model is not Anthropic Opus)", true
-	}
-	current := s.IsFastMode()
-	action := ""
-	if len(args) > 0 {
-		action = strings.ToLower(strings.TrimSpace(args[0]))
-	}
-	switch action {
-	case "", "toggle":
-		next := !current
-		if err := s.SetFastMode(next); err != nil {
-			return "fast: " + err.Error(), true
-		}
-		if next {
-			return "fast: on (Anthropic priority service tier)", true
-		}
-		return "fast: off", true
-	case "on", "true", "1", "enable":
-		if current {
-			return "fast: already on", true
-		}
-		if err := s.SetFastMode(true); err != nil {
-			return "fast: " + err.Error(), true
-		}
-		return "fast: on (Anthropic priority service tier)", true
-	case "off", "false", "0", "disable":
-		if !current {
-			return "fast: already off", true
-		}
-		if err := s.SetFastMode(false); err != nil {
-			return "fast: " + err.Error(), true
-		}
-		return "fast: off", true
-	case "status":
-		if current {
-			return "fast: on", true
-		}
-		return "fast: off", true
-	default:
-		return "fast: usage /fast [on|off|status]", true
-	}
-}
-
 // PrimaryAgents lists the primary agents /agent offers.
 func (s *ChatSession) PrimaryAgents() ([]turn.PrimaryAgent, error) {
 	resolver, err := s.primaryAgentResolver()
@@ -890,7 +840,7 @@ func (s *ChatSession) agentSwitchDeps() process.AgentDeps {
 }
 
 // stateRoot returns the active primary agent's per-agent state root (its
-// workspace root), onto which the mode/plan/todo/faststate stores join "state".
+// workspace root), onto which the mode/plan/todo/intermediate stores join "state".
 // Every TUI seam touching per-agent state must use this so the main agent
 // and a non-main agent never share a state directory.
 func (s *ChatSession) stateRoot() string {

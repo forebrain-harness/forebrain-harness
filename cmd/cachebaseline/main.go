@@ -1,11 +1,11 @@
-// cachebaseline is P0-5d's recording tool: it drives one of the plan's six
+// cachebaseline is P0-5d's recording tool: it drives one of the plan's five
 // named cache-hit scenarios against a real provider and writes (or updates)
 // pkg/architecture/testdata/cache_baseline.json in the exact shape
 // pkg/architecture.CacheReport / scripts/hitrate.sh already expect, so the
 // existing CI regression gate (P0-5e) has real data to compare against
 // instead of the placeholder numbers the file previously shipped with.
 //
-// Status: all six named cases are implemented. This tool measures provider
+// Status: all five named cases are implemented. This tool measures provider
 // cache behavior on realistic request shapes — it deliberately does not
 // drive forebrain's own production approval/agent-switch/subagent/compaction
 // machinery (pkg/tui's characterization suite already verifies that
@@ -13,8 +13,8 @@
 // request, so a synthetic tool-approval outcome, a swapped system prompt, a
 // synthetic subagent result, or a synthetic post-compaction summary message
 // is indistinguishable, for caching purposes, from the real production path
-// producing the same bytes. fast_mode and approval_resume are
-// one-provider-client scenarios; agent_switch drives a second, materially
+// producing the same bytes. approval_resume is a
+// one-provider-client scenario; agent_switch drives a second, materially
 // different system prompt mid-session on the same client to confirm the
 // cache correctly treats it as a fresh prefix; subagent inserts a
 // realistically large synthetic tool_result after a subagent_run call
@@ -154,18 +154,6 @@ func appendReplyAndSyntheticToolResults(messages []llm.Message, reply *llm.Messa
 // measuring — not the necessarily-cold first turn.
 func recordLongToolTurn(client llm.LLM) (architecture.CacheUse, error) {
 	return recordWithContext(context.Background(), client)
-}
-
-// recordFastMode is long_tool_turn's exact scenario, run under
-// llm.WithFast(ctx, true) — the /fast flag's real signal, which only
-// pkg/run/anthropic_agent_llm.go currently reads (it sets ServiceTier);
-// providers reached through the OpenAI-compatible client see no request
-// difference at all, so this case is expected to read identically to
-// long_tool_turn there, and is still worth recording as confirmation of
-// that fact rather than an assumption.
-func recordFastMode(client llm.LLM) (architecture.CacheUse, error) {
-	ctx := llm.WithFast(context.Background(), true)
-	return recordWithContext(ctx, client)
 }
 
 // recordAgentSwitch measures whether cache survives a mid-session prefix
@@ -406,13 +394,12 @@ func main() {
 	baselineModel := flag.String("baseline-model", "", "catalog id recorded in the model field, e.g. deepseek/deepseek-v4-flash")
 	baseURL := flag.String("base-url", "", "base URL for the provider")
 	outPath := flag.String("out", "pkg/architecture/testdata/cache_baseline.json", "baseline file to update in place")
-	scenario := flag.String("scenario", "long_tool_turn", "which named case to record: long_tool_turn, fast_mode, agent_switch, approval_resume, subagent, or compaction")
+	scenario := flag.String("scenario", "long_tool_turn", "which named case to record: long_tool_turn, agent_switch, approval_resume, subagent, or compaction")
 	codexAuthPath := flag.String("codex-auth-path", "", "path to a Codex/ChatGPT auth.json; required when -provider-type is chatgpt, ignored otherwise")
 	flag.Parse()
 
 	recorders := map[string]func(llm.LLM) (architecture.CacheUse, error){
 		"long_tool_turn":  recordLongToolTurn,
-		"fast_mode":       recordFastMode,
 		"agent_switch":    recordAgentSwitch,
 		"approval_resume": recordApprovalResume,
 		"subagent":        recordSubagent,
@@ -436,7 +423,7 @@ func main() {
 	}
 	recorder, ok := recorders[*scenario]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "scenario %q is not implemented yet; have: long_tool_turn, fast_mode, agent_switch, approval_resume, subagent, compaction\n", *scenario)
+		fmt.Fprintf(os.Stderr, "scenario %q is not implemented yet; have: long_tool_turn, agent_switch, approval_resume, subagent, compaction\n", *scenario)
 		os.Exit(2)
 	}
 

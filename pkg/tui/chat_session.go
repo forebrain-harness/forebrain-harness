@@ -178,15 +178,6 @@ type ChatSession struct {
 	// turn.PlanReviewsForAction, so a restart or another surface serves them.
 	planReviewerFactory func(turn.Model) (turn.Reviewer, error)
 
-	// fastMode persists the per-session /fast toggle (Anthropic service_tier=auto).
-	// Loaded lazily from $FOREBRAIN_HOME/state/fast/<session>.json on first
-	// access and rewritten on Set. The bool is read inside
-	// dispatchUserTurnContent to seed llm.WithFast(ctx) before the agent runs.
-	fastMu      sync.RWMutex
-	fastSession string
-	fastEnabled bool
-	fastLoaded  bool
-
 	tuiRunMu   sync.Mutex
 	tuiControl *run.Controller
 	// planReviewCancel stops an in-flight plan review. The review runs between
@@ -1969,7 +1960,6 @@ func (s *ChatSession) slashContext(ctx context.Context, sessionID, channel strin
 		SessionSource:  memory.SessionSourceTUI,
 		RunID:          runID,
 		DuringRun:      strings.EqualFold(channel, "tui") && s.tuiRunActive(),
-		FastAvailable:  llm.IsOpusLabel(s.CurrentModelOption()),
 		Sessions:       s.sessStore(),
 		Compact:        s,
 		Clear:          s,
@@ -1981,7 +1971,6 @@ func (s *ChatSession) slashContext(ctx context.Context, sessionID, channel strin
 		Sandbox:        s,
 		Model:          s,
 		Agent:          s,
-		Fast:           s,
 		Memories:       s,
 	}, nil
 }
@@ -2419,9 +2408,6 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	// context so a withdrawal decided before the run is registered still stops it.
 	agBase := process.AgentContextForProject(ctx, s.stateRoot(), sessionID, runnerProjectKey(s.runner()))
 	agBase = run.WithExplicitSkillSelection(agBase, skillName, skillPath)
-	if s.IsFastMode() && llm.IsOpusLabel(s.CurrentModelOption()) {
-		agBase = llm.WithFast(agBase, true)
-	}
 	agWrapped, streamFlag, cleanup := s.prepareTUIAgentBase(sessionID, agBase)
 	defer cleanup()
 	var runIDOut string
@@ -2597,60 +2583,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	return nil
 }
 
-// IsFastMode reports the persisted /fast toggle for the active state.
-// Reads $FOREBRAIN_HOME/state/fast/<session>.json once per session and caches
-// the result; subsequent reads return the cached value until the session
-// changes or SetFastMode is called. Returns false on any read error.
-func (s *ChatSession) IsFastMode() bool {
-	if s == nil {
-		return false
-	}
-	sid := s.preferredSessionIDForFast()
-	s.fastMu.RLock()
-	if s.fastLoaded && s.fastSession == sid {
-		v := s.fastEnabled
-		s.fastMu.RUnlock()
-		return v
-	}
-	s.fastMu.RUnlock()
-	s.fastMu.Lock()
-	defer s.fastMu.Unlock()
-	if s.fastLoaded && s.fastSession == sid {
-		return s.fastEnabled
-	}
-	st, err := state.Fast(s.stateRoot(), sid)
-	if err != nil {
-		s.fastSession = sid
-		s.fastEnabled = false
-		s.fastLoaded = true
-		return false
-	}
-	s.fastSession = sid
-	s.fastEnabled = st.Enabled
-	s.fastLoaded = true
-	return s.fastEnabled
-}
-
-// SetFastMode persists the /fast toggle for the active session and updates
-// the in-memory cache. Caller is responsible for gating on model capability
-// (Opus only) before invoking this method.
-func (s *ChatSession) SetFastMode(enabled bool) error {
-	if s == nil {
-		return fmt.Errorf("chat session: nil")
-	}
-	sid := s.preferredSessionIDForFast()
-	if err := state.SetFast(s.stateRoot(), sid, enabled); err != nil {
-		return err
-	}
-	s.fastMu.Lock()
-	s.fastSession = sid
-	s.fastEnabled = enabled
-	s.fastLoaded = true
-	s.fastMu.Unlock()
-	return nil
-}
-
-func (s *ChatSession) preferredSessionIDForFast() string {
+func (s *ChatSession) preferredSessionID() string {
 	if s == nil {
 		return "default"
 	}
@@ -2882,7 +2815,7 @@ func (s *ChatSession) executeUserShellCommand(ctx context.Context, command strin
 	env := homepkg.SafeSubprocessEnv(os.Environ(), homepkg.Options{
 		ExplicitEnv: map[string]string{
 			"FOREBRAIN_HOME":       strings.TrimSpace(s.home()),
-			"FOREBRAIN_SESSION_ID": strings.TrimSpace(s.preferredSessionIDForFast()),
+			"FOREBRAIN_SESSION_ID": strings.TrimSpace(s.preferredSessionID()),
 		},
 	})
 	res, decision, err := manager.RunCommand(ctx, cfg, safety.CommandRequest{

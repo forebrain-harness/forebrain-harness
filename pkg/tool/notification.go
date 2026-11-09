@@ -236,7 +236,6 @@ var notificationContracts = map[string]notificationContract{
 	"auto-mode-unavailable": {Title: "Auto Mode", Type: "auto_mode_unavailable"},
 	"subscription-switch":   {Title: "Subscription", Type: "subscription_switch"},
 	"deprecation":           {Title: "Deprecation", Type: "deprecation"},
-	"fast-mode":             {Title: "Fast Mode", Type: "fast_mode"},
 	"ide-status":            {Title: "IDE Status", Type: "ide_status"},
 	"install-message":       {Title: "Installation", Type: "install_message"},
 	"mcp-connectivity":      {Title: "MCP Connectivity", Type: "mcp_connectivity"},

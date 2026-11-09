@@ -13,6 +13,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -435,14 +436,21 @@ func (r *PlanReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanR
 	// The reviewer model is chosen as a pair; the row it means is resolved
 	// here so a twin row of the same pair cannot serve the review instead.
 	modelID := run.ModelIDForAgentModel(r.Config, r.AgentName, r.Model.Provider, r.Model.Model)
+	override := run.SubagentModelOverride{ModelID: modelID, Provider: r.Model.Provider, Model: r.Model.Model}
+	task := turn.BuildPrompt(req)
+	// The images the user attached reach the reviewer the way they reach the
+	// conversation's own model, and a reviewer that cannot read them is
+	// refused here, before a run opens, with the reason and the way on.
+	var parts []llm.ContentPart
+	if images := planReviewImageParts(ctx, r.Runner, req.Images); len(images) > 0 {
+		if err := run.PlanReviewImageRefusal(ctx, r.Runner, llm.AgentSessionIDFromContext(ctx), override); err != nil {
+			return turn.PlanReviewResult{}, err
+		}
+		parts = append([]llm.ContentPart{llm.Text(task)}, images...)
+	}
 	runCtx := tool.WithStepHook(ctx, r.StepHook)
 	started := time.Now()
-	text, err := r.Runner.RunPlanReviewSubagent(
-		runCtx,
-		turn.BuildPrompt(req),
-		run.SubagentModelOverride{ModelID: modelID, Provider: r.Model.Provider, Model: r.Model.Model},
-		r.Approve,
-	)
+	text, err := r.Runner.RunPlanReviewSubagent(runCtx, task, parts, override, r.Approve)
 	if err != nil {
 		return turn.PlanReviewResult{}, err
 	}

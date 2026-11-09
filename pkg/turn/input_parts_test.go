@@ -846,8 +846,67 @@ func TestBuildPromptTruncatesAnOversizedPlan(t *testing.T) {
 	if !strings.Contains(prompt, "[truncated]") {
 		t.Fatal("an oversized plan must be marked as cut off, not silently shortened")
 	}
-	if len([]rune(prompt)) > MaxPlanChars+MaxTaskChars+400 {
+	if !strings.Contains(prompt, "do not report the cut as a gap in the plan") {
+		t.Fatalf("with no file to read, the reviewer must be told the cut is not the plan's:\n%s", prompt[:400])
+	}
+	if len([]rune(prompt)) > MaxPlanChars+MaxTaskChars+800 {
 		t.Fatalf("prompt is not bounded: %d runes", len([]rune(prompt)))
+	}
+}
+
+// The plan lives in the conversation's plan directory, not in the project: a
+// reviewer that is not told where looks for it in the repository and reports
+// it missing. The prompt names the file every time.
+func TestBuildPromptNamesThePlanFile(t *testing.T) {
+	const path = "/home/u/.forebrain/workspace/plans/proj/s1/plan.md"
+	prompt := BuildPrompt(Request{Task: "Add S3 sync.", Plan: "# Plan\n\n1. Ship it.", PlanPath: path})
+	if !strings.Contains(prompt, "The plan file is "+path) {
+		t.Fatalf("prompt must name the plan file:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "truncated") || strings.Contains(prompt, "only its first") {
+		t.Fatalf("a plan that fits must not read as cut:\n%s", prompt)
+	}
+}
+
+// A plan longer than the prompt carries is cut at a line, and the reviewer is
+// sent to the file for the rest — before the excerpt, where it stops, and in
+// the closing instruction — instead of reviewing the excerpt as the plan.
+func TestBuildPromptSendsTheReviewerToTheFileForALongPlan(t *testing.T) {
+	const path = "/home/u/.forebrain/workspace/plans/proj/s1/plan.md"
+	line := strings.Repeat("y", 99) + "\n"
+	plan := "# Plan\n" + strings.Repeat(line, MaxPlanChars/100+50) + "## Done criteria\nall green"
+	prompt := BuildPrompt(Request{Task: "Add S3 sync.", Plan: plan, PlanPath: path})
+	for _, want := range []string{
+		"Read the whole file with your read tools before you judge anything",
+		"[truncated: the plan continues in " + path + "]",
+		"Read the whole plan file first.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
+	}
+	if strings.Contains(prompt, "## Done criteria") {
+		t.Fatal("the excerpt must stop at the limit")
+	}
+	start := strings.Index(prompt, "<plan>\n") + len("<plan>\n")
+	end := strings.Index(prompt, "\n[truncated: ")
+	excerpt := prompt[start:end]
+	if !strings.HasSuffix(excerpt, strings.Repeat("y", 99)) {
+		t.Fatalf("the excerpt must end on a whole line, ends %q", excerpt[len(excerpt)-20:])
+	}
+	if len([]rune(excerpt)) > MaxPlanChars {
+		t.Fatalf("excerpt is %d runes, over %d", len([]rune(excerpt)), MaxPlanChars)
+	}
+}
+
+func TestBuildPromptSaysTheImagesComeWithTheRequest(t *testing.T) {
+	prompt := BuildPrompt(Request{Task: "<message n=\"1\">\nlike this\n</message>", Plan: "# Plan", Images: []RequestImage{{Message: 1}}})
+	if !strings.Contains(prompt, "The images the user attached follow this text") ||
+		!strings.Contains(prompt, "crop or enlarge it with a script") {
+		t.Fatalf("prompt must say the images and their files come with the request:\n%s", prompt)
+	}
+	if strings.Contains(BuildPrompt(Request{Task: "x", Plan: "# Plan"}), "The images the user attached") {
+		t.Fatal("a request without images must not mention them")
 	}
 }
 
@@ -1007,7 +1066,7 @@ func TestRemovedSlashCommandsAreNotRegistered(t *testing.T) {
 func TestExitIsTheTerminalsAlone(t *testing.T) {
 	t.Parallel()
 	visible := func(surface Surface) bool {
-		for _, cmd := range VisibleWithOptions(surface, DiscoveryOptions{FastAvailable: true}) {
+		for _, cmd := range VisibleWithOptions(surface, DiscoveryOptions{}) {
 			if cmd.Name == "exit" {
 				return true
 			}
@@ -1028,7 +1087,7 @@ func TestSharedCommandsVisibleOnWebchatAndTUI(t *testing.T) {
 	for _, name := range []string{"model"} {
 		for _, surface := range []Surface{SurfaceWebChat, SurfaceTUI} {
 			var found bool
-			for _, cmd := range VisibleWithOptions(surface, DiscoveryOptions{FastAvailable: true}) {
+			for _, cmd := range VisibleWithOptions(surface, DiscoveryOptions{}) {
 				if cmd.Name == name {
 					found = true
 					break

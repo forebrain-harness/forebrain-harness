@@ -63,55 +63,6 @@ func TestCompactUsesSurfaceCommandContext(t *testing.T) {
 	}
 }
 
-type fastSlashStub struct {
-	reply   string
-	handled bool
-}
-
-func (f fastSlashStub) HandleFastSlash(sessionID, channel string, args []string) (string, bool) {
-	return f.reply, f.handled
-}
-
-func TestExecFastRejectsWhenFastAvailableFalse(t *testing.T) {
-	res := Execute(Context{
-		Surface:       SurfaceTUI,
-		FastAvailable: false,
-		Fast:          fastSlashStub{reply: "fast: on", handled: true},
-	}, "/fast")
-	require.True(t, res.Handled)
-	require.Equal(t, "fast: unavailable for current model", res.Reply)
-}
-
-func TestExecFastRejectsWhenHandlerNil(t *testing.T) {
-	res := Execute(Context{
-		Surface:       SurfaceTUI,
-		FastAvailable: true,
-		Fast:          nil,
-	}, "/fast")
-	require.True(t, res.Handled)
-	require.Equal(t, "fast: unavailable (no fast handler wired)", res.Reply)
-}
-
-func TestExecFastDelegatesToFastSlashHandler(t *testing.T) {
-	res := Execute(Context{
-		Surface:       SurfaceTUI,
-		FastAvailable: true,
-		Fast:          fastSlashStub{reply: "fast: on (Anthropic priority service tier)", handled: true},
-	}, "/fast")
-	require.True(t, res.Handled)
-	require.Equal(t, "fast: on (Anthropic priority service tier)", res.Reply)
-}
-
-func TestExecFastFallbackWhenHandlerReturnsUnhandled(t *testing.T) {
-	res := Execute(Context{
-		Surface:       SurfaceTUI,
-		FastAvailable: true,
-		Fast:          fastSlashStub{reply: "", handled: false},
-	}, "/fast")
-	require.True(t, res.Handled)
-	require.Equal(t, "fast: unavailable", res.Reply)
-}
-
 func TestExecGoalWithObjective(t *testing.T) {
 	res := Execute(Context{Surface: SurfaceTUI}, "/goal ship the parser")
 	require.True(t, res.ShouldContinueRun, "ShouldContinueRun=false, want true")

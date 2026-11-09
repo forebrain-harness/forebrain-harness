@@ -65,13 +65,10 @@ func executeSlash(ctx Context, content string) Result {
 		return Result{Handled: true, Reply: fmt.Sprintf("/%s is unavailable in side conversations.", cmd.Name)}
 	}
 	// Argument shape precedes availability: a refusal for the argument is
-	// the same answer whatever the model supports, and /fast an-arg must not
+	// the same answer whatever the model supports, and /rename an-arg must not
 	// be answered with a model capability note.
 	if reply, refuse := InlineArgsRefusal(cmd.Name, toks[1:]); refuse {
 		return Result{Handled: true, Reply: reply}
-	}
-	if cmd.Name == "fast" && !ctx.FastAvailable {
-		return Result{Handled: true, Reply: "fast: unavailable for current model"}
 	}
 	if dyn, ok := findDynamic(cmd.Name); ok {
 		return dyn.Handler(ctx, line, toks)
@@ -102,8 +99,6 @@ func executeSlash(ctx Context, content string) Result {
 		return execStatus(ctx)
 	case "permissions":
 		return execPermissions(ctx, toks)
-	case "fast":
-		return execFast(ctx)
 	case "agent":
 		return execAgent(ctx)
 	case "subagents":
@@ -294,7 +289,7 @@ func surfaceInWords(surface Surface) string {
 }
 
 func discoveryOptionsOf(ctx Context) DiscoveryOptions {
-	return DiscoveryOptions{DuringRun: ctx.DuringRun, SideConversation: ctx.SideConversation, FastAvailable: ctx.FastAvailable}
+	return DiscoveryOptions{DuringRun: ctx.DuringRun, SideConversation: ctx.SideConversation}
 }
 
 func execNew(ctx Context) Result {
@@ -581,22 +576,6 @@ func execPermissions(ctx Context, toks []string) Result {
 	}
 	reply, handled := ctx.Permissions.HandlePermissionsSlash(ctx.SessionID, ctx.Channel, toks[1:])
 	return Result{Handled: handled, Reply: reply}
-}
-
-func execFast(ctx Context) Result {
-	if !ctx.FastAvailable {
-		return Result{Handled: true, Reply: "fast: unavailable (Anthropic Opus only)"}
-	}
-	if ctx.Fast == nil {
-		return Result{Handled: true, Reply: "fast: unavailable (no fast handler wired)"}
-	}
-	// No inline args: the toggle is the whole command, and the state is
-	// visible in the footer and /status.
-	reply, handled := ctx.Fast.HandleFastSlash(ctx.SessionID, ctx.Channel, nil)
-	if !handled {
-		return Result{Handled: true, Reply: "fast: unavailable"}
-	}
-	return Result{Handled: true, Reply: reply}
 }
 
 // execAgent answers /agent on a surface without the agent picker, the only

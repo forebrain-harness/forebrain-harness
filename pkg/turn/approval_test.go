@@ -1018,13 +1018,26 @@ func TestApprovalToolStepIDNamesTheGatedCall(t *testing.T) {
 
 func newPlanReviewTaskStore(t *testing.T) *state.SessionStore {
 	t.Helper()
+	store, _ := newPlanReviewTaskDB(t)
+	return store
+}
+
+func newPlanReviewTaskDB(t *testing.T) (*state.SessionStore, *sql.DB) {
+	t.Helper()
 	ctx := context.Background()
 	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	store := state.NewSessionStore(db, "main")
 	require.NoError(t, store.Ensure(ctx, "s1", "s1"))
-	return store
+	return store, db
+}
+
+func appendUserTurn(t *testing.T, store *state.SessionStore, text string) {
+	t.Helper()
+	require.NoError(t, store.AppendNewMessages(context.Background(), "s1", "", []llm.Message{
+		llm.UserMessage(llm.Text(text)),
+	}, "", ""))
 }
 
 func appendInvestigationRows(t *testing.T, store *state.SessionStore, n int) {
@@ -1058,7 +1071,7 @@ func TestPlanReviewTaskContextSurvivesALongInvestigation(t *testing.T) {
 		metaEnvironmentMessage(),
 	}, "", ""))
 
-	got := planReviewTaskContext(ctx, store, "s1")
+	got, _ := planReviewTaskContext(ctx, store, "s1")
 	require.Contains(t, got, "Add S3 sync to the skill installer.")
 	require.NotContains(t, got, "forebrain_environment_context")
 }
@@ -1073,43 +1086,169 @@ func TestPlanReviewTaskContextSkipsRuntimeMetaRows(t *testing.T) {
 		metaEnvironmentMessage(),
 	}, "", ""))
 
-	got := planReviewTaskContext(ctx, store, "s1")
+	got, _ := planReviewTaskContext(ctx, store, "s1")
 	require.Contains(t, got, "Add S3 sync to the skill installer.")
 	require.NotContains(t, got, "forebrain_environment_context")
 }
 
-// The newest turn is the request the plan is meant to serve, so the budget is
-// spent on it first: an older turn can be cut, never the newest one.
-func TestPlanReviewTaskContextKeepsTheNewestTurnWhole(t *testing.T) {
+// A long conversation is the case the review matters most for. Every message
+// the person sent reaches the reviewer, oldest first — the first one usually
+// states the task — however many turns and injected meta rows came since.
+func TestPlanReviewTaskContextKeepsEveryMessageOfALongConversation(t *testing.T) {
 	ctx := context.Background()
 	store := newPlanReviewTaskStore(t)
-	older := make([]llm.Message, 0, 5)
-	for i := 0; i < 5; i++ {
-		older = append(older, llm.UserMessage(llm.Text(
-			fmt.Sprintf("older turn %d: %s", i, strings.Repeat("a", 3000)),
-		)))
+	appendUserTurn(t, store, "/improve execute 282")
+	for i := 1; i <= 9; i++ {
+		require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{metaEnvironmentMessage()}, "", ""))
+		appendInvestigationRows(t, store, 20)
+		appendUserTurn(t, store, fmt.Sprintf("follow-up %d", i))
 	}
-	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", older, "", ""))
+
+	got, _ := planReviewTaskContext(ctx, store, "s1")
+	require.True(t, strings.HasPrefix(got, "<message n=\"1\">\n/improve execute 282\n</message>"), got)
+	last := -1
+	for i := 1; i <= 9; i++ {
+		at := strings.Index(got, fmt.Sprintf("<message n=\"%d\">\nfollow-up %d\n</message>", i+1, i))
+		require.Greater(t, at, last, "follow-up %d missing or out of order:\n%s", i, got)
+		last = at
+	}
+	require.NotContains(t, got, "forebrain_environment_context")
+	require.NotContains(t, got, "left out")
+}
+
+// What the user decided in a form and what they said when they sent a plan
+// back are as binding as their messages. A denial the engine wrote to deliver
+// a review is not the user's and stays out.
+func TestPlanReviewTaskContextCarriesAnswersAndPlanFeedback(t *testing.T) {
+	ctx := context.Background()
+	store, db := newPlanReviewTaskDB(t)
+	actions := &state.ActionService{DB: db}
+	appendUserTurn(t, store, "Add S3 sync to the skill installer.")
+
+	ask, err := actions.CreateAsk(ctx, state.AskForm{SessionID: "s1", Questions: []state.AskQuestion{{
+		ID: "Scope", Prompt: "Sync on install only, or on every run?",
+		Options: []state.AskOption{{ID: "Install only", Label: "Install only"}, {ID: "Every run", Label: "Every run"}},
+	}}})
+	require.NoError(t, err)
+	_, err = actions.AnswerAsk(ctx, ask.ID, state.AskAnswer{Answers: []state.AskAnswerItem{
+		{QuestionID: "Scope", OptionIDs: []string{"Install only"}},
+	}})
+	require.NoError(t, err)
+
+	rejected, err := actions.CreatePending(ctx, "s1", "exit_plan_mode", map[string]any{"action": "exit"})
+	require.NoError(t, err)
+	_, err = actions.Deny(ctx, rejected.ID, "Keep the old bucket layout.")
+	require.NoError(t, err)
+
+	delivered, err := actions.CreatePending(ctx, "s1", "exit_plan_mode", map[string]any{"action": "exit"})
+	require.NoError(t, err)
+	_, err = DeliverPlanReview(ctx, actions, delivered.ID)
+	require.NoError(t, err)
+
+	got, _ := planReviewTaskContext(ctx, store, "s1")
+	require.Contains(t, got, "<message n=\"1\">\nAdd S3 sync to the skill installer.\n</message>")
+	require.Contains(t, got, "<answers>\nSync on install only, or on every run?\n  → Install only\n</answers>")
+	require.Contains(t, got, "<plan_feedback>\nKeep the old bucket layout.\n</plan_feedback>")
+	require.NotContains(t, got, PlanReviewDeliveredReason)
+	require.Less(t, strings.Index(got, "<message"), strings.Index(got, "<answers>"))
+}
+
+// When everything does not fit, the newest message — what the plan is for —
+// and the first one — what started the work — are kept, the rest fills from
+// newest back, and what is left out is said so where it was. The result fits
+// the bound BuildPrompt applies, so BuildPrompt never cuts the newest entry
+// off the end.
+func TestPlanReviewTaskContextKeepsTheFirstAndNewestMessageWhenItDoesNotFit(t *testing.T) {
+	ctx := context.Background()
+	store := newPlanReviewTaskStore(t)
+	appendUserTurn(t, store, "Add S3 sync to the skill installer.")
+	for i := 0; i < 12; i++ {
+		appendUserTurn(t, store, fmt.Sprintf("middle turn %d: %s", i, strings.Repeat("a", 3000)))
+	}
+	appendUserTurn(t, store, "Now also cover the uninstall path.")
+
+	got, _ := planReviewTaskContext(ctx, store, "s1")
+	require.True(t, strings.HasPrefix(got, "<message n=\"1\">\nAdd S3 sync to the skill installer.\n</message>"), got[:200])
+	require.True(t, strings.HasSuffix(got, "<message n=\"14\">\nNow also cover the uninstall path.\n</message>"))
+	require.Regexp(t, `</message>\n\n\[\d+ entries left out to fit the length limit\]\n\n<message n="\d+">\nmiddle turn`, got)
+	require.Contains(t, got, "middle turn 11:", "the newest middle turns are kept before older ones")
+	require.NotContains(t, got, "middle turn 0:")
+	require.LessOrEqual(t, len([]rune(got)), MaxTaskChars)
+	require.Equal(t, got, strings.TrimSpace(Truncate(got, MaxTaskChars)))
+}
+
+// A screenshot is part of what the user said. Every message that attached
+// one is handed over with its number, whether or not its text fit, and a
+// message that sent only images keeps its place in the request.
+func TestPlanReviewTaskContextHandsOverEveryMessagesImages(t *testing.T) {
+	ctx := context.Background()
+	store := newPlanReviewTaskStore(t)
+	appendUserTurn(t, store, "Fix the header colour.")
 	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
-		llm.UserMessage(llm.Text("Add S3 sync to the skill installer.")),
+		llm.UserMessage(llm.Text("[Image #1] like this"), llm.ImageBase64("image/png", "iVBORw0KGgo=")),
+	}, "", ""))
+	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
+		llm.UserMessage(llm.ImageBase64("image/png", "iVBORw0KGgo=")),
 	}, "", ""))
 
-	got := planReviewTaskContext(ctx, store, "s1")
-	require.Contains(t, got, "Add S3 sync to the skill installer.")
-	// MaxTaskChars of turn text, the "\n[truncated]" marker on the turn that
-	// hit the budget, and the "\n\n" separators between the kept turns.
-	overrun := len([]rune("\n[truncated]")) + 2*(planReviewTaskMessages-1)
-	require.LessOrEqual(t, len([]rune(got)), MaxTaskChars+overrun)
+	got, images := planReviewTaskContext(ctx, store, "s1")
+	require.Contains(t, got, "<message n=\"2\">\n[Image #1] like this\n</message>")
+	require.Contains(t, got, "<message n=\"3\">\n"+planReviewImageOnly+"\n</message>")
+	require.Len(t, images, 2)
+	require.Equal(t, 2, images[0].Message)
+	require.Equal(t, 3, images[1].Message)
+	require.Contains(t, images[0].PartsJSON, "iVBORw0KGgo=")
+}
+
+// A failure the engine classified travels with its code, so a surface can say
+// it in the viewer's language; the sentence stays for everything else.
+func TestRunPlanReviewCarriesAClassifiedFailuresCode(t *testing.T) {
+	ctx := context.Background()
+	stateRoot := t.TempDir()
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", "s1", "# Plan"))
+	var events []event.RunEvent
+	err := RunPlanReview(ctx, PlanReviewRun{
+		ActionID: "a1", Model: Model{Provider: "acme", Model: "text-only"},
+		SessionID: "s1", StateRoot: stateRoot, ProjectKey: "proj",
+		Reviewer: failingReviewer{err: codedReviewError{code: "image_input_unsupported"}},
+		Publish: func(_ context.Context, evt event.RunEvent) error {
+			events = append(events, evt)
+			return nil
+		},
+	})
+	require.Error(t, err)
+	var reviewed event.PlanReviewedPayload
+	for _, evt := range events {
+		if evt.Type == event.RunEventPlanReviewed {
+			require.NoError(t, json.Unmarshal(evt.Payload, &reviewed))
+		}
+	}
+	require.Equal(t, planReviewOutcomeFailed, reviewed.Outcome)
+	require.Equal(t, "image_input_unsupported", reviewed.Code)
+	require.Equal(t, "coded failure", reviewed.Error)
+}
+
+type codedReviewError struct{ code string }
+
+func (e codedReviewError) Error() string { return "coded failure" }
+func (e codedReviewError) Code() string  { return e.code }
+
+type failingReviewer struct{ err error }
+
+func (r failingReviewer) Review(context.Context, Request) (PlanReviewResult, error) {
+	return PlanReviewResult{}, r.err
 }
 
 type recordingReviewer struct {
-	task string
-	plan string
+	task     string
+	plan     string
+	planPath string
 }
 
 func (r *recordingReviewer) Review(_ context.Context, req Request) (PlanReviewResult, error) {
 	r.task = req.Task
 	r.plan = req.Plan
+	r.planPath = req.PlanPath
 	return PlanReviewResult{Model: req.Model, Text: "looks fine"}, nil
 }
 
@@ -1134,4 +1273,5 @@ func TestRunPlanReviewHandsTheRequestToTheReviewer(t *testing.T) {
 	}))
 	require.Contains(t, reviewer.task, "Add S3 sync to the skill installer.")
 	require.Contains(t, reviewer.plan, "# Plan")
+	require.Equal(t, state.PlanPathForSession(stateRoot, "proj", "s1"), reviewer.planPath)
 }

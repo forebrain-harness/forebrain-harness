@@ -1790,7 +1790,7 @@ func PrimaryEndpoint(r *Runner) string {
 // surface already knows.
 func SubagentOwnModel(r *Runner, agentType string) (modelID, provider, model, effort string, ok bool) {
 	agentType = strings.TrimSpace(agentType)
-	if r == nil || r.AppCfg == nil || agentType == "" {
+	if r == nil || r.Deps == nil || r.AppCfg == nil || agentType == "" {
 		return "", "", "", "", false
 	}
 	if modelID, provider, model, effort, ok := SubagentCatalogFor(r.AppCfg, r.activeAgentNameForModel()).Model(agentType); ok {

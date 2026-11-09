@@ -1048,7 +1048,7 @@ func TestCacheBaselineCoversSupportedProviders(t *testing.T) {
 		"anthropic": "anthropic/claude-opus-4-6",
 		"openai":    "openai/gpt-5",
 		// Measured on glm-5.3-flash (the cache-optimization pass's probe
-		// model); re-record all six cases together if this ever moves.
+		// model); re-record all five cases together if this ever moves.
 		"zhipuai":  "zhipuai/glm-5.3-flash",
 		"deepseek": "deepseek/deepseek-v4-pro",
 		"kimi":     "moonshotai/kimi-k3",
@@ -1059,7 +1059,7 @@ func TestCacheBaselineCoversSupportedProviders(t *testing.T) {
 		if !ok || run.Model != model {
 			t.Fatalf("baseline %s = %#v, want model %q", provider, run, model)
 		}
-		for _, name := range []string{"long_tool_turn", "approval_resume", "compaction", "agent_switch", "fast_mode", "subagent"} {
+		for _, name := range []string{"long_tool_turn", "approval_resume", "compaction", "agent_switch", "subagent"} {
 			if _, ok := run.Cases[name]; !ok {
 				t.Fatalf("baseline %s misses case %q", provider, name)
 			}

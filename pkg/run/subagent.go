@@ -4233,8 +4233,12 @@ const PlanReviewApprovalBudget = SubagentApprovalBudget
 // which model answers: the approval overlay asks, and override pins the model
 // the user picked. Everything the UI keys off — roster row, per-agent screen,
 // cancel-by-row — therefore behaves exactly as it does for subagent_run.
+//
+// parts, when given, is the whole first message — the task's text part first,
+// then what it carries (the images the user attached to the conversation) —
+// as a user turn's InputParts are.
 func (r *Runner) RunPlanReviewSubagent(
-	ctx context.Context, task string, override SubagentModelOverride, approve PlanReviewApprovalFunc,
+	ctx context.Context, task string, parts []llm.ContentPart, override SubagentModelOverride, approve PlanReviewApprovalFunc,
 ) (string, error) {
 	if r == nil {
 		return "", fmt.Errorf("plan review requires a runner")
@@ -4266,7 +4270,7 @@ func (r *Runner) RunPlanReviewSubagent(
 		// sees, so it resolves against every built-in rather than the public set.
 		resolve: agent.ResolveSubtype,
 		run: func(_ context.Context, fac Factory, prep preparedSubagent) (string, error) {
-			return r.runPlanReviewAcrossApprovals(subagentExecContext(prep), fac, prep, approve)
+			return r.runPlanReviewAcrossApprovals(subagentExecContext(prep), fac, prep, parts, approve)
 		},
 	})
 	if err != nil {
@@ -4348,13 +4352,13 @@ func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID
 // request can be put to the user in that place and the run resumed with the
 // answer. A reviewer is never refused a tool for lack of an approval path.
 func (r *Runner) runPlanReviewAcrossApprovals(
-	ctx context.Context, fac Factory, prep preparedSubagent, approve PlanReviewApprovalFunc,
+	ctx context.Context, fac Factory, prep preparedSubagent, parts []llm.ContentPart, approve PlanReviewApprovalFunc,
 ) (string, error) {
 	return runSubagentExecution(ctx, fac, prep.entry, func(execCtx context.Context) (string, error) {
 		return runAcrossApprovals(execCtx, approve, prep.superviseRunID, "plan review",
 			func(runCtx context.Context, superviseRunID string) (string, error) {
 				return executeSubagent(
-					runCtx, fac, prep.entry, prep.task, nil, superviseRunID, prep.parentRunID,
+					runCtx, fac, prep.entry, prep.task, parts, superviseRunID, prep.parentRunID,
 					prep.sessionID, prep.workerSessionID, prep.subagentType,
 				)
 			})

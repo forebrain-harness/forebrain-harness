@@ -13,20 +13,17 @@ import (
 
 // scriptedLLM returns one fixed usage per call, in order, so
 // recordLongToolTurn can be tested without a live provider. It also records
-// each call's system prompt and whether llm.Fast(ctx) was set, so tests
-// can confirm recordAgentSwitch actually varies the prefix and
-// recordFastMode actually threads the fast-mode signal through.
+// each call's system prompt, so tests can confirm recordAgentSwitch actually
+// varies the prefix.
 type scriptedLLM struct {
 	calls        int
 	usage        []llm.Usage
-	sawFast      []bool
 	sawSystemMsg []string
 }
 
 func (m *scriptedLLM) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
 	u := m.usage[m.calls]
 	m.calls++
-	m.sawFast = append(m.sawFast, llm.Fast(ctx))
 	system := ""
 	for _, msg := range messages {
 		if msg.Role == llm.RoleSystem {
@@ -56,22 +53,6 @@ func TestRecordLongToolTurnReturnsLastCallUsage(t *testing.T) {
 	}
 	if client.calls != 3 {
 		t.Fatalf("calls = %d, want 3 (one cold turn + two follow-ups)", client.calls)
-	}
-}
-
-func TestRecordFastModeThreadsFastSignalToEveryCall(t *testing.T) {
-	client := &scriptedLLM{usage: []llm.Usage{
-		{InputTokens: 800},
-		{InputTokens: 200, CacheReadInputTokens: 600},
-		{InputTokens: 150, CacheReadInputTokens: 700},
-	}}
-	if _, err := recordFastMode(client); err != nil {
-		t.Fatalf("recordFastMode: %v", err)
-	}
-	for i, fast := range client.sawFast {
-		if !fast {
-			t.Fatalf("sawFast[%d] = false, want true (recordFastMode must set llm.WithFast on every call)", i)
-		}
 	}
 }
 
@@ -207,7 +188,6 @@ func TestWriteReportUpdatesOnlyTargetCaseAndPreservesOthers(t *testing.T) {
 				"approval_resume": {Read: 4, Creation: 5, Input: 6},
 				"compaction":      {Read: 7, Creation: 8, Input: 9},
 				"agent_switch":    {Read: 10, Creation: 11, Input: 12},
-				"fast_mode":       {Read: 13, Creation: 14, Input: 15},
 				"subagent":        {Read: 16, Creation: 17, Input: 18},
 			},
 		},

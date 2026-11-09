@@ -47,29 +47,50 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		MySQL:    `DELETE FROM fb_file_changes WHERE session_id=? AND path=?`,
 		Postgres: `DELETE FROM fb_file_changes WHERE session_id=$1 AND path=$2`,
 	}
+	// No LIMIT: meta rows are told apart in Go, so a row limit would count
+	// them too, and a long run of injected rows would hide the person's own
+	// message behind it. The reader stops at the first message it keeps.
 	latestUserMessageRowSelectSQL = dbx.SQL{
-		SQLite:   `SELECT id, parts FROM fb_messages WHERE session_id=? AND role='user' AND visibility=? ORDER BY id DESC LIMIT 40`,
-		MySQL:    `SELECT id, parts FROM fb_messages WHERE session_id=? AND role='user' AND visibility=? ORDER BY id DESC LIMIT 40`,
-		Postgres: `SELECT id, parts FROM fb_messages WHERE session_id=$1 AND role='user' AND visibility=$2 ORDER BY id DESC LIMIT 40`,
+		SQLite:   `SELECT id, parts FROM fb_messages WHERE session_id=? AND role='user' AND visibility=? ORDER BY id DESC`,
+		MySQL:    `SELECT id, parts FROM fb_messages WHERE session_id=? AND role='user' AND visibility=? ORDER BY id DESC`,
+		Postgres: `SELECT id, parts FROM fb_messages WHERE session_id=$1 AND role='user' AND visibility=$2 ORDER BY id DESC`,
 	}
 	userMessageContentSQL = dbx.SQL{
 		SQLite:   `SELECT content FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
 		MySQL:    `SELECT content FROM fb_messages WHERE id=? AND session_id=? AND role='user'`,
 		Postgres: `SELECT content FROM fb_messages WHERE id=$1 AND session_id=$2 AND role='user'`,
 	}
+	// No LIMIT, for the reason latestUserMessageRowSelectSQL gives: the
+	// reader counts the messages it keeps and stops there.
 	visibleUserMessagesSQL = dbx.SQL{
 		SQLite: `
-SELECT id, content, parts FROM fb_messages
+SELECT id, content, parts, created_at FROM fb_messages
 WHERE session_id=? AND role='user' AND visibility=?
-ORDER BY id DESC LIMIT ?`,
+ORDER BY id DESC`,
 		MySQL: `
-SELECT id, content, parts FROM fb_messages
+SELECT id, content, parts, created_at FROM fb_messages
 WHERE session_id=? AND role='user' AND visibility=?
-ORDER BY id DESC LIMIT ?`,
+ORDER BY id DESC`,
 		Postgres: `
-SELECT id, content, parts FROM fb_messages
+SELECT id, content, parts, created_at FROM fb_messages
 WHERE session_id=$1 AND role='user' AND visibility=$2
-ORDER BY id DESC LIMIT $3`,
+ORDER BY id DESC`,
+	}
+	// A rewind that took the conversation back hid its anchor message; one
+	// that only restored files left it visible and discarded nothing said.
+	rewoundStretchesSQL = dbx.SQL{
+		SQLite: `
+SELECT m.created_at, r.created_at_ms FROM fb_rewinds r
+JOIN fb_messages m ON m.id = r.anchor_message_id
+WHERE r.session_id=? AND m.visibility=?`,
+		MySQL: `
+SELECT m.created_at, r.created_at_ms FROM fb_rewinds r
+JOIN fb_messages m ON m.id = r.anchor_message_id
+WHERE r.session_id=? AND m.visibility=?`,
+		Postgres: `
+SELECT m.created_at, r.created_at_ms FROM fb_rewinds r
+JOIN fb_messages m ON m.id = r.anchor_message_id
+WHERE r.session_id=$1 AND m.visibility=$2`,
 	}
 	insertRewindSQL = dbx.SQL{
 		SQLite: `
@@ -296,22 +317,30 @@ func (s *SessionStore) UserMessageContent(ctx context.Context, sessionID string,
 	return content, true, nil
 }
 
-// UserMessageRef is one visible user message a rewind can target.
+// UserMessageRef is one visible message the person sent.
 type UserMessageRef struct {
 	RowID   int64
 	Content string
+	// PartsJSON is the row's stored parts: the images and files the message
+	// attached, read back through run.UserInputParts the way history is.
+	PartsJSON string
+	// CreatedAt is when the row was stored, in Unix seconds.
+	CreatedAt int64
 }
 
-// ListVisibleUserMessages returns a conversation's visible user messages,
-// newest first: the rows a "rewind to before a message" picker lists.
+// ListVisibleUserMessages returns up to limit of a conversation's visible
+// user messages, newest first — every one when limit is not positive. These
+// are the rows a "rewind to before a message" picker lists and the request a
+// plan reviewer is handed.
+//
+// The limit counts the person's messages, not user rows: the runtime injects
+// meta user rows too (the environment block, reminders, other agents'
+// messages), and a turn can inject dozens of them in a row.
 func (s *SessionStore) ListVisibleUserMessages(ctx context.Context, sessionID string, limit int) ([]UserMessageRef, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("list user messages: session store unavailable")
 	}
-	if limit <= 0 {
-		limit = 200
-	}
-	rows, err := s.db.QueryContext(ctx, visibleUserMessagesSQL.For(dbx.DialectOf(s.db)), strings.TrimSpace(sessionID), messageVisible, limit)
+	rows, err := s.db.QueryContext(ctx, visibleUserMessagesSQL.For(dbx.DialectOf(s.db)), strings.TrimSpace(sessionID), messageVisible)
 	if err != nil {
 		return nil, err
 	}
@@ -319,16 +348,16 @@ func (s *SessionStore) ListVisibleUserMessages(ctx context.Context, sessionID st
 	out := []UserMessageRef{}
 	for rows.Next() {
 		var r UserMessageRef
-		var parts string
-		if err := rows.Scan(&r.RowID, &r.Content, &parts); err != nil {
+		if err := rows.Scan(&r.RowID, &r.Content, &r.PartsJSON, &r.CreatedAt); err != nil {
 			return nil, err
 		}
-		// The runtime-injected environment block is a user row too; it is not
-		// something the person sent, so it is not a rewind target.
-		if _, _, _, isMeta := ParseMessageParts(parts, ""); isMeta {
+		if _, _, _, isMeta := ParseMessageParts(r.PartsJSON, ""); isMeta {
 			continue
 		}
 		out = append(out, r)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	return out, rows.Err()
 }

@@ -609,6 +609,10 @@ type PlanReviewedPayload struct {
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	Outcome    string `json:"outcome"`
 	Error      string `json:"error,omitempty"`
+	// Code classifies a failure a surface says in the viewer's own language
+	// (run.ImageInputRefusedCode, run.ImageRejectedCode); Error stays the
+	// engine's sentence for everything else.
+	Code string `json:"code,omitempty"`
 }
 
 type ModeChangedPayload struct {

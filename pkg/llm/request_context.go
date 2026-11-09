@@ -97,33 +97,6 @@ func NotifyExternalContext(ctx context.Context) {
 	}
 }
 
-// fastCtxKey is separate from requestCtxKey so the two cannot collide.
-type fastCtxKey struct{}
-
-// WithFast threads the per-turn /fast toggle through context. A surface sets
-// it before invoking the runner; the Anthropic client reads it inside Execute
-// to send service_tier=auto. Other providers ignore it, having no equivalent
-// knob.
-//
-// It lives here rather than in pkg/agent because it is a property of the LLM
-// request, and because a Layer 0 provider package cannot import agent: agent
-// already depends on llm, so the edge would close a cycle.
-func WithFast(ctx context.Context, enabled bool) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, fastCtxKey{}, enabled)
-}
-
-// Fast reports whether the current turn asked for fast mode.
-func Fast(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	v, _ := ctx.Value(fastCtxKey{}).(bool)
-	return v
-}
-
 // Observability ports for provider clients.
 //
 // A provider client has to wrap its HTTP transport for tracing and emit the

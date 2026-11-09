@@ -142,9 +142,6 @@ func (r *recordingSlashHandlers) SwitchPrimaryAgent(_ context.Context, id string
 	r.record("switch", id, nil)
 	return PrimaryAgent{ID: id, WorkspaceRoot: "/w/" + id, Active: true}, nil
 }
-func (r *recordingSlashHandlers) HandleFastSlash(sessionID, _ string, args []string) (string, bool) {
-	return r.record("fast", sessionID, args)
-}
 
 func contextForSurface(h *recordingSlashHandlers, surface Surface, channel, home string) Context {
 	return Context{
@@ -154,7 +151,6 @@ func contextForSurface(h *recordingSlashHandlers, surface Surface, channel, home
 		SessionID:      "sid-1",
 		Channel:        channel,
 		Surface:        surface,
-		FastAvailable:  true,
 		Compact:        h,
 		Clear:          h,
 		ContextDebug:   h,
@@ -164,7 +160,6 @@ func contextForSurface(h *recordingSlashHandlers, surface Surface, channel, home
 		Sandbox:        h,
 		Model:          h,
 		Agent:          h,
-		Fast:           h,
 		Memories:       h,
 	}
 }
@@ -190,7 +185,6 @@ func TestSharedSlashCommandsDispatchIdenticallyOnBothSurfaces(t *testing.T) {
 		"/diff HEAD~1",
 		"/model",
 		"/agent",
-		"/fast",
 		"/memories",
 	}
 	for _, input := range inputs {
@@ -449,7 +443,6 @@ func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
 		"plan":   SubagentViewHidden,
 		"agent":  SubagentViewHidden,
 		"model":  SubagentViewHidden,
-		"fast":   SubagentViewHidden,
 		"goal":   SubagentViewHidden,
 	}
 	for _, cmd := range commands {
@@ -477,7 +470,7 @@ func TestSubagentViewHidesConversationCommands(t *testing.T) {
 	for _, cmd := range VisibleWithOptions(SurfaceTUI, DiscoveryOptions{SubagentView: true}) {
 		listed[cmd.Name] = true
 	}
-	for _, hidden := range []string{"new", "resume", "fork", "rename", "init", "clear", "plan", "agent", "model", "fast", "goal", "compact"} {
+	for _, hidden := range []string{"new", "resume", "fork", "rename", "init", "clear", "plan", "agent", "model", "goal", "compact"} {
 		if listed[hidden] {
 			t.Fatalf("the subagent view must hide /%s", hidden)
 		}

@@ -2802,208 +2802,15 @@ func TestInstallSkillPackageAsyncReportsFailure(t *testing.T) {
 	}
 }
 
-func newOpusChatSession(t *testing.T) *ChatSession {
-	t.Helper()
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "anthropic", Model: "claude-opus-4-7"}}},
-	}}}
-	home := t.TempDir()
-	return sessionEnv{Home: home, Config: cfg, Runner: &run.Runner{Deps: &run.Deps{Home: home, AppCfg: &cfg}}}.session()
-}
-
-func newSonnetChatSession(t *testing.T) *ChatSession {
-	t.Helper()
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "anthropic", Model: "claude-sonnet-4-6"}}},
-	}}}
-	home := t.TempDir()
-	return sessionEnv{Home: home, Config: cfg, Runner: &run.Runner{Deps: &run.Deps{Home: home, AppCfg: &cfg}}}.session()
-}
-
-func TestHandleFastSlashRejectsNonOpusModel(t *testing.T) {
-	s := newSonnetChatSession(t)
-	reply, handled := s.HandleFastSlash("s1", "tui", nil)
-	require.True(t, handled)
-	require.Equal(t, "fast: unavailable (current model is not Anthropic Opus)", reply)
-	require.False(t, s.IsFastMode())
-}
-
-func TestHandleFastSlashToggleOnThenOff(t *testing.T) {
-	s := newOpusChatSession(t)
-	require.False(t, s.IsFastMode())
-
-	reply, handled := s.HandleFastSlash("s1", "tui", nil)
-	require.True(t, handled)
-	require.Equal(t, "fast: on (Anthropic priority service tier)", reply)
-	require.True(t, s.IsFastMode())
-
-	reply, handled = s.HandleFastSlash("s1", "tui", nil)
-	require.True(t, handled)
-	require.Equal(t, "fast: off", reply)
-	require.False(t, s.IsFastMode())
-}
-
-func TestHandleFastSlashExplicitOnOff(t *testing.T) {
-	s := newOpusChatSession(t)
-
-	reply, handled := s.HandleFastSlash("s1", "tui", []string{"on"})
-	require.True(t, handled)
-	require.Equal(t, "fast: on (Anthropic priority service tier)", reply)
-	require.True(t, s.IsFastMode())
-
-	reply, handled = s.HandleFastSlash("s1", "tui", []string{"on"})
-	require.True(t, handled)
-	require.Equal(t, "fast: already on", reply)
-
-	reply, handled = s.HandleFastSlash("s1", "tui", []string{"off"})
-	require.True(t, handled)
-	require.Equal(t, "fast: off", reply)
-	require.False(t, s.IsFastMode())
-
-	reply, handled = s.HandleFastSlash("s1", "tui", []string{"off"})
-	require.True(t, handled)
-	require.Equal(t, "fast: already off", reply)
-}
-
-func TestHandleFastSlashStatus(t *testing.T) {
-	s := newOpusChatSession(t)
-
-	reply, handled := s.HandleFastSlash("s1", "tui", []string{"status"})
-	require.True(t, handled)
-	require.Equal(t, "fast: off", reply)
-
-	require.NoError(t, s.SetFastMode(true))
-	reply, handled = s.HandleFastSlash("s1", "tui", []string{"status"})
-	require.True(t, handled)
-	require.Equal(t, "fast: on", reply)
-}
-
-func TestHandleFastSlashUnknownAction(t *testing.T) {
-	s := newOpusChatSession(t)
-	reply, handled := s.HandleFastSlash("s1", "tui", []string{"bogus"})
-	require.True(t, handled)
-	require.Equal(t, "fast: usage /fast [on|off|status]", reply)
-}
-
-func TestSetFastModePersistsAcrossInstances(t *testing.T) {
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "anthropic", Model: "claude-opus-4-7"}}},
-	}}}
-	home := t.TempDir()
-	s1 := sessionEnv{Home: home, Config: cfg, Runner: &run.Runner{Deps: &run.Deps{Home: home, AppCfg: &cfg}}}.session()
-	require.NoError(t, s1.SetFastMode(true))
-
-	s2 := sessionEnv{Home: home, Config: cfg, Runner: &run.Runner{Deps: &run.Deps{Home: home, AppCfg: &cfg}}}.session()
-	require.True(t, s2.IsFastMode())
-}
-
-func TestIsFastModeNilSession(t *testing.T) {
+func TestPreferredSessionIDNilSession(t *testing.T) {
 	var s *ChatSession
-	require.False(t, s.IsFastMode())
-}
-
-func TestIsFastModeOnRequestsToFalse(t *testing.T) {
-	s := newOpusChatSession(t)
-	require.False(t, s.IsFastMode())
-}
-
-func TestIsFastModeCachesAcrossReads(t *testing.T) {
-	s := newOpusChatSession(t)
-	require.NoError(t, s.SetFastMode(true))
-
-	// First read loads from disk
-	require.True(t, s.IsFastMode())
-
-	// Second read uses cache
-	require.True(t, s.IsFastMode())
-}
-
-func TestIsFastModeReturnsZeroOnReadError(t *testing.T) {
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "anthropic", Model: "claude-opus-4-7"}}},
-	}}}
-	// Use invalid home path to trigger read error
-	s := sessionEnv{Home: "/dev/null/invalid", Config: cfg, Runner: &run.Runner{Deps: &run.Deps{Home: "/dev/null/invalid", AppCfg: &cfg}}}.session()
-	require.False(t, s.IsFastMode())
-}
-
-func TestSetFastModeNilSession(t *testing.T) {
-	var s *ChatSession
-	err := s.SetFastMode(true)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "nil")
-}
-
-func TestSetFastModeUpdatesCache(t *testing.T) {
-	s := newOpusChatSession(t)
-	require.False(t, s.IsFastMode())
-
-	require.NoError(t, s.SetFastMode(true))
-	require.True(t, s.IsFastMode())
-
-	require.NoError(t, s.SetFastMode(false))
-	require.False(t, s.IsFastMode())
-}
-
-func TestFastContextFlowOpusEnabled(t *testing.T) {
-	s := newOpusChatSession(t)
-	require.NoError(t, s.SetFastMode(true))
-
-	// Simulate the dispatchUserTurnContent flow
-	ctx := context.Background()
-	if s.IsFastMode() && s.CurrentModelOption() == "anthropic/claude-opus-4-7" {
-		ctx = llm.WithFast(ctx, true)
-	}
-
-	require.True(t, llm.Fast(ctx))
-}
-
-func TestFastContextFlowOpusDisabled(t *testing.T) {
-	s := newOpusChatSession(t)
-	require.NoError(t, s.SetFastMode(false))
-
-	ctx := context.Background()
-	if s.IsFastMode() && s.CurrentModelOption() == "anthropic/claude-opus-4-7" {
-		ctx = llm.WithFast(ctx, true)
-	}
-
-	require.False(t, llm.Fast(ctx))
-}
-
-func TestFastContextFlowSonnetIgnored(t *testing.T) {
-	s := newSonnetChatSession(t)
-	// SetFastMode doesn't validate model - it's the caller's responsibility
-	// But the dispatch flow checks both IsFastMode AND IsOpusLabel
-	require.NoError(t, s.SetFastMode(true))
-
-	ctx := context.Background()
-	// This simulates the actual dispatchUserTurnContent logic:
-	// if s.IsFastMode() && modelcatalog.IsOpusLabel(s.CurrentModelOption()) {
-	//     agBase = llm.WithFast(agBase, true)
-	// }
-	// For Sonnet, IsOpusLabel returns false, so context is NOT set
-	modelLabel := s.CurrentModelOption()
-	require.Contains(t, modelLabel, "sonnet")
-
-	// Import modelcatalog to test the actual condition
-	// Since we can't import here without circular deps, we test the behavior:
-	// IsFastMode is true, but the model check would fail
-	require.True(t, s.IsFastMode())
-
-	// The context should NOT be set because Sonnet is not Opus
-	// (in production, the IsOpusLabel check prevents this)
-	require.False(t, llm.Fast(ctx))
-}
-
-func TestPreferredSessionIDForFastNilSession(t *testing.T) {
-	var s *ChatSession
-	sid := s.preferredSessionIDForFast()
+	sid := s.preferredSessionID()
 	require.Equal(t, "default", sid)
 }
 
-func TestPreferredSessionIDForFastEmptySession(t *testing.T) {
+func TestPreferredSessionIDEmptySession(t *testing.T) {
 	s := &ChatSession{}
-	sid := s.preferredSessionIDForFast()
+	sid := s.preferredSessionID()
 	require.Equal(t, "default", sid)
 }
 
@@ -13782,8 +13589,8 @@ func runSharedReview(
 
 type stubReviewTranscripts struct{ text string }
 
-func (s stubReviewTranscripts) ListVisibleUserMessages(context.Context, string, int) ([]state.UserMessageRef, error) {
-	return []state.UserMessageRef{{RowID: 1, Content: s.text}}, nil
+func (s stubReviewTranscripts) ListUserInputs(context.Context, string) ([]state.UserInput, error) {
+	return []state.UserInput{{Message: &state.UserMessageRef{RowID: 1, Content: s.text}}}, nil
 }
 
 // fakeSubagentExecutor records how each review run was dispatched and replays a

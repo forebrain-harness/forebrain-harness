@@ -874,23 +874,6 @@ func SetGlobalCatalogForTest(cat *Catalog) {
 	globalCatMu.Unlock()
 }
 
-// IsOpus reports whether (provider, apiModel) refers to an Anthropic Opus
-// variant. The Anthropic /fast service tier is gated to Opus models; other
-// Anthropic models (Sonnet, Haiku) and non-Anthropic providers return false.
-func IsOpus(provider, apiModel string) bool {
-	if !strings.EqualFold(strings.TrimSpace(provider), "anthropic") {
-		return false
-	}
-	return strings.Contains(strings.ToLower(strings.TrimSpace(apiModel)), "opus")
-}
-
-// IsOpusLabel parses a "provider/model" label and reports whether it is an
-// Anthropic Opus variant.
-func IsOpusLabel(label string) bool {
-	provider, model := ParseProviderModelLabel(label)
-	return IsOpus(provider, model)
-}
-
 // FormatProviderModel renders a provider/model pair as the "provider/model"
 // label used across the UI: the /model picker, the composer footer, approval
 // rows and plan-review reviewer names. It is the inverse of

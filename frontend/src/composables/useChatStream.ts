@@ -2892,6 +2892,20 @@ export function formatRetryCountdown(ms: number, tr: TranslateFn = translate): s
   return tr('chat.transportRetry.minutes', { n: Math.floor(secs / 60) })
 }
 
+/**
+ * What a failed plan review says on its card. A refusal the engine classified
+ * — the review model cannot take the images the conversation's messages carry,
+ * or it already refused one here — is said in the viewer's language, naming
+ * the model; any other failure keeps the engine's own sentence.
+ */
+export function planReviewErrorText(payload: Record<string, unknown>): string {
+  const code = String(payload.code ?? '').trim()
+  const model = String(payload.model ?? '').trim()
+  if (code === 'image_input_unsupported') return translate('chat.planReviewImagesUnsupported', { model })
+  if (code === 'image_rejected_by_provider') return translate('chat.planReviewImagesRejected', { model })
+  return String(payload.error ?? '').trim()
+}
+
 export function useChatStream() {
   const sessionId = ref<string | null>(null)
   const mode = ref<SessionMode>('agent')
@@ -5489,7 +5503,7 @@ export function useChatStream() {
     if (evt.type === 'plan_reviewed') {
       const reviewId = String(payload.reviewId ?? '').trim()
       const outcome = String(payload.outcome ?? '').trim().toLowerCase()
-      const errText = String(payload.error ?? '').trim()
+      const errText = planReviewErrorText(payload)
       const finishedAtMs = eventTimestamp(evt.createdAt)
       const durationMs = Number(payload.durationMs)
       // The review's call-level outcome, written back onto the card's own

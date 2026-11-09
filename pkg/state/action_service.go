@@ -223,6 +223,7 @@ func (s *ActionService) CreateAsk(ctx context.Context, form AskForm) (*Action, e
 type ActionFilter struct {
 	SessionID string
 	Status    string
+	Kind      string
 	// Requester is the subagent that raised the action, as its payload records
 	// it; the primary agent's own actions name none.
 	Requester string
@@ -267,6 +268,10 @@ JOIN fb_sessions s ON s.id = a.session_id`
 	if status := strings.TrimSpace(f.Status); status != "" {
 		predicates = append(predicates, "a.status = "+next())
 		args = append(args, status)
+	}
+	if kind := strings.TrimSpace(f.Kind); kind != "" {
+		predicates = append(predicates, "a.kind = "+next())
+		args = append(args, kind)
 	}
 	if requester := strings.TrimSpace(f.Requester); requester != "" {
 		predicates = append(predicates, "TRIM("+ifNullExpr(d, jsonFieldText(d, "a.payload_json", "agent_id"), `''`)+") = "+next())

@@ -76,7 +76,6 @@ func (s *Service) ExecuteSlashCommand(ctx Context, content string) Result {
 // command (not of a surface), so the TUI and the web read one table.
 var commands = []Command{
 	{Name: "model", Description: "choose what model and reasoning effort to use", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "fast", Description: "toggle Fast mode to enable fastest inference with increased plan usage", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "permissions", Description: "choose what Forebrain Harness is allowed to do", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[explain <tool>]", Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "skills", Description: "run, add, create, improve, and toggle skills", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "rename", Description: "rename the current thread", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<title>", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
@@ -184,9 +183,6 @@ func VisibleWithOptions(surface Surface, opts DiscoveryOptions) []Command {
 		if opts.SideConversation && !cmd.AvailableInSideConversation {
 			continue
 		}
-		if cmd.Name == "fast" && !opts.FastAvailable {
-			continue
-		}
 		out = append(out, cmd)
 	}
 	return out
@@ -269,7 +265,7 @@ func defaultActionKind(name string) string {
 		return "open-panel"
 	case "plan", "init", "goal":
 		return "inject-prompt"
-	case "new", "fork", "rename", "fast":
+	case "new", "fork", "rename":
 		return "mutate-state"
 	default:
 		return "immediate"

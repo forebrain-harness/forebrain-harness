@@ -194,7 +194,6 @@ type Command struct {
 type DiscoveryOptions struct {
 	DuringRun        bool
 	SideConversation bool
-	FastAvailable    bool
 	// SubagentView lists the commands available while a subagent's own view is
 	// on screen: the hidden ones are dropped, the rest behave per SubagentView.
 	SubagentView bool
@@ -409,15 +408,6 @@ type SlashChoice struct {
 	Value   string `json:"value"`
 }
 
-// FastSlashHandler routes /fast invocations from the slash executor to the
-// owning ChatSession. The handler returns a human-readable reply and a
-// handled flag; an unhandled result lets the executor fall back to the
-// generic "fast: unavailable" message. Implementations should reject when
-// the active model is not Anthropic Opus.
-type FastSlashHandler interface {
-	HandleFastSlash(sessionID, channel string, args []string) (reply string, handled bool)
-}
-
 type MemoriesSlashHandler interface {
 	HandleMemoriesSlash(ctx context.Context, sessionID, channel string, args []string) (reply string, handled bool)
 }
@@ -469,7 +459,6 @@ type Context struct {
 	RunID            string
 	DuringRun        bool
 	SideConversation bool
-	FastAvailable    bool
 	Sessions         SessionStore
 	Compact          CompactSlashHandler
 	Clear            ClearSlashHandler
@@ -481,7 +470,6 @@ type Context struct {
 	Sandbox          SandboxSlashHandler
 	Model            ModelSlashHandler
 	Agent            AgentSlashHandler
-	Fast             FastSlashHandler
 	Memories         MemoriesSlashHandler
 }
 
@@ -731,7 +719,7 @@ type StatusReport struct {
 	Mode         string
 	Phase        string // shown only in plan mode
 	Proxy        string // userinfo stripped
-	ModelLine    string // "provider / model", "· fast on" once Fast mode is on
+	ModelLine    string // "provider / model"
 	Endpoint     string // userinfo and query stripped
 	Permissions  StatusPermissions
 	Sandbox      string
@@ -777,7 +765,6 @@ type StatusSource struct {
 	Provider string
 	Model    string
 	Endpoint string
-	FastOn   bool
 	// Permissions is the resolved line (preset match already attempted).
 	Permissions StatusPermissions
 	// Sandbox is the one-line summary from the same source as /sandbox.
@@ -817,7 +804,7 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 		Directory:    strings.TrimSpace(src.Directory),
 		AgentID:      strings.TrimSpace(src.AgentID),
 		Proxy:        StatusProxy(),
-		ModelLine:    statusModelLine(src.Provider, src.Model, src.FastOn),
+		ModelLine:    statusModelLine(src.Provider, src.Model),
 		Endpoint:     SanitizeEndpoint(src.Endpoint),
 		Permissions:  src.Permissions,
 		Sandbox:      strings.TrimSpace(src.Sandbox),
@@ -965,16 +952,12 @@ func SanitizeEndpoint(raw string) string {
 	return u.String()
 }
 
-// statusModelLine names the model and says when Fast mode is on. Off is what
-// every session is by default, so the absence of the marker is the whole
-// answer — /status says nothing about a state the user never turned on.
-func statusModelLine(provider, model string, fastOn bool) string {
+// statusModelLine names the model. Nothing follows it: the name is the whole
+// answer, so no switch of any kind can be read off this line.
+func statusModelLine(provider, model string) string {
 	line := llm.FormatProviderModel(provider, model)
 	if line == "" {
 		line = "unknown"
-	}
-	if fastOn {
-		line += " · fast on"
 	}
 	return line
 }

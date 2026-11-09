@@ -483,3 +483,80 @@ func TestImageTurnRefusalRemembersWithoutBeingATextOnlyModel(t *testing.T) {
 		t.Fatalf("catalog refusal: observed=%v code=%q", catalogRefused.Observed, catalogRefused.Code())
 	}
 }
+
+// A subagent's requests go to its own model, so a provider refusing an image
+// on one is that model's refusal. Recording it against the conversation's
+// model would withhold the conversation's next turn for a model that never
+// refused anything.
+func TestImageRefusalRecorderRecordsTheSubagentsOwnModel(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	const sid = "conv-subagent-refusal"
+	if err := store.Ensure(ctx, sid, sid); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	r := mainModelRunner(t, store, &imageRefusingLLM{}, &collectingSink{})
+
+	reviewCtx := WithSubagentModelOverride(llm.WithAgentSessionID(ctx, sid), SubagentModelOverride{Provider: "acme", Model: "reviewer"})
+	recorded := withImageRefusalRecorder(reviewCtx, r, sid)
+	llm.ImageRefusalObserverFromContext(recorded)(reviewCtx, "no images here")
+
+	if reason, ok, err := store.ImageRefusal(ctx, sid, "acme", "reviewer"); err != nil || !ok || reason != "no images here" {
+		t.Fatalf("reviewer record: ok=%v reason=%q err=%v", ok, reason, err)
+	}
+	if _, ok, err := store.ImageRefusal(ctx, sid, "openai", "gpt-main"); err != nil || ok {
+		t.Fatalf("the conversation's model was recorded as refusing: ok=%v err=%v", ok, err)
+	}
+}
+
+// A plan review that hands its reviewer the conversation's images is judged by
+// the review model the user picked — the catalog first, then this
+// conversation's record of that model refusing one — never by the
+// conversation's own model.
+func TestPlanReviewImageRefusalJudgesTheReviewModel(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	const sid = "conv-plan-review-images"
+	if err := store.Ensure(ctx, sid, sid); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	r := &Runner{Deps: &Deps{SessionStore: store}, FileResolver: PathResolver{}}
+
+	// The conversation runs on a text-only model; the reviewer is one the
+	// catalog does not know, which is the fail-open case.
+	onTextOnly := withSessionModel("deepseek", "deepseek-v4-pro")
+	vision := SubagentModelOverride{Provider: "acme", Model: "vision-model"}
+	if err := PlanReviewImageRefusal(onTextOnly, r, sid, vision); err != nil {
+		t.Fatalf("judged by the conversation's model: %v", err)
+	}
+
+	err = PlanReviewImageRefusal(ctx, r, sid, SubagentModelOverride{Provider: "deepseek", Model: "deepseek-v4-pro"})
+	var refused *PlanReviewImageRefusedError
+	if !errors.As(err, &refused) || refused.Observed || refused.Code() != ImageInputRefusedCode {
+		t.Fatalf("text-only reviewer: err=%v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "deepseek/deepseek-v4-pro") || !strings.Contains(msg, "pick a review model") {
+		t.Fatalf("refusal=%q, want it to name the model and the way on", msg)
+	}
+
+	if err := store.RecordImageRefusal(ctx, sid, "acme", "vision-model", "unsupported image"); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	err = PlanReviewImageRefusal(ctx, r, sid, vision)
+	if !errors.As(err, &refused) || !refused.Observed || refused.Code() != ImageRejectedCode || refused.Reason != "unsupported image" {
+		t.Fatalf("remembered refusal: err=%v", err)
+	}
+	if err := PlanReviewImageRefusal(ctx, r, sid, SubagentModelOverride{Provider: "acme", Model: "another-model"}); err != nil {
+		t.Fatalf("the record does not follow another model: %v", err)
+	}
+}

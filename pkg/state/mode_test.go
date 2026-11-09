@@ -427,95 +427,8 @@ func IsKnownMode(raw string) bool {
 	return false
 }
 
-func TestGetMissingReturnsZero(t *testing.T) {
-	home := t.TempDir()
-	st, err := Fast(home, "s1")
-	if err != nil {
-		t.Fatalf("Get on missing session: %v", err)
-	}
-	if st.Enabled {
-		t.Fatalf("expected Enabled=false on missing, got true")
-	}
-}
-
-func TestSetThenGetRoundTrip(t *testing.T) {
-	home := t.TempDir()
-	if err := SetFast(home, "s1", true); err != nil {
-		t.Fatalf("Set true: %v", err)
-	}
-	st, err := Fast(home, "s1")
-	if err != nil {
-		t.Fatalf("Get after Set: %v", err)
-	}
-	if !st.Enabled {
-		t.Fatalf("expected Enabled=true, got false")
-	}
-	if st.UpdatedAt == 0 {
-		t.Fatalf("expected UpdatedAt to be set, got 0")
-	}
-}
-
-func TestSetFalseOverridesTrue(t *testing.T) {
-	home := t.TempDir()
-	if err := SetFast(home, "s1", true); err != nil {
-		t.Fatalf("Set true: %v", err)
-	}
-	if err := SetFast(home, "s1", false); err != nil {
-		t.Fatalf("Set false: %v", err)
-	}
-	st, err := Fast(home, "s1")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if st.Enabled {
-		t.Fatalf("expected Enabled=false after override, got true")
-	}
-}
-
-func TestSessionsAreIsolated(t *testing.T) {
-	home := t.TempDir()
-	if err := SetFast(home, "s1", true); err != nil {
-		t.Fatalf("Set s1: %v", err)
-	}
-	st2, err := Fast(home, "s2")
-	if err != nil {
-		t.Fatalf("Get s2: %v", err)
-	}
-	if st2.Enabled {
-		t.Fatalf("expected s2 Enabled=false, got true")
-	}
-}
-
-func TestEmptySessionDefaultsToDefault(t *testing.T) {
-	home := t.TempDir()
-	if err := SetFast(home, "", true); err != nil {
-		t.Fatalf("Set empty session: %v", err)
-	}
-	st, err := Fast(home, "default")
-	if err != nil {
-		t.Fatalf("Get default: %v", err)
-	}
-	if !st.Enabled {
-		t.Fatalf("expected default Enabled=true, got false")
-	}
-}
-
-func TestPathLayout(t *testing.T) {
-	home := t.TempDir()
-	if err := SetFast(home, "abc", true); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-	want := filepath.Join(home, "state", "fast", "abc.json")
-	if _, err := Fast(home, "abc"); err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got := fastPath(home, "abc"); got != want {
-		t.Fatalf("path = %q, want %q", got, want)
-	}
-}
-
 // TestRemoveSessionStateFiles pins the whole on-disk footprint a session
-// keeps under one agent's state root: all four files go, and a session that
+// keeps under one agent's state root: all three files go, and a session that
 // never wrote some of them still deletes cleanly — removal must be
 // repeatable, not a mirror of how the session happened to be used.
 func TestRemoveSessionStateFiles(t *testing.T) {
@@ -523,9 +436,6 @@ func TestRemoveSessionStateFiles(t *testing.T) {
 	sid := "sid-remove"
 
 	if err := Set(root, sid, State{Mode: ModePlan}); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetFast(root, sid, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := Save(root, sid, List{Items: []Item{{ID: "1", Content: "step"}}}); err != nil {
@@ -538,7 +448,7 @@ func TestRemoveSessionStateFiles(t *testing.T) {
 	if err := RemoveSessionStateFiles(root, sid); err != nil {
 		t.Fatalf("RemoveSessionStateFiles: %v", err)
 	}
-	for _, p := range []string{modePath(root, sid), fastPath(root, sid), todoPath(root, sid), intermediatePath(root, sid)} {
+	for _, p := range []string{modePath(root, sid), todoPath(root, sid), intermediatePath(root, sid)} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Fatalf("%s still exists after removal", p)
 		}

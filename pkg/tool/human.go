@@ -290,6 +290,27 @@ func humanInputToAskForm(in *Input) (state.AskForm, error) {
 	return form, nil
 }
 
+// FormatAskAnswer renders an answered user_interaction action — its stored
+// form and answer — the way the call's card reads: each question with the
+// answer the person gave. The bool is false when the answer cannot be read.
+func FormatAskAnswer(payloadJSON, answerJSON string) (string, bool) {
+	out, err := askAnswerJSONToHumanOutput(answerJSON)
+	if err != nil {
+		return "", false
+	}
+	content, err := json.Marshal(out)
+	if err != nil {
+		return "", false
+	}
+	var form state.AskForm
+	_ = json.Unmarshal([]byte(strings.TrimSpace(payloadJSON)), &form)
+	questions := make([]map[string]any, 0, len(form.Questions))
+	for _, q := range form.Questions {
+		questions = append(questions, map[string]any{"header": q.ID, "question": q.Prompt})
+	}
+	return FormatUserInteractionResult(string(content), map[string]any{"questions": questions})
+}
+
 func askAnswerJSONToHumanOutput(raw string) (*Output, error) {
 	var ans state.AskAnswer
 	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &ans); err != nil {

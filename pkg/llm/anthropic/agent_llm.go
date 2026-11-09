@@ -283,9 +283,6 @@ func (c *anthropicAgentLLM) messageParams(ctx context.Context, conversation []ll
 	if c.effort != "" {
 		params.OutputConfig.Effort = c.effort
 	}
-	if llm.Fast(ctx) {
-		params.ServiceTier = anthropicapi.MessageNewParamsServiceTierAuto
-	}
 	if len(tools) > 0 {
 		params.Tools = agentAnthropicTools(tools)
 	}

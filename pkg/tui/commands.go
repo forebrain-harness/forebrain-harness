@@ -13,7 +13,6 @@ import (
 	"unicode"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
-	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/migrate"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -2957,16 +2956,6 @@ func (c *commandController) handleRewind(ctx context.Context, sessionID string) 
 	return res.AnchorText, true
 }
 
-// sessionFastAvailable reports whether the active session supports the /fast// command. Gated to Anthropic Opus (the only family with the priority
-// service tier surfaced by Forebrain Harness's Anthropic agent LLM). Non-Opus models
-// hide /fast from the tui picker.
-func sessionFastAvailable(session Session) bool {
-	if session == nil {
-		return false
-	}
-	return llm.IsOpusLabel(session.CurrentModelOption())
-}
-
 type StreamCommandAction string
 
 const (
@@ -3052,17 +3041,12 @@ func newSlashOverlay() *SlashOverlay {
 }
 
 // rebuildFiltered narrows Visible to the commands whose name contains
-// FilterText (case-insensitive). It also threads FastAvailable into the
-// registry's DiscoveryOptions so /fast respects session capability (per
-// design §DiscoveryOptions wiring).
+// FilterText (case-insensitive).
 func (o *SlashOverlay) rebuildFiltered(session Session) {
 	if o == nil {
 		return
 	}
 	opts := turn.DiscoveryOptions{
-		FastAvailable: sessionFastAvailable(session),
-		// In a subagent's own view the commands that would change the
-		// conversation are hidden (D4).
 		SubagentView: o.SubagentView,
 	}
 	// The engine's filter and order, the same the web menu lists: exact,

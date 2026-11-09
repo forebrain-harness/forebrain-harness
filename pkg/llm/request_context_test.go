@@ -191,45 +191,6 @@ func TestCacheUsageTransportSumsSeparateResponses(t *testing.T) {
 	}
 }
 
-func TestFastIsFalseOnBareContext(t *testing.T) {
-	ctx := context.Background()
-	if Fast(ctx) {
-		t.Fatalf("expected false on bare context, got true")
-	}
-}
-
-func TestFastIsFalseOnNilContext(t *testing.T) {
-	if Fast(nil) {
-		t.Fatalf("expected false on nil context, got true")
-	}
-}
-
-func TestWithFastRoundTrips(t *testing.T) {
-	cases := []struct {
-		name    string
-		enabled bool
-	}{
-		{"enabled", true},
-		{"disabled", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := WithFast(context.Background(), tc.enabled)
-			if got := Fast(ctx); got != tc.enabled {
-				t.Fatalf("Fast(ctx) = %v, want %v", got, tc.enabled)
-			}
-		})
-	}
-}
-
-func TestWithFastLastValueWins(t *testing.T) {
-	ctx := WithFast(context.Background(), true)
-	ctx = WithFast(ctx, false)
-	if Fast(ctx) {
-		t.Fatalf("expected false after override, got true")
-	}
-}
-
 func TestInstall_EmptyHome(t *testing.T) {
 	if err := Install("", "(devel)"); err == nil {
 		t.Fatal("expected error for empty forebrainHome")
@@ -507,54 +468,6 @@ func TestLogDebugIsSilentUntilInstalled(t *testing.T) {
 	LogDebug("topic", "dropped")
 	if got != [2]string{} {
 		t.Fatalf("logger still received %v after being cleared", got)
-	}
-}
-
-func TestIsOpus(t *testing.T) {
-	cases := []struct {
-		name     string
-		provider string
-		model    string
-		want     bool
-	}{
-		{"anthropic opus 4", "anthropic", "claude-opus-4-7", true},
-		{"anthropic opus mixed case", "Anthropic", "Claude-Opus-4-7", true},
-		{"anthropic sonnet not opus", "anthropic", "claude-sonnet-4-6", false},
-		{"anthropic haiku not opus", "anthropic", "claude-haiku-4-5", false},
-		{"openai gpt not opus", "openai", "gpt-4o", false},
-		{"non-anthropic with opus in name", "openai", "opus-clone", false},
-		{"empty provider", "", "claude-opus-4-7", false},
-		{"empty model", "anthropic", "", false},
-		{"whitespace trimmed", "  anthropic  ", "  claude-opus-4-7  ", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := IsOpus(tc.provider, tc.model); got != tc.want {
-				t.Fatalf("IsOpus(%q,%q) = %v, want %v", tc.provider, tc.model, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestIsOpusLabel(t *testing.T) {
-	cases := []struct {
-		name  string
-		label string
-		want  bool
-	}{
-		{"plain opus label", "anthropic/claude-opus-4-7", true},
-		{"sonnet label", "anthropic/claude-sonnet-4-6", false},
-		{"openai label", "openai/gpt-4o", false},
-		{"empty label", "", false},
-		{"no slash", "claude-opus-4-7", false},
-		{"whitespace around segments", "  anthropic / claude-opus-4-7  ", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := IsOpusLabel(tc.label); got != tc.want {
-				t.Fatalf("IsOpusLabel(%q) = %v, want %v", tc.label, got, tc.want)
-			}
-		})
 	}
 }
 

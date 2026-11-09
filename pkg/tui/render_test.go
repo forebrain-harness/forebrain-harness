@@ -1970,3 +1970,28 @@ func TestProductionCodeNeverOverridesTheTerminalSize(t *testing.T) {
 		})
 	}
 }
+
+// TestWrapPanelWordsFoldsAtSpacesAndBreaksOnlyLongTokens pins the panel's
+// folding rule: whole words move to the next row, a run of blank-separated
+// empty words folds to one space, and only a token wider than the whole width
+// is broken inside itself.
+func TestWrapPanelWordsFoldsAtSpacesAndBreaksOnlyLongTokens(t *testing.T) {
+	cases := []struct {
+		text  string
+		width int
+		want  []string
+	}{
+		// "alpha beta" is exactly 10 cells; adding " gamma" would overflow 11.
+		{"alpha beta gamma", 11, []string{"alpha beta", "gamma"}},
+		// Only a token wider than the row breaks, and it breaks to the width.
+		{"aaaaaaaaaa", 4, []string{"aaaa", "aaaa", "aa"}},
+		// Empty words are dropped, not doubled.
+		{"a  b", 10, []string{"a b"}},
+	}
+	for _, tc := range cases {
+		got := wrapPanelWords(tc.text, tc.width)
+		if !slices.Equal(got, tc.want) {
+			t.Fatalf("wrapPanelWords(%q, %d) = %q, want %q", tc.text, tc.width, got, tc.want)
+		}
+	}
+}

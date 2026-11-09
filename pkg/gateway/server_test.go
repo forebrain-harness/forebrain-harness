@@ -435,7 +435,7 @@ func TestHandleChatWSSlashReplyIsUIOnly(t *testing.T) {
 		Op:        "start_run",
 		RequestID: "req-slash",
 		SessionID: "s1",
-		Message:   wsClientMessage{Content: "/fast", Role: "user"},
+		Message:   wsClientMessage{Content: "/sandbox", Role: "user"},
 	}))
 
 	var got []wsServerMsg

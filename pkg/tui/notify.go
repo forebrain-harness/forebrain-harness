@@ -1751,7 +1751,7 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 	s.stopAbandonedRunReaper = turn.AbandonedRunReaper{
 		Runs:    env.Deps.RunRT,
 		Publish: s.publishTUIRunEvent,
-		Recover: func(context.Context) { s.recoverResolvedApprovalWaitsOnce(s.preferredSessionIDForFast()) },
+		Recover: func(context.Context) { s.recoverResolvedApprovalWaitsOnce(s.preferredSessionID()) },
 	}.Start(ctx)
 	// This process registers itself as a local peer (plan 195): one socket,
 	// one rendezvous record kept current with this surface's session and
@@ -1992,13 +1992,6 @@ type Session interface {
 	// SubagentComposerTokenStats is the subagent's own footer gauge — how much
 	// of that subagent's context window is left.
 	SubagentComposerTokenStats(sessionID, agentKey string) ComposerTokenStats
-	// IsFastMode reports whether the active session has /fast enabled.
-	// Anthropic Opus only — sessionFastAvailable() guards the slash UI so
-	// non-Opus models never expose the toggle.
-	IsFastMode() bool
-	// SetFastMode persists the /fast toggle for the active state.
-	// Implementations should reject when the active model is not Opus.
-	SetFastMode(enabled bool) error
 	AgentRosterSnapshot(sessionID string) AgentRosterSnapshot
 	CancelSubagent(query SubagentControlQuery) bool
 	CancelAllAgents() AgentCancelSummary

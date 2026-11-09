@@ -1280,7 +1280,7 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 	}
 	switch cmd {
 	case "":
-		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.CommandCatalog(turn.SurfaceTUI, turn.DiscoveryOptions{FastAvailable: sessionFastAvailable(cmds.session)}), Final: true})
+		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.CommandCatalog(turn.SurfaceTUI, turn.DiscoveryOptions{}), Final: true})
 		return true, false, ComposerSubmission{}, false
 	case "resume":
 		if selected, ok := cmds.handleResume(ctx, state.sessionID); ok {
@@ -1373,7 +1373,7 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 	// gateway path, which checks ShouldContinueRun before Handled).
 	if !ok || (!outcome.Handled && !outcome.ShouldContinueRun) {
 		if _, known := turn.Find(cmd); !known {
-			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.UnknownCommandReply(turn.SurfaceTUI, cmd, turn.DiscoveryOptions{FastAvailable: sessionFastAvailable(cmds.session)}), Final: true})
+			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.UnknownCommandReply(turn.SurfaceTUI, cmd, turn.DiscoveryOptions{}), Final: true})
 			return true, false, ComposerSubmission{}, false
 		}
 		return false, false, ComposerSubmission{}, false
@@ -2667,7 +2667,7 @@ func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-cha
 		// activated.
 		submission, ok := expandSubagentSkillCommand(ctx, session, state, line, draft)
 		if !ok {
-			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.UnknownCommandReply(turn.SurfaceTUI, name, turn.DiscoveryOptions{SubagentView: true, FastAvailable: sessionFastAvailable(session)}), AgentID: view, Final: true})
+			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.UnknownCommandReply(turn.SurfaceTUI, name, turn.DiscoveryOptions{SubagentView: true}), AgentID: view, Final: true})
 			return
 		}
 		sendSubagentViewSubmission(ctx, session, renderer, state, view, submission)
