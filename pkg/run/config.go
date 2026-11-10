@@ -986,6 +986,13 @@ func (w *planModeLLM) executeImplementationPhase(ctx context.Context, msgs []llm
 	if w.office {
 		reminder = buildOfficePlanImplementationReminder(planFile, planModeKindForCount(reminderCount))
 	}
+	// A handed-off plan reminds with the tech-lead contract instead: the
+	// primary agent does not implement, it dispatches one executor subagent
+	// on the chosen row and reviews its work (owner 2026-11-10). Coding and
+	// office share it — the hand-off means the same thing in both.
+	if st.PlanHandOff != nil && strings.TrimSpace(st.PlanHandOff.Model) != "" {
+		reminder = buildPlanHandOffReminder(planFile, *st.PlanHandOff, planModeKindForCount(reminderCount))
+	}
 	reminder, insertAt := w.stableReminderForRun(ctx, msgs, reminder)
 	msgs = injectAndRecordPlanReminder(ctx, msgs, reminder, insertAt)
 	return w.inner.Execute(ctx, msgs, tools)
@@ -1045,6 +1052,22 @@ func buildPlanImplementationReminder(planFile, kind string) string {
 		)
 	}
 	return planImplementationReminderMarker + " - read carefully.\n\n" + tool.ApprovedPlanExecutionPrompt(planFile)
+}
+
+// buildPlanHandOffReminder is buildPlanImplementationReminder for a plan the
+// user handed to another model: the full form carries the whole tech-lead
+// contract (the marker and heading it shares keep the reminder accounting
+// untouched), the sparse one only the review-and-record core of it.
+func buildPlanHandOffReminder(planFile string, h state.PlanHandOff, kind string) string {
+	if kind == "sparse" {
+		return fmt.Sprintf(
+			"%s: before you report the work finished, review the executor's worktree yourself and append a '%s' section to the plan file %s with your verdict.",
+			planImplementationReminderMarker, state.ImplementationHeading, planFile,
+		)
+	}
+	display := llm.FormatProviderModel(h.Provider, h.Model)
+	ref := strings.TrimSpace(h.ModelID)
+	return planImplementationReminderMarker + " - read carefully.\n\n" + tool.HandOffPlanExecutionPrompt(planFile, display, ref)
 }
 
 // analyzePlanReminders inspects the LLM-bound message slice to derive the
@@ -1264,7 +1287,7 @@ The user switched this conversation to plan mode: plan the work before doing it.
 2. Design each deliverable: its format; its structure (sections, sheets or slides); what goes in each part and from which source; the calculations or data processing it needs; the template or style to follow.
 3. Surface decisions: list your assumptions and the questions only the user can answer. When an answer would change the plan, ask with user_interaction, all questions in one go.
 4. Write the plan file with these sections: Goal, Deliverables, Sources, Outline of each deliverable, Steps, Checks before hand-over, Open questions.
-5. Call exit_plan_mode when the plan is complete. The user can have it carried out, ask for changes, keep the plan itself as the deliverable, or ask another model to review it.
+5. Call exit_plan_mode when the plan is complete. The user can have it carried out, hand it to another model to carry out, ask for changes, keep the plan itself as the deliverable, or ask another model to review it.
 
 ## Tools in plan mode
 

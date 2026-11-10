@@ -2647,3 +2647,74 @@ func TestNewLLMFromYAMLVolcengineCodingPlanSpeaksMessages(t *testing.T) {
 		t.Fatalf("request path = %q, want /api/coding/v1/messages", got.Path)
 	}
 }
+
+// A handed-off plan reminds with the tech-lead contract — the marker it
+// shares keeps the accounting, the words tell the primary agent to dispatch
+// one executor subagent on the chosen row instead of implementing. Without a
+// hand-off the reminder is the self-execution one, verbatim as before.
+func TestPlanHandOffReminderIsTheTechLeadContract(t *testing.T) {
+	home := t.TempDir()
+	sid := "hand-off-remind"
+	if err := state.SetPlanForSession(home, "", sid, "# Plan\n\n- [ ] write the report"); err != nil {
+		t.Fatalf("SetPlanForSession: %v", err)
+	}
+	handOff := state.PlanHandOff{ModelID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3"}
+	if err := state.Set(home, sid, state.State{Mode: state.ModeAgent, HasExitedPlan: true, PlanHandOff: &handOff}); err != nil {
+		t.Fatalf("state.Set: %v", err)
+	}
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLMFor(inner, home, "", state.ProjectTypeCoding)
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("go"))}, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	text := allReminderText(inner.gotMsgs)
+	if !strings.Contains(text, planImplementationReminderMarker) {
+		t.Fatalf("a handed-off plan must still remind: %q", text)
+	}
+	if !strings.Contains(text, "You are the tech lead for an approved plan") {
+		t.Fatalf("the reminder must carry the tech-lead contract: %q", text)
+	}
+	if !strings.Contains(text, `model "`+"llm_row2"+`"`) {
+		t.Fatalf("the contract must dispatch on the recorded row id: %q", text)
+	}
+	if strings.Contains(text, "You are the primary executor of an approved plan") {
+		t.Fatalf("a handed-off plan must not run the self-execution contract: %q", text)
+	}
+
+	// The sparse form keeps the same core: review the worktree, record the
+	// verdict — with the shared marker and heading.
+	sparse := buildPlanHandOffReminder("/plans/p/plan.md", handOff, "sparse")
+	if !strings.Contains(sparse, planImplementationReminderMarker) ||
+		!strings.Contains(sparse, state.ImplementationHeading) ||
+		!strings.Contains(sparse, "review the executor's worktree yourself") {
+		t.Fatalf("sparse hand-off reminder = %q", sparse)
+	}
+
+	// Without a hand-off the ordinary reminder is unchanged, office included.
+	if err := state.Set(home, sid, state.State{Mode: state.ModeAgent, HasExitedPlan: true}); err != nil {
+		t.Fatalf("state.Set: %v", err)
+	}
+	inner2 := &capturingLLM{}
+	w2 := wrapPlanModeLLMFor(inner2, home, "", state.ProjectTypeOffice)
+	if _, err := w2.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("go"))}, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if text := allReminderText(inner2.gotMsgs); !strings.Contains(text, "You are the primary executor of an approved plan") {
+		t.Fatalf("ordinary exit keeps the self-execution contract: %q", text)
+	}
+
+	// PlanKeptOnly still suppresses everything, hand-off or not.
+	if err := state.Set(home, sid, state.State{Mode: state.ModeAgent, HasExitedPlan: true, PlanKeptOnly: true, PlanHandOff: &handOff}); err != nil {
+		t.Fatalf("state.Set: %v", err)
+	}
+	inner3 := &capturingLLM{}
+	w3 := wrapPlanModeLLMFor(inner3, home, "", state.ProjectTypeCoding)
+	if _, err := w3.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("go"))}, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if text := allReminderText(inner3.gotMsgs); strings.Contains(text, planImplementationReminderMarker) {
+		t.Fatalf("kept-only session must not get an implementation reminder: %q", text)
+	}
+}
