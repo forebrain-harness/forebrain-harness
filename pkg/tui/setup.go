@@ -388,6 +388,7 @@ const (
 	setupPageThinking    // custom: the levels a model no source knows supports
 	setupPageConnection  // custom: send one request before saving
 	setupPageOffers      // a subscription's models to add
+	setupPageSubagents   // may the agent pick this row for subagents on its own?
 	setupPageReview
 )
 
@@ -446,6 +447,18 @@ type llmSetup struct {
 	// subscription: the first page's «· Signed in» and the sign-in page ask the
 	// vendor once between them, never twice.
 	probes map[string]turn.SignInCheck
+	// subagentAllowed is the authorization page's answer: may the agent pick
+	// this model for a subagent on its own? (owner 2026-11-10)
+	subagentAllowed bool
+	// subagentAnswered records that this flow already asked, so stepping back
+	// to the page shows this flow's answer rather than the stored switch.
+	subagentAnswered bool
+	// offerSubagent is the subscription flow's answer per offer index: which
+	// of the models the sign-in unlocked the agent may pick for subagents.
+	offerSubagent map[int]bool
+	// offerSubagentAnswered records that the subscription flow asked, so a
+	// step back to the model list keeps what was ticked there.
+	offerSubagentAnswered bool
 	// db is the state database the rows are written to, opened on first use.
 	db *sql.DB
 }
@@ -492,6 +505,8 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 				})
 				return s.options(), true, nil
 			}
+		case setupPageSubagents:
+			forward, err = s.pickSubagents()
 		case setupPageReview:
 			var action setupReviewAction
 			action, err = s.review()
@@ -528,7 +543,9 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 // the long one — the address, the protocol, the key, the model, and only when
 // nothing knows the model's levels, the levels — while a subscription ends on
 // the models it offers and a provider reached with a key never sees those
-// pages at all.
+// pages at all. The subagent authorization is one page of its own before the
+// review (owner 2026-11-10): a subscription answers it inside the model list,
+// where the rows are already being ticked.
 func (s *llmSetup) flowPages() []int {
 	switch {
 	case s.choice.Custom:
@@ -536,11 +553,11 @@ func (s *llmSetup) flowPages() []int {
 		if s.asksThinkingLevels() {
 			pages = append(pages, setupPageThinking)
 		}
-		return append(pages, setupPageConnection, setupPageReview)
+		return append(pages, setupPageConnection, setupPageSubagents, setupPageReview)
 	case s.choice.Subscription != "":
 		return []int{setupPageProvider, setupPageCredentials, setupPageOffers}
 	default:
-		return []int{setupPageProvider, setupPageCredentials, setupPageModel, setupPageReview}
+		return []int{setupPageProvider, setupPageCredentials, setupPageModel, setupPageSubagents, setupPageReview}
 	}
 }
 
@@ -595,6 +612,9 @@ func (s *llmSetup) options() process.Options {
 			Model:    offer.Model,
 			BaseURL:  offer.BaseURL,
 			APIPath:  offer.APIPath,
+			// The save rewrites this row, so it has to carry the tick the
+			// second check list took for it.
+			SubagentAllowed: s.offerSubagentFor(s.chosen),
 		}
 	}
 	if s.choice.Custom {
@@ -606,6 +626,8 @@ func (s *llmSetup) options() process.Options {
 			Model:       s.model,
 			URLVerbatim: s.urlVerbatim,
 			CapEfforts:  s.efforts,
+			// The page asked, so its answer is this configuration's fact.
+			SubagentAllowed: s.subagentAllowed,
 		}
 		return opts
 	}
@@ -617,6 +639,8 @@ func (s *llmSetup) options() process.Options {
 		Model:        s.model,
 		ParamsJSON:   s.params,
 		UpdateParams: true,
+		// The page asked, so its answer is this configuration's fact.
+		SubagentAllowed: s.subagentAllowed,
 	}
 }
 
@@ -1311,15 +1335,46 @@ func (s *llmSetup) pickOffers() (bool, error) {
 				chosen = append(chosen, s.offers[idx])
 			}
 		}
+		// Which of these may the agent pick on its own? Asked before the rows
+		// are written, so the switch lands with them (owner 2026-11-10). Esc
+		// goes back to the model list.
+		allowed, ok, err := s.pickOfferSubagents(chosen, idxs)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			checked = idxs
+			continue
+		}
 		env, err := s.subscriptionEnv()
 		if err != nil {
 			return false, err
 		}
-		if _, err := sub.Provision(s.ctx(), env, chosen, subscription.ProvisionOptions{}); err != nil {
+		ids, err := sub.Provision(s.ctx(), env, chosen, subscription.ProvisionOptions{})
+		if err != nil {
 			// The registry's own sentence: it names what the user has to do and
 			// never a key. Nothing it refused is written.
 			logPromptChoice(s.cfg, "llmsetup.provision_failed", s.choice, map[string]any{"error": errString(err)})
 			s.note("Adding the models failed", err.Error())
+			checked = idxs
+			continue
+		}
+		// provisionRows writes one row per offer, in input order, so the ids
+		// line up with chosen and with the answers.
+		if len(ids) != len(allowed) {
+			return false, fmt.Errorf("%s wrote %d rows for %d models", label, len(ids), len(allowed))
+		}
+		models := &state.LLMModelStore{DB: env.DB}
+		var failed error
+		for i, id := range ids {
+			if err := models.SetSubagentAllowed(s.ctx(), id, allowed[i]); err != nil {
+				failed = err
+				break
+			}
+		}
+		if failed != nil {
+			logPromptChoice(s.cfg, "llmsetup.subagent_allowed.failed", s.choice, map[string]any{"error": errString(failed)})
+			s.note("Saving the subagent authorization failed", failed.Error())
 			checked = idxs
 			continue
 		}
@@ -1543,6 +1598,138 @@ func (s *llmSetup) identity() (provider, model, baseURL, apiPath string) {
 	return appcfg.NormalizeLLMModelIdentity(strings.TrimSpace(s.choice.Provider), s.model, s.baseURL, s.apiPath)
 }
 
+// The subagent authorization page's two answers (owner 2026-11-10). They are
+// the stored switch's wording, so the page, the review line and the model page
+// say the same thing.
+const (
+	subagentsNo  = "No, only when you pick it"
+	subagentsYes = "Yes, the agent may use it"
+)
+
+// subagentAllowedLabel is the switch as the review line states it.
+func subagentAllowedLabel(allowed bool) string {
+	if allowed {
+		return subagentsYes
+	}
+	return subagentsNo
+}
+
+// storedRow is the row this flow's answers save over, when the install already
+// holds it.
+func (s *llmSetup) storedRow() (state.LLMModel, bool, error) {
+	provider, model, baseURL, apiPath := s.identity()
+	db, err := s.stateDB()
+	if err != nil {
+		return state.LLMModel{}, false, err
+	}
+	return (&state.LLMModelStore{DB: db}).FindByIdentity(s.ctx(), provider, model, baseURL, apiPath)
+}
+
+// pickSubagents asks whether the agent may pick this row for a subagent on its
+// own — its own page, after the model and before the review, because the answer
+// is about the row being configured and not about who the agent talks to. The
+// default is this flow's earlier answer, else the row's stored switch, else No:
+// every row that predates the switch, and every install that never answered,
+// stays closed.
+func (s *llmSetup) pickSubagents() (bool, error) {
+	current := s.subagentAllowed
+	if !s.subagentAnswered {
+		row, found, err := s.storedRow()
+		if err != nil {
+			return false, err
+		}
+		if found {
+			current = row.SubagentAllowed
+		}
+	}
+	defaultOption := subagentsNo
+	if current {
+		defaultOption = subagentsYes
+	}
+	selected, ok, err := s.cfg.Selector.Select(
+		"Subagents\nMay the agent pick this model for subagents on its own?",
+		[]string{subagentsNo, subagentsYes}, defaultOption)
+	if err != nil || !ok {
+		return false, err
+	}
+	s.subagentAllowed = strings.EqualFold(strings.TrimSpace(selected), subagentsYes)
+	s.subagentAnswered = true
+	logPromptChoice(s.cfg, "llmsetup.subagent_allowed.selected", s.choice, map[string]any{"allowed": s.subagentAllowed})
+	return true, nil
+}
+
+// offerSubagentFor is the subscription answer for the row a finished flow
+// switches the session to: the first offer the user ticked.
+func (s *llmSetup) offerSubagentFor(chosen []int) bool {
+	for _, idx := range chosen {
+		if idx >= 0 && idx < len(s.offers) {
+			return s.offerSubagent[idx]
+		}
+	}
+	return false
+}
+
+// storedOfferAllowed reports whether an already configured offer row is open to
+// the agent already, which is the check list's default when this flow has not
+// answered yet.
+func (s *llmSetup) storedOfferAllowed(offer subscription.Offer) bool {
+	provider, model, baseURL, apiPath := appcfg.NormalizeLLMModelIdentity(offer.Provider, offer.Model, offer.BaseURL, offer.APIPath)
+	db, err := s.stateDB()
+	if err != nil {
+		return false
+	}
+	row, found, err := (&state.LLMModelStore{DB: db}).FindByIdentity(s.ctx(), provider, model, baseURL, apiPath)
+	if err != nil || !found {
+		return false
+	}
+	return row.SubagentAllowed
+}
+
+// pickOfferSubagents asks, for the models a sign-in unlocked, which of them the
+// agent may pick for subagents on its own (owner 2026-11-10). Esc goes back to
+// the model list, so a user who wants fewer rows can change them. The answer
+// comes back aligned with chosen.
+func (s *llmSetup) pickOfferSubagents(chosen []subscription.Offer, chosenIdxs []int) ([]bool, bool, error) {
+	items := make([]SelectItem, len(chosen))
+	checked := make([]int, 0, len(chosen))
+	for i, offer := range chosen {
+		items[i] = SelectItem{
+			Label:       offer.Model,
+			Description: turn.ModelEndpointLabel(offer.BaseURL, offer.APIPath, false),
+			Category:    offer.PlanLabel,
+		}
+		allowed := false
+		if s.offerSubagentAnswered {
+			allowed = s.offerSubagent[chosenIdxs[i]]
+		} else {
+			allowed = s.storedOfferAllowed(offer)
+		}
+		if allowed {
+			checked = append(checked, i)
+		}
+	}
+	idxs, ok, err := multiSelectRichTabbed(s.cfg.Selector,
+		"Subagents\nWhich of these may the agent pick for subagents on its own?",
+		items, TabbedSelectOptions{Checked: checked})
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	answers := make([]bool, len(chosen))
+	if s.offerSubagent == nil {
+		s.offerSubagent = make(map[int]bool, len(chosen))
+	}
+	for _, idx := range idxs {
+		if idx >= 0 && idx < len(answers) {
+			answers[idx] = true
+		}
+	}
+	for i, offerIdx := range chosenIdxs {
+		s.offerSubagent[offerIdx] = answers[i]
+	}
+	s.offerSubagentAnswered = true
+	return answers, true, nil
+}
+
 // reviewFacts are the answers as the review lists them.
 func (s *llmSetup) reviewFacts() []turn.StatusFact {
 	if s.choice.Custom {
@@ -1552,6 +1739,7 @@ func (s *llmSetup) reviewFacts() []turn.StatusFact {
 			{Label: "Protocol", Value: s.protocolLabel()},
 			{Label: "Endpoint", Value: s.endpoint()},
 			{Label: "Thinking", Value: thinkingLabel(s.efforts)},
+			{Label: "Subagents", Value: subagentAllowedLabel(s.subagentAllowed)},
 		}
 	}
 	provider := s.choice.Group
@@ -1571,6 +1759,7 @@ func (s *llmSetup) reviewFacts() []turn.StatusFact {
 		{Label: "Model", Value: s.model},
 		{Label: "Reasoning", Value: effort},
 		{Label: "Endpoint", Value: endpoint},
+		{Label: "Subagents", Value: subagentAllowedLabel(s.subagentAllowed)},
 	}
 }
 

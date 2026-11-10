@@ -14570,7 +14570,7 @@ func (s *fakeSelector) Confirm(label string, defaultValue bool) (bool, bool, err
 func TestPromptMainLLMSetupPersistsReasoningEffort(t *testing.T) {
 	useSetupTestCatalog(t)
 	selector := &fakeSelector{
-		selects: []string{"Anthropic", "claude-sonnet-4-6", "high"},
+		selects: []string{"Anthropic", "claude-sonnet-4-6", "high", subagentsYes},
 		inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 	}
 	opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
@@ -14588,6 +14588,20 @@ func TestPromptMainLLMSetupPersistsReasoningEffort(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected a reasoning effort prompt, got %#v", selector.selectLabels)
+	}
+	// /connect walks the same authorization page as onboarding, after the
+	// model and before the review, and its answer rides the saved options.
+	subagentPage := false
+	for _, label := range selector.selectLabels {
+		if strings.HasPrefix(label, "Subagents\n") {
+			subagentPage = true
+		}
+	}
+	if !subagentPage {
+		t.Fatalf("expected the subagent authorization page, got %#v", selector.selectLabels)
+	}
+	if !opts.SubagentAllowed {
+		t.Fatalf("opts.SubagentAllowed = false, want the page's yes")
 	}
 }
 
@@ -28960,6 +28974,9 @@ func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 				"OpenAI",
 				"gpt-5.5",
 				"high",
+				// The subagent authorization page (283): onboarding asks it
+				// like /connect does, and the answer reaches the row.
+				subagentsYes,
 			},
 			inputs: []string{
 				"sk-live-secret",
@@ -28980,6 +28997,20 @@ func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 	v := appcfg.ValidateMainAgentLLMConfigured(&loaded)
 	if !v.Complete() {
 		t.Fatalf("expected LLM configured, missing=%v", v.MissingFields())
+	}
+	// The authorization page's answer is the row's switch, not a display value.
+	db, err := process.StateDB(process.Context{Home: home, ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	defer db.Close()
+	row, found, err := (&state.LLMModelStore{DB: db}).FindByIdentity(context.Background(),
+		"openai", "gpt-5.5", "https://api.openai.com/v1", appcfg.APIPathChatCompletions)
+	if err != nil || !found {
+		t.Fatalf("find the row: found=%t err=%v", found, err)
+	}
+	if !row.SubagentAllowed {
+		t.Fatalf("row.SubagentAllowed = false, want the page's yes")
 	}
 	w.printSummary(&out)
 	if got := stripANSI(out.String()); !strings.Contains(got, "Model:  openai/gpt-5.5") {
@@ -29040,7 +29071,8 @@ func TestSelectLLMProviderUsesSelectorLabels(t *testing.T) {
 	home := t.TempDir()
 	choice, ok, err := PromptMainLLMSetup(PromptConfig{
 		Selector: &wizardSelector{
-			selects: []string{"Anthropic", "claude-sonnet-4-6", "high"},
+			// provider, model, effort, then the subagent authorization page (283)
+			selects: []string{"Anthropic", "claude-sonnet-4-6", "high", subagentsNo},
 			inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 			confirms: []bool{
 				true,
@@ -29091,15 +29123,18 @@ func TestOnboardEscGoesBackAPage(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 	t.Setenv("FOREBRAIN_HOME", home)
+	// Esc on the subagent authorization page (283) is the step back this test
+	// drives: the model and its effort are asked again, and they open on what
+	// was chosen before.
 	selector := &backtrackSelector{fakeSelector: fakeSelector{
-		selects: []string{"OpenAI", "gpt-5.5", "high", "gpt-5.5", "low"},
+		selects: []string{"OpenAI", "gpt-5.5", "high", "gpt-5.5", "low", subagentsNo},
 		inputs:  []string{"sk-live-secret"},
-	}, backAt: map[string]int{"Review": 1}}
+	}, backAt: map[string]int{"Subagents": 1}}
 	w := &Wizard{rt: process.Context{Home: home, ConfigPath: cfgPath}, out: io.Discard, selector: selector}
 	if err := w.run(context.Background()); err != nil {
 		t.Fatalf("run error: %v", err)
 	}
-	if got := strings.Join(selector.pages, " → "); got != "Welcome to Forebrain Harness → OpenAI API key → Model → Reasoning effort → Review → Model → Reasoning effort → Review" {
+	if got := strings.Join(selector.pages, " → "); got != "Welcome to Forebrain Harness → OpenAI API key → Model → Reasoning effort → Subagents → Model → Reasoning effort → Subagents → Review" {
 		t.Fatalf("pages = %s", got)
 	}
 	if got := selector.selectDefaults[3]; got != "gpt-5.5" {
@@ -29168,6 +29203,14 @@ func (s *backtrackSelector) page(label string) bool {
 }
 
 func (s *backtrackSelector) Select(label string, options []string, defaultOption string) (string, bool, error) {
+	// Esc on the subagent authorization page (283) steps back like Esc on the
+	// rich pages does; the answer given there is not consumed.
+	if strings.HasPrefix(label, "Subagents\n") {
+		if s.page(label) {
+			return "", false, nil
+		}
+		return s.fakeSelector.Select(label, options, defaultOption)
+	}
 	s.page(label)
 	return s.fakeSelector.Select(label, options, defaultOption)
 }

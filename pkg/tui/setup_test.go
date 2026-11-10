@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -339,9 +338,25 @@ func (s *fakeSubscription) Provision(_ context.Context, env subscription.Env, of
 			return nil, err
 		}
 	}
+	// Write the rows the way a real subscription's provisionRows does: the
+	// flow that saves the subagent switch addresses them by id, so the ids have
+	// to name rows that exist (a login-backed row holds no key).
 	ids := make([]string, len(offers))
-	for i := range offers {
-		ids[i] = s.id + "-row-" + strconv.Itoa(i)
+	empty := ""
+	for i, offer := range offers {
+		id, err := process.UpsertLLMModel(context.Background(), env.DB, process.LLMModelInput{
+			Provider:   offer.Provider,
+			Model:      offer.Model,
+			BaseURL:    offer.BaseURL,
+			APIPath:    offer.APIPath,
+			APIKey:     &empty,
+			Source:     s.id,
+			SourcePlan: offer.Plan,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ids[i] = id
 	}
 	return ids, nil
 }
@@ -780,7 +795,10 @@ func TestConfigureSubscriptionProvisionFailureKeepsThePage(t *testing.T) {
 	}
 	browserMachine(t)
 	out := &bytes.Buffer{}
-	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}, multiSelects: [][]int{{0}, {1}}})
+	// Two check lists per attempt now: the models to add, then which of them the
+	// agent may pick for subagents (283). The first attempt ticks row 0, the
+	// second row 1; neither opens the subagent switch.
+	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}, multiSelects: [][]int{{0}, {}, {1}, {}}})
 	cfg.Output = out
 	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
 	if err != nil || !ok {
@@ -1521,4 +1539,114 @@ func TestRegistryCarriesTheClientConstants(t *testing.T) {
 	if chatGPTRow.DefaultBaseURL != "" || openCodeRow.DefaultBaseURL != "" {
 		t.Fatalf("sign-in rows carry %q/%q, want no base url of their own", chatGPTRow.DefaultBaseURL, openCodeRow.DefaultBaseURL)
 	}
+}
+
+// The subscription flow asks twice: which models to add, and then which of them
+// the agent may pick for subagents on its own (283, owner 2026-11-10). The
+// second answer is written on the rows the sign-in just wrote, addressed by the
+// ids Provision returned, in the order the offers were ticked.
+func TestConfigureSubscriptionWritesTheSubagentSwitchByRowID(t *testing.T) {
+	sub := chatGPTLike()
+	browserMachine(t)
+	cfg := setupTestConfig(t, &fakeSelector{
+		confirms:     []bool{true},
+		multiSelects: [][]int{{0, 1}, {1}},
+	})
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	selector := cfg.Selector.(*fakeSelector)
+	if len(selector.multiLabels) != 2 ||
+		!strings.HasPrefix(selector.multiLabels[0], "ChatGPT\n") ||
+		!strings.HasPrefix(selector.multiLabels[1], "Subagents\n") {
+		t.Fatalf("check lists = %#v, want the models and then the subagent authorization", selector.multiLabels)
+	}
+	if len(sub.provisioned) != 1 || len(sub.provisioned[0]) != 2 {
+		t.Fatalf("provisioned = %#v, want one write of the two ticked models", sub.provisioned)
+	}
+	db, err := process.StateDB(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath})
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	defer db.Close()
+	store := &state.LLMModelStore{DB: db}
+	for i, offer := range sub.provisioned[0] {
+		provider, model, baseURL, apiPath := appcfg.NormalizeLLMModelIdentity(offer.Provider, offer.Model, offer.BaseURL, offer.APIPath)
+		row, found, err := store.FindByIdentity(context.Background(), provider, model, baseURL, apiPath)
+		if err != nil || !found {
+			t.Fatalf("row %d: found=%t err=%v", i, found, err)
+		}
+		want := i == 1
+		if row.SubagentAllowed != want {
+			t.Fatalf("row %d (%s) SubagentAllowed = %t, want %t", i, row.Model, row.SubagentAllowed, want)
+		}
+	}
+	// The session switches to the first model ticked, and the switch it carries
+	// is that row's own answer.
+	if opts.Model != "gpt-future" || opts.SubagentAllowed {
+		t.Fatalf("options = %+v, want the first offer with its own (closed) switch", opts)
+	}
+}
+
+// An installation that already holds the row opens the page on that row's
+// switch, so stepping through a save keeps a user's earlier answer; a row that
+// predates the switch opens closed.
+func TestSubagentPageDefaultsToTheStoredSwitch(t *testing.T) {
+	cfg := setupTestConfig(t, &fakeSelector{})
+	db, err := process.StateDB(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath})
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	if _, err := (&state.LLMModelStore{DB: db}).Create(context.Background(), state.LLMModel{
+		Provider: appcfg.CustomProvider, Model: "gpt-4o", BaseURL: "https://api.example.com/v1",
+		APIPath: appcfg.APIPathChatCompletions, APIKey: "sk-old", SubagentAllowed: true,
+	}); err != nil {
+		t.Fatalf("seed the row: %v", err)
+	}
+	_ = db.Close()
+
+	setup := newLLMSetup(cfg)
+	setup.setChoice(customChoice())
+	setup.model = "gpt-4o"
+	setup.baseURL = "https://api.example.com/v1"
+	setup.apiPath = appcfg.APIPathChatCompletions
+	allowed, err := setup.pickSubagents()
+	if err != nil {
+		t.Fatalf("pickSubagents: %v", err)
+	}
+	if !allowed || !setup.subagentAllowed {
+		t.Fatalf("answer = %t/%t, want the stored yes", allowed, setup.subagentAllowed)
+	}
+	selector := cfg.Selector.(*fakeSelector)
+	if got := selector.selectDefaults[len(selector.selectDefaults)-1]; got != subagentsYes {
+		t.Fatalf("page default = %q, want the stored yes", got)
+	}
+	if got := setup.reviewFacts(); !containsFact(got, "Subagents", subagentsYes) {
+		t.Fatalf("review facts = %#v, want the Subagents line", got)
+	}
+
+	// A row the install never authorized opens on No, and so does a row that
+	// does not exist yet.
+	other := newLLMSetup(setupTestConfig(t, &fakeSelector{}))
+	other.setChoice(customChoice())
+	other.model = "gpt-4o-mini"
+	other.baseURL = "https://api.example.com/v1"
+	other.apiPath = appcfg.APIPathChatCompletions
+	if _, err := other.pickSubagents(); err != nil {
+		t.Fatalf("pickSubagents: %v", err)
+	}
+	if other.subagentAllowed {
+		t.Fatalf("subagentAllowed = true, want the closed default")
+	}
+}
+
+// containsFact reports whether the review lists the given label with the value.
+func containsFact(facts []turn.StatusFact, label, value string) bool {
+	for _, fact := range facts {
+		if fact.Label == label {
+			return fact.Value == value
+		}
+	}
+	return false
 }
