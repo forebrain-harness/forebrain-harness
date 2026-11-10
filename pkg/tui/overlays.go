@@ -558,7 +558,16 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 			}
 			writeLine("%s", approvalSeparatorLine(width))
 		}
-		if planContent != "" || len(o.req.PlanReviews) > 0 {
+		// A reviewer picker asks its question in the verdict line's place
+		// instead of below it: the panel asks one thing at a time, and the
+		// proceed question cannot be answered while the model list holds
+		// the keys. The row is recorded here because the first paint
+		// anchors the picker on its question.
+		switch {
+		case o.planReviewPicking:
+			o.planReviewTopRow = lineCount
+			writeLine("Which model should review this plan? (Esc to go back)")
+		case planContent != "" || len(o.req.PlanReviews) > 0:
 			writeLine("Would you like to proceed?")
 		}
 	} else if isApprovalWebSearch(o.req) {
@@ -695,8 +704,6 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		}
 		cursorLine = o.feedbackFirstRow + o.feedbackLayout.cursorRow
 	case o.planReviewPicking:
-		o.planReviewTopRow = lineCount
-		writeLine("Which model should review this plan? (Esc to go back)")
 		models := o.req.PlanReviewModels
 		list := newPlanReviewList(models, width)
 		for i, model := range models {

@@ -29,12 +29,14 @@
 #
 # The release is pinned (RELEASE_TAG); the numeric asset ids are NOT — they are
 # resolved at run time from that tag's asset list by file name, because the ids
-# change on every release. The sha256 of each asset is pinned in the table
-# below, taken from RELEASE_TAG; a moved or re-cut release fails the check
-# loudly instead of silently linking something else.
+# change on every release. That resolution is one api.github.com call, made
+# only when a target actually needs downloading. The sha256 of each asset is
+# pinned in the table below, taken from RELEASE_TAG; a moved or re-cut release
+# fails the check loudly instead of silently linking something else.
 #
 # Idempotent: a target whose .version matches RELEASE_TAG and whose library is
-# present is left alone, so a CI cache hit costs nothing.
+# present is left alone, so a CI cache hit costs nothing — and a run where
+# every requested target is already cached makes no network call at all.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -93,6 +95,26 @@ resolve_asset_id() {
   printf '%s' "$id"
 }
 
+# fetch_release_json: fill $release_json with the pinned release's asset list.
+# Called only when some target is uncached and no mirror is set. --retry 2
+# covers curl's default transient set (timeouts, HTTP 408/429/5xx); a 403 is
+# permanent for as long as the quota window lasts, so it fails at once instead
+# of burning four requests — and the message names the two escape hatches.
+fetch_release_json() {
+  local code
+  code="$(curl -sSL --retry 2 \
+    ${gh_curl_opts[@]+"${gh_curl_opts[@]}"} \
+    -o "$release_json" -w '%{http_code}' \
+    "$RELEASES_API/releases/tags/$RELEASE_TAG_ENCODED")" \
+    || die "could not read release $RELEASE_TAG: curl failed"
+  if [ "$code" != 200 ]; then
+    if [ "$code" = 403 ] && grep -q "API rate limit exceeded" "$release_json" 2>/dev/null; then
+      die "GitHub API rate limit exceeded reading release $RELEASE_TAG (anonymous quota: 60/h per IP). Set GITHUB_TOKEN (or GH_TOKEN) to lift it to 5000/h, or set FOREBRAIN_GITHUB_MIRROR to bypass the API entirely."
+    fi
+    die "could not read release $RELEASE_TAG: HTTP $code"
+  fi
+}
+
 write_pc() { # write_pc <dir> <libdir-rel> <extra-libs>
   local dir="$1" lib="$2" extra="$3"
   cat > "$dir/pdfium.pc" <<EOF
@@ -122,18 +144,21 @@ ensure_windows_alias() { # ensure_windows_alias <dir>
   [ -f "$dir/lib/pdfium.lib" ] || die "windows archive has no import library (lib/pdfium.dll.lib)"
 }
 
-fetch_one() { # fetch_one <goos>/<goarch> <release-json>
+# target_cached <goos>/<goarch>: the pinned release is already unpacked for
+# this target — .version matches and the library is present, no network needed.
+target_cached() {
+  local goos="${1%%/*}" goarch="${1##*/}"
+  local dir="$DEST_ROOT/${goos}_${goarch}"
+  [ -f "$dir/.version" ] && [ "$(cat "$dir/.version")" = "$RELEASE_TAG" ] && [ -d "$dir/lib" ]
+}
+
+# fetch_one <goos>/<goarch> <release-json>: download and unpack one target the
+# pre-check below found uncached; cached targets never reach this function.
+fetch_one() {
   local target="$1" json="$2"
   local goos="${target%%/*}" goarch="${target##*/}"
   local dir="$DEST_ROOT/${goos}_${goarch}"
   local verfile="$dir/.version"
-  if [ -f "$verfile" ] && [ "$(cat "$verfile")" = "$RELEASE_TAG" ] && [ -d "$dir/lib" ]; then
-    if [ "$goos" = "windows" ]; then
-      ensure_windows_alias "$dir"
-    fi
-    log "$target already at $RELEASE_TAG"
-    return 0
-  fi
 
   local asset sha
   if ! read -r asset sha < <(asset_and_sha "$target"); then
@@ -144,13 +169,14 @@ fetch_one() { # fetch_one <goos>/<goarch> <release-json>
   tmp="$(mktemp -d)"
   trap "rm -rf '$tmp'" RETURN
   log "downloading $asset ($RELEASE_TAG)"
-  # Two ways to the same bytes.
+  # Two ways to the same bytes (only uncached targets get this far, and unless
+  # the mirror is set the probe in fetch_release_json has already run).
   #
   # Through the asset API (the default): the id is looked up in the pinned
   # release's asset list, then downloaded with an octet-stream Accept. That path
-  # is rate-limited to 60 anonymous requests an hour per IP, so a few local
-  # retries exhaust it and the build fails with 403 rather than anything about
-  # this repository.
+  # is rate-limited to 60 anonymous requests an hour per IP; once the quota is
+  # gone, the probe dies with guidance (GITHUB_TOKEN, or the mirror below)
+  # rather than a bare 403 that says nothing about this repository.
   #
   # Through FOREBRAIN_GITHUB_MIRROR: the release URL is deterministic, so no API
   # call is made at all — the mirror serves
@@ -224,11 +250,6 @@ fetch_one() { # fetch_one <goos>/<goarch> <release-json>
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v tar >/dev/null 2>&1 || die "tar is required"
-# jq resolves asset ids through the API; the mirror path downloads the
-# deterministic release URL instead and never needs it.
-if [ -z "${FOREBRAIN_GITHUB_MIRROR:-}" ] && ! command -v jq >/dev/null 2>&1; then
-  die "jq is required to resolve asset ids"
-fi
 command -v pkg-config >/dev/null 2>&1 || die "pkg-config is required: go-pdfium links through 'cgo pkg-config: pdfium'"
 
 targets=("$@")
@@ -239,24 +260,37 @@ if [ "${#targets[@]}" -eq 0 ]; then
   targets=("$(go env GOOS)/$(go env GOARCH)")
 fi
 
-# Fetch the pinned release's asset list once; every target resolves its id here.
-# The mirror path (FOREBRAIN_GITHUB_MIRROR) never reads the API — the release URL
-# is deterministic — so skip the call entirely there: it costs one request of a
-# 60/hour anonymous quota and is the first thing to fail once that quota is gone.
-release_json="$(mktemp)"
-trap 'rm -f "$release_json"' EXIT
-if [ -z "${FOREBRAIN_GITHUB_MIRROR:-}" ]; then
-  curl -fsSL --retry 3 --retry-all-errors \
-    ${gh_curl_opts[@]+"${gh_curl_opts[@]}"} \
-    "$RELEASES_API/releases/tags/$RELEASE_TAG_ENCODED" -o "$release_json" \
-    || die "could not read release $RELEASE_TAG"
-fi
-
+# Split the targets with a pure-filesystem pre-check: a cached target is
+# finished right here (windows keeps its alias fix-up, same as a fresh
+# extract), and only the uncached ones still need anything from the network.
+needs=()
 for target in "${targets[@]}"; do
   case "$target" in
     */*) ;;
     *) die "target \"$target\" must be <goos>/<goarch>" ;;
   esac
+  if target_cached "$target"; then
+    if [ "${target%%/*}" = "windows" ]; then
+      ensure_windows_alias "$DEST_ROOT/${target%%/*}_${target##*/}"
+    fi
+    log "$target already at $RELEASE_TAG"
+  else
+    needs+=("$target")
+  fi
+done
+
+# Fetch the pinned release's asset list once; every uncached target resolves
+# its id here. The mirror path (FOREBRAIN_GITHUB_MIRROR) never reads the API —
+# the release URL is deterministic — so the call is skipped entirely there: it
+# costs one request of a 60/hour anonymous quota and is the first thing to
+# fail once that quota is gone. So is jq, which only serves the API path.
+release_json="$(mktemp)"
+trap 'rm -f "$release_json"' EXIT
+if [ "${#needs[@]}" -gt 0 ] && [ -z "${FOREBRAIN_GITHUB_MIRROR:-}" ]; then
+  command -v jq >/dev/null 2>&1 || die "jq is required to resolve asset ids"
+  fetch_release_json
+fi
+for target in ${needs[@]+"${needs[@]}"}; do
   fetch_one "$target" "$release_json"
 done
 

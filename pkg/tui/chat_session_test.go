@@ -10960,6 +10960,57 @@ func TestExitPlanOverlayRendersPickerAndCollectedReviews(t *testing.T) {
 	}
 }
 
+// The picker asks its own question in the verdict line's place instead of below
+// it: the panel asks one thing at a time, and the proceed question is not
+// answerable while the model list holds the keys. A blank line separates the
+// question from the models it asks about.
+func TestExitPlanReviewPickerQuestionTakesTheVerdictLine(t *testing.T) {
+	req := exitPlanReviewRequest(t, "# Plan\n\nStep one.\n")
+	lines := func(picking bool) []string {
+		overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+		if picking {
+			overlay.enterPlanReviewMode()
+		}
+		rendered, _ := overlay.buildApprovalContent(100)
+		out := make([]string, len(rendered))
+		for i, line := range rendered {
+			out[i] = stripANSI(line)
+		}
+		return out
+	}
+	at := func(lines []string, want string) int {
+		for i, line := range lines {
+			if strings.Contains(line, want) {
+				return i
+			}
+		}
+		return -1
+	}
+	const (
+		proceed  = "Would you like to proceed?"
+		question = "Which model should review this plan?"
+	)
+	verdict, picking := lines(false), lines(true)
+	proceedAt := at(verdict, proceed)
+	if proceedAt < 0 {
+		t.Fatalf("the verdict list must ask %q:\n%s", proceed, strings.Join(verdict, "\n"))
+	}
+	if got := at(picking, proceed); got >= 0 {
+		t.Fatalf("the picker repeated the verdict question on line %d:\n%s", got, strings.Join(picking, "\n"))
+	}
+	questionAt := at(picking, question)
+	if questionAt != proceedAt {
+		t.Fatalf("the question is on line %d, want the verdict line %d:\n%s",
+			questionAt, proceedAt, strings.Join(picking, "\n"))
+	}
+	if questionAt+1 >= len(picking) || strings.TrimSpace(picking[questionAt+1]) != "" {
+		t.Fatalf("no blank line between the question and the models:\n%s", strings.Join(picking, "\n"))
+	}
+	if questionAt+2 >= len(picking) || !strings.Contains(picking[questionAt+2], "anthropic/claude-opus-4-1") {
+		t.Fatalf("the model rows do not start under the blank line:\n%s", strings.Join(picking, "\n"))
+	}
+}
+
 // exitPlanReviewPickerLines draws the reviewer picker the way the overlay does
 // and returns its lines with their styling stripped.
 func exitPlanReviewPickerLines(t *testing.T, req turn.ToolApprovalRequest, width int) []string {
