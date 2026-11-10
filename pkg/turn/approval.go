@@ -69,6 +69,32 @@ type ApprovalReply struct {
 	AskAnswerJSON string
 	ClearContext  bool
 	PlanOnly      bool
+	// HandOffModel approves an exit-plan decision and hands the plan's
+	// implementation to this configured row; the decision names it by row id.
+	HandOffModel *Model
+}
+
+// handOffModelJSON is the answer_json shape of a hand-off decision, shared by
+// the three decoders that read an approved answer back (the reply writer,
+// ApplyResolvedEffect's replay and sameApprovedReply's idempotence check), so
+// a decision written by one surface replays the same in every other.
+type handOffModelJSON struct {
+	ID       string `json:"id,omitempty"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// handOffModelJSONOf projects a reply's hand-off model into the answer shape,
+// trimming the fields; nil stays nil.
+func handOffModelJSONOf(m *Model) *handOffModelJSON {
+	if m == nil {
+		return nil
+	}
+	return &handOffModelJSON{
+		ID:       strings.TrimSpace(m.ID),
+		Provider: strings.TrimSpace(m.Provider),
+		Model:    strings.TrimSpace(m.Model),
+	}
 }
 
 // ApprovalResult records the state transition made by Decide.
@@ -215,6 +241,7 @@ func (s ApprovalService) ApplyResolvedEffect(action *state.Action, runID string)
 		Update       *safety.PermissionUpdate   `json:"update"`
 		ClearContext bool                       `json:"clear_context"`
 		PlanOnly     bool                       `json:"plan_only"`
+		HandOffModel *handOffModelJSON          `json:"hand_off_model"`
 	}
 	if raw := strings.TrimSpace(action.AnswerJSON); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &answer); err != nil {
@@ -225,9 +252,18 @@ func (s ApprovalService) ApplyResolvedEffect(action *state.Action, runID string)
 	if choice == "" {
 		choice = "accept"
 	}
+	handOff := (*Model)(nil)
+	if answer.HandOffModel != nil {
+		handOff = &Model{
+			ID:       answer.HandOffModel.ID,
+			Provider: answer.HandOffModel.Provider,
+			Model:    answer.HandOffModel.Model,
+		}
+	}
 	effect, err := s.effect(action, choice, ApprovalReply{
 		Choice: choice, Exec: answer.Exec,
 		Update: answer.Update, ClearContext: answer.ClearContext, PlanOnly: answer.PlanOnly,
+		HandOffModel: handOff,
 	})
 	if err != nil {
 		return err
@@ -269,6 +305,20 @@ func (s ApprovalService) Decide(ctx context.Context, actionID string, reply Appr
 	if reply.PlanOnly && reply.ClearContext {
 		return ApprovalResult{}, fmt.Errorf("plan only and clear context cannot be combined")
 	}
+	if reply.HandOffModel != nil {
+		if !strings.EqualFold(strings.TrimSpace(act.Kind), "exit_plan_mode") || choice != "accept" {
+			return ApprovalResult{}, fmt.Errorf("hand off is only valid for an approved exit-plan decision")
+		}
+		if reply.ClearContext || reply.PlanOnly {
+			return ApprovalResult{}, fmt.Errorf("hand off cannot be combined with clear context or plan only")
+		}
+		// A hand-off names a configured row by id (owner ruling 9): the same
+		// provider/model may be configured twice, so the pair alone is not an
+		// identity and the id is what the dispatch later resolves.
+		if strings.TrimSpace(reply.HandOffModel.ID) == "" || strings.TrimSpace(reply.HandOffModel.Model) == "" {
+			return ApprovalResult{}, fmt.Errorf("hand off requires a configured model id")
+		}
+	}
 	if reply.Update != nil && choice != "accept" {
 		return ApprovalResult{}, fmt.Errorf("approval decision cannot include a permission update")
 	}
@@ -309,7 +359,9 @@ func (s ApprovalService) Decide(ctx context.Context, actionID string, reply Appr
 		Update       *safety.PermissionUpdate   `json:"update,omitempty"`
 		ClearContext bool                       `json:"clear_context,omitempty"`
 		PlanOnly     bool                       `json:"plan_only,omitempty"`
-	}{Decision: choice, Exec: reply.Exec, Update: reply.Update, ClearContext: reply.ClearContext, PlanOnly: reply.PlanOnly})
+		HandOffModel *handOffModelJSON          `json:"hand_off_model,omitempty"`
+	}{Decision: choice, Exec: reply.Exec, Update: reply.Update, ClearContext: reply.ClearContext,
+		PlanOnly: reply.PlanOnly, HandOffModel: handOffModelJSONOf(reply.HandOffModel)})
 	if err != nil {
 		return ApprovalResult{}, err
 	}
@@ -370,17 +422,30 @@ func sameApprovedReply(act *state.Action, choice string, reply ApprovalReply) bo
 		Update       *safety.PermissionUpdate   `json:"update"`
 		ClearContext bool                       `json:"clear_context"`
 		PlanOnly     bool                       `json:"plan_only"`
+		HandOffModel *handOffModelJSON          `json:"hand_off_model"`
 	}
 	if json.Unmarshal([]byte(act.AnswerJSON), &answer) != nil {
-		return choice == "accept" && len(reply.Exec) == 0 && reply.Update == nil && !reply.ClearContext && !reply.PlanOnly
+		return choice == "accept" && len(reply.Exec) == 0 && reply.Update == nil && !reply.ClearContext && !reply.PlanOnly &&
+			reply.HandOffModel == nil
+	}
+	// Both sides normalize to trimmed values, so a replay of the same decision
+	// — whatever whitespace a surface's round trip added — is idempotent.
+	sameHandOff := func(a, b *handOffModelJSON) bool {
+		if a == nil || b == nil {
+			return a == nil && b == nil
+		}
+		return strings.TrimSpace(a.ID) == strings.TrimSpace(b.ID) &&
+			strings.TrimSpace(a.Provider) == strings.TrimSpace(b.Provider) &&
+			strings.TrimSpace(a.Model) == strings.TrimSpace(b.Model)
 	}
 	return answer.Decision == choice && reflect.DeepEqual(answer.Exec, reply.Exec) &&
 		reflect.DeepEqual(answer.Update, reply.Update) &&
-		answer.ClearContext == reply.ClearContext && answer.PlanOnly == reply.PlanOnly
+		answer.ClearContext == reply.ClearContext && answer.PlanOnly == reply.PlanOnly &&
+		sameHandOff(answer.HandOffModel, handOffModelJSONOf(reply.HandOffModel))
 }
 
 func (s ApprovalService) decideAsk(ctx context.Context, act *state.Action, choice string, reply ApprovalReply) (ApprovalResult, error) {
-	if reply.Update != nil || len(reply.Exec) > 0 || reply.Permissions != nil || reply.ClearContext || reply.PlanOnly {
+	if reply.Update != nil || len(reply.Exec) > 0 || reply.Permissions != nil || reply.ClearContext || reply.PlanOnly || reply.HandOffModel != nil {
 		return ApprovalResult{}, fmt.Errorf("user_interaction does not accept approval policy options")
 	}
 	if choice == "cancel" {
@@ -639,6 +704,27 @@ func ActionKeptPlanOnly(action *state.Action) bool {
 	}
 	_ = json.Unmarshal([]byte(action.AnswerJSON), &answer)
 	return answer.PlanOnly
+}
+
+// ActionHandOffModel reports the model an approved exit-plan decision handed
+// the plan's implementation to. Same shape as ActionKeptPlanOnly; ok is false
+// when the answer carried no hand-off.
+func ActionHandOffModel(action *state.Action) (Model, bool) {
+	if action == nil || action.Status != state.ActionApproved {
+		return Model{}, false
+	}
+	var answer struct {
+		HandOffModel *handOffModelJSON `json:"hand_off_model"`
+	}
+	_ = json.Unmarshal([]byte(action.AnswerJSON), &answer)
+	if answer.HandOffModel == nil {
+		return Model{}, false
+	}
+	return Model{
+		ID:       strings.TrimSpace(answer.HandOffModel.ID),
+		Provider: strings.TrimSpace(answer.HandOffModel.Provider),
+		Model:    strings.TrimSpace(answer.HandOffModel.Model),
+	}, true
 }
 
 // PlanModeForAction returns the mode selected by an approved plan action.
@@ -1391,12 +1477,14 @@ func ActivePlanReview(ctx context.Context, log PlanReviewLog, sessionID, actionI
 	return PlanReviewInFlight{}, false
 }
 
-// planReviewerAgentID finds the roster key of the subagent one review
-// dispatched: its spawned event names the review as its parent tool call.
-func planReviewerAgentID(ctx context.Context, log PlanReviewLog, sessionID, reviewID string) string {
+// planReviewerSpawn finds the subagent one review dispatched, as its spawned
+// event: the newest one whose parent tool call is the review. The whole
+// payload comes back — a continuation needs the roster key and the task id,
+// not just the agent.
+func planReviewerSpawn(ctx context.Context, log PlanReviewLog, sessionID, reviewID string) (event.SubagentSpawnedPayload, bool) {
 	spawns, err := log.ListSessionEventsOfType(ctx, sessionID, event.RunEventSubagentSpawned, 0)
 	if err != nil {
-		return ""
+		return event.SubagentSpawnedPayload{}, false
 	}
 	for i := len(spawns) - 1; i >= 0; i-- {
 		var payload event.SubagentSpawnedPayload
@@ -1404,10 +1492,65 @@ func planReviewerAgentID(ctx context.Context, log PlanReviewLog, sessionID, revi
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(payload.ParentToolCallID), reviewID) {
-			return strings.TrimSpace(payload.AgentID)
+			return payload, true
 		}
 	}
-	return ""
+	return event.SubagentSpawnedPayload{}, false
+}
+
+// planReviewerAgentID finds the roster key of the subagent one review
+// dispatched: its spawned event names the review as its parent tool call.
+func planReviewerAgentID(ctx context.Context, log PlanReviewLog, sessionID, reviewID string) string {
+	spawn, ok := planReviewerSpawn(ctx, log, sessionID, reviewID)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(spawn.AgentID)
+}
+
+// LastPlanReview names the conversation's previous review — the newest
+// plan_review_started, whatever its outcome and whichever approval it served —
+// together with its reviewer subagent's dispatch record, when that review can
+// be continued in its own conversation. It is the review the user last asked
+// for: it must have dispatched a subagent (AgentID and TaskID non-empty), or
+// there is no conversation to continue. Only the newest one counts — an older
+// review the newest displaced is several rounds stale, not "the previous
+// review" — so a newest started event that resolves to nothing returns false
+// rather than falling back.
+func LastPlanReview(ctx context.Context, log PlanReviewLog, sessionID string) (PlanReviewAgain, Model, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	if log == nil || sessionID == "" {
+		return PlanReviewAgain{}, Model{}, false
+	}
+	started, err := log.ListSessionEventsOfType(ctx, sessionID, event.RunEventPlanReviewStarted, 0)
+	if err != nil || len(started) == 0 {
+		return PlanReviewAgain{}, Model{}, false
+	}
+	// ListSessionEventsOfType returns oldest first: the conversation's last
+	// review is the final slice element.
+	record := started[len(started)-1]
+	var payload event.PlanReviewStartedPayload
+	if json.Unmarshal(record.Payload, &payload) != nil {
+		return PlanReviewAgain{}, Model{}, false
+	}
+	model := Model{
+		ID:       strings.TrimSpace(payload.ModelID),
+		Provider: strings.TrimSpace(payload.Provider),
+		Model:    strings.TrimSpace(payload.Model),
+	}
+	if model.Model == "" {
+		return PlanReviewAgain{}, Model{}, false
+	}
+	spawn, ok := planReviewerSpawn(ctx, log, sessionID, strings.TrimSpace(payload.ReviewID))
+	if !ok || strings.TrimSpace(spawn.AgentID) == "" || strings.TrimSpace(spawn.TaskID) == "" {
+		return PlanReviewAgain{}, Model{}, false
+	}
+	return PlanReviewAgain{
+		ReviewID:  strings.TrimSpace(payload.ReviewID),
+		AgentID:   strings.TrimSpace(spawn.AgentID),
+		TaskID:    strings.TrimSpace(spawn.TaskID),
+		StartedAt: record.CreatedAt,
+	}, model, true
 }
 
 // PlanReviewTranscripts is the transcript half of the reviewer's task
@@ -1784,6 +1927,11 @@ type PendingApprovalGate struct {
 	// returning nothing, leaves the request without the review row — a surface
 	// with no configured model to ask has no choice to offer.
 	ReviewModels func(sessionID string) []PlanReviewModelOption
+	// ProjectRoot resolves the root of the project the session works in; the
+	// gate uses it to decide whether the plan can be handed to another model
+	// (the executor needs a git repository for its worktree). Nil, or
+	// returning an empty string, leaves HandOffAvailable false.
+	ProjectRoot func(ctx context.Context, sessionID string) string
 }
 
 // Waiting reports whether the session is parked on a tool approval.
@@ -1897,8 +2045,35 @@ func (g *PendingApprovalGate) PendingForRun(ctx context.Context, sessionID, runI
 		if err == nil {
 			req.PlanReviews = planReviewNotesFrom(results)
 		}
+		// The review the user may ask to continue: the conversation's newest
+		// one, offered only when its model is still configured (a deleted row
+		// cannot be re-picked) and its subagent is still addressable.
+		if again, model, ok := LastPlanReview(ctx, g.Runs, sessionID); ok {
+			for i := range req.PlanReviewModels {
+				if req.PlanReviewModels[i].MatchesSelection(model.ID, model.Provider, model.Model) {
+					req.PreviousPlanReview = &PreviousPlanReview{PlanReviewAgain: again, Model: req.PlanReviewModels[i]}
+					break
+				}
+			}
+		}
+		// The hand-off row needs a git repository (the executor's worktree)
+		// and a model to hand to. The models are checked first — a session
+		// with none skips the git subprocess entirely.
+		req.HandOffAvailable = hasNonCurrentModel(req.PlanReviewModels) &&
+			g.ProjectRoot != nil && tool.MainWorktreeRoot(ctx, g.ProjectRoot(ctx, sessionID)) != ""
 	}
 	return &req, nil
+}
+
+// hasNonCurrentModel reports whether any offered model is not the
+// conversation's current one: a hand-off needs somewhere to hand to.
+func hasNonCurrentModel(models []PlanReviewModelOption) bool {
+	for _, model := range models {
+		if !model.Current {
+			return true
+		}
+	}
+	return false
 }
 
 // PendingApprovalToolCall finds the original LLM call parked at an approval

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1342,4 +1343,228 @@ func TestRunPlanReviewRecordsTheRowItRanOn(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.Equal(t, Model{ID: "row-2", Provider: "openai", Model: "gpt-4o"}, results[0].Model)
+}
+
+// TestDecideHandOffModelValidatedAndRecorded pins the hand-off decision's
+// rules (语义 2): only an approved exit-plan decision may carry it, it cannot
+// combine with clear-context or plan-only, and it must name a configured row
+// by id. A valid one lands in answer_json.hand_off_model and replays
+// idempotently; a different model on the same action conflicts.
+func TestDecideHandOffModelValidatedAndRecorded(t *testing.T) {
+	handOff := &Model{ID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3"}
+
+	// Non exit_plan_mode kind.
+	store := &approvalStoreStub{action: &state.Action{ID: "a1", Kind: "shell", Status: state.ActionPending, PayloadJSON: `{}`}}
+	_, err := (ApprovalService{Actions: store}).Decide(context.Background(), "a1", ApprovalReply{HandOffModel: handOff})
+	require.ErrorContains(t, err, "hand off is only valid")
+	require.Equal(t, state.ActionPending, store.action.Status)
+
+	// A denied exit-plan decision cannot hand off.
+	store = &approvalStoreStub{action: &state.Action{ID: "a2", Kind: "exit_plan_mode", Status: state.ActionPending, PayloadJSON: `{}`}}
+	_, err = (ApprovalService{Actions: store}).Decide(context.Background(), "a2", ApprovalReply{Choice: "deny", HandOffModel: handOff})
+	require.ErrorContains(t, err, "hand off is only valid")
+	require.Equal(t, state.ActionPending, store.action.Status)
+
+	// hand_off_model cannot combine with clear context or plan only.
+	for name, reply := range map[string]ApprovalReply{
+		"clear context": {ClearContext: true, HandOffModel: handOff},
+		"plan only":     {PlanOnly: true, HandOffModel: handOff},
+	} {
+		store = &approvalStoreStub{action: &state.Action{ID: "a3", Kind: "exit_plan_mode", Status: state.ActionPending, PayloadJSON: `{}`}}
+		_, err = (ApprovalService{Actions: store}).Decide(context.Background(), "a3", reply)
+		require.ErrorContains(t, err, "cannot be combined", name)
+		require.Equal(t, state.ActionPending, store.action.Status, name)
+	}
+
+	// The row id and the model name are both required: a hand-off resolves the
+	// row by id later, so a pair alone is not an identity.
+	for name, model := range map[string]*Model{
+		"no id":    {Provider: "zhipuai", Model: "glm-5.3"},
+		"no model": {ID: "llm_row2", Provider: "zhipuai"},
+	} {
+		store = &approvalStoreStub{action: &state.Action{ID: "a4", Kind: "exit_plan_mode", Status: state.ActionPending, PayloadJSON: `{}`}}
+		_, err = (ApprovalService{Actions: store}).Decide(context.Background(), "a4", ApprovalReply{HandOffModel: model})
+		require.ErrorContains(t, err, "hand off requires a configured model id", name)
+		require.Equal(t, state.ActionPending, store.action.Status, name)
+	}
+
+	// The valid decision records the row in the answer.
+	store = &approvalStoreStub{action: &state.Action{ID: "a5", Kind: "exit_plan_mode", Status: state.ActionPending, PayloadJSON: `{}`}}
+	service := ApprovalService{Actions: store}
+	result, err := service.Decide(context.Background(), "a5", ApprovalReply{HandOffModel: handOff})
+	require.NoError(t, err)
+	require.True(t, result.Approved)
+	require.Contains(t, store.action.AnswerJSON, `"hand_off_model":{"id":"llm_row2","provider":"zhipuai","model":"glm-5.3"}`)
+
+	got, ok := ActionHandOffModel(store.action)
+	require.True(t, ok)
+	require.Equal(t, Model{ID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3"}, got)
+	if _, ok := ActionHandOffModel(&state.Action{Status: state.ActionApproved, Kind: "exit_plan_mode", AnswerJSON: `{}`}); ok {
+		t.Fatal("an answer without a hand-off reported one")
+	}
+
+	// The same decision replays idempotently; a different model conflicts.
+	retry, err := service.Decide(context.Background(), "a5", ApprovalReply{HandOffModel: handOff})
+	require.NoError(t, err)
+	require.True(t, retry.Approved)
+	require.True(t, retry.Idempotent)
+	other := &Model{ID: "llm_row9", Provider: "zhipuai", Model: "glm-5.3"}
+	if _, err := service.Decide(context.Background(), "a5", ApprovalReply{HandOffModel: other}); !errors.Is(err, ErrApprovalConflict) {
+		t.Fatalf("different model on the decided action = %v, want ErrApprovalConflict", err)
+	}
+}
+
+// gateEventsRuns serves one parked run plus a canned event log, the shape the
+// previous-review and hand-off facts are derived from.
+type gateEventsRuns struct {
+	fakeApprovalRuns
+	events map[string][]state.SessionEvent
+}
+
+func (f *gateEventsRuns) ListSessionEventsOfType(_ context.Context, _ string, eventType string, _ int) ([]state.SessionEvent, error) {
+	return f.events[eventType], nil
+}
+
+func gateEventRow(t *testing.T, id, eventType string, payload any, at time.Time) state.SessionEvent {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state.SessionEvent{ID: id, Type: eventType, Payload: raw, CreatedAt: at}
+}
+
+// TestLastPlanReviewTakesTheNewestStartedWithSpawn pins 语义 6's "previous
+// review": the newest plan_review_started the conversation holds, whatever its
+// outcome and whichever approval it served, offered back only when that very
+// review dispatched a subagent — an older review behind a spawnless newest one
+// is stale, not "the previous review".
+func TestLastPlanReviewTakesTheNewestStartedWithSpawn(t *testing.T) {
+	at := time.Now().UTC()
+	startedOf := func(reviewID, actionID, rowID string, ts time.Time) state.SessionEvent {
+		return gateEventRow(t, reviewID+":started", event.RunEventPlanReviewStarted,
+			event.PlanReviewStartedPayload{ActionID: actionID, ReviewID: reviewID, ModelID: rowID, Provider: "zhipuai", Model: "glm-5.3"}, ts)
+	}
+	spawnOf := func(reviewID, agentID, taskID string) state.SessionEvent {
+		return gateEventRow(t, reviewID+":spawn", event.RunEventSubagentSpawned,
+			event.SubagentSpawnedPayload{AgentID: agentID, TaskID: taskID, ParentToolCallID: reviewID}, at.Add(time.Second))
+	}
+	olderAt, newerAt := at.Add(-time.Minute), at
+	runs := &gateEventsRuns{events: map[string][]state.SessionEvent{
+		event.RunEventPlanReviewStarted: {
+			startedOf("plan-review:old", "act-1", "llm_row1", olderAt),
+			startedOf("plan-review:new", "act-2", "llm_row2", newerAt),
+		},
+		event.RunEventSubagentSpawned: {
+			spawnOf("plan-review:old", "agent-old", "task-old"),
+			spawnOf("plan-review:new", "agent-new", "task-new"),
+		},
+	}}
+	again, model, ok := LastPlanReview(context.Background(), runs, "s1")
+	require.True(t, ok)
+	require.Equal(t, "plan-review:new", again.ReviewID)
+	require.Equal(t, "agent-new", again.AgentID)
+	require.Equal(t, "task-new", again.TaskID)
+	require.Equal(t, newerAt, again.StartedAt)
+	require.Equal(t, Model{ID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3"}, model)
+
+	// The newest started has no spawn: no continuation, and no falling back to
+	// the older review behind one.
+	runs.events[event.RunEventSubagentSpawned] = []state.SessionEvent{spawnOf("plan-review:old", "agent-old", "task-old")}
+	if _, _, ok := LastPlanReview(context.Background(), runs, "s1"); ok {
+		t.Fatal("a newest review without a subagent must not fall back to an older one")
+	}
+
+	// A spawn whose record lost its agent or task keys cannot be continued.
+	runs.events[event.RunEventSubagentSpawned] = []state.SessionEvent{spawnOf("plan-review:new", "", "task-new")}
+	if _, _, ok := LastPlanReview(context.Background(), runs, "s1"); ok {
+		t.Fatal("a spawn without an agent id must not be continuable")
+	}
+}
+
+// TestPendingForRunOffersPreviousReviewAndHandOff pins the gate's two new
+// facts: PreviousPlanReview is the newest continuable review whose model is
+// still configured, and HandOffAvailable needs a git repository plus a model
+// that is not the current one — the models are checked before git runs, so a
+// session with nothing to hand to never spawns the subprocess.
+func TestPendingForRunOffersPreviousReviewAndHandOff(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+
+	at := time.Now().UTC()
+	models := []PlanReviewModelOption{
+		{ID: "llm_row1", Provider: "zhipuai", Model: "glm-5.3", Current: true},
+		{ID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash"},
+	}
+	runs := &gateEventsRuns{fakeApprovalRuns: fakeApprovalRuns{
+		waitingSession: "s1", runID: "run-1",
+		wait: &state.Wait{RunID: "run-1", ActionID: "act-1", ToolName: "exit_plan_mode"},
+	}, events: map[string][]state.SessionEvent{
+		event.RunEventPlanReviewStarted: {
+			gateEventRow(t, "e1", event.RunEventPlanReviewStarted,
+				event.PlanReviewStartedPayload{ActionID: "act-1", ReviewID: "plan-review:r1", ModelID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash"}, at),
+		},
+		event.RunEventSubagentSpawned: {
+			gateEventRow(t, "e2", event.RunEventSubagentSpawned,
+				event.SubagentSpawnedPayload{AgentID: "agent-r1", TaskID: "task-r1", ParentToolCallID: "plan-review:r1"}, at.Add(time.Second)),
+		},
+	}}
+	gitCalls := 0
+	gate := &PendingApprovalGate{
+		Runs:         runs,
+		Actions:      &fakeApprovalActions{action: &state.Action{Kind: "exit_plan_mode"}},
+		ReviewModels: func(string) []PlanReviewModelOption { return models },
+		ProjectRoot: func(context.Context, string) string {
+			gitCalls++
+			return repo
+		},
+	}
+	req, err := gate.PendingForRun(context.Background(), "s1", "run-1")
+	require.NoError(t, err)
+	require.NotNil(t, req)
+	require.True(t, req.HandOffAvailable)
+	require.Equal(t, 1, gitCalls)
+	if req.PreviousPlanReview == nil {
+		t.Fatal("PreviousPlanReview = nil, want the newest continuable review")
+	}
+	require.Equal(t, "plan-review:r1", req.PreviousPlanReview.ReviewID)
+	require.Equal(t, "task-r1", req.PreviousPlanReview.TaskID)
+	require.Equal(t, "llm_row2", req.PreviousPlanReview.Model.ID)
+
+	// The review's model left the configuration: no row to offer back.
+	gate.ReviewModels = func(string) []PlanReviewModelOption { return models[:1] }
+	req, err = gate.PendingForRun(context.Background(), "s1", "run-1")
+	require.NoError(t, err)
+	if req.PreviousPlanReview != nil {
+		t.Fatal("a review whose model is gone was still offered")
+	}
+
+	// Only the current model configured: no hand-off, and git never runs.
+	gate.ReviewModels = func(string) []PlanReviewModelOption { return models[:1] }
+	before := gitCalls
+	req, err = gate.PendingForRun(context.Background(), "s1", "run-1")
+	require.NoError(t, err)
+	require.False(t, req.HandOffAvailable)
+	require.Equal(t, before, gitCalls, "the git subprocess ran although no model is available")
+
+	// A project outside any repository cannot take a hand-off.
+	gate.ReviewModels = func(string) []PlanReviewModelOption { return models }
+	gate.ProjectRoot = func(context.Context, string) string { return t.TempDir() }
+	req, err = gate.PendingForRun(context.Background(), "s1", "run-1")
+	require.NoError(t, err)
+	require.False(t, req.HandOffAvailable)
 }

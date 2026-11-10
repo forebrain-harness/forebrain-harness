@@ -591,9 +591,40 @@ type ToolApprovalRequest struct {
 	AvailableDecisions   []safety.ApprovalDecisionOption
 	PlanReviewModels     []PlanReviewModelOption
 	PlanReviews          []PlanReviewNote
+	// PreviousPlanReview is the conversation's previous review when it can be
+	// continued: its subagent session is still known, so "review it again"
+	// means continuing that reviewer's conversation rather than dispatching a
+	// new one (语义 6). nil = the row is not offered — no review ever
+	// dispatched a subagent, or its model is no longer configured.
+	PreviousPlanReview *PreviousPlanReview
+	// HandOffAvailable reports whether the user may hand this plan to another
+	// model (语义 1): the session's project root is inside a git repository
+	// and at least one configured model is not the conversation's current
+	// one. The executor runs in its own git worktree, so a project outside a
+	// repository cannot take a hand-off.
+	HandOffAvailable bool
 	// ProjectType is the type of the conversation the gate belongs to. The
 	// terminal picks its exit-plan choice group from it; empty means coding.
 	ProjectType string
+}
+
+// PlanReviewAgain names one review that can be continued in its own subagent
+// conversation: the review's id, its reviewer subagent's roster key and task
+// id, and when it started.
+type PlanReviewAgain struct {
+	ReviewID  string
+	AgentID   string
+	TaskID    string
+	StartedAt time.Time
+}
+
+// PreviousPlanReview is the conversation's previous review as an approval
+// offers it back: the review that can be continued, and Model is the copy of
+// the option in PlanReviewModels it matched, so the surface renders the same
+// identity the picker would.
+type PreviousPlanReview struct {
+	PlanReviewAgain
+	Model PlanReviewModelOption
 }
 
 type PlanReviewModelOption struct {
@@ -655,6 +686,14 @@ type ToolApprovalDecision struct {
 	PlanOnly                   bool
 	DenyReason                 string
 	RequestPlanReview          *PlanReviewModelOption
+	// HandOffModel approves the exit-plan decision and hands the plan's
+	// implementation to this model: the conversation's model stays as the
+	// tech lead and one executor subagent runs on the selected row.
+	HandOffModel *PlanReviewModelOption
+	// RequestPlanReviewAgain asks the previous review's subagent to review the
+	// revised plan again, continuing its conversation. Like RequestPlanReview
+	// it does not decide the approval: the gate stays pending.
+	RequestPlanReviewAgain bool
 }
 
 type ToolApprovalDecisionSink interface {
