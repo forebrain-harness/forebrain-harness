@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/session"
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -981,4 +983,115 @@ func TestPlanReviewRowRefusesARowThatIsGone(t *testing.T) {
 	if !strings.Contains(err.Error(), "is not configured for this session") {
 		t.Fatalf("error = %q, want it to name the model as not configured", err)
 	}
+}
+
+// reviewingStubExecutor captures the task one review round was handed and
+// answers with a fixed verdict, implementing the executor interface the
+// reviewer's runner dispatches through.
+type reviewingStubExecutor struct {
+	mu   sync.Mutex
+	task string
+}
+
+func (e *reviewingStubExecutor) RunSubagentExec(_ context.Context, req run.SubagentExecRequest) (string, error) {
+	e.mu.Lock()
+	e.task = req.Task
+	e.mu.Unlock()
+	return "again: rollback covered", nil
+}
+
+func (e *reviewingStubExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn) {}
+
+func (e *reviewingStubExecutor) SubagentExecutionStarting(context.Context, string) {}
+
+func (e *reviewingStubExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {}
+
+// TestPlanReviewerAgainContinuesThePreviousReview pins the Review dispatch:
+// a request that carries Again goes to the continuation entry point on the
+// previous review's task id — not to a fresh reviewer dispatch — and the task
+// it runs is the re-review prompt, opening with its fixed sentence.
+func TestPlanReviewerAgainContinuesThePreviousReview(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	if err := store.Ensure(context.Background(), "worker-r1", "worker-r1"); err != nil {
+		t.Fatalf("ensure worker session: %v", err)
+	}
+	// The fresh-dispatch contrast below births a new worker session under the
+	// conversation, so the conversation row has to exist too.
+	if err := store.Ensure(context.Background(), "session-1", "session-1"); err != nil {
+		t.Fatalf("ensure conversation session: %v", err)
+	}
+	if err := store.AppendNewMessages(context.Background(), "worker-r1", "", []llm.Message{
+		llm.UserMessage(llm.Text("first round")),
+	}, "", ""); err != nil {
+		t.Fatalf("seed worker history: %v", err)
+	}
+	// The ledger lives under the runner's workspace root (<home>/workspace for
+	// a bare Deps{Home}), which is what subagentScopeRoot resolves to.
+	if err := agent.AppendHistory(filepath.Join(home, "workspace"), agent.HistoryEntry{
+		TaskID: "task-r1", RunID: "child-r1", ParentRunID: "parent-1",
+		SessionID: "session-1", WorkerSessionID: "worker-r1",
+		Task: "first round", Status: agent.StatusOK, Output: "R1-MARK",
+		AgentKind: "typed", AgentType: "plan-reviewer", RuntimeKind: "typed_subagent",
+		OneShot: true, Continuable: false, DefSource: "built-in",
+	}); err != nil {
+		t.Fatalf("append history: %v", err)
+	}
+	executor := &reviewingStubExecutor{}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, SessionStore: store}, SubagentExecutor: executor}
+	reviewer := &PlanReviewer{
+		Runner: runner, Model: turn.Model{ID: "row-2", Provider: "openai", Model: "gpt-4o"},
+		Config: planReviewRowConfig(), AgentName: "main",
+	}
+	ctx := tool.WithToolUseID(tool.WithRunID(llm.WithAgentSessionID(context.Background(), "session-1"), "parent-1"), "plan-review:r2")
+	result, err := reviewer.Review(ctx, turn.Request{
+		Plan: "# Plan\n\n1. Do the thing.",
+		Again: &turn.PlanReviewAgain{
+			ReviewID: "plan-review:r1", AgentID: "task-r1", TaskID: "task-r1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Review with Again: %v", err)
+	}
+	if result.Text != "again: rollback covered" {
+		t.Fatalf("review text = %q", result.Text)
+	}
+	executor.mu.Lock()
+	task := executor.task
+	executor.mu.Unlock()
+	if !strings.HasPrefix(task, "The planner revised the plan after your last review") {
+		t.Fatalf("the continuation ran %q, want the re-review prompt", firstLine(task))
+	}
+
+	// A request without Again still dispatches a fresh reviewer: the seeded
+	// record's task id must not be reused.
+	fresh := &reviewingStubExecutor{}
+	runner.SubagentExecutor = fresh
+	if _, err := reviewer.Review(ctx, turn.Request{Plan: "# Plan"}); err != nil {
+		t.Fatalf("Review without Again: %v", err)
+	}
+	if strings.HasPrefix(freshTask(t, fresh), "The planner revised the plan after your last review") {
+		t.Fatal("a fresh review must run the first-round prompt")
+	}
+}
+
+func firstLine(s string) string {
+	if at := strings.IndexByte(s, '\n'); at >= 0 {
+		return s[:at]
+	}
+	return s
+}
+
+func freshTask(t *testing.T, e *reviewingStubExecutor) string {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.task
 }

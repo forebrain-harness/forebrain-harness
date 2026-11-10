@@ -1010,6 +1010,10 @@ type Request struct {
 	Images []RequestImage
 	// Model is the reviewer the user picked.
 	Model Model
+	// Again names the review this one continues: the user asked the same
+	// reviewer to look at the revised plan, so the prompt builds on the
+	// conversation that reviewer already holds. nil = a fresh review.
+	Again *PlanReviewAgain
 }
 
 // RequestImage is one user message whose images go to the reviewer.
@@ -1077,7 +1081,22 @@ func BuildPrompt(req Request) string {
 	// The file a picture is stored in travels in the text, once: the prompt is
 	// what the user reads and what the review's transcript keeps, and a line
 	// after each picture reaches neither.
-	if lines := imageFileLines(req.Images); len(lines) > 0 {
+	writeImageFiles(&b, req.Images)
+	cut, path := writePlanSection(&b, req)
+	if cut && path != "" {
+		b.WriteString("Read the whole plan file first. Then investigate")
+	} else {
+		b.WriteString("Investigate")
+	}
+	b.WriteString(" the project sources this plan touches before judging it: work out for yourself what the request requires, ")
+	b.WriteString("then check the plan against that understanding, the actual sources, and the handoff quality bar. ")
+	b.WriteString("Report your verdict, evidence-backed problems, and concrete corrections.")
+	return b.String()
+}
+
+// writeImageFiles writes exactly the <images> block of BuildPrompt.
+func writeImageFiles(b *strings.Builder, images []RequestImage) {
+	if lines := imageFileLines(images); len(lines) > 0 {
 		b.WriteString("<images>\n")
 		b.WriteString("Each line names one of the images the request attached and the file it is stored in.\n")
 		for _, line := range lines {
@@ -1086,17 +1105,22 @@ func BuildPrompt(req Request) string {
 		}
 		b.WriteString("</images>\n\n")
 	}
+}
+
+// writePlanSection writes exactly the plan-file notice, truncation notice and
+// <plan> block of BuildPrompt. cut/path feed the caller's final sentence.
+func writePlanSection(b *strings.Builder, req Request) (cut bool, path string) {
 	plan := strings.TrimSpace(req.Plan)
 	excerpt, cut := planExcerpt(plan)
-	path := strings.TrimSpace(req.PlanPath)
+	path = strings.TrimSpace(req.PlanPath)
 	if path != "" {
-		fmt.Fprintf(&b, "The plan file is %s: the conversation's own plan file, kept outside the project, and the document the user is asked to approve.", path)
+		fmt.Fprintf(b, "The plan file is %s: the conversation's own plan file, kept outside the project, and the document the user is asked to approve.", path)
 	}
 	if cut {
 		if path != "" {
 			b.WriteString(" ")
 		}
-		fmt.Fprintf(&b, "The plan is %d characters and only its first %d are copied below. ", len([]rune(plan)), len([]rune(excerpt)))
+		fmt.Fprintf(b, "The plan is %d characters and only its first %d are copied below. ", len([]rune(plan)), len([]rune(excerpt)))
 		if path != "" {
 			b.WriteString("Read the whole file with your read tools before you judge anything: the rest of it is part of the plan, and a review of the excerpt alone is not a review of the plan.")
 		} else {
@@ -1110,20 +1134,37 @@ func BuildPrompt(req Request) string {
 	b.WriteString(excerpt)
 	if cut {
 		if path != "" {
-			fmt.Fprintf(&b, "\n[truncated: the plan continues in %s]", path)
+			fmt.Fprintf(b, "\n[truncated: the plan continues in %s]", path)
 		} else {
 			b.WriteString("\n[truncated]")
 		}
 	}
 	b.WriteString("\n</plan>\n\n")
-	if cut && path != "" {
-		b.WriteString("Read the whole plan file first. Then investigate")
-	} else {
-		b.WriteString("Investigate")
+	return cut, path
+}
+
+// BuildReReviewPrompt renders the task that continues a previous review's
+// subagent conversation: the same reviewer holds its earlier investigation and
+// review in this very session, so the message builds on them instead of
+// starting over. It shares BuildPrompt's image and plan sections verbatim;
+// only what surrounds them is this prompt's own — the revision notice, what
+// the user said since the last review, and the re-review instructions.
+func BuildReReviewPrompt(req Request) string {
+	var b strings.Builder
+	b.WriteString("The planner revised the plan after your last review, and the user asked you to review it again before deciding. Your earlier investigation and review are above in this conversation: build on them instead of starting over.\n\n")
+	if task := strings.TrimSpace(Truncate(req.Task, MaxTaskChars)); task != "" {
+		b.WriteString("Since your last review the user said the following, oldest first: their messages, their answers to questions they were asked, and their feedback on plans they sent back.\n\n")
+		b.WriteString("<request_since>\n")
+		b.WriteString(task)
+		b.WriteString("\n</request_since>\n\n")
 	}
-	b.WriteString(" the project sources this plan touches before judging it: work out for yourself what the request requires, ")
-	b.WriteString("then check the plan against that understanding, the actual sources, and the handoff quality bar. ")
-	b.WriteString("Report your verdict, evidence-backed problems, and concrete corrections.")
+	writeImageFiles(&b, req.Images)
+	cut, path := writePlanSection(&b, req)
+	if cut && path != "" {
+		b.WriteString("Read the whole plan file first. Then re-review the revised plan. First take each problem you reported last time and say whether the revision fixed it, citing the plan and the project sources. Then investigate whatever the revision added or changed, against the request and the actual sources. Report your verdict, evidence-backed problems, and concrete corrections, in the same form as your last review.")
+	} else {
+		b.WriteString("Re-review the revised plan. First take each problem you reported last time and say whether the revision fixed it, citing the plan and the project sources. Then investigate whatever the revision added or changed, against the request and the actual sources. Report your verdict, evidence-backed problems, and concrete corrections, in the same form as your last review.")
+	}
 	return b.String()
 }
 
@@ -1579,13 +1620,29 @@ type PlanReviewTranscripts interface {
 // Messages are numbered, and every message that attached an image is
 // returned with its number, whether or not its text fit: the images go to the
 // reviewer beside the text, each labelled with the message it came with.
-func planReviewTaskContext(ctx context.Context, transcripts PlanReviewTranscripts, sessionID string) (string, []RequestImage) {
+//
+// since drops everything older than it — a continuation passes the previous
+// review's StartedAt, so the reviewer that already saw the earlier request
+// gets only what was said since; the zero value keeps today's whole-request
+// behavior. An input from the same second is kept: the review itself may have
+// started between two rows of one second.
+func planReviewTaskContext(ctx context.Context, transcripts PlanReviewTranscripts, sessionID string, since time.Time) (string, []RequestImage) {
 	if transcripts == nil {
 		return "", nil
 	}
 	inputs, err := transcripts.ListUserInputs(ctx, strings.TrimSpace(sessionID))
 	if err != nil {
 		return "", nil
+	}
+	if !since.IsZero() {
+		kept := make([]state.UserInput, 0, len(inputs))
+		for _, input := range inputs {
+			if input.At < since.Unix() {
+				continue
+			}
+			kept = append(kept, input)
+		}
+		inputs = kept
 	}
 	entries := make([]planReviewEntry, 0, len(inputs))
 	var images []RequestImage
@@ -1786,9 +1843,30 @@ type PlanReviewRun struct {
 	// Reviewer runs the review; the LLM-backed implementation lives in
 	// pkg/process, tests stub it.
 	Reviewer Reviewer
+	// Again names the review whose subagent conversation this run continues
+	// (from the gate's PreviousPlanReview). Nil = dispatch a fresh reviewer.
+	Again *PlanReviewAgain
 	// Publish puts one review event on the conversation's event log, the way
 	// every canonical event travels.
 	Publish func(ctx context.Context, evt event.RunEvent) error
+}
+
+// continuesReviewID names the review a continuation carries on from, for the
+// started event's payload; a fresh review announces none.
+func continuesReviewID(again *PlanReviewAgain) string {
+	if again == nil {
+		return ""
+	}
+	return strings.TrimSpace(again.ReviewID)
+}
+
+// reviewSince is the cutoff a continuation's task context drops older input
+// at: the previous review's start, or the zero value for a fresh review.
+func reviewSince(again *PlanReviewAgain) time.Time {
+	if again == nil {
+		return time.Time{}
+	}
+	return again.StartedAt
 }
 
 // RunPlanReview asks the selected model to review the pending plan and
@@ -1827,6 +1905,7 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 		event.RunEventPlanReviewStarted, event.PlanReviewStartedPayload{
 			ActionID: actionID, ReviewID: reviewID,
 			ModelID: model.ID, Provider: model.Provider, Model: model.Model,
+			ContinuesReviewID: continuesReviewID(in.Again),
 		}, time.Now()))
 	finish := func(outcome string, err error, text string, duration time.Duration) {
 		reviewed := event.PlanReviewedPayload{
@@ -1862,13 +1941,14 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 		reviewCtx = tool.WithRunID(reviewCtx, runID)
 	}
 	reviewCtx = tool.WithToolUseID(reviewCtx, reviewID)
-	task, images := planReviewTaskContext(ctx, in.Transcripts, sessionID)
+	task, images := planReviewTaskContext(ctx, in.Transcripts, sessionID, reviewSince(in.Again))
 	result, err := in.Reviewer.Review(reviewCtx, Request{
 		Plan:     plan,
 		PlanPath: state.PlanPathForSession(strings.TrimSpace(in.StateRoot), strings.TrimSpace(in.ProjectKey), sessionID),
 		Task:     task,
 		Images:   images,
 		Model:    model,
+		Again:    in.Again,
 	})
 	if err != nil {
 		finish(planReviewOutcomeOf(err), err, "", 0)

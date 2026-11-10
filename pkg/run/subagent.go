@@ -2946,6 +2946,31 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 	if err := subagentWorktreeMissing(record); err != nil {
 		return agent.HistoryEntry{}, err
 	}
+	// The tool path passes no parts (its message is text alone) and no
+	// approval hook: continueSubagentRecord takes the hook from the same
+	// context it always did, derived from the record.
+	final, _, err := continueSubagentRecord(ctx, fac, record, msg, nil, nil)
+	return final, err
+}
+
+// continueSubagentRecord runs one more round of an existing subagent's
+// conversation: the follow-up lands in its worker session as a user message,
+// the model, roster key and sessions come from the record, and a fresh
+// execution id carries the round. It is the one continuation core every
+// continuation caller shares — the subagent_continue tool (via
+// continueSubagentExecution) and a plan review asked to look again (via
+// Runner.ContinuePlanReviewSubagent) — so both run on the same treatment of
+// the worker session, the registry handle and the end notifications.
+//
+// parts, when given, is the follow-up message's own parts (a review
+// continuation carries the revised plan's images the way the first round
+// carried the request's); the tool path passes nil. approve, when nil, is
+// taken from the record's own context exactly as the tool path always did.
+// The returned outText is this round's reply alone; final.Output merges it
+// with everything before.
+func continueSubagentRecord(
+	ctx context.Context, fac Factory, record agent.HistoryEntry, msg string, parts []llm.ContentPart, approve tool.SubagentApprovalHook,
+) (final agent.HistoryEntry, outText string, err error) {
 	// The subagent's conversation lives in its worker session now. When the
 	// session holds history — every subagent this runtime births — the
 	// follow-up goes to that conversation as the message verbatim, and the
@@ -2964,7 +2989,7 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 	} else {
 		entries, lerr := own.SessionStore.ListTranscriptMessages(ctx, record.WorkerSessionID, 1)
 		if lerr != nil {
-			return agent.HistoryEntry{}, lerr
+			return record, "", lerr
 		}
 		if len(entries) == 0 {
 			input = buildSubagentContinuePrompt(record, msg)
@@ -2973,7 +2998,7 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 			// and the stitched prompt needs the row to land in. EnsureAt is
 			// an upsert, so an already-born session is only touched.
 			if err := ensureSubagentSession(ctx, fac, record); err != nil {
-				return agent.HistoryEntry{}, fmt.Errorf("persist subagent session: %w", err)
+				return record, "", fmt.Errorf("persist subagent session: %w", err)
 			}
 		}
 	}
@@ -3015,7 +3040,9 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 	if strings.TrimSpace(record.AgentKind) == "typed" {
 		subagentType = strings.TrimSpace(record.AgentType)
 	}
-	approve := tool.SubagentApprovalHookFromContext(hostCtx, factoryToolsState(fac))
+	if approve == nil {
+		approve = tool.SubagentApprovalHookFromContext(hostCtx, factoryToolsState(fac))
+	}
 	var runFork func(context.Context, string) (string, error)
 	if strings.TrimSpace(record.AgentKind) == "fork" && !legacyConversation {
 		// A fork with its own conversation continues on it: the system it
@@ -3033,11 +3060,11 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 				if runFork != nil {
 					return runFork(attemptCtx, superviseRunID)
 				}
-				return executeSubagent(attemptCtx, fac, record, input, nil, superviseRunID, record.ParentRunID, record.SessionID, record.WorkerSessionID, subagentType)
+				return executeSubagent(attemptCtx, fac, record, input, parts, superviseRunID, record.ParentRunID, record.SessionID, record.WorkerSessionID, subagentType)
 			})
 	})
 	now := time.Now().Unix()
-	final := record
+	final = record
 	final.ExecutionID = executionID
 	final.ParentToolCallID = lifecycle.ParentToolCallID
 	final.TaskIndex = lifecycle.TaskIndex
@@ -3070,14 +3097,14 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 		// A gate is a suspension and a cancellation was asked for; only an
 		// execution that ran and failed is the dispatcher's to pick up.
 		if final.Status == agent.StatusFailed && !isRequiresActionError(runErr) {
-			return final, &subagentFailure{record: final, elapsed: time.Since(started), err: runErr}
+			return final, outText, &subagentFailure{record: final, elapsed: time.Since(started), err: runErr}
 		}
 		if final.Status == agent.StatusCancelled && subagentStoppedBy(runCtx) {
-			return final, &subagentStopped{record: final, err: runErr}
+			return final, outText, &subagentStopped{record: final, err: runErr}
 		}
-		return final, runErr
+		return final, outText, runErr
 	}
-	return final, nil
+	return final, outText, nil
 }
 
 func buildSubagentContinuePrompt(record agent.HistoryEntry, message string) string {
@@ -4430,6 +4457,54 @@ func (r *Runner) RunPlanReviewSubagent(
 		return "", err
 	}
 	return output, nil
+}
+
+// ContinuePlanReviewSubagent runs one more round of a previous plan review in
+// the same reviewer subagent's conversation (语义 6): the model, roster key
+// and worker session come from the record, so the reviewer investigates the
+// revision with its earlier review already in context instead of starting
+// over. The plan-reviewer definition is OneShot and Continuable: false, so
+// the model's own subagent_continue still refuses it — this entry point is
+// the only bypass, and it accepts nothing but a plan-reviewer record.
+//
+// The write scope and the workspace brief follow the fresh review's rules
+// (RunPlanReviewSubagent): a coding conversation's reviewer gets a new
+// scratch directory and worktree for the round, named in the task's tail.
+func (r *Runner) ContinuePlanReviewSubagent(
+	ctx context.Context, taskID, task string, parts []llm.ContentPart, approve PlanReviewApprovalFunc,
+) (string, error) {
+	if r == nil {
+		return "", fmt.Errorf("plan review requires a runner")
+	}
+	if r.SubagentExecutor == nil {
+		return "", fmt.Errorf("plan review requires the in-process subagent executor")
+	}
+	record, ok, err := lookupSubagentRecord(r.subagentFactory().subagentScopeRoot(), ctx, &SubagentLookupInput{TaskID: strings.TrimSpace(taskID)})
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("the previous plan review is no longer available")
+	}
+	if strings.TrimSpace(record.AgentType) != PlanReviewSubagentType {
+		return "", fmt.Errorf("subagent_type %q is not a plan review", strings.TrimSpace(record.AgentType))
+	}
+	if record.Status == agent.StatusRunning {
+		return "", fmt.Errorf("the previous plan review is still running")
+	}
+	scope := r.planReviewWriteScope(ctx)
+	if scope != nil {
+		ctx = tool.WithReviewWriteScope(ctx, scope)
+		defer scope.Release()
+	}
+	task, parts = planReviewTaskAndParts(task, parts, scope)
+	// No model override here: the round runs on the model the record carries,
+	// which is the reviewer the user picked the first time.
+	_, out, err := continueSubagentRecord(ctx, r.subagentFactory(), record, task, parts, approve)
+	if err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 // planReviewWriteScope prepares the write scope a coding conversation's plan

@@ -1082,7 +1082,7 @@ func TestPlanReviewTaskContextSurvivesALongInvestigation(t *testing.T) {
 		metaEnvironmentMessage(),
 	}, "", ""))
 
-	got, _ := planReviewTaskContext(ctx, store, "s1")
+	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
 	require.Contains(t, got, "Add S3 sync to the skill installer.")
 	require.NotContains(t, got, "forebrain_environment_context")
 }
@@ -1097,7 +1097,7 @@ func TestPlanReviewTaskContextSkipsRuntimeMetaRows(t *testing.T) {
 		metaEnvironmentMessage(),
 	}, "", ""))
 
-	got, _ := planReviewTaskContext(ctx, store, "s1")
+	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
 	require.Contains(t, got, "Add S3 sync to the skill installer.")
 	require.NotContains(t, got, "forebrain_environment_context")
 }
@@ -1115,7 +1115,7 @@ func TestPlanReviewTaskContextKeepsEveryMessageOfALongConversation(t *testing.T)
 		appendUserTurn(t, store, fmt.Sprintf("follow-up %d", i))
 	}
 
-	got, _ := planReviewTaskContext(ctx, store, "s1")
+	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
 	require.True(t, strings.HasPrefix(got, "<message n=\"1\">\n/improve execute 282\n</message>"), got)
 	last := -1
 	for i := 1; i <= 9; i++ {
@@ -1156,7 +1156,7 @@ func TestPlanReviewTaskContextCarriesAnswersAndPlanFeedback(t *testing.T) {
 	_, err = DeliverPlanReview(ctx, actions, delivered.ID)
 	require.NoError(t, err)
 
-	got, _ := planReviewTaskContext(ctx, store, "s1")
+	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
 	require.Contains(t, got, "<message n=\"1\">\nAdd S3 sync to the skill installer.\n</message>")
 	require.Contains(t, got, "<answers>\nSync on install only, or on every run?\n  → Install only\n</answers>")
 	require.Contains(t, got, "<plan_feedback>\nKeep the old bucket layout.\n</plan_feedback>")
@@ -1178,7 +1178,7 @@ func TestPlanReviewTaskContextKeepsTheFirstAndNewestMessageWhenItDoesNotFit(t *t
 	}
 	appendUserTurn(t, store, "Now also cover the uninstall path.")
 
-	got, _ := planReviewTaskContext(ctx, store, "s1")
+	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
 	require.True(t, strings.HasPrefix(got, "<message n=\"1\">\nAdd S3 sync to the skill installer.\n</message>"), got[:200])
 	require.True(t, strings.HasSuffix(got, "<message n=\"14\">\nNow also cover the uninstall path.\n</message>"))
 	require.Regexp(t, `</message>\n\n\[\d+ entries left out to fit the length limit\]\n\n<message n="\d+">\nmiddle turn`, got)
@@ -1208,7 +1208,9 @@ func TestPlanReviewTaskContextHandsOverEveryMessagesImages(t *testing.T) {
 		llm.UserMessage(llm.Text("and here\n[Image: source: /tmp/a.png]\n[Image #1]"), llm.ImageBase64("image/png", "iVBORw0KGgo=")),
 	}, "", ""))
 
-	got, images := planReviewTaskContext(ctx, store, "s1")
+	// The zero since keeps the whole request: this is a fresh review's
+	// context (the Again path is covered by its own test below).
+	got, images := planReviewTaskContext(ctx, store, "s1", time.Time{})
 	require.Contains(t, got, "<message n=\"2\">\nlike this\n</message>")
 	require.Contains(t, got, "<message n=\"3\">\n"+planReviewImageOnly+"\n</message>")
 	require.Contains(t, got, "<message n=\"4\">\nand here\n</message>")
@@ -1567,4 +1569,72 @@ func TestPendingForRunOffersPreviousReviewAndHandOff(t *testing.T) {
 	req, err = gate.PendingForRun(context.Background(), "s1", "run-1")
 	require.NoError(t, err)
 	require.False(t, req.HandOffAvailable)
+}
+
+// againRecordingReviewer records the whole request a continuation is handed.
+type againRecordingReviewer struct{ req Request }
+
+func (r *againRecordingReviewer) Review(_ context.Context, req Request) (PlanReviewResult, error) {
+	r.req = req
+	return PlanReviewResult{Model: req.Model, Text: "still fine"}, nil
+}
+
+// TestRunPlanReviewAgainContinuesThePreviousReview pins the continuation's
+// wiring: the started event names the review it continues and still gets its
+// own id, the reviewer is handed the Again record, and its task context holds
+// only what was said since the previous review started.
+func TestRunPlanReviewAgainContinuesThePreviousReview(t *testing.T) {
+	ctx := context.Background()
+	store := newPlanReviewTaskStore(t)
+	appendUserTurn(t, store, "Add S3 sync to the skill installer.")
+	// At is Unix seconds and a same-second input stays (the review itself may
+	// have started between two rows of one second), so the new input has to
+	// land in a later second than the old one for the cutoff to divide them.
+	oldInputs, err := store.ListUserInputs(ctx, "s1")
+	require.NoError(t, err)
+	require.NotEmpty(t, oldInputs)
+	oldAt := oldInputs[0].At
+	if wait := time.Until(time.Unix(oldAt+1, 0).Add(300 * time.Millisecond)); wait > 0 {
+		time.Sleep(wait)
+	}
+	appendUserTurn(t, store, "Use the blue theme instead.")
+	cutoff := time.Unix(oldAt+1, 0)
+
+	stateRoot := t.TempDir()
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", "s1", "# Plan\n\nbody"))
+	var events []event.RunEvent
+	reviewer := &againRecordingReviewer{}
+	err = RunPlanReview(ctx, PlanReviewRun{
+		ActionID: "a2", Model: Model{ID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash"},
+		SessionID: "s1", StateRoot: stateRoot, ProjectKey: "proj",
+		Transcripts: store, Reviewer: reviewer,
+		Again: &PlanReviewAgain{ReviewID: "plan-review:r1", AgentID: "agent-r1", TaskID: "task-r1", StartedAt: cutoff},
+		Publish: func(_ context.Context, evt event.RunEvent) error {
+			events = append(events, evt)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	var started event.PlanReviewStartedPayload
+	var reviewed event.PlanReviewedPayload
+	for _, evt := range events {
+		switch evt.Type {
+		case event.RunEventPlanReviewStarted:
+			require.NoError(t, json.Unmarshal(evt.Payload, &started))
+		case event.RunEventPlanReviewed:
+			require.NoError(t, json.Unmarshal(evt.Payload, &reviewed))
+		}
+	}
+	require.Equal(t, "plan-review:r1", started.ContinuesReviewID)
+	require.NotEqual(t, "plan-review:r1", started.ReviewID, "the continuation gets its own review id")
+	require.Equal(t, started.ReviewID, reviewed.ReviewID)
+	require.Equal(t, "done", reviewed.Outcome)
+
+	require.NotNil(t, reviewer.req.Again)
+	require.Equal(t, "plan-review:r1", reviewer.req.Again.ReviewID)
+	require.Equal(t, "task-r1", reviewer.req.Again.TaskID)
+	require.Contains(t, reviewer.req.Task, "Use the blue theme instead.")
+	require.NotContains(t, reviewer.req.Task, "Add S3 sync to the skill installer.",
+		"the reviewer already saw the earlier request; only what came after its review belongs here")
 }

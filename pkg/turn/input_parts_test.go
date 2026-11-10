@@ -1536,3 +1536,91 @@ func TestFilterMatchesTheWholeQueryOnly(t *testing.T) {
 		t.Fatalf("/CONNECT lists %v, want /connect", got)
 	}
 }
+
+// BuildReReviewPrompt is the message that continues a previous review's
+// subagent conversation: the fixed opening, the new input since the last
+// review (when there is any), then exactly BuildPrompt's image and plan
+// sections, and the re-review instructions whose whole-file variant matches
+// the truncated-with-path case. Five combinations are pinned.
+func TestBuildReReviewPromptWithoutNewInput(t *testing.T) {
+	prompt := BuildReReviewPrompt(Request{Plan: "# Plan\n\n1. Do the thing."})
+	if !strings.HasPrefix(prompt, "The planner revised the plan after your last review, and the user asked you to review it again before deciding. Your earlier investigation and review are above in this conversation: build on them instead of starting over.\n\n") {
+		t.Fatalf("prompt must open with the fixed continuation sentence:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "<request_since>") {
+		t.Fatalf("no new input must leave the request block out:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "<plan>\n# Plan\n\n1. Do the thing.\n</plan>") {
+		t.Fatalf("the plan section must match BuildPrompt's:\n%s", prompt)
+	}
+	if !strings.HasSuffix(prompt, "Re-review the revised plan. First take each problem you reported last time and say whether the revision fixed it, citing the plan and the project sources. Then investigate whatever the revision added or changed, against the request and the actual sources. Report your verdict, evidence-backed problems, and concrete corrections, in the same form as your last review.") {
+		t.Fatalf("prompt must end with the short re-review instruction:\n%s", prompt)
+	}
+}
+
+func TestBuildReReviewPromptWithNewInput(t *testing.T) {
+	prompt := BuildReReviewPrompt(Request{
+		Task: "<message n=\"1\">\nchange the colour to blue\n</message>",
+		Plan: "# Plan",
+	})
+	if !strings.Contains(prompt, "Since your last review the user said the following, oldest first: their messages, their answers to questions they were asked, and their feedback on plans they sent back.\n\n<request_since>\n<message n=\"1\">\nchange the colour to blue\n</message>\n</request_since>\n\n") {
+		t.Fatalf("new input must ride in <request_since>:\n%s", prompt)
+	}
+	// BuildPrompt's request framing does not belong here: the reviewer was
+	// introduced to the request last time.
+	if strings.Contains(prompt, "The request is what the user said") || strings.Contains(prompt, "<request>\n") {
+		t.Fatalf("the continuation must not repeat the fresh review's request framing:\n%s", prompt)
+	}
+}
+
+func TestBuildReReviewPromptCarriesImages(t *testing.T) {
+	prompt := BuildReReviewPrompt(Request{
+		Task:  "<message n=\"1\">\nlike this\n</message>",
+		Plan:  "# Plan",
+		Again: &PlanReviewAgain{ReviewID: "plan-review:r1"},
+		Images: []RequestImage{
+			{Message: 1, Files: []string{"/a.png"}},
+		},
+	})
+	if !strings.Contains(prompt, "\n<images>\nEach line names one of the images the request attached and the file it is stored in.\nImage 1 of message 1: /a.png\n</images>\n\n") {
+		t.Fatalf("the images block must be exactly BuildPrompt's:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "The images the user attached follow this text") {
+		t.Fatalf("the fresh review's image framing must not appear:\n%s", prompt)
+	}
+}
+
+func TestBuildReReviewPromptTruncatedPlanWithFile(t *testing.T) {
+	const path = "/home/u/.forebrain/workspace/plans/proj/s1/plan.md"
+	line := strings.Repeat("y", 99) + "\n"
+	plan := "# Plan\n" + strings.Repeat(line, MaxPlanChars/100+50) + "## Done criteria\nall green"
+	prompt := BuildReReviewPrompt(Request{Task: "x", Plan: plan, PlanPath: path})
+	for _, want := range []string{
+		"The plan file is " + path,
+		"Read the whole file with your read tools before you judge anything",
+		"[truncated: the plan continues in " + path + "]",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if !strings.Contains(prompt, "Read the whole plan file first. Then re-review the revised plan.") {
+		t.Fatalf("a truncated plan with a file must open the instruction with the whole-file read:\n%s", prompt[len(prompt)-400:])
+	}
+}
+
+func TestBuildReReviewPromptTruncatedPlanWithoutFile(t *testing.T) {
+	prompt := BuildReReviewPrompt(Request{Plan: strings.Repeat("x", MaxPlanChars+500)})
+	if !strings.Contains(prompt, "The plan is ") || !strings.Contains(prompt, "The rest is not available here; do not report the cut as a gap in the plan.") {
+		t.Fatalf("a truncated plan without a file must say so the way BuildPrompt does:\n%s", prompt[:600])
+	}
+	if !strings.Contains(prompt, "[truncated]") {
+		t.Fatalf("the cut must be marked:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Read the whole plan file first.") {
+		t.Fatalf("there is no file to read; the short instruction applies:\n%s", prompt[len(prompt)-400:])
+	}
+	if strings.Contains(prompt, "%!") {
+		t.Fatalf("a rendering artifact leaked into the prompt:\n%s", prompt)
+	}
+}

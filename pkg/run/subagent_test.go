@@ -8131,3 +8131,178 @@ func TestWorktreeSubagentKeepsItsWorktreeAcrossApprovalReplay(t *testing.T) {
 		t.Fatalf("approval context worktree = %q (resume %q), want %q", askedIn[0], resumedIn[0], want)
 	}
 }
+
+// sessionWritingExecutor is a stand-in worker: it records what the dispatch
+// handed it and writes the round's user message and reply into the worker
+// session the way the real worker does, so a continuation's session effects
+// are observable without a live model.
+type sessionWritingExecutor struct {
+	mu              sync.Mutex
+	output          string
+	task            string
+	workerSessionID string
+	store           *state.SessionStore
+}
+
+func (e *sessionWritingExecutor) PersistSubagentTurn(context.Context, SubagentTurn) {}
+
+func (e *sessionWritingExecutor) SubagentExecutionStarting(context.Context, string) {}
+
+func (e *sessionWritingExecutor) SubagentExecutionEnded(context.Context, SubagentExecutionEnd) {}
+
+func (e *sessionWritingExecutor) RunSubagentExec(ctx context.Context, req SubagentExecRequest) (string, error) {
+	e.mu.Lock()
+	e.task, e.workerSessionID = req.Task, req.WorkerSessionID
+	e.mu.Unlock()
+	if e.store != nil {
+		_ = e.store.AppendNewMessages(ctx, req.WorkerSessionID, "", []llm.Message{
+			llm.UserMessage(llm.Text(req.Task)),
+			llm.AssistantMessage([]llm.ContentPart{llm.Text(e.output)}),
+		}, "", "")
+	}
+	return e.output, nil
+}
+
+// TestContinuePlanReviewSubagentContinuesTheSameConversation pins 语义 6's
+// engine entry: a completed plan-reviewer record runs one more round in its
+// own conversation — same agent and worker session, the follow-up as the
+// message verbatim beside the previous round's rows, and the round's spawned
+// event pointing at the new review id on the context.
+func TestContinuePlanReviewSubagentContinuesTheSameConversation(t *testing.T) {
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	if err := store.Ensure(context.Background(), "worker-r1", "worker-r1"); err != nil {
+		t.Fatalf("ensure worker session: %v", err)
+	}
+	// The previous round: the task it was asked and the review it gave. The
+	// next request the worker builds reads this session, so its history
+	// carries the first review.
+	if err := store.AppendNewMessages(context.Background(), "worker-r1", "", []llm.Message{
+		llm.UserMessage(llm.Text("Review the plan below...")),
+		llm.AssistantMessage([]llm.ContentPart{llm.Text("R1-MARK: looks thin on rollback")}),
+	}, "", ""); err != nil {
+		t.Fatalf("seed first round: %v", err)
+	}
+	fac := Factory{Home: home, Owner: &Runner{Deps: &Deps{Home: home, SessionStore: store}}}
+	if err := agent.AppendHistory(fac.subagentScopeRoot(), agent.HistoryEntry{
+		TaskID:          "task-r1",
+		AgentID:         "agent-r1",
+		RunID:           "child-r1",
+		ParentRunID:     "parent-1",
+		SessionID:       "session-1",
+		WorkerSessionID: "worker-r1",
+		Task:            "Review the plan below...",
+		Status:          agent.StatusOK,
+		Output:          "R1-MARK: looks thin on rollback",
+		StartedAt:       10,
+		UpdatedAt:       20,
+		FinishedAt:      20,
+		AgentKind:       "typed",
+		AgentType:       PlanReviewSubagentType,
+		RuntimeKind:     "typed_subagent",
+		OneShot:         true,
+		Continuable:     false,
+		DefSource:       "built-in",
+	}); err != nil {
+		t.Fatalf("append history: %v", err)
+	}
+	probe := &collectingUINotify{}
+	executor := &sessionWritingExecutor{output: "R2: rollback now covered", store: store}
+	fac.Owner.Events = probe
+	fac.Owner.SubagentExecutor = executor
+	runner := fac.Owner
+
+	task := "The planner revised the plan after your last review, and the user asked you to review it again before deciding."
+	out, err := runner.ContinuePlanReviewSubagent(
+		toolpkg.WithToolUseID(toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "session-1"), "parent-1"), "plan-review:r2"),
+		"task-r1", task, nil, nil)
+	if err != nil {
+		t.Fatalf("ContinuePlanReviewSubagent: %v", err)
+	}
+	if out != "R2: rollback now covered" {
+		t.Fatalf("round output = %q", out)
+	}
+	if executor.workerSessionID != "worker-r1" {
+		t.Fatalf("worker session = %q, want the record's own", executor.workerSessionID)
+	}
+	// The follow-up is the message verbatim — no stitched prompt, the session
+	// holds the history — plus the coding project's fresh workspace brief, the
+	// same tail a fresh review's task carries.
+	if !strings.HasPrefix(executor.task, task) ||
+		!strings.Contains(executor.task, "Your reproduction workspace") {
+		t.Fatalf("follow-up = %q, want the re-review message plus the workspace brief", executor.task)
+	}
+	spawns := probe.spawnMsgs()
+	if len(spawns) != 1 {
+		t.Fatalf("spawn notifications = %#v", spawns)
+	}
+	// The roster key is the task id (agent.RosterKey), so the round's spawned
+	// event carries the very identity the first round's did.
+	if spawns[0].AgentID != "task-r1" {
+		t.Fatalf("spawned agent = %q, want the previous review's own roster key", spawns[0].AgentID)
+	}
+	if spawns[0].ParentToolCallID != "plan-review:r2" {
+		t.Fatalf("spawned parent tool call = %q, want the new review id", spawns[0].ParentToolCallID)
+	}
+	rows, err := store.ListTranscriptMessages(context.Background(), "worker-r1", 0)
+	if err != nil {
+		t.Fatalf("read worker session: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("worker session rows = %d, want the first round plus one user message and one reply:\n%#v", len(rows), rows)
+	}
+	if !strings.Contains(fmt.Sprint(rows[2]), task) || !strings.Contains(fmt.Sprint(rows[3]), "R2: rollback now covered") {
+		t.Fatalf("the round's rows did not land after the first round's:\n%#v", rows)
+	}
+}
+
+// TestContinuePlanReviewSubagentGuardsItsRecords pins the entry point's
+// boundaries: only a plan-reviewer record — the one type whose one-shot rule
+// the model's own subagent_continue still enforces — may be continued, and
+// only when it exists and is not running.
+func TestContinuePlanReviewSubagentGuardsItsRecords(t *testing.T) {
+	home := t.TempDir()
+	fac := Factory{Home: home, Owner: &Runner{Deps: &Deps{Home: home}}}
+	seed := func(taskID, agentType string, status agent.Status) {
+		t.Helper()
+		if err := agent.AppendHistory(fac.subagentScopeRoot(), agent.HistoryEntry{
+			TaskID: taskID, AgentID: "agent-" + taskID, RunID: "child", ParentRunID: "parent-1",
+			SessionID: "session-1", WorkerSessionID: "worker-1", Task: "t", Status: status,
+			AgentKind: "typed", AgentType: agentType, RuntimeKind: "typed_subagent",
+			OneShot: true, Continuable: false, DefSource: "built-in",
+		}); err != nil {
+			t.Fatalf("append history: %v", err)
+		}
+	}
+	seed("task-general", "general-purpose", agent.StatusOK)
+	seed("task-running", PlanReviewSubagentType, agent.StatusRunning)
+	fac.Owner.SubagentExecutor = &fixedSubagentExecutor{output: "x"}
+	runner := fac.Owner
+	ctx := toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "session-1"), "parent-1")
+
+	if _, err := runner.ContinuePlanReviewSubagent(ctx, "task-missing", "again", nil, nil); err == nil ||
+		!strings.Contains(err.Error(), "no longer available") {
+		t.Fatalf("missing record error = %v", err)
+	}
+	if _, err := runner.ContinuePlanReviewSubagent(ctx, "task-general", "again", nil, nil); err == nil ||
+		!strings.Contains(err.Error(), "not a plan review") {
+		t.Fatalf("non-reviewer record error = %v", err)
+	}
+	if _, err := runner.ContinuePlanReviewSubagent(ctx, "task-running", "again", nil, nil); err == nil ||
+		!strings.Contains(err.Error(), "still running") {
+		t.Fatalf("running record error = %v", err)
+	}
+
+	// The model's own continuation tool keeps refusing the one-shot reviewer:
+	// the bypass is the engine entry alone.
+	seed("task-reviewer-done", PlanReviewSubagentType, agent.StatusOK)
+	_, err := continueSubagentExecution(ctx, fac, &SubagentContinueInput{TaskID: "task-reviewer-done", Message: "again"})
+	if err == nil || !strings.Contains(err.Error(), "one-shot and cannot continue") {
+		t.Fatalf("subagent_continue on a plan-reviewer = %v, want the one-shot refusal", err)
+	}
+}

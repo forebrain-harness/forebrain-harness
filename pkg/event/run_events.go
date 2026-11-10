@@ -600,6 +600,10 @@ type PlanReviewStartedPayload struct {
 	ModelID  string `json:"model_id,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model"`
+	// ContinuesReviewID names the review whose subagent conversation this one
+	// continues: the user asked the same reviewer to look again, so the review
+	// runs on in that reviewer's own session. Empty = a fresh review.
+	ContinuesReviewID string `json:"continues_review_id,omitempty"`
 }
 
 // PlanReviewedPayload closes the review PlanReviewStartedPayload opened: its
