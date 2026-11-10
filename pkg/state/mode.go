@@ -33,8 +33,23 @@ type State struct {
 	// itself ("keep the plan only"): the session left plan mode without carrying
 	// the plan out, so nothing should nudge it to implement the plan. Entering
 	// plan mode again clears it.
-	PlanKeptOnly bool  `json:"plan_kept_only,omitempty"`
-	UpdatedAt    int64 `json:"updated_at,omitempty"`
+	PlanKeptOnly bool `json:"plan_kept_only,omitempty"`
+	// PlanHandOff records that the user handed the plan's implementation to
+	// another model: the session left plan mode with the main agent as the
+	// tech lead and one executor subagent to dispatch on this row. Entering
+	// plan mode again clears it.
+	PlanHandOff *PlanHandOff `json:"plan_hand_off,omitempty"`
+	UpdatedAt   int64        `json:"updated_at,omitempty"`
+}
+
+// PlanHandOff is the model row a hand-off named (owner 2026-11-10). The row id
+// is the identity — the same provider/model may be configured twice — and it
+// is what the dispatch later resolves; the pair travels along for records and
+// display.
+type PlanHandOff struct {
+	ModelID  string `json:"model_id,omitempty"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 func modePath(home, sessionID string) string {
@@ -109,6 +124,7 @@ func Switch(home, sessionID string, mode Mode) (State, error) {
 		}
 		next.HasExitedPlan = false
 		next.PlanKeptOnly = false
+		next.PlanHandOff = nil
 	} else {
 		next.Phase = ""
 		next.PrePlanMode = ""
@@ -130,6 +146,17 @@ func KeepPlanOnly(home, sessionID string, restore Mode) (State, error) {
 	return next, Set(home, sessionID, next)
 }
 
+// HandOffPlan leaves plan mode the way an approved exit does and records the
+// model the plan's implementation was handed to.
+func HandOffPlan(home, sessionID string, restore Mode, handOff PlanHandOff) (State, error) {
+	next, err := Switch(home, sessionID, restore)
+	if err != nil {
+		return State{}, err
+	}
+	next.PlanHandOff = &handOff
+	return next, Set(home, sessionID, next)
+}
+
 func normalizeMode(m Mode) Mode {
 	switch strings.ToLower(strings.TrimSpace(string(m))) {
 	case string(ModePlan):
@@ -143,7 +170,7 @@ func normalizeMode(m Mode) Mode {
 // state root, all named for the session id:
 //
 //	state/modes/<sid>.json          the session's mode and plan-mode bookkeeping
-////	state/todos/<sid>.json          the session's checklist
+//	state/todos/<sid>.json          the session's checklist
 //	state/intermediate/<sid>.md     the session's intermediate notes
 //
 // A file that does not exist is not an error: deletion must be repeatable

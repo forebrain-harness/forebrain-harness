@@ -459,3 +459,65 @@ func TestRemoveSessionStateFiles(t *testing.T) {
 		t.Fatalf("removing a file-less session = %v, want nil", err)
 	}
 }
+
+// HandOffPlan leaves plan mode the way an approved exit does and records the
+// row the implementation was handed to; entering plan mode again clears it,
+// and a state file written before the field existed reads back without one.
+func TestHandOffPlanRecordsTheRowAndReentryClearsIt(t *testing.T) {
+	home := t.TempDir()
+	sid := "sid-hand-off"
+
+	if _, err := Switch(home, sid, ModePlan); err != nil {
+		t.Fatalf("Switch to plan: %v", err)
+	}
+	handed, err := HandOffPlan(home, sid, ModeAgent, PlanHandOff{
+		ModelID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3",
+	})
+	if err != nil {
+		t.Fatalf("HandOffPlan: %v", err)
+	}
+	if handed.Mode != ModeAgent || handed.Phase != "" || handed.PrePlanMode != "" || !handed.HasExitedPlan {
+		t.Fatalf("handed = %+v, want a plain agent state the way an approved exit leaves", handed)
+	}
+	if handed.PlanHandOff == nil || handed.PlanHandOff.ModelID != "llm_row2" || handed.PlanHandOff.Model != "glm-5.3" {
+		t.Fatalf("handed = %+v, want the chosen row recorded", handed)
+	}
+	stored, err := Get(home, sid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.PlanHandOff == nil || stored.PlanHandOff.Provider != "zhipuai" {
+		t.Fatalf("stored = %+v, want the hand-off persisted", stored)
+	}
+
+	reentered, err := Switch(home, sid, ModePlan)
+	if err != nil {
+		t.Fatalf("Switch back to plan: %v", err)
+	}
+	if reentered.PlanHandOff != nil {
+		t.Fatal("entering plan mode must clear PlanHandOff")
+	}
+	stored, err = Get(home, sid)
+	if err != nil {
+		t.Fatalf("Get after re-entry: %v", err)
+	}
+	if stored.PlanHandOff != nil {
+		t.Fatal("persisted state must not carry PlanHandOff after a re-entry")
+	}
+
+	// A file from before the field existed reads back with no hand-off.
+	legacy := filepath.Join(home, "state", "modes", "sid-legacy.json")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"mode":"agent","has_exited_plan":true}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old, err := Get(home, "sid-legacy")
+	if err != nil {
+		t.Fatalf("Get legacy: %v", err)
+	}
+	if old.PlanHandOff != nil || old.Mode != ModeAgent || !old.HasExitedPlan {
+		t.Fatalf("legacy state = %+v, want agent mode with no hand-off", old)
+	}
+}
