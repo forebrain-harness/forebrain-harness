@@ -68,7 +68,16 @@ type Service struct {
 	// PrimaryModel names the model the conversation being compacted runs on.
 	// It takes the calling context because the answer is per conversation: a
 	// shared runner may serve sessions on different models.
-	PrimaryModel       func(ctx context.Context) (provider string, model string)
+	PrimaryModel func(ctx context.Context) (provider string, model string)
+	// ModelHit is PrimaryModel's capability answer, read from the configured
+	// row the conversation runs on (owner 2026-11-10). nil — a service built
+	// without a runner — leaves the pair's catalog values in force.
+	ModelHit func(ctx context.Context) (llm.Hit, bool)
+	// ModelRow names the configured row the conversation's model comes from:
+	// observed window behaviour belongs to that row, so two rows naming one
+	// provider/model do not share a learned cap (owner 2026-11-10). nil — or
+	// "" — falls back to the pair.
+	ModelRow           func(ctx context.Context) string
 	CompactLLM         func(ctx context.Context) llm.LLM
 	ModelProvider      func(model string) string
 	CompactLLMForModel func(model string) llm.LLM
@@ -256,7 +265,7 @@ func (s Service) autoCompactDecision(ctx context.Context, sessionID string) (aut
 	provider, model := s.projectionModel(ctx)
 	est := llm.EstimatorFor(provider, model)
 	usage := state.TokenCountWithEstimationFor(turns, est)
-	limits, _ := llm.Lookup(provider, model)
+	limits, _ := s.modelLimits(ctx, provider, model)
 	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, state.TokenBudgetOptions{
 		AutoCompactPercent:    s.AutoCompactPercent,
 		FallbackContextTokens: s.ConfigContextTokens,
@@ -270,8 +279,11 @@ func (s Service) autoCompactDecision(ctx context.Context, sessionID string) (aut
 		modelChanged := !strings.EqualFold(previousModel, model)
 		providerChanged := previousProvider != "" && provider != "" && !strings.EqualFold(previousProvider, provider)
 		if modelChanged || providerChanged {
+			// The previous model is known by its pair alone — the message row
+			// carries no configured-row id — so its overrides apply only when
+			// that pair names one row (owner 2026-11-10).
 			previousLimits, previousKnown := llm.Lookup(previousProvider, previousModel)
-			currentLimits, currentKnown := llm.Lookup(provider, model)
+			currentLimits, currentKnown := s.modelLimits(ctx, provider, model)
 			if previousKnown && currentKnown {
 				if reason := modelChangeCompactReason(usage, budget.AutoCompactThreshold, previousLimits, currentLimits); reason != "" {
 					return autoCompactDecision{Should: true, Usage: usage, Reason: reason, PreviousModel: previousModel}, nil
@@ -351,7 +363,7 @@ func (s Service) TryCompactOnMessages(ctx context.Context, messages []llm.Messag
 	}
 	result.TokensBefore = before
 	provider, model := s.projectionModel(ctx)
-	result.TokensAfter = llm.ProjectRequestTokens(provider, model, s.estimator(ctx), replacement, tools)
+	result.TokensAfter = llm.ProjectRequestTokensForRow(s.modelRow(ctx), provider, model, s.estimator(ctx), replacement, tools)
 	run.finish(result)
 	// The checkpoint excludes initial instructions. Reinject current initial
 	// context for the request that immediately follows a mid-turn compaction.
@@ -467,7 +479,7 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 		// two numbers can be read against each other. No tool schemas here —
 		// the summary path does not carry them, which understates the next
 		// request by that block (~2% of a window) and never overstates it.
-		TokensAfter: llm.ProjectFor(provider, model, est.Name(), llm.EstimateMessagesWith(est, replacement)),
+		TokensAfter: llm.ProjectForRow(s.modelRow(ctx), provider, model, est.Name(), llm.EstimateMessagesWith(est, replacement)),
 	}
 	return replacement, result, nil
 }
@@ -648,6 +660,28 @@ func (s Service) gaugeUsage(ctx context.Context, sessionID string) int {
 	return state.TokenCountWithEstimationFor(turns, s.estimator(ctx))
 }
 
+// modelRow is the configured row the conversation runs on, "" when the service
+// was built without a runner.
+func (s Service) modelRow(ctx context.Context) string {
+	if s.ModelRow == nil {
+		return ""
+	}
+	return s.ModelRow(ctx)
+}
+
+// modelLimits is what the primary model may do: the row's own capabilities when
+// ModelHit answers (the runner names the conversation's row), else the pair's.
+// The two readers — the decision and the summary budget — go through here so
+// they cannot read different rows (owner 2026-11-10).
+func (s Service) modelLimits(ctx context.Context, provider, model string) (llm.Hit, bool) {
+	if s.ModelHit != nil {
+		if hit, ok := s.ModelHit(ctx); ok {
+			return hit, true
+		}
+	}
+	return llm.Lookup(provider, model)
+}
+
 // summaryInputBudget returns the token budget for a summarization request,
 // reserving room for the summary output. It prefers the learned window for the
 // active model over the catalog value, and falls back to a fraction of the
@@ -657,8 +691,8 @@ func (s Service) summaryInputBudget(ctx context.Context, messages []llm.Message)
 	if s.PrimaryModel != nil {
 		provider, model = s.PrimaryModel(ctx)
 	}
-	limits, _ := llm.Lookup(provider, model)
-	window := llm.EffectiveWindow(provider, model, limits.Limits().EffectiveInputLimit())
+	limits, _ := s.modelLimits(ctx, provider, model)
+	window := llm.EffectiveWindowForRow(s.modelRow(ctx), provider, model, limits.Limits().EffectiveInputLimit())
 	if window <= 0 {
 		// Unknown window. Returning 0 tells the caller to send the full history
 		// first: guessing a budget here would trim a history that may well have

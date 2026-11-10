@@ -103,10 +103,12 @@ func ContextReport(ctx context.Context, src ContextSources, sessionID string) st
 // the /context report and the composer footer, so they cannot disagree. opts
 // carries the auto-compaction percent and the configured context window, the
 // same two the compaction decision reads.
-func ContextGaugeOf(provider, model string, usage int, opts state.TokenBudgetOptions) StatusContext {
+func ContextGaugeOf(modelID, provider, model string, usage int, opts state.TokenBudgetOptions) StatusContext {
 	// The footer ignores Lookup's ok flag and feeds whatever the model table
 	// yields (its defaults included); every reader must get the same answer.
-	limits, _ := llm.Lookup(strings.TrimSpace(provider), strings.TrimSpace(model))
+	// The row is named so two rows sharing a provider/model keep their own
+	// window (owner 2026-11-10).
+	limits, _ := llm.LookupRow(strings.TrimSpace(modelID), strings.TrimSpace(provider), strings.TrimSpace(model))
 	budget := state.CalculateTokenBudgetWithOptions(usage, strings.TrimSpace(model), limits, opts)
 	return StatusContext{
 		PercentLeft:   budget.PercentLeft,

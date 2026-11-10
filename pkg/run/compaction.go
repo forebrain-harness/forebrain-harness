@@ -17,8 +17,8 @@ import (
 // compactModelLimit resolves the budget independently of the optional context
 // snapshot. Resume and worker runs may never execute the interactive assembly
 // hook, and a snapshot can describe a previously selected model.
-func compactModelLimit(snapshotRaw json.RawMessage, provider, model string, configContextTokens int) int {
-	limits, known := llm.Lookup(provider, model)
+func compactModelLimit(snapshotRaw json.RawMessage, rowID, provider, model string, configContextTokens int) int {
+	limits, known := llm.LookupRow(rowID, provider, model)
 	window := limits.Limits().EffectiveInputLimit()
 	if !known || window <= 0 {
 		window = modelContextLimitFromSnapshot(snapshotRaw)
@@ -29,7 +29,7 @@ func compactModelLimit(snapshotRaw json.RawMessage, provider, model string, conf
 		// compaction.
 		window = state.EffectiveInputWindow(limits.Limits(), configContextTokens)
 	}
-	return llm.EffectiveWindow(provider, model, window)
+	return llm.EffectiveWindowForRow(rowID, provider, model, window)
 }
 
 // modelContextLimitFromSnapshot extracts the effective input window size used
@@ -71,6 +71,11 @@ type CompactChainDeps struct {
 	// context because a shared runner may serve conversations on different
 	// models.
 	ActiveModel func(ctx context.Context) (provider string, model string)
+	// ActiveModelRow names the configured row ActiveModel's model comes from:
+	// capabilities and observed window behaviour belong to the row, so two rows
+	// naming one provider/model keep their own (owner 2026-11-10). "" falls back
+	// to the pair, which is what a caller that knows no row has.
+	ActiveModelRow func(ctx context.Context) string
 }
 
 func (d *CompactChainDeps) activeModel(ctx context.Context) (string, string) {
@@ -78,6 +83,14 @@ func (d *CompactChainDeps) activeModel(ctx context.Context) (string, string) {
 		return "", ""
 	}
 	return d.ActiveModel(ctx)
+}
+
+// activeModelRow is the row activeModel's model comes from, "" when unknown.
+func (d *CompactChainDeps) activeModelRow(ctx context.Context) string {
+	if d == nil || d.ActiveModelRow == nil {
+		return ""
+	}
+	return d.ActiveModelRow(ctx)
 }
 
 func (d *CompactChainDeps) tryCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool, reactive bool, occupancy int) ([]llm.Message, bool) {
@@ -101,11 +114,11 @@ func compactIfNeeded(
 	tools []*llm.Tool,
 ) ([]llm.Message, bool) {
 	provider, model := deps.activeModel(ctx)
-	modelLimit := compactModelLimit(snapshotRaw, provider, model, deps.ConfigContextTokens)
+	modelLimit := compactModelLimit(snapshotRaw, deps.activeModelRow(ctx), provider, model, deps.ConfigContextTokens)
 	if deps == nil || modelLimit <= 0 || deps.TryCompact == nil {
 		return messages, false
 	}
-	occupancy := requestOccupancy(provider, model, tools, messages)
+	occupancy := requestOccupancy(deps.activeModelRow(ctx), provider, model, tools, messages)
 	if !compactThresholdReached(occupancy, modelLimit, deps) {
 		return messages, false
 	}
@@ -120,7 +133,7 @@ func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *Compact
 	if modelLimit <= 0 {
 		return false
 	}
-	return compactThresholdReached(requestOccupancy(provider, model, tools, messages), modelLimit, deps)
+	return compactThresholdReached(requestOccupancy("", provider, model, tools, messages), modelLimit, deps)
 }
 
 // requestOccupancy is this request's projected size: the history plus the tool
@@ -135,8 +148,8 @@ func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *Compact
 // tokenizer than the observation measured against, the learned overhead would
 // be added to the wrong base and the two checkpoints would fire at different
 // real sizes.
-func requestOccupancy(provider, model string, tools []*llm.Tool, messages []llm.Message) int {
-	return llm.ProjectRequestTokens(provider, model, llm.EstimatorFor(provider, model), messages, tools)
+func requestOccupancy(rowID, provider, model string, tools []*llm.Tool, messages []llm.Message) int {
+	return llm.ProjectRequestTokensForRow(rowID, provider, model, llm.EstimatorFor(provider, model), messages, tools)
 }
 
 // compactThresholdReached reports whether occupancy has crossed this

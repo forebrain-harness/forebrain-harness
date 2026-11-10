@@ -24,6 +24,10 @@ type HookParams struct {
 	PrimaryModel       func(sessionID string) (string, string)
 	ReadStatesProvider func() []tool.ReadState
 	SnapshotWriter     func(string, AssemblyResult)
+	// ModelHit answers what a session's model may do, read from the configured
+	// row it runs on (owner 2026-11-10): the catalog's entry with that row's
+	// capabilities laid over it. nil leaves the catalog's values in force.
+	ModelHit func(sessionID string) (llm.Hit, bool)
 }
 
 func NewRuntimeHook(params HookParams) *Hook {
@@ -38,6 +42,14 @@ func NewRuntimeHook(params HookParams) *Hook {
 		// then reads the windows as unknown rather than failing.
 		if cat, err := llm.Resolve(); err == nil {
 			hook.ModelLimitsProvider = func(sessionID string) (llm.Limits, bool) {
+				// The session's row wins over the catalog: a model page's
+				// context window applies to the row it was set on, and two rows
+				// naming one provider/model keep their own (owner 2026-11-10).
+				if params.ModelHit != nil {
+					if hit, ok := params.ModelHit(sessionID); ok {
+						return hit.Limits(), true
+					}
+				}
 				provider, model := params.PrimaryModel(sessionID)
 				return cat.Lookup(llm.JoinProviderModel(provider, model))
 			}

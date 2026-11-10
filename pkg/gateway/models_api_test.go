@@ -501,7 +501,7 @@ func TestLLMModelsAPIReachesTheRuntimeSnapshot(t *testing.T) {
 	// later test would resolve a model from a home that is already gone.
 	t.Cleanup(func() {
 		state.SetSectionValidator(nil)
-		llm.SetModelOverrides(nil)
+		llm.SetModelOverrides(nil, nil)
 	})
 
 	s := &Server{Home: home, Env: env, Runner: env.Runner, Sessions: env.Deps.SessionStore, RunRT: env.Deps.RunRT}

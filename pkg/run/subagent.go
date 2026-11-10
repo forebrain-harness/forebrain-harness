@@ -2969,22 +2969,23 @@ func SubagentContextBudget(ctx context.Context, r *Runner, conversationSessionID
 // reads, the model the gauge is sized by, the measured occupancy, and the
 // budget the gauge divides by — the inputs the shared report builder and the
 // primary session's HandleContextSlash are fed with.
-func SubagentContextGauge(ctx context.Context, r *Runner, conversationSessionID, agentKey string) (workerSessionID, provider, model string, used int, budget state.TokenBudgetOptions, err error) {
+func SubagentContextGauge(ctx context.Context, r *Runner, conversationSessionID, agentKey string) (workerSessionID, modelID, provider, model string, used int, budget state.TokenBudgetOptions, err error) {
 	record, ok, err := mergedSubagentRecord(r, conversationSessionID, agentKey)
 	if err != nil {
-		return "", "", "", 0, state.TokenBudgetOptions{}, err
+		return "", "", "", "", 0, state.TokenBudgetOptions{}, err
 	}
 	if !ok {
-		return "", "", "", 0, state.TokenBudgetOptions{}, fmt.Errorf("subagent %s not found", agentKey)
+		return "", "", "", "", 0, state.TokenBudgetOptions{}, fmt.Errorf("subagent %s not found", agentKey)
 	}
 	provider, model, _ = AgentModel(r, conversationSessionID, &record)
+	modelID = AgentModelRow(r, conversationSessionID, &record)
 	var store *state.SessionStore
 	if r != nil && r.Deps != nil {
 		store = r.Deps.SessionStore
 		budget = CompactBudgetOptions(r.AppCfg)
 	}
 	used, _ = ContextOccupancy(ctx, store, record.WorkerSessionID)
-	return record.WorkerSessionID, provider, model, used, budget, nil
+	return record.WorkerSessionID, modelID, provider, model, used, budget, nil
 }
 
 // publishSubagentContextBudget pushes the gauge of a subagent's own context
@@ -4254,6 +4255,11 @@ type SubagentModelOverride struct {
 	// keys on it, so a row edited mid-run (new key, new endpoint) gets a new
 	// client instead of the stale one.
 	Version int64
+	// Caps is the same row's capability projection: the context window, output
+	// reserve, image support and thinking levels this run reads, so a model
+	// added after this turn's configuration was adopted runs on its own
+	// settings rather than on the catalog's alone (owner 2026-11-10).
+	Caps *llm.ModelOverride
 }
 
 func (o SubagentModelOverride) valid() bool {
@@ -4405,6 +4411,15 @@ func subagentModelOverrideForRef(ctx context.Context, fac Factory, id string) (S
 		return SubagentModelOverride{}, err
 	}
 	entry := usable.Entry
+	configRow, err := usable.Row.ConfigRow()
+	if err != nil {
+		return SubagentModelOverride{}, err
+	}
+	capsOverride, hasCaps := state.ModelOverrideFromCaps(configRow.Caps)
+	var caps *llm.ModelOverride
+	if hasCaps {
+		caps = &capsOverride
+	}
 	return SubagentModelOverride{
 		ModelID:  strings.TrimSpace(entry.ID),
 		Provider: strings.TrimSpace(entry.Provider),
@@ -4412,6 +4427,7 @@ func subagentModelOverrideForRef(ctx context.Context, fac Factory, id string) (S
 		Effort:   appcfg.ReasoningEffort(entry.Params),
 		Entry:    &entry,
 		Version:  usable.Row.UpdatedAt,
+		Caps:     caps,
 	}, nil
 }
 

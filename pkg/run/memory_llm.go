@@ -233,7 +233,7 @@ func memoryStage1RolloutTokenLimit(cfg *appcfg.Root, agentType, model string) in
 	if provider == nil {
 		return memory.Stage1RolloutAbsoluteCap
 	}
-	info, ok := llm.Lookup(provider.Provider, provider.Model)
+	info, ok := llm.LookupRow(provider.ID, provider.Provider, provider.Model)
 	if !ok || info.ContextWindow <= 0 {
 		return memory.Stage1RolloutAbsoluteCap
 	}

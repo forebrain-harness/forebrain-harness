@@ -472,7 +472,14 @@ func EstimateRequestTokens(e Estimator, msgs []Message, tools []*Tool) int {
 // provider/model has actually reported: the learned constant this estimator
 // cannot see (the provider's own framing), see ProjectFor.
 func ProjectRequestTokens(provider, model string, e Estimator, msgs []Message, tools []*Tool) int {
-	return ProjectFor(provider, model, e.Name(), EstimateRequestTokens(e, msgs, tools))
+	return ProjectRequestTokensForRow("", provider, model, e, msgs, tools)
+}
+
+// ProjectRequestTokensForRow is ProjectRequestTokens for a caller that knows the
+// configured row the request goes to: the overhead it adds is that row's own
+// (owner 2026-11-10).
+func ProjectRequestTokensForRow(rowID, provider, model string, e Estimator, msgs []Message, tools []*Tool) int {
+	return ProjectForRow(rowID, provider, model, e.Name(), EstimateRequestTokens(e, msgs, tools))
 }
 
 // SetEstimatorForTest pins the estimator for a provider/model pair and returns

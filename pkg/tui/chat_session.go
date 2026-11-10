@@ -1673,7 +1673,7 @@ func (s *ChatSession) SubagentContextReport(sessionID, agentKey string) (string,
 	if r == nil {
 		return "context: unavailable", true
 	}
-	workerSessionID, provider, model, used, explicitLimit, err := run.SubagentContextGauge(context.Background(), r, strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	workerSessionID, modelID, provider, model, used, explicitLimit, err := run.SubagentContextGauge(context.Background(), r, strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
 	if err != nil {
 		return "context: " + err.Error(), true
 	}
@@ -1684,7 +1684,7 @@ func (s *ChatSession) SubagentContextReport(sessionID, agentKey string) (string,
 	if runs := s.runSvc(); runs != nil {
 		src.Compactions = runs
 	}
-	src.Gauge = turn.ContextGaugeOf(provider, model, used, explicitLimit)
+	src.Gauge = turn.ContextGaugeOf(modelID, provider, model, used, explicitLimit)
 	return turn.ContextReport(context.Background(), src, workerSessionID), true
 }
 

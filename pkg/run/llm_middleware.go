@@ -584,7 +584,7 @@ func (r recoverableLLM) observeSuccess(ctx context.Context, res *llm.Result, est
 		// The settled size was still accepted, which is all the window needs.
 		estimated = 0
 	}
-	llm.RecordSuccessFor(provider, model, est.Name(), realInput, estimated)
+	llm.RecordSuccessForRow(r.compactDeps.activeModelRow(ctx), provider, model, est.Name(), realInput, estimated)
 }
 
 // observeOverflow records a rejected prompt size as an upper bound on the real
@@ -598,7 +598,7 @@ func (r recoverableLLM) observeOverflow(ctx context.Context, err error, estimate
 	if usage := llm.LastAttemptUsageFromError(err); usage != nil {
 		realInput = usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
 	}
-	llm.RecordOverflow(provider, model, realInput, estimated)
+	llm.RecordOverflowForRow(r.compactDeps.activeModelRow(ctx), provider, model, realInput, estimated)
 }
 
 func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message, tail int, tools []*llm.Tool, est llm.Estimator) ([]llm.Message, bool) {
@@ -609,7 +609,7 @@ func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message
 	provider, model := r.compactDeps.activeModel(ctx)
 	// The rejected request is this one: its projected size is what the
 	// compaction card reports as the occupancy it fired at.
-	occupancy := requestOccupancy(provider, model, tools, head)
+	occupancy := requestOccupancy(r.compactDeps.activeModelRow(ctx), provider, model, tools, head)
 	compactCtx, release := compactionContext(ctx)
 	compacted, ok := r.compactDeps.tryCompact(compactCtx, head, tools, true, occupancy)
 	release()

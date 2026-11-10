@@ -31,6 +31,10 @@ import (
 )
 
 type LLMProviderYAML struct {
+	// ID names the configured row this entry was projected from, so a reader
+	// can ask what that row may do instead of what any row naming the same
+	// provider/model does (owner 2026-11-10). Runtime-only.
+	ID       string                  `yaml:"-" json:"-"`
 	Provider string                  `yaml:"provider" json:"provider"`
 	Model    string                  `yaml:"model" json:"model"`
 	APIKey   string                  `yaml:"api_key,omitempty" json:"api_key,omitempty"`
@@ -358,6 +362,7 @@ func llmYAMLsFromResolved(cfgs []appcfg.AgentLLMProviderConfig) []*LLMProviderYA
 	for i := range cfgs {
 		c := cfgs[i]
 		out[i] = &LLMProviderYAML{
+			ID:              c.ID,
 			Provider:        c.Provider,
 			Model:           c.Model,
 			APIKey:          c.APIKey,
@@ -2493,6 +2498,52 @@ func (r *Runner) agentModelFor(ctx context.Context) (provider, model string) {
 	return r.effectiveModelFor(ctx)
 }
 
+// agentModelRowFor names the configured row the model agentModelFor returns
+// comes from, reading the same three sources in the same order: the subagent's
+// dispatch-time override, else that type's own chain, else the conversation's
+// selection. Capabilities are read per row (owner 2026-11-10), so the two
+// functions must agree; "" means no row is known and a capability lookup falls
+// back to the pair.
+func (r *Runner) agentModelRowFor(ctx context.Context) string {
+	if !explicitMainThreadQuerySource(QuerySourceFromContext(ctx)) {
+		if override, ok := SubagentModelOverrideFromContext(ctx); ok {
+			return strings.TrimSpace(override.ModelID)
+		}
+		if modelID, _, _, _, ok := SubagentOwnModel(r, tool.SubagentTypeFromContext(ctx)); ok {
+			return strings.TrimSpace(modelID)
+		}
+	}
+	if sel, ok := SessionModelSelectionFromContext(ctx); ok {
+		if id := strings.TrimSpace(sel.ModelID); id != "" {
+			return id
+		}
+	}
+	if r != nil && r.Deps != nil && r.Deps.SessionStore != nil && ctx != nil {
+		if sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx)); sid != "" {
+			if row, hasRow, err := r.Deps.SessionStore.SessionModelSelection(ctx, sid); err == nil && hasRow {
+				if resolved, err := resolveSessionModelRow(r, row); err == nil {
+					return strings.TrimSpace(resolved.ModelID)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// modelHitFor is what the call in ctx may do: the catalog's entry for its
+// model, with the capabilities of the row it runs on. A dispatch-time override
+// carries the capabilities of the row it read live — the row may have been added
+// after this turn's configuration was adopted — so that projection is used
+// instead of the installed table.
+func (r *Runner) modelHitFor(ctx context.Context) (llm.Hit, bool) {
+	provider, model := r.agentModelFor(ctx)
+	if override, ok := SubagentModelOverrideFromContext(ctx); ok && override.Caps != nil {
+		hit, _ := llm.LookupCatalog(provider, model)
+		return llm.OverlayModelOverride(hit, *override.Caps), true
+	}
+	return llm.LookupRow(r.agentModelRowFor(ctx), provider, model)
+}
+
 // agentCompactClientFor is the compaction client for the model agentModelFor
 // names: the conversation's client on the main thread, and the client the
 // subagent's own requests run on otherwise — built the way the routing
@@ -2668,6 +2719,26 @@ func AgentModel(r *Runner, conversationSessionID string, subagent *agent.History
 	return sel.Provider, sel.Model, sel.Effort
 }
 
+// AgentModelRow names the configured row AgentModel's answer comes from: the
+// record's own row for a subagent, and the conversation's selection for the
+// primary agent. "" means no row is known (a hand-built configuration), and
+// capability lookups then fall back to the pair.
+func AgentModelRow(r *Runner, conversationSessionID string, subagent *agent.HistoryEntry) string {
+	if subagent != nil {
+		if id := strings.TrimSpace(subagent.ModelID); id != "" {
+			return id
+		}
+		if modelID, _, _, _, ok := SubagentOwnModel(r, subagent.AgentType); ok {
+			return strings.TrimSpace(modelID)
+		}
+	}
+	var store *state.SessionStore
+	if r != nil && r.Deps != nil {
+		store = r.Deps.SessionStore
+	}
+	return strings.TrimSpace(PrimaryModelStateForSession(r, store, conversationSessionID).ModelID)
+}
+
 // ContextOccupancy is how much of the context window a session fills right
 // now: the whole prompt of its last API response. Every gauge reads it — the
 // footer of either surface, /status, /context — so they never disagree.
@@ -2688,7 +2759,7 @@ func ContextOccupancy(ctx context.Context, store *state.SessionStore, sessionID 
 // Usage 0 is a fresh context, which shows the whole window.
 func ContextBudget(r *Runner, conversationSessionID string, subagent *agent.HistoryEntry, usage int) (event.TokenBudgetUpdatedPayload, bool) {
 	provider, model, _ := AgentModel(r, conversationSessionID, subagent)
-	limits, _ := llm.Lookup(provider, model)
+	limits, _ := llm.LookupRow(AgentModelRow(r, conversationSessionID, subagent), provider, model)
 	var cfg *appcfg.Root
 	if r != nil {
 		cfg = r.AppCfg

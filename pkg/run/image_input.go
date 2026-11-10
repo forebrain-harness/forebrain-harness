@@ -300,7 +300,7 @@ func imageInputRefusedModel(ctx context.Context, r *Runner) (provider, model str
 	if model == "" {
 		return "", "", false
 	}
-	hit, ok := llm.Lookup(provider, model)
+	hit, ok := r.modelHitFor(ctx)
 	if !ok || hit.SupportsAttachments {
 		// Unknown model: fail open.
 		return "", "", false

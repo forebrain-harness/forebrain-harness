@@ -820,7 +820,11 @@ type StatusSource struct {
 	// ProjectKey is the run's launch-project key.
 	ProjectKey string
 	RunStore   StatusRunStore
-	// Provider, Model and Endpoint are the active agent's primary model facts.
+	// ModelID names the configured row the facts below come from; Provider and
+	// Model are its pair, Endpoint where its requests go. The row matters
+	// because two rows may share a pair and carry different capabilities
+	// (owner 2026-11-10).
+	ModelID  string
 	Provider string
 	Model    string
 	Endpoint string
@@ -905,7 +909,7 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 	if src.ContextUsage != nil {
 		estimated, budget = src.ContextUsage()
 	}
-	rep.Context = ContextGaugeOf(src.Provider, src.Model, estimated, budget)
+	rep.Context = ContextGaugeOf(src.ModelID, src.Provider, src.Model, estimated, budget)
 	if src.RunStore != nil {
 		if totals, err := src.RunStore.SessionUsageForSession(ctx, sid); err == nil {
 			rep.Session = SessionUsageTotalsOf(totals)

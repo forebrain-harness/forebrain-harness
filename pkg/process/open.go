@@ -230,6 +230,17 @@ func sessionPrimaryModel(r *run.Runner, store *state.SessionStore) func(sessionI
 	}
 }
 
+// sessionModelHit answers what one conversation's model may do, read from the
+// configured row it runs on: the catalog's entry with that row's capabilities
+// laid over it (owner 2026-11-10). The assembly's model limits read this, so a
+// model page's context window applies to the row it was set on.
+func sessionModelHit(r *run.Runner, store *state.SessionStore) func(sessionID string) (llm.Hit, bool) {
+	return func(sessionID string) (llm.Hit, bool) {
+		sel := run.PrimaryModelStateForSession(r, store, sessionID)
+		return llm.LookupRow(sel.ModelID, sel.Provider, sel.Model)
+	}
+}
+
 // ApprovalTTLFromEnv returns the configured approval auto-expire TTL parsed from
 // FOREBRAIN_APPROVAL_TTL_SEC, or 0 when unset/invalid (disabled).
 func ApprovalTTLFromEnv() time.Duration {
@@ -628,6 +639,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		RunRT:         runSvc,
 		SkillHub:      skillHub,
 		PrimaryModel:  sessionPrimaryModel(runner, sessStore),
+		ModelHit:      sessionModelHit(runner, sessStore),
 		ReadStatesProvider: func() []tool.ReadState {
 			tools := runner.Tools()
 			if tools == nil {

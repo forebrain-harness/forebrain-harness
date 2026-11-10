@@ -63,9 +63,9 @@ func (s *Server) HandleContextSlash(ctx context.Context, sessionID, channel stri
 	if r == nil {
 		r = s.Runner
 	}
-	provider, model := run.PrimaryModelForSession(r, s.Sessions, sessionID)
+	sel := run.PrimaryModelStateForSession(r, s.Sessions, sessionID)
 	used, _ := run.ContextOccupancy(ctx, s.Sessions, sessionID)
-	src.Gauge = turn.ContextGaugeOf(provider, model, used, s.compactBudgetOptions())
+	src.Gauge = turn.ContextGaugeOf(sel.ModelID, sel.Provider, sel.Model, used, s.compactBudgetOptions())
 	return turn.ContextReport(ctx, src, sessionID), true
 }
 
@@ -83,7 +83,7 @@ func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string
 	if r == nil {
 		return "status: unavailable", true
 	}
-	provider, model := run.PrimaryModelForSession(r, s.Sessions, sessionID)
+	sel := run.PrimaryModelStateForSession(r, s.Sessions, sessionID)
 	perm := turn.PermissionsOf(r.PermissionSnapshotForSession(sessionID), cfg)
 	sessionName := ""
 	if s.Sessions != nil {
@@ -99,8 +99,9 @@ func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string
 		StateRoot:   s.stateRoot(),
 		ProjectKey:  r.ProjectKey,
 		RunStore:    s.RunRT,
-		Provider:    provider,
-		Model:       model,
+		ModelID:     sel.ModelID,
+		Provider:    sel.Provider,
+		Model:       sel.Model,
 		Endpoint:    run.PrimaryEndpoint(r),
 		Permissions: perm,
 		Sandbox:     safety.SandboxStatusLine(cfg),

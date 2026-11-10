@@ -37,7 +37,7 @@ func TestCompactModelLimitDoesNotRequireSnapshot(t *testing.T) {
 		{name: "configured window stands in for an uncatalogued model", model: "uncatalogued-compact-test", configContextTokens: 128000, want: 128000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := compactModelLimit(tc.snapshot, tc.provider, tc.model, tc.configContextTokens); got != tc.want {
+			if got := compactModelLimit(tc.snapshot, "", tc.provider, tc.model, tc.configContextTokens); got != tc.want {
 				t.Fatalf("window=%d want %d", got, tc.want)
 			}
 		})
@@ -958,5 +958,75 @@ func TestCompactionOfAHistoryThatCarriesAnotherHistorysTail(t *testing.T) {
 	}
 	if len(compacted) != 1 || len(compacted[0]) != len(history) {
 		t.Fatalf("compactions=%d, first input=%v; want the child's own history compacted whole", len(compacted), roles(compacted[0]))
+	}
+}
+
+// A caller that knows the configured row reads that row's capabilities, and a
+// dispatch-time override carries the row it read live: the window a model page
+// set on a row applies to the requests that row makes, even when another row
+// names the same provider/model (owner 2026-11-10, plan 283 Part E).
+func TestModelHitForFollowsTheConfiguredRow(t *testing.T) {
+	wide, narrow := int64(64000), int64(32000)
+	llm.SetModelOverrides(
+		map[string]llm.ModelOverride{
+			"row-wide":   {ContextWindow: &wide},
+			"row-narrow": {ContextWindow: &narrow},
+		},
+		map[string]string{
+			"row-wide":   "deepseek/deepseek-v4",
+			"row-narrow": "deepseek/deepseek-v4",
+		},
+	)
+	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
+	r := &Runner{}
+
+	// The conversation's own selection names the row.
+	ctx := WithSessionModelSelection(context.Background(), PrimaryModelState{
+		ModelID: "row-narrow", Provider: "deepseek", Model: "deepseek-v4", Set: true,
+	})
+	if hit, ok := r.modelHitFor(ctx); !ok || hit.ContextWindow != 32000 {
+		t.Fatalf("session row hit = %+v ok=%v, want the narrow row's window", hit, ok)
+	}
+	if got := r.agentModelRowFor(ctx); got != "row-narrow" {
+		t.Fatalf("agentModelRowFor = %q, want the selection's row", got)
+	}
+
+	// A subagent's dispatch-time override carries the capabilities it read from
+	// the table, so a row added after this turn's adoption still counts.
+	override := SubagentModelOverride{
+		ModelID: "row-wide", Provider: "deepseek", Model: "deepseek-v4",
+		Caps: &llm.ModelOverride{ContextWindow: &wide},
+	}
+	dispatch := WithSubagentModelOverride(context.Background(), override)
+	if hit, ok := r.modelHitFor(dispatch); !ok || hit.ContextWindow != 64000 {
+		t.Fatalf("override hit = %+v ok=%v, want the override's own window", hit, ok)
+	}
+	if got := r.agentModelRowFor(dispatch); got != "row-wide" {
+		t.Fatalf("agentModelRowFor = %q, want the override's row", got)
+	}
+
+	// Without a row the pair decides: two rows naming it leave the catalog's
+	// values, which is what a caller that knows nothing gets.
+	plain := WithSessionModelSelection(context.Background(), PrimaryModelState{
+		Provider: "deepseek", Model: "deepseek-v4", Set: true,
+	})
+	if hit, _ := r.modelHitFor(plain); hit.ContextWindow != 0 {
+		t.Fatalf("rowless hit = %+v, want no row's window", hit)
+	}
+}
+
+// One row's refusal does not shrink another row's compaction budget, even when
+// both name the same provider/model: the observed window is the row's own
+// (owner 2026-11-10, plan 283 Part F).
+func TestCompactModelLimitStaysWithItsRow(t *testing.T) {
+	llm.ResetObservedForTest()
+	t.Cleanup(llm.ResetObservedForTest)
+	llm.RecordOverflowForRow("row-a", "deepseek", "deepseek-v4", 30000, 0)
+
+	if got := compactModelLimit(nil, "row-b", "deepseek", "deepseek-v4", 32000); got != 32000 {
+		t.Fatalf("row-b limit = %d, want its own 32000", got)
+	}
+	if got := compactModelLimit(nil, "row-a", "deepseek", "deepseek-v4", 32000); got != 29999 {
+		t.Fatalf("row-a limit = %d, want its own refusal cap 29999", got)
 	}
 }

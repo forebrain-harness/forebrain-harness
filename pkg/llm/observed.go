@@ -87,8 +87,9 @@ func overheadKey(key, estimator string) string {
 	return key + "\x00" + estimator
 }
 
-// observationKey identifies the provider/model pair an observation belongs to.
-// ok is false when neither is named.
+// observationKey identifies the configured row — or, for a caller that knows no
+// row, the provider/model pair — an observation belongs to. ok is false when
+// neither names anything.
 //
 // An observation is a fact about one model: how its provider counts tokens, and
 // how large a prompt it has accepted or refused. A caller that names no model
@@ -97,12 +98,21 @@ func overheadKey(key, estimator string) string {
 // an unrelated runtime's window, and one provider's token accounting rescales
 // another's estimates. There is no bucket for "some model"; callers that cannot
 // name one simply learn nothing, which is what they actually know.
-func observationKey(provider, model string) (string, bool) {
-	key := strings.ToLower(strings.TrimSpace(provider)) + "/" + strings.ToLower(strings.TrimSpace(model))
-	if key == "/" {
+//
+// The row is the identity when it is known (owner 2026-11-10): two rows may name
+// the same provider/model and be served by different endpoints, so one row's
+// refusal must not cap the other's window. A pair observation and a row
+// observation are separate buckets — a caller that knows no row neither learns
+// from nor pollutes what the rows learned.
+func observationKey(rowID, provider, model string) (string, bool) {
+	if row := strings.ToLower(strings.TrimSpace(rowID)); row != "" {
+		return "row:" + row, true
+	}
+	pair := strings.ToLower(strings.TrimSpace(provider)) + "/" + strings.ToLower(strings.TrimSpace(model))
+	if pair == "/" {
 		return "", false
 	}
-	return key, true
+	return "pair:" + pair, true
 }
 
 // RecordSuccess records that the provider accepted a prompt of realInput
@@ -118,10 +128,16 @@ func RecordSuccess(provider, model string, realInput, estimated int) {
 // at estimated tokens. The accepted size is a fact about the model; the
 // overhead is learned for that estimator only.
 func RecordSuccessFor(provider, model, estimator string, realInput, estimated int) {
+	RecordSuccessForRow("", provider, model, estimator, realInput, estimated)
+}
+
+// RecordSuccessForRow is RecordSuccessFor for a caller that knows the configured
+// row the request went to (owner 2026-11-10).
+func RecordSuccessForRow(rowID, provider, model, estimator string, realInput, estimated int) {
 	if realInput <= 0 {
 		return
 	}
-	key, ok := observationKey(provider, model)
+	key, ok := observationKey(rowID, provider, model)
 	if !ok {
 		return
 	}
@@ -153,6 +169,12 @@ func RecordSuccessFor(provider, model, estimator string, realInput, estimated in
 // estimator had sized at estimated tokens. Pass realInput when the failed
 // response still reported usage; pass 0 when it did not.
 func RecordOverflow(provider, model string, realInput, estimated int) {
+	RecordOverflowForRow("", provider, model, realInput, estimated)
+}
+
+// RecordOverflowForRow is RecordOverflow for a caller that knows the configured
+// row the refused request went to (owner 2026-11-10).
+func RecordOverflowForRow(rowID, provider, model string, realInput, estimated int) {
 	size := realInput
 	if size <= 0 {
 		size = estimated
@@ -160,7 +182,7 @@ func RecordOverflow(provider, model string, realInput, estimated int) {
 	if size <= 0 {
 		return
 	}
-	key, ok := observationKey(provider, model)
+	key, ok := observationKey(rowID, provider, model)
 	if !ok {
 		return
 	}
@@ -183,7 +205,13 @@ func RecordOverflow(provider, model string, realInput, estimated int) {
 
 // Get returns the learned observation for a provider/model pair.
 func Get(provider, model string) (Observation, bool) {
-	key, named := observationKey(provider, model)
+	return GetForRow("", provider, model)
+}
+
+// GetForRow is Get for a caller that knows the configured row (owner
+// 2026-11-10).
+func GetForRow(rowID, provider, model string) (Observation, bool) {
+	key, named := observationKey(rowID, provider, model)
 	if !named {
 		return Observation{}, false
 	}
@@ -211,10 +239,16 @@ func Project(provider, model string, estimated int) int {
 // overhead learned under that same estimator. Returns the estimate unchanged
 // when nothing is known for it yet.
 func ProjectFor(provider, model, estimator string, estimated int) int {
+	return ProjectForRow("", provider, model, estimator, estimated)
+}
+
+// ProjectForRow is ProjectFor for a caller that knows the configured row the
+// request goes to (owner 2026-11-10).
+func ProjectForRow(rowID, provider, model, estimator string, estimated int) int {
 	if estimated <= 0 {
 		return 0
 	}
-	key, named := observationKey(provider, model)
+	key, named := observationKey(rowID, provider, model)
 	if !named {
 		return estimated
 	}
@@ -230,7 +264,14 @@ func ProjectFor(provider, model, estimator string, estimated int) int {
 // EffectiveWindow reconciles the catalog window with what the provider has
 // actually demonstrated. catalogWindow may be 0 when the model is unknown.
 func EffectiveWindow(provider, model string, catalogWindow int) int {
-	obs, ok := Get(provider, model)
+	return EffectiveWindowForRow("", provider, model, catalogWindow)
+}
+
+// EffectiveWindowForRow is EffectiveWindow for a caller that knows the
+// configured row: one row's rejection never caps another row's window, even
+// when both name the same provider/model (owner 2026-11-10).
+func EffectiveWindowForRow(rowID, provider, model string, catalogWindow int) int {
+	obs, ok := GetForRow(rowID, provider, model)
 	if !ok {
 		return catalogWindow
 	}

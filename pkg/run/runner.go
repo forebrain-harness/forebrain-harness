@@ -1062,6 +1062,12 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		PrimaryModel: func(ctx context.Context) (string, string) {
 			return r.agentModelFor(ctx)
 		},
+		// The conversation's own row answers what its model may do, so the
+		// compaction budget and the compact card read the row the footer does.
+		ModelHit: r.modelHitFor,
+		// Observed window behaviour is per row, so the compact service reads
+		// the same identity the checkpoint path resolves.
+		ModelRow:   r.agentModelRowFor,
 		CompactLLM: r.agentCompactClientFor,
 		ModelProvider: func(model string) string {
 			return ProviderForAgentModel(r.AppCfg, r.activeAgentNameForModel(), model)
@@ -1090,6 +1096,10 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		// the same identity the compact service resolves.
 		ActiveModel: func(ctx context.Context) (string, string) {
 			return r.agentModelFor(ctx)
+		},
+		// The row is what capabilities and observed window behaviour belong to.
+		ActiveModelRow: func(ctx context.Context) string {
+			return r.agentModelRowFor(ctx)
 		},
 		TryCompact: func(ctx context.Context, msgs []llm.Message, tools []*llm.Tool, reactive bool, occupancy int) ([]llm.Message, bool, error) {
 			// Compaction owns model history, so it remains scoped to the worker

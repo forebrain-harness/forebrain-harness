@@ -200,3 +200,47 @@ func TestOverheadIsPerEstimator(t *testing.T) {
 		t.Fatalf("projection after ResetObservedForTest = %d, want the estimate unchanged", got)
 	}
 }
+
+// Two configured rows may name one provider/model and be served by different
+// endpoints: what one row's provider refused or accepted is that row's fact, so
+// the other row's window and overhead are untouched, and a caller that knows no
+// row keeps its own pair bucket beside them (owner 2026-11-10, plan 283 Part F).
+func TestObservationsStayWithTheirRow(t *testing.T) {
+	ResetObservedForTest()
+	t.Cleanup(ResetObservedForTest)
+
+	RecordOverflowForRow("row-a", "deepseek", "deepseek-v4", 300000, 0)
+	RecordSuccessForRow("row-a", "deepseek", "deepseek-v4", "estimate", 120000, 100000)
+
+	if got := EffectiveWindowForRow("row-a", "deepseek", "deepseek-v4", 200000); got != 299999 && got != 200000 {
+		t.Fatalf("row-a window = %d, want its own cap", got)
+	}
+	if got := EffectiveWindowForRow("row-b", "deepseek", "deepseek-v4", 200000); got != 200000 {
+		t.Fatalf("row-b window = %d, want its catalog window untouched", got)
+	}
+	if got := ProjectForRow("row-b", "deepseek", "deepseek-v4", "estimate", 1000); got != 1000 {
+		t.Fatalf("row-b projection = %d, want the estimate unchanged", got)
+	}
+	if got := ProjectForRow("row-a", "deepseek", "deepseek-v4", "estimate", 1000); got != 21000 {
+		t.Fatalf("row-a projection = %d, want its own overhead added", got)
+	}
+	// The pair bucket is a separate caller's: it neither sees the row's
+	// observations nor changes them.
+	if _, ok := Get("deepseek", "deepseek-v4"); ok {
+		t.Fatal("the pair bucket must not read a row's observation")
+	}
+	if got := EffectiveWindow("deepseek", "deepseek-v4", 200000); got != 200000 {
+		t.Fatalf("pair window = %d, want the catalog window", got)
+	}
+	RecordOverflow("deepseek", "deepseek-v4", 90000, 0)
+	if got := EffectiveWindowForRow("row-a", "deepseek", "deepseek-v4", 200000); got == 89999 {
+		t.Fatal("a pair refusal capped a row's window")
+	}
+	if got := EffectiveWindow("deepseek", "deepseek-v4", 200000); got != 89999 {
+		t.Fatalf("pair window = %d, want the pair refusal's cap", got)
+	}
+	ResetObservedForTest()
+	if _, ok := GetForRow("row-a", "deepseek", "deepseek-v4"); ok {
+		t.Fatal("ResetObservedForTest must clear the row buckets too")
+	}
+}

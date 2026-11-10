@@ -687,6 +687,14 @@ func overrideForPairLocked(provider, apiModel string) (ModelOverride, bool) {
 	return o, ok
 }
 
+// OverlayModelOverride lays one row's capabilities over a hit — the same
+// projection applyModelOverride makes, exported for a caller that read the row
+// live (a dispatch on a model the turn's configuration does not know yet, owner
+// 2026-11-10). A field the row says nothing about keeps the catalog's value.
+func OverlayModelOverride(hit Hit, override ModelOverride) Hit {
+	return applyModelOverride(hit, override)
+}
+
 // applyModelOverride lays one configured row's capabilities over a hit. A row
 // that says nothing about a field leaves the catalog's value in place.
 func applyModelOverride(hit Hit, override ModelOverride) Hit {

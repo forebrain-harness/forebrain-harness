@@ -3227,7 +3227,7 @@ func (s *Server) handleSubagentToolOutput(w http.ResponseWriter, r *http.Request
 		http.Error(w, "context unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	workerSessionID, _, _, _, _, err := run.SubagentContextGauge(r.Context(), runner, sid, agentKey)
+	workerSessionID, _, _, _, _, _, err := run.SubagentContextGauge(r.Context(), runner, sid, agentKey)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -3644,7 +3644,7 @@ func (s *Server) handleSubagentContext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "context unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	workerSessionID, provider, model, used, budget, err := run.SubagentContextGauge(r.Context(), runner, sid, agentKey)
+	workerSessionID, modelID, provider, model, used, budget, err := run.SubagentContextGauge(r.Context(), runner, sid, agentKey)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -3654,13 +3654,13 @@ func (s *Server) handleSubagentContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.subagentContextBody(r.Context(), workerSessionID, provider, model, used, budget))
+	_ = json.NewEncoder(w).Encode(s.subagentContextBody(r.Context(), workerSessionID, modelID, provider, model, used, budget))
 }
 
 // subagentContextBody is /context for a subagent: the same report the
 // conversation's own /context returns, fed the subagent's worker session, its
 // model and its own occupancy, so the page draws it with the same component.
-func (s *Server) subagentContextBody(ctx context.Context, workerSessionID, provider, model string, used int, budget state.TokenBudgetOptions) map[string]any {
+func (s *Server) subagentContextBody(ctx context.Context, workerSessionID, modelID, provider, model string, used int, budget state.TokenBudgetOptions) map[string]any {
 	workerSessionID = strings.TrimSpace(workerSessionID)
 	body := map[string]any{}
 	var compactions []event.ContextCompactedPayload
@@ -3679,7 +3679,7 @@ func (s *Server) subagentContextBody(ctx context.Context, workerSessionID, provi
 			}
 		}
 	}
-	gauge := turn.ContextGaugeOf(provider, model, used, budget)
+	gauge := turn.ContextGaugeOf(modelID, provider, model, used, budget)
 	body["model_context_tokens"] = gauge.WindowTokens
 	body["available_window_tokens"] = gauge.WindowTokens
 	body["remaining_context_tokens"] = gauge.UsedTokens

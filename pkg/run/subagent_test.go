@@ -8660,16 +8660,18 @@ func mustConfigRow(t *testing.T, fix *modelArgumentFixture, id string) appcfg.LL
 // The three input schemas carry the model argument's description as fixed
 // text: it names the tool that lists the choices and never a model, so adding
 // one or flipping a switch cannot move the tool definition (and every cached
-// prompt prefix with it).
+// prompt prefix with it). The tag is jsonschema_description because the text
+// contains a comma, which the jsonschema keyword list would truncate at
+// (pkg/llm's guard walks the module for exactly that).
 func TestSubagentModelArgumentDescriptionIsFixedText(t *testing.T) {
-	const want = "description=Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."
+	const want = "Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."
 	for _, typ := range []reflect.Type{reflect.TypeOf(SubagentInput{}), reflect.TypeOf(SubagentSendInput{}), reflect.TypeOf(SubagentTask{})} {
 		field, ok := typ.FieldByName("Model")
 		if !ok {
 			t.Fatalf("%s has no Model field", typ.Name())
 		}
-		if tag, _ := field.Tag.Lookup("jsonschema"); tag != want {
-			t.Fatalf("%s.Model jsonschema tag =\n%q\nwant the fixed text", typ.Name(), tag)
+		if tag, _ := field.Tag.Lookup("jsonschema_description"); tag != want {
+			t.Fatalf("%s.Model description =\n%q\nwant the fixed text", typ.Name(), tag)
 		}
 	}
 }

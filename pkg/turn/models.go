@@ -177,7 +177,14 @@ func openCodeModelRecord(provider, id string, meta opencode.ModelMeta) ModelReco
 // only a toggle or a token budget has none either. ChatGPT's account data is
 // the one exception and does not come through here.
 func ModelReasoningEfforts(provider, model string) []string {
-	levels, known := llm.ReasoningEfforts(provider, model)
+	return ModelReasoningEffortsRow("", provider, model)
+}
+
+// ModelReasoningEffortsRow is ModelReasoningEfforts for a caller that knows the
+// configured row: the row's own levels win over the catalog's, and over a
+// same-pair sibling's (owner 2026-11-10).
+func ModelReasoningEffortsRow(modelID, provider, model string) []string {
+	levels, known := llm.ReasoningEffortsRow(modelID, provider, model)
 	if !known {
 		return nil
 	}
@@ -704,10 +711,10 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 			APIPath:     strings.TrimSpace(configured.APIPath),
 			URLVerbatim: configured.URLVerbatim,
 		}
-		if hit, ok := llm.Lookup(provider, model); ok {
+		if hit, ok := llm.LookupRow(choice.ID, provider, model); ok {
 			choice.SupportsImages = hit.SupportsAttachments
 		}
-		choice.ReasoningEfforts = ModelReasoningEfforts(provider, model)
+		choice.ReasoningEfforts = ModelReasoningEffortsRow(choice.ID, provider, model)
 		out = append(out, choice)
 	}
 	return out

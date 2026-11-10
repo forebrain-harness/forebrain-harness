@@ -77,7 +77,7 @@ func (s *ChatSession) HandleContextSlash(ctx context.Context, sessionID, channel
 	}
 	sessionModel := s.sessionModelState(sid)
 	used, _ := run.ContextOccupancy(ctx, s.sessStore(), sid)
-	src.Gauge = turn.ContextGaugeOf(sessionModel.Provider, sessionModel.Model, used, s.compactBudgetOptions())
+	src.Gauge = turn.ContextGaugeOf(sessionModel.ModelID, sessionModel.Provider, sessionModel.Model, used, s.compactBudgetOptions())
 	return turn.ContextReport(ctx, src, sid), true
 }
 
@@ -115,6 +115,7 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 		instructions = hook.InstructionSources()
 	}
 	src := turn.StatusSource{
+		ModelID:      sessionModel.ModelID,
 		Version:      home.Version,
 		SessionName:  sessionName,
 		SessionID:    sid,

@@ -1121,3 +1121,21 @@ func TestTrimHistoryToFitUsesGivenEstimator(t *testing.T) {
 		t.Fatalf("tenfold trim measures %d by its own estimator, over the budget %d", size, budget)
 	}
 }
+
+// The summary budget reads the row the conversation runs on when the caller
+// supplies one: the pair alone knows no window here (no catalog entry), so the
+// only answer comes from ModelHit (owner 2026-11-10, plan 283 Part E).
+func TestSummaryBudgetReadsTheSessionsRow(t *testing.T) {
+	svc := Service{PrimaryModel: func(context.Context) (string, string) {
+		return "deepseek", "deepseek-not-in-any-catalog"
+	}}
+	if got := svc.summaryInputBudget(context.Background(), nil); got != 0 {
+		t.Fatalf("budget without a row = %d, want 0 for an unknown window", got)
+	}
+	svc.ModelHit = func(context.Context) (llm.Hit, bool) {
+		return llm.Hit{ContextWindow: 64000}, true
+	}
+	if got := svc.summaryInputBudget(context.Background(), nil); got <= 0 {
+		t.Fatalf("budget with the row = %d, want a positive budget", got)
+	}
+}
