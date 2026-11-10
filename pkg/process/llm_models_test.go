@@ -817,7 +817,7 @@ func TestDatabaseCapsWinOverCatalog(t *testing.T) {
 	llm.SetGlobalCatalogForTest(cat)
 	t.Cleanup(func() {
 		llm.SetGlobalCatalogForTest(nil)
-		llm.SetModelOverrides(nil)
+		llm.SetModelOverrides(nil, nil)
 	})
 
 	window := int64(64000)
@@ -847,10 +847,12 @@ func TestDatabaseCapsWinOverCatalog(t *testing.T) {
 // TestInstallModelOverridesPublishesRegistryTablesAndRowCaps pins what the
 // composition installs on every adoption: the registry's plan tables (so
 // volcengine resolves without catalog rows) and the rows' own capabilities,
-// with the oldest row winning when two name the same provider and model.
+// keyed by row id — two rows naming the same provider and model keep their own
+// settings, and a caller that knows only the pair gets the catalog's values
+// rather than either row's (owner 2026-11-10, plan 283 Part E).
 func TestInstallModelOverridesPublishesRegistryTablesAndRowCaps(t *testing.T) {
 	t.Cleanup(func() {
-		llm.SetModelOverrides(nil)
+		llm.SetModelOverrides(nil, nil)
 		llm.SetBuiltinModels("volcengine", nil)
 		llm.SetBuiltinModels("byteplus", nil)
 	})
@@ -871,12 +873,18 @@ func TestInstallModelOverridesPublishesRegistryTablesAndRowCaps(t *testing.T) {
 	if !ok || hit.ContextWindow != 1024000 || hit.DefaultMaxTokens != 256000 {
 		t.Fatalf("volcengine hit = %+v ok=%v", hit, ok)
 	}
-	hit, ok = llm.Lookup(appcfg.CustomProvider, model)
-	if !ok {
-		t.Fatal("the row's capabilities did not make its model resolve")
+	// Two rows name this pair, so the pair alone has no single answer: the
+	// catalog's values stand, and the custom model stays unknown there.
+	if _, ok := llm.Lookup(appcfg.CustomProvider, model); ok {
+		t.Fatal("a pair two rows name must not resolve from one row's capabilities")
 	}
-	if hit.ContextWindow != 32000 || hit.DefaultMaxTokens != 4096 || hit.SupportsAttachments {
-		t.Fatalf("hit = %+v, want the first row's capabilities", hit)
+	old, ok := llm.LookupRow("row-old", appcfg.CustomProvider, model)
+	if !ok || old.ContextWindow != 32000 || old.DefaultMaxTokens != 4096 || old.SupportsAttachments {
+		t.Fatalf("row-old hit = %+v ok=%v, want its own capabilities", old, ok)
+	}
+	fresh, ok := llm.LookupRow("row-new", appcfg.CustomProvider, model)
+	if !ok || fresh.ContextWindow != 1 {
+		t.Fatalf("row-new hit = %+v ok=%v, want its own window", fresh, ok)
 	}
 }
 

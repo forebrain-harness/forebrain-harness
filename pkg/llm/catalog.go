@@ -514,13 +514,31 @@ func InitGlobalCatalog() error {
 // Three layers answer, in order. The catalog (models.json) is the base; the
 // built-in model table covers providers it has no rows for (volcengine,
 // byteplus) and ranks below it; a configured row's own overrides win over
-// both. A custom model the catalog does not list borrows the capabilities of
+// both.
+//
+// A caller that knows only the pair gets a row's overrides only when exactly
+// one configured row names that pair: with several rows naming it, none of
+// them is "the" answer, so the catalog's values stand alone. Callers that know
+// the row use LookupRow. A custom model the catalog does not list borrows the capabilities of
 // the catalog entry its name happens to be (a user typing "openai/gpt-4o"
 // gets gpt-4o's context window), and a custom model that matches nothing has
 // no entry at all.
 func Lookup(provider, apiModel string) (Hit, bool) {
 	hit, ok := LookupCatalog(provider, apiModel)
-	if override, found := modelOverride(JoinProviderModel(provider, apiModel)); found {
+	if override, found := modelOverrideForPair(provider, apiModel); found {
+		return applyModelOverride(hit, override), true
+	}
+	return hit, ok
+}
+
+// LookupRow is Lookup for a caller that knows which configured row it asks
+// about (owner 2026-11-10). Two rows may name the same provider/model and carry
+// different capabilities, so the row — not the pair — is the identity: the
+// catalog's entry for the pair, with that row's own overrides laid over it.
+// rowID "" behaves like Lookup.
+func LookupRow(rowID, provider, apiModel string) (Hit, bool) {
+	hit, ok := LookupCatalog(provider, apiModel)
+	if override, found := modelOverrideForRow(strings.TrimSpace(rowID), provider, apiModel); found {
 		return applyModelOverride(hit, override), true
 	}
 	return hit, ok
@@ -593,37 +611,79 @@ type ModelOverride struct {
 
 var (
 	overrideMu sync.RWMutex
-	overrides  map[string]ModelOverride
+	// overrides is what each configured row says about its own model, keyed by
+	// the row id: the row is the identity, so two rows naming the same
+	// provider/model keep their own capabilities (owner 2026-11-10).
+	overrides map[string]ModelOverride
+	// rowsByPair maps JoinProviderModel(provider, model) to the ids of the rows
+	// that name it, so a caller that knows only the pair can find the row that
+	// owns its overrides — and only when there is exactly one.
+	rowsByPair map[string][]string
 
 	builtinModelMu sync.RWMutex
 	builtinModels  map[string][]Model
 )
 
-// SetModelOverrides installs the overrides the configured rows carry, keyed
-// by JoinProviderModel(provider, model). The process installs them every time
-// it adopts a configuration; nil clears them.
-func SetModelOverrides(m map[string]ModelOverride) {
-	installed := make(map[string]ModelOverride, len(m))
-	for key, override := range m {
-		key = strings.ToLower(strings.TrimSpace(key))
-		if key == "" {
+// SetModelOverrides installs the overrides the configured rows carry, keyed by
+// row id, with pairOf naming each row's JoinProviderModel(provider, model).
+// The process installs them every time it adopts a configuration; nil clears
+// them.
+func SetModelOverrides(byRow map[string]ModelOverride, pairOf map[string]string) {
+	installed := make(map[string]ModelOverride, len(byRow))
+	pairs := make(map[string][]string, len(byRow))
+	for rawID, override := range byRow {
+		id := strings.ToLower(strings.TrimSpace(rawID))
+		if id == "" {
 			continue
 		}
 		override.Efforts = append([]string(nil), override.Efforts...)
-		installed[key] = override
+		installed[id] = override
+		pair := strings.ToLower(strings.TrimSpace(pairOf[rawID]))
+		if pair == "" {
+			continue
+		}
+		pairs[pair] = append(pairs[pair], id)
 	}
 	overrideMu.Lock()
 	overrides = installed
+	rowsByPair = pairs
 	overrideMu.Unlock()
 }
 
-func modelOverride(key string) (ModelOverride, bool) {
+// modelOverrideForRow is the override a lookup applies: the named row's own
+// when a row is named, the pair's only row otherwise.
+func modelOverrideForRow(rowID, provider, apiModel string) (ModelOverride, bool) {
 	overrideMu.RLock()
 	defer overrideMu.RUnlock()
 	if len(overrides) == 0 {
 		return ModelOverride{}, false
 	}
-	o, ok := overrides[strings.ToLower(strings.TrimSpace(key))]
+	if id := strings.ToLower(strings.TrimSpace(rowID)); id != "" {
+		o, ok := overrides[id]
+		return o, ok
+	}
+	return overrideForPairLocked(provider, apiModel)
+}
+
+// modelOverrideForPair answers a caller that knows only the pair.
+func modelOverrideForPair(provider, apiModel string) (ModelOverride, bool) {
+	overrideMu.RLock()
+	defer overrideMu.RUnlock()
+	if len(overrides) == 0 {
+		return ModelOverride{}, false
+	}
+	return overrideForPairLocked(provider, apiModel)
+}
+
+// overrideForPairLocked applies a row's overrides to a pair only when exactly
+// one configured row names that pair.
+func overrideForPairLocked(provider, apiModel string) (ModelOverride, bool) {
+	pair := strings.ToLower(strings.TrimSpace(JoinProviderModel(provider, apiModel)))
+	ids := rowsByPair[pair]
+	if len(ids) != 1 {
+		return ModelOverride{}, false
+	}
+	o, ok := overrides[ids[0]]
 	return o, ok
 }
 
@@ -716,6 +776,17 @@ func builtinModel(provider, apiModel string) (Model, bool) {
 // Lookup, not through here.
 func ReasoningEfforts(provider, apiModel string) (levels []string, known bool) {
 	hit, ok := Lookup(provider, apiModel)
+	if !ok {
+		return nil, false
+	}
+	return hit.ReasoningEfforts()
+}
+
+// ReasoningEffortsRow is ReasoningEfforts for a caller that knows the
+// configured row: its own levels win over the catalog's and over a same-pair
+// sibling's.
+func ReasoningEffortsRow(rowID, provider, apiModel string) (levels []string, known bool) {
+	hit, ok := LookupRow(rowID, provider, apiModel)
 	if !ok {
 		return nil, false
 	}

@@ -96,7 +96,7 @@ type SubagentInput struct {
 	// one pair are two models. The description is fixed text on purpose — it
 	// must not enumerate the models, or adding one would change the tool
 	// definition and every cached prompt prefix with it.
-	Model string `json:"model,omitempty" jsonschema:"description=Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
+	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
 
 type SubagentSendInput struct {
@@ -105,7 +105,7 @@ type SubagentSendInput struct {
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype. Omit for fork-style run; set for fresh typed subagent."`
 	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id; see SubagentInput.Model.
-	Model string `json:"model,omitempty" jsonschema:"description=Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
+	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
 
 type SubagentContinueInput struct {
@@ -136,7 +136,7 @@ type SubagentTask struct {
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype for this task."`
 	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id; see SubagentInput.Model.
-	Model string `json:"model,omitempty" jsonschema:"description=Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
+	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
 
 func subagentTypeEnumValues(cat SubagentCatalog) []any {

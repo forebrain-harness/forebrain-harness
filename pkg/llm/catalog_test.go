@@ -400,8 +400,8 @@ func installCatalogForOverrideTest(t *testing.T, raw string) {
 	}
 	restoreGlobalCatalog(t)
 	SetGlobalCatalogForTest(cat)
-	SetModelOverrides(nil)
-	t.Cleanup(func() { SetModelOverrides(nil) })
+	SetModelOverrides(nil, nil)
+	t.Cleanup(func() { SetModelOverrides(nil, nil) })
 }
 
 const overrideTestCatalog = `{
@@ -433,12 +433,24 @@ func TestModelOverrideAbsentLeavesTheCatalog(t *testing.T) {
 
 // TestModelOverrideReplacesCapabilities pins the row-level override of the
 // fields the model dialog asks about (images, context window, output limit).
+// setOverridesByPair installs overrides the way a caller that knows only the
+// pair does: each key is a pair and names its only row, which is the shape a
+// one-row install has (two rows naming one pair need LookupRow, and the pair
+// alone gets the catalog's values — owner 2026-11-10).
+func setOverridesByPair(m map[string]ModelOverride) {
+	pairOf := make(map[string]string, len(m))
+	for key := range m {
+		pairOf[key] = key
+	}
+	SetModelOverrides(m, pairOf)
+}
+
 func TestModelOverrideReplacesCapabilities(t *testing.T) {
 	installCatalogForOverrideTest(t, overrideTestCatalog)
 	no := false
 	context := int64(64000)
 	output := int64(4096)
-	SetModelOverrides(map[string]ModelOverride{
+	setOverridesByPair(map[string]ModelOverride{
 		"openai/gpt-4o": {SupportsImages: &no, ContextWindow: &context, MaxOutput: &output},
 	})
 	hit, ok := Lookup("openai", "gpt-4o")
@@ -461,7 +473,7 @@ func TestModelOverrideReplacesCapabilities(t *testing.T) {
 func TestModelOverrideEffortsAndReasoningOff(t *testing.T) {
 	installCatalogForOverrideTest(t, overrideTestCatalog)
 	off := true
-	SetModelOverrides(map[string]ModelOverride{
+	setOverridesByPair(map[string]ModelOverride{
 		"anthropic/claude-sonnet-5": {Efforts: []string{"low", "high"}, ReasoningOff: &off},
 	})
 	if levels, known := ReasoningEfforts("anthropic", "claude-sonnet-5"); !known || !reflect.DeepEqual(levels, []string{"none", "low", "high"}) {
@@ -474,7 +486,7 @@ func TestModelOverrideEffortsAndReasoningOff(t *testing.T) {
 func TestModelOverrideCanReasonFalseDropsLevels(t *testing.T) {
 	installCatalogForOverrideTest(t, overrideTestCatalog)
 	no := false
-	SetModelOverrides(map[string]ModelOverride{"anthropic/claude-sonnet-5": {CanReason: &no, Efforts: []string{"low", "high"}}})
+	setOverridesByPair(map[string]ModelOverride{"anthropic/claude-sonnet-5": {CanReason: &no, Efforts: []string{"low", "high"}}})
 	hit, ok := Lookup("anthropic", "claude-sonnet-5")
 	if !ok {
 		t.Fatal("anthropic/claude-sonnet-5 did not resolve")
@@ -507,22 +519,22 @@ func TestModelOverrideCustomModelBorrowsCatalogEntry(t *testing.T) {
 	}
 	// An override makes a model the catalog cannot name resolve anyway.
 	context := int64(8000)
-	SetModelOverrides(map[string]ModelOverride{"custom/my-model": {ContextWindow: &context}})
+	setOverridesByPair(map[string]ModelOverride{"custom/my-model": {ContextWindow: &context}})
 	if hit, ok := Lookup("custom", "my-model"); !ok || hit.ContextWindow != 8000 {
 		t.Fatalf("a row-level override must resolve on its own: %+v ok=%v", hit, ok)
 	}
 }
 
-// TestModelOverrideClearRestoresTheCatalog pins SetModelOverrides(nil): the
+// TestModelOverrideClearRestoresTheCatalog pins SetModelOverrides(nil, nil): the
 // process clears the layer when a configuration carries no capabilities.
 func TestModelOverrideClearRestoresTheCatalog(t *testing.T) {
 	installCatalogForOverrideTest(t, overrideTestCatalog)
 	context := int64(1)
-	SetModelOverrides(map[string]ModelOverride{"openai/gpt-4o": {ContextWindow: &context}})
+	setOverridesByPair(map[string]ModelOverride{"openai/gpt-4o": {ContextWindow: &context}})
 	if hit, _ := Lookup("openai", "gpt-4o"); hit.ContextWindow != 1 {
 		t.Fatalf("override not applied: %+v", hit)
 	}
-	SetModelOverrides(nil)
+	SetModelOverrides(nil, nil)
 	if hit, ok := Lookup("openai", "gpt-4o"); !ok || hit.ContextWindow != 128000 {
 		t.Fatalf("cleared override left %+v ok=%v", hit, ok)
 	}
@@ -556,7 +568,7 @@ func TestBuiltinModelsFillProvidersTheCatalogMisses(t *testing.T) {
 		t.Fatalf("catalog lookup changed: %+v ok=%v", hit, ok)
 	}
 	output := int64(1024)
-	SetModelOverrides(map[string]ModelOverride{"volcengine/doubao-seed-evolving": {MaxOutput: &output}})
+	setOverridesByPair(map[string]ModelOverride{"volcengine/doubao-seed-evolving": {MaxOutput: &output}})
 	if hit, _ := Lookup("volcengine", "doubao-seed-evolving"); hit.DefaultMaxTokens != 1024 {
 		t.Fatalf("a row override must outrank the built-in table: %+v", hit)
 	}
@@ -598,5 +610,65 @@ func TestLookupCatalogSuffixPickIsDeterministic(t *testing.T) {
 		if hit.CatalogID != "alpha/dup" || hit.ContextWindow != 1 {
 			t.Fatalf("lookup %d = %+v; want the first id in sorted order (alpha/dup)", i, hit)
 		}
+	}
+}
+
+// Two configured rows may name one provider/model and carry different
+// capabilities: the row id is the identity, so each row's own settings answer
+// for it, and a caller that knows only the pair gets the catalog's values
+// instead of one row's (owner 2026-11-10, plan 283 Part E).
+func TestLookupRowKeepsSameNamedRowsApart(t *testing.T) {
+	installCatalogForOverrideTest(t, overrideTestCatalog)
+	t.Cleanup(func() { SetModelOverrides(nil, nil) })
+	wide, narrow := int64(64000), int64(32000)
+	SetModelOverrides(
+		map[string]ModelOverride{
+			"row-wide":   {ContextWindow: &wide},
+			"row-narrow": {ContextWindow: &narrow},
+		},
+		map[string]string{
+			"row-wide":   "openai/gpt-4o",
+			"row-narrow": "openai/gpt-4o",
+		},
+	)
+
+	hit, ok := LookupRow("row-wide", "openai", "gpt-4o")
+	if !ok || hit.ContextWindow != 64000 {
+		t.Fatalf("row-wide hit = %+v ok=%v, want its own window", hit, ok)
+	}
+	hit, ok = LookupRow("row-narrow", "openai", "gpt-4o")
+	if !ok || hit.ContextWindow != 32000 {
+		t.Fatalf("row-narrow hit = %+v ok=%v, want its own window", hit, ok)
+	}
+	// The pair alone has no single answer: the catalog's window stands.
+	if hit, ok := Lookup("openai", "gpt-4o"); !ok || hit.ContextWindow != 128000 {
+		t.Fatalf("pair hit = %+v ok=%v, want the catalog's window", hit, ok)
+	}
+	// A row the pair does not name has no overrides of its own to apply.
+	if _, ok := LookupRow("row-unknown", "openai", "gpt-4o"); ok {
+		hit, _ := LookupRow("row-unknown", "openai", "gpt-4o")
+		if hit.ContextWindow != 128000 {
+			t.Fatalf("unknown row = %+v, want the catalog's values", hit)
+		}
+	}
+}
+
+// One row naming the pair is still "the" row: a caller that knows only the pair
+// keeps the behaviour it has today.
+func TestLookupAppliesTheOnlyRowForItsPair(t *testing.T) {
+	installCatalogForOverrideTest(t, overrideTestCatalog)
+	t.Cleanup(func() { SetModelOverrides(nil, nil) })
+	window := int64(64000)
+	SetModelOverrides(
+		map[string]ModelOverride{"row-only": {ContextWindow: &window}},
+		map[string]string{"row-only": "openai/gpt-4o"},
+	)
+	if hit, ok := Lookup("openai", "gpt-4o"); !ok || hit.ContextWindow != 64000 {
+		t.Fatalf("pair hit = %+v ok=%v, want the only row's window", hit, ok)
+	}
+	// A row that names no levels leaves the catalog's: the override lays over
+	// the catalog, it does not replace it.
+	if levels, known := ReasoningEffortsRow("row-only", "openai", "gpt-4o"); !known || !reflect.DeepEqual(levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("levels = %v known=%v, want the catalog's", levels, known)
 	}
 }

@@ -53,7 +53,7 @@ func installShippedCatalog(t *testing.T) {
 	llm.SetGlobalCatalogForTest(cat)
 	t.Cleanup(func() {
 		llm.SetGlobalCatalogForTest(nil)
-		llm.SetModelOverrides(nil)
+		llm.SetModelOverrides(nil, nil)
 	})
 }
 
@@ -237,7 +237,7 @@ func TestModelsDevSourceIgnoresRowOverrides(t *testing.T) {
 	window := int64(64000)
 	llm.SetModelOverrides(map[string]llm.ModelOverride{
 		"openai/gpt-4o": {SupportsImages: &no, ContextWindow: &window, Efforts: []string{"high"}},
-	})
+	}, map[string]string{"openai/gpt-4o": "openai/gpt-4o"})
 	source := ModelsDevSource{}
 	info, err := source.Fetch(context.Background(), Row{Provider: "openai", Model: "gpt-4o"}, "")
 	if err != nil {

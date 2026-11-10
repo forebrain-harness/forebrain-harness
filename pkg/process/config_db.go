@@ -220,7 +220,8 @@ func llmModelsFromRows(rows []state.LLMModel) ([]appcfg.LLMModelConfig, error) {
 // unreachable provider.
 func installModelOverrides(root appcfg.Root) {
 	installBuiltinModelTables()
-	llm.SetModelOverrides(modelOverridesFor(root.LLMModels))
+	byRow, pairOf := modelOverridesFor(root.LLMModels)
+	llm.SetModelOverrides(byRow, pairOf)
 	if testing.Testing() {
 		// A test binary reaches no provider: the live refresh is exercised
 		// directly by the tests that install their own sources
@@ -275,23 +276,29 @@ func installBuiltinModelTables() {
 // model collapse to the first — the one the table lists first, which is the
 // oldest — because the global lookup has one answer per model; the client's
 // own output limit still applies per row (AgentLLMProviderConfig.MaxOutputTokens).
-func modelOverridesFor(rows []appcfg.LLMModelConfig) map[string]llm.ModelOverride {
+// modelOverridesFor projects every configured row's capabilities, keyed by its
+// row id, and names each row's provider/model so a caller that knows only the
+// pair can still find its row when the pair names exactly one (owner
+// 2026-11-10: same-named rows keep their own settings instead of the first
+// row's winning).
+func modelOverridesFor(rows []appcfg.LLMModelConfig) (map[string]llm.ModelOverride, map[string]string) {
 	out := make(map[string]llm.ModelOverride, len(rows))
+	pairOf := make(map[string]string, len(rows))
 	for _, row := range rows {
+		id := strings.TrimSpace(row.ID)
+		if id == "" {
+			continue
+		}
 		override, ok := modelOverrideForRow(row)
 		if !ok {
 			continue
 		}
-		key := strings.ToLower(llm.JoinProviderModel(row.Provider, row.Model))
-		if key == "" {
-			continue
+		out[id] = override
+		if pair := llm.JoinProviderModel(row.Provider, row.Model); strings.TrimSpace(pair) != "" {
+			pairOf[id] = pair
 		}
-		if _, exists := out[key]; exists {
-			continue
-		}
-		out[key] = override
 	}
-	return out
+	return out, pairOf
 }
 
 // modelOverrideForRow projects one row's capability columns into the lookup's
