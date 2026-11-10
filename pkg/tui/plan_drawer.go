@@ -109,8 +109,9 @@ type planDrawerLayout struct {
 	// display-row offset rows starts at.
 	rowsTotal int
 	scroll    int
-	// above and below count the display rows still off screen in each
-	// direction; they are what the muted overflow hint reports.
+	// above and below count the entries still wholly off screen in each
+	// direction — a plan item counts once however many rows it wraps onto —
+	// and they are what the muted overflow hint reports.
 	above int
 	below int
 	// activeRow is the full-list index of the ▣ item's first row, or -1.
@@ -168,7 +169,7 @@ func buildPlanDrawerLayout(frame Frame, drawerWidth, height, scroll int, followA
 		width = 1
 	}
 	bodyWidth := planDrawerBodyWidth(width)
-	rows, activeRow := planDrawerContentRows(frame.Content, bodyWidth)
+	rows, entries, activeRow := planDrawerContentRows(frame.Content, bodyWidth)
 
 	layout := planDrawerLayout{
 		width:     width,
@@ -218,17 +219,60 @@ func buildPlanDrawerLayout(frame Frame, drawerWidth, height, scroll int, followA
 	if end > len(rows) {
 		end = len(rows)
 	}
+	// The hint counts plan items, not the display rows a soft-wrapped item
+	// takes: the list is what the reader is looking at, so "10 below" means
+	// ten more todos even when those todos wrap onto 16 rows.
+	layout.above, layout.below = countPlanDrawerOffScreen(entries, layout.scroll, end)
+	if layout.hintRow && layout.above == 0 && layout.below == 0 {
+		// Nothing is wholly off screen: the only content past an edge is an
+		// entry that edge cuts, which the reader counts as seen. There is no
+		// number to report, and a blank hint row is worse than one more line
+		// of the list, so the list keeps the row the hint was holding.
+		layout.hintRow = false
+		contentRows++
+		if max := len(rows) - contentRows; layout.scroll > max {
+			layout.scroll = max
+		}
+		end = layout.scroll + contentRows
+		if end > len(rows) {
+			end = len(rows)
+		}
+		layout.above, layout.below = countPlanDrawerOffScreen(entries, layout.scroll, end)
+	}
 	if layout.scroll < len(rows) {
 		layout.rows = rows[layout.scroll:end]
 	}
-	layout.above = layout.scroll
-	layout.below = len(rows) - end
 	layout.closeSpan = planDrawerSpanFor(0, width)
 	return layout
 }
 
+// planDrawerEntry is one thing the overflow hint counts: the display rows one
+// piece of the plan occupies. A todo item is one entry however many rows it
+// soft-wraps onto; a plain content row (a plan frame with no items, such as the
+// text a written plan puts in the frame) is one entry per display row.
+type planDrawerEntry struct {
+	first int
+	last  int
+}
+
+// countPlanDrawerOffScreen counts the entries wholly above the window starting
+// at scroll and the entries wholly below the one ending at end. An entry the
+// window cuts is partly on screen and counts in neither direction.
+func countPlanDrawerOffScreen(entries []planDrawerEntry, scroll, end int) (above, below int) {
+	for _, entry := range entries {
+		switch {
+		case entry.last < scroll:
+			above++
+		case entry.first >= end:
+			below++
+		}
+	}
+	return above, below
+}
+
 // planDrawerContentRows turns the plan frame's Content into display rows for a
-// body of bodyWidth cells.
+// body of bodyWidth cells, together with the entries the overflow hint counts
+// and the first row of the ▣ item.
 //
 // planText writes the plan's Explanation first and the items after it, and
 // emitPlanUpdateStep sets the Explanation to the active item's own label when
@@ -238,7 +282,7 @@ func buildPlanDrawerLayout(frame Frame, drawerWidth, height, scroll int, followA
 // list, which is shown as it stands). Items are soft-wrapped by display width
 // with their continuation rows hanging under the item's text: an item's text is
 // never ellipsized.
-func planDrawerContentRows(content string, bodyWidth int) (rows []string, activeRow int) {
+func planDrawerContentRows(content string, bodyWidth int) (rows []string, entries []planDrawerEntry, activeRow int) {
 	activeRow = -1
 	if bodyWidth < 1 {
 		bodyWidth = 1
@@ -256,6 +300,7 @@ func planDrawerContentRows(content string, bodyWidth int) (rows []string, active
 		if !ok {
 			for _, part := range wrapCardLine(line, bodyWidth) {
 				rows = append(rows, "\x1b[2m"+part+"\x1b[0m")
+				entries = append(entries, planDrawerEntry{first: len(rows) - 1, last: len(rows) - 1})
 			}
 			continue
 		}
@@ -273,11 +318,12 @@ func planDrawerContentRows(content string, bodyWidth int) (rows []string, active
 			}
 			rows = append(rows, strings.Repeat(" ", indent)+part)
 		}
+		entries = append(entries, planDrawerEntry{first: first, last: len(rows) - 1})
 		if glyph == "▣" && activeRow < 0 {
 			activeRow = first
 		}
 	}
-	return rows, activeRow
+	return rows, entries, activeRow
 }
 
 // planDrawerIsItemLine reports whether a Content line is a plan item: planText

@@ -51,6 +51,47 @@ func planDrawerTestFrame() Frame {
 	})
 }
 
+// planDrawer283Frame is the 27-item plan-283 list, verbatim from the owner's
+// screenshots of the drawer that reported the unit bug: at drawer width 48 its
+// items soft-wrap onto 43 display rows, so a row-based hint and an item-based
+// one disagree.
+func planDrawer283Frame() Frame {
+	items := []struct{ text, status string }{
+		{"环境准备：worktree 状态确认 + pnpm install + /tmp/283-artifacts", "completed"},
+		{"Part A: 原型验证 grep（三条确认痕迹）", "completed"},
+		{"B0: 模型授权开关数据面（schema×3 + 迁移 v34 + config_store + 投影 + 快照再生）", "completed"},
+		{"B1: 引擎数据面 pkg/turn（类型 + Decide + LastPlanReview + gate）", "pending"},
+		{"B1b: 再评审续聊（event 字段 + BuildReReviewPrompt + ContinuePlanReviewSubagent + Reviewer 分支）", "pending"},
+		{"B2: 模式状态 PlanHandOff（pkg/state/mode.go）", "in_progress"},
+		{"B3: 子代理 model 参数与实时查库", "pending"},
+		{"B3b: 内置工具 list_usable_models（注册+卡片+金样）", "pending"},
+		{"B4: exit_plan_mode 工具与卡片（交接合同）", "pending"},
+		{"B5: 实施提醒与计划模式提示", "pending"},
+		{"B6: TUI 接线（chat_surface/channels）", "pending"},
+		{"B7: TUI 面板 overlays.go（六行顺序 + 选择器复用 + 数字键1..9）", "pending"},
+		{"B8: 网关（approval.go + api_extra.go）", "pending"},
+		{"B9: TUI 原型文档同步 tui-prototype.html", "pending"},
+		{"B10: fake 真机驱动（TUI 交接+再评审五项证据）", "pending"},
+		{"B11: TUI onboard/connect 授权页", "pending"},
+		{"B12: 网关模型接口与订阅写入", "pending"},
+		{"E1: 能力表按行建键（llm catalog + process config_db）", "pending"},
+		{"E2: 所有调用点带行 id（LookupRow/modelHitFor/ContextGaugeOf）", "pending"},
+		{"E3+F3: fake driver 真机核对（同名两行能力 + 实测窗口）合并一次会话", "pending"},
+		{"F1: 观测键按行（observed.go + tokenizers.go）", "pending"},
+		{"F2: 生产调用点带行 id（run/assembly） + 全仓核对", "pending"},
+		{"C1: 前端数据层（api.ts + usePendingActions.ts）", "pending"},
+		{"C2: PlanApprovalDock.vue 与文案", "pending"},
+		{"C3: 测试与 e2e", "pending"},
+		{"C4: 网页模型页授权开关", "pending"},
+		{"收尾：回归面 + 最终证据 + diff stat + 报告", "pending"},
+	}
+	var payload event.PlanUpdatedPayload
+	for _, it := range items {
+		payload.Items = append(payload.Items, planTodoItem(it.text, it.status))
+	}
+	return planFrameFor(payload)
+}
+
 // plainPlanDrawerRows strips the styling so a test can read what the user sees.
 func plainPlanDrawerRows(rows []string) []string {
 	out := make([]string, len(rows))
@@ -303,6 +344,65 @@ func TestPlanDrawerContentWrapsCJKLines(t *testing.T) {
 	}
 }
 
+// The overflow hint speaks the list's own unit: a todo item counts once however
+// many rows it wraps onto. The owner read "16 below" beside a list that had 10
+// todos left, because the hint summed the display rows those todos occupy.
+func TestPlanDrawerOverflowHintCountsItems(t *testing.T) {
+	layout := buildPlanDrawerLayout(planDrawer283Frame(), 48, 29, 0, true)
+	if got := layout.planDrawerHint(); got != "10 below" {
+		t.Fatalf("hint = %q, want %q: 27 items wrap onto 43 rows and items 1..17 are on screen", got, "10 below")
+	}
+	atEnd := buildPlanDrawerLayout(planDrawer283Frame(), 48, 29, 1<<20, false)
+	if got := atEnd.planDrawerHint(); got != "8 above" {
+		t.Fatalf("hint = %q, want %q: items 1..8 are wholly above the window", got, "8 above")
+	}
+	// The same frame one row taller also shows item 18's first row, and an
+	// item the window cuts counts as seen.
+	taller := buildPlanDrawerLayout(planDrawer283Frame(), 48, 30, 0, true)
+	if got := taller.planDrawerHint(); got != "9 below" {
+		t.Fatalf("hint = %q, want %q: item 18's first row is on screen", got, "9 below")
+	}
+}
+
+// An entry the window cuts is partly on screen, so it is not something the
+// reader has yet to reach: when such an entry is the only content past an edge
+// there is no number to report, and the list keeps the row the hint held.
+func TestPlanDrawerOverflowHintSkipsACutItem(t *testing.T) {
+	two := planFrameFor(event.PlanUpdatedPayload{Items: []event.PlanUpdateItem{
+		planTodoItem("短", "completed"),
+		planTodoItem("验证中文、路径和很长的事项正文在右侧抽屉中完整换行显示，不出现省略号，并且每一行都不超过抽屉正文的显示宽度", "pending"),
+	}})
+	cut := buildPlanDrawerLayout(two, 40, 4, 0, true)
+	if cut.hintRow || cut.planDrawerHint() != "" {
+		t.Fatalf("hintRow=%v hint=%q, want no hint: the only content past the edge is one cut item", cut.hintRow, cut.planDrawerHint())
+	}
+	if cut.rowsTotal <= 3 || len(cut.rows) != 3 {
+		t.Fatalf("rowsTotal=%d visible=%d, want the long item taller than the 3-row body with every row kept", cut.rowsTotal, len(cut.rows))
+	}
+}
+
+// A plan frame with no items — the markdown text a written plan puts in the
+// frame — has no list for the reader to count, so the hint keeps counting
+// display rows there.
+func TestPlanDrawerOverflowHintCountsRowsWithoutItems(t *testing.T) {
+	plain := Frame{Kind: FramePlan, Title: "Plan", Content: strings.Join([]string{
+		"第一行很长的中文计划正文用于验证换行以后逐行计入溢出提示",
+		"第二行很长的中文计划正文用于验证换行以后逐行计入溢出提示",
+		"第三行很长的中文计划正文用于验证换行以后逐行计入溢出提示",
+		"第四行很长的中文计划正文用于验证换行以后逐行计入溢出提示",
+	}, "\n")}
+	layout := buildPlanDrawerLayout(plain, 40, 5, 0, true)
+	if layout.rowsTotal != 6 || len(layout.rows) != 3 {
+		t.Fatalf("plain frame laid out rowsTotal=%d visible=%d, want 6 / 3 (leading line dropped, 2 rows per line)", layout.rowsTotal, len(layout.rows))
+	}
+	if layout.above != 0 || layout.below != layout.rowsTotal-len(layout.rows) {
+		t.Fatalf("plain frame reports above %d / below %d, want row counts 0 / %d: %+v", layout.above, layout.below, layout.rowsTotal-len(layout.rows), layout)
+	}
+	if hint := layout.planDrawerHint(); hint != "3 below" {
+		t.Fatalf("hint = %q, want %q (display rows, because a plain frame has no items)", hint, "3 below")
+	}
+}
+
 func TestPlanDrawerScroll(t *testing.T) {
 	frame := planDrawerTestFrame()
 	const height = 8
@@ -317,8 +417,9 @@ func TestPlanDrawerScroll(t *testing.T) {
 	if focused.activeRow < focused.scroll || focused.activeRow >= focused.scroll+len(focused.rows) {
 		t.Fatalf("opening left the active row %d outside the visible rows [%d,%d)", focused.activeRow, focused.scroll, focused.scroll+len(focused.rows))
 	}
-	if focused.above != focused.scroll {
-		t.Fatalf("above = %d, want the scroll offset %d", focused.above, focused.scroll)
+	// above counts items: a list at its top reports none.
+	if focused.above != 0 {
+		t.Fatalf("above = %d at the top of the list, want 0", focused.above)
 	}
 
 	// Once the user has scrolled the list themselves, a plan update only
@@ -327,8 +428,13 @@ func TestPlanDrawerScroll(t *testing.T) {
 	if manual.scroll != 2 {
 		t.Fatalf("manual scroll moved to %d, want to stay at 2", manual.scroll)
 	}
-	// An offset past the end is clamped, and the leftover is what the overflow
-	// hint counts in display rows.
+	// Scrolling two display rows past the first item leaves exactly that one
+	// item wholly above the window.
+	if manual.above != 1 {
+		t.Fatalf("above = %d after scrolling past the first (two-row) item, want 1", manual.above)
+	}
+	// An offset past the end is clamped, and a list at its end reports no
+	// items below.
 	clamped := buildPlanDrawerLayout(frame, 40, height, 1<<20, false)
 	if clamped.below != 0 {
 		t.Fatalf("below = %d at the end of the list, want 0", clamped.below)
@@ -337,7 +443,7 @@ func TestPlanDrawerScroll(t *testing.T) {
 		t.Fatalf("clamped scroll = %d, want %d (rows %d, visible %d)", clamped.scroll, clamped.rowsTotal-len(clamped.rows), clamped.rowsTotal, len(clamped.rows))
 	}
 	if clamped.above == 0 {
-		t.Fatalf("a list scrolled to its end reports no rows above: %+v", clamped)
+		t.Fatalf("a list scrolled to its end reports no items above: %+v", clamped)
 	}
 
 	// A list that fits does not pretend to scroll.
@@ -349,12 +455,19 @@ func TestPlanDrawerScroll(t *testing.T) {
 		t.Fatalf("a list that fits shows the overflow hint %q", hint)
 	}
 
-	// The overflow hint counts display rows, in both directions at once.
-	overflowing := buildPlanDrawerLayout(frame, 40, 6, 1, false)
-	hint := overflowing.planDrawerHint()
-	if overflowing.above > 0 && overflowing.below > 0 && !strings.Contains(hint, " above · ") {
-		t.Fatalf("hint = %q, want it to report both directions", hint)
+	// The overflow hint reports both directions in items; one-row items keep
+	// that number unambiguous.
+	seven := planFrameFor(event.PlanUpdatedPayload{Items: []event.PlanUpdateItem{
+		planTodoItem("一", "pending"), planTodoItem("二", "pending"),
+		planTodoItem("三", "pending"), planTodoItem("四", "pending"),
+		planTodoItem("五", "pending"), planTodoItem("六", "pending"),
+		planTodoItem("七", "pending"),
+	}})
+	both := buildPlanDrawerLayout(seven, 40, 5, 1, false)
+	if hint := both.planDrawerHint(); hint != "1 above · 3 below" {
+		t.Fatalf("hint = %q, want %q", hint, "1 above · 3 below")
 	}
+	overflowing := buildPlanDrawerLayout(frame, 40, 6, 1, false)
 	if overflowing.planDrawerMaxScroll() != overflowing.rowsTotal-len(overflowing.rows) {
 		t.Fatalf("max scroll = %d, want %d", overflowing.planDrawerMaxScroll(), overflowing.rowsTotal-len(overflowing.rows))
 	}
