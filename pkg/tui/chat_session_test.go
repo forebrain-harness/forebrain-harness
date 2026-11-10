@@ -5177,8 +5177,11 @@ func TestApprovalOverlay_QuestionMarkTogglesKeymap(t *testing.T) {
 	if !strings.Contains(rendered, "Keymap") {
 		t.Fatalf("keymap pane not rendered after '?'; output:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "1..5") {
-		t.Fatalf("keymap missing 1..5 jump-key hint; output:\n%s", rendered)
+	// The jump-key hint counts the visible rows (283: the exit-plan panel can
+	// offer up to six), so it is asserted against this request's option count
+	// rather than a fixed range.
+	if !strings.Contains(rendered, fmt.Sprintf("1..%d", len(overlay.options))) {
+		t.Fatalf("keymap missing 1..%d jump-key hint; output:\n%s", len(overlay.options), rendered)
 	}
 }
 

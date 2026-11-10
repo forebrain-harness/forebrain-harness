@@ -3447,3 +3447,161 @@ func (s *heldPeerTestSession) DenyPeerMessage(msgID string) error {
 	s.denied = append(s.denied, msgID)
 	return nil
 }
+
+// handOffReviewRequest is an exit-plan request with everything the two new
+// rows need: a git-backed project with another model to hand to, and a
+// previous review that can be continued.
+func handOffReviewRequest(projectType string) turn.ToolApprovalRequest {
+	return turn.ToolApprovalRequest{
+		ToolName:           "exit_plan_mode",
+		PermissionToolName: "exit_plan_mode",
+		ProjectType:        projectType,
+		HandOffAvailable:   true,
+		PlanReviewModels: []turn.PlanReviewModelOption{
+			{ID: "llm_row1", Provider: "zhipuai", Model: "glm-5.3", Current: true},
+			{ID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash"},
+		},
+		PreviousPlanReview: &turn.PreviousPlanReview{
+			PlanReviewAgain: turn.PlanReviewAgain{ReviewID: "plan-review:r1", AgentID: "task-r1", TaskID: "task-r1"},
+			Model:           turn.PlanReviewModelOption{ID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash"},
+		},
+	}
+}
+
+// The exit-plan rows follow one order (owner 2026-11-10): agree-class → No →
+// review-class. Coding and office differ only in their agree-class rows; the
+// hand-off row sits with them, the again row with the reviews.
+func TestExitPlanChoicesOrderHandOffAndAgain(t *testing.T) {
+	coding := buildExitPlanChoices(handOffReviewRequest(""), 37)
+	wantCoding := []string{
+		"Yes, clear context (37% used) and proceed",
+		"Yes, proceed",
+		"Yes, hand off to another model",
+		"No, keep planning",
+		"Ask another model to review this plan",
+		"Ask deepseek/deepseek-v4-flash to review it again",
+	}
+	if len(coding) != len(wantCoding) {
+		t.Fatalf("coding choices=%d want %d: %+v", len(coding), len(wantCoding), coding)
+	}
+	for i, want := range wantCoding {
+		if coding[i].label != want {
+			t.Fatalf("coding choice %d label=%q want %q", i+1, coding[i].label, want)
+		}
+	}
+	if !coding[2].isHandOff || coding[2].allowOnce {
+		t.Fatalf("the hand-off row must open the picker, not commit: %+v", coding[2])
+	}
+	if !coding[5].isReviewAgain || coding[5].isPlanReview {
+		t.Fatalf("the again row must not open the picker: %+v", coding[5])
+	}
+
+	office := buildExitPlanChoices(handOffReviewRequest("office"), 0)
+	wantOffice := []string{
+		"Yes, carry out the plan",
+		"Yes, hand off to another model",
+		"No, revise the plan",
+		"Keep the plan only, don't carry it out",
+		"Ask another model to review this plan",
+		"Ask deepseek/deepseek-v4-flash to review it again",
+	}
+	if len(office) != len(wantOffice) {
+		t.Fatalf("office choices=%d want %d: %+v", len(office), len(wantOffice), office)
+	}
+	for i, want := range wantOffice {
+		if office[i].label != want {
+			t.Fatalf("office choice %d label=%q want %q", i+1, office[i].label, want)
+		}
+	}
+
+	// Only one of the two conditions: five rows, the absent one gone and No
+	// staying after the agree-class rows that remain.
+	noHandOff := handOffReviewRequest("")
+	noHandOff.HandOffAvailable = false
+	five := buildExitPlanChoices(noHandOff, 0)
+	if len(five) != 5 || five[2].label != "No, keep planning" {
+		t.Fatalf("no hand-off coding choices=%+v", five)
+	}
+	noAgain := handOffReviewRequest("")
+	noAgain.PreviousPlanReview = nil
+	five = buildExitPlanChoices(noAgain, 0)
+	if len(five) != 5 || five[4].label != "Ask another model to review this plan" {
+		t.Fatalf("no again coding choices=%+v", five)
+	}
+}
+
+// Pressing 3 opens the hand-off picker: the question takes the verdict line,
+// the same list the reviewer picker draws, and Enter approves the exit with
+// the selected row — the current model included, though the cursor starts
+// elsewhere. Esc goes back to the options on the same row.
+func TestExitPlanOverlayPicksHandOffModel(t *testing.T) {
+	req := handOffReviewRequest("")
+	var out strings.Builder
+	f := newFakeRawSelector(t)
+	f.write([]byte{'3'})
+	f.write([]byte{'\r'})
+	f.write([]byte("j")) // deepseek/deepseek-v4-flash, already the first non-current
+	f.write([]byte{'\r'})
+	f.close()
+	overlay := newApprovalOverlay(context.Background(), &out, f.rs, withServiceDecisions(req), nil)
+	decision, err := overlay.Run()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !decision.Approved || decision.HandOffModel == nil || decision.HandOffModel.ID != "llm_row2" {
+		t.Fatalf("hand-off decision=%#v", decision)
+	}
+	rendered := out.String()
+	for _, want := range []string{
+		"Which model should carry out this plan? (Esc to go back)",
+		"Enter to hand off",
+		"deepseek/deepseek-v4-flash",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("picker render missing %q:\n%s", want, rendered)
+		}
+	}
+
+	// Esc from the picker returns to the options without deciding anything.
+	var back strings.Builder
+	f2 := newFakeRawSelector(t)
+	f2.write([]byte{'3'})
+	f2.write([]byte{'\r'})
+	f2.write([]byte{0x1b}) // Esc
+	f2.write([]byte{'\r'}) // still on the hand-off row: reopens the picker
+	f2.write([]byte{0x1b}) // Esc again
+	f2.write([]byte{'y'})  // the ordinary approve shortcut still works
+	f2.close()
+	overlay2 := newApprovalOverlay(context.Background(), &back, f2.rs, withServiceDecisions(req), nil)
+	decision2, err := overlay2.Run()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !decision2.Approved || decision2.ClearContext != true || decision2.HandOffModel != nil {
+		t.Fatalf("after Esc the first row approves with clear-context and no hand-off: %#v", decision2)
+	}
+}
+
+// The again row (6 with everything offered) decides nothing and opens no
+// picker: it asks the engine to continue the previous review, which re-reads
+// which review that is.
+func TestExitPlanOverlayReviewAgainRow(t *testing.T) {
+	req := handOffReviewRequest("")
+	var out strings.Builder
+	f := newFakeRawSelector(t)
+	f.write([]byte{'6'})
+	f.write([]byte{'\r'})
+	f.close()
+	overlay := newApprovalOverlay(context.Background(), &out, f.rs, withServiceDecisions(req), nil)
+	decision, err := overlay.Run()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !decision.RequestPlanReviewAgain || decision.Approved || decision.RequestPlanReview != nil {
+		t.Fatalf("again decision=%#v", decision)
+	}
+	rendered := out.String()
+	if strings.Contains(rendered, "Which model should") {
+		t.Fatalf("the again row must not open a picker:\n%s", rendered)
+	}
+}

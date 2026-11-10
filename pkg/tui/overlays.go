@@ -58,9 +58,11 @@ type approvalOverlay struct {
 	// mouse hit-testing.
 	feedbackFirstRow int
 	feedbackLayout   approvalFeedbackLayout
-	// planReviewPicking is true while the user is choosing which model should
-	// review the plan. planReviewCursor indexes req.PlanReviewModels.
+	// planReviewPicking is true while the user is choosing a model in the
+	// picker (which purpose it serves is planPickerPurpose). planReviewCursor
+	// indexes req.PlanReviewModels.
 	planReviewPicking bool
+	planPickerPurpose planPickerPurpose
 	planReviewCursor  int
 	// planReviewShown is set once the picker has been painted since it opened:
 	// its first paint starts the overlay at the picker's question, at row
@@ -113,6 +115,17 @@ type approvalFeedbackLayout struct {
 	cursorCol int
 }
 
+// planPickerPurpose is what the shared model picker is open for: a reviewer
+// (the request the row always meant) or the executor of a hand-off (283). The
+// list, cursor and scrolling are one implementation; the question line, the
+// footer and what Enter returns are the purpose's.
+type planPickerPurpose int
+
+const (
+	pickReview planPickerPurpose = iota
+	pickHandOff
+)
+
 // overlayChoice holds the server-derived decision represented by one row.
 type overlayChoice struct {
 	label       string
@@ -128,6 +141,8 @@ type overlayChoice struct {
 	// with them (plan 129).
 	feedbackInput bool
 	isPlanReview  bool
+	isHandOff     bool
+	isReviewAgain bool
 	clearContext  bool
 	planOnly      bool
 	strictReview  bool
@@ -288,22 +303,50 @@ func buildProposedOverlayChoices(req turn.ToolApprovalRequest) []overlayChoice {
 	return choices
 }
 
+// buildExitPlanChoices lays the exit-plan rows out in one order for both
+// project types: agree-class first, then No, then the review rows (owner
+// 2026-11-10). The number keys follow the visible rows, so they move with
+// what the request offers — the hand-off row only when a git repository and
+// another model make it real, the again row only when a continuable previous
+// review exists — while y, n and m keep their semantic jumps wherever the
+// rows land.
 func buildExitPlanChoices(req turn.ToolApprovalRequest, percentUsed int) []overlayChoice {
-	// Office conversations get their own verdicts (plan 148): no
+	handOff := overlayChoice{label: "Yes, hand off to another model", isHandOff: true}
+	review := overlayChoice{label: "Ask another model to review this plan", isPlanReview: true}
+	again := overlayChoice{}
+	if req.PreviousPlanReview != nil {
+		again = overlayChoice{
+			label: "Ask " + planReviewModelDisplay(
+				req.PreviousPlanReview.Model.Provider, req.PreviousPlanReview.Model.Model,
+			) + " to review it again",
+			isReviewAgain: true,
+		}
+	}
+	reviewRows := func() []overlayChoice {
+		if len(req.PlanReviewModels) == 0 {
+			return nil
+		}
+		rows := []overlayChoice{review}
+		if req.PreviousPlanReview != nil {
+			rows = append(rows, again)
+		}
+		return rows
+	}
+	// Office conversations keep their own verdicts (plan 148): no
 	// clear-context exit, plus "keep the plan only" as a first-class answer.
 	// The deny row keeps the same input field the coding one has.
 	if req.ProjectType == state.ProjectTypeOffice {
 		choices := []overlayChoice{
 			{label: "Yes, carry out the plan", allowOnce: true},
-			{label: "No, revise the plan", denyOnce: true, isPlanDeny: true},
-			{label: "Keep the plan only, don't carry it out", allowOnce: true, planOnly: true},
 		}
-		if len(req.PlanReviewModels) > 0 {
-			choices = append(choices, overlayChoice{
-				label: "Ask another model to review this plan", isPlanReview: true,
-			})
+		if req.HandOffAvailable {
+			choices = append(choices, handOff)
 		}
-		return choices
+		choices = append(choices,
+			overlayChoice{label: "No, revise the plan", denyOnce: true, isPlanDeny: true},
+			overlayChoice{label: "Keep the plan only, don't carry it out", allowOnce: true, planOnly: true},
+		)
+		return append(choices, reviewRows()...)
 	}
 	clearLabel := "Yes, clear context and proceed"
 	if percentUsed > 0 {
@@ -312,18 +355,12 @@ func buildExitPlanChoices(req turn.ToolApprovalRequest, percentUsed int) []overl
 	choices := []overlayChoice{
 		{label: clearLabel, allowOnce: true, clearContext: true},
 		{label: "Yes, proceed", allowOnce: true},
-		{label: "No, keep planning", denyOnce: true, isPlanDeny: true},
 	}
-	// The review row is appended rather than inserted so the three verdicts keep
-	// the positions their number keys already had. It only appears when the
-	// session offered reviewers, which is what keeps a surface without
-	// configured models from showing a choice that cannot be taken.
-	if len(req.PlanReviewModels) > 0 {
-		choices = append(choices, overlayChoice{
-			label: "Ask another model to review this plan", isPlanReview: true,
-		})
+	if req.HandOffAvailable {
+		choices = append(choices, handOff)
 	}
-	return choices
+	choices = append(choices, overlayChoice{label: "No, keep planning", denyOnce: true, isPlanDeny: true})
+	return append(choices, reviewRows()...)
 }
 
 func overlayRuleContent(req turn.ToolApprovalRequest) (ruleContent string, labelContent string, prefixMode bool) {
@@ -564,6 +601,9 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		// the keys. The row is recorded here because the first paint
 		// anchors the picker on its question.
 		switch {
+		case o.planReviewPicking && o.planPickerPurpose == pickHandOff:
+			o.planReviewTopRow = lineCount
+			writeLine("Which model should carry out this plan? (Esc to go back)")
 		case o.planReviewPicking:
 			o.planReviewTopRow = lineCount
 			writeLine("Which model should review this plan? (Esc to go back)")
@@ -812,7 +852,7 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		writeLine("")
 		writeLine("\x1b[2m--- Keymap ---\x1b[0m")
 		writeLine("  ↑/↓ / j/k  move selection")
-		writeLine("  1..5       jump to option")
+		writeLine("  1..%d       jump to option", len(o.options))
 		yesLabel := "Yes, proceed"
 		if len(o.options) > 0 {
 			yesLabel = o.options[0].label
@@ -843,6 +883,8 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 	switch {
 	case o.feedback != feedbackClosed:
 		writeLine("\x1b[2mEsc to refuse without words · Ctrl+J/Alt+Enter for newline · Enter to submit\x1b[0m")
+	case o.planReviewPicking && o.planPickerPurpose == pickHandOff:
+		writeLine("\x1b[2mEsc to go back · Enter to hand off\x1b[0m")
 	case o.planReviewPicking:
 		writeLine("\x1b[2mEsc to go back · Enter to request the review\x1b[0m")
 	default:
@@ -947,6 +989,17 @@ func (o *approvalOverlay) handleKey(key parsedKey) (turn.ToolApprovalDecision, b
 			o.enterPlanReviewMode()
 			return turn.ToolApprovalDecision{}, false
 		}
+		// The hand-off row opens the same picker for the executor: the model
+		// it returns is the approval's answer, so nothing is decided here.
+		if o.cursor < len(o.options) && o.options[o.cursor].isHandOff {
+			o.enterHandOffMode()
+			return turn.ToolApprovalDecision{}, false
+		}
+		// The again row continues the previous reviewer's conversation: the
+		// engine re-reads which review that is, so no picker opens here.
+		if o.cursor < len(o.options) && o.options[o.cursor].isReviewAgain {
+			return turn.ToolApprovalDecision{RequestPlanReviewAgain: true}, true
+		}
 		return o.commit(), true
 	case rawKeyCtrlE:
 		o.showExplain = !o.showExplain
@@ -991,7 +1044,7 @@ func (o *approvalOverlay) handleKey(key parsedKey) (turn.ToolApprovalDecision, b
 			if o.cursor > 0 {
 				o.cursor--
 			}
-		case '1', '2', '3', '4', '5':
+		case '1', '2', '3', '4', '5', '6', '7', '8', '9':
 			idx := int(key.r - '1')
 			if idx < len(o.options) {
 				o.cursor = idx
@@ -1292,12 +1345,16 @@ func (o *approvalOverlay) handleFeedbackKey(key parsedKey) (turn.ToolApprovalDec
 	return turn.ToolApprovalDecision{}, false
 }
 
-func (o *approvalOverlay) enterPlanReviewMode() {
+// enterPlanPickerMode opens the shared model picker for one purpose. The
+// cursor starts on a model other than the conversation's own: a second
+// opinion is the point of the review row, a cheaper or stronger executor of
+// the hand-off row — and the current model is still one keypress away for
+// both, which is a legitimate choice.
+func (o *approvalOverlay) enterPlanPickerMode(purpose planPickerPurpose) {
 	o.planReviewPicking = true
+	o.planPickerPurpose = purpose
 	o.planReviewShown = false
 	o.planReviewCursor = 0
-	// Start on a model other than the one that wrote the plan: a second opinion
-	// is the point of the row, and the current model is still one keypress away.
 	for i, model := range o.req.PlanReviewModels {
 		if !model.Current {
 			o.planReviewCursor = i
@@ -1306,8 +1363,17 @@ func (o *approvalOverlay) enterPlanReviewMode() {
 	}
 }
 
+func (o *approvalOverlay) enterPlanReviewMode() {
+	o.enterPlanPickerMode(pickReview)
+}
+
+func (o *approvalOverlay) enterHandOffMode() {
+	o.enterPlanPickerMode(pickHandOff)
+}
+
 func (o *approvalOverlay) exitPlanReviewMode() {
 	o.planReviewPicking = false
+	o.planPickerPurpose = pickReview
 	o.planReviewShown = false
 	o.planReviewCursor = 0
 }
@@ -1341,7 +1407,14 @@ func (o *approvalOverlay) handlePlanReviewKey(key parsedKey) (turn.ToolApprovalD
 			return turn.ToolApprovalDecision{}, false
 		}
 		selected := models[o.planReviewCursor]
+		purpose := o.planPickerPurpose
 		o.exitPlanReviewMode()
+		// A hand-off pick approves the exit and names the executor; the
+		// conversation's own model stays as the tech lead. The current model
+		// may be picked: handing off to it is odd but sound.
+		if purpose == pickHandOff {
+			return turn.ToolApprovalDecision{Approved: true, HandOffModel: &selected}, true
+		}
 		return turn.ToolApprovalDecision{RequestPlanReview: &selected}, true
 	case rawKeyRune:
 		switch {
