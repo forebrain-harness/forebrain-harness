@@ -220,3 +220,18 @@ func headerTestSortedKeys(m map[string]map[string]any) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// list_usable_models words its three states like peer_list: the verb alone,
+// no target — the answer's rows are the card body's business.
+func TestListUsableModelsHeader(t *testing.T) {
+	cwd := "/work/proj"
+	list := func(status string) DisplayFrame {
+		return DisplayFrame{
+			Title: "list_usable_models", Final: true,
+			Meta: ToolMeta{ToolName: "list_usable_models", Status: status},
+		}
+	}
+	require.Equal(t, HeaderParts{Action: "Listed usable models"}, DisplayHeaderParts(list("completed"), cwd))
+	require.Equal(t, HeaderParts{Action: "Listing usable models"}, DisplayHeaderParts(list("running"), cwd))
+	require.Equal(t, HeaderParts{Action: "Failed to list usable models"}, DisplayHeaderParts(list("failed"), cwd))
+}

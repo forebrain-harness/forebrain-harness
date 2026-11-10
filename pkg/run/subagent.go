@@ -493,7 +493,79 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 			InputSchema:     subagentSchemaRaw(cat, reflect.TypeOf(SubagentInput{}), []string{"properties", "subagent_type"}),
 		})
 	}
+	// list_usable_models rides the same switch and the same gate as the
+	// dispatch tools: it answers what the model argument accepts, so it is
+	// offered exactly when dispatching is. It is not a subagent management
+	// tool (subagentToolName below) — the roster tools manage running
+	// subagents — and its guard refuses a call from inside a subagent the way
+	// every other tool here does.
+	usable, err := llm.NewTool("list_usable_models", listUsableModelsDescription,
+		func(ctx context.Context, _ *struct{}) (string, error) {
+			if err := guardSubagentTool(ctx, fac, "list_usable_models"); err != nil {
+				return "", err
+			}
+			return listUsableModels(ctx, fac)
+		})
+	if err != nil {
+		return err
+	}
+	if err := fac.Tools.Register(a, usable); err != nil {
+		return err
+	}
+	if fac.Tools != nil {
+		fac.Tools.RegisterToolMeta(event.ToolMeta{
+			Name:            "list_usable_models",
+			Description:     listUsableModelsDescription,
+			Category:        "session",
+			ReadOnly:        true,
+			ConcurrencySafe: true,
+			InputSchema:     tool.SchemaForInputType(reflect.TypeOf(struct{}{})),
+		})
+	}
 	return registerFanoutTool(a, fac, cat)
+}
+
+// listUsableModelsDescription is fixed text on purpose: it names no model, so
+// adding one or flipping an authorization switch never moves the tool
+// definition (and every cached prompt prefix with it). The list itself is
+// read live from the model table on every call.
+const listUsableModelsDescription = "List the configured models you may run a subagent on, read live from the model table. Pass a model's id as the model argument of subagent_run, subagent_send or subagent_fanout. Pick a model by its id. Rows with the same provider/model are different models; their endpoint shows how they differ."
+
+// listUsableModels answers what usableModels reads: the rows the agent may
+// pick for a subagent, their endpoint (how twin rows differ) and whether each
+// is the conversation's current row. No key or any other credential ever
+// appears in the answer.
+func listUsableModels(ctx context.Context, fac Factory) (string, error) {
+	models, err := usableModels(ctx, fac)
+	if err != nil {
+		return "", err
+	}
+	current := ""
+	if sel, ok := SessionModelSelectionFromContext(ctx); ok {
+		current = strings.TrimSpace(sel.ModelID)
+	}
+	out := struct {
+		Models []map[string]any `json:"models"`
+		Note   string           `json:"note,omitempty"`
+	}{}
+	for _, m := range models {
+		out.Models = append(out.Models, map[string]any{
+			"id":         m.Row.ID,
+			"provider":   m.Row.Provider,
+			"model":      m.Row.Model,
+			"endpoint":   appcfg.ModelEndpointLabel(m.Row.BaseURL, m.Row.APIPath, m.Row.URLVerbatim),
+			"current":    current != "" && m.Row.ID == current,
+			"handed_off": m.HandedOff,
+		})
+	}
+	if len(out.Models) == 0 {
+		out.Note = "No model is allowed for subagents you pick. Omit model to run on the conversation's model."
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 func subagentToolName(name string) bool {

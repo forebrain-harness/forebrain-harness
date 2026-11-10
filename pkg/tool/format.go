@@ -4168,6 +4168,8 @@ func ReadableToolAnswer(toolName, body string, input map[string]any) (ReadableAn
 		return readPeerRoster(body)
 	case name == "peer_send":
 		return readPeerSend(input, body)
+	case name == "list_usable_models":
+		return readUsableModels(body)
 	case name == "web_search" || name == "websearch":
 		if formatted, ok := FormatWebSearchResult(body); ok && formatted != strings.TrimSpace(body) {
 			return ReadableAnswer{Text: formatted}, true
@@ -4207,6 +4209,53 @@ func toolAnswerCandidates(content string) []string {
 		candidates = append(candidates, strings.TrimSpace(text))
 	}
 	return candidates
+}
+
+// usableModelsAnswer is list_usable_models' answer as pkg/run writes it: the
+// rows the agent may pick for a subagent and the note an empty list carries.
+type usableModelsAnswer struct {
+	Models []usableModelRow `json:"models"`
+	Note   string           `json:"note"`
+}
+
+// usableModelRow is one row of that answer. The endpoint is how twin rows of
+// one provider/model differ; the flags name the conversation's own row and
+// the row an approved hand-off pinned.
+type usableModelRow struct {
+	ID        string `json:"id"`
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	Endpoint  string `json:"endpoint"`
+	Current   bool   `json:"current"`
+	HandedOff bool   `json:"handed_off"`
+}
+
+// readUsableModels reads a list_usable_models card: one line per model,
+// "provider/model · endpoint", with " (current)" / " (handed off)" naming the
+// rows those facts belong to. The raw JSON never reaches a card.
+func readUsableModels(content string) (ReadableAnswer, bool) {
+	for _, candidate := range toolAnswerCandidates(content) {
+		var raw usableModelsAnswer
+		if json.Unmarshal([]byte(candidate), &raw) != nil {
+			continue
+		}
+		if raw.Models == nil && strings.TrimSpace(raw.Note) == "" {
+			continue
+		}
+		var lines []string
+		for _, row := range raw.Models {
+			line := fmt.Sprintf("%s/%s · %s", strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model), strings.TrimSpace(row.Endpoint))
+			if row.Current {
+				line += " (current)"
+			}
+			if row.HandedOff {
+				line += " (handed off)"
+			}
+			lines = append(lines, line)
+		}
+		return ReadableAnswer{Text: strings.Join(lines, "\n"), Note: strings.TrimSpace(raw.Note)}, true
+	}
+	return ReadableAnswer{}, false
 }
 
 // peerRosterAnswer is peer_list's answer as pkg/run writes it: the caller's

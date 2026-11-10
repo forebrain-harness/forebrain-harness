@@ -392,6 +392,16 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 			action = "Listed agents"
 		}
 
+	case lower == "list_usable_models":
+		// No target either: the answer's rows are the card body's business.
+		if isFailed {
+			action = "Failed to list usable models"
+		} else if isRunning || isPending {
+			action = "Listing usable models"
+		} else {
+			action = "Listed usable models"
+		}
+
 	// --- MCP ---
 	case strings.HasPrefix(lower, "mcp__"):
 		action = "MCP"
@@ -514,6 +524,8 @@ func HeaderActions() []string {
 		"Sent a message to", "Sending a message to", "Could not send a message to",
 		"Sent a message", "Sending a message", "Could not send a message",
 		"Listed agents", "Listing agents", "Failed to list agents",
+		// The model picker for subagents (283)
+		"Listed usable models", "Listing usable models", "Failed to list usable models",
 		// Skill and MCP cards
 		"Loading skill", "Skill",
 		"MCP",

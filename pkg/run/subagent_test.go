@@ -8673,3 +8673,66 @@ func TestSubagentModelArgumentDescriptionIsFixedText(t *testing.T) {
 		}
 	}
 }
+
+// list_usable_models reads the table live on every call: a row added after
+// the tools were registered (after this turn's configuration was adopted)
+// lists immediately, the conversation's own row is marked current, the
+// hand-off row carries its flag, no credential ever appears, and the guard
+// keeps subagents from calling it.
+func TestListUsableModelsToolReadsTheTableLive(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, fix.fac); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	tool, ok := aToolByName(a, "list_usable_models")
+	if !ok {
+		t.Fatal("list_usable_models not registered")
+	}
+	// The row joins after registration — nothing adopted it into any snapshot.
+	rowID := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://one.test/v1", "key-one", true)
+
+	ctx := dispatchTestCtx()
+	out, err := tool.Handle(ctx, `{}`)
+	if err != nil {
+		t.Fatalf("list_usable_models: %v", err)
+	}
+	text, _ := out.(string)
+	if !strings.Contains(text, rowID) || !strings.Contains(text, "https://one.test/v1/chat/completions") {
+		t.Fatalf("live row missing from %s", text)
+	}
+	if strings.Contains(text, "key-one") || strings.Contains(text, "api_key") {
+		t.Fatalf("a credential leaked into the answer: %s", text)
+	}
+	if strings.Contains(text, `"current":true`) {
+		t.Fatalf("a session with no selection must mark no row current: %s", text)
+	}
+
+	// The conversation's own selection marks its row; the hand-off row keeps
+	// its flag beside it.
+	other := fix.seedModelRow(t, "anthropic", "claude-x", "https://two.test/v1", "key-two", false)
+	if _, err := state.HandOffPlan(fix.fac.Owner.StateRoot(), "session-1", state.ModeAgent, state.PlanHandOff{
+		ModelID: other, Provider: "anthropic", Model: "claude-x",
+	}); err != nil {
+		t.Fatalf("HandOffPlan: %v", err)
+	}
+	sel := PrimaryModelState{ModelID: rowID, Provider: "zhipuai", Model: "glm-5.3"}
+	ctx = WithSessionModelSelection(ctx, sel)
+	out, err = tool.Handle(ctx, `{}`)
+	if err != nil {
+		t.Fatalf("list_usable_models with a selection: %v", err)
+	}
+	text, _ = out.(string)
+	if !strings.Contains(text, `"current":true`) || !strings.Contains(text, `"handed_off":true`) {
+		t.Fatalf("current/handed-off flags missing from %s", text)
+	}
+
+	// The guard keeps a call from inside a subagent from reading anything.
+	_, err = tool.Handle(toolpkg.WithSubagentRun(ctx, true), `{}`)
+	if err == nil || !strings.Contains(err.Error(), "only available to the primary agent") {
+		t.Fatalf("guard inside a subagent = %v", err)
+	}
+}

@@ -3477,3 +3477,29 @@ func TestPlanOnlyMetadataSurvivesLiveAndReplay(t *testing.T) {
 		t.Fatalf("malformed result must not be marked plan-only: %+v", badMeta)
 	}
 }
+
+// list_usable_models' card body is a readable roster — one line per model,
+// the endpoint showing how twin rows differ — never the raw JSON, and an
+// empty list says why it is empty.
+func TestListUsableModelsCard(t *testing.T) {
+	roster := `{"models":[` +
+		`{"id":"llm_a","provider":"zhipuai","model":"glm-5.3","endpoint":"https://one.test/v1/chat/completions","current":true,"handed_off":false},` +
+		`{"id":"llm_b","provider":"zhipuai","model":"glm-5.3","endpoint":"https://two.test/anthropic/v1/messages","current":false,"handed_off":true}` +
+		`]}`
+	answer, ok := ReadableToolAnswer("list_usable_models", roster, nil)
+	require.True(t, ok)
+	require.Equal(t,
+		"zhipuai/glm-5.3 · https://one.test/v1/chat/completions (current)\n"+
+			"zhipuai/glm-5.3 · https://two.test/anthropic/v1/messages (handed off)",
+		answer.String())
+
+	empty, ok := ReadableToolAnswer("list_usable_models", `{"models":[],"note":"No model is allowed for subagents you pick. Omit model to run on the conversation's model."}`, nil)
+	require.True(t, ok)
+	require.Equal(t, "No model is allowed for subagents you pick. Omit model to run on the conversation's model.", empty.String())
+
+	// The live card's output envelope reads the same as a replayed row.
+	live := "output:\n\n```json\n{\"output\":" + strconv.Quote(roster) + "}\n```"
+	envelope, ok := ReadableToolAnswer("list_usable_models", live, nil)
+	require.True(t, ok)
+	require.Equal(t, answer.String(), envelope.String())
+}
