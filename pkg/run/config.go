@@ -2479,7 +2479,13 @@ func (r *Runner) agentModelFor(ctx context.Context) (provider, model string) {
 func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
 	if !explicitMainThreadQuerySource(QuerySourceFromContext(ctx)) {
 		if override, ok := SubagentModelOverrideFromContext(ctx); ok {
-			client, err := ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
+			var client llm.LLM
+			var err error
+			if override.Entry != nil {
+				client, err = modelClientFromEntry(*override.Entry, override.Effort)
+			} else {
+				client, err = ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
+			}
 			if err != nil {
 				slog.Warn("build subagent compaction client", "err", err)
 				return nil

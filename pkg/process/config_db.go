@@ -201,33 +201,11 @@ func composeSectionsFrom(ctx context.Context, cfgPath string, db *sql.DB, overri
 func llmModelsFromRows(rows []state.LLMModel) ([]appcfg.LLMModelConfig, error) {
 	out := make([]appcfg.LLMModelConfig, 0, len(rows))
 	for _, row := range rows {
-		params, err := appcfg.ParseLLMRequestParamsJSON(row.ParamsJSON)
+		cfg, err := row.ConfigRow()
 		if err != nil {
 			return nil, fmt.Errorf("model %s: params: %w", row.ID, err)
 		}
-		out = append(out, appcfg.LLMModelConfig{
-			ID:       row.ID,
-			Provider: row.Provider,
-			Model:    row.Model,
-			BaseURL:  row.BaseURL,
-			APIPath:  row.APIPath,
-			APIKey:   row.APIKey,
-			Params:   params,
-			Caps: appcfg.LLMModelCaps{
-				Images:        row.CapImages,
-				PDF:           row.CapPDF,
-				Video:         row.CapVideo,
-				Audio:         row.CapAudio,
-				Reasoning:     row.CapReasoning,
-				ReasoningOff:  row.CapReasoningOff,
-				Efforts:       row.CapEfforts,
-				DefaultEffort: row.CapDefaultEffort,
-				ContextWindow: row.CapContextWindow,
-				MaxOutput:     row.CapMaxOutput,
-			},
-			URLVerbatim:     row.URLVerbatim,
-			SubagentAllowed: row.SubagentAllowed,
-		})
+		out = append(out, cfg)
 	}
 	return out, nil
 }
@@ -317,25 +295,11 @@ func modelOverridesFor(rows []appcfg.LLMModelConfig) map[string]llm.ModelOverrid
 }
 
 // modelOverrideForRow projects one row's capability columns into the lookup's
-// override type. ok is false for a row that names no capability at all.
+// override type: the shared projection state.ModelOverrideFromCaps owns, so a
+// row installed into the catalog and a row read live by a dispatch agree.
+// ok is false for a row that names no capability at all.
 func modelOverrideForRow(row appcfg.LLMModelConfig) (llm.ModelOverride, bool) {
-	caps := row.Caps
-	if caps.Images == nil && caps.PDF == nil && caps.Video == nil && caps.Audio == nil &&
-		caps.Reasoning == nil && caps.ReasoningOff == nil && caps.Efforts == nil &&
-		caps.ContextWindow == nil && caps.MaxOutput == nil {
-		return llm.ModelOverride{}, false
-	}
-	return llm.ModelOverride{
-		SupportsImages: caps.Images,
-		SupportsPDF:    caps.PDF,
-		SupportsVideo:  caps.Video,
-		SupportsAudio:  caps.Audio,
-		CanReason:      caps.Reasoning,
-		ReasoningOff:   caps.ReasoningOff,
-		Efforts:        caps.Efforts,
-		ContextWindow:  caps.ContextWindow,
-		MaxOutput:      caps.MaxOutput,
-	}, true
+	return state.ModelOverrideFromCaps(row.Caps)
 }
 
 var (

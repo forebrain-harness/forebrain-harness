@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8304,5 +8305,371 @@ func TestContinuePlanReviewSubagentGuardsItsRecords(t *testing.T) {
 	_, err := continueSubagentExecution(ctx, fac, &SubagentContinueInput{TaskID: "task-reviewer-done", Message: "again"})
 	if err == nil || !strings.Contains(err.Error(), "one-shot and cannot continue") {
 		t.Fatalf("subagent_continue on a plan-reviewer = %v, want the one-shot refusal", err)
+	}
+}
+
+// modelArgumentFixture is a factory whose owner reads the model table live:
+// a real state store with the rows the test seeds, a fixed executor, and the
+// subagent tools registered the way a session registers them.
+type modelArgumentFixture struct {
+	fac     Factory
+	db      *sql.DB
+	store   *state.LLMModelStore
+	probe   *collectingUINotify
+	capture *capturingModelArgumentExecutor
+}
+
+// capturingModelArgumentExecutor records the entry each dispatched run was
+// pinned to and answers with a fixed output.
+type capturingModelArgumentExecutor struct {
+	mu    sync.Mutex
+	pins  []SubagentModelOverride
+	model string
+}
+
+func (e *capturingModelArgumentExecutor) RunSubagentExec(ctx context.Context, req SubagentExecRequest) (string, error) {
+	e.mu.Lock()
+	if pin, ok := SubagentModelOverrideFromContext(ctx); ok {
+		e.pins = append(e.pins, pin)
+	}
+	e.model = req.Model
+	e.mu.Unlock()
+	return "done", nil
+}
+
+func (e *capturingModelArgumentExecutor) PersistSubagentTurn(context.Context, SubagentTurn) {}
+
+func (e *capturingModelArgumentExecutor) SubagentExecutionStarting(context.Context, string) {}
+
+func (e *capturingModelArgumentExecutor) SubagentExecutionEnded(context.Context, SubagentExecutionEnd) {
+}
+
+func newModelArgumentFixture(t *testing.T, cfg *appcfg.Root) *modelArgumentFixture {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	if err := store.Ensure(ctx, "session-1", "session-1"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	home := t.TempDir()
+	probe := &collectingUINotify{}
+	capture := &capturingModelArgumentExecutor{}
+	fac := Factory{
+		Home: home, AgentName: "main",
+		Owner: &Runner{
+			Deps:    &Deps{Home: home, SessionStore: store, AppCfg: cfg},
+			Events:  probe,
+			Control: NewController(),
+		},
+	}
+	fac.Owner.SubagentExecutor = capture
+	return &modelArgumentFixture{fac: fac, db: db, store: &state.LLMModelStore{DB: db}, probe: probe, capture: capture}
+}
+
+// seedModelRow inserts one configured row and returns its id.
+func (f *modelArgumentFixture) seedModelRow(t *testing.T, provider, model, baseURL, key string, allowed bool) string {
+	t.Helper()
+	row, err := f.store.Create(context.Background(), state.LLMModel{
+		Provider: provider, Model: model, BaseURL: baseURL, APIPath: "/chat/completions",
+		APIKey: key, SubagentAllowed: allowed,
+	})
+	if err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	return row.ID
+}
+
+func (f *modelArgumentFixture) subagentRunTool(t *testing.T) *llm.Tool {
+	t.Helper()
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, f.fac); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	tool, ok := aToolByName(a, "subagent_run")
+	if !ok {
+		t.Fatal("subagent_run not registered")
+	}
+	return tool
+}
+
+// The model argument names a configured row by id: the dispatched run is
+// pinned to that row — its entry read live from the table — while a pair
+// text, an unauthorized row and a row without credentials are each refused
+// with their own sentence, and no argument at all leaves the dispatch as it
+// always was.
+func TestSubagentModelArgumentPinsTheNamedRow(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	allowed := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://one.test/v1", "key-one", true)
+	denied := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://two.test/v1", "key-two", false)
+	keyless := fix.seedModelRow(t, "deepseek", "deepseek-v4-flash", "https://three.test/v1", "", true)
+	tool := fix.subagentRunTool(t)
+	ctx := dispatchTestCtx()
+
+	// The named row pins the run, with the live entry attached.
+	out, err := tool.Handle(ctx, fmt.Sprintf(`{"task":"inspect","subagent_type":"general-purpose","model":%q}`, allowed))
+	if err != nil {
+		t.Fatalf("subagent_run with a live row id: %v", err)
+	}
+	outText, _ := out.(string)
+	if !strings.Contains(outText, `"status":"ok"`) {
+		t.Fatalf("run output = %s", out)
+	}
+	pins := fix.capture.pinsOf()
+	if len(pins) != 1 {
+		t.Fatalf("dispatched runs = %d, want 1", len(pins))
+	}
+	pin := pins[0]
+	if pin.ModelID != allowed || pin.Model != "glm-5.3" || pin.Provider != "zhipuai" {
+		t.Fatalf("pin = %+v, want the named row", pin)
+	}
+	if pin.Entry == nil || pin.Entry.BaseURL != "https://one.test/v1" {
+		t.Fatalf("pin entry = %+v, want the row's own endpoint", pin.Entry)
+	}
+
+	// A pair text is not an id: two rows of one pair make the pair ambiguous.
+	_, err = tool.Handle(ctx, `{"task":"inspect","subagent_type":"general-purpose","model":"zhipuai/glm-5.3"}`)
+	if err == nil || !strings.Contains(err.Error(), `no configured model has id "zhipuai/glm-5.3"; call list_usable_models`) {
+		t.Fatalf("pair text error = %v", err)
+	}
+
+	// A row the switch does not allow, with the reason said in its own words.
+	_, err = tool.Handle(ctx, fmt.Sprintf(`{"task":"inspect","subagent_type":"general-purpose","model":%q}`, denied))
+	if err == nil || !strings.Contains(err.Error(), "is not one you may pick for subagents") {
+		t.Fatalf("unauthorized row error = %v", err)
+	}
+
+	// A row without credentials is dispatchable in name only.
+	_, err = tool.Handle(ctx, fmt.Sprintf(`{"task":"inspect","subagent_type":"general-purpose","model":%q}`, keyless))
+	if err == nil || !strings.Contains(err.Error(), "has no credentials") {
+		t.Fatalf("keyless row error = %v", err)
+	}
+
+	// No argument: the ordinary chain, no pin from here.
+	if _, err := tool.Handle(ctx, `{"task":"inspect","subagent_type":"general-purpose"}`); err != nil {
+		t.Fatalf("subagent_run without model: %v", err)
+	}
+	if got := len(fix.capture.pinsOf()); got > 1 && fix.capture.pinsOf()[1].Entry != nil {
+		t.Fatalf("a dispatch without the argument was pinned to a live row: %+v", fix.capture.pinsOf()[1])
+	}
+}
+
+func (e *capturingModelArgumentExecutor) pinsOf() []SubagentModelOverride {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]SubagentModelOverride(nil), e.pins...)
+}
+
+// A fanout resolves every task's model before anything starts: one bad id
+// fails the whole call with no task dispatched, and each task runs on its own
+// named row.
+func TestSubagentFanoutModelArgumentResolvesAllOrNothing(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	rowA := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://one.test/v1", "key-one", true)
+	rowB := fix.seedModelRow(t, "deepseek", "deepseek-v4-flash", "https://two.test/v1", "key-two", true)
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, fix.fac); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	tool, ok := aToolByName(a, "subagent_fanout")
+	if !ok {
+		t.Fatal("subagent_fanout not registered")
+	}
+	ctx := dispatchTestCtx()
+
+	// One unresolvable id in the batch fails the whole call before any start.
+	_, err = tool.Handle(ctx, fmt.Sprintf(
+		`{"max_parallel":2,"tasks":[{"prompt":"a","subagent_type":"general-purpose","model":%q},{"prompt":"b","subagent_type":"general-purpose","model":"llm_missing"}]}`, rowA))
+	if err == nil || !strings.Contains(err.Error(), `no configured model has id "llm_missing"`) {
+		t.Fatalf("mixed batch error = %v", err)
+	}
+	if got := len(fix.capture.pinsOf()); got != 0 {
+		t.Fatalf("tasks dispatched = %d, want none on a failed batch", got)
+	}
+
+	out, err := tool.Handle(ctx, fmt.Sprintf(
+		`{"max_parallel":2,"tasks":[{"prompt":"a","subagent_type":"general-purpose","model":%q},{"prompt":"b","subagent_type":"general-purpose","model":%q}]}`, rowA, rowB))
+	if err != nil {
+		t.Fatalf("fanout with two rows: %v", err)
+	}
+	outText, _ := out.(string)
+	if !strings.Contains(outText, "2 ok") {
+		t.Fatalf("fanout output = %s", out)
+	}
+	pins := fix.capture.pinsOf()
+	if len(pins) != 2 {
+		t.Fatalf("dispatched pins = %d, want 2", len(pins))
+	}
+	ids := map[string]bool{}
+	for _, pin := range pins {
+		ids[pin.ModelID] = true
+	}
+	if !ids[rowA] || !ids[rowB] {
+		t.Fatalf("pins = %+v, want each task on its own row", pins)
+	}
+}
+
+// The usable list and the dispatch check are one query pair: what lists is
+// what dispatch accepts. The hand-off row joins without the switch — the user
+// picked it — flagged so the model can say why it is there.
+func TestUsableModelsListAndDispatchAgree(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	allowed := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://one.test/v1", "key-one", true)
+	denied := fix.seedModelRow(t, "zhipuai", "glm-5.3-flash", "https://two.test/v1", "key-two", false)
+	keyless := fix.seedModelRow(t, "deepseek", "deepseek-v4-flash", "https://three.test/v1", "", true)
+	login := fix.seedModelRow(t, "opencode", "cl-4.5", "", "", true)
+	handed := fix.seedModelRow(t, "anthropic", "claude-x", "https://four.test/v1", "key-four", false)
+
+	ctx := dispatchTestCtx()
+	listed, err := usableModels(ctx, fix.fac)
+	if err != nil {
+		t.Fatalf("usableModels: %v", err)
+	}
+	got := map[string]bool{}
+	handedOff := map[string]bool{}
+	for _, m := range listed {
+		got[m.Row.ID] = true
+		handedOff[m.Row.ID] = m.HandedOff
+	}
+	if !got[allowed] || got[denied] || got[keyless] {
+		t.Fatalf("listed = %v, want the allowed+credentialed row only among the switched ones", got)
+	}
+	if !got[login] {
+		t.Fatal("a login-backed provider is credentialed by its login and must list")
+	}
+	if got[handed] {
+		t.Fatal("the hand-off row must not list while the conversation handed nothing off")
+	}
+
+	// A hand-off recorded in the mode state admits exactly that row.
+	home := fix.fac.Owner.StateRoot()
+	if _, err := state.HandOffPlan(home, "session-1", state.ModeAgent, state.PlanHandOff{
+		ModelID: handed, Provider: "anthropic", Model: "claude-x",
+	}); err != nil {
+		t.Fatalf("HandOffPlan: %v", err)
+	}
+	listed, err = usableModels(ctx, fix.fac)
+	if err != nil {
+		t.Fatalf("usableModels after hand-off: %v", err)
+	}
+	found := false
+	for _, m := range listed {
+		if m.Row.ID == handed {
+			found = m.HandedOff
+		}
+	}
+	if !found {
+		t.Fatalf("handed-off row missing or unflagged in %#v", listed)
+	}
+	if usable, err := usableModelByID(ctx, fix.fac, handed); err != nil || !usable.HandedOff {
+		t.Fatalf("dispatch check for the handed-off row = %+v, %v", usable, err)
+	}
+}
+
+// The client cache keys a live row by its version: a row edited mid-run (new
+// key, new endpoint) gets a new client instead of the stale one.
+func TestSubagentOverrideClientCacheKeysLiveRowsByVersion(t *testing.T) {
+	entry := appcfg.AgentLLMProviderConfig{ID: "llm_row", Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://one.test/v1"}
+	builds := 0
+	inner := &noopLLM{}
+	w := &subagentModelOverrideLLM{inner: inner, clients: map[string]llm.LLM{}, build: func(SubagentModelOverride) (llm.LLM, error) {
+		builds++
+		return inner, nil
+	}}
+	pin := SubagentModelOverride{ModelID: "llm_row", Provider: "zhipuai", Model: "glm-5.3", Entry: &entry}
+	if _, err := w.clientFor(pin); err != nil {
+		t.Fatalf("first client: %v", err)
+	}
+	if _, err := w.clientFor(pin); err != nil {
+		t.Fatalf("same row again: %v", err)
+	}
+	if builds != 1 {
+		t.Fatalf("builds = %d, want one client for an unchanged row", builds)
+	}
+	edited := pin
+	edited.Version = 42
+	if _, err := w.clientFor(edited); err != nil {
+		t.Fatalf("edited row: %v", err)
+	}
+	if builds != 2 {
+		t.Fatalf("builds = %d, want a new client after the row changed", builds)
+	}
+}
+
+// A run pinned to a live row rereads that row when it continues: the round
+// carries the row's current entry, and a row that is gone fails the
+// continuation with the same refusal a dispatch gets.
+func TestModelLiveContinuationRereadsTheRow(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	rowID := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://one.test/v1", "key-one", true)
+	if err := agent.AppendHistory(fix.fac.subagentScopeRoot(), agent.HistoryEntry{
+		TaskID: "task-live", AgentID: "task-live", RunID: "child", ParentRunID: "parent-1",
+		SessionID: "session-1", WorkerSessionID: "worker-live",
+		Task: "first", Status: agent.StatusOK, Output: "first round",
+		ModelID: rowID, ModelProvider: "zhipuai", Model: "glm-5.3",
+		AgentKind: "typed", AgentType: "general-purpose", RuntimeKind: "typed_subagent",
+		Continuable: true, DefSource: "built-in", ModelLive: true,
+	}); err != nil {
+		t.Fatalf("append history: %v", err)
+	}
+	ctx := dispatchTestCtx()
+	record, err := continueSubagentExecution(ctx, fix.fac, &SubagentContinueInput{TaskID: "task-live", Message: "again"})
+	if err != nil {
+		t.Fatalf("continuation: %v", err)
+	}
+	_ = record
+	pins := fix.capture.pinsOf()
+	if len(pins) != 1 || pins[0].Entry == nil || pins[0].ModelID != rowID {
+		t.Fatalf("continuation pins = %+v, want the reread live row", pins)
+	}
+
+	// The row withdrawn (deleted): the continuation refuses rather than
+	// quietly running on another model.
+	if err := fix.store.Delete(context.Background(), rowID); err != nil {
+		t.Fatalf("delete row: %v", err)
+	}
+	if _, err := continueSubagentExecution(ctx, fix.fac, &SubagentContinueInput{TaskID: "task-live", Message: "once more"}); err == nil ||
+		!strings.Contains(err.Error(), `no configured model has id`) {
+		t.Fatalf("continuation after the row is gone = %v, want the same refusal a dispatch gets", err)
+	}
+}
+
+func mustConfigRow(t *testing.T, fix *modelArgumentFixture, id string) appcfg.LLMModelConfig {
+	t.Helper()
+	row, err := fix.store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get row: %v", err)
+	}
+	cfg, err := row.ConfigRow()
+	if err != nil {
+		t.Fatalf("ConfigRow: %v", err)
+	}
+	return cfg
+}
+
+// The three input schemas carry the model argument's description as fixed
+// text: it names the tool that lists the choices and never a model, so adding
+// one or flipping a switch cannot move the tool definition (and every cached
+// prompt prefix with it).
+func TestSubagentModelArgumentDescriptionIsFixedText(t *testing.T) {
+	const want = "description=Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."
+	for _, typ := range []reflect.Type{reflect.TypeOf(SubagentInput{}), reflect.TypeOf(SubagentSendInput{}), reflect.TypeOf(SubagentTask{})} {
+		field, ok := typ.FieldByName("Model")
+		if !ok {
+			t.Fatalf("%s has no Model field", typ.Name())
+		}
+		if tag, _ := field.Tag.Lookup("jsonschema"); tag != want {
+			t.Fatalf("%s.Model jsonschema tag =\n%q\nwant the fixed text", typ.Name(), tag)
+		}
 	}
 }

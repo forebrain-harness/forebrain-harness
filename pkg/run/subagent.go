@@ -92,6 +92,11 @@ type SubagentInput struct {
 	Task         string `json:"task" jsonschema:"description=Task for an isolated agent run with the same model configuration."`
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype. Omit for fork-style run; set for fresh typed subagent."`
 	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
+	// Model is a configured row id, never a provider/model pair: two rows of
+	// one pair are two models. The description is fixed text on purpose — it
+	// must not enumerate the models, or adding one would change the tool
+	// definition and every cached prompt prefix with it.
+	Model string `json:"model,omitempty" jsonschema:"description=Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
 
 type SubagentSendInput struct {
@@ -99,6 +104,8 @@ type SubagentSendInput struct {
 	Task         string `json:"task" jsonschema:"description=Task for an isolated agent run that should continue asynchronously."`
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype. Omit for fork-style run; set for fresh typed subagent."`
 	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
+	// Model is a configured row id; see SubagentInput.Model.
+	Model string `json:"model,omitempty" jsonschema:"description=Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
 
 type SubagentContinueInput struct {
@@ -128,6 +135,8 @@ type SubagentTask struct {
 	Prompt       string `json:"prompt" jsonschema:"description=Task prompt for the subagent."`
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype for this task."`
 	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
+	// Model is a configured row id; see SubagentInput.Model.
+	Model string `json:"model,omitempty" jsonschema:"description=Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
 
 func subagentTypeEnumValues(cat SubagentCatalog) []any {
@@ -392,6 +401,13 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 					"error":  "skipped: empty prompt",
 				})
 				return string(b), nil
+			}
+			if in != nil {
+				pin, err := subagentModelOverrideForRef(ctx, fac, in.Model)
+				if err != nil {
+					return "", err
+				}
+				ctx = WithSubagentModelOverride(ctx, pin)
 			}
 			taskID := newSubagentTaskID()
 			execRes, err := execGeneralSubagent(ctx, fac, taskID, title, task, subType, worktree)
@@ -1906,6 +1922,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 		entry.Model = strings.TrimSpace(pin.Model)
 		entry.ModelID = strings.TrimSpace(pin.ModelID)
 		entry.ReasoningEffort = strings.TrimSpace(pin.Effort)
+		entry.ModelLive = pin.Entry != nil
 		cctx = WithSubagentModelOverride(cctx, pin)
 	}
 	// The worker session is born before anything can reference it. Its row is
@@ -2289,6 +2306,43 @@ func subagentRosterKey(entry agent.HistoryEntry) string {
 // model override, its worker session, and the conversation it belongs to.
 // Everything that shapes the prefix of the subagent's requests is here, so a
 // compaction or a continuation built from it reuses that prefix.
+// subagentRecordPin rebuilds the model pin a record carries. A run pinned to
+// a live row (ModelLive — the model argument named it) rereads that row: the
+// continuation is a new execution, and the row may have been edited or
+// withdrawn since the first one started, so the round runs on the row's
+// current key and endpoint. A row that no longer resolves is an error — a
+// continuation must fail loudly rather than quietly run on another model.
+func subagentRecordPin(ctx context.Context, fac Factory, record agent.HistoryEntry) (SubagentModelOverride, error) {
+	pin := SubagentModelOverride{}
+	if strings.TrimSpace(record.Model) == "" {
+		return pin, nil
+	}
+	modelID := strings.TrimSpace(record.ModelID)
+	if modelID == "" {
+		modelID = ModelIDForAgentModel(fac.appConfig(), fac.AgentName, record.ModelProvider, record.Model)
+	}
+	pin = SubagentModelOverride{
+		ModelID:  modelID,
+		Provider: record.ModelProvider, Model: record.Model, Effort: record.ReasoningEffort,
+	}
+	if !record.ModelLive || modelID == "" {
+		return pin, nil
+	}
+	reread, err := usableModelByID(ctx, fac, modelID)
+	if err != nil {
+		return SubagentModelOverride{}, err
+	}
+	entry := reread.Entry
+	return SubagentModelOverride{
+		ModelID:  strings.TrimSpace(entry.ID),
+		Provider: strings.TrimSpace(entry.Provider),
+		Model:    strings.TrimSpace(entry.Model),
+		Effort:   appcfg.ReasoningEffort(entry.Params),
+		Entry:    &entry,
+		Version:  reread.Row.UpdatedAt,
+	}, nil
+}
+
 func subagentRecordContext(ctx context.Context, fac Factory, record agent.HistoryEntry) context.Context {
 	// Like every other parent-turn-only value here: the skill the dispatching
 	// turn selected is not part of this subagent's record, so a continuation
@@ -2305,15 +2359,8 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 	// conversation's default. The record names the row the dispatch chose; only
 	// a record written before ids existed carries the pair alone, and that pair
 	// is resolved the way it always was.
-	if strings.TrimSpace(record.Model) != "" {
-		modelID := strings.TrimSpace(record.ModelID)
-		if modelID == "" {
-			modelID = ModelIDForAgentModel(fac.appConfig(), fac.AgentName, record.ModelProvider, record.Model)
-		}
-		hostCtx = WithSubagentModelOverride(hostCtx, SubagentModelOverride{
-			ModelID:  modelID,
-			Provider: record.ModelProvider, Model: record.Model, Effort: record.ReasoningEffort,
-		})
+	if pin, err := subagentRecordPin(ctx, fac, record); err == nil {
+		hostCtx = WithSubagentModelOverride(hostCtx, pin)
 	}
 	if strings.TrimSpace(record.AgentKind) == "typed" {
 		// The policy a custom subagent ran under on its first execution, for the
@@ -3005,7 +3052,12 @@ func continueSubagentRecord(
 	// Everything that shapes the subagent's own requests — its kind flags,
 	// its model, its roster key, its two session ids, the roots, the cache
 	// key and the query source its model resolution routes on — comes from
-	// the record, once.
+	// the record, once. A run pinned to a live row rereads it first: the row
+	// that no longer resolves fails the continuation with the same refusal a
+	// dispatch gets, rather than quietly running on another model.
+	if _, perr := subagentRecordPin(ctx, fac, record); perr != nil {
+		return record, "", perr
+	}
 	// The subagent's own input runtime is attached by runSubagentExecution; the
 	// dispatching agent's is not inherited.
 	hostCtx := subagentRecordContext(ctx, fac, record)
@@ -3291,6 +3343,17 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 			fanoutCtx, fanoutCancel := context.WithCancel(ctx)
 			defer fanoutCancel()
 
+			// Every task's model resolves before any dispatch starts: one
+			// unresolvable id fails the whole call, rather than half the
+			// tasks running and the other half reporting a model error.
+			taskPins := make([]SubagentModelOverride, len(in.Tasks))
+			for i := range in.Tasks {
+				pin, err := subagentModelOverrideForRef(ctx, fac, in.Tasks[i].Model)
+				if err != nil {
+					return "", err
+				}
+				taskPins[i] = pin
+			}
 			taskIDs := make([]string, len(in.Tasks))
 			for i := range taskIDs {
 				taskIDs[i] = newSubagentTaskID()
@@ -3326,7 +3389,7 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 					defer wg.Done()
 					defer func() { <-sem }()
 
-					execRes, err := execGeneralSubagent(withSubagentTaskIndex(fanoutCtx, i), fac, taskID, title, task, subType, worktree)
+					execRes, err := execGeneralSubagent(WithSubagentModelOverride(withSubagentTaskIndex(fanoutCtx, i), taskPins[i]), fac, taskID, title, task, subType, worktree)
 					// A task the user stopped is not a failure: fail_fast does
 					// not take the other tasks down with it.
 					var stopped *subagentStopped
@@ -3476,6 +3539,13 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 					"error":  "skipped: empty prompt",
 				})
 				return string(b), nil
+			}
+			if in != nil {
+				pin, err := subagentModelOverrideForRef(ctx, fac, in.Model)
+				if err != nil {
+					return "", err
+				}
+				ctx = WithSubagentModelOverride(ctx, pin)
 			}
 			taskID := newSubagentTaskID()
 			entry, err := spawnAsyncSubagent(ctx, fac, taskID, title, task, subType, worktree)
@@ -4080,6 +4150,10 @@ func subagentExecContext(prep preparedSubagent) context.Context {
 	}
 	if dispatched, ok := SubagentModelOverrideFromContext(prep.ctx); ok && strings.TrimSpace(dispatched.Model) == strings.TrimSpace(pin.Model) {
 		pin.ModelID = dispatched.ModelID
+		// The live row the dispatch resolved rides along: the client for this
+		// run is built from that row, and the cache keys on its version.
+		pin.Entry = dispatched.Entry
+		pin.Version = dispatched.Version
 	}
 	hostCtx = WithSubagentModelOverride(hostCtx, pin)
 	return tool.WithHookAgentID(hostCtx, subagentRosterKey(prep.entry))
@@ -4097,6 +4171,17 @@ type SubagentModelOverride struct {
 	Provider string
 	Model    string
 	Effort   string
+	// Entry is the row a live dispatch read from the model table, projected
+	// the way the snapshot view projects it. It is set only by the model
+	// argument's resolution (and a continuation rereading that row): the row
+	// was added after this turn's configuration was adopted, so the client is
+	// built from it directly rather than from the snapshot, whose next
+	// adoption is a turn boundary away. nil = resolve from the snapshot.
+	Entry *appcfg.AgentLLMProviderConfig
+	// Version is the row's updated_at when Entry was read: the client cache
+	// keys on it, so a row edited mid-run (new key, new endpoint) gets a new
+	// client instead of the stale one.
+	Version int64
 }
 
 func (o SubagentModelOverride) valid() bool {
@@ -4118,6 +4203,144 @@ func ModelIDForAgentModel(cfg *appcfg.Root, agentName, provider, model string) s
 		return ""
 	}
 	return strings.TrimSpace(entry.ID)
+}
+
+// usableModel is one row the agent may pick for a subagent: the stored row,
+// its projection into the configuration view, and — for the row this
+// conversation's hand-off named — the flag that says so.
+type usableModel struct {
+	Row       state.LLMModel
+	Entry     appcfg.AgentLLMProviderConfig
+	HandedOff bool
+}
+
+// usableModels answers, live from the model table, which rows the agent may
+// pick for a subagent on its own through the model argument: the switch is on
+// (owner 2026-11-10) and credentials exist (a stored key, or a provider whose
+// login is the credential). The conversation's hand-off row joins the list
+// without the switch — the user picked it themselves — flagged so the model
+// can tell why it is there. This and usableModelByID are the one query pair
+// behind both list_usable_models and the dispatch's own check, so what the
+// model sees listed is exactly what it may dispatch on.
+func usableModels(ctx context.Context, fac Factory) ([]usableModel, error) {
+	if fac.Owner == nil || fac.Owner.Deps == nil || fac.Owner.Deps.SessionStore == nil {
+		return nil, fmt.Errorf("model store unavailable")
+	}
+	rows, err := (&state.LLMModelStore{DB: fac.Owner.Deps.SessionStore.DB()}).List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	handOff := handOffModelID(ctx, fac)
+	out := make([]usableModel, 0, len(rows))
+	for _, row := range rows {
+		entry, cerr := row.ConfigRow()
+		if cerr != nil {
+			continue
+		}
+		credentialed := strings.TrimSpace(row.APIKey) != "" || appcfg.CredentialsBackedProvider(row.Provider)
+		if strings.TrimSpace(row.ID) == handOff && handOff != "" {
+			// The hand-off exception (语义 8): the user picked this row for
+			// this conversation's plan, so the agent may dispatch on it for
+			// that purpose without the switch. It still needs credentials —
+			// a row nobody can call is not a model to run on.
+			if !credentialed {
+				continue
+			}
+			out = append(out, usableModel{Row: row, Entry: appcfg.ProviderFromModelRow(entry), HandedOff: true})
+			continue
+		}
+		if !row.SubagentAllowed || !credentialed {
+			continue
+		}
+		out = append(out, usableModel{Row: row, Entry: appcfg.ProviderFromModelRow(entry)})
+	}
+	return out, nil
+}
+
+// usableModelByID resolves one row id the way usableModels lists it, with the
+// three refusal texts the model reads (语义 9): an unknown id, a row the
+// switch does not allow, a row without credentials. The hand-off row resolves
+// without the switch, exactly as it lists.
+func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return usableModel{}, fmt.Errorf("no configured model has id %q; call list_usable_models", id)
+	}
+	if fac.Owner == nil || fac.Owner.Deps == nil || fac.Owner.Deps.SessionStore == nil {
+		return usableModel{}, fmt.Errorf("model store unavailable")
+	}
+	row, err := (&state.LLMModelStore{DB: fac.Owner.Deps.SessionStore.DB()}).Get(ctx, id)
+	if err != nil {
+		if errors.Is(err, state.ErrLLMModelNotFound) {
+			// A hand-off id recorded against a pre-table configuration entry
+			// never had a row: resolve it against the snapshot so the
+			// hand-off the user made themselves still runs (语义 9).
+			if handOffID := handOffModelID(ctx, fac); handOffID == id {
+				if entry, ok := appcfg.ResolveModelRef(fac.appConfig(), fac.AgentName, id); ok && strings.TrimSpace(entry.Model) != "" {
+					return usableModel{Entry: entry, HandedOff: true}, nil
+				}
+			}
+			return usableModel{}, fmt.Errorf("no configured model has id %q; call list_usable_models", id)
+		}
+		return usableModel{}, err
+	}
+	entry, err := row.ConfigRow()
+	if err != nil {
+		return usableModel{}, err
+	}
+	credentialed := strings.TrimSpace(row.APIKey) != "" || appcfg.CredentialsBackedProvider(row.Provider)
+	handedOff := strings.TrimSpace(row.ID) == handOffModelID(ctx, fac) && handOffModelID(ctx, fac) != ""
+	if !handedOff && !row.SubagentAllowed {
+		return usableModel{}, fmt.Errorf("model %q (provider/model) is not one you may pick for subagents; call list_usable_models, or omit model to use the conversation's model.", llm.FormatProviderModel(row.Provider, row.Model))
+	}
+	if !credentialed {
+		return usableModel{}, fmt.Errorf("model %q (provider/model) has no credentials; call list_usable_models, or omit model to use the conversation's model.", llm.FormatProviderModel(row.Provider, row.Model))
+	}
+	return usableModel{Row: row, Entry: appcfg.ProviderFromModelRow(entry), HandedOff: handedOff}, nil
+}
+
+// handOffModelID names the row this conversation's approved hand-off recorded,
+// from the session's mode state; "" when the conversation handed nothing off
+// or the state cannot be read.
+func handOffModelID(ctx context.Context, fac Factory) string {
+	if fac.Owner == nil {
+		return ""
+	}
+	sid := llm.AgentSessionIDFromContext(ctx)
+	if strings.TrimSpace(sid) == "" {
+		return ""
+	}
+	st, err := state.Get(fac.Owner.StateRoot(), sid)
+	if err != nil || st.PlanHandOff == nil {
+		return ""
+	}
+	return strings.TrimSpace(st.PlanHandOff.ModelID)
+}
+
+// subagentModelOverrideForRef resolves the model argument's row id into the
+// pin a dispatch runs under: the row read live, its client entry and its
+// version carried along, so this subagent's requests go to exactly this row
+// even when it joined the table after this turn's configuration was adopted.
+// An empty id is no statement — the zero override leaves the dispatch on its
+// ordinary model chain.
+func subagentModelOverrideForRef(ctx context.Context, fac Factory, id string) (SubagentModelOverride, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return SubagentModelOverride{}, nil
+	}
+	usable, err := usableModelByID(ctx, fac, id)
+	if err != nil {
+		return SubagentModelOverride{}, err
+	}
+	entry := usable.Entry
+	return SubagentModelOverride{
+		ModelID:  strings.TrimSpace(entry.ID),
+		Provider: strings.TrimSpace(entry.Provider),
+		Model:    strings.TrimSpace(entry.Model),
+		Effort:   appcfg.ReasoningEffort(entry.Params),
+		Entry:    &entry,
+		Version:  usable.Row.UpdatedAt,
+	}, nil
 }
 
 type subagentModelOverrideKey struct{}
@@ -4190,6 +4413,12 @@ func (w *subagentModelOverrideLLM) Execute(ctx context.Context, messages []llm.M
 // part of the key: twin rows of one pair are different clients.
 func (w *subagentModelOverrideLLM) clientFor(override SubagentModelOverride) (llm.LLM, error) {
 	key := strings.ToLower(strings.TrimSpace(override.ModelID) + "/" + strings.TrimSpace(override.Provider) + "/" + strings.TrimSpace(override.Model))
+	// A live row's client is keyed by its version too: the row can be edited
+	// mid-run (new key, new endpoint), and the next dispatch on it must build
+	// a new client rather than reuse the stale one.
+	if override.Entry != nil {
+		key += fmt.Sprintf("/v%d", override.Version)
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if client, ok := w.clients[key]; ok && client != nil {
@@ -4240,10 +4469,23 @@ func ConfiguredModelClientWithEffort(cfg *appcfg.Root, agentType, modelID, provi
 	if effort = strings.TrimSpace(effort); effort != "" {
 		entry.Params = appcfg.WithReasoningEffort(entry.Params, effort)
 	}
+	return modelClientFromEntry(entry, "")
+}
+
+// modelClientFromEntry builds the client for one resolved configuration
+// entry. It is the tail every client builder shares: the snapshot path
+// (ConfiguredModelClientWithEffort) resolves its entry first and lands here,
+// and a live row the model argument named skips the snapshot entirely and
+// starts here — a row added after this turn's configuration was adopted is
+// dispatchable without waiting for the next adoption. effort overlays the
+// entry's params the way a session's own selection overlays them.
+func modelClientFromEntry(entry appcfg.AgentLLMProviderConfig, effort string) (llm.LLM, error) {
+	if effort = strings.TrimSpace(effort); effort != "" {
+		entry.Params = appcfg.WithReasoningEffort(entry.Params, effort)
+	}
 	chain := llmYAMLsFromResolved([]appcfg.AgentLLMProviderConfig{entry})
 	if len(chain) == 0 || chain[0] == nil {
-		return nil, fmt.Errorf("model %s is not configured for this session",
-			subagentModelDisplay(SubagentModelOverride{Provider: provider, Model: model}))
+		return nil, fmt.Errorf("model %s is not configured for this session", subagentModelDisplay(SubagentModelOverride{Provider: entry.Provider, Model: entry.Model}))
 	}
 	return NewLLMFromYAML(chain[0])
 }

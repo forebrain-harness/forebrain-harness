@@ -677,17 +677,11 @@ type ModelChoice struct {
 	SupportsImages bool
 }
 
-// ModelEndpointLabel is the request URL a configured row sends to, as a picker
-// shows it: base url and api path joined exactly as the client joins them
-// (https://api.deepseek.com/chat/completions). A URLVerbatim row (「自定义协议」)
-// sends to its base url as stored, so the path only names the protocol; a row
-// with no endpoint at all (a login-backed provider) has nothing to show.
+// ModelEndpointLabel is the request URL a configured row sends to. The
+// projection itself lives in pkg/config (appcfg.ModelEndpointLabel) next to
+// the row type every reader shares; this name keeps its callers.
 func ModelEndpointLabel(baseURL, apiPath string, urlVerbatim bool) string {
-	base := strings.TrimSpace(baseURL)
-	if urlVerbatim {
-		return base
-	}
-	return base + strings.TrimSpace(apiPath)
+	return appcfg.ModelEndpointLabel(baseURL, apiPath, urlVerbatim)
 }
 
 // ModelChoices lists the models the install has configured, in their

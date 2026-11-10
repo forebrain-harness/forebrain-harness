@@ -959,7 +959,10 @@ const (
 	// filesystem boundary is resolved where the runtime already resolves the
 	// skill roots it names, and the turn environment (pkg/process) asks for it
 	// through this one method rather than re-deriving the expression.
-	runnerMethods = 47
+	// ContinuePlanReviewSubagent joins with 283: the "review it again" entry
+	// that continues the previous plan-reviewer's own conversation, the one
+	// bypass of its one-shot definition.
+	runnerMethods = 48
 )
 
 func TestRunnerOnlyShrinks(t *testing.T) {

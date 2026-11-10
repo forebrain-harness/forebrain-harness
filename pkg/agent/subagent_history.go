@@ -45,7 +45,12 @@ type HistoryEntry struct {
 	RuntimeKind string `json:"runtime_kind,omitempty"`
 	OneShot     bool   `json:"one_shot,omitempty"`
 	Continuable bool   `json:"continuable,omitempty"`
-	DefSource   string `json:"definition_source,omitempty"`
+	// ModelLive marks a run pinned to a row read live from the model table
+	// (the model argument named it): a continuation rereads that row rather
+	// than trusting the pin's recorded copy, so the round runs on the row's
+	// current key and endpoint.
+	ModelLive bool   `json:"model_live,omitempty"`
+	DefSource string `json:"definition_source,omitempty"`
 	// ModelProvider and Model are the model a dispatch-time override put
 	// this agent on; empty when it runs on its definition's or the
 	// conversation's model.

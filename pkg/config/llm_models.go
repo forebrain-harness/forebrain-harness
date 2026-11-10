@@ -295,6 +295,28 @@ func llmProviderFromLegacyEntry(entry AgentLLMProviderConfig) AgentLLMProviderCo
 
 // llmProviderFromModelRow projects one fb_llm_models row into the view.
 func llmProviderFromModelRow(row LLMModelConfig) AgentLLMProviderConfig {
+	return ProviderFromModelRow(row)
+}
+
+// ModelEndpointLabel is the request URL a configured row sends to, as a picker
+// shows it: base url and api path joined exactly as the client joins them
+// (https://api.deepseek.com/chat/completions). A URLVerbatim row (「自定义协议」)
+// sends to its base url as stored, so the path only names the protocol; a row
+// with no endpoint at all (a login-backed provider) has nothing to show.
+func ModelEndpointLabel(baseURL, apiPath string, urlVerbatim bool) string {
+	base := strings.TrimSpace(baseURL)
+	if urlVerbatim {
+		return base
+	}
+	return base + strings.TrimSpace(apiPath)
+}
+
+// ProviderFromModelRow is llmProviderFromModelRow spelled for callers outside
+// the package (283: the subagent dispatch reads a row live and needs the same
+// entry the snapshot view would have projected). ConfiguredLLMs routes through
+// it, so a row read live and a row read through the snapshot carry the same
+// projection.
+func ProviderFromModelRow(row LLMModelConfig) AgentLLMProviderConfig {
 	provider, model, baseURL, apiPath := NormalizeLLMModelIdentity(
 		row.Provider, row.Model, row.BaseURL, row.APIPath)
 	out := AgentLLMProviderConfig{

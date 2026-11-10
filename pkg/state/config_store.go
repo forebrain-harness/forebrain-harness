@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
@@ -458,6 +460,65 @@ type LLMModel struct {
 
 	CreatedAt int64 // unix ms
 	UpdatedAt int64 // unix ms
+}
+
+// ConfigRow projects this row into the configuration view's model type: the
+// one conversion every reader of a live row shares (283), so a row the
+// subagent dispatch reads from the table carries the same params and caps the
+// snapshot's rows do. The identity fields are not normalized here — the view's
+// own projection (appcfg.ProviderFromModelRow) does that on top.
+func (m LLMModel) ConfigRow() (appcfg.LLMModelConfig, error) {
+	params, err := appcfg.ParseLLMRequestParamsJSON(m.ParamsJSON)
+	if err != nil {
+		return appcfg.LLMModelConfig{}, err
+	}
+	return appcfg.LLMModelConfig{
+		ID:       m.ID,
+		Provider: m.Provider,
+		Model:    m.Model,
+		BaseURL:  m.BaseURL,
+		APIPath:  m.APIPath,
+		APIKey:   m.APIKey,
+		Params:   params,
+		Caps: appcfg.LLMModelCaps{
+			Images:        m.CapImages,
+			PDF:           m.CapPDF,
+			Video:         m.CapVideo,
+			Audio:         m.CapAudio,
+			Reasoning:     m.CapReasoning,
+			ReasoningOff:  m.CapReasoningOff,
+			Efforts:       m.CapEfforts,
+			DefaultEffort: m.CapDefaultEffort,
+			ContextWindow: m.CapContextWindow,
+			MaxOutput:     m.CapMaxOutput,
+		},
+		URLVerbatim:     m.URLVerbatim,
+		SubagentAllowed: m.SubagentAllowed,
+	}, nil
+}
+
+// ModelOverrideFromCaps projects a row's capability columns into the model
+// catalog's override type. ok is false for a row that names no capability at
+// all. It lives in pkg/state — which already imports pkg/config and pkg/llm —
+// rather than on appcfg.LLMModelCaps, because pkg/config's production files
+// do not import pkg/llm and must not start to (the package graph pins that).
+func ModelOverrideFromCaps(caps appcfg.LLMModelCaps) (llm.ModelOverride, bool) {
+	if caps.Images == nil && caps.PDF == nil && caps.Video == nil && caps.Audio == nil &&
+		caps.Reasoning == nil && caps.ReasoningOff == nil && caps.Efforts == nil &&
+		caps.ContextWindow == nil && caps.MaxOutput == nil {
+		return llm.ModelOverride{}, false
+	}
+	return llm.ModelOverride{
+		SupportsImages: caps.Images,
+		SupportsPDF:    caps.PDF,
+		SupportsVideo:  caps.Video,
+		SupportsAudio:  caps.Audio,
+		CanReason:      caps.Reasoning,
+		ReasoningOff:   caps.ReasoningOff,
+		Efforts:        caps.Efforts,
+		ContextWindow:  caps.ContextWindow,
+		MaxOutput:      caps.MaxOutput,
+	}, true
 }
 
 // ErrLLMModelExists reports that another row already has this identity.
