@@ -612,6 +612,15 @@ func (s *ChatSession) approvalGate() *turn.PendingApprovalGate {
 				modelConfigFromChatSession(s), chatSessionActiveAgentName(s), sel.ModelID, sel.Provider, sel.Model,
 			)
 		},
+		// The hand-off row needs the project's root: the executor's worktree
+		// is created from its repository. A conversation whose runner resolves
+		// no root cannot hand off, which is what an empty answer says.
+		ProjectRoot: func(_ context.Context, sessionID string) string {
+			if r := s.conversationRunner(strings.TrimSpace(sessionID)); r != nil {
+				return r.ProjectRoot
+			}
+			return ""
+		},
 	}
 	if s.actionSvc() != nil {
 		gate.Actions = s.actionSvc()
@@ -651,6 +660,9 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 	}
 	if decision.RequestPlanReview != nil {
 		return s.completeSurfacePlanReviewRequest(ctx, actionID, *decision.RequestPlanReview)
+	}
+	if decision.RequestPlanReviewAgain {
+		return s.completeSurfacePlanReviewAgain(ctx, actionID)
 	}
 	act, aerr := s.actionSvc().Get(ctx, actionID)
 	if aerr != nil || act == nil {
@@ -709,6 +721,7 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 		// plan collected reach the model when the denial is resumed, composed
 		// there (resumeAgentContext), so the conversation never displays them.
 		Permissions: decision.RequestPermissionsResponse, Reason: decision.DenyReason, ClearContext: decision.ClearContext, PlanOnly: decision.PlanOnly,
+		HandOffModel: handOffModelOf(decision.HandOffModel),
 	})
 	if err != nil {
 		return err
@@ -869,7 +882,7 @@ func approvalChoice(act *state.Action, decision turn.ToolApprovalDecision) strin
 // does; approvalDisplayRecord is what turns that into a record of its own.
 func approvalDecisionActionStatus(actionKind string, decision turn.ToolApprovalDecision) string {
 	switch {
-	case decision.RequestPlanReview != nil:
+	case decision.RequestPlanReview != nil, decision.RequestPlanReviewAgain:
 		return ""
 	case decision.Cancelled:
 		return string(state.ActionCancelled)
@@ -899,7 +912,7 @@ const approvalDisplayDecisionReviewRequested = "review_requested"
 // afterwards - but it does print a line, so it gets an id of its own, keyed by
 // the model that was asked, rather than claiming a decision nobody made. ok is
 // false when the decision names no record at all.
-func approvalDisplayRecord(actionID, actionKind string, decision turn.ToolApprovalDecision) (id string, reportedDecision string, ok bool) {
+func approvalDisplayRecord(actionID, actionKind string, decision turn.ToolApprovalDecision, previousReviewID string) (id string, reportedDecision string, ok bool) {
 	actionID = strings.TrimSpace(actionID)
 	if actionID == "" {
 		return "", "", false
@@ -914,6 +927,16 @@ func approvalDisplayRecord(actionID, actionKind string, decision turn.ToolApprov
 			id += row + ":"
 		}
 		return id + strings.TrimSpace(review.Provider) + ":" + strings.TrimSpace(review.Model),
+			approvalDisplayDecisionReviewRequested, true
+	}
+	if decision.RequestPlanReviewAgain {
+		// The same chain a review request uses, keyed by the review it
+		// continues: asking twice — review, revise, review again — leaves one
+		// record per ask rather than overwriting the first.
+		if previousReviewID == "" {
+			return "", "", false
+		}
+		return "approval-review:" + actionID + ":again:" + previousReviewID,
 			approvalDisplayDecisionReviewRequested, true
 	}
 	status := approvalDecisionActionStatus(actionKind, decision)
@@ -1090,7 +1113,45 @@ func (s *ChatSession) completeSurfacePlanReviewRequest(ctx context.Context, acti
 	if strings.TrimSpace(selection.Model) == "" {
 		return fmt.Errorf("plan review requires a model")
 	}
-	s.runPlanReview(ctx, actionID, selection)
+	s.runPlanReview(ctx, actionID, selection, nil)
+	return nil
+}
+
+// handOffModelOf projects the picked option into the reply's model shape:
+// nil stays nil, the fields are trimmed.
+func handOffModelOf(option *turn.PlanReviewModelOption) *turn.Model {
+	if option == nil {
+		return nil
+	}
+	return &turn.Model{
+		ID:       strings.TrimSpace(option.ID),
+		Provider: strings.TrimSpace(option.Provider),
+		Model:    strings.TrimSpace(option.Model),
+	}
+}
+
+// completeSurfacePlanReviewAgain continues the previous review's own
+// subagent conversation (语义 6): the reviewer the user last asked looks at
+// the revised plan with its earlier investigation already in context. The
+// previous review is re-read from the gate — never trusted from the screen —
+// so a restart or a rebuild cannot continue the wrong reviewer.
+func (s *ChatSession) completeSurfacePlanReviewAgain(ctx context.Context, actionID string) error {
+	act, err := s.actionSvc().Get(ctx, actionID)
+	if err != nil || act == nil {
+		return fmt.Errorf("load action: %w", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(act.Kind), "exit_plan_mode") {
+		return fmt.Errorf("plan review is only valid for an exit-plan decision")
+	}
+	req, err := s.approvalGate().Pending(ctx, act.SessionID)
+	if err != nil {
+		return err
+	}
+	if req == nil || req.PreviousPlanReview == nil {
+		return fmt.Errorf("there is no earlier review to continue")
+	}
+	prev := req.PreviousPlanReview
+	s.runPlanReview(ctx, actionID, prev.Model, &prev.PlanReviewAgain)
 	return nil
 }
 
@@ -1106,7 +1167,7 @@ func (s *ChatSession) completeSurfacePlanReviewRequest(ctx context.Context, acti
 // out of the shared flow (turn.RunPlanReview), and its closing event is also
 // its storage: this surface no longer keeps the result anywhere, so a restart
 // or another surface reading the conversation serves the same review.
-func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, selection turn.PlanReviewModelOption) {
+func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, selection turn.PlanReviewModelOption, again *turn.PlanReviewAgain) {
 	if s == nil {
 		return
 	}
@@ -1152,6 +1213,7 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 		ProjectKey:  runnerProjectKey(s.runner()),
 		Transcripts: transcripts,
 		Reviewer:    reviewer,
+		Again:       again,
 		Publish: func(ctx context.Context, evt event.RunEvent) error {
 			if s == nil || s.runner() == nil || s.runner().Events == nil {
 				return nil

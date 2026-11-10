@@ -30089,7 +30089,7 @@ func TestPlanReviewRequestIsRecordedAsItselfNotAsAResolution(t *testing.T) {
 	}
 	review := turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5"}
 
-	id, reported, ok := approvalDisplayRecord(req.ActionID, req.ActionKind, turn.ToolApprovalDecision{RequestPlanReview: &review})
+	id, reported, ok := approvalDisplayRecord(req.ActionID, req.ActionKind, turn.ToolApprovalDecision{RequestPlanReview: &review}, "")
 	require.True(t, ok, "a printed line must have a record")
 	if strings.HasPrefix(id, "approval-resolved:") {
 		t.Fatalf("a review request claimed a resolution id: %q", id)
@@ -30099,7 +30099,7 @@ func TestPlanReviewRequestIsRecordedAsItselfNotAsAResolution(t *testing.T) {
 	}
 	// The gate is answered afterwards, and that answer is the resolution: its id
 	// is the one the post-decision publish builds, so the two writes stay one.
-	resolvedID, resolved, ok := approvalDisplayRecord(req.ActionID, req.ActionKind, turn.ToolApprovalDecision{Approved: true})
+	resolvedID, resolved, ok := approvalDisplayRecord(req.ActionID, req.ActionKind, turn.ToolApprovalDecision{Approved: true}, "")
 	require.True(t, ok)
 	if resolvedID == id {
 		t.Fatalf("the review note and the decision share one record id: %q", id)
@@ -30117,9 +30117,9 @@ func TestPlanReviewRequestRecordNamesTheRow(t *testing.T) {
 	first := turn.PlanReviewModelOption{ID: "row-1", Provider: "openai", Model: "gpt-5"}
 	second := turn.PlanReviewModelOption{ID: "row-2", Provider: "openai", Model: "gpt-5"}
 
-	firstID, _, ok := approvalDisplayRecord(actionID, "exit_plan_mode", turn.ToolApprovalDecision{RequestPlanReview: &first})
+	firstID, _, ok := approvalDisplayRecord(actionID, "exit_plan_mode", turn.ToolApprovalDecision{RequestPlanReview: &first}, "")
 	require.True(t, ok)
-	secondID, _, ok := approvalDisplayRecord(actionID, "exit_plan_mode", turn.ToolApprovalDecision{RequestPlanReview: &second})
+	secondID, _, ok := approvalDisplayRecord(actionID, "exit_plan_mode", turn.ToolApprovalDecision{RequestPlanReview: &second}, "")
 	require.True(t, ok)
 	if firstID == secondID {
 		t.Fatalf("the twin rows share one record id: %q", firstID)
@@ -30130,7 +30130,7 @@ func TestPlanReviewRequestRecordNamesTheRow(t *testing.T) {
 	// A selection with no row id — an approval replayed from before ids — keeps
 	// the chain it has always had.
 	anonymous := turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5"}
-	anonymousID, _, ok := approvalDisplayRecord(actionID, "exit_plan_mode", turn.ToolApprovalDecision{RequestPlanReview: &anonymous})
+	anonymousID, _, ok := approvalDisplayRecord(actionID, "exit_plan_mode", turn.ToolApprovalDecision{RequestPlanReview: &anonymous}, "")
 	require.True(t, ok)
 	require.Equal(t, "approval-review:"+actionID+":openai:gpt-5", anonymousID)
 }

@@ -303,6 +303,13 @@ func approvalConfirmationText(req turn.ToolApprovalRequest, decision turn.ToolAp
 			decision.RequestPlanReview.Provider, decision.RequestPlanReview.Model,
 		) + " to review the plan", true
 	}
+	// Continuing the previous review decides nothing either; the line says
+	// who is looking again, from the gate's own record of that review.
+	if decision.RequestPlanReviewAgain && req.PreviousPlanReview != nil {
+		return "You asked " + planReviewModelDisplay(
+			req.PreviousPlanReview.Model.Provider, req.PreviousPlanReview.Model.Model,
+		) + " to review the plan again", true
+	}
 
 	// Plan-mode entry is an action-level approval, rather than permission to run
 	// its JSON input. Match both the internal and canonical tool names and give
@@ -324,6 +331,10 @@ func approvalConfirmationText(req turn.ToolApprovalRequest, decision turn.ToolAp
 
 	if isApprovalExitPlanMode(req) {
 		switch {
+		case decision.Approved && decision.HandOffModel != nil:
+			return "You approved forebrain to exit plan mode and hand off to " + planReviewModelDisplay(
+				decision.HandOffModel.Provider, decision.HandOffModel.Model,
+			), true
 		case decision.Approved:
 			return "You approved forebrain to exit plan mode", true
 		case decision.Denied:

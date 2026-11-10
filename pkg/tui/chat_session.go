@@ -1826,7 +1826,11 @@ func (s *ChatSession) RecordApprovalDecision(req turn.ToolApprovalRequest, decis
 	if s == nil || actionID == "" {
 		return
 	}
-	id, reported, ok := approvalDisplayRecord(actionID, req.ActionKind, decision)
+	previousReviewID := ""
+	if req.PreviousPlanReview != nil {
+		previousReviewID = strings.TrimSpace(req.PreviousPlanReview.ReviewID)
+	}
+	id, reported, ok := approvalDisplayRecord(actionID, req.ActionKind, decision, previousReviewID)
 	if !ok {
 		return
 	}
