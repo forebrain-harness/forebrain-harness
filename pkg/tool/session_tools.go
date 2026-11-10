@@ -472,6 +472,36 @@ func actionKeptPlanOnly(act *state.Action) bool {
 	return answer.PlanOnly
 }
 
+// actionHandOffModel is the tool-package twin of turn.ActionHandOffModel
+// (the turn package imports this one, so it cannot be used here): it reads
+// the hand_off_model object out of an approved action's answer JSON. ok is
+// false when the decision carried no hand-off, or named no model.
+func actionHandOffModel(act *state.Action) (state.PlanHandOff, bool) {
+	if act == nil || act.Status != state.ActionApproved {
+		return state.PlanHandOff{}, false
+	}
+	var answer struct {
+		HandOffModel *struct {
+			ID       string `json:"id"`
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+		} `json:"hand_off_model"`
+	}
+	_ = json.Unmarshal([]byte(act.AnswerJSON), &answer)
+	if answer.HandOffModel == nil {
+		return state.PlanHandOff{}, false
+	}
+	handOff := state.PlanHandOff{
+		ModelID:  strings.TrimSpace(answer.HandOffModel.ID),
+		Provider: strings.TrimSpace(answer.HandOffModel.Provider),
+		Model:    strings.TrimSpace(answer.HandOffModel.Model),
+	}
+	if handOff.Model == "" {
+		return state.PlanHandOff{}, false
+	}
+	return handOff, true
+}
+
 // planFileTitle returns the plan file's first "# " heading, falling back to
 // the file name when it has none.
 func planFileTitle(planFile, fallback string) string {
@@ -575,6 +605,82 @@ func ApprovedPlanExecutionPrompt(planFile string) string {
 	return fmt.Sprintf(planExecutionContractFormat, planFile, state.ImplementationHeading)
 }
 
+// planHandOffContractFormat is the contract a handed-off plan runs under,
+// written after the improve skill's execute variant (owner 2026-11-10): the
+// primary agent stays as the tech lead, one executor subagent does the work
+// on the chosen model in its own git worktree, and the verdict is the tech
+// lead's own review. It is the twin of planExecutionContractFormat above and
+// must move with it when either changes. The placeholders are the plan file
+// path (%[1]s), the model's display name (%[2]s, used twice), the model
+// reference passed to subagent_run (%[3]s, always the configured row id) and
+// state.ImplementationHeading (%[4]s).
+const planHandOffContractFormat = `You are the tech lead for an approved plan. The user handed its implementation to another model, %[2]s. The plan file is:
+
+  %[1]s
+
+It remains writable in this mode; keep the original plan readable beside the implementation record.
+
+You do not implement the plan yourself. One executor subagent does, on %[2]s, in its own git worktree. You dispatch it, review its work the way a tech lead reviews a pull request against its spec, and give the verdict. Never merge, push, rebase or commit on the user's current branch, and never remove the executor's worktree or branch: merging is the user's decision.
+
+## Before you dispatch
+
+1. Confirm the project is a git repository: "git rev-parse --show-toplevel" must succeed. If it does not, stop and tell the user this hand-off needs a git repository.
+2. Run the plan's drift check yourself in the current checkout, and if the plan declares dependencies, confirm they are complete. A mismatch is a STOP: report it to the user instead of dispatching.
+3. Run "git status --porcelain". A new worktree starts from the last commit, so uncommitted changes in files the plan touches will not be in it. If there are any, ask the user with user_interaction whether to proceed from the last commit or to wait. Never commit, stash or discard their changes yourself.
+
+## Dispatch exactly one executor
+
+Read the whole plan file now. Call subagent_run with subagent_type "general-purpose", model "%[3]s", a short title, and a task made of these four parts, in order:
+
+1. Where to work. Pick a short kebab-case name after the plan and give the exact command: "git worktree add -b <branch> <main worktree>/.worktrees/<name> HEAD", where the main worktree is the first path "git worktree list" prints. Every read, edit, command and commit happens inside that directory and nowhere else.
+2. This preamble, word for word:
+   You are the executor for the implementation plan below. Work only inside the git worktree named above. Follow the plan step by step. Run every verification command and confirm the expected result before moving on. Touch only the files the plan lists as in scope. If any STOP condition occurs, stop immediately and report. Do not improvise around obstacles. A fresh worktree has no installed dependencies or build output: install and build what the verification commands need first. Commit your work in the worktree, on its own branch, following the plan's git workflow when it has one; never push, merge or touch any other branch. Skip any instruction to update a backlog index or the plan file: your reviewer maintains them. Before reporting, audit every claim in your report against an actual tool result from this session; only report what you can point to evidence for, and if a verification failed or was skipped, say so plainly. When finished, reply with exactly the report format below.
+3. This report format:
+   STATUS: COMPLETE | STOPPED
+   WORKTREE: path and branch
+   STEPS: per step - done/skipped + verification command result
+   STOPPED BECAUSE: (only if STOPPED) which STOP condition, what was observed
+   FILES CHANGED: list
+   NOTES: deviations, surprises, judgment calls
+4. The plan itself, copied in whole, followed by its file path. Do not summarize or shorten it.
+
+## Review: your real job
+
+Run your checks inside the executor's worktree; it is isolated and disposable. Never fix anything yourself.
+
+1. Re-run every done criterion of the plan in the worktree. Do not trust the report: verify.
+2. Scope: compare "git -C <worktree> diff --stat <base>..HEAD" and "git -C <worktree> status --porcelain" with the plan's in-scope list, where <base> is the commit the worktree started from. Any change outside scope fails review.
+3. Read the full diff. Judge it against the plan's intent (does it solve the actual problem?) and against the project conventions the plan names.
+4. Audit the new tests: read what they assert. A test that asserts nothing meaningful proves nothing.
+
+Documented deviations are judged on merit: a minimal, explained adaptation that serves the plan's intent and stays in scope is acceptable; an undocumented deviation fails review.
+
+## Verdict
+
+- APPROVE: every criterion passes in your own run, scope is clean, quality holds.
+- REVISE: fixable gaps. Send the same executor specific, actionable feedback with subagent_continue, then review again. At most two revision rounds; after that, BLOCK.
+- BLOCK: a STOP condition was hit, scope was violated beyond repair, or the revision rounds ran out.
+
+## Close the plan loop
+
+Before your final answer, mark each plan task done, partially done or not done and append exactly the heading %[4]s to the plan file. Record the verdict, the worktree path and branch, the executor's commits, every deviation and why, anything not done, and each verification result you ran yourself.
+
+Finish with this report; omit BLOCKED BECAUSE unless blocked:
+
+VERDICT: APPROVE | BLOCK
+WORKTREE: path and branch (merging it is the user's decision)
+CHECKS: each done criterion - pass or fail, from your own run
+SCOPE: files changed, and anything outside scope
+BLOCKED BECAUSE: what stopped it
+NOTES: deviations, revision rounds, anything left unresolved`
+
+// HandOffPlanExecutionPrompt is the contract the tech lead executes a handed-
+// off plan under. modelRef is what the dispatch passes to subagent_run's
+// model argument: the configured row id, never a provider/model pair.
+func HandOffPlanExecutionPrompt(planFile, modelDisplay, modelRef string) string {
+	return fmt.Sprintf(planHandOffContractFormat, planFile, modelDisplay, modelRef, state.ImplementationHeading)
+}
+
 // newExitPlanModeToolFor is newExitPlanModeTool for a concrete runtime. A nil
 // rt keeps the historical coding behaviour; an office runtime refuses the
 // call outside plan mode (the user enters plan mode explicitly, the wrapper
@@ -651,10 +757,35 @@ func newExitPlanModeToolFor(st *State, stateRoot, projectKey string, rt *AgentTo
 					actionID = ApprovedActionIDFromContext(ctx)
 				}
 				planOnly := false
+				var handOff state.PlanHandOff
+				handedOff := false
 				if actionID != "" {
 					if act, err := rt.Actions.Get(ctx, actionID); err == nil {
 						planOnly = actionKeptPlanOnly(act)
+						handOff, handedOff = actionHandOffModel(act)
 					}
+				}
+				if handedOff {
+					// The user handed the plan's implementation to another model:
+					// leave plan mode the way an approved exit does and record the
+					// row, so the recurring reminder is this contract rather than
+					// the self-execution one. The conversation's own model stays —
+					// the primary agent is the tech lead, the chosen row runs the
+					// executor subagent.
+					if _, err := state.HandOffPlan(stateRoot, sid, restored, handOff); err != nil {
+						return "", err
+					}
+					st.SetRuntimeSessionMode(ctx, sid, string(restored), planDir)
+					display := llm.FormatProviderModel(handOff.Provider, handOff.Model)
+					ref := strings.TrimSpace(handOff.ModelID) // B1 guarantees a row id
+					b, _ := json.Marshal(map[string]any{
+						"mode":           string(restored),
+						"plan_file":      planFile,
+						"hand_off_model": map[string]any{"id": handOff.ModelID, "provider": handOff.Provider, "model": handOff.Model},
+						"message":        "Exited plan mode. The user handed this plan to " + display + ": dispatch one executor subagent on that model to carry it out in its own git worktree, then review its work. Do not implement the plan yourself.",
+						"on_completion":  HandOffPlanExecutionPrompt(planFile, display, ref),
+					})
+					return string(b), nil
 				}
 				if planOnly {
 					// The plan itself is the deliverable: leave plan mode the

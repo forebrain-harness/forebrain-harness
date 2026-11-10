@@ -3503,3 +3503,22 @@ func TestListUsableModelsCard(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, answer.String(), envelope.String())
 }
+
+// A handed-off exit states where the plan went — the card says the model,
+// not the tech-lead instructions, which are the model-facing contract's
+// business and stay out of the card.
+func TestHandedOffExitPlanModeStepNamesTheModel(t *testing.T) {
+	t.Parallel()
+	payload := `{"mode":"agent","plan_file":"/tmp/plans/p/plan.md",` +
+		`"hand_off_model":{"id":"llm_row2","provider":"zhipuai","model":"glm-5.3"},` +
+		`"message":"Exited plan mode. The user handed this plan to zhipuai/glm-5.3: dispatch one executor subagent on that model to carry it out in its own git worktree, then review its work. Do not implement the plan yourself."}`
+	evt := StepEvent{Kind: StepKindToolCompleted, ToolName: "exit_plan_mode", Output: map[string]any{"output": payload}}
+	body, trunc := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	if trunc || body != "Handed off to zhipuai/glm-5.3" {
+		t.Fatalf("hand-off body=%q trunc=%t, want the model line", body, trunc)
+	}
+	// The self-execution wording never appears for a handed-off exit.
+	if strings.Contains(body, "Exited plan mode") {
+		t.Fatalf("hand-off body leaked the ordinary message: %q", body)
+	}
+}

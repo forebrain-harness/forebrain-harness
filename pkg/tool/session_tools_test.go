@@ -973,3 +973,129 @@ func TestCodingExitPlanModeNeedsNoPlanMode(t *testing.T) {
 		t.Fatalf("a coding agent-mode call must pass the office guard, got: %v", err)
 	}
 }
+
+// TestHandOffContractRendersVerbatim pins the hand-off contract byte for
+// byte: the words are the owner-approved execute variant (2026-11-10), so a
+// drifted sentence here is a behavior change, not a wording tweak. The
+// rendering must also consume every placeholder — no %! artifact survives.
+func TestHandOffContractRendersVerbatim(t *testing.T) {
+	rendered := HandOffPlanExecutionPrompt("/plans/283/plan.md", "zhipuai/glm-5.3", "llm_row2")
+	if strings.Contains(rendered, "%!") {
+		t.Fatalf("a placeholder was not consumed:\n%s", rendered)
+	}
+	const want = `You are the tech lead for an approved plan. The user handed its implementation to another model, zhipuai/glm-5.3. The plan file is:
+
+  /plans/283/plan.md
+
+It remains writable in this mode; keep the original plan readable beside the implementation record.
+
+You do not implement the plan yourself. One executor subagent does, on zhipuai/glm-5.3, in its own git worktree. You dispatch it, review its work the way a tech lead reviews a pull request against its spec, and give the verdict. Never merge, push, rebase or commit on the user's current branch, and never remove the executor's worktree or branch: merging is the user's decision.
+
+## Before you dispatch
+
+1. Confirm the project is a git repository: "git rev-parse --show-toplevel" must succeed. If it does not, stop and tell the user this hand-off needs a git repository.
+2. Run the plan's drift check yourself in the current checkout, and if the plan declares dependencies, confirm they are complete. A mismatch is a STOP: report it to the user instead of dispatching.
+3. Run "git status --porcelain". A new worktree starts from the last commit, so uncommitted changes in files the plan touches will not be in it. If there are any, ask the user with user_interaction whether to proceed from the last commit or to wait. Never commit, stash or discard their changes yourself.
+
+## Dispatch exactly one executor
+
+Read the whole plan file now. Call subagent_run with subagent_type "general-purpose", model "llm_row2", a short title, and a task made of these four parts, in order:
+
+1. Where to work. Pick a short kebab-case name after the plan and give the exact command: "git worktree add -b <branch> <main worktree>/.worktrees/<name> HEAD", where the main worktree is the first path "git worktree list" prints. Every read, edit, command and commit happens inside that directory and nowhere else.
+2. This preamble, word for word:
+   You are the executor for the implementation plan below. Work only inside the git worktree named above. Follow the plan step by step. Run every verification command and confirm the expected result before moving on. Touch only the files the plan lists as in scope. If any STOP condition occurs, stop immediately and report. Do not improvise around obstacles. A fresh worktree has no installed dependencies or build output: install and build what the verification commands need first. Commit your work in the worktree, on its own branch, following the plan's git workflow when it has one; never push, merge or touch any other branch. Skip any instruction to update a backlog index or the plan file: your reviewer maintains them. Before reporting, audit every claim in your report against an actual tool result from this session; only report what you can point to evidence for, and if a verification failed or was skipped, say so plainly. When finished, reply with exactly the report format below.
+3. This report format:
+   STATUS: COMPLETE | STOPPED
+   WORKTREE: path and branch
+   STEPS: per step - done/skipped + verification command result
+   STOPPED BECAUSE: (only if STOPPED) which STOP condition, what was observed
+   FILES CHANGED: list
+   NOTES: deviations, surprises, judgment calls
+4. The plan itself, copied in whole, followed by its file path. Do not summarize or shorten it.
+
+## Review: your real job
+
+Run your checks inside the executor's worktree; it is isolated and disposable. Never fix anything yourself.
+
+1. Re-run every done criterion of the plan in the worktree. Do not trust the report: verify.
+2. Scope: compare "git -C <worktree> diff --stat <base>..HEAD" and "git -C <worktree> status --porcelain" with the plan's in-scope list, where <base> is the commit the worktree started from. Any change outside scope fails review.
+3. Read the full diff. Judge it against the plan's intent (does it solve the actual problem?) and against the project conventions the plan names.
+4. Audit the new tests: read what they assert. A test that asserts nothing meaningful proves nothing.
+
+Documented deviations are judged on merit: a minimal, explained adaptation that serves the plan's intent and stays in scope is acceptable; an undocumented deviation fails review.
+
+## Verdict
+
+- APPROVE: every criterion passes in your own run, scope is clean, quality holds.
+- REVISE: fixable gaps. Send the same executor specific, actionable feedback with subagent_continue, then review again. At most two revision rounds; after that, BLOCK.
+- BLOCK: a STOP condition was hit, scope was violated beyond repair, or the revision rounds ran out.
+
+## Close the plan loop
+
+Before your final answer, mark each plan task done, partially done or not done and append exactly the heading ## Implementation Status to the plan file. Record the verdict, the worktree path and branch, the executor's commits, every deviation and why, anything not done, and each verification result you ran yourself.
+
+Finish with this report; omit BLOCKED BECAUSE unless blocked:
+
+VERDICT: APPROVE | BLOCK
+WORKTREE: path and branch (merging it is the user's decision)
+CHECKS: each done criterion - pass or fail, from your own run
+SCOPE: files changed, and anything outside scope
+BLOCKED BECAUSE: what stopped it
+NOTES: deviations, revision rounds, anything left unresolved`
+	if rendered != want {
+		t.Fatalf("contract drifted:\n got: %q\nwant: %q", rendered, want)
+	}
+	for _, marker := range []string{"subagent_run", ".worktrees", "llm_row2", state.ImplementationHeading, "general-purpose"} {
+		if !strings.Contains(rendered, marker) {
+			t.Fatalf("contract missing %q", marker)
+		}
+	}
+}
+
+// TestExitPlanModeHandOffRecordsTheRowAndReturnsTheContract pins the replay:
+// an approved answer carrying hand_off_model leaves plan mode, writes the row
+// into the mode state, and answers with the hand-off contract rather than the
+// self-execution one.
+func TestExitPlanModeHandOffRecordsTheRowAndReturnsTheContract(t *testing.T) {
+	st, rt, home, sid := officePlanOnlySetup(t, `{"decision":"accept","hand_off_model":{"id":"llm_row2","provider":"zhipuai","model":"glm-5.3"}}`)
+
+	tool, err := newExitPlanModeToolFor(st, home, "", rt)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	tctx := withSession(context.Background(), sid)
+	tctx = WithConversationSessionID(tctx, "conv-office-exit")
+	tctx = WithRunID(tctx, "run-office-exit")
+	raw, err := tool.Handle(tctx, `{}`)
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw.(string)), &obj); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	handOff, has := obj["hand_off_model"].(map[string]any)
+	if !has || handOff["id"] != "llm_row2" || handOff["provider"] != "zhipuai" || handOff["model"] != "glm-5.3" {
+		t.Fatalf("result must carry the hand-off row: %s", raw)
+	}
+	if want := "Exited plan mode. The user handed this plan to zhipuai/glm-5.3: dispatch one executor subagent on that model to carry it out in its own git worktree, then review its work. Do not implement the plan yourself."; obj["message"] != want {
+		t.Fatalf("message must be the verbatim hand-off sentence:\n got: %q\nwant: %q", obj["message"], want)
+	}
+	on, _ := obj["on_completion"].(string)
+	for _, marker := range []string{"subagent_run", ".worktrees", "llm_row2", state.ImplementationHeading} {
+		if !strings.Contains(on, marker) {
+			t.Fatalf("on_completion missing %q: %s", marker, on)
+		}
+	}
+	if strings.Contains(on, "You are the primary executor") {
+		t.Fatal("a handed-off plan must not run the self-execution contract")
+	}
+
+	final, _ := state.Get(home, sid)
+	if final.Mode != state.ModeAgent || final.PlanKeptOnly {
+		t.Fatalf("mode state after a hand-off = %+v, want plain agent", final)
+	}
+	if final.PlanHandOff == nil || final.PlanHandOff.ModelID != "llm_row2" || final.PlanHandOff.Model != "glm-5.3" {
+		t.Fatalf("mode state must record the hand-off row: %+v", final)
+	}
+}

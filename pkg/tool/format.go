@@ -2060,6 +2060,13 @@ type exitPlanModeEnvelope struct {
 	Mode     string                `json:"mode"`
 	PlanFile string                `json:"plan_file"`
 	PlanOnly bool                  `json:"plan_only"`
+	// HandOffModel names the row the plan's implementation was handed to;
+	// nil for every other exit.
+	HandOffModel *struct {
+		ID       string `json:"id"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	} `json:"hand_off_model"`
 	Artifact *exitPlanModeArtifact `json:"artifact"`
 }
 
@@ -2097,6 +2104,11 @@ func formatExitPlanModeStep(evt StepEvent, maxBytes int) (string, bool) {
 		// The message asked the model not to act; the card states the fact
 		// the user cares about instead.
 		return clampBody("Kept the plan as the deliverable: "+parsed.PlanFile, maxBytes)
+	}
+	if parsed.HandOffModel != nil && strings.TrimSpace(parsed.HandOffModel.Model) != "" {
+		// The card states where the plan went; how the tech lead runs the
+		// executor is the model-facing contract's business, not the card's.
+		return clampBody("Handed off to "+llm.FormatProviderModel(parsed.HandOffModel.Provider, parsed.HandOffModel.Model), maxBytes)
 	}
 	body := strings.TrimSpace(parsed.Message)
 	if body == "" {
