@@ -70,11 +70,15 @@ type llmModelRow struct {
 	BaseURL      string `json:"base_url"`
 	APIPath      string `json:"api_path"`
 	// URLVerbatim is 「自定义协议」: requests go to BaseURL as stored.
-	URLVerbatim bool   `json:"url_verbatim"`
-	Protocol    string `json:"protocol"`
-	Endpoint    string `json:"endpoint"`
-	APIKeySet   bool   `json:"api_key_set"`
-	APIKeyLast4 string `json:"api_key_last4,omitempty"`
+	URLVerbatim bool `json:"url_verbatim"`
+	// SubagentAllowed is the row's authorization switch (owner 2026-11-10):
+	// may the agent pick it for a subagent on its own? Closed by default, and
+	// a user's own pick never needs it.
+	SubagentAllowed bool   `json:"subagent_allowed"`
+	Protocol        string `json:"protocol"`
+	Endpoint        string `json:"endpoint"`
+	APIKeySet       bool   `json:"api_key_set"`
+	APIKeyLast4     string `json:"api_key_last4,omitempty"`
 	// APIKey is the stored key in plaintext (owner 2026-11-07: the edit drawer
 	// must be able to reveal it). Empty for a row with no key. Never logged,
 	// never in an error, never in /choices or an event.
@@ -115,6 +119,8 @@ type llmModelWrite struct {
 	Params      *string       `json:"params"`
 	Caps        *llmModelCaps `json:"caps"`
 	URLVerbatim *bool         `json:"url_verbatim"`
+	// SubagentAllowed is the authorization switch; nil leaves it alone.
+	SubagentAllowed *bool `json:"subagent_allowed"`
 }
 
 // llmModelIdWrite is a body that addresses a stored row as well: the
@@ -387,20 +393,23 @@ func (s *Server) llmModelRowOf(r *http.Request, scope llmModelScope, row state.L
 		BaseURL:      row.BaseURL,
 		APIPath:      row.APIPath,
 		URLVerbatim:  row.URLVerbatim,
-		Protocol:     llmModelProtocol(row.Provider, row.APIPath),
-		Endpoint:     turn.ModelEndpointLabel(row.BaseURL, row.APIPath, row.URLVerbatim),
-		APIKeySet:    row.APIKey != "",
-		APIKeyLast4:  secretLast4(row.APIKey),
-		APIKey:       row.APIKey,
-		LoginBacked:  config.CredentialsBackedProvider(row.Provider),
-		Source:       row.Source,
-		SourcePlan:   row.SourcePlan,
-		Params:       row.ParamsJSON,
-		Caps:         llmModelCapsOfRow(row),
-		CatalogCaps:  llmModelCatalogCaps(row.Provider, row.Model),
-		IsDefault:    row.ID == scope.defaultID,
-		DefaultFor:   llmModelDefaultFor(scope.cfg, row.ID),
-		CreatedAt:    row.CreatedAt,
+		// The switch is editable on any row, a subscription's included: it is
+		// a permission, not the row's identity.
+		SubagentAllowed: row.SubagentAllowed,
+		Protocol:        llmModelProtocol(row.Provider, row.APIPath),
+		Endpoint:        turn.ModelEndpointLabel(row.BaseURL, row.APIPath, row.URLVerbatim),
+		APIKeySet:       row.APIKey != "",
+		APIKeyLast4:     secretLast4(row.APIKey),
+		APIKey:          row.APIKey,
+		LoginBacked:     config.CredentialsBackedProvider(row.Provider),
+		Source:          row.Source,
+		SourcePlan:      row.SourcePlan,
+		Params:          row.ParamsJSON,
+		Caps:            llmModelCapsOfRow(row),
+		CatalogCaps:     llmModelCatalogCaps(row.Provider, row.Model),
+		IsDefault:       row.ID == scope.defaultID,
+		DefaultFor:      llmModelDefaultFor(scope.cfg, row.ID),
+		CreatedAt:       row.CreatedAt,
 	}
 	out.EffortsKnown = llmModelApplyLiveCaps(row.ID, &out.CatalogCaps)
 	if sub, ok := gatewaySubscriptionByID(row.Source); ok {
@@ -873,6 +882,10 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 	if write.URLVerbatim != nil {
 		verbatim = *write.URLVerbatim
 	}
+	subagentAllowed := row.SubagentAllowed
+	if write.SubagentAllowed != nil {
+		subagentAllowed = *write.SubagentAllowed
+	}
 
 	// 1. A provider the form offers, or the custom one. A sign-in-backed
 	// provider is added by signing in, never typed in (plan 264/265).
@@ -964,6 +977,7 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 		Source:           row.Source,
 		SourcePlan:       row.SourcePlan,
 		URLVerbatim:      verbatim,
+		SubagentAllowed:  subagentAllowed,
 		CreatedAt:        row.CreatedAt,
 	}
 	// A row a subscription wrote is recognised by its sign-in: its model, its

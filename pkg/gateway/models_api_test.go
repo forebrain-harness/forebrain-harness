@@ -318,6 +318,12 @@ func TestLLMModelsAPISubscriptionRowIsAdvancedOnly(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	require.Contains(t, rec.Body.String(), "订阅来的模型只能改高级配置")
 
+	// The authorization switch is a permission, not the row's identity: it is
+	// editable on a sign-in row like the capability overrides are (283).
+	rec = do(http.MethodPut, "/api/llm-models/"+id, `{"subagent_allowed":true}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"subagent_allowed":true`)
+
 	rec = do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"images":true,"context_window":256000}}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var row struct {

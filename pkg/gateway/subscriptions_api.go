@@ -12,12 +12,14 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -202,6 +204,10 @@ func (s *Server) handleSubscriptionProvision(w http.ResponseWriter, r *http.Requ
 			Model    string `json:"model"`
 			BaseURL  string `json:"base_url"`
 			APIPath  string `json:"api_path"`
+			// SubagentAllowed is the authorization switch for the row this
+			// offer writes (owner 2026-11-10): may the agent pick it for a
+			// subagent on its own? Closed unless the user ticks it.
+			SubagentAllowed bool `json:"subagent_allowed"`
 		} `json:"offers"`
 		KeyID     string `json:"key_id"`
 		CreateKey bool   `json:"create_key"`
@@ -245,6 +251,20 @@ func (s *Server) handleSubscriptionProvision(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		s.failSubscriptionWrite(w, r, err)
 		return
+	}
+	// The authorization each ticked offer carried is written on the row it
+	// just wrote: provisionRows writes one row per offer, in input order, so
+	// the ids line up with the offers and their answers (owner 2026-11-10).
+	if len(ids) != len(chosen) {
+		s.failSubscriptionWrite(w, r, fmt.Errorf("stored %d rows for %d models", len(ids), len(chosen)))
+		return
+	}
+	models := &state.LLMModelStore{DB: env.DB}
+	for i, id := range ids {
+		if err := models.SetSubagentAllowed(r.Context(), id, body.Offers[i].SubagentAllowed); err != nil {
+			s.failSubscriptionWrite(w, r, err)
+			return
+		}
 	}
 	if !hadDefault && len(ids) > 0 {
 		if err := process.SetAgentDefaultModel(r.Context(), s.Env.SQL, agentID, ids[0]); err != nil {

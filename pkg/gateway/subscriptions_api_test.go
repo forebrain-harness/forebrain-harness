@@ -60,15 +60,19 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "没有你选择的那一行")
 
 	// The listed one is written, and the first model an agent gets is its
-	// default.
+	// default. Each offer carries its own subagent authorization, which lands on
+	// the row it wrote (283).
 	rec = do(http.MethodPost, "/api/subscriptions/chatgpt/provision",
-		`{"offers":[{"provider":"chatgpt","model":"gpt-5-codex","base_url":"https://chatgpt.com/backend-api/codex"}]}`)
+		`{"offers":[{"provider":"chatgpt","model":"gpt-5-codex","base_url":"https://chatgpt.com/backend-api/codex","subagent_allowed":true}]}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var written struct {
 		IDs []string `json:"ids"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &written))
 	require.Len(t, written.IDs, 1)
+	rows, _ := llmModelRows(t, do)
+	writtenRow := llmModelByID(t, rows, written.IDs[0])
+	require.Equal(t, true, writtenRow["subagent_allowed"])
 	_, defaultID := llmModelRows(t, do)
 	require.Equal(t, written.IDs[0], defaultID)
 
