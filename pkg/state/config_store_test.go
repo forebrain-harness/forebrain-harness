@@ -684,3 +684,52 @@ func TestEnvVarRejectsInvalidNames(t *testing.T) {
 		}
 	}
 }
+
+// TestLLMModelSubagentAllowedSwitch pins the authorization switch's store
+// path (owner 2026-11-10): the column rides every Create/Update/Get/List, and
+// SetSubagentAllowed flips only it — reporting a missing row with the store's
+// not-found error rather than inventing one.
+func TestLLMModelSubagentAllowedSwitch(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+
+	created, err := store.Create(ctx, LLMModel{Provider: "p", Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.SubagentAllowed {
+		t.Fatal("a row created without the switch must read false")
+	}
+
+	if err := store.SetSubagentAllowed(ctx, created.ID, true); err != nil {
+		t.Fatalf("flip the switch: %v", err)
+	}
+	got, err := store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.SubagentAllowed {
+		t.Fatal("Get did not read the flipped switch")
+	}
+
+	// A full Update carries the column too: the store's ordinary write path
+	// must not silently reset it.
+	got.SubagentAllowed = false
+	if _, err := store.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SubagentAllowed {
+		t.Fatal("Update did not write the switch back")
+	}
+
+	if err := store.SetSubagentAllowed(ctx, "llm_missing", true); !errors.Is(err, ErrLLMModelNotFound) {
+		t.Fatalf("missing row error = %v, want ErrLLMModelNotFound", err)
+	}
+	if err := store.SetSubagentAllowed(ctx, "  ", true); !errors.Is(err, ErrLLMModelNotFound) {
+		t.Fatalf("blank id error = %v, want ErrLLMModelNotFound", err)
+	}
+}

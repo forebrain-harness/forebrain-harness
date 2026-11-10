@@ -450,6 +450,12 @@ type LLMModel struct {
 	// APIPath still names the wire protocol. Not part of the identity.
 	URLVerbatim bool
 
+	// SubagentAllowed is the authorization switch (owner 2026-11-10): 1 = the
+	// agent may pick this row for a subagent on its own through the model
+	// argument, 0 = only the user's own choices use it. Not part of the
+	// identity; authorization checks read the table live, not this copy.
+	SubagentAllowed bool
+
 	CreatedAt int64 // unix ms
 	UpdatedAt int64 // unix ms
 }
@@ -492,7 +498,7 @@ func NormalizeLLMModelIdentity(m *LLMModel) {
 const llmModelColumns = `id, provider, model, base_url, api_path, api_key, params_json,
 cap_images, cap_pdf, cap_video, cap_audio, cap_reasoning, cap_reasoning_off,
 cap_efforts_json, cap_default_effort, cap_context_window, cap_max_output,
-source, source_plan, url_verbatim, created_at, updated_at`
+source, source_plan, url_verbatim, subagent_allowed, created_at, updated_at`
 
 var (
 	llmModelListSQL = dbx.SQL{
@@ -511,29 +517,38 @@ var (
 		Postgres: `SELECT ` + llmModelColumns + ` FROM fb_llm_models WHERE provider=$1 AND model=$2 AND base_url=$3 AND api_path=$4`,
 	}
 	llmModelInsertSQL = dbx.SQL{
-		SQLite: `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		MySQL:  `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		SQLite: `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL:  `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		Postgres: `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES
-		($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+		($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
 	}
 	llmModelUpdateSQL = dbx.SQL{
 		SQLite: `UPDATE fb_llm_models SET provider=?, model=?, base_url=?, api_path=?, api_key=?, params_json=?,
 		cap_images=?, cap_pdf=?, cap_video=?, cap_audio=?, cap_reasoning=?, cap_reasoning_off=?,
 		cap_efforts_json=?, cap_default_effort=?, cap_context_window=?, cap_max_output=?,
-		source=?, source_plan=?, url_verbatim=?, updated_at=? WHERE id=?`,
+		source=?, source_plan=?, url_verbatim=?, subagent_allowed=?, updated_at=? WHERE id=?`,
 		MySQL: `UPDATE fb_llm_models SET provider=?, model=?, base_url=?, api_path=?, api_key=?, params_json=?,
 		cap_images=?, cap_pdf=?, cap_video=?, cap_audio=?, cap_reasoning=?, cap_reasoning_off=?,
 		cap_efforts_json=?, cap_default_effort=?, cap_context_window=?, cap_max_output=?,
-		source=?, source_plan=?, url_verbatim=?, updated_at=? WHERE id=?`,
+		source=?, source_plan=?, url_verbatim=?, subagent_allowed=?, updated_at=? WHERE id=?`,
 		Postgres: `UPDATE fb_llm_models SET provider=$1, model=$2, base_url=$3, api_path=$4, api_key=$5, params_json=$6,
 		cap_images=$7, cap_pdf=$8, cap_video=$9, cap_audio=$10, cap_reasoning=$11, cap_reasoning_off=$12,
 		cap_efforts_json=$13, cap_default_effort=$14, cap_context_window=$15, cap_max_output=$16,
-		source=$17, source_plan=$18, url_verbatim=$19, updated_at=$20 WHERE id=$21`,
+		source=$17, source_plan=$18, url_verbatim=$19, subagent_allowed=$20, updated_at=$21 WHERE id=$22`,
 	}
 	llmModelDeleteSQL = dbx.SQL{
 		SQLite:   `DELETE FROM fb_llm_models WHERE id=?`,
 		MySQL:    `DELETE FROM fb_llm_models WHERE id=?`,
 		Postgres: `DELETE FROM fb_llm_models WHERE id=$1`,
+	}
+	// llmModelSetSubagentAllowedSQL flips only the authorization switch (and
+	// the row's updated_at), in all three dialects: config_store.go is not on
+	// schema_migrations.go's dialect allowlist, so every statement here needs
+	// explicit arms.
+	llmModelSetSubagentAllowedSQL = dbx.SQL{
+		SQLite:   `UPDATE fb_llm_models SET subagent_allowed=?, updated_at=? WHERE id=?`,
+		MySQL:    `UPDATE fb_llm_models SET subagent_allowed=?, updated_at=? WHERE id=?`,
+		Postgres: `UPDATE fb_llm_models SET subagent_allowed=$1, updated_at=$2 WHERE id=$3`,
 	}
 )
 
@@ -688,6 +703,33 @@ func (s *LLMModelStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// SetSubagentAllowed flips only the authorization switch (owner 2026-11-10),
+// touching updated_at so the configuration fingerprint sees the change; every
+// other column keeps its stored value. A row that is not there reports
+// ErrLLMModelNotFound.
+func (s *LLMModelStore) SetSubagentAllowed(ctx context.Context, id string, allowed bool) error {
+	if !s.ok() {
+		return fmt.Errorf("model store unavailable")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ErrLLMModelNotFound
+	}
+	res, err := dbx.Exec(ctx, s.DB, llmModelSetSubagentAllowedSQL.For(dbx.DialectOf(s.DB)),
+		boolToInt(allowed), time.Now().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrLLMModelNotFound
+	}
+	return nil
+}
+
 func llmModelInsertArgs(m LLMModel) []any {
 	return []any{
 		m.ID, m.Provider, m.Model, m.BaseURL, m.APIPath, m.APIKey, m.ParamsJSON,
@@ -695,7 +737,8 @@ func llmModelInsertArgs(m LLMModel) []any {
 		boolPtrToInt(m.CapAudio), boolPtrToInt(m.CapReasoning), boolPtrToInt(m.CapReasoningOff),
 		llmModelEffortsJSON(m.CapEfforts), m.CapDefaultEffort,
 		int64PtrToNull(m.CapContextWindow), int64PtrToNull(m.CapMaxOutput),
-		m.Source, m.SourcePlan, boolToInt(m.URLVerbatim), m.CreatedAt, m.UpdatedAt,
+		m.Source, m.SourcePlan, boolToInt(m.URLVerbatim), boolToInt(m.SubagentAllowed),
+		m.CreatedAt, m.UpdatedAt,
 	}
 }
 
@@ -706,7 +749,8 @@ func llmModelUpdateArgs(m LLMModel) []any {
 		boolPtrToInt(m.CapAudio), boolPtrToInt(m.CapReasoning), boolPtrToInt(m.CapReasoningOff),
 		llmModelEffortsJSON(m.CapEfforts), m.CapDefaultEffort,
 		int64PtrToNull(m.CapContextWindow), int64PtrToNull(m.CapMaxOutput),
-		m.Source, m.SourcePlan, boolToInt(m.URLVerbatim), m.UpdatedAt, m.ID,
+		m.Source, m.SourcePlan, boolToInt(m.URLVerbatim), boolToInt(m.SubagentAllowed),
+		m.UpdatedAt, m.ID,
 	}
 }
 
@@ -730,12 +774,13 @@ func scanLLMModel(scanner interface{ Scan(...any) error }) (LLMModel, error) {
 		effortsJSON                                        string
 		contextWindow, maxOutput                           sql.NullInt64
 		urlVerbatim                                        int
+		subagentAllowed                                    int
 	)
 	if err := scanner.Scan(
 		&m.ID, &m.Provider, &m.Model, &m.BaseURL, &m.APIPath, &m.APIKey, &m.ParamsJSON,
 		&images, &pdf, &video, &audio, &reasoning, &reasoningOff,
 		&effortsJSON, &m.CapDefaultEffort, &contextWindow, &maxOutput,
-		&m.Source, &m.SourcePlan, &urlVerbatim, &m.CreatedAt, &m.UpdatedAt,
+		&m.Source, &m.SourcePlan, &urlVerbatim, &subagentAllowed, &m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
 		return LLMModel{}, err
 	}
@@ -748,6 +793,7 @@ func scanLLMModel(scanner interface{ Scan(...any) error }) (LLMModel, error) {
 	m.CapContextWindow = int64FromNull(contextWindow)
 	m.CapMaxOutput = int64FromNull(maxOutput)
 	m.URLVerbatim = urlVerbatim != 0
+	m.SubagentAllowed = subagentAllowed != 0
 	if strings.TrimSpace(effortsJSON) != "" {
 		if err := json.Unmarshal([]byte(effortsJSON), &m.CapEfforts); err != nil {
 			return LLMModel{}, fmt.Errorf("decode model reasoning levels: %w", err)

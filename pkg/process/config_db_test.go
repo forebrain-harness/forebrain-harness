@@ -881,3 +881,37 @@ func TestConfigDBFingerprintMovesWithAModelRow(t *testing.T) {
 		t.Fatal("an api_key edit left the fingerprint unchanged; the next turn would run on the old row")
 	}
 }
+
+// TestConfigDBFingerprintMovesWithSubagentAllowed pins that flipping only the
+// authorization switch (owner 2026-11-10) still moves the configuration
+// fingerprint: llmModelsFingerprintWire carries the column, so a switch a
+// surface flipped reaches the next turn instead of being adopted never.
+func TestConfigDBFingerprintMovesWithSubagentAllowed(t *testing.T) {
+	env, ctx := composeEnvForTest(t, "gateway:\n  http_addr: 127.0.0.1:6060\n")
+	created, err := (&state.LLMModelStore{DB: env.SQL}).Create(ctx, state.LLMModel{
+		Provider: "openai", Model: "gpt-4o", BaseURL: "https://table.test", APIKey: "a-key",
+	})
+	if err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	fingerprint := func() []byte {
+		t.Helper()
+		composed, err := composeConfig(ctx, env)
+		if err != nil {
+			t.Fatalf("composeConfig: %v", err)
+		}
+		fp, err := configSnapshotFingerprint(composed)
+		if err != nil {
+			t.Fatalf("configSnapshotFingerprint: %v", err)
+		}
+		return fp
+	}
+	before := fingerprint()
+	store := &state.LLMModelStore{DB: env.SQL}
+	if err := store.SetSubagentAllowed(ctx, created.ID, true); err != nil {
+		t.Fatalf("flip the switch: %v", err)
+	}
+	if after := fingerprint(); bytes.Equal(before, after) {
+		t.Fatal("flipping subagent_allowed left the fingerprint unchanged; the next turn would run on the old row")
+	}
+}

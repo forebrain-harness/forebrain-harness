@@ -26,6 +26,11 @@ type LLMModelConfig struct {
 	// URLVerbatim (「自定义协议」): requests go to BaseURL as stored; APIPath
 	// only names the protocol. plan 263 wires it into the clients.
 	URLVerbatim bool
+	// SubagentAllowed is the row's authorization switch (owner 2026-11-10):
+	// the agent may pick this row for a subagent on its own through the model
+	// argument. Projected from the table row; authorization itself reads the
+	// table live.
+	SubagentAllowed bool
 }
 
 // LLMModelCaps overrides the model catalog for one row; a nil pointer, a nil
@@ -293,13 +298,14 @@ func llmProviderFromModelRow(row LLMModelConfig) AgentLLMProviderConfig {
 	provider, model, baseURL, apiPath := NormalizeLLMModelIdentity(
 		row.Provider, row.Model, row.BaseURL, row.APIPath)
 	out := AgentLLMProviderConfig{
-		ID:          row.ID,
-		Provider:    provider,
-		Model:       model,
-		BaseURL:     baseURL,
-		APIPath:     apiPath,
-		APIKey:      row.APIKey,
-		URLVerbatim: row.URLVerbatim,
+		ID:              row.ID,
+		Provider:        provider,
+		Model:           model,
+		BaseURL:         baseURL,
+		APIPath:         apiPath,
+		APIKey:          row.APIKey,
+		URLVerbatim:     row.URLVerbatim,
+		SubagentAllowed: row.SubagentAllowed,
 	}
 	if row.Caps.MaxOutput != nil && *row.Caps.MaxOutput > 0 {
 		out.MaxOutputTokens = *row.Caps.MaxOutput

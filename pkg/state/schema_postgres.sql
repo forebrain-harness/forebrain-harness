@@ -673,12 +673,14 @@ CREATE TABLE fb_llm_models (
   source TEXT NOT NULL DEFAULT '',
   source_plan TEXT NOT NULL DEFAULT '',
   url_verbatim BIGINT NOT NULL DEFAULT 0,
+  subagent_allowed BIGINT NOT NULL DEFAULT 0,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
   CHECK (TRIM(id) <> ''),
   CHECK (TRIM(provider) <> ''),
   CHECK (TRIM(model) <> ''),
-  CHECK (url_verbatim IN (0, 1))
+  CHECK (url_verbatim IN (0, 1)),
+  CHECK (subagent_allowed IN (0, 1))
 );
 CREATE UNIQUE INDEX idx_fb_llm_models_identity ON fb_llm_models (provider, model, base_url, api_path);
 CREATE INDEX idx_fb_llm_models_created ON fb_llm_models (created_at, id);

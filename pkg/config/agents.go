@@ -112,6 +112,12 @@ type AgentLLMProviderConfig struct {
 	// APIPath only names the protocol. ConfiguredLLMs projects it from the table
 	// row; a legacy entry never carries it. Runtime-only.
 	URLVerbatim bool `yaml:"-" json:"-"`
+	// SubagentAllowed is the row's authorization switch (owner 2026-11-10): the
+	// agent may pick this row for a subagent on its own through the model
+	// argument. ConfiguredLLMs projects it from the table row; a legacy entry
+	// never carries it. Runtime-only, from the table row — authorization checks
+	// read the table live, this copy only feeds surfaces and snapshots.
+	SubagentAllowed bool `yaml:"-" json:"-"`
 
 	// MaxOutputTokens is the row's own output limit (fb_llm_models
 	// cap_max_output), 0 when the row names none. It is the exact value the

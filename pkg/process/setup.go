@@ -27,6 +27,11 @@ type Options struct {
 	// URLVerbatim is 「自定义协议」: the request goes to BaseURL exactly as
 	// stored, and APIPath only names the wire protocol (plan 267's custom form).
 	URLVerbatim bool
+	// SubagentAllowed is the authorization page's answer (owner 2026-11-10):
+	// may the agent pick this row for a subagent on its own? The flow always
+	// asks, so it always writes the answer — also over an existing row, whose
+	// user just re-answered the question.
+	SubagentAllowed bool
 	// CapEfforts are the thinking levels this model supports, for a model no
 	// source documents — the custom form asks when nothing knows them. nil
 	// leaves the stored levels alone.
@@ -121,6 +126,9 @@ func Execute(rt Context, opts Options) (Report, error) {
 		BaseURL:     opts.BaseURL,
 		APIPath:     opts.APIPath,
 		URLVerbatim: opts.URLVerbatim,
+		// The flow just asked the subagent question, so the answer is a fact
+		// about this configuration, not "leave the stored value alone".
+		SubagentAllowed: &opts.SubagentAllowed,
 	}
 	if opts.CapEfforts != nil {
 		efforts := append([]string{}, opts.CapEfforts...)

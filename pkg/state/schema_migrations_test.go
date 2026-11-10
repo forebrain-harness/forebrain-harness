@@ -4133,3 +4133,78 @@ func TestLLMModelTablesMigrationReachesAnOlderDatabase(t *testing.T) {
 		t.Fatalf("model_id = %q for a row written without one, want ''", sel.ModelID)
 	}
 }
+
+// TestStateV33UpgradesToV34AddsSubagentAllowed pins the authorization switch's
+// migration (owner 2026-11-10): a v33 database's model rows all read as not
+// authorized — the column lands with default 0 and no backfill — and running
+// the migration against a table that already carries the column (a fixture
+// built from the current schema with a lowered version) skips instead of
+// failing on a duplicate.
+func TestStateV33UpgradesToV34AddsSubagentAllowed(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	dialect := dbx.DialectOf(db)
+
+	if _, err := db.ExecContext(ctx, `ALTER TABLE fb_llm_models DROP COLUMN subagent_allowed`); err != nil {
+		t.Fatalf("drop fb_llm_models.subagent_allowed: %v", err)
+	}
+	// A row the v33 table already holds: it must migrate as off without a
+	// backfill statement touching it.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO fb_llm_models (id, provider, model, created_at, updated_at) VALUES ('llm_v33_row', 'v33p', 'm', 1, 1)`); err != nil {
+		t.Fatalf("insert the pre-migration row: %v", err)
+	}
+	if dialect == dbx.SQLite {
+		if _, err := db.ExecContext(ctx, `PRAGMA user_version = 33`); err != nil {
+			t.Fatalf("lower user_version: %v", err)
+		}
+	} else if err := writeDialectSchemaVersion(ctx, db, dialect, 33); err != nil {
+		t.Fatalf("lower the version row: %v", err)
+	}
+
+	if err := migrateStateSchema(ctx, db, ""); err != nil {
+		t.Fatalf("%s migrate to v%d: %v", dialect, stateSchemaVersion, err)
+	}
+	if dialect == dbx.SQLite {
+		requireSchemaVersion(ctx, t, db, stateSchemaVersion)
+	}
+
+	models := &LLMModelStore{DB: db}
+	row, err := models.Get(ctx, "llm_v33_row")
+	if err != nil {
+		t.Fatalf("read the migrated row: %v", err)
+	}
+	if row.SubagentAllowed {
+		t.Fatal("a row the migration did not touch must read subagent_allowed=false")
+	}
+	// The store writes the column now: flipping it survives a re-read.
+	if err := models.SetSubagentAllowed(ctx, "llm_v33_row", true); err != nil {
+		t.Fatalf("flip the switch on the migrated row: %v", err)
+	}
+	row, err = models.Get(ctx, "llm_v33_row")
+	if err != nil || !row.SubagentAllowed {
+		t.Fatalf("re-read after flip: %+v (%v)", row, err)
+	}
+
+	// A fixture whose table already carries the column skips the ALTER rather
+	// than failing on a duplicate.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	switch dialect {
+	case dbx.SQLite:
+		if err := migrateStateV33ToV34(ctx, conn); err != nil {
+			t.Fatalf("re-run over the existing column: %v", err)
+		}
+	case dbx.MySQL:
+		if err := migrateStateV33ToV34MySQL(ctx, conn); err != nil {
+			t.Fatalf("re-run over the existing column: %v", err)
+		}
+	case dbx.Postgres:
+		if err := migrateStateV33ToV34Postgres(ctx, conn); err != nil {
+			t.Fatalf("re-run over the existing column: %v", err)
+		}
+	}
+}

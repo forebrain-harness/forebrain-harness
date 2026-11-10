@@ -626,6 +626,12 @@ type LLMModelInput struct {
 	// row's own property, so an input that does not name it writes a row that
 	// does not carry it.
 	URLVerbatim bool
+	// SubagentAllowed is the row's authorization switch (owner 2026-11-10):
+	// may the agent pick this row for a subagent on its own through the model
+	// argument? nil keeps the stored value on an update; a new row treats nil
+	// as false. Setup answers the question in its own flow, so it always names
+	// one, even when the row it replaces already exists.
+	SubagentAllowed *bool
 	// CapEfforts are the thinking levels this model supports, for a model no
 	// source documents (the custom form's ticked levels, plan 267). nil keeps
 	// the stored value on an update; an empty slice states "no levels".
@@ -675,6 +681,9 @@ func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, 
 			row.ParamsJSON = strings.TrimSpace(*in.ParamsJSON)
 		}
 		row.URLVerbatim = in.URLVerbatim
+		if in.SubagentAllowed != nil {
+			row.SubagentAllowed = *in.SubagentAllowed
+		}
 		if in.CapEfforts != nil {
 			row.CapEfforts = append([]string{}, (*in.CapEfforts)...)
 		}
@@ -704,17 +713,24 @@ func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, 
 	if in.CapEfforts != nil {
 		efforts = append([]string{}, (*in.CapEfforts)...)
 	}
+	// A new row defaults to not authorized: nil means "not answered", and an
+	// unanswered switch is off (owner 2026-11-10).
+	subagentAllowed := false
+	if in.SubagentAllowed != nil {
+		subagentAllowed = *in.SubagentAllowed
+	}
 	created, err := store.Create(ctx, state.LLMModel{
-		Provider:    provider,
-		Model:       model,
-		BaseURL:     baseURL,
-		APIPath:     apiPath,
-		APIKey:      key,
-		ParamsJSON:  params,
-		CapEfforts:  efforts,
-		Source:      strings.TrimSpace(in.Source),
-		SourcePlan:  strings.TrimSpace(in.SourcePlan),
-		URLVerbatim: in.URLVerbatim,
+		Provider:        provider,
+		Model:           model,
+		BaseURL:         baseURL,
+		APIPath:         apiPath,
+		APIKey:          key,
+		ParamsJSON:      params,
+		CapEfforts:      efforts,
+		Source:          strings.TrimSpace(in.Source),
+		SourcePlan:      strings.TrimSpace(in.SourcePlan),
+		URLVerbatim:     in.URLVerbatim,
+		SubagentAllowed: subagentAllowed,
 	})
 	if err != nil {
 		// A concurrent writer stored the same identity between the lookup and

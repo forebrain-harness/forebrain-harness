@@ -225,7 +225,8 @@ func llmModelsFromRows(rows []state.LLMModel) ([]appcfg.LLMModelConfig, error) {
 				ContextWindow: row.CapContextWindow,
 				MaxOutput:     row.CapMaxOutput,
 			},
-			URLVerbatim: row.URLVerbatim,
+			URLVerbatim:     row.URLVerbatim,
+			SubagentAllowed: row.SubagentAllowed,
 		})
 	}
 	return out, nil
@@ -795,15 +796,16 @@ func configSnapshotFingerprint(root appcfg.Root) ([]byte, error) {
 
 // llmModelsFingerprintWire is the fingerprint's view of one model row.
 type llmModelsFingerprintWire struct {
-	ID          string                      `json:"id"`
-	Provider    string                      `json:"provider"`
-	Model       string                      `json:"model"`
-	BaseURL     string                      `json:"base_url"`
-	APIPath     string                      `json:"api_path"`
-	APIKey      string                      `json:"api_key"`
-	Params      appcfg.LLMRequestParams     `json:"params"`
-	Caps        llmModelCapsFingerprintWire `json:"caps"`
-	URLVerbatim bool                        `json:"url_verbatim"`
+	ID              string                      `json:"id"`
+	Provider        string                      `json:"provider"`
+	Model           string                      `json:"model"`
+	BaseURL         string                      `json:"base_url"`
+	APIPath         string                      `json:"api_path"`
+	APIKey          string                      `json:"api_key"`
+	Params          appcfg.LLMRequestParams     `json:"params"`
+	Caps            llmModelCapsFingerprintWire `json:"caps"`
+	URLVerbatim     bool                        `json:"url_verbatim"`
+	SubagentAllowed bool                        `json:"subagent_allowed"`
 }
 
 // llmModelCapsFingerprintWire is the fingerprint's view of a row's overrides:
@@ -829,14 +831,15 @@ func llmModelsFingerprintWireFrom(models []appcfg.LLMModelConfig) []llmModelsFin
 	out := make([]llmModelsFingerprintWire, 0, len(models))
 	for _, m := range models {
 		out = append(out, llmModelsFingerprintWire{
-			ID:          m.ID,
-			Provider:    m.Provider,
-			Model:       m.Model,
-			BaseURL:     m.BaseURL,
-			APIPath:     m.APIPath,
-			APIKey:      m.APIKey,
-			Params:      append(appcfg.LLMRequestParams(nil), m.Params...),
-			URLVerbatim: m.URLVerbatim,
+			ID:              m.ID,
+			Provider:        m.Provider,
+			Model:           m.Model,
+			BaseURL:         m.BaseURL,
+			APIPath:         m.APIPath,
+			APIKey:          m.APIKey,
+			Params:          append(appcfg.LLMRequestParams(nil), m.Params...),
+			URLVerbatim:     m.URLVerbatim,
+			SubagentAllowed: m.SubagentAllowed,
 			Caps: llmModelCapsFingerprintWire{
 				Images:        m.Caps.Images,
 				PDF:           m.Caps.PDF,

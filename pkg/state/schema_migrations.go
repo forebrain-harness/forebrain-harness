@@ -20,7 +20,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 33
+const stateSchemaVersion = 34
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -101,6 +101,12 @@ var stateSchemaMigrations = []schemaMigration{
 		apply:         migrateStateV32ToV33,
 		applyMySQL:    migrateStateV32ToV33MySQL,
 		applyPostgres: migrateStateV32ToV33Postgres,
+	},
+	{
+		version:       34,
+		apply:         migrateStateV33ToV34,
+		applyMySQL:    migrateStateV33ToV34MySQL,
+		applyPostgres: migrateStateV33ToV34Postgres,
 	},
 }
 
@@ -1719,6 +1725,71 @@ CREATE TABLE IF NOT EXISTS fb_env_vars (
 	if _, err := conn.ExecContext(ctx,
 		`ALTER TABLE fb_session_model_state ADD COLUMN IF NOT EXISTS model_id TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add fb_session_model_state.model_id: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV33ToV34 adds the subagent authorization switch to every model
+// row (owner 2026-11-10): 1 = the agent may pick this row for a subagent on
+// its own through the model argument, 0 (the default, which every existing
+// row keeps) = only the user's own choices use it. SQLite allows ADD COLUMN
+// with a non-NULL default, so it is a single statement; a database whose
+// table already carries the column (a fixture built from the current
+// schema.sql with a lowered user_version) skips it instead of failing on a
+// duplicate.
+func migrateStateV33ToV34(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_llm_models') WHERE name='subagent_allowed'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_llm_models ADD COLUMN subagent_allowed INTEGER NOT NULL DEFAULT 0 CHECK (subagent_allowed IN (0, 1))`); err != nil {
+		return fmt.Errorf("add fb_llm_models.subagent_allowed: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV33ToV34MySQL is the same column in MySQL's types; the column
+// is checked in information_schema, then added.
+func migrateStateV33ToV34MySQL(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'fb_llm_models' AND column_name = 'subagent_allowed'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_llm_models ADD COLUMN subagent_allowed BIGINT NOT NULL DEFAULT 0 CHECK (subagent_allowed IN (0, 1))`); err != nil {
+		return fmt.Errorf("add fb_llm_models.subagent_allowed: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV33ToV34Postgres is the same column in PostgreSQL's types. The
+// constraint carries the name schema.sql's inline CHECK would get, so an
+// upgraded database and a fresh one hold the same objects.
+func migrateStateV33ToV34Postgres(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = CURRENT_SCHEMA() AND table_name = 'fb_llm_models' AND column_name = 'subagent_allowed'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_llm_models ADD COLUMN subagent_allowed BIGINT NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add fb_llm_models.subagent_allowed: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_llm_models ADD CONSTRAINT fb_llm_models_subagent_allowed_check CHECK (subagent_allowed IN (0, 1))`); err != nil {
+		return fmt.Errorf("add fb_llm_models.subagent_allowed check: %w", err)
 	}
 	return nil
 }

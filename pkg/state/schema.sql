@@ -739,6 +739,9 @@ CREATE TABLE fb_llm_models (
   -- 地址，不拼接任何协议路径；只允许 provider='custom' 的行，api_path 存
   -- '/chat/completions'（请求体格式）。不参与唯一性。
   url_verbatim INTEGER NOT NULL DEFAULT 0 CHECK (url_verbatim IN (0, 1)),
+  -- May the agent pick this row for a subagent on its own via the model
+  -- argument (owner 2026-11-10)? Off by default; existing rows migrate as off.
+  subagent_allowed INTEGER NOT NULL DEFAULT 0 CHECK (subagent_allowed IN (0, 1)),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;

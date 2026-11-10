@@ -632,6 +632,7 @@ CREATE TABLE fb_llm_models (
   source VARCHAR(64) NOT NULL DEFAULT '',
   source_plan VARCHAR(64) NOT NULL DEFAULT '',
   url_verbatim BIGINT NOT NULL DEFAULT 0 CHECK (url_verbatim IN (0, 1)),
+  subagent_allowed BIGINT NOT NULL DEFAULT 0 CHECK (subagent_allowed IN (0, 1)),
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
   -- base_url has no length the store can promise: keyed over its SHA-256,
