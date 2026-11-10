@@ -185,6 +185,21 @@
         <span v-if="isCustom" class="models-field__hint">{{ t('models.modelNameHint') }}</span>
       </div>
 
+      <!-- May the agent pick this row for a subagent on its own (plan 283)? The
+           switch sits on the label's line, not centred on the label-and-hint
+           block, so it reads as that field's own control. -->
+      <div class="models-field models-switch-row">
+        <SwitchComponent
+          :model-value="draft.subagentAllowed"
+          data-testid="models-subagent-allowed"
+          @update:model-value="draft.subagentAllowed = $event === true"
+        />
+        <div class="models-switch-row__text">
+          <span class="models-switch-row__label">{{ t('models.subagentAllowed') }}</span>
+          <span class="models-field__hint">{{ t('models.subagentAllowedHint') }}</span>
+        </div>
+      </div>
+
       <ModelCapsFields
         v-model:open="advancedOpen"
         :draft="draft.caps"
@@ -275,6 +290,7 @@ import { Input } from '@repo/shadcn-vue/components/ui/input'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainDrawer from '@/components/common/ForebrainDrawer.vue'
 import ModelCapsFields from '@/components/models/ModelCapsFields.vue'
+import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import ModelSignature from '@/components/models/ModelSignature.vue'
 import ProtocolPicker from '@/components/models/ProtocolPicker.vue'
 import ProviderCombobox from '@/components/models/ProviderCombobox.vue'
@@ -325,6 +341,7 @@ interface Draft {
   apiPath: string
   verbatim: boolean
   model: string
+  subagentAllowed: boolean
   apiKey: string
   params: string
   caps: LlmModelCaps
@@ -366,7 +383,12 @@ const originalKey = ref('')
 const storedPath = ref('')
 
 function blankDraft(): Draft {
-  return { provider: '', endpointIndex: 0, baseUrl: '', apiPath: '', verbatim: false, model: '', apiKey: '', params: '', caps: {}, efforts: [] }
+  return {
+    provider: '', endpointIndex: 0, baseUrl: '', apiPath: '', verbatim: false, model: '',
+    // A new row starts closed: the agent picks only what the user opened
+    // (owner 2026-11-10, plan 283).
+    subagentAllowed: false, apiKey: '', params: '', caps: {}, efforts: [],
+  }
 }
 
 const sourceRow = computed(() => (props.row && props.row.source ? props.row : null))
@@ -514,6 +536,7 @@ watch(
         apiPath: row.apiPath,
         verbatim: row.urlVerbatim,
         model: row.model,
+        subagentAllowed: row.subagentAllowed,
         apiKey: row.apiKey ?? '',
         params: row.params ?? '',
         caps: { ...row.catalogCaps, ...row.caps },
@@ -596,7 +619,11 @@ async function save(): Promise<void> {
   try {
     if (sourceRow.value) {
       // A subscription row keeps its identity: only the capabilities travel.
-      await forebrainApi.updateLlmModel(sourceRow.value.id, { caps: capsBody(), params: draft.params.trim() })
+      await forebrainApi.updateLlmModel(sourceRow.value.id, {
+        caps: capsBody(),
+        params: draft.params.trim(),
+        subagentAllowed: draft.subagentAllowed,
+      })
       emit('saved')
       return
     }
@@ -608,6 +635,7 @@ async function save(): Promise<void> {
       urlVerbatim: draft.verbatim,
       params: draft.params.trim(),
       caps: capsBody(),
+      subagentAllowed: draft.subagentAllowed,
       // An untouched key is the stored key: sending it back would be a write of
       // a value the person did not choose, and a blank one is not the clear.
       ...(draft.apiKey && draft.apiKey !== originalKey.value ? { apiKey: draft.apiKey } : {}),
@@ -786,6 +814,26 @@ async function refreshKey(): Promise<void> {
   color: var(--forebrain-text);
 }
 /* The read-only facts of a subscription row, and the card above them. */
+/* The authorization switch: control and its label on one line, the hint under
+   the label (plan 283's prototype .row.sw-first). */
+.models-switch-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.models-switch-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.models-switch-row__label {
+  font-size: 13px;
+  color: var(--forebrain-text);
+  line-height: 18px;
+}
+
 .rows {
   margin-top: 10px;
 }

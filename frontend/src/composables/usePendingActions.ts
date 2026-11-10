@@ -79,6 +79,9 @@ export function usePendingActions(options: {
   const exitPlans = ref<Record<string, SessionApprovalRequest | null>>({})
   /** Whether a card's review-model picker is open, by action id. */
   const modelPicking = ref<Record<string, boolean>>({})
+  /** Why a model picker is open: picking a reviewer, or picking the model a
+   *  plan is handed to (plan 283). The list is the same one either way. */
+  const modelPickPurpose = ref<Record<string, 'review' | 'handoff'>>({})
   /** Whether an exit-plan card's feedback field is open, by action id. The
    *  field appears only after「继续规划」is chosen, the way the terminal's
    *  overlay asks for feedback after the verdict, and folds away again on any
@@ -168,6 +171,7 @@ export function usePendingActions(options: {
     denyFeedback.value = {}
     exitPlans.value = {}
     modelPicking.value = {}
+    modelPickPurpose.value = {}
     planFeedbackOpen.value = {}
     loadError.value = null
   }
@@ -402,8 +406,10 @@ export function usePendingActions(options: {
     }
   }
 
-  function toggleModelPicker(a: ActionRow) {
-    modelPicking.value = { ...modelPicking.value, [a.id]: !modelPicking.value[a.id] }
+  function toggleModelPicker(a: ActionRow, purpose: 'review' | 'handoff' = 'review') {
+    const open = !modelPicking.value[a.id] || modelPickPurpose.value[a.id] !== purpose
+    modelPicking.value = { ...modelPicking.value, [a.id]: open }
+    modelPickPurpose.value = { ...modelPickPurpose.value, [a.id]: purpose }
   }
 
   /** Asking for a review does not decide anything: the approval stays pending,
@@ -416,6 +422,29 @@ export function usePendingActions(options: {
     await submitAction(a.id, () =>
       forebrainApi.actionPlanReview(a.id, { provider: model.provider, model: model.model, modelId: model.id }),
     )
+  }
+
+  /** Handing the plan to another model is a decision: the engine approves the
+   *  exit-plan request with `hand_off_model`, so the primary agent dispatches
+   *  one executor subagent on that row (plan 283). */
+  async function handOffTo(a: ActionRow, model: PlanReviewModelOption) {
+    closePlanFeedback(a)
+    modelPicking.value = { ...modelPicking.value, [a.id]: false }
+    await submitAction(a.id, () =>
+      forebrainApi.actionsApprove(a.id, {
+        // The engine hands off by configured row id — two rows of one
+        // provider/model are different executors — and refuses an empty one.
+        handOffModel: { id: String(model.id ?? ''), provider: model.provider, model: model.model },
+      }),
+    )
+  }
+
+  /** 「请 <模型> 再评审」continues the previous reviewer in its own conversation
+   *  instead of dispatching a new one: the engine reads which review that is
+   *  from the gate, so nothing goes with the request but the flag (plan 283). */
+  async function reviewAgain(a: ActionRow) {
+    modelPicking.value = { ...modelPicking.value, [a.id]: false }
+    await submitAction(a.id, () => forebrainApi.actionPlanReview(a.id, { again: true }))
   }
 
   /** Stopping a review is stopping the reviewer subagent, the same way any
@@ -537,6 +566,7 @@ export function usePendingActions(options: {
     errors,
     denyFeedback,
     modelPicking,
+    modelPickPurpose,
     planFeedbackOpen,
     loading,
     loadError,
@@ -561,6 +591,8 @@ export function usePendingActions(options: {
     closePlanFeedback,
     toggleModelPicker,
     requestReview,
+    handOffTo,
+    reviewAgain,
     stopReview,
     approvalDecisionOptions,
     approvalDecisionLabel,

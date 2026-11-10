@@ -56,6 +56,7 @@ function row(overrides: Partial<LlmModelRow> = {}): LlmModelRow {
     baseUrl: 'https://api.deepseek.com',
     apiPath: '/chat/completions',
     urlVerbatim: false,
+    subagentAllowed: false,
     protocol: 'chat_completions',
     endpoint: 'https://api.deepseek.com/chat/completions',
     apiKeySet: true,
@@ -204,6 +205,46 @@ describe('ModelFormDrawer', () => {
     await flushPromises()
 
     const body = update.mock.calls[0][1] as Record<string, unknown>
-    expect(Object.keys(body).sort()).toEqual(['caps', 'params'])
+    // The authorization switch is a permission, not the row's identity, so it
+    // travels with the advanced settings the sign-in row does allow (plan 283).
+    expect(Object.keys(body).sort()).toEqual(['caps', 'params', 'subagentAllowed'])
+    expect(body.subagentAllowed).toBe(false)
+  })
+})
+
+// The subagent authorization (plan 283) is the drawer's own switch under the
+// model name: it opens on the row's stored answer, a new row opens closed, and
+// the answer travels with the save — also for a row a sign-in wrote.
+describe('ModelFormDrawer subagent authorization', () => {
+  it('opens on the stored answer and saves the change', async () => {
+    const update = vi.spyOn(forebrainApi, 'updateLlmModel').mockResolvedValue(row({ subagentAllowed: true }))
+    const wrapper = mountDrawer({ row: row({ subagentAllowed: true }) })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="models-subagent-allowed"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('主代理可用它派子代理')
+    expect(wrapper.text()).toContain('关闭时，只有你亲自选择才会用它')
+
+    await wrapper.get('[data-testid="models-save"]').trigger('click')
+    await flushPromises()
+    const body = update.mock.calls[0][1] as Record<string, unknown>
+    expect(body.subagentAllowed).toBe(true)
+  })
+
+  it('starts a new row closed', async () => {
+    const create = vi.spyOn(forebrainApi, 'createLlmModel').mockResolvedValue(row())
+    const wrapper = mountDrawer({ mode: 'create' })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="models-provider-trigger"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-provider="deepseek"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="models-model-name"]').setValue('deepseek-v4-pro')
+    await wrapper.get('[data-testid="models-save"]').trigger('click')
+    await flushPromises()
+
+    const body = (create.mock.calls[0]?.[0] ?? {}) as Record<string, unknown>
+    expect(body.subagentAllowed).toBe(false)
   })
 })

@@ -173,6 +173,39 @@ describe('SubscriptionLoginModal', () => {
     expect(wrapper.emitted('saved')).toBeTruthy()
   })
 
+  // plan 283: the third step's rows carry a second check box — may the agent
+  // pick this model for a subagent on its own? It is off unless ticked, and it
+  // travels with the offer it belongs to.
+  it('sends the subagent authorization each ticked model carries', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(subscriptions())
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([
+      offer({ provider: 'volcengine', plan: 'Coding Plan', model: 'doubao-a' }),
+      offer({ provider: 'volcengine', plan: 'Coding Plan', model: 'doubao-b' }),
+    ])
+    vi.spyOn(forebrainApi, 'provisionSubscription').mockResolvedValue({ ids: ['row-1', 'row-2'] })
+
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.find('[data-subscription="volcengine"]').trigger('click')
+    await flushPromises()
+
+    // Unticked model: its authorization cannot be ticked either.
+    expect(wrapper.find('[data-offer-subagents="0"]').attributes('disabled')).toBeDefined()
+    await wrapper.find('[data-offer="0"]').trigger('click')
+    await wrapper.find('[data-offer="1"]').trigger('click')
+    await wrapper.find('[data-offer-subagents="1"]').trigger('click')
+    await wrapper.find('[data-testid="models-provision"]').trigger('click')
+    await flushPromises()
+
+    const body = vi.mocked(forebrainApi.provisionSubscription).mock.calls[0][1] as {
+      offers: { model: string; subagentAllowed: boolean }[]
+    }
+    expect(body.offers.map((o) => [o.model, o.subagentAllowed])).toEqual([
+      ['doubao-a', false],
+      ['doubao-b', true],
+    ])
+  })
+
   it('offers to create a key when the account holds none', async () => {
     vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(subscriptions())
     vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([offer({ provider: 'volcengine', plan: 'Coding Plan' })])

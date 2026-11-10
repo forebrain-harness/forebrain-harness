@@ -160,6 +160,83 @@ describe('PlanApprovalDock', () => {
     withModels.wrapper.unmount()
   })
 
+  // plan 283: handing the plan to another model is a verdict of its own, and
+  // "review it again" continues the reviewer the user already asked. Both rows
+  // appear only when the engine says they can, and the picker's caption says
+  // which of the two lists is open.
+  it('offers the hand-off and the re-review only when the gate allows them', async () => {
+    const plain = mountDock(exitPlanAction(), {}, undefined, {})
+    await flushPromises()
+    expect(plain.wrapper.find('[data-testid="exit-plan-hand-off"]').exists()).toBe(false)
+    expect(plain.wrapper.find('[data-testid="exit-plan-review-again"]').exists()).toBe(false)
+    plain.wrapper.unmount()
+
+    const allowed = mountDock(exitPlanAction(), {
+      handOffAvailable: true,
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3' },
+      ],
+      previousPlanReview: {
+        reviewId: 'plan-review:1',
+        agentId: 'agent-r1',
+        model: { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3' },
+      },
+    })
+    await flushPromises()
+    const acts = allowed.wrapper.findAll('.gate-acts .gate-btn').map((b) => b.text())
+    expect(acts).toEqual([
+      '批准并清空上下文（已用 72%）',
+      '批准',
+      '交给其他模型执行',
+      '请其他模型评审',
+      '请 zhipuai/glm-5.3 再评审',
+      '继续规划',
+    ])
+    allowed.wrapper.unmount()
+  })
+
+  it('hands the plan to the row the user picks', async () => {
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const { wrapper } = mountDock(exitPlanAction(), {
+      handOffAvailable: true,
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3' },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-hand-off"]').trigger('click')
+    await nextTick()
+    expect(wrapper.get('.xp-pick .cap').text()).toBe('交给哪个模型执行？')
+    expect(wrapper.get('.xp-pick .hint').text()).toBe('在新的 worktree 里实施，不动当前分支')
+    const rows = wrapper.findAll('[data-testid="exit-plan-hand-off-model"]')
+    expect(rows).toHaveLength(2)
+    await rows[1].trigger('click')
+    await flushPromises()
+    expect(approve).toHaveBeenCalledWith('act-exit', {
+      handOffModel: { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3' },
+    })
+    wrapper.unmount()
+  })
+
+  it('re-reviews through the previous reviewer without opening the list', async () => {
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    const { wrapper } = mountDock(exitPlanAction(), {
+      previousPlanReview: {
+        reviewId: 'plan-review:1',
+        agentId: 'agent-r1',
+        model: { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3' },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-review-again"]').trigger('click')
+    await flushPromises()
+    expect(review).toHaveBeenCalledWith('act-exit', { again: true })
+    expect(wrapper.find('.xp-pick').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   // plan 153 A9: an office conversation answers its plan in the office's own
   // four words. "Running it" is the plain approval, "revising it" is the same
   // keep-planning refusal coding uses (words required), and "keep the plan

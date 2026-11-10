@@ -50,15 +50,18 @@
       <!-- Choosing a reviewer: the list opens on the footer, the current one
            marked; Esc folds it back. -->
       <div v-else-if="picking" class="xp-pick">
-        <span class="cap">{{ t('chat.exitPlanReviewChoose') }}</span>
+        <span class="cap">
+          {{ pickPurpose === 'handoff' ? t('chat.exitPlanHandOffChoose') : t('chat.exitPlanReviewChoose') }}
+        </span>
+        <span v-if="pickPurpose === 'handoff'" class="hint">{{ t('chat.exitPlanHandOffHint') }}</span>
         <button
           v-for="model in reviewModels"
           :key="`${action.id}-model-${model.id || model.provider + '/' + model.model}-${model.provider}-${model.model}`"
           type="button"
           class="xp-model"
           :disabled="submitting"
-          data-testid="plan-review-model"
-          @click="requestReview(action, model)"
+          :data-testid="pickPurpose === 'handoff' ? 'exit-plan-hand-off-model' : 'plan-review-model'"
+          @click="pickModel(model)"
         >
           <span class="ml">
             <span class="m">{{ modelLabel(model) }}</span>
@@ -83,6 +86,14 @@
               @click="approveExitPlan(action, false)"
             >{{ t('chat.officePlanExecute') }}</button>
             <button
+              v-if="handOffAvailable"
+              type="button"
+              class="gate-btn"
+              data-testid="exit-plan-hand-off"
+              :disabled="submitting"
+              @click="handOffChosen"
+            >{{ t('chat.exitPlanHandOff') }}</button>
+            <button
               type="button"
               class="gate-btn"
               :class="feedbackOpen ? 'gate-btn-on' : ''"
@@ -106,6 +117,15 @@
               :disabled="submitting"
               @click="askReviewChosen"
             >{{ t('chat.exitPlanAskReview') }}</button>
+            <button
+              v-if="previousReview"
+              type="button"
+              class="gate-btn"
+              data-testid="exit-plan-review-again"
+              :disabled="submitting"
+              :title="t('chat.exitPlanReviewAgain', { model: previousReviewLabel })"
+              @click="reviewAgain(action)"
+            >{{ t('chat.exitPlanReviewAgain', { model: previousReviewLabel }) }}</button>
           </template>
           <template v-else>
             <button
@@ -123,6 +143,14 @@
               @click="approveExitPlan(action, false)"
             >{{ t('chat.exitPlanApprove') }}</button>
             <button
+              v-if="handOffAvailable"
+              type="button"
+              class="gate-btn"
+              data-testid="exit-plan-hand-off"
+              :disabled="submitting"
+              @click="handOffChosen"
+            >{{ t('chat.exitPlanHandOff') }}</button>
+            <button
               v-if="reviewModels.length"
               type="button"
               class="gate-btn"
@@ -130,6 +158,15 @@
               :disabled="submitting"
               @click="askReviewChosen"
             >{{ t('chat.exitPlanAskReview') }}</button>
+            <button
+              v-if="previousReview"
+              type="button"
+              class="gate-btn"
+              data-testid="exit-plan-review-again"
+              :disabled="submitting"
+              :title="t('chat.exitPlanReviewAgain', { model: previousReviewLabel })"
+              @click="reviewAgain(action)"
+            >{{ t('chat.exitPlanReviewAgain', { model: previousReviewLabel }) }}</button>
             <!-- Keep planning is the refusal here: a toggle that opens the words
                  the planner will read, the same pressed state every refusal's
                  toggle takes. -->
@@ -188,7 +225,7 @@ import { computed, nextTick, onMounted, ref, withDefaults } from 'vue'
 import { Eye, LoaderCircle, Map } from 'lucide-vue-next'
 import { Kbd } from '@repo/shadcn-vue/components/ui/kbd'
 import { MessageResponse } from '@repo/elements/message'
-import { forebrainApi } from '@/lib/api'
+import { forebrainApi, type PlanReviewModelOption } from '@/lib/api'
 import type { ActionRow } from '@/composables/usePendingActions'
 import { injectPendingActions } from '@/composables/providePendingActions'
 import type { SessionPlan } from '@/composables/useSessionPlans'
@@ -222,7 +259,7 @@ const store = injectPendingActions()!
 const {
   exitPlanRequest, approveExitPlan, keepPlanning, keepPlanOnly, openPlanFeedback, closePlanFeedback,
   toggleModelPicker, requestReview, stopReview, modelLabel, activeReviewLabel, clearContextLabel,
-  refuseAndStop,
+  handOffTo, reviewAgain, refuseAndStop,
 } = store
 
 /** The plan this approval is about, from the typed request the gate served. */
@@ -233,6 +270,14 @@ const reviewActive = computed(() => Boolean(request.value?.planReviewActive))
 const reviewModels = computed(() => request.value?.planReviewModels ?? [])
 const feedbackOpen = computed(() => Boolean(store.planFeedbackOpen.value[props.action.id]))
 const picking = computed(() => Boolean(store.modelPicking.value[props.action.id]))
+/** What the open picker is for: a reviewer, or the model the plan is handed to
+ *  (plan 283). One list either way, two captions and two verdicts. */
+const pickPurpose = computed(() => store.modelPickPurpose.value[props.action.id] ?? 'review')
+const handOffAvailable = computed(() => Boolean(request.value?.handOffAvailable))
+const previousReview = computed(() => request.value?.previousPlanReview ?? null)
+const previousReviewLabel = computed(() =>
+  previousReview.value ? modelLabel(previousReview.value.model as PlanReviewModelOption) : '',
+)
 const submitting = computed(() => Boolean(store.submitting.value[props.action.id]))
 const errorLine = computed(() => store.errors.value[props.action.id] ?? '')
 const words = computed({
@@ -298,7 +343,21 @@ function sendFeedback() {
 
 function askReviewChosen() {
   closePlanFeedback(props.action)
-  toggleModelPicker(props.action)
+  toggleModelPicker(props.action, 'review')
+}
+
+/** 「交给其他模型执行」opens the same list for the hand-off (plan 283). */
+function handOffChosen() {
+  closePlanFeedback(props.action)
+  toggleModelPicker(props.action, 'handoff')
+}
+
+function pickModel(model: PlanReviewModelOption) {
+  if (pickPurpose.value === 'handoff') {
+    void handOffTo(props.action, model)
+    return
+  }
+  void requestReview(props.action, model)
 }
 
 /** Esc backs the model picker out; on the words it is the wordless refusal —
@@ -543,6 +602,13 @@ async function onEsc() {
 .xp-pick .cap {
   font-size: 12.5px;
   color: var(--forebrain-text-2);
+}
+
+/* Handing the plan over runs it somewhere else: the one line under the caption
+   says where, so the choice is not mistaken for "run it here" (plan 283). */
+.xp-pick .hint {
+  font-size: 11.5px;
+  color: var(--forebrain-muted-text);
 }
 
 .xp-model {

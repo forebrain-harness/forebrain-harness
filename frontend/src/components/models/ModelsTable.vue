@@ -127,12 +127,17 @@ function rowClass(row: LlmModelRow): Record<string, boolean> {
   return { 'models-row--flash': Boolean(props.flashId) && row.id === props.flashId }
 }
 
-/** The provider line: the service, plus where a subscription row came from. */
+/** The provider line: the service, plus where a subscription row came from, and
+ *  — for a row the agent may pick for subagents — the word for that (plan 283). */
 function providerLine(row: LlmModelRow): string {
   const name = row.providerName || row.provider
-  if (!row.source) return name
-  const plan = row.sourcePlan ? t('models.sourceLineWithPlan', { plan: row.sourcePlan }) : t('models.sourceLine')
-  return `${name}${plan}`
+  const line = (() => {
+    if (!row.source) return name
+    const plan = row.sourcePlan ? t('models.sourceLineWithPlan', { plan: row.sourcePlan }) : t('models.sourceLine')
+    return `${name}${plan}`
+  })()
+  if (!row.subagentAllowed) return line
+  return `${line} · ${t('models.subagentAllowedMark')}`
 }
 
 /** The path a row's requests really take. A row that stores none is the engine's

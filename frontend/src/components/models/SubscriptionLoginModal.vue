@@ -102,11 +102,13 @@
         v-else
         :offers="offers"
         :chosen="chosen"
+        :subagents="chosenSubagents"
         :key-choice="keyChoice"
         :key-choice-for="keyChoiceFor"
         :key-id="keyId"
         :needs-consent="needsConsent"
         @update:chosen="chosen = $event"
+        @update:subagents="chosenSubagents = $event"
         @update:key-id="keyId = $event"
         @update:create-key="createKey = $event"
       />
@@ -222,6 +224,9 @@ const pasteError = ref('')
 const offers = ref<SubscriptionOffer[]>([])
 const offersError = ref('')
 const chosen = ref<number[]>([])
+/** The chosen offers the agent may pick for subagents on its own (plan 283).
+ *  Empty is the default: an installation only opens what the user opens. */
+const chosenSubagents = ref<number[]>([])
 const provisioning = ref(false)
 const provisionError = ref('')
 const keyChoice = ref<{ id: string; name: string; tail: string }[]>([])
@@ -477,7 +482,13 @@ async function provision(): Promise<void> {
     await forebrainApi.provisionSubscription(subscription.id, {
       offers: chosen.value.map((index) => {
         const offer = offers.value[index]
-        return { provider: offer.provider, model: offer.model, baseUrl: offer.baseUrl, apiPath: offer.apiPath }
+        return {
+          provider: offer.provider,
+          model: offer.model,
+          baseUrl: offer.baseUrl,
+          apiPath: offer.apiPath,
+          subagentAllowed: chosenSubagents.value.includes(index),
+        }
       }),
       ...(keyId.value ? { keyId: keyId.value } : {}),
       ...(createKey.value ? { createKey: true } : {}),

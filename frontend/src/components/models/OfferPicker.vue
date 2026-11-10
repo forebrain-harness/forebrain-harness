@@ -22,6 +22,20 @@
           hide-provider
         />
         <small>{{ facts(row.offer) }}</small>
+        <!-- May the agent pick this model for a subagent on its own (plan 283)?
+             Disabled, and cleared, while the row itself is unticked: an
+             authorization on a model nobody adds means nothing. -->
+        <label class="orow__sub" :title="t('models.subagentAllowedHint')">
+          <input
+            type="checkbox"
+            :checked="subagents.includes(row.index)"
+            :disabled="!chosen.includes(row.index)"
+            :data-offer-subagents="row.index"
+            :aria-label="t('models.subagentAllowed')"
+            @change="toggleSubagent(row.index, ($event.target as HTMLInputElement).checked)"
+          />
+          <span>{{ t('models.subagentAllowedMark') }}</span>
+        </label>
       </div>
       <!-- The vendor could not decide which key, or the account has none: both
            are the person's call, and both belong under the plan they concern. -->
@@ -82,6 +96,8 @@ const props = withDefaults(
     offers: SubscriptionOffer[]
     /** The chosen offers, by their index in `offers`. */
     chosen: number[]
+    /** The chosen offers the agent may pick for subagents on its own (283). */
+    subagents?: number[]
     /** The keys a plan holds, when the gateway answered that it cannot pick. */
     keyChoice?: { id: string; name: string; tail: string }[]
     /** Which plan asked for a key (the offers' own plan id). */
@@ -90,11 +106,12 @@ const props = withDefaults(
     /** The account holds no key and a write would have to create one. */
     needsConsent?: boolean
   }>(),
-  { keyChoice: () => [], keyChoiceFor: '', keyId: '', needsConsent: false },
+  { keyChoice: () => [], keyChoiceFor: '', keyId: '', needsConsent: false, subagents: () => [] },
 )
 
 const emit = defineEmits<{
   'update:chosen': [indices: number[]]
+  'update:subagents': [indices: number[]]
   'update:keyId': [id: string]
   'update:createKey': [create: boolean]
 }>()
@@ -142,6 +159,16 @@ function window(tokens: number): string {
 function toggle(index: number, checked: boolean): void {
   const kept = props.chosen.filter((entry) => entry !== index)
   emit('update:chosen', checked ? [...kept, index].sort((a, b) => a - b) : kept)
+  // Unticking the model takes its authorization with it: an authorization on a
+  // row nobody adds means nothing (plan 283).
+  if (!checked && props.subagents.includes(index)) {
+    emit('update:subagents', props.subagents.filter((entry) => entry !== index))
+  }
+}
+
+function toggleSubagent(index: number, checked: boolean): void {
+  const kept = props.subagents.filter((entry) => entry !== index)
+  emit('update:subagents', checked ? [...kept, index].sort((a, b) => a - b) : kept)
 }
 </script>
 

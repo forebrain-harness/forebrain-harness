@@ -1418,6 +1418,11 @@ export interface LlmModelRow {
   apiPath: string
   /** 「自定义协议」: requests go to the base URL as stored, no path appended. */
   urlVerbatim: boolean
+  /**
+   * May the agent pick this row for a subagent on its own (plan 283)? Closed by
+   * default; a model the user picks themselves never needs it.
+   */
+  subagentAllowed: boolean
   protocol: string
   endpoint: string
   apiKeySet: boolean
@@ -1453,6 +1458,7 @@ export interface LlmModelWrite {
   params?: string
   caps?: LlmModelCaps
   urlVerbatim?: boolean
+  subagentAllowed?: boolean
 }
 
 /** One entry of the list every model picker reads (`/api/llm-models/choices`). */
@@ -1596,6 +1602,14 @@ export interface ActionApprovalBody {
    * `plan_only`; the engine refuses it on any other kind of gate.
    */
   planOnly?: boolean
+  /**
+   * Approve a coding or office plan by handing it to another model (plan 283):
+   * the primary agent dispatches one executor subagent on this configured row,
+   * which implements the plan in its own git worktree. The engine refuses it on
+   * any other kind of gate, and never together with `clearContext` or
+   * `planOnly`.
+   */
+  handOffModel?: { id: string; provider: string; model: string }
 }
 
 /** One model a pending exit-plan approval may be handed to for a review. */
@@ -1642,6 +1656,22 @@ export interface SessionApprovalRequest {
   planReviewModels?: PlanReviewModelOption[]
   planReviews?: PlanReviewNote[]
   planReviewActive?: PlanReviewInFlight | null
+  /**
+   * The review "review it again" would continue (plan 283): the review the user
+   * asked last and the model that ran it. Absent when there is nothing to
+   * continue — the review failed before its subagent existed, or the model is
+   * no longer configured.
+   */
+  previousPlanReview?: {
+    reviewId: string
+    agentId?: string
+    model: PlanReviewModelOption
+  } | null
+  /**
+   * True when this approval may be handed to another model: the conversation's
+   * project is a git repository and at least one other model is configured.
+   */
+  handOffAvailable?: boolean
 }
 
 export interface ChatSessionRecord {
@@ -3639,6 +3669,7 @@ export const forebrainApi = {
         ...(body?.execpolicyAmendment ? { execpolicyAmendment: body.execpolicyAmendment } : {}),
         ...(body?.requestPermissionsResponse ? { requestPermissionsResponse: body.requestPermissionsResponse } : {}),
         ...(body?.planOnly ? { planOnly: true } : {}),
+        ...(body?.handOffModel ? { handOffModel: body.handOffModel } : {}),
       })),
     }).then(async (r) => {
       if (!r.ok) throw new Error(await r.text())
@@ -3673,7 +3704,7 @@ export const forebrainApi = {
 
   /** Ask one configured model to review a pending exit-plan approval. The
    * review runs in the background; its events are its progress. */
-  actionPlanReview(id: string, body: { provider: string; model: string; modelId?: string }) {
+  actionPlanReview(id: string, body: { provider?: string; model?: string; modelId?: string; again?: boolean }) {
     return gatewayFetch(`/api/actions/${encodeURIComponent(id)}/plan-review`, {
       method: 'POST',
       headers: {
@@ -4560,7 +4591,14 @@ export const forebrainApi = {
   provisionSubscription(
     id: string,
     body: {
-      offers: { provider: string; model: string; baseUrl: string; apiPath: string }[]
+      offers: {
+        provider: string
+        model: string
+        baseUrl: string
+        apiPath: string
+        /** May the agent pick this row for a subagent on its own (283)? */
+        subagentAllowed?: boolean
+      }[]
       keyId?: string
       createKey?: boolean
     },
