@@ -33,7 +33,10 @@ func NewRuntimeHook(params HookParams) *Hook {
 	hook.RunRT = params.RunRT
 	hook.SkillHub = params.SkillHub
 	if params.Cfg != nil && params.PrimaryModel != nil {
-		if cat, err := llm.Resolve(hook.Home); err == nil {
+		// The catalog is the one this build ships beside its binary; a build
+		// that carries none leaves ModelLimitsProvider nil, and the assembly
+		// then reads the windows as unknown rather than failing.
+		if cat, err := llm.Resolve(); err == nil {
 			hook.ModelLimitsProvider = func(sessionID string) (llm.Limits, bool) {
 				provider, model := params.PrimaryModel(sessionID)
 				return cat.Lookup(llm.JoinProviderModel(provider, model))

@@ -19,6 +19,7 @@ import (
 // path (turn.SurfaceTurnContentParts), and the web turn's live input is this
 // function, so a turn and every replay of it carry the same text.
 func withImageSourceNotes(parts []llm.ContentPart) []llm.ContentPart {
+	text := llm.TextContent(parts...)
 	var out []llm.ContentPart
 	for i, part := range parts {
 		if part.Type != llm.ContentTypeImageBase64 && part.Type != llm.ContentTypeImageURL {
@@ -36,7 +37,7 @@ func withImageSourceNotes(parts []llm.ContentPart) []llm.ContentPart {
 		if i+1 < len(parts) && llm.IsImageSourceNote(parts[i+1]) {
 			continue
 		}
-		if source := ImageSource(part); source != "" {
+		if source := ImageSource(part); source != "" && !llm.ImageFileNamedInText(text, source) {
 			out = append(out, llm.Text(llm.ImageSourceNote(source)))
 		}
 	}

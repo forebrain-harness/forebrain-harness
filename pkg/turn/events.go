@@ -60,6 +60,25 @@ type RunPlanEventLister interface {
 	ListRunEventsOfTypes(ctx context.Context, runID string, types ...string) ([]state.SessionEvent, error)
 }
 
+// planUpdateOfEvent decodes one stored plan update, reporting false for another
+// event type or for a subagent's own checklist: that checklist is recorded
+// under its parent's run but belongs to the subagent, and the conversation's
+// worked line reports the conversation's plan, exactly as the terminal's
+// tracker does.
+func planUpdateOfEvent(typ string, payload json.RawMessage) (event.PlanUpdatedPayload, bool) {
+	if typ != event.RunEventPlanUpdated {
+		return event.PlanUpdatedPayload{}, false
+	}
+	var update event.PlanUpdatedPayload
+	if err := json.Unmarshal(payload, &update); err != nil {
+		return event.PlanUpdatedPayload{}, false
+	}
+	if strings.TrimSpace(update.AgentID) != "" {
+		return event.PlanUpdatedPayload{}, false
+	}
+	return update, true
+}
+
 // LastPlanProgressOfRun folds the run's final checklist update into the
 // worked line's three facts. A run without a checklist reports zeros — the
 // same silence the terminal's formatWorkingCounters produces.
@@ -72,25 +91,34 @@ func LastPlanProgressOfRun(ctx context.Context, runs RunPlanEventLister, runID s
 	if err != nil {
 		return event.PlanProgress{}
 	}
-	var last *event.PlanUpdatedPayload
 	for i := len(events) - 1; i >= 0; i-- {
-		var payload event.PlanUpdatedPayload
-		if err := json.Unmarshal(events[i].Payload, &payload); err != nil {
-			continue
+		if last, ok := planUpdateOfEvent(events[i].Type, events[i].Payload); ok {
+			return event.PlanProgressOf(last.Items, last.Completed, last.Total, last.Explanation)
 		}
-		// A subagent's checklist is recorded under its parent's run but is
-		// that subagent's own; the conversation's worked line reports the
-		// conversation's plan, exactly as the terminal's tracker does.
-		if strings.TrimSpace(payload.AgentID) != "" {
-			continue
+	}
+	return event.PlanProgress{}
+}
+
+// PlanProgressAtRunEnds returns, for every run the events mention, the
+// conversation's checklist state at that run's end: the counters the run's live
+// "Worked for" line read off the tracker when it closed. The conversation's own
+// plan updates are folded in event order and each run's own events stamp the
+// state they leave behind, so a run that updated no checklist still reports the
+// state the runs before it left — which is what its live line showed. A record
+// that carries no run id stamps nothing; a subagent's update never moves the
+// conversation's counters.
+func PlanProgressAtRunEnds(events []event.RunEvent) map[string]event.PlanProgress {
+	out := make(map[string]event.PlanProgress)
+	var current event.PlanProgress
+	for _, evt := range events {
+		if update, ok := planUpdateOfEvent(evt.Type, evt.Payload); ok {
+			current = event.PlanProgressOf(update.Items, update.Completed, update.Total, update.Explanation)
 		}
-		last = &payload
-		break
+		if runID := strings.TrimSpace(evt.RunID); runID != "" {
+			out[runID] = current
+		}
 	}
-	if last == nil {
-		return event.PlanProgress{}
-	}
-	return event.PlanProgressOf(last.Items, last.Completed, last.Total, last.Explanation)
+	return out
 }
 
 // RunArtifactLister is the slice of the session store the run's delivered

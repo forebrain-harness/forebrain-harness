@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Regenerate assets/models.json from models.dev.
+# Regenerate assets/models.json from a local models.dev snapshot.
 #
-#   scripts/update-models-asset.sh [catalog.json]
+#   scripts/update-models-asset.sh <catalog.json>
 #
-# Without an argument it downloads https://models.dev/catalog.json?type=all
-# (FOREBRAIN_MODELSDEV_CATALOG overrides with a local copy for an offline run).
+# The snapshot is required and must be local: the catalog is regenerated offline
+# (owner 2026-11-09), so there is no download here and no runtime refresh
+# anywhere. scripts/merge-catalog-into-models.sh is the entry point to run.
 #
 # Three views are merged, because no single one is sufficient:
 #   models                    canonical "provider/model" table: the entry set and
@@ -18,6 +19,12 @@
 #                             carries none), keyed by provider because the same model
 #                             id has different levels per provider.
 #
+# A key the snapshot's providers tree has no row for takes the previous
+# models.json's reasoning_options over: upstream dropping a provider row must not
+# silently erase levels this build can still send. `lost-options=N` counts the
+# models whose effort levels could not be preserved, names them, and fails the
+# run when N>0 — that is a data decision, never something to paper over.
+#
 # Local overrides live in OVERRIDES and are the ONLY fields that may differ from
 # upstream. Each one carries a dated reason.
 set -euo pipefail
@@ -25,15 +32,16 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$repo_root/assets/models.json"
 
-catalog="${1:-${FOREBRAIN_MODELSDEV_CATALOG:-}}"
-cleanup=""
-if [[ -z "$catalog" ]]; then
-	catalog="$(mktemp)"
-	cleanup="$catalog"
-	curl -fsS -o "$catalog" "https://models.dev/catalog.json?type=all"
+if [[ "$#" -ne 1 || -z "$1" ]]; then
+	echo "usage: scripts/update-models-asset.sh <catalog.json>" >&2
+	echo "the snapshot is local input (download https://models.dev/catalog.json?type=all);" >&2
+	echo "nothing here downloads it — run scripts/merge-catalog-into-models.sh" >&2
+	exit 2
 fi
-if [[ -n "$cleanup" ]]; then
-	trap 'rm -f "$cleanup"' EXIT
+catalog="$1"
+if [[ ! -f "$catalog" ]]; then
+	echo "no snapshot file at $catalog" >&2
+	exit 2
 fi
 
 python3 - "$catalog" "$out" <<'PYTHON'
@@ -57,13 +65,23 @@ OVERRIDES = {
     # which takes image input. Upstream's canonical row is coarser (its deepseek
     # provider lists four models, no routing detail), and pkg/run.ImageInputRefusal
     # reads exactly this field — taking upstream would make the owner's own default
-    # model refuse images. Pinned by pkg/llm/catalog_test.go:189.
+    # model refuse images. Pinned by TestCatalogMarksTheOwnerDefaultAsMultimodal
+    # (pkg/llm/catalog_test.go).
     "deepseek/deepseek-v4-flash": {"attachment": True, "modalities": {"input": ["text", "image"], "output": ["text"]}},
 }
 
 
 def provider_models(catalog, provider):
     return ((catalog.get("providers") or {}).get(provider) or {}).get("models") or {}
+
+
+def effort_levels(entry):
+    """The discrete levels an entry names, whether a carried or a fresh one."""
+    levels = []
+    for option in entry.get("reasoning_options") or []:
+        if option.get("type") == "effort":
+            levels.extend(option.get("values") or [])
+    return levels
 
 
 def main():
@@ -112,6 +130,40 @@ def main():
             cleaned.append(option)
         entry["reasoning_options"] = cleaned
 
+    # The previous file is the only place a level the snapshot no longer
+    # describes can come from. A key whose entry carries no reasoning_options —
+    # the providers tree has no row for it — keeps the old value whole, item for
+    # item; a tree row that names its own options (empty or toggle-only) is
+    # upstream's current answer and is never overridden.
+    previous = {}
+    try:
+        with open(out_path, encoding="utf-8") as handle:
+            previous = json.load(handle)
+    except FileNotFoundError:
+        previous = {}
+    if not isinstance(previous, dict):
+        sys.exit("previous %s is not a JSON object" % out_path)
+
+    carried = 0
+    lost = []
+    for key, old in previous.items():
+        if not isinstance(old, dict):
+            continue
+        old_options = old.get("reasoning_options")
+        if not old_options:
+            continue
+        entry = entries.get(key)
+        if entry is None or entry.get("reasoning_options") is not None:
+            continue
+        entry["reasoning_options"] = old_options
+        carried += 1
+    for key, entry in entries.items():
+        old = previous.get(key) if isinstance(previous.get(key), dict) else {}
+        if not effort_levels(old):
+            continue
+        if not effort_levels(entry):
+            lost.append(key)
+
     for key, fields in OVERRIDES.items():
         entry = entries.get(key)
         if entry is None:
@@ -126,7 +178,7 @@ def main():
     with_options = sum(1 for entry in entries.values() if entry.get("reasoning_options"))
     empty = sum(1 for entry in entries.values() if entry.get("reasoning_options") == [])
     print(
-        "entries=%d canonical=%d injected=%d with-options=%d empty=%d chat=%d non-chat=%d overrides=%d dropped=%d bytes=%d"
+        "entries=%d canonical=%d injected=%d with-options=%d empty=%d chat=%d non-chat=%d overrides=%d dropped=%d carried=%d lost-options=%d bytes=%d"
         % (
             len(entries),
             canonical,
@@ -137,9 +189,18 @@ def main():
             len(entries) - chat,
             len(OVERRIDES),
             dropped,
+            carried,
+            len(lost),
             len(payload.encode("utf-8")),
         )
     )
+    if lost:
+        print(
+            "lost-options=%d: these models had effort levels the snapshot cannot describe and no old value could carry:\n  %s"
+            % (len(lost), "\n  ".join(sorted(lost))),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 main()

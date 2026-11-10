@@ -1607,6 +1607,7 @@ func (s *ChatSession) SubagentInputPreview(sessionID, agentKey string) ComposerP
 		PendingSteers:  preview.Steers,
 		RejectedSteers: preview.Rejected,
 		QueuedMessages: preview.FollowUp,
+		Editable:       preview.Editable,
 	}
 }
 
@@ -1617,7 +1618,7 @@ func (s *ChatSession) RecallSubagentInput(sessionID, agentKey string) (ComposerS
 	if !ok {
 		return ComposerSubmission{}, false
 	}
-	return subagentSubmissionFromInput(in)
+	return submissionFromQueuedInput(in)
 }
 
 // InterruptSubagentToSend stops the subagent's running execution to send the
@@ -1740,14 +1741,19 @@ func subagentSubmissions(inputs []run.Input) []ComposerSubmission {
 	}
 	out := make([]ComposerSubmission, 0, len(inputs))
 	for _, in := range inputs {
-		if sub, ok := subagentSubmissionFromInput(in); ok {
+		if sub, ok := submissionFromQueuedInput(in); ok {
 			out = append(out, sub)
 		}
 	}
 	return out
 }
 
-func subagentSubmissionFromInput(in run.Input) (ComposerSubmission, bool) {
+// submissionFromQueuedInput is the surface's own record of one queued entry:
+// the payload when the entry carries it, or — for a foreign or legacy producer
+// with no record of its own — a submission rebuilt from the queue's words so
+// the message is still editable. It serves every recall path: the conversation
+// and the subagent view.
+func submissionFromQueuedInput(in run.Input) (ComposerSubmission, bool) {
 	if sub, ok := in.Payload.(ComposerSubmission); ok {
 		return sub, true
 	}

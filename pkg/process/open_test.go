@@ -14,6 +14,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -95,11 +96,14 @@ func TestActivePrimaryAgentFallsBackToMainWhenUnresolvable(t *testing.T) {
 
 func TestContextSnapshotResolvesConfiguredPrimaryModel(t *testing.T) {
 	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, "models.json"), []byte(`{
+	// The catalog lives beside the binary, not in the home (owner 2026-11-09).
+	assets := t.TempDir()
+	if err := os.WriteFile(filepath.Join(assets, "models.json"), []byte(`{
 		"openai/compact-test": {"id":"openai/compact-test", "limit":{"context":1000,"input":900,"output":100}}
 	}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv(llm.AssetsDirEnv, assets)
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
 			Provider: "openai", Models: appcfg.StringList{"compact-test", "another-model"},

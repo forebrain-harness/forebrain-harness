@@ -1,4 +1,36 @@
 {
+    "abacusai/dracarys-llama-3.1-70b-instruct": {
+        "attachment": false,
+        "description": "Abacus.AI coding fine-tune of Llama 3.1 70B Instruct",
+        "family": "llama",
+        "id": "abacusai/dracarys-llama-3.1-70b-instruct",
+        "last_updated": "2024-08-14",
+        "license": "Llama 3 Community License",
+        "limit": {
+            "context": 131072,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Dracarys Llama 3.1 70B Instruct",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2024-08-14",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/abacusai/Dracarys-Llama-3.1-70B-Instruct"
+            }
+        ]
+    },
     "ai21/jamba-large": {
         "attachment": false,
         "description": "AI21's hybrid SSM-Transformer long-context model for enterprise agents and grounded generation",
@@ -190,6 +222,37 @@
             {
                 "label": "Hugging Face",
                 "url": "https://huggingface.co/aisingapore/Gemma-SEA-LION-v4-27B-IT"
+            }
+        ]
+    },
+    "aleph-alpha/kolibri-1": {
+        "attachment": false,
+        "description": "Aleph Alpha's German and English mixture-of-experts reasoning model (78B total, 3.46B active) for chat, RAG and agents",
+        "id": "aleph-alpha/kolibri-1",
+        "knowledge": "2026-06-18",
+        "last_updated": "2026-10-03",
+        "license": "Apache-2.0",
+        "limit": {
+            "context": 1048576
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Kolibri 1",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-10-03",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/Aleph-Alpha/Kolibri-1"
             }
         ]
     },
@@ -1469,6 +1532,40 @@
         "release_date": "2025-09-23",
         "temperature": true,
         "tool_call": true
+    },
+    "alibaba/qwen3.5-0.8b": {
+        "attachment": true,
+        "description": "Smallest Qwen3.5 multimodal model for on-device chat, reasoning, and tool use",
+        "family": "qwen",
+        "id": "alibaba/qwen3.5-0.8b",
+        "last_updated": "2026-03-02",
+        "license": "Apache-2.0",
+        "limit": {
+            "context": 262144,
+            "output": 81920
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Qwen3.5 0.8B",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-03-02",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/Qwen/Qwen3.5-0.8B"
+            }
+        ]
     },
     "alibaba/qwen3.5-122b-a10b": {
         "attachment": true,
@@ -4039,6 +4136,151 @@
         "temperature": false,
         "tool_call": true
     },
+    "anthropic/claude-fable-5-2": {
+        "attachment": true,
+        "benchmarks": [
+            {
+                "date": "2026-11-09",
+                "metric": "score",
+                "name": "FrontierCode",
+                "score": 49.1,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "xhigh effort; safeguards on",
+                "version": "2.0"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "score",
+                "name": "FrontierSWE",
+                "score": 69.9,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "highest available effort; safeguards on",
+                "version": "2"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "score",
+                "name": "AutomationBench",
+                "score": 51.4,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "highest available effort; safeguards on"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "score",
+                "name": "Terminal-Bench-Science",
+                "score": 74.6,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "highest available effort; safeguards on",
+                "version": "0.1"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "relaxed score",
+                "name": "WANDR",
+                "score": 82.1,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "highest available effort; safeguards on"
+            },
+            {
+                "dataset": "offline set",
+                "date": "2026-11-09",
+                "metric": "partial score",
+                "name": "OSWorld",
+                "score": 89.3,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "highest available effort; safeguards on",
+                "version": "2.1"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "average success rate",
+                "name": "RoboDojo Sim",
+                "score": 64.9,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "max effort; internal run"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "rubric score",
+                "name": "AA-Briefcase",
+                "score": 66.1,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "highest available effort; safeguards on",
+                "version": "1.1"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "Elo",
+                "name": "AA-Briefcase",
+                "score": 1785,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "highest available effort; safeguards on",
+                "version": "1.1"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "score",
+                "name": "Remote Labor Index",
+                "score": 41.3,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "high effort; safeguards on"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "score",
+                "name": "Humanity's Last Exam",
+                "score": 74.2,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "with tools; highest available effort; safeguards on"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "score",
+                "name": "Chartography",
+                "score": 73.4,
+                "source": "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+                "variant": "no tools; highest available effort; safeguards on"
+            }
+        ],
+        "description": "Claude model for demanding reasoning and long-horizon agentic work",
+        "family": "claude-fable",
+        "id": "anthropic/claude-fable-5-2",
+        "knowledge": "2026-06",
+        "last_updated": "2026-11-09",
+        "limit": {
+            "context": 1000000,
+            "output": 128000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Claude Fable 5.2",
+        "open_weights": false,
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            }
+        ],
+        "release_date": "2026-11-09",
+        "temperature": false,
+        "tool_call": true
+    },
     "anthropic/claude-haiku-4-5": {
         "attachment": true,
         "benchmarks": [
@@ -4252,6 +4494,34 @@
         "open_weights": false,
         "reasoning": true,
         "release_date": "2026-06-09",
+        "temperature": false,
+        "tool_call": true
+    },
+    "anthropic/claude-mythos-5-1": {
+        "attachment": true,
+        "description": "Restricted Claude model for advanced cybersecurity and biology research workflows",
+        "family": "claude-mythos",
+        "id": "anthropic/claude-mythos-5-1",
+        "knowledge": "2026-06",
+        "last_updated": "2026-09-01",
+        "limit": {
+            "context": 1000000,
+            "output": 128000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Claude Mythos 5.1",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-09-01",
         "temperature": false,
         "tool_call": true
     },
@@ -5952,6 +6222,39 @@
             }
         ]
     },
+    "baai/bge-multilingual-gemma2": {
+        "attachment": false,
+        "description": "Multilingual Gemma 2 based embedding model for retrieval and semantic search",
+        "family": "bge",
+        "id": "baai/bge-multilingual-gemma2",
+        "last_updated": "2024-07-25",
+        "license": "Gemma",
+        "limit": {
+            "context": 8192,
+            "output": 0
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "BGE Multilingual Gemma2",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2024-07-25",
+        "temperature": false,
+        "tool_call": false,
+        "type": "embedding",
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/BAAI/bge-multilingual-gemma2"
+            }
+        ]
+    },
     "baai/bge-reranker-v2-m3": {
         "attachment": false,
         "description": "Lightweight multilingual cross-encoder that scores query-document relevance",
@@ -6073,6 +6376,38 @@
             }
         ]
     },
+    "baidu/ernie-4.5-300b-a47b": {
+        "attachment": false,
+        "description": "Open ERNIE text MoE with 300B total and 47B active parameters",
+        "family": "ernie",
+        "id": "baidu/ernie-4.5-300b-a47b",
+        "last_updated": "2025-06-30",
+        "license": "Apache-2.0",
+        "limit": {
+            "context": 131072,
+            "output": 12000
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "ERNIE 4.5 300B A47B",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2025-06-30",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/baidu/ERNIE-4.5-300B-A47B-Paddle"
+            }
+        ]
+    },
     "baidu/ernie-4.5-vl-424b-a47b": {
         "attachment": true,
         "description": "Multimodal reasoning model for visual analysis, planning, and tool use",
@@ -6100,8 +6435,108 @@
         "temperature": true,
         "tool_call": false
     },
-    "bytedance-seed/seed-1-6": {
+    "black-forest-labs/flux-1-dev": {
         "attachment": false,
+        "description": "Open-weight FLUX.1 text-to-image model for high-quality guidance-distilled generation",
+        "family": "flux",
+        "id": "black-forest-labs/flux-1-dev",
+        "last_updated": "2024-08-01",
+        "license": "FLUX.1 [dev] Non-Commercial License",
+        "limit": {
+            "context": 0,
+            "output": 0
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "image"
+            ]
+        },
+        "name": "FLUX.1 [dev]",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2024-08-01",
+        "temperature": false,
+        "tool_call": false,
+        "type": "image",
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev"
+            }
+        ]
+    },
+    "black-forest-labs/flux-1-kontext-dev": {
+        "attachment": true,
+        "description": "Open-weight FLUX.1 Kontext model for instruction-based image editing",
+        "family": "flux",
+        "id": "black-forest-labs/flux-1-kontext-dev",
+        "last_updated": "2025-05-29",
+        "license": "FLUX.1 [dev] Non-Commercial License",
+        "limit": {
+            "context": 0,
+            "output": 0
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "image"
+            ]
+        },
+        "name": "FLUX.1 Kontext [dev]",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2025-05-29",
+        "temperature": false,
+        "tool_call": false,
+        "type": "image",
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev"
+            }
+        ]
+    },
+    "black-forest-labs/flux-1-schnell": {
+        "attachment": false,
+        "description": "Fast few-step FLUX.1 text-to-image model under Apache 2.0",
+        "family": "flux",
+        "id": "black-forest-labs/flux-1-schnell",
+        "last_updated": "2024-08-01",
+        "license": "Apache 2.0",
+        "limit": {
+            "context": 0,
+            "output": 0
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "image"
+            ]
+        },
+        "name": "FLUX.1 [schnell]",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2024-08-01",
+        "temperature": false,
+        "tool_call": false,
+        "type": "image",
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/black-forest-labs/FLUX.1-schnell"
+            }
+        ]
+    },
+    "bytedance-seed/seed-1-6": {
+        "attachment": true,
         "description": "ByteDance Seed model for long-context reasoning, instruction following, and tool-assisted tasks",
         "family": "seed",
         "id": "bytedance-seed/seed-1-6",
@@ -6112,7 +6547,9 @@
         },
         "modalities": {
             "input": [
-                "text"
+                "text",
+                "image",
+                "video"
             ],
             "output": [
                 "text"
@@ -6138,7 +6575,8 @@
         "modalities": {
             "input": [
                 "text",
-                "image"
+                "image",
+                "video"
             ],
             "output": [
                 "text"
@@ -6419,6 +6857,39 @@
         "temperature": true,
         "tool_call": true
     },
+    "bytedance-seed/seed-oss-36b-instruct": {
+        "attachment": false,
+        "description": "Open ByteDance Seed model for long-context reasoning, tool use, and agents",
+        "family": "seed",
+        "id": "bytedance-seed/seed-oss-36b-instruct",
+        "knowledge": "2024-07",
+        "last_updated": "2025-08-20",
+        "license": "Apache 2.0",
+        "limit": {
+            "context": 524288,
+            "output": 524288
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Seed-OSS-36B-Instruct",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2025-08-20",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/ByteDance-Seed/Seed-OSS-36B-Instruct"
+            }
+        ]
+    },
     "bytedance-seed/seedance-2.0": {
         "attachment": true,
         "description": "ByteDance unified multimodal audio-video model supporting text, image, video and audio references, editing, extension and synchronized stereo sound.",
@@ -6578,7 +7049,6 @@
         "open_weights": true,
         "reasoning": false,
         "release_date": "2026-10-01",
-        "structured_output": true,
         "temperature": true,
         "tool_call": false,
         "type": "decision",
@@ -6624,7 +7094,6 @@
         "open_weights": true,
         "reasoning": false,
         "release_date": "2026-10-01",
-        "structured_output": true,
         "temperature": true,
         "tool_call": false,
         "type": "decision",
@@ -9783,8 +10252,7 @@
         },
         "name": "Nano Banana",
         "open_weights": false,
-        "reasoning": true,
-        "reasoning_options": [],
+        "reasoning": false,
         "release_date": "2025-08-26",
         "temperature": true,
         "tool_call": false,
@@ -9850,6 +10318,96 @@
             }
         ],
         "release_date": "2025-06-17",
+        "temperature": true,
+        "tool_call": true
+    },
+    "google/gemini-2.5-flash-lite-preview-06-17": {
+        "attachment": true,
+        "description": "First preview of Gemini 2.5 Flash-Lite, the low-cost, low-latency 2.5 model",
+        "family": "gemini-flash-lite",
+        "id": "google/gemini-2.5-flash-lite-preview-06-17",
+        "knowledge": "2025-01",
+        "last_updated": "2025-06-17",
+        "limit": {
+            "context": 1048576,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "audio",
+                "video",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemini 2.5 Flash-Lite Preview 06-17",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2025-06-17",
+        "temperature": true,
+        "tool_call": true
+    },
+    "google/gemini-2.5-flash-lite-preview-09-2025": {
+        "attachment": true,
+        "description": "September 2025 preview of Gemini 2.5 Flash-Lite with better instruction following and multimodal quality",
+        "family": "gemini-flash-lite",
+        "id": "google/gemini-2.5-flash-lite-preview-09-2025",
+        "knowledge": "2025-01",
+        "last_updated": "2025-09-25",
+        "limit": {
+            "context": 1048576,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "audio",
+                "video",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemini 2.5 Flash-Lite Preview 09-2025",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2025-09-25",
+        "temperature": true,
+        "tool_call": true
+    },
+    "google/gemini-2.5-flash-preview-05-20": {
+        "attachment": true,
+        "description": "Preview snapshot of Gemini 2.5 Flash with controllable thinking budgets",
+        "family": "gemini-flash",
+        "id": "google/gemini-2.5-flash-preview-05-20",
+        "knowledge": "2025-01",
+        "last_updated": "2025-05-20",
+        "limit": {
+            "context": 1048576,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "audio",
+                "video",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemini 2.5 Flash Preview 05-20",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2025-05-20",
         "temperature": true,
         "tool_call": true
     },
@@ -10136,7 +10694,6 @@
         "name": "Nano Banana Pro Preview",
         "open_weights": false,
         "reasoning": true,
-        "reasoning_options": [],
         "release_date": "2025-11-20",
         "temperature": true,
         "tool_call": false,
@@ -10905,7 +11462,7 @@
         "tool_call": true
     },
     "google/gemini-3.5-live-translate-preview": {
-        "attachment": false,
+        "attachment": true,
         "description": "Low-latency audio-to-audio model for real-time speech translation across 70+ languages",
         "family": "gemini-pro",
         "id": "google/gemini-3.5-live-translate-preview",
@@ -10933,7 +11490,7 @@
         "type": "realtime"
     },
     "google/gemini-3.5-transcribe-live": {
-        "attachment": false,
+        "attachment": true,
         "description": "Speech transcription model for accurate audio-to-text and captioning workflows",
         "family": "gemini",
         "id": "google/gemini-3.5-transcribe-live",
@@ -10954,6 +11511,7 @@
         "open_weights": false,
         "reasoning": false,
         "release_date": "2026-08-26",
+        "temperature": true,
         "tool_call": false,
         "type": "transcription"
     },
@@ -11656,6 +12214,38 @@
         "temperature": true,
         "tool_call": false
     },
+    "google/gemma-2-2b-it": {
+        "attachment": false,
+        "description": "Small open Gemma 2 instruction model for lightweight chat and on-device use",
+        "family": "gemma",
+        "id": "google/gemma-2-2b-it",
+        "last_updated": "2024-07-31",
+        "license": "Gemma Terms of Use",
+        "limit": {
+            "context": 8192,
+            "output": 8192
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemma 2 2B IT",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2024-07-31",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/google/gemma-2-2b-it"
+            }
+        ]
+    },
     "google/gemma-3-12b-it": {
         "attachment": true,
         "description": "Open multimodal Gemma instruction model for multilingual text generation and image understanding",
@@ -11752,6 +12342,76 @@
             {
                 "label": "Hugging Face",
                 "url": "https://huggingface.co/google/gemma-3-4b-it"
+            }
+        ]
+    },
+    "google/gemma-3n-e2b-it": {
+        "attachment": true,
+        "description": "Efficient on-device Gemma 3n model for text, image, and audio understanding",
+        "family": "gemma",
+        "id": "google/gemma-3n-e2b-it",
+        "knowledge": "2024-06",
+        "last_updated": "2025-06-26",
+        "license": "Gemma Terms of Use",
+        "limit": {
+            "context": 32768,
+            "output": 32768
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "audio"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemma 3n E2B IT",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2025-06-26",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/google/gemma-3n-E2B-it"
+            }
+        ]
+    },
+    "google/gemma-3n-e4b-it": {
+        "attachment": true,
+        "description": "Efficient on-device Gemma 3n model for text, image, and audio understanding",
+        "family": "gemma",
+        "id": "google/gemma-3n-e4b-it",
+        "knowledge": "2024-06",
+        "last_updated": "2025-06-26",
+        "license": "Gemma Terms of Use",
+        "limit": {
+            "context": 32768,
+            "output": 32768
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "audio"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemma 3n E4B IT",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2025-06-26",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/google/gemma-3n-E4B-it"
             }
         ]
     },
@@ -12582,6 +13242,85 @@
         "temperature": true,
         "tool_call": false
     },
+    "levanto/levanto-sage-v1.4": {
+        "attachment": true,
+        "description": "Decision model that answers typed yes/no, choice, scale, sort and tag questions with calibrated probabilities",
+        "id": "levanto/levanto-sage-v1.4",
+        "last_updated": "2026-10-04",
+        "limit": {
+            "context": 32768,
+            "output": 0
+        },
+        "links": [
+            {
+                "label": "Documentation",
+                "type": "docs",
+                "url": "https://docs.levanto.ai/"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Sage 1.4",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-10-04",
+        "temperature": false,
+        "tool_call": false,
+        "type": "decision"
+    },
+    "lightonai/lightonocr-3-0.8b": {
+        "attachment": true,
+        "benchmarks": [
+            {
+                "metric": "score",
+                "name": "olmOCR-bench",
+                "score": 85.5,
+                "source": "https://huggingface.co/lightonai/LightOnOCR-3-0.8B"
+            },
+            {
+                "metric": "mean",
+                "name": "ParseBench",
+                "score": 74.6,
+                "source": "https://huggingface.co/lightonai/LightOnOCR-3-0.8B"
+            }
+        ],
+        "description": "LightOnOCR-3-0.8B is the lightest model of LightOn's LightOnOCR-3 family, with the same layout and visual understanding features as its larger siblings.",
+        "id": "lightonai/lightonocr-3-0.8b",
+        "last_updated": "2026-10-14",
+        "license": "apache-2.0",
+        "limit": {
+            "context": 262144,
+            "output": 16384
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "LightOnOCR-3 0.8B",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2026-10-08",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/lightonai/LightOnOCR-3-0.8B"
+            }
+        ]
+    },
     "liquid/d1": {
         "attachment": true,
         "description": "System One decision model for typed classification, routing, and scoring over shared state",
@@ -12742,6 +13481,32 @@
         "reasoning": true,
         "release_date": "2026-06-30",
         "temperature": true,
+        "tool_call": true
+    },
+    "meituan/longcat-2.5": {
+        "attachment": true,
+        "description": "Meituan's multimodal reasoning model for long-horizon coding and agent tasks, with visual understanding and a 1M-token context window",
+        "family": "longcat",
+        "id": "meituan/longcat-2.5",
+        "last_updated": "2026-11-02",
+        "limit": {
+            "context": 1000000,
+            "output": 262144
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "LongCat-2.5",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-11-02",
+        "temperature": false,
         "tool_call": true
     },
     "meituan/longcat-2.5-preview": {
@@ -12966,6 +13731,73 @@
             }
         ]
     },
+    "meta/llama-3.2-3b-instruct": {
+        "attachment": false,
+        "description": "Small instruction-tuned Llama model for multilingual dialogue and agentic retrieval",
+        "family": "llama",
+        "id": "meta/llama-3.2-3b-instruct",
+        "knowledge": "2023-12",
+        "last_updated": "2024-09-25",
+        "license": "Llama 3.2 Community License",
+        "limit": {
+            "context": 131072,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Llama 3.2 3B Instruct",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2024-09-25",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct"
+            }
+        ]
+    },
+    "meta/llama-3.2-90b-vision-instruct": {
+        "attachment": true,
+        "description": "Large open multimodal Llama model for image reasoning, document QA, and captioning",
+        "family": "llama",
+        "id": "meta/llama-3.2-90b-vision-instruct",
+        "knowledge": "2023-12",
+        "last_updated": "2024-09-25",
+        "license": "Llama 3.2 Community License",
+        "limit": {
+            "context": 128000,
+            "output": 4096
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Llama-3.2-90B-Vision-Instruct",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2024-09-25",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/meta-llama/Llama-3.2-90B-Vision-Instruct"
+            }
+        ]
+    },
     "meta/llama-3.3-70b-instruct": {
         "attachment": false,
         "benchmarks": [
@@ -13135,6 +13967,39 @@
             }
         ]
     },
+    "meta/llama-guard-4-12b": {
+        "attachment": true,
+        "description": "Multimodal Llama 4-based safety classifier for moderating prompts and responses",
+        "family": "llama",
+        "id": "meta/llama-guard-4-12b",
+        "last_updated": "2025-04-29",
+        "license": "Llama 4 Community License",
+        "limit": {
+            "context": 163840,
+            "output": 163840
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Llama Guard 4 12B",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2025-04-29",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/meta-llama/Llama-Guard-4-12B"
+            }
+        ]
+    },
     "meta/llama-prompt-guard-2-22m": {
         "attachment": false,
         "description": "22M-parameter (DeBERTa-xsmall) English classifier that detects prompt injection and jailbreak attempts",
@@ -13198,6 +14063,138 @@
                 "url": "https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M"
             }
         ]
+    },
+    "meta/muse-ember-1.0": {
+        "attachment": true,
+        "benchmarks": [
+            {
+                "date": "2026-11-09",
+                "metric": "strict pass@1",
+                "name": "AutomationBench",
+                "score": 37.8,
+                "source": "https://research.meta.ai/blog/muse-ember",
+                "variant": "max effort; Artificial Analysis AutomationBench-AA"
+            },
+            {
+                "dataset": "Linux subset",
+                "date": "2026-11-09",
+                "harness": "Meta internal evaluation framework",
+                "metric": "score",
+                "name": "Agents' Last Exam",
+                "score": 61.6,
+                "source": "https://research.meta.ai/blog/muse-ember",
+                "variant": "max effort"
+            },
+            {
+                "date": "2026-11-09",
+                "harness": "mini-swe-agent",
+                "metric": "accuracy",
+                "name": "Terminal-Bench",
+                "score": 40.9,
+                "source": "https://research.meta.ai/blog/muse-ember",
+                "variant": "max effort",
+                "version": "4.0"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "score",
+                "name": "FrontierCode",
+                "score": 27.2,
+                "source": "https://research.meta.ai/blog/muse-ember",
+                "variant": "max effort; Artificial Analysis FrontierCode-AA",
+                "version": "2.0"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "score",
+                "name": "GDP.pdf",
+                "score": 22.8,
+                "source": "https://research.meta.ai/blog/muse-ember",
+                "variant": "max effort; Artificial Analysis GDP.pdf-AA"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "mean partial score",
+                "name": "OSWorld",
+                "score": 69.5,
+                "source": "https://research.meta.ai/blog/muse-ember",
+                "variant": "max effort",
+                "version": "2.1"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "binary completion rate",
+                "name": "OSWorld",
+                "score": 33.8,
+                "source": "https://research.meta.ai/blog/muse-ember",
+                "variant": "max effort",
+                "version": "2.1"
+            },
+            {
+                "date": "2026-11-09",
+                "harness": "Meta internal evaluation framework",
+                "metric": "score",
+                "name": "PerceptionBench",
+                "score": 80.6,
+                "source": "https://research.meta.ai/blog/muse-ember",
+                "variant": "max effort; with tools"
+            },
+            {
+                "date": "2026-11-09",
+                "metric": "index score",
+                "name": "Artificial Analysis Intelligence Index",
+                "score": 36,
+                "source": "https://research.meta.ai/blog/muse-ember",
+                "variant": "max effort",
+                "version": "5"
+            }
+        ],
+        "description": "Muse Ember is Meta's smallest and most efficient reasoning model, built for the work agents repeat all day: tool calls, coding subtasks, routing, extraction, and long-document parsing. It pairs with Muse Wonder or Muse Spark, which plan while Muse Ember handles the volume.",
+        "family": "muse",
+        "id": "meta/muse-ember-1.0",
+        "last_updated": "2026-11-09",
+        "limit": {
+            "context": 1048576,
+            "output": 524288
+        },
+        "links": [
+            {
+                "label": "Announcement",
+                "type": "announcement",
+                "url": "https://research.meta.ai/blog/muse-ember"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "pdf",
+                "audio"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Muse Ember",
+        "open_weights": false,
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            }
+        ],
+        "release_date": "2026-11-09",
+        "temperature": true,
+        "tool_call": true
     },
     "meta/muse-glimmer-30b": {
         "attachment": true,
@@ -14414,6 +15411,7 @@
         "open_weights": false,
         "reasoning": true,
         "release_date": "2026-08-11",
+        "temperature": false,
         "tool_call": true
     },
     "microsoft/phi-4-mini": {
@@ -14456,6 +15454,41 @@
         "release_date": "2025-02-26",
         "temperature": true,
         "tool_call": true
+    },
+    "microsoft/phi-4-multimodal-instruct": {
+        "attachment": true,
+        "description": "Compact Microsoft multimodal model for text, image, and speech understanding",
+        "family": "phi",
+        "id": "microsoft/phi-4-multimodal-instruct",
+        "knowledge": "2024-06",
+        "last_updated": "2025-02-26",
+        "license": "MIT",
+        "limit": {
+            "context": 131072,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "audio"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Phi-4-multimodal-instruct",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2025-02-26",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct"
+            }
+        ]
     },
     "microsoft/wizardlm-2-8x22b": {
         "attachment": false,
@@ -15008,7 +16041,7 @@
             ]
         },
         "name": "MiniMax-M3.1-Flash",
-        "open_weights": false,
+        "open_weights": true,
         "reasoning": true,
         "reasoning_options": [
             {
@@ -15079,8 +16112,8 @@
         "tool_call": true
     },
     "minimax/image-01": {
-        "attachment": true,
-        "description": "MiniMax text-to-image generation model with reference-image support",
+        "attachment": false,
+        "description": "MiniMax text-to-image generation model. The API also takes one character (portrait) reference to keep a person consistent, but it cannot edit an input image",
         "family": "minimax",
         "id": "minimax/image-01",
         "last_updated": "2026-08-25",
@@ -15090,8 +16123,7 @@
         },
         "modalities": {
             "input": [
-                "text",
-                "image"
+                "text"
             ],
             "output": [
                 "image"
@@ -15800,6 +16832,38 @@
             }
         ]
     },
+    "mistral/mistral-7b-instruct-v0.3": {
+        "attachment": false,
+        "description": "Open 7B Mistral instruction model with function calling",
+        "family": "mistral",
+        "id": "mistral/mistral-7b-instruct-v0.3",
+        "last_updated": "2024-05-22",
+        "license": "Apache 2.0",
+        "limit": {
+            "context": 32768,
+            "output": 32768
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Mistral 7B Instruct v0.3",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2024-05-22",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3"
+            }
+        ]
+    },
     "mistral/mistral-embed": {
         "attachment": false,
         "description": "Embedding model for semantic search, retrieval, clustering, and ranking pipelines",
@@ -16023,7 +17087,8 @@
             {
                 "type": "effort",
                 "values": [
-                    "none",
+                    "low",
+                    "medium",
                     "high"
                 ]
             }
@@ -16642,6 +17707,38 @@
         "release_date": "2024-04-17",
         "temperature": true,
         "tool_call": true
+    },
+    "mistral/mixtral-8x7b-instruct-v0.1": {
+        "attachment": false,
+        "description": "Open sparse mixture-of-experts Mistral instruction model",
+        "family": "mistral",
+        "id": "mistral/mixtral-8x7b-instruct-v0.1",
+        "last_updated": "2023-12-11",
+        "license": "Apache 2.0",
+        "limit": {
+            "context": 32768,
+            "output": 32768
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Mixtral 8x7B Instruct v0.1",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2023-12-11",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1"
+            }
+        ]
     },
     "mistral/pixtral-12b": {
         "attachment": true,
@@ -17451,6 +18548,43 @@
         "temperature": false,
         "tool_call": true
     },
+    "moonshotai/kimi-k3.1-pro": {
+        "attachment": true,
+        "description": "Multimodal Kimi model with a 1M-token context window and always-on reasoning, for coding, 3D creation and financial research",
+        "family": "kimi-k3",
+        "id": "moonshotai/kimi-k3.1-pro",
+        "last_updated": "2026-10-23",
+        "limit": {
+            "context": 1048576,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Kimi K3.1 Pro",
+        "open_weights": true,
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "high",
+                    "max"
+                ]
+            }
+        ],
+        "release_date": "2026-10-23",
+        "temperature": false,
+        "tool_call": true
+    },
     "morph/morph-v3-fast": {
         "attachment": false,
         "description": "Efficient model for low-latency assistance, extraction, and routine automation",
@@ -17458,8 +18592,8 @@
         "id": "morph/morph-v3-fast",
         "last_updated": "2025-07-07",
         "limit": {
-            "context": 81920,
-            "output": 38000
+            "context": 262144,
+            "output": 131072
         },
         "modalities": {
             "input": [
@@ -17656,6 +18790,7 @@
     "nousresearch/hermes-2-pro-llama-3-8b": {
         "attachment": false,
         "description": "Llama 3 fine-tune optimized for function calling, structured JSON responses, and dialogue",
+        "family": "hermes",
         "id": "nousresearch/hermes-2-pro-llama-3-8b",
         "last_updated": "2024-04-30",
         "license": "Llama 3 Community License",
@@ -21768,6 +22903,48 @@
         "temperature": false,
         "tool_call": true
     },
+    "openai/gpt-6.1-terra": {
+        "attachment": true,
+        "description": "Fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
+        "family": "gpt-terra",
+        "id": "openai/gpt-6.1-terra",
+        "knowledge": "2026-06-01",
+        "last_updated": "2026-10-26",
+        "limit": {
+            "context": 1050000,
+            "input": 922000,
+            "output": 128000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "GPT-6.1 Terra",
+        "open_weights": false,
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "none",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            }
+        ],
+        "release_date": "2026-10-26",
+        "temperature": false,
+        "tool_call": true
+    },
     "openai/gpt-image-1": {
         "attachment": true,
         "description": "OpenAI image model for production generation, edits, and brand-safe visual workflows",
@@ -22236,7 +23413,7 @@
         "family": "o",
         "id": "openai/o3-deep-research",
         "knowledge": "2024-05",
-        "last_updated": "2024-06-26",
+        "last_updated": "2025-06-26",
         "limit": {
             "context": 200000,
             "output": 100000
@@ -22253,7 +23430,7 @@
         "name": "o3-deep-research",
         "open_weights": false,
         "reasoning": true,
-        "release_date": "2024-06-26",
+        "release_date": "2025-06-26",
         "temperature": false,
         "tool_call": true
     },
@@ -22400,7 +23577,7 @@
         "family": "o-mini",
         "id": "openai/o4-mini-deep-research",
         "knowledge": "2024-05",
-        "last_updated": "2024-06-26",
+        "last_updated": "2025-06-26",
         "limit": {
             "context": 200000,
             "output": 100000
@@ -22417,7 +23594,7 @@
         "name": "o4-mini-deep-research",
         "open_weights": false,
         "reasoning": true,
-        "release_date": "2024-06-26",
+        "release_date": "2025-06-26",
         "temperature": false,
         "tool_call": true
     },
@@ -22698,6 +23875,40 @@
             }
         ]
     },
+    "opencode-go/crouton-alpha-free": {
+        "attachment": true,
+        "id": "opencode-go/crouton-alpha-free",
+        "limit": {
+            "context": 1048576,
+            "output": 270000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Crouton Alpha Free",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            }
+        ]
+    },
     "opencode-go/deepseek-v4-pro": {
         "attachment": false,
         "family": "deepseek-thinking",
@@ -22714,7 +23925,7 @@
                 "text"
             ]
         },
-        "name": "DeepSeek V4 Pro (New)",
+        "name": "DeepSeek V4 Pro",
         "reasoning": true,
         "reasoning_options": [
             {
@@ -22752,6 +23963,39 @@
                     "low",
                     "high",
                     "max"
+                ]
+            }
+        ]
+    },
+    "opencode-go/gemini-4-argon": {
+        "attachment": true,
+        "family": "gemini",
+        "id": "opencode-go/gemini-4-argon",
+        "limit": {
+            "context": 1048576,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "audio",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemini 4 Argon",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high"
                 ]
             }
         ]
@@ -22858,8 +24102,7 @@
             "input": [
                 "text",
                 "image",
-                "video",
-                "pdf"
+                "video"
             ],
             "output": [
                 "text"
@@ -23010,6 +24253,36 @@
             }
         ]
     },
+    "opencode-go/hy4": {
+        "attachment": true,
+        "family": "Hy",
+        "id": "opencode-go/hy4",
+        "limit": {
+            "context": 1048576,
+            "input": 983010,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Hy4",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "none",
+                    "high"
+                ]
+            }
+        ]
+    },
     "opencode-go/hy4-preview": {
         "attachment": false,
         "family": "Hy",
@@ -23037,6 +24310,25 @@
                 ]
             }
         ]
+    },
+    "opencode-go/iceman-contributor-free": {
+        "attachment": false,
+        "id": "opencode-go/iceman-contributor-free",
+        "limit": {
+            "context": 262144,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Iceman Contributor Free",
+        "reasoning": true,
+        "reasoning_options": []
     },
     "opencode-go/kimi-k2.7-code": {
         "attachment": true,
@@ -23089,6 +24381,37 @@
             }
         ]
     },
+    "opencode-go/kimi-k3.1-pro": {
+        "attachment": true,
+        "family": "kimi-k3",
+        "id": "opencode-go/kimi-k3.1-pro",
+        "limit": {
+            "context": 1048576,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Kimi K3.1 Pro",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "high",
+                    "max"
+                ]
+            }
+        ]
+    },
     "opencode-go/longcat-2.0": {
         "attachment": false,
         "family": "longcat",
@@ -23106,6 +24429,31 @@
             ]
         },
         "name": "LongCat-2.0",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "toggle"
+            }
+        ]
+    },
+    "opencode-go/longcat-2.5-free": {
+        "attachment": true,
+        "family": "longcat",
+        "id": "opencode-go/longcat-2.5-free",
+        "limit": {
+            "context": 1000000,
+            "output": 262144
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "LongCat 2.5 Free",
         "reasoning": true,
         "reasoning_options": [
             {
@@ -23162,7 +24510,7 @@
         "reasoning_options": []
     },
     "opencode-go/mimo-v2.5-pro": {
-        "attachment": true,
+        "attachment": false,
         "family": "mimo-v2.5-pro",
         "id": "opencode-go/mimo-v2.5-pro",
         "limit": {
@@ -23229,7 +24577,7 @@
     },
     "opencode-go/minimax-m2.7": {
         "attachment": false,
-        "family": "minimax-m2.7",
+        "family": "minimax",
         "id": "opencode-go/minimax-m2.7",
         "limit": {
             "context": 204800,
@@ -23248,7 +24596,7 @@
         "reasoning_options": []
     },
     "opencode-go/minimax-m3": {
-        "attachment": false,
+        "attachment": true,
         "family": "minimax-m3",
         "id": "opencode-go/minimax-m3",
         "limit": {
@@ -23270,6 +24618,39 @@
         "reasoning_options": [
             {
                 "type": "toggle"
+            }
+        ]
+    },
+    "opencode-go/minimax-m3.1-flash": {
+        "attachment": true,
+        "family": "minimax",
+        "id": "opencode-go/minimax-m3.1-flash",
+        "limit": {
+            "context": 1000000,
+            "output": 512000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "MiniMax M3.1 Flash",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
             }
         ]
     },
@@ -23745,6 +25126,39 @@
             }
         ]
     },
+    "opencode/claude-fable-5-2": {
+        "attachment": true,
+        "family": "claude-fable",
+        "id": "opencode/claude-fable-5-2",
+        "limit": {
+            "context": 1000000,
+            "output": 128000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Claude Fable 5.2",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            }
+        ]
+    },
     "opencode/claude-haiku-4-5": {
         "attachment": true,
         "family": "claude-haiku",
@@ -24194,6 +25608,40 @@
             }
         ]
     },
+    "opencode/crouton-alpha-free": {
+        "attachment": true,
+        "id": "opencode/crouton-alpha-free",
+        "limit": {
+            "context": 1048576,
+            "output": 270000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Crouton Alpha Free",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            }
+        ]
+    },
     "opencode/deepseek-v4-flash": {
         "attachment": false,
         "family": "deepseek-flash",
@@ -24340,6 +25788,9 @@
         "reasoning": true,
         "reasoning_options": [
             {
+                "type": "toggle"
+            },
+            {
                 "type": "effort",
                 "values": [
                     "low",
@@ -24369,6 +25820,9 @@
         "name": "DeepSeek V4.1 Flash Free",
         "reasoning": true,
         "reasoning_options": [
+            {
+                "type": "toggle"
+            },
             {
                 "type": "effort",
                 "values": [
@@ -24430,6 +25884,37 @@
                 "values": [
                     "low",
                     "high",
+                    "max"
+                ]
+            }
+        ]
+    },
+    "opencode/flint-40b-free": {
+        "attachment": false,
+        "family": "flint",
+        "id": "opencode/flint-40b-free",
+        "limit": {
+            "context": 262144,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Flint 40B Free",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
                     "max"
                 ]
             }
@@ -24785,7 +26270,7 @@
     },
     "opencode/glm-4.7-free": {
         "attachment": false,
-        "family": "glm-free",
+        "family": "glm",
         "id": "opencode/glm-4.7-free",
         "limit": {
             "context": 204800,
@@ -24833,7 +26318,7 @@
     },
     "opencode/glm-5-free": {
         "attachment": false,
-        "family": "glm-free",
+        "family": "glm",
         "id": "opencode/glm-5-free",
         "limit": {
             "context": 204800,
@@ -24948,8 +26433,7 @@
             "input": [
                 "text",
                 "image",
-                "video",
-                "pdf"
+                "video"
             ],
             "output": [
                 "text"
@@ -24980,8 +26464,7 @@
             "input": [
                 "text",
                 "image",
-                "video",
-                "pdf"
+                "video"
             ],
             "output": [
                 "text"
@@ -25932,7 +27415,7 @@
     },
     "opencode/hy3-free": {
         "attachment": false,
-        "family": "hy3-free",
+        "family": "Hy",
         "id": "opencode/hy3-free",
         "limit": {
             "context": 190000,
@@ -25965,7 +27448,7 @@
     },
     "opencode/hy3-preview-free": {
         "attachment": false,
-        "family": "hy3-free",
+        "family": "Hy",
         "id": "opencode/hy3-preview-free",
         "limit": {
             "context": 256000,
@@ -25983,8 +27466,60 @@
         "reasoning": true,
         "reasoning_options": []
     },
-    "opencode/jev-1.13": {
+    "opencode/iceman-free": {
         "attachment": false,
+        "id": "opencode/iceman-free",
+        "limit": {
+            "context": 262144,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Iceman Free",
+        "reasoning": true,
+        "reasoning_options": []
+    },
+    "opencode/inkling-2-small-free": {
+        "attachment": true,
+        "family": "ling",
+        "id": "opencode/inkling-2-small-free",
+        "limit": {
+            "context": 1048576,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Inkling 2 Small Free",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "max"
+                ]
+            }
+        ]
+    },
+    "opencode/jev-1.13": {
+        "attachment": true,
         "id": "opencode/jev-1.13",
         "limit": {
             "context": 64000,
@@ -25992,7 +27527,8 @@
         },
         "modalities": {
             "input": [
-                "text"
+                "text",
+                "image"
             ],
             "output": [
                 "text"
@@ -26003,7 +27539,7 @@
         "type": "decision"
     },
     "opencode/jev-1.13-free": {
-        "attachment": false,
+        "attachment": true,
         "id": "opencode/jev-1.13-free",
         "limit": {
             "context": 64000,
@@ -26011,7 +27547,8 @@
         },
         "modalities": {
             "input": [
-                "text"
+                "text",
+                "image"
             ],
             "output": [
                 "text"
@@ -26088,7 +27625,7 @@
     },
     "opencode/kimi-k2.5-free": {
         "attachment": true,
-        "family": "kimi-free",
+        "family": "kimi-k2",
         "id": "opencode/kimi-k2.5-free",
         "limit": {
             "context": 262144,
@@ -26182,8 +27719,13 @@
         "reasoning": true,
         "reasoning_options": [
             {
+                "type": "toggle"
+            },
+            {
                 "type": "effort",
                 "values": [
+                    "low",
+                    "high",
                     "max"
                 ]
             }
@@ -26388,6 +27930,31 @@
             }
         ]
     },
+    "opencode/longcat-2.5-free": {
+        "attachment": true,
+        "family": "longcat",
+        "id": "opencode/longcat-2.5-free",
+        "limit": {
+            "context": 1000000,
+            "output": 262144
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "LongCat 2.5 Free",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "toggle"
+            }
+        ]
+    },
     "opencode/longcat-2.5-preview-free": {
         "attachment": true,
         "family": "longcat",
@@ -26415,7 +27982,7 @@
     },
     "opencode/mimo-v2-flash-free": {
         "attachment": false,
-        "family": "mimo-flash-free",
+        "family": "mimo",
         "id": "opencode/mimo-v2-flash-free",
         "limit": {
             "context": 262144,
@@ -26435,7 +28002,7 @@
     },
     "opencode/mimo-v2-omni-free": {
         "attachment": true,
-        "family": "mimo-omni-free",
+        "family": "mimo",
         "id": "opencode/mimo-v2-omni-free",
         "limit": {
             "context": 262144,
@@ -26457,8 +28024,8 @@
         "reasoning_options": []
     },
     "opencode/mimo-v2-pro-free": {
-        "attachment": true,
-        "family": "mimo-pro-free",
+        "attachment": false,
+        "family": "mimo",
         "id": "opencode/mimo-v2-pro-free",
         "limit": {
             "context": 1048576,
@@ -26478,7 +28045,7 @@
     },
     "opencode/mimo-v2.5-free": {
         "attachment": true,
-        "family": "mimo-v2.5-free",
+        "family": "mimo",
         "id": "opencode/mimo-v2.5-free",
         "limit": {
             "context": 200000,
@@ -26544,7 +28111,7 @@
     },
     "opencode/minimax-m2.1-free": {
         "attachment": false,
-        "family": "minimax-free",
+        "family": "minimax",
         "id": "opencode/minimax-m2.1-free",
         "limit": {
             "context": 204800,
@@ -26584,7 +28151,7 @@
     },
     "opencode/minimax-m2.5-free": {
         "attachment": false,
-        "family": "minimax-free",
+        "family": "minimax",
         "id": "opencode/minimax-m2.5-free",
         "limit": {
             "context": 204800,
@@ -26642,11 +28209,15 @@
         },
         "name": "MiniMax-M3",
         "reasoning": true,
-        "reasoning_options": []
+        "reasoning_options": [
+            {
+                "type": "toggle"
+            }
+        ]
     },
     "opencode/minimax-m3-free": {
-        "attachment": false,
-        "family": "minimax-m3-free",
+        "attachment": true,
+        "family": "minimax",
         "id": "opencode/minimax-m3-free",
         "limit": {
             "context": 200000,
@@ -26732,6 +28303,41 @@
             }
         ]
     },
+    "opencode/muse-ember-1.0": {
+        "attachment": true,
+        "family": "muse",
+        "id": "opencode/muse-ember-1.0",
+        "limit": {
+            "context": 1048576,
+            "output": 270000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Muse Ember 1.0",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            }
+        ]
+    },
     "opencode/muse-spark-1.2": {
         "attachment": true,
         "family": "muse",
@@ -26769,7 +28375,7 @@
     },
     "opencode/muse-spark-1.2-contributor-free": {
         "attachment": true,
-        "family": "muse-free",
+        "family": "muse",
         "id": "opencode/muse-spark-1.2-contributor-free",
         "limit": {
             "context": 1048576,
@@ -26839,7 +28445,7 @@
     },
     "opencode/muse-spark-1.3-contributor-free": {
         "attachment": true,
-        "family": "muse-free",
+        "family": "muse",
         "id": "opencode/muse-spark-1.3-contributor-free",
         "limit": {
             "context": 1048576,
@@ -26910,7 +28516,7 @@
     },
     "opencode/nemotron-3-super-free": {
         "attachment": false,
-        "family": "nemotron-free",
+        "family": "nemotron",
         "id": "opencode/nemotron-3-super-free",
         "limit": {
             "context": 204800,
@@ -26930,7 +28536,7 @@
     },
     "opencode/nemotron-3-ultra-free": {
         "attachment": false,
-        "family": "nemotron-free",
+        "family": "nemotron",
         "id": "opencode/nemotron-3-ultra-free",
         "limit": {
             "context": 1000000,
@@ -26950,7 +28556,7 @@
     },
     "opencode/nemotron-3.5-lightning-free": {
         "attachment": false,
-        "family": "nemotron-free",
+        "family": "nemotron",
         "id": "opencode/nemotron-3.5-lightning-free",
         "limit": {
             "context": 262144,
@@ -26970,7 +28576,7 @@
     },
     "opencode/nemotron-3.5-super-vl-free": {
         "attachment": true,
-        "family": "nemotron-free",
+        "family": "nemotron",
         "id": "opencode/nemotron-3.5-super-vl-free",
         "limit": {
             "context": 1048576,
@@ -27004,7 +28610,7 @@
     },
     "opencode/north-mini-code-free": {
         "attachment": false,
-        "family": "north-free",
+        "family": "north",
         "id": "opencode/north-mini-code-free",
         "limit": {
             "context": 256000,
@@ -27030,6 +28636,35 @@
             }
         ]
     },
+    "opencode/pulse-alpha-free": {
+        "attachment": true,
+        "id": "opencode/pulse-alpha-free",
+        "limit": {
+            "context": 1048576,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Pulse Alpha Free",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "high",
+                    "max"
+                ]
+            }
+        ]
+    },
     "opencode/qwen3-coder": {
         "attachment": false,
         "family": "qwen",
@@ -27051,7 +28686,7 @@
     },
     "opencode/qwen3.5-plus": {
         "attachment": true,
-        "family": "qwen3.5",
+        "family": "qwen",
         "id": "opencode/qwen3.5-plus",
         "limit": {
             "context": 262144,
@@ -27074,14 +28709,13 @@
                 "type": "toggle"
             },
             {
-                "max": 81920,
                 "type": "budget_tokens"
             }
         ]
     },
     "opencode/qwen3.6-plus": {
         "attachment": true,
-        "family": "qwen3.6",
+        "family": "qwen",
         "id": "opencode/qwen3.6-plus",
         "limit": {
             "context": 262144,
@@ -27104,14 +28738,13 @@
                 "type": "toggle"
             },
             {
-                "max": 81920,
                 "type": "budget_tokens"
             }
         ]
     },
     "opencode/qwen3.6-plus-free": {
         "attachment": true,
-        "family": "qwen-free",
+        "family": "qwen",
         "id": "opencode/qwen3.6-plus-free",
         "limit": {
             "context": 262144,
@@ -27134,7 +28767,6 @@
                 "type": "toggle"
             },
             {
-                "max": 81920,
                 "type": "budget_tokens"
             }
         ]
@@ -27198,6 +28830,18 @@
         "reasoning_options": [
             {
                 "type": "toggle"
+            },
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "xhigh"
+                ]
+            },
+            {
+                "min": 1024,
+                "type": "budget_tokens"
             }
         ]
     },
@@ -27391,6 +29035,33 @@
         "release_date": "2026-05-12",
         "temperature": true,
         "tool_call": false
+    },
+    "perceptron/perceptron-mk1.5": {
+        "attachment": true,
+        "description": "Image, video, and audio understanding with visual grounding, reasoning, and function calling",
+        "id": "perceptron/perceptron-mk1.5",
+        "last_updated": "2026-09-25",
+        "limit": {
+            "context": 36864,
+            "output": 8192
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "audio"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Perceptron Mk1.5",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-09-25",
+        "temperature": true,
+        "tool_call": true
     },
     "perplexity/sonar": {
         "attachment": false,
@@ -27763,6 +29434,56 @@
         "release_date": "2026-09-16",
         "temperature": false,
         "tool_call": true
+    },
+    "recursive/flint": {
+        "attachment": false,
+        "description": "Open-weight mixture-of-experts model with about 2.5B active parameters for local coding agents",
+        "family": "flint",
+        "id": "recursive/flint",
+        "knowledge": "2026-06",
+        "last_updated": "2026-10-21",
+        "license": "Apache-2.0",
+        "limit": {
+            "context": 262144,
+            "output": 262144
+        },
+        "links": [
+            {
+                "label": "Model card",
+                "type": "model_card",
+                "url": "https://huggingface.co/RecursiveSI/flint"
+            },
+            {
+                "label": "Introducing Recursive Flint",
+                "type": "announcement",
+                "url": "https://www.recursive.com/updates/introducing-recursive-flint"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Flint",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-10-21",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/RecursiveSI/flint"
+            },
+            {
+                "label": "Hugging Face (INT4)",
+                "quantization": "int4",
+                "url": "https://huggingface.co/RecursiveSI/flint-int4"
+            }
+        ]
     },
     "reflection/beam-1.0-501b-a23b": {
         "attachment": false,
@@ -28540,6 +30261,9 @@
         "reasoning": true,
         "reasoning_options": [
             {
+                "type": "toggle"
+            },
+            {
                 "type": "effort",
                 "values": [
                     "low",
@@ -28575,6 +30299,9 @@
         "reasoning": true,
         "reasoning_options": [
             {
+                "type": "toggle"
+            },
+            {
                 "type": "effort",
                 "values": [
                     "low",
@@ -28586,6 +30313,38 @@
         "release_date": "2026-02-18",
         "temperature": true,
         "tool_call": true
+    },
+    "sarvam/sarvam-m": {
+        "attachment": false,
+        "description": "Hybrid-reasoning multilingual model for Indian languages built on Mistral Small",
+        "family": "sarvam",
+        "id": "sarvam/sarvam-m",
+        "last_updated": "2025-05-20",
+        "license": "Apache 2.0",
+        "limit": {
+            "context": 32768,
+            "output": 32768
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Sarvam-M",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2025-05-20",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/sarvamai/sarvam-m"
+            }
+        ]
     },
     "sdaia/allam-2-7b": {
         "attachment": false,
@@ -28649,6 +30408,7 @@
             }
         ],
         "description": "StepFun flash lane for quick multimodal reasoning and coding assistance",
+        "family": "step",
         "id": "stepfun/step-3.5-flash",
         "knowledge": "2025-01",
         "last_updated": "2026-02-13",
@@ -28713,6 +30473,7 @@
             }
         ],
         "description": "StepFun flash model for efficient multimodal reasoning, coding, and tool use",
+        "family": "step",
         "id": "stepfun/step-3.5-flash-2603",
         "knowledge": "2025-01",
         "last_updated": "2026-04-02",
@@ -29383,6 +31144,33 @@
             }
         ]
     },
+    "tencent/hy4": {
+        "attachment": true,
+        "description": "A next-generation multimodal productivity model with significantly enhanced Agent and complex task execution capabilities.",
+        "family": "Hy",
+        "id": "tencent/hy4",
+        "last_updated": "2026-11-04",
+        "limit": {
+            "context": 1048576,
+            "input": 983010,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Hy4",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-11-04",
+        "temperature": true,
+        "tool_call": true
+    },
     "tencent/hy4-preview": {
         "attachment": false,
         "description": "A next-generation productivity model with significantly enhanced Agent and complex task execution capabilities.",
@@ -29517,6 +31305,51 @@
             }
         ]
     },
+    "thinkingmachines/inkling-2-small": {
+        "attachment": true,
+        "benchmarks": [
+            {
+                "name": "Artificial Analysis Intelligence Index",
+                "score": 30.6,
+                "source": "https://thinkingmachines.ai/news/inkling-2-small/",
+                "version": "v5.0"
+            }
+        ],
+        "description": "Multimodal MoE reasoning model (594B total, 17B active) for agentic coding, vision, and knowledge work",
+        "family": "ling",
+        "id": "thinkingmachines/inkling-2-small",
+        "last_updated": "2026-11-05",
+        "license": "Proprietary",
+        "limit": {
+            "context": 1048576,
+            "output": 131072
+        },
+        "links": [
+            {
+                "type": "announcement",
+                "url": "https://thinkingmachines.ai/news/inkling-2-small/"
+            },
+            {
+                "type": "model_card",
+                "url": "https://thinkingmachines.ai/model-card/inkling-2-small/"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Inkling 2 Small",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-11-05",
+        "temperature": true,
+        "tool_call": true
+    },
     "thinkingmachines/inkling-small": {
         "attachment": true,
         "description": "Multimodal MoE reasoning model (276B total, 12B active) for text, image, and audio",
@@ -29583,8 +31416,34 @@
             }
         ]
     },
+    "typesafe/jev-1.13.0": {
+        "attachment": true,
+        "description": "System One model for fast, typed probabilistic decisions over text or structured state",
+        "id": "typesafe/jev-1.13.0",
+        "last_updated": "2026-09-15",
+        "limit": {
+            "context": 64000,
+            "output": 0
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Jev 1.13",
+        "open_weights": false,
+        "reasoning": false,
+        "release_date": "2026-09-15",
+        "temperature": false,
+        "tool_call": false,
+        "type": "decision"
+    },
     "typesafe/jev-1.14.0": {
-        "attachment": false,
+        "attachment": true,
         "description": "System One model for fast, typed probabilistic decisions over text or structured state",
         "id": "typesafe/jev-1.14.0",
         "last_updated": "2026-10-14",
@@ -29594,7 +31453,8 @@
         },
         "modalities": {
             "input": [
-                "text"
+                "text",
+                "image"
             ],
             "output": [
                 "text"
@@ -29609,7 +31469,7 @@
         "type": "decision"
     },
     "typesafe/jev-latest": {
-        "attachment": false,
+        "attachment": true,
         "description": "System One model for fast, typed probabilistic decisions over text or structured state",
         "id": "typesafe/jev-latest",
         "last_updated": "2026-09-15",
@@ -29619,7 +31479,8 @@
         },
         "modalities": {
             "input": [
-                "text"
+                "text",
+                "image"
             ],
             "output": [
                 "text"
@@ -29682,6 +31543,38 @@
         "release_date": "2023-07-22",
         "temperature": true,
         "tool_call": false
+    },
+    "upstage/solar-10.7b-instruct-v1.0": {
+        "attachment": false,
+        "description": "Upstage depth-upscaled 10.7B instruction model for single-turn chat",
+        "family": "solar",
+        "id": "upstage/solar-10.7b-instruct-v1.0",
+        "last_updated": "2023-12-12",
+        "license": "CC-BY-NC-4.0",
+        "limit": {
+            "context": 4096,
+            "output": 4096
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "SOLAR 10.7B Instruct v1.0",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2023-12-12",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/upstage/SOLAR-10.7B-Instruct-v1.0"
+            }
+        ]
     },
     "upstage/solar-mini4": {
         "attachment": false,
@@ -30014,6 +31907,7 @@
     "xai/grok-4-fast-non-reasoning": {
         "attachment": true,
         "description": "Fast Grok model for responsive chat, reasoning, and tool-assisted work",
+        "family": "grok",
         "id": "xai/grok-4-fast-non-reasoning",
         "last_updated": "2025-12-18",
         "limit": {
@@ -30041,6 +31935,7 @@
     "xai/grok-4-fast-reasoning": {
         "attachment": true,
         "description": "Fast Grok model for responsive chat, reasoning, and tool-assisted work",
+        "family": "grok",
         "id": "xai/grok-4-fast-reasoning",
         "last_updated": "2025-12-18",
         "limit": {
@@ -30575,6 +32470,7 @@
     "xai/grok-code-fast-1": {
         "attachment": false,
         "description": "Fast Grok model for responsive chat, reasoning, and tool-assisted work",
+        "family": "grok",
         "id": "xai/grok-code-fast-1",
         "last_updated": "2025-09-02",
         "limit": {

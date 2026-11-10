@@ -5,8 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -188,97 +186,6 @@ func TestCacheUsageTransportSumsSeparateResponses(t *testing.T) {
 	want := Usage{InputTokens: 600, OutputTokens: 30}
 	if !ok || got != want {
 		t.Fatalf("usage = %#v, %v; want %#v", got, ok, want)
-	}
-}
-
-func TestInstall_EmptyHome(t *testing.T) {
-	if err := Install("", "(devel)"); err == nil {
-		t.Fatal("expected error for empty forebrainHome")
-	}
-	if err := Install("   ", "(devel)"); err == nil {
-		t.Fatal("expected error for whitespace-only forebrainHome")
-	}
-}
-
-func TestInstall_SeedsWhenMissing(t *testing.T) {
-	tmp := t.TempDir()
-	assets, err := RepoAssetsDirForTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(AssetsDirEnv, assets)
-	if err := Install(tmp, "(devel)"); err != nil {
-		t.Fatalf("Install failed: %v", err)
-	}
-
-	target := filepath.Join(tmp, "models.json")
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("models.json not written: %v", err)
-	}
-	if len(data) == 0 {
-		t.Fatal("models.json is empty")
-	}
-
-	// Content must match the catalog the build ships beside the binary.
-	shipped, err := RepoModelsJSONForTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(data) != len(shipped) {
-		t.Fatalf("seeded size = %d, want %d", len(data), len(shipped))
-	}
-}
-
-func TestInstall_DoesNotOverwriteExisting(t *testing.T) {
-	tmp := t.TempDir()
-	target := filepath.Join(tmp, "models.json")
-
-	// Pre-write a user-customized models.json.
-	custom := []byte(`{"custom/model": {"id":"custom/model","limit":{"context":999}}}`)
-	if err := os.WriteFile(target, custom, 0o644); err != nil {
-		t.Fatalf("pre-write: %v", err)
-	}
-
-	if err := Install(tmp, "(devel)"); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(got) != string(custom) {
-		t.Fatal("Install overwrote existing user-customized models.json")
-	}
-}
-
-func TestInstall_ThenResolve(t *testing.T) {
-	tmp := t.TempDir()
-	assets, err := RepoAssetsDirForTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(AssetsDirEnv, assets)
-
-	// Before Install the home has no copy, so Resolve answers from the shipped
-	// base alone; Install then makes the home a full copy (asserted in
-	// catalog_test.go) and Resolve keeps answering.
-	if cat, err := Resolve(tmp); err != nil || cat.Len() == 0 {
-		t.Fatalf("Resolve before Install = %v, %v; want the shipped base", cat.Len(), err)
-	}
-
-	if err := Install(tmp, "(devel)"); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	// After Install, Resolve should succeed and return a usable catalog.
-	cat, err := Resolve(tmp)
-	if err != nil {
-		t.Fatalf("Resolve after Install: %v", err)
-	}
-	if cat == nil || cat.Len() == 0 {
-		t.Fatal("catalog is nil or empty after Install + Resolve")
 	}
 }
 

@@ -81,13 +81,6 @@ func runAssetsInstall(cmd *cobra.Command, _ []string) error {
 		installed++
 		fmt.Fprintf(out, "%s  ok  %s\n", status.File.Name, status.Path)
 	}
-	// The model catalog travels beside the dictionaries; seed it too, and
-	// report it without failing the dictionary install over it.
-	if err := llm.Install(root, home.Version); err != nil {
-		fmt.Fprintf(out, "models.json  missing  %v\n", err)
-	} else {
-		fmt.Fprintf(out, "models.json  ok  %s\n", filepath.Join(root, "models.json"))
-	}
 	if installed == 0 {
 		return fmt.Errorf("no memory dictionary could be installed for %s", root)
 	}
@@ -121,7 +114,7 @@ func runAssetsStatus(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Fprintf(out, "%s  ok  %s\n", status.File.Name, status.Path)
 	}
-	fmt.Fprintf(out, "models.json  %s\n", modelsJSONLocation(root))
+	fmt.Fprintf(out, "models.json  %s\n", modelsJSONLocation())
 	if !available {
 		return fmt.Errorf("some memory search dictionaries are missing; run `forebrain assets install`")
 	}
@@ -140,16 +133,14 @@ func assetsSourceDir() (string, error) {
 	return filepath.Join(dir, memory.DictionaryDir), nil
 }
 
-// modelsJSONLocation names where the model catalog is read from, or that it is
-// missing. It prefers the copy beside the binary, as the runtime does.
-func modelsJSONLocation(root string) string {
+// modelsJSONLocation names where the runtime reads the model catalog from —
+// the copy beside the binary, which is the only one there is (owner 2026-11-09)
+// — or that it is missing.
+func modelsJSONLocation() string {
 	if dir, err := llm.AssetsDir(); err == nil {
 		if path := filepath.Join(dir, "models.json"); fileExists(path) {
 			return path
 		}
-	}
-	if path := filepath.Join(root, "models.json"); fileExists(path) {
-		return path
 	}
 	return "missing"
 }

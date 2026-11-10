@@ -460,6 +460,52 @@ func TestPlanReviewSpawnEventNamesTheChosenModel(t *testing.T) {
 	}
 }
 
+// A review's write scope is added to the task the reviewer runs and to the
+// parts that carry it — the same parts the worker stores as the reviewer's
+// first turn. A brief added to the text alone leaves a stored row that says one
+// thing while the model was sent another, and that turn is then carried twice:
+// the stored row as history, the live parts as input.
+func TestPlanReviewBriefReachesTheTaskAndTheParts(t *testing.T) {
+	scope := toolpkg.NewReviewWriteScope("/proj", "/tmp/scratch", "/repo/.git/worktrees", "/repo/.worktrees/r1")
+	parts := []llm.ContentPart{
+		llm.Text("  review the plan  "),
+		llm.Text("Image 1 of message 1:"),
+		llm.ImageBase64("image/png", sourceTestPNG),
+	}
+
+	task, got := planReviewTaskAndParts("  review the plan  ", parts, scope)
+	if strings.TrimSpace(task) != task {
+		t.Fatalf("task %q keeps surrounding space", task)
+	}
+	if !strings.Contains(task, scope.Scratch()) {
+		t.Fatalf("task %q does not name the scratch directory", task)
+	}
+	if len(got) != len(parts) || got[0].Text != task {
+		t.Fatalf("parts = %#v, want the task the reviewer runs in the first text part", got)
+	}
+	if !reflect.DeepEqual(got[1:], parts[1:]) {
+		t.Fatalf("parts[1:] = %#v, want the label and the image unchanged", got[1:])
+	}
+	if parts[0].Text != "  review the plan  " {
+		t.Fatalf("the caller's parts were rewritten: %q", parts[0].Text)
+	}
+
+	// The trimming is unconditional: the worker trims what it stores and sends
+	// whether or not the review has a workspace.
+	task, got = planReviewTaskAndParts("  review the plan  ", parts, nil)
+	if task != "review the plan" {
+		t.Fatalf("task = %q, want it trimmed", task)
+	}
+	if got[0].Text != task {
+		t.Fatalf("parts[0] = %q, want %q", got[0].Text, task)
+	}
+
+	// A review without images has no parts to enrich and gains none.
+	if task, got := planReviewTaskAndParts("review the plan", nil, scope); task != "review the plan"+planReviewWorkspaceBrief(scope) || got != nil {
+		t.Fatalf("task = %q / parts = %#v, want the task alone", task, got)
+	}
+}
+
 // The subagent ledger has one writer — agentrun, through
 // Factory.subagentHistoryRoot — and readers in three packages that each resolve
 // the root on their own: agentrun's own lifecycle tools, appcore (handed

@@ -252,6 +252,85 @@ func releasedInputSteps(t *testing.T, s *Server, runID string) []event.QueuedInp
 	return out
 }
 
+// A peer message a finished run never took is not handed to the page: the
+// gateway runs it itself as a detached peer turn once the ended run's lock is
+// gone, so the page never sends it as something the person typed. What the
+// person queued is still published, and nothing is dropped with the run.
+func TestFinishRunKeepsTheQueuedPeerMessageForItsOwnTurn(t *testing.T) {
+	s := newRunInputTestServer(t)
+	runID := "run-release-peer"
+	q := trackedQueue(t, s, runID)
+	// A live runtime is what a running turn's queue has; the released batch is
+	// one boundary's worth of steers, the person's and the peer's together.
+	q.Attach(run.NewTurnInputRuntime())
+
+	envelope := `<cross-session-message from="uds:/tmp/peer.sock" from-name="router-peer" from-mode="bypass">` +
+		"\nplease confirm the plan\n</cross-session-message>"
+	peerIn := run.Input{
+		Text:   envelope,
+		Parts:  []llm.ContentPart{llm.Text(envelope)},
+		Origin: state.MessageOriginPeer,
+		Payload: process.PeerPrompt{
+			SessionID: "sid",
+			Text:      envelope,
+			Origin:    state.MessageOriginPeer,
+			MsgID:     "msg-1",
+			FromName:  "router-peer",
+		},
+	}
+	personIn := run.Input{Text: "typed follow-up"}
+
+	require.True(t, q.Steer(peerIn))
+	require.True(t, q.Steer(personIn))
+	s.finishRun(context.Background(), "sid", runID, state.RunStatusDone)
+
+	require.Equal(t, []event.QueuedInputReleasedPayload{{
+		Next: []event.ReleasedInput{{Text: "typed follow-up"}},
+	}}, releasedInputSteps(t, s, runID), "only the person's message is handed to the page")
+	require.False(t, q.Preview().Visible(), "the release took both entries out of the queue")
+
+	// The reported case: the peer message is the queued follow-up when the run
+	// ends. It leaves the queue without a release event, because the gateway
+	// runs it — the page would draw it as the person's own turn.
+	rr, err := s.RunRT.CreateRun(context.Background(), "sid", "the next turn")
+	require.NoError(t, err)
+	require.True(t, s.runController().Track(rr.ID, "sid", func() {}))
+	followUp, _, ok := s.runController().Queue(rr.ID)
+	require.True(t, ok)
+	require.True(t, followUp.FollowUp(peerIn))
+	s.finishRun(context.Background(), "sid", rr.ID, state.RunStatusDone)
+
+	require.Empty(t, releasedInputSteps(t, s, rr.ID), "a peer message is never published as the person's next turn")
+	require.False(t, followUp.Preview().Visible(), "the peer message left the queue for its own turn")
+}
+
+func TestSplitReleasedInputsSeparatesPeerMessages(t *testing.T) {
+	typed := run.Input{Text: "typed"}
+	typedLater := run.Input{Text: "typed later"}
+	peer := run.Input{Text: "<cross-session-message>hi</cross-session-message>", Origin: state.MessageOriginPeer}
+	peerNote := run.Input{Text: "what became of it", Origin: state.MessageOriginPeerStatus}
+
+	cases := []struct {
+		name string
+		in   []run.Input
+		want []run.Input
+		peer []run.Input
+	}{
+		{name: "empty"},
+		{name: "person only", in: []run.Input{typed}, want: []run.Input{typed}},
+		{name: "peer only", in: []run.Input{peer}, peer: []run.Input{peer}},
+		{name: "mixed keeps the order", in: []run.Input{typed, peer, typedLater}, want: []run.Input{typed, typedLater}, peer: []run.Input{peer}},
+		{name: "a delivery note is not the person's either", in: []run.Input{peerNote}, peer: []run.Input{peerNote}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			person, peer := splitReleasedInputs(tc.in)
+			require.Equal(t, tc.want, person)
+			require.Equal(t, tc.peer, peer)
+		})
+	}
+}
+
 func TestRunControllerUsesProcessControl(t *testing.T) {
 	ctl := run.NewController()
 	s := &Server{Env: &process.Environment{Control: ctl}}

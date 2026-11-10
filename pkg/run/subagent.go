@@ -4283,11 +4283,12 @@ func (r *Runner) RunPlanReviewSubagent(
 	// context below (the prepared execution's, the reviewer's calls) derives
 	// from this one, so the pinning reaches the whole run.
 	ctx = WithSubagentModelOverride(ctx, override)
-	if scope := r.planReviewWriteScope(ctx); scope != nil {
+	scope := r.planReviewWriteScope(ctx)
+	if scope != nil {
 		ctx = tool.WithReviewWriteScope(ctx, scope)
-		task += planReviewWorkspaceBrief(scope)
 		defer scope.Release()
 	}
+	task, parts = planReviewTaskAndParts(task, parts, scope)
 	// agents.defaults.enable_subagent governs the subagents the model may
 	// spawn; the reviewer is dispatched only because the user asked for it
 	// from the approval overlay, so that switch does not apply here.
@@ -4327,6 +4328,26 @@ func (r *Runner) planReviewWriteScope(ctx context.Context) *tool.ReviewWriteScop
 	}
 	slog.Warn("plan review runs read-only: write scope unavailable", "error", err)
 	return nil
+}
+
+// planReviewTaskAndParts appends the review's workspace brief to the task and
+// to the parts that carry it. The parts are what the reviewer's session row
+// stores, so a brief added to the text alone leaves a row that says one thing
+// while the model was sent another — and that turn is then carried twice: the
+// stored row as history, the live parts as input.
+//
+// The text is trimmed exactly as the worker trims it before it stores and
+// sends it (pkg/process/worker_cli.go:104/121), so the parts and the row are
+// byte-identical, not merely equal when nothing happens to trail.
+func planReviewTaskAndParts(task string, parts []llm.ContentPart, scope *tool.ReviewWriteScope) (string, []llm.ContentPart) {
+	task = strings.TrimSpace(task)
+	if scope != nil {
+		task += planReviewWorkspaceBrief(scope)
+	}
+	if len(parts) > 0 {
+		parts = pipelineParts(task, parts)
+	}
+	return task, parts
 }
 
 // planReviewWorkspaceBrief names the paths of one review's write scope. The

@@ -993,7 +993,12 @@ func (s *Server) llmModelCapsValid(r *http.Request, provider, model string, caps
 	// A row that already carries levels keeps them: the rule is about setting
 	// them now, and refusing an unchanged value would lock the whole row.
 	if len(caps.Efforts) > 0 && !slices.Equal(caps.Efforts, stored.CapEfforts) {
-		if _, err := process.ResolveModelInfo(r.Context(), provider, model, stored.Source, stored.APIKey); err == nil {
+		// Only a model the catalog lists WITH levels has them decided by its
+		// vendor. The answer is the shipped catalog's (owner 2026-11-09), so
+		// this is offline and stable across an install; a model it does not
+		// list, and one it lists without discrete levels (a toggle or no
+		// reasoning_options), is the user's to pick.
+		if info, err := process.ResolveModelInfo(r.Context(), provider, model, stored.Source, stored.APIKey); err == nil && len(info.Efforts) > 0 {
 			return llmRefuse(r, http.StatusBadRequest,
 				"这个模型的思考强度由官方文档决定",
 				"this model's thinking levels are decided by its vendor, not by hand")

@@ -518,6 +518,50 @@ func TestInputQueuePreviewShowsEntryTexts(t *testing.T) {
 	}
 }
 
+// The recall key hands back only what the person wrote. A peer message queued
+// after their own stays in the queue for the turn its sender was answered for:
+// it is not theirs to edit, and handing it to the composer would drop it from
+// the boundary that runs it.
+func TestRecallSkipsPeerEntries(t *testing.T) {
+	q := NewInputQueue()
+	q.Attach(NewTurnInputRuntime())
+	q.FollowUp(Input{Text: "person A"})
+	envelope := `<cross-session-message from="uds:/tmp/peer.sock" from-name="router-peer"> please confirm </cross-session-message>`
+	if !q.FollowUp(Input{Text: envelope, Origin: state.MessageOriginPeer}) {
+		t.Fatal("peer message was not queued")
+	}
+
+	in, ok := q.Recall()
+	if !ok || in.Text != "person A" {
+		t.Fatalf("recall = %#v, %v, want the person's own message", in, ok)
+	}
+	if preview := q.Preview(); !reflect.DeepEqual(preview.FollowUp, []string{envelope}) {
+		t.Fatalf("the peer message must stay queued: %#v", preview)
+	}
+	if _, ok := q.Recall(); ok {
+		t.Fatal("recall handed back the peer message")
+	}
+	if preview := q.Preview(); !reflect.DeepEqual(preview.FollowUp, []string{envelope}) {
+		t.Fatalf("a refused recall touched the queue: %#v", preview)
+	}
+}
+
+// Editable is the preview's honest answer to "is there anything here the
+// person can recall": a peer message is not theirs, so a queue holding only one
+// advertises no recall, and their own message makes it true again.
+func TestPreviewEditableTracksThePersonOnly(t *testing.T) {
+	q := NewInputQueue()
+	envelope := `<cross-session-message from="uds:/tmp/peer.sock" from-name="router-peer"> please confirm </cross-session-message>`
+	q.FollowUp(Input{Text: envelope, Origin: state.MessageOriginPeer})
+	if q.Preview().Editable {
+		t.Fatal("a queue holding only another agent's message advertises recall")
+	}
+	q.FollowUp(Input{Text: "typed by the person"})
+	if !q.Preview().Editable {
+		t.Fatal("a queued message the person wrote must advertise recall")
+	}
+}
+
 // Q3 (engine half): a delivery the runtime commits leaves the steer lane and
 // waits on the delivered list for the surface to render, whole.
 func TestInputQueueDeliveryReachesDeliveredList(t *testing.T) {

@@ -451,8 +451,9 @@ type Renderer struct {
 	// hover (e.g. cursor left the window or first move not yet received).
 	vpHoverRow int
 	// vpControlHover names the local control the pointer is over — the
-	// composer's ☑N/M plan-progress token or the plan drawer's close control —
-	// or hoverTargetNone. It is kept separately from vpHoverRow because those
+	// composer's ☑N/M plan-progress token, a run-closing transcript row's own
+	// token, or the plan drawer's close control — or hoverTargetNone. It is
+	// kept separately from vpHoverRow because those
 	// controls highlight their own cells rather than a whole transcript row.
 	// ?1003h reports every pointer move, so the hover handler repaints only
 	// when this target actually changes (see viewportHoverAt).
@@ -483,6 +484,19 @@ type Renderer struct {
 	// vpProgressSpan is the screen cell the last paint drew the composer's
 	// ☑N/M plan-progress token on, or a span on no row.
 	vpProgressSpan screenSpan
+	// vpHistoryProgress are the ☑N/M tokens the last paint drew on the
+	// transcript rows that closed a run ("Worked for …") of the view on
+	// screen, in screen cells. They are the drawer's second entry: a run's
+	// closing line keeps its checklist reachable after the live Working line
+	// is gone. Only the token of such a row is an entry; the rest of the row
+	// still folds, selects and opens a subagent view exactly as before.
+	vpHistoryProgress []screenSpan
+	// vpHoverProgress names the transcript token the pointer is on, as the
+	// paint that showed it named it. A repaint resolves the highlight against
+	// this name, not the screen index, so a streamed delta that scrolls the
+	// line to another row cannot move the highlight onto a row the pointer
+	// never touched.
+	vpHoverProgress planDrawerHoverToken
 	// vpNewMessages counts transcript messages that arrived in the visible view
 	// while the user was scrolled away from the bottom, i.e. the ones they have
 	// not seen. The floating control announces them ("1 new message (ctrl+End)
@@ -4345,6 +4359,10 @@ type ComposerPendingInputPreview struct {
 	PendingSteers  []string
 	RejectedSteers []string
 	QueuedMessages []string
+	// Editable reports whether the queue holds at least one message the person
+	// wrote — the only entries the recall key can hand back. Another agent's
+	// message stays queued for its own turn, so it makes no entry editable.
+	Editable bool
 }
 
 // OverlayRow is one row of the composer's @ mention menu under the input
@@ -4723,11 +4741,12 @@ func composerPreviewVisible(p ComposerPendingInputPreview) bool {
 }
 
 // composerPreviewHasEditableQueuedInput gates the "edit last queued message"
-// hint. Pending steers count: they stay retractable from the run's input runtime
-// until it drains them at a tool boundary, and the preview drops them the moment
-// that happens.
+// hint. It is the queue's own answer: a message another agent wrote is still
+// shown here — it is going to run — but the recall key cannot hand it back,
+// because it is not the person's to edit. The queue drops an entry from this
+// preview the moment its turn takes it.
 func composerPreviewHasEditableQueuedInput(p ComposerPendingInputPreview) bool {
-	return len(p.QueuedMessages) > 0 || len(p.PendingSteers) > 0 || len(p.RejectedSteers) > 0
+	return p.Editable
 }
 
 func formatComposerPendingInputPreview(p ComposerPendingInputPreview, termWidth int) []string {

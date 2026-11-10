@@ -24,17 +24,17 @@ func Seed(root string) error {
 	if err := skill.Install(root); err != nil {
 		slog.Warn("system skills install failed", "err", err)
 	}
-	if err := llm.InitGlobalCatalog(root, home.Version); err != nil {
-		slog.Warn("model catalog seed failed", "err", err)
+	if err := llm.InitGlobalCatalog(); err != nil {
+		slog.Warn("model catalog load failed", "err", err)
 	}
-	// The dictionaries are a home-level install like models.json — the home
-	// copy is filled in when it is missing and left alone when it exists — so
-	// seeding them from the copy beside this binary at startup means a search,
-	// in this process or any other forebrain sharing the home, finds them before
-	// its first Chinese or Japanese query, with no window where a search would
-	// fail because the home had not been prepared yet. (models.json differs in
-	// one respect: its home copy is an overlay over the shipped catalog, merged
-	// per field when the catalog is loaded.)
+	// The dictionaries are a home-level install — the home copy is filled in
+	// when it is missing and left alone when it exists — so seeding them from
+	// the copy beside this binary at startup means a search, in this process or
+	// any other forebrain sharing the home, finds them before its first
+	// Chinese or Japanese query, with no window where a search would fail
+	// because the home had not been prepared yet. (The model catalog is not
+	// seeded into the home any more: it is read from beside the binary, owner
+	// 2026-11-09.)
 	if err := memory.Seed(root, home.Version); err != nil {
 		slog.Warn("memory search dictionary seed failed", "err", err)
 	}

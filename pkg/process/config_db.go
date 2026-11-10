@@ -395,14 +395,29 @@ func refreshModelCatalogCaps(rows []appcfg.LLMModelConfig, resolver *modelinfo.R
 		pending = append(pending, row)
 	}
 	go func() {
+		// One line per distinct failure per sweep, not per row: every configured
+		// row asks the same sources, so an install with twenty rows meets one
+		// unreachable API twenty times. The model travels as a field, never as
+		// part of the key — a keyed-by-text line is the class of failure, and
+		// the first row that hit it names it.
+		logged := map[string]bool{}
 		for _, row := range pending {
 			// One row at a time: a sweep must not open a connection per row
 			// at once, and the resolver already bounds each source.
 			info, err := resolver.Resolve(context.Background(), modelinfo.Row{Provider: row.Provider, Model: row.Model}, "", row.APIKey)
 			if err != nil {
-				// Silent by design: an unreachable source and a model it does
-				// not list are the same answer to the person — the levels are
-				// theirs to pick.
+				if errors.Is(err, modelinfo.ErrNotListed) {
+					// Not a failure: the catalog does not list the model (or
+					// lists it without discrete levels), which is the same
+					// answer to the person as an unreachable source — the
+					// levels are theirs to pick. Silent.
+					continue
+				}
+				key := err.Error()
+				if logged[key] {
+					continue
+				}
+				logged[key] = true
 				slog.Debug("live model capabilities unavailable", "model", row.Model, "provider", row.Provider, "err", err)
 				continue
 			}

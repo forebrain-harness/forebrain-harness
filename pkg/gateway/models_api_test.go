@@ -375,9 +375,11 @@ func TestLLMModelsAPICatalogCaps(t *testing.T) {
 	require.True(t, *body.Images)
 	require.True(t, *body.Reasoning)
 	require.Equal(t, []string{"low", "high"}, body.Efforts)
-	// No source answered for this install: the page offers the checkboxes.
-	require.False(t, body.EffortsKnown)
-	require.Empty(t, body.EffortsSource)
+	// The built-in table is part of the default layer, and the shipped catalog
+	// source answers from it (owner 2026-11-09): the levels are known, and the
+	// label names where they came from.
+	require.True(t, body.EffortsKnown)
+	require.Equal(t, "models.dev", body.EffortsSource)
 
 	// A model nothing lists has no catalog values at all.
 	rec = do(http.MethodGet, "/api/llm-models/catalog-caps?provider=deepseek&model=nothing-at-all")
@@ -554,4 +556,46 @@ func TestLLMModelsAPIReachesTheRuntimeSnapshot(t *testing.T) {
 	// Deleting it takes it back out: the snapshot follows the table both ways.
 	require.Equal(t, http.StatusNoContent, do(http.MethodDelete, "/api/llm-models/"+created.ID).Code)
 	require.NotContains(t, runtimeModels(t), "deepseek-snapshot")
+}
+
+// TestLLMModelsAPICapsValidationFollowsTheShippedCatalog pins the "official
+// levels" rule against the offline catalog (owner 2026-11-09): a model the
+// catalog lists with levels has them decided by its vendor; a model the catalog
+// does not list, or lists without discrete levels, keeps the user's pick.
+func TestLLMModelsAPICapsValidationFollowsTheShippedCatalog(t *testing.T) {
+	// The built-in table is a row of the same default layer the shipped catalog
+	// fills, so this pins the rule without disturbing the package's catalog.
+	llm.SetBuiltinModels("caps-test", []llm.Model{
+		{ID: "with-levels", Provider: "caps-test", APIModel: "with-levels",
+			ReasoningOptions: []llm.ReasoningOption{{Type: "effort", Values: []string{"low", "high"}}},
+			ReasoningKnown:   true},
+		{ID: "without-levels", Provider: "caps-test", APIModel: "without-levels"},
+	})
+	t.Cleanup(func() { llm.SetBuiltinModels("caps-test", nil) })
+
+	s := &Server{}
+	r := httptest.NewRequest(http.MethodPut, "/api/llm-models/x", nil)
+
+	// Listed with levels: hand-entering them is refused.
+	err := s.llmModelCapsValid(r, "caps-test", "with-levels", llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "官方文档")
+
+	// A stored row that already carries exactly these levels may send them
+	// back unchanged: the rule is about setting them now.
+	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "with-levels",
+		llmModelCaps{Efforts: []string{"low"}},
+		state.LLMModel{CapEfforts: []string{"low"}}))
+
+	// Listed without discrete levels: the user's pick is allowed.
+	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "without-levels",
+		llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{}))
+
+	// Not in the catalog at all: allowed, the same as before the catalog existed.
+	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "no-such-model",
+		llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{}))
+
+	// The level names themselves are checked first, whatever the catalog says.
+	require.Error(t, s.llmModelCapsValid(r, "openai", "no-such-model",
+		llmModelCaps{Efforts: []string{"ultra"}}, state.LLMModel{}))
 }

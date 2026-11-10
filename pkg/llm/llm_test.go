@@ -453,3 +453,38 @@ func TestNewRawTool_DoesNotMutateCallerSchema(t *testing.T) {
 		t.Fatalf("original schema was mutated: 'description' key was added")
 	}
 }
+
+// The line naming an image's file is what lets the model open it, so it is
+// written once: a text that already names that file (the plan review's prompt
+// lists every image path) gets no second mention. A mention must be the whole
+// path — a neighbouring byte that continues a path means the text named a
+// different file, and dropping the line there would take away the only pointer
+// to the picture.
+func TestImageFileNamedInText(t *testing.T) {
+	const file = "/tmp/a.png"
+	cases := []struct {
+		name   string
+		text   string
+		source string
+		want   bool
+	}{
+		{"an images block line", "<images>\nImage 1 of message 2: /tmp/a.png\n</images>", file, true},
+		{"the note itself", "[Image: source: /tmp/a.png]", file, true},
+		{"a newline after the path", "/tmp/a.png\nand then some more", file, true},
+		{"a closing tag after the path", "/tmp/a.png</images>", file, true},
+		{"a longer name with the same start", "see /tmp/a.png.bak", file, false},
+		{"a longer path ending in it", "x/tmp/a.png", file, false},
+		{"a sentence continuing it", "see /tmp/a.png.", file, false},
+		{"another file entirely", "see /tmp/b.png", file, false},
+		{"no text", "", file, false},
+		{"no source", "/tmp/a.png", "", false},
+		{"a whole mention after a longer one", "/tmp/a.png.bak and /tmp/a.png", file, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ImageFileNamedInText(tc.text, tc.source); got != tc.want {
+				t.Fatalf("ImageFileNamedInText(%q, %q) = %v, want %v", tc.text, tc.source, got, tc.want)
+			}
+		})
+	}
+}

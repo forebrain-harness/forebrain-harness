@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -284,212 +282,47 @@ func (s ArkSource) Fetch(ctx context.Context, row Row, apiKey string) (Info, err
 }
 
 // ModelsDevSource answers every model neither subscription owns — OpenCode's
-// subscriptions, the built-in vendors, and custom models — from models.dev,
-// the upstream the shipped catalog is synchronized from.
-type ModelsDevSource struct {
-	// BaseURL is the catalog endpoint; "" means ModelsDevCatalogURL.
-	BaseURL string
-	// TTL is how long one fetch answers. It exists because the response is
-	// large (measured 6.5MB, 2026-11-07) and every row of an install asks the
-	// same document: zero means ModelsDevTTL.
-	TTL time.Duration
-	// Now is the clock; nil means time.Now.
-	Now func() time.Time
+// subscriptions, the built-in vendors, and custom models — from the catalog this
+// build ships beside its binary. It is the same data models.dev's document is
+// synchronized from, read as a file and never fetched (owner 2026-11-09), so
+// the answer is the same on every machine of a build and no row can wait on a
+// network.
+type ModelsDevSource struct{}
 
-	mu       sync.Mutex
-	cached   *devCatalog
-	cachedAt time.Time
-}
-
-// ModelsDevCatalogURL is the catalog owner 2026-11-07 designated as the source
-// for every model the two subscription APIs do not own.
-const ModelsDevCatalogURL = "https://models.dev/catalog.json?type=all"
-
-// ModelsDevTTL is how long one fetched catalog answers (the plan's 6h).
-const ModelsDevTTL = 6 * time.Hour
-
-// maxCatalogBytes bounds a catalog response. The real document measured 6.5MB;
-// the bound exists so a broken or hostile response cannot exhaust memory.
+// maxCatalogBytes bounds a catalog-shaped response body. The real models.dev
+// document measured 6.5MB; the bound exists so a broken or hostile response
+// cannot exhaust memory. It bounds the Ark plan list, the one source that still
+// reads a response body.
 const maxCatalogBytes = 64 << 20
-
-// devCatalog is the two tables the response carries: models grouped by
-// provider, and the flat top-level table keyed by "vendor/model".
-type devCatalog struct {
-	Providers map[string]struct {
-		Models map[string]devModel `json:"models"`
-	} `json:"providers"`
-	Models map[string]devModel `json:"models"`
-}
-
-type devModel struct {
-	ReasoningOptions []struct {
-		Type   string   `json:"type"`
-		Values []string `json:"values"`
-	} `json:"reasoning_options"`
-	Limit struct {
-		Context int64 `json:"context"`
-		Output  int64 `json:"output"`
-	} `json:"limit"`
-	Modalities struct {
-		Input []string `json:"input"`
-	} `json:"modalities"`
-	Status string `json:"status"`
-}
 
 // Applies answers true for every row: this is the general source, the one a
 // subscription API's failure falls back to.
-func (s *ModelsDevSource) Applies(row Row, subscription string) bool { return true }
+func (s ModelsDevSource) Applies(row Row, subscription string) bool { return true }
 
-func (s *ModelsDevSource) Fetch(ctx context.Context, row Row, apiKey string) (Info, error) {
-	cat, err := s.catalog(ctx)
-	if err != nil {
-		return Info{}, err
-	}
-	entry, ok := cat.find(row)
+func (s ModelsDevSource) Fetch(ctx context.Context, row Row, apiKey string) (Info, error) {
+	hit, ok := llm.LookupCatalog(strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model))
 	if !ok {
 		return Info{}, ErrNotListed
 	}
-	info := Info{Origin: "models.dev"}
-	info.Efforts = effortLevels(entry)
-	// A toggle option or an empty list means models.dev names no levels for
-	// this model. The answer stands with no Efforts: an empty list is what
-	// makes the surface offer the checkboxes, so this is neither a failure
-	// nor something another source has to answer.
-	info.ContextWindow = entry.Limit.Context
-	info.MaxOutput = entry.Limit.Output
-	images := containsFold(entry.Modalities.Input, "image")
+	if strings.EqualFold(strings.TrimSpace(hit.Status), "deprecated") {
+		// The catalog has retired the model: its levels are no longer a
+		// promise about anything.
+		return Info{}, ErrNotListed
+	}
+	info := Info{
+		ContextWindow: hit.ContextWindow,
+		MaxOutput:     hit.DefaultMaxTokens,
+		Origin:        "models.dev",
+	}
+	if levels, known := hit.ReasoningEfforts(); known {
+		// A row that reasons with nothing discrete (a toggle, a token budget)
+		// answers with no levels: the surface then offers the checkboxes, exactly
+		// as it did when this answer came from the upstream document.
+		info.Efforts = levels
+	}
+	images := hit.SupportsAttachments
 	info.Images = &images
 	return info, nil
-}
-
-// find resolves a row against the catalog: a custom model by its name in the
-// flat table (exactly, or by its last segment when the user typed no vendor),
-// and every other model in its own provider's table.
-func (c *devCatalog) find(row Row) (devModel, bool) {
-	provider := strings.ToLower(strings.TrimSpace(row.Provider))
-	model := strings.ToLower(strings.TrimSpace(row.Model))
-	if model == "" {
-		return devModel{}, false
-	}
-	if provider == "custom" {
-		if entry, ok := c.lookupFlat(model); ok {
-			return entry, true
-		}
-		// Several vendors may carry the same short name. The decoder does
-		// not keep the response's order, so the candidate keys are sorted
-		// and the first taken: the answer is stable run to run.
-		matches := make([]string, 0, 2)
-		for key := range c.Models {
-			if strings.EqualFold(lastSegment(key), model) {
-				matches = append(matches, key)
-			}
-		}
-		if len(matches) == 0 {
-			return devModel{}, false
-		}
-		sort.Strings(matches)
-		if entry, ok := c.lookupFlat(matches[0]); ok {
-			return entry, true
-		}
-		return devModel{}, false
-	}
-	group, ok := c.Providers[provider]
-	if !ok {
-		return devModel{}, false
-	}
-	entry, ok := group.Models[model]
-	if !ok {
-		return devModel{}, false
-	}
-	return entry, acceptedDevModel(entry)
-}
-
-// lookupFlat reads the top-level table by its exact key.
-func (c *devCatalog) lookupFlat(key string) (devModel, bool) {
-	entry, ok := c.Models[key]
-	if !ok {
-		return devModel{}, false
-	}
-	return entry, acceptedDevModel(entry)
-}
-
-// acceptedDevModel drops a model the catalog has retired: its levels are no
-// longer a promise about anything.
-func acceptedDevModel(entry devModel) bool {
-	return !strings.EqualFold(strings.TrimSpace(entry.Status), "deprecated")
-}
-
-// catalog returns the parsed document, fetching it when the cached copy is
-// older than the TTL. One fetch serves every row of an install.
-func (s *ModelsDevSource) catalog(ctx context.Context) (*devCatalog, error) {
-	now := time.Now
-	if s.Now != nil {
-		now = s.Now
-	}
-	ttl := s.TTL
-	if ttl <= 0 {
-		ttl = ModelsDevTTL
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cached != nil && now().Sub(s.cachedAt) < ttl {
-		return s.cached, nil
-	}
-	upstream := strings.TrimSpace(s.BaseURL)
-	if upstream == "" {
-		upstream = ModelsDevCatalogURL
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream, nil)
-	if err != nil {
-		return nil, fmt.Errorf("models.dev: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := llm.NewHTTPClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("models.dev: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCatalogBytes))
-	if err != nil {
-		return nil, fmt.Errorf("models.dev: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models.dev: http %d", resp.StatusCode)
-	}
-	var cat devCatalog
-	if err := json.Unmarshal(body, &cat); err != nil {
-		return nil, fmt.Errorf("models.dev: decode response: %w", err)
-	}
-	if cat.Providers == nil && cat.Models == nil {
-		// The response shape this package parses is gone. Guessing a new one
-		// would invent levels a provider never named, so it is an error the
-		// caller falls back from.
-		return nil, fmt.Errorf("models.dev: response carries neither providers nor models")
-	}
-	s.cached = &cat
-	s.cachedAt = now()
-	return s.cached, nil
-}
-
-// effortLevels reads the discrete levels a models.dev entry names: the values
-// of its "effort" reasoning option, in the order the document gives them. A
-// toggle option or an empty list names none.
-func effortLevels(entry devModel) []string {
-	var out []string
-	seen := make(map[string]bool, 4)
-	for _, option := range entry.ReasoningOptions {
-		if !strings.EqualFold(strings.TrimSpace(option.Type), "effort") {
-			continue
-		}
-		for _, value := range normalizeLevels(option.Values) {
-			if seen[value] {
-				continue
-			}
-			seen[value] = true
-			out = append(out, value)
-		}
-	}
-	return out
 }
 
 // normalizeLevels trims, lowercases and de-duplicates a provider's list,
@@ -515,14 +348,6 @@ func containsFold(values []string, want string) bool {
 		}
 	}
 	return false
-}
-
-func lastSegment(id string) string {
-	id = strings.TrimSpace(id)
-	if i := strings.LastIndex(id, "/"); i >= 0 {
-		return id[i+1:]
-	}
-	return id
 }
 
 // matchesSubscriptionOrProvider reports whether a source owns a row: the

@@ -89,6 +89,40 @@ func TestSurfaceTurnContentPartsIncludesImageAttachment(t *testing.T) {
 	}
 }
 
+// A live turn whose text already names the attachment's file is not told where
+// the picture is stored a second time — the next request replays that row under
+// the same rule, so both carry the image alone. Any other text still gets the
+// line: it is the only pointer to the file.
+func TestSurfaceTurnContentPartsSkipsTheNoteItsTextAlreadyNames(t *testing.T) {
+	img := filepath.Join(t.TempDir(), "clip.png")
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	if err := os.WriteFile(img, data, 0o600); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+	attachments := []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}}
+
+	named := "the picture at " + img + " explains it"
+	parts, _, _, _, err := SurfaceTurnContentParts(named, named, attachments)
+	if err != nil {
+		t.Fatalf("SurfaceTurnContentParts: %v", err)
+	}
+	if len(parts) != 2 || parts[0].Text != named || parts[1].Type != llm.ContentTypeImageBase64 {
+		t.Fatalf("parts = %#v, want the text and the image with no second mention", parts)
+	}
+
+	plain := "explain this"
+	parts, _, _, _, err = SurfaceTurnContentParts(plain, plain, attachments)
+	if err != nil {
+		t.Fatalf("SurfaceTurnContentParts: %v", err)
+	}
+	if len(parts) != 3 || parts[2].Text != llm.ImageSourceNote(img) {
+		t.Fatalf("parts = %#v, want the source line after the image", parts)
+	}
+}
+
 // TestSurfaceTurnContentPartsImageOnlyText pins what a message that attached a
 // picture and typed nothing sends the model: the same sentence on every
 // surface, while its row keeps the marker alone.
@@ -935,13 +969,47 @@ func TestBuildPromptSendsTheReviewerToTheFileForALongPlan(t *testing.T) {
 }
 
 func TestBuildPromptSaysTheImagesComeWithTheRequest(t *testing.T) {
-	prompt := BuildPrompt(Request{Task: "<message n=\"1\">\nlike this\n</message>", Plan: "# Plan", Images: []RequestImage{{Message: 1}}})
+	prompt := BuildPrompt(Request{Task: "<message n=\"1\">\nlike this\n</message>", Plan: "# Plan", Images: []RequestImage{{Message: 1, Files: []string{"/a.png"}}}})
 	if !strings.Contains(prompt, "The images the user attached follow this text") ||
 		!strings.Contains(prompt, "crop or enlarge it with a script") {
 		t.Fatalf("prompt must say the images and their files come with the request:\n%s", prompt)
 	}
-	if strings.Contains(BuildPrompt(Request{Task: "x", Plan: "# Plan"}), "The images the user attached") {
+	if !strings.Contains(prompt, "\n<images>\n") {
+		t.Fatalf("prompt must name the block listing the files:\n%s", prompt)
+	}
+	without := BuildPrompt(Request{Task: "x", Plan: "# Plan"})
+	if strings.Contains(without, "The images the user attached") || strings.Contains(without, "<images>") {
 		t.Fatal("a request without images must not mention them")
+	}
+}
+
+// The reviewer is told where each picture it is sent is stored, in the text and
+// not in a line after the picture: the label before an image and its line in
+// <images> are the same key, so a file is found without counting pictures.
+func TestBuildPromptListsEveryImageFile(t *testing.T) {
+	prompt := BuildPrompt(Request{
+		Task: "<message n=\"1\">\nlike this\n</message>",
+		Plan: "# Plan",
+		Images: []RequestImage{
+			{Message: 2, Files: []string{"/a.png"}},
+			{Message: 3, Files: []string{"/b.png", "/c.png"}},
+			{Message: 4},
+		},
+	})
+	for _, want := range []string{
+		"<images>",
+		"Image 1 of message 2: /a.png",
+		"Image 2 of message 3: /c.png",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if block, request, plan := strings.Index(prompt, "\n<images>\n"), strings.Index(prompt, "</request>"), strings.Index(prompt, "<plan>"); block < request || block > plan {
+		t.Fatalf("the files must be named after the request and before the plan:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "of message 4") {
+		t.Fatalf("an image whose file cannot be named adds no line:\n%s", prompt)
 	}
 }
 

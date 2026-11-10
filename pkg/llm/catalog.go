@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -48,6 +49,9 @@ type Hit struct {
 	// Kind is the catalog's model type when it is not a chat model ("image",
 	// "speech", "embedding", "decision", …), "" for chat models.
 	Kind string `json:"kind,omitempty"`
+	// Status is the catalog's lifecycle marker — "deprecated" for a model the
+	// upstream has retired, "" when the entry names none.
+	Status string `json:"status,omitempty"`
 	// ReasoningOptions and ReasoningKnown carry the entry's reasoning_options
 	// as written. ReasoningKnown is false when the entry has no such field at
 	// all — different data from a field that is present and empty.
@@ -70,6 +74,8 @@ type Model struct {
 	// Kind is the catalog's model type when it is not a chat model, "" for
 	// chat models. Chat() is the predicate to ask.
 	Kind string `json:"kind,omitempty"`
+	// Status is the catalog's lifecycle marker; see Hit.
+	Status string `json:"status,omitempty"`
 	// ReasoningOptions and ReasoningKnown carry the entry's reasoning_options
 	// as written; see Hit.
 	ReasoningOptions []ReasoningOption `json:"reasoning_options,omitempty"`
@@ -83,8 +89,8 @@ type Model struct {
 func (m Model) Chat() bool { return strings.TrimSpace(m.Kind) == "" }
 
 // reasoningEffortLevels is the closed set of levels a reasoning_options
-// description may name. models.json is an editable file, so a level outside
-// the set is dropped here rather than reaching a surface that cannot send it.
+// description may name. The catalog is third-party data, so a level outside the
+// set is dropped here rather than reaching a surface that cannot send it.
 var reasoningEffortLevels = map[string]bool{
 	"none":    true,
 	"minimal": true,
@@ -177,6 +183,9 @@ type rawEntry struct {
 	Attachment bool   `json:"attachment"`
 	// Type is the catalog's non-chat model type; absent for chat models.
 	Type string `json:"type"`
+	// Status is the upstream lifecycle marker ("deprecated" for a retired
+	// model); absent when the catalog names none.
+	Status string `json:"status"`
 	// ReasoningOptions is a pointer so "the field is absent" and "the field is
 	// an empty array" stay distinguishable: an empty array is a model that
 	// reasons with no discrete level, an absent field is a model the catalog
@@ -226,6 +235,7 @@ func Parse(data []byte) (*Catalog, error) {
 			CanReason:           e.Reasoning,
 			SupportsAttachments: e.Attachment,
 			Kind:                strings.TrimSpace(e.Type),
+			Status:              strings.TrimSpace(e.Status),
 		}
 		if e.ReasoningOptions != nil {
 			model.ReasoningKnown = true
@@ -242,67 +252,38 @@ func Parse(data []byte) (*Catalog, error) {
 	return c, nil
 }
 
-// errNoCatalog reports that neither a shipped base nor an overlay exists, so
-// there is no catalog to load at all. It is the one failure Resolve rewords:
-// every other failure is about a file that IS there, and its own error — which
-// names the file and the offending byte — is more useful than "not found".
+// errNoCatalog reports that this build has no catalog to load at all. It is
+// the one failure Resolve rewords: every other failure is about a file that IS
+// there, and its own error — which names the file and the offending byte — is
+// more useful than "not found".
 var errNoCatalog = errors.New("modelcatalog: no catalog")
 
-// Load reads a model catalog from basePath and merges overlayPath over it.
-//
-// basePath is the shipped catalog (assets/models.json beside the binary);
-// overlayPath is $FOREBRAIN_HOME/models.json, a file the user owns and edits.
-// The merge is per key and, inside a key, per field:
-//
-//   - a top-level key only in the base stays as shipped;
-//   - a top-level key only in the overlay is added;
-//   - a key in both keeps every shipped field the overlay does not name, and
-//     takes the overlay's value for every field it does name;
-//   - an overlay entry (or field) that is null removes the key (or falls the
-//     field back to nothing), which is how a user deletes a model.
-//
-// Arrays and nested objects (`reasoning_options`, `limit`, `modalities`) are
-// values like any other: the overlay replaces them whole and never merges them
-// element-wise, so naming a field replaces that field's value entirely. A
-// missing overlay is not an error (a user may never have written one); a
-// missing base is not an error either, because a source build may ship no
-// asset — the overlay is then the whole catalog. Both missing is an error.
-func Load(basePath, overlayPath string) (*Catalog, error) {
+// errModelDataNotFound is what a surface may show when this build ships no
+// catalog: one sentence, no machine layout (owner 2026-11-07).
+var errModelDataNotFound = errors.New("model data not found; reinstall forebrain")
+
+// Load reads the model catalog this build ships from basePath. There is one
+// file and one layer: models.json beside the binary, exactly as the build
+// carries it. Nothing merges over it and nothing is added beside it (owner
+// 2026-11-09); a configured row's own overrides are a separate layer that
+// Lookup applies, not a second document. A missing base is errNoCatalog rather
+// than an empty catalog, because "this build carries no data" is a state the
+// caller has to be able to name.
+func Load(basePath string) (*Catalog, error) {
 	baseData, err := readOptionalFile(basePath)
 	if err != nil {
 		return nil, err
 	}
-	overlayData, err := readOptionalFile(overlayPath)
-	if err != nil {
-		return nil, err
+	if baseData == nil {
+		return nil, fmt.Errorf("%w at %q", errNoCatalog, basePath)
 	}
-	if baseData == nil && overlayData == nil {
-		return nil, fmt.Errorf("%w at %q or overlay at %q", errNoCatalog, basePath, overlayPath)
-	}
-	merged, err := mergeCatalogJSON(baseData, overlayData)
+	cat, err := Parse(baseData)
 	if err != nil {
-		return nil, mergedCatalogError(overlayPath, basePath, err)
-	}
-	cat, err := Parse(merged)
-	if err != nil {
-		return nil, mergedCatalogError(overlayPath, basePath, err)
+		// The file is in the build, so a parse failure is a defect in the
+		// data: the error names the path and the byte, never "not found".
+		return nil, fmt.Errorf("%q: %w", basePath, err)
 	}
 	return cat, nil
-}
-
-// mergedCatalogError reports a failure that came out of the merged document,
-// naming the files it was built from, the user's overlay first because that is
-// the one they can fix. The overlay is the only file anybody hand-edits, so a
-// typo in it is the likeliest failure the two-layer scheme has; its error has
-// to point at their path — not at a role ("parse overlay") they cannot map to a
-// file, and never at a "not found" that sends them hunting for a file they are
-// looking at. No "modelcatalog:" prefix: everything wrapped here already
-// carries it.
-func mergedCatalogError(overlayPath, basePath string, err error) error {
-	if strings.TrimSpace(overlayPath) == "" {
-		return fmt.Errorf("%q: %w", basePath, err)
-	}
-	return fmt.Errorf("%q over %q: %w", overlayPath, basePath, err)
 }
 
 // readOptionalFile reads path, reporting nil bytes when it does not exist.
@@ -318,76 +299,6 @@ func readOptionalFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("modelcatalog: load %q: %w", path, err)
 	}
 	return data, nil
-}
-
-// mergeCatalogJSON merges overlay model entries over base ones, per field, and
-// returns the merged document. A null overlay entry deletes the model; a null
-// overlay field drops that field from the shipped entry.
-func mergeCatalogJSON(baseData, overlayData []byte) ([]byte, error) {
-	base := map[string]json.RawMessage{}
-	if len(baseData) > 0 {
-		if err := json.Unmarshal(baseData, &base); err != nil {
-			return nil, fmt.Errorf("modelcatalog: parse base: %w", err)
-		}
-	}
-	overlay := map[string]json.RawMessage{}
-	if len(overlayData) > 0 {
-		if err := json.Unmarshal(overlayData, &overlay); err != nil {
-			return nil, fmt.Errorf("modelcatalog: parse overlay: %w", err)
-		}
-	}
-	merged := make(map[string]json.RawMessage, len(base)+len(overlay))
-	for key, raw := range base {
-		merged[key] = raw
-	}
-	for key, raw := range overlay {
-		if isJSONNull(raw) {
-			delete(merged, key)
-			continue
-		}
-		shipped, ok := merged[key]
-		if !ok {
-			merged[key] = raw
-			continue
-		}
-		entry, err := mergeEntryJSON(shipped, raw)
-		if err != nil {
-			return nil, fmt.Errorf("modelcatalog: merge %q: %w", key, err)
-		}
-		merged[key] = entry
-	}
-	out, err := json.Marshal(merged)
-	if err != nil {
-		return nil, fmt.Errorf("modelcatalog: merge: %w", err)
-	}
-	return out, nil
-}
-
-// mergeEntryJSON merges one entry's fields: every field the overlay names wins,
-// a null field is dropped, and every field it does not name keeps its shipped
-// value. Non-object values (a malformed hand edit) let the overlay win whole.
-func mergeEntryJSON(shipped, overlay json.RawMessage) (json.RawMessage, error) {
-	shippedFields := map[string]json.RawMessage{}
-	overlayFields := map[string]json.RawMessage{}
-	if json.Unmarshal(shipped, &shippedFields) != nil || json.Unmarshal(overlay, &overlayFields) != nil {
-		return overlay, nil
-	}
-	for field, raw := range overlayFields {
-		if isJSONNull(raw) {
-			delete(shippedFields, field)
-			continue
-		}
-		shippedFields[field] = raw
-	}
-	out, err := json.Marshal(shippedFields)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func isJSONNull(raw json.RawMessage) bool {
-	return strings.TrimSpace(string(raw)) == "null"
 }
 
 // Lookup returns the limits for a model id. It matches exactly (case
@@ -425,11 +336,19 @@ func (c *Catalog) LookupModel(model string) (Model, bool) {
 		return m, true
 	}
 	if seg := lastSegment(key); seg != "" {
-		// Search by suffix (short name) - return first match
-		for _, m := range c.models {
-			if lastSegment(m.ID) == seg {
-				return m, true
+		// A bare model name several ids share resolves to the first id in sorted
+		// order: the answer has to be stable run to run, and map iteration is not
+		// (the suffix table drops ambiguous names, LookupModel must still answer
+		// one — a custom model typed in is named this way).
+		matches := make([]string, 0, 2)
+		for id := range c.models {
+			if lastSegment(id) == seg {
+				matches = append(matches, id)
 			}
+		}
+		if len(matches) > 0 {
+			sort.Strings(matches)
+			return c.models[matches[0]], true
 		}
 	}
 	return Model{}, false
@@ -489,29 +408,26 @@ func lastSegment(id string) string {
 	return id
 }
 
-// Resolve loads the effective model catalog: the shipped catalog beside the
-// binary as the base, with $FOREBRAIN_HOME/models.json merged over it field by
-// field (see Load). The home file is the user's: whatever it names wins, and a
-// shipped field it does not name (a column their copy predates, say) still
-// arrives. The result is cached per base path, overlay path and overlay
-// content, so editing the overlay takes effect on the next resolve.
+// Resolve loads the model catalog this build ships: models.json beside the
+// binary (see shippedCatalogPath), exactly as it was built. There is no home
+// copy and nothing merges over the file (owner 2026-11-09), so a catalog the
+// user's configuration changes is expressed as that row's overrides, not as a
+// second document. The result is cached per base path and file content, so a
+// replaced file takes effect on the next resolve.
 //
-// Only "there is no catalog anywhere" is reworded to name the home. Every other
-// failure is returned as it came: an overlay a user broke while editing it has
-// to report the byte that broke, not look like a missing file.
-func Resolve(home string) (*Catalog, error) {
+// Only "there is no catalog anywhere" is reworded to the sentence a surface
+// may show. Every other failure is returned as it came: a catalog the build
+// shipped broken has to report the byte that broke, not look like a missing
+// file.
+func Resolve() (*Catalog, error) {
 	basePath := shippedCatalogPath()
-	overlayPath := ""
-	if h := strings.TrimSpace(home); h != "" {
-		overlayPath = filepath.Join(h, "models.json")
-	}
-	cat, err := loadCached(basePath, overlayPath)
+	cat, err := loadCached(basePath)
 	if err == nil {
 		return cat, nil
 	}
 	if errors.Is(err, errNoCatalog) {
-		// The home is for a log line; the error is what a surface may show.
-		slog.Debug("model data not found", "home", home)
+		// The path is for the debug log; the error is what a surface may show.
+		slog.Debug("model data not found", "path", basePath)
 		return nil, errModelDataNotFound
 	}
 	return nil, err
@@ -519,7 +435,7 @@ func Resolve(home string) (*Catalog, error) {
 
 // shippedCatalogPath is the models.json that ships beside the binary (or is
 // named by FOREBRAIN_ASSETS_DIR). Empty when there is no asset directory to
-// resolve — a build without shipped assets then reads the home overlay alone.
+// resolve.
 func shippedCatalogPath() string {
 	dir, err := AssetsDir()
 	if err != nil || strings.TrimSpace(dir) == "" {
@@ -535,16 +451,15 @@ var (
 	globalCatMu sync.RWMutex
 )
 
-func loadCached(basePath, overlayPath string) (*Catalog, error) {
+func loadCached(basePath string) (*Catalog, error) {
 	base := absolutePath(basePath)
-	overlay := absolutePath(overlayPath)
-	key := base + "\x00" + overlay + "\x00" + fileDigest(overlay)
+	key := base + "\x00" + fileDigest(basePath)
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	if c, ok := cache[key]; ok {
 		return c, nil
 	}
-	c, err := Load(basePath, overlayPath)
+	c, err := Load(basePath)
 	if err != nil {
 		return nil, err
 	}
@@ -562,9 +477,9 @@ func absolutePath(path string) string {
 	return path
 }
 
-// fileDigest is the content digest the catalog cache key carries, so a home
-// file the user edited is re-read instead of answering from a stale cache.
-// "" means the file is absent.
+// fileDigest is the content digest the catalog cache key carries, so a catalog
+// file that was replaced (a new build installed beside a running binary) is
+// re-read instead of answering from a stale cache. "" means the file is absent.
 func fileDigest(path string) string {
 	if strings.TrimSpace(path) == "" {
 		return ""
@@ -577,18 +492,13 @@ func fileDigest(path string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// InitGlobalCatalog initializes the global catalog: it makes sure the home
-// holds its copy of models.json (writing a full copy only when the file is
-// missing), then resolves the shipped catalog with the home copy merged over
-// it. Loading and seeding are one step: a fresh home's first process must not
-// run without the catalog it installs a moment later, reading every model's
-// limits as unknown. version is passed in (llm sits below pkg/home) so a build
-// with no catalog beside it can download its release's copy.
-func InitGlobalCatalog(home, version string) error {
-	if err := Install(home, version); err != nil {
-		return err
-	}
-	cat, err := Resolve(home)
+// InitGlobalCatalog initializes the global catalog from the models.json beside
+// the binary. It is the only model-data source: nothing is copied into a home
+// and nothing in a home is read (owner 2026-11-09), so every process on this
+// build answers from the same bytes, and a build with no catalog is a warning
+// its caller logs — not a catalog this process can download or invent.
+func InitGlobalCatalog() error {
+	cat, err := Resolve()
 	if err != nil {
 		return err
 	}
@@ -656,6 +566,7 @@ func hitFromModel(m Model) Hit {
 		CanReason:           m.CanReason,
 		SupportsAttachments: m.SupportsAttachments,
 		Kind:                m.Kind,
+		Status:              m.Status,
 		ReasoningOptions:    m.ReasoningOptions,
 		ReasoningKnown:      m.ReasoningKnown,
 	}
@@ -798,11 +709,11 @@ func builtinModel(provider, apiModel string) (Model, bool) {
 	return Model{}, false
 }
 
-// ReasoningEfforts names the discrete thinking levels the catalog's merged data
-// gives (provider, apiModel), and whether it says anything at all. It is the
-// single source of truth for that question: the levels live in models.json's
-// reasoning_options, shipped base and home overlay already merged, so a value
-// the user wrote in their overlay is what this returns.
+// ReasoningEfforts names the discrete thinking levels the catalog's data gives
+// (provider, apiModel), and whether it says anything at all. It is the single
+// source of truth for that question: the levels live in the shipped models.json
+// reasoning_options, so a configured row's override of them is read through
+// Lookup, not through here.
 func ReasoningEfforts(provider, apiModel string) (levels []string, known bool) {
 	hit, ok := Lookup(provider, apiModel)
 	if !ok {
@@ -867,7 +778,7 @@ func KnownProvider(provider string) bool {
 }
 
 // SetGlobalCatalogForTest installs a catalog as the global catalog for testing.
-// Production code should use InitGlobalCatalog to load from models.json.
+// Production code initializes it through InitGlobalCatalog.
 func SetGlobalCatalogForTest(cat *Catalog) {
 	globalCatMu.Lock()
 	globalCat = cat
@@ -901,46 +812,6 @@ func ParseProviderModelLabel(label string) (string, string) {
 		return "", strings.TrimSpace(label)
 	}
 	return strings.TrimSpace(provider), strings.TrimSpace(model)
-}
-
-// Install makes sure $FOREBRAIN_HOME/models.json exists, writing a full copy of
-// the shipped catalog (assets/models.json beside the binary) when the home has
-// none. Existing files are NEVER written, upgraded, rewritten, backed up or
-// migrated — not one byte: the file belongs to the user. It is both a complete
-// editable copy and an overlay, because Resolve merges its keys and fields over
-// the shipped catalog: what the user writes wins, and a field their copy does
-// not carry falls back to what this build ships. A release build that ships no
-// catalog beside it downloads this version's models.json instead; a source
-// build has neither, and the error names the install script that puts it there.
-// Errors are non-fatal — callers should log a warning and continue.
-func Install(forebrainHome, version string) error {
-	if strings.TrimSpace(forebrainHome) == "" {
-		return fmt.Errorf("modelcatalog: empty forebrainHome")
-	}
-	target := filepath.Join(forebrainHome, "models.json")
-
-	if _, err := os.Stat(target); err == nil {
-		// Already exists — never touch the user's file.
-		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("modelcatalog: stat %q: %w", target, err)
-	}
-
-	if err := os.MkdirAll(forebrainHome, 0o755); err != nil {
-		return fmt.Errorf("modelcatalog: mkdir %q: %w", forebrainHome, err)
-	}
-
-	data, err := sourceModelsJSON(version)
-	if err != nil {
-		return err
-	}
-	if _, err := Parse(data); err != nil {
-		return fmt.Errorf("modelcatalog: %w", err)
-	}
-	if err := writeCatalogAtomic(target, data); err != nil {
-		return fmt.Errorf("modelcatalog: write %q: %w", target, err)
-	}
-	return nil
 }
 
 func LeadingTokenLooksLikeFilesystemPath(tok string) bool {

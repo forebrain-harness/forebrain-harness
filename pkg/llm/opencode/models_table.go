@@ -9,12 +9,12 @@ import "strings"
 // is why the protocol is transcribed here instead of discovered.
 //
 // What this table does NOT carry any more is the reasoning levels: they come
-// from models.json (the shipped catalog plus the user's overlay), which has a
-// row for every id below and is refreshed with scripts/update-models-asset.sh.
-// The window, image capability and levels are only fallbacks here for an id
-// models.json has never heard of — a model the live catalog reports after this
-// table was written. One fact stays in code because it is code, not data: the
-// protocol a surface serves a model on (it picks the client).
+// from models.json beside the binary, which has a row for every id below and is
+// regenerated offline with scripts/merge-catalog-into-models.sh. The window,
+// image capability and levels are only fallbacks here for an id models.json has
+// never heard of — a model the live catalog reports after this table was written.
+// One fact stays in code because it is code, not data: the protocol a surface
+// serves a model on (it picks the client).
 //
 // The tables are deliberately not exhaustive. Console lists whole families
 // ("all gpt-*", "all claude-*", "all gemini-*") whose members are not named in

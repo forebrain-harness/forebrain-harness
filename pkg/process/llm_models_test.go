@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -800,6 +801,49 @@ func TestProbeLLMModelRefusesSignInModels(t *testing.T) {
 	}
 }
 
+// TestDatabaseCapsWinOverCatalog pins the two-layer answer a configured row
+// gets: the shipped catalog is the default, and the row's own capability
+// columns win over it. LookupCatalog stays the defaults-only answer the models
+// page compares against, so the row being edited never pollutes its own form
+// (plan 265).
+func TestDatabaseCapsWinOverCatalog(t *testing.T) {
+	cat, err := llm.Parse([]byte(`{
+		"openai/gpt-4o": {"id":"openai/gpt-4o","limit":{"context":128000,"output":16384},
+			"reasoning_options":[{"type":"effort","values":["low","high"]}]}
+	}`))
+	if err != nil {
+		t.Fatalf("parse catalog: %v", err)
+	}
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() {
+		llm.SetGlobalCatalogForTest(nil)
+		llm.SetModelOverrides(nil)
+	})
+
+	window := int64(64000)
+	root := appcfg.Root{LLMModels: []appcfg.LLMModelConfig{{
+		ID: "row-1", Provider: "openai", Model: "gpt-4o",
+		Caps: appcfg.LLMModelCaps{ContextWindow: &window, Efforts: []string{"high"}},
+	}}}
+	installModelOverrides(root)
+
+	hit, ok := llm.Lookup("openai", "gpt-4o")
+	if !ok || hit.ContextWindow != 64000 {
+		t.Fatalf("Lookup = %+v ok=%v, want the row's window", hit, ok)
+	}
+	if levels, known := hit.ReasoningEfforts(); !known || !reflect.DeepEqual(levels, []string{"high"}) {
+		t.Fatalf("levels = %v known=%v, want the row's levels", levels, known)
+	}
+
+	defaults, ok := llm.LookupCatalog("openai", "gpt-4o")
+	if !ok || defaults.ContextWindow != 128000 {
+		t.Fatalf("LookupCatalog = %+v ok=%v, want the catalog's window", defaults, ok)
+	}
+	if levels, known := defaults.ReasoningEfforts(); !known || !reflect.DeepEqual(levels, []string{"low", "high"}) {
+		t.Fatalf("default levels = %v known=%v, want the catalog's levels", levels, known)
+	}
+}
+
 // TestInstallModelOverridesPublishesRegistryTablesAndRowCaps pins what the
 // composition installs on every adoption: the registry's plan tables (so
 // volcengine resolves without catalog rows) and the rows' own capabilities,
@@ -837,16 +881,22 @@ func TestInstallModelOverridesPublishesRegistryTablesAndRowCaps(t *testing.T) {
 }
 
 // TestRefreshModelCatalogCapsPublishesEachAnswer pins the live half: answers
-// arrive per row, off the request path, and a row the source does not list
-// stays absent — which is what makes a surface show the checkboxes.
+// arrive per row, off the request path, from the shipped catalog, and a row the
+// catalog does not list stays absent — which is what makes a surface show the
+// checkboxes.
 func TestRefreshModelCatalogCapsPublishesEachAnswer(t *testing.T) {
 	t.Cleanup(resetModelCatalogCaps)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"providers":{"opencode-go":{"models":{"step-5-preview":{"reasoning_options":[{"type":"effort","values":["low","medium","high"]}],"limit":{"context":1000,"output":100}}}}}}`))
-	}))
-	t.Cleanup(srv.Close)
-	resolver := &modelinfo.Resolver{Sources: []modelinfo.Source{&modelinfo.ModelsDevSource{BaseURL: srv.URL}}}
+	cat, err := llm.Parse([]byte(`{
+		"opencode-go/step-5-preview": {"id":"opencode-go/step-5-preview","reasoning":true,
+			"reasoning_options":[{"type":"effort","values":["low","medium","high"]}],"limit":{"context":1000,"output":100}}
+	}`))
+	if err != nil {
+		t.Fatalf("parse catalog: %v", err)
+	}
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() { llm.SetGlobalCatalogForTest(nil) })
+
+	resolver := &modelinfo.Resolver{Sources: []modelinfo.Source{modelinfo.ModelsDevSource{}}}
 	refreshModelCatalogCaps([]appcfg.LLMModelConfig{
 		{ID: "row-ok", Provider: "opencode-go", Model: "step-5-preview"},
 		{ID: "row-missing", Provider: "opencode-go", Model: "not-listed"},
@@ -867,7 +917,83 @@ func TestRefreshModelCatalogCapsPublishesEachAnswer(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if _, ok := ModelCatalogCaps("row-missing"); ok {
-		t.Fatal("a row the source does not list must stay unknown, so the surface offers the checkboxes")
+		t.Fatal("a row the catalog does not list must stay unknown, so the surface offers the checkboxes")
+	}
+}
+
+// failingSource stands in for a subscription API in the sweep tests: it applies
+// to every row and answers with the error its test put on that row.
+type failingSource struct {
+	apply  func(Row string) bool
+	answer func(Row string) (modelinfo.Info, error)
+}
+
+func (s failingSource) Applies(row modelinfo.Row, _ string) bool {
+	return s.apply == nil || s.apply(row.Model)
+}
+
+func (s failingSource) Fetch(_ context.Context, row modelinfo.Row, _ string) (modelinfo.Info, error) {
+	return s.answer(row.Model)
+}
+
+// TestRefreshModelCatalogCapsLogsEachFailureOnce pins the log budget owner
+// 2026-11-09 asked for: a model the catalog does not list is not a failure and
+// logs nothing; a real failure logs one line per distinct text per sweep, not
+// one per configured row — the model name is a field, never the dedupe key.
+func TestRefreshModelCatalogCapsLogsEachFailureOnce(t *testing.T) {
+	t.Cleanup(resetModelCatalogCaps)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	backendDown := fmt.Errorf("subscription backend unreachable")
+	keyRejected := fmt.Errorf("plan key rejected")
+	source := failingSource{answer: func(model string) (modelinfo.Info, error) {
+		switch model {
+		case "a", "b":
+			return modelinfo.Info{}, backendDown
+		case "c":
+			return modelinfo.Info{}, keyRejected
+		case "d":
+			return modelinfo.Info{}, modelinfo.ErrNotListed
+		default:
+			return modelinfo.Info{Efforts: []string{"high"}, Origin: "models.dev"}, nil
+		}
+	}}
+	resolver := &modelinfo.Resolver{Sources: []modelinfo.Source{source}}
+	refreshModelCatalogCaps([]appcfg.LLMModelConfig{
+		{ID: "row-a", Provider: "test", Model: "a"},
+		{ID: "row-b", Provider: "test", Model: "b"},
+		{ID: "row-c", Provider: "test", Model: "c"},
+		{ID: "row-d", Provider: "test", Model: "d"},
+		{ID: "row-ok", Provider: "test", Model: "ok"},
+	}, resolver)
+
+	// The sweep is sequential, so the successful last row is the completion
+	// signal: once it landed, every log line of this sweep is written.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := ModelCatalogCaps("row-ok"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sweep never finished")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	out := logs.String()
+	if got := strings.Count(out, "live model capabilities unavailable"); got != 2 {
+		t.Fatalf("log lines = %d, want one per distinct failure (2):\n%s", got, out)
+	}
+	if got := strings.Count(out, "subscription backend unreachable"); got != 1 {
+		t.Fatalf("the shared failure logged %d times, want once:\n%s", got, out)
+	}
+	if got := strings.Count(out, "plan key rejected"); got != 1 {
+		t.Fatalf("the second failure logged %d times, want once:\n%s", got, out)
+	}
+	if strings.Contains(out, "model not listed") {
+		t.Fatalf("ErrNotListed must be silent, not logged:\n%s", out)
 	}
 }
 

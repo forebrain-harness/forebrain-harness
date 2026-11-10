@@ -862,6 +862,226 @@ func TestPlanDrawerTruncatedTokenHasNoHotZone(t *testing.T) {
 	}
 }
 
+// paintedTokenCells returns the display column and screen row of every painted
+// occurrence of token, so a test can act on exactly what the user can see.
+func paintedTokenCells(r *Renderer, token string) (cells [][2]int) {
+	for row := 0; row < r.vpBodyHeight && row < len(r.vpPainted); row++ {
+		plain := sgrPattern.ReplaceAllString(r.vpPainted[row], "")
+		for offset := 0; ; {
+			idx := strings.Index(plain[offset:], token)
+			if idx < 0 {
+				break
+			}
+			at := offset + idx
+			cells = append(cells, [2]int{runewidth.StringWidth(plain[:at]), row})
+			offset = at + len(token)
+		}
+	}
+	return cells
+}
+
+// workedForTokenCell returns the first painted occurrence of token.
+func workedForTokenCell(t *testing.T, r *Renderer, token string) (row, col int) {
+	t.Helper()
+	cells := paintedTokenCells(r, token)
+	if len(cells) == 0 {
+		t.Fatalf("%q was not painted; body rows: %#v", token, plainPlanDrawerRows(r.vpPainted))
+	}
+	return cells[0][1], cells[0][0]
+}
+
+// The ☑N/M a run's closing "Worked for" row carries is the drawer's second
+// entry: once the run is over the live Working line is gone, so the row left in
+// the transcript is the only place its checklist stays reachable.
+func TestPlanDrawerWorkedForTokenIsTheEntry(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	fillPlanDrawerTranscript(r)
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s · ☑3/7 · 修改 pkg/tui 的鼠标交互 · 12:34", Final: true})
+
+	if got := len(r.vpHistoryProgress); got != 1 {
+		t.Fatalf("the run-closing row registered %d tokens, want 1: %#v", got, r.vpHistoryProgress)
+	}
+	span := r.vpHistoryProgress[0]
+	if span.row < 0 || span.row >= r.vpBodyHeight {
+		t.Fatalf("the token's hot zone is on row %d, outside the %d-row transcript", span.row, r.vpBodyHeight)
+	}
+	if got := drawnCellAt(r.vpPainted[span.row], span.startCol); got != "☑" {
+		t.Fatalf("the hot zone starts on %q, not the ☑ of the drawn token: %q", got, r.vpPainted[span.row])
+	}
+	if got, want := span.endCol-span.startCol, 4; got != want {
+		t.Fatalf("hot zone is %d cells wide, want %d (☑3/7)", got, want)
+	}
+	// The rest of the row stays outside the entry.
+	if got := drawnCellAt(r.vpPainted[span.row], span.endCol); got != " " {
+		t.Fatalf("hot zone runs into %q past the token; the task text must stay outside it", got)
+	}
+
+	// A press arms the drawer control instead of starting a selection, and its
+	// release toggles the drawer — the gesture the composer's token takes.
+	r.ViewportSelectStart(span.startCol+1, span.row)
+	if r.selectStartRow >= 0 {
+		t.Fatalf("pressing the token started a text selection at row %d", r.selectStartRow)
+	}
+	if !r.vpPress.onPlanDrawer {
+		t.Fatal("pressing the token did not arm the drawer control")
+	}
+	r.ViewportSelectEnd(span.startCol+1, span.row)
+	if !r.planDrawer.open || !r.vpDrawerOpen {
+		t.Fatal("releasing a press on the Worked for token did not open the drawer")
+	}
+
+	// The split reflows the transcript; the token moves with its row and stays
+	// the entry that closes the drawer again.
+	if got := len(r.vpHistoryProgress); got != 1 {
+		t.Fatalf("with the drawer open the run-closing row registered %d tokens, want 1", got)
+	}
+	openSpan := r.vpHistoryProgress[0]
+	clickAt(r, openSpan.startCol+1, openSpan.row)
+	if r.planDrawer.open || r.vpDrawerOpen {
+		t.Fatal("clicking the Worked for token again did not close the drawer")
+	}
+}
+
+// Hovering a run-closing row's token highlights that token and nothing else,
+// and moving between two such rows carries the highlight with the pointer.
+func TestPlanDrawerWorkedForRowHoverHighlightsOnlyTheToken(t *testing.T) {
+	r, out := newPlanDrawerScreenWithOut(t, 120, 40)
+	fillPlanDrawerTranscript(r)
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s · ☑1/7 · 归档计划", Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 03s · ☑3/7 · 新增回归测试", Final: true})
+	if got := len(r.vpHistoryProgress); got != 2 {
+		t.Fatalf("two run-closing rows registered %d tokens, want 2: %#v", got, r.vpHistoryProgress)
+	}
+	firstRow, firstCol := workedForTokenCell(t, r, "☑1/7")
+	secondRow, secondCol := workedForTokenCell(t, r, "☑3/7")
+	firstBefore, secondBefore := r.vpPainted[firstRow], r.vpPainted[secondRow]
+	drainCaretRequest()
+
+	move := func(col, row int) {
+		r.HandleMouse(inputEvent{kind: inputEventMouseMove, mouseCol: col, mouseRow: row, at: time.Now()})
+	}
+	hoverSeq := "\x1b[48;5;" + hoverBackgroundColor + "m"
+	move(firstCol+1, firstRow)
+	hovered := r.vpPainted[firstRow]
+	if !strings.Contains(hovered, hoverSeq+"☑1/7\x1b[49m") {
+		t.Fatalf("hovering the token painted no background confined to it: %q", hovered)
+	}
+	if strings.Contains(strings.ReplaceAll(hovered, hoverSeq+"☑1/7\x1b[49m", ""), "\x1b[4m") {
+		t.Fatalf("the hovered token is underlined: %q", hovered)
+	}
+	if got := strings.ReplaceAll(hovered, hoverSeq+"☑1/7\x1b[49m", "☑1/7"); got != firstBefore {
+		t.Fatalf("hovering changed more than the token:\nbefore %q\nafter  %q", firstBefore, got)
+	}
+	if got := r.vpPainted[secondRow]; got != secondBefore {
+		t.Fatalf("hovering the first row changed the second:\nwant %q\ngot  %q", secondBefore, got)
+	}
+
+	// The same cell, reported again and again, writes nothing.
+	out.Reset()
+	for i := 0; i < 20; i++ {
+		move(firstCol+1, firstRow)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("20 repeated hover reports on the same token wrote %d bytes", out.Len())
+	}
+
+	// Moving onto the other token moves the highlight with it.
+	move(secondCol+1, secondRow)
+	if got := r.vpPainted[firstRow]; got != firstBefore {
+		t.Fatalf("leaving the first token did not restore its row:\nwant %q\ngot  %q", firstBefore, got)
+	}
+	if got := r.vpPainted[secondRow]; !strings.Contains(got, hoverSeq+"☑3/7\x1b[49m") {
+		t.Fatalf("hovering the second token painted no background on it: %q", got)
+	}
+
+	// Leaving both restores both.
+	move(1, 1)
+	if got := r.vpPainted[firstRow]; got != firstBefore {
+		t.Fatalf("leaving the tokens did not restore the first row: %q", got)
+	}
+	if got := r.vpPainted[secondRow]; got != secondBefore {
+		t.Fatalf("leaving the tokens did not restore the second row: %q", got)
+	}
+}
+
+// A ☑N/M that is not a run-closing row's own token is inert: the guard is the
+// block's kind and its "Worked for " title, not the glyph.
+func TestPlanDrawerPlanTokenOutsideRunClosingRowsIsInert(t *testing.T) {
+	r := newPlanDrawerScreen(t, 120, 40)
+	fillPlanDrawerTranscript(r)
+	r.RenderFrame(Frame{Kind: FrameAssistant, Final: true, Content: "正文里的字面量 ☑9/9 不是抽屉入口"})
+	r.RenderFrame(Frame{Kind: FrameTool, StepID: "call-1", Title: "shell", Content: "☑9/9 也出现在工具输出里", Final: true})
+	// A subagent's closing row belongs to that agent's view, not to this one.
+	r.RenderFrame(Frame{Kind: FrameStatus, AgentID: "sub-1", Title: "Worked for 2s · ☑1/2", Final: true})
+
+	if got := len(r.vpHistoryProgress); got != 0 {
+		t.Fatalf("non-closing rows registered %d tokens: %#v", got, r.vpHistoryProgress)
+	}
+	cells := paintedTokenCells(r, "☑9/9")
+	if len(cells) != 2 {
+		t.Fatalf("painted %d literal tokens, want 2 (assistant body and tool output): %#v", len(cells), plainPlanDrawerRows(r.vpPainted))
+	}
+	for _, cell := range cells {
+		clickAt(r, cell[0]+1, cell[1])
+		if r.planDrawer.open {
+			t.Fatalf("clicking a literal token at row %d col %d opened the drawer", cell[1], cell[0])
+		}
+	}
+
+	// The same row is an entry inside the subagent's own view, where it exists,
+	// and it opens that view's list.
+	sub := newPlanDrawerScreen(t, 120, 40)
+	for i := 0; i < 6; i++ {
+		sub.RenderFrame(Frame{Kind: FrameAssistant, Final: true, AgentID: "sub-1", Content: fmt.Sprintf(
+			"子代理的第 %d 条回复，足够长，以便在抽屉打开之后必须按更窄的宽度重新换行：the quick brown fox jumps over the lazy dog", i)})
+	}
+	sub.RenderFrame(planFrameFor(event.PlanUpdatedPayload{
+		AgentID: "sub-1",
+		Items:   []event.PlanUpdateItem{planTodoItem("子代理事项", "in_progress")},
+	}))
+	sub.RenderFrame(Frame{Kind: FrameStatus, AgentID: "sub-1", Title: "Worked for 2s · ☑1/2", Final: true})
+	if got := len(sub.vpHistoryProgress); got != 0 {
+		t.Fatalf("the conversation registered a subagent's closing row (%d tokens)", got)
+	}
+	sub.SetActiveView("sub-1")
+	if got := len(sub.vpHistoryProgress); got != 1 {
+		t.Fatalf("the subagent view registered %d tokens, want its own closing row", got)
+	}
+	span := sub.vpHistoryProgress[0]
+	clickAt(sub, span.startCol+1, span.row)
+	if !sub.planDrawer.open {
+		t.Fatal("clicking the subagent view's closing token did not open its drawer")
+	}
+	sub.mu.Lock()
+	plan, ok := sub.latestPlanFrameLocked()
+	sub.mu.Unlock()
+	if !ok || !strings.Contains(plan.Content, "子代理事项") {
+		t.Fatalf("the drawer opened on the subagent's plan frame = %q (ok=%v)", plan.Content, ok)
+	}
+}
+
+// A token the row's width cut was never on screen, so it is not an entry.
+func TestPlanDrawerWorkedForTruncatedTokenHasNoHotZone(t *testing.T) {
+	r := newPlanDrawerScreen(t, 40, 24)
+	fillPlanDrawerTranscript(r)
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s · first token 12.4s · ☑3/7", Final: true})
+	if got := len(r.vpHistoryProgress); got != 0 {
+		t.Fatalf("a token the 40-column rule cut off registered a hot zone at %#v", r.vpHistoryProgress)
+	}
+
+	// The same width registers the whole token where the title leaves it room.
+	fit := newPlanDrawerScreen(t, 40, 24)
+	fillPlanDrawerTranscript(fit)
+	fit.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 3s · ☑3/7", Final: true})
+	if got := len(fit.vpHistoryProgress); got != 1 {
+		t.Fatalf("a fully drawn token registered %d hot zones, want 1: %#v", got, fit.vpHistoryProgress)
+	}
+	span := fit.vpHistoryProgress[0]
+	if got := drawnCellAt(fit.vpPainted[span.row], span.startCol); got != "☑" {
+		t.Fatalf("the hot zone starts on %q, not the ☑ of the drawn token", got)
+	}
+}
+
 // The × on the drawer's title row closes it, and only its own three cells are
 // the target.
 func TestPlanDrawerCloseControlClosesIt(t *testing.T) {

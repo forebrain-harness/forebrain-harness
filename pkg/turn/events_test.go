@@ -356,6 +356,47 @@ func TestLastPlanProgressOfRun(t *testing.T) {
 	require.Equal(t, event.PlanProgress{}, LastPlanProgressOfRun(context.Background(), nil, "run-1"))
 }
 
+// TestPlanProgressAtRunEnds pins the fold the terminal's replay closes every
+// run with: the state its own last update left, an earlier run keeping the
+// state it ended on, a run that updated nothing inheriting what the runs before
+// it left (its live line read the same tracker state), and a subagent's
+// checklist never moving the conversation's counters.
+func TestPlanProgressAtRunEnds(t *testing.T) {
+	t.Parallel()
+	at := time.Now().UTC()
+	planEvent := func(runID string, payload event.PlanUpdatedPayload) event.RunEvent {
+		raw, err := json.Marshal(payload)
+		require.NoError(t, err)
+		return event.RunEvent{ID: "plan-" + runID, RunID: runID, Type: event.RunEventPlanUpdated, Payload: raw, CreatedAt: at}
+	}
+	runEvent := func(runID, typ string) event.RunEvent {
+		return event.RunEvent{ID: typ + "-" + runID, RunID: runID, Type: typ, CreatedAt: at}
+	}
+	events := []event.RunEvent{
+		planEvent("run-1", event.PlanUpdatedPayload{Completed: 1, Total: 3, Explanation: "first"}),
+		planEvent("run-1", event.PlanUpdatedPayload{Completed: 2, Total: 3, Items: []event.PlanUpdateItem{
+			{ID: "1", Content: "done", Status: "completed"},
+			{ID: "2", Content: "short", Status: "in_progress"},
+		}}),
+		runEvent("run-1", event.RunEventTurnCompleted),
+		runEvent("run-2", event.RunEventTurnCompleted),
+		planEvent("run-2", event.PlanUpdatedPayload{Completed: 9, Total: 9, AgentID: "sub-1"}),
+		runEvent("run-2", event.RunEventTurnCompleted),
+	}
+
+	got := PlanProgressAtRunEnds(events)
+	require.Equal(t, event.PlanProgress{Done: 2, Total: 3, Active: "short"}, got["run-1"])
+	// run-2 updated no conversation checklist of its own: it reports what its
+	// live line read when it closed, not zeros and not the subagent's list.
+	require.Equal(t, got["run-1"], got["run-2"])
+	require.Len(t, got, 2)
+
+	// A record with no run id stamps no run, and no events is an empty answer
+	// rather than a nil map or a panic.
+	require.Empty(t, PlanProgressAtRunEnds(nil))
+	require.NotContains(t, PlanProgressAtRunEnds([]event.RunEvent{planEvent("", event.PlanUpdatedPayload{Completed: 1, Total: 1})}), "")
+}
+
 func TestExtractTurnDiffPayloadCoversApplyPatchFiles(t *testing.T) {
 	payload, ok := ExtractTurnDiffPayload(map[string]any{
 		"output": map[string]any{

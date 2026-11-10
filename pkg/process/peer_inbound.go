@@ -698,7 +698,13 @@ func (in *peerInbox) deliverToSubagent(ctx context.Context, a peerArrival, targe
 	// The message is wrapped as the peer envelope it is, and marked meta with
 	// its origin: an agent reading it must see what the sender wrote and where
 	// it came from, and must not have its own view re-pointed at this surface.
-	_, err := run.SteerLiveSubagent(runner, target.SessionID, target.AgentKey, peerInput(envelope, state.MessageOriginPeer))
+	_, err := run.SteerLiveSubagent(runner, target.SessionID, target.AgentKey, peerInput(PeerPrompt{
+		SessionID: target.SessionID,
+		Text:      envelope,
+		Origin:    state.MessageOriginPeer,
+		MsgID:     msgID,
+		FromName:  fromName,
+	}))
 	switch {
 	case err == nil:
 		return ""
@@ -752,12 +758,12 @@ func (in *peerInbox) deliverPrimary(ctx context.Context, sessionID string, promp
 	if runID, phase, ok := in.svc.env.Control.Find(sessionID); ok {
 		switch phase {
 		case run.Running:
-			if in.svc.env.Control.Steer(runID, peerInput(prompt.Text, prompt.Origin)) {
+			if in.svc.env.Control.Steer(runID, peerInput(prompt)) {
 				in.noteHanded(sessionID)
 				return ""
 			}
 		case run.Waiting, run.Finishing:
-			if in.svc.env.Control.FollowUp(runID, peerInput(prompt.Text, prompt.Origin)) {
+			if in.svc.env.Control.FollowUp(runID, peerInput(prompt)) {
 				in.noteHanded(sessionID)
 				return ""
 			}
@@ -784,12 +790,16 @@ func (in *peerInbox) deliverPrimary(ctx context.Context, sessionID string, promp
 }
 
 // peerInput is a peer message as the engine's input: the envelope as the text,
-// one text part, and the origin that marks the row as written elsewhere.
-func peerInput(envelope, origin string) run.Input {
+// one text part, the origin that marks the row as written elsewhere, and the
+// prompt itself as the payload — the surface's own record of the message, so a
+// message the run never took can still be run as the peer turn it is instead of
+// being dropped with the queue.
+func peerInput(prompt PeerPrompt) run.Input {
 	return run.Input{
-		Text:   envelope,
-		Parts:  []llm.ContentPart{llm.Text(envelope)},
-		Origin: origin,
+		Text:    prompt.Text,
+		Parts:   []llm.ContentPart{llm.Text(prompt.Text)},
+		Origin:  prompt.Origin,
+		Payload: prompt,
 	}
 }
 

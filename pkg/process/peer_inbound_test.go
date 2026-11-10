@@ -480,6 +480,50 @@ func TestPeerInboundSteersARunningSession(t *testing.T) {
 	}
 }
 
+// A message that lands behind a run parked on an approval is a follow-up: the
+// sender's words stay the input's text, the origin marks the row as written
+// elsewhere, and the prompt itself travels as the payload. A message the parked
+// run never takes (the person interrupts or withdraws) must still be runnable
+// as the peer turn it is, and only the payload keeps the sender's name.
+func TestPeerInboundFollowUpToParkedRunCarriesThePrompt(t *testing.T) {
+	view := &peerTestView{}
+	svc := startPeerTestService(t, "tui", "cli-parked-session", view, nil)
+	queue := svc.env.Control.SessionQueue("cli-parked-session")
+	queue.Attach(run.NewTurnInputRuntime())
+	if !svc.env.Control.TrackRuntime("run-parked", "cli-parked-session", func() {}, queue.Runtime()) {
+		t.Fatal("the test run was not tracked")
+	}
+	if !svc.env.Control.WaitApproval("run-parked") {
+		t.Fatal("the test run did not park on its approval")
+	}
+
+	envelope := envelopeOf(peer.EncodeUDS(svc.sendFrom), "please confirm the plan", withFromName("router-peer"))
+	msgID := svc.sendFrame(t, envelope, nil)
+
+	waitFor(t, "the follow-up", func() bool { return len(queue.Preview().FollowUp) == 1 })
+	entries := queue.TakeAll()
+	if len(entries) != 1 {
+		t.Fatalf("the parked run holds %d follow-ups, want 1", len(entries))
+	}
+	if entries[0].Origin != state.MessageOriginPeer {
+		t.Fatalf("follow-up origin = %q, want %q", entries[0].Origin, state.MessageOriginPeer)
+	}
+	prompt, ok := entries[0].Payload.(PeerPrompt)
+	if !ok {
+		t.Fatalf("follow-up payload = %T, want the peer prompt", entries[0].Payload)
+	}
+	if prompt.Text != envelope {
+		t.Fatalf("prompt text = %q, want the envelope verbatim", prompt.Text)
+	}
+	if prompt.FromName != "router-peer" || prompt.MsgID != msgID || prompt.SessionID != "cli-parked-session" {
+		t.Fatalf("prompt = %#v, want the sender, message id and conversation it was sent to", prompt)
+	}
+	svc.noReceipt(t, "an accepted message")
+	if view.wakeCount() != 0 {
+		t.Fatal("a parked conversation was woken as well as queued behind")
+	}
+}
+
 func TestPeerInboundHoldsReleasesAndDenies(t *testing.T) {
 	view := &peerTestView{}
 	svc := startPeerTestService(t, "tui", "cli-held", view, func(env *peerTestEnv) {

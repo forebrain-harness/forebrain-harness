@@ -9138,17 +9138,17 @@ func TestQueuePreviewShowsEveryQueueShortcut(t *testing.T) {
 	}{
 		{
 			name:    "pending steer",
-			preview: ComposerPendingInputPreview{PendingSteers: []string{"adjust the plan"}},
+			preview: ComposerPendingInputPreview{PendingSteers: []string{"adjust the plan"}, Editable: true},
 			want:    []string{"press esc to interrupt", "⇧+← recall last queued", "tab queue follow-up"},
 		},
 		{
 			name:    "rejected steer",
-			preview: ComposerPendingInputPreview{RejectedSteers: []string{"retry"}},
+			preview: ComposerPendingInputPreview{RejectedSteers: []string{"retry"}, Editable: true},
 			want:    []string{"⇧+← recall last queued", "tab queue follow-up"},
 		},
 		{
 			name:    "queued follow-up",
-			preview: ComposerPendingInputPreview{QueuedMessages: []string{"then commit"}},
+			preview: ComposerPendingInputPreview{QueuedMessages: []string{"then commit"}, Editable: true},
 			want:    []string{"⇧+← recall last queued", "tab queue follow-up"},
 		},
 	}
@@ -9209,7 +9209,7 @@ func TestQueuePreviewShowsNoShortcutsWhenEmpty(t *testing.T) {
 // floor: below that the wrap itself lands inside a key name, but the composer is
 // unusable at that size anyway.
 func TestQueuePreviewShortcutsWrapInsteadOfTruncating(t *testing.T) {
-	preview := ComposerPendingInputPreview{QueuedMessages: []string{"then commit"}}
+	preview := ComposerPendingInputPreview{QueuedMessages: []string{"then commit"}, Editable: true}
 	for _, width := range []int{120, 100, 80, 60, 40} {
 		rows := composerPreviewShortcutLines(composerQueueShortcutHints(preview), "  ", width)
 		if len(rows) == 0 {
@@ -9235,7 +9235,7 @@ func TestQueuePreviewShortcutsWrapInsteadOfTruncating(t *testing.T) {
 // At a usable terminal width the whole block stays compact: the queue must not
 // push the transcript off screen to document itself.
 func TestQueuePreviewShortcutsStayCompactAtNormalWidths(t *testing.T) {
-	preview := ComposerPendingInputPreview{QueuedMessages: []string{"then commit"}}
+	preview := ComposerPendingInputPreview{QueuedMessages: []string{"then commit"}, Editable: true}
 	for _, width := range []int{100, 120} {
 		if rows := composerPreviewShortcutLines(composerQueueShortcutHints(preview), "  ", width); len(rows) != 1 {
 			t.Fatalf("width %d: expected a single shortcut row, got %#v", width, rows)
@@ -18900,15 +18900,21 @@ func TestRendererBeginBatchSuppressesRepaint(t *testing.T) {
 	}
 }
 
-func TestComposerPreviewHasEditableQueuedInputCoversEveryQueue(t *testing.T) {
+// The recall hint is gated by the queue's own answer, not by what the section
+// happens to list: a peer message is drawn there too — it is going to run —
+// but it is not the person's to recall, so a section holding only those must
+// not advertise the key. Assertions updated from the pre-field list check:
+// Editable is now the queue's statement about who wrote the entries.
+func TestComposerPreviewHasEditableQueuedInputFollowsTheQueue(t *testing.T) {
 	cases := []struct {
 		name    string
 		preview ComposerPendingInputPreview
 		want    bool
 	}{
-		{"pending steer only", ComposerPendingInputPreview{PendingSteers: []string{"adjust"}}, true},
-		{"rejected steer only", ComposerPendingInputPreview{RejectedSteers: []string{"retry"}}, true},
-		{"queued follow-up only", ComposerPendingInputPreview{QueuedMessages: []string{"next"}}, true},
+		{"pending steer the person wrote", ComposerPendingInputPreview{PendingSteers: []string{"adjust"}, Editable: true}, true},
+		{"rejected steer the person wrote", ComposerPendingInputPreview{RejectedSteers: []string{"retry"}, Editable: true}, true},
+		{"queued follow-up the person wrote", ComposerPendingInputPreview{QueuedMessages: []string{"next"}, Editable: true}, true},
+		{"peer message only", ComposerPendingInputPreview{QueuedMessages: []string{"<cross-session-message>hi</cross-session-message>"}}, false},
 		{"empty", ComposerPendingInputPreview{}, false},
 	}
 	for _, tc := range cases {

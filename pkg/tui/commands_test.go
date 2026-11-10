@@ -3822,7 +3822,7 @@ func TestReplayWorkedLinePerRun(t *testing.T) {
 	if !ok {
 		t.Fatal("the tool row closing run-1 must produce its Worked-for line")
 	}
-	frame := replayWorkedFrame(line)
+	frame := replayWorkedFrame(line, event.PlanProgress{})
 	if frame.Kind != FrameStatus || frame.RunID != "run-1" || !frame.Final {
 		t.Fatalf("worked frame = %+v", frame)
 	}
@@ -3854,13 +3854,96 @@ func TestReplayWorkedLineCarriesFirstToken(t *testing.T) {
 		Worked:     12 * time.Second,
 		FirstToken: 1200 * time.Millisecond,
 	}
-	if got := replayWorkedFrame(line).Title; !strings.HasPrefix(got, "Worked for 12s · first token 1.2s · ") {
+	if got := replayWorkedFrame(line, event.PlanProgress{}).Title; !strings.HasPrefix(got, "Worked for 12s · first token 1.2s · ") {
 		t.Fatalf("replayed worked title = %q, want the first-token segment after the duration", got)
 	}
 	line.FirstToken = 0
-	if got := replayWorkedFrame(line).Title; strings.Contains(got, "first token") {
+	if got := replayWorkedFrame(line, event.PlanProgress{}).Title; strings.Contains(got, "first token") {
 		t.Fatalf("replayed worked title = %q, want no first-token segment for an unmeasured run", got)
 	}
+}
+
+// A resumed run's closing line carries the checklist it ended with — the same
+// ☑N/M the live line reported — so the token stays the drawer's entry after a
+// /resume. A run that updated nothing reports the state it inherited, and the
+// subagent checklist recorded under it never leaks into the conversation's
+// counters.
+func TestResumedWorkedLineCarriesItsChecklistAndIsTheDrawerEntry(t *testing.T) {
+	require := require.New(t)
+	todoArgs := `{"action":"set","items":[{"id":"T1","content":"归档计划","status":"completed"},{"id":"T2","content":"Writing tests","status":"in_progress"}]}`
+	assistantParts := state.MessagePartsJSON(llm.AssistantMessage(nil, llm.ToolCall{
+		ID:   "call-todo-1",
+		Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{
+			Name:      "session_todo",
+			Arguments: todoArgs,
+		},
+	}), "")
+	body := `{"output":"ok"}` + "\n"
+	toolParts := state.MessagePartsJSON(llm.ToolResultMessage("call-todo-1", llm.Text(body)), body)
+	metaJSON, err := json.Marshal(tool.ToolMeta{ToolName: "session_todo", Status: "completed"})
+	require.NoError(err)
+	plan := event.PlanUpdatedPayload{
+		Title:     "Updated Plan",
+		Completed: 2,
+		Total:     3,
+		Items: []event.PlanUpdateItem{
+			{ID: "T1", Content: "归档计划", Status: "completed"},
+			{ID: "T2", Content: "Writing tests", Status: "in_progress"},
+		},
+	}
+	finished := time.Date(2026, 11, 10, 9, 14, 0, 0, time.UTC)
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "把待办列出来"},
+		{RowID: 2, RunID: "run-1", Role: "assistant", PartsJSON: assistantParts},
+		{RowID: 3, RunID: "run-1", Role: "tool", Content: body, PartsJSON: toolParts, ToolMetaJSON: string(metaJSON),
+			RunWorkedMs: 62_000, RunFinishedAtMs: finished.UnixMilli()},
+		{RowID: 4, Role: "user", Content: "继续"},
+		{RowID: 5, RunID: "run-2", Role: "assistant", Content: "清单没动", RunWorkedMs: 3_000,
+			RunFinishedAtMs: finished.Add(time.Minute).UnixMilli()},
+	}
+	planRaw, err := json.Marshal(plan)
+	require.NoError(err)
+	subPlanRaw, err := json.Marshal(event.PlanUpdatedPayload{
+		Completed: 9, Total: 9, AgentID: "sub-1",
+		Items: []event.PlanUpdateItem{{ID: "S1", Content: "子代理事项", Status: "in_progress"}},
+	})
+	require.NoError(err)
+	now := finished
+	events := []event.RunEvent{
+		{ID: "e-plan", RunID: "run-1", Type: event.RunEventPlanUpdated, Payload: planRaw, CreatedAt: now, Sequence: 1},
+		{ID: "e-end-1", RunID: "run-1", Type: event.RunEventTurnCompleted, CreatedAt: now, Sequence: 2},
+		{ID: "e-end-2", RunID: "run-2", Type: event.RunEventTurnCompleted, CreatedAt: now.Add(time.Minute), Sequence: 3},
+		{ID: "e-sub", RunID: "run-2", Type: event.RunEventPlanUpdated, Payload: subPlanRaw, CreatedAt: now.Add(time.Minute), Sequence: 4},
+	}
+
+	r := newPlanDrawerScreen(t, 120, 40)
+	reducer := &Reducer{}
+	replayTimelineWithReducer(r, turns, events, reducer, []event.PlanUpdatedPayload{plan})
+	flushReplayReducer(r, reducer)
+
+	var titles []string
+	for _, block := range r.vm.blocks {
+		if block.frame.Kind == FrameStatus && strings.HasPrefix(block.frame.Title, workedForPrefix) {
+			titles = append(titles, block.frame.Title)
+		}
+	}
+	require.Len(titles, 2, "one closing line per run")
+	require.Contains(titles[0], "☑2/3 · Writing tests", "the run's own checklist, as live reported it")
+	require.Contains(titles[1], "☑2/3 · Writing tests", "a run that updated nothing reports the state it inherited")
+	require.NotContains(titles[1], "子代理事项")
+
+	// The replayed token is a drawer entry exactly like the live one.
+	require.Len(r.vpHistoryProgress, 2, "both replayed closing lines carry their token")
+	span := r.vpHistoryProgress[0]
+	require.Equal("☑", drawnCellAt(r.vpPainted[span.row], span.startCol))
+	clickAt(r, span.startCol+1, span.row)
+	require.True(r.planDrawer.open, "clicking the resumed token did not open the drawer")
+	r.mu.Lock()
+	card, ok := r.latestPlanFrameLocked()
+	r.mu.Unlock()
+	require.True(ok)
+	require.Contains(card.Content, "Writing tests")
 }
 
 // A run that failed before it said anything still closed live: its error, then

@@ -4,15 +4,15 @@
 #   scripts/install-assets.sh <bin-dir>
 #
 # The runtime reads models.json from <bin-dir> — the directory holding the
-# forebrain executable — as its shipped base; it is not compiled into the
+# forebrain executable — and from nowhere else; it is not compiled into the
 # binary. The file carries per-model capability data: the model type (`type`,
 # set only for non-chat models), the context/output `limit`, `attachment`,
 # `reasoning`, and `reasoning_options` (the thinking levels a model offers,
 # from which both the TUI and the web build their effort pickers).
 #
-# $FOREBRAIN_HOME/models.json is a different thing: the user's overlay over
-# that base, merged per key and per field when the catalog loads, written once
-# as a full copy if the home has none and never touched afterwards.
+# That copy is the whole catalog: there is no per-home overlay, no copy
+# installed into $FOREBRAIN_HOME and no runtime download (owner 2026-11-09).
+# A user's capability changes live in the model configuration (web 设置 › 模型).
 #
 # The list and the copying live in Go (llm.InstallAssets, cmd/installassets),
 # so this only runs that.

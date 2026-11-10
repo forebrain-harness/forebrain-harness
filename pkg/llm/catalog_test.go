@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestParseAndLookup(t *testing.T) {
@@ -109,49 +108,6 @@ func (c *Catalog) Len() int {
 	return len(c.byID)
 }
 
-// A fresh home has no models.json until the catalog beside the binary is
-// seeded into it. Initializing the global catalog seeds it first, so the very
-// first process knows every model's limits instead of reading them all as
-// unknown.
-func TestInitGlobalCatalogSeedsAFreshHome(t *testing.T) {
-	globalCatMu.RLock()
-	previous := globalCat
-	globalCatMu.RUnlock()
-	t.Cleanup(func() { SetGlobalCatalogForTest(previous) })
-	SetGlobalCatalogForTest(nil)
-
-	assets, err := RepoAssetsDirForTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(AssetsDirEnv, assets)
-
-	home := t.TempDir()
-	if err := InitGlobalCatalog(home, "(devel)"); err != nil {
-		t.Fatalf("InitGlobalCatalog: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(home, "models.json")); err != nil {
-		t.Fatalf("models.json was not seeded: %v", err)
-	}
-	hit, ok := Lookup("deepseek", "deepseek-chat")
-	if !ok || hit.ContextWindow <= 0 {
-		t.Fatalf("Lookup after a fresh init = %+v, %v", hit, ok)
-	}
-	// The merged catalog is what a caller sees: shipped data plus the home
-	// copy the seed just wrote, which is the same bytes.
-	shipped, err := RepoModelsJSONForTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := Parse(shipped)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := len(AllModels()); got != len(want.AllModels()) {
-		t.Fatalf("merged catalog has %d models, want %d", got, len(want.AllModels()))
-	}
-}
-
 // A catalog entry carries the upstream model type and its reasoning_options,
 // and an absent reasoning_options field is not the same data as an empty one:
 // the first says nothing, the second says "reasons with nothing to pick".
@@ -243,325 +199,122 @@ func requireRepoAssets(t *testing.T) string {
 	return assets
 }
 
+// writeShippedCatalog writes a catalog beside a binary — the one place the
+// runtime reads — and points the lookup at it.
+func writeShippedCatalog(t *testing.T, content []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "models.json"), content, 0o644); err != nil {
+		t.Fatalf("write shipped models.json: %v", err)
+	}
+	t.Setenv(AssetsDirEnv, dir)
+	return filepath.Join(dir, "models.json")
+}
+
+// The catalog is the one this build ships beside its binary. A file of the same
+// name in the forebrain home is not a data source any more: it is not read,
+// nothing merges over the shipped row, and the file is left byte for byte alone
+// (owner 2026-11-09).
+func TestCatalogReadsTheShippedFileOnly(t *testing.T) {
+	writeShippedCatalog(t, []byte(`{"openai/gpt-5":{"id":"openai/gpt-5","attachment":false,"limit":{"context":400000}}}`))
+	restoreGlobalCatalog(t)
+
+	// The home copy exists before the catalog is loaded: initializing must
+	// ignore it, and nothing may write it back.
+	home := t.TempDir()
+	homeCopy := []byte(`{"openai/gpt-5":{"attachment":true},"local/private-model":{"id":"local/private-model","limit":{"context":8192}}}`)
+	homePath := filepath.Join(home, "models.json")
+	if err := os.WriteFile(homePath, homeCopy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := InitGlobalCatalog(); err != nil {
+		t.Fatalf("InitGlobalCatalog: %v", err)
+	}
+
+	hit, ok := Lookup("openai", "gpt-5")
+	if !ok {
+		t.Fatal("openai/gpt-5 missing from the shipped catalog")
+	}
+	if hit.SupportsAttachments || hit.ContextWindow != 400000 {
+		t.Fatalf("hit = %+v; the home copy must not reach the answer", hit)
+	}
+	if _, ok := Lookup("local", "private-model"); ok {
+		t.Fatal("the home copy's model resolved; the home file must not be read")
+	}
+	got, err := os.ReadFile(homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, homeCopy) {
+		t.Fatal("the home copy was rewritten")
+	}
+}
+
+// Initializing the catalog writes nothing into a home: a fresh home stays
+// exactly as it was, and the answer still comes from beside the binary. The
+// first process used to seed a full copy into the home; that semantic is gone
+// (owner 2026-11-09).
+func TestInitGlobalCatalogDoesNotWriteHome(t *testing.T) {
+	writeShippedCatalog(t, []byte(`{"deepseek/deepseek-chat":{"id":"deepseek/deepseek-chat","limit":{"context":128000,"output":8192}}}`))
+	restoreGlobalCatalog(t)
+	home := t.TempDir()
+
+	if err := InitGlobalCatalog(); err != nil {
+		t.Fatalf("InitGlobalCatalog: %v", err)
+	}
+	hit, ok := Lookup("deepseek", "deepseek-chat")
+	if !ok || hit.ContextWindow != 128000 {
+		t.Fatalf("hit = %+v ok=%v", hit, ok)
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("the home gained %v; the catalog is not installed there any more", names)
+	}
+}
+
+// A catalog that shipped broken reports its own path and byte; a build that
+// ships no catalog at all reports the one sentence a surface may show. The
+// second case used to be reached through a broken hand-edited overlay, so both
+// halves stay pinned on the one file that is left.
+func TestResolveReportsTheShippedCatalogPrecisely(t *testing.T) {
+	restoreGlobalCatalog(t)
+	path := writeShippedCatalog(t, []byte(`{"openai/gpt-5": [}`))
+
+	_, err := Resolve()
+	if err == nil {
+		t.Fatal("Resolve accepted a shipped catalog that is not JSON")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error %q does not name the file that is broken (%s)", err, path)
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error %q reads as a missing file; the catalog is there and broken", err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Resolve()
+	if err == nil || !strings.Contains(err.Error(), "model data not found; reinstall forebrain") {
+		t.Fatalf("Resolve with no catalog = %v, want the model-data sentence", err)
+	} else if strings.Contains(err.Error(), "models.json") {
+		t.Fatalf("error %q names models.json: a surface never shows that file", err)
+	}
+}
+
 func restoreGlobalCatalog(t *testing.T) {
 	t.Helper()
 	globalCatMu.RLock()
 	previous := globalCat
 	globalCatMu.RUnlock()
 	t.Cleanup(func() { SetGlobalCatalogForTest(previous) })
-}
-
-// A home with no models.json gets a full copy of the shipped catalog — the file
-// a user opens and edits — and nothing else: no marker, no backup, no
-// second file of any kind.
-func TestInstallWritesAFullCopyWhenMissing(t *testing.T) {
-	assets := requireRepoAssets(t)
-	shipped, err := os.ReadFile(filepath.Join(assets, "models.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	home := t.TempDir()
-	if err := Install(home, "(devel)"); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	got, err := os.ReadFile(filepath.Join(home, "models.json"))
-	if err != nil {
-		t.Fatalf("read seeded copy: %v", err)
-	}
-	if !bytes.Equal(got, shipped) {
-		t.Fatalf("seeded copy is %d bytes, shipped is %d", len(got), len(shipped))
-	}
-	entries, err := os.ReadDir(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "models.json" {
-		names := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			names = append(names, entry.Name())
-		}
-		t.Fatalf("home holds %v; a missing-copy install writes models.json and nothing else", names)
-	}
-}
-
-// An existing home file is the user's: Install leaves its bytes and its mtime
-// exactly as they were, however outdated or damaged they look.
-func TestInstallLeavesAnExistingFileByteIdentical(t *testing.T) {
-	requireRepoAssets(t)
-
-	home := t.TempDir()
-	target := filepath.Join(home, "models.json")
-	trimmed := []byte(`{"openai/gpt-5":{"id":"openai/gpt-5","name":"my name","attachment":false,"limit":{"context":12345}}}`)
-	if err := os.WriteFile(target, trimmed, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	past := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
-	if err := os.Chtimes(target, past, past); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.Stat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := Install(home, "(devel)"); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, trimmed) {
-		t.Fatalf("Install rewrote the user's file: %s", got)
-	}
-	after, err := os.Stat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !after.ModTime().Equal(before.ModTime()) {
-		t.Fatalf("Install touched the user's file: mtime %v -> %v", before.ModTime(), after.ModTime())
-	}
-	entries, err := os.ReadDir(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("Install added files beside the user's copy: %d entries", len(entries))
-	}
-}
-
-// The home file is an overlay read field by field: a field it names wins, a
-// field it does not name still comes from the shipped row.
-func TestOverlayOverridesSingleField(t *testing.T) {
-	requireRepoAssets(t)
-	restoreGlobalCatalog(t)
-
-	home := t.TempDir()
-	overlay := []byte(`{"openai/gpt-5":{"attachment":true}}`)
-	if err := os.WriteFile(filepath.Join(home, "models.json"), overlay, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := InitGlobalCatalog(home, "(devel)"); err != nil {
-		t.Fatalf("InitGlobalCatalog: %v", err)
-	}
-
-	hit, ok := Lookup("openai", "gpt-5")
-	if !ok {
-		t.Fatal("openai/gpt-5 missing after the overlay merge")
-	}
-	if !hit.SupportsAttachments {
-		t.Fatal("the overlay's attachment:true did not win")
-	}
-	if hit.ContextWindow != 400000 {
-		t.Fatalf("context window = %d; an unnamed field must come from the shipped row", hit.ContextWindow)
-	}
-	if levels, known := hit.ReasoningEfforts(); !known || !reflect.DeepEqual(levels, []string{"minimal", "low", "medium", "high"}) {
-		t.Fatalf("reasoning levels = %v, known=%v; want the shipped ones", levels, known)
-	}
-	// The shipped copy is untouched by any of this.
-	shipped, err := RepoModelsJSONForTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(shipped, []byte(`"openai/gpt-5"`)) {
-		t.Fatal("the shipped asset lost openai/gpt-5")
-	}
-}
-
-// The overlay can add a model the shipped catalog has never carried and delete
-// one it does, without disturbing anything else.
-func TestOverlayAddsAModelAndDeletesOne(t *testing.T) {
-	requireRepoAssets(t)
-	restoreGlobalCatalog(t)
-
-	home := t.TempDir()
-	overlay := []byte(`{
-		"local/private-model":{"id":"local/private-model","name":"Private","reasoning":true,
-			"reasoning_options":[{"type":"effort","values":["low","high"]}],"limit":{"context":32768,"output":4096}},
-		"openai/gpt-4":null
-	}`)
-	if err := os.WriteFile(filepath.Join(home, "models.json"), overlay, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := InitGlobalCatalog(home, "(devel)"); err != nil {
-		t.Fatalf("InitGlobalCatalog: %v", err)
-	}
-
-	added, ok := Lookup("local", "private-model")
-	if !ok || added.ContextWindow != 32768 {
-		t.Fatalf("added model = %+v, %v", added, ok)
-	}
-	if levels, known := added.ReasoningEfforts(); !known || !reflect.DeepEqual(levels, []string{"low", "high"}) {
-		t.Fatalf("added model levels = %v, known=%v", levels, known)
-	}
-	if _, ok := Lookup("openai", "gpt-4"); ok {
-		t.Fatal("openai/gpt-4 must be deleted by its null overlay entry")
-	}
-	if hit, ok := Lookup("openai", "gpt-5"); !ok || hit.ContextWindow != 400000 {
-		t.Fatalf("an unrelated model changed: %+v, %v", hit, ok)
-	}
-}
-
-// The levels a surface offers are the merged data's levels: a user who narrows
-// one model's efforts in their overlay sees exactly those, on every surface
-// that asks (TUI /model and the gateway both read through ModelReasoningEfforts).
-func TestOverlayAppliesToReasoningOptions(t *testing.T) {
-	requireRepoAssets(t)
-	restoreGlobalCatalog(t)
-
-	home := t.TempDir()
-	overlay := []byte(`{"zhipuai/glm-5.3-flash":{"reasoning_options":[{"type":"effort","values":["high"]}]}}`)
-	if err := os.WriteFile(filepath.Join(home, "models.json"), overlay, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := InitGlobalCatalog(home, "(devel)"); err != nil {
-		t.Fatalf("InitGlobalCatalog: %v", err)
-	}
-	levels, known := ReasoningEfforts("zhipuai", "glm-5.3-flash")
-	if !known || !reflect.DeepEqual(levels, []string{"high"}) {
-		t.Fatalf("levels = %v, known=%v; want [high] from the overlay", levels, known)
-	}
-}
-
-// A home copy written before this build added `type` and `reasoning_options`
-// still gains both — from the shipped row — while keeping every value the user
-// already had. This is why an old copy never has to be rewritten or migrated.
-func TestLegacyFullCopyGainsTheNewColumns(t *testing.T) {
-	requireRepoAssets(t)
-	restoreGlobalCatalog(t)
-
-	shipped, err := RepoModelsJSONForTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var entries map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(shipped, &entries); err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		delete(entry, "type")
-		delete(entry, "reasoning_options")
-	}
-	// What a user changed in their own copy: a narrower window and no images.
-	entries["openai/gpt-5"]["limit"] = json.RawMessage(`{"context":12345,"output":1000}`)
-	entries["openai/gpt-5"]["attachment"] = json.RawMessage(`false`)
-	legacy, err := json.Marshal(entries)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, "models.json"), legacy, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := InitGlobalCatalog(home, "(devel)"); err != nil {
-		t.Fatalf("InitGlobalCatalog: %v", err)
-	}
-
-	// The user's own values still win.
-	gpt5, ok := Lookup("openai", "gpt-5")
-	if !ok {
-		t.Fatal("openai/gpt-5 missing")
-	}
-	if gpt5.ContextWindow != 12345 {
-		t.Fatalf("context window = %d; the user's value must win", gpt5.ContextWindow)
-	}
-	if gpt5.SupportsAttachments {
-		t.Fatal("the user's attachment:false must win")
-	}
-	// The columns their copy predates arrive from the shipped base.
-	if levels, known := gpt5.ReasoningEfforts(); !known || !reflect.DeepEqual(levels, []string{"minimal", "low", "medium", "high"}) {
-		t.Fatalf("levels = %v, known=%v; a legacy copy must gain the shipped reasoning_options", levels, known)
-	}
-	whisper, ok := Lookup("openai", "whisper-large-v3")
-	if !ok {
-		t.Fatal("openai/whisper-large-v3 missing")
-	}
-	if whisper.Kind != "transcription" {
-		t.Fatalf("whisper kind = %q; a legacy copy must gain the shipped type", whisper.Kind)
-	}
-	// And the user's file is still theirs, byte for byte.
-	got, err := os.ReadFile(filepath.Join(home, "models.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, legacy) {
-		t.Fatal("loading a legacy copy rewrote it")
-	}
-}
-
-// A broken overlay is the likeliest failure of the whole two-layer scheme —
-// the file exists precisely so a user edits it — so its error has to name the
-// file and the byte. Reporting it as "not found" would send them looking for a
-// missing file they are looking at.
-func TestResolveReportsABrokenOverlayPrecisely(t *testing.T) {
-	requireRepoAssets(t)
-	restoreGlobalCatalog(t)
-
-	home := t.TempDir()
-	overlayPath := filepath.Join(home, "models.json")
-	broken := []byte(`{"zhipuai/glm-5.3-flash": {"reasoning_options": [}`)
-	if err := os.WriteFile(overlayPath, broken, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := Resolve(home)
-	if err == nil {
-		t.Fatal("Resolve accepted a hand-edited overlay that is not JSON")
-	}
-	if !strings.Contains(err.Error(), overlayPath) {
-		t.Fatalf("error %q does not name the file the user edited (%s)", err, overlayPath)
-	}
-	if strings.Contains(err.Error(), "not found") {
-		t.Fatalf("error %q reads as a missing file; the overlay is there and broken", err)
-	}
-
-	// The same through the startup path, which is where a user meets it.
-	if err := InitGlobalCatalog(home, "(devel)"); err == nil {
-		t.Fatal("InitGlobalCatalog accepted a broken overlay")
-	} else if !strings.Contains(err.Error(), overlayPath) {
-		t.Fatalf("InitGlobalCatalog error %q does not name the overlay", err)
-	}
-
-	// The genuinely absent case keeps its own message: one sentence a surface
-	// can show, naming neither models.json nor this machine's layout (owner
-	// 2026-11-07).
-	empty := t.TempDir()
-	t.Setenv(AssetsDirEnv, t.TempDir())
-	if _, err := Resolve(empty); err == nil || !strings.Contains(err.Error(), "model data not found; reinstall forebrain") {
-		t.Fatalf("Resolve with no catalog anywhere = %v, want the model-data sentence", err)
-	} else if strings.Contains(err.Error(), "models.json") {
-		t.Fatalf("error %q names models.json: a surface never shows that file", err)
-	}
-}
-
-// A malformed entry (a key whose value is not an object) is a user's editing
-// mistake too, and reaches the same precise error rather than a silent partial
-// merge.
-func TestResolveRejectsANonObjectOverlayEntry(t *testing.T) {
-	requireRepoAssets(t)
-	restoreGlobalCatalog(t)
-
-	home := t.TempDir()
-	overlayPath := filepath.Join(home, "models.json")
-	if err := os.WriteFile(overlayPath, []byte(`{"openai/gpt-5": "gpt-5"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cat, err := Resolve(home)
-	if err != nil {
-		// Either answer is defensible for a non-object entry: a precise error
-		// or a merge that lets the overlay win whole. What must not happen is
-		// a silent loss of the shipped row without a word.
-		if !strings.Contains(err.Error(), overlayPath) {
-			t.Fatalf("error %q does not name the overlay", err)
-		}
-		return
-	}
-	if _, ok := cat.LookupModel("openai/gpt-5"); !ok {
-		t.Fatal("the overlay's entry vanished from the merged catalog")
-	}
 }
 
 // catalogEntry mirrors the parts of a models.json entry the capability gate
@@ -822,5 +575,28 @@ func TestCustomProviderIDIsTheConfigOne(t *testing.T) {
 	}
 	if !KnownProvider("custom") {
 		t.Fatal("the custom-model provider must always be known")
+	}
+}
+
+// A bare model name that several ids share resolves to the first id in sorted
+// order: the capability answer a surface shows must not depend on map iteration
+// order (plan A0c). The suffix LIMITS table drops ambiguous names; LookupModel
+// still has to answer one, because a custom model is typed this way.
+func TestLookupCatalogSuffixPickIsDeterministic(t *testing.T) {
+	installCatalogForOverrideTest(t, `{
+		"zeta/dup": {"id":"zeta/dup","limit":{"context":3}},
+		"mid/dup": {"id":"mid/dup","limit":{"context":2}},
+		"alpha/dup": {"id":"alpha/dup","limit":{"context":1}}
+	}`)
+	// Go randomizes map iteration on every range, so a repeated lookup would see
+	// a random pick if the code still returned the first iterated entry.
+	for i := 0; i < 50; i++ {
+		hit, ok := LookupCatalog("custom", "dup")
+		if !ok {
+			t.Fatal("custom/dup did not resolve through the suffix fallback")
+		}
+		if hit.CatalogID != "alpha/dup" || hit.ContextWindow != 1 {
+			t.Fatalf("lookup %d = %+v; want the first id in sorted order (alpha/dup)", i, hit)
+		}
 	}
 }

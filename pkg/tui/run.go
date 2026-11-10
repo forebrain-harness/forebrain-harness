@@ -763,12 +763,26 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		// A peer message waiting for this conversation runs the way a due
 		// continuation does: the loop owns the turn, and the conversation has
-		// no run, so nothing is waiting behind it.
+		// no run, so nothing is waiting behind it. Whatever the queue held
+		// behind the peer message — messages the boundary released while the
+		// peer turn sat between them — runs at the peer turn's own boundary,
+		// exactly as it would have after any other turn.
 		if state.panel == nil {
 			if prompt, due := state.takePeerDue(); due {
 				sessionTouched = true
-				if _, err := executePeerTurn(ctx, events, notifyCh, processUINotification, opts.Session, renderer, tracker, &state, prompt, opts.Clipboard, cmds, &turnWorkedStatus); err != nil {
+				disposition, err := executePeerTurn(ctx, events, notifyCh, processUINotification, opts.Session, renderer, tracker, &state, prompt, opts.Clipboard, cmds, &turnWorkedStatus)
+				if err != nil {
 					return err
+				}
+				for {
+					next, ok := nextAutomaticSubmission(&state, disposition)
+					if !ok {
+						break
+					}
+					disposition, err = executeComposerSubmission(ctx, sigCh, events, notifyCh, processUINotification, opts.Session, renderer, tracker, &state, next, opts.Clipboard, cmds, true, &turnWorkedStatus)
+					if err != nil {
+						return err
+					}
 				}
 				continue
 			}
@@ -2599,6 +2613,7 @@ func (s *streamState) composerPendingInputPreview() ComposerPendingInputPreview 
 		PendingSteers:  preview.Steers,
 		RejectedSteers: preview.Rejected,
 		QueuedMessages: preview.FollowUp,
+		Editable:       preview.Editable,
 	}
 }
 
@@ -2965,7 +2980,7 @@ func buildComposerSubmission(actualText string, displayText string, attachments 
 		if strings.TrimSpace(att.Path) == "" {
 			continue
 		}
-		image, err := turn.AttachmentImageParts(att.Path)
+		image, err := turn.AttachmentImageParts(att.Path, actualText)
 		if err != nil {
 			continue
 		}
@@ -3075,10 +3090,11 @@ func rejectedQueueInput(submission ComposerSubmission) run.Input {
 
 // queuedSubmissions pulls the surface's submissions back out of the queue's
 // inputs, in the order the queue listed them. An input the person did not type
-// carries no submission — a peer message and a delivery note are steered into a
-// running turn with no Payload at all — so those are skipped rather than
-// asserted: every caller here is a steer path, and a steer that is not a
-// composer submission has nothing for it to recall, release or render.
+// carries no submission — a peer message and a delivery note are written by
+// another agent — so those are skipped rather than asserted: a caller that
+// renders such a message has nothing composer-shaped to render, and a caller
+// that releases one must park it instead (releasedSubmissions and
+// parkQueuedPeerTurns are the release-path pair).
 func queuedSubmissions(inputs []run.Input) []ComposerSubmission {
 	out := make([]ComposerSubmission, 0, len(inputs))
 	for _, in := range inputs {
@@ -3087,6 +3103,53 @@ func queuedSubmissions(inputs []run.Input) []ComposerSubmission {
 		}
 	}
 	return out
+}
+
+// releasedSubmissions turns the entries a boundary released into the messages
+// the person's next turn runs on: the ones the surface recorded, and a message
+// an agent of this conversation queued with no surface record of its own, which
+// runs on the words the queue holds. A peer message is not in this list — it is
+// a turn of its own (parkQueuedPeerTurns).
+func releasedSubmissions(inputs []run.Input) []ComposerSubmission {
+	out := make([]ComposerSubmission, 0, len(inputs))
+	for _, in := range inputs {
+		if submission, ok := in.Payload.(ComposerSubmission); ok {
+			out = append(out, submission)
+			continue
+		}
+		if _, ok := in.Payload.(process.PeerPrompt); ok || statepkg.IsPeerOrigin(in.Origin) {
+			continue
+		}
+		if text := strings.TrimSpace(in.Text); text != "" {
+			out = append(out, ComposerSubmission{
+				Text:        in.Text,
+				DisplayText: in.Text,
+				Parts:       append([]llm.ContentPart(nil), in.Parts...),
+			})
+		}
+	}
+	return out
+}
+
+// parkQueuedPeerTurns hands every released entry another agent wrote to the
+// loop's pending peer turns: it is a wake of its own, and the idle loop runs it
+// as the turn its sender was already answered for. Nothing of the person's is
+// parked, and nothing is dropped. The payload keeps the sender's name when the
+// producer attached one; a peer entry that carries only its origin is rebuilt
+// from the words the queue holds.
+func (s *streamState) parkQueuedPeerTurns(inputs []run.Input) {
+	if s == nil {
+		return
+	}
+	for _, in := range inputs {
+		if prompt, ok := in.Payload.(process.PeerPrompt); ok {
+			s.setPeerDue(prompt)
+			continue
+		}
+		if statepkg.IsPeerOrigin(in.Origin) {
+			s.setPeerDue(process.PeerPrompt{SessionID: s.sessionID, Text: in.Text, Origin: in.Origin})
+		}
+	}
 }
 
 // takeDeliveredSteers drains the steers the model has received and hands back
@@ -3252,7 +3315,11 @@ func (s *streamState) restoreLatestQueuedEditableSubmission(session Session) boo
 	if !ok {
 		return false
 	}
-	s.restoreRecalledSubmission(in.Payload.(ComposerSubmission))
+	submission, ok := submissionFromQueuedInput(in)
+	if !ok {
+		return false
+	}
+	s.restoreRecalledSubmission(submission)
 	return true
 }
 
@@ -3329,7 +3396,12 @@ func (s *streamState) restoreWithdrawnWork(session Session) {
 	// TakeAll empties the queue and retracts the pending steers from the
 	// turn's runtime in the same step, ordered by the shared enqueue clock —
 	// the order the user wrote them.
-	rest := queuedSubmissions(s.sessionQueue().TakeAll())
+	all := s.sessionQueue().TakeAll()
+	// A peer message was not written as a follow-up to the withdrawn message,
+	// and it is not the person's to edit: it runs as its own turn instead of
+	// being folded into the recovered draft (or dropped with the queue).
+	s.parkQueuedPeerTurns(all)
+	rest := releasedSubmissions(all)
 	if !first && len(rest) == 0 {
 		return
 	}
@@ -3548,7 +3620,7 @@ func mergeComposerSubmissions(items []ComposerSubmission) ComposerSubmission {
 		if strings.TrimSpace(att.Path) == "" {
 			continue
 		}
-		image, err := turn.AttachmentImageParts(att.Path)
+		image, err := turn.AttachmentImageParts(att.Path, merged.Text)
 		if err != nil {
 			continue
 		}
@@ -4363,7 +4435,9 @@ func drainActiveRunEvents(ctx context.Context, events <-chan inputEvent, notifyC
 // asking the conversation's queue how the turn ended. The queue owns the
 // ordering — which messages merge into the next turn, which go back to the
 // composer — so this function only merges what the engine listed and submits
-// or restores it.
+// or restores it. A peer message another session wrote is neither: it is
+// parked for a turn of its own (the loop runs it once the queue is idle), so
+// it is never drawn as something the person typed and never dropped.
 func nextAutomaticSubmission(state *streamState, disposition runTurnDisposition) (ComposerSubmission, bool) {
 	if state == nil || state.quitRequested || disposition == runTurnWithdrawn {
 		return ComposerSubmission{}, false
@@ -4383,13 +4457,15 @@ func nextAutomaticSubmission(state *streamState, disposition runTurnDisposition)
 		// interrupted boundary restores work into the composer instead.
 		if state.consumeSubmitPendingSteersAfterInterrupt() && disposition == runTurnInterrupted {
 			if send, _ := q.Next(run.BoundaryInterruptToSend); len(send) > 0 {
-				if merged := mergeComposerSubmissions(queuedSubmissions(send)); len(merged.Parts) > 0 {
+				state.parkQueuedPeerTurns(send)
+				if merged := mergeComposerSubmissions(releasedSubmissions(send)); len(merged.Parts) > 0 {
 					return merged, true
 				}
 			}
 		}
 		_, restore := q.Next(run.BoundaryInterrupted)
-		items := queuedSubmissions(restore)
+		state.parkQueuedPeerTurns(restore)
+		items := releasedSubmissions(restore)
 		// The visible composer draft is the newest thing the user wrote, so it
 		// trails the restored work.
 		if current, ok := state.currentDraftSubmission(); ok {
@@ -4406,7 +4482,8 @@ func nextAutomaticSubmission(state *streamState, disposition runTurnDisposition)
 		// each completed boundary until the queue is empty.
 		send, _ := q.Next(run.BoundaryCompleted)
 		if len(send) > 0 {
-			if merged := mergeComposerSubmissions(queuedSubmissions(send)); len(merged.Parts) > 0 {
+			state.parkQueuedPeerTurns(send)
+			if merged := mergeComposerSubmissions(releasedSubmissions(send)); len(merged.Parts) > 0 {
 				return merged, true
 			}
 		}

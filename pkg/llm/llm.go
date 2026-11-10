@@ -101,6 +101,40 @@ func IsImageSourceNote(part ContentPart) bool {
 		strings.HasSuffix(text, "]") && !strings.Contains(text, "\n")
 }
 
+// ImageFileNamedInText reports whether a message's own text names the file an
+// image is stored in. The note exists so the model can open that file; when the
+// text already says where it is, a second line would only say it again.
+//
+// The mention must be the whole path: the bytes on either side of it cannot
+// continue a path, so a text that names "/tmp/a.png.bak" does not count as
+// having named "/tmp/a.png".
+func ImageFileNamedInText(text, source string) bool {
+	source = strings.TrimSpace(source)
+	if source == "" || text == "" {
+		return false
+	}
+	for at := strings.Index(text, source); at >= 0; {
+		end := at + len(source)
+		if (at == 0 || !isPathChar(text[at-1])) && (end == len(text) || !isPathChar(text[end])) {
+			return true
+		}
+		next := strings.Index(text[end:], source)
+		if next < 0 {
+			return false
+		}
+		at = end + next
+	}
+	return false
+}
+
+// isPathChar reports a byte that continues a filesystem path.
+func isPathChar(b byte) bool {
+	if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' {
+		return true
+	}
+	return strings.IndexByte("/\\._-~+@%:", b) >= 0
+}
+
 // WithoutImageSourceNotes drops the ImageSourceNote lines that follow images.
 // The line belongs to the request only: it is derived from the image every
 // time a message is sent or replayed, so a stored message never holds it — a

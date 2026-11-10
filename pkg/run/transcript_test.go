@@ -254,7 +254,7 @@ func TestBuildTranscriptSessionReplacesRawImageUserWithEnriched(t *testing.T) {
 	// and carry the image as the live turn sends it: the picture, then the
 	// line naming its file — the same line the replay writes, which is what
 	// keeps the stored turn recognisable as this one.
-	image, err := turn.AttachmentImageParts(img)
+	image, err := turn.AttachmentImageParts(img, userText)
 	require.NoError(t, err)
 	enriched := append([]llm.ContentPart{llm.Text(userText)}, image...)
 
@@ -590,9 +590,80 @@ func TestUserImageAttachmentRehydratesIdenticallyToLiveImageFile(t *testing.T) {
 	require.NotNil(t, rehydrated, "user message missing after reload")
 	require.Equal(t, []llm.ContentPart{llm.Text(userText), live, llm.Text(llm.ImageSourceNote(imgPath))}, rehydrated.Parts)
 	// And it is exactly what the live terminal turn sends for that attachment.
-	liveTurn, err := turn.AttachmentImageParts(imgPath)
+	liveTurn, err := turn.AttachmentImageParts(imgPath, userText)
 	require.NoError(t, err)
 	require.Equal(t, liveTurn, rehydrated.Parts[1:])
+
+	// A message whose own text names the file is not told where it is again:
+	// live and replay both stop after the image, field for field.
+	namedText := "as the screenshot in " + imgPath + " shows, the row is off by one"
+	namedParts := state.MessagePartsJSON(llm.UserMessage(llm.Text(namedText)), namedText)
+	namedParts = state.AppendRawPartJSON(namedParts, state.FileReferencePartJSON(imgPath, "shot.png", "image/png"))
+	_, err = sess.AppendStructuredMessage(ctx, "s1", "user", namedText, "", namedParts, "", "", "", "", state.MessageExecTiming{})
+	require.NoError(t, err)
+
+	entries, err = sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
+	require.NoError(t, err)
+	msgs = rehydrateImageReferences(ctx, PathResolver{}, entries)
+	rehydrated = nil
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleUser {
+			rehydrated = &msgs[i]
+		}
+	}
+	require.NotNil(t, rehydrated, "the naming user message is missing after reload")
+	namedLive, err := turn.AttachmentImageParts(imgPath, namedText)
+	require.NoError(t, err)
+	require.Len(t, namedLive, 1, "the text names the file: the live turn must not repeat it")
+	require.Equal(t, []llm.ContentPart{llm.Text(namedText), namedLive[0]}, rehydrated.Parts)
+}
+
+// TestReviewRowReplaysWithoutASecondMention pins what the plan reviewer's own
+// turn replays as — the row every later review request is prefixed with. The
+// worker stores the task as parts[0] (the prompt, whose <images> block names
+// every picture's file), then the label and the file_reference of each image,
+// and never the source line. Replaying that row must send the picture once and
+// name its file only in the text: a second mention would put the same path in
+// the same message twice, and a live/replay difference at this row would fork
+// the prefix the provider cached.
+func TestReviewRowReplaysWithoutASecondMention(t *testing.T) {
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	ctx := context.Background()
+	require.NoError(t, sess.Ensure(ctx, "s1", "s1"))
+
+	img := filepath.Join(t.TempDir(), "clip.png")
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(img, png, 0o600))
+
+	label := "Image 1 of message 1:"
+	prompt := "Review the plan below.\n\n<images>\nEach line names one of the images the request attached and the file it is stored in.\n" +
+		label + " " + img + "\n</images>"
+	partsJSON := state.MessagePartsJSON(llm.UserMessage(llm.Text(prompt), llm.Text(label)), prompt)
+	partsJSON = state.AppendRawPartJSON(partsJSON, state.FileReferencePartJSON(img, "clip.png", "image/png"))
+	_, err = sess.AppendStructuredMessage(ctx, "s1", "user", prompt, "", partsJSON, "", "", "", "", state.MessageExecTiming{})
+	require.NoError(t, err)
+
+	entries, err := sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
+	require.NoError(t, err)
+	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries)
+	require.Len(t, msgs, 1)
+	got := msgs[0].Parts
+	require.Len(t, got, 3, "parts = %#v", got)
+	require.Equal(t, prompt, got[0].Text)
+	require.Equal(t, label, got[1].Text)
+	require.Equal(t, llm.ContentTypeImageBase64, got[2].Type)
+	notes := 0
+	for _, part := range got {
+		if llm.IsImageSourceNote(part) {
+			notes++
+		}
+	}
+	require.Zero(t, notes, "the row's own text already names the file: %#v", got)
+	require.Equal(t, 1, strings.Count(got[0].Text, img), "the path is named once, in the text")
 }
 
 // A terminal image picked with @ was stored by bare path with no type. Such a

@@ -194,3 +194,51 @@ func TestSubagentAttemptTextImageOnly(t *testing.T) {
 		t.Fatalf("attempt text = %q, want the parts' own words", got)
 	}
 }
+
+// A replayed message whose own text already names the file an image is stored
+// in gets no second mention of it. The plan review's prompt lists every image
+// path in its <images> block, and the picture follows that text; writing the
+// source line after it too would name the same file twice in one message. A
+// text that names only a longer path with the same start is a different file
+// and still gets the line — it is the only pointer to this picture.
+func TestImageSourceLineIsSkippedWhenTheTextNamesTheFile(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	img := filepath.Join(t.TempDir(), "shot.png")
+	raw, _ := base64.StdEncoding.DecodeString(sourceTestPNG)
+	if err := os.WriteFile(img, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image, err := llm.ImageFile(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	named := llm.UserMessage(llm.Text("<images>\nImage 1 of message 1: "+img+"\n</images>"), image)
+	got := rehydrateMessageImages(context.Background(), PathResolver{}, named, nil)
+	if len(got.Parts) != 2 {
+		t.Fatalf("parts = %#v, want the text and the image with no second mention", got.Parts)
+	}
+	if got.Parts[1].Type != llm.ContentTypeImageBase64 {
+		t.Fatalf("parts[1] = %#v, want the image", got.Parts[1])
+	}
+
+	other := llm.UserMessage(llm.Text("see "+img+".bak"), image)
+	got = rehydrateMessageImages(context.Background(), PathResolver{}, other, nil)
+	if len(got.Parts) != 3 || got.Parts[2].Text != llm.ImageSourceNote(img) {
+		t.Fatalf("parts = %#v, want the source line after the image", got.Parts)
+	}
+
+	silent := llm.UserMessage(llm.Text("what is this?"), image)
+	got = rehydrateMessageImages(context.Background(), PathResolver{}, silent, nil)
+	if len(got.Parts) != 3 || got.Parts[2].Text != llm.ImageSourceNote(img) {
+		t.Fatalf("parts = %#v, want the source line after the image", got.Parts)
+	}
+
+	// An inline image's file is written from its bytes, so no text can have
+	// named it: the line is always written.
+	inline := llm.UserMessage(llm.Text("what is this?"), llm.ImageBase64("image/png", sourceTestPNG))
+	got = rehydrateMessageImages(context.Background(), PathResolver{}, inline, nil)
+	if len(got.Parts) != 3 || !llm.IsImageSourceNote(got.Parts[2]) {
+		t.Fatalf("parts = %#v, want the source line after the inline image", got.Parts)
+	}
+}

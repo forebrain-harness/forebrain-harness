@@ -31,7 +31,7 @@ cd frontend && pnpm install && pnpm build
 
 Packaging flows (only when touching the npm layer): `npm/scripts/build-platform-packages.sh` builds the host triple by default; override with `FOREBRAIN_BUILD_TARGETS="darwin/arm64 linux/amd64"`. `cd npm && npm link` to test the launcher flow.
 
-Model reference data: `scripts/update-models-asset.sh` regenerates `assets/models.json` from `https://models.dev/catalog.json?type=all` (the canonical `models` table, the `opencode`/`opencode-go` rows injected from the providers tree, and `reasoning_options` lifted out of it). Its `OVERRIDES` table is the only place a local correction may differ from upstream — each entry carries a dated reason and a golden test. Rerun it, read the diff, commit.
+Model reference data: `scripts/merge-catalog-into-models.sh` regenerates `assets/models.json` offline from a local models.dev snapshot (`assets/catalog.json`, never committed): it runs `scripts/update-models-asset.sh` (the canonical `models` table, the `opencode`/`opencode-go` rows injected from the providers tree, `reasoning_options` lifted out of it, and the old file's levels carried forward where the snapshot has no row). Its `OVERRIDES` table is the only place a local correction may differ from upstream — each entry carries a dated reason and a golden test. Rerun it, read the diff, commit only `models.json`.
 
 ## Architecture
 
@@ -58,28 +58,28 @@ Integrations:
 
 ## Model data
 
-`assets/models.json` beside the binary is the catalog (refreshed with the build).
-`$FOREBRAIN_HOME/models.json` is an overlay you own: write only the keys and fields
-you want to change, and they win over the shipped row — a field you leave out falls
-back to it. `null` removes a model. A named value replaces the whole value, so
-arrays and nested objects (`reasoning_options`, `limit`, `modalities.input`) are
-never merged element-wise — write the one you want, not a patch of one.
+`assets/models.json` beside the binary is the catalog, and it is the only one:
+nothing is downloaded at runtime and no copy lives in a forebrain home (owner
+2026-11-09). Every process of a build reads the same file, and a build that ships
+no catalog reports that and runs with no catalog data instead of fetching one.
 
-    {"zhipuai/glm-5.3-flash": {"reasoning_options": [{"type": "effort", "values": ["high"]}]}}
-    {"openai/gpt-4": null}
+The catalog is regenerated offline from a models.dev snapshot, never by the
+running product: `scripts/merge-catalog-into-models.sh` takes the snapshot, calls
+`scripts/update-models-asset.sh` and leaves only `assets/models.json` to review
+and commit (`npm/scripts/build-platform-packages.sh` runs the same step when the
+snapshot is present). A model the snapshot no longer carries keeps the
+`reasoning_options` it had, so a provider row disappearing upstream does not
+erase levels users can still send; `lost-options` counts what could not be
+preserved and fails the run when it is non-zero.
 
-Two consequences worth knowing. The home file is written for you once, as a full
-copy, the first time it is missing — and after that it is never touched again: no
-upgrade, no rewrite, no backup. Values your copy already carries stay yours; a
-column it predates (`type`, `reasoning_options`) still arrives from the shipped
-catalog, because the two are merged per field at load. Deleting the file (or just
-the keys you pinned) is how you return to the shipped values.
-
-Reasoning-effort levels have exactly one source: the merged catalog's
+Reasoning-effort levels have exactly one source: the catalog's
 `reasoning_options`, trimmed to what the build can send on that model's protocol.
-A model with no level there is not offered a picker. The two OpenCode surfaces and
-ChatGPT are exceptions only in where their models come from — an account login —
-so their rows are reference data and a model listing skips them.
+A model with no level there is not offered a picker. Capabilities a configured
+model overrides — and the levels a user picks by hand — are that row's data in
+the database (web `设置 › 模型`), applied over the catalog at lookup; they are
+not written back into `models.json`. The two OpenCode surfaces and ChatGPT are
+exceptions only in where their models come from — an account login — so their
+rows are reference data and a model listing skips them.
 
 ## Project-level MCP and projects
 

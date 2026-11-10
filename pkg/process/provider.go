@@ -15,11 +15,11 @@ import (
 // provider, which accepts any name by design.
 //
 // chatgpt and the two OpenCode surfaces are allowed explicitly through
-// config.CredentialsBackedProvider: models.json is installed once and never
-// overwritten, so a catalog entry added later would leave every existing home
-// unable to save these providers. Their model metadata lives in their own
-// packages instead (pkg/llm/opencode for opencode/opencode-go), the same way
-// the ChatGPT subscription's does.
+// config.CredentialsBackedProvider: their model sets arrive with an account
+// login, not with the catalog, so a catalog without their rows must not block
+// saving them. Their model metadata lives in their own packages instead
+// (pkg/llm/opencode for opencode/opencode-go), the same way the ChatGPT
+// subscription's does.
 func VerifyProvider(provider string) error {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	if p == "" {

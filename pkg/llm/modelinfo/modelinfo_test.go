@@ -7,184 +7,54 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 )
 
-// devCatalogFixture is the shape measurements on 2026-11-07 produced: two
-// tables, providers grouped by id and a flat top-level one keyed by
-// "vendor/model", each entry carrying reasoning_options / limit / modalities /
-// status.
-const devCatalogFixture = `{
-  "providers": {
-    "opencode-go": {"models": {
-      "step-5-preview": {"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}],
-        "limit":{"context":1000,"output":100},"modalities":{"input":["text","image"]}},
-      "longcat-2.0": {"reasoning":true,"reasoning_options":[{"type":"toggle"}],"limit":{"context":200,"output":20}}
-    }},
-    "opencode": {"models": {
-      "claude-opus-4-8": {"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high","xhigh","max"]}],
-        "limit":{"context":200000,"output":64000}}
-    }},
-    "deepseek": {"models": {
-      "deepseek-v4-flash": {"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","high"]}],"limit":{"context":1000000,"output":384000}},
-      "deepseek-v4-flash-0731": {"reasoning":true,"reasoning_options":[{"type":"effort","values":["low"]}],"limit":{"context":1,"output":1},"status":"deprecated"}
-    }}
-  },
-  "models": {
-    "openai/gpt-4o": {"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}],
-      "limit":{"context":128000,"output":16384},"modalities":{"input":["text","image"]}},
-    "deepseek/deepseek-v4-flash": {"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","high"]}],
-      "limit":{"context":1000000,"output":384000}},
-    "zhipuai/glm-5.3": {"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","high","max"]}],
-      "limit":{"context":1000000,"output":128000}},
-    "alpha/dup": {"reasoning":true,"reasoning_options":[{"type":"effort","values":["low"]}],"limit":{"context":11,"output":1}},
-    "beta/dup": {"reasoning":true,"reasoning_options":[{"type":"effort","values":["high"]}],"limit":{"context":22,"output":2}}
-  }
+// shippedCatalogFixture is the shipped models.json shape: one flat table keyed
+// "provider/model", each entry carrying capability fields, reasoning_options
+// (absent, empty, toggle-only or effort levels) and an optional status.
+const shippedCatalogFixture = `{
+	"opencode-go/step-5-preview": {"id":"opencode-go/step-5-preview","reasoning":true,
+		"reasoning_options":[{"type":"effort","values":["low","medium","high"]}],
+		"limit":{"context":1000,"output":100},"attachment":true},
+	"opencode-go/longcat-2.0": {"id":"opencode-go/longcat-2.0","reasoning":true,
+		"reasoning_options":[{"type":"toggle"}],"limit":{"context":200,"output":20}},
+	"openai/plain-model": {"id":"openai/plain-model","limit":{"context":4096}},
+	"openai/gpt-4o": {"id":"openai/gpt-4o","reasoning":true,"attachment":true,
+		"reasoning_options":[{"type":"effort","values":["low","medium","high"]}],
+		"limit":{"context":128000,"output":16384}},
+	"deepseek/deepseek-v4-flash": {"id":"deepseek/deepseek-v4-flash","reasoning":true,
+		"reasoning_options":[{"type":"effort","values":["low","high"]}],
+		"limit":{"context":1000000,"output":384000}},
+	"deepseek/deepseek-v4-flash-0731": {"id":"deepseek/deepseek-v4-flash-0731","reasoning":true,
+		"reasoning_options":[{"type":"effort","values":["low"]}],"limit":{"context":1,"output":1},
+		"status":"deprecated"},
+	"zhipuai/glm-5.3": {"id":"zhipuai/glm-5.3","reasoning":true,
+		"reasoning_options":[{"type":"effort","values":["low","high","max"]}],
+		"limit":{"context":1000000,"output":128000}},
+	"alpha/dup": {"id":"alpha/dup","reasoning":true,
+		"reasoning_options":[{"type":"effort","values":["low"]}],"limit":{"context":11,"output":1}},
+	"beta/dup": {"id":"beta/dup","reasoning":true,
+		"reasoning_options":[{"type":"effort","values":["high"]}],"limit":{"context":22,"output":2}}
 }`
 
-// newModelsDevServer serves the fixture and counts its hits, so the cache tests
-// can prove a second resolve does not go back to the network.
-func newModelsDevServer(t *testing.T) (*httptest.Server, *int64) {
+// installShippedCatalog makes the fixture the catalog this build answers from,
+// the way startup does, and restores the global state afterwards.
+func installShippedCatalog(t *testing.T) {
 	t.Helper()
-	var hits int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/catalog.json" || r.URL.Query().Get("type") != "all" {
-			t.Errorf("unexpected catalog request %s", r.URL.String())
-		}
-		atomic.AddInt64(&hits, 1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(devCatalogFixture))
-	}))
-	t.Cleanup(server.Close)
-	return server, &hits
-}
-
-func TestModelsDevSourceResolvesOpenCodeModels(t *testing.T) {
-	server, _ := newModelsDevServer(t)
-	source := &ModelsDevSource{BaseURL: server.URL + "/catalog.json?type=all"}
-	if !source.Applies(Row{Provider: "opencode-go", Model: "step-5-preview"}, "opencode-go") {
-		t.Fatal("models.dev must apply to every row")
-	}
-	info, err := source.Fetch(context.Background(), Row{Provider: "opencode-go", Model: "step-5-preview"}, "")
+	cat, err := llm.Parse([]byte(shippedCatalogFixture))
 	if err != nil {
-		t.Fatalf("fetch: %v", err)
+		t.Fatalf("parse shipped catalog fixture: %v", err)
 	}
-	if !reflect.DeepEqual(info.Efforts, []string{"low", "medium", "high"}) {
-		t.Fatalf("efforts = %v", info.Efforts)
-	}
-	if info.ContextWindow != 1000 || info.MaxOutput != 100 || info.Origin != "models.dev" {
-		t.Fatalf("info = %+v", info)
-	}
-	if info.Images == nil || !*info.Images {
-		t.Fatalf("images = %v, want true", info.Images)
-	}
-	// A toggle option names no levels: the row resolves with an empty list,
-	// which is what makes a surface offer the checkboxes.
-	toggle, err := source.Fetch(context.Background(), Row{Provider: "opencode-go", Model: "longcat-2.0"}, "")
-	if err != nil {
-		t.Fatalf("toggle fetch: %v", err)
-	}
-	if len(toggle.Efforts) != 0 {
-		t.Fatalf("a toggle model must carry no levels, got %v", toggle.Efforts)
-	}
-}
-
-func TestModelsDevSourceBuiltinVendorAndDeprecated(t *testing.T) {
-	server, _ := newModelsDevServer(t)
-	source := &ModelsDevSource{BaseURL: server.URL + "/catalog.json?type=all"}
-	info, err := source.Fetch(context.Background(), Row{Provider: "deepseek", Model: "deepseek-v4-flash"}, "")
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	if !reflect.DeepEqual(info.Efforts, []string{"low", "high"}) || info.ContextWindow != 1000000 {
-		t.Fatalf("info = %+v", info)
-	}
-	// A retired entry is not a source of truth for levels any more.
-	if _, err := source.Fetch(context.Background(), Row{Provider: "deepseek", Model: "deepseek-v4-flash-0731"}, ""); !errors.Is(err, ErrNotListed) {
-		t.Fatalf("deprecated entry err = %v, want ErrNotListed", err)
-	}
-	if _, err := source.Fetch(context.Background(), Row{Provider: "deepseek", Model: "no-such-model"}, ""); !errors.Is(err, ErrNotListed) {
-		t.Fatalf("unknown model err = %v, want ErrNotListed", err)
-	}
-	// A provider models.dev has no entry for (meituan, tencent, byteplus —
-	// measured NOT FOUND 2026-11-07) asks the user for the levels.
-	if _, err := source.Fetch(context.Background(), Row{Provider: "meituan", Model: "LongCat-2.5"}, ""); !errors.Is(err, ErrNotListed) {
-		t.Fatalf("meituan err = %v, want ErrNotListed", err)
-	}
-}
-
-func TestModelsDevSourceCustomLookups(t *testing.T) {
-	server, _ := newModelsDevServer(t)
-	source := &ModelsDevSource{BaseURL: server.URL + "/catalog.json?type=all"}
-	// A vendor prefix the user typed is the flat table's key.
-	prefixed, err := source.Fetch(context.Background(), Row{Provider: "custom", Model: "openai/gpt-4o"}, "")
-	if err != nil {
-		t.Fatalf("prefixed fetch: %v", err)
-	}
-	if !reflect.DeepEqual(prefixed.Efforts, []string{"low", "medium", "high"}) || prefixed.ContextWindow != 128000 {
-		t.Fatalf("prefixed info = %+v", prefixed)
-	}
-	// No prefix: matched by the key's last segment.
-	bare, err := source.Fetch(context.Background(), Row{Provider: "custom", Model: "glm-5.3"}, "")
-	if err != nil {
-		t.Fatalf("bare fetch: %v", err)
-	}
-	if !reflect.DeepEqual(bare.Efforts, []string{"low", "high", "max"}) {
-		t.Fatalf("bare info = %+v", bare)
-	}
-	// Several matches: the first key in sorted order wins, so the answer is
-	// stable from run to run.
-	dup, err := source.Fetch(context.Background(), Row{Provider: "custom", Model: "dup"}, "")
-	if err != nil {
-		t.Fatalf("dup fetch: %v", err)
-	}
-	if !reflect.DeepEqual(dup.Efforts, []string{"low"}) || dup.ContextWindow != 11 {
-		t.Fatalf("dup resolved to the wrong entry: %+v", dup)
-	}
-	if _, err := source.Fetch(context.Background(), Row{Provider: "custom", Model: "nothing-here"}, ""); !errors.Is(err, ErrNotListed) {
-		t.Fatalf("unprefixed unknown err = %v, want ErrNotListed", err)
-	}
-}
-
-func TestModelsDevSourceCacheTTL(t *testing.T) {
-	server, hits := newModelsDevServer(t)
-	clock := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
-	source := &ModelsDevSource{
-		BaseURL: server.URL + "/catalog.json?type=all",
-		TTL:     2 * time.Hour,
-		Now:     func() time.Time { return clock },
-	}
-	row := Row{Provider: "opencode-go", Model: "step-5-preview"}
-	for i := 0; i < 3; i++ {
-		if _, err := source.Fetch(context.Background(), row, ""); err != nil {
-			t.Fatalf("fetch %d: %v", i, err)
-		}
-	}
-	if got := atomic.LoadInt64(hits); got != 1 {
-		t.Fatalf("catalog requests = %d, want 1 inside the TTL", got)
-	}
-	clock = clock.Add(2*time.Hour + time.Minute)
-	if _, err := source.Fetch(context.Background(), row, ""); err != nil {
-		t.Fatalf("fetch after TTL: %v", err)
-	}
-	if got := atomic.LoadInt64(hits); got != 2 {
-		t.Fatalf("catalog requests = %d, want a refetch after the TTL", got)
-	}
-}
-
-func TestModelsDevSourceRejectsAnUnrelatedResponse(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"unexpected":"shape"}`))
-	}))
-	defer server.Close()
-	source := &ModelsDevSource{BaseURL: server.URL}
-	if _, err := source.Fetch(context.Background(), Row{Provider: "opencode-go", Model: "step-5-preview"}, ""); err == nil {
-		t.Fatal("a response with neither table must be an error, not an empty answer")
-	}
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() {
+		llm.SetGlobalCatalogForTest(nil)
+		llm.SetModelOverrides(nil)
+	})
 }
 
 func TestArkSourceResolvesPlanModels(t *testing.T) {
@@ -287,27 +157,151 @@ func TestChatGPTSourceResolvesTheAccountList(t *testing.T) {
 	}
 }
 
-// TestResolverFallsBackToModelsDev pins the precedence chain: the subscription
-// API that owns the row is asked first, and its failure resolves through
-// models.dev rather than ending the answer.
-func TestResolverFallsBackToModelsDev(t *testing.T) {
-	server, hits := newModelsDevServer(t)
-	dev := &ModelsDevSource{BaseURL: server.URL + "/catalog.json?type=all"}
-	failing := ChatGPTSource{List: func(ctx context.Context) ([]openai.ModelInfo, error) {
-		return nil, fmt.Errorf("backend down")
-	}}
-	resolver := &Resolver{Sources: []Source{failing, dev}}
-	info, err := resolver.Resolve(context.Background(), Row{Provider: "chatgpt", Model: "gpt-5.6-codex"}, "", "")
-	if err == nil {
-		// models.dev does not list this model in the fixture.
-		t.Fatalf("a row neither source lists must not resolve: %+v", info)
+// TestModelsDevSourceReadsTheShippedCatalog is the point of the change: the
+// general source answers from the catalog beside the binary, offline, with no
+// request and no cache of its own to go stale.
+func TestModelsDevSourceReadsTheShippedCatalog(t *testing.T) {
+	installShippedCatalog(t)
+	source := ModelsDevSource{}
+	if !source.Applies(Row{Provider: "opencode-go", Model: "step-5-preview"}, "opencode-go") {
+		t.Fatal("the general source must apply to every row")
 	}
-	if atomic.LoadInt64(hits) == 0 {
-		t.Fatal("the fall-back source was never asked")
+	info, err := source.Fetch(context.Background(), Row{Provider: "opencode-go", Model: "step-5-preview"}, "")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
 	}
-	// A row models.dev does list resolves with its origin, even after the
-	// subscription source failed.
-	model, err := resolver.Resolve(context.Background(), Row{Provider: "opencode-go", Model: "step-5-preview"}, "", "")
+	if !reflect.DeepEqual(info.Efforts, []string{"low", "medium", "high"}) {
+		t.Fatalf("efforts = %v", info.Efforts)
+	}
+	if info.ContextWindow != 1000 || info.MaxOutput != 100 || info.Origin != "models.dev" {
+		t.Fatalf("info = %+v", info)
+	}
+	if info.Images == nil || !*info.Images {
+		t.Fatalf("images = %v, want true", info.Images)
+	}
+}
+
+// A model the catalog has retired is not a source of truth for levels any more
+// — the same answer the upstream document's status gives.
+func TestModelsDevSourceSkipsDeprecated(t *testing.T) {
+	installShippedCatalog(t)
+	source := ModelsDevSource{}
+	if _, err := source.Fetch(context.Background(), Row{Provider: "deepseek", Model: "deepseek-v4-flash-0731"}, ""); !errors.Is(err, ErrNotListed) {
+		t.Fatalf("deprecated entry err = %v, want ErrNotListed", err)
+	}
+}
+
+// A row that reasons with nothing discrete — a toggle, or an entry with no
+// reasoning_options at all — is a successful answer with no levels: the surface
+// then offers the checkboxes. It is not a failure.
+func TestModelsDevSourceListedWithoutLevelsStillAnswers(t *testing.T) {
+	installShippedCatalog(t)
+	source := ModelsDevSource{}
+	toggle, err := source.Fetch(context.Background(), Row{Provider: "opencode-go", Model: "longcat-2.0"}, "")
+	if err != nil {
+		t.Fatalf("toggle fetch: %v", err)
+	}
+	if len(toggle.Efforts) != 0 || toggle.ContextWindow != 200 {
+		t.Fatalf("toggle info = %+v", toggle)
+	}
+	plain, err := source.Fetch(context.Background(), Row{Provider: "openai", Model: "plain-model"}, "")
+	if err != nil {
+		t.Fatalf("plain fetch: %v", err)
+	}
+	if len(plain.Efforts) != 0 || plain.ContextWindow != 4096 {
+		t.Fatalf("plain info = %+v", plain)
+	}
+}
+
+// A model the catalog does not carry is an answer too: ErrNotListed, which the
+// resolver treats as "the user picks the levels", never as a failure.
+func TestModelsDevSourceNotListedIsAnAnswer(t *testing.T) {
+	installShippedCatalog(t)
+	source := ModelsDevSource{}
+	if _, err := source.Fetch(context.Background(), Row{Provider: "deepseek", Model: "no-such-model"}, ""); !errors.Is(err, ErrNotListed) {
+		t.Fatalf("unknown model err = %v, want ErrNotListed", err)
+	}
+	// A provider the catalog has no rows for (meituan is one) asks the user
+	// rather than inventing levels.
+	if _, err := source.Fetch(context.Background(), Row{Provider: "meituan", Model: "LongCat-2.5"}, ""); !errors.Is(err, ErrNotListed) {
+		t.Fatalf("meituan err = %v, want ErrNotListed", err)
+	}
+}
+
+// TestModelsDevSourceIgnoresRowOverrides pins the layer split: the default
+// answer reads LookupCatalog, so the row being edited never becomes part of
+// what its own form calls "official" (plan 265).
+func TestModelsDevSourceIgnoresRowOverrides(t *testing.T) {
+	installShippedCatalog(t)
+	no := false
+	window := int64(64000)
+	llm.SetModelOverrides(map[string]llm.ModelOverride{
+		"openai/gpt-4o": {SupportsImages: &no, ContextWindow: &window, Efforts: []string{"high"}},
+	})
+	source := ModelsDevSource{}
+	info, err := source.Fetch(context.Background(), Row{Provider: "openai", Model: "gpt-4o"}, "")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if !reflect.DeepEqual(info.Efforts, []string{"low", "medium", "high"}) {
+		t.Fatalf("efforts = %v, want the catalog's levels", info.Efforts)
+	}
+	if info.ContextWindow != 128000 || info.Images == nil || !*info.Images {
+		t.Fatalf("info = %+v, want the catalog's defaults", info)
+	}
+}
+
+// Custom rows are named the way a user types them. A vendor-prefixed name is
+// its key; a bare name falls through to the suffix match, and several matches
+// resolve to the first in sorted order so the answer is stable run to run.
+func TestModelsDevSourceCustomLookups(t *testing.T) {
+	installShippedCatalog(t)
+	source := ModelsDevSource{}
+	prefixed, err := source.Fetch(context.Background(), Row{Provider: "custom", Model: "openai/gpt-4o"}, "")
+	if err != nil {
+		t.Fatalf("prefixed fetch: %v", err)
+	}
+	if !reflect.DeepEqual(prefixed.Efforts, []string{"low", "medium", "high"}) || prefixed.ContextWindow != 128000 {
+		t.Fatalf("prefixed info = %+v", prefixed)
+	}
+	bare, err := source.Fetch(context.Background(), Row{Provider: "custom", Model: "glm-5.3"}, "")
+	if err != nil {
+		t.Fatalf("bare fetch: %v", err)
+	}
+	if !reflect.DeepEqual(bare.Efforts, []string{"low", "high", "max"}) {
+		t.Fatalf("bare info = %+v", bare)
+	}
+	dup, err := source.Fetch(context.Background(), Row{Provider: "custom", Model: "dup"}, "")
+	if err != nil {
+		t.Fatalf("dup fetch: %v", err)
+	}
+	if !reflect.DeepEqual(dup.Efforts, []string{"low"}) || dup.ContextWindow != 11 {
+		t.Fatalf("dup resolved to the wrong entry: %+v", dup)
+	}
+	if _, err := source.Fetch(context.Background(), Row{Provider: "custom", Model: "nothing-here"}, ""); !errors.Is(err, ErrNotListed) {
+		t.Fatalf("unprefixed unknown err = %v, want ErrNotListed", err)
+	}
+}
+
+// brokenSource is a Source that applies to every row and always fails, the
+// way an unreachable subscription API behaves.
+type brokenSource struct{ err error }
+
+func (s brokenSource) Applies(Row, string) bool { return true }
+func (s brokenSource) Fetch(context.Context, Row, string) (Info, error) {
+	return Info{}, s.err
+}
+
+// TestResolverFallsBackToTheCatalog pins the precedence chain: the source that
+// owns the row is asked first, and its failure resolves through the shipped
+// catalog rather than ending the answer.
+func TestResolverFallsBackToTheCatalog(t *testing.T) {
+	installShippedCatalog(t)
+	resolver := &Resolver{Sources: []Source{brokenSource{err: fmt.Errorf("backend down")}, ModelsDevSource{}}}
+	if _, err := resolver.Resolve(context.Background(), Row{Provider: "openai", Model: "no-such-model"}, "", ""); err == nil {
+		t.Fatal("a row neither source lists must not resolve")
+	}
+	model, err := resolver.Resolve(context.Background(), Row{Provider: "openai", Model: "gpt-4o"}, "", "")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -317,39 +311,36 @@ func TestResolverFallsBackToModelsDev(t *testing.T) {
 }
 
 // TestResolverPrefersTheOwningSubscription pins the other half: a row a
-// subscription owns is answered by it, and the general source is not consulted.
+// subscription owns is answered by it, and the catalog is not consulted.
 func TestResolverPrefersTheOwningSubscription(t *testing.T) {
-	server, hits := newModelsDevServer(t)
+	installShippedCatalog(t)
 	owning := ChatGPTSource{List: func(ctx context.Context) ([]openai.ModelInfo, error) {
-		return []openai.ModelInfo{{Slug: "gpt-5.6-codex",
+		return []openai.ModelInfo{{Slug: "gpt-4o",
 			SupportedReasoningEfforts: []openai.ReasoningEffortPreset{{Effort: "high"}}}}, nil
 	}}
-	resolver := &Resolver{Sources: []Source{owning, &ModelsDevSource{BaseURL: server.URL + "/catalog.json?type=all"}}}
-	info, err := resolver.Resolve(context.Background(), Row{Provider: "chatgpt", Model: "gpt-5.6-codex"}, "", "")
+	resolver := &Resolver{Sources: []Source{owning, ModelsDevSource{}}}
+	info, err := resolver.Resolve(context.Background(), Row{Provider: "chatgpt", Model: "gpt-4o"}, "", "")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	if info.Origin != "chatgpt-api" || !reflect.DeepEqual(info.Efforts, []string{"high"}) {
 		t.Fatalf("info = %+v", info)
 	}
-	if got := atomic.LoadInt64(hits); got != 0 {
-		t.Fatalf("models.dev was asked %d times for a subscription row", got)
-	}
 }
 
 // TestResolverTimesOutOneSource pins the per-source bound: a source that never
-// answers cannot hold the chain, and the fall-back still resolves.
+// answers cannot hold the chain, and the offline fall-back still resolves.
 func TestResolverTimesOutOneSource(t *testing.T) {
-	server, _ := newModelsDevServer(t)
+	installShippedCatalog(t)
 	stuck := ChatGPTSource{List: func(ctx context.Context) ([]openai.ModelInfo, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}
 	resolver := &Resolver{
-		Sources: []Source{stuck, &ModelsDevSource{BaseURL: server.URL + "/catalog.json?type=all"}},
+		Sources: []Source{stuck, ModelsDevSource{}},
 		Timeout: 20 * time.Millisecond,
 	}
-	info, err := resolver.Resolve(context.Background(), Row{Provider: "opencode-go", Model: "step-5-preview"}, "", "")
+	info, err := resolver.Resolve(context.Background(), Row{Provider: "openai", Model: "gpt-4o"}, "", "")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

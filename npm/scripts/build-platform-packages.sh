@@ -217,6 +217,21 @@ build_target() {
 JSON
 }
 
+# The model catalog is regenerated from the local models.dev snapshot when the
+# developer has one (assets/catalog.json, gitignored): that snapshot is the only
+# refresh path there is, and a package build is the moment the shipped data has
+# to match it. A checkout without the snapshot — CI and the release matrix —
+# skips the step and ships the committed assets/models.json unchanged.
+if [ -f "$ROOT_DIR/assets/catalog.json" ]; then
+  echo "==> regenerating the model catalog from assets/catalog.json"
+  "$ROOT_DIR/scripts/merge-catalog-into-models.sh" "$ROOT_DIR/assets/catalog.json" || {
+    echo "model catalog regeneration failed; fix the snapshot, or remove assets/catalog.json to ship the committed models.json" >&2
+    exit 1
+  }
+else
+  echo "==> no models.dev snapshot (assets/catalog.json); shipping the committed assets/models.json"
+fi
+
 for target in $TARGETS; do
   build_target "$target"
 done

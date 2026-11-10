@@ -75,7 +75,7 @@ func SurfaceTurnContentParts(userText string, displayText string, attachments []
 		if path == "" {
 			continue
 		}
-		image, imageErr := AttachmentImageParts(path)
+		image, imageErr := AttachmentImageParts(path, text)
 		if imageErr != nil {
 			// Self-heal instead of failing the turn: the model is told which
 			// image could not be sent and why — the same sentence the replay of
@@ -99,17 +99,20 @@ func SurfaceTurnContentParts(userText string, displayText string, attachments []
 }
 
 // AttachmentImageParts is what one image attachment sends the model: the image,
-// then the line naming its file (llm.ImageSourceNote), so the model can open
-// the file itself when the picture as sent is too small to read. Every path
-// that turns a terminal attachment into model input — the turn, a steer, a
-// message to a subagent — goes through here, and run's rehydration writes the
-// same line from the same path, so a message and its replay carry the same
-// text.
-func AttachmentImageParts(path string) ([]llm.ContentPart, error) {
+// then — unless text already names that file — the line naming it
+// (llm.ImageSourceNote), so the model can open the file itself when the picture
+// as sent is too small to read. Every path that turns a terminal attachment
+// into model input — the turn, a steer, a message to a subagent — goes through
+// here, and run's rehydration writes the same line from the same path and under
+// the same rule, so a message and its replay carry the same text.
+func AttachmentImageParts(path, text string) ([]llm.ContentPart, error) {
 	path = strings.TrimSpace(path)
 	part, err := llm.ImageFile(path)
 	if err != nil {
 		return nil, err
+	}
+	if llm.ImageFileNamedInText(text, path) {
+		return []llm.ContentPart{part}, nil
 	}
 	return []llm.ContentPart{part, llm.Text(llm.ImageSourceNote(path))}, nil
 }

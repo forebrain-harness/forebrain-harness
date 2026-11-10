@@ -222,6 +222,10 @@ func (s *Server) handleRunQueuedInput(w http.ResponseWriter, r *http.Request) {
 // what runs next versus what returns to the composer — travels in the event,
 // so the client sends or takes back accordingly and nothing is dropped with
 // the run.
+//
+// A peer message the run never took is not the person's: it is not published,
+// and the gateway runs it itself as a detached peer turn once the ended run's
+// lock is gone (startReleasedPeerTurns).
 func (s *Server) finishRun(ctx context.Context, sessionID, runID string, status state.RunStatus) {
 	if s.RunRT != nil {
 		// A run the executor already settled is refused by the status rule
@@ -230,12 +234,14 @@ func (s *Server) finishRun(ctx context.Context, sessionID, runID string, status 
 		_ = s.RunRT.SetStatus(ctx, runID, status)
 	}
 	send, restore := s.runController().Release(runID, runBoundaryForStatus(status))
-	if len(send) > 0 || len(restore) > 0 {
+	personSend, peerSend := splitReleasedInputs(send)
+	personRestore, peerRestore := splitReleasedInputs(restore)
+	if len(personSend) > 0 || len(personRestore) > 0 {
 		payload := event.QueuedInputReleasedPayload{}
-		for _, in := range restore {
+		for _, in := range personRestore {
 			payload.Inputs = append(payload.Inputs, releasedInput(in))
 		}
-		for _, in := range send {
+		for _, in := range personSend {
 			payload.Next = append(payload.Next, releasedInput(in))
 		}
 		if err := s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventQueuedInputReleased, payload); err != nil {
@@ -244,6 +250,9 @@ func (s *Server) finishRun(ctx context.Context, sessionID, runID string, status 
 	}
 	s.stampRunEnd(ctx, runID)
 	s.runController().Finish(runID)
+	// The run's own lock is gone before the peer turns start: a new turn of
+	// the session is admitted by the same one-run rule the page's sends obey.
+	s.startReleasedPeerTurns(ctx, sessionID, append(peerSend, peerRestore...))
 	s.runStartedAt.Delete(runID)
 }
 
@@ -263,6 +272,60 @@ func runBoundaryForStatus(status state.RunStatus) run.Boundary {
 func releasedInput(in run.Input) event.ReleasedInput {
 	return event.ReleasedInput{Text: in.Text, Attachments: in.Attachments, MentionImages: in.MentionImages}
 }
+
+// splitReleasedInputs separates what the page still obeys — the person's own
+// messages — from what the gateway runs itself: another session wrote the rest,
+// so running it through the page would draw it as something the person typed.
+func splitReleasedInputs(inputs []run.Input) (person, peer []run.Input) {
+	for _, in := range inputs {
+		if state.IsPeerOrigin(in.Origin) {
+			peer = append(peer, in)
+			continue
+		}
+		person = append(person, in)
+	}
+	return person, peer
+}
+
+// startReleasedPeerTurns runs each peer message a finished run never took as a
+// detached turn of its own — the peer wake's own entry point, so the prompt row
+// is written with origin "peer" and every open page draws the letter it is.
+// A failure is logged: the sender was already answered as delivered.
+//
+// The follow-up lane releases one entry per boundary, so the engine's order is
+// preserved there; inside one released steer batch the person's merged turn is
+// published first (above) and these start after it.
+func (s *Server) startReleasedPeerTurns(ctx context.Context, sessionID string, inputs []run.Input) {
+	if len(inputs) == 0 {
+		return
+	}
+	// A server with no turn service (a test harness) cannot run one: reporting
+	// it here keeps a failure to start a turn from becoming a panic in the
+	// goroutine that would have run it.
+	if s.Core == nil {
+		slog.Error("peer message a finished run never took could not start its turn", "session_id", sessionID, "count", len(inputs), "err", errNoTurnService)
+		return
+	}
+	for _, in := range inputs {
+		text := strings.TrimSpace(in.Text)
+		if text == "" {
+			continue
+		}
+		if _, err := s.startDetachedTurn(detachedTurn{
+			SessionID:    sessionID,
+			Prompt:       in.Text,
+			Trigger:      "peer",
+			Origin:       turn.Origin{Surface: turn.SurfaceWebChat, ChannelID: "peer"},
+			Unattended:   true,
+			PromptOrigin: state.MessageOriginPeer,
+		}); err != nil {
+			slog.Error("peer message a finished run never took could not start its turn", "session_id", sessionID, "err", err)
+		}
+	}
+}
+
+// errNoTurnService reports a peer turn that had no engine behind it to start.
+var errNoTurnService = errors.New("gateway: no turn service to start a detached turn")
 
 // stampRunEnd gives a run that ends here its clock, so replay closes it with
 // the "Worked for" line the page closed it with. An ending that persisted its

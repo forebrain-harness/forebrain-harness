@@ -934,6 +934,12 @@ type RequestImage struct {
 	// PartsJSON is the message row's stored parts; the reviewer's side reads
 	// its images back through run.UserInputParts, the way history is read.
 	PartsJSON string
+	// Files is where each of this message's images is stored, in image
+	// order; the reviewer's side fills it as it reads the images back. The
+	// prompt names them in its <images> block, so the reviewer is sent each
+	// picture and, once, the file it is stored in. "" for an image whose
+	// file cannot be named.
+	Files []string
 }
 
 // PlanReviewResult is one completed review.
@@ -974,7 +980,7 @@ func BuildPrompt(req Request) string {
 		b.WriteString("The request is what the user said in this conversation, oldest first: their messages, their answers to questions they were asked, and their feedback on plans they sent back. ")
 		b.WriteString("The newest message is what this plan is for; an earlier one still holds unless a later one changed it.")
 		if len(req.Images) > 0 {
-			b.WriteString(" The images the user attached follow this text, each labelled with the number of the message that carried it and followed by the file it is stored in; they are part of the request. ")
+			b.WriteString(" The images the user attached follow this text, each labelled with the number of the message that carried it; the <images> block names the file each one is stored in. ")
 			b.WriteString("When an image is too small or dense to read as sent, open its file with your tools - crop or enlarge it with a script - rather than guessing what it shows.")
 		}
 		b.WriteString("\n\n")
@@ -982,6 +988,18 @@ func BuildPrompt(req Request) string {
 	b.WriteString("<request>\n")
 	b.WriteString(task)
 	b.WriteString("\n</request>\n\n")
+	// The file a picture is stored in travels in the text, once: the prompt is
+	// what the user reads and what the review's transcript keeps, and a line
+	// after each picture reaches neither.
+	if lines := imageFileLines(req.Images); len(lines) > 0 {
+		b.WriteString("<images>\n")
+		b.WriteString("Each line names one of the images the request attached and the file it is stored in.\n")
+		for _, line := range lines {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		b.WriteString("</images>\n\n")
+	}
 	plan := strings.TrimSpace(req.Plan)
 	excerpt, cut := planExcerpt(plan)
 	path := strings.TrimSpace(req.PlanPath)
@@ -1021,6 +1039,23 @@ func BuildPrompt(req Request) string {
 	b.WriteString("then check the plan against that understanding, the actual sources, and the handoff quality bar. ")
 	b.WriteString("Report your verdict, evidence-backed problems, and concrete corrections.")
 	return b.String()
+}
+
+// imageFileLines names where each image the request attached is stored, one
+// line per image, keyed by the label the picture itself is sent with ("Image 1
+// of message 2:") so the reviewer joins a picture to its file without
+// counting. An image whose file cannot be named adds no line.
+func imageFileLines(images []RequestImage) []string {
+	var lines []string
+	for _, image := range images {
+		for i, file := range image.Files {
+			if file = strings.TrimSpace(file); file == "" {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("Image %d of message %d: %s", i+1, image.Message, file))
+		}
+	}
+	return lines
 }
 
 // planExcerpt is the part of a plan the prompt copies in: all of it when it

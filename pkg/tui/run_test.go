@@ -6306,6 +6306,237 @@ func TestQueueSemantics_Q5_CompletedDrainsRejectedThenPendingThenFollowUps(t *te
 	}
 }
 
+// A peer message that lands in the queue while a run is parked is a turn of its
+// own, not a message the person typed: at the boundary it must be handed to the
+// loop's pending peer turns and run from there — never consumed and dropped —
+// and the person's follow-up queued behind it must still run.
+func TestPeerFollowUpRunsAfterCompletedTurnInsteadOfBeingDropped(t *testing.T) {
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	q := session.SurfaceInputQueue("s1")
+	envelope := `<cross-session-message from="uds:/tmp/x.sock" from-name="peer-a" from-mode="bypass"> please confirm </cross-session-message>`
+	prompt := process.PeerPrompt{
+		SessionID: "s1",
+		Text:      envelope,
+		Origin:    statepkg.MessageOriginPeer,
+		MsgID:     "msg-1",
+		FromName:  "peer-a",
+	}
+	if !q.FollowUp(runpkg.Input{
+		Text:    envelope,
+		Parts:   []llm.ContentPart{llm.Text(envelope)},
+		Origin:  statepkg.MessageOriginPeer,
+		Payload: prompt,
+	}) {
+		t.Fatal("peer follow-up was not queued")
+	}
+	session.enqueueFollowUp("s1", mustComposerSubmission("typed follow-up"))
+
+	next, ok := nextAutomaticSubmission(state, runTurnCompleted)
+	if ok {
+		t.Fatalf("a peer message was run as the person's next turn: %#v", next)
+	}
+	if len(state.peerDue) != 1 {
+		t.Fatalf("peer message was not parked for its own turn: %#v", state.peerDue)
+	}
+	if parked := state.peerDue[0]; parked.Text != envelope || parked.FromName != "peer-a" {
+		t.Fatalf("parked prompt lost what the sender wrote: %#v", parked)
+	}
+	if preview := q.Preview(); !reflect.DeepEqual(preview.FollowUp, []string{"typed follow-up"}) {
+		t.Fatalf("queue after the peer release: %#v", preview)
+	}
+	next, ok = nextAutomaticSubmission(state, runTurnCompleted)
+	if !ok || strings.TrimSpace(next.Text) != "typed follow-up" {
+		t.Fatalf("the follow-up behind the peer message did not run: ok=%v next=%#v", ok, next)
+	}
+
+	// A peer entry that carries only its origin still survives the boundary:
+	// the queue hands it back, the surface parks it with the words it holds.
+	if !q.FollowUp(runpkg.Input{Text: envelope, Parts: []llm.ContentPart{llm.Text(envelope)}, Origin: statepkg.MessageOriginPeer}) {
+		t.Fatal("payload-less peer follow-up was not queued")
+	}
+	if next, ok := nextAutomaticSubmission(state, runTurnCompleted); ok {
+		t.Fatalf("a payload-less peer message ran as the person's turn: %#v", next)
+	}
+	if len(state.peerDue) != 2 || state.peerDue[1].Text != envelope {
+		t.Fatalf("payload-less peer message was not parked: %#v", state.peerDue)
+	}
+}
+
+// Interrupting or cancelling a turn does not cancel the peer message it was
+// still carrying: the message runs as its own turn once the conversation is
+// idle, and nothing of it is restored into the composer as the person's draft.
+func TestPeerFollowUpsRunAfterInterruptedTurn(t *testing.T) {
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	envelope := `<cross-session-message from="uds:/tmp/x.sock" from-name="peer-a" from-mode="bypass"> please confirm </cross-session-message>`
+	prompt := process.PeerPrompt{
+		SessionID: "s1",
+		Text:      envelope,
+		Origin:    statepkg.MessageOriginPeer,
+		MsgID:     "msg-1",
+		FromName:  "peer-a",
+	}
+	if !session.SurfaceInputQueue("s1").FollowUp(runpkg.Input{
+		Text:    envelope,
+		Parts:   []llm.ContentPart{llm.Text(envelope)},
+		Origin:  statepkg.MessageOriginPeer,
+		Payload: prompt,
+	}) {
+		t.Fatal("peer follow-up was not queued")
+	}
+
+	next, ok := nextAutomaticSubmission(state, runTurnInterrupted)
+	if ok {
+		t.Fatalf("a peer message ran as the person's next turn: %#v", next)
+	}
+	if len(state.peerDue) != 1 || state.peerDue[0].Text != envelope {
+		t.Fatalf("peer message was not parked for its own turn: %#v", state.peerDue)
+	}
+	if strings.TrimSpace(state.composer.DraftText) != "" {
+		t.Fatalf("the peer message was restored into the composer: %q", state.composer.DraftText)
+	}
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("peer message was left in the queue as well: %#v", preview)
+	}
+}
+
+// Withdrawing a submitted message recovers the person's own work into the
+// composer as one editable draft, and parks the peer message it had queued
+// behind it as its own turn — a message another agent wrote is not the person's
+// draft, and it is not dropped either.
+func TestWithdrawnWorkParksPeerMessageInsteadOfDroppingIt(t *testing.T) {
+	session := &fakeSession{}
+	foreground := &foregroundTurn{submission: mustComposerSubmission("the withdrawn message")}
+	state := &streamState{sessionID: "s1", session: session, activeForeground: foreground}
+	foreground.withdraw()
+
+	envelope := `<cross-session-message from="uds:/tmp/x.sock" from-name="peer-a" from-mode="bypass"> please confirm </cross-session-message>`
+	prompt := process.PeerPrompt{
+		SessionID: "s1",
+		Text:      envelope,
+		Origin:    statepkg.MessageOriginPeer,
+		MsgID:     "msg-1",
+		FromName:  "peer-a",
+	}
+	if !session.SurfaceInputQueue("s1").FollowUp(runpkg.Input{
+		Text:    envelope,
+		Parts:   []llm.ContentPart{llm.Text(envelope)},
+		Origin:  statepkg.MessageOriginPeer,
+		Payload: prompt,
+	}) {
+		t.Fatal("peer follow-up was not queued")
+	}
+	session.enqueueFollowUp("s1", mustComposerSubmission("typed follow-up"))
+
+	state.restoreWithdrawnWork(session)
+
+	draft := state.composer.DraftText
+	for _, want := range []string{"the withdrawn message", "typed follow-up"} {
+		if !strings.Contains(draft, want) {
+			t.Fatalf("recovered draft %q lost the person's %q", draft, want)
+		}
+	}
+	if strings.Contains(draft, "<cross-session-message") {
+		t.Fatalf("a peer message was restored into the person's draft: %q", draft)
+	}
+	if len(state.peerDue) != 1 || state.peerDue[0].Text != envelope || state.peerDue[0].FromName != "peer-a" {
+		t.Fatalf("peer message was not parked for its own turn: %#v", state.peerDue)
+	}
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("work was left in the queues as well: %#v", preview)
+	}
+}
+
+// The recall key hands back the newest message the person wrote. A peer message
+// is not theirs to edit, so it stays queued for its own turn instead of being
+// recalled — and the section that advertises the key must not appear for it.
+func TestRecallSkipsPeerMessage(t *testing.T) {
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	q := session.SurfaceInputQueue("s1")
+	envelope := `<cross-session-message from="uds:/tmp/x.sock" from-name="peer-a" from-mode="bypass"> please confirm </cross-session-message>`
+	prompt := process.PeerPrompt{
+		SessionID: "s1",
+		Text:      envelope,
+		Origin:    statepkg.MessageOriginPeer,
+		MsgID:     "msg-1",
+		FromName:  "peer-a",
+	}
+	if !q.FollowUp(runpkg.Input{
+		Text:    envelope,
+		Parts:   []llm.ContentPart{llm.Text(envelope)},
+		Origin:  statepkg.MessageOriginPeer,
+		Payload: prompt,
+	}) {
+		t.Fatal("peer follow-up was not queued")
+	}
+	state.composer.DraftText = "the person's own draft"
+	state.composer.Cursor = len([]rune(state.composer.DraftText))
+
+	if state.restoreLatestQueuedEditableSubmission(session) {
+		t.Fatal("a peer message was recalled into the composer")
+	}
+	if state.composer.DraftText != "the person's own draft" {
+		t.Fatalf("recall rewrote the person's draft: %q", state.composer.DraftText)
+	}
+	if preview := q.Preview(); len(preview.FollowUp) != 1 || preview.FollowUp[0] != envelope {
+		t.Fatalf("recall did not leave the peer message queued: %#v", preview)
+	}
+
+	// The newest message the person wrote is the one recalled, even when a
+	// peer message was queued after it.
+	session.enqueueFollowUp("s1", mustComposerSubmission("typed answer"))
+	if !state.restoreLatestQueuedEditableSubmission(session) {
+		t.Fatal("the person's queued message was not recalled")
+	}
+	if state.composer.DraftText != "typed answer" {
+		t.Fatalf("recall restored %q, want the person's newest message", state.composer.DraftText)
+	}
+	if preview := q.Preview(); len(preview.FollowUp) != 1 || preview.FollowUp[0] != envelope {
+		t.Fatalf("recall disturbed the peer message: %#v", preview)
+	}
+	if state.restoreLatestQueuedEditableSubmission(session) {
+		t.Fatal("recall returned the same peer message again")
+	}
+}
+
+// The recall hint documents a key that only works on the person's own
+// messages: it is shown while one of theirs is queued, and gone when the
+// section lists only a peer message — which stays queued for its own turn.
+func TestRecallHintShowsOnlyForThePersonsQueuedMessages(t *testing.T) {
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	q := session.SurfaceInputQueue("s1")
+	envelope := `<cross-session-message from="uds:/tmp/x.sock" from-name="peer-a" from-mode="bypass"> please confirm </cross-session-message>`
+	if !q.FollowUp(runpkg.Input{Text: envelope, Parts: []llm.ContentPart{llm.Text(envelope)}, Origin: statepkg.MessageOriginPeer}) {
+		t.Fatal("peer follow-up was not queued")
+	}
+
+	rendered := func() string {
+		var lines []string
+		for _, line := range formatComposerPendingInputPreview(state.composerPendingInputPreview(), 120) {
+			lines = append(lines, strings.ReplaceAll(stripANSI(line), "\x1b[K", ""))
+		}
+		return strings.Join(lines, "\n")
+	}
+	got := rendered()
+	if !strings.Contains(got, "please confirm") {
+		t.Fatalf("the queued peer message was not shown above the composer:\n%s", got)
+	}
+	if strings.Contains(got, envelope) || strings.Contains(got, "<cross-session-message") {
+		t.Fatalf("the preview drew the envelope itself, not the sender's words:\n%s", got)
+	}
+	if strings.Contains(got, "⇧+←") {
+		t.Fatalf("a peer-only queue advertises a recall it cannot honour:\n%s", got)
+	}
+
+	session.enqueueFollowUp("s1", mustComposerSubmission("typed follow-up"))
+	if got := rendered(); !strings.Contains(got, "⇧+← recall last queued") {
+		t.Fatalf("the person's queued message must advertise recall:\n%s", got)
+	}
+}
+
 // Q11: the queue preview shows each queue's composer display text, keeping
 // the "[Image #N]" and "[Pasted Content N chars]" placeholders the composer
 // resolves on send.

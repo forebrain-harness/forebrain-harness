@@ -1,8 +1,10 @@
 package tui
 
-// plan_drawer.go is the read-only todo drawer the composer's ☑N/M plan-progress
-// token opens. It is deliberately small: one split of the history region into a
-// narrower transcript plus a right-hand column, one pure layout over the plan
+// plan_drawer.go is the read-only todo drawer a run's ☑N/M plan-progress token
+// opens: the composer's live Working line while the run is moving, and the
+// transcript row that closes the run ("Worked for …") once it is over. It is
+// deliberately small: one split of the history region into a narrower
+// transcript plus a right-hand column, one pure layout over the plan
 // frame the transcript already holds, and the renderer-side state that makes a
 // click, a wheel notch and a hover resolve against the screen that was painted.
 //
@@ -615,6 +617,7 @@ func (r *Renderer) closePlanDrawerLocked() bool {
 func (r *Renderer) repaintAfterDrawerToggleLocked(anchor planDrawerHistoryAnchor) {
 	r.vpControlHover = hoverTargetNone
 	r.vpHoverRow = -1
+	r.vpHoverProgress = planDrawerHoverToken{}
 	r.paintViewportLocked()
 	if r.restoreHistoryAnchorLocked(anchor) {
 		r.paintViewportLocked()
@@ -821,7 +824,8 @@ func (r *Renderer) scrollPlanDrawerLocked(delta int) bool {
 }
 
 // planDrawerClickLocked resolves one plain click against the screen s, in the
-// order the contract fixes: the progress token toggles the drawer, the close
+// order the contract fixes: either progress token — the composer's Working line
+// or a run-closing transcript row — toggles the drawer, the close
 // control closes it, and a click inside it is consumed. A click outside it is
 // not the drawer's at all: the drawer covers only the right column, so the
 // history and the composer on its left stay live — clicking a card folds it,
@@ -848,7 +852,7 @@ func (r *Renderer) planDrawerClickLocked(s shownScreen, col, row int) (handled, 
 // planDrawerConsumeClickLocked is planDrawerClickLocked without the click
 // sequence bookkeeping. Caller holds r.mu.
 func (r *Renderer) planDrawerConsumeClickLocked(s shownScreen, col, row int) (handled, changed bool) {
-	if s.progress.contains(col, row) {
+	if _, ok := s.historyProgressSpan(col, row); ok || s.progress.contains(col, row) {
 		return true, r.togglePlanDrawerLocked()
 	}
 	if !s.drawerOpen {
@@ -872,21 +876,49 @@ func (r *Renderer) planDrawerConsumeClickLocked(s shownScreen, col, row int) (ha
 // control instead of starting a text selection, exactly as the jump control
 // does. Caller holds r.mu.
 func (r *Renderer) planDrawerPressLocked(s shownScreen, col, row int) bool {
-	if s.progress.contains(col, row) || s.drawerClose.contains(col, row) {
+	if _, onHistory := s.historyProgressSpan(col, row); onHistory || s.progress.contains(col, row) || s.drawerClose.contains(col, row) {
 		return true
 	}
 	return s.drawerOpen && col >= s.drawerLeft && row < s.bodyHeight
 }
 
+// planDrawerHoverToken names one transcript ☑N/M token across repaints: the
+// view it belongs to and its absolute transcript row. A "Worked for" line is a
+// single row, so the row is the token.
+type planDrawerHoverToken struct {
+	found bool
+	view  string
+	row   int
+}
+
+func (t planDrawerHoverToken) on(view string, absRow int) bool {
+	return t.found && t.view == view && t.row == absRow
+}
+
 // planDrawerHoverTarget identifies the local control under a screen cell of s.
 func planDrawerHoverTarget(s shownScreen, col, row int) int {
-	switch {
-	case s.progress.contains(col, row):
+	if s.progress.contains(col, row) {
 		return hoverTargetProgress
-	case s.drawerClose.contains(col, row):
+	}
+	if _, ok := s.historyProgressSpan(col, row); ok {
+		return hoverTargetProgress
+	}
+	if s.drawerClose.contains(col, row) {
 		return hoverTargetClose
 	}
 	return hoverTargetNone
+}
+
+// historyProgressSpan reports the run-closing ☑N/M token drawn at this cell of
+// s, in screen cells. ok is false on every other cell, including the composer's
+// own token (s.progress) and the drawer's close control (s.drawerClose).
+func (s shownScreen) historyProgressSpan(col, row int) (screenSpan, bool) {
+	for _, span := range s.historyProgress {
+		if span.contains(col, row) {
+			return span, true
+		}
+	}
+	return screenSpan{row: -1}, false
 }
 
 // planProgressToken locates the ☑N/M token in a rendered composer status line's
@@ -920,4 +952,28 @@ func planProgressToken(text string) (startCol, endCol int, ok bool) {
 	}
 	startCol = runewidth.StringWidth(text[:idx])
 	return startCol, startCol + runewidth.StringWidth(tail[:end]), true
+}
+
+// workedForTokenSpan reports the cells a run-closing "Worked for" row drew its
+// ☑N/M token on. It is the drawer's transcript entry, and only the token is:
+// the row's other cells keep their ordinary click meaning, and a token the
+// row's width cut in half was never on screen.
+func workedForTokenSpan(vr viewportRender, vm *viewModel, row int, painted string) (screenSpan, bool) {
+	if vm == nil {
+		return screenSpan{row: -1}, false
+	}
+	blockID, _ := vr.blockAtRow(row)
+	if blockID < 0 {
+		return screenSpan{row: -1}, false
+	}
+	b := vm.blockByID(blockID)
+	if b == nil || b.frame.Kind != FrameStatus ||
+		!strings.HasPrefix(strings.TrimSpace(b.frame.Title), workedForPrefix) {
+		return screenSpan{row: -1}, false
+	}
+	start, end, ok := planProgressToken(stripAnsi(painted))
+	if !ok {
+		return screenSpan{row: -1}, false
+	}
+	return screenSpan{row: row, startCol: start, endCol: end}, true
 }

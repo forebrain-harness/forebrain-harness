@@ -24,8 +24,8 @@
 //
 // # Why the model table is in this package
 //
-// pkg/llm/catalog.go never overwrites an installed models.json, so adding
-// opencode entries there would be invisible on every machine that already has
-// one. The static metadata therefore lives in this package (like the ChatGPT
-// provider's does), and the live /v1/models endpoint supplies the ids.
+// The catalogs arrive with the account login: models.json is reference data
+// regenerated offline, not a live list of what this account may call. The static
+// metadata therefore lives in this package (like the ChatGPT provider's does),
+// and the live /v1/models endpoint supplies the ids.
 package opencode

@@ -1936,11 +1936,15 @@ func shortestActiveTaskTitle(items []event.PlanUpdateItem, fallback string) stri
 	return event.PlanProgressOf(items, 0, 0, fallback).Active
 }
 
+// workedForPrefix opens the line that closes a run — live, replayed and in a
+// subagent's own view. The plan drawer's transcript entry is recognised by it.
+const workedForPrefix = "Worked for "
+
 // workedForLabel renders a finished run's duration. The renderer paints a
 // status whose title starts with it as a full-width rule, which is what closes
 // a transcript.
 func workedForLabel(elapsed time.Duration) string {
-	return "Worked for " + formatElapsedDuration(elapsed)
+	return workedForPrefix + formatElapsedDuration(elapsed)
 }
 
 // firstTokenLabel renders how long a run waited for the model's first output,
@@ -4985,6 +4989,7 @@ func (r *Renderer) paintViewportLocked() {
 	// Composing first is what lets the write below address only the rows whose
 	// bytes actually changed, leaving every unchanged row untouched.
 	rows := make([]string, bodyHeight+composerHeight)
+	var historyProgress []screenSpan
 	for row := 0; row < bodyHeight; row++ {
 		if row >= len(vr.lines) {
 			if drawerOpen {
@@ -4996,6 +5001,17 @@ func (r *Renderer) paintViewportLocked() {
 			continue
 		}
 		line := canvasRow(vr.lines[row], rowWidth)
+		// A run-closing "Worked for" row's ☑N/M is the drawer's transcript
+		// entry. Measured on the row as it will be drawn (after the width cut),
+		// so the hot zone is exactly the token on screen; a row with no ☑ pays
+		// one substring check and nothing else.
+		token := screenSpan{row: -1}
+		if strings.Contains(line, "☑") {
+			if span, ok := workedForTokenSpan(vr, activeVM, row, line); ok {
+				token = span
+				historyProgress = append(historyProgress, span)
+			}
+		}
 		// Selection anchors are in absolute transcript-row space; map this
 		// screen row to its absolute row to test membership.
 		absRow := vr.firstRow + row
@@ -5023,6 +5039,12 @@ func (r *Renderer) paintViewportLocked() {
 		} else if r.vpHoverRow == row && vr.isClickableRow(row, activeVM) {
 			line = applyHoverHighlight(line, rowWidth, hoverBgSeq)
 		}
+		if token.row >= 0 && r.vpControlHover == hoverTargetProgress &&
+			r.vpHoverProgress.on(r.activeView, absRow) {
+			// Only the token's own cells take the hover background, the same
+			// layer the composer's token uses.
+			line = highlightCells(line, token.startCol, token.endCol, hoverBgSeq)
+		}
 		if drawerOpen {
 			// The hover background covers the history region only, and the
 			// drawer's own cells follow it, so a hover can never bleed across
@@ -5031,6 +5053,9 @@ func (r *Renderer) paintViewportLocked() {
 		}
 		rows[row] = line
 	}
+	// The paint's own slice, not the previous one scrubbed in place: a kept
+	// screen still answers events against the tokens it drew.
+	r.vpHistoryProgress = historyProgress
 	// When the user has scrolled away from the newest transcript rows, float a
 	// compact clickable control over the last body row. It intentionally does
 	// not consume layout height, so showing it cannot move the transcript or the
@@ -6384,11 +6409,16 @@ func (r *Renderer) viewportHoverAt(col, row int, at time.Time) {
 			hoverRow = row
 		}
 	}
-	if target == r.vpControlHover && hoverRow == r.vpHoverRow {
+	hoverToken := planDrawerHoverToken{}
+	if span, ok := s.historyProgressSpan(col, row); ok && s.view == r.activeView {
+		hoverToken = planDrawerHoverToken{found: true, view: s.view, row: s.render.firstRow + span.row}
+	}
+	if target == r.vpControlHover && hoverRow == r.vpHoverRow && hoverToken == r.vpHoverProgress {
 		return
 	}
 	r.vpControlHover = target
 	r.vpHoverRow = hoverRow
+	r.vpHoverProgress = hoverToken
 	r.paintViewportLocked()
 }
 
@@ -6757,6 +6787,10 @@ type shownScreen struct {
 	drawerLeft  int
 	drawerClose screenSpan
 	progress    screenSpan
+	// historyProgress are the ☑N/M tokens the paint drew on the run-closing
+	// rows of the view it showed, in the same screen cells; a click, a press
+	// and a hover resolve against them exactly like the composer's token.
+	historyProgress []screenSpan
 }
 
 // shownScreensKept is how many past paints the renderer keeps for resolving
@@ -6921,6 +6955,7 @@ func (r *Renderer) liveScreenLocked() shownScreen {
 		overlayFirstRow: r.vpOverlayFirstRow,
 		jumpButton:      r.jumpButtonSpanLocked(),
 		progress:        r.vpProgressSpan,
+		historyProgress: r.vpHistoryProgress,
 		drawerOpen:      r.vpDrawerOpen,
 	}
 	if r.vpDrawerOpen {

@@ -21,6 +21,10 @@ third_party/pdfium/
 # scripts/fetch-pdfium-fonts.sh places them at assets/fonts/*.otf
 # (pinned npm package + sha256, OFL-1.1). See assets/fonts/README.md.
 assets/fonts/*.otf
+# The models.dev snapshot is owner-local input for
+# scripts/merge-catalog-into-models.sh: the regenerated assets/models.json is
+# what gets committed and shipped, the snapshot never is.
+assets/catalog.json
 .idea
 .cursor
 .DS_Store

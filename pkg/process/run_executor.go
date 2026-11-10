@@ -433,12 +433,16 @@ func (r *PlanReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanR
 		return turn.PlanReviewResult{}, err
 	}
 	override := run.SubagentModelOverride{ModelID: modelID, Provider: r.Model.Provider, Model: r.Model.Model}
-	task := turn.BuildPrompt(req)
 	// The images the user attached reach the reviewer the way they reach the
 	// conversation's own model, and a reviewer that cannot read them is
-	// refused here, before a run opens, with the reason and the way on.
+	// refused here, before a run opens, with the reason and the way on. They
+	// are read before the prompt is built: the file each one is stored in is
+	// named there, once, in the text the reviewer and the transcript read.
+	images, sources := planReviewImageParts(ctx, r.Runner, req.Images)
+	req.Images = sources
+	task := turn.BuildPrompt(req)
 	var parts []llm.ContentPart
-	if images := planReviewImageParts(ctx, r.Runner, req.Images); len(images) > 0 {
+	if len(images) > 0 {
 		if err := run.PlanReviewImageRefusal(ctx, r.Runner, llm.AgentSessionIDFromContext(ctx), override); err != nil {
 			return turn.PlanReviewResult{}, err
 		}

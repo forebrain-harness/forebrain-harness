@@ -3,15 +3,11 @@ package llm
 import (
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -21,9 +17,9 @@ import (
 // models.json — the built-in model catalog — is a data file, so like the
 // word-segmentation dictionaries memory search reads it is not embedded: every
 // build that produces a binary someone runs installs it beside the binary, and
-// the runtime reads it from there. A build that ships no assets beside the
-// binary downloads models.json from that version's GitHub release on first
-// need.
+// the runtime reads it from there. That copy is the only catalog the runtime
+// reads: nothing downloads it, nothing copies it into a home (owner
+// 2026-11-09), and a build that ships no assets has no catalog data.
 // Plan 041 adds the tokenizer files here; assetEntries is the one list of
 // them, and the installer, the release packaging and the runtime read all
 // follow it, so they cannot drift apart.
@@ -148,25 +144,6 @@ func RepoModelsJSONForTest() ([]byte, error) {
 	return os.ReadFile(filepath.Join(dir, "models.json"))
 }
 
-// modelsReleaseVersion matches the versions that have a GitHub release to
-// download an asset from: strict vX.Y.Z tags. A pseudo-version, a prerelease,
-// a "+dirty" build or a checkout build ("(devel)") has no release, so it must
-// not try.
-var modelsReleaseVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
-
-// modelsJSONURLTemplate is where a release's models.json is downloaded from.
-// It is a variable, not a constant, so a test can point it at an httptest
-// server.
-var modelsJSONURLTemplate = "https://raw.githubusercontent.com/forebrain-harness/forebrain-harness/%s/assets/models.json"
-
-// modelsJSONTimeout bounds one whole download of models.json. The asset is a
-// few hundred kilobytes, so half a minute is already generous; what matters is
-// that an install which cannot reach the release page — an offline intranet —
-// fails within a bounded time instead of holding startup for the two minutes
-// the default client allowed. It is a variable so a test can prove that path
-// without waiting for the real bound.
-var modelsJSONTimeout = 30 * time.Second
-
 // downloadDialTimeout bounds the connection attempt of every automatic
 // download. A firewall that drops packets silently leaves a dial waiting for
 // whatever the client's overall timeout is, and that wait is what a start or a
@@ -174,10 +151,10 @@ var modelsJSONTimeout = 30 * time.Second
 // fast, while the transfer itself keeps the longer bound.
 const downloadDialTimeout = 5 * time.Second
 
-// downloadClient builds the client every automatic download uses: a short
-// connect timeout, the caller's overall bound, and the process's proxy settings
-// (a developer reaching GitHub through a proxy, an intranet reaching a mirror
-// directly).
+// downloadClient builds the client an automatic download uses — the tokenizer
+// files an estimator fetches when it needs them: a short connect timeout, the
+// caller's overall bound, and the process's proxy settings (a developer reaching
+// a hub through a proxy, an intranet reaching a mirror directly).
 func downloadClient(overall time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: overall,
@@ -187,116 +164,4 @@ func downloadClient(overall time.Duration) *http.Client {
 			TLSHandshakeTimeout: downloadDialTimeout,
 		},
 	}
-}
-
-// Model-data failures a surface may show: one sentence each, no machine layout
-// and no script name (owner 2026-11-07: the person meets model data, not
-// models.json, and is not expected to arrange it by hand).
-var (
-	errModelDataMissing  = errors.New("model data is missing beside the binary; reinstall forebrain")
-	errModelDataNotFound = errors.New("model data not found; reinstall forebrain")
-)
-
-// sourceModelsJSON returns the bytes to seed $FOREBRAIN_HOME/models.json with:
-// the catalog beside the binary when it is there, otherwise a download from
-// this version's release. A build that is not a release version has no release
-// to download from — its catalog comes from the install script instead — so a
-// missing asset is reported with the command that fixes it.
-func sourceModelsJSON(version string) ([]byte, error) {
-	dir, err := AssetsDir()
-	if err != nil {
-		return nil, err
-	}
-	path := filepath.Join(dir, "models.json")
-	data, err := os.ReadFile(path)
-	if err == nil {
-		return data, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("modelcatalog: read %q: %w", path, err)
-	}
-	if !modelsReleaseVersion.MatchString(version) {
-		// The path and the install script are for whoever is debugging this
-		// build; the error is what a surface may show, so it says what the
-		// person can do and nothing about this machine's layout.
-		slog.Debug("model data is missing beside the binary", "dir", dir, "hint", "scripts/install-assets.sh "+dir)
-		return nil, errModelDataMissing
-	}
-	return downloadModelsJSON(version)
-}
-
-// downloadModelsJSON fetches version's models.json from its GitHub release.
-// The attempt is made at most once per process and URL: two startup steps
-// install the catalog, and repeating a download that just failed against the
-// same unreachable release page can only add a second wait to a start that is
-// already degraded.
-func downloadModelsJSON(version string) ([]byte, error) {
-	url := fmt.Sprintf(modelsJSONURLTemplate, version)
-	if err := modelsJSONFailure(url); err != nil {
-		return nil, err
-	}
-	client := downloadClient(modelsJSONTimeout)
-	response, err := client.Get(url)
-	if err != nil {
-		return nil, rememberModelsJSONFailure(url, fmt.Errorf("modelcatalog: download %s: %w", url, err))
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, rememberModelsJSONFailure(url, fmt.Errorf("modelcatalog: download %s: %s", url, response.Status))
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
-	if err != nil {
-		return nil, rememberModelsJSONFailure(url, fmt.Errorf("modelcatalog: download %s: %w", url, err))
-	}
-	return data, nil
-}
-
-// modelsJSONFailures records the downloads this process has already given up
-// on and the error each one reported, so a later caller is answered from the
-// first attempt instead of paying for another one.
-var modelsJSONFailures struct {
-	mu   sync.Mutex
-	errs map[string]error
-}
-
-// modelsJSONFailure returns the error the process already got for url, or nil
-// when that download has not been tried yet.
-func modelsJSONFailure(url string) error {
-	modelsJSONFailures.mu.Lock()
-	defer modelsJSONFailures.mu.Unlock()
-	return modelsJSONFailures.errs[url]
-}
-
-// rememberModelsJSONFailure records err for url and returns it.
-func rememberModelsJSONFailure(url string, err error) error {
-	modelsJSONFailures.mu.Lock()
-	defer modelsJSONFailures.mu.Unlock()
-	if modelsJSONFailures.errs == nil {
-		modelsJSONFailures.errs = map[string]error{}
-	}
-	modelsJSONFailures.errs[url] = err
-	return err
-}
-
-// writeCatalogAtomic writes data to path through a temporary file in the same
-// directory, so a crash never leaves a half-written catalog and a reader sees
-// either the old file or the complete new one.
-func writeCatalogAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".models.json-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }

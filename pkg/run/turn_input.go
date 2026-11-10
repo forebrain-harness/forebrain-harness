@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 type TurnInputMode string
@@ -619,6 +620,10 @@ type QueuePreview struct {
 	Steers   []string
 	Rejected []string
 	FollowUp []string
+	// Editable reports whether the queue holds at least one message the person
+	// wrote. Those are the only entries the recall key can hand back: everything
+	// else here was written by another agent on their behalf.
+	Editable bool
 }
 
 // Visible reports whether the preview contains queued input.
@@ -922,9 +927,11 @@ const (
 	laneFollowUp
 )
 
-// newestLocked returns the lane and index of the highest-sequence message.
-// Each lane is append-only in sequence order, so only its tail has to be
-// considered.
+// newestLocked returns the lane and index of the highest-sequence message the
+// person wrote. Each lane is append-only in sequence order, so only its tail has
+// to be considered — unless the newest entry there was written by another agent,
+// which the recall key cannot hand back; then the walk continues to the newest
+// entry that person did write.
 func (q *InputQueue) newestLocked(skipSteers bool) (queueLane, int) {
 	best := queueLane(-1)
 	bestIdx, bestSeq := -1, 0
@@ -933,15 +940,20 @@ func (q *InputQueue) newestLocked(skipSteers bool) (queueLane, int) {
 			best, bestIdx, bestSeq = lane, idx, seq
 		}
 	}
-	if !skipSteers && len(q.steers) > 0 {
-		consider(laneSteer, len(q.steers)-1, q.steers[len(q.steers)-1].Seq)
+	considerLane := func(lane queueLane, entries []Input) {
+		for i := len(entries) - 1; i >= 0; i-- {
+			if state.IsPeerOrigin(entries[i].Origin) {
+				continue
+			}
+			consider(lane, i, entries[i].Seq)
+			return
+		}
 	}
-	if len(q.rejected) > 0 {
-		consider(laneRejected, len(q.rejected)-1, q.rejected[len(q.rejected)-1].Seq)
+	if !skipSteers {
+		considerLane(laneSteer, q.steers)
 	}
-	if len(q.followUp) > 0 {
-		consider(laneFollowUp, len(q.followUp)-1, q.followUp[len(q.followUp)-1].Seq)
-	}
+	considerLane(laneRejected, q.rejected)
+	considerLane(laneFollowUp, q.followUp)
 	return best, bestIdx
 }
 
@@ -1151,16 +1163,19 @@ func (q *InputQueue) previewLocked() QueuePreview {
 	for _, in := range q.steers {
 		if text := previewInput(in); text != "" {
 			out.Steers = append(out.Steers, text)
+			out.Editable = out.Editable || !state.IsPeerOrigin(in.Origin)
 		}
 	}
 	for _, in := range q.rejected {
 		if text := previewInput(in); text != "" {
 			out.Rejected = append(out.Rejected, text)
+			out.Editable = out.Editable || !state.IsPeerOrigin(in.Origin)
 		}
 	}
 	for _, in := range q.followUp {
 		if text := previewInput(in); text != "" {
 			out.FollowUp = append(out.FollowUp, text)
+			out.Editable = out.Editable || !state.IsPeerOrigin(in.Origin)
 		}
 	}
 	return out
