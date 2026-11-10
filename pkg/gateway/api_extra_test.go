@@ -10196,3 +10196,156 @@ func TestHandleSessionPeersHeldIsEmptyWithoutAPeerService(t *testing.T) {
 		t.Fatalf("held = %+v", out)
 	}
 }
+
+// handOffExitPlanServer is exitPlanServer with the project rooted in a real
+// git repository: the hand-off row needs one, because the executor's
+// worktree is created from it.
+func handOffExitPlanServer(t *testing.T, cfg *appcfg.Root) (*Server, *state.RunStore, *state.ActionService, string, string) {
+	t.Helper()
+	s, runs, actions, actionID, sid := exitPlanServer(t, cfg)
+	repo := t.TempDir()
+	out, err := exec.Command("git", append([]string{"-C", repo}, "init", "-q")...).CombinedOutput()
+	if err != nil {
+		t.Skipf("git not available: %v\n%s", err, out)
+	}
+	ctx := context.Background()
+	// BindSession moves the session to the repository-backed project: the
+	// gate reads the root from whatever project the session is bound to now.
+	gitProject, err := s.Projects.Create(ctx, state.CreateProjectInput{Name: "handoff", Root: repo})
+	require.NoError(t, err)
+	require.NoError(t, s.Projects.BindSession(ctx, sid, gitProject.ID))
+	return s, runs, actions, actionID, sid
+}
+
+// seedPreviousReview writes the events a continuable previous review leaves:
+// one started and the spawned event of the subagent it dispatched.
+func seedPreviousReview(t *testing.T, runs *state.RunStore, reviewID string) {
+	t.Helper()
+	ctx := context.Background()
+	// The event rows reference a run of the conversation. The conversation is
+	// parked on the approval these events serve, and creating a new run now
+	// would be refused, so they ride the parked run itself.
+	runID, err := runs.FirstWaitingRunIDForSession(ctx, "s1")
+	require.NoError(t, err)
+	require.NotEmpty(t, runID)
+	startedPayload, err := json.Marshal(event.PlanReviewStartedPayload{
+		ActionID: "act-prev", ReviewID: reviewID, ModelID: "row-2", Provider: "openai", Model: "gpt-5.1",
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{
+		RunID: runID, SessionID: "s1", Type: event.RunEventPlanReviewStarted,
+		Payload: startedPayload, CreatedAt: time.Now().Add(-time.Minute).UTC(),
+	})
+	require.NoError(t, err)
+	spawnPayload, err := json.Marshal(event.SubagentSpawnedPayload{
+		AgentID: "task-r1", AgentType: "plan-reviewer", TaskID: "task-r1",
+		WorkerSessionID: "worker-r1", ParentToolCallID: reviewID,
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{
+		RunID: runID, SessionID: "s1", Type: event.RunEventSubagentSpawned,
+		Payload: spawnPayload, CreatedAt: time.Now().Add(-time.Minute + time.Second).UTC(),
+	})
+	require.NoError(t, err)
+}
+
+// A hand-off approval names a row the gate offered, over a project rooted in
+// a git repository; anything less is refused before the action resolves, and
+// a valid one lands in the action's answer for the replay to read.
+func TestGatewayApproveHandOffModel(t *testing.T) {
+	ctx := context.Background()
+	s, _, actions, actionID, _ := handOffExitPlanServer(t, twinRowPlanReviewConfig())
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/approve",
+		map[string]any{"hand_off_model": map[string]string{"id": "row-9", "provider": "openai", "model": "gpt-5.1"}},
+		s.handleActionsApprove, "id", actionID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "the model is not configured for this session")
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/approve",
+		map[string]any{"hand_off_model": map[string]string{"id": "row-2", "provider": "openai", "model": "gpt-5.1"}},
+		s.handleActionsApprove, "id", actionID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	act, err := actions.Get(ctx, actionID)
+	require.NoError(t, err)
+	require.Contains(t, act.AnswerJSON, `"hand_off_model":{"id":"row-2","provider":"openai","model":"gpt-5.1"}`)
+
+	// A project outside any repository cannot take a hand-off: the executor
+	// has no worktree to run in.
+	plain, _, _, plainAction, _ := exitPlanServer(t, twinRowPlanReviewConfig())
+	rec = cronRequest(t, plain, http.MethodPost, "/api/actions/"+plainAction+"/approve",
+		map[string]any{"hand_off_model": map[string]string{"id": "row-2", "provider": "openai", "model": "gpt-5.1"}},
+		plain.handleActionsApprove, "id", plainAction)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "hand off needs a git repository")
+}
+
+// The approval-request wire carries the two facts the new buttons need: the
+// previous review a "review it again" would continue, and whether a hand-off
+// is on offer at all.
+func TestSessionApprovalRequestCarriesPreviousReviewAndHandOff(t *testing.T) {
+	s, runs, _, _, _ := handOffExitPlanServer(t, twinRowPlanReviewConfig())
+	seedPreviousReview(t, runs, "plan-review:r1")
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/approval-request", nil, s.handleSessionApprovalRequest, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var out struct {
+		PreviousPlanReview *struct {
+			ReviewID string `json:"review_id"`
+			AgentID  string `json:"agent_id"`
+			Model    struct {
+				ID       string `json:"id"`
+				Provider string `json:"provider"`
+				Model    string `json:"model"`
+			} `json:"model"`
+		} `json:"previous_plan_review"`
+		HandOffAvailable bool `json:"hand_off_available"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.True(t, out.HandOffAvailable, "a git-backed project with a second row must offer the hand-off")
+	require.NotNil(t, out.PreviousPlanReview)
+	require.Equal(t, "plan-review:r1", out.PreviousPlanReview.ReviewID)
+	require.Equal(t, "task-r1", out.PreviousPlanReview.AgentID)
+	require.Equal(t, "row-2", out.PreviousPlanReview.Model.ID)
+
+	// Outside a repository the hand-off row is off: the wire says so without
+	// naming a reason the card would have to translate.
+	plain, plainRuns, _, _, _ := exitPlanServer(t, twinRowPlanReviewConfig())
+	seedPreviousReview(t, plainRuns, "plan-review:r1")
+	rec = cronRequest(t, plain, http.MethodGet, "/api/chat/sessions/s1/approval-request", nil, plain.handleSessionApprovalRequest, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.False(t, out.HandOffAvailable)
+	require.NotNil(t, out.PreviousPlanReview)
+}
+
+// "Review it again" continues the previous review's own subagent
+// conversation: the request ignores its model fields, the gate names the
+// review to continue, and the round announces itself with the review id it
+// continues. No continuable previous review is a plain 400.
+func TestActionPlanReviewAgainContinuesThePreviousReview(t *testing.T) {
+	ctx := context.Background()
+	s, runs, _, actionID, _ := handOffExitPlanServer(t, twinRowPlanReviewConfig())
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]any{"again": true}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "there is no earlier review to continue")
+
+	seedPreviousReview(t, runs, "plan-review:r1")
+	rec = cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]any{"again": true, "provider": "ignored", "model": "ignored"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var started []state.SessionEvent
+	require.Eventually(t, func() bool {
+		var err error
+		started, err = runs.ListSessionEventsOfType(ctx, "s1", event.RunEventPlanReviewStarted, 0)
+		return err == nil && len(started) == 2
+	}, 5*time.Second, 50*time.Millisecond, "the continuation must announce itself")
+	var payload event.PlanReviewStartedPayload
+	require.NoError(t, json.Unmarshal(started[1].Payload, &payload))
+	require.Equal(t, "plan-review:r1", payload.ContinuesReviewID)
+	require.NotEqual(t, "plan-review:r1", payload.ReviewID)
+	require.Equal(t, "row-2", payload.ModelID, "the continuation runs on the reviewer that wrote the first review")
+}

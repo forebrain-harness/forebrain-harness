@@ -57,6 +57,19 @@ func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *sta
 		}
 		return turn.PlanReviewModelOptions(cfg, agentName, sel.ModelID, sel.Provider, sel.Model)
 	}
+	// The hand-off row needs the project's root: the executor's worktree is
+	// created from its repository, so a conversation outside any project or
+	// repository cannot take one.
+	gate.ProjectRoot = func(ctx context.Context, sessionID string) string {
+		if projects == nil {
+			return ""
+		}
+		project, ok, err := projects.ProjectForSession(ctx, strings.TrimSpace(sessionID))
+		if err != nil || !ok {
+			return ""
+		}
+		return project.Root
+	}
 	return gate
 }
 

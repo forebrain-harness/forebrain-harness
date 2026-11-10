@@ -4408,6 +4408,11 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 		Decision                   string                             `json:"decision,omitempty"`
 		ExecPolicyAmendment        safety.ExecPolicyAmendment         `json:"execpolicy_amendment,omitempty"`
 		RequestPermissionsResponse *safety.RequestPermissionsResponse `json:"request_permissions_response,omitempty"`
+		HandOffModel               *struct {
+			ID       string `json:"id"`
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+		} `json:"hand_off_model,omitempty"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	decodeErr := decoder.Decode(&body)
@@ -4426,10 +4431,46 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 	if decision == "" {
 		decision = "accept"
 	}
-	err := s.resolveGatewayApproval(r.Context(), id, turn.ApprovalReply{
+	reply := turn.ApprovalReply{
 		Choice: decision, Exec: body.ExecPolicyAmendment,
 		Permissions: body.RequestPermissionsResponse, Update: body.Update, Reason: body.Reason, ClearContext: body.ClearContext, PlanOnly: body.PlanOnly,
-	})
+	}
+	// A hand-off is validated against the gate before it resolves anything:
+	// the row must still be offered (a git-backed project and a model that is
+	// not the conversation's own), exactly as the terminal's picker offers it.
+	if body.HandOffModel != nil {
+		act, err := s.Actions.Get(r.Context(), id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		req, err := s.approvalGate().Pending(r.Context(), strings.TrimSpace(act.SessionID))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if req == nil || !req.HandOffAvailable {
+			http.Error(w, "hand off needs a git repository and another configured model", http.StatusBadRequest)
+			return
+		}
+		allowed := false
+		for _, option := range req.PlanReviewModels {
+			if option.MatchesSelection(body.HandOffModel.ID, body.HandOffModel.Provider, body.HandOffModel.Model) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			http.Error(w, "the model is not configured for this session", http.StatusBadRequest)
+			return
+		}
+		reply.HandOffModel = &turn.Model{
+			ID:       strings.TrimSpace(body.HandOffModel.ID),
+			Provider: strings.TrimSpace(body.HandOffModel.Provider),
+			Model:    strings.TrimSpace(body.HandOffModel.Model),
+		}
+	}
+	err := s.resolveGatewayApproval(r.Context(), id, reply)
 	if err != nil {
 		if errors.Is(err, turn.ErrApprovalConflict) {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -4512,6 +4553,16 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 	out := sessionApprovalRequestWire{
 		ActionID: req.ActionID, Kind: req.ActionKind, ToolName: req.ToolName,
 		PlanText: planText, PlanReviewModels: models, PlanReviews: reviews,
+		HandOffAvailable: req.HandOffAvailable,
+	}
+	if prev := req.PreviousPlanReview; prev != nil {
+		out.PreviousPlanReview = &previousPlanReviewWire{
+			ReviewID: prev.ReviewID, AgentID: prev.AgentID,
+			Model: planReviewModelWire{
+				ID: prev.Model.ID, Provider: prev.Model.Provider, Model: prev.Model.Model,
+				Current: prev.Model.Current, Endpoint: prev.Model.Endpoint,
+			},
+		}
 	}
 	// A review in flight is a fact of the conversation's events, the only
 	// source every surface and every replica can agree on without sharing
@@ -4529,13 +4580,24 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 // The approval-request wire shapes: the card reads these fields alone, in the
 // snake_case the gateway's API speaks, with durations in milliseconds.
 type sessionApprovalRequestWire struct {
-	ActionID         string                  `json:"action_id"`
-	Kind             string                  `json:"kind"`
-	ToolName         string                  `json:"tool_name"`
-	PlanText         string                  `json:"plan_text"`
-	PlanReviewModels []planReviewModelWire   `json:"plan_review_models"`
-	PlanReviews      []planReviewNoteWire    `json:"plan_reviews"`
-	PlanReviewActive *planReviewInFlightWire `json:"plan_review_active"`
+	ActionID           string                  `json:"action_id"`
+	Kind               string                  `json:"kind"`
+	ToolName           string                  `json:"tool_name"`
+	PlanText           string                  `json:"plan_text"`
+	PlanReviewModels   []planReviewModelWire   `json:"plan_review_models"`
+	PlanReviews        []planReviewNoteWire    `json:"plan_reviews"`
+	PlanReviewActive   *planReviewInFlightWire `json:"plan_review_active"`
+	PreviousPlanReview *previousPlanReviewWire `json:"previous_plan_review"`
+	HandOffAvailable   bool                    `json:"hand_off_available"`
+}
+
+// previousPlanReviewWire is the review a "review it again" would continue:
+// the review it names and the model that ran it. The task id stays off the
+// wire — the engine resolves the reviewer from the review id alone.
+type previousPlanReviewWire struct {
+	ReviewID string              `json:"review_id"`
+	AgentID  string              `json:"agent_id,omitempty"`
+	Model    planReviewModelWire `json:"model"`
 }
 
 type planReviewModelWire struct {
@@ -4587,6 +4649,10 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 		ModelID  string `json:"model_id"`
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
+		// Again asks the previous review's own subagent to look at the revised
+		// plan (语义 6): the model fields are ignored — the reviewer that ran
+		// the first review runs this one, in its own conversation.
+		Again bool `json:"again,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -4617,9 +4683,36 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	// "Review it again" continues the previous review in its own subagent
+	// conversation: the reviewer that ran it stays, and the gate — not the
+	// request body — says which review that is, so a stale page cannot
+	// continue the wrong one.
+	var again *turn.PlanReviewAgain
+	var req *turn.ToolApprovalRequest
+	if body.Again {
+		pending, err := s.approvalGate().Pending(r.Context(), sid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req = pending
+		if req == nil || req.PreviousPlanReview == nil {
+			http.Error(w, "there is no earlier review to continue", http.StatusBadRequest)
+			return
+		}
+		again = &req.PreviousPlanReview.PlanReviewAgain
+	}
 	// The model must be one the session is configured with: a reviewer has to
-	// run on credentials the session already has.
+	// run on credentials the session already has. An again-request runs on the
+	// previous review's model — the reviewer that wrote it continues it.
 	model := turn.Model{ID: strings.TrimSpace(body.ModelID), Provider: strings.TrimSpace(body.Provider), Model: strings.TrimSpace(body.Model)}
+	if again != nil && req.PreviousPlanReview != nil {
+		model = turn.Model{
+			ID:       req.PreviousPlanReview.Model.ID,
+			Provider: req.PreviousPlanReview.Model.Provider,
+			Model:    req.PreviousPlanReview.Model.Model,
+		}
+	}
 	allowed := false
 	for _, option := range s.approvalGate().ReviewModels(sid) {
 		if option.MatchesSelection(model.ID, model.Provider, model.Model) {
@@ -4650,6 +4743,7 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 	review := turn.PlanReviewRun{
 		ActionID: id, Model: model, SessionID: sid, RunID: runID,
 		StateRoot: s.stateRoot(), ProjectKey: s.sessionProjectKey(context.Background(), sid),
+		Again:       again,
 		Transcripts: transcripts,
 		Reviewer: &process.PlanReviewer{
 			Runner: s.Runner, Model: model, Config: s.modelConfig(),
