@@ -2056,10 +2056,10 @@ type exitPlanModeArtifact struct {
 // exitPlanModeEnvelope is the parsed result envelope of a completed
 // exit_plan_mode.
 type exitPlanModeEnvelope struct {
-	Message  string                `json:"message"`
-	Mode     string                `json:"mode"`
-	PlanFile string                `json:"plan_file"`
-	PlanOnly bool                  `json:"plan_only"`
+	Message  string `json:"message"`
+	Mode     string `json:"mode"`
+	PlanFile string `json:"plan_file"`
+	PlanOnly bool   `json:"plan_only"`
 	// HandOffModel names the row the plan's implementation was handed to;
 	// nil for every other exit.
 	HandOffModel *struct {
