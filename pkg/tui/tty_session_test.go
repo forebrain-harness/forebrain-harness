@@ -127,11 +127,18 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-func startClipboardWatcher(t *testing.T, probe ClipboardImageProbe, interval time.Duration) (*clipboardImageWatcher, *Renderer) {
+func startClipboardWatcher(t *testing.T, probe ClipboardImageProbe, interval time.Duration, tune ...func(*clipboardImageWatcher)) (*clipboardImageWatcher, *Renderer) {
 	t.Helper()
 	r := NewRenderer(nil, nil)
 	w := newClipboardImageWatcher(probe, r)
 	w.interval = interval
+	// The real debounce is 1s; tests wait on 2s deadlines, so shorten it
+	// unless a test tunes it further. Tuning runs before the goroutine
+	// starts, so the run loop never races the fields it reads.
+	w.debounce = 5 * time.Millisecond
+	for _, f := range tune {
+		f(w)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -143,6 +150,108 @@ func startClipboardWatcher(t *testing.T, probe ClipboardImageProbe, interval tim
 		<-done
 	})
 	return w, r
+}
+
+// TestClipboardImageHintExpiresWhileImageStays pins the hint as transient:
+// gone after clipboardImageHintTimeout even though nothing told the renderer
+// the clipboard changed, hidden at once by false, and a repeated true while
+// it is up must not push its expiry back.
+func TestClipboardImageHintExpiresWhileImageStays(t *testing.T) {
+	prev := clipboardImageHintTimeout
+	clipboardImageHintTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { clipboardImageHintTimeout = prev })
+
+	r := NewRenderer(nil, nil)
+	r.SetClipboardImageAvailable(true)
+	if !clipboardHintState(r) {
+		t.Fatal("the hint must be up after SetClipboardImageAvailable(true)")
+	}
+	eventually(t, "the hint to expire while the image stays", func() bool { return !clipboardHintState(r) })
+
+	r.SetClipboardImageAvailable(true)
+	eventually(t, "a fresh true to show the hint again", func() bool { return clipboardHintState(r) })
+	r.mu.Lock()
+	armed := r.clipboardImageTimer
+	r.mu.Unlock()
+	r.SetClipboardImageAvailable(true) // already up: keep the original expiry
+	r.mu.Lock()
+	rearmed := r.clipboardImageTimer != armed
+	r.mu.Unlock()
+	if rearmed {
+		t.Fatal("a repeated true while the hint is up must not re-arm its expiry")
+	}
+
+	r.SetClipboardImageAvailable(false)
+	if clipboardHintState(r) {
+		t.Fatal("false must hide the hint at once")
+	}
+	r.SetClipboardImageAvailable(false)
+	if clipboardHintState(r) {
+		t.Fatal("a second false must not show anything")
+	}
+}
+
+// TestClipboardWatcherDebounceDropsAFleetingImage pins the debounce: an image
+// that leaves before the rising edge's re-check never produces a hint.
+func TestClipboardWatcherDebounceDropsAFleetingImage(t *testing.T) {
+	probe := &countingClipboardProbe{}
+	_, r := startClipboardWatcher(t, probe, 5*time.Millisecond, func(w *clipboardImageWatcher) {
+		w.debounce = 100 * time.Millisecond
+	})
+	probe.image.Store(true)
+	time.Sleep(50 * time.Millisecond) // rising edge seen, re-check pending
+	probe.image.Store(false)          // the image leaves first
+	time.Sleep(200 * time.Millisecond)
+	if clipboardHintState(r) {
+		t.Fatal("a fleeting image must not produce a hint")
+	}
+}
+
+// TestClipboardWatcherRateLimitsRepeatHints pins the rate limit: once a hint
+// has been shown, a new image inside the limit — falling edge, rising edge
+// and re-check all happening — stays silent.
+func TestClipboardWatcherRateLimitsRepeatHints(t *testing.T) {
+	prev := clipboardImageHintTimeout
+	clipboardImageHintTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { clipboardImageHintTimeout = prev })
+
+	probe := &countingClipboardProbe{}
+	probe.image.Store(true)
+	_, r := startClipboardWatcher(t, probe, 5*time.Millisecond, func(w *clipboardImageWatcher) {
+		w.rateLimit = 10 * time.Second
+	})
+	eventually(t, "the first hint to show", func() bool { return clipboardHintState(r) })
+	eventually(t, "the first hint to expire", func() bool { return !clipboardHintState(r) })
+
+	probe.image.Store(false)
+	time.Sleep(50 * time.Millisecond) // a tick sees the falling edge
+	probe.image.Store(true)
+	time.Sleep(300 * time.Millisecond) // rising edge and re-check happen inside the limit
+	if clipboardHintState(r) {
+		t.Fatal("a repeat hint inside the rate limit must stay silent")
+	}
+}
+
+// TestClipboardWatcherRetriesConfirmWhileUnfocused pins the re-check's focus
+// gate: a debounce that matures while the terminal is in the background
+// probes nothing, and the re-armed one after refocus shows the hint.
+func TestClipboardWatcherRetriesConfirmWhileUnfocused(t *testing.T) {
+	probe := &countingClipboardProbe{}
+	probe.image.Store(true)
+	w, r := startClipboardWatcher(t, probe, time.Hour, func(w *clipboardImageWatcher) {
+		w.debounce = 50 * time.Millisecond
+	})
+	eventually(t, "the rising edge's probe", func() bool { return probe.calls.Load() >= 1 })
+	w.SetFocused(false)
+	time.Sleep(120 * time.Millisecond) // the debounce matures unfocused and re-arms
+	if got := probe.calls.Load(); got != 1 {
+		t.Fatalf("an unfocused re-check must not probe, got %d probes", got)
+	}
+	if clipboardHintState(r) {
+		t.Fatal("nothing may be shown from an unfocused re-check")
+	}
+	w.SetFocused(true)
+	eventually(t, "the re-armed re-check to show the hint after refocus", func() bool { return clipboardHintState(r) })
 }
 
 // TestClipboardWatcherProbesOnlyWhileFocused pins that the watcher spawns no
@@ -186,13 +295,13 @@ func TestLookupSessionTitleReadsByID(t *testing.T) {
 }
 
 // TestClipboardWatcherProbesAtOnceWhenFocusReturns pins that regaining focus
-// probes immediately rather than on the next tick, so the hint is current the
-// moment it can be seen.
+// probes immediately rather than on the next tick, so the hint's state is
+// re-evaluated the moment it can be seen.
 func TestClipboardWatcherProbesAtOnceWhenFocusReturns(t *testing.T) {
 	probe := &countingClipboardProbe{}
 	probe.image.Store(true)
 	w, r := startClipboardWatcher(t, probe, time.Hour) // no tick fires in this test
-	eventually(t, "the first probe to show the hint", func() bool { return clipboardHintState(r) })
+	eventually(t, "the debounced re-check to show the hint", func() bool { return clipboardHintState(r) })
 
 	w.SetFocused(false)
 	probe.image.Store(false)

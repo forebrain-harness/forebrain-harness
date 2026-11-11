@@ -5026,12 +5026,23 @@ func copyNotice(r *Renderer) string {
 	return r.clipNotification
 }
 
+// pinNativeClipboardTextMethod pins copied-notice wording to the native
+// branch, whatever clipboard tools the host running the tests happens to
+// have: the wording is chosen at copy time by clipboardTextMethod.
+func pinNativeClipboardTextMethod(t *testing.T) {
+	t.Helper()
+	prev := clipboardTextMethod
+	clipboardTextMethod = func() string { return "native" }
+	t.Cleanup(func() { clipboardTextMethod = prev })
+}
+
 // TestComposerDragSelectionLeavesTheClipboardAlone is the reported bug: with
 // text copied elsewhere, a drag over the draft, Delete, then a paste brought
 // back the deleted text instead, because releasing the drag had copied it over
 // the user's own copy. A selection in the draft is the next edit's target, as in
 // a native text field, so it is not copied; one in the conversation still is.
 func TestComposerDragSelectionLeavesTheClipboardAlone(t *testing.T) {
+	pinNativeClipboardTextMethod(t)
 	r := newComposerRenderer(t, 80, 24)
 	r.RenderFrame(Frame{Kind: FrameStatus, Content: "transcript line", Final: true})
 	cursor := 0
@@ -5065,7 +5076,7 @@ func TestComposerDragSelectionLeavesTheClipboardAlone(t *testing.T) {
 	}
 
 	dragComposer(r, 0, transcriptRow, 20, transcriptRow)
-	if notice := copyNotice(r); !strings.HasPrefix(notice, "Copied ") {
+	if notice := copyNotice(r); !strings.HasPrefix(notice, "copied ") {
 		t.Fatalf("a drag over the conversation should still copy it, got notice %q", notice)
 	}
 }
@@ -5076,6 +5087,7 @@ func TestComposerDragSelectionLeavesTheClipboardAlone(t *testing.T) {
 // copied is only dropped, its copy announced again. Either way the selection is
 // gone afterwards, so the next Ctrl+C is an ordinary one.
 func TestCtrlCCopiesTheSelection(t *testing.T) {
+	pinNativeClipboardTextMethod(t)
 	r := newComposerRenderer(t, 80, 24)
 	r.RenderFrame(Frame{Kind: FrameStatus, Content: "transcript line", Final: true})
 	cursor := 0
@@ -5095,7 +5107,7 @@ func TestCtrlCCopiesTheSelection(t *testing.T) {
 	if !r.CopySelectionForCtrlC() {
 		t.Fatal("Ctrl+C over a selection in the draft should copy it")
 	}
-	if notice := copyNotice(r); notice != "Copied 5 chars to clipboard" {
+	if notice := copyNotice(r); notice != "copied 5 chars to clipboard" {
 		t.Fatalf("Ctrl+C should copy \"world\", got notice %q", notice)
 	}
 	if r.HasSelection() {
@@ -5136,20 +5148,67 @@ func TestCtrlCCopiesTheSelection(t *testing.T) {
 	}
 }
 
-// TestCopiedNoticeCountsCharacters: the notice counts characters, not bytes,
-// and says "char" for one.
+// TestCopiedNoticeCountsCharacters: the notice counts grapheme clusters, the
+// way Claude Code's Intl.Segmenter does — not bytes, not runes — and says
+// "char" for one.
 func TestCopiedNoticeCountsCharacters(t *testing.T) {
 	for text, want := range map[string]string{
-		"a":     "Copied 1 char to clipboard",
-		"原":     "Copied 1 char to clipboard",
-		"ab":    "Copied 2 chars to clipboard",
-		"原始数据":  "Copied 4 chars to clipboard",
-		"hello": "Copied 5 chars to clipboard",
+		"a":       "copied 1 char to clipboard",
+		"原":       "copied 1 char to clipboard",
+		"ab":      "copied 2 chars to clipboard",
+		"原始数据":    "copied 4 chars to clipboard",
+		"hello":   "copied 5 chars to clipboard",
+		"👨‍👩‍👧‍👦": "copied 1 char to clipboard",
+		"a\u0301": "copied 1 char to clipboard",
 	} {
 		if got := copiedNotice(text); got != want {
 			t.Errorf("copiedNotice(%q) = %q, want %q", text, got, want)
 		}
 	}
+}
+
+// TestCopiedNoticeFollowsClipboardMethod pins Claude Code's selection-copied
+// rule: the notice is worded by how the copy travels — copied … to clipboard
+// through a native tool, sent … via OSC 52 when none is — chosen ahead of the
+// write, not from its outcome.
+func TestCopiedNoticeFollowsClipboardMethod(t *testing.T) {
+	prev := clipboardTextMethod
+	t.Cleanup(func() { clipboardTextMethod = prev })
+
+	r := newComposerRenderer(t, 80, 24)
+	clipboardTextMethod = func() string { return "native" }
+	r.mu.Lock()
+	r.setCopiedNotificationLocked("ab")
+	r.mu.Unlock()
+	if got, want := copyNotice(r), "copied 2 chars to clipboard"; got != want {
+		t.Fatalf("native notice = %q, want %q", got, want)
+	}
+
+	clipboardTextMethod = func() string { return "osc52" }
+	r.mu.Lock()
+	r.setCopiedNotificationLocked("ab")
+	r.mu.Unlock()
+	if got, want := copyNotice(r), "sent 2 chars via OSC 52"; got != want {
+		t.Fatalf("osc52 notice = %q, want %q", got, want)
+	}
+}
+
+// TestClipNotificationLastsItsDuration pins the parameterized timer: the
+// notice stands for the duration its channel asks for (2s native, 4s OSC 52
+// in production) and a later notice replaces an earlier one.
+func TestClipNotificationLastsItsDuration(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	r.mu.Lock()
+	r.setClipNotification("stands", time.Hour)
+	r.mu.Unlock()
+	time.Sleep(10 * time.Millisecond)
+	if got := copyNotice(r); got != "stands" {
+		t.Fatalf("a fresh notice must stand, got %q", got)
+	}
+	r.mu.Lock()
+	r.setClipNotification("brief", time.Millisecond)
+	r.mu.Unlock()
+	eventually(t, "the brief notice to clear", func() bool { return copyNotice(r) == "" })
 }
 
 // TestComposerSelectionRunesOnWideRunes guards the CJK case: a wide rune covers

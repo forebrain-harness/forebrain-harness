@@ -2421,6 +2421,7 @@ func waitForDragRelease(t *testing.T, r *Renderer) {
 // target and is not copied over what the user copied elsewhere, while a drag
 // over the list below it is still copied.
 func TestSelectorFilterSelectionLeavesTheClipboardAlone(t *testing.T) {
+	pinNativeClipboardTextMethod(t)
 	r, pw, done := startFilterPicker(t)
 	typeIntoPicker(t, r, pw, "abcd")
 
@@ -2439,7 +2440,7 @@ func TestSelectorFilterSelectionLeavesTheClipboardAlone(t *testing.T) {
 	for copyNotice(r) == "" && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if notice := copyNotice(r); !strings.HasPrefix(notice, "Copied ") {
+	if notice := copyNotice(r); !strings.HasPrefix(notice, "copied ") {
 		t.Fatalf("a drag over the list should still copy it, got notice %q", notice)
 	}
 
@@ -2450,6 +2451,7 @@ func TestSelectorFilterSelectionLeavesTheClipboardAlone(t *testing.T) {
 // copies it and does nothing else — the picker stays open and its filter keeps
 // its text.
 func TestSelectorCtrlCCopiesTheSelection(t *testing.T) {
+	pinNativeClipboardTextMethod(t)
 	r, pw, done := startFilterPicker(t)
 	typeIntoPicker(t, r, pw, "abcd")
 
@@ -2464,7 +2466,7 @@ func TestSelectorCtrlCCopiesTheSelection(t *testing.T) {
 	for copyNotice(r) == "" && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if notice := copyNotice(r); notice != "Copied 2 chars to clipboard" {
+	if notice := copyNotice(r); notice != "copied 2 chars to clipboard" {
 		t.Fatalf("Ctrl+C should copy the selected \"bc\", got notice %q", notice)
 	}
 	select {
@@ -2486,6 +2488,7 @@ func TestSelectorCtrlCCopiesTheSelection(t *testing.T) {
 // that reports it, or a Terminal.app key binding, delivers — copies the
 // selection in a modal and, with nothing selected, does nothing at all.
 func TestSelectorCmdCCopiesTheSelection(t *testing.T) {
+	pinNativeClipboardTextMethod(t)
 	r, pw, done := startFilterPicker(t)
 	typeIntoPicker(t, r, pw, "abcd")
 
@@ -2513,7 +2516,7 @@ func TestSelectorCmdCCopiesTheSelection(t *testing.T) {
 	for copyNotice(r) == "" && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if notice := copyNotice(r); notice != "Copied 2 chars to clipboard" {
+	if notice := copyNotice(r); notice != "copied 2 chars to clipboard" {
 		t.Fatalf("cmd+c should copy the selected \"bc\", got notice %q", notice)
 	}
 	if _, plain := overlayRowContaining(t, r, panelFilterGlyph); !strings.Contains(plain, "abcd") {

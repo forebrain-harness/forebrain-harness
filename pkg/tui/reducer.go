@@ -24,6 +24,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 )
 
 type FrameKind string
@@ -7614,20 +7615,45 @@ func (r *Renderer) writeClipboard(text string) {
 	}()
 }
 
-// setCopiedNotificationLocked announces that text went to the clipboard.
-// Caller holds r.mu.
+// How long the copied notice stands in the footer, by how the copy travels —
+// Claude Code's selection-copied timeouts (FJo): 2000ms native, 4000ms OSC 52.
+const (
+	copiedNoticeNativeTimeout = 2 * time.Second
+	copiedNoticeOSC52Timeout  = 4 * time.Second
+)
+
+// setCopiedNotificationLocked announces that text went to the clipboard,
+// worded and timed by how the copy will travel. Caller holds r.mu.
 func (r *Renderer) setCopiedNotificationLocked(text string) {
-	r.setClipNotification(copiedNotice(text))
+	if clipboardTextMethod() == "osc52" {
+		r.setClipNotification(osc52Notice(text), copiedNoticeOSC52Timeout)
+		return
+	}
+	r.setClipNotification(copiedNotice(text), copiedNoticeNativeTimeout)
 }
 
-// copiedNotice is the notice for text that went to the clipboard.
-func copiedNotice(text string) string {
-	n := len([]rune(text))
-	unit := "chars"
+// graphemeCountUnit counts text as grapheme clusters, the way Claude Code's
+// Intl.Segmenter does, with the char/chars unit for the notices.
+func graphemeCountUnit(text string) (int, string) {
+	n := uniseg.GraphemeClusterCount(text)
 	if n == 1 {
-		unit = "char"
+		return n, "char"
 	}
-	return fmt.Sprintf("Copied %d %s to clipboard", n, unit)
+	return n, "chars"
+}
+
+// copiedNotice is the notice for text that went to the native clipboard.
+func copiedNotice(text string) string {
+	n, unit := graphemeCountUnit(text)
+	return fmt.Sprintf("copied %d %s to clipboard", n, unit)
+}
+
+// osc52Notice is the notice for text that went out via OSC 52: Claude Code's
+// osc52 branch minus its hold-Shift clause, which belongs to a modifier-key
+// native-copy mechanism this codebase does not have.
+func osc52Notice(text string) string {
+	n, unit := graphemeCountUnit(text)
+	return fmt.Sprintf("sent %d %s via OSC 52", n, unit)
 }
 
 func (r *Renderer) ViewportSelectClear() {
@@ -8035,12 +8061,12 @@ func (r *Renderer) writeClipboardOSC52Locked(text string) {
 	fmt.Fprintf(r.out, "\x1b]52;c;%s\x1b\\", encoded)
 }
 
-func (r *Renderer) setClipNotification(text string) {
+func (r *Renderer) setClipNotification(text string, d time.Duration) {
 	r.clipNotification = text
 	if r.clipNotifyTimer != nil {
 		r.clipNotifyTimer.Stop()
 	}
-	r.clipNotifyTimer = time.AfterFunc(3*time.Second, func() {
+	r.clipNotifyTimer = time.AfterFunc(d, func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		r.clipNotification = ""
@@ -8077,18 +8103,46 @@ func (r *Renderer) ShowCtrlCExitHint(d time.Duration) {
 // an image.
 const clipboardImageHintText = "Image in clipboard · ctrl+v to paste"
 
-// SetClipboardImageAvailable records whether the clipboard currently holds an
-// image and repaints when that changes.
+// clipboardImageHintTimeout is how long the paste hint stays up once shown,
+// matching Claude Code's clipboard-image-hint (8s). A var, not a const, so
+// tests can shorten it.
+var clipboardImageHintTimeout = 8 * time.Second
+
+// SetClipboardImageAvailable shows or hides the paste hint. true shows it and
+// auto-expires it after clipboardImageHintTimeout even if the clipboard still
+// holds the image; a repeated true while it is already up keeps the original
+// expiry. false hides it at once. When to show at all — debounce, rate limit —
+// is the clipboardImageWatcher's call, not the renderer's.
 func (r *Renderer) SetClipboardImageAvailable(on bool) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.clipboardImage == on {
-		return
+	if on {
+		if r.clipboardImage {
+			return
+		}
+		r.clipboardImage = true
+		r.clipboardImageTimer = time.AfterFunc(clipboardImageHintTimeout, func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			r.clipboardImage = false
+			r.clipboardImageTimer = nil
+			if r.viewportMode {
+				r.paintViewportLocked()
+			}
+		})
+	} else {
+		if r.clipboardImageTimer != nil {
+			r.clipboardImageTimer.Stop()
+			r.clipboardImageTimer = nil
+		}
+		if !r.clipboardImage {
+			return
+		}
+		r.clipboardImage = false
 	}
-	r.clipboardImage = on
 	if r.viewportMode {
 		r.paintViewportLocked()
 	}

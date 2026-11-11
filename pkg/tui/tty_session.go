@@ -562,22 +562,49 @@ func pngpasteAvailable() bool {
 	return err == nil
 }
 
-// clipboardImageWatcher keeps the composer's paste hint in step with the
-// system clipboard. Every probe spawns a helper process (osascript, wl-paste
-// or xclip), so it probes only while the terminal has focus: the clipboard
-// changes while the user is in another window, and regaining focus probes at
-// once, so the hint is current whenever it can be seen and acted on.
-// Terminals that never report focus are treated as always focused.
+// Claude Code's clipboard-image-hint pacing (2.1.220, reversed): after the
+// clipboard gains an image, a debounce re-check confirms it still holds one,
+// the hint shows for a fixed time and then expires even if the image stays,
+// and a repeat within the rate limit stays silent.
+const (
+	clipboardImageDebounce  = time.Second
+	clipboardImageRateLimit = 30 * time.Second
+)
+
+// clipboardImageWatcher turns clipboard images into transient paste hints.
+// Every probe spawns a helper process (osascript, wl-paste or xclip), so it
+// probes only while the terminal has focus: the clipboard changes while the
+// user is in another window, and regaining focus probes at once. Terminals
+// that never report focus are treated as always focused.
 type clipboardImageWatcher struct {
 	probe    ClipboardImageProbe
 	renderer *Renderer
 	interval time.Duration
 	focused  atomic.Bool
 	wake     chan struct{}
+
+	// had is the last probe result and lastShown the last time the hint was
+	// actually shown; both, like every watcher field, belong to the run
+	// goroutine. debounce and rateLimit mirror the constants above as fields
+	// so tests can shorten them. confirm is the rising-edge debounce timer;
+	// nil means no re-check is pending.
+	had       bool
+	lastShown time.Time
+	debounce  time.Duration
+	rateLimit time.Duration
+	confirm   *time.Timer
+	confirmC  <-chan time.Time
 }
 
 func newClipboardImageWatcher(probe ClipboardImageProbe, renderer *Renderer) *clipboardImageWatcher {
-	w := &clipboardImageWatcher{probe: probe, renderer: renderer, interval: time.Second, wake: make(chan struct{}, 1)}
+	w := &clipboardImageWatcher{
+		probe:     probe,
+		renderer:  renderer,
+		interval:  time.Second,
+		wake:      make(chan struct{}, 1),
+		debounce:  clipboardImageDebounce,
+		rateLimit: clipboardImageRateLimit,
+	}
 	w.focused.Store(true)
 	return w
 }
@@ -596,10 +623,30 @@ func (w *clipboardImageWatcher) SetFocused(focused bool) {
 	}
 }
 
-// run polls the clipboard until ctx ends.
+// armConfirm schedules the post-debounce re-check of a rising edge, replacing
+// any pending one.
+func (w *clipboardImageWatcher) armConfirm() {
+	w.stopConfirm()
+	w.confirm = time.NewTimer(w.debounce)
+	w.confirmC = w.confirm.C
+}
+
+// stopConfirm drops a pending debounce re-check, if any.
+func (w *clipboardImageWatcher) stopConfirm() {
+	if w.confirm != nil {
+		w.confirm.Stop()
+		w.confirm = nil
+		w.confirmC = nil
+	}
+}
+
+// run polls the clipboard until ctx ends, showing the paste hint on a rising
+// edge (image arrives) once its debounce re-check passes, hiding it on a
+// falling edge (image leaves) at once.
 func (w *clipboardImageWatcher) run(ctx context.Context) {
 	tick := time.NewTicker(w.interval)
 	defer tick.Stop()
+	defer w.stopConfirm()
 	for {
 		if w.focused.Load() {
 			has := w.probe.ClipboardHasImage(ctx)
@@ -608,13 +655,42 @@ func (w *clipboardImageWatcher) run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			w.renderer.SetClipboardImageAvailable(has)
+			switch {
+			case has && !w.had: // rising edge: re-check after the debounce
+				w.had = true
+				w.armConfirm()
+			case !has && w.had: // falling edge: hide now, drop the re-check
+				w.had = false
+				w.stopConfirm()
+				w.renderer.SetClipboardImageAvailable(false)
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		case <-w.wake:
+		case <-w.confirmC:
+			w.confirmC, w.confirm = nil, nil
+			if !w.focused.Load() {
+				// Out of focus nothing may be probed; re-arm and wait for it.
+				w.armConfirm()
+				continue
+			}
+			has := w.probe.ClipboardHasImage(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			// An image that already left waits for the next tick's falling
+			// edge, like Claude Code's prop-driven update.
+			if !has {
+				continue
+			}
+			if time.Since(w.lastShown) < w.rateLimit {
+				continue
+			}
+			w.lastShown = time.Now()
+			w.renderer.SetClipboardImageAvailable(true)
 		}
 	}
 }
@@ -683,38 +759,54 @@ func runClipboardImageTool(cmd *exec.Cmd) error {
 // overwrite the clipboard of whoever runs `go test`.
 var clipboardWriteText = writeTextToClipboard
 
-func writeTextToClipboard(ctx context.Context, text string) error {
+// clipboardTextTool returns the command vector of the system clipboard tool
+// available on this platform, or nil when none is. clipboardTextMethod and
+// writeTextToClipboard both consult it, so the supported-tool list lives in
+// exactly one place.
+func clipboardTextTool() []string {
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("pbcopy"); err == nil {
-			cmd := exec.CommandContext(ctx, "pbcopy")
-			cmd.Stdin = strings.NewReader(text)
-			return cmd.Run()
+			return []string{"pbcopy"}
 		}
 	case "linux":
 		if _, err := exec.LookPath("wl-copy"); err == nil {
-			cmd := exec.CommandContext(ctx, "wl-copy")
-			cmd.Stdin = strings.NewReader(text)
-			return cmd.Run()
+			return []string{"wl-copy"}
 		}
 		if _, err := exec.LookPath("xclip"); err == nil {
-			cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard")
-			cmd.Stdin = strings.NewReader(text)
-			return cmd.Run()
+			return []string{"xclip", "-selection", "clipboard"}
 		}
 		if _, err := exec.LookPath("xsel"); err == nil {
-			cmd := exec.CommandContext(ctx, "xsel", "--clipboard", "--input")
-			cmd.Stdin = strings.NewReader(text)
-			return cmd.Run()
+			return []string{"xsel", "--clipboard", "--input"}
 		}
 	case "windows":
 		if _, err := exec.LookPath("clip.exe"); err == nil {
-			cmd := exec.CommandContext(ctx, "clip.exe")
-			cmd.Stdin = strings.NewReader(text)
-			return cmd.Run()
+			return []string{"clip.exe"}
 		}
 	}
-	return fmt.Errorf("clipboard write unavailable: no supported clipboard tool found")
+	return nil
+}
+
+// clipboardTextMethod reports which channel a text copy takes: "native" (a
+// system clipboard tool is available) or "osc52" (none is, so writeClipboard
+// falls back to writing an OSC 52 sequence). Claude Code's LKr() decides the
+// same way, ahead of the write rather than from its outcome. A var as a test
+// seam, like clipboardWriteText.
+var clipboardTextMethod = func() string {
+	if clipboardTextTool() != nil {
+		return "native"
+	}
+	return "osc52"
+}
+
+func writeTextToClipboard(ctx context.Context, text string) error {
+	argv := clipboardTextTool()
+	if argv == nil {
+		return fmt.Errorf("clipboard write unavailable: no supported clipboard tool found")
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
 }
 
 // DiffTheme is a three-value enum for the terminal background.

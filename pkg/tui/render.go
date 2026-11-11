@@ -602,9 +602,10 @@ type Renderer struct {
 	ctrlCExitHint  bool
 	ctrlCExitTimer *time.Timer
 
-	// clipboardImage is true while the system clipboard holds an image, which
-	// the composer advertises with a right-aligned hint above its top rule.
-	clipboardImage bool
+	// clipboardImage is true while the transient paste hint is visible (shown
+	// by SetClipboardImageAvailable, auto-expired via clipboardImageTimer).
+	clipboardImage      bool
+	clipboardImageTimer *time.Timer
 }
 
 type viewportBrowseState struct {
