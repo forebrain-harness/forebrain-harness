@@ -657,6 +657,8 @@ type fakeSession struct {
 	titles                   map[string]string
 	permissions              string
 	model                    string
+	modelRowID               string
+	rowWindows               map[string]int64
 	skills                   string
 	models                   []string
 	skillToggleOpts          []skill.Entry
@@ -928,12 +930,19 @@ func (f *fakeSession) SurfaceTranscriptMessages(context.Context, string) ([]stat
 // SurfaceComposerTokenStats computes the footer budget for the fake's model
 // label the way ChatSession computes it for its runner's model. The fake has
 // no session rows, so the session id it is handed names nothing it reads.
+// rowWindows, when set, plays the twin-row table: a configured row whose
+// window differs from what the pair resolves to.
 func (f *fakeSession) SurfaceComposerTokenStats(_ string, usage int) ComposerTokenStats {
 	provider, model := llm.ParseProviderModelLabel(f.model)
 	if strings.TrimSpace(model) == "" {
 		return ComposerTokenStats{}
 	}
 	limits, _ := llm.Lookup(provider, model)
+	f.mu.Lock()
+	if w, ok := f.rowWindows[strings.TrimSpace(f.modelRowID)]; ok && w > 0 {
+		limits.ContextWindow = w
+	}
+	f.mu.Unlock()
 	budget := statepkg.CalculateTokenBudgetWithOptions(usage, model, limits, statepkg.TokenBudgetOptions{})
 	if budget.ContextWindow <= 0 {
 		return ComposerTokenStats{}
@@ -1059,6 +1068,10 @@ func (f *fakeSession) CurrentModelOption() string {
 
 func (f *fakeSession) CurrentModelReasoningEffort() string {
 	return strings.TrimSpace(f.currentReasoningEffort)
+}
+
+func (f *fakeSession) CurrentModelRowID() string {
+	return strings.TrimSpace(f.modelRowID)
 }
 
 func (f *fakeSession) ApplySkillSelection(label string) (string, error) {
@@ -4033,6 +4046,59 @@ func TestMeasuredComposerTokenStatsReadsTheConversationsOccupancy(t *testing.T) 
 	}
 	if got.PercentLeft == 100 {
 		t.Fatalf("measuredComposerTokenStats() read 100%% for a conversation holding 153000 tokens")
+	}
+}
+
+// TestRefreshSessionFooterFollowsTheRowBetweenTwinRows pins the footer's gauge
+// on a same-name switch (plan 283 E3's unclosed item): two configured rows of
+// one provider/model pair share the footer's model label and still swap the
+// window the budget is sized by, so the refresh must follow the row, not the
+// name — and still perform no occupancy read when neither moved.
+func TestRefreshSessionFooterFollowsTheRowBetweenTwinRows(t *testing.T) {
+	session := &fakeSession{
+		model:      "deepseek/deepseek-v4-flash",
+		modelRowID: "row-a-64k",
+		rowWindows: map[string]int64{"row-a-64k": 64000, "row-b-32k": 32000},
+		activeContextTurns: []statepkg.Message{{
+			Role:      "assistant",
+			RunID:     "run-1",
+			UsageJSON: `{"input_tokens":16000,"output_tokens":500}`,
+		}},
+	}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	refreshSessionFooter(renderer, session, "s1") // settle on row-a
+	if got := renderer.ComposerTokenStats("").ContextWindow; got != 64000 {
+		t.Fatalf("settled window = %d, want row-a's 64000", got)
+	}
+	session.mu.Lock()
+	readsAfterSettle := session.occupancyReads
+	session.mu.Unlock()
+
+	// The twin row: same label, its own window.
+	session.mu.Lock()
+	session.modelRowID = "row-b-32k"
+	session.mu.Unlock()
+	refreshSessionFooter(renderer, session, "s1")
+	stats := renderer.ComposerTokenStats("")
+	if stats.ContextWindow != 32000 {
+		t.Fatalf("window after the same-name switch = %d, want row-b's 32000", stats.ContextWindow)
+	}
+	if stats.Active && stats.PercentLeft == 100 {
+		t.Fatalf("the switch recomputed to a fresh 100%% instead of the measured budget: %+v", stats)
+	}
+
+	// Neither the name nor the row moved: the refresh must leave the store
+	// alone, exactly as before — the guard the row comparison had to keep.
+	session.mu.Lock()
+	readsAfterSwitch := session.occupancyReads
+	session.mu.Unlock()
+	refreshSessionFooter(renderer, session, "s1")
+	session.mu.Lock()
+	readsAfterSteady := session.occupancyReads
+	session.mu.Unlock()
+	if readsAfterSteady != readsAfterSwitch || readsAfterSwitch != readsAfterSettle+1 {
+		t.Fatalf("occupancy reads settle=%d switch=%d steady=%d, want the switch's one read and no others", readsAfterSettle, readsAfterSwitch, readsAfterSteady)
 	}
 }
 

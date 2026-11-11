@@ -241,6 +241,13 @@ func (s *ChatSession) CurrentModelReasoningEffort() string {
 	return s.sessionModelState(s.currentSessionID()).Effort
 }
 
+// CurrentModelRowID is the configured row this conversation's model runs on.
+// The footer compares it beside the model's name because twin rows share the
+// name and still swap the window the gauge is sized by.
+func (s *ChatSession) CurrentModelRowID() string {
+	return strings.TrimSpace(s.sessionModelState(s.currentSessionID()).ModelID)
+}
+
 func (s *ChatSession) AvailableSkillOptions() []string {
 	if s == nil || strings.TrimSpace(s.home()) == "" {
 		return nil

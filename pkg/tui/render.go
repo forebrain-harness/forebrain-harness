@@ -642,6 +642,11 @@ type ComposerFooter struct {
 	Model           string
 	ReasoningEffort string
 	Directory       string
+	// ModelRowID is the configured row the Model label runs on. Two rows of
+	// one provider/model pair are two models — twin rows share Model and still
+	// swap the context window the footer's gauge is sized by — so the refresh
+	// logic compares this beside the name. Not rendered.
+	ModelRowID string
 }
 
 // ComposerTokenStats holds the live token figures shown on the right side of

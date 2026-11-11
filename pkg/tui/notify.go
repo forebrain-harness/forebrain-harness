@@ -1884,6 +1884,11 @@ type Session interface {
 	SyncConfig(ctx context.Context) error
 	CurrentModelOption() string
 	CurrentModelReasoningEffort() string
+	// CurrentModelRowID names the configured row the conversation's model
+	// runs on ("" when no row is known). Two rows of one provider/model pair
+	// are two models — often with two context windows — so the footer's gauge
+	// follows the row, not the name.
+	CurrentModelRowID() string
 	ApplySkillSelection(label string) (string, error)
 	ApplySkillEnabledSelection(enabledPaths []string) (string, error)
 	// The skill draft-and-version lifecycle (plan 037) the /skills panel

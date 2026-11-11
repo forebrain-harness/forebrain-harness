@@ -138,6 +138,7 @@ func Run(ctx context.Context, opts Options) error {
 		Model:           summarizeComposerModel(opts.Session),
 		ReasoningEffort: summarizeComposerReasoningEffort(opts.Session),
 		Directory:       startupWorkingDirectoryDisplay(opts.WorkingDirectory),
+		ModelRowID:      opts.Session.CurrentModelRowID(),
 	})
 	renderer.SetComposerTokenStats("", measuredComposerTokenStats(opts.Session, initialSessionID))
 	// Seed the idle terminal title with the resumed session's title (or the
@@ -5377,23 +5378,28 @@ func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Rend
 
 // refreshSessionFooter redraws what the footer says about the session: its
 // model and effort, the subagents' models, and — when the model the footer
-// names has moved — the context budget, recomputed from the conversation's
-// measured occupancy. An unchanged model leaves the budget exactly where the
-// last response's live update left it: a turn is not a context reset, and the
-// gauge must not flash a fresh "100%" while the request the turn started is
-// still in flight. The budget is sized by the model's window, which is why it
-// follows the model and nothing else.
+// names has moved, counting the configured row it runs on — the context
+// budget, recomputed from the conversation's measured occupancy. An unchanged
+// model leaves the budget exactly where the last response's live update left
+// it: a turn is not a context reset, and the gauge must not flash a fresh
+// "100%" while the request the turn started is still in flight. The budget is
+// sized by the model's window, which is why it follows the model — the row
+// included, because twin rows of one pair share a name and still swap the
+// window — and nothing else.
 func refreshSessionFooter(renderer *Renderer, session Session, sessionID string) {
 	if renderer == nil || session == nil {
 		return
 	}
 	model := summarizeComposerModel(session)
+	row := session.CurrentModelRowID()
 	footer := renderer.ComposerFooterSnapshot()
-	modelMoved := strings.TrimSpace(model) != strings.TrimSpace(footer.Model)
+	modelMoved := strings.TrimSpace(model) != strings.TrimSpace(footer.Model) ||
+		strings.TrimSpace(row) != strings.TrimSpace(footer.ModelRowID)
 	renderer.SetComposerFooter(ComposerFooter{
 		Model:           model,
 		ReasoningEffort: summarizeComposerReasoningEffort(session),
 		Directory:       footer.Directory,
+		ModelRowID:      row,
 	})
 	if !modelMoved {
 		return
