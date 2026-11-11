@@ -109,6 +109,11 @@ test('an office plan is answered in the office\'s four words, never the coding o
   await expect(page.locator('[data-testid="exit-plan-approve-clear"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="exit-plan-approve"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="exit-plan-keep-planning"]')).toHaveCount(0)
+  // plan 283's two rows stay hidden here for the right reasons: the hand-off
+  // needs a git repository (this project is a plain directory), and no review
+  // has run yet, so there is nothing for 再评审 to continue.
+  await expect(page.locator('[data-testid="exit-plan-hand-off"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="exit-plan-review-again"]')).toHaveCount(0)
   // 修改计划 asks for the words the planner will read, and only then sends them.
   await expect(page.locator('[data-testid="exit-plan-feedback"]')).toHaveCount(0)
   await page.click('[data-testid="office-plan-revise"]')

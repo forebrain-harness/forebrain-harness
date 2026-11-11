@@ -1030,3 +1030,59 @@ func TestCompactModelLimitStaysWithItsRow(t *testing.T) {
 		t.Fatalf("row-a limit = %d, want its own refusal cap 29999", got)
 	}
 }
+
+// The composer footer's budget (run.ContextBudget) sizes itself by the
+// configured row the conversation selected — the twin-row rule every other
+// gauge follows (owner 2026-11-10, plan 283 Part E): two rows naming one
+// provider/model carry different windows, and the session picked the second.
+func TestContextBudgetSizesByTheSessionOwnRow(t *testing.T) {
+	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
+	runner, store := newSessionRoutingRunner(t, nil)
+	wide, narrow := int64(64000), int64(32000)
+	runner.Deps.AppCfg.LLMModels = []appcfg.LLMModelConfig{
+		{ID: "row-a", Provider: "openai", Model: "gpt-b", BaseURL: "http://a.test/v1", Caps: appcfg.LLMModelCaps{ContextWindow: &wide}},
+		{ID: "row-b", Provider: "openai", Model: "gpt-b", BaseURL: "http://b.test/v1", Caps: appcfg.LLMModelCaps{ContextWindow: &narrow}},
+	}
+	// The rows' capabilities reach the lookup the way the composition's
+	// adoption installs them (pkg/process owns the installer; the tables it
+	// fills are what the budget reads).
+	byRow, pairOf := processModelOverridesFor(runner.Deps.AppCfg)
+	llm.SetModelOverrides(byRow, pairOf)
+	if byRow["row-b"].ContextWindow == nil || *byRow["row-b"].ContextWindow != 32000 {
+		t.Fatalf("byRow[row-b] = %+v, want the row's window installed", byRow["row-b"])
+	}
+	ctx := context.Background()
+	if err := store.Ensure(ctx, "session-1", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "session-1", state.SessionModelSelection{
+		Provider: "openai", Model: "gpt-b", ModelID: "row-b",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, ok := ContextBudget(runner, "session-1", nil, 1000)
+	if !ok {
+		t.Fatal("ContextBudget did not answer")
+	}
+	if payload.ContextWindow != 32000 {
+		t.Fatalf("ContextWindow = %d, want the selected row's 32000", payload.ContextWindow)
+	}
+}
+
+// processModelOverridesFor mirrors what pkg/process's adoption installs, from
+// the same projection it uses, so the test exercises the lookup tables exactly
+// as the runtime fills them without importing across the layer line.
+func processModelOverridesFor(root *appcfg.Root) (map[string]llm.ModelOverride, map[string]string) {
+	byRow := make(map[string]llm.ModelOverride, len(root.LLMModels))
+	pairOf := make(map[string]string, len(root.LLMModels))
+	for _, row := range root.LLMModels {
+		override, ok := state.ModelOverrideFromCaps(row.Caps)
+		if !ok {
+			continue
+		}
+		byRow[strings.TrimSpace(row.ID)] = override
+		pairOf[strings.TrimSpace(row.ID)] = llm.JoinProviderModel(row.Provider, row.Model)
+	}
+	return byRow, pairOf
+}

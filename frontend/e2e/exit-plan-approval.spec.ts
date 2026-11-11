@@ -216,6 +216,135 @@ test('asking for a review hands it to the planner: the card closes silently', as
   await shot(page, 'exit-plan-approval-delivered')
 })
 
+test('handing the plan to another model approves with the row on the wire and the tech-lead contract in the tool result', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  // The launch project is a git repository and the config holds other models,
+  // so the gate offers the hand-off for real (plan 283).
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan')
+  parkExitPlan(session, 'handoff')
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  const dock = page.locator('[data-testid="exit-plan-approval"]')
+  await expect(dock).toBeVisible()
+  const handOff = page.locator('[data-testid="exit-plan-hand-off"]')
+  await expect(handOff).toBeVisible()
+  await expect(handOff).toHaveText('交给其他模型执行')
+
+  // The picker is the review list wearing its second caption: the grey line
+  // says where the implementation runs, and every row names its endpoint.
+  await handOff.click()
+  await expect(page.locator('.xp-pick .cap')).toHaveText('交给哪个模型执行？')
+  await expect(page.locator('.xp-pick .hint')).toHaveText('在新的 worktree 里实施，不动当前分支')
+  const rows = page.locator('[data-testid="exit-plan-hand-off-model"]')
+  await expect(rows.nth(1)).toContainText('http')
+
+  const approve = page.waitForRequest((req) => req.url().includes('/approve') && req.method() === 'POST')
+  await rows.nth(1).click()
+  const body = await (await approve).postDataJSON()
+  // The engine hands off by configured row id — two rows of one provider/model
+  // are two executors — never without one.
+  expect(body?.hand_off_model).toMatchObject({ id: expect.any(String), provider: expect.any(String), model: expect.any(String) })
+  await expect(dock).toHaveCount(0, { timeout: 30_000 })
+  await shot(page, 'exit-plan-approval-handed-off')
+
+  // The decision is durable: the answer the engine stores is what a replay
+  // reads the hand-off back from (the parked seed has no live run to write a
+  // tool result; the tech-lead contract's own text is pinned by unit goldens).
+  const answer = execFileSync('sqlite3', ['-cmd', '.timeout 5000', stateDb(),
+    `SELECT answer_json FROM fb_actions WHERE id='act-e2e-exitplan-handoff'`], { encoding: 'utf8' })
+  expect(answer).toContain('hand_off_model')
+  expect(answer).toMatch(/"id":"llm-[^"]+"/)
+  expect(answer).toContain('"provider"')
+  expect(answer).toContain('"model"')
+})
+
+test('a review handed back is asked again in its own conversation: the continuation names the first review', async ({ page }) => {
+  test.info().setTimeout(300_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan')
+  seedPlan(session, '# 计划：交接后的复审\n\n1. 先读 README。\n2. 再对照计划逐条检查。\n')
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  // Plan mode is the person's own switch; the gate only exists while it is on.
+  await page.click('[data-testid="mode-chip"]')
+  await page.click('[data-testid="mode-option-plan"]')
+  await page.fill('textarea', `[[e2e:tool-call]]${JSON.stringify({ name: 'exit_plan_mode', arguments: {} })}\n\n计划写好了，退出计划模式。`)
+  await page.press('textarea', 'Enter')
+  const dock = page.locator('[data-testid="exit-plan-approval"]')
+  await expect(dock).toBeVisible({ timeout: 60_000 })
+  // Nothing to continue yet: the again row is absent (plan 283).
+  await expect(page.locator('[data-testid="exit-plan-review-again"]')).toHaveCount(0)
+
+  // One real review, picked from the list.
+  await page.click('[data-testid="exit-plan-ask-review"]')
+  const reviewer = page.locator('[data-testid="plan-review-model"]').first()
+  await expect(reviewer).toBeVisible()
+  await reviewer.click()
+  // The review runs as its own subagent and finishes into the planner; the
+  // dock leaves until the planner asks again.
+  await expect(dock).toHaveCount(0, { timeout: 180_000 })
+  const firstStarted = execFileSync('sqlite3', ['-cmd', '.timeout 5000', stateDb(),
+    `SELECT json_extract(payload_json,'$.review_id') FROM fb_session_events WHERE session_id='${session}' AND event_type='plan_review_started' ORDER BY rowid DESC LIMIT 1`], { encoding: 'utf8' }).trim()
+  expect(firstStarted).toMatch(/^plan-review:/)
+
+  // The planner's revised exit call: parked the same way a real one parks.
+  const now = Math.floor(Date.now() / 1000)
+  const actionId = `act-e2e-again-${Date.now()}`
+  const runId = `run-e2e-again-${Date.now()}`
+  sqlite(`
+    INSERT INTO fb_runs (id, session_id, input_text, status, created_at, updated_at)
+      VALUES ('${runId}', '${session}', 'plan the change', 'waiting_action', ${now - 60}, ${now - 60});
+    INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
+      VALUES('${actionId}', '${session}', 'exit_plan_mode', 'pending', '${sqlJson({ session_id: session })}', ${now - 60}, ${now - 60});
+    INSERT INTO fb_run_waits(run_id, action_id, tool_name, tool_input_json, created_at, updated_at)
+      VALUES('${runId}', '${actionId}', 'exit_plan_mode', '{}', ${now - 60}, ${now - 60});
+  `)
+
+  // The dock is back and the again row is there, naming the reviewer that
+  // ran the first review (plan 283). The seed landed after the page had the
+  // session open, so the initial load — the read every parked approval rides
+  // — picks it up.
+  await page.reload({ waitUntil: 'networkidle' })
+  await expect(dock).toBeVisible({ timeout: 60_000 })
+  const again = page.locator('[data-testid="exit-plan-review-again"]')
+  await expect(again).toBeVisible()
+  await expect(again).toContainText('再评审')
+
+  const review = page.waitForRequest((req) => req.url().includes('/plan-review') && req.method() === 'POST')
+  await again.click()
+  const reviewBody = await (await review).postDataJSON()
+  // The gate — not the request — knows which review to continue, so the body
+  // carries nothing but the flag.
+  expect(reviewBody).toEqual({ again: true })
+  // No second picker: the reviewer is the one the user already picked.
+  await expect(page.locator('.xp-pick')).toHaveCount(0)
+
+  // The continuation is the SAME reviewer: the second started event points
+  // back at the first, and the spawned subagent keeps its identity. The card
+  // is drawn from the started event, so the spawned row can trail it by a
+  // moment — poll until both rounds' subagents are on record.
+  await expect(page.locator('[data-testid="subagent-call-card"]').nth(1)).toBeVisible({ timeout: 120_000 })
+  let chain = ''
+  for (let attempt = 0; attempt < 50; attempt++) {
+    chain = execFileSync('sqlite3', ['-cmd', '.timeout 5000', stateDb(),
+      `SELECT json_extract(payload_json,'$.continues_review_id'), json_extract(payload_json,'$.review_id') FROM fb_session_events WHERE session_id='${session}' AND event_type='plan_review_started' ORDER BY rowid DESC LIMIT 1; ` +
+      `SELECT json_extract(payload_json,'$.agent_id'), json_extract(payload_json,'$.worker_session_id') FROM fb_session_events WHERE session_id='${session}' AND event_type='subagent_spawned' ORDER BY rowid;`], { encoding: 'utf8' })
+    if (chain.trim().split('\n').length >= 3) break
+    await page.waitForTimeout(200)
+  }
+  const [continues, second, agent1, worker1, agent2, worker2] = chain.trim().split('\n').flatMap((l) => l.split('|'))
+  expect(continues).toBe(firstStarted)
+  expect(second).toMatch(/^plan-review:/)
+  expect(agent2).toBe(agent1)
+  expect(worker2).toBe(worker1)
+  await shot(page, 'exit-plan-review-again')
+})
+
 test('approving with the context cleared says so on the wire and brings the input back', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
