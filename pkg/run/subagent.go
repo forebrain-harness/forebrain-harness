@@ -91,7 +91,10 @@ type SubagentInput struct {
 	Title        string `json:"title" jsonschema:"description=Short 3-6 word title naming this task. Shown in the agent roster and on the task card; the prompt itself is never shown there."`
 	Task         string `json:"task" jsonschema:"description=Task for an isolated agent run with the same model configuration."`
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype. Omit for fork-style run; set for fresh typed subagent."`
-	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
+	// Worktree is described with jsonschema_description, not the key=value
+	// form: the sentence carries a comma, and a jsonschema tag is truncated at
+	// the first one (TestJSONSchemaDescriptionTagsSurviveReflection).
+	Worktree string `json:"worktree,omitempty" jsonschema_description:"Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id, never a provider/model pair: two rows of
 	// one pair are two models. The description is fixed text on purpose — it
 	// must not enumerate the models, or adding one would change the tool
@@ -103,7 +106,10 @@ type SubagentSendInput struct {
 	Title        string `json:"title" jsonschema:"description=Short 3-6 word title naming this task. Shown in the agent roster and on the task card; the prompt itself is never shown there."`
 	Task         string `json:"task" jsonschema:"description=Task for an isolated agent run that should continue asynchronously."`
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype. Omit for fork-style run; set for fresh typed subagent."`
-	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
+	// Worktree is described with jsonschema_description, not the key=value
+	// form: the sentence carries a comma, and a jsonschema tag is truncated at
+	// the first one (TestJSONSchemaDescriptionTagsSurviveReflection).
+	Worktree string `json:"worktree,omitempty" jsonschema_description:"Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id; see SubagentInput.Model.
 	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
@@ -134,7 +140,10 @@ type SubagentTask struct {
 	Title        string `json:"title" jsonschema:"description=Short 3-6 word title naming this task. Shown in the agent roster and on the task card; the prompt itself is never shown there."`
 	Prompt       string `json:"prompt" jsonschema:"description=Task prompt for the subagent."`
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype for this task."`
-	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
+	// Worktree is described with jsonschema_description, not the key=value
+	// form: the sentence carries a comma, and a jsonschema tag is truncated at
+	// the first one (TestJSONSchemaDescriptionTagsSurviveReflection).
+	Worktree string `json:"worktree,omitempty" jsonschema_description:"Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id; see SubagentInput.Model.
 	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
