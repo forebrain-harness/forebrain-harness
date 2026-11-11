@@ -20,11 +20,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 	"golang.org/x/term"
-
-	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
 type inputEventKind int
