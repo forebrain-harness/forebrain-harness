@@ -84,6 +84,21 @@ Modes:
           then hangs. That delta is what commits the steer's delivery, and the
           hang keeps the execution running, so no execution-end repaint can
           hide a preview that failed to drop the delivered steer.
+  overflow-usage
+          drive "a context overflow with usage, and the window the engine
+          learns from it moving the compaction trigger" (plan 283 F3). Every
+          reply reports usage counted from the request body itself (chars/4,
+          the same arithmetic on both sides), so the conversation's measured
+          occupancy grows with what is actually on the wire; the FIRST request
+          whose prompt estimate exceeds FAKE_OVERFLOW_WINDOW (default 30000)
+          is refused with the 400 context_length_exceeded the engine's
+          overflow recovery matches, and every request after it answers
+          normally, so the post-compaction retry succeeds. Compaction summary
+          and memory requests answer small regardless of size: the engine must
+          be able to shrink the conversation below the window it just learned.
+          The default answer text is a ~16k-token filler, so a few turns grow
+          the context past the window. Watch provider.log for the OVERFLOW
+          line and the screen for the compact card.
   gemini
           answer generateContent requests the way the Gemini wire format
           shapes them: the turn's first request streams two text parts, a
@@ -281,6 +296,32 @@ SUBAGENT_NET_PROBE_ARGS = json.dumps({
 SUBAGENT_LIMIT_RESETS_AT = []
 SUBAGENT_LIMIT_MAIN = itertools.count()
 SUBAGENT_STEER_MAIN = itertools.count()
+
+# The "overflow-usage" mode's tunables: the model's true window, and the
+# once-only latch so the post-compaction retry goes through. The filler reply
+# is ~16k tokens by the same chars/4 arithmetic the prompt estimate uses.
+OVERFLOW_WINDOW = int(os.environ.get("FAKE_OVERFLOW_WINDOW") or 30000)
+OVERFLOWED = []
+if MODE == "overflow-usage" and TEXT == "FAKE_ANSWER":
+    TEXT = "x" * 64000
+
+
+def _prompt_estimate(body):
+    """The request's prompt size in the mode's own arithmetic: chars/4 of
+    every message's text. Both the reported usage and the refusal threshold
+    use it, so the conversation's numbers stay self-consistent."""
+    try:
+        messages = json.loads(body).get("messages") or []
+    except Exception:
+        return 0
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+        if isinstance(content, str):
+            total += len(content)
+    return total // 4
 
 
 def _has_tool_result(body):
@@ -492,6 +533,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if MODE == "subagent-steer":
             self.serve_subagent_steer(body)
+            return
+
+        if MODE == "overflow-usage":
+            self.serve_overflow_usage(body)
             return
 
         if MODE == "limit" and self.serve_limit():
@@ -759,6 +804,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.write_event(chunk(delta={"role": "assistant", "content": "primary noted the failure"}))
             self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
+    def serve_overflow_usage(self, body):
+        """Drive "an overflow with usage, and the learned window moving the
+        compaction trigger" (plan 283 F3).
+
+        Every reply reports the request's own prompt estimate as usage, so the
+        conversation's measured occupancy grows with what is actually on the
+        wire. The first request whose estimate exceeds the window is refused
+        with the 400 the engine's overflow recovery matches — the refusal that
+        teaches it the true window — and everything after it answers normally,
+        so the post-compaction retry succeeds. Compaction summary and memory
+        requests answer small regardless of size: shrinking the conversation
+        below the learned window must always be possible.
+        """
+        system, _ = _system_and_last_user(body)
+        small = COMPACTION_SUMMARY_MARK in system or MEMORY_AGENT_MARK in system
+        estimate = _prompt_estimate(body)
+        if not small and not OVERFLOWED and estimate > OVERFLOW_WINDOW:
+            OVERFLOWED.append(estimate)
+            sys.stderr.write("OVERFLOW refused %d tokens against window %d\n" % (estimate, OVERFLOW_WINDOW))
+            sys.stderr.flush()
+            payload = json.dumps({"error": {
+                "message": "This model's maximum context length is %d tokens. However, your messages resulted in %d tokens." % (OVERFLOW_WINDOW, estimate),
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+            }}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+            return
+        text = "summary: compacted demo context" if small else TEXT
+        completion = len(text) // 4
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.write_event(chunk(delta={"role": "assistant", "content": text}))
+        final = chunk(finish="stop")
+        final["usage"] = {
+            "prompt_tokens": estimate,
+            "completion_tokens": completion,
+            "total_tokens": estimate + completion,
+        }
+        self.write_event(final)
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
 
