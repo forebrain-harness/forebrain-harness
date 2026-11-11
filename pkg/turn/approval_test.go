@@ -1638,3 +1638,53 @@ func TestRunPlanReviewAgainContinuesThePreviousReview(t *testing.T) {
 	require.NotContains(t, reviewer.req.Task, "Add S3 sync to the skill installer.",
 		"the reviewer already saw the earlier request; only what came after its review belongs here")
 }
+
+// Stopping a review is cancelling its context — the surface's Esc reaches
+// exactly that context. The closing plan_reviewed(stopped) is the review's
+// only trace, so it must still publish even though the context it ran under is
+// gone: a sink that honours the context (as the store-backed one does) would
+// otherwise drop the record of the stop (plan 283's driver run caught this
+// live: subagent_ended(cancelled) landed, plan_reviewed never did).
+func TestRunPlanReviewStopStillRecordsTheOutcome(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stateRoot := t.TempDir()
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", "s1", "# Plan"))
+	var events []event.RunEvent
+	publish := func(pctx context.Context, evt event.RunEvent) error {
+		if err := pctx.Err(); err != nil {
+			return err // the store-backed sink's own behaviour on a dead context
+		}
+		events = append(events, evt)
+		return nil
+	}
+	stoppingReviewer := stoppingReviewerFunc(func(rctx context.Context, _ Request) (PlanReviewResult, error) {
+		cancel() // what Esc does to the review's own context
+		<-rctx.Done()
+		return PlanReviewResult{}, context.Canceled
+	})
+	err := RunPlanReview(ctx, PlanReviewRun{
+		ActionID: "a1", Model: Model{Provider: "acme", Model: "text-only"},
+		SessionID: "s1", StateRoot: stateRoot, ProjectKey: "proj",
+		Reviewer: stoppingReviewer,
+		Publish:  publish,
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	var reviewed event.PlanReviewedPayload
+	var seen bool
+	for _, evt := range events {
+		if evt.Type == event.RunEventPlanReviewed {
+			seen = true
+			require.NoError(t, json.Unmarshal(evt.Payload, &reviewed))
+		}
+	}
+	require.True(t, seen, "the stopped review must still close itself with plan_reviewed")
+	require.Equal(t, planReviewOutcomeStopped, reviewed.Outcome)
+}
+
+// stoppingReviewerFunc adapts a review function to the Reviewer interface the
+// way the failing/recording stubs above do.
+type stoppingReviewerFunc func(context.Context, Request) (PlanReviewResult, error)
+
+func (f stoppingReviewerFunc) Review(ctx context.Context, req Request) (PlanReviewResult, error) {
+	return f(ctx, req)
+}

@@ -1901,6 +1901,12 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 		}
 		_ = in.Publish(ctx, evt)
 	}
+	publishDetached := func(evt event.RunEvent) {
+		if in.Publish == nil {
+			return
+		}
+		_ = in.Publish(context.WithoutCancel(ctx), evt)
+	}
 	publish(event.NewRunEvent("plan-review:"+reviewID+":started", runID, sessionID,
 		event.RunEventPlanReviewStarted, event.PlanReviewStartedPayload{
 			ActionID: actionID, ReviewID: reviewID,
@@ -1920,7 +1926,13 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 				reviewed.Code = strings.TrimSpace(coded.Code())
 			}
 		}
-		publish(event.NewRunEvent("plan-review:"+reviewID+":reviewed", runID, sessionID,
+		// The closing event is the review's only trace, and the way a review
+		// is stopped is cancelling this very context — the surface's Esc
+		// reaches it. Publishing on the cancelled context would drop the
+		// record of the stop (the subagent's own cancelled end is not the
+		// review's), so the closing write detaches from the cancellation
+		// while the started event above still rides the live context.
+		publishDetached(event.NewRunEvent("plan-review:"+reviewID+":reviewed", runID, sessionID,
 			event.RunEventPlanReviewed, reviewed, time.Now()))
 	}
 	plan, err := state.GetPlanForSession(strings.TrimSpace(in.StateRoot), strings.TrimSpace(in.ProjectKey), sessionID)
