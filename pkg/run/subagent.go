@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -83,16 +84,21 @@ func (s *subagentSemaphore) get(capacity func() int) chan struct{} {
 	return s.ch
 }
 
+// The "worktree" sentence every dispatch tool carries is one fixed wording
+// (not configuration), so the three arguments below spell it identically: a
+// struct tag cannot name a constant.
 type SubagentInput struct {
 	Title        string `json:"title" jsonschema:"description=Short 3-6 word title naming this task. Shown in the agent roster and on the task card; the prompt itself is never shown there."`
 	Task         string `json:"task" jsonschema:"description=Task for an isolated agent run with the same model configuration."`
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype. Omit for fork-style run; set for fresh typed subagent."`
+	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 }
 
 type SubagentSendInput struct {
 	Title        string `json:"title" jsonschema:"description=Short 3-6 word title naming this task. Shown in the agent roster and on the task card; the prompt itself is never shown there."`
 	Task         string `json:"task" jsonschema:"description=Task for an isolated agent run that should continue asynchronously."`
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype. Omit for fork-style run; set for fresh typed subagent."`
+	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 }
 
 type SubagentContinueInput struct {
@@ -121,6 +127,7 @@ type SubagentTask struct {
 	Title        string `json:"title" jsonschema:"description=Short 3-6 word title naming this task. Shown in the agent roster and on the task card; the prompt itself is never shown there."`
 	Prompt       string `json:"prompt" jsonschema:"description=Task prompt for the subagent."`
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype for this task."`
+	Worktree     string `json:"worktree,omitempty" jsonschema:"description=Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 }
 
 func subagentTypeEnumValues(cat SubagentCatalog) []any {
@@ -290,6 +297,10 @@ type FanoutResult struct {
 	RanFor   string `json:"ran_for,omitempty"`
 	ResetsAt string `json:"resets_at,omitempty"`
 	Next     string `json:"next,omitempty"`
+	// Worktree is the git worktree this task's subagent ran in, empty when it
+	// ran in the conversation's directory: the path the dispatcher reviews
+	// that task's edits in.
+	Worktree string `json:"worktree,omitempty"`
 }
 
 type subagentExecResult struct {
@@ -298,6 +309,10 @@ type subagentExecResult struct {
 	ParentRunID string
 	SessionID   string
 	Output      string
+	// Worktree is the git worktree this execution ran in, empty when it ran
+	// in the conversation's directory. The dispatch's receipt names it, so
+	// the parent reviews the files that were actually edited.
+	Worktree string
 }
 
 type preparedSubagent struct {
@@ -364,10 +379,12 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 			task := ""
 			subType := ""
 			title := ""
+			worktree := ""
 			if in != nil {
 				task = strings.TrimSpace(in.Task)
 				subType = strings.TrimSpace(in.SubagentType)
 				title = strings.TrimSpace(in.Title)
+				worktree = strings.TrimSpace(in.Worktree)
 			}
 			if task == "" {
 				b, _ := json.Marshal(map[string]any{
@@ -377,7 +394,7 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 				return string(b), nil
 			}
 			taskID := newSubagentTaskID()
-			execRes, err := execGeneralSubagent(ctx, fac, taskID, title, task, subType)
+			execRes, err := execGeneralSubagent(ctx, fac, taskID, title, task, subType, worktree)
 			if err != nil {
 				var failed *subagentFailure
 				if errors.As(err, &failed) {
@@ -428,6 +445,12 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 				"definition_source": defSource,
 				"one_shot":          oneShot,
 				"continuable":       continuable,
+			}
+			// Only an isolated run names a tree: the parent reviews the files
+			// that were actually edited, and its receipt is where it reads the
+			// path from.
+			if execRes.Worktree != "" {
+				resp["worktree"] = execRes.Worktree
 			}
 			b, _ := json.Marshal(resp)
 			return string(b), nil
@@ -619,6 +642,9 @@ type subagentChannel struct {
 	// re-reading the ledger. Written under subagentChannelsMu, the lock the
 	// channel table itself sits under, and read under the same lock.
 	title string
+	// worktree is the git worktree the record named, on the same terms as
+	// title: a live-subagent listing reports it as the agent's own tree.
+	worktree string
 	// firstTokenExecID/firstTokenStarted/firstTokenWait (mu-guarded) are the
 	// first-token window of the execution that currently holds the channel's
 	// exec slot: the window opens when the execution starts, the execution's
@@ -708,6 +734,9 @@ func subagentChannelFor(fac Factory, record agent.HistoryEntry) *subagentChannel
 	}
 	if title := strings.TrimSpace(record.Title); title != "" {
 		ch.title = title
+	}
+	if dir := strings.TrimSpace(record.Worktree); dir != "" {
+		ch.worktree = dir
 	}
 	return ch
 }
@@ -1672,6 +1701,22 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	if rawSubtype != "" && own.SubagentExecutor == nil {
 		return preparedSubagent{}, fmt.Errorf("subagent requires an in-process executor")
 	}
+	// A dispatch may ask for a git worktree of its own (owner 2026-11-10).
+	// It is created before the child run record, so the record, its spawned
+	// event and the path the receipt answers with all name the same tree.
+	// A batch task is refused: its unattended approval rule and an isolation
+	// boundary cannot be mixed without one of them lying about the other.
+	worktreeDir := ""
+	if name := strings.TrimSpace(d.worktree); name != "" {
+		if tool.TaskWorkspaceFromContext(baseCtx) != "" {
+			return preparedSubagent{}, fmt.Errorf("a worktree dispatch needs an interactive session")
+		}
+		dir, err := tool.CreateWorktree(baseCtx, fac.projectRoot(), name)
+		if err != nil {
+			return preparedSubagent{}, err
+		}
+		worktreeDir = dir
+	}
 	cat := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType())
 	parent := strings.TrimSpace(tool.RunIDFromContext(baseCtx))
 	sid := strings.TrimSpace(llm.AgentSessionIDFromContext(baseCtx))
@@ -1714,6 +1759,13 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	// ~/.forebrain as the subagent's scope, hiding the real project.
 	if pr := fac.projectRoot(); pr != "" {
 		cctx = tool.WithProjectRoot(cctx, pr)
+	}
+	// Every tool of this child — file tools, @-mentions, the shell's cwd,
+	// shell-diff — resolves inside the worktree from here on, and GuardWrite
+	// refuses a write outside it. It is not a task workspace: the child still
+	// asks for approvals like any other run.
+	if worktreeDir != "" {
+		cctx = tool.WithIsolatedWorktree(cctx, worktreeDir)
 	}
 	// The task workspace and task context follow the dispatch: a subagent of a
 	// batch execution works inside the execution's workspace, under the same
@@ -1815,6 +1867,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 		OneShot:          oneShot,
 		Continuable:      continuable,
 		DefSource:        defSource,
+		Worktree:         worktreeDir,
 	}
 	// The model this run is pinned to is a property of the execution, decided
 	// once, here: recorded with the entry, so its spawned event and every
@@ -1979,13 +2032,14 @@ func runAcrossApprovals(
 	}
 }
 
-func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, subagentType string) (subagentExecResult, error) {
+func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, subagentType, worktree string) (subagentExecResult, error) {
 	prep, output, err := dispatchSubagent(ctx, fac, subagentDispatch{
-		taskID:  taskID,
-		title:   title,
-		task:    task,
-		subtype: subagentType,
-		resolve: SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
+		taskID:   taskID,
+		title:    title,
+		task:     task,
+		subtype:  subagentType,
+		worktree: worktree,
+		resolve:  SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
 		run: func(runCtx context.Context, fac Factory, prep preparedSubagent) (string, error) {
 			// A gate this child hits is answered in place, while its run and its
 			// dispatcher stay alive. Without the hook the error travels on
@@ -2023,6 +2077,7 @@ func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, 
 		ParentRunID: prep.entry.ParentRunID,
 		SessionID:   prep.entry.SessionID,
 		Output:      output,
+		Worktree:    prep.entry.Worktree,
 	}, nil
 }
 
@@ -2063,13 +2118,14 @@ func asyncSubagentContext(ctx context.Context) context.Context {
 	return base
 }
 
-func spawnAsyncSubagent(ctx context.Context, fac Factory, taskID, title, task, subagentType string) (agent.HistoryEntry, error) {
+func spawnAsyncSubagent(ctx context.Context, fac Factory, taskID, title, task, subagentType, worktree string) (agent.HistoryEntry, error) {
 	d := subagentDispatch{
-		taskID:  taskID,
-		title:   title,
-		task:    task,
-		subtype: subagentType,
-		resolve: SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
+		taskID:   taskID,
+		title:    title,
+		task:     task,
+		subtype:  subagentType,
+		worktree: worktree,
+		resolve:  SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic,
 	}
 	// The execution outlives the call that starts it, so it runs on the
 	// background context built here rather than on the dispatching one: this is
@@ -2282,6 +2338,14 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 	if pr := fac.projectRoot(); pr != "" {
 		hostCtx = tool.WithProjectRoot(hostCtx, pr)
 	}
+	// A subagent dispatched into a worktree continues there: the record's tree
+	// is its working directory and its write boundary, exactly as on its first
+	// execution. A tree that no longer exists is refused by
+	// subagentWorktreeMissing before anything runs — never silently swapped
+	// for the conversation's directory.
+	if dir := strings.TrimSpace(record.Worktree); dir != "" {
+		hostCtx = tool.WithIsolatedWorktree(hostCtx, dir)
+	}
 	// A continued subagent keeps running where its execution runs: the task
 	// workspace and task context its dispatch carried are restored here, so a
 	// later attempt edits the same files under the same rules.
@@ -2314,6 +2378,22 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 		hostCtx = WithQuerySource(hostCtx, source)
 	}
 	return hostCtx
+}
+
+// subagentWorktreeMissing refuses a continuation whose recorded worktree is
+// gone: its edits belong in that tree, and running it in the conversation's
+// directory would put them where the record — and the reviewer reading it —
+// does not look. A dispatch never deletes a worktree, so a missing one was
+// removed by hand.
+func subagentWorktreeMissing(record agent.HistoryEntry) error {
+	dir := strings.TrimSpace(record.Worktree)
+	if dir == "" {
+		return nil
+	}
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return nil
+	}
+	return fmt.Errorf("subagent %s ran in worktree %s, which no longer exists", subagentRosterKey(record), dir)
 }
 
 // ErrSubagentRunning refuses a second execution of a subagent while one is
@@ -2587,6 +2667,10 @@ type LiveSubagent struct {
 	Title           string
 	StartedAt       time.Time
 	WorkerSessionID string
+	// Worktree is the git worktree this subagent runs in, empty when it runs
+	// in the conversation's directory. It is the agent's own tree: a peer
+	// listing reports this path, not the tree its dispatcher sits in.
+	Worktree string
 }
 
 // LiveSubagents lists the subagents of one conversation whose execution is in
@@ -2613,7 +2697,10 @@ func LiveSubagents(r *Runner, conversationSessionID string) []LiveSubagent {
 		if ex == nil {
 			continue
 		}
-		out = append(out, LiveSubagent{Key: ch.agentKey, Title: ch.title, StartedAt: ex.started, WorkerSessionID: workerSessionID})
+		out = append(out, LiveSubagent{
+			Key: ch.agentKey, Title: ch.title, StartedAt: ex.started,
+			WorkerSessionID: workerSessionID, Worktree: ch.worktree,
+		})
 	}
 	// Insertion sort keeps the listing stable without a new import — the
 	// channel table is a map, and an unordered listing would re-order the
@@ -2684,7 +2771,14 @@ func startSubagentContinuation(ctx context.Context, fac Factory, ch *subagentCha
 	if own.RunRT != nil && strings.TrimSpace(record.RunID) != "" {
 		_ = own.RunRT.SetStatus(ctx, record.RunID, state.RunStatusRunning)
 	}
-	outText, runErr := runSubagentExecution(runCtx, fac, lifecycle, subagentResumeAttempt(fac, record, in, skills))
+	// A recorded worktree that is gone fails this execution instead of running
+	// it in the conversation's directory: the spawn above already announced it,
+	// so the ended event below settles its row as failed with the reason.
+	var outText string
+	runErr := subagentWorktreeMissing(record)
+	if runErr == nil {
+		outText, runErr = runSubagentExecution(runCtx, fac, lifecycle, subagentResumeAttempt(fac, record, in, skills))
+	}
 	now = time.Now().Unix()
 	// The ended event must carry the identity the spawn announced, not the
 	// original record's: this execution has no dispatching tool call, so its
@@ -2845,6 +2939,12 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 		if _, rerr := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ForProjectType(fac.projectType()).ResolvePublic(record.AgentType); rerr != nil {
 			return agent.HistoryEntry{}, rerr // disabled: the catalog's own reason
 		}
+	}
+	// A deleted worktree is refused here, by name: the continuation belongs in
+	// the tree the record names, and running it in the conversation's directory
+	// would leave its edits where nobody looks for them.
+	if err := subagentWorktreeMissing(record); err != nil {
+		return agent.HistoryEntry{}, err
 	}
 	// The subagent's conversation lives in its worker session now. When the
 	// session holds history — every subagent this runtime births — the
@@ -3172,15 +3272,16 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 				task := strings.TrimSpace(item.Prompt)
 				subType := strings.TrimSpace(item.SubagentType)
 				title := strings.TrimSpace(item.Title)
+				worktree := strings.TrimSpace(item.Worktree)
 				if task == "" {
-					results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Error: "skipped: empty prompt", OK: false}
+					results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Worktree: worktree, Error: "skipped: empty prompt", OK: false}
 					continue
 				}
 
 				select {
 				case sem <- struct{}{}:
 				case <-fanoutCtx.Done():
-					results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Error: "skipped due to fail_fast", OK: false}
+					results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Worktree: worktree, Error: "skipped due to fail_fast", OK: false}
 					continue
 				}
 
@@ -3188,17 +3289,17 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 				if in.FailFast && firstErr != nil {
 					mu.Unlock()
 					<-sem
-					results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Error: "skipped due to fail_fast", OK: false}
+					results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Worktree: worktree, Error: "skipped due to fail_fast", OK: false}
 					continue
 				}
 				mu.Unlock()
 
 				wg.Add(1)
-				go func(i int, task, subType, title, taskID string) {
+				go func(i int, task, subType, title, worktree, taskID string) {
 					defer wg.Done()
 					defer func() { <-sem }()
 
-					execRes, err := execGeneralSubagent(withSubagentTaskIndex(fanoutCtx, i), fac, taskID, title, task, subType)
+					execRes, err := execGeneralSubagent(withSubagentTaskIndex(fanoutCtx, i), fac, taskID, title, task, subType, worktree)
 					// A task the user stopped is not a failure: fail_fast does
 					// not take the other tasks down with it.
 					var stopped *subagentStopped
@@ -3209,6 +3310,9 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 							Error:  stopped.record.Error,
 							TaskID: stopped.record.TaskID,
 							Next:   subagentStoppedAdvice,
+							// A stopped run keeps its tree: the dispatcher
+							// reviews what it left behind.
+							Worktree: stopped.record.Worktree,
 						}
 						return
 					}
@@ -3239,10 +3343,11 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 								RanFor:   tool.FormatDuration(failed.elapsed),
 								ResetsAt: failed.resetsAt(),
 								Next:     failed.advice(),
+								Worktree: failed.record.Worktree,
 							}
 							return
 						}
-						results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Error: err.Error(), OK: false}
+						results[i] = FanoutResult{Index: i, Title: title, Task: task, SubagentType: subType, Worktree: worktree, Error: err.Error(), OK: false}
 						return
 					}
 					taskStart := time.Now()
@@ -3255,10 +3360,11 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 						RanFor:       tool.FormatDuration(time.Since(taskStart)),
 						// The raw report: budgeting happens once, where the fanout
 						// text is rendered (renderFanoutReport), never here.
-						Output: execRes.Output,
-						OK:     true,
+						Output:   execRes.Output,
+						OK:       true,
+						Worktree: execRes.Worktree,
 					}
-				}(i, task, subType, title, taskIDs[i])
+				}(i, task, subType, title, worktree, taskIDs[i])
 			}
 			wg.Wait()
 
@@ -3330,10 +3436,12 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			task := ""
 			subType := ""
 			title := ""
+			worktree := ""
 			if in != nil {
 				task = strings.TrimSpace(in.Task)
 				subType = strings.TrimSpace(in.SubagentType)
 				title = strings.TrimSpace(in.Title)
+				worktree = strings.TrimSpace(in.Worktree)
 			}
 			if task == "" {
 				b, _ := json.Marshal(map[string]any{
@@ -3343,11 +3451,11 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 				return string(b), nil
 			}
 			taskID := newSubagentTaskID()
-			entry, err := spawnAsyncSubagent(ctx, fac, taskID, title, task, subType)
+			entry, err := spawnAsyncSubagent(ctx, fac, taskID, title, task, subType, worktree)
 			if err != nil {
 				return "", err
 			}
-			b, _ := json.Marshal(map[string]any{
+			resp := map[string]any{
 				"agent_id":          entry.AgentID,
 				"task_id":           entry.TaskID,
 				"run_id":            entry.RunID,
@@ -3360,7 +3468,11 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 				"agent_kind":        entry.AgentKind,
 				"agent_type":        entry.AgentType,
 				"runtime_kind":      entry.RuntimeKind,
-			})
+			}
+			if entry.Worktree != "" {
+				resp["worktree"] = entry.Worktree
+			}
+			b, _ := json.Marshal(resp)
 			return string(b), nil
 		},
 	); err != nil {
@@ -3592,6 +3704,10 @@ type subagentDispatch struct {
 	title   string
 	task    string
 	subtype string
+	// worktree is the kebab-case name a dispatch asked to be isolated into,
+	// empty for the conversation's own directory. prepareSubagentExecutionResolved
+	// creates it and the child run works there for its whole life.
+	worktree string
 	// resolve decides which definitions this dispatcher may name. The tool
 	// paths pass the public resolver so a model cannot reach a reserved
 	// subtype; an internal dispatcher passes the full one.
@@ -3898,6 +4014,12 @@ func subagentExecContext(prep preparedSubagent) context.Context {
 	// the skills its own messages select, and this is where the child's
 	// context leaves the parent's.
 	hostCtx := withoutExplicitSkills(prep.ctx)
+	// An isolated run works in the worktree its dispatch created, wherever the
+	// dispatch's own context carried it: every tool of this execution resolves
+	// there, and an approval replay resumes on this very context.
+	if dir := strings.TrimSpace(prep.entry.Worktree); dir != "" {
+		hostCtx = tool.WithIsolatedWorktree(hostCtx, dir)
+	}
 	// Every subagent execution — fork, typed or custom — carries one marker:
 	// this run is a subagent. It is set here, the single place every dispatch
 	// path builds the child's context from, so the subagent-tool guards and

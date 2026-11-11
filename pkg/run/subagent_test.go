@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -873,6 +874,7 @@ func TestSpawnAsyncSubagentSendsDirectSpawnNotification(t *testing.T) {
 		"short title",
 		"verify direct spawn",
 		"general-purpose",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("spawnAsyncSubagent: %v", err)
@@ -1117,7 +1119,7 @@ func TestSubagentDispatchKernelsKeepTheDispatchingRunsHooks(t *testing.T) {
 		run  func(t *testing.T, h *dispatchHarness, dispatch context.Context)
 	}{
 		{"execGeneralSubagent", func(t *testing.T, h *dispatchHarness, dispatch context.Context) {
-			if _, err := execGeneralSubagent(dispatch, h.factory, "task-kernel-sync", "kernels", "run a tool", "general-purpose"); err != nil {
+			if _, err := execGeneralSubagent(dispatch, h.factory, "task-kernel-sync", "kernels", "run a tool", "general-purpose", ""); err != nil {
 				t.Fatalf("execGeneralSubagent: %v", err)
 			}
 		}},
@@ -1225,6 +1227,7 @@ func TestSpawnAsyncSubagentTurnsPanicIntoDurableFailure(t *testing.T) {
 		"short title",
 		"exercise panic cleanup",
 		"general-purpose",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("spawnAsyncSubagent: %v", err)
@@ -2310,6 +2313,7 @@ func TestExecGeneralTypedSubagentWritesLifecycleToChildRun(t *testing.T) {
 		"short title",
 		"do work",
 		"general-purpose",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("execGeneralSubagent: %v", err)
@@ -2372,6 +2376,7 @@ func TestExecGeneralSubagentExecCtxCarriesRosterKeyAsHookAgentID(t *testing.T) {
 		"short title",
 		"do work",
 		"explore",
+		"",
 	); err != nil {
 		t.Fatalf("execGeneralSubagent: %v", err)
 	}
@@ -2457,6 +2462,7 @@ func TestSubagentContextDoesNotInheritPrimarySteerRuntime(t *testing.T) {
 		"short title",
 		"do work",
 		"explore",
+		"",
 	); err != nil {
 		t.Fatalf("execGeneralSubagent: %v", err)
 	}
@@ -2517,6 +2523,7 @@ func TestSubagentDispatchDoesNotInheritTheDispatchTurnsSkill(t *testing.T) {
 		"short title",
 		"do work",
 		"general-purpose",
+		"",
 	); err != nil {
 		t.Fatalf("execGeneralSubagent: %v", err)
 	}
@@ -2839,6 +2846,7 @@ func TestTypedSubagentDoesNotStreamThroughTheDispatchingAgentsSink(t *testing.T)
 		"short title",
 		"do work",
 		"explore",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("execGeneralSubagent: %v", err)
@@ -3294,6 +3302,7 @@ func TestExecGeneralForkSubagentUsesParentSnapshotAndStableForkMessages(t *testi
 		"short title",
 		"inspect auth flow",
 		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("execGeneralSubagent fork: %v", err)
@@ -3391,6 +3400,7 @@ func TestFrontForkChildCarriesItsOwnIdentity(t *testing.T) {
 		"task-front-fork",
 		"short title",
 		"inspect auth flow",
+		"",
 		"",
 	); err != nil {
 		t.Fatalf("execGeneralSubagent fork: %v", err)
@@ -3760,6 +3770,7 @@ func TestForkSubagentDoesNotMutateParentTools(t *testing.T) {
 		"short title",
 		"investigate auth flow",
 		"",
+		"",
 	); err != nil {
 		t.Fatalf("execGeneralSubagent fork: %v", err)
 	}
@@ -4078,7 +4089,7 @@ func TestSubagentUsageStaysOutOfTheDispatchingRunsAccumulator(t *testing.T) {
 	parentCtx := llm.WithUsageAccumulator(toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID), parentAcc)
 	parentAcc.ObserveUsage(llm.Usage{InputTokens: 7, OutputTokens: 3})
 
-	if _, err := execGeneralSubagent(parentCtx, Factory{AgentName: "main", Owner: owner, Home: t.TempDir()}, "task-1", "title", "do work", "general-purpose"); err != nil {
+	if _, err := execGeneralSubagent(parentCtx, Factory{AgentName: "main", Owner: owner, Home: t.TempDir()}, "task-1", "title", "do work", "general-purpose", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := parentAcc.Snapshot(); got != (llm.Usage{InputTokens: 7, OutputTokens: 3}) {
@@ -4391,7 +4402,7 @@ func TestForkSubagentWritesItsInheritedPrefixAndItsWork(t *testing.T) {
 	fix.ensureConversation(t, "conv-fork")
 	ctx := withForkRuntimeSnapshot(llm.WithAgentSessionID(context.Background(), "conv-fork"), parentMsgs)
 	ctx = toolpkg.WithRunID(ctx, "parent-run-1")
-	res, err := execGeneralSubagent(ctx, fix.fac, "task-fork", "dig", "look into it", "")
+	res, err := execGeneralSubagent(ctx, fix.fac, "task-fork", "dig", "look into it", "", "")
 	if err != nil {
 		t.Fatalf("execGeneralSubagent: %v", err)
 	}
@@ -4484,7 +4495,7 @@ func TestForkSubagentFirstRequestIsUnchangedByPersistence(t *testing.T) {
 	fix.ensureConversation(t, "conv-golden")
 	ctx := withForkRuntimeSnapshot(llm.WithAgentSessionID(context.Background(), "conv-golden"), parentMsgs)
 	ctx = toolpkg.WithRunID(ctx, "parent-run-1")
-	if _, err := execGeneralSubagent(ctx, fix.fac, "task-golden", "dig", task, ""); err != nil {
+	if _, err := execGeneralSubagent(ctx, fix.fac, "task-golden", "dig", task, "", ""); err != nil {
 		t.Fatalf("dispatched fork: %v", err)
 	}
 
@@ -5239,7 +5250,7 @@ func TestSubagentUsageSnapshotIsPublishedForItsOwnView(t *testing.T) {
 	}
 	parentCtx := llm.WithStreamSink(toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID), parentSink)
 
-	if _, err := execGeneralSubagent(parentCtx, Factory{AgentName: "main", Owner: owner, Home: t.TempDir()}, "task-budget", "title", "do work", "explore"); err != nil {
+	if _, err := execGeneralSubagent(parentCtx, Factory{AgentName: "main", Owner: owner, Home: t.TempDir()}, "task-budget", "title", "do work", "explore", ""); err != nil {
 		t.Fatal(err)
 	}
 	events := probe.budgetEvents()
@@ -5337,7 +5348,7 @@ func TestSubagentBudgetEventFiledOncePerResponse(t *testing.T) {
 		Events:  probe,
 	}
 	parentCtx := llm.WithStreamSink(toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID), &llm.StreamSink{})
-	if _, err := execGeneralSubagent(parentCtx, Factory{AgentName: "main", Owner: owner, Home: t.TempDir()}, "task-budget-once", "title", "do work", "explore"); err != nil {
+	if _, err := execGeneralSubagent(parentCtx, Factory{AgentName: "main", Owner: owner, Home: t.TempDir()}, "task-budget-once", "title", "do work", "explore", ""); err != nil {
 		t.Fatal(err)
 	}
 	events := probe.budgetEvents()
@@ -5933,7 +5944,7 @@ func TestSubagentReceivesASteerAtItsNextToolBoundary(t *testing.T) {
 		toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "conv-steer"), "parent-1"),
 		primaryRt,
 	)
-	if _, err := execGeneralSubagent(ctx, fix.fac, "task-steer", "short title", "go", "explore"); err != nil {
+	if _, err := execGeneralSubagent(ctx, fix.fac, "task-steer", "short title", "go", "explore", ""); err != nil {
 		t.Fatalf("execGeneralSubagent: %v", err)
 	}
 	if len(ex.requests) < 2 {
@@ -6001,7 +6012,7 @@ func TestEverySubagentExecutionIsReportedToItsScheduler(t *testing.T) {
 
 	ctx := llm.WithAgentSessionID(context.Background(), conv)
 	ctx = toolpkg.WithRunID(ctx, "parent-run-1")
-	if _, err := execGeneralSubagent(ctx, fix.fac, "task-report", "title", "do work", "general-purpose"); err != nil {
+	if _, err := execGeneralSubagent(ctx, fix.fac, "task-report", "title", "do work", "general-purpose", ""); err != nil {
 		t.Fatalf("first dispatch: %v", err)
 	}
 	if _, err := continueSubagentExecution(context.Background(), fix.fac, &SubagentContinueInput{TaskID: "task-report", Message: "keep going"}); err != nil {
@@ -7363,7 +7374,7 @@ func TestExecSubagentHandsTheRecordedModelToTheWorker(t *testing.T) {
 	}
 	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
 
-	if _, err := execGeneralSubagent(dispatchTestCtx(), fac, "task-worker-model", "short title", "do work", "general-purpose"); err != nil {
+	if _, err := execGeneralSubagent(dispatchTestCtx(), fac, "task-worker-model", "short title", "do work", "general-purpose", ""); err != nil {
 		t.Fatalf("execGeneralSubagent: %v", err)
 	}
 	exec.mu.Lock()
@@ -7871,5 +7882,252 @@ func TestSubagentRecordCarriesNoRowWhenThePinNamesNone(t *testing.T) {
 	}
 	if prep.entry.ModelID != "" {
 		t.Fatalf("the dispatch recorded row %q, want none — the pin names no configured row", prep.entry.ModelID)
+	}
+}
+
+// subagentWorktreeRepo makes dir a repository with one commit, so a dispatch
+// can check a worktree out from HEAD. The user's own git configuration — a
+// global ignore file that already lists .worktrees among it — is kept out of
+// the answer.
+func subagentWorktreeRepo(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// TestDispatchSubagentCreatesAndRunsInItsWorktree pins a worktree dispatch
+// (owner 2026-11-10): the engine checks the tree out under the one directory
+// worktrees live in, the child's tools resolve inside it, and the record keeps
+// the path a reviewer and a continuation read.
+func TestDispatchSubagentCreatesAndRunsInItsWorktree(t *testing.T) {
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	subagentWorktreeRepo(t, project)
+	fac, _ := newDispatchFactory(t)
+	fac.ProjectRoot = project
+	prep, out, err := dispatchSubagent(dispatchTestCtx(), fac, subagentDispatch{
+		taskID:   "task-worktree",
+		task:     "work in a worktree",
+		subtype:  "explore",
+		worktree: "demo-exec",
+		resolve:  agent.ResolvePublicSubtype,
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatchSubagent: %v", err)
+	}
+	want := filepath.Join(project, toolpkg.WorktreesDirName, "demo-exec")
+	if out != "done" || prep.entry.Worktree != want {
+		t.Fatalf("out=%q worktree=%q, want %q", out, prep.entry.Worktree, want)
+	}
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("the worktree directory does not exist: %v", err)
+	}
+	execDir, err := toolpkg.WorkingDir(subagentExecContext(prep))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execDir != want {
+		t.Fatalf("the child's working directory = %q, want its worktree %q", execDir, want)
+	}
+	// The ledger is what a continuation and the peer listing read the tree
+	// from, so the path has to survive there.
+	list, err := agent.ListHistory(fac.subagentScopeRoot(), agent.Query{Limit: -1})
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	found := false
+	for _, record := range list {
+		if record.TaskID == "task-worktree" {
+			found = true
+			if record.Worktree != want {
+				t.Fatalf("recorded worktree = %q, want %q", record.Worktree, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the dispatch left no record: %#v", list)
+	}
+}
+
+// TestDispatchSubagentRefusesAWorktreeInABatchContext pins the combination a
+// dispatch may not ask for: a batch task's unattended approval rule and an
+// isolation boundary cannot both hold, and the refusal names the reason.
+func TestDispatchSubagentRefusesAWorktreeInABatchContext(t *testing.T) {
+	fac, _ := newDispatchFactory(t)
+	ran := false
+	_, _, err := dispatchSubagent(toolpkg.WithTaskWorkspace(dispatchTestCtx(), t.TempDir()), fac, subagentDispatch{
+		taskID:   "task-batch-worktree",
+		task:     "work in a worktree",
+		worktree: "demo-exec",
+		resolve:  agent.ResolvePublicSubtype,
+		run: func(_ context.Context, _ Factory, _ preparedSubagent) (string, error) {
+			ran = true
+			return "", nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "a worktree dispatch needs an interactive session") {
+		t.Fatalf("err = %v, want the interactive-session refusal", err)
+	}
+	if ran {
+		t.Fatal("a refused dispatch must not run")
+	}
+}
+
+// TestSubagentContinuationRunsInItsRecordedWorktree pins what a continuation
+// rebuilds from the record: the subagent's own working directory is its
+// worktree again, and a worktree that no longer exists is refused by name
+// instead of silently running in the conversation's directory.
+func TestSubagentContinuationRunsInItsRecordedWorktree(t *testing.T) {
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	subagentWorktreeRepo(t, project)
+	dir, err := toolpkg.CreateWorktree(context.Background(), project, "demo-exec")
+	if err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+	fac, _ := newDispatchFactory(t)
+	fac.ProjectRoot = project
+	record := agent.HistoryEntry{
+		TaskID: "task-continue", AgentType: "general-purpose", AgentKind: "typed",
+		WorkerSessionID: "ws-task-continue", SessionID: "session-1", Worktree: dir,
+	}
+	hostCtx := subagentRecordContext(context.Background(), fac, record)
+	if got, err := toolpkg.WorkingDir(hostCtx); err != nil || got != dir {
+		t.Fatalf("continuation working directory = %q, %v; want %q", got, err, dir)
+	}
+	if err := subagentWorktreeMissing(record); err != nil {
+		t.Fatalf("an existing worktree must not be refused: %v", err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := subagentWorktreeMissing(record); err == nil ||
+		!strings.Contains(err.Error(), "which no longer exists") {
+		t.Fatalf("err = %v, want the missing-worktree refusal", err)
+	}
+	// A record that never had a worktree keeps running where its conversation
+	// does.
+	plain := record
+	plain.Worktree = ""
+	if err := subagentWorktreeMissing(plain); err != nil {
+		t.Fatalf("a subagent without a worktree must not be refused: %v", err)
+	}
+	if got, _ := toolpkg.WorkingDir(subagentRecordContext(context.Background(), fac, plain)); got != project {
+		t.Fatalf("plain continuation working directory = %q, want the project root %q", got, project)
+	}
+}
+
+// TestLiveSubagentsReportsItsWorktree pins the fact a peer listing reads: each
+// live subagent carries the worktree its execution runs in, and one without a
+// worktree carries none.
+func TestLiveSubagentsReportsItsWorktree(t *testing.T) {
+	fac := Factory{AgentName: "main", Home: t.TempDir(), Owner: &Runner{Deps: &Deps{}}}
+	owner := fac.Owner
+	record := func(task, worktree string) agent.HistoryEntry {
+		return agent.HistoryEntry{
+			TaskID: task, AgentType: "general-purpose", Title: task,
+			WorkerSessionID: "ws-" + task, SessionID: "conv-worktree", Worktree: worktree,
+		}
+	}
+	isolated := subagentChannelFor(fac, record("task-live-wt", "/tmp/demo-exec"))
+	plain := subagentChannelFor(fac, record("task-live-plain", ""))
+	start := time.Now()
+	isolated.setRunning(&subagentExecution{executionID: "exec-live-wt", started: start})
+	plain.setRunning(&subagentExecution{executionID: "exec-live-plain", started: start})
+
+	got := LiveSubagents(owner, "conv-worktree")
+	if len(got) != 2 {
+		t.Fatalf("LiveSubagents = %#v, want both running ones", got)
+	}
+	byKey := map[string]string{}
+	for _, live := range got {
+		byKey[live.Key] = live.Worktree
+	}
+	if tree := byKey[subagentRosterKey(record("task-live-wt", ""))]; tree != "/tmp/demo-exec" {
+		t.Fatalf("isolated subagent worktree = %q, want its own tree", tree)
+	}
+	if tree := byKey[subagentRosterKey(record("task-live-plain", ""))]; tree != "" {
+		t.Fatalf("plain subagent worktree = %q, want none", tree)
+	}
+}
+
+// TestWorktreeSubagentKeepsItsWorktreeAcrossApprovalReplay pins the retry path:
+// a gate the surface answers resumes the child on the context the isolation
+// was set on, so the retry edits its worktree and not the conversation's tree.
+func TestWorktreeSubagentKeepsItsWorktreeAcrossApprovalReplay(t *testing.T) {
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	subagentWorktreeRepo(t, project)
+	executor := &gatedSubagentExecutor{}
+	st := toolpkg.NewState(t.TempDir())
+	var mu sync.Mutex
+	var askedIn, resumedIn []string
+	st.SetSubagentApprovalHook(func(ctx context.Context, rae *toolpkg.RequiresActionError) (context.Context, error) {
+		resume := toolpkg.WithApprovedActionID(ctx, rae.ActionID)
+		mu.Lock()
+		askedIn = append(askedIn, toolpkg.IsolatedWorktreeFromContext(ctx))
+		resumedIn = append(resumedIn, toolpkg.IsolatedWorktreeFromContext(resume))
+		mu.Unlock()
+		return resume, nil
+	})
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, Factory{
+		Home:        t.TempDir(),
+		ProjectRoot: project,
+		Owner:       &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: executor},
+		Tools:       st,
+	}); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	tl, ok := aToolByName(a, "subagent_run")
+	if !ok {
+		t.Fatal("subagent_run not registered")
+	}
+	got, err := tl.Handle(dispatchTestCtx(), `{"task":"one","subagent_type":"general-purpose","worktree":"demo-exec"}`)
+	if err != nil {
+		t.Fatalf("tool.Handle: %v", err)
+	}
+	var resp struct {
+		Status   string `json:"status"`
+		Output   string `json:"output"`
+		Worktree string `json:"worktree"`
+	}
+	if err := json.Unmarshal([]byte(got.(string)), &resp); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	want := filepath.Join(project, toolpkg.WorktreesDirName, "demo-exec")
+	if resp.Output != "done:one" || resp.Worktree != want {
+		t.Fatalf("output=%q worktree=%q, want the resumed run's report and %q", resp.Output, resp.Worktree, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(askedIn) != 1 || len(resumedIn) != 1 {
+		t.Fatalf("approval hook ran %d/%d times, want once", len(askedIn), len(resumedIn))
+	}
+	if askedIn[0] != want || resumedIn[0] != want {
+		t.Fatalf("approval context worktree = %q (resume %q), want %q", askedIn[0], resumedIn[0], want)
 	}
 }

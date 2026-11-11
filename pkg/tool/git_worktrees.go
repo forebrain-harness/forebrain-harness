@@ -3,8 +3,10 @@ package tool
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +82,62 @@ func WorktreesDir(ctx context.Context, dir string) string {
 	return filepath.Join(mainRoot, WorktreesDirName)
 }
 
+// worktreeCreateTimeout bounds `git worktree add`: a cold checkout of a large
+// repository takes seconds, and a dispatch must never hang the turn on git.
+const worktreeCreateTimeout = 60 * time.Second
+
+// worktreeNamePattern is the shape of a worktree name a dispatch may ask for:
+// a short kebab-case name, which is also the branch it is checked out on.
+// Anything else — a path, a revision, an empty string — would name a directory
+// or a branch this repository did not agree to.
+var worktreeNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+// CreateWorktree makes a worktree of the repository projectRoot belongs to, at
+// <main worktree>/.worktrees/<name>, checked out from HEAD on a new branch
+// <name> (owner 2026-11-10). It answers the resolved directory — the path a
+// subagent's record carries and a reviewer runs git with — and fails outside a
+// repository, when the name is already taken and when git refuses.
+//
+// Nothing is deleted or reused: a name that already names a directory or a
+// branch fails here, and the caller picks another one.
+func CreateWorktree(ctx context.Context, projectRoot, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if !worktreeNamePattern.MatchString(name) {
+		return "", fmt.Errorf("worktree name %q is not a short kebab-case name", name)
+	}
+	mainRoot := MainWorktreeRoot(ctx, strings.TrimSpace(projectRoot))
+	if mainRoot == "" {
+		return "", fmt.Errorf("worktree dispatch needs a git repository: %s is not inside one", strings.TrimSpace(projectRoot))
+	}
+	EnsureWorktreesIgnored(ctx, mainRoot)
+	dir := filepath.Join(mainRoot, WorktreesDirName, name)
+	if _, err := os.Lstat(dir); err == nil {
+		return "", fmt.Errorf("worktree %s already exists; pick another name", dir)
+	}
+	// git creates the worktree directory itself; only its parent is prepared,
+	// so a name that is taken cannot be merged into an existing checkout.
+	if err := os.MkdirAll(filepath.Join(mainRoot, WorktreesDirName), 0o755); err != nil {
+		return "", fmt.Errorf("create worktrees directory: %w", err)
+	}
+	if _, err := shellDiffRun(ctx, shellDiffDiscoveryEnv(), worktreeCreateTimeout, nil,
+		"-C", mainRoot, "worktree", "add", "-b", name, dir, "HEAD"); err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", fmt.Errorf("created worktree %s is not readable: %w", dir, err)
+	}
+	resolved = filepath.Clean(resolved)
+	// The same-tree rule stops at a linked worktree top, so a directory that
+	// is not one — a plain checkout git made, a worktree that lost its
+	// administrative files — must not be reported as a subagent's tree: every
+	// reader of this path would then disagree with the guard.
+	if !IsLinkedWorktreeTop(resolved) {
+		return "", fmt.Errorf("git made %s, but it is not a linked worktree top", resolved)
+	}
+	return resolved, nil
+}
+
 // IsLinkedWorktreeTop reports whether dir is the top of a linked git
 // worktree: its .git is a file naming an administrative directory that holds a
 // commondir file, which git writes for linked worktrees only. A main
@@ -109,6 +167,34 @@ func IsLinkedWorktreeTop(dir string) bool {
 	}
 	commondir, err := os.Stat(filepath.Join(gitDir, "commondir"))
 	return err == nil && commondir.Mode().IsRegular()
+}
+
+// LinkedWorktreeTop resolves which linked worktree a path belongs to: the
+// innermost directory at or above it whose .git is a linked worktree's, "" for
+// a path in the main checkout and outside any repository. It is how a path
+// names its tree without asking git, so the same answer costs two file reads
+// however deep the path sits (plan 198 §8).
+func LinkedWorktreeTop(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = filepath.Clean(abs)
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = filepath.Clean(resolved)
+	}
+	for dir := path; ; {
+		if IsLinkedWorktreeTop(dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir || dir == "" {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // worktreesIgnored remembers the directories EnsureWorktreesIgnored has

@@ -26,6 +26,23 @@ func TestSandboxDenialReasonFallsBackToExecutionError(t *testing.T) {
 	}
 }
 
+// TestSandboxAdditionalDirsDropsRootsForAnIsolatedWorktree pins the shell half
+// of a worktree dispatch's write boundary (owner 2026-11-10): an ordinary run
+// keeps the conversation's roots writable beside its cwd, an isolated one adds
+// none, so only the worktree (the cwd), the sandbox's temp directory and /tmp
+// stay writable.
+func TestSandboxAdditionalDirsDropsRootsForAnIsolatedWorktree(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, ".worktrees", "demo-exec")
+	st := NewState(root)
+	if got, want := sandboxAdditionalDirs(context.Background(), st), st.AllowedRoots(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("additional dirs = %v, want the allowed roots %v", got, want)
+	}
+	if got := sandboxAdditionalDirs(WithIsolatedWorktree(context.Background(), worktree), st); got != nil {
+		t.Fatalf("an isolated worktree run adds %v, want nothing", got)
+	}
+}
+
 func TestSandboxDenialReasonUsesConcreteDeniedOutputLine(t *testing.T) {
 	res := safety.CommandResult{Stderr: "--- FAIL: TestOAuth\nlistener_test.go:28: listen tcp 127.0.0.1:0: bind: operation not permitted\nFAIL"}
 	want := "listener_test.go:28: listen tcp 127.0.0.1:0: bind: operation not permitted"

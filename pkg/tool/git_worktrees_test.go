@@ -221,3 +221,86 @@ func TestIsLinkedWorktreeTopKnowsALinkedWorktreeFromASubmodule(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateWorktreeChecksOutANewBranchUnderWorktrees pins what a worktree
+// dispatch asks git for (owner 2026-11-10): the one directory worktrees live
+// in, a new branch named after the worktree, checked out from HEAD, and the
+// resolved path the dispatch reports.
+func TestCreateWorktreeChecksOutANewBranchUnderWorktrees(t *testing.T) {
+	repo := gitRepoFixture(t)
+	ctx := context.Background()
+	dir, err := CreateWorktree(ctx, repo, "demo-exec")
+	if err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+	if want := filepath.Join(repo, WorktreesDirName, "demo-exec"); dir != want {
+		t.Fatalf("CreateWorktree = %q, want %q", dir, want)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("the worktree directory does not exist: %v", err)
+	}
+	if !IsLinkedWorktreeTop(dir) {
+		t.Fatalf("%s is not a linked worktree top", dir)
+	}
+	if branch := strings.TrimSpace(gitIn(t, dir, "rev-parse", "--abbrev-ref", "HEAD")); branch != "demo-exec" {
+		t.Fatalf("checked-out branch = %q, want demo-exec", branch)
+	}
+	if got := MainWorktreeRoot(ctx, dir); got != repo {
+		t.Fatalf("MainWorktreeRoot(%s) = %q, want the repository %q", dir, got, repo)
+	}
+}
+
+// TestCreateWorktreeRefusesATakenName pins that a dispatch never reuses or
+// clears what is already there: a directory the name already owns, and a
+// branch git already has, both refuse instead of checking out over them.
+func TestCreateWorktreeRefusesATakenName(t *testing.T) {
+	repo := gitRepoFixture(t)
+	ctx := context.Background()
+	if _, err := CreateWorktree(ctx, repo, "taken"); err != nil {
+		t.Fatalf("first CreateWorktree: %v", err)
+	}
+	if _, err := CreateWorktree(ctx, repo, "taken"); err == nil {
+		t.Fatal("a worktree directory that already exists must be refused")
+	}
+	gitIn(t, repo, "branch", "branch-only")
+	if _, err := CreateWorktree(ctx, repo, "branch-only"); err == nil {
+		t.Fatal("a branch that already exists must be refused")
+	} else if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("the branch refusal must carry git's own words, got %v", err)
+	}
+}
+
+// TestCreateWorktreeNeedsARepository pins the refusal a directory outside a
+// repository gets: there is no main worktree to put a worktree in.
+func TestCreateWorktreeNeedsARepository(t *testing.T) {
+	if _, err := CreateWorktree(context.Background(), t.TempDir(), "demo"); err == nil {
+		t.Fatal("CreateWorktree outside a repository must fail")
+	}
+}
+
+// TestLinkedWorktreeTopFindsTheInnermostWorktree pins the path-to-tree answer
+// the write ledger records: a file inside a linked worktree names that
+// worktree, the innermost one when worktrees are nested, and a path in the
+// main checkout or outside a repository names none.
+func TestLinkedWorktreeTopFindsTheInnermostWorktree(t *testing.T) {
+	repo := gitRepoFixture(t)
+	linked := filepath.Join(repo, WorktreesDirName, "feature")
+	gitIn(t, repo, "worktree", "add", "-q", "--detach", linked, "HEAD")
+	inner := filepath.Join(linked, WorktreesDirName, "inner")
+	gitIn(t, linked, "worktree", "add", "-q", "--detach", inner, "HEAD")
+	if err := os.MkdirAll(filepath.Join(linked, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(linked, "pkg", "a.go"): linked,
+		filepath.Join(inner, "pkg", "a.go"):  inner,
+		filepath.Join(linked, "a.go"):        linked,
+		filepath.Join(repo, "pkg", "a.go"):   "",
+		filepath.Join(repo, "go.mod"):        "",
+		t.TempDir():                          "",
+	} {
+		if got := LinkedWorktreeTop(path); got != want {
+			t.Errorf("LinkedWorktreeTop(%s) = %q, want %q", path, got, want)
+		}
+	}
+}

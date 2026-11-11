@@ -240,6 +240,14 @@ type peerService struct {
 	sinceCheck  int
 	ticks       int
 	branch      map[string]peerBranchEntry
+	// agentTrees is where this process last watched each of its own agents
+	// write inside a linked worktree, keyed by the ledger's agent address (the
+	// conversation and the agent key). A dispatch that declared its worktree
+	// does not need it; an agent that made its own does, and the record would
+	// otherwise report the conversation's tree for it. Bounded by the agents
+	// of one process, and emptied lazily by the same 30-minute window the
+	// ledger keeps.
+	agentTrees map[string]agentTreeEntry
 
 	// dirMu guards the directory listing cache: the frame handler reads it
 	// off the tick loop's lock, which the tick loop itself holds.
@@ -290,6 +298,7 @@ func (env *Environment) StartPeers(ctx context.Context, s PeerSurface) (stop fun
 		startedAt:    time.Now().UnixMilli(),
 		ownAddresses: map[string]bool{},
 		branch:       map[string]peerBranchEntry{},
+		agentTrees:   map[string]agentTreeEntry{},
 	}
 	svc.procStart, _ = peer.ProcStart(os.Getpid())
 	svc.inbox = newPeerInbox(svc, s)
@@ -1016,12 +1025,17 @@ func (svc *peerService) subagentsFor(ctx context.Context, sid, primaryName, root
 			name = fmt.Sprintf("%s-%d", name, suffix)
 		}
 		names[name] = true
+		// The tree is the agent's own, not the process's: a subagent dispatched
+		// into a worktree edits there, and its row must say so (owner
+		// 2026-11-10).
+		tree := svc.subagentTree(sid, sub, root)
 		agents = append(agents, peer.ExtAgent{
 			ID:     sid + "/" + sub.Key,
 			Name:   name,
 			Kind:   "subagent",
 			Parent: sid,
-			Root:   root,
+			Root:   tree,
+			Branch: svc.branchFor(tree),
 			Status: peer.StatusBusy,
 			Task:   sub.Title,
 			Mode:   mode,
@@ -1029,6 +1043,66 @@ func (svc *peerService) subagentsFor(ctx context.Context, sid, primaryName, root
 		})
 	}
 	return agents
+}
+
+// subagentTree is where a live subagent works: the worktree its dispatch
+// declared, else the one this process watched it write in, else the session's
+// own tree. The declared answer is the dispatch contract; the observed one is
+// the fallback for a subagent that made its own worktree (owner 2026-11-10),
+// and the session tree is only what remains when nothing says otherwise.
+// Caller holds svc.mu.
+func (svc *peerService) subagentTree(sid string, sub run.LiveSubagent, root string) string {
+	if tree := strings.TrimSpace(sub.Worktree); tree != "" {
+		return tree
+	}
+	if tree := svc.agentTreeLocked(sid + "/" + sub.Key); tree != "" {
+		return tree
+	}
+	return root
+}
+
+// agentTreeEntry is one observation of an agent writing inside a linked
+// worktree: the tree, and when the last such write happened.
+type agentTreeEntry struct {
+	tree string
+	at   time.Time
+}
+
+// noteAgentTree records that agentID wrote inside the linked worktree tree.
+// Only the file tools call this — once per write — so the registration's
+// every-second record rewrite reads the table without doing that work.
+func (svc *peerService) noteAgentTree(agentID, tree string, at time.Time) {
+	agentID = strings.TrimSpace(agentID)
+	tree = strings.TrimSpace(tree)
+	if svc == nil || agentID == "" || tree == "" {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if svc.agentTrees == nil {
+		svc.agentTrees = map[string]agentTreeEntry{}
+	}
+	svc.agentTrees[agentID] = agentTreeEntry{tree: tree, at: at}
+	// One entry per agent of this process, so sweeping on write stays cheap.
+	for id, entry := range svc.agentTrees {
+		if at.Sub(entry.at) > agentTouchRetention {
+			delete(svc.agentTrees, id)
+		}
+	}
+}
+
+// agentTreeLocked answers the linked worktree agentID was last seen writing
+// in, "" when it has not written in one inside the ledger's window.
+// Caller holds svc.mu.
+func (svc *peerService) agentTreeLocked(agentID string) string {
+	entry, ok := svc.agentTrees[strings.TrimSpace(agentID)]
+	if !ok || time.Since(entry.at) > agentTouchRetention {
+		return ""
+	}
+	return entry.tree
 }
 
 // modeFor is the session's peer mode: bypass when its approval policy never

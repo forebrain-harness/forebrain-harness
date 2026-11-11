@@ -621,3 +621,46 @@ func TestPeerToolsAnswerUnavailableWhileTheFirstRegistrationIsRetried(t *testing
 		t.Fatalf("Send while unregistered = %v, want %v", err, errPeerMessagingUnavailable)
 	}
 }
+
+// TestPeerCandidateInAWorktreeIsNotSameTree pins the listing half of a
+// subagent's worktree (owner 2026-11-10): a subagent whose own root is a linked
+// worktree checked out below this directory is listed under "other", with the
+// worktree as its path — while a submodule stays part of the checkout that
+// contains it, the same boundary the guards apply.
+func TestPeerCandidateInAWorktreeIsNotSameTree(t *testing.T) {
+	f := startPeerOutbound(t, "cli-out-worktree", nil)
+	root := resolvePath(f.env.LaunchDir)
+	linked := nestedWorktreeRepo(t, root)
+	submodule := filepath.Join(root, "vendor", "lib")
+	remote := startPeerRemote(t, f.env.dirs.fbSock, "900720")
+	writePeerRecord(t, f.env, f.dir, terminalPeer(remote.socket, root, "worktree-host",
+		peer.ExtAgent{ID: "cli-wt-1", Name: "worktree-host", Kind: "primary", Root: root,
+			Status: peer.StatusIdle},
+		peer.ExtAgent{ID: "cli-wt-1/task-exec", Name: "worktree-host.task-exec", Kind: "subagent",
+			Parent: "cli-wt-1", Root: linked, Status: peer.StatusBusy, Task: "Executing in its worktree"},
+		peer.ExtAgent{ID: "cli-wt-2", Name: "worktree-host.submodule", Kind: "primary",
+			Root: submodule, Status: peer.StatusIdle},
+	))
+
+	listing, err := f.port.List(context.Background(), f.caller())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	rows := map[string]run.PeerEntry{}
+	for _, entry := range listing.Peers {
+		rows[entry.Name] = entry
+	}
+	executor, ok := rows["worktree-host.task-exec"]
+	if !ok {
+		t.Fatalf("listing = %v, want the subagent row", peerNames(listing))
+	}
+	if executor.SameTree || executor.Cwd != linked {
+		t.Fatalf("subagent row = %#v, want its own worktree %q and not same_tree", executor, linked)
+	}
+	if primary, ok := rows["worktree-host"]; !ok || !primary.SameTree || primary.Cwd != root {
+		t.Fatalf("primary row = %#v, want the conversation's tree", primary)
+	}
+	if sub, ok := rows["worktree-host.submodule"]; !ok || !sub.SameTree {
+		t.Fatalf("submodule row = %#v, want it still in this tree", sub)
+	}
+}

@@ -429,6 +429,100 @@ func TestWorkingDirPrefersTheTaskWorkspace(t *testing.T) {
 	}
 }
 
+// TestWorkingDirPrefersTheIsolatedWorktree pins where an isolated subagent's
+// tools act (owner 2026-11-10): the worktree its dispatch resolved, ahead of
+// every other root, so a relative edit and the shell's cwd land there.
+func TestWorkingDirPrefersTheIsolatedWorktree(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, ".worktrees", "demo-exec")
+	workspace := filepath.Join(root, "tasks", "tsk-1", "1")
+	for _, dir := range []string{worktree, workspace} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := WithProjectRoot(context.Background(), root)
+	ctx = WithTaskWorkspace(ctx, workspace)
+	ctx = WithIsolatedWorktree(ctx, worktree)
+
+	got, err := WorkingDir(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != worktree {
+		t.Fatalf("WorkingDir = %q, want the isolated worktree %q", got, worktree)
+	}
+	if ProjectRootFromContext(ctx) != root {
+		t.Fatalf("the project root changed to %q", ProjectRootFromContext(ctx))
+	}
+	resolved, err := ResolvePath(ctx, "pkg/a.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(worktree, "pkg", "a.go"); resolved != want {
+		t.Fatalf("ResolvePath = %q, want %q", resolved, want)
+	}
+	// The isolation is not a task workspace: a run without one keeps asking
+	// for approvals.
+	plain := WithIsolatedWorktree(WithProjectRoot(context.Background(), root), worktree)
+	if TaskWorkspaceFromContext(plain) != "" {
+		t.Fatal("an isolated worktree must not read as a task workspace")
+	}
+	if IsolatedWorktreeFromContext(context.Background()) != "" {
+		t.Fatal("a plain context carries an isolated worktree")
+	}
+}
+
+// TestGuardWriteRefusesOutsideTheIsolatedWorktree pins the hard boundary
+// (owner 2026-11-10): a worktree subagent writes inside its worktree and
+// nowhere else — not the conversation's tree it was checked out from, not a
+// symlink out of the worktree — and an ordinary turn keeps its own guard.
+func TestGuardWriteRefusesOutsideTheIsolatedWorktree(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	worktree := filepath.Join(project, ".worktrees", "demo-exec")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{filepath.Join(worktree, "pkg"), outside} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(worktree, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Errorf("symlink: %v", err)
+	}
+	st := NewState(project)
+	ctx := WithIsolatedWorktree(WithProjectRoot(context.Background(), project), worktree)
+
+	for _, path := range []string{
+		filepath.Join(worktree, "pkg", "a.go"),
+		filepath.Join(worktree, "new.txt"),
+	} {
+		if err := st.GuardWrite(ctx, path); err != nil {
+			t.Fatalf("a write inside the worktree must pass: %v", err)
+		}
+	}
+	for name, path := range map[string]string{
+		"the project root":    filepath.Join(project, "shared.txt"),
+		"a sibling worktree":  filepath.Join(project, ".worktrees", "other", "x.txt"),
+		"a symlink out of it": filepath.Join(link, "x.txt"),
+		"a traversal":         filepath.Join(worktree, "..", "..", "x.txt"),
+	} {
+		err := st.GuardWrite(ctx, path)
+		if err == nil {
+			t.Fatalf("a write to %s must be refused", name)
+		}
+		if !strings.Contains(err.Error(), "writes are confined to its worktree "+worktree) {
+			t.Fatalf("the refusal for %s must name the worktree, got %v", name, err)
+		}
+	}
+	// A turn that is not isolated keeps today's behavior, whatever the path.
+	ordinaryCtx := WithProjectRoot(context.Background(), project)
+	if err := st.GuardWrite(ordinaryCtx, filepath.Join(project, "shared.txt")); err != nil {
+		t.Fatalf("a turn without a worktree keeps its ordinary write guard: %v", err)
+	}
+}
+
 // TestGuardWriteConfinesBatchWrites pins the file-tool half of a batch task's
 // write boundary (plans/150): the task's own directory is writable, everything
 // else — the project root it sits in, a traversal, a symlink out of it — is not,

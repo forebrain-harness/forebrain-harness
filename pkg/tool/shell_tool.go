@@ -328,7 +328,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	}
 	manager := safety.NewManager()
 	defer manager.Close()
-	runtimeCfg := manager.UpdateConfig(cfg, shellToolSettingsSources(rt, cfg), snap, req.cwd, req.cwd, os.TempDir(), st.AllowedRoots())
+	runtimeCfg := manager.UpdateConfig(cfg, shellToolSettingsSources(rt, cfg), snap, req.cwd, req.cwd, os.TempDir(), sandboxAdditionalDirs(ctx, st))
 	// contained reports whether a sandbox holds this command, which is the
 	// manager's decision to make and never the profile's: a full-access session
 	// and a user-approved escalation both run the command on the host while the
@@ -1871,6 +1871,17 @@ func planModeShellGate(ctx context.Context, dangerFullAccess bool, mutation safe
 // other verdicts take the same path.
 func PlanModeShellGateForCommand(ctx context.Context, dangerFullAccess bool, cmd string) PlanModeShellGateDecision {
 	return planModeShellGate(ctx, dangerFullAccess, safety.ClassifyShellCommand(cmd, nil, ""))
+}
+
+// sandboxAdditionalDirs is what the sandbox may write besides its cwd, its
+// own temp directory and /tmp. An isolated worktree run adds nothing: its cwd
+// is the worktree and a shell command must not reach the conversation's tree
+// (owner 2026-11-10). Reading is untouched — the sandbox still reads the disk.
+func sandboxAdditionalDirs(ctx context.Context, st *State) []string {
+	if IsolatedWorktreeFromContext(ctx) != "" {
+		return nil
+	}
+	return st.AllowedRoots()
 }
 
 // shellAllowedRoots returns the roots that the shell classifier may treat as

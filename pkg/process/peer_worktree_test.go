@@ -22,6 +22,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/peer"
+	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 )
 
 // touchLedger installs the ledger override for one case and returns its
@@ -476,6 +477,22 @@ func TestPeerWorkTreePeersListOnlyTheAgentsInThisTree(t *testing.T) {
 	}
 }
 
+// gitInRepo runs one git command in root, failing the case when git refuses.
+func gitInRepo(t *testing.T, root string, args ...string) {
+	t.Helper()
+	if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// initRepoWithCommit makes root a repository with one commit, so worktrees can
+// be checked out from HEAD.
+func initRepoWithCommit(t *testing.T, root string) {
+	t.Helper()
+	gitInRepo(t, root, "init", "-q")
+	gitInRepo(t, root, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+}
+
 // nestedWorktreeRepo makes root a repository with a linked worktree at
 // root/.worktrees/feature, where agents create them, and a submodule-shaped
 // checkout at root/vendor/lib. It returns the worktree's resolved path.
@@ -484,16 +501,9 @@ func nestedWorktreeRepo(t *testing.T, root string) string {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
-	git := func(args ...string) {
-		t.Helper()
-		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	git("init", "-q")
-	git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+	initRepoWithCommit(t, root)
 	linked := filepath.Join(root, ".worktrees", "feature")
-	git("worktree", "add", "-q", "--detach", linked, "HEAD")
+	gitInRepo(t, root, "worktree", "add", "-q", "--detach", linked, "HEAD")
 	submodule := filepath.Join(root, "vendor", "lib")
 	for _, dir := range []string{filepath.Join(root, ".git", "modules", "lib"), submodule} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -503,6 +513,20 @@ func nestedWorktreeRepo(t *testing.T, root string) string {
 	if err := os.WriteFile(filepath.Join(submodule, ".git"), []byte("gitdir: ../../.git/modules/lib\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return resolvePath(linked)
+}
+
+// worktreeOnBranch makes root a repository with one commit and a linked
+// worktree at root/.worktrees/<name>, checked out on a new branch <name>. It
+// returns the worktree's resolved path.
+func worktreeOnBranch(t *testing.T, root, name string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	initRepoWithCommit(t, root)
+	linked := filepath.Join(root, ".worktrees", name)
+	gitInRepo(t, root, "worktree", "add", "-q", "-b", name, linked, "HEAD")
 	return resolvePath(linked)
 }
 
@@ -564,5 +588,60 @@ func TestPeerTouchesLeaveOutANestedWorktree(t *testing.T) {
 	panel := f.env.RecentPeerFileTouches(root)
 	if len(panel) != 1 || panel[0].AgentName != "in-main" {
 		t.Errorf("panel for the main checkout = %#v, want only the write there", panel)
+	}
+}
+
+// TestObservedWorktreeBecomesTheAgentsTree pins the fallback for a subagent
+// that made its own git worktree (owner 2026-11-10): the file-tool write is
+// evidence of which tree it works in, so the record names that tree when the
+// dispatch declared none — and a declared worktree still wins over it.
+func TestObservedWorktreeBecomesTheAgentsTree(t *testing.T) {
+	f := startPeerOutbound(t, "cli-observed-tree", nil)
+	svc := f.port.service()
+	if svc == nil {
+		t.Fatal("this process has no running peer service")
+	}
+	root := resolvePath(f.env.LaunchDir)
+	linked := worktreeOnBranch(t, root, "demo-exec")
+	sid := "cli-observed-tree"
+	key := "task-observed"
+	agentID := sid + "/" + key
+
+	svc.noteAgentTree(agentID, linked, time.Now())
+	svc.mu.Lock()
+	observed := svc.agentTreeLocked(agentID)
+	svc.mu.Unlock()
+	if observed != linked {
+		t.Fatalf("observed tree = %q, want the worktree the write landed in %q", observed, linked)
+	}
+
+	live := run.LiveSubagent{Key: key, Title: "编辑演示目录"}
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if tree := svc.subagentTree(sid, live, root); tree != linked {
+		t.Fatalf("subagent tree = %q, want the observed worktree %q", tree, linked)
+	}
+	// The dispatch's own answer outranks what was observed.
+	live.Worktree = "/tmp/declared-tree"
+	if tree := svc.subagentTree(sid, live, root); tree != "/tmp/declared-tree" {
+		t.Fatalf("subagent tree = %q, want the declared worktree", tree)
+	}
+	live.Worktree = ""
+	// No observation at all: the session's tree, as before.
+	if tree := svc.subagentTree(sid, run.LiveSubagent{Key: "task-unseen"}, root); tree != root {
+		t.Fatalf("subagent tree = %q, want the session tree %q", tree, root)
+	}
+	// The worktree's branch is the one the dispatch created it on, read from
+	// the worktree's own .git file.
+	if branch := svc.branchFor(linked); branch != "demo-exec" {
+		t.Fatalf("branch of %s = %q, want demo-exec", linked, branch)
+	}
+
+	// An observation older than the ledger's window is no evidence.
+	svc.mu.Unlock()
+	svc.noteAgentTree(agentID, linked, time.Now().Add(-agentTouchRetention-time.Minute))
+	svc.mu.Lock()
+	if tree := svc.agentTreeLocked(agentID); tree != "" {
+		t.Fatalf("stale observation = %q, want none", tree)
 	}
 }

@@ -174,6 +174,7 @@ const (
 	ctxKeyProjectRoot          ctxKey = "forebrain_project_root"
 	ctxKeyProjectType          ctxKey = "forebrain_project_type"
 	ctxKeyTaskWorkspace        ctxKey = "forebrain_task_workspace"
+	ctxKeyIsolatedWorktree     ctxKey = "forebrain_isolated_worktree"
 	ctxKeyTaskContext          ctxKey = "forebrain_task_context"
 	ctxKeyWorkspaceRoot        ctxKey = "forebrain_workspace_root"
 	ctxKeyProjectKey           ctxKey = "forebrain_project_key"
@@ -656,6 +657,28 @@ func TaskWorkspaceFromContext(ctx context.Context) string {
 	return strings.TrimSpace(v)
 }
 
+// WithIsolatedWorktree records the git worktree this run was dispatched into
+// (owner 2026-11-10): its file tools resolve paths there and may write nowhere
+// else, and the shell sandbox keeps its writes there too. It is NOT a task
+// workspace: an isolated run still asks for approvals, so it must not reach
+// the batch turn's unattended rule.
+func WithIsolatedWorktree(ctx context.Context, dir string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ctxKeyIsolatedWorktree, strings.TrimSpace(dir))
+}
+
+// IsolatedWorktreeFromContext is the worktree WithIsolatedWorktree recorded,
+// "" for a run that works where its conversation does.
+func IsolatedWorktreeFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(ctxKeyIsolatedWorktree).(string)
+	return strings.TrimSpace(v)
+}
+
 // WithTaskContext records the task context paragraph a batch turn's
 // environment carries (task id, execution, workspace, input files). The rules
 // hook wraps it in its own tag when it builds the turn's addendum.
@@ -676,12 +699,19 @@ func TaskContextFromContext(ctx context.Context) string {
 	return v
 }
 
-// WorkingDir is the directory a turn's tools act in: the batch execution's
-// task workspace when the turn runs one, else the session's project root that
-// the runner put on the context at the turn's entry. A context without either
+// WorkingDir is the directory a turn's tools act in: the git worktree a
+// dispatched subagent was isolated into, else the batch execution's task
+// workspace when the turn runs one, else the session's project root that the
+// runner put on the context at the turn's entry. A context without any of them
 // (a test, a command run outside any turn) falls back to the process
 // directory. The result is absolute and cleaned.
 func WorkingDir(ctx context.Context) (string, error) {
+	if dir := IsolatedWorktreeFromContext(ctx); dir != "" {
+		if abs, err := filepath.Abs(dir); err == nil {
+			return filepath.Clean(abs), nil
+		}
+		return filepath.Clean(dir), nil
+	}
 	if ws := TaskWorkspaceFromContext(ctx); ws != "" {
 		if abs, err := filepath.Abs(ws); err == nil {
 			return filepath.Clean(abs), nil
@@ -1047,10 +1077,11 @@ func HookTranscriptPathFromContext(ctx context.Context) string {
 	return strings.TrimSpace(v)
 }
 
-// GuardWrite refuses the writes no approval can repair. Plan mode is the only
-// one left: it is a phase the user entered deliberately and exit_plan_mode ends
-// it, so the model has a way out that does not need the user to answer a prompt
-// about every file.
+// GuardWrite refuses the writes no approval can repair. Plan mode and a run
+// isolated into a git worktree are the walls left: plan mode is a phase the
+// user entered deliberately and exit_plan_mode ends it, and isolation is the
+// contract a dispatch was made under — a subagent may work in its worktree and
+// nowhere else.
 //
 // Everything else a write can run into — agent metadata directories, FOREBRAIN_HOME,
 // git”'s execution surfaces, a loaded skill”'s own files — is a question for the
@@ -1071,6 +1102,13 @@ func (s *State) GuardWrite(ctx context.Context, absPath string) error {
 		if err := scope.admitWrite(absPath); err != nil {
 			return err
 		}
+	}
+	// A subagent dispatched into a worktree works there and nowhere else
+	// (owner 2026-11-10): the isolation is the dispatch contract, so no
+	// approval can widen it. pathWithinWorkspace is the same symlink-resolving
+	// containment the batch rule below uses.
+	if root := IsolatedWorktreeFromContext(ctx); root != "" && !pathWithinWorkspace(absPath, root) {
+		return fmt.Errorf("worktree subagent: writes are confined to its worktree %s", root)
 	}
 	// A batch task's write set is the directory it was given, and nobody is
 	// there to approve an exception (plans/150). The symlink resolution in

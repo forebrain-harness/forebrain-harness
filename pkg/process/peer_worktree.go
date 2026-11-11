@@ -395,6 +395,15 @@ func (o *peerOutbound) NoteWrite(ctx context.Context, absPath string, at time.Ti
 		at = time.Now()
 	}
 	appendAgentTouch(dir, agentTouch{path: path, addr: addr, agentID: agentID, name: name}, at)
+	// The same write is evidence of which tree this agent works in: a subagent
+	// that made its own worktree would otherwise be recorded under the
+	// conversation's tree, and the same-tree guards would place it in a directory
+	// its edits never touch (owner 2026-11-10). The innermost linked worktree
+	// the written path sits in is that tree; a write in the main checkout
+	// changes nothing.
+	if svc := o.service(); svc != nil {
+		svc.noteAgentTree(agentID, tool.LinkedWorktreeTop(path), at)
+	}
 }
 
 // TouchesBetween answers with the other agents' writes under root in (from, to],

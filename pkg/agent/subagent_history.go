@@ -58,6 +58,10 @@ type HistoryEntry struct {
 	// ReasoningEffort is the effort that model runs at, when the configuration
 	// pinned one; empty lets the model's own configuration decide.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Worktree is the git worktree this subagent was dispatched into; empty
+	// for a subagent that works where its conversation does. Continuations run
+	// there again, and the peer record reports it as the agent's own tree.
+	Worktree string `json:"worktree,omitempty"`
 }
 
 type Query struct {
