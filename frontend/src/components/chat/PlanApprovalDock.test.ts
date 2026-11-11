@@ -220,6 +220,74 @@ describe('PlanApprovalDock', () => {
     wrapper.unmount()
   })
 
+  // plan 289: Esc folds the picker away instead of re-entering
+  // toggleModelPicker with the default 'review', which would quietly turn a
+  // hand-off into a review. The "no request went out" assertion is what pins
+  // the purpose down — seeing .xp-pick disappear is not enough.
+  it('Esc closes the hand-off picker without turning it into a review', async () => {
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    // This file has no restoreAllMocks between cases: clear the shared spies'
+    // history so "no request went out" is about this case alone.
+    approve.mockClear()
+    review.mockClear()
+    const { wrapper, store } = mountDock(exitPlanAction(), {
+      handOffAvailable: true,
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3' },
+      ],
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="exit-plan-hand-off"]').trigger('click')
+    await nextTick()
+    expect(wrapper.get('.xp-pick .cap').text()).toBe('交给哪个模型执行？')
+    expect(wrapper.findAll('[data-testid="exit-plan-hand-off-model"]')).toHaveLength(2)
+
+    await wrapper.get('[data-testid="exit-plan-approval"]').trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(wrapper.findAll('.xp-pick')).toHaveLength(0)
+    expect(store.modelPicking.value['act-exit']).toBe(false)
+
+    // Before the user picks again: neither a review nor an approval was sent.
+    expect(review).not.toHaveBeenCalled()
+    expect(approve).not.toHaveBeenCalled()
+
+    // Re-opening the same list still hands off, and the row reaches
+    // actionsApprove — Esc changed neither the purpose nor the verdict.
+    await wrapper.get('[data-testid="exit-plan-hand-off"]').trigger('click')
+    await nextTick()
+    expect(wrapper.get('.xp-pick .cap').text()).toBe('交给哪个模型执行？')
+    const rows = wrapper.findAll('[data-testid="exit-plan-hand-off-model"]')
+    expect(rows).toHaveLength(2)
+    await rows[1].trigger('click')
+    await flushPromises()
+    expect(approve).toHaveBeenCalledWith('act-exit', {
+      handOffModel: { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3' },
+    })
+    expect(review).not.toHaveBeenCalled()
+    wrapper.unmount()
+
+    // Symmetry: closeModelPicker is purpose-agnostic, so Esc also closes the
+    // reviewer's list opened with 'review'.
+    const reviewDock = mountDock(exitPlanAction(), {
+      planReviewModels: [
+        { provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { provider: 'zhipuai', model: 'glm-5.3-flash' },
+      ],
+    })
+    await flushPromises()
+    await reviewDock.wrapper.get('[data-testid="exit-plan-ask-review"]').trigger('click')
+    await nextTick()
+    expect(reviewDock.wrapper.findAll('[data-testid="plan-review-model"]')).toHaveLength(2)
+    await reviewDock.wrapper.get('[data-testid="exit-plan-approval"]').trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(reviewDock.wrapper.findAll('.xp-pick')).toHaveLength(0)
+    expect(reviewDock.store.modelPicking.value['act-exit']).toBe(false)
+    reviewDock.wrapper.unmount()
+  })
+
   it('re-reviews through the previous reviewer without opening the list', async () => {
     const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
     const { wrapper } = mountDock(exitPlanAction(), {

@@ -270,12 +270,6 @@ func installBuiltinModelTables() {
 	}
 }
 
-// modelOverridesFor builds the override layer from the configured rows: a row
-// that carries any capability becomes one entry under
-// JoinProviderModel(provider, model). Two rows naming the same provider and
-// model collapse to the first — the one the table lists first, which is the
-// oldest — because the global lookup has one answer per model; the client's
-// own output limit still applies per row (AgentLLMProviderConfig.MaxOutputTokens).
 // modelOverridesFor projects every configured row's capabilities, keyed by its
 // row id, and names each row's provider/model so a caller that knows only the
 // pair can still find its row when the pair names exactly one (owner

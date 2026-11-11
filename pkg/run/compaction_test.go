@@ -1086,3 +1086,61 @@ func processModelOverridesFor(root *appcfg.Root) (map[string]llm.ModelOverride, 
 	}
 	return byRow, pairOf
 }
+
+// CompactionService is the assembly point for the explicit /compact command,
+// the worker CLI and subagent auto-compaction. It must read capabilities and
+// the observed window from the conversation's configured row, not the pair's
+// catalog values, so two rows naming one provider/model stay independent
+// (plan 291). The interactive run's auto-compaction already does this in
+// loadLocked; this test pins the manual path to the same behaviour.
+func TestCompactionServiceReadsTheSessionsOwnRow(t *testing.T) {
+	wide, narrow := int64(64000), int64(32000)
+	llm.SetModelOverrides(
+		map[string]llm.ModelOverride{
+			"row-wide":   {ContextWindow: &wide},
+			"row-narrow": {ContextWindow: &narrow},
+		},
+		map[string]string{
+			"row-wide":   "deepseek/deepseek-v4",
+			"row-narrow": "deepseek/deepseek-v4",
+		},
+	)
+	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
+	// CompactionService reads r.AppCfg, a field promoted through the embedded
+	// *Deps, so this runner needs a non-nil Deps even though modelHitFor and
+	// agentModelRowFor alone would work with a bare &Runner{}.
+	r := &Runner{Deps: &Deps{}}
+
+	svc := CompactionService(r, nil)
+	if svc.ModelHit == nil {
+		t.Fatal("CompactionService left ModelHit nil; want it wired to the runner's modelHitFor")
+	}
+	if svc.ModelRow == nil {
+		t.Fatal("CompactionService left ModelRow nil; want it wired to the runner's agentModelRowFor")
+	}
+
+	ctx := WithSessionModelSelection(context.Background(), PrimaryModelState{
+		ModelID: "row-narrow", Provider: "deepseek", Model: "deepseek-v4", Set: true,
+	})
+	if got := svc.ModelRow(ctx); got != "row-narrow" {
+		t.Fatalf("ModelRow = %q, want the selected narrow row", got)
+	}
+	if hit, ok := svc.ModelHit(ctx); !ok || hit.ContextWindow != 32000 {
+		t.Fatalf("ModelHit = %+v ok=%v, want the narrow row's 32000 window", hit, ok)
+	}
+
+	// A service built without a runner keeps the contract's nil fields.
+	bare := CompactionService(nil, nil)
+	if bare.ModelHit != nil || bare.ModelRow != nil {
+		t.Fatalf("runnerless service has ModelHit=%v ModelRow=%v; want both nil", bare.ModelHit != nil, bare.ModelRow != nil)
+	}
+
+	// Switching the selection to the twin row moves the reading, proving the
+	// service reads the chosen row rather than pinning the first one it saw.
+	wideCtx := WithSessionModelSelection(context.Background(), PrimaryModelState{
+		ModelID: "row-wide", Provider: "deepseek", Model: "deepseek-v4", Set: true,
+	})
+	if hit, ok := svc.ModelHit(wideCtx); !ok || hit.ContextWindow != 64000 {
+		t.Fatalf("twin-row ModelHit = %+v ok=%v, want the wide row's 64000 window", hit, ok)
+	}
+}

@@ -1774,18 +1774,30 @@ func migrateStateV33ToV34MySQL(ctx context.Context, conn *sql.Conn) error {
 // migrateStateV33ToV34Postgres is the same column in PostgreSQL's types. The
 // constraint carries the name schema.sql's inline CHECK would get, so an
 // upgraded database and a fresh one hold the same objects.
+//
+// The two ALTERs are separate statements and the migration loop runs without a
+// transaction, so a crash between them leaves the column without the check and
+// the version still one behind. Each object therefore gets its own existence
+// test: a retry adds the check instead of skipping on the column.
 func migrateStateV33ToV34Postgres(ctx context.Context, conn *sql.Conn) error {
 	var present int
 	if err := conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = CURRENT_SCHEMA() AND table_name = 'fb_llm_models' AND column_name = 'subagent_allowed'`).Scan(&present); err != nil {
 		return err
 	}
-	if present > 0 {
-		return nil
+	if present == 0 {
+		if _, err := conn.ExecContext(ctx,
+			`ALTER TABLE fb_llm_models ADD COLUMN subagent_allowed BIGINT NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add fb_llm_models.subagent_allowed: %w", err)
+		}
 	}
-	if _, err := conn.ExecContext(ctx,
-		`ALTER TABLE fb_llm_models ADD COLUMN subagent_allowed BIGINT NOT NULL DEFAULT 0`); err != nil {
-		return fmt.Errorf("add fb_llm_models.subagent_allowed: %w", err)
+	var checked int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pg_constraint WHERE conname = 'fb_llm_models_subagent_allowed_check' AND conrelid = 'fb_llm_models'::regclass`).Scan(&checked); err != nil {
+		return err
+	}
+	if checked > 0 {
+		return nil
 	}
 	if _, err := conn.ExecContext(ctx,
 		`ALTER TABLE fb_llm_models ADD CONSTRAINT fb_llm_models_subagent_allowed_check CHECK (subagent_allowed IN (0, 1))`); err != nil {

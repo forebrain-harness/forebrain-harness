@@ -266,6 +266,7 @@
   "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'fb_llm_models' AND column_name = 'subagent_allowed'",
   "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'fb_run_owners' AND column_name = 'internal_addr'",
   "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'fb_session_model_state' AND column_name = 'model_id'",
+  "SELECT COUNT(*) FROM pg_constraint WHERE conname = 'fb_llm_models_subagent_allowed_check' AND conrelid = 'fb_llm_models'::regclass",
   "SELECT COUNT(*) FROM pragma_table_info('fb_cron_jobs') WHERE name='last_error_code'",
   "SELECT COUNT(*) FROM pragma_table_info('fb_cron_jobs') WHERE name='project_id' AND \"notnull\"=1",
   "SELECT COUNT(*) FROM pragma_table_info('fb_cron_runs') WHERE name='error_code'",

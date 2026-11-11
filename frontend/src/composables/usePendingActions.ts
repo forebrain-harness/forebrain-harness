@@ -412,6 +412,13 @@ export function usePendingActions(options: {
     modelPickPurpose.value = { ...modelPickPurpose.value, [a.id]: purpose }
   }
 
+  /** Esc closes whichever picker is open without changing what it was for:
+   *  re-entering toggleModelPicker with the default 'review' would reopen the
+   *  list and silently turn a hand-off into a review (plan 289). */
+  function closeModelPicker(a: ActionRow) {
+    modelPicking.value = { ...modelPicking.value, [a.id]: false }
+  }
+
   /** Asking for a review does not decide anything: the approval stays pending,
    * the review runs in the background, and the card learns its progress from
    * the conversation's events. */
@@ -590,6 +597,7 @@ export function usePendingActions(options: {
     openPlanFeedback,
     closePlanFeedback,
     toggleModelPicker,
+    closeModelPicker,
     requestReview,
     handOffTo,
     reviewAgain,

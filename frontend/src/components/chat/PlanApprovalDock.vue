@@ -258,7 +258,7 @@ const store = injectPendingActions()!
 // binds plain values, keyed by the action the input is parked on.
 const {
   exitPlanRequest, approveExitPlan, keepPlanning, keepPlanOnly, openPlanFeedback, closePlanFeedback,
-  toggleModelPicker, requestReview, stopReview, modelLabel, activeReviewLabel, clearContextLabel,
+  toggleModelPicker, closeModelPicker, requestReview, stopReview, modelLabel, activeReviewLabel, clearContextLabel,
   handOffTo, reviewAgain, refuseAndStop,
 } = store
 
@@ -364,7 +364,7 @@ function pickModel(model: PlanReviewModelOption) {
  *  the plan approval's stop, not the field's collapse (129). */
 async function onEsc() {
   if (picking.value) {
-    toggleModelPicker(props.action)
+    closeModelPicker(props.action)
     return
   }
   if (feedbackOpen.value) await refuseAndStop(props.action)

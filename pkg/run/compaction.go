@@ -360,6 +360,9 @@ func CompactionService(r *Runner, sessions *state.SessionStore) assembly.Service
 	out.ModelProvider = r.ContextCompactModelProvider
 	out.CompactLLMForModel = r.ContextCompactLLMForModel
 	out.PrimaryModel = func(ctx context.Context) (string, string) { return r.agentModelFor(ctx) }
+	// The manual /compact path reads the same row as the interactive run's auto-compaction; without these two the pair's catalog values and the shared observation bucket stay in force (plan 291).
+	out.ModelHit = r.modelHitFor
+	out.ModelRow = r.agentModelRowFor
 	if r.AppCfg != nil {
 		out.Prompt = r.AppCfg.Compact.Prompt
 		opts := CompactBudgetOptions(r.AppCfg)

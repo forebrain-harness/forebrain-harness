@@ -75,3 +75,4 @@ pkg/migrate/testdata/**/.DS_Store
 # Plan documents are owner-local, never committed:
 docs/plan/
 plans/
+.workbuddy/

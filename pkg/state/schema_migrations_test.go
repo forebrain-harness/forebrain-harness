@@ -4208,3 +4208,40 @@ func TestStateV33UpgradesToV34AddsSubagentAllowed(t *testing.T) {
 		}
 	}
 }
+
+// TestStateV34PostgresMigrationRepairsAMissingCheck covers the half-migrated
+// state the two separate ALTERs can leave behind: the column landed, the named
+// CHECK never did, and the version row still says 33. A retry must add the
+// check rather than skip on "the column exists", or the constraint is missing
+// for good and an upgraded database differs from a fresh one.
+func TestStateV34PostgresMigrationRepairsAMissingCheck(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	if dbx.DialectOf(db) != dbx.Postgres {
+		t.Skipf("requires %s pointing at PostgreSQL", testDatabaseURLVar)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_llm_models DROP CONSTRAINT IF EXISTS fb_llm_models_subagent_allowed_check`); err != nil {
+		t.Fatalf("drop the check: %v", err)
+	}
+	if err := migrateStateV33ToV34Postgres(ctx, conn); err != nil {
+		t.Fatalf("retry the v34 migration: %v", err)
+	}
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pg_constraint WHERE conname = 'fb_llm_models_subagent_allowed_check' AND conrelid = 'fb_llm_models'::regclass`).Scan(&present); err != nil {
+		t.Fatal(err)
+	}
+	if present != 1 {
+		t.Fatalf("named check constraints = %d, want 1", present)
+	}
+	// Re-running stays a no-op rather than failing on a duplicate constraint.
+	if err := migrateStateV33ToV34Postgres(ctx, conn); err != nil {
+		t.Fatalf("re-run the v34 migration: %v", err)
+	}
+}
