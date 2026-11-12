@@ -14198,8 +14198,8 @@ func TestSupportedProvidersMatchMainstreamSet(t *testing.T) {
 	for _, sub := range subscription.Registry() {
 		signIns = append(signIns, sub.ID())
 	}
-	if !reflect.DeepEqual(signIns, []string{"chatgpt", "opencode-go"}) {
-		t.Fatalf("sign-ins = %#v, want the registry's two", signIns)
+	if !reflect.DeepEqual(signIns, []string{"chatgpt", "opencode-go", "volcengine"}) {
+		t.Fatalf("sign-ins = %#v, want the registry's three", signIns)
 	}
 	for i := range want {
 		if got[i] != want[i] {

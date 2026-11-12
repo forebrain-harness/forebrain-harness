@@ -779,7 +779,7 @@ func (s *llmSetup) probeSubscription(sub subscription.Subscription) turn.SignInC
 		return check
 	}
 	probeCtx, cancel := context.WithTimeout(s.ctx(), modelsDiscoveryTimeout)
-	check := sub.Probe(probeCtx, subscription.Env{Home: s.cfg.Home})
+	check := sub.Probe(probeCtx, s.signInEnv())
 	cancel()
 	if s.probes == nil {
 		s.probes = make(map[string]turn.SignInCheck, len(subscriptions()))
@@ -1115,7 +1115,7 @@ func (s *llmSetup) signIn(sub subscription.Subscription) (bool, error) {
 		return false, err
 	}
 	ctx := s.ctx()
-	login, err := sub.Start(ctx, subscription.Env{Home: s.cfg.Home}, flow)
+	login, err := sub.Start(ctx, s.signInEnv(), flow)
 	if err != nil {
 		return false, err
 	}
@@ -1131,7 +1131,11 @@ func (s *llmSetup) signIn(sub subscription.Subscription) (bool, error) {
 			fmt.Fprintln(status, page)
 		}
 	}
-	if address != "" && localBrowser() && flow != subscription.FlowDeviceCode {
+	// The flow hands the page over and never opens it: only a surface sits in
+	// front of the user. A device code is no exception — the page it shows is the
+	// one to open, and Volcengine's carries the code already filled in — so a
+	// machine with a browser opens it and a remote one only prints it.
+	if address != "" && localBrowser() {
 		if openErr := browserOpener(address, func(err error) {
 			logPromptChoice(s.cfg, "llmsetup.browser_open_failed", s.choice, map[string]any{"error": errString(err)})
 		}); openErr != nil && status != nil {
@@ -1355,7 +1359,7 @@ func (s *llmSetup) pickOffers() (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		ids, err := sub.Provision(s.ctx(), env, chosen, subscription.ProvisionOptions{})
+		ids, err := s.provisionWithPastedKey(sub, env, chosen)
 		if err != nil {
 			// The registry's own sentence: it names what the user has to do and
 			// never a key. Nothing it refused is written.
@@ -1389,6 +1393,54 @@ func (s *llmSetup) pickOffers() (bool, error) {
 	}
 }
 
+// provisionWithPastedKey writes the chosen offers and, when a plan answers that
+// it needs an API key nobody can fetch (Volcengine's personal plans, plan 281),
+// asks for one on a masked page and writes again with it. The key travels into
+// the row and nowhere else: the page's sentences name the plan and the console,
+// never a key.
+func (s *llmSetup) provisionWithPastedKey(sub subscription.Subscription, env subscription.Env,
+	chosen []subscription.Offer) ([]string, error) {
+	opts := subscription.ProvisionOptions{}
+	for {
+		ids, err := sub.Provision(s.ctx(), env, chosen, opts)
+		var needsKey subscription.ErrPlanKeyRequired
+		if !errors.As(err, &needsKey) {
+			return ids, err
+		}
+		key, ok, askErr := s.pastedPlanKey(needsKey)
+		if askErr != nil {
+			return nil, askErr
+		}
+		if !ok {
+			return nil, fmt.Errorf("no key was pasted, so %s was not added", needsKey.PlanLabel)
+		}
+		opts.Key = key
+	}
+}
+
+// pastedPlanKey is the masked page a plan's own key comes from: the console says
+// what the key is, the page says where to copy it and that it stays here.
+func (s *llmSetup) pastedPlanKey(need subscription.ErrPlanKeyRequired) (string, bool, error) {
+	label := strings.TrimSpace(need.PlanLabel)
+	if label == "" {
+		label = strings.TrimSpace(need.Plan)
+	}
+	title := "Paste the " + label + " API key"
+	if url := strings.TrimSpace(need.ConsoleURL); url != "" {
+		title += "\nCopy it from " + url
+	}
+	title += "\nSaved on this machine only."
+	for {
+		key, ok, err := s.cfg.Selector.Secret(title, "")
+		if err != nil || !ok {
+			return "", false, err
+		}
+		if key = strings.TrimSpace(key); key != "" {
+			return key, true, nil
+		}
+	}
+}
+
 // defaultOffers is what the offers page opens with: the models the subscription
 // marks as its default, or — when it marks none — its first row. Starting with
 // nothing ticked would make Enter a no-op.
@@ -1417,7 +1469,7 @@ func (s *llmSetup) fetchOffers(sub subscription.Subscription) ([]subscription.Of
 		if status != nil {
 			fmt.Fprintln(status, "Fetching this account's available models…")
 		}
-		offers, err := sub.Offers(fetchCtx, subscription.Env{Home: s.cfg.Home})
+		offers, err := sub.Offers(fetchCtx, s.signInEnv())
 		cancel()
 		if err == nil {
 			logPromptChoice(s.cfg, "llmsetup.models_fetched", s.choice, map[string]any{"count": len(offers)})
@@ -1430,6 +1482,18 @@ func (s *llmSetup) fetchOffers(sub subscription.Subscription) ([]subscription.Of
 				"login saved, but the account's models could not be fetched: %w\nNo provider configuration was written; run /connect again later, or choose another provider", err)
 		}
 	}
+}
+
+// signInEnv is what a sign-in reads before it writes anything: the same home and
+// database subscriptionEnv hands the write, because a subscription's credential
+// is a database row like the other two sign-ins'. An install whose database
+// cannot open still lists its sign-ins — the probe then answers from the home
+// alone, and the write that needs the row reports the failure itself.
+func (s *llmSetup) signInEnv() subscription.Env {
+	if env, err := s.subscriptionEnv(); err == nil {
+		return env
+	}
+	return subscription.Env{Home: s.cfg.Home}
 }
 
 // subscriptionEnv is what the registry reads and writes: this home, and the

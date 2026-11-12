@@ -301,6 +301,7 @@ type fakeSubscription struct {
 	startedFlow string
 	offerCalls  int
 	provisioned [][]subscription.Offer
+	options     []subscription.ProvisionOptions
 	envs        []subscription.Env
 }
 
@@ -330,9 +331,10 @@ func (s *fakeSubscription) Offers(context.Context, subscription.Env) ([]subscrip
 	return s.offers, nil
 }
 
-func (s *fakeSubscription) Provision(_ context.Context, env subscription.Env, offers []subscription.Offer, _ subscription.ProvisionOptions) ([]string, error) {
+func (s *fakeSubscription) Provision(_ context.Context, env subscription.Env, offers []subscription.Offer, opts subscription.ProvisionOptions) ([]string, error) {
 	s.envs = append(s.envs, env)
 	s.provisioned = append(s.provisioned, offers)
+	s.options = append(s.options, opts)
 	if s.provisionFn != nil {
 		if err := s.provisionFn(len(s.provisioned)); err != nil {
 			return nil, err
@@ -340,16 +342,17 @@ func (s *fakeSubscription) Provision(_ context.Context, env subscription.Env, of
 	}
 	// Write the rows the way a real subscription's provisionRows does: the
 	// flow that saves the subagent switch addresses them by id, so the ids have
-	// to name rows that exist (a login-backed row holds no key).
+	// to name rows that exist (a login-backed row holds no key; a key-backed plan
+	// carries the one the user pasted, plan 281).
 	ids := make([]string, len(offers))
-	empty := ""
+	key := strings.TrimSpace(opts.Key)
 	for i, offer := range offers {
 		id, err := process.UpsertLLMModel(context.Background(), env.DB, process.LLMModelInput{
 			Provider:   offer.Provider,
 			Model:      offer.Model,
 			BaseURL:    offer.BaseURL,
 			APIPath:    offer.APIPath,
-			APIKey:     &empty,
+			APIKey:     &key,
 			Source:     s.id,
 			SourcePlan: offer.Plan,
 		})
@@ -393,6 +396,33 @@ func openCodeLike() *fakeSubscription {
 			{Subscription: "opencode-go", Provider: "opencode-go", Model: "kimi-k3", BaseURL: base, APIPath: "/chat/completions", Plan: "go", PlanLabel: "Go"},
 		},
 	}
+}
+
+// volcengineLike is the shape plan 281's Volcengine Ark has: a device code, offers
+// that ask for a key the vendor never returns, and a write that refuses until it
+// is given one.
+func volcengineLike() *fakeSubscription {
+	sub := &fakeSubscription{
+		id: "volcengine", label: "Volcengine Ark",
+		flows: []string{subscription.FlowDeviceCode},
+		check: turn.SignInCheck{State: turn.SignInMissing},
+		login: newFakeLogin("https://signin.volcengine.com/device?user_code=ABCD-1234", "ABCD-1234"),
+		offers: []subscription.Offer{
+			{Subscription: "volcengine", Provider: "volcengine", Model: "doubao-seed-2.1-pro",
+				BaseURL: "https://ark.cn-beijing.volces.com/api/coding", APIPath: "/v1/messages",
+				Plan: "coding-plan", PlanLabel: "Coding Plan", KeyRequired: true, Default: true},
+		},
+	}
+	sub.provisionFn = func(attempt int) error {
+		if attempt == 1 {
+			return subscription.ErrPlanKeyRequired{
+				Plan: "coding-plan", PlanLabel: "Coding Plan",
+				ConsoleURL: "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+			}
+		}
+		return nil
+	}
+	return sub
 }
 
 // withSubscriptions replaces the sign-in registry the setup lists and drives,
@@ -736,9 +766,9 @@ func TestConfigureSubscriptionRejectedPasteTriesAgain(t *testing.T) {
 	}
 }
 
-// The device code is the whole page: the address to open and the code to confirm.
-// A device flow opens no browser — the plan's browser-opened device flow arrives
-// with the first key-backed plan, not here.
+// The device code is the whole page: the address to open and the code to confirm,
+// and on a machine with a browser the flow opens that address — a device flow is
+// no exception, and Volcengine's page carries the code already filled in.
 func TestConfigureSubscriptionDeviceFlowShowsTheCode(t *testing.T) {
 	sub := openCodeLike()
 	opened := browserMachine(t)
@@ -752,8 +782,8 @@ func TestConfigureSubscriptionDeviceFlowShowsTheCode(t *testing.T) {
 	if sub.startedFlow != subscription.FlowDeviceCode {
 		t.Fatalf("flow = %q", sub.startedFlow)
 	}
-	if len(*opened) != 0 {
-		t.Fatalf("opened %v, want no browser for a device code", *opened)
+	if len(*opened) != 1 || (*opened)[0] != "https://opencode.ai/auth" {
+		t.Fatalf("opened %v, want the address the page shows", *opened)
 	}
 	for _, want := range []string{
 		"Open https://opencode.ai/auth and enter this code.",
@@ -765,6 +795,66 @@ func TestConfigureSubscriptionDeviceFlowShowsTheCode(t *testing.T) {
 	}
 	if opts.Provider != "opencode-go" || opts.BaseURL != opencode.ProviderBaseURL("opencode-go") || opts.APIKey != "" {
 		t.Fatalf("options = %+v", opts)
+	}
+}
+
+// A plan whose key nobody can fetch asks for it on a masked page — naming the
+// console it is copied from — and writes the rows only once it has one: the key
+// reaches the write and is never repeated on the page (plan 281).
+func TestConfigureSubscriptionAsksForTheKeyAPlanCannotFetch(t *testing.T) {
+	sub := volcengineLike()
+	const pasted = "ark-pasted-placeholder-key"
+	out := &bytes.Buffer{}
+	selector := &fakeSelector{confirms: []bool{true}, inputs: []string{pasted}}
+	cfg := setupTestConfig(t, selector)
+	cfg.Output = out
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if sub.startedFlow != subscription.FlowDeviceCode {
+		t.Fatalf("flow = %q, want the console's device code", sub.startedFlow)
+	}
+	if len(sub.provisioned) != 2 {
+		t.Fatalf("writes = %d, want the refused one and the retry", len(sub.provisioned))
+	}
+	if sub.options[0].Key != "" {
+		t.Fatalf("first write carried key %q, want none", sub.options[0].Key)
+	}
+	if sub.options[1].Key != pasted {
+		t.Fatalf("retry carried key %q, want the pasted one", sub.options[1].Key)
+	}
+	labels := strings.Join(selector.inputLabels, "\n")
+	if !strings.Contains(labels, "Paste the Coding Plan API key") {
+		t.Fatalf("key page = %q, want it to name the plan", labels)
+	}
+	if !strings.Contains(labels, "https://console.volcengine.com/ark") {
+		t.Fatalf("key page = %q, want the console it is copied from", labels)
+	}
+	if strings.Contains(out.String(), pasted) {
+		t.Fatalf("output = %q, must never repeat the key", out.String())
+	}
+	if opts.Provider != "volcengine" {
+		t.Fatalf("options = %+v", opts)
+	}
+}
+
+// Every sign-in call reads the same environment the write does, database
+// included: a subscription's credential is a database row, so a probe without it
+// would answer "not signed in" on a machine that is.
+func TestSignInEnvCarriesTheStateDatabase(t *testing.T) {
+	setup := newLLMSetup(setupTestConfig(t, &fakeSelector{}))
+	t.Cleanup(setup.closeState)
+	env, err := setup.subscriptionEnv()
+	if err != nil {
+		t.Fatalf("subscriptionEnv: %v", err)
+	}
+	if env.DB == nil || env.Home == "" {
+		t.Fatalf("subscriptionEnv = %+v, want a home and a database", env)
+	}
+	signIn := setup.signInEnv()
+	if signIn.DB != env.DB || signIn.Home != env.Home {
+		t.Fatalf("signInEnv = %+v, want the write's own environment", signIn)
 	}
 }
 
@@ -1669,8 +1759,8 @@ func TestConfigureSubscriptionDeviceFlowWithoutAUserCode(t *testing.T) {
 	if sub.startedFlow != subscription.FlowDeviceCode {
 		t.Fatalf("flow = %q", sub.startedFlow)
 	}
-	if len(*opened) != 0 {
-		t.Fatalf("opened %v, want no browser for a device code", *opened)
+	if len(*opened) != 1 || (*opened)[0] != "https://opencode.ai/auth" {
+		t.Fatalf("opened %v, want the address the page shows", *opened)
 	}
 	page := out.String()
 	if !strings.Contains(page, "Open https://opencode.ai/auth to sign in.") {
