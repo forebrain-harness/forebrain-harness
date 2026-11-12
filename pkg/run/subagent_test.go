@@ -5737,15 +5737,27 @@ func seedStoppableSubagent(t *testing.T, fix *persistenceFixture, conv, worker s
 // lastSubagentEndedStatus is the status the last subagent_ended event carried.
 func lastSubagentEndedStatus(t *testing.T, p *channelEventProbe) string {
 	t.Helper()
-	ended := p.ofType(event.RunEventSubagentEnded)
-	if len(ended) == 0 {
-		t.Fatal("no subagent_ended event was published")
+	// The subagent's record settles before its ended event is published (the
+	// event announces the recorded outcome — finishSubagentExecution then
+	// notifySubagentEndedDirect in runSubagentDirect), so a caller that waited
+	// for the record still races the publication. Poll for the event with a
+	// deadline — the same bound the record wait uses — instead of assuming the
+	// record's settle already delivered it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ended := p.ofType(event.RunEventSubagentEnded)
+		if len(ended) > 0 {
+			var payload event.SubagentEndedPayload
+			if err := json.Unmarshal(ended[len(ended)-1].Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			return payload.Status
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no subagent_ended event was published")
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	var payload event.SubagentEndedPayload
-	if err := json.Unmarshal(ended[len(ended)-1].Payload, &payload); err != nil {
-		t.Fatal(err)
-	}
-	return payload.Status
 }
 
 // TestSubagentContinueCanBeStoppedFromTheRoster pins the roster's stop for a
