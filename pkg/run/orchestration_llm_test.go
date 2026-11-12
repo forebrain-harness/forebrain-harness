@@ -1,11 +1,13 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -11802,5 +11804,129 @@ func TestInterruptToSendKeepsTheAbandonedReplysReasoning(t *testing.T) {
 	}
 	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
 		t.Fatalf("unexpected result: %#v", res)
+	}
+}
+
+// captureRunLogs sends every slog record the test writes to a buffer and puts
+// the default logger back afterwards.
+func captureRunLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &logs
+}
+
+// A response that reports every call its stream already ran is the ordinary
+// case, not a fault: the warning this test forbids used to fire whenever a
+// tool had been dispatched, saying the response reported nothing, which was as
+// often false as true — 44,380 warnings in one home's error.log (plan 285).
+func TestStreamedToolsReportedByTheResponseAreNotWarned(t *testing.T) {
+	ctx := context.Background()
+	const sid = "streamtools-reported"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe_a", ReadOnly: true, ConcurrencySafe: true})
+
+	var runs int32
+	probe, err := llm.NewTool("probe_a", "only", func(context.Context, *struct{}) (string, error) {
+		atomic.AddInt32(&runs, 1)
+		return "a ok", nil
+	})
+	if err != nil {
+		t.Fatalf("probe_a: %v", err)
+	}
+	call := streamCall("call-a", "probe_a")
+
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(_ context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("working")
+			sink.OnTextBlockDone()
+			sink.OnToolCallReady(call)
+			// The response reports the very call the stream already ran.
+			msg := llm.AssistantMessage(nil, call)
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(context.Context, *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid), streamTestSink())
+
+	logs := captureRunLogs(t)
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{probe})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("result = %+v", res)
+	}
+	if runs != 1 {
+		t.Fatalf("tool runs = %d, want 1", runs)
+	}
+	joined := logs.String()
+	if strings.Contains(joined, "reports no tool calls") {
+		t.Fatalf("a response that reported its call must not be warned about: %s", joined)
+	}
+	if strings.Contains(joined, "outran the response") {
+		t.Fatalf("nothing outran the response, so nothing may say it did: %s", joined)
+	}
+}
+
+// The one case worth a warning is a call that really is missing from the
+// response: it is named once, with the call id an operator can grep for.
+func TestStreamedToolMissingFromTheResponseIsWarnedOnce(t *testing.T) {
+	ctx := context.Background()
+	const sid = "streamtools-missing"
+	store, runID := newProgressStore(t, sid)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe_a", ReadOnly: true, ConcurrencySafe: true})
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe_b", ReadOnly: true, ConcurrencySafe: true})
+
+	probeA, err := llm.NewTool("probe_a", "first", func(context.Context, *struct{}) (string, error) { return "a ok", nil })
+	if err != nil {
+		t.Fatalf("probe_a: %v", err)
+	}
+	probeB, err := llm.NewTool("probe_b", "second", func(context.Context, *struct{}) (string, error) { return "b ok", nil })
+	if err != nil {
+		t.Fatalf("probe_b: %v", err)
+	}
+	callA := streamCall("call-a", "probe_a")
+	callB := streamCall("call-b", "probe_b")
+
+	inner := &streamFailLLM{attempts: []func(ctx context.Context, sink *llm.StreamSink) (*llm.Result, error){
+		func(_ context.Context, sink *llm.StreamSink) (*llm.Result, error) {
+			sink.OnDelta("working")
+			sink.OnTextBlockDone()
+			sink.OnToolCallReady(callA)
+			sink.OnToolCallReady(callB)
+			// The response leaves B out although the stream ran it.
+			msg := llm.AssistantMessage(nil, callA)
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+		func(context.Context, *llm.StreamSink) (*llm.Result, error) {
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLMWithProgress(inner, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid), streamTestSink())
+
+	logs := captureRunLogs(t)
+	if _, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{probeA, probeB}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	joined := logs.String()
+	if got := strings.Count(joined, "outran the response's tool calls"); got != 1 {
+		t.Fatalf("warnings = %d, want exactly one: %s", got, joined)
+	}
+	if !strings.Contains(joined, "call_id=call-b") {
+		t.Fatalf("the warning must name the call it appended: %s", joined)
+	}
+	if strings.Contains(joined, "reports no tool calls") {
+		t.Fatalf("the always-false warning must be gone: %s", joined)
 	}
 }

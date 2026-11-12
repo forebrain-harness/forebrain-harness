@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -817,9 +816,10 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		// A response can report fewer calls than its stream announced — a compat
 		// adapter synthesizes them from its final frame. The calls that already
 		// ran are still this response's own: append the ones it left out so each
-		// is answered. Self-healing, so it is a warning, never an error.
+		// is answered. reconcile warns for each call it actually had to append;
+		// this loop used to warn unconditionally, so a response that reported
+		// every call it ran was still told it had reported none (plan 285).
 		if exec != nil && exec.dispatched() && res != nil && res.Message != nil {
-			slog.Warn("tools executed in-stream but the response reports no tool calls")
 			res.Message.ToolCalls = exec.reconcile(res.Message.ToolCalls)
 		}
 		if res == nil || res.Message == nil || len(res.Message.ToolCalls) == 0 {
