@@ -1259,6 +1259,12 @@ func TestGatewayInlineApprovalApprovesInTheSameRun(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, action.ID, tool.ApprovedActionIDFromContext(resumeCtx))
+	// The answered call's fence renews the continuation lease in a goroutine of
+	// its own, writing to the state database every third of a lease. This test
+	// never replays the call, so it releases the fence the way the turn does
+	// after the replay: left open, that renewal outlives the test and writes into
+	// a state database the test is about to close and remove under it.
+	t.Cleanup(func() { tool.EndApprovalContinuation(resumeCtx) })
 
 	mu.Lock()
 	require.NotEmpty(t, published)
@@ -1271,7 +1277,17 @@ func TestGatewayInlineApprovalApprovesInTheSameRun(t *testing.T) {
 	require.Len(t, list, 1, "no second run: the turn continued in place")
 
 	// The endpoint's resume dispatch cannot claim the continuation this live
-	// loop holds, whichever door it tries.
+	// loop holds, whichever door it tries. It runs the real continuation in this
+	// test's own goroutine: production starts the dispatch on one that outlives
+	// the response, and under -race and full-suite load that resume was still
+	// reading the state database — opening a connection, and with it the WAL
+	// sidecar files — while the test's TempDir cleanup removed the directory,
+	// which failed the test with "directory not empty".
+	previous := dispatchGatewayResume
+	dispatchGatewayResume = func(srv *Server, actionID string, clearedContext bool) {
+		srv.resumeGatewayRun(actionID, clearedContext)
+	}
+	t.Cleanup(func() { dispatchGatewayResume = previous })
 	s.resumeGatewayRunIfParked(ctx, action.ID, false)
 	claimed, err := runs.ClaimWaitResume(ctx, runRow.ID, action.ID, "another-process")
 	require.NoError(t, err)
@@ -1291,6 +1307,10 @@ func TestGatewayInlineApprovalDenialRefusesOnlyThatCall(t *testing.T) {
 	}()
 	resumeCtx, err := s.promptGatewayInlineApproval(ctx, rae, "req-1", "session-1", func(wsServerMsg) {})
 	require.NoError(t, err)
+	// The answered call's fence renews the lease in a goroutine of its own; the
+	// call is never replayed here, so the test releases it before the state
+	// database it writes to is closed.
+	t.Cleanup(func() { tool.EndApprovalContinuation(resumeCtx) })
 	resume := tool.ToolApprovalResumeFromContext(resumeCtx)
 	require.NotNil(t, resume)
 	require.True(t, resume.Denied)
