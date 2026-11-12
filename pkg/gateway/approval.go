@@ -84,8 +84,8 @@ func (s *Server) approvalGate() *turn.PendingApprovalGate {
 // modelConfig is the configuration the active agent's models resolve against:
 // the runner's own when it holds one, the environment's otherwise.
 func (s *Server) modelConfig() *config.Root {
-	if s != nil && s.Runner != nil && s.Runner.AppCfg != nil {
-		return s.Runner.AppCfg
+	if s != nil && s.Runner != nil && s.Runner.Config() != nil {
+		return s.Runner.Config()
 	}
 	return s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 }

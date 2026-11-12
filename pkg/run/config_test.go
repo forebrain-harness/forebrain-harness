@@ -53,7 +53,7 @@ func TestAgentModelResolvesEachKindOfAgent(t *testing.T) {
 			"general-purpose": {},
 		},
 	}}
-	r := &Runner{Deps: &Deps{AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{}).WithConfig(cfg)}
 
 	provider, model, effort := AgentModel(r, "session-1", nil)
 	if provider != "zhipuai" || model != "glm-5.3" || effort != "xhigh" {
@@ -297,7 +297,7 @@ func TestRunnerLoadDoesNotRegisterEnableThinkingTool(t *testing.T) {
 			},
 		},
 	}
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg)}
 
 	if err := r.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
@@ -362,7 +362,7 @@ description: Deck helper`, "Cold body")
 			},
 		},
 	}
-	r := &Runner{Deps: &Deps{Home: home, AppCfg: cfg, LaunchProject: launch, ProjectRoot: project}}
+	r := &Runner{Deps: (&Deps{Home: home, LaunchProject: launch, ProjectRoot: project}).WithConfig(cfg)}
 
 	if err := r.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
@@ -574,13 +574,13 @@ func toolTableWithoutSkills(t *testing.T) string {
 	if err := safety.MarkTrusted(home, trusted); err != nil {
 		t.Fatalf("trust bare project: %v", err)
 	}
-	bare := &Runner{Deps: &Deps{Home: home, AppCfg: &appcfg.Root{
+	bare := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{
 		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
 				Provider: "openai", Model: "qwen-test", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
 			}}},
 		}},
-	}}}
+	})}
 	if err := bare.Load(); err != nil {
 		t.Fatalf("load skill-free runtime: %v", err)
 	}
@@ -749,7 +749,7 @@ func TestAgentModelAndRoutingAgree(t *testing.T) {
 			"general-purpose": {},
 		},
 	}}
-	r := &Runner{Deps: &Deps{AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{}).WithConfig(cfg)}
 
 	cases := []struct {
 		name string
@@ -810,7 +810,7 @@ func TestContextBudgetUsesEachAgentsOwnModel(t *testing.T) {
 		}},
 		"general-purpose": {},
 	}}}
-	r := &Runner{Deps: &Deps{AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{}).WithConfig(cfg)}
 
 	cases := []struct {
 		name       string
@@ -898,7 +898,7 @@ func TestContextBudgetUsesEachAgentsOwnModel(t *testing.T) {
 	// The configured auto-compaction percent is part of the budget, for the
 	// subagent's window as much as the primary's.
 	limited := &appcfg.Root{Agents: cfg.Agents, Compact: appcfg.CompactSection{AutoCompactPercent: 50}}
-	rl := &Runner{Deps: &Deps{AppCfg: limited}}
+	rl := &Runner{Deps: (&Deps{}).WithConfig(limited)}
 	// Half of the primary's 1M window, and half of the explore agent's 128k.
 	primary, ok := ContextBudget(rl, "conversation-1", nil, 500000)
 	if !ok || primary.AutoCompactThreshold != 500000 || primary.PercentLeft != 0 {
@@ -1209,7 +1209,7 @@ func TestRunnerLoadPointsAtTheModelsPageWhenThereIsNoModel(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true},
 	}}}
-	r := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: state.NewSessionStore(db, "main")}, FileResolver: PathResolver{}}
+	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: state.NewSessionStore(db, "main")}).WithConfig(cfg), FileResolver: PathResolver{}}
 	err = r.Load()
 	if err == nil {
 		t.Fatal("Load with no model succeeded, want an error")
@@ -1812,7 +1812,7 @@ func TestPublishContextBudget(t *testing.T) {
 		}},
 	}}}
 	probe := &budgetEventProbe{}
-	r := &Runner{Deps: &Deps{SessionStore: sess, AppCfg: cfg}, Events: probe}
+	r := &Runner{Deps: (&Deps{SessionStore: sess}).WithConfig(cfg), Events: probe}
 
 	if !PublishContextBudget(r, "run-1", "session-1") {
 		t.Fatal("PublishContextBudget returned false for a measured session")

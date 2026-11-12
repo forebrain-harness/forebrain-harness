@@ -289,7 +289,7 @@ func cronTestServer(t *testing.T) *Server {
 	return &Server{
 		Home:  home,
 		RunRT: &state.RunStore{DB: db},
-		Env:   &process.Environment{Root: home, ConfigPath: filepath.Join(home, "forebrain.yaml"), SQL: db, Deps: run.Deps{Home: home, AppCfg: cfg}},
+		Env:   (&process.Environment{Root: home, ConfigPath: filepath.Join(home, "forebrain.yaml"), SQL: db, Deps: &run.Deps{Home: home}}).WithDepsConfig(cfg),
 	}
 }
 
@@ -826,7 +826,7 @@ func newProjectsTestServer(t *testing.T) (*Server, *state.ProjectStore, string) 
 	require.NoError(t, err)
 	seedConfigRoot(t, db, cfg)
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}}
-	env := &process.Environment{Deps: run.Deps{Home: home}, Root: home, SQL: db}
+	env := &process.Environment{Deps: &run.Deps{Home: home}, Root: home, SQL: db}
 	env.ConfigPath = cfgPath
 	s := &Server{
 		Home:     home,
@@ -3535,7 +3535,7 @@ func rulesServer(t *testing.T) (*Server, string, string) {
 	cfg := &appcfg.Root{}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {Primary: true}}
 	seedConfigRoot(t, db, *cfg)
-	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
+	env := (&process.Environment{Deps: &run.Deps{Home: home}, Root: home, SQL: db}).WithDepsConfig(cfg)
 	env.ConfigPath = cfgPath
 	s := &Server{Home: home, Env: env}
 	// Registered after db.Close, and t.Cleanup is LIFO, so the accepted inbound
@@ -3887,8 +3887,8 @@ func TestSessionPresetSurvivesServerRestart(t *testing.T) {
 	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
 	cfg := &appcfg.Root{}
 	newServer := func() *Server {
-		runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
-		return &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
+		runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
+		return &Server{Home: home, Runner: runner, Env: (&process.Environment{Deps: &run.Deps{}, Root: home, Sandbox: safety.NewManager(), Runner: runner}).WithDepsConfig(cfg)}
 	}
 	s := newServer()
 
@@ -3922,8 +3922,8 @@ func TestSessionPresetGetInfersLegacyYoloSession(t *testing.T) {
 	require.NoError(t, err)
 
 	cfg := &appcfg.Root{}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
-	s := &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
+	s := &Server{Home: home, Runner: runner, Env: (&process.Environment{Deps: &run.Deps{}, Root: home, Sandbox: safety.NewManager(), Runner: runner}).WithDepsConfig(cfg)}
 
 	rr := httptest.NewRecorder()
 	s.handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset?session_id=yoloed", nil))
@@ -3938,8 +3938,8 @@ func TestSessionPresetGetInfersLegacyYoloSession(t *testing.T) {
 func TestSessionPresetBelongsToItsConversation(t *testing.T) {
 	home := t.TempDir()
 	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite, ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyOnRequest)}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
-	s := &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home}).WithConfig(cfg)}
+	s := &Server{Home: home, Runner: runner, Env: (&process.Environment{Deps: &run.Deps{}, Root: home, Sandbox: safety.NewManager(), Runner: runner}).WithDepsConfig(cfg)}
 
 	rr := httptest.NewRecorder()
 	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full_access"}`)))
@@ -3979,12 +3979,12 @@ func TestSessionScopedPermissionWritesRefuseAnotherAgentsSession(t *testing.T) {
 	defer db.Close()
 	require.NoError(t, state.NewSessionStore(db, "other-agent").Ensure(ctx, "their-session", "their-session"))
 	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite, ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyOnRequest)}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home}).WithConfig(cfg)}
 	s := &Server{
 		Home:     home,
 		Runner:   runner,
 		Sessions: state.NewSessionStore(db, "main"),
-		Env:      &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner},
+		Env:      (&process.Environment{Deps: &run.Deps{}, Root: home, Sandbox: safety.NewManager(), Runner: runner}).WithDepsConfig(cfg),
 	}
 	require.NoError(t, s.Sessions.Ensure(ctx, "my-session", "my-session"))
 	require.NoError(t, s.Sessions.Ensure(ctx, "rule-session", "rule-session"))
@@ -4051,7 +4051,7 @@ func workspaceTreeServer(t *testing.T) (*Server, string, string) {
 	}
 	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(home, "state", "primary-agent.json"), []byte(`{"active":"main"}`+"\n"), 0o600))
-	s := &Server{Home: home, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}}}
+	s := &Server{Home: home, Env: (&process.Environment{Deps: &run.Deps{}}).WithDepsConfig(cfg)}
 	return s, ws, scopeServerToRoot(t, s, home, ws)
 }
 
@@ -5346,7 +5346,7 @@ func exitPlanServer(t *testing.T, cfg *appcfg.Root) (*Server, *state.RunStore, *
 		Home: home, RunRT: runs, Actions: actions,
 		Sessions: state.NewSessionStore(db, "main"),
 		Projects: projects,
-		Runner:   &run.Runner{Deps: &run.Deps{AppCfg: cfg}},
+		Runner:   &run.Runner{Deps: (&run.Deps{}).WithConfig(cfg)},
 	}
 	require.NoError(t, state.SetPlanForSession(s.stateRoot(), s.sessionProjectKey(ctx, "s1"), "s1", "# Plan\n\n1. Ship it."))
 	return s, runs, actions, action.ID, "s1"
@@ -5808,7 +5808,7 @@ func newSubagentViewTestServer(t *testing.T) (*Server, string) {
 	cfg := &appcfg.Root{}
 	// A production runner always carries the controller: a subagent's channel
 	// keeps its queue there, and a steer is only deliverable through it.
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main", SessionStore: sessions}, Control: run.NewController()}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg), Control: run.NewController()}
 	s := &Server{Home: home, RunRT: &state.RunStore{DB: db}, Sessions: sessions, Runner: runner}
 	return s, filepath.Join(home, "workspace")
 }
@@ -6332,8 +6332,8 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	sess := state.NewSessionStore(db, "main")
 	require.NoError(t, sess.Ensure(context.Background(), "s1", "s1"))
-	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sess}}
-	runner := &run.Runner{Deps: &env.Deps}
+	env := (&process.Environment{Root: home, ConfigPath: cfgPath, Deps: &run.Deps{Home: home, AgentName: "main", SessionStore: sess}}).WithDepsConfig(&cfg)
+	runner := &run.Runner{Deps: env.Deps}
 	env.Runner = runner
 	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
 	// The fixture states its configuration directly (the file is a restart-time
@@ -6608,8 +6608,8 @@ func TestChatSessionModelEndpointsPickTheRow(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	sess := state.NewSessionStore(db, "main")
 	require.NoError(t, sess.Ensure(context.Background(), "s1", "s1"))
-	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sess}}
-	runner := &run.Runner{Deps: &env.Deps}
+	env := (&process.Environment{Root: home, ConfigPath: cfgPath, Deps: &run.Deps{Home: home, AgentName: "main", SessionStore: sess}}).WithDepsConfig(&cfg)
+	runner := &run.Runner{Deps: env.Deps}
 	env.Runner = runner
 	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
 	// The fixture states its configuration directly (the file is a restart-time
@@ -6720,8 +6720,8 @@ func TestChatModelDefaultFollowsMostRecentlyUsed(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sess}}
-	runner := &run.Runner{Deps: &env.Deps}
+	env := (&process.Environment{Root: home, ConfigPath: cfgPath, Deps: &run.Deps{Home: home, AgentName: "main", SessionStore: sess}}).WithDepsConfig(&cfg)
+	runner := &run.Runner{Deps: env.Deps}
 	env.Runner = runner
 	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
 	// The fixture states its configuration directly (the file is a restart-time
@@ -6874,22 +6874,21 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 	// stays as the untouched-file evidence the write tests compare against.
 	seedConfigRoot(t, db, cfg)
 	ws := filepath.Join(home, "workspace")
-	runner := &run.Runner{Deps: &run.Deps{
+	runner := &run.Runner{Deps: (&run.Deps{
 		Home:          home,
 		AgentName:     agentName,
 		WorkspaceRoot: ws,
 		ProjectRoot:   home,
 		MCPServers:    effective,
-		AppCfg:        &cfg,
-	}}
-	env := &process.Environment{
+	}).WithConfig(&cfg)}
+	env := (&process.Environment{
 		Root:       home,
 		ConfigPath: cfgPath,
-		RawConfig:  cfg,
-		SQL:        db,
-		Deps:       run.Deps{Home: home, AgentName: agentName, AppCfg: &cfg, WorkspaceRoot: ws},
-		Runner:     runner,
-	}
+
+		SQL:    db,
+		Deps:   &run.Deps{Home: home, AgentName: agentName, WorkspaceRoot: ws},
+		Runner: runner,
+	}).WithRawConfig(cfg).WithDepsConfig(&cfg)
 	s := &Server{Home: home, Runner: runner, Env: env, Projects: state.NewProjectStore(db, agentName)}
 	// The fixture takes the file as its live configuration the way a process
 	// start does — ${ENV} references resolved, the launch project's trust
@@ -6901,7 +6900,7 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 	}
 	live := safety.EffectiveConfig(loaded, safety.ProjectContext{})
 	env.AdoptConfig(&live)
-	runner.AppCfg = &live
+	runner.SetConfig(&live)
 	return &mcpWriteFixture{server: s, cfgPath: cfgPath, home: home, agentName: agentName, projects: s.Projects}
 }
 
@@ -7659,7 +7658,7 @@ func toolsPageServer(t *testing.T) *Server {
 		tools.RegisterToolMeta(meta)
 	}
 	setRunnerToolsForTest(runner, tools)
-	return &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{Home: home}, Runner: runner}}
+	return &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: &run.Deps{Home: home}, Runner: runner}}
 }
 
 // TestToolsListPagesWithFiltersCategoriesAndTotal pins the tool table's
@@ -8328,7 +8327,7 @@ func projectPagesServer(t *testing.T) (*Server, state.Project, string) {
 	t.Cleanup(func() { _ = db.Close() })
 	workspace := filepath.Join(home, "workspace")
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", WorkspaceRoot: workspace}}
-	env := &process.Environment{Root: home, SQL: db, Runner: runner, Deps: run.Deps{Home: home, AppCfg: cfg}}
+	env := (&process.Environment{Root: home, SQL: db, Runner: runner, Deps: &run.Deps{Home: home}}).WithDepsConfig(cfg)
 	env.ConfigPath = cfgPath
 	root := filepath.Join(home, "proj")
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o755))
@@ -8829,7 +8828,7 @@ func TestWithConfigSectionSerialisesWriters(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{Home: home, Env: &process.Environment{Root: home, ConfigPath: filepath.Join(home, "forebrain.yaml"), SQL: db, Deps: run.Deps{Home: home, AppCfg: &appcfg.Root{}}}}
+	s := &Server{Home: home, Env: (&process.Environment{Root: home, ConfigPath: filepath.Join(home, "forebrain.yaml"), SQL: db, Deps: &run.Deps{Home: home}}).WithDepsConfig(&appcfg.Root{})}
 
 	const writers = 8
 	errs := make([]error, writers)
@@ -9667,7 +9666,7 @@ func TestProjectChannelTargetsListsSeenChats(t *testing.T) {
 		Runner:   &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}},
 		Projects: state.NewProjectStore(db, "main"),
 		Sessions: state.NewSessionStore(db, "main"),
-		Env:      &process.Environment{SQL: db, Deps: run.Deps{AppCfg: &appcfg.Root{}}},
+		Env:      (&process.Environment{SQL: db, Deps: &run.Deps{}}).WithDepsConfig(&appcfg.Root{}),
 	}
 	store := s.Projects
 	root := projectTempRoot(t)
@@ -9800,12 +9799,12 @@ func settingsServer(t *testing.T) (*Server, *sql.DB) {
 		"gateway:\n  http_addr: 127.0.0.1:6060\n"), 0o600))
 	process.InstallConfigSectionValidator(cfgPath, db)
 	t.Cleanup(func() { state.SetSectionValidator(nil) })
-	s := &Server{Home: home, Env: &process.Environment{
+	s := &Server{Home: home, Env: (&process.Environment{
 		Root:       home,
 		ConfigPath: cfgPath,
 		SQL:        db,
-		Deps:       run.Deps{Home: home, AppCfg: &appcfg.Root{}},
-	}}
+		Deps:       &run.Deps{Home: home},
+	}).WithDepsConfig(&appcfg.Root{})}
 	return s, db
 }
 

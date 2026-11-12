@@ -370,7 +370,7 @@ func TestRegisterSubagentToolOmitsTheFamilyWhenSubagentsAreDisabled(t *testing.T
 		if err := RegisterSubagentTool(a, Factory{
 			Home:  t.TempDir(),
 			Tools: st,
-			Owner: &Runner{Deps: &Deps{AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
+			Owner: &Runner{Deps: (&Deps{}).WithConfig(cfg), SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
 		}); err != nil {
 			t.Fatalf("RegisterSubagentTool: %v", err)
 		}
@@ -410,7 +410,7 @@ func TestRunPlanReviewSubagentRunsWithSubagentsDisabled(t *testing.T) {
 		},
 	}}
 	probe := &dispatchProbe{}
-	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "verdict"}}
+	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg), Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "verdict"}}
 
 	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", nil, SubagentModelOverride{
 		Provider: "openai", Model: "gpt-4o",
@@ -440,7 +440,7 @@ func TestPlanReviewSpawnEventNamesTheChosenModel(t *testing.T) {
 		},
 	}}
 	probe := &dispatchProbe{}
-	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "verdict"}}
+	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg), Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "verdict"}}
 
 	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", nil, SubagentModelOverride{
 		Provider: "zhipuai", Model: "glm-5.3-flash",
@@ -739,7 +739,7 @@ func TestSubagentSpawnCarriesTheTitleItWasNamedWith(t *testing.T) {
 	}
 
 	notifier := &collectingUINotify{}
-	owner := &Runner{Deps: &Deps{RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}, Control: NewController(), Events: notifier}
+	owner := &Runner{Deps: (&Deps{RunRT: runSvc}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: "ok"}, Control: NewController(), Events: notifier}
 	a, err := agent.New(noopLLM{}, "main", "main")
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
@@ -805,7 +805,7 @@ func TestFanoutSendsDirectSpawnNotificationForEveryTask(t *testing.T) {
 
 	notifier := &collectingUINotify{}
 	executor := &fixedSubagentExecutor{output: "ok"}
-	owner := &Runner{Deps: &Deps{RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: executor, Control: NewController(), Events: notifier}
+	owner := &Runner{Deps: (&Deps{RunRT: runSvc}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: executor, Control: NewController(), Events: notifier}
 	a, err := agent.New(noopLLM{}, "main", "main")
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
@@ -919,7 +919,7 @@ func TestSubagentSendLifecycleNamesItsDispatchingCall(t *testing.T) {
 	}
 
 	notifier := &collectingUINotify{}
-	owner := &Runner{Deps: &Deps{RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}, Control: NewController(), Events: notifier}
+	owner := &Runner{Deps: (&Deps{RunRT: runSvc}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: "done"}, Control: NewController(), Events: notifier}
 	a, err := agent.New(noopLLM{}, "main", "main")
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
@@ -1002,7 +1002,7 @@ func newDispatchHarness(t *testing.T) *dispatchHarness {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	executor := &ctxCaptureSubagentExecutor{reached: make(chan context.Context, 1)}
-	owner := &Runner{Deps: &Deps{RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: executor, Control: NewController()}
+	owner := &Runner{Deps: (&Deps{RunRT: runSvc}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: executor, Control: NewController()}
 	fac := Factory{AgentName: "main", Owner: owner, Home: t.TempDir()}
 	a, err := agent.New(noopLLM{}, "main", "main")
 	if err != nil {
@@ -1164,7 +1164,7 @@ func TestSubagentEndedCarriesItsFinishTime(t *testing.T) {
 	}
 
 	notifier := &collectingUINotify{}
-	owner := &Runner{Deps: &Deps{RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}, Control: NewController(), Events: notifier}
+	owner := &Runner{Deps: (&Deps{RunRT: runSvc}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: "done"}, Control: NewController(), Events: notifier}
 	a, err := agent.New(noopLLM{}, "main", "main")
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
@@ -1411,7 +1411,7 @@ func TestSubagentToolSchemasExposeSubtypeGuideToLLMAndToolMeta(t *testing.T) {
 	}
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  t.TempDir(),
-		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
+		Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
 		Tools: state,
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -1542,7 +1542,7 @@ func containsSubtypeName(items []string, want string) bool {
 func TestPrepareSubagentExecutionForksWhenSubtypeIsOmitted(t *testing.T) {
 	fac := Factory{
 		Home:  t.TempDir(),
-		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
+		Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
 		Tools: toolpkg.NewState(t.TempDir()),
 	}
 	for _, subtype := range []string{"", "   "} {
@@ -1717,7 +1717,7 @@ func TestSubagentToolResultsKeepTheirShape(t *testing.T) {
 
 	notifier := &collectingUINotify{}
 	home := t.TempDir()
-	owner := &Runner{Deps: &Deps{Home: home, RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}, Control: NewController(), Events: notifier}
+	owner := &Runner{Deps: (&Deps{Home: home, RunRT: runSvc}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: "done"}, Control: NewController(), Events: notifier}
 	a, err := agent.New(noopLLM{}, "main", "main")
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
@@ -1851,7 +1851,7 @@ func newSubagentToolsFor(t *testing.T, exec SubagentExecutor) (*agent.Agent, Fac
 		t.Fatalf("CreateRun: %v", err)
 	}
 	home := t.TempDir()
-	owner := &Runner{Deps: &Deps{Home: home, RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: exec, Control: NewController(), Events: &collectingUINotify{}}
+	owner := &Runner{Deps: (&Deps{Home: home, RunRT: runSvc}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: exec, Control: NewController(), Events: &collectingUINotify{}}
 	a, err := agent.New(noopLLM{}, "main", "main")
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
@@ -2967,7 +2967,7 @@ func TestSubagentRunGovernedOutputUsesUnifiedContextTruncation(t *testing.T) {
 	}
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  home,
-		Owner: &Runner{Deps: &Deps{RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: strings.Repeat("x\n", toolpkg.SpillThresholdBytes)}},
+		Owner: &Runner{Deps: (&Deps{RunRT: runSvc}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: strings.Repeat("x\n", toolpkg.SpillThresholdBytes)}},
 		Tools: toolsState,
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -3013,7 +3013,7 @@ func TestSubagentFanoutGovernedOutputUsesUnifiedContextTruncation(t *testing.T) 
 	}
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  home,
-		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: strings.Repeat("y\n", toolpkg.SpillThresholdBytes)}},
+		Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: strings.Repeat("y\n", toolpkg.SpillThresholdBytes)}},
 		Tools: toolsState,
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -3052,7 +3052,7 @@ func TestSubagentFanoutRejectsMissingOrNonPositiveMaxParallel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
 	}
-	if err := RegisterSubagentTool(a, Factory{Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: noopSubagentExecutor{}}}); err != nil {
+	if err := RegisterSubagentTool(a, Factory{Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: noopSubagentExecutor{}}}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
 	}
 	tool, ok := aToolByName(a, "subagent_fanout")
@@ -3115,7 +3115,7 @@ func TestSubagentFanoutAssignsDistinctTaskIDPerTask(t *testing.T) {
 	// which stresses the generator directly.
 	home := t.TempDir()
 	executor := &fixedSubagentExecutor{output: "ok"}
-	fac := Factory{Home: home, Owner: &Runner{Deps: &Deps{Home: home, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: executor}}
+	fac := Factory{Home: home, Owner: &Runner{Deps: (&Deps{Home: home}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: executor}}
 	a, err := agent.New(noopLLM{}, "main", "main")
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
@@ -3169,7 +3169,7 @@ func TestSubagentFanoutClampsLLMParallelismToGlobalMaxParallelSubagents(t *testi
 	}
 	cfg := subagentsEnabledConfig()
 	cfg.Agents.Defaults.Execution = appcfg.ExecutionConfig{MaxParallelSubagents: &limit}
-	if err := RegisterSubagentTool(a, Factory{Owner: &Runner{Deps: &Deps{AppCfg: cfg}, SubagentExecutor: executor}}); err != nil {
+	if err := RegisterSubagentTool(a, Factory{Owner: &Runner{Deps: (&Deps{}).WithConfig(cfg), SubagentExecutor: executor}}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
 	}
 	tool, ok := aToolByName(a, "subagent_fanout")
@@ -3206,7 +3206,7 @@ func TestSubagentFanoutDoesNotApplyFixedSixteenConcurrencyCap(t *testing.T) {
 	}
 	cfg := subagentsEnabledConfig()
 	cfg.Agents.Defaults.Execution = appcfg.ExecutionConfig{MaxParallelSubagents: &limit}
-	if err := RegisterSubagentTool(a, Factory{Owner: &Runner{Deps: &Deps{AppCfg: cfg}, SubagentExecutor: executor}}); err != nil {
+	if err := RegisterSubagentTool(a, Factory{Owner: &Runner{Deps: (&Deps{}).WithConfig(cfg), SubagentExecutor: executor}}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
 	}
 	tool, ok := aToolByName(a, "subagent_fanout")
@@ -3429,7 +3429,7 @@ func TestFrontForkChildCarriesItsOwnIdentity(t *testing.T) {
 	// tags the subtype, so the fork marker is a fact about the run, not a
 	// blanket tag.
 	cfg := subagentCustomConfig()
-	typedOwner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	typedOwner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg), SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
 	typedFac := Factory{AgentName: "main", Home: typedOwner.Deps.Home, AppCfg: cfg, Owner: typedOwner}
 	var typedCtx context.Context
 	if _, _, err := dispatchSubagent(dispatchTestCtx(), typedFac, subagentDispatch{
@@ -3877,7 +3877,7 @@ func fanoutToolForGatedExecutor(t *testing.T, executor *gatedSubagentExecutor, s
 	}
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  t.TempDir(),
-		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: executor},
+		Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: executor},
 		Tools: st,
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -3978,7 +3978,7 @@ func TestSubagentRunResolvesChildApprovalInPlace(t *testing.T) {
 	}
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  t.TempDir(),
-		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: executor},
+		Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: executor},
 		Tools: st,
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -4336,7 +4336,7 @@ func (f *persistenceFixture) armForCompaction(systemPrompt string, contextTokens
 	owner := f.fac.Owner
 	owner.summaryLLM = f.llm
 	owner.transcript = transcriptSession{store: f.store, systemPrompt: systemPrompt}
-	owner.AppCfg = &appcfg.Root{
+	owner.SetConfig(&appcfg.Root{
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				// A constructable client for the compaction's fallback path; the
@@ -4348,7 +4348,7 @@ func (f *persistenceFixture) armForCompaction(systemPrompt string, contextTokens
 			Defaults: appcfg.AgentDefaults{ContextInject: appcfg.ContextInjectConfig{ModelContextTokens: contextTokens}},
 		},
 		Compact: appcfg.CompactSection{Prompt: prompt},
-	}
+	})
 }
 
 // compactEventCollector keeps the run events the owner published so a test can
@@ -5234,7 +5234,7 @@ func TestSubagentUsageSnapshotIsPublishedForItsOwnView(t *testing.T) {
 	}}}
 	probe := &budgetEventProbe{}
 	owner := &Runner{
-		Deps:             &Deps{RunRT: runSvc, AppCfg: cfg},
+		Deps:             (&Deps{RunRT: runSvc}).WithConfig(cfg),
 		SubagentExecutor: &snapshotReportingSubagentExecutor{input: 28000, output: 800},
 		Control:          NewController(),
 		Events:           probe,
@@ -5284,7 +5284,7 @@ func TestSubagentUsageSnapshotIsPublishedForItsOwnView(t *testing.T) {
 	reviewProbe := &budgetEventProbe{}
 	reviewHome := t.TempDir()
 	reviewer := &Runner{
-		Deps:             &Deps{Home: reviewHome, AppCfg: cfg},
+		Deps:             (&Deps{Home: reviewHome}).WithConfig(cfg),
 		Events:           reviewProbe,
 		SubagentExecutor: &snapshotReportingSubagentExecutor{input: 29000, output: 491},
 	}
@@ -5341,7 +5341,7 @@ func TestSubagentBudgetEventFiledOncePerResponse(t *testing.T) {
 	}}}
 	probe := &budgetEventProbe{}
 	owner := &Runner{
-		Deps: &Deps{RunRT: runSvc, AppCfg: cfg},
+		Deps: (&Deps{RunRT: runSvc}).WithConfig(cfg),
 		SubagentExecutor: &snapshotReportingSubagentExecutor{snapshots: [][2]int{
 			{28000, 800}, {28000, 1600}, {28000, 2400},
 		}},
@@ -5394,14 +5394,14 @@ func TestSubagentContextBudgetReadsItsWorkerSession(t *testing.T) {
 	}, "deepseek-v3.2", `{"input_tokens":12000,"output_tokens":800}`); err != nil {
 		t.Fatal(err)
 	}
-	fixture.fac.Owner.AppCfg = &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+	fixture.fac.Owner.SetConfig(&appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
 			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
 		}},
 		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
 			{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"},
 		}},
-	}}}
+	}}})
 	root := fixture.fac.subagentScopeRoot()
 	if err := agent.AppendHistory(root, agent.HistoryEntry{
 		TaskID: "task-9", SessionID: "conv-1", WorkerSessionID: "worker-1",
@@ -6891,7 +6891,7 @@ func TestRegisterSubagentToolHonoursThePrimaryAgentSwitch(t *testing.T) {
 			Home:      t.TempDir(),
 			Tools:     toolpkg.NewState(t.TempDir()),
 			AppCfg:    cfg,
-			Owner:     &Runner{Deps: &Deps{AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
+			Owner:     &Runner{Deps: (&Deps{}).WithConfig(cfg), SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
 		}
 		if err := RegisterSubagentTool(a, fac); err != nil {
 			t.Fatalf("RegisterSubagentTool: %v", err)
@@ -6957,7 +6957,7 @@ func TestSubagentTypeEnumListsCustomAndHidesDisabled(t *testing.T) {
 		Home:      t.TempDir(),
 		Tools:     toolpkg.NewState(t.TempDir()),
 		AppCfg:    cfg,
-		Owner:     &Runner{Deps: &Deps{AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
+		Owner:     &Runner{Deps: (&Deps{}).WithConfig(cfg), SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
 	}
 	if err := RegisterSubagentTool(a, fac); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -6997,7 +6997,7 @@ func TestCustomSubagentModelAndEffortReachTheEntry(t *testing.T) {
 	cfg := subagentCustomConfig()
 	probe := &dispatchProbe{}
 	home := t.TempDir()
-	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	owner := &Runner{Deps: (&Deps{Home: home}).WithConfig(cfg), Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
 	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
 
 	var pinned SubagentModelOverride
@@ -7080,7 +7080,7 @@ func TestSubagentModelPinReachesItsRowsEndpoint(t *testing.T) {
 		},
 	}}
 	home := t.TempDir()
-	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	owner := &Runner{Deps: (&Deps{Home: home}).WithConfig(cfg), SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
 	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
 
 	var pinned SubagentModelOverride
@@ -7139,7 +7139,7 @@ func TestDispatchOverrideOutranksAgentSubagentModel(t *testing.T) {
 	cfg := subagentCustomConfig()
 	probe := &dispatchProbe{}
 	home := t.TempDir()
-	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	owner := &Runner{Deps: (&Deps{Home: home}).WithConfig(cfg), Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
 	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
 
 	ctx := WithSubagentModelOverride(dispatchTestCtx(), SubagentModelOverride{
@@ -7174,7 +7174,7 @@ func TestDispatchPinsTheSameModelItRecords(t *testing.T) {
 	cfg := subagentCustomConfig()
 	probe := &dispatchProbe{}
 	home := t.TempDir()
-	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	owner := &Runner{Deps: (&Deps{Home: home}).WithConfig(cfg), Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
 	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
 
 	var pinned SubagentModelOverride
@@ -7225,7 +7225,7 @@ func TestDispatchPinsTheSameModelItRecords(t *testing.T) {
 func TestSubagentExecContextKeepsThePinnedModel(t *testing.T) {
 	cfg := subagentCustomConfig()
 	home := t.TempDir()
-	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	owner := &Runner{Deps: (&Deps{Home: home}).WithConfig(cfg), SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
 	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
 
 	var execCtx context.Context
@@ -7263,7 +7263,7 @@ func TestSubagentExecContextKeepsThePinnedModel(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	forkFac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+	forkFac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.Config(), Owner: runner}
 	forkCtx := withForkRuntimeSnapshot(dispatchTestCtx(), []llm.Message{llm.UserMessage(llm.Text("earlier work"))})
 	prepFork, _, err := dispatchSubagent(forkCtx, forkFac, subagentDispatch{
 		taskID:  "task-fork-exec-ctx",
@@ -7308,7 +7308,7 @@ func TestSubagentFollowsTheConversationModelAtDispatchOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.Config(), Owner: runner}
 
 	dispatch := func(taskID string) (preparedSubagent, context.Context) {
 		t.Helper()
@@ -7373,7 +7373,7 @@ func TestExecSubagentHandsTheRecordedModelToTheWorker(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.Config(), Owner: runner}
 
 	if _, err := execGeneralSubagent(dispatchTestCtx(), fac, "task-worker-model", "short title", "do work", "general-purpose", ""); err != nil {
 		t.Fatalf("execGeneralSubagent: %v", err)
@@ -7394,7 +7394,7 @@ func TestExecSubagentHandsTheRecordedModelToTheWorker(t *testing.T) {
 func TestContinueAfterCustomSubagentDeletedSaysSo(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Defaults: appcfg.AgentDefaults{EnableSubagent: boolPtr(true)}}}
 	home := t.TempDir()
-	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	owner := &Runner{Deps: (&Deps{Home: home}).WithConfig(cfg), SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
 	fac := Factory{
 		AgentName:     "main",
 		Home:          home,
@@ -7448,7 +7448,7 @@ func TestContinueAfterCustomSubagentDisabledSaysDisabled(t *testing.T) {
 		},
 	}}
 	home := t.TempDir()
-	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	owner := &Runner{Deps: (&Deps{Home: home}).WithConfig(cfg), SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
 	fac := Factory{
 		AgentName:     "main",
 		Home:          home,
@@ -7510,7 +7510,7 @@ func newCustomSubagentSend(t *testing.T, subagents []appcfg.SubagentConfig) cust
 	if subagents != nil {
 		cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {Primary: true, Subagents: subagents}}
 	}
-	owner.AppCfg = cfg
+	owner.SetConfig(cfg)
 	conv := "conv-custom-send"
 	worker := "main:conv-custom-send:worker:00000000-0000-0000-0000-0000000000aa"
 	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
@@ -7748,7 +7748,7 @@ func subagentRecordRowFactory() Factory {
 		{ID: "row-1", Provider: "openai", Model: "gpt-4o", BaseURL: "http://one.test/v1", APIKey: "key-one"},
 		{ID: "row-2", Provider: "openai", Model: "gpt-4o", BaseURL: "http://two.test/v1", APIKey: "key-two"},
 	}}
-	return Factory{AgentName: "main", Owner: &Runner{Deps: &Deps{AppCfg: cfg}}}
+	return Factory{AgentName: "main", Owner: &Runner{Deps: (&Deps{}).WithConfig(cfg)}}
 }
 
 // A continuation runs on the row its dispatch chose, not on the first row of
@@ -7817,7 +7817,7 @@ func newDispatchRowFixture(t *testing.T) (*Runner, *state.SessionStore) {
 			"main": {Primary: true},
 		}},
 	}
-	runner := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: store}}
+	runner := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: store}).WithConfig(cfg)}
 	runner.SubagentExecutor = &fixedSubagentExecutor{output: "done"}
 	if err := runner.Load(); err != nil {
 		t.Fatalf("Runner.Load: %v", err)
@@ -7838,7 +7838,7 @@ func TestSubagentRecordKeepsTheRowTheConversationChose(t *testing.T) {
 	if _, err := store.SaveSessionModelSelection(ctx, "session-1", sel); err != nil {
 		t.Fatal(err)
 	}
-	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.Config(), Owner: runner}
 	baseCtx := WithSessionModelSelection(dispatchTestCtx(), PrimaryModelState{ModelID: sel.ModelID, Provider: sel.Provider, Model: sel.Model})
 	prep, _, err := dispatchSubagent(baseCtx, fac, subagentDispatch{
 		taskID:  "task-row",
@@ -7872,7 +7872,7 @@ func TestSubagentRecordCarriesNoRowWhenThePinNamesNone(t *testing.T) {
 	if err := store.Ensure(ctx, "session-1", "conversation"); err != nil {
 		t.Fatal(err)
 	}
-	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.Config(), Owner: runner}
 	baseCtx := WithSubagentModelOverride(dispatchTestCtx(), SubagentModelOverride{
 		Provider: "openai", Model: "gpt-unlisted",
 	})
@@ -8108,7 +8108,7 @@ func TestWorktreeSubagentKeepsItsWorktreeAcrossApprovalReplay(t *testing.T) {
 	if err := RegisterSubagentTool(a, Factory{
 		Home:        t.TempDir(),
 		ProjectRoot: project,
-		Owner:       &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: executor},
+		Owner:       &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: executor},
 		Tools:       st,
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -8372,7 +8372,7 @@ func newModelArgumentFixture(t *testing.T, cfg *appcfg.Root) *modelArgumentFixtu
 	fac := Factory{
 		Home: home, AgentName: "main",
 		Owner: &Runner{
-			Deps:    &Deps{Home: home, SessionStore: store, AppCfg: cfg},
+			Deps:    (&Deps{Home: home, SessionStore: store}).WithConfig(cfg),
 			Events:  probe,
 			Control: NewController(),
 		},

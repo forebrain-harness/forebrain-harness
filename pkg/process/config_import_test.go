@@ -172,7 +172,7 @@ func TestImportLegacyConfigRewritesYAMLAndSeedsDB(t *testing.T) {
 	if len(models) != 1 || models[0].APIKey != "sk-import" {
 		t.Fatalf("model rows = %+v, want the imported plaintext value", models)
 	}
-	if got := env.RawConfig.Agents.Definitions["main"].DefaultModel; got != models[0].ID {
+	if got := env.RawConfigValue().Agents.Definitions["main"].DefaultModel; got != models[0].ID {
 		t.Fatalf("composed default_model = %q, want the imported row %q", got, models[0].ID)
 	}
 
@@ -485,8 +485,8 @@ func TestPeersRowSurvivesAFileCopy(t *testing.T) {
 
 	env := importOpenForTest(t, home)
 	defer env.Close()
-	if env.RawConfig.Peers.ClaudeCode == nil || !*env.RawConfig.Peers.ClaudeCode {
-		t.Fatalf("composed peers.claude_code = %v, want the database's true (the file's false is dead)", env.RawConfig.Peers.ClaudeCode)
+	if env.RawConfigValue().Peers.ClaudeCode == nil || !*env.RawConfigValue().Peers.ClaudeCode {
+		t.Fatalf("composed peers.claude_code = %v, want the database's true (the file's false is dead)", env.RawConfigValue().Peers.ClaudeCode)
 	}
 }
 
@@ -539,8 +539,8 @@ func TestImportLegacyConfigSkipsWhenDBHoldsSections(t *testing.T) {
 	}
 	// The database's sections won the compose: the file's preset and its
 	// provider did not become the runtime's.
-	if env.RawConfig.ApprovalPreset != appcfg.ApprovalPresetFullAccess {
-		t.Fatalf("composed approval_preset = %q, want the database's full_access", env.RawConfig.ApprovalPreset)
+	if env.RawConfigValue().ApprovalPreset != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("composed approval_preset = %q, want the database's full_access", env.RawConfigValue().ApprovalPreset)
 	}
 	if models := importedModelsForTest(t, env); len(models) != 1 || models[0].Model != "gpt-seeded" {
 		t.Fatalf("composed model rows = %+v, want the database's gpt-seeded", models)
@@ -778,7 +778,7 @@ agents:
 		if got := rows["compact"]; strings.Contains(got, "file prompt") {
 			t.Fatalf("compact row = %s, want the marked home's stored value to survive", got)
 		}
-		if got := env2.RawConfig.Compact.Prompt; got == "file prompt" {
+		if got := env2.RawConfigValue().Compact.Prompt; got == "file prompt" {
 			t.Fatalf("the file's compact section reached the runtime after the import: %q", got)
 		}
 		if got := len(listBackupsForTest(t, home)); got != 1 {
@@ -830,7 +830,7 @@ func TestProcessReadsOnEveryDialect(t *testing.T) {
 	if _, err := db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_sessions SET source = 'workshop' WHERE id = 's-workshop'`)); err != nil {
 		t.Fatal(err)
 	}
-	pool := NewRunnerPool(&Environment{SQL: db, Deps: run.Deps{AgentName: "main"}}, 1)
+	pool := NewRunnerPool(&Environment{SQL: db, Deps: &run.Deps{AgentName: "main"}}, 1)
 	t.Cleanup(pool.Close)
 	source, err := pool.sessionSource(ctx, "s-workshop")
 	if err != nil || source != "workshop" {

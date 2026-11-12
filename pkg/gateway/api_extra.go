@@ -8341,7 +8341,7 @@ func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 	// next process restore, so a choice that failed to persist never ran
 	// only in memory either.
 	s.saveSessionPresetRow(r.Context(), sid, preset.ID)
-	for _, update := range preset.SessionUpdatesForLaunch(sid, runner.AppCfg, runner.LaunchProject) {
+	for _, update := range preset.SessionUpdatesForLaunch(sid, runner.Config(), runner.LaunchProject) {
 		runner.ApplyPermissionUpdate(update)
 	}
 	writeJSON(w, map[string]any{"ok": true, "description": preset.Description})

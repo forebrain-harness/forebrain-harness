@@ -1349,7 +1349,7 @@ func (s *Server) compactBudgetOptions() state.TokenBudgetOptions {
 	if s == nil || s.Runner == nil {
 		return state.TokenBudgetOptions{}
 	}
-	return run.CompactBudgetOptions(s.Runner.AppCfg)
+	return run.CompactBudgetOptions(s.Runner.Config())
 }
 
 // Auto-continue on the web: the engine's continuation of a conversation stopped

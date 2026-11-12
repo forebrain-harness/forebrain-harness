@@ -90,11 +90,11 @@ func TestControlPlaneAuthorized(t *testing.T) {
 }
 
 func tokenAuthEnv(token string) *process.Environment {
-	return &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{
+	return (&process.Environment{Deps: &run.Deps{}}).WithDepsConfig(&appcfg.Root{
 		Gateway: appcfg.Gateway{
 			Auth: appcfg.GatewayAuth{Token: token},
 		},
-	}}}
+	})
 }
 
 func TestControlPlaneHTTPMiddlewareUsesGatewayAuthToken(t *testing.T) {
@@ -553,11 +553,11 @@ func newReplicaTestServer(t *testing.T, db *sql.DB, home, owner, token, internal
 	require.NoError(t, store.RegisterReplica(ctx, state.RunOwnerKindGateway, internalAddr, "host-"+owner))
 	cfg := &appcfg.Root{}
 	cfg.Gateway.Auth.Token = token
-	env := &process.Environment{
+	env := (&process.Environment{
 		Root: home,
 		SQL:  db,
-		Deps: run.Deps{Home: home, AppCfg: cfg, SessionStore: sessions, RunRT: store},
-	}
+		Deps: &run.Deps{Home: home, SessionStore: sessions, RunRT: store},
+	}).WithDepsConfig(cfg)
 	return &Server{
 		Home: home, Sessions: sessions, RunRT: store,
 		Actions: &state.ActionService{DB: db}, Env: env,

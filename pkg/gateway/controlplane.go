@@ -365,11 +365,11 @@ func refuseInternalRequest(w http.ResponseWriter, r *http.Request) {
 
 func ControlPlaneHTTPMiddleware(env *process.Environment, gw *Server, inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if env == nil || env.Deps.AppCfg == nil {
+		if env == nil || env.Deps.Config() == nil {
 			inner.ServeHTTP(w, r)
 			return
 		}
-		cfg := env.Deps.AppCfg
+		cfg := env.Deps.Config()
 		path := strings.TrimSpace(r.URL.Path)
 		// The exempt inbound paths are those of the agent's project channels,
 		// which is the agent the runner is bound to.
@@ -478,10 +478,10 @@ func ServeHTTPChain(env *process.Environment, gw *Server, inner http.Handler) ht
 // requestAuthorized reports whether r carries the gateway's credentials under
 // the live configuration.
 func requestAuthorized(env *process.Environment, r *http.Request) bool {
-	if env == nil || env.Deps.AppCfg == nil {
+	if env == nil || env.Deps.Config() == nil {
 		return false
 	}
-	_, err := authorizeControlPlane(r, env.Deps.AppCfg)
+	_, err := authorizeControlPlane(r, env.Deps.Config())
 	return err == nil
 }
 

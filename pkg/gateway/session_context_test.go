@@ -91,7 +91,7 @@ func TestHandleSessionCompactSuccess(t *testing.T) {
 	s := &Server{
 		Home:     home,
 		Sessions: sess,
-		Runner:   &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main", SessionStore: sess}},
+		Runner:   &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sess}).WithConfig(cfg)},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions/s1/compact", nil)
 	req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{

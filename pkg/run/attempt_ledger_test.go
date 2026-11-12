@@ -144,7 +144,7 @@ func TestLLMAttemptLedgerFillsFromASupervisedRun(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
 	}}}
-	r := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: state.NewSessionStore(db, "main")}, FileResolver: PathResolver{}}
+	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: state.NewSessionStore(db, "main")}).WithConfig(cfg), FileResolver: PathResolver{}}
 	r.RunRT = runs
 	if err := r.Load(); err != nil {
 		t.Fatalf("Load: %v", err)

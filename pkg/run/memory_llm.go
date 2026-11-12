@@ -31,7 +31,7 @@ func (r *Runner) buildMemoryPipeline() *memory.Pipeline {
 	if r == nil {
 		return nil
 	}
-	cfg := r.AppCfg
+	cfg := r.Config()
 	agentType := r.activeAgentNameForModel()
 	return memory.NewPipeline(memory.PipelineDeps{
 		Store:         r.MemoryStore,
@@ -307,7 +307,7 @@ func (r *Runner) LaunchMemoryStartup(sessionID string) {
 	if r == nil {
 		return
 	}
-	if !memory.Enabled(r.AppCfg) {
+	if !memory.Enabled(r.Config()) {
 		return
 	}
 	p := r.memPipeline.Get(r.buildMemoryPipeline)
@@ -332,7 +332,7 @@ func (r *Runner) ConsolidateMemoriesNow(ctx context.Context, sessionID string) e
 	if r == nil {
 		return errors.New("runner unavailable")
 	}
-	if !memory.Enabled(r.AppCfg) {
+	if !memory.Enabled(r.Config()) {
 		return ErrMemoriesDisabled
 	}
 	p := r.memPipeline.Get(r.buildMemoryPipeline)
@@ -353,7 +353,7 @@ func (r *Runner) ConsolidateMemoryWorkspace(ctx context.Context) error {
 	if r == nil {
 		return errors.New("runner unavailable")
 	}
-	if !memory.Enabled(r.AppCfg) {
+	if !memory.Enabled(r.Config()) {
 		return ErrMemoriesDisabled
 	}
 	p := r.memPipeline.Get(r.buildMemoryPipeline)

@@ -957,7 +957,7 @@ func TestHandleChatWSCompactStreamsItsLifecycleAndCanBeCancelled(t *testing.T) {
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: summarizer.URL + "/v1"}},
 	}}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())
 	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db}}
 	runner.Events = s.RunEvents()
@@ -1117,7 +1117,7 @@ func TestHandleChatWSStoppingPreTurnCompactionWithdrawsTheTurn(t *testing.T) {
 				Primary:      true,
 				LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: model.URL + "/v1"}},
 			}}
-			runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+			runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 			require.NoError(t, runner.Load())
 			s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db}}
 			runner.Events = s.RunEvents()
@@ -1258,7 +1258,7 @@ func TestHandleChatWSHandsQueuedMessagesBackBeforeTheTurnEnds(t *testing.T) {
 				Primary:      true,
 				LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}},
 			}}
-			runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+			runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 			require.NoError(t, runner.Load())
 			runStore := &state.RunStore{DB: db}
 			s := &Server{
@@ -1374,7 +1374,7 @@ func TestHandleChatWSTurnThatCannotRecordItsRunIsWithdrawn(t *testing.T) {
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: model.URL + "/v1"}},
 	}}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())
 	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: elsewhere}}
 	runner.Events = s.RunEvents()
@@ -1529,7 +1529,7 @@ func TestHandleChatWSKeepsAMessageTheModelCannotTakeAndRefusesIt(t *testing.T) {
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "test-key", BaseURL: "http://model.invalid/v1"}},
 	}}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sessions}, FileResolver: run.PathResolver{}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(&cfg), FileResolver: run.PathResolver{}}
 	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
 	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
 	defer server.Close()
@@ -1583,7 +1583,7 @@ func TestHandleChatWSRefusalNamesTheRememberedRejection(t *testing.T) {
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "acme", Model: "vision-model", APIKey: "test-key", BaseURL: "http://model.invalid/v1"}},
 	}}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sessions}, FileResolver: run.PathResolver{}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(&cfg), FileResolver: run.PathResolver{}}
 	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
 	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
 	defer server.Close()
@@ -1632,7 +1632,7 @@ func TestHandleChatWSRefusedImageMessageInABusySessionIsWithdrawn(t *testing.T) 
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "test-key", BaseURL: "http://model.invalid/v1"}},
 	}}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sessions}, FileResolver: run.PathResolver{}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(&cfg), FileResolver: run.PathResolver{}}
 	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
 	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
 	defer server.Close()

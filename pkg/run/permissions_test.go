@@ -85,7 +85,7 @@ func TestCWDFileToolsUseResolvedApprovalPath(t *testing.T) {
 			}
 
 			// An explicit ask still produces the service's complete choice list.
-			runner.permRuntimeGet().Store(runner.AppCfg).AddRule(safety.SourceSession, safety.BehaviorAsk,
+			runner.permRuntimeGet().Store(runner.Config()).AddRule(safety.SourceSession, safety.BehaviorAsk,
 				safety.PermissionRuleValue{ToolName: "Edit", RuleContent: path, SessionID: "session-1"})
 			input, _ := json.Marshal(tool.FileEditInput{FilePath: path, OldString: "written", NewString: "approved"})
 			_, err = editTool.Handle(ctx, string(input))
@@ -128,12 +128,12 @@ func TestSandboxAllowsFileMutationOnlyWhenTargetIsWritable(t *testing.T) {
 	decision := safety.Decision{Behavior: safety.BehaviorAsk, Reason: "default_ask"}
 	ctx := tool.WithProjectRoot(context.Background(), project)
 
-	readOnly := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly}, ProjectRoot: project}}
+	readOnly := &Runner{Deps: (&Deps{ProjectRoot: project}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly})}
 	if readOnly.sandboxAllowsFileMutation(ctx, "write_file", map[string]any{"resolved_file_path": filepath.Join(project, "a.go")}, decision) {
 		t.Fatal("read-only policy must not auto-allow a file mutation")
 	}
 
-	workspaceWrite := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}, ProjectRoot: project}}
+	workspaceWrite := &Runner{Deps: (&Deps{ProjectRoot: project}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite})}
 	if !workspaceWrite.sandboxAllowsFileMutation(ctx, "write_file", map[string]any{"resolved_file_path": filepath.Join(project, "a.go")}, decision) {
 		t.Fatal("workspace-write policy should auto-allow a project mutation")
 	}
@@ -147,7 +147,7 @@ func TestSandboxAllowsFileMutationOnlyWhenTargetIsWritable(t *testing.T) {
 		t.Fatal("an explicit ask rule must not be overridden")
 	}
 
-	fullAccess := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}}}
+	fullAccess := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess})}
 	if !fullAccess.sandboxAllowsFileMutation(ctx, "edit_file", map[string]any{"resolved_file_path": filepath.Join(outside, "a.go")}, decision) {
 		t.Fatal("danger-full-access should auto-allow file mutations")
 	}
@@ -155,7 +155,7 @@ func TestSandboxAllowsFileMutationOnlyWhenTargetIsWritable(t *testing.T) {
 
 func TestSandboxAllowsFileMutationHonorsDeniedMetadataPaths(t *testing.T) {
 	project := t.TempDir()
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}, ProjectRoot: project}}
+	runner := &Runner{Deps: (&Deps{ProjectRoot: project}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite})}
 	decision := safety.Decision{Behavior: safety.BehaviorAsk, Reason: "default_ask"}
 	target := filepath.Join(project, ".forebrain", "permissions.json")
 	if runner.sandboxAllowsFileMutation(context.Background(), "write_file", map[string]any{"resolved_file_path": target}, decision) {
@@ -181,7 +181,7 @@ func TestSandboxAllowsFileMutationHonorsDeniedMetadataPaths(t *testing.T) {
 
 func TestSandboxAllowsFileMutationRequiresEveryPatchPath(t *testing.T) {
 	project := t.TempDir()
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}, ProjectRoot: project}}
+	runner := &Runner{Deps: (&Deps{ProjectRoot: project}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite})}
 	decision := safety.Decision{Behavior: safety.BehaviorAsk, Reason: "default_ask"}
 	ctx := tool.WithProjectRoot(context.Background(), project)
 	if !runner.sandboxAllowsFileMutation(ctx, "edit_file", map[string]any{
@@ -199,7 +199,7 @@ func TestSandboxAllowsFileMutationRequiresEveryPatchPath(t *testing.T) {
 func TestApplyPatchSessionApprovalRequiresEveryPath(t *testing.T) {
 	runner := &Runner{Deps: &Deps{}}
 	for _, path := range []string{"/repo/a.go", "/repo/b.go"} {
-		runner.permRuntimeGet().Store(runner.AppCfg).AddRule(safety.SourceSession, safety.BehaviorAllow, safety.PermissionRuleValue{
+		runner.permRuntimeGet().Store(runner.Config()).AddRule(safety.SourceSession, safety.BehaviorAllow, safety.PermissionRuleValue{
 			ToolName: "apply_patch", RuleContent: path, BypassSandbox: true, SessionID: "session-1",
 		})
 	}
@@ -215,8 +215,8 @@ func TestApplyPatchSessionApprovalRequiresEveryPath(t *testing.T) {
 }
 
 func TestApplyPatchReadOnlyNeverRejectsWithoutPrompt(t *testing.T) {
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly}}}
-	runner.permRuntimeGet().Store(runner.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
+	runner := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly})}
+	runner.permRuntimeGet().Store(runner.Config()).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
 	_, _, err := runner.actionHook(context.Background(), "apply_patch", map[string]any{"resolved_paths": []string{"/repo/a.go"}})
 	if err == nil || !strings.Contains(err.Error(), "writing is blocked by read-only sandbox") {
 		t.Fatalf("unexpected error: %v", err)
@@ -230,8 +230,8 @@ func TestApplyPatchReadOnlyNeverRejectsWithoutPrompt(t *testing.T) {
 // refused these commands outright and the approval path its own comment
 // promised never opened under any configuration.
 func TestPlanModeUnprovenShellCommandReachesThePromptUnderOnRequest(t *testing.T) {
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
-	runner.permRuntimeGet().Store(runner.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalOnRequest})
+	runner := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{})}
+	runner.permRuntimeGet().Store(runner.Config()).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalOnRequest})
 
 	_, pending, err := runner.actionHook(context.Background(), "shell", map[string]any{
 		"command": "python3 script.py", "force_tool_approval": true,
@@ -251,8 +251,8 @@ func TestPlanModeUnprovenShellCommandReachesThePromptUnderOnRequest(t *testing.T
 // marking must not accidentally become an exemption from that: the user is the
 // one who decides a command nothing can prove read-only.
 func TestPlanModeUnprovenShellCommandIsAskedUnderUnlessTrusted(t *testing.T) {
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
-	runner.permRuntimeGet().Store(runner.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalUnlessTrusted})
+	runner := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{})}
+	runner.permRuntimeGet().Store(runner.Config()).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalUnlessTrusted})
 
 	_, pending, err := runner.actionHook(context.Background(), "shell", map[string]any{
 		"command": "python3 script.py", "force_tool_approval": true,
@@ -267,8 +267,8 @@ func TestPlanModeUnprovenShellCommandIsAskedUnderUnlessTrusted(t *testing.T) {
 }
 
 func TestPlanModeUnprovenShellCommandIsDeniedByNeverPolicy(t *testing.T) {
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
-	runner.permRuntimeGet().Store(runner.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
+	runner := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{})}
+	runner.permRuntimeGet().Store(runner.Config()).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
 
 	_, _, err := runner.actionHook(context.Background(), "shell", map[string]any{
 		"command": "python3 script.py", "force_tool_approval": true,
@@ -282,8 +282,8 @@ func TestPlanModeUnprovenShellCommandIsDeniedByNeverPolicy(t *testing.T) {
 // The gate refuses without asking, so the payload the gate would have marked
 // never reaches the approval layer at all.
 func TestPlanModeUnprovenShellCommandRunsWhenPolicyAlreadyAllowsIt(t *testing.T) {
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
-	store := runner.permRuntimeGet().Store(runner.AppCfg)
+	runner := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{})}
+	store := runner.permRuntimeGet().Store(runner.Config())
 	store.SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalOnRequest})
 	store.AddRule(safety.SourceSession, safety.BehaviorAllow, safety.PermissionRuleValue{
 		ToolName: "Bash", RuleContent: "python3 script.py", SessionID: "session-1",
@@ -354,10 +354,10 @@ func TestLSPEvaluatedAsRead(t *testing.T) {
 	}
 
 	cfg := &appcfg.Root{}
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	rt := r.permRuntimeGet()
-	rt.LoadFromDisk(r.AppCfg, r.permPaths())
-	rt.Store(r.AppCfg).AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
+	rt.LoadFromDisk(r.Config(), r.permPaths())
+	rt.Store(r.Config()).AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
 		ToolName: "Read", RuleContent: filepath.ToSlash(deniedDir) + "/**", SessionID: sessionID,
 	})
 
@@ -589,8 +589,8 @@ func TestApplyPatchDecisionTable(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: tc.mode}, ProjectRoot: project}}
-			runner.permRuntimeGet().Store(runner.AppCfg).SetApprovalPolicy(tc.policy)
+			runner := &Runner{Deps: (&Deps{ProjectRoot: project}).WithConfig(&appcfg.Root{SandboxMode: tc.mode})}
+			runner.permRuntimeGet().Store(runner.Config()).SetApprovalPolicy(tc.policy)
 
 			got, message := applyPatchOutcome(t, runner, ctx, tc.payload)
 			if got != tc.want {
@@ -626,7 +626,7 @@ func TestActionHookUsesPermissionRequestDecisionBeforeReviewer(t *testing.T) {
 				Home: t.TempDir(), Cfg: cfg,
 				PermissionMode: func() string { return "on-request" },
 			})
-			runner := &Runner{Deps: &Deps{AppCfg: cfg}, permRuntime: safety.NewRuntimeWithStore(store), tools: tools}
+			runner := &Runner{Deps: (&Deps{}).WithConfig(cfg), permRuntime: safety.NewRuntimeWithStore(store), tools: tools}
 			_, pending, err := runner.actionHook(context.Background(), "shell", map[string]any{
 				"command": "curl example.com", "force_tool_approval": true,
 			})
@@ -723,14 +723,14 @@ func TestPermissionRulesPersistAcrossRunners(t *testing.T) {
 		}},
 	})
 	r2 := &Runner{Deps: &Deps{Home: home}}
-	r2.permRuntimeGet().LoadFromDisk(r2.AppCfg, r2.permPaths())
-	if got := r2.permRuntimeGet().Mode(r2.AppCfg); got != safety.ModeOnRequest {
+	r2.permRuntimeGet().LoadFromDisk(r2.Config(), r2.permPaths())
+	if got := r2.permRuntimeGet().Mode(r2.Config()); got != safety.ModeOnRequest {
 		t.Fatalf("approval mode must come from configuration, got %s", got)
 	}
-	if d := r2.permRuntimeGet().EvaluateRaw("", "Bash", "git status", r2.AppCfg); d.Behavior != safety.BehaviorAllow {
+	if d := r2.permRuntimeGet().EvaluateRaw("", "Bash", "git status", r2.Config()); d.Behavior != safety.BehaviorAllow {
 		t.Fatalf("expected allow from the persisted local rule, got %s", d.Behavior)
 	}
-	if d := r2.permRuntimeGet().EvaluateRaw("", "Bash", "rm -rf tmp", r2.AppCfg); d.Behavior != safety.BehaviorDeny {
+	if d := r2.permRuntimeGet().EvaluateRaw("", "Bash", "rm -rf tmp", r2.Config()); d.Behavior != safety.BehaviorDeny {
 		t.Fatalf("expected deny from persisted local rule, got %s", d.Behavior)
 	}
 
@@ -772,7 +772,7 @@ func TestCommandPermissionPrefixesPersistAsTokenArrays(t *testing.T) {
 	}
 
 	reloaded := &Runner{Deps: &Deps{Home: home}}
-	reloaded.permRuntimeGet().LoadFromDisk(reloaded.AppCfg, reloaded.permPaths())
+	reloaded.permRuntimeGet().LoadFromDisk(reloaded.Config(), reloaded.permPaths())
 	if decision := reloaded.EvaluatePermission("Bash", "npm run build -- --watch"); decision.Matched == nil || !decision.BypassSandbox {
 		t.Fatalf("reloaded decision=%+v", decision)
 	}
@@ -819,11 +819,11 @@ func TestSessionRulesAreNotPersisted(t *testing.T) {
 	})
 
 	r2 := &Runner{Deps: &Deps{Home: home}}
-	r2.permRuntimeGet().LoadFromDisk(r2.AppCfg, r2.permPaths())
-	if got := r2.permRuntimeGet().Store(r2.AppCfg).Rules(safety.SourceSession, safety.BehaviorAllow); len(got) != 0 {
+	r2.permRuntimeGet().LoadFromDisk(r2.Config(), r2.permPaths())
+	if got := r2.permRuntimeGet().Store(r2.Config()).Rules(safety.SourceSession, safety.BehaviorAllow); len(got) != 0 {
 		t.Fatalf("expected no persisted session rules, got %#v", got)
 	}
-	if d := r2.permRuntimeGet().EvaluateRaw("", "Bash", "npm run build", r2.AppCfg); d.Matched != nil {
+	if d := r2.permRuntimeGet().EvaluateRaw("", "Bash", "npm run build", r2.Config()); d.Matched != nil {
 		t.Fatalf("unexpected persisted session rule: %+v", d)
 	}
 }
@@ -856,8 +856,8 @@ func TestRuntimeYOLOAllowsWithoutChangingPersistedPolicy(t *testing.T) {
 	}
 
 	r2 := &Runner{Deps: &Deps{Home: home}}
-	r2.permRuntimeGet().LoadFromDisk(r2.AppCfg, r2.permPaths())
-	if got := r2.permRuntimeGet().Mode(r2.AppCfg); got != safety.ModeOnRequest {
+	r2.permRuntimeGet().LoadFromDisk(r2.Config(), r2.permPaths())
+	if got := r2.permRuntimeGet().Mode(r2.Config()); got != safety.ModeOnRequest {
 		t.Fatalf("runtime yolo must not alter persisted approval policy, got %s", got)
 	}
 }
@@ -870,10 +870,10 @@ func TestRuntimeYOLOOverridesNeverPolicyDefaultsButHonorsExplicitDeny(t *testing
 		SandboxMode:    appcfg.SandboxModeDangerFullAccess,
 		ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyNever),
 	}
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	rt := r.permRuntimeGet()
-	rt.LoadFromDisk(r.AppCfg, r.permPaths())
-	rt.Store(r.AppCfg).AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
+	rt.LoadFromDisk(r.Config(), r.permPaths())
+	rt.Store(r.Config()).AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
 		ToolName: "Bash", RuleContent: "shutdown:*", SessionID: sessionID,
 	})
 
@@ -909,10 +909,10 @@ func TestRuntimeYOLOOverridesAskRuleConvertedByNeverPolicy(t *testing.T) {
 		SandboxMode:    appcfg.SandboxModeDangerFullAccess,
 		ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyNever),
 	}
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	rt := r.permRuntimeGet()
-	rt.LoadFromDisk(r.AppCfg, r.permPaths())
-	rt.Store(r.AppCfg).AddRule(safety.SourceSession, safety.BehaviorAsk, safety.PermissionRuleValue{
+	rt.LoadFromDisk(r.Config(), r.permPaths())
+	rt.Store(r.Config()).AddRule(safety.SourceSession, safety.BehaviorAsk, safety.PermissionRuleValue{
 		ToolName: "Bash", RuleContent: "git push:*", SessionID: sessionID,
 	})
 
@@ -938,10 +938,10 @@ func TestFullAccessMatchesTheYOLOEnvironment(t *testing.T) {
 		ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyNever),
 	}
 	newRunner := func() *Runner {
-		r := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}}
+		r := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg)}
 		rt := r.permRuntimeGet()
-		rt.LoadFromDisk(r.AppCfg, r.permPaths())
-		rt.Store(r.AppCfg).AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
+		rt.LoadFromDisk(r.Config(), r.permPaths())
+		rt.Store(r.Config()).AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
 			ToolName: "Bash", RuleContent: "shutdown:*", SessionID: sessionID,
 		})
 		return r
@@ -998,7 +998,7 @@ func TestPermissionRequestHookCwdIsSessionProjectRoot(t *testing.T) {
 		PermissionMode: func() string { return "on-request" },
 	})
 	runner := &Runner{
-		Deps:        &Deps{AppCfg: cfg, WorkspaceRoot: workspace, ProjectRoot: project},
+		Deps:        (&Deps{WorkspaceRoot: workspace, ProjectRoot: project}).WithConfig(cfg),
 		tools:       tools,
 		permRuntime: safety.NewRuntimeWithStore(safety.NewStore()),
 	}
@@ -1039,16 +1039,16 @@ func newPresetTestRunner(t *testing.T, trust safety.Level) (*Runner, *state.Sess
 	}
 	sessions := state.NewSessionStore(db, "main")
 	r := &Runner{
-		Deps: &Deps{
+		Deps: (&Deps{
 			SessionStore: sessions,
 			// A non-nil config: MatchApprovalPreset reads the snapshot's
 			// sandbox through it, and a nil config never matches.
-			AppCfg: &appcfg.Root{},
+
 			LaunchProject: safety.ProjectContext{
 				Project:    safety.Project{Root: "/repo/s"},
 				TrustLevel: trust,
 			},
-		},
+		}).WithConfig(&appcfg.Root{}),
 		FileResolver: PathResolver{},
 	}
 	return r, sessions
@@ -1066,7 +1066,7 @@ func mustPreset(t *testing.T, id string) safety.ApprovalPreset {
 func presetSnapshotMatches(t *testing.T, r *Runner, sid string, want safety.ApprovalPreset) {
 	t.Helper()
 	snap := r.PermissionSnapshotForSession(sid)
-	cfg := safety.ConfigForSnapshot(r.AppCfg, snap)
+	cfg := safety.ConfigForSnapshot(r.Config(), snap)
 	if cfg == nil {
 		t.Fatalf("live preset after apply: no config for session %q", sid)
 	}
@@ -1092,7 +1092,7 @@ func TestInjectSessionPermissionAppliesStoredRow(t *testing.T) {
 	// first application stays until the row itself moves.
 	readOnly, _ := safety.ApprovalPresetByID(safety.PresetWorkspaceWrite)
 	fullAccess, _ := safety.ApprovalPresetByID(safety.PresetFullAccess)
-	for _, update := range fullAccess.SessionUpdatesForLaunch("s", r.AppCfg, r.LaunchProject) {
+	for _, update := range fullAccess.SessionUpdatesForLaunch("s", r.Config(), r.LaunchProject) {
 		r.ApplyPermissionUpdate(update)
 	}
 	r.injectSessionPermission(ctx)
@@ -1316,7 +1316,7 @@ func TestSeededDefaultPresetKeepsTheTrustNarrowing(t *testing.T) {
 		t.Fatalf("seeded row = %q/%q stored=%v err=%v", preset, source, stored, err)
 	}
 	r.injectSessionPermission(ctx)
-	if got := safety.ConfigForSnapshot(r.AppCfg, r.PermissionSnapshotForSession("seeded")).SandboxMode; got != appcfg.SandboxModeReadOnly {
+	if got := safety.ConfigForSnapshot(r.Config(), r.PermissionSnapshotForSession("seeded")).SandboxMode; got != appcfg.SandboxModeReadOnly {
 		t.Fatalf("sandbox of a default-preset session in an undecided project = %q, want read-only", got)
 	}
 }
@@ -1337,7 +1337,7 @@ func TestNoSandboxForcesFullAccessWithoutWritingTheRow(t *testing.T) {
 		t.Fatalf("with a sandbox, preset = %+v, want the stored workspace_write", got)
 	}
 	r.injectSessionPermission(ctx)
-	if got := safety.ConfigForSnapshot(r.AppCfg, r.PermissionSnapshotForSession("s")).SandboxMode; got != appcfg.SandboxModeReadOnly {
+	if got := safety.ConfigForSnapshot(r.Config(), r.PermissionSnapshotForSession("s")).SandboxMode; got != appcfg.SandboxModeReadOnly {
 		t.Fatalf("with a sandbox, the stored row narrows to %q, want read-only", got)
 	}
 
@@ -1362,8 +1362,8 @@ func TestNoSandboxForcesFullAccessWithoutWritingTheRow(t *testing.T) {
 // same-tree git guard that used to raise one is gone).
 func TestFullAccessBypassesForcedShellApproval(t *testing.T) {
 	t.Setenv(safety.EnvYOLO, "1")
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
-	runner.permRuntimeGet().Store(runner.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalOnRequest})
+	runner := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{})}
+	runner.permRuntimeGet().Store(runner.Config()).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalOnRequest})
 
 	_, pending, err := runner.actionHook(context.Background(), "shell", map[string]any{
 		"command":             "git add -A",

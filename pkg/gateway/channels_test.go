@@ -54,7 +54,7 @@ func twoAgentChannelServer(t *testing.T, home string) *Server {
 	return &Server{
 		Home:     home,
 		Channels: channel.NewRegistry(),
-		Env:      &process.Environment{SQL: db, Deps: run.Deps{AppCfg: cfg}},
+		Env:      (&process.Environment{SQL: db, Deps: &run.Deps{}}).WithDepsConfig(cfg),
 	}
 }
 
@@ -403,7 +403,7 @@ func newActiveReviewGatewayServer(t *testing.T, home string) *Server {
 	seedConfigRoot(t, db, cfg)
 	skillsRoot := filepath.Join(home, "workspaces", "review", "skills")
 	_ = skillsRoot
-	env := &process.Environment{Deps: run.Deps{AppCfg: &cfg}, Root: home, SQL: db}
+	env := (&process.Environment{Deps: &run.Deps{}, Root: home, SQL: db}).WithDepsConfig(&cfg)
 	env.ConfigPath = cfgPath
 	return &Server{Home: home, Env: env}
 }
@@ -590,7 +590,7 @@ func TestPermissionUpdateEndpointRefreshesSandboxRuntime(t *testing.T) {
 	s := &Server{
 		Home:   home,
 		Runner: runner,
-		Env:    &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner},
+		Env:    (&process.Environment{Deps: &run.Deps{}, Root: home, Sandbox: safety.NewManager(), Runner: runner}).WithDepsConfig(cfg),
 	}
 	body := safety.PermissionUpdate{
 		Type:        safety.UpdateAddRules,
@@ -627,7 +627,7 @@ func TestPermissionUpdateEndpointSessionOnly(t *testing.T) {
 	const sessionID = "session-1"
 	home := t.TempDir()
 	runner := &run.Runner{Deps: &run.Deps{Home: home}}
-	s := &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{Home: home, AppCfg: &appcfg.Root{}}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
+	s := &Server{Home: home, Runner: runner, Env: (&process.Environment{Deps: &run.Deps{Home: home}, Root: home, Sandbox: safety.NewManager(), Runner: runner}).WithDepsConfig(&appcfg.Root{})}
 	body := safety.PermissionUpdate{
 		Type:        safety.UpdateAddRules,
 		Destination: safety.DestinationSession,
@@ -755,7 +755,7 @@ func TestAgentPermissionEndpointsLeaveTheLaunchProjectOut(t *testing.T) {
 	})
 	require.Equal(t, safety.BehaviorDeny, launched.EvaluatePermissionForSession("", "Bash", "git push").Behavior,
 		"the launched runner holds the project's rule")
-	s := &Server{Home: home, Runner: launched, Env: &process.Environment{Deps: run.Deps{Home: home, AppCfg: &appcfg.Root{}}, Root: home, Runner: launched}}
+	s := &Server{Home: home, Runner: launched, Env: (&process.Environment{Deps: &run.Deps{Home: home}, Root: home, Runner: launched}).WithDepsConfig(&appcfg.Root{})}
 
 	rr := httptest.NewRecorder()
 	s.handlePermissionRules(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/rules", nil))
@@ -1289,7 +1289,7 @@ func batchChannelGateway(t *testing.T) (*Server, state.Project, *batchNotifyChan
 	s := &Server{
 		Home:     home,
 		RunRT:    &state.RunStore{DB: db},
-		Env:      &process.Environment{SQL: db, ConfigPath: cfgPath, Deps: run.Deps{AppCfg: &cfg}},
+		Env:      (&process.Environment{SQL: db, ConfigPath: cfgPath, Deps: &run.Deps{}}).WithDepsConfig(&cfg),
 		Sessions: state.NewSessionStore(db, "main"),
 		Channels: channel.NewRegistry(),
 	}
@@ -1524,7 +1524,7 @@ func TestBatchEndNotifiesTheOriginChat(t *testing.T) {
 	// A cookie-session write tells the gateway which address a browser reached
 	// it at, and the notification links there — nobody configures it (plan 206
 	// §3.1). A loopback write afterwards must not displace it.
-	s.Env.Deps.AppCfg.Gateway.Auth.Token = "gw-secret"
+	s.Env.Deps.Config().Gateway.Auth.Token = "gw-secret"
 	cookieWrite := func(host, origin string) {
 		inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 		req := httptest.NewRequest(http.MethodPost, "/api/resources", nil)

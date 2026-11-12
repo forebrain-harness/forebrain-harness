@@ -44,7 +44,9 @@ func (f Factory) NewIsolatedRunner(label string) *Runner {
 	var subagentExecutor = f.ownerSubagentExecutor()
 	var control = f.ownerControl()
 	codeIntel, codeIntelControl, codeIntelTool := f.ownerCodeIntel()
-	return &Runner{Deps: &Deps{Home: f.Home, AgentName: f.AgentName, WorkspaceRoot: f.workspaceRoot(), StateDir: filepath.Join(root, dir), Actions: actions, MCPServers: f.ownerMCPServers(), MCPProject: f.ownerMCPProject(), MemoryStore: f.MemoryStore, AppCfg: f.AppCfg, SessionStore: sessionStore, RunRT: runRT, ProjectKey: f.projectKey(), ProjectRoot: f.projectRoot(), CodeIntel: codeIntel, CodeIntelControl: codeIntelControl, CodeIntelTool: codeIntelTool}, SubagentExecutor: subagentExecutor, Control: control, FileResolver: f.ownerFileResolver()}
+	deps := &Deps{Home: f.Home, AgentName: f.AgentName, WorkspaceRoot: f.workspaceRoot(), StateDir: filepath.Join(root, dir), Actions: actions, MCPServers: f.ownerMCPServers(), MCPProject: f.ownerMCPProject(), MemoryStore: f.MemoryStore, SessionStore: sessionStore, RunRT: runRT, ProjectKey: f.projectKey(), ProjectRoot: f.projectRoot(), CodeIntel: codeIntel, CodeIntelControl: codeIntelControl, CodeIntelTool: codeIntelTool}
+	deps.SetConfig(f.AppCfg)
+	return &Runner{Deps: deps, SubagentExecutor: subagentExecutor, Control: control, FileResolver: f.ownerFileResolver()}
 }
 
 func (f Factory) workspaceRoot() string {
@@ -135,7 +137,7 @@ func (f Factory) projectRoot() string {
 // factory falls back to the copy it carries.
 func (f Factory) appConfig() *appcfg.Root {
 	if f.Owner != nil {
-		return f.Owner.AppCfg
+		return f.Owner.Config()
 	}
 	return f.AppCfg
 }

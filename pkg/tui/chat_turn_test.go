@@ -156,7 +156,7 @@ func TestWithdrawDuringAutoCompactionCancelsItCleanly(t *testing.T) {
 	// gpt-main is not in the model catalog, so the configured context window is
 	// the denominator and 45 tokens at the default 90% puts the threshold at 40.
 	// CompactionService reads this config at call time.
-	s.runner().AppCfg.Agents.Defaults.ContextInject.ModelContextTokens = 45
+	s.runner().Config().Agents.Defaults.ContextInject.ModelContextTokens = 45
 
 	store := s.sessStore()
 	seedCtx := context.Background()
@@ -251,7 +251,7 @@ func TestPrimaryFooterBudgetIsUnchangedByTheEngineMove(t *testing.T) {
 		SQL:       db,
 		SessStore: store,
 		Config:    cfg,
-		Runner:    &run.Runner{Deps: &run.Deps{Home: home, AppCfg: &cfg, SessionStore: store}},
+		Runner:    &run.Runner{Deps: (&run.Deps{Home: home, SessionStore: store}).WithConfig(&cfg)},
 	}.session()
 	require.NoError(t, store.Ensure(ctx, "s-budget", "s-budget"))
 	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, "s-budget", "seed")
@@ -310,10 +310,10 @@ func TestSurfaceComposerTokenStatsMatchesLabel(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	store := state.NewSessionStore(db, "main")
-	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{
-		Home: home, AgentName: "main", AppCfg: &loaded, SessionStore: store,
-	}}
-	runner := &run.Runner{Deps: &env.Deps}
+	env := (&process.Environment{Root: home, ConfigPath: cfgPath, Deps: &run.Deps{
+		Home: home, AgentName: "main", SessionStore: store,
+	}}).WithDepsConfig(&loaded)
+	runner := &run.Runner{Deps: env.Deps}
 	env.Runner = runner
 	require.NoError(t, runner.Load())
 	s := &ChatSession{Env: env, tuiControl: run.NewController()}
@@ -372,7 +372,7 @@ func newAuditHookEnv(t *testing.T) (*ChatSession, *run.Runner, *state.RunStore, 
 			},
 		},
 	}
-	runner := &run.Runner{Deps: &run.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
 	created, err := runSvc.CreateRun(ctx, "sess-B", "coordinate work")
 	require.NoError(t, err)

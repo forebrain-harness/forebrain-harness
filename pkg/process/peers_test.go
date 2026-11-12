@@ -87,7 +87,7 @@ func peerTestEnvFor(t *testing.T, kind string, session func() string) *peerTestE
 	if kind == "gateway" {
 		// The gateway's agent list reads the session store; its emptiness is
 		// what this harness needs.
-		env.Deps.RunRT = nil
+		env.deps().RunRT = nil
 	}
 	return &peerTestEnv{Environment: env, dirs: dirs, detectCalls: &calls}
 }
@@ -95,11 +95,13 @@ func peerTestEnvFor(t *testing.T, kind string, session func() string) *peerTestE
 // setSwitch writes the interop switch into the snapshot the service reads.
 func (env *peerTestEnv) setSwitch(on bool) {
 	env.reloadMu.Lock()
+	raw := env.RawConfigValue()
 	if on {
-		env.RawConfig.Peers.ClaudeCode = appcfg.BoolPtr(true)
+		raw.Peers.ClaudeCode = appcfg.BoolPtr(true)
 	} else {
-		env.RawConfig.Peers.ClaudeCode = nil
+		raw.Peers.ClaudeCode = nil
 	}
+	env.SetRawConfig(raw)
 	env.reloadMu.Unlock()
 }
 

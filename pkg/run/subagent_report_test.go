@@ -52,7 +52,7 @@ func fanoutReportFor(t *testing.T, exec SubagentExecutor, args string) string {
 	}
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  home,
-		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: exec},
+		Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: exec},
 		Tools: toolpkg.NewState(home),
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -252,7 +252,7 @@ func TestFanoutReportPathIsReadableInPages(t *testing.T) {
 	}
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  home,
-		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: exec},
+		Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: exec},
 		Tools: toolsState,
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -328,7 +328,7 @@ func subagentRunReportFor(t *testing.T, output string) map[string]any {
 	}
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  home,
-		Owner: &Runner{Deps: &Deps{RunRT: runSvc, AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: output}},
+		Owner: &Runner{Deps: (&Deps{RunRT: runSvc}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: output}},
 		Tools: toolpkg.NewState(home),
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
@@ -410,7 +410,7 @@ func TestFanoutCardFactsRideTheSidecarNotTheReport(t *testing.T) {
 	}
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  home,
-		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: exec},
+		Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: exec},
 		Tools: toolpkg.NewState(home),
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)

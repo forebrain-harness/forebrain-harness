@@ -432,8 +432,8 @@ func (in *peerInbox) routeByWorkTree(ctx context.Context, a peerArrival) (peerTa
 		// A conversation another process is running takes no message from here:
 		// that process owns the turn, and its own inbox is where the sender
 		// should have aimed.
-		if in.svc.env != nil && in.svc.env.Deps.RunRT != nil {
-			if err := in.svc.env.Deps.RunRT.SessionBusy(ctx, session.ID); err != nil {
+		if in.svc.env != nil && in.svc.env.deps().RunRT != nil {
+			if err := in.svc.env.deps().RunRT.SessionBusy(ctx, session.ID); err != nil {
 				if !in.runningHere(session.ID) {
 					continue
 				}
@@ -473,10 +473,10 @@ func (in *peerInbox) senderRecord(a peerArrival) *peer.Record {
 
 // recentSessions is the gateway's own conversation list, newest first.
 func (in *peerInbox) recentSessions(ctx context.Context) []state.RecentSession {
-	if in.svc.env == nil || in.svc.env.Deps.SessionStore == nil {
+	if in.svc.env == nil || in.svc.env.deps().SessionStore == nil {
 		return nil
 	}
-	sessions, err := in.svc.env.Deps.SessionStore.RecentlyActiveSessions(ctx, time.Now().Add(-peerGatewayWindow), peerMaxAgents)
+	sessions, err := in.svc.env.deps().SessionStore.RecentlyActiveSessions(ctx, time.Now().Add(-peerGatewayWindow), peerMaxAgents)
 	if err != nil {
 		slog.Debug("peer routing could not read this process's conversations", "err", err)
 		return nil
@@ -499,7 +499,7 @@ func (in *peerInbox) batchSession(ctx context.Context, sessionID string) bool {
 	if in.svc.env == nil || in.svc.env.SQL == nil {
 		return false
 	}
-	projectType, err := state.NewProjectStore(in.svc.env.SQL, in.svc.env.Deps.AgentName).SessionProjectType(ctx, sessionID)
+	projectType, err := state.NewProjectStore(in.svc.env.SQL, in.svc.env.deps().AgentName).SessionProjectType(ctx, sessionID)
 	if err != nil {
 		// Unreadable is treated as an ordinary conversation: refusing every
 		// message because a lookup failed would cut a working session off.
@@ -771,8 +771,8 @@ func (in *peerInbox) deliverPrimary(ctx context.Context, sessionID string, promp
 		// The run ended between the lookup and the delivery: the message is a
 		// turn of its own from here, exactly as if it had arrived a moment later.
 	}
-	if in.svc.env.Deps.RunRT != nil {
-		if err := in.svc.env.Deps.RunRT.SessionBusy(ctx, sessionID); err != nil {
+	if in.svc.env.deps().RunRT != nil {
+		if err := in.svc.env.deps().RunRT.SessionBusy(ctx, sessionID); err != nil {
 			return peerRefusedBusyElsewhere
 		}
 	}
@@ -933,8 +933,8 @@ func (in *peerInbox) finishedAtMs(ctx context.Context, sessionID string) *int64 
 	in.mu.Unlock()
 	if !known {
 		at = 0
-		if in.svc.env != nil && in.svc.env.Deps.SessionStore != nil {
-			if last, err := in.svc.env.Deps.SessionStore.LastActiveByIDs(ctx, []string{sessionID}); err == nil {
+		if in.svc.env != nil && in.svc.env.deps().SessionStore != nil {
+			if last, err := in.svc.env.deps().SessionStore.LastActiveByIDs(ctx, []string{sessionID}); err == nil {
 				// Session rows carry seconds; the notice carries milliseconds.
 				at = last[sessionID] * 1000
 			}

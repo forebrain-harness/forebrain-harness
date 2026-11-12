@@ -46,7 +46,7 @@ func newPoolTestEnv(t *testing.T) (*Environment, *state.ProjectStore, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: live, WorkspaceRoot: filepath.Join(home, "workspace")}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}).WithConfig(live)}
 	if err := runner.Load(); err != nil {
 		t.Fatalf("base runner load: %v", err)
 	}
@@ -54,7 +54,7 @@ func newPoolTestEnv(t *testing.T) (*Environment, *state.ProjectStore, *sql.DB) {
 	// RawConfig is the underived config project runners derive their own
 	// effective sandbox/approval from; a hand-built Environment must set it the
 	// way Open does.
-	env := &Environment{Root: home, RawConfig: cfg, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: live, WorkspaceRoot: filepath.Join(home, "workspace"), SessionStore: sessStore}, ConfigPath: cfgPath, Runner: runner, SQL: db}
+	env := (&Environment{Root: home, Deps: &run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace"), SessionStore: sessStore}, ConfigPath: cfgPath, Runner: runner, SQL: db}).WithRawConfig(cfg).WithDepsConfig(live)
 	projects := state.NewProjectStore(db, "main")
 	return env, projects, db
 }
@@ -366,7 +366,7 @@ func TestRunnerPoolKeysEntriesBySessionType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.Deps.SessionStore.EnsureAt(ctx, "sess-type-a", "sess-type-a", state.SessionBirth{ProjectID: proj.ID}); err != nil {
+	if err := env.deps().SessionStore.EnsureAt(ctx, "sess-type-a", "sess-type-a", state.SessionBirth{ProjectID: proj.ID}); err != nil {
 		t.Fatal(err)
 	}
 	bound := pool.RunnerForSession(ctx, "sess-type-a")
@@ -383,7 +383,7 @@ func TestRunnerPoolKeysEntriesBySessionType(t *testing.T) {
 	if _, err := projects.Update(ctx, proj.ID, state.UpdateProjectInput{ProjectType: &coding}); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.Deps.SessionStore.EnsureAt(ctx, "sess-type-b", "sess-type-b", state.SessionBirth{ProjectID: proj.ID}); err != nil {
+	if err := env.deps().SessionStore.EnsureAt(ctx, "sess-type-b", "sess-type-b", state.SessionBirth{ProjectID: proj.ID}); err != nil {
 		t.Fatal(err)
 	}
 	fresh := pool.RunnerForSession(ctx, "sess-type-b")
@@ -448,7 +448,7 @@ func TestRunnerPoolBindsANewSessionToItsProjectsType(t *testing.T) {
 		t.Fatalf("a new conversation in an office project must bind office, got %q", got)
 	}
 	// The row then freezes office, and the binding it was made with stands.
-	if err := env.Deps.SessionStore.EnsureAt(ctx, "sess-new-office", "sess-new-office", state.SessionBirth{ProjectID: office.ID}); err != nil {
+	if err := env.deps().SessionStore.EnsureAt(ctx, "sess-new-office", "sess-new-office", state.SessionBirth{ProjectID: office.ID}); err != nil {
 		t.Fatal(err)
 	}
 	after, ok := pool.BoundRunnerForSession(ctx, "sess-new-office")
@@ -472,7 +472,7 @@ func TestRunnerPoolBindsANewSessionToItsProjectsType(t *testing.T) {
 	if got := fresh.ProjectType(); got != state.ProjectTypeCoding {
 		t.Fatalf("a new conversation in a coding project must bind coding, got %q", got)
 	}
-	if err := env.Deps.SessionStore.EnsureAt(ctx, "sess-new-coding", "sess-new-coding", state.SessionBirth{ProjectID: coding.ID}); err != nil {
+	if err := env.deps().SessionStore.EnsureAt(ctx, "sess-new-coding", "sess-new-coding", state.SessionBirth{ProjectID: coding.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if got := pool.RunnerForSession(ctx, "sess-new-coding"); got != fresh {
@@ -571,7 +571,7 @@ func TestRunnerPoolProjectMCPServesProjectServers(t *testing.T) {
 func ensurePoolSessions(t *testing.T, env *Environment, ids ...string) {
 	t.Helper()
 	for _, id := range ids {
-		if err := env.Deps.SessionStore.Ensure(context.Background(), id, id); err != nil {
+		if err := env.deps().SessionStore.Ensure(context.Background(), id, id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -711,7 +711,7 @@ func TestEvictStaleEntriesOnlyWhenEverySessionIsQuiet(t *testing.T) {
 	env, projects, _ := newPoolTestEnv(t)
 	pool := NewRunnerPool(env, 4)
 	defer pool.Close()
-	store := env.Deps.SessionStore
+	store := env.deps().SessionStore
 
 	projPin, err := projects.Create(ctx, state.CreateProjectInput{Name: "pin", Root: "/tmp/ev-pin", ProjectKey: "-tmp-ev-pin"})
 	if err != nil {
@@ -804,7 +804,7 @@ func TestEvictStaleEntriesRefusesRecentEntries(t *testing.T) {
 func evictTestDeleteSession(t *testing.T, env *Environment, sessionID string) error {
 	t.Helper()
 	_, err := env.SQL.ExecContext(context.Background(),
-		dbx.Rebind(dbx.DialectOf(env.SQL), `DELETE FROM fb_sessions WHERE id=? AND agent_id=?`), sessionID, env.Deps.AgentName)
+		dbx.Rebind(dbx.DialectOf(env.SQL), `DELETE FROM fb_sessions WHERE id=? AND agent_id=?`), sessionID, env.deps().AgentName)
 	return err
 }
 
@@ -857,7 +857,7 @@ func TestSweepToolStateCleansBaseAndPooledRunners(t *testing.T) {
 	env, projects, _ := newPoolTestEnv(t)
 	pool := NewRunnerPool(env, 4)
 	defer pool.Close()
-	store := env.Deps.SessionStore
+	store := env.deps().SessionStore
 
 	// A quiet session on the base runner and an active one beside it.
 	ensurePoolSessions(t, env, "base-quiet", "base-live")
@@ -965,13 +965,13 @@ func TestRunnerPoolPropagateConfigReachesEveryEntry(t *testing.T) {
 	require.True(t, pinnedBefore.Set)
 
 	next := reorderedPoolConfig(t, env.ConfigPath)
-	before := pooled.AppCfg
+	before := pooled.Config()
 	require.NoError(t, env.pool.PropagateConfig(ctx, *next))
 
 	// The pool derives each entry's effective config from the raw config and
 	// that entry's own launch context, so the pointer an entry adopts is a
 	// fresh derivation, not the base runner's config it was handed.
-	if pooled.AppCfg == before || pooled.AppCfg == next {
+	if pooled.Config() == before || pooled.Config() == next {
 		t.Fatalf("pooled runner did not adopt a freshly derived config")
 	}
 	pinned := run.PrimaryModelSelection(pooled)
@@ -998,7 +998,7 @@ func TestRunnerPoolPropagateConfigKeepsEntryServingWhenPinRemoved(t *testing.T) 
 	env.poolOnce.Do(func() { env.pool = NewRunnerPool(env, 4) })
 	defer env.pool.Close()
 	pooled := boundPoolEntry(t, env, projects, "sess-a", "prop-fail", "/tmp/pool-prop-fail")
-	before := pooled.AppCfg
+	before := pooled.Config()
 	pinnedBefore := run.PrimaryModelSelection(pooled)
 
 	// The pinned pair is gone from this config; another entry remains.
@@ -1009,7 +1009,7 @@ func TestRunnerPoolPropagateConfigKeepsEntryServingWhenPinRemoved(t *testing.T) 
 	}}}
 	err := env.pool.PropagateConfig(ctx, *withoutPin)
 	require.NoError(t, err, "a reload whose pin disappeared must not fail")
-	if pooled.AppCfg == before {
+	if pooled.Config() == before {
 		t.Fatal("the entry did not adopt the new config pointer")
 	}
 	pinned := run.PrimaryModelSelection(pooled)
@@ -1098,14 +1098,14 @@ func TestProjectRunnerDerivesSandboxFromItsOwnTrust(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	live := &cfg
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: live, WorkspaceRoot: filepath.Join(home, "workspace")}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}).WithConfig(live)}
 	require.NoError(t, runner.Load())
 	sessStore := state.NewSessionStore(db, "main")
 	// The process serves from no project of its own (the gateway): its empty
 	// launch project derives a read-only sandbox, which must not leak onto any
 	// project runner.
-	env := &Environment{Root: home, RawConfig: cfg, ConfigPath: cfgPath, SQL: db, Runner: runner,
-		Deps: run.Deps{Home: home, AgentName: "main", AppCfg: live, WorkspaceRoot: filepath.Join(home, "workspace"), SessionStore: sessStore}}
+	env := (&Environment{Root: home, ConfigPath: cfgPath, SQL: db, Runner: runner,
+		Deps: &run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace"), SessionStore: sessStore}}).WithRawConfig(cfg).WithDepsConfig(live)
 	projects := state.NewProjectStore(db, "main")
 
 	trustedRoot := t.TempDir()
@@ -1126,13 +1126,13 @@ func TestProjectRunnerDerivesSandboxFromItsOwnTrust(t *testing.T) {
 	trusted := pool.RunnerForSession(ctx, "s-trusted")
 	require.NotNil(t, trusted)
 	require.NotSame(t, env.Runner, trusted)
-	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, trusted.AppCfg.SandboxMode,
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, trusted.Config().SandboxMode,
 		"a trusted project runner must be writable, from the project's own trust")
 
 	undecided := pool.RunnerForSession(ctx, "s-undecided")
 	require.NotNil(t, undecided)
 	require.NotSame(t, env.Runner, undecided)
-	require.Equal(t, appcfg.SandboxModeReadOnly, undecided.AppCfg.SandboxMode,
+	require.Equal(t, appcfg.SandboxModeReadOnly, undecided.Config().SandboxMode,
 		"an undecided project runner must stay read-only")
 }
 
@@ -1188,7 +1188,7 @@ func TestEnvironmentBindConversationBuildsTheProjectRunner(t *testing.T) {
 	defer env.CloseRunnerPool()
 	// The shared list every project runner inherits (the base runner was
 	// already built without it, so only the pool sees the change).
-	env.Deps.AppCfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
+	env.deps().Config().Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
 		Name: "global-srv", Transport: "stdio", Command: "/usr/bin/true",
 	}}
 

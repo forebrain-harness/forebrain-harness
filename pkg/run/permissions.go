@@ -139,11 +139,11 @@ func (r *Runner) newToolPermissionMiddleware() llm.ToolMiddleware {
 // decisions are made under: AppCfg, with the conversation's own sandbox mode
 // in force when it picked one for itself.
 func (r *Runner) sessionConfig(ctx context.Context) *appcfg.Root {
-	return safety.ConfigForSnapshot(r.AppCfg, r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx)))
+	return safety.ConfigForSnapshot(r.Config(), r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx)))
 }
 
 func (r *Runner) sandboxAllowsFileMutation(ctx context.Context, kind string, payload map[string]any, decision safety.Decision) bool {
-	if r == nil || r.AppCfg == nil || decision.Behavior != safety.BehaviorAsk || decision.Reason != "default_ask" {
+	if r == nil || r.Config() == nil || decision.Behavior != safety.BehaviorAsk || decision.Reason != "default_ask" {
 		return false
 	}
 	switch safety.CanonicalToolName(kind) {
@@ -152,7 +152,7 @@ func (r *Runner) sandboxAllowsFileMutation(ctx context.Context, kind string, pay
 		return false
 	}
 	snapshot := r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx))
-	cfg := safety.ConfigForSnapshot(r.AppCfg, snapshot)
+	cfg := safety.ConfigForSnapshot(r.Config(), snapshot)
 	if cfg.DangerFullAccessEnabled() {
 		return true
 	}
@@ -302,20 +302,20 @@ func (r *Runner) mcpPermissionPromptAutoApproved(ctx context.Context) bool {
 		return false
 	}
 	snapshot := r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx))
-	if snapshot.ApprovalPolicy.Mode != safety.ApprovalNever || r.AppCfg == nil {
+	if snapshot.ApprovalPolicy.Mode != safety.ApprovalNever || r.Config() == nil {
 		return false
 	}
-	if safety.ConfigForSnapshot(r.AppCfg, snapshot).DangerFullAccessEnabled() {
+	if safety.ConfigForSnapshot(r.Config(), snapshot).DangerFullAccessEnabled() {
 		return true
 	}
 	return r.restrictedProfileHasFullDiskWrite(ctx, snapshot)
 }
 
 func (r *Runner) restrictedProfileHasFullDiskWrite(ctx context.Context, snapshot safety.Snapshot) bool {
-	if r == nil || r.AppCfg == nil {
+	if r == nil || r.Config() == nil {
 		return false
 	}
-	cfg := safety.ConfigForSnapshot(r.AppCfg, snapshot)
+	cfg := safety.ConfigForSnapshot(r.Config(), snapshot)
 	cwd, err := tool.WorkingDir(ctx)
 	if err != nil {
 		return false
@@ -800,7 +800,7 @@ func (r *Runner) fullAccessEnabled(sessionID string) bool {
 	if safety.RuntimeYOLOEnabled() {
 		return true
 	}
-	cfg := safety.ConfigForSnapshot(r.AppCfg, r.PermissionSnapshotForSession(sessionID))
+	cfg := safety.ConfigForSnapshot(r.Config(), r.PermissionSnapshotForSession(sessionID))
 	return cfg != nil && cfg.DangerFullAccessEnabled()
 }
 
@@ -815,7 +815,7 @@ func (r *Runner) PermissionSnapshotForSession(sessionID string) safety.Snapshot 
 			Rules: map[safety.PermissionSource]map[safety.PermissionBehavior][]safety.PermissionRuleValue{},
 		}
 	}
-	return r.permRuntimeGet().SnapshotForSession(sessionID, r.AppCfg)
+	return r.permRuntimeGet().SnapshotForSession(sessionID, r.Config())
 }
 
 func (r *Runner) EvaluatePermission(toolName, input string) safety.Decision {
@@ -826,7 +826,7 @@ func (r *Runner) EvaluatePermissionForSession(sessionID, toolName, input string)
 	if r == nil {
 		return safety.Decision{Behavior: safety.BehaviorAsk, Mode: safety.ModeOnRequest, Reason: "nil_runner"}
 	}
-	return r.permRuntimeGet().Evaluate(sessionID, toolName, input, r.AppCfg, r.fullAccessEnabled(sessionID))
+	return r.permRuntimeGet().Evaluate(sessionID, toolName, input, r.Config(), r.fullAccessEnabled(sessionID))
 }
 
 func (r *Runner) ExplainPermission(toolName, input string) safety.ExplainResult {
@@ -843,7 +843,7 @@ func (r *Runner) ExplainPermissionForSession(sessionID, toolName, input string) 
 			},
 		}
 	}
-	return r.permRuntimeGet().Explain(sessionID, toolName, input, r.AppCfg, r.fullAccessEnabled(sessionID))
+	return r.permRuntimeGet().Explain(sessionID, toolName, input, r.Config(), r.fullAccessEnabled(sessionID))
 }
 
 // ResetRuntimePermissionGrants drops approvals scoped to the running agent so
@@ -853,7 +853,7 @@ func (r *Runner) ResetRuntimePermissionGrants() {
 	if r == nil {
 		return
 	}
-	r.permRuntimeGet().ResetGrants(r.AppCfg)
+	r.permRuntimeGet().ResetGrants(r.Config())
 	// A reset is a fresh permission runtime: the next turn re-applies the
 	// session's stored preset row rather than believing it already did.
 	r.sessionPerm.Range(func(key, _ any) bool {
@@ -941,8 +941,8 @@ func (r *Runner) SessionPresetFor(ctx context.Context, sessionID string) Session
 	// Nothing chosen for this conversation: the configured default is the
 	// answer, and it is the preset the setting names rather than a guess
 	// matched from a mode and a sandbox mode that used to be set apart.
-	if r.AppCfg != nil {
-		if preset, ok := safety.ApprovalPresetByID(string(r.AppCfg.ApprovalPreset.Effective())); ok {
+	if r.Config() != nil {
+		if preset, ok := safety.ApprovalPresetByID(string(r.Config().ApprovalPreset.Effective())); ok {
 			return SessionPresetState{Current: preset.ID, Effective: preset.ID}
 		}
 	}
@@ -963,7 +963,7 @@ func (r *Runner) presetStateFromRow(presetID, source string) SessionPresetState 
 // the session is the whole answer, because the preset is what derives it.
 func (r *Runner) matchLivePreset(sessionID string) (safety.ApprovalPreset, bool) {
 	snap := r.PermissionSnapshotForSession(sessionID)
-	cfg := safety.ConfigForSnapshot(r.AppCfg, snap)
+	cfg := safety.ConfigForSnapshot(r.Config(), snap)
 	if cfg == nil {
 		return safety.ApprovalPreset{}, false
 	}
@@ -1048,7 +1048,7 @@ func (r *Runner) injectSessionPermission(ctx context.Context) context.Context {
 	// The pair is derived for this process's launch project, so a stored
 	// default preset stays narrowed exactly as the configuration's own preset
 	// is: an undecided project keeps its commands read-only.
-	for _, update := range preset.SessionUpdatesForLaunch(sid, r.AppCfg, r.LaunchProject) {
+	for _, update := range preset.SessionUpdatesForLaunch(sid, r.Config(), r.LaunchProject) {
 		r.ApplyPermissionUpdate(update)
 	}
 	return ctx
@@ -1075,7 +1075,7 @@ func (r *Runner) applySandboxlessFullAccess(sid string) {
 	if !ok {
 		return
 	}
-	for _, update := range preset.SessionUpdatesForLaunch(sid, r.AppCfg, r.LaunchProject) {
+	for _, update := range preset.SessionUpdatesForLaunch(sid, r.Config(), r.LaunchProject) {
 		r.ApplyPermissionUpdate(update)
 	}
 }
@@ -1098,7 +1098,7 @@ func (r *Runner) ApplyPermissionUpdate(update safety.PermissionUpdate) {
 	if r == nil {
 		return
 	}
-	r.permRuntimeGet().ApplyUpdate(update, r.AppCfg, r.permPaths())
+	r.permRuntimeGet().ApplyUpdate(update, r.Config(), r.permPaths())
 	r.RefreshFilesystemPolicy()
 }
 
@@ -1111,7 +1111,7 @@ func (r *Runner) RefreshSandboxAvailability() {
 	if r == nil {
 		return
 	}
-	r.permRuntimeGet().RefreshSandboxAvailability(r.AppCfg)
+	r.permRuntimeGet().RefreshSandboxAvailability(r.Config())
 }
 
 // RefreshFilesystemPolicy re-resolves active filesystem capabilities and
@@ -1124,7 +1124,7 @@ func (r *Runner) RefreshFilesystemPolicy() {
 	st := r.tools
 	home := r.Home
 	cwd := r.ProjectRoot
-	cfg := r.AppCfg
+	cfg := r.Config()
 	r.mu.load.RUnlock()
 	if st == nil || cfg == nil {
 		return

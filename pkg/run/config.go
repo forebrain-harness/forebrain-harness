@@ -1884,7 +1884,7 @@ func (r *Runner) resolvePrimaryModelCandidateLocked(
 	snap := r.primaryState.snapshot.Load()
 	switch intent {
 	case primaryModelExplicit:
-		entry, err := resolveAgentProvider(r.AppCfg, name, modelSelector{provider: provider, model: model})
+		entry, err := resolveAgentProvider(r.Config(), name, modelSelector{provider: provider, model: model})
 		if err != nil {
 			return appcfg.AgentLLMProviderConfig{}, err
 		}
@@ -1894,14 +1894,14 @@ func (r *Runner) resolvePrimaryModelCandidateLocked(
 		}
 		return entry, nil
 	case primaryModelReset:
-		return resolveAgentProvider(r.AppCfg, name, modelSelector{})
+		return resolveAgentProvider(r.Config(), name, modelSelector{})
 	default:
 		if snap == nil || snap.agent != name {
 			// First load, or the active agent changed: adopt the config's
 			// first resolved entry and pin its current concrete effort.
-			return resolveAgentProvider(r.AppCfg, name, modelSelector{})
+			return resolveAgentProvider(r.Config(), name, modelSelector{})
 		}
-		entry, err := resolveAgentProvider(r.AppCfg, name, modelSelector{
+		entry, err := resolveAgentProvider(r.Config(), name, modelSelector{
 			provider: snap.provider.Provider,
 			model:    snap.provider.Model,
 		})
@@ -2048,7 +2048,7 @@ func (r *Runner) ResetPrimaryModel() error {
 // LoadConfig is the one config-pointer transaction: the pointer is swapped
 // only while r.mu.load is held, an ordinary pinned reload runs against the
 // new config, and a failure restores the old pointer and rebuilds the old
-// effective runtime before returning. Callers never write Runner.AppCfg
+// effective runtime before returning. Callers never write Runner.Config()
 // first. Filesystem policy is refreshed only after unlocking, for the runtime
 // that ultimately won — RefreshFilesystemPolicy takes r.mu.load.RLock itself.
 //
@@ -2060,13 +2060,13 @@ func (r *Runner) LoadConfig(next *appcfg.Root) error {
 	}
 	r.mu.load.Lock()
 	defer r.mu.load.Unlock()
-	prev := r.AppCfg
-	r.AppCfg = next
+	prev := r.Config()
+	r.SetConfig(next)
 	err := r.loadWithIntentLocked(primaryModelOrdinary, "", "", nil, false)
 	if err == nil {
 		return nil
 	}
-	r.AppCfg = prev
+	r.SetConfig(prev)
 	// The authoritative rollback: rebuild the previously effective runtime
 	// under the restored pointer. Only its failure leaves the runner
 	// uncertain; when it succeeds, surfaces see the load error, not an
@@ -2167,7 +2167,7 @@ func PrimaryModelSelection(r *Runner) PrimaryModelState {
 	}
 	provider, model := PrimaryModel(r)
 	state := PrimaryModelState{Provider: provider, Model: model}
-	if entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{}); err == nil {
+	if entry, err := resolveAgentProvider(r.Config(), r.activeAgentNameForModel(), modelSelector{}); err == nil {
 		state.ModelID = strings.TrimSpace(entry.ID)
 		state.Effort = appcfg.ReasoningEffort(entry.Params)
 	}
@@ -2289,10 +2289,10 @@ func SessionModelSelectionFromContext(ctx context.Context) (PrimaryModelState, b
 // selection: nil derives the entry's configured effort once, and an explicit
 // pointer — including "" — pins that exact value.
 func ResolveSessionModelChoiceRef(r *Runner, modelID, provider, model string, effort *string) (PrimaryModelState, error) {
-	if r == nil || r.AppCfg == nil {
+	if r == nil || r.Config() == nil {
 		return PrimaryModelState{}, fmt.Errorf("select model: runner has no configuration")
 	}
-	entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{
+	entry, err := resolveAgentProvider(r.Config(), r.activeAgentNameForModel(), modelSelector{
 		id:       strings.TrimSpace(modelID),
 		provider: strings.TrimSpace(provider),
 		model:    strings.TrimSpace(model),
@@ -2345,7 +2345,7 @@ func (r *Runner) sessionModelClient(sel PrimaryModelState) (llm.LLM, error) {
 	}
 	// The selection's row id first: the same provider/model may be configured
 	// more than once, and the conversation must reach the row it picked.
-	entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{
+	entry, err := resolveAgentProvider(r.Config(), r.activeAgentNameForModel(), modelSelector{
 		id:       sel.ModelID,
 		provider: sel.Provider,
 		model:    sel.Model,
@@ -2576,7 +2576,7 @@ func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
 			if override.Entry != nil {
 				client, err = modelClientFromEntry(*override.Entry, override.Effort)
 			} else {
-				client, err = ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
+				client, err = ConfiguredModelClientWithEffort(r.Config(), r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
 			}
 			if err != nil {
 				slog.WarnContext(ctx, "build subagent compaction client", "err", err)
@@ -2586,7 +2586,7 @@ func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
 		}
 		if subtype := strings.TrimSpace(tool.SubagentTypeFromContext(ctx)); subtype != "" {
 			if modelID, provider, model, effort, ok := SubagentOwnModel(r, subtype); ok {
-				client, err := ConfiguredModelClientWithEffort(r.AppCfg, subtype, modelID, provider, model, effort)
+				client, err := ConfiguredModelClientWithEffort(r.Config(), subtype, modelID, provider, model, effort)
 				if err != nil {
 					slog.WarnContext(ctx, "build typed subagent compaction client", "type", subtype, "err", err)
 					return nil
@@ -2632,10 +2632,10 @@ func (r *Runner) sessionClientFor(ctx context.Context) llm.LLM {
 // the turn entry and this reading name one model for such a session: the
 // live configuration's default, never a runner's pin.
 func ConfiguredDefaultSelection(r *Runner) (PrimaryModelState, error) {
-	if r == nil || r.AppCfg == nil {
+	if r == nil || r.Config() == nil {
 		return PrimaryModelState{}, fmt.Errorf("resolve the configured default: runner has no configuration")
 	}
-	entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{})
+	entry, err := resolveAgentProvider(r.Config(), r.activeAgentNameForModel(), modelSelector{})
 	if err != nil {
 		return PrimaryModelState{}, err
 	}
@@ -2713,7 +2713,7 @@ func AgentModel(r *Runner, conversationSessionID string, subagent *agent.History
 			// Otherwise it comes from the provider entry that model resolves
 			// to — the same entry ConfiguredModelClientWithEffort builds the
 			// client from, so the footer states what the run actually uses.
-			if entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{provider: provider, model: model}); err == nil {
+			if entry, err := resolveAgentProvider(r.Config(), r.activeAgentNameForModel(), modelSelector{provider: provider, model: model}); err == nil {
 				effort = reasoningEffortFromParams(entry.Params)
 			}
 		}
@@ -2780,7 +2780,7 @@ func ContextBudget(r *Runner, conversationSessionID string, subagent *agent.Hist
 	limits, _ := llm.LookupRow(AgentModelRow(r, conversationSessionID, subagent), provider, model)
 	var cfg *appcfg.Root
 	if r != nil {
-		cfg = r.AppCfg
+		cfg = r.Config()
 	}
 	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, CompactBudgetOptions(cfg))
 	if usage > 0 {

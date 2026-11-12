@@ -500,7 +500,7 @@ func TestLLMModelsAPIWritesTheRuntimeView(t *testing.T) {
 
 // A model the page stores is a model the process runs on: the write re-composes
 // the configuration, so the runtime snapshot every picker reads
-// (/api/chat/model, Environment.Deps.AppCfg) lists the row at once instead of
+// (/api/chat/model, Environment.Deps.Config()) lists the row at once instead of
 // waiting for an unrelated reload. A delete takes it out the same way.
 //
 // The environment is a real one (process.Open composes from the database), which

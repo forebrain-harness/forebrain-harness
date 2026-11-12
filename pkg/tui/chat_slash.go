@@ -1306,8 +1306,8 @@ func modelConfigFromChatSession(s *ChatSession) *appcfg.Root {
 	if s == nil {
 		return nil
 	}
-	if s.runner() != nil && s.runner().AppCfg != nil {
-		return s.runner().AppCfg
+	if s.runner() != nil && s.runner().Config() != nil {
+		return s.runner().Config()
 	}
 	return s.cfg()
 }
@@ -1371,8 +1371,8 @@ func mcpConfigFromChatSession(s *ChatSession) *appcfg.Root {
 	if s == nil {
 		return nil
 	}
-	if s.runner() != nil && s.runner().AppCfg != nil {
-		return s.runner().AppCfg
+	if s.runner() != nil && s.runner().Config() != nil {
+		return s.runner().Config()
 	}
 	return s.cfg()
 }

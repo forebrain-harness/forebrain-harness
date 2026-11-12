@@ -105,7 +105,7 @@ func TestMemoriesSettingsValidRequestUpdatesConfig(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	seedConfigDocument(t, db, document)
-	env := &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{}}, Root: home, ConfigPath: configPath, SQL: db}
+	env := (&process.Environment{Deps: &run.Deps{}, Root: home, ConfigPath: configPath, SQL: db}).WithDepsConfig(&appcfg.Root{})
 	server := &Server{Home: home, Env: env}
 	recorder := httptest.NewRecorder()
 	server.handleMemoriesSettings(recorder, httptest.NewRequest(http.MethodPost, "/memories/settings", strings.NewReader(`{"feature_enabled":false}`)))
@@ -137,7 +137,7 @@ func TestMemoriesSettingsStrictJSONAndStorePrecondition(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	seedConfigDocument(t, db, original)
-	server := &Server{Home: home, Env: &process.Environment{Root: home, ConfigPath: configPath, SQL: db, Deps: run.Deps{AppCfg: &appcfg.Root{}}}}
+	server := &Server{Home: home, Env: (&process.Environment{Root: home, ConfigPath: configPath, SQL: db, Deps: &run.Deps{}}).WithDepsConfig(&appcfg.Root{})}
 	for _, body := range []string{`{"unknown":true}`, `{} {}`} {
 		recorder := httptest.NewRecorder()
 		server.handleMemoriesSettings(recorder, httptest.NewRequest(http.MethodPost, "/memories/settings", strings.NewReader(body)))

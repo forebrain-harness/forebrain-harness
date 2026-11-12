@@ -737,7 +737,7 @@ func TestHistoryUsesTheFileResolverWiredAfterLoad(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
 	}}}
-	r := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 	require.NoError(t, r.Load())
 	r.FileResolver = PathResolver{}
 

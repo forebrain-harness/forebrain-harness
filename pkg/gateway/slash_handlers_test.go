@@ -121,7 +121,7 @@ func TestHandleMCPSlashSummary(t *testing.T) {
 	s := &Server{
 		Home:   t.TempDir(),
 		Runner: &run.Runner{Deps: &run.Deps{MCPServers: cfg.Agents.Defaults.MCPServers}},
-		Env:    &process.Environment{Deps: run.Deps{AppCfg: cfg}},
+		Env:    (&process.Environment{Deps: &run.Deps{}}).WithDepsConfig(cfg),
 	}
 
 	reply, handled := s.HandleMCPSlash("s1", "webchat")
@@ -133,7 +133,7 @@ func TestHandleMCPSlashSummary(t *testing.T) {
 	empty := &Server{
 		Home:   t.TempDir(),
 		Runner: &run.Runner{Deps: &run.Deps{}},
-		Env:    &process.Environment{Deps: run.Deps{AppCfg: cfg}},
+		Env:    (&process.Environment{Deps: &run.Deps{}}).WithDepsConfig(cfg),
 	}
 	reply, _ = empty.HandleMCPSlash("s1", "webchat")
 	require.Contains(t, reply, "No MCP servers configured")
@@ -165,12 +165,12 @@ func TestHandleMCPServersV1MarksOfficialRegistryURLs(t *testing.T) {
 	seedConfigRoot(t, db, *cfg)
 	s := &Server{
 		Home: home,
-		Env: &process.Environment{
-			Deps:       run.Deps{Home: home, AppCfg: cfg},
+		Env: (&process.Environment{
+			Deps:       &run.Deps{Home: home},
 			Root:       home,
 			SQL:        db,
 			ConfigPath: cfgPath,
-		},
+		}).WithDepsConfig(cfg),
 	}
 	rec := httptest.NewRecorder()
 
@@ -206,8 +206,8 @@ func TestWebModelPickerSwitchesTheModel(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	sess := state.NewSessionStore(db, "main")
 	require.NoError(t, sess.Ensure(context.Background(), "s1", "s1"))
-	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sess}}
-	runner := &run.Runner{Deps: &env.Deps}
+	env := (&process.Environment{Root: home, ConfigPath: cfgPath, Deps: &run.Deps{Home: home, AgentName: "main", SessionStore: sess}}).WithDepsConfig(&cfg)
+	runner := &run.Runner{Deps: env.Deps}
 	env.Runner = runner
 	s := &Server{
 		Home:     home,
@@ -256,8 +256,8 @@ func TestGatewayStatusAndModelHelpers(t *testing.T) {
 	cfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{Name: "docs"}, {Name: "code"}}
 	s := &Server{
 		Home:   t.TempDir(),
-		Runner: &run.Runner{Deps: &run.Deps{AppCfg: cfg, AgentName: "worker"}},
-		Env:    &process.Environment{Deps: run.Deps{AppCfg: cfg}},
+		Runner: &run.Runner{Deps: (&run.Deps{AgentName: "worker"}).WithConfig(cfg)},
+		Env:    (&process.Environment{Deps: &run.Deps{}}).WithDepsConfig(cfg),
 	}
 
 	// The active-agent model resolution lives in run.PrimaryModel now; it is
@@ -286,8 +286,8 @@ func TestHandleStatusSlashUsesRuntimeStores(t *testing.T) {
 	}
 	s := &Server{
 		Home:   home,
-		Runner: &run.Runner{Deps: &run.Deps{AppCfg: cfg, AgentName: "main"}},
-		Env:    &process.Environment{Deps: run.Deps{AppCfg: cfg}},
+		Runner: &run.Runner{Deps: (&run.Deps{AgentName: "main"}).WithConfig(cfg)},
+		Env:    (&process.Environment{Deps: &run.Deps{}}).WithDepsConfig(cfg),
 	}
 	s.Runner.ApplyPermissionUpdate(safety.PermissionUpdate{
 		Type:        safety.UpdateSetMode,
@@ -334,7 +334,7 @@ func TestHandleSandboxSlashStatus(t *testing.T) {
 	s := &Server{
 		Home:   t.TempDir(),
 		Runner: &run.Runner{Deps: &run.Deps{}},
-		Env:    &process.Environment{Deps: run.Deps{AppCfg: cfg}},
+		Env:    (&process.Environment{Deps: &run.Deps{}}).WithDepsConfig(cfg),
 	}
 	reply, handled := s.HandleSandboxSlash("s1", "webchat", nil)
 	require.True(t, handled)
@@ -396,7 +396,7 @@ func TestSandboxReportShowsUnavailableReason(t *testing.T) {
 	s := &Server{
 		Home:   t.TempDir(),
 		Runner: &run.Runner{Deps: &run.Deps{}},
-		Env:    &process.Environment{Deps: run.Deps{AppCfg: cfg}},
+		Env:    (&process.Environment{Deps: &run.Deps{}}).WithDepsConfig(cfg),
 	}
 	reply, handled := s.HandleSandboxSlash("s1", "webchat", nil)
 	require.True(t, handled)
@@ -435,12 +435,12 @@ func TestMCPServerToggleSharesTheTerminalsAction(t *testing.T) {
 	s := &Server{
 		Home:   home,
 		Runner: &run.Runner{Deps: &run.Deps{WorkspaceRoot: ws}},
-		Env: &process.Environment{
-			Deps:       run.Deps{Home: home, AppCfg: cfg},
+		Env: (&process.Environment{
+			Deps:       &run.Deps{Home: home},
 			Root:       home,
 			SQL:        db,
 			ConfigPath: cfgPath,
-		},
+		}).WithDepsConfig(cfg),
 	}
 	post := func(path, body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -527,7 +527,7 @@ func gatewayModelServer(t *testing.T) *Server {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	sess := state.NewSessionStore(db, "main")
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sess}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sess}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	require.NoError(t, appcfg.Save(cfgPath, *cfg))
@@ -535,15 +535,15 @@ func gatewayModelServer(t *testing.T) *Server {
 		Home:     home,
 		Runner:   runner,
 		Sessions: sess,
-		Env: &process.Environment{
+		Env: (&process.Environment{
 			Root:       home,
 			ConfigPath: cfgPath,
 			// RawConfig is what project runners derive their own effective
 			// config from; a hand-built Environment must set it as Open does.
-			RawConfig: *cfg,
-			Deps:      run.Deps{AppCfg: cfg},
-			Runner:    runner,
-		},
+
+			Deps:   &run.Deps{},
+			Runner: runner,
+		}).WithRawConfig(*cfg).WithDepsConfig(cfg),
 	}
 }
 
@@ -593,7 +593,7 @@ func TestGatewayModelSettingsWithoutConfiguration(t *testing.T) {
 }
 
 func TestGatewaySelectModelNeedsARunner(t *testing.T) {
-	s := &Server{Env: &process.Environment{Deps: run.Deps{}}}
+	s := &Server{Env: &process.Environment{Deps: &run.Deps{}}}
 	err := s.SelectModel(context.Background(), "s1", turn.ModelChoice{Provider: "openai", Model: "gpt-a"}, nil)
 	require.Error(t, err)
 }
@@ -632,10 +632,9 @@ func TestGatewayProjectRunnerSelectionIsolated(t *testing.T) {
 	// Two hand-built project runners over their own Deps, the way the pool
 	// builds them; the base runner stays untouched by their selections.
 	projRunner := func() *run.Runner {
-		r := &run.Runner{Deps: &run.Deps{
+		r := &run.Runner{Deps: (&run.Deps{
 			Home: t.TempDir(), AgentName: "main",
-			AppCfg: s.Runner.AppCfg,
-		}}
+		}).WithConfig(s.Runner.Config())}
 		require.NoError(t, r.Load())
 		return r
 	}
@@ -738,7 +737,7 @@ func TestHandleStatusSlashIncludesLSPRow(t *testing.T) {
 	s := &Server{
 		Home:   t.TempDir(),
 		Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}},
-		Env:    &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{}}},
+		Env:    (&process.Environment{Deps: &run.Deps{}}).WithDepsConfig(&appcfg.Root{}),
 	}
 	reply, handled := s.HandleStatusSlash("s1", "webchat", false)
 	require.True(t, handled)

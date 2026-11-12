@@ -112,7 +112,7 @@ func TestContextSnapshotResolvesConfiguredPrimaryModel(t *testing.T) {
 	}}}
 	for _, agentName := range []string{"main", "review"} {
 		t.Run(agentName, func(t *testing.T) {
-			runner := &run.Runner{Deps: &run.Deps{AppCfg: cfg, AgentName: agentName}}
+			runner := &run.Runner{Deps: (&run.Deps{AgentName: agentName}).WithConfig(cfg)}
 			h := assembly.NewRuntimeHook(assembly.HookParams{
 				Cfg: cfg, Home: home,
 				PrimaryModel: func(string) (string, string) { return run.PrimaryModel(runner) },
@@ -186,7 +186,7 @@ func TestOpenFilesSessionsUnderTheLaunchProjectScope(t *testing.T) {
 
 	sessionCwd := func(id string) string {
 		t.Helper()
-		if err := env.Deps.SessionStore.Ensure(ctx, id, id); err != nil {
+		if err := env.deps().SessionStore.Ensure(ctx, id, id); err != nil {
 			t.Fatalf("Ensure %s: %v", id, err)
 		}
 		var cwd string
@@ -213,7 +213,7 @@ func TestOpenFilesSessionsUnderTheLaunchProjectScope(t *testing.T) {
 
 	// A configuration application re-derives everything the environment froze
 	// from it; the project a session's memory is filed under is not one of them.
-	if err := env.applyComposedConfigLocked(env.RawConfig); err != nil {
+	if err := env.applyComposedConfigLocked(env.RawConfigValue()); err != nil {
 		t.Fatalf("apply config: %v", err)
 	}
 	assertScope("after a config application", sessionCwd("s-apply"))
@@ -246,10 +246,10 @@ func TestOpenWiresCodeIntelligence(t *testing.T) {
 	if env.LSP == nil {
 		t.Fatal("Open built no language-server pool")
 	}
-	if env.Deps.CodeIntel == nil || env.Deps.CodeIntelControl == nil {
+	if env.deps().CodeIntel == nil || env.deps().CodeIntelControl == nil {
 		t.Fatal("the primary runner's Deps carry no language-server runtime")
 	}
-	if env.Deps.CodeIntelTool {
+	if env.deps().CodeIntelTool {
 		t.Fatal("the skeleton must not register the lsp tool")
 	}
 	// The launch project's root is stored symlink-resolved, which on macOS
@@ -259,7 +259,7 @@ func TestOpenWiresCodeIntelligence(t *testing.T) {
 	if resolved, rerr := filepath.EvalSymlinks(project); rerr == nil {
 		wantRoot = resolved
 	}
-	if got := env.Deps.CodeIntelControl.Snapshot().ProjectRoot; got != wantRoot {
+	if got := env.deps().CodeIntelControl.Snapshot().ProjectRoot; got != wantRoot {
 		t.Fatalf("snapshot project root = %q, want the launch project %q", got, wantRoot)
 	}
 
@@ -390,7 +390,7 @@ func TestOpenRegistersTheRunOwner(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	resetProcessWideInstalls(t)
-	owner := env.Deps.RunRT.Owner
+	owner := env.deps().RunRT.Owner
 	if owner == "" {
 		t.Fatal("the production RunStore must carry the process owner")
 	}
@@ -476,9 +476,9 @@ func TestGatewayEnvironmentHasNoLaunchProject(t *testing.T) {
 	if env.Runner.ProjectRoot != "" {
 		t.Fatalf("base runner ProjectRoot = %q, want empty", env.Runner.ProjectRoot)
 	}
-	for _, srv := range env.Deps.MCPServers {
+	for _, srv := range env.deps().MCPServers {
 		if strings.EqualFold(strings.TrimSpace(srv.Name), "projtool") {
-			t.Fatalf("the launch directory's project MCP entry loaded: %+v", env.Deps.MCPServers)
+			t.Fatalf("the launch directory's project MCP entry loaded: %+v", env.deps().MCPServers)
 		}
 	}
 }
@@ -511,7 +511,7 @@ func TestOpenBaseRunnerHostsNoMCP(t *testing.T) {
 	if len(env.Runner.MCPServers) != 0 {
 		t.Fatalf("base runner MCPServers = %+v, want none even with a configured global entry", env.Runner.MCPServers)
 	}
-	if env.Deps.MCPResolve != nil {
+	if env.deps().MCPResolve != nil {
 		t.Fatal("MCPResolve must be nil: no conversation ever re-resolves on the base runner")
 	}
 	if got := env.Runner.MCPStartup().Snapshot().Servers; len(got) != 0 {

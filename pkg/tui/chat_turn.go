@@ -1578,7 +1578,7 @@ func (s *ChatSession) compactBudgetOptions() state.TokenBudgetOptions {
 	if s == nil || s.runner() == nil {
 		return state.TokenBudgetOptions{}
 	}
-	return run.CompactBudgetOptions(s.runner().AppCfg)
+	return run.CompactBudgetOptions(s.runner().Config())
 }
 
 // turnCompletion is the single authoritative completion snapshot for a turn.

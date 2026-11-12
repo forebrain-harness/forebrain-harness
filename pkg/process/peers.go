@@ -288,7 +288,7 @@ func (env *Environment) StartPeers(ctx context.Context, s PeerSurface) (stop fun
 	// port may not follow the registration's life — a call made while the
 	// service is between modes answers that messaging is not available.
 	if env != nil {
-		env.Deps.Peers = env.peerDirectory()
+		env.deps().Peers = env.peerDirectory()
 	}
 	svc := &peerService{
 		env:          env,
@@ -347,8 +347,9 @@ func (env *Environment) setPeerService(svc *peerService) {
 func (env *Environment) peersConfigSnapshot() (cfg peerConfigView) {
 	env.reloadMu.Lock()
 	defer env.reloadMu.Unlock()
-	if env.RawConfig.Peers.ClaudeCode != nil {
-		cfg.on = *env.RawConfig.Peers.ClaudeCode
+	raw := env.RawConfigValue()
+	if raw.Peers.ClaudeCode != nil {
+		cfg.on = *raw.Peers.ClaudeCode
 		cfg.set = true
 	}
 	return cfg
@@ -946,10 +947,10 @@ func (svc *peerService) sessionStatus(sid string) string {
 // sessionTask is the session's live primary input — the one line that says
 // what it is doing — or empty when it is idle.
 func (svc *peerService) sessionTask(sid string) string {
-	if svc.env.Deps.RunRT == nil {
+	if svc.env.deps().RunRT == nil {
 		return ""
 	}
-	task, err := svc.env.Deps.RunRT.LivePrimaryInput(context.Background(), sid)
+	task, err := svc.env.deps().RunRT.LivePrimaryInput(context.Background(), sid)
 	if err != nil {
 		return ""
 	}
@@ -959,7 +960,7 @@ func (svc *peerService) sessionTask(sid string) string {
 // gatewayStatusLocked lists the gateway's recently active sessions, capped
 // at peerMaxAgents, and reports busy when any of them is running.
 func (svc *peerService) gatewayStatusLocked(ctx context.Context) (string, []peer.ExtAgent) {
-	store := svc.env.Deps.SessionStore
+	store := svc.env.deps().SessionStore
 	if store == nil {
 		return peer.StatusIdle, nil
 	}

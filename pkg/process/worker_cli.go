@@ -47,7 +47,7 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 	if sid == "" {
 		sid = "default"
 	}
-	agBase := AgentContext(ctx, config.ActiveStateRoot(env.Root, env.Deps.AppCfg), sid)
+	agBase := AgentContext(ctx, config.ActiveStateRoot(env.Root, env.deps().Config()), sid)
 	if parentKey := strings.TrimSpace(llm.PromptCacheKeyFromContext(ctx)); parentKey != "" {
 		agBase = llm.WithPromptCacheKey(agBase, parentKey)
 	} else if parentKey := strings.TrimSpace(sessionID); parentKey != "" {
@@ -88,17 +88,17 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 	// enriched version, so the first request gains no duplicate. An attempt
 	// resuming across an approval gate must not write again: the first
 	// attempt's row is the one the replay continues from.
-	if tool.ToolApprovalResumeFromContext(ctx) == nil && env.Deps.SessionStore != nil {
+	if tool.ToolApprovalResumeFromContext(ctx) == nil && env.deps().SessionStore != nil {
 		// The pre-turn compaction runs before the new user turn is written,
 		// the way the conversation's own pre-turn compaction does. A failure
 		// only logs — it must not stop the continuation it was making room
 		// for, which is how chat_session's maybeAutoCompactBeforeAppend
 		// treats a failure too. A first dispatch's empty worker session sits
 		// far below any threshold and decides against it on its own.
-		if _, _, cerr := run.CompactionService(env.Runner, env.Deps.SessionStore).AutoCompactSession(ctx, sid, ""); cerr != nil {
+		if _, _, cerr := run.CompactionService(env.Runner, env.deps().SessionStore).AutoCompactSession(ctx, sid, ""); cerr != nil {
 			slog.Warn("subagent pre-turn compaction skipped", "session_id", sid, "err", cerr)
 		}
-		if _, err := turn.PersistUserTurn(ctx, env.Deps.SessionStore, turn.UserTurn{
+		if _, err := turn.PersistUserTurn(ctx, env.deps().SessionStore, turn.UserTurn{
 			SessionID:  sid,
 			RunID:      runID,
 			ModelInput: strings.TrimSpace(task),
@@ -113,7 +113,7 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 	capture := run.NewPartialSessionCapture()
 	agBase = run.WithPartialSessionCapture(agBase, capture)
 	opts := run.Options{
-		RunRT:        env.Deps.RunRT,
+		RunRT:        env.deps().RunRT,
 		Runner:       runner,
 		Hooks:        env.Hooks,
 		AgBase:       agBase,

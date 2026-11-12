@@ -683,13 +683,13 @@ func TestConsolidateMemoryWorkspaceMirrorsTheNowContract(t *testing.T) {
 	}
 
 	// Memories switched off is the feature's answer, verbatim.
-	disabled := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{Features: appcfg.FeaturesSection{Memories: boolPtr(false)}}}}
+	disabled := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{Features: appcfg.FeaturesSection{Memories: boolPtr(false)}})}
 	if err := disabled.ConsolidateMemoryWorkspace(ctx); err != ErrMemoriesDisabled {
 		t.Fatalf("disabled error = %v", err)
 	}
 
 	// A pipeline that cannot be built is an error the caller can report.
-	unbuilt := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
+	unbuilt := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{})}
 	if err := unbuilt.ConsolidateMemoryWorkspace(ctx); err == nil {
 		t.Fatal("unbuildable pipeline reported success")
 	}
@@ -707,7 +707,7 @@ func TestConsolidateMemoryWorkspaceMirrorsTheNowContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
+	runner := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{})}
 	runner.memPipeline.Get(func() *memory.Pipeline {
 		return &memory.Pipeline{Store: memory.NewStore(db, "main"), Roots: roots, Cfg: &appcfg.Root{}}
 	})

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -39,8 +40,8 @@ import (
 // under a per-subagent directory.
 //
 // R6: these fields used to sit directly on Runner as copies of what the
-// Environment held, which is how Runner.AppCfg could drift from
-// Environment.Config. Embedding the pointer means r.Home and r.AppCfg still
+// Environment held, which is how Runner.Config() could drift from
+// Environment.Config. Embedding the pointer means r.Home and r.Config() still
 // resolve (promoted fields), but the storage is the shared Deps, not a second
 // copy on every Runner.
 type Deps struct {
@@ -142,11 +143,46 @@ type Deps struct {
 	// the life of the process, because the tool table sits in the prompt
 	// prefix and may not follow a peer service starting or stopping. Subagents
 	// inherit it through the factory that built them.
-	Peers        PeerDirectory
-	MemoryStore  *memory.Store
-	AppCfg       *appcfg.Root
+	Peers       PeerDirectory
+	MemoryStore *memory.Store
+	// appCfg holds the live configuration root. It is published by config
+	// applications (Runner.LoadConfig under mu.load, Environment.AdoptConfig
+	// under the environment's reloadMu) while surfaces on other goroutines
+	// read it, so the pointer itself is atomic: a reader loads a coherent
+	// snapshot, and a writer's store publishes every write that composed the
+	// replacement. Under a bare pointer there was no release/acquire edge, so
+	// a reader could load a freshly stored pointer and still observe a
+	// half-composed Root — the race detector caught exactly that pair.
+	// Accessed only through Config/SetConfig.
+	appCfg       atomic.Pointer[appcfg.Root]
 	SessionStore *state.SessionStore
 	RunRT        *state.RunStore
+}
+
+// Config returns the live configuration root — a coherent snapshot: the
+// pointer and everything its composer wrote before storing it. Nil when no
+// configuration has been installed yet.
+func (d *Deps) Config() *appcfg.Root {
+	if d == nil {
+		return nil
+	}
+	return d.appCfg.Load()
+}
+
+// SetConfig replaces the live configuration root. next is stored whole: no
+// writes to it may follow (compose a fresh Root instead).
+func (d *Deps) SetConfig(next *appcfg.Root) {
+	d.appCfg.Store(next)
+}
+
+// WithConfig is SetConfig in construction form — the literal spelling
+// (&Deps{…}).WithConfig(cfg) — so a hand-built Deps installs its
+// configuration in one expression.
+func (d *Deps) WithConfig(next *appcfg.Root) *Deps {
+	if d != nil {
+		d.SetConfig(next)
+	}
+	return d
 }
 
 // MCPServersResolution is one session-open re-resolution of the effective MCP
@@ -451,7 +487,7 @@ func addModelSetupHint(err error) error {
 func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (string, bool, error) {
 	pay := payloadToMap(payload)
 	strictAutoReview := r != nil && r.permRuntimeGet().StrictAutoReviewEnabledForSession(
-		tool.ConversationSessionIDFromContext(ctx), r.policyRunIDForTool(ctx), r.AppCfg,
+		tool.ConversationSessionIDFromContext(ctx), r.policyRunIDForTool(ctx), r.Config(),
 	)
 	exitPlanMode := strings.EqualFold(strings.TrimSpace(kind), "exit_plan_mode")
 	isRequestPermissions := strings.EqualFold(strings.TrimSpace(kind), "request_permissions")
@@ -495,7 +531,7 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 	forceToolApproval := exitPlanMode || payloadForcesToolApproval(pay)
 	snapshot := r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx))
 	approvalPolicy := snapshot.ApprovalPolicy
-	sessionCfg := safety.ConfigForSnapshot(r.AppCfg, snapshot)
+	sessionCfg := safety.ConfigForSnapshot(r.Config(), snapshot)
 	if isApplyPatch {
 		if approved, err := r.applyPatchSessionApproval(ctx, pay); err != nil {
 			return "", false, err
@@ -767,7 +803,7 @@ func permissionRequestHookPayload(kind string, payload map[string]any) (string, 
 }
 
 func (r *Runner) approvalHookModel(ctx context.Context) string {
-	if r == nil || r.AppCfg == nil {
+	if r == nil || r.Config() == nil {
 		return ""
 	}
 	if snap := r.primaryState.snapshot.Load(); snap != nil {
@@ -787,7 +823,7 @@ func (r *Runner) approvalHookModel(ctx context.Context) string {
 // default — default_model when set, otherwise the first entry — the same way
 // the runtime does, so the two cannot disagree.
 func (r *Runner) unloadedPrimaryModelFallback() (appcfg.AgentLLMProviderConfig, bool) {
-	entry := appcfg.EffectiveDefaultLLMFor(r.AppCfg, r.activeAgentNameForModel())
+	entry := appcfg.EffectiveDefaultLLMFor(r.Config(), r.activeAgentNameForModel())
 	if entry == nil {
 		return appcfg.AgentLLMProviderConfig{}, false
 	}
@@ -813,7 +849,7 @@ func (r *Runner) effectivePrimaryClient() llm.LLM {
 		}
 		return nil
 	}
-	client, _ := NewLLMForAgentType(r.AppCfg, r.activeAgentNameForModel())
+	client, _ := NewLLMForAgentType(r.Config(), r.activeAgentNameForModel())
 	return client
 }
 
@@ -826,7 +862,7 @@ func (r *Runner) applyPatchSessionApproval(ctx context.Context, payload map[stri
 		return false, nil
 	}
 	for _, path := range paths {
-		decision := r.permRuntimeGet().EvaluateRaw(tool.ConversationSessionIDFromContext(ctx), "apply_patch", strings.TrimSpace(path), r.AppCfg)
+		decision := r.permRuntimeGet().EvaluateRaw(tool.ConversationSessionIDFromContext(ctx), "apply_patch", strings.TrimSpace(path), r.Config())
 		if decision.Matched != nil && decision.Behavior == safety.BehaviorDeny {
 			return false, formatPermissionDenyError(decision, "apply_patch", map[string]any{"path": path})
 		}
@@ -894,7 +930,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	if name == "" {
 		name = "main"
 	}
-	cfgMap, err := LoadAgentConfigsFromRoot(r.AppCfg)
+	cfgMap, err := LoadAgentConfigsFromRoot(r.Config())
 	if err != nil {
 		return err
 	}
@@ -929,7 +965,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		}
 	}
 	r.permRuntimeGet().SetGuardian(nil, "")
-	guardianLLM, guardianErr := NewLLMForAgentType(r.AppCfg, "guardian")
+	guardianLLM, guardianErr := NewLLMForAgentType(r.Config(), "guardian")
 	if guardianErr != nil {
 		slog.Warn("initialize automatic approval reviewer", "err", guardianErr)
 	} else if guardianLLM != nil {
@@ -945,10 +981,10 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// via the typedSubagentProviderLLM wrapper.
 	typeLLMs := make(map[string]llm.LLM)
 	for _, typeName := range agent.PublicTypeNames() {
-		if !appcfg.HasOwnModelChoice(r.AppCfg, typeName) {
+		if !appcfg.HasOwnModelChoice(r.Config(), typeName) {
 			continue
 		}
-		typedLLM, terr := NewLLMForAgentType(r.AppCfg, typeName)
+		typedLLM, terr := NewLLMForAgentType(r.Config(), typeName)
 		if terr != nil {
 			slog.Warn("failed to build typed subagent LLM, falling back to main", "type", typeName, "err", terr)
 			continue
@@ -974,12 +1010,12 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		if override.Entry != nil {
 			return modelClientFromEntry(*override.Entry, override.Effort)
 		}
-		return ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
+		return ConfiguredModelClientWithEffort(r.Config(), r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
 	})
 	// The prompt a typed run reaches the model with is this primary agent's
 	// answer: its rewrite of a built-in, or a custom subagent's own text.
 	llmClient = wrapTypedSubagentPromptLLM(llmClient, func(subtype string) (string, bool) {
-		return SubagentCatalogFor(r.AppCfg, r.activeAgentNameForModel()).ForProjectType(r.ProjectType()).Prompt(subtype)
+		return SubagentCatalogFor(r.Config(), r.activeAgentNameForModel()).ForProjectType(r.ProjectType()).Prompt(subtype)
 	})
 	llmClient = wrapCodegraphPromptLLM(llmClient)
 	// The skill roots are resolved once per load, from this runtime's frozen
@@ -994,8 +1030,8 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// for a business system, so neither the memory instructions nor the
 	// citation wrapper reach its requests (owner 2026-10-26).
 	if r.ProjectType() != state.ProjectTypeBatch {
-		llmClient = wrapMemoryInstructionLLM(llmClient, r.workspaceRoot(), r.ProjectKey, r.AppCfg, r.SessionStore, r.ProjectMemoryOnly())
-		llmClient = wrapMemoryCitationLLM(llmClient, r.AppCfg, r.MemoryStore)
+		llmClient = wrapMemoryInstructionLLM(llmClient, r.workspaceRoot(), r.ProjectKey, r.Config(), r.SessionStore, r.ProjectMemoryOnly())
+		llmClient = wrapMemoryCitationLLM(llmClient, r.Config(), r.MemoryStore)
 	}
 	llmClient = wrapTypedSubagentToolFilterLLM(llmClient)
 	// Everything wrapped so far shapes the start of a request — system prompt,
@@ -1018,8 +1054,8 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// overflows and kills the turn. Its context is muted
 	// (WithMutedForegroundStream), so its retries surface no cards and clear
 	// no foreground buffers; each retry re-sends the whole summary request.
-	networkRetryMax := r.AppCfg.Agents.Defaults.NetworkRetryMaxOrDefault()
-	if v := r.AppCfg.Agents.Defaults.NetworkRetryMax; v != nil && *v > appcfg.MaxNetworkRetryMax {
+	networkRetryMax := r.Config().Agents.Defaults.NetworkRetryMaxOrDefault()
+	if v := r.Config().Agents.Defaults.NetworkRetryMax; v != nil && *v > appcfg.MaxNetworkRetryMax {
 		slog.Warn("agents.defaults.network_retry_max above the limit; running with the limit", "configured", *v, "limit", appcfg.MaxNetworkRetryMax)
 	}
 	// One attempt ledger for both chains a Runner builds, so the conversation's
@@ -1030,7 +1066,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// Held on the Runner so the image-refusal recorder shares the same
 	// instance as both chains: one counter, continuous call numbers.
 	r.attemptLedger = attemptLedger
-	summaryChain := wrapNetworkRetryLLM(withImageHeal(llmClient), networkRetryMax, r.AppCfg.Agents.Defaults.StreamIdleTimeout(), attemptLedger)
+	summaryChain := wrapNetworkRetryLLM(withImageHeal(llmClient), networkRetryMax, r.Config().Agents.Defaults.StreamIdleTimeout(), attemptLedger)
 	r.summaryLLM = summaryChain
 	// The reminder planModeLLM injects is not written here. It reaches the
 	// transcript through the run's own message sequence, which the orchestration
@@ -1043,7 +1079,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// reach the live session through the same adoption sink in record order.
 	// The tool state is read through a getter because it is built later in
 	// this same Load than the chain being wrapped here.
-	llmClient = wrapSkillOfferLLM(llmClient, r.AppCfg, func() *tool.State { return r.tools }, r.workspaceRoot(), r.LaunchProject)
+	llmClient = wrapSkillOfferLLM(llmClient, r.Config(), func() *tool.State { return r.tools }, r.workspaceRoot(), r.LaunchProject)
 	// The late-diagnostics reminder joins here for the same reason the
 	// plan-mode and skill-offer reminders sit outside summaryChain: it belongs
 	// to the conversation's next request, and a compaction's summary request
@@ -1056,7 +1092,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	llmClient = wrapPeerAwarenessReminderLLM(llmClient, r.peerDirectory)
 	// Build compactDeps for the checkpoint path. SessionID is
 	// extracted from context at LLM call time.
-	compactBudget := CompactBudgetOptions(r.AppCfg)
+	compactBudget := CompactBudgetOptions(r.Config())
 	compactSvc := assembly.Service{
 		Sessions: r.SessionStore,
 		PrimaryModel: func(ctx context.Context) (string, string) {
@@ -1070,13 +1106,13 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		ModelRow:   r.agentModelRowFor,
 		CompactLLM: r.agentCompactClientFor,
 		ModelProvider: func(model string) string {
-			return ProviderForAgentModel(r.AppCfg, r.activeAgentNameForModel(), model)
+			return ProviderForAgentModel(r.Config(), r.activeAgentNameForModel(), model)
 		},
 		CompactLLMForModel: func(model string) llm.LLM {
-			_, c, _ := NewLLMForAgentModel(r.AppCfg, r.activeAgentNameForModel(), model)
+			_, c, _ := NewLLMForAgentModel(r.Config(), r.activeAgentNameForModel(), model)
 			return c
 		},
-		Prompt: r.AppCfg.Compact.Prompt,
+		Prompt: r.Config().Compact.Prompt,
 		// The threshold and the context-pressure warning divide by the same
 		// window, so both read the same two settings.
 		AutoCompactPercent:  compactBudget.AutoCompactPercent,
@@ -1131,13 +1167,13 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		},
 		compactDeps,
 		networkRetryMax,
-		r.AppCfg.Agents.Defaults.StreamIdleTimeout(),
+		r.Config().Agents.Defaults.StreamIdleTimeout(),
 		attemptLedger,
 	)
 	// The dedup lives inside the wrapper this hands it to, which is rebuilt on
 	// every Load along with it, so the Runner has no reason to keep a
 	// reference of its own.
-	llmClient = wrapGuardrailsLLM(llmClient, r.AppCfg, newGuardrailRunDedup())
+	llmClient = wrapGuardrailsLLM(llmClient, r.Config(), newGuardrailRunDedup())
 	stateDir := strings.TrimSpace(r.StateDir)
 	if stateDir == "" {
 		stateDir = filepath.Join(r.workspaceRoot(), "state")
@@ -1148,7 +1184,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	}
 	activeWorkspace := r.workspaceRoot()
 	var siblingWorkspaces []string
-	if resolver, resolveErr := appcfg.NewResolver(strings.TrimSpace(r.Home), r.AppCfg); resolveErr == nil {
+	if resolver, resolveErr := appcfg.NewResolver(strings.TrimSpace(r.Home), r.Config()); resolveErr == nil {
 		if paths, pathsErr := resolver.Paths(); pathsErr == nil {
 			if strings.TrimSpace(paths.Active.WorkspaceRoot) == strings.TrimSpace(activeWorkspace) {
 				siblingWorkspaces = paths.SiblingWorkspaces
@@ -1177,7 +1213,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	hookRT := &hook.Runtime{
 		Home:          r.Home,
 		WorkspaceRoot: r.workspaceRoot(),
-		Cfg:           r.AppCfg,
+		Cfg:           r.Config(),
 		Sess:          r.SessionStore,
 		Actions:       r.Actions,
 		NewPromptRunner: func(label string) (hook.PromptRun, error) {
@@ -1188,7 +1224,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 				ProjectKey:    r.ProjectKey,
 				ProjectRoot:   r.ProjectRoot,
 				MemoryStore:   r.MemoryStore,
-				AppCfg:        r.AppCfg,
+				AppCfg:        r.Config(),
 			}
 			rr := fac.NewIsolatedRunner(label)
 			if rr == nil {
@@ -1209,7 +1245,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 			if r == nil {
 				return "on-request"
 			}
-			return string(r.permRuntimeGet().Mode(r.AppCfg))
+			return string(r.permRuntimeGet().Mode(r.Config()))
 		},
 	}
 	r.tools.SetRuntimeValue("hooks_runtime", hookRT)
@@ -1284,12 +1320,12 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// guards this reassignment with its own lock (R3), so unlike the R2-era
 	// code here, loadLocked does not need to borrow any of Runner's own locks
 	// to stay mutually exclusive with a concurrent permission evaluation.
-	r.permRuntimeGet().LoadFromDisk(r.AppCfg, r.permPaths())
+	r.permRuntimeGet().LoadFromDisk(r.Config(), r.permPaths())
 	if r.Actions != nil {
 		r.tools.SetActionHook(r.actionHook)
 	}
 	rt := &tool.AgentToolRuntime{
-		Home: r.Home, WorkspaceRoot: r.workspaceRoot(), ProjectKey: r.ProjectKey, ProjectType: r.ProjectType(), BatchSandbox: r.Deps.BatchSandbox, Cfg: r.AppCfg, YOLO: safety.RuntimeYOLOEnabled(), Sess: r.SessionStore, Actions: r.Actions, RunRT: r.RunRT,
+		Home: r.Home, WorkspaceRoot: r.workspaceRoot(), ProjectKey: r.ProjectKey, ProjectType: r.ProjectType(), BatchSandbox: r.Deps.BatchSandbox, Cfg: r.Config(), YOLO: safety.RuntimeYOLOEnabled(), Sess: r.SessionStore, Actions: r.Actions, RunRT: r.RunRT,
 		PolicyRunID:                  r.policyRunIDForTool,
 		PermissionSnapshot:           r.PermissionSnapshot,
 		PermissionSnapshotForSession: r.PermissionSnapshotForSession,
@@ -1309,7 +1345,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	} else {
 		r.tools.SetNamedReadObserver("lsp", nil)
 	}
-	if err := llm.Configure(tokenEstimateOptions(r.Home, r.AppCfg)); err != nil {
+	if err := llm.Configure(tokenEstimateOptions(r.Home, r.Config())); err != nil {
 		return err
 	}
 	_ = tool.RegisterDefaultTools(a, r.tools, rt)
@@ -1682,7 +1718,7 @@ func (r *Runner) subagentFactory() Factory {
 		WorkspaceRoot: r.workspaceRoot(),
 		ProjectKey:    r.ProjectKey,
 		MemoryStore:   r.MemoryStore,
-		AppCfg:        r.AppCfg,
+		AppCfg:        r.Config(),
 		Tools:         r.tools,
 		Owner:         r,
 	}
@@ -1692,7 +1728,7 @@ func (r *Runner) markExternalContextUsed(ctx context.Context, sessionID string) 
 	if r == nil {
 		return
 	}
-	reconsolidate, err := memory.MarkPollutedByExternalContext(ctx, r.AppCfg, r.MemoryStore, sessionID)
+	reconsolidate, err := memory.MarkPollutedByExternalContext(ctx, r.Config(), r.MemoryStore, sessionID)
 	if err != nil {
 		slog.DebugContext(ctx, "memory pollution update failed", "session", sessionID, "err", err)
 		return
@@ -1766,7 +1802,7 @@ func (r *Runner) activeAgentNameForModel() string {
 // model. Every caller that draws "which model am I on" must come through
 // here, not re-read the config.
 func PrimaryModel(r *Runner) (string, string) {
-	if r == nil || r.AppCfg == nil {
+	if r == nil || r.Config() == nil {
 		return "", ""
 	}
 	if snap := r.primaryState.snapshot.Load(); snap != nil {
@@ -1783,7 +1819,7 @@ func PrimaryModel(r *Runner) (string, string) {
 // config-order fallback only for a Runner that never loaded — so /status
 // cannot show an endpoint the runtime is not actually using.
 func PrimaryEndpoint(r *Runner) string {
-	if r == nil || r.AppCfg == nil {
+	if r == nil || r.Config() == nil {
 		return ""
 	}
 	if snap := r.primaryState.snapshot.Load(); snap != nil {
@@ -1812,10 +1848,10 @@ func PrimaryEndpoint(r *Runner) string {
 // surface already knows.
 func SubagentOwnModel(r *Runner, agentType string) (modelID, provider, model, effort string, ok bool) {
 	agentType = strings.TrimSpace(agentType)
-	if r == nil || r.Deps == nil || r.AppCfg == nil || agentType == "" {
+	if r == nil || r.Deps == nil || r.Config() == nil || agentType == "" {
 		return "", "", "", "", false
 	}
-	if modelID, provider, model, effort, ok := SubagentCatalogFor(r.AppCfg, r.activeAgentNameForModel()).Model(agentType); ok {
+	if modelID, provider, model, effort, ok := SubagentCatalogFor(r.Config(), r.activeAgentNameForModel()).Model(agentType); ok {
 		return modelID, provider, model, effort, true
 	}
 	if !slices.Contains(agent.PublicTypeNames(), agentType) {
@@ -1824,10 +1860,10 @@ func SubagentOwnModel(r *Runner, agentType string) (modelID, provider, model, ef
 	// "Inherits the primary agent's model" is no longer a list lookup: a type
 	// that names no model of its own runs on whatever the primary agent runs
 	// on, and reporting main's default as the type's own would be a lie.
-	if !appcfg.HasOwnModelChoice(r.AppCfg, agentType) {
+	if !appcfg.HasOwnModelChoice(r.Config(), agentType) {
 		return "", "", "", "", false
 	}
-	entry := appcfg.EffectiveDefaultLLMFor(r.AppCfg, agentType)
+	entry := appcfg.EffectiveDefaultLLMFor(r.Config(), agentType)
 	if entry == nil {
 		return "", "", "", "", false
 	}
@@ -1864,14 +1900,14 @@ func (r *Runner) ContextCompactModelProvider(model string) string {
 	if r == nil {
 		return ""
 	}
-	return ProviderForAgentModel(r.AppCfg, r.activeAgentNameForModel(), model)
+	return ProviderForAgentModel(r.Config(), r.activeAgentNameForModel(), model)
 }
 
 func (r *Runner) ContextCompactLLMForModel(model string) llm.LLM {
 	if r == nil {
 		return nil
 	}
-	_, client, _ := NewLLMForAgentModel(r.AppCfg, r.activeAgentNameForModel(), model)
+	_, client, _ := NewLLMForAgentModel(r.Config(), r.activeAgentNameForModel(), model)
 	return client
 }
 

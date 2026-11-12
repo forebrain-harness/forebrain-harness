@@ -384,7 +384,7 @@ func TestSubagentOwnModelMatchesWhatTheRuntimeRoutes(t *testing.T) {
 			Provider: "openai", Model: "gpt-4.1",
 		}}},
 	}
-	r := &Runner{Deps: &Deps{AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{}).WithConfig(cfg)}
 
 	modelID, provider, model, effort, ok := SubagentOwnModel(r, "explore")
 	if !ok || provider != "openai" || model != "gpt-4.1-mini" || effort != "low" {

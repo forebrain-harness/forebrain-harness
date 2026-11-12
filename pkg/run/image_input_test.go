@@ -78,7 +78,7 @@ func TestImageInputRefusalAllowsUnknownModels(t *testing.T) {
 // selection.
 func TestImageInputRefusalFallsBackToPrimaryModel(t *testing.T) {
 	cfg := newPrimaryModelRoot(primaryModelEntry("deepseek", "deepseek-v4-pro", "k", "https://api.deepseek.com", nil))
-	r := &Runner{Deps: &Deps{AppCfg: cfg, AgentName: "main"}}
+	r := &Runner{Deps: (&Deps{AgentName: "main"}).WithConfig(cfg)}
 	if got := r.ImageInputRefusal(context.Background()); got == "" {
 		t.Fatal("expected the runner's configured text-only model to be judged without a context selection")
 	}
@@ -170,7 +170,7 @@ func TestImageTurnRefusalJudgesTheSessionsOwnModel(t *testing.T) {
 		primaryModelEntry("deepseek", "deepseek-v4-flash", "k", "http://api.deepseek.test/v1", nil),
 		primaryModelEntry("deepseek", "deepseek-v4-pro", "k", "http://api.deepseek.test/v1", nil),
 	)
-	r := &Runner{Deps: &Deps{AppCfg: cfg, AgentName: "main", SessionStore: sess}, FileResolver: PathResolver{}}
+	r := &Runner{Deps: (&Deps{AgentName: "main", SessionStore: sess}).WithConfig(cfg), FileResolver: PathResolver{}}
 	if stored, err := sess.SaveSessionModelSelection(ctx, "s1", state.SessionModelSelection{Provider: "deepseek", Model: "deepseek-v4-pro"}); err != nil || !stored {
 		t.Fatalf("save session model selection: stored=%v err=%v", stored, err)
 	}
@@ -284,7 +284,7 @@ func mainModelRunner(t *testing.T, store *state.SessionStore, client llm.LLM, si
 			{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
 		}},
 	}}}
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: cfg, SessionStore: store}, Events: sink, FileResolver: PathResolver{}}
+	r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main", SessionStore: store}).WithConfig(cfg), Events: sink, FileResolver: PathResolver{}}
 	if err := r.Load(); err != nil {
 		t.Fatalf("load runner: %v", err)
 	}

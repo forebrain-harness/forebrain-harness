@@ -59,7 +59,7 @@ func TestMainAgentPlanUpdateIsBothDrawnAndPersisted(t *testing.T) {
 			},
 		},
 	}
-	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	runner := &runpkg.Runner{Deps: (&runpkg.Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	// Env is what production always has, and tool state is now read through
 	// it rather than through the Runner (R4).
 	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
@@ -131,7 +131,7 @@ func TestPreparedTUIRunKeepsItsAuditHookAfterForegroundCleanup(t *testing.T) {
 			},
 		},
 	}
-	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	runner := &runpkg.Runner{Deps: (&runpkg.Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
 
 	runCtx, _, cleanupStream := s.prepareTUIAgentBase("session-a", context.Background())
@@ -179,7 +179,7 @@ func TestRunAuditStepHookPopulatesSubagentToolContent(t *testing.T) {
 			},
 		},
 	}
-	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	runner := &runpkg.Runner{Deps: (&runpkg.Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	// Env is what production always has, and tool state is now read through
 	// it rather than through the Runner (R4).
 	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
@@ -253,7 +253,7 @@ func TestPlanReviewRunContextPublishesTheReviewersToolSteps(t *testing.T) {
 			},
 		},
 	}
-	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	runner := &runpkg.Runner{Deps: (&runpkg.Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
 	toolCh := make(chan Message, 4)
 	s.PrependUINotify(func(msg any) {
@@ -320,7 +320,7 @@ func TestRunAuditStepHookEmitsPrimaryToolMessagesDirectly(t *testing.T) {
 			},
 		},
 	}
-	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	runner := &runpkg.Runner{Deps: (&runpkg.Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	// Env is what production always has, and tool state is now read through
 	// it rather than through the Runner (R4).
 	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
@@ -396,7 +396,7 @@ func TestRunAuditStepHookRecordsARefusalWithoutDrawingIt(t *testing.T) {
 			},
 		},
 	}
-	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	runner := &runpkg.Runner{Deps: (&runpkg.Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
 	var mu sync.Mutex
 	var uiMessages []Message
@@ -4244,7 +4244,7 @@ func TestSurfaceComposerTokenStatsCountsTheConfiguredAutoCompactPercent(t *testi
 	// Half the model's window, instead of the default 90% of it.
 	cfg.Compact.AutoCompactPercent = 50
 	home := t.TempDir()
-	s := sessionEnv{Home: home, Config: cfg, Runner: &runpkg.Runner{Deps: &runpkg.Deps{Home: home, AppCfg: &cfg}}}.session()
+	s := sessionEnv{Home: home, Config: cfg, Runner: &runpkg.Runner{Deps: (&runpkg.Deps{Home: home}).WithConfig(&cfg)}}.session()
 	full := s.SurfaceComposerTokenStats("s-budget", 0)
 	if !full.Active || full.PercentLeft != 100 {
 		t.Fatalf("empty context = %+v, want the full budget", full)
@@ -7785,7 +7785,7 @@ func TestToolOutputDeltaIsDrawnNotStored(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "test-model", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
 	}}}
-	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	runner := &runpkg.Runner{Deps: (&runpkg.Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
 	drawn := make(chan Message, 8)
 	s.PrependUINotify(func(msg any) {

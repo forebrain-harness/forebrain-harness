@@ -151,7 +151,7 @@ func (env *Environment) RunnerForSession(ctx context.Context, sessionID string) 
 	if env == nil {
 		return nil
 	}
-	if env.SQL == nil || env.Deps.SessionStore == nil {
+	if env.SQL == nil || env.deps().SessionStore == nil {
 		return env.Runner
 	}
 	env.poolOnce.Do(func() {
@@ -172,7 +172,7 @@ func (env *Environment) BoundRunnerForSession(ctx context.Context, sessionID str
 	if env == nil {
 		return nil, false
 	}
-	if env.SQL == nil || env.Deps.SessionStore == nil {
+	if env.SQL == nil || env.deps().SessionStore == nil {
 		return env.Runner, env.Runner != nil
 	}
 	env.poolOnce.Do(func() {
@@ -246,7 +246,7 @@ func (env *Environment) RunnerForTurn(ctx context.Context, sessionID string) (*r
 	if sessionID == "" {
 		return nil, ErrSessionHasNoProject
 	}
-	if env.SQL == nil || env.Deps.SessionStore == nil {
+	if env.SQL == nil || env.deps().SessionStore == nil {
 		// No project registry to resolve against: there is no project concept
 		// in this process, so the conversation runs on its own runner, exactly
 		// as RunnerForSession answers. A served gateway always has the registry.
@@ -305,7 +305,7 @@ func NewRunnerPool(env *Environment, max int) *RunnerPool {
 	}
 	p := &RunnerPool{
 		env:      env,
-		projects: state.NewProjectStore(env.SQL, env.Deps.AgentName),
+		projects: state.NewProjectStore(env.SQL, env.deps().AgentName),
 		max:      max,
 		entries:  make(map[string]*poolEntry),
 		sessions: make(map[string]string),
@@ -442,7 +442,7 @@ func (p *RunnerPool) sweepIdleEntries(now time.Time) {
 // the entry is removed, so a resolution that arrived mid-query un-candidates
 // the entry instead of being evicted out from under.
 func (p *RunnerPool) evictStaleEntries(ctx context.Context, now time.Time) {
-	if p == nil || p.env.Deps.SessionStore == nil {
+	if p == nil || p.env.deps().SessionStore == nil {
 		return
 	}
 	p.mu.Lock()
@@ -474,7 +474,7 @@ func (p *RunnerPool) evictStaleEntries(ctx context.Context, now time.Time) {
 	for _, cand := range candidates {
 		ids = append(ids, cand.sessions...)
 	}
-	lastActive, err := p.env.Deps.SessionStore.LastActiveByIDs(ctx, ids)
+	lastActive, err := p.env.deps().SessionStore.LastActiveByIDs(ctx, ids)
 	if err != nil {
 		slog.Warn("runner pool eviction: read session activity", "err", err)
 		return
@@ -551,7 +551,7 @@ func entryEvictableLocked(entry *poolEntry, sessions []string, lastActive map[st
 // same threshold as eviction, deliberately: it is one rule about when a
 // conversation's leftovers stop mattering, applied everywhere it does.
 func (p *RunnerPool) sweepToolState(ctx context.Context, now time.Time) {
-	if p == nil || p.env.Deps.SessionStore == nil {
+	if p == nil || p.env.deps().SessionStore == nil {
 		return
 	}
 	p.mu.Lock()
@@ -572,7 +572,7 @@ func (p *RunnerPool) sweepToolState(ctx context.Context, now time.Time) {
 		}
 		ids := st.SessionIDs()
 		if len(ids) > 0 {
-			lastActive, err := p.env.Deps.SessionStore.LastActiveByIDs(ctx, ids)
+			lastActive, err := p.env.deps().SessionStore.LastActiveByIDs(ctx, ids)
 			if err != nil {
 				slog.Warn("runner pool state sweep: read session activity", "err", err)
 				continue
@@ -652,7 +652,7 @@ func (p *RunnerPool) BoundRunnerForSession(ctx context.Context, sessionID string
 		return base, base != nil
 	}
 	project = p.withSessionType(ctx, sessionID, project)
-	key := poolKey(p.env.Deps.AgentName, project)
+	key := poolKey(p.env.deps().AgentName, project)
 	p.mu.Lock()
 	entry := p.entries[key]
 	p.mu.Unlock()
@@ -759,7 +759,7 @@ func (p *RunnerPool) sessionSource(ctx context.Context, sessionID string) (strin
 // context (no project MCP/LSP/skills) rooted at the agent's own skill
 // directory, so the model can read and edit the skills it is working on.
 func (p *RunnerPool) workshopEntry(ctx context.Context, sessionID string) (*poolEntry, error) {
-	key := workshopPoolKey(p.env.Deps.AgentName)
+	key := workshopPoolKey(p.env.deps().AgentName)
 	p.mu.Lock()
 	if entry, ok := p.entries[key]; ok {
 		p.sessions[strings.TrimSpace(sessionID)] = key
@@ -767,7 +767,7 @@ func (p *RunnerPool) workshopEntry(ctx context.Context, sessionID string) (*pool
 		p.mu.Unlock()
 		return entry, nil
 	}
-	agentWorkspace := p.env.Deps.WorkspaceRoot
+	agentWorkspace := p.env.deps().WorkspaceRoot
 	if strings.TrimSpace(agentWorkspace) == "" {
 		agentWorkspace = workspaceRootFor(p.env)
 	}
@@ -804,7 +804,7 @@ func (p *RunnerPool) entryForSession(ctx context.Context, sessionID string, proj
 			return entry, nil
 		}
 	}
-	key := poolKey(p.env.Deps.AgentName, project)
+	key := poolKey(p.env.deps().AgentName, project)
 	entry, ok := p.entries[key]
 	if !ok {
 		var err error
@@ -982,7 +982,7 @@ const runnerPoolCloseDeadline = 20 * time.Second
 func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project, workshop bool) (*poolEntry, error) {
 	env := p.env
 	baseDeps := env.Deps
-	if baseDeps.AppCfg == nil {
+	if baseDeps.Config() == nil {
 		return nil, fmt.Errorf("runner pool: environment has no config")
 	}
 	// launch is the frozen project context this entry's project-gated features
@@ -1011,7 +1011,7 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	if strings.TrimSpace(agentWorkspace) == "" {
 		agentWorkspace = workspaceRootFor(env)
 	}
-	mcpRes := ResolveSessionMCP(env.Root, agentWorkspace, baseDeps.AppCfg.Agents, baseDeps.AgentName, launch)
+	mcpRes := ResolveSessionMCP(env.Root, agentWorkspace, baseDeps.Config().Agents, baseDeps.AgentName, launch)
 	frozenProject := project
 	frozenServers := mcpRes.Servers
 	frozenAgentWorkspace := agentWorkspace
@@ -1038,7 +1038,7 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	lspOpts.AutoAllowProject = func() bool {
 		return mcp.ProjectAutoAllowed(ws, key)
 	}
-	lspOpts.ToolRegistered = lsp.ToolEnabled(baseDeps.AppCfg, lspOpts)
+	lspOpts.ToolRegistered = lsp.ToolEnabled(baseDeps.Config(), lspOpts)
 	if env.LSP != nil {
 		entry.lsp = env.LSP.NewManager(lspOpts)
 	}
@@ -1060,7 +1060,7 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		// asks for the three scope layers again, with this entry's own launch
 		// context and workspace.
 		MCPResolve: func(agentName, agentWorkspace string, launch safety.ProjectContext) (run.MCPServersResolution, error) {
-			agents := env.Deps.AppCfg.Agents
+			agents := env.deps().Config().Agents
 			res := ResolveSessionMCP(env.Root, agentWorkspace, agents, agentName, launch)
 			return run.MCPServersResolution{Servers: res.Servers, Disabled: res.Disabled}, nil
 		},
@@ -1070,7 +1070,6 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		// context: a project runner's sandbox and approval policy follow the
 		// project's trust decision, never the base runner's (which follows the
 		// gateway's launch directory and, there, nothing at all).
-		AppCfg:       effectiveFor(env.RawConfig, cfgLaunch),
 		SessionStore: baseDeps.SessionStore,
 		RunRT:        baseDeps.RunRT,
 		// The frozen lsp-tool decision; the manager itself is attached below
@@ -1078,6 +1077,11 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		// interface fields as a non-nil interface.
 		CodeIntelTool: lspOpts.ToolRegistered,
 	}
+	// Derived from the raw configuration and this entry's own launch
+	// context: a project runner's sandbox and approval policy follow the
+	// project's trust decision, never the base runner's (which follows the
+	// gateway's launch directory and, there, nothing at all).
+	deps.SetConfig(effectiveFor(env.RawConfigValue(), cfgLaunch))
 	if entry.lsp != nil {
 		deps.CodeIntel = entry.lsp
 		deps.CodeIntelControl = entry.lsp

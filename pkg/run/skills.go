@@ -84,8 +84,8 @@ func wrapSkillCatalogLLM(inner llm.LLM, roots []string, stateRoot string, sessio
 // than a snapshot taken at wrap time.
 func (r *Runner) skillOfferGuidance() string {
 	enabled := true
-	if r != nil && r.AppCfg != nil {
-		enabled = r.AppCfg.EffectiveFeatures().SkillOffer
+	if r != nil && r.Config() != nil {
+		enabled = r.Config().EffectiveFeatures().SkillOffer
 	}
 	return skill.RenderSkillOfferGuidance(skill.SkillOfferGuidanceOptions{Enabled: enabled})
 }

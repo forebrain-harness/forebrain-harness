@@ -59,7 +59,7 @@ type ChatSession struct {
 	// Env owns every path, config and store this session runs on. The session
 	// used to hold a second copy of each (Home/Config/Sandbox/SQL/MemoryStore/
 	// SessStore/ActionSvc/Runner/Pipe/RunSvc/CtxHook); it now reads through the
-	// accessors below instead. A config reload swaps run.Deps.AppCfg for a new
+	// accessors below instead. A config reload swaps run.Deps.Config() for a new
 	// pointer and re-points every holder, so a duplicate field here would keep
 	// serving the pre-reload value -- which is exactly what P2-8 removes.
 	Env  *process.Environment
@@ -815,7 +815,7 @@ func (s *ChatSession) deps() *run.Deps {
 	if s == nil || s.Env == nil {
 		return nil
 	}
-	return &s.Env.Deps
+	return s.Env.Deps
 }
 
 func (s *ChatSession) home() string {
@@ -835,7 +835,7 @@ func (s *ChatSession) cfg() *appcfg.Root {
 	if d == nil {
 		return nil
 	}
-	return d.AppCfg
+	return d.Config()
 }
 
 func (s *ChatSession) sandbox() *safety.Manager {
@@ -2620,7 +2620,7 @@ func (s *ChatSession) SyncConfig(ctx context.Context) error {
 }
 
 // adoptConfig re-points the config pointers the session itself owns. An
-// application swaps run.Deps.AppCfg for a freshly composed value rather than
+// application swaps run.Deps.Config() for a freshly composed value rather than
 // overwriting it in place, so every holder has to be told: the environment
 // re-points its own hooks and the runner, and these are the TUI's.
 func (s *ChatSession) adoptConfig(next *appcfg.Root) {
@@ -2690,7 +2690,7 @@ func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string,
 			}})
 		}
 	}
-	for _, update := range preset.SessionUpdatesForLaunch(sessionID, s.runner().AppCfg, s.runner().LaunchProject) {
+	for _, update := range preset.SessionUpdatesForLaunch(sessionID, s.runner().Config(), s.runner().LaunchProject) {
 		s.runner().ApplyPermissionUpdate(update)
 	}
 	cfg := safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession(sessionID))

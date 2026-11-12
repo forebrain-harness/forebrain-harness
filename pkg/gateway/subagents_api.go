@@ -566,7 +566,7 @@ func (w *subagentWrite) switchAfter() bool {
 // Rebuilding the agent's runners is what "the next session uses it" means for
 // a process that already has them.
 func (s *Server) writeAgentSubagents(w http.ResponseWriter, r *http.Request, mutate func(*subagentWrite) (any, error)) {
-	// Resolving the route's agent reads liveCfg (Env.Deps.AppCfg), which the
+	// Resolving the route's agent reads liveCfg (Env.Deps.Config()), which the
 	// next turn's sync replaces — resolving it before the write is the same
 	// snapshot the write itself works from.
 	id, err := s.subagentAgentID(pathParam(r, "id"))

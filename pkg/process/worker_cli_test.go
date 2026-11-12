@@ -126,10 +126,10 @@ func bindSessionToProject(t *testing.T, env *Environment, sessionID string) {
 	t.Helper()
 	ctx := context.Background()
 	root := t.TempDir()
-	if err := env.Deps.SessionStore.Ensure(ctx, sessionID, sessionID); err != nil {
+	if err := env.deps().SessionStore.Ensure(ctx, sessionID, sessionID); err != nil {
 		t.Fatal(err)
 	}
-	projects := state.NewProjectStore(env.SQL, env.Deps.AgentName)
+	projects := state.NewProjectStore(env.SQL, env.deps().AgentName)
 	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "proj-" + sessionID, Root: root, ProjectKey: state.ProjectKeyForRoot(root)})
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +181,7 @@ func TestRunExecutorRunsWhenOnlyAnOptionalServerFailed(t *testing.T) {
 	env, counter := envWithMCPServers(t, mcpServerEntry("optional-docs", false))
 
 	executor := env.NewRunExecutor("webchat", RunExecutorOptions{FailOnRequiredMCP: true})
-	if err := env.Deps.SessionStore.Ensure(context.Background(), "s-optional", "s-optional"); err != nil {
+	if err := env.deps().SessionStore.Ensure(context.Background(), "s-optional", "s-optional"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := executor.Run(context.Background(), turn.TurnRequest{SessionID: "s-optional", UserText: "hello"}, func(string) {}); err != nil {
@@ -346,20 +346,20 @@ func envWithScriptedLLMOnModel(t *testing.T, model string, script []scriptedRepl
 func birthWorkerSession(t *testing.T, env *Environment, conversationID, workerSessionID string) string {
 	t.Helper()
 	ctx := context.Background()
-	if err := env.Deps.SessionStore.Ensure(ctx, conversationID, conversationID); err != nil {
+	if err := env.deps().SessionStore.Ensure(ctx, conversationID, conversationID); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.Deps.SessionStore.EnsureAt(ctx, workerSessionID, workerSessionID, state.SessionBirth{
+	if err := env.deps().SessionStore.EnsureAt(ctx, workerSessionID, workerSessionID, state.SessionBirth{
 		Source:          state.SessionSourceSubagent,
 		ParentSessionID: conversationID,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	parent, err := env.Deps.RunRT.CreateRun(ctx, conversationID, "dispatching turn")
+	parent, err := env.deps().RunRT.CreateRun(ctx, conversationID, "dispatching turn")
 	if err != nil {
 		t.Fatal(err)
 	}
-	child, err := env.Deps.RunRT.CreateSubagentRun(ctx, parent.ID, workerSessionID, "subagent task")
+	child, err := env.deps().RunRT.CreateSubagentRun(ctx, parent.ID, workerSessionID, "subagent task")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func birthWorkerSession(t *testing.T, env *Environment, conversationID, workerSe
 
 func workerRows(t *testing.T, env *Environment, workerSessionID string) []llm.Message {
 	t.Helper()
-	rows, err := env.Deps.SessionStore.ListTranscriptMessages(context.Background(), workerSessionID, 200)
+	rows, err := env.deps().SessionStore.ListTranscriptMessages(context.Background(), workerSessionID, 200)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,10 +558,10 @@ func TestTypedSubagentFirstRequestIsUnchangedByPersistence(t *testing.T) {
 		conversationID = "conv-golden"
 		task           = "report the tally"
 	)
-	if err := env.Deps.SessionStore.Ensure(context.Background(), conversationID, conversationID); err != nil {
+	if err := env.deps().SessionStore.Ensure(context.Background(), conversationID, conversationID); err != nil {
 		t.Fatal(err)
 	}
-	stateRoot := config.ActiveStateRoot(env.Root, env.Deps.AppCfg)
+	stateRoot := config.ActiveStateRoot(env.Root, env.deps().Config())
 	// Before: the worker session stays empty; nothing is written.
 	beforeWorker := "main:conv-golden:worker:before-00000000-0000-0000-0000-000000000000"
 	beforeBase := AgentContext(tool.WithSubagentType(context.Background(), "general-purpose"), stateRoot, beforeWorker)
@@ -621,7 +621,7 @@ func TestNestedTypedDispatchPersistsCleanly(t *testing.T) {
 	}
 	// Both conversations exist as their own sessions, born subagents of the
 	// conversation chain, and the nested one holds its own exchange.
-	born, err := env.Deps.SessionStore.ListSessionsOfSource(context.Background(), state.SessionSourceSubagent, 10)
+	born, err := env.deps().SessionStore.ListSessionsOfSource(context.Background(), state.SessionSourceSubagent, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +704,7 @@ func TestTypedSubagentContinuationCompactsFirstWhenItNoLongerFits(t *testing.T) 
 	for llm.EstimateText(big) < 120000 {
 		big += big[:len(big)/2]
 	}
-	if err := env.Deps.SessionStore.AppendMessageSequenceForRun(context.Background(), workerID, childRunID, []llm.Message{
+	if err := env.deps().SessionStore.AppendMessageSequenceForRun(context.Background(), workerID, childRunID, []llm.Message{
 		llm.UserMessage(llm.Text(big)),
 		llm.AssistantMessage([]llm.ContentPart{llm.Text("the prior answer")}),
 	}, "gpt-compact-003", ""); err != nil {
@@ -733,7 +733,7 @@ func TestTypedSubagentContinuationCompactsFirstWhenItNoLongerFits(t *testing.T) 
 
 	// The boundary predates the new user turn: the session's rows are the
 	// compacted history, then the new turn, then the answer.
-	boundaryID, _, err := env.Deps.SessionStore.LatestCompactBoundary(context.Background(), workerID)
+	boundaryID, _, err := env.deps().SessionStore.LatestCompactBoundary(context.Background(), workerID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -805,7 +805,7 @@ func TestTypedSubagentContinuationCompactsFirstWhenItNoLongerFits(t *testing.T) 
 func TestSubagentTurnModelPrefersTheRecord(t *testing.T) {
 	env, _ := envWithScriptedLLM(t, nil)
 	ctx := context.Background()
-	if err := env.Deps.SessionStore.Ensure(ctx, "s-turn", "conversation"); err != nil {
+	if err := env.deps().SessionStore.Ensure(ctx, "s-turn", "conversation"); err != nil {
 		t.Fatal(err)
 	}
 	pinned := run.WithSubagentModelOverride(ctx, run.SubagentModelOverride{

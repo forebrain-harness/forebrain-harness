@@ -446,14 +446,14 @@ func (v *peerOutboundView) hopChain(ctx context.Context, env *Environment, sessi
 // so the chain is where the sender put it; a row that does not parse is not one
 // this process can inherit from, and the chain starts fresh.
 func lastPeerHopChain(ctx context.Context, env *Environment, sessionID string) []string {
-	if env == nil || env.Deps.SessionStore == nil {
+	if env == nil || env.deps().SessionStore == nil {
 		return nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil
 	}
-	rows, err := env.Deps.SessionStore.ListRecentMessages(ctx, sessionID, peerRecentRowScan)
+	rows, err := env.deps().SessionStore.ListRecentMessages(ctx, sessionID, peerRecentRowScan)
 	if err != nil {
 		slog.Debug("peer hop chain could not read the conversation", "session_id", sessionID, "err", err)
 		return nil

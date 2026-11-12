@@ -140,7 +140,7 @@ func (c *CronService) AgentID() string {
 // ending its run recorded. The store is the only source — a crash, another
 // replica's tick, and this process's own bus hook all read the same facts.
 func (c *CronService) fireRunState(ctx context.Context, sessionID string) (turn.FireRun, error) {
-	runs := c.env.Deps.RunRT
+	runs := c.env.deps().RunRT
 	alive, err := runs.SessionHasLiveRun(ctx, sessionID)
 	if err != nil {
 		return turn.FireRun{}, err
@@ -185,10 +185,10 @@ func (c *CronService) fireRunState(ctx context.Context, sessionID string) (turn.
 // lastAssistantText reads the answer a run's transcript ends with. A store-less
 // deployment (or a session store that is not wired) simply has none.
 func (c *CronService) lastAssistantText(ctx context.Context, runID string) (string, error) {
-	if c == nil || c.env == nil || c.env.Deps.SessionStore == nil {
+	if c == nil || c.env == nil || c.env.deps().SessionStore == nil {
 		return "", nil
 	}
-	return c.env.Deps.SessionStore.LastAssistantTextForRun(ctx, runID)
+	return c.env.deps().SessionStore.LastAssistantTextForRun(ctx, runID)
 }
 
 // SettleFire asks the bound scheduler to look at the fire that ran in
@@ -280,7 +280,7 @@ func (c *CronService) pruneExpiredFires(ctx context.Context, now time.Time) erro
 	if c == nil || c.store() == nil {
 		return nil
 	}
-	cfg := c.env.Deps.AppCfg
+	cfg := c.env.deps().Config()
 	cutoff := now.Add(-time.Duration(cfg.CronRetentionDays()) * 24 * time.Hour)
 	fires, err := c.store().ExpiredFires(ctx, cutoff)
 	if err != nil {

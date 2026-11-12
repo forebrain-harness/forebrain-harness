@@ -1165,15 +1165,15 @@ func newAutoContinueGateway(t *testing.T) *autoContinueGateway {
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}},
 	}}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())
 	// This fixture predates R1 (its session carries no project row). It is a
 	// process with a project of its own rather than the project-less gateway,
 	// so the conversation runs on the base runner these tests drive. RawConfig
 	// is the underived config a project runner would derive its effective form
 	// from.
-	env := &process.Environment{Root: home, SQL: db, Runner: runner, RawConfig: *cfg,
-		Deps: run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions, RunRT: runStore}}
+	env := (&process.Environment{Root: home, SQL: db, Runner: runner,
+		Deps: &run.Deps{Home: home, AgentName: "main", SessionStore: sessions, RunRT: runStore}}).WithRawConfig(*cfg).WithDepsConfig(cfg)
 	s := &Server{
 		Home: home, Sessions: sessions, RunRT: runStore, Runner: runner,
 		Core: turn.New(turn.WithRunEventStore(runStore), turn.WithSessionStore(sessions), turn.WithRunExecutor(executor)),
@@ -2331,16 +2331,16 @@ func TestBindSessionReconcilesTheSessionsRunner(t *testing.T) {
 		}}},
 	}}}
 	var resolves atomic.Int64
-	runner := &run.Runner{Deps: &run.Deps{
-		Home:         home,
-		AgentName:    "main",
-		AppCfg:       cfg,
+	runner := &run.Runner{Deps: (&run.Deps{
+		Home:      home,
+		AgentName: "main",
+
 		SessionStore: sessions,
 		MCPResolve: func(string, string, safety.ProjectContext) (run.MCPServersResolution, error) {
 			resolves.Add(1)
 			return run.MCPServersResolution{Servers: []appcfg.MCPServerConfig{stub}}, nil
 		},
-	}}
+	}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())
 	t.Cleanup(func() { _ = runner.Close() })
 	// The tool table the runner published before any bind: the MCP tool the

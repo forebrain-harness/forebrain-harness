@@ -335,8 +335,8 @@ func TestSyncConfigFromDBAppliesChangedSection(t *testing.T) {
 	if reloaded != 1 {
 		t.Fatalf("config_reloaded events = %d, want 1", reloaded)
 	}
-	if env.RawConfig.ApprovalPreset != appcfg.ApprovalPresetWorkspaceWrite {
-		t.Fatalf("raw config approval_preset = %q, want the database's workspace_write", env.RawConfig.ApprovalPreset)
+	if env.RawConfigValue().ApprovalPreset != appcfg.ApprovalPresetWorkspaceWrite {
+		t.Fatalf("raw config approval_preset = %q, want the database's workspace_write", env.RawConfigValue().ApprovalPreset)
 	}
 
 	// The fingerprint moved with the application: the next sync stays quiet.
@@ -648,13 +648,14 @@ func TestSyncConfigFromDBComposesFromDatabase(t *testing.T) {
 	if err := env.SyncConfigFromDB(ctx); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if env.RawConfig.ApprovalPreset != appcfg.ApprovalPresetFullAccess {
-		t.Fatalf("applied approval_preset = %q, want the database's full_access", env.RawConfig.ApprovalPreset)
+	if env.RawConfigValue().ApprovalPreset != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("applied approval_preset = %q, want the database's full_access", env.RawConfigValue().ApprovalPreset)
 	}
 	// The runtime sections the import moved are still there after the sync:
 	// the file holds none of them. The model itself is a row (plan 262), and
 	// the definition names it.
-	if got := appcfg.EffectiveDefaultLLMFor(&env.RawConfig, "main"); got == nil || got.Model != "gpt-import" {
+	raw := env.RawConfigValue()
+	if got := appcfg.EffectiveDefaultLLMFor(&raw, "main"); got == nil || got.Model != "gpt-import" {
 		t.Fatalf("reloaded provider model = %+v, want the imported gpt-import", got)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -73,12 +74,19 @@ type Environment struct {
 	Root          string
 	LaunchDir     string
 	LaunchProject safety.ProjectContext
-	// RawConfig is the configuration as loaded from disk, before any
+	// rawConfig is the configuration as loaded from disk, before any
 	// project-scoped derivation (EffectiveConfig) or YOLO override. The base
-	// runner stores the derived form in Deps.AppCfg; this is the one every
+	// runner stores the derived form in Deps.Config(); this is the one every
 	// project runner is derived from — each project's sandbox and approval
 	// policy come from its own trust decision, not the base runner's.
-	RawConfig appcfg.Root
+	// A whole Root copy is published by config applications while pool builds
+	// and peer reads copy it on other goroutines, so the value rides an
+	// atomic pointer: a reader copies a coherent snapshot, with no lock (the
+	// pool's build path runs under the pool lock, which reloadMu-taking
+	// accessors would invert against applyComposedConfigLocked's
+	// reloadMu → pool-lock ordering). Accessed through SetRawConfig and
+	// RawConfigValue; nothing writes a stored Root afterwards.
+	rawConfig atomic.Pointer[appcfg.Root]
 	// noLaunchProject records that this process was started with no project of
 	// its own (OpenOptions.NoLaunchProject — the gateway). Such a process
 	// cannot serve a conversation that belongs to no project: it has no runner
@@ -93,12 +101,13 @@ type Environment struct {
 	// lease it asks for, so the machinery is inert there.
 	Leases *Leases
 	// Deps is the single owner of the path/config/store dependencies this
-	// process shares with its primary Runner. Runner.Deps points at this very
-	// field, so there is exactly one place that state lives (R6). It is a value
-	// rather than a pointer so an Environment built without it is still safe to
-	// call methods on: a zero Deps reads as empty rather than nil-dereferencing.
-	// Subagents get their own Deps with StateDir overridden.
-	Deps          run.Deps
+	// process shares with its primary Runner: Runner.Deps points at this very
+	// field, so there is exactly one place that state lives (R6). A pointer —
+	// the shared owner — because Deps carries the live configuration behind an
+	// atomic pointer, which must never be copied by value (go vet copylocks);
+	// Open installs it before anything reads it, and a hand-built Environment
+	// installs its own. Subagents get their own Deps with StateDir overridden.
+	Deps          *run.Deps
 	Sandbox       *safety.Manager
 	Runner        *run.Runner
 	Hooks         *hook.AgentPipeline
@@ -160,6 +169,66 @@ type Environment struct {
 	// runner lives it may still settle runs under this owner, and the DELETE
 	// needs the database.
 	ownerLeaseStop func()
+}
+
+// SetRawConfig replaces the raw on-disk configuration. The stored Root is
+// immutable from here on: compose a fresh value instead of writing through.
+func (env *Environment) SetRawConfig(raw appcfg.Root) {
+	if env == nil {
+		return
+	}
+	stored := raw
+	env.rawConfig.Store(&stored)
+}
+
+// RawConfigValue returns a copy of the raw on-disk configuration — a
+// coherent snapshot, lock-free.
+
+// deps returns the environment's Deps, installing an empty one the first
+// time a hand-built Environment (a test fixture) touches it — the value
+// field this replaced read as empty rather than nil-dereferencing, and
+// process code keeps that tolerance. Open installs the real Deps long before
+// any concurrent use, so the lazy install only ever runs single-threaded.
+func (env *Environment) deps() *run.Deps {
+	if env == nil {
+		return &run.Deps{}
+	}
+	if env.Deps == nil {
+		env.Deps = &run.Deps{}
+	}
+	return env.Deps
+}
+
+// WithDepsConfig installs cfg as the environment's live configuration — the
+// literal-construction spelling for tests and composition roots:
+// (&process.Environment{…}).WithDepsConfig(cfg).
+func (env *Environment) WithDepsConfig(cfg *appcfg.Root) *Environment {
+	if env == nil {
+		return nil
+	}
+	if env.Deps == nil {
+		env.Deps = &run.Deps{}
+	}
+	env.deps().SetConfig(cfg)
+	return env
+}
+
+// WithRawConfig is SetRawConfig in construction form.
+func (env *Environment) WithRawConfig(raw appcfg.Root) *Environment {
+	if env == nil {
+		return nil
+	}
+	env.SetRawConfig(raw)
+	return env
+}
+func (env *Environment) RawConfigValue() appcfg.Root {
+	if env == nil {
+		return appcfg.Root{}
+	}
+	if stored := env.rawConfig.Load(); stored != nil {
+		return *stored
+	}
+	return appcfg.Root{}
 }
 
 func (env *Environment) Close() {
@@ -497,7 +566,8 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	if source == "" {
 		source = memory.SessionSourceWebchat
 	}
-	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, RawConfig: loaded, noLaunchProject: opts.NoLaunchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel, ChannelMigrationNotes: channelMigrationBannerNotes(channelMigrationNotes), configFingerprint: configFingerprint, runtimeConfigFromDB: opts.Config == nil}
+	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, noLaunchProject: opts.NoLaunchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel, ChannelMigrationNotes: channelMigrationBannerNotes(channelMigrationNotes), configFingerprint: configFingerprint, runtimeConfigFromDB: opts.Config == nil}
+	env.SetRawConfig(loaded)
 	// The environment's own runner is the primary agent's: it serves no
 	// conversation — every conversation runs on its project's runner (see
 	// RunnerPool) — so it never resolves or hosts an MCP list. Servers
@@ -543,7 +613,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	}
 	lspOpts.ToolRegistered = lsp.ToolEnabled(cfgRoot, lspOpts)
 	env.lspManager = env.LSP.NewManager(lspOpts)
-	env.Deps = run.Deps{
+	env.Deps = &run.Deps{
 		Home:        root,
 		Actions:     actionSvc,
 		MCPServers:  frozenMCP,
@@ -565,7 +635,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		// the three scope layers again, which is the only place that knows
 		// the consent store and the launch project's trust decision.
 		MCPResolve: func(agentName, agentWorkspace string, launch safety.ProjectContext) (run.MCPServersResolution, error) {
-			agents := env.Deps.AppCfg.Agents
+			agents := env.deps().Config().Agents
 			res := ResolveSessionMCP(root, agentWorkspace, agents, agentName, launch)
 			return run.MCPServersResolution{Servers: res.Servers, Disabled: res.Disabled}, nil
 		},
@@ -576,21 +646,21 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		CodeIntelControl: env.lspManager,
 		CodeIntelTool:    lspOpts.ToolRegistered,
 		MemoryStore:      memStore,
-		AppCfg:           cfgRoot,
 		SessionStore:     sessStore,
 		RunRT:            runSvc,
 	}
 	// No re-resolution either: the base runner never hosts MCP, so a
 	// conversation that begins re-resolves on its project's runner, never
 	// here.
-	env.Deps.MCPResolve = nil
-	env.Deps.MCPDiagnostics = nil
+	env.deps().SetConfig(cfgRoot)
+	env.deps().MCPResolve = nil
+	env.deps().MCPDiagnostics = nil
 	// The same-tree guards (plan 198) read their port from the tool runtime the
 	// load below builds, so it has to be there before that load: the port is
 	// built once and outlives the registration, exactly as it does for the peer
 	// tools, which read it again on every call.
-	env.Deps.Peers = env.peerDirectory()
-	runner := &run.Runner{Deps: &env.Deps, Control: env.Control, SkillCommands: run.SkillCommandHooks{
+	env.deps().Peers = env.peerDirectory()
+	runner := &run.Runner{Deps: env.Deps, Control: env.Control, SkillCommands: run.SkillCommandHooks{
 		Refresh:   turn.RefreshSkills,
 		IsBuiltin: turn.IsBuiltinName,
 	}}

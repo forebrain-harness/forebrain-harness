@@ -180,8 +180,8 @@ func TestPeerWorkTreeAnswersWhenTheServiceNeverStarted(t *testing.T) {
 	env := peerTestEnvFor(t, "tui", func() string { return "cli-guard-down" })
 	// StartPeers is exactly what did not happen in this case: the port is
 	// installed by hand and nothing is registered.
-	env.Deps.Peers = env.peerDirectory()
-	port, ok := env.Deps.Peers.(*peerOutbound)
+	env.deps().Peers = env.peerDirectory()
+	port, ok := env.deps().Peers.(*peerOutbound)
 	if !ok || port == nil {
 		t.Fatal("this process has no port onto the other processes")
 	}
@@ -203,7 +203,7 @@ func TestPeerWorkTreeAnswersWhenTheServiceNeverStarted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	peers := env.Deps.Peers.WorkTreePeers(context.Background(), env.LaunchDir)
+	peers := env.deps().Peers.WorkTreePeers(context.Background(), env.LaunchDir)
 	if len(peers) != 1 || peers[0].Name != "editing" {
 		t.Fatalf("peers = %#v, want the peer editing this tree", peers)
 	}
@@ -245,7 +245,7 @@ func TestPeerWorkTreeAnswersWhileTheFirstRegistrationIsRetried(t *testing.T) {
 	if rec := ownRecord(t, env.dirs.fbDir); rec != nil {
 		t.Fatalf("record = %+v, want the first attempt to have failed", rec)
 	}
-	peers := env.Deps.Peers.WorkTreePeers(context.Background(), env.LaunchDir)
+	peers := env.deps().Peers.WorkTreePeers(context.Background(), env.LaunchDir)
 	if len(peers) != 1 || peers[0].Name != "editing" {
 		t.Fatalf("peers = %#v, want the neighbour from the rendezvous directory", peers)
 	}

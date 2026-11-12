@@ -193,7 +193,7 @@ func twoPrimaryConfig() *appcfg.Root {
 func TestSwitchRebindsRunnerToTargetWorkspace(t *testing.T) {
 	home := t.TempDir()
 	cfg := twoPrimaryConfig()
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home}).WithConfig(cfg)}
 
 	active, err := SwitchAgent(AgentDeps{Home: home, Cfg: cfg, Runner: runner}, "review")
 	if err != nil {
@@ -218,7 +218,7 @@ func TestSwitchRebindsRunnerToTargetWorkspace(t *testing.T) {
 func TestApplyDropsRuntimeGrantsFromThePreviousAgent(t *testing.T) {
 	home := t.TempDir()
 	cfg := twoPrimaryConfig()
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home}).WithConfig(cfg)}
 
 	runner.ApplyPermissionUpdate(safety.PermissionUpdate{
 		Type:        safety.UpdateAddRules,
@@ -300,7 +300,7 @@ func TestSwitchPersistsActiveAgent(t *testing.T) {
 func TestSwitchDeniesPeerWorkspacesInTheSandbox(t *testing.T) {
 	home := t.TempDir()
 	cfg := twoPrimaryConfig()
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home}).WithConfig(cfg)}
 	sandbox := safety.NewManager()
 
 	if _, err := SwitchAgent(AgentDeps{Home: home, Cfg: cfg, Runner: runner, Sandbox: sandbox}, "review"); err != nil {
@@ -359,9 +359,9 @@ func TestAgentSwitchReResolvesTheMCPList(t *testing.T) {
 	cfg := twoPrimaryConfig()
 	var resolves int
 	var resolvedAgent string
-	runner := &run.Runner{Deps: &run.Deps{
-		Home:   home,
-		AppCfg: cfg,
+	runner := &run.Runner{Deps: (&run.Deps{
+		Home: home,
+
 		MCPResolve: func(agentName, agentWorkspace string, launch safety.ProjectContext) (run.MCPServersResolution, error) {
 			resolves++
 			resolvedAgent = agentName
@@ -373,7 +373,7 @@ func TestAgentSwitchReResolvesTheMCPList(t *testing.T) {
 				Command: "/nonexistent/" + agentName + "-mcp",
 			}}}, nil
 		},
-	}}
+	}).WithConfig(cfg)}
 
 	if _, err := SwitchAgent(AgentDeps{Home: home, Cfg: cfg, Runner: runner}, "review"); err != nil {
 		t.Fatalf("switch: %v", err)
@@ -396,7 +396,7 @@ func TestAgentSwitchReResolvesTheMCPList(t *testing.T) {
 func TestPersistedRulesDoNotCrossPrimaryAgents(t *testing.T) {
 	home := t.TempDir()
 	cfg := twoPrimaryConfig()
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home}).WithConfig(cfg)}
 
 	// Grant a persistent rule while "main" is active.
 	runner.ApplyPermissionUpdate(safety.PermissionUpdate{
@@ -450,7 +450,7 @@ func TestSwitchRebindsTenantScopedStores(t *testing.T) {
 
 	sessions := state.NewSessionStore(db, "main")
 	mems := memory.NewStore(db, "main")
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, SessionStore: sessions, MemoryStore: mems}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, SessionStore: sessions, MemoryStore: mems}).WithConfig(cfg)}
 
 	if _, err := SwitchAgent(AgentDeps{Home: home, Cfg: cfg, Runner: runner}, "review"); err != nil {
 		t.Fatalf("switch: %v", err)

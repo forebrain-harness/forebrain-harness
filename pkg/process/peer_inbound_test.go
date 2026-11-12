@@ -384,7 +384,7 @@ func approvalNeverRunner(t *testing.T, home, sessionID string) *run.Runner {
 
 // promptingRunner is a conversation that asks: the "prompting" side.
 func promptingRunner(home string) *run.Runner {
-	return &run.Runner{Deps: &run.Deps{Home: home, AppCfg: &appcfg.Root{}}}
+	return &run.Runner{Deps: (&run.Deps{Home: home}).WithConfig(&appcfg.Root{})}
 }
 
 // openPeerSessions gives the environment a session store, which is what the
@@ -399,7 +399,7 @@ func openPeerSessions(t *testing.T, env *peerTestEnv) *state.SessionStore {
 	t.Cleanup(func() { _ = db.Close() })
 	env.SQL = db
 	store := state.NewSessionStore(db, "main")
-	env.Deps.SessionStore = store
+	env.deps().SessionStore = store
 	return store
 }
 
@@ -867,7 +867,7 @@ func TestPeerInboundGatewaySkipsASessionRunElsewhere(t *testing.T) {
 	if _, err := elsewhere.CreateRun(context.Background(), "web-elsewhere", "busy over there"); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	env.Deps.RunRT = &state.RunStore{DB: store.DB(), Owner: "this-process"}
+	env.deps().RunRT = &state.RunStore{DB: store.DB(), Owner: "this-process"}
 
 	stop := env.StartPeers(context.Background(), view.surface("gateway", nil))
 	t.Cleanup(stop)

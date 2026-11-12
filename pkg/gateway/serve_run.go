@@ -106,7 +106,7 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		// supplied one, so a channel message arriving while a gate was open
 		// started a second run against that session. submitChannelTurn already
 		// knows how to report the wait to the user.
-		turn.WithApprovalGate(approvalGateOn(root, h.Deps.AppCfg, runner, runSvc, actionSvc, state.NewProjectStore(h.SQL, runner.AgentName), sessStore)),
+		turn.WithApprovalGate(approvalGateOn(root, h.Deps.Config(), runner, runSvc, actionSvc, state.NewProjectStore(h.SQL, runner.AgentName), sessStore)),
 		// A batch task's execution is admitted and settled by the engine, so
 		// every door into a batch conversation — the websocket, a detached
 		// turn, a channel, a scheduled fire — answers with the same codes. Its
@@ -254,7 +254,7 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	svc.OnRefresh = func() error { return turn.RefreshSkills(svc.Home, svc.Workspace(), runner.LaunchProject) }
 	svc.IsBuiltin = turn.IsBuiltinName
 	_ = svc.Refresh()
-	addr := strings.TrimSpace(h.Deps.AppCfg.Gateway.HTTPAddr)
+	addr := strings.TrimSpace(h.Deps.Config().Gateway.HTTPAddr)
 	if addr == "" {
 		addr = "127.0.0.1:6060"
 	}
@@ -265,7 +265,7 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 
 	signInToken := ""
 	if opts.PrintToken {
-		signInToken = strings.TrimSpace(h.Deps.AppCfg.Gateway.Auth.Token)
+		signInToken = strings.TrimSpace(h.Deps.Config().Gateway.Auth.Token)
 	}
 	banner := startupBanner{
 		Version:     opts.Version,

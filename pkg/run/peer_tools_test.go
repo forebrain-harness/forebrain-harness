@@ -30,7 +30,7 @@ func newPeerFixture(t *testing.T, projectType string) *peerFixture {
 	t.Helper()
 	root := t.TempDir()
 	owner := &Runner{
-		Deps:    &Deps{Home: root, WorkspaceRoot: root, ProjectType: projectType, AppCfg: subagentsEnabledConfig()},
+		Deps:    (&Deps{Home: root, WorkspaceRoot: root, ProjectType: projectType}).WithConfig(subagentsEnabledConfig()),
 		Control: NewController(),
 	}
 	fac := Factory{AgentName: "main", Home: root, WorkspaceRoot: root, Tools: toolpkg.NewState(t.TempDir()), AppCfg: subagentsEnabledConfig()}

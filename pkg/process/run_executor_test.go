@@ -79,7 +79,7 @@ func envWithFakeLLM(t *testing.T, reply string) *Environment {
 // the executor's run row belongs to it by foreign key.
 func ensureExecutorSession(t *testing.T, env *Environment, sid string) {
 	t.Helper()
-	if err := env.Deps.SessionStore.Ensure(context.Background(), sid, sid); err != nil {
+	if err := env.deps().SessionStore.Ensure(context.Background(), sid, sid); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -136,19 +136,19 @@ func envWithFakeLLMForSource(t *testing.T, reply, sessionSource string) *Environ
 func TestSessionProjectKeyFollowsTheSessionsProject(t *testing.T) {
 	ctx := context.Background()
 	env := envWithFakeLLM(t, "hello")
-	projects := state.NewProjectStore(env.SQL, env.Deps.AgentName)
+	projects := state.NewProjectStore(env.SQL, env.deps().AgentName)
 	root := t.TempDir()
 	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "keyed", Root: root})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.Deps.SessionStore.Ensure(ctx, "with-project", "with-project"); err != nil {
+	if err := env.deps().SessionStore.Ensure(ctx, "with-project", "with-project"); err != nil {
 		t.Fatal(err)
 	}
 	if err := projects.BindSession(ctx, "with-project", project.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.Deps.SessionStore.Ensure(ctx, "no-project", "no-project"); err != nil {
+	if err := env.deps().SessionStore.Ensure(ctx, "no-project", "no-project"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,7 +163,7 @@ func TestSessionProjectKeyFollowsTheSessionsProject(t *testing.T) {
 	}
 	// A store that cannot be read is not an error: the project-less key is the
 	// answer, and the turn keeps its own directory.
-	broken := &Environment{Deps: run.Deps{AgentName: "main"}}
+	broken := &Environment{Deps: &run.Deps{AgentName: "main"}}
 	if got := broken.SessionProjectKey(ctx, "with-project"); got != "" {
 		t.Fatalf("SessionProjectKey(no store) = %q, want empty", got)
 	}
@@ -196,7 +196,7 @@ func (s *collectingSink) events() []event.RunEvent {
 func TestSubmitRunsATurnThroughTheProcessExecutor(t *testing.T) {
 	env := envWithFakeLLM(t, "hello from the model")
 	svc := turn.New(
-		turn.WithSessionStore(env.Deps.SessionStore),
+		turn.WithSessionStore(env.deps().SessionStore),
 		turn.WithForegroundLocker(env.Foreground),
 		turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{})),
 	)
@@ -223,7 +223,7 @@ func TestSubmitRunsATurnThroughTheProcessExecutor(t *testing.T) {
 	if strings.HasPrefix(out.RunID, "run-") || strings.TrimSpace(out.RunID) == "" {
 		t.Fatalf("RunID = %q, want the store-assigned id rather than the synthetic fallback", out.RunID)
 	}
-	stored, err := env.Deps.RunRT.GetRun(context.Background(), out.RunID)
+	stored, err := env.deps().RunRT.GetRun(context.Background(), out.RunID)
 	if err != nil || stored == nil {
 		t.Fatalf("GetRun(%q) = %v, %v; the outcome's run ID does not exist in the store", out.RunID, stored, err)
 	}
@@ -268,7 +268,7 @@ func TestSubmitRunsATurnThroughTheProcessExecutor(t *testing.T) {
 func TestExecutorDoesNotRelockTheForegroundLock(t *testing.T) {
 	env := envWithFakeLLM(t, "ok")
 	svc := turn.New(
-		turn.WithSessionStore(env.Deps.SessionStore),
+		turn.WithSessionStore(env.deps().SessionStore),
 		turn.WithForegroundLocker(env.Foreground),
 		turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{})),
 	)
@@ -304,7 +304,7 @@ func TestExecutorBeforeAgentSeesTheRealRunID(t *testing.T) {
 	env := envWithFakeLLM(t, "ok")
 	var seen []string
 	svc := turn.New(
-		turn.WithSessionStore(env.Deps.SessionStore),
+		turn.WithSessionStore(env.deps().SessionStore),
 		turn.WithForegroundLocker(env.Foreground),
 		turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{
 			BeforeAgent: func(_ context.Context, runID, sessionID, _ string) error {
@@ -408,7 +408,7 @@ func TestExecutorDoesNotFinishARunPausedAtAnApprovalGate(t *testing.T) {
 	t.Cleanup(env.Close)
 
 	svc := turn.New(
-		turn.WithSessionStore(env.Deps.SessionStore),
+		turn.WithSessionStore(env.deps().SessionStore),
 		turn.WithForegroundLocker(env.Foreground),
 		turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{})),
 	)
@@ -470,7 +470,7 @@ func TestExecutorKeepsACallerSuppliedPartialCapture(t *testing.T) {
 
 	var seen *run.PartialSessionCapture
 	svc := turn.New(
-		turn.WithSessionStore(env.Deps.SessionStore),
+		turn.WithSessionStore(env.deps().SessionStore),
 		turn.WithForegroundLocker(env.Foreground),
 		turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{
 			BeforeAgent: func(agentCtx context.Context, _, _, _ string) error {
@@ -497,7 +497,7 @@ func TestExecutorInstallsACaptureWhenTheCallerSuppliesNone(t *testing.T) {
 	env := envWithFakeLLM(t, "ok")
 	var seen *run.PartialSessionCapture
 	svc := turn.New(
-		turn.WithSessionStore(env.Deps.SessionStore),
+		turn.WithSessionStore(env.deps().SessionStore),
 		turn.WithForegroundLocker(env.Foreground),
 		turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{
 			BeforeAgent: func(agentCtx context.Context, _, _, _ string) error {
@@ -538,14 +538,14 @@ func TestSameTurnRequestProducesTheSameScenarioAcrossSurfaces(t *testing.T) {
 		t.Helper()
 		env := envWithFakeLLMForSource(t, reply, sessionSource)
 		core := turn.New(
-			turn.WithSessionStore(env.Deps.SessionStore),
+			turn.WithSessionStore(env.deps().SessionStore),
 			turn.WithSessionSource(sessionSource),
 			turn.WithRunExecutor(env.NewRunExecutor(channel, RunExecutorOptions{PreviewMax: 4096})),
 		)
 		const userText = "say the same thing"
 		// Both surfaces write the user row through the shared helper before
 		// submitting, so the contract covers that row too.
-		turn.PersistUserTurn(context.Background(), env.Deps.SessionStore, turn.UserTurn{
+		turn.PersistUserTurn(context.Background(), env.deps().SessionStore, turn.UserTurn{
 			SessionID:     sessionID,
 			ModelInput:    userText,
 			EnsureSession: true,
@@ -563,15 +563,15 @@ func TestSameTurnRequestProducesTheSameScenarioAcrossSurfaces(t *testing.T) {
 		}
 		// Both surfaces write the assistant outcome through the shared helper
 		// after Submit returns, so the contract covers those rows too.
-		turn.PersistAssistantTurn(context.Background(), env.Deps.SessionStore, turn.AssistantTurn{
+		turn.PersistAssistantTurn(context.Background(), env.deps().SessionStore, turn.AssistantTurn{
 			SessionID: sessionID,
 			Result:    out.Result,
 			Model:     "gpt-test",
 		})
 		got, err := testutil.CaptureScenario(context.Background(), testutil.ScenarioSource{
-			Sessions: env.Deps.SessionStore,
-			Runs:     env.Deps.RunRT,
-			Actions:  env.Deps.Actions,
+			Sessions: env.deps().SessionStore,
+			Runs:     env.deps().RunRT,
+			Actions:  env.deps().Actions,
 		}, sessionID)
 		if err != nil {
 			t.Fatalf("%s CaptureScenario: %v", sessionSource, err)
@@ -737,7 +737,7 @@ func TestRunExecutorFilesTheOneTurnEndBudgetRecord(t *testing.T) {
 		probe := &collectingSink{}
 		env.Runner.Events = probe
 		svc := turn.New(
-			turn.WithSessionStore(env.Deps.SessionStore),
+			turn.WithSessionStore(env.deps().SessionStore),
 			turn.WithForegroundLocker(env.Foreground),
 			turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{})),
 		)
@@ -771,7 +771,7 @@ func TestRunExecutorFilesTheOneTurnEndBudgetRecord(t *testing.T) {
 		probe := &collectingSink{}
 		env.Runner.Events = probe
 		svc := turn.New(
-			turn.WithSessionStore(env.Deps.SessionStore),
+			turn.WithSessionStore(env.deps().SessionStore),
 			turn.WithForegroundLocker(env.Foreground),
 			turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{})),
 		)
@@ -796,7 +796,7 @@ func TestRunExecutorFilesTheOneTurnEndBudgetRecord(t *testing.T) {
 		probe := &collectingSink{}
 		env.Runner.Events = probe
 		svc := turn.New(
-			turn.WithSessionStore(env.Deps.SessionStore),
+			turn.WithSessionStore(env.deps().SessionStore),
 			turn.WithForegroundLocker(env.Foreground),
 			turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{})),
 		)
@@ -839,7 +839,7 @@ func TestRunExecutorFilesTheOneTurnEndBudgetRecord(t *testing.T) {
 func TestBatchTurnRunsInItsTaskWorkspace(t *testing.T) {
 	ctx := context.Background()
 	env := envWithFakeLLM(t, "hello from the model")
-	projects := state.NewProjectStore(env.SQL, env.Deps.AgentName)
+	projects := state.NewProjectStore(env.SQL, env.deps().AgentName)
 	root := t.TempDir()
 	project, err := projects.Create(ctx, state.CreateProjectInput{
 		Name:        "batch",
@@ -854,7 +854,7 @@ func TestBatchTurnRunsInItsTaskWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	const sid = "batch-session"
-	if err := env.Deps.SessionStore.EnsureAt(ctx, sid, "batch", state.SessionBirth{
+	if err := env.deps().SessionStore.EnsureAt(ctx, sid, "batch", state.SessionBirth{
 		Cwd:       root,
 		ProjectID: project.ID,
 		Source:    state.SessionSourceConversation,
@@ -868,9 +868,9 @@ func TestBatchTurnRunsInItsTaskWorkspace(t *testing.T) {
 
 	var observed WorkDirObservation
 	svc := turn.New(
-		turn.WithSessionStore(env.Deps.SessionStore),
+		turn.WithSessionStore(env.deps().SessionStore),
 		turn.WithForegroundLocker(env.Foreground),
-		turn.WithBatchTasks(projects, env.Deps.SessionStore, nil),
+		turn.WithBatchTasks(projects, env.deps().SessionStore, nil),
 		turn.WithRunExecutor(env.NewRunExecutor("tui", RunExecutorOptions{
 			BeforeAgent: func(agentCtx context.Context, runID, sessionID, input string) error {
 				wd, _ := tool.WorkingDir(agentCtx)

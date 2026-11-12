@@ -265,7 +265,7 @@ func TestRunnerKeepsPrefixWhenSkillFilesChangeMidSession(t *testing.T) {
 	writeRunnerSkillFile(t, filepath.Join(home, "workspace", "skills", "first-skill", "SKILL.md"),
 		"name: first-skill\ndescription: Present before the session started", "First body")
 
-	r := &Runner{Deps: &Deps{Home: home, AppCfg: &appcfg.Root{
+	r := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
@@ -278,7 +278,7 @@ func TestRunnerKeepsPrefixWhenSkillFilesChangeMidSession(t *testing.T) {
 				},
 			},
 		},
-	}}}
+	})}
 	if err := r.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1195,7 +1195,7 @@ func TestRunnerSkillRootsAgreeBetweenCatalogAndDiscovery(t *testing.T) {
 			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "m", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
 		},
 	}}
-	r := &Runner{Deps: &Deps{Home: home, WorkspaceRoot: workspace, AppCfg: cfg, LaunchProject: launch, ProjectRoot: project}}
+	r := &Runner{Deps: (&Deps{Home: home, WorkspaceRoot: workspace, LaunchProject: launch, ProjectRoot: project}).WithConfig(cfg)}
 	if err := r.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}

@@ -112,7 +112,7 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 	// run is. A surface that opened the session already has it; the first
 	// message of a channel conversation has not. The upsert is also the tenant
 	// check — a session another agent owns is refused before any work.
-	if err := x.env.Deps.SessionStore.Ensure(ctx, sid, sid); err != nil {
+	if err := x.env.deps().SessionStore.Ensure(ctx, sid, sid); err != nil {
 		return nil, err
 	}
 
@@ -189,7 +189,7 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 	// batch conversation without a task is refused rather than run somewhere
 	// nobody can find its work.
 	if runner.ProjectType() == state.ProjectTypeBatch {
-		exec, task, ok, err := state.NewProjectStore(x.env.SQL, x.env.Deps.AgentName).ExecutionForSession(ctx, sid)
+		exec, task, ok, err := state.NewProjectStore(x.env.SQL, x.env.deps().AgentName).ExecutionForSession(ctx, sid)
 		if err != nil {
 			return nil, err
 		}
@@ -217,7 +217,7 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 		}
 	}
 	res, _, err := run.Run(run.Options{
-		RunRT:                  x.env.Deps.RunRT,
+		RunRT:                  x.env.deps().RunRT,
 		Runner:                 runner,
 		Hooks:                  x.env.Hooks,
 		AgBase:                 agBase,
@@ -324,7 +324,7 @@ func (env *Environment) stateRoot() string {
 	if env == nil {
 		return ""
 	}
-	return appcfg.ActiveStateRoot(strings.TrimSpace(env.Root), env.Deps.AppCfg)
+	return appcfg.ActiveStateRoot(strings.TrimSpace(env.Root), env.deps().Config())
 }
 
 // SessionProjectKey is the key a session's project-scoped state lives under:
@@ -348,7 +348,7 @@ func (env *Environment) SessionProjectKey(ctx context.Context, sessionID string)
 	if sessionID == "" {
 		return ""
 	}
-	project, ok, err := state.NewProjectStore(env.SQL, env.Deps.AgentName).ProjectForSession(ctx, sessionID)
+	project, ok, err := state.NewProjectStore(env.SQL, env.deps().AgentName).ProjectForSession(ctx, sessionID)
 	if err != nil || !ok {
 		return ""
 	}
@@ -361,7 +361,7 @@ func (env *Environment) SessionProjectKey(ctx context.Context, sessionID string)
 // message, and the next turn rebuilds context from scratch, losing work the
 // user watched happen.
 func (env *Environment) persistPartialTurn(sessionID, runID string, capture *run.PartialSessionCapture) {
-	if env == nil || env.Deps.SessionStore == nil || capture == nil {
+	if env == nil || env.deps().SessionStore == nil || capture == nil {
 		return
 	}
 	pending := capture.Snapshot()
@@ -370,7 +370,7 @@ func (env *Environment) persistPartialTurn(sessionID, runID string, capture *run
 	}
 	// What the stopped run wrote is the run's. The model is unknown at cancel
 	// time; the store tolerates it.
-	_ = env.Deps.SessionStore.AppendMessageSequenceForRun(context.Background(), sessionID, runID, pending, "", "")
+	_ = env.deps().SessionStore.AppendMessageSequenceForRun(context.Background(), sessionID, runID, pending, "", "")
 }
 
 // Tools is the active primary agent's tool state.

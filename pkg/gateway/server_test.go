@@ -529,8 +529,8 @@ func TestParseSlashCommandForkSwitchesWebchatSession(t *testing.T) {
 		}},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, cfg))
-	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg}}
-	runner := &run.Runner{Deps: &env.Deps}
+	env := (&process.Environment{Root: home, ConfigPath: cfgPath, Deps: &run.Deps{Home: home, AgentName: "main"}}).WithDepsConfig(&cfg)
+	runner := &run.Runner{Deps: env.Deps}
 	env.Runner = runner
 	require.NoError(t, runner.Load())
 
@@ -674,7 +674,7 @@ func newMCPServersTestServer(t *testing.T, cfg *appcfg.Root, primary *run.Runner
 	}
 	seedConfigRoot(t, db, *cfg)
 	s := &Server{Home: home, Runner: primary}
-	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
+	env := (&process.Environment{Deps: &run.Deps{Home: home}, Root: home, SQL: db}).WithDepsConfig(cfg)
 	env.ConfigPath = cfgPath
 	env.Runner = primary
 	s.Env = env
@@ -954,10 +954,10 @@ func TestWorkshopTurnRunsInTheAgentSkillDirectory(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}}},
 	}}}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions, WorkspaceRoot: workspace}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions, WorkspaceRoot: workspace}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())
-	env := &process.Environment{Root: home, SQL: db, Runner: runner, RawConfig: *cfg,
-		Deps: run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions, WorkspaceRoot: workspace}}
+	env := (&process.Environment{Root: home, SQL: db, Runner: runner,
+		Deps: &run.Deps{Home: home, AgentName: "main", SessionStore: sessions, WorkspaceRoot: workspace}}).WithRawConfig(*cfg).WithDepsConfig(cfg)
 
 	workshop, err := env.RunnerForTurn(ctx, "s-workshop")
 	require.NoError(t, err)
@@ -994,7 +994,7 @@ func bindGatewayEnv(t *testing.T, home string) *process.Environment {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	seedConfigRoot(t, db, cfg)
-	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: &cfg}, Root: home, SQL: db}
+	env := (&process.Environment{Deps: &run.Deps{Home: home}, Root: home, SQL: db}).WithDepsConfig(&cfg)
 	env.ConfigPath = cfgPath
 	return env
 }

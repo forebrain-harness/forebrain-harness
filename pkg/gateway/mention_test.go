@@ -536,7 +536,7 @@ func TestWebImageGateRefusesTheTurnNotTheAttachment(t *testing.T) {
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-v4-pro"}},
 	}}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main"}).WithConfig(cfg)}
 	s := &Server{Home: home, Files: files, Sessions: sessions, Projects: projects, Runner: runner}
 
 	// The attachment step no longer judges the model: the picture is attached

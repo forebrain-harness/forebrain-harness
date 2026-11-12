@@ -35,7 +35,7 @@ func newSkillVersionsServer(t *testing.T, home string) (*Server, string) {
 	require.NoError(t, os.MkdirAll(skillsRoot, 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(home, "state", "primary-agent.json"), []byte(`{"active":"review"}`+"\n"), 0o600))
-	env := &process.Environment{Deps: run.Deps{AppCfg: &cfg}, Root: home, SQL: db}
+	env := (&process.Environment{Deps: &run.Deps{}, Root: home, SQL: db}).WithDepsConfig(&cfg)
 	env.ConfigPath = cfgPath
 	return &Server{Home: home, Env: env}, skillsRoot
 }

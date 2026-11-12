@@ -234,7 +234,7 @@ func TestPullSkillUpdateUsesItsDeadline(t *testing.T) {
 	skillPullTimeout = 500 * time.Millisecond
 	t.Cleanup(func() { skillPullTimeout = previous })
 
-	s := &ChatSession{Env: &process.Environment{Deps: run.Deps{Home: home}}}
+	s := &ChatSession{Env: &process.Environment{Deps: &run.Deps{Home: home}}}
 	start := time.Now()
 	err := s.PullSkillUpdate(skill.Entry{Name: "demo", Path: skillDir}, true)
 	elapsed := time.Since(start)

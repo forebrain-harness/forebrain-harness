@@ -218,7 +218,7 @@ func TestRetentionSweepSparesAFireWhoseConversationCameBackToLife(t *testing.T) 
 
 	// The conversation ends; the next sweep takes both.
 	stopDriver()
-	if _, err := env.Deps.RunRT.ReapAbandonedRuns(ctx, time.Now()); err != nil {
+	if _, err := env.deps().RunRT.ReapAbandonedRuns(ctx, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.pruneExpiredFires(ctx, time.Now()); err != nil {
@@ -329,14 +329,14 @@ func TestFireRunStateReadsTheRunsOwnFacts(t *testing.T) {
 	}
 
 	// The other run is reaped as abandoned, and its ending is the reaper's.
-	reaped, err := env.Deps.RunRT.ReapAbandonedRuns(ctx, time.Now())
+	reaped, err := env.deps().RunRT.ReapAbandonedRuns(ctx, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(reaped) != 1 || reaped[0].ID != died.ID {
 		t.Fatalf("reap = %+v, want only the abandoned run (not the parked one)", reaped)
 	}
-	if _, err := env.Deps.RunRT.AppendSessionEvent(ctx, state.SessionEvent{
+	if _, err := env.deps().RunRT.AppendSessionEvent(ctx, state.SessionEvent{
 		ID: "evt-reap-fire", RunID: died.ID, SessionID: "cron-died-1",
 		Type: event.RunEventTurnError,
 		Payload: event.EncodePayload(event.TurnErrorPayload{
@@ -406,11 +406,11 @@ func TestSettleFireAndFireParkedReachTheBoundScheduler(t *testing.T) {
 	// One fire whose run already ended with an answer, one still open. The
 	// answer is not on the ending event any more — a run's words live in its
 	// transcript — so the settled fire's output is read back from there.
-	run, err := env.Deps.RunRT.CreateRun(ctx, "cron-job-1-1", "x")
+	run, err := env.deps().RunRT.CreateRun(ctx, "cron-job-1-1", "x")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.Deps.RunRT.AppendSessionEvent(ctx, state.SessionEvent{
+	if _, err := env.deps().RunRT.AppendSessionEvent(ctx, state.SessionEvent{
 		ID: "evt-fire-done", RunID: run.ID, SessionID: "cron-job-1-1",
 		Type: event.RunEventTurnCompleted, Payload: event.EncodePayload(event.TurnCompletedPayload{}),
 	}); err != nil {
@@ -419,7 +419,7 @@ func TestSettleFireAndFireParkedReachTheBoundScheduler(t *testing.T) {
 	if _, err := sessions.AppendMessageForRun(ctx, "cron-job-1-1", run.ID, "assistant", "the answer", "", "", state.MessageExecTiming{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.Deps.RunRT.SetStatus(ctx, run.ID, state.RunStatusDone); err != nil {
+	if err := env.deps().RunRT.SetStatus(ctx, run.ID, state.RunStatusDone); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := cronStore.StartRun(ctx, state.CronRun{JobID: "job-1", AgentID: "main", SessionID: "cron-job-1-1", Trigger: "schedule"}); err != nil {
@@ -751,7 +751,7 @@ func TestPruneReadsTheLiveRetentionConfig(t *testing.T) {
 	}
 
 	long := 3650
-	env.Deps.AppCfg.Cron = appcfg.CronSection{RetentionDays: &long}
+	env.deps().Config().Cron = appcfg.CronSection{RetentionDays: &long}
 	if err := env.Cron().pruneExpiredFires(ctx, now); err != nil {
 		t.Fatal(err)
 	}
@@ -764,7 +764,7 @@ func TestPruneReadsTheLiveRetentionConfig(t *testing.T) {
 	}
 
 	one := 1
-	env.Deps.AppCfg.Cron = appcfg.CronSection{RetentionDays: &one}
+	env.deps().Config().Cron = appcfg.CronSection{RetentionDays: &one}
 	if err := env.Cron().pruneExpiredFires(ctx, now); err != nil {
 		t.Fatal(err)
 	}

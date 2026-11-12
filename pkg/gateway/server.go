@@ -532,7 +532,7 @@ func (s *Server) liveCfg() *config.Root {
 	if s == nil || s.Env == nil {
 		return nil
 	}
-	return s.Env.Deps.AppCfg
+	return s.Env.Deps.Config()
 }
 
 // stateRoot returns the active primary agent's per-agent state root (its
@@ -1260,8 +1260,8 @@ func applyWSScope(m *wsClientMsg, session string) error {
 }
 
 func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request, opts wsConnOptions) {
-	if !opts.internal && s != nil && s.Env != nil && s.Env.Deps.AppCfg != nil {
-		if origin, err := authorizeControlPlane(r, s.Env.Deps.AppCfg); err != nil {
+	if !opts.internal && s != nil && s.Env != nil && s.Env.Deps.Config() != nil {
+		if origin, err := authorizeControlPlane(r, s.Env.Deps.Config()); err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		} else if origin != "" {

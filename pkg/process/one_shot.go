@@ -95,7 +95,7 @@ func (env *Environment) ContinueSubagent(r *run.Runner, surface run.SubagentSurf
 // in one of the branches above, and writing the gate-time list here would
 // leave tool_calls rows that the replayed run's own list never contains.
 func (env *Environment) PersistSubagentTurn(ctx context.Context, t run.SubagentTurn) {
-	if env == nil || env.Deps.SessionStore == nil {
+	if env == nil || env.deps().SessionStore == nil {
 		return
 	}
 	end := time.Now()
@@ -110,7 +110,7 @@ func (env *Environment) PersistSubagentTurn(ctx context.Context, t run.SubagentT
 	bg := context.Background()
 	switch {
 	case t.Err == nil:
-		turn.PersistAssistantTurn(bg, env.Deps.SessionStore, turn.AssistantTurn{
+		turn.PersistAssistantTurn(bg, env.deps().SessionStore, turn.AssistantTurn{
 			SessionID: t.WorkerSessionID,
 			RunID:     t.RunID,
 			Result:    t.Result,
@@ -120,7 +120,7 @@ func (env *Environment) PersistSubagentTurn(ctx context.Context, t run.SubagentT
 	case run.IsRequiresAction(t.Err):
 		return
 	default:
-		turn.PersistCancelledTurn(bg, env.Deps.SessionStore, turn.CancelledTurn{
+		turn.PersistCancelledTurn(bg, env.deps().SessionStore, turn.CancelledTurn{
 			SessionID: t.WorkerSessionID,
 			RunID:     t.RunID,
 			Captured:  t.Partial,

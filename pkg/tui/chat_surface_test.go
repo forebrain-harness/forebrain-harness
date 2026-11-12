@@ -981,7 +981,7 @@ func TestDispatchSurfaceTurnBangShellHelpDoesNotAppendTranscript(t *testing.T) {
 func TestDispatchSurfaceTurnUserPromptSubmitHookBlocksBeforeTranscriptAppend(t *testing.T) {
 	s, cleanup := newSurfaceTestSession(t)
 	defer cleanup()
-	s.Env.Deps.AppCfg = ptrTo(appcfg.Root{
+	s.Env.Deps.SetConfig(ptrTo(appcfg.Root{
 		Hooks: appcfg.HooksSettings{
 			"UserPromptSubmit": {{
 				Hooks: []appcfg.HookCommand{{
@@ -990,7 +990,7 @@ func TestDispatchSurfaceTurnUserPromptSubmitHookBlocksBeforeTranscriptAppend(t *
 				}},
 			}},
 		},
-	})
+	}))
 	s.userHooks = &hook.Runtime{
 		Home:          s.home(),
 		WorkspaceRoot: s.StateRoot(),

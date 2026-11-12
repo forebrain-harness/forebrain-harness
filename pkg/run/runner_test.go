@@ -301,7 +301,7 @@ func TestRunnerLoadsPrimaryAgentWithoutItsOwnProvider(t *testing.T) {
 		t.Fatalf("Switch: %v", err)
 	}
 
-	r := &Runner{Deps: &Deps{Home: home, AgentName: "review", AppCfg: &cfg}, FileResolver: PathResolver{}}
+	r := &Runner{Deps: (&Deps{Home: home, AgentName: "review"}).WithConfig(&cfg), FileResolver: PathResolver{}}
 	if err := r.Load(); err != nil {
 		t.Fatalf("Load for a primary agent with no provider of its own = %v, want nil "+
 			"(it must inherit main's until /connect configures one)", err)
@@ -324,7 +324,7 @@ func TestPrimaryModelExpandsTheModelsList(t *testing.T) {
 		}}},
 	}}}
 
-	provider, model := PrimaryModel(&Runner{Deps: &Deps{AppCfg: cfg, AgentName: "main"}})
+	provider, model := PrimaryModel(&Runner{Deps: (&Deps{AgentName: "main"}).WithConfig(cfg)})
 	if provider != "openai" || model != "gpt-5.4" {
 		t.Fatalf("PrimaryModel = %q/%q, want openai/gpt-5.4 (the first model of the list)", provider, model)
 	}
@@ -336,13 +336,13 @@ func TestPrimaryModelFallsBackToMainAndNil(t *testing.T) {
 	}}}
 
 	// An empty AgentName resolves to main, the same fallback the runtime uses.
-	if provider, model := PrimaryModel(&Runner{Deps: &Deps{AppCfg: cfg}}); provider != "openai" || model != "gpt-main" {
+	if provider, model := PrimaryModel(&Runner{Deps: (&Deps{}).WithConfig(cfg)}); provider != "openai" || model != "gpt-main" {
 		t.Fatalf("PrimaryModel(empty agent) = %q/%q, want openai/gpt-main", provider, model)
 	}
 	if p, m := PrimaryModel(nil); p != "" || m != "" {
 		t.Fatalf("PrimaryModel(nil) = %q/%q, want empty", p, m)
 	}
-	if p, m := PrimaryModel(&Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}); p != "" || m != "" {
+	if p, m := PrimaryModel(&Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{})}); p != "" || m != "" {
 		t.Fatalf("PrimaryModel(no providers) = %q/%q, want empty", p, m)
 	}
 }
@@ -1988,7 +1988,7 @@ func primaryModelEntry(provider, model, apiKey, baseURL string, params appcfg.LL
 func loadPrimaryModelRunner(t *testing.T, cfg *appcfg.Root) *Runner {
 	t.Helper()
 	t.Setenv(primaryModelTestKeyEnv, "test-key")
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main"}).WithConfig(cfg)}
 	if err := r.Load(); err != nil {
 		t.Fatalf("Runner.Load: %v", err)
 	}
@@ -2213,7 +2213,7 @@ func TestLoadResetsPinWhenAgentChanges(t *testing.T) {
 		"review": {LLMProviders: []appcfg.AgentLLMProviderConfig{primaryModelEntry("anthropic", "claude-r", key, "http://r.test/v1", nil)}},
 	}}}
 	t.Setenv(primaryModelTestKeyEnv, "test-key")
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main"}).WithConfig(cfg)}
 	if err := r.Load(); err != nil {
 		t.Fatalf("Runner.Load: %v", err)
 	}
@@ -2318,7 +2318,7 @@ func strPtr(s string) *string { return &s }
 func TestPrimaryModelStateUnloadedFallback(t *testing.T) {
 	cfg := newPrimaryModelRoot(primaryModelEntry("openai", "gpt-a", "k", "http://a.test/v1",
 		appcfg.LLMRequestParams(`{"reasoning":{"effort":"low"}}`)))
-	state := PrimaryModelSelection(&Runner{Deps: &Deps{AppCfg: cfg, AgentName: "main"}})
+	state := PrimaryModelSelection(&Runner{Deps: (&Deps{AgentName: "main"}).WithConfig(cfg)})
 	if state.Set || state.Provider != "openai" || state.Model != "gpt-a" || state.Effort != "low" {
 		t.Fatalf("unloaded selection = %+v", state)
 	}
@@ -2372,7 +2372,7 @@ func newSessionRoutingRunner(t *testing.T, override llm.LLM) (*Runner, *state.Se
 		restore := SetLLMOverrideForTest(override)
 		t.Cleanup(restore)
 	}
-	r := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: store}}
+	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: store}).WithConfig(cfg)}
 	if err := r.Load(); err != nil {
 		t.Fatalf("Runner.Load: %v", err)
 	}
@@ -2602,10 +2602,10 @@ func TestLSPToolTableStableAcrossServerChanges(t *testing.T) {
 		},
 	}
 	stub := factoryCodeIntelStub{}
-	r := &Runner{Deps: &Deps{
-		Home: t.TempDir(), AppCfg: cfg,
+	r := &Runner{Deps: (&Deps{
+		Home:      t.TempDir(),
 		CodeIntel: stub, CodeIntelControl: stub, CodeIntelTool: true,
-	}}
+	}).WithConfig(cfg)}
 	if err := r.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -2750,7 +2750,7 @@ func TestCodingLoadKeepsTheWorktreesDirectoryIgnored(t *testing.T) {
 				Provider: "openai", Model: "qwen-test", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
 			}}},
 		}}}
-		r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: cfg, ProjectType: projectType, ProjectRoot: project}}
+		r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main", ProjectType: projectType, ProjectRoot: project}).WithConfig(cfg)}
 		if err := r.Load(); err != nil {
 			t.Fatalf("Load(%s): %v", projectType, err)
 		}
@@ -2782,7 +2782,7 @@ func TestSystemPromptFollowsProjectType(t *testing.T) {
 				}},
 			},
 		}}}
-		r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: cfg, ProjectType: projectType}}
+		r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main", ProjectType: projectType}).WithConfig(cfg)}
 		if err := r.Load(); err != nil {
 			t.Fatalf("Load(%s): %v", projectType, err)
 		}
@@ -2857,7 +2857,7 @@ func TestBatchToolSetAsksNobodyAnything(t *testing.T) {
 	}
 	// The subagent tools are the runner's to register, and a batch task keeps
 	// them: dispatching is work, not a question.
-	if err := RegisterSubagentTool(a, (&Runner{Deps: &Deps{Home: home, AppCfg: cfg, ProjectType: state.ProjectTypeBatch}}).subagentFactory()); err != nil {
+	if err := RegisterSubagentTool(a, (&Runner{Deps: (&Deps{Home: home, ProjectType: state.ProjectTypeBatch}).WithConfig(cfg)}).subagentFactory()); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
 	}
 	registered := map[string]bool{}

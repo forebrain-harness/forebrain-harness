@@ -45,8 +45,8 @@ func TestPrimaryAgentsAPIListsAndSwitches(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	seedConfigRoot(t, db, *cfg)
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}}
-	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}).WithConfig(cfg)}
+	env := (&process.Environment{Deps: &run.Deps{Home: home}, Root: home, SQL: db}).WithDepsConfig(cfg)
 	env.ConfigPath = filepath.Join(home, "forebrain.yaml")
 	_ = os.WriteFile(env.ConfigPath, []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600)
 	s := &Server{Home: home, Env: env, Runner: runner}
@@ -84,7 +84,7 @@ func TestAgentRosterIncludesPrimaryAndLiveSubagent(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	seedConfigRoot(t, db, *cfg)
-	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
+	env := (&process.Environment{Deps: &run.Deps{Home: home}, Root: home, SQL: db}).WithDepsConfig(cfg)
 	env.ConfigPath = filepath.Join(home, "forebrain.yaml")
 	_ = os.WriteFile(env.ConfigPath, []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600)
 	s := &Server{Home: home, Env: env}
@@ -139,7 +139,7 @@ func TestAgentRosterPagesRunningRowsWithSessionTitles(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	seedConfigRoot(t, db, *cfg)
-	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}, Root: home, SQL: db}
+	env := (&process.Environment{Deps: &run.Deps{Home: home}, Root: home, SQL: db}).WithDepsConfig(cfg)
 	env.ConfigPath = filepath.Join(home, "forebrain.yaml")
 	_ = os.WriteFile(env.ConfigPath, []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600)
 	s := &Server{
@@ -290,7 +290,7 @@ func crudServer(t *testing.T) (*Server, string) {
 	t.Cleanup(func() { _ = db.Close() })
 	seedConfigRoot(t, db, cfg)
 	crudHome = home
-	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: &cfg}, Root: home, SQL: db}
+	env := (&process.Environment{Deps: &run.Deps{Home: home}, Root: home, SQL: db}).WithDepsConfig(&cfg)
 	env.ConfigPath = cfgPath
 	s := &Server{Home: home, Env: env}
 	t.Cleanup(func() {})

@@ -504,9 +504,9 @@ func newLoadedRunnerForSupervisorTest(t *testing.T, script llm.LLM) *Runner {
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
 	}
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+	r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main"}).WithConfig(&appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {},
-	}}}}}
+	}}})}
 	setUnexportedRunnerFieldForSupervisorTest(t, r, "main", a)
 	setUnexportedRunnerFieldForSupervisorTest(t, r, "mainCfg", AgentConfigYAML{Description: "desc"})
 	return r
@@ -514,9 +514,9 @@ func newLoadedRunnerForSupervisorTest(t *testing.T, script llm.LLM) *Runner {
 
 func newLoadedRunnerWithAgentForSupervisorTest(t *testing.T, a *agent.Agent) *Runner {
 	t.Helper()
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+	r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main"}).WithConfig(&appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {},
-	}}}}}
+	}}})}
 	setUnexportedRunnerFieldForSupervisorTest(t, r, "main", a)
 	setUnexportedRunnerFieldForSupervisorTest(t, r, "mainCfg", AgentConfigYAML{Description: "desc"})
 	return r
@@ -726,7 +726,7 @@ func TestCoordinatedExecutionProductPathPreservesToolOrchestration(t *testing.T)
 	}
 
 	inner := &coordinatedExecutionProductPathLLM{}
-	runner := &Runner{Deps: &Deps{Home: home, AppCfg: &appcfg.Root{}}, tools: st}
+	runner := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{}), tools: st}
 	wrapped := runner.wrapExecutionLLM(inner, true)
 	ctx := llm.WithAgentSessionID(context.Background(), "s1")
 	ctx = toolpkg.WithMode(ctx, "agent")
@@ -1271,7 +1271,7 @@ func outsideWorkspaceRunner(t *testing.T, projectRoot string, mode safety.AskFor
 		SandboxMode: appcfg.SandboxModeWorkspaceWrite,
 	}
 	st := toolpkg.NewState(projectRoot)
-	r := &Runner{Deps: &Deps{Actions: &state.ActionService{DB: db}, AppCfg: cfg, ProjectRoot: projectRoot}, permRuntime: safety.NewRuntimeWithStore(permissionStore), tools: st}
+	r := &Runner{Deps: (&Deps{Actions: &state.ActionService{DB: db}, ProjectRoot: projectRoot}).WithConfig(cfg), permRuntime: safety.NewRuntimeWithStore(permissionStore), tools: st}
 	toolpkg.ApplyFilesystemPolicy(st, t.TempDir(), projectRoot, cfg, safety.Snapshot{})
 	st.SetActionHook(r.actionHook)
 	return r, st
@@ -1636,7 +1636,7 @@ func TestStrictAutoReviewForcesGuardianUnderNeverPolicy(t *testing.T) {
 	store.SetSandboxAvailable(true)
 	permRT := safety.NewRuntimeWithStore(store)
 	permRT.SetGuardian(client, "")
-	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}, permRuntime: permRT}
+	runner := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{}), permRuntime: permRT}
 	ctx := toolpkg.WithRunID(context.Background(), "run-strict")
 	_, pending, err := runner.actionHook(ctx, "shell", map[string]any{"command": "make release"})
 	if err != nil || pending {
@@ -2182,7 +2182,7 @@ func TestUsageAccountingWrapperDoesNotAdvertiseCompactionForLocalClient(t *testi
 // merely by inspection.
 func TestConcurrentLoadAndPermissionEvaluationDoNotRace(t *testing.T) {
 	home := t.TempDir()
-	r := &Runner{Deps: &Deps{Home: home, AppCfg: &appcfg.Root{
+	r := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
@@ -2195,7 +2195,7 @@ func TestConcurrentLoadAndPermissionEvaluationDoNotRace(t *testing.T) {
 				},
 			},
 		},
-	}}}
+	})}
 	// Deliberately do not pre-Load: the permission runtime's store/engine
 	// start nil, so the first concurrent Load and the first concurrent
 	// permission evaluation race to initialize them via safety.Runtime's
@@ -2348,7 +2348,7 @@ func pipelineRunner(t *testing.T, l *pipelineLLM) *Runner {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Runner{Deps: &Deps{Home: t.TempDir(), AgentName: "main", AppCfg: &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{"main": {}}}}}, main: a, mainCfg: AgentConfigYAML{Description: "desc"}}
+	return &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main"}).WithConfig(&appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{"main": {}}}}), main: a, mainCfg: AgentConfigYAML{Description: "desc"}}
 }
 
 func TestRunPipeline(t *testing.T) {
@@ -3895,7 +3895,7 @@ func runnerWithLocalSettings(t *testing.T, body string) (*Runner, string) {
 		t.Fatal(err)
 	}
 	r := &Runner{Deps: &Deps{Home: home}}
-	r.permRuntimeGet().LoadFromDisk(r.AppCfg, r.permPaths())
+	r.permRuntimeGet().LoadFromDisk(r.Config(), r.permPaths())
 	return r, path
 }
 
@@ -3985,7 +3985,7 @@ func TestUnreadableSettingsFileKeepsLoadedRules(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r.permRuntimeGet().LoadFromDisk(r.AppCfg, r.permPaths())
+	r.permRuntimeGet().LoadFromDisk(r.Config(), r.permPaths())
 	if d := r.EvaluatePermissionForSession("", "Bash", "go test ./..."); d.Matched == nil {
 		t.Fatalf("an unreadable settings file dropped the loaded rules: %+v", d)
 	}
@@ -3998,7 +3998,7 @@ func TestAbsentSettingsFileClearsRules(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	r.permRuntimeGet().LoadFromDisk(r.AppCfg, r.permPaths())
+	r.permRuntimeGet().LoadFromDisk(r.Config(), r.permPaths())
 	if d := r.EvaluatePermissionForSession("", "Bash", "go test ./..."); d.Matched != nil {
 		t.Fatalf("rules survived a scope with no settings file: %+v", d)
 	}
@@ -4015,7 +4015,7 @@ func TestRememberedRuleAppliesOnTheFirstAttemptWithASandbox(t *testing.T) {
 	r, _ := runnerWithLocalSettings(t, `{"rules":{"allow":[
       {"tool_name":"Bash","command_prefix":["git","--no-pager","add"],"bypass_sandbox":true}
     ],"ask":[],"deny":[]}}`)
-	r.permRuntimeGet().Store(r.AppCfg).SetSandboxAvailable(true)
+	r.permRuntimeGet().Store(r.Config()).SetSandboxAvailable(true)
 
 	for _, command := range []string{
 		"git add -A",
@@ -4038,7 +4038,7 @@ func TestRewriteFallbackAppliesARestrictionOnTheRewrittenCommand(t *testing.T) {
 	r, _ := runnerWithLocalSettings(t, `{"rules":{"allow":[],"ask":[],"deny":[
       {"tool_name":"Bash","rule_content":"git --no-pager push:*"}
     ]}}`)
-	r.permRuntimeGet().Store(r.AppCfg).SetSandboxAvailable(true)
+	r.permRuntimeGet().Store(r.Config()).SetSandboxAvailable(true)
 	decision := r.evaluateToolPermission("", "shell", map[string]any{"command": "git push origin main"})
 	if decision.Behavior != safety.BehaviorDeny {
 		t.Fatalf("deny rule written against the rewritten command did not apply: %+v", decision)
@@ -8512,8 +8512,8 @@ func TestMCPToolApprovalHonorsOperatorOverrides(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Full Access picked in the session: the mode is session-scoped, so
 			// the configured approval policy is still on-request.
-			r := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}}}
-			r.permRuntimeGet().Store(r.AppCfg).SetSessionRuntimeMode(sessionID, safety.ModeNever)
+			r := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess})}
+			r.permRuntimeGet().Store(r.Config()).SetSessionRuntimeMode(sessionID, safety.ModeNever)
 			r.tools = toolpkg.NewState(t.TempDir())
 			r.tools.RegisterToolMeta(event.ToolMeta{
 				Name: "mcp__server__tool", Category: "mcp", DestructiveHint: &destructive,
@@ -8536,7 +8536,7 @@ func TestMCPToolApprovalHonorsOperatorOverrides(t *testing.T) {
 
 	// A deny rule still wins: an override may skip approvals, never a rule that
 	// forbids the call.
-	r := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}}}
+	r := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess})}
 	r.tools = toolpkg.NewState(t.TempDir())
 	r.tools.RegisterToolMeta(event.ToolMeta{
 		Name: "mcp__server__tool", Category: "mcp", DestructiveHint: &destructive,
@@ -8551,8 +8551,8 @@ func TestMCPToolApprovalHonorsOperatorOverrides(t *testing.T) {
 }
 
 func TestMCPToolApprovalCanPromptUnderNeverWithRestrictedFilesystem(t *testing.T) {
-	r := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly}}}
-	r.permRuntimeGet().Store(r.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
+	r := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly})}
+	r.permRuntimeGet().Store(r.Config()).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
 	r.tools = toolpkg.NewState(t.TempDir())
 	r.tools.RegisterToolMeta(event.ToolMeta{
 		Name: "mcp__server__write", Category: "mcp",
@@ -8569,8 +8569,8 @@ func TestMCPToolApprovalCanPromptUnderNeverWithRestrictedFilesystem(t *testing.T
 
 func TestMCPPromptAutoApprovedForRestrictedRootWrite(t *testing.T) {
 	const sessionID = "session-root-write"
-	r := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly}}}
-	r.permRuntimeGet().Store(r.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
+	r := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly})}
+	r.permRuntimeGet().Store(r.Config()).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
 	rootWrite := safety.FileSystemPermissionEntry{
 		Path: safety.FileSystemPermissionPath{
 			Type:  safety.FileSystemPermissionPathTypeSpecial,
@@ -8578,7 +8578,7 @@ func TestMCPPromptAutoApprovedForRestrictedRootWrite(t *testing.T) {
 		},
 		Access: safety.FileSystemAccessWrite,
 	}
-	safety.ApplyUpdate(r.permRuntimeGet().Store(r.AppCfg), safety.PermissionUpdate{
+	safety.ApplyUpdate(r.permRuntimeGet().Store(r.Config()), safety.PermissionUpdate{
 		Type: safety.UpdateAddPermissionGrants, Destination: safety.DestinationSession, SessionID: sessionID,
 		FileSystemGrants: []safety.FileSystemPermissionGrant{{
 			Entry: rootWrite, Scope: safety.GrantScopeSession,
@@ -8588,7 +8588,7 @@ func TestMCPPromptAutoApprovedForRestrictedRootWrite(t *testing.T) {
 	if !r.mcpPermissionPromptAutoApproved(ctx) {
 		t.Fatal("root-write profile must auto-approve MCP permission prompts under never")
 	}
-	safety.ApplyUpdate(r.permRuntimeGet().Store(r.AppCfg), safety.PermissionUpdate{
+	safety.ApplyUpdate(r.permRuntimeGet().Store(r.Config()), safety.PermissionUpdate{
 		Type: safety.UpdateAddPermissionGrants, Destination: safety.DestinationSession, SessionID: sessionID,
 		FileSystemGrants: []safety.FileSystemPermissionGrant{{
 			Entry: safety.FileSystemPermissionEntry{
@@ -8676,7 +8676,7 @@ func TestToolPermissionMiddleware_YOLOModeRespectsHardDeny(t *testing.T) {
 	r := &Runner{Deps: &Deps{}}
 
 	// Add a hard deny rule for shell tools
-	r.permRuntimeGet().Store(r.AppCfg).AddRule(
+	r.permRuntimeGet().Store(r.Config()).AddRule(
 		safety.SourceLocalSettings,
 		safety.BehaviorDeny,
 		safety.PermissionRuleValue{ToolName: "shell"},
@@ -8719,7 +8719,7 @@ func TestActionHookYOLOAllowsForceToolApproval(t *testing.T) {
 	// YOLO is read from the environment, not carried on the Runner.
 	t.Setenv(safety.EnvYOLO, "1")
 	r := &Runner{Deps: &Deps{}}
-	r.permRuntimeGet().Store(r.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
+	r.permRuntimeGet().Store(r.Config()).SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
 
 	payload := map[string]any{
 		"command":             "cd /some/path && for f in $(find . -name '*.java'); do cat \"$f\"; done",
@@ -8751,7 +8751,7 @@ func TestToolPermissionMiddlewareRequestPermissionsCapturesExemptionReason(t *te
 
 	t.Run("matched allow rule", func(t *testing.T) {
 		r := &Runner{Deps: &Deps{}}
-		r.permRuntimeGet().Store(r.AppCfg).AddRule(
+		r.permRuntimeGet().Store(r.Config()).AddRule(
 			safety.SourceLocalSettings,
 			safety.BehaviorAllow,
 			safety.PermissionRuleValue{ToolName: "request_permissions"},
@@ -8773,11 +8773,11 @@ func TestToolPermissionMiddlewareRequestPermissionsCapturesExemptionReason(t *te
 }
 
 func TestToolPermissionMiddlewareDefaultShellMarksPolicyApproved(t *testing.T) {
-	r := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
-	r.AppCfg.SandboxMode = appcfg.SandboxModeWorkspaceWrite
+	r := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{})}
+	r.Config().SandboxMode = appcfg.SandboxModeWorkspaceWrite
 	// The unattended shell default exists because a sandbox contains the
 	// command; this store is built directly, so it has to be told.
-	r.permRuntimeGet().Store(r.AppCfg).SetSandboxAvailable(true)
+	r.permRuntimeGet().Store(r.Config()).SetSandboxAvailable(true)
 
 	tool, err := llm.NewRawTool("shell", "Execute shell command", map[string]any{
 		"type":       "object",
@@ -8858,10 +8858,10 @@ func TestUnlessTrustedKnownSafeSkipsPromptRegardlessOfDefaultReason(t *testing.T
 		}
 		t.Run(name, func(t *testing.T) {
 			r := &Runner{Deps: &Deps{}}
-			r.permRuntimeGet().Store(r.AppCfg).SetApprovalPolicy(safety.ApprovalPolicy{
+			r.permRuntimeGet().Store(r.Config()).SetApprovalPolicy(safety.ApprovalPolicy{
 				Mode: safety.ApprovalUnlessTrusted,
 			})
-			r.permRuntimeGet().Store(r.AppCfg).SetSandboxAvailable(sandbox)
+			r.permRuntimeGet().Store(r.Config()).SetSandboxAvailable(sandbox)
 
 			tool, err := llm.NewRawTool("shell", "Execute shell command", map[string]any{
 				"type":       "object",
@@ -9302,7 +9302,7 @@ func TestSkillToolLoadIsAnUnpromptedSkillStepEndToEnd(t *testing.T) {
 	tools := debuglogToolsView(mainAgent)
 
 	inner := &skillLoadingLLM{skillName: "golang-testing"}
-	runner := &Runner{Deps: &Deps{Home: home, AppCfg: &appcfg.Root{}}, tools: st}
+	runner := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{}), tools: st}
 	wrapped := runner.wrapExecutionLLM(inner, false)
 	ctx := llm.WithAgentSessionID(context.Background(), "s-skill")
 	ctx = toolpkg.WithMode(ctx, "agent")
@@ -9650,7 +9650,7 @@ func TestSubagentDispatchToolsShareOneConcurrentPlan(t *testing.T) {
 	if err := RegisterSubagentTool(a, Factory{
 		Home:  t.TempDir(),
 		Tools: st,
-		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
+		Owner: &Runner{Deps: (&Deps{}).WithConfig(subagentsEnabledConfig()), SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
 	}); err != nil {
 		t.Fatalf("RegisterSubagentTool: %v", err)
 	}

@@ -1648,7 +1648,7 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 	require.Equal(t, appcfg.SandboxModeDangerFullAccess, sessionSandbox())
 	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
 	require.Equal(t, "gpt-old", appcfg.EffectiveDefaultLLM(s.cfg().Agents.Definitions["main"]).Model, "the shared config file was rewritten")
-	require.Same(t, s.cfg(), s.runner().AppCfg)
+	require.Same(t, s.cfg(), s.runner().Config())
 	sel, hasRow, selErr := s.sessStore().SessionModelSelection(context.Background(), "s1")
 	require.NoError(t, selErr)
 	require.True(t, hasRow, "the model choice must be durable for the session")
@@ -1757,7 +1757,7 @@ func TestPrimaryAgentOptionsAndSwitchUseResolver(t *testing.T) {
 			}},
 		},
 	}
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: &cfg}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home}).WithConfig(&cfg)}
 	// Env is what production always has, and the session now reads the tool
 	// state through it rather than through the Runner (R4).
 	s := sessionEnv{Home: home, Config: cfg, Runner: runner}.session()
@@ -1836,7 +1836,7 @@ func TestHandleMCPSlashRendersInventory(t *testing.T) {
 	s := sessionEnv{
 		Home:   home,
 		Config: cfg,
-		Runner: &run.Runner{Deps: &run.Deps{Home: home, AppCfg: &cfg, MCPServers: cfg.Agents.Defaults.MCPServers}},
+		Runner: &run.Runner{Deps: (&run.Deps{Home: home, MCPServers: cfg.Agents.Defaults.MCPServers}).WithConfig(&cfg)},
 	}.session()
 
 	reply, handled := s.HandleMCPSlash("s1", "cli")
@@ -1855,7 +1855,7 @@ func TestAvailableModelOptionsUseConfiguredLLMProvidersOnly(t *testing.T) {
 	}}}
 	home := t.TempDir()
 	require.NoError(t, appcfg.Save(filepath.Join(home, "forebrain.yaml"), cfg))
-	s := sessionEnv{Home: home, Config: cfg, Runner: &run.Runner{Deps: &run.Deps{AppCfg: &cfg}}}.session()
+	s := sessionEnv{Home: home, Config: cfg, Runner: &run.Runner{Deps: (&run.Deps{}).WithConfig(&cfg)}}.session()
 
 	res, ok := s.ExecuteSurfaceSlash(context.Background(), "s1", "/model")
 	require.True(t, ok)
@@ -1883,7 +1883,7 @@ func TestCurrentModelReasoningEffortReadsPrimaryProviderParams(t *testing.T) {
 			}},
 		},
 	}}}
-	s := sessionEnv{Config: cfg, Runner: &run.Runner{Deps: &run.Deps{AppCfg: &cfg}}}.session()
+	s := sessionEnv{Config: cfg, Runner: &run.Runner{Deps: (&run.Deps{}).WithConfig(&cfg)}}.session()
 
 	require.Equal(t, "high", s.CurrentModelReasoningEffort())
 }
@@ -1909,7 +1909,7 @@ func TestConversationModelAnswersFollowTheSessionsOwnRow(t *testing.T) {
 		}},
 	}}}
 	require.NoError(t, appcfg.Save(filepath.Join(home, "forebrain.yaml"), cfg))
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sessStore}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessStore}).WithConfig(&cfg)}
 	s := sessionEnv{Home: home, SQL: db, SessStore: sessStore, Config: cfg, Runner: runner}.session()
 	restore := run.SetLLMOverrideForTest(&sequencedLLM{})
 	t.Cleanup(restore)
@@ -1979,7 +1979,7 @@ func TestChooseModelEffortLeavesTheConfigFileAlone(t *testing.T) {
 		SQL:       db,
 		SessStore: state.NewSessionStore(db, "main"),
 		Config:    cfg,
-		Runner:    &run.Runner{Deps: &run.Deps{AppCfg: &cfg}},
+		Runner:    &run.Runner{Deps: (&run.Deps{}).WithConfig(&cfg)},
 	}.session()
 
 	picked := chooseInSession(t, s, "model", "openai/"+model)
@@ -2047,7 +2047,7 @@ func TestChooseModelInTheTerminalLeavesTheConfigFileAlone(t *testing.T) {
 		SQL:       db,
 		SessStore: state.NewSessionStore(db, "main"),
 		Config:    cfg,
-		Runner:    &run.Runner{Deps: &run.Deps{AppCfg: &cfg, AgentName: "main"}},
+		Runner:    &run.Runner{Deps: (&run.Deps{AgentName: "main"}).WithConfig(&cfg)},
 	}.session()
 
 	require.Equal(t, "Switched to openai/gpt-4o-mini.", chooseInSession(t, s, "model", modelLabel(t, s, "openai/gpt-4o-mini")).Reply)
@@ -2114,7 +2114,7 @@ func TestChooseModelResolvesAgainstTheActiveAgent(t *testing.T) {
 		SQL:       db,
 		SessStore: state.NewSessionStore(db, "main"),
 		Config:    cfg,
-		Runner:    &run.Runner{Deps: &run.Deps{AppCfg: &cfg, AgentName: "writer"}},
+		Runner:    &run.Runner{Deps: (&run.Deps{AgentName: "writer"}).WithConfig(&cfg)},
 	}.session()
 
 	require.Equal(t, "Switched to openai/gpt-4o-mini.", chooseInSession(t, s, "model", modelLabel(t, s, "openai/gpt-4o-mini")).Reply)
@@ -5872,7 +5872,7 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 		},
 	}}
 
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, Actions: actions, SessionStore: sessStore, RunRT: runStore}, FileResolver: run.PathResolver{}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", Actions: actions, SessionStore: sessStore, RunRT: runStore}).WithConfig(cfg), FileResolver: run.PathResolver{}}
 
 	if client != nil {
 		restore := run.SetLLMOverrideForTest(client)
@@ -5903,10 +5903,10 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 	// harness that gave the session its own copies would run every turn with no
 	// hooks and no run store.
 	pipe := hook.NewAgentPipeline()
-	env := &process.Environment{
-		Deps: run.Deps{
-			Home:         home,
-			AppCfg:       cfg,
+	env := (&process.Environment{
+		Deps: &run.Deps{
+			Home: home,
+
 			RunRT:        runStore,
 			SessionStore: sessStore,
 			Actions:      actions,
@@ -5918,8 +5918,8 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 		Control:    control,
 		Foreground: session.NewLocker(),
 		Hooks:      pipe,
-	}
-	runner.Deps = &env.Deps
+	}).WithDepsConfig(cfg)
+	runner.Deps = env.Deps
 	s := &ChatSession{Env: env, tuiControl: control}
 	// Mirrors openProcessChatSession: Submit executes through the environment's
 	// run executor, and the per-turn hook closes over the session.
@@ -6943,15 +6943,15 @@ func TestCharacterizationApprovalSurvivesProcessRestart(t *testing.T) {
 	// the way a restarted process would: new Runner, new in-memory state, same
 	// persisted store.
 	restartedPipe := hook.NewAgentPipeline()
-	restartedRunner := &run.Runner{Deps: &run.Deps{Home: original.home(), AgentName: "main", AppCfg: original.runner().AppCfg, Actions: original.actionSvc(), SessionStore: original.sessStore(), RunRT: original.runSvc(), ProjectRoot: original.home()}, FileResolver: run.PathResolver{}}
+	restartedRunner := &run.Runner{Deps: (&run.Deps{Home: original.home(), AgentName: "main", Actions: original.actionSvc(), SessionStore: original.sessStore(), RunRT: original.runSvc(), ProjectRoot: original.home()}).WithConfig(original.runner().Config()), FileResolver: run.PathResolver{}}
 	// A restarted process rebuilds its Environment too, so the resumed run
 	// executes through a new executor over the same persisted store. Without
 	// one, Submit has nothing to run and the resumed run never leaves
 	// "running".
-	restartedEnv := &process.Environment{
-		Deps: run.Deps{
-			Home:         original.home(),
-			AppCfg:       original.runner().AppCfg,
+	restartedEnv := (&process.Environment{
+		Deps: &run.Deps{
+			Home: original.home(),
+
 			RunRT:        original.runSvc(),
 			SessionStore: original.sessStore(),
 			Actions:      original.actionSvc(),
@@ -6963,8 +6963,8 @@ func TestCharacterizationApprovalSurvivesProcessRestart(t *testing.T) {
 		Control:    run.NewController(),
 		Foreground: session.NewLocker(),
 		Hooks:      restartedPipe,
-	}
-	restartedRunner.Deps = &restartedEnv.Deps
+	}).WithDepsConfig(original.runner().Config())
+	restartedRunner.Deps = restartedEnv.Deps
 	restarted := &ChatSession{Env: restartedEnv, tuiControl: restartedEnv.Control}
 	restarted.Core = turn.New(
 		turn.WithSessionStore(original.sessStore()),
@@ -13564,7 +13564,7 @@ func TestPlanReviewOptionsDedupeAndMarkTheCurrentModel(t *testing.T) {
 		appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"},
 		appcfg.AgentLLMProviderConfig{Provider: "anthropic", Model: "claude-sonnet-4"},
 	)
-	cs := sessionEnv{Runner: &run.Runner{Deps: &run.Deps{AppCfg: cfg}}}.session()
+	cs := sessionEnv{Runner: &run.Runner{Deps: (&run.Deps{}).WithConfig(cfg)}}.session()
 
 	options := planReviewOptionsFor(cs)
 	if len(options) != 2 {
@@ -13580,7 +13580,7 @@ func TestPlanReviewOptionsDedupeAndMarkTheCurrentModel(t *testing.T) {
 
 func TestPlanReviewOptionsAreOnlyOfferedForExitPlanApprovals(t *testing.T) {
 	cfg := planReviewConfig(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"})
-	cs := sessionEnv{Runner: &run.Runner{Deps: &run.Deps{AppCfg: cfg}}}.session()
+	cs := sessionEnv{Runner: &run.Runner{Deps: (&run.Deps{}).WithConfig(cfg)}}.session()
 	if len(planReviewOptionsFor(cs)) == 0 {
 		t.Fatal("a configured session must offer at least one reviewer")
 	}
@@ -13597,7 +13597,7 @@ func TestPlanReviewIsOfferedRegardlessOfSubagentSwitch(t *testing.T) {
 	for name, sw := range map[string]*bool{"enabled": &on, "disabled": &off, "unset": nil} {
 		cfg := *base
 		cfg.Agents.Defaults.EnableSubagent = sw
-		if got := planReviewOptionsFor(sessionEnv{Runner: &run.Runner{Deps: &run.Deps{AppCfg: &cfg}}}.session()); len(got) == 0 {
+		if got := planReviewOptionsFor(sessionEnv{Runner: &run.Runner{Deps: (&run.Deps{}).WithConfig(&cfg)}}.session()); len(got) == 0 {
 			t.Fatalf("enable_subagent %s: a configured model must be offered as reviewer", name)
 		}
 	}
@@ -13717,7 +13717,7 @@ func newReviewRunSession(t *testing.T, executor run.SubagentExecutor) (*ChatSess
 	cs := sessionEnv{
 		Home:      home,
 		ActionSvc: actions,
-		Runner:    &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, ProjectRoot: home}, SubagentExecutor: executor},
+		Runner:    &run.Runner{Deps: (&run.Deps{Home: home, ProjectRoot: home}).WithConfig(cfg), SubagentExecutor: executor},
 	}.session()
 	cs.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "session-1"})
 	// The shared flow reads the plan from the session's own plan file.
@@ -14009,7 +14009,7 @@ func TestPlanReviewFencesItsRunWaitSoNothingElseResumesIt(t *testing.T) {
 	)
 	cs := sessionEnv{
 		Home: home, ActionSvc: actions, RunSvc: runs,
-		Runner: &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, ProjectRoot: home}, SubagentExecutor: executor},
+		Runner: &run.Runner{Deps: (&run.Deps{Home: home, ProjectRoot: home}).WithConfig(cfg), SubagentExecutor: executor},
 	}.session()
 	cs.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "session-1"})
 	cs.SetToolApprovalSink(&scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Approved: true}}})
@@ -29203,10 +29203,10 @@ func TestCharacterizationConfigApplyKeepsEnvironmentConfigLive(t *testing.T) {
 	if got := s.cfg().Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-main-v2" {
 		t.Fatalf("session config model = %q, want the applied value", got)
 	}
-	if s.Env == nil || s.Env.Deps.AppCfg == nil {
+	if s.Env == nil || s.Env.Deps.Config() == nil {
 		t.Fatal("characterization session must carry an Environment with a config")
 	}
-	if got := s.Env.Deps.AppCfg.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-main-v2" {
+	if got := s.Env.Deps.Config().Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-main-v2" {
 		t.Fatalf("Environment config model = %q, want %q: applying a configuration must leave "+
 			"the Environment holding the live config, because the run executor resolves the "+
 			"agent state root from it", got, "gpt-main-v2")
@@ -29318,7 +29318,7 @@ func TestConfigApplyRepointsEveryConfigHolder(t *testing.T) {
 	cfg, err := loadDocumentForTest(path)
 	require.NoError(t, err)
 
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main"}).WithConfig(&cfg)}
 	require.NoError(t, runner.Load())
 	s := sessionEnv{Home: home, Config: cfg, Runner: runner}.session()
 	s.userHooks = &hook.Runtime{Home: home, Cfg: s.cfg()}
@@ -29329,9 +29329,9 @@ func TestConfigApplyRepointsEveryConfigHolder(t *testing.T) {
 
 	require.NotSame(t, before, s.cfg(), "an application must publish a new config, not mutate the old one in place")
 	require.Equal(t, "gpt-new", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
-	require.Same(t, s.cfg(), s.Env.Deps.AppCfg,
+	require.Same(t, s.cfg(), s.Env.Deps.Config(),
 		"the session must read the environment's config, not a copy of it")
-	require.Same(t, s.cfg(), s.runner().AppCfg,
+	require.Same(t, s.cfg(), s.runner().Config(),
 		"the runner shares the environment's Deps, so it sees the same config")
 	require.Same(t, s.cfg(), s.userHooks.Cfg,
 		"the user hook runtime holds a pointer the session handed out; an application must re-point it")
@@ -29368,6 +29368,8 @@ func (e sessionEnv) session() *ChatSession {
 		Sandbox: e.Sandbox,
 		Runner:  e.Runner,
 		Hooks:   e.Pipe,
+		// The zero Deps this wiring always had when no runner supplied one.
+		Deps: &run.Deps{},
 	}
 	if e.Home != "" {
 		// process.Open always fills this in, and the environment's reload path
@@ -29375,11 +29377,11 @@ func (e sessionEnv) session() *ChatSession {
 		env.ConfigPath = filepath.Join(e.Home, "forebrain.yaml")
 	}
 	if e.Runner != nil && e.Runner.Deps != nil {
-		env.Deps = *e.Runner.Deps
+		env.Deps = e.Runner.Deps
 	}
 	cfg := e.Config
-	if env.Deps.AppCfg == nil {
-		env.Deps.AppCfg = &cfg
+	if env.Deps.Config() == nil {
+		env.Deps.SetConfig(&cfg)
 	}
 	if e.Home != "" {
 		env.Deps.Home = e.Home
@@ -29403,7 +29405,7 @@ func (e sessionEnv) session() *ChatSession {
 		env.Deps.RunRT = e.RunSvc
 	}
 	if e.Runner != nil {
-		e.Runner.Deps = &env.Deps
+		e.Runner.Deps = env.Deps
 	}
 	// One controller, shared: the environment asks it whether a run is active
 	// before applying a config reload, while the session asks it the same
@@ -29451,7 +29453,7 @@ func seedConfigFromFile(s *ChatSession) error {
 	// derives from, and forebrain.yaml carries only its supported keys (plan
 	// 207 §3.6) — the fixture keeps the whole document it just read, which is
 	// what this session is meant to run on.
-	s.Env.RawConfig = loaded
+	s.Env.SetRawConfig(loaded)
 	s.adoptConfig(&effective)
 	if st := s.sessStore(); st != nil {
 		st.SetMemoryMode(memory.SessionModeFor(s.cfg()))
@@ -30657,7 +30659,7 @@ func TestPlanReviewRunIsAChildOfTheGatedRun(t *testing.T) {
 	cs := sessionEnv{
 		Home:      home,
 		ActionSvc: newTestActions(t, db),
-		Runner:    &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, ProjectRoot: home, RunRT: runs}, SubagentExecutor: executor},
+		Runner:    &run.Runner{Deps: (&run.Deps{Home: home, ProjectRoot: home, RunRT: runs}).WithConfig(cfg), SubagentExecutor: executor},
 	}.session()
 	cs.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "session-1", RunID: gate.ID})
 	// The shared flow reads the plan from the session's own plan file.
@@ -31204,14 +31206,14 @@ func (f *crossProcessFixture) loadRuntime(t *testing.T, sessionID string) *ChatS
 	t.Cleanup(func() { _ = db.Close() })
 	sessStore := state.NewSessionStore(db, "main")
 	require.NoError(t, sessStore.Ensure(context.Background(), sessionID, sessionID))
-	deps := run.Deps{
+	deps := &run.Deps{
 		Home:         f.home,
 		AgentName:    "main",
-		AppCfg:       &loaded,
 		SessionStore: sessStore,
 	}
+	deps.SetConfig(&loaded)
 	env := &process.Environment{Root: f.home, ConfigPath: f.cfgPath, Deps: deps}
-	runner := &run.Runner{Deps: &env.Deps}
+	runner := &run.Runner{Deps: env.Deps}
 	env.Runner = runner
 	require.NoError(t, runner.Load())
 	return &ChatSession{Env: env, tuiControl: run.NewController()}
@@ -31976,7 +31978,7 @@ func TestPanelMCPInventoryReadsTheConversationRunner(t *testing.T) {
 	t.Cleanup(s.Env.CloseRunnerPool)
 	// A shared entry every project runner inherits; the fixture's base runner
 	// was built without it.
-	s.Env.Deps.AppCfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
+	s.Env.Deps.Config().Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
 		Name: "global-srv", Transport: "stdio", Command: "/usr/bin/true",
 	}}
 

@@ -283,7 +283,7 @@ func TestConversationSummaryRequestStartsLikeTheConversation(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
 	}}}
-	r := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}, FileResolver: PathResolver{}}
+	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg), FileResolver: PathResolver{}}
 	if err := r.Load(); err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +434,7 @@ func TestSummaryChainHealsRefusedImage(t *testing.T) {
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
 	}}}
-	r := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}, FileResolver: PathResolver{}}
+	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg), FileResolver: PathResolver{}}
 	if err := r.Load(); err != nil {
 		t.Fatalf("load runner: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestCompactionSizesATypedSubagentByItsOwnModel(t *testing.T) {
 			{Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
 		}},
 	}}}
-	r := &Runner{Deps: &Deps{AppCfg: cfg}}
+	r := &Runner{Deps: (&Deps{}).WithConfig(cfg)}
 
 	// The context an explore subagent's own calls run under: its subtype, a
 	// query source that is not the main thread's.
@@ -1039,14 +1039,14 @@ func TestContextBudgetSizesByTheSessionOwnRow(t *testing.T) {
 	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
 	runner, store := newSessionRoutingRunner(t, nil)
 	wide, narrow := int64(64000), int64(32000)
-	runner.Deps.AppCfg.LLMModels = []appcfg.LLMModelConfig{
+	runner.Deps.Config().LLMModels = []appcfg.LLMModelConfig{
 		{ID: "row-a", Provider: "openai", Model: "gpt-b", BaseURL: "http://a.test/v1", Caps: appcfg.LLMModelCaps{ContextWindow: &wide}},
 		{ID: "row-b", Provider: "openai", Model: "gpt-b", BaseURL: "http://b.test/v1", Caps: appcfg.LLMModelCaps{ContextWindow: &narrow}},
 	}
 	// The rows' capabilities reach the lookup the way the composition's
 	// adoption installs them (pkg/process owns the installer; the tables it
 	// fills are what the budget reads).
-	byRow, pairOf := processModelOverridesFor(runner.Deps.AppCfg)
+	byRow, pairOf := processModelOverridesFor(runner.Deps.Config())
 	llm.SetModelOverrides(byRow, pairOf)
 	if byRow["row-b"].ContextWindow == nil || *byRow["row-b"].ContextWindow != 32000 {
 		t.Fatalf("byRow[row-b] = %+v, want the row's window installed", byRow["row-b"])
@@ -1106,7 +1106,7 @@ func TestCompactionServiceReadsTheSessionsOwnRow(t *testing.T) {
 		},
 	)
 	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
-	// CompactionService reads r.AppCfg, a field promoted through the embedded
+	// CompactionService reads r.Config(), a field promoted through the embedded
 	// *Deps, so this runner needs a non-nil Deps even though modelHitFor and
 	// agentModelRowFor alone would work with a bare &Runner{}.
 	r := &Runner{Deps: &Deps{}}

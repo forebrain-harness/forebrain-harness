@@ -17,7 +17,7 @@ import (
 
 // P3-4 requires a broken-config test proving the live runtime is left
 // completely unchanged, with no half-applied state. applyComposedConfigLocked
-// swaps Runner.AppCfg/MCPServers/YOLO *before* it calls Runner.Load, so a
+// swaps Runner.Config()/MCPServers/YOLO *before* it calls Runner.Load, so a
 // config that parses and passes the startup check but fails to load is exactly
 // the case that can strand the runner describing a configuration nothing else
 // is using. The rollback in config_apply.go had no coverage before this.
@@ -46,12 +46,12 @@ func TestApplyComposedConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T)
 	}
 	live := &cfg
 
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: live}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main"}).WithConfig(live)}
 	runner.MCPServers = live.Agents.Defaults.MCPServers
 	if err := runner.Load(); err != nil {
 		t.Fatalf("Runner.Load(good): %v", err)
 	}
-	env := &Environment{Deps: run.Deps{AppCfg: live}, Root: home, ConfigPath: cfgPath, Runner: runner}
+	env := (&Environment{Deps: &run.Deps{}, Root: home, ConfigPath: cfgPath, Runner: runner}).WithDepsConfig(live)
 
 	// Refused by the loader: a provider the runtime cannot route never becomes
 	// the running model, so the application fails after the pointer has already
@@ -78,18 +78,18 @@ func TestApplyComposedConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T)
 	// The snapshot did reach the kernel — it passed the startup check and only
 	// the runner refused it — so the assertions below are about the rollback,
 	// not about an early return.
-	if got := env.RawConfig.Agents.Definitions["main"].LLMProviders; len(got) != 1 || got[0].APIKey != "" {
+	if got := env.RawConfigValue().Agents.Definitions["main"].LLMProviders; len(got) != 1 || got[0].APIKey != "" {
 		t.Fatalf("RawConfig = %+v, want the applied snapshot; the failure came before the runner was reached", got)
 	}
 
-	if env.Deps.AppCfg != live {
-		t.Fatalf("Environment.Deps.AppCfg was replaced despite the failed load")
+	if env.deps().Config() != live {
+		t.Fatalf("Environment.Deps.Config() was replaced despite the failed load")
 	}
-	if env.Runner.AppCfg != live {
-		t.Fatalf("Runner.AppCfg = %p, want it restored to the live config %p", env.Runner.AppCfg, live)
+	if env.Runner.Config() != live {
+		t.Fatalf("Runner.AppCfg = %p, want it restored to the live config %p", env.Runner.Config(), live)
 	}
-	if got := env.Runner.AppCfg.Agents.Definitions["main"].LLMProviders; len(got) != 1 || got[0].Model != "gpt-old" {
-		t.Fatalf("Runner.AppCfg providers = %+v, want the pre-apply gpt-old entry", got)
+	if got := env.Runner.Config().Agents.Definitions["main"].LLMProviders; len(got) != 1 || got[0].Model != "gpt-old" {
+		t.Fatalf("Runner.Config() providers = %+v, want the pre-apply gpt-old entry", got)
 	}
 	if len(env.Runner.MCPServers) != 1 || env.Runner.MCPServers[0].Name != "keep-me" {
 		t.Fatalf("Runner.MCPServers = %+v, want the pre-apply entry restored", env.Runner.MCPServers)
@@ -135,11 +135,11 @@ func TestRefreshSandboxRuntimeReappliesFilesystemPolicyToInProcessTools(t *testi
 	}
 	cfg.SandboxWorkspaceWrite.WritableRoots = []string{first}
 
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, ProjectRoot: home}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", ProjectRoot: home}).WithConfig(&cfg)}
 	if err := runner.Load(); err != nil {
 		t.Fatalf("Runner.Load: %v", err)
 	}
-	env := &Environment{Deps: run.Deps{Home: home, AppCfg: &cfg}, Root: home, Runner: runner}
+	env := (&Environment{Deps: &run.Deps{Home: home}, Root: home, Runner: runner}).WithDepsConfig(&cfg)
 
 	env.RefreshSandboxRuntime()
 	if !slices.Contains(runner.Tools().PermissionRoots(safety.FileSystemAccessWrite), first) {
@@ -187,7 +187,7 @@ func TestApplyComposedConfigLeavesMCPServersFrozen(t *testing.T) {
 		t.Fatal(err)
 	}
 	live := &cfg
-	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: live}}
+	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main"}).WithConfig(live)}
 	// The composition root resolved the effective list once at Open time; the
 	// apply path must not touch it afterwards.
 	runner.MCPServers = append([]appcfg.MCPServerConfig(nil), live.Agents.Defaults.MCPServers...)
@@ -195,7 +195,7 @@ func TestApplyComposedConfigLeavesMCPServersFrozen(t *testing.T) {
 	if err := runner.Load(); err != nil {
 		t.Fatalf("Runner.Load(first): %v", err)
 	}
-	env := &Environment{Deps: run.Deps{AppCfg: live, MCPServers: frozen}, Root: home, ConfigPath: cfgPath, Runner: runner}
+	env := (&Environment{Deps: &run.Deps{MCPServers: frozen}, Root: home, ConfigPath: cfgPath, Runner: runner}).WithDepsConfig(live)
 
 	const second = "agents:\n" +
 		"  defaults:\n" +
@@ -219,14 +219,14 @@ func TestApplyComposedConfigLeavesMCPServersFrozen(t *testing.T) {
 	if err := env.applyComposedConfigLocked(secondCfg); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if got := env.Runner.AppCfg.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-new" {
+	if got := env.Runner.Config().Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-new" {
 		t.Fatalf("AppCfg should reflect the applied snapshot, got %q", got)
 	}
 	if len(env.Runner.MCPServers) != 1 || env.Runner.MCPServers[0].Name != "first-server" {
 		t.Fatalf("effective MCP list must stay frozen, got %+v", env.Runner.MCPServers)
 	}
-	if env.Deps.MCPServers[0].Name != "first-server" {
-		t.Fatalf("Deps.MCPServers must stay frozen, got %+v", env.Deps.MCPServers)
+	if env.deps().MCPServers[0].Name != "first-server" {
+		t.Fatalf("Deps.MCPServers must stay frozen, got %+v", env.deps().MCPServers)
 	}
 }
 
@@ -248,7 +248,7 @@ func TestApplyComposedConfigPropagatesToPoolEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := env.Deps.SessionStore.Ensure(ctx, "sess-apply", "sess-apply"); err != nil {
+	if err := env.deps().SessionStore.Ensure(ctx, "sess-apply", "sess-apply"); err != nil {
 		t.Fatal(err)
 	}
 	if err := projects.BindSession(ctx, "sess-apply", proj.ID); err != nil {
@@ -280,7 +280,7 @@ func TestApplyComposedConfigPropagatesToPoolEntries(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 
-	if pooled.AppCfg == env.Deps.AppCfg {
+	if pooled.Config() == env.deps().Config() {
 		t.Fatalf("pooled runner shares the base runner's derived config; its sandbox must follow its own trust")
 	}
 	if got := run.PrimaryEndpoint(pooled); got != "http://propagated.test/v1" {
@@ -304,7 +304,7 @@ func TestHandEditedConfigFileIsNotPickedUp(t *testing.T) {
 
 	applied := 0
 	env.OnConfigReload = func(*appcfg.Root) { applied++ }
-	before := env.Deps.AppCfg
+	before := env.deps().Config()
 
 	// A file edit the old watcher would have picked up within its 400ms
 	// debounce: a different provider model, with no database row behind it.
@@ -323,12 +323,12 @@ func TestHandEditedConfigFileIsNotPickedUp(t *testing.T) {
 	if applied != 0 {
 		t.Fatalf("the file edit was applied %d times without a restart, want 0: nothing watches the file (plan 189)", applied)
 	}
-	if env.Deps.AppCfg != before {
+	if env.deps().Config() != before {
 		t.Fatal("the live config moved under a file edit")
 	}
 	// The live configuration still runs on the imported model, which plan 262
 	// moved into the model table: the definition names that row.
-	if got := appcfg.EffectiveDefaultLLMFor(env.Deps.AppCfg, "main"); got == nil || got.Model != "gpt-import" {
+	if got := appcfg.EffectiveDefaultLLMFor(env.deps().Config(), "main"); got == nil || got.Model != "gpt-import" {
 		t.Fatalf("live provider model = %+v, want the imported gpt-import", got)
 	}
 
@@ -337,7 +337,7 @@ func TestHandEditedConfigFileIsNotPickedUp(t *testing.T) {
 	if err := env.SyncConfigFromDB(context.Background()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if got := appcfg.EffectiveDefaultLLMFor(env.Deps.AppCfg, "main"); got == nil || got.Model != "gpt-import" {
+	if got := appcfg.EffectiveDefaultLLMFor(env.deps().Config(), "main"); got == nil || got.Model != "gpt-import" {
 		t.Fatalf("provider model after a sync = %+v, want the database's gpt-import (a hand edit is not a source)", got)
 	}
 	if applied != 0 {
@@ -372,7 +372,7 @@ func TestAdoptLaunchTrustRederivesTheSandbox(t *testing.T) {
 	if level := env.LaunchProject.TrustLevel; level != safety.LevelUnknown {
 		t.Fatalf("trust level after Open = %q, want undecided", level)
 	}
-	if got := env.Deps.AppCfg.SandboxMode; got != appcfg.SandboxModeReadOnly {
+	if got := env.deps().Config().SandboxMode; got != appcfg.SandboxModeReadOnly {
 		t.Fatalf("sandbox after Open = %q, want read-only while undecided", got)
 	}
 
@@ -388,10 +388,10 @@ func TestAdoptLaunchTrustRederivesTheSandbox(t *testing.T) {
 	if level := env.LaunchProject.TrustLevel; level != safety.LevelTrusted {
 		t.Fatalf("trust level after AdoptLaunchTrust = %q, want trusted", level)
 	}
-	if level := env.Deps.LaunchProject.TrustLevel; level != safety.LevelTrusted {
+	if level := env.deps().LaunchProject.TrustLevel; level != safety.LevelTrusted {
 		t.Fatalf("Deps trust level after AdoptLaunchTrust = %q, want trusted", level)
 	}
-	if got := env.Deps.AppCfg.SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
+	if got := env.deps().Config().SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
 		t.Fatalf("sandbox after AdoptLaunchTrust = %q, want workspace-write", got)
 	}
 
@@ -404,11 +404,11 @@ func TestAdoptLaunchTrustRederivesTheSandbox(t *testing.T) {
 		t.Fatalf("Open (no launch project): %v", err)
 	}
 	defer gw.Close()
-	before, beforeCfg := gw.LaunchProject, gw.Deps.AppCfg
+	before, beforeCfg := gw.LaunchProject, gw.Deps.Config()
 	if err := gw.AdoptLaunchTrust(); err != nil {
 		t.Fatalf("AdoptLaunchTrust on a no-launch-project environment: %v", err)
 	}
-	if gw.LaunchProject != before || gw.Deps.AppCfg != beforeCfg {
+	if gw.LaunchProject != before || gw.Deps.Config() != beforeCfg {
 		t.Fatal("a no-launch-project environment must not change on AdoptLaunchTrust")
 	}
 }
@@ -421,7 +421,7 @@ func TestApplyComposedConfigSeedsNewSessionsWithTheApprovalPreset(t *testing.T) 
 	ctx := context.Background()
 	env, _, _ := newPoolTestEnv(t)
 	// A session that exists before the change, born under no configured preset.
-	if err := env.Deps.SessionStore.Ensure(ctx, "before", "before"); err != nil {
+	if err := env.deps().SessionStore.Ensure(ctx, "before", "before"); err != nil {
 		t.Fatalf("ensure before: %v", err)
 	}
 
@@ -446,10 +446,10 @@ func TestApplyComposedConfigSeedsNewSessionsWithTheApprovalPreset(t *testing.T) 
 		t.Fatalf("apply: %v", err)
 	}
 
-	if err := env.Deps.SessionStore.Ensure(ctx, "after", "after"); err != nil {
+	if err := env.deps().SessionStore.Ensure(ctx, "after", "after"); err != nil {
 		t.Fatalf("ensure after: %v", err)
 	}
-	preset, source, _, stored, err := env.Deps.SessionStore.SessionPermissionPreset(ctx, "after")
+	preset, source, _, stored, err := env.deps().SessionStore.SessionPermissionPreset(ctx, "after")
 	if err != nil || !stored || preset != "full_access" || source == "" {
 		t.Fatalf("session born after the apply = %q/%q stored=%v err=%v, want full_access", preset, source, stored, err)
 	}
@@ -459,7 +459,7 @@ func TestApplyComposedConfigSeedsNewSessionsWithTheApprovalPreset(t *testing.T) 
 	// The session that already existed was not re-seeded: a configuration
 	// change reaches the sessions created after it, never the row a running
 	// conversation was given.
-	if preset, _, _, _, err := env.Deps.SessionStore.SessionPermissionPreset(ctx, "before"); err != nil || preset != state.SessionPresetWorkspaceWrite {
+	if preset, _, _, _, err := env.deps().SessionStore.SessionPermissionPreset(ctx, "before"); err != nil || preset != state.SessionPresetWorkspaceWrite {
 		t.Fatalf("existing session preset = %q err=%v, want the workspace_write row it was born with", preset, err)
 	}
 }

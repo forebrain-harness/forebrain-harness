@@ -342,7 +342,7 @@ type llmModelScope struct {
 // adoptLLMModelWrite re-reads the composed configuration after a table write, so
 // the process runs on the rows the table now holds. Every picker and the
 // conversation's own model read come from the runtime snapshot
-// (Environment.Deps.AppCfg), which only moves when the composition is
+// (Environment.Deps.Config()), which only moves when the composition is
 // re-applied: a write that stored a row and left the snapshot alone would hide
 // it until an unrelated reload, and the models page would show a model nothing
 // can be switched to.

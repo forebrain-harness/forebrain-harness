@@ -2000,7 +2000,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 			pin.ModelID = strings.TrimSpace(sel.ModelID)
 		}
 		if pin.ModelID == "" {
-			pin.ModelID = ModelIDForAgentModel(own.AppCfg, own.activeAgentNameForModel(), provider, model)
+			pin.ModelID = ModelIDForAgentModel(own.Config(), own.activeAgentNameForModel(), provider, model)
 		}
 	}
 	if pin.valid() {
@@ -3021,7 +3021,7 @@ func SubagentContextGauge(ctx context.Context, r *Runner, conversationSessionID,
 	var store *state.SessionStore
 	if r != nil && r.Deps != nil {
 		store = r.Deps.SessionStore
-		budget = CompactBudgetOptions(r.AppCfg)
+		budget = CompactBudgetOptions(r.Config())
 	}
 	used, _ = ContextOccupancy(ctx, store, record.WorkerSessionID)
 	return record.WorkerSessionID, modelID, provider, model, used, budget, nil
