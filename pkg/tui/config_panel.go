@@ -27,31 +27,31 @@ import (
 
 // The panel's fixed rows and notice lines.
 const (
-	configSaveRowLabel = "保存并生效"
-	configBackRowLabel = "返回段列表"
-	configAddRowLabel  = "＋ 新增一行"
-	configUpRowLabel   = "返回上一级"
-	configRowEditLabel = "编辑"
-	configRowOpenLabel = "打开"
-	configRowDropLabel = "删除此行"
-	configRowBackLabel = "返回"
+	configSaveRowLabel = "Save and apply"
+	configBackRowLabel = "Back to sections"
+	configAddRowLabel  = "+ Add a row"
+	configUpRowLabel   = "Up one level"
+	configRowEditLabel = "Edit"
+	configRowOpenLabel = "Open"
+	configRowDropLabel = "Delete this row"
+	configRowBackLabel = "Back"
 
-	configSavedNotice = "已写入数据库，下一 turn 生效"
+	configSavedNotice = "Written to the database; applies from the next turn"
 	// configFileOnlyNote is the read-only tail every forebrain.yaml section
 	// carries: the panel must not look like an editor for a section it
 	// cannot write.
-	configFileOnlyNote = "此段只能手动编辑 forebrain.yaml，重启进程后生效"
+	configFileOnlyNote = "This section is edited in forebrain.yaml by hand only; it applies after the process restarts"
 
-	configBoolOnLabel    = "开"
-	configBoolOffLabel   = "关"
-	configBoolUnsetLabel = "默认（不设置）"
-	configUnsetLabel     = "默认（不设置）"
+	configBoolOnLabel    = "On"
+	configBoolOffLabel   = "Off"
+	configBoolUnsetLabel = "Default (unset)"
+	configUnsetLabel     = "Default (unset)"
 
-	configNewTextRow   = "文本"
-	configNewNumberRow = "数字"
-	configNewTrueRow   = "开"
-	configNewFalseRow  = "关"
-	configNewObjectRow = "子对象"
+	configNewTextRow   = "Text"
+	configNewNumberRow = "Number"
+	configNewTrueRow   = "On"
+	configNewFalseRow  = "Off"
+	configNewObjectRow = "Object"
 )
 
 // configPanelSnapshot is what the panel reads when it opens: the stored
@@ -78,7 +78,7 @@ type configPanelSession interface {
 // own copy, and anything another surface wrote shows up on the next open.
 func (s *ChatSession) ConfigPanelSections(ctx context.Context) (configPanelSnapshot, error) {
 	if s == nil || s.Env == nil {
-		return configPanelSnapshot{}, fmt.Errorf("配置面板不可用：没有运行时环境")
+		return configPanelSnapshot{}, fmt.Errorf("the configuration panel is unavailable: no runtime environment")
 	}
 	root, err := s.Env.ComposedPersistedConfig(ctx)
 	if err != nil {
@@ -117,14 +117,14 @@ func (s *ChatSession) ConfigPanelSections(ctx context.Context) (configPanelSnaps
 // for one would be a second copy nothing reads.
 func (s *ChatSession) UpdateConfigSection(ctx context.Context, section string, raw json.RawMessage) error {
 	if s == nil || s.Env == nil {
-		return fmt.Errorf("配置面板不可用：没有运行时环境")
+		return fmt.Errorf("the configuration panel is unavailable: no runtime environment")
 	}
 	schema, ok := configSectionSchemaFor(section)
 	if !ok {
-		return fmt.Errorf("未知配置段 %q", section)
+		return fmt.Errorf("unknown configuration section %q", section)
 	}
 	if schema.YAMLOnly {
-		return fmt.Errorf("段 %s 只能手动编辑 forebrain.yaml", schema.Name)
+		return fmt.Errorf("section %s is edited in forebrain.yaml by hand only", schema.Name)
 	}
 	store, err := s.Env.ConfigStore()
 	if err != nil {
@@ -162,7 +162,7 @@ func (c *commandController) handleConfig(ctx context.Context, args []string) boo
 	}
 	session, ok := c.session.(configPanelSession)
 	if !ok {
-		c.renderer.PrintError(fmt.Errorf("/config 不可用：这个会话没有挂载配置源"))
+		c.renderer.PrintError(fmt.Errorf("/config is unavailable: this session has no configuration source mounted"))
 		return true
 	}
 	panel := newConfigPanel(c.selector, c.renderer, session)
@@ -178,7 +178,7 @@ func (c *commandController) handleConfig(ctx context.Context, args []string) boo
 	if len(args) > 0 {
 		schema, known := panelSectionSchemaFor(args[0])
 		if !known {
-			c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "config", Content: "/config " + args[0] + " 不是已知配置段。\n可用：" + strings.Join(configSectionNames(), "、"), Final: true})
+			c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "config", Content: "/config " + args[0] + " is not a known configuration section.\nAvailable: " + strings.Join(configSectionNames(), ", "), Final: true})
 			return true
 		}
 		start = schema.Name
@@ -210,7 +210,7 @@ func (p *configPanel) run(ctx context.Context, start string) {
 // chooseSection lists every section, tabbed by the group its descriptor names.
 func (p *configPanel) chooseSection() (string, bool) {
 	items, names := p.sectionItems()
-	label := "配置\n运行时配置段。保存写入数据库，下一 turn 生效；标 [YAML] 的段只读。"
+	label := "Configuration\nRuntime configuration sections. Saving writes the database and applies from the next turn; a [YAML] section is read-only."
 	idx, ok, err := selectRichTabbed(p.sel, label, items, TabbedSelectOptions{DefaultIdx: 0})
 	if err != nil {
 		p.printError(err)
@@ -278,11 +278,11 @@ func (p *configPanel) sectionDescription(schema configSectionSchema) string {
 	desc := schema.Title + " · " + schema.Summary
 	switch {
 	case schema.YAMLOnly:
-		return "[YAML] " + desc + " · 只读"
+		return "[YAML] " + desc + " · read-only"
 	case len(p.raw[schema.Name]) > 0:
-		return desc + " · 已设置"
+		return desc + " · set"
 	default:
-		return desc + " · 默认"
+		return desc + " · default"
 	}
 }
 
@@ -291,7 +291,7 @@ func (p *configPanel) sectionDescription(schema configSectionSchema) string {
 func (p *configPanel) editSection(ctx context.Context, name string) bool {
 	schema, ok := configSectionSchemaFor(name)
 	if !ok {
-		p.printError(fmt.Errorf("未知配置段 %q", name))
+		p.printError(fmt.Errorf("unknown configuration section %q", name))
 		return true
 	}
 	if schema.YAMLOnly {
@@ -351,15 +351,15 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 		owners = append(owners, i)
 	}
 	items = append(items,
-		SelectItem{Label: configSaveRowLabel, Description: "写入数据库（fb_config），下一 turn 生效"},
-		SelectItem{Label: configBackRowLabel, Description: "回到段列表；未保存的改动丢弃"},
+		SelectItem{Label: configSaveRowLabel, Description: "Writes the database (fb_config); applies from the next turn"},
+		SelectItem{Label: configBackRowLabel, Description: "Back to the section list; unsaved changes are dropped"},
 	)
 	owners = append(owners, configRowSave, configRowBack)
 	return items, owners
 }
 
 // configFieldListed reports whether the panel offers one field on this machine.
-// 「允许联网」is not offered on Windows: the restricted-token sandbox cannot take
+// "Allow network access" is not offered on Windows: the restricted-token sandbox cannot take
 // the network away, so the switch would control nothing (plan 206 §3.2). The
 // platform that decides is the one running the sandbox, not the one a browser
 // happens to be on. A ClaudeCodeOnly field is offered only where Claude Code
@@ -381,12 +381,12 @@ func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice 
 	head := schema.Name + " · " + schema.Title + "\n" + schema.Summary
 	switch {
 	case len(p.raw[schema.Name]) == 0:
-		head += " · 当前：默认（数据库里没有这一段的记录）"
+		head += " · now: default (the database holds no record for this section)"
 	default:
-		head += " · 当前：已设置"
+		head += " · now: set"
 	}
 	if len(schema.Fields) == 0 {
-		head += "\n这一段没有可在终端编辑的设置项。"
+		head += "\nThis section has no setting editable from the terminal."
 	}
 	if notice != "" {
 		head += "\n" + notice
@@ -399,7 +399,7 @@ func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice 
 func (p *configPanel) showFileSection(schema configSectionSchema) {
 	body := strings.TrimSpace(p.file[schema.Name])
 	if body == "" {
-		body = "（未配置）"
+		body = "(not configured)"
 	}
 	content := body + "\n\n" + configFileOnlyNote
 	if overlay, ok := p.sel.(InfoOverlaySelector); ok {
@@ -492,13 +492,13 @@ func (p *configPanel) editField(doc any, field configField) (any, string) {
 	}
 }
 
-// editBool3 is the three-state switch. "默认" deletes the key instead of
+// editBool3 is the three-state switch. "default" deletes the key instead of
 // writing false, because for a *bool that is what "unset" means.
 func (p *configPanel) editBool3(doc any, path []string, field configField, cur any) (any, string) {
 	items := []SelectItem{
-		{Label: configBoolOnLabel, Description: "写入 true"},
-		{Label: configBoolOffLabel, Description: "写入 false"},
-		{Label: configBoolUnsetLabel, Description: "不写这个键，用内置默认"},
+		{Label: configBoolOnLabel, Description: "Writes true"},
+		{Label: configBoolOffLabel, Description: "Writes false"},
+		{Label: configBoolUnsetLabel, Description: "Leaves the key out, using the built-in default"},
 	}
 	defaultIdx := len(items) - 1
 	if value, ok := cur.(bool); ok {
@@ -532,13 +532,13 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 func (p *configPanel) editEnum(doc any, path []string, field configField, cur any) (any, string) {
 	items := make([]SelectItem, 0, len(field.Options)+1)
 	for _, option := range field.Options {
-		item := SelectItem{Label: option, Description: "写入 " + option}
+		item := SelectItem{Label: option, Description: "Writes " + option}
 		if label := field.OptionLabels[option]; label != "" {
 			item = SelectItem{Label: label}
 		}
 		items = append(items, item)
 	}
-	items = append(items, SelectItem{Label: configUnsetLabel, Description: "不写这个键，用内置默认"})
+	items = append(items, SelectItem{Label: configUnsetLabel, Description: "Leaves the key out, using the built-in default"})
 	defaultIdx := len(items) - 1
 	if text, ok := cur.(string); ok {
 		for i, option := range field.Options {
@@ -586,18 +586,18 @@ func (p *configPanel) editNumber(doc any, path []string, field configField, cur 
 	}
 	value, convErr := strconv.Atoi(text)
 	if convErr != nil {
-		return doc, "「" + text + "」不是整数，未写入"
+		return doc, fmt.Sprintf("%q is not an integer; nothing was written", text)
 	}
 	if value < field.Min {
-		return doc, fmt.Sprintf("%s 不能小于 %d，未写入", field.Label, field.Min)
+		return doc, fmt.Sprintf("%s may not be smaller than %d; nothing was written", field.Label, field.Min)
 	}
 	notice := ""
 	if field.Max > 0 && value > field.Max {
 		if !field.Clamp {
-			return doc, fmt.Sprintf("%s 不能大于 %d，未写入", field.Label, field.Max)
+			return doc, fmt.Sprintf("%s may not be larger than %d; nothing was written", field.Label, field.Max)
 		}
 		value = field.Max
-		notice = fmt.Sprintf("按上限存为 %d", field.Max)
+		notice = fmt.Sprintf("Stored as the maximum, %d", field.Max)
 	}
 	updated, note := p.assign(doc, path, value, false)
 	if note != "" {
@@ -644,7 +644,7 @@ func (p *configPanel) fieldPrompt(field configField) string {
 // fieldDescription is a field's picker row: the value in force, then the hint.
 func configFieldDescription(doc any, field configField) string {
 	value, exists := configLookupValue(doc, configFieldPath(field))
-	state := "当前：" + configFieldValueText(field, value, exists)
+	state := "now: " + configFieldValueText(field, value, exists)
 	if strings.TrimSpace(field.Hint) == "" {
 		return state
 	}
@@ -698,8 +698,8 @@ func (p *configPanel) rowItems(container any, keys []string, list bool) ([]Selec
 		owners = append(owners, i)
 	}
 	items = append(items,
-		SelectItem{Label: configAddRowLabel, Description: "在这一层加一行"},
-		SelectItem{Label: configUpRowLabel, Description: "回到上一级；已保存过的行保持已保存"},
+		SelectItem{Label: configAddRowLabel, Description: "Adds a row at this level"},
+		SelectItem{Label: configUpRowLabel, Description: "Back up one level; rows already saved stay saved"},
 	)
 	owners = append(owners, configRowAdd, configRowUp)
 	return items, owners
@@ -717,10 +717,10 @@ func configRowLabel(key string, index int, list bool) string {
 // configRowDescription is a row's second column: what it holds right now.
 func configRowDescription(value any) string {
 	if configIsContainer(value) {
-		return "› " + strconv.Itoa(configContainerLen(value)) + " 项"
+		return "› " + strconv.Itoa(configContainerLen(value)) + " items"
 	}
 	if value == nil {
-		return "（空）"
+		return "(empty)"
 	}
 	return "= " + configScalarText(value)
 }
@@ -733,9 +733,9 @@ func (p *configPanel) rowsPrompt(field configField, keys []string, notice string
 		head += "\n" + field.Hint
 	}
 	if len(keys) == 0 {
-		head += "\n这一层还没有行"
+		head += "\nThis level has no rows yet"
 	} else {
-		head += fmt.Sprintf("\n共 %d 行；选中一行可编辑或删除", len(keys))
+		head += fmt.Sprintf("\n%d rows; open one to edit or delete it", len(keys))
 	}
 	if notice != "" {
 		head += "\n" + notice
@@ -754,8 +754,8 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 	}
 	items := []SelectItem{
 		{Label: editLabel, Description: configRowDescription(value)},
-		{Label: configRowDropLabel, Description: "从这一层去掉，保存后生效"},
-		{Label: configRowBackLabel, Description: "回到行列表"},
+		{Label: configRowDropLabel, Description: "Removes it from this level; applies after you save"},
+		{Label: configRowBackLabel, Description: "Back to the row list"},
 	}
 	idx, ok, err := p.sel.SelectRich(field.Label+" · "+configRowLabel(key, 0, false), items, 0)
 	if err != nil {
@@ -800,7 +800,7 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 	list := configContainerIsList(field, container)
 	key := ""
 	if !list {
-		name, ok, err := p.sel.Input(field.Label+" · 新行的键名", "")
+		name, ok, err := p.sel.Input(field.Label+" · key of the new row", "")
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -810,11 +810,11 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		}
 		key = strings.TrimSpace(name)
 		if key == "" {
-			return doc, "键名不能为空，未写入"
+			return doc, "the key may not be empty; nothing was written"
 		}
 		if rows, isMap := container.(map[string]any); isMap {
 			if _, dup := rows[key]; dup {
-				return doc, "「" + key + "」已存在"
+				return doc, fmt.Sprintf("%q already exists", key)
 			}
 		}
 	}
@@ -853,11 +853,11 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 // whether the caller should open it for editing.
 func (p *configPanel) chooseNewValue(label string, cur any) (any, bool, bool, error) {
 	items := []SelectItem{
-		{Label: configNewTextRow, Description: "字符串"},
-		{Label: configNewNumberRow, Description: "整数"},
-		{Label: configNewTrueRow, Description: "布尔 true"},
-		{Label: configNewFalseRow, Description: "布尔 false"},
-		{Label: configNewObjectRow, Description: "空对象，随后打开编辑"},
+		{Label: configNewTextRow, Description: "String"},
+		{Label: configNewNumberRow, Description: "Integer"},
+		{Label: configNewTrueRow, Description: "Boolean true"},
+		{Label: configNewFalseRow, Description: "Boolean false"},
+		{Label: configNewObjectRow, Description: "Empty object; open it to edit"},
 	}
 	defaultIdx := 0
 	switch value := cur.(type) {
@@ -871,25 +871,25 @@ func (p *configPanel) chooseNewValue(label string, cur any) (any, bool, bool, er
 	case map[string]any:
 		defaultIdx = 4
 	}
-	idx, ok, err := p.sel.SelectRich(label+"\n这一行的值是什么类型", items, defaultIdx)
+	idx, ok, err := p.sel.SelectRich(label+"\nWhat type is this row's value?", items, defaultIdx)
 	if err != nil || !ok {
 		return nil, false, false, err
 	}
 	switch idx {
 	case 0:
-		text, entered, err := p.sel.Input(label+" · 值", configScalarText(cur))
+		text, entered, err := p.sel.Input(label+" · value", configScalarText(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}
 		return text, false, true, nil
 	case 1:
-		text, entered, err := p.sel.Input(label+" · 整数", configScalarInput(cur))
+		text, entered, err := p.sel.Input(label+" · integer", configScalarInput(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}
 		value, convErr := strconv.Atoi(strings.TrimSpace(text))
 		if convErr != nil {
-			return nil, false, false, fmt.Errorf("「%s」不是整数", strings.TrimSpace(text))
+			return nil, false, false, fmt.Errorf("%q is not an integer", strings.TrimSpace(text))
 		}
 		return value, false, true, nil
 	case 2:
@@ -1035,10 +1035,10 @@ func configAssign(doc any, path []string, value any, remove bool) (any, error) {
 	case []any:
 		index, err := strconv.Atoi(head)
 		if err != nil {
-			return doc, fmt.Errorf("%s 不是列表下标", head)
+			return doc, fmt.Errorf("%s is not a list index", head)
 		}
 		if index < 0 || index >= len(node) {
-			return doc, fmt.Errorf("列表下标 %s 超出范围", head)
+			return doc, fmt.Errorf("list index %s is out of range", head)
 		}
 		next, err := configAssign(node[index], rest, value, remove)
 		if err != nil {
@@ -1050,7 +1050,7 @@ func configAssign(doc any, path []string, value any, remove bool) (any, error) {
 		node[index] = next
 		return node, nil
 	}
-	return doc, fmt.Errorf("%s 这一层不是对象或列表", strings.Join(path, "."))
+	return doc, fmt.Errorf("%s is not an object or a list", strings.Join(path, "."))
 }
 
 // configMarshalDoc renders the staged document as the bytes its row holds. A
@@ -1062,7 +1062,7 @@ func configMarshalDoc(doc any) (json.RawMessage, error) {
 	}
 	raw, err := json.Marshal(doc)
 	if err != nil {
-		return nil, fmt.Errorf("配置无法序列化：%w", err)
+		return nil, fmt.Errorf("the configuration cannot be serialized: %w", err)
 	}
 	switch string(raw) {
 	case "{}", "[]", "null", `""`:
@@ -1074,13 +1074,13 @@ func configMarshalDoc(doc any) (json.RawMessage, error) {
 // configFieldValueText is a field's value as the section page shows it.
 func configFieldValueText(field configField, value any, exists bool) string {
 	if configIsContainer(value) {
-		return strconv.Itoa(configContainerLen(value)) + " 项"
+		return strconv.Itoa(configContainerLen(value)) + " items"
 	}
 	if field.Kind == configFieldBool3 {
 		boolean, ok := value.(bool)
 		switch {
 		case !ok:
-			return "默认"
+			return "default"
 		case boolean:
 			return configBoolOnLabel
 		default:
@@ -1091,7 +1091,7 @@ func configFieldValueText(field configField, value any, exists bool) string {
 	// reached only by a leaf inside a table row — an optional field of an MCP
 	// server or an LSP server, which no registered default covers.
 	if !exists || value == nil {
-		return "未设置"
+		return "unset"
 	}
 	return configScalarText(value)
 }
@@ -1103,7 +1103,7 @@ func configScalarText(value any) string {
 		return ""
 	case string:
 		if strings.TrimSpace(scalar) == "" {
-			return "（空）"
+			return "(empty)"
 		}
 		return scalar
 	case bool:
@@ -1125,7 +1125,7 @@ func configScalarText(value any) string {
 }
 
 // configScalarInput is a scalar as a text field opens on it: empty when the
-// setting is unset, so the field does not carry "未设置" as if it were a value.
+// setting is unset, so the field does not carry "unset" as if it were a value.
 func configScalarInput(value any) string {
 	if value == nil {
 		return ""

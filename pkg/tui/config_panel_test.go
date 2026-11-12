@@ -148,7 +148,7 @@ func TestConfigPanelListsEverySection(t *testing.T) {
 }
 
 // With no sandbox the panel lists nothing about approvals: the whole
-// 审批与沙箱 tab is gone with its two sections, and naming one of them directly
+// "Approval & sandbox" tab is gone with its two sections, and naming one of them directly
 // is answered like any other unknown section (owner 2026-10-31, plan 215 §3.4).
 func TestConfigPanelHidesTheApprovalSectionsWithoutASandbox(t *testing.T) {
 	restore := safety.SetSandboxAvailableForTest(false)
@@ -185,7 +185,7 @@ func TestConfigPanelSavesATriStateBoolean(t *testing.T) {
 	selector := &scriptedSelector{}
 	renderer := runConfigPanel(t, session, selector, []richStep{
 		{label: "features", ok: true},
-		{label: "记忆功能", ok: true},
+		{label: "Memory", ok: true},
 		{label: configBoolOnLabel, ok: true},
 		{label: configSaveRowLabel, ok: true},
 		{ok: false},
@@ -213,7 +213,7 @@ func TestConfigPanelClearsAFieldToItsDefault(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "features", ok: true},
-		{label: "记忆功能", ok: true},
+		{label: "Memory", ok: true},
 		{label: configBoolUnsetLabel, ok: true},
 		{label: configSaveRowLabel, ok: true},
 		{ok: false},
@@ -236,15 +236,15 @@ func TestConfigPanelRefusesAnOutOfRangeNumber(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "cron", ok: true},
-		{label: "保留天数", ok: true},
-		{label: "保留天数", ok: true},
+		{label: "Keep days", ok: true},
+		{label: "Keep days", ok: true},
 		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "99999", ok: true}, {value: "45", ok: true}})
 
 	// The refusal is the page's own line, so it is in the prompt the panel
 	// showed next — the user reads it before the value they retype.
-	if refusals := strings.Join(selector.richLabels, "\n"); !strings.Contains(refusals, "不能大于 3650") {
+	if refusals := strings.Join(selector.richLabels, "\n"); !strings.Contains(refusals, "may not be larger than 3650") {
 		t.Fatalf("the refusal must be shown on the page; prompts:\n%s", refusals)
 	}
 	if len(session.writes) != 1 {
@@ -262,12 +262,12 @@ func TestConfigPanelClampsANumberToItsCeiling(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "memories", ok: true},
-		{label: "检索返回条数", ok: true},
+		{label: "Results per search", ok: true},
 		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "99", ok: true}})
 
-	if prompts := strings.Join(selector.richLabels, "\n"); !strings.Contains(prompts, "按上限存为 20") {
+	if prompts := strings.Join(selector.richLabels, "\n"); !strings.Contains(prompts, "Stored as the maximum, 20") {
 		t.Fatalf("the clamp must be reported; prompts:\n%s", prompts)
 	}
 	if len(session.writes) != 1 || string(session.writes[0].raw) != `{"search_top_k":20}` {
@@ -283,7 +283,7 @@ func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 	selector := &scriptedSelector{}
 	renderer := runConfigPanel(t, session, selector, []richStep{
 		{label: "features", ok: true},
-		{label: "记忆功能", ok: true},
+		{label: "Memory", ok: true},
 		{label: configBoolOnLabel, ok: true},
 		{label: configSaveRowLabel, ok: true},
 		{ok: false},
@@ -310,7 +310,7 @@ func TestConfigPanelOpensASectionByName(t *testing.T) {
 	if len(selector.richLabels) == 0 {
 		t.Fatal("no page opened")
 	}
-	if !strings.HasPrefix(selector.richLabels[0], "cron · 定时任务") {
+	if !strings.HasPrefix(selector.richLabels[0], "cron · Scheduled tasks") {
 		t.Fatalf("first page = %q, want the cron section page", selector.richLabels[0])
 	}
 }
@@ -326,7 +326,7 @@ func TestConfigPanelRejectsAnUnknownSectionName(t *testing.T) {
 		t.Fatalf("no picker may open for an unknown section, got %d", len(selector.richItems))
 	}
 	text := frameText(renderer)
-	if !strings.Contains(text, "不是已知配置段") || !strings.Contains(text, "approval_preset") {
+	if !strings.Contains(text, "is not a known configuration section") || !strings.Contains(text, "approval_preset") {
 		t.Fatalf("frames:\n%s", text)
 	}
 }
@@ -358,7 +358,7 @@ func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "agents", ok: true},
-		{label: "代理定义", ok: true},
+		{label: "Agent definitions", ok: true},
 		{label: "work", ok: true},
 		{label: configRowOpenLabel, ok: true},
 		{label: "description", ok: true},
@@ -385,7 +385,7 @@ func TestConfigPanelAddsAndDeletesARow(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "sandbox_workspace_write", ok: true},
-		{label: "额外可写根目录", ok: true},
+		{label: "Extra writable roots", ok: true},
 		{label: configAddRowLabel, ok: true},
 		{label: configNewTextRow, ok: true},
 		{label: "#1", ok: true},
@@ -410,7 +410,7 @@ func TestConfigPanelAddsToAnUnsetList(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "sandbox_workspace_write", ok: true},
-		{label: "额外可写根目录", ok: true},
+		{label: "Extra writable roots", ok: true},
 		{label: configAddRowLabel, ok: true},
 		{label: configNewTextRow, ok: true},
 		{label: configUpRowLabel, ok: true},
@@ -433,7 +433,7 @@ func TestConfigPanelEscBacksOutOneLevel(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "agents", ok: true},
-		{label: "代理定义", ok: true},
+		{label: "Agent definitions", ok: true},
 		{ok: false}, // the row page closes
 		{ok: false}, // the section page closes
 	}, nil)

@@ -16,7 +16,8 @@ import "strings"
 type configFieldKind int
 
 const (
-	// configFieldBool3 is an optional boolean, three states: 开, 关, 默认.
+	// configFieldBool3 is an optional boolean, three states: on, off, and the
+	// setting's own default.
 	// The third state is not decoration — nil is what selects the setting's
 	// default (see config.BoolPtr), so a two-state switch would silently
 	// turn "unset" into an explicit choice.
@@ -78,7 +79,7 @@ type configSectionSchema struct {
 	// Name is the section name a reader sees in forebrain.yaml and in
 	// fb_config.
 	Name string
-	// Title is the name in the picker, in Chinese.
+	// Title is the name in the picker, in English.
 	Title string
 	// Summary is the one-line "what this is for" the picker shows beside it.
 	Summary string
@@ -96,10 +97,10 @@ type configSectionSchema struct {
 // The picker's tabs. A terminal is wide enough for four short headings, and
 // four is what keeps the 11 stored sections reachable without a filter.
 const (
-	configTabApproval = "审批与沙箱"
-	configTabSession  = "会话与记忆"
-	configTabAgents   = "代理与工具"
-	configTabFile     = "仅配置文件"
+	configTabApproval = "Approval & sandbox"
+	configTabSession  = "Session & memory"
+	configTabAgents   = "Agents & tools"
+	configTabFile     = "File only"
 )
 
 // configSectionSchemas lists every section of the runtime configuration: the
@@ -108,160 +109,160 @@ const (
 // switch that decides everything else first.
 var configSectionSchemas = []configSectionSchema{
 	{
-		Name: "approval_preset", Title: "审批预设", Tab: configTabApproval,
-		Summary: "新会话默认的审批模式",
+		Name: "approval_preset", Title: "Approval preset", Tab: configTabApproval,
+		Summary: "Default approval mode for new sessions",
 		Fields: []configField{{
-			Label: "审批预设", Kind: configFieldEnum,
+			Label: "Approval preset", Kind: configFieldEnum,
 			Options:      []string{"workspace_write", "full_access"},
-			OptionLabels: map[string]string{"workspace_write": "默认", "full_access": "完全访问"},
+			OptionLabels: map[string]string{"workspace_write": "Default", "full_access": "Full access"},
 			DefaultValue: "workspace_write",
-			Hint:         "默认：工作区内的读写照常，超出工作区才问；完全访问：除明确拒绝外都不问。改这里只影响新会话。",
+			Hint:         "Default: reads and writes inside the workspace proceed, anything outside it asks first; full access: nothing asks unless you refuse it. A change here affects new sessions only.",
 		}},
 	},
 	{
-		Name: "sandbox_workspace_write", Title: "沙箱可写工作区", Tab: configTabApproval,
-		Summary: "workspace-write 沙箱的写权限与缓存",
+		Name: "sandbox_workspace_write", Title: "Sandbox writable roots", Tab: configTabApproval,
+		Summary: "Write access and caching for the workspace-write sandbox",
 		Fields: []configField{
-			{Path: "writable_roots", Label: "额外可写根目录", Kind: configFieldRows, List: true, Hint: "每行一个绝对路径"},
-			{Path: "network_access", Label: "允许联网", Kind: configFieldBool3, Hint: "默认开"},
+			{Path: "writable_roots", Label: "Extra writable roots", Kind: configFieldRows, List: true, Hint: "One absolute path per row"},
+			{Path: "network_access", Label: "Allow network access", Kind: configFieldBool3, Hint: "On by default"},
 		},
 	},
 	{
-		Name: "compact", Title: "上下文压缩", Tab: configTabSession,
-		Summary: "自动压缩的阈值与提示词",
+		Name: "compact", Title: "Context compaction", Tab: configTabSession,
+		Summary: "Auto-compaction threshold and prompt",
 		Fields: []configField{
-			{Path: "prompt", Label: "交接提示词", Kind: configFieldText, Hint: "留空用内置提示词"},
+			{Path: "prompt", Label: "Hand-off prompt", Kind: configFieldText, Hint: "Empty uses the built-in prompt"},
 			{
-				Path: "auto_compact_percent", Label: "自动压缩阈值(%)", Kind: configFieldNumber,
+				Path: "auto_compact_percent", Label: "Auto-compact threshold (%)", Kind: configFieldNumber,
 				Min: 50, Max: 90, Clamp: true,
-				Hint: "默认 90；窗口用到这个百分比时自动压缩，范围 50–90，超过按 90 存",
+				Hint: "Default 90; compacts when the window reaches this percentage — range 50–90, past 90 is stored as 90",
 			},
 		},
 	},
 	{
-		Name: "batch", Title: "跑批项目", Tab: configTabApproval,
-		Summary: "新跑批项目默认启用的沙箱",
+		Name: "batch", Title: "Batch projects", Tab: configTabApproval,
+		Summary: "Sandbox a new batch project starts with",
 		Fields: []configField{{
-			Path: "sandbox_default", Label: "启用沙箱", Kind: configFieldBool3,
-			Hint: "默认开；新建跑批项目沿用这里的值，之后各项目自己管",
+			Path: "sandbox_default", Label: "Enable sandbox", Kind: configFieldBool3,
+			Hint: "On by default; a new batch project starts from this value and manages its own afterwards",
 		}},
 	},
 	{
-		Name: "memories", Title: "记忆", Tab: configTabSession,
-		Summary: "记忆的预算与模型；开关在「功能开关」的「记忆功能」",
+		Name: "memories", Title: "Memory", Tab: configTabSession,
+		Summary: "Memory budgets and models; the switch lives under Feature switches → Memory",
 		Fields: []configField{
-			{Path: "search_top_k", Label: "检索返回条数", Kind: configFieldNumber, Min: 1, Max: 20, Clamp: true, Hint: "默认 5；超过 20 按 20 存"},
-			{Path: "max_raw_memories_for_consolidation", Label: "整合的原始记忆上限", Kind: configFieldNumber, Min: 1, Max: 4096, Clamp: true, Hint: "默认 256"},
-			{Path: "max_unused_days", Label: "未使用过期天数", Kind: configFieldNumber, Min: 0, Max: 365, Clamp: true, Hint: "默认 30"},
-			{Path: "max_rollout_age_days", Label: "记录保留天数", Kind: configFieldNumber, Min: 0, Max: 90, Clamp: true, Hint: "默认 10"},
-			{Path: "max_rollouts_per_startup", Label: "每次启动处理的记录数", Kind: configFieldNumber, Min: 1, Max: 128, Clamp: true, Hint: "默认 2"},
-			{Path: "min_rollout_idle_hours", Label: "记录空闲小时数", Kind: configFieldNumber, Min: 1, Max: 48, Clamp: true, Hint: "默认 6"},
+			{Path: "search_top_k", Label: "Results per search", Kind: configFieldNumber, Min: 1, Max: 20, Clamp: true, Hint: "Default 5; past 20 is stored as 20"},
+			{Path: "max_raw_memories_for_consolidation", Label: "Raw memories per consolidation", Kind: configFieldNumber, Min: 1, Max: 4096, Clamp: true, Hint: "Default 256"},
+			{Path: "max_unused_days", Label: "Days before an unused memory expires", Kind: configFieldNumber, Min: 0, Max: 365, Clamp: true, Hint: "Default 30"},
+			{Path: "max_rollout_age_days", Label: "Days a record is kept", Kind: configFieldNumber, Min: 0, Max: 90, Clamp: true, Hint: "Default 10"},
+			{Path: "max_rollouts_per_startup", Label: "Records processed per startup", Kind: configFieldNumber, Min: 1, Max: 128, Clamp: true, Hint: "Default 2"},
+			{Path: "min_rollout_idle_hours", Label: "Idle hours before a record is processed", Kind: configFieldNumber, Min: 1, Max: 48, Clamp: true, Hint: "Default 6"},
 			// The stored value is a model name or the explicit "current" (the
 			// conversation's own model, plan 207 §3.3): the database always
 			// holds one, so the row shows what is in force instead of a
 			// "leave it empty" placeholder.
-			{Path: "extract_model", Label: "抽取模型", Kind: configFieldText, Hint: "current＝当前模型；也可填模型名"},
-			{Path: "consolidation_model", Label: "整合模型", Kind: configFieldText, Hint: "current＝当前模型；也可填模型名"},
+			{Path: "extract_model", Label: "Extraction model", Kind: configFieldText, Hint: "current = the conversation's own model; a model name also works"},
+			{Path: "consolidation_model", Label: "Consolidation model", Kind: configFieldText, Hint: "current = the conversation's own model; a model name also works"},
 		},
 	},
 	{
-		Name: "cron", Title: "定时任务", Tab: configTabSession,
-		Summary: "定时任务的保留期",
+		Name: "cron", Title: "Scheduled tasks", Tab: configTabSession,
+		Summary: "How long a scheduled task's records are kept",
 		Fields: []configField{{
-			Path: "retention_days", Label: "保留天数", Kind: configFieldNumber,
-			Min: 1, Max: 3650, Hint: "默认 30；范围 1–3650",
+			Path: "retention_days", Label: "Keep days", Kind: configFieldNumber,
+			Min: 1, Max: 3650, Hint: "Default 30; range 1–3650",
 		}},
 	},
 	{
-		Name: "features", Title: "功能开关", Tab: configTabSession,
-		Summary: "特性开关",
+		Name: "features", Title: "Feature switches", Tab: configTabSession,
+		Summary: "Feature switches",
 		Fields: []configField{
-			{Path: "memories", Label: "记忆功能", Kind: configFieldBool3, Hint: "默认开"},
-			{Path: "skill_offer", Label: "技能推荐", Kind: configFieldBool3, Hint: "默认开"},
-			{Path: "lsp", Label: "语言服务器", Kind: configFieldBool3, Hint: "默认开"},
+			{Path: "memories", Label: "Memory", Kind: configFieldBool3, Hint: "On by default"},
+			{Path: "skill_offer", Label: "Skill suggestions", Kind: configFieldBool3, Hint: "On by default"},
+			{Path: "lsp", Label: "Language servers", Kind: configFieldBool3, Hint: "On by default"},
 		},
 	},
 	{
-		Name: "agents", Title: "代理", Tab: configTabAgents,
-		Summary: "默认参数、代理定义与其 provider、子代理、MCP",
+		Name: "agents", Title: "Agents", Tab: configTabAgents,
+		Summary: "Defaults, agent definitions and their providers, subagents, MCP",
 		Fields: []configField{
 			{
-				Path: "definitions", Label: "代理定义", Kind: configFieldRows,
-				Hint: "每行一个代理 id；行内是 provider、子代理、MCP 与其默认模型",
+				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows,
+				Hint: "One agent id per row; a row holds its providers, subagents, MCP and default model",
 			},
 			{
-				Path: "defaults.network_retry_max", Label: "网络重试上限", Kind: configFieldNumber,
-				Min: 0, Max: 15, Clamp: true, Hint: "默认 10；0 关闭重试，超过 15 按 15 跑",
+				Path: "defaults.network_retry_max", Label: "Network retry limit", Kind: configFieldNumber,
+				Min: 0, Max: 15, Clamp: true, Hint: "Default 10; 0 turns retries off, past 15 runs as 15",
 			},
 			{
-				Path: "defaults.stream_idle_timeout_seconds", Label: "流空闲超时(秒)", Kind: configFieldNumber,
-				Min: 0, Max: 1800, Clamp: true, Hint: "默认 300；0 关闭看门狗",
+				Path: "defaults.stream_idle_timeout_seconds", Label: "Stream idle timeout (s)", Kind: configFieldNumber,
+				Min: 0, Max: 1800, Clamp: true, Hint: "Default 300; 0 turns the watchdog off",
 			},
-			{Path: "defaults.enable_subagent", Label: "启用子代理", Kind: configFieldBool3, Hint: "默认按内置设置"},
+			{Path: "defaults.enable_subagent", Label: "Enable subagents", Kind: configFieldBool3, Hint: "Default: the built-in setting"},
 			{
-				Path: "defaults.context_inject.warn_remaining_percent", Label: "提醒余量(%)", Kind: configFieldNumber,
+				Path: "defaults.context_inject.warn_remaining_percent", Label: "Warn remaining (%)", Kind: configFieldNumber,
 				Min: 1, Max: 50, Clamp: true,
-				Hint: "默认 12；剩余可用窗口低于这个百分比时提醒，范围 1–50",
+				Hint: "Default 12; warns when the remaining window falls below this percentage, range 1–50",
 			},
-			{Path: "defaults.mcp_servers", Label: "共享 MCP 服务器", Kind: configFieldRows, Hint: "每行一个服务器"},
+			{Path: "defaults.mcp_servers", Label: "Shared MCP servers", Kind: configFieldRows, Hint: "One server per row"},
 			// The /goal check's global row (plan 299) is two settings, not a
 			// whole subagent entry: it is dispatched by the system, so it has
 			// no name, description, prompt or tool policy to edit here, and a
 			// rows descriptor on the value would offer all of those.
 			{
-				Path: "goal_evaluator.model", Label: "目标检查模型", Kind: configFieldText,
-				Hint: "模型行 id（设置 · 子代理里选的那一行）；留空跟随主代理",
+				Path: "goal_evaluator.model", Label: "Goal check model", Kind: configFieldText,
+				Hint: "A model row id (the row chosen in Settings → Subagents); empty follows the primary agent",
 			},
 			{
-				Path: "goal_evaluator.reasoning_effort", Label: "目标检查思考强度", Kind: configFieldText,
-				Hint: "留空跟随该模型行的默认强度；填 low、high 等覆盖它",
+				Path: "goal_evaluator.reasoning_effort", Label: "Goal check thinking level", Kind: configFieldText,
+				Hint: "Empty follows that model row's default level; low, high and so on override it",
 			},
 		},
 	},
 	{
-		Name: "hooks", Title: "钩子", Tab: configTabAgents,
-		Summary: "事件钩子（命令 / 提示）",
+		Name: "hooks", Title: "Hooks", Tab: configTabAgents,
+		Summary: "Event hooks (command / prompt)",
 		Fields: []configField{{
-			Label: "钩子事件", Kind: configFieldRows,
-			Hint: "每行一个事件名（如 pre_tool_use），行内是 matcher 列表",
+			Label: "Hook events", Kind: configFieldRows,
+			Hint: "One event name per row (e.g. pre_tool_use); a row holds its matcher list",
 		}},
 	},
 	{
-		Name: "lsp", Title: "语言服务器", Tab: configTabAgents,
-		Summary: "语言服务器的开关、限额与诊断",
+		Name: "lsp", Title: "Language servers", Tab: configTabAgents,
+		Summary: "Language server switches, limits and diagnostics",
 		Fields: []configField{
-			{Path: "recommendations", Label: "推荐", Kind: configFieldBool3, Hint: "默认开"},
-			{Path: "servers", Label: "服务器", Kind: configFieldRows, Hint: "每行一个服务器 id；行内是 command、args、env 等"},
-			{Path: "max_servers", Label: "并发服务器上限", Kind: configFieldNumber, Min: 0, Max: 32, Hint: "默认 6；范围 1–32"},
-			{Path: "idle_timeout", Label: "空闲退出(秒)", Kind: configFieldNumber, Min: 0, Max: 86400, Hint: "默认 600；非 0 时范围 60–86400"},
-			{Path: "request_timeout", Label: "请求超时(秒)", Kind: configFieldNumber, Min: 0, Max: 600, Hint: "默认 30；范围 1–600"},
-			{Path: "diagnostics.after_edit", Label: "编辑后诊断", Kind: configFieldBool3, Hint: "默认开"},
-			{Path: "diagnostics.wait_ms", Label: "诊断等待(毫秒)", Kind: configFieldNumber, Min: 0, Max: 30000, Hint: "默认 2500；0 表示不等待"},
+			{Path: "recommendations", Label: "Recommendations", Kind: configFieldBool3, Hint: "On by default"},
+			{Path: "servers", Label: "Servers", Kind: configFieldRows, Hint: "One server id per row; a row holds command, args, env and the rest"},
+			{Path: "max_servers", Label: "Concurrent servers limit", Kind: configFieldNumber, Min: 0, Max: 32, Hint: "Default 6; range 1–32"},
+			{Path: "idle_timeout", Label: "Idle exit (s)", Kind: configFieldNumber, Min: 0, Max: 86400, Hint: "Default 600; range 60–86400 when not 0"},
+			{Path: "request_timeout", Label: "Request timeout (s)", Kind: configFieldNumber, Min: 0, Max: 600, Hint: "Default 30; range 1–600"},
+			{Path: "diagnostics.after_edit", Label: "Diagnose after edit", Kind: configFieldBool3, Hint: "On by default"},
+			{Path: "diagnostics.wait_ms", Label: "Diagnostic wait (ms)", Kind: configFieldNumber, Min: 0, Max: 30000, Hint: "Default 2500; 0 does not wait"},
 			{
-				Path: "diagnostics.min_severity", Label: "最低严重度", Kind: configFieldEnum,
-				Options: []string{"error", "warning", "information", "hint"}, Hint: "默认 warning",
+				Path: "diagnostics.min_severity", Label: "Lowest severity", Kind: configFieldEnum,
+				Options: []string{"error", "warning", "information", "hint"}, Hint: "Default warning",
 			},
-			{Path: "diagnostics.max_per_file", Label: "每文件上限", Kind: configFieldNumber, Min: 0, Max: 200, Hint: "默认 20；范围 1–200"},
-			{Path: "diagnostics.max_files", Label: "文件数上限", Kind: configFieldNumber, Min: 0, Max: 50, Hint: "默认 10；范围 1–50"},
-			{Path: "diagnostics.late_delivery", Label: "迟到诊断", Kind: configFieldBool3, Hint: "默认开"},
+			{Path: "diagnostics.max_per_file", Label: "Limit per file", Kind: configFieldNumber, Min: 0, Max: 200, Hint: "Default 20; range 1–200"},
+			{Path: "diagnostics.max_files", Label: "File-count limit", Kind: configFieldNumber, Min: 0, Max: 50, Hint: "Default 10; range 1–50"},
+			{Path: "diagnostics.late_delivery", Label: "Late diagnostics", Kind: configFieldBool3, Hint: "On by default"},
 		},
 	},
 	{
-		Name: "peers", Title: "对等通信", Tab: configTabAgents,
-		Summary: "本机代理进程之间互发消息",
+		Name: "peers", Title: "Peer messaging", Tab: configTabAgents,
+		Summary: "Agents' processes on this machine message each other",
 		Fields: []configField{{
-			Path: "claude_code", Label: "与 Claude Code 互通", Kind: configFieldBool3, ClaudeCodeOnly: true,
-			Hint: "默认关；开关不同的 forebrain 进程互相看不见",
+			Path: "claude_code", Label: "Interoperate with Claude Code", Kind: configFieldBool3, ClaudeCodeOnly: true,
+			Hint: "Off by default; forebrain processes with different switches cannot see each other",
 		}},
 	},
 	{
-		Name: "gateway", Title: "网关", Tab: configTabFile,
-		Summary:  "监听地址、鉴权与对外链接（只读）",
+		Name: "gateway", Title: "Gateway", Tab: configTabFile,
+		Summary:  "Listen address, authentication and outward links (read-only)",
 		YAMLOnly: true,
 	},
 	{
-		Name: "credentials", Title: "凭据文件", Tab: configTabFile,
-		Summary:  "外部凭据文件的位置（只读）",
+		Name: "credentials", Title: "Credential files", Tab: configTabFile,
+		Summary:  "Where external credential files live (read-only)",
 		YAMLOnly: true,
 	},
 }
