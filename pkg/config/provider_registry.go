@@ -9,7 +9,10 @@
 // derives behaviour from a row beyond the fields it reads.
 package config
 
-import "strings"
+import (
+	"strings"
+	"sync"
+)
 
 // CustomProvider is the provider id every user-defined model is stored under
 // (owner 2026-11-07: the custom form asks for no provider; the model name is
@@ -260,13 +263,58 @@ var builtinProviders = []BuiltinProvider{
 	},
 }
 
-// BuiltinProviders returns a copy of the registry, in display order.
+// pluginProviders holds the rows local subscription plugins install at init
+// (scripts/gen-subscription-plugins.sh bridges them in; they are never part of
+// this repository). A plugin row behaves exactly like a built-in one: every
+// surface that lists providers picks it up through the two functions below.
+var (
+	pluginProvidersMu sync.RWMutex
+	pluginProviders   []BuiltinProvider
+)
+
+// RegisterProviderPlugin registers a provider supplied by a local subscription
+// plugin. Re-registering the same ID replaces the entry in place.
+func RegisterProviderPlugin(p BuiltinProvider) {
+	p.ID = strings.ToLower(strings.TrimSpace(p.ID))
+	if p.ID == "" || p.ID == CustomProvider {
+		return
+	}
+	cloned := p
+	cloned.Endpoints = append([]ProviderEndpoint(nil), p.Endpoints...)
+	cloned.Models = append([]BuiltinModel(nil), p.Models...)
+	pluginProvidersMu.Lock()
+	defer pluginProvidersMu.Unlock()
+	for i, existing := range pluginProviders {
+		if existing.ID == cloned.ID {
+			pluginProviders[i] = cloned
+			return
+		}
+	}
+	pluginProviders = append(pluginProviders, cloned)
+}
+
+// ResetProviderPluginsForTest clears registered provider plugins in tests.
+func ResetProviderPluginsForTest() {
+	pluginProvidersMu.Lock()
+	pluginProviders = nil
+	pluginProvidersMu.Unlock()
+}
+
+// BuiltinProviders returns a copy of the registry, in display order: the
+// built-ins first, then whatever local subscription plugins registered.
 func BuiltinProviders() []BuiltinProvider {
-	out := make([]BuiltinProvider, len(builtinProviders))
-	for i, p := range builtinProviders {
-		out[i] = p
-		out[i].Endpoints = append([]ProviderEndpoint(nil), p.Endpoints...)
-		out[i].Models = append([]BuiltinModel(nil), p.Models...)
+	pluginProvidersMu.RLock()
+	defer pluginProvidersMu.RUnlock()
+	out := make([]BuiltinProvider, 0, len(builtinProviders)+len(pluginProviders))
+	for _, p := range builtinProviders {
+		out = append(out, p)
+	}
+	for _, p := range pluginProviders {
+		out = append(out, p)
+	}
+	for i := range out {
+		out[i].Endpoints = append([]ProviderEndpoint(nil), out[i].Endpoints...)
+		out[i].Models = append([]BuiltinModel(nil), out[i].Models...)
 	}
 	return out
 }
@@ -278,7 +326,17 @@ func BuiltinProviderByID(id string) (BuiltinProvider, bool) {
 	if want == "" {
 		return BuiltinProvider{}, false
 	}
+	pluginProvidersMu.RLock()
+	defer pluginProvidersMu.RUnlock()
 	for _, p := range builtinProviders {
+		if p.ID != want {
+			continue
+		}
+		p.Endpoints = append([]ProviderEndpoint(nil), p.Endpoints...)
+		p.Models = append([]BuiltinModel(nil), p.Models...)
+		return p, true
+	}
+	for _, p := range pluginProviders {
 		if p.ID != want {
 			continue
 		}

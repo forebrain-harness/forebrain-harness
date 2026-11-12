@@ -127,11 +127,50 @@ var (
 	errLoginEnded      = errors.New("this sign-in has already ended")
 )
 
-// Registry is every subscription a surface offers, in display order. Only
-// sign-ins are here: a provider a user connects with a pasted key belongs to
-// the built-in provider registry (pkg/config).
+// pluginSubs holds the subscriptions local plugins registered at init
+// (scripts/gen-subscription-plugins.sh bridges them in; they are never part of
+// this repository). They surface exactly like the built-ins above.
+var (
+	pluginSubsMu sync.RWMutex
+	pluginSubs   []Subscription
+)
+
+// Register installs a subscription plugin into the surface registry.
+// Re-registering the same ID replaces the entry in place.
+func Register(sub Subscription) {
+	if sub == nil || strings.TrimSpace(sub.ID()) == "" {
+		return
+	}
+	want := strings.ToLower(strings.TrimSpace(sub.ID()))
+	pluginSubsMu.Lock()
+	defer pluginSubsMu.Unlock()
+	for i, existing := range pluginSubs {
+		if existing.ID() == want {
+			pluginSubs[i] = sub
+			return
+		}
+	}
+	pluginSubs = append(pluginSubs, sub)
+}
+
+// ResetPluginsForTest clears registered subscription plugins in tests.
+func ResetPluginsForTest() {
+	pluginSubsMu.Lock()
+	pluginSubs = nil
+	pluginSubsMu.Unlock()
+}
+
+// Registry is every subscription a surface offers, in display order: the
+// built-ins first, then whatever local plugins registered. Only sign-ins are
+// here: a provider a user connects with a pasted key belongs to the built-in
+// provider registry (pkg/config).
 func Registry() []Subscription {
-	return []Subscription{chatGPT{}, openCodeGo{}}
+	pluginSubsMu.RLock()
+	defer pluginSubsMu.RUnlock()
+	subs := make([]Subscription, 0, 2+len(pluginSubs))
+	subs = append(subs, chatGPT{}, openCodeGo{})
+	subs = append(subs, pluginSubs...)
+	return subs
 }
 
 // ByID finds one subscription by the id a surface persisted (a model row's
@@ -283,12 +322,14 @@ func offersFromRecords(subscription string, records []turn.ModelRecord, baseURL 
 	return offers
 }
 
-// provisionRows writes offers as model rows written by source and returns their
+// ProvisionRows writes offers as model rows written by source and returns their
 // ids in input order. A login-backed row holds no key: the login is the
 // credential, and stating an empty key is not the same as saying nothing — a
 // key left on the row belongs to whatever provider used it before and, for
-// OpenCode, it outranks the login.
-func provisionRows(ctx context.Context, env Env, offers []Offer, source string) ([]string, error) {
+// OpenCode, it outranks the login. Local subscription plugins provision their
+// chosen offers through it, so a plugin row lands in the table exactly like a
+// built-in one.
+func ProvisionRows(ctx context.Context, env Env, offers []Offer, source string) ([]string, error) {
 	ids := make([]string, 0, len(offers))
 	for _, offer := range offers {
 		empty := ""
@@ -308,3 +349,6 @@ func provisionRows(ctx context.Context, env Env, offers []Offer, source string) 
 	}
 	return ids, nil
 }
+
+// provisionRows is the in-package spelling of ProvisionRows.
+var provisionRows = ProvisionRows

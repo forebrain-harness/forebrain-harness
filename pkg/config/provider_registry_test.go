@@ -157,3 +157,59 @@ func TestBuiltinProvidersAreUsableWithoutCatalogRows(t *testing.T) {
 		t.Fatalf("provider %q has neither catalog rows nor a registry model table", p.ID)
 	}
 }
+
+// A provider a local subscription plugin registers behaves like a built-in in
+// every lookup, and a login-backed one answers CredentialsBackedProvider — the
+// question the model write path and the web form ask before allowing an empty
+// key and keeping the login's own endpoint.
+func TestRegisterProviderPluginMarksLoginBackedAndCredentialsBacked(t *testing.T) {
+	ResetProviderPluginsForTest()
+	t.Cleanup(ResetProviderPluginsForTest)
+
+	register := func() {
+		RegisterProviderPlugin(BuiltinProvider{
+			ID: " PlugIn ", Label: "Plug In", LabelZH: "Plug In",
+			Hint: "Subscription login", LoginBacked: true,
+			Endpoints: []ProviderEndpoint{{BaseURL: "https://plugin.example.test"}},
+		})
+	}
+	register()
+	// Re-registering replaces in place instead of appending a second row.
+	register()
+	// The reserved custom-model provider id is never installable.
+	RegisterProviderPlugin(BuiltinProvider{ID: CustomProvider, Label: "never", LabelZH: "never",
+		Endpoints: []ProviderEndpoint{{BaseURL: "https://never.example.test"}}})
+
+	providers := BuiltinProviders()
+	ids := make([]string, 0, len(providers))
+	for _, p := range providers {
+		ids = append(ids, p.ID)
+	}
+	if got, want := ids[len(ids)-1], "plugin"; got != want {
+		t.Fatalf("plugin row appended last, got %v", ids)
+	}
+	seen := map[string]int{}
+	for _, id := range ids {
+		seen[id]++
+	}
+	if seen["plugin"] != 1 || seen[CustomProvider] != 0 {
+		t.Fatalf("registry ids %v: plugin must appear once and custom never", ids)
+	}
+
+	row, ok := BuiltinProviderByID("PLUGIN")
+	if !ok || row.ID != "plugin" || !row.LoginBacked || row.DefaultBaseURL() != "" {
+		t.Fatalf("BuiltinProviderByID = %+v ok=%t", row, ok)
+	}
+	if !CredentialsBackedProvider(" Plugin ") {
+		t.Fatal("a login-backed plugin provider is credentials-backed")
+	}
+	if CredentialsBackedProvider("zhipuai") {
+		t.Fatal("a provider no plugin registered stays key-backed")
+	}
+	// The login-backed row keeps an empty api_path instead of being handed the
+	// default Chat Completions protocol.
+	_, _, _, apiPath := NormalizeLLMModelIdentity("plugin", "m", "https://plugin.example.test/", "")
+	if apiPath != "" {
+		t.Fatalf("login-backed plugin row keeps no api path, got %q", apiPath)
+	}
+}

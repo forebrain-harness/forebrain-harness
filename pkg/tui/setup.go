@@ -1242,10 +1242,15 @@ func signInPage(login subscription.Login, address, flow string) string {
 	lines := make([]string, 0, 3)
 	switch flow {
 	case subscription.FlowDeviceCode:
-		if address != "" {
-			lines = append(lines, "Open "+address+" and enter this code.", "")
-		}
-		if code := login.UserCode(); code != "" {
+		// A device flow with no user code (a PKCE browser-confirm flow) says
+		// only "open this address": showing an empty code box, or claiming
+		// there is a code to enter, would send the user hunting for one.
+		code := login.UserCode()
+		if address != "" && code != "" {
+			lines = append(lines, "Open "+address+" and enter this code.", "", code)
+		} else if address != "" {
+			lines = append(lines, "Open "+address+" to sign in.")
+		} else if code != "" {
 			lines = append(lines, code)
 		}
 	case subscription.FlowPasteCallback:

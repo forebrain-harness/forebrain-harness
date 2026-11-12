@@ -432,15 +432,22 @@ func ValidateAgentLLMConfigured(root *Root, agentName string) MainAgentLLMValida
 
 // CredentialsBackedProvider reports whether a provider is authenticated from a
 // file this machine holds instead of an api_key in configuration: the ChatGPT
-// subscription (auth.json, or credentials.chatgpt) and the OpenCode surfaces
-// (opencode.json from the device-code login, or OPENCODE_API_KEY). The client
+// subscription (auth.json, or credentials.chatgpt), the OpenCode surfaces
+// (opencode.json from the device-code login, or OPENCODE_API_KEY), and any
+// provider a local subscription plugin registered as login-backed. The client
 // refuses to run without that credential, so an empty api_key is not a
 // missing field here. Everything else still needs one.
 func CredentialsBackedProvider(provider string) bool {
 	provider = strings.TrimSpace(provider)
-	return strings.EqualFold(provider, "chatgpt") ||
+	if strings.EqualFold(provider, "chatgpt") ||
 		strings.EqualFold(provider, "opencode") ||
-		strings.EqualFold(provider, "opencode-go")
+		strings.EqualFold(provider, "opencode-go") {
+		return true
+	}
+	if p, ok := BuiltinProviderByID(provider); ok && p.LoginBacked {
+		return true
+	}
+	return false
 }
 
 func (v MainAgentLLMValidation) Complete() bool {

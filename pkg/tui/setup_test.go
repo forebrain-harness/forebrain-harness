@@ -1650,3 +1650,36 @@ func containsFact(facts []turn.StatusFact, label, value string) bool {
 	}
 	return false
 }
+
+// A device flow whose login carries no short code (a PKCE browser-confirm
+// flow, like a subscription plugin's) shows the address as the whole
+// instruction: an empty code box, or "enter this code" wording, would send the
+// user hunting for a code that does not exist.
+func TestConfigureSubscriptionDeviceFlowWithoutAUserCode(t *testing.T) {
+	sub := openCodeLike()
+	sub.login = newFakeLogin("https://opencode.ai/auth", "")
+	opened := browserMachine(t)
+	out := &bytes.Buffer{}
+	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}})
+	cfg.Output = out
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if sub.startedFlow != subscription.FlowDeviceCode {
+		t.Fatalf("flow = %q", sub.startedFlow)
+	}
+	if len(*opened) != 0 {
+		t.Fatalf("opened %v, want no browser for a device code", *opened)
+	}
+	page := out.String()
+	if !strings.Contains(page, "Open https://opencode.ai/auth to sign in.") {
+		t.Fatalf("sign-in page = %q, want it to name the address as the instruction", page)
+	}
+	if strings.Contains(page, "enter this code") {
+		t.Fatalf("sign-in page = %q, must not mention a code", page)
+	}
+	if opts.Provider != "opencode-go" || opts.APIKey != "" {
+		t.Fatalf("options = %+v", opts)
+	}
+}

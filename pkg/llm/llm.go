@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ContentType identifies the kind of content within a ContentPart.
@@ -526,6 +527,69 @@ func (r *Result) Billed() *Usage {
 // assistant message. Tools can be configured via WithTools.
 type LLM interface {
 	Execute(context.Context, []Message, []*Tool) (*Result, error)
+}
+
+// ProviderLLMRequest carries the configuration a registered provider plugin
+// needs to construct an LLM client. The row's stored endpoint and params pass
+// through verbatim; a login-backed plugin ignores the key and uses its own
+// credential store.
+type ProviderLLMRequest struct {
+	Provider        string
+	Model           string
+	APIKey          string
+	BaseURL         string
+	APIPath         string
+	MaxOutputTokens int
+	ParamsJSON      []byte
+}
+
+// ProviderLLMFactory constructs an LLM client for one provider. Factories are
+// installed by local subscription plugins (RegisterProviderFactory) and called
+// by the run configuration when NewLLMFromYAML meets a provider it has no
+// built-in branch for.
+type ProviderLLMFactory func(req ProviderLLMRequest) (LLM, error)
+
+var (
+	providerFactoriesMu sync.RWMutex
+	providerFactories   = map[string]ProviderLLMFactory{}
+)
+
+// RegisterProviderFactory installs the client constructor for a provider
+// supplied by a local subscription plugin. Registering nil or an empty provider
+// is a no-op; re-registering a provider replaces its factory.
+func RegisterProviderFactory(provider string, factory ProviderLLMFactory) {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	if p == "" || factory == nil {
+		return
+	}
+	providerFactoriesMu.Lock()
+	providerFactories[p] = factory
+	providerFactoriesMu.Unlock()
+}
+
+// HasProviderFactory reports whether a provider has a registered factory.
+func HasProviderFactory(provider string) bool {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	providerFactoriesMu.RLock()
+	_, ok := providerFactories[p]
+	providerFactoriesMu.RUnlock()
+	return ok
+}
+
+// BuildProviderLLM runs the provider's registered factory. The bool reports
+// whether a factory existed at all, so a caller without one falls through to
+// its own handling instead of mistaking that for an error.
+func BuildProviderLLM(req ProviderLLMRequest) (LLM, bool, error) {
+	p := strings.ToLower(strings.TrimSpace(req.Provider))
+	providerFactoriesMu.RLock()
+	factory, ok := providerFactories[p]
+	providerFactoriesMu.RUnlock()
+	if !ok {
+		return nil, false, nil
+	}
+	req.Provider = p
+	client, err := factory(req)
+	return client, true, err
 }
 
 // StructuredOutputSpec requests provider-enforced JSON output matching Schema.

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -714,5 +715,79 @@ func TestCatalogModalitiesFeedTheMediaCapabilities(t *testing.T) {
 	overlaid = OverlayModelOverride(quiet, ModelOverride{SupportsAudio: &on})
 	if !overlaid.SupportsAudio || overlaid.SupportsPDF {
 		t.Fatalf("overlaid = %+v, want the row to switch audio on", overlaid)
+	}
+}
+
+// stubPluginLLM is the client a test factory hands back.
+type stubPluginLLM struct{ request ProviderLLMRequest }
+
+func (stubPluginLLM) Execute(context.Context, []Message, []*Tool) (*Result, error) { return nil, nil }
+
+// A provider a local subscription plugin registered a factory for is known and
+// login-backed, its capabilities are answered from SetBuiltinModels, and the
+// run configuration builds its client through the factory.
+func TestRegisterProviderFactoryAndBuiltinModels(t *testing.T) {
+	providerFactoriesMu.Lock()
+	previous := providerFactories
+	providerFactories = map[string]ProviderLLMFactory{}
+	providerFactoriesMu.Unlock()
+	t.Cleanup(func() {
+		providerFactoriesMu.Lock()
+		providerFactories = previous
+		providerFactoriesMu.Unlock()
+	})
+
+	// A loaded catalog keeps KnownProvider strict (it is permissive when no
+	// catalog exists), so the assertions below say what a factory changes.
+	globalCatMu.Lock()
+	previousCat := globalCat
+	globalCatMu.Unlock()
+	SetGlobalCatalogForTest(loadTestCatalog(t))
+	t.Cleanup(func() { SetGlobalCatalogForTest(previousCat) })
+
+	if LoginBackedProvider("plugtest") || KnownProvider("plugtest") || HasProviderFactory("plugtest") {
+		t.Fatal("an unregistered plugin provider is neither login-backed nor known")
+	}
+
+	var built []ProviderLLMRequest
+	RegisterProviderFactory(" PlugTest ", func(req ProviderLLMRequest) (LLM, error) {
+		built = append(built, req)
+		return stubPluginLLM{}, nil
+	})
+	RegisterProviderFactory("", func(ProviderLLMRequest) (LLM, error) { return nil, nil }) // no-op
+	RegisterProviderFactory("plugtest-nil", nil)                                           // no-op
+
+	if !HasProviderFactory("PLUGTEST") || HasProviderFactory("plugtest-nil") {
+		t.Fatal("factory registration is case-insensitive and nil is a no-op")
+	}
+	if !LoginBackedProvider("plugtest") || !KnownProvider("plugtest") {
+		t.Fatal("a provider with a registered factory is login-backed and known")
+	}
+
+	SetBuiltinModels("plugtest", []Model{{
+		ID: "pmodel", ContextWindow: 180000, DefaultMaxTokens: 32000,
+		CanReason: true, ReasoningKnown: true,
+		ReasoningOptions: []ReasoningOption{{Type: "effort", Values: []string{"low", "medium", "xhigh"}}},
+	}})
+	t.Cleanup(func() { SetBuiltinModels("plugtest", nil) })
+
+	levels, known := ReasoningEfforts("plugtest", "pmodel")
+	if !known || !reflect.DeepEqual(levels, []string{"low", "medium", "xhigh"}) {
+		t.Fatalf("ReasoningEfforts = %v known=%t", levels, known)
+	}
+
+	client, ok, err := BuildProviderLLM(ProviderLLMRequest{Provider: " PlugTest ", Model: "pmodel"})
+	if !ok || err != nil {
+		t.Fatalf("BuildProviderLLM ok=%t err=%v", ok, err)
+	}
+	if _, isStub := client.(stubPluginLLM); !isStub {
+		t.Fatalf("BuildProviderLLM returned %T", client)
+	}
+	if len(built) != 1 || built[0].Provider != "plugtest" || built[0].Model != "pmodel" {
+		t.Fatalf("factory requests = %+v", built)
+	}
+
+	if _, ok, err := BuildProviderLLM(ProviderLLMRequest{Provider: "nosuch"}); ok || err != nil {
+		t.Fatalf("a provider without a factory answers ok=false err=nil, got ok=%t err=%v", ok, err)
 	}
 }

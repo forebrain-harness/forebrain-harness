@@ -839,13 +839,15 @@ func ReasoningEffortsRow(rowID, provider, apiModel string) (levels []string, kno
 // login. models.json carries reference rows for the OpenCode models (windows,
 // modalities, levels) and nothing for ChatGPT, but neither is a static list a
 // picker should sell — a listing skips them, and bare-model provider inference
-// ignores them, because their real set is answered live or not at all.
+// ignores them, because their real set is answered live or not at all. A
+// provider a local subscription plugin registered a factory for is the same
+// kind of account: the plugin answers the live listing after login.
 func LoginBackedProvider(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "chatgpt", "opencode", "opencode-go":
 		return true
 	}
-	return false
+	return HasProviderFactory(provider)
 }
 
 // AllModels returns all models from the global catalog.
@@ -872,6 +874,12 @@ func KnownProvider(provider string) bool {
 		return false
 	}
 	if p == customModelProvider {
+		return true
+	}
+	// A provider with a registered factory (a local subscription plugin) is
+	// known even before its models are installed, so a row configured ahead
+	// of the plugin's first listing is not refused.
+	if HasProviderFactory(p) {
 		return true
 	}
 	globalCatMu.RLock()

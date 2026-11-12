@@ -469,6 +469,24 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 	if prov == "opencode" || prov == "opencode-go" {
 		return newOpenCodeLLM(prov, model, apiKey, baseURL, cfg)
 	}
+	// A provider a local subscription plugin registered a factory for builds
+	// its own client: the login is the credential, and the factory owns the
+	// endpoint and the request shape, so the key and URL checks below do not
+	// apply to it.
+	if client, ok, err := llm.BuildProviderLLM(llm.ProviderLLMRequest{
+		Provider:        prov,
+		Model:           model,
+		APIKey:          apiKey,
+		BaseURL:         baseURL,
+		APIPath:         apiPath,
+		MaxOutputTokens: llm.OutputTokenCap(prov, model, cfg.MaxOutputTokens),
+		ParamsJSON:      cfg.Params.Bytes(),
+	}); ok {
+		if err != nil {
+			return nil, err
+		}
+		return wrapUsageAccountingLLM(client), nil
+	}
 	if apiKey == "" {
 		// Same sentence as before, wrapped around a sentinel so the run's entry
 		// point can add where a key comes from (Settings › Models) without the
