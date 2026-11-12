@@ -384,13 +384,6 @@ func localDay(t time.Time) string {
 	return t.In(time.Local).Format(dayLayout)
 }
 
-// startOfDay is local midnight of t's day, the stamp a day directory is
-// compared as.
-func startOfDay(t time.Time) time.Time {
-	year, month, day := t.In(time.Local).Date()
-	return time.Date(year, month, day, 0, 0, 0, 0, time.Local)
-}
-
 // HostLabel is this machine's name, reduced to the characters a file name keeps
 // on every platform, or "local" when it has none. It is the same rule the
 // gateway's per-replica log name used (cmd/forebrain/gateway_log.go), moved here
@@ -453,11 +446,9 @@ func SweepLogs(root string, now time.Time) {
 	if err != nil {
 		return // no log tree yet: nothing to keep back
 	}
-	// Two cutoffs, because the two things compared are different kinds of stamp.
-	// A day directory is compared as a date: dated D-7 it is still inside a
-	// seven-day window, dated D-8 it is out. The legacy files below have only a
-	// modification time, so they are compared against the instant seven days ago.
-	dayCutoff := startOfDay(now).AddDate(0, 0, -LogRetentionDays)
+	// Both arms compare against the same instant, now minus LogRetentionDays: a
+	// day directory as its own date, a legacy file as its modification time. A
+	// directory dated D-7 starts before that instant, so it goes; D-6..D0 stay.
 	cutoff := now.AddDate(0, 0, -LogRetentionDays)
 
 	var days []string // oldest first; the day name sorts as its date
@@ -470,7 +461,7 @@ func SweepLogs(root string, now time.Time) {
 			continue // not a day directory: not ours to delete
 		}
 		path := filepath.Join(logsDir, entry.Name())
-		if day.Before(dayCutoff) {
+		if day.Before(cutoff) {
 			_ = os.RemoveAll(path)
 			continue
 		}

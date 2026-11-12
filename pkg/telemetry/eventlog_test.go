@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +44,23 @@ func onlyFile(t *testing.T, files []string) string {
 		t.Fatalf("want exactly one record file, got %v", files)
 	}
 	return files[0]
+}
+
+// dayDirs lists the day directories under one logs directory, oldest first.
+func dayDirs(t *testing.T, logsDir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(logsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var days []string
+	for _, entry := range entries {
+		if _, ok := parseDayName(entry.Name()); entry.IsDir() && ok {
+			days = append(days, entry.Name())
+		}
+	}
+	sort.Strings(days)
+	return days
 }
 
 // readLines decodes every line of one record file.
@@ -489,15 +507,17 @@ func TestSweepLogsDropsOldDaysThenOldestPayloads(t *testing.T) {
 		}
 	}
 
-	// Today back seven days is still inside the window; three more days are out.
-	kept := make([]string, 0, 8)
-	for i := 0; i < 8; i++ {
+	// Ten day directories, of which exactly three are older than the window:
+	// D-7, D-8 and D-9. Seven survive (D-6 back to today) — a directory dated D-7
+	// starts before now minus LogRetentionDays, so it goes with the older ones.
+	kept := make([]string, 0, 7)
+	for i := 0; i < 7; i++ {
 		day := localDay(now.AddDate(0, 0, -i))
 		kept = append(kept, day)
 		writeDay(day, true)
 	}
 	var expired []string
-	for i := 8; i <= 10; i++ {
+	for i := 7; i <= 9; i++ {
 		day := localDay(now.AddDate(0, 0, -i))
 		expired = append(expired, day)
 		writeDay(day, true)
@@ -513,13 +533,18 @@ func TestSweepLogsDropsOldDaysThenOldestPayloads(t *testing.T) {
 
 	// One payload's worth of headroom: the sweep must delete the oldest payload
 	// and stop, leaving every record file in place.
-	logBudgetBytes = 7500
+	logBudgetBytes = 6500
 	SweepLogs(root, now)
 
 	for _, day := range expired {
 		if _, err := os.Stat(filepath.Join(logsDir, day)); !os.IsNotExist(err) {
 			t.Fatalf("%s is older than the retention window but survived: %v", day, err)
 		}
+	}
+	if surviving := dayDirs(t, logsDir); len(surviving) != len(kept) ||
+		surviving[0] != kept[len(kept)-1] || surviving[len(surviving)-1] != kept[0] {
+		t.Fatalf("want %d day directories from %s to %s, got %v",
+			len(kept), kept[len(kept)-1], kept[0], surviving)
 	}
 	if _, err := os.Stat(filepath.Join(foreign, "note.txt")); err != nil {
 		t.Fatalf("a directory that is not a day directory was touched: %v", err)
