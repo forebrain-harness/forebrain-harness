@@ -6193,7 +6193,11 @@ func workedStatusLine(label string, width int) string {
 
 // termSizeWithFallback returns the terminal dimensions by querying common fds.
 // forcedTermWidth/forcedTermHeight override the real terminal size when non-zero
-// (used by tests to override the real terminal size).
+// (used by tests to override the real terminal size; the setter lives in the
+// test files). Guarded by the same mutex as the cached size below:
+// termSizeWithFallback runs on paint goroutines beside the compact animation,
+// the blink ticker and the resize watch, so any of them can be reading while a
+// test pins or clears the size.
 var forcedTermWidth, forcedTermHeight int
 
 // lastGoodTermSize caches the most recent successful term.GetSize result so a
@@ -6222,8 +6226,10 @@ var (
 var termGetSize = term.GetSize
 
 func termSizeWithFallback() (width, height int, err error) {
-	if forcedTermWidth > 0 || forcedTermHeight > 0 {
-		w, h := forcedTermWidth, forcedTermHeight
+	lastGoodTermMu.Lock()
+	w, h := forcedTermWidth, forcedTermHeight
+	lastGoodTermMu.Unlock()
+	if w > 0 || h > 0 {
 		if w <= 0 {
 			w = 80
 		}
@@ -6246,10 +6252,10 @@ func termSizeWithFallback() (width, height int, err error) {
 	// not shrink the layout to 80x24 and render full-bleed elements at the
 	// wrong width.
 	lastGoodTermMu.Lock()
-	w, h := lastGoodTermWidth, lastGoodTermHeight
+	cachedW, cachedH := lastGoodTermWidth, lastGoodTermHeight
 	lastGoodTermMu.Unlock()
-	if w > 0 && h > 0 {
-		return w, h, nil
+	if cachedW > 0 && cachedH > 0 {
+		return cachedW, cachedH, nil
 	}
 	return 80, 24, fmt.Errorf("no tty found")
 }

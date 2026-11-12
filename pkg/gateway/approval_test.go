@@ -1223,14 +1223,33 @@ func TestGatewayInlineApprovalApprovesInTheSameRun(t *testing.T) {
 
 	var published []wsServerMsg
 	var mu sync.Mutex
+	// The approver answers beside the gate: as soon as the gate publishes, it
+	// approves, and the gate unblocks. It is bounded by the test — a goroutine
+	// still inside Approve after the test returns races the TempDir cleanup
+	// (seen under -race) — and reports through t.Error, because FailNow is
+	// legal only on the test's own goroutine.
+	var approver sync.WaitGroup
+	approver.Add(1)
+	t.Cleanup(approver.Wait)
 	go func() {
-		require.Eventually(t, func() bool {
+		defer approver.Done()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
 			mu.Lock()
-			defer mu.Unlock()
-			return len(published) > 0
-		}, 2*time.Second, 5*time.Millisecond)
-		_, err := actions.Approve(context.Background(), action.ID, "web")
-		require.NoError(t, err)
+			publishedCount := len(published)
+			mu.Unlock()
+			if publishedCount > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Error("the inline gate never published its requires_action message")
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if _, err := actions.Approve(context.Background(), action.ID, "web"); err != nil {
+			t.Errorf("approve the inline action: %v", err)
+		}
 	}()
 
 	resumeCtx, err := s.promptGatewayInlineApproval(ctx, rae, "req-1", "session-1", func(msg wsServerMsg) {

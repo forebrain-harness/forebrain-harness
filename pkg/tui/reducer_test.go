@@ -3088,8 +3088,8 @@ func composerTextRowScreen(r *Renderer, textRow int) int {
 
 func newComposerRenderer(t *testing.T, width, height int) *Renderer {
 	t.Helper()
-	forcedTermWidth, forcedTermHeight = width, height
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(width, height)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
 	r.EnableViewportMode()
@@ -4310,7 +4310,7 @@ func TestViewportResizeErasesTheDisplayFirst(t *testing.T) {
 		t.Fatalf("an ordinary repaint must not erase the display, got %q", out.String())
 	}
 
-	forcedTermWidth = 80
+	setForcedTermSize(80, 24)
 	out.Reset()
 	r.ViewportResize()
 	paint := out.String()

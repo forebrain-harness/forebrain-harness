@@ -1113,6 +1113,15 @@ func (x *recordingRunExecutor) last() turn.TurnRequest {
 	return x.requests[len(x.requests)-1]
 }
 
+// count answers how many turns the executor has recorded. Reads go through
+// the lock: a run can still be appending on its own goroutine while a test
+// polls this from the test goroutine.
+func (x *recordingRunExecutor) count() int {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return len(x.requests)
+}
+
 func usageLimitResettingAt(resetAt time.Time) error {
 	return &llm.APIError{
 		StatusCode: http.StatusTooManyRequests,
@@ -1417,7 +1426,7 @@ func TestAutoContinuationStandsDownWhenTheSessionIsBusy(t *testing.T) {
 	g.occupySessionWithAnotherOwner(t, state.RunStatusRunning)
 	err := g.server.continueAfterUsageLimit(context.Background(), turn.AutoContinuePlan{SessionID: "session-ws"}, turn.AutoContinuePrompt)
 	require.ErrorIs(t, err, turn.ErrAutoContinueUnavailable)
-	require.Empty(t, g.executor.requests, "a second run must not start beside the one in flight")
+	require.Equal(t, 0, g.executor.count(), "a second run must not start beside the one in flight")
 }
 
 // An executor that fails before run.Run ever started (a required MCP server
@@ -1665,7 +1674,7 @@ func TestHeartbeatStandsDownWhenTheSessionIsBusy(t *testing.T) {
 	g.occupySessionWithAnotherOwner(t, state.RunStatusRunning)
 	err := g.server.startHeartbeatTurn(context.Background(), "session-ws", "anything new?")
 	require.ErrorIs(t, err, state.ErrSessionBusy)
-	require.Empty(t, g.executor.requests, "a heartbeat must not interrupt the run in flight")
+	require.Equal(t, 0, g.executor.count(), "a heartbeat must not interrupt the run in flight")
 	rows, rerr := g.sessions.ListRecentMessages(context.Background(), "session-ws", 10)
 	require.NoError(t, rerr)
 	require.Empty(t, rows, "a beat that did not fire must leave no row behind")
@@ -1679,7 +1688,7 @@ func TestHeartbeatStandsDownWhenTheSessionIsParked(t *testing.T) {
 	// Another process holds the parked run, so the heartbeat's store is told
 	// the approval is on the other surface.
 	require.ErrorIs(t, err, state.ErrSessionAwaitingApprovalElsewhere)
-	require.Empty(t, g.executor.requests)
+	require.Equal(t, 0, g.executor.count())
 	rows, rerr := g.sessions.ListRecentMessages(context.Background(), "session-ws", 10)
 	require.NoError(t, rerr)
 	require.Empty(t, rows, "a beat beside a parked approval must leave no row behind")
@@ -2058,7 +2067,7 @@ func TestCronFireParkedOnApprovalSettlesWhenItsRunEnds(t *testing.T) {
 	})
 
 	// The fire parks: its record stays open and "run it now" is refused.
-	require.Eventually(t, func() bool { return len(g.executor.requests) == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return g.executor.count() == 1 }, 5*time.Second, 10*time.Millisecond)
 	require.Equal(t, state.CronStatusRunning, fireRunRecord(t, g, job.ID).Status)
 	err := g.server.Env.Cron().RunJobNow(ctx, "main", job.ID)
 	require.Error(t, err)

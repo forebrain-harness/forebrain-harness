@@ -91,9 +91,8 @@ func (w *approvalPaintWriter) waitForPaint(t *testing.T) {
 }
 
 func TestApprovalOverlayRunDiscardsQueuedNavigationBeforeInitialRender(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	readEnd, writeEnd, err := os.Pipe()
 	if err != nil {
@@ -227,9 +226,8 @@ func TestQuestionOverlayRunResetsInitialFocusToFirstOption(t *testing.T) {
 }
 
 func TestViewportSelectionOverlayForceHidesDesyncedHardwareCursor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -266,9 +264,8 @@ func TestViewportSelectionOverlayForceHidesDesyncedHardwareCursor(t *testing.T) 
 // overlay appeared fused to the transcript above it. The rule is pinned to row
 // 0 of the composer block and only the content below it scrolls.
 func TestOverlaySeparatorStaysPinnedWhileScrolling(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 12
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 12)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -338,9 +335,8 @@ func TestOverlaySeparatorStaysPinnedWhileScrolling(t *testing.T) {
 // across the pin: the caret row is reported in content coordinates and must be
 // shifted past the separator only after the content slice is taken.
 func TestOverlayCursorRowAccountsForPinnedSeparator(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 12
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 12)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -418,9 +414,8 @@ func TestMouseWheelEventCarriesPointerPosition(t *testing.T) {
 // whose pointer is over a tall (scrollable) composer overlay scrolls the overlay
 // content, not the transcript.
 func TestViewportScrollAtOverTallOverlayScrollsOverlay(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 12
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 12)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -463,9 +458,8 @@ func TestViewportScrollAtOverTallOverlayScrollsOverlay(t *testing.T) {
 // transcript instead of being swallowed. This preserves the pre-overlay-scroll
 // behaviour where wheeling during a short picker scrolled the conversation.
 func TestViewportScrollAtOverShortOverlayFallsThroughToTranscript(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 12
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 12)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -503,9 +497,8 @@ func TestViewportScrollAtOverShortOverlayFallsThroughToTranscript(t *testing.T) 
 // wheel instead of only PgUp/PgDn. Before the fix Run dropped every mouse
 // event including wheel notches.
 func TestApprovalOverlayWheelScrollsTallOverlay(t *testing.T) {
-	forcedTermWidth = 40
-	forcedTermHeight = 16
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(40, 16)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
@@ -590,9 +583,8 @@ func TestApprovalOverlayWheelScrollsTallOverlay(t *testing.T) {
 // option rows are visible under a body (a full file diff, a wrapped command)
 // taller than the overlay area.
 func TestApprovalOverlayReopenDropsStaleScrollOffset(t *testing.T) {
-	forcedTermWidth = 40
-	forcedTermHeight = 16
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(40, 16)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
@@ -652,9 +644,8 @@ func TestApprovalOverlayReopenDropsStaleScrollOffset(t *testing.T) {
 }
 
 func TestQuestionOverlayWheelScrollsTallOverlay(t *testing.T) {
-	forcedTermWidth = 40
-	forcedTermHeight = 16
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(40, 16)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
@@ -745,9 +736,8 @@ func TestQuestionOverlayWheelScrollsTallOverlay(t *testing.T) {
 }
 
 func TestQuestionOverlayReopenResetsScrollOffset(t *testing.T) {
-	forcedTermWidth = 40
-	forcedTermHeight = 16
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(40, 16)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
@@ -1129,9 +1119,8 @@ func TestApprovalFeedbackCtrlCCancelsTheApproval(t *testing.T) {
 // visible caret on screen by scrolling back to it, so a render that follows a
 // scroll must report the caret hidden or the scroll is undone on the spot.
 func TestApprovalFeedbackPageKeysScrollTheOverlay(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -2121,8 +2110,8 @@ func TestEveryPanelShowsTheSameFilterBar(t *testing.T) {
 // the blank row above it or the blank under it — neither of which is part of
 // the bar — is not.
 func TestClickAnywhereOnTheFilterBarReachesTheFilter(t *testing.T) {
-	forcedTermWidth, forcedTermHeight = 100, 40
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(100, 40)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	st := &selectState{options: manyOptions(), label: "pick", inFilter: true}
 	st.applyFilter()
 	st.filter = filterField{text: "abc", cursor: 3}
@@ -2609,8 +2598,8 @@ func TestSelectorInputSelectionIsDeleted(t *testing.T) {
 // TestQuestionOtherSelectionIsDeleted covers user_interaction's Other field,
 // whose row carries a one-cell caret block the mapping has to skip.
 func TestQuestionOtherSelectionIsDeleted(t *testing.T) {
-	forcedTermWidth, forcedTermHeight = 80, 30
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 30)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
 	r.EnableViewportMode()
@@ -2685,8 +2674,8 @@ func TestQuestionOtherSelectionIsDeleted(t *testing.T) {
 // bug on the Other row: the row highlights a wide rune the drag only partly
 // covers, so Delete must take the characters the highlight showed and no less.
 func TestQuestionOtherSelectionDeletesAWideRuneWhole(t *testing.T) {
-	forcedTermWidth, forcedTermHeight = 80, 30
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 30)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
 	r.EnableViewportMode()
@@ -2944,8 +2933,8 @@ func TestSelectorInputForwardDeleteDeletesAtTheCaret(t *testing.T) {
 // Other field, whose row carries a one-cell caret block the mapping has to
 // skip.
 func TestQuestionOtherForwardDeleteDeletesAtTheCaret(t *testing.T) {
-	forcedTermWidth, forcedTermHeight = 80, 30
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 30)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
 	r.EnableViewportMode()
@@ -3327,9 +3316,8 @@ func TestHeldPeerOverlayAnswersWithTheKeyPressed(t *testing.T) {
 // input from the approval already on screen: it queues behind it, and the note
 // under that approval says it is waiting.
 func TestHeldPeerPromptQueuesBehindAnApproval(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)

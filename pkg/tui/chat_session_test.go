@@ -3206,9 +3206,8 @@ func TestFileMutationApprovalConfirmationMissingPathFallback(t *testing.T) {
 // wait is cancellable by the request's context, and while queued the overlay
 // is counted so the holding surface can show "N approvals waiting".
 func TestApprovalOverlayQueuesBehindBusyInput(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -3301,9 +3300,8 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 }
 
 func TestApprovalOverlay_ViewportModeHidesHardwareCursor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -3334,9 +3332,8 @@ func TestApprovalOverlay_ViewportModeHidesHardwareCursor(t *testing.T) {
 }
 
 func TestApprovalOverlay_ViewportModeQuestionHelpHidesCursor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -3369,9 +3366,8 @@ func TestApprovalOverlay_ViewportModeQuestionHelpHidesCursor(t *testing.T) {
 }
 
 func TestApprovalOverlay_ViewportModeCursorAtOption2HidesCursor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -3400,9 +3396,8 @@ func TestApprovalOverlay_ViewportModeCursorAtOption2HidesCursor(t *testing.T) {
 }
 
 func TestApprovalOverlay_ViewportModeWithSoftwareCursorHidesHardwareCursor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -3430,9 +3425,8 @@ func TestApprovalOverlay_ViewportModeWithSoftwareCursorHidesHardwareCursor(t *te
 }
 
 func TestApprovalOverlay_AfterSoftwareCursorHidesHardwareCursor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -3460,9 +3454,8 @@ func TestApprovalOverlay_AfterSoftwareCursorHidesHardwareCursor(t *testing.T) {
 }
 
 func TestApprovalOverlay_RunLoopHidesHardwareCursor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
@@ -3526,9 +3519,8 @@ func TestApprovalOverlay_RunLoopHidesHardwareCursor(t *testing.T) {
 }
 
 func TestApprovalOverlay_RunLoopAfterNavHidesHardwareCursor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
@@ -4339,9 +4331,8 @@ func TestApprovalOverlayCachesDiffBody(t *testing.T) {
 // option rows, and the scroll keys — whose whole purpose is to move away from
 // them — do not.
 func TestApprovalOverlayScrollKeysReleaseTheOptionAnchor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -4378,9 +4369,8 @@ func TestApprovalOverlayScrollKeysReleaseTheOptionAnchor(t *testing.T) {
 // anchor the render that followed each one pinned the overlay straight back to
 // the end of its content, which made both keys look dead.
 func TestPlanReviewPickerScrollKeysReleaseTheOptionAnchor(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -4487,9 +4477,8 @@ func TestPlanReviewPickerKeepsTheSelectionOnScreen(t *testing.T) {
 // rows to the bottom, and in the feedback field it would hide the caret, both
 // for a gesture that moved nothing.
 func TestApprovalOverlayScrollKeysKeepTheAnchorWhenNothingMoves(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 40
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 40)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -4676,8 +4665,8 @@ func exactCommandApproval(command string) (turn.ToolApprovalRequest, turn.ToolAp
 // text builder — is what keeps it inside three display lines. Drives
 // printApprovalConfirmation so removing the cap fails the test.
 func TestApprovalSink_ConfirmationIsCappedAtThreeLines(t *testing.T) {
-	forcedTermWidth = 80
-	t.Cleanup(func() { forcedTermWidth = 0 })
+	setForcedTermSize(80, 0)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	command := "git commit -m \"" + strings.Repeat("重构 approval ", 30) + "\""
 	req, decision := exactCommandApproval(command)
@@ -4708,8 +4697,8 @@ func TestApprovalSink_ConfirmationIsCappedAtThreeLines(t *testing.T) {
 // repaints or retitles the terminal, and an ESC also defeats the wrapper's
 // width math, which is what the three-line cap rides on.
 func TestApprovalSink_ConfirmationStripsTerminalControlSequences(t *testing.T) {
-	forcedTermWidth = 80
-	t.Cleanup(func() { forcedTermWidth = 0 })
+	setForcedTermSize(80, 0)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	command := "echo hi\x1b[2J\x1b]0;pwned\x07 && \rrm -rf /\nsecond line\ttabbed‮gnitirw"
 	req, decision := exactCommandApproval(command)
@@ -8392,9 +8381,8 @@ func TestCharacterizationToolArrayIsStableAcrossTurns(t *testing.T) {
 }
 
 func TestCJKComposerBlockNoExtraBlankLines(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	r := NewRenderer(nil, nil)
 	r.EnableViewportMode()
@@ -8420,9 +8408,8 @@ func TestCJKComposerBlockNoExtraBlankLines(t *testing.T) {
 }
 
 func TestCJKComposerPaintOutputNoExtraBlankLines(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -8448,9 +8435,8 @@ func TestCJKComposerPaintOutputNoExtraBlankLines(t *testing.T) {
 }
 
 func TestCJKComposerWithTrailingNewlines(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	r := NewRenderer(nil, nil)
 	r.EnableViewportMode()
@@ -8770,9 +8756,8 @@ func TestCompactBlockRendersCheckpointAsMarkdown(t *testing.T) {
 // "我爱北京" (each CJK = 2 cols), the caret at logical cursor N must be painted
 // at 1-based screen column 3 + 2*N.
 func TestPaintCJKCaretColumn(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	text := "我爱北京"
 	// rune -> cumulative display width: 我=2 爱=4 北=6 京=8
@@ -8811,9 +8796,8 @@ func TestPaintCJKCaretColumn(t *testing.T) {
 // wide rune's first cell and leaves a dangling second cell — which made the
 // caret visually drift by one CJK column.
 func TestSoftwareCursorBlockPreservesWideRune(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	text := "我爱北京"
 	// At cursor=2 the caret is between 爱 and 北; the cell at the caret is 北
@@ -8847,9 +8831,8 @@ func TestSoftwareCursorBlockPreservesWideRune(t *testing.T) {
 // right after "b". A width model that charged the rune two cells pushed the
 // caret one column past the text and made it repaint the character it skipped.
 func TestSoftwareCursorBlockAfterAmbiguousWidthRune(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	text := "a·b"
 	cursor := 3 // end of line
@@ -8912,9 +8895,8 @@ func blinkCaretOn(t *testing.T, r *Renderer, out *bytes.Buffer) string {
 // text (no rune to the right of the caret) the caret is still a 1-cell reverse
 // space.
 func TestSoftwareCursorBlockEmptyCellAtEndOfLine(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	text := "我爱北京"
 	cursor := 4 // end of line
@@ -8981,9 +8963,8 @@ type pasteCursorVariant struct {
 // produces "我爱大北京".
 func TestReproPasteCJKCursorOffsetVariants(t *testing.T) {
 	drainInteractiveInputSeedQueue()
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	variants := []pasteCursorVariant{
 		{
@@ -11913,9 +11894,8 @@ func TestMain(m *testing.M) {
 //   - the long body collapses to a click-to-expand preview by default,
 //   - expanding reveals the full body.
 func TestMCPRealisticCodegraphOutput(t *testing.T) {
-	forcedTermWidth = 160
-	forcedTermHeight = 60
-	t.Cleanup(func() { forcedTermWidth = 0; forcedTermHeight = 0 })
+	setForcedTermSize(160, 60)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	text := strings.Join([]string{
 		"**Exploration: sample query**",
@@ -14827,9 +14807,8 @@ func TestQuestionOverlayDescriptionNotTruncated(t *testing.T) {
 }
 
 func TestQuestionOverlayDescriptionSoftWrapsInFullAtViewportWidth(t *testing.T) {
-	forcedTermWidth = 44
-	forcedTermHeight = 200
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(44, 200)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	description := strings.Repeat("说明文字", 75)
 	form := sampleForm()
@@ -14898,9 +14877,8 @@ func TestQuestionOverlayDescriptionCRLFIsNormalized(t *testing.T) {
 }
 
 func TestQuestionOverlayLongTextSoftWrapsAtViewportWidthAndReflowsOnResize(t *testing.T) {
-	forcedTermWidth = 44
-	forcedTermHeight = 200
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(44, 200)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	const description = "允许 rg、grep/egrep/fgrep、git grep、find；可通过管道连接只读结果整形命令（如 head、sort、uniq、wc、cut、只读 sed），每个命令都必须完整显示。"
 	form := sampleForm()
@@ -14940,7 +14918,7 @@ func TestQuestionOverlayLongTextSoftWrapsAtViewportWidthAndReflowsOnResize(t *te
 
 	// A SIGWINCH repaint must reflow the retained logical rows immediately;
 	// the overlay should not require another key press to reveal hidden text.
-	forcedTermWidth = 30
+	setForcedTermSize(30, 200)
 	r.ViewportResize()
 	narrowRows := assertWrapped(forcedTermWidth)
 	if narrowRows <= wideRows {
@@ -16661,8 +16639,8 @@ func TestInputPanelShowsQuestionFieldAndKeys(t *testing.T) {
 // the brand and the step on top, the progress rule, then the panel, with the
 // hardware caret placed in the field at the logical cursor.
 func TestStandalonePromptPaintsASetupPage(t *testing.T) {
-	forcedTermWidth, forcedTermHeight = 60, 16
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(60, 16)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	var out strings.Builder
 	sel := newStandaloneRawSelector(nil, &out)
 	sel.SetupPage(2, 5)
@@ -16971,11 +16949,9 @@ func TestCompactProgressBarShowsItsPercentage(t *testing.T) {
 }
 
 func TestCompactFrameStartsAndStopsAnimationTicker(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 
 	var out strings.Builder
@@ -17713,8 +17689,8 @@ func TestThinkingDisplayLinesFinalShowsAllLines(t *testing.T) {
 // own line. The reducer accumulates deltas; append-only streaming advances the
 // cursor forward on the same line so all words share one line on screen.
 func TestRendererFinalAssistantWrapsLongLinesWithinPadding(t *testing.T) {
-	forcedTermWidth = 60
-	t.Cleanup(func() { forcedTermWidth = 0 })
+	setForcedTermSize(60, 0)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
 	longWord := strings.Repeat("word ", 40)
@@ -17748,9 +17724,9 @@ func TestRendererFinalAssistantAlignsCJKMarkdownTable(t *testing.T) {
 }
 
 func TestRendererFinalAssistantCJKMarkdownTableAvoidsTerminalAutowrap(t *testing.T) {
-	forcedTermWidth = 70
+	setForcedTermSize(70, 0)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
+		setForcedTermSize(0, 0)
 	})
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -18569,9 +18545,8 @@ func TestRendererAgentRosterDisambiguatesRepeatedNames(t *testing.T) {
 }
 
 func TestWorkedForRuleSpansTrueTerminalWidthInViewport(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 100000
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 100000)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	// Viewport paints transcript frames at termWidth - viewportRightPadding.
 	captureWidth := 80 - viewportRightPadding
 	lines := renderFrameLines(Frame{Kind: FrameStatus, Title: "Worked for 5m 04s", Final: true}, captureWidth, DiffThemeDark, 0)
@@ -19292,8 +19267,8 @@ func TestNormalizeFailedToolContent(t *testing.T) {
 }
 
 func TestRendererMCPUsesCanonicalHeaderAndSemanticArguments(t *testing.T) {
-	forcedTermWidth = 200
-	t.Cleanup(func() { forcedTermWidth = 0 })
+	setForcedTermSize(200, 0)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
 	r.renderCompactFrame(Frame{
@@ -19390,11 +19365,9 @@ func TestRendererMCPUnwrapsStructuredOutputContentAsMarkdown(t *testing.T) {
 }
 
 func TestRendererToolHeaderContinuationRespectsRightMargin(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 
 	summary := `ran codegraph.codegraph_explore {"query":"keyhandler up down arrow history tui some more words here to force wrap"}`
@@ -20636,8 +20609,8 @@ func TestRendererReadFileHeaderDoesNotTruncatePathUnderCwd(t *testing.T) {
 	relPath := "aaaa/bbbb/cccc/dddd/eeee/ffff/gggg/hhhh/iiii/jjjj/openapi.yaml"
 	filePath := cwd + "/" + relPath
 
-	forcedTermWidth = 200
-	t.Cleanup(func() { forcedTermWidth = 0 })
+	setForcedTermSize(200, 0)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -20672,8 +20645,8 @@ func TestRendererReadFileHeaderDoesNotTruncatePathOutsideCwd(t *testing.T) {
 	cwd := "/home/user/project"
 	filePath := "/other/workspace/aaaa/bbbb/cccc/dddd/eeee/ffff/gggg/hhhh/iiii/jjjj/openapi.yaml"
 
-	forcedTermWidth = 200
-	t.Cleanup(func() { forcedTermWidth = 0 })
+	setForcedTermSize(200, 0)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -21787,8 +21760,8 @@ func TestHandleSandboxOpensOverlay(t *testing.T) {
 // A selector with no terminal to paint into (non-TTY runs, tests) still has to
 // deliver the report rather than swallow it.
 func TestHandleSandboxFallsBackToTranscript(t *testing.T) {
-	forcedTermWidth, forcedTermHeight = 80, 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	session := &fakeSession{sandboxReply: "sandbox:\n- mode: workspace-write"}
 	var out bytes.Buffer
@@ -26163,9 +26136,8 @@ func TestJumpToBottomButtonTextPluralization(t *testing.T) {
 
 func newScrolledJumpToBottomRenderer(t *testing.T) (*Renderer, *bytes.Buffer) {
 	t.Helper()
-	forcedTermWidth = 60
-	forcedTermHeight = 14
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(60, 14)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -26655,9 +26627,8 @@ func TestViewportSelectEndPersistsSelectionAfterCopy(t *testing.T) {
 // the hardware cursor to the composer prompt (\x1b[?25h at the prompt cell),
 // not leave it hidden (\x1b[?25l) which stranded it at the footer's right edge.
 func TestViewportSelectEndRepositionsCursorToComposer(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -26708,9 +26679,8 @@ func TestViewportSelectEndRepositionsCursorToComposer(t *testing.T) {
 // cursor-position sequence (CUP) and never ?25h/?25l; ?25h is reserved for an
 // actual visibility transition (e.g. releasing a mouse-drag selection).
 func TestViewportCursorBlinkPreservedWhileStreaming(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -26745,9 +26715,8 @@ func TestViewportCursorBlinkPreservedWhileStreaming(t *testing.T) {
 // software cursor hides the hardware caret and paints a reverse-video block at
 // the composer prompt.
 func TestSoftwareCursorHidesHardwareAndPaintsBlock(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -26777,9 +26746,8 @@ func TestSoftwareCursorHidesHardwareAndPaintsBlock(t *testing.T) {
 // TestSoftwareCursorBlinkToggle verifies the 500ms ticker toggles the
 // reverse-video block on and off, producing a blinking caret.
 func TestSoftwareCursorBlinkToggle(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -26827,9 +26795,8 @@ func TestSoftwareCursorBlinkToggle(t *testing.T) {
 // third caret appeared after "xxxxx tokens". After the fix every frame
 // repositions the cursor at the caret, matching the hardware-cursor path.
 func TestSoftwareCursorBlinkOffRepositionsCaret(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -26869,9 +26836,8 @@ func TestSoftwareCursorBlinkOffRepositionsCaret(t *testing.T) {
 // very tall composer (large pasted content) grew beyond the terminal height and
 // pushed the hardware cursor into the footer row.
 func TestTallComposerClampsHeightAndKeepsCursorOnScreen(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 10
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 10)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -26918,9 +26884,8 @@ func TestTallComposerClampsHeightAndKeepsCursorOnScreen(t *testing.T) {
 // a scrolled composer resolves to the correct logical line rather than the
 // top of the full composer block.
 func TestTallComposerSelectionMapsToScrolledLine(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 10
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 10)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	r := NewRenderer(nil, nil)
 	r.EnableViewportMode()
@@ -26955,9 +26920,8 @@ func TestTallComposerSelectionMapsToScrolledLine(t *testing.T) {
 // allocated area. The cursor is placed at the top of the content so the
 // auto-scroll logic does not immediately pull the offset back down.
 func TestTallComposerMouseWheelScrollsComposer(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 10
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 10)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	r := NewRenderer(nil, nil)
 	r.EnableViewportMode()
@@ -27018,9 +26982,8 @@ func TestStripAnsiSGRMouse(t *testing.T) {
 // the delayed-wrap regression: a full-width tool row must not make the next
 // viewport repaint clear or draw at the wrong physical terminal row.
 func TestViewportPaintUsesAbsoluteRowPositioningAfterFullWidthToolOutput(t *testing.T) {
-	forcedTermWidth = 40
-	forcedTermHeight = 16
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(40, 16)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -27798,11 +27761,9 @@ func TestViewportComposerKeepsSingleSpacingAroundWorkingAndPendingQueue(t *testi
 }
 
 func TestViewportAppendPreservesManualScrollPosition(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 5
+	setForcedTermSize(80, 5)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 	r := NewRenderer(nil, nil)
 	r.viewportMode = true
@@ -28447,11 +28408,9 @@ func TestViewportSelectionExtractsOffScreenRows(t *testing.T) {
 }
 
 func TestViewportTerminalErrorMirrorsIntoActiveSubagentView(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 
 	var out strings.Builder
@@ -28496,11 +28455,9 @@ func TestViewportTerminalErrorMirrorsIntoActiveSubagentView(t *testing.T) {
 // apart (the nested-subagent bug), the switched view is empty and Enter appears
 // to "do nothing".
 func TestSetActiveViewShowsSubagentToolFramesByRosterKey(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 	r := NewRenderer(nil, nil)
 	r.viewportMode = true
@@ -28621,11 +28578,9 @@ func TestViewportToolFallbackOmitsSummaryForUnknownTool(t *testing.T) {
 //  2. Continuation lines must respect contentRightMargin (no flush-right text).
 //  3. The body must not contain header continuation lines (no duplicate text).
 func TestViewportFoldHeaderWrapsAndDoesNotDuplicate(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 
 	longBody := ""
@@ -29515,11 +29470,9 @@ func ptrTo(v appcfg.Root) *appcfg.Root { return &v }
 // key, so it belongs to that subagent's own view, and the fanout card in the
 // primary transcript keeps its own account of the same event.
 func TestSubagentFailureLandsInItsOwnView(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 	r := NewRenderer(nil, nil)
 	r.viewportMode = true
@@ -29552,11 +29505,9 @@ func TestSubagentFailureLandsInItsOwnView(t *testing.T) {
 // A terminal error that belongs to no subagent stays global: it is retained on
 // the primary transcript and mirrored into whichever subagent view is open.
 func TestUnownedErrorStaysGlobal(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 	r := NewRenderer(nil, nil)
 	r.viewportMode = true
@@ -29576,11 +29527,9 @@ func TestUnownedErrorStaysGlobal(t *testing.T) {
 // view had just shown. The view says it once; the primary transcript keeps the
 // turn's error; and a global error that says something else is still mirrored.
 func TestTurnErrorRepeatingSubagentFailureIsNotMirroredTwice(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 	r := NewRenderer(nil, nil)
 	r.viewportMode = true
@@ -29624,11 +29573,9 @@ func TestTurnErrorRepeatingSubagentFailureIsNotMirroredTwice(t *testing.T) {
 // stop line carrying its reason, and the turn error the interruption published
 // — the same sentence, mirrored in as global news — is not said there twice.
 func TestInterruptedSubagentViewSaysItsReasonOnce(t *testing.T) {
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 	r := NewRenderer(nil, nil)
 	r.viewportMode = true
@@ -30146,8 +30093,8 @@ func TestPlanReviewRequestRecordNamesTheRow(t *testing.T) {
 // The record is written by the same function that prints the line, so "shown
 // implies recorded" cannot be split by a later confirmFn call site.
 func TestApprovalSinkRecordsTheLineBeforeItPrintsIt(t *testing.T) {
-	forcedTermWidth = 120
-	t.Cleanup(func() { forcedTermWidth = 0 })
+	setForcedTermSize(120, 0)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)

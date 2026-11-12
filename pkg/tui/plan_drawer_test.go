@@ -547,8 +547,8 @@ func newPlanDrawerScreen(t *testing.T, width, height int) *Renderer {
 // how a hover test proves a repeated report writes nothing.
 func newPlanDrawerScreenWithOut(t *testing.T, width, height int) (*Renderer, *bytes.Buffer) {
 	t.Helper()
-	forcedTermWidth, forcedTermHeight = width, height
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(width, height)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
 	r.EnableViewportMode()

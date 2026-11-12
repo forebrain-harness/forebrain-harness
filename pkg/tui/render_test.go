@@ -1420,11 +1420,9 @@ func TestFastToolCardHeadersCarryNoTime(t *testing.T) {
 
 func useMigrationCardTerminal(t *testing.T) (*Renderer, *strings.Builder) {
 	t.Helper()
-	forcedTermWidth = 80
-	forcedTermHeight = 24
+	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
-		forcedTermWidth = 0
-		forcedTermHeight = 0
+		setForcedTermSize(0, 0)
 	})
 	out := &strings.Builder{}
 	r := NewRenderer(out, out)
@@ -1862,8 +1860,8 @@ func TestGatedCardsDrawTheOpenCircleBothWays(t *testing.T) {
 // size sees only the terminal.
 func TestBlockLayoutWidthIsTheRenderersOwn(t *testing.T) {
 	const terminalWidth, width = 200, 60
-	forcedTermWidth, forcedTermHeight = terminalWidth, 50
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(terminalWidth, 50)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	long := strings.Repeat("宽度来自参数而不是终端 the width comes from the argument ", 6)
 	shellBody, _ := tool.FormatToolStepResult(tool.StepEvent{
@@ -1994,4 +1992,15 @@ func TestWrapPanelWordsFoldsAtSpacesAndBreaksOnlyLongTokens(t *testing.T) {
 			t.Fatalf("wrapPanelWords(%q, %d) = %q, want %q", tc.text, tc.width, got, tc.want)
 		}
 	}
+}
+
+// setForcedTermSize pins the terminal size tests render at; (0, 0) clears it.
+// Test-file-only on purpose: production code must never override the
+// process-wide terminal size (TestProductionCodeNeverOverridesTheTerminalSize
+// guards that), and the write is locked because paint goroutines read the size
+// beside the test goroutine that pins it.
+func setForcedTermSize(width, height int) {
+	lastGoodTermMu.Lock()
+	forcedTermWidth, forcedTermHeight = width, height
+	lastGoodTermMu.Unlock()
 }

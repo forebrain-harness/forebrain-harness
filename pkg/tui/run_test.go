@@ -6143,9 +6143,8 @@ func TestLSPRecommendationModalChoices(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			forcedTermWidth = 80
-			forcedTermHeight = 24
-			t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+			setForcedTermSize(80, 24)
+			t.Cleanup(func() { setForcedTermSize(0, 0) })
 			var out bytes.Buffer
 			renderer := NewRenderer(&out, &out)
 			renderer.EnableViewportMode()

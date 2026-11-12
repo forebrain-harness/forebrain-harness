@@ -296,8 +296,8 @@ func wrappedImageStepFrame(name string) Frame {
 // and treated its marker rows as the only mouse path back from expanded.)
 func TestImageCardIsNeverCollapsibleAndItsMarkerOpensTheFile(t *testing.T) {
 	opened := stubImageOpener(t)
-	forcedTermWidth, forcedTermHeight = 40, 30
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(40, 30)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
 	name := strings.Repeat("c", 200) + ".png"
 	r := NewRenderer(io.Discard, io.Discard)
@@ -373,8 +373,8 @@ func TestImageCardIsNeverCollapsibleAndItsMarkerOpensTheFile(t *testing.T) {
 // one more paragraph to that answer, as a delta would, and repaints.
 func streamingRenderer(t *testing.T, blocks ...Frame) (r *Renderer, stream func()) {
 	t.Helper()
-	forcedTermWidth, forcedTermHeight = 80, 24
-	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	r = NewRenderer(io.Discard, io.Discard)
 	r.viewportMode = true
 	r.vpFollow = true
