@@ -32,10 +32,14 @@
     <template v-else-if="step === 2">
       <div class="auth">
         <!-- device_code: a code to type on the authorization page; the poll
-             advances on its own once the person approves there. -->
+             advances on its own once the person approves there. A plugin flow
+             with no code (browser-confirm) drops the empty code box: the
+             address is the whole instruction. -->
         <template v-if="flow === 'device_code'">
-          <p>{{ t('models.deviceHint') }}</p>
-          <div class="ucode" data-testid="models-login-code">{{ userCode || t('models.deviceCodePending') }}</div>
+          <p>{{ deviceHintText }}</p>
+          <div v-if="userCode || (!currentPlugin?.hideEmptyUserCode && !url)" class="ucode" data-testid="models-login-code">
+            {{ userCode || t('models.deviceCodePending') }}
+          </div>
           <div class="acts2">
             <Button
               type="button"
@@ -189,6 +193,7 @@ import {
   type SubscriptionRow,
 } from '@/lib/api'
 import { useI18n } from '@/locales'
+import { getSubscriptionFrontendPlugin } from '@/plugins/subscriptionPlugin'
 
 /** The poll period on the gateway's own status endpoint: this only asks a local
  *  process what it has learned, so a second is often enough and cheap. */
@@ -207,7 +212,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{ close: []; saved: [] }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 const step = ref<1 | 2 | 3>(1)
 const subscriptions = ref<SubscriptionRow[]>([...props.known])
@@ -241,9 +246,25 @@ const stepText = computed(() =>
   step.value === 1 ? t('models.subscribeStep1') : step.value === 2 ? t('models.subscribeStep2') : t('models.subscribeStep3'),
 )
 
+/** The local plugin that owns the subscription being signed in to, when one
+ *  does: it carries the flow's wording and whether its device flow shows a
+ *  code at all. */
+const currentPlugin = computed(() => (current.value ? getSubscriptionFrontendPlugin(current.value.id) : undefined))
+
+/** What the device-flow step says while the person authorizes elsewhere: the
+ *  plugin's own sentence when it has one, the page's otherwise. */
+const deviceHintText = computed(
+  () => currentPlugin.value?.waitingHint?.(locale.value === 'zh' ? 'zh' : 'en') ?? t('models.deviceHint'),
+)
+
 /** What the second line under a subscription's name says: the flow it drives,
- *  in the page's words rather than the backend's enum. */
+ *  in the page's words rather than the backend's enum — or, for a subscription
+ *  a local plugin owns, in that plugin's words. */
 function describe(subscription: SubscriptionRow): string {
+  const plugin = getSubscriptionFrontendPlugin(subscription.id)
+  if (plugin?.describe) {
+    return plugin.describe(locale.value === 'zh' ? 'zh' : 'en', subscription)
+  }
   if (subscription.flows.includes('paste_callback')) return t('models.pasteHint')
   return t('models.deviceHint')
 }

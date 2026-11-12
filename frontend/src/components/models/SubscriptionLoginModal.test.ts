@@ -231,3 +231,50 @@ describe('SubscriptionLoginModal', () => {
     expect(second.createKey).toBe(true)
   })
 })
+
+// A subscription a local plugin owns carries its own wording and may run a
+// browser-confirm device flow with no short code: Step 1 shows the plugin's
+// description, and Step 2 shows its waiting hint, the open-authorization
+// button, and no empty code placeholder.
+const pluginRegistry = vi.hoisted(() => new Map<string, { id: string } & Record<string, unknown>>())
+vi.mock('@/plugins/subscriptionPlugin', () => ({
+  getSubscriptionFrontendPlugin: (id: string) => pluginRegistry.get(id.trim().toLowerCase()),
+}))
+
+describe('SubscriptionLoginModal plugin subscriptions', () => {
+  it('shows the plugin wording and drops the empty code box for a codeless device flow', async () => {
+    pluginRegistry.set('plugtest', {
+      id: 'plugtest',
+      describe: (locale: 'zh' | 'en') => (locale === 'zh' ? '浏览器授权登录 PLUGIN 订阅' : 'Authorize the PLUGIN subscription'),
+      waitingHint: (locale: 'zh' | 'en') => (locale === 'zh' ? '在浏览器确认后自动继续-PLUGIN' : 'Confirms in the browser-PLUGIN'),
+      hideEmptyUserCode: true,
+    })
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue([
+      ...subscriptions(),
+      { id: 'plugtest', name: 'Plugin Sub', flows: ['device_code'], state: 'missing' },
+    ])
+    vi.spyOn(forebrainApi, 'startProviderLogin').mockResolvedValue({ provider: 'plugtest', loginId: 'login-p' })
+    vi.spyOn(forebrainApi, 'providerLoginStatus').mockResolvedValue(
+      status({ url: 'https://plugin.example.test/device/selectAccounts', userCode: '', flow: 'device_code' }),
+    )
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([offer({ provider: 'plugtest' })])
+
+    const wrapper = mountModal()
+    await flushPromises()
+
+    // Step 1: the plugin's own description under the subscription's name.
+    expect(wrapper.find('[data-subscription="plugtest"]').text()).toContain('浏览器授权登录 PLUGIN 订阅')
+
+    await wrapper.find('[data-subscription="plugtest"]').trigger('click')
+    await flushPromises()
+
+    // Step 2: the plugin's waiting hint, no empty code placeholder for a flow
+    // that has no code, and a usable open button once the URL arrives.
+    await vi.waitFor(() => expect(wrapper.text()).toContain('在浏览器确认后自动继续-PLUGIN'), { timeout: 5000 })
+    expect(wrapper.find('[data-testid="models-login-code"]').exists()).toBe(false)
+    await vi.waitFor(
+      () => expect(wrapper.find('[data-testid="models-login-open"]').attributes('disabled')).toBeUndefined(),
+      { timeout: 5000 },
+    )
+  })
+})
