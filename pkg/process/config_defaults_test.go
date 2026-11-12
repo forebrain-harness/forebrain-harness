@@ -43,6 +43,18 @@ var zeroIsTheDefault = map[string]string{
 	// switch's own off, so the row never carries a default to hand the
 	// settings surfaces.
 	"peers.claude_code": "nil is the interop switch off",
+	// The /goal check's global row (plan 299) starts unconfigured, and its
+	// empty value is the setting: no model is "follow the primary agent", and
+	// no effort is "follow the model row's own default". The rest are a custom
+	// subagent's fields, which this row never carries — the check's prompt,
+	// tool set and lifecycle are the built-ins' own.
+	"agents.goal_evaluator.model":            "empty follows the primary agent",
+	"agents.goal_evaluator.reasoning_effort": "empty follows the model row's default",
+	"agents.goal_evaluator.description":      "the check is not a dispatchable type",
+	"agents.goal_evaluator.system_prompt":    "the built-in prompt is the check's",
+	"agents.goal_evaluator.tools":            "the check's tool set is read-only and fixed",
+	"agents.goal_evaluator.continuable":      "the check runs once per round",
+	"agents.goal_evaluator.enabled":          "the check is not a dispatchable type",
 }
 
 // TestStoredConfigDefaultsCoverEveryField is the registry's guard (plan 207

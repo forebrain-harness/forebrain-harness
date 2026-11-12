@@ -606,6 +606,57 @@ func TestValidateAgentSubagentsAcceptsAResolvableModelReference(t *testing.T) {
 	}
 }
 
+// The settings page's goal-check row is global, so it has no per-agent entry
+// to be validated with: this is the one exported verdict it gets, and it is
+// the same rule every per-agent entry gets (plan 299). The second half pins
+// the mount point: the loader judges the row even for an install with no
+// agents.definitions at all, which is what validatePrimaryAgents skips.
+func TestValidateGoalEvaluatorModel(t *testing.T) {
+	resolves := func(ref string) bool { return ref == "llm-goal-check" }
+
+	// An effort needs a model next to it, exactly as for a per-agent entry.
+	effort := SubagentConfig{ReasoningEffort: "high"}
+	err := ValidateGoalEvaluatorModel(effort, resolves)
+	if err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
+		t.Fatalf("err = %v, want the effort rule", err)
+	}
+	if !strings.Contains(err.Error(), "agents.goal_evaluator") {
+		t.Fatalf("err = %v, want the path the settings page writes", err)
+	}
+
+	// A reference no row carries is refused, naming the row.
+	missing := SubagentConfig{Model: "llm-no-such-row"}
+	if err := ValidateGoalEvaluatorModel(missing, resolves); err == nil || !strings.Contains(err.Error(), `model "llm-no-such-row" must be provider/model`) {
+		t.Fatalf("err = %v, want the shape sentence for a value that resolves to nothing", err)
+	}
+
+	// A configured row id is the accepted form.
+	if err := ValidateGoalEvaluatorModel(SubagentConfig{Model: "llm-goal-check", ReasoningEffort: "low"}, resolves); err != nil {
+		t.Fatalf("a resolvable row id was refused: %v", err)
+	}
+
+	// Empty is "follow the primary agent".
+	if err := ValidateGoalEvaluatorModel(SubagentConfig{}, nil); err != nil {
+		t.Fatalf("the unconfigured row was refused: %v", err)
+	}
+
+	// The loader runs it with no definitions present: the fresh install's
+	// shape, where validatePrimaryAgents has already returned.
+	root := Root{
+		LLMModels: []LLMModelConfig{{ID: "llm-goal-check", Provider: "deepseek", Model: "deepseek-v4-flash"}},
+		Agents: AgentsSection{
+			GoalEvaluator: SubagentConfig{Model: "llm-goal-check", ReasoningEffort: "high"},
+		},
+	}
+	if err := FinishLoad(&root); err != nil {
+		t.Fatalf("a configured goal-check row was refused on an install with no definitions: %v", err)
+	}
+	root.Agents.GoalEvaluator = SubagentConfig{ReasoningEffort: "high"}
+	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
+		t.Fatalf("err = %v, want the loader to refuse an effort with no model", err)
+	}
+}
+
 // The loader's name lists decide whether an entry overrides a built-in or
 // declares a custom subagent, so they must be the definitions' own lists. A
 // built-in missing from the copy would silently become a configurable custom

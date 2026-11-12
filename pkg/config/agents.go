@@ -13,6 +13,11 @@ import (
 type AgentsSection struct {
 	Defaults    AgentDefaults              `yaml:"defaults,omitempty" json:"defaults,omitempty"`
 	Definitions map[string]AgentDefinition `yaml:"definitions,omitempty" json:"definitions,omitempty"`
+	// GoalEvaluator is the one system subagent the settings page configures:
+	// the /goal round's check. It is global on purpose — every primary agent's
+	// goal check runs on the same row — which is why it sits beside Defaults
+	// and Definitions rather than inside them (plan 299).
+	GoalEvaluator SubagentConfig `yaml:"goal_evaluator,omitempty" json:"goal_evaluator,omitempty"`
 }
 
 // MCPServersFor returns the MCP servers one primary agent owns, in
@@ -320,6 +325,14 @@ func validateSubagentModel(where string, entry SubagentConfig, refResolves func(
 		return nil
 	}
 	return fmt.Errorf("%s: model %q must be provider/model", where, entry.Model)
+}
+
+// ValidateGoalEvaluatorModel puts the settings page's one global subagent row
+// under the same rule every per-agent entry gets: validateSubagentModel,
+// unmodified. The where string is the configuration path the settings page
+// writes, so a refusal names the row the user was editing.
+func ValidateGoalEvaluatorModel(entry SubagentConfig, refResolves func(string) bool) error {
+	return validateSubagentModel("agents.goal_evaluator", entry, refResolves)
 }
 
 // subagentModelShape reports whether a model value has the legacy

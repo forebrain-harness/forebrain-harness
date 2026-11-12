@@ -199,6 +199,19 @@ func validateLoadedRoot(r *Root) error {
 	if err := ValidateCronSection(r.Cron); err != nil {
 		return err
 	}
+	// The settings page's goal-check row is global, so it has no per-agent
+	// entry to be validated with: this one call is its whole verdict, and it
+	// sits here rather than in validatePrimaryAgents because that function
+	// returns early for an install with no definitions at all — the shape a
+	// fresh install has, and the one this row must still be checked on
+	// (plan 299). The reference resolves against the global model table: the
+	// row is the same for every primary agent.
+	if err := ValidateGoalEvaluatorModel(r.Agents.GoalEvaluator, func(ref string) bool {
+		_, ok := ResolveModelRef(r, "main", ref)
+		return ok
+	}); err != nil {
+		return err
+	}
 	if err := validatePrimaryAgents(r); err != nil {
 		return err
 	}
