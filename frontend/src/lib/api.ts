@@ -1,9 +1,30 @@
 import axios, { type AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 
 import { toCamelCase, toSnakeCase } from './case'
-import type { ForebrainTokenBudget } from './forebrainGatewayRuntime'
-import type { LspRecommendationChoice } from './lspRecommendation'
 import { reportGatewayUnauthorized } from './gatewaySession'
+import type { ForebrainTokenBudget } from './forebrainGatewayRuntime'
+import type { LogBlobText, LogExchange, LogPage, LogQuery } from './logs'
+import type { LspRecommendationChoice } from './lspRecommendation'
+
+/** The log page's wire types (plan 288): one record, one page, one model call.
+ * They live in `@/lib/logs` beside the functions that read them, and are
+ * re-exported here so a page imports its data through the API module it calls. */
+export type {
+  LogBlobRef,
+  LogBlobText,
+  LogBucket,
+  LogExchange,
+  LogExchangeCall,
+  LogExchangePart,
+  LogExchangeReply,
+  LogExchangeScope,
+  LogPage,
+  LogQuery,
+  LogRecord,
+  LogResponseSummary,
+  LogSummaryToolCall,
+  LogSummaryUsage,
+} from './logs'
 
 export function getErrorMessage(error: unknown): string {
   const err = error as AxiosError
@@ -4727,6 +4748,47 @@ export const forebrainApi = {
    * browser reached are the browser's own. */
   runtimeInfo() {
     return api.get<RuntimeInfo>('/runtime').then((res) => res.data)
+  },
+
+  /** One page of the event log (plan 287): the records of the range and the
+   * dimensions asked for, newest first, with the counts the level buttons and
+   * the histogram draw. Filtering, ordering and slicing happen in the gateway;
+   * `@/lib/logs` builds the query. */
+  logs(query: LogQuery) {
+    return api.get<LogPage>('/logs', { params: query }).then((res) => res.data)
+  },
+
+  /** One model call as the log page opens it: the request it sent, the
+   * response it read, a summary of what came back, and the calls that were in
+   * flight with it. */
+  logExchange(day: string, id: string) {
+    return api.get<LogExchange>('/logs/exchange', { params: { day, id } }).then((res) => res.data)
+  },
+
+  /** One payload file, decompressed, as a byte window (offset/limit). `total`
+   * is the whole file's size from `X-Log-Blob-Bytes` — what "load the rest" and
+   * the download are measured against. The body is plain text, never JSON. */
+  logBlob(day: string, name: string, offset?: number, limit?: number): Promise<LogBlobText> {
+    const params: Record<string, string | number> = { day, name }
+    if (offset) params.offset = offset
+    if (limit) params.limit = limit
+    return api
+      .get<string>('/logs/blob', {
+        params,
+        responseType: 'text',
+        transformResponse: [(data: unknown) => data],
+      })
+      .then((res) => ({
+        text: typeof res.data === 'string' ? res.data : String(res.data ?? ''),
+        total: Number(res.headers['x-log-blob-bytes'] ?? 0),
+      }))
+  },
+
+  /** Where one payload is downloaded whole. The browser's own save requests it,
+   * cookie and all, so a whole 1MB request body never rides through JS. */
+  logBlobDownloadUrl(day: string, name: string): string {
+    const params = new URLSearchParams({ day, name, download: '1' })
+    return `${API_BASE}/logs/blob?${params.toString()}`
   },
 
   // Retention is the install's configuration, so it lives apart from the
