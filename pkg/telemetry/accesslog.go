@@ -39,14 +39,19 @@ func AccessLogMiddleware(next http.Handler) http.Handler {
 			if recovered != nil {
 				rec.panicked = true
 			}
+			status := rec.status()
 			attrs := []any{
+				// The one reserved attribute: 284's slog adapter promotes it into
+				// the record's kind, so an access record is kind=http and never
+				// mistaken for the engine's own log line.
+				"kind", "http",
 				"method", r.Method,
 				// The target alone: a query string is free text from the caller and
 				// routinely carries credentials. The field keeps the name "path"
 				// even when it carries an authority instead, because the field
 				// name is part of the shipped format.
 				"path", requestTarget(r),
-				"status", rec.status(),
+				"status", status,
 				"duration", formatAccessDuration(time.Since(start)),
 				"bytes", rec.written,
 				"remote", ClientIP(r),
@@ -55,10 +60,29 @@ func AccessLogMiddleware(next http.Handler) http.Handler {
 				slog.Error("request panicked", append(attrs, "panic", recovered)...)
 				panic(recovered)
 			}
-			slog.Info("request", attrs...)
+			slog.Log(r.Context(), accessLogLevel(r.Method, status), "request", attrs...)
 		}()
 		next.ServeHTTP(rec, r)
 	})
+}
+
+// accessLogLevel says how loudly one answered request is worth reporting.
+//
+// Opening a session in the web interface is a dozen successful GETs and a
+// heartbeat is one every few seconds; at INFO they drown the INFO that
+// mattered. So a success nobody has to act on — a read — is DEBUG, while a
+// success that changed something stays INFO. A failure always keeps its level.
+func accessLogLevel(method string, status int) slog.Level {
+	switch {
+	case status >= 500:
+		return slog.LevelError
+	case status >= 400:
+		return slog.LevelWarn
+	case method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions:
+		return slog.LevelDebug
+	default:
+		return slog.LevelInfo
+	}
 }
 
 // requestTarget is what the record reports for a request. An origin server's

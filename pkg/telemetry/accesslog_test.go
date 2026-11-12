@@ -87,18 +87,23 @@ func TestAccessLogMiddlewareReportsOneRecordPerRequest(t *testing.T) {
 		inner   http.HandlerFunc
 		status  string
 		written string
+		level   slog.Level
 	}{
 		{
 			name:    "ok",
 			inner:   func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("hello")) },
 			status:  "200",
 			written: "5",
+			// A successful read is the request nobody has to act on: DEBUG, so
+			// the page that opens a session cannot bury the INFO that mattered.
+			level: slog.LevelDebug,
 		},
 		{
 			name:    "not found",
 			inner:   func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) },
 			status:  "404",
 			written: fmt.Sprint(len("404 page not found\n")),
+			level:   slog.LevelWarn,
 		},
 		{
 			name: "rate limited",
@@ -107,12 +112,14 @@ func TestAccessLogMiddlewareReportsOneRecordPerRequest(t *testing.T) {
 			},
 			status:  "429",
 			written: fmt.Sprint(len("too many requests\n")),
+			level:   slog.LevelWarn,
 		},
 		{
 			name:    "handler writes nothing",
 			inner:   func(http.ResponseWriter, *http.Request) {},
 			status:  "200",
 			written: "0",
+			level:   slog.LevelDebug,
 		},
 	}
 	for _, tc := range tests {
@@ -125,10 +132,13 @@ func TestAccessLogMiddlewareReportsOneRecordPerRequest(t *testing.T) {
 				t.Fatalf("records = %d, want exactly one", len(recs))
 			}
 			rec := recs[0]
-			if rec.Level != slog.LevelInfo {
-				t.Fatalf("level = %v, want INFO", rec.Level)
+			if rec.Level != tc.level {
+				t.Fatalf("level = %v, want %v", rec.Level, tc.level)
 			}
 			got := recordAttrs(rec)
+			if got["kind"] != "http" {
+				t.Errorf("kind = %q, want the reserved attribute 284 promotes", got["kind"])
+			}
 			if got["method"] != http.MethodGet {
 				t.Errorf("method = %q", got["method"])
 			}
@@ -446,4 +456,66 @@ func TestSlogErrorLogCarriesAPanicStackFromNetHTTP(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("the panicking handler's report never reached slog")
+}
+
+// The four levels, one case each: a failure keeps its level, a successful read
+// is DEBUG, and a successful write — the request that changed something — is
+// the one an operator reads at INFO.
+func TestAccessLogLevelsByOutcome(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		inner  http.HandlerFunc
+		level  slog.Level
+	}{
+		{
+			name:   "5xx is an error",
+			method: http.MethodGet,
+			inner:  func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", http.StatusBadGateway) },
+			level:  slog.LevelError,
+		},
+		{
+			name:   "4xx is a warning",
+			method: http.MethodPost,
+			inner:  func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "bad", http.StatusBadRequest) },
+			level:  slog.LevelWarn,
+		},
+		{
+			name:   "GET 200 is a debug",
+			method: http.MethodGet,
+			inner:  func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) },
+			level:  slog.LevelDebug,
+		},
+		{
+			name:   "HEAD 204 is a debug",
+			method: http.MethodHead,
+			inner:  func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) },
+			level:  slog.LevelDebug,
+		},
+		{
+			name:   "POST 200 is info",
+			method: http.MethodPost,
+			inner:  func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) },
+			level:  slog.LevelInfo,
+		},
+		{
+			name:   "DELETE 204 is info",
+			method: http.MethodDelete,
+			inner:  func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) },
+			level:  slog.LevelInfo,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := captureAccessLog(t)
+			serveOnce(t, tc.method, "/api/runs", tc.inner)
+			recs := requestRecords(h)
+			if len(recs) != 1 {
+				t.Fatalf("records = %d, want exactly one", len(recs))
+			}
+			if recs[0].Level != tc.level {
+				t.Fatalf("level = %v, want %v", recs[0].Level, tc.level)
+			}
+		})
+	}
 }
