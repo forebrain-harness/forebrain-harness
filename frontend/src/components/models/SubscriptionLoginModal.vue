@@ -116,6 +116,23 @@
         @update:key-id="keyId = $event"
         @update:create-key="createKey = $event"
       />
+      <!-- A plan whose key nobody can fetch asks for it here: the console is
+           the only place the key exists, and it is stored on this machine. -->
+      <div v-if="keyPasteNeeded" class="kpaste">
+        <span>{{ t('models.keyPasteLabel') }}</span>
+        <Input
+          v-model="pastedKey"
+          type="password"
+          autocomplete="off"
+          class="forebrain-field h-[32px] font-mono text-xs"
+          :aria-invalid="keyPasteMissing ? 'true' : undefined"
+          data-testid="models-key-paste"
+        />
+        <p class="listnote">
+          {{ t('models.keyPasteHint') }}
+          <a v-if="keyConsoleURL" :href="keyConsoleURL" target="_blank" rel="noopener">{{ keyConsoleURL }}</a>
+        </p>
+      </div>
       <p v-if="provisionError" class="bad" data-testid="models-provision-error">{{ provisionError }}</p>
     </template>
 
@@ -153,7 +170,7 @@
           v-else-if="step === 3"
           type="button"
           class="forebrain-btn forebrain-btn-primary h-auto text-xs"
-          :disabled="!chosen.length || provisioning"
+          :disabled="!chosen.length || provisioning || keyPasteMissing"
           data-testid="models-provision"
           @click="provision"
         >
@@ -239,12 +256,27 @@ const keyChoiceFor = ref('')
 const keyId = ref('')
 const needsConsent = ref(false)
 const createKey = ref(false)
+/** The API key a plan asks the user to paste (plan 281), and where the gateway
+ *  says it is copied from. */
+const pastedKey = ref('')
+const keyConsoleURL = ref('')
+/** The gateway answered that a chosen plan needs a key it cannot fetch. */
+const keyPasteAsked = ref(false)
 
 let timer: ReturnType<typeof setTimeout> | null = null
 
 const stepText = computed(() =>
   step.value === 1 ? t('models.subscribeStep1') : step.value === 2 ? t('models.subscribeStep2') : t('models.subscribeStep3'),
 )
+
+/** Whether the chosen offers include a plan whose key the user has to paste:
+ *  either the listing says so, or the write answered that it needs one. */
+const keyPasteNeeded = computed(
+  () => keyPasteAsked.value || chosen.value.some((index) => offers.value[index]?.needsKey === true),
+)
+
+/** The add button stays closed until the key a plan asks for is there. */
+const keyPasteMissing = computed(() => keyPasteNeeded.value && !pastedKey.value.trim())
 
 /** The local plugin that owns the subscription being signed in to, when one
  *  does: it carries the flow's wording and whether its device flow shows a
@@ -309,6 +341,9 @@ function reset(): void {
   keyId.value = ''
   needsConsent.value = false
   createKey.value = false
+  pastedKey.value = ''
+  keyConsoleURL.value = ''
+  keyPasteAsked.value = false
 }
 
 watch(
@@ -513,6 +548,7 @@ async function provision(): Promise<void> {
       }),
       ...(keyId.value ? { keyId: keyId.value } : {}),
       ...(createKey.value ? { createKey: true } : {}),
+      ...(pastedKey.value.trim() ? { key: pastedKey.value.trim() } : {}),
     })
     emit('saved')
   } catch (cause) {
@@ -525,6 +561,14 @@ async function provision(): Promise<void> {
         // The choice applies to the plan of the first chosen row: a kit mixing
         // two plans is the vendor's call, and its refusal names what it needs.
         provisionError.value = t('models.keyChoice')
+        return
+      }
+      // The plan wants a key the console owns: show the field, and let the page
+      // say where the key comes from.
+      if (cause.payload?.needsKey) {
+        keyPasteAsked.value = true
+        keyConsoleURL.value = String(cause.payload?.consoleUrl ?? '')
+        provisionError.value = ''
         return
       }
       if (cause.payload?.needsKeyConsent) {
@@ -574,6 +618,13 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.kpaste {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
 .stepl {
   margin: 0 0 4px;
   font-size: 12px;

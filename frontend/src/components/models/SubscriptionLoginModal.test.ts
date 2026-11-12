@@ -44,6 +44,7 @@ function offer(overrides: Partial<SubscriptionOffer> = {}): SubscriptionOffer {
     supportsImages: false,
     default: false,
     fromStaticList: false,
+    needsKey: false,
     ...overrides,
   }
 }
@@ -204,6 +205,74 @@ describe('SubscriptionLoginModal', () => {
       ['doubao-a', false],
       ['doubao-b', true],
     ])
+  })
+
+  // plan 281: a plan whose key nobody can fetch asks for it on the page — a
+  // masked field named for the plan, sent with the write — and the add button
+  // stays shut until it is there.
+  it('asks for the key a plan cannot fetch and sends it with the write', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(subscriptions())
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([
+      offer({ provider: 'volcengine', plan: 'coding-plan', planName: 'Coding Plan', needsKey: true }),
+    ])
+    vi.spyOn(forebrainApi, 'provisionSubscription').mockResolvedValue({ ids: ['row-1'] })
+
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.find('[data-subscription="volcengine"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-offer="0"]').trigger('click')
+    await flushPromises()
+
+    const field = wrapper.find('[data-testid="models-key-paste"]')
+    expect(field.exists()).toBe(true)
+    expect(field.attributes('type')).toBe('password')
+    // Nothing is written before the key is pasted.
+    expect(wrapper.find('[data-testid="models-provision"]').attributes('disabled')).toBeDefined()
+
+    await field.setValue('ark-pasted-placeholder')
+    await wrapper.find('[data-testid="models-provision"]').trigger('click')
+    await flushPromises()
+
+    const body = vi.mocked(forebrainApi.provisionSubscription).mock.calls[0][1] as Record<string, unknown>
+    expect(body.key).toBe('ark-pasted-placeholder')
+  })
+
+  // The refusal is the other way the field appears: a write that answered
+  // "needs_key" shows it, and the plan's console comes with the answer.
+  it('reveals the key field when the write says a plan needs one', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(subscriptions())
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([offer({ provider: 'volcengine', plan: 'coding-plan' })])
+    vi.spyOn(forebrainApi, 'provisionSubscription')
+      .mockRejectedValueOnce(
+        new GatewayHttpError(
+          409,
+          JSON.stringify({
+            error: '这个套餐的 Key 需要你从控制台复制后填进来',
+            needs_key: true,
+            plan: 'coding-plan',
+            console_url: 'https://console.example.test/apiKey',
+          }),
+        ),
+      )
+      .mockResolvedValueOnce({ ids: ['row-1'] })
+
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.find('[data-subscription="volcengine"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-offer="0"]').trigger('click')
+    await wrapper.find('[data-testid="models-provision"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="models-key-paste"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('https://console.example.test/apiKey')
+
+    await wrapper.find('[data-testid="models-key-paste"]').setValue('ark-pasted-placeholder')
+    await wrapper.find('[data-testid="models-provision"]').trigger('click')
+    await flushPromises()
+    const second = vi.mocked(forebrainApi.provisionSubscription).mock.calls[1][1] as Record<string, unknown>
+    expect(second.key).toBe('ark-pasted-placeholder')
   })
 
   it('offers to create a key when the account holds none', async () => {

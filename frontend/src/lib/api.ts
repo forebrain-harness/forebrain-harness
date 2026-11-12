@@ -1548,6 +1548,9 @@ export interface SubscriptionOffer {
   default: boolean
   /** The vendor's list is a shipped table rather than its own endpoint. */
   fromStaticList: boolean
+  /** This plan's row carries an API key the user pastes from the vendor's
+   *  console: the sign-in proves the plan, and no API hands the key over. */
+  needsKey: boolean
 }
 
 /** One row of the variables table. The value never comes back: only whether one
@@ -4633,6 +4636,8 @@ export const forebrainApi = {
       }[]
       keyId?: string
       createKey?: boolean
+      /** The API key a plan asks the user to paste (plan 281). */
+      key?: string
     },
   ) {
     return sendJSON<{ ids: string[] }>('POST', `/subscriptions/${encodeURIComponent(id)}/provision`, body)
