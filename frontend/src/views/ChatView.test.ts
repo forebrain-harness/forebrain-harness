@@ -1139,6 +1139,56 @@ describe('ChatView new conversation picks a project first', () => {
     expect(wrapper.text()).toContain('no longer exists')
     wrapper.unmount()
   })
+
+  // A model picked before the conversation exists shows the effort the model
+  // page configured for it (plan 300): the pick is held without an effort, and
+  // the row its first message opens is what pins the configured level — so the
+  // write must not name one, or the setting would be overridden by a blank.
+  it('a model picked on a new chat shows its configured effort and is saved without one', async () => {
+    const alpha = project({ id: 'a', name: 'alpha', root: '/work/alpha', trustLevel: 'trusted' })
+    vi.spyOn(forebrainApi, 'chatSessionCreate').mockResolvedValue({ id: 'new-1', title: '' })
+    vi.spyOn(forebrainApi, 'chatModelDefault').mockResolvedValue({
+      modelId: 'm-a',
+      provider: 'p',
+      model: 'a',
+      effort: '',
+      options: [
+        { id: 'm-a', provider: 'p', model: 'a', label: 'a', efforts: [] },
+        { id: 'm-b', provider: 'p', model: 'b', label: 'b', efforts: ['low', 'high'], defaultEffort: 'high' },
+      ],
+    })
+    const save = vi.spyOn(forebrainApi, 'saveSessionModel').mockResolvedValue({
+      modelId: 'm-b', provider: 'p', model: 'b', effort: 'high',
+    })
+    const wrapper = await openNewChat([alpha])
+    await pickProject(wrapper, 'alpha')
+
+    // No levels for the model in force: there is nothing to pick, so no chip.
+    expect(wrapper.find('[data-testid="effort-chip"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="model-chip"]').trigger('click')
+    await nextTick()
+    await wrapper.find('[data-testid="model-option-b"]').trigger('click')
+    await flushPromises()
+
+    // The chip already reads the configured level — the person sees what the
+    // conversation will run on, before it exists. (The level's own wording is
+    // Chinese, which is what the product calls it.)
+    setLocale('zh')
+    await nextTick()
+    try {
+      expect(wrapper.find('[data-testid="effort-chip"]').text()).toContain('高')
+    } finally {
+      setLocale('en')
+    }
+
+    await submit(wrapper, 'hello')
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(save.mock.calls[0][0]).toBe('new-1')
+    expect(save.mock.calls[0][1]).toMatchObject({ modelId: 'm-b', provider: 'p', model: 'b' })
+    expect(save.mock.calls[0][1]).not.toHaveProperty('effort')
+    wrapper.unmount()
+  })
 })
 
 /**

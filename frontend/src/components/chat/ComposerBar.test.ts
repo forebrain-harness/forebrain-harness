@@ -96,15 +96,63 @@ describe('ContextRing', () => {
 })
 
 describe('EffortChip', () => {
-  it('offers the default plus exactly the levels the model supports', async () => {
-    const wrapper = mount(EffortChip, { props: { effort: '', efforts: ['low', 'high'] } })
+  async function openMenu(props: { effort: string; efforts: string[]; defaultEffort?: string }) {
+    const wrapper = mount(EffortChip, { props })
     await wrapper.find('[data-testid="effort-chip"]').trigger('click')
+    return wrapper
+  }
+  const ids = (wrapper: Awaited<ReturnType<typeof openMenu>>) =>
+    wrapper.findAll('.forebrain-chip-menu-opt').map((option) => option.attributes('data-testid'))
+
+  // The model page configures a level: the menu is those levels alone, in the
+  // project's own order, with the configured one marked — and no 「默认」 row,
+  // because default-styled placeholders are not offered (plan 300, and the
+  // owner's own rule that the value in force is pre-selected instead).
+  it('offers the model’s levels when the model is configured with one', async () => {
+    const wrapper = await openMenu({ effort: 'high', efforts: ['high', 'low'], defaultEffort: 'high' })
+
+    expect(ids(wrapper)).toEqual(['effort-option-low', 'effort-option-high'])
+    expect(wrapper.find('[data-testid="effort-option-default"]').exists()).toBe(false)
+    const tags = wrapper.findAll('[data-testid="effort-setting-tag"]')
+    expect(tags).toHaveLength(1)
+    expect(tags[0].element.closest('[role="option"]')!.getAttribute('data-testid')).toBe('effort-option-high')
+    expect(wrapper.find('[data-testid="effort-option-high"]').attributes('aria-selected')).toBe('true')
+
+    await wrapper.find('[data-testid="effort-option-low"]').trigger('click')
+    expect(wrapper.emitted('select')).toEqual([['low']])
+    wrapper.unmount()
+  })
+
+  // A model that configures no level: 「默认」 is what the provider will apply,
+  // so it is a real row, selected, and nothing claims the model setting.
+  it('offers 「默认」 when the model configures no level', async () => {
+    const wrapper = await openMenu({ effort: '', efforts: ['low', 'high'], defaultEffort: '' })
+
+    expect(ids(wrapper)).toEqual(['effort-option-default', 'effort-option-low', 'effort-option-high'])
+    expect(wrapper.find('[data-testid="effort-option-default"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-testid="effort-setting-tag"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  // A conversation whose row stores no level keeps reading 「默认」 even after
+  // the model page configured one: the row is what it runs on, and history is
+  // not rewritten (the setting only applies at the moment a model is picked).
+  it('keeps showing a stored empty level as 「默认」', async () => {
+    const wrapper = await openMenu({ effort: '', efforts: ['low', 'high'], defaultEffort: 'high' })
+
+    expect(wrapper.find('[data-testid="effort-option-default"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-testid="effort-option-high"] [data-testid="effort-setting-tag"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  // A model that allows turning thinking off puts 「关闭思考」 first: the catalog
+  // already lists none first, and the menu keeps the project's order.
+  it('leads with 关闭思考 for a model that may switch thinking off', async () => {
+    const wrapper = await openMenu({ effort: 'low', efforts: ['low', 'none'], defaultEffort: 'low' })
 
     const options = wrapper.findAll('.forebrain-chip-menu-opt')
-    expect(options.map((option) => option.text())).toEqual(['默认模型默认档位', '低更快', '高更深入'])
-
-    await options[2].trigger('click')
-    expect(wrapper.emitted('select')).toEqual([['high']])
+    expect(options[0].attributes('data-testid')).toBe('effort-option-none')
+    expect(options[0].text()).toContain('关闭思考')
     wrapper.unmount()
   })
 })

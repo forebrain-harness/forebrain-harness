@@ -31,9 +31,11 @@ test('a reasoning effort picked on the chip survives a reload', async ({ page })
   await page.click('[data-testid="model-option-glm-5.3-flash"]')
   await expect(page.locator('[data-testid="model-chip"]')).toContainText('glm-5.3-flash')
 
-  // The effort chip offers the model's levels behind one menu.
+  // The effort chip offers the model's levels behind one menu. 「默认」 is no
+  // longer always a row (plan 300): it appears only when the conversation
+  // stores no level or the model is configured with none.
   await page.click('[data-testid="effort-chip"]')
-  await expect(page.locator('[data-testid="effort-option-default"]')).toBeVisible()
+  await expect(page.locator('[data-testid="effort-option-high"]')).toBeVisible()
   await page.click('[data-testid="effort-option-high"]')
 
   // The choice is the conversation's own: written to its session row, read
@@ -43,6 +45,61 @@ test('a reasoning effort picked on the chip survives a reload', async ({ page })
   await page.reload({ waitUntil: 'networkidle' })
   await page.waitForSelector('[data-testid="effort-chip"]')
   await expect(page.locator('[data-testid="effort-chip"]')).toContainText('高', { timeout: 15_000 })
+})
+
+/**
+ * Every conversation opens on the model and the effort its own session row
+ * stores (plan 300): two conversations of the same agent may run on the same
+ * model at two different levels, and switching between them must read each
+ * row — never carry the other one's pick over, and never fall back to the
+ * configured default.
+ */
+test('each conversation shows the model and effort its own row stores', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const sessionA = await seedProjectSession(page, 'chat-row-a')
+  const sessionB = await seedProjectSession(page, 'chat-row-b')
+  const LABEL: Record<string, string> = { low: '低', high: '高', max: '极致' }
+
+  /** One pick on the effort chip, waiting for the row's answer to come back. */
+  async function chooseLevel(level: string) {
+    await page.click('[data-testid="effort-chip"]')
+    await page.click(`[data-testid="effort-option-${level}"]`)
+    await expect(page.locator('[data-testid="effort-chip"]')).toContainText(LABEL[level])
+  }
+
+  /** Open one conversation, switch it to glm-5.3-flash and pick a level. */
+  async function pickLevel(session: string, level: string) {
+    await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+    await page.waitForSelector('textarea')
+    await expect(page.locator('[data-testid="model-chip"]')).toContainText(/glm|deepseek/i)
+    await page.click('[data-testid="model-chip"]')
+    await page.click('[data-testid="model-option-glm-5.3-flash"]')
+    await expect(page.locator('[data-testid="model-chip"]')).toContainText('glm-5.3-flash')
+    // A conversation that stores no row of its own yet reads the agent's most
+    // recently used one, and a pick equal to what it already shows changes
+    // nothing — so step through another level first, and let the wanted level
+    // be the change that writes this conversation's row.
+    await chooseLevel(level === 'max' ? 'low' : 'max')
+    await chooseLevel(level)
+  }
+
+  await pickLevel(sessionA, 'high')
+  await pickLevel(sessionB, 'low')
+  await shot(page, 'chat-effort-per-session')
+
+  // Back to A: its own row, not B's level and not the model's configured one.
+  await page.goto(`/?session=${sessionA}`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('[data-testid="effort-chip"]')
+  await expect(page.locator('[data-testid="model-chip"]')).toContainText('glm-5.3-flash')
+  await expect(page.locator('[data-testid="effort-chip"]')).toContainText('高', { timeout: 15_000 })
+
+  await page.goto(`/?session=${sessionB}`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('[data-testid="effort-chip"]')
+  await expect(page.locator('[data-testid="model-chip"]')).toContainText('glm-5.3-flash')
+  await expect(page.locator('[data-testid="effort-chip"]')).toContainText('低', { timeout: 15_000 })
 })
 
 test('an MCP server that cannot start is said once, at the head of the thread', async ({ page }) => {

@@ -173,7 +173,9 @@ describe('ModelChip', () => {
       modelId: 'row-eu',
       provider: 'deepseek',
       model: 'deepseek-v4-flash',
-      effort: '',
     })
+    // No effort in the request: a switch takes the row's configured one, which
+    // only the server knows (plan 300).
+    expect(save.mock.calls[0][1]).not.toHaveProperty('effort')
   })
 })
