@@ -157,16 +157,22 @@ type llmProviderEndpoint struct {
 // llmModelChoice is one entry of the one list every model picker reads: a
 // subagent's model, the memory settings, a new conversation's default.
 type llmModelChoice struct {
-	ID             string   `json:"id"`
-	Provider       string   `json:"provider"`
-	ProviderName   string   `json:"provider_name"`
-	Model          string   `json:"model"`
-	BaseURL        string   `json:"base_url"`
-	APIPath        string   `json:"api_path"`
-	Endpoint       string   `json:"endpoint"`
-	Label          string   `json:"label"`
-	Efforts        []string `json:"efforts"`
-	SupportsImages bool     `json:"supports_images"`
+	ID           string   `json:"id"`
+	Provider     string   `json:"provider"`
+	ProviderName string   `json:"provider_name"`
+	Model        string   `json:"model"`
+	BaseURL      string   `json:"base_url"`
+	APIPath      string   `json:"api_path"`
+	Endpoint     string   `json:"endpoint"`
+	Label        string   `json:"label"`
+	Efforts      []string `json:"efforts"`
+	// DefaultEffort is the level this row itself is configured with (plan 300's
+	// ModelChoice.ConfiguredEffort, read as-is). A picker that lets one type
+	// override a row's effort shows what the row gets when it names none, so it
+	// reads the row's own value rather than guessing from the catalog
+	// (plan 299 §2).
+	DefaultEffort  string `json:"default_effort"`
+	SupportsImages bool   `json:"supports_images"`
 }
 
 // llmModelRefusal is one refused request: the sentence the page shows under the
@@ -628,6 +634,7 @@ func (s *Server) handleLLMModelChoices(w http.ResponseWriter, r *http.Request) {
 			Endpoint:       turn.ModelEndpointLabel(choice.BaseURL, choice.APIPath, choice.URLVerbatim),
 			Label:          choice.Label,
 			Efforts:        choice.ReasoningEfforts,
+			DefaultEffort:  choice.ConfiguredEffort,
 			SupportsImages: choice.SupportsImages,
 		})
 	}

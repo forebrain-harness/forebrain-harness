@@ -461,6 +461,30 @@ func TestLLMModelsAPIRoutesKeepStaticSegments(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, do(http.MethodDelete, "/api/llm-models/choices").Code)
 }
 
+// The picker list carries each row's own configured effort (plan 299): a
+// picker that overrides one type's level has to show what the row itself gets
+// when it names none, and that value is the one plan 300 computed once rather
+// than a guess from the catalog.
+func TestLLMModelsAPIChoicesCarryTheRowsConfiguredEffort(t *testing.T) {
+	_, do := modelsPageServer(t)
+	createModel(t, do, `{"provider":"deepseek","model":"deepseek-v4","base_url":"https://api.deepseek.com","api_key":"sk-first","caps":{"efforts":["low","high"],"default_effort":"high"}}`)
+	createModel(t, do, `{"provider":"deepseek","model":"deepseek-v4-flash","base_url":"https://api.deepseek.com","api_key":"sk-first"}`)
+
+	rec := do(http.MethodGet, "/api/llm-models/choices")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var choices []struct {
+		Model         string `json:"model"`
+		DefaultEffort string `json:"default_effort"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &choices))
+	efforts := map[string]string{}
+	for _, choice := range choices {
+		efforts[choice.Model] = choice.DefaultEffort
+	}
+	require.Equal(t, "high", efforts["deepseek-v4"], "the row's configured level reaches the picker")
+	require.Equal(t, "", efforts["deepseek-v4-flash"], "a row with no configured level answers empty, not a guess")
+}
+
 // The table's own store is what these endpoints write: a row created here must
 // be readable by the runtime's view (plan 260).
 func TestLLMModelsAPIWritesTheRuntimeView(t *testing.T) {
