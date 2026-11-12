@@ -1232,13 +1232,18 @@ func EstimateMessage(msg Message) int {
 
 // estimateImageTokens accounts for image parts, which carry no text and so
 // would otherwise be invisible to occupancy accounting despite costing on the
-// order of a thousand tokens each.
+// order of a thousand tokens each. A file part — a PDF, an audio clip, a video —
+// is invisible the same way and is counted by its size: bytes over four, which
+// is what the same bytes would cost as text and therefore never under-reads a
+// request the provider bills for.
 func estimateImageTokens(parts []ContentPart) int {
 	total := 0
 	for _, part := range parts {
 		switch part.Type {
 		case ContentTypeImageBase64, ContentTypeImageURL:
 			total += ImageTokens
+		case ContentTypeFileBase64:
+			total += FilePartTokens(part)
 		}
 	}
 	return total

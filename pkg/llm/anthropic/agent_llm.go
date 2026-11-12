@@ -656,7 +656,11 @@ func agentAnthropicMessagesToAPI(messages []llm.Message, replayTo string) ([]ant
 				systemParts = append(systemParts, text)
 			}
 		case llm.RoleUser:
-			appendUser(agentAnthropicContentBlocks(m.Parts))
+			blocks, err := agentAnthropicContentBlocks(m.Parts)
+			if err != nil {
+				return nil, nil, err
+			}
+			appendUser(blocks)
 		case llm.RoleAssistant:
 			// A reply that was only reasoning goes back to the model that
 			// produced it, and to no other: the fence would hand that model's
@@ -754,7 +758,12 @@ func anthropicThinkingParams(m llm.Message, replayTo string) []anthropicapi.Cont
 	return out
 }
 
-func agentAnthropicContentBlocks(parts []llm.ContentPart) []anthropicapi.ContentBlockParamUnion {
+// agentAnthropicContentBlocks projects one user turn. A PDF a model takes
+// natively becomes a document block with a base64 source — Messages has a shape
+// for that and for nothing else: audio and video have no content block at all,
+// so one reaching here is a defect upstream and is refused rather than dropped
+// (docs/plan/NATIVE_MEDIA_INPUT_FACTS.md).
+func agentAnthropicContentBlocks(parts []llm.ContentPart) ([]anthropicapi.ContentBlockParamUnion, error) {
 	blocks := make([]anthropicapi.ContentBlockParamUnion, 0, len(parts))
 	for _, p := range parts {
 		switch p.Type {
@@ -773,9 +782,19 @@ func agentAnthropicContentBlocks(parts []llm.ContentPart) []anthropicapi.Content
 					MediaType: anthropicapi.Base64ImageSourceMediaType(p.MIMEType),
 				},
 			))
+		case llm.ContentTypeFileBase64:
+			if kind := llm.NativeMediaKindOfMIME(p.MIMEType); kind != llm.MediaKindPDF {
+				return nil, fmt.Errorf("anthropic: the Messages API carries a PDF natively, not a %s file; switch model or detach it", string(kind))
+			}
+			if strings.TrimSpace(p.FileBase64) == "" {
+				return nil, errors.New("anthropic: a PDF part carries no bytes")
+			}
+			blocks = append(blocks, anthropicapi.NewDocumentBlock(
+				anthropicapi.Base64PDFSourceParam{Data: p.FileBase64},
+			))
 		}
 	}
-	return blocks
+	return blocks, nil
 }
 
 func agentAnthropicToolResultContent(parts []llm.ContentPart) []anthropicapi.ToolResultBlockParamContentUnion {

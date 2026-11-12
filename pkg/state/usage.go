@@ -135,6 +135,20 @@ func contentBlocksJSON(parts []llm.ContentPart, fallbackText string) []map[strin
 					},
 				})
 			}
+		case llm.ContentTypeFileBase64:
+			// A file part is stored by reference like an image, and reported
+			// without its bytes either way: the row says which file was sent,
+			// not what was in it.
+			if src := strings.TrimSpace(part.SourcePath); src != "" {
+				blocks = append(blocks, map[string]any{
+					"type":      PartTypeFileReference,
+					"file_id":   src,
+					"label":     filepath.Base(src),
+					"mime_type": strings.TrimSpace(part.MIMEType),
+				})
+				break
+			}
+			blocks = append(blocks, llm.FilePartSummary(part))
 		case llm.ContentTypeImageBase64:
 			if src := strings.TrimSpace(part.SourcePath); src != "" {
 				// A part that knows its file is stored by reference: the bytes stay

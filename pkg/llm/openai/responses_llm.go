@@ -666,7 +666,10 @@ func (c *openAIResponsesLLM) execute(ctx context.Context, messages []llm.Message
 	replayed := false
 	for {
 		rounds++
-		params := c.newResponseParams(ctx, conversation, tools, false)
+		params, paramsErr := c.newResponseParams(ctx, conversation, tools, false)
+		if paramsErr != nil {
+			return finish(nil), replayed, paramsErr
+		}
 		if responsesParamsReplayReasoning(params) {
 			replayed = true
 		}
@@ -852,7 +855,10 @@ func (c *openAIResponsesLLM) ExecuteStructured(ctx context.Context, messages []l
 // reporting whether it replayed reasoning the way execute does.
 func (c *openAIResponsesLLM) executeStructured(ctx context.Context, messages []llm.Message, spec llm.StructuredOutputSpec) (*llm.Result, bool, error) {
 	ctx, finish := llm.WithRawCacheUsage(ctx)
-	params := c.newResponseParams(ctx, messages, nil, false)
+	params, err := c.newResponseParams(ctx, messages, nil, false)
+	if err != nil {
+		return nil, false, err
+	}
 	replayed := responsesParamsReplayReasoning(params)
 	params.Text = responses.ResponseTextConfigParam{
 		Format: responses.ResponseFormatTextConfigUnionParam{
@@ -869,7 +875,7 @@ func (c *openAIResponsesLLM) executeStructured(ctx context.Context, messages []l
 	return finish(result), replayed, err
 }
 
-func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []llm.Message, tools []*llm.Tool, compactionTrigger bool) responses.ResponseNewParams {
+func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []llm.Message, tools []*llm.Tool, compactionTrigger bool) (responses.ResponseNewParams, error) {
 	input := make(responses.ResponseInputParam, 0, len(messages))
 	rawInput := make([]any, 0, len(messages)+1)
 	hasOpaqueInput := compactionTrigger
@@ -948,12 +954,19 @@ func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []l
 			// prefix shifts.
 			if imageParts := toolResultImageParts(msg.Parts); len(imageParts) > 0 {
 				userParts := append([]llm.ContentPart{llm.Text("image read from tool result")}, imageParts...)
-				if projected := openAIResponsesUserContent(userParts); len(projected) > 0 {
+				projected, perr := openAIResponsesUserContent(userParts)
+				if perr != nil {
+					return responses.ResponseNewParams{}, perr
+				}
+				if len(projected) > 0 {
 					input = append(input, responses.ResponseInputItemParamOfMessage(projected, responses.EasyInputMessageRoleUser))
 				}
 			}
 		default:
-			content := openAIResponsesUserContent(msg.Parts)
+			content, perr := openAIResponsesUserContent(msg.Parts)
+			if perr != nil {
+				return responses.ResponseNewParams{}, perr
+			}
 			if len(content) == 0 {
 				continue
 			}
@@ -1039,7 +1052,7 @@ func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []l
 		}, params.Tools...)
 	}
 
-	return params
+	return params, nil
 }
 
 func agentMessageRawInput(message *llm.AgentMessageState) map[string]any {
@@ -1064,7 +1077,10 @@ func agentMessageRawInput(message *llm.AgentMessageState) map[string]any {
 // item that stands in for the history. That item can be replayed to this
 // provider only; see llm.ContextCompactor.
 func (c *openAIResponsesLLM) Compact(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.CompactResult, error) {
-	params := c.newResponseParams(ctx, messages, tools, true)
+	params, err := c.newResponseParams(ctx, messages, tools, true)
+	if err != nil {
+		return nil, err
+	}
 	// A synchronous request gives the same replacement semantics and avoids
 	// surfacing compaction bytes through the ordinary assistant stream.
 	resp, err := c.remoteCompactResponse(ctx, params)
@@ -1451,7 +1467,13 @@ func toolResultImageParts(parts []llm.ContentPart) []llm.ContentPart {
 	return imageParts
 }
 
-func openAIResponsesUserContent(parts []llm.ContentPart) responses.ResponseInputMessageContentListParam {
+// openAIResponsesUserContent projects one user turn. A PDF a model takes
+// natively becomes an input_file item carrying its bytes as a data URL — the
+// Responses API's own shape for a document, and the only non-image kind it has
+// one for: audio and video have no input item at all, so one reaching here is a
+// defect upstream and is refused rather than dropped
+// (docs/plan/NATIVE_MEDIA_INPUT_FACTS.md).
+func openAIResponsesUserContent(parts []llm.ContentPart) (responses.ResponseInputMessageContentListParam, error) {
 	content := make(responses.ResponseInputMessageContentListParam, 0, len(parts))
 	for _, part := range parts {
 		switch part.Type {
@@ -1476,9 +1498,25 @@ func openAIResponsesUserContent(parts []llm.ContentPart) responses.ResponseInput
 			image := responses.ResponseInputContentParamOfInputImage(responses.ResponseInputImageDetailAuto)
 			image.OfInputImage.ImageURL = openaigo.String("data:" + mimeType + ";base64," + data)
 			content = append(content, image)
+		case llm.ContentTypeFileBase64:
+			kind := llm.NativeMediaKindOfMIME(part.MIMEType)
+			if kind != llm.MediaKindPDF {
+				return nil, fmt.Errorf("openai responses: the API carries a PDF natively, not a %s file; switch model or detach it", string(kind))
+			}
+			data := strings.TrimSpace(part.FileBase64)
+			if data == "" {
+				return nil, errors.New("openai responses: a PDF part carries no bytes")
+			}
+			file := responses.ResponseInputFileParam{
+				FileData: openaigo.String("data:" + strings.TrimSpace(part.MIMEType) + ";base64," + data),
+			}
+			if name := strings.TrimSpace(part.FileName); name != "" {
+				file.Filename = openaigo.String(name)
+			}
+			content = append(content, responses.ResponseInputContentUnionParam{OfInputFile: &file})
 		}
 	}
-	return content
+	return content, nil
 }
 
 func (c *openAIResponsesLLM) executeStreaming(ctx context.Context, params responses.ResponseNewParams) (*llm.Result, error) {

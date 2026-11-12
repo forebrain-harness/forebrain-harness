@@ -159,7 +159,10 @@ func TestOpenAIResponsesRemoteV2AcceptsCompactionResponseWireShape(t *testing.T)
 
 func TestOpenAIResponsesReplaysOpaqueCompactionItem(t *testing.T) {
 	client := &openAIResponsesLLM{model: "gpt-test", maxTokens: 64}
-	params := client.newResponseParams(context.Background(), []llm.Message{{Compaction: &llm.CompactionState{ID: "cmp_1", EncryptedContent: "opaque"}}}, nil, false)
+	params, err := client.newResponseParams(context.Background(), []llm.Message{{Compaction: &llm.CompactionState{ID: "cmp_1", EncryptedContent: "opaque"}}}, nil, false)
+	if err != nil {
+		t.Fatalf("newResponseParams: %v", err)
+	}
 	body, err := json.Marshal(params)
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +174,10 @@ func TestOpenAIResponsesReplaysOpaqueCompactionItem(t *testing.T) {
 
 func TestOpenAIResponsesReplaysOpaqueCompactionSummaryItem(t *testing.T) {
 	client := &openAIResponsesLLM{model: "gpt-test", maxTokens: 64}
-	params := client.newResponseParams(context.Background(), []llm.Message{{Compaction: &llm.CompactionState{Type: "compaction_summary", ID: "cmp_1", EncryptedContent: "opaque"}}}, nil, false)
+	params, err := client.newResponseParams(context.Background(), []llm.Message{{Compaction: &llm.CompactionState{Type: "compaction_summary", ID: "cmp_1", EncryptedContent: "opaque"}}}, nil, false)
+	if err != nil {
+		t.Fatalf("newResponseParams: %v", err)
+	}
 	body, err := json.Marshal(params)
 	if err != nil {
 		t.Fatal(err)
@@ -2779,5 +2785,36 @@ func TestResponsesDoesNotResendUnrelatedFailures(t *testing.T) {
 				t.Fatalf("requests = %d, want 1: this failure is not the reasoning's", requests)
 			}
 		})
+	}
+}
+
+// A PDF is the Responses API's own `input_file` item: the bytes as a data URL
+// and the name the model can read. Audio and video have no input item at all,
+// so they are refused instead of being sent as an image.
+func TestResponsesUserContentCarriesAPDFNatively(t *testing.T) {
+	content, err := openAIResponsesUserContent([]llm.ContentPart{
+		llm.Text("read this"),
+		llm.FileBase64("demo.pdf", "application/pdf", "JVBERi0xLjcK"),
+	})
+	if err != nil {
+		t.Fatalf("openAIResponsesUserContent: %v", err)
+	}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{`"type":"input_file"`, `"file_data":"data:application/pdf;base64,JVBERi0xLjcK"`, `"filename":"demo.pdf"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("content = %s, want it to carry %s", got, want)
+		}
+	}
+}
+
+func TestResponsesUserContentRefusesNonPDFFiles(t *testing.T) {
+	for _, mime := range []string{"audio/mpeg", "video/mp4"} {
+		if _, err := openAIResponsesUserContent([]llm.ContentPart{llm.FileBase64("clip", mime, "AAAA")}); err == nil {
+			t.Fatalf("%s must be refused: the Responses API has no input item for it", mime)
+		}
 	}
 }

@@ -523,6 +523,19 @@ func userParts(parts []llm.ContentPart) ([]part, error) {
 			}
 		case llm.ContentTypeImageBase64:
 			out = append(out, part{InlineData: &inlineData{MIMEType: p.MIMEType, Data: p.ImageBase64}})
+		case llm.ContentTypeFileBase64:
+			// Gemini gives audio and video the same inline shape an image has
+			// (docs/plan/NATIVE_MEDIA_INPUT_FACTS.md); its document input is
+			// not verified, so a PDF is refused here rather than sent under a
+			// shape nobody documented.
+			kind := llm.NativeMediaKindOfMIME(p.MIMEType)
+			if strings.TrimSpace(p.FileBase64) == "" || kind == "" {
+				return nil, errors.New("google: a file part needs its bytes and the type they are")
+			}
+			if !llm.NativeMediaForProtocol(llm.ProtocolGemini).Has(kind) {
+				return nil, fmt.Errorf("google: generateContent carries audio and video natively, not a %s file; switch model or detach it", string(kind))
+			}
+			out = append(out, part{InlineData: &inlineData{MIMEType: p.MIMEType, Data: p.FileBase64}})
 		case llm.ContentTypeImageURL:
 			return nil, errors.New("google: image URLs are not supported; attach the image bytes instead")
 		}

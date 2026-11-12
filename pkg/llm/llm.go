@@ -16,9 +16,11 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -33,6 +35,10 @@ const (
 	// ContentTypeImageBase64 is an image provided as raw base64-encoded bytes.
 	// Use ImageBase64 or ImageFile to create parts of this type.
 	ContentTypeImageBase64 ContentType = "image_base64"
+	// ContentTypeFileBase64 carries a non-image file (PDF, audio, video) as raw
+	// base64 bytes for a model that takes it natively. MIMEType says which.
+	// Use FileBase64 or FileFromPath to create parts of this type.
+	ContentTypeFileBase64 ContentType = "file_base64"
 )
 
 // ContentPart is a single piece of content within a message — either text or an image.
@@ -45,6 +51,15 @@ type ContentPart struct {
 	ImageURL string
 	// ImageBase64 holds the base64-encoded image bytes when Type is ContentTypeImageBase64.
 	ImageBase64 string
+	// FileBase64 holds the base64-encoded bytes of a non-image file when Type
+	// is ContentTypeFileBase64. A protocol that can carry that kind of file
+	// natively sends these bytes; nothing else ever reads them, and no reader
+	// puts them in a log, a row or a note.
+	FileBase64 string
+	// FileName names the file the FileBase64 bytes came from — the base name
+	// only. A protocol that labels an inline file (OpenAI's `file` part) sends
+	// it, so the model can tell one attachment from another.
+	FileName string
 	// MIMEType is the MIME type of the image (e.g. "image/png") when Type is ContentTypeImageBase64.
 	MIMEType string
 	// SourcePath names the file whose bytes this image part was built from, when
@@ -228,6 +243,49 @@ func ImageMIMEType(path string, data []byte) string {
 		return sniffed
 	}
 	return ""
+}
+
+// FileBase64 returns a ContentPart carrying a non-image file a model takes
+// natively — a PDF, audio, video — as base64 bytes. name labels it for the
+// protocols that carry a file name; mimeType says which kind of file it is
+// (NativeMediaKindOfMIME reads it). data must be the standard base64 encoding
+// of the raw bytes.
+func FileBase64(name, mimeType, data string) ContentPart {
+	return ContentPart{
+		Type:       ContentTypeFileBase64,
+		FileBase64: data,
+		FileName:   strings.TrimSpace(name),
+		MIMEType:   strings.TrimSpace(mimeType),
+	}
+}
+
+// FileFromPath reads path and returns it as a file part for a model that takes
+// it natively, or an error when it is not a kind of file this build sends that
+// way (an image has ImageFile; anything else stays the text an attachment has
+// always degraded to) or is larger than NativeMediaInlineLimit.
+//
+// The type comes from the bytes, never the extension, for the reason
+// ImageMIMEType gives: an extension can only relabel bytes, and a file sent
+// under the wrong type is rejected as a whole request. The part is stamped with
+// path, so persistence stores the same file_reference an image does and a
+// replay re-derives the identical part from the same bytes.
+func FileFromPath(path string) (ContentPart, error) {
+	path = strings.TrimSpace(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ContentPart{}, fmt.Errorf("FileFromPath: read %q: %w", path, err)
+	}
+	mimeType := NativeMediaMIMEType(path, data)
+	if mimeType == "" {
+		return ContentPart{}, fmt.Errorf("FileFromPath: %q is not a PDF, an audio file or a video this build sends natively", path)
+	}
+	if len(data) > NativeMediaInlineLimit {
+		return ContentPart{}, fmt.Errorf("%w: %d MiB, and the largest one sent inline is %d MiB",
+			ErrNativeMediaTooLarge, len(data)>>20, NativeMediaInlineLimit>>20)
+	}
+	part := FileBase64(filepath.Base(path), mimeType, base64.StdEncoding.EncodeToString(data))
+	part.SourcePath = path
+	return part, nil
 }
 
 // FunctionCall holds the name and JSON-encoded arguments of a tool invocation.

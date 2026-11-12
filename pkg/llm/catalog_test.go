@@ -672,3 +672,47 @@ func TestLookupAppliesTheOnlyRowForItsPair(t *testing.T) {
 		t.Fatalf("levels = %v known=%v, want the catalog's", levels, known)
 	}
 }
+
+// The three non-image kinds come from the catalog's own modalities.input, and a
+// configured row's switches lay over them exactly the way the image switch does.
+func TestCatalogModalitiesFeedTheMediaCapabilities(t *testing.T) {
+	restoreGlobalCatalog(t)
+	data := []byte(`{
+		"acme/reader": {"id":"acme/reader","name":"Reader","reasoning":false,"attachment":true,
+			"modalities":{"input":["text","image","PDF","video","audio"]},
+			"limit":{"context":1000,"output":100}},
+		"acme/textual": {"id":"acme/textual","name":"Textual","reasoning":false,"attachment":false,
+			"modalities":{"input":["text"]},
+			"limit":{"context":1000,"output":100}}
+	}`)
+	cat, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	SetGlobalCatalogForTest(cat)
+	SetModelOverrides(nil, nil)
+	t.Cleanup(func() { SetModelOverrides(nil, nil) })
+
+	hit, ok := LookupCatalog("acme", "reader")
+	if !ok {
+		t.Fatal("acme/reader must be found")
+	}
+	if !hit.SupportsPDF || !hit.SupportsVideo || !hit.SupportsAudio {
+		t.Fatalf("hit = %+v, want pdf+video+audio from modalities.input (spelling is case-insensitive)", hit)
+	}
+	quiet, _ := LookupCatalog("acme", "textual")
+	if quiet.SupportsPDF || quiet.SupportsVideo || quiet.SupportsAudio {
+		t.Fatalf("hit = %+v, want no media kinds for a text-only entry", quiet)
+	}
+
+	// A row's own switches win over the catalog, both ways.
+	off, on := false, true
+	overlaid := OverlayModelOverride(hit, ModelOverride{SupportsPDF: &off})
+	if overlaid.SupportsPDF || !overlaid.SupportsVideo {
+		t.Fatalf("overlaid = %+v, want the row to switch PDF off and leave video alone", overlaid)
+	}
+	overlaid = OverlayModelOverride(quiet, ModelOverride{SupportsAudio: &on})
+	if !overlaid.SupportsAudio || overlaid.SupportsPDF {
+		t.Fatalf("overlaid = %+v, want the row to switch audio on", overlaid)
+	}
+}

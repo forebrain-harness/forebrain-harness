@@ -46,6 +46,12 @@ type Hit struct {
 	DefaultMaxTokens    int64  `json:"default_max_tokens,omitempty"`
 	CanReason           bool   `json:"can_reason,omitempty"`
 	SupportsAttachments bool   `json:"supports_attachments,omitempty"`
+	// SupportsPDF, SupportsVideo and SupportsAudio are the catalog's
+	// modalities.input, the same facts as SupportsAttachments for the three
+	// non-image kinds (a configured row's own switches lay over them).
+	SupportsPDF   bool `json:"supports_pdf,omitempty"`
+	SupportsVideo bool `json:"supports_video,omitempty"`
+	SupportsAudio bool `json:"supports_audio,omitempty"`
 	// Kind is the catalog's model type when it is not a chat model ("image",
 	// "speech", "embedding", "decision", …), "" for chat models.
 	Kind string `json:"kind,omitempty"`
@@ -71,6 +77,10 @@ type Model struct {
 	DefaultMaxTokens    int64  `json:"default_max_tokens"`
 	CanReason           bool   `json:"can_reason"`
 	SupportsAttachments bool   `json:"supports_attachments"`
+	// SupportsPDF, SupportsVideo and SupportsAudio are modalities.input; see Hit.
+	SupportsPDF   bool `json:"supports_pdf"`
+	SupportsVideo bool `json:"supports_video"`
+	SupportsAudio bool `json:"supports_audio"`
 	// Kind is the catalog's model type when it is not a chat model, "" for
 	// chat models. Chat() is the predicate to ask.
 	Kind string `json:"kind,omitempty"`
@@ -186,6 +196,12 @@ type rawEntry struct {
 	// Status is the upstream lifecycle marker ("deprecated" for a retired
 	// model); absent when the catalog names none.
 	Status string `json:"status"`
+	// Modalities is which kinds of input and output the model takes. The
+	// input list is where the three non-image kinds are stated ("pdf",
+	// "video", "audio" beside "text" and "image").
+	Modalities struct {
+		Input []string `json:"input"`
+	} `json:"modalities"`
 	// ReasoningOptions is a pointer so "the field is absent" and "the field is
 	// an empty array" stay distinguishable: an empty array is a model that
 	// reasons with no discrete level, an absent field is a model the catalog
@@ -223,6 +239,7 @@ func Parse(data []byte) (*Catalog, error) {
 		if slash := strings.LastIndex(id, "/"); slash >= 0 {
 			provider, apiModel = id[:slash], id[slash+1:]
 		}
+		inputModalities := modalitySet(e.Modalities.Input)
 		model := Model{
 			ID:                  e.ID,
 			Name:                e.Name,
@@ -234,6 +251,9 @@ func Parse(data []byte) (*Catalog, error) {
 			DefaultMaxTokens:    int64(e.Limit.Output),
 			CanReason:           e.Reasoning,
 			SupportsAttachments: e.Attachment,
+			SupportsPDF:         inputModalities[mediaKindPDF],
+			SupportsVideo:       inputModalities[mediaKindVideo],
+			SupportsAudio:       inputModalities[mediaKindAudio],
 			Kind:                strings.TrimSpace(e.Type),
 			Status:              strings.TrimSpace(e.Status),
 		}
@@ -583,6 +603,9 @@ func hitFromModel(m Model) Hit {
 		DefaultMaxTokens:    m.DefaultMaxTokens,
 		CanReason:           m.CanReason,
 		SupportsAttachments: m.SupportsAttachments,
+		SupportsPDF:         m.SupportsPDF,
+		SupportsVideo:       m.SupportsVideo,
+		SupportsAudio:       m.SupportsAudio,
 		Kind:                m.Kind,
 		Status:              m.Status,
 		ReasoningOptions:    m.ReasoningOptions,
@@ -601,8 +624,8 @@ const customModelProvider = "custom"
 type ModelOverride struct {
 	SupportsImages, SupportsPDF, SupportsVideo, SupportsAudio, CanReason, ReasoningOff *bool
 	// Efforts replaces the levels a model offers when non-nil. PDF, Video and
-	// Audio are carried for the surfaces that consume those capabilities;
-	// nothing here reads them yet.
+	// Audio are what a model may be handed directly, read the same way the
+	// image switch is: the row wins over the catalog.
 	Efforts []string
 	// ContextWindow and MaxOutput replace the windows the catalog carries;
 	// MaxOutput is the row's own output limit.
@@ -700,6 +723,15 @@ func OverlayModelOverride(hit Hit, override ModelOverride) Hit {
 func applyModelOverride(hit Hit, override ModelOverride) Hit {
 	if override.SupportsImages != nil {
 		hit.SupportsAttachments = *override.SupportsImages
+	}
+	if override.SupportsPDF != nil {
+		hit.SupportsPDF = *override.SupportsPDF
+	}
+	if override.SupportsVideo != nil {
+		hit.SupportsVideo = *override.SupportsVideo
+	}
+	if override.SupportsAudio != nil {
+		hit.SupportsAudio = *override.SupportsAudio
 	}
 	if override.CanReason != nil {
 		hit.CanReason = *override.CanReason
@@ -915,4 +947,28 @@ func LeadingTokenLooksLikeFilesystemPath(tok string) bool {
 		return true
 	}
 	return false
+}
+
+// mediaKindPDF, mediaKindVideo and mediaKindAudio are the modalities.input
+// spellings of the three non-image kinds. They are restated rather than reused
+// from native_media.go's MediaKind so a catalog value that happens to differ in
+// case still reads: the catalog is third-party data.
+const (
+	mediaKindPDF   = "pdf"
+	mediaKindVideo = "video"
+	mediaKindAudio = "audio"
+)
+
+// modalitySet is a modalities list as a lookup table, lowercased and trimmed.
+func modalitySet(list []string) map[string]bool {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(list))
+	for _, entry := range list {
+		if key := strings.ToLower(strings.TrimSpace(entry)); key != "" {
+			out[key] = true
+		}
+	}
+	return out
 }

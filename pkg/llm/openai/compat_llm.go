@@ -87,6 +87,7 @@ func newCompatLLM(apiKey, baseURL, model string, temperature float32, maxTokens 
 		}
 		hc.Transport = llm.WrapHTTPTransport(hc.Transport)
 		hc.Transport = &normalizeOpenAICompatReasoningRoundTripper{inner: hc.Transport}
+		hc.Transport = &compatNativeMediaRoundTripper{inner: hc.Transport}
 		if normalized := normalizeOpenAIChatAPIPath(apiPath); normalized != "" && normalized != defaultOpenAIChatCompletionsPath {
 			hc.Transport = &rewriteOpenAIChatPathRoundTripper{inner: hc.Transport, apiPath: normalized}
 		}
@@ -1748,6 +1749,13 @@ func compatMessageToOpenAI(m llm.Message, model string) (openaiclient.ChatComple
 					URL: dataURI,
 				},
 			})
+		case llm.ContentTypeFileBase64:
+			if data := strings.TrimSpace(p.FileBase64); data != "" && llm.NativeMediaKindOfMIME(p.MIMEType) != "" {
+				multi = append(multi, openaiclient.ChatMessagePart{
+					Type:     openaiclient.ChatMessagePartTypeImageURL,
+					ImageURL: &openaiclient.ChatMessageImageURL{URL: compatNativeMediaDataURL(p)},
+				})
+			}
 		}
 	}
 	msg.MultiContent = multi

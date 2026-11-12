@@ -1656,3 +1656,34 @@ func TestAnthropicProjectsOneToolRoundIntoOneUserMessage(t *testing.T) {
 		}
 	}
 }
+
+// A PDF is a document block with the bytes inline: Messages' own shape for a
+// document. Audio and video have no content block at all, so they are refused
+// rather than sent as an unnamed blob.
+func TestAnthropicContentBlocksCarryAPDFDocument(t *testing.T) {
+	blocks, err := agentAnthropicContentBlocks([]llm.ContentPart{
+		llm.Text("read this"),
+		llm.FileBase64("demo.pdf", "application/pdf", "JVBERi0xLjcK"),
+	})
+	if err != nil {
+		t.Fatalf("agentAnthropicContentBlocks: %v", err)
+	}
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{`"type":"document"`, `"media_type":"application/pdf"`, `"data":"JVBERi0xLjcK"`, `"type":"base64"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("blocks = %s, want it to carry %s", got, want)
+		}
+	}
+}
+
+func TestAnthropicContentBlocksRefuseAudioAndVideo(t *testing.T) {
+	for _, mime := range []string{"audio/mpeg", "video/mp4"} {
+		if _, err := agentAnthropicContentBlocks([]llm.ContentPart{llm.FileBase64("clip", mime, "AAAA")}); err == nil {
+			t.Fatalf("%s must be refused: the Messages API has no block for it", mime)
+		}
+	}
+}

@@ -76,6 +76,12 @@ func serializeContentParts(parts []llm.ContentPart) []map[string]any {
 		case llm.ContentTypeImageBase64:
 			m["mime_type"] = p.MIMEType
 			m["image_base64"] = p.ImageBase64
+		case llm.ContentTypeFileBase64:
+			// A file part is recorded by what it was and how big, never by
+			// what was in it: this log is read far more often than the file.
+			for key, value := range llm.FilePartSummary(p) {
+				m[key] = value
+			}
 		}
 		out = append(out, m)
 	}

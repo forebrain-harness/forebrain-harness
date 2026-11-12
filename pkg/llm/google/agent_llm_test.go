@@ -1443,3 +1443,30 @@ func TestGoogleDoesNotResendUnrelatedFailures(t *testing.T) {
 		})
 	}
 }
+
+// Audio and video travel as inline_data, the same shape an image has:
+// mime_type plus the bytes. A PDF is refused, because generateContent's
+// document input has no official shape this build could verify.
+func TestGoogleUserPartsCarryAudioAndVideoInline(t *testing.T) {
+	for _, tc := range []struct{ mime, b64 string }{
+		{"audio/mpeg", "SUQzBAAAAA=="},
+		{"video/mp4", "AAAAIGZ0eXA="},
+	} {
+		parts, err := userParts([]llm.ContentPart{llm.Text("look"), llm.FileBase64("clip", tc.mime, tc.b64)})
+		if err != nil {
+			t.Fatalf("userParts(%s): %v", tc.mime, err)
+		}
+		if len(parts) != 2 || parts[1].InlineData == nil {
+			t.Fatalf("parts = %#v, want text + inline_data", parts)
+		}
+		if parts[1].InlineData.MIMEType != tc.mime || parts[1].InlineData.Data != tc.b64 {
+			t.Fatalf("inline_data = %#v, want %s and its bytes", parts[1].InlineData, tc.mime)
+		}
+	}
+}
+
+func TestGoogleUserPartsRefuseAPDF(t *testing.T) {
+	if _, err := userParts([]llm.ContentPart{llm.FileBase64("demo.pdf", "application/pdf", "JVBERi0=")}); err == nil {
+		t.Fatal("a PDF must be refused: no official inline shape was verified for it")
+	}
+}
