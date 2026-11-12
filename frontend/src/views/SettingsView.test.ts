@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type Stubs, type VueWrapper } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import { forebrainApi } from '@/lib/api'
@@ -23,7 +23,7 @@ function mockSettings(approvalPresetsVisible: boolean) {
   })
 }
 
-async function mountView(query = '?tab=appearance'): Promise<VueWrapper> {
+async function mountView(query = '?tab=appearance', stubs?: Stubs): Promise<VueWrapper> {
   setLocale('en')
   const router = createRouter({
     history: createMemoryHistory(),
@@ -33,7 +33,7 @@ async function mountView(query = '?tab=appearance'): Promise<VueWrapper> {
     ],
   })
   await router.push('/settings' + query)
-  const wrapper = mount(SettingsView, { global: { plugins: [router] } })
+  const wrapper = mount(SettingsView, { global: { plugins: [router], ...(stubs ? { stubs } : {}) } })
   await router.isReady()
   await flushPromises()
   return wrapper
@@ -73,6 +73,7 @@ describe('SettingsView', () => {
       'Variables',
       'Config file',
       'Runtime status',
+      'Log',
     ])
     // A heading never becomes a tab, and never takes `?tab=`.
     expect(nav.findAll('.settings-group').every((group) => group.attributes('role') === undefined)).toBe(true)
@@ -84,6 +85,45 @@ describe('SettingsView', () => {
     const selected = wrapper.findAll('[role="tab"]').filter((tab) => tab.attributes('aria-selected') === 'true')
     expect(selected.map((tab) => tab.text())).toEqual(['Web tools'])
     expect(wrapper.find('[data-tab="net"]').exists()).toBe(true)
+  })
+
+  // The log page lives in the advanced group (plan 288) and takes the whole
+  // window: the design's `.set.wide` instead of the reading column.
+  it('opens the log page in the advanced group, at the window’s own width', async () => {
+    mockSettings(true)
+    const wrapper = await mountView('?tab=logs', {
+      LogsTab: { props: ['session', 'from', 'to', 'focus'], template: '<div data-testid="logs-tab-stub" />' },
+    })
+
+    const advanced = wrapper.find('.settings-group[data-group="advanced"]')
+    expect(advanced.text()).toBe('Advanced')
+    const selected = wrapper.findAll('[role="tab"]').filter((tab) => tab.attributes('aria-selected') === 'true')
+    expect(selected.map((tab) => tab.text())).toEqual(['Log'])
+    expect(wrapper.find('.settings-layout').classes()).toContain('settings-layout--wide')
+    expect(wrapper.find('[data-testid="logs-tab-stub"]').exists()).toBe(true)
+  })
+
+  // A link from a failed turn's card names the conversation and the turn's
+  // window; the page hands them to the log tab as its preselected filters.
+  it('hands the URL’s conversation and window to the log tab', async () => {
+    mockSettings(true)
+    const wrapper = await mountView(
+      '?tab=logs&session=s9&from=2026-11-11T02:00:00Z&to=2026-11-11T03:00:00Z&focus=r1',
+      {
+        LogsTab: {
+          props: ['session', 'from', 'to', 'focus'],
+          template: '<div data-testid="logs-tab-stub" />',
+        },
+      },
+    )
+
+    const stub = wrapper.findComponent('[data-testid="logs-tab-stub"]') as unknown as VueWrapper
+    expect(stub.props()).toMatchObject({
+      session: 's9',
+      from: '2026-11-11T02:00:00Z',
+      to: '2026-11-11T03:00:00Z',
+      focus: 'r1',
+    })
   })
 
   // A gateway with no sandbox has one posture, so the tab that configures the

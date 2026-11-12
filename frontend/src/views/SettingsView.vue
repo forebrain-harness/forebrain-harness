@@ -1,7 +1,7 @@
 <template>
   <div class="min-h-[calc(100dvh-0px)] bg-[var(--forebrain-bg)] px-4 py-8">
-    <div class="mx-auto max-w-6xl space-y-6">
-      <div class="settings-layout">
+    <div class="mx-auto space-y-6" :class="wide ? 'max-w-[1500px]' : 'max-w-6xl'">
+      <div class="settings-layout" :class="{ 'settings-layout--wide': wide }">
         <nav class="settings-tabs" :aria-label="t('settings.narrowTabs')" data-testid="settings-tabs">
           <template v-for="group in tabGroups" :key="group.key">
             <div class="settings-group" :data-group="group.key">{{ group.label }}</div>
@@ -36,6 +36,13 @@
           <RuntimeStatusTab v-else-if="activeTab === 'runtime'" />
           <SettingsSharedSkillsTab v-else-if="activeTab === 'shared-skills'" />
           <EnvVarsTab v-else-if="activeTab === 'vars'" />
+          <LogsTab
+            v-else-if="activeTab === 'logs'"
+            :session="routeText('session')"
+            :from="routeText('from')"
+            :to="routeText('to')"
+            :focus="routeText('focus')"
+          />
         </section>
       </div>
     </div>
@@ -66,6 +73,7 @@ import { useSettingsForm } from '@/components/settings/form/useSettingsForm'
 import McpTab from '@/components/settings/McpTab.vue'
 import ModelsTab from '@/components/settings/ModelsTab.vue'
 import LspTab from '@/components/settings/LspTab.vue'
+import LogsTab from '@/components/settings/LogsTab.vue'
 import MemorySwitchesTab from '@/components/settings/MemorySwitchesTab.vue'
 import RuntimeStatusTab from '@/components/settings/RuntimeStatusTab.vue'
 import SettingsApprovalTab from '@/components/settings/SettingsApprovalTab.vue'
@@ -119,6 +127,9 @@ const tabGroups = computed(() => [
     tabs: [
       { key: 'config', label: t('settings.tabConfig') },
       { key: 'runtime', label: t('settings.tabRuntime') },
+      // The log page is its own width: five columns and a histogram do not fit
+      // the reading column the setting tabs use (plan 288).
+      { key: 'logs', label: t('settings.tabLogs') },
     ],
   },
 ])
@@ -134,6 +145,18 @@ function tabFromRoute(): string {
 }
 
 const activeTab = ref(tabFromRoute())
+
+/** The log page takes the whole window: the design's `.set.wide` (a 150px tab
+ *  column, a 24px gap and everything else for the table). Every other tab keeps
+ *  the reading column. */
+const wide = computed(() => activeTab.value === 'logs')
+
+/** One string out of the URL, for the log page's own preselected filters. */
+function routeText(key: string): string {
+  const value = route.query[key]
+  const text = Array.isArray(value) ? value[0] : value
+  return typeof text === 'string' ? text : ''
+}
 
 watch(
   () => route.query.tab,
@@ -162,6 +185,12 @@ onMounted(async () => {
   display: grid;
   gap: 16px;
   grid-template-columns: 220px minmax(0, 1fr);
+}
+/* The log page's own width (the prototype's `.set.wide`): a narrower tab
+   column, a tighter gap, and every other pixel for the table. */
+.settings-layout--wide {
+  gap: 24px;
+  grid-template-columns: 150px minmax(0, 1fr);
 }
 .settings-tabs {
   display: flex;

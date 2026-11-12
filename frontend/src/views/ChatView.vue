@@ -316,6 +316,9 @@
                             v-else-if="run.item.kind === 'error'"
                             :text="run.item.text"
                             :detail="run.item.detail"
+                            :session="sessionId ?? ''"
+                            :started-at="msg.runStartedAt"
+                            :at="failedAtOf(msg)"
                           />
                         </template>
                         <!-- A turn that only updated the todo still draws its
@@ -1733,6 +1736,17 @@ function drawnBlocks(blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['b
  */
 function activityRunsOf(msg: ChatMessage) {
   return groupActivityRuns(drawnBlocks(msg.blocks), blockOnActivityLine)
+}
+
+/**
+ * When a turn failed, in milliseconds: the run's own end when the row carried
+ * one, else the moment the row was written. The error card hands it to the log
+ * page's window (plan 288).
+ */
+function failedAtOf(msg: ChatMessage): number {
+  const finished = msg.runFinishedAt ? Date.parse(msg.runFinishedAt) : Number.NaN
+  if (!Number.isNaN(finished)) return finished
+  return msg.createdAt ?? Date.now()
 }
 
 /** Where the turn's first on-line run sits, or -1 when nothing hangs on it. */
