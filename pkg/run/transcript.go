@@ -530,7 +530,7 @@ func rehydrateNativeMediaReference(ctx context.Context, resolver FileReferenceRe
 	}
 	absPath, ok := resolver.ResolveFilePath(ctx, ref.FileID)
 	if !ok {
-		slog.Debug("rehydrate: cannot resolve file_id", "file_id", ref.FileID, "mime", ref.MIMEType)
+		slog.DebugContext(ctx, "rehydrate: cannot resolve file_id", "file_id", ref.FileID, "mime", ref.MIMEType)
 		return false
 	}
 	if kind == "" {
@@ -540,7 +540,7 @@ func rehydrateNativeMediaReference(ctx context.Context, resolver FileReferenceRe
 	}
 	part, err := llm.FileFromPath(absPath)
 	if err != nil {
-		slog.Debug("rehydrate: file part read failed", "path", absPath, "err", err)
+		slog.DebugContext(ctx, "rehydrate: file part read failed", "path", absPath, "err", err)
 		note := llm.UnsendableImageNote(label, strings.TrimSpace(ref.MIMEType), err.Error())
 		if errors.Is(err, llm.ErrNativeMediaTooLarge) {
 			note = llm.NativeMediaTooLargeNote(label, strings.TrimSpace(ref.MIMEType))
