@@ -260,8 +260,8 @@ func TestDotEnvMigrateTurnsChannelSecretsIntoPlaintext(t *testing.T) {
 	}
 	insertChannel := func(kind, configJSON, accountKey string) {
 		t.Helper()
-		if _, err := dbx.Exec(ctx, db, `INSERT INTO fb_project_channels
-(project_id, kind, enabled, config_json, account_key, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
+		if _, err := dbx.Exec(ctx, db, dbx.Rebind(dbx.DialectOf(db), `INSERT INTO fb_project_channels
+(project_id, kind, enabled, config_json, account_key, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`),
 			project.ID, kind, 1, configJSON, accountKey, 1, 1); err != nil {
 			t.Fatalf("insert channel %s: %v", kind, err)
 		}
