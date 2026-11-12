@@ -133,19 +133,6 @@ func TestNativeMediaTables(t *testing.T) {
 	}
 }
 
-func TestNativeMediaSendableNeedsBothTheKindAndAKnownType(t *testing.T) {
-	kinds := NativeMediaKinds{PDF: true}
-	if !NativeMediaSendable(kinds, "application/pdf") {
-		t.Fatal("a PDF must be sendable when the set carries PDF")
-	}
-	if NativeMediaSendable(kinds, "audio/mpeg") {
-		t.Fatal("audio must not be sendable when the set carries only PDF")
-	}
-	if NativeMediaSendable(kinds, "") {
-		t.Fatal("an unnamed type is not sendable")
-	}
-}
-
 func TestFilePartIsReportedWithoutItsBytes(t *testing.T) {
 	part := FileBase64("demo.pdf", "application/pdf", strings.Repeat("A", 400))
 	summary := FilePartSummary(part)

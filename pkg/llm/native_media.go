@@ -199,15 +199,6 @@ func NativeMediaForProvider(provider string) NativeMediaKinds {
 	return nativeMediaByProvider[strings.ToLower(strings.TrimSpace(provider))]
 }
 
-// NativeMediaSendable reports whether a part carrying mimeType may be built for
-// kinds: the kind is accepted and the MIME type is a whole, known type. A
-// format a protocol cannot carry (an audio format Chat Completions has no name
-// for) is caught by the encoder, which is the layer that knows the protocol's
-// own vocabulary.
-func NativeMediaSendable(kinds NativeMediaKinds, mimeType string) bool {
-	return kinds.Has(NativeMediaKindOfMIME(mimeType))
-}
-
 // NativeMediaTooLargeNote is the model-visible line a file part degrades to
 // when its bytes are larger than NativeMediaInlineLimit: the attachment's label
 // and type, and the reason, in the one sentence every degraded attachment
