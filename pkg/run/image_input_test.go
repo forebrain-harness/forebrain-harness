@@ -327,7 +327,7 @@ func TestRunRemembersAndReportsAProviderImageRefusal(t *testing.T) {
 	}
 
 	// (a) The refusal is on record for the model in force.
-	reason, recorded, err := store.ImageRefusal(ctx, sid, "openai", "gpt-main")
+	reason, recorded, err := store.MediaRefusal(ctx, sid, "openai", "gpt-main", "image")
 	if err != nil {
 		t.Fatalf("read the record: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestImageRefusalRecorderIsIdempotent(t *testing.T) {
 	if rows != 1 {
 		t.Fatalf("rows = %d, want one per (session, provider, model)", rows)
 	}
-	if reason, ok, err := store.ImageRefusal(ctx, sid, "openai", "gpt-main"); err != nil || !ok || reason != "second refusal" {
+	if reason, ok, err := store.MediaRefusal(ctx, sid, "openai", "gpt-main", "image"); err != nil || !ok || reason != "second refusal" {
 		t.Fatalf("record: ok=%v reason=%q err=%v, want the latest sentence", ok, reason, err)
 	}
 }
@@ -440,7 +440,7 @@ func TestImageTurnRefusalRemembersWithoutBeingATextOnlyModel(t *testing.T) {
 	if err := ImageTurnRefusal(imageModel, r, sid, true); err != nil {
 		t.Fatalf("nothing recorded yet: %v", err)
 	}
-	if err := store.RecordImageRefusal(ctx, sid, "acme", "vision-model", "unsupported image"); err != nil {
+	if err := store.RecordMediaRefusal(ctx, sid, "acme", "vision-model", "image", "unsupported image"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -506,10 +506,10 @@ func TestImageRefusalRecorderRecordsTheSubagentsOwnModel(t *testing.T) {
 	recorded := withImageRefusalRecorder(reviewCtx, r, sid)
 	llm.ImageRefusalObserverFromContext(recorded)(reviewCtx, "no images here")
 
-	if reason, ok, err := store.ImageRefusal(ctx, sid, "acme", "reviewer"); err != nil || !ok || reason != "no images here" {
+	if reason, ok, err := store.MediaRefusal(ctx, sid, "acme", "reviewer", "image"); err != nil || !ok || reason != "no images here" {
 		t.Fatalf("reviewer record: ok=%v reason=%q err=%v", ok, reason, err)
 	}
-	if _, ok, err := store.ImageRefusal(ctx, sid, "openai", "gpt-main"); err != nil || ok {
+	if _, ok, err := store.MediaRefusal(ctx, sid, "openai", "gpt-main", "image"); err != nil || ok {
 		t.Fatalf("the conversation's model was recorded as refusing: ok=%v err=%v", ok, err)
 	}
 }
@@ -549,7 +549,7 @@ func TestPlanReviewImageRefusalJudgesTheReviewModel(t *testing.T) {
 		t.Fatalf("refusal=%q, want it to name the model and the way on", msg)
 	}
 
-	if err := store.RecordImageRefusal(ctx, sid, "acme", "vision-model", "unsupported image"); err != nil {
+	if err := store.RecordMediaRefusal(ctx, sid, "acme", "vision-model", "image", "unsupported image"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	err = PlanReviewImageRefusal(ctx, r, sid, vision)

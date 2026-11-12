@@ -772,7 +772,7 @@ func TestStateV15UpgradesToV16AddsImageRefusals(t *testing.T) {
 	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
 	requireForeignKeysClean(ctx, t, migrated)
 
-	want := map[string]bool{"session_id": true, "provider": true, "model": true, "reason": true, "observed_at": true}
+	want := map[string]bool{"session_id": true, "provider": true, "model": true, "media": true, "reason": true, "observed_at": true}
 	rows, err := migrated.QueryContext(ctx, `SELECT name FROM pragma_table_info('fb_session_image_refusals')`)
 	if err != nil {
 		t.Fatal(err)
@@ -4244,4 +4244,199 @@ func TestStateV34PostgresMigrationRepairsAMissingCheck(t *testing.T) {
 	if err := migrateStateV33ToV34Postgres(ctx, conn); err != nil {
 		t.Fatalf("re-run the v34 migration: %v", err)
 	}
+}
+
+// downgradeImageRefusalsToV34 puts fb_session_image_refusals back in the shape
+// v34 declares, so the v35 migration can be run against a database that really
+// carries the old table — rows and foreign key included. SQLite cannot drop a
+// column that belongs to its primary key, so it rebuilds; the two servers swap
+// the key in one statement, which keeps the foreign key on session_id indexed
+// throughout.
+func downgradeImageRefusalsToV34(ctx context.Context, t *testing.T, db *sql.DB, dialect dbx.Dialect) {
+	t.Helper()
+	switch dialect {
+	case dbx.SQLite:
+		for _, stmt := range []string{
+			`CREATE TABLE fb_session_image_refusals_v34 (
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  observed_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, provider, model)
+) STRICT, WITHOUT ROWID`,
+			`DROP TABLE fb_session_image_refusals`,
+			`ALTER TABLE fb_session_image_refusals_v34 RENAME TO fb_session_image_refusals`,
+		} {
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				t.Fatalf("downgrade fb_session_image_refusals: %v (%s)", err, stmt)
+			}
+		}
+	case dbx.MySQL:
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE fb_session_image_refusals DROP PRIMARY KEY, DROP COLUMN media, ADD PRIMARY KEY (session_id, provider, model)`); err != nil {
+			t.Fatalf("downgrade fb_session_image_refusals: %v", err)
+		}
+	case dbx.Postgres:
+		if _, err := db.ExecContext(ctx,
+			`ALTER TABLE fb_session_image_refusals DROP CONSTRAINT fb_session_image_refusals_pkey, DROP COLUMN media, ADD PRIMARY KEY (session_id, provider, model)`); err != nil {
+			t.Fatalf("downgrade fb_session_image_refusals: %v", err)
+		}
+	}
+}
+
+// imageRefusalPrimaryKey reads the primary key's columns in key order, in the
+// catalog each engine keeps it in.
+func imageRefusalPrimaryKey(ctx context.Context, t *testing.T, db *sql.DB, dialect dbx.Dialect) []string {
+	t.Helper()
+	var query string
+	switch dialect {
+	case dbx.SQLite:
+		query = `SELECT name FROM pragma_table_info('fb_session_image_refusals') WHERE pk > 0 ORDER BY pk`
+	case dbx.MySQL:
+		query = `SELECT column_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'fb_session_image_refusals' AND index_name = 'PRIMARY' ORDER BY seq_in_index`
+	case dbx.Postgres:
+		query = `SELECT a.attname FROM pg_constraint c
+			JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+			JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+			WHERE c.conrelid = 'fb_session_image_refusals'::regclass AND c.contype = 'p'
+			ORDER BY k.ord`
+	}
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		t.Fatalf("read the primary key: %v", err)
+	}
+	defer rows.Close()
+	var columns []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan the primary key: %v", err)
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the primary key: %v", err)
+	}
+	return columns
+}
+
+// TestStateSchemaV34UpgradesToV35RemembersTheMediaKind pins the migration the
+// per-kind record needs (owner 2026-11-12): a v34 database's rows are all
+// picture refusals, so they come through reading as media='image', unchanged in
+// number and reason; the kind joins the primary key, so the same session,
+// provider and model can then hold a PDF refusal beside its picture refusal;
+// and running the migration against a table that already carries the column (a
+// fixture built from the current schema with a lowered version) skips instead of
+// failing on a duplicate table.
+func TestStateSchemaV34UpgradesToV35RemembersTheMediaKind(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	dialect := dbx.DialectOf(db)
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s35a','main','s35a',10,10,'/repo/s35a')`); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s35b','main','s35b',10,10,'/repo/s35b')`); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	downgradeImageRefusalsToV34(ctx, t, db, dialect)
+	for _, row := range [][4]any{
+		{"s35a", "deepseek", "m", "unsupported image"},
+		{"s35b", "acme", "vision", "invalid image format"},
+	} {
+		if _, err := db.ExecContext(ctx, dbx.Rebind(dialect,
+			`INSERT INTO fb_session_image_refusals (session_id, provider, model, reason, observed_at) VALUES (?, ?, ?, ?, 10)`),
+			row[0], row[1], row[2], row[3]); err != nil {
+			t.Fatalf("seed a v34 refusal (%v): %v", row, err)
+		}
+	}
+	if dialect == dbx.SQLite {
+		if _, err := db.ExecContext(ctx, `PRAGMA user_version = 34`); err != nil {
+			t.Fatalf("lower user_version: %v", err)
+		}
+	} else if err := writeDialectSchemaVersion(ctx, db, dialect, 34); err != nil {
+		t.Fatalf("lower the version row: %v", err)
+	}
+
+	if err := migrateStateSchema(ctx, db, ""); err != nil {
+		t.Fatalf("%s migrate to v%d: %v", dialect, stateSchemaVersion, err)
+	}
+	if dialect == dbx.SQLite {
+		requireSchemaVersion(ctx, t, db, stateSchemaVersion)
+		requireForeignKeysClean(ctx, t, db)
+	}
+
+	// The kind is a column of the key, in key order.
+	if got, want := imageRefusalPrimaryKey(ctx, t, db, dialect), []string{"session_id", "provider", "model", "media"}; !stringSlicesEqual(got, want) {
+		t.Fatalf("primary key = %v, want %v", got, want)
+	}
+
+	// Both rows are still there, and each reads as the kind every v34 row
+	// meant.
+	store := NewSessionStore(db, "main")
+	for _, row := range [][4]string{
+		{"s35a", "deepseek", "m", "unsupported image"},
+		{"s35b", "acme", "vision", "invalid image format"},
+	} {
+		reason, ok, err := store.MediaRefusal(ctx, row[0], row[1], row[2], "image")
+		if err != nil || !ok || reason != row[3] {
+			t.Fatalf("%v after migration: ok=%v reason=%q err=%v, want the row that was there", row[:3], ok, reason, err)
+		}
+		if _, ok, err := store.MediaRefusal(ctx, row[0], row[1], row[2], "pdf"); err != nil || ok {
+			t.Fatalf("%v must not read as a PDF refusal: ok=%v err=%v", row[:3], ok, err)
+		}
+	}
+
+	// The same (session, provider, model) now holds a second kind beside the
+	// picture refusal — the fact the v34 key could not express.
+	if err := store.RecordMediaRefusal(ctx, "s35a", "deepseek", "m", "pdf", "unsupported content type"); err != nil {
+		t.Fatalf("record a PDF refusal beside the picture refusal: %v", err)
+	}
+	refused, err := store.MediaRefusals(ctx, "s35a", "deepseek", "m")
+	if err != nil {
+		t.Fatalf("read every kind: %v", err)
+	}
+	if len(refused) != 2 || refused["image"] != "unsupported image" || refused["pdf"] != "unsupported content type" {
+		t.Fatalf("refused = %v, want the picture and the PDF side by side", refused)
+	}
+
+	// A fixture whose table already carries the column skips the rebuild.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	switch dialect {
+	case dbx.SQLite:
+		if err := migrateStateV34ToV35(ctx, conn); err != nil {
+			t.Fatalf("re-run over the existing column: %v", err)
+		}
+	case dbx.MySQL:
+		if err := migrateStateV34ToV35MySQL(ctx, conn); err != nil {
+			t.Fatalf("re-run over the existing column: %v", err)
+		}
+	case dbx.Postgres:
+		if err := migrateStateV34ToV35Postgres(ctx, conn); err != nil {
+			t.Fatalf("re-run over the existing column: %v", err)
+		}
+	}
+	if reason, ok, err := store.MediaRefusal(ctx, "s35a", "deepseek", "m", "pdf"); err != nil || !ok || reason != "unsupported content type" {
+		t.Fatalf("the re-run must change nothing: ok=%v reason=%q err=%v", ok, reason, err)
+	}
+}
+
+// stringSlicesEqual compares two ordered name lists.
+func stringSlicesEqual(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }

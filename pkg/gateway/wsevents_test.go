@@ -1576,7 +1576,7 @@ func TestHandleChatWSRefusalNamesTheRememberedRejection(t *testing.T) {
 	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
 	seedWebImageConversation(t, ctx, sessions, "session-ws")
 	// A model the catalog does not know: nothing but the record can refuse it.
-	require.NoError(t, sessions.RecordImageRefusal(ctx, "session-ws", "acme", "vision-model", "unsupported image"))
+	require.NoError(t, sessions.RecordMediaRefusal(ctx, "session-ws", "acme", "vision-model", "image", "unsupported image"))
 
 	cfg := appcfg.Root{}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {

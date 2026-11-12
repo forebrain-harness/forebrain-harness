@@ -221,12 +221,17 @@ CREATE TABLE fb_session_permission_state (
   PRIMARY KEY (session_id)
 ) STRICT, WITHOUT ROWID;
 
--- One session's observed image rejections, coarsely: a provider that refused an
--- image for this conversation is remembered per provider+model, so the next
--- request on that model is withheld instead of sent to be refused again. A
--- model switch is the recovery the refusal sentence already points at, and it is
--- free here because the lookup is keyed by the model in force. Only a turn whose
--- request would actually carry an image consults this row.
+-- One session's observed media rejections, coarsely: a provider that refused a
+-- kind of media for this conversation is remembered per provider+model+media, so
+-- the next request on that model is withheld instead of sent to be refused
+-- again. A model switch is the recovery the refusal sentence already points at,
+-- and it is free here because the lookup is keyed by the model in force. Only a
+-- turn whose request would actually carry that kind consults the row.
+--
+-- The kind is part of the key rather than a detail of the row (owner
+-- 2026-11-12): a conversation refused a PDF must still send its pictures, and
+-- one refused an image must still send its PDF, so those are two rows.
+-- 'image' is the kind every row written before this column existed meant.
 --
 -- It lives beside the session for the reason fb_session_model_state does: a
 -- resumed session should not pay the refusal twice, and the record is released
@@ -235,9 +240,10 @@ CREATE TABLE fb_session_image_refusals (
   session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
+  media TEXT NOT NULL DEFAULT 'image',
   reason TEXT NOT NULL DEFAULT '',
   observed_at INTEGER NOT NULL,
-  PRIMARY KEY (session_id, provider, model)
+  PRIMARY KEY (session_id, provider, model, media)
 ) STRICT, WITHOUT ROWID;
 
 -- Prompt state frozen for the life of a session. Content injected ahead of the

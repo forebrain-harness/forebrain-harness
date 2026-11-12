@@ -20,7 +20,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 34
+const stateSchemaVersion = 35
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -107,6 +107,12 @@ var stateSchemaMigrations = []schemaMigration{
 		apply:         migrateStateV33ToV34,
 		applyMySQL:    migrateStateV33ToV34MySQL,
 		applyPostgres: migrateStateV33ToV34Postgres,
+	},
+	{
+		version:       35,
+		apply:         migrateStateV34ToV35,
+		applyMySQL:    migrateStateV34ToV35MySQL,
+		applyPostgres: migrateStateV34ToV35Postgres,
 	},
 }
 
@@ -1802,6 +1808,119 @@ func migrateStateV33ToV34Postgres(ctx context.Context, conn *sql.Conn) error {
 	if _, err := conn.ExecContext(ctx,
 		`ALTER TABLE fb_llm_models ADD CONSTRAINT fb_llm_models_subagent_allowed_check CHECK (subagent_allowed IN (0, 1))`); err != nil {
 		return fmt.Errorf("add fb_llm_models.subagent_allowed check: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV34ToV35 gives fb_session_image_refusals the media kind it always
+// meant (owner 2026-11-12): a provider that refuses a PDF says nothing about the
+// pictures in the same conversation, so the refusal is recorded per kind and the
+// kind joins the primary key. Every existing row is a picture refusal — that is
+// the only thing the table could record — so it migrates reading as 'image'.
+//
+// SQLite cannot change a primary key, so the table is rebuilt the way v11
+// rebuilt fb_messages: the old table is renamed aside, the new shape takes the
+// name, every row is copied into it reading as the kind it meant, and the
+// renamed-aside table is dropped. This runs inside the caller's transaction with
+// foreign keys off, and migrateStateSchema runs PRAGMA foreign_key_check before
+// committing, so an interruption leaves the database at v34 instead of half
+// renamed. A database whose table already carries the column (a fixture built
+// from the current schema.sql with a lowered user_version) skips the rebuild
+// instead of failing on a duplicate table.
+func migrateStateV34ToV35(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_session_image_refusals') WHERE name='media'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_session_image_refusals RENAME TO legacy_fb_session_image_refusals`); err != nil {
+		return fmt.Errorf("rename fb_session_image_refusals: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE fb_session_image_refusals (
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  media TEXT NOT NULL DEFAULT 'image',
+  reason TEXT NOT NULL DEFAULT '',
+  observed_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, provider, model, media)
+) STRICT, WITHOUT ROWID`); err != nil {
+		return fmt.Errorf("create fb_session_image_refusals v35: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO fb_session_image_refusals (session_id, provider, model, media, reason, observed_at)
+SELECT session_id, provider, model, 'image', reason, observed_at FROM legacy_fb_session_image_refusals`); err != nil {
+		return fmt.Errorf("copy fb_session_image_refusals: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `DROP TABLE legacy_fb_session_image_refusals`); err != nil {
+		return fmt.Errorf("drop legacy_fb_session_image_refusals: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV34ToV35MySQL adds the column and swaps the primary key. The two
+// statements are separate and the dialect migration loop runs without a
+// transaction (MySQL commits DDL as it goes), so each object gets its own
+// existence test: a crash between them leaves the column without the key and
+// the version row still at 34, and the retry adds the key instead of skipping
+// because the column is there.
+func migrateStateV34ToV35MySQL(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'fb_session_image_refusals' AND column_name = 'media'`).Scan(&present); err != nil {
+		return err
+	}
+	if present == 0 {
+		if _, err := conn.ExecContext(ctx,
+			`ALTER TABLE fb_session_image_refusals ADD COLUMN media VARCHAR(32) NOT NULL DEFAULT 'image'`); err != nil {
+			return fmt.Errorf("add fb_session_image_refusals.media: %w", err)
+		}
+	}
+	var keyed int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'fb_session_image_refusals' AND index_name = 'PRIMARY' AND column_name = 'media'`).Scan(&keyed); err != nil {
+		return err
+	}
+	if keyed > 0 {
+		return nil
+	}
+	// One statement: dropping the primary key on its own would leave the
+	// foreign key on session_id without an index to lean on.
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_session_image_refusals DROP PRIMARY KEY, ADD PRIMARY KEY (session_id, provider, model, media)`); err != nil {
+		return fmt.Errorf("key fb_session_image_refusals by media: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV34ToV35Postgres is the same change in PostgreSQL's types, with
+// the same pair of existence tests for the same reason. The primary key is the
+// name PostgreSQL gave the inline one schema_postgres.sql declares; a database
+// is created from that script at v30 or later and only migrated after it, so
+// there is no older spelling to look up.
+func migrateStateV34ToV35Postgres(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_session_image_refusals ADD COLUMN IF NOT EXISTS media TEXT NOT NULL DEFAULT 'image'`); err != nil {
+		return fmt.Errorf("add fb_session_image_refusals.media: %w", err)
+	}
+	var keyed int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pg_constraint c
+			JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+			WHERE c.conrelid = 'fb_session_image_refusals'::regclass AND c.contype = 'p' AND a.attname = 'media'`).Scan(&keyed); err != nil {
+		return err
+	}
+	if keyed > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_session_image_refusals DROP CONSTRAINT fb_session_image_refusals_pkey, ADD PRIMARY KEY (session_id, provider, model, media)`); err != nil {
+		return fmt.Errorf("key fb_session_image_refusals by media: %w", err)
 	}
 	return nil
 }

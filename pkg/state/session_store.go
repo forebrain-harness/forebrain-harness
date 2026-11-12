@@ -452,16 +452,30 @@ SELECT CASE WHEN EXISTS(
 		JOIN fb_sessions s ON s.id=m.session_id AND s.agent_id=$1
 		WHERE m.session_id=$2`,
 	}
-	imageRefusalSelectSQL = dbx.SQL{
+	mediaRefusalSelectSQL = dbx.SQL{
 		SQLite: `SELECT r.reason
 		FROM fb_session_image_refusals r
 		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=?
-		WHERE r.session_id=? AND r.provider=? AND r.model=?`,
+		WHERE r.session_id=? AND r.provider=? AND r.model=? AND r.media=?`,
 		MySQL: `SELECT r.reason
 		FROM fb_session_image_refusals r
 		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=?
-		WHERE r.session_id=? AND r.provider=? AND r.model=?`,
+		WHERE r.session_id=? AND r.provider=? AND r.model=? AND r.media=?`,
 		Postgres: `SELECT r.reason
+		FROM fb_session_image_refusals r
+		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=$1
+		WHERE r.session_id=$2 AND r.provider=$3 AND r.model=$4 AND r.media=$5`,
+	}
+	mediaRefusalsSelectSQL = dbx.SQL{
+		SQLite: `SELECT r.media, r.reason
+		FROM fb_session_image_refusals r
+		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=?
+		WHERE r.session_id=? AND r.provider=? AND r.model=?`,
+		MySQL: `SELECT r.media, r.reason
+		FROM fb_session_image_refusals r
+		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=?
+		WHERE r.session_id=? AND r.provider=? AND r.model=?`,
+		Postgres: `SELECT r.media, r.reason
 		FROM fb_session_image_refusals r
 		JOIN fb_sessions s ON s.id=r.session_id AND s.agent_id=$1
 		WHERE r.session_id=$2 AND r.provider=$3 AND r.model=$4`,
@@ -603,22 +617,23 @@ func copySessionModelSelectionSQL(d dbx.Dialect) string {
 	}
 }
 
-// recordImageRefusalSQL is the upsert RecordImageRefusal runs.
-var recordImageRefusalSQL = dbx.SQL{
-	SQLite: `INSERT INTO fb_session_image_refusals(session_id, provider, model, reason, observed_at)
-		SELECT ?, ?, ?, ?, ?
+// recordMediaRefusalSQL is the upsert RecordMediaRefusal runs. The media kind
+// is part of the key: one model can refuse a PDF and still take pictures.
+var recordMediaRefusalSQL = dbx.SQL{
+	SQLite: `INSERT INTO fb_session_image_refusals(session_id, provider, model, media, reason, observed_at)
+		SELECT ?, ?, ?, ?, ?, ?
 		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
-		ON CONFLICT(session_id, provider, model) DO UPDATE SET
+		ON CONFLICT(session_id, provider, model, media) DO UPDATE SET
 			reason=excluded.reason, observed_at=excluded.observed_at`,
-	MySQL: `INSERT INTO fb_session_image_refusals(session_id, provider, model, reason, observed_at)
-		SELECT ?, ?, ?, ?, ?
+	MySQL: `INSERT INTO fb_session_image_refusals(session_id, provider, model, media, reason, observed_at)
+		SELECT ?, ?, ?, ?, ?, ?
 		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=? AND agent_id=?)
 		ON DUPLICATE KEY UPDATE
 			reason=VALUES(reason), observed_at=VALUES(observed_at)`,
-	Postgres: `INSERT INTO fb_session_image_refusals(session_id, provider, model, reason, observed_at)
-		SELECT $1, $2, $3, $4, $5
-		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=$6 AND agent_id=$7)
-		ON CONFLICT(session_id, provider, model) DO UPDATE SET
+	Postgres: `INSERT INTO fb_session_image_refusals(session_id, provider, model, media, reason, observed_at)
+		SELECT $1, $2, $3, $4, $5, $6
+		WHERE EXISTS (SELECT 1 FROM fb_sessions WHERE id=$7 AND agent_id=$8)
+		ON CONFLICT(session_id, provider, model, media) DO UPDATE SET
 			reason=excluded.reason, observed_at=excluded.observed_at`,
 }
 
@@ -4029,44 +4044,55 @@ func (s *SessionStore) SessionModelSelection(
 	return sel, true, nil
 }
 
-// RecordImageRefusal remembers that this session's model refused an image, so
-// the next request that would carry one is withheld instead of sent to be
-// refused again. Coarse on purpose: the provider's refusal never says which
-// image it meant, so the fact recorded is "this conversation, this
-// provider+model, cannot take pictures".
+// errMediaKindRequired is the refusal to file a record under no media kind at
+// all: the column is part of the key, so an empty one would either overwrite
+// another kind's row or sit where nothing reads it, and a provider refusal
+// silently filed as the wrong kind is worse than a refusal nobody remembered.
+var errMediaKindRequired = errors.New("state: a media refusal needs the media kind it is about")
+
+// RecordMediaRefusal remembers that this session's model refused one kind of
+// media, so the next request that would carry that kind is withheld instead of
+// sent to be refused again. Coarse on purpose: the provider's refusal never
+// says which file it meant, so the fact recorded is "this conversation, this
+// provider+model, cannot take this kind".
 //
 // An empty session, provider or model is not an error: there is no identity to
 // file it under, and this record only ever saves a wasted request — it is never
 // the reason a turn is refused (the request's own content decides that). The
-// write is last-write-wins on (session_id, provider, model), so a second refusal
-// on the same model refreshes the reason rather than growing the table.
-func (s *SessionStore) RecordImageRefusal(ctx context.Context, sessionID, provider, model, reason string) error {
+// write is last-write-wins on (session_id, provider, model, media), so a second
+// refusal of the same kind refreshes the reason rather than growing the table,
+// while another kind's row is left alone.
+func (s *SessionStore) RecordMediaRefusal(ctx context.Context, sessionID, provider, model, media, reason string) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	provider = strings.TrimSpace(provider)
 	model = strings.TrimSpace(model)
+	media = strings.TrimSpace(media)
 	if sessionID == "" || provider == "" || model == "" {
 		return nil
+	}
+	if media == "" {
+		return errMediaKindRequired
 	}
 	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
 		return err
 	}
-	_, err := dbx.Exec(ctx, s.db, recordImageRefusalSQL.For(dbx.DialectOf(s.db)),
-		sessionID, provider, model, imageRefusalReason(reason), time.Now().Unix(), sessionID, s.AgentID(),
+	_, err := dbx.Exec(ctx, s.db, recordMediaRefusalSQL.For(dbx.DialectOf(s.db)),
+		sessionID, provider, model, media, mediaRefusalReason(reason), time.Now().Unix(), sessionID, s.AgentID(),
 	)
 	return err
 }
 
-// ImageRefusal returns the recorded reason for this session on this exact
-// provider+model, and false when there is none. A session that belongs to
-// another primary agent is an error, exactly as the model-selection read
-// reports it — the record is that tenant's. The lookup is keyed by the model in
-// force, so switching model is the recovery: nothing is deleted, the refusal
-// simply does not apply to the new model.
-func (s *SessionStore) ImageRefusal(
-	ctx context.Context, sessionID, provider, model string,
+// MediaRefusal returns the recorded reason for this session on this exact
+// provider+model and this kind of media, and false when there is none. A
+// session that belongs to another primary agent is an error, exactly as the
+// model-selection read reports it — the record is that tenant's. The lookup is
+// keyed by the model in force, so switching model is the recovery: nothing is
+// deleted, the refusal simply does not apply to the new model.
+func (s *SessionStore) MediaRefusal(
+	ctx context.Context, sessionID, provider, model, media string,
 ) (string, bool, error) {
 	if s == nil || s.db == nil {
 		return "", false, nil
@@ -4074,15 +4100,19 @@ func (s *SessionStore) ImageRefusal(
 	sessionID = strings.TrimSpace(sessionID)
 	provider = strings.TrimSpace(provider)
 	model = strings.TrimSpace(model)
+	media = strings.TrimSpace(media)
 	if sessionID == "" || provider == "" || model == "" {
 		return "", false, nil
+	}
+	if media == "" {
+		return "", false, errMediaKindRequired
 	}
 	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
 		return "", false, err
 	}
 	var reason string
-	err := s.db.QueryRowContext(ctx, imageRefusalSelectSQL.For(dbx.DialectOf(s.db)),
-		s.AgentID(), sessionID, provider, model,
+	err := s.db.QueryRowContext(ctx, mediaRefusalSelectSQL.For(dbx.DialectOf(s.db)),
+		s.AgentID(), sessionID, provider, model, media,
 	).Scan(&reason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
@@ -4093,11 +4123,55 @@ func (s *SessionStore) ImageRefusal(
 	return reason, true, nil
 }
 
-// imageRefusalReason folds a provider's sentence into the one line the record
+// MediaRefusals returns every kind of media this session's model refused, each
+// with the reason it gave, in one lookup: it is what a caller that has to
+// decide what a conversation may still send asks, and the table holds at most
+// one row per kind. A session that belongs to another primary agent is an
+// error, exactly as MediaRefusal reports it.
+func (s *SessionStore) MediaRefusals(
+	ctx context.Context, sessionID, provider, model string,
+) (map[string]string, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if sessionID == "" || provider == "" || model == "" {
+		return nil, nil
+	}
+	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, mediaRefusalsSelectSQL.For(dbx.DialectOf(s.db)),
+		s.AgentID(), sessionID, provider, model,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var refused map[string]string
+	for rows.Next() {
+		var media, reason string
+		if err := rows.Scan(&media, &reason); err != nil {
+			return nil, err
+		}
+		if refused == nil {
+			refused = map[string]string{}
+		}
+		refused[media] = reason
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return refused, nil
+}
+
+// mediaRefusalReason folds a provider's sentence into the one line the record
 // keeps: whitespace collapsed, and cut at the same 200 characters pkg/llm
 // bounds it to, so a stored reason is safe to embed in a prompt-adjacent
 // sentence on any surface.
-func imageRefusalReason(reason string) string {
+func mediaRefusalReason(reason string) string {
 	flat := strings.Join(strings.Fields(reason), " ")
 	if len(flat) <= 200 {
 		return flat

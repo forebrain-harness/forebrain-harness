@@ -199,7 +199,7 @@ func recordedImageRefusal(ctx context.Context, r *Runner, sessionID, provider, m
 	if r == nil || r.Deps == nil || r.SessionStore == nil || sessionID == "" || provider == "" || model == "" {
 		return "", false, nil
 	}
-	return r.SessionStore.ImageRefusal(ctx, sessionID, provider, model)
+	return r.SessionStore.MediaRefusal(ctx, sessionID, provider, model, mediaKindImage)
 }
 
 // withImageRefusalRecorder installs the one observer the run layer needs: a
@@ -235,7 +235,7 @@ func withImageRefusalRecorder(ctx context.Context, r *Runner, sessionID string) 
 		// The write outlives a cancelled turn on purpose: the refusal happened,
 		// and the record is what stops the next turn paying for it again.
 		storeCtx := context.WithoutCancel(ctx)
-		if err := r.SessionStore.RecordImageRefusal(storeCtx, sessionID, provider, model, reason); err != nil {
+		if err := r.SessionStore.RecordMediaRefusal(storeCtx, sessionID, provider, model, mediaKindImage, reason); err != nil {
 			// Debug, not Warn: this repeats every turn a refused image stays in
 			// the conversation, and nothing the reader could do would fix it.
 			slog.DebugContext(ctx, "remember a provider image refusal", "session", sessionID, "provider", provider, "model", model, "err", err)

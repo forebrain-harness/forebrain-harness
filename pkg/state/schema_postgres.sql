@@ -265,15 +265,17 @@ CREATE TABLE fb_session_permission_state (
   PRIMARY KEY (session_id)
 );
 
--- One session's observed image rejections, coarsely: a provider that refused
--- an image for this conversation is remembered per provider+model.
+-- One session's observed media rejections, coarsely: a provider that refused a
+-- kind of media for this conversation is remembered per provider+model+media,
+-- and 'image' is the kind every row written before this column existed meant.
 CREATE TABLE fb_session_image_refusals (
   session_id TEXT NOT NULL REFERENCES fb_sessions (id) ON DELETE CASCADE,
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
+  media TEXT NOT NULL DEFAULT 'image',
   reason TEXT NOT NULL DEFAULT '',
   observed_at BIGINT NOT NULL,
-  PRIMARY KEY (session_id, provider, model)
+  PRIMARY KEY (session_id, provider, model, media)
 );
 
 -- Prompt state frozen for the life of a session: content injected ahead of the
