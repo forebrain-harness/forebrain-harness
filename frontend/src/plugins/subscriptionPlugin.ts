@@ -3,7 +3,7 @@ import type { SubscriptionRow } from '@/lib/api'
 import { localSubscriptionPlugins } from './local_subscriptions.gen'
 
 export interface SubscriptionFrontendPlugin {
-  /** Must match backend Subscription.ID() (e.g. 'qodercn', 'zcode', 'workbuddy'). */
+  /** Must match backend Subscription.ID() (a subscription plugin's id). */
   id: string
   /** Optional subtitle shown under the subscription name in Step 1. */
   describe?: (locale: 'zh' | 'en', row: SubscriptionRow) => string
