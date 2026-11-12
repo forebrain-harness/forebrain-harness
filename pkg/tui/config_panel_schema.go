@@ -204,6 +204,18 @@ var configSectionSchemas = []configSectionSchema{
 				Hint: "默认 12；剩余可用窗口低于这个百分比时提醒，范围 1–50",
 			},
 			{Path: "defaults.mcp_servers", Label: "共享 MCP 服务器", Kind: configFieldRows, Hint: "每行一个服务器"},
+			// The /goal check's global row (plan 299) is two settings, not a
+			// whole subagent entry: it is dispatched by the system, so it has
+			// no name, description, prompt or tool policy to edit here, and a
+			// rows descriptor on the value would offer all of those.
+			{
+				Path: "goal_evaluator.model", Label: "目标检查模型", Kind: configFieldText,
+				Hint: "模型行 id（设置 · 子代理里选的那一行）；留空跟随主代理",
+			},
+			{
+				Path: "goal_evaluator.reasoning_effort", Label: "目标检查思考强度", Kind: configFieldText,
+				Hint: "留空跟随该模型行的默认强度；填 low、high 等覆盖它",
+			},
 		},
 	},
 	{
