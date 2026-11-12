@@ -1976,6 +1976,12 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	// conversation's. Resolving any of it again further down is how a run gets
 	// announced as one model and served by another.
 	pin := SubagentModelOverride{}
+	// ModelLive is the model argument's mark, not any live row's: a
+	// continuation rereads and re-authorizes that row (subagentRecordPin),
+	// because the model argument is a choice the switch governs. A configured
+	// type's row is read again at every dispatch by definition, so marking it
+	// live would put a configured dispatch through that switch.
+	modelLive := false
 	// The /goal check takes its model from the settings page alone (plan 299):
 	// a dispatch-time pin is a caller's choice, and the check is not the
 	// caller's. Every other type keeps the three-level chain untouched — the
@@ -1983,8 +1989,21 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	// first for it (plan 283).
 	if override, ok := SubagentModelOverrideFromContext(baseCtx); ok && agentType != GoalCheckSubagentType {
 		pin = override
+		modelLive = pin.Entry != nil
 	} else if modelID, provider, model, effort, ok := cat.Model(agentType); ok {
 		pin = SubagentModelOverride{ModelID: modelID, Provider: provider, Model: model, Effort: effort}
+		// The row behind that id is read live, with its version: the settings
+		// page can move the row's default effort or its key and endpoint, and
+		// the next dispatch follows it without waiting for the next adoption
+		// (plan 304). The pair comes from the row too — the client is built
+		// from it, so the recorded model must be the one the requests go to. A
+		// row that is missing or unreadable leaves the pin on the snapshot,
+		// which is what every dispatch of the type did before.
+		if rowEntry, version, ok := configuredRowByID(baseCtx, fac, modelID); ok {
+			pin.Provider = strings.TrimSpace(rowEntry.Provider)
+			pin.Model = strings.TrimSpace(rowEntry.Model)
+			pin.Entry, pin.Version = &rowEntry, version
+		}
 	} else if provider, model, effort := AgentModel(own, sid, &agent.HistoryEntry{
 		AgentType: agentType, AgentKind: agentKind,
 	}); strings.TrimSpace(model) != "" {
@@ -2008,7 +2027,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 		entry.Model = strings.TrimSpace(pin.Model)
 		entry.ModelID = strings.TrimSpace(pin.ModelID)
 		entry.ReasoningEffort = strings.TrimSpace(pin.Effort)
-		entry.ModelLive = pin.Entry != nil
+		entry.ModelLive = modelLive
 		cctx = WithSubagentModelOverride(cctx, pin)
 	}
 	// The worker session is born before anything can reference it. Its row is
@@ -2418,16 +2437,7 @@ func subagentRecordPin(ctx context.Context, fac Factory, record agent.HistoryEnt
 	if err != nil {
 		return SubagentModelOverride{}, err
 	}
-	entry := reread.Entry
-	configRow, err := reread.Row.ConfigRow()
-	if err != nil {
-		return SubagentModelOverride{}, err
-	}
-	capsOverride, hasCaps := state.ModelOverrideFromCaps(configRow.Caps)
-	var caps *llm.ModelOverride
-	if hasCaps {
-		caps = &capsOverride
-	}
+	entry, caps := reread.Entry, reread.Caps
 	return SubagentModelOverride{
 		ModelID:  strings.TrimSpace(entry.ID),
 		Provider: strings.TrimSpace(entry.Provider),
@@ -4331,12 +4341,60 @@ func ModelIDForAgentModel(cfg *appcfg.Root, agentName, provider, model string) s
 	return strings.TrimSpace(entry.ID)
 }
 
+// configuredRow projects one stored row the way the snapshot view projects a
+// configured model: the entry a client is built from, and the capability
+// override its calls are read at. It decides nothing — no switch, no hand-off
+// exception, no credential rule — so the authorized read (usableModelByID) and
+// the configuration's own pin (a type's configured model) project a row the
+// same way, and the snapshot view (ConfiguredLLMs) agrees with both.
+func configuredRow(row state.LLMModel) (appcfg.AgentLLMProviderConfig, *llm.ModelOverride, error) {
+	configRow, err := row.ConfigRow()
+	if err != nil {
+		return appcfg.AgentLLMProviderConfig{}, nil, err
+	}
+	caps, hasCaps := state.ModelOverrideFromCaps(configRow.Caps)
+	var override *llm.ModelOverride
+	if hasCaps {
+		override = &caps
+	}
+	return appcfg.ProviderFromModelRow(configRow), override, nil
+}
+
+// configuredRowByID reads one row by id and projects it with its version, for
+// a pin that came from the configuration rather than from the model argument
+// (plan 304). The row is the authority for what the configured model is right
+// now: the model page can move its default effort or its key and endpoint, and
+// the next dispatch on it follows without a reload. It authorizes nothing — a
+// configured row is not a choice the model made, so the switch, the hand-off
+// exception and the credential rule stay in usableModelByID. A row that is
+// missing, unreadable, or read with no store answers ok=false and the caller
+// keeps the snapshot's own view.
+func configuredRowByID(ctx context.Context, fac Factory, id string) (appcfg.AgentLLMProviderConfig, int64, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" || fac.Owner == nil || fac.Owner.Deps == nil || fac.Owner.Deps.SessionStore == nil {
+		return appcfg.AgentLLMProviderConfig{}, 0, false
+	}
+	row, err := (&state.LLMModelStore{DB: fac.Owner.Deps.SessionStore.DB()}).Get(ctx, id)
+	if err != nil {
+		return appcfg.AgentLLMProviderConfig{}, 0, false
+	}
+	entry, _, err := configuredRow(row)
+	if err != nil {
+		return appcfg.AgentLLMProviderConfig{}, 0, false
+	}
+	return entry, row.UpdatedAt, true
+}
+
 // usableModel is one row the agent may pick for a subagent: the stored row,
-// its projection into the configuration view, and — for the row this
-// conversation's hand-off named — the flag that says so.
+// its projection into the configuration view (entry and capabilities), and —
+// for the row this conversation's hand-off named — the flag that says so.
+// Caps is nil when no row was read (the hand-off row a pre-table configuration
+// entry named), which is the same answer the projection gives a row that
+// carries no capability.
 type usableModel struct {
 	Row       state.LLMModel
 	Entry     appcfg.AgentLLMProviderConfig
+	Caps      *llm.ModelOverride
 	HandedOff bool
 }
 
@@ -4359,7 +4417,7 @@ func usableModels(ctx context.Context, fac Factory) ([]usableModel, error) {
 	handOff := handOffModelID(ctx, fac)
 	out := make([]usableModel, 0, len(rows))
 	for _, row := range rows {
-		entry, cerr := row.ConfigRow()
+		entry, caps, cerr := configuredRow(row)
 		if cerr != nil {
 			continue
 		}
@@ -4372,13 +4430,13 @@ func usableModels(ctx context.Context, fac Factory) ([]usableModel, error) {
 			if !credentialed {
 				continue
 			}
-			out = append(out, usableModel{Row: row, Entry: appcfg.ProviderFromModelRow(entry), HandedOff: true})
+			out = append(out, usableModel{Row: row, Entry: entry, Caps: caps, HandedOff: true})
 			continue
 		}
 		if !row.SubagentAllowed || !credentialed {
 			continue
 		}
-		out = append(out, usableModel{Row: row, Entry: appcfg.ProviderFromModelRow(entry)})
+		out = append(out, usableModel{Row: row, Entry: entry, Caps: caps})
 	}
 	return out, nil
 }
@@ -4417,7 +4475,7 @@ func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, 
 		}
 		return usableModel{}, err
 	}
-	entry, err := row.ConfigRow()
+	entry, caps, err := configuredRow(row)
 	if err != nil {
 		return usableModel{}, err
 	}
@@ -4429,7 +4487,7 @@ func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, 
 	if !credentialed {
 		return usableModel{}, fmt.Errorf("model %q (provider/model) has no credentials; call list_usable_models, or omit model to use the conversation's model.", llm.FormatProviderModel(row.Provider, row.Model))
 	}
-	return usableModel{Row: row, Entry: appcfg.ProviderFromModelRow(entry), HandedOff: handedOff}, nil
+	return usableModel{Row: row, Entry: entry, Caps: caps, HandedOff: handedOff}, nil
 }
 
 // handOffModelID names the row this conversation's approved hand-off recorded,
@@ -4465,16 +4523,7 @@ func subagentModelOverrideForRef(ctx context.Context, fac Factory, id string) (S
 	if err != nil {
 		return SubagentModelOverride{}, err
 	}
-	entry := usable.Entry
-	configRow, err := usable.Row.ConfigRow()
-	if err != nil {
-		return SubagentModelOverride{}, err
-	}
-	capsOverride, hasCaps := state.ModelOverrideFromCaps(configRow.Caps)
-	var caps *llm.ModelOverride
-	if hasCaps {
-		caps = &capsOverride
-	}
+	entry, caps := usable.Entry, usable.Caps
 	return SubagentModelOverride{
 		ModelID:  strings.TrimSpace(entry.ID),
 		Provider: strings.TrimSpace(entry.Provider),
@@ -4524,15 +4573,20 @@ type subagentModelOverrideLLM struct {
 	inner llm.LLM
 	build func(SubagentModelOverride) (llm.LLM, error)
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// clients is keyed by model — and by the row's version when the pin
+	// carries a live row. current is that key per model: the newest client a
+	// model has, so an edited row replaces its own stale client instead of
+	// leaving one behind per edit for the life of the runner.
 	clients map[string]llm.LLM
+	current map[string]string
 }
 
 func wrapSubagentModelOverrideLLM(inner llm.LLM, build func(SubagentModelOverride) (llm.LLM, error)) llm.LLM {
 	if inner == nil || build == nil {
 		return inner
 	}
-	return &subagentModelOverrideLLM{inner: inner, build: build, clients: map[string]llm.LLM{}}
+	return &subagentModelOverrideLLM{inner: inner, build: build, clients: map[string]llm.LLM{}, current: map[string]string{}}
 }
 
 func (w *subagentModelOverrideLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
@@ -4555,10 +4609,17 @@ func (w *subagentModelOverrideLLM) Execute(ctx context.Context, messages []llm.M
 // tool loop would throw away connection reuse for no reason. The row id is
 // part of the key: twin rows of one pair are different clients.
 func (w *subagentModelOverrideLLM) clientFor(override SubagentModelOverride) (llm.LLM, error) {
-	key := strings.ToLower(strings.TrimSpace(override.ModelID) + "/" + strings.TrimSpace(override.Provider) + "/" + strings.TrimSpace(override.Model))
+	modelKey := strings.ToLower(strings.TrimSpace(override.ModelID) + "/" + strings.TrimSpace(override.Provider) + "/" + strings.TrimSpace(override.Model))
+	key := modelKey
+	// The effort a pin names is built into its client, so it is part of the
+	// key: moving the level a model runs at must not keep the client the old
+	// level was built into.
+	if effort := strings.ToLower(strings.TrimSpace(override.Effort)); effort != "" {
+		key += "/e" + effort
+	}
 	// A live row's client is keyed by its version too: the row can be edited
-	// mid-run (new key, new endpoint), and the next dispatch on it must build
-	// a new client rather than reuse the stale one.
+	// mid-run (new key, new endpoint, a new default effort), and the next
+	// dispatch on it must build a new client rather than reuse the stale one.
 	if override.Entry != nil {
 		key += fmt.Sprintf("/v%d", override.Version)
 	}
@@ -4574,7 +4635,15 @@ func (w *subagentModelOverrideLLM) clientFor(override SubagentModelOverride) (ll
 	if client == nil {
 		return nil, fmt.Errorf("model %s is not configured for this session", subagentModelDisplay(override))
 	}
+	// One client per model. A runner lives as long as its conversation, and a
+	// person who changes a row's settings a dozen times must not leave a dozen
+	// clients behind: the version is in the key so an edit replaces the entry,
+	// and this map is what says which entry the model's newest one is.
+	if prev, ok := w.current[modelKey]; ok && prev != key {
+		delete(w.clients, prev)
+	}
 	w.clients[key] = client
+	w.current[modelKey] = key
 	return client, nil
 }
 
@@ -4613,6 +4682,18 @@ func ConfiguredModelClientWithEffort(cfg *appcfg.Root, agentType, modelID, provi
 		entry.Params = appcfg.WithReasoningEffort(entry.Params, effort)
 	}
 	return modelClientFromEntry(entry, "")
+}
+
+// subagentOverrideClient builds the client a pin's requests go through. A pin
+// carrying its own entry — the model argument's live row, or a configured
+// type's row read at dispatch (plan 304) — is built from that row, not from
+// this turn's snapshot: the row may have been edited or added after the
+// configuration was adopted. Every other pin resolves against the snapshot.
+func (r *Runner) subagentOverrideClient(override SubagentModelOverride) (llm.LLM, error) {
+	if override.Entry != nil {
+		return modelClientFromEntry(*override.Entry, override.Effort)
+	}
+	return ConfiguredModelClientWithEffort(r.Config(), r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
 }
 
 // modelClientFromEntry builds the client for one resolved configuration

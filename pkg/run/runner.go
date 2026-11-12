@@ -1003,15 +1003,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// A run may pin its own model (plan review lets the user pick the reviewer,
 	// a configured subagent pins its own), which outranks both the per-type
 	// provider above and the main agent's model.
-	llmClient = wrapSubagentModelOverrideLLM(llmClient, func(override SubagentModelOverride) (llm.LLM, error) {
-		// A live row (the model argument named it) carries its own entry: the
-		// row joined the table after this turn's configuration was adopted,
-		// so the client is built from the row, not from the snapshot.
-		if override.Entry != nil {
-			return modelClientFromEntry(*override.Entry, override.Effort)
-		}
-		return ConfiguredModelClientWithEffort(r.Config(), r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
-	})
+	llmClient = wrapSubagentModelOverrideLLM(llmClient, r.subagentOverrideClient)
 	// The prompt a typed run reaches the model with is this primary agent's
 	// answer: its rewrite of a built-in, or a custom subagent's own text.
 	llmClient = wrapTypedSubagentPromptLLM(llmClient, func(subtype string) (string, bool) {
