@@ -4,45 +4,106 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"log/slog"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
-func NewToolDebugFileLogMiddleware() llm.ToolMiddleware {
+// kindTool is the record kind of a tool call, told apart from kindLLM, kindHTTP
+// (the access log) and kindLog.
+const kindTool = "tool"
+
+// NewToolEventMiddleware records one tool call as two records sharing a call id:
+// the model's own arguments before the handler runs, and the result after it
+// (plans/286).
+//
+// The id is what pairs them. A tool result can quote the arguments, and a model
+// may write anything at all into them, so matching on text — which is what the
+// debug.log blocks did — pairs the two halves wrongly exactly when the call is
+// interesting.
+func NewToolEventMiddleware() llm.ToolMiddleware {
 	return func(tool *llm.Tool, next llm.ToolHandler) llm.ToolHandler {
 		return func(ctx context.Context, arguments string) (any, error) {
+			log := DefaultEventLog()
+			if log == nil {
+				return next(ctx, arguments) // no log: nothing to say, nothing to compute
+			}
 			name := ""
 			if tool != nil {
 				name = tool.Name()
 			}
-			ts := time.Now().Format(time.RFC3339Nano)
-			var b strings.Builder
-			fmt.Fprintf(&b, "tool_call ts=%s\n", ts)
-			fmt.Fprintf(&b, "tool_name=%s\n", name)
-			// arguments_raw is the model's own output and is written in full; the
-			// tool result below is not model output and stays bounded.
-			fmt.Fprintf(&b, "arguments_raw:\n%s\n", arguments)
-			writeDebugFileLogWhole("tool_call", b.String())
+			id := nextCallID(log, "t", &toolCallSeq)
+			started := time.Now()
+			emitToolArguments(ctx, log, id, name, arguments)
 			out, err := next(ctx, arguments)
-			var rb strings.Builder
-			fmt.Fprintf(&rb, "tool_result ts=%s\n", time.Now().Format(time.RFC3339Nano))
-			fmt.Fprintf(&rb, "tool_name=%s\n", name)
-			if err != nil {
-				fmt.Fprintf(&rb, "handler_error=%q\n", err.Error())
-			} else {
-				rb.WriteString("result_value:\n")
-				resStr := BoundText(formatToolResultValue(out), DefaultRecordBytes)
-				rb.WriteString(resStr)
-				if resStr != "" && !strings.HasSuffix(resStr, "\n") {
-					rb.WriteByte('\n')
-				}
-			}
-			writeDebugFileLogWhole("tool_result", rb.String())
+			emitToolResult(ctx, log, id, name, time.Since(started), out, err)
 			return out, err
 		}
 	}
+}
+
+// emitToolArguments records what the model asked the tool to do. The arguments
+// are the model's output, so they are kept whole: up to a record attribute's
+// own limit inline, and past it the whole text in the call's own file with a
+// preview left in the record.
+func emitToolArguments(ctx context.Context, log *EventLog, id, name, arguments string) {
+	attrs := []slog.Attr{
+		slog.String("tool", name),
+		slog.String("tool_call", id),
+		slog.Int64("args_bytes", int64(len(arguments))),
+	}
+	if len(arguments) <= payloadInlineMaxBytes {
+		attrs = append(attrs, slog.String("args", arguments))
+	} else {
+		attrs = append(attrs, slog.String("args_preview", previewText(arguments, payloadPreviewBytes)))
+		if ref, err := writeToolPayload(log, id+".args.gz", []byte(arguments), true, 0); err != nil {
+			attrs = append(attrs, slog.String(attrBlobError, err.Error()))
+		} else {
+			attrs = append(attrs, slog.Any(blobAttrPrefix+"args", ref))
+		}
+	}
+	Emit(ctx, slog.LevelDebug, kindTool, "tool call", attrs...)
+}
+
+// emitToolResult records what the tool gave back. A result is not model output,
+// so it is bounded once (DefaultRecordBytes, as debug.log always did): inline up
+// to a record attribute's limit, and past it in the call's own file with the
+// record saying how much was left out.
+//
+// A call whose handler failed records the error instead of a result: there is
+// no result, and "<nil>" is not one.
+func emitToolResult(ctx context.Context, log *EventLog, id, name string, dur time.Duration, out any, handlerErr error) {
+	level := slog.LevelInfo
+	attrs := []slog.Attr{
+		slog.String("tool", name),
+		slog.String("tool_call", id),
+		slog.Int64("dur_ms", dur.Milliseconds()),
+	}
+	switch {
+	case handlerErr != nil:
+		level = slog.LevelWarn
+		attrs = append(attrs, slog.Any(attrErr, handlerErr))
+	default:
+		full := formatToolResultValue(out)
+		bounded := BoundText(full, DefaultRecordBytes)
+		attrs = append(attrs, slog.Int64("result_bytes", int64(len(full))))
+		if len(bounded) <= payloadInlineMaxBytes {
+			attrs = append(attrs, slog.String("result", bounded))
+		} else {
+			omitted := int64(len(full) - DefaultRecordBytes)
+			if omitted < 0 {
+				omitted = 0
+			}
+			attrs = append(attrs, slog.String("result_preview", previewText(bounded, payloadPreviewBytes)))
+			if ref, err := writeToolPayload(log, id+".result.gz", []byte(bounded), omitted == 0, omitted); err != nil {
+				attrs = append(attrs, slog.String(attrBlobError, err.Error()))
+			} else {
+				attrs = append(attrs, slog.Any(blobAttrPrefix+"result", ref))
+			}
+		}
+	}
+	Emit(ctx, level, kindTool, "tool result", attrs...)
 }
 
 func formatToolResultValue(v any) string {

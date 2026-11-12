@@ -266,7 +266,7 @@ func (s *State) ToolMiddlewares() []llm.ToolMiddleware {
 		s.mu.Unlock()
 	}
 	mws := make([]llm.ToolMiddleware, 0, len(extra)+3)
-	mws = append(mws, telemetry.NewToolDebugFileLogMiddleware())
+	mws = append(mws, telemetry.NewToolEventMiddleware())
 	mws = append(mws, extra...)
 	mws = append(mws, telemetry.NewToolTraceMiddleware())
 	return mws
