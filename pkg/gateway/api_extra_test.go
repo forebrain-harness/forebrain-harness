@@ -9910,6 +9910,72 @@ func TestSettingsPatchKeepsMemoryModelsOnConfiguredRows(t *testing.T) {
 	require.Equal(t, other.ID, stored(t).Memories.ExtractModel, "a refused write must not move the stored model")
 }
 
+// The goal check's model is one global row (plan 299), so the settings write
+// path stores the id of a configured row and nothing else: a "provider/model"
+// label resolves against a primary agent's own model list, which would turn a
+// global choice into a per-agent one. The effort keeps its own rule — it needs
+// a model next to it — through the loader, which is where the row is judged.
+func TestSettingsPatchNormalizesGoalEvaluatorModelToRowID(t *testing.T) {
+	s, db := settingsServer(t)
+	ctx := context.Background()
+	store := &state.LLMModelStore{DB: db}
+	pro, err := store.Create(ctx, state.LLMModel{
+		Provider: "deepseek", Model: "deepseek-v4-pro",
+		BaseURL: "https://api.deepseek.com", APIPath: "/chat/completions", APIKey: "sk-goal-pro",
+	})
+	require.NoError(t, err)
+
+	stored := func(t *testing.T) appcfg.Root {
+		t.Helper()
+		cfg, err := s.persistedConfig(ctx)
+		require.NoError(t, err)
+		return cfg
+	}
+	refusalOf := func(t *testing.T, body []byte) (path, message string) {
+		t.Helper()
+		var refusal struct {
+			Path    string `json:"path"`
+			Message string `json:"message"`
+		}
+		require.NoError(t, json.Unmarshal(body, &refusal))
+		return refusal.Path, refusal.Message
+	}
+
+	// An effort with no model is refused: reasoning_effort requires model, the
+	// same rule every per-agent entry gets, and the refusal names the item the
+	// page edited.
+	saved := settingsPatch(t, s, map[string]any{"agents.goal_evaluator.reasoning_effort": "high"}, nil)
+	require.Equal(t, http.StatusBadRequest, saved.Code, saved.Body.String())
+	path, message := refusalOf(t, saved.Body.Bytes())
+	require.Equal(t, "agents.goal_evaluator.reasoning_effort", path)
+	require.NotEmpty(t, message)
+	require.Empty(t, stored(t).Agents.GoalEvaluator.ReasoningEffort)
+
+	// A row id is the accepted form, and the id is what is stored.
+	saved = settingsPatch(t, s, map[string]any{"agents.goal_evaluator.model": pro.ID}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Equal(t, pro.ID, stored(t).Agents.GoalEvaluator.Model)
+
+	// With a model next to it, the effort that was just refused is accepted.
+	saved = settingsPatch(t, s, map[string]any{"agents.goal_evaluator.reasoning_effort": "low"}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Equal(t, "low", stored(t).Agents.GoalEvaluator.ReasoningEffort)
+
+	// A legacy label is translated to the row it names, never stored as a label.
+	saved = settingsPatch(t, s, map[string]any{"agents.goal_evaluator.model": "deepseek/deepseek-v4-pro"}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Equal(t, pro.ID, stored(t).Agents.GoalEvaluator.Model)
+
+	// A value no row carries is refused, naming the field, and the stored row
+	// does not move.
+	saved = settingsPatch(t, s, map[string]any{"agents.goal_evaluator.model": "deepseek/no-such-model"}, nil)
+	require.Equal(t, http.StatusBadRequest, saved.Code, saved.Body.String())
+	path, message = refusalOf(t, saved.Body.Bytes())
+	require.Equal(t, "agents.goal_evaluator.model", path)
+	require.NotEmpty(t, message)
+	require.Equal(t, pro.ID, stored(t).Agents.GoalEvaluator.Model, "a refused write must not move the stored row")
+}
+
 // TestSettingsGetMasksCredentials pins §0.20 on the wire: a credential the page
 // can show is reported as set plus its last four characters, and its plaintext
 // appears nowhere in the reply.

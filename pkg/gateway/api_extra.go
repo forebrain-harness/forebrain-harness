@@ -9206,6 +9206,11 @@ var settingsFieldList = []settingsField{
 	{path: "agents.defaults.enable_subagent", section: "agents", kind: settingsBool, def: false},
 	{path: "agents.defaults.execution.max_parallel_subagents", section: "agents", kind: settingsNumber,
 		def: config.DefaultMaxParallelSubagents()},
+	// The /goal check's own model and reasoning effort (plan 299): one global
+	// row, not a per-agent entry, so it is registered here beside the two
+	// subagent defaults rather than on the sidebar's subagent page.
+	{path: "agents.goal_evaluator.model", section: "agents", kind: settingsText},
+	{path: "agents.goal_evaluator.reasoning_effort", section: "agents", kind: settingsText},
 
 	// 对等通信（只存库的段；行仅在检测到 Claude Code 时显示，见 meta）
 	{path: "peers.claude_code", section: "peers", kind: settingsBool, def: false},
@@ -9696,6 +9701,13 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: err.Error()})
 			return
 		}
+		// The /goal check's model is the same kind of choice one step
+		// narrower: a configured row and nothing else, because the engine
+		// resolves it globally (plan 299).
+		if err := normalizeGoalEvaluatorModelPath(&candidate, path); err != nil {
+			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: err.Error()})
+			return
+		}
 		// The item just written is the one a value-domain refusal names: the
 		// loader's own checks are what judge it, and its Chinese range
 		// description is what the page shows (plan 191 §0.1, §0.20).
@@ -9768,6 +9780,33 @@ func normalizeMemoryModelPath(cfg *config.Root, path string) error {
 	return nil
 }
 
+// goalEvaluatorModelPath is the /goal check's model: one global row, chosen on
+// the settings page's subagent tab (plan 299).
+const goalEvaluatorModelPath = "agents.goal_evaluator.model"
+
+// normalizeGoalEvaluatorModelPath puts the goal check's model into the form the
+// engine resolves globally: the id of a configured model row (plan 299). Empty
+// is "follow the primary agent" and stays empty; a legacy "provider/model"
+// label resolves to the row it names; anything else is refused here rather
+// than by a goal check much later. The row id is what makes the choice global:
+// only the id branch of the reference resolution ignores the agent name, so a
+// stored label would silently become a per-agent reference.
+func normalizeGoalEvaluatorModelPath(cfg *config.Root, path string) error {
+	if cfg == nil || path != goalEvaluatorModelPath {
+		return nil
+	}
+	ref := strings.TrimSpace(cfg.Agents.GoalEvaluator.Model)
+	if ref == "" {
+		return nil
+	}
+	entry, ok := config.ResolveModelRef(cfg, "main", ref)
+	if !ok {
+		return fmt.Errorf("这个设置项要选一个已配置的模型")
+	}
+	cfg.Agents.GoalEvaluator.Model = strings.TrimSpace(entry.ID)
+	return nil
+}
+
 // settingsCandidateLoads runs the loader's own checks over the candidate
 // configuration. Nothing it changes is written: the answer is only whether the
 // configuration would start.
@@ -9776,6 +9815,14 @@ func settingsCandidateLoads(candidate config.Root) error {
 	if err != nil {
 		return err
 	}
+	// The clone is a JSON round trip and the model table rides on the root as a
+	// runtime field, so put the rows back — exactly as the candidate above got
+	// them from the configuration it was read from. The loader's checks resolve
+	// model references by row id (agents.goal_evaluator.model among them, plan
+	// 299), and a probe without the table would refuse every one of them: the
+	// answer has to be the one the composed configuration gets, and that
+	// configuration carries the table (process.composeSectionsFrom).
+	probe.LLMModels = candidate.LLMModels
 	return config.FinishLoad(&probe)
 }
 
