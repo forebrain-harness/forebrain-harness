@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -32,8 +31,11 @@ func pollReadableInputFD(fd int, timeoutMs int) (bool, error) {
 	return true, nil
 }
 
-func attachProcessStderrToErrorLog(logDir string) func() {
-	lf, err := os.OpenFile(filepath.Join(logDir, "error.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+// attachProcessStderr points the process's stderr at path: a panic's trace and
+// a C library's complaint reach the file even if the Go side is already dying.
+// The returned func puts the previous console handle back and closes the file.
+func attachProcessStderr(path string) func() {
+	lf, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return func() {}
 	}

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io"
 	"log/slog"
 	"os"
 
@@ -14,32 +13,17 @@ func stderrColor() bool {
 	return rootIsTerminal(os.Stderr) && os.Getenv("NO_COLOR") == ""
 }
 
-// stderrLogHandler is the inner handler the process logs to stderr through
-// before the telemetry tee wraps it.
+// stderrLogHandler is the handler the process logs to stderr through: the
+// compact console format on a terminal — colored unless NO_COLOR — and logfmt
+// everywhere else (systemd, docker, a redirected descriptor), so machine
+// consumers see one stable format.
+//
+// It is also what the slog fanout writes to the terminal with; the log file
+// beside it is the event log's, which is written once and in one format
+// (plan 285), so this handler no longer mirrors anything to a file.
 func stderrLogHandler(level slog.Level, addSource bool) slog.Handler {
-	return stderrLogHandlerTo(nil, level, addSource)
-}
-
-// stderrLogHandlerTo builds that handler and, when file is non-nil, mirrors
-// every record into it: the compact console format on a terminal — colored
-// unless NO_COLOR — with the file receiving the same text without a single
-// SGR byte. Everywhere else (systemd, docker, a redirected descriptor) the
-// terminal and the file both get logfmt, so machine consumers see one stable
-// format.
-func stderrLogHandlerTo(file io.Writer, level slog.Level, addSource bool) slog.Handler {
-	// The durable destination is written first: if the process dies between the
-	// two writes, the record that is supposed to outlive the session is the one
-	// already on disk.
 	if !rootIsTerminal(os.Stderr) {
-		w := io.Writer(os.Stderr)
-		if file != nil {
-			w = telemetry.MultiWriter(file, os.Stderr)
-		}
-		return slog.NewTextHandler(w, &slog.HandlerOptions{Level: level, AddSource: addSource})
+		return slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level, AddSource: addSource})
 	}
-	sinks := []telemetry.ConsoleSink{{W: os.Stderr, Color: stderrColor()}}
-	if file != nil {
-		sinks = []telemetry.ConsoleSink{{W: file}, {W: os.Stderr, Color: stderrColor()}}
-	}
-	return telemetry.NewConsoleHandler(level, addSource, sinks...)
+	return telemetry.NewConsoleHandler(level, addSource, telemetry.ConsoleSink{W: os.Stderr, Color: stderrColor()})
 }

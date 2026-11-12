@@ -113,7 +113,15 @@ func prepPersistentHome(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	inner := stderrLogHandler(defaultSlogLevel(), true)
-	slog.SetDefault(slog.New(telemetry.NewSlogTeeHandler(root, inner)))
+	// The event log is opened once per process and every later writer replaces
+	// its source rather than its file: OpenEventLog creates the file on the
+	// first record, so a command that never logs leaves none behind. The
+	// terminal keeps the console format it always had; the log is the second
+	// destination, not a replacement (plan 285).
+	telemetry.SetDefaultEventLog(telemetry.OpenEventLog(root, "cli"))
+	slog.SetDefault(slog.New(telemetry.NewFanoutHandler(
+		stderrLogHandler(defaultSlogLevel(), true),
+		telemetry.NewEventHandler(telemetry.DefaultEventLog(), defaultSlogLevel()),
+	)))
 	return nil
 }

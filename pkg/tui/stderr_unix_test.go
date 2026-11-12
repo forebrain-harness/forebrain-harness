@@ -5,16 +5,15 @@ package tui
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
 // The vars this test swaps (unixOpenFile, unixDup, unixDup2, unixClose,
 // stderrFD) live in stderr_unix.go behind the same constraint; the test never
-// compiles on Windows, where attachProcessStderrToErrorLog has its own
+// compiles on Windows, where attachProcessStderr has its own
 // platform_windows.go half.
-func TestAttachProcessStderrToErrorLog(t *testing.T) {
-	origAttach := attachStderrToError
-	t.Cleanup(func() { attachStderrToError = origAttach })
+func TestAttachProcessStderr(t *testing.T) {
 	origStderrFD := stderrFD
 	t.Cleanup(func() { stderrFD = origStderrFD })
 
@@ -24,7 +23,7 @@ func TestAttachProcessStderrToErrorLog(t *testing.T) {
 		unixOpenFile = func(string, int, os.FileMode) (*os.File, error) {
 			return nil, errors.New("open failed")
 		}
-		restore := attachProcessStderrToErrorLog(t.TempDir())
+		restore := attachProcessStderr(filepath.Join(t.TempDir(), "stderr-tui.log"))
 		restore()
 	})
 
@@ -41,7 +40,7 @@ func TestAttachProcessStderrToErrorLog(t *testing.T) {
 		unixDup = func(int) (int, error) {
 			return 0, errors.New("dup failed")
 		}
-		restore := attachProcessStderrToErrorLog(t.TempDir())
+		restore := attachProcessStderr(filepath.Join(t.TempDir(), "stderr-tui.log"))
 		restore()
 	})
 
@@ -66,12 +65,11 @@ func TestAttachProcessStderrToErrorLog(t *testing.T) {
 			return errors.New("dup2 failed")
 		}
 		unixClose = func(int) error { return nil }
-		restore := attachProcessStderrToErrorLog(t.TempDir())
+		restore := attachProcessStderr(filepath.Join(t.TempDir(), "stderr-tui.log"))
 		restore()
 	})
 
 	t.Run("restore path", func(t *testing.T) {
-		attachStderrToError = func(string) func() { return func() {} }
 		origOpen := unixOpenFile
 		origDup := unixDup
 		origDup2 := unixDup2
@@ -95,7 +93,7 @@ func TestAttachProcessStderrToErrorLog(t *testing.T) {
 			t.Cleanup(func() { _ = f.Close() })
 			return int(f.Fd())
 		}
-		restore := attachProcessStderrToErrorLog(t.TempDir())
+		restore := attachProcessStderr(filepath.Join(t.TempDir(), "stderr-tui.log"))
 		restore()
 	})
 }

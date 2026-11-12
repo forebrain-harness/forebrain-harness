@@ -2,10 +2,7 @@
 package tui
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -7342,172 +7339,86 @@ func NewStandaloneRawSelector(f *os.File, out io.Writer) (selector Selector, wra
 
 var (
 	mkdirAll = os.MkdirAll
-	openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-		return telemetry.OpenRaw(name, flag, perm, telemetry.Options{})
-	}
-	fileWrite           = func(f *os.File, p []byte) (int, error) { return telemetry.WriteRaw(f, p, 0, 0) }
-	fileSync            = telemetry.SyncRaw
-	fileClose           = telemetry.CloseRaw
-	attachStderrToError = attachProcessStderrToErrorLog
+	// attachStderr is a seam for the platform half: the Unix one dup2s the
+	// descriptor, the Windows one swaps the console handle.
+	attachStderr = attachProcessStderr
 )
 
-type tuiLogSink struct {
-	mu       *sync.Mutex
-	dbgF     *os.File
-	infF     *os.File
-	errF     *os.File
-	minLevel slog.Level
-	attrs    []slog.Attr
-}
-
-func (s *tuiLogSink) pickFile(level slog.Level) *os.File {
-	switch {
-	case level < slog.LevelInfo:
-		return s.dbgF
-	case level < slog.LevelWarn:
-		return s.infF
-	default:
-		return s.errF
-	}
-}
-
-func (s *tuiLogSink) Enabled(_ context.Context, level slog.Level) bool {
-	return level >= s.minLevel
-}
-
-func (s *tuiLogSink) Handle(ctx context.Context, r slog.Record) error {
-	f := s.pickFile(r.Level)
-	if f == nil {
-		return nil
-	}
-	r2 := r.Clone()
-	if len(s.attrs) > 0 {
-		r2.AddAttrs(s.attrs...)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	th := slog.NewTextHandler(telemetry.RawWriter{File: f}, &slog.HandlerOptions{
-		AddSource: true,
-		Level:     slog.LevelDebug,
-	})
-	if err := th.Handle(ctx, r2); err != nil {
-		return err
-	}
-	if err := fileSync(f); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *tuiLogSink) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &tuiLogSink{
-		mu:       s.mu,
-		dbgF:     s.dbgF,
-		infF:     s.infF,
-		errF:     s.errF,
-		minLevel: s.minLevel,
-		attrs:    append(append([]slog.Attr{}, s.attrs...), attrs...),
-	}
-}
-
-func (s *tuiLogSink) WithGroup(string) slog.Handler {
-	return s
-}
-
-type tuiStdLogWriter struct{ s *tuiLogSink }
-
-func logLineLooksErrory(low []byte) bool {
-	return bytes.Contains(low, []byte("err=")) ||
-		bytes.Contains(low, []byte("panic")) ||
-		bytes.Contains(low, []byte("fatal")) ||
-		bytes.Contains(low, []byte("failed")) ||
-		bytes.Contains(low, []byte("handler_error")) ||
-		bytes.Contains(low, []byte("docker error"))
-}
+// tuiStdLogWriter turns the standard library's log output into event records:
+// one INFO record per line, kind=log, tagged via=stdlog.
+//
+// It does not judge the line's severity. The keyword test this replaces read
+// "failed", "err=", "panic" and three other spellings as an error, whatever the
+// line was saying, so a normal message carrying one of those words was copied
+// into error.log as a failure (plans/285 §3).
+type tuiStdLogWriter struct{ log *telemetry.EventLog }
 
 func (w tuiStdLogWriter) Write(p []byte) (int, error) {
-	w.s.mu.Lock()
-	defer w.s.mu.Unlock()
-	if w.s.infF == nil {
-		return 0, nil
+	msg := strings.TrimRight(string(p), "\n")
+	if msg == "" {
+		return len(p), nil
 	}
-	n, err := fileWrite(w.s.infF, p)
-	if err != nil {
-		return n, err
-	}
-	if err := fileSync(w.s.infF); err != nil {
-		return n, err
-	}
-	low := bytes.ToLower(p)
-	if w.s.errF != nil && logLineLooksErrory(low) {
-		if n2, e2 := fileWrite(w.s.errF, p); e2 != nil {
-			if n2 > 0 {
-				return n + n2, e2
-			}
-			return n, e2
-		}
-		if err := fileSync(w.s.errF); err != nil {
-			return n, err
-		}
-	}
-	return n, nil
+	// Written as a Record rather than through Emit: a standard-library line has
+	// no call site to point at, and Emit would fill At with this writer's own
+	// address, which is not where the message came from.
+	w.log.Write(telemetry.Record{
+		Level: slog.LevelInfo.String(),
+		Kind:  "log",
+		Msg:   msg,
+		Attrs: map[string]any{"via": "stdlog"},
+	})
+	return len(p), nil
 }
 
-func closeFiles(dbgF, infF, errF *os.File) error {
-	var errs []error
-	for _, f := range []*os.File{dbgF, infF, errF} {
-		if f == nil {
-			continue
-		}
-		if err := fileClose(f); err != nil {
-			errs = append(errs, err)
-		}
+// tuiStderrLogPath is where this process's raw stderr goes: the day directory
+// the event log writes into, one file per process. It is deliberately not under
+// x/ — it is not a payload a record points at, it is a record's own raw text,
+// kept verbatim because a crash's output cannot be structured (plan 285).
+func tuiStderrLogPath(root string, log *telemetry.EventLog) (string, error) {
+	dir := filepath.Join(root, homepkg.LogsDir, time.Now().Format("2006-01-02"))
+	if err := mkdirAll(dir, 0o755); err != nil {
+		return "", err
 	}
-	return errors.Join(errs...)
+	return filepath.Join(dir, fmt.Sprintf("stderr-tui-%s-%d-%s.log",
+		telemetry.HostLabel(), os.Getpid(), log.Proc())), nil
 }
 
+// RedirectProcessLoggingForTUI claims this process's logging for the terminal's
+// home: every slog record and every standard-library log line goes to the event
+// log under home, and the descriptor-level stderr — a panic's trace, a C
+// library's complaint — keeps going to a file, since neither can be made into a
+// record.
+//
+// The terminal is this process's own interface, so nothing is fanned out to it:
+// a log line printed on screen would paint over the transcript. Records are
+// written by the event log's single writer, with no per-record handler built and
+// no fsync.
+//
+// A home that is not usable leaves the process with logging turned off, the way
+// it always has; nothing here can fail a launch.
 func RedirectProcessLoggingForTUI(home string) (restore func()) {
 	home = strings.TrimSpace(home)
 	if home == "" {
 		return redirectLoggingToDiscard()
 	}
-	dir := filepath.Join(home, homepkg.LogsDir)
-	if err := mkdirAll(dir, 0o755); err != nil {
+	if err := mkdirAll(filepath.Join(home, homepkg.LogsDir), 0o755); err != nil {
 		return redirectLoggingToDiscard()
 	}
-	flags := os.O_APPEND | os.O_CREATE | os.O_WRONLY
-	debugPath := filepath.Join(dir, "debug.log")
-	infoPath := filepath.Join(dir, "info.log")
-	errorPath := filepath.Join(dir, "error.log")
-	dbgF, err1 := openFile(debugPath, flags, 0o644)
-	infF, err2 := openFile(infoPath, flags, 0o644)
-	errF, err3 := openFile(errorPath, flags, 0o644)
-	if err1 != nil || err2 != nil || err3 != nil {
-		if cErr := closeFiles(dbgF, infF, errF); cErr != nil {
-			return redirectLoggingToDiscard()
-		}
-		return redirectLoggingToDiscard()
-	}
-	restoreStderr := attachStderrToError(dir)
-	stopRotation := telemetry.StartPeriodicRotation([]string{debugPath, infoPath, errorPath}, 0)
-	mu := &sync.Mutex{}
-	sink := &tuiLogSink{
-		mu:       mu,
-		dbgF:     dbgF,
-		infF:     infF,
-		errF:     errF,
-		minLevel: slogLevelForTUILogFile(),
-	}
-	oldW := log.Writer()
-	log.SetOutput(tuiStdLogWriter{sink})
+	eventLog := telemetry.OpenEventLog(home, "tui")
+	telemetry.SetDefaultEventLog(eventLog)
 	prev := slog.Default()
-	slog.SetDefault(slog.New(sink))
+	slog.SetDefault(slog.New(telemetry.NewEventHandler(eventLog, slogLevelForTUILogFile())))
+	oldW := log.Writer()
+	log.SetOutput(tuiStdLogWriter{log: eventLog})
+	restoreStderr := func() {}
+	if path, err := tuiStderrLogPath(home, eventLog); err == nil {
+		restoreStderr = attachStderr(path)
+	}
 	return func() {
 		restoreStderr()
-		stopRotation()
 		log.SetOutput(oldW)
 		slog.SetDefault(prev)
-		_ = closeFiles(dbgF, infF, errF)
+		_ = eventLog.Close()
 	}
 }
 
@@ -7537,8 +7448,6 @@ func slogLevelForTUILogFile() slog.Level {
 	}
 	return slog.LevelDebug
 }
-
-var _ slog.Handler = (*tuiLogSink)(nil)
 
 // --- slash panels ---
 //

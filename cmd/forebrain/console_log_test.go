@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -8,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 )
 
 // --- stderr wiring ---
@@ -58,38 +62,6 @@ func TestStderrLogHandlerFormatFollowsTTY(t *testing.T) {
 	})
 }
 
-// On a terminal the wiring puts one handler behind both destinations: the
-// file sink is colorless and the terminal sink colored, so the file mirrors
-// the console minus every SGR byte. The write order — durable sink first —
-// is pinned by pkg/telemetry's TestConsoleLogHandlerWritesDurableSinkFirst.
-func TestStderrLogHandlerWiresConsoleSinksOnATerminal(t *testing.T) {
-	fakeTerminal(t)
-	t.Setenv("NO_COLOR", "")
-	_, read := captureStderr(t)
-	file, err := os.Create(filepath.Join(t.TempDir(), "mirror.log"))
-	if err != nil {
-		t.Fatalf("temp mirror: %v", err)
-	}
-	t.Cleanup(func() { _ = file.Close() })
-
-	slog.New(stderrLogHandlerTo(file, slog.LevelDebug, false)).Info("wired", "k", "v")
-
-	terminal := read(t)
-	if !strings.Contains(terminal, "\x1b[36mINF\x1b[0m wired") {
-		t.Fatalf("terminal output = %q, want the colored console format", terminal)
-	}
-	data, err := os.ReadFile(file.Name())
-	if err != nil {
-		t.Fatalf("read mirror: %v", err)
-	}
-	if strings.ContainsRune(string(data), 0x1b) {
-		t.Fatalf("file sink must carry no escape sequence: %q", string(data))
-	}
-	if !strings.Contains(string(data), "INF wired k=v") {
-		t.Fatalf("file output = %q, want the colorless console format", string(data))
-	}
-}
-
 // fakeTerminal makes rootIsTerminal report a terminal for one test.
 func fakeTerminal(t *testing.T) {
 	t.Helper()
@@ -122,20 +94,63 @@ func captureStderr(t *testing.T) (restore func(), read func(*testing.T) string) 
 	return restore, read
 }
 
-// On a terminal the gateway mirrors its console format into the log file,
-// minus every SGR byte.
-func TestInstallGatewayConsoleLogMirrorsConsoleFormat(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "logs"), 0o755); err != nil {
-		t.Fatalf("mkdir logs: %v", err)
+// --- the gateway's log wiring ---
+
+// gatewayRecordFiles lists the gateway's record files for one home.
+func gatewayRecordFiles(t *testing.T, root string) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(root, "logs", "*", "gateway-*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
 	}
+	return files
+}
+
+// gatewayRecords decodes every record the gateway wrote for one home.
+func gatewayRecords(t *testing.T, root string) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, path := range gatewayRecordFiles(t, root) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+			if line == "" {
+				continue
+			}
+			var rec map[string]any
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				t.Fatalf("line is not JSON: %v\n%s", err, line)
+			}
+			records = append(records, rec)
+		}
+	}
+	return records
+}
+
+// installGateway points the process at one home's gateway log for one test and
+// restores everything it touched afterwards.
+func installGateway(t *testing.T, root string) func() {
+	t.Helper()
+	prev := slog.Default()
+	prevLog := telemetry.DefaultEventLog()
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		telemetry.SetDefaultEventLog(prevLog)
+	})
+	return installGatewayConsoleLog(root)
+}
+
+// On a terminal the gateway keeps its console format on stderr and writes the
+// same record to its event log: one JSON line per record, no SGR byte.
+func TestInstallGatewayConsoleLogWritesTheEventLog(t *testing.T) {
+	root := t.TempDir()
 	fakeTerminal(t)
 	t.Setenv("NO_COLOR", "")
 	_, read := captureStderr(t)
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
 
-	restore := installGatewayConsoleLog(root)
+	restore := installGateway(t, root)
 	slog.Info("gateway started", "port", 6060)
 	restore()
 
@@ -143,106 +158,95 @@ func TestInstallGatewayConsoleLogMirrorsConsoleFormat(t *testing.T) {
 	if !strings.Contains(terminal, "\x1b[36mINF\x1b[0m gateway started") {
 		t.Fatalf("terminal output = %q", terminal)
 	}
-	data, err := os.ReadFile(gatewayLogPath(root))
-	if err != nil {
-		t.Fatalf("read %s: %v", gatewayLogPath(root), err)
+	records := gatewayRecords(t, root)
+	if len(records) != 1 {
+		t.Fatalf("records = %v, want one", records)
 	}
-	if strings.ContainsRune(string(data), 0x1b) {
-		t.Fatalf("log file must carry no escape sequence: %q", string(data))
+	rec := records[0]
+	if rec["msg"] != "gateway started" || rec["lvl"] != "INFO" || rec["kind"] != "log" {
+		t.Fatalf("record = %v", rec)
 	}
-	want := stripSGR(terminal)
-	if string(data) != want {
-		t.Fatalf("log file must mirror the console:\n--- file ---\n%q\n--- console ---\n%q", string(data), want)
+	if attrs, _ := rec["attrs"].(map[string]any); attrs["port"] != float64(6060) {
+		t.Fatalf("record attrs = %v, want the console's own attributes", rec["attrs"])
 	}
-	info, err := os.Stat(gatewayLogPath(root))
-	if err != nil {
-		t.Fatalf("stat %s: %v", gatewayLogPath(root), err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("gateway log mode = %o, want 0600", got)
-	}
-	if slog.Default() != prev {
-		t.Fatal("restore must put the previous logger back")
+	for _, path := range gatewayRecordFiles(t, root) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.ContainsRune(string(data), 0x1b) {
+			t.Fatalf("%s must carry no escape sequence: %q", path, string(data))
+		}
 	}
 }
 
 // Off a terminal — systemd, docker, a redirected descriptor — the gateway
-// keeps the logfmt format machine consumers parse, in the file too.
+// keeps the logfmt format machine consumers parse, and the event log gets the
+// same record.
 func TestInstallGatewayConsoleLogKeepsLogfmtOffATerminal(t *testing.T) {
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "logs"), 0o755); err != nil {
-		t.Fatalf("mkdir logs: %v", err)
-	}
 	_, read := captureStderr(t)
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
 
-	restore := installGatewayConsoleLog(root)
+	restore := installGateway(t, root)
 	slog.Info("gateway started", "port", 6060)
 	restore()
 
-	data, err := os.ReadFile(gatewayLogPath(root))
-	if err != nil {
-		t.Fatalf("read %s: %v", gatewayLogPath(root), err)
+	if got := read(t); !strings.Contains(got, "level=INFO") || !strings.Contains(got, `msg="gateway started"`) {
+		t.Fatalf("stderr = %q, want logfmt", got)
 	}
-	if !strings.Contains(string(data), "level=INFO") || !strings.Contains(string(data), "msg=\"gateway started\"") {
-		t.Fatalf("log file = %q, want logfmt", string(data))
-	}
-	if !strings.Contains(read(t), "level=INFO") {
-		t.Fatalf("stderr = %q, want logfmt", read(t))
+	records := gatewayRecords(t, root)
+	if len(records) != 1 || records[0]["msg"] != "gateway started" {
+		t.Fatalf("records = %v, want the same record in the event log", records)
 	}
 }
 
-// stripSGR removes every escape sequence, leaving the text a file should hold.
-func stripSGR(s string) string {
-	return regexp.MustCompile("\x1b\\[[0-9;]*m").ReplaceAllString(s, "")
-}
-
-// A home whose logs directory is missing leaves the terminal output working
-// and says so, rather than taking the gateway down.
+// A home with no logs directory is not a reason to lose the terminal output or
+// the start: the event log creates its directory with the first record.
 func TestInstallGatewayConsoleLogSurvivesMissingLogsDir(t *testing.T) {
 	root := t.TempDir() // no logs/ subdirectory
 	_, read := captureStderr(t)
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
 
-	restore := installGatewayConsoleLog(root)
+	restore := installGateway(t, root)
 	slog.Info("still logging")
 	restore()
 
 	if got := read(t); !strings.Contains(got, "still logging") {
 		t.Fatalf("terminal output = %q", got)
 	}
-	if _, err := os.Stat(gatewayLogPath(root)); err == nil {
-		t.Fatal("no log file should exist when the logs directory is absent")
+	if records := gatewayRecords(t, root); len(records) != 1 {
+		t.Fatalf("records = %v, want the record written into the new directory", records)
 	}
 }
 
-// TestGatewayLogPathIsPerReplica pins plan 213 §3.6 for the one always-on log a
-// gateway replica writes: the file is its own, named for the machine it runs on
-// (a pod's name is its hostname), because the log rotates by copy-and-truncate —
-// two replicas truncating one file lose whichever records the other copied, and
-// no line of a shared file says which replica wrote it.
-func TestGatewayLogPathIsPerReplica(t *testing.T) {
+// The gateway's log file name is the event log's: source, host, pid and a
+// per-process suffix, so two replicas — or two starts — never share a file.
+func TestGatewayLogFileNamesTheProcess(t *testing.T) {
 	root := t.TempDir()
-	path := gatewayLogPath(root)
-	if got := filepath.Dir(path); got != filepath.Join(root, "logs") {
-		t.Fatalf("log dir = %q, want the home's logs directory", got)
+	restore := installGateway(t, root)
+	slog.Info("first")
+	restore()
+
+	files := gatewayRecordFiles(t, root)
+	if len(files) != 1 {
+		t.Fatalf("files = %v, want one", files)
 	}
-	base := filepath.Base(path)
-	if !strings.HasPrefix(base, "gateway-") || !strings.HasSuffix(base, ".log") {
-		t.Fatalf("log file = %q, want gateway-<replica>.log", base)
+	base := filepath.Base(files[0])
+	want := "gateway-" + telemetry.HostLabel() + "-"
+	if !strings.HasPrefix(base, want) || !regexp.MustCompile(`-\d+-[0-9a-f]{6}\.jsonl$`).MatchString(base) {
+		t.Fatalf("log file = %q, want %s<pid>-<proc>.jsonl", base, want)
 	}
-	name := strings.TrimSuffix(strings.TrimPrefix(base, "gateway-"), ".log")
-	if name == "" {
-		t.Fatal("the replica name must never be empty")
-	}
-	for _, bad := range []string{"/", "\\", ":", " "} {
-		if strings.Contains(name, bad) {
-			t.Fatalf("replica name %q keeps %q, which is not a portable file name", name, bad)
-		}
-	}
-	if other := replicaLogName(); !strings.HasSuffix(strings.TrimSuffix(base, ".log"), other) && other != "local" {
-		t.Fatalf("log file %q does not name this replica %q", base, other)
+}
+
+// A record's file lives in the day directory of its own time, so `ls logs`
+// answers "what happened today" without opening anything.
+func TestGatewayRecordsLandInTodaysDirectory(t *testing.T) {
+	root := t.TempDir()
+	restore := installGateway(t, root)
+	slog.Info("dated")
+	restore()
+
+	day := time.Now().Format("2006-01-02")
+	if _, err := os.Stat(filepath.Join(root, "logs", day)); err != nil {
+		t.Fatalf("day directory: %v", err)
 	}
 }

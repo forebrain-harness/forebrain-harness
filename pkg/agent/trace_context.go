@@ -56,6 +56,14 @@ func agentNameFromContext(ctx context.Context) string {
 	return name
 }
 
+// NameFromContext is the read-only half of WithAgentName, for the composition
+// root: a log record's identity names the agent it belongs to, and the root
+// registers this with telemetry.RegisterScope because pkg/telemetry cannot
+// import this package (plan 285).
+func NameFromContext(ctx context.Context) string {
+	return agentNameFromContext(ctx)
+}
+
 // WithIteration returns a context carrying the current agent loop iteration number.
 //
 // The LLM wrapper reads this to annotate LLMRequestEvent and LLMResponseEvent

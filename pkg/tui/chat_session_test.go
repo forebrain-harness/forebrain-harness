@@ -11636,208 +11636,134 @@ func TestLineSelectorMultiSelectByIndexAndDefault(t *testing.T) {
 	})
 }
 
-func TestLogLineLooksErrory(t *testing.T) {
-	tests := []struct {
-		name string
-		line string
-		want bool
-	}{
-		{name: "err", line: "err=boom", want: true},
-		{name: "panic", line: "panic happened", want: true},
-		{name: "fatal", line: "fatal error", want: true},
-		{name: "failed", line: "task failed", want: true},
-		{name: "handler", line: "handler_error=x", want: true},
-		{name: "docker", line: "docker error", want: true},
-		{name: "normal", line: "all good", want: false},
+// readEvents decodes every record the TUI wrote for one home, oldest file
+// first: the event log is the only place a TUI's logs live now (plan 285).
+func readEvents(t *testing.T, home string) []map[string]any {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(home, "logs", "*", "tui-*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := logLineLooksErrory([]byte(tt.line)); got != tt.want {
-				t.Fatalf("got=%v", got)
+	var records []map[string]any
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+			if line == "" {
+				continue
 			}
-		})
+			var rec map[string]any
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				t.Fatalf("line is not JSON: %v\n%s", err, line)
+			}
+			records = append(records, rec)
+		}
 	}
+	return records
 }
 
-func TestTUILogSink(t *testing.T) {
-	dbg := createTempLog(t)
-	inf := createTempLog(t)
-	errf := createTempLog(t)
-	defer closeFiles(dbg, inf, errf)
-
-	sink := &tuiLogSink{mu: &sync.Mutex{}, dbgF: dbg, infF: inf, errF: errf, minLevel: slog.LevelInfo}
-	if sink.Enabled(context.Background(), slog.LevelDebug) {
-		t.Fatal("debug should be disabled")
+// eventsWithMsg is every record of one home whose msg is exactly msg.
+func eventsWithMsg(t *testing.T, home, msg string) []map[string]any {
+	t.Helper()
+	var matched []map[string]any
+	for _, rec := range readEvents(t, home) {
+		if rec["msg"] == msg {
+			matched = append(matched, rec)
+		}
 	}
-	if !sink.Enabled(context.Background(), slog.LevelInfo) {
-		t.Fatal("info should be enabled")
-	}
-	if sink.pickFile(slog.LevelDebug) != dbg || sink.pickFile(slog.LevelInfo) != inf || sink.pickFile(slog.LevelWarn) != errf {
-		t.Fatal("pickFile mismatch")
-	}
-
-	withAttrs := sink.WithAttrs([]slog.Attr{slog.String("k", "v")})
-	if withAttrs == sink {
-		t.Fatal("WithAttrs should return a new handler")
-	}
-	if withAttrs.WithGroup("ignored") != withAttrs {
-		t.Fatal("WithGroup should return same handler")
-	}
-	rec := slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0)
-	if err := withAttrs.Handle(context.Background(), rec); err != nil {
-		t.Fatalf("Handle error: %v", err)
-	}
-	data, err := os.ReadFile(inf.Name())
-	if err != nil {
-		t.Fatalf("read info: %v", err)
-	}
-	if !strings.Contains(string(data), "hello") || !strings.Contains(string(data), "k=v") {
-		t.Fatalf("info log=%s", data)
-	}
-
-	nilSink := &tuiLogSink{mu: &sync.Mutex{}}
-	if err := nilSink.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "drop", 0)); err != nil {
-		t.Fatalf("nil Handle error: %v", err)
-	}
-
-	origSync := fileSync
-	t.Cleanup(func() { fileSync = origSync })
-	fileSync = func(*os.File) error { return errors.New("sync failed") }
-	if err := sink.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "hello", 0)); err == nil {
-		t.Fatal("expected sync error")
-	}
-
-	closed := createTempLog(t)
-	_ = closed.Close()
-	closedSink := &tuiLogSink{mu: &sync.Mutex{}, infF: closed}
-	if err := closedSink.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "closed", 0)); err == nil {
-		t.Fatal("expected handle error")
-	}
+	return matched
 }
 
-func TestStdLogWriter(t *testing.T) {
-	inf := createTempLog(t)
-	errf := createTempLog(t)
-	defer closeFiles(nil, inf, errf)
-	w := tuiStdLogWriter{s: &tuiLogSink{mu: &sync.Mutex{}, infF: inf, errF: errf}}
-
-	n, err := w.Write([]byte("hello\n"))
-	if err != nil || n != len("hello\n") {
-		t.Fatalf("write n=%d err=%v", n, err)
-	}
-	n, err = w.Write([]byte("panic now\n"))
-	if err != nil || n != len("panic now\n") {
-		t.Fatalf("error write n=%d err=%v", n, err)
-	}
-	errData, err := os.ReadFile(errf.Name())
-	if err != nil {
-		t.Fatalf("read err: %v", err)
-	}
-	if !strings.Contains(string(errData), "panic now") {
-		t.Fatalf("error log=%s", errData)
-	}
-
-	nilWriter := tuiStdLogWriter{s: &tuiLogSink{mu: &sync.Mutex{}}}
-	if n, err := nilWriter.Write([]byte("drop")); n != 0 || err != nil {
-		t.Fatalf("nil writer n=%d err=%v", n, err)
-	}
-
-	origSync := fileSync
-	t.Cleanup(func() { fileSync = origSync })
-	fileSync = func(*os.File) error { return errors.New("sync failed") }
-	if _, err := (tuiStdLogWriter{s: &tuiLogSink{mu: &sync.Mutex{}, infF: inf}}).Write([]byte("hello\n")); err == nil {
-		t.Fatal("expected sync error")
-	}
-
-	origWrite := fileWrite
-	t.Cleanup(func() { fileWrite = origWrite })
-	fileWrite = func(*os.File, []byte) (int, error) { return 0, errors.New("write failed") }
-	if _, err := (tuiStdLogWriter{s: &tuiLogSink{mu: &sync.Mutex{}, infF: inf}}).Write([]byte("hello\n")); err == nil {
-		t.Fatal("expected write error")
-	}
-
-	origFileWrite := fileWrite
-	origFileSync := fileSync
-	t.Cleanup(func() {
-		fileWrite = origFileWrite
-		fileSync = origFileSync
-	})
-	fileWrite = func(f *os.File, p []byte) (int, error) {
-		if f != nil && f.Name() == errf.Name() {
-			return 3, errors.New("err write failed")
-		}
-		return len(p), nil
-	}
-	fileSync = func(*os.File) error { return nil }
-	if _, err := (tuiStdLogWriter{s: &tuiLogSink{mu: &sync.Mutex{}, infF: inf, errF: errf}}).Write([]byte("panic now\n")); err == nil {
-		t.Fatal("expected err writer failure")
-	}
-
-	fileWrite = func(f *os.File, p []byte) (int, error) {
-		if f != nil && f.Name() == errf.Name() {
-			return 0, errors.New("err write failed")
-		}
-		return len(p), nil
-	}
-	if _, err := (tuiStdLogWriter{s: &tuiLogSink{mu: &sync.Mutex{}, infF: inf, errF: errf}}).Write([]byte("panic now\n")); err == nil {
-		t.Fatal("expected err writer failure with zero progress")
-	}
-
-	fileWrite = func(f *os.File, p []byte) (int, error) {
-		if f != nil && f.Name() == errf.Name() {
-			return 3, errors.New("err write partial")
-		}
-		return len(p), nil
-	}
-	if _, err := (tuiStdLogWriter{s: &tuiLogSink{mu: &sync.Mutex{}, infF: inf, errF: errf}}).Write([]byte("panic now\n")); err == nil {
-		t.Fatal("expected err writer partial failure")
-	}
-
-	fileWrite = func(f *os.File, p []byte) (int, error) {
-		return len(p), nil
-	}
-	fileSync = func(f *os.File) error {
-		if f != nil && f.Name() == errf.Name() {
-			return errors.New("err sync failed")
-		}
-		return nil
-	}
-	if _, err := (tuiStdLogWriter{s: &tuiLogSink{mu: &sync.Mutex{}, infF: inf, errF: errf}}).Write([]byte("panic now\n")); err == nil {
-		t.Fatal("expected err sync failure")
-	}
-}
-
-func TestCloseFiles(t *testing.T) {
-	origClose := fileClose
-	t.Cleanup(func() { fileClose = origClose })
-	fileClose = func(*os.File) error { return errors.New("close failed") }
-
-	f1 := createTempLog(t)
-	f2 := createTempLog(t)
-	if err := closeFiles(f1, f2, nil); err == nil {
-		t.Fatal("expected close error")
-	}
-}
-
-func TestRedirectProcessLoggingForTUI(t *testing.T) {
+// A WARN record keeps its level: the old sink routed everything from Warn up
+// into error.log, so a warning read as an error there and its level was
+// whatever the file name implied (plans/285 §3).
+func TestRedirectProcessLoggingKeepsTheRecordLevel(t *testing.T) {
 	home := t.TempDir()
 	restore := RedirectProcessLoggingForTUI(home)
-	log.Print("info message")
 	slog.Debug("debug message")
+	slog.Info("info message")
+	slog.Warn("warn message")
 	slog.Error("error message")
 	restore()
 
-	for _, name := range []string{"info.log", "debug.log", "error.log"} {
-		path := filepath.Join(home, "logs", name)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+	for level, msg := range map[string]string{
+		"DEBUG": "debug message",
+		"INFO":  "info message",
+		"WARN":  "warn message",
+		"ERROR": "error message",
+	} {
+		got := eventsWithMsg(t, home, msg)
+		if len(got) != 1 {
+			t.Fatalf("%s: records = %v, want exactly one", msg, got)
 		}
-		if len(data) == 0 {
-			t.Fatalf("%s empty", name)
+		if got[0]["lvl"] != level {
+			t.Fatalf("%s: lvl = %v, want %s", msg, got[0]["lvl"], level)
+		}
+		if got[0]["kind"] != "log" {
+			t.Fatalf("%s: kind = %v, want log", msg, got[0]["kind"])
 		}
 	}
+}
 
+// A standard library line is one INFO record tagged via=stdlog — never a second
+// copy, and never an ERROR because of a word it happens to contain.
+func TestStdLogLinesBecomeOneInfoRecord(t *testing.T) {
+	home := t.TempDir()
+	restore := RedirectProcessLoggingForTUI(home)
+	log.Printf("x failed")
+	restore()
+
+	got := eventsWithMsg(t, home, "x failed")
+	if len(got) != 1 {
+		t.Fatalf("records = %v, want exactly one", got)
+	}
+	rec := got[0]
+	if rec["lvl"] != "INFO" || rec["kind"] != "log" {
+		t.Fatalf("record = %v, want INFO/log", rec)
+	}
+	attrs, _ := rec["attrs"].(map[string]any)
+	if attrs["via"] != "stdlog" {
+		t.Fatalf("attrs = %v, want via=stdlog", rec["attrs"])
+	}
+	for _, other := range readEvents(t, home) {
+		if other["lvl"] == "ERROR" {
+			t.Fatalf("a standard library line must not also be an ERROR record: %v", other)
+		}
+	}
+}
+
+// The descriptor-level stderr keeps going to a file of this process's own: a
+// crash's output cannot be made into a record, so it stays raw text in the day
+// directory beside the records (plans/285 non-functional: robustness).
+func TestRedirectProcessLoggingKeepsRawStderr(t *testing.T) {
+	home := t.TempDir()
+	origAttach := attachStderr
+	t.Cleanup(func() { attachStderr = origAttach })
+	var attached string
+	attachStderr = func(path string) func() {
+		attached = path
+		return func() {}
+	}
+	restore := RedirectProcessLoggingForTUI(home)
+	restore()
+
+	if attached == "" {
+		t.Fatal("the process stderr must be attached to a file")
+	}
+	if dir := filepath.Dir(attached); dir != filepath.Join(home, "logs", time.Now().Format("2006-01-02")) {
+		t.Fatalf("stderr file = %q, want it in the day directory the records use", attached)
+	}
+	base := filepath.Base(attached)
+	if !strings.HasPrefix(base, "stderr-tui-") || !strings.HasSuffix(base, ".log") {
+		t.Fatalf("stderr file = %q, want stderr-tui-<host>-<pid>-<proc>.log", base)
+	}
+}
+
+// An unusable home turns logging off instead of failing the launch, and a
+// directory that cannot be created is the same case.
+func TestRedirectProcessLoggingFallsBackToDiscard(t *testing.T) {
 	discardRestore := RedirectProcessLoggingForTUI("")
 	log.Print("discarded")
 	discardRestore()
@@ -11847,48 +11773,6 @@ func TestRedirectProcessLoggingForTUI(t *testing.T) {
 		t.Cleanup(func() { mkdirAll = origMkdirAll })
 		mkdirAll = func(string, os.FileMode) error { return errors.New("mkdir failed") }
 		restore := RedirectProcessLoggingForTUI(" " + t.TempDir() + " ")
-		restore()
-	})
-
-	t.Run("open third file fails and close fails", func(t *testing.T) {
-		origOpenFile := openFile
-		origClose := fileClose
-		t.Cleanup(func() {
-			openFile = origOpenFile
-			fileClose = origClose
-		})
-		call := 0
-		openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-			call++
-			if call == 3 {
-				return nil, errors.New("open failed")
-			}
-			return os.OpenFile(name, flag, perm)
-		}
-		fileClose = func(*os.File) error { return errors.New("close failed") }
-		restore := RedirectProcessLoggingForTUI(t.TempDir())
-		restore()
-	})
-
-	t.Run("open third file fails and close succeeds", func(t *testing.T) {
-		origOpenFile := openFile
-		origClose := fileClose
-		t.Cleanup(func() {
-			openFile = origOpenFile
-			fileClose = origClose
-		})
-		call := 0
-		openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-			call++
-			if call == 3 {
-				return nil, errors.New("open failed")
-			}
-			return os.OpenFile(name, flag, perm)
-		}
-		fileClose = func(f *os.File) error {
-			return f.Close()
-		}
-		restore := RedirectProcessLoggingForTUI(t.TempDir())
 		restore()
 	})
 }

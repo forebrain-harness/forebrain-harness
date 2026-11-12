@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
 	"github.com/forebrain-harness/forebrain-harness/pkg/channel"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
@@ -287,6 +288,25 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	llm.SetHTTPTransportWrapper(telemetry.WrapLLMHTTPTransport)
 	llm.SetDebugLogger(telemetry.LogProviderDebug)
 	skill.SetAuthoredSkillSource(memory.ListAuthoredSkillsForWorkspace)
+	// Every record names who it belongs to. telemetry cannot import tool or
+	// agent (both sit above it), so the scope a context already carries is
+	// read here and handed over once per process (plan 285). worker is empty
+	// when the subagent's transcript session is the conversation's own: the
+	// two fields would then say the same thing twice.
+	telemetry.RegisterScope(func(ctx context.Context) telemetry.Scope {
+		conv := tool.ConversationSessionIDFromContext(ctx)
+		worker := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
+		if worker == conv {
+			worker = ""
+		}
+		return telemetry.Scope{
+			Project: tool.ProjectKeyFromContext(ctx),
+			Session: conv,
+			Worker:  worker,
+			Run:     tool.RunIDFromContext(ctx),
+			Agent:   agent.NameFromContext(ctx),
+		}
+	})
 
 	opts := OpenOptions{}
 	if len(options) > 0 {
