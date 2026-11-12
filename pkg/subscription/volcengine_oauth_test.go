@@ -113,7 +113,8 @@ func TestVolcengineDevicePollWaitsOutTheIntervalAndTakesTheCredential(t *testing
 	tokenForms := stub.formsFor(volcengineTokenPath)
 	require.Len(t, tokenForms, 3)
 	for _, form := range tokenForms {
-		require.Equal(t, "device_code", form.Get("grant_type"))
+		require.Equal(t, "urn:ietf:params:oauth:grant-type:device_code", form.Get("grant_type"),
+			"the console refuses the bare \"device_code\" spelling")
 		require.Equal(t, "device-code-1", form.Get("device_code"))
 		require.Equal(t, volcengineClientID, form.Get("client_id"))
 	}

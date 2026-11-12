@@ -226,7 +226,7 @@ func (c *volcengineSignIn) poll(ctx context.Context, device volcengineDeviceAuth
 		if err := c.sleep(ctx, wait); err != nil {
 			return volcengineCredential{}, err
 		}
-		token, err := c.exchange(ctx, volcengineTokenPath, volcengineTokenForm("device_code", device.DeviceCode))
+		token, err := c.exchange(ctx, volcengineTokenPath, volcengineTokenForm(volcengineDeviceCodeGrant, device.DeviceCode))
 		if err == nil {
 			return credentialFromToken(token, c.now())
 		}
@@ -293,6 +293,11 @@ func (c *volcengineSignIn) refresh(ctx context.Context, current volcengineCreden
 	}
 	return renewed, nil
 }
+
+// volcengineDeviceCodeGrant is the grant_type a device-code poll sends. RFC 8628
+// names it in full, and the console refuses the bare "device_code" spelling with
+// invalid_request (measured against the live endpoint, 2026-11-13).
+const volcengineDeviceCodeGrant = "urn:ietf:params:oauth:grant-type:device_code"
 
 // volcengineTokenForm is the token endpoint's form for one grant: the grant, its
 // one input, and the client the flow belongs to.
