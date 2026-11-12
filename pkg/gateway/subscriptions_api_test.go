@@ -21,6 +21,7 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	chatGPT.state = turn.SignInCheck{State: turn.SignInUsable}
 	chatGPT.offers = []subscription.Offer{{
 		Provider: "chatgpt", Model: "gpt-5-codex", BaseURL: "https://chatgpt.com/backend-api/codex", Default: true,
+		KeyRequired: true, FromStaticList: true,
 	}}
 	previous := gatewaySubscriptions
 	gatewaySubscriptions = func() []subscription.Subscription { return []subscription.Subscription{chatGPT} }
@@ -43,15 +44,20 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	rec = do(http.MethodGet, "/api/subscriptions/chatgpt/offers")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var offers []struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
-		Endpoint string `json:"endpoint"`
-		Default  bool   `json:"default"`
+		Provider       string `json:"provider"`
+		Model          string `json:"model"`
+		Endpoint       string `json:"endpoint"`
+		Default        bool   `json:"default"`
+		NeedsKey       bool   `json:"needs_key"`
+		FromStaticList bool   `json:"from_static_list"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &offers))
 	require.Len(t, offers, 1)
 	require.Equal(t, "https://chatgpt.com/backend-api/codex", offers[0].Endpoint)
 	require.True(t, offers[0].Default)
+	// The two facts a plan that asks for a pasted key adds (plan 281).
+	require.True(t, offers[0].NeedsKey)
+	require.True(t, offers[0].FromStaticList)
 
 	// A row the subscription never listed cannot be written through it.
 	rec = do(http.MethodPost, "/api/subscriptions/chatgpt/provision",
@@ -89,6 +95,45 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 		`{"offers":[{"provider":"chatgpt","model":"gpt-5-codex","base_url":"https://chatgpt.com/backend-api/codex"}]}`)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	require.Contains(t, rec.Body.String(), `"needs_key_consent":true`)
+
+	// A plan whose key the user pastes asks for one, naming the plan and where
+	// the key comes from, and the key the page sends is what the subscription
+	// was told (plan 281).
+	chatGPT.provisionErr = subscription.ErrPlanKeyRequired{
+		Plan: "coding-plan", PlanLabel: "Coding Plan", ConsoleURL: "https://console.example.test/apiKey",
+	}
+	rec = do(http.MethodPost, "/api/subscriptions/chatgpt/provision",
+		`{"offers":[{"provider":"chatgpt","model":"gpt-5-codex","base_url":"https://chatgpt.com/backend-api/codex"}],"key":"ark-pasted-placeholder"}`)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var needKey struct {
+		Error    string `json:"error"`
+		NeedsKey bool   `json:"needs_key"`
+		Plan     string `json:"plan"`
+		Console  string `json:"console_url"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &needKey))
+	require.True(t, needKey.NeedsKey)
+	require.Equal(t, "coding-plan", needKey.Plan)
+	require.Equal(t, "https://console.example.test/apiKey", needKey.Console)
+	require.NotContains(t, rec.Body.String(), "ark-pasted-placeholder")
+
+	// A row only a person can re-key says so instead of "the sign-in is the
+	// credential".
+	chatGPT.provisionErr = subscription.ErrKeyPasted
+	rec = do(http.MethodPost, "/api/subscriptions/chatgpt/provision",
+		`{"offers":[{"provider":"chatgpt","model":"gpt-5-codex","base_url":"https://chatgpt.com/backend-api/codex"}]}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "重新粘一次")
+
+	// The key the page sends reaches the subscription's own write.
+	chatGPT.provisionErr = nil
+	rec = do(http.MethodPost, "/api/subscriptions/chatgpt/provision",
+		`{"offers":[{"provider":"chatgpt","model":"gpt-5-codex","base_url":"https://chatgpt.com/backend-api/codex"}],"key":"ark-pasted-placeholder"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	chatGPT.mu.Lock()
+	sent := chatGPT.provisions[len(chatGPT.provisions)-1]
+	chatGPT.mu.Unlock()
+	require.Equal(t, "ark-pasted-placeholder", sent.Key)
 
 	require.Equal(t, http.StatusNotFound, do(http.MethodGet, "/api/subscriptions/zhipuai/offers").Code)
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/stretchr/testify/require"
 )
 
@@ -348,6 +349,14 @@ func TestLLMModelsAPISubscriptionRowIsAdvancedOnly(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	require.Contains(t, rec.Body.String(), "登录就是凭据")
 	require.Equal(t, []string{id}, chatGPT.refreshed)
+
+	// A row whose key the user pastes says so: refreshing it means pasting a
+	// new one, which is not "the sign-in is the credential" (plan 281).
+	chatGPT.refreshErr = subscription.ErrKeyPasted
+	rec = do(http.MethodPost, "/api/llm-models/"+id+"/refresh-key")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "重新粘一次")
+	require.NotContains(t, rec.Body.String(), "登录就是凭据")
 
 	// A plan that does hold a key answers with the fresh row.
 	chatGPT.refreshErr = nil

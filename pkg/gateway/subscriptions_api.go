@@ -69,11 +69,13 @@ type subscriptionOffer struct {
 	ContextWindow  int64  `json:"context_window,omitempty"`
 	SupportsImages bool   `json:"supports_images"`
 	Default        bool   `json:"default"`
+	// NeedsKey marks a plan whose row carries an API key the user pastes from the
+	// vendor's console (plan 281): the sign-in proved the plan, and no API hands
+	// the key over, so the page asks for it before the write.
+	NeedsKey bool `json:"needs_key"`
 	// FromStaticList marks an offer a subscription knows from a shipped table
 	// rather than from the vendor's own list, so the page can say the console is
-	// the authority. No subscription today offers them that way: the shape is
-	// here because the page reads it, and each subscription that grows a static
-	// table (plan 281) fills it in.
+	// the authority.
 	FromStaticList bool `json:"from_static_list"`
 }
 
@@ -180,6 +182,8 @@ func (s *Server) handleSubscriptionOffers(w http.ResponseWriter, r *http.Request
 			ContextWindow:  offer.ContextWindow,
 			SupportsImages: offer.SupportsImages,
 			Default:        offer.Default,
+			NeedsKey:       offer.KeyRequired,
+			FromStaticList: offer.FromStaticList,
 		})
 	}
 	writeJSON(w, out)
@@ -211,6 +215,10 @@ func (s *Server) handleSubscriptionProvision(w http.ResponseWriter, r *http.Requ
 		} `json:"offers"`
 		KeyID     string `json:"key_id"`
 		CreateKey bool   `json:"create_key"`
+		// Key is the API key a plan asks the user to paste (plan 281). It is
+		// forwarded to the subscription and stored on the row it writes; it is
+		// never logged and never echoed back.
+		Key string `json:"key"`
 	}
 	if !decodeLLMModelBody(w, r, &body) {
 		return
@@ -246,7 +254,11 @@ func (s *Server) handleSubscriptionProvision(w http.ResponseWriter, r *http.Requ
 	// read before the rows land, so a first kit of models leaves a default
 	// behind (the rule plan 262's setup follows).
 	agentID, hadDefault := s.subscriptionDefaultTarget(r.Context())
-	opts := subscription.ProvisionOptions{KeyID: strings.TrimSpace(body.KeyID), CreateKey: body.CreateKey}
+	opts := subscription.ProvisionOptions{
+		Key:       strings.TrimSpace(body.Key),
+		KeyID:     strings.TrimSpace(body.KeyID),
+		CreateKey: body.CreateKey,
+	}
 	ids, err := sub.Provision(r.Context(), env, chosen, opts)
 	if err != nil {
 		s.failSubscriptionWrite(w, r, err)
@@ -355,6 +367,26 @@ func (s *Server) failSubscriptionWrite(w http.ResponseWriter, r *http.Request, e
 	if errors.Is(err, subscription.ErrNoKeyToRefresh) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]any{
 			"error": llmText(r, "这个订阅不存 Key，登录就是凭据", "this subscription stores no key: the sign-in is the credential"),
+		})
+		return
+	}
+	var needsKey subscription.ErrPlanKeyRequired
+	if errors.As(err, &needsKey) {
+		// The plan is named in the offers' own vocabulary, so the page can point
+		// at the group that asks; the console is where the key is copied from.
+		writeJSONStatus(w, http.StatusConflict, map[string]any{
+			"error": llmText(r, "这个套餐的 Key 需要你从控制台复制后填进来",
+				"this plan's key is copied from the vendor's console and pasted here"),
+			"needs_key":   true,
+			"plan":        needsKey.Plan,
+			"console_url": needsKey.ConsoleURL,
+		})
+		return
+	}
+	if errors.Is(err, subscription.ErrKeyPasted) {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{
+			"error": llmText(r, "这个套餐的 Key 是手填的，重新粘一次即可",
+				"this plan's key is pasted by hand; paste a new one"),
 		})
 		return
 	}

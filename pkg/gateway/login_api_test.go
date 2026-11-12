@@ -134,9 +134,11 @@ type loginSubscription struct {
 
 	mu sync.Mutex
 	// starts counts the flows begun, refreshed the rows RefreshKey was asked
-	// about.
-	starts    int
-	refreshed []string
+	// about, and provisions is what each write was told (plan 281's pasted key
+	// arrives through it).
+	starts     int
+	refreshed  []string
+	provisions []subscription.ProvisionOptions
 }
 
 // newLoginSubscription builds one stand-in at its defaults: a sign-in with no
@@ -186,7 +188,10 @@ func (sub *loginSubscription) Offers(context.Context, subscription.Env) ([]subsc
 // per offer, under this sign-in's source — so the default-model rule and the row
 // shape are exercised rather than mocked.
 func (sub *loginSubscription) Provision(ctx context.Context, env subscription.Env,
-	offers []subscription.Offer, _ subscription.ProvisionOptions) ([]string, error) {
+	offers []subscription.Offer, opts subscription.ProvisionOptions) ([]string, error) {
+	sub.mu.Lock()
+	sub.provisions = append(sub.provisions, opts)
+	sub.mu.Unlock()
 	if sub.provisionErr != nil {
 		return nil, sub.provisionErr
 	}
