@@ -1472,6 +1472,11 @@ export interface LlmModelChoice {
   endpoint: string
   label: string
   efforts: string[]
+  /** The level this row itself is configured with (`default_effort`, plan 300).
+   *  A picker that overrides one type's level shows it as what the row gets
+   *  when it names none (plan 299); absent or empty means the row has no
+   *  configured default. */
+  defaultEffort?: string
   supportsImages: boolean
 }
 

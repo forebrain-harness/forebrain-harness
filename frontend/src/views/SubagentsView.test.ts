@@ -148,7 +148,7 @@ describe('SubagentsView', () => {
     expect(heads[4].classes()).toContain('text-center')
     expect(wrapper.find('[data-testid="table-pager"]').text()).toContain('共 3 条')
     expect(wrapper.find('p.forebrain-list-note').text()).toBe(
-      '“内置”与“自定义”的子代理启用后由模型按说明派发；“系统”子代理在计划审阅、/goal、自动审批等场合由系统调用，只能查看。保存在 forebrain.yaml，新会话生效。',
+      '“内置”与“自定义”的子代理启用后由模型按说明派发；“系统”子代理在计划审阅、/goal、自动审批等场合由系统调用，只能查看。修改已保存，新会话生效。',
     )
     // Scoped to the list this trigger opened rather than the document-wide
     // `optionTexts()`: the pager draws a page-size select too, and both render
