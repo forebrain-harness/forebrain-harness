@@ -235,13 +235,12 @@ func TestPersistCancelledTurnRepairsEvenWithNothingToWrite(t *testing.T) {
 }
 
 // TestPersistCancelledTurnReportsARepairFailure pins a real regression: the
-// TUI's cancel path used to log a RepairDanglingToolResults failure
-// (chat_session.go's cancel handler called s.chatLog.Debugf on error) before
-// this logic was shared into PersistCancelledTurn. The shared version dropped
-// the error on the floor with a bare `_, _ =`, so a repair failure on a
-// cancelled turn left no trace anywhere -- worse than before the sharing, not
-// neutral to it. OnRepairError restores the observability without hard-coding
-// either surface's logger.
+// TUI's cancel path used to log a RepairDanglingToolResults failure itself
+// before this logic was shared into PersistCancelledTurn. The shared version
+// dropped the error on the floor with a bare `_, _ =`, so a repair failure on
+// a cancelled turn left no trace anywhere -- worse than before the sharing,
+// not neutral to it. OnRepairError restores the observability without
+// hard-coding either surface's logger.
 func TestPersistCancelledTurnReportsARepairFailure(t *testing.T) {
 	t.Parallel()
 

@@ -206,32 +206,6 @@ func TestWriteSectionWholeDoesNotBound(t *testing.T) {
 	}
 }
 
-func TestLevelLoggerOwnsInfoAndDebugFiles(t *testing.T) {
-	dir := t.TempDir()
-	infoPath := filepath.Join(dir, "info.log")
-	debugPath := filepath.Join(dir, "debug.log")
-	logger, err := OpenLevelLogger(infoPath, debugPath, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger.Infof("info %d", 1)
-	logger.Debugf("debug %d", 2)
-	if err := logger.Close(); err != nil {
-		t.Fatal(err)
-	}
-	infoBody, err := os.ReadFile(infoPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	debugBody, err := os.ReadFile(debugPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(infoBody), "info 1") || !strings.Contains(string(debugBody), "debug 2") {
-		t.Fatalf("info=%q debug=%q", infoBody, debugBody)
-	}
-}
-
 // benchmarkFileWrite exercises the real Open→Write path with a payload of the
 // given size. MaxBytes is set far above what the benchmark can write so the
 // measurement isolates the per-record write cost from rotation work.

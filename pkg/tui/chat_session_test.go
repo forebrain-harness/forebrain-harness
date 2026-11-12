@@ -47,6 +47,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/testutil"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -11775,6 +11776,83 @@ func TestRedirectProcessLoggingFallsBackToDiscard(t *testing.T) {
 		restore := RedirectProcessLoggingForTUI(" " + t.TempDir() + " ")
 		restore()
 	})
+}
+
+// installTUIEventLog points the process's event log at one test's home, the
+// way the TUI's launch does, so a turn's records land somewhere readable.
+func installTUIEventLog(t *testing.T, home string) {
+	t.Helper()
+	prev := telemetry.DefaultEventLog()
+	eventLog := telemetry.OpenEventLog(home, "tui")
+	telemetry.SetDefaultEventLog(eventLog)
+	t.Cleanup(func() {
+		telemetry.SetDefaultEventLog(prev)
+		_ = eventLog.Close()
+	})
+}
+
+// A turn that succeeds writes one "turn completed" record and no "turn
+// failed": the pair this replaces wrote the same sentence twice, once at Info
+// and once at Debug (plans/285 §2).
+func TestSuccessfulTurnRecordsOneCompleted(t *testing.T) {
+	s := newCharacterizationSession(t, scriptedLLM{text: "hello there"})
+	installTUIEventLog(t, s.Env.Root)
+	const sessionID = "one-completed"
+	if err := s.Env.Deps.SessionStore.Ensure(context.Background(), sessionID, sessionID); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := s.DispatchSurfaceTurn(context.Background(), turn.TurnSubmission{
+		SessionID: sessionID, UserText: "hi",
+	}); err != nil {
+		t.Fatalf("DispatchSurfaceTurn: %v", err)
+	}
+
+	if got := eventsWithMsg(t, s.Env.Root, "turn started"); len(got) != 1 {
+		t.Fatalf("turn started = %v, want exactly one", got)
+	}
+	completed := eventsWithMsg(t, s.Env.Root, "turn completed")
+	if len(completed) != 1 {
+		t.Fatalf("turn completed = %v, want exactly one", completed)
+	}
+	if completed[0]["kind"] != "turn" || completed[0]["lvl"] != "INFO" {
+		t.Fatalf("record = %v, want an INFO turn record", completed[0])
+	}
+	if completed[0]["session"] != sessionID {
+		t.Fatalf("session = %v, want %q", completed[0]["session"], sessionID)
+	}
+	if got := eventsWithMsg(t, s.Env.Root, "turn failed"); len(got) != 0 {
+		t.Fatalf("a successful turn wrote a failure record: %v", got)
+	}
+}
+
+// A turn the provider fails writes one "turn failed" record, at ERROR, with
+// the error's own text — again one, where the pair this replaces wrote two.
+func TestFailedTurnRecordsOneFailure(t *testing.T) {
+	s := newCharacterizationSession(t, erroringStreamingLLM{err: errors.New("connection reset by peer")})
+	installTUIEventLog(t, s.Env.Root)
+	const sessionID = "one-failed"
+	if err := s.Env.Deps.SessionStore.Ensure(context.Background(), sessionID, sessionID); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := s.DispatchSurfaceTurn(context.Background(), turn.TurnSubmission{
+		SessionID: sessionID, UserText: "look something up",
+	}); err == nil {
+		t.Fatal("a provider failure must reach the caller")
+	}
+
+	failed := eventsWithMsg(t, s.Env.Root, "turn failed")
+	if len(failed) != 1 {
+		t.Fatalf("turn failed = %v, want exactly one", failed)
+	}
+	if failed[0]["kind"] != "turn" || failed[0]["lvl"] != "ERROR" {
+		t.Fatalf("record = %v, want an ERROR turn record", failed[0])
+	}
+	if got, _ := failed[0]["err"].(string); !strings.Contains(got, "connection reset by peer") {
+		t.Fatalf("err = %q, want the provider's error", got)
+	}
+	if got := eventsWithMsg(t, s.Env.Root, "turn completed"); len(got) != 0 {
+		t.Fatalf("a failed turn wrote a completion record: %v", got)
+	}
 }
 
 func TestSlogLevelForTUILogFile(t *testing.T) {

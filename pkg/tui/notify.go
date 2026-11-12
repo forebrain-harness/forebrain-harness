@@ -1665,14 +1665,8 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 	if err != nil {
 		return nil, err
 	}
-	log, err := newChatDiskLog(env.Root)
-	if err != nil {
-		env.Close()
-		return nil, err
-	}
 	runner := env.Runner
 	if runner == nil || env.Deps.SessionStore == nil || env.Hooks == nil {
-		log.Close()
 		env.Close()
 		return nil, fmt.Errorf("process environment is incomplete")
 	}
@@ -1684,7 +1678,6 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 		Core:          turn.New(turn.WithSessionStore(env.Deps.SessionStore), turn.WithSessionSource(memory.SessionSourceTUI)),
 		WorkingDir:    strings.TrimSpace(cwd),
 		LaunchProject: env.LaunchProject,
-		chatLog:       log,
 	}
 	s.Core = turn.New(
 		turn.WithSessionStore(env.Deps.SessionStore),

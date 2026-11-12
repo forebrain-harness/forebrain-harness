@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -621,9 +623,8 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 		Model:     cliResultModel(s, sessionID),
 		End:       completion.runEnd(),
 		OnSequenceError: func(err error) {
-			if s.chatLog != nil {
-				s.chatLog.Errorf("forebrain chat append_assistant_outcome session=%s run=%s failed: %v", sessionID, runID, err)
-			}
+			telemetry.Emit(context.Background(), slog.LevelError, "log", "append assistant outcome failed",
+				slog.String("session", sessionID), slog.String("run", runID), slog.Any("err", err))
 		},
 	})
 	// The run's end, as the gateway records its own: the clock the worked line
@@ -635,11 +636,11 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 	}
 	hideFromForeground := false
 	elapsed := completion.Duration
-	if s.chatLog != nil {
-		s.chatLog.Infof("forebrain chat turn ok session=%s assistant_bytes=%d elapsed=%s", sessionID, len(outText), elapsed)
-		ot := llm.TruncateBytes(outText, 512, "...")
-		s.chatLog.Debugf("forebrain chat turn ok session=%s assistant_bytes=%d elapsed=%s preview=%q", sessionID, len(outText), elapsed, ot)
-	}
+	// One record for a finished turn, not two: the pair this replaces wrote
+	// "turn ok" at Info and again at Debug (plan 285 §2).
+	telemetry.Emit(context.Background(), slog.LevelInfo, "turn", "turn completed",
+		slog.String("session", sessionID), slog.Int("assistant_bytes", len(outText)),
+		slog.String("elapsed", elapsed.String()), slog.String("preview", llm.TruncateBytes(outText, 512, "...")))
 	if strings.TrimSpace(outText) != "" && !streamAssistantViaTUI && !hideFromForeground {
 		if reasoningText != "" {
 			s.notifyUIForSession(sessionID, NewMessageMsg{Msg: Message{
@@ -722,9 +723,8 @@ func (s *ChatSession) resumeAfterApproval(actionID string) bool {
 	}
 	p := s.takePendingApprovalForAction(actionID)
 	if p == nil {
-		if s.chatLog != nil {
-			s.chatLog.DebugForceFlushf("forebrain tui tool_approval resumeAfterApproval skipped action_id=%s (no matching pending state and no fb_run_waits row)", actionID)
-		}
+		telemetry.Emit(context.Background(), slog.LevelDebug, "log", "resume after approval skipped",
+			slog.String("action_id", actionID))
 		return false
 	}
 	if !s.tuiController().ClaimResume(p.RunID, p.SessionID) {
@@ -954,9 +954,9 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 			OutputTokens:   runUsage.out,
 		})
 	}()
-	if s.chatLog != nil {
-		s.chatLog.Debugf("forebrain chat %s session=%s run_id=%s action_id=%s", v.logLabel, p.SessionID, p.RunID, actionID)
-	}
+	telemetry.Emit(context.Background(), slog.LevelDebug, "turn", "turn resumed",
+		slog.String("label", v.logLabel), slog.String("session", p.SessionID),
+		slog.String("run", p.RunID), slog.String("action_id", actionID))
 	if !v.denied && !v.stopped && s.actionSvc() != nil && s.runner() != nil {
 		if act, aerr := s.actionSvc().Get(context.Background(), actionID); aerr == nil && act != nil && act.Status == state.ActionApproved {
 			service := turn.ApprovalService{Actions: s.actionSvc(), Policy: s.runner()}
@@ -1060,9 +1060,9 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		// stopped it: the refusal results are already written, so this is a
 		// cancel's finish — no error card, the run ends cancelled (plan 129).
 		if errors.Is(err, context.Canceled) || errors.Is(err, run.ErrTurnStoppedByRejection) {
-			if s.chatLog != nil {
-				s.chatLog.Infof("forebrain chat %s cancelled session=%s elapsed=%s", v.logLabel, p.SessionID, time.Since(t0))
-			}
+			telemetry.Emit(context.Background(), slog.LevelInfo, "turn", "turn cancelled",
+				slog.String("label", v.logLabel), slog.String("session", p.SessionID),
+				slog.String("elapsed", time.Since(t0).String()))
 			// Persist any tool result replayed during this resume (e.g. an
 			// approved exit_plan_mode) before discarding the cancelled run.
 			// persistRequiresActionSnapshot left a dangling tool_calls row in
@@ -1085,9 +1085,9 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		// additional tool calls/results produced after the replay).
 		s.persistReplayResults(p.SessionID, runUsage.runID, replayCapture)
 		s.persistCancelledTurnOutcome(p.SessionID, runUsage.runID, completion)
-		if s.chatLog != nil {
-			s.chatLog.Errorf("forebrain chat %s error session=%s elapsed=%s err=%v", v.logLabel, p.SessionID, time.Since(t0), err)
-		}
+		telemetry.Emit(context.Background(), slog.LevelError, "turn", "turn failed",
+			slog.String("label", v.logLabel), slog.String("session", p.SessionID),
+			slog.String("elapsed", time.Since(t0).String()), slog.Any("err", err))
 		explained := llm.ExplainError(err)
 		s.notifyUI(NewMessageMsg{Msg: Message{
 			Kind:      MsgKindError,
@@ -1111,9 +1111,8 @@ func (s *ChatSession) resumeAfterDenial(actionID string) bool {
 	}
 	p := s.takePendingApprovalForAction(actionID)
 	if p == nil {
-		if s.chatLog != nil {
-			s.chatLog.DebugForceFlushf("forebrain tui tool_approval resumeAfterDenial skipped action_id=%s (no matching pending state)", actionID)
-		}
+		telemetry.Emit(context.Background(), slog.LevelDebug, "log", "resume after denial skipped",
+			slog.String("action_id", actionID))
 		return false
 	}
 	if !s.tuiController().ClaimResume(p.RunID, p.SessionID) {
@@ -1156,9 +1155,8 @@ func (s *ChatSession) resumeAfterRejectedStop(actionID string) bool {
 	// nothing to record the refusal on: report false so the dispatch falls
 	// back to the direct cancel those rows always had.
 	if p == nil || len(p.SessionSnapshot) == 0 {
-		if s.chatLog != nil {
-			s.chatLog.DebugForceFlushf("forebrain tui tool_approval resumeAfterRejectedStop skipped action_id=%s (no snapshot to record the refusal on)", actionID)
-		}
+		telemetry.Emit(context.Background(), slog.LevelDebug, "log", "resume after rejected stop skipped",
+			slog.String("action_id", actionID))
 		return false
 	}
 	if !s.tuiController().ClaimResume(p.RunID, p.SessionID) {
@@ -1367,9 +1365,9 @@ func (s *ChatSession) abortPendingApproval(sessionID, actionID string) bool {
 			})
 		}
 	}
-	if s.chatLog != nil {
-		s.chatLog.DebugForceFlushf("forebrain tui tool_approval abort action_id=%s run_id=%s cancel_active=%t", actionID, runID, cancelledActive)
-	}
+	telemetry.Emit(context.Background(), slog.LevelDebug, "log", "tool approval aborted",
+		slog.String("action_id", actionID), slog.String("run", runID),
+		slog.Bool("cancel_active", cancelledActive))
 	return p != nil || runID != "" || cancelledActive
 }
 

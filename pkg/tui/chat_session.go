@@ -78,7 +78,6 @@ type ChatSession struct {
 	// and new sessions are born under it. Empty when the surface has no
 	// project registry (a bare test fixture).
 	ProjectID string
-	chatLog   *chatDiskLog
 	tuiMu     sync.Mutex
 	uiNotify  func(any)
 	// uiSessionID is the conversation this surface is currently looking at.
@@ -983,12 +982,6 @@ func (s *ChatSession) Close() error {
 		s.stopPeers = nil
 	}
 	var errs []error
-	if s.chatLog != nil {
-		if err := s.chatLog.Close(); err != nil {
-			errs = append(errs, err)
-		}
-		s.chatLog = nil
-	}
 	if s.Env != nil {
 		s.Env.Close()
 		s.Env = nil
@@ -1912,10 +1905,14 @@ func (s *ChatSession) ApproveCallback() ApproveFn {
 	}
 	return func(sub ApprovalSubmit) {
 		actionID := strings.TrimSpace(sub.ActionID)
-		if s.chatLog != nil {
-			s.chatLog.DebugForceFlushf("forebrain tui tool_approval ui_submit approved=%t cancelled=%t key_chord=%q action_id=%s policy_kind=%q reason=%q detail_preview=%q",
-				sub.Approved, sub.Cancelled, sub.KeyChord, actionID, strings.TrimSpace(sub.PolicyKind), strings.TrimSpace(sub.Reason), strings.TrimSpace(sub.DetailPreview))
-		}
+		telemetry.Emit(context.Background(), slog.LevelDebug, "log", "tool approval submitted",
+			slog.Bool("approved", sub.Approved),
+			slog.Bool("cancelled", sub.Cancelled),
+			slog.String("key_chord", sub.KeyChord),
+			slog.String("action_id", actionID),
+			slog.String("policy_kind", strings.TrimSpace(sub.PolicyKind)),
+			slog.String("reason", strings.TrimSpace(sub.Reason)),
+			slog.String("detail_preview", strings.TrimSpace(sub.DetailPreview)))
 		decision := turn.ToolApprovalDecision{Approved: sub.Approved, Cancelled: sub.Cancelled, DenyReason: sub.Reason, AskAnswerJSON: sub.AskAnswerJSON}
 		if err := s.completeSurfaceApproval(context.Background(), actionID, decision, &sub); err != nil {
 			s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: fmt.Sprintf("tool approval failed: %v", err), Timestamp: time.Now()}})
@@ -2227,9 +2224,8 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, compl
 		Model:             cliResultModel(s, sessionID),
 		End:               completion.runEnd(),
 		OnRepairError: func(err error) {
-			if s.chatLog != nil {
-				s.chatLog.Debugf("forebrain chat dangling tool_calls repair failed session=%s err=%v", sessionID, err)
-			}
+			telemetry.Emit(context.Background(), slog.LevelWarn, "log", "dangling tool calls repair failed",
+				slog.String("session", sessionID), slog.Any("err", err))
 		},
 	})
 }
@@ -2295,18 +2291,16 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		// The user sees one sentence saying what is and is not true; the store's
 		// own error text is a transport detail and belongs in the log, not the
 		// transcript.
-		if s.chatLog != nil {
-			s.chatLog.Errorf("forebrain chat withdraw failed session=%s row_id=%d err=%v", sessionID, userRowID, cause)
-		}
+		telemetry.Emit(context.Background(), slog.LevelError, "log", "withdraw failed",
+			slog.String("session", sessionID), slog.Int64("row_id", userRowID), slog.Any("err", cause))
 		retErr = errWithdrawNotDurable
 	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s.chatLog != nil {
-		prev := llm.TruncateBytes(modelText, 512, "...")
-		s.chatLog.Debugf("forebrain chat turn start session=%s channel=%s input_bytes=%d preview=%q", sessionID, channel, len(modelText), prev)
-	}
+	telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn started",
+		slog.String("session", sessionID), slog.String("channel", channel),
+		slog.Int("input_bytes", len(modelText)), slog.String("preview", llm.TruncateBytes(modelText, 512, "...")))
 	if s.hasPendingToolApproval() {
 		return nil
 	}
@@ -2323,11 +2317,11 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	// 'tool_call_id'." Repair the transcript before it is read for this turn.
 	if s.sessStore() != nil {
 		if repaired, rerr := s.sessStore().RepairDanglingToolResults(durable, sessionID); rerr != nil {
-			if s.chatLog != nil {
-				s.chatLog.Debugf("forebrain chat dangling tool_calls repair failed session=%s err=%v", sessionID, rerr)
-			}
-		} else if repaired > 0 && s.chatLog != nil {
-			s.chatLog.Debugf("forebrain chat repaired dangling tool_calls session=%s rows=%d", sessionID, repaired)
+			telemetry.Emit(durable, slog.LevelWarn, "log", "dangling tool calls repair failed",
+				slog.String("session", sessionID), slog.Any("err", rerr))
+		} else if repaired > 0 {
+			telemetry.Emit(durable, slog.LevelInfo, "log", "dangling tool calls repaired",
+				slog.String("session", sessionID), slog.Int("rows", repaired))
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -2340,8 +2334,9 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	// A message whose image the session model refuses sends no request, so
 	// there is nothing to make room for; the next turn compacts as usual.
 	if imageRefusal == nil {
-		if cerr := s.maybeAutoCompactBeforeAppend(ctx, sessionID, channel, modelText, rawInput); cerr != nil && s.chatLog != nil {
-			s.chatLog.Debugf("forebrain chat auto compact skipped session=%s err=%v", sessionID, cerr)
+		if cerr := s.maybeAutoCompactBeforeAppend(ctx, sessionID, channel, modelText, rawInput); cerr != nil {
+			telemetry.Emit(ctx, slog.LevelDebug, "log", "auto compact skipped",
+				slog.String("session", sessionID), slog.Any("err", cerr))
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -2437,8 +2432,10 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		// The message was stored before the engine created the run it starts.
 		// It is that run's first row all the same: a run that ends before
 		// writing anything of its own closes after it on replay.
-		if err := s.sessStore().BindMessageToRun(durable, sessionID, userRowID, runID); err != nil && s.chatLog != nil {
-			s.chatLog.Errorf("forebrain chat bind user row session=%s row_id=%d run=%s failed: %v", sessionID, userRowID, runID, err)
+		if err := s.sessStore().BindMessageToRun(durable, sessionID, userRowID, runID); err != nil {
+			telemetry.Emit(durable, slog.LevelError, "log", "bind user row failed",
+				slog.String("session", sessionID), slog.Int64("row_id", userRowID),
+				slog.String("run", runID), slog.Any("err", err))
 		}
 		// The run's start, in the log both surfaces read: the gateway records
 		// its own turns the same way. The fixed id keeps a continuation past an
@@ -2518,9 +2515,8 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 				s.attachRunWaitForRequiresAction(rid, sessionID, channel, modelText, rae, t0)
 				s.emitPartialAssistantFromRAE(rae, streamAssistantViaTUI)
 				emitRunEnded = shouldEmitRunEndedOnRequiresAction(true)
-				if s.chatLog != nil {
-					s.chatLog.Debugf("forebrain chat turn awaiting approval session=%s run_id=%s action_id=%s", sessionID, rid, rae.ActionID)
-				}
+				telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn awaiting approval",
+					slog.String("session", sessionID), slog.String("run", rid), slog.String("action_id", rae.ActionID))
 				return nil
 			}
 		}
@@ -2531,8 +2527,9 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			// Esc takes a message out of the conversation, and the caller
 			// takes the submission back rather than reporting a failed run.
 			if userRowID > 0 {
-				if werr := s.sessStore().WithdrawUserTurn(durable, sessionID, userRowID); werr != nil && s.chatLog != nil {
-					s.chatLog.Errorf("forebrain chat withdraw refused-turn row session=%s row_id=%d err=%v", sessionID, userRowID, werr)
+				if werr := s.sessStore().WithdrawUserTurn(durable, sessionID, userRowID); werr != nil {
+					telemetry.Emit(durable, slog.LevelError, "log", "withdraw refused-turn row failed",
+						slog.String("session", sessionID), slog.Int64("row_id", userRowID), slog.Any("err", werr))
 				}
 			}
 			return err
@@ -2543,9 +2540,8 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		// refusal results are already written, so this is a cancel's finish —
 		// no error card, the run ends cancelled.
 		if errors.Is(err, context.Canceled) || errors.Is(err, run.ErrTurnStoppedByRejection) {
-			if s.chatLog != nil {
-				s.chatLog.Infof("forebrain chat turn cancelled session=%s elapsed=%s", sessionID, time.Since(t0))
-			}
+			telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn cancelled",
+				slog.String("session", sessionID), slog.String("elapsed", time.Since(t0).String()))
 			// Persist what the user already saw: completed tool calls/results
 			// (from the partial session capture) and the streamed partial
 			// assistant text/reasoning. Without this a cancelled run loses every
@@ -2568,15 +2564,16 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		// would repeat the same news twice.
 		var skillLoadErr *run.ExplicitSkillLoadError
 		if errors.As(err, &skillLoadErr) {
-			if s.chatLog != nil {
-				s.chatLog.Errorf("forebrain chat turn skill load failed session=%s skill=%s elapsed=%s err=%v", sessionID, skillLoadErr.SkillName, time.Since(t0), err)
-			}
+			telemetry.Emit(ctx, slog.LevelError, "turn", "turn failed",
+				slog.String("session", sessionID), slog.String("skill", skillLoadErr.SkillName),
+				slog.String("elapsed", time.Since(t0).String()), slog.Any("err", err),
+				slog.String("reason", "skill_load"))
 			return err
 		}
-		if s.chatLog != nil {
-			s.chatLog.Errorf("forebrain chat turn error session=%s elapsed=%s err=%v", sessionID, time.Since(t0), err)
-			s.chatLog.Debugf("forebrain chat turn error session=%s elapsed=%s err=%v", sessionID, time.Since(t0), err)
-		}
+		// One record for the failure: the pair this replaces wrote the same
+		// sentence twice, once at Error and once at Debug (plan 285 §2).
+		telemetry.Emit(ctx, slog.LevelError, "turn", "turn failed",
+			slog.String("session", sessionID), slog.String("elapsed", time.Since(t0).String()), slog.Any("err", err))
 		explained := llm.ExplainError(err)
 		if !callerRendersReturnedError {
 			s.notifyUI(NewMessageMsg{Msg: Message{
@@ -2956,58 +2953,6 @@ func userShellRunID(command string) string {
 
 func userShellStepID(command string) string {
 	return userShellRunID(command) + ":tool"
-}
-
-type chatDiskLog struct {
-	home string
-	logs *telemetry.LevelLogger
-}
-
-func newChatDiskLog(home string) (*chatDiskLog, error) {
-	dir := filepath.Join(home, homepkg.LogsDir)
-	infoPath := filepath.Join(dir, "info.log")
-	debugPath := filepath.Join(dir, "debug.log")
-	logs, err := telemetry.OpenLevelLogger(infoPath, debugPath, telemetry.Options{})
-	if err != nil {
-		return nil, fmt.Errorf("chat logs: %w", err)
-	}
-	return &chatDiskLog{home: home, logs: logs}, nil
-}
-
-func (l *chatDiskLog) Close() error {
-	if l == nil {
-		return nil
-	}
-	return l.logs.Close()
-}
-
-func (l *chatDiskLog) Errorf(format string, args ...any) {
-	if l == nil {
-		return
-	}
-	err := fmt.Errorf(format, args...)
-	telemetry.ErrorSkip(l.home, err, "chatDiskLog", 1)
-}
-
-func (l *chatDiskLog) Infof(format string, args ...any) {
-	if l == nil {
-		return
-	}
-	l.logs.Infof(format, args...)
-}
-
-func (l *chatDiskLog) Debugf(format string, args ...any) {
-	if l == nil {
-		return
-	}
-	l.logs.Debugf(format, args...)
-}
-
-func (l *chatDiskLog) DebugForceFlushf(format string, args ...any) {
-	if l == nil {
-		return
-	}
-	l.logs.Debugf(format, args...)
 }
 
 // --- panel support (/status, /mcp interactive panels) ---

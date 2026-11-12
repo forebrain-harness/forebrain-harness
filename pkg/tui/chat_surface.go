@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -781,8 +783,9 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 	}
 	if decision.ClearContext {
 		if sid := act.SessionID; sid != "" {
-			if cerr := s.ClearSurfaceSession(ctx, sid); cerr != nil && s.chatLog != nil {
-				s.chatLog.Debugf("forebrain tui tool_approval clear_context failed session=%s err=%v", sid, cerr)
+			if cerr := s.ClearSurfaceSession(ctx, sid); cerr != nil {
+				telemetry.Emit(ctx, slog.LevelWarn, "log", "tool approval clear context failed",
+					slog.String("session", sid), slog.Any("err", cerr))
 			}
 		}
 		s.markPendingApprovalClearedContext(actionID)
@@ -829,9 +832,8 @@ func (s *ChatSession) retryResumeDispatch(actionID, label string, dispatch func(
 			return
 		}
 	}
-	if s.chatLog != nil {
-		s.chatLog.Errorf("forebrain tui tool_approval %s dispatch failed after %d attempts action_id=%s: run left waiting", label, attempts, actionID)
-	}
+	telemetry.Emit(context.Background(), slog.LevelError, "log", "tool approval dispatch failed",
+		slog.String("label", label), slog.Int("attempts", attempts), slog.String("action_id", actionID))
 }
 
 // actionNetworkInline reports whether an action is an inline network
@@ -1248,9 +1250,8 @@ func (s *ChatSession) deliverCompletedPlanReview(ctx context.Context, actionID s
 		return
 	}
 	if err != nil || act == nil {
-		if s.chatLog != nil {
-			s.chatLog.Errorf("forebrain tui plan_review deliver failed action_id=%s err=%v", actionID, err)
-		}
+		telemetry.Emit(ctx, slog.LevelError, "log", "plan review deliver failed",
+			slog.String("action_id", actionID), slog.Any("err", err))
 		return
 	}
 	runID := ""
