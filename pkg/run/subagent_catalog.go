@@ -49,6 +49,11 @@ type SubagentCatalog struct {
 	// projectType is the conversation type this catalog was narrowed to with
 	// ForProjectType; "" means the coding default.
 	projectType string
+	// goalCheck is the settings page's global row for the /goal check (plan
+	// 299). It is kept out of entries on purpose: entries is what ResolvePublic
+	// and ToolPolicy read as "this agent configures that type", and the goal
+	// check must stay undispatchable from a primary agent.
+	goalCheck appcfg.SubagentConfig
 }
 
 // SubagentCatalogFor reads one primary agent's subagent configuration. An
@@ -59,6 +64,10 @@ func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
 	if cfg == nil {
 		return catalog
 	}
+	// The goal check's row is global, so it is carried before — and
+	// independently of — the per-agent definitions below: a primary agent with
+	// no entry of its own (a fresh install's shape) still sees it.
+	catalog.goalCheck = cfg.Agents.GoalEvaluator
 	def, ok := cfg.Agents.Definitions[subagentKey(agentName)]
 	if !ok {
 		return catalog
@@ -159,8 +168,15 @@ func (c SubagentCatalog) Prompt(name string) (string, bool) {
 // configured model pins nothing: the type follows the conversation rather than
 // pinning a run to a model this agent cannot build a client for. The id comes
 // back with the pair, because the same pair may be configured more than once.
+//
+// The /goal check is the one type whose row does not come from this agent's
+// entries but from the settings page's global field (plan 299): its model is
+// the same for every primary agent, and no primary agent configures it.
 func (c SubagentCatalog) Model(name string) (modelID, provider, model, effort string, ok bool) {
 	entry, found := c.entries[subagentKey(name)]
+	if !found && subagentKey(name) == GoalCheckSubagentType {
+		entry, found = c.goalCheck, true
+	}
 	if !found {
 		return "", "", "", "", false
 	}

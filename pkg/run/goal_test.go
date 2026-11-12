@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -11,6 +15,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -730,29 +735,62 @@ func TestContinuationPromptWithoutWhy(t *testing.T) {
 	}
 }
 
-// TestGoalCheckCanBePinnedToAConfiguredRow is a spike / characterization test,
-// not a product feature. It proves that a configured model row pinned on the
-// context alone is adopted by the goal-check subagent with zero production
-// changes: goalCheck.Evaluate -> runGoalCheck -> dispatchSubagent ->
-// prepareSubagentExecutionResolved -> subagentExecContext -> RunSubagentExec.
-// It adds no model parameter, does not change subagentDispatch, and touches no
-// tool definition. The product questions (where the row id comes from, and
-// whether /goal should keep bypassing subagent_allowed) are left to the owner;
-// see plans/297-goal-check-model-row-spike.md. Negative control for the no-pin
-// path is the unchanged TestGoalCheckDispatchesTheEvaluatorSubagent above.
-func TestGoalCheckCanBePinnedToAConfiguredRow(t *testing.T) {
-	probe := &dispatchProbe{}
-	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "pinned"}`}
-	runner := &Runner{Deps: &Deps{Home: t.TempDir()}, Events: probe, SubagentExecutor: executor}
-	pin := SubagentModelOverride{
-		ModelID:  "row-cheap",
-		Provider: "deepseek",
-		Model:    "deepseek-v4-flash",
-	}
-	// The whole point of the spike: the only injection is a context value.
-	ctx := WithSubagentModelOverride(dispatchTestCtx(), pin)
+// The /goal check's row in the tests below: one configured model whose own
+// default effort is "high", chosen on the settings page for every primary
+// agent. The primary agent's own model is a different one on purpose — see
+// goalCheckConfig.
+const (
+	goalCheckRowID       = "llm-goal-check-row"
+	goalCheckRowProvider = "deepseek"
+	goalCheckRowModel    = "deepseek-v4-flash"
+	goalCheckRowEffort   = "high"
+)
 
-	verdict, err := goalCheck{runner: runner}.Evaluate(ctx, "make the tests pass", []RoundOutcome{{Index: 0, Text: "fixed the parser"}})
+// goalCheckConfig is an install whose settings page configured the goal
+// check's row. The primary agent's own model (glm-5.3) is deliberately
+// different, and so is the first row in the install's model table: what the
+// check runs on has to come from the settings field, never from the
+// conversation and never from "whichever row is first".
+func goalCheckConfig() *appcfg.Root {
+	return &appcfg.Root{
+		LLMModels: []appcfg.LLMModelConfig{
+			{
+				ID: "llm-session-row", Provider: "openai", Model: "gpt-4o",
+				BaseURL: "https://api.openai.invalid/v1", APIPath: "/chat/completions", APIKey: "sk-session-row",
+			},
+			{
+				ID:       goalCheckRowID,
+				Provider: goalCheckRowProvider,
+				Model:    goalCheckRowModel,
+				BaseURL:  "https://api.deepseek.invalid",
+				APIPath:  "/chat/completions",
+				APIKey:   "sk-goal-check",
+				Caps:     appcfg.LLMModelCaps{DefaultEffort: goalCheckRowEffort},
+			},
+		},
+		Agents: appcfg.AgentsSection{
+			Definitions: map[string]appcfg.AgentDefinition{
+				"main": {
+					Primary: true,
+					LLMProviders: []appcfg.AgentLLMProviderConfig{
+						{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
+					},
+				},
+			},
+			GoalEvaluator: appcfg.SubagentConfig{Model: goalCheckRowID},
+		},
+	}
+}
+
+// The goal check's model comes from the settings page and nowhere else: one
+// global row for every primary agent, so the check takes the row id, provider
+// and model the configuration names (plan 299, two-level semantics).
+func TestGoalCheckRunsOnTheConfiguredRow(t *testing.T) {
+	probe := &dispatchProbe{}
+	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "configured"}`}
+	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: goalCheckConfig()}, Events: probe, SubagentExecutor: executor}
+
+	verdict, err := goalCheck{runner: runner}.Evaluate(dispatchTestCtx(), "make the tests pass", []RoundOutcome{{Index: 0, Text: "fixed the parser"}})
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
@@ -761,25 +799,223 @@ func TestGoalCheckCanBePinnedToAConfiguredRow(t *testing.T) {
 	}
 
 	// fixedSubagentExecutor.RunSubagentExec (pkg/run/subagent_test.go:2267-2283)
-	// records two distinct facts: `model` = req.Model, and `pinnedModel` =
-	// SubagentModelOverrideFromContext(ctx).Model. The latter is fed directly by
-	// the pin injected on the context, so it is the spike's primary evidence
-	// that a ctx-only pin reaches this goal check unchanged.
-	if executor.pinnedModel != pin.Model {
-		t.Fatalf("goal check pinnedModel = %q, want the injected pin %q", executor.pinnedModel, pin.Model)
+	// records two distinct facts: `model` = req.Model (what the record says) and
+	// `pinnedModel` = the model on the execution's context (what its requests
+	// are routed to). Both are the configured row.
+	if executor.pinnedModel != goalCheckRowModel {
+		t.Fatalf("goal check pinnedModel = %q, want the configured row %q", executor.pinnedModel, goalCheckRowModel)
 	}
-	// req.Model comes from record.Model, which prepareSubagentExecutionResolved
-	// writes from the dispatch-time pin: a second, independent observation that
-	// the configured row was adopted rather than the conversation's model.
-	if executor.model != pin.Model {
-		t.Fatalf("goal check req model = %q, want the injected pin %q", executor.model, pin.Model)
+	if executor.model != goalCheckRowModel {
+		t.Fatalf("goal check req model = %q, want the configured row %q", executor.model, goalCheckRowModel)
 	}
-	// The pin must not turn the check into some other subagent: still exactly
-	// one spawn, still the reserved goal-evaluator type.
+	// The spawn announcement carries the same fact, plus the effort the row's
+	// own default gives it (the settings page stores "" for "follow the row").
 	if len(probe.spawned) != 1 {
 		t.Fatalf("spawned = %+v, want exactly one goal check", probe.spawned)
 	}
-	if probe.spawned[0].AgentType != GoalCheckSubagentType {
-		t.Fatalf("spawned AgentType = %q, want %q", probe.spawned[0].AgentType, GoalCheckSubagentType)
+	if got := probe.spawned[0]; got.AgentType != GoalCheckSubagentType ||
+		got.Provider != goalCheckRowProvider || got.Model != goalCheckRowModel || got.Effort != goalCheckRowEffort {
+		t.Fatalf("spawned %#v, want %s/%s effort %s as %s",
+			got, goalCheckRowProvider, goalCheckRowModel, goalCheckRowEffort, GoalCheckSubagentType)
+	}
+}
+
+// A dispatch-time pin is a caller's choice, and the goal check is not the
+// caller's: /goal takes its model from the settings page, so a pin another
+// caller put on the context (plan 283's approval-card pick, or anything else)
+// reaches no goal check. This is the direct assertion of the owner's two-level
+// decision (plan 299 §1).
+func TestGoalCheckIgnoresADispatchTimeModelPin(t *testing.T) {
+	probe := &dispatchProbe{}
+	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "configured"}`}
+	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: goalCheckConfig()}, Events: probe, SubagentExecutor: executor}
+	// Another configured row, pinned the way the plan review's approval card
+	// pins the user's pick.
+	ctx := WithSubagentModelOverride(dispatchTestCtx(), SubagentModelOverride{
+		ModelID: "llm-approval-card", Provider: "zhipuai", Model: "glm-5.3", Effort: "max",
+	})
+
+	if _, err := (goalCheck{runner: runner}).Evaluate(ctx, "make the tests pass", nil); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if executor.pinnedModel != goalCheckRowModel {
+		t.Fatalf("goal check pinnedModel = %q, want the configured row %q, not the dispatch-time pin",
+			executor.pinnedModel, goalCheckRowModel)
+	}
+	if executor.model != goalCheckRowModel {
+		t.Fatalf("goal check req model = %q, want the configured row %q", executor.model, goalCheckRowModel)
+	}
+	if len(probe.spawned) != 1 || probe.spawned[0].Model != goalCheckRowModel {
+		t.Fatalf("spawned = %+v, want the configured row %q", probe.spawned, goalCheckRowModel)
+	}
+}
+
+// With nothing configured the check keeps the behaviour it has always had: it
+// runs on the conversation's model, resolved through AgentModel ->
+// PrimaryModelStateForSession.
+func TestGoalCheckFollowsTheSessionModelWhenUnconfigured(t *testing.T) {
+	probe := &dispatchProbe{}
+	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "unconfigured"}`}
+	cfg := goalCheckConfig()
+	cfg.Agents.GoalEvaluator = appcfg.SubagentConfig{}
+	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}, Events: probe, SubagentExecutor: executor}
+
+	if _, err := (goalCheck{runner: runner}).Evaluate(dispatchTestCtx(), "ship", nil); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if executor.model != "glm-5.3" {
+		t.Fatalf("goal check req model = %q, want the session's own model glm-5.3", executor.model)
+	}
+	if len(probe.spawned) != 1 || probe.spawned[0].Model != "glm-5.3" {
+		t.Fatalf("spawned = %+v, want the session's own model", probe.spawned)
+	}
+}
+
+// The settings page's row is global, so it must survive the two early returns
+// in SubagentCatalogFor: cfg == nil is covered by leaving it nil, and a
+// primary agent with no definition of its own — a fresh install's shape — must
+// still run its goal check on the configured row (plan 299 §4 pitfall ①).
+func TestGoalCheckConfigAppliesToAgentsWithoutDefinitions(t *testing.T) {
+	probe := &dispatchProbe{}
+	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "no definitions"}`}
+	cfg := goalCheckConfig()
+	cfg.Agents.Definitions = nil
+	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg, AgentName: "main"}, Events: probe, SubagentExecutor: executor}
+
+	if _, err := (goalCheck{runner: runner}).Evaluate(dispatchTestCtx(), "ship", nil); err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if executor.model != goalCheckRowModel {
+		t.Fatalf("goal check req model = %q, want the configured row %q", executor.model, goalCheckRowModel)
+	}
+	if len(probe.spawned) != 1 || probe.spawned[0].Model != goalCheckRowModel {
+		t.Fatalf("spawned = %+v, want the configured row %q", probe.spawned, goalCheckRowModel)
+	}
+}
+
+// The settings page stores "" for "follow the model page's thinking level",
+// and that has to be a live reading, not a snapshot (plan 299 §6-⑪): a check
+// whose row default says "high" sends high, and after the row's default moves
+// the next check sends the new level — with nothing of its own to override.
+// An effort the page did set is the opposite: it is sent as stored and does
+// not move with the row.
+//
+// The effort is read off the request the run actually sends: the provider
+// client's chat-completions body carries "reasoning_effort", which is where
+// the engine folds a model's default level into a request that names none.
+func TestGoalCheckEffortFollowsTheRowDefaultUntilOverridden(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		rw.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range []string{
+			`{"id":"chatcmpl-goal","object":"chat.completion.chunk","created":1,"model":"gpt-5","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-goal","object":"chat.completion.chunk","created":1,"model":"gpt-5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		} {
+			_, _ = fmt.Fprintf(rw, "data: %s\n\n", frame)
+		}
+		_, _ = fmt.Fprint(rw, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	cfg := &appcfg.Root{
+		LLMModels: []appcfg.LLMModelConfig{{
+			ID:       "llm-goal-effort",
+			Provider: "openai",
+			Model:    "gpt-5",
+			BaseURL:  server.URL + "/v1",
+			APIKey:   "sk-goal-effort",
+			Caps:     appcfg.LLMModelCaps{DefaultEffort: "high"},
+		}},
+		Agents: appcfg.AgentsSection{
+			GoalEvaluator: appcfg.SubagentConfig{Model: "llm-goal-effort"},
+		},
+	}
+
+	// dispatch runs one real goal-check dispatch and answers the pin it decided
+	// on: the one place the configured row becomes the execution's model.
+	dispatch := func(t *testing.T) SubagentModelOverride {
+		t.Helper()
+		home := t.TempDir()
+		owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg, AgentName: "main"},
+			SubagentExecutor: &fixedSubagentExecutor{output: `{"status": "done", "why": "ok"}`}}
+		var pin SubagentModelOverride
+		var pinned bool
+		if _, _, err := dispatchSubagent(dispatchTestCtx(), Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}, subagentDispatch{
+			taskID:  "task-goal-effort",
+			task:    "judge the objective",
+			subtype: GoalCheckSubagentType,
+			resolve: agent.ResolveSubtype,
+			run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+				pin, pinned = SubagentModelOverrideFromContext(prep.ctx)
+				return "done", nil
+			},
+		}); err != nil {
+			t.Fatalf("dispatchSubagent: %v", err)
+		}
+		if !pinned {
+			t.Fatal("the goal check dispatched without a model pin")
+		}
+		return pin
+	}
+
+	// send builds the client the run's requests go through — the same builder
+	// the runtime's override wrapper calls — and answers the effort its request
+	// carried.
+	send := func(t *testing.T, pin SubagentModelOverride) string {
+		t.Helper()
+		client, err := ConfiguredModelClientWithEffort(cfg, GoalCheckSubagentType, pin.ModelID, pin.Provider, pin.Model, pin.Effort)
+		if err != nil {
+			t.Fatalf("ConfiguredModelClientWithEffort: %v", err)
+		}
+		if _, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("judge"))}, nil); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(bodies) == 0 {
+			t.Fatal("the provider server saw no request")
+		}
+		body := bodies[len(bodies)-1]
+		effort, _ := body["reasoning_effort"].(string)
+		return effort
+	}
+
+	// The page stored no effort: the check follows the row's own default.
+	pin := dispatch(t)
+	if pin.ModelID != "llm-goal-effort" || pin.Model != "gpt-5" || strings.TrimSpace(pin.Effort) != "" {
+		t.Fatalf("pin = %#v, want the configured row with no effort of its own", pin)
+	}
+	if got := send(t, pin); got != "high" {
+		t.Fatalf("request effort = %q, want the row's default %q", got, "high")
+	}
+
+	// The model page moves the row's default, the configuration is adopted
+	// again, and the next check carries the new level — not the old one, and
+	// not an empty request.
+	cfg.LLMModels[0].Caps.DefaultEffort = "low"
+	if got := send(t, dispatch(t)); got != "low" {
+		t.Fatalf("request effort after the row default moved = %q, want %q", got, "low")
+	}
+
+	// An effort the page did set is the opposite: sent as stored, unmoved by
+	// the row's default.
+	cfg.Agents.GoalEvaluator.ReasoningEffort = "max"
+	pin = dispatch(t)
+	if pin.Effort != "max" {
+		t.Fatalf("pin effort = %q, want the configured override %q", pin.Effort, "max")
+	}
+	if got := send(t, pin); got != "max" {
+		t.Fatalf("request effort = %q, want the configured override %q", got, "max")
+	}
+	cfg.LLMModels[0].Caps.DefaultEffort = "minimal"
+	if got := send(t, dispatch(t)); got != "max" {
+		t.Fatalf("request effort after the row default moved = %q, want the override %q to stand", got, "max")
 	}
 }

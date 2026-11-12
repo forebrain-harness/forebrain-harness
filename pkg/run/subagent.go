@@ -1976,7 +1976,12 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	// conversation's. Resolving any of it again further down is how a run gets
 	// announced as one model and served by another.
 	pin := SubagentModelOverride{}
-	if override, ok := SubagentModelOverrideFromContext(baseCtx); ok {
+	// The /goal check takes its model from the settings page alone (plan 299):
+	// a dispatch-time pin is a caller's choice, and the check is not the
+	// caller's. Every other type keeps the three-level chain untouched — the
+	// plan reviewer's pin is the user's pick in the approval card and stays
+	// first for it (plan 283).
+	if override, ok := SubagentModelOverrideFromContext(baseCtx); ok && agentType != GoalCheckSubagentType {
 		pin = override
 	} else if modelID, provider, model, effort, ok := cat.Model(agentType); ok {
 		pin = SubagentModelOverride{ModelID: modelID, Provider: provider, Model: model, Effort: effort}
