@@ -21,12 +21,15 @@ var (
 // wrappers between the failing caller and this function, so At names the code
 // that failed rather than the logging helper itself.
 //
-// label was named context before this package wrote records; the name moved
-// because the package that means "context" is now in scope here.
+// forebrainRoot is kept for the callers and no longer used: the record goes to
+// the process's event log, which was installed with the home it needs (plan
+// 285). label was named context until this package wrote records; the name
+// moved because the package that means "context" is in scope here.
 func ErrorSkip(forebrainRoot string, err error, label string, extraFrames int) {
 	if err == nil {
 		return
 	}
+	_ = forebrainRoot
 	if extraFrames < 0 {
 		extraFrames = 0
 	}
