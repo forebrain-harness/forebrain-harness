@@ -3323,7 +3323,14 @@ func continueForkSubagent(ctx context.Context, fac Factory, record agent.History
 	if _, _, cerr := CompactionService(own, store).AutoCompactSession(ctx, record.WorkerSessionID, ""); cerr != nil {
 		slog.Warn("fork subagent pre-turn compaction skipped", "session_id", record.WorkerSessionID, "err", cerr)
 	}
-	ts := transcriptSession{store: store, systemPrompt: frozen, resolver: own.FileResolver}
+	ts := transcriptSession{
+		store:        store,
+		systemPrompt: frozen,
+		resolver:     own.FileResolver,
+		nativeMedia: func(ctx context.Context) llm.NativeMediaKinds {
+			return own.NativeMediaKinds(ctx, record.WorkerSessionID)
+		},
+	}
 	history, err := ts.history(ctx, record.WorkerSessionID)
 	if err != nil {
 		return "", err

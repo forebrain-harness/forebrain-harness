@@ -3,6 +3,7 @@ package run
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -79,6 +80,45 @@ type transcriptSession struct {
 	systemPrompt        string
 	resolver            FileReferenceResolver
 	projectInstructions func(sessionID string) string
+	// nativeMedia answers what the conversation's model takes directly. It is
+	// read per request rather than captured: /model switches the answer, and a
+	// message replayed after the switch must carry what the new model takes.
+	// Nil means none — a builder assembled without one (tests, a surface with
+	// no capability data) replays every attachment as the text it always was.
+	nativeMedia func(ctx context.Context) llm.NativeMediaKinds
+}
+
+// mediaKindsFor answers what the conversation's model takes directly, but only
+// when this history actually carries a file: most requests of most
+// conversations carry none, and the answer costs a capability lookup (a store
+// read for a session model) that would then buy nothing on every step of every
+// tool loop.
+func (t transcriptSession) mediaKindsFor(ctx context.Context, entries []state.TranscriptEntry) llm.NativeMediaKinds {
+	if t.nativeMedia == nil || !transcriptCarriesFileReference(entries) {
+		return llm.NativeMediaKinds{}
+	}
+	return t.nativeMedia(ctx)
+}
+
+// transcriptCarriesFileReference reports whether any stored row carries a
+// file_reference typed as something other than an image. It reads the parsed
+// references, never the files.
+//
+// A reference stored without a type does not count: the only way to store one
+// that way is an image attached by bare path, so every untyped reference in
+// practice is a picture, and counting them would pay for a capability lookup and
+// a file read on every request of every conversation that ever pasted a
+// screenshot.
+func transcriptCarriesFileReference(entries []state.TranscriptEntry) bool {
+	for _, entry := range entries {
+		for _, ref := range entry.FileRefs {
+			mime := strings.TrimSpace(ref.MIMEType)
+			if mime != "" && !strings.HasPrefix(mime, "image/") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // head is the byte-stable start of every request: the system prompt and the
@@ -123,7 +163,7 @@ func (t transcriptSession) history(ctx context.Context, sessionID string) ([]llm
 	if err != nil {
 		return nil, err
 	}
-	transcript := rehydrateImageReferences(ctx, t.resolver, entries)
+	transcript := rehydrateImageReferences(ctx, t.resolver, entries, t.mediaKindsFor(ctx, entries))
 	if len(transcript) == 0 {
 		transcript = []llm.Message{}
 	}
@@ -299,10 +339,10 @@ func (r FilertResolver) ResolveFilePath(ctx context.Context, fileID string) (str
 // Rehydration is best-effort: any failure (missing resolver, unresolved path,
 // unreadable file, unsupported format) leaves the original text placeholder
 // intact. The function never returns an error.
-func rehydrateImageReferences(ctx context.Context, resolver FileReferenceResolver, entries []state.TranscriptEntry) []llm.Message {
+func rehydrateImageReferences(ctx context.Context, resolver FileReferenceResolver, entries []state.TranscriptEntry, media llm.NativeMediaKinds) []llm.Message {
 	out := make([]llm.Message, len(entries))
 	for i, e := range entries {
-		out[i] = rehydrateMessageImages(ctx, resolver, e.Message, e.FileRefs)
+		out[i] = rehydrateMessageMedia(ctx, resolver, e.Message, e.FileRefs, media)
 	}
 	return out
 }
@@ -313,28 +353,32 @@ func rehydrateImageReferences(ctx context.Context, resolver FileReferenceResolve
 // it sends the same message now as every later request replays, so the
 // request's prefix stays cached and the turn's own message is never written
 // to the transcript a second time.
-func UserInputParts(ctx context.Context, resolver FileReferenceResolver, partsJSON string) []llm.ContentPart {
+func UserInputParts(ctx context.Context, resolver FileReferenceResolver, partsJSON string, media llm.NativeMediaKinds) []llm.ContentPart {
 	parts, _, _, _ := state.ParseMessageParts(partsJSON, "")
-	return rehydrateMessageImages(ctx, resolver, llm.UserMessage(parts...), state.ExtractFileRefInfos(partsJSON)).Parts
+	return rehydrateMessageMedia(ctx, resolver, llm.UserMessage(parts...), state.ExtractFileRefInfos(partsJSON), media).Parts
 }
 
-// rehydrateMessageImages replaces the text placeholder ParseMessageParts
+// rehydrateMessageMedia replaces the text placeholder ParseMessageParts
 // leaves for each image-typed file_reference with the image itself, read
 // through resolver. User rows send the file's bytes as-is; tool rows re-run
 // the ImagePartWithin ladder, because a tool image was budgeted and possibly
 // downscaled when the live turn sent it.
 //
+// A reference typed as something else is a PDF, an audio clip or a video: media
+// says whether this conversation's model takes that kind directly, and one it
+// does not take keeps the placeholder it has always replayed as.
+//
 // A user row's images are then each followed by the line naming the file they
 // are stored in (withImageSourceNotes), so the model can open it itself.
-func rehydrateMessageImages(ctx context.Context, resolver FileReferenceResolver, msg llm.Message, refs []state.FileRefInfo) llm.Message {
-	msg = rehydrateMessageFileImages(ctx, resolver, msg, refs)
+func rehydrateMessageMedia(ctx context.Context, resolver FileReferenceResolver, msg llm.Message, refs []state.FileRefInfo, media llm.NativeMediaKinds) llm.Message {
+	msg = rehydrateMessageFileMedia(ctx, resolver, msg, refs, media)
 	if msg.Role == llm.RoleUser {
 		msg.Parts = withImageSourceNotes(msg.Parts)
 	}
 	return msg
 }
 
-func rehydrateMessageFileImages(ctx context.Context, resolver FileReferenceResolver, msg llm.Message, refs []state.FileRefInfo) llm.Message {
+func rehydrateMessageFileMedia(ctx context.Context, resolver FileReferenceResolver, msg llm.Message, refs []state.FileRefInfo, media llm.NativeMediaKinds) llm.Message {
 	if resolver == nil || len(refs) == 0 || (msg.Role != llm.RoleUser && msg.Role != llm.RoleTool) {
 		return msg
 	}
@@ -348,6 +392,19 @@ func rehydrateMessageFileImages(ctx context.Context, resolver FileReferenceResol
 		// that message to the model as a name with no picture.
 		mime := strings.TrimSpace(ref.MIMEType)
 		if mime != "" && !strings.HasPrefix(mime, "image/") {
+			// Not an image: a PDF, an audio clip or a video is rebuilt as a
+			// file part when this conversation's model takes that kind
+			// directly; every other file keeps the placeholder it has always
+			// replayed as, byte for byte.
+			if media.Any() {
+				rehydrateNativeMediaReference(ctx, resolver, &parts, ref, media)
+			}
+			continue
+		}
+		if mime == "" && media.Any() && rehydrateNativeMediaReference(ctx, resolver, &parts, ref, media) {
+			// A reference stored without its type is still a PDF, an audio clip
+			// or a video when its bytes say so — the same rule an image follows
+			// below, asked first because only one of the two can send it.
 			continue
 		}
 		absPath, ok := resolver.ResolveFilePath(ctx, ref.FileID)
@@ -445,4 +502,67 @@ func InputPreview(s string, max int) string {
 		return s
 	}
 	return s[:max]
+}
+
+// rehydrateNativeMediaReference replaces one non-image file_reference's text
+// placeholder with the file part this conversation's model takes directly.
+//
+// The kind comes from the type the reference recorded, and from the file's own
+// bytes when the row was written before its type was kept (an attachment picked
+// by path carried no type until it was an image). A kind the model does not take
+// is left alone: the placeholder is what that message has always said, and
+// saying anything else would rewrite history the model already read.
+//
+// A file whose bytes cannot be sent — unreadable, or larger than the inline
+// limit — degrades to the same note the live turn wrote for it, so the message
+// the model sees on this request is the message the turn sent. Nothing here
+// reads a file the model does not take: a conversation that never switches to a
+// model with the capability pays nothing.
+func rehydrateNativeMediaReference(ctx context.Context, resolver FileReferenceResolver, parts *[]llm.ContentPart, ref state.FileRefInfo, media llm.NativeMediaKinds) bool {
+	kind := llm.NativeMediaKindOfMIME(ref.MIMEType)
+	if !media.Has(kind) && kind != "" {
+		return false
+	}
+	placeholder := fileReferencePlaceholder(ref)
+	label := strings.TrimSpace(ref.Label)
+	if label == "" {
+		label = ref.FileID
+	}
+	absPath, ok := resolver.ResolveFilePath(ctx, ref.FileID)
+	if !ok {
+		slog.Debug("rehydrate: cannot resolve file_id", "file_id", ref.FileID, "mime", ref.MIMEType)
+		return false
+	}
+	if kind == "" {
+		if kind = llm.NativeMediaKindOfMIME(llm.NativeMediaMIMETypeOfFile(absPath)); !media.Has(kind) {
+			return false
+		}
+	}
+	part, err := llm.FileFromPath(absPath)
+	if err != nil {
+		slog.Debug("rehydrate: file part read failed", "path", absPath, "err", err)
+		note := llm.UnsendableImageNote(label, strings.TrimSpace(ref.MIMEType), err.Error())
+		if errors.Is(err, llm.ErrNativeMediaTooLarge) {
+			note = llm.NativeMediaTooLargeNote(label, strings.TrimSpace(ref.MIMEType))
+		}
+		replacePlaceholder(parts, placeholder, llm.Text(note))
+		return true
+	}
+	replacePlaceholder(parts, placeholder, part)
+	return true
+}
+
+// replacePlaceholder swaps the text ParseMessageParts wrote for a
+// file_reference with what this request sends instead of it.
+func replacePlaceholder(parts *[]llm.ContentPart, placeholder string, replacement llm.ContentPart) {
+	if placeholder == "" {
+		return
+	}
+	for j := range *parts {
+		if (*parts)[j].Type == llm.ContentTypeText && strings.TrimSpace((*parts)[j].Text) == placeholder {
+			(*parts)[j] = replacement
+			return
+		}
+	}
+	slog.Debug("rehydrate: placeholder not found for a file reference", "placeholder", placeholder)
 }

@@ -23,7 +23,7 @@ func TestInlineUserImageIsFollowedByAFileWrittenFromItsBytes(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	msg := llm.UserMessage(llm.Text("like this"), llm.ImageBase64("image/png", sourceTestPNG))
 
-	first := rehydrateMessageImages(context.Background(), PathResolver{}, msg, nil)
+	first := rehydrateMessageMedia(context.Background(), PathResolver{}, msg, nil, llm.NativeMediaKinds{})
 	if len(first.Parts) != 3 || first.Parts[1].Type != llm.ContentTypeImageBase64 {
 		t.Fatalf("parts = %#v", first.Parts)
 	}
@@ -45,7 +45,7 @@ func TestInlineUserImageIsFollowedByAFileWrittenFromItsBytes(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	again := rehydrateMessageImages(context.Background(), PathResolver{}, msg, nil)
+	again := rehydrateMessageMedia(context.Background(), PathResolver{}, msg, nil, llm.NativeMediaKinds{})
 	if again.Parts[2].Text != note {
 		t.Fatalf("replay named %q, first named %q", again.Parts[2].Text, note)
 	}
@@ -64,13 +64,13 @@ func TestImageSourceLinesAreForUserImagesOnly(t *testing.T) {
 	}
 	refs := []state.FileRefInfo{{FileID: img, Label: "shot.png", MIMEType: "image/png"}}
 	toolRow := llm.Message{Role: llm.RoleTool, Parts: []llm.ContentPart{llm.Text("[attachment] shot.png (image/png)")}}
-	got := rehydrateMessageImages(context.Background(), PathResolver{}, toolRow, refs)
+	got := rehydrateMessageMedia(context.Background(), PathResolver{}, toolRow, refs, llm.NativeMediaKinds{})
 	if len(got.Parts) != 1 || got.Parts[0].Type != llm.ContentTypeImageBase64 {
 		t.Fatalf("tool row parts = %#v", got.Parts)
 	}
 
 	web := llm.UserMessage(llm.ImageURL("https://example.com/a.png"))
-	got = rehydrateMessageImages(context.Background(), PathResolver{}, web, nil)
+	got = rehydrateMessageMedia(context.Background(), PathResolver{}, web, nil, llm.NativeMediaKinds{})
 	if len(got.Parts) != 2 || got.Parts[1].Text != "[Image: source: https://example.com/a.png]" {
 		t.Fatalf("web image parts = %#v", got.Parts)
 	}
@@ -117,7 +117,7 @@ func TestImageSourceLineIsSentNotStored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replayed := rehydrateImageReferences(ctx, PathResolver{}, entries)
+	replayed := rehydrateImageReferences(ctx, PathResolver{}, entries, llm.NativeMediaKinds{})
 	if len(replayed) != 1 || len(replayed[0].Parts) != 3 || replayed[0].Parts[2].Text != live[2].Text ||
 		replayed[0].Parts[1].ImageBase64 != image.ImageBase64 {
 		t.Fatalf("replay = %#v, want what was sent", replayed)
@@ -214,7 +214,7 @@ func TestImageSourceLineIsSkippedWhenTheTextNamesTheFile(t *testing.T) {
 	}
 
 	named := llm.UserMessage(llm.Text("<images>\nImage 1 of message 1: "+img+"\n</images>"), image)
-	got := rehydrateMessageImages(context.Background(), PathResolver{}, named, nil)
+	got := rehydrateMessageMedia(context.Background(), PathResolver{}, named, nil, llm.NativeMediaKinds{})
 	if len(got.Parts) != 2 {
 		t.Fatalf("parts = %#v, want the text and the image with no second mention", got.Parts)
 	}
@@ -223,13 +223,13 @@ func TestImageSourceLineIsSkippedWhenTheTextNamesTheFile(t *testing.T) {
 	}
 
 	other := llm.UserMessage(llm.Text("see "+img+".bak"), image)
-	got = rehydrateMessageImages(context.Background(), PathResolver{}, other, nil)
+	got = rehydrateMessageMedia(context.Background(), PathResolver{}, other, nil, llm.NativeMediaKinds{})
 	if len(got.Parts) != 3 || got.Parts[2].Text != llm.ImageSourceNote(img) {
 		t.Fatalf("parts = %#v, want the source line after the image", got.Parts)
 	}
 
 	silent := llm.UserMessage(llm.Text("what is this?"), image)
-	got = rehydrateMessageImages(context.Background(), PathResolver{}, silent, nil)
+	got = rehydrateMessageMedia(context.Background(), PathResolver{}, silent, nil, llm.NativeMediaKinds{})
 	if len(got.Parts) != 3 || got.Parts[2].Text != llm.ImageSourceNote(img) {
 		t.Fatalf("parts = %#v, want the source line after the image", got.Parts)
 	}
@@ -237,7 +237,7 @@ func TestImageSourceLineIsSkippedWhenTheTextNamesTheFile(t *testing.T) {
 	// An inline image's file is written from its bytes, so no text can have
 	// named it: the line is always written.
 	inline := llm.UserMessage(llm.Text("what is this?"), llm.ImageBase64("image/png", sourceTestPNG))
-	got = rehydrateMessageImages(context.Background(), PathResolver{}, inline, nil)
+	got = rehydrateMessageMedia(context.Background(), PathResolver{}, inline, nil, llm.NativeMediaKinds{})
 	if len(got.Parts) != 3 || !llm.IsImageSourceNote(got.Parts[2]) {
 		t.Fatalf("parts = %#v, want the source line after the inline image", got.Parts)
 	}

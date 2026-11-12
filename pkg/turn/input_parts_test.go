@@ -67,7 +67,7 @@ func TestSurfaceTurnContentPartsIncludesImageAttachment(t *testing.T) {
 		t.Fatalf("write png: %v", err)
 	}
 
-	parts, modelText, display, warnings, err := SurfaceTurnContentParts("explain", "explain", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}})
+	parts, modelText, display, warnings, err := SurfaceTurnContentParts("explain", "explain", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}}, llm.NativeMediaKinds{})
 	if err != nil {
 		t.Fatalf("SurfaceTurnContentParts: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestSurfaceTurnContentPartsSkipsTheNoteItsTextAlreadyNames(t *testing.T) {
 	attachments := []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}}
 
 	named := "the picture at " + img + " explains it"
-	parts, _, _, _, err := SurfaceTurnContentParts(named, named, attachments)
+	parts, _, _, _, err := SurfaceTurnContentParts(named, named, attachments, llm.NativeMediaKinds{})
 	if err != nil {
 		t.Fatalf("SurfaceTurnContentParts: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestSurfaceTurnContentPartsSkipsTheNoteItsTextAlreadyNames(t *testing.T) {
 	}
 
 	plain := "explain this"
-	parts, _, _, _, err = SurfaceTurnContentParts(plain, plain, attachments)
+	parts, _, _, _, err = SurfaceTurnContentParts(plain, plain, attachments, llm.NativeMediaKinds{})
 	if err != nil {
 		t.Fatalf("SurfaceTurnContentParts: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestSurfaceTurnContentPartsImageOnlyText(t *testing.T) {
 		t.Fatalf("write png: %v", err)
 	}
 
-	parts, modelText, display, _, err := SurfaceTurnContentParts("", "", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}})
+	parts, modelText, display, _, err := SurfaceTurnContentParts("", "", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}}, llm.NativeMediaKinds{})
 	if err != nil {
 		t.Fatalf("SurfaceTurnContentParts: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestSurfaceTurnContentPartsDegradesUnsendableAttachment(t *testing.T) {
 	parts, _, display, warnings, err := SurfaceTurnContentParts(
 		"explain", "explain",
 		[]InputAttachment{{Path: bad, Label: "fake.png"}},
-	)
+		llm.NativeMediaKinds{})
 	if err != nil {
 		t.Fatalf("an unsendable attachment must not fail the turn: %v", err)
 	}
@@ -1622,5 +1622,82 @@ func TestBuildReReviewPromptTruncatedPlanWithoutFile(t *testing.T) {
 	}
 	if strings.Contains(prompt, "%!") {
 		t.Fatalf("a rendering artifact leaked into the prompt:\n%s", prompt)
+	}
+}
+
+// writeNativeMedia writes a file whose leading bytes are a PDF header, the way a
+// real attachment arrives: the bytes decide the type, never the name.
+func writeNativeMedia(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+// With the capability, a PDF is sent as a file part and nothing warns.
+func TestSurfaceTurnContentPartsSendsNativeMedia(t *testing.T) {
+	pdf := writeNativeMedia(t, "demo.pdf")
+	parts, _, display, warnings, err := SurfaceTurnContentParts("read this", "read this",
+		[]InputAttachment{{Path: pdf, Label: "demo.pdf"}}, llm.NativeMediaKinds{PDF: true})
+	if err != nil {
+		t.Fatalf("SurfaceTurnContentParts: %v", err)
+	}
+	if len(parts) != 2 || parts[1].Type != llm.ContentTypeFileBase64 {
+		t.Fatalf("parts = %#v, want text + one file part", parts)
+	}
+	if parts[1].MIMEType != "application/pdf" || parts[1].FileName != "demo.pdf" {
+		t.Fatalf("file part = %#v, want the PDF and its name", parts[1])
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	// A file gets no "[Image #N]" marker: the row shows the words it always did.
+	if display != "read this" {
+		t.Fatalf("display = %q, want the text alone", display)
+	}
+}
+
+// Without it — the switch off, or a model that does not take a PDF — the
+// attachment degrades to exactly the sentence it degraded to before this
+// existed.
+func TestSurfaceTurnContentPartsKeepsTodaysDegradeText(t *testing.T) {
+	pdf := writeNativeMedia(t, "demo.pdf")
+	parts, _, _, warnings, err := SurfaceTurnContentParts("read this", "read this",
+		[]InputAttachment{{Path: pdf, Label: "demo.pdf"}}, llm.NativeMediaKinds{})
+	if err != nil {
+		t.Fatalf("SurfaceTurnContentParts: %v", err)
+	}
+	if len(parts) != 2 || parts[1].Type != llm.ContentTypeText {
+		t.Fatalf("parts = %#v, want text + one degraded text part", parts)
+	}
+	want := llm.UnsendableImageNote("demo.pdf", "", `ImageFile: unsupported image type for "`+pdf+`"; convert it to png or jpeg first`)
+	if parts[1].Text != want {
+		t.Fatalf("degraded text = %q, want %q", parts[1].Text, want)
+	}
+	if len(warnings) != 1 || warnings[0] != want {
+		t.Fatalf("warnings = %v, want the same sentence", warnings)
+	}
+}
+
+// A file over the inline limit degrades with the limit's own sentence: the turn
+// still runs, and the model is told why the file is not there.
+func TestSurfaceTurnContentPartsDegradesAnOversizeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "big.pdf")
+	body := append([]byte("%PDF-1.7\n"), make([]byte, llm.NativeMediaInlineLimit)...)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	parts, _, _, warnings, err := SurfaceTurnContentParts("read this", "read this",
+		[]InputAttachment{{Path: path, Label: "big.pdf"}}, llm.NativeMediaKinds{PDF: true})
+	if err != nil {
+		t.Fatalf("an oversize file must not fail the turn: %v", err)
+	}
+	if len(parts) != 2 || !strings.Contains(parts[1].Text, "larger than the largest one sent inline") {
+		t.Fatalf("parts = %#v, want the too-large sentence", parts)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one", warnings)
 	}
 }

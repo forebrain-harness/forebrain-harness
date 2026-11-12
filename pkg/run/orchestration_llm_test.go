@@ -1685,7 +1685,7 @@ func TestRehydrateImageReferences_NoResolver(t *testing.T) {
 		Message:  llm.UserMessage(llm.Text("[attachment] a.png (image/png)")),
 		FileRefs: []state.FileRefInfo{{FileID: "/tmp/a.png", Label: "a.png", MIMEType: "image/png"}},
 	}}
-	msgs := rehydrateImageReferences(context.Background(), nil, entries)
+	msgs := rehydrateImageReferences(context.Background(), nil, entries, llm.NativeMediaKinds{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -1718,7 +1718,7 @@ func TestRehydrateImageReferences_ImageReplaced(t *testing.T) {
 		Message:  llm.UserMessage(llm.Text("[attachment] test.png (image/png)")),
 		FileRefs: []state.FileRefInfo{{FileID: imgPath, Label: "test.png", MIMEType: "image/png"}},
 	}}
-	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries)
+	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries, llm.NativeMediaKinds{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -1747,7 +1747,7 @@ func TestRehydrateImageReferences_NonImageMIME(t *testing.T) {
 		Message:  llm.UserMessage(llm.Text("[attachment] doc.pdf (application/pdf)")),
 		FileRefs: []state.FileRefInfo{{FileID: "/tmp/doc.pdf", Label: "doc.pdf", MIMEType: "application/pdf"}},
 	}}
-	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries)
+	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries, llm.NativeMediaKinds{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -1763,7 +1763,7 @@ func TestRehydrateImageReferences_MissingFile(t *testing.T) {
 		Message:  llm.UserMessage(llm.Text("[attachment] nonexistent.png (image/png)")),
 		FileRefs: []state.FileRefInfo{{FileID: imgPath, Label: "nonexistent.png", MIMEType: "image/png"}},
 	}}
-	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries)
+	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries, llm.NativeMediaKinds{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -1798,7 +1798,7 @@ func TestRehydrateImageReferences_MultipleImages(t *testing.T) {
 			{FileID: img2, Label: "b.png", MIMEType: "image/png"},
 		},
 	}}
-	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries)
+	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries, llm.NativeMediaKinds{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -1822,7 +1822,7 @@ func TestRehydrateImageReferences_RelativePath(t *testing.T) {
 		Message:  llm.UserMessage(llm.Text("[attachment] img.png (image/png)")),
 		FileRefs: []state.FileRefInfo{{FileID: "img.png", Label: "img.png", MIMEType: "image/png"}},
 	}}
-	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries)
+	msgs := rehydrateImageReferences(context.Background(), PathResolver{}, entries, llm.NativeMediaKinds{})
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}

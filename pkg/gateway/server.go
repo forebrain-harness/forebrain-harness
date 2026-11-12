@@ -2538,7 +2538,7 @@ func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request, opts wsCon
 		// carries what the user typed, while PartsJSON carries what the model
 		// is sent. The model is sent exactly what the row replays as, so this
 		// request and every later one carry the same message.
-		inputParts := run.UserInputParts(r.Context(), turnRunner.FileResolver, turnInput.partsJSON)
+		inputParts := run.UserInputParts(r.Context(), turnRunner.FileResolver, turnInput.partsJSON, nativeMediaFor(r.Context(), turnRunner, sid))
 		if s.Sessions != nil {
 			turn.PersistUserTurn(r.Context(), s.Sessions, turn.UserTurn{
 				SessionID:  sid,

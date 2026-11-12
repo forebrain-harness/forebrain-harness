@@ -249,7 +249,7 @@ func TestWebTurnInputValidatesClientImagePaths(t *testing.T) {
 // self-heal: a file the image ladder cannot send does not fail the message.
 // It gets no file_reference — the model is sent this row through
 // run.UserInputParts, i.e. the replay path, so the one note it must see comes
-// from rehydrateMessageImages — and the sentence rides in the message text,
+// from rehydrateMessageMedia — and the sentence rides in the message text,
 // where the user reads it. Writing it here as well would say it twice.
 func TestPrepareWebTurnInputDegradesUnsendableImage(t *testing.T) {
 	home, workspace := newMentionWorkspace(t)
@@ -273,7 +273,7 @@ func TestPrepareWebTurnInputDegradesUnsendableImage(t *testing.T) {
 	if got := strings.Count(in.text, "not sent:"); got != 1 {
 		t.Fatalf("note appears %d times, want once", got)
 	}
-	sent := run.UserInputParts(ctx, run.PathResolver{}, in.partsJSON)
+	sent := run.UserInputParts(ctx, run.PathResolver{}, in.partsJSON, llm.NativeMediaKinds{})
 	for _, part := range sent {
 		if part.Type != llm.ContentTypeText {
 			t.Fatalf("sent a %s part for a file that could not be sent", part.Type)
@@ -336,7 +336,7 @@ func TestWebTurnInputIsTheMessageItStores(t *testing.T) {
 		abs, _, err := files.EnsureLocalFile(ctx, "main", fileID)
 		return abs, err == nil
 	}}, run.PathResolver{}}
-	sent := run.UserInputParts(ctx, resolver, in.partsJSON)
+	sent := run.UserInputParts(ctx, resolver, in.partsJSON, llm.NativeMediaKinds{})
 	var kinds []string
 	for _, part := range sent {
 		kinds = append(kinds, string(part.Type))

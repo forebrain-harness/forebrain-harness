@@ -329,7 +329,7 @@ func TestUserInputPartsRehydratesFileReferenceToImage(t *testing.T) {
 	partsJSON := state.MessagePartsJSON(llm.UserMessage(llm.Text(userText)), userText)
 	partsJSON = state.AppendRawPartJSON(partsJSON, state.FileReferencePartJSON(img, "clip.png", "image/png"))
 
-	sent := UserInputParts(context.Background(), PathResolver{}, partsJSON)
+	sent := UserInputParts(context.Background(), PathResolver{}, partsJSON, llm.NativeMediaKinds{})
 	images := 0
 	for _, part := range sent {
 		if part.Type == llm.ContentTypeImageBase64 {
@@ -412,7 +412,7 @@ func TestToolImageRowPersistsAsReferenceAndRehydratesIdentically(t *testing.T) {
 	// base64 string and MIME included.
 	entries, err := sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
 	require.NoError(t, err)
-	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries)
+	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries, llm.NativeMediaKinds{})
 	var rehydrated *llm.Message
 	for i := range msgs {
 		if msgs[i].Role == llm.RoleTool {
@@ -430,7 +430,7 @@ func TestToolImageRowPersistsAsReferenceAndRehydratesIdentically(t *testing.T) {
 	require.NoError(t, os.Remove(imgPath))
 	entries, err = sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
 	require.NoError(t, err)
-	msgs = rehydrateImageReferences(ctx, PathResolver{}, entries)
+	msgs = rehydrateImageReferences(ctx, PathResolver{}, entries, llm.NativeMediaKinds{})
 	for i := range msgs {
 		if msgs[i].Role != llm.RoleTool {
 			continue
@@ -490,7 +490,7 @@ func TestToolImageRowRehydratesWithinProviderSideLimit(t *testing.T) {
 
 	entries, err := sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
 	require.NoError(t, err)
-	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries)
+	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries, llm.NativeMediaKinds{})
 	var rehydrated *llm.Message
 	for i := range msgs {
 		if msgs[i].Role == llm.RoleTool {
@@ -518,7 +518,7 @@ func TestSurfaceTurnContentPartsNoteMatchesPersistedReference(t *testing.T) {
 	require.NoError(t, os.WriteFile(bad, []byte("not an image"), 0o600))
 	attachments := []turn.InputAttachment{{Path: bad, Label: "fake.png"}}
 
-	parts, _, _, warnings, err := turn.SurfaceTurnContentParts("look", "look", attachments)
+	parts, _, _, warnings, err := turn.SurfaceTurnContentParts("look", "look", attachments, llm.NativeMediaKinds{})
 	require.NoError(t, err)
 	require.Len(t, warnings, 1)
 	var live string
@@ -530,7 +530,7 @@ func TestSurfaceTurnContentPartsNoteMatchesPersistedReference(t *testing.T) {
 	require.NotEmpty(t, live, "the live turn wrote no note: %+v", parts)
 
 	partsJSON := turn.BuildSurfaceUserPartsJSON("look", attachments)
-	replayed := UserInputParts(context.Background(), PathResolver{}, partsJSON)
+	replayed := UserInputParts(context.Background(), PathResolver{}, partsJSON, llm.NativeMediaKinds{})
 	var note string
 	for _, part := range replayed {
 		if part.Type == llm.ContentTypeText && strings.HasPrefix(part.Text, "[attachment]") {
@@ -580,7 +580,7 @@ func TestUserImageAttachmentRehydratesIdenticallyToLiveImageFile(t *testing.T) {
 	// Reload + rehydrate reproduces the live part field for field.
 	entries, err := sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
 	require.NoError(t, err)
-	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries)
+	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries, llm.NativeMediaKinds{})
 	var rehydrated *llm.Message
 	for i := range msgs {
 		if msgs[i].Role == llm.RoleUser {
@@ -604,7 +604,7 @@ func TestUserImageAttachmentRehydratesIdenticallyToLiveImageFile(t *testing.T) {
 
 	entries, err = sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
 	require.NoError(t, err)
-	msgs = rehydrateImageReferences(ctx, PathResolver{}, entries)
+	msgs = rehydrateImageReferences(ctx, PathResolver{}, entries, llm.NativeMediaKinds{})
 	rehydrated = nil
 	for i := range msgs {
 		if msgs[i].Role == llm.RoleUser {
@@ -649,7 +649,7 @@ func TestReviewRowReplaysWithoutASecondMention(t *testing.T) {
 
 	entries, err := sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
 	require.NoError(t, err)
-	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries)
+	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries, llm.NativeMediaKinds{})
 	require.Len(t, msgs, 1)
 	got := msgs[0].Parts
 	require.Len(t, got, 3, "parts = %#v", got)
@@ -753,4 +753,74 @@ func TestHistoryUsesTheFileResolverWiredAfterLoad(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, images, "the stored image must replay as pixels, not its name")
+}
+
+// writePDFAttachment writes a tiny file whose leading bytes are a PDF header.
+func writePDFAttachment(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "demo.pdf")
+	if err := os.WriteFile(path, []byte("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"), 0o600); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	return path
+}
+
+// A PDF the conversation's model takes is replayed as a file part, from the same
+// file_reference the row has always stored.
+func TestUserInputPartsRehydratesNativeMedia(t *testing.T) {
+	pdf := writePDFAttachment(t)
+	userText := "summarise this"
+	partsJSON := state.MessagePartsJSON(llm.UserMessage(llm.Text(userText)), userText)
+	partsJSON = state.AppendRawPartJSON(partsJSON, state.FileReferencePartJSON(pdf, "demo.pdf", "application/pdf"))
+
+	sent := UserInputParts(context.Background(), PathResolver{}, partsJSON, llm.NativeMediaKinds{PDF: true})
+	require.Len(t, sent, 2)
+	require.Equal(t, userText, sent[0].Text)
+	require.Equal(t, llm.ContentTypeFileBase64, sent[1].Type)
+	require.Equal(t, "application/pdf", sent[1].MIMEType)
+	require.Equal(t, "demo.pdf", sent[1].FileName)
+}
+
+// The same row, on a model that does not take a PDF — the switch off, or a
+// /model switch to a model without the capability — keeps the placeholder it has
+// always replayed as, byte for byte.
+func TestUserInputPartsKeepsThePlaceholderWithoutTheCapability(t *testing.T) {
+	pdf := writePDFAttachment(t)
+	userText := "summarise this"
+	partsJSON := state.MessagePartsJSON(llm.UserMessage(llm.Text(userText)), userText)
+	partsJSON = state.AppendRawPartJSON(partsJSON, state.FileReferencePartJSON(pdf, "demo.pdf", "application/pdf"))
+
+	sent := UserInputParts(context.Background(), PathResolver{}, partsJSON, llm.NativeMediaKinds{})
+	require.Len(t, sent, 2)
+	require.Equal(t, llm.ContentTypeText, sent[1].Type)
+	require.Equal(t, "[attachment] demo.pdf (application/pdf)", sent[1].Text)
+}
+
+// A reference stored before its type was kept still names its kind from the
+// file's own bytes, so an old PDF row is sent natively too.
+func TestUserInputPartsSniffsTheKindWhenTheRowStoredNoType(t *testing.T) {
+	pdf := writePDFAttachment(t)
+	userText := "summarise this"
+	partsJSON := state.MessagePartsJSON(llm.UserMessage(llm.Text(userText)), userText)
+	partsJSON = state.AppendRawPartJSON(partsJSON, state.FileReferencePartJSON(pdf, "demo.pdf", ""))
+
+	sent := UserInputParts(context.Background(), PathResolver{}, partsJSON, llm.NativeMediaKinds{PDF: true})
+	require.Len(t, sent, 2)
+	require.Equal(t, llm.ContentTypeFileBase64, sent[1].Type)
+}
+
+// A file that is gone degrades to the note the image path writes for the same
+// accident, rather than keeping a placeholder that claims the model was handed
+// bytes it never saw.
+func TestUserInputPartsDegradesAFileThatNoLongerExists(t *testing.T) {
+	pdf := filepath.Join(t.TempDir(), "gone.pdf")
+	userText := "summarise this"
+	partsJSON := state.MessagePartsJSON(llm.UserMessage(llm.Text(userText)), userText)
+	partsJSON = state.AppendRawPartJSON(partsJSON, state.FileReferencePartJSON(pdf, "gone.pdf", "application/pdf"))
+
+	sent := UserInputParts(context.Background(), PathResolver{}, partsJSON, llm.NativeMediaKinds{PDF: true})
+	require.Len(t, sent, 2)
+	require.Equal(t, llm.ContentTypeText, sent[1].Type)
+	require.True(t, strings.HasPrefix(sent[1].Text, "[attachment] gone.pdf (application/pdf) — not sent: "),
+		"degraded text = %q", sent[1].Text)
 }

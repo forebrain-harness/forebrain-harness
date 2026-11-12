@@ -1269,7 +1269,13 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	if r.Deps == nil {
 		instructionsFor = nil
 	}
-	r.transcript = transcriptSession{store: r.SessionStore, systemPrompt: desc, resolver: runnerFileResolver{r}, projectInstructions: instructionsFor}
+	r.transcript = transcriptSession{
+		store:               r.SessionStore,
+		systemPrompt:        desc,
+		resolver:            runnerFileResolver{r},
+		projectInstructions: instructionsFor,
+		nativeMedia:         func(ctx context.Context) llm.NativeMediaKinds { return r.NativeMediaKinds(ctx, "") },
+	}
 	a.SetSessionBuilder(r.transcript.build)
 	// The permission runtime is rebuilt on every load regardless of the action
 	// service: the rules on disk belong to this agent's workspace, so a load

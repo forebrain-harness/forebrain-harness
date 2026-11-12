@@ -639,7 +639,7 @@ func TestToolResultImageRoundTripsThroughFileReference(t *testing.T) {
 	}
 
 	// Rehydrate with the tool-row semantics pkg/run applies (run.
-	// rehydrateMessageImages: os.ReadFile + ImagePartWithin(path, persisted
+	// rehydrateMessageMedia: os.ReadFile + ImagePartWithin(path, persisted
 	// MIME, bytes, 0)) and require the exact live part back.
 	data, err := os.ReadFile(refs[0].FileID)
 	if err != nil {

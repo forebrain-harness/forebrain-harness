@@ -1,6 +1,7 @@
 package turn
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -59,7 +60,13 @@ func withoutDisplayImageLines(text string) string {
 // It does not apply the image-input gate: a message refused for a text-only
 // session model is still kept in the conversation, so the caller needs its
 // display text and stored parts either way and refuses only the request.
-func SurfaceTurnContentParts(userText string, displayText string, attachments []InputAttachment) (parts []llm.ContentPart, modelText string, display string, warnings []string, err error) {
+//
+// media is what the session's model takes directly — a PDF, an audio clip, a
+// video — as run.(*Runner).NativeMediaKinds answers it. An attachment of one of
+// those kinds is sent natively when the set carries it, and otherwise takes the
+// same path it always took: an unsendable attachment degrades to the note the
+// replay of that file_reference writes, so the switch being off changes nothing.
+func SurfaceTurnContentParts(userText string, displayText string, attachments []InputAttachment, media llm.NativeMediaKinds) (parts []llm.ContentPart, modelText string, display string, warnings []string, err error) {
 	text := strings.TrimSpace(userText)
 	if text == "" {
 		text = llm.ImageOnlyUserText
@@ -74,6 +81,27 @@ func SurfaceTurnContentParts(userText string, displayText string, attachments []
 		path := strings.TrimSpace(att.Path)
 		if path == "" {
 			continue
+		}
+		if media.Any() {
+			label, mimeType := attachmentLabelAndMIME(att)
+			if kind := attachmentNativeKind(att, mimeType); media.Has(kind) {
+				file, fileErr := llm.FileFromPath(path)
+				if fileErr == nil {
+					parts = append(parts, file)
+					continue
+				}
+				// A file too large to send inline, or one whose bytes could not
+				// be read, degrades exactly as an unsendable image does: the
+				// note names the file and the reason instead of failing the
+				// turn, and the request still runs.
+				note := llm.UnsendableImageNote(label, mimeType, fileErr.Error())
+				if errors.Is(fileErr, llm.ErrNativeMediaTooLarge) {
+					note = llm.NativeMediaTooLargeNote(label, mimeType)
+				}
+				parts = append(parts, llm.Text(note))
+				warnings = append(warnings, note)
+				continue
+			}
 		}
 		image, imageErr := AttachmentImageParts(path, text)
 		if imageErr != nil {
@@ -115,6 +143,21 @@ func AttachmentImageParts(path, text string) ([]llm.ContentPart, error) {
 		return []llm.ContentPart{part}, nil
 	}
 	return []llm.ContentPart{part, llm.Text(llm.ImageSourceNote(path))}, nil
+}
+
+// attachmentNativeKind names the kind of non-image media an attachment is: from
+// the type it was given, else from its bytes. "" is an image (the image path's
+// own business), a text file, or anything else this build never sends directly.
+func attachmentNativeKind(att InputAttachment, mimeType string) llm.MediaKind {
+	if kind := llm.NativeMediaKindOfMIME(mimeType); kind != "" {
+		return kind
+	}
+	if strings.TrimSpace(mimeType) != "" {
+		// A named type that is not native media: an image, text, a zip. It is
+		// not whatever its bytes might say instead.
+		return ""
+	}
+	return llm.NativeMediaKindOfMIME(llm.NativeMediaMIMETypeOfFile(strings.TrimSpace(att.Path)))
 }
 
 // attachmentLabelAndMIME names an attachment exactly the way it is stored: the

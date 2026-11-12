@@ -1239,7 +1239,7 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 		// A file the ladder cannot send is no longer fatal and gets no
 		// file_reference at all: the model is sent this row through
 		// run.UserInputParts (server.go), so the one note it must see comes from
-		// rehydrateMessageImages. Writing a second one here would say it twice —
+		// rehydrateMessageMedia. Writing a second one here would say it twice —
 		// and the note rides in the message text below, where the user reads it.
 		image, err := llm.ImageFile(abs)
 		if err != nil {
@@ -1287,7 +1287,7 @@ func (s *Server) withWebInputParts(ctx context.Context, runner *run.Runner, sess
 	if runner != nil && runner.FileResolver != nil {
 		resolver = runner.FileResolver
 	}
-	in.Parts = run.UserInputParts(ctx, resolver, turnInput.partsJSON)
+	in.Parts = run.UserInputParts(ctx, resolver, turnInput.partsJSON, nativeMediaFor(ctx, runner, sessionID))
 	return in, nil
 }
 
@@ -1895,4 +1895,15 @@ func (s *Server) handleAutoContinue(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
+}
+
+// nativeMediaFor answers what the web turn's model takes directly: the same
+// question the terminal asks its runner, asked for a surface that has already
+// resolved the conversation it is about. A nil runner has no model to ask, and
+// no attachment is sent directly.
+func nativeMediaFor(ctx context.Context, runner *run.Runner, sessionID string) llm.NativeMediaKinds {
+	if runner == nil {
+		return llm.NativeMediaKinds{}
+	}
+	return runner.NativeMediaKinds(ctx, sessionID)
 }
