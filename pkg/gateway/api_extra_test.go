@@ -6479,8 +6479,8 @@ func TestChatSessionModelPutWithoutAnEffortPinsTheRowsConfiguredEffort(t *testin
 	t.Cleanup(func() { _ = db.Close() })
 	sess := state.NewSessionStore(db, "main")
 	require.NoError(t, sess.Ensure(context.Background(), "s1", "s1"))
-	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sess}}
-	runner := &run.Runner{Deps: &env.Deps}
+	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sess}).WithConfig(&cfg)}
+	runner := &run.Runner{Deps: env.Deps}
 	env.Runner = runner
 	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
 	// The fixture states its configuration directly (the file is a restart-time

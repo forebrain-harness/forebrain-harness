@@ -788,7 +788,7 @@ func goalCheckConfig() *appcfg.Root {
 func TestGoalCheckRunsOnTheConfiguredRow(t *testing.T) {
 	probe := &dispatchProbe{}
 	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "configured"}`}
-	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: goalCheckConfig()}, Events: probe, SubagentExecutor: executor}
+	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(goalCheckConfig()), Events: probe, SubagentExecutor: executor}
 
 	verdict, err := goalCheck{runner: runner}.Evaluate(dispatchTestCtx(), "make the tests pass", []RoundOutcome{{Index: 0, Text: "fixed the parser"}})
 	if err != nil {
@@ -828,7 +828,7 @@ func TestGoalCheckRunsOnTheConfiguredRow(t *testing.T) {
 func TestGoalCheckIgnoresADispatchTimeModelPin(t *testing.T) {
 	probe := &dispatchProbe{}
 	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "configured"}`}
-	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: goalCheckConfig()}, Events: probe, SubagentExecutor: executor}
+	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(goalCheckConfig()), Events: probe, SubagentExecutor: executor}
 	// Another configured row, pinned the way the plan review's approval card
 	// pins the user's pick.
 	ctx := WithSubagentModelOverride(dispatchTestCtx(), SubagentModelOverride{
@@ -858,7 +858,7 @@ func TestGoalCheckFollowsTheSessionModelWhenUnconfigured(t *testing.T) {
 	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "unconfigured"}`}
 	cfg := goalCheckConfig()
 	cfg.Agents.GoalEvaluator = appcfg.SubagentConfig{}
-	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}, Events: probe, SubagentExecutor: executor}
+	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg), Events: probe, SubagentExecutor: executor}
 
 	if _, err := (goalCheck{runner: runner}).Evaluate(dispatchTestCtx(), "ship", nil); err != nil {
 		t.Fatalf("Evaluate: %v", err)
@@ -880,7 +880,7 @@ func TestGoalCheckConfigAppliesToAgentsWithoutDefinitions(t *testing.T) {
 	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "no definitions"}`}
 	cfg := goalCheckConfig()
 	cfg.Agents.Definitions = nil
-	runner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg, AgentName: "main"}, Events: probe, SubagentExecutor: executor}
+	runner := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main"}).WithConfig(cfg), Events: probe, SubagentExecutor: executor}
 
 	if _, err := (goalCheck{runner: runner}).Evaluate(dispatchTestCtx(), "ship", nil); err != nil {
 		t.Fatalf("Evaluate: %v", err)
@@ -943,7 +943,7 @@ func TestGoalCheckEffortFollowsTheRowDefaultUntilOverridden(t *testing.T) {
 	dispatch := func(t *testing.T) SubagentModelOverride {
 		t.Helper()
 		home := t.TempDir()
-		owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg, AgentName: "main"},
+		owner := &Runner{Deps: (&Deps{Home: home, AgentName: "main"}).WithConfig(cfg),
 			SubagentExecutor: &fixedSubagentExecutor{output: `{"status": "done", "why": "ok"}`}}
 		var pin SubagentModelOverride
 		var pinned bool
