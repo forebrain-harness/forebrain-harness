@@ -408,6 +408,11 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	// knows. The version and the address the browser reached are the
 	// browser's own.
 	api.Get("/runtime", s.handleRuntimeInfo)
+	// The log page (plan 287): every process's records under <home>/logs, read
+	// only. One call's request and response are fetched on their own.
+	api.Get("/logs", s.handleLogs)
+	api.Get("/logs/exchange", s.handleLogExchange)
+	api.Get("/logs/blob", s.handleLogBlob)
 	// The models page (plan 265): the install-wide model table by row id, the one
 	// list every model picker reads, the built-in providers a form is built from,
 	// the live capability lookup, and the two things the page tests a row with.
