@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,7 +160,10 @@ func FormatEventTime(t time.Time) string { return t.Format(eventTimeLayout) }
 // file only grows, so its mtime is its newest record), and by eventScanMaxBytes
 // / eventScanMaxHits. Only the rows of the served page are decoded in full: the
 // scan itself reads a time, a level and the byte-level filters.
-func QueryEvents(root string, q EventQuery) (EventPage, error) {
+func QueryEvents(ctx context.Context, root string, q EventQuery) (EventPage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	from, to := q.From, q.To
 	if to.IsZero() {
 		to = time.Now()
@@ -194,6 +198,12 @@ func QueryEvents(root string, q EventQuery) (EventPage, error) {
 	var scanned int64
 	scanner := newLogLineScanner(eventLineMaxBytes)
 	for index := range files {
+		// The scan is bounded by bytes, but a client that walked away should not
+		// keep it reading: the request's context is checked once per file, which
+		// is where a day's 32 MiB part (tens of milliseconds) ends.
+		if err := ctx.Err(); err != nil {
+			return EventPage{}, err
+		}
 		file := &files[index]
 		if file.stderr != nil {
 			// A process's raw stderr is one record, made here rather than read
@@ -948,7 +958,10 @@ type exchangePair struct {
 // both are scanned; the response is in the day it ended.
 //
 // A missing call is fs.ErrNotExist; a day that is not a day is ErrBadLogRequest.
-func ReadExchange(root, day, id string) (Exchange, error) {
+func ReadExchange(ctx context.Context, root, day, id string) (Exchange, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	start, ok := parseDayName(day)
 	if !ok {
 		return Exchange{}, fmt.Errorf("%w: day %q is not a day", ErrBadLogRequest, day)
@@ -961,6 +974,9 @@ func ReadExchange(root, day, id string) (Exchange, error) {
 	pairs := make(map[string]*exchangePair)
 	scanner := newLogLineScanner(eventLineMaxBytes)
 	for offset := 0; offset <= 1; offset++ {
+		if err := ctx.Err(); err != nil {
+			return Exchange{}, err
+		}
 		name := start.AddDate(0, 0, -offset).Format(dayLayout)
 		entries, err := os.ReadDir(filepath.Join(logsDir, name))
 		if err != nil {
@@ -982,6 +998,9 @@ func ReadExchange(root, day, id string) (Exchange, error) {
 				host:   host,
 				proc:   proc,
 				pid:    pid,
+			}
+			if err := ctx.Err(); err != nil {
+				return Exchange{}, err
 			}
 			scanExchangeFile(&file, scanner, pairs)
 			if len(pairs) >= exchangeCallsMax {

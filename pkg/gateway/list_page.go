@@ -263,7 +263,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	page, err := telemetry.QueryEvents(s.Home, telemetry.EventQuery{
+	page, err := telemetry.QueryEvents(r.Context(), s.Home, telemetry.EventQuery{
 		From: from, To: to,
 		Levels: levels, Sources: sources,
 		Project: project,
@@ -274,6 +274,11 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		Page:    q.Page, PageSize: q.PageSize,
 	})
 	if err != nil {
+		// The client is gone; there is nobody left to answer and no status worth
+		// writing. Any other failure is the request's own (bad range, bad enum).
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -298,9 +303,11 @@ func (s *Server) handleLogExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	exchange, err := telemetry.ReadExchange(s.Home,
+	exchange, err := telemetry.ReadExchange(r.Context(), s.Home,
 		strings.TrimSpace(query.Get("day")), strings.TrimSpace(query.Get("id")))
 	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return
 	case errors.Is(err, telemetry.ErrBadLogRequest):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

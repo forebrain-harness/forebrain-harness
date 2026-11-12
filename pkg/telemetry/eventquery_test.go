@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -117,7 +118,7 @@ func TestQueryEventsFiltersByEveryDimension(t *testing.T) {
 	query := func(q EventQuery) EventPage {
 		t.Helper()
 		q.From, q.To = at.Add(-time.Minute), at.Add(time.Minute)
-		page, err := QueryEvents(root, q)
+		page, err := QueryEvents(context.Background(), root, q)
 		require.NoError(t, err)
 		return page
 	}
@@ -178,10 +179,11 @@ func TestQueryEventsTimeRangeAcrossDays(t *testing.T) {
 
 	// Yesterday's noon to today's nine: the evening of one day and the morning
 	// of the next, which live in two different directories.
-	page, err := QueryEvents(root, EventQuery{
+	page, err := QueryEvents(context.Background(), root, EventQuery{
 		From: yesterdayStart.Add(12 * time.Hour),
 		To:   startOfLocalDay(today).Add(9 * time.Hour),
 	})
+
 	require.NoError(t, err)
 	require.Equal(t, 2, page.Total)
 	require.Equal(t, "today morning", page.Rows[0].Msg)
@@ -211,7 +213,7 @@ func TestQueryEventsNewestFirstAndStablePaging(t *testing.T) {
 	var times []time.Time
 	for page := 1; page <= 4; page++ {
 		query.Page = page
-		result, err := QueryEvents(root, query)
+		result, err := QueryEvents(context.Background(), root, query)
 		require.NoError(t, err)
 		require.Equal(t, 200, result.Total)
 		require.Len(t, result.Rows, 50)
@@ -228,7 +230,7 @@ func TestQueryEventsNewestFirstAndStablePaging(t *testing.T) {
 	}
 	// A page past the end serves the last one.
 	query.Page = 99
-	last, err := QueryEvents(root, query)
+	last, err := QueryEvents(context.Background(), root, query)
 	require.NoError(t, err)
 	require.Equal(t, 4, last.Page)
 	require.Len(t, last.Rows, 50)
@@ -250,10 +252,11 @@ func TestQueryEventsLevelCountsIgnoreLevelFilter(t *testing.T) {
 		Record{Time: at.Add(6 * time.Millisecond), Level: "ERROR", Kind: "log", Msg: "e1"},
 	)
 
-	page, err := QueryEvents(root, EventQuery{
+	page, err := QueryEvents(context.Background(), root, EventQuery{
 		From: at.Add(-time.Minute), To: at.Add(time.Minute),
 		Levels: []string{"ERROR"},
 	})
+
 	require.NoError(t, err)
 	require.Equal(t, 1, page.Total)
 	require.Len(t, page.Rows, 1)
@@ -273,7 +276,7 @@ func TestQueryEventsBucketsCoverTheRange(t *testing.T) {
 		Record{Time: from.Add(59 * time.Minute), Level: "ERROR", Kind: "log", Msg: "late"},
 	)
 
-	page, err := QueryEvents(root, EventQuery{From: from, To: from.Add(time.Hour)})
+	page, err := QueryEvents(context.Background(), root, EventQuery{From: from, To: from.Add(time.Hour)})
 	require.NoError(t, err)
 	require.Len(t, page.Buckets, eventBucketCount)
 	require.True(t, page.Buckets[0].T.Equal(from))
@@ -299,7 +302,7 @@ func TestQueryEventsParsesHostWithDashes(t *testing.T) {
 	writeLines(t, dir, "gateway-gw-pod-7f9c-4117-51be02.1.jsonl",
 		recordLine(t, Record{Time: at.Add(time.Second), Level: "INFO", Kind: "log", Msg: "pod record, part 1"}))
 
-	page, err := QueryEvents(root, EventQuery{From: at.Add(-time.Minute), To: at.Add(time.Minute)})
+	page, err := QueryEvents(context.Background(), root, EventQuery{From: at.Add(-time.Minute), To: at.Add(time.Minute)})
 	require.NoError(t, err)
 	require.Equal(t, 2, page.Total)
 	for _, row := range page.Rows {
@@ -320,17 +323,19 @@ func TestQueryEventsTextIsCaseInsensitive(t *testing.T) {
 		Record{Time: at, Level: "INFO", Kind: "log", Msg: "Gemini tool loop 400"},
 		Record{Time: at.Add(time.Second), Level: "INFO", Kind: "log", Msg: "something else"},
 	)
-	page, err := QueryEvents(root, EventQuery{
+	page, err := QueryEvents(context.Background(), root, EventQuery{
 		From: at.Add(-time.Minute), To: at.Add(time.Minute), Text: "gemini TOOL",
 	})
+
 	require.NoError(t, err)
 	require.Equal(t, 1, page.Total)
 	require.Equal(t, "Gemini tool loop 400", page.Rows[0].Msg)
 
 	// The filter reaches the attributes, which a plain message search would miss.
-	page, err = QueryEvents(root, EventQuery{
+	page, err = QueryEvents(context.Background(), root, EventQuery{
 		From: at.Add(-time.Minute), To: at.Add(time.Minute), Text: "else",
 	})
+
 	require.NoError(t, err)
 	require.Equal(t, 1, page.Total)
 }
@@ -352,7 +357,7 @@ func TestQueryEventsSkipsOverlongAndBrokenLines(t *testing.T) {
 		recordLine(t, Record{Time: at.Add(time.Second), Level: "INFO", Kind: "log", Msg: "after the noise"}),
 	)
 
-	page, err := QueryEvents(root, EventQuery{From: at.Add(-time.Minute), To: at.Add(time.Minute)})
+	page, err := QueryEvents(context.Background(), root, EventQuery{From: at.Add(-time.Minute), To: at.Add(time.Minute)})
 	require.NoError(t, err)
 	require.Equal(t, 2, page.Total)
 	require.Equal(t, "after the noise", page.Rows[0].Msg)
@@ -370,7 +375,7 @@ func TestQueryEventsSurfacesProcessStderr(t *testing.T) {
 	log := testEventLog(t, root, "tui")
 	writeRecords(t, log, Record{Time: at, Level: "INFO", Kind: "log", Msg: "a normal record"})
 
-	page, err := QueryEvents(root, EventQuery{From: at.Add(-time.Hour), To: time.Now().Add(time.Minute)})
+	page, err := QueryEvents(context.Background(), root, EventQuery{From: at.Add(-time.Hour), To: time.Now().Add(time.Minute)})
 	require.NoError(t, err)
 	require.Equal(t, 2, page.Total)
 	stderrRow := page.Rows[0]
@@ -392,7 +397,7 @@ func TestQueryEventsSurfacesProcessStderr(t *testing.T) {
 func queryFor(t *testing.T, root string, at time.Time, q EventQuery) int {
 	t.Helper()
 	q.From, q.To = at.Add(-time.Hour), time.Now().Add(time.Minute)
-	page, err := QueryEvents(root, q)
+	page, err := QueryEvents(context.Background(), root, q)
 	require.NoError(t, err)
 	return page.Total
 }
@@ -410,14 +415,14 @@ func TestQueryEventsStopsAtScanLimit(t *testing.T) {
 	eventScanMaxHits = 5
 	t.Cleanup(func() { eventScanMaxHits = previous })
 
-	page, err := QueryEvents(root, EventQuery{From: at.Add(-time.Minute), To: at.Add(time.Minute)})
+	page, err := QueryEvents(context.Background(), root, EventQuery{From: at.Add(-time.Minute), To: at.Add(time.Minute)})
 	require.NoError(t, err)
 	require.True(t, page.Truncated)
 	require.Greater(t, page.Total, 0)
 
 	// Under the ceiling the same query is complete.
 	eventScanMaxHits = previous
-	page, err = QueryEvents(root, EventQuery{From: at.Add(-time.Minute), To: at.Add(time.Minute)})
+	page, err = QueryEvents(context.Background(), root, EventQuery{From: at.Add(-time.Minute), To: at.Add(time.Minute)})
 	require.NoError(t, err)
 	require.False(t, page.Truncated)
 	require.Equal(t, 20, page.Total)
@@ -459,7 +464,7 @@ func TestReadExchangePairsRequestAndResponse(t *testing.T) {
 		}, map[string]BlobRef{"resp": {Name: id + ".resp.gz", Bytes: int64(len(responseBody)), Whole: true}}, "s-a")),
 	)
 
-	exchange, err := ReadExchange(root, day, id)
+	exchange, err := ReadExchange(context.Background(), root, day, id)
 	require.NoError(t, err)
 	require.Equal(t, id, exchange.ID)
 	require.Equal(t, day, exchange.Day)
@@ -489,9 +494,9 @@ func TestReadExchangePairsRequestAndResponse(t *testing.T) {
 
 	// A call the day does not hold is not found, and a day that is not a day is
 	// refused before the directory is read.
-	_, err = ReadExchange(root, day, "nope-000001")
+	_, err = ReadExchange(context.Background(), root, day, "nope-000001")
 	require.ErrorIs(t, err, os.ErrNotExist)
-	_, err = ReadExchange(root, "..", id)
+	_, err = ReadExchange(context.Background(), root, "..", id)
 	require.ErrorIs(t, err, ErrBadLogRequest)
 }
 
@@ -508,7 +513,7 @@ func TestReadExchangeWithoutResponse(t *testing.T) {
 		}, map[string]BlobRef{"req": {Name: id + ".req.gz", Bytes: 10, Whole: true}}, "s-b")),
 	)
 
-	exchange, err := ReadExchange(root, day, id)
+	exchange, err := ReadExchange(context.Background(), root, day, id)
 	require.NoError(t, err)
 	require.NotNil(t, exchange.Request)
 	require.Nil(t, exchange.Response)
@@ -540,7 +545,7 @@ func TestReadExchangeListsConcurrentCalls(t *testing.T) {
 	add("three-000003", "s-3", base.Add(30*time.Second), base.Add(40*time.Second), 200)
 	writeLines(t, dir, "tui-mbp-4117-abcdef.jsonl", lines...)
 
-	exchange, err := ReadExchange(root, day, "one-000001")
+	exchange, err := ReadExchange(context.Background(), root, day, "one-000001")
 	require.NoError(t, err)
 	require.Len(t, exchange.Concurrent, 1)
 	require.Equal(t, "two-000002", exchange.Concurrent[0].ID)
@@ -548,7 +553,7 @@ func TestReadExchangeListsConcurrentCalls(t *testing.T) {
 	require.Equal(t, 500, exchange.Concurrent[0].Status)
 
 	// The call that ran afterwards does not overlap the first one.
-	exchange, err = ReadExchange(root, day, "three-000003")
+	exchange, err = ReadExchange(context.Background(), root, day, "three-000003")
 	require.NoError(t, err)
 	require.Empty(t, exchange.Concurrent)
 }
@@ -778,7 +783,7 @@ func BenchmarkQueryEvents(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				page, err := QueryEvents(root, testCase.query)
+				page, err := QueryEvents(context.Background(), root, testCase.query)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -788,4 +793,31 @@ func BenchmarkQueryEvents(b *testing.B) {
 			}
 		})
 	}
+}
+
+// A caller that has gone away stops the scan instead of leaving it to read the
+// rest of the tree: the request's context is checked at every file boundary.
+func TestQueryEventsStopsWhenTheCallerIsGone(t *testing.T) {
+	root := t.TempDir()
+	writeRecords(t, testEventLog(t, root, "tui"),
+		Record{Time: time.Now(), Level: "INFO", Kind: "log", Msg: "one"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	now := time.Now()
+	_, err := QueryEvents(ctx, root, EventQuery{From: now.Add(-time.Hour), To: now.Add(time.Hour)})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// The exchange scan reads two day directories; a cancelled request must not
+// keep walking them either.
+func TestReadExchangeStopsWhenTheCallerIsGone(t *testing.T) {
+	root := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ReadExchange(ctx, root, time.Now().Format(dayLayout), "any")
+	require.ErrorIs(t, err, context.Canceled)
 }
