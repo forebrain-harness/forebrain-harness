@@ -691,9 +691,9 @@ func (h *eventHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &next
 }
 
-// WithGroup prefixes every later attribute key with the group name. Today's
-// tuiLogSink.WithGroup drops the group instead (pkg/tui/render.go); a record that
-// says which subsystem an attribute came from is the point of having groups.
+// WithGroup prefixes every later attribute key with the group name. The TUI's
+// old file sink dropped the group instead (it is gone with plan 285); a record
+// that says which subsystem an attribute came from is the point of groups.
 func (h *eventHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
