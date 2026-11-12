@@ -1905,5 +1905,5 @@ func nativeMediaFor(ctx context.Context, runner *run.Runner, sessionID string) l
 	if runner == nil {
 		return llm.NativeMediaKinds{}
 	}
-	return runner.NativeMediaKinds(ctx, sessionID)
+	return run.NativeMediaKinds(ctx, runner, sessionID)
 }

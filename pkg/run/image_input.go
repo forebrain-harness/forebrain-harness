@@ -274,7 +274,7 @@ func sessionHistoryCarriesImage(ctx context.Context, r *Runner, sessionID string
 	if err != nil {
 		return false
 	}
-	for _, msg := range rehydrateImageReferences(ctx, r.FileResolver, entries, r.NativeMediaKinds(ctx, sid)) {
+	for _, msg := range rehydrateImageReferences(ctx, r.FileResolver, entries, NativeMediaKinds(ctx, r, sid)) {
 		for _, part := range msg.Parts {
 			if part.Type == llm.ContentTypeImageBase64 || part.Type == llm.ContentTypeImageURL {
 				return true

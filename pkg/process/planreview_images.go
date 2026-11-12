@@ -32,7 +32,7 @@ func planReviewImageParts(ctx context.Context, runner *run.Runner, sources []tur
 	for _, source := range sources {
 		n := 0
 		var files []string
-		parts := run.UserInputParts(ctx, runner.FileResolver, source.PartsJSON, runner.NativeMediaKinds(ctx, ""))
+		parts := run.UserInputParts(ctx, runner.FileResolver, source.PartsJSON, run.NativeMediaKinds(ctx, runner, ""))
 		for _, part := range parts {
 			if part.Type != llm.ContentTypeImageBase64 && part.Type != llm.ContentTypeImageURL {
 				continue

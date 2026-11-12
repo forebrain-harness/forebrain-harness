@@ -26,7 +26,11 @@ import (
 // sessionID names the conversation when ctx does not already carry it, the way
 // ImageTurnRefusal resolves it: the web and terminal surfaces call this before a
 // turn's context exists.
-func (r *Runner) NativeMediaKinds(ctx context.Context, sessionID string) llm.NativeMediaKinds {
+//
+// It is a function over the Runner rather than a method on it, for the reason
+// ImageTurnRefusal is: a surface's question about what a conversation may carry
+// is not part of the Runner's own surface, and that surface has a budget.
+func NativeMediaKinds(ctx context.Context, r *Runner, sessionID string) llm.NativeMediaKinds {
 	if r == nil {
 		return llm.NativeMediaKinds{}
 	}

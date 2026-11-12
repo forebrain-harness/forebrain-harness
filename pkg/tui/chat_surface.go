@@ -188,7 +188,7 @@ func (s *ChatSession) dispatchSurfaceContent(ctx context.Context, sessionID, ch 
 	if len(submission.Attachments) > 0 {
 		var err error
 		var warnings []string
-		parts, modelText, displayText, warnings, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments, s.runner().NativeMediaKinds(ctx, sessionID))
+		parts, modelText, displayText, warnings, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments, run.NativeMediaKinds(ctx, s.runner(), sessionID))
 		if err != nil {
 			return err
 		}

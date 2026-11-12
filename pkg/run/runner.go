@@ -1274,7 +1274,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		systemPrompt:        desc,
 		resolver:            runnerFileResolver{r},
 		projectInstructions: instructionsFor,
-		nativeMedia:         func(ctx context.Context) llm.NativeMediaKinds { return r.NativeMediaKinds(ctx, "") },
+		nativeMedia:         func(ctx context.Context) llm.NativeMediaKinds { return NativeMediaKinds(ctx, r, "") },
 	}
 	a.SetSessionBuilder(r.transcript.build)
 	// The permission runtime is rebuilt on every load regardless of the action

@@ -3328,7 +3328,7 @@ func continueForkSubagent(ctx context.Context, fac Factory, record agent.History
 		systemPrompt: frozen,
 		resolver:     own.FileResolver,
 		nativeMedia: func(ctx context.Context) llm.NativeMediaKinds {
-			return own.NativeMediaKinds(ctx, record.WorkerSessionID)
+			return NativeMediaKinds(ctx, own, record.WorkerSessionID)
 		},
 	}
 	history, err := ts.history(ctx, record.WorkerSessionID)
