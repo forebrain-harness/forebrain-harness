@@ -567,7 +567,9 @@
                        preset; on the right the context ring, the model, the
                        reasoning effort, then send. Every chip is drawn whether
                        or not its data has landed yet, so the bar keeps its
-                       shape from the first frame. -->
+                       shape from the first frame — the effort chip is the one
+                       exception: once the data says the model has no levels,
+                       it is not drawn. -->
                   <div class="flex min-w-0 flex-1 items-center gap-2">
                     <ComposerPlusMenu :disabled="composerLocked" @insert="insertPlusCommand" />
                     <ModeChip :mode="mode" :disabled="isStreaming || composerLocked" @select="selectMode" />
@@ -591,8 +593,10 @@
                       @pick="pickDraftModel"
                     />
                     <EffortChip
+                      v-if="!sessionModelData || sessionEfforts.length"
                       :effort="sessionModelData?.effort ?? ''"
                       :efforts="sessionEfforts"
+                      :default-effort="sessionDefaultEffort"
                       :disabled="composerLocked || !sessionModelData"
                       @select="selectEffort"
                     />
@@ -926,6 +930,7 @@ import type { ComposerSubmission, PickedFile, SubmittedAttachment } from '@/lib/
 import AttachSaveDialog, { type AttachFileRow } from '@/components/chat/AttachSaveDialog.vue'
 import tip from '@/directives/tip'
 import { sessionTitleFromContent } from '@/lib/sessionTitle'
+import { sessionModelOptionInForce } from '@/lib/sessionModel'
 import { useI18n } from '@/locales'
 import type { I18nKey } from '@/locales'
 const { lastSessionId } = useLastSession()
@@ -1859,7 +1864,7 @@ const approvalPickerRef = ref<InstanceType<typeof ApprovalPresetPicker> | null>(
  * own choice. The chips themselves work before there is a session: they read
  * the agent's default (`chatModelDefault`) and the pick is held here.
  */
-const draftModel = ref<{ modelId?: string; provider: string; model: string; effort: string } | null>(null)
+const draftModel = ref<{ modelId?: string; provider: string; model: string; effort?: string } | null>(null)
 
 async function loadSessionModel(sid: string | null) {
   const generation = ++sessionModelGeneration
@@ -1875,27 +1880,26 @@ async function loadSessionModel(sid: string | null) {
   }
 }
 
-/** A model picked on a new chat: held, with the effort back at the model's default. */
+/** A model picked on a new chat: held without an effort — the server pins the
+ *  one the model is configured with when the first message opens the session —
+ *  and the chip shows that configured effort meanwhile. */
 function pickDraftModel(option: SessionModelOption) {
   const data = sessionModelData.value
   if (!data) return
-  draftModel.value = { modelId: option.id, provider: option.provider, model: option.model, effort: '' }
-  sessionModelData.value = { ...data, modelId: option.id, provider: option.provider, model: option.model, effort: '' }
+  draftModel.value = { modelId: option.id, provider: option.provider, model: option.model }
+  sessionModelData.value = { ...data, modelId: option.id, provider: option.provider, model: option.model, effort: option.defaultEffort ?? '' }
 }
 
 watch(sessionId, (sid) => {
   void loadSessionModel(sid)
 }, { immediate: true })
 
-/** The reasoning levels the model in force offers, per the shared catalog. */
-const sessionEfforts = computed(() => {
-  const data = sessionModelData.value
-  if (!data) return []
-  const option = data.modelId
-    ? data.options.find((candidate) => candidate.id === data.modelId)
-    : data.options.find((candidate) => candidate.provider === data.provider && candidate.model === data.model)
-  return option?.efforts ?? []
-})
+/** The option the conversation's selection names, per the shared catalog. */
+const sessionModelOption = computed(() => sessionModelOptionInForce(sessionModelData.value))
+/** The reasoning levels the model in force offers. */
+const sessionEfforts = computed(() => sessionModelOption.value?.efforts ?? [])
+/** The effort the model page configured for the model in force. */
+const sessionDefaultEffort = computed(() => sessionModelOption.value?.defaultEffort ?? '')
 
 /** The effort pick writes the session's own row; the model stays as it is. */
 async function selectEffort(effort: string) {

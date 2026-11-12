@@ -100,7 +100,7 @@
  * this primary agent is configured with to switch to. A choice writes the
  * session's own model row — the same switch /model makes, session-scoped — and
  * rides the next turn; the agent's default for other conversations never moves.
- * Switching resets the effort to the model's default, exactly as a /model
+ * Switching pins the effort the model is configured with, exactly as a /model
  * switch does. On a new chat there is no row to write yet: the pick is handed to
  * the page, which writes it once its first message opens the session.
  *
@@ -220,9 +220,7 @@ async function choose(option: SessionModelOption) {
       modelId: option.id,
       provider: option.provider,
       model: option.model,
-      // A model switch resets the effort to the model's own default — the
-      // effort chip pins one for the model it belongs to.
-      effort: '',
+      // No effort: the server pins the row's configured one, as /model does.
     })
     emit('saved')
   } catch (cause) {

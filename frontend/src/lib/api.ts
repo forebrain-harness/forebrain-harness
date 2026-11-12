@@ -1734,6 +1734,10 @@ export interface SessionModelOption {
   baseUrl?: string
   apiPath?: string
   efforts: string[]
+  /** The effort a switch to this row pins when the request names none: the
+   *  row's configured effort (the model page's 「思考强度」), '' when it
+   *  configures none. Absent from a list that predates the field. */
+  defaultEffort?: string
   /** True when the catalog knows this model takes image input; an unknown
    *  model reports false, so a picker marks only what it knows. */
   supportsImages?: boolean
@@ -3010,11 +3014,13 @@ export const forebrainApi = {
     return api.get<SessionModelResponse>(`/chat/sessions/${encodeURIComponent(sessionId)}/model`).then((res) => res.data)
   },
 
-  /** Records the conversation's own model choice. An empty effort is the
-   *  explicit "model default" pin; the change rides the next turn. modelId
-   *  names the configured row a pick chose — the same pair may be configured
-   *  more than once, and the server refuses a pair it cannot tell apart. */
-  saveSessionModel(sessionId: string, choice: { modelId?: string; provider: string; model: string; effort: string }) {
+  /** Records the conversation's own model choice. Omitting the effort is a
+   *  model switch: the server takes that row's configured effort and pins it
+   *  into the session row. Naming one — `''` included — pins that value. The
+   *  change rides the next turn. modelId names the configured row a pick
+   *  chose — the same pair may be configured more than once, and the server
+   *  refuses a pair it cannot tell apart. */
+  saveSessionModel(sessionId: string, choice: { modelId?: string; provider: string; model: string; effort?: string }) {
     return putRaw<SessionModelSelection>(`/chat/sessions/${encodeURIComponent(sessionId)}/model`, toSnakeCase(choice))
   },
 

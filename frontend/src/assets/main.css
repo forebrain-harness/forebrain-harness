@@ -852,6 +852,41 @@
   color: var(--forebrain-brand-1);
 }
 
+/* A one-line option (the effort menu): a fixed lead column for the check, the
+   label, the level's own value name, and a trailing tag. */
+.forebrain-chip-menu-opt--line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.forebrain-chip-menu-opt--line b {
+  font-weight: 400;
+}
+.forebrain-chip-menu-opt--line.forebrain-chip-menu-opt--on b {
+  font-weight: 500;
+}
+.forebrain-chip-menu-lead {
+  width: 14px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--forebrain-brand-1);
+}
+.forebrain-chip-menu-val {
+  font-family: var(--forebrain-mono-font);
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
+}
+.forebrain-chip-menu-tag {
+  margin-left: auto;
+  font-size: 11.5px;
+  font-style: normal;
+  color: var(--forebrain-muted-text);
+  white-space: nowrap;
+}
+
 .forebrain-main {
   position: relative;
   z-index: 1;

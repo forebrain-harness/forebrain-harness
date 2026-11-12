@@ -131,6 +131,7 @@
                     v-if="sessionModelData && sessionEfforts.length"
                     :effort="sessionModelData.effort"
                     :efforts="sessionEfforts"
+                    :default-effort="sessionDefaultEffort"
                     :disabled="composerLocked"
                     @select="selectEffort"
                   />
@@ -286,6 +287,7 @@ import forebrainApi, {
 } from '@/lib/api'
 import { parseSkillCandidates } from '@/lib/skillCandidates'
 import { parseWorkshopTarget } from '@/lib/workshopTarget'
+import { sessionModelOptionInForce } from '@/lib/sessionModel'
 import { useI18n, type I18nKey } from '@/locales'
 
 const { t } = useI18n()
@@ -422,14 +424,9 @@ async function loadSessionModel(sid: string | null) {
     if (generation === modelGeneration) sessionModelData.value = null
   }
 }
-const sessionEfforts = computed(() => {
-  const data = sessionModelData.value
-  if (!data) return []
-  const option = data.modelId
-    ? data.options.find((candidate) => candidate.id === data.modelId)
-    : data.options.find((candidate) => candidate.provider === data.provider && candidate.model === data.model)
-  return option?.efforts ?? []
-})
+const sessionModelOption = computed(() => sessionModelOptionInForce(sessionModelData.value))
+const sessionEfforts = computed(() => sessionModelOption.value?.efforts ?? [])
+const sessionDefaultEffort = computed(() => sessionModelOption.value?.defaultEffort ?? '')
 
 async function selectEffort(effort: string) {
   const sid = activeSessionId.value
