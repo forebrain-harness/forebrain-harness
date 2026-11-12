@@ -1,6 +1,6 @@
 <template>
   <div class="forebrain-pager" data-testid="table-pager">
-    <span class="forebrain-list-note" data-testid="pager-total">{{ t('list.total', { total }) }}</span>
+    <span class="forebrain-list-note" data-testid="pager-total">{{ totalLabel || t('list.total', { total }) }}</span>
     <span class="flex-1" />
     <span class="forebrain-pager-size">
       <Select :model-value="String(pageSize)" @update:model-value="onPageSizeChange">
@@ -94,6 +94,9 @@ const props = defineProps<{
   total: number
   page: number
   pageSize: number
+  /** The count line's own words, where the total is a bound the list has to
+   *  state itself ("120 条以上" for a scan that stopped at its ceiling). */
+  totalLabel?: string
 }>()
 
 const emit = defineEmits<{

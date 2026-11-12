@@ -3,12 +3,17 @@
     <SheetContent
       side="right"
       class="forebrain-drawer sm:max-w-none"
+      :style="widthStyle"
       :aria-label="title"
       @escape-key-down="preventDefault"
       @interact-outside="onInteractOutside"
     >
       <div class="forebrain-drawer-head">
-        <b>{{ title }}</b>
+        <!-- A record that draws its own header — a call's status and moment, a
+             log line's level and title — replaces the shell's title here; the
+             `title` prop stays the panel's name for assistive technology. -->
+        <slot name="head" />
+        <b v-if="!$slots.head">{{ title }}</b>
         <BadgeComponent v-if="readonly" variant="gray">{{ t('drawer.readonly') }}</BadgeComponent>
         <button
           v-tip:bottom="t('common.close')"
@@ -39,8 +44,12 @@
  * whatever opened it — and its `readonly` badge says the record cannot be
  * changed here. It is the library's Sheet (plan 096); its look is the global
  * `.forebrain-drawer` design class, since a sheet's content is portalled.
+ *
+ * Two things a caller can change: the width (the log page's call drawer is the
+ * prototype's 720 rather than the design's 560) and the header (`#head` draws a
+ * record's own badges and moment where the plain title would be).
  */
-import { nextTick, onBeforeUnmount, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, watch } from 'vue'
 import { X } from 'lucide-vue-next'
 
 import { Sheet, SheetContent } from '@repo/shadcn-vue/components/ui/sheet'
@@ -48,11 +57,20 @@ import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import { useI18n } from '@/locales'
 import { isTopModal, popModal, pushModal } from './modalStack'
 
-const props = withDefaults(defineProps<{ open: boolean; title: string; readonly?: boolean }>(), {
-  readonly: false,
-})
+const props = withDefaults(
+  defineProps<{
+    open: boolean
+    title: string
+    readonly?: boolean
+    /** The panel's width in px; absent keeps the design's 560. */
+    width?: number
+  }>(),
+  { readonly: false },
+)
 const emit = defineEmits<{ close: [] }>()
 const { t } = useI18n()
+
+const widthStyle = computed(() => (props.width ? { width: `${props.width}px` } : undefined))
 
 const id = Symbol('forebrain-drawer')
 let restoreFocus: HTMLElement | null = null
