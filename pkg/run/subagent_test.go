@@ -5007,7 +5007,7 @@ func TestSubagentManualCompactionReusesTheSubagentsPrefix(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("seed record: ok=%v err=%v", ok, err)
 	}
-	subCtx := subagentRecordContext(context.Background(), fix.fac, record)
+	subCtx := subagentRecordContext(context.Background(), fix.fac, record, SubagentModelOverride{})
 	if worker := record.WorkerSessionID; worker != workerID {
 		t.Fatalf("worker session = %q, want %q", worker, workerID)
 	}
@@ -5090,7 +5090,7 @@ func TestForkSubagentManualCompactionReusesItsFrozenPrefix(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("seed record: ok=%v err=%v", ok, err)
 	}
-	subCtx := subagentRecordContext(context.Background(), fix.fac, record)
+	subCtx := subagentRecordContext(context.Background(), fix.fac, record, SubagentModelOverride{})
 	worker := workerID
 	// The fork executor persists its answer, so the summary request is the
 	// fork's last request plus that answer and the instruction. The answer
@@ -7760,7 +7760,12 @@ func TestSubagentRecordContextKeepsTheRowTheRecordNames(t *testing.T) {
 	record := agent.HistoryEntry{
 		SessionID: "conv-row", ModelProvider: "openai", Model: "gpt-4o", ModelID: "row-2",
 	}
-	pin, ok := SubagentModelOverrideFromContext(subagentRecordContext(context.Background(), subagentRecordRowFactory(), record))
+	fac := subagentRecordRowFactory()
+	recordPin, err := subagentRecordPin(context.Background(), fac, record)
+	if err != nil {
+		t.Fatalf("resolve the record's pin: %v", err)
+	}
+	pin, ok := SubagentModelOverrideFromContext(subagentRecordContext(context.Background(), fac, record, recordPin))
 	if !ok {
 		t.Fatal("the record's model did not reach the continuation")
 	}
@@ -7778,7 +7783,12 @@ func TestSubagentRecordContextResolvesThePairOnlyWithoutARow(t *testing.T) {
 	t.Parallel()
 
 	record := agent.HistoryEntry{SessionID: "conv-row", ModelProvider: "openai", Model: "gpt-4o"}
-	pin, ok := SubagentModelOverrideFromContext(subagentRecordContext(context.Background(), subagentRecordRowFactory(), record))
+	fac := subagentRecordRowFactory()
+	recordPin, err := subagentRecordPin(context.Background(), fac, record)
+	if err != nil {
+		t.Fatalf("resolve the record's pin: %v", err)
+	}
+	pin, ok := SubagentModelOverrideFromContext(subagentRecordContext(context.Background(), fac, record, recordPin))
 	if !ok {
 		t.Fatal("the record's model did not reach the continuation")
 	}
@@ -8010,7 +8020,7 @@ func TestSubagentContinuationRunsInItsRecordedWorktree(t *testing.T) {
 		TaskID: "task-continue", AgentType: "general-purpose", AgentKind: "typed",
 		WorkerSessionID: "ws-task-continue", SessionID: "session-1", Worktree: dir,
 	}
-	hostCtx := subagentRecordContext(context.Background(), fac, record)
+	hostCtx := subagentRecordContext(context.Background(), fac, record, SubagentModelOverride{})
 	if got, err := toolpkg.WorkingDir(hostCtx); err != nil || got != dir {
 		t.Fatalf("continuation working directory = %q, %v; want %q", got, err, dir)
 	}
@@ -8031,7 +8041,7 @@ func TestSubagentContinuationRunsInItsRecordedWorktree(t *testing.T) {
 	if err := subagentWorktreeMissing(plain); err != nil {
 		t.Fatalf("a subagent without a worktree must not be refused: %v", err)
 	}
-	if got, _ := toolpkg.WorkingDir(subagentRecordContext(context.Background(), fac, plain)); got != project {
+	if got, _ := toolpkg.WorkingDir(subagentRecordContext(context.Background(), fac, plain, SubagentModelOverride{})); got != project {
 		t.Fatalf("plain continuation working directory = %q, want the project root %q", got, project)
 	}
 }
@@ -8737,4 +8747,248 @@ func TestListUsableModelsToolReadsTheTableLive(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "only available to the primary agent") {
 		t.Fatalf("guard inside a subagent = %v", err)
 	}
+}
+
+// A model row's capabilities must survive both places the pin is rebuilt: the
+// dispatch-to-execution context and a continuation rereading that same row.
+// Dropping Caps there sends the child's requests back to the catalog (or a
+// stale installed row) instead of the window this row was configured with.
+func TestSubagentPinKeepsTheRowsCapsThroughExecAndContinuation(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	window := int64(32000)
+	row, err := fix.store.Create(context.Background(), state.LLMModel{
+		Provider: "zhipuai", Model: "glm-5.3",
+		BaseURL: "https://caps.test/v1", APIPath: "/chat/completions",
+		APIKey: "key-caps", SubagentAllowed: true,
+		CapContextWindow: &window,
+	})
+	if err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+
+	ctx := dispatchTestCtx()
+	pin, err := subagentModelOverrideForRef(ctx, fix.fac, row.ID)
+	if err != nil {
+		t.Fatalf("subagentModelOverrideForRef: %v", err)
+	}
+	if pin.Caps == nil || pin.Caps.ContextWindow == nil || *pin.Caps.ContextWindow != window {
+		t.Fatalf("producer pin Caps = %+v, want ContextWindow %d", pin.Caps, window)
+	}
+
+	// Exec path: the dispatch's live pin (with Caps) must reach the context
+	// the child's own requests run under, and its capability lookup must read
+	// that row's window rather than the catalog's.
+	_, _, dispatchErr := dispatchSubagent(WithSubagentModelOverride(ctx, pin), fix.fac, subagentDispatch{
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			execCtx := subagentExecContext(prep)
+			got, ok := SubagentModelOverrideFromContext(execCtx)
+			if !ok {
+				t.Errorf("exec context carried no subagent model override")
+			} else if got.Caps == nil {
+				t.Errorf("exec context pin dropped the row's Caps")
+			} else if got.Caps.ContextWindow == nil || *got.Caps.ContextWindow != window {
+				t.Errorf("exec context pin Caps.ContextWindow = %v, want %d", got.Caps.ContextWindow, window)
+			}
+			if hit, ok := fix.fac.Owner.modelHitFor(execCtx); !ok || hit.ContextWindow != window {
+				t.Errorf("modelHitFor(execCtx) = %+v ok=%v, want ContextWindow %d", hit, ok, window)
+			}
+			return "done", nil
+		},
+	})
+	if dispatchErr != nil {
+		t.Fatalf("dispatchSubagent: %v", dispatchErr)
+	}
+
+	// Continuation path: rereading the very same row must project its Caps
+	// again, not rebuild a pin that has only the identity fields.
+	record := agent.HistoryEntry{
+		ModelProvider: "zhipuai", Model: "glm-5.3",
+		ModelID: row.ID, ModelLive: true,
+	}
+	recordPin, err := subagentRecordPin(ctx, fix.fac, record)
+	if err != nil {
+		t.Fatalf("subagentRecordPin: %v", err)
+	}
+	if recordPin.Caps == nil {
+		t.Errorf("continuation pin dropped the row's Caps")
+	} else if recordPin.Caps.ContextWindow == nil || *recordPin.Caps.ContextWindow != window {
+		t.Errorf("continuation pin Caps.ContextWindow = %v, want %d", recordPin.Caps.ContextWindow, window)
+	}
+}
+
+// A pre-table configuration entry can still be named by this conversation's
+// hand-off even though list_usable_models only walks DB rows. The legacy
+// fallback must honor the same credential rule as the DB-row dispatch path:
+// an entry nobody can call is not one the agent may dispatch on (semantics 9).
+func TestUsableModelsLegacyHandOffNeedsCredentials(t *testing.T) {
+	legacyCfg := func(key string) *appcfg.Root {
+		on := true
+		return &appcfg.Root{Agents: appcfg.AgentsSection{
+			Defaults: appcfg.AgentDefaults{EnableSubagent: &on},
+			Definitions: map[string]appcfg.AgentDefinition{
+				"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+					{Provider: "openai", Model: "legacy-m", BaseURL: "https://legacy.test/v1", APIKey: key},
+				}},
+			},
+		}}
+	}
+
+	ref := "openai/legacy-m"
+	// Premise: the legacy label resolves to an entry that really has no
+	// credentials, and openai is not a login-backed provider. If this shape
+	// ever changes, stop rather than widening ResolveModelRef's compatibility.
+	entry, ok := appcfg.ResolveModelRef(legacyCfg(""), "main", ref)
+	if !ok {
+		t.Fatalf("premise: ResolveModelRef(%q) did not resolve the legacy entry", ref)
+	}
+	if strings.TrimSpace(entry.APIKey) != "" {
+		t.Fatalf("premise: legacy entry has APIKey %q, want none", entry.APIKey)
+	}
+	if appcfg.CredentialsBackedProvider(entry.Provider) {
+		t.Fatalf("premise: provider %q is unexpectedly login-backed", entry.Provider)
+	}
+
+	fix := newModelArgumentFixture(t, legacyCfg(""))
+	ctx := dispatchTestCtx()
+	if _, err := state.HandOffPlan(fix.fac.Owner.StateRoot(), "session-1", state.ModeAgent, state.PlanHandOff{
+		ModelID: ref, Provider: "openai", Model: "legacy-m",
+	}); err != nil {
+		t.Fatalf("hand off: %v", err)
+	}
+	if got := handOffModelID(ctx, fix.fac); got != ref {
+		t.Fatalf("handOffModelID = %q, want %q", got, ref)
+	}
+
+	listed, err := usableModels(ctx, fix.fac)
+	if err != nil {
+		t.Fatalf("usableModels: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("usableModels listed %d rows, want none (the list only walks DB rows)", len(listed))
+	}
+
+	// Regression: the credential-less legacy fallback must be refused with the
+	// same fixed wording as the DB-row path, not dispatched with a nil error.
+	if _, err = usableModelByID(ctx, fix.fac, ref); err == nil || !strings.Contains(err.Error(), "has no credentials") {
+		t.Fatalf("usableModelByID(%q) = %v, want a 'has no credentials' error", ref, err)
+	}
+
+	// Happy path: the same legacy entry, now with a key, still passes the
+	// hand-off exception. Each fixture has its own StateRoot, so write its own
+	// hand-off record too.
+	fix2 := newModelArgumentFixture(t, legacyCfg("key-x"))
+	if _, err := state.HandOffPlan(fix2.fac.Owner.StateRoot(), "session-1", state.ModeAgent, state.PlanHandOff{
+		ModelID: ref, Provider: "openai", Model: "legacy-m",
+	}); err != nil {
+		t.Fatalf("hand off (fix2): %v", err)
+	}
+	usable, err := usableModelByID(ctx, fix2.fac, ref)
+	if err != nil || !usable.HandedOff || strings.TrimSpace(usable.Entry.Model) != "legacy-m" {
+		t.Fatalf("usableModelByID(%q) = %+v, %v; want HandedOff with Model legacy-m", ref, usable, err)
+	}
+
+	// Boundary: without a hand-off record the fallback must not admit an
+	// arbitrary id. fix2 already has a hand-off, so use a third fresh fixture.
+	fix3 := newModelArgumentFixture(t, legacyCfg("key-x"))
+	if _, err := usableModelByID(ctx, fix3.fac, ref); err == nil || !strings.Contains(err.Error(), "no configured model has id") {
+		t.Fatalf("usableModelByID(%q) with no hand-off = %v, want 'no configured model has id'", ref, err)
+	}
+}
+
+// A continuation whose pinned model row was withdrawn between dispatch and
+// resume must fail its own execution loudly: the refusal text lands on the
+// ended event and no execution reaches the executor, rather than the row's
+// error being swallowed and the subagent quietly running on the conversation's
+// default model. This drives the async auto-continue path, which has no
+// synchronous guard to catch the missing row.
+func TestSubagentContinuationFailsLoudlyOnAMissingRow(t *testing.T) {
+	rowRecord := func(rowID, taskID, worker string) agent.HistoryEntry {
+		return agent.HistoryEntry{
+			SessionID: "session-1", WorkerSessionID: worker,
+			TaskID: taskID, RunID: "run-cont", ParentRunID: "parent-cont",
+			Task: "first", Status: agent.StatusOK,
+			ModelID: rowID, ModelLive: true,
+			ModelProvider: "zhipuai", Model: "glm-5.3",
+			AgentKind: "typed", AgentType: "explore", Continuable: true,
+		}
+	}
+
+	// Happy path: with the row still configured, the async continuation runs
+	// on that row's pin and succeeds. This proves the fix does not close the
+	// ordinary path along with the swallowed error.
+	t.Run("row present", func(t *testing.T) {
+		fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+		rowID := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://cont.test/v1", "key-cont", true)
+		record := rowRecord(rowID, "task-cont-ok", "worker-cont-ok")
+		ex := &fixedSubagentExecutor{output: "done"}
+		fix.fac.Owner.SubagentExecutor = ex
+		probe := &dispatchProbe{endedCh: make(chan endedMsg, 1)}
+		fix.fac.Owner.Events = probe
+
+		seedChannelRecord(t, fix.fac, record)
+		if err := StartSubagentAutoContinue(context.Background(), fix.fac.Owner, SubagentSurface{}, "session-1", "task-cont-ok", Input{Text: "resume"}); err != nil {
+			t.Fatalf("StartSubagentAutoContinue: %v", err)
+		}
+		select {
+		case ended := <-probe.endedCh:
+			if ended.Status != string(agent.StatusOK) {
+				t.Fatalf("ended = %#v, want StatusOK", ended)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the async continuation never emitted an ended event")
+		}
+		ex.mu.Lock()
+		pinnedModel := ex.pinnedModel
+		ex.mu.Unlock()
+		if pinnedModel != "glm-5.3" {
+			t.Fatalf("pinnedModel = %q, want glm-5.3 — the row's model must still reach the executor", pinnedModel)
+		}
+	})
+
+	// Regression: withdraw the row before the continuation starts. Resolving
+	// the pin fails, and that failure must settle this execution as failed with
+	// the refusal text — never a quiet run on another model.
+	t.Run("row gone", func(t *testing.T) {
+		fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+		rowID := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://cont.test/v1", "key-cont", true)
+		record := rowRecord(rowID, "task-cont-gone", "worker-cont-gone")
+
+		ctx := dispatchTestCtx()
+		if _, err := subagentRecordPin(ctx, fix.fac, record); err != nil {
+			t.Fatalf("premise: the live row must resolve: %v", err)
+		}
+		if err := fix.store.Delete(context.Background(), rowID); err != nil {
+			t.Fatalf("delete the pinned row: %v", err)
+		}
+		if _, err := subagentRecordPin(ctx, fix.fac, record); err == nil || !strings.Contains(err.Error(), "no configured model has id") {
+			t.Fatalf("premise: a withdrawn row must be refused = %v, want 'no configured model has id'", err)
+		}
+
+		ex := &fixedSubagentExecutor{output: "done"}
+		fix.fac.Owner.SubagentExecutor = ex
+		probe := &dispatchProbe{endedCh: make(chan endedMsg, 1)}
+		fix.fac.Owner.Events = probe
+
+		seedChannelRecord(t, fix.fac, record)
+		if err := StartSubagentAutoContinue(context.Background(), fix.fac.Owner, SubagentSurface{}, "session-1", "task-cont-gone", Input{Text: "resume"}); err != nil {
+			t.Fatalf("StartSubagentAutoContinue: %v", err)
+		}
+		select {
+		case ended := <-probe.endedCh:
+			if ended.Status != string(agent.StatusFailed) {
+				t.Fatalf("ended = %#v, want StatusFailed — a missing row must fail loudly, not run on another model", ended)
+			}
+			if !strings.Contains(ended.Error, "no configured model has id") {
+				t.Fatalf("ended.Error = %q, want the refusal text 'no configured model has id'", ended.Error)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the async continuation never emitted an ended event")
+		}
+		ex.mu.Lock()
+		task := ex.task
+		ex.mu.Unlock()
+		if task != "" {
+			t.Fatalf("executor ran with task %q; the failed pin must stop before runSubagentExecution", task)
+		}
+	})
 }

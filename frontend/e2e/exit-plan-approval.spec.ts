@@ -37,6 +37,28 @@ function sqlite(sql: string): void {
   execFileSync('sqlite3', ['-cmd', '.timeout 5000', stateDb(), sql], { stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
+/** The two SQL statements the chain reads: one started row (2 columns), then
+ *  one spawned row per round (2 columns each). Parse by statement, not by a
+ *  flat list of slots — a short result must never look like a valid chain. */
+type ReviewChain = {
+  continues: string
+  second: string
+  spawned: Array<{ agent: string; worker: string }>
+}
+
+function readReviewChain(session: string): ReviewChain {
+  const out = execFileSync('sqlite3', ['-cmd', '.timeout 5000', stateDb(),
+    `SELECT json_extract(payload_json,'$.continues_review_id'), json_extract(payload_json,'$.review_id') FROM fb_session_events WHERE session_id='${session}' AND event_type='plan_review_started' ORDER BY rowid DESC LIMIT 1; ` +
+    `SELECT json_extract(payload_json,'$.agent_id'), json_extract(payload_json,'$.worker_session_id') FROM fb_session_events WHERE session_id='${session}' AND event_type='subagent_spawned' ORDER BY rowid;`], { encoding: 'utf8' })
+  const lines = out.split('\n').map((l) => l.trim()).filter(Boolean)
+  const [continues = '', second = ''] = (lines[0] ?? '').split('|')
+  const spawned = lines.slice(1).map((l) => {
+    const [agent = '', worker = ''] = l.split('|')
+    return { agent, worker }
+  })
+  return { continues, second, spawned }
+}
+
 /** SQL quoting for a raw JSON document stored as the column's text. */
 function sqlJson(value: unknown): string {
   return JSON.stringify(value).replace(/'/g, "''")
@@ -329,19 +351,26 @@ test('a review handed back is asked again in its own conversation: the continuat
   // is drawn from the started event, so the spawned row can trail it by a
   // moment — poll until both rounds' subagents are on record.
   await expect(page.locator('[data-testid="subagent-call-card"]').nth(1)).toBeVisible({ timeout: 120_000 })
-  let chain = ''
-  for (let attempt = 0; attempt < 50; attempt++) {
-    chain = execFileSync('sqlite3', ['-cmd', '.timeout 5000', stateDb(),
-      `SELECT json_extract(payload_json,'$.continues_review_id'), json_extract(payload_json,'$.review_id') FROM fb_session_events WHERE session_id='${session}' AND event_type='plan_review_started' ORDER BY rowid DESC LIMIT 1; ` +
-      `SELECT json_extract(payload_json,'$.agent_id'), json_extract(payload_json,'$.worker_session_id') FROM fb_session_events WHERE session_id='${session}' AND event_type='subagent_spawned' ORDER BY rowid;`], { encoding: 'utf8' })
-    if (chain.trim().split('\n').length >= 3) break
-    await page.waitForTimeout(200)
-  }
-  const [continues, second, agent1, worker1, agent2, worker2] = chain.trim().split('\n').flatMap((l) => l.split('|'))
-  expect(continues).toBe(firstStarted)
-  expect(second).toMatch(/^plan-review:/)
-  expect(agent2).toBe(agent1)
-  expect(worker2).toBe(worker1)
+  // Poll the semantic condition, not a line count: both spawned rounds must be
+  // on record with non-empty identities before the comparison means anything.
+  await expect.poll(
+    () => {
+      const c = readReviewChain(session)
+      return c.continues === firstStarted &&
+        /^plan-review:/.test(c.second) &&
+        c.spawned.length >= 2 &&
+        c.spawned.slice(0, 2).every((s) => s.agent !== '' && s.worker !== '')
+    },
+    { timeout: 30_000, intervals: [200, 500, 1000] },
+  ).toBe(true)
+
+  const chain = readReviewChain(session)
+  expect(chain.continues).toBe(firstStarted)
+  expect(chain.second).toMatch(/^plan-review:/)
+  expect(chain.spawned[0]?.agent).toBeTruthy()
+  expect(chain.spawned[0]?.worker).toBeTruthy()
+  expect(chain.spawned[1]?.agent).toBe(chain.spawned[0]?.agent)
+  expect(chain.spawned[1]?.worker).toBe(chain.spawned[0]?.worker)
   await shot(page, 'exit-plan-review-again')
 })
 

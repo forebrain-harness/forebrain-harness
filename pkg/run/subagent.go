@@ -2414,6 +2414,15 @@ func subagentRecordPin(ctx context.Context, fac Factory, record agent.HistoryEnt
 		return SubagentModelOverride{}, err
 	}
 	entry := reread.Entry
+	configRow, err := reread.Row.ConfigRow()
+	if err != nil {
+		return SubagentModelOverride{}, err
+	}
+	capsOverride, hasCaps := state.ModelOverrideFromCaps(configRow.Caps)
+	var caps *llm.ModelOverride
+	if hasCaps {
+		caps = &capsOverride
+	}
 	return SubagentModelOverride{
 		ModelID:  strings.TrimSpace(entry.ID),
 		Provider: strings.TrimSpace(entry.Provider),
@@ -2421,10 +2430,11 @@ func subagentRecordPin(ctx context.Context, fac Factory, record agent.HistoryEnt
 		Effort:   appcfg.ReasoningEffort(entry.Params),
 		Entry:    &entry,
 		Version:  reread.Row.UpdatedAt,
+		Caps:     caps,
 	}, nil
 }
 
-func subagentRecordContext(ctx context.Context, fac Factory, record agent.HistoryEntry) context.Context {
+func subagentRecordContext(ctx context.Context, fac Factory, record agent.HistoryEntry, pin SubagentModelOverride) context.Context {
 	// Like every other parent-turn-only value here: the skill the dispatching
 	// turn selected is not part of this subagent's record, so a continuation
 	// built from the record must not carry it.
@@ -2439,10 +2449,10 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 	// continuation runs on the same model the user picked for it, not on the
 	// conversation's default. The record names the row the dispatch chose; only
 	// a record written before ids existed carries the pair alone, and that pair
-	// is resolved the way it always was.
-	if pin, err := subagentRecordPin(ctx, fac, record); err == nil {
-		hostCtx = WithSubagentModelOverride(hostCtx, pin)
-	}
+	// is resolved the way it always was. The caller resolves the pin once and
+	// propagates any error; this function neither rereads the row nor swallows
+	// a failure to resolve it.
+	hostCtx = WithSubagentModelOverride(hostCtx, pin)
 	if strings.TrimSpace(record.AgentKind) == "typed" {
 		// The policy a custom subagent ran under on its first execution, for the
 		// same reason: it is configuration, and the record's execution has to
@@ -2856,10 +2866,22 @@ func startSubagentContinuation(ctx context.Context, fac Factory, ch *subagentCha
 	// the identity its requests run under. A fresh background context: the
 	// continuation outlives the request that started it.
 	base := context.Background()
+	if sid := strings.TrimSpace(record.SessionID); sid != "" {
+		base = llm.WithAgentSessionID(base, sid)
+	}
 	if surface := ch.surfaceFor(); surface.Frame != nil {
 		base = surface.Frame(base)
 	}
-	hostCtx := subagentRecordContext(base, fac, record)
+	// Resolve the record's pin once, with the session id on base so the hand-off
+	// exception is readable. A continuation whose row no longer resolves fails
+	// its own execution with the refusal text instead of quietly running on the
+	// conversation's default model; the error is settled into runErr below so
+	// the spawned/ended events still pair up.
+	pin, pinErr := subagentRecordPin(base, fac, record)
+	hostCtx := base
+	if pinErr == nil {
+		hostCtx = subagentRecordContext(base, fac, record, pin)
+	}
 	// A skill command carries its trusted explicit selection here; the
 	// execution activates that skill the same way a dispatched turn does. It is
 	// threaded before the model call, so the skill's activation is injected
@@ -2904,6 +2926,9 @@ func startSubagentContinuation(ctx context.Context, fac Factory, ch *subagentCha
 	// so the ended event below settles its row as failed with the reason.
 	var outText string
 	runErr := subagentWorktreeMissing(record)
+	if runErr == nil && pinErr != nil {
+		runErr = pinErr
+	}
 	if runErr == nil {
 		outText, runErr = runSubagentExecution(runCtx, fac, lifecycle, subagentResumeAttempt(fac, record, in, skills))
 	}
@@ -3137,12 +3162,13 @@ func continueSubagentRecord(
 	// the record, once. A run pinned to a live row rereads it first: the row
 	// that no longer resolves fails the continuation with the same refusal a
 	// dispatch gets, rather than quietly running on another model.
-	if _, perr := subagentRecordPin(ctx, fac, record); perr != nil {
+	pin, perr := subagentRecordPin(ctx, fac, record)
+	if perr != nil {
 		return record, "", perr
 	}
 	// The subagent's own input runtime is attached by runSubagentExecution; the
 	// dispatching agent's is not inherited.
-	hostCtx := subagentRecordContext(ctx, fac, record)
+	hostCtx := subagentRecordContext(ctx, fac, record, pin)
 	executionID := uuid.NewString()
 	lifecycle := record
 	lifecycle.ExecutionID = executionID
@@ -4236,6 +4262,7 @@ func subagentExecContext(prep preparedSubagent) context.Context {
 		// run is built from that row, and the cache keys on its version.
 		pin.Entry = dispatched.Entry
 		pin.Version = dispatched.Version
+		pin.Caps = dispatched.Caps
 	}
 	hostCtx = WithSubagentModelOverride(hostCtx, pin)
 	return tool.WithHookAgentID(hostCtx, subagentRosterKey(prep.entry))
@@ -4364,6 +4391,13 @@ func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, 
 			// hand-off the user made themselves still runs (语义 9).
 			if handOffID := handOffModelID(ctx, fac); handOffID == id {
 				if entry, ok := appcfg.ResolveModelRef(fac.appConfig(), fac.AgentName, id); ok && strings.TrimSpace(entry.Model) != "" {
+					// The hand-off exception waives the switch, not the credential rule:
+					// list_usable_models only lists rows that can actually be called, and a
+					// dispatch must agree with it (语义 9).
+					credentialed := strings.TrimSpace(entry.APIKey) != "" || appcfg.CredentialsBackedProvider(entry.Provider)
+					if !credentialed {
+						return usableModel{}, fmt.Errorf("model %q (provider/model) has no credentials; call list_usable_models, or omit model to use the conversation's model.", llm.FormatProviderModel(entry.Provider, entry.Model))
+					}
 					return usableModel{Entry: entry, HandedOff: true}, nil
 				}
 			}

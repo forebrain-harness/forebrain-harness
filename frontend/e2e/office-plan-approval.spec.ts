@@ -111,7 +111,12 @@ test('an office plan is answered in the office\'s four words, never the coding o
   await expect(page.locator('[data-testid="exit-plan-keep-planning"]')).toHaveCount(0)
   // plan 283's two rows stay hidden here for the right reasons: the hand-off
   // needs a git repository (this project is a plain directory), and no review
-  // has run yet, so there is nothing for 再评审 to continue.
+  // has run yet, so there is nothing for 再评审 to continue. These are negative
+  // assertions, not a proof of the gate: the positive control is the same
+  // suite's exit-plan-approval.spec.ts, where the hand-off button, the hand-off
+  // model rows and the 再评审 row are asserted visible. Here a plain (non-git)
+  // directory hides the hand-off, and no prior review hides 再评审 — the two
+  // toHaveCount(0) rows pin just those gating conditions.
   await expect(page.locator('[data-testid="exit-plan-hand-off"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="exit-plan-review-again"]')).toHaveCount(0)
   // 修改计划 asks for the words the planner will read, and only then sends them.

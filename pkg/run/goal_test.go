@@ -729,3 +729,57 @@ func TestContinuationPromptWithoutWhy(t *testing.T) {
 		t.Fatalf("prompt = %q", got)
 	}
 }
+
+// TestGoalCheckCanBePinnedToAConfiguredRow is a spike / characterization test,
+// not a product feature. It proves that a configured model row pinned on the
+// context alone is adopted by the goal-check subagent with zero production
+// changes: goalCheck.Evaluate -> runGoalCheck -> dispatchSubagent ->
+// prepareSubagentExecutionResolved -> subagentExecContext -> RunSubagentExec.
+// It adds no model parameter, does not change subagentDispatch, and touches no
+// tool definition. The product questions (where the row id comes from, and
+// whether /goal should keep bypassing subagent_allowed) are left to the owner;
+// see plans/297-goal-check-model-row-spike.md. Negative control for the no-pin
+// path is the unchanged TestGoalCheckDispatchesTheEvaluatorSubagent above.
+func TestGoalCheckCanBePinnedToAConfiguredRow(t *testing.T) {
+	probe := &dispatchProbe{}
+	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "pinned"}`}
+	runner := &Runner{Deps: &Deps{Home: t.TempDir()}, Events: probe, SubagentExecutor: executor}
+	pin := SubagentModelOverride{
+		ModelID:  "row-cheap",
+		Provider: "deepseek",
+		Model:    "deepseek-v4-flash",
+	}
+	// The whole point of the spike: the only injection is a context value.
+	ctx := WithSubagentModelOverride(dispatchTestCtx(), pin)
+
+	verdict, err := goalCheck{runner: runner}.Evaluate(ctx, "make the tests pass", []RoundOutcome{{Index: 0, Text: "fixed the parser"}})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if verdict.Status != StatusDone {
+		t.Fatalf("verdict = %+v", verdict)
+	}
+
+	// fixedSubagentExecutor.RunSubagentExec (pkg/run/subagent_test.go:2267-2283)
+	// records two distinct facts: `model` = req.Model, and `pinnedModel` =
+	// SubagentModelOverrideFromContext(ctx).Model. The latter is fed directly by
+	// the pin injected on the context, so it is the spike's primary evidence
+	// that a ctx-only pin reaches this goal check unchanged.
+	if executor.pinnedModel != pin.Model {
+		t.Fatalf("goal check pinnedModel = %q, want the injected pin %q", executor.pinnedModel, pin.Model)
+	}
+	// req.Model comes from record.Model, which prepareSubagentExecutionResolved
+	// writes from the dispatch-time pin: a second, independent observation that
+	// the configured row was adopted rather than the conversation's model.
+	if executor.model != pin.Model {
+		t.Fatalf("goal check req model = %q, want the injected pin %q", executor.model, pin.Model)
+	}
+	// The pin must not turn the check into some other subagent: still exactly
+	// one spawn, still the reserved goal-evaluator type.
+	if len(probe.spawned) != 1 {
+		t.Fatalf("spawned = %+v, want exactly one goal check", probe.spawned)
+	}
+	if probe.spawned[0].AgentType != GoalCheckSubagentType {
+		t.Fatalf("spawned AgentType = %q, want %q", probe.spawned[0].AgentType, GoalCheckSubagentType)
+	}
+}
