@@ -1,11 +1,10 @@
 package telemetry
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
+	"log/slog"
 	"runtime"
 	"strings"
 	"time"
@@ -18,7 +17,13 @@ var (
 	datadirRoot   = home.Root
 )
 
-func ErrorSkip(forebrainRoot string, err error, context string, extraFrames int) {
+// ErrorSkip records one error where it happened. extraFrames walks past the
+// wrappers between the failing caller and this function, so At names the code
+// that failed rather than the logging helper itself.
+//
+// label was named context before this package wrote records; the name moved
+// because the package that means "context" is now in scope here.
+func ErrorSkip(forebrainRoot string, err error, label string, extraFrames int) {
 	if err == nil {
 		return
 	}
@@ -26,39 +31,26 @@ func ErrorSkip(forebrainRoot string, err error, context string, extraFrames int)
 		extraFrames = 0
 	}
 	skip := 2 + extraFrames
-	pc, file, line, ok := runtimeCaller(skip)
+	_, file, line, ok := runtimeCaller(skip)
 	if !ok {
 		file, line = "?", 0
-		pc = 0
 	}
-	_ = writeErrorEntry(forebrainRoot, err, context, file, line, functionNameForPC(pc))
+	msg := strings.TrimSpace(label)
+	if msg == "" {
+		msg = "error"
+	}
+	emitAt(context.Background(), Record{Level: slog.LevelError.String(), Kind: kindLog, Msg: msg},
+		atLocation(file, line), slog.Any(attrErr, err))
 }
 
-func ErrorThenFprintln(forebrainRoot string, w io.Writer, err error, context string) {
+// ErrorThenFprintln records the error and prints it: a command that is about
+// to exit owed the reader both.
+func ErrorThenFprintln(forebrainRoot string, w io.Writer, err error, label string) {
 	if err == nil {
 		return
 	}
-	ErrorSkip(forebrainRoot, err, context, 1)
+	ErrorSkip(forebrainRoot, err, label, 1)
 	_, _ = fmt.Fprintln(w, err)
-}
-
-func functionNameForPC(pc uintptr) string {
-	if pc == 0 {
-		return "?"
-	}
-	if fp := runtime.FuncForPC(pc); fp != nil {
-		return fp.Name()
-	}
-	return "?"
-}
-
-func writeErrorEntry(forebrainRoot string, err error, context string, file string, line int, function string) error {
-	if err == nil {
-		return nil
-	}
-	root := resolveRoot(forebrainRoot)
-	path := filepath.Join(root, home.LogsDir, "error.log")
-	return appendErrorFile(path, err, context, file, line, function)
 }
 
 func resolveRoot(forebrainRoot string) string {
@@ -73,45 +65,23 @@ func resolveRoot(forebrainRoot string) string {
 	return x
 }
 
-func formatErrorDetails(err error) string {
-	if err == nil {
-		return ""
+// emitAt writes one record for ctx's identity at the call site a reader needs.
+//
+// Emit cannot serve the two writers below it: it takes At from its own caller,
+// which for a wrapper inside this package is this package, not the failing
+// line. The identity half is the same — the scope off ctx, overridden by any
+// explicit attribute — and so is the attribute folding, which is what turns an
+// err attribute into the record's Err and its type chain.
+func emitAt(ctx context.Context, rec Record, at string, attrs ...slog.Attr) {
+	l := DefaultEventLog()
+	if l == nil {
+		return // no log configured: nothing to write, nothing to compute
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%%v: %v\n", err)
-	fmt.Fprintf(&b, "%%#v: %#v\n", err)
-	fmt.Fprintf(&b, "Error(): %s\n", err.Error())
-	i := 0
-	for u := errors.Unwrap(err); u != nil && i < 32; u = errors.Unwrap(u) {
-		fmt.Fprintf(&b, "unwrap[%d]: %v\n", i+1, u)
-		i++
+	rec.Time = time.Now()
+	rec.At = at
+	adoptScope(&rec, scopeFor(ctx))
+	for _, attr := range attrs {
+		applyAttr(&rec, attr, "", false)
 	}
-	return b.String()
-}
-
-func appendErrorFile(path string, err error, context string, file string, line int, function string) error {
-	if err == nil {
-		return nil
-	}
-	writeMu.Lock()
-	defer writeMu.Unlock()
-	if e := os.MkdirAll(filepath.Dir(path), 0o755); e != nil {
-		return e
-	}
-	f, e := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if e != nil {
-		return e
-	}
-	defer f.Close()
-	var b strings.Builder
-	fmt.Fprintf(&b, "=== [ERROR] %s\n", time.Now().Format(time.RFC3339Nano))
-	if context != "" {
-		fmt.Fprintf(&b, "context: %s\n", context)
-	}
-	fmt.Fprintf(&b, "location: %s:%d\n", file, line)
-	fmt.Fprintf(&b, "function: %s\n", function)
-	b.WriteString(formatErrorDetails(err))
-	b.WriteString("---\n\n")
-	_, e = f.WriteString(b.String())
-	return e
+	l.Write(rec)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -291,6 +292,7 @@ func TestExecuteStoresAPIKeyInTheModelTable(t *testing.T) {
 
 func TestExecuteWritesOnboardLogWithoutSecrets(t *testing.T) {
 	home := t.TempDir()
+	installEventLog(t, home)
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	rt := Context{
 		Home:       home,
@@ -310,26 +312,54 @@ func TestExecuteWritesOnboardLogWithoutSecrets(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(home, "logs", "info.log"))
-	if err != nil {
-		t.Fatalf("read onboard log: %v", err)
-	}
-	text := string(raw)
+	// The setup events are records now, not lines in info.log (plan 285).
+	text := readSetupRecords(t, home)
 	for _, want := range []string{
-		"event=setup.execute.start",
-		"event=setup.execute.success",
-		`provider="openai"`,
-		`model="qwen3.5-122b"`,
-		`base_url="http://10.20.200.100:30122/v1"`,
-		`api_key_set="true"`,
+		`"msg":"setup.execute.start"`,
+		`"msg":"setup.execute.success"`,
+		`"provider":"openai"`,
+		`"model":"qwen3.5-122b"`,
+		`"base_url":"http://10.20.200.100:30122/v1"`,
+		`"api_key_set":"true"`,
 	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("log missing %q: %s", want, text)
+			t.Fatalf("records missing %q: %s", want, text)
 		}
 	}
 	if strings.Contains(text, "sk-live-secret") {
-		t.Fatalf("log leaked api key: %s", text)
+		t.Fatalf("a record leaked the api key: %s", text)
 	}
+}
+
+// installEventLog points the process's event log at home for one test: the
+// setup events' only destination since plan 285.
+func installEventLog(t *testing.T, home string) {
+	t.Helper()
+	prev := telemetry.DefaultEventLog()
+	eventLog := telemetry.OpenEventLog(home, "test")
+	telemetry.SetDefaultEventLog(eventLog)
+	t.Cleanup(func() {
+		telemetry.SetDefaultEventLog(prev)
+		_ = eventLog.Close()
+	})
+}
+
+// readSetupRecords is every record written for home, concatenated.
+func readSetupRecords(t *testing.T, home string) string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(home, "logs", "*", "test-*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	var all strings.Builder
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		all.Write(data)
+	}
+	return all.String()
 }
 
 func TestExecuteRequiresModelAPIKeyAndBaseURL(t *testing.T) {

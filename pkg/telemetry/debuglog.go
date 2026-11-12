@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,9 +70,13 @@ func writeDebugFileLogWhole(section, msg string) {
 // per-call-site helper (LogOpenAIResponsesContentPreview) so that provider
 // clients, which may not import this package, can emit debug output through
 // llm's port instead.
+//
+// It writes a record rather than a block in debug.log: the model and tool
+// exchanges that log keeps in full are 286's subject, and this is a provider's
+// note about one call (plan 285).
 func LogProviderDebug(topic, message string) {
 	if !debugFileLogEnabled() {
 		return
 	}
-	writeDebugFileLog(topic, message)
+	Emit(context.Background(), slog.LevelDebug, "log", topic, slog.String("detail", message))
 }

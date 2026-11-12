@@ -1,49 +1,35 @@
 package telemetry
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"path/filepath"
+	"log/slog"
+	"sort"
 	"strings"
-	"time"
-
-	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
 )
 
-const SetupLogFile = "info.log"
-
+// SetupEvent records one setup step: what happened and the fields it reported,
+// with the same redaction a token or a secret needed before.
 func SetupEvent(home string, event string, fields map[string]any) {
-	home = strings.TrimSpace(home)
-	if home == "" {
-		return
-	}
-	dir := filepath.Join(home, homepkg.LogsDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return
-	}
-	f, err := os.OpenFile(filepath.Join(dir, SetupLogFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	var b strings.Builder
-	b.WriteString(time.Now().Format(time.RFC3339Nano))
-	b.WriteString(" event=")
-	b.WriteString(sanitizeToken(event))
-	for key, value := range fields {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
+	// The home is no longer where this goes — the event log is — but the
+	// parameter stays because every call site passes it and none of them
+	// should change an argument for a change of destination (plan 285).
+	_ = home
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		if strings.TrimSpace(key) != "" {
+			keys = append(keys, key)
 		}
-		b.WriteByte(' ')
-		b.WriteString(key)
-		b.WriteByte('=')
-		b.WriteString(fmt.Sprintf("%q", sanitizeValue(key, value)))
 	}
-	b.WriteByte('\n')
-	_, _ = f.WriteString(b.String())
-	_ = f.Sync()
+	// Sorted, because a record whose attributes move around from one run to
+	// the next cannot be compared or read in a fixed order: the map iteration
+	// this replaces was a bug, not a style choice.
+	sort.Strings(keys)
+	attrs := make([]slog.Attr, 0, len(keys))
+	for _, key := range keys {
+		attrs = append(attrs, slog.String(strings.TrimSpace(key), sanitizeValue(key, fields[key])))
+	}
+	Emit(context.Background(), slog.LevelInfo, "setup", sanitizeToken(event), attrs...)
 }
 
 func sanitizeValue(key string, value any) string {
