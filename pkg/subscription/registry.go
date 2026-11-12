@@ -73,11 +73,24 @@ type Offer struct {
 	ContextWindow  int64
 	SupportsImages bool
 	Default        bool
+	// KeyRequired marks a plan whose row carries an API key the user pastes
+	// from the vendor's console: the sign-in proves which plans the account
+	// holds, and no public API reads their key back (Volcengine's personal
+	// plans, plan 281). A surface asks for it before the write.
+	KeyRequired bool
+	// FromStaticList marks an offer a shipped table names instead of the
+	// vendor's own listing, so the page can say the console is the authority.
+	FromStaticList bool
 }
 
 // ProvisionOptions carries the choices a key-backed plan needs. ChatGPT and
-// OpenCode Go ignore it; plan 281 (Volcengine) reads both fields.
+// OpenCode Go ignore it; Volcengine (plan 281) reads Key, and its key-pool
+// errors answer the two ids.
 type ProvisionOptions struct {
+	// Key is the API key a plan takes from the user's clipboard, used for
+	// every chosen offer that asks for one (Offer.KeyRequired). It is never
+	// stored anywhere but the model row it writes, and never logged.
+	Key string
 	// KeyID picks one key when a plan's key pool holds several; empty means
 	// "the only Active one" and fails with ErrKeyChoice when there are several.
 	KeyID string
@@ -119,6 +132,29 @@ var ErrNoKey = errors.New("no API key in this plan's pool; creating one needs yo
 // ErrNoKeyToRefresh is the answer for a sign-in-backed row: there is no key to
 // fetch again, because the login is the credential.
 var ErrNoKeyToRefresh = errors.New("this subscription has no stored key to refresh")
+
+// ErrPlanKeyRequired says the plan's row needs an API key the user pastes: the
+// sign-in proves the plan belongs to the account, and no public API returns the
+// key itself (Volcengine's personal plans). Plan and PlanLabel name the plan in
+// offers' own vocabulary so a surface can point at the group that asks.
+type ErrPlanKeyRequired struct {
+	Plan, PlanLabel string
+	// ConsoleURL is where the user copies the key from, when the vendor
+	// publishes one.
+	ConsoleURL string
+}
+
+func (e ErrPlanKeyRequired) Error() string {
+	label := e.PlanLabel
+	if label == "" {
+		label = e.Plan
+	}
+	return "the " + label + " plan needs an API key from the vendor's console"
+}
+
+// ErrKeyPasted is the answer for a row whose key the user pastes by hand: no
+// API reads that key back, so refreshing it means pasting a fresh one.
+var ErrKeyPasted = errors.New("this plan's key is pasted by hand; paste a new one from the console")
 
 // The two errors a Login handle answers when it cannot take a pasted address:
 // the flow has no callback to hand over, or it already ended.
@@ -167,8 +203,8 @@ func ResetPluginsForTest() {
 func Registry() []Subscription {
 	pluginSubsMu.RLock()
 	defer pluginSubsMu.RUnlock()
-	subs := make([]Subscription, 0, 2+len(pluginSubs))
-	subs = append(subs, chatGPT{}, openCodeGo{})
+	subs := make([]Subscription, 0, 3+len(pluginSubs))
+	subs = append(subs, chatGPT{}, openCodeGo{}, volcengine{})
 	subs = append(subs, pluginSubs...)
 	return subs
 }

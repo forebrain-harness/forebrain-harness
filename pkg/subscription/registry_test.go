@@ -26,13 +26,14 @@ func testEnv(t *testing.T) Env {
 }
 
 // The order is the display order every surface shows, and it is what the
-// surfaces' own lists were before this registry existed.
+// surfaces' own lists were before this registry existed. Volcengine Ark joins it
+// third (plan 281), after the two sign-ins that store no key of their own.
 func TestRegistryListsTheSignInsInDisplayOrder(t *testing.T) {
 	ids := make([]string, 0, len(Registry()))
 	for _, sub := range Registry() {
 		ids = append(ids, sub.ID())
 	}
-	require.Equal(t, []string{chatGPTID, openCodeGoID}, ids)
+	require.Equal(t, []string{chatGPTID, openCodeGoID, volcengineID}, ids)
 }
 
 // Every entry is a sign-in: the list reads "sign in with …", so a provider a
@@ -139,7 +140,7 @@ func TestRegisterPluginSubscriptionAppendsInOrderAndDeduplicates(t *testing.T) {
 	for _, sub := range Registry() {
 		ids = append(ids, sub.ID())
 	}
-	require.Equal(t, []string{chatGPTID, openCodeGoID, "pluga", "plugb"}, ids)
+	require.Equal(t, []string{chatGPTID, openCodeGoID, volcengineID, "pluga", "plugb"}, ids)
 
 	found, ok := ByID(" PLUGB ")
 	require.True(t, ok)
