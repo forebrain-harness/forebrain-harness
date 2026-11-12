@@ -116,9 +116,10 @@ func resolveUncachedWithHooks(hooks StartupHooks) (Context, error) {
 	return Context{Home: home, ConfigPath: cfgPath, Config: cfg}, nil
 }
 
-// ErrorLogPath is where a forebrain home keeps its error log.
-func ErrorLogPath(home string) string {
-	return filepath.Join(strings.TrimSpace(home), homepkg.LogsDir, "error.log")
+// LogsDirPath is where a forebrain home keeps its records: one directory per
+// local day, one file per process inside it (plan 285).
+func LogsDirPath(home string) string {
+	return filepath.Join(strings.TrimSpace(home), homepkg.LogsDir)
 }
 
 // AppVersion reports the embedded application version. Gateway surfaces read

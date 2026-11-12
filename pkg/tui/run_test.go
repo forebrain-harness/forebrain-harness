@@ -5556,7 +5556,7 @@ func panelInventory(t *testing.T) *turn.MCPInventory {
 		}},
 		Tools:        mcpToolsForPanel("codegraph"),
 		GlobalSource: "/home/tester/.forebrain/forebrain.yaml",
-		ErrorLogPath: "/home/tester/.forebrain/logs/error.log",
+		LogsDir:      "/home/tester/.forebrain/logs",
 	})
 	return &inv
 }
@@ -5570,7 +5570,7 @@ func TestMCPPanelGoldenWidths(t *testing.T) {
 		lines, focus := panelTestLines(panel, width, "⠋")
 		assertRowsFit(t, lines, width)
 		joined := stripANSI(strings.Join(lines, "\n"))
-		for _, want := range []string{"Manage MCP servers", "4 servers", "Global MCPs (/home/tester/.forebrain/forebrain.yaml)", "codegraph · ✓ connected · 1 tool", "broken · ✗ failed", "⠋ connecting…", "paused · ○ disabled", "Error logs:"} {
+		for _, want := range []string{"Manage MCP servers", "4 servers", "Global MCPs (/home/tester/.forebrain/forebrain.yaml)", "codegraph · ✓ connected · 1 tool", "broken · ✗ failed", "⠋ connecting…", "paused · ○ disabled", "Logs: /home/tester/.forebrain/logs"} {
 			if !strings.Contains(strings.Join(strings.Fields(joined), " "), want) {
 				t.Fatalf("width %d: mcp panel missing %q:\n%s", width, want, joined)
 			}

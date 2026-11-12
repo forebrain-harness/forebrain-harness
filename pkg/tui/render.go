@@ -8115,8 +8115,8 @@ func buildMCPList(b *panelBuilder, panel *uiPanel, spinner string) {
 	if inv.ForeignConfig != "" {
 		notes = append(notes, "Another agent's MCP config is here ("+inv.ForeignConfig+"); /migrate can import it")
 	}
-	if inv.ErrorLogPath != "" {
-		notes = append(notes, "Error logs: "+inv.ErrorLogPath)
+	if inv.LogsDir != "" {
+		notes = append(notes, "Logs: "+inv.LogsDir)
 	}
 	if len(notes) > 0 {
 		if len(b.body) > 0 {

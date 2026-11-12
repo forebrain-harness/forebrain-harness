@@ -160,7 +160,7 @@ func (s *ChatSession) mcpInventorySource() turn.MCPInventorySource {
 		Tools:         r.MCPStartup().PublishedTools(),
 		ProjectSource: turn.ProjectMCPSource(scope.ProjectRoot),
 		GlobalSource:  turn.GlobalMCPSource(mcpConfigFromChatSession(s)),
-		ErrorLogPath:  filepath.Join(s.home(), home.LogsDir, "error.log"),
+		LogsDir:       filepath.Join(s.home(), home.LogsDir),
 	}
 	next, err := mcp.DisabledForNextSession(r.WorkspaceRoot)
 	src.DisabledNext = next

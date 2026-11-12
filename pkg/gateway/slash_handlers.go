@@ -184,7 +184,7 @@ func (s *Server) mcpInventorySource(r *run.Runner, cfg *appcfg.Root) turn.MCPInv
 		Tools:         r.MCPStartup().PublishedTools(),
 		ProjectSource: turn.ProjectMCPSource(scope.ProjectRoot),
 		GlobalSource:  turn.GlobalMCPSource(cfg),
-		ErrorLogPath:  process.ErrorLogPath(s.Home),
+		LogsDir:       process.LogsDirPath(s.Home),
 	}
 	next, err := mcp.DisabledForNextSession(r.WorkspaceRoot)
 	src.DisabledNext = next

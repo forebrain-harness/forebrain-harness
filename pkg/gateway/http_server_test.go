@@ -179,9 +179,17 @@ func warmResolve(t *testing.T) {
 // restoring the previous one on cleanup.
 func captureDefaultSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
+	return captureDefaultSlogAt(t, slog.LevelInfo)
+}
+
+// captureDefaultSlogAt is captureDefaultSlog down to level: the access log
+// reports a successful read at DEBUG (plan 285), so a test about which
+// requests were reported has to keep DEBUG records.
+func captureDefaultSlogAt(t *testing.T, level slog.Level) *bytes.Buffer {
+	t.Helper()
 	var buf bytes.Buffer
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
 }

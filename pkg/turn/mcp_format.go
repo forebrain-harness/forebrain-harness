@@ -155,9 +155,11 @@ type MCPScopeGroup struct {
 // scope, plus the project-scope notes that explain what is deliberately not
 // running.
 type MCPInventory struct {
-	Groups       []MCPScopeGroup
-	Total        int
-	ErrorLogPath string
+	Groups []MCPScopeGroup
+	Total  int
+	// LogsDir is where this home keeps its records: one directory per day,
+	// one file per process (plan 285).
+	LogsDir string
 	// GlobalSource and ProjectSource name the two files servers are
 	// configured in, so an empty list can say where to add one.
 	GlobalSource  string
@@ -243,7 +245,7 @@ type MCPInventorySource struct {
 	ResourceServers map[string]bool
 	ProjectSource   string
 	GlobalSource    string
-	ErrorLogPath    string
+	LogsDir         string
 }
 
 // AttributeMCPTools splits the session's frozen tool table by server using the
@@ -373,7 +375,7 @@ func schemaText(v any) string {
 // kept out of the session trail their scope group so the choice stays visible.
 func BuildMCPInventory(src MCPInventorySource) MCPInventory {
 	inv := MCPInventory{
-		ErrorLogPath:      strings.TrimSpace(src.ErrorLogPath),
+		LogsDir:           strings.TrimSpace(src.LogsDir),
 		GlobalSource:      strings.TrimSpace(src.GlobalSource),
 		ProjectSource:     strings.TrimSpace(src.ProjectSource),
 		DisableStoreError: strings.TrimSpace(src.DisableStoreError),
@@ -594,8 +596,8 @@ func RenderMCPInventoryMarkdown(inv MCPInventory) string {
 	if inv.ForeignConfig != "" {
 		b.WriteString("\nDetected another agent's project MCP config (" + inv.ForeignConfig + ") in this repository; /migrate can import it into .forebrain/mcp_servers.yaml\n")
 	}
-	if inv.ErrorLogPath != "" {
-		b.WriteString("\nError logs: " + inv.ErrorLogPath + "\n")
+	if inv.LogsDir != "" {
+		b.WriteString("\nLogs: " + inv.LogsDir + "\n")
 	}
 	return strings.TrimSpace(b.String())
 }

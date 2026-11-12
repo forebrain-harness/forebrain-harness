@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -480,7 +481,9 @@ func TestRateLimitHoldsStrangersNotTheSignedInOwner(t *testing.T) {
 // like any other request. What is under test here is the shared
 // telemetry.AccessLogMiddleware, through the chain that installs it.
 func TestServeHTTPChainLogsEveryRequest(t *testing.T) {
-	logs := captureDefaultSlog(t)
+	// DEBUG keeps the successful reads, which the access log reports there so
+	// a page full of GETs cannot bury the records that matter.
+	logs := captureDefaultSlogAt(t, slog.LevelDebug)
 	chain := ServeHTTPChain(nil, nil, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}))
