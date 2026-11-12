@@ -109,7 +109,7 @@ func RunFork(ctx context.Context, p RunParams) (*RunOutcome, error) {
 		return nil, err
 	}
 	t0 := time.Now()
-	slog.Info("fork_agent_query_start",
+	slog.InfoContext(ctx, "fork_agent_query_start",
 		"agent_id", agentID,
 		"agent_type", agentType,
 		"fork_label", strings.TrimSpace(p.ForkLabel),
@@ -141,7 +141,7 @@ func RunFork(ctx context.Context, p RunParams) (*RunOutcome, error) {
 		out.CompletionTokens = res.Summary.Usage.OutputTokens
 		telemetry.AddForkAgentUsage(out.PromptTokens, out.CompletionTokens)
 	}
-	slog.Info("fork_agent_query_done",
+	slog.InfoContext(ctx, "fork_agent_query_done",
 		"agent_id", agentID,
 		"agent_type", agentType,
 		"fork_label", strings.TrimSpace(p.ForkLabel),

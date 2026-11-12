@@ -483,7 +483,7 @@ func (r AbandonedRunReaper) ReapOnce(ctx context.Context) {
 	}
 	reaped, err := r.Runs.ReapAbandonedRuns(ctx, time.Now())
 	if err != nil {
-		slog.Error("reap abandoned runs", "err", err)
+		slog.ErrorContext(ctx, "reap abandoned runs", "err", err)
 		return
 	}
 	for _, run := range reaped {
@@ -517,7 +517,7 @@ func (r AbandonedRunReaper) ReapOnce(ctx context.Context) {
 func (r AbandonedRunReaper) subagentSpawnFacts(ctx context.Context, runID string) (event.SubagentSpawnedPayload, bool) {
 	records, err := r.Runs.ListRunEventsOfTypes(ctx, runID, event.RunEventSubagentSpawned)
 	if err != nil {
-		slog.Error("read abandoned subagent's spawned event", "run_id", runID, "err", err)
+		slog.ErrorContext(ctx, "read abandoned subagent's spawned event", "run_id", runID, "err", err)
 		return event.SubagentSpawnedPayload{}, false
 	}
 	for _, record := range records {

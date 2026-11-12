@@ -64,7 +64,7 @@ func (t *transcriptProgress) flush(ctx context.Context, session []llm.Message, m
 		return
 	}
 	if err := t.store.AppendMessageSequenceForRun(ctx, t.sessionID, t.runID, session, strings.TrimSpace(model), state.MarshalTokenUsage(usage)); err != nil {
-		slog.Warn("transcript progress: append block", "session_id", t.sessionID, "run_id", t.runID, "err", err)
+		slog.WarnContext(ctx, "transcript progress: append block", "session_id", t.sessionID, "run_id", t.runID, "err", err)
 	}
 }
 
@@ -85,7 +85,7 @@ func (t *transcriptProgress) reasoningDone(ctx context.Context, text string, sta
 	}
 	rowID, err := t.store.AppendStructuredMessageForRun(ctx, t.sessionID, t.runID, "reasoning", text, "", state.ReasoningPartsJSON(text, spent), "", "", "", "", state.MessageExecTiming{})
 	if err != nil {
-		slog.Warn("transcript progress: append reasoning", "session_id", t.sessionID, "run_id", t.runID, "err", err)
+		slog.WarnContext(ctx, "transcript progress: append reasoning", "session_id", t.sessionID, "run_id", t.runID, "err", err)
 		return
 	}
 	t.mu.Lock()
@@ -117,7 +117,7 @@ func (t *transcriptProgress) dropFinishedReasoning(ctx context.Context) {
 	t.mu.Unlock()
 	for _, rowID := range rows {
 		if err := t.store.DeleteRunMessageRow(ctx, t.sessionID, t.runID, rowID); err != nil {
-			slog.Warn("transcript progress: withdraw reasoning row", "session_id", t.sessionID, "run_id", t.runID, "row", rowID, "err", err)
+			slog.WarnContext(ctx, "transcript progress: withdraw reasoning row", "session_id", t.sessionID, "run_id", t.runID, "row", rowID, "err", err)
 		}
 	}
 }

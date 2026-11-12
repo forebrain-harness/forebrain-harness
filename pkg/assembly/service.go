@@ -238,7 +238,7 @@ func (s Service) runPostCompact(ctx context.Context, sid, trigger string) {
 		return
 	}
 	if err := s.PostCompact(ctx, sid, trigger); err != nil {
-		slog.Warn("PostCompact hook failed after the checkpoint was committed", "session_id", sid, "trigger", trigger, "error", err)
+		slog.WarnContext(ctx, "PostCompact hook failed after the checkpoint was committed", "session_id", sid, "trigger", trigger, "error", err)
 	}
 }
 
@@ -311,7 +311,7 @@ func (s Service) autoCompactDecision(ctx context.Context, sessionID string) (aut
 			// best); the switch is declared to the prefix tracker and called
 			// out loudly enough that the cost is visible instead of silent.
 			llm.RecordPrefixGeneration(sid, "provider_switch", usage, previousProvider+"/"+previousModel+"->"+provider+"/"+model)
-			slog.Warn("model switch starts a new prompt-cache generation: the new provider holds none of this session's cached prefix",
+			slog.WarnContext(ctx, "model switch starts a new prompt-cache generation: the new provider holds none of this session's cached prefix",
 				"session_id", sid, "previous_model", previousModel, "model", model, "prompt_tokens", usage)
 		}
 	}

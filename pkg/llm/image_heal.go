@@ -146,7 +146,7 @@ func (h *imageHealLLM) Execute(ctx context.Context, messages []Message, tools []
 	// provider or model, but its caller can, and the refusal is a fact that
 	// costs a wasted request every turn it goes unremembered.
 	reportImageRefusal(ctx, oneLineReason(err.Error()))
-	slog.Warn("provider rejected an image; retrying with the image degraded",
+	slog.WarnContext(ctx, "provider rejected an image; retrying with the image degraded",
 		"replaced", replaced, "err", err)
 	ResetStreamProgress(ctx)
 	return h.inner.Execute(ctx, degraded, tools)

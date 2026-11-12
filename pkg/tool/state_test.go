@@ -750,12 +750,21 @@ func TestToolLogLinesRedactCommandText(t *testing.T) {
 			if !ok || pkg.Name != "slog" {
 				return true
 			}
+			// Both spellings: the plain one leads with the message, the
+			// Context one (which every function holding a context must use,
+			// plan 285) leads with the context and then the message.
+			firstAttr := 1
 			switch sel.Sel.Name {
 			case "Debug", "Info", "Warn", "Error":
+			case "DebugContext", "InfoContext", "WarnContext", "ErrorContext":
+				firstAttr = 2 // Args[0] is the context, Args[1] the message
 			default:
 				return true
 			}
-			args := call.Args[1:] // Args[0] is the message; the rest are key/value pairs.
+			if len(call.Args) < firstAttr {
+				return true
+			}
+			args := call.Args[firstAttr:] // the rest are key/value pairs
 			for i := 0; i+1 < len(args); i += 2 {
 				lit, ok := args[i].(*ast.BasicLit)
 				if !ok || lit.Kind != token.STRING {

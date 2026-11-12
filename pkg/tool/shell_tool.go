@@ -635,7 +635,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 			// request or an authorized retry. Only a denial nothing can answer
 			// is logged as one, below.
 			denialReason := sandboxDenialReason(decision, res, runErr)
-			slog.Warn("sandbox denied shell command; asking whether it may run outside the sandbox",
+			slog.WarnContext(ctx, "sandbox denied shell command; asking whether it may run outside the sandbox",
 				"command", redactForLog(req.command), "command_bytes", len(req.command),
 				"reason", redactForLog(denialReason), "err", runErr)
 			authorized, approvalErr := requestSandboxRetryApproval(ctx, st, rt, req, res, decision, runErr, denialReason)
@@ -760,7 +760,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		// attempt this denial may have come from; asking again here would show
 		// the same prompt twice for one command.
 		denialReason := sandboxDenialReason(decision, res, runErr)
-		slog.Error("sandbox denied shell command",
+		slog.ErrorContext(ctx, "sandbox denied shell command",
 			"command", redactForLog(req.command), "command_bytes", len(req.command),
 			"reason", redactForLog(denialReason), "err", runErr)
 		captureCompletion()
@@ -1949,7 +1949,7 @@ func rewriteShellCommand(ctx context.Context, cmd string) shellRewriteOutcome {
 	out.Applied = true
 	out.Inserted = res.Inserted
 	out.Note = res.Note()
-	slog.Debug("rewrote shell command",
+	slog.DebugContext(ctx, "rewrote shell command",
 		"original", cmd,
 		"rewritten", res.Command,
 		"inserted", strings.Join(res.Inserted, " "),

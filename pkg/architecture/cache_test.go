@@ -2018,3 +2018,149 @@ func sneakOverlay(home string) error {
 		t.Fatalf("overlay guard did not catch the violation: %v", got)
 	}
 }
+
+// engineLogPackages are the packages whose log calls run inside a turn: they
+// hold the context a conversation's identity travels on, and none of them
+// passed it to slog.
+var engineLogPackages = []string{"run", "turn", "assembly", "llm", "tool"}
+
+// slogLevelsWithoutContext are the slog entry points that take a context in
+// their ...Context form, which is the form a function holding one must use.
+var slogLevelsWithoutContext = map[string]bool{
+	"Debug": true, "Info": true, "Warn": true, "Error": true,
+}
+
+// TestEngineLogsCarryContext keeps the engine's records attributable: a
+// function that has a context.Context in hand must log through it, so the
+// record carries the session, run, project and agent 284's scope reader takes
+// from that context.
+//
+// Before this guard, not one of the repository's 325 slog calls used the
+// Context form: 22 hand-wrote a session attribute and the rest said nothing
+// about whose work they described. The legitimate exception is a function
+// whose own parameter list has no context — giving it one only to reach the
+// log would reshape code that has no other use for it, so those calls stay
+// bare. They are counted and logged, not failed: the guard's job is to stop
+// the number growing, and the next session starts from the number it prints.
+func TestEngineLogsCarryContext(t *testing.T) {
+	root := findRepoRoot(t)
+	fset := token.NewFileSet()
+	var files, ctxFunctions, bare int
+	var violations []string
+	for _, pkg := range engineLogPackages {
+		dir := filepath.Join(root, "pkg", pkg)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read %s: %v", dir, err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") ||
+				strings.HasSuffix(entry.Name(), "_test.go") {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			file, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s: %v", path, err)
+			}
+			files++
+			rel := entry.Name()
+			if relPath, relErr := filepath.Rel(root, path); relErr == nil {
+				rel = relPath
+			}
+			// Every function — declared or a literal — is judged by its own
+			// parameter list, so a closure that captures an outer context is
+			// not credited with it.
+			ast.Inspect(file, func(node ast.Node) bool {
+				var body *ast.BlockStmt
+				var params *ast.FieldList
+				switch fn := node.(type) {
+				case *ast.FuncDecl:
+					body, params = fn.Body, fn.Type.Params
+				case *ast.FuncLit:
+					body, params = fn.Body, fn.Type.Params
+				default:
+					return true
+				}
+				if body == nil || params == nil {
+					return true
+				}
+				ctxNames := contextParamNames(params)
+				calls := bareSlogCalls(fset, body, rel)
+				if len(ctxNames) > 0 {
+					ctxFunctions++
+					for _, call := range calls {
+						violations = append(violations, call+" — reachable from "+ctxNames[0])
+					}
+					return true
+				}
+				bare += len(calls)
+				return true
+			})
+		}
+	}
+	if files == 0 || ctxFunctions == 0 {
+		t.Fatal("nothing was walked, or no function takes a context; the guard would pass vacuously")
+	}
+	t.Logf("checked %d files: %d functions hold a context, %d calls break the rule, %d bare calls remain in functions without one",
+		files, ctxFunctions, len(violations), bare)
+	if len(violations) > 0 {
+		sort.Strings(violations)
+		t.Fatalf("a function holding a context must log through it (slog.<Level>Context):\n%s",
+			strings.Join(violations, "\n"))
+	}
+}
+
+// contextParamNames is the names a parameter list gives its context.Context
+// parameters, so a violation can name the one the call site should pass.
+func contextParamNames(params *ast.FieldList) []string {
+	var names []string
+	for _, field := range params.List {
+		if !isContextType(field.Type) {
+			continue
+		}
+		for _, name := range field.Names {
+			names = append(names, name.Name)
+		}
+	}
+	return names
+}
+
+// isContextType reports whether a parameter is written context.Context.
+func isContextType(expr ast.Expr) bool {
+	selector, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := selector.X.(*ast.Ident)
+	return ok && pkg.Name == "context" && selector.Sel.Name == "Context"
+}
+
+// bareSlogCalls lists one body's positional slog calls as "file:line slog.Level".
+// Nested function literals are skipped: the walk visits each of them on its
+// own, with its own parameter list.
+func bareSlogCalls(fset *token.FileSet, body *ast.BlockStmt, rel string) []string {
+	var calls []string
+	ast.Inspect(body, func(node ast.Node) bool {
+		if node != body {
+			if _, ok := node.(*ast.FuncLit); ok {
+				return false
+			}
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := selector.X.(*ast.Ident)
+		if !ok || pkg.Name != "slog" || !slogLevelsWithoutContext[selector.Sel.Name] {
+			return true
+		}
+		calls = append(calls, fmt.Sprintf("%s:%d slog.%s", rel, fset.Position(call.Pos()).Line, selector.Sel.Name))
+		return true
+	})
+	return calls
+}

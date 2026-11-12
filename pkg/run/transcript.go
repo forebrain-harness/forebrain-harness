@@ -409,7 +409,7 @@ func rehydrateMessageFileMedia(ctx context.Context, resolver FileReferenceResolv
 		}
 		absPath, ok := resolver.ResolveFilePath(ctx, ref.FileID)
 		if !ok {
-			slog.Debug("rehydrate: cannot resolve file_id", "file_id", ref.FileID, "mime", mime)
+			slog.DebugContext(ctx, "rehydrate: cannot resolve file_id", "file_id", ref.FileID, "mime", mime)
 			continue
 		}
 		var imgPart llm.ContentPart
@@ -432,7 +432,7 @@ func rehydrateMessageFileMedia(ctx context.Context, resolver FileReferenceResolv
 			imgPart, err = llm.ImageFile(absPath)
 		}
 		if err != nil {
-			slog.Debug("rehydrate: image file read failed", "path", absPath, "err", err)
+			slog.DebugContext(ctx, "rehydrate: image file read failed", "path", absPath, "err", err)
 			// Live turns degrade an unsendable attachment to this exact sentence
 			// (llm.UnsendableImageNote), so the replayed message — and the web
 			// turn, whose live input IS this function — says what the terminal
@@ -453,7 +453,7 @@ func rehydrateMessageFileMedia(ctx context.Context, resolver FileReferenceResolv
 				}
 			}
 			if !replaced {
-				slog.Debug("rehydrate: placeholder not found for unsendable image", "placeholder", placeholder)
+				slog.DebugContext(ctx, "rehydrate: placeholder not found for unsendable image", "placeholder", placeholder)
 			}
 			continue
 		}
@@ -469,7 +469,7 @@ func rehydrateMessageFileMedia(ctx context.Context, resolver FileReferenceResolv
 			}
 		}
 		if !replaced {
-			slog.Debug("rehydrate: placeholder not found in message parts", "placeholder", placeholder)
+			slog.DebugContext(ctx, "rehydrate: placeholder not found in message parts", "placeholder", placeholder)
 		}
 	}
 	msg.Parts = parts

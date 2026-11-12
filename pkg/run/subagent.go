@@ -3321,7 +3321,7 @@ func continueForkSubagent(ctx context.Context, fac Factory, record agent.History
 	// room for, which is how chat_session's maybeAutoCompactBeforeAppend
 	// treats a failure too.
 	if _, _, cerr := CompactionService(own, store).AutoCompactSession(ctx, record.WorkerSessionID, ""); cerr != nil {
-		slog.Warn("fork subagent pre-turn compaction skipped", "session_id", record.WorkerSessionID, "err", cerr)
+		slog.WarnContext(ctx, "fork subagent pre-turn compaction skipped", "session_id", record.WorkerSessionID, "err", cerr)
 	}
 	ts := transcriptSession{
 		store:        store,
@@ -4908,7 +4908,7 @@ func (r *Runner) planReviewWriteScope(ctx context.Context) *tool.ReviewWriteScop
 			return scope
 		}
 	}
-	slog.Warn("plan review runs read-only: write scope unavailable", "error", err)
+	slog.WarnContext(ctx, "plan review runs read-only: write scope unavailable", "error", err)
 	return nil
 }
 

@@ -978,7 +978,7 @@ func (r *Runner) persistSessionPreset(ctx context.Context, sessionID, presetID, 
 		return
 	}
 	if _, err := r.Deps.SessionStore.SaveSessionPermissionPreset(ctx, sessionID, presetID, source); err != nil {
-		slog.Warn("persist session approval preset", "session_id", sessionID, "err", err)
+		slog.WarnContext(ctx, "persist session approval preset", "session_id", sessionID, "err", err)
 	}
 }
 

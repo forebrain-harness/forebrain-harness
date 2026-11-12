@@ -294,14 +294,14 @@ func (s *Service) endBatchExecution(ctx context.Context, req TurnRequest, runID,
 		code = "error"
 	}
 	if err := s.batchTasks.MarkExecutionEnded(ctx, sid, status, code, text); err != nil {
-		slog.Error("batch execution end not recorded", "session", sid, "run_id", runID, "status", status, "err", err)
+		slog.ErrorContext(ctx, "batch execution end not recorded", "session", sid, "run_id", runID, "status", status, "err", err)
 	}
 	// Read the row back: the caller needs finished_at and the final status, not
 	// the running snapshot this turn started from.
 	exec, task, ok, err := s.batchTasks.ExecutionForSession(ctx, sid)
 	if err != nil || !ok {
 		if err != nil {
-			slog.Error("batch execution read back", "session", sid, "err", err)
+			slog.ErrorContext(ctx, "batch execution read back", "session", sid, "err", err)
 		}
 		// The execution row is gone or unreadable, so there are no facts to
 		// add to the ending — but the ending is still the engine's fact, and a
@@ -327,7 +327,7 @@ func (s *Service) endBatchExecution(ctx context.Context, req TurnRequest, runID,
 	var artifacts []state.Artifact
 	if s.batchArtifacts != nil {
 		if _, total, err := s.batchArtifacts.ListArtifactsPage(ctx, sid, 1, 0); err != nil {
-			slog.Error("batch artifacts read", "session", sid, "err", err)
+			slog.ErrorContext(ctx, "batch artifacts read", "session", sid, "err", err)
 		} else if total == 0 {
 			// Nothing was presented, so the outputs folder is the deliverable:
 			// a task that produced files must not look like it produced none.
@@ -362,7 +362,7 @@ func (s *Service) publishBatchExecution(ctx context.Context, runID string, paylo
 	}
 	evt := event.NewRunEvent("", strings.TrimSpace(runID), strings.TrimSpace(payload.SessionID), event.RunEventBatchExecution, payload, time.Now())
 	if err := s.runEventPublisher(ctx, evt); err != nil {
-		slog.Warn("batch execution event not published", "session", payload.SessionID, "run_id", runID, "status", payload.Status, "err", err)
+		slog.WarnContext(ctx, "batch execution event not published", "session", payload.SessionID, "run_id", runID, "status", payload.Status, "err", err)
 	}
 }
 
@@ -423,7 +423,7 @@ func (s *Service) collectBatchFallbackArtifacts(ctx context.Context, sessionID, 
 	for _, path := range files {
 		sum, kind, mimeType, preview, size, mtimeNS, err := hashArtifactFile(path)
 		if err != nil {
-			slog.Warn("batch fallback artifact skipped", "path", path, "err", err)
+			slog.WarnContext(ctx, "batch fallback artifact skipped", "path", path, "err", err)
 			continue
 		}
 		rel := filepath.Base(path)
@@ -446,7 +446,7 @@ func (s *Service) collectBatchFallbackArtifacts(ctx context.Context, sessionID, 
 			SHA256:    sum,
 			Origin:    state.ArtifactOriginFallback,
 		}); err != nil {
-			slog.Error("batch fallback artifact not recorded", "session", sessionID, "path", path, "err", err)
+			slog.ErrorContext(ctx, "batch fallback artifact not recorded", "session", sessionID, "path", path, "err", err)
 		}
 	}
 }

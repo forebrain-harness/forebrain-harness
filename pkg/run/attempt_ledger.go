@@ -198,6 +198,6 @@ func (l *llmAttemptLedger) settle(ctx context.Context, res *llm.Result, err erro
 // write is a warning, never a failed request.
 func (l *llmAttemptLedger) record(ctx context.Context, rec state.LLMAttempt) {
 	if err := l.store.InsertLLMAttempt(ctx, rec); err != nil {
-		slog.Warn("llm attempt ledger write failed", "run_id", rec.RunID, "call", rec.Call, "attempt", rec.Attempt, "error", err)
+		slog.WarnContext(ctx, "llm attempt ledger write failed", "run_id", rec.RunID, "call", rec.Call, "attempt", rec.Attempt, "error", err)
 	}
 }

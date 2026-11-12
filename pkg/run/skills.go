@@ -125,11 +125,11 @@ func (w *skillCatalogLLM) catalogForSession(ctx context.Context) string {
 	if frozen, ok, err := w.sessions.SessionPromptState(ctx, sessionID, sessionPromptStateSkillCatalog); err == nil && ok {
 		return frozen
 	} else if err != nil {
-		slog.Debug("skill catalog: read frozen catalog", "session", sessionID, "err", err)
+		slog.DebugContext(ctx, "skill catalog: read frozen catalog", "session", sessionID, "err", err)
 	}
 	frozen, ok, err := w.sessions.FreezeSessionPromptState(ctx, sessionID, sessionPromptStateSkillCatalog, w.render())
 	if err != nil {
-		slog.Debug("skill catalog: freeze catalog", "session", sessionID, "err", err)
+		slog.DebugContext(ctx, "skill catalog: freeze catalog", "session", sessionID, "err", err)
 	}
 	if err != nil || !ok {
 		// Nothing was frozen — there is no session row to hang it on, or the

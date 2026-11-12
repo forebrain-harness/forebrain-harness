@@ -531,7 +531,7 @@ func registerKeptPlanArtifact(ctx context.Context, rt *AgentToolRuntime, planFil
 	}
 	sum, kind, mimeType, preview, err := hashAndClassifyFile(planFile)
 	if err != nil {
-		slog.Warn("kept-plan artifact classification failed", "path", planFile, "err", err)
+		slog.WarnContext(ctx, "kept-plan artifact classification failed", "path", planFile, "err", err)
 		return nil, false
 	}
 	name := filepath.Base(planFile)
@@ -551,7 +551,7 @@ func registerKeptPlanArtifact(ctx context.Context, rt *AgentToolRuntime, planFil
 		Origin:     state.ArtifactOriginPlan,
 	})
 	if err != nil {
-		slog.Warn("kept-plan artifact registration failed", "path", planFile, "err", err)
+		slog.WarnContext(ctx, "kept-plan artifact registration failed", "path", planFile, "err", err)
 		return nil, false
 	}
 	return map[string]any{

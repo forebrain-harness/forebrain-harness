@@ -213,7 +213,7 @@ func PersistCancelledTurn(ctx context.Context, store CancelledTurnStore, in Canc
 			in.Model,
 			"", // usage is unknown at cancel time; the store tolerates it
 		); err != nil {
-			slog.Error("persist the cancelled turn's messages", "session_id", in.SessionID, "run_id", in.RunID, "err", err)
+			slog.ErrorContext(ctx, "persist the cancelled turn's messages", "session_id", in.SessionID, "run_id", in.RunID, "err", err)
 		}
 	}
 	if reasoning := strings.TrimSpace(in.PartialReasoning); reasoning != "" {

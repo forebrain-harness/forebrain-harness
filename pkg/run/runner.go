@@ -1694,7 +1694,7 @@ func (r *Runner) markExternalContextUsed(ctx context.Context, sessionID string) 
 	}
 	reconsolidate, err := memory.MarkPollutedByExternalContext(ctx, r.AppCfg, r.MemoryStore, sessionID)
 	if err != nil {
-		slog.Debug("memory pollution update failed", "session", sessionID, "err", err)
+		slog.DebugContext(ctx, "memory pollution update failed", "session", sessionID, "err", err)
 		return
 	}
 	if reconsolidate {
@@ -3728,7 +3728,7 @@ func (r *Runner) operatorEnvVars(ctx context.Context) map[string]string {
 	}
 	vars, err := (&state.EnvVarStore{DB: r.SessionStore.DB()}).Map(ctx)
 	if err != nil {
-		slog.Warn("the operator's variables could not be read; MCP references resolve from the environment only", "err", err)
+		slog.WarnContext(ctx, "the operator's variables could not be read; MCP references resolve from the environment only", "err", err)
 		return nil
 	}
 	return vars

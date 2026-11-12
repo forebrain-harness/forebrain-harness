@@ -543,7 +543,7 @@ func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []ll
 		// usual. A negative tail also tells the overflow path not to compact
 		// (see forceCompact): the same call must not fold the steer in through
 		// the reactive route either.
-		slog.Warn("compaction skipped: provisional messages cannot be told apart",
+		slog.WarnContext(ctx, "compaction skipped: provisional messages cannot be told apart",
 			"run_id", strings.TrimSpace(tool.RunIDFromContext(ctx)), "messages", len(messages))
 		return messages, -1, false
 	}

@@ -238,7 +238,7 @@ func withImageRefusalRecorder(ctx context.Context, r *Runner, sessionID string) 
 		if err := r.SessionStore.RecordImageRefusal(storeCtx, sessionID, provider, model, reason); err != nil {
 			// Debug, not Warn: this repeats every turn a refused image stays in
 			// the conversation, and nothing the reader could do would fix it.
-			slog.Debug("remember a provider image refusal", "session", sessionID, "provider", provider, "model", model, "err", err)
+			slog.DebugContext(ctx, "remember a provider image refusal", "session", sessionID, "provider", provider, "model", model, "err", err)
 		}
 		if runID == "" {
 			// No run, no event: an injected id would be a second line every

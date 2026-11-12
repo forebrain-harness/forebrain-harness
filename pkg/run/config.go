@@ -2372,7 +2372,7 @@ func (w *sessionModelLLM) Execute(ctx context.Context, messages []llm.Message, t
 		// the runner's current model — which, by the ordinary-reload rule, is
 		// the same model this selection named, so this is no model switch —
 		// and the next turn is refused at the turn-entry check.
-		slog.Error("session model no longer resolves; the call runs on the runner's current model",
+		slog.ErrorContext(ctx, "session model no longer resolves; the call runs on the runner's current model",
 			"provider", sel.Provider, "model", sel.Model, "err", err)
 		return w.inner.Execute(ctx, messages, tools)
 	}
@@ -2431,14 +2431,14 @@ func (r *Runner) injectSessionModelSelection(ctx context.Context) (context.Conte
 			// turn. Scheduled fires, channel conversations and subagent
 			// workers hold no row and never reach here.
 			if touchErr := store.TouchSessionModelSelection(ctx, sid); touchErr != nil {
-				slog.Warn("refresh session model row", "session_id", sid, "err", touchErr)
+				slog.WarnContext(ctx, "refresh session model row", "session_id", sid, "err", touchErr)
 			}
 			return WithSessionModelSelection(ctx, resolved), nil
 		}
 		// The stored pair is gone: this turn fails rather than running on a
 		// model the user did not pick. The row stays as written so the choice
 		// is recoverable; the log carries no credentials.
-		slog.Error("session model no longer configured; the turn is refused",
+		slog.ErrorContext(ctx, "session model no longer configured; the turn is refused",
 			"session_id", sid,
 			"old_provider", strings.TrimSpace(row.Provider),
 			"old_model", strings.TrimSpace(row.Model),
@@ -2454,7 +2454,7 @@ func (r *Runner) injectSessionModelSelection(ctx context.Context) (context.Conte
 	if _, saveErr := store.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
 		ModelID: sel.ModelID, Provider: sel.Provider, Model: sel.Model, Effort: sel.Effort,
 	}); saveErr != nil {
-		slog.Warn("persist row-less session model row", "session_id", sid, "err", saveErr)
+		slog.WarnContext(ctx, "persist row-less session model row", "session_id", sid, "err", saveErr)
 	}
 	return WithSessionModelSelection(ctx, sel), nil
 }
@@ -2561,7 +2561,7 @@ func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
 				client, err = ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.ModelID, override.Provider, override.Model, override.Effort)
 			}
 			if err != nil {
-				slog.Warn("build subagent compaction client", "err", err)
+				slog.WarnContext(ctx, "build subagent compaction client", "err", err)
 				return nil
 			}
 			return client
@@ -2570,7 +2570,7 @@ func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
 			if modelID, provider, model, effort, ok := SubagentOwnModel(r, subtype); ok {
 				client, err := ConfiguredModelClientWithEffort(r.AppCfg, subtype, modelID, provider, model, effort)
 				if err != nil {
-					slog.Warn("build typed subagent compaction client", "type", subtype, "err", err)
+					slog.WarnContext(ctx, "build typed subagent compaction client", "type", subtype, "err", err)
 					return nil
 				}
 				return client

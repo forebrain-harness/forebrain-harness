@@ -470,11 +470,11 @@ func (w *memoryInstructionLLM) instructionForSession(ctx context.Context, projec
 	if frozen, ok, err := w.sessions.SessionPromptState(ctx, sessionID, key); err == nil && ok {
 		return frozen
 	} else if err != nil {
-		slog.Debug("memory instruction: read frozen instruction", "session", sessionID, "err", err)
+		slog.DebugContext(ctx, "memory instruction: read frozen instruction", "session", sessionID, "err", err)
 	}
 	frozen, ok, err := w.sessions.FreezeSessionPromptState(ctx, sessionID, key, w.renderInstruction(projectKey, opts))
 	if err != nil {
-		slog.Debug("memory instruction: freeze instruction", "session", sessionID, "err", err)
+		slog.DebugContext(ctx, "memory instruction: freeze instruction", "session", sessionID, "err", err)
 	}
 	if err != nil || !ok {
 		// Nothing was frozen — there is no session row to hang it on, or the
