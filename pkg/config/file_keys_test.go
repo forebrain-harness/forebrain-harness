@@ -125,3 +125,64 @@ func TestFileDatabaseURL(t *testing.T) {
 		t.Fatal("a malformed configuration file read as no database url")
 	}
 }
+
+// SetGatewayToken writes the token wherever the file stands: over the value
+// already there, into a key with nothing after it, and into a file that has no
+// such key yet — a hand-trimmed file must still be able to take a token. Every
+// other line of the file stays as it was written.
+func TestSetGatewayTokenWritesIntoAnyFileShape(t *testing.T) {
+	cases := map[string]string{
+		"a value to replace":  "# kept\ngateway:\n  http_addr: \"127.0.0.1:6060\"\n  auth:\n    token: ${SOME_NAME}\n",
+		"a key with no value": "# kept\ngateway:\n  http_addr: \"127.0.0.1:6060\"\n  auth:\n    token:\n",
+		"an empty auth":       "# kept\ngateway:\n  http_addr: \"127.0.0.1:6060\"\n  auth:\n",
+		"no auth section":     "# kept\ngateway:\n  http_addr: \"127.0.0.1:6060\"\n",
+		"no gateway section":  "# kept\ncredentials:\n  chatgpt: auth.json\n",
+		"only a comment":      "# kept\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "forebrain.yaml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			// A token that would read as a number has to stay a string.
+			if err := SetGatewayToken(path, "0123"); err != nil {
+				t.Fatalf("SetGatewayToken: %v", err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			loaded, err := LoadPersisted(path)
+			if err != nil {
+				t.Fatalf("load:\n%s\n%v", raw, err)
+			}
+			if loaded.Gateway.Auth.Token != "0123" {
+				t.Fatalf("token = %q, want 0123:\n%s", loaded.Gateway.Auth.Token, raw)
+			}
+			if !strings.Contains(string(raw), "# kept") {
+				t.Fatalf("the rewrite dropped the file's comment:\n%s", raw)
+			}
+			if strings.Contains(body, "http_addr") && loaded.Gateway.HTTPAddr != "127.0.0.1:6060" {
+				t.Fatalf("http_addr = %q:\n%s", loaded.Gateway.HTTPAddr, raw)
+			}
+		})
+	}
+}
+
+// A gateway section that is not a mapping cannot take the key, and the file is
+// left alone rather than rewritten into something else.
+func TestSetGatewayTokenRefusesAGatewayThatIsNotAMapping(t *testing.T) {
+	const body = "gateway:\n  - not\n  - a mapping\n"
+	path := filepath.Join(t.TempDir(), "forebrain.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := SetGatewayToken(path, "tok"); err == nil {
+		t.Fatal("SetGatewayToken = nil, want an error")
+	}
+	raw, _ := os.ReadFile(path)
+	if string(raw) != body {
+		t.Fatalf("the file was rewritten:\n%s", raw)
+	}
+}

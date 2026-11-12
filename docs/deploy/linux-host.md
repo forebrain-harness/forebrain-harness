@@ -91,6 +91,13 @@ database:                      # 不用外部数据库就删掉这一段
   url: "mysql://forebrain:<口令>@mysql.internal:3306/forebrain"
 ```
 
+没有配置令牌（`gateway.auth.token` 缺失、为空，或 `${NAME}` 引用解析不到值）时，
+`forebrain gateway start` 会自动生成一个临时令牌，连同登录链接打印在标准输出里。它
+只存在于这个进程里，不写进 `forebrain.yaml`，重启后会换成新的。要固定令牌、要让
+`forebrain gateway stop` 等其他进程能连上、或者多副本共用一个 home，就在
+`gateway.auth.token` 里写上自己的令牌（明文即可）。已配置的令牌不会被覆盖，也不会被
+打印出来。
+
 模型不用写在配置里：起服务 → 浏览器打开 `http://<主机>:6060` → 用上面的 token 登录 →
 在「设置 · 模型」里添加一个模型（或在那里做订阅登录）。网关在没有模型时也照常对外
 服务，正是为了让人能打开这一页。旧配置里若还留着 `agents.definitions.main.llm_providers`，

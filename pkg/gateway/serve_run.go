@@ -23,10 +23,14 @@ type ServeOptions struct {
 	Out io.Writer
 	// Version is this build's version, printed under the banner.
 	Version string
-	// SignInLink prints a sign-in URL that carries the gateway token. The
-	// command sets it only when stdout is a terminal, so the token never lands
-	// in a log file that captures a service's output.
-	SignInLink bool
+	// PrintToken prints the gateway token and a sign-in URL that carries it.
+	// The command sets it only for a token the gateway generated for this
+	// run: stdout is the one place that token can be read from. A token the
+	// operator configured is theirs already and is never printed.
+	PrintToken bool
+	// Notes are startup notices of the command's own, printed under the banner
+	// with the ones the runtime reports.
+	Notes []string
 }
 
 func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
@@ -260,14 +264,14 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	httpSrv.Handler = ServeHTTPChain(h, gw, gddHandler)
 
 	signInToken := ""
-	if opts.SignInLink {
+	if opts.PrintToken {
 		signInToken = strings.TrimSpace(h.Deps.AppCfg.Gateway.Auth.Token)
 	}
 	banner := startupBanner{
 		Version:     opts.Version,
 		SignInToken: signInToken,
 		WebUI:       gw.resolveStaticFS() != nil,
-		Notes:       h.ChannelMigrationNotes,
+		Notes:       append(append([]string(nil), opts.Notes...), h.ChannelMigrationNotes...),
 	}
 	return httpSrv.Run(func(a net.Addr) {
 		banner.Addr = a
@@ -287,7 +291,7 @@ const bannerArt = " _____              _               _\n" +
 type startupBanner struct {
 	Version     string   // this build's version, "" prints no version line suffix
 	Addr        net.Addr // the address actually bound
-	SignInToken string   // set only when a sign-in link is to be printed
+	SignInToken string   // set only for a generated token: it and its sign-in link are printed
 	WebUI       bool     // true when the web UI is being served
 	// Notes are one-off startup notices, printed under the banner. The
 	// primary-agent-level channel removal is the first: a channel that was
@@ -330,10 +334,15 @@ func writeStartupBanner(w io.Writer, b startupBanner) {
 	if b.WebUI {
 		fmt.Fprintf(&out, "Web UI       %s/\n", base)
 	}
+	// A token generated for this run is printed — the value the sign-in page
+	// asks for and an API client sends, and the link that signs a browser in
+	// with it. A configured token is not: the banner only says one is required.
 	if b.SignInToken != "" {
 		fmt.Fprintf(&out, "Sign in      %s/login#token=%s\n", base, signInFragmentValue(b.SignInToken))
+		fmt.Fprintf(&out, "Token        %s\n", b.SignInToken)
+	} else {
+		fmt.Fprintf(&out, "Auth         token\n")
 	}
-	fmt.Fprintf(&out, "Auth         token\n")
 	fmt.Fprintf(&out, "Listening on http://%s\n", b.Addr.String())
 	for _, note := range b.Notes {
 		if n := strings.TrimSpace(note); n != "" {

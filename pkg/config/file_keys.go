@@ -155,8 +155,18 @@ func SetGatewayToken(path, token string) error {
 	if err := yamlv3.Unmarshal(b, &doc); err != nil {
 		return err
 	}
+	// A file with no document in it — empty, or nothing but comments — has no
+	// node to edit: the key is written under whatever text it holds, so the
+	// comments stay.
+	var lead []byte
+	if doc.Kind == 0 {
+		if lead = bytes.TrimRight(b, "\n"); len(lead) > 0 {
+			lead = append(lead, '\n')
+		}
+		doc = yamlv3.Node{Kind: yamlv3.DocumentNode}
+	}
 	if !setMappingScalar(&doc, []string{"gateway", "auth", "token"}, token) {
-		return fmt.Errorf("%s: gateway.auth.token is not in the file", path)
+		return fmt.Errorf("%s: gateway.auth.token cannot be written: gateway or gateway.auth holds something other than keys", path)
 	}
 	// Two-space indentation, the shape every file this code writes has: the
 	// edit must not reindent the rest of a hand-edited file.
@@ -169,41 +179,65 @@ func SetGatewayToken(path, token string) error {
 	if err := enc.Close(); err != nil {
 		return err
 	}
-	return writeFileAtomic(path, out.Bytes(), 0o600)
+	return writeFileAtomic(path, append(lead, out.Bytes()...), 0o600)
 }
 
-// setMappingScalar replaces the scalar at a dotted key path of a YAML document
-// and reports whether it found one. The value is written double-quoted so a
-// token that happens to read as a number, a bool or an empty string stays the
-// string it is.
+// setMappingScalar sets the scalar at a dotted key path of a YAML document,
+// adding the keys the path names when the file does not carry them yet — a
+// hand-trimmed file with no gateway section still has to be able to take a
+// token. It reports false only when something on the path is in the way: a
+// key that holds a list or a scalar where a mapping has to be. The value is
+// written double-quoted so a token that happens to read as a number, a bool
+// or an empty string stays the string it is.
 func setMappingScalar(n *yamlv3.Node, path []string, value string) bool {
 	if n == nil || len(path) == 0 {
 		return false
 	}
 	if n.Kind == yamlv3.DocumentNode {
 		if len(n.Content) == 0 {
-			return false
+			// An empty file, or one holding only comments: the document gets
+			// the mapping the path is written into.
+			n.Content = []*yamlv3.Node{{Kind: yamlv3.MappingNode, Tag: "!!map"}}
 		}
 		return setMappingScalar(n.Content[0], path, value)
 	}
 	if n.Kind != yamlv3.MappingNode {
 		return false
 	}
+	scalar := func(target *yamlv3.Node) {
+		target.Kind = yamlv3.ScalarNode
+		target.Value = value
+		target.Tag = "!!str"
+		target.Style = yamlv3.DoubleQuotedStyle
+		target.Content = nil
+	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		if n.Content[i].Value != path[0] {
 			continue
 		}
 		target := n.Content[i+1]
+		// `key:` with nothing after it parses as a null scalar; it is an
+		// empty slot, not something in the way.
+		empty := target.Kind == yamlv3.ScalarNode && target.Tag == "!!null"
 		if len(path) > 1 {
+			if empty {
+				*target = yamlv3.Node{Kind: yamlv3.MappingNode, Tag: "!!map"}
+			}
 			return setMappingScalar(target, path[1:], value)
 		}
 		if target.Kind != yamlv3.ScalarNode {
 			return false
 		}
-		target.Value = value
-		target.Tag = "!!str"
-		target.Style = yamlv3.DoubleQuotedStyle
+		scalar(target)
 		return true
 	}
-	return false
+	key := &yamlv3.Node{Kind: yamlv3.ScalarNode, Tag: "!!str", Value: path[0]}
+	child := &yamlv3.Node{Kind: yamlv3.MappingNode, Tag: "!!map"}
+	if len(path) == 1 {
+		scalar(child)
+	} else if !setMappingScalar(child, path[1:], value) {
+		return false
+	}
+	n.Content = append(n.Content, key, child)
+	return true
 }

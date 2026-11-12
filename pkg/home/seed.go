@@ -8,7 +8,10 @@ import (
 	"strings"
 )
 
-func generateGatewayToken() (string, error) {
+// GenerateGatewayToken returns a fresh gateway token: 64 hex characters from
+// the system's CSPRNG. A new home is seeded with one, and a gateway that starts
+// with no token configured generates one the same way.
+func GenerateGatewayToken() (string, error) {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", err
@@ -26,7 +29,7 @@ func seedWorkspace(root string) error {
 	}
 	cfgPath := ConfigPath(root)
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		tok, err := generateGatewayToken()
+		tok, err := GenerateGatewayToken()
 		if err != nil {
 			return err
 		}

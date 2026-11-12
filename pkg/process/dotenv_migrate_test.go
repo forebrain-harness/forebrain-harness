@@ -155,6 +155,98 @@ gateway:
 	})
 }
 
+// The retired .env merge wrote FOREBRAIN_GATEWAY_TOKEN over gateway.auth.token
+// whatever the file held, so the token in effect came from .env also when the
+// file's own key named something else. Such a home must keep signing in with
+// the token it had: dropping it left the gateway refusing every request.
+func TestDotEnvMigrateKeepsTheTokenTheOldMergeForced(t *testing.T) {
+	migrated := func(t *testing.T, body, dotenv string) (string, appcfg.Root) {
+		t.Helper()
+		home, cfgPath, db := dotEnvHomeForTest(t)
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		writeLegacyEnvForTest(t, home, dotenv)
+		if err := migrateLegacyDotEnv(context.Background(), db, home, cfgPath); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		raw, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatalf("read config: %v", err)
+		}
+		loaded, err := appcfg.LoadPersisted(cfgPath)
+		if err != nil {
+			t.Fatalf("load the migrated config:\n%s\n%v", raw, err)
+		}
+		return string(raw), loaded
+	}
+
+	// The file references a name nothing ever supplied — a home created under
+	// an earlier product name — and .env carries the token under the name the
+	// merge read.
+	t.Run("a reference to a name nothing supplies", func(t *testing.T) {
+		raw, loaded := migrated(t, `# kept
+gateway:
+  http_addr: "127.0.0.1:6060"
+  auth:
+    token: ${OLDNAME_GATEWAY_TOKEN}
+`, "FOREBRAIN_GATEWAY_TOKEN=token-in-effect\n")
+		if loaded.Gateway.Auth.Token != "token-in-effect" {
+			t.Fatalf("stored token = %q, want the one .env put in effect:\n%s", loaded.Gateway.Auth.Token, raw)
+		}
+		if !strings.Contains(raw, "# kept") || !strings.Contains(raw, `http_addr: "127.0.0.1:6060"`) {
+			t.Fatalf("the rewrite lost the rest of the file:\n%s", raw)
+		}
+	})
+
+	t.Run("the second legacy name", func(t *testing.T) {
+		_, loaded := migrated(t, "gateway:\n  auth:\n    token: ${OLDNAME_GATEWAY_TOKEN}\n",
+			"GATEWAY_TOKEN=second-name\n")
+		if loaded.Gateway.Auth.Token != "second-name" {
+			t.Fatalf("stored token = %q", loaded.Gateway.Auth.Token)
+		}
+	})
+
+	t.Run("an empty key", func(t *testing.T) {
+		_, loaded := migrated(t, "gateway:\n  http_addr: \"127.0.0.1:6060\"\n  auth:\n    token: \"\"\n",
+			"FOREBRAIN_GATEWAY_TOKEN=token-in-effect\n")
+		if loaded.Gateway.Auth.Token != "token-in-effect" {
+			t.Fatalf("stored token = %q", loaded.Gateway.Auth.Token)
+		}
+	})
+
+	t.Run("no key at all", func(t *testing.T) {
+		raw, loaded := migrated(t, "gateway:\n  http_addr: \"127.0.0.1:6060\"\n",
+			"FOREBRAIN_GATEWAY_TOKEN=token-in-effect\n")
+		if loaded.Gateway.Auth.Token != "token-in-effect" {
+			t.Fatalf("stored token = %q:\n%s", loaded.Gateway.Auth.Token, raw)
+		}
+		if loaded.Gateway.HTTPAddr != "127.0.0.1:6060" {
+			t.Fatalf("http_addr = %q:\n%s", loaded.Gateway.HTTPAddr, raw)
+		}
+	})
+
+	// A token written into the file in plaintext is the operator's own.
+	t.Run("a hand-written token is never overwritten", func(t *testing.T) {
+		raw, loaded := migrated(t, "gateway:\n  auth:\n    token: my-own-token\n",
+			"FOREBRAIN_GATEWAY_TOKEN=from-dotenv\n")
+		if loaded.Gateway.Auth.Token != "my-own-token" {
+			t.Fatalf("stored token = %q, want the hand-written one:\n%s", loaded.Gateway.Auth.Token, raw)
+		}
+	})
+
+	// A reference to another name the process environment supplies is the
+	// container arrangement under a name of the operator's choosing.
+	t.Run("a reference the environment supplies stays", func(t *testing.T) {
+		t.Setenv("MY_GATEWAY_TOKEN", "from-env")
+		raw, _ := migrated(t, "gateway:\n  auth:\n    token: ${MY_GATEWAY_TOKEN}\n",
+			"FOREBRAIN_GATEWAY_TOKEN=from-dotenv\n")
+		if !strings.Contains(raw, "${MY_GATEWAY_TOKEN}") {
+			t.Fatalf("the reference the environment resolves must stay:\n%s", raw)
+		}
+	})
+}
+
 // A project channel's secret reference becomes the plaintext the reference
 // stood for, and its account identity follows the plaintext.
 func TestDotEnvMigrateTurnsChannelSecretsIntoPlaintext(t *testing.T) {

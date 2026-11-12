@@ -38,6 +38,17 @@ var migrateLegacyHome = func(ctx context.Context) error {
 	return nil
 }
 
+// ensureGatewayToken is process.EnsureGatewayToken for this home: the token
+// it generated for this run, or "" when one was already configured. A variable
+// only so a test can drive the start without a home of its own.
+var ensureGatewayToken = func(ctx context.Context) (string, error) {
+	root, err := home.Root()
+	if err != nil {
+		return "", err
+	}
+	return process.EnsureGatewayToken(ctx, root)
+}
+
 var gatewayIsTerminal = func(f *os.File) bool {
 	return f != nil && term.IsTerminal(int(f.Fd()))
 }
@@ -48,6 +59,19 @@ func runGatewayE(cmd *cobra.Command, _ []string) error {
 	if err := ensureGatewayStartSetup(ctx, cmd); err != nil {
 		return err
 	}
+	// A gateway nobody gave a token generates one for this run (owner
+	// 2026-11-12). It exists only in this process and on this stdout — nothing
+	// writes it to the configuration file — so the banner prints it wherever
+	// stdout goes: there is no other place to read it from. A token the
+	// operator configured is never printed.
+	generated, err := ensureGatewayToken(ctx)
+	if err != nil {
+		return err
+	}
+	var notes []string
+	if generated != "" {
+		notes = append(notes, "gateway.auth.token is not set in forebrain.yaml; the token above was generated for this run only")
+	}
 	// The console log is what an operator reads live and what an operator
 	// reads later, so it also lands in <home>/logs with debug.log's rotation.
 	root, err := home.Root()
@@ -56,12 +80,11 @@ func runGatewayE(cmd *cobra.Command, _ []string) error {
 	}
 	restoreLog := installGatewayConsoleLog(root)
 	defer restoreLog()
-	// The sign-in link carries the gateway token, so it is printed only when
-	// stdout is a terminal a human is reading — never into captured logs.
 	return gatewayRunBlocking(ctx, gateway.ServeOptions{
 		Out:        cmd.OutOrStdout(),
 		Version:    home.Version,
-		SignInLink: gatewayIsTerminal(os.Stdout),
+		PrintToken: generated != "",
+		Notes:      notes,
 	})
 }
 

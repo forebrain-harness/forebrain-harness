@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.yaml.in/yaml/v2"
@@ -93,7 +94,40 @@ func FinishLoadWith(r *Root, lookup func(string) (string, bool)) error {
 		lookup = os.LookupEnv
 	}
 	expandRootEnvReferences(r, lookup)
+	applyGeneratedGatewayToken(r)
 	return validateLoadedRoot(r)
+}
+
+// generatedGatewayToken is the token a gateway process generated for itself
+// because its configuration has none in effect (owner 2026-11-12). It lives in
+// this process only — it is printed where the gateway was started and never
+// written to the configuration file — and it stands in exactly where the
+// configuration's own token is empty, so a token the operator writes into
+// gateway.auth.token takes over the moment the configuration is read again.
+var generatedGatewayToken atomic.Pointer[string]
+
+// SetGeneratedGatewayToken installs the token this process generated for
+// itself; "" removes it. Process-wide: one process serves one gateway.
+func SetGeneratedGatewayToken(token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		generatedGatewayToken.Store(nil)
+		return
+	}
+	generatedGatewayToken.Store(&token)
+}
+
+// applyGeneratedGatewayToken fills an empty gateway.auth.token with the
+// generated one. It runs in the tail every loaded configuration takes, after
+// the references are expanded: a reference nothing resolves is an empty token
+// too.
+func applyGeneratedGatewayToken(r *Root) {
+	if strings.TrimSpace(r.Gateway.Auth.Token) != "" {
+		return
+	}
+	if token := generatedGatewayToken.Load(); token != nil {
+		r.Gateway.Auth.Token = *token
+	}
 }
 
 func loadPersisted(path string) (Root, error) {

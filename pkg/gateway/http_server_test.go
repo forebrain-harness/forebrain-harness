@@ -61,7 +61,7 @@ func TestWriteStartupBannerGolden(t *testing.T) {
 		"\n" +
 		"Web UI       http://127.0.0.1:6060/\n" +
 		"Sign in      http://127.0.0.1:6060/login#token=tok\n" +
-		"Auth         token\n" +
+		"Token        tok\n" +
 		"Listening on http://127.0.0.1:6060\n"
 	if buf.String() != want {
 		t.Fatalf("banner mismatch:\n--- got ---\n%s\n--- want ---\n%s", buf.String(), want)
@@ -90,8 +90,12 @@ func TestWriteStartupBannerOmitsSignInWithoutToken(t *testing.T) {
 		Version: "v0.3.0",
 		Addr:    bannerAddr(t, "127.0.0.1:6060"),
 	})
-	if strings.Contains(buf.String(), "Sign in") {
-		t.Fatalf("banner must omit the sign-in line without a token:\n%s", buf.String())
+	if strings.Contains(buf.String(), "Sign in") || strings.Contains(buf.String(), "Token  ") {
+		t.Fatalf("banner must omit the sign-in and token lines without a token:\n%s", buf.String())
+	}
+	// Captured output still says a token is required, without carrying one.
+	if !strings.Contains(buf.String(), "Auth         token\n") {
+		t.Fatalf("banner must name the auth mode when it prints no token:\n%s", buf.String())
 	}
 	if strings.Contains(buf.String(), "Web UI") {
 		t.Fatalf("banner must omit the Web UI line when no UI is served:\n%s", buf.String())

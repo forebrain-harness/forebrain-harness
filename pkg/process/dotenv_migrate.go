@@ -130,24 +130,36 @@ func MigrateLegacyHome(ctx context.Context, home, cfgPath string) error {
 	return nil
 }
 
-// migrateGatewayToken writes the token the configuration referenced into
-// gateway.auth.token itself, unless the process environment supplies the name
-// it references — that is the container arrangement, and the reference is what
-// such a deployment wants to keep.
+// migrateGatewayToken keeps the token that was in effect in effect. The
+// retired .env merge wrote FOREBRAIN_GATEWAY_TOKEN (or GATEWAY_TOKEN) over
+// gateway.auth.token whatever the file held there, so a home whose .env carries
+// one signs every client in with that value — also when the file's own key is
+// empty, absent, or a reference to some other name nothing ever supplied. The
+// value moves into gateway.auth.token itself.
+//
+// Two things the file may hold are left as they are: a token written there in
+// plaintext, which is the operator's own and never overwritten, and a
+// reference the process environment supplies — that is the container
+// arrangement, and the reference is what such a deployment wants to keep.
 func migrateGatewayToken(cfgPath string, dotenv map[string]string, consumed map[string]bool) error {
 	persisted, err := appcfg.LoadPersisted(cfgPath)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", cfgPath, err)
 	}
-	name, ok := envReferenceName(persisted.Gateway.Auth.Token)
-	if !ok || !isGatewayTokenEnvName(name) {
+	current := strings.TrimSpace(persisted.Gateway.Auth.Token)
+	name, isRef := envReferenceName(current)
+	if isRef && isGatewayTokenEnvName(name) {
+		consumed[name] = true
+	}
+	if current != "" && !isRef {
 		return nil
 	}
-	consumed[name] = true
-	if _, inEnv := os.LookupEnv(name); inEnv {
-		return nil
+	if isRef {
+		if _, inEnv := os.LookupEnv(name); inEnv {
+			return nil
+		}
 	}
-	token := strings.TrimSpace(dotenv[name])
+	token := legacyGatewayToken(dotenv)
 	if token == "" {
 		return nil
 	}
@@ -155,6 +167,17 @@ func migrateGatewayToken(cfgPath string, dotenv map[string]string, consumed map[
 		return fmt.Errorf("store the gateway token in %s: %w", cfgPath, err)
 	}
 	return nil
+}
+
+// legacyGatewayToken is the token the retired .env merge put in effect: the
+// first of its two names that carries a value.
+func legacyGatewayToken(dotenv map[string]string) string {
+	for _, name := range gatewayTokenEnvNames {
+		if token := strings.TrimSpace(dotenv[name]); token != "" {
+			return token
+		}
+	}
+	return ""
 }
 
 // migrateChannelSecrets replaces every ${NAME} a project channel's secret

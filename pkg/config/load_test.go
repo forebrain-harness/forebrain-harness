@@ -906,3 +906,47 @@ func loadPersistedDocumentForTest(path string) (Root, error) {
 	}
 	return r, nil
 }
+
+// A token the gateway process generated for itself stands in only where the
+// configuration's own token is empty — after the references are expanded, so a
+// reference nothing resolves counts as empty — and never over a configured one.
+func TestGeneratedGatewayTokenFillsOnlyAnEmptyToken(t *testing.T) {
+	t.Cleanup(func() { SetGeneratedGatewayToken("") })
+	finish := func(token string) string {
+		t.Helper()
+		var r Root
+		r.Gateway.Auth.Token = token
+		lookup := func(name string) (string, bool) {
+			if name == "SET_TOKEN" {
+				return "from-lookup", true
+			}
+			return "", false
+		}
+		if err := FinishLoadWith(&r, lookup); err != nil {
+			t.Fatalf("FinishLoadWith: %v", err)
+		}
+		return r.Gateway.Auth.Token
+	}
+
+	// Nothing generated: an empty token stays empty.
+	if got := finish(""); got != "" {
+		t.Fatalf("token = %q, want empty with nothing generated", got)
+	}
+
+	SetGeneratedGatewayToken("generated")
+	for in, want := range map[string]string{
+		"":               "generated",
+		"${UNSET_TOKEN}": "generated",
+		"hand-written":   "hand-written",
+		"${SET_TOKEN}":   "from-lookup",
+	} {
+		if got := finish(in); got != want {
+			t.Fatalf("token %q loaded as %q, want %q", in, got, want)
+		}
+	}
+
+	SetGeneratedGatewayToken("")
+	if got := finish(""); got != "" {
+		t.Fatalf("token = %q, want empty after the generated one is removed", got)
+	}
+}

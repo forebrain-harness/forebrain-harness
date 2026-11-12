@@ -266,7 +266,80 @@ func TestRunGatewayPassesStdoutAndVersion(t *testing.T) {
 	if got.Version != home.Version {
 		t.Fatalf("opts.Version = %q, want %q", got.Version, home.Version)
 	}
-	if got.SignInLink {
-		t.Fatal("opts.SignInLink must be false when stdout is not a terminal")
+	if got.PrintToken {
+		t.Fatal("opts.PrintToken must be false when no token was generated")
+	}
+}
+
+// A start that had to generate the gateway's token prints it: the token lives
+// only in the process, so the banner is the one place to read it, wherever
+// stdout goes. A token the operator configured is never printed, on a terminal
+// or off one.
+func TestRunGatewayPrintsAGeneratedToken(t *testing.T) {
+	prevNeeds := gatewayNeedsFirstSetup
+	prevStartupError := gatewayStartupConfigError
+	prevTTY := gatewayIsTerminal
+	prevRun := gatewayRunBlocking
+	prevEnsure := ensureGatewayToken
+	t.Cleanup(func() {
+		gatewayNeedsFirstSetup = prevNeeds
+		gatewayStartupConfigError = prevStartupError
+		gatewayIsTerminal = prevTTY
+		gatewayRunBlocking = prevRun
+		ensureGatewayToken = prevEnsure
+	})
+	gatewayNeedsFirstSetup = func() (bool, error) { return false, nil }
+	gatewayStartupConfigError = func() error { return nil }
+	gatewayIsTerminal = func(*os.File) bool { return false }
+
+	var got gateway.ServeOptions
+	ran := 0
+	gatewayRunBlocking = func(_ context.Context, opts gateway.ServeOptions) error {
+		ran++
+		got = opts
+		return nil
+	}
+	start := func() error {
+		cmd := &cobra.Command{Use: "start"}
+		cmd.SetOut(io.Discard)
+		return runGatewayE(cmd, nil)
+	}
+
+	ensureGatewayToken = func(context.Context) (string, error) { return "generated-token", nil }
+	if err := start(); err != nil {
+		t.Fatalf("runGatewayE error: %v", err)
+	}
+	if !got.PrintToken {
+		t.Fatal("a generated token must be printed even when stdout is not a terminal")
+	}
+	if len(got.Notes) != 1 || !strings.Contains(got.Notes[0], "gateway.auth.token") {
+		t.Fatalf("notes = %q, want one naming the key to set", got.Notes)
+	}
+	if strings.Contains(got.Notes[0], "generated-token") {
+		t.Fatalf("the note must not repeat the token: %q", got.Notes[0])
+	}
+
+	// A configured token is nothing to report and is not printed — not even
+	// on a terminal.
+	ensureGatewayToken = func(context.Context) (string, error) { return "", nil }
+	for _, tty := range []bool{false, true} {
+		gatewayIsTerminal = func(*os.File) bool { return tty }
+		if err := start(); err != nil {
+			t.Fatalf("runGatewayE error: %v", err)
+		}
+		if got.PrintToken || len(got.Notes) != 0 {
+			t.Fatalf("terminal=%v: PrintToken = %v, notes = %q; want neither for a configured token", tty, got.PrintToken, got.Notes)
+		}
+	}
+	gatewayIsTerminal = func(*os.File) bool { return false }
+
+	// A start that cannot settle its token does not serve.
+	ran = 0
+	ensureGatewayToken = func(context.Context) (string, error) { return "", fmt.Errorf("config unreadable") }
+	if err := start(); err == nil || !strings.Contains(err.Error(), "config unreadable") {
+		t.Fatalf("runGatewayE error = %v, want the failure", err)
+	}
+	if ran != 0 {
+		t.Fatal("the gateway must not start without a token")
 	}
 }
