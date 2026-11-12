@@ -62,6 +62,7 @@ all: build
 ## ui: build the frontend straight into the embed package (vite outDir).
 ## Installs deps only on a fresh checkout; otherwise builds with what's present.
 ui:
+	scripts/gen-subscription-plugins.sh
 	find $(WEBUI_DIST) -mindepth 1 ! -name .gitkeep -exec rm -rf {} +
 	cd frontend && [ -d node_modules ] || CI=true corepack pnpm install --frozen-lockfile
 	cd frontend && corepack pnpm build
@@ -91,6 +92,7 @@ pdfium-fonts:
 ## CGO is mandatory on every platform (Windows included): it pulls in the
 ## weixin silk voice decoder, sqlite, and other cgo-backed features.
 build: ui libtokenizers pdfium pdfium-fonts
+	scripts/gen-subscription-plugins.sh
 	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/forebrain
 	scripts/install-dictionary.sh $(dir $(BIN))
 	scripts/install-assets.sh $(dir $(BIN))

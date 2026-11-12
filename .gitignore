@@ -76,3 +76,7 @@ pkg/migrate/testdata/**/.DS_Store
 docs/plan/
 plans/
 .workbuddy/
+# Closed-source subscription plugins (qodercn, zcode, workbuddy, etc.) and generated bridges:
+/plugins/
+/cmd/forebrain/plugins_local_gen.go
+/frontend/src/plugins/local_subscriptions.gen.ts

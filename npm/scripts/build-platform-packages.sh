@@ -60,6 +60,12 @@ FOREBRAIN_VERSION="${FOREBRAIN_VERSION:-$(tr -d '[:space:]' < "$ROOT_DIR/VERSION
 DEFAULT_TARGET="$(go env GOOS)/$(go env GOARCH)"
 TARGETS="${FOREBRAIN_BUILD_TARGETS:-$DEFAULT_TARGET}"
 
+# Closed-source subscription plugins (gitignored) are discovered here, so both
+# bridges — the Go blank-import file and the frontend plugin registry — are
+# fresh before the web UI and the binaries are built, even when the UI rebuild
+# below is skipped.
+"$ROOT_DIR/scripts/gen-subscription-plugins.sh"
+
 if [ "${FOREBRAIN_SKIP_UI_BUILD:-}" = "1" ]; then
   [ -f "$ROOT_DIR/pkg/gateway/dist/index.html" ] || { echo "pkg/gateway/dist has no web UI build; run make ui first" >&2; exit 1; }
 else
