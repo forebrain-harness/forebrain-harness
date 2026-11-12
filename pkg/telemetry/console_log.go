@@ -23,28 +23,6 @@ type ConsoleSink struct {
 	Color bool
 }
 
-// fanoutWriter adapts a write function to io.Writer.
-type fanoutWriter func([]byte) (int, error)
-
-func (f fanoutWriter) Write(p []byte) (int, error) { return f(p) }
-
-// MultiWriter duplicates each write to every writer, and does so even when one
-// of them fails: the stdlib MultiWriter stops at the first error, which would
-// let a broken terminal silence the log file on a headless or piped run. The
-// errors are joined so a caller that inspects them still sees every failure.
-func MultiWriter(writers ...io.Writer) io.Writer {
-	return fanoutWriter(func(p []byte) (int, error) {
-		n := len(p)
-		var errs []error
-		for _, w := range writers {
-			if _, err := w.Write(p); err != nil {
-				errs = append(errs, err)
-			}
-		}
-		return n, errors.Join(errs...)
-	})
-}
-
 // NewConsoleHandler returns a handler printing one line per record:
 //
 //	16:40:05.131 INF request method=GET path=/ status=200 … · serve_run.go:203

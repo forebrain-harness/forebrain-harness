@@ -73,7 +73,8 @@ func runGatewayE(cmd *cobra.Command, _ []string) error {
 		notes = append(notes, "gateway.auth.token is not set in forebrain.yaml; the token above was generated for this run only")
 	}
 	// The console log is what an operator reads live and what an operator
-	// reads later, so it also lands in <home>/logs with debug.log's rotation.
+	// reads later, so it also lands in <home>/logs — as this gateway's own
+	// event-log file, beside the terminal handler (plans 284/285).
 	root, err := home.Root()
 	if err != nil {
 		return err

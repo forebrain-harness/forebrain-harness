@@ -4,66 +4,23 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync"
-
-	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 )
 
-var (
-	debugFileLogMu   sync.Mutex
-	debugFileLogFile *File
-	debugFileLogOnce sync.Once
-	rootDirFn        = home.Root
-)
-
-func debugFileLogEnabled() bool {
+// payloadCaptureEnabled reports whether model and tool payloads are kept:
+// FOREBRAIN_LLM_HTTP_DEBUG=0/false/no/off turns the payload files off.
+//
+// It is the switch for payloads only. The records themselves are written
+// either way — who called, which model, the status, the outcome and the timings
+// are what makes a call diagnosable, and losing them because someone turned the
+// bodies off would be the old debug.log switch taking the metadata with it
+// (plan 286).
+func payloadCaptureEnabled() bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("FOREBRAIN_LLM_HTTP_DEBUG")))
 	if v == "0" || v == "false" || v == "no" || v == "off" {
 		return false
 	}
 	return true
-}
-
-// withDebugFileLog opens debug.log lazily once, then runs write under the
-// process-wide debug log lock. It is the shared body of writeDebugFileLog and
-// writeDebugFileLogWhole so the open path cannot drift between them.
-func withDebugFileLog(write func(*File)) {
-	if !debugFileLogEnabled() {
-		return
-	}
-	debugFileLogOnce.Do(func() {
-		root, err := rootDirFn()
-		if err != nil {
-			return
-		}
-		p := filepath.Join(root, home.LogsDir, "debug.log")
-		f, err := Open(p, Options{ExistingParentOnly: true})
-		if err == nil {
-			debugFileLogFile = f
-		}
-	})
-	debugFileLogMu.Lock()
-	defer debugFileLogMu.Unlock()
-	if debugFileLogFile != nil {
-		write(debugFileLogFile)
-	}
-}
-
-func writeDebugFileLog(section, msg string) {
-	withDebugFileLog(func(f *File) {
-		_ = f.WriteSection(section, msg)
-	})
-}
-
-// writeDebugFileLogWhole writes the block as given: the caller has already
-// bounded whatever needed bounding, or deliberately bounded nothing (a
-// model's output, which debug.log must record in full).
-func writeDebugFileLogWhole(section, msg string) {
-	withDebugFileLog(func(f *File) {
-		_ = f.WriteSectionWhole(section, msg)
-	})
 }
 
 // LogProviderDebug records one provider debug line under topic. It replaces a
@@ -72,10 +29,10 @@ func writeDebugFileLogWhole(section, msg string) {
 // llm's port instead.
 //
 // It writes a record rather than a block in debug.log: the model and tool
-// exchanges that log keeps in full are 286's subject, and this is a provider's
+// exchanges that log kept in full are 286's subject, and this is a provider's
 // note about one call (plan 285).
 func LogProviderDebug(topic, message string) {
-	if !debugFileLogEnabled() {
+	if !payloadCaptureEnabled() {
 		return
 	}
 	Emit(context.Background(), slog.LevelDebug, "log", topic, slog.String("detail", message))

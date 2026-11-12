@@ -10,10 +10,10 @@ import (
 
 // fanoutHandler sends every enabled record to each of its handlers in turn.
 //
-// A handler that fails does not stop the ones after it, for the reason
-// MultiWriter exists: the fragile destination is the terminal, and a broken
-// terminal must not silence the log file (or the reverse). The errors are
-// joined, so a caller that inspects them still sees every failure.
+// A handler that fails does not stop the ones after it: the fragile destination
+// is the terminal, and a broken terminal must not silence the log file (or the
+// reverse). The errors are joined, so a caller that inspects them still sees
+// every failure.
 type fanoutHandler struct {
 	handlers []slog.Handler
 }

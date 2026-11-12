@@ -301,27 +301,6 @@ func TestConsoleLogHandlerWritesDurableSinkFirst(t *testing.T) {
 	}
 }
 
-// The fan-out writer keeps writing past a failure — the stdlib MultiWriter's
-// documented stop-at-first-error is the exact behaviour this replaces on the
-// logfmt path.
-func TestMultiWriterKeepsGoingAfterAFailure(t *testing.T) {
-	var file bytes.Buffer
-	w := MultiWriter(
-		writerFunc(func([]byte) (int, error) { return 0, errors.New("eio") }),
-		&file,
-	)
-	n, err := w.Write([]byte("gateway started\n"))
-	if err == nil {
-		t.Fatal("the fan-out must report the failing writer")
-	}
-	if n != len("gateway started\n") {
-		t.Fatalf("n = %d, want the full payload length", n)
-	}
-	if file.String() != "gateway started\n" {
-		t.Fatalf("the healthy writer must receive the payload: %q", file.String())
-	}
-}
-
 // errors.Join of no failures is nil: healthy sinks keep Handle's contract of
 // returning nil.
 func TestConsoleLogHandlerHandleReturnsNoErrorOnSuccess(t *testing.T) {
