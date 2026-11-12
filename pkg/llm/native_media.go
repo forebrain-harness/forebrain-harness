@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -63,6 +64,16 @@ func (k NativeMediaKinds) Every(other NativeMediaKinds) NativeMediaKinds {
 		PDF:   k.PDF && other.PDF,
 		Audio: k.Audio && other.Audio,
 		Video: k.Video && other.Video,
+	}
+}
+
+// Without returns the set with every kind in refused removed: what a
+// conversation's model still accepts after one kind was refused on it.
+func (k NativeMediaKinds) Without(refused NativeMediaKinds) NativeMediaKinds {
+	return NativeMediaKinds{
+		PDF:   k.PDF && !refused.PDF,
+		Audio: k.Audio && !refused.Audio,
+		Video: k.Video && !refused.Video,
 	}
 }
 
@@ -197,6 +208,225 @@ var nativeMediaByProvider = map[string]NativeMediaKinds{
 // set for a provider this build has no official shape for.
 func NativeMediaForProvider(provider string) NativeMediaKinds {
 	return nativeMediaByProvider[strings.ToLower(strings.TrimSpace(provider))]
+}
+
+// IsMediaRejection reports whether err is the provider refusing one kind of
+// native media, and the sentence to remember when it is.
+//
+// The judgement is deliberately narrower than IsImageRejection's, because what
+// a caller does with a hit is switch that kind off for the rest of the
+// conversation: a false positive costs a capability the user only gets back by
+// switching model, while a false negative costs the request that already
+// failed. So a hit needs both halves:
+//
+//   - the provider's own rejection. err must be an *APIError carrying 400 or
+//     413 — the two statuses IsImageRejection reads as a rejection. A 5xx, a
+//     429, a timeout, or any error that never reached the provider carries no
+//     such status and never matches: the media is not what failed, and
+//     degrading it would hide an outage behind a text-only request.
+//   - text about this kind: it names the kind (pdf/document, audio/input_audio,
+//     video/video_url), or it is one of the generic unsupported-content
+//     sentences and names no other native kind — a provider saying it does not
+//     support audio is refusing the audio, not the PDF travelling beside it.
+func IsMediaRejection(err error, kind MediaKind) (reason string, ok bool) {
+	if len(mediaKindWords(kind)) == 0 {
+		return "", false
+	}
+	text, sentence, rejected := mediaRejectionText(err)
+	if !rejected {
+		return "", false
+	}
+	lowered := strings.ToLower(text)
+	for _, word := range mediaKindWords(kind) {
+		if strings.Contains(lowered, word) {
+			return oneLineReason(sentence), true
+		}
+	}
+	if mediaNamesAnotherKind(lowered, kind) {
+		return "", false
+	}
+	for _, phrase := range mediaRejectionPhrases {
+		if strings.Contains(lowered, phrase) {
+			return oneLineReason(sentence), true
+		}
+	}
+	return "", false
+}
+
+// mediaRejectionText is the prose a provider rejection is judged on — the
+// error's own text plus the parsed body message, the same two sources
+// IsImageRejection reads — with the sentence to remember quoted once. It
+// reports false for anything that is not the provider answering 400 or 413.
+func mediaRejectionText(err error) (text, sentence string, ok bool) {
+	if err == nil {
+		return "", "", false
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return "", "", false
+	}
+	switch apiErr.StatusCode {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge:
+	default:
+		return "", "", false
+	}
+	// Error() renders Err when the SDK set one; the parsed body text can carry
+	// the sentence even then.
+	text = err.Error()
+	sentence = strings.TrimSpace(text)
+	if message := strings.TrimSpace(apiErr.Message); message != "" {
+		text += " " + message
+		if sentence == "" {
+			sentence = message
+		}
+	}
+	text = strings.TrimSpace(text)
+	return text, sentence, text != ""
+}
+
+// mediaKindWords are the words a provider's sentence uses to name one kind: the
+// medium, and the wire part name a protocol gives it (which is what a provider
+// quoting the rejected part prints).
+func mediaKindWords(kind MediaKind) []string {
+	switch kind {
+	case MediaKindPDF:
+		return []string{"pdf", "document"}
+	case MediaKindAudio:
+		return []string{"audio", "input_audio"}
+	case MediaKindVideo:
+		return []string{"video", "video_url"}
+	}
+	return nil
+}
+
+// mediaNamesAnotherKind reports whether the sentence is about a different
+// native kind than the one asked about: a request can carry a PDF, a clip and a
+// video at once, and a provider that names the audio is refusing the audio.
+//
+// An image mention does not count. Pictures have their own gate and their own
+// heal, and the reporter sits above the heal: by the time a refusal is judged
+// here the image it was about has been replaced with text, so what the sentence
+// still says about pictures is what the model accepts, not what it refused.
+func mediaNamesAnotherKind(lowered string, kind MediaKind) bool {
+	for _, other := range []MediaKind{MediaKindPDF, MediaKindAudio, MediaKindVideo} {
+		if other == kind {
+			continue
+		}
+		for _, word := range mediaKindWords(other) {
+			if strings.Contains(lowered, word) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mediaRejectionPhrases are the generic prose a provider uses when it does not
+// name the kind: the whole request is refused for what it carries.
+var mediaRejectionPhrases = []string{
+	"unsupported content type",
+	"invalid content type",
+	"does not support",
+	"only supports text",
+}
+
+// NewMediaRefusalReporter returns a middleware that reports a provider's
+// refusal of a native media part to whoever asked, and changes nothing else:
+// the call still ends with the provider's error and is never retried here. The
+// degraded resend belongs to the next turn (a refused kind is subtracted from
+// what the conversation may send, see run.NativeMediaKinds), so a turn pays for
+// a refusal of a kind nobody remembered exactly once.
+func NewMediaRefusalReporter() LLMMiddleware {
+	return func(next LLM) LLM {
+		return &mediaRefusalReporterLLM{inner: next}
+	}
+}
+
+type mediaRefusalReporterLLM struct {
+	inner LLM
+}
+
+func (m *mediaRefusalReporterLLM) Execute(ctx context.Context, messages []Message, tools []*Tool) (*Result, error) {
+	result, err := m.inner.Execute(ctx, messages, tools)
+	if err != nil {
+		reportMediaRefusals(ctx, messages, err)
+	}
+	return result, err
+}
+
+// reportMediaRefusals hands the observer one report per kind the failed request
+// carried and the provider's answer names. A request carrying no such part, an
+// error that is not a rejection, or no observer at all reports nothing — the
+// scan runs only after a call failed, so a successful turn pays nothing.
+func reportMediaRefusals(ctx context.Context, messages []Message, err error) {
+	if MediaRefusalObserverFromContext(ctx) == nil {
+		return
+	}
+	for _, kind := range mediaKindsInMessages(messages) {
+		if reason, ok := IsMediaRejection(err, kind); ok {
+			reportMediaRefusal(ctx, kind, reason)
+		}
+	}
+}
+
+// mediaKindsInMessages names the native-media kinds a request carries, each
+// kind once however many parts carry it.
+func mediaKindsInMessages(messages []Message) []MediaKind {
+	var out []MediaKind
+	seen := map[MediaKind]bool{}
+	for _, message := range messages {
+		for _, part := range message.Parts {
+			if part.Type != ContentTypeFileBase64 {
+				continue
+			}
+			kind := NativeMediaKindOfMIME(part.MIMEType)
+			if kind == "" || seen[kind] {
+				continue
+			}
+			seen[kind] = true
+			out = append(out, kind)
+		}
+	}
+	return out
+}
+
+// mediaRefusalObserverKey is the context key the observer rides on. A private
+// type keeps the key from colliding with any other package's.
+type mediaRefusalObserverKey struct{}
+
+// WithMediaRefusalObserver runs fn once per provider refusal of a native media
+// kind this call meets. It is how a caller that does know the provider and
+// model learns a fact this package cannot name itself, exactly as
+// WithImageRefusalObserver does for pictures: the reporter answers "what was
+// refused", the observer answers "who should be told".
+//
+// The observer is a report, not a decision: it cannot change the request or the
+// result, and it runs on the request's own goroutine. It must return quickly —
+// a caller that has to write something does so on a context of its own, without
+// blocking the turn's failure.
+func WithMediaRefusalObserver(ctx context.Context, fn func(ctx context.Context, kind MediaKind, reason string)) context.Context {
+	if ctx == nil || fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, mediaRefusalObserverKey{}, fn)
+}
+
+// MediaRefusalObserverFromContext returns the observer installed by
+// WithMediaRefusalObserver, or nil when nobody asked to be told.
+func MediaRefusalObserverFromContext(ctx context.Context) func(ctx context.Context, kind MediaKind, reason string) {
+	if ctx == nil {
+		return nil
+	}
+	fn, _ := ctx.Value(mediaRefusalObserverKey{}).(func(ctx context.Context, kind MediaKind, reason string))
+	return fn
+}
+
+// reportMediaRefusal hands one refusal to the installed observer, with the
+// request's own context. A nil observer is the ordinary case.
+func reportMediaRefusal(ctx context.Context, kind MediaKind, reason string) {
+	if fn := MediaRefusalObserverFromContext(ctx); fn != nil {
+		fn(ctx, kind, reason)
+	}
 }
 
 // NativeMediaTooLargeNote is the model-visible line a file part degrades to
