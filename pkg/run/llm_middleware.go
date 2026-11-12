@@ -229,6 +229,22 @@ func withImageHeal(inner llm.LLM) llm.LLM {
 	return llm.Use(inner, llm.NewImageHeal())
 }
 
+// withMediaRefusalReport attaches the report a refused native media part gets:
+// the kind the provider's answer names is told to whoever asked, and nothing
+// else happens — the call still ends with the provider's error and is not
+// retried.
+//
+// It goes on above withImageHeal, not below it, because an image refusal is the
+// heal's to answer: by the time a failure reaches this wrapper the picture it
+// was about has been replaced with text, so what is left to report is the PDF,
+// clip or video travelling beside it.
+func withMediaRefusalReport(inner llm.LLM) llm.LLM {
+	if inner == nil {
+		return nil
+	}
+	return llm.Use(inner, llm.NewMediaRefusalReporter())
+}
+
 func WrapRecoverableLLM(
 	inner llm.LLM,
 	snapshot func(context.Context) (json.RawMessage, bool),
@@ -247,8 +263,10 @@ func WrapRecoverableLLM(
 	// Below the blank-output retry and the orchestration wrapper (which is what
 	// builds Result.Session): a provider that refuses an image gets one retry
 	// with that image degraded to text, and the degraded request is this call
-	// only — the transcript keeps its images.
+	// only — the transcript keeps its images. The native-media report sits just
+	// above it: a refusal the heal did not answer is the kind's own.
 	inner = withImageHeal(inner)
+	inner = withMediaRefusalReport(inner)
 	inner = wrapBlankOutputRetryLLM(inner, ledger)
 	// The network retry goes on last, i.e. outermost: it is the boundary a
 	// request first succeeds or dies on, and it owns the discard/retry

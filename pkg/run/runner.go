@@ -1597,6 +1597,10 @@ func (r *Runner) RunContent(ctx context.Context, parts []llm.ContentPart) (*agen
 				// id — and because the heal that reports it sits on the request
 				// chains this turn drives.
 				ctx = withImageRefusalRecorder(ctx, r, sid)
+				// The same record for a refused PDF, clip or video: no event
+				// (nothing draws it yet), just the row that keeps the next
+				// request from carrying a kind this model already turned down.
+				ctx = withMediaRefusalRecorder(ctx, r, sid)
 			}
 		}
 		r.foreground.enter()
