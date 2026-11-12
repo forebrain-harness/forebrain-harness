@@ -618,3 +618,46 @@ func BenchmarkEventLogWrite(b *testing.B) {
 		log.Write(record)
 	}
 }
+
+// BoundText keeps both ends of a record and says how much it left out, so a
+// bounded record never reads as a complete one.
+func TestBoundTextRetainsHeadTail(t *testing.T) {
+	text := strings.Repeat("a", 100) + strings.Repeat("z", 100)
+	got := BoundText(text, 40)
+	if !strings.HasPrefix(got, strings.Repeat("a", 20)) || !strings.HasSuffix(got, strings.Repeat("z", 20)) || !strings.Contains(got, "log bytes omitted") {
+		t.Fatalf("bounded=%q", got)
+	}
+}
+
+// A "blob." attribute is a pointer at a payload file, not an attribute: it
+// lands in the record's Blobs, under the rest of the key (plans/286).
+func TestEmitRoutesBlobAttrs(t *testing.T) {
+	log, root := newTestLog(t, "tui")
+	SetDefaultEventLog(log)
+	t.Cleanup(func() { SetDefaultEventLog(nil) })
+
+	Emit(context.Background(), slog.LevelInfo, "llm", "llm response",
+		slog.String("outcome", "ok"),
+		slog.Any("blob.req", BlobRef{Name: "a3f09c-000001.req.gz", Bytes: 2048}),
+		slog.Any("blob.resp", BlobRef{Name: "a3f09c-000001.resp.gz", Bytes: 900, Whole: true}),
+	)
+
+	rec := onlyRecord(t, root)
+	if len(rec.Blobs) != 2 {
+		t.Fatalf("blobs = %+v, want both payload references", rec.Blobs)
+	}
+	if got := rec.Blobs["req"]; got.Name != "a3f09c-000001.req.gz" || got.Bytes != 2048 || got.Whole {
+		t.Fatalf("blobs[req] = %+v", got)
+	}
+	if got := rec.Blobs["resp"]; got.Name != "a3f09c-000001.resp.gz" || !got.Whole {
+		t.Fatalf("blobs[resp] = %+v", got)
+	}
+	for key := range rec.Attrs {
+		if strings.HasPrefix(key, blobAttrPrefix) {
+			t.Fatalf("payload reference stayed in attrs as %q", key)
+		}
+	}
+	if got := rec.Attrs["outcome"]; got != "ok" {
+		t.Fatalf("outcome = %v, want it kept as an ordinary attribute", got)
+	}
+}

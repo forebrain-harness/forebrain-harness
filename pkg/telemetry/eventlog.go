@@ -810,7 +810,20 @@ func attrString(value slog.Value) (string, bool) {
 
 // setAttr stores one attribute value as its Go value, so numbers stay numbers in
 // JSON rather than being flattened to their text form.
+//
+// An attribute keyed "blob.<name>" whose value is a BlobRef is not an attribute
+// at all: it is the record's pointer at a payload file, so it lands in Blobs
+// (plans/286). The prefix keeps the two apart without a second Emit signature.
 func setAttr(rec *Record, key string, value slog.Value) {
+	if name, ok := strings.CutPrefix(key, blobAttrPrefix); ok {
+		if ref, ok := value.Any().(BlobRef); ok {
+			if rec.Blobs == nil {
+				rec.Blobs = map[string]BlobRef{}
+			}
+			rec.Blobs[name] = ref
+			return
+		}
+	}
 	var stored any
 	switch value.Kind() {
 	case slog.KindString:
@@ -910,4 +923,24 @@ func atLocation(file string, line int) string {
 		return fmt.Sprintf("%s:%d", path[start+1:], line)
 	}
 	return fmt.Sprintf("%s:%d", filepath.Base(file), line)
+}
+
+// BoundText retains the beginning and end of one record with an explicit
+// omission marker.
+//
+// Both ends, not just the head: the tail of a model request is the newest turn
+// and the tail of a response is the finish reason and the usage, which are
+// exactly what a reader looks for. The marker states the omitted count so a
+// bounded record never reads as a complete one.
+func BoundText(text string, maxBytes int) string {
+	if maxBytes <= 0 {
+		maxBytes = DefaultRecordBytes
+	}
+	if len(text) <= maxBytes {
+		return text
+	}
+	head := maxBytes / 2
+	tail := maxBytes - head
+	omitted := len(text) - maxBytes
+	return text[:head] + fmt.Sprintf("\n... [%d log bytes omitted] ...\n", omitted) + text[len(text)-tail:]
 }
