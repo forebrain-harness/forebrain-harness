@@ -679,6 +679,11 @@ type ModelChoice struct {
 	// build can send; empty means the picker has nothing to ask, either
 	// because the model does not reason or because it has no discrete level.
 	ReasoningEfforts []string
+	// ConfiguredEffort is the reasoning effort this row is configured with —
+	// the model page's 「思考强度」, folded into the row's params — which is
+	// exactly what a pick that names no effort pins (SelectModel's nil). ""
+	// means the row configures none and the provider applies its own.
+	ConfiguredEffort string
 	// SupportsImages reports that the catalog knows this model accepts image
 	// input. Unknown models report false: a picker marks only what it knows.
 	SupportsImages bool
@@ -715,6 +720,7 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 			choice.SupportsImages = hit.SupportsAttachments
 		}
 		choice.ReasoningEfforts = ModelReasoningEffortsRow(choice.ID, provider, model)
+		choice.ConfiguredEffort = appcfg.ReasoningEffort(configured.Params)
 		out = append(out, choice)
 	}
 	return out

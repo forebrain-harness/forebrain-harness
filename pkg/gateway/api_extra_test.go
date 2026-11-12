@@ -6452,6 +6452,140 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	require.Equal(t, "", row.Effort)
 }
 
+// A model switch names no effort, and that is a derivation rather than a
+// blank: the runner takes the row's configured effort — the model page's
+// 「思考强度」, folded into the row's params — and pins it once, exactly as
+// /model's own switch does (plan 300). Each option states that same value as
+// default_effort, so a picker can mark the level a switch would pin instead of
+// inventing a 「默认」 row. An explicit effort, "" included, still pins itself;
+// and a setting changed afterwards never rewrites a row that already stores a
+// level — the next switch to that model is what reads the new value.
+func TestChatSessionModelPutWithoutAnEffortPinsTheRowsConfiguredEffort(t *testing.T) {
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	t.Setenv("FOREBRAIN_WEB_MODEL_EFFORT_KEY", "test-key")
+	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{
+				Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_EFFORT_KEY}", BaseURL: "http://a.test/v1",
+				Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
+			},
+			{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_EFFORT_KEY}", BaseURL: "http://c.test/v1"},
+		}},
+	}}}
+	require.NoError(t, appcfg.Save(cfgPath, cfg))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	require.NoError(t, sess.Ensure(context.Background(), "s1", "s1"))
+	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sess}}
+	runner := &run.Runner{Deps: &env.Deps}
+	env.Runner = runner
+	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
+	// The fixture states its configuration directly (the file is a restart-time
+	// source, not a watched one — plan 189).
+	s.Env.AdoptConfig(&cfg)
+
+	modelCall := func(method string, body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		var reader io.Reader
+		if body != nil {
+			raw, err := json.Marshal(body)
+			require.NoError(t, err)
+			reader = bytes.NewReader(raw)
+		}
+		req := httptest.NewRequest(method, "/api/chat/sessions/s1/model", reader)
+		req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{
+			{Key: "id", Value: "s1"},
+		}))
+		rec := httptest.NewRecorder()
+		if method == http.MethodGet {
+			s.handleChatSessionModelGet(rec, req)
+		} else {
+			s.handleChatSessionModelPut(rec, req)
+		}
+		return rec
+	}
+	// readModel is the GET as a picker reads it: the conversation's own effort
+	// and every option's configured one.
+	readModel := func() (effort string, defaults []string) {
+		t.Helper()
+		rec := modelCall(http.MethodGet, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var got struct {
+			Effort  string `json:"effort"`
+			Options []struct {
+				Model         string   `json:"model"`
+				Efforts       []string `json:"efforts"`
+				DefaultEffort string   `json:"default_effort"`
+			} `json:"options"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		require.Len(t, got.Options, 2)
+		require.Equal(t, []string{"low", "high", "max"}, got.Options[0].Efforts, "glm-5.3-flash keeps its own levels")
+		for _, option := range got.Options {
+			defaults = append(defaults, option.DefaultEffort)
+		}
+		return got.Effort, defaults
+	}
+	storedEffort := func() string {
+		t.Helper()
+		row, hasRow, err := sess.SessionModelSelection(context.Background(), "s1")
+		require.NoError(t, err)
+		require.True(t, hasRow)
+		return row.Effort
+	}
+
+	// 1. Each option states the effort a switch to it would pin: the row's
+	// configured one, and "" for a row that configures none.
+	_, defaults := readModel()
+	require.Equal(t, []string{"high", ""}, defaults)
+
+	// 2. A switch that names no effort pins the configured one — the write, the
+	// answer and the session's row all agree, and none of them is a blank.
+	rec := modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "glm-5.3-flash"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"effort":"high"`)
+	require.Equal(t, "high", storedEffort())
+
+	// 3. An explicit effort is the session's own: it wins over the setting, and
+	// what the surface reads back is the session's row, not the config.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "glm-5.3-flash", "effort": "low"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "low", storedEffort())
+	effort, _ := readModel()
+	require.Equal(t, "low", effort)
+
+	// 4. The setting changing afterwards moves the option's mark and leaves the
+	// conversation alone: its row is the truth about what it runs on.
+	main := cfg.Agents.Definitions["main"]
+	main.LLMProviders[0].Params = appcfg.LLMRequestParams(`{"reasoning":{"effort":"max"}}`)
+	cfg.Agents.Definitions["main"] = main
+	s.Env.AdoptConfig(&cfg)
+	effort, defaults = readModel()
+	require.Equal(t, []string{"max", ""}, defaults)
+	require.Equal(t, "low", effort, "a stored level survives a settings change")
+
+	// 5. Picking the model again reads the new value: that is the one moment
+	// the configured effort is taken.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "glm-5.3-flash"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "max", storedEffort())
+
+	// 6. An explicit "" is still the "model default" pin: omitting the key is
+	// what derives, so the two cannot be confused.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "glm-5.3-flash", "effort": ""})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "", storedEffort())
+
+	// 7. A row that configures no effort pins the empty one: the provider
+	// applies its own, which is the truth for that row.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "deepseek", "model": "deepseek-v4-pro"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "", storedEffort())
+}
+
 // The conversation's model write names the configured row, not the pair (plan
 // 261): the same provider and model may be configured more than once — another
 // endpoint, another key — so a request carrying only the pair cannot say which

@@ -1818,14 +1818,17 @@ func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
 // catalog reports for it. The id is what tells twin rows of one provider/model
 // apart; the endpoint is what a picker has to show to tell them apart.
 type sessionModelOption struct {
-	ID             string   `json:"id"`
-	Provider       string   `json:"provider"`
-	Model          string   `json:"model"`
-	Label          string   `json:"label"`
-	BaseURL        string   `json:"base_url,omitempty"`
-	APIPath        string   `json:"api_path,omitempty"`
-	Efforts        []string `json:"efforts"`
-	SupportsImages bool     `json:"supports_images"`
+	ID       string   `json:"id"`
+	Provider string   `json:"provider"`
+	Model    string   `json:"model"`
+	Label    string   `json:"label"`
+	BaseURL  string   `json:"base_url,omitempty"`
+	APIPath  string   `json:"api_path,omitempty"`
+	Efforts  []string `json:"efforts"`
+	// DefaultEffort is the effort a switch to this row pins when the request
+	// names none: the row's configured effort ("" when it configures none).
+	DefaultEffort  string `json:"default_effort"`
+	SupportsImages bool   `json:"supports_images"`
 }
 
 // sessionModelEfforts names the reasoning levels one model offers: the
@@ -1888,6 +1891,7 @@ func (s *Server) sessionModelOptions(cfg *config.Root, agentName string) []sessi
 			BaseURL:        choice.BaseURL,
 			APIPath:        choice.APIPath,
 			Efforts:        sessionModelEfforts(records, choice.ReasoningEfforts, choice.Provider, choice.Model),
+			DefaultEffort:  choice.ConfiguredEffort,
 			SupportsImages: sessionModelSupportsImages(records, choice),
 		})
 	}
@@ -2000,7 +2004,8 @@ func runnerSessionStore(runner *run.Runner) *state.SessionStore {
 // change lands on the next turn exactly as /model's does. A pair or an effort
 // the agent's options do not offer is refused here, before anything is
 // written. An empty effort is the explicit "model default" choice — the row
-// pins no level and the provider applies its own.
+// pins no level and the provider applies its own. An omitted effort derives
+// and pins the row's configured effort, which is what a model switch means.
 func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -2070,15 +2075,19 @@ func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "model is not offered for this agent", http.StatusBadRequest)
 		return
 	}
-	effort := ""
+	// A request that names no effort is a model switch: the runner derives
+	// the row's configured effort once and pins it, exactly as /model does.
+	// One that names an effort — including "" — pins that value.
+	var effort *string
 	if body.Effort != nil {
-		effort = strings.TrimSpace(*body.Effort)
+		pinned := strings.TrimSpace(*body.Effort)
+		if pinned != "" && !slices.Contains(s.sessionModelEffortsFor(cfg, agentName, chosen.Provider, chosen.Model), pinned) {
+			http.Error(w, "reasoning effort is not offered for this model", http.StatusBadRequest)
+			return
+		}
+		effort = &pinned
 	}
-	if effort != "" && !slices.Contains(s.sessionModelEffortsFor(cfg, agentName, chosen.Provider, chosen.Model), effort) {
-		http.Error(w, "reasoning effort is not offered for this model", http.StatusBadRequest)
-		return
-	}
-	if err := s.SelectModel(r.Context(), sid, chosen, &effort); err != nil {
+	if err := s.SelectModel(r.Context(), sid, chosen, effort); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}

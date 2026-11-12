@@ -528,6 +528,26 @@ func TestModelChoicesKeepCatalogEffortLevels(t *testing.T) {
 	require.Equal(t, []string{"minimal", "low", "medium", "high"}, choices[0].ReasoningEfforts)
 }
 
+// A row's configured effort — the model page's 「思考强度」, folded into the
+// row's params by pkg/config — is what an effort-less pick pins, so a choice
+// that a picker marks「模型设置」must carry that same value. The engine's nil
+// derivation and this field are the one expression (appcfg.ReasoningEffort of
+// the configured params), which is what keeps the mark and the pinned level
+// from ever disagreeing.
+func TestModelChoicesCarryTheRowsConfiguredEffort(t *testing.T) {
+	installRepoCatalog(t)
+	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "openai", Model: "gpt-5", Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`)},
+			{Provider: "openai", Model: "gpt-5.5"},
+		}},
+	}}}
+	choices := ModelChoices(&cfg, "main")
+	require.Len(t, choices, 2)
+	require.Equal(t, "high", choices[0].ConfiguredEffort)
+	require.Empty(t, choices[1].ConfiguredEffort, "a row that configures no effort leaves the provider's own in charge")
+}
+
 // The levels a surface offers are the model's own, row by row: this is the
 // table every surface reads (the TUI model page, /model, the setup flow and
 // the gateway's model chip).
