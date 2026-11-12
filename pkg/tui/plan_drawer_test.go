@@ -1383,17 +1383,18 @@ func TestPlanDrawerHoverHighlightsOnlyTheToken(t *testing.T) {
 	}
 	move(span.startCol+1, span.row)
 	hovered := r.vpPainted[span.row]
-	if !strings.Contains(hovered, "\x1b[48;5;"+hoverBackgroundColor+"m") {
-		t.Fatalf("hovering the token painted no hover background: %q", hovered)
-	}
-	if !strings.Contains(hovered, "\x1b[48;5;"+hoverBackgroundColor+"m☑3/7\x1b[49m") {
-		t.Fatalf("the hover background is not confined to the token: %q", hovered)
+	// The working line is faint; the hover must cancel faint inside the token
+	// (terminals dim a faint cell's background into invisibility) and restore
+	// it after, so the highlight shows like the worked-for token's.
+	hoverSeq := "\x1b[22m\x1b[48;5;" + hoverBackgroundColor + "m☑3/7\x1b[49m\x1b[2m"
+	if !strings.Contains(hovered, hoverSeq) {
+		t.Fatalf("hovering the token did not paint a full-intensity highlight confined to it: %q", hovered)
 	}
 	if strings.Contains(strings.ReplaceAll(hovered, "\x1b[48;5;"+hoverBackgroundColor+"m", ""), "\x1b[4m") {
 		t.Fatalf("the hovered token is underlined: %q", hovered)
 	}
 	// Only the token's cells changed.
-	if got := strings.ReplaceAll(hovered, "\x1b[48;5;"+hoverBackgroundColor+"m☑3/7\x1b[49m", "☑3/7"); got != plainBefore {
+	if got := strings.ReplaceAll(hovered, hoverSeq, "☑3/7"); got != plainBefore {
 		t.Fatalf("hovering changed more than the token:\nbefore %q\nafter  %q", plainBefore, got)
 	}
 
@@ -1420,7 +1421,7 @@ func TestPlanDrawerHoverHighlightsOnlyTheToken(t *testing.T) {
 		t.Fatalf("opening the drawer moved the token's hot zone to %+v, want %+v", got, span)
 	}
 	move(span.startCol+1, span.row)
-	if got := r.vpPainted[span.row]; !strings.Contains(got, "\x1b[48;5;"+hoverBackgroundColor+"m☑3/7\x1b[49m") {
+	if got := r.vpPainted[span.row]; !strings.Contains(got, hoverSeq) {
 		t.Fatalf("hovering the token with the drawer open painted no highlight on it: %q", got)
 	}
 }

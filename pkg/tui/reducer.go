@@ -5044,7 +5044,7 @@ func (r *Renderer) paintViewportLocked() {
 			r.vpHoverProgress.on(r.activeView, absRow) {
 			// Only the token's own cells take the hover background, the same
 			// layer the composer's token uses.
-			line = highlightCells(line, token.startCol, token.endCol, hoverBgSeq)
+			line = highlightCells(line, token.startCol, token.endCol, hoverBgSeq, "\x1b[49m")
 		}
 		if drawerOpen {
 			// The hover background covers the history region only, and the
@@ -5110,9 +5110,11 @@ func (r *Renderer) paintViewportLocked() {
 	}
 	r.vpProgressSpan = composer.progressScreenSpan(bodyHeight)
 	if r.vpControlHover == hoverTargetProgress && r.vpProgressSpan.row >= 0 && r.vpProgressSpan.row < len(rows) {
-		// Only the token's own cells take the hover background, and only the
-		// background: the status line's faint stays as it is.
-		rows[r.vpProgressSpan.row] = highlightCells(rows[r.vpProgressSpan.row], r.vpProgressSpan.startCol, r.vpProgressSpan.endCol, hoverBgSeq)
+		// Only the token's own cells take the hover background. The working
+		// line is faint (\x1b[2m), and terminals dim a faint cell's background
+		// too, which hides the hover colour; cancel faint inside the token and
+		// restore it after, so the highlight shows like the worked-for token's.
+		rows[r.vpProgressSpan.row] = highlightCells(rows[r.vpProgressSpan.row], r.vpProgressSpan.startCol, r.vpProgressSpan.endCol, "\x1b[22m"+hoverBgSeq, "\x1b[49m\x1b[2m")
 	}
 
 	var b strings.Builder

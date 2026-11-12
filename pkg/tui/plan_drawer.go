@@ -510,18 +510,17 @@ func planDrawerSplitRow(line string, rowWidth int, layout planDrawerLayout, row 
 	return planDrawerPadCells(line, rowWidth) + layout.planDrawerScreenRow(row, closeHover)
 }
 
-// highlightCells paints bgSeq over the cells [startCol, endCol) of one rendered
-// row and leaves everything else about the row alone: the range is opened with
-// the background and closed with a background-only reset (\x1b[49m), so the
-// status line's faint text and the row's other attributes carry on past it.
-// Wide runes are copied whole, so a range that ends inside one still highlights
-// every cell it occupies.
-func highlightCells(row string, startCol, endCol int, bgSeq string) string {
+// highlightCells paints a hover range over the cells [startCol, endCol) of one
+// rendered row and leaves everything else about the row alone: the range is
+// opened with openSeq and closed with closeSeq, so the row's other attributes
+// carry on past it. Wide runes are copied whole, so a range that ends inside
+// one still highlights every cell it occupies.
+func highlightCells(row string, startCol, endCol int, openSeq, closeSeq string) string {
 	if startCol >= endCol {
 		return row
 	}
 	var b strings.Builder
-	b.Grow(len(row) + 2*len(bgSeq))
+	b.Grow(len(row) + len(openSeq) + len(closeSeq))
 	col := 0
 	open := false
 	for i := 0; i < len(row); {
@@ -533,23 +532,23 @@ func highlightCells(row string, startCol, endCol int, bgSeq string) string {
 		}
 		rn, size := utf8.DecodeRuneInString(row[i:])
 		if !open && col >= startCol && col < endCol {
-			b.WriteString(bgSeq)
+			b.WriteString(openSeq)
 			open = true
 		}
 		b.WriteString(row[i : i+size])
 		col += runewidth.RuneWidth(rn)
 		if open && col >= endCol {
-			// Close the background on the last cell of the range rather than at
-			// the next visible rune: what follows may be the row's own \x1b[K,
+			// Close the range on the last cell of the range rather than at the
+			// next visible rune: what follows may be the row's own \x1b[K,
 			// which a terminal that erases with the current background would
 			// then paint in the hover colour to the end of the row.
-			b.WriteString("\x1b[49m")
+			b.WriteString(closeSeq)
 			open = false
 		}
 		i += size
 	}
 	if open {
-		b.WriteString("\x1b[49m")
+		b.WriteString(closeSeq)
 	}
 	return b.String()
 }
