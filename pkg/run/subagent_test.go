@@ -8406,6 +8406,48 @@ func (f *modelArgumentFixture) seedModelRow(t *testing.T, provider, model, baseU
 	return row.ID
 }
 
+// insertModelRow stores one row exactly as given — id included — and answers
+// the stored copy with its timestamps.
+func (f *modelArgumentFixture) insertModelRow(t *testing.T, row state.LLMModel) state.LLMModel {
+	t.Helper()
+	stored, err := f.store.Create(context.Background(), row)
+	if err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	return stored
+}
+
+// updateModelRow rewrites the row through edit and answers the stored copy. The
+// store's version is a millisecond clock, so the write waits for it to pass the
+// version it replaces: an edit inside the same millisecond would keep the
+// version, and a client cache keyed on it would not see the change.
+func (f *modelArgumentFixture) updateModelRow(t *testing.T, row state.LLMModel, edit func(*state.LLMModel)) state.LLMModel {
+	t.Helper()
+	was := row.UpdatedAt
+	waitForRowVersion(t, was)
+	edit(&row)
+	stored, err := f.store.Update(context.Background(), row)
+	if err != nil {
+		t.Fatalf("update model row: %v", err)
+	}
+	if stored.UpdatedAt <= was {
+		t.Fatalf("row version = %d after an edit of version %d, want a later one", stored.UpdatedAt, was)
+	}
+	return stored
+}
+
+// waitForRowVersion waits for the model table's millisecond clock to pass v.
+func waitForRowVersion(t *testing.T, v int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().UnixMilli() <= v {
+		if time.Now().After(deadline) {
+			t.Fatalf("the model table's clock did not advance past %d", v)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (f *modelArgumentFixture) subagentRunTool(t *testing.T) *llm.Tool {
 	t.Helper()
 	a, err := agent.New(noopLLM{}, "main", "main")
@@ -8604,10 +8646,10 @@ func TestSubagentOverrideClientCacheKeysLiveRowsByVersion(t *testing.T) {
 	entry := appcfg.AgentLLMProviderConfig{ID: "llm_row", Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://one.test/v1"}
 	builds := 0
 	inner := &noopLLM{}
-	w := &subagentModelOverrideLLM{inner: inner, clients: map[string]llm.LLM{}, build: func(SubagentModelOverride) (llm.LLM, error) {
+	w := wrapSubagentModelOverrideLLM(inner, func(SubagentModelOverride) (llm.LLM, error) {
 		builds++
 		return inner, nil
-	}}
+	}).(*subagentModelOverrideLLM)
 	pin := SubagentModelOverride{ModelID: "llm_row", Provider: "zhipuai", Model: "glm-5.3", Entry: &entry}
 	if _, err := w.clientFor(pin); err != nil {
 		t.Fatalf("first client: %v", err)
@@ -8625,6 +8667,122 @@ func TestSubagentOverrideClientCacheKeysLiveRowsByVersion(t *testing.T) {
 	}
 	if builds != 2 {
 		t.Fatalf("builds = %d, want a new client after the row changed", builds)
+	}
+}
+
+// pinnedClientLLM is one distinct client per build: the cache tests compare
+// clients, and a zero-size value can share an address between allocations.
+type pinnedClientLLM struct{ version int64 }
+
+func (c *pinnedClientLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("ok")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+}
+
+// The configured row is read again on every dispatch, so a settings change
+// reaches the next round of the same runner: the row's default effort moves,
+// the pin's version moves with it, and the client cache builds the next client
+// instead of reusing the one the old settings made (plan 304).
+func TestSubagentClientFollowsARowEditWithoutAReload(t *testing.T) {
+	fix := newModelArgumentFixture(t, &appcfg.Root{})
+	row := fix.insertModelRow(t, state.LLMModel{
+		ID: "llm-follow", Provider: "openai", Model: "gpt-5",
+		BaseURL: "https://one.test/v1", APIPath: "/chat/completions", APIKey: "sk-one",
+		CapDefaultEffort: "high",
+	})
+	ctx := context.Background()
+	before, version, ok := configuredRowByID(ctx, fix.fac, "llm-follow")
+	if !ok || version != row.UpdatedAt {
+		t.Fatalf("configuredRowByID = %+v, %d, %v; want the row at version %d", before, version, ok, row.UpdatedAt)
+	}
+	if got := appcfg.ReasoningEffort(before.Params); got != "high" {
+		t.Fatalf("row effort = %q, want %q", got, "high")
+	}
+
+	builds := 0
+	w := wrapSubagentModelOverrideLLM(&noopLLM{}, func(SubagentModelOverride) (llm.LLM, error) {
+		builds++
+		return &pinnedClientLLM{version: int64(builds)}, nil
+	}).(*subagentModelOverrideLLM)
+	client := func(entry appcfg.AgentLLMProviderConfig, version int64) llm.LLM {
+		t.Helper()
+		c, err := w.clientFor(SubagentModelOverride{
+			ModelID: "llm-follow", Provider: "openai", Model: "gpt-5", Entry: &entry, Version: version,
+		})
+		if err != nil {
+			t.Fatalf("clientFor: %v", err)
+		}
+		return c
+	}
+	first := client(before, version)
+
+	// The model page moves the row's default effort; nothing is reloaded.
+	row = fix.updateModelRow(t, row, func(m *state.LLMModel) { m.CapDefaultEffort = "low" })
+	after, edited, ok := configuredRowByID(ctx, fix.fac, "llm-follow")
+	if !ok || edited != row.UpdatedAt {
+		t.Fatalf("configuredRowByID after the edit = %+v, %d, %v; want the row at version %d", after, edited, ok, row.UpdatedAt)
+	}
+	if edited == version {
+		t.Fatalf("the row's version did not move: %d", edited)
+	}
+	if got := appcfg.ReasoningEffort(after.Params); got != "low" {
+		t.Fatalf("row effort after the edit = %q, want %q", got, "low")
+	}
+	if second := client(after, edited); second == first {
+		t.Fatal("the edited row was served by the client built for its old settings")
+	}
+	if builds != 2 {
+		t.Fatalf("builds = %d, want a second client for the edited row", builds)
+	}
+	if got := len(w.clients); got != 1 {
+		t.Fatalf("cached clients = %d, want one for the model", got)
+	}
+}
+
+// The cache keeps one client per model however often the row is edited: a
+// runner lives as long as its conversation, and every version bump replaces
+// its model's client rather than adding one to the map (plan 304).
+func TestSubagentClientCacheKeepsOneClientPerModel(t *testing.T) {
+	entry := appcfg.AgentLLMProviderConfig{ID: "llm_row", Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://one.test/v1"}
+	builds := 0
+	w := wrapSubagentModelOverrideLLM(&noopLLM{}, func(SubagentModelOverride) (llm.LLM, error) {
+		builds++
+		return &pinnedClientLLM{version: int64(builds)}, nil
+	}).(*subagentModelOverrideLLM)
+	var newest llm.LLM
+	for version := int64(1); version <= 3; version++ {
+		pin := SubagentModelOverride{ModelID: "llm_row", Provider: "zhipuai", Model: "glm-5.3", Entry: &entry, Version: version}
+		client, err := w.clientFor(pin)
+		if err != nil {
+			t.Fatalf("clientFor v%d: %v", version, err)
+		}
+		if client == newest {
+			t.Fatalf("v%d was served by the previous version's client", version)
+		}
+		newest = client
+		if got := len(w.clients); got != 1 {
+			t.Fatalf("cached clients after v%d = %d, want one for the model", version, got)
+		}
+	}
+	// The newest version is the one kept: a later insert does not drop it, and
+	// asking for it again does not build.
+	if client, err := w.clientFor(SubagentModelOverride{
+		ModelID: "llm_row", Provider: "zhipuai", Model: "glm-5.3", Entry: &entry, Version: 3,
+	}); err != nil || client != newest {
+		t.Fatalf("clientFor v3 again = %v, %v; want the cached client", client, err)
+	}
+	if builds != 3 {
+		t.Fatalf("builds = %d, want one per version and no more", builds)
+	}
+	// Another model keeps its own client: the eviction is per model.
+	other := appcfg.AgentLLMProviderConfig{ID: "llm_other", Provider: "zhipuai", Model: "glm-5.3-flash", BaseURL: "https://two.test/v1"}
+	if _, err := w.clientFor(SubagentModelOverride{
+		ModelID: "llm_other", Provider: "zhipuai", Model: "glm-5.3-flash", Entry: &other,
+	}); err != nil {
+		t.Fatalf("clientFor the other model: %v", err)
+	}
+	if got := len(w.clients); got != 2 {
+		t.Fatalf("cached clients = %d, want one per model (2)", got)
 	}
 }
 

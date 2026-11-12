@@ -893,16 +893,45 @@ func TestGoalCheckConfigAppliesToAgentsWithoutDefinitions(t *testing.T) {
 	}
 }
 
+// dispatchGoalCheckPin runs one real goal-check dispatch through fac and
+// answers the pin it decided on — the one place the settings page's row becomes
+// the execution's model — with the record the dispatch wrote.
+func dispatchGoalCheckPin(t *testing.T, fac Factory, taskID string) (SubagentModelOverride, agent.HistoryEntry) {
+	t.Helper()
+	var pin SubagentModelOverride
+	var record agent.HistoryEntry
+	var pinned bool
+	if _, _, err := dispatchSubagent(dispatchTestCtx(), fac, subagentDispatch{
+		taskID:  taskID,
+		task:    "judge the objective",
+		subtype: GoalCheckSubagentType,
+		resolve: agent.ResolveSubtype,
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			pin, pinned = SubagentModelOverrideFromContext(prep.ctx)
+			record = prep.entry
+			return "done", nil
+		},
+	}); err != nil {
+		t.Fatalf("dispatchSubagent: %v", err)
+	}
+	if !pinned {
+		t.Fatal("the goal check dispatched without a model pin")
+	}
+	return pin, record
+}
+
 // The settings page stores "" for "follow the model page's thinking level",
-// and that has to be a live reading, not a snapshot (plan 299 §6-⑪): a check
-// whose row default says "high" sends high, and after the row's default moves
-// the next check sends the new level — with nothing of its own to override.
-// An effort the page did set is the opposite: it is sent as stored and does
-// not move with the row.
+// and that has to be a live reading, not a snapshot (plan 299 §6-⑪, plan 304):
+// a check whose row default says "high" sends high, and after the model page
+// moves the row's default the next check sends the new level — with nothing
+// reloaded in between and nothing of its own to override. An effort the page
+// did set is the opposite: it is sent as stored and does not move with the row.
 //
 // The effort is read off the request the run actually sends: the provider
 // client's chat-completions body carries "reasoning_effort", which is where
-// the engine folds a model's default level into a request that names none.
+// the engine folds a model's default level into a request that names none. The
+// request goes through the wrapper the runner installs and the runner's own
+// client builder, so the client cache under test is the one a real run uses.
 func TestGoalCheckEffortFollowsTheRowDefaultUntilOverridden(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []map[string]any
@@ -924,9 +953,14 @@ func TestGoalCheckEffortFollowsTheRowDefaultUntilOverridden(t *testing.T) {
 	}))
 	defer server.Close()
 
+	const rowID = "llm-goal-effort"
+	// The configuration the runner adopts is one thing; the row itself is
+	// another, and the row is what a dispatch reads. The adopted copy stays at
+	// "high" for the whole test: every level change below lands in the table
+	// alone, which is what "without a reload" means.
 	cfg := &appcfg.Root{
 		LLMModels: []appcfg.LLMModelConfig{{
-			ID:       "llm-goal-effort",
+			ID:       rowID,
 			Provider: "openai",
 			Model:    "gpt-5",
 			BaseURL:  server.URL + "/v1",
@@ -934,47 +968,36 @@ func TestGoalCheckEffortFollowsTheRowDefaultUntilOverridden(t *testing.T) {
 			Caps:     appcfg.LLMModelCaps{DefaultEffort: "high"},
 		}},
 		Agents: appcfg.AgentsSection{
-			GoalEvaluator: appcfg.SubagentConfig{Model: "llm-goal-effort"},
+			GoalEvaluator: appcfg.SubagentConfig{Model: rowID},
 		},
 	}
+	fix := newModelArgumentFixture(t, cfg)
+	row := fix.insertModelRow(t, state.LLMModel{
+		ID: rowID, Provider: "openai", Model: "gpt-5",
+		BaseURL: server.URL + "/v1", APIPath: "/chat/completions", APIKey: "sk-goal-effort",
+		CapDefaultEffort: "high",
+	})
+	// One wrapper and one client cache for every round: the instance the
+	// runner builds once per load, over the runner's own builder.
+	clients := wrapSubagentModelOverrideLLM(&noopLLM{}, fix.fac.Owner.subagentOverrideClient).(*subagentModelOverrideLLM)
 
 	// dispatch runs one real goal-check dispatch and answers the pin it decided
-	// on: the one place the configured row becomes the execution's model.
+	// on. Every round goes through the same runner and the same client cache:
+	// no reload, no rebuilt cache, between the level changes below.
+	rounds := 0
 	dispatch := func(t *testing.T) SubagentModelOverride {
 		t.Helper()
-		home := t.TempDir()
-		owner := &Runner{Deps: (&Deps{Home: home, AgentName: "main"}).WithConfig(cfg),
-			SubagentExecutor: &fixedSubagentExecutor{output: `{"status": "done", "why": "ok"}`}}
-		var pin SubagentModelOverride
-		var pinned bool
-		if _, _, err := dispatchSubagent(dispatchTestCtx(), Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}, subagentDispatch{
-			taskID:  "task-goal-effort",
-			task:    "judge the objective",
-			subtype: GoalCheckSubagentType,
-			resolve: agent.ResolveSubtype,
-			run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
-				pin, pinned = SubagentModelOverrideFromContext(prep.ctx)
-				return "done", nil
-			},
-		}); err != nil {
-			t.Fatalf("dispatchSubagent: %v", err)
-		}
-		if !pinned {
-			t.Fatal("the goal check dispatched without a model pin")
-		}
+		rounds++
+		pin, _ := dispatchGoalCheckPin(t, fix.fac, fmt.Sprintf("task-goal-effort-%d", rounds))
 		return pin
 	}
 
-	// send builds the client the run's requests go through — the same builder
-	// the runtime's override wrapper calls — and answers the effort its request
-	// carried.
+	// send runs one request through that wrapper and answers the effort its
+	// body carried.
 	send := func(t *testing.T, pin SubagentModelOverride) string {
 		t.Helper()
-		client, err := ConfiguredModelClientWithEffort(cfg, GoalCheckSubagentType, pin.ModelID, pin.Provider, pin.Model, pin.Effort)
-		if err != nil {
-			t.Fatalf("ConfiguredModelClientWithEffort: %v", err)
-		}
-		if _, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("judge"))}, nil); err != nil {
+		if _, err := clients.Execute(WithSubagentModelOverride(context.Background(), pin),
+			[]llm.Message{llm.UserMessage(llm.Text("judge"))}, nil); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		mu.Lock()
@@ -987,35 +1010,108 @@ func TestGoalCheckEffortFollowsTheRowDefaultUntilOverridden(t *testing.T) {
 		return effort
 	}
 
-	// The page stored no effort: the check follows the row's own default.
+	// The page stored no effort: the check follows the row's own default, read
+	// live from the table.
 	pin := dispatch(t)
-	if pin.ModelID != "llm-goal-effort" || pin.Model != "gpt-5" || strings.TrimSpace(pin.Effort) != "" {
+	if pin.ModelID != rowID || pin.Model != "gpt-5" || strings.TrimSpace(pin.Effort) != "" {
 		t.Fatalf("pin = %#v, want the configured row with no effort of its own", pin)
 	}
 	if got := send(t, pin); got != "high" {
 		t.Fatalf("request effort = %q, want the row's default %q", got, "high")
 	}
 
-	// The model page moves the row's default, the configuration is adopted
-	// again, and the next check carries the new level — not the old one, and
-	// not an empty request.
-	cfg.LLMModels[0].Caps.DefaultEffort = "low"
+	// The model page moves the row's default. Nothing is reloaded and no runner
+	// is rebuilt, and the next check already carries the new level — not the
+	// old one, and not an empty request. This is the assertion plan 304 exists
+	// for: on the snapshot's client it would still say "high".
+	row = fix.updateModelRow(t, row, func(m *state.LLMModel) { m.CapDefaultEffort = "low" })
 	if got := send(t, dispatch(t)); got != "low" {
-		t.Fatalf("request effort after the row default moved = %q, want %q", got, "low")
+		t.Fatalf("request effort after the row default moved = %q, want %q on the next dispatch, without a reload", got, "low")
 	}
 
 	// An effort the page did set is the opposite: sent as stored, unmoved by
-	// the row's default.
-	cfg.Agents.GoalEvaluator.ReasoningEffort = "max"
+	// the row's default — and it reaches the next check just as promptly, with
+	// no row edit in between to carry it.
+	cfg.Agents.GoalEvaluator.ReasoningEffort = "medium"
 	pin = dispatch(t)
-	if pin.Effort != "max" {
-		t.Fatalf("pin effort = %q, want the configured override %q", pin.Effort, "max")
+	if pin.Effort != "medium" {
+		t.Fatalf("pin effort = %q, want the configured override %q", pin.Effort, "medium")
 	}
-	if got := send(t, pin); got != "max" {
-		t.Fatalf("request effort = %q, want the configured override %q", got, "max")
+	if got := send(t, pin); got != "medium" {
+		t.Fatalf("request effort = %q, want the configured override %q on the next dispatch, without a reload", got, "medium")
 	}
-	cfg.LLMModels[0].Caps.DefaultEffort = "minimal"
-	if got := send(t, dispatch(t)); got != "max" {
-		t.Fatalf("request effort after the row default moved = %q, want the override %q to stand", got, "max")
+	row = fix.updateModelRow(t, row, func(m *state.LLMModel) { m.CapDefaultEffort = "high" })
+	if got := send(t, dispatch(t)); got != "medium" {
+		t.Fatalf("request effort after the row default moved = %q, want the override %q to stand", got, "medium")
+	}
+	row = fix.updateModelRow(t, row, func(m *state.LLMModel) { m.CapDefaultEffort = "minimal" })
+	if got := send(t, dispatch(t)); got != "medium" {
+		t.Fatalf("request effort after the row default moved = %q, want the override %q to stand", got, "medium")
+	}
+}
+
+// A type's configured model is a row of the model table, and the pin a
+// dispatch decides on carries that row live — its projection and its version —
+// so the model the run is announced as and the row its requests are built from
+// are the same one (plan 304). A configured id the table does not carry (a
+// pre-table configuration entry) keeps the pin it always had: no entry,
+// resolved from the adopted snapshot, and the dispatch still runs.
+func TestConfiguredRowPinCarriesTheRowsVersion(t *testing.T) {
+	const rowID = "llm-row-effort"
+	cfg := &appcfg.Root{
+		LLMModels: []appcfg.LLMModelConfig{{
+			ID:       rowID,
+			Provider: "openai",
+			Model:    "gpt-5",
+			BaseURL:  "https://one.test/v1",
+			APIKey:   "sk-row",
+			Caps:     appcfg.LLMModelCaps{DefaultEffort: "high"},
+		}},
+		Agents: appcfg.AgentsSection{
+			GoalEvaluator: appcfg.SubagentConfig{Model: rowID},
+		},
+	}
+	fix := newModelArgumentFixture(t, cfg)
+	row := fix.insertModelRow(t, state.LLMModel{
+		ID: rowID, Provider: "openai", Model: "gpt-5",
+		BaseURL: "https://one.test/v1", APIPath: "/chat/completions", APIKey: "sk-row",
+		CapDefaultEffort: "high",
+	})
+
+	pin, record := dispatchGoalCheckPin(t, fix.fac, "task-row-version")
+	if pin.Entry == nil {
+		t.Fatal("the configured row's pin carries no entry: the client would come from the snapshot, not the row")
+	}
+	if pin.Entry.ID != row.ID || pin.Entry.Provider != row.Provider || pin.Entry.Model != row.Model || pin.Entry.APIKey != row.APIKey {
+		t.Fatalf("pin entry = %+v, want the projection of row %s", *pin.Entry, row.ID)
+	}
+	if got := appcfg.ReasoningEffort(pin.Entry.Params); got != "high" {
+		t.Fatalf("pin entry effort = %q, want the row's default %q", got, "high")
+	}
+	if pin.Version != row.UpdatedAt {
+		t.Fatalf("pin version = %d, want the row's updated_at %d", pin.Version, row.UpdatedAt)
+	}
+	if pin.ModelID != rowID || pin.Provider != "openai" || pin.Model != "gpt-5" {
+		t.Fatalf("pin = %#v, want the configured row %s", pin, rowID)
+	}
+	// The row is not the model argument's: a configured dispatch must not be
+	// marked live, or continuing it would run through the model argument's
+	// switch and refuse a row the person configured for the type.
+	if record.ModelLive {
+		t.Fatalf("record = %#v, want a configured dispatch without the model argument's live-row mark", record)
+	}
+
+	// The row withdrawn: the type still dispatches, on the snapshot's view of
+	// the model, exactly as every dispatch of the type did before the row was
+	// read live.
+	if err := fix.store.Delete(context.Background(), rowID); err != nil {
+		t.Fatalf("delete row: %v", err)
+	}
+	pin, record = dispatchGoalCheckPin(t, fix.fac, "task-row-version-gone")
+	if pin.Entry != nil || pin.Version != 0 {
+		t.Fatalf("pin = %#v, want no live entry once the row is gone", pin)
+	}
+	if pin.ModelID != rowID || pin.Provider != "openai" || pin.Model != "gpt-5" {
+		t.Fatalf("pin = %#v, want the snapshot's row %s", pin, rowID)
 	}
 }
