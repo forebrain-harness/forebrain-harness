@@ -27,6 +27,13 @@ vi.mock('@/components/models/ParamsJsonField.vue', () => ({
   },
 }))
 
+// jsdom has no layout, so `Element.prototype.scrollIntoView` does not exist;
+// reka's listbox (the provider and model menus) calls it when the highlighted
+// item changes, and the missing method surfaces as an unhandled rejection that
+// fails the suite's exit code. A browser has it, so the shim is the environment's
+// gap and not the component's behaviour.
+if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
+
 beforeAll(() => setLocale('zh'))
 afterEach(() => vi.restoreAllMocks())
 

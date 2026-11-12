@@ -503,6 +503,17 @@ watch(
   },
 )
 
+/**
+ * What this model can do by default, and which levels a source lists for it.
+ * One request per settled identity: the answer decides whether the form shows
+ * the level dropdown or the checkboxes, and it fills the numbers' placeholders.
+ *
+ * The timer is declared here, above the watcher that calls `loadCaps`: the
+ * row watcher runs immediately, so a declaration further down would still be in
+ * its temporal dead zone when the first call reads it.
+ */
+let capsTimer: ReturnType<typeof setTimeout> | null = null
+
 // The endpoint chips write the address; a chip clicked back to where it was
 // must not undo an edit the person made after it.
 watch(
@@ -565,12 +576,6 @@ watch(
   { immediate: true },
 )
 
-/**
- * What this model can do by default, and which levels a source lists for it.
- * One request per settled identity: the answer decides whether the form shows
- * the level dropdown or the checkboxes, and it fills the numbers' placeholders.
- */
-let capsTimer: ReturnType<typeof setTimeout> | null = null
 async function loadCaps(): Promise<void> {
   if (capsTimer) clearTimeout(capsTimer)
   const provider = draft.provider
