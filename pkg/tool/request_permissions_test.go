@@ -1097,12 +1097,14 @@ func TestAdHocNoteIsReadableAfterWrite(t *testing.T) {
 	if !ok {
 		t.Fatalf("response = %#v", result)
 	}
-	if added.Path != memory.AdHocNotePath(filename) {
+	if !strings.HasPrefix(added.Path, memory.AdHocNotesDir+"/") || !strings.HasSuffix(added.Path, "-sandbox-go-build-method.md") {
 		t.Fatalf("path = %q", added.Path)
 	}
-	// Both the returned path and the bare filename the model passed to the
-	// write tool must read back, and both must report the stored path so the
-	// model is never handed a path it cannot reuse.
+	// Both the returned path and the bare stamped filename the response
+	// implies must read back, and both must report the stored path so the
+	// model is never handed a path it cannot reuse. The model-supplied
+	// timestamp does not survive the write, so its bare form is not a path.
+	filename = filepath.Base(added.Path)
 	for _, path := range []string{added.Path, filename} {
 		read, err := handlers["memories_read"](context.Background(), `{"path":"`+path+`"}`)
 		if err != nil {
@@ -1152,6 +1154,46 @@ func TestAdHocNoteFallbackOnlyRetriesMissingPaths(t *testing.T) {
 	}
 }
 
+// A model can report any timestamp it likes in the filename; the tool stamps
+// the actual write time so note provenance stays honest. The fabricated note
+// incident (2026-11-13) landed as 00-00-00 written midday: only the slug may
+// survive from the model-supplied name.
+func TestMemoriesAddAdHocNoteStampsServerSideTimestamp(t *testing.T) {
+	home := t.TempDir()
+	root := testMemoryScopeRoot(t, home)
+	handlers := memoryToolHandlers(t, home)
+	supplied := "1999-01-01T00-00-00-fabricated-timestamp.md"
+	result, err := handlers["memories_add_ad_hoc_note"](context.Background(), `{"filename":"`+supplied+`","note":"note body"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, ok := result.(addAdHocNoteResponse)
+	if !ok {
+		t.Fatalf("response = %#v", result)
+	}
+	base := filepath.Base(added.Path)
+	if !strings.HasPrefix(base, time.Now().UTC().Format("2006-01-02")) {
+		t.Fatalf("stamped filename %q does not start with today's UTC date", base)
+	}
+	if strings.Contains(added.Path, "1999-01-01") {
+		t.Fatalf("model-supplied timestamp survived: %q", added.Path)
+	}
+	if !strings.HasSuffix(base, "-fabricated-timestamp.md") {
+		t.Fatalf("slug not preserved verbatim: %q", base)
+	}
+	stampedRel := memory.AdHocNotePath(base)
+	if _, err := os.Stat(filepath.Join(root.MemoryRoot, stampedRel)); err != nil {
+		t.Fatalf("stamped note not on disk: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root.MemoryRoot, memory.AdHocNotePath(supplied))); !os.IsNotExist(err) {
+		t.Fatalf("note landed under the model-supplied name (stat err = %v)", err)
+	}
+	// An invalid filename still fails before anything is written.
+	if _, err := handlers["memories_add_ad_hoc_note"](context.Background(), `{"filename":"short.md","note":"note body"}`); err == nil {
+		t.Fatal("invalid filename accepted")
+	}
+}
+
 // memories_list and memories_search take the same bare note filename the write
 // tool accepts, so the model is not sent back to a "was not found" on the two
 // sibling tools.
@@ -1168,9 +1210,17 @@ func TestAdHocNoteResolvesForListAndSearch(t *testing.T) {
 	}
 	handlers := memoryToolHandlers(t, home)
 	filename := "2026-08-16T19-12-00-sibling-tools.md"
-	if _, err := handlers["memories_add_ad_hoc_note"](context.Background(), `{"filename":"`+filename+`","note":"sandbox go build"}`); err != nil {
+	result, err := handlers["memories_add_ad_hoc_note"](context.Background(), `{"filename":"`+filename+`","note":"sandbox go build"}`)
+	if err != nil {
 		t.Fatal(err)
 	}
+	added, ok := result.(addAdHocNoteResponse)
+	if !ok {
+		t.Fatalf("response = %#v", result)
+	}
+	// The note lands under the server-stamped name, so list and search must
+	// resolve the same bare stamped filename the write response reported.
+	filename = filepath.Base(added.Path)
 	stored := memory.AdHocNotePath(filename)
 	listed, err := handlers["memories_list"](context.Background(), `{"path":"`+filename+`"}`)
 	if err != nil {

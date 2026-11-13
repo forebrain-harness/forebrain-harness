@@ -111,7 +111,7 @@ func TestCaptureInstructionRendersBeforeAnyMemoryExists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Capturing memory", "memories_add_ad_hoc_note", root.MemoryRoot} {
+	for _, want := range []string{"Capturing memory", "memories_add_ad_hoc_note", root.MemoryRoot, "never quote wording the user did not literally send"} {
 		if !strings.Contains(instruction, want) {
 			t.Fatalf("capture instruction missing %q:\n%s", want, instruction)
 		}

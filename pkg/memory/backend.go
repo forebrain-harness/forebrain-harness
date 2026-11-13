@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -735,6 +736,17 @@ func validateNoteFilename(filename string) error {
 		}
 	}
 	return nil
+}
+
+// StampNoteFilename replaces the timestamp prefix of a model-supplied note
+// filename with at, keeping the slug. When a note was written is provenance
+// the tool reports honestly, not a value the model chooses; /migrate imports
+// keep their original filenames because they do not go through this helper.
+func StampNoteFilename(filename string, at time.Time) (string, error) {
+	if err := validateNoteFilename(filename); err != nil {
+		return "", err
+	}
+	return at.Format("2006-01-02T15-04-05") + filename[19:], nil
 }
 
 func validTimestampPrefix(stem string) bool {

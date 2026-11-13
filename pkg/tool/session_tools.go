@@ -834,7 +834,7 @@ func newExitPlanModeToolFor(st *State, stateRoot, projectKey string, rt *AgentTo
 }
 
 type memoriesAddAdHocNoteInput struct {
-	Filename string  `json:"filename" jsonschema:"minLength=24,maxLength=128,pattern=^\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-[a-z0-9][a-z0-9-]{0\\,79}\\.md$,description=Name of the note file to create in YYYY-MM-DDTHH-MM-SS-<slug>.md format."`
+	Filename string  `json:"filename" jsonschema:"minLength=24,maxLength=128,pattern=^\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-[a-z0-9][a-z0-9-]{0\\,79}\\.md$,description=Name of the note file to create in YYYY-MM-DDTHH-MM-SS-<slug>.md format. The tool replaces the timestamp prefix with the actual write time; only the <slug> part is kept."`
 	Note     string  `json:"note" jsonschema:"minLength=1,description=Verbatim Markdown note to append to the ad-hoc memory notes."`
 	Scope    *string `json:"scope,omitempty" jsonschema:"enum=project,enum=global" jsonschema_description:"project (default) for this project; global only for the user's own preferences that apply in every project."`
 }
@@ -883,7 +883,12 @@ func newDedicatedMemoryTools(_ *State, runtime *AgentToolRuntime) ([]*llm.Tool, 
 		if input.Scope != nil {
 			scope = memory.AddAdHocNoteScope(strings.TrimSpace(*input.Scope))
 		}
-		path, err := backend.AddAdHocNote(scope, input.Filename, input.Note)
+		filename, err := memory.StampNoteFilename(input.Filename, time.Now())
+		if err != nil {
+			recordMemoryToolCall("add_ad_hoc_note", "ad_hoc_notes:"+string(scope), false, "unknown")
+			return addAdHocNoteResponse{}, err
+		}
+		path, err := backend.AddAdHocNote(scope, filename, input.Note)
 		recordMemoryToolCall("add_ad_hoc_note", "ad_hoc_notes:"+string(scope), err == nil, "unknown")
 		return addAdHocNoteResponse{Path: path}, err
 	})
