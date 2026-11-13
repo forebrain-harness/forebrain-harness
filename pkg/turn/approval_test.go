@@ -775,6 +775,29 @@ func TestPlanReviewModelOptionsCarryEachRowsEndpoint(t *testing.T) {
 	require.True(t, picked[1].Current, "the row the conversation runs on is the marked one")
 }
 
+// The exit gate's reviewer offers the same list /model and the web chip draw,
+// so they come in the one display order too — and the mark is still the row
+// the conversation runs on, wherever the order puts it.
+func TestPlanReviewModelOptionsFollowTheDisplayOrder(t *testing.T) {
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		// Storage order: openai before deepseek, so only the sort puts
+		// deepseek first.
+		{ID: "row-openai", Provider: "openai", Model: "gpt-5.1", BaseURL: "http://openai.test/v1"},
+		{ID: "row-deepseek", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://deepseek.test"},
+		{ID: "row-zhipuai", Provider: "zhipuai", Model: "glm-5.3", BaseURL: "http://zhipu.test/api"},
+	}}
+	options := PlanReviewModelOptions(cfg, "main", "row-openai", "openai", "gpt-5.1")
+	require.Len(t, options, 3)
+	var order []string
+	for _, option := range options {
+		order = append(order, option.Provider+"/"+option.Model)
+	}
+	require.Equal(t, []string{"deepseek/deepseek-v4-flash", "openai/gpt-5.1", "zhipuai/glm-5.3"}, order)
+	require.False(t, options[0].Current)
+	require.True(t, options[1].Current, "the row the conversation runs on carries the mark")
+	require.False(t, options[2].Current)
+}
+
 // TestPendingExitPlanRequestResolvesOnlyItsOwnSessionPlan is the gate-layer
 // regression test for the cross-conversation plan leak: the approval card the
 // user is looking at (TUI overlay and web card render the same request) must

@@ -81,12 +81,15 @@ func LegacyLLMModelID(provider, model, baseURL, apiPath string) string {
 	return LegacyLLMModelIDPrefix + hex.EncodeToString(sum[:])[:16]
 }
 
-// ConfiguredLLMs is every model the install has configured, in display order:
-// the table's rows (root.LLMModels, already in created_at order), then entries
-// lifted from legacy llm_providers lists — main's first, then every other
-// definition by name, each list in stored order, `model: [a, b]` expanded.
-// Rows are de-duplicated by normalized identity; the first wins, so a table
-// row beats a legacy entry naming the same endpoint.
+// ConfiguredLLMs is every model the install has configured, in the order the
+// configuration stores it — not the display order a picker draws (turn's
+// ModelChoices sorts its own projection; this order is what the default's
+// first-row fallback reads): the table's rows (root.LLMModels, already in
+// created_at order), then entries lifted from legacy llm_providers lists —
+// main's first, then every other definition by name, each list in stored
+// order, `model: [a, b]` expanded. Rows are de-duplicated by normalized
+// identity; the first wins, so a table row beats a legacy entry naming the
+// same endpoint.
 func ConfiguredLLMs(root *Root) []AgentLLMProviderConfig {
 	if root == nil {
 		return nil

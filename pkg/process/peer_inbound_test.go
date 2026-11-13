@@ -480,12 +480,14 @@ func TestPeerInboundSteersARunningSession(t *testing.T) {
 	}
 }
 
-// A message that lands behind a run parked on an approval is a follow-up: the
-// sender's words stay the input's text, the origin marks the row as written
-// elsewhere, and the prompt itself travels as the payload. A message the parked
-// run never takes (the person interrupts or withdraws) must still be runnable
-// as the peer turn it is, and only the payload keeps the sender's name.
-func TestPeerInboundFollowUpToParkedRunCarriesThePrompt(t *testing.T) {
+// A message that lands behind a run parked on an approval is a steer: the run
+// is still live, so the letter rides the next model call after the approval,
+// exactly as the person's own steer does (owner ruling, 2026-11). The sender's
+// words stay the input's text, the origin marks the row as written elsewhere,
+// and the prompt itself travels as the payload. A message the parked run never
+// takes (the person interrupts or withdraws) must still be runnable as the peer
+// turn it is, and only the payload keeps the sender's name.
+func TestPeerInboundSteersAParkedRunCarriesThePrompt(t *testing.T) {
 	view := &peerTestView{}
 	svc := startPeerTestService(t, "tui", "cli-parked-session", view, nil)
 	queue := svc.env.Control.SessionQueue("cli-parked-session")
@@ -500,17 +502,20 @@ func TestPeerInboundFollowUpToParkedRunCarriesThePrompt(t *testing.T) {
 	envelope := envelopeOf(peer.EncodeUDS(svc.sendFrom), "please confirm the plan", withFromName("router-peer"))
 	msgID := svc.sendFrame(t, envelope, nil)
 
-	waitFor(t, "the follow-up", func() bool { return len(queue.Preview().FollowUp) == 1 })
+	waitFor(t, "the steer", func() bool { return len(queue.Preview().Steers) == 1 })
+	if p := queue.Preview(); len(p.Rejected) != 0 || len(p.FollowUp) != 0 {
+		t.Fatalf("a parked run's letter was demoted: %#v", p)
+	}
 	entries := queue.TakeAll()
 	if len(entries) != 1 {
-		t.Fatalf("the parked run holds %d follow-ups, want 1", len(entries))
+		t.Fatalf("the parked run holds %d steers, want 1", len(entries))
 	}
 	if entries[0].Origin != state.MessageOriginPeer {
-		t.Fatalf("follow-up origin = %q, want %q", entries[0].Origin, state.MessageOriginPeer)
+		t.Fatalf("steer origin = %q, want %q", entries[0].Origin, state.MessageOriginPeer)
 	}
 	prompt, ok := entries[0].Payload.(PeerPrompt)
 	if !ok {
-		t.Fatalf("follow-up payload = %T, want the peer prompt", entries[0].Payload)
+		t.Fatalf("steer payload = %T, want the peer prompt", entries[0].Payload)
 	}
 	if prompt.Text != envelope {
 		t.Fatalf("prompt text = %q, want the envelope verbatim", prompt.Text)
@@ -520,7 +525,7 @@ func TestPeerInboundFollowUpToParkedRunCarriesThePrompt(t *testing.T) {
 	}
 	svc.noReceipt(t, "an accepted message")
 	if view.wakeCount() != 0 {
-		t.Fatal("a parked conversation was woken as well as queued behind")
+		t.Fatal("a parked conversation was woken as well as steered")
 	}
 }
 

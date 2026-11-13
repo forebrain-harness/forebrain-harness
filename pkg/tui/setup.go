@@ -759,6 +759,23 @@ func (s *llmSetup) providerRows() []providerRow {
 	return rows
 }
 
+// providerRowHolds reports whether row is the one the user picked before. A
+// sign-in is named by its subscription, a provider with several endpoints by
+// its group, and a single-endpoint provider by its choice. Display labels
+// cannot name it: a subscription and an API-key group may share one
+// (Volcengine Ark), and the later row would win.
+func providerRowHolds(row providerRow, choice providerChoice) bool {
+	switch {
+	case choice.Subscription != "":
+		return row.choice.Subscription == choice.Subscription
+	case row.group != nil:
+		return row.item.Label == choice.Group
+	default:
+		return row.choice.Subscription == "" &&
+			row.choice.Group == choice.Group && row.choice.Label == choice.Label
+	}
+}
+
 // subscriptionChoice is one subscription's row: its name, and what signing in
 // to it gets the user.
 func subscriptionChoice(sub subscription.Subscription) providerChoice {
@@ -824,14 +841,7 @@ func (s *llmSetup) pickProvider() (bool, error) {
 	chosen := -1 // the provider picked before, when the user came back here
 	for i, row := range rows {
 		items[i] = row.item
-		switch {
-		case row.group != nil:
-			// A provider with several endpoints: the user came from its
-			// endpoint page, so its row is where they were.
-			if row.item.Label == s.choice.Group {
-				chosen = i
-			}
-		case row.choice.Group == s.choice.Group && row.choice.Label == s.choice.Label:
+		if providerRowHolds(row, s.choice) {
 			chosen = i
 		}
 	}

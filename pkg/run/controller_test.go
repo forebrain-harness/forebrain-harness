@@ -55,6 +55,38 @@ func TestControllerCancelAndQueue(t *testing.T) {
 	if c.Steer("r1", Input{Text: "late"}) {
 		t.Fatal("steer accepted after cancellation")
 	}
+	if p := c.SessionQueue("s1").Preview(); len(p.Rejected) != 0 || len(p.FollowUp) != 0 {
+		t.Fatalf("a refused steer must not linger in the queue: %#v", p)
+	}
+}
+
+func TestControllerSteersWhileParkedOnApproval(t *testing.T) {
+	c := NewController()
+	if _, err := c.Begin(context.Background(), "r1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if !c.WaitApproval("r1") {
+		t.Fatal("park")
+	}
+	// The peer path does Find then Steer; the phase can flip between the two
+	// steps, and a turn parked on its approval must still take the steer.
+	if _, phase, ok := c.Find("s1"); !ok || phase != Waiting {
+		t.Fatal("find")
+	}
+	if !c.Steer("r1", Input{Text: "peer", Parts: []llm.ContentPart{llm.Text("peer")}}) {
+		t.Fatal("steer refused while parked on approval")
+	}
+	p := c.SessionQueue("s1").Preview()
+	if len(p.Steers) != 1 || len(p.Rejected) != 0 || len(p.FollowUp) != 0 {
+		t.Fatalf("parked steer lanes = %#v, want 1 steer and nothing demoted", p)
+	}
+	if !c.Resume("r1") {
+		t.Fatal("resume")
+	}
+	entries := c.SessionQueue("s1").Runtime().DrainSteers()
+	if len(entries) != 1 || llm.TextContent(entries[0].Parts...) != "peer" {
+		t.Fatalf("drained = %#v, want the peer steer", entries)
+	}
 }
 
 func TestControllerKeepsQueueAcrossApproval(t *testing.T) {
@@ -85,15 +117,11 @@ func TestControllerKeepsQueueAcrossApproval(t *testing.T) {
 // the surface's job.
 func TestControllerNextListsRejectedInputWhole(t *testing.T) {
 	c := NewController()
-	if !c.Track("r1", "s1", func() {}) || !c.WaitApproval("r1") {
-		t.Fatal("track")
-	}
-	c.Steer("r1", Input{Text: "look at this", MentionImages: []string{"shots/a.png"}})
-	c.Steer("r1", Input{Attachments: []string{"file-1"}})
-	q, _, ok := c.Queue("r1")
-	if !ok {
-		t.Fatal("queue")
-	}
+	// No run is tracked, so the queue's runtime is not attached: a steer is
+	// refused into the rejected lane, which is the queue's own refusal rule.
+	q := c.SessionQueue("s1")
+	q.Steer(Input{Text: "look at this", MentionImages: []string{"shots/a.png"}})
+	q.Steer(Input{Attachments: []string{"file-1"}})
 	send, _ := q.Next(BoundaryCompleted)
 	if len(send) != 2 || !send[0].Rejected || send[0].Text != "look at this" || send[0].MentionImages[0] != "shots/a.png" ||
 		!send[1].Rejected || send[1].Attachments[0] != "file-1" {

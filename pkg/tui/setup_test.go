@@ -518,6 +518,28 @@ func (s *dismissingSelector) MultiSelectRichTabbed(label string, items []SelectI
 	return nil, false, nil
 }
 
+// indexSelector answers the provider page by row index and records the row the
+// page opened on, which is what a label cannot say when two rows share one.
+type indexSelector struct {
+	*fakeSelector
+	answers  []int
+	at       int
+	defaults []int
+}
+
+func (s *indexSelector) SelectRich(label string, items []SelectItem, defaultIdx int) (int, bool, error) {
+	s.defaults = append(s.defaults, defaultIdx)
+	if s.at >= len(s.answers) {
+		return -1, false, nil
+	}
+	answer := s.answers[s.at]
+	s.at++
+	if answer < 0 {
+		return -1, false, nil
+	}
+	return answer, true, nil
+}
+
 // The first page is three groups in this order: the sign-ins the registry
 // lists, the providers reached with a key, and the custom form. The sign-in
 // group is the registry's alone — a provider that only takes a key never
@@ -721,6 +743,76 @@ func TestEscOnOffersPageReturnsToProviderPage(t *testing.T) {
 	}
 	if opts.Provider != "" {
 		t.Fatalf("options = %+v, want none written", opts)
+	}
+}
+
+// The sign-in row and the API-key group row are both called "Volcengine Ark".
+// Coming back from the sign-in must land on the sign-in row, not on the later
+// row that shares its label.
+func TestProviderPageComesBackToTheSubscriptionRow(t *testing.T) {
+	sub := volcengineLike()
+	withSubscriptions(t, sub)
+	selector := &indexSelector{fakeSelector: &fakeSelector{}}
+	setup := newLLMSetup(PromptConfig{Selector: selector, Output: io.Discard, Home: t.TempDir()})
+
+	subRow, keyRow := -1, -1
+	for i, row := range setup.providerRows() {
+		if row.choice.Subscription == sub.ID() {
+			subRow = i
+		}
+		if row.group != nil && row.item.Label == sub.label {
+			keyRow = i
+		}
+	}
+	if subRow < 0 || keyRow < 0 || subRow == keyRow {
+		t.Fatalf("the page no longer holds two Volcengine Ark rows: sign-in=%d key=%d", subRow, keyRow)
+	}
+
+	selector.answers = []int{subRow, -1}
+	if _, err := setup.pickProvider(); err != nil {
+		t.Fatalf("pick the sign-in row: %v", err)
+	}
+	if setup.choice.Subscription != sub.ID() {
+		t.Fatalf("choice = %+v, want the %s sign-in", setup.choice, sub.ID())
+	}
+	if _, err := setup.pickProvider(); err != nil {
+		t.Fatalf("come back: %v", err)
+	}
+	if len(selector.defaults) != 2 || selector.defaults[1] != subRow {
+		t.Fatalf("the page reopened on row %v, want the sign-in row %d", selector.defaults, subRow)
+	}
+}
+
+// The other direction: a key endpoint's row is the group row, and coming back
+// must not be pulled onto the sign-in row by the shared label.
+func TestProviderPageComesBackToTheAPIKeyRow(t *testing.T) {
+	sub := volcengineLike()
+	withSubscriptions(t, sub)
+	selector := &indexSelector{fakeSelector: &fakeSelector{}}
+	setup := newLLMSetup(PromptConfig{Selector: selector, Output: io.Discard, Home: t.TempDir()})
+
+	keyRow := -1
+	for i, row := range setup.providerRows() {
+		if row.group != nil && row.item.Label == sub.label {
+			keyRow = i
+		}
+	}
+	if keyRow < 0 {
+		t.Fatalf("no API-key group row for %s", sub.label)
+	}
+
+	selector.answers = []int{keyRow, 0, -1}
+	if _, err := setup.pickProvider(); err != nil {
+		t.Fatalf("pick the key group: %v", err)
+	}
+	if setup.choice.Provider != sub.ID() || setup.choice.Subscription != "" {
+		t.Fatalf("choice = %+v, want a %s key endpoint", setup.choice, sub.ID())
+	}
+	if _, err := setup.pickProvider(); err != nil {
+		t.Fatalf("come back: %v", err)
+	}
+	if len(selector.defaults) != 3 || selector.defaults[2] != keyRow {
+		t.Fatalf("the page reopened on row %v, want the API-key group row %d", selector.defaults, keyRow)
 	}
 }
 

@@ -565,6 +565,109 @@ func TestModelChoicesCarryTheRowsConfiguredEffort(t *testing.T) {
 	require.Empty(t, choices[1].ConfiguredEffort, "a row that configures no effort leaves the provider's own in charge")
 }
 
+// The list every picker draws comes in one order — provider, then the model's
+// readable name, then the wire id, then the endpoint — never in the order the
+// configuration happens to store: interleaved providers and out-of-order names
+// are what made a 67-row install unscannable. A twin pair (one provider/model,
+// two endpoints) stays adjacent, one before two, so a pick can be told apart.
+func TestModelChoicesSortByProviderThenModelNameThenEndpoint(t *testing.T) {
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		// Storage order, deliberately unscannable.
+		{ID: "m2", Provider: "meituan", Model: "LongCat-2.5", BaseURL: "https://meituan.test/v1", APIPath: "/chat/completions"},
+		{ID: "z1", Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://zhipu.test/api", APIPath: "/coding/paas/v4/chat/completions"},
+		{ID: "d2", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://two.test"},
+		{ID: "a1", Provider: "alibaba", Model: "qwen3.8-max", BaseURL: "https://alibaba.test/v1", APIPath: "/compatible-mode/v1/chat/completions"},
+		{ID: "d1", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://one.test"},
+		{ID: "m1", Provider: "meituan", Model: "longcat-2.0", BaseURL: "https://meituan.test/v1", APIPath: "/chat/completions"},
+		{ID: "z2", Provider: "zhipuai", Model: "glm-5.1", BaseURL: "https://zhipu.test/api", APIPath: "/coding/paas/v4/chat/completions"},
+	}}
+	type row struct{ provider, modelName, baseURL string }
+	want := []row{
+		{"alibaba", "qwen3.8-max", "https://alibaba.test/v1"},
+		// The twins keep provider/model together and are ordered by endpoint.
+		{"deepseek", "deepseek-v4-flash", "http://one.test"},
+		{"deepseek", "deepseek-v4-flash", "http://two.test"},
+		// Case-insensitive: the lower-case wire id sorts first, the mixed-case
+		// one by its own lower-cased name.
+		{"meituan", "longcat-2.0", "https://meituan.test/v1"},
+		{"meituan", "LongCat-2.5", "https://meituan.test/v1"},
+		{"zhipuai", "glm-5.1", "https://zhipu.test/api"},
+		{"zhipuai", "glm-5.3", "https://zhipu.test/api"},
+	}
+	choices := ModelChoices(cfg, "main")
+	require.Len(t, choices, len(want))
+	got := make([]row, 0, len(choices))
+	for _, choice := range choices {
+		got = append(got, row{choice.Provider, choice.ModelName, choice.BaseURL})
+	}
+	require.Equal(t, want, got)
+	require.Equal(t, "d1", choices[1].ID, "the twin row's own id, not its twin's")
+	require.Equal(t, "d2", choices[2].ID)
+}
+
+// Sorting is a display projection over the list /model draws; the row in force
+// is still resolved by id, so the mark follows its row to whatever position
+// the order puts it in, and picking that row still means "nothing changed".
+func TestModelChoicesSortKeepsTheDefaultMarked(t *testing.T) {
+	f := newModelSelectionFixture(t, ModelSelectionState{})
+	res := execModel(f.ctx)
+	require.True(t, res.Handled)
+	require.NotNil(t, res.Picker, res.Reply)
+	items := res.Picker.Items
+	require.Len(t, items, 2)
+
+	// The config's first entry is openai/gpt-5 — the effective default — but
+	// the display order puts deepseek first.
+	require.Equal(t, "deepseek/deepseek-chat", items[0].Label)
+	require.False(t, items[0].Current)
+	require.Equal(t, "openai/gpt-5", items[1].Label)
+	require.True(t, items[1].Current)
+	require.Equal(t, f.choiceID(t, "openai", "gpt-5"), items[1].Value)
+	marked := 0
+	for _, item := range items {
+		if item.Current {
+			marked++
+		}
+	}
+	require.Equal(t, 1, marked, "exactly one row carries the mark: %+v", items)
+
+	// Picking the marked row is what the conversation already runs on, even
+	// though the order no longer puts it first: nothing is applied. (The row
+	// reasons, so the answer is its effort page rather than a "Still using"
+	// line — either way no switch reaches the runtime.)
+	picked := Choose(f.ctx, SlashChoice{Command: "model", Value: items[1].Value})
+	require.True(t, picked.Handled)
+	for _, call := range f.calls() {
+		require.NotContains(t, call, "select(", "picking the row in force applied a switch: %v", f.calls())
+	}
+}
+
+// The order the default resolution reads is the configuration's own, not the
+// picker's: ConfiguredLLMs feeds EffectiveDefaultLLMFor's first-row fallback,
+// so sorting the view instead of the projection would move every install's
+// default model.
+func TestModelChoicesDoNotReorderTheStoredView(t *testing.T) {
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-z", Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://zhipu.test/api"},
+		{ID: "row-a", Provider: "alibaba", Model: "qwen3.8-max", BaseURL: "https://alibaba.test/v1"},
+	}}
+	var stored []string
+	for _, configured := range appcfg.ConfiguredLLMs(cfg) {
+		stored = append(stored, configured.ID)
+	}
+	require.Equal(t, []string{"row-z", "row-a"}, stored, "the stored view keeps its configured order")
+
+	var drawn []string
+	for _, choice := range ModelChoices(cfg, "main") {
+		drawn = append(drawn, choice.ID)
+	}
+	require.Equal(t, []string{"row-a", "row-z"}, drawn, "the picker's projection is sorted")
+
+	def := appcfg.EffectiveDefaultLLMFor(cfg, "main")
+	require.NotNil(t, def)
+	require.Equal(t, "row-z", def.ID, "the default is still the view's first row")
+}
+
 // The levels a surface offers are the model's own, row by row: this is the
 // table every surface reads (the TUI model page, /model, the setup flow and
 // the gateway's model chip).

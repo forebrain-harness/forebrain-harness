@@ -2207,13 +2207,16 @@ func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, 
 
 // asyncSubagentContext rebuilds the context one fire-and-forget dispatch runs
 // under: a fresh background context, because the execution outlives the turn
-// that started it, carrying the few facts of the dispatch that must cross the
-// boundary. The dispatching turn's run-scoped hooks cross with them — the step
-// hook that draws and records this child's tool cards (a background context
-// inherits none, and the child's project runner has no process-wide fallback),
-// and the three approval hooks that let a gated call inside the child be
-// answered instead of failing the whole execution. A hook the dispatcher does
-// not carry stays absent: nothing is invented here.
+// that started it. Every fact of the dispatch that must cross that boundary
+// crosses here explicitly — both what the child's own dispatch reads from its
+// base context (the mode, a batch's workspace and task facts, the model pin,
+// the session's model selection) and the dispatching turn's run-scoped hooks:
+// the step hook that draws and records this child's tool cards (a background
+// context inherits none, and the child's project runner has no process-wide
+// fallback), and the three approval hooks that let a gated call inside the
+// child be answered instead of failing the whole execution. The list has to
+// stay in step with prepareSubagentExecutionResolved's reads. A hook the
+// dispatcher does not carry stays absent: nothing is invented here.
 func asyncSubagentContext(ctx context.Context) context.Context {
 	base := context.Background()
 	if sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx)); sid != "" {
@@ -2238,6 +2241,48 @@ func asyncSubagentContext(ctx context.Context) context.Context {
 	}
 	if hook := tool.InlineApprovalHookFromContext(ctx, nil); hook != nil {
 		base = tool.WithInlineApprovalHook(base, hook)
+	}
+	// The facts the child's dispatch reads from its base context cross here
+	// too. A dispatch is decided on the dispatching context and then runs on
+	// this one, so a fact that is not moved is silently lost — the child does
+	// not fail, it just behaves like something the caller never asked for:
+	//
+	//   - the mode (plan/agent): prepareSubagentExecutionResolved writes the
+	//     child's own plan-mode entry from it, and GuardTool reads the same
+	//     mode off the context — without it a write-capable child dispatched
+	//     during planning could edit files;
+	//   - a batch dispatch's workspace, task facts and boundary: the child
+	//     works inside the execution's workspace under the same task;
+	//   - the dispatch-time model pin: prepare records it and routes every
+	//     request of the run on it (the model argument, or the plan review's
+	//     pick) — dropped, the child runs the conversation's model and its
+	//     record names that instead;
+	//   - the session's model selection: the effort a child on the
+	//     conversation's model runs at.
+	//
+	// The invariant: every fact a dispatching turn can carry that
+	// prepareSubagentExecutionResolved reads from its base context has a line
+	// here. A new one added there without one is a behaviour loss, not a
+	// compile error. The one base-context read deliberately absent is the
+	// fanout task index (subagentTaskIndexFromContext): only the synchronous
+	// fanout sets it.
+	if mode := strings.TrimSpace(tool.ModeFromContext(ctx)); mode != "" {
+		base = tool.WithMode(base, mode)
+	}
+	if ws := strings.TrimSpace(tool.TaskWorkspaceFromContext(ctx)); ws != "" {
+		base = tool.WithTaskWorkspace(base, ws)
+		if text := strings.TrimSpace(tool.TaskContextFromContext(ctx)); text != "" {
+			base = tool.WithTaskContext(base, text)
+		}
+		if boundary, ok := tool.BatchBoundaryFromContext(ctx); ok {
+			base = tool.WithBatchBoundary(base, boundary)
+		}
+	}
+	if override, ok := SubagentModelOverrideFromContext(ctx); ok {
+		base = WithSubagentModelOverride(base, override)
+	}
+	if sel, ok := SessionModelSelectionFromContext(ctx); ok {
+		base = WithSessionModelSelection(base, sel)
 	}
 	return base
 }

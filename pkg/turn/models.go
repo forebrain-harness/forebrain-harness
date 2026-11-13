@@ -702,10 +702,14 @@ func ModelEndpointLabel(baseURL, apiPath string, urlVerbatim bool) string {
 	return appcfg.ModelEndpointLabel(baseURL, apiPath, urlVerbatim)
 }
 
-// ModelChoices lists the models the install has configured, in their
-// configured order — storage order, not priority: the one in force is the
-// effective default (the agent's default_model reference, else its first
-// legacy entry, else main's, else the view's first row).
+// ModelChoices lists the models the install has configured, in the one order
+// every picker shows them: provider, then the model's readable name, then the
+// wire id, then the endpoint — so a provider's rows are one block, rows that
+// share a provider/model sit together, and the same configuration always draws
+// the same list. The one in force is the effective default (the agent's
+// default_model reference, else its first legacy entry, else main's, else the
+// view's first row) — resolved by EffectiveDefaultLLMFor and found by id, not
+// by position; the storage order ConfiguredLLMs carries is not touched.
 func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 	var out []ModelChoice
 	for _, configured := range appcfg.ConfiguredLLMs(cfg) {
@@ -734,7 +738,28 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 		choice.ConfiguredEffort = appcfg.ReasoningEffort(configured.Params)
 		out = append(out, choice)
 	}
+	sort.SliceStable(out, func(i, j int) bool { return modelChoiceLess(out[i], out[j]) })
 	return out
+}
+
+// modelChoiceLess is the display order of configured models: provider, the
+// model's readable name (what the picker shows), the wire id, then the endpoint
+// a row sends to — twins of one provider/model stay adjacent and in a stable
+// order. Case-insensitive, the way the model catalog's own listing sorts.
+func modelChoiceLess(a, b ModelChoice) bool {
+	if cmp := strings.Compare(strings.ToLower(a.Provider), strings.ToLower(b.Provider)); cmp != 0 {
+		return cmp < 0
+	}
+	if cmp := strings.Compare(strings.ToLower(a.ModelName), strings.ToLower(b.ModelName)); cmp != 0 {
+		return cmp < 0
+	}
+	if cmp := strings.Compare(strings.ToLower(a.Model), strings.ToLower(b.Model)); cmp != 0 {
+		return cmp < 0
+	}
+	if cmp := strings.Compare(strings.ToLower(a.BaseURL), strings.ToLower(b.BaseURL)); cmp != 0 {
+		return cmp < 0
+	}
+	return strings.ToLower(a.APIPath) < strings.ToLower(b.APIPath)
 }
 
 // defaultModelIndex reports the index within choices of the effective default

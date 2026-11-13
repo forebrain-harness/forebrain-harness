@@ -618,8 +618,9 @@ func (s *Server) deleteLLMModel(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLLMModelChoices serves the one list every model picker reads: the
-// install's models in configured order, each with the endpoint its requests go
-// to and the levels it offers. It carries nothing about a key.
+// install's models in the display order every picker uses (provider, then the
+// model's readable name, then the endpoint), each with the endpoint its
+// requests go to and the levels it offers. It carries nothing about a key.
 func (s *Server) handleLLMModelChoices(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)

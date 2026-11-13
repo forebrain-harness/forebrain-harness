@@ -757,13 +757,8 @@ func (in *peerInbox) deliverPrimary(ctx context.Context, sessionID string, promp
 	}
 	if runID, phase, ok := in.svc.env.Control.Find(sessionID); ok {
 		switch phase {
-		case run.Running:
+		case run.Running, run.Waiting:
 			if in.svc.env.Control.Steer(runID, peerInput(prompt)) {
-				in.noteHanded(sessionID)
-				return ""
-			}
-		case run.Waiting, run.Finishing:
-			if in.svc.env.Control.FollowUp(runID, peerInput(prompt)) {
 				in.noteHanded(sessionID)
 				return ""
 			}

@@ -342,10 +342,12 @@ func TestUnknownCommandSuggestionsAndBareSlashCatalog(t *testing.T) {
 	require.Equal(t, "There is no /zzzq; type / to see every command.", UnknownCommandReply(SurfaceWebChat, "zzzq", DiscoveryOptions{}))
 }
 
-// /model offers every model the install has configured, in configured order —
-// a model array expanded into one choice each — the agent's own default in
-// force. One install-wide list (owner 2026-11-07, plan 260): the agent a
-// picker is drawn for no longer narrows it, only its default differs.
+// /model offers every model the install has configured — a model array
+// expanded into one choice each — the agent's own default in force. One
+// install-wide list (owner 2026-11-07, plan 260): the agent a picker is drawn
+// for no longer narrows it, only its default differs. The rows come in the
+// pickers' one display order (provider, then model name, then endpoint), not
+// in the order the configuration stores them.
 func TestModelChoicesAreTheInstallWideModels(t *testing.T) {
 	codex := "gpt-5.3-co" + "dex"
 	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
@@ -356,7 +358,7 @@ func TestModelChoicesAreTheInstallWideModels(t *testing.T) {
 		}},
 		"writer": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "anthropic", Model: "claude-sonnet-4-5"}}},
 	}}}
-	want := []string{"zhipuai/glm-5.1", "openai/" + codex, "openai/gpt-5.4", "openai/gpt-5.5", "anthropic/claude-sonnet-4-5"}
+	want := []string{"anthropic/claude-sonnet-4-5", "openai/" + codex, "openai/gpt-5.4", "openai/gpt-5.5", "zhipuai/glm-5.1"}
 	labels := func(choices []ModelChoice) []string {
 		out := make([]string, 0, len(choices))
 		for _, choice := range choices {
@@ -367,6 +369,14 @@ func TestModelChoicesAreTheInstallWideModels(t *testing.T) {
 	require.Equal(t, want, labels(ModelChoices(&cfg, "main")))
 	require.Equal(t, want, labels(ModelChoices(&cfg, "writer")), "every agent reads the same install-wide list")
 	require.Equal(t, ModelChoices(&cfg, "main"), ModelChoices(&cfg, "no-such-agent"), "an unknown agent runs on the same list")
+	// The sorting is the display projection alone: the view the default
+	// resolution reads keeps the configured order.
+	var stored []string
+	for _, configured := range appcfg.ConfiguredLLMs(&cfg) {
+		stored = append(stored, configured.Provider+"/"+configured.Model)
+	}
+	require.Equal(t, []string{"zhipuai/glm-5.1", "openai/" + codex, "openai/gpt-5.4", "openai/gpt-5.5", "anthropic/claude-sonnet-4-5"}, stored,
+		"ConfiguredLLMs keeps the configured order the default's first-row fallback reads")
 }
 
 // /lsp is a tools-category panel command on both surfaces, next to /mcp.

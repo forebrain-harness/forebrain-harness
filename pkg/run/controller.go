@@ -478,7 +478,11 @@ func (c *Controller) Finish(runID string) bool {
 	return true
 }
 
-// Steer queues an interrupting message while the model is running.
+// Steer queues an interrupting message while the turn is live. A turn parked
+// on its approval gate is still live: the steer waits for the next model call
+// after the approval, exactly as the person's own steer does (InputQueue.Steer).
+// A winding-down or finished run takes nothing; the caller falls back to its
+// own next-turn path.
 func (c *Controller) Steer(runID string, in Input) bool {
 	state, ok := c.Get(runID)
 	if !ok {
@@ -486,12 +490,7 @@ func (c *Controller) Steer(runID string, in Input) bool {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.phase != Running {
-		if state.input != nil {
-			rejected := cloneInput(in)
-			rejected.Rejected = true
-			state.input.FollowUp(rejected)
-		}
+	if state.phase == Finishing || state.phase == Finished {
 		return false
 	}
 	return state.input != nil && state.input.Steer(in)

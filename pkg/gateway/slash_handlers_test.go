@@ -224,9 +224,23 @@ func TestWebModelPickerSwitchesTheModel(t *testing.T) {
 	require.NotNil(t, res.Picker, res.Reply)
 	require.Equal(t, "model", res.Picker.Command)
 	require.Len(t, res.Picker.Items, 2)
-	require.True(t, res.Picker.Items[0].Current)
+	// The rows are drawn in the pickers' display order — deepseek before
+	// openai — so the model in force is wherever that order puts it, and a
+	// pick names the row it means, never a position.
+	current := -1
+	for i, item := range res.Picker.Items {
+		if item.Current {
+			current = i
+		}
+	}
+	require.Equal(t, 1, current, "the model in force is openai/gpt-4o, second in provider order")
+	require.Equal(t, "openai/gpt-4o", res.Picker.Items[current].Label)
 
-	chosen := parseSlashCommandWithOptions(s, "s1", "webchat", "/model", turn.Context{}, &turn.SlashChoice{Command: "model", Value: res.Picker.Items[1].Value})
+	other := res.Picker.Items[0]
+	require.False(t, other.Current)
+	require.Equal(t, "deepseek/deepseek-chat", other.Label)
+
+	chosen := parseSlashCommandWithOptions(s, "s1", "webchat", "/model", turn.Context{}, &turn.SlashChoice{Command: "model", Value: other.Value})
 	require.Equal(t, "Switched to deepseek/deepseek-chat.", chosen.Reply)
 	saved, err := loadPersistedDocumentForTest(cfgPath)
 	require.NoError(t, err)

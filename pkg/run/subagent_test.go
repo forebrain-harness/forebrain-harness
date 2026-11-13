@@ -8510,6 +8510,95 @@ func (e *capturingModelArgumentExecutor) pinsOf() []SubagentModelOverride {
 	return append([]SubagentModelOverride(nil), e.pins...)
 }
 
+func (e *capturingModelArgumentExecutor) modelOf() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.model
+}
+
+// A subagent_send dispatch is decided on the dispatching context and then runs
+// on one rebuilt from a background: a model argument made at dispatch has to
+// cross that boundary, or the child runs the conversation's model while its
+// record names the same — announced as one model, served by another, which is
+// the failure the argument exists to prevent.
+func TestSubagentSendModelArgumentPinsTheAsyncRun(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	rowID := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://one.test/v1", "key-one", true)
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, fix.fac); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	send, ok := aToolByName(a, "subagent_send")
+	if !ok {
+		t.Fatal("subagent_send not registered")
+	}
+	if _, err := send.Handle(dispatchTestCtx(), fmt.Sprintf(`{"task":"inspect","subagent_type":"general-purpose","model":%q}`, rowID)); err != nil {
+		t.Fatalf("subagent_send with a live row id: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var pins []SubagentModelOverride
+	for time.Now().Before(deadline) {
+		if pins = fix.capture.pinsOf(); len(pins) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("captured pins = %d, want 1 (the async run dropped the dispatch pin)", len(pins))
+	}
+	pin := pins[0]
+	if pin.ModelID != rowID || pin.Provider != "zhipuai" || pin.Model != "glm-5.3" {
+		t.Fatalf("pin = %+v, want the named row", pin)
+	}
+	if pin.Entry == nil || pin.Entry.BaseURL != "https://one.test/v1" {
+		t.Fatalf("pin entry = %+v, want the row's own endpoint", pin.Entry)
+	}
+	if got := fix.capture.modelOf(); got != "glm-5.3" {
+		t.Fatalf("execution model = %q, want the pinned row's model", got)
+	}
+}
+
+// asyncSubagentContext is the one place a fire-and-forget dispatch decides
+// what crosses into the execution's background context. Every fact
+// prepareSubagentExecutionResolved reads from its base context — the mode, a
+// batch's workspace and task facts, the dispatch-time model pin, the session's
+// model selection — has to be carried there; dropped, the child does not fail,
+// it silently runs as something the dispatcher never asked for.
+func TestAsyncSubagentContextCarriesTheDispatchFacts(t *testing.T) {
+	ctx := context.Background()
+	ctx = toolpkg.WithMode(ctx, "plan")
+	ctx = toolpkg.WithTaskWorkspace(ctx, "/tmp/fb-task-ws")
+	ctx = toolpkg.WithTaskContext(ctx, "work item 7")
+	ctx = toolpkg.WithBatchBoundary(ctx, toolpkg.BatchBoundary{Workspace: "/tmp/fb-task-ws"})
+	ctx = WithSubagentModelOverride(ctx, SubagentModelOverride{ModelID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3"})
+	ctx = WithSessionModelSelection(ctx, PrimaryModelState{ModelID: "llm_row1", Provider: "qodercn", Model: "qmodel_latest", Effort: "high"})
+
+	carried := asyncSubagentContext(ctx)
+
+	if got := toolpkg.ModeFromContext(carried); got != "plan" {
+		t.Errorf("mode = %q, want plan", got)
+	}
+	if got := toolpkg.TaskWorkspaceFromContext(carried); got != "/tmp/fb-task-ws" {
+		t.Errorf("task workspace = %q, want /tmp/fb-task-ws", got)
+	}
+	if got := toolpkg.TaskContextFromContext(carried); got != "work item 7" {
+		t.Errorf("task context = %q, want work item 7", got)
+	}
+	if boundary, ok := toolpkg.BatchBoundaryFromContext(carried); !ok || boundary.Workspace != "/tmp/fb-task-ws" {
+		t.Errorf("batch boundary = %+v, ok=%v, want the dispatch's workspace", boundary, ok)
+	}
+	if pin, ok := SubagentModelOverrideFromContext(carried); !ok || pin.ModelID != "llm_row2" || pin.Model != "glm-5.3" {
+		t.Errorf("model pin = %+v, ok=%v, want the dispatch-time row", pin, ok)
+	}
+	if sel, ok := SessionModelSelectionFromContext(carried); !ok || sel.Effort != "high" {
+		t.Errorf("session model selection = %+v, ok=%v, want the dispatch's effort", sel, ok)
+	}
+}
+
 // The refusal a model argument gets names list_usable_models only while that
 // tool rides requests: with an empty roster it is not offered, so pointing at
 // it would teach the model to call a tool it cannot see — the guidance then

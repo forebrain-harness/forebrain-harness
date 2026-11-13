@@ -1865,12 +1865,22 @@ func TestAvailableModelOptionsUseConfiguredLLMProvidersOnly(t *testing.T) {
 		labels = append(labels, item.Label)
 	}
 	// The list is the configured models and nothing else: adding one is
-	// /connect's, so the picker offers no row that would name no model.
+	// /connect's, so the picker offers no row that would name no model. The
+	// rows come in the pickers' one display order (provider, then the model's
+	// name), and the model in force keeps its mark wherever that order puts
+	// it.
 	require.Equal(t, []string{
-		"zhipuai/glm-5.1",
 		"openai/" + codeModel,
+		"zhipuai/glm-5.1",
 	}, labels)
-	require.True(t, res.Picker.Items[0].Current)
+	current := -1
+	for i, item := range res.Picker.Items {
+		if item.Current {
+			current = i
+		}
+	}
+	require.Equal(t, 1, current, "the configured first entry is the one in force")
+	require.Equal(t, "zhipuai/glm-5.1", labels[current])
 }
 
 func TestCurrentModelReasoningEffortReadsPrimaryProviderParams(t *testing.T) {

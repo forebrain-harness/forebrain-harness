@@ -6381,13 +6381,22 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	require.Equal(t, "zhipuai", got.Provider)
 	require.Equal(t, "glm-5.3-flash", got.Model)
 	require.Len(t, got.Options, 3)
-	require.Equal(t, []string{"low", "high", "max"}, got.Options[0].Efforts)
-	require.Empty(t, got.Options[1].Efforts, "deepseek-chat does not reason, so it has no levels")
+	// The chip draws the one display order (provider, then the model's name),
+	// so each row is read by the model it names, never by its position.
+	efforts := map[string][]string{}
+	images := map[string]bool{}
+	for _, option := range got.Options {
+		efforts[option.Model] = option.Efforts
+		images[option.Model] = option.SupportsImages
+	}
+	require.Equal(t, []string{"low", "high", "max"}, efforts["glm-5.3-flash"])
+	require.Empty(t, efforts["deepseek-chat"], "deepseek-chat does not reason, so it has no levels")
 	// The chip marks the models the catalog knows take images: only
 	// glm-5.3-flash does; deepseek-chat and deepseek-v4-pro are text-only.
-	require.Equal(t, []bool{true, false, false},
-		[]bool{got.Options[0].SupportsImages, got.Options[1].SupportsImages, got.Options[2].SupportsImages})
-	require.Equal(t, []string{"low", "high", "max"}, got.Options[2].Efforts)
+	require.True(t, images["glm-5.3-flash"])
+	require.False(t, images["deepseek-chat"])
+	require.False(t, images["deepseek-v4-pro"])
+	require.Equal(t, []string{"low", "high", "max"}, efforts["deepseek-v4-pro"])
 	publishedBefore := run.PrimaryModelSelection(runner)
 
 	// A conversation that does not exist yet reads the same model and options
@@ -6407,7 +6416,11 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	require.Equal(t, got.Provider, fresh.Provider)
 	require.Equal(t, got.Model, fresh.Model)
 	require.Len(t, fresh.Options, 3)
-	require.Equal(t, []string{"low", "high", "max"}, fresh.Options[0].Efforts)
+	freshEfforts := map[string][]string{}
+	for _, option := range fresh.Options {
+		freshEfforts[option.Model] = option.Efforts
+	}
+	require.Equal(t, []string{"low", "high", "max"}, freshEfforts["glm-5.3-flash"], "the new-chat chips read the same rows")
 	wrong := httptest.NewRecorder()
 	s.handleChatModelDefault(wrong, httptest.NewRequest(http.MethodPost, "/api/chat/model", nil))
 	require.Equal(t, http.StatusMethodNotAllowed, wrong.Code)
@@ -6508,8 +6521,9 @@ func TestChatSessionModelPutWithoutAnEffortPinsTheRowsConfiguredEffort(t *testin
 		return rec
 	}
 	// readModel is the GET as a picker reads it: the conversation's own effort
-	// and every option's configured one.
-	readModel := func() (effort string, defaults []string) {
+	// and every option's configured one, keyed by the model each row names so
+	// the display order's positions never enter the assertion.
+	readModel := func() (effort string, defaults map[string]string) {
 		t.Helper()
 		rec := modelCall(http.MethodGet, nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -6523,9 +6537,12 @@ func TestChatSessionModelPutWithoutAnEffortPinsTheRowsConfiguredEffort(t *testin
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 		require.Len(t, got.Options, 2)
-		require.Equal(t, []string{"low", "high", "max"}, got.Options[0].Efforts, "glm-5.3-flash keeps its own levels")
+		defaults = map[string]string{}
 		for _, option := range got.Options {
-			defaults = append(defaults, option.DefaultEffort)
+			defaults[option.Model] = option.DefaultEffort
+			if option.Model == "glm-5.3-flash" {
+				require.Equal(t, []string{"low", "high", "max"}, option.Efforts, "glm-5.3-flash keeps its own levels")
+			}
 		}
 		return got.Effort, defaults
 	}
@@ -6540,7 +6557,7 @@ func TestChatSessionModelPutWithoutAnEffortPinsTheRowsConfiguredEffort(t *testin
 	// 1. Each option states the effort a switch to it would pin: the row's
 	// configured one, and "" for a row that configures none.
 	_, defaults := readModel()
-	require.Equal(t, []string{"high", ""}, defaults)
+	require.Equal(t, map[string]string{"glm-5.3-flash": "high", "deepseek-v4-pro": ""}, defaults)
 
 	// 2. A switch that names no effort pins the configured one — the write, the
 	// answer and the session's row all agree, and none of them is a blank.
@@ -6564,7 +6581,7 @@ func TestChatSessionModelPutWithoutAnEffortPinsTheRowsConfiguredEffort(t *testin
 	cfg.Agents.Definitions["main"] = main
 	s.Env.AdoptConfig(&cfg)
 	effort, defaults = readModel()
-	require.Equal(t, []string{"max", ""}, defaults)
+	require.Equal(t, map[string]string{"glm-5.3-flash": "max", "deepseek-v4-pro": ""}, defaults)
 	require.Equal(t, "low", effort, "a stored level survives a settings change")
 
 	// 5. Picking the model again reads the new value: that is the one moment
