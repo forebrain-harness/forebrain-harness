@@ -1435,6 +1435,9 @@ export interface LlmModelRow {
   providerName: string
   custom: boolean
   model: string
+  /** The vendor listing's readable name for the model (`model_name`), the
+   *  wire id when the listing named none. Display only: edits keep `model`. */
+  modelName?: string
   baseUrl: string
   apiPath: string
   /** 「自定义协议」: requests go to the base URL as stored, no path appended. */
@@ -1488,6 +1491,8 @@ export interface LlmModelChoice {
   provider: string
   providerName: string
   model: string
+  /** The vendor listing's readable name, the wire id when it named none. */
+  modelName?: string
   baseUrl: string
   apiPath: string
   endpoint: string
@@ -1760,6 +1765,10 @@ export interface SessionModelOption {
    *  「火山方舟」 where the id says `volcengine`. */
   providerName?: string
   model: string
+  /** The vendor listing's readable name for the model (`model_name`), the
+   *  wire id when the listing named none. A picker shows this in place of
+   *  `model`; a pick still stores `model`/`id`. */
+  modelName?: string
   label: string
   /** The endpoint this row's requests go to: a picker shows the two to tell
    *  twin rows apart. Absent for a login-backed provider. */

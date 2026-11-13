@@ -67,8 +67,12 @@ type llmModelRow struct {
 	ProviderName string `json:"provider_name"`
 	Custom       bool   `json:"custom"`
 	Model        string `json:"model"`
-	BaseURL      string `json:"base_url"`
-	APIPath      string `json:"api_path"`
+	// ModelName is the vendor listing's readable name for Model, the wire id
+	// when the listing named none — mirroring provider/provider_name. The
+	// table shows it; identity and edits keep Model.
+	ModelName string `json:"model_name,omitempty"`
+	BaseURL   string `json:"base_url"`
+	APIPath   string `json:"api_path"`
 	// URLVerbatim is 「自定义协议」: requests go to BaseURL as stored.
 	URLVerbatim bool `json:"url_verbatim"`
 	// SubagentAllowed is the row's authorization switch (owner 2026-11-10):
@@ -157,15 +161,19 @@ type llmProviderEndpoint struct {
 // llmModelChoice is one entry of the one list every model picker reads: a
 // subagent's model, the memory settings, a new conversation's default.
 type llmModelChoice struct {
-	ID           string   `json:"id"`
-	Provider     string   `json:"provider"`
-	ProviderName string   `json:"provider_name"`
-	Model        string   `json:"model"`
-	BaseURL      string   `json:"base_url"`
-	APIPath      string   `json:"api_path"`
-	Endpoint     string   `json:"endpoint"`
-	Label        string   `json:"label"`
-	Efforts      []string `json:"efforts"`
+	ID           string `json:"id"`
+	Provider     string `json:"provider"`
+	ProviderName string `json:"provider_name"`
+	Model        string `json:"model"`
+	// ModelName is the vendor listing's readable name, the wire id when the
+	// listing named none — the name-only half of Label, mirroring
+	// provider/provider_name.
+	ModelName string   `json:"model_name"`
+	BaseURL   string   `json:"base_url"`
+	APIPath   string   `json:"api_path"`
+	Endpoint  string   `json:"endpoint"`
+	Label     string   `json:"label"`
+	Efforts   []string `json:"efforts"`
 	// DefaultEffort is the level this row itself is configured with (plan 300's
 	// ModelChoice.ConfiguredEffort, read as-is). A picker that lets one type
 	// override a row's effort shows what the row gets when it names none, so it
@@ -396,6 +404,7 @@ func (s *Server) llmModelRowOf(r *http.Request, scope llmModelScope, row state.L
 		ProviderName: name,
 		Custom:       custom,
 		Model:        row.Model,
+		ModelName:    firstNonBlank(llm.ListingDisplayName(row.Provider, row.Model), row.Model),
 		BaseURL:      row.BaseURL,
 		APIPath:      row.APIPath,
 		URLVerbatim:  row.URLVerbatim,
@@ -629,6 +638,7 @@ func (s *Server) handleLLMModelChoices(w http.ResponseWriter, r *http.Request) {
 			Provider:       choice.Provider,
 			ProviderName:   name,
 			Model:          choice.Model,
+			ModelName:      choice.ModelName,
 			BaseURL:        choice.BaseURL,
 			APIPath:        choice.APIPath,
 			Endpoint:       turn.ModelEndpointLabel(choice.BaseURL, choice.APIPath, choice.URLVerbatim),

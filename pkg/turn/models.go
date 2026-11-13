@@ -665,10 +665,16 @@ type ModelChoice struct {
 	// tells those rows apart.
 	ID string
 	// Label is what a picker shows and what a choice named before ids existed:
-	// "provider/model".
+	// "provider/model", with the vendor listing's display name in the model
+	// half when it carries one (FormatProviderModelDisplay).
 	Label    string
 	Provider string
 	Model    string
+	// ModelName is the name-only half of Label: the vendor listing's readable
+	// name, the wire id when the listing named none. Surfaces that render
+	// provider and model separately (the web model chip) show this instead of
+	// Model; identity and writes keep Model.
+	ModelName string
 	// BaseURL, APIPath and URLVerbatim are the endpoint this row's requests go
 	// to: the picker's description column shows it (ModelEndpointLabel), which
 	// is the other half of telling twin rows apart.
@@ -707,11 +713,16 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 		if provider == "" && model == "" {
 			continue
 		}
+		name := llm.ListingDisplayName(provider, model)
+		if name == "" {
+			name = model
+		}
 		choice := ModelChoice{
 			ID:          strings.TrimSpace(configured.ID),
-			Label:       llm.FormatProviderModel(provider, model),
+			Label:       llm.FormatProviderModelDisplay(provider, model),
 			Provider:    provider,
 			Model:       model,
+			ModelName:   name,
 			BaseURL:     strings.TrimSpace(configured.BaseURL),
 			APIPath:     strings.TrimSpace(configured.APIPath),
 			URLVerbatim: configured.URLVerbatim,

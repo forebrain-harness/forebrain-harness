@@ -278,7 +278,7 @@ func subagentRowModel(cfg *config.Root, agentID, name string, row *subagentRow, 
 		row.ModelProvider, row.Model, _ = strings.Cut(configured, "/")
 		row.ModelProvider = strings.TrimSpace(row.ModelProvider)
 		row.Model = strings.TrimSpace(row.Model)
-		row.ModelLabel = llm.FormatProviderModel(row.ModelProvider, row.Model)
+		row.ModelLabel = llm.FormatProviderModelDisplay(row.ModelProvider, row.Model)
 		return
 	}
 	if !slices.Contains(agent.PublicSubagentNames, name) {
@@ -304,7 +304,7 @@ func subagentRowModelFields(row *subagentRow, entry config.AgentLLMProviderConfi
 	row.ModelID = strings.TrimSpace(entry.ID)
 	row.ModelProvider = strings.TrimSpace(entry.Provider)
 	row.Model = strings.TrimSpace(entry.Model)
-	row.ModelLabel = llm.FormatProviderModel(entry.Provider, entry.Model)
+	row.ModelLabel = llm.FormatProviderModelDisplay(entry.Provider, entry.Model)
 	row.ModelEndpoint = turn.ModelEndpointLabel(entry.BaseURL, entry.APIPath, entry.URLVerbatim)
 }
 

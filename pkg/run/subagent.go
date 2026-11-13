@@ -4664,7 +4664,7 @@ func (w *subagentModelOverrideLLM) clientFor(override SubagentModelOverride) (ll
 }
 
 func subagentModelDisplay(override SubagentModelOverride) string {
-	return llm.FormatProviderModel(override.Provider, override.Model)
+	return llm.FormatProviderModelDisplay(override.Provider, override.Model)
 }
 
 // ConfiguredModelClient builds the client for one provider/model pair out of an

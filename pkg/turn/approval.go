@@ -987,7 +987,7 @@ type Model struct {
 // Display renders the model for a UI row or a confirmation line, in the same
 // "provider/model" form the rest of the UI uses.
 func (m Model) Display() string {
-	return llm.FormatProviderModel(m.Provider, m.Model)
+	return llm.FormatProviderModelDisplay(m.Provider, m.Model)
 }
 
 // Request is the bounded material for one review: the plan, and nothing else.

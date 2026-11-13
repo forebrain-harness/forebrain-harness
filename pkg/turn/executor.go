@@ -886,7 +886,7 @@ func chooseModel(ctx Context, value string) Result {
 		return Result{Handled: true, Reply: "That model is no longer configured for this agent."}
 	}
 	chosen := choices[at]
-	name := llm.FormatProviderModel(chosen.Provider, chosen.Model)
+	name := llm.FormatProviderModelDisplay(chosen.Provider, chosen.Model)
 	// A published live selection decides what "changed" means; a runtime
 	// that never published one diffs against the effective default.
 	changed := false
@@ -971,10 +971,10 @@ func chooseReasoningEffort(ctx Context, value string) Result {
 			// The switch was already reported; its effort stayed as it was.
 			return Result{Handled: true}
 		}
-		return Result{Handled: true, Reply: "Still using " + llm.FormatProviderModel(chosen.Provider, chosen.Model) + " at " + effort + " reasoning effort."}
+		return Result{Handled: true, Reply: "Still using " + llm.FormatProviderModelDisplay(chosen.Provider, chosen.Model) + " at " + effort + " reasoning effort."}
 	}
 	if err := ctx.Model.SelectModel(ctx.commandContext(), ctx.SessionID, chosen, &effort); err != nil {
-		return Result{Handled: true, Reply: modelSelectionFailureReply(llm.FormatProviderModel(chosen.Provider, chosen.Model), err)}
+		return Result{Handled: true, Reply: modelSelectionFailureReply(llm.FormatProviderModelDisplay(chosen.Provider, chosen.Model), err)}
 	}
 	return Result{Handled: true, Reply: "Reasoning effort set to " + effort + "."}
 }

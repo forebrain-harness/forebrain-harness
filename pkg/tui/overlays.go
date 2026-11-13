@@ -1508,7 +1508,7 @@ func (l planReviewList) rows(lead string, i int, model turn.PlanReviewModelOptio
 }
 
 func planReviewModelDisplay(provider, model string) string {
-	if label := llm.FormatProviderModel(provider, model); label != "" {
+	if label := llm.FormatProviderModelDisplay(provider, model); label != "" {
 		return label
 	}
 	return "the selected model"

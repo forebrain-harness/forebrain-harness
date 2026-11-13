@@ -2108,7 +2108,7 @@ func formatExitPlanModeStep(evt StepEvent, maxBytes int) (string, bool) {
 	if parsed.HandOffModel != nil && strings.TrimSpace(parsed.HandOffModel.Model) != "" {
 		// The card states where the plan went; how the tech lead runs the
 		// executor is the model-facing contract's business, not the card's.
-		return clampBody("Handed off to "+llm.FormatProviderModel(parsed.HandOffModel.Provider, parsed.HandOffModel.Model), maxBytes)
+		return clampBody("Handed off to "+llm.FormatProviderModelDisplay(parsed.HandOffModel.Provider, parsed.HandOffModel.Model), maxBytes)
 	}
 	body := strings.TrimSpace(parsed.Message)
 	if body == "" {

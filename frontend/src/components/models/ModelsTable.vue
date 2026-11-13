@@ -7,7 +7,7 @@
     :row-class="rowClass"
   >
     <template #cell-model="{ row }">
-      <span class="mname" data-testid="models-cell-model">{{ row.model }}</span>
+      <span class="mname" data-testid="models-cell-model">{{ row.modelName || row.model }}</span>
       <BadgeComponent v-if="row.isDefault" class="ml-1.5" data-testid="models-cell-default">{{ t('models.defaultBadge') }}</BadgeComponent>
       <span class="mprov">{{ providerLine(row) }}</span>
     </template>

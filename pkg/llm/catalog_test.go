@@ -791,3 +791,65 @@ func TestRegisterProviderFactoryAndBuiltinModels(t *testing.T) {
 		t.Fatalf("a provider without a factory answers ok=false err=nil, got ok=%t err=%v", ok, err)
 	}
 }
+
+// TestListingDisplayName pins the one source of a vendor display name: the
+// builtin table a listing installs, never the catalog. A listing that names
+// its models answers with that name; one that names none (volcengine's plan
+// table) answers "", and so does a pair only the catalog knows.
+func TestListingDisplayName(t *testing.T) {
+	installCatalogForOverrideTest(t, `{
+		"openai/gpt-4o": {"id":"openai/gpt-4o","name":"GPT-4o","limit":{"context":128000,"output":16384}}
+	}`)
+	SetBuiltinModels("qodercn", []Model{
+		{ID: "gfmodel", Name: "GLM-5.3-Flash"},
+		{ID: "noname"},
+		{ID: "blankname", Name: "   "},
+	})
+	t.Cleanup(func() { SetBuiltinModels("qodercn", nil) })
+	for _, tc := range []struct {
+		provider, model, want string
+	}{
+		{"qodercn", "gfmodel", "GLM-5.3-Flash"},
+		{"QODERCN", "GFMODEL", "GLM-5.3-Flash"}, // the table matches case-insensitively
+		{"qodercn", "noname", ""},
+		{"qodercn", "blankname", ""},
+		{"qodercn", "nosuchmodel", ""},
+		{"nosuchprovider", "gfmodel", ""},
+		{"openai", "gpt-4o", ""}, // the catalog's name is not a listing name
+		{"", "gfmodel", ""},
+		{"qodercn", "", ""},
+	} {
+		if got := ListingDisplayName(tc.provider, tc.model); got != tc.want {
+			t.Fatalf("ListingDisplayName(%q, %q) = %q, want %q", tc.provider, tc.model, got, tc.want)
+		}
+	}
+}
+
+// TestFormatProviderModelDisplay pins the human label: the vendor's display
+// name when the listing carries one, the wire id otherwise — including for
+// catalog rows, whose names must never reach the label (owner decision).
+func TestFormatProviderModelDisplay(t *testing.T) {
+	installCatalogForOverrideTest(t, `{
+		"openai/gpt-4o": {"id":"openai/gpt-4o","name":"GPT-4o","limit":{"context":128000,"output":16384}}
+	}`)
+	SetBuiltinModels("qodercn", []Model{
+		{ID: "gfmodel", Name: "GLM-5.3-Flash"},
+		{ID: "noname"},
+	})
+	t.Cleanup(func() { SetBuiltinModels("qodercn", nil) })
+	for _, tc := range []struct {
+		provider, model, want string
+	}{
+		{"qodercn", "gfmodel", "qodercn/GLM-5.3-Flash"},
+		{"qodercn", "noname", "qodercn/noname"},
+		{"openai", "gpt-4o", "openai/gpt-4o"}, // catalog name stays out of the label
+		{"volcengine", "glm-5.3-flash", "volcengine/glm-5.3-flash"},
+		{"", "gfmodel", "gfmodel"},
+		{"qodercn", "", "qodercn"},
+		{"", "", ""},
+	} {
+		if got := FormatProviderModelDisplay(tc.provider, tc.model); got != tc.want {
+			t.Fatalf("FormatProviderModelDisplay(%q, %q) = %q, want %q", tc.provider, tc.model, got, tc.want)
+		}
+	}
+}

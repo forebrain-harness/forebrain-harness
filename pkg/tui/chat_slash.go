@@ -197,13 +197,19 @@ func (s *ChatSession) ModelSummaryString() string {
 	if strings.TrimSpace(provider) == "" && strings.TrimSpace(model) == "" {
 		return "model: unavailable"
 	}
+	// The model half shows the vendor listing's readable name when it carries
+	// one, the wire id otherwise — the same rule CurrentModelOption follows.
+	name := llm.ListingDisplayName(provider, model)
+	if name == "" {
+		name = model
+	}
 	if strings.TrimSpace(provider) == "" {
-		return "model=" + strings.TrimSpace(model)
+		return "model=" + strings.TrimSpace(name)
 	}
 	if strings.TrimSpace(model) == "" {
 		return "provider=" + strings.TrimSpace(provider)
 	}
-	return strings.TrimSpace("provider=" + strings.TrimSpace(provider) + "\nmodel=" + strings.TrimSpace(model))
+	return strings.TrimSpace("provider=" + strings.TrimSpace(provider) + "\nmodel=" + strings.TrimSpace(name))
 }
 
 func (s *ChatSession) SkillListString() string {
@@ -233,7 +239,7 @@ func (s *ChatSession) SkillListString() string {
 }
 
 func (s *ChatSession) CurrentModelOption() string {
-	return llm.FormatProviderModel(s.currentModelNames())
+	return llm.FormatProviderModelDisplay(s.currentModelNames())
 }
 
 func (s *ChatSession) CurrentModelReasoningEffort() string {

@@ -925,6 +925,30 @@ func FormatProviderModel(provider, model string) string {
 	}
 }
 
+// ListingDisplayName is the readable name the vendor's own listing (the
+// builtin table a subscription plugin installs through SetBuiltinModels)
+// gives this model, "" when the listing named none. It reads only the builtin
+// table, never the catalog: catalog rows are reference data whose wire ids
+// are already readable and stay as they are (owner decision).
+func ListingDisplayName(provider, apiModel string) string {
+	if m, ok := builtinModel(provider, apiModel); ok {
+		return strings.TrimSpace(m.Name)
+	}
+	return ""
+}
+
+// FormatProviderModelDisplay is the human-facing label: the vendor's display
+// name when its listing carries one, the wire id otherwise. It has the same
+// "provider/model" shape as FormatProviderModel and is what every label a
+// person reads projects through; identity, parsing and model-facing text keep
+// FormatProviderModel (the wire id).
+func FormatProviderModelDisplay(provider, model string) string {
+	if name := ListingDisplayName(provider, model); name != "" {
+		return FormatProviderModel(provider, name)
+	}
+	return FormatProviderModel(provider, model)
+}
+
 func ParseProviderModelLabel(label string) (string, string) {
 	provider, model, ok := strings.Cut(strings.TrimSpace(label), "/")
 	if !ok {

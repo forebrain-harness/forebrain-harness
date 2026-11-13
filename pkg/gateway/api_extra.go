@@ -1823,13 +1823,17 @@ func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
 // catalog reports for it. The id is what tells twin rows of one provider/model
 // apart; the endpoint is what a picker has to show to tell them apart.
 type sessionModelOption struct {
-	ID       string   `json:"id"`
-	Provider string   `json:"provider"`
-	Model    string   `json:"model"`
-	Label    string   `json:"label"`
-	BaseURL  string   `json:"base_url,omitempty"`
-	APIPath  string   `json:"api_path,omitempty"`
-	Efforts  []string `json:"efforts"`
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	// ModelName is the vendor listing's readable name for Model, the wire id
+	// when the listing named none — the name-only half of Label, mirroring
+	// provider/provider_name. Identity and writes keep Model.
+	ModelName string   `json:"model_name"`
+	Label     string   `json:"label"`
+	BaseURL   string   `json:"base_url,omitempty"`
+	APIPath   string   `json:"api_path,omitempty"`
+	Efforts   []string `json:"efforts"`
 	// DefaultEffort is the effort a switch to this row pins when the request
 	// names none: the row's configured effort ("" when it configures none).
 	DefaultEffort  string `json:"default_effort"`
@@ -1892,6 +1896,7 @@ func (s *Server) sessionModelOptions(cfg *config.Root, agentName string) []sessi
 			ID:             choice.ID,
 			Provider:       choice.Provider,
 			Model:          choice.Model,
+			ModelName:      choice.ModelName,
 			Label:          choice.Label,
 			BaseURL:        choice.BaseURL,
 			APIPath:        choice.APIPath,

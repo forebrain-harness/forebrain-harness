@@ -53,6 +53,53 @@ describe('ModelChip', () => {
     expect(pro.find('[data-testid="model-supports-images"]').exists()).toBe(false)
   })
 
+  // The vendor listing's readable name is what a person reads: the chip and
+  // the menu show it in place of the wire id, while the option's test anchor
+  // keeps the wire id.
+  it('shows the vendor listing display name on the chip and in the menu', async () => {
+    const named: SessionModelOption[] = [
+      { id: 'm-qoder', provider: 'qodercn', model: 'gfmodel', modelName: 'GLM-5.3-Flash', label: 'qodercn/GLM-5.3-Flash', efforts: [] },
+    ]
+    const wrapper = mountChip({
+      selection: { modelId: 'm-qoder', provider: 'qodercn', model: 'gfmodel', effort: '' },
+      options: named,
+    })
+    const chip = wrapper.get('[data-testid="model-chip"]')
+    expect(chip.text()).toContain('GLM-5.3-Flash')
+    expect(chip.text()).not.toContain('gfmodel')
+
+    await chip.trigger('click')
+    const option = wrapper.get('[data-testid="model-option-gfmodel"]')
+    expect(option.text()).toContain('GLM-5.3-Flash')
+    expect(option.text()).not.toContain('gfmodel')
+  })
+
+  // A selection whose row the list no longer offers has no listing name to
+  // read: the wire id stands in, as it always did.
+  it('keeps the wire id when the selected row is not offered', () => {
+    const wrapper = mountChip({
+      selection: { modelId: 'gone', provider: 'qodercn', model: 'gfmodel', effort: '' },
+      options: [],
+    })
+    expect(wrapper.get('[data-testid="model-chip"]').text()).toContain('gfmodel')
+  })
+
+  // The filter matches the display name too: a person types what they read.
+  it('finds a model by its vendor display name in the filter', async () => {
+    const filler: SessionModelOption[] = Array.from({ length: 7 }, (_, i) => ({
+      id: `m-${i}`, provider: 'deepseek', model: `deepseek-m${i}`, label: `deepseek/deepseek-m${i}`, efforts: [],
+    }))
+    const named: SessionModelOption = {
+      id: 'm-qoder', provider: 'qodercn', model: 'gfmodel', modelName: 'GLM-5.3-Flash', label: 'qodercn/GLM-5.3-Flash', efforts: [],
+    }
+    const wrapper = mountChip({ options: [...filler, named] })
+    await wrapper.find('[data-testid="model-chip"]').trigger('click')
+    await wrapper.find('[data-testid="model-filter"]').setValue('glm-5.3')
+    const visible = wrapper.findAll('[data-testid^="model-option-"]')
+    expect(visible).toHaveLength(1)
+    expect(visible[0].attributes('data-testid')).toBe('model-option-gfmodel')
+  })
+
   it('opens the menu when something else asks it to', async () => {
     const wrapper = mountChip()
     expect(wrapper.find('[data-testid="model-option-deepseek-v4-flash"]').exists()).toBe(false)

@@ -1008,7 +1008,7 @@ func SanitizeEndpoint(raw string) string {
 // statusModelLine names the model. Nothing follows it: the name is the whole
 // answer, so no switch of any kind can be read off this line.
 func statusModelLine(provider, model string) string {
-	line := llm.FormatProviderModel(provider, model)
+	line := llm.FormatProviderModelDisplay(provider, model)
 	if line == "" {
 		line = "unknown"
 	}

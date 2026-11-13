@@ -494,6 +494,43 @@ func TestLLMModelsAPIChoicesCarryTheRowsConfiguredEffort(t *testing.T) {
 	require.Equal(t, "", efforts["deepseek-v4-flash"], "a row with no configured level answers empty, not a guess")
 }
 
+// The vendor listing's display name reaches the page's human-facing fields —
+// the table's model_name and the picker's label — while model stays the wire
+// id the edit form and a pick's identity use.
+func TestLLMModelsAPIShowsVendorListingDisplayName(t *testing.T) {
+	s, do := modelsPageServer(t)
+	llm.SetBuiltinModels("qodercn", []llm.Model{{ID: "gfmodel", Name: "GLM-5.3-Flash"}})
+	t.Cleanup(func() { llm.SetBuiltinModels("qodercn", nil) })
+	// The host test binary carries no qodercn plugin, so the row is not
+	// login-backed here and the upsert asks for a key; the display projection
+	// under test never reads it.
+	key := "sk-fixture"
+	id, err := process.UpsertLLMModel(context.Background(), s.Env.SQL, process.LLMModelInput{
+		Provider: "qodercn", Model: "gfmodel", BaseURL: "https://gateway.qoder.com.cn",
+		APIPath: "/algo/api/v2/service/pro/sse/agent_chat_generation",
+		APIKey:  &key, Source: "qodercn",
+	})
+	require.NoError(t, err)
+
+	rows, _ := llmModelRows(t, do)
+	row := llmModelByID(t, rows, id)
+	require.Equal(t, "gfmodel", row["model"], "identity stays the wire id")
+	require.Equal(t, "GLM-5.3-Flash", row["model_name"])
+
+	rec := do(http.MethodGet, "/api/llm-models/choices")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var choices []struct {
+		Model     string `json:"model"`
+		ModelName string `json:"model_name"`
+		Label     string `json:"label"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &choices))
+	require.Len(t, choices, 1)
+	require.Equal(t, "gfmodel", choices[0].Model)
+	require.Equal(t, "GLM-5.3-Flash", choices[0].ModelName)
+	require.Equal(t, "qodercn/GLM-5.3-Flash", choices[0].Label)
+}
+
 // The table's own store is what these endpoints write: a row created here must
 // be readable by the runtime's view (plan 260).
 func TestLLMModelsAPIWritesTheRuntimeView(t *testing.T) {

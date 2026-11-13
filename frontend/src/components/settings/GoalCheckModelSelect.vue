@@ -18,7 +18,7 @@
       <ModelSignature
         v-if="selected"
         class="gcs__sig"
-        :model="selected.model"
+        :model="selected.modelName || selected.model"
         :provider-name="selected.providerName"
       />
       <span v-else class="gcs__ph">{{ t('subagents.followPrimary') }}</span>
@@ -68,7 +68,7 @@
           </span>
           <ModelSignature
             class="gcs__opt-sig"
-            :model="choice.model"
+            :model="choice.modelName || choice.model"
             :provider-name="choice.providerName"
             :base-url="choice.baseUrl"
             :api-path="choice.apiPath"
@@ -116,7 +116,7 @@ const selected = computed(() => props.choices.find((choice) => choice.id === pro
 
 /** What the search box filters on: the three facts a row is told apart by. */
 const haystack = (choice: LlmModelChoice): string =>
-  [choice.model, choice.providerName, choice.baseUrl, choice.apiPath].join(' ').toLowerCase()
+  [choice.model, choice.modelName ?? '', choice.providerName, choice.baseUrl, choice.apiPath].join(' ').toLowerCase()
 
 const filtered = computed(() => {
   const needle = query.value.trim().toLowerCase()

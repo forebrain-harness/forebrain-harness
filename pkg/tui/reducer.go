@@ -1248,7 +1248,7 @@ func (r *Reducer) openPlanReviewCard(reviewID, provider, model string) *fanoutSt
 		StepID:       stepID,
 		Verb:         "review",
 		RunID:        r.activeRunID,
-		ReviewTarget: llm.FormatProviderModel(provider, model),
+		ReviewTarget: llm.FormatProviderModelDisplay(provider, model),
 		Tasks: []FanoutTaskState{{
 			Title:        "Plan review",
 			SubagentType: run.PlanReviewSubagentType,

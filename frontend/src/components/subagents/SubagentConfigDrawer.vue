@@ -39,7 +39,7 @@
             >
               <ModelSignature
                 v-if="selectedModel"
-                :model="selectedModel.model"
+                :model="selectedModel.modelName || selectedModel.model"
                 :provider-name="selectedModel.providerName ?? selectedModel.provider"
                 :base-url="selectedModel.baseUrl ?? ''"
                 :api-path="selectedModel.apiPath ?? ''"
@@ -54,7 +54,7 @@
               <SelectItem :value="EMPTY_CHOICE">{{ followLabel }}</SelectItem>
               <SelectItem v-for="option in modelChoices" :key="rowValue(option)" :value="rowValue(option)">
                 <ModelSignature
-                  :model="option.model"
+                  :model="option.modelName || option.model"
                   :provider-name="option.providerName ?? option.provider"
                   :base-url="option.baseUrl ?? ''"
                   :api-path="option.apiPath ?? ''"

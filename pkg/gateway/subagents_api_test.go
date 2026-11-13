@@ -12,6 +12,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
@@ -580,6 +581,50 @@ func TestSubagentModelOptions(t *testing.T) {
 
 	rec = f.do(t, http.MethodGet, "/api/agents/primary/nope/model-options", nil)
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}
+
+// The drawer's model menu and the subagent rows show the vendor listing's
+// display name: a configured row through the shared choice projection, and a
+// reference nothing resolves through the label fallback — both halves of
+// subagentRowModel. The wire id stays the identity a write stores.
+func TestSubagentModelSurfacesShowVendorListingDisplayName(t *testing.T) {
+	llm.SetBuiltinModels("qodercn", []llm.Model{
+		{ID: "gfmodel", Name: "GLM-5.3-Flash"},
+		{ID: "dmodel", Name: "DeepSeek-V4-Pro"},
+	})
+	t.Cleanup(func() { llm.SetBuiltinModels("qodercn", nil) })
+	f := newSubagentFixture(t, func(def *appcfg.AgentDefinition) {
+		def.LLMProviders = append(def.LLMProviders, appcfg.AgentLLMProviderConfig{Provider: "qodercn", Model: "gfmodel"})
+		def.Subagents = []appcfg.SubagentConfig{
+			{Name: "solo", Description: "d", SystemPrompt: "p", Model: "qodercn/gfmodel"},
+			{Name: "duo", Description: "d", SystemPrompt: "p", Model: "qodercn/dmodel"},
+		}
+	})
+
+	rec := f.do(t, http.MethodGet, "/api/agents/primary/main/model-options", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body struct {
+		Options []sessionModelOption `json:"options"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	var qoder *sessionModelOption
+	for i := range body.Options {
+		if body.Options[i].Provider == "qodercn" {
+			qoder = &body.Options[i]
+		}
+	}
+	require.NotNil(t, qoder, "the configured qodercn row is offered")
+	require.Equal(t, "gfmodel", qoder.Model)
+	require.Equal(t, "GLM-5.3-Flash", qoder.ModelName)
+	require.Equal(t, "qodercn/GLM-5.3-Flash", qoder.Label)
+
+	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	page := decodeSubagentPage(t, rec)
+	require.Equal(t, "qodercn/GLM-5.3-Flash", subagentRowByName(t, page.Rows, "solo").ModelLabel,
+		"a resolved row projects through the shared choice label")
+	require.Equal(t, "qodercn/DeepSeek-V4-Pro", subagentRowByName(t, page.Rows, "duo").ModelLabel,
+		"an unresolved reference still shows the listing's name")
 }
 
 // TestSubagentRowSwitchesDoNotLoseUpdates fires all four built-in row switches

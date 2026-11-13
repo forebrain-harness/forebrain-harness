@@ -51,7 +51,7 @@
             <Check v-if="isCurrent(option)" class="size-3.5" aria-hidden="true" />
           </span>
           <ModelSignature
-            :model="option.model"
+            :model="option.modelName || option.model"
             :provider-name="providerNameOf(option)"
             :base-url="option.baseUrl ?? ''"
             :api-path="option.apiPath ?? ''"
@@ -148,7 +148,14 @@ const providers = ref<import('@/lib/api').LlmProviderOption[]>([])
 const protocols = ref<{ apiPath: string; name: string }[]>([])
 const customId = ref('custom')
 
-const label = computed(() => props.selection?.model || t('chat.modelNone'))
+const label = computed(() => {
+  const selection = props.selection
+  if (!selection) return t('chat.modelNone')
+  // The chip reads the vendor listing's name through the option that is
+  // current; a selection whose row the list no longer offers keeps its wire id.
+  const current = props.options.find((option) => isCurrent(option))
+  return current?.modelName || selection.model || t('chat.modelNone')
+})
 
 /** Eight rows is where a list stops being scannable by eye. */
 const showFilter = computed(() => props.options.length >= 8)
@@ -157,7 +164,7 @@ const visibleOptions = computed(() => {
   const needle = filter.value.trim().toLowerCase()
   if (!needle) return props.options
   return props.options.filter((option) =>
-    [option.model, option.provider, option.baseUrl ?? '', option.apiPath ?? ''].some((value) =>
+    [option.model, option.modelName ?? '', option.label, option.provider, option.baseUrl ?? '', option.apiPath ?? ''].some((value) =>
       String(value).toLowerCase().includes(needle),
     ),
   )

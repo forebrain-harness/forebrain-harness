@@ -528,6 +528,23 @@ func TestModelChoicesKeepCatalogEffortLevels(t *testing.T) {
 	require.Equal(t, []string{"minimal", "low", "medium", "high"}, choices[0].ReasoningEfforts)
 }
 
+// The picker label shows the vendor's own listing name when the builtin
+// table carries one (qodercn's gfmodel is sold as GLM-5.3-Flash); the wire id
+// stays the identity a pick stores. Catalog reference rows keep their wire
+// ids — only a vendor listing's display name reaches the label.
+func TestModelChoicesShowsVendorListingDisplayName(t *testing.T) {
+	installRepoCatalog(t)
+	llm.SetBuiltinModels("qodercn", []llm.Model{{ID: "gfmodel", Name: "GLM-5.3-Flash"}})
+	t.Cleanup(func() { llm.SetBuiltinModels("qodercn", nil) })
+	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "qodercn", Model: "gfmodel"}}},
+	}}}
+	choices := ModelChoices(&cfg, "main")
+	require.Len(t, choices, 1)
+	require.Equal(t, "qodercn/GLM-5.3-Flash", choices[0].Label)
+	require.Equal(t, "gfmodel", choices[0].Model, "identity stays the wire id")
+}
+
 // A row's configured effort — the model page's 「思考强度」, folded into the
 // row's params by pkg/config — is what an effort-less pick pins, so a choice
 // that a picker marks「模型设置」must carry that same value. The engine's nil

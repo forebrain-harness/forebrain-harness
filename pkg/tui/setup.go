@@ -178,7 +178,7 @@ func mainLLMSummary(cfg *appcfg.Root) string {
 	if !v.Complete() {
 		return "Not configured."
 	}
-	if label := llm.FormatProviderModel(v.Provider, v.Model); label != "" {
+	if label := llm.FormatProviderModelDisplay(v.Provider, v.Model); label != "" {
 		return label
 	}
 	return "Configured."

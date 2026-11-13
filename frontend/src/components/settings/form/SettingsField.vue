@@ -76,7 +76,7 @@
         <SelectTrigger class="settings-input !h-auto min-h-[32px] py-1" :aria-label="t(labelKey)">
           <ModelSignature
             v-if="selectedChoice"
-            :model="selectedChoice.model"
+            :model="selectedChoice.modelName || selectedChoice.model"
             :provider-name="selectedChoice.providerName || selectedChoice.provider"
             :base-url="selectedChoice.baseUrl"
             :api-path="selectedChoice.apiPath"
@@ -87,7 +87,7 @@
           <SelectItem :value="EMPTY_CHOICE">{{ field.placeholder }}</SelectItem>
           <SelectItem v-for="choice in choices" :key="choice.id" :value="choice.id">
             <ModelSignature
-              :model="choice.model"
+              :model="choice.modelName || choice.model"
               :provider-name="choice.providerName || choice.provider"
               :base-url="choice.baseUrl"
               :api-path="choice.apiPath"
