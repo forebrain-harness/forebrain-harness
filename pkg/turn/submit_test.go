@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 )
 
 func TestSubmitOutcomes(t *testing.T) {
@@ -972,5 +976,282 @@ func TestSubmitWithoutConfigSyncKeepsWorking(t *testing.T) {
 	out, err := svc.Submit(context.Background(), TurnRequest{SessionID: "s1"}, nil)
 	if err != nil || out.Status != TurnCompleted || out.RunID != "run-plain" {
 		t.Fatalf("outcome = %#v, error = %v", out, err)
+	}
+}
+
+// openTurnRecordLog installs a real event log on a throwaway home and returns
+// a reader for every record Submit wrote, so the engine's own turn records are
+// asserted on what landed in the jsonl both surfaces read (the same approach
+// as pkg/telemetry's own tests).
+func openTurnRecordLog(t *testing.T) func() []map[string]any {
+	t.Helper()
+	root := t.TempDir()
+	log := telemetry.OpenEventLog(root, "test")
+	telemetry.SetDefaultEventLog(log)
+	t.Cleanup(func() {
+		telemetry.SetDefaultEventLog(nil)
+		_ = log.Close()
+	})
+	return func() []map[string]any {
+		files, err := filepath.Glob(filepath.Join(root, "logs", "*", "*.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var records []map[string]any
+		for _, path := range files {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if line == "" {
+					continue
+				}
+				var rec map[string]any
+				if err := json.Unmarshal([]byte(line), &rec); err != nil {
+					t.Fatalf("record is not JSON: %q", line)
+				}
+				if rec["kind"] == "turn" {
+					records = append(records, rec)
+				}
+			}
+		}
+		return records
+	}
+}
+
+// TestSubmitWritesTurnRecordsForEveryOutcome pins the engine as the one write
+// point for turn records: every outcome writes exactly one record per exit,
+// with the message, level and channel both surfaces share, and a failure's
+// error reaches the file redacted.
+func TestSubmitWritesTurnRecordsForEveryOutcome(t *testing.T) {
+	secret := "Bearer sk-live-turn-record-fixture"
+	tests := []struct {
+		name string
+		run  func(context.Context, TurnRequest, func(string)) (*agent.Result, error)
+		// want lists every turn record in order as "msg level".
+		want  []string
+		check func(t *testing.T, records []map[string]any)
+	}{
+		{
+			name: "completed",
+			run: func(_ context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+				started("run-1")
+				return &agent.Result{Parts: []llm.ContentPart{llm.Text("hello answer")}}, nil
+			},
+			want: []string{"turn started INFO", "turn completed INFO"},
+			check: func(t *testing.T, records []map[string]any) {
+				completed := records[len(records)-1]
+				attrs, _ := completed["attrs"].(map[string]any)
+				if attrs == nil || attrs["assistant_bytes"] != float64(len("hello answer")) {
+					t.Fatalf("completed record has no assistant_bytes: %v", completed)
+				}
+				if preview, _ := attrs["preview"].(string); preview != "hello answer" {
+					t.Fatalf("completed preview = %q, want the answer", preview)
+				}
+				if _, has := attrs["elapsed"]; !has {
+					t.Fatalf("completed record has no elapsed: %v", completed)
+				}
+			},
+		},
+		{
+			name: "completed without an answer omits the answer attrs",
+			run: func(_ context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+				started("run-1")
+				return &agent.Result{}, nil
+			},
+			want: []string{"turn started INFO", "turn completed INFO"},
+			check: func(t *testing.T, records []map[string]any) {
+				completed := records[len(records)-1]
+				attrs, _ := completed["attrs"].(map[string]any)
+				if attrs != nil {
+					if _, has := attrs["assistant_bytes"]; has {
+						t.Fatalf("silent run recorded assistant_bytes: %v", completed)
+					}
+					if _, has := attrs["preview"]; has {
+						t.Fatalf("silent run recorded a preview: %v", completed)
+					}
+				}
+			},
+		},
+		{
+			name: "cancelled",
+			run: func(_ context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+				started("run-1")
+				return nil, context.Canceled
+			},
+			want: []string{"turn started INFO", "turn cancelled INFO"},
+		},
+		{
+			name: "failed redacts the error",
+			run: func(_ context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+				started("run-1")
+				return nil, errors.New("provider refused: " + secret)
+			},
+			want: []string{"turn started INFO", "turn failed ERROR"},
+			check: func(t *testing.T, records []map[string]any) {
+				failed := records[len(records)-1]
+				if failed["err"] == nil || !strings.Contains(failed["err"].(string), "provider refused") {
+					t.Fatalf("failed record carries no error text: %v", failed)
+				}
+				if strings.Contains(failed["err"].(string), "sk-live-turn-record-fixture") {
+					t.Fatalf("the bearer token reached the record: %v", failed)
+				}
+				if !strings.Contains(failed["err"].(string), "Bearer [REDACTED]") {
+					t.Fatalf("no redaction marker in the record: %v", failed)
+				}
+			},
+		},
+		{
+			name: "waiting for approval",
+			run: func(_ context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+				started("run-1")
+				return nil, &WaitingError{
+					Request: &ToolApprovalRequest{ActionID: "act-1", RunID: "run-1"},
+					Resume:  &ApprovalResumeState{ActionID: "act-1"},
+				}
+			},
+			want: []string{"turn started INFO", "turn awaiting approval INFO"},
+			check: func(t *testing.T, records []map[string]any) {
+				waiting := records[len(records)-1]
+				attrs, _ := waiting["attrs"].(map[string]any)
+				if attrs == nil || attrs["action_id"] != "act-1" {
+					t.Fatalf("approval record has no action_id: %v", waiting)
+				}
+			},
+		},
+		{
+			name: "executor that never created a run still records a start without one",
+			run: func(context.Context, TurnRequest, func(string)) (*agent.Result, error) {
+				return nil, errors.New("executor failed before the run existed")
+			},
+			want: []string{"turn started INFO", "turn failed ERROR"},
+			check: func(t *testing.T, records []map[string]any) {
+				for _, rec := range records {
+					if run, has := rec["run"]; has && run != "" {
+						t.Fatalf("a record named a run the executor never created: %v", rec)
+					}
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			read := openTurnRecordLog(t)
+			svc := New(WithRunExecutor(runFunc(tt.run)))
+			out, _ := svc.Submit(context.Background(), TurnRequest{
+				SessionID: "sess-1",
+				Origin:    Origin{Surface: SurfaceWebChat, ChannelID: "webchat"},
+				RawInput:  "the user's own words",
+				UserText:  "the user's own words",
+			}, nil)
+			if out.RunID != "run-1" && tt.want[0] == "turn started INFO" && out.Status != TurnFailed {
+				t.Fatalf("outcome = %#v", out)
+			}
+			records := read()
+			var got []string
+			for _, rec := range records {
+				got = append(got, rec["msg"].(string)+" "+rec["lvl"].(string))
+			}
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Fatalf("records = %v, want %v", got, tt.want)
+			}
+			for _, rec := range records {
+				if rec["session"] != "sess-1" {
+					t.Fatalf("record session = %v, want sess-1: %v", rec["session"], rec)
+				}
+				attrs, _ := rec["attrs"].(map[string]any)
+				channel := ""
+				if attrs != nil {
+					channel, _ = attrs["channel"].(string)
+				}
+				if channel != "webchat" {
+					t.Fatalf("record channel = %q, want webchat: %v", channel, rec)
+				}
+			}
+			started := records[0]
+			attrs, _ := started["attrs"].(map[string]any)
+			if attrs == nil || attrs["input_bytes"] != float64(len("the user's own words")) {
+				t.Fatalf("started record has no input_bytes: %v", started)
+			}
+			if preview, _ := attrs["preview"].(string); preview != "the user's own words" {
+				t.Fatalf("started preview = %q", preview)
+			}
+			if tt.check != nil {
+				tt.check(t, records)
+			}
+		})
+	}
+}
+
+// TestTurnRecordIdentityComesFromTheRequestNotTheScope is the gateway's
+// detached-turn shape: the context carries a scope for some other session (or
+// none at all), and the record still names the request's own session, run and
+// channel, because the explicit attributes win over whatever the scope says.
+func TestTurnRecordIdentityComesFromTheRequestNotTheScope(t *testing.T) {
+	read := openTurnRecordLog(t)
+	telemetry.RegisterScope(func(context.Context) telemetry.Scope {
+		return telemetry.Scope{Project: "p-ctx", Session: "s-from-scope", Run: "r-from-scope"}
+	})
+	t.Cleanup(func() { telemetry.RegisterScope(nil) })
+
+	svc := New(WithRunExecutor(runFunc(func(_ context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+		started("run-from-executor")
+		return &agent.Result{}, nil
+	})))
+	if _, err := svc.Submit(context.Background(), TurnRequest{
+		SessionID: "sess-req",
+		Origin:    Origin{Surface: SurfaceChannel, ChannelID: "feishu"},
+		RawInput:  "via a channel",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	records := read()
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want 2 (started + completed): %v", len(records), records)
+	}
+	for _, rec := range records {
+		if rec["session"] != "sess-req" {
+			t.Fatalf("record session = %v, want sess-req from the request: %v", rec["session"], rec)
+		}
+		if rec["run"] != "run-from-executor" {
+			t.Fatalf("record run = %v, want the executor's run: %v", rec["run"], rec)
+		}
+		attrs, _ := rec["attrs"].(map[string]any)
+		channel, _ := attrs["channel"].(string)
+		if channel != "channel" {
+			t.Fatalf("record channel = %q, want the channel surface: %v", channel, rec)
+		}
+	}
+}
+
+// TestStartedRecordFallsBackToUserTextWhenThereIsNoRawInput pins the plain
+// message's shape: RawInput only carries the original text of a slash turn
+// (the expanded prompt lives in UserText/Parts), so a plain message's start
+// record sizes and previews the message itself rather than an empty string.
+func TestStartedRecordFallsBackToUserTextWhenThereIsNoRawInput(t *testing.T) {
+	read := openTurnRecordLog(t)
+	svc := New(WithRunExecutor(runFunc(func(_ context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+		started("run-plain")
+		return &agent.Result{}, nil
+	})))
+	if _, err := svc.Submit(context.Background(), TurnRequest{
+		SessionID: "sess-plain",
+		Origin:    Origin{Surface: SurfaceTUI},
+		UserText:  "a plain message, no separate raw form",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	records := read()
+	if len(records) == 0 {
+		t.Fatal("no turn records were written")
+	}
+	started := records[0]
+	attrs, _ := started["attrs"].(map[string]any)
+	if attrs == nil || attrs["input_bytes"] != float64(len("a plain message, no separate raw form")) {
+		t.Fatalf("started record did not size the message: %v", started)
+	}
+	if preview, _ := attrs["preview"].(string); preview != "a plain message, no separate raw form" {
+		t.Fatalf("started preview = %q, want the message", preview)
 	}
 }

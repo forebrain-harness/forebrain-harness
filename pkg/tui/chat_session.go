@@ -2298,9 +2298,6 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn started",
-		slog.String("session", sessionID), slog.String("channel", channel),
-		slog.Int("input_bytes", len(modelText)), slog.String("preview", llm.TruncateBytes(modelText, 512, "...")))
 	if s.hasPendingToolApproval() {
 		return nil
 	}
@@ -2515,8 +2512,6 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 				s.attachRunWaitForRequiresAction(rid, sessionID, channel, modelText, rae, t0)
 				s.emitPartialAssistantFromRAE(rae, streamAssistantViaTUI)
 				emitRunEnded = shouldEmitRunEndedOnRequiresAction(true)
-				telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn awaiting approval",
-					slog.String("session", sessionID), slog.String("run", rid), slog.String("action_id", rae.ActionID))
 				return nil
 			}
 		}
@@ -2540,8 +2535,6 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		// refusal results are already written, so this is a cancel's finish —
 		// no error card, the run ends cancelled.
 		if errors.Is(err, context.Canceled) || errors.Is(err, run.ErrTurnStoppedByRejection) {
-			telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn cancelled",
-				slog.String("session", sessionID), slog.String("elapsed", time.Since(t0).String()))
 			// Persist what the user already saw: completed tool calls/results
 			// (from the partial session capture) and the streamed partial
 			// assistant text/reasoning. Without this a cancelled run loses every
@@ -2564,16 +2557,15 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		// would repeat the same news twice.
 		var skillLoadErr *run.ExplicitSkillLoadError
 		if errors.As(err, &skillLoadErr) {
+			// Kept here rather than sunk into the engine (plan 307): a failed
+			// skill load happens before Submit, so the engine never saw this
+			// turn and has no record of it — this call is the only witness.
 			telemetry.Emit(ctx, slog.LevelError, "turn", "turn failed",
 				slog.String("session", sessionID), slog.String("skill", skillLoadErr.SkillName),
 				slog.String("elapsed", time.Since(t0).String()), slog.Any("err", err),
 				slog.String("reason", "skill_load"))
 			return err
 		}
-		// One record for the failure: the pair this replaces wrote the same
-		// sentence twice, once at Error and once at Debug (plan 285 §2).
-		telemetry.Emit(ctx, slog.LevelError, "turn", "turn failed",
-			slog.String("session", sessionID), slog.String("elapsed", time.Since(t0).String()), slog.Any("err", err))
 		explained := llm.ExplainError(err)
 		if !callerRendersReturnedError {
 			s.notifyUI(NewMessageMsg{Msg: Message{

@@ -635,12 +635,6 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 		s.persistRunEvent(context.Background(), s.turnCompletedEvent(sessionID, runID, completion.Duration))
 	}
 	hideFromForeground := false
-	elapsed := completion.Duration
-	// One record for a finished turn, not two: the pair this replaces wrote
-	// "turn ok" at Info and again at Debug (plan 285 §2).
-	telemetry.Emit(context.Background(), slog.LevelInfo, "turn", "turn completed",
-		slog.String("session", sessionID), slog.Int("assistant_bytes", len(outText)),
-		slog.String("elapsed", elapsed.String()), slog.String("preview", llm.TruncateBytes(outText, 512, "...")))
 	if strings.TrimSpace(outText) != "" && !streamAssistantViaTUI && !hideFromForeground {
 		if reasoningText != "" {
 			s.notifyUIForSession(sessionID, NewMessageMsg{Msg: Message{
@@ -954,6 +948,9 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 			OutputTokens:   runUsage.out,
 		})
 	}()
+	// Kept here rather than sunk into the engine (plan 307): "resumed" is the
+	// terminal's own UI state — re-attaching this surface to a run that is
+	// already going — and the engine has no corresponding fact to record.
 	telemetry.Emit(context.Background(), slog.LevelDebug, "turn", "turn resumed",
 		slog.String("label", v.logLabel), slog.String("session", p.SessionID),
 		slog.String("run", p.RunID), slog.String("action_id", actionID))
@@ -1060,9 +1057,6 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		// stopped it: the refusal results are already written, so this is a
 		// cancel's finish — no error card, the run ends cancelled (plan 129).
 		if errors.Is(err, context.Canceled) || errors.Is(err, run.ErrTurnStoppedByRejection) {
-			telemetry.Emit(context.Background(), slog.LevelInfo, "turn", "turn cancelled",
-				slog.String("label", v.logLabel), slog.String("session", p.SessionID),
-				slog.String("elapsed", time.Since(t0).String()))
 			// Persist any tool result replayed during this resume (e.g. an
 			// approved exit_plan_mode) before discarding the cancelled run.
 			// persistRequiresActionSnapshot left a dangling tool_calls row in
@@ -1085,9 +1079,6 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		// additional tool calls/results produced after the replay).
 		s.persistReplayResults(p.SessionID, runUsage.runID, replayCapture)
 		s.persistCancelledTurnOutcome(p.SessionID, runUsage.runID, completion)
-		telemetry.Emit(context.Background(), slog.LevelError, "turn", "turn failed",
-			slog.String("label", v.logLabel), slog.String("session", p.SessionID),
-			slog.String("elapsed", time.Since(t0).String()), slog.Any("err", err))
 		explained := llm.ExplainError(err)
 		s.notifyUI(NewMessageMsg{Msg: Message{
 			Kind:      MsgKindError,

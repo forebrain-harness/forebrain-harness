@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -2163,4 +2164,104 @@ func bareSlogCalls(fset *token.FileSet, body *ast.BlockStmt, rel string) []strin
 		return true
 	})
 	return calls
+}
+
+// TestOnlyTheEngineWritesTurnRecords keeps turn records a single write point:
+// the engine (pkg/turn) is the only writer of kind="turn" records, so the
+// terminal and the web cannot drift into two shapes for the same fact again
+// (plan 307 found exactly that — nine terminal writes, no gateway ones).
+//
+// The two exceptions are terminal facts the engine cannot know, and each is
+// matched by file and message, never by freeing a whole file: a "turn started"
+// added next to an allowed "turn failed" is still a violation.
+var turnRecordExceptions = map[string]string{
+	// A skill that failed to load ends the turn before Submit, so the engine
+	// never saw this turn; this call is the only record of it.
+	"pkg/tui/chat_session.go": "turn failed",
+	// Re-attaching this surface to a run that is already going is the
+	// terminal's own UI state; the engine has no matching fact.
+	"pkg/tui/chat_turn.go": "turn resumed",
+}
+
+func TestOnlyTheEngineWritesTurnRecords(t *testing.T) {
+	root := findRepoRoot(t)
+	fset := token.NewFileSet()
+	var violations []string
+	emitCalls := 0
+	err := filepath.WalkDir(filepath.Join(root, "pkg"), func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		file, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			return perr
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, ok := selector.X.(*ast.Ident)
+			if !ok || pkg.Name != "telemetry" || selector.Sel.Name != "Emit" {
+				return true
+			}
+			emitCalls++
+			if len(call.Args) < 4 {
+				violations = append(violations, fmt.Sprintf("%s:%d — malformed Emit", rel, fset.Position(call.Pos()).Line))
+				return true
+			}
+			if literalString(call.Args[2]) != "turn" {
+				return true
+			}
+			msg := literalString(call.Args[3])
+			if strings.HasPrefix(rel, "pkg/turn/") {
+				return true
+			}
+			if allowed, ok := turnRecordExceptions[rel]; ok && allowed == msg {
+				return true
+			}
+			violations = append(violations, fmt.Sprintf("%s:%d — %q", rel, fset.Position(call.Pos()).Line, msg))
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emitCalls == 0 {
+		t.Fatal("no telemetry.Emit call was walked; the guard would pass vacuously")
+	}
+	t.Logf("walked every non-test file under pkg/: %d telemetry.Emit calls, %d turn-record violations", emitCalls, len(violations))
+	if len(violations) > 0 {
+		sort.Strings(violations)
+		t.Fatalf("turn records have one writer, the engine (pkg/turn.Submit); a surface must not write its own:\n%s",
+			strings.Join(violations, "\n"))
+	}
+}
+
+// literalString reads a string literal argument; anything else (a variable, a
+// constant reference) reports "", which the caller treats as not the literal
+// being looked for.
+func literalString(expr ast.Expr) string {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return ""
+	}
+	value, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return ""
+	}
+	return value
 }

@@ -3,6 +3,7 @@ package turn
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 )
 
 var (
@@ -167,6 +169,29 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 			runID = id
 		}
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnStarted})
+		// The turn's own record, in the log both surfaces read. Identity comes
+		// from the request rather than the context's scope: the terminal's
+		// contexts carry one, the gateway's detached turns do not, and an
+		// explicit attribute wins over the scope either way, so every surface's
+		// records land with the same shape. A start the executor announced
+		// without a run (its early failure, below) still records, without a run
+		// attribute naming a run no store holds. The input previewed is what
+		// the person sent: the raw command for a slash turn, the plain message
+		// itself when there is no separate raw form.
+		input := req.RawInput
+		if input == "" {
+			input = req.UserText
+		}
+		startedAttrs := []slog.Attr{
+			slog.String("session", req.SessionID),
+			slog.String("channel", string(req.Origin.Surface)),
+			slog.Int("input_bytes", len(input)),
+			slog.String("preview", llm.TruncateBytes(input, 512, "...")),
+		}
+		if id := strings.TrimSpace(runID); id != "" {
+			startedAttrs = append(startedAttrs, slog.String("run", id))
+		}
+		telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn started", startedAttrs...)
 		// The execution's own state moves with the turn that made it: the
 		// engine committed the transition before the run existed, and the run
 		// now names the execution it belongs to. A turn that never got a run
@@ -232,6 +257,10 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		out.Approval = waiting.Request
 		out.Resume = waiting.Resume
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventApprovalReq})
+		telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn awaiting approval",
+			slog.String("session", req.SessionID), slog.String("run", runID),
+			slog.String("channel", string(req.Origin.Surface)),
+			slog.String("action_id", waiting.Request.ActionID))
 		return out, nil
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		s.autoContinue.turnEnded(ctx, req, runID, nil)
@@ -239,12 +268,21 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		out.Status = TurnCancelled
 		out.Error = err
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnCancelled})
+		telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn cancelled",
+			slog.String("session", req.SessionID), slog.String("run", runID),
+			slog.String("channel", string(req.Origin.Surface)),
+			slog.String("elapsed", time.Since(startedAt).String()))
 		return out, err
 	case err != nil:
 		out.Status = TurnFailed
 		out.Error = err
 		endBatch(state.TaskStatusFailed, "", err)
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnError})
+		telemetry.Emit(ctx, slog.LevelError, "turn", "turn failed",
+			slog.String("session", req.SessionID), slog.String("run", runID),
+			slog.String("channel", string(req.Origin.Surface)),
+			slog.String("elapsed", time.Since(startedAt).String()),
+			slog.Any("err", err))
 		// A turn stopped by a spent usage allowance is continued by the
 		// runtime once the allowance returns. It is decided here, below every
 		// surface, so the terminal and the web schedule, show and cancel the
@@ -257,6 +295,21 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		out.Status = TurnCompleted
 		out.Result = result
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnCompleted})
+		// The answer's size and preview come from the result the run produced
+		// (its text parts, nil-safe); a run that said nothing omits both rather
+		// than record an empty answer.
+		answer := result.TextContent()
+		completedAttrs := []slog.Attr{
+			slog.String("session", req.SessionID), slog.String("run", runID),
+			slog.String("channel", string(req.Origin.Surface)),
+			slog.String("elapsed", time.Since(startedAt).String()),
+		}
+		if answer != "" {
+			completedAttrs = append(completedAttrs,
+				slog.Int("assistant_bytes", len(answer)),
+				slog.String("preview", llm.TruncateBytes(answer, 512, "...")))
+		}
+		telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn completed", completedAttrs...)
 		return out, nil
 	}
 }
