@@ -786,14 +786,10 @@ type StatusReport struct {
 	LSP          string
 	Instructions []StatusInstruction
 	ConfigFiles  []string
-	// SkillOfferOff, when non-empty, is the rendered "off (setting)" line; the
-	// row appears only when the feature is off, because that is the only time
-	// the answer changes what the user does next.
-	SkillOfferOff string
-	Context       StatusContext
-	Session       StatusUsageTotals
-	LastTurn      StatusLastTurn
-	Work          StatusWork
+	Context      StatusContext
+	Session      StatusUsageTotals
+	LastTurn     StatusLastTurn
+	Work         StatusWork
 }
 
 // StatusRunStore is the run-store slice /status reads. It is the smallest
@@ -843,8 +839,6 @@ type StatusSource struct {
 	// ConfigFiles lists the config files the session's configuration was
 	// actually read from.
 	ConfigFiles []string
-	// SkillOffer is the resolved features.skill_offer value.
-	SkillOffer bool
 	// ContextUsage feeds the gauge: the same token count (the last API
 	// response's whole prompt) and the same budget options the surface's
 	// footer uses, so the two cannot disagree.
@@ -873,9 +867,6 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 		Sandbox:      strings.TrimSpace(src.Sandbox),
 		Instructions: src.Instructions,
 		ConfigFiles:  src.ConfigFiles,
-	}
-	if !src.SkillOffer {
-		rep.SkillOfferOff = "off (features.skill_offer)"
 	}
 	// Mode and phase come from the agent state store.
 	if st, err := state.Get(src.StateRoot, sid); err == nil {
@@ -1082,7 +1073,6 @@ func StatusFacts(rep StatusReport) []StatusFact {
 	}
 	add("Instructions", RenderInstructionsLine(rep.Instructions))
 	add("Config files", strings.Join(rep.ConfigFiles, ", "))
-	add("Skill offer", rep.SkillOfferOff)
 	return facts
 }
 

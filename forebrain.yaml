@@ -26,8 +26,8 @@ sandbox_workspace_write:
   # disabled leaves Go's environment unchanged.
   go_cache_mode: "isolated"
 
-# Managed-network features default to false; memories, skill offering, and
-# language servers default to true. Command rewriting, command-execution
+# Managed-network features default to false; memories and language servers
+# default to true. Command rewriting, command-execution
 # approvals and the request_permissions tool are always on and have no switch.
 features:
   # A boolean enables the managed proxy with default settings. The object form
@@ -52,8 +52,6 @@ features:
   # Default: true. Enables memory use, generation, tools, and /memories.
   # Explicitly disabled here; the memories: section below is then inert.
   memories: false
-  # Default: true. Shows the standing offer to capture a workflow as a skill.
-  skill_offer: true
   # Default: true. Master switch for language-server code intelligence; the
   # lsp: section below only takes effect while this is true.
   lsp: true

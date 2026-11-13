@@ -9281,7 +9281,6 @@ var settingsFieldList = []settingsField{
 		def: config.DefaultCronRetentionDays, rule: "1–3650 天"},
 
 	// 共享技能、语言服务器
-	{path: "features.skill_offer", section: "features", kind: settingsBool, def: true},
 	{path: "features.lsp", section: "features", kind: settingsBool, def: true},
 	{path: "lsp.recommendations", section: "lsp", kind: settingsBool, def: true},
 	{path: "lsp.diagnostics.after_edit", section: "lsp", kind: settingsBool, def: true},

@@ -2,7 +2,7 @@
   <!-- One settings tab built from the schema (plan 191 §4.1–§4.3): the groups
        the prototype draws for this tab, each with its own save bar, plus the
        toolbar switch a tab may carry — flipped and saved at once, the way the
-       language server and skill offer switches are (§0.7). -->
+       language server switch is (§0.7). -->
   <div class="grid gap-4" :data-tab="tab">
     <p v-if="form.loadError.value" class="text-[12px] text-[var(--forebrain-danger)]">{{ form.loadError.value }}</p>
 

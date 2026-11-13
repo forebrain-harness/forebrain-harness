@@ -94,7 +94,6 @@ func TestBuildStatusReportAssemblesThePanel(t *testing.T) {
 		MCP:          MCPInventorySource{Servers: []appcfg.MCPServerConfig{{Name: "docs"}}},
 		Permissions:  StatusPermissions{Preset: "Workspace", Matched: true, Rules: 3},
 		Sandbox:      "workspace-write · seatbelt",
-		SkillOffer:   true,
 	})
 	out := RenderStatusMarkdown(rep)
 
@@ -124,16 +123,11 @@ func TestBuildStatusReportAssemblesThePanel(t *testing.T) {
 	if strings.Contains(out, "secret") || strings.Contains(out, "key=k") {
 		t.Errorf("status markdown leaked endpoint credentials:\n%s", out)
 	}
-	// Skill offer on: the row is omitted entirely, not shown as "on".
-	if strings.Contains(out, "Skill offer") {
-		t.Errorf("an enabled skill offer must not render a row:\n%s", out)
-	}
 }
 
-// TestBuildStatusReportOmitsEmptyRowsAndNamesSkillOfferOff pins the R-json
-// sibling of the status panel: no placeholder rows, and the skill-offer row
-// exists only to name the switch that turned it off.
-func TestBuildStatusReportOmitsEmptyRowsAndNamesSkillOfferOff(t *testing.T) {
+// TestBuildStatusReportOmitsEmptyRows pins the R-json sibling of the status
+// panel: no placeholder rows.
+func TestBuildStatusReportOmitsEmptyRows(t *testing.T) {
 	out := RenderStatusMarkdown(BuildStatusReport(context.Background(), StatusSource{
 		StateRoot: t.TempDir(),
 		SessionID: "",
@@ -144,15 +138,6 @@ func TestBuildStatusReportOmitsEmptyRowsAndNamesSkillOfferOff(t *testing.T) {
 	if strings.Contains(out, "Work:") || strings.Contains(out, "Session: ") || strings.Contains(out, "Proxy:") {
 		t.Errorf("empty data must omit the row:\n%s", out)
 	}
-
-	off := RenderStatusMarkdown(BuildStatusReport(context.Background(), StatusSource{
-		StateRoot:  t.TempDir(),
-		SessionID:  "s1",
-		SkillOffer: false,
-	}))
-	if !strings.Contains(off, "Skill offer: off (features.skill_offer)") {
-		t.Errorf("the off row must name the setting:\n%s", off)
-	}
 }
 
 // TestStatusAgentLineOmitsTheDefaultMode pins what /status stays silent about:
@@ -162,7 +147,7 @@ func TestStatusAgentLineOmitsTheDefaultMode(t *testing.T) {
 	require.NoError(t, state.Set(stateRoot, "s1", state.State{Mode: state.ModeAgent}))
 	defaults := BuildStatusReport(context.Background(), StatusSource{
 		StateRoot: stateRoot, SessionID: "s1", AgentID: "main",
-		Provider: "openai", Model: "gpt-main", SkillOffer: true,
+		Provider: "openai", Model: "gpt-main",
 	})
 	if got := StatusAgentLine(defaults); got != "main" {
 		t.Fatalf("default agent line = %q, want the agent alone", got)
@@ -176,7 +161,7 @@ func TestStatusAgentLineOmitsTheDefaultMode(t *testing.T) {
 // conversation's report describes its own session and says so.
 func TestStatusSideConversationSaysWhoseSessionItIs(t *testing.T) {
 	out := RenderStatusMarkdown(BuildStatusReport(context.Background(), StatusSource{
-		StateRoot: t.TempDir(), SessionID: "side-1", Side: true, SkillOffer: true,
+		StateRoot: t.TempDir(), SessionID: "side-1", Side: true,
 	}))
 	if !strings.HasPrefix(out, "Session Status · side conversation") || !strings.Contains(out, "Session ID: side-1") {
 		t.Fatalf("side report:\n%s", out)

@@ -339,11 +339,10 @@ function memoryOn(draft: Record<string, unknown>): boolean {
 
 /**
  * A single switch drawn in its tab's toolbar and saved the moment it is flipped
- * — the language server and the skill offer (plan 191 §0.7).
+ * — the language server (plan 191 §0.7).
  */
 export const TOOLBAR_SWITCHES: Record<string, SettingsField> = {
   lsp: field('features.lsp', 'bool', { def: true }),
-  'shared-skills': field('features.skill_offer', 'bool', { def: true }),
 }
 
 /** The language server tab's parameter group, drawn in a modal. */

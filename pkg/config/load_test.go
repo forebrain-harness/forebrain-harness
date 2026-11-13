@@ -547,7 +547,7 @@ func TestForebrainYamlExampleStaysValid(t *testing.T) {
 		t.Fatalf("credentials example wrong: %+v", r.Credentials)
 	}
 	f := r.EffectiveFeatures()
-	if !f.Memories && r.Features.Memories == nil || !f.SkillOffer || !f.LSP {
+	if !f.Memories && r.Features.Memories == nil || !f.LSP {
 		t.Fatalf("features example resolved unexpectedly: %+v", f)
 	}
 	if srv := r.Agents.Defaults.MCPServers; len(srv) > 0 {

@@ -3,7 +3,6 @@ package run
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,7 +63,7 @@ func TestSkillCatalogIsInjectedAheadOfTheConversation(t *testing.T) {
 	writeCatalogSkill(t, root, "review-flow", "Review a change carefully")
 
 	inner := &catalogCapturingLLM{}
-	wrapped := wrapSkillCatalogLLM(inner, []string{root}, t.TempDir(), newPromptStateStore(t), nil)
+	wrapped := wrapSkillCatalogLLM(inner, []string{root}, t.TempDir(), newPromptStateStore(t))
 	ctx := llm.WithAgentSessionID(context.Background(), "s1")
 	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -95,7 +94,7 @@ func TestSkillCatalogIsFrozenForTheSession(t *testing.T) {
 	if err := sessions.Ensure(context.Background(), "s2", "second"); err != nil {
 		t.Fatal(err)
 	}
-	wrapped := wrapSkillCatalogLLM(inner, []string{root}, t.TempDir(), sessions, nil)
+	wrapped := wrapSkillCatalogLLM(inner, []string{root}, t.TempDir(), sessions)
 	ctx := llm.WithAgentSessionID(context.Background(), "s1")
 	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err != nil {
 		t.Fatal(err)
@@ -141,7 +140,7 @@ func TestSkillCatalogFreezeOutlivesTheProcess(t *testing.T) {
 	ctx := llm.WithAgentSessionID(context.Background(), "s1")
 
 	before := &catalogCapturingLLM{}
-	if _, err := wrapSkillCatalogLLM(before, []string{root}, stateRoot, sessions, nil).Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err != nil {
+	if _, err := wrapSkillCatalogLLM(before, []string{root}, stateRoot, sessions).Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -149,7 +148,7 @@ func TestSkillCatalogFreezeOutlivesTheProcess(t *testing.T) {
 	// same session then resumes against a brand-new runtime.
 	writeCatalogSkill(t, root, "second-skill", "Installed while the process was down")
 	after := &catalogCapturingLLM{}
-	if _, err := wrapSkillCatalogLLM(after, []string{root}, stateRoot, sessions, nil).Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("two"))}, nil); err != nil {
+	if _, err := wrapSkillCatalogLLM(after, []string{root}, stateRoot, sessions).Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("two"))}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if after.developer[0] != before.developer[0] {
@@ -164,7 +163,7 @@ func TestSkillCatalogIsFrozenForASessionlessRuntime(t *testing.T) {
 	writeCatalogSkill(t, root, "first-skill", "Present at the first call")
 
 	inner := &catalogCapturingLLM{}
-	wrapped := wrapSkillCatalogLLM(inner, []string{root}, t.TempDir(), nil, nil)
+	wrapped := wrapSkillCatalogLLM(inner, []string{root}, t.TempDir(), nil)
 	if _, err := wrapped.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -177,29 +176,10 @@ func TestSkillCatalogIsFrozenForASessionlessRuntime(t *testing.T) {
 	}
 }
 
-// With no skills there is no section at all, rather than an empty heading.
-// The skill-offer criteria join the same frozen block. Both tests below pin
-// the two properties the frozen prefix depends on: the criteria render even
-// with no skills installed, and a session never sees the block re-rendered.
-func TestSkillOfferGuidanceRendersWithZeroSkills(t *testing.T) {
-	inner := &catalogCapturingLLM{}
-	wrapped := wrapSkillCatalogLLM(inner, []string{t.TempDir()}, t.TempDir(), newPromptStateStore(t), func() string {
-		return skill.RenderSkillOfferGuidance(skill.SkillOfferGuidanceOptions{Enabled: true})
-	})
-	ctx := llm.WithAgentSessionID(context.Background(), "no-skills")
-	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
-		t.Fatal(err)
-	}
-	got := inner.developer[0]
-	if strings.Contains(got, "### Available skills") {
-		t.Fatalf("no skills are installed, yet a catalog listing appeared:\n%s", got)
-	}
-	if !strings.Contains(got, "/skill-generator") {
-		t.Fatalf("zero-skill session lost the offer criteria:\n%s", got)
-	}
-}
-
-func TestSkillOfferGuidanceJoinsTheFrozenBlock(t *testing.T) {
+// A new session's frozen catalog carries the installed skills and nothing
+// else. The same session's second request is checked too: the freeze must not
+// reintroduce a stale guidance section on a later turn.
+func TestSkillCatalogFreezesWithoutProposalGuidance(t *testing.T) {
 	root := t.TempDir()
 	writeCatalogSkill(t, root, "first-skill", "Present at session start")
 	sessions := newPromptStateStore(t)
@@ -207,9 +187,7 @@ func TestSkillOfferGuidanceJoinsTheFrozenBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	inner := &catalogCapturingLLM{}
-	wrapped := wrapSkillCatalogLLM(inner, []string{root}, t.TempDir(), sessions, func() string {
-		return skill.RenderSkillOfferGuidance(skill.SkillOfferGuidanceOptions{Enabled: true})
-	})
+	wrapped := wrapSkillCatalogLLM(inner, []string{root}, t.TempDir(), sessions)
 	ctx := llm.WithAgentSessionID(context.Background(), "s1")
 	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("one"))}, nil); err != nil {
 		t.Fatal(err)
@@ -217,32 +195,19 @@ func TestSkillOfferGuidanceJoinsTheFrozenBlock(t *testing.T) {
 	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("two"))}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if inner.developer[0] != inner.developer[1] {
-		t.Fatalf("the frozen block re-rendered within one session:\nfirst:\n%s\nsecond:\n%s",
-			inner.developer[0], inner.developer[1])
-	}
-	if !strings.Contains(inner.developer[0], "/skill-generator") {
-		t.Fatalf("frozen block lost the offer criteria:\n%s", inner.developer[0])
-	}
-}
-
-func TestSkillOfferGuidanceOffKeepsCatalogByteIdentical(t *testing.T) {
-	inner := &catalogCapturingLLM{}
-	wrapped := wrapSkillCatalogLLM(inner, []string{t.TempDir()}, t.TempDir(), newPromptStateStore(t), func() string {
-		return skill.RenderSkillOfferGuidance(skill.SkillOfferGuidanceOptions{Enabled: false})
-	})
-	ctx := llm.WithAgentSessionID(context.Background(), "offer-off")
-	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(inner.developer[0], "skill-generator") {
-		t.Fatalf("disabled offer leaked guidance into the frozen block:\n%s", inner.developer[0])
+	for i, got := range inner.developer {
+		if !strings.Contains(got, "first-skill") {
+			t.Fatalf("request %d lost the skill catalog:\n%s", i+1, got)
+		}
+		if strings.Contains(got, "Keeping "+"finished work") {
+			t.Fatalf("request %d froze deleted guidance into the catalog:\n%s", i+1, got)
+		}
 	}
 }
 
 func TestSkillCatalogIsSilentWithoutSkills(t *testing.T) {
 	inner := &catalogCapturingLLM{}
-	wrapped := wrapSkillCatalogLLM(inner, []string{t.TempDir()}, t.TempDir(), newPromptStateStore(t), nil)
+	wrapped := wrapSkillCatalogLLM(inner, []string{t.TempDir()}, t.TempDir(), newPromptStateStore(t))
 	ctx := llm.WithAgentSessionID(context.Background(), "s1")
 	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 		t.Fatal(err)
@@ -520,411 +485,6 @@ func TestSkillToolMatchesExplicitActivationByteForByte(t *testing.T) {
 func quoteJSON(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
-}
-
-// offerTestHarness builds a skillOfferLLM with every dependency under the
-// test's control, plus the inner capturing LLM.
-type offerTestHarness struct {
-	inner *capturingLLM
-	wrap  *skillOfferLLM
-	ctx   context.Context
-	state *tool.State
-	home  string
-	cfg   *appcfg.Root
-	sid   string
-}
-
-func newOfferHarness(t *testing.T) *offerTestHarness {
-	t.Helper()
-	home := t.TempDir()
-	cfg := &appcfg.Root{}
-	st := tool.NewState()
-	st.ReplaceLoadedSkillCatalog([]tool.LoadedSkill{{Name: skillOfferCommandName, RootDir: filepath.Join(home, ".forebrain", "skills", skillOfferCommandName)}})
-	h := &offerTestHarness{
-		inner: &capturingLLM{},
-		state: st,
-		home:  home,
-		cfg:   cfg,
-		sid:   "offer-session",
-	}
-	h.ctx = llm.WithAgentSessionID(context.Background(), h.sid)
-	h.rewrap()
-	return h
-}
-
-func (h *offerTestHarness) rewrap() {
-	// Trusted with a project root, and deliberately NOT version controlled: the
-	// VCS gate is gone (R6), so a trusted project needs no .git to receive the
-	// offer. The positive gate tests below therefore also prove the non-VCS
-	// path opens.
-	project := safety.ProjectContext{
-		Project:    safety.Project{Root: h.home},
-		TrustLevel: safety.LevelTrusted,
-	}
-	h.wrap = wrapSkillOfferLLM(h.inner, h.cfg, func() *tool.State { return h.state }, h.home, project).(*skillOfferLLM)
-}
-
-func (h *offerTestHarness) setFeature(enabled bool) {
-	off := enabled
-	h.cfg.Features.SkillOffer = &off
-}
-
-func offerToolCall(id, name string) llm.Message {
-	return llm.Message{
-		Role:  llm.RoleAssistant,
-		Parts: []llm.ContentPart{llm.Text("working")},
-		ToolCalls: []llm.ToolCall{{
-			ID:       id,
-			Type:     llm.ToolTypeFunction,
-			Function: llm.FunctionCall{Name: name, Arguments: "{}"},
-		}},
-	}
-}
-
-func offerToolResult(id, text string) llm.Message {
-	return llm.ToolResultMessage(id, llm.Text(text))
-}
-
-// runSegment builds the messages of one tool-driven run: a genuine user turn,
-// then alternating assistant tool-call batches and tool results.
-func runSegment(calls []struct {
-	id   string
-	name string
-	fail bool
-}) []llm.Message {
-	msgs := []llm.Message{llm.UserMessage(llm.Text("do the thing"))}
-	for i, c := range calls {
-		msgs = append(msgs, offerToolCall(c.id, c.name))
-		text := fmt.Sprintf("result %d", i)
-		if c.fail {
-			text = fmt.Sprintf("Error executing tool '%s': boom", c.name)
-		}
-		msgs = append(msgs, offerToolResult(c.id, text))
-	}
-	return msgs
-}
-
-// TestSkillOfferGateOpensOnBreadth pins the breadth branch and its exact
-// boundary: eight results across three tools open the gate, seven results do
-// not, eight results across two tools do not.
-func TestSkillOfferGateOpensOnBreadth(t *testing.T) {
-	build := func(n int, tools []string) []llm.Message {
-		calls := make([]struct {
-			id   string
-			name string
-			fail bool
-		}, 0, n)
-		for i := 0; i < n; i++ {
-			calls = append(calls, struct {
-				id   string
-				name string
-				fail bool
-			}{id: fmt.Sprintf("c%d", i), name: tools[i%len(tools)]})
-		}
-		return runSegment(calls)
-	}
-	threeTools := []string{"shell", "read_file", "write_file"}
-	twoTools := []string{"shell", "read_file"}
-
-	cases := []struct {
-		name   string
-		msgs   []llm.Message
-		inject bool
-	}{
-		{"eight results three tools", build(8, threeTools), true},
-		{"seven results three tools", build(7, threeTools), false},
-		{"eight results two tools", build(8, twoTools), false},
-		{"nine results three tools", build(9, threeTools), true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newOfferHarness(t)
-			if _, err := h.wrap.Execute(h.ctx, tc.msgs, nil); err != nil {
-				t.Fatal(err)
-			}
-			sent := h.inner.gotMsgs
-			injected := len(sent) > len(tc.msgs)
-			if injected != tc.inject {
-				t.Fatalf("injected=%d want %v\nlast message: %q", len(sent)-len(tc.msgs), tc.inject, llm.TextContent(sent[len(sent)-1].Parts...))
-			}
-			if tc.inject {
-				last := sent[len(sent)-1]
-				if !last.IsMeta || last.Role != llm.RoleUser {
-					t.Fatalf("reminder must be an IsMeta user message: %#v", last)
-				}
-				if !strings.Contains(llm.TextContent(last.Parts...), skillOfferMarker) {
-					t.Fatalf("reminder missing marker: %q", llm.TextContent(last.Parts...))
-				}
-			}
-		})
-	}
-}
-
-// TestSkillOfferGateOpensOnRecovery pins the depth branch: a failure the same
-// tool later recovered from opens the gate at five results, and stays shut at
-// four.
-func TestSkillOfferGateOpensOnRecovery(t *testing.T) {
-	calls := func(n int) []struct {
-		id   string
-		name string
-		fail bool
-	} {
-		out := make([]struct {
-			id   string
-			name string
-			fail bool
-		}, 0, n)
-		for i := 0; i < n; i++ {
-			c := struct {
-				id   string
-				name string
-				fail bool
-			}{id: fmt.Sprintf("c%d", i), name: "shell"}
-			if i == 0 {
-				c.fail = true
-			}
-			out = append(out, c)
-		}
-		return out
-	}
-	for _, tc := range []struct {
-		n      int
-		inject bool
-	}{{5, true}, {4, false}} {
-		h := newOfferHarness(t)
-		msgs := runSegment(calls(tc.n))
-		if _, err := h.wrap.Execute(h.ctx, msgs, nil); err != nil {
-			t.Fatal(err)
-		}
-		got := h.inner.gotMsgs
-		if got := len(got) - len(msgs); (got > 0) != tc.inject {
-			t.Fatalf("n=%d injected=%d want %v", tc.n, got, tc.inject)
-		}
-	}
-}
-
-// TestSkillOfferSuppressedWithoutAProjectRoot covers suppression 1: without a
-// project root the offer would name a command whose output has nowhere to land.
-// Version control is not the gate (R6) — a trusted project needs no .git; only
-// the absence of a root suppresses the offer.
-func TestSkillOfferSuppressedWithoutAProjectRoot(t *testing.T) {
-	h := newOfferHarness(t)
-	h.wrap.project = safety.ProjectContext{}
-	msgs := runSegment(breadthCalls(8, []string{"shell", "read_file", "write_file"}))
-	if _, err := h.wrap.Execute(h.ctx, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(h.inner.gotMsgs); got != len(msgs) {
-		t.Fatalf("injected %d reminders without a project root", got-len(msgs))
-	}
-}
-
-// TestSkillOfferSuppressedWhenFeatureOff covers suppression 2: the switch
-// turns off the proposing, not the command.
-func TestSkillOfferSuppressedWhenFeatureOff(t *testing.T) {
-	h := newOfferHarness(t)
-	h.setFeature(false)
-	msgs := runSegment(breadthCalls(8, []string{"shell", "read_file", "write_file"}))
-	if _, err := h.wrap.Execute(h.ctx, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(h.inner.gotMsgs); got != len(msgs) {
-		t.Fatalf("injected %d reminders with the feature off", got-len(msgs))
-	}
-}
-
-// TestSkillOfferSuppressedWhenGeneratorUnavailable covers suppression 3: a
-// disabled or missing generator skill means the proposed command does not
-// exist.
-func TestSkillOfferSuppressedWhenGeneratorUnavailable(t *testing.T) {
-	h := newOfferHarness(t)
-	h.state.ReplaceLoadedSkillCatalog(nil)
-	msgs := runSegment(breadthCalls(8, []string{"shell", "read_file", "write_file"}))
-	if _, err := h.wrap.Execute(h.ctx, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(h.inner.gotMsgs); got != len(msgs) {
-		t.Fatalf("injected %d reminders with the generator skill unavailable", got-len(msgs))
-	}
-}
-
-// TestSkillOfferSuppressedForSubagent covers suppression 4: proposals belong
-// to the main thread only.
-func TestSkillOfferSuppressedForSubagent(t *testing.T) {
-	h := newOfferHarness(t)
-	ctx := tool.WithForkChild(h.ctx, true)
-	msgs := runSegment(breadthCalls(8, []string{"shell", "read_file", "write_file"}))
-	if _, err := h.wrap.Execute(ctx, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(h.inner.gotMsgs); got != len(msgs) {
-		t.Fatalf("injected %d reminders in a fork child", got-len(msgs))
-	}
-
-	h2 := newOfferHarness(t)
-	ctx2 := tool.WithSubagentType(h.ctx, "explore")
-	if _, err := h2.wrap.Execute(ctx2, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(h2.inner.gotMsgs); got != len(msgs) {
-		t.Fatalf("injected %d reminders in a typed subagent", got-len(msgs))
-	}
-}
-
-// TestSkillOfferSuppressedForGeneratorRuns covers suppression 5: a run the
-// generator itself started must not propose generating.
-func TestSkillOfferSuppressedForGeneratorRuns(t *testing.T) {
-	h := newOfferHarness(t)
-	ctx := WithExplicitSkillSelection(h.ctx, skillOfferCommandName, "/tmp/whatever/SKILL.md")
-	msgs := runSegment(breadthCalls(8, []string{"shell", "read_file", "write_file"}))
-	if _, err := h.wrap.Execute(ctx, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(h.inner.gotMsgs); got != len(msgs) {
-		t.Fatalf("injected %d reminders during a generator run", got-len(msgs))
-	}
-}
-
-// TestSkillOfferSuppressedInPlanMode covers suppression 6: planned work has
-// not run yet.
-func TestSkillOfferSuppressedInPlanMode(t *testing.T) {
-	h := newOfferHarness(t)
-	setMode(t, h.home, h.sid, state.ModePlan, 0)
-	msgs := runSegment(breadthCalls(8, []string{"shell", "read_file", "write_file"}))
-	if _, err := h.wrap.Execute(h.ctx, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(h.inner.gotMsgs); got != len(msgs) {
-		t.Fatalf("injected %d reminders in plan mode", got-len(msgs))
-	}
-}
-
-// TestSkillOfferSuppressedOnceAlreadyOffered covers suppression 7 and the
-// compaction/resume story at once: the once-per-session rule reads the marker
-// out of the transcript-visible history, so any later request — next
-// iteration, post-compaction replacement, resumed session — that carries the
-// persisted reminder is left alone.
-func TestSkillOfferSuppressedOnceAlreadyOffered(t *testing.T) {
-	h := newOfferHarness(t)
-	msgs := runSegment(breadthCalls(8, []string{"shell", "read_file", "write_file"}))
-	if _, err := h.wrap.Execute(h.ctx, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	sent := h.inner.gotMsgs
-	if len(sent) != len(msgs)+1 {
-		t.Fatalf("first request must inject exactly one reminder, got %d", len(sent)-len(msgs))
-	}
-	// The next request of the same run: history plus the adopted reminder.
-	if _, err := h.wrap.Execute(h.ctx, sent, nil); err != nil {
-		t.Fatal(err)
-	}
-	second := h.inner.gotMsgs
-	if len(second) != len(sent) {
-		t.Fatalf("second request must not inject again: %d vs %d", len(second), len(sent))
-	}
-	// The strict-prefix invariant within one run: the second request is the
-	// first request's history with messages only appended.
-	if !offerStrictPrefix(sent, second) {
-		t.Fatal("second request is not a strict superset of the first in order")
-	}
-}
-
-// TestSkillOfferReminderAnchoredAcrossIterations pins the anchoring: every
-// request of a run sends the reminder at the same boundary, with the history
-// before it byte-identical.
-func TestSkillOfferReminderAnchoredAcrossIterations(t *testing.T) {
-	h := newOfferHarness(t)
-	msgs := runSegment(breadthCalls(8, []string{"shell", "read_file", "write_file"}))
-	if _, err := h.wrap.Execute(h.ctx, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	first := h.inner.gotMsgs
-	continued := append(append([]llm.Message{}, first...),
-		llm.AssistantMessage([]llm.ContentPart{llm.Text("done")}))
-	if _, err := h.wrap.Execute(h.ctx, continued, nil); err != nil {
-		t.Fatal(err)
-	}
-	second := h.inner.gotMsgs
-	if len(second) != len(continued) {
-		t.Fatalf("anchored reminder must not duplicate on iteration 2: %d vs %d", len(second), len(continued))
-	}
-	for i := range first {
-		if llm.TextContent(first[i].Parts...) != llm.TextContent(second[i].Parts...) ||
-			first[i].Role != second[i].Role || first[i].IsMeta != second[i].IsMeta {
-			t.Fatalf("iteration 2 moved or rewrote the history at %d", i)
-		}
-	}
-}
-
-// TestSkillOfferReminderGolden pins the exact bytes of the offer reminder.
-// The wording is the gate's judgment half: it must keep the marker (the
-// once-per-session rule reads it back from history) and must not drift back
-// to affirmative framing. Changing the text is a deliberate act that lands
-// in this file.
-func TestSkillOfferReminderGolden(t *testing.T) {
-	got := (&skillOfferLLM{}).reminder()
-	want := `Skill worth keeping - one-time note.
-
-This run tripped the skill-offer gate, but the gate measures length, not value: most long runs are one-off work and call for silence. When you finish this work, judge it against the skill criteria in your instructions: propose /skill-generator in a single sentence at the very end of your final message only if you can name concrete evidence the same procedure will recur; otherwise say nothing about it. This reminder applies to finishing the current work only - it appears once and is not a standing instruction for later turns.`
-	if got != want {
-		t.Fatalf("skill offer reminder drifted from the golden bytes:\n--- got ---\n%s\n--- want ---\n%s", got, want)
-	}
-	if strings.Contains(got, "%!") {
-		t.Fatalf("format verb leaked into the rendered reminder: %s", got)
-	}
-}
-
-func TestSkillOfferReminderCommandName(t *testing.T) {
-	if got := (&skillOfferLLM{commandName: "custom-namer"}).reminder(); !strings.Contains(got, "/custom-namer") {
-		t.Fatalf("custom command name missing: %q", got)
-	}
-}
-
-// TestSkillOfferSuppressedForRunsBelowTheGate pins the closed gate: a short,
-// single-tool run earns no reminder.
-func TestSkillOfferSuppressedForRunsBelowTheGate(t *testing.T) {
-	h := newOfferHarness(t)
-	msgs := runSegment(breadthCalls(3, []string{"read_file"}))
-	if _, err := h.wrap.Execute(h.ctx, msgs, nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(h.inner.gotMsgs); got != len(msgs) {
-		t.Fatalf("injected %d reminders for a short run", got-len(msgs))
-	}
-}
-
-func breadthCalls(n int, tools []string) []struct {
-	id   string
-	name string
-	fail bool
-} {
-	calls := make([]struct {
-		id   string
-		name string
-		fail bool
-	}, 0, n)
-	for i := 0; i < n; i++ {
-		calls = append(calls, struct {
-			id   string
-			name string
-			fail bool
-		}{id: fmt.Sprintf("c%d", i), name: tools[i%len(tools)]})
-	}
-	return calls
-}
-
-func offerStrictPrefix(prefix, whole []llm.Message) bool {
-	if len(prefix) > len(whole) {
-		return false
-	}
-	for i := range prefix {
-		if prefix[i].Role != whole[i].Role || prefix[i].IsMeta != whole[i].IsMeta ||
-			prefix[i].ToolCallID != whole[i].ToolCallID ||
-			llm.TextContent(prefix[i].Parts...) != llm.TextContent(whole[i].Parts...) {
-			return false
-		}
-	}
-	return true
 }
 
 // guardHarness builds the middleware over one skill root and runs tool calls
@@ -1250,7 +810,7 @@ func TestRunnerSkillRootsAgreeBetweenCatalogAndDiscovery(t *testing.T) {
 	// The catalog that enters the cached prefix describes the same set: a
 	// skill the model is not told about could never be chosen.
 	inner := &capturingLLM{}
-	wrapped := wrapSkillCatalogLLM(inner, want, workspace, newPromptStateStore(t), r.skillOfferGuidance)
+	wrapped := wrapSkillCatalogLLM(inner, want, workspace, newPromptStateStore(t))
 	ctx := llm.WithAgentSessionID(context.Background(), "roots-session")
 	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil); err != nil {
 		t.Fatal(err)

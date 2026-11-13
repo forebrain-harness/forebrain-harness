@@ -133,7 +133,6 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 		MCP:          s.mcpInventorySource(),
 		Instructions: instructions,
 		ConfigFiles:  turn.StatusConfigFiles(cfg, cr.MCPProjectStatus().ProjectRoot),
-		SkillOffer:   cfg.EffectiveFeatures().SkillOffer,
 		ContextUsage: func() (int, state.TokenBudgetOptions) {
 			used, _ := run.ContextOccupancy(context.Background(), s.sessStore(), sid)
 			return used, s.compactBudgetOptions()

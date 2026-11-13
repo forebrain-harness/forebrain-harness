@@ -724,8 +724,8 @@ const reminderRunCacheCap = 512
 // its cached prefix and only the appended tail is re-sent. The anchor caches
 // the reminder text first sent in a run together with the length and hash of
 // the history it was appended to; later iterations re-insert at that boundary
-// instead of re-deriving a position. Plan mode and the skill-offer gate share
-// the type because they need the identical guarantee for different reminders.
+// instead of re-deriving a position. Plan mode owns the reminder that needs
+// this guarantee today.
 type reminderRunAnchor struct {
 	mu       sync.Mutex
 	runCache map[string]reminderAnchorEntry
@@ -1402,9 +1402,9 @@ func buildOfficePlanImplementationReminder(planFile, kind string) string {
 }
 
 // reminderAdoptionSink is a context-scoped channel that lets the reminder
-// wrappers (plan mode, plan implementation, skill offer) hand the reminders
-// they injected into a request back to the enclosing tool-orchestration loop,
-// so the live session adopts them.
+// wrappers (plan mode, plan implementation) hand the reminders they injected
+// into a request back to the enclosing tool-orchestration loop, so the live
+// session adopts them.
 //
 // The reminder must enter the run's own message sequence rather than being
 // written to the transcript on its own, because the transcript has exactly one

@@ -149,11 +149,11 @@ describe('settingsSchema against the prototype', () => {
   it('reads the prototype at all', () => {
     expect(prototypeSource).toContain('const FORMS = {')
     expect(Object.keys(FORMS).length).toBeGreaterThan(0)
-    // Every literal `F('<path>'` call in the prototype — 34 of them since plan
-    // 195 added the peers switch — plus the ones spelled with the WS/WF/CI/GR/TE
-    // shorthands: every one of them is a row the page must draw.
+    // Every literal `F('<path>'` call in the prototype — 33 of them after the
+    // obsolete switch was removed — plus the ones spelled with the
+    // WS/WF/CI/GR/TE shorthands: every one of them is a row the page must draw.
     const literal = (prototypeSource.match(/F\('/g) ?? []).length
-    expect(literal).toBe(34)
+    expect(literal).toBe(33)
     expect(ALL_SETTINGS_FIELDS.length).toBe(
       Object.values(FORMS)
         .flatMap((groups) => groups.flatMap((group) => group.fields))

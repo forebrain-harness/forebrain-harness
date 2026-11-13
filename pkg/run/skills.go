@@ -1,5 +1,5 @@
 // Skills in a run: the prompt catalog, explicit activation, the command bridge,
-// the offer gate, and the write guard.
+// and the write guard.
 package run
 
 import (
@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
@@ -51,12 +50,6 @@ type skillCatalogLLM struct {
 	// mid-session, and why the freeze belongs to the session rather than to
 	// this process.
 	sessions *state.SessionStore
-	// offerGuidance renders the standing skill-offer criteria appended to the
-	// catalog inside the same frozen developer block: one more paragraph in a
-	// block that was already frozen per session, so the prefix gains neither
-	// blocks nor entries. Nil, or a function returning "", means the feature
-	// is off and nothing is appended.
-	offerGuidance func() string
 	// renderOnce freezes one catalog for a runtime that keeps no session state
 	// at all — a hook, an isolated run. There is no next session for those, so
 	// one render for the life of the runtime is both the most stable answer
@@ -65,29 +58,16 @@ type skillCatalogLLM struct {
 	rendered   string
 }
 
-func wrapSkillCatalogLLM(inner llm.LLM, roots []string, stateRoot string, sessions *state.SessionStore, offerGuidance func() string) llm.LLM {
+func wrapSkillCatalogLLM(inner llm.LLM, roots []string, stateRoot string, sessions *state.SessionStore) llm.LLM {
 	if inner == nil || len(roots) == 0 {
 		return inner
 	}
 	return &skillCatalogLLM{
-		inner:         inner,
-		roots:         append([]string(nil), roots...),
-		stateRoot:     strings.TrimSpace(stateRoot),
-		sessions:      sessions,
-		offerGuidance: offerGuidance,
+		inner:     inner,
+		roots:     append([]string(nil), roots...),
+		stateRoot: strings.TrimSpace(stateRoot),
+		sessions:  sessions,
 	}
-}
-
-// skillOfferGuidance renders the standing skill-offer criteria for this
-// runtime, honoring the features.skill_offer switch. wrapSkillCatalogLLM calls
-// it once per session render, so the frozen block reads the config live rather
-// than a snapshot taken at wrap time.
-func (r *Runner) skillOfferGuidance() string {
-	enabled := true
-	if r != nil && r.Config() != nil {
-		enabled = r.Config().EffectiveFeatures().SkillOffer
-	}
-	return skill.RenderSkillOfferGuidance(skill.SkillOfferGuidanceOptions{Enabled: enabled})
 }
 
 func (w *skillCatalogLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
@@ -148,10 +128,7 @@ func (w *skillCatalogLLM) renderFrozen() string {
 	return w.rendered
 }
 
-// render walks the skill roots and renders the catalog for what is on disk now,
-// then appends the standing skill-offer criteria. The criteria render even for
-// a session with no skills at all: the catalog is empty there, but the model
-// still needs the judgment to notice work worth keeping.
+// render walks the skill roots and renders the catalog for what is on disk now.
 func (w *skillCatalogLLM) render() string {
 	catalog, err := skill.Catalog(w.roots, w.stateRoot)
 	if err != nil {
@@ -160,17 +137,7 @@ func (w *skillCatalogLLM) render() string {
 		slog.Debug("skill catalog: render failed", "err", err)
 		catalog = ""
 	}
-	return strings.TrimSpace(catalog + "\n\n" + w.offerGuidanceSection())
-}
-
-// offerGuidanceSection renders the skill-offer criteria, or "" when the
-// feature is off. The catalog itself renders "" for zero skills; the two are
-// kept independent so the criteria never depend on the installed set.
-func (w *skillCatalogLLM) offerGuidanceSection() string {
-	if w == nil || w.offerGuidance == nil {
-		return ""
-	}
-	return strings.TrimSpace(w.offerGuidance())
+	return strings.TrimSpace(catalog)
 }
 
 // SkillToolInput names the skill to load. It carries a free-form string and
@@ -622,259 +589,6 @@ type SkillCommandHooks struct {
 	Refresh func(home, workspace string, launch safety.ProjectContext) error
 	// IsBuiltin reports whether name collides with a builtin slash command.
 	IsBuiltin func(name string) bool
-}
-
-// skillOfferMarker is the phrase the injected offer reminder carries. The
-// once-per-session rule reads it back out of the transcript-visible messages,
-// so a reminder persists across requests, resumes, and compactions exactly the
-// way the plan-mode reminders do.
-const skillOfferMarker = "Skill worth keeping"
-
-// skillOfferCommandName is the skill whose slash command the reminder names.
-// It must be the name the generator skill is installed under: the command the
-// model proposes only exists while that skill does (see the availability
-// suppression below).
-const skillOfferCommandName = skill.DefaultSkillOfferCommand
-
-// Gate thresholds. They deliberately sit in one place: real-machine acceptance
-// tunes them against actual noise, and nothing else may restate them.
-const (
-	// skillOfferMinToolResults and skillOfferMinDistinctTools are the
-	// breadth branch: enough steps, drawn from enough tools, that the run is
-	// unlikely to be a single lookup.
-	skillOfferMinToolResults   = 8
-	skillOfferMinDistinctTools = 3
-	// skillOfferRecoveredMinToolResults is the depth branch: fewer steps, but
-	// the run hit a failure and found its way past it — exactly the knowledge
-	// that is hardest to rediscover.
-	skillOfferRecoveredMinToolResults = 5
-)
-
-// skillOfferLLM is the gate around the conversation: the standing criteria in
-// the frozen catalog decide what is worth keeping, and this wrapper decides
-// whether this run has earned the question. The division is deliberate — the
-// gate counts what it can count (tool results, distinct tools, recovered
-// failures, one reminder already in the history) and never judges whether the
-// work itself deserves a skill; that judgment stays with the model, which can
-// still stay silent when the gate is open.
-//
-// Everything the gate knows is derived from msgs and ctx, never from runtime
-// state: counting on the transcript-visible slice is what keeps the decision
-// drift-free after compaction and correct after a resume, the same property
-// analyzePlanReminders bought the plan-mode reminders.
-type skillOfferLLM struct {
-	inner llm.LLM
-	// appCfg carries the features.skill_offer switch. Nil reads as defaults.
-	appCfg *appcfg.Root
-	// loadedSkills resolves the loaded-skill catalog at call time. The
-	// generator skill must be in it: if the skill is unavailable, or turned
-	// off from /skills, its command is gone and a proposal would name
-	// something that cannot run. It is a getter because the catalog is owned
-	// by the tool state, which is built later in the same Load that wraps this
-	// chain — capturing the pointer at wrap time would pin nil or a stale one.
-	loadedSkills func() *tool.State
-	// stateRoot resolves the session mode, so an offer is not proposed while
-	// the session is planning — work still in plan mode has not run yet.
-	stateRoot string
-	// project is the frozen launch project. An offer proposes writing into the
-	// project's skills directory; without a version-controlled project root
-	// there is nowhere to write and the proposal is an empty promise.
-	project safety.ProjectContext
-	// commandName is the slash command the reminder names. Blank falls back to
-	// skillOfferCommandName.
-	commandName string
-	anchor      *reminderRunAnchor
-}
-
-func wrapSkillOfferLLM(inner llm.LLM, appCfg *appcfg.Root, loadedSkills func() *tool.State, stateRoot string, project safety.ProjectContext) llm.LLM {
-	if inner == nil {
-		return nil
-	}
-	return &skillOfferLLM{
-		inner:        inner,
-		appCfg:       appCfg,
-		loadedSkills: loadedSkills,
-		stateRoot:    strings.TrimSpace(stateRoot),
-		project:      project,
-		anchor:       newReminderRunAnchor(),
-	}
-}
-
-func (w *skillOfferLLM) Execute(ctx context.Context, msgs []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
-	if w.suppressed(ctx, msgs) {
-		return w.inner.Execute(ctx, msgs, tools)
-	}
-	runID := strings.TrimSpace(tool.RunIDFromContext(ctx))
-	reminder, insertAt := w.anchor.anchor(runID, msgs, w.reminder())
-	message := planReminderMessage(reminder)
-	// The anchor may already hold this exact reminder because the loop adopted
-	// it on an earlier iteration; a second copy would send the same paragraph
-	// twice and break the append-only prefix the anchor preserves.
-	if insertAt < len(msgs) && planReminderMessagesEqual(msgs[insertAt], message) {
-		return w.inner.Execute(ctx, msgs, tools)
-	}
-	recordReminderAdoption(ctx, message, insertAt)
-	return w.inner.Execute(ctx, insertPlanReminderMessage(msgs, message, insertAt), tools)
-}
-
-// suppressed reports whether this request must not carry an offer reminder.
-// Every condition is a hard suppression from the design: any one of them makes
-// a proposal either impossible to act on or explicitly unwanted.
-func (w *skillOfferLLM) suppressed(ctx context.Context, msgs []llm.Message) bool {
-	if w == nil || w.inner == nil {
-		return true
-	}
-	// features.skill_offer off: the switch turns off the proposing, not the
-	// command — /skill-generator itself keeps working.
-	if !w.appCfg.EffectiveFeatures().SkillOffer {
-		return true
-	}
-	// No project root: there is no project skills directory to write into, so
-	// the proposal could not be kept. Version control is not required (R6): a
-	// trusted project needs no .git to hold skills.
-	if strings.TrimSpace(w.project.Project.Root) == "" {
-		return true
-	}
-	// The generator skill unavailable or disabled: its command is gone, so
-	// there is nothing for the user to accept with.
-	if w.loadedSkills == nil {
-		return true
-	}
-	if _, available := loadedSkillByName(w.loadedSkills(), skillOfferCommandName); !available {
-		return true
-	}
-	// Proposals belong to the main thread. A subagent or fork child's output
-	// belongs to its own view, and the parent would never see the offer.
-	if tool.IsForkChildFromContext(ctx) || strings.TrimSpace(tool.SubagentTypeFromContext(ctx)) != "" {
-		return true
-	}
-	// A run the generator itself started must not propose generating.
-	if selections, ok := explicitSkillSelectionsFromContext(ctx); ok {
-		for _, selection := range selections {
-			if skill.NormalizeToken(selection.SkillName) == skill.NormalizeToken(skillOfferCommandName) {
-				return true
-			}
-		}
-	}
-	// One offer per session: the marker in any persisted reminder counts.
-	if skillOfferAlreadyInHistory(msgs) {
-		return true
-	}
-	// Plan mode: planned work has not run yet, so there is nothing finished to
-	// keep. Checked late because it is the one suppression that touches disk.
-	if w.inPlanMode(ctx) {
-		return true
-	}
-	// The gate itself: enough evidence that this run carried real work.
-	sig := analyzeSkillOfferSignals(msgs)
-	broad := sig.toolResults >= skillOfferMinToolResults && sig.distinctTools >= skillOfferMinDistinctTools
-	recovered := sig.recoveredFailure && sig.toolResults >= skillOfferRecoveredMinToolResults
-	return !broad && !recovered
-}
-
-// inPlanMode reports whether the session driving this request is currently in
-// plan mode.
-func (w *skillOfferLLM) inPlanMode(ctx context.Context) bool {
-	sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
-	if sid == "" || w.stateRoot == "" {
-		return false
-	}
-	st, err := state.Get(w.stateRoot, sid)
-	if err != nil {
-		// An unreadable mode cannot rule out plan mode, and an offer made
-		// during planning is exactly the one the design forbids.
-		return true
-	}
-	return st.Mode == state.ModePlan
-}
-
-// reminder renders the offer reminder. It is turn-scoped and self-terminating:
-// it asks the model to judge the work it is finishing now, and says outright
-// that it will not recur, so the persisted reminder never becomes a standing
-// voice nagging every later turn.
-func (w *skillOfferLLM) reminder() string {
-	command := strings.TrimSpace(w.commandName)
-	if command == "" {
-		command = skillOfferCommandName
-	}
-	return fmt.Sprintf(`%s - one-time note.
-
-This run tripped the skill-offer gate, but the gate measures length, not value: most long runs are one-off work and call for silence. When you finish this work, judge it against the skill criteria in your instructions: propose /%s in a single sentence at the very end of your final message only if you can name concrete evidence the same procedure will recur; otherwise say nothing about it. This reminder applies to finishing the current work only - it appears once and is not a standing instruction for later turns.`,
-		skillOfferMarker, command)
-}
-
-// skillOfferSignals is what the gate reads out of the transcript-visible
-// messages.
-type skillOfferSignals struct {
-	// toolResults counts the tool result messages of the current run segment.
-	toolResults int
-	// distinctTools counts how many different tools those results answered.
-	distinctTools int
-	// recoveredFailure records that a tool failed and the same tool later
-	// succeeded: knowledge bought twice, and the cheapest real signal of work
-	// that was not straightforward.
-	recoveredFailure bool
-	// alreadyOffered records that a reminder is already in the history.
-	alreadyOffered bool
-}
-
-// analyzeSkillOfferSignals derives the gate's signals from msgs alone. The
-// current run segment is everything after the last genuine (non-meta) user
-// message: the turns the user is actually watching, not the accumulated
-// history. Deriving from the slice rather than from runtime counters is what
-// makes the decision identical after a compaction and after a resume.
-func analyzeSkillOfferSignals(msgs []llm.Message) skillOfferSignals {
-	var sig skillOfferSignals
-	segmentStart := 0
-	for i, m := range msgs {
-		if m.Role == llm.RoleUser && !m.IsMeta {
-			segmentStart = i + 1
-		}
-		if m.Role == llm.RoleUser && m.IsMeta && strings.Contains(llm.TextContent(m.Parts...), skillOfferMarker) {
-			sig.alreadyOffered = true
-		}
-	}
-	nameByCallID := make(map[string]string)
-	distinct := make(map[string]struct{})
-	failed := make(map[string]bool)
-	for i := segmentStart; i < len(msgs); i++ {
-		m := msgs[i]
-		switch m.Role {
-		case llm.RoleAssistant:
-			for _, tc := range m.ToolCalls {
-				if id := strings.TrimSpace(tc.ID); id != "" {
-					nameByCallID[id] = strings.TrimSpace(tc.Function.Name)
-				}
-			}
-		case llm.RoleTool:
-			sig.toolResults++
-			name := nameByCallID[strings.TrimSpace(m.ToolCallID)]
-			if name == "" {
-				continue
-			}
-			if _, ok := distinct[name]; !ok {
-				distinct[name] = struct{}{}
-				sig.distinctTools++
-			}
-			if strings.HasPrefix(llm.TextContent(m.Parts...), fmt.Sprintf("Error executing tool '%s':", name)) {
-				failed[name] = true
-			} else if failed[name] {
-				sig.recoveredFailure = true
-			}
-		}
-	}
-	return sig
-}
-
-// skillOfferAlreadyInHistory reports whether a persisted offer reminder is
-// already part of the conversation.
-func skillOfferAlreadyInHistory(msgs []llm.Message) bool {
-	for _, m := range msgs {
-		if m.Role == llm.RoleUser && m.IsMeta && strings.Contains(llm.TextContent(m.Parts...), skillOfferMarker) {
-			return true
-		}
-	}
-	return false
 }
 
 // skillWriteGuard is a tool middleware that refuses a write whose result would

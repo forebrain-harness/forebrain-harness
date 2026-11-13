@@ -521,7 +521,7 @@ func TestPromptPrefixBlockOrderStable(t *testing.T) {
 	// Same composition order as runner.Load: skills catalog inside, memory
 	// instruction outside it.
 	wrapped := wrapMemoryInstructionLLM(
-		wrapSkillCatalogLLM(inner, skill.AgentSkillRoots(home, workspace, safety.ProjectContext{}), workspace, sessions, nil),
+		wrapSkillCatalogLLM(inner, skill.AgentSkillRoots(home, workspace, safety.ProjectContext{}), workspace, sessions),
 		workspace, memoryTestProjectKey, memoryTestConfig(), sessions, false)
 
 	ctx := llm.WithAgentSessionID(context.Background(), "prefix-order")

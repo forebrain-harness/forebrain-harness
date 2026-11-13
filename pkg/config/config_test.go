@@ -943,44 +943,6 @@ func TestSandboxValidateRemainingBranches(t *testing.T) {
 	}
 }
 
-// The offer is on unless the user turns it off: the switch exists so the
-// behavior can be stopped, not so it has to be started.
-func TestEffectiveFeaturesSkillOfferDefaultsOn(t *testing.T) {
-	var nilRoot *Root
-	if !nilRoot.EffectiveFeatures().SkillOffer {
-		t.Fatal("a nil config must read the offer as on")
-	}
-	if !(&Root{}).EffectiveFeatures().SkillOffer {
-		t.Fatal("an unset features.skill_offer must read as on")
-	}
-	off := false
-	cfg := &Root{Features: FeaturesSection{SkillOffer: &off}}
-	if cfg.EffectiveFeatures().SkillOffer {
-		t.Fatal("features.skill_offer: false must read as off")
-	}
-	on := true
-	cfg = &Root{Features: FeaturesSection{SkillOffer: &on}}
-	if !cfg.EffectiveFeatures().SkillOffer {
-		t.Fatal("features.skill_offer: true must read as on")
-	}
-}
-
-// The switch is one of the resolved features, so anything that reads the
-// effective set sees the same answer /status reports.
-func TestSkillOfferIsPartOfTheResolvedFeatureSet(t *testing.T) {
-	off := false
-	unset := (&Root{}).EffectiveFeatures()
-	set := (&Root{Features: FeaturesSection{SkillOffer: &off}}).EffectiveFeatures()
-	if unset.SkillOffer == set.SkillOffer {
-		t.Fatalf("resolving the features lost features.skill_offer: %+v vs %+v", unset, set)
-	}
-	// The other flags must not have moved: the new field joins the set, it does
-	// not replace it.
-	if unset.Memories != set.Memories || unset.LSP != set.LSP {
-		t.Fatalf("resolving skill_offer changed an unrelated flag: %+v vs %+v", unset, set)
-	}
-}
-
 // TestLoadRecordsTheFilesTheConfigurationCameFrom pins /status's "Config
 // files" row: the configuration names the file it was read from, on the loaded
 // value itself rather than in process-wide state. It is the only file a

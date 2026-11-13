@@ -107,7 +107,6 @@ func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string
 		Sandbox:     safety.SandboxStatusLine(cfg),
 		MCP:         s.mcpInventorySource(r, cfg),
 		ConfigFiles: turn.StatusConfigFiles(cfg, r.MCPProjectStatus().ProjectRoot),
-		SkillOffer:  cfg.EffectiveFeatures().SkillOffer,
 		ContextUsage: func() (int, state.TokenBudgetOptions) {
 			used, _ := run.ContextOccupancy(ctx, s.Sessions, sessionID)
 			return used, s.compactBudgetOptions()

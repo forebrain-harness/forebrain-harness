@@ -178,7 +178,6 @@ var configSectionSchemas = []configSectionSchema{
 		Summary: "Feature switches",
 		Fields: []configField{
 			{Path: "memories", Label: "Memory", Kind: configFieldBool3, Hint: "On by default"},
-			{Path: "skill_offer", Label: "Skill suggestions", Kind: configFieldBool3, Hint: "On by default"},
 			{Path: "lsp", Label: "Language servers", Kind: configFieldBool3, Hint: "On by default"},
 		},
 	},

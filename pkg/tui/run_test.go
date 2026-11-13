@@ -5445,7 +5445,6 @@ func goldenStatusPanel(t *testing.T, width, tab int) []string {
 			{Name: "AGENTS.md", Agent: true, Loaded: true},
 			{Name: "FOREBRAIN.md", Loaded: true},
 		},
-		SkillOffer:   true,
 		ContextUsage: func() (int, statepkg.TokenBudgetOptions) { return 48_000, statepkg.TokenBudgetOptions{} },
 	})
 	panel := &uiPanel{kind: "status", tab: tab, status: &rep}

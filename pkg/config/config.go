@@ -145,9 +145,8 @@ type CredentialsSection struct {
 }
 
 type FeaturesSection struct {
-	Memories   *bool `yaml:"memories,omitempty" json:"memories,omitempty"`
-	SkillOffer *bool `yaml:"skill_offer,omitempty" json:"skill_offer,omitempty"`
-	LSP        *bool `yaml:"lsp,omitempty" json:"lsp,omitempty"`
+	Memories *bool `yaml:"memories,omitempty" json:"memories,omitempty"`
+	LSP      *bool `yaml:"lsp,omitempty" json:"lsp,omitempty"`
 }
 
 // EffectiveFeatures returns the resolved boolean values for all feature flags,
@@ -158,17 +157,15 @@ func (r *Root) EffectiveFeatures() EffectiveFeaturesConfig {
 		f = r.Features
 	}
 	return EffectiveFeaturesConfig{
-		Memories:   boolValue(f.Memories, true),
-		SkillOffer: boolValue(f.SkillOffer, true),
-		LSP:        boolValue(f.LSP, true),
+		Memories: boolValue(f.Memories, true),
+		LSP:      boolValue(f.LSP, true),
 	}
 }
 
 // EffectiveFeaturesConfig holds resolved feature flag values with defaults applied.
 type EffectiveFeaturesConfig struct {
-	Memories   bool
-	SkillOffer bool
-	LSP        bool
+	Memories bool
+	LSP      bool
 }
 
 // memorySearchDefaultTopK and memorySearchMaxTopK bound how many memories one

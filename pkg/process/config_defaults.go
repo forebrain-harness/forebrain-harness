@@ -101,9 +101,8 @@ func defaultStoredMemories(root appcfg.Root) appcfg.MemorySection {
 func defaultStoredFeatures(root appcfg.Root) appcfg.FeaturesSection {
 	effective := root.EffectiveFeatures()
 	return appcfg.FeaturesSection{
-		Memories:   appcfg.BoolPtr(effective.Memories),
-		SkillOffer: appcfg.BoolPtr(effective.SkillOffer),
-		LSP:        appcfg.BoolPtr(effective.LSP),
+		Memories: appcfg.BoolPtr(effective.Memories),
+		LSP:      appcfg.BoolPtr(effective.LSP),
 	}
 }
 

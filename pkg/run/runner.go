@@ -1015,9 +1015,8 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// the discovery below, so the two can never disagree inside one runtime.
 	skillRoots := skill.AgentSkillRoots(r.Home, r.workspaceRoot(), r.LaunchProject)
 	// The skills catalog sits beside the memory instruction, ahead of the
-	// conversation and frozen per session for the same cache reason. The
-	// standing skill-offer criteria join the same frozen block.
-	llmClient = wrapSkillCatalogLLM(llmClient, skillRoots, r.workspaceRoot(), r.SessionStore, r.skillOfferGuidance)
+	// conversation and frozen per session for the same cache reason.
+	llmClient = wrapSkillCatalogLLM(llmClient, skillRoots, r.workspaceRoot(), r.SessionStore)
 	// Memory is a collaboration with the person: a batch task runs unattended
 	// for a business system, so neither the memory instructions nor the
 	// citation wrapper reach its requests (owner 2026-10-26).
@@ -1066,16 +1065,10 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	// land between an assistant tool_calls row stored at an approval gate and the
 	// result that answers it, and the dangling-result repair then strips both.
 	llmClient = wrapPlanModeLLMFor(llmClient, r.workspaceRoot(), r.ProjectKey, r.ProjectType())
-	// The skill-offer gate sits outside the plan-mode wrapper: it suppresses
-	// itself in plan mode, and when it does inject, both wrappers' reminders
-	// reach the live session through the same adoption sink in record order.
-	// The tool state is read through a getter because it is built later in
-	// this same Load than the chain being wrapped here.
-	llmClient = wrapSkillOfferLLM(llmClient, r.Config(), func() *tool.State { return r.tools }, r.workspaceRoot(), r.LaunchProject)
 	// The late-diagnostics reminder joins here for the same reason the
-	// plan-mode and skill-offer reminders sit outside summaryChain: it belongs
-	// to the conversation's next request, and a compaction's summary request
-	// must neither consume nor acknowledge it.
+	// plan-mode reminder sits outside summaryChain: it belongs to the
+	// conversation's next request, and a compaction's summary request must
+	// neither consume nor acknowledge it.
 	llmClient = wrapLSPDiagnosticsReminderLLM(llmClient, r.CodeIntel)
 	// The same-tree reminder joins here for the same reason (plan 198 §3.3): it
 	// belongs to this conversation's next request, and a compaction's summary
