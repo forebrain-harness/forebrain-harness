@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Behavioural acceptance for the plan workflows the primary agent carries: the
-# shared audit/planning contract, the single-plan branch, the independent plan
-# reviewer, and the execution contract an approved plan hands back.
+# built-in audit skill the catalog offers, the single-plan branch, the
+# independent plan reviewer, and the execution contract an approved plan hands
+# back.
 #
 # Two halves, one entry point:
 #
@@ -508,11 +509,17 @@ exit_card() { # exit_card [seconds] -> the plan decision is on screen now
 
 scenario_stop() { driver stop >/dev/null 2>&1 || true; }
 
-# The two prompt fragments every project type must receive, and the reviewer
-# fragment every review task must carry. A missing one is a wiring failure and
-# nothing else in the scenario matters.
-SHARED_WORKFLOW="# Audit and planning workflows"
+# The prompt fragment every project type must receive, the built-in skill its
+# catalog must offer, and the reviewer fragment every review task must carry. A
+# missing one is a wiring failure and nothing else in the scenario matters.
+#
+# The audit/planning workflows are not system-prompt text: they are the built-in
+# "audit" skill (pkg/skill/system_assets/audit/SKILL.md), described to the model
+# in the catalog and loaded only when a request needs them. What every project
+# type must therefore carry is the catalog line that offers it, which is the
+# first line of that skill's description.
 SHARED_HANDOFF="# Handoff plan quality bar"
+AUDIT_SKILL="- audit: Audit a project"
 SHARED_SINGLE="## Single-plan workflow"
 REVIEWER_BAR="handoff plan quality bar below, item by item"
 EXECUTOR_CONTRACT="You are the primary executor of an approved plan."
@@ -521,10 +528,8 @@ REVIEW_ROW="Ask another model to review this plan"
 check_system_prompt() { # check_system_prompt <marker-name> [request-number]
   local name="$1" n="${2:-1}" sys
   sys="$(q sys "$n")"
-  case "$sys" in
-    *"$SHARED_WORKFLOW"*) ;;
-    *) fail "$name" "system prompt is missing the shared audit/planning contract"; return 1 ;;
-  esac
+  [ "$(q has "$n" "$AUDIT_SKILL")" = yes ] \
+    || { fail "$name" "the request does not offer the built-in audit skill"; return 1; }
   case "$sys" in
     *"$SHARED_HANDOFF"*) ;;
     *) fail "$name" "system prompt is missing the handoff quality bar"; return 1 ;;
@@ -655,6 +660,10 @@ MD
     || { fail "$name" "the review task does not order investigation first"; return; }
   [ "$(q all "Scale ledger amounts before summing")" = yes ] \
     || { fail "$name" "the review task does not carry the plan text"; return; }
+  # The review task is the plan and nothing else: the conversation's request
+  # is not repeated there, because the plan file the user approves holds it.
+  [ "$(q all '<request')" = no ] \
+    || { fail "$name" "the review task still carries a request block"; return; }
   local rv; rv="$(q syswith "Review the plan below before the user decides")"
   case "$rv" in
     *"# Handoff plan quality bar"*) ;;
@@ -699,78 +708,6 @@ MD
   pass "$name"
 }
 
-# The reviewer's task context must survive a plan turn that wrote hundreds of
-# the agent's own rows after the request. The store-side window used to be the
-# newest 200 transcript rows; 110 scripted read_file calls put 220 rows between
-# the request and the review, so a window like that holds no user row at all.
-fake_plan_review_long_investigation() {
-  local name=plan-review-long-investigation
-  want "$name" || return 0
-  local script="$LOGS/scripts-long-review.json" i
-  {
-    printf '[["", "{}"],'
-    for i in $(seq 1 110); do
-      printf '["read_file", "{\\"file_path\\":\\"README.md\\",\\"offset\\":%d}"],' "$((i % 5))"
-    done
-    printf '["exit_plan_mode", "{}"]]'
-  } > "$script"
-  SCENARIO_SCRIPT="$script"
-  scenario_start toolcall vcs --plan || { fail "$name" "session did not start"; return; }
-
-  # Turn 1 only names the session's plan directory (the plan-mode reminder
-  # carries it); the review needs a plan on disk, and the long turn below is the
-  # request the reviewer must still be able to see.
-  driver submit "Tell me where this session keeps its plan." >/dev/null 2>&1
-  wait_grew "Worked for" "$TURN_COUNT" 60 || { fail "$name" "the plan-directory turn never closed"; return; }
-  TURN_COUNT=$(screen_count "Worked for")
-  local dir; dir=$(plan_dir_on_disk 1)
-  [ -n "$dir" ] || { fail "$name" "the plan reminder named no plan directory"; return; }
-  cat > "$LOGS/plan-long-investigation.md" <<'MD'
-# Add S3 sync to the skill installer
-
-## Steps
-1. Upload the staged skill bundle to the configured S3 bucket.
-2. Keep the local installer working when no bucket is configured.
-
-## Verification
-- `go test ./pkg/skill`
-MD
-  seed_plan "$dir" s3-sync.md "$LOGS/plan-long-investigation.md"
-
-  driver submit "Add S3 sync to the skill installer." >/dev/null 2>&1
-  exit_card 120 || { fail "$name" "the long investigation never reached its card"; return; }
-  driver key m >/dev/null 2>&1
-  wait_text "Which model should review this plan" 20 || { fail "$name" "the reviewer picker never opened"; return; }
-  driver key Enter >/dev/null 2>&1
-  wait_text "plan-reviewer task" 60 || { fail "$name" "no reviewer run was recorded"; shot "$name-review"; return; }
-  sleep 2
-  shot "$name-review"
-
-  local review
-  review=$(db "SELECT content FROM fb_messages WHERE role='user' AND content LIKE 'Review the plan below%' ORDER BY id DESC LIMIT 1;")
-  case "$review" in
-    *"Add S3 sync to the skill installer."*) ;;
-    *) fail "$name" "the reviewer's <request> does not carry the user's ask"; return ;;
-  esac
-  case "$review" in
-    *forebrain_environment_context*) fail "$name" "the reviewer's <request> carries the runtime environment block"; return ;;
-  esac
-
-  # The discriminator: the request sits more than one 200-row window before the
-  # review, so a newest-rows window cannot reach it. The review dispatch line
-  # lands in the reviewer's worker session, so the row ids are read globally and
-  # the conversation id is read back from the request row itself.
-  local sid req_row review_row between
-  req_row=$(db "SELECT id FROM fb_messages WHERE role='user' AND content LIKE '%Add S3 sync%' AND content NOT LIKE 'Review the plan below%' ORDER BY id DESC LIMIT 1;" | tr -d ' ')
-  review_row=$(db "SELECT id FROM fb_messages WHERE role='user' AND content LIKE 'Review the plan below%' ORDER BY id DESC LIMIT 1;" | tr -d ' ')
-  sid=$(db "SELECT session_id FROM fb_messages WHERE id=${req_row:-0};" | tr -d ' ')
-  between=$(db "SELECT count(*) FROM fb_messages WHERE session_id='${sid:-none}' AND visibility='visible' AND id > ${req_row:-0} AND id < ${review_row:-0};" | tr -d ' ')
-  if [ -z "$req_row" ] || [ -z "$review_row" ] || [ "${between:-0}" -le 200 ]; then
-    fail "$name" "not discriminating: ${between:-0} rows between the request and the review"; return
-  fi
-  pass "$name"
-}
-
 # The input rail must judge what the person typed. The runtime appends its
 # environment block as a meta user message after the turn's own message, so a
 # rail that picks the last user row scans the block: a blocked phrase in what
@@ -782,27 +719,22 @@ fake_input_rail_scans_the_persons_message() {
   local name=input-rail-scans-the-persons-message
   want "$name" || return 0
   scenario_start reply vcs || { fail "$name" "session did not start"; return; }
-  # driver start wrote the config; the guardrail tunables are not part of it, so
-  # the TUI is restarted by hand over the same home, project and provider.
+  # The runtime reads its settings from the stored configuration (fb_config), not
+  # from forebrain.yaml: since plan 207 the file holds the gateway and the
+  # credentials only, and a YAML written after the first start is never imported.
+  # The rail's block list therefore goes onto the stored agents section, which is
+  # the same section the settings surfaces write, and the TUI is restarted by
+  # hand over the same home, project and provider so it loads it.
   driver stop >/dev/null 2>&1 || true
-  cat > "$HOME_DIR/forebrain.yaml" <<YAML
-approval_policy: on-request
-agents:
-  defaults:
-    guardrails:
-      input:
-        block_substrings:
-        - zzz-blocked-needle
-  definitions:
-    main:
-      primary: true
-      enable_subagent: false
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-v4-flash
-        api_key: \${FAKE_LLM_KEY}
-        base_url: http://127.0.0.1:$PORT
-YAML
+  local patched
+  patched=$(db "UPDATE fb_config
+    SET value_json=json_set(value_json, '\$.defaults.guardrails.input.block_substrings',
+      json_array('zzz-blocked-needle'))
+    WHERE section='agents' RETURNING json_extract(value_json, '\$.defaults.guardrails.input.block_substrings');" 2>&1 | tr -d ' ')
+  case "$patched" in
+    *zzz-blocked-needle*) ;;
+    *) fail "$name" "the stored agents section did not take the block list: ${patched:-no row}"; return ;;
+  esac
   python3 "$REPO/scripts/acceptance/fake_provider.py" reply "$PORT" FAKE_ANSWER 0.6 \
     > "$ACCEPT_HOME/provider.log" 2>&1 &
   echo $! > "$ACCEPT_HOME/provider.pid"
@@ -972,48 +904,40 @@ JSON
 }
 
 # ------------------------------------------------ scenario 2: advisor matrix --
-# One generic driver: start the fixture, ask for the variant, and check that the
-# request the model received carries that variant's rules and that the audit
-# changed nothing on disk. The variant's own behaviour is the real half's job.
-fake_advisor() { # fake_advisor <name> <fixture> <ask> <system-fragment>...
-  local name="$1" fixture="$2" ask="$3"; shift 3
+# One generic driver: start the fixture, ask for the variant, and check the
+# wiring — the ask reaches the model, the request offers the built-in audit
+# skill, the turn closed, and the audit changed nothing on disk.
+#
+# The variant rules themselves (quick/deep/branch/next/reconcile/issues, the
+# categories, the evidence standard) are the audit skill's body: they reach the
+# model only once it loads the skill, which a scripted provider never does, and
+# they are pinned where they live, in pkg/skill's own tests. The variant's real
+# behaviour is the real half's job.
+fake_advisor() { # fake_advisor <name> <fixture> <ask>
+  local name="$1" fixture="$2" ask="$3"
   want "$name" || return 0
   scenario_start toolcall "$fixture" || { fail "$name" "session did not start"; return; }
   local before; before=$(fixture_hash)
   turn "$ask" 60 || { fail "$name" "the turn never closed"; return; }
   check_system_prompt "$name" || return
-  local frag n; n=$(q count)
-  for frag in "$@"; do
-    [ "$(q has "$n" "$frag")" = yes ] || { fail "$name" "the request is missing its rule: $frag"; return; }
-  done
-  [ "$(q has "$n" "$ask")" = yes ] || { fail "$name" "the ask never reached the model"; return; }
+  [ "$(q has "$(q count)" "$ask")" = yes ] || { fail "$name" "the ask never reached the model"; return; }
   [ "$before" = "$(fixture_hash)" ] || { fail "$name" "the audit changed the project"; return; }
   pass "$name"
   scenario_stop
 }
 
 fake_advisor_all() {
-  fake_advisor advisor-default vcs "Audit this project and tell me what to fix." \
-    "Default request: run recon, audit, vetting, prioritization and planning." \
-    "standard (the default): use hotspot-weighted coverage"
-  fake_advisor advisor-standard vcs "Run a standard depth audit of this project." \
-    "standard (the default): use hotspot-weighted coverage"
-  fake_advisor advisor-quick-focus vcs "Quick audit, security category only." \
-    "quick: cover only recon hotspots" "A category focus ("
-  fake_advisor advisor-deep vcs "Run a deep audit of this project." \
-    "deep: cover the whole requested scope" "explicitly marked investigate"
-  fake_advisor advisor-next vcs "What should we build next?" \
-    "next, features or roadmap: audit direction only" "Return 4–6 grounded options"
-  fake_advisor advisor-features vcs "Which features are worth adding?" \
-    "next, features or roadmap: audit direction only"
-  fake_advisor advisor-roadmap vcs "Give me a product roadmap for this project." \
-    "next, features or roadmap: audit direction only"
-  fake_advisor advisor-reconcile issues "Reconcile the plan backlog in plans/." \
-    "reconcile: process the existing plan backlog" "read-only inputs/ directory"
+  fake_advisor advisor-default vcs "Audit this project and tell me what to fix."
+  fake_advisor advisor-standard vcs "Run a standard depth audit of this project."
+  fake_advisor advisor-quick-focus vcs "Quick audit, security category only."
+  fake_advisor advisor-deep vcs "Run a deep audit of this project."
+  fake_advisor advisor-next vcs "What should we build next?"
+  fake_advisor advisor-features vcs "Which features are worth adding?"
+  fake_advisor advisor-roadmap vcs "Give me a product roadmap for this project."
+  fake_advisor advisor-reconcile issues "Reconcile the plan backlog in plans/."
 
   # branch mode, in the four states it has to tell apart
-  fake_advisor advisor-branch vcs "Audit the changes on this branch against main." \
-    "merge-base" "introduced or pre-existing"
+  fake_advisor advisor-branch vcs "Audit the changes on this branch against main."
   if want advisor-branch && [ "$(git -C "$PROJ" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "feature/amount-scale" ]; then
     fail advisor-branch "the fixture is not on the feature branch the scenario needs"
   fi
@@ -1021,14 +945,12 @@ fake_advisor_all() {
     fail advisor-branch "the fixture is not two commits ahead of main"
   fi
 
-  fake_advisor advisor-branch-default vcs-default "Audit the changes on this branch." \
-    "On the default branch or with zero commits ahead"
+  fake_advisor advisor-branch-default vcs-default "Audit the changes on this branch."
   if want advisor-branch-default && [ "$(git -C "$PROJ" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "main" ]; then
     fail advisor-branch-default "the fixture is not on the default branch"
   fi
 
-  fake_advisor advisor-branch-zero-ahead vcs-zero "Audit the changes on this branch." \
-    "On the default branch or with zero commits ahead"
+  fake_advisor advisor-branch-zero-ahead vcs-zero "Audit the changes on this branch."
   if want advisor-branch-zero-ahead && [ "$(git -C "$PROJ" rev-list --count main..HEAD 2>/dev/null)" != "0" ]; then
     fail advisor-branch-zero-ahead "the fixture is not zero commits ahead"
   fi
@@ -1037,8 +959,8 @@ fake_advisor_all() {
     scenario_start toolcall nongit --no-git || { fail advisor-branch-non-git "session did not start"; return; }
     turn "Audit the changes on this branch." 60 || { fail advisor-branch-non-git "the turn never closed"; return; }
     check_system_prompt advisor-branch-non-git || return
-    if [ "$(q has "$(q count)" "Where no version-control history exists")" != yes ]; then
-      fail advisor-branch-non-git "the non-git fallback is missing"; return
+    if [ "$(q has "$(q count)" "Audit the changes on this branch.")" != yes ]; then
+      fail advisor-branch-non-git "the ask never reached the model"; return
     fi
     if [ -d "$PROJ/.git" ]; then fail advisor-branch-non-git "the fixture unexpectedly has history"; return; fi
     pass advisor-branch-non-git
@@ -1682,7 +1604,6 @@ run_fake() {
   skill_vacuum || { echo "the acceptance environment is not skill-vacuum" >&2; exit 2; }
 
   fake_coding_plan_review_execute
-  fake_plan_review_long_investigation
   fake_input_rail_scans_the_persons_message
   fake_advisor_all
   fake_plan_mode_audit

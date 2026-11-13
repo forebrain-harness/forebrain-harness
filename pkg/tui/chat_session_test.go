@@ -13335,7 +13335,7 @@ func TestPlanReviewPublishesItsStartAndEnd(t *testing.T) {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
 	var flowEvents []event.RunEvent
-	if err := runSharedReview(t, real, turn.Model{Provider: "openai", Model: "gpt-4o"}, "Add S3 sync.", "", reviewer, &flowEvents); err != nil {
+	if err := runSharedReview(t, real, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", reviewer, &flowEvents); err != nil {
 		t.Fatalf("run the shared review flow: %v", err)
 	}
 	if len(flowEvents) != 2 {
@@ -13614,20 +13614,18 @@ func planReviewOptionsFor(cs *ChatSession) []turn.PlanReviewModelOption {
 }
 
 // runSharedReview drives one review through turn.RunPlanReview with the
-// reviewer the surface builds, the way runPlanReview does. The plan comes
-// from the session's plan file and the task from its transcript, which is
-// what the Request fields carried before the flow moved down a layer.
+// reviewer the surface builds, the way runPlanReview does. The plan comes from
+// the session's plan file, which is the review's whole material.
 func runSharedReview(
-	t *testing.T, cs *ChatSession, model turn.Model, task, runID string, reviewer turn.Reviewer, events *[]event.RunEvent,
+	t *testing.T, cs *ChatSession, model turn.Model, runID string, reviewer turn.Reviewer, events *[]event.RunEvent,
 ) error {
 	t.Helper()
 	return turn.RunPlanReview(context.Background(), turn.PlanReviewRun{
 		ActionID: "plan-action", Model: model,
 		SessionID: "session-1", RunID: runID,
-		StateRoot:   cs.stateRoot(),
-		ProjectKey:  runnerProjectKey(cs.runner()),
-		Transcripts: stubReviewTranscripts{text: task},
-		Reviewer:    reviewer,
+		StateRoot:  cs.stateRoot(),
+		ProjectKey: runnerProjectKey(cs.runner()),
+		Reviewer:   reviewer,
 		Publish: func(_ context.Context, evt event.RunEvent) error {
 			if events != nil {
 				*events = append(*events, evt)
@@ -13635,12 +13633,6 @@ func runSharedReview(
 			return nil
 		},
 	})
-}
-
-type stubReviewTranscripts struct{ text string }
-
-func (s stubReviewTranscripts) ListUserInputs(context.Context, string) ([]state.UserInput, error) {
-	return []state.UserInput{{Message: &state.UserMessageRef{RowID: 1, Content: s.text}}}, nil
 }
 
 // fakeSubagentExecutor records how each review run was dispatched and replays a
@@ -13738,7 +13730,7 @@ func TestPlanReviewRunsAsAPlanReviewerSubagentOnTheChosenModel(t *testing.T) {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
 	var flowEvents []event.RunEvent
-	if err := runSharedReview(t, cs, model, "Add S3 sync.", "", reviewer, &flowEvents); err != nil {
+	if err := runSharedReview(t, cs, model, "", reviewer, &flowEvents); err != nil {
 		t.Fatalf("Review error: %v", err)
 	}
 	if len(flowEvents) != 2 {
@@ -13782,8 +13774,11 @@ func TestPlanReviewRunsAsAPlanReviewerSubagentOnTheChosenModel(t *testing.T) {
 	if root := tool.ProjectRootFromContext(call.ctx); strings.TrimSpace(root) == "" {
 		t.Fatal("reviewer must be pointed at the project root or it cannot read the code")
 	}
-	if !strings.Contains(call.task, "1. Ship it.") || !strings.Contains(call.task, "Add S3 sync.") {
-		t.Fatalf("review task missing material:\n%s", call.task)
+	if !strings.Contains(call.task, "1. Ship it.") {
+		t.Fatalf("review task missing the plan:\n%s", call.task)
+	}
+	if strings.Contains(call.task, "<request") {
+		t.Fatalf("the review task carries the plan alone, not the conversation's request:\n%s", call.task)
 	}
 	if !strings.Contains(call.task, "Investigate the project sources this plan touches") {
 		t.Fatalf("review task must order investigation before judgement:\n%s", call.task)
@@ -13799,7 +13794,7 @@ func TestPlanReviewRefusesAModelTheSessionHasNotConfigured(t *testing.T) {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
 
-	err = runSharedReview(t, cs, model, "", "", reviewer, nil)
+	err = runSharedReview(t, cs, model, "", reviewer, nil)
 	if err == nil || !strings.Contains(err.Error(), "not configured") {
 		t.Fatalf("err = %v, want a refusal for an unconfigured model", err)
 	}
@@ -13837,7 +13832,7 @@ func TestPlanReviewToolApprovalIsShownAndTheRunResumes(t *testing.T) {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
 	var flowEvents []event.RunEvent
-	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "Add S3 sync.", "", reviewer, &flowEvents); err != nil {
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", reviewer, &flowEvents); err != nil {
 		t.Fatalf("Review error: %v", err)
 	}
 	var reviewed event.PlanReviewedPayload
@@ -13906,7 +13901,7 @@ func TestPlanReviewDeniedToolResumesWithTheDenial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
-	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil); err != nil {
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", reviewer, nil); err != nil {
 		t.Fatalf("a denied tool must not fail the review: %v", err)
 	}
 	state := tool.ToolApprovalResumeFromContext(executor.calls[1].ctx)
@@ -13937,7 +13932,7 @@ func TestPlanReviewStopsWhenTheUserCancelsATooLApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
-	err = runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil)
+	err = runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", reviewer, nil)
 	// The reviewer's gate carries no agent id, so a cancel answers it as the
 	// refusal without words (plan 127): the review still stops, its run is
 	// never resumed, and the error names the refusal.
@@ -13958,7 +13953,7 @@ func TestPlanReviewPropagatesRunFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
-	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil); err == nil ||
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", reviewer, nil); err == nil ||
 		!strings.Contains(err.Error(), "upstream 429") {
 		t.Fatalf("err = %v", err)
 	}
@@ -14022,7 +14017,7 @@ func TestPlanReviewFencesItsRunWaitSoNothingElseResumesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
-	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil); err != nil {
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", reviewer, nil); err != nil {
 		t.Fatalf("Review error: %v", err)
 	}
 	if len(executor.calls) != 2 {
@@ -14136,7 +14131,7 @@ func TestPlanReviewShowsInTheAgentRosterAndCanBeStoppedFromIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
-	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil); err == nil {
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", reviewer, nil); err == nil {
 		t.Fatal("a stopped review must report that it did not finish")
 	}
 
@@ -30671,7 +30666,7 @@ func TestPlanReviewRunIsAChildOfTheGatedRun(t *testing.T) {
 		t.Fatalf("planReviewerFor: %v", err)
 	}
 
-	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "Ship.", gate.ID, reviewer, nil); err != nil {
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, gate.ID, reviewer, nil); err != nil {
 		t.Fatalf("Review error: %v", err)
 	}
 	if len(executor.calls) != 1 || executor.calls[0].superviseRunID == "" {

@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -17,28 +16,6 @@ import (
 // image: the transcript row, and the chip the terminal composer shows while the
 // message is written. Display only — the model's text never holds it.
 func ImageMarker(index int) string { return fmt.Sprintf("[Image #%d]", index+1) }
-
-var imageMarkerPattern = regexp.MustCompile(`\[Image #\d+\]`)
-
-// withoutDisplayImageLines drops what a stored row carries only for display:
-// the "[Image #N]" markers, and a line that is nothing but the request's own
-// "[Image: source: <path>]" note — a review is sent that note again after the
-// labelled image, and the cache it rebuilds is its own. A marker inside words
-// is dropped in place, so what the person typed around it survives.
-func withoutDisplayImageLines(text string) string {
-	out := make([]string, 0, 8)
-	for _, line := range strings.Split(text, "\n") {
-		if llm.IsImageSourceNote(llm.Text(strings.TrimSpace(line))) {
-			continue
-		}
-		stripped := imageMarkerPattern.ReplaceAllString(line, "")
-		if strings.TrimSpace(line) != "" && strings.TrimSpace(stripped) == "" {
-			continue // a marker-only line leaves no empty line behind
-		}
-		out = append(out, stripped)
-	}
-	return strings.TrimSpace(strings.Join(out, "\n"))
-}
 
 // SurfaceTurnContentParts builds the model-facing content parts for a turn
 // with attachments: the text part plus one image part per attachment, each

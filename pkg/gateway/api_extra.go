@@ -4748,17 +4748,10 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 	detached := s.withDetachedGatewayApprovalHooks(
 		process.AgentContextForProject(context.Background(), s.stateRoot(), sid, s.sessionProjectKey(context.Background(), sid)), sid, runID,
 	)
-	// A session without a transcript store reviews without a task context
-	// rather than handing the flow a typed-nil store.
-	var transcripts turn.PlanReviewTranscripts
-	if sessions := s.Sessions; sessions != nil {
-		transcripts = sessions
-	}
 	review := turn.PlanReviewRun{
 		ActionID: id, Model: model, SessionID: sid, RunID: runID,
 		StateRoot: s.stateRoot(), ProjectKey: s.sessionProjectKey(context.Background(), sid),
-		Again:       again,
-		Transcripts: transcripts,
+		Again: again,
 		Reviewer: &process.PlanReviewer{
 			Runner: s.Runner, Model: model, Config: s.modelConfig(),
 			StepHook: tool.StepHookFromContext(detached, nil),

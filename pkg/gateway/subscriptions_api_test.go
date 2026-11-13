@@ -19,9 +19,11 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	_, do := modelsPageServer(t)
 	chatGPT, _ := loginStubs(t)
 	chatGPT.state = turn.SignInCheck{State: turn.SignInUsable}
+	reasoningOff := true
 	chatGPT.offers = []subscription.Offer{{
-		Provider: "chatgpt", Model: "gpt-5-codex", BaseURL: "https://chatgpt.com/backend-api/codex", Default: true,
-		KeyRequired: true, FromStaticList: true,
+		Provider: "chatgpt", Model: "gpt-5-codex", Name: "GPT-5 Codex", BaseURL: "https://chatgpt.com/backend-api/codex", Default: true,
+		ContextWindow: 400000, SupportsImages: true, KeyRequired: true, FromStaticList: true,
+		Efforts: []string{"low", "medium", "high"}, DefaultEffort: "medium", ReasoningOff: &reasoningOff,
 	}}
 	previous := gatewaySubscriptions
 	gatewaySubscriptions = func() []subscription.Subscription { return []subscription.Subscription{chatGPT} }
@@ -46,6 +48,7 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	var offers []struct {
 		Provider       string `json:"provider"`
 		Model          string `json:"model"`
+		Name           string `json:"name"`
 		Endpoint       string `json:"endpoint"`
 		Default        bool   `json:"default"`
 		NeedsKey       bool   `json:"needs_key"`
@@ -53,6 +56,9 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &offers))
 	require.Len(t, offers, 1)
+	// The page draws the vendor's name beside the wire id the row carries.
+	require.Equal(t, "gpt-5-codex", offers[0].Model)
+	require.Equal(t, "GPT-5 Codex", offers[0].Name)
 	require.Equal(t, "https://chatgpt.com/backend-api/codex", offers[0].Endpoint)
 	require.True(t, offers[0].Default)
 	// The two facts a plan that asks for a pasted key adds (plan 281).
@@ -79,6 +85,16 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	rows, _ := llmModelRows(t, do)
 	writtenRow := llmModelByID(t, rows, written.IDs[0])
 	require.Equal(t, true, writtenRow["subagent_allowed"])
+	// The listing's capabilities from the offer landed on the row as its own:
+	// the window it declared and the image switch, not the catalog's guess.
+	caps, _ := writtenRow["caps"].(map[string]any)
+	require.EqualValues(t, 400_000, caps["context_window"])
+	require.Equal(t, true, caps["images"])
+	// The listing's thinking answers land beside them: its levels, the level it
+	// defaults to, and its off switch — three facts the model page reads back.
+	require.Equal(t, []any{"low", "medium", "high"}, caps["efforts"])
+	require.Equal(t, "medium", caps["default_effort"])
+	require.Equal(t, true, caps["reasoning_off"])
 	_, defaultID := llmModelRows(t, do)
 	require.Equal(t, written.IDs[0], defaultID)
 

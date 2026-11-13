@@ -13,7 +13,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
-	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -423,9 +422,8 @@ type PlanReviewer struct {
 // Review runs one review to its verdict. A request that carries Again does
 // not dispatch a new reviewer: it continues the previous review's subagent
 // conversation, so the reviewer re-judges the revision with its earlier
-// investigation already in context. The model row check and the image
-// handling are shared with the fresh path — the round still runs on the
-// reviewer the user picked, and still sees the images the request attached.
+// investigation already in context. The model row check is shared with the
+// fresh path — both rounds run on the reviewer the user picked.
 func (r *PlanReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanReviewResult, error) {
 	if r == nil || r.Runner == nil {
 		return turn.PlanReviewResult{}, fmt.Errorf("plan review requires a runner")
@@ -438,31 +436,17 @@ func (r *PlanReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanR
 		return turn.PlanReviewResult{}, err
 	}
 	override := run.SubagentModelOverride{ModelID: modelID, Provider: r.Model.Provider, Model: r.Model.Model}
-	// The images the user attached reach the reviewer the way they reach the
-	// conversation's own model, and a reviewer that cannot read them is
-	// refused here, before a run opens, with the reason and the way on. They
-	// are read before the prompt is built: the file each one is stored in is
-	// named there, once, in the text the reviewer and the transcript read.
-	images, sources := planReviewImageParts(ctx, r.Runner, req.Images)
-	req.Images = sources
 	task := turn.BuildReReviewPrompt(req)
 	if req.Again == nil {
 		task = turn.BuildPrompt(req)
-	}
-	var parts []llm.ContentPart
-	if len(images) > 0 {
-		if err := run.PlanReviewImageRefusal(ctx, r.Runner, llm.AgentSessionIDFromContext(ctx), override); err != nil {
-			return turn.PlanReviewResult{}, err
-		}
-		parts = append([]llm.ContentPart{llm.Text(task)}, images...)
 	}
 	runCtx := tool.WithStepHook(ctx, r.StepHook)
 	started := time.Now()
 	var text string
 	if req.Again != nil {
-		text, err = r.Runner.ContinuePlanReviewSubagent(runCtx, req.Again.TaskID, task, parts, r.Approve)
+		text, err = r.Runner.ContinuePlanReviewSubagent(runCtx, req.Again.TaskID, task, r.Approve)
 	} else {
-		text, err = r.Runner.RunPlanReviewSubagent(runCtx, task, parts, override, r.Approve)
+		text, err = r.Runner.RunPlanReviewSubagent(runCtx, task, override, r.Approve)
 	}
 	if err != nil {
 		return turn.PlanReviewResult{}, err

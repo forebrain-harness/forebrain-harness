@@ -63,16 +63,31 @@ type Login interface {
 // Offer is one model a finished sign-in can write: the model, the endpoint its
 // requests go to, and the plan inside the subscription it belongs to.
 type Offer struct {
-	Subscription   string // ID()
-	Plan           string // "" | "coding-plan" | "agent-plan" | "coding-plan-team" | "agent-plan-team"
-	PlanLabel      string // "Coding Plan" / "Agent Plan · 团队" …
-	Provider       string
-	Model          string
+	Subscription string // ID()
+	Plan         string // "" | "coding-plan" | "agent-plan" | "coding-plan-team" | "agent-plan-team"
+	PlanLabel    string // "Coding Plan" / "Agent Plan · 团队" …
+	Provider     string
+	Model        string
+	// Name is the vendor's display name for Model, when its listing carries
+	// one: a surface shows it in place of the wire id, and "" falls back to
+	// Model.
+	Name           string
 	BaseURL        string
 	APIPath        string
 	ContextWindow  int64
 	SupportsImages bool
 	Default        bool
+	// Efforts are the thinking levels the listing offers, in wire order and
+	// WITHOUT "none": turning thinking off is ReasoningOff, not a level (the
+	// models page accepts only the numeric levels). nil means the listing named
+	// none.
+	Efforts []string
+	// DefaultEffort is the level the listing marks as its default; "" when it
+	// names none.
+	DefaultEffort string
+	// ReasoningOff is whether the listing offers a mode that turns thinking off
+	// entirely; nil when it says nothing either way.
+	ReasoningOff *bool
 	// KeyRequired marks a plan whose row carries an API key the user pastes
 	// from the vendor's console: the sign-in proves which plans the account
 	// holds, and no public API reads their key back (Volcengine's personal
@@ -353,6 +368,8 @@ func offersFromRecords(subscription string, records []turn.ModelRecord, baseURL 
 			ContextWindow:  record.ContextWindow,
 			SupportsImages: record.SupportsAttachments,
 			Default:        record.IsDefault,
+			Efforts:        append([]string(nil), record.ReasoningEfforts...),
+			DefaultEffort:  strings.TrimSpace(record.DefaultReasoningEffort),
 		})
 	}
 	return offers
@@ -362,28 +379,91 @@ func offersFromRecords(subscription string, records []turn.ModelRecord, baseURL 
 // ids in input order. A login-backed row holds no key: the login is the
 // credential, and stating an empty key is not the same as saying nothing — a
 // key left on the row belongs to whatever provider used it before and, for
-// OpenCode, it outranks the login. Local subscription plugins provision their
-// chosen offers through it, so a plugin row lands in the table exactly like a
-// built-in one.
+// OpenCode, it outranks the login. The capabilities the offer carries — the
+// window and the image switch its listing declared — land on the row as its own
+// caps, so a surface that reads the row (footer gauge, compaction budget, the
+// model page) sees what the vendor said rather than a catalog guess. Local
+// subscription plugins provision their chosen offers through it, so a plugin row
+// lands in the table exactly like a built-in one.
 func ProvisionRows(ctx context.Context, env Env, offers []Offer, source string) ([]string, error) {
 	ids := make([]string, 0, len(offers))
 	for _, offer := range offers {
-		empty := ""
-		id, err := process.UpsertLLMModel(ctx, env.DB, process.LLMModelInput{
-			Provider:   offer.Provider,
-			Model:      offer.Model,
-			BaseURL:    offer.BaseURL,
-			APIPath:    offer.APIPath,
-			APIKey:     &empty,
-			Source:     source,
-			SourcePlan: offer.Plan,
-		})
+		key := ""
+		id, err := process.UpsertLLMModel(ctx, env.DB, offerRowInput(offer, source, &key))
 		if err != nil {
 			return nil, fmt.Errorf("store %s/%s: %w", offer.Provider, offer.Model, err)
 		}
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+// offerRowInput is the model-row write one offer means: its identity, the source
+// that wrote it, the key this writer holds (a sign-in's is empty), and the
+// capabilities its listing declared. The window goes on the row only when the
+// listing named one — 0 is not a window, so a column left nil lets the catalog
+// answer — while the image switch is always an answer, because "no images" is
+// one. Every provisioning path builds its write here, so an offer's capabilities
+// never depend on which subscription wrote it.
+func offerRowInput(offer Offer, source string, key *string) process.LLMModelInput {
+	input := process.LLMModelInput{
+		Provider:   offer.Provider,
+		Model:      offer.Model,
+		BaseURL:    offer.BaseURL,
+		APIPath:    offer.APIPath,
+		APIKey:     key,
+		Source:     source,
+		SourcePlan: offer.Plan,
+	}
+	if offer.ContextWindow > 0 {
+		window := offer.ContextWindow
+		input.CapContextWindow = &window
+	}
+	images := offer.SupportsImages
+	input.CapImages = &images
+	// The levels a listing names never include "none": that is the off switch,
+	// which the host keeps in its own column (cap_reasoning_off) and renders as
+	// "none" at the head of the levels. Splitting here means every producer — a
+	// plugin's listing, a catalog-derived record — gets the same rule.
+	levels, off := splitThinkingOff(offer.Efforts)
+	if levels != nil {
+		input.CapEfforts = &levels
+	}
+	switch {
+	case offer.ReasoningOff != nil:
+		value := *offer.ReasoningOff
+		input.CapReasoningOff = &value
+	case off:
+		value := true
+		input.CapReasoningOff = &value
+	}
+	defaultEffort := strings.TrimSpace(offer.DefaultEffort)
+	input.CapDefaultEffort = &defaultEffort
+	return input
+}
+
+// splitThinkingOff separates the levels a listing names from the off switch it
+// may also name: "none" is not a level, and a listing that carries it says the
+// model can turn thinking off. It returns the levels in listing order, or nil
+// when the listing named none.
+func splitThinkingOff(efforts []string) ([]string, bool) {
+	if efforts == nil {
+		return nil, false
+	}
+	levels := make([]string, 0, len(efforts))
+	off := false
+	for _, effort := range efforts {
+		level := strings.ToLower(strings.TrimSpace(effort))
+		if level == "none" {
+			off = true
+			continue
+		}
+		if level == "" {
+			continue
+		}
+		levels = append(levels, level)
+	}
+	return levels, off
 }
 
 // provisionRows is the in-package spelling of ProvisionRows.

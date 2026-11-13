@@ -1199,23 +1199,15 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 	defer cancel()
 	s.trackPlanReviewCancel(cancel)
 	defer s.forgetPlanReviewCancel()
-	// A session without a transcript store reviews without a task context
-	// rather than handing the flow a typed-nil store: the interface would not
-	// see the nil the way a direct call did.
-	var transcripts turn.PlanReviewTranscripts
-	if store := s.sessStore(); store != nil {
-		transcripts = store
-	}
 	reviewErr := turn.RunPlanReview(ctx, turn.PlanReviewRun{
-		ActionID:    actionID,
-		Model:       model,
-		SessionID:   sessionID,
-		RunID:       runID,
-		StateRoot:   s.stateRoot(),
-		ProjectKey:  runnerProjectKey(s.runner()),
-		Transcripts: transcripts,
-		Reviewer:    reviewer,
-		Again:       again,
+		ActionID:   actionID,
+		Model:      model,
+		SessionID:  sessionID,
+		RunID:      runID,
+		StateRoot:  s.stateRoot(),
+		ProjectKey: runnerProjectKey(s.runner()),
+		Reviewer:   reviewer,
+		Again:      again,
 		Publish: func(ctx context.Context, evt event.RunEvent) error {
 			if s == nil || s.runner() == nil || s.runner().Events == nil {
 				return nil

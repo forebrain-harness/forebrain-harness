@@ -134,64 +134,6 @@ func ImageTurnRefusal(ctx context.Context, r *Runner, sessionID string, attaches
 	return &ImageInputRefusedError{Provider: provider, Model: model}
 }
 
-// PlanReviewImageRefusedError refuses a plan review before it starts: the
-// review model the user picked does not take image input — the catalog says
-// so, or it already refused an image in this conversation — and the request
-// it would review carries the user's images. Nothing ran and the approval is
-// still waiting; picking another review model is the way on.
-type PlanReviewImageRefusedError struct {
-	Provider string
-	Model    string
-	Reason   string
-	Observed bool
-}
-
-func (e *PlanReviewImageRefusedError) Error() string {
-	name := e.Model
-	if e.Provider != "" {
-		name = e.Provider + "/" + e.Model
-	}
-	sentence := fmt.Sprintf("%s does not accept images, so it cannot see this conversation's screenshots; pick a review model that does", name)
-	if e.Observed {
-		sentence = fmt.Sprintf("%s already refused an image in this conversation, so it cannot see its screenshots; pick a review model that does", name)
-	}
-	if reason := strings.TrimSpace(e.Reason); reason != "" {
-		sentence += fmt.Sprintf(" (provider said: %s)", reason)
-	}
-	return sentence
-}
-
-// Code is the same pair of wire codes a refused turn carries: the catalog
-// answer and the remembered rejection are the same two facts here.
-func (e *PlanReviewImageRefusedError) Code() string {
-	if e == nil || !e.Observed {
-		return ImageInputRefusedCode
-	}
-	return ImageRejectedCode
-}
-
-// PlanReviewImageRefusal is the image gate of a plan review that hands its
-// reviewer images: the turn gate's two judgements — the fail-open catalog
-// check and this conversation's record of a refusal — applied to the review
-// model instead of the conversation's. It is asked before the reviewer starts,
-// so a review that could not see the screenshots it is about never runs.
-func PlanReviewImageRefusal(ctx context.Context, r *Runner, sessionID string, override SubagentModelOverride) error {
-	sid := strings.TrimSpace(sessionID)
-	if sid != "" && strings.TrimSpace(llm.AgentSessionIDFromContext(ctx)) == "" {
-		ctx = llm.WithAgentSessionID(ctx, sid)
-	}
-	ctx = WithSubagentModelOverride(ctx, override)
-	if provider, model, refused := imageInputRefusedModel(ctx, r); refused {
-		return &PlanReviewImageRefusedError{Provider: provider, Model: model}
-	}
-	provider, model := r.agentModelFor(ctx)
-	provider, model = strings.TrimSpace(provider), strings.TrimSpace(model)
-	if reason, recorded, err := recordedImageRefusal(ctx, r, sid, provider, model); err == nil && recorded {
-		return &PlanReviewImageRefusedError{Provider: provider, Model: model, Reason: reason, Observed: true}
-	}
-	return nil
-}
-
 // recordedImageRefusal reads what this conversation recorded about the exact
 // provider+model in force. A read error is not a refusal: the record is an
 // optimization, and a missing one costs one request, never a turn.

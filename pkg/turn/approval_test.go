@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1027,202 +1026,6 @@ func TestApprovalToolStepIDNamesTheGatedCall(t *testing.T) {
 	require.Equal(t, "call-exit-1", ApprovalToolStepID(fromSnapshot))
 }
 
-func newPlanReviewTaskStore(t *testing.T) *state.SessionStore {
-	t.Helper()
-	store, _ := newPlanReviewTaskDB(t)
-	return store
-}
-
-func newPlanReviewTaskDB(t *testing.T) (*state.SessionStore, *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	store := state.NewSessionStore(db, "main")
-	require.NoError(t, store.Ensure(ctx, "s1", "s1"))
-	return store, db
-}
-
-func appendUserTurn(t *testing.T, store *state.SessionStore, text string) {
-	t.Helper()
-	require.NoError(t, store.AppendNewMessages(context.Background(), "s1", "", []llm.Message{
-		llm.UserMessage(llm.Text(text)),
-	}, "", ""))
-}
-
-func appendInvestigationRows(t *testing.T, store *state.SessionStore, n int) {
-	t.Helper()
-	rows := make([]llm.Message, 0, n)
-	for i := 0; i < n; i++ {
-		rows = append(rows, llm.AssistantMessage([]llm.ContentPart{
-			llm.Text(fmt.Sprintf("investigation step %d: reading the installer", i)),
-		}))
-	}
-	require.NoError(t, store.AppendNewMessages(context.Background(), "s1", "", rows, "", ""))
-}
-
-func metaEnvironmentMessage() llm.Message {
-	msg := llm.UserMessage(llm.Text("<forebrain_environment_context>\nproject=/work\n</forebrain_environment_context>"))
-	msg.IsMeta = true
-	return msg
-}
-
-// A plan-mode turn writes hundreds of the agent's own rows after the request.
-// The reviewer's material must still be the request, not whatever the newest
-// transcript rows happen to be.
-func TestPlanReviewTaskContextSurvivesALongInvestigation(t *testing.T) {
-	ctx := context.Background()
-	store := newPlanReviewTaskStore(t)
-	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
-		llm.UserMessage(llm.Text("Add S3 sync to the skill installer.")),
-	}, "", ""))
-	appendInvestigationRows(t, store, 300)
-	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
-		metaEnvironmentMessage(),
-	}, "", ""))
-
-	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
-	require.Contains(t, got, "Add S3 sync to the skill installer.")
-	require.NotContains(t, got, "forebrain_environment_context")
-}
-
-// The runtime-injected environment block is stored as a user row. It is not
-// something the person asked for, so it is not reviewer material.
-func TestPlanReviewTaskContextSkipsRuntimeMetaRows(t *testing.T) {
-	ctx := context.Background()
-	store := newPlanReviewTaskStore(t)
-	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
-		llm.UserMessage(llm.Text("Add S3 sync to the skill installer.")),
-		metaEnvironmentMessage(),
-	}, "", ""))
-
-	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
-	require.Contains(t, got, "Add S3 sync to the skill installer.")
-	require.NotContains(t, got, "forebrain_environment_context")
-}
-
-// A long conversation is the case the review matters most for. Every message
-// the person sent reaches the reviewer, oldest first — the first one usually
-// states the task — however many turns and injected meta rows came since.
-func TestPlanReviewTaskContextKeepsEveryMessageOfALongConversation(t *testing.T) {
-	ctx := context.Background()
-	store := newPlanReviewTaskStore(t)
-	appendUserTurn(t, store, "/improve execute 282")
-	for i := 1; i <= 9; i++ {
-		require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{metaEnvironmentMessage()}, "", ""))
-		appendInvestigationRows(t, store, 20)
-		appendUserTurn(t, store, fmt.Sprintf("follow-up %d", i))
-	}
-
-	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
-	require.True(t, strings.HasPrefix(got, "<message n=\"1\">\n/improve execute 282\n</message>"), got)
-	last := -1
-	for i := 1; i <= 9; i++ {
-		at := strings.Index(got, fmt.Sprintf("<message n=\"%d\">\nfollow-up %d\n</message>", i+1, i))
-		require.Greater(t, at, last, "follow-up %d missing or out of order:\n%s", i, got)
-		last = at
-	}
-	require.NotContains(t, got, "forebrain_environment_context")
-	require.NotContains(t, got, "left out")
-}
-
-// What the user decided in a form and what they said when they sent a plan
-// back are as binding as their messages. A denial the engine wrote to deliver
-// a review is not the user's and stays out.
-func TestPlanReviewTaskContextCarriesAnswersAndPlanFeedback(t *testing.T) {
-	ctx := context.Background()
-	store, db := newPlanReviewTaskDB(t)
-	actions := &state.ActionService{DB: db}
-	appendUserTurn(t, store, "Add S3 sync to the skill installer.")
-
-	ask, err := actions.CreateAsk(ctx, state.AskForm{SessionID: "s1", Questions: []state.AskQuestion{{
-		ID: "Scope", Prompt: "Sync on install only, or on every run?",
-		Options: []state.AskOption{{ID: "Install only", Label: "Install only"}, {ID: "Every run", Label: "Every run"}},
-	}}})
-	require.NoError(t, err)
-	_, err = actions.AnswerAsk(ctx, ask.ID, state.AskAnswer{Answers: []state.AskAnswerItem{
-		{QuestionID: "Scope", OptionIDs: []string{"Install only"}},
-	}})
-	require.NoError(t, err)
-
-	rejected, err := actions.CreatePending(ctx, "s1", "exit_plan_mode", map[string]any{"action": "exit"})
-	require.NoError(t, err)
-	_, err = actions.Deny(ctx, rejected.ID, "Keep the old bucket layout.")
-	require.NoError(t, err)
-
-	delivered, err := actions.CreatePending(ctx, "s1", "exit_plan_mode", map[string]any{"action": "exit"})
-	require.NoError(t, err)
-	_, err = DeliverPlanReview(ctx, actions, delivered.ID)
-	require.NoError(t, err)
-
-	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
-	require.Contains(t, got, "<message n=\"1\">\nAdd S3 sync to the skill installer.\n</message>")
-	require.Contains(t, got, "<answers>\nSync on install only, or on every run?\n  → Install only\n</answers>")
-	require.Contains(t, got, "<plan_feedback>\nKeep the old bucket layout.\n</plan_feedback>")
-	require.NotContains(t, got, PlanReviewDeliveredReason)
-	require.Less(t, strings.Index(got, "<message"), strings.Index(got, "<answers>"))
-}
-
-// When everything does not fit, the newest message — what the plan is for —
-// and the first one — what started the work — are kept, the rest fills from
-// newest back, and what is left out is said so where it was. The result fits
-// the bound BuildPrompt applies, so BuildPrompt never cuts the newest entry
-// off the end.
-func TestPlanReviewTaskContextKeepsTheFirstAndNewestMessageWhenItDoesNotFit(t *testing.T) {
-	ctx := context.Background()
-	store := newPlanReviewTaskStore(t)
-	appendUserTurn(t, store, "Add S3 sync to the skill installer.")
-	for i := 0; i < 12; i++ {
-		appendUserTurn(t, store, fmt.Sprintf("middle turn %d: %s", i, strings.Repeat("a", 3000)))
-	}
-	appendUserTurn(t, store, "Now also cover the uninstall path.")
-
-	got, _ := planReviewTaskContext(ctx, store, "s1", time.Time{})
-	require.True(t, strings.HasPrefix(got, "<message n=\"1\">\nAdd S3 sync to the skill installer.\n</message>"), got[:200])
-	require.True(t, strings.HasSuffix(got, "<message n=\"14\">\nNow also cover the uninstall path.\n</message>"))
-	require.Regexp(t, `</message>\n\n\[\d+ entries left out to fit the length limit\]\n\n<message n="\d+">\nmiddle turn`, got)
-	require.Contains(t, got, "middle turn 11:", "the newest middle turns are kept before older ones")
-	require.NotContains(t, got, "middle turn 0:")
-	require.LessOrEqual(t, len([]rune(got)), MaxTaskChars)
-	require.Equal(t, got, strings.TrimSpace(Truncate(got, MaxTaskChars)))
-}
-
-// A screenshot is part of what the user said. Every message that attached
-// one is handed over with its number, whether or not its text fit, and a
-// message that sent only images keeps its place in the request.
-func TestPlanReviewTaskContextHandsOverEveryMessagesImages(t *testing.T) {
-	ctx := context.Background()
-	store := newPlanReviewTaskStore(t)
-	appendUserTurn(t, store, "Fix the header colour.")
-	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
-		llm.UserMessage(llm.Text("[Image #1] like this"), llm.ImageBase64("image/png", "iVBORw0KGgo=")),
-	}, "", ""))
-	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
-		llm.UserMessage(llm.ImageBase64("image/png", "iVBORw0KGgo=")),
-	}, "", ""))
-	// A row written before the display form was split still carries the path
-	// note and the marker inside its content: the reviewer gets the image and
-	// its note after it, so neither line belongs in the message text again.
-	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
-		llm.UserMessage(llm.Text("and here\n[Image: source: /tmp/a.png]\n[Image #1]"), llm.ImageBase64("image/png", "iVBORw0KGgo=")),
-	}, "", ""))
-
-	// The zero since keeps the whole request: this is a fresh review's
-	// context (the Again path is covered by its own test below).
-	got, images := planReviewTaskContext(ctx, store, "s1", time.Time{})
-	require.Contains(t, got, "<message n=\"2\">\nlike this\n</message>")
-	require.Contains(t, got, "<message n=\"3\">\n"+planReviewImageOnly+"\n</message>")
-	require.Contains(t, got, "<message n=\"4\">\nand here\n</message>")
-	require.NotContains(t, got, "[Image #1]")
-	require.NotContains(t, got, "[Image: source:")
-	require.Len(t, images, 3)
-	require.Equal(t, 2, images[0].Message)
-	require.Equal(t, 3, images[1].Message)
-	require.Equal(t, 4, images[2].Message)
-	require.Contains(t, images[0].PartsJSON, "iVBORw0KGgo=")
-}
-
 // A failure the engine classified travels with its code, so a surface can say
 // it in the viewer's language; the sentence stays for everything else.
 func TestRunPlanReviewCarriesAClassifiedFailuresCode(t *testing.T) {
@@ -1233,7 +1036,7 @@ func TestRunPlanReviewCarriesAClassifiedFailuresCode(t *testing.T) {
 	err := RunPlanReview(ctx, PlanReviewRun{
 		ActionID: "a1", Model: Model{Provider: "acme", Model: "text-only"},
 		SessionID: "s1", StateRoot: stateRoot, ProjectKey: "proj",
-		Reviewer: failingReviewer{err: codedReviewError{code: "image_input_unsupported"}},
+		Reviewer: failingReviewer{err: codedReviewError{code: "model_not_configured"}},
 		Publish: func(_ context.Context, evt event.RunEvent) error {
 			events = append(events, evt)
 			return nil
@@ -1247,7 +1050,7 @@ func TestRunPlanReviewCarriesAClassifiedFailuresCode(t *testing.T) {
 		}
 	}
 	require.Equal(t, planReviewOutcomeFailed, reviewed.Outcome)
-	require.Equal(t, "image_input_unsupported", reviewed.Code)
+	require.Equal(t, "model_not_configured", reviewed.Code)
 	require.Equal(t, "coded failure", reviewed.Error)
 }
 
@@ -1263,40 +1066,14 @@ func (r failingReviewer) Review(context.Context, Request) (PlanReviewResult, err
 }
 
 type recordingReviewer struct {
-	task     string
 	plan     string
 	planPath string
 }
 
 func (r *recordingReviewer) Review(_ context.Context, req Request) (PlanReviewResult, error) {
-	r.task = req.Task
 	r.plan = req.Plan
 	r.planPath = req.PlanPath
 	return PlanReviewResult{Model: req.Model, Text: "looks fine"}, nil
-}
-
-// The wiring-level counterpart: what the reviewer is handed through
-// RunPlanReview is the person's request, not the fallback.
-func TestRunPlanReviewHandsTheRequestToTheReviewer(t *testing.T) {
-	ctx := context.Background()
-	store := newPlanReviewTaskStore(t)
-	require.NoError(t, store.AppendNewMessages(ctx, "s1", "", []llm.Message{
-		llm.UserMessage(llm.Text("Add S3 sync to the skill installer.")),
-	}, "", ""))
-	appendInvestigationRows(t, store, 300)
-
-	stateRoot := t.TempDir()
-	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", "s1", "# Plan\n\nbody"))
-
-	reviewer := &recordingReviewer{}
-	require.NoError(t, RunPlanReview(ctx, PlanReviewRun{
-		ActionID: "a1", Model: Model{Provider: "openai", Model: "gpt-4o"},
-		SessionID: "s1", StateRoot: stateRoot, ProjectKey: "proj",
-		Transcripts: store, Reviewer: reviewer,
-	}))
-	require.Contains(t, reviewer.task, "Add S3 sync to the skill installer.")
-	require.Contains(t, reviewer.plan, "# Plan")
-	require.Equal(t, state.PlanPathForSession(stateRoot, "proj", "s1"), reviewer.planPath)
 }
 
 // The row a review runs on is part of its record, and it survives the round
@@ -1467,7 +1244,6 @@ func TestLastPlanReviewTakesTheNewestStartedWithSpawn(t *testing.T) {
 	require.Equal(t, "plan-review:new", again.ReviewID)
 	require.Equal(t, "agent-new", again.AgentID)
 	require.Equal(t, "task-new", again.TaskID)
-	require.Equal(t, newerAt, again.StartedAt)
 	require.Equal(t, Model{ID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3"}, model)
 
 	// The newest started has no spawn: no continuation, and no falling back to
@@ -1581,34 +1357,18 @@ func (r *againRecordingReviewer) Review(_ context.Context, req Request) (PlanRev
 
 // TestRunPlanReviewAgainContinuesThePreviousReview pins the continuation's
 // wiring: the started event names the review it continues and still gets its
-// own id, the reviewer is handed the Again record, and its task context holds
-// only what was said since the previous review started.
+// own id, and the reviewer is handed the Again record.
 func TestRunPlanReviewAgainContinuesThePreviousReview(t *testing.T) {
 	ctx := context.Background()
-	store := newPlanReviewTaskStore(t)
-	appendUserTurn(t, store, "Add S3 sync to the skill installer.")
-	// At is Unix seconds and a same-second input stays (the review itself may
-	// have started between two rows of one second), so the new input has to
-	// land in a later second than the old one for the cutoff to divide them.
-	oldInputs, err := store.ListUserInputs(ctx, "s1")
-	require.NoError(t, err)
-	require.NotEmpty(t, oldInputs)
-	oldAt := oldInputs[0].At
-	if wait := time.Until(time.Unix(oldAt+1, 0).Add(300 * time.Millisecond)); wait > 0 {
-		time.Sleep(wait)
-	}
-	appendUserTurn(t, store, "Use the blue theme instead.")
-	cutoff := time.Unix(oldAt+1, 0)
-
 	stateRoot := t.TempDir()
 	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", "s1", "# Plan\n\nbody"))
 	var events []event.RunEvent
 	reviewer := &againRecordingReviewer{}
-	err = RunPlanReview(ctx, PlanReviewRun{
+	err := RunPlanReview(ctx, PlanReviewRun{
 		ActionID: "a2", Model: Model{ID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash"},
 		SessionID: "s1", StateRoot: stateRoot, ProjectKey: "proj",
-		Transcripts: store, Reviewer: reviewer,
-		Again: &PlanReviewAgain{ReviewID: "plan-review:r1", AgentID: "agent-r1", TaskID: "task-r1", StartedAt: cutoff},
+		Reviewer: reviewer,
+		Again:    &PlanReviewAgain{ReviewID: "plan-review:r1", AgentID: "agent-r1", TaskID: "task-r1"},
 		Publish: func(_ context.Context, evt event.RunEvent) error {
 			events = append(events, evt)
 			return nil
@@ -1634,9 +1394,7 @@ func TestRunPlanReviewAgainContinuesThePreviousReview(t *testing.T) {
 	require.NotNil(t, reviewer.req.Again)
 	require.Equal(t, "plan-review:r1", reviewer.req.Again.ReviewID)
 	require.Equal(t, "task-r1", reviewer.req.Again.TaskID)
-	require.Contains(t, reviewer.req.Task, "Use the blue theme instead.")
-	require.NotContains(t, reviewer.req.Task, "Add S3 sync to the skill installer.",
-		"the reviewer already saw the earlier request; only what came after its review belongs here")
+	require.Equal(t, "# Plan\n\nbody", reviewer.req.Plan)
 }
 
 // Stopping a review is cancelling its context — the surface's Esc reaches

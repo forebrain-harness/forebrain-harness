@@ -383,6 +383,23 @@ func chatGPTLike() *fakeSubscription {
 	}
 }
 
+// qoderCNLike is a listing-driven sign-in's shape: the wire id the row is
+// written with, the vendor's own name for it, and — on one row — no name at
+// all, which is the case the wire id has to cover.
+func qoderCNLike() *fakeSubscription {
+	return &fakeSubscription{
+		id: "qodercn", label: "Qoder CN",
+		flows: []string{subscription.FlowBrowserCallback, subscription.FlowDeviceCode},
+		check: turn.SignInCheck{State: turn.SignInUsable},
+		login: newFakeLogin("https://qoder.com.cn/authorize", ""),
+		offers: []subscription.Offer{
+			{Subscription: "qodercn", Provider: "qodercn", Model: "auto", Name: "Auto", BaseURL: "https://gateway.qoder.com.cn", APIPath: "/algo/api/v2/service/pro/sse/agent_chat_generation", ContextWindow: 1000000, Default: true},
+			{Subscription: "qodercn", Provider: "qodercn", Model: "qmodel_38max", Name: "Qwen3.8-Max", BaseURL: "https://gateway.qoder.com.cn", APIPath: "/algo/api/v2/service/pro/sse/agent_chat_generation", ContextWindow: 1000000},
+			{Subscription: "qodercn", Provider: "qodercn", Model: "dmodel", BaseURL: "https://gateway.qoder.com.cn", APIPath: "/algo/api/v2/service/pro/sse/agent_chat_generation", ContextWindow: 1000000},
+		},
+	}
+}
+
 // openCodeLike is the OpenCode Go shape: a device code and nothing else.
 func openCodeLike() *fakeSubscription {
 	base := opencode.ProviderBaseURL("opencode-go")
@@ -476,6 +493,29 @@ func runSubscriptionSetup(t *testing.T, cfg PromptConfig, sub *fakeSubscription)
 	setup.setChoice(subscriptionChoice(sub))
 	setup.page = setupPageCredentials
 	return setup.run()
+}
+
+// dismissingSelector hands the first multi-select page one dismissal — the Esc
+// a person presses to step back — and answers everything after it like the plain
+// fake.
+type dismissingSelector struct {
+	*fakeSelector
+	dismissed bool
+}
+
+func (s *dismissingSelector) MultiSelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
+	if s.dismissed {
+		return s.fakeSelector.MultiSelectRichTabbed(label, items, opts)
+	}
+	s.dismissed = true
+	s.multiLabels = append(s.multiLabels, label)
+	options := make([]string, len(items))
+	for i, item := range items {
+		options[i] = item.Label
+	}
+	s.multiOptions = append(s.multiOptions, options)
+	s.multiDefaults = append(s.multiDefaults, append([]int(nil), opts.Checked...))
+	return nil, false, nil
 }
 
 // The first page is three groups in this order: the sign-ins the registry
@@ -589,6 +629,98 @@ func TestConfigureSubscriptionAddsTheModelsTheUserTicks(t *testing.T) {
 	}
 	if !strings.HasPrefix(selector.multiLabels[0], "ChatGPT\nChoose the models to add; each row shows where requests go.") {
 		t.Fatalf("offers page title = %q", selector.multiLabels[0])
+	}
+}
+
+// Both pages that list one batch of offers — the models to add, then the ones
+// the agent may pick for subagents on its own — call the models what the vendor
+// calls them, and fall back to the wire id only where the listing named none.
+func TestOffersPageLabelsModelsByVendorName(t *testing.T) {
+	sub := qoderCNLike()
+	// The rows are login-backed: a provider nothing registered would need an API
+	// key the page never asks for, and the write would fail on every retry.
+	appcfg.ResetProviderPluginsForTest()
+	t.Cleanup(appcfg.ResetProviderPluginsForTest)
+	appcfg.RegisterProviderPlugin(appcfg.BuiltinProvider{
+		ID: "qodercn", Label: "Qoder CN", LabelZH: "Qoder CN", LoginBacked: true,
+		Endpoints: []appcfg.ProviderEndpoint{{BaseURL: "https://gateway.qoder.com.cn"}},
+	})
+	selector := &fakeSelector{multiSelects: [][]int{{0, 1}}}
+	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	want := []string{"Auto", "Qwen3.8-Max", "dmodel"}
+	if got := selector.multiOptions[0]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("offer rows = %#v, want %#v", got, want)
+	}
+	if len(selector.multiOptions) < 2 {
+		t.Fatalf("pages drawn = %d, want the models list and the subagent list", len(selector.multiOptions))
+	}
+	if got := selector.multiOptions[1]; !reflect.DeepEqual(got, []string{"Auto", "Qwen3.8-Max"}) {
+		t.Fatalf("subagent rows = %#v, want the same names for the ticked models", got)
+	}
+	// What is written is still the wire id: a display name never becomes a model.
+	if opts.Model != "auto" || len(sub.provisioned) != 1 || sub.provisioned[0][1].Model != "qmodel_38max" {
+		t.Fatalf("options = %+v provisioned = %+v", opts, sub.provisioned)
+	}
+}
+
+// A sign-in page whose answer the probe already gave is not a step: the flow is
+// the list of sign-ins and the list of models, so Esc on the models goes back to
+// the page that asks. Only a page that will ask for a sign-in stays in the flow.
+func TestSubscriptionFlowDropsSettledSignInPage(t *testing.T) {
+	threePages := []int{setupPageProvider, setupPageCredentials, setupPageOffers}
+	for _, tc := range []struct {
+		name  string
+		check *turn.SignInCheck
+		want  []int
+	}{
+		{name: "a login that lists its models", check: &turn.SignInCheck{State: turn.SignInUsable}, want: []int{setupPageProvider, setupPageOffers}},
+		{name: "a login whose listing failed", check: &turn.SignInCheck{State: turn.SignInUnreachable}, want: []int{setupPageProvider, setupPageOffers}},
+		{name: "no login", check: &turn.SignInCheck{State: turn.SignInMissing}, want: threePages},
+		{name: "a dead login", check: &turn.SignInCheck{State: turn.SignInDead}, want: threePages},
+		{name: "not probed yet", want: threePages},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := qoderCNLike()
+			withSubscriptions(t, sub)
+			setup := newLLMSetup(PromptConfig{Selector: &fakeSelector{}, Output: io.Discard, Home: t.TempDir()})
+			setup.setChoice(subscriptionChoice(sub))
+			if tc.check != nil {
+				setup.probes = map[string]turn.SignInCheck{sub.ID(): *tc.check}
+			}
+			if got := setup.flowPages(); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("pages = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Esc on the list of models goes back to the list of sign-ins. It used to land
+// on the sign-in page, which answers itself for a login this machine holds and
+// steps straight forward again — the page never moved.
+func TestEscOnOffersPageReturnsToProviderPage(t *testing.T) {
+	sub := qoderCNLike()
+	selector := &dismissingSelector{fakeSelector: &fakeSelector{}}
+	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	if ok {
+		t.Fatal("the setup saved itself after Esc on the model list")
+	}
+	if len(selector.multiLabels) != 1 {
+		t.Fatalf("the model list was drawn %d times, want once", len(selector.multiLabels))
+	}
+	if len(selector.selectLabels) != 1 || !strings.HasPrefix(selector.selectLabels[0], "Connect a model") {
+		t.Fatalf("the page Esc landed on = %#v, want the list of sign-ins", selector.selectLabels)
+	}
+	if sub.startCalls != 0 {
+		t.Fatalf("sign-ins = %d, a login this machine holds must not sign in again", sub.startCalls)
+	}
+	if opts.Provider != "" {
+		t.Fatalf("options = %+v, want none written", opts)
 	}
 }
 

@@ -610,12 +610,11 @@ type ToolApprovalRequest struct {
 
 // PlanReviewAgain names one review that can be continued in its own subagent
 // conversation: the review's id, its reviewer subagent's roster key and task
-// id, and when it started.
+// id.
 type PlanReviewAgain struct {
-	ReviewID  string
-	AgentID   string
-	TaskID    string
-	StartedAt time.Time
+	ReviewID string
+	AgentID  string
+	TaskID   string
 }
 
 // PreviousPlanReview is the conversation's previous review as an approval

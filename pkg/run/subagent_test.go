@@ -412,7 +412,7 @@ func TestRunPlanReviewSubagentRunsWithSubagentsDisabled(t *testing.T) {
 	probe := &dispatchProbe{}
 	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg), Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "verdict"}}
 
-	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", nil, SubagentModelOverride{
+	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", SubagentModelOverride{
 		Provider: "openai", Model: "gpt-4o",
 	}, nil); err != nil {
 		t.Fatalf("plan review must run with subagents disabled: %v", err)
@@ -442,7 +442,7 @@ func TestPlanReviewSpawnEventNamesTheChosenModel(t *testing.T) {
 	probe := &dispatchProbe{}
 	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg), Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "verdict"}}
 
-	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", nil, SubagentModelOverride{
+	if _, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", SubagentModelOverride{
 		Provider: "zhipuai", Model: "glm-5.3-flash",
 	}, nil); err != nil {
 		t.Fatalf("plan review: %v", err)
@@ -462,49 +462,28 @@ func TestPlanReviewSpawnEventNamesTheChosenModel(t *testing.T) {
 	}
 }
 
-// A review's write scope is added to the task the reviewer runs and to the
-// parts that carry it — the same parts the worker stores as the reviewer's
-// first turn. A brief added to the text alone leaves a stored row that says one
-// thing while the model was sent another, and that turn is then carried twice:
-// the stored row as history, the live parts as input.
-func TestPlanReviewBriefReachesTheTaskAndTheParts(t *testing.T) {
+// A review's write scope is added to the task the reviewer runs: the brief
+// names the scratch directory and worktree the round may write in, and the
+// rules for using them are in the coding reviewer's system prompt.
+func TestPlanReviewBriefReachesTheTask(t *testing.T) {
 	scope := toolpkg.NewReviewWriteScope("/proj", "/tmp/scratch", "/repo/.git/worktrees", "/repo/.worktrees/r1")
-	parts := []llm.ContentPart{
-		llm.Text("  review the plan  "),
-		llm.Text("Image 1 of message 1:"),
-		llm.ImageBase64("image/png", sourceTestPNG),
-	}
 
-	task, got := planReviewTaskAndParts("  review the plan  ", parts, scope)
+	task := planReviewTask("  review the plan  ", scope)
 	if strings.TrimSpace(task) != task {
 		t.Fatalf("task %q keeps surrounding space", task)
 	}
 	if !strings.Contains(task, scope.Scratch()) {
 		t.Fatalf("task %q does not name the scratch directory", task)
 	}
-	if len(got) != len(parts) || got[0].Text != task {
-		t.Fatalf("parts = %#v, want the task the reviewer runs in the first text part", got)
-	}
-	if !reflect.DeepEqual(got[1:], parts[1:]) {
-		t.Fatalf("parts[1:] = %#v, want the label and the image unchanged", got[1:])
-	}
-	if parts[0].Text != "  review the plan  " {
-		t.Fatalf("the caller's parts were rewritten: %q", parts[0].Text)
-	}
 
 	// The trimming is unconditional: the worker trims what it stores and sends
 	// whether or not the review has a workspace.
-	task, got = planReviewTaskAndParts("  review the plan  ", parts, nil)
-	if task != "review the plan" {
+	if task := planReviewTask("  review the plan  ", nil); task != "review the plan" {
 		t.Fatalf("task = %q, want it trimmed", task)
 	}
-	if got[0].Text != task {
-		t.Fatalf("parts[0] = %q, want %q", got[0].Text, task)
-	}
 
-	// A review without images has no parts to enrich and gains none.
-	if task, got := planReviewTaskAndParts("review the plan", nil, scope); task != "review the plan"+planReviewWorkspaceBrief(scope) || got != nil {
-		t.Fatalf("task = %q / parts = %#v, want the task alone", task, got)
+	if task := planReviewTask("review the plan", scope); task != "review the plan"+planReviewWorkspaceBrief(scope) {
+		t.Fatalf("task = %q, want the task plus the workspace brief", task)
 	}
 }
 
@@ -5288,7 +5267,7 @@ func TestSubagentUsageSnapshotIsPublishedForItsOwnView(t *testing.T) {
 		Events:           reviewProbe,
 		SubagentExecutor: &snapshotReportingSubagentExecutor{input: 29000, output: 491},
 	}
-	if _, err := reviewer.RunPlanReviewSubagent(toolpkg.WithConversationSessionID(dispatchTestCtx(), "session-1"), "review the plan", nil, SubagentModelOverride{
+	if _, err := reviewer.RunPlanReviewSubagent(toolpkg.WithConversationSessionID(dispatchTestCtx(), "session-1"), "review the plan", SubagentModelOverride{
 		Provider: "zhipuai", Model: "glm-4.5",
 	}, nil); err != nil {
 		t.Fatalf("plan review: %v", err)
@@ -8243,7 +8222,7 @@ func TestContinuePlanReviewSubagentContinuesTheSameConversation(t *testing.T) {
 	task := "The planner revised the plan after your last review, and the user asked you to review it again before deciding."
 	out, err := runner.ContinuePlanReviewSubagent(
 		toolpkg.WithToolUseID(toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "session-1"), "parent-1"), "plan-review:r2"),
-		"task-r1", task, nil, nil)
+		"task-r1", task, nil)
 	if err != nil {
 		t.Fatalf("ContinuePlanReviewSubagent: %v", err)
 	}
@@ -8308,15 +8287,15 @@ func TestContinuePlanReviewSubagentGuardsItsRecords(t *testing.T) {
 	runner := fac.Owner
 	ctx := toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "session-1"), "parent-1")
 
-	if _, err := runner.ContinuePlanReviewSubagent(ctx, "task-missing", "again", nil, nil); err == nil ||
+	if _, err := runner.ContinuePlanReviewSubagent(ctx, "task-missing", "again", nil); err == nil ||
 		!strings.Contains(err.Error(), "no longer available") {
 		t.Fatalf("missing record error = %v", err)
 	}
-	if _, err := runner.ContinuePlanReviewSubagent(ctx, "task-general", "again", nil, nil); err == nil ||
+	if _, err := runner.ContinuePlanReviewSubagent(ctx, "task-general", "again", nil); err == nil ||
 		!strings.Contains(err.Error(), "not a plan review") {
 		t.Fatalf("non-reviewer record error = %v", err)
 	}
-	if _, err := runner.ContinuePlanReviewSubagent(ctx, "task-running", "again", nil, nil); err == nil ||
+	if _, err := runner.ContinuePlanReviewSubagent(ctx, "task-running", "again", nil); err == nil ||
 		!strings.Contains(err.Error(), "still running") {
 		t.Fatalf("running record error = %v", err)
 	}

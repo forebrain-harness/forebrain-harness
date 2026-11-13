@@ -555,10 +555,34 @@ func (s *llmSetup) flowPages() []int {
 		}
 		return append(pages, setupPageConnection, setupPageSubagents, setupPageReview)
 	case s.choice.Subscription != "":
+		// A sign-in this machine already holds — or one whose listing failed —
+		// has nothing to answer on its page: the probe decided it before the
+		// flow started. Leaving that page out keeps Esc where the user expects
+		// it, on the list of models, going back to the list of sign-ins.
+		if s.subscriptionSettled() {
+			return []int{setupPageProvider, setupPageOffers}
+		}
 		return []int{setupPageProvider, setupPageCredentials, setupPageOffers}
 	default:
 		return []int{setupPageProvider, setupPageCredentials, setupPageModel, setupPageSubagents, setupPageReview}
 	}
+}
+
+// subscriptionSettled reports whether the chosen subscription's cached probe
+// already answers the sign-in page: the login stands (usable), or it stands but
+// the vendor's listing failed (unreachable) — the two answers signIn takes as
+// done. The provider page fills that cache before the flow starts, so a page
+// that would only step forward again is not counted as one.
+func (s *llmSetup) subscriptionSettled() bool {
+	sub := s.subscription()
+	if sub == nil {
+		return false
+	}
+	check, ok := s.probes[sub.ID()]
+	if !ok {
+		return false
+	}
+	return check.State == turn.SignInUsable || check.State == turn.SignInUnreachable
 }
 
 // pageIndex is where the current page stands in the flow, for the step header.
@@ -1318,7 +1342,7 @@ func (s *llmSetup) pickOffers() (bool, error) {
 	items := make([]SelectItem, len(s.offers))
 	for i, offer := range s.offers {
 		items[i] = SelectItem{
-			Label:       offer.Model,
+			Label:       offerDisplayName(offer),
 			Description: turn.ModelEndpointLabel(offer.BaseURL, offer.APIPath, false),
 			Category:    offer.PlanLabel,
 		}
@@ -1455,6 +1479,16 @@ func defaultOffers(offers []subscription.Offer) []int {
 		checked = append(checked, 0)
 	}
 	return checked
+}
+
+// offerDisplayName is what a picker calls an offer: the vendor's own name for
+// the model, and the wire id only when the listing named none — the two pages
+// that list one batch of offers ask it the same question.
+func offerDisplayName(offer subscription.Offer) string {
+	if name := strings.TrimSpace(offer.Name); name != "" {
+		return name
+	}
+	return offer.Model
 }
 
 // fetchOffers lists what the sign-in unlocked, and is where a failed listing is
@@ -1763,7 +1797,7 @@ func (s *llmSetup) pickOfferSubagents(chosen []subscription.Offer, chosenIdxs []
 	checked := make([]int, 0, len(chosen))
 	for i, offer := range chosen {
 		items[i] = SelectItem{
-			Label:       offer.Model,
+			Label:       offerDisplayName(offer),
 			Description: turn.ModelEndpointLabel(offer.BaseURL, offer.APIPath, false),
 			Category:    offer.PlanLabel,
 		}

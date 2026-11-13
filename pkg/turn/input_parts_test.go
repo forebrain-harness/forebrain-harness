@@ -868,17 +868,22 @@ func TestPermissionFacadeDelegation(t *testing.T) {
 	require.Equal(t, update, facade.updates[0])
 }
 
-func TestBuildPromptDelimitsRequestAndPlan(t *testing.T) {
-	prompt := BuildPrompt(Request{
-		Task: "Add S3 sync to the skill installer.",
-		Plan: "# Plan\n\n1. Do the thing.",
-	})
+// The review's material is the plan alone. The plan file the user is asked to
+// approve already carries the context the reviewer needs, so the conversation's
+// request is not copied into the prompt beside it.
+func TestBuildPromptCarriesThePlanAndNotTheRequest(t *testing.T) {
+	prompt := BuildPrompt(Request{Plan: "# Plan\n\n1. Do the thing."})
 	for _, want := range []string{
-		"<request>\nAdd S3 sync to the skill installer.\n</request>",
+		"Review the plan below before the user decides whether to approve it.\n\n",
 		"<plan>\n# Plan\n\n1. Do the thing.\n</plan>",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, unwanted := range []string{"<request", "<request_since"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("the review prompt must not carry %q:\n%s", unwanted, prompt)
 		}
 	}
 }
@@ -886,27 +891,13 @@ func TestBuildPromptDelimitsRequestAndPlan(t *testing.T) {
 // The reviewer has investigation tools; the task must tell it to use them
 // before judging, or it reviews the plan against the plan.
 func TestBuildPromptOrdersInvestigationBeforeJudgement(t *testing.T) {
-	prompt := BuildPrompt(Request{Task: "Add S3 sync.", Plan: "# Plan"})
+	prompt := BuildPrompt(Request{Plan: "# Plan"})
 	read := strings.Index(prompt, "Investigate the project sources this plan touches")
 	if read < 0 {
 		t.Fatalf("task must direct the reviewer to the source first:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "work out for yourself what the request requires") {
 		t.Fatalf("task must ask for the reviewer's own understanding:\n%s", prompt)
-	}
-}
-
-func TestBuildPromptSaysWhenTheRequestIsUnavailable(t *testing.T) {
-	prompt := BuildPrompt(Request{Plan: "# Plan"})
-	if !strings.Contains(prompt, "the originating request is not available") &&
-		!strings.Contains(prompt, "The originating request is not available") {
-		t.Fatalf("prompt must admit the missing task context:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "project sources") {
-		t.Fatalf("the fallback must send the reviewer to the project sources:\n%s", prompt)
-	}
-	if strings.Contains(prompt, "the code it touches") {
-		t.Fatalf("the fallback must not describe a code-only plan:\n%s", prompt)
 	}
 }
 
@@ -918,7 +909,7 @@ func TestBuildPromptTruncatesAnOversizedPlan(t *testing.T) {
 	if !strings.Contains(prompt, "do not report the cut as a gap in the plan") {
 		t.Fatalf("with no file to read, the reviewer must be told the cut is not the plan's:\n%s", prompt[:400])
 	}
-	if len([]rune(prompt)) > MaxPlanChars+MaxTaskChars+800 {
+	if len([]rune(prompt)) > MaxPlanChars+800 {
 		t.Fatalf("prompt is not bounded: %d runes", len([]rune(prompt)))
 	}
 }
@@ -928,7 +919,7 @@ func TestBuildPromptTruncatesAnOversizedPlan(t *testing.T) {
 // it missing. The prompt names the file every time.
 func TestBuildPromptNamesThePlanFile(t *testing.T) {
 	const path = "/home/u/.forebrain/workspace/plans/proj/s1/plan.md"
-	prompt := BuildPrompt(Request{Task: "Add S3 sync.", Plan: "# Plan\n\n1. Ship it.", PlanPath: path})
+	prompt := BuildPrompt(Request{Plan: "# Plan\n\n1. Ship it.", PlanPath: path})
 	if !strings.Contains(prompt, "The plan file is "+path) {
 		t.Fatalf("prompt must name the plan file:\n%s", prompt)
 	}
@@ -944,7 +935,7 @@ func TestBuildPromptSendsTheReviewerToTheFileForALongPlan(t *testing.T) {
 	const path = "/home/u/.forebrain/workspace/plans/proj/s1/plan.md"
 	line := strings.Repeat("y", 99) + "\n"
 	plan := "# Plan\n" + strings.Repeat(line, MaxPlanChars/100+50) + "## Done criteria\nall green"
-	prompt := BuildPrompt(Request{Task: "Add S3 sync.", Plan: plan, PlanPath: path})
+	prompt := BuildPrompt(Request{Plan: plan, PlanPath: path})
 	for _, want := range []string{
 		"Read the whole file with your read tools before you judge anything",
 		"[truncated: the plan continues in " + path + "]",
@@ -965,51 +956,6 @@ func TestBuildPromptSendsTheReviewerToTheFileForALongPlan(t *testing.T) {
 	}
 	if len([]rune(excerpt)) > MaxPlanChars {
 		t.Fatalf("excerpt is %d runes, over %d", len([]rune(excerpt)), MaxPlanChars)
-	}
-}
-
-func TestBuildPromptSaysTheImagesComeWithTheRequest(t *testing.T) {
-	prompt := BuildPrompt(Request{Task: "<message n=\"1\">\nlike this\n</message>", Plan: "# Plan", Images: []RequestImage{{Message: 1, Files: []string{"/a.png"}}}})
-	if !strings.Contains(prompt, "The images the user attached follow this text") ||
-		!strings.Contains(prompt, "crop or enlarge it with a script") {
-		t.Fatalf("prompt must say the images and their files come with the request:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "\n<images>\n") {
-		t.Fatalf("prompt must name the block listing the files:\n%s", prompt)
-	}
-	without := BuildPrompt(Request{Task: "x", Plan: "# Plan"})
-	if strings.Contains(without, "The images the user attached") || strings.Contains(without, "<images>") {
-		t.Fatal("a request without images must not mention them")
-	}
-}
-
-// The reviewer is told where each picture it is sent is stored, in the text and
-// not in a line after the picture: the label before an image and its line in
-// <images> are the same key, so a file is found without counting pictures.
-func TestBuildPromptListsEveryImageFile(t *testing.T) {
-	prompt := BuildPrompt(Request{
-		Task: "<message n=\"1\">\nlike this\n</message>",
-		Plan: "# Plan",
-		Images: []RequestImage{
-			{Message: 2, Files: []string{"/a.png"}},
-			{Message: 3, Files: []string{"/b.png", "/c.png"}},
-			{Message: 4},
-		},
-	})
-	for _, want := range []string{
-		"<images>",
-		"Image 1 of message 2: /a.png",
-		"Image 2 of message 3: /c.png",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing %q:\n%s", want, prompt)
-		}
-	}
-	if block, request, plan := strings.Index(prompt, "\n<images>\n"), strings.Index(prompt, "</request>"), strings.Index(prompt, "<plan>"); block < request || block > plan {
-		t.Fatalf("the files must be named after the request and before the plan:\n%s", prompt)
-	}
-	if strings.Contains(prompt, "of message 4") {
-		t.Fatalf("an image whose file cannot be named adds no line:\n%s", prompt)
 	}
 }
 
@@ -1538,17 +1484,13 @@ func TestFilterMatchesTheWholeQueryOnly(t *testing.T) {
 }
 
 // BuildReReviewPrompt is the message that continues a previous review's
-// subagent conversation: the fixed opening, the new input since the last
-// review (when there is any), then exactly BuildPrompt's image and plan
-// sections, and the re-review instructions whose whole-file variant matches
-// the truncated-with-path case. Five combinations are pinned.
+// subagent conversation: the fixed opening, then exactly BuildPrompt's plan
+// section, then the re-review instructions whose whole-file variant matches
+// the truncated-with-path case.
 func TestBuildReReviewPromptWithoutNewInput(t *testing.T) {
 	prompt := BuildReReviewPrompt(Request{Plan: "# Plan\n\n1. Do the thing."})
 	if !strings.HasPrefix(prompt, "The planner revised the plan after your last review, and the user asked you to review it again before deciding. Your earlier investigation and review are above in this conversation: build on them instead of starting over.\n\n") {
 		t.Fatalf("prompt must open with the fixed continuation sentence:\n%s", prompt)
-	}
-	if strings.Contains(prompt, "<request_since>") {
-		t.Fatalf("no new input must leave the request block out:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "<plan>\n# Plan\n\n1. Do the thing.\n</plan>") {
 		t.Fatalf("the plan section must match BuildPrompt's:\n%s", prompt)
@@ -1558,43 +1500,11 @@ func TestBuildReReviewPromptWithoutNewInput(t *testing.T) {
 	}
 }
 
-func TestBuildReReviewPromptWithNewInput(t *testing.T) {
-	prompt := BuildReReviewPrompt(Request{
-		Task: "<message n=\"1\">\nchange the colour to blue\n</message>",
-		Plan: "# Plan",
-	})
-	if !strings.Contains(prompt, "Since your last review the user said the following, oldest first: their messages, their answers to questions they were asked, and their feedback on plans they sent back.\n\n<request_since>\n<message n=\"1\">\nchange the colour to blue\n</message>\n</request_since>\n\n") {
-		t.Fatalf("new input must ride in <request_since>:\n%s", prompt)
-	}
-	// BuildPrompt's request framing does not belong here: the reviewer was
-	// introduced to the request last time.
-	if strings.Contains(prompt, "The request is what the user said") || strings.Contains(prompt, "<request>\n") {
-		t.Fatalf("the continuation must not repeat the fresh review's request framing:\n%s", prompt)
-	}
-}
-
-func TestBuildReReviewPromptCarriesImages(t *testing.T) {
-	prompt := BuildReReviewPrompt(Request{
-		Task:  "<message n=\"1\">\nlike this\n</message>",
-		Plan:  "# Plan",
-		Again: &PlanReviewAgain{ReviewID: "plan-review:r1"},
-		Images: []RequestImage{
-			{Message: 1, Files: []string{"/a.png"}},
-		},
-	})
-	if !strings.Contains(prompt, "\n<images>\nEach line names one of the images the request attached and the file it is stored in.\nImage 1 of message 1: /a.png\n</images>\n\n") {
-		t.Fatalf("the images block must be exactly BuildPrompt's:\n%s", prompt)
-	}
-	if strings.Contains(prompt, "The images the user attached follow this text") {
-		t.Fatalf("the fresh review's image framing must not appear:\n%s", prompt)
-	}
-}
-
 func TestBuildReReviewPromptTruncatedPlanWithFile(t *testing.T) {
 	const path = "/home/u/.forebrain/workspace/plans/proj/s1/plan.md"
 	line := strings.Repeat("y", 99) + "\n"
 	plan := "# Plan\n" + strings.Repeat(line, MaxPlanChars/100+50) + "## Done criteria\nall green"
-	prompt := BuildReReviewPrompt(Request{Task: "x", Plan: plan, PlanPath: path})
+	prompt := BuildReReviewPrompt(Request{Plan: plan, PlanPath: path})
 	for _, want := range []string{
 		"The plan file is " + path,
 		"Read the whole file with your read tools before you judge anything",

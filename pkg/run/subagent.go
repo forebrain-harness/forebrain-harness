@@ -4894,12 +4894,8 @@ const PlanReviewApprovalBudget = SubagentApprovalBudget
 // which model answers: the approval overlay asks, and override pins the model
 // the user picked. Everything the UI keys off — roster row, per-agent screen,
 // cancel-by-row — therefore behaves exactly as it does for subagent_run.
-//
-// parts, when given, is the whole first message — the task's text part first,
-// then what it carries (the images the user attached to the conversation) —
-// as a user turn's InputParts are.
 func (r *Runner) RunPlanReviewSubagent(
-	ctx context.Context, task string, parts []llm.ContentPart, override SubagentModelOverride, approve PlanReviewApprovalFunc,
+	ctx context.Context, task string, override SubagentModelOverride, approve PlanReviewApprovalFunc,
 ) (string, error) {
 	if r == nil {
 		return "", fmt.Errorf("plan review requires a runner")
@@ -4919,7 +4915,7 @@ func (r *Runner) RunPlanReviewSubagent(
 		ctx = tool.WithReviewWriteScope(ctx, scope)
 		defer scope.Release()
 	}
-	task, parts = planReviewTaskAndParts(task, parts, scope)
+	task = planReviewTask(task, scope)
 	// agents.defaults.enable_subagent governs the subagents the model may
 	// spawn; the reviewer is dispatched only because the user asked for it
 	// from the approval overlay, so that switch does not apply here.
@@ -4932,7 +4928,7 @@ func (r *Runner) RunPlanReviewSubagent(
 		// sees, so it resolves against every built-in rather than the public set.
 		resolve: agent.ResolveSubtype,
 		run: func(_ context.Context, fac Factory, prep preparedSubagent) (string, error) {
-			return r.runPlanReviewAcrossApprovals(subagentExecContext(prep), fac, prep, parts, approve)
+			return r.runPlanReviewAcrossApprovals(subagentExecContext(prep), fac, prep, approve)
 		},
 	})
 	if err != nil {
@@ -4953,7 +4949,7 @@ func (r *Runner) RunPlanReviewSubagent(
 // (RunPlanReviewSubagent): a coding conversation's reviewer gets a new
 // scratch directory and worktree for the round, named in the task's tail.
 func (r *Runner) ContinuePlanReviewSubagent(
-	ctx context.Context, taskID, task string, parts []llm.ContentPart, approve PlanReviewApprovalFunc,
+	ctx context.Context, taskID, task string, approve PlanReviewApprovalFunc,
 ) (string, error) {
 	if r == nil {
 		return "", fmt.Errorf("plan review requires a runner")
@@ -4979,10 +4975,10 @@ func (r *Runner) ContinuePlanReviewSubagent(
 		ctx = tool.WithReviewWriteScope(ctx, scope)
 		defer scope.Release()
 	}
-	task, parts = planReviewTaskAndParts(task, parts, scope)
+	task = planReviewTask(task, scope)
 	// No model override here: the round runs on the model the record carries,
 	// which is the reviewer the user picked the first time.
-	_, out, err := continueSubagentRecord(ctx, r.subagentFactory(), record, task, parts, approve)
+	_, out, err := continueSubagentRecord(ctx, r.subagentFactory(), record, task, nil, approve)
 	if err != nil {
 		return "", err
 	}
@@ -5009,24 +5005,18 @@ func (r *Runner) planReviewWriteScope(ctx context.Context) *tool.ReviewWriteScop
 	return nil
 }
 
-// planReviewTaskAndParts appends the review's workspace brief to the task and
-// to the parts that carry it. The parts are what the reviewer's session row
-// stores, so a brief added to the text alone leaves a row that says one thing
-// while the model was sent another — and that turn is then carried twice: the
-// stored row as history, the live parts as input.
+// planReviewTask appends the review's workspace brief to the task: the brief
+// names the scratch directory and worktree this round may write in, and its
+// rules are in the coding reviewer's system prompt.
 //
 // The text is trimmed exactly as the worker trims it before it stores and
-// sends it (pkg/process/worker_cli.go:104/121), so the parts and the row are
-// byte-identical, not merely equal when nothing happens to trail.
-func planReviewTaskAndParts(task string, parts []llm.ContentPart, scope *tool.ReviewWriteScope) (string, []llm.ContentPart) {
+// sends it (pkg/process/worker_cli.go:104/121).
+func planReviewTask(task string, scope *tool.ReviewWriteScope) string {
 	task = strings.TrimSpace(task)
 	if scope != nil {
 		task += planReviewWorkspaceBrief(scope)
 	}
-	if len(parts) > 0 {
-		parts = pipelineParts(task, parts)
-	}
-	return task, parts
+	return task
 }
 
 // planReviewWorkspaceBrief names the paths of one review's write scope. The
@@ -5082,13 +5072,13 @@ func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID
 // request can be put to the user in that place and the run resumed with the
 // answer. A reviewer is never refused a tool for lack of an approval path.
 func (r *Runner) runPlanReviewAcrossApprovals(
-	ctx context.Context, fac Factory, prep preparedSubagent, parts []llm.ContentPart, approve PlanReviewApprovalFunc,
+	ctx context.Context, fac Factory, prep preparedSubagent, approve PlanReviewApprovalFunc,
 ) (string, error) {
 	return runSubagentExecution(ctx, fac, prep.entry, func(execCtx context.Context) (string, error) {
 		return runAcrossApprovals(execCtx, approve, prep.superviseRunID, "plan review",
 			func(runCtx context.Context, superviseRunID string) (string, error) {
 				return executeSubagent(
-					runCtx, fac, prep.entry, prep.task, parts, superviseRunID, prep.parentRunID,
+					runCtx, fac, prep.entry, prep.task, nil, superviseRunID, prep.parentRunID,
 					prep.sessionID, prep.workerSessionID, prep.subagentType,
 				)
 			})

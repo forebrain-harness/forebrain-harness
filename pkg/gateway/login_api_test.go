@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
-	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
@@ -184,9 +183,10 @@ func (sub *loginSubscription) Offers(context.Context, subscription.Env) ([]subsc
 	return sub.offers, nil
 }
 
-// Provision writes the chosen offers the way a real subscription does — one row
-// per offer, under this sign-in's source — so the default-model rule and the row
-// shape are exercised rather than mocked.
+// Provision writes the chosen offers through the registry's own writer — one row
+// per offer, under this sign-in's source, carrying the capabilities the listing
+// declared — so the default-model rule and the row shape are exercised rather
+// than mocked.
 func (sub *loginSubscription) Provision(ctx context.Context, env subscription.Env,
 	offers []subscription.Offer, opts subscription.ProvisionOptions) ([]string, error) {
 	sub.mu.Lock()
@@ -195,24 +195,7 @@ func (sub *loginSubscription) Provision(ctx context.Context, env subscription.En
 	if sub.provisionErr != nil {
 		return nil, sub.provisionErr
 	}
-	ids := make([]string, 0, len(offers))
-	for _, offer := range offers {
-		empty := ""
-		id, err := process.UpsertLLMModel(ctx, env.DB, process.LLMModelInput{
-			Provider:   offer.Provider,
-			Model:      offer.Model,
-			BaseURL:    offer.BaseURL,
-			APIPath:    offer.APIPath,
-			APIKey:     &empty,
-			Source:     sub.id,
-			SourcePlan: offer.Plan,
-		})
-		if err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
+	return subscription.ProvisionRows(ctx, env, offers, sub.id)
 }
 
 func (sub *loginSubscription) RefreshKey(_ context.Context, _ subscription.Env, modelID string) error {

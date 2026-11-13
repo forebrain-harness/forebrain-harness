@@ -76,22 +76,6 @@ SELECT id, content, parts, created_at FROM fb_messages
 WHERE session_id=$1 AND role='user' AND visibility=$2
 ORDER BY id DESC`,
 	}
-	// A rewind that took the conversation back hid its anchor message; one
-	// that only restored files left it visible and discarded nothing said.
-	rewoundStretchesSQL = dbx.SQL{
-		SQLite: `
-SELECT m.created_at, r.created_at_ms FROM fb_rewinds r
-JOIN fb_messages m ON m.id = r.anchor_message_id
-WHERE r.session_id=? AND m.visibility=?`,
-		MySQL: `
-SELECT m.created_at, r.created_at_ms FROM fb_rewinds r
-JOIN fb_messages m ON m.id = r.anchor_message_id
-WHERE r.session_id=? AND m.visibility=?`,
-		Postgres: `
-SELECT m.created_at, r.created_at_ms FROM fb_rewinds r
-JOIN fb_messages m ON m.id = r.anchor_message_id
-WHERE r.session_id=$1 AND m.visibility=$2`,
-	}
 	insertRewindSQL = dbx.SQL{
 		SQLite: `
 INSERT INTO fb_rewinds(id, session_id, anchor_message_id, mode, hidden_event_seq_from, files_json, state, created_at_ms)

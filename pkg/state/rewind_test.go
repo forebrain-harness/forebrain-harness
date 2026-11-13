@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/stretchr/testify/require"
 )
@@ -298,4 +299,65 @@ func TestRewindHidesNothingInAnotherSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, total)
 	require.Equal(t, 1, byTool["read_file"])
+}
+
+// appendUserRow stores one user row, stamps it with createdAt, and returns
+// its id.
+func appendUserRow(t *testing.T, db *sql.DB, store *SessionStore, sid, text string, meta bool, createdAt int64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	msg := llm.UserMessage(llm.Text(text))
+	msg.IsMeta = meta
+	require.NoError(t, store.AppendNewMessages(ctx, sid, "", []llm.Message{msg}, "", ""))
+	var id int64
+	require.NoError(t, db.QueryRowContext(ctx,
+		dbx.Rebind(dbx.DialectOf(db), `SELECT MAX(id) FROM fb_messages WHERE session_id=?`), sid).Scan(&id))
+	if createdAt > 0 {
+		_, err := db.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(db), `UPDATE fb_messages SET created_at=? WHERE id=?`), createdAt, id)
+		require.NoError(t, err)
+	}
+	return id
+}
+
+// The runtime injects meta user rows — a turn can inject dozens in a row — and
+// the limit must count the person's messages, not rows, or the injected rows
+// crowd the messages out of the window.
+func TestListVisibleUserMessagesLimitCountsMessagesNotMetaRows(t *testing.T) {
+	ctx := context.Background()
+	db := openSessionDB(t)
+	store := NewSessionStore(db, "main")
+	require.NoError(t, store.Ensure(ctx, "s1", "s1"))
+	for i := 0; i < 3; i++ {
+		appendUserRow(t, db, store, "s1", fmt.Sprintf("message %d", i), false, 0)
+		for j := 0; j < 10; j++ {
+			appendUserRow(t, db, store, "s1", "<system-reminder>injected</system-reminder>", true, 0)
+		}
+	}
+
+	two, err := store.ListVisibleUserMessages(ctx, "s1", 2)
+	require.NoError(t, err)
+	require.Len(t, two, 2)
+	require.Equal(t, "message 2", two[0].Content)
+	require.Equal(t, "message 1", two[1].Content)
+
+	all, err := store.ListVisibleUserMessages(ctx, "s1", 0)
+	require.NoError(t, err)
+	require.Len(t, all, 3, "a non-positive limit reads every message")
+}
+
+// A turn the runtime started (a reminder, a peer's message, a hook) can stack
+// more meta rows after the person's last message than any fixed row window.
+func TestLatestUserMessageRowIDSeesPastALongRunOfMetaRows(t *testing.T) {
+	ctx := context.Background()
+	db := openSessionDB(t)
+	store := NewSessionStore(db, "main")
+	require.NoError(t, store.Ensure(ctx, "s1", "s1"))
+	want := appendUserRow(t, db, store, "s1", "fix the installer", false, 0)
+	for i := 0; i < 60; i++ {
+		appendUserRow(t, db, store, "s1", "<system-reminder>injected</system-reminder>", true, 0)
+	}
+
+	got, err := store.LatestUserMessageRowID(ctx, "s1")
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }

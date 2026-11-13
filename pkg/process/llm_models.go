@@ -636,6 +636,22 @@ type LLMModelInput struct {
 	// source documents (the custom form's ticked levels, plan 267). nil keeps
 	// the stored value on an update; an empty slice states "no levels".
 	CapEfforts *[]string
+	// CapContextWindow and CapImages are the capabilities the subscription's
+	// own listing declared for this model — the row's values, which win over
+	// the catalog's. nil keeps the stored value on an update and leaves the row
+	// without one on a create; a caller that does not know the window names nil
+	// rather than 0, because 0 is not a window.
+	CapContextWindow *int64
+	CapImages        *bool
+	// CapReasoningOff is whether a mode that turns thinking off exists: the
+	// row's value, rendered as "none" at the head of its levels. nil keeps the
+	// stored value on an update and leaves the row without one on a create.
+	CapReasoningOff *bool
+	// CapDefaultEffort is the level the listing marks as its default: the row's
+	// value, applied to a request whose params name no effort. nil keeps the
+	// stored value on an update and leaves the row without one on a create; a
+	// non-nil "" states the listing names no default.
+	CapDefaultEffort *string
 }
 
 // UpsertLLMModel stores one model by identity (normalized with
@@ -687,6 +703,21 @@ func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, 
 		if in.CapEfforts != nil {
 			row.CapEfforts = append([]string{}, (*in.CapEfforts)...)
 		}
+		if in.CapContextWindow != nil {
+			window := *in.CapContextWindow
+			row.CapContextWindow = &window
+		}
+		if in.CapImages != nil {
+			images := *in.CapImages
+			row.CapImages = &images
+		}
+		if in.CapReasoningOff != nil {
+			off := *in.CapReasoningOff
+			row.CapReasoningOff = &off
+		}
+		if in.CapDefaultEffort != nil {
+			row.CapDefaultEffort = strings.TrimSpace(*in.CapDefaultEffort)
+		}
 		if source := strings.TrimSpace(in.Source); source != "" {
 			row.Source = source
 		}
@@ -713,6 +744,25 @@ func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, 
 	if in.CapEfforts != nil {
 		efforts = append([]string{}, (*in.CapEfforts)...)
 	}
+	var window *int64
+	if in.CapContextWindow != nil {
+		named := *in.CapContextWindow
+		window = &named
+	}
+	var images *bool
+	if in.CapImages != nil {
+		named := *in.CapImages
+		images = &named
+	}
+	var reasoningOff *bool
+	if in.CapReasoningOff != nil {
+		named := *in.CapReasoningOff
+		reasoningOff = &named
+	}
+	defaultEffort := ""
+	if in.CapDefaultEffort != nil {
+		defaultEffort = strings.TrimSpace(*in.CapDefaultEffort)
+	}
 	// A new row defaults to not authorized: nil means "not answered", and an
 	// unanswered switch is off (owner 2026-11-10).
 	subagentAllowed := false
@@ -720,17 +770,21 @@ func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, 
 		subagentAllowed = *in.SubagentAllowed
 	}
 	created, err := store.Create(ctx, state.LLMModel{
-		Provider:        provider,
-		Model:           model,
-		BaseURL:         baseURL,
-		APIPath:         apiPath,
-		APIKey:          key,
-		ParamsJSON:      params,
-		CapEfforts:      efforts,
-		Source:          strings.TrimSpace(in.Source),
-		SourcePlan:      strings.TrimSpace(in.SourcePlan),
-		URLVerbatim:     in.URLVerbatim,
-		SubagentAllowed: subagentAllowed,
+		Provider:         provider,
+		Model:            model,
+		BaseURL:          baseURL,
+		APIPath:          apiPath,
+		APIKey:           key,
+		ParamsJSON:       params,
+		CapEfforts:       efforts,
+		CapContextWindow: window,
+		CapImages:        images,
+		CapReasoningOff:  reasoningOff,
+		CapDefaultEffort: defaultEffort,
+		Source:           strings.TrimSpace(in.Source),
+		SourcePlan:       strings.TrimSpace(in.SourcePlan),
+		URLVerbatim:      in.URLVerbatim,
+		SubagentAllowed:  subagentAllowed,
 	})
 	if err != nil {
 		// A concurrent writer stored the same identity between the lookup and

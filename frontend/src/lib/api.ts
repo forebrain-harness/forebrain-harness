@@ -1540,6 +1540,9 @@ export interface SubscriptionOffer {
   planName: string
   provider: string
   model: string
+  /** The vendor's own name for `model`; absent when its listing named none, in
+   *  which case the page shows the wire id. */
+  name?: string
   baseUrl: string
   apiPath: string
   endpoint: string

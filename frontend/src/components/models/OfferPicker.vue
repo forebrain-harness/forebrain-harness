@@ -16,7 +16,7 @@
         </label>
         <ModelSignature
           class="orow__sig"
-          :model="row.offer.model"
+          :model="row.offer.name || row.offer.model"
           :base-url="row.offer.baseUrl"
           :api-path="row.offer.apiPath"
           hide-provider

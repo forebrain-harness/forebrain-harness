@@ -59,10 +59,13 @@ type subscriptionRow struct {
 // subscriptionOffer is one model a finished sign-in unlocked, as the picker
 // lists it.
 type subscriptionOffer struct {
-	Plan           string `json:"plan"`
-	PlanName       string `json:"plan_name"`
-	Provider       string `json:"provider"`
-	Model          string `json:"model"`
+	Plan     string `json:"plan"`
+	PlanName string `json:"plan_name"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	// Name is the vendor's own name for Model; "" when the listing named none,
+	// in which case the page shows Model.
+	Name           string `json:"name,omitempty"`
 	BaseURL        string `json:"base_url"`
 	APIPath        string `json:"api_path"`
 	Endpoint       string `json:"endpoint"`
@@ -176,6 +179,7 @@ func (s *Server) handleSubscriptionOffers(w http.ResponseWriter, r *http.Request
 			PlanName:       offer.PlanLabel,
 			Provider:       offer.Provider,
 			Model:          offer.Model,
+			Name:           offer.Name,
 			BaseURL:        offer.BaseURL,
 			APIPath:        offer.APIPath,
 			Endpoint:       turn.ModelEndpointLabel(offer.BaseURL, offer.APIPath, false),

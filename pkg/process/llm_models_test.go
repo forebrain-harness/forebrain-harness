@@ -580,6 +580,63 @@ func TestUpsertLLMModelKeepsAndClearsTheStoredKey(t *testing.T) {
 	}
 }
 
+// A subscription's listing states a model's capabilities, and the row keeps
+// them: the window and the image switch are the row's own, so every reader sees
+// what the vendor said. An input that says nothing about a capability keeps the
+// stored one — signing in again with a listing that named no window must not
+// erase the window the row already knew.
+func TestUpsertLLMModelWritesAndKeepsTheListingsCapabilities(t *testing.T) {
+	store, ctx := upsertEnvForTest(t)
+	key := "sk-1"
+	window := int64(1_000_000)
+	images := true
+	efforts := []string{"low", "medium", "xhigh"}
+	off := true
+	defaultEffort := "medium"
+	id, err := UpsertLLMModel(ctx, store.DB, LLMModelInput{
+		Provider: "openai", Model: "gpt-5.5", BaseURL: "https://api.openai.com/v1", APIKey: &key,
+		CapContextWindow: &window, CapImages: &images,
+		CapEfforts: &efforts, CapReasoningOff: &off, CapDefaultEffort: &defaultEffort,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	rows, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].CapContextWindow == nil || *rows[0].CapContextWindow != 1_000_000 ||
+		rows[0].CapImages == nil || !*rows[0].CapImages {
+		t.Fatalf("rows = %+v, want the listing's caps on the row", rows)
+	}
+	if got := rows[0].CapEfforts; len(got) != 3 || got[2] != "xhigh" {
+		t.Fatalf("row levels = %v, want the listing's", got)
+	}
+	if rows[0].CapReasoningOff == nil || !*rows[0].CapReasoningOff {
+		t.Fatalf("row off switch = %v, want the listing's", rows[0].CapReasoningOff)
+	}
+	if rows[0].CapDefaultEffort != "medium" {
+		t.Fatalf("row default effort = %q, want the listing's", rows[0].CapDefaultEffort)
+	}
+
+	if _, err := UpsertLLMModel(ctx, store.DB, LLMModelInput{
+		Provider: "openai", Model: "gpt-5.5", BaseURL: "https://api.openai.com/v1",
+	}); err != nil {
+		t.Fatalf("upsert without caps: %v", err)
+	}
+	rows, err = store.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != id || rows[0].CapContextWindow == nil || *rows[0].CapContextWindow != 1_000_000 {
+		t.Fatalf("rows = %+v, want the stored window kept", rows)
+	}
+	if len(rows[0].CapEfforts) != 3 || rows[0].CapReasoningOff == nil || !*rows[0].CapReasoningOff ||
+		rows[0].CapDefaultEffort != "medium" {
+		t.Fatalf("row = %+v, want the stored thinking caps kept", rows[0])
+	}
+}
+
 // A different endpoint is a different row: the same model reached through a
 // mirror is a second configuration, not an edit of the first.
 func TestUpsertLLMModelAddsARowForAnotherEndpoint(t *testing.T) {

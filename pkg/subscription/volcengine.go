@@ -207,15 +207,7 @@ func (volcengine) Provision(ctx context.Context, env Env, offers []Offer, opts P
 			}
 		}
 		key := rowKey
-		id, err := process.UpsertLLMModel(ctx, env.DB, process.LLMModelInput{
-			Provider:   offer.Provider,
-			Model:      offer.Model,
-			BaseURL:    offer.BaseURL,
-			APIPath:    offer.APIPath,
-			APIKey:     &key,
-			Source:     volcengineID,
-			SourcePlan: offer.Plan,
-		})
+		id, err := process.UpsertLLMModel(ctx, env.DB, offerRowInput(offer, volcengineID, &key))
 		if err != nil {
 			return nil, fmt.Errorf("store %s/%s: %w", offer.Provider, offer.Model, err)
 		}

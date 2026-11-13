@@ -22,7 +22,6 @@ import {
   formatRetryCountdown,
   formatRuntimeStatusLabel,
   formatToolDuration,
-  planReviewErrorText,
   formatTransportRetryLine,
   formatWorkedDurationLabel,
   hasVisibleBlocks,
@@ -7262,23 +7261,3 @@ describe('held peer messages', () => {
   })
 })
 
-describe('planReviewErrorText', () => {
-  // A review the engine refused because the review model cannot take the
-  // conversation's screenshots says so in the viewer's language, naming the
-  // model; any other failure keeps the engine's sentence.
-  it('says an image refusal in the viewer language', () => {
-    try {
-      setLocale('zh')
-      expect(planReviewErrorText({ code: 'image_input_unsupported', model: 'deepseek-v4-pro', error: 'x' }))
-        .toBe('deepseek-v4-pro 不支持图片，看不了会话里的截图，请换一个支持图片的评审模型。')
-      expect(planReviewErrorText({ code: 'image_rejected_by_provider', model: 'glm-5.3', error: 'x' }))
-        .toBe('glm-5.3 在本会话拒收过图片，看不了会话里的截图，请换一个支持图片的评审模型。')
-      setLocale('en')
-      expect(planReviewErrorText({ code: 'image_input_unsupported', model: 'deepseek-v4-pro' }))
-        .toContain('deepseek-v4-pro does not accept images')
-      expect(planReviewErrorText({ outcome: 'failed', error: ' no plan to review ' })).toBe('no plan to review')
-    } finally {
-      setLocale('en')
-    }
-  })
-})
