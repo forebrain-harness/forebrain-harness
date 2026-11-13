@@ -97,9 +97,11 @@ type SubagentInput struct {
 	Worktree string `json:"worktree,omitempty" jsonschema_description:"Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id, never a provider/model pair: two rows of
 	// one pair are two models. The description is fixed text on purpose — it
-	// must not enumerate the models, or adding one would change the tool
-	// definition and every cached prompt prefix with it.
-	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
+	// must not enumerate the models or name the tool that lists them (that
+	// tool rides a request only while the roster is non-empty), or a table
+	// edit or the roster state would change the tool definition and every
+	// cached prompt prefix with it.
+	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
 
 type SubagentSendInput struct {
@@ -111,7 +113,7 @@ type SubagentSendInput struct {
 	// the first one (TestJSONSchemaDescriptionTagsSurviveReflection).
 	Worktree string `json:"worktree,omitempty" jsonschema_description:"Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id; see SubagentInput.Model.
-	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
+	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
 
 type SubagentContinueInput struct {
@@ -145,7 +147,7 @@ type SubagentTask struct {
 	// the first one (TestJSONSchemaDescriptionTagsSurviveReflection).
 	Worktree string `json:"worktree,omitempty" jsonschema_description:"Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id; see SubagentInput.Model.
-	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
+	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 }
 
 func subagentTypeEnumValues(cat SubagentCatalog) []any {
@@ -4441,6 +4443,20 @@ func usableModels(ctx context.Context, fac Factory) ([]usableModel, error) {
 	return out, nil
 }
 
+// modelPickGuidance tails every model-argument refusal: while the roster has a
+// row to pick, list_usable_models is the honest pointer; with an empty roster
+// the tool rides no request, so pointing at it would teach the model to call a
+// tool it cannot see and the only honest guidance is omitting the argument. A
+// store that cannot answer keeps the pointer — the roster is unknown, not
+// known-empty.
+func modelPickGuidance(ctx context.Context, fac Factory) string {
+	usable, err := usableModels(ctx, fac)
+	if err != nil || len(usable) > 0 {
+		return "call list_usable_models, or omit model to use the conversation's model."
+	}
+	return "omit model to use the conversation's model."
+}
+
 // usableModelByID resolves one row id the way usableModels lists it, with the
 // three refusal texts the model reads (语义 9): an unknown id, a row the
 // switch does not allow, a row without credentials. The hand-off row resolves
@@ -4448,7 +4464,7 @@ func usableModels(ctx context.Context, fac Factory) ([]usableModel, error) {
 func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return usableModel{}, fmt.Errorf("no configured model has id %q; call list_usable_models", id)
+		return usableModel{}, fmt.Errorf("no configured model has id %q; %s", id, modelPickGuidance(ctx, fac))
 	}
 	if fac.Owner == nil || fac.Owner.Deps == nil || fac.Owner.Deps.SessionStore == nil {
 		return usableModel{}, fmt.Errorf("model store unavailable")
@@ -4466,12 +4482,12 @@ func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, 
 					// dispatch must agree with it (语义 9).
 					credentialed := strings.TrimSpace(entry.APIKey) != "" || appcfg.CredentialsBackedProvider(entry.Provider)
 					if !credentialed {
-						return usableModel{}, fmt.Errorf("model %q (provider/model) has no credentials; call list_usable_models, or omit model to use the conversation's model.", llm.FormatProviderModel(entry.Provider, entry.Model))
+						return usableModel{}, fmt.Errorf("model %q (provider/model) has no credentials; %s", llm.FormatProviderModel(entry.Provider, entry.Model), modelPickGuidance(ctx, fac))
 					}
 					return usableModel{Entry: entry, HandedOff: true}, nil
 				}
 			}
-			return usableModel{}, fmt.Errorf("no configured model has id %q; call list_usable_models", id)
+			return usableModel{}, fmt.Errorf("no configured model has id %q; %s", id, modelPickGuidance(ctx, fac))
 		}
 		return usableModel{}, err
 	}
@@ -4482,10 +4498,10 @@ func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, 
 	credentialed := strings.TrimSpace(row.APIKey) != "" || appcfg.CredentialsBackedProvider(row.Provider)
 	handedOff := strings.TrimSpace(row.ID) == handOffModelID(ctx, fac) && handOffModelID(ctx, fac) != ""
 	if !handedOff && !row.SubagentAllowed {
-		return usableModel{}, fmt.Errorf("model %q (provider/model) is not one you may pick for subagents; call list_usable_models, or omit model to use the conversation's model.", llm.FormatProviderModel(row.Provider, row.Model))
+		return usableModel{}, fmt.Errorf("model %q (provider/model) is not one you may pick for subagents; %s", llm.FormatProviderModel(row.Provider, row.Model), modelPickGuidance(ctx, fac))
 	}
 	if !credentialed {
-		return usableModel{}, fmt.Errorf("model %q (provider/model) has no credentials; call list_usable_models, or omit model to use the conversation's model.", llm.FormatProviderModel(row.Provider, row.Model))
+		return usableModel{}, fmt.Errorf("model %q (provider/model) has no credentials; %s", llm.FormatProviderModel(row.Provider, row.Model), modelPickGuidance(ctx, fac))
 	}
 	return usableModel{Row: row, Entry: entry, Caps: caps, HandedOff: handedOff}, nil
 }

@@ -8531,6 +8531,38 @@ func (e *capturingModelArgumentExecutor) pinsOf() []SubagentModelOverride {
 	return append([]SubagentModelOverride(nil), e.pins...)
 }
 
+// The refusal a model argument gets names list_usable_models only while that
+// tool rides requests: with an empty roster it is not offered, so pointing at
+// it would teach the model to call a tool it cannot see — the guidance then
+// is omission alone. A pickable roster turns the pointer back on, byte for
+// byte as it always read.
+func TestModelArgumentRefusalNamesOnlyAnOfferedTool(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	ctx := dispatchTestCtx()
+
+	// Empty roster: a denied row is all the table holds.
+	denied := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://one.test/v1", "key-one", false)
+	_, err := usableModelByID(ctx, fix.fac, denied)
+	if err == nil || !strings.Contains(err.Error(), "omit model to use the conversation's model.") || strings.Contains(err.Error(), "list_usable_models") {
+		t.Fatalf("denied row with an empty roster = %v", err)
+	}
+	_, err = usableModelByID(ctx, fix.fac, "no-such-row")
+	if err == nil || !strings.Contains(err.Error(), "omit model to use the conversation's model.") || strings.Contains(err.Error(), "list_usable_models") {
+		t.Fatalf("unknown id with an empty roster = %v", err)
+	}
+
+	// A pickable row turns the pointer back on, byte for byte as before.
+	fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://two.test/v1", "key-two", true)
+	_, err = usableModelByID(ctx, fix.fac, denied)
+	if err == nil || !strings.Contains(err.Error(), "call list_usable_models, or omit model to use the conversation's model.") {
+		t.Fatalf("denied row with a pickable roster = %v", err)
+	}
+	_, err = usableModelByID(ctx, fix.fac, "no-such-row")
+	if err == nil || !strings.Contains(err.Error(), "call list_usable_models, or omit model to use the conversation's model.") {
+		t.Fatalf("unknown id with a pickable roster = %v", err)
+	}
+}
+
 // A fanout resolves every task's model before anything starts: one bad id
 // fails the whole call with no task dispatched, and each task runs on its own
 // named row.
@@ -8838,13 +8870,14 @@ func mustConfigRow(t *testing.T, fix *modelArgumentFixture, id string) appcfg.LL
 }
 
 // The three input schemas carry the model argument's description as fixed
-// text: it names the tool that lists the choices and never a model, so adding
-// one or flipping a switch cannot move the tool definition (and every cached
-// prompt prefix with it). The tag is jsonschema_description because the text
-// contains a comma, which the jsonschema keyword list would truncate at
+// text: it names no model and no tool, so adding a row, flipping a switch or
+// list_usable_models appearing and disappearing (it rides a request only
+// while the roster is non-empty) cannot move the tool definition — and every
+// cached prompt prefix with it. The tag is jsonschema_description because the
+// text contains a comma, which the jsonschema keyword list would truncate at
 // (pkg/llm's guard walks the module for exactly that).
 func TestSubagentModelArgumentDescriptionIsFixedText(t *testing.T) {
-	const want = "Optional id of a model from list_usable_models to run this subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."
+	const want = "Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."
 	for _, typ := range []reflect.Type{reflect.TypeOf(SubagentInput{}), reflect.TypeOf(SubagentSendInput{}), reflect.TypeOf(SubagentTask{})} {
 		field, ok := typ.FieldByName("Model")
 		if !ok {
