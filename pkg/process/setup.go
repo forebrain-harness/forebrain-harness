@@ -67,10 +67,6 @@ func Execute(rt Context, opts Options) (Report, error) {
 		logSetupError(rt.Home, "setup.execute.validation_error", opts, "model required in non-interactive mode")
 		return rep, fmt.Errorf("model required in non-interactive mode")
 	}
-	if strings.TrimSpace(opts.APIKey) == "" && !appcfg.CredentialsBackedProvider(opts.Provider) {
-		logSetupError(rt.Home, "setup.execute.validation_error", opts, "api_key required in non-interactive mode")
-		return rep, fmt.Errorf("api_key required in non-interactive mode")
-	}
 	if strings.TrimSpace(opts.BaseURL) == "" {
 		logSetupError(rt.Home, "setup.execute.validation_error", opts, "base_url required in non-interactive mode")
 		return rep, fmt.Errorf("base_url required in non-interactive mode")
@@ -134,6 +130,10 @@ func Execute(rt Context, opts Options) (Report, error) {
 		efforts := append([]string{}, opts.CapEfforts...)
 		in.CapEfforts = &efforts
 	}
+	// The api_key requirement is the write's to judge, not a gate here: a row
+	// a subscription's Provision already wrote keeps its stored key when the
+	// input names none, and a row that would end up keyless is refused by
+	// UpsertLLMModel with the same sentence.
 	key := strings.TrimSpace(opts.APIKey)
 	switch {
 	case key != "":

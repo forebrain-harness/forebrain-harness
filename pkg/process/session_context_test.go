@@ -426,6 +426,102 @@ func TestExecuteRequiresModelAPIKeyAndBaseURL(t *testing.T) {
 	}
 }
 
+// A subscription's Provision writes its rows — key included — before the flow
+// saves, and the save's options carry no key of their own. Whether a keyless
+// input is acceptable is the write's to judge: the existing row keeps its
+// stored key, so the save must reach the write instead of refusing it at the
+// door (Volcengine's Coding Plan: the row was written, then the save failed).
+func TestExecuteSavesSubscriptionRowAlreadyProvisioned(t *testing.T) {
+	ResetResolve()
+	t.Cleanup(ResetResolve)
+	// A row the wizard wrote must not fail the save on a catalog question, so
+	// the plan model tables are installed the way the process installs them.
+	installBuiltinModelTables()
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	rt := Context{
+		Home:       home,
+		ConfigPath: cfgPath,
+		Config:     appcfg.Root{},
+	}
+	pastedKey := "ark-pasted-placeholder-key"
+	db, err := StateDB(rt)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	id, err := UpsertLLMModel(context.Background(), db, LLMModelInput{
+		Provider:   "volcengine",
+		Model:      "doubao-seed-2.1-pro",
+		BaseURL:    "https://ark.cn-beijing.volces.com/api/coding",
+		APIPath:    "/v1/messages",
+		APIKey:     &pastedKey,
+		Source:     "volcengine",
+		SourcePlan: "coding-plan",
+	})
+	if err != nil {
+		db.Close()
+		t.Fatalf("store the provisioned row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close state: %v", err)
+	}
+
+	// The wizard's own options: same identity, no key, the subagent answer the
+	// offers page took.
+	rep, err := Execute(rt, Options{
+		Provider:        "volcengine",
+		Model:           "doubao-seed-2.1-pro",
+		BaseURL:         "https://ark.cn-beijing.volces.com/api/coding",
+		APIPath:         "/v1/messages",
+		SubagentAllowed: true,
+	})
+	if err != nil {
+		t.Fatalf("Execute error = %v, want the provisioned row saved", err)
+	}
+	if rep.ModelID != id {
+		t.Fatalf("ModelID = %q, want the provisioned row %q", rep.ModelID, id)
+	}
+	db, err = StateDB(rt)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+	row, err := (&state.LLMModelStore{DB: db}).Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("read the saved row: %v", err)
+	}
+	if row.APIKey != pastedKey {
+		t.Fatalf("row key = %q, want the stored one kept", row.APIKey)
+	}
+	if !row.SubagentAllowed {
+		t.Fatalf("row = %+v, want the subagent answer saved", row)
+	}
+}
+
+// Removing that gate must not loosen the write: an input that would create a
+// keyless row is still refused, with the sentence the gate used to carry.
+func TestExecuteStillRefusesKeylessNewVolcengineRow(t *testing.T) {
+	ResetResolve()
+	t.Cleanup(ResetResolve)
+	home := t.TempDir()
+	rt := Context{
+		Home:       home,
+		ConfigPath: filepath.Join(home, "forebrain.yaml"),
+		Config:     appcfg.Root{},
+	}
+
+	_, err := Execute(rt, Options{
+		Provider:        "volcengine",
+		Model:           "doubao-seed-2.1-pro",
+		BaseURL:         "https://ark.cn-beijing.volces.com/api/coding",
+		APIPath:         "/v1/messages",
+		SubagentAllowed: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "api_key required in non-interactive mode") {
+		t.Fatalf("Execute error = %v, want the keyless row refused", err)
+	}
+}
+
 func TestAgentContextDefaults(t *testing.T) {
 	root := t.TempDir()
 	ctx := AgentContext(nil, root, " ")

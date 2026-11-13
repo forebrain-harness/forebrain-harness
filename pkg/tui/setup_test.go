@@ -839,6 +839,51 @@ func TestConfigureSubscriptionAsksForTheKeyAPlanCannotFetch(t *testing.T) {
 	}
 }
 
+// The wizard's answers are saved by the call the surface makes next: the rows
+// are already written with the pasted key, and the options carry none of their
+// own. Asking the save for a key the wizard never had refused a completed
+// sign-in after every row had been stored (Volcengine's Coding Plan), so the
+// whole ride — wizard, write, save — is one test.
+func TestVolcengineSubscriptionSetupSavesThroughExecute(t *testing.T) {
+	t.Cleanup(process.ResetResolve)
+	// The process installs the registry's plan tables when it adopts a
+	// configuration at startup; this test binary runs no startup, and the
+	// catalog it installs is models.json, which has no volcengine rows. The
+	// save's provider check reads that layer, so it is installed here.
+	llm.SetBuiltinModels("volcengine", []llm.Model{{ID: "doubao-seed-2.1-pro"}})
+	t.Cleanup(func() { llm.SetBuiltinModels("volcengine", nil) })
+	sub := volcengineLike()
+	const pasted = "ark-pasted-placeholder-key"
+	selector := &fakeSelector{confirms: []bool{true}, inputs: []string{pasted}}
+	cfg := setupTestConfig(t, selector)
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	// What runConnect calls the moment the wizard returns.
+	rt := process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath, Config: appcfg.Root{}}
+	rep, err := process.Execute(rt, opts)
+	if err != nil {
+		t.Fatalf("Execute after the wizard: %v", err)
+	}
+	if rep.Provider != "volcengine" || rep.ModelID == "" {
+		t.Fatalf("report = %+v, want the model the sign-in unlocked", rep)
+	}
+	// The save keeps the key the write stored instead of demanding another.
+	db, err := process.StateDB(rt)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+	row, err := (&state.LLMModelStore{DB: db}).Get(context.Background(), rep.ModelID)
+	if err != nil {
+		t.Fatalf("read the saved row: %v", err)
+	}
+	if row.APIKey != pasted {
+		t.Fatalf("row key = %q, want the pasted one kept", row.APIKey)
+	}
+}
+
 // Every sign-in call reads the same environment the write does, database
 // included: a subscription's credential is a database row, so a probe without it
 // would answer "not signed in" on a machine that is.
