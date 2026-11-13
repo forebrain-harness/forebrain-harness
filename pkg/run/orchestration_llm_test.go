@@ -750,6 +750,181 @@ func TestCoordinatedExecutionProductPathPreservesToolOrchestration(t *testing.T)
 	}
 }
 
+// rosterToolsRecordingLLM records the tool names one request carried and
+// answers with plain text, so the tool loop ends after a single call.
+type rosterToolsRecordingLLM struct {
+	names []string
+}
+
+func (m *rosterToolsRecordingLLM) Execute(_ context.Context, _ []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if tool != nil {
+			names = append(names, tool.Name())
+		}
+	}
+	m.names = names
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("ok")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+}
+
+// rosterFixture assembles the product wiring this file's roster-visibility
+// tests need: a state store with a model table, one session, and a runner
+// whose wrapExecutionLLM is the real one (no hand-set predicates).
+func rosterFixture(t *testing.T) (*Runner, *state.LLMModelStore, *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	if err := store.Ensure(ctx, "session-1", "session-1"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	home := t.TempDir()
+	runner := &Runner{Deps: (&Deps{Home: home, SessionStore: store}).WithConfig(subagentsEnabledConfig()), tools: toolpkg.NewState(home)}
+	return runner, &state.LLMModelStore{DB: db}, db
+}
+
+// rosterRequestTools registers the subagent family on a fresh agent, wraps the
+// recording LLM through the runner's real wrapExecutionLLM, and answers with
+// the tool names the single request carried.
+func rosterRequestTools(t *testing.T, runner *Runner, ctx context.Context) []string {
+	t.Helper()
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, runner.subagentFactory()); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	tools := debuglogToolsView(a)
+	for _, tool := range tools {
+		if tool.Name() == "list_usable_models" {
+			goto registered
+		}
+	}
+	t.Fatal("the subagent family must register list_usable_models for this test to mean anything")
+registered:
+	inner := &rosterToolsRecordingLLM{}
+	wrapped := runner.wrapExecutionLLM(inner, true)
+	if _, err := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hello"))}, tools); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	return inner.names
+}
+
+// TestToolOrchestrationOmitsListUsableModelsWhenTheRosterIsEmpty pins the tool
+// table the request actually carries (plans/309): list_usable_models is
+// registered with the dispatch family, but it rides a request only while the
+// roster it would list is non-empty — the model is never offered a tool whose
+// only outcome would be an empty-roster refusal.
+func TestToolOrchestrationOmitsListUsableModelsWhenTheRosterIsEmpty(t *testing.T) {
+	runner, models, _ := rosterFixture(t)
+	ctx0 := context.Background()
+	if _, err := models.Create(ctx0, state.LLMModel{
+		Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://roster.test/v1", APIPath: "/chat/completions",
+		APIKey: "k", SubagentAllowed: false,
+	}); err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	names := rosterRequestTools(t, runner, llm.WithAgentSessionID(ctx0, "session-1"))
+	if containsString(names, "list_usable_models") {
+		t.Fatalf("list_usable_models rode the request with an empty roster: %v", names)
+	}
+	if !containsString(names, "subagent_run") {
+		t.Fatalf("the dispatch tools must stay offered; got %v", names)
+	}
+}
+
+// A pickable row (switch on, credentialed) keeps the tool offered — the
+// tightening must never swallow the tool's legitimate case.
+func TestToolOrchestrationKeepsListUsableModelsWhenARowIsPickable(t *testing.T) {
+	runner, models, _ := rosterFixture(t)
+	ctx0 := context.Background()
+	if _, err := models.Create(ctx0, state.LLMModel{
+		Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://roster.test/v1", APIPath: "/chat/completions",
+		APIKey: "k", SubagentAllowed: true,
+	}); err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	names := rosterRequestTools(t, runner, llm.WithAgentSessionID(ctx0, "session-1"))
+	if !containsString(names, "list_usable_models") {
+		t.Fatalf("list_usable_models must ride the request while a row is pickable; got %v", names)
+	}
+}
+
+// A handed-off row is part of usableModels' answer (the plan approval took the
+// model over), so the tool stays offered even though the row's switch is off.
+func TestToolOrchestrationKeepsListUsableModelsForAHandedOffRow(t *testing.T) {
+	runner, models, _ := rosterFixture(t)
+	ctx0 := context.Background()
+	row, err := models.Create(ctx0, state.LLMModel{
+		Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://roster.test/v1", APIPath: "/chat/completions",
+		APIKey: "k", SubagentAllowed: false,
+	})
+	if err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	if _, err := state.HandOffPlan(runner.StateRoot(), "session-1", state.ModeAgent, state.PlanHandOff{
+		ModelID: row.ID, Provider: "zhipuai", Model: "glm-5.3",
+	}); err != nil {
+		t.Fatalf("HandOffPlan: %v", err)
+	}
+	names := rosterRequestTools(t, runner, llm.WithAgentSessionID(ctx0, "session-1"))
+	if !containsString(names, "list_usable_models") {
+		t.Fatalf("a handed-off row keeps list_usable_models offered; got %v", names)
+	}
+}
+
+// A failed model-table query keeps the tool offered: a broken store must not
+// silently rewrite the tool table (fail-open, the old behavior).
+func TestToolOrchestrationKeepsListUsableModelsWhenTheModelStoreFails(t *testing.T) {
+	runner, _, db := rosterFixture(t)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	names := rosterRequestTools(t, runner, llm.WithAgentSessionID(context.Background(), "session-1"))
+	if !containsString(names, "list_usable_models") {
+		t.Fatalf("a failed model-table query must keep list_usable_models offered; got %v", names)
+	}
+}
+
+// Inside a subagent run with an empty roster the tool is not offered either —
+// the same tightening the primary context gets (before, it was visible there
+// and its call was only ever refused by the guard).
+func TestToolOrchestrationOmitsListUsableModelsInsideASubagentRunWithEmptyRoster(t *testing.T) {
+	runner, models, _ := rosterFixture(t)
+	ctx0 := context.Background()
+	if _, err := models.Create(ctx0, state.LLMModel{
+		Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://roster.test/v1", APIPath: "/chat/completions",
+		APIKey: "k", SubagentAllowed: false,
+	}); err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	ctx := toolpkg.WithSubagentRun(llm.WithAgentSessionID(ctx0, "session-1"), true)
+	names := rosterRequestTools(t, runner, ctx)
+	if containsString(names, "list_usable_models") {
+		t.Fatalf("list_usable_models must not ride a subagent's request with an empty roster: %v", names)
+	}
+}
+
+// The product wiring must install the predicate: a missing installation would
+// silently degrade to the tool being offered unconditionally again.
+func TestWrapExecutionLLMWiresTheRosterPredicate(t *testing.T) {
+	runner, _, _ := rosterFixture(t)
+	wrapped := runner.wrapExecutionLLM(&rosterToolsRecordingLLM{}, true)
+	o, ok := wrapped.(*toolOrchestrationLLM)
+	if !ok {
+		t.Fatalf("wrapExecutionLLM returned %T, want *toolOrchestrationLLM", wrapped)
+	}
+	if o.listUsableModelsOffered == nil {
+		t.Fatal("wrapExecutionLLM must wire listUsableModelsOffered")
+	}
+}
+
 func TestExitPlanModeActionHookAlwaysRequiresApprovalDespiteAllowRule(t *testing.T) {
 	ctx := llm.WithAgentSessionID(context.Background(), "session-1")
 	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))

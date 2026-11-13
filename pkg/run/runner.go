@@ -1489,6 +1489,13 @@ func (r *Runner) wrapExecutionLLM(inner llm.LLM, bootstrap bool) llm.LLM {
 		o.withdrawGate = func(err error) {
 			r.withdrawPendingAction(err, "another call of the same batch stopped the turn at its own approval")
 		}
+		fac := r.subagentFactory()
+		o.listUsableModelsOffered = func(ctx context.Context) bool {
+			usable, err := usableModels(ctx, fac)
+			// A failed query keeps the tool offered: a broken store must not
+			// silently rewrite the tool table (the old behavior).
+			return err != nil || len(usable) > 0
+		}
 	}
 	return orchestrated
 }

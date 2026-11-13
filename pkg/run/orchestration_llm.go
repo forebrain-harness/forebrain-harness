@@ -35,6 +35,11 @@ type toolOrchestrationLLM struct {
 	// does not stop on. nil leaves it pending (a bare wrapper with no action
 	// queue).
 	withdrawGate func(err error)
+	// listUsableModelsOffered, when set, answers whether the roster the dispatch
+	// tools' model argument accepts is non-empty right now; list_usable_models
+	// rides a request only while it can list something. nil keeps the tool
+	// offered unconditionally (a bare wrapper with no model store behind it).
+	listUsableModelsOffered func(context.Context) bool
 }
 
 type stopAfterToolResultKey struct{}
@@ -208,6 +213,13 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 	}
 	ctx = w.state.ContextWithRuntimeSessionMode(ctx)
 	tools = effectiveToolsForContext(ctx, tools)
+	// list_usable_models rides a request only while the roster it would list
+	// has something to offer — the same question its own answer reads, so the
+	// tool table the model is prompted with matches what the session can
+	// actually do. nil predicate (a bare wrapper) keeps the tool offered.
+	if w.listUsableModelsOffered != nil && !w.listUsableModelsOffered(ctx) {
+		tools = withoutTool(tools, "list_usable_models")
+	}
 	// Write the run's conversation to its transcript as each block ends, not
 	// only when the turn does. Nothing here when no store is wired, when the
 	// context names no session, or when the model call has no foreground sink
