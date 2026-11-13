@@ -29,11 +29,11 @@ type SkillOfferGuidanceOptions struct {
 // between sessions or builds.
 const offerGuidanceTemplate = `## Keeping finished work as a skill
 
-Noticing work worth keeping is your call: %s writes the steps that just worked into the project's skills directory, so the next session starts with them.
+%s writes a finished procedure into the project's skills directory so the next session starts with it. Most finished work is not worth keeping: length, difficulty, and hard-won debugging are not reasons to propose.
 
-Propose it when the work took several ordered steps with hard-to-rediscover choices (a non-obvious flag, an isolation trick, a wait or retry condition) that someone starting over would trip on, and is likely to recur here. Not for one-off debugging, answering by reading code, the repository's documented standard commands, or work an existing skill covers.
+Propose only when the same procedure will demonstrably be needed again (the user has asked for it before, it is a documented recurring process, or this session already had to repeat it) and it carries choices someone starting over would trip on (a non-obvious flag, an isolation trick, a wait or retry condition). A one-off task stays unsaved however many steps it took: implementing a feature, fixing a specific bug, a migration, or an elaborate orchestration run once for one batch of work. Also not for answering by reading code, the repository's documented standard commands, or work an existing skill covers.
 
-To propose, end the final message for that work with one sentence naming %s and what rerunning it would save. Do it at most once per session and never again if ignored; when the work is not worth keeping, say nothing about it.`
+To propose, end the final message for that work with one sentence naming %s and the evidence that it will recur. Do it at most once per session and never again if ignored; when in doubt, say nothing about it.`
 
 // RenderSkillOfferGuidance renders the standing skill-offer criteria appended
 // to the frozen skills catalog. It is a pure function with fixed output: the

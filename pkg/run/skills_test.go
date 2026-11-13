@@ -856,6 +856,30 @@ func TestSkillOfferReminderAnchoredAcrossIterations(t *testing.T) {
 	}
 }
 
+// TestSkillOfferReminderGolden pins the exact bytes of the offer reminder.
+// The wording is the gate's judgment half: it must keep the marker (the
+// once-per-session rule reads it back from history) and must not drift back
+// to affirmative framing. Changing the text is a deliberate act that lands
+// in this file.
+func TestSkillOfferReminderGolden(t *testing.T) {
+	got := (&skillOfferLLM{}).reminder()
+	want := `Skill worth keeping - one-time note.
+
+This run tripped the skill-offer gate, but the gate measures length, not value: most long runs are one-off work and call for silence. When you finish this work, judge it against the skill criteria in your instructions: propose /skill-generator in a single sentence at the very end of your final message only if you can name concrete evidence the same procedure will recur; otherwise say nothing about it. This reminder applies to finishing the current work only - it appears once and is not a standing instruction for later turns.`
+	if got != want {
+		t.Fatalf("skill offer reminder drifted from the golden bytes:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if strings.Contains(got, "%!") {
+		t.Fatalf("format verb leaked into the rendered reminder: %s", got)
+	}
+}
+
+func TestSkillOfferReminderCommandName(t *testing.T) {
+	if got := (&skillOfferLLM{commandName: "custom-namer"}).reminder(); !strings.Contains(got, "/custom-namer") {
+		t.Fatalf("custom command name missing: %q", got)
+	}
+}
+
 // TestSkillOfferSuppressedForRunsBelowTheGate pins the closed gate: a short,
 // single-tool run earns no reminder.
 func TestSkillOfferSuppressedForRunsBelowTheGate(t *testing.T) {

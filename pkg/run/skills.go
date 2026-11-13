@@ -799,7 +799,7 @@ func (w *skillOfferLLM) reminder() string {
 	}
 	return fmt.Sprintf(`%s - one-time note.
 
-This session has just done substantial tool-driven work, which may be worth keeping as a reusable project skill. When you finish this work, judge it against the skill criteria in your instructions: if the steps are worth keeping, propose that in a single sentence at the very end of your final message, naming /%s; if they are not, say nothing about it. This reminder applies to finishing the current work only - it appears once and is not a standing instruction for later turns.`,
+This run tripped the skill-offer gate, but the gate measures length, not value: most long runs are one-off work and call for silence. When you finish this work, judge it against the skill criteria in your instructions: propose /%s in a single sentence at the very end of your final message only if you can name concrete evidence the same procedure will recur; otherwise say nothing about it. This reminder applies to finishing the current work only - it appears once and is not a standing instruction for later turns.`,
 		skillOfferMarker, command)
 }
 
