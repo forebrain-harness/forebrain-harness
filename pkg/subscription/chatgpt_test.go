@@ -121,7 +121,7 @@ func TestChatGPTOffersCarryTheEndpointTheLoginFixes(t *testing.T) {
 	previous := chatGPTList
 	chatGPTList = func(ctx context.Context, home string) ([]turn.ModelRecord, error) {
 		return []turn.ModelRecord{
-			{Provider: chatGPTID, APIModel: "gpt-6", ContextWindow: 400000, SupportsAttachments: true, IsDefault: true},
+			{Provider: chatGPTID, APIModel: "gpt-6", ContextWindow: 400000, SupportsAttachments: true, AttachmentsKnown: true, IsDefault: true},
 			{Provider: chatGPTID, APIModel: "gpt-5-mini"},
 		}, nil
 	}
@@ -134,7 +134,9 @@ func TestChatGPTOffersCarryTheEndpointTheLoginFixes(t *testing.T) {
 			Subscription: chatGPTID, Provider: chatGPTID, Model: "gpt-6", BaseURL: openai.CodexBaseURL,
 			ContextWindow: 400000, SupportsImages: true, Default: true,
 		},
-		{Subscription: chatGPTID, Provider: chatGPTID, Model: "gpt-5-mini", BaseURL: openai.CodexBaseURL},
+		// A listing that carried no input_modalities said nothing about the
+		// model's modalities, so its offer declares no image answer at all.
+		{Subscription: chatGPTID, Provider: chatGPTID, Model: "gpt-5-mini", BaseURL: openai.CodexBaseURL, ImagesUndeclared: true},
 	}, offers)
 }
 

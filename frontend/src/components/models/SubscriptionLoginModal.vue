@@ -520,10 +520,12 @@ async function loadOffers(): Promise<void> {
   provisionError.value = ''
   try {
     offers.value = await forebrainApi.subscriptionOffers(subscription.id)
-    // A first sign-in needs one model, and the vendor's default is the one it
-    // would pick; everything else stays unchecked.
+    // What this install already holds is ticked, the way the terminal's
+    // /connect opens on it; a first sign-in has nothing held and preselects the
+    // vendor's own default.
+    const held = offers.value.map((offer, index) => (offer.held ? index : -1)).filter((index) => index >= 0)
     const preset = offers.value.findIndex((offer) => offer.default)
-    chosen.value = preset >= 0 ? [preset] : []
+    chosen.value = held.length > 0 ? held : preset >= 0 ? [preset] : []
   } catch (cause) {
     offersError.value = getErrorMessage(cause) || t('models.offersFailed')
   }

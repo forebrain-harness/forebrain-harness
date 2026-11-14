@@ -1360,7 +1360,10 @@ func (s *llmSetup) pickOffers() (bool, error) {
 	title := label + "\nChoose the models to add; each row shows where requests go."
 	checked := s.chosen
 	if checked == nil {
-		checked = defaultOffers(s.offers)
+		checked = s.heldOffers()
+		if len(checked) == 0 {
+			checked = defaultOffers(s.offers)
+		}
 	}
 	for {
 		idxs, ok, err := multiSelectRichTabbed(s.cfg.Selector, title, items, TabbedSelectOptions{Checked: checked})
@@ -1473,6 +1476,30 @@ func (s *llmSetup) pastedPlanKey(need subscription.ErrPlanKeyRequired) (string, 
 			return key, true, nil
 		}
 	}
+}
+
+// heldOffers is the check list's opening state when this install already holds
+// rows for the listed models: what /model already runs is ticked, so /connect
+// opens on the truth instead of on the vendor listing's own first row. Nothing
+// held — a first sign-in — answers nil and leaves the page on defaultOffers. A
+// database it cannot read answers nil for the same reason: the write that
+// follows is where a broken install reports itself.
+func (s *llmSetup) heldOffers() []int {
+	db, err := s.stateDB()
+	if err != nil {
+		return nil
+	}
+	held := make([]int, 0, len(s.offers))
+	for i, offer := range s.offers {
+		_, found, err := process.LLMModelHeld(s.ctx(), db, offer.Provider, offer.Model, offer.BaseURL, offer.APIPath)
+		if err != nil {
+			return nil
+		}
+		if found {
+			held = append(held, i)
+		}
+	}
+	return held
 }
 
 // defaultOffers is what the offers page opens with: the models the subscription

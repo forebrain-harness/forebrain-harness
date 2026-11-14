@@ -144,11 +144,106 @@ func TestImageTurnRefusalCountsImagesAlreadyInTheConversation(t *testing.T) {
 	}
 }
 
+// TestImageTurnRefusalFailsOpenOnARowThatSaysNothingAboutImages pins the gate's
+// half of the capability-data contract the subscription fix relies on (owner
+// report 2026-11-13). A configured row whose cap_images is NULL names no
+// capability at all — state.ModelOverrideFromCaps answers ok=false for it — so
+// the catalog alone answers, and a model nobody characterized is let through.
+// A row that does say cap_images=0 is an answer: that turn is refused with the
+// code a surface renders in the viewer's language.
+func TestImageTurnRefusalFailsOpenOnARowThatSaysNothingAboutImages(t *testing.T) {
+	const provider, model = "volcengine", "kimi-k3.1-pro"
+	ctx := withSessionModel(provider, model)
+
+	// Nothing installed: the row's columns are empty and no catalog entry
+	// exists for the model, so the request may carry the image.
+	llm.SetModelOverrides(nil, nil)
+	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
+	if err := ImageTurnRefusal(context.Background(), &Runner{}, "", true); err != nil {
+		t.Fatalf("an uncharacterized model must be let through, got %v", err)
+	}
+	if err := ImageTurnRefusal(ctx, &Runner{}, "", true); err != nil {
+		t.Fatalf("a row that says nothing about images must be let through, got %v", err)
+	}
+
+	// The answer a fabricated row used to carry: cap_images=0.
+	images := false
+	llm.SetModelOverrides(
+		map[string]llm.ModelOverride{"row-text-only": {SupportsImages: &images}},
+		map[string]string{"row-text-only": llm.JoinProviderModel(provider, model)},
+	)
+	err := ImageTurnRefusal(ctx, &Runner{}, "", true)
+	var refused *ImageInputRefusedError
+	if !errors.As(err, &refused) || refused.Code() != ImageInputRefusedCode {
+		t.Fatalf("a row saying no images must refuse the turn with %s, got %v", ImageInputRefusedCode, err)
+	}
+}
+
+// TestImageTurnRefusalJudgesARowLessSessionsModel pins the gate to the reading
+// every surface shows for a conversation that has not run yet: its first turn
+// adopts the agent's most recently used model (RowLessSessionModel /
+// NewSessionModel), so that is the model the image gate must judge — not the
+// configuration default the runner happens to carry. Judging the default
+// refused an image the turn would have accepted (the owner's report, 2026-11-14:
+// a fresh session showed the multimodal model in the footer and refused the
+// image in deepseek/deepseek-chat's name) and, the other way round, would have
+// sent images to a text-only model whose row the first turn was about to adopt.
+func TestImageTurnRefusalJudgesARowLessSessionsModel(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	for _, sid := range []string{"older", "fresh"} {
+		if err := sess.Ensure(ctx, sid, sid); err != nil {
+			t.Fatalf("ensure session %s: %v", sid, err)
+		}
+	}
+	// Both entries are configured; which one the fresh session runs on comes
+	// from the most recently used model alone.
+	cfg := newPrimaryModelRoot(
+		primaryModelEntry("deepseek", "deepseek-v4-pro", "k", "http://api.deepseek.test/v1", nil),
+		primaryModelEntry("deepseek", "deepseek-v4-flash", "k", "http://api.deepseek.test/v1", nil),
+	)
+	r := &Runner{Deps: (&Deps{AgentName: "main", SessionStore: sess}).WithConfig(cfg), FileResolver: PathResolver{}}
+
+	// No stored row on the fresh session: the gate must judge what its first
+	// turn will adopt. An image-capable last used model lets the turn proceed.
+	if _, err := sess.SaveSessionModelSelection(ctx, "older", state.SessionModelSelection{Provider: "deepseek", Model: "deepseek-v4-flash"}); err != nil {
+		t.Fatalf("save the last used model: %v", err)
+	}
+	if sel := NewSessionModel(r, sess); !sel.Set || sel.Model != "deepseek-v4-flash" {
+		t.Fatalf("premise: the fresh session adopts %+v, want deepseek-v4-flash", sel)
+	}
+	if err := ImageTurnRefusal(ctx, r, "fresh", true); err != nil {
+		t.Fatalf("the gate must judge the model the first turn adopts (an image-capable one), got %v", err)
+	}
+
+	// The same shape with a text-only last used model: the gate refuses, and
+	// names the model the turn would have run on.
+	if _, err := sess.SaveSessionModelSelection(ctx, "older", state.SessionModelSelection{Provider: "deepseek", Model: "deepseek-v4-pro"}); err != nil {
+		t.Fatalf("save the text-only last used model: %v", err)
+	}
+	if sel := NewSessionModel(r, sess); !sel.Set || sel.Model != "deepseek-v4-pro" {
+		t.Fatalf("premise: the fresh session adopts %+v, want deepseek-v4-pro", sel)
+	}
+	err = ImageTurnRefusal(ctx, r, "fresh", true)
+	var refused *ImageInputRefusedError
+	if !errors.As(err, &refused) || refused.Model != "deepseek-v4-pro" {
+		t.Fatalf("the gate must refuse in the adopted model's name, got %v", err)
+	}
+}
+
 // TestImageTurnRefusalJudgesTheSessionsOwnModel pins the third source of the
 // session model: a web session may run on a model other than the runner's
 // default, and the stored choice is what decides whether the request would
 // carry an image into a model that cannot take one. A session with no stored
-// choice follows the runner.
+// choice follows the rule its turn entry does — a conversation that has not run
+// adopts the last used model (pinned by
+// TestImageTurnRefusalJudgesARowLessSessionsModel), an older one the configured
+// default.
 func TestImageTurnRefusalJudgesTheSessionsOwnModel(t *testing.T) {
 	ctx := context.Background()
 	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
@@ -161,6 +256,11 @@ func TestImageTurnRefusalJudgesTheSessionsOwnModel(t *testing.T) {
 		if err := sess.Ensure(ctx, sid, sid); err != nil {
 			t.Fatalf("ensure session %s: %v", sid, err)
 		}
+	}
+	// s2 is a conversation older than the model-state table: it has run, and
+	// holds no row saying what it runs on.
+	if _, err := sess.AppendStructuredMessage(ctx, "s2", "assistant", "an answer", "", "", "", "", "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatalf("give s2 a turn of its own: %v", err)
 	}
 	cfg := newPrimaryModelRoot(
 		// The runner default has to be a model the catalog knows takes images:
@@ -181,7 +281,7 @@ func TestImageTurnRefusalJudgesTheSessionsOwnModel(t *testing.T) {
 		t.Fatalf("a session pinned to a text-only model must be refused, got %v", err)
 	}
 	if err := ImageTurnRefusal(context.Background(), r, "s2", true); err != nil {
-		t.Fatalf("a session with no stored choice follows the image-capable runner default, got %v", err)
+		t.Fatalf("a row-less session that has run follows the image-capable configured default, got %v", err)
 	}
 }
 

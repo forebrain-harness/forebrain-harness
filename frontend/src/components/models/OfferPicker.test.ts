@@ -28,6 +28,7 @@ function offer(overrides: Partial<SubscriptionOffer> = {}): SubscriptionOffer {
     contextWindow: 1_000_000,
     supportsImages: true,
     default: true,
+    held: false,
     fromStaticList: false,
     needsKey: false,
     ...overrides,

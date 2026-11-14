@@ -76,7 +76,12 @@ type Offer struct {
 	APIPath        string
 	ContextWindow  int64
 	SupportsImages bool
-	Default        bool
+	// ImagesUndeclared marks an offer whose listing said nothing about image
+	// input: the row must not answer for it — the catalog answers, and the
+	// image gate fails open on a model nobody characterized. Zero value keeps
+	// every producer that does declare images writing its answer.
+	ImagesUndeclared bool
+	Default          bool
 	// Efforts are the thinking levels the listing offers, in wire order and
 	// WITHOUT "none": turning thinking off is ReasoningOff, not a level (the
 	// models page accepts only the numeric levels). nil means the listing named
@@ -356,20 +361,23 @@ func (l *login) Cancel() { l.cancel() }
 // offersFromRecords is the one projection of a subscription's model listing
 // into offers: the row a surface writes names the API model, the endpoint comes
 // from the subscription (its login decides it, never the user), and the
-// capability data comes from the listing.
+// capability data comes from the listing. A record whose listing characterized
+// no input modalities — see turn.ModelRecord.AttachmentsKnown — leaves the image
+// switch undeclared rather than answering "no images" for it.
 func offersFromRecords(subscription string, records []turn.ModelRecord, baseURL string) []Offer {
 	offers := make([]Offer, 0, len(records))
 	for _, record := range records {
 		offers = append(offers, Offer{
-			Subscription:   subscription,
-			Provider:       record.Provider,
-			Model:          record.APIModel,
-			BaseURL:        baseURL,
-			ContextWindow:  record.ContextWindow,
-			SupportsImages: record.SupportsAttachments,
-			Default:        record.IsDefault,
-			Efforts:        append([]string(nil), record.ReasoningEfforts...),
-			DefaultEffort:  strings.TrimSpace(record.DefaultReasoningEffort),
+			Subscription:     subscription,
+			Provider:         record.Provider,
+			Model:            record.APIModel,
+			BaseURL:          baseURL,
+			ContextWindow:    record.ContextWindow,
+			SupportsImages:   record.SupportsAttachments,
+			ImagesUndeclared: !record.AttachmentsKnown,
+			Default:          record.IsDefault,
+			Efforts:          append([]string(nil), record.ReasoningEfforts...),
+			DefaultEffort:    strings.TrimSpace(record.DefaultReasoningEffort),
 		})
 	}
 	return offers
@@ -400,11 +408,13 @@ func ProvisionRows(ctx context.Context, env Env, offers []Offer, source string) 
 
 // offerRowInput is the model-row write one offer means: its identity, the source
 // that wrote it, the key this writer holds (a sign-in's is empty), and the
-// capabilities its listing declared. The window goes on the row only when the
-// listing named one — 0 is not a window, so a column left nil lets the catalog
-// answer — while the image switch is always an answer, because "no images" is
-// one. Every provisioning path builds its write here, so an offer's capabilities
-// never depend on which subscription wrote it.
+// capabilities its listing declared. Both capability columns follow one rule: a
+// listing that said nothing writes nothing — a window left nil lets the catalog
+// answer, and so does an image switch left nil, because "no images" is an answer
+// only a listing can give. A vendor list carrying ids alone, or a model id
+// nothing local knows, therefore lands as unknown rather than as "no images",
+// and the image gate fails open on it. Every provisioning path builds its write
+// here, so an offer's capabilities never depend on which subscription wrote it.
 func offerRowInput(offer Offer, source string, key *string) process.LLMModelInput {
 	input := process.LLMModelInput{
 		Provider:   offer.Provider,
@@ -419,8 +429,10 @@ func offerRowInput(offer Offer, source string, key *string) process.LLMModelInpu
 		window := offer.ContextWindow
 		input.CapContextWindow = &window
 	}
-	images := offer.SupportsImages
-	input.CapImages = &images
+	if !offer.ImagesUndeclared {
+		images := offer.SupportsImages
+		input.CapImages = &images
+	}
 	// The levels a listing names never include "none": that is the off switch,
 	// which the host keeps in its own column (cap_reasoning_off) and renders as
 	// "none" at the head of the levels. Splitting here means every producer — a

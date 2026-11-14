@@ -199,21 +199,48 @@ func (volcengine) Provision(ctx context.Context, env Env, offers []Offer, opts P
 		if !offer.KeyRequired {
 			rowKey = seatKey
 		}
-		if rowKey == "" {
+		var key *string
+		switch {
+		case rowKey != "":
+			key = &rowKey
+		case offer.KeyRequired:
 			// Only a personal plan can arrive without a key: a team seat's is
-			// fetched above, and an empty answer there is already an error.
-			return nil, ErrPlanKeyRequired{
-				Plan: offer.Plan, PlanLabel: offer.PlanLabel, ConsoleURL: volcengineKeyConsoleURL,
+			// fetched above, and an empty answer there is already an error. A
+			// row that already holds its plan's key is not asked for it again
+			// — the write keeps what the row has.
+			held, err := volcengineRowKeyHeld(ctx, env, offer)
+			if err != nil {
+				return nil, err
+			}
+			if !held {
+				return nil, ErrPlanKeyRequired{
+					Plan: offer.Plan, PlanLabel: offer.PlanLabel, ConsoleURL: volcengineKeyConsoleURL,
+				}
 			}
 		}
-		key := rowKey
-		id, err := process.UpsertLLMModel(ctx, env.DB, offerRowInput(offer, volcengineID, &key))
+		id, err := process.UpsertLLMModel(ctx, env.DB, offerRowInput(offer, volcengineID, key))
 		if err != nil {
 			return nil, fmt.Errorf("store %s/%s: %w", offer.Provider, offer.Model, err)
 		}
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+// volcengineRowKeyHeld reports whether the row this offer would write already
+// holds a key. The plan asks for a pasted key only for a row that would end up
+// keyless — the same sentence UpsertLLMModel answers with, and the same rule the
+// save follows (owner 2026-11-13): a key the row already has is never asked for
+// again.
+func volcengineRowKeyHeld(ctx context.Context, env Env, offer Offer) (bool, error) {
+	if env.DB == nil {
+		return false, nil
+	}
+	row, found, err := process.LLMModelHeld(ctx, env.DB, offer.Provider, offer.Model, offer.BaseURL, offer.APIPath)
+	if err != nil || !found {
+		return false, err
+	}
+	return strings.TrimSpace(row.APIKey) != "", nil
 }
 
 // RefreshKey fetches a team seat's key again for one row this subscription
@@ -443,25 +470,29 @@ func volcengineSeatKey(ctx context.Context, client *volcengineClient, credential
 	return key, seat.BizInfo, nil
 }
 
-// volcengineModelOffers projects a plan's model ids into offers. Capability data
-// comes from the shipped table when it names the model — the vendor's plan
-// listing carries ids only — and keyRequired says whether a row asks for a
-// pasted key.
+// volcengineModelOffers projects a plan's model ids into offers. Capability
+// data comes from the shipped table when it names the model — the vendor's plan
+// listing carries ids only — and a model it does not name is offered with the
+// image switch undeclared rather than off: the listing never said the model
+// rejects pictures, so the row must not answer for it. keyRequired says whether
+// a row asks for a pasted key.
 func volcengineModelOffers(plan, label string, models []string, keyRequired bool) []Offer {
 	baseURL, apiPath := volcenginePlanEndpoint(plan)
 	offers := make([]Offer, 0, len(models))
 	for _, model := range models {
+		images, declared := volcengineModelImages(model)
 		offers = append(offers, Offer{
-			Subscription:   volcengineID,
-			Plan:           plan,
-			PlanLabel:      label,
-			Provider:       volcengineID,
-			Model:          model,
-			BaseURL:        baseURL,
-			APIPath:        apiPath,
-			ContextWindow:  volcengineModelWindow(model),
-			SupportsImages: volcengineModelImages(model),
-			KeyRequired:    keyRequired,
+			Subscription:     volcengineID,
+			Plan:             plan,
+			PlanLabel:        label,
+			Provider:         volcengineID,
+			Model:            model,
+			BaseURL:          baseURL,
+			APIPath:          apiPath,
+			ContextWindow:    volcengineModelWindow(model),
+			SupportsImages:   images,
+			ImagesUndeclared: !declared,
+			KeyRequired:      keyRequired,
 		})
 	}
 	return offers
@@ -495,8 +526,10 @@ func volcenginePlanEndpoint(plan string) (baseURL, apiPath string) {
 }
 
 // volcengineModelWindow and volcengineModelImages read the capability data the
-// shipped table holds for one model; a model it does not name is offered with
-// none, which the picker simply does not show.
+// shipped table holds for one model. A model it does not name is offered with no
+// window — the picker simply does not show one — and with its image switch
+// undeclared: the table not naming a model says nothing about its input
+// modalities, and guessing "no images" for it is what refused valid pictures.
 func volcengineModelWindow(model string) int64 {
 	provider, ok := appcfg.BuiltinProviderByID(volcengineID)
 	if !ok {
@@ -510,17 +543,17 @@ func volcengineModelWindow(model string) int64 {
 	return 0
 }
 
-func volcengineModelImages(model string) bool {
+func volcengineModelImages(model string) (images, declared bool) {
 	provider, ok := appcfg.BuiltinProviderByID(volcengineID)
 	if !ok {
-		return false
+		return false, false
 	}
 	for _, entry := range provider.Models {
 		if entry.ID == model {
-			return entry.Images
+			return entry.Images, true
 		}
 	}
-	return false
+	return false, false
 }
 
 // volcengineIsNotFound reports the console's answer for a plan the account does

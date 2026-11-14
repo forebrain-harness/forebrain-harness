@@ -192,6 +192,53 @@ func TestVolcengineOffersFallBackToTheShippedTable(t *testing.T) {
 	require.Len(t, offers, len(provider.Models), "the shipped table is what a failed listing falls back to")
 }
 
+// The plan listings carry model ids only, so the shipped table is the only
+// place image support can come from. A model the table does not name is offered
+// with its image switch undeclared rather than off — nobody said that model
+// rejects pictures, and a row answering "no images" for it turned away every
+// image in the turn (owner report 2026-11-13: kimi-k3.1-pro).
+func TestVolcengineOffersDeclareOnlyWhatTheTableNames(t *testing.T) {
+	stub, _ := newVolcengineStub(t)
+	stub.answer = func(action string, body map[string]any) (int, string, bool) {
+		switch action {
+		case volcengineGetPersonalPlan:
+			plan, _ := body["Plan"].(string)
+			return http.StatusOK, `{"ResponseMetadata":{"RequestId":"r"},"Result":{"PlanType":"Pro","Status":"Running","Plan":"` + plan + `"}}`, true
+		case volcengineListArkCodingPlanModel:
+			return http.StatusOK, `{"Result":{"Datas":[{"ModelID":"glm-5.3"}]}}`, true
+		case volcengineListArkAgentPlanModel:
+			return http.StatusOK, `{"Result":{"Datas":[{"ModelID":"kimi-k3.1-pro"},{"ModelID":"kimi-k3"}]}}`, true
+		case volcengineListSeatInfos:
+			return http.StatusOK, `{"Result":{"BizSummaries":[],"Data":[]}}`, true
+		}
+		return 0, "", false
+	}
+	env := testEnv(t)
+	seedVolcengineCredential(t, env, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
+
+	offers, err := (volcengine{}).Offers(context.Background(), env)
+	require.NoError(t, err)
+	byModel := make(map[string]Offer, len(offers))
+	for _, offer := range offers {
+		byModel[offer.Model] = offer
+	}
+
+	unknown := byModel["kimi-k3.1-pro"]
+	require.True(t, unknown.ImagesUndeclared, "a model the table does not name declares nothing about images")
+	require.False(t, unknown.SupportsImages)
+	require.Zero(t, unknown.ContextWindow, "nor a window")
+
+	named := byModel["kimi-k3"]
+	require.False(t, named.ImagesUndeclared, "the table names kimi-k3")
+	require.True(t, named.SupportsImages, "and says it takes images")
+
+	// The other answer the table can give: a model it names without image
+	// support stays declared, so its row still refuses pictures.
+	text := byModel["glm-5.3"]
+	require.False(t, text.ImagesUndeclared, "the table names glm-5.3")
+	require.False(t, text.SupportsImages)
+}
+
 // A running team seat is offered from the enterprise catalog, and its rows take
 // the seat's own key, so no pasted key is asked for.
 func TestVolcengineOffersListTheTeamSeat(t *testing.T) {
@@ -293,6 +340,42 @@ func TestVolcengineProvisionWritesThePastedKey(t *testing.T) {
 	_, err = (volcengine{}).Provision(context.Background(), Env{Home: env.Home, DB: nil}, offers, ProvisionOptions{Key: pasted})
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), pasted)
+}
+
+// A row that already holds its plan's key is updated without asking for it
+// again; only a row that would end up keyless requires the paste.
+func TestVolcengineProvisionKeepsTheKeyARowAlreadyHas(t *testing.T) {
+	newVolcengineStub(t)
+	env := testEnv(t)
+	offer := Offer{
+		Subscription: volcengineID, Plan: volcengineCodingPlan, PlanLabel: "Coding Plan", Provider: volcengineID,
+		Model: "doubao-seed-2.1-pro", BaseURL: volcengineCodingBaseURL, APIPath: "/v1/messages", KeyRequired: true,
+	}
+	ids, err := (volcengine{}).Provision(context.Background(), env, []Offer{offer}, ProvisionOptions{Key: "first-key-placeholder"})
+	require.NoError(t, err)
+
+	// The same offer again, with no key pasted: the row keeps the key it has.
+	again, err := (volcengine{}).Provision(context.Background(), env, []Offer{offer}, ProvisionOptions{})
+	require.NoError(t, err)
+	require.Equal(t, ids, again)
+	var key string
+	require.NoError(t, env.DB.QueryRowContext(context.Background(),
+		`SELECT api_key FROM fb_llm_models WHERE id = ?`, ids[0]).Scan(&key))
+	require.Equal(t, "first-key-placeholder", key)
+}
+
+// A row this install does not hold yet still needs its plan's key, and the
+// refusal names the plan.
+func TestVolcengineProvisionStillAsksForAFreshRow(t *testing.T) {
+	newVolcengineStub(t)
+	env := testEnv(t)
+	_, err := (volcengine{}).Provision(context.Background(), env, []Offer{{
+		Subscription: volcengineID, Plan: volcengineAgentPlan, PlanLabel: "Agent Plan", Provider: volcengineID,
+		Model: "glm-5.3", BaseURL: volcengineAgentBaseURL, APIPath: "/v1/messages", KeyRequired: true,
+	}}, ProvisionOptions{})
+	var need ErrPlanKeyRequired
+	require.ErrorAs(t, err, &need)
+	require.Equal(t, volcengineAgentPlan, need.Plan)
 }
 
 // A team row takes the seat's key from the control plane; the pasted key is not

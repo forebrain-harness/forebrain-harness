@@ -691,6 +691,60 @@ func TestUpsertLLMModelStoresALoginRowWithoutAKey(t *testing.T) {
 	}
 }
 
+// A login-backed row is one row whatever path it displays: writing it again
+// updates it in place and keeps the path the models page already shows.
+func TestUpsertLLMModelFindsALoginRowWhateverItsPath(t *testing.T) {
+	store, ctx := upsertEnvForTest(t)
+	empty := ""
+	legacy, err := UpsertLLMModel(ctx, store.DB, LLMModelInput{
+		Provider: "opencode-go", Model: "glm-5.3", BaseURL: "https://opencode.ai/inference/go",
+		APIPath: "/chat/completions", APIKey: &empty,
+	})
+	if err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	again, err := UpsertLLMModel(ctx, store.DB, LLMModelInput{
+		Provider: "opencode-go", Model: "glm-5.3", BaseURL: "https://opencode.ai/inference/go", APIKey: &empty,
+	})
+	if err != nil {
+		t.Fatalf("write again: %v", err)
+	}
+	if again != legacy {
+		t.Fatalf("id changed %q -> %q: the login decides the endpoint, so the path is not part of the row", legacy, again)
+	}
+	rows, err := store.List(ctx)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %+v err=%v, want one", rows, err)
+	}
+	if rows[0].APIPath != "/chat/completions" {
+		t.Fatalf("api_path = %q, want the stored display path kept", rows[0].APIPath)
+	}
+}
+
+// The path is identity for a provider whose endpoints are told apart by it.
+func TestLLMModelHeldKeepsThePathForAKeyProvider(t *testing.T) {
+	store, ctx := upsertEnvForTest(t)
+	key := "ark-placeholder-key"
+	row, err := UpsertLLMModel(ctx, store.DB, LLMModelInput{
+		Provider: "volcengine", Model: "glm-5.3", BaseURL: "https://ark.cn-beijing.volces.com/api/coding",
+		APIPath: "/v1/messages", APIKey: &key,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	_, found, err := LLMModelHeld(ctx, store.DB, "volcengine", "glm-5.3", "https://ark.cn-beijing.volces.com/api/coding", "")
+	if err != nil {
+		t.Fatalf("held: %v", err)
+	}
+	if found {
+		t.Fatal("a plan's OpenAI-compatible path is a different endpoint, not the same row")
+	}
+	got, found, err := LLMModelHeld(ctx, store.DB, "volcengine", "glm-5.3", "https://ark.cn-beijing.volces.com/api/coding", "/v1/messages")
+	if err != nil || !found || got.ID != row {
+		t.Fatalf("held = %+v found=%t err=%v, want the seeded row", got, found, err)
+	}
+}
+
 // SetAgentDefaultModel creates main the way setup always did, and refuses a
 // name no definition carries.
 func TestSetAgentDefaultModelCreatesMainAndRefusesAnUnknownAgent(t *testing.T) {

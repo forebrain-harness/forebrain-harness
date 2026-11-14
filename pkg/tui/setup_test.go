@@ -2042,3 +2042,81 @@ func TestConfigureSubscriptionDeviceFlowWithoutAUserCode(t *testing.T) {
 		t.Fatalf("options = %+v", opts)
 	}
 }
+
+// offerRowSeed writes the row an earlier /connect run would have left for one of
+// the subscription's offers.
+func offerRowSeed(t *testing.T, cfg PromptConfig, sub *fakeSubscription, offer subscription.Offer, key string) string {
+	t.Helper()
+	db, err := process.StateDB(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath})
+	if err != nil {
+		t.Fatalf("state db: %v", err)
+	}
+	defer db.Close()
+	id, err := process.UpsertLLMModel(context.Background(), db, process.LLMModelInput{
+		Provider: offer.Provider, Model: offer.Model, BaseURL: offer.BaseURL, APIPath: offer.APIPath,
+		APIKey: &key, Source: sub.id, SourcePlan: offer.Plan,
+	})
+	if err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	return id
+}
+
+// The models page opens on what /model already runs: the rows a previous sign-in
+// wrote are ticked, across both of Ark's plans. (The fake plan still refuses its
+// first write and takes the pasted key, so the flow completes; whether a held row
+// asks for a key at all is the subscription's own answer, pinned in
+// pkg/subscription's tests.)
+func TestOffersPageOpensOnTheModelsAlreadyAdded(t *testing.T) {
+	sub := volcengineLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.offers = append(sub.offers, subscription.Offer{
+		Subscription: "volcengine", Provider: "volcengine", Model: "glm-5.3",
+		BaseURL: "https://ark.cn-beijing.volces.com/api/plan", APIPath: "/v1/messages",
+		Plan: "agent-plan", PlanLabel: "Agent Plan",
+	})
+	selector := &fakeSelector{inputs: []string{"placeholder-key"}, multiSelects: [][]int{{1}}}
+	cfg := setupTestConfig(t, selector)
+	offerRowSeed(t, cfg, sub, sub.offers[1], "placeholder-plan-key")
+
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if opts.Model != "glm-5.3" {
+		t.Fatalf("options = %+v, want the model that was already added", opts)
+	}
+	if got := selector.multiDefaults[0]; !reflect.DeepEqual(got, []int{1}) {
+		t.Fatalf("checked rows = %v, want the already added row [1]", got)
+	}
+}
+
+// A login-backed row carries the endpoint its model speaks when a legacy
+// configuration wrote it, and none when /connect writes it: the login decides
+// the endpoint either way, so both are the same model in /model and both are
+// ticked. The offer below is the production shape — a login listing names no
+// API path (`opencode.go` goes through `offersFromRecords`) — while the row a
+// pre-table configuration left behind carries the path it displays.
+func TestOffersPageOpensOnALoginRowWhateverPathItShows(t *testing.T) {
+	sub := openCodeLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	// openCodeLike's offers carry a path for the rows they write; a real login
+	// listing carries none.
+	sub.offers[1].APIPath = ""
+	selector := &fakeSelector{multiSelects: [][]int{{1}}}
+	cfg := setupTestConfig(t, selector)
+	legacy := sub.offers[1]
+	legacy.APIPath = "/chat/completions"
+	offerRowSeed(t, cfg, sub, legacy, "")
+
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if opts.Model != "kimi-k3" {
+		t.Fatalf("options = %+v, want the model that was already added", opts)
+	}
+	if got := selector.multiDefaults[0]; !reflect.DeepEqual(got, []int{1}) {
+		t.Fatalf("checked rows = %v, want the already added row [1]", got)
+	}
+}

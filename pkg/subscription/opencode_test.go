@@ -87,7 +87,7 @@ func TestOpenCodeOffersLiveUnderTheGoInferenceRoot(t *testing.T) {
 	previous := openCodeList
 	openCodeList = func(ctx context.Context, home string) ([]turn.ModelRecord, error) {
 		return []turn.ModelRecord{
-			{Provider: openCodeGoID, APIModel: "gpt-5.6-luna", ContextWindow: 400000, SupportsAttachments: true, IsDefault: true},
+			{Provider: openCodeGoID, APIModel: "gpt-5.6-luna", ContextWindow: 400000, SupportsAttachments: true, AttachmentsKnown: true, IsDefault: true},
 			{Provider: openCodeGoID, APIModel: "qwen3.8-max"},
 		}, nil
 	}
@@ -102,7 +102,10 @@ func TestOpenCodeOffersLiveUnderTheGoInferenceRoot(t *testing.T) {
 			Subscription: openCodeGoID, Provider: openCodeGoID, Model: "gpt-5.6-luna", BaseURL: root,
 			ContextWindow: 400000, SupportsImages: true, Default: true,
 		},
-		{Subscription: openCodeGoID, Provider: openCodeGoID, Model: "qwen3.8-max", BaseURL: root},
+		// A record whose listing characterized no input modalities declares
+		// nothing about images, so the row it writes leaves the catalog to
+		// answer instead of claiming the model rejects pictures.
+		{Subscription: openCodeGoID, Provider: openCodeGoID, Model: "qwen3.8-max", BaseURL: root, ImagesUndeclared: true},
 	}, offers)
 }
 

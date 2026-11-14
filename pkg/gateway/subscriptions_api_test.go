@@ -51,6 +51,7 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 		Name           string `json:"name"`
 		Endpoint       string `json:"endpoint"`
 		Default        bool   `json:"default"`
+		Held           bool   `json:"held"`
 		NeedsKey       bool   `json:"needs_key"`
 		FromStaticList bool   `json:"from_static_list"`
 	}
@@ -61,6 +62,9 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	require.Equal(t, "GPT-5 Codex", offers[0].Name)
 	require.Equal(t, "https://chatgpt.com/backend-api/codex", offers[0].Endpoint)
 	require.True(t, offers[0].Default)
+	// Nothing is held before the write: a first sign-in opens on the vendor's
+	// own default.
+	require.False(t, offers[0].Held)
 	// The two facts a plan that asks for a pasted key adds (plan 281).
 	require.True(t, offers[0].NeedsKey)
 	require.True(t, offers[0].FromStaticList)
@@ -97,6 +101,17 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	require.Equal(t, true, caps["reasoning_off"])
 	_, defaultID := llmModelRows(t, do)
 	require.Equal(t, written.IDs[0], defaultID)
+
+	// After the write the same listing says the row is this install's own,
+	// which is what the page preselects.
+	rec = do(http.MethodGet, "/api/subscriptions/chatgpt/offers")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var after []struct {
+		Held bool `json:"held"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &after))
+	require.Len(t, after, 1)
+	require.True(t, after[0].Held, "a model this install holds must be marked for the page")
 
 	// A plan that needs a key answers with its choices or its consent.
 	chatGPT.provisionErr = subscription.ErrKeyChoice{Keys: []subscription.KeyCandidate{{ID: "k1", Name: "main", Tail: "1234"}}}

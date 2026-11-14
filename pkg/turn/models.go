@@ -46,6 +46,13 @@ type ModelRecord struct {
 	DefaultMaxTokens    int64  `json:"default_max_tokens"`
 	CanReason           bool   `json:"can_reason"`
 	SupportsAttachments bool   `json:"supports_attachments"`
+	// AttachmentsKnown reports that SupportsAttachments is an answer some
+	// listing gave. false means nobody characterized this model's input
+	// modalities — an id neither models.json nor OpenCode's table knows, a
+	// ChatGPT listing without input_modalities — and a subscription row must
+	// then claim nothing about images, so the catalog answers and the image
+	// gate fails open. Zero value is the safe direction on purpose.
+	AttachmentsKnown bool `json:"attachments_known,omitempty"`
 	// ReasoningEfforts lists the reasoning levels the backend reported for the
 	// model. Empty means the model is not known to reason.
 	ReasoningEfforts []string `json:"supported_reasoning_efforts,omitempty"`
@@ -128,7 +135,7 @@ func DiscoverOpenCodeModels(ctx context.Context, src OpenCodeModelsSource, goSub
 		if !known {
 			meta = opencode.DefaultModelMeta(id)
 		}
-		records = append(records, openCodeModelRecord(provider, id, meta))
+		records = append(records, openCodeModelRecord(provider, id, meta, known))
 	}
 	for i := range records {
 		records[i].Source = ModelSourceOpenCodeAccount
@@ -144,8 +151,11 @@ func DiscoverOpenCodeModels(ctx context.Context, src OpenCodeModelsSource, goSub
 //
 // Capabilities come from models.json first — it carries every id these surfaces
 // serve, with the upstream window, image support and reasoning flag — and from
-// opencode's own table only for an id the catalog has no row for.
-func openCodeModelRecord(provider, id string, meta opencode.ModelMeta) ModelRecord {
+// opencode's own table only for an id the catalog has no row for. known says the
+// table itself names this id: an id it fills in from DefaultModelMeta is a model
+// nothing has characterized, so the record carries a window but no answer about
+// its input modalities (AttachmentsKnown stays false).
+func openCodeModelRecord(provider, id string, meta opencode.ModelMeta, known bool) ModelRecord {
 	record := ModelRecord{
 		ModelID:             provider + "/" + id,
 		Provider:            provider,
@@ -153,6 +163,7 @@ func openCodeModelRecord(provider, id string, meta opencode.ModelMeta) ModelReco
 		ContextWindow:       meta.ContextWindow,
 		CanReason:           meta.Reasoning,
 		SupportsAttachments: meta.Attachments,
+		AttachmentsKnown:    known,
 	}
 	if hit, ok := llm.Lookup(provider, id); ok && strings.EqualFold(hit.CatalogID, provider+"/"+id) {
 		// Only this surface's own row counts: llm.Lookup falls back to an
@@ -163,6 +174,7 @@ func openCodeModelRecord(provider, id string, meta opencode.ModelMeta) ModelReco
 		}
 		record.CanReason = hit.CanReason
 		record.SupportsAttachments = hit.SupportsAttachments
+		record.AttachmentsKnown = true
 	}
 	record.ReasoningEfforts = ModelReasoningEfforts(provider, id)
 	return record
@@ -289,6 +301,7 @@ func chatGPTModelRecord(info openai.ModelInfo, fetched time.Time) ModelRecord {
 		ContextWindow:          contextWindow,
 		CanReason:              len(efforts) > 0,
 		SupportsAttachments:    info.SupportsAttachments(),
+		AttachmentsKnown:       len(info.InputModalities) > 0,
 		ReasoningEfforts:       efforts,
 		DefaultReasoningEffort: strings.TrimSpace(info.DefaultReasoningEffort),
 		Source:                 ModelSourceChatGPTAccount,
@@ -588,6 +601,9 @@ func modelRecordFromCatalog(m llm.Model) ModelRecord {
 		DefaultMaxTokens:    m.DefaultMaxTokens,
 		CanReason:           m.CanReason,
 		SupportsAttachments: m.SupportsAttachments,
+		// A catalog row is this build's answer about the model: it is what a
+		// row left with no image switch falls back to, so it knows.
+		AttachmentsKnown: true,
 	}
 }
 

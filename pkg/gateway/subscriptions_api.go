@@ -72,6 +72,11 @@ type subscriptionOffer struct {
 	ContextWindow  int64  `json:"context_window,omitempty"`
 	SupportsImages bool   `json:"supports_images"`
 	Default        bool   `json:"default"`
+	// Held marks a model this install already holds as a row, so the page opens
+	// on the truth instead of on the vendor's own first row. The terminal's
+	// models page asks the same question through the same rule
+	// (process.LLMModelHeld).
+	Held bool `json:"held"`
 	// NeedsKey marks a plan whose row carries an API key the user pastes from the
 	// vendor's console (plan 281): the sign-in proved the plan, and no API hands
 	// the key over, so the page asks for it before the write.
@@ -174,6 +179,12 @@ func (s *Server) handleSubscriptionOffers(w http.ResponseWriter, r *http.Request
 	}
 	out := make([]subscriptionOffer, 0, len(offers))
 	for _, offer := range offers {
+		held := false
+		if env.DB != nil {
+			if _, found, herr := process.LLMModelHeld(r.Context(), env.DB, offer.Provider, offer.Model, offer.BaseURL, offer.APIPath); herr == nil {
+				held = found
+			}
+		}
 		out = append(out, subscriptionOffer{
 			Plan:           offer.Plan,
 			PlanName:       offer.PlanLabel,
@@ -186,6 +197,7 @@ func (s *Server) handleSubscriptionOffers(w http.ResponseWriter, r *http.Request
 			ContextWindow:  offer.ContextWindow,
 			SupportsImages: offer.SupportsImages,
 			Default:        offer.Default,
+			Held:           held,
 			NeedsKey:       offer.KeyRequired,
 			FromStaticList: offer.FromStaticList,
 		})

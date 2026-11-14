@@ -43,6 +43,7 @@ function offer(overrides: Partial<SubscriptionOffer> = {}): SubscriptionOffer {
     contextWindow: 1_000_000,
     supportsImages: false,
     default: false,
+    held: false,
     fromStaticList: false,
     needsKey: false,
     ...overrides,
@@ -137,6 +138,26 @@ describe('SubscriptionLoginModal', () => {
     expect(wrapper.text()).toContain('第 3 步')
     expect(start).not.toHaveBeenCalled()
     expect(wrapper.find('[data-offer="0"]').exists()).toBe(true)
+  })
+
+  // What this install already holds is ticked, the way the terminal's /connect
+  // opens on it: the vendor's own default is only the fallback for a first
+  // sign-in.
+  it('preselects the models this install already holds, not the vendor default', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(subscriptions())
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([
+      offer({ provider: 'volcengine', plan: 'Coding Plan', model: 'doubao-seed-2.1-pro', default: true }),
+      offer({ provider: 'volcengine', plan: 'Coding Plan', model: 'kimi-k3', held: true }),
+      offer({ provider: 'volcengine', plan: 'Coding Plan', model: 'qwen3.8-max', held: true }),
+    ])
+
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.find('[data-subscription="volcengine"]').trigger('click')
+    await flushPromises()
+
+    const boxes = wrapper.findAll('input[type="checkbox"][data-offer]')
+    expect(boxes.map((box) => (box.element as HTMLInputElement).checked)).toEqual([false, true, true])
   })
 
   it('asks which key when the plan holds several, and creates one when asked', async () => {

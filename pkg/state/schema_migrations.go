@@ -20,7 +20,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 35
+const stateSchemaVersion = 36
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -113,6 +113,12 @@ var stateSchemaMigrations = []schemaMigration{
 		apply:         migrateStateV34ToV35,
 		applyMySQL:    migrateStateV34ToV35MySQL,
 		applyPostgres: migrateStateV34ToV35Postgres,
+	},
+	{
+		version:       36,
+		apply:         migrateStateV35ToV36,
+		applyMySQL:    migrateStateV35ToV36MySQL,
+		applyPostgres: migrateStateV35ToV36Postgres,
 	},
 }
 
@@ -1921,6 +1927,66 @@ func migrateStateV34ToV35Postgres(ctx context.Context, conn *sql.Conn) error {
 	if _, err := conn.ExecContext(ctx,
 		`ALTER TABLE fb_session_image_refusals DROP CONSTRAINT fb_session_image_refusals_pkey, ADD PRIMARY KEY (session_id, provider, model, media)`); err != nil {
 		return fmt.Errorf("key fb_session_image_refusals by media: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV35ToV36 clears the image switches older builds fabricated for
+// Volcengine Ark's plan models (owner report 2026-11-13). The plan listing
+// carries model ids only, so provisioning asked the shipped table
+// (pkg/config/provider_registry) what each model accepts; a model the table does
+// not name came back as "no images" and landed on the row as cap_images = 0,
+// which the image gate reads as the vendor refusing pictures. The gate then
+// turned away a legal multimodal model — kimi-k3.1-pro among them — for a fact
+// nobody had stated.
+//
+// The fabrication has a signature: the same table answered both capability
+// columns, so a model it did not name got no window either. cap_images = 0 with
+// cap_context_window NULL on a Volcengine row a provisioning path wrote can only
+// be that fabrication. Rows keep their answer in every other case:
+//   - only 0 is cleared. 1 is a value the table really held.
+//   - only subscription-written rows (a non-empty source) are touched. An empty
+//     source is a row the user added or edited, and its columns are the user
+//     speaking.
+//   - a named model keeps its "no images" (glm-5.3, deepseek-v4-pro), because
+//     provisioning also wrote the window the table holds for it.
+//
+// Clearing is not losing the answer: installBuiltinModelTables already puts the
+// shipped table into the catalog's builtin layer, so a named model still answers
+// false there and stays refused. A model the table does not name becomes
+// uncharacterized, which is exactly the fail-open the image gate documents
+// (pkg/run/image_input.go: refusing an endpoint that does accept pictures is
+// worse than sending one request it rejects, which NewImageHeal then downgrades).
+func migrateStateV35ToV36(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+UPDATE fb_llm_models SET cap_images = NULL
+ WHERE lower(provider) = 'volcengine' AND trim(source) <> ''
+   AND cap_images = 0 AND cap_context_window IS NULL`); err != nil {
+		return fmt.Errorf("clear fabricated volcengine image caps: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV35ToV36MySQL is the same statement in MySQL's dialect. It is a
+// plain UPDATE, so it needs no existence test and re-running it changes nothing.
+func migrateStateV35ToV36MySQL(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+UPDATE fb_llm_models SET cap_images = NULL
+ WHERE LOWER(provider) = 'volcengine' AND TRIM(source) <> ''
+   AND cap_images = 0 AND cap_context_window IS NULL`); err != nil {
+		return fmt.Errorf("clear fabricated volcengine image caps: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV35ToV36Postgres is the same statement in PostgreSQL's dialect,
+// with the same reason for needing no existence test.
+func migrateStateV35ToV36Postgres(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+UPDATE fb_llm_models SET cap_images = NULL
+ WHERE lower(provider) = 'volcengine' AND btrim(source) <> ''
+   AND cap_images = 0 AND cap_context_window IS NULL`); err != nil {
+		return fmt.Errorf("clear fabricated volcengine image caps: %w", err)
 	}
 	return nil
 }

@@ -2480,8 +2480,13 @@ func (r *Runner) injectSessionModelSelection(ctx context.Context) (context.Conte
 // effectiveModelFor names the model this context's conversation runs on: the
 // run's carried selection first, then (for callers outside a turn, e.g. an
 // explicit /compact) the session's stored row resolved against the live
-// config, then the runner's published snapshot, then the config-order
-// fallback an unloaded test fixture uses.
+// config, then the rule a conversation without a row follows — its first turn
+// adopts the agent's most recently used model (RowLessSessionModel) — and only
+// then the runner's published snapshot, then the config-order fallback an
+// unloaded test fixture uses. The row-less step is what keeps a pre-flight
+// reading (the image gate, the media protocol, a token budget) on the model the
+// turn entry will actually adopt: without it the gate judged the configuration
+// default while the turn ran on another model (owner report 2026-11-14).
 func (r *Runner) effectiveModelFor(ctx context.Context) (provider, model string) {
 	if sel, ok := SessionModelSelectionFromContext(ctx); ok {
 		return sel.Provider, sel.Model
@@ -2492,6 +2497,9 @@ func (r *Runner) effectiveModelFor(ctx context.Context) (provider, model string)
 				if resolved, err := resolveSessionModelRow(r, row); err == nil {
 					return resolved.Provider, resolved.Model
 				}
+			}
+			if sel := RowLessSessionModel(r, r.Deps.SessionStore, sid); sel.Set {
+				return sel.Provider, sel.Model
 			}
 		}
 	}
@@ -2517,11 +2525,12 @@ func (r *Runner) agentModelFor(ctx context.Context) (provider, model string) {
 }
 
 // agentModelRowFor names the configured row the model agentModelFor returns
-// comes from, reading the same three sources in the same order: the subagent's
+// comes from, reading the same sources in the same order: the subagent's
 // dispatch-time override, else that type's own chain, else the conversation's
-// selection. Capabilities are read per row (owner 2026-11-10), so the two
-// functions must agree; "" means no row is known and a capability lookup falls
-// back to the pair.
+// selection — its stored row, else the row the row-less rule adopts.
+// Capabilities are read per row (owner 2026-11-10), so the two functions must
+// agree; "" means no row is known and a capability lookup falls back to the
+// pair.
 func (r *Runner) agentModelRowFor(ctx context.Context) string {
 	if !explicitMainThreadQuerySource(QuerySourceFromContext(ctx)) {
 		if override, ok := SubagentModelOverrideFromContext(ctx); ok {
@@ -2542,6 +2551,9 @@ func (r *Runner) agentModelRowFor(ctx context.Context) string {
 				if resolved, err := resolveSessionModelRow(r, row); err == nil {
 					return strings.TrimSpace(resolved.ModelID)
 				}
+			}
+			if sel := RowLessSessionModel(r, r.Deps.SessionStore, sid); sel.Set {
+				return strings.TrimSpace(sel.ModelID)
 			}
 		}
 	}

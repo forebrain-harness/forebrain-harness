@@ -1554,6 +1554,10 @@ export interface SubscriptionOffer {
   contextWindow?: number
   supportsImages: boolean
   default: boolean
+  /** This install already holds a row for this model: the picker opens on it,
+   *  the way the terminal's models page does, instead of on the vendor's own
+   *  first row. */
+  held: boolean
   /** The vendor's list is a shipped table rather than its own endpoint. */
   fromStaticList: boolean
   /** This plan's row carries an API key the user pastes from the vendor's

@@ -109,6 +109,7 @@ function offer(plan: string, model: string, extra: Record<string, unknown> = {})
     context_window: 1_000_000,
     supports_images: false,
     default: false,
+    held: false,
     from_static_list: false,
     ...extra,
   }
@@ -149,7 +150,8 @@ test('a device-code sign-in shows its code, then the models it unlocked', async 
     pending({ url: 'https://opencode.ai/console/device?user_code=ABCD-1234', user_code: 'ABCD-1234', flow: 'device_code' }),
     complete('https://opencode.ai/zen/go/v1', 'device_code'),
   ])
-  await stubOffers(page, 'opencode-go', [offer('Go 订阅', 'glm-5.3'), offer('Go 订阅', 'kimi-k3')])
+  // The row this install already holds is the one the page opens on.
+  await stubOffers(page, 'opencode-go', [offer('Go 订阅', 'glm-5.3'), offer('Go 订阅', 'kimi-k3', { held: true })])
   await stubProvision(page, 'opencode-go', ['row-glm', 'row-kimi'])
 
   let provisioned: { offers?: { model: string }[] } = {}
@@ -173,13 +175,15 @@ test('a device-code sign-in shows its code, then the models it unlocked', async 
   expect(await page.evaluate(() => (window as unknown as { __openedAuthorizations: string[] }).__openedAuthorizations))
     .toEqual(['https://opencode.ai/console/device?user_code=ABCD-1234'])
 
-  // The poll's complete answer lands on step 3: the vendor's own listing.
+  // The poll's complete answer lands on step 3: the vendor's own listing,
+  // opened on the row this install already holds.
   await expect(page.locator('[data-testid="models-subscribe-step"]')).toContainText('第 3 步', { timeout: 15_000 })
   await expect(page.locator('[data-offer="0"]')).toBeVisible()
   await expect(page.locator('[data-plan]')).toContainText('Go 订阅')
+  await expect(page.locator('[data-offer="0"]')).not.toBeChecked()
+  await expect(page.locator('[data-offer="1"]')).toBeChecked()
   await shot(page, 'models-subscribe-offers')
 
-  await page.click('[data-offer="1"]')
   await page.click('[data-testid="models-provision"]')
 
   // The modal closes on success and the write carried exactly the chosen rows.

@@ -654,6 +654,35 @@ type LLMModelInput struct {
 	CapDefaultEffort *string
 }
 
+// LLMModelHeld returns the row this install already holds for one endpoint, as a
+// save recognises it. A provider this machine signs in to carries no API path of
+// its own — the login decides the endpoint, and a stored path is only what the
+// models page displays — so such a row is recognised by its provider, model and
+// base URL alone. Everything else is recognised by the identity a save
+// normalizes: provider, model, base URL and path.
+func LLMModelHeld(ctx context.Context, db *sql.DB, provider, model, baseURL, apiPath string) (state.LLMModel, bool, error) {
+	if db == nil {
+		return state.LLMModel{}, false, fmt.Errorf("no state database")
+	}
+	provider, model, baseURL, apiPath = appcfg.NormalizeLLMModelIdentity(provider, model, baseURL, apiPath)
+	store := &state.LLMModelStore{DB: db}
+	if apiPath != "" || !appcfg.CredentialsBackedProvider(provider) {
+		return store.FindByIdentity(ctx, provider, model, baseURL, apiPath)
+	}
+	rows, err := store.List(ctx)
+	if err != nil {
+		return state.LLMModel{}, false, err
+	}
+	for _, row := range rows {
+		// Oldest first: the row this endpoint was first configured as is the
+		// one a save updates, the same "first wins" rule ConfiguredLLMs uses.
+		if row.Provider == provider && row.Model == model && row.BaseURL == baseURL {
+			return row, true, nil
+		}
+	}
+	return state.LLMModel{}, false, nil
+}
+
 // UpsertLLMModel stores one model by identity (normalized with
 // appcfg.NormalizeLLMModelIdentity): an existing row with the same provider,
 // model, base URL and API path is updated in place — /connect signing in
@@ -664,6 +693,11 @@ type LLMModelInput struct {
 // The api path is completed to the protocol's default before the lookup, so
 // "" and an explicit "/chat/completions" are one identity and cannot become
 // two rows.
+//
+// What counts as "the same row" is LLMModelHeld's answer: a login-backed
+// provider's path is not part of the row, because the login decides the
+// endpoint, so an empty input keeps the display path the row already carries
+// instead of clearing it.
 func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, error) {
 	if db == nil {
 		return "", fmt.Errorf("no state database")
@@ -680,13 +714,16 @@ func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, 
 	if !login && baseURL == "" {
 		return "", fmt.Errorf("base_url required in non-interactive mode")
 	}
-	existing, found, err := store.FindByIdentity(ctx, provider, model, baseURL, apiPath)
+	existing, found, err := LLMModelHeld(ctx, db, provider, model, baseURL, apiPath)
 	if err != nil {
 		return "", err
 	}
 	if found {
 		row := existing
-		row.Provider, row.Model, row.BaseURL, row.APIPath = provider, model, baseURL, apiPath
+		row.Provider, row.Model, row.BaseURL = provider, model, baseURL
+		if apiPath != "" {
+			row.APIPath = apiPath
+		}
 		if in.APIKey != nil {
 			row.APIKey = strings.TrimSpace(*in.APIKey)
 		}

@@ -4428,6 +4428,77 @@ func TestStateSchemaV34UpgradesToV35RemembersTheMediaKind(t *testing.T) {
 	}
 }
 
+// TestStateSchemaV35UpgradesToV36ClearsFabricatedVolcengineImages pins the
+// repair of the image switches older builds invented for Volcengine Ark's plan
+// models (owner report 2026-11-13): the shipped table answered both capability
+// columns, so a model it did not name landed with cap_images = 0 and no window,
+// and the image gate then refused pictures for a legal multimodal model. The
+// migration clears exactly that signature and leaves every real answer alone —
+// a 1 the table held, a 0 on a model that also carries the window the table
+// named (the user's explicit off switch), and every hand-added row, whose
+// source is empty.
+func TestStateSchemaV35UpgradesToV36ClearsFabricatedVolcengineImages(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	dialect := dbx.DialectOf(db)
+
+	// id, model, source, cap_images, cap_context_window
+	rows := []struct {
+		id, model, source string
+		images            int
+		window            any
+	}{
+		{"llm_v36_fabricated", "kimi-k3.1-pro", "volcengine", 0, nil},
+		{"llm_v36_true_value", "kimi-k3", "volcengine", 1, nil},
+		{"llm_v36_user_off", "glm-5.3", "volcengine", 0, 1024000},
+		{"llm_v36_by_hand", "kimi-latest", "", 0, nil},
+	}
+	for _, row := range rows {
+		if _, err := db.ExecContext(ctx, dbx.Rebind(dialect, `
+INSERT INTO fb_llm_models (id, provider, model, base_url, api_path, source, cap_images, cap_context_window, created_at, updated_at)
+VALUES (?, 'volcengine', ?, 'https://ark.test', '/api/plan', ?, ?, ?, 10, 10)`),
+			row.id, row.model, row.source, row.images, row.window); err != nil {
+			t.Fatalf("seed %s: %v", row.id, err)
+		}
+	}
+	if dialect == dbx.SQLite {
+		if _, err := db.ExecContext(ctx, `PRAGMA user_version = 35`); err != nil {
+			t.Fatalf("lower user_version: %v", err)
+		}
+	} else if err := writeDialectSchemaVersion(ctx, db, dialect, 35); err != nil {
+		t.Fatalf("lower the version row: %v", err)
+	}
+
+	if err := migrateStateSchema(ctx, db, ""); err != nil {
+		t.Fatalf("%s migrate to v%d: %v", dialect, stateSchemaVersion, err)
+	}
+	if dialect == dbx.SQLite {
+		requireSchemaVersion(ctx, t, db, stateSchemaVersion)
+		requireForeignKeysClean(ctx, t, db)
+	} else if version, err := readDialectSchemaVersion(ctx, db, dialect); err != nil || version != stateSchemaVersion {
+		t.Fatalf("%s schema version = %d (%v), want %d", dialect, version, err, stateSchemaVersion)
+	}
+
+	for _, want := range []struct {
+		id     string
+		images sql.NullInt64
+	}{
+		{"llm_v36_fabricated", sql.NullInt64{}},
+		{"llm_v36_true_value", sql.NullInt64{Int64: 1, Valid: true}},
+		{"llm_v36_user_off", sql.NullInt64{Int64: 0, Valid: true}},
+		{"llm_v36_by_hand", sql.NullInt64{Int64: 0, Valid: true}},
+	} {
+		var got sql.NullInt64
+		if err := db.QueryRowContext(ctx,
+			dbx.Rebind(dialect, `SELECT cap_images FROM fb_llm_models WHERE id = ?`), want.id).Scan(&got); err != nil {
+			t.Fatalf("read %s: %v", want.id, err)
+		}
+		if got != want.images {
+			t.Fatalf("%s cap_images = %+v, want %+v", want.id, got, want.images)
+		}
+	}
+}
+
 // stringSlicesEqual compares two ordered name lists.
 func stringSlicesEqual(got, want []string) bool {
 	if len(got) != len(want) {

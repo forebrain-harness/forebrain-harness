@@ -302,6 +302,64 @@ func TestDiscoverOpenCodeModelsProjectsConsoleCatalog(t *testing.T) {
 	require.Zero(t, src.goCalls)
 }
 
+// SupportsAttachments is an answer only when something answered it: this build's
+// models.json row for the id, OpenCode's own table, or the listing's
+// input_modalities. An id none of them knows leaves it false WITH
+// AttachmentsKnown false — "nobody asked" — so a subscription row written from
+// the record declares nothing about images instead of claiming the model rejects
+// them (owner report 2026-11-13: locally unknown ids were refused every image).
+func TestModelRecordsSayWhetherAttachmentSupportIsAnAnswer(t *testing.T) {
+	// models.json answers for a catalog id even when OpenCode's table does not.
+	known := openCodeModelRecord(opencodeProvider, "qwen3.8-flash", opencode.ModelMeta{}, false)
+	require.True(t, known.AttachmentsKnown, "the catalog's row is an answer")
+
+	// The table naming the id is an answer too, whatever the catalog says. An
+	// id no catalog holds keeps the table's own value.
+	named := openCodeModelRecord(opencodeProvider, "zz-unmeasured-model", opencode.ModelMeta{Attachments: true}, true)
+	require.True(t, named.AttachmentsKnown)
+	require.True(t, named.SupportsAttachments)
+
+	// Nothing named it: the record carries the conservative default and no
+	// answer about modalities.
+	unknown := openCodeModelRecord(opencodeProvider, "zz-unmeasured-model", opencode.DefaultModelMeta("zz-unmeasured-model"), false)
+	require.False(t, unknown.AttachmentsKnown)
+	require.False(t, unknown.SupportsAttachments)
+
+	// The live catalog's projection keeps that distinction.
+	src := &stubOpenCodeSource{console: []opencode.ModelInfo{{ID: "qwen3.8-flash"}, {ID: "gpt-7-unseen"}}}
+	records, err := DiscoverOpenCodeModels(context.Background(), src, false)
+	require.NoError(t, err)
+	byID := make(map[string]ModelRecord, len(records))
+	for _, rec := range records {
+		byID[rec.APIModel] = rec
+	}
+	require.True(t, byID["qwen3.8-flash"].AttachmentsKnown)
+	require.False(t, byID["gpt-7-unseen"].AttachmentsKnown)
+
+	// A ChatGPT listing answers through input_modalities: present means the
+	// record knows, absent means the listing said nothing.
+	chatgptSrc := &stubChatGPTSource{models: []openai.ModelInfo{
+		{Slug: "gpt-with-modalities", Visibility: "list", Priority: 1, InputModalities: []string{"text", "image"}},
+		{Slug: "gpt-silent", Visibility: "list", Priority: 2},
+	}}
+	chatgptRecords, err := DiscoverChatGPTModels(context.Background(), chatgptSrc)
+	require.NoError(t, err)
+	chatgpt := make(map[string]ModelRecord, len(chatgptRecords))
+	for _, rec := range chatgptRecords {
+		chatgpt[rec.APIModel] = rec
+	}
+	require.True(t, chatgpt["gpt-with-modalities"].AttachmentsKnown)
+	require.False(t, chatgpt["gpt-silent"].AttachmentsKnown)
+
+	// A catalog-derived record is this build's own answer about the model, so a
+	// row left with no image switch falls back to it.
+	catalog := ListModelCatalog(ModelCatalogQuery{Provider: "openai", Limit: 5})
+	require.NotEmpty(t, catalog)
+	for _, rec := range catalog {
+		require.True(t, rec.AttachmentsKnown, "%s comes from the catalog, which knows", rec.ModelID)
+	}
+}
+
 // The Go subscription reads its own table: the same id can carry a different
 // window there, and the provider prefix keeps the two surfaces apart.
 func TestDiscoverOpenCodeModelsUsesTheGoTable(t *testing.T) {

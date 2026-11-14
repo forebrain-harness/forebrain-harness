@@ -177,9 +177,11 @@ func TestRegisterPluginSubscriptionAppendsInOrderAndDeduplicates(t *testing.T) {
 }
 
 // What the listing said about a model lands on its row as the row's own caps:
-// the window the model serves and whether it takes images. A number the listing
-// never named is not written — the catalog's value still answers — while the
-// image switch is always an answer, because "no images" is one.
+// the window the model serves and whether it takes images. Both follow one rule
+// — a listing that said nothing writes nothing, leaving the catalog to answer,
+// because "no images" is only an answer when some listing gave it. A list that
+// carries ids alone (Volcengine's plan listing) therefore lands as unknown
+// rather than as "no images", and the image gate fails open on it.
 func TestProvisionRowsWritesTheListingsCapabilities(t *testing.T) {
 	appcfg.ResetProviderPluginsForTest()
 	t.Cleanup(appcfg.ResetProviderPluginsForTest)
@@ -192,6 +194,8 @@ func TestProvisionRowsWritesTheListingsCapabilities(t *testing.T) {
 		{Provider: "capsub", Model: "with-caps", BaseURL: "https://capsub.example.test", APIPath: "/chat",
 			ContextWindow: 1_000_000, SupportsImages: true},
 		{Provider: "capsub", Model: "no-window", BaseURL: "https://capsub.example.test", APIPath: "/chat"},
+		{Provider: "capsub", Model: "undeclared", BaseURL: "https://capsub.example.test", APIPath: "/chat",
+			ImagesUndeclared: true},
 	}, "capsub")
 	require.NoError(t, err)
 
@@ -211,16 +215,19 @@ func TestProvisionRowsWritesTheListingsCapabilities(t *testing.T) {
 		caps = append(caps, row)
 	}
 	require.NoError(t, rows.Err())
-	require.Len(t, caps, 2)
+	require.Len(t, caps, 3)
 	require.Equal(t, "no-window", caps[0].model)
 	require.Nil(t, caps[0].window, "a window nobody named stays the catalog's")
 	require.NotNil(t, caps[0].images)
 	require.EqualValues(t, 0, *caps[0].images)
-	require.Equal(t, "with-caps", caps[1].model)
-	require.NotNil(t, caps[1].window)
-	require.EqualValues(t, 1_000_000, *caps[1].window)
-	require.NotNil(t, caps[1].images)
-	require.EqualValues(t, 1, *caps[1].images)
+	require.Equal(t, "undeclared", caps[1].model)
+	require.Nil(t, caps[1].window, "a list carrying ids alone names no window")
+	require.Nil(t, caps[1].images, "and must not answer for the image switch")
+	require.Equal(t, "with-caps", caps[2].model)
+	require.NotNil(t, caps[2].window)
+	require.EqualValues(t, 1_000_000, *caps[2].window)
+	require.NotNil(t, caps[2].images)
+	require.EqualValues(t, 1, *caps[2].images)
 
 	// The row is what every reader asks: the window the model serves is the
 	// listing's, not a catalog guess.
@@ -230,6 +237,22 @@ func TestProvisionRowsWritesTheListingsCapabilities(t *testing.T) {
 	require.True(t, found)
 	require.NotNil(t, row.CapContextWindow)
 	require.EqualValues(t, 1_000_000, *row.CapContextWindow)
+}
+
+// A record knows its input modalities only when the listing answered the
+// question: models.json for an OpenCode id, input_modalities for a ChatGPT one.
+// A record that carries no answer projects to an offer that declares nothing,
+// which is what keeps a locally unknown model from writing "no images".
+func TestOffersFromRecordsDeclareOnlyWhatTheRecordKnows(t *testing.T) {
+	offers := offersFromRecords("recordsub", []turn.ModelRecord{
+		{Provider: "recordsub", APIModel: "declared", SupportsAttachments: true, AttachmentsKnown: true},
+		{Provider: "recordsub", APIModel: "unknown"},
+	}, "https://x.test")
+	require.Len(t, offers, 2)
+	require.False(t, offers[0].ImagesUndeclared, "a characterized model keeps its answer")
+	require.True(t, offers[0].SupportsImages)
+	require.True(t, offers[1].ImagesUndeclared, "an uncharacterized model declares nothing")
+	require.False(t, offers[1].SupportsImages)
 }
 
 // The listing's thinking capabilities land on the row too: the levels it
