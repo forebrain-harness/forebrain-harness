@@ -283,6 +283,9 @@ func BuildToolMeta(evt StepEvent) ToolMeta {
 			meta.PlanOnly = true
 		}
 	}
+	if rows := DeliverablesFrom(evt.Output); len(rows) > 0 {
+		meta.Deliverables = rows
+	}
 	return meta
 }
 

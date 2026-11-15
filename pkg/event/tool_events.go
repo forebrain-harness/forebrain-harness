@@ -106,6 +106,24 @@ type ToolCallMeta struct {
 	// PlanOnly marks an exit_plan_mode approved as "keep the plan only": the
 	// plan is the deliverable and must not be carried out.
 	PlanOnly bool `json:"plan_only,omitempty"`
+	// Deliverables is what a present_files call registered — one row per file
+	// the user receives. It mirrors tool.ToolMeta.Deliverables so a card
+	// painted live and the same card repainted by a replay draw the same list;
+	// absent on every other call and on steps recorded before the tool
+	// reported its rows.
+	Deliverables []Deliverable `json:"deliverables,omitempty"`
+}
+
+// Deliverable is one file a present_files call registered. pkg/tool owns the
+// derivation and pkg/event declares the same shape for the event boundary;
+// pkg/event imports only the standard library, and pkg/tool already imports
+// pkg/event, so the conversion lives in pkg/tool (DeliverablesFromEvent).
+type Deliverable struct {
+	Title   string `json:"title,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	RelPath string `json:"rel_path,omitempty"`
+	Size    int64  `json:"size,omitempty"`
 }
 
 // SubagentCall is what one subagent_* tool call is about — the tasks it

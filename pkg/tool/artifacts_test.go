@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
@@ -366,17 +368,260 @@ func TestPresentFilesRegisteredOnlyForOfficeAndBatch(t *testing.T) {
 	}
 }
 
+// TestPresentFilesCompletionCarriesStructuredRows is the reproduction of the
+// deliverable card's empty body: the tool answered with a JSON string, so the
+// step output carried {"output":"<json>"} and the card could only ever draw
+// the "Presented files." fallback. The rows must reach the completion capture
+// as the structured map the card and every surface read.
+func TestPresentFilesCompletionCarriesStructuredRows(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ddl.sql"), []byte("create "), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithToolCompletionCapture(presentFilesTestCtx(t, root))
+	sess := newStateSessionStoreForTest(t)
+	if err := sess.Ensure(ctx, "sess-art", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	tl, err := newPresentFilesTool(NewState(t.TempDir()), &AgentToolRuntime{Sess: sess})
+	if err != nil {
+		t.Fatalf("newPresentFilesTool: %v", err)
+	}
+	args, _ := json.Marshal(presentFilesInput{Files: []presentFileInput{{Path: "ddl.sql", Title: "PostgreSQL DDL"}}})
+	out, err := tl.Handle(ctx, string(args))
+	if err != nil {
+		t.Fatalf("present_files: %v", err)
+	}
+	payload, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("present_files captured nothing: the step output stays the text envelope")
+	}
+	rows, ok := payload.Output["presented"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("presented = %#v, want one row", payload.Output["presented"])
+	}
+	row, ok := rows[0].(map[string]any)
+	if !ok {
+		t.Fatalf("row = %#v, want a map", rows[0])
+	}
+	if row["rel_path"] != "ddl.sql" || row["kind"] != "text" || row["title"] != "PostgreSQL DDL" {
+		t.Fatalf("row = %#v", row)
+	}
+	if want := int64(len("create ")); row["size"] != want {
+		t.Fatalf("row size = %#v, want %d", row["size"], want)
+	}
+	// The card's facts and the model's result are the same map: one payload,
+	// two readers. A second, hand-shaped answer is how the two drift apart.
+	raw, err := json.Marshal(payload.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outText, _ := out.(string)
+	if string(raw) != outText {
+		t.Fatalf("model payload %s and captured payload %s disagree", outText, raw)
+	}
+	if strings.Contains(outText, root) {
+		t.Fatalf("the payload leaks the absolute project path: %s", outText)
+	}
+	body, _ := FormatToolStepResult(StepEvent{Kind: StepKindToolCompleted, ToolName: "present_files",
+		Output: payload.Output}, DefaultMaxFormattedBody)
+	if want := "- **PostgreSQL DDL** · text · 7 B · `ddl.sql`"; !strings.Contains(body, want) {
+		t.Fatalf("body %q lost %q", body, want)
+	}
+}
+
+// TestPresentFilesCompletionKeepsInputOrder pins that the rows — and so the
+// card and the "this turn's deliverables" group — list the files in the order
+// the model presented them, which is the order the user should see them in.
+func TestPresentFilesCompletionKeepsInputOrder(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"second.md", "first.md", "third.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := WithToolCompletionCapture(presentFilesTestCtx(t, root))
+	sess := newStateSessionStoreForTest(t)
+	if err := sess.Ensure(ctx, "sess-art", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	tl, err := newPresentFilesTool(NewState(t.TempDir()), &AgentToolRuntime{Sess: sess})
+	if err != nil {
+		t.Fatalf("newPresentFilesTool: %v", err)
+	}
+	args, _ := json.Marshal(presentFilesInput{Files: []presentFileInput{
+		{Path: "second.md"}, {Path: "first.md"}, {Path: "third.txt"},
+	}})
+	if _, err := tl.Handle(ctx, string(args)); err != nil {
+		t.Fatalf("present_files: %v", err)
+	}
+	payload, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("present_files captured nothing")
+	}
+	rows, _ := payload.Output["presented"].([]any)
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want 3", len(rows))
+	}
+	for i, want := range []string{"second.md", "first.md", "third.txt"} {
+		row, _ := rows[i].(map[string]any)
+		if row["rel_path"] != want {
+			t.Fatalf("row %d rel_path = %#v, want %q", i, row["rel_path"], want)
+		}
+	}
+}
+
+// TestPresentFilesMissingPathCapturesNothing is the pre-write validation
+// contract: a rejected path leaves the conversation with no half-delivered
+// set, so nothing is captured and the card's body is the error.
+func TestPresentFilesMissingPathCapturesNothing(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.md"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithToolCompletionCapture(presentFilesTestCtx(t, root))
+	sess := newStateSessionStoreForTest(t)
+	if err := sess.Ensure(ctx, "sess-art", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	tl, err := newPresentFilesTool(NewState(t.TempDir()), &AgentToolRuntime{Sess: sess})
+	if err != nil {
+		t.Fatalf("newPresentFilesTool: %v", err)
+	}
+	args, _ := json.Marshal(presentFilesInput{Files: []presentFileInput{{Path: "a.md"}, {Path: "gone.md"}}})
+	if _, err := tl.Handle(ctx, string(args)); err == nil {
+		t.Fatal("present_files accepted a missing path")
+	}
+	if payload, ok := ToolCompletionFromContext(ctx); ok {
+		t.Fatalf("a rejected set still captured %#v", payload.Output)
+	}
+	if rows, err := sess.ListArtifactsForRun(context.Background(), "run-art"); err != nil {
+		t.Fatal(err)
+	} else if len(rows) != 0 {
+		t.Fatalf("a rejected set still wrote %d rows", len(rows))
+	}
+}
+
+// TestPresentFilesLegacyShapeStaysProse is the old sessions' contract: a step
+// whose output is the text envelope {"output":"<json>"} has no rows, so the
+// card keeps its one line of prose.
+func TestPresentFilesLegacyShapeStaysProse(t *testing.T) {
+	legacy := `{"presented":[{"id":"art-1","name":"a.md","rel_path":"a.md","title":"a.md","kind":"markdown","preview":"markdown","size":288994}],"note":"…"}`
+	evt := StepEvent{Kind: StepKindToolCompleted, ToolName: "present_files", Output: map[string]any{"output": legacy}}
+	body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	if body != "Presented files." {
+		t.Fatalf("legacy body = %q, want the fallback line", body)
+	}
+}
+
+// TestBuildToolMetaCarriesDeliverableRows is the criterion the card and the
+// turn's group both branch on: the rows ride the meta, live and replay alike,
+// and a step with no rows carries none.
+func TestBuildToolMetaCarriesDeliverableRows(t *testing.T) {
+	evt := StepEvent{Kind: StepKindToolCompleted, ToolName: "present_files", Output: map[string]any{
+		"presented": []any{
+			map[string]any{"id": "art-1", "name": "ddl.sql", "rel_path": "db/ddl.sql",
+				"title": "PostgreSQL DDL", "kind": "text", "preview": "text", "size": int64(288994)},
+			map[string]any{"id": "art-2", "name": "a.md", "kind": "markdown", "size": float64(2048)},
+		},
+	}}
+	meta := BuildToolMeta(evt)
+	if len(meta.Deliverables) != 2 {
+		t.Fatalf("deliverables = %#v, want two rows", meta.Deliverables)
+	}
+	first := meta.Deliverables[0]
+	if first.Title != "PostgreSQL DDL" || first.RelPath != "db/ddl.sql" || first.Kind != "text" || first.Size != 288994 {
+		t.Fatalf("first row = %+v", first)
+	}
+	// A row without a title or a path still names a file: both fall back to
+	// the name, so no surface has to guess what to print.
+	second := meta.Deliverables[1]
+	if second.Title != "a.md" || second.RelPath != "a.md" || second.Size != 2048 {
+		t.Fatalf("second row = %+v", second)
+	}
+	// The old text envelope has no rows, which is exactly what keeps an old
+	// session's card unchanged.
+	legacy := BuildToolMeta(StepEvent{Kind: StepKindToolCompleted, ToolName: "present_files",
+		Output: map[string]any{"output": `{"presented":[{"name":"a.md"}]}`}})
+	if len(legacy.Deliverables) != 0 {
+		t.Fatalf("the text envelope yielded rows: %#v", legacy.Deliverables)
+	}
+}
+
+// TestDeliverablesCrossTheEventBoundary pins the mirror: the canonical event
+// carries the same rows (they are what the web card and a replayed row read),
+// and the shape converts back into the tool's without loss.
+func TestDeliverablesCrossTheEventBoundary(t *testing.T) {
+	evt := StepEvent{Kind: StepKindToolCompleted, ToolName: "present_files", StepID: "call_1",
+		Output: map[string]any{"presented": []any{map[string]any{
+			"id": "art-1", "name": "a.md", "rel_path": "out/a.md", "title": "Report",
+			"kind": "markdown", "preview": "markdown", "size": int64(2048),
+		}}}}
+	run, ok := RunEventFromStep(context.Background(), "sess", "run", "tui", evt)
+	if !ok {
+		t.Fatal("RunEventFromStep dropped the completed call")
+	}
+	var payload event.ToolCallCompletedPayload
+	if err := json.Unmarshal(run.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.ToolMeta.Deliverables) != 1 {
+		t.Fatalf("event rows = %#v, want one", payload.ToolMeta.Deliverables)
+	}
+	back := DeliverablesFromEvent(payload.ToolMeta.Deliverables)
+	if len(back) != 1 || back[0] != (Deliverable{Title: "Report", Name: "a.md", Kind: "markdown", RelPath: "out/a.md", Size: 2048}) {
+		t.Fatalf("round trip = %#v", back)
+	}
+}
+
+// TestArtifactKindGlyphsCoverEveryClass is the coverage gate the glyph table
+// exists under: every class the classification table can produce has a glyph
+// of its own, so adding a format (one row in artifactClasses) fails here until
+// its row is drawn too.
+func TestArtifactKindGlyphsCoverEveryClass(t *testing.T) {
+	seen := map[string]string{}
+	for ext, class := range artifactClasses {
+		glyph := ArtifactKindGlyph(class.kind)
+		if glyph == "◇" {
+			t.Errorf("%s (extension %q) has no glyph of its own", class.kind, ext)
+		}
+		if want, ok := seen[glyph]; ok && want != class.kind {
+			t.Errorf("kinds %q and %q share the glyph %q", want, class.kind, glyph)
+		}
+		seen[glyph] = class.kind
+	}
+	// The glyph is one rune: a grapheme cluster would take its own columns and
+	// shift everything after it.
+	for kind, glyph := range artifactKindGlyphs {
+		if n := utf8.RuneCountInString(glyph); n != 1 {
+			t.Errorf("%s glyph %q is %d runes", kind, glyph, n)
+		}
+	}
+	// Nothing recognized reads as the unknown-class mark.
+	if got := ArtifactKindGlyph(""); got != "◇" {
+		t.Errorf("empty kind glyph = %q, want ◇", got)
+	}
+	if got := ArtifactKindGlyph("hologram"); got != "◇" {
+		t.Errorf("unknown kind glyph = %q, want ◇", got)
+	}
+}
+
 func TestFormatPresentFilesStepNeverShowsJSON(t *testing.T) {
+	// Both size types a step output can carry: the live capture keeps the Go
+	// value AddArtifact returned (int64), while a row read back from JSON is a
+	// float64. The card must read either as the same size.
 	normal := StepEvent{ToolName: "present_files", Output: map[string]any{
 		"presented": []any{
 			map[string]any{"id": "art-1", "name": "a.docx", "title": "Q3 report", "kind": "document", "rel_path": "outputs/a.docx", "preview": "docx", "size": float64(1259520)},
 			map[string]any{"id": "art-2", "name": "b.pptx", "title": "b.pptx", "kind": "presentation", "rel_path": "b.pptx", "preview": "office_pdf", "size": float64(512)},
+			map[string]any{"id": "art-3", "name": "c.pdf", "title": "c.pdf", "kind": "pdf", "rel_path": "c.pdf", "preview": "pdf", "size": int64(1259520)},
 		},
 	}}
 	body, _ := FormatToolStepResult(normal, DefaultMaxFormattedBody)
 	wantLines := []string{
 		"- **Q3 report** · document · 1.2 MB · `outputs/a.docx`",
 		"- **b.pptx** · presentation · 512 B · `b.pptx`",
+		"- **c.pdf** · pdf · 1.2 MB · `c.pdf`",
 	}
 	for _, want := range wantLines {
 		if !strings.Contains(body, want) {

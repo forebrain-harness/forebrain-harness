@@ -12,6 +12,42 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 )
 
+// eventDeliverables mirrors a call's delivered rows across the event boundary,
+// whose shape is declared separately: pkg/event carries only the standard
+// library, and pkg/tool already imports it, so it cannot own the tool type.
+// Every ToolMeta rebuild point (RunEventFromStep, a subagent's mirror, a
+// replay) goes through this pair, or a row list the live card had would be
+// missing from the replayed one.
+func eventDeliverables(rows []Deliverable) []event.Deliverable {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]event.Deliverable, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, event.Deliverable{
+			Title: row.Title, Name: row.Name, Kind: row.Kind,
+			RelPath: row.RelPath, Size: row.Size,
+		})
+	}
+	return out
+}
+
+// DeliverablesFromEvent is eventDeliverables' other direction: the rows a
+// surface reconstructs into a ToolMeta from a canonical event.
+func DeliverablesFromEvent(rows []event.Deliverable) []Deliverable {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]Deliverable, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, Deliverable{
+			Title: row.Title, Name: row.Name, Kind: row.Kind,
+			RelPath: row.RelPath, Size: row.Size,
+		})
+	}
+	return out
+}
+
 // RunEventFromStep converts a user-visible tool boundary to the canonical
 // event consumed by both live surfaces and resume replay. Keeping this next to
 // the display normalizer prevents TUI and gateway from serializing different
@@ -45,6 +81,7 @@ func RunEventFromStep(ctx context.Context, sessionID, runID, channel string, evt
 		// on ToolMeta, so no renderer can branch on it.
 		Origin:       strings.TrimSpace(evt.Origin),
 		SubagentCall: meta.SubagentCall,
+		Deliverables: eventDeliverables(meta.Deliverables),
 	}
 	stepID := strings.TrimSpace(evt.StepID)
 	id := ""
@@ -339,6 +376,12 @@ type ToolMeta struct {
 	// PlanOnly marks an exit_plan_mode approved as "keep the plan only": the
 	// plan is the deliverable and must not be carried out.
 	PlanOnly bool `json:"plan_only,omitempty"`
+	// Deliverables is what a present_files call registered: the files the user
+	// receives from this conversation. The card and the turn's "deliverables"
+	// group both read these rows, and the row list is the only criterion — a
+	// step recorded before the tool reported them carries none, so an old
+	// session keeps the card it always had. Absent on every other call.
+	Deliverables []Deliverable `json:"deliverables,omitempty"`
 }
 
 // RunningFor reports how long an executing call has been running as of now,

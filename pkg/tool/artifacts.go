@@ -251,19 +251,20 @@ func newPresentFilesTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				}
 				staged = append(staged, stagedFile{input: f, resolved: resolved, size: info.Size(), mtimeNS: info.ModTime().UnixNano()})
 			}
-			type presentedFile struct {
-				ID      string `json:"id"`
-				Name    string `json:"name"`
-				RelPath string `json:"rel_path"`
-				Title   string `json:"title"`
-				Kind    string `json:"kind"`
-				Preview string `json:"preview"`
-				Size    int64  `json:"size"`
+			// The rows are the card: one structured result, captured for the
+			// surfaces and serialized for the model. It is built by one
+			// closure so both readers see the same facts, and it is captured
+			// on the way out of every exit — a call that registered some rows
+			// and then failed still delivered those, and the card must say so
+			// (the failure's own words ride evt.Error, never this payload).
+			rows := make([]any, 0, len(staged))
+			payload := func() map[string]any {
+				return map[string]any{"presented": rows, "note": presentFilesToolNote}
 			}
-			presented := make([]presentedFile, 0, len(staged))
 			for _, s := range staged {
 				sum, kind, mimeType, preview, err := hashAndClassifyFile(s.resolved)
 				if err != nil {
+					CaptureToolOutput(ctx, payload())
 					return "", err
 				}
 				name := filepath.Base(s.resolved)
@@ -295,19 +296,108 @@ func newPresentFilesTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 					Origin:      state.ArtifactOriginModel,
 				})
 				if err != nil {
+					CaptureToolOutput(ctx, payload())
 					return "", err
 				}
-				presented = append(presented, presentedFile{ID: row.ID, Name: row.Name, RelPath: row.RelPath, Title: row.Title, Kind: row.Kind, Preview: row.Preview, Size: row.Size})
+				rows = append(rows, map[string]any{
+					"id": row.ID, "name": row.Name, "rel_path": row.RelPath, "title": row.Title,
+					"kind": row.Kind, "preview": row.Preview, "size": row.Size,
+				})
 			}
-			out, err := json.Marshal(struct {
-				Presented []presentedFile `json:"presented"`
-				Note      string          `json:"note"`
-			}{Presented: presented, Note: presentFilesToolNote})
+			CaptureToolOutput(ctx, payload())
+			out, err := json.Marshal(payload())
 			if err != nil {
 				return "", err
 			}
 			return string(out), nil
 		})
+}
+
+// Deliverable is one file a present_files call registered, in the shape a card
+// needs it: what to call it, what it is, where it lives in the project and how
+// many bytes it is. It is the structured half of the call's result, so every
+// surface that lists what a conversation delivered — the card, the turn's
+// deliverables group, a batch task's end notification — draws from these rows
+// instead of re-reading the JSON the model was handed.
+type Deliverable struct {
+	Title   string `json:"title,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	RelPath string `json:"rel_path,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+}
+
+// DeliverablesFrom reads the rows out of a present_files result. The existence
+// of a row is the whole criterion for "this call delivered files": a step
+// recorded before the tool reported them carries the old text envelope and
+// yields nothing, so an old session keeps exactly the card it always had. Title
+// and path fall back to the file name, because a row without them still names
+// a file the user received.
+func DeliverablesFrom(output map[string]any) []Deliverable {
+	items, _ := output["presented"].([]any)
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]Deliverable, 0, len(items))
+	for _, item := range items {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		d := Deliverable{
+			Title:   strings.TrimSpace(stringFromAny(row["title"])),
+			Name:    strings.TrimSpace(stringFromAny(row["name"])),
+			Kind:    strings.TrimSpace(stringFromAny(row["kind"])),
+			RelPath: strings.TrimSpace(stringFromAny(row["rel_path"])),
+			// The live capture keeps the int64 AddArtifact returned; a row read
+			// back out of JSON is a float64. One reader for both.
+			Size: int64(intFromAny(row["size"])),
+		}
+		if d.Title == "" {
+			d.Title = d.Name
+		}
+		if d.RelPath == "" {
+			d.RelPath = d.Name
+		}
+		if d.Title == "" && d.RelPath == "" {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// artifactKindGlyphs is one glyph per artifact class. A row's glyph says what
+// the file is at a glance, and the table is keyed by the same kinds
+// artifactClasses produces, so a new format adds its class row and its glyph
+// here — TestArtifactKindGlyphsCoverEveryClass keeps the two in step.
+var artifactKindGlyphs = map[string]string{
+	"document":     "▥",
+	"spreadsheet":  "▦",
+	"presentation": "▧",
+	"pdf":          "▨",
+	"image":        "▩",
+	"video":        "▶",
+	"audio":        "♪",
+	"html":         "◈",
+	"markdown":     "¶",
+	"text":         "≡",
+	"archive":      "⊞",
+	"design":       "✎",
+	"cad":          "⌗",
+	"other":        "◇",
+}
+
+// ArtifactKindGlyph is the glyph a deliverable of this class leads with. An
+// unknown class reads as ◇ — the same shape ArtifactKindGlyphs gives a file
+// nothing recognized. It lives here, beside the classification table, because
+// the class is the engine's fact and every surface must draw it the same way;
+// the terminal keeps a test that the glyphs stay clear of its own markers.
+func ArtifactKindGlyph(kind string) string {
+	if glyph, ok := artifactKindGlyphs[strings.ToLower(strings.TrimSpace(kind))]; ok {
+		return glyph
+	}
+	return "◇"
 }
 
 // hashAndClassifyFile reads a delivered file once: the first bytes classify
@@ -357,7 +447,7 @@ func formatPresentFilesStep(evt StepEvent, maxBytes int) (string, bool) {
 		title, _ := row["title"].(string)
 		kind, _ := row["kind"].(string)
 		rel, _ := row["rel_path"].(string)
-		size, _ := row["size"].(float64)
+		size := int64(intFromAny(row["size"]))
 		label := title
 		if label == "" || label == name {
 			label = name
@@ -365,7 +455,7 @@ func formatPresentFilesStep(evt StepEvent, maxBytes int) (string, bool) {
 		if label == "" || rel == "" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("- **%s** · %s · %s · `%s`", label, kind, HumanSize(int64(size)), rel))
+		lines = append(lines, fmt.Sprintf("- **%s** · %s · %s · `%s`", label, kind, HumanSize(size), rel))
 	}
 	if len(lines) == 0 {
 		return "Presented files.", false

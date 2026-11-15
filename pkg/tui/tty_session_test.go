@@ -56,19 +56,36 @@ func TestClipboardImageReaderFallsBackToTempWithoutAProject(t *testing.T) {
 
 func TestClipboardImageHintLine(t *testing.T) {
 	r := NewRenderer(nil, nil)
-	if got := r.clipboardImageHintLine(80); got != "" {
-		t.Fatalf("hint shown without an image: %q", got)
+	if rows := r.composerHintRows(80); len(rows) != 0 {
+		t.Fatalf("hint shown without an image: %v", rows)
 	}
-	r.clipboardImage = true
-	got := r.clipboardImageHintLine(80)
-	if !strings.Contains(got, clipboardImageHintText) {
-		t.Fatalf("hint missing: %q", got)
+	r.composerHint = clipboardImageHintText
+	rows := r.composerHintRows(80)
+	if len(rows) != 1 || !strings.Contains(rows[0], clipboardImageHintText) {
+		t.Fatalf("hint missing: %v", rows)
 	}
-	if w := runewidth.StringWidth(stripANSI(got)); w != 80-sharedBlockFooterTruncateExtraRoom {
+	if w := runewidth.StringWidth(stripANSI(rows[0])); w != 80 {
 		t.Fatalf("hint not right-aligned, width %d", w)
 	}
-	if got := r.clipboardImageHintLine(5); strings.Contains(got, "ctrl+v to paste") {
-		t.Fatalf("hint not truncated: %q", got)
+	// Owner's 2026-11-14 ruling: a hint narrower than its text WRAPS, it is
+	// never truncated.
+	narrow := r.composerHintRows(5)
+	if len(narrow) < 2 {
+		t.Fatalf("hint did not wrap at width 5: %v", narrow)
+	}
+	// Every row carries its own SGR (the grey the clipboard hint has), so the
+	// text must be compared with the styling stripped: joining the styled
+	// strings would break a word across an escape sequence.
+	var plain strings.Builder
+	for _, row := range narrow {
+		text := stripANSI(row)
+		if w := runewidth.StringWidth(text); w > 5 {
+			t.Fatalf("row %q is %d cells wide, terminal is 5", text, w)
+		}
+		plain.WriteString(text)
+	}
+	if !strings.Contains(plain.String(), "clipboard") {
+		t.Fatalf("wrapped hint lost its text: %q", plain.String())
 	}
 }
 
@@ -113,7 +130,7 @@ func (p *countingClipboardProbe) ClipboardHasImage(context.Context) bool {
 func clipboardHintState(r *Renderer) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.clipboardImage
+	return r.composerHint != ""
 }
 
 func eventually(t *testing.T, what string, cond func() bool) {
@@ -153,13 +170,13 @@ func startClipboardWatcher(t *testing.T, probe ClipboardImageProbe, interval tim
 }
 
 // TestClipboardImageHintExpiresWhileImageStays pins the hint as transient:
-// gone after clipboardImageHintTimeout even though nothing told the renderer
+// gone after composerHintTimeout even though nothing told the renderer
 // the clipboard changed, hidden at once by false, and a repeated true while
 // it is up must not push its expiry back.
 func TestClipboardImageHintExpiresWhileImageStays(t *testing.T) {
-	prev := clipboardImageHintTimeout
-	clipboardImageHintTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { clipboardImageHintTimeout = prev })
+	prev := composerHintTimeout
+	composerHintTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { composerHintTimeout = prev })
 
 	r := NewRenderer(nil, nil)
 	r.SetClipboardImageAvailable(true)
@@ -171,11 +188,11 @@ func TestClipboardImageHintExpiresWhileImageStays(t *testing.T) {
 	r.SetClipboardImageAvailable(true)
 	eventually(t, "a fresh true to show the hint again", func() bool { return clipboardHintState(r) })
 	r.mu.Lock()
-	armed := r.clipboardImageTimer
+	armed := r.composerHintTimer
 	r.mu.Unlock()
 	r.SetClipboardImageAvailable(true) // already up: keep the original expiry
 	r.mu.Lock()
-	rearmed := r.clipboardImageTimer != armed
+	rearmed := r.composerHintTimer != armed
 	r.mu.Unlock()
 	if rearmed {
 		t.Fatal("a repeated true while the hint is up must not re-arm its expiry")

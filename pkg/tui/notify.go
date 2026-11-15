@@ -175,6 +175,14 @@ type RunEndedMsg struct {
 	WorkedDuration time.Duration
 	InputTokens    int // Phase 2 redesign: provider-reported prompt token count; 0 when provider doesn't expose it.
 	OutputTokens   int // Phase 2 redesign: provider-reported completion token count; 0 when provider doesn't expose it.
+	// ClosesTurn marks the one run-end that also ends its whole turn: the
+	// dispatch that ran it, the approval resume that continued it, or the
+	// cancellation of the gate it was parked on. A turn's deliverables group is
+	// drawn exactly at that close, so a turn that ran twice (an approval
+	// resumed it) still shows one group. A replayed turn synthesizes its own
+	// run-ends and leaves this false: replay draws the group from the stored
+	// rows at the turn's end instead.
+	ClosesTurn bool
 }
 
 // InputQueueChangedMsg is emitted when the conversation's input queue changes
@@ -1623,6 +1631,10 @@ func subagentToolStepMsg(evt event.RunEvent, stepID, toolName, summary string, m
 			// this mirror; without its card facts the nested dispatch would
 			// fall back to a generic tool card instead of its own card.
 			SubagentCall: meta.SubagentCall,
+			// present_files is primary-agent only (tool.PrimaryOnlyToolName), so
+			// this path never carries rows; the mirror is kept complete so any
+			// future event-borne card fact reaches the same ToolMeta shape.
+			Deliverables: tool.DeliverablesFromEvent(meta.Deliverables),
 		},
 		ToolPhase: phase,
 		AgentID:   strings.TrimSpace(meta.AgentID),

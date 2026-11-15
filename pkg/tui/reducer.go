@@ -65,6 +65,11 @@ const (
 	// for the current terminal width on every repaint, so a resize reflows
 	// it; the directory is wrapped, never truncated.
 	FrameBannerInfo FrameKind = "banner_info"
+	// FrameDeliverables is a turn's "deliverables" group: one row per file the
+	// turn presented, drawn once after the turn's last text and before its
+	// "Worked for" line. It carries the rows themselves (Frame.Deliverables),
+	// never prose.
+	FrameDeliverables FrameKind = "deliverables"
 )
 
 type Frame struct {
@@ -150,6 +155,11 @@ type Frame struct {
 	// title; empty leaves that kind's own mark. It says what a card is, never
 	// what state it is in — state stays the spinner, the ✗ and the ○.
 	Marker string
+	// Deliverables is the delivered files a FrameDeliverables group lists, in
+	// the order they were presented. The rows are the frame's whole content:
+	// each one renders as its own line, and the block folds by rows, not by
+	// rendered lines (a long title wraps).
+	Deliverables []tool.Deliverable
 }
 
 // TransportRetryStatus is the network retry an agent is waiting on, read by
@@ -390,6 +400,12 @@ type Reducer struct {
 	// compactions holds each running compaction's card state, keyed by
 	// compaction id, until its terminal event replaces the card.
 	compactions map[string]*compactionCard
+	// pendingDeliverables is what this turn has presented so far, in order and
+	// across its runs (an approval resume is a second run of one turn). The
+	// turn's one group is drawn from it when the turn closes, and it is reset
+	// there — or when a withdrawn turn's rows would otherwise leak into the
+	// next turn's group.
+	pendingDeliverables []tool.Deliverable
 }
 
 // compactionCard is what a running compaction's card shows between events.
@@ -401,6 +417,38 @@ type compactionCard struct {
 }
 
 const maxLiveToolOutputBytes = 256 * 1024
+
+// appendDeliverables adds rows to a turn's list, skipping the ones already
+// there: a step that is republished — the same completion reaching the reducer
+// twice — and the same file presented twice must not double a row in the
+// group. A row is identified by what a reader sees on it: its title, path and
+// size.
+func appendDeliverables(existing, rows []tool.Deliverable) []tool.Deliverable {
+	for _, row := range rows {
+		duplicate := false
+		for _, have := range existing {
+			if have.RelPath == row.RelPath && have.Size == row.Size && have.Title == row.Title {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			existing = append(existing, row)
+		}
+	}
+	return existing
+}
+
+// takePendingDeliverables hands over the turn's presented files and clears the
+// accumulator, so a group can never be drawn twice from one turn.
+func (r *Reducer) takePendingDeliverables() []tool.Deliverable {
+	if r == nil || len(r.pendingDeliverables) == 0 {
+		return nil
+	}
+	rows := r.pendingDeliverables
+	r.pendingDeliverables = nil
+	return rows
+}
 
 func liveToolOutputKey(msg Message) string {
 	return strings.TrimSpace(msg.AgentID) + "\x00" + strings.TrimSpace(msg.StepID)
@@ -1353,6 +1401,10 @@ func (r *Reducer) Reduce(msg any) EventResult {
 					buf.runningStepIDs = nil
 				}
 			}
+			// A withdrawn turn is presented as a turn that never happened, so
+			// the files it presented go with it: keeping them would leak the
+			// rows into the next turn's group.
+			r.pendingDeliverables = nil
 			return EventResult{}
 		}
 		if runID == "" {
@@ -1398,6 +1450,19 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		// completed are canceled with it. A dispatch's agents outlive the
 		// turn, so those cards are deliberately left running.
 		out = append(out, r.cancelInFlightQueryCards(runID, "")...)
+		// The turn's deliverables are said once, at its close and after its last
+		// text: every file it presented, in one group, immediately above the
+		// "Worked for" line. A turn that ran more than once (an approval
+		// resumed it) presents the same group here, because only the run-end
+		// that closes the turn carries ClosesTurn. The frame carries no event
+		// id: one turn has exactly one producer, so it needs no identity to be
+		// recognized by, and a derived id would only invite a reader to key
+		// card deduplication on something that can repeat.
+		if m.ClosesTurn {
+			if rows := r.takePendingDeliverables(); len(rows) > 0 {
+				out = append(out, Frame{Kind: FrameDeliverables, Deliverables: rows, RunID: runID, Final: true})
+			}
+		}
 		return EventResult{Frames: out, WorkedStatus: worked}
 	case TokenUsageDeltaMsg:
 		if r.tracker != nil && (m.InputTokens > 0 || m.OutputTokens > 0) {
@@ -2116,6 +2181,17 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		if tool.ToolStepHoldsNoCard(firstNonEmpty(msg.ToolName, msg.ToolMeta.ToolName), msg.ToolMeta.Status) {
 			return r.flushBufferedText(r.agentBuf(strings.TrimSpace(msg.AgentID)), msg.Timestamp)
 		}
+		// A delivered call hands its rows to the turn's deliverables group, and
+		// a completed one then has nothing left to say on its own card: the
+		// header is the card, the rows are the group's. A failed, refused or
+		// canceled call keeps its body — that text is the only explanation the
+		// user gets — and only the main agent delivers at all.
+		if strings.TrimSpace(msg.AgentID) == "" && len(msg.ToolMeta.Deliverables) > 0 {
+			r.pendingDeliverables = appendDeliverables(r.pendingDeliverables, msg.ToolMeta.Deliverables)
+			if strings.EqualFold(strings.TrimSpace(msg.ToolMeta.Status), "completed") {
+				msg.Content = ""
+			}
+		}
 		stepID := strings.TrimSpace(msg.StepID)
 		outputKey := liveToolOutputKey(msg)
 		if msg.ToolOutputDelta {
@@ -2725,6 +2801,7 @@ func (m *viewModel) toggleAtScreenRow(vr viewportRender, screenRow int) bool {
 		kind := b.frame.Kind
 		fullBodyClickable := kind == FrameTool ||
 			kind == FrameMemoryCompact ||
+			kind == FrameDeliverables ||
 			(kind == FrameThinking && b.frame.Final)
 		if !fullBodyClickable {
 			return false
@@ -2877,6 +2954,11 @@ func (vr viewportRender) isClickableRow(screenRow int, vm *viewModel) bool {
 		// Both the header and the truncated checkpoint preview toggle.
 		return true
 	}
+	if kind == FrameDeliverables {
+		// Every row of the group toggles it, the first one included: the group
+		// has no header, so a click anywhere in it means the same thing.
+		return true
+	}
 	if kind == FrameTool || (kind == FrameThinking && b.frame.Final) {
 		return !isHeader
 	}
@@ -3022,6 +3104,29 @@ func foldBlockLines(b *viewBlock, full []string, width int, spinnerPhase int, cw
 	}()
 	if !b.collapsible {
 		return full, -1
+	}
+	if b.frame.Kind == FrameDeliverables {
+		// The rows are the body (the block has no header), so the fold counts
+		// deliverables and slices whole ones: a title that wrapped must not be
+		// cut in half, and "1 more" must mean one more file. Expanded returns
+		// header 0, never -1: a -1 header is what makes toggleAtScreenRow
+		// refuse the click, which would leave "click to hide" dead.
+		groups := deliverableLineGroups(full)
+		if len(groups) <= toolOutputMaxLines {
+			return full, -1
+		}
+		if b.expanded {
+			return append(append([]string{}, full...),
+				lipgloss.NewStyle().Faint(true).Render("  ··· click to hide")), 0
+		}
+		shown := deliverablePrefixLines(groups, toolOutputMaxLines)
+		more := len(groups) - toolOutputMaxLines
+		noun := "deliverables"
+		if more == 1 {
+			noun = "deliverable"
+		}
+		return append(append([]string{}, full[:shown]...),
+			lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("  ··· %d more %s · click to show", more, noun))), 0
 	}
 	if b.frame.Kind == FrameThinking {
 		if !b.frame.Final {
@@ -3254,6 +3359,42 @@ func readFileFoldPreview(body []string, maxLines int) (preview []string, groups 
 	return body[:bounds[maxLines]], groups
 }
 
+// startsDeliverableRow reports whether a style-stripped group row is the FIRST
+// rendered row of one deliverable: the two-cell indent, then the class glyph.
+// A row wrapped by a long title continues one cell further in, so it never
+// matches — which is what lets the fold count files instead of rows.
+func startsDeliverableRow(plain string) bool {
+	return strings.HasPrefix(plain, "  ") && len(plain) > 2 && plain[2] != ' '
+}
+
+// deliverableLineGroups splits a rendered deliverables body into one row range
+// per deliverable, in order. renderDeliverables writes the first row of each
+// file at the two-cell indent and its continuations at four, so the indent is
+// the boundary between files.
+func deliverableLineGroups(full []string) [][]int {
+	var groups [][]int
+	for i, line := range full {
+		if i == 0 || startsDeliverableRow(sgrPattern.ReplaceAllString(line, "")) {
+			groups = append(groups, []int{i, i + 1})
+			continue
+		}
+		groups[len(groups)-1][1] = i + 1
+	}
+	return groups
+}
+
+// deliverablePrefixLines returns how many rendered rows cover the first n
+// deliverables of the body, so a preview shows whole files.
+func deliverablePrefixLines(groups [][]int, n int) int {
+	if n <= 0 || len(groups) == 0 {
+		return 0
+	}
+	if n >= len(groups) {
+		return groups[len(groups)-1][1]
+	}
+	return groups[n][0]
+}
+
 // renderBlockFull returns the block's full (expanded) rendered lines, served
 // from the per-block cache when the inputs that affect output are unchanged.
 // The fold state is NOT part of the cache key: folding (foldBlock) is cheap
@@ -3418,6 +3559,8 @@ func renderFrameLinesWithAgents(f Frame, width int, theme DiffTheme, spinnerPhas
 		sr.renderSkillInstall(f)
 	case FrameGoal:
 		sr.renderGoal(f)
+	case FrameDeliverables:
+		sr.renderDeliverables(f)
 	default:
 		sr.renderCompactFrame(f, "system", "244")
 	}

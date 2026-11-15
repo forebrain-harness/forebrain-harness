@@ -2237,6 +2237,14 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 					_, _ = fmt.Fprintln(r.out)
 					return
 				}
+				// A call that delivered files says so on its header and nothing
+				// more: the rows are the turn's deliverables group, and the card
+				// is its title alone. The placeholder would read as an output
+				// that went missing.
+				if strings.EqualFold(title, "present_files") && len(f.ToolMeta.Deliverables) > 0 {
+					_, _ = fmt.Fprintln(r.out)
+					return
+				}
 				// A refused call never ran, so an empty body is its norm: the
 				// refusal's own words riding the meta are the body when the user
 				// wrote any (plan 154), and the faint placeholder stands in only
@@ -6035,6 +6043,38 @@ func migrationMarker(f Frame, spinnerPhase int) (string, string) {
 // colour, what it amounts to after it, and below, in full, what the line is
 // about — the objective, the check's reason for another round, or why the
 // goal ended.
+// renderDeliverables draws a turn's "deliverables" group: one line per
+// presented file, led by the glyph of its class. The group has no header —
+// the rows are the whole statement, and the card above already said the files
+// were handed over — so every row is indented two cells to sit with the other
+// card bodies, and a row a long label wraps continues one cell further in.
+//
+// A row is the file's label and nothing else (owner rulings): the glyph says
+// what kind of file it is and the suffix says it again, so the class is not
+// spelled out; the size is not repeated either, and no separator is drawn
+// between facts a row does not need to state. The label is the title the model
+// gave the file, and its name when it gave none.
+//
+// The first row's indent is drawn here rather than through wrapToolDisplayRows,
+// whose word splitter would eat a leading run of spaces; the fold reads the
+// same indent back (startsDeliverableRow) to count rows by deliverable.
+func (r *Renderer) renderDeliverables(f Frame) {
+	for _, d := range f.Deliverables {
+		label := strings.TrimSpace(d.Title)
+		if label == "" {
+			label = strings.TrimSpace(d.Name)
+		}
+		if label == "" {
+			continue
+		}
+		row := tool.ArtifactKindGlyph(d.Kind) + " " + label
+		body := wrapToolDisplayLineWidth(row, "    ", r.layoutTermWidth())
+		_, _ = fmt.Fprintln(r.out, "  "+body)
+	}
+}
+
+// renderGoal draws one /goal line: the objective it opened with, each
+// continuation round, and how it ended.
 func (r *Renderer) renderGoal(f Frame) {
 	marker, color := goalMarker(f.Title)
 	header := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(marker + " " + strings.TrimSpace(f.Title))

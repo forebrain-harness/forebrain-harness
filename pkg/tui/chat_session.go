@@ -2270,6 +2270,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			WorkedDuration: completion.Duration,
 			InputTokens:    runUsage.in,
 			OutputTokens:   runUsage.out,
+			ClosesTurn:     true,
 		})
 	}()
 	// This runs before RunEnded and before either ownership lock is released.
@@ -2730,6 +2731,7 @@ func (s *ChatSession) runSurfaceUserShellCommand(ctx context.Context, sessionID 
 			s.notifyUI(RunEndedMsg{
 				RunID:          userShellRunID(command),
 				WorkedDuration: completion.Duration,
+				ClosesTurn:     true,
 			})
 		}()
 	}

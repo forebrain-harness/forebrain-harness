@@ -881,6 +881,17 @@ func CaptureToolAttempt(ctx context.Context, payload ToolCompletionPayload) {
 	})
 }
 
+// CaptureToolOutput hands a call's structured result to the completion slot.
+// It is the one road a structured result takes out of a tool: the orchestration
+// layer prefers it over the handler's return value, so a surface reads the
+// facts as the map the tool built instead of re-parsing JSON text.
+//
+// One rule, two exits: a tool whose result is a structured object captures it
+// here (present_files — its rows are the card); a tool whose result is text
+// returns that text, which the layer wraps as {"output": <text>}. Text never
+// gets pushed through here to be unwrapped later: a text result may legitimately
+// look like JSON (a shell's stdout, an MCP result, a stored file), and a reader
+// that splits it by shape would empty it.
 func CaptureToolOutput(ctx context.Context, output map[string]any) {
 	CaptureToolCompletion(ctx, ToolCompletionPayload{Output: output})
 }

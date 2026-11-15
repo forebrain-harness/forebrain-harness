@@ -469,6 +469,10 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 	// that line live, so the error is drawn there too rather than wherever its
 	// clock happens to fall among the rows.
 	workedLines := turn.RunWorkedLines(turns)
+	// Which of those lines closes its turn: the last one before the next
+	// person's message. A turn's deliverables group is drawn just before it, the
+	// way live draws it above the "Worked for" line.
+	lastWorkedOfTurn := lastWorkedLinePerTurn(turns, workedLines)
 	// The checklist each line reported, folded from the run's own plan updates:
 	// the live line read the tracker's counters when the run closed, and these
 	// are the same facts from the log, so a resumed line carries its ☑N/M and
@@ -688,11 +692,64 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 			for _, frame := range runEndFrames[line.RunID] {
 				renderer.RenderFrame(frame)
 			}
+			if lastWorkedOfTurn[i] {
+				renderReplayDeliverables(renderer, reducer)
+			}
 			renderer.RenderFrame(replayWorkedFrame(line, planAtRun[line.RunID]))
+		}
+		// A turn that recorded no run-end at all (the process died before it
+		// wrote one) still ends where the next person's message begins, and
+		// whatever it presented is drawn there. In the ordinary case the rows
+		// were already taken above and this draws nothing.
+		if i+1 == len(turns) || isUserTranscriptRow(turns[i+1]) {
+			flushReplayReducer(renderer, reducer)
+			renderReplayDeliverables(renderer, reducer)
 		}
 	}
 	flush(len(turns))
 	return eventCount
+}
+
+// isUserTranscriptRow reports whether a stored row is a person's own message —
+// the boundary between one turn and the next in a replayed transcript. It
+// reads the same role mapping the rows are replayed through.
+func isUserTranscriptRow(row state.Message) bool {
+	return msgKindFromRole(row.Role) == MsgKindUser
+}
+
+// lastWorkedLinePerTurn marks, for each run-end line, whether it is the last
+// one of its turn. Turns are the runs of rows between two user rows, so a turn
+// an approval resumed has two run-end lines and only the second closes it.
+func lastWorkedLinePerTurn(turns []state.Message, workedLines map[int]turn.RunWorkedLine) map[int]bool {
+	last := make(map[int]bool, len(workedLines))
+	inTurn := -1
+	for i := range turns {
+		if isUserTranscriptRow(turns[i]) {
+			if inTurn >= 0 {
+				last[inTurn] = true
+			}
+			inTurn = -1
+			continue
+		}
+		if _, ok := workedLines[i]; ok {
+			inTurn = i
+		}
+	}
+	if inTurn >= 0 {
+		last[inTurn] = true
+	}
+	return last
+}
+
+// renderReplayDeliverables draws the turn's deliverables group from the rows
+// the replayed transcript accumulated, and clears them. Nothing presented means
+// no group at all.
+func renderReplayDeliverables(renderer *Renderer, reducer *Reducer) {
+	rows := reducer.takePendingDeliverables()
+	if len(rows) == 0 {
+		return
+	}
+	renderer.RenderFrame(Frame{Kind: FrameDeliverables, Deliverables: rows, Final: true})
 }
 
 // supersededAbandonedErrors finds the "process stopped" errors a run also has a
@@ -2185,6 +2242,9 @@ func replayToolStepMeta(toolName string, argsJSON string, meta tool.ToolMeta, ki
 	base.Category = strings.TrimSpace(meta.Category)
 	base.SkillName = strings.TrimSpace(meta.SkillName)
 	base.SkillPath = strings.TrimSpace(meta.SkillPath)
+	// The replayed card's delivered rows come from the stored meta alone: pkg/tool
+	// cannot re-derive them from a text result, and an old row has none to lose.
+	base.Deliverables = meta.Deliverables
 	return base
 }
 

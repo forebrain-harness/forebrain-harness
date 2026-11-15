@@ -1507,7 +1507,9 @@ func EventStreamSink(ctx context.Context, sink event.Sink, runID, sessionID, age
 }
 
 // webSearchEventMeta carries a tool.ToolMeta across the event boundary, which
-// has its own copy of the same shape.
+// has its own copy of the same shape. Only the fields a web search row needs
+// cross here; present_files — the one call with delivered rows — is
+// primary-agent only, so this path never carries any.
 func webSearchEventMeta(meta tool.ToolMeta) event.ToolCallMeta {
 	return event.ToolCallMeta{
 		ToolName:   meta.ToolName,

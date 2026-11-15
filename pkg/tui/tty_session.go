@@ -1387,7 +1387,8 @@ func collapsibleKind(kind FrameKind) bool {
 	switch kind {
 	case FrameThinking,
 		FrameTool,
-		FrameMemoryCompact:
+		FrameMemoryCompact,
+		FrameDeliverables:
 		return true
 	default:
 		return false
@@ -1405,6 +1406,12 @@ func frameCollapsible(f Frame) bool {
 		strings.EqualFold(strings.TrimSpace(f.ToolMeta.PreviewKind), "image") &&
 		strings.TrimSpace(f.ToolMeta.PreviewPath) != "" {
 		return false
+	}
+	// A deliverables group folds by delivered file, not by rendered row: a
+	// long title wraps, and counting rows would fold away the third file's
+	// tail as if it were a fourth one.
+	if f.Kind == FrameDeliverables {
+		return len(f.Deliverables) > toolOutputMaxLines
 	}
 	return collapsibleKind(f.Kind)
 }
