@@ -151,6 +151,62 @@ func TestImageMarkerHitTestOpensTheClickedStep(t *testing.T) {
 	}
 }
 
+// TestAModalOverlayLeavesTheImageMarkerInert pins the deliberate gap: a modal
+// overlay replaces the whole composer area, so the hint rows a dead-image click
+// would answer on are not painted. Rather than accept a gesture whose only
+// feedback cannot be shown, the image row stops resolving while the overlay is
+// up — and works again the moment it closes.
+func TestAModalOverlayLeavesTheImageMarkerInert(t *testing.T) {
+	opened := stubImageOpener(t)
+	r := NewRenderer(io.Discard, io.Discard)
+	r.viewportMode = true
+	r.overlayActive = true // a modal owns the composer area
+	r.vm.append(imageStepFrame("/tmp/shot.png"))
+	r.vpHeight, r.vpBodyHeight = 10, 10
+	r.vpLastRender = renderViewport(&r.vm, 80, 10, 0, DiffThemeDark)
+	row := markerRowOf(r.vpLastRender.lines, "shot.png")
+	clickRow(t, r, row)
+	if len(*opened) != 0 {
+		t.Fatalf("a modal overlay must not open files: %v", *opened)
+	}
+	if rows := hintRowsFor(r, 80); len(rows) != 0 {
+		t.Fatalf("a modal overlay must not post a hint nobody can see: %v", rows)
+	}
+	r.overlayActive = false // the same click works again
+	clickRow(t, r, row)
+	if len(*opened) != 1 || (*opened)[0] != "/tmp/shot.png" {
+		t.Fatalf("after the overlay closed, opened = %v", *opened)
+	}
+}
+
+// TestRepeatedClicksOnAMissingImageNeverStackCards pins the shape of the
+// whole fix: the click is a gesture the user can repeat at no cost, so a file
+// that is gone says so on the transient hint rows every time and never appends
+// a permanent transcript card.
+func TestRepeatedClicksOnAMissingImageNeverStackCards(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "shot.png")
+	r := NewRenderer(io.Discard, io.Discard)
+	r.viewportMode = true
+	r.composerSuppressed = true
+
+	for i := 0; i < 3; i++ {
+		openImagePreview(r, gone, "shot.png")
+	}
+	rows := hintRowsFor(r, 80)
+	if len(rows) != 1 || !strings.Contains(rows[0], "open shot.png: file no longer exists") {
+		t.Fatalf("three clicks must leave one hint, got %v", rows)
+	}
+	if got := lastErrorFrame(r); got != "" {
+		t.Fatalf("a card was appended: %q", got)
+	}
+	r.mu.Lock()
+	blocks := len(r.vm.blocks)
+	r.mu.Unlock()
+	if blocks != 0 {
+		t.Fatalf("the transcript gained %d blocks from clicks that only reported", blocks)
+	}
+}
+
 // TestImageMarkerHitTestIgnoresEverythingButTheMarkerRow pins the boundaries of
 // the click target: the card's own title (which also names the file), another
 // step's body and an empty separator row all answer nothing, so only the marker
@@ -790,12 +846,28 @@ func lastErrorFrame(r *Renderer) string {
 	return ""
 }
 
-// TestClickingTheMarkerOfAFileSinceDeletedSaysSo pins the "click to open does
-// nothing while a shell command runs" report: the command was rebuilding the
-// directory the image had been read from, so the file was gone, and the only
-// thing that noticed — the launcher's exit status — was thrown away. A missing
-// file is now caught before anything is launched, and the click says so.
-func TestClickingTheMarkerOfAFileSinceDeletedSaysSo(t *testing.T) {
+// hintRowsFor returns the composer hint rows as painted at the given width,
+// ANSI stripped and each row trimmed, so a test compares text rather than
+// right-alignment padding.
+func hintRowsFor(r *Renderer, width int) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rows := r.composerHintRows(width)
+	out := make([]string, len(rows))
+	for i, row := range rows {
+		out[i] = strings.TrimSpace(stripANSI(row))
+	}
+	return out
+}
+
+// TestClickingTheMarkerOfAFileSinceDeletedSaysItInTheHintRow pins the "click to
+// open does nothing while a shell command runs" report: the command was
+// rebuilding the directory the image had been read from, so the file was gone,
+// and the only thing that noticed — the launcher's exit status — was thrown
+// away. A missing file is now caught before anything is launched, and the click
+// says so on the composer's hint rows, not as a transcript card: the marker row
+// outlives its file, so a card per click is a card per click forever.
+func TestClickingTheMarkerOfAFileSinceDeletedSaysItInTheHintRow(t *testing.T) {
 	viewerDir := fakeViewer(t, ": > \"$0.ran\"\n")
 	gone := filepath.Join(t.TempDir(), "shot.png")
 	r := NewRenderer(io.Discard, io.Discard)
@@ -803,8 +875,11 @@ func TestClickingTheMarkerOfAFileSinceDeletedSaysSo(t *testing.T) {
 	r.composerSuppressed = true
 
 	openImagePreview(r, gone, "shot.png")
-	if got := lastErrorFrame(r); got != "open shot.png: file no longer exists" {
-		t.Fatalf("error frame = %q, want the missing file named", got)
+	if got := strings.Join(hintRowsFor(r, 80), "\n"); !strings.Contains(got, "open shot.png: file no longer exists") {
+		t.Fatalf("hint rows = %q, want the missing file named", got)
+	}
+	if got := lastErrorFrame(r); got != "" {
+		t.Fatalf("a dead image click must not append a transcript card, got %q", got)
 	}
 	program, _ := imageViewerCommand(gone)
 	if _, err := os.Stat(filepath.Join(viewerDir, program+".ran")); err == nil {
@@ -814,9 +889,14 @@ func TestClickingTheMarkerOfAFileSinceDeletedSaysSo(t *testing.T) {
 
 // TestALauncherThatRefusesTheFileIsReported pins the other half: a launcher
 // checks what it was handed only once it runs, so a refusal arrives as its exit
-// status after the click returned. It must reach the transcript with what the
-// launcher said, instead of the click silently doing nothing.
+// status after the click returned. It must reach the hint rows with what the
+// launcher said, instead of the click silently doing nothing — and the rows are
+// transient, so the transcript stays untouched.
 func TestALauncherThatRefusesTheFileIsReported(t *testing.T) {
+	prev := composerHintTimeout
+	composerHintTimeout = time.Minute // the async refusal must not race the expiry
+	t.Cleanup(func() { composerHintTimeout = prev })
+
 	fakeViewer(t, "echo 'No application knows how to open it.' >&2\nexit 1\n")
 	shot := filepath.Join(t.TempDir(), "shot.png")
 	if err := os.WriteFile(shot, []byte("\x89PNG"), 0o644); err != nil {
@@ -829,10 +909,13 @@ func TestALauncherThatRefusesTheFileIsReported(t *testing.T) {
 	openImagePreview(r, shot, "shot.png")
 	want := "open shot.png: No application knows how to open it."
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		if got := lastErrorFrame(r); got == want {
+		if got := strings.Join(hintRowsFor(r, 80), "\n"); strings.Contains(got, want) {
+			if frame := lastErrorFrame(r); frame != "" {
+				t.Fatalf("the refusal must not append a transcript card, got %q", frame)
+			}
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("error frame = %q, want %q", lastErrorFrame(r), want)
+	t.Fatalf("hint rows = %q, want %q", strings.Join(hintRowsFor(r, 80), "\n"), want)
 }

@@ -89,6 +89,247 @@ func TestClipboardImageHintLine(t *testing.T) {
 	}
 }
 
+// hintText is the composer hint as one string, for the tests that only care
+// what it says.
+func hintText(r *Renderer) string {
+	return strings.Join(hintRowsFor(r, 80), "\n")
+}
+
+// TestOneComposerHintSaysOneThingAtATime pins the slot as a single message: two
+// producers (the clipboard watcher and a dead image click) share the rows, so a
+// new message replaces the old one and each producer can only take down its own.
+func TestOneComposerHintSaysOneThingAtATime(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	r.ShowComposerHint(clipboardImageHintText, "", time.Second)
+	if got := hintText(r); !strings.Contains(got, clipboardImageHintText) {
+		t.Fatalf("hint = %q, want the clipboard text", got)
+	}
+
+	r.ShowComposerHint("open a.png: file no longer exists", "file no longer exists", time.Second)
+	if got := hintText(r); !strings.Contains(got, "open a.png: file no longer exists") {
+		t.Fatalf("a second message must replace the first, got %q", got)
+	}
+
+	// The clipboard's own falling edge must not wipe the click's hint.
+	r.HideComposerHint(clipboardImageHintText)
+	if got := hintText(r); !strings.Contains(got, "open a.png") {
+		t.Fatalf("another producer's text must not be hidden, got %q", got)
+	}
+
+	r.HideComposerHint("open a.png: file no longer exists")
+	if got := hintText(r); got != "" {
+		t.Fatalf("the hint's own text must take it down, got %q", got)
+	}
+}
+
+// TestComposerHintExpiresOnItsOwn pins that no caller has to take the hint
+// down: the clock started when it was shown does it.
+func TestComposerHintExpiresOnItsOwn(t *testing.T) {
+	prev := composerHintTimeout
+	composerHintTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { composerHintTimeout = prev })
+
+	r := NewRenderer(nil, nil)
+	r.ShowComposerHint("open a.png: file no longer exists", "", composerHintTimeout)
+	if got := hintText(r); got == "" {
+		t.Fatal("the hint must be up as soon as ShowComposerHint returns")
+	}
+	eventually(t, "the hint to expire on its own", func() bool { return hintText(r) == "" })
+}
+
+// TestComposerHintDropsTheNameBeforeItWraps pins the two forms: the full
+// sentence names the file, and once one row cannot hold it the reason alone is
+// what stays — wrapped, never cut.
+func TestComposerHintDropsTheNameBeforeItWraps(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	r.ShowComposerHint("open logs-debug.png: file no longer exists", "file no longer exists", time.Second)
+
+	wide := hintRowsFor(r, 80)
+	if len(wide) != 1 || wide[0] != "open logs-debug.png: file no longer exists" {
+		t.Fatalf("width 80 = %v, want the whole sentence on one row", wide)
+	}
+
+	// Exactly the reason's width: the full sentence no longer fits, so the
+	// name goes rather than the words being broken up.
+	exact := hintRowsFor(r, len("file no longer exists"))
+	if len(exact) != 1 || exact[0] != "file no longer exists" {
+		t.Fatalf("width 21 = %v, want the reason alone on one row", exact)
+	}
+
+	narrow := hintRowsFor(r, 8)
+	if len(narrow) < 2 {
+		t.Fatalf("width 8 = %v, want the reason wrapped over several rows", narrow)
+	}
+	for _, row := range narrow {
+		if w := runewidth.StringWidth(row); w > 8 {
+			t.Fatalf("row %q is %d cells wide, terminal is 8", row, w)
+		}
+	}
+	joined := strings.Join(narrow, "")
+	for _, want := range []string{"file", "longer", "exists"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("wrapped hint lost %q: %v", want, narrow)
+		}
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("the hint was cut, not wrapped: %v", narrow)
+	}
+}
+
+// TestComposerHintRowsNeverExceedTheTerminal pins the alignment against the
+// WIDEST row: padding to the narrowest one would push the wide rows past the
+// terminal edge, where the painter cuts their tail off — exactly the reason the
+// hint exists to show.
+func TestComposerHintRowsNeverExceedTheTerminal(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	r.ShowComposerHint("open screenshot-of-the-sidebar.png: file no longer exists", "", time.Hour)
+	for _, width := range []int{8, 5} {
+		for _, row := range hintRowsFor(r, width) {
+			if w := runewidth.StringWidth(row); w > width {
+				t.Fatalf("width %d: row %q is %d cells wide", width, row, w)
+			}
+		}
+	}
+}
+
+// TestComposerHintNeverBreaksItsRows pins the sanitising: these rows are spliced
+// straight into the paint stream, so a launcher's stderr carrying a newline, a
+// tab or an escape must arrive as plain text, and the only escapes on the row
+// are the two that make it grey.
+func TestComposerHintNeverBreaksItsRows(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	r.ShowComposerHint("open a.png: boom\nsecond line\twith tab\x1b[31m red", "", time.Hour)
+
+	r.mu.Lock()
+	raw := r.composerHintRows(20)
+	r.mu.Unlock()
+	if len(raw) == 0 {
+		t.Fatal("no hint rows painted")
+	}
+	for _, row := range raw {
+		plain := stripANSI(row)
+		if strings.ContainsAny(plain, "\n\t") {
+			t.Fatalf("row %q carries a line break or a tab", plain)
+		}
+		for _, ru := range plain {
+			if ru < 0x20 || ru == 0x7f {
+				t.Fatalf("row %q carries control character %q", plain, ru)
+			}
+		}
+		if w := runewidth.StringWidth(plain); w > 20 {
+			t.Fatalf("row %q is %d cells wide, terminal is 20", plain, w)
+		}
+		styled := strings.TrimLeft(row, " ")
+		if !strings.HasPrefix(styled, sharedBlockFooterStyle) || !strings.HasSuffix(styled, sharedBlockReset) {
+			t.Fatalf("row %q is not the grey hint row", row)
+		}
+		if body := strings.TrimSuffix(strings.TrimPrefix(styled, sharedBlockFooterStyle), sharedBlockReset); strings.Contains(body, "\x1b") {
+			t.Fatalf("row %q carries an escape of its own: %q", row, body)
+		}
+	}
+}
+
+// TestAVeryLongFailureWrapsWithoutEverCutting pins the owner's ruling for a
+// huge message (a launcher's 2KB stderr): every row wraps, nothing is ever
+// elided, so the end of the reason is still on screen.
+func TestAVeryLongFailureWrapsWithoutEverCutting(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	r.ShowComposerHint("open a.png: "+strings.Repeat("x", 2000)+" file no longer exists", "", time.Hour)
+
+	rows := hintRowsFor(r, 80)
+	if len(rows) <= 2 {
+		t.Fatalf("a 2KB message took %d rows at width 80, want it wrapped", len(rows))
+	}
+	for _, row := range rows {
+		if w := runewidth.StringWidth(row); w > 80 {
+			t.Fatalf("row is %d cells wide, terminal is 80", w)
+		}
+	}
+	joined := strings.Join(rows, " ")
+	for _, want := range []string{"file", "longer", "exists"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("the long message lost %q", want)
+		}
+	}
+	if last := rows[len(rows)-1]; !strings.Contains(last, "exists") {
+		t.Fatalf("the message ends with %q, want its tail intact", last)
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatal("the long message was elided instead of wrapped")
+	}
+}
+
+// TestAStaleComposerHintTimerCannotWipeANewerHint pins the generation check: the
+// 'first' timer has already fired by the time ShowComposerHint stops it, so only
+// the generation can tell it that the hint on screen is somebody else's.
+func TestAStaleComposerHintTimerCannotWipeANewerHint(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	r.ShowComposerHint("first", "", time.Nanosecond)
+	r.ShowComposerHint("second", "", time.Hour)
+
+	for deadline := time.Now().Add(100 * time.Millisecond); time.Now().Before(deadline); {
+		if got := hintText(r); !strings.Contains(got, "second") {
+			t.Fatalf("a stale timer wiped the newer hint: %q", got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestComposerHintIsPaintedByEveryComposerLayout pins the four layouts a hint
+// has to survive: the editable composer (where it replaces the blank spacer, or
+// adds rows below a queued preview), slash mode, and the read-only view an idle
+// subagent shows. A click is answered where the user made it.
+func TestComposerHintIsPaintedByEveryComposerLayout(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	cursor := 0
+	const hint = "open shot.png: file no longer exists"
+	text := func(block composerBlock) string {
+		lines := make([]string, len(block.lines))
+		for i, line := range block.lines {
+			lines[i] = stripANSI(line)
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	empty := ComposerRenderState{Text: "", Cursor: &cursor}
+	withoutHint := r.buildComposerBlock(empty, 80)
+	// Set directly: no timer goroutine runs, so this layout call needs no lock.
+	r.composerHint = hint
+	withHint := r.buildComposerBlock(empty, 80)
+	if !strings.Contains(text(withHint), hint) {
+		t.Fatalf("the plain composer dropped the hint: %q", text(withHint))
+	}
+	if len(withHint.lines) != len(withoutHint.lines) {
+		t.Fatalf("the hint replaced the spacer, so the row count must not move: %d -> %d",
+			len(withoutHint.lines), len(withHint.lines))
+	}
+
+	queued := empty
+	queued.PendingInput = ComposerPendingInputPreview{PendingSteers: []string{"queued while running"}}
+	r.composerHint = ""
+	queuedWithout := r.buildComposerBlock(queued, 80)
+	r.composerHint = hint
+	queuedWith := r.buildComposerBlock(queued, 80)
+	if !strings.Contains(text(queuedWith), hint) {
+		t.Fatalf("a queued preview hid the hint: %q", text(queuedWith))
+	}
+	if got, want := len(queuedWith.lines), len(queuedWithout.lines)+len(hintRowsFor(r, 80)); got != want {
+		t.Fatalf("a hint below the queue preview must add its rows: %d -> %d, want %d", len(queuedWithout.lines), got, want)
+	}
+
+	slashCursor := len([]rune("/model"))
+	slash := ComposerRenderState{Text: "/model", Cursor: &slashCursor}
+	if got := text(r.buildComposerBlock(slash, 80)); !strings.Contains(got, hint) {
+		t.Fatalf("slash mode dropped the hint: %q", got)
+	}
+
+	readOnly := ComposerRenderState{Text: "", Cursor: &cursor, ReadOnly: true}
+	if got := text(r.buildComposerBlock(readOnly, 80)); !strings.Contains(got, hint) {
+		t.Fatalf("the read-only composer dropped the hint: %q", got)
+	}
+	r.composerHint = ""
+}
+
 // TestClipboardTypesHoldPastableImage pins that the hint promises no more than
 // ctrl+v delivers: a type the reader cannot extract is not an image to paste.
 func TestClipboardTypesHoldPastableImage(t *testing.T) {
@@ -228,9 +469,9 @@ func TestClipboardWatcherDebounceDropsAFleetingImage(t *testing.T) {
 // has been shown, a new image inside the limit — falling edge, rising edge
 // and re-check all happening — stays silent.
 func TestClipboardWatcherRateLimitsRepeatHints(t *testing.T) {
-	prev := clipboardImageHintTimeout
-	clipboardImageHintTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { clipboardImageHintTimeout = prev })
+	prev := composerHintTimeout
+	composerHintTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { composerHintTimeout = prev })
 
 	probe := &countingClipboardProbe{}
 	probe.image.Store(true)

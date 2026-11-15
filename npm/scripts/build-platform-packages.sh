@@ -60,10 +60,9 @@ FOREBRAIN_VERSION="${FOREBRAIN_VERSION:-$(tr -d '[:space:]' < "$ROOT_DIR/VERSION
 DEFAULT_TARGET="$(go env GOOS)/$(go env GOARCH)"
 TARGETS="${FOREBRAIN_BUILD_TARGETS:-$DEFAULT_TARGET}"
 
-# Closed-source subscription plugins (gitignored) are discovered here, so both
-# bridges — the Go blank-import file and the frontend plugin registry — are
-# fresh before the web UI and the binaries are built, even when the UI rebuild
-# below is skipped.
+# In-tree subscription plugins are discovered here, so both bridges — the Go
+# blank-import file and the frontend plugin registry — are fresh before the web
+# UI and the binaries are built, even when the UI rebuild below is skipped.
 "$ROOT_DIR/scripts/gen-subscription-plugins.sh"
 
 if [ "${FOREBRAIN_SKIP_UI_BUILD:-}" = "1" ]; then

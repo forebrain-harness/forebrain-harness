@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -122,16 +123,27 @@ func openInBrowser(url string, failed func(error)) error {
 
 // openImagePreview hands one already-resolved image step to the system viewer.
 // A click resolves it on the screen its press landed on (viewportRelease). A
-// miss is not an error worth a status line: the marker line is the affordance,
-// so nothing at all happens when no file was named. A file that was named and
-// could not be opened is said, whether the launch failed to start or the
-// launcher refused it afterwards.
+// miss is not an error worth saying: the marker line is the affordance, so
+// nothing at all happens when no file was named. A file that was named and
+// could not be opened is said on the composer's hint rows — the rows the
+// clipboard's paste hint uses — because the click is a gesture the user can
+// repeat at no cost, while a transcript error card is permanent: a marker row
+// outlives its file, and one click per card soon filled the scrollback with
+// identical "open …: file no longer exists" cards.
+//
+// The card's wording survives in full; only the rows are transient. The reason
+// alone is the narrow form, so a hint that no longer fits one row drops the
+// file name before anything is wrapped.
 func openImagePreview(renderer *Renderer, path, label string) {
 	if renderer == nil || strings.TrimSpace(path) == "" {
 		return
 	}
 	report := func(err error) {
-		renderer.PrintError(fmt.Errorf("open %s: %w", label, err))
+		renderer.ShowComposerHint(
+			llm.ExplainError(fmt.Errorf("open %s: %w", label, err)),
+			llm.ExplainError(err),
+			composerHintTimeout,
+		)
 	}
 	if err := imagePreviewOpener(path, report); err != nil {
 		report(err)

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Generate the local subscription-plugin bridges for the Go binary and the web
-# UI. Closed-source subscription plugins (qodercn, zcode, workbuddy, ...) live
-# under gitignored plugins/subscriptions/<id>/ and are never committed; this
-# script is the only piece of the open-source tree that knows they exist.
+# UI. Subscription plugins (qodercn, workbuddy, …) are in-tree source under
+# plugins/subscriptions/<id>/; this script only turns their presence into the
+# two import bridges the Go and TypeScript builds need.
 #
 # Plugin layout it discovers (either file is optional, directory order is the
 # plugin id):
@@ -13,7 +13,7 @@
 #   plugins/subscriptions/<id>/frontend/index.ts  frontend plugin definition
 #                                                 (default export)
 #
-# Bridges it generates (both gitignored, both disposable):
+# Bridges it generates (both committed, both refreshed in place):
 #
 #   cmd/forebrain/plugins_local_gen.go             blank-imports every Go plugin
 #                                                  so its init() runs in the
@@ -21,9 +21,9 @@
 #                                                  plugin is gone
 #   frontend/src/plugins/local_subscriptions.gen.ts  always present; empty when
 #                                                  no plugin ships a frontend
-#                                                  definition, so the open-source
-#                                                  tree typechecks without any
-#                                                  plugin on disk
+#                                                  definition, so the tree
+#                                                  typechecks without any plugin
+#                                                  on disk
 #
 # Idempotent and safe to run concurrently (make ui / make build / the release
 # script all call it): each bridge is written to a temp file beside its target

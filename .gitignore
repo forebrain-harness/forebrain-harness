@@ -76,7 +76,8 @@ pkg/migrate/testdata/**/.DS_Store
 docs/plan/
 plans/
 .workbuddy/
-# Closed-source subscription plugins (qodercn, zcode, workbuddy, etc.) and generated bridges:
-/plugins/
-/cmd/forebrain/plugins_local_gen.go
-/frontend/src/plugins/local_subscriptions.gen.ts
+# Subscription plugins (qodercn, workbuddy, …) are in-tree source, and the two
+# import bridges generated from them (cmd/forebrain/plugins_local_gen.go,
+# frontend/src/plugins/local_subscriptions.gen.ts) are committed as well, so a
+# fresh clone builds the complete binary and web UI with plain go/pnpm
+# commands; scripts/gen-subscription-plugins.sh refreshes both files.

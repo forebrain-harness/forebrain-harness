@@ -599,10 +599,15 @@ type Renderer struct {
 	ctrlCExitHint  bool
 	ctrlCExitTimer *time.Timer
 
-	// clipboardImage is true while the transient paste hint is visible (shown
-	// by SetClipboardImageAvailable, auto-expired via clipboardImageTimer).
-	clipboardImage      bool
-	clipboardImageTimer *time.Timer
+	// composerHint is the transient hint painted in the rows above the
+	// composer's top rule (ShowComposerHint); composerHintNarrow replaces it
+	// once it no longer fits one row; composerHintTimer takes the rows down
+	// when their time is up, and composerHintGen makes a timer that fired
+	// before Stop reached it unable to wipe a newer hint.
+	composerHint       string
+	composerHintNarrow string
+	composerHintTimer  *time.Timer
+	composerHintGen    uint64
 }
 
 type viewportBrowseState struct {

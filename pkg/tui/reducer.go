@@ -4019,6 +4019,11 @@ func (r *Renderer) buildReadOnlyComposerBlock(cs ComposerRenderState, statusText
 		}
 		lines = append(lines, "")
 	}
+	// This view has no spacer row above the card, so a hint adds its rows
+	// between the last row this view already had and the footer.
+	if hint := r.composerHintRows(termWidth); len(hint) > 0 {
+		lines = append(lines, hint...)
+	}
 	if len(cs.OverlayRows) == 0 {
 		lines = append(lines, sharedBlockFooterStyle+footerText+sharedBlockReset)
 	}
@@ -4165,13 +4170,15 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 	}
 	if len(previewLines) > 0 {
 		lines = append(lines, previewLines...)
-	} else {
-		// Without a queue preview, retain the usual single spacer before the
-		// composer card. A visible preview already provides that boundary and
-		// should sit directly against the card instead of leaving an empty row.
-		// While the clipboard holds an image, that same row carries the paste
-		// hint, right-aligned over the card's top rule.
-		lines = append(lines, r.clipboardImageHintLine(termWidth))
+	}
+	// The hint rows double as the spacer above the card: with no preview
+	// queued they are the rows that would have been blank anyway, and with a
+	// preview they add transient rows rather than hiding the hint — the same
+	// way a queued preview itself makes the composer taller.
+	if hint := r.composerHintRows(termWidth); len(hint) > 0 {
+		lines = append(lines, hint...)
+	} else if len(previewLines) == 0 {
+		lines = append(lines, "")
 	}
 	cursorRow := len(lines) + 1 // +1 for the leading border line below
 	cursorCol := layout.cursorCol
@@ -4246,6 +4253,11 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 	}
 	if len(previewLines) > 0 {
 		lines = append(lines, previewLines...)
+	}
+	// Slash mode has no spacer row of its own, so a hint adds its rows here,
+	// above the typed command and any slash menu below it.
+	if hint := r.composerHintRows(termWidth); len(hint) > 0 {
+		lines = append(lines, hint...)
 	}
 	if cs.SlashMenu != nil {
 		// The slash menu is a slash panel whose head is the composer itself:
@@ -6513,7 +6525,12 @@ func (r *Renderer) transcriptClickLocked(s shownScreen, row int) (changed bool, 
 		return false, "", ""
 	}
 	vm := r.activeVMLocked()
-	imagePath, imageLabel, _ = vm.imageMarkerAtScreenRow(s.render, row)
+	// A modal overlay owns the composer area while it is up, so the hint rows
+	// the click would answer on are not painted: the image row stays inert
+	// instead of accepting a gesture whose only feedback cannot be shown.
+	if !r.overlayActive {
+		imagePath, imageLabel, _ = vm.imageMarkerAtScreenRow(s.render, row)
+	}
 	if r.openAgentViewAtRowLocked(s.render, row) {
 		return true, imagePath, imageLabel
 	}
@@ -7750,8 +7767,14 @@ func (r *Renderer) CopySelectionForCtrlC() bool {
 // no clipboard tool is available. It runs in the background: the helper is a
 // process, and a key or a mouse release must not wait for it.
 func (r *Renderer) writeClipboard(text string) {
+	// The seam is read here, on the caller's goroutine, and the goroutine gets
+	// the function it chose: reading it inside the goroutine made every test
+	// that swaps clipboardWriteText and restores it in a cleanup race a write
+	// still in flight (go test -race caught it between signInWaitRenderer's
+	// cleanup and this goroutine).
+	write := clipboardWriteText
 	go func() {
-		clipErr := clipboardWriteText(context.Background(), text)
+		clipErr := write(context.Background(), text)
 		if clipErr != nil {
 			r.mu.Lock()
 			r.writeClipboardOSC52Locked(text)
@@ -8248,65 +8271,138 @@ func (r *Renderer) ShowCtrlCExitHint(d time.Duration) {
 // an image.
 const clipboardImageHintText = "Image in clipboard · ctrl+v to paste"
 
-// clipboardImageHintTimeout is how long the paste hint stays up once shown,
+// composerHintTimeout is how long a composer hint stays up once shown,
 // matching Claude Code's clipboard-image-hint (8s). A var, not a const, so
 // tests can shorten it.
-var clipboardImageHintTimeout = 8 * time.Second
+var composerHintTimeout = 8 * time.Second
 
 // SetClipboardImageAvailable shows or hides the paste hint. true shows it and
-// auto-expires it after clipboardImageHintTimeout even if the clipboard still
-// holds the image; a repeated true while it is already up keeps the original
-// expiry. false hides it at once. When to show at all — debounce, rate limit —
-// is the clipboardImageWatcher's call, not the renderer's.
+// auto-expires it after composerHintTimeout even if the clipboard still holds
+// the image; a repeated true while it is already up keeps the original expiry.
+// false hides it at once. When to show at all — debounce, rate limit — is the
+// clipboardImageWatcher's call, not the renderer's.
 func (r *Renderer) SetClipboardImageAvailable(on bool) {
-	if r == nil {
+	if on {
+		r.ShowComposerHint(clipboardImageHintText, "", composerHintTimeout)
 		return
 	}
+	r.HideComposerHint(clipboardImageHintText)
+}
+
+// ShowComposerHint puts text on the rows above the composer for d. narrow, when
+// non-empty, is what the hint becomes once text no longer fits one row: a
+// message's head names the thing the user just clicked and can go, while its
+// tail carries the reason.
+//
+// The hint carries one message at a time: a different text replaces it and
+// restarts the clock, while the text already there keeps the expiry it was
+// given — a caller that keeps saying the same thing (the clipboard watcher's
+// poll, a user clicking the same dead row) must not pin the hint up.
+//
+// This is the surface's answer to "something the user just did could not
+// happen, and it costs nothing to try again": it replaces no content, expires
+// on its own, and never enters the transcript.
+func (r *Renderer) ShowComposerHint(text, narrow string, d time.Duration) {
+	if r == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	text, narrow = oneLineHint(text), oneLineHint(narrow)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if on {
-		if r.clipboardImage {
-			return
-		}
-		r.clipboardImage = true
-		r.clipboardImageTimer = time.AfterFunc(clipboardImageHintTimeout, func() {
-			r.mu.Lock()
-			defer r.mu.Unlock()
-			r.clipboardImage = false
-			r.clipboardImageTimer = nil
-			if r.viewportMode {
-				r.paintViewportLocked()
-			}
-		})
-	} else {
-		if r.clipboardImageTimer != nil {
-			r.clipboardImageTimer.Stop()
-			r.clipboardImageTimer = nil
-		}
-		if !r.clipboardImage {
-			return
-		}
-		r.clipboardImage = false
+	if r.composerHint == text && r.composerHintTimer != nil {
+		return
 	}
+	if r.composerHintTimer != nil {
+		r.composerHintTimer.Stop()
+	}
+	r.composerHintGen++
+	gen := r.composerHintGen
+	r.composerHint, r.composerHintNarrow = text, narrow
+	r.composerHintTimer = time.AfterFunc(d, func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		// A timer that had already fired when the next hint replaced it must
+		// not take that newer hint down: the generation says whose expiry
+		// this still is.
+		if r.composerHintGen != gen {
+			return
+		}
+		r.composerHint, r.composerHintNarrow, r.composerHintTimer = "", "", nil
+		if r.viewportMode {
+			r.paintViewportLocked()
+		}
+	})
 	if r.viewportMode {
 		r.paintViewportLocked()
 	}
 }
 
-// clipboardImageHintLine is the row above the composer's top rule: empty, or
-// the paste hint right-aligned when the clipboard holds an image. Caller holds
-// r.mu.
-func (r *Renderer) clipboardImageHintLine(termWidth int) string {
-	if !r.clipboardImage {
-		return ""
+// HideComposerHint takes the hint down when it still says text — the hint its
+// own caller put up. Another caller's hint is left alone.
+func (r *Renderer) HideComposerHint(text string) {
+	if r == nil {
+		return
 	}
-	maxWidth := termWidth - sharedBlockFooterTruncateExtraRoom
-	hint := runewidth.Truncate(clipboardImageHintText, maxWidth, "…")
-	pad := maxWidth - runewidth.StringWidth(hint)
-	if maxWidth <= 0 || pad < 0 {
-		return ""
+	text = oneLineHint(text)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.composerHint == "" || r.composerHint != text {
+		return
 	}
-	return strings.Repeat(" ", pad) + sharedBlockFooterStyle + hint + sharedBlockReset
+	if r.composerHintTimer != nil {
+		r.composerHintTimer.Stop()
+		r.composerHintTimer = nil
+	}
+	r.composerHintGen++
+	r.composerHint, r.composerHintNarrow = "", ""
+	if r.viewportMode {
+		r.paintViewportLocked()
+	}
+}
+
+// oneLineHint is a hint as the rows can paint it: printable text with its
+// whitespace runs folded to single spaces. A newline or an escape from a
+// launcher's stderr would otherwise break the painted rows or write into the
+// terminal; folding and stripping are the two rules the composer status row
+// already follows.
+func oneLineHint(s string) string {
+	return strings.Join(strings.Fields(sanitizeTerminalInputText(s)), " ")
+}
+
+// composerHintRows paints the hint: no rows when there is none, otherwise the
+// text (or its narrow form once it no longer fits one row) wrapped to the
+// terminal width and right-aligned as one block — every row starts at the
+// column the WIDEST row leaves, so the widest row ends exactly at the right
+// edge and a row wider than the terminal is what this alignment exists to
+// prevent (a wide rune on a one-cell-wide terminal is wrapCardLine's own
+// pre-existing edge, not this row's). Nothing is ever cut: a message too long
+// to fit one screen simply takes the rows it takes (owner, 2026-11-14).
+// Caller holds r.mu.
+func (r *Renderer) composerHintRows(termWidth int) []string {
+	if r.composerHint == "" || termWidth < 1 {
+		return nil
+	}
+	hint := r.composerHint
+	if runewidth.StringWidth(hint) > termWidth && r.composerHintNarrow != "" {
+		hint = r.composerHintNarrow
+	}
+	rows := wrapCardLine(hint, termWidth)
+	widest := 0
+	for _, row := range rows {
+		if w := runewidth.StringWidth(row); w > widest {
+			widest = w
+		}
+	}
+	pad := termWidth - widest
+	if pad < 0 {
+		pad = 0
+	}
+	indent := strings.Repeat(" ", pad)
+	out := make([]string, len(rows))
+	for i, row := range rows {
+		out[i] = indent + sharedBlockFooterStyle + row + sharedBlockReset
+	}
+	return out
 }
 
 func (r *Renderer) clipNotificationText() string {
