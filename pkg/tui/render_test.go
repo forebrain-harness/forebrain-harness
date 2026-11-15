@@ -2259,3 +2259,126 @@ func TestImageRejectedLineUsesDisplayName(t *testing.T) {
 		t.Fatalf("line = %q, want the wire id when no display name", plain)
 	}
 }
+
+// A subagent card's third layer — the latest tool call — is one row: cut at the
+// card's right edge with an ellipsis, never wrapped into a paragraph.
+func TestSubagentCardLatestToolIsOneElidedRow(t *testing.T) {
+	const longCommand = "python3 - <<'EOF' s = open('pkg/run/runner.go').read() old = '''// WithConfig is SetConfig in construction form''' " +
+		"new = old + '''// NewDeps is SetConfig in value-construction form''' assert old in s; s = s.replace(old, new, 1) " +
+		"open('pkg/run/runner.go','w').write(s) print('NewDeps added') EOF"
+	const wideCommand = "python3 - <<'EOF' 重构 " + "读取 subagent 卡片第三层的最近一次工具调用并输出为一行 " +
+		"然后比较终端宽度决定是否截断 " + "EOF"
+
+	cases := []struct {
+		name  string
+		width int
+		label string
+	}{
+		{name: "long shell command at 120 columns", width: 120, label: longCommand},
+		{name: "long shell command at 60 columns", width: 60, label: longCommand},
+		{name: "wide characters are counted in columns", width: 80, label: wideCommand},
+		{name: "unbroken token stays one row", width: 120, label: strings.Repeat("x", 400)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fanoutState{
+				StepID: "fanout-elide", Verb: "continue", Running: true,
+				Tasks: []FanoutTaskState{{
+					Title: "Execute plan 302", AgentID: "agent-1", Status: "running",
+					ToolTotal: 1, RecentTools: []fanoutToolEntry{{StepID: "tool-1", Label: tc.label}},
+				}},
+			}
+			f := (&Reducer{}).emitFanoutFrame(fs)
+			var rows []string
+			for _, line := range renderFrameLines(f, tc.width, DiffThemeDark, 0) {
+				if plain := stripANSI(line); strings.TrimSpace(plain) != "" {
+					rows = append(rows, plain)
+				}
+			}
+			// header + task row + the one tool row.
+			if len(rows) != 3 {
+				t.Fatalf("card draws %d rows, want 3:\n%s", len(rows), strings.Join(rows, "\n"))
+			}
+			toolRow := rows[2]
+			if !strings.Contains(toolRow, "└ ") || !strings.HasSuffix(toolRow, "…") {
+				t.Fatalf("tool row = %q, want one row ending in an ellipsis", toolRow)
+			}
+			if got, max := displayLineWidth(toolRow), tc.width-contentRightMargin; got > max {
+				t.Fatalf("tool row is %d columns wide, want at most %d: %q", got, max, toolRow)
+			}
+		})
+	}
+}
+
+// A command that fits keeps every character: the elision adds nothing to pay
+// for on the rows that were already fine.
+func TestSubagentCardLatestToolShortCommandIsUntouched(t *testing.T) {
+	fs := &fanoutState{
+		StepID: "fanout-short", Verb: "continue", Running: true,
+		Tasks: []FanoutTaskState{{
+			Title: "Execute plan 302", AgentID: "agent-1", Status: "running",
+			ToolTotal: 1, RecentTools: []fanoutToolEntry{{StepID: "tool-1", Label: "sleep 8"}},
+		}},
+	}
+	f := (&Reducer{}).emitFanoutFrame(fs)
+	var rows []string
+	for _, line := range renderFrameLines(f, 120, DiffThemeDark, 0) {
+		if plain := stripANSI(line); strings.TrimSpace(plain) != "" {
+			rows = append(rows, plain)
+		}
+	}
+	if len(rows) != 3 || !strings.HasSuffix(rows[2], "└ sleep 8") || strings.Contains(rows[2], "…") {
+		t.Fatalf("short command row changed:\n%s", strings.Join(rows, "\n"))
+	}
+}
+
+// The elision is the third layer's alone: a failed task's reason still wraps,
+// because a reader has to be able to read all of it.
+func TestSubagentCardReasonStillWraps(t *testing.T) {
+	const reason = "The provider is rate-limiting this account — available again in 1h 3m, at 2026-09-07 15:40 CST."
+	fs := &fanoutState{
+		StepID: "fanout-reason", Verb: "run", Running: false,
+		Tasks: []FanoutTaskState{{
+			Title: "read-only investigation", AgentID: "agent-1", Status: "failed",
+			Error: reason,
+		}},
+	}
+	f := (&Reducer{}).emitFanoutFrame(fs)
+	var rows []string
+	for _, line := range renderFrameLines(f, 60, DiffThemeDark, 0) {
+		if plain := stripANSI(line); strings.TrimSpace(plain) != "" {
+			rows = append(rows, plain)
+		}
+	}
+	// header + task row + the reason on at least two rows.
+	if len(rows) < 4 {
+		t.Fatalf("card draws %d rows, want the failure reason wrapped onto more:\n%s", len(rows), strings.Join(rows, "\n"))
+	}
+	for _, row := range rows {
+		if strings.HasSuffix(row, "…") {
+			t.Fatalf("a row was elided, want the reason wrapped whole: %q", row)
+		}
+	}
+}
+
+// The pause that replaces the last call is the third layer too, so it obeys the
+// same one-row rule.
+func TestSubagentCardPausedRowIsOneRow(t *testing.T) {
+	fs := &fanoutState{
+		StepID: "fanout-paused", Verb: "continue", Running: true,
+		Tasks: []FanoutTaskState{{
+			Title: "Execute plan 302", AgentID: "agent-1", Status: "running", Paused: true,
+			ToolTotal: 1, RecentTools: []fanoutToolEntry{{StepID: "tool-1", Label: strings.Repeat("very long command ", 40)}},
+		}},
+	}
+	f := (&Reducer{}).emitFanoutFrame(fs)
+	var rows []string
+	for _, line := range renderFrameLines(f, 120, DiffThemeDark, 0) {
+		if plain := stripANSI(line); strings.TrimSpace(plain) != "" {
+			rows = append(rows, plain)
+		}
+	}
+	if len(rows) != 3 || !strings.HasSuffix(rows[2], "waiting for your message") {
+		t.Fatalf("paused row = %q", strings.Join(rows, "\n"))
+	}
+}
