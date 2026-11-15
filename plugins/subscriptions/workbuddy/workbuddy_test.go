@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -87,11 +88,13 @@ func storeCredentials(t *testing.T, db *sql.DB, home string, creds Credentials) 
 	}
 }
 
-// freshCredentials is a usable login whose token is good for an hour.
+// freshCredentials is a usable login whose token is good for an hour, on an
+// account the product's paid line covers (type personal, no enterprise).
 func freshCredentials() Credentials {
 	return Credentials{
 		UID:          "uid-1",
 		Name:         "Test Account",
+		AccountType:  "personal",
 		AccessToken:  "access-1",
 		RefreshToken: "refresh-1",
 		ExpiresAt:    time.Now().Add(time.Hour),
@@ -113,8 +116,10 @@ func TestStaticTableMatchesOfficialProduct(t *testing.T) {
 	if len(rows) != 16 {
 		t.Fatalf("static table holds %d rows, want 16 (the conversation agent's models, without auto)", len(rows))
 	}
-	if rows[0].ID != "hy4free" || rows[0].Name != "Hy4" {
-		t.Fatalf("first row = %q/%q, want the picker's first entry hy4free/Hy4", rows[0].ID, rows[0].Name)
+	// The free tier's row says which tier it is: the picker has no credits column
+	// to tell it from its paid twin.
+	if rows[0].ID != "hy4free" || rows[0].Name != "Hy4 Free" {
+		t.Fatalf("first row = %q/%q, want the picker's first entry hy4free/Hy4 Free", rows[0].ID, rows[0].Name)
 	}
 	byID := map[string]workBuddyModel{}
 	for _, m := range rows {
@@ -174,7 +179,7 @@ func TestChatModelsKeepTheConversationSubset(t *testing.T) {
 
 func TestFetchModelsFallsBackToShippedTable(t *testing.T) {
 	home := t.TempDir()
-	records, fromStatic := FetchModels(context.Background(), nil, home)
+	records, _, fromStatic := FetchModels(context.Background(), nil, home)
 	if !fromStatic {
 		t.Fatal("no login must answer from the shipped table")
 	}
@@ -218,7 +223,7 @@ func TestFetchModelsPrefersLiveAndFillsCapabilities(t *testing.T) {
 	t.Cleanup(server.Close)
 	withEndpoint(t, server)
 
-	records, fromStatic := FetchModels(context.Background(), nil, home)
+	records, _, fromStatic := FetchModels(context.Background(), nil, home)
 	if fromStatic {
 		t.Fatal("a live listing answered, so the offers are not the shipped table")
 	}
@@ -292,7 +297,7 @@ func TestFetchModelsMergesEnterpriseList(t *testing.T) {
 		t.Cleanup(server.Close)
 		withEndpoint(t, server)
 
-		records, fromStatic := FetchModels(context.Background(), nil, home)
+		records, _, fromStatic := FetchModels(context.Background(), nil, home)
 		if fromStatic {
 			t.Fatal("both listings answered")
 		}
@@ -337,7 +342,7 @@ func TestFetchModelsMergesEnterpriseList(t *testing.T) {
 		t.Cleanup(server.Close)
 		withEndpoint(t, server)
 
-		records, fromStatic := FetchModels(context.Background(), nil, home)
+		records, _, fromStatic := FetchModels(context.Background(), nil, home)
 		if fromStatic {
 			t.Fatal("the account's own listing answered")
 		}
@@ -366,7 +371,7 @@ func TestFetchModelsMergesEnterpriseList(t *testing.T) {
 		t.Cleanup(server.Close)
 		withEndpoint(t, server)
 
-		if _, fromStatic := FetchModels(context.Background(), nil, home); fromStatic {
+		if _, _, fromStatic := FetchModels(context.Background(), nil, home); fromStatic {
 			t.Fatal("the account's own listing answered")
 		}
 		if atomic.LoadInt32(&enterpriseHits) != 0 {
@@ -408,7 +413,7 @@ func TestFetchModelsOffersTheSurfaceAgentListInOrder(t *testing.T) {
 	t.Cleanup(server.Close)
 	withEndpoint(t, server)
 
-	records, fromStatic := FetchModels(context.Background(), nil, home)
+	records, _, fromStatic := FetchModels(context.Background(), nil, home)
 	if fromStatic {
 		t.Fatal("the account's own listing answered")
 	}
@@ -445,7 +450,7 @@ func TestFetchModelsKeepsTheCatalogWhenTheListingNamesNoAgent(t *testing.T) {
 	t.Cleanup(server.Close)
 	withEndpoint(t, server)
 
-	records, fromStatic := FetchModels(context.Background(), nil, home)
+	records, _, fromStatic := FetchModels(context.Background(), nil, home)
 	if fromStatic {
 		t.Fatal("a live listing answered, so the offers are not the shipped table")
 	}
@@ -1385,4 +1390,550 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// --- paid tiers -------------------------------------------------------------
+
+// ratePairListing is the account listing the reported defect came from: the
+// four Hy ids the free and paid tiers share a display name for, the agent that
+// declares them, and the product's own rate-limit-cap declaration that pairs
+// them (plan §1, read off the live /v3/config on 2026-11-15).
+const ratePairListing = `{"code":0,"msg":"OK","data":{
+	"models":[
+		{"id":"hy4free","name":"Hy4","maxInputTokens":960000,"maxOutputTokens":131072,"supportsToolCall":true,"supportsImages":false},
+		{"id":"hy4std","name":"Hy4","maxInputTokens":960000,"maxOutputTokens":131072,"supportsToolCall":true,"supportsImages":false},
+		{"id":"hy3","name":"Hy3","maxInputTokens":192000,"maxOutputTokens":32768,"supportsToolCall":true,"supportsImages":false},
+		{"id":"hy3-x","name":"Hy3","maxInputTokens":192000,"maxOutputTokens":32768,"supportsToolCall":true,"supportsImages":false}
+	],
+	"agents":[
+		{"name":"cli","tags":["cli","default","model:craft"],
+		 "models":["hy4free","hy4std","hy3","hy3-x"]}
+	],
+	"productFeaturesConfig":{"ModelRateLimitCap":{"lines":[
+		{"allowPaidSwitch":true,"displayName":"Hy3","freeId":"hy3","paidId":"hy3-x"},
+		{"allowPaidSwitch":true,"displayName":"Hy4","freeId":"hy4free","paidId":"hy4std"}
+	]}}
+}}`
+
+// ratePairGateway serves that listing and nothing else.
+func ratePairGateway(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v3/config":
+			writeJSON(w, ratePairListing)
+		case "/v2/plugin/account":
+			writeJSON(w, `{"code":0,"msg":"OK","data":{"uid":"uid-1","type":"personal","nickname":"Test Account"}}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// withRateLimitClock pins the clock the rate-limit state reads, so a test can
+// walk past a reset without waiting for it.
+func withRateLimitClock(t *testing.T, now time.Time) {
+	t.Helper()
+	previous := rateLimitNow
+	rateLimitNow = func() time.Time { return now }
+	t.Cleanup(func() { rateLimitNow = previous })
+}
+
+// withCatalog replaces what the transport resolves a send against — the model
+// ids the last listing carried and the pairs the product declared — and
+// restores the shipped declaration afterwards. No ids and no pairs restore the
+// shipped fallback.
+func withCatalog(t *testing.T, ids []string, pairs []ratePair) {
+	t.Helper()
+	rememberCatalog(ids, pairs)
+	t.Cleanup(func() { rememberCatalog(nil, nil) })
+}
+
+// TestOffersShowOneRowPerRateLimitedPair is the owner's screenshot: an eligible
+// account must see each of the two tiers as ONE row, named for the free tier,
+// carrying the paid twin as metadata the switch uses.
+func TestOffersShowOneRowPerRateLimitedPair(t *testing.T) {
+	home := t.TempDir()
+	storeCredentials(t, nil, home, freshCredentials())
+	restoreShippedTable(t)
+	withEndpoint(t, ratePairGateway(t))
+	withCatalog(t, nil, nil)
+
+	records, pairs, fromStatic := FetchModels(context.Background(), nil, home)
+	if fromStatic {
+		t.Fatal("the account's own listing answered, so the offers are not the shipped table")
+	}
+	if len(records) != 4 {
+		t.Fatalf("records = %d, want all four capability rows (a free and a paid id per tier)", len(records))
+	}
+	if len(pairs) != 2 {
+		t.Fatalf("pairs = %+v, want the product's two declared lines", pairs)
+	}
+
+	offers, err := workBuddySubscription{}.Offers(context.Background(), subscription.Env{Home: home})
+	if err != nil {
+		t.Fatalf("offers: %v", err)
+	}
+	if len(offers) != 2 {
+		names := make([]string, 0, len(offers))
+		for _, offer := range offers {
+			names = append(names, offer.Model+"/"+offer.Name)
+		}
+		t.Fatalf("offers = %v, want one row per rate-limited pair", names)
+	}
+	want := []struct {
+		model, name, paid string
+	}{
+		{"hy4free", "Hy4 Free", "hy4std"},
+		{"hy3", "Hy3 Free", "hy3-x"},
+	}
+	for i, expected := range want {
+		offer := offers[i]
+		if offer.Model != expected.model || offer.Name != expected.name {
+			t.Fatalf("offer %d = %q/%q, want %q/%q", i, offer.Model, offer.Name, expected.model, expected.name)
+		}
+		if offer.PaidModel != expected.paid || !offer.AllowPaidSwitch {
+			t.Fatalf("offer %q carries paid=%q switch=%v, want %q and true", offer.Model, offer.PaidModel, offer.AllowPaidSwitch, expected.paid)
+		}
+	}
+	if offers[0].Name == offers[1].Name {
+		t.Fatalf("both offers are named %q: the picker depends on the names being distinct", offers[0].Name)
+	}
+}
+
+// TestOffersKeepBothRowsForANonEligibleAccount pins the client's own rule: the
+// paid line is filtered only for a personal or pro account, so an account
+// outside that gets both rows — and both must be readable.
+func TestOffersKeepBothRowsForANonEligibleAccount(t *testing.T) {
+	home := t.TempDir()
+	creds := freshCredentials()
+	creds.AccountType = "enterprise"
+	storeCredentials(t, nil, home, creds)
+	restoreShippedTable(t)
+	withEndpoint(t, ratePairGateway(t))
+	withCatalog(t, nil, nil)
+
+	offers, err := workBuddySubscription{}.Offers(context.Background(), subscription.Env{Home: home})
+	if err != nil {
+		t.Fatalf("offers: %v", err)
+	}
+	if len(offers) != 4 {
+		t.Fatalf("offers = %d, want both rows of both pairs for an account outside the paid line", len(offers))
+	}
+	seen := map[string]bool{}
+	for i, offer := range offers {
+		if seen[offer.Name] {
+			// Distinct names are what makes the extra row readable at all.
+			t.Fatalf("offer %d repeats a name: %v", i, offerNames(offers))
+		}
+		seen[offer.Name] = true
+	}
+	for i, want := range []string{"Hy4 Free", "Hy4", "Hy3 Free", "Hy3"} {
+		if offers[i].Name != want {
+			t.Fatalf("offers = %v, want %q at %d", offerNames(offers), want, i)
+		}
+	}
+}
+
+func offerNames(offers []subscription.Offer) []string {
+	names := make([]string, 0, len(offers))
+	for _, offer := range offers {
+		names = append(names, offer.Model+"/"+offer.Name)
+	}
+	return names
+}
+
+// TestStaticTableNamesEachFreeTierApart guards narrowToSurface: the shipped
+// table carries the four Hy ids the conversation agent declares, and no two of
+// its names may collide. It is the invariant that goes red when the product
+// adds another id under a name already in use — which is exactly how the
+// picker showed two rows called Hy4.
+func TestStaticTableNamesEachFreeTierApart(t *testing.T) {
+	byID := map[string]workBuddyModel{}
+	seen := map[string]string{}
+	for _, row := range staticWorkBuddyModels() {
+		if other, dup := seen[row.Name]; dup {
+			t.Fatalf("rows %q and %q are both named %q", other, row.ID, row.Name)
+		}
+		seen[row.Name] = row.ID
+		byID[row.ID] = row
+	}
+	for id, want := range map[string]string{
+		"hy4free": "Hy4 Free", "hy4std": "Hy4",
+		"hy3": "Hy3 Free", "hy3-x": "Hy3",
+	} {
+		row, ok := byID[id]
+		if !ok {
+			t.Fatalf("%q is not in the shipped table", id)
+		}
+		if row.Name != want {
+			t.Fatalf("%q name = %q, want %q", id, row.Name, want)
+		}
+	}
+}
+
+// testCapResetTime is the reset stamp a 6004 answers with in these tests: the
+// wall clock the product writes, interpreted as UTC+8 (plan §3, the client's
+// own regex).
+var testCapResetTime = func() time.Time {
+	return time.Date(2026, 11, 16, 0, 0, 0, 0, time.FixedZone("UTC+8", 8*3600))
+}
+
+// TestTransportClassifiesCapCodeAndRecordsReset pins Step 0b's envelope: a 400,
+// application/json, {"code":6004,"msg":"…"} with the reset inside msg. The
+// plugin must record the reset and hand the client an OpenAI-shaped error.
+func TestTransportClassifiesCapCodeAndRecordsReset(t *testing.T) {
+	home := t.TempDir()
+	creds := freshCredentials()
+	storeCredentials(t, nil, home, creds)
+	withCatalog(t, nil, nil)
+	now := time.Now().Round(0)
+	withRateLimitClock(t, now)
+	reset := now.Add(6 * time.Hour).Truncate(time.Hour).In(testCapResetTime().Location())
+
+	// FIXTURE FROM STEP 0b: HTTP 400, Content-Type application/json; charset=utf-8,
+	// top-level "code" is the business code and top-level "msg" is the prose (the
+	// live probe of an unknown model id answered exactly this envelope, code
+	// 11102). The reset stamp rides in that prose as YYYY-MM-DD HH:MM:SS, read as
+	// UTC+8.
+	msg := "hy4free 的免费使用量已用完，可在 " + reset.Format("2006-01-02 15:04:05") + " 重置"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":6004,"msg":"` + msg + `","requestId":"req-1","retry_policy":{"retry":false}}`))
+	}))
+	t.Cleanup(server.Close)
+	withEndpoint(t, server)
+
+	transport := &Transport{Home: home}
+	req := httptest.NewRequest(http.MethodPost, "http://placeholder/v1/chat/completions",
+		strings.NewReader(`{"model":"hy4free","messages":[]}`))
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want the gateway's own 400 kept", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var rewritten struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &rewritten); err != nil {
+		t.Fatalf("body = %s, want the OpenAI error shape: %v", raw, err)
+	}
+	if rewritten.Error.Code != "6004" || rewritten.Error.Type != "quota_exhausted" {
+		t.Fatalf("rewritten error = %+v, want code 6004 and type quota_exhausted", rewritten.Error)
+	}
+	// The sentence stays the provider's, with its stamp spelled in the zone it
+	// is written in: one layer up that is what turns into a reset time.
+	prose, stamp, _ := strings.Cut(msg, reset.Format("2006-01-02 15:04:05"))
+	if !strings.Contains(rewritten.Error.Message, prose) || !strings.Contains(rewritten.Error.Message, reset.Format(time.RFC3339)) {
+		t.Fatalf("rewritten message = %q, want the provider's sentence with its stamp normalized", rewritten.Error.Message)
+	}
+	_ = stamp
+
+	stored, err := os.ReadFile(rateLimitStatePath(home))
+	if err != nil {
+		t.Fatalf("rate-limit state: %v", err)
+	}
+	var state map[string]map[string]struct {
+		ResetAt int64 `json:"resetAt"`
+		OptedIn bool  `json:"optedIn"`
+	}
+	if err := json.Unmarshal(stored, &state); err != nil {
+		t.Fatalf("rate-limit state %s: %v", stored, err)
+	}
+	entry, ok := state[capHitAccountKey(creds)]["hy4free"]
+	if !ok {
+		t.Fatalf("state = %s, want the cap hit filed under %q", stored, capHitAccountKey(creds))
+	}
+	if got := time.UnixMilli(entry.ResetAt).UTC(); !got.Equal(reset.UTC()) {
+		t.Fatalf("recorded reset = %s, want %s (the prose stamp read as UTC+8)", got, reset.UTC())
+	}
+	if entry.OptedIn {
+		t.Fatal("a cap hit is not an opt-in: the user has not chosen the paid tier yet")
+	}
+}
+
+// TestTransportSendsPaidTwinWhileOptedIn pins the switch: an opt-in in force
+// sends the paid id, an expired one sends the free id again, and a pair the
+// product does not allow to switch never sends it at all.
+func TestTransportSendsPaidTwinWhileOptedIn(t *testing.T) {
+	home := t.TempDir()
+	creds := freshCredentials()
+	storeCredentials(t, nil, home, creds)
+	now := time.Now().Round(0)
+
+	var mu sync.Mutex
+	var bodies, headerModels []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := make([]byte, 1<<16)
+		n, _ := r.Body.Read(raw)
+		mu.Lock()
+		bodies = append(bodies, string(raw[:n]))
+		headerModels = append(headerModels, r.Header.Get("X-Model-ID"))
+		mu.Unlock()
+		writeJSON(w, `{"id":"1","object":"chat.completion","model":"hy4free","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(server.Close)
+	withEndpoint(t, server)
+	withRateLimitClock(t, now)
+
+	send := func(t *testing.T) (string, string) {
+		t.Helper()
+		transport := &Transport{Home: home}
+		req := httptest.NewRequest(http.MethodPost, "http://placeholder/v1/chat/completions",
+			strings.NewReader(`{"model":"hy4free","messages":[],"temperature":0.2}`))
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("round trip: %v", err)
+		}
+		resp.Body.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		body, header := bodies[len(bodies)-1], headerModels[len(headerModels)-1]
+		var payload struct {
+			Model       string  `json:"model"`
+			Temperature float64 `json:"temperature"`
+		}
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatalf("request body %q: %v", body, err)
+		}
+		if payload.Temperature != 0.2 {
+			t.Fatalf("body = %q, want every field but model untouched", body)
+		}
+		return payload.Model, header
+	}
+
+	withCatalog(t, []string{"hy4free", "hy4std"}, []ratePair{{DisplayName: "Hy4", FreeID: "hy4free", PaidID: "hy4std", AllowPaidSwitch: true}})
+	if err := markCapHit(home, capHitAccountKey(creds), "hy4free", now.Add(time.Hour)); err != nil {
+		t.Fatalf("mark cap hit: %v", err)
+	}
+	if err := markPaidOptIn(home, capHitAccountKey(creds), "hy4free"); err != nil {
+		t.Fatalf("mark opt-in: %v", err)
+	}
+	if model, header := send(t); model != "hy4std" || header != "hy4std" {
+		t.Fatalf("opted in: sent %q (X-Model-ID %q), want the paid twin hy4std", model, header)
+	}
+
+	// The reset passes: the opt-in expires and the free tier is sent again.
+	withRateLimitClock(t, now.Add(2*time.Hour))
+	if model, header := send(t); model != "hy4free" || header != "hy4free" {
+		t.Fatalf("after the reset: sent %q (X-Model-ID %q), want the free id again", model, header)
+	}
+
+	// A pair the product does not allow to switch is never switched, whatever
+	// this account opted into.
+	withCatalog(t, []string{"hy4free", "hy4std"}, []ratePair{{DisplayName: "Hy4", FreeID: "hy4free", PaidID: "hy4std", AllowPaidSwitch: false}})
+	withRateLimitClock(t, now)
+	if err := markCapHit(home, capHitAccountKey(creds), "hy4free", now.Add(time.Hour)); err != nil {
+		t.Fatalf("mark cap hit: %v", err)
+	}
+	if err := markPaidOptIn(home, capHitAccountKey(creds), "hy4free"); err != nil {
+		t.Fatalf("mark opt-in: %v", err)
+	}
+	if model, _ := send(t); model != "hy4free" {
+		t.Fatalf("allowPaidSwitch=false: sent %q, want hy4free", model)
+	}
+}
+
+// TestExplainAllowanceSpentCarriesReset pins the new classification: the cap
+// refusal is its own code with the reset attached, so no auto-continue takes it
+// for a wait-it-out throttle.
+func TestExplainAllowanceSpentCarriesReset(t *testing.T) {
+	reset := testCapResetTime()
+	if !reset.After(time.Now()) {
+		t.Skip("the fixed reset stamp is in the past")
+	}
+	apiErr := &llm.APIError{
+		StatusCode: http.StatusBadRequest,
+		Code:       "6004",
+		Type:       "quota_exhausted",
+		Message:    "免费额度已用尽，可在 " + reset.Format("2006-01-02 15:04:05") + " 重置",
+	}
+	explanation, ok := llm.Explain(apiErr)
+	if !ok {
+		t.Fatal("a cap refusal must classify")
+	}
+	if explanation.Code != llm.ExplainAllowanceSpent {
+		t.Fatalf("code = %q, want %q", explanation.Code, llm.ExplainAllowanceSpent)
+	}
+	if !explanation.ResetAt.Equal(reset) {
+		t.Fatalf("reset = %s, want %s", explanation.ResetAt, reset)
+	}
+}
+
+// TestLegacyCredentialGetsAccountType is the upgrade path: a login saved before
+// this change has no type in it, and without one the plugin cannot tell whether
+// the account is inside the paid line — so it asks the account endpoint once and
+// persists the answer.
+func TestLegacyCredentialGetsAccountType(t *testing.T) {
+	home := t.TempDir()
+	// The credential file as today's releases write it: every key, no "type".
+	legacy := `{"uid":"uid-1","name":"Test Account","domain":"www.workbuddy.cn",` +
+		`"access_token":"test-access","refresh_token":"test-refresh",` +
+		`"expires_at":"` + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + `",` +
+		`"refresh_expires_at":"` + time.Now().Add(24*time.Hour).UTC().Format(time.RFC3339) + `",` +
+		`"session_state":"session-1","login_method":"browser"}`
+	if err := os.WriteFile(credentialPath(home), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy credential: %v", err)
+	}
+	restoreShippedTable(t)
+	withEndpoint(t, ratePairGateway(t))
+	withCatalog(t, nil, nil)
+
+	offers, err := workBuddySubscription{}.Offers(context.Background(), subscription.Env{Home: home})
+	if err != nil {
+		t.Fatalf("offers: %v", err)
+	}
+	if len(offers) != 2 {
+		t.Fatalf("offers = %v, want one row per pair once the account's type is known", offerNames(offers))
+	}
+	stored, ok, err := loadCredentials(context.Background(), nil, home)
+	if err != nil || !ok {
+		t.Fatalf("stored login: ok=%v err=%v", ok, err)
+	}
+	if stored.AccountType != "personal" {
+		t.Fatalf("stored account type = %q, want the account endpoint's answer persisted", stored.AccountType)
+	}
+}
+
+// TestShippedTableNamesReachTheModelLabel is the mechanical half of the rename:
+// every label a person reads (/model, the footer, the web chip) projects through
+// FormatProviderModelDisplay, so the shipped table's names are what they show.
+func TestShippedTableNamesReachTheModelLabel(t *testing.T) {
+	restoreShippedTable(t)
+	for model, want := range map[string]string{
+		"hy4free": "workbuddy/Hy4 Free",
+		"hy4std":  "workbuddy/Hy4",
+		"hy3":     "workbuddy/Hy3 Free",
+		"hy3-x":   "workbuddy/Hy3",
+	} {
+		if got := llm.FormatProviderModelDisplay("workbuddy", model); got != want {
+			t.Fatalf("label for %q = %q, want %q", model, got, want)
+		}
+	}
+}
+
+// TestPaidTierLLMNamesTheCapRefusal joins the two plugin halves: the transport
+// recognizes the product's cap refusal and rewrites it, and the LLM the factory
+// builds names it as the choice a surface can offer.
+func TestPaidTierLLMNamesTheCapRefusal(t *testing.T) {
+	home := t.TempDir()
+	storeCredentials(t, nil, home, freshCredentials())
+	t.Setenv("FOREBRAIN_HOME", home)
+	restoreShippedTable(t)
+	withCatalog(t, nil, nil)
+	now := time.Now().Round(0)
+	withRateLimitClock(t, now)
+	reset := now.Add(5 * time.Hour).Truncate(time.Hour).In(testCapResetTime().Location())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":6004,"msg":"Hy4 的免费额度已用尽，可在 ` +
+			reset.Format("2006-01-02 15:04:05") + ` 重置"}`))
+	}))
+	t.Cleanup(server.Close)
+	withEndpoint(t, server)
+
+	client, err := newWorkBuddyLLM(llm.ProviderLLMRequest{Model: "hy4free", MaxOutputTokens: 64})
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	if !llm.HasPaidTier("workbuddy") {
+		t.Fatal("building the model row must register what the switch writes")
+	}
+	_, err = client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	var paid *llm.PaidTierError
+	if !errors.As(err, &paid) {
+		t.Fatalf("error = %v, want the paid-tier offer", err)
+	}
+	if paid.Provider != "workbuddy" || paid.FreeModel != "hy4free" || paid.PaidModel != "hy4std" || paid.DisplayName != "Hy4" {
+		t.Fatalf("offer = %+v", paid)
+	}
+	if !paid.ResetAt.Equal(reset) {
+		t.Fatalf("offer reset = %s, want %s", paid.ResetAt, reset)
+	}
+	// The refusal was recorded on the way, so the offer's save has a window to
+	// attach the choice to.
+	if _, ok := capHitResetAt(home, capHitAccountKey(freshCredentials()), "hy4free"); !ok {
+		t.Fatal("the refused request must record the spent window")
+	}
+}
+
+// TestUsePaidTierWritesTheRecord is the switch's own write: the choice lands in
+// the record the transport reads, and it is the paid twin the next send carries.
+func TestUsePaidTierWritesTheRecord(t *testing.T) {
+	home := t.TempDir()
+	creds := freshCredentials()
+	storeCredentials(t, nil, home, creds)
+	withCatalog(t, []string{"hy4free", "hy4std"}, []ratePair{{DisplayName: "Hy4", FreeID: "hy4free", PaidID: "hy4std", AllowPaidSwitch: true}})
+	now := time.Now().Round(0)
+	withRateLimitClock(t, now)
+	reset := now.Add(2 * time.Hour).Truncate(time.Minute)
+
+	if err := recordCapHitWith(t, home, creds, reset); err != nil {
+		t.Fatalf("record the spent window: %v", err)
+	}
+	if paidSwitchActive(home, creds, "hy4free") {
+		t.Fatal("a spent window is not a choice")
+	}
+	if err := (workBuddyPaidTier{home: home}).UsePaidTier(context.Background(), "hy4free", reset); err != nil {
+		t.Fatalf("use paid tier: %v", err)
+	}
+	if !paidSwitchActive(home, creds, "hy4free") {
+		t.Fatal("the recorded choice must be what the transport reads")
+	}
+	// The choice is the window's, not the row's: when the free tier returns it
+	// is gone without anybody deleting it.
+	withRateLimitClock(t, reset.Add(time.Minute))
+	if paidSwitchActive(home, creds, "hy4free") {
+		t.Fatal("the choice outlived the window it was made for")
+	}
+}
+
+// TestUsePaidTierWithoutAResetStaysInThisProcess pins the half that may not be
+// written: a hit the product named no reset for keeps its choice in memory, and
+// nothing about it reaches the disk.
+func TestUsePaidTierWithoutAResetStaysInThisProcess(t *testing.T) {
+	home := t.TempDir()
+	creds := freshCredentials()
+	storeCredentials(t, nil, home, creds)
+	withCatalog(t, []string{"hy4free", "hy4std"}, []ratePair{{DisplayName: "Hy4", FreeID: "hy4free", PaidID: "hy4std", AllowPaidSwitch: true}})
+	withRateLimitClock(t, time.Now().Round(0))
+	forgetLiveCapHits()
+	t.Cleanup(forgetLiveCapHits)
+
+	setLiveCapHit(home, capHitAccountKey(creds), "hy4free", true)
+	if err := (workBuddyPaidTier{home: home}).UsePaidTier(context.Background(), "hy4free", time.Time{}); err != nil {
+		t.Fatalf("use paid tier: %v", err)
+	}
+	if !paidSwitchActive(home, creds, "hy4free") {
+		t.Fatal("the live choice must switch the next send")
+	}
+	if _, err := os.Stat(rateLimitStatePath(home)); !os.IsNotExist(err) {
+		t.Fatalf("a reset-less choice reached the disk (state file err = %v)", err)
+	}
+}
+
+// recordCapHitWith files one spent window the way a refusal does.
+func recordCapHitWith(t *testing.T, home string, creds Credentials, reset time.Time) error {
+	t.Helper()
+	if err := markCapHit(home, capHitAccountKey(creds), "hy4free", reset); err != nil {
+		return err
+	}
+	return nil
 }

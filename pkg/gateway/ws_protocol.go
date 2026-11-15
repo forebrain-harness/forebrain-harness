@@ -38,6 +38,10 @@ var wsInboundOps = map[string]struct{}{
 	// cancel_auto_continue stops the continuation a session is waiting to
 	// run once a usage limit resets.
 	wsOpCancelAutoContinue: {},
+	// use_paid_tier and dismiss_paid_tier_offer answer a spent free tier that
+	// offers its paid twin: the switch, and the refusal.
+	wsOpUsePaidTier:     {},
+	wsOpDismissPaidTier: {},
 }
 
 // wsOutboundOps are ops the server sends that are NOT canonical run events:
@@ -56,6 +60,10 @@ var wsOutboundOps = map[string]struct{}{
 	// The answer to cancel_auto_continue. What the cancel changed reaches the
 	// session log as its own auto_continue_cancelled event.
 	wsOpAutoContinueCancelAck: {},
+	// The answer to use_paid_tier and dismiss_paid_tier_offer. The choice
+	// itself reaches the session's page through the engine's own turn and
+	// events; this op only says whether it was taken.
+	wsOpPaidTierAck: {},
 	// first_token is the live wait for the model's first output (plan 015). It
 	// is measured once per run and stored on fb_runs; the socket op only shows
 	// it while the run is going, so it must never enter the session log.
@@ -103,6 +111,8 @@ var wsSessionOps = map[string]struct{}{
 	"mcp_tool_search":      {},
 	"task_status":          {},
 	wsOpCancelAutoContinue: {},
+	wsOpUsePaidTier:        {},
+	wsOpDismissPaidTier:    {},
 }
 
 // wsUnrelayedOps are the inbound operations a relay never forwards: connect
@@ -169,7 +179,7 @@ func validateWSClientMessage(m wsClientMsg) error {
 		if strings.TrimSpace(m.ActionID) == "" {
 			return fmt.Errorf("action_id required for op: %s", op)
 		}
-	case wsOpCancelAutoContinue:
+	case wsOpCancelAutoContinue, wsOpUsePaidTier, wsOpDismissPaidTier:
 		if strings.TrimSpace(m.SessionID) == "" {
 			return fmt.Errorf("session_id required for op: %s", op)
 		}

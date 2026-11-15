@@ -1158,6 +1158,12 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		if msg, ok := autoContinueUIMessage(evt); ok {
 			s.notifyUIForSession(evt.SessionID, msg)
 		}
+	// The paid-tier choice is the sibling of that wait: it is drawn from the
+	// engine's own offer, so answering it on either surface answers the same one.
+	case event.RunEventPaidTierOffered:
+		if msg, ok := paidTierUIMessage(evt); ok {
+			s.notifyUIForSession(evt.SessionID, msg)
+		}
 	// A language-server recommendation is the user's to answer, not the
 	// model's: the event is persisted above (so a reconnect does not ask
 	// twice) and only the live surface opens the modal. Replay reads the
@@ -2569,10 +2575,16 @@ func handleAutoContinueNotification(renderer *Renderer, state *streamState, m an
 		// Only a wait this loop is still showing is continued. A reader who
 		// pressed Esc as the timer fired has cleared it, and the continuation
 		// that raced the key is dropped rather than run against their wish.
-		if entry == nil || !sameSessionID(msg.SessionID, entry.sessionID) {
+		waiting := entry != nil && sameSessionID(msg.SessionID, entry.sessionID)
+		// The paid-tier switch resends through this same port with no wait behind
+		// it: the offer its answer was for is what this loop checks instead.
+		offer := state.paidTierFor()
+		switched := view == "" && offer != nil && sameSessionID(msg.SessionID, offer.sessionID)
+		if !waiting && !switched {
 			return true
 		}
 		state.clearAutoContinue(view)
+		state.clearPaidTierOffer()
 		prompt := strings.TrimSpace(msg.Prompt)
 		if prompt == "" {
 			return true
@@ -2680,6 +2692,9 @@ func (s *streamState) leaveAutoContinue() {
 		return
 	}
 	s.autoContinueDue = nil
+	// The offer belongs to the conversation being left: its allowance is that
+	// conversation's, and the engine keeps holding it for whoever comes back.
+	s.paidTier = nil
 	for view, entry := range s.autoContinue {
 		if entry == nil {
 			continue
@@ -2955,6 +2970,192 @@ func handlePeerHoldNotification(renderer *Renderer, state *streamState, m any) b
 
 func sameSessionID(a, b string) bool {
 	return strings.TrimSpace(a) == strings.TrimSpace(b)
+}
+
+// PaidTierOfferedMsg reports a choice the engine is holding: a request refused
+// because a free tier's allowance is spent, on a model row the product also sells
+// as a paid twin. Ctrl-P takes the paid rate and resends the turn; Esc drops the
+// offer. Typing does not drop it — the offer is a price, and reading the
+// conversation is not an answer.
+type PaidTierOfferedMsg struct {
+	SessionID   string
+	RunID       string
+	Provider    string
+	FreeModel   string
+	PaidModel   string
+	DisplayName string
+	ResetAt     time.Time
+}
+
+// paidTierUIMessage turns the engine's offer event into the message the event
+// loop acts on.
+func paidTierUIMessage(evt event.RunEvent) (any, bool) {
+	var p event.PaidTierOfferedPayload
+	if json.Unmarshal(evt.Payload, &p) != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(p.FreeModel) == "" || strings.TrimSpace(p.PaidModel) == "" {
+		return nil, false
+	}
+	var resetAt time.Time
+	if raw := strings.TrimSpace(p.ResetAt); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return nil, false
+		}
+		resetAt = parsed
+	}
+	return PaidTierOfferedMsg{
+		SessionID:   evt.SessionID,
+		RunID:       evt.RunID,
+		Provider:    strings.TrimSpace(p.Provider),
+		FreeModel:   strings.TrimSpace(p.FreeModel),
+		PaidModel:   strings.TrimSpace(p.PaidModel),
+		DisplayName: strings.TrimSpace(p.DisplayName),
+		ResetAt:     resetAt,
+	}, true
+}
+
+// paidTierView is what the event loop knows about one offer on the table.
+type paidTierView struct {
+	sessionID   string
+	displayName string
+	paidModel   string
+	resetAt     time.Time
+}
+
+// paidTierUser is the optional half of Session that answers the offer: it records
+// the choice and lets the engine resend the turn.
+type paidTierUser interface {
+	UsePaidTier(sessionID string) error
+}
+
+// paidTierDismisser is the optional half of Session that drops the offer.
+type paidTierDismisser interface {
+	DismissPaidTierOffer(sessionID string) bool
+}
+
+// UsePaidTier records the reader's choice of the paid twin for the offer the
+// conversation is waiting on.
+func (s *ChatSession) UsePaidTier(sessionID string) error {
+	if s == nil || s.Core == nil {
+		return turn.ErrPaidTierNoOffer
+	}
+	return s.Core.UsePaidTier(context.Background(), sessionID)
+}
+
+// DismissPaidTierOffer drops the conversation's offer without spending the paid
+// rate.
+func (s *ChatSession) DismissPaidTierOffer(sessionID string) bool {
+	if s == nil || s.Core == nil {
+		return false
+	}
+	return s.Core.DismissPaidTierOffer(sessionID)
+}
+
+// setPaidTierOffer records the offer on the table.
+func (s *streamState) setPaidTierOffer(offer *paidTierView) {
+	if s == nil {
+		return
+	}
+	s.paidTier = offer
+}
+
+// paidTierFor answers the offer on the table, nil when none.
+func (s *streamState) paidTierFor() *paidTierView {
+	if s == nil {
+		return nil
+	}
+	return s.paidTier
+}
+
+// clearPaidTierOffer drops the local offer.
+func (s *streamState) clearPaidTierOffer() {
+	if s == nil {
+		return
+	}
+	s.paidTier = nil
+}
+
+// usePaidTierOffer answers the offer with the paid rate. It reports whether there
+// was an offer, so Ctrl-P is consumed only when it did something.
+func (s *streamState) usePaidTierOffer(renderer *Renderer) bool {
+	offer := s.paidTierFor()
+	if offer == nil {
+		return false
+	}
+	user, ok := s.session.(paidTierUser)
+	if !ok {
+		return false
+	}
+	// The engine starts the resend through the continuation port; the offer is
+	// cleared here because the engine has already taken it.
+	s.clearPaidTierOffer()
+	if err := user.UsePaidTier(offer.sessionID); err != nil {
+		renderer.RenderFrame(Frame{Kind: FrameStatus, Title: paidTierUnavailableText(err.Error()), Final: true})
+	}
+	return true
+}
+
+// dismissPaidTierOffer drops the offer on Esc, and reports whether there was one.
+func (s *streamState) dismissPaidTierOffer(renderer *Renderer) bool {
+	offer := s.paidTierFor()
+	if offer == nil {
+		return false
+	}
+	if dismisser, ok := s.session.(paidTierDismisser); ok {
+		dismisser.DismissPaidTierOffer(offer.sessionID)
+	}
+	s.clearPaidTierOffer()
+	return true
+}
+
+// handlePaidTierNotification applies one offer message to the event loop's state,
+// reporting false for any other message. It draws the line once, under the
+// refusal that produced it.
+func handlePaidTierNotification(renderer *Renderer, state *streamState, m any) bool {
+	msg, ok := m.(PaidTierOfferedMsg)
+	if !ok {
+		return false
+	}
+	if state == nil || !sameSessionID(msg.SessionID, state.sessionID) {
+		return true
+	}
+	view := &paidTierView{sessionID: msg.SessionID, displayName: msg.DisplayName, paidModel: msg.PaidModel, resetAt: msg.ResetAt}
+	state.setPaidTierOffer(view)
+	// One line, in the conversation's own view: a subagent's failure is reported
+	// in that subagent's view and its allowance is the conversation's.
+	if renderer != nil && renderer.ActiveView() == "" {
+		renderer.RenderFrame(Frame{Kind: FrameStatus, Title: paidTierNoticeText(view), Final: true})
+	}
+	renderComposerWithState(renderer, state)
+	return true
+}
+
+// paidTierClockZone is the zone the product writes its reset stamps in; the
+// notice spells the reset in it and says so, so a reader in another zone is not
+// misled.
+var paidTierClockZone = time.FixedZone("UTC+8", 8*60*60)
+
+// paidTierNoticeText is the line the transcript keeps while the choice stands.
+func paidTierNoticeText(view *paidTierView) string {
+	paid := strings.TrimSpace(view.displayName)
+	if paid == "" {
+		paid = view.paidModel
+	}
+	head := "Free tier spent"
+	if !view.resetAt.IsZero() {
+		head += " until " + view.resetAt.In(paidTierClockZone).Format("2006-01-02 15:04:05") + " (UTC+8)"
+	}
+	return head + ". Ctrl-P use paid (" + paid + ") · Esc dismiss"
+}
+
+func paidTierUnavailableText(detail string) string {
+	text := "Could not switch to the paid model"
+	if detail = strings.TrimSpace(detail); detail != "" {
+		text += ": " + detail
+	}
+	return text
 }
 
 // autoContinueHeadline names what stopped the conversation.

@@ -2064,6 +2064,7 @@ import { persistLastSessionId } from '@/composables/useLastSession'
 import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { currentLocale, t as translate, type I18nKey } from '@/locales'
 import { AUTO_CONTINUE_EVENT_TYPES, parseAutoContinue, type AutoContinueEntry, type AutoContinueState } from '@/lib/autoContinue'
+import { PAID_TIER_EVENT_TYPE, parsePaidTierOffer, type PaidTierOffer } from '@/lib/paidTier'
 import { LSP_RECOMMENDATION_EVENT_TYPE, parseLspRecommendation, type LspRecommendation } from '@/lib/lspRecommendation'
 import { noteSessionBound, recordBatchExecution } from '@/lib/batchExecution'
 import { liveStateFor, setLiveState } from '@/lib/liveConnection'
@@ -2919,6 +2920,10 @@ export function useChatStream() {
   // holds each subagent's own, keyed by its roster key, so a continuation
   // shows in the subagent's view rather than the conversation's.
   const autoContinue = ref<AutoContinueState | null>(null)
+  // paidTierOffer is the choice a spent free tier put in front of the reader: a
+  // model row the product also sells as a paid twin. The runtime holds it (the
+  // terminal answers the same one), so the page only shows and answers it.
+  const paidTierOffer = ref<PaidTierOffer | null>(null)
   const subagentAutoContinue = ref<Record<string, AutoContinueState>>({})
   // The peer facts (plan 200 §3): the messages waiting for this conversation's
   // person, and the drawer's view of the machine — the files being edited under
@@ -3832,6 +3837,13 @@ export function useChatStream() {
       if (rememberObservedEvent(evt)) applyAutoContinueEvent(evt, historical)
       return
     }
+    // A refused turn whose row has a paid twin: live state of the conversation,
+    // filed under the run the refusal stopped, so it is read here rather than in
+    // that run's timeline.
+    if (String(evt.type) === PAID_TIER_EVENT_TYPE) {
+      if (rememberObservedEvent(evt)) paidTierOffer.value = parsePaidTierOffer(evt.payload)
+      return
+    }
     if (String(evt.type) === 'heartbeat_fired') {
       if (rememberObservedEvent(evt)) applyHeartbeatFiredEvent(evt, historical)
       return
@@ -4115,6 +4127,7 @@ export function useChatStream() {
 	  observerHighWater = 0
 	  autoContinueSequence = 0
 	  autoContinue.value = null
+	  paidTierOffer.value = null
 	  subagentAutoContinue.value = {}
 	  heldPeers.value = []
 	  peerDirectory.value = { files: [], sameTree: [], other: [], otherTotal: 0 }
@@ -6032,6 +6045,28 @@ export function useChatStream() {
     return true
   }
 
+  /**
+   * usePaidTier answers the offer with the paid rate: the runtime records the
+   * choice and resends the refused turn. The offer clears at once; the resend is
+   * the runtime's own turn and arrives through the stream like any other.
+   */
+  function usePaidTier(): boolean {
+    if (!paidTierOffer.value) return false
+    paidTierOffer.value = null
+    const sid = String(sessionId.value ?? '').trim()
+    if (sid) void forebrainApi.paidTierOffer(sid, 'use').catch(() => { /* the offer may have expired */ })
+    return true
+  }
+
+  /** dismissPaidTierOffer drops the offer without spending the paid rate. */
+  function dismissPaidTierOffer(): boolean {
+    if (!paidTierOffer.value) return false
+    paidTierOffer.value = null
+    const sid = String(sessionId.value ?? '').trim()
+    if (sid) void forebrainApi.paidTierOffer(sid, 'dismiss').catch(() => { /* the offer may have expired */ })
+    return true
+  }
+
   /** autoContinueForView is the wait to show in one view: "" the conversation's. */
   function autoContinueForView(view: string): AutoContinueState | null {
     const key = String(view ?? '').trim()
@@ -7021,6 +7056,9 @@ export function useChatStream() {
     subagentAutoContinue,
     autoContinueForView,
     cancelAutoContinue,
+    paidTierOffer,
+    usePaidTier,
+    dismissPaidTierOffer,
     heldPeers,
     peerDirectory,
     peerDirectoryPage,

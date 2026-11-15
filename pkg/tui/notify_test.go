@@ -1469,3 +1469,147 @@ func TestPeerSettledNotificationSaysHowAnAskedMessageEnded(t *testing.T) {
 		t.Fatalf("settle line=%q want the sender and the outcome", card.Title)
 	}
 }
+
+// paidTierSession is a session that answers the paid-tier offer, recording what
+// the surface asked it to do.
+type paidTierSession struct {
+	*fakeSession
+	used      []string
+	dismissed []string
+	useErr    error
+}
+
+func (s *paidTierSession) UsePaidTier(sessionID string) error {
+	s.used = append(s.used, sessionID)
+	return s.useErr
+}
+
+func (s *paidTierSession) DismissPaidTierOffer(sessionID string) bool {
+	s.dismissed = append(s.dismissed, sessionID)
+	return true
+}
+
+// paidTierMsg is the engine's offer as the widget receives it.
+func paidTierMsg(resetAt time.Time) PaidTierOfferedMsg {
+	return PaidTierOfferedMsg{
+		SessionID: "s1", RunID: "run-1", Provider: "workbuddy",
+		FreeModel: "hy4free", PaidModel: "hy4std", DisplayName: "Hy4", ResetAt: resetAt,
+	}
+}
+
+func TestPaidTierNoticeLine(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	state := &streamState{sessionID: "s1", session: &paidTierSession{fakeSession: &fakeSession{}}}
+	reset := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+
+	if !handlePaidTierNotification(renderer, state, paidTierMsg(reset)) {
+		t.Fatal("offer message not handled")
+	}
+	if state.paidTierFor() == nil {
+		t.Fatal("the offer is not on the table")
+	}
+	want := "Free tier spent until 2026-11-16 08:00:00 (UTC+8). Ctrl-P use paid (Hy4) · Esc dismiss"
+	transcript := statusLines(renderer)
+	if !strings.Contains(transcript, want) {
+		t.Fatalf("transcript = %q, want %q", transcript, want)
+	}
+	// The offer is drawn in the transcript and nowhere else: no second copy in
+	// the composer footer.
+	if strings.Contains(composerText(renderer), "Ctrl-P") {
+		t.Fatalf("composer repeats the notice: %q", composerText(renderer))
+	}
+}
+
+func TestPaidTierCtrlPTakesThePaidRate(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	session := &paidTierSession{fakeSession: &fakeSession{}}
+	state := &streamState{sessionID: "s1", session: session}
+
+	// Without an offer the key is not consumed.
+	if state.usePaidTierOffer(renderer) {
+		t.Fatal("Ctrl-P was consumed with no offer on the table")
+	}
+	handlePaidTierNotification(renderer, state, paidTierMsg(time.Now().Add(time.Hour)))
+	if !state.usePaidTierOffer(renderer) {
+		t.Fatal("Ctrl-P did not answer the offer")
+	}
+	if len(session.used) != 1 || session.used[0] != "s1" {
+		t.Fatalf("engine switch calls = %v", session.used)
+	}
+	if state.paidTierFor() != nil {
+		t.Fatal("the offer stands after it was answered")
+	}
+	if state.usePaidTierOffer(renderer) {
+		t.Fatal("a second Ctrl-P found an offer to answer")
+	}
+}
+
+func TestPaidTierCtrlPReportsARefusedSwitch(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	session := &paidTierSession{fakeSession: &fakeSession{}, useErr: turn.ErrPaidTierNoOffer}
+	state := &streamState{sessionID: "s1", session: session}
+	handlePaidTierNotification(renderer, state, paidTierMsg(time.Now().Add(time.Hour)))
+
+	if !state.usePaidTierOffer(renderer) {
+		t.Fatal("Ctrl-P found no offer to answer")
+	}
+	if got := statusLines(renderer); !strings.Contains(got, "Could not switch to the paid model") {
+		t.Fatalf("transcript = %q, want the failure said", got)
+	}
+}
+
+func TestPaidTierEscapeDismissesThroughTheEngine(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	session := &paidTierSession{fakeSession: &fakeSession{}}
+	state := &streamState{sessionID: "s1", session: session}
+	handlePaidTierNotification(renderer, state, paidTierMsg(time.Now().Add(time.Hour)))
+
+	if !state.dismissPaidTierOffer(renderer) {
+		t.Fatal("Esc reported no offer to dismiss")
+	}
+	if len(session.dismissed) != 1 || session.dismissed[0] != "s1" {
+		t.Fatalf("engine dismiss calls = %v", session.dismissed)
+	}
+	if state.paidTierFor() != nil {
+		t.Fatal("the dismissed offer is still on the table")
+	}
+	if state.dismissPaidTierOffer(renderer) {
+		t.Fatal("a second Esc found an offer to dismiss")
+	}
+}
+
+// TestPaidTierTypingLeavesTheOffer is the difference from auto-continue: typing
+// cancels a wait (the reader is taking the conversation somewhere themselves) and
+// must not answer a price.
+func TestPaidTierTypingLeavesTheOffer(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	session := &paidTierSession{fakeSession: &fakeSession{}}
+	state := &streamState{sessionID: "s1", session: session}
+	handlePaidTierNotification(renderer, state, paidTierMsg(time.Now().Add(time.Hour)))
+
+	// What the loop does on every keystroke with a non-empty draft.
+	state.cancelAutoContinue(renderer)
+	if state.paidTierFor() == nil {
+		t.Fatal("typing dismissed the offer: reading the conversation is not an answer")
+	}
+}
+
+// TestPaidTierResendReachesTheComposer pins the resend path: the engine fires it
+// through the continuation port, which carries no wait of its own.
+func TestPaidTierResendReachesTheComposer(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	state := &streamState{sessionID: "s1", session: &paidTierSession{fakeSession: &fakeSession{}}}
+	handlePaidTierNotification(renderer, state, paidTierMsg(time.Now().Add(time.Hour)))
+
+	handleAutoContinueNotification(renderer, state, AutoContinueDueMsg{SessionID: "s1", Prompt: turn.AutoContinuePrompt})
+	if !state.autoContinueWake() {
+		t.Fatal("the resent turn must wake the idle loop")
+	}
+	sub, ok := state.takeAutoContinueDue()
+	if !ok || sub.DisplayText != turn.AutoContinuePrompt {
+		t.Fatalf("submission = %+v, ok %v", sub, ok)
+	}
+	if state.paidTierFor() != nil {
+		t.Fatal("the offer stands after the turn was resent")
+	}
+}

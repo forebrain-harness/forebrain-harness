@@ -4947,6 +4947,31 @@ export const forebrainApi = {
     return api.delete<{ cancelled: boolean }>('/auto-continue', { params }).then((res) => res.data)
   },
 
+  /**
+   * Answers a spent free tier's paid-tier offer: `use` records the choice and
+   * resends the refused turn, `dismiss` drops the offer without spending the
+   * paid rate. The offer is the runtime's, so this is the same answer the
+   * terminal's key press gives.
+   */
+  paidTierOffer(sessionId: string, action: 'use' | 'dismiss') {
+    return api
+      .post<{ session_id: string; used?: boolean; dismissed?: boolean; error?: string }>(
+        '/paid-tier-offer',
+        undefined,
+        { params: { session_id: sessionId, action } },
+      )
+      .then((res) => res.data)
+  },
+
+  /** The offer a freshly loaded page should already be showing, if any. */
+  pendingPaidTierOffer(sessionId: string) {
+    return api
+      .get<{ session_id: string; pending: boolean; offer?: unknown }>('/paid-tier-offer', {
+        params: { session_id: sessionId },
+      })
+      .then((res) => res.data)
+  },
+
   /** The peer drawer's payload (plan 200 §3): the messages waiting for this
    *  conversation's person, the files being edited under its directory, and
    *  the agents other processes host — this directory tree first, then the

@@ -334,6 +334,9 @@ func Run(ctx context.Context, opts Options) error {
 		if handleAutoContinueNotification(renderer, &state, m) {
 			return
 		}
+		if handlePaidTierNotification(renderer, &state, m) {
+			return
+		}
 		ev := reducer.Reduce(m)
 		shouldRefreshWorking := false
 		rosterChanged := false
@@ -898,6 +901,14 @@ func Run(ctx context.Context, opts Options) error {
 					continue
 				}
 				if ev.hotkey == hotkeyEscapeInterrupt && renderer.ActiveView() == "" && state.cancelAutoContinue(renderer) {
+					renderComposerWithState(renderer, &state)
+					continue
+				}
+				if ev.hotkey == hotkeyEscapeInterrupt && renderer.ActiveView() == "" && state.dismissPaidTierOffer(renderer) {
+					renderComposerWithState(renderer, &state)
+					continue
+				}
+				if ev.hotkey == hotkeyPaidTierSwitch && renderer.ActiveView() == "" && state.usePaidTierOffer(renderer) {
 					renderComposerWithState(renderer, &state)
 					continue
 				}
@@ -1746,6 +1757,11 @@ type streamState struct {
 	// delivered when its notice arrives, so it has no separate due slot.
 	autoContinue    map[string]*autoContinueView
 	autoContinueDue *ComposerSubmission
+	// paidTier is the offer a spent free tier put in front of the reader (a
+	// model row the product also sells as a paid twin), until they answer it.
+	// It belongs to the conversation's own view: the allowance is the
+	// conversation's, not a subagent's.
+	paidTier *paidTierView
 	// peerDue are the peer messages waiting for a turn of this conversation,
 	// oldest first: the engine wakes the surface once per accepted message, and
 	// each is a turn of its own, so the idle loop runs them the way it runs a

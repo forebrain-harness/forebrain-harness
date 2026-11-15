@@ -72,6 +72,13 @@ const (
 	RunEventAutoContinueScheduled = "auto_continue_scheduled"
 	RunEventAutoContinueStarted   = "auto_continue_started"
 	RunEventAutoContinueCancelled = "auto_continue_cancelled"
+	// RunEventPaidTierOffered announces a choice where the other two announce a
+	// wait: a request the provider refused because a free tier's allowance is
+	// spent, on a product that sells a paid twin of the same model row. The
+	// surface offers the switch; answering it records the choice and resends the
+	// turn through the same continuation port. One event per offer, durable so a
+	// page opened after it draws the same choice.
+	RunEventPaidTierOffered = "paid_tier_offered"
 	// RunEventHeartbeatFired announces a heartbeat starting a turn in its
 	// own conversation, so a page watching the run can draw its prompt.
 	RunEventHeartbeatFired = "heartbeat_fired"
@@ -360,8 +367,27 @@ type AutoContinueCancelledPayload struct {
 	AgentID string `json:"agent_id,omitempty"`
 }
 
-// HeartbeatFiredPayload marks a heartbeat starting a turn in its
-// conversation. Prompt is the message it sent, so a page watching a run it
+// PaidTierOfferedPayload says which pair of models a refusal put in front of the
+// reader: the free tier that ran out, the paid twin the same row is sent as once
+// they agree, and when the free tier returns.
+//
+// ResetAt is absolute and may be empty: the products that sell a paid twin do not
+// all state when the free allowance comes back, and a choice with no reset to
+// expire with cannot be written down (the runtime keeps it for this process).
+type PaidTierOfferedPayload struct {
+	// Provider is the model row's provider.
+	Provider string `json:"provider"`
+	// FreeModel is the row's own model — the tier that ran out.
+	FreeModel string `json:"free_model"`
+	// PaidModel is the twin the row is sent as after the switch.
+	PaidModel string `json:"paid_model"`
+	// DisplayName is the product's name for the pair, what a surface shows.
+	DisplayName string `json:"display_name,omitempty"`
+	// ResetAt is when the free tier returns, RFC 3339, empty when unknown.
+	ResetAt string `json:"reset_at,omitempty"`
+}
+
+// HeartbeatFiredPayload marks a heartbeat starting a turn in its// conversation. Prompt is the message it sent, so a page watching a run it
 // did not start can draw that message as the turn's first row.
 type HeartbeatFiredPayload struct {
 	Prompt string `json:"prompt,omitempty"`

@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
@@ -59,7 +60,12 @@ type Service struct {
 	chatgptModels      ChatGPTModelsSource
 	opencodeModels     OpenCodeModelsSource
 	autoContinue       *autoContinuer
-	firstTokens        FirstTokenStore
+	// paidTier is the choice a spent free tier offers (paid_tier.go): the
+	// sibling of auto-continue, holding the offers waiting for the reader's
+	// answer per conversation.
+	paidTier     *paidTierBoard
+	paidTierOnce sync.Once
+	firstTokens  FirstTokenStore
 	// batchTasks is the engine's view of a batch execution: which task a
 	// conversation is, and the transition that starts it. Nil leaves every
 	// turn on the ordinary path.

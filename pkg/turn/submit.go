@@ -288,6 +288,9 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		// surface, so the terminal and the web schedule, show and cancel the
 		// same continuation.
 		s.autoContinue.turnEnded(ctx, req, runID, err)
+		// A refusal that names a paid twin is not a wait but a choice, and the
+		// same branch is where the reader's answer reaches every surface.
+		s.offerPaidTier(ctx, req, runID, err)
 		return out, err
 	default:
 		s.autoContinue.turnEnded(ctx, req, runID, nil)
@@ -823,17 +826,31 @@ func (a *autoContinuer) tick(key string, id uint64) {
 
 	ctx := context.Background()
 	plan := entry.plan
-	a.publish(ctx, plan, "started", event.RunEventAutoContinueStarted, event.AutoContinueStartedPayload{Attempt: plan.Attempt, Prompt: AutoContinuePrompt, AgentID: plan.AgentKey})
-	if err := a.cfg.Continue(ctx, plan, AutoContinuePrompt); err != nil {
+	if err := a.deliver(ctx, plan, AutoContinuePrompt); err != nil {
 		a.mu.Lock()
 		delete(a.fired, key)
 		a.mu.Unlock()
+	}
+}
+
+// deliver hands one continuation turn to the surface's own port and says so in
+// the lifecycle. It is what the timer does when the wait ends, and what the
+// paid-tier switch does when the reader takes the paid rate: one place, so both
+// resends are the same turn.
+func (a *autoContinuer) deliver(ctx context.Context, plan AutoContinuePlan, prompt string) error {
+	if a == nil || a.cfg.Continue == nil {
+		return ErrAutoContinueUnavailable
+	}
+	a.publish(ctx, plan, "started", event.RunEventAutoContinueStarted, event.AutoContinueStartedPayload{Attempt: plan.Attempt, Prompt: prompt, AgentID: plan.AgentKey})
+	if err := a.cfg.Continue(ctx, plan, prompt); err != nil {
 		payload := event.AutoContinueCancelledPayload{Reason: AutoContinueUnavailable, AgentID: plan.AgentKey}
 		if !errors.Is(err, ErrAutoContinueUnavailable) {
 			payload.Error = err.Error()
 		}
 		a.publish(ctx, plan, "cancelled", event.RunEventAutoContinueCancelled, payload)
+		return err
 	}
+	return nil
 }
 
 func (a *autoContinuer) cancel(ctx context.Context, key, reason string) bool {

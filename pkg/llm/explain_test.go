@@ -297,3 +297,46 @@ func TestExplainDeclinesWhatItCannotImproveOn(t *testing.T) {
 		t.Error("nil is not a failure")
 	}
 }
+
+// TestExplainAllowanceSpentNeedsTheCapClassifier is the guard around the new
+// code: a spent allowance that names when it returns and carries the product's
+// own cap classifier is a choice (spend the paid twin or wait), while prose
+// about a quota with nothing else behind it keeps the classification it had.
+func TestExplainAllowanceSpentNeedsTheCapClassifier(t *testing.T) {
+	now := time.Now()
+	reset := now.Add(4 * time.Hour).Truncate(time.Hour).In(time.FixedZone("UTC+8", 8*3600))
+
+	spent, ok := Explain(&APIError{
+		StatusCode: http.StatusBadRequest,
+		Code:       "6004",
+		Type:       "quota_exhausted",
+		Message:    "免费额度已用尽，可在 " + reset.Format(time.RFC3339) + " 重置",
+	})
+	if !ok || spent.Code != ExplainAllowanceSpent {
+		t.Fatalf("cap refusal = %+v (ok=%v), want %q", spent, ok, ExplainAllowanceSpent)
+	}
+	if !spent.ResetAt.Equal(reset) {
+		t.Fatalf("reset = %s, want %s", spent.ResetAt, reset)
+	}
+
+	// A provider's quota prose with no cap classifier and no reset is billed as
+	// it always was: the new code must not be a second name for the old one.
+	billed, ok := Explain(&APIError{
+		StatusCode: http.StatusPaymentRequired,
+		Type:       "insufficient_quota",
+		Message:    "Your quota is exhausted; add a payment method to continue.",
+	})
+	if !ok || billed.Code != ExplainBilling {
+		t.Fatalf("billing refusal = %+v (ok=%v), want %q", billed, ok, ExplainBilling)
+	}
+
+	// A throttle keeps its own code and its own wait, cap vocabulary or not.
+	throttled, ok := Explain(&APIError{
+		StatusCode: http.StatusTooManyRequests,
+		Err:        errors.New("dump"),
+		RateLimit:  &RateLimit{Quota: true, ResetAt: reset, RetryAfter: time.Until(reset)},
+	})
+	if !ok || throttled.Code != ExplainRateLimitQuota {
+		t.Fatalf("throttle = %+v (ok=%v), want %q", throttled, ok, ExplainRateLimitQuota)
+	}
+}

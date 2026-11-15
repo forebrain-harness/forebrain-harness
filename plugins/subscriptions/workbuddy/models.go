@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
@@ -155,13 +156,99 @@ func effortLevels(m workBuddyModel) []string {
 	return m.Efforts
 }
 
+// ratePair is one pair of ids the product sells at two rates: the free tier its
+// picker lists, and the paid twin a request falls back to once that tier's
+// allowance is spent. It is the product's own declaration
+// (data.productFeaturesConfig.ModelRateLimitCap.lines), which the official
+// client calls ModelRateLimitCap; the shipped copy is shippedRatePairs.
+type ratePair struct {
+	// DisplayName is the product's name for the pair ("Hy4"), the name the paid
+	// twin carries.
+	DisplayName string
+	FreeID      string
+	PaidID      string
+	// AllowPaidSwitch is the product's own flag for the pair: requests may fall
+	// back to PaidID, and a surface offers the switch, only when it is set.
+	AllowPaidSwitch bool
+}
+
+// wireRatePair is one line of the product's rate-limit-cap declaration.
+type wireRatePair struct {
+	AllowPaidSwitch bool   `json:"allowPaidSwitch"`
+	DisplayName     string `json:"displayName"`
+	FreeID          string `json:"freeId"`
+	PaidID          string `json:"paidId"`
+}
+
+// wireRateLimitCap is that declaration: the lines it holds, one per pair.
+type wireRateLimitCap struct {
+	Lines []wireRatePair `json:"lines"`
+}
+
+// ratePairs is the declaration as the plugin reads it: blank lines dropped,
+// every id trimmed.
+func (c wireRateLimitCap) ratePairs() []ratePair {
+	out := make([]ratePair, 0, len(c.Lines))
+	for _, line := range c.Lines {
+		free, paid := strings.TrimSpace(line.FreeID), strings.TrimSpace(line.PaidID)
+		if free == "" || paid == "" {
+			continue
+		}
+		out = append(out, ratePair{
+			DisplayName:     strings.TrimSpace(line.DisplayName),
+			FreeID:          free,
+			PaidID:          paid,
+			AllowPaidSwitch: line.AllowPaidSwitch,
+		})
+	}
+	return out
+}
+
+// freeTierName is the display name a free tier's row carries: the product's own
+// name with " Free" behind it, so the free and the paid row of one pair read
+// differently on a surface with no credits column (the official picker tells
+// them apart by the credits beside the name; ours has no such column). It is
+// idempotent: a name that already says so is left alone.
+func freeTierName(displayName string) string {
+	name := strings.TrimSpace(displayName)
+	if name == "" || strings.HasSuffix(name, " Free") {
+		return name
+	}
+	return name + " Free"
+}
+
+// catalog is one resolution of the account's model listing: the rows, the pairs
+// the product declared for them, and the login it was read for.
+type catalog struct {
+	records []workBuddyModel
+	pairs   []ratePair
+	// account is the login the listing was read with. signedIn is false when
+	// there was none (or it was dead), in which case the shipped table is what
+	// answered.
+	account  Credentials
+	signedIn bool
+	// fromStatic says no live listing answered.
+	fromStatic bool
+}
+
 // FetchModels resolves the account's catalog: the account's own live listing
 // first (already narrowed to its conversation agent), the enterprise listing on
 // top of it for an enterprise account, and the shipped table for what a live
-// entry leaves out. fromStatic says no live listing answered — the shipped
-// table is what the surface is showing, so the model page can point at the
-// console as the authority.
-func FetchModels(ctx context.Context, db *sql.DB, home string) (records []workBuddyModel, fromStatic bool) {
+// entry leaves out. It also answers the product's free/paid pairs, which the
+// offers collapse and the transport switches on. fromStatic says no live
+// listing answered — the shipped table is what the surface is showing, so the
+// model page can point at the console as the authority.
+func FetchModels(ctx context.Context, db *sql.DB, home string) (records []workBuddyModel, pairs []ratePair, fromStatic bool) {
+	resolved := fetchCatalog(ctx, db, home)
+	return resolved.records, resolved.pairs, resolved.fromStatic
+}
+
+// fetchCatalog is FetchModels with the login it resolved, which the offers need
+// to decide whether the account is inside the product's paid line.
+//
+// The published ids and pairs are remembered for the transport, which resolves
+// every request against them: a send carries no listing of its own.
+func fetchCatalog(ctx context.Context, db *sql.DB, home string) catalog {
 	shipped := staticWorkBuddyModels()
 	byID := make(map[string]workBuddyModel, len(shipped))
 	for _, m := range shipped {
@@ -172,11 +259,16 @@ func FetchModels(ctx context.Context, db *sql.DB, home string) (records []workBu
 	if err != nil {
 		// Not signed in (or a dead login) is not an error here: the shipped
 		// table is what an account with no live listing gets.
-		return chatModels(shipped), true
+		out := catalog{records: chatModels(shipped), pairs: shippedRatePairs(), fromStatic: true}
+		rememberCatalog(modelIDs(out.records), out.pairs)
+		return out
 	}
-	live, err := fetchAccountModels(ctx, creds)
+	creds = ensureAccountType(ctx, db, home, creds)
+	live, declared, err := fetchAccountModels(ctx, creds)
 	if err != nil || len(live) == 0 {
-		return chatModels(shipped), true
+		out := catalog{records: chatModels(shipped), pairs: shippedRatePairs(), account: creds, signedIn: true, fromStatic: true}
+		rememberCatalog(modelIDs(out.records), out.pairs)
+		return out
 	}
 	if strings.TrimSpace(creds.EnterpriseID) != "" {
 		// The enterprise listing is an addition, never a precondition: a
@@ -187,7 +279,7 @@ func FetchModels(ctx context.Context, db *sql.DB, home string) (records []workBu
 		}
 	}
 
-	records = make([]workBuddyModel, 0, len(live))
+	records := make([]workBuddyModel, 0, len(live))
 	for _, entry := range live {
 		shippedRow, known := byID[strings.TrimSpace(entry.ID)]
 		if !keepLiveModel(entry, shippedRow, known) {
@@ -196,9 +288,55 @@ func FetchModels(ctx context.Context, db *sql.DB, home string) (records []workBu
 		records = append(records, mergeLiveModel(entry, shippedRow, known))
 	}
 	if len(records) == 0 {
-		return chatModels(shipped), true
+		out := catalog{records: chatModels(shipped), pairs: shippedRatePairs(), account: creds, signedIn: true, fromStatic: true}
+		rememberCatalog(modelIDs(out.records), out.pairs)
+		return out
 	}
-	return records, false
+	// A listing that names no declaration gets the shipped one (the client's own
+	// fallback), but it does NOT rename the rows it named: only the product's
+	// live declaration says which two ids are one pair, and a name is not
+	// guessed from an id.
+	if len(declared) == 0 {
+		out := catalog{records: records, pairs: shippedRatePairs(), account: creds, signedIn: true}
+		rememberCatalog(modelIDs(out.records), out.pairs)
+		return out
+	}
+	for i, pair := range declared {
+		declared[i].DisplayName = strings.TrimSpace(pair.DisplayName)
+	}
+	records = nameFreeTiers(records, declared)
+	out := catalog{records: records, pairs: declared, account: creds, signedIn: true}
+	rememberCatalog(modelIDs(out.records), out.pairs)
+	return out
+}
+
+// nameFreeTiers spells the free row of each declared pair as the product's name
+// with " Free" behind it. Every other row keeps the name its source gave it.
+func nameFreeTiers(records []workBuddyModel, pairs []ratePair) []workBuddyModel {
+	free := make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		if name := freeTierName(pair.DisplayName); name != "" {
+			free[pair.FreeID] = name
+		}
+	}
+	if len(free) == 0 {
+		return records
+	}
+	for i, record := range records {
+		if name, ok := free[record.ID]; ok {
+			records[i].Name = name
+		}
+	}
+	return records
+}
+
+// modelIDs is the id set of a resolved catalog.
+func modelIDs(records []workBuddyModel) []string {
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		ids = append(ids, record.ID)
+	}
+	return ids
 }
 
 // keepLiveModel reports whether one live entry is a conversation choice. The
@@ -333,27 +471,35 @@ func surfaceAgent(agents []wireAgent) (wireAgent, bool) {
 }
 
 // fetchAccountModels asks for the account's own listing: the product config,
-// whose models hang under data.models and whose conversation agent lists the
-// picker's subset under data.agents.
-func fetchAccountModels(ctx context.Context, creds Credentials) ([]wireModel, error) {
+// whose models hang under data.models, whose conversation agent lists the
+// picker's subset under data.agents, and whose free/paid pairs are declared
+// under data.productFeaturesConfig.ModelRateLimitCap.
+func fetchAccountModels(ctx context.Context, creds Credentials) ([]wireModel, []ratePair, error) {
 	body, err := listingJSON(ctx, creds, "/v3/config")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var answer struct {
 		Data struct {
-			Models json.RawMessage `json:"models"`
-			Agents []wireAgent     `json:"agents"`
+			Models   json.RawMessage `json:"models"`
+			Agents   []wireAgent     `json:"agents"`
+			Features *struct {
+				ModelRateLimitCap wireRateLimitCap `json:"ModelRateLimitCap"`
+			} `json:"productFeaturesConfig"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &answer); err != nil {
-		return nil, fmt.Errorf("workbuddy: product config answer: %w", err)
+		return nil, nil, fmt.Errorf("workbuddy: product config answer: %w", err)
 	}
 	catalog, err := decodeModels(answer.Data.Models)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return narrowToSurface(catalog, answer.Data.Agents), nil
+	var declared []ratePair
+	if answer.Data.Features != nil {
+		declared = answer.Data.Features.ModelRateLimitCap.ratePairs()
+	}
+	return narrowToSurface(catalog, answer.Data.Agents), declared, nil
 }
 
 // fetchEnterpriseModels asks for the enterprise's listing, whose array hangs
@@ -472,6 +618,109 @@ func thinkingLevels(record workBuddyModel) []string {
 		return append([]string{"none"}, levels...)
 	}
 	return levels
+}
+
+// shippedIDs is the id set of the shipped table.
+func shippedIDs() map[string]bool {
+	rows := staticWorkBuddyModels()
+	ids := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		ids[row.ID] = true
+	}
+	return ids
+}
+
+// knownCatalog is what a send is resolved against: the ids the last listing
+// carried and the pairs the product declared for them. The client asks the same
+// two questions of its own catalog (catalogHasPaid, modelLines); here they are
+// remembered once per listing rather than read on every request, because a send
+// carries no listing of its own. Until the first listing answers, the shipped
+// declaration stands — the same fallback the client ships.
+var knownCatalog struct {
+	mu    sync.RWMutex
+	ids   map[string]bool
+	pairs []ratePair
+	ready bool
+}
+
+// rememberCatalog records what a resolved catalog published. No ids and no
+// pairs restore the shipped declaration.
+func rememberCatalog(ids []string, pairs []ratePair) {
+	published := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			published[id] = true
+		}
+	}
+	if len(published) == 0 && len(pairs) == 0 {
+		published, pairs = shippedIDs(), shippedRatePairs()
+	}
+	knownCatalog.mu.Lock()
+	knownCatalog.ids, knownCatalog.pairs, knownCatalog.ready = published, pairs, true
+	knownCatalog.mu.Unlock()
+}
+
+// catalogSnapshot answers the published ids and pairs, filling in the shipped
+// declaration the first time it is asked.
+func catalogSnapshot() (map[string]bool, []ratePair) {
+	knownCatalog.mu.RLock()
+	ids, pairs, ready := knownCatalog.ids, knownCatalog.pairs, knownCatalog.ready
+	knownCatalog.mu.RUnlock()
+	if ready {
+		return ids, pairs
+	}
+	knownCatalog.mu.Lock()
+	if !knownCatalog.ready {
+		knownCatalog.ids, knownCatalog.pairs, knownCatalog.ready = shippedIDs(), shippedRatePairs(), true
+	}
+	ids, pairs = knownCatalog.ids, knownCatalog.pairs
+	knownCatalog.mu.Unlock()
+	return ids, pairs
+}
+
+// catalogHasModel reports whether the published catalog carries id.
+func catalogHasModel(id string) bool {
+	ids, _ := catalogSnapshot()
+	return ids[strings.TrimSpace(id)]
+}
+
+// pairForFree answers the declared pair a free id belongs to.
+func pairForFree(id string) (ratePair, bool) {
+	_, pairs := catalogSnapshot()
+	id = strings.TrimSpace(id)
+	for _, pair := range pairs {
+		if pair.FreeID == id {
+			return pair, true
+		}
+	}
+	return ratePair{}, false
+}
+
+// pairForPaid answers the declared pair a paid id belongs to.
+func pairForPaid(id string) (ratePair, bool) {
+	_, pairs := catalogSnapshot()
+	id = strings.TrimSpace(id)
+	for _, pair := range pairs {
+		if pair.PaidID == id {
+			return pair, true
+		}
+	}
+	return ratePair{}, false
+}
+
+// paidLineEligible reports whether the account is inside the product's paid
+// line, which is what collapses a pair into one row. It is the client's
+// isEligiblePaidLineUser minus its denyList — that list is a constant inside the
+// client with no public source, so only the account type decides here (§3.1).
+// An account whose type is unknown reads as outside: both rows show, named
+// apart, which is the safe half (nothing is hidden from a reader we cannot
+// place).
+func paidLineEligible(creds Credentials) bool {
+	switch strings.ToLower(strings.TrimSpace(creds.AccountType)) {
+	case "personal", "pro":
+		return true
+	}
+	return false
 }
 
 // installBuiltinModels publishes records as the workbuddy capability rows: the

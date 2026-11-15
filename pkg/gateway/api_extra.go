@@ -385,6 +385,8 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 
 	api.Get("/auto-continue", s.handleAutoContinue)
 	api.Delete("/auto-continue", s.handleAutoContinue)
+	api.Get("/paid-tier-offer", s.handlePaidTierOffer)
+	api.Post("/paid-tier-offer", s.handlePaidTierOffer)
 
 	// The agents other processes on this machine host, and the answers to a
 	// held peer message (plan 200 §3). The drawer reads the first; the banner's

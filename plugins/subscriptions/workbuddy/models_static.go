@@ -6,7 +6,7 @@ var __boolTrue, __boolFalse = true, false
 func staticWorkBuddyModels() []workBuddyModel {
 	return []workBuddyModel{
 		{
-			ID: "hy4free", Name: "Hy4",
+			ID: "hy4free", Name: "Hy4 Free",
 			MaxInputTokens: 960000, MaxOutputTokens: 64000,
 			SupportsToolCall: true, SupportsImages: true,
 			IsDefault:          false,
@@ -24,7 +24,7 @@ func staticWorkBuddyModels() []workBuddyModel {
 			CanDisableThinking: &__boolFalse,
 		},
 		{
-			ID: "hy3", Name: "Hy3",
+			ID: "hy3", Name: "Hy3 Free",
 			MaxInputTokens: 192000, MaxOutputTokens: 64000,
 			SupportsToolCall: true, SupportsImages: true,
 			IsDefault:          false,
@@ -149,5 +149,16 @@ func staticWorkBuddyModels() []workBuddyModel {
 			DefaultEffort:      "",
 			CanDisableThinking: nil,
 		},
+	}
+}
+
+// shippedRatePairs is the product's free/paid declaration as the shipped
+// fallback records it (the client's own ModelRateLimitCap fallback): the pairs a
+// listing that names none still leaves a surface to collapse and the transport
+// to switch.
+func shippedRatePairs() []ratePair {
+	return []ratePair{
+		{DisplayName: "Hy3", FreeID: "hy3", PaidID: "hy3-x", AllowPaidSwitch: true},
+		{DisplayName: "Hy4", FreeID: "hy4free", PaidID: "hy4std", AllowPaidSwitch: true},
 	}
 }

@@ -71,11 +71,19 @@ type Offer struct {
 	// Name is the vendor's display name for Model, when its listing carries
 	// one: a surface shows it in place of the wire id, and "" falls back to
 	// Model.
-	Name           string
-	BaseURL        string
-	APIPath        string
-	ContextWindow  int64
-	SupportsImages bool
+	Name string
+	// PaidModel is the paid twin of a model the product sells at two rates (a
+	// free tier and its paid twin): "" for a plain model. A surface shows the
+	// pair as one row and never provisions PaidModel — requests reach it only
+	// through the cap switch (PaidModel + AllowPaidSwitch).
+	PaidModel string
+	// AllowPaidSwitch is the product's own flag for that pair: requests may
+	// fall back to PaidModel once the free tier's allowance is spent.
+	AllowPaidSwitch bool
+	BaseURL         string
+	APIPath         string
+	ContextWindow   int64
+	SupportsImages  bool
 	// ImagesUndeclared marks an offer whose listing said nothing about image
 	// input: the row must not answer for it — the catalog answers, and the
 	// image gate fails open on a model nobody characterized. Zero value keeps

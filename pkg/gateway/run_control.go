@@ -1897,6 +1897,102 @@ func (s *Server) handleAutoContinue(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Paid tier on the web: a turn the provider refused because a free tier's
+// allowance is spent, on a model row the product also sells as a paid twin. The
+// reader either spends the paid rate (the engine records the choice and resends
+// the turn through its continuation port) or dismisses the offer. The page answers
+// over REST, and over the socket when its connection is the only thing open.
+
+// The client ops that answer a paid-tier offer, and the one reply they share.
+const (
+	wsOpUsePaidTier     = "use_paid_tier"
+	wsOpDismissPaidTier = "dismiss_paid_tier_offer"
+	wsOpPaidTierAck     = "paid_tier_ack"
+)
+
+// handlePaidTierMessage answers one of those ops. It is answered by the socket's
+// reader, like an approval, so it takes effect even while the connection's loop is
+// busy.
+func (s *Server) handlePaidTierMessage(ctx context.Context, m wsClientMsg) wsServerMsg {
+	sid := strings.TrimSpace(m.SessionID)
+	reply := wsServerMsg{Op: wsOpPaidTierAck, RequestID: m.RequestID, SessionID: sid}
+	if sid == "" {
+		reply.Error = "session_id required for op: " + m.Op
+		return reply
+	}
+	if owned, err := s.sessionOwned(ctx, sid); err != nil || !owned {
+		reply.Error = "unknown session"
+		return reply
+	}
+	if s.Core == nil {
+		reply.Error = turn.ErrPaidTierNoOffer.Error()
+		return reply
+	}
+	switch m.Op {
+	case wsOpUsePaidTier:
+		if err := s.Core.UsePaidTier(ctx, sid); err != nil {
+			reply.Error = err.Error()
+		}
+	case wsOpDismissPaidTier:
+		if !s.Core.DismissPaidTierOffer(sid) {
+			reply.Error = turn.ErrPaidTierNoOffer.Error()
+		}
+	}
+	return reply
+}
+
+// handlePaidTierOffer is the REST face of the choice: GET says whether an offer is
+// waiting, POST answers it (?action=use|dismiss). The query carries the action the
+// same way the auto-continue route carries its own parameters, so a page that
+// reconnects can answer without a body.
+func (s *Server) handlePaidTierOffer(w http.ResponseWriter, r *http.Request) {
+	sid := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sid == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out := map[string]any{"session_id": sid, "pending": false}
+		if s.Core != nil {
+			if offer, ok := s.Core.PaidTierOffer(sid); ok {
+				out["pending"] = true
+				out["offer"] = offer.Payload()
+			}
+		}
+		writeAgentsJSON(w, out)
+	case http.MethodPost:
+		if s.Core == nil {
+			writeJSONStatus(w, http.StatusConflict, map[string]any{"error": turn.ErrPaidTierNoOffer.Error()})
+			return
+		}
+		switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("action"))) {
+		case "use":
+			if err := s.Core.UsePaidTier(r.Context(), sid); err != nil {
+				writeJSONStatus(w, http.StatusConflict, map[string]any{"error": err.Error()})
+				return
+			}
+			writeAgentsJSON(w, map[string]any{"session_id": sid, "used": true})
+		case "dismiss":
+			dismissed := s.Core.DismissPaidTierOffer(sid)
+			writeAgentsJSON(w, map[string]any{"session_id": sid, "dismissed": dismissed})
+		default:
+			http.Error(w, "action must be use or dismiss", http.StatusBadRequest)
+		}
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
 // nativeMediaFor answers what the web turn's model takes directly: the same
 // question the terminal asks its runner, asked for a surface that has already
 // resolved the conversation it is about. A nil runner has no model to ask, and

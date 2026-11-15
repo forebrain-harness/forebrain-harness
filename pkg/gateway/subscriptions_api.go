@@ -71,7 +71,15 @@ type subscriptionOffer struct {
 	Endpoint       string `json:"endpoint"`
 	ContextWindow  int64  `json:"context_window,omitempty"`
 	SupportsImages bool   `json:"supports_images"`
-	Default        bool   `json:"default"`
+	// PaidModel is the paid twin of a model the product sells at two rates
+	// (workbuddy's Hy4/Hy3): the page shows the pair as one row, so this is
+	// what tells it the row has a second rate behind the same name.
+	PaidModel string `json:"paid_model,omitempty"`
+	// AllowPaidSwitch is the product's own flag for that pair: requests may
+	// fall back to PaidModel once the free tier's allowance is spent, and the
+	// page may offer the switch.
+	AllowPaidSwitch bool `json:"allow_paid_switch,omitempty"`
+	Default         bool `json:"default"`
 	// Held marks a model this install already holds as a row, so the page opens
 	// on the truth instead of on the vendor's own first row. The terminal's
 	// models page asks the same question through the same rule
@@ -186,20 +194,22 @@ func (s *Server) handleSubscriptionOffers(w http.ResponseWriter, r *http.Request
 			}
 		}
 		out = append(out, subscriptionOffer{
-			Plan:           offer.Plan,
-			PlanName:       offer.PlanLabel,
-			Provider:       offer.Provider,
-			Model:          offer.Model,
-			Name:           offer.Name,
-			BaseURL:        offer.BaseURL,
-			APIPath:        offer.APIPath,
-			Endpoint:       turn.ModelEndpointLabel(offer.BaseURL, offer.APIPath, false),
-			ContextWindow:  offer.ContextWindow,
-			SupportsImages: offer.SupportsImages,
-			Default:        offer.Default,
-			Held:           held,
-			NeedsKey:       offer.KeyRequired,
-			FromStaticList: offer.FromStaticList,
+			Plan:            offer.Plan,
+			PlanName:        offer.PlanLabel,
+			Provider:        offer.Provider,
+			Model:           offer.Model,
+			Name:            offer.Name,
+			BaseURL:         offer.BaseURL,
+			APIPath:         offer.APIPath,
+			Endpoint:        turn.ModelEndpointLabel(offer.BaseURL, offer.APIPath, false),
+			ContextWindow:   offer.ContextWindow,
+			SupportsImages:  offer.SupportsImages,
+			PaidModel:       offer.PaidModel,
+			AllowPaidSwitch: offer.AllowPaidSwitch,
+			Default:         offer.Default,
+			Held:            held,
+			NeedsKey:        offer.KeyRequired,
+			FromStaticList:  offer.FromStaticList,
 		})
 	}
 	writeJSON(w, out)

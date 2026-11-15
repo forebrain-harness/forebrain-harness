@@ -76,6 +76,10 @@ const (
 	// hotkeyCopySelection is Ctrl+C pressed while text is selected: it copies
 	// the selection instead of clearing the draft or interrupting.
 	hotkeyCopySelection inputHotkey = "copy_selection"
+	// hotkeyPaidTierSwitch is Ctrl+P: it takes the paid rate of the model row a
+	// spent free tier stopped, and resends that turn. A non-text key on purpose —
+	// a bare "p" would race the composer.
+	hotkeyPaidTierSwitch inputHotkey = "paid_tier_switch"
 )
 
 // slashOverlayActive gates whether arrow keys route to slash-overlay nav

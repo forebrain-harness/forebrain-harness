@@ -10,11 +10,14 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -52,7 +55,9 @@ func (t *Transport) roundTripper() http.RoundTripper {
 }
 
 // RoundTrip re-sends the request the client built to the product endpoint,
-// wearing the official client's headers; the body is the client's, unchanged.
+// wearing the official client's headers; the body is the client's, unchanged —
+// except for the one field that says which id the request is for, when the free
+// tier's allowance is spent and this account chose its paid twin.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	body, err := readRequestBody(req)
 	if err != nil {
@@ -60,7 +65,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	model := modelIDFromBody(body)
 
-	resp, err := t.send(req, body, model)
+	resp, creds, sent, err := t.send(req, body, model)
 	if err != nil {
 		return nil, err
 	}
@@ -70,28 +75,31 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// the surface can say the login is gone.
 		resp.Body.Close()
 		if _, refreshErr := ForceRefreshCredentials(req.Context(), t.DB, t.Home); refreshErr == nil {
-			resp, err = t.send(req, body, model)
+			resp, creds, sent, err = t.send(req, body, model)
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
-	return resp, nil
+	return t.classifyCap(creds, sent, resp), nil
 }
 
-// send signs and performs one model request.
-func (t *Transport) send(original *http.Request, body []byte, model string) (*http.Response, error) {
+// send signs and performs one model request. It answers the credential it was
+// signed with and the id it was actually sent as, which the caller needs to read
+// the answer.
+func (t *Transport) send(original *http.Request, body []byte, model string) (*http.Response, Credentials, string, error) {
 	creds, err := EnsureFreshCredentials(original.Context(), t.DB, t.Home)
 	if err != nil {
-		return nil, err
+		return nil, Credentials{}, "", err
 	}
+	model, body = t.effectiveModel(creds, body, model)
 	target, err := requestURL(workBuddyBaseURL, chatCompletionsPath)
 	if err != nil {
-		return nil, err
+		return nil, Credentials{}, "", err
 	}
 	out, err := http.NewRequestWithContext(original.Context(), http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, Credentials{}, "", err
 	}
 	out.Header = disguiseHeaders(creds, model)
 	// The client's own answer format requests travel with it: Accept selects the
@@ -103,7 +111,181 @@ func (t *Transport) send(original *http.Request, body []byte, model string) (*ht
 		out.Header.Set("Content-Type", contentType)
 	}
 	out.ContentLength = int64(len(body))
-	return t.roundTripper().RoundTrip(out)
+	resp, err := t.roundTripper().RoundTrip(out)
+	if err != nil {
+		return nil, Credentials{}, "", err
+	}
+	return resp, creds, model, nil
+}
+
+// effectiveModel answers the id one request is sent as. A model that is the free
+// tier of a declared pair — whose product flag allows the switch, and whose paid
+// twin this catalog carries — is sent as the paid id while this account has
+// opted into it; every other request keeps the id the row names. It is the
+// client's resolvePaidLineRuntimeId without its reverse direction: a paid id is
+// never a row of this plugin's picker (Offers collapses the pair), so there is
+// no window to reopen and no code for it here.
+func (t *Transport) effectiveModel(creds Credentials, body []byte, model string) (string, []byte) {
+	pair, ok := pairForFree(model)
+	if !ok || !pair.AllowPaidSwitch || !catalogHasModel(pair.PaidID) {
+		return model, body
+	}
+	if !paidSwitchActive(t.Home, creds, pair.FreeID) {
+		return model, body
+	}
+	rewritten, err := replaceBodyModel(body, pair.PaidID)
+	if err != nil {
+		return model, body
+	}
+	return pair.PaidID, rewritten
+}
+
+// replaceBodyModel swaps one Chat Completions document's "model" for id. Every
+// other member is carried as the bytes it arrived as, so nothing else about the
+// request is re-encoded.
+func replaceBodyModel(body []byte, id string) ([]byte, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	if _, ok := payload["model"]; !ok {
+		return nil, errors.New("workbuddy: the request body names no model")
+	}
+	encoded, err := json.Marshal(id)
+	if err != nil {
+		return nil, err
+	}
+	payload["model"] = encoded
+	return json.Marshal(payload)
+}
+
+// maxErrorBody caps how much of a refused answer the transport reads to classify
+// it. The envelope is a few hundred bytes; a body past this is not one this
+// plugin can read, and it is passed through untouched rather than buffered.
+const maxErrorBody = 64 << 10
+
+// capCode is the product's own code for "this tier's allowance is spent": the
+// CLI's CraftRateTPDLimit, and what the official client's
+// isConversationRateLimitCapError looks for on a failed model request.
+const capCode = 6004
+
+// classifyCap reads a refused model request for that code and, when the request
+// was for a free tier whose paid twin may be switched, records the spent window
+// and hands the layers above an OpenAI-shaped error they can classify.
+//
+// The gate follows the envelope Step 0b recorded: the product refuses with a 4xx
+// whose body is JSON ({"code":6004,"msg":"…"}). A 2xx answer and a 2xx SSE stream
+// pass through unread — the stream would break, and a successful document can be
+// large. Anything else is passed through with its bytes intact.
+func (t *Transport) classifyCap(creds Credentials, sentModel string, resp *http.Response) *http.Response {
+	if resp == nil || resp.Body == nil {
+		return resp
+	}
+	if resp.StatusCode < http.StatusBadRequest || resp.StatusCode >= http.StatusInternalServerError {
+		return resp
+	}
+	if contentType := strings.ToLower(resp.Header.Get("Content-Type")); !strings.HasPrefix(contentType, "application/json") {
+		return resp
+	}
+	head, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	rest := resp.Body
+	resp.Body = replayBody{Reader: io.MultiReader(bytes.NewReader(head), rest), Closer: rest}
+	if err != nil {
+		return resp
+	}
+	refusal, ok := readCapRefusal(head)
+	if !ok {
+		return resp
+	}
+	pair, ok := pairForFree(sentModel)
+	if !ok || pair.FreeID != sentModel || !pair.AllowPaidSwitch {
+		return resp
+	}
+	reset, stamp := parseCapResetAt(refusal.prose)
+	recordCapHit(t.Home, creds, pair.FreeID, reset)
+	text := refusal.prose
+	if !reset.IsZero() && stamp != "" {
+		// The product's sentence with its own stamp, spelled with the zone it is
+		// written in: the same instant, unambiguous to every layer above.
+		text = strings.Replace(text, stamp, reset.Format(time.RFC3339), 1)
+	}
+	rewritten, err := json.Marshal(map[string]any{
+		"error": map[string]string{
+			"message": text,
+			"type":    "quota_exhausted",
+			"code":    strconv.Itoa(capCode),
+		},
+	})
+	if err != nil {
+		return resp
+	}
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(rewritten))
+	resp.ContentLength = int64(len(rewritten))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(rewritten)))
+	return resp
+}
+
+// replayBody puts a read-ahead body back together: the bytes already read, then
+// the rest of the original stream, closed with the original body.
+type replayBody struct {
+	io.Reader
+	io.Closer
+}
+
+// capRefusal is one refusal read out of the product's envelope.
+type capRefusal struct {
+	code  int64
+	prose string
+}
+
+// capErrorBody is that envelope as Step 0b recorded it — the family whose
+// unknown-model answer is {"code":11102,"msg":"model […] service info not
+// found","requestId":…,"retry_policy":{…}} — plus the OpenAI-shaped spelling a
+// gateway in front of it may use.
+type capErrorBody struct {
+	Code  json.Number `json:"code"`
+	Msg   string      `json:"msg"`
+	Error *struct {
+		Code    json.Number `json:"code"`
+		Message string      `json:"message"`
+		Data    *struct {
+			Code json.Number `json:"code"`
+		} `json:"data"`
+	} `json:"error"`
+}
+
+// readCapRefusal answers the business code and the prose of one response body.
+// The code is read in the client's own order (parseResponseBodyObject then
+// extractRateLimitBizCode): error.data.code, then error.code, then the body's
+// own code.
+func readCapRefusal(body []byte) (capRefusal, bool) {
+	var envelope capErrorBody
+	if err := json.Unmarshal(bytes.TrimSpace(body), &envelope); err != nil {
+		return capRefusal{}, false
+	}
+	refusal := capRefusal{prose: strings.TrimSpace(envelope.Msg)}
+	if envelope.Error != nil {
+		if refusal.prose == "" {
+			refusal.prose = strings.TrimSpace(envelope.Error.Message)
+		}
+		if envelope.Error.Data != nil {
+			if code, err := envelope.Error.Data.Code.Int64(); err == nil {
+				refusal.code = code
+				return refusal, true
+			}
+		}
+		if code, err := envelope.Error.Code.Int64(); err == nil {
+			refusal.code = code
+			return refusal, true
+		}
+	}
+	code, err := envelope.Code.Int64()
+	if err != nil {
+		return capRefusal{}, false
+	}
+	refusal.code = code
+	return refusal, true
 }
 
 // requestURL is where one request goes: always the product endpoint, whatever

@@ -509,6 +509,9 @@
               <AlertDescription class="whitespace-pre-line">{{ composerNoticeDetail }}</AlertDescription>
             </Alert>
             <AutoContinueBanner :state="autoContinueForView('')" @cancel="cancelAutoContinue('')" />
+            <!-- A spent free tier whose row the product also sells at a paid
+                 rate: the same two answers the terminal offers. -->
+            <PaidTierBanner :offer="paidTierOffer" @use="usePaidTier" @dismiss="dismissPaidTierOffer" />
             <!-- A peer message waiting for the person (plan 200 §3): the one
                  thing above the composer that is a question rather than a
                  notice, so it is framed like an approval. -->
@@ -898,6 +901,7 @@ import ArtifactPreview from '@/components/chat/ArtifactPreview.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
 import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
+import PaidTierBanner from '@/components/chat/PaidTierBanner.vue'
 import LspRecommendationCard from '@/components/chat/LspRecommendationCard.vue'
 import DiffView from '@/components/DiffView.vue'
 import CompactionCard from '@/components/chat/CompactionCard.vue'
@@ -1662,6 +1666,9 @@ const {
   mcpStatus,
   autoContinueForView,
   cancelAutoContinue,
+  paidTierOffer,
+  usePaidTier,
+  dismissPaidTierOffer,
   heldPeers,
   peerDirectory,
   peerDirectoryPage,

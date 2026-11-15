@@ -8,6 +8,8 @@ package workbuddy
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,14 +74,20 @@ func init() {
 }
 
 // newWorkBuddyLLM is the factory the run configuration calls for a workbuddy
-// model row: a Chat Completions client whose transport is the disguise.
+// model row: a Chat Completions client whose transport is the disguise, wrapped
+// so a spent free tier reaches the runtime as the choice it is.
 func newWorkBuddyLLM(req llm.ProviderLLMRequest) (llm.LLM, error) {
 	// The endpoint is the login's, not the row's: the transport owns it.
 	root, err := home.Root()
 	if err != nil {
 		return nil, err
 	}
-	return openai.NewCompatLLMWithTransport(
+	// The reader's answer to the switch is written into this plugin's own record,
+	// which the transport reads before every send. It is registered here rather
+	// than in init() because it needs the home the rest of the plugin runs
+	// against, and a factory is the first place one exists.
+	llm.RegisterPaidTier("workbuddy", workBuddyPaidTier{home: root})
+	inner := openai.NewCompatLLMWithTransport(
 		"",                     // the login is the credential
 		workBuddyBaseURL+"/v2", // rewritten by the transport anyway
 		req.Model,
@@ -88,7 +96,68 @@ func newWorkBuddyLLM(req llm.ProviderLLMRequest) (llm.LLM, error) {
 		"",
 		req.ParamsJSON,
 		&Transport{Home: root},
-	), nil
+	)
+	return &paidTierLLM{inner: inner, model: strings.TrimSpace(req.Model)}, nil
+}
+
+// paidTierLLM names the one failure a reader can answer: the transport has
+// already recognized a spent free tier and rewritten it into an OpenAI-shaped
+// error, and this turns it into the offer a surface draws.
+type paidTierLLM struct {
+	inner llm.LLM
+	// model is the row's model — the free tier, since a paid twin is never a row
+	// of this plugin's picker.
+	model string
+}
+
+func (p *paidTierLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	result, err := p.inner.Execute(ctx, messages, tools)
+	return result, p.classify(err)
+}
+
+// classify answers the refusal as a PaidTierError when the reader has a paid twin
+// to switch to, and hands every other failure on untouched. The three conditions
+// are the client's own: the row is a declared free tier, the product allows the
+// switch, and the catalog carries the paid twin.
+func (p *paidTierLLM) classify(err error) error {
+	if err == nil {
+		return nil
+	}
+	pair, ok := pairForFree(p.model)
+	if !ok || !pair.AllowPaidSwitch || !catalogHasModel(pair.PaidID) {
+		return err
+	}
+	var api *llm.APIError
+	if !errors.As(err, &api) || api == nil || strings.TrimSpace(api.Code) != strconv.Itoa(capCode) {
+		return err
+	}
+	resetAt, _ := parseCapResetAt(api.Message)
+	return &llm.PaidTierError{
+		Provider:    "workbuddy",
+		FreeModel:   pair.FreeID,
+		PaidModel:   pair.PaidID,
+		DisplayName: pair.DisplayName,
+		ResetAt:     resetAt,
+		Err:         err,
+	}
+}
+
+// workBuddyPaidTier is what the switch writes: the persistent half lives in the
+// plugin's rate-limit record, keyed by the account the login names, and a hit the
+// product stated no reset for keeps its choice in this process only.
+type workBuddyPaidTier struct {
+	home string
+}
+
+func (p workBuddyPaidTier) UsePaidTier(ctx context.Context, freeModel string, resetAt time.Time) error {
+	creds, ok, err := loadCredentials(ctx, nil, p.home)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return signInRequired(nil)
+	}
+	return optInPaidTier(p.home, creds, freeModel, resetAt)
 }
 
 // workBuddySubscription is the sign-in surface entry: a browser sign-in that
@@ -201,12 +270,33 @@ func (l *workBuddyLogin) Cancel() { l.once.Do(func() { l.cancel() }) }
 // Offers lists the models the account unlocks: the live listings when they
 // answer, the shipped table otherwise — each offer carrying the endpoint the
 // transport owns.
+//
+// A free/paid pair is one row for an account the product's paid line covers
+// (the official client's filterVisiblePaidLineModels): the offer names the free
+// tier and carries the paid twin as metadata, so a surface shows one row and the
+// transport can switch it. An account outside that line gets both rows, named
+// apart, because the client offers both there too.
 func (workBuddySubscription) Offers(ctx context.Context, env subscription.Env) ([]subscription.Offer, error) {
-	records, fromStatic := FetchModels(ctx, env.DB, env.Home)
-	installBuiltinModels(records)
-	offers := make([]subscription.Offer, 0, len(records))
-	for _, record := range records {
-		offers = append(offers, subscription.Offer{
+	resolved := fetchCatalog(ctx, env.DB, env.Home)
+	installBuiltinModels(resolved.records)
+	eligible := resolved.signedIn && paidLineEligible(resolved.account)
+	pairs := make(map[string]ratePair, len(resolved.pairs))
+	listed := make(map[string]bool, len(resolved.records))
+	for _, record := range resolved.records {
+		listed[record.ID] = true
+	}
+	for _, pair := range resolved.pairs {
+		pairs[pair.FreeID] = pair
+	}
+	offers := make([]subscription.Offer, 0, len(resolved.records))
+	for _, record := range resolved.records {
+		// The paid row of a pair the account can switch is not a row of its
+		// own: requests reach it through the switch, and provisioning it would
+		// give the picker the second identically-named row this replaces.
+		if eligible && pairedPaidRow(record.ID, resolved.pairs) {
+			continue
+		}
+		offer := subscription.Offer{
 			Subscription:   "workbuddy",
 			Provider:       "workbuddy",
 			Model:          record.ID,
@@ -221,10 +311,27 @@ func (workBuddySubscription) Offers(ctx context.Context, env subscription.Env) (
 			Efforts:          effortLevels(record),
 			DefaultEffort:    record.DefaultEffort,
 			ReasoningOff:     record.CanDisableThinking,
-			FromStaticList:   fromStatic,
-		})
+			FromStaticList:   resolved.fromStatic,
+		}
+		if pair, ok := pairs[record.ID]; ok && listed[pair.PaidID] {
+			offer.PaidModel = pair.PaidID
+			offer.AllowPaidSwitch = pair.AllowPaidSwitch
+		}
+		offers = append(offers, offer)
 	}
 	return offers, nil
+}
+
+// pairedPaidRow reports whether id is the paid twin of a pair whose free row the
+// same catalog carries: without that free row the paid id is a model in its own
+// right and stays on the picker.
+func pairedPaidRow(id string, pairs []ratePair) bool {
+	for _, pair := range pairs {
+		if pair.PaidID == id && pair.FreeID != id {
+			return true
+		}
+	}
+	return false
 }
 
 // Provision writes the chosen models as login-backed rows.

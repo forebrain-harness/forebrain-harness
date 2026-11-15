@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -45,11 +46,17 @@ var httpClient = &http.Client{Timeout: 30 * time.Second}
 // belongs to (whose fields every identity header is built from), and when it
 // expires.
 type Credentials struct {
-	UID              string    `json:"uid,omitempty"`
-	Name             string    `json:"name,omitempty"`
-	EnterpriseID     string    `json:"enterprise_id,omitempty"`
-	IDSource         string    `json:"id_source,omitempty"`
-	Domain           string    `json:"domain,omitempty"`
+	UID          string `json:"uid,omitempty"`
+	Name         string `json:"name,omitempty"`
+	EnterpriseID string `json:"enterprise_id,omitempty"`
+	IDSource     string `json:"id_source,omitempty"`
+	Domain       string `json:"domain,omitempty"`
+	// AccountType is /v2/plugin/account's type ("personal", "pro", …). It
+	// decides whether the account is inside the product's paid line, which is
+	// what collapses a free/paid model pair into one row (§3.1). A login
+	// stored by an earlier release has no type in it; the model paths fill it
+	// in from the account endpoint the first time they read one.
+	AccountType      string    `json:"account_type,omitempty"`
 	AccessToken      string    `json:"access_token"`
 	RefreshToken     string    `json:"refresh_token,omitempty"`
 	ExpiresAt        time.Time `json:"expires_at"`
@@ -301,6 +308,50 @@ func (a account) applyTo(creds *Credentials) {
 	creds.Name = strings.TrimSpace(a.Nickname)
 	creds.EnterpriseID = strings.TrimSpace(a.EnterpriseID)
 	creds.IDSource = strings.TrimSpace(a.IDSource)
+	creds.AccountType = strings.TrimSpace(a.Type)
+}
+
+// ensureAccountType answers a credential that says which kind of account it
+// belongs to. A login stored before this field existed carries no type, and a
+// missing type reads as "outside the paid line", which would leave the reader
+// with the two identical rows this change exists to remove — so the account is
+// asked once, and the answer is persisted under the credential lock (the same
+// lock every other credential write takes).
+//
+// A failed read is not an error: the credential stands as it is and the model
+// paths fall back to the outside-the-paid-line reading, which shows both rows
+// with distinct names rather than guessing.
+func ensureAccountType(ctx context.Context, db *sql.DB, home string, creds Credentials) Credentials {
+	if strings.TrimSpace(creds.AccountType) != "" || strings.TrimSpace(creds.AccessToken) == "" {
+		return creds
+	}
+	account, err := fetchAccount(ctx, creds.AccessToken)
+	if err != nil {
+		slog.Warn("workbuddy: the account type is unknown", "err", err)
+		return creds
+	}
+	updated := creds
+	account.applyTo(&updated)
+	if strings.TrimSpace(updated.AccountType) == "" {
+		slog.Warn("workbuddy: the account endpoint answered no type")
+		return creds
+	}
+	mutex := llm.CredentialMutex(credentialPath(home))
+	mutex.Lock()
+	defer mutex.Unlock()
+	// Re-read inside the lock: a refresh that landed while the account was
+	// being read owns the newer token, and stamping this read's fields onto it
+	// would put an older token back.
+	stored, ok, err := loadCredentials(ctx, db, home)
+	if err != nil || !ok {
+		slog.Warn("workbuddy: could not re-read the login to record the account type", "err", err)
+		return updated
+	}
+	stored.AccountType = updated.AccountType
+	if err := saveCredentials(ctx, db, home, stored); err != nil {
+		slog.Warn("workbuddy: could not record the account type", "err", err)
+	}
+	return stored
 }
 
 // fetchAccount reads the account the access token belongs to.

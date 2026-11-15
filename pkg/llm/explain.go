@@ -20,6 +20,15 @@ const (
 	ExplainRateLimitQuota ExplanationCode = "rate_limit_quota"
 	// ExplainRateLimitThrottle is the provider asking for a slower request rate.
 	ExplainRateLimitThrottle ExplanationCode = "rate_limit_throttle"
+	// ExplainAllowanceSpent is a free tier's allowance spent on a product that
+	// sells a paid twin of the same model: the refusal names when the free tier
+	// returns, and the reader may either wait or switch that row to the paid
+	// tier.
+	//
+	// It is deliberately not ExplainRateLimitQuota. That one is a wait the
+	// runtime resumes by itself once the allowance returns; this one is a choice
+	// only the reader can make, so nothing may schedule a retry on it.
+	ExplainAllowanceSpent ExplanationCode = "allowance_spent"
 	// ExplainContextWindow is a request larger than the model's context window.
 	ExplainContextWindow ExplanationCode = "context_window"
 	// ExplainCredentials is a rejected key or an expired sign-in.
@@ -92,6 +101,14 @@ func Explain(err error) (ErrorExplanation, bool) {
 		out.Code = ExplainContextWindow
 		return out, true
 	}
+	if reset, ok := allowanceSpentReset(apiErr); ok {
+		out.Code = ExplainAllowanceSpent
+		out.ResetAt = reset
+		if wait := time.Until(reset); wait > 0 {
+			out.RetryAfter = wait
+		}
+		return out, true
+	}
 	switch {
 	case apiErr.StatusCode == http.StatusUnauthorized, apiErr.StatusCode == http.StatusForbidden:
 		out.Code = ExplainCredentials
@@ -114,6 +131,30 @@ func Explain(err error) (ErrorExplanation, bool) {
 		out.Code = ExplainRejected
 	}
 	return out, true
+}
+
+// allowanceSpentReset reports whether apiErr is a free tier whose allowance is
+// spent, and when the tier returns.
+//
+// Two things make it that: a machine-readable classifier that names an allowance
+// (isQuotaReason's vocabulary, which isQuotaReason already matches for providers
+// that answer in prose), and a future reset stated in the provider's own
+// sentence. Both are required. Without the classifier this would swallow every
+// provider's prose about a bill; without the reset there is nothing for a
+// surface to offer and nothing for a choice to expire with, so the refusal stays
+// whatever its status says it is.
+func allowanceSpentReset(apiErr *APIError) (time.Time, bool) {
+	if apiErr == nil {
+		return time.Time{}, false
+	}
+	if !isQuotaReason(apiErr.Code) && !isQuotaReason(apiErr.Type) {
+		return time.Time{}, false
+	}
+	reset := resetAtFromProse(apiErr.Message, time.Now())
+	if reset.IsZero() {
+		return time.Time{}, false
+	}
+	return reset, true
 }
 
 // ExplainError renders err as English text a person can act on.

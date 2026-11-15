@@ -1716,6 +1716,14 @@ func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request, opts wsCon
 				writeMsg(s.handleCancelAutoContinueMessage(r.Context(), message))
 				continue
 			}
+			if message.Op == wsOpUsePaidTier || message.Op == wsOpDismissPaidTier {
+				if validationErr := validateWSClientMessage(message); validationErr != nil {
+					writeMsg(wsServerMsg{Op: wsOpPaidTierAck, RequestID: message.RequestID, SessionID: message.SessionID, Error: validationErr.Error()})
+					continue
+				}
+				writeMsg(s.handlePaidTierMessage(r.Context(), message))
+				continue
+			}
 			if message.Op == "approve_action" || message.Op == "deny_action" {
 				if validationErr := validateWSClientMessage(message); validationErr != nil {
 					writeMsg(wsServerMsg{Op: "run_error", RequestID: message.RequestID, Error: validationErr.Error()})

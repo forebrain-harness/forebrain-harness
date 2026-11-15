@@ -2927,3 +2927,134 @@ func TestWebSteerCarriesItsImagesAndTheirFiles(t *testing.T) {
 	require.Contains(t, entries[1].Parts[0].Text, "docs/missing.png")
 	require.Contains(t, entries[1].Parts[0].Text, "not sent")
 }
+
+// paidTierRefusal is the failure a product that sells a free tier and its paid
+// twin answers with, as the plugin hands it to the engine.
+func paidTierRefusal(resetAt time.Time) error {
+	return &llm.PaidTierError{
+		Provider: "paidgw", FreeModel: "hy4free", PaidModel: "hy4std", DisplayName: "Hy4", ResetAt: resetAt,
+		Err: &llm.APIError{
+			StatusCode: http.StatusBadRequest, Code: "6004", Type: "quota_exhausted",
+			Message: "免费额度已用尽，可在 " + resetAt.Format(time.RFC3339) + " 重置",
+		},
+	}
+}
+
+// gatewayPaidTier records what the switch was asked to write.
+type gatewayPaidTier struct {
+	free  string
+	reset time.Time
+	calls int
+}
+
+func (g *gatewayPaidTier) UsePaidTier(_ context.Context, freeModel string, resetAt time.Time) error {
+	g.calls++
+	g.free, g.reset = freeModel, resetAt
+	return nil
+}
+
+func TestPaidTierRESTOffersTakesAndDismisses(t *testing.T) {
+	stub := &gatewayPaidTier{}
+	llm.RegisterPaidTier("paidgw", stub)
+	t.Cleanup(func() { llm.RegisterPaidTier("paidgw", nil) })
+
+	g := newAutoContinueGateway(t)
+	reset := time.Now().Add(time.Hour).Round(time.Second)
+	refuse := func() {
+		g.executor.err = paidTierRefusal(reset)
+		_, _ = g.server.Core.Submit(context.Background(), turn.TurnRequest{
+			SessionID: "session-ws", Origin: turn.Origin{Surface: turn.SurfaceWebChat},
+		}, nil)
+	}
+	call := func(method, action string) (int, map[string]any) {
+		t.Helper()
+		target := "/api/paid-tier-offer?session_id=session-ws"
+		if action != "" {
+			target += "&action=" + action
+		}
+		req := httptest.NewRequest(method, target, nil)
+		rec := httptest.NewRecorder()
+		g.server.handlePaidTierOffer(rec, req)
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body
+	}
+
+	refuse()
+	code, body := call(http.MethodGet, "")
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, true, body["pending"])
+	offer, ok := body["offer"].(map[string]any)
+	require.True(t, ok, "the offer travels with the answer: %v", body)
+	require.Equal(t, "hy4free", offer["free_model"])
+	require.Equal(t, "hy4std", offer["paid_model"])
+	require.Equal(t, "Hy4", offer["display_name"])
+
+	code, body = call(http.MethodPost, "dismiss")
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, true, body["dismissed"])
+	_, body = call(http.MethodGet, "")
+	require.Equal(t, false, body["pending"])
+	_, body = call(http.MethodPost, "dismiss")
+	require.Equal(t, false, body["dismissed"], "a second dismiss drops nothing")
+
+	// The switch: the choice is recorded and the turn is resent, which is what
+	// the page sees as a new run on the same session.
+	refuse()
+	code, body = call(http.MethodPost, "use")
+	require.Equal(t, http.StatusOK, code, "%v", body)
+	require.Equal(t, true, body["used"])
+	require.Equal(t, 1, stub.calls)
+	require.Equal(t, "hy4free", stub.free)
+	require.True(t, stub.reset.Equal(reset), "the recorded window is the offer's: %v", stub.reset)
+	_, body = call(http.MethodGet, "")
+	require.Equal(t, false, body["pending"])
+	require.Eventually(t, func() bool {
+		return g.executor.last().UserText == turn.AutoContinuePrompt
+	}, 5*time.Second, 10*time.Millisecond, "the resent turn never ran")
+
+	// The resent turn met the same refusal in this fixture (the executor always
+	// answers with it), so the choice is on the table again — the switch does not
+	// swallow the second offer.
+	_, body = call(http.MethodGet, "")
+	require.Equal(t, true, body["pending"])
+	_, _ = call(http.MethodPost, "dismiss")
+	// Nothing left on the table: the answer says so rather than pretending.
+	code, _ = call(http.MethodPost, "use")
+	require.Equal(t, http.StatusConflict, code)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/paid-tier-offer?session_id=someone-else", nil)
+	rec := httptest.NewRecorder()
+	g.server.handlePaidTierOffer(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code, "another agent's session is not this page's to answer")
+}
+
+func TestPaidTierSocketOpsAckTheChoice(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	reset := time.Now().Add(time.Hour).Round(time.Second)
+	g.executor.err = paidTierRefusal(reset)
+	_, _ = g.server.Core.Submit(context.Background(), turn.TurnRequest{
+		SessionID: "session-ws", Origin: turn.Origin{Surface: turn.SurfaceWebChat},
+	}, nil)
+
+	// A message without the session it acts on is refused before anything else.
+	missing := wsClientMsg{Op: wsOpUsePaidTier, RequestID: "r1"}
+	require.Error(t, validateWSClientMessage(missing))
+
+	reply := g.server.handlePaidTierMessage(context.Background(), wsClientMsg{Op: wsOpDismissPaidTier, RequestID: "r2", SessionID: "session-ws"})
+	require.Equal(t, wsOpPaidTierAck, reply.Op)
+	require.Equal(t, "r2", reply.RequestID)
+	require.Empty(t, reply.Error)
+	require.False(t, g.server.Core.DismissPaidTierOffer("session-ws"), "the socket op dismissed the offer")
+
+	// Dismissing again is not an error the page must show as a crash, but the ack
+	// says nothing was there.
+	reply = g.server.handlePaidTierMessage(context.Background(), wsClientMsg{Op: wsOpDismissPaidTier, RequestID: "r3", SessionID: "session-ws"})
+	require.Equal(t, wsOpPaidTierAck, reply.Op)
+	require.NotEmpty(t, reply.Error)
+
+	// An unknown session is not this page's to answer.
+	reply = g.server.handlePaidTierMessage(context.Background(), wsClientMsg{Op: wsOpUsePaidTier, RequestID: "r4", SessionID: "someone-else"})
+	require.Equal(t, wsOpPaidTierAck, reply.Op)
+	require.Equal(t, "unknown session", reply.Error)
+}
