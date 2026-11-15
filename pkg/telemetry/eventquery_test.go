@@ -102,6 +102,12 @@ func TestQueryEventsFiltersByEveryDimension(t *testing.T) {
 	root := t.TempDir()
 	tui := testEventLog(t, root, "tui")
 	gateway := testEventLog(t, root, "gateway")
+	// Ten minutes in the past, so every record is behind the wall clock and the
+	// writer's mtime bound sees the file. For the first ten minutes of a day
+	// that lands in yesterday's directory, which is correct: a row's day is
+	// the local day of the record's own time, and that is what the assertion
+	// below asks (a fixture claiming "today" would be untrue of the record it
+	// wrote).
 	at := time.Now().Add(-10 * time.Minute).Truncate(time.Millisecond)
 
 	writeRecords(t, tui,
@@ -133,7 +139,7 @@ func TestQueryEventsFiltersByEveryDimension(t *testing.T) {
 	require.Equal(t, "gateway", all.Rows[0].Source)
 	require.Equal(t, os.Getpid(), all.Rows[0].PID)
 	require.NotEmpty(t, all.Rows[0].Proc)
-	require.Equal(t, startOfLocalDay(time.Now()).Format(dayLayout), all.Rows[0].Day)
+	require.Equal(t, startOfLocalDay(at).Format(dayLayout), all.Rows[0].Day)
 	require.Contains(t, all.Rows[0].ID, all.Rows[0].Day+"/gateway-")
 
 	require.Equal(t, 4, query(EventQuery{Sources: []string{"tui"}}).Total)

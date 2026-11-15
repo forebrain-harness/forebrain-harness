@@ -742,11 +742,16 @@ func validateNoteFilename(filename string) error {
 // filename with at, keeping the slug. When a note was written is provenance
 // the tool reports honestly, not a value the model chooses; /migrate imports
 // keep their original filenames because they do not go through this helper.
+// The stamp is UTC, the convention every other note filename in the store
+// keeps: the store's own stems and /migrate's imports are stamped from
+// time.UTC, and the pruner parses this prefix as UTC — so the name a note is
+// listed under and the instant it was written mean the same on every machine
+// and in every timezone.
 func StampNoteFilename(filename string, at time.Time) (string, error) {
 	if err := validateNoteFilename(filename); err != nil {
 		return "", err
 	}
-	return at.Format("2006-01-02T15-04-05") + filename[19:], nil
+	return at.UTC().Format("2006-01-02T15-04-05") + filename[19:], nil
 }
 
 func validTimestampPrefix(stem string) bool {
