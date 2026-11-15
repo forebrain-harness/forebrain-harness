@@ -58,7 +58,7 @@ jobs:
           echo "PKG_CONFIG_PATH=$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" >> "$GITHUB_ENV"
       - run: go vet ./...
       - name: gofmt
-        run: test -z "$(gofmt -l cmd pkg third_party)" || { gofmt -l cmd pkg third_party; exit 1; }
+        run: test -z "$(gofmt -l cmd pkg third_party plugins)" || { gofmt -l cmd pkg third_party plugins; exit 1; }
       - name: Verify package graph
         run: |
           scripts/package-graph.sh

@@ -22,7 +22,7 @@ scripts/install-dictionary.sh ./build/bin   # dict/ beside the binary (memory se
 scripts/install-assets.sh ./build/bin       # models.json beside the binary (already there after make build)
 
 # Lint / vet (no golangci-lint; this is what CI runs):
-gofmt -l cmd pkg third_party                 # must print nothing
+gofmt -l cmd pkg third_party plugins         # must print nothing
 CGO_ENABLED=1 go vet -tags fts5 ./...
 
 # Tests (CGO: silk voice decoder + sqlite; -tags fts5: memory-search FTS5 tables):
