@@ -153,10 +153,10 @@ func TestInstructionSourcesMatchMergedBody(t *testing.T) {
 	if len(sources) != 2 {
 		t.Fatalf("sources = %+v, want the agent bootstrap and the project FOREBRAIN.md", sources)
 	}
-	if sources[0].Name != "AGENTS.md" || !sources[0].Agent || !sources[0].Loaded || sources[0].TruncatedTo != 0 {
+	if sources[0].Name != "AGENTS.md" || !sources[0].Loaded || sources[0].TruncatedTo != 0 {
 		t.Fatalf("bootstrap source = %+v", sources[0])
 	}
-	if sources[1].Name != "FOREBRAIN.md" || sources[1].Agent || !sources[1].Loaded || sources[1].TruncatedTo != 0 {
+	if sources[1].Name != "FOREBRAIN.md" || !sources[1].Loaded || sources[1].TruncatedTo != 0 {
 		t.Fatalf("project source = %+v", sources[1])
 	}
 }

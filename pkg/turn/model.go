@@ -1214,18 +1214,17 @@ func RenderPermissionsLine(p StatusPermissions) string {
 }
 
 // RenderInstructionsLine lists the instruction files in load order, each with
-// what became of it: agent bootstrap files are marked, a file that did not
-// make it into the merged body says why, and a cut one says how much of it
-// arrived.
+// what became of it: a file that did not make it into the merged body says
+// why, and a cut one says how much of it arrived. The name alone says where a
+// file came from — the agent bootstrap files are fixed names
+// (AGENTS/SOUL/USER.md) and the project rules are always FOREBRAIN.md — so the
+// row marks nothing else.
 func RenderInstructionsLine(sources []StatusInstruction) string {
 	parts := make([]string, 0, len(sources))
 	for _, src := range sources {
 		name := strings.TrimSpace(src.Name)
 		if name == "" {
 			continue
-		}
-		if src.Agent {
-			name += " (agent)"
 		}
 		switch {
 		case !src.Loaded:

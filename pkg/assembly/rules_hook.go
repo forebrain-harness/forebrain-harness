@@ -23,8 +23,7 @@ import (
 // body's size limit is dropped), and how much of it arrived when only part did
 // (the per-file budget, or the body limit running out inside it).
 type RuleSource struct {
-	Name  string
-	Agent bool // a workspace bootstrap file (AGENTS/SOUL/USER.md)
+	Name string
 	// Loaded reports that some of the file's text is in the merged body;
 	// NotLoadedReason says why not when it is false.
 	Loaded          bool
@@ -210,7 +209,7 @@ func (p *PreHook) buildRules(wd string, agentFiles bool) rulesBuild {
 				if strings.TrimSpace(f.Body) == "" {
 					continue
 				}
-				src := RuleSource{Name: f.Name, Agent: true, Loaded: true}
+				src := RuleSource{Name: f.Name, Loaded: true}
 				if f.Truncated {
 					src.TruncatedTo = perFile
 				}

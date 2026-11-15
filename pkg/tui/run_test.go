@@ -5442,7 +5442,7 @@ func goldenStatusPanel(t *testing.T, width, tab int) []string {
 			}},
 		},
 		Instructions: []assembly.RuleSource{
-			{Name: "AGENTS.md", Agent: true, Loaded: true},
+			{Name: "AGENTS.md", Loaded: true},
 			{Name: "FOREBRAIN.md", Loaded: true},
 		},
 		ContextUsage: func() (int, statepkg.TokenBudgetOptions) { return 48_000, statepkg.TokenBudgetOptions{} },
