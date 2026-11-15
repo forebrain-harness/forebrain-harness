@@ -23808,6 +23808,58 @@ func TestFanoutContentAttributesEveryLineToItsTask(t *testing.T) {
 	}
 }
 
+// The third layer is marked once — fanoutActivityPrefix — and the renderer keys
+// its one-row rule on that same marker, so a change on either side fails here
+// instead of silently painting a paragraph again.
+func TestFanoutThirdLayerUsesTheActivityPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		task FanoutTaskState
+		want string
+	}{
+		{name: "latest tool", task: FanoutTaskState{
+			Title: "probe", AgentID: "task-a", Status: "running", ToolTotal: 1,
+			RecentTools: []fanoutToolEntry{{Label: "sleep 8"}},
+		}, want: "sleep 8"},
+		{name: "paused", task: FanoutTaskState{
+			Title: "probe", AgentID: "task-a", Status: "running", Paused: true,
+		}, want: subagentPausedCardLine},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content, _, _ := renderFanoutContent(&fanoutState{Tasks: []FanoutTaskState{tc.task}})
+			var marked []string
+			for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
+				if isFanoutActivityLine(line) {
+					marked = append(marked, line)
+				}
+			}
+			if len(marked) != 1 || !strings.HasPrefix(marked[0], fanoutActivityPrefix) || !strings.Contains(marked[0], tc.want) {
+				t.Fatalf("third layer = %q, want one %q row carrying %q", marked, fanoutActivityPrefix, tc.want)
+			}
+		})
+	}
+}
+
+// Cutting the third layer to one row must not cost its click: the row still
+// belongs to the task whose call it names.
+func TestSubagentCardElidedToolRowKeepsItsTask(t *testing.T) {
+	fs := &fanoutState{
+		StepID: "fanout-owner", Verb: "continue", Running: true,
+		Tasks: []FanoutTaskState{{
+			Title: "Execute plan 302", AgentID: "subagent-7", Status: "running",
+			ToolTotal: 1, RecentTools: []fanoutToolEntry{{StepID: "tool-1", Label: strings.Repeat("python3 - <<'EOF' ", 20)}},
+		}},
+	}
+	f := (&Reducer{}).emitFanoutFrame(fs)
+	lines, agents := renderFrameLinesWithAgents(f, 120, DiffThemeDark, 0)
+	if len(lines) != 3 || len(agents) != 3 {
+		t.Fatalf("card renders %d rows with %d owners, want 3 and 3", len(lines), len(agents))
+	}
+	if agents[2] != "subagent-7" {
+		t.Fatalf("third-layer row owner = %q, want subagent-7", agents[2])
+	}
+}
+
 // A failure can reach the user on more than one line — an error carries its own
 // text, and a turn recorded under the older wording still holds two — so the
 // reason a task carries arrives with its own line breaks. The fanout block is

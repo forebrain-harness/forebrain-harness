@@ -5472,6 +5472,15 @@ func (r *Renderer) renderFanout(f Frame) {
 			wrapWidth = 20
 		}
 		wrapped := wrapCardLine(text, wrapWidth)
+		if isFanoutActivityLine(line) {
+			// The third layer is one row by contract: it names the call, and a
+			// shell command can be a whole heredoc — wrapped, it painted a
+			// paragraph across the transcript where a reader wanted one line.
+			// It is cut at the card's right edge with an ellipsis instead, the
+			// same one row the web card draws for it. The full command stays
+			// readable in the task's own view, on its tool card's header.
+			wrapped = []string{runewidth.Truncate(text, wrapWidth, "…")}
+		}
 		continuation := strings.Repeat(" ", leadWidth)
 		for i, wl := range wrapped {
 			p := lead
@@ -5588,6 +5597,21 @@ func isFanoutTaskLine(line string) bool {
 	}
 	// Stat/activity lines start with spaces; everything else is a task title.
 	return !strings.HasPrefix(line, " ")
+}
+
+// fanoutActivityPrefix opens a fanout card's third layer: the row under a task
+// naming the call it is running now (or the pause that replaced it). The
+// producer (renderFanoutContent) and the reader (isFanoutActivityLine) share
+// this one marker, so the two halves cannot drift apart silently.
+const fanoutActivityPrefix = "  └ "
+
+// isFanoutActivityLine reports whether a fanout content line is that third
+// layer rather than a task row or a reason/stat continuation.
+func isFanoutActivityLine(line string) bool {
+	if isFanoutTaskLine(line) {
+		return false
+	}
+	return strings.HasPrefix(line, fanoutActivityPrefix)
 }
 
 func (r *Renderer) renderStatus(f Frame) {

@@ -2549,13 +2549,13 @@ func renderFanoutContent(fs *fanoutState) (string, []string, []fanoutLineClock) 
 		// A paused task's third layer is the pause: the last call it made was
 		// stopped, and what it does next is the user's message.
 		if t.Paused && !fanoutTaskTerminal(t.Status) {
-			add("  └ ", subagentPausedCardLine)
+			add(fanoutActivityPrefix, subagentPausedCardLine)
 			continue
 		}
 		// Live tool progress (third layer): the most recent tool label.
 		overflow := t.ToolTotal - len(t.RecentTools)
 		for _, tool := range t.RecentTools {
-			add("  └ ", singleDisplayLine(tool.Label))
+			add(fanoutActivityPrefix, singleDisplayLine(tool.Label))
 		}
 		if t.ToolTotal > 0 && overflow > 0 {
 			add("    ", fmt.Sprintf("… +%d tool uses", overflow))
