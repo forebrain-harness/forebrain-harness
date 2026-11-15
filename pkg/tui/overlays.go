@@ -60,7 +60,8 @@ type approvalOverlay struct {
 	feedbackLayout   approvalFeedbackLayout
 	// planReviewPicking is true while the user is choosing a model in the
 	// picker (which purpose it serves is planPickerPurpose). planReviewCursor
-	// indexes req.PlanReviewModels.
+	// indexes planReviewFiltered — the models the filter leaves, in the order
+	// the list draws them.
 	planReviewPicking bool
 	planPickerPurpose planPickerPurpose
 	planReviewCursor  int
@@ -69,6 +70,14 @@ type approvalOverlay struct {
 	// planReviewTopRow, and later ones only follow the selection.
 	planReviewShown  bool
 	planReviewTopRow int
+	// planReviewFilter narrows the reviewer list and planReviewInFilter is true
+	// while the keyboard is in it: the list keeps no ❯ then, exactly like every
+	// other picker's filter. planReviewFiltered indexes req.PlanReviewModels in
+	// the order the list draws them — positions, not copies, so a row keeps its
+	// id and endpoint.
+	planReviewFilter   filterField
+	planReviewInFilter bool
+	planReviewFiltered []int
 	// focusStart and focusEnd are the rows [start, end) kept on screen as last
 	// rendered: the selected option, or the selected reviewer while picking —
 	// with the picker's question over the first and its key hint under the
@@ -744,12 +753,40 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		}
 		cursorLine = o.feedbackFirstRow + o.feedbackLayout.cursorRow
 	case o.planReviewPicking:
-		models := o.req.PlanReviewModels
+		models := o.planReviewVisible()
+		// The reviewer list carries the same filter bar every picker in this
+		// terminal does, in the same shape: air above it, a padded row, the
+		// text's row, a padded row, then air before the list it narrows.
+		if o.planReviewShowsFilter() {
+			field := o.planReviewFilter.pickerField(o.planReviewInFilter)
+			lines = append(lines, field.padRow(width))
+			lineCount++
+			if o.planReviewInFilter {
+				// Only the field's own keyboard shows the hardware caret; on
+				// the rows the list's ❯ is the indicator, and the bar is
+				// dimmed. Handing the painter the row only while it is focused
+				// is also what keeps the bar on screen as the user types —
+				// the paint follows the caret row.
+				cursorLine = lineCount
+			}
+			lines = append(lines, field.row(width))
+			lineCount++
+			lines = append(lines, field.padRow(width))
+			lineCount++
+			writeLine("")
+		}
+		if len(models) == 0 {
+			writeLine("%sNo matches", panelIndent)
+		}
 		list := newPlanReviewList(models, width)
 		for i, model := range models {
 			lead := panelIndent
 			if i == o.planReviewCursor {
-				lead = panelCursor
+				// The list keeps its ❯ only while the keyboard is on it: a
+				// picker shows its cursor or its ❯, never both.
+				if !o.planReviewInFilter {
+					lead = panelCursor
+				}
 				o.focusStart = lineCount
 				if i == 0 {
 					o.focusStart = o.planReviewTopRow
@@ -911,6 +948,9 @@ func (o *approvalOverlay) renderViewport() {
 	cursorCol := 0
 	if cursorLine >= 0 && o.feedback != feedbackClosed {
 		cursorCol = o.feedbackLayout.cursorCol
+	}
+	if cursorLine >= 0 && o.planReviewPicking && o.planReviewInFilter {
+		cursorCol = o.planReviewFilter.pickerField(o.planReviewInFilter).caretCol()
 	}
 	if o.rs != nil && o.rs.inViewportOverlay() {
 		switch {
@@ -1345,6 +1385,43 @@ func (o *approvalOverlay) handleFeedbackKey(key parsedKey) (turn.ToolApprovalDec
 	return turn.ToolApprovalDecision{}, false
 }
 
+// planReviewShowsFilter reports whether the reviewer list is long enough to need
+// a filter: the same threshold every picker in this terminal uses, counted over
+// the rows the picker opens with so the bar does not vanish as the list narrows.
+func (o *approvalOverlay) planReviewShowsFilter() bool {
+	return pickerShowsFilter(len(o.req.PlanReviewModels))
+}
+
+// applyPlanReviewFilter narrows the list to the models whose shown name — or
+// endpoint — contains the filter, best match first, and re-anchors the cursor on
+// the first match, the way every other picker re-anchors after a filter change.
+func (o *approvalOverlay) applyPlanReviewFilter() {
+	query := strings.ToLower(strings.TrimSpace(o.planReviewFilter.text))
+	o.planReviewFiltered = o.planReviewFiltered[:0]
+	ranks := make(map[int]int, len(o.req.PlanReviewModels))
+	for i, model := range o.req.PlanReviewModels {
+		name := planReviewModelDisplay(model.Provider, model.Model)
+		if rank := pickerMatchRank(name, model.Endpoint, query); rank >= 0 {
+			o.planReviewFiltered = append(o.planReviewFiltered, i)
+			ranks[i] = rank
+		}
+	}
+	sort.SliceStable(o.planReviewFiltered, func(a, b int) bool {
+		return ranks[o.planReviewFiltered[a]] < ranks[o.planReviewFiltered[b]]
+	})
+	o.planReviewCursor = 0
+}
+
+// planReviewVisible returns the models the filter leaves, in the order the list
+// draws them.
+func (o *approvalOverlay) planReviewVisible() []turn.PlanReviewModelOption {
+	out := make([]turn.PlanReviewModelOption, 0, len(o.planReviewFiltered))
+	for _, i := range o.planReviewFiltered {
+		out = append(out, o.req.PlanReviewModels[i])
+	}
+	return out
+}
+
 // enterPlanPickerMode opens the shared model picker for one purpose. The
 // cursor starts on a model other than the conversation's own: a second
 // opinion is the point of the review row, a cheaper or stronger executor of
@@ -1354,9 +1431,12 @@ func (o *approvalOverlay) enterPlanPickerMode(purpose planPickerPurpose) {
 	o.planReviewPicking = true
 	o.planPickerPurpose = purpose
 	o.planReviewShown = false
-	o.planReviewCursor = 0
-	for i, model := range o.req.PlanReviewModels {
-		if !model.Current {
+	o.planReviewFilter = filterField{}
+	o.planReviewInFilter = false
+	o.planReviewFiltered = o.planReviewFiltered[:0]
+	o.applyPlanReviewFilter()
+	for i, modelIdx := range o.planReviewFiltered {
+		if !o.req.PlanReviewModels[modelIdx].Current {
 			o.planReviewCursor = i
 			break
 		}
@@ -1376,34 +1456,92 @@ func (o *approvalOverlay) exitPlanReviewMode() {
 	o.planPickerPurpose = pickReview
 	o.planReviewShown = false
 	o.planReviewCursor = 0
+	o.planReviewFilter = filterField{}
+	o.planReviewInFilter = false
+	o.planReviewFiltered = o.planReviewFiltered[:0]
 }
 
 // handlePlanReviewKey drives the reviewer picker. Choosing a model returns a
 // decision that requests the review without approving or denying, so the
-// surface owner re-prompts this overlay once the review is in.
+// surface owner re-prompts this overlay once the review is in. A filter narrows
+// the list; the cursor indexes the rows it leaves.
 func (o *approvalOverlay) handlePlanReviewKey(key parsedKey) (turn.ToolApprovalDecision, bool) {
 	o.keepOptionsInView = true
-	models := o.req.PlanReviewModels
+	models := o.planReviewVisible()
+	filterShown := o.planReviewShowsFilter()
 	switch key.kind {
 	case rawKeyEscape:
 		o.exitPlanReviewMode()
 	case rawKeyCtrlC:
 		return turn.ToolApprovalDecision{Cancelled: true}, true
 	case rawKeyUp:
-		if o.planReviewCursor > 0 {
-			o.planReviewCursor--
-		}
+		navigatePicker(&o.planReviewInFilter, &o.planReviewCursor, len(models), -1, filterShown)
 	case rawKeyDown:
-		if o.planReviewCursor < len(models)-1 {
-			o.planReviewCursor++
-		}
+		navigatePicker(&o.planReviewInFilter, &o.planReviewCursor, len(models), 1, filterShown)
 	case rawKeyPageUp:
 		o.scrollOverlay(-10)
 	case rawKeyPageDown:
 		o.scrollOverlay(10)
+	case rawKeyBackspace:
+		if !filterShown {
+			return turn.ToolApprovalDecision{}, false
+		}
+		// An empty filter the keyboard is not in has nothing to delete: taking
+		// the keyboard to edit nothing would trade the list's ❯ for a caret
+		// that changes no query (the guard in selectState's rawKeyBackspace /
+		// rawKeyDelete cases).
+		if !o.planReviewInFilter && o.planReviewFilter.text == "" {
+			return turn.ToolApprovalDecision{}, false
+		}
+		o.planReviewInFilter = true
+		if o.planReviewFilter.backspace() {
+			o.applyPlanReviewFilter()
+		}
+	case rawKeyDelete:
+		if !filterShown {
+			return turn.ToolApprovalDecision{}, false
+		}
+		if !o.planReviewInFilter && o.planReviewFilter.text == "" {
+			return turn.ToolApprovalDecision{}, false
+		}
+		o.planReviewInFilter = true
+		if o.planReviewFilter.deleteForward() {
+			o.applyPlanReviewFilter()
+		}
+	case rawKeyLeft:
+		if filterShown && o.planReviewInFilter {
+			o.planReviewFilter.move(-1)
+		}
+	case rawKeyRight:
+		if filterShown && o.planReviewInFilter {
+			o.planReviewFilter.move(1)
+		}
+	case rawKeyHome:
+		if filterShown && o.planReviewInFilter {
+			o.planReviewFilter.moveTo(0)
+		}
+	case rawKeyEnd:
+		if filterShown && o.planReviewInFilter {
+			o.planReviewFilter.moveTo(len(o.planReviewFilter.runes()))
+		}
+	case rawKeyPaste:
+		if !filterShown {
+			return turn.ToolApprovalDecision{}, false
+		}
+		o.planReviewInFilter = true
+		o.planReviewFilter.insert(strings.ReplaceAll(key.text, "\n", " "))
+		o.applyPlanReviewFilter()
+	case rawKeySpace:
+		if !filterShown {
+			return turn.ToolApprovalDecision{}, false
+		}
+		o.planReviewInFilter = true
+		o.planReviewFilter.insert(" ")
+		o.applyPlanReviewFilter()
 	case rawKeyEnter:
-		if o.planReviewCursor < 0 || o.planReviewCursor >= len(models) {
-			o.exitPlanReviewMode()
+		// A filter that matches nothing is not an answer: the picker stays open
+		// on it rather than closing on a model the user never saw.
+		if len(models) == 0 {
 			return turn.ToolApprovalDecision{}, false
 		}
 		selected := models[o.planReviewCursor]
@@ -1417,6 +1555,15 @@ func (o *approvalOverlay) handlePlanReviewKey(key parsedKey) (turn.ToolApprovalD
 		}
 		return turn.ToolApprovalDecision{RequestPlanReview: &selected}, true
 	case rawKeyRune:
+		// A picker with a filter types into it, the way every other picker
+		// does — j/k included — and a short list with no filter keeps its
+		// one-key navigation.
+		if filterShown {
+			o.planReviewInFilter = true
+			o.planReviewFilter.insert(string(key.r))
+			o.applyPlanReviewFilter()
+			return turn.ToolApprovalDecision{}, false
+		}
 		switch {
 		case key.r == 'j':
 			if o.planReviewCursor < len(models)-1 {
