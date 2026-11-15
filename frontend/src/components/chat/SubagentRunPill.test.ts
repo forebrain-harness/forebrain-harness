@@ -94,6 +94,17 @@ describe('SubagentRunPill', () => {
     expect(wrapper.get('[data-testid="subagent-run-pill"]').text()).toContain('glm-5.3-flash')
   })
 
+  it('names the model with the vendor display name, not the wire id', async () => {
+    const wrapper = mountPill({
+      record: record({ model: 'gfmodel', modelProvider: 'qodercn', modelName: 'GLM-5.3-Flash' }),
+    })
+    const pill = wrapper.get('[data-testid="subagent-run-pill"]')
+    expect(pill.text()).toContain('GLM-5.3-Flash')
+    expect(pill.text()).not.toContain('gfmodel')
+    await pill.trigger('click')
+    expect(wrapper.get('[data-testid="subagent-run-card"]').text()).toContain('qodercn/GLM-5.3-Flash')
+  })
+
   it('draws nothing when there is neither a budget nor a model', () => {
     const wrapper = mountPill({ record: record() })
     expect(wrapper.find('[data-testid="subagent-run-pill"]').exists()).toBe(false)

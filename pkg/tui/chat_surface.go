@@ -723,7 +723,8 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 		// plan collected reach the model when the denial is resumed, composed
 		// there (resumeAgentContext), so the conversation never displays them.
 		Permissions: decision.RequestPermissionsResponse, Reason: decision.DenyReason, ClearContext: decision.ClearContext, PlanOnly: decision.PlanOnly,
-		HandOffModel: handOffModelOf(decision.HandOffModel),
+		AskAnswerJSON: decision.AskAnswerJSON,
+		HandOffModel:  handOffModelOf(decision.HandOffModel),
 	})
 	if err != nil {
 		return err
@@ -850,6 +851,11 @@ func actionNetworkInline(act *state.Action) bool {
 }
 
 func approvalChoice(act *state.Action, decision turn.ToolApprovalDecision) string {
+	if decision.AskClarify {
+		// The ask's clarify is its own decision: the engine composes the words
+		// and records the denial, so it must not read as an ordinary refuse.
+		return "clarify"
+	}
 	if decision.Cancelled {
 		return "cancel"
 	}
@@ -1545,11 +1551,28 @@ func (s *ChatSession) answerInPlaceApproval(
 		s.notifyInPlaceRefusedCard(gate, req, decision)
 		return nil, tool.ErrApprovalRejectedStop
 	}
+	reason := decision.DenyReason
+	if decision.AskClarify {
+		// The clarify instruction is composed where the denial is recorded (the
+		// engine owns its words); the decision that asked for it carries none.
+		act, err := s.actionSvc().Get(ctx, gate.ActionID)
+		if err != nil {
+			return nil, fmt.Errorf("clarify ask %s: %w", gate.ActionID, err)
+		}
+		if act == nil || strings.TrimSpace(act.Error) == "" {
+			// Never fall through with an empty reason: the model would read the
+			// generic deny sentence instead of the clarify instruction, and the
+			// person would think their "chat about this" asked something it did
+			// not. The waiting call fails visibly instead.
+			return nil, fmt.Errorf("clarify ask %s: the engine stored no clarify reason", gate.ActionID)
+		}
+		reason = strings.TrimSpace(act.Error)
+	}
 	resumeCtx, resumeErr := turn.SubagentApprovalResumeContext(ctx, gate, turn.ApprovalResume{
 		Session:  gate.Session,
 		Approved: decision.Approved,
 		Denied:   decision.Denied,
-		Reason:   decision.DenyReason,
+		Reason:   reason,
 	}, who)
 	if resumeErr != nil {
 		return nil, resumeErr
@@ -1599,7 +1622,7 @@ func (s *ChatSession) notifyInPlaceRefusedCard(gate turn.SubagentApprovalGate, r
 		StepID:    stepID,
 		ToolName:  toolName,
 		FilePath:  extractFilePathFromInput(input),
-		Content:   tool.DeniedToolDisplayBody(toolName, strings.TrimSpace(decision.DenyReason)),
+		Content:   tool.DeniedToolDisplayBody(toolName, input, strings.TrimSpace(decision.DenyReason)),
 		ToolMeta:  meta,
 		ToolPhase: event.RunEventToolCompleted,
 		RunID:     gate.RunID,

@@ -133,7 +133,7 @@
                   >
                     <ImageOff class="size-3.5" aria-hidden="true" />
                     <div>
-                      <b>{{ msg.imageRefusal.model || sessionModelData?.model || '' }}</b> {{ t(imageRefusalSentence(msg)) }}
+                      <b>{{ msg.imageRefusal.modelName || msg.imageRefusal.model || sessionModelData?.model || '' }}</b> {{ t(imageRefusalSentence(msg)) }}
                       <span class="forebrain-err-s">
                         {{ t('chat.imageRefusedRecover') }}
                         <button type="button" class="rewind-undo" data-testid="image-refused-switch" @click="modelChipRef?.openMenu()">{{ t('chat.imageRefusedSwitch') }}</button>

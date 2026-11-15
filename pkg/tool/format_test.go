@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2901,21 +2902,40 @@ func TestDeniedToolStepReadsAsTheRefusalEverywhere(t *testing.T) {
 	cases := []struct {
 		name     string
 		toolName string
+		input    map[string]any
 		feedback string
 		wantBody string
 	}{
 		{name: "exit with feedback", toolName: "exit_plan_mode", feedback: "split milestones", wantBody: "split milestones"},
 		{name: "exit without feedback", toolName: "exit_plan_mode", feedback: "", wantBody: "(no output)"},
 		{name: "request_permissions", toolName: "request_permissions", feedback: "", wantBody: "The user did not approve the requested permissions"},
+		{
+			name:     "user_interaction",
+			toolName: "user_interaction",
+			input: map[string]any{"questions": []any{
+				map[string]any{
+					"header":   "轮询方案",
+					"question": "最多等待多久？",
+					"options":  []any{map[string]any{"label": "60 秒"}, map[string]any{"label": "15 秒"}},
+				},
+			}},
+			// The engine's clarify instruction: the card must not print it.
+			feedback: "The user wants to clarify these questions.",
+			wantBody: "· 最多等待多久？ (60 秒 / 15 秒)",
+		},
 		{name: "shell", toolName: "shell", feedback: "no", wantBody: ""},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			evt := DeniedToolStep("call-1", tc.toolName, map[string]any{}, tc.feedback)
-			if got := BuildToolMeta(evt).Status; got != "denied" {
+			evt := DeniedToolStep("call-1", tc.toolName, tc.input, tc.feedback)
+			meta := BuildToolMeta(evt)
+			if got := meta.Status; got != "denied" {
 				t.Fatalf("status = %q, want %q", got, "denied")
+			}
+			if tc.toolName == "user_interaction" && meta.DenyFeedback != "" {
+				t.Fatalf("a declined ask's card must not carry its clarify text, got %q", meta.DenyFeedback)
 			}
 			body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
 			if body != tc.wantBody {
@@ -2969,6 +2989,100 @@ func TestDeniedToolStepReadsAsTheRefusalEverywhere(t *testing.T) {
 	}
 	if deniedEvt.ID == awaitingEvt.ID {
 		t.Fatalf("denied event id %q collides with awaiting-approval event id", deniedEvt.ID)
+	}
+}
+
+// A declined question's body is the questions as they were asked, and the same
+// body comes out of the model's arguments and out of the stored form payload:
+// a live card reads one shape, a replayed row the other.
+func TestUserInteractionDeniedBodyReadsBothShapes(t *testing.T) {
+	modelArgs := map[string]any{"questions": []any{
+		map[string]any{
+			"header":   "轮询方案",
+			"question": "最多等待多久？",
+			"options":  []any{map[string]any{"label": "60 秒"}, map[string]any{"label": "15 秒"}},
+		},
+		map[string]any{
+			"header":   "等待上限",
+			"question": "安装失败时如何回报？",
+			"options":  []any{map[string]any{"label": "原始报错"}, map[string]any{"label": "结构化错误"}},
+		},
+	}}
+	formPayload := map[string]any{"questions": []any{
+		map[string]any{
+			"id":      "轮询方案",
+			"prompt":  "最多等待多久？",
+			"options": []any{map[string]any{"id": "60 秒", "label": "60 秒"}, map[string]any{"id": "15 秒", "label": "15 秒"}},
+		},
+		map[string]any{
+			"id":      "等待上限",
+			"prompt":  "安装失败时如何回报？",
+			"options": []any{map[string]any{"id": "原始报错", "label": "原始报错"}, map[string]any{"id": "结构化错误", "label": "结构化错误"}},
+		},
+	}}
+	want := "· 最多等待多久？ (60 秒 / 15 秒)\n· 安装失败时如何回报？ (原始报错 / 结构化错误)"
+	if got := userInteractionDeclinedBody(modelArgs); got != want {
+		t.Fatalf("model-argument shape body = %q, want %q", got, want)
+	}
+	if got := userInteractionDeclinedBody(formPayload); got != want {
+		t.Fatalf("stored-form shape body = %q, want %q", got, want)
+	}
+	// An option-less question still names the question itself; a call with no
+	// readable question leaves the card on the ordinary empty-body path.
+	if got := userInteractionDeclinedBody(map[string]any{"questions": []any{
+		map[string]any{"header": "h", "question": "no options here"},
+	}}); got != "· no options here" {
+		t.Fatalf("option-less body = %q, want %q", got, "· no options here")
+	}
+	if got := userInteractionDeclinedBody(map[string]any{}); got != "" {
+		t.Fatalf("empty input body = %q, want empty", got)
+	}
+	// A question's text has no length bound, so the body is clamped at the
+	// shared display limit rather than handed to the viewport whole.
+	long := strings.Repeat("敌", DefaultMaxFormattedBody)
+	if got := userInteractionDeclinedBody(map[string]any{"questions": []any{
+		map[string]any{"header": "h", "question": long},
+	}}); len(got) >= len(long) {
+		t.Fatalf("an oversized question must be clamped, got %d bytes", len(got))
+	}
+}
+
+// The clarify text is Claude Code's AskUserQuestion feedback, verbatim for the
+// instruction, with the questions as asked and whatever the person had already
+// answered.
+func TestAskClarifyReasonSpeaksClaudeCodeWords(t *testing.T) {
+	const head = "The user wants to clarify these questions.\n" +
+		"    This means they may have additional information, context or questions for you.\n" +
+		"    Take their response into account and then reformulate the questions if appropriate.\n" +
+		"    Start by asking them what they would like to clarify.\n" +
+		"\n" +
+		"    Questions asked:"
+	form := state.AskForm{Questions: []state.AskQuestion{
+		{ID: "single", Prompt: "Pick one", Options: []state.AskOption{{ID: "a", Label: "Alpha"}, {ID: "b", Label: "Beta"}}},
+		{ID: "chosen", Prompt: "Already chosen", Options: []state.AskOption{{ID: "a", Label: "Alpha"}}},
+		{ID: "typed", Prompt: "Typed instead", Options: []state.AskOption{{ID: "a", Label: "Alpha"}}},
+		{ID: "multi", Prompt: "Pick many", AllowMultiple: true, Options: []state.AskOption{{ID: "a", Label: "Alpha"}, {ID: "b", Label: "Beta"}}},
+	}}
+	answers := state.AskAnswer{Answers: []state.AskAnswerItem{
+		{QuestionID: "chosen", OptionIDs: []string{"a"}},
+		{QuestionID: "typed", OptionIDs: []string{"a"}, OtherText: "write this instead"},
+		{QuestionID: "multi", OptionIDs: []string{"a", "b"}, OtherText: "and this"},
+	}}
+	want := head +
+		"\n- \"Pick one\"\n  (No answer provided)" +
+		"\n- \"Already chosen\"\n  Answer: Alpha" +
+		// A single-select's free text replaces the selection, as in Claude.
+		"\n- \"Typed instead\"\n  Answer: write this instead" +
+		// A multi-select keeps its Other text, which Claude drops on purpose:
+		// what the person typed must reach the model.
+		"\n- \"Pick many\"\n  Answer: Alpha, Beta, and this"
+	if got := AskClarifyReason(form, answers); got != want {
+		t.Fatalf("clarify reason = %q, want %q", got, want)
+	}
+	// A form with no questions still returns the instruction: the model must
+	// hear why its call was refused even when nothing can be listed.
+	if got := AskClarifyReason(state.AskForm{}, state.AskAnswer{}); got != head {
+		t.Fatalf("empty form reason = %q, want the instruction alone", got)
 	}
 }
 

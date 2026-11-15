@@ -1632,9 +1632,11 @@ export interface ActionApprovalBody {
   update?: PermissionUpdateBody
   clearContext?: boolean
   /** The reply choice the endpoint resolves: an option the engine offered
-   *  (ApprovalDecisionName), or `deny` — a refusal in the user's own words,
-   *  a choice no option list carries (plan 129's refuse-with-words). */
-  decision?: import('./approvalSuggestions').ApprovalDecisionName | 'deny'
+   *  (ApprovalDecisionName), `deny` — a refusal in the user's own words,
+   *  a choice no option list carries (plan 129's refuse-with-words) — or
+   *  `clarify`: an asked form's「和它聊聊」, refused with the engine's clarify
+   *  instruction so the turn carries on. */
+  decision?: import('./approvalSuggestions').ApprovalDecisionName | 'deny' | 'clarify'
   execpolicyAmendment?: string[]
   requestPermissionsResponse?: RequestPermissionsResponse
   /**
@@ -1660,6 +1662,9 @@ export interface PlanReviewModelOption {
   id?: string
   provider: string
   model: string
+  /** The vendor listing's readable name for the model (`model_name`); display
+   *  only, the wire id when the listing named none. Identity keeps `model`. */
+  modelName?: string
   current?: boolean
   /** Where this row's requests go — shown under the name so two rows of one
    * provider/model are telling apart; never compared. */
@@ -1670,6 +1675,7 @@ export interface PlanReviewModelOption {
 export interface PlanReviewNote {
   provider: string
   model: string
+  modelName?: string
   text: string
   durationMs?: number
 }
@@ -1679,6 +1685,7 @@ export interface PlanReviewInFlight {
   reviewId: string
   provider?: string
   model: string
+  modelName?: string
   /** The reviewer subagent's roster key; cancelling it stops the review. */
   agentId?: string
 }

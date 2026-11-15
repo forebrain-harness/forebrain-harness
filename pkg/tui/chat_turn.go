@@ -1234,7 +1234,7 @@ func (s *ChatSession) notifyToolApprovalDenied(p *chatApprovalResume, actionID s
 	if status == "denied" && deliveredReview {
 		return
 	}
-	content := tool.DeniedToolDisplayBody(toolName, feedback)
+	content := tool.DeniedToolDisplayBody(toolName, input, feedback)
 	if status == "denied" {
 		// The refused call's card comes from the same constructor the runtime's
 		// own denied step and the in-place answer's card use, so the live card,

@@ -379,7 +379,7 @@ func resolvedApproval(act *state.Action, choice string, reply ApprovalReply) (Ap
 	}
 	switch act.Status {
 	case state.ActionDenied:
-		if choice == "deny" || choice == "decline" {
+		if choice == "deny" || choice == "decline" || choice == "clarify" {
 			return ApprovalResult{Action: act, Denied: true, Idempotent: true}, nil
 		}
 	case state.ActionCancelled:
@@ -452,6 +452,23 @@ func (s ApprovalService) decideAsk(ctx context.Context, act *state.Action, choic
 		next, err := s.Actions.Cancel(ctx, act.ID, approvalReason(reply.Reason, "cancelled"))
 		return ApprovalResult{Action: next, Cancelled: err == nil}, err
 	}
+	if choice == "clarify" {
+		// "Chat about this": the ask is refused, not cancelled. The engine owns
+		// the words, and the person's partial answers ride along so the model
+		// sees what they were looking at before asking again.
+		form, err := askFormOf(act.PayloadJSON)
+		if err != nil {
+			return ApprovalResult{}, err
+		}
+		var partial state.AskAnswer
+		if raw := strings.TrimSpace(reply.AskAnswerJSON); raw != "" {
+			// Lenient by design: these are answers to questions nobody
+			// answered, not a submitted form.
+			_ = json.Unmarshal([]byte(raw), &partial)
+		}
+		next, err := s.Actions.Deny(ctx, act.ID, tool.AskClarifyReason(form, partial))
+		return ApprovalResult{Action: next, Denied: err == nil}, err
+	}
 	if choice != "accept" {
 		return ApprovalResult{}, fmt.Errorf("unsupported user_interaction decision %q", choice)
 	}
@@ -461,6 +478,18 @@ func (s ApprovalService) decideAsk(ctx context.Context, act *state.Action, choic
 	}
 	next, err := s.Actions.AnswerAsk(ctx, act.ID, answer)
 	return ApprovalResult{Action: next, Answered: err == nil}, err
+}
+
+// askFormOf decodes the question form an ask action stores as its payload.
+func askFormOf(payloadJSON string) (state.AskForm, error) {
+	var form state.AskForm
+	if err := json.Unmarshal([]byte(strings.TrimSpace(payloadJSON)), &form); err != nil {
+		return state.AskForm{}, fmt.Errorf("decode ask form: %w", err)
+	}
+	if len(form.Questions) == 0 {
+		return state.AskForm{}, fmt.Errorf("ask form has no questions")
+	}
+	return form, nil
 }
 
 func (s ApprovalService) decidePermissions(ctx context.Context, act *state.Action, choice string, reply ApprovalReply) (ApprovalResult, error) {
@@ -1296,6 +1325,7 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvi
 			ID:           strings.TrimSpace(entry.ID),
 			Provider:     provider,
 			Model:        model,
+			ModelName:    llm.ListingDisplayName(provider, model),
 			Current:      current,
 			Endpoint:     ModelEndpointLabel(entry.BaseURL, entry.APIPath, entry.URLVerbatim),
 			EndpointTail: endpointTail(entry),
@@ -1370,10 +1400,11 @@ func planReviewNotesFrom(results []PlanReviewResult) []PlanReviewNote {
 	notes := make([]PlanReviewNote, 0, len(results))
 	for _, result := range results {
 		notes = append(notes, PlanReviewNote{
-			Provider: result.Model.Provider,
-			Model:    result.Model.Model,
-			Text:     result.Text,
-			Duration: result.Duration,
+			Provider:  result.Model.Provider,
+			Model:     result.Model.Model,
+			ModelName: llm.ListingDisplayName(result.Model.Provider, result.Model.Model),
+			Text:      result.Text,
+			Duration:  result.Duration,
 		})
 	}
 	return notes
@@ -1385,9 +1416,10 @@ func planReviewNotesFrom(results []PlanReviewResult) []PlanReviewNote {
 // plan_reviewed has not arrived — so every surface, in every process, agrees
 // on whether a review is running without sharing any memory.
 type PlanReviewInFlight struct {
-	ReviewID string
-	Provider string
-	Model    string
+	ReviewID  string
+	Provider  string
+	Model     string
+	ModelName string
 	// AgentID is the reviewer's roster key, from the subagent_spawned event
 	// whose parent tool call is the review. It is what a surface cancels to
 	// stop the review, the same way it stops any other subagent.
@@ -1431,10 +1463,11 @@ func ActivePlanReview(ctx context.Context, log PlanReviewLog, sessionID, actionI
 			continue
 		}
 		open := PlanReviewInFlight{
-			ReviewID: payload.ReviewID,
-			Provider: strings.TrimSpace(payload.Provider),
-			Model:    strings.TrimSpace(payload.Model),
-			AgentID:  planReviewerAgentID(ctx, log, sessionID, payload.ReviewID),
+			ReviewID:  payload.ReviewID,
+			Provider:  strings.TrimSpace(payload.Provider),
+			Model:     strings.TrimSpace(payload.Model),
+			ModelName: llm.ListingDisplayName(strings.TrimSpace(payload.Provider), strings.TrimSpace(payload.Model)),
+			AgentID:   planReviewerAgentID(ctx, log, sessionID, payload.ReviewID),
 		}
 		return open, true
 	}
@@ -1615,13 +1648,15 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 		event.RunEventPlanReviewStarted, event.PlanReviewStartedPayload{
 			ActionID: actionID, ReviewID: reviewID,
 			ModelID: model.ID, Provider: model.Provider, Model: model.Model,
+			ModelName:         llm.ListingDisplayName(model.Provider, model.Model),
 			ContinuesReviewID: continuesReviewID(in.Again),
 		}, time.Now()))
 	finish := func(outcome string, err error, text string, duration time.Duration) {
 		reviewed := event.PlanReviewedPayload{
 			ActionID: actionID, ReviewID: reviewID,
 			ModelID: model.ID, Provider: model.Provider, Model: model.Model,
-			Text: text, DurationMs: duration.Milliseconds(), Outcome: outcome,
+			ModelName: llm.ListingDisplayName(model.Provider, model.Model),
+			Text:      text, DurationMs: duration.Milliseconds(), Outcome: outcome,
 		}
 		if err != nil && outcome == planReviewOutcomeFailed {
 			reviewed.Error = strings.TrimSpace(err.Error())

@@ -235,3 +235,18 @@ func TestListUsableModelsHeader(t *testing.T) {
 	require.Equal(t, HeaderParts{Action: "Listing usable models"}, DisplayHeaderParts(list("running"), cwd))
 	require.Equal(t, HeaderParts{Action: "Failed to list usable models"}, DisplayHeaderParts(list("failed"), cwd))
 }
+
+// A refused question says what happened instead of the generic "Denied": the
+// body lists what was asked, so the head must not claim the call ran.
+func TestDeclinedAskHeaderSaysSo(t *testing.T) {
+	cwd := "/work/proj"
+	ask := func(status string) DisplayFrame {
+		return DisplayFrame{
+			Title: "user_interaction", Final: true,
+			Meta: ToolMeta{ToolName: "user_interaction", Status: status},
+		}
+	}
+	require.Equal(t, HeaderParts{Action: "User declined to answer questions"}, DisplayHeaderParts(ask("denied"), cwd))
+	require.Equal(t, HeaderParts{Action: "Asked user"}, DisplayHeaderParts(ask("completed"), cwd))
+	require.Equal(t, HeaderParts{Action: "Asking user"}, DisplayHeaderParts(ask("running"), cwd))
+}

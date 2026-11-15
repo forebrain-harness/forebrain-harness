@@ -194,10 +194,11 @@ func withImageRefusalRecorder(ctx context.Context, r *Runner, sessionID string) 
 		_ = r.publishSurfaceEvent(ctx, event.NewRunEvent(
 			"image-rejected:"+runID, runID, sessionID, event.RunEventImageRejected,
 			event.ImageRejectedPayload{
-				Code:     ImageRejectedCode,
-				Provider: provider,
-				Model:    model,
-				Reason:   reason,
+				Code:      ImageRejectedCode,
+				Provider:  provider,
+				Model:     model,
+				ModelName: llm.ListingDisplayName(provider, model),
+				Reason:    reason,
 			},
 			time.Now(),
 		))

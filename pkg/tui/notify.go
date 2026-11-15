@@ -304,12 +304,13 @@ func imageRejectedMessage(evt event.RunEvent) (any, bool) {
 // cannot drift.
 func imageRejectedLine(p event.ImageRejectedPayload) string {
 	model := strings.TrimSpace(p.Model)
-	if provider := strings.TrimSpace(p.Provider); provider != "" && model != "" {
-		model = provider + "/" + model
+	label := ""
+	if model != "" {
+		label = llm.FormatProviderModelDisplay(strings.TrimSpace(p.Provider), model)
 	}
 	sentence := "an image in this turn was rejected by the provider; it was sent as a text note instead"
-	if model != "" {
-		sentence = "an image in this turn was rejected by " + model + "; it was sent as a text note instead"
+	if label != "" {
+		sentence = "an image in this turn was rejected by " + label + "; it was sent as a text note instead"
 	}
 	sentence += " — switch model with /model to send pictures again"
 	if reason := strings.TrimSpace(p.Reason); reason != "" {

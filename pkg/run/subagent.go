@@ -2390,7 +2390,7 @@ func notifySubagentSpawnedDirect(fac Factory, entry agent.HistoryEntry, origin s
 		TaskID: strings.TrimSpace(entry.TaskID), Title: strings.TrimSpace(entry.Title), Task: strings.TrimSpace(entry.Task),
 		WorkerSessionID: entry.WorkerSessionID, ParentRunID: entry.ParentRunID,
 		ParentToolCallID: entry.ParentToolCallID, TaskIndex: entry.TaskIndex, ExecutionID: entry.ExecutionID,
-		ModelProvider: provider, Model: model, ReasoningEffort: effort,
+		ModelProvider: provider, Model: model, ModelName: llm.ListingDisplayName(provider, model), ReasoningEffort: effort,
 		Origin: origin,
 	})
 }

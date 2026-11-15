@@ -15474,19 +15474,68 @@ func TestQuestionOverlayChatAboutThisNumberUnique(t *testing.T) {
 	}
 }
 
-func TestQuestionOverlayChatAboutThisCancels(t *testing.T) {
+// "Chat about this" is Claude Code's clarify, not a cancel: the ask is refused
+// and the turn carries on so the model can ask what the person wants to
+// clarify. The contract was revised in 2026-11 to match Claude Code; the old
+// case here asserted a cancel.
+func TestQuestionOverlayChatAboutThisRefusesWithClarify(t *testing.T) {
 	o := newTestOverlay(sampleForm())
-	// Navigate to "Chat about this" (cursor = chatIdx = 3 for 2-option single-select).
-	chatIdx := o.chatIdx()
-	for o.cursor < chatIdx {
+	for o.cursor < o.chatIdx() {
 		o.handleKey(parsedKey{kind: rawKeyDown})
 	}
-	if o.cursor != chatIdx {
-		t.Fatalf("expected cursor=%d, got %d", chatIdx, o.cursor)
-	}
 	dec, done := o.handleKey(parsedKey{kind: rawKeyEnter})
-	if !done || !dec.Cancelled {
-		t.Fatalf("Chat about this must cancel: done=%v dec=%+v", done, dec)
+	if !done {
+		t.Fatalf("chat row must close the form: dec=%+v", dec)
+	}
+	if dec.Cancelled || !dec.Denied || !dec.AskClarify {
+		t.Fatalf("chat about this must refuse with clarify, not cancel: dec=%+v", dec)
+	}
+	if !strings.Contains(dec.AskAnswerJSON, `"answers"`) {
+		t.Fatalf("the form's partial answer must ride along: %q", dec.AskAnswerJSON)
+	}
+}
+
+// The declined ask card says the person refused to answer and lists what was
+// asked, the way Claude Code's declined ask reads — never the engine's clarify
+// instruction, and never the empty-body placeholder.
+func TestDeclinedAskCardDrawsTheQuestionsNotTheClarifyText(t *testing.T) {
+	evt := tool.DeniedToolStep("call-1", "user_interaction", map[string]any{"questions": []any{
+		map[string]any{
+			"header":   "轮询方案",
+			"question": "最多等待多久？",
+			"options":  []any{map[string]any{"label": "60 秒"}, map[string]any{"label": "15 秒"}},
+		},
+	}}, "The user wants to clarify these questions.")
+	meta := tool.BuildToolMeta(evt)
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	frame := Frame{
+		Kind: FrameTool, Title: meta.ToolName, Content: body, Final: true, ToolMeta: meta,
+	}
+	var out bytes.Buffer
+	NewRenderer(&out, &out).renderCompactFrame(frame, "tool", toolHeaderColor(frame))
+	plain := stripANSI(out.String())
+	for _, want := range []string{"User declined to answer questions", "· 最多等待多久？ (60 秒 / 15 秒)"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("declined ask card missing %q:\n%s", want, plain)
+		}
+	}
+	for _, unwanted := range []string{"(no output)", "The user wants to clarify"} {
+		if strings.Contains(plain, unwanted) {
+			t.Fatalf("declined ask card must not show %q:\n%s", unwanted, plain)
+		}
+	}
+}
+
+// A declined ask is not an error: its head keeps the ordinary tool ink (and the
+// flat gray under NO_COLOR), not the red of a failed or denied call.
+func TestDeniedAskHeaderColor(t *testing.T) {
+	f := Frame{Kind: FrameTool, Title: "user_interaction", ToolMeta: tool.ToolMeta{Status: "denied"}}
+	if got := toolHeaderColor(f); got != ordinaryToolHeaderColor {
+		t.Fatalf("declined ask header color = %q, want %q", got, ordinaryToolHeaderColor)
+	}
+	t.Setenv("NO_COLOR", "1")
+	if got := toolHeaderColor(f); got != "244" {
+		t.Fatalf("declined ask header color under NO_COLOR = %q, want 244", got)
 	}
 }
 

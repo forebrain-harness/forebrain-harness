@@ -90,6 +90,13 @@
            in the agent's words, then each answer under it — never the raw
            result as one paragraph of text. -->
       <AskDoneCard v-else-if="isAnsweredAsk" :text="String(step.output ?? '')" />
+      <!-- A declined question keeps its body: what was asked, one line each, the
+           way the terminal's card lists it (never the engine's clarify text). -->
+      <ToolOutput
+        v-else-if="isDeclinedAsk"
+        :output="String(step.output ?? '') || t('chat.toolNoOutput')"
+        :error-text="''"
+      />
       <!-- A shell call's body is its result only (plan 137): the streams, the
            files, the notes and the truncation footer, from the gateway's own
            card facts — never the Markdown body the card once rendered. While
@@ -380,12 +387,20 @@ const gateFooter = computed(() => {
 })
 
 /**
+ * A question the reader declined: the card lists what was asked (Claude Code's
+ * declined ask), so it is not the ordinary refusal sentence.
+ */
+const isDeclinedAsk = computed(() =>
+  String(props.step.toolName ?? '').trim() === 'user_interaction' && toolStatus.value === 'denied',
+)
+
+/**
  * A settled refusal draws two lines: the one sentence that says what happened
  * to this call, then — when the user gave their words — those words under the
  * arrow (prototype ⑬⑭). The engine's own display body stays untranslated
  * model-facing text; the sentence here is the reader's.
  */
-const isRefused = computed(() => toolStatus.value === 'denied')
+const isRefused = computed(() => toolStatus.value === 'denied' && !isDeclinedAsk.value)
 
 const refusalWords = computed(() => String(props.step.denyFeedback ?? '').trim())
 
@@ -412,9 +427,12 @@ const isAnsweredAsk = computed(() => (
  * The prototype draws a settled ask open (:3113) and a kept plan's facts line
  * open (:4842): the answer is the point of the card, so it is not hidden
  * behind the fold. A live call still opens closed, as every other call's card
- * does, and so does an ordinary exit — only keeping the plan is an answer.
+ * does, and so does an ordinary exit — only keeping the plan is an answer. A
+ * declined ask opens too: the question replay is the card's whole body.
  */
-const openedByDefault = computed(() => props.defaultOpen || isAnsweredAsk.value || isKeptPlan.value)
+const openedByDefault = computed(
+  () => props.defaultOpen || isAnsweredAsk.value || isKeptPlan.value || isDeclinedAsk.value,
+)
 
 const toolStatusLabel = computed(() => {
   const labels = {

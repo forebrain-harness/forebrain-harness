@@ -145,7 +145,7 @@ export interface ChatMessage {
    * one this turn and the request went on without it (`rejected`), or this
    * conversation already paid for that refusal on this model and the turn was
    * withheld (`remembered`). All three end at /model. */
-  imageRefusal?: { provider: string; model: string; kind?: 'unsupported' | 'rejected' | 'remembered' }
+  imageRefusal?: { provider: string; model: string; modelName?: string; kind?: 'unsupported' | 'rejected' | 'remembered' }
 }
 
 /**
@@ -1792,6 +1792,9 @@ export interface SubagentTranscript {
    */
   modelProvider?: string
   model?: string
+  /** The vendor listing's readable name for `model` (`model_name`); display
+   *  only, absent when the listing named none. Identity keeps `model`. */
+  modelName?: string
   reasoningEffort?: string
   /**
    * The agent's own checklist state, the facts its working line shows and its
@@ -5094,6 +5097,7 @@ export function useChatStream() {
       imageRefusal: {
         provider: String(payload.provider ?? '').trim(),
         model: String(payload.model ?? '').trim(),
+        modelName: String(payload.modelName ?? '').trim() || undefined,
         kind: 'rejected',
       },
     }
@@ -5324,6 +5328,7 @@ export function useChatStream() {
         // The model is the engine's own resolution, read — not derived here.
         modelProvider: String(payload.modelProvider ?? '').trim() || undefined,
         model: String(payload.model ?? '').trim() || undefined,
+        modelName: String(payload.modelName ?? '').trim() || undefined,
         reasoningEffort: String(payload.reasoningEffort ?? '').trim() || undefined,
         executionStarts: executionId
           ? { ...(entry.executionStarts ?? {}), [executionId]: evt.createdAt ?? entry.startedAt ?? '' }
@@ -5460,7 +5465,8 @@ export function useChatStream() {
       if (!reviewId) return
       const provider = String(payload.provider ?? '').trim()
       const model = String(payload.model ?? '').trim()
-      const label = [provider, model].filter(Boolean).join('/')
+      const modelName = String(payload.modelName ?? '').trim()
+      const label = [provider, modelName || model].filter(Boolean).join('/')
       const step = {
         stepId: reviewId,
         toolName: '',
@@ -6275,6 +6281,7 @@ export function useChatStream() {
             imageRefusal: {
               provider: String(data.provider ?? '').trim(),
               model: String(data.model ?? '').trim(),
+              modelName: String(data.modelName ?? '').trim() || undefined,
               ...(code === 'image_rejected_by_provider' ? { kind: 'remembered' as const } : {}),
             },
           }))

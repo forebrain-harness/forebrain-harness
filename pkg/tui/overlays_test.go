@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -3591,5 +3592,285 @@ func TestExitPlanOverlayReviewAgainRow(t *testing.T) {
 	rendered := out.String()
 	if strings.Contains(rendered, "Which model should") {
 		t.Fatalf("the again row must not open a picker:\n%s", rendered)
+	}
+}
+
+// signInWaitPage is the page /connect prints while a device-code sign-in waits
+// for the person in the browser: the address to open and the code to enter.
+const signInWaitPage = "Open https://signin.volcengine.com/authorize/oauth/device and enter this code.\n\n27S2-9U93"
+
+// signInWaitRenderer paints that page into a viewport renderer and returns the
+// screen row the device code landed on, so a test drags over the code without
+// hardcoding coordinates. Clipboard writes are stubbed: a release that ends a
+// drag copies to the system clipboard, which a test must not touch.
+func signInWaitRenderer(t *testing.T) (*Renderer, int) {
+	t.Helper()
+	prev := clipboardWriteText
+	clipboardWriteText = func(context.Context, string) error { return nil }
+	t.Cleanup(func() { clipboardWriteText = prev })
+	r := newComposerRenderer(t, 80, 24)
+	r.RenderFrame(Frame{Kind: FrameRaw, Content: signInWaitPage, Final: true})
+	row := -1
+	for i, line := range r.vpLastRender.lines {
+		if strings.Contains(stripANSI(line), "27S2-9U93") {
+			row = i
+		}
+	}
+	if row < 0 {
+		t.Fatalf("the sign-in page is not on screen:\n%s", strings.Join(r.vpLastRender.lines, "\n"))
+	}
+	return r, row
+}
+
+// sgrMouseReport builds one SGR mouse report with 1-based coordinates: button 0
+// is a press, 32 a drag (button held), and a release ends with 'm'.
+func sgrMouseReport(col, row, button int, press bool) []byte {
+	term := "M"
+	if !press {
+		term = "m"
+	}
+	return []byte(fmt.Sprintf("\x1b[<%d;%d;%d%s", button, col, row, term))
+}
+
+// sgrDrag is the gesture that selects a run of text: press at col, drag span
+// cells right, release there.
+func sgrDrag(col, row, span int) []byte {
+	out := sgrMouseReport(col, row, 0, true)
+	out = append(out, sgrMouseReport(col+span, row, 32, true)...)
+	out = append(out, sgrMouseReport(col+span, row, 0, false)...)
+	return out
+}
+
+// TestSignInWaitWithoutAnInputOwnerLosesTheDrag pins the reported defect: while
+// a sign-in wait blocks the input loop, the shared reader decodes the mouse
+// report but has nobody to hand it to, so a drag over the page selects nothing
+// and copies nothing. The fix gives the wait its own input ownership; this case
+// stays to keep that requirement visible — with no owner, nothing arrives.
+func TestSignInWaitWithoutAnInputOwnerLosesTheDrag(t *testing.T) {
+	r, row := signInWaitRenderer(t)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := readRawInputEvents(ctx, pr, io.Discard, stubRawInputController{}, testRawInputHistoryStore{})
+
+	// The main loop is blocked in the sign-in wait: nobody drains `events`.
+	if _, err := pw.Write(sgrDrag(1, row+1, 9)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case ev := <-events:
+		t.Logf("the reader decoded the report (kind=%v) — stuck in the channel", ev.kind)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reader never decoded the mouse report")
+	}
+	if r.HasSelection() {
+		t.Fatal("BUG NOT REPRODUCED: the renderer holds a selection")
+	}
+	if notice := copyNotice(r); notice != "" {
+		t.Fatalf("BUG NOT REPRODUCED: the footer says %q", notice)
+	}
+}
+
+// selectCopiedText is the text the renderer last copied, read under its lock.
+func selectCopiedText(r *Renderer) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.selectCopied
+}
+
+// TestAwaitSignInSelectsAndCopiesThePageWhileTheFlowRuns is the fix itself:
+// while the flow waits for the person in the browser, the wait owns the
+// terminal, so a drag over the page /connect printed selects it and the release
+// copies it — and a bare Esc is the person abandoning the sign-in.
+func TestAwaitSignInSelectsAndCopiesThePageWhileTheFlowRuns(t *testing.T) {
+	r, row := signInWaitRenderer(t)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+
+	rs := newRawSelector(pr, r)
+	done := make(chan error, 1)
+	result := make(chan error, 1)
+	go func() { result <- rs.AwaitSignIn(done) }()
+
+	// The drag waits in the pipe until the wait reaches the fd, which is what a
+	// terminal does with input that arrives while the reader is paused.
+	if _, err := pw.Write(sgrDrag(1, row+1, 9)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for !strings.Contains(selectCopiedText(r), "27S2-9U93") {
+		select {
+		case err := <-result:
+			t.Fatalf("the wait ended before the release copied: err=%v notice=%q", err, copyNotice(r))
+		case <-deadline:
+			t.Fatalf("a drag over the device code copied nothing; screen:\n%s", strings.Join(r.vpLastRender.lines, "\n"))
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if notice := copyNotice(r); !strings.HasPrefix(notice, "copied ") {
+		t.Fatalf("footer notice = %q, want the release's copy notice", notice)
+	}
+	if _, err := pw.Write([]byte{0x1b}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrCancelled) {
+			t.Fatalf("the wait returned %v, want ErrCancelled for a bare Esc", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the wait ignored Esc")
+	}
+}
+
+// TestAwaitSignInEndsWhenTheFlowEndsWithoutAKey: the wait comes back the moment
+// the flow ends — it watches the outcome, it does not park until a key arrives.
+// The shared reader runs here, which is the real topology and the reason the
+// pause is immediate.
+func TestAwaitSignInEndsWhenTheFlowEndsWithoutAKey(t *testing.T) {
+	r, _ := signInWaitRenderer(t)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Nobody drains the events channel: the input loop is blocked here, in the
+	// wait, which is the whole point.
+	_ = readRawInputEvents(ctx, pr, io.Discard, stubRawInputController{}, testRawInputHistoryStore{})
+
+	rs := newRawSelector(pr, r)
+	done := make(chan error, 1)
+	result := make(chan error, 1)
+	go func() { result <- rs.AwaitSignIn(done) }()
+
+	done <- nil
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("the wait returned %v, want the flow's outcome", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the wait parked after the flow ended: it only came back for a key")
+	}
+}
+
+// TestAwaitSignInFallsBackWhenTheInputIsOwned: another modal is mid-key, so the
+// wait must not take the input from it, must not block, and must return the
+// flow's outcome when it arrives.
+func TestAwaitSignInFallsBackWhenTheInputIsOwned(t *testing.T) {
+	r, _ := signInWaitRenderer(t)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+
+	rs := newRawSelector(pr, r)
+	// readKey holds stdinReadMu for its whole call, so a modal reading the
+	// terminal is exactly this: the mutex taken.
+	stdinReadMu.Lock()
+	taken := true
+	release := func() {
+		if taken {
+			stdinReadMu.Unlock()
+			taken = false
+		}
+	}
+	defer release()
+
+	done := make(chan error, 1)
+	result := make(chan error, 1)
+	go func() { result <- rs.AwaitSignIn(done) }()
+
+	done <- nil
+	select {
+	case err := <-result:
+		release()
+		if err != nil {
+			t.Fatalf("the wait returned %v, want the flow's outcome", err)
+		}
+	case <-time.After(time.Second):
+		release()
+		t.Fatal("the wait took the input from a modal that was reading it")
+	}
+	if depth := interactiveInputPauseDepth.Load(); depth != 0 {
+		t.Fatalf("pause depth = %d, want the wait to leave the input alone", depth)
+	}
+}
+
+// TestAwaitSignInFallsBackWithoutAViewport: the onboarding's own pages and piped
+// stdin draw no viewport, so there is no selection to serve and the wait is the
+// plain wait it always was.
+func TestAwaitSignInFallsBackWithoutAViewport(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+
+	rs := newRawSelector(pr, nil)
+	done := make(chan error, 1)
+	result := make(chan error, 1)
+	go func() { result <- rs.AwaitSignIn(done) }()
+
+	done <- nil
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("the wait returned %v, want the flow's outcome", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the wait did not fall back to the plain wait")
+	}
+	if depth := interactiveInputPauseDepth.Load(); depth != 0 {
+		t.Fatalf("pause depth = %d, want no ownership without a viewport", depth)
+	}
+}
+
+// TestAwaitSignInReportsAReadError: a terminal that has gone away is reported
+// instead of parking the whole setup on it.
+func TestAwaitSignInReportsAReadError(t *testing.T) {
+	r, _ := signInWaitRenderer(t)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer pr.Close()
+
+	rs := newRawSelector(pr, r)
+	done := make(chan error, 1)
+	result := make(chan error, 1)
+	go func() { result <- rs.AwaitSignIn(done) }()
+
+	// The other end is gone: every read now reports EOF.
+	if err := pw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("the wait returned no error after the terminal closed")
+		}
+		if !strings.Contains(err.Error(), "sign-in wait") {
+			t.Fatalf("error = %v, want it to name the wait", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait parked on a terminal that cannot deliver input")
 	}
 }

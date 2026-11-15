@@ -391,9 +391,10 @@ describe('ApprovalCard', () => {
 
     await wrapper.find('[data-testid="ask-chat-about"]').trigger('click')
     await flushPromises()
-    // One gesture, both halves: the question is dropped and the caller is told
-    // to put the caret in the composer.
-    expect(approve).toHaveBeenCalledWith('act-ask', { decision: 'cancel' })
+    // One gesture, both halves: the question is refused with the engine's
+    // clarify instruction (not cancelled, so the turn carries on) and the
+    // caller is told to put the caret in the composer.
+    expect(approve).toHaveBeenCalledWith('act-ask', { decision: 'clarify' })
     expect(wrapper.emitted('focus-composer')).toHaveLength(1)
     wrapper.unmount()
   })

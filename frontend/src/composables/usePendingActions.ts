@@ -103,12 +103,12 @@ export function usePendingActions(options: {
   }
 
   function modelLabel(model: PlanReviewModelOption): string {
-    return [model.provider, model.model].filter(Boolean).join('/')
+    return [model.provider, model.modelName || model.model].filter(Boolean).join('/')
   }
 
   function activeReviewLabel(a: ActionRow): string {
     const active = exitPlanRequest(a)?.planReviewActive
-    return [active?.provider, active?.model ?? ''].filter(Boolean).join('/')
+    return [active?.provider, active?.modelName || (active?.model ?? '')].filter(Boolean).join('/')
   }
 
   /** The clear-context choice names what it frees when the number is known,
@@ -308,6 +308,13 @@ export function usePendingActions(options: {
    *  question — not the run. */
   async function cancelAsk(actionId: string) {
     await submitAction(actionId, () => forebrainApi.actionsApprove(actionId, { decision: 'cancel' }))
+  }
+
+  /** 「和它聊聊」: this question is not cancelled — the engine records a refusal
+   *  carrying its own clarify instruction (composed in Go, tool.AskClarifyReason),
+   *  so the turn carries on and the model asks what to clarify. */
+  async function clarifyAsk(actionId: string) {
+    await submitAction(actionId, () => forebrainApi.actionsApprove(actionId, { decision: 'clarify' }))
   }
 
   /** One question's answer, written by whichever surface is asking it — the
@@ -585,6 +592,7 @@ export function usePendingActions(options: {
     clearContextLabel,
     submitAsk,
     cancelAsk,
+    clarifyAsk,
     setAskAnswer,
     setAskOther,
     submitApprovalDecision,

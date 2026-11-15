@@ -509,8 +509,12 @@ type SubagentSpawnedPayload struct {
 	ExecutionID      string `json:"execution_id,omitempty"`
 	// The model this execution runs on, resolved once when it starts;
 	// surfaces show it rather than re-deriving it from the agent's type.
-	ModelProvider   string `json:"model_provider,omitempty"`
-	Model           string `json:"model,omitempty"`
+	ModelProvider string `json:"model_provider,omitempty"`
+	Model         string `json:"model,omitempty"`
+	// ModelName is the vendor listing's readable name for Model (model_name),
+	// empty when the listing named none. Display only: a surface shows
+	// ModelName when set, Model otherwise; identity keeps Model.
+	ModelName       string `json:"model_name,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// Origin is who started this execution: "user" when a message the user
 	// sent the subagent began it, empty when the dispatching agent did.
@@ -600,6 +604,9 @@ type PlanReviewStartedPayload struct {
 	ModelID  string `json:"model_id,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model"`
+	// ModelName is the vendor listing's readable name for Model (model_name),
+	// empty when the listing named none; display only, identity keeps Model.
+	ModelName string `json:"model_name,omitempty"`
 	// ContinuesReviewID names the review whose subagent conversation this one
 	// continues: the user asked the same reviewer to look again, so the review
 	// runs on in that reviewer's own session. Empty = a fresh review.
@@ -614,6 +621,7 @@ type PlanReviewedPayload struct {
 	ModelID    string `json:"model_id,omitempty"`
 	Provider   string `json:"provider,omitempty"`
 	Model      string `json:"model"`
+	ModelName  string `json:"model_name,omitempty"`
 	Text       string `json:"text,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	Outcome    string `json:"outcome"`
@@ -776,7 +784,10 @@ type ImageRejectedPayload struct {
 	Code     string `json:"code,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+	// ModelName is the vendor listing's readable name for Model (model_name),
+	// empty when the listing named none; display only, identity keeps Model.
+	ModelName string `json:"model_name,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 // TransportRetryPayload mirrors llm.TransportRetry on the wire. Retry/Total

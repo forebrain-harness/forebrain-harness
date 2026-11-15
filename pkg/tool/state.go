@@ -245,7 +245,10 @@ type StepEvent struct {
 	// surface that only sees events draws exactly what the persisted row
 	// replays.
 	Denied bool `json:"denied,omitempty"`
-	// DenyFeedback is the user's own words from that refusal, if any.
+	// DenyFeedback is the user's own words from that refusal, if any. It stays
+	// empty for user_interaction: an ask's only refusal is "Chat about this",
+	// whose reason is the engine's clarify text for the model and rides in the
+	// denial result's content alone, never on the card.
 	DenyFeedback string `json:"deny_feedback,omitempty"`
 }
 

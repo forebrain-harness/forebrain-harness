@@ -84,10 +84,11 @@ func RejectionText(subagent bool, feedback string) string {
 
 // DeniedToolDisplayBody is the one sentence a refused tool call shows as its
 // card body — live when the refusal lands, and on every replay of the tool
-// result row that recorded it. feedback is the user's own words from the
-// refusal. It is display only: the model still receives the instruction text
-// the denial result's content carries.
-func DeniedToolDisplayBody(toolName, feedback string) string {
+// result row that recorded it. input is the call as it was made, so a refused
+// question can play back what it asked; feedback is the user's own words from
+// the refusal. It is display only: the model still receives the instruction
+// text the denial result's content carries.
+func DeniedToolDisplayBody(toolName string, input map[string]any, feedback string) string {
 	switch {
 	case strings.EqualFold(strings.TrimSpace(toolName), "exit_plan_mode"):
 		if feedback = strings.TrimSpace(feedback); feedback != "" {
@@ -96,6 +97,8 @@ func DeniedToolDisplayBody(toolName, feedback string) string {
 		return "(no output)"
 	case strings.EqualFold(strings.TrimSpace(toolName), "request_permissions"):
 		return "The user did not approve the requested permissions"
+	case strings.EqualFold(strings.TrimSpace(toolName), "user_interaction"):
+		return userInteractionDeclinedBody(input)
 	default:
 		return ""
 	}
@@ -106,10 +109,17 @@ func DeniedToolDisplayBody(toolName, feedback string) string {
 // and derives that result's persisted display from it, so the card a live
 // surface draws and the card every replay of the row draws are one card.
 func DeniedToolStep(stepID, toolName string, input map[string]any, feedback string) StepEvent {
+	toolName = strings.TrimSpace(toolName)
+	if strings.EqualFold(toolName, userInteractionToolName) {
+		// The ask's only refusal is "Chat about this": its stored reason is the
+		// engine's clarify text for the model, not the person's words, so the
+		// card carries none — its body is the questions themselves.
+		feedback = ""
+	}
 	return StepEvent{
 		Kind:         StepKindToolCompleted,
 		StepID:       strings.TrimSpace(stepID),
-		ToolName:     strings.TrimSpace(toolName),
+		ToolName:     toolName,
 		Input:        input,
 		Denied:       true,
 		DenyFeedback: strings.TrimSpace(feedback),
@@ -135,7 +145,7 @@ func FormatToolStepResult(evt StepEvent, maxBytes int) (formatted string, trunca
 	}
 	// A refused call never ran; its body is the refusal's own sentence.
 	if evt.Denied {
-		return DeniedToolDisplayBody(toolName, evt.DenyFeedback), false
+		return DeniedToolDisplayBody(toolName, evt.Input, evt.DenyFeedback), false
 	}
 	if stepRequiresApproval(evt) {
 		return "", false
@@ -2296,7 +2306,10 @@ func userInteractionLabel(verb string, evt StepEvent) string {
 
 // userInteractionQuestions projects the questions a call asked, in order: the
 // header that keys the answer, and the question itself, which is what a reader
-// is shown.
+// is shown. It reads both shapes a call arrives in — the model's arguments
+// (header/question/options) and the form the runtime stores as the action's
+// payload (id/prompt/options) — so one projection serves the live card and a
+// replay of the same row.
 func userInteractionQuestions(input map[string]any) []userInteractionQuestion {
 	if len(input) == 0 {
 		return nil
@@ -2311,8 +2324,13 @@ func userInteractionQuestions(input map[string]any) []userInteractionQuestion {
 	}
 	out := make([]userInteractionQuestion, 0, len(questions))
 	for _, q := range questions {
-		q.Header = strings.TrimSpace(q.Header)
-		q.Question = strings.TrimSpace(q.Question)
+		q.ID = strings.TrimSpace(q.ID)
+		q.Prompt = strings.TrimSpace(q.Prompt)
+		q.Header = firstNonEmpty(q.Header, q.ID)
+		q.Question = firstNonEmpty(q.Question, q.Prompt)
+		for i := range q.Options {
+			q.Options[i].Label = strings.TrimSpace(q.Options[i].Label)
+		}
 		if q.Header == "" {
 			continue
 		}
@@ -2322,8 +2340,53 @@ func userInteractionQuestions(input map[string]any) []userInteractionQuestion {
 }
 
 type userInteractionQuestion struct {
-	Header   string `json:"header"`
-	Question string `json:"question"`
+	Header   string                  `json:"header"`
+	Question string                  `json:"question"`
+	ID       string                  `json:"id"`
+	Prompt   string                  `json:"prompt"`
+	Options  []userInteractionOption `json:"options"`
+}
+
+type userInteractionOption struct {
+	Label string `json:"label"`
+}
+
+// Text is the question as a reader is shown it: the question itself, or its
+// header when the call carried no question.
+func (q userInteractionQuestion) Text() string {
+	if q.Question != "" {
+		return q.Question
+	}
+	return q.Header
+}
+
+// userInteractionDeclinedBody is the body of a question call the person
+// declined to answer: one line per question — the question, then the options
+// it offered — the way Claude Code's declined ask reads. Empty when the call
+// carries no question this build can read (a migrated row), which leaves the
+// card on the ordinary empty-body path rather than inventing text.
+func userInteractionDeclinedBody(input map[string]any) string {
+	questions := userInteractionQuestions(input)
+	if len(questions) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(questions))
+	for _, q := range questions {
+		line := "· " + q.Text()
+		labels := make([]string, 0, len(q.Options))
+		for _, opt := range q.Options {
+			if opt.Label == "" {
+				continue
+			}
+			labels = append(labels, opt.Label)
+		}
+		if len(labels) > 0 {
+			line += " (" + strings.Join(labels, " / ") + ")"
+		}
+		lines = append(lines, line)
+	}
+	body, _ := clampBody(strings.Join(lines, "\n"), DefaultMaxFormattedBody)
+	return body
 }
 
 func appendUserInteractionAnswer(sb *strings.Builder, answer string) {

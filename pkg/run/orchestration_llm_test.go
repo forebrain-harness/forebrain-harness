@@ -4904,7 +4904,7 @@ func TestDeniedToolResultCarriesItsDisplay(t *testing.T) {
 	if denial.ToolDisplay == nil {
 		t.Fatal("the denial tool result must carry the display the replay draws from")
 	}
-	if got := denial.ToolDisplay.Body; got != toolpkg.DeniedToolDisplayBody("exit_plan_mode", "改成先写测试") {
+	if got := denial.ToolDisplay.Body; got != toolpkg.DeniedToolDisplayBody("exit_plan_mode", nil, "改成先写测试") {
 		t.Fatalf("denial display body = %q, want the sentence the live card shows", got)
 	}
 	var meta struct {
@@ -5105,7 +5105,7 @@ func TestDeniedToolCallAnnouncesItsSettledStep(t *testing.T) {
 	if denial.ToolDisplay.ToolMetaJSON != wantDisplay.ToolMetaJSON {
 		t.Fatalf("denial display meta = %q, want %q (derived from the denied step)", denial.ToolDisplay.ToolMetaJSON, wantDisplay.ToolMetaJSON)
 	}
-	if got := denial.ToolDisplay.Body; got != toolpkg.DeniedToolDisplayBody("exit_plan_mode", "改成先写测试") {
+	if got := denial.ToolDisplay.Body; got != toolpkg.DeniedToolDisplayBody("exit_plan_mode", nil, "改成先写测试") {
 		t.Fatalf("denial display body = %q, want the sentence the live card shows", got)
 	}
 }

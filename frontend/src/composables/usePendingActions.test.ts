@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
 
 import { setLocale } from '@/locales'
+import { forebrainApi } from '@/lib/api'
 import type { ApprovalDecisionName } from '@/lib/approvalSuggestions'
 import type { ApprovalFacts } from '@/lib/approvalGates'
 import type { ActionRow } from './usePendingActions'
@@ -171,5 +172,30 @@ describe('usePendingActions pendingForStep', () => {
   it('finds nothing when the named request is no longer pending', () => {
     const { pendingForStep } = storeWith([row('act-other')])
     expect(pendingForStep('call-write', [{ actionId: 'act-settled', toolStepId: 'call-write' }])).toBeNull()
+  })
+})
+
+/**
+ * 「和它聊聊」is Claude Code's clarify, not a cancel: the ask is refused with the
+ * engine's own instruction so the turn carries on. The card posts that decision
+ * and nothing else — one request per click.
+ */
+describe('usePendingActions clarifyAsk', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('sends the clarify decision once', async () => {
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const { clarifyAsk } = usePendingActions({
+      sessionId: ref(null),
+      version: ref(0),
+      contextUsedPercent: ref(null),
+    })
+
+    await clarifyAsk('act-ask')
+
+    expect(approve).toHaveBeenCalledTimes(1)
+    expect(approve).toHaveBeenCalledWith('act-ask', { decision: 'clarify' })
   })
 })

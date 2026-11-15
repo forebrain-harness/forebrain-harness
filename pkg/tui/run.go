@@ -1177,21 +1177,18 @@ func summarizeComposerModel(session Session) string {
 }
 
 // subagentModelFooterLabel names the model one spawned execution runs on the
-// way the composer footer does: provider/model, with the spacing a display
-// string may carry normalized away. Empty when the spawn named no model — a
-// view the spawn said nothing about names nothing rather than borrowing the
-// conversation's.
+// way the composer footer does: the vendor listing's display name when it
+// carries one (qodercn/gfmodel -> qodercn/GLM-5.3-Flash), the wire id otherwise,
+// with the spacing a display string may carry normalized away. Empty when the
+// spawn named no model — a view the spawn said nothing about names nothing
+// rather than borrowing the conversation's.
 func subagentModelFooterLabel(provider, model string) string {
 	provider = strings.TrimSpace(provider)
 	model = strings.ReplaceAll(strings.TrimSpace(model), " / ", "/")
-	switch {
-	case provider != "" && model != "":
-		return provider + "/" + model
-	case model != "":
-		return model
-	default:
+	if model == "" {
 		return ""
 	}
+	return llm.FormatProviderModelDisplay(provider, model)
 }
 
 func summarizeComposerReasoningEffort(session Session) string {

@@ -541,6 +541,31 @@ describe('ToolCallCard gates', () => {
     expect(other.get('[data-testid="tool-refused"] .say').text()).toBe('你拒绝了这次调用，它没有执行。')
     expect(other.find('[data-testid="tool-refused"] .said').exists()).toBe(false)
   })
+
+  it('draws a declined question as what was asked, not as a refusal', () => {
+    setLocale('zh')
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        step: stepOf({
+          toolName: 'user_interaction',
+          summary: 'asked user',
+          status: 'denied',
+          // The gateway's header parts for a refused ask (pkg/tool/header_parts.go).
+          headerParts: { action: 'User declined to answer questions' },
+          output: '· 最多等待多久？ (60 秒 / 15 秒)',
+          // The engine's clarify instruction for the model: never on the card.
+          denyFeedback: 'The user wants to clarify these questions.',
+        }),
+      },
+    })
+    expect(wrapper.text()).toContain('用户拒绝回答提问')
+    expect(wrapper.text()).toContain('· 最多等待多久？ (60 秒 / 15 秒)')
+    expect(wrapper.text()).not.toContain('The user wants to clarify')
+    expect(wrapper.find('[data-testid="tool-refused"]').exists()).toBe(false)
+    // The question replay is the card's whole body, so it is drawn open.
+    expect(wrapper.get('[data-slot="collapsible-trigger"]').attributes('aria-expanded')).toBe('true')
+    wrapper.unmount()
+  })
 })
 
 /**

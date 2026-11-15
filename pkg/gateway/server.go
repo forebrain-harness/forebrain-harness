@@ -2456,6 +2456,9 @@ func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request, opts wsCon
 					"provider": detail.Provider,
 					"model":    detail.Model,
 				}
+				if name := llm.ListingDisplayName(detail.Provider, detail.Model); name != "" {
+					data["model_name"] = name
+				}
 				if reason := strings.TrimSpace(detail.Reason); reason != "" {
 					data["reason"] = reason
 				}

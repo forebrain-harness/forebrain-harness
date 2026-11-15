@@ -2004,3 +2004,117 @@ func setForcedTermSize(width, height int) {
 	forcedTermWidth, forcedTermHeight = width, height
 	lastGoodTermMu.Unlock()
 }
+
+// TestInlineCodeSpanKeepsItsOwnColour pins inline code as prose rather than
+// card chrome. It used to be painted in the settled tool header's amber, so a
+// code span inside a card body could be read as part of the header above it.
+func TestInlineCodeSpanKeepsItsOwnColour(t *testing.T) {
+	useANSI256ColorProfile(t)
+	rendered := renderAssistantMarkdownWithWidth("see `pkg/tui/render.go` now", 80, DiffThemeDark)
+	if want := "\x1b[38;5;32mpkg/tui/render.go\x1b[0m"; !strings.Contains(rendered, want) {
+		t.Fatalf("a code span must carry the inline code colour: want %q in %q", want, rendered)
+	}
+	if strings.Contains(rendered, "38;5;214") {
+		t.Fatalf("a code span must not wear the settled tool header's amber: %q", rendered)
+	}
+	if !strings.HasPrefix(rendered, "see ") || !strings.HasSuffix(rendered, " now") {
+		t.Fatalf("only the quoted text itself may be coloured: %q", rendered)
+	}
+}
+
+// TestMemorySearchCardBodyPathDoesNotWearTheHeaderAccent pins the card this
+// collision was reported on: a memory search whose first body row is the
+// matched path as a code span. Body row and header used to be the same amber,
+// so the path read as the header's last row and the elapsed time as a
+// mid-header one.
+func TestMemorySearchCardBodyPathDoesNotWearTheHeaderAccent(t *testing.T) {
+	useANSI256ColorProfile(t)
+	const matchedPath = "extensions/ad_hoc/notes/2026-11-07T01-14-32-llm-models-in-db-no-dotenv.md"
+	queries := []any{
+		"connect 登录 火山 coding plan",
+		"api_key required non-interactive",
+		"volcengine ark 火山方舟",
+		"connect command TUI OAuth",
+	}
+	input := map[string]any{
+		"queries": queries,
+		"path":    "/Users/doudou/.forebrain/workspace/memories/projects/-Users-doudou-workspace-unionj-cloud-forebrain-harness",
+	}
+	body, _ := tool.FormatToolStepResult(tool.StepEvent{
+		Kind:     tool.StepKindToolCompleted,
+		ToolName: "memories_search",
+		Input:    input,
+		Output: map[string]any{"output": map[string]any{
+			"queries":   queries,
+			"truncated": false,
+			"matches": []any{map[string]any{
+				"path":                      matchedPath,
+				"match_line_number":         float64(14),
+				"content_start_line_number": float64(13),
+				"content":                   "line thirteen\n另：同 provider+model 可配多条\nline fifteen",
+				"matched_queries":           []any{"api_key required non-interactive"},
+				"matched_terms":             []any{"provider"},
+			}},
+		}},
+	}, tool.DefaultMaxFormattedBody)
+	if body == "" {
+		t.Fatalf("memories_search drew no body for this result")
+	}
+	lines := renderFrameLines(Frame{
+		Kind:     FrameTool,
+		Title:    "memories_search",
+		StepID:   "call-1",
+		Content:  body,
+		Final:    true,
+		Duration: 700 * time.Millisecond,
+		ToolMeta: tool.ToolMeta{ToolName: "memories_search", Status: "completed", Input: input},
+	}, 132, DiffThemeDark, 0)
+
+	bodyRow := -1
+	for i, line := range lines {
+		if strings.HasPrefix(stripANSI(line), "  └ ") {
+			bodyRow = i
+			break
+		}
+	}
+	if bodyRow <= 0 {
+		t.Fatalf("the card drew no body row under its header:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+	header := strings.TrimRight(stripANSI(lines[bodyRow-1]), " ")
+	if !strings.HasSuffix(header, "· 0.7s") {
+		t.Fatalf("the header's last row must carry the elapsed time, not the body's: %q", header)
+	}
+	row := lines[bodyRow]
+	if want := "\x1b[38;5;32m" + matchedPath + "\x1b[0m"; !strings.Contains(row, want) {
+		t.Fatalf("the matched path must carry the inline code colour: want %q in %q", want, row)
+	}
+	// The corner is this card's own rule colour — the one amber the row keeps.
+	if n := strings.Count(row, "38;5;214m"); n != 1 {
+		t.Fatalf("the body row must carry the corner's amber exactly once, got %d: %q", n, row)
+	}
+	if tail := row[strings.LastIndex(row, "└")+len("└"):]; strings.Contains(tail, "38;5;214") {
+		t.Fatalf("nothing after the corner may wear the header accent: %q", tail)
+	}
+}
+
+// TestPaletteKeepsContentColoursOffCardChrome turns the rule the palette
+// comments state — a content colour must stay clear of every card accent —
+// into a gate over the constants themselves, so a future change to either
+// side is caught with the other in view.
+func TestPaletteKeepsContentColoursOffCardChrome(t *testing.T) {
+	const palette = "a content colour must stay clear of card chrome"
+	colors := []struct{ what, color string }{
+		{"inline code", inlineCodeColor},
+		{"ordinary tool header", ordinaryToolHeaderColor},
+		{"skill card header", skillCardHeaderColor},
+		{"reasoning header", reasoningHeaderColor},
+		{"marked span", markedSpanColor},
+	}
+	for i := range colors {
+		for j := i + 1; j < len(colors); j++ {
+			if colors[i].color == colors[j].color {
+				t.Fatalf("%s and %s are both %q: %s", colors[i].what, colors[j].what, colors[i].color, palette)
+			}
+		}
+	}
+}

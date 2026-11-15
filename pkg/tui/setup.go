@@ -1182,12 +1182,32 @@ func (s *llmSetup) signIn(sub subscription.Subscription) (bool, error) {
 			return false, err
 		}
 	}
-	err = login.Wait(ctx)
+	// The page above is transcript text the person has to copy to another
+	// window, so the wait cannot keep the input loop: a selector that can own
+	// the terminal does, which is what makes the page selectable and what lets
+	// Esc abandon the sign-in instead of waiting out the setup window.
+	waitCtx, cancelWait := context.WithCancel(ctx)
+	defer cancelWait()
+	outcome := make(chan error, 1)
+	go func() { outcome <- login.Wait(waitCtx) }()
+	var waitErr error
+	if waiter, ok := s.cfg.Selector.(ConnectWaitSelector); ok && waiter != nil {
+		waitErr = waiter.AwaitSignIn(outcome)
+	} else {
+		waitErr = <-outcome
+	}
 	if end != nil {
 		end()
 	}
-	if err != nil {
-		return false, err
+	if errors.Is(waitErr, ErrCancelled) {
+		// The person abandoned the sign-in from the page it printed: the same
+		// answer Esc on this page always gave — the setup steps back a page and
+		// writes nothing.
+		logPromptChoice(s.cfg, "llmsetup.sign_in_declined", s.choice, nil)
+		return false, nil
+	}
+	if waitErr != nil {
+		return false, waitErr
 	}
 	logPromptChoice(s.cfg, "llmsetup.signed_in", s.choice, map[string]any{"flow": flow})
 	return true, nil

@@ -714,6 +714,21 @@ type ConnectProgressSelector interface {
 	ConnectProgress(stage func() string) func()
 }
 
+// ConnectWaitSelector is an optional capability of a selector that can hold the
+// terminal's input while a sign-in waits for the person in the browser. Without
+// it the wait owns nothing: the page the flow printed — the address and the
+// code — cannot be selected, because the surface has captured the mouse and the
+// only servo that selection has is the input loop the wait is blocking.
+type ConnectWaitSelector interface {
+	// AwaitSignIn owns input until the flow's outcome arrives on done: a mouse
+	// drag selects and copies the page's text with the conversation's own
+	// semantics (release copies, Ctrl+C copies while a selection stands), the
+	// wheel scrolls the transcript, and Esc or Ctrl+C abandons the sign-in —
+	// which reports ErrCancelled to the caller. It otherwise returns the flow's
+	// outcome exactly as Login.Wait did.
+	AwaitSignIn(done <-chan error) error
+}
+
 func NewSelector(out io.Writer, readLine func(context.Context) (string, error)) Selector {
 	return &lineSelector{out: out, readLine: readLine}
 }

@@ -4559,14 +4559,14 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 	for _, option := range req.PlanReviewModels {
 		models = append(models, planReviewModelWire{
 			ID:       option.ID,
-			Provider: option.Provider, Model: option.Model, Current: option.Current,
+			Provider: option.Provider, Model: option.Model, ModelName: option.ModelName, Current: option.Current,
 			Endpoint: option.Endpoint,
 		})
 	}
 	reviews := make([]planReviewNoteWire, 0, len(req.PlanReviews))
 	for _, note := range req.PlanReviews {
 		reviews = append(reviews, planReviewNoteWire{
-			Provider: note.Provider, Model: note.Model, Text: note.Text, DurationMs: note.Duration.Milliseconds(),
+			Provider: note.Provider, Model: note.Model, ModelName: note.ModelName, Text: note.Text, DurationMs: note.Duration.Milliseconds(),
 		})
 	}
 	out := sessionApprovalRequestWire{
@@ -4578,7 +4578,7 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 		out.PreviousPlanReview = &previousPlanReviewWire{
 			ReviewID: prev.ReviewID, AgentID: prev.AgentID,
 			Model: planReviewModelWire{
-				ID: prev.Model.ID, Provider: prev.Model.Provider, Model: prev.Model.Model,
+				ID: prev.Model.ID, Provider: prev.Model.Provider, Model: prev.Model.Model, ModelName: prev.Model.ModelName,
 				Current: prev.Model.Current, Endpoint: prev.Model.Endpoint,
 			},
 		}
@@ -4588,7 +4588,7 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 	// memory: a started review whose closing event has not arrived.
 	if active, open := turn.ActivePlanReview(r.Context(), s.RunRT, sid, req.ActionID); open {
 		out.PlanReviewActive = &planReviewInFlightWire{
-			ReviewID: active.ReviewID, Provider: active.Provider, Model: active.Model,
+			ReviewID: active.ReviewID, Provider: active.Provider, Model: active.Model, ModelName: active.ModelName,
 			AgentID: active.AgentID,
 		}
 	}
@@ -4623,25 +4623,28 @@ type planReviewModelWire struct {
 	// ID names the configured row this offer is, and Endpoint where its
 	// requests go: two rows of one provider/model differ by these alone, so a
 	// card that shows neither offers two identical buttons.
-	ID       string `json:"id,omitempty"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	Current  bool   `json:"current,omitempty"`
-	Endpoint string `json:"endpoint,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	ModelName string `json:"model_name,omitempty"`
+	Current   bool   `json:"current,omitempty"`
+	Endpoint  string `json:"endpoint,omitempty"`
 }
 
 type planReviewNoteWire struct {
 	Provider   string `json:"provider"`
 	Model      string `json:"model"`
+	ModelName  string `json:"model_name,omitempty"`
 	Text       string `json:"text"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
 }
 
 type planReviewInFlightWire struct {
-	ReviewID string `json:"review_id"`
-	Provider string `json:"provider,omitempty"`
-	Model    string `json:"model"`
-	AgentID  string `json:"agent_id,omitempty"`
+	ReviewID  string `json:"review_id"`
+	Provider  string `json:"provider,omitempty"`
+	Model     string `json:"model"`
+	ModelName string `json:"model_name,omitempty"`
+	AgentID   string `json:"agent_id,omitempty"`
 }
 
 // handleActionPlanReview starts one second-opinion review of a parked

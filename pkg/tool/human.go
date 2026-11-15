@@ -309,6 +309,90 @@ func askAnswerJSONToHumanOutput(raw string) (*Output, error) {
 	return out, nil
 }
 
+// AskClarifyReason is what the model receives when the person picks
+// "Chat about this" on a question form: the questions stay unanswered, and the
+// model is told to find out what the person wants to clarify before asking
+// again. The words are Claude Code's (AskUserQuestion's clarify feedback),
+// verbatim for the instruction, with the questions as they were asked and
+// whatever the person had already answered.
+func AskClarifyReason(form state.AskForm, answers state.AskAnswer) string {
+	const head = "The user wants to clarify these questions.\n" +
+		"    This means they may have additional information, context or questions for you.\n" +
+		"    Take their response into account and then reformulate the questions if appropriate.\n" +
+		"    Start by asking them what they would like to clarify.\n" +
+		"\n" +
+		"    Questions asked:"
+	byQuestion := make(map[string]state.AskAnswerItem, len(answers.Answers))
+	for _, item := range answers.Answers {
+		key := strings.TrimSpace(item.QuestionID)
+		if key == "" {
+			continue
+		}
+		byQuestion[key] = item
+	}
+	var sb strings.Builder
+	sb.WriteString(head)
+	for _, q := range form.Questions {
+		text := strings.TrimSpace(q.Prompt)
+		if text == "" {
+			text = strings.TrimSpace(q.ID)
+		}
+		sb.WriteString("\n- \"")
+		sb.WriteString(text)
+		sb.WriteString("\"")
+		if answer := askClarifyAnswerText(q, byQuestion[strings.TrimSpace(q.ID)]); answer != "" {
+			sb.WriteString("\n  Answer: ")
+			sb.WriteString(answer)
+		} else {
+			sb.WriteString("\n  (No answer provided)")
+		}
+	}
+	return sb.String()
+}
+
+// askClarifyAnswerText is one question's answer as the clarify instruction
+// reports it, following Claude Code's setAnswer: a single-select free-text
+// answer replaces the selection, and a multi-select joins its labels with
+// ", ". The multi-select difference is deliberate — Claude drops that question's
+// Other text, while here it is appended to the labels: it is the person's own
+// words, and the model must not lose what they wrote.
+func askClarifyAnswerText(q state.AskQuestion, item state.AskAnswerItem) string {
+	labels := make([]string, 0, len(item.OptionIDs))
+	for _, id := range item.OptionIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		labels = append(labels, askOptionLabel(q, id))
+	}
+	other := strings.TrimSpace(item.OtherText)
+	if !q.AllowMultiple {
+		if other != "" {
+			return other
+		}
+		return strings.Join(labels, ", ")
+	}
+	if other != "" {
+		labels = append(labels, other)
+	}
+	return strings.Join(labels, ", ")
+}
+
+// askOptionLabel is the option's label, or the id itself when the form no
+// longer carries that option (an answer recorded before a reformulation).
+func askOptionLabel(q state.AskQuestion, id string) string {
+	for _, opt := range q.Options {
+		if strings.TrimSpace(opt.ID) != id {
+			continue
+		}
+		if label := strings.TrimSpace(opt.Label); label != "" {
+			return label
+		}
+		return id
+	}
+	return id
+}
+
 // ErrNilInput is returned when the tool handler receives a nil input.
 var ErrNilInput = errors.New("nil input")
 

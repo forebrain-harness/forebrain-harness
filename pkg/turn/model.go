@@ -631,10 +631,11 @@ type PlanReviewModelOption struct {
 	// picker also uses. Two rows of one provider/model differ by it alone,
 	// so it is the reviewer's identity; empty only for an offer built from a
 	// config that carries no ids.
-	ID       string
-	Provider string
-	Model    string
-	Current  bool
+	ID        string
+	Provider  string
+	Model     string
+	ModelName string
+	Current   bool
 	// Endpoint is where this reviewer's requests go — the picker's second
 	// column; EndpointTail is the part a narrow column must keep, the api
 	// path (empty for a url-verbatim row). They are shown, never compared:
@@ -668,18 +669,25 @@ func (o PlanReviewModelOption) MatchesSelection(id, provider, model string) bool
 }
 
 type PlanReviewNote struct {
-	Provider string
-	Model    string
-	Text     string
-	Duration time.Duration
+	Provider  string
+	Model     string
+	ModelName string
+	Text      string
+	Duration  time.Duration
 }
 
 type ToolApprovalDecision struct {
-	Approved                   bool
-	Denied                     bool
-	Cancelled                  bool
-	Update                     *safety.PermissionUpdate
-	AskAnswerJSON              string
+	Approved      bool
+	Denied        bool
+	Cancelled     bool
+	Update        *safety.PermissionUpdate
+	AskAnswerJSON string
+	// AskClarify is "Chat about this" on a question form: the call is refused
+	// with the engine's clarify instruction (tool.AskClarifyReason) instead of
+	// being cancelled, so the turn carries on and the model asks the person what
+	// they want to clarify. AskAnswerJSON carries what they had already answered.
+	AskClarify bool
+
 	RequestPermissionsResponse *safety.RequestPermissionsResponse
 	ClearContext               bool
 	PlanOnly                   bool

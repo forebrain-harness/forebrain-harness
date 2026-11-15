@@ -1754,7 +1754,7 @@ func renderMarkdownInline(node mdast.Node, source []byte) string {
 		if text == "" {
 			return ""
 		}
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(text)
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(inlineCodeColor)).Render(text)
 	case *mdast.Emphasis:
 		text := renderMarkdownInlineChildren(n, source)
 		if text == "" {
@@ -2240,8 +2240,11 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 				// A refused call never ran, so an empty body is its norm: the
 				// refusal's own words riding the meta are the body when the user
 				// wrote any (plan 154), and the faint placeholder stands in only
-				// for a refusal without words.
-				if words := strings.TrimSpace(f.ToolMeta.DenyFeedback); toolStatusDenied(f) && words != "" {
+				// for a refusal without words. A declined ask never falls back to
+				// it: those words are the clarify instruction the engine wrote for
+				// the model, and the card lists the questions instead.
+				if words := strings.TrimSpace(f.ToolMeta.DenyFeedback); toolStatusDenied(f) && words != "" &&
+					!strings.EqualFold(title, "user_interaction") {
 					content = words
 				} else {
 					content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
@@ -2524,6 +2527,16 @@ func toolHeaderColor(f Frame) string {
 			return "244"
 		}
 		return "70" // green on a granted request
+	case "user_interaction":
+		if toolStatusDenied(f) {
+			// A declined ask is not an error: Claude paints its head in the
+			// default ink, and all it says is that no answer came. Every other
+			// state falls through to the ordinary rules below.
+			if noColorActive() {
+				return "244"
+			}
+			return ordinaryToolHeaderColor
+		}
 	}
 
 	switch {
@@ -2560,6 +2573,12 @@ const (
 	// beside the colors it must stay distinct from, so a future change to
 	// either one is made with the other in view.
 	reasoningHeaderColor = "147"
+	// inlineCodeColor paints a Markdown code span. Inline code is prose that
+	// quotes something literally, not card chrome, so it must stay clear of
+	// every card accent above: a body whose first line is a code span — a
+	// memory search's matched path — was otherwise the same amber as the
+	// header it sits under, and read as the header's last row.
+	inlineCodeColor = "32"
 )
 
 // normalizeFailedToolContent removes the Markdown notification envelope used

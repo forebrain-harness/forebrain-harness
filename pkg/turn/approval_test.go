@@ -239,6 +239,43 @@ func TestApprovalServiceAnswersAsk(t *testing.T) {
 	require.True(t, result.Idempotent)
 }
 
+func TestDecideAskClarifyDeniesWithClarifyReason(t *testing.T) {
+	payload := `{"questions":[{"id":"q1","prompt":"continue?","options":[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}]}]}`
+	store := &approvalStoreStub{action: &state.Action{
+		ID: "a1", Kind: "user_interaction", Status: state.ActionPending, PayloadJSON: payload,
+	}}
+	service := ApprovalService{Actions: store}
+	result, err := service.Decide(context.Background(), "a1", ApprovalReply{
+		Choice: "clarify",
+		// What the person had already answered rides along without making this
+		// a submitted form.
+		AskAnswerJSON: `{"answers":[{"question_id":"q1","option_ids":["yes"]}]}`,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Denied)
+	require.Equal(t, state.ActionDenied, store.action.Status)
+	require.Contains(t, store.action.Error, "The user wants to clarify these questions.")
+	require.Contains(t, store.action.Error, `- "continue?"`)
+	require.Contains(t, store.action.Error, "Answer: Yes")
+
+	// A retried clarify (a double click, a re-sent request) is the same
+	// verdict, not a conflict.
+	retry, err := service.Decide(context.Background(), "a1", ApprovalReply{Choice: "clarify"})
+	require.NoError(t, err)
+	require.True(t, retry.Denied)
+	require.True(t, retry.Idempotent)
+
+	// An empty partial answer still denies: the questions stay unanswered and
+	// the model is told so.
+	store = &approvalStoreStub{action: &state.Action{
+		ID: "a2", Kind: "user_interaction", Status: state.ActionPending, PayloadJSON: payload,
+	}}
+	result, err = (ApprovalService{Actions: store}).Decide(context.Background(), "a2", ApprovalReply{Choice: "clarify"})
+	require.NoError(t, err)
+	require.True(t, result.Denied)
+	require.Contains(t, store.action.Error, "(No answer provided)")
+}
+
 func TestApprovalServiceRejectsInvalidClearContext(t *testing.T) {
 	store := &approvalStoreStub{action: &state.Action{ID: "a1", Kind: "shell", Status: state.ActionPending, PayloadJSON: `{}`}}
 	_, err := (ApprovalService{Actions: store}).Decide(context.Background(), "a1", ApprovalReply{ClearContext: true})
@@ -773,6 +810,27 @@ func TestPlanReviewModelOptionsCarryEachRowsEndpoint(t *testing.T) {
 	picked := PlanReviewModelOptions(cfg, "main", "row-2", "deepseek", "deepseek-v4-flash")
 	require.False(t, picked[0].Current, "the twin row the conversation is not on must not be marked")
 	require.True(t, picked[1].Current, "the row the conversation runs on is the marked one")
+}
+
+// The reviewer offer names the model the way every human label does: the
+// vendor listing's display name, not the opaque subscription wire id — while
+// identity (Model) keeps the wire id.
+func TestPlanReviewModelOptionsCarryDisplayName(t *testing.T) {
+	llm.SetBuiltinModels("qodercn", []llm.Model{{ID: "gfmodel", Name: "GLM-5.3-Flash"}})
+	t.Cleanup(func() { llm.SetBuiltinModels("qodercn", nil) })
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-qoder", Provider: "qodercn", Model: "gfmodel", BaseURL: "http://qoder.test"},
+		{ID: "row-deepseek", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://deepseek.test"},
+	}}
+	options := PlanReviewModelOptions(cfg, "main", "row-qoder", "qodercn", "gfmodel")
+	require.Len(t, options, 2)
+	byID := map[string]PlanReviewModelOption{}
+	for _, o := range options {
+		byID[o.ID] = o
+	}
+	require.Equal(t, "GLM-5.3-Flash", byID["row-qoder"].ModelName)
+	require.Equal(t, "gfmodel", byID["row-qoder"].Model, "identity keeps the wire id")
+	require.Equal(t, "", byID["row-deepseek"].ModelName, "a listing that names none carries no display name")
 }
 
 // The exit gate's reviewer offers the same list /model and the web chip draw,

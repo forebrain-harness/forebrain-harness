@@ -97,7 +97,7 @@ func toolStatesOwnCanceledLabel(lower string) bool {
 // prevented.
 func toolStatesOwnDeniedLabel(lower string) bool {
 	switch lower {
-	case "request_permissions", "exit_plan_mode", "retrieve_output", "memories_add_ad_hoc_note":
+	case "request_permissions", "exit_plan_mode", "retrieve_output", "memories_add_ad_hoc_note", "user_interaction":
 		return true
 	default:
 		return IsMemoryQueryTool(lower)

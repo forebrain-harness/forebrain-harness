@@ -27,7 +27,7 @@
       </template>
       <span v-if="percent != null && model" class="subagent-run-dv" aria-hidden="true" />
       <template v-if="model">
-        <span class="subagent-run-model">{{ model }}</span>
+        <span class="subagent-run-model">{{ modelDisplay }}</span>
         <span v-if="effort" class="subagent-run-effort">· {{ effort }}</span>
       </template>
     </button>
@@ -123,12 +123,15 @@ const used = computed(() => formatTokenCount(props.record.tokenBudget?.tokenUsag
 const window = computed(() => formatTokenCount(props.record.tokenBudget?.contextWindow))
 const model = computed(() => String(props.record.model ?? '').trim())
 const provider = computed(() => String(props.record.modelProvider ?? '').trim())
+const modelName = computed(() => String(props.record.modelName ?? '').trim())
+/** The model half as a person reads it: the vendor display name, the wire id otherwise. */
+const modelDisplay = computed(() => modelName.value || model.value)
 /** The effort only when the spawn reported one: an empty field is unknown, not "default". */
 const effort = computed(() => {
   const value = String(props.record.reasoningEffort ?? '').trim()
   return value ? effortLevelLabel(value) : ''
 })
-const modelLine = computed(() => (provider.value ? `${provider.value}/${model.value}` : model.value))
+const modelLine = computed(() => (provider.value ? `${provider.value}/${modelDisplay.value}` : modelDisplay.value))
 const usage = computed(() => {
   const input = formatTokenCount(props.record.inputTokens)
   const output = formatTokenCount(props.record.outputTokens)

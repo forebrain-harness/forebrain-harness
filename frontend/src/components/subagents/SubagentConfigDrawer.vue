@@ -434,7 +434,7 @@ const followLabel = computed(() => {
 
 /** A model as a sentence names it: 服务商/模型. */
 function labelOf(option: SessionModelOption): string {
-  return `${option.provider}/${option.model}`
+  return `${option.provider}/${option.modelName || option.model}`
 }
 
 const toolTiers = computed(() => [

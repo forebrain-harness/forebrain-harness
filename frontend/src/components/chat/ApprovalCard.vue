@@ -191,6 +191,10 @@ function cancelAsk(actionId: string) {
   if (store) void store.cancelAsk(actionId)
 }
 
+function clarifyAsk(actionId: string) {
+  if (store) void store.clarifyAsk(actionId)
+}
+
 function setAskAnswer(actionId: string, questionId: string, value: string | string[]) {
   store?.setAskAnswer(actionId, questionId, value)
 }
@@ -242,11 +246,11 @@ const fallbackApprovals = computed<ActionRow[]>(() => {
   })
 })
 
-/** 「和它聊聊」: the question is withdrawn, and the composer takes the turn. One
- *  gesture, two halves — the run must stop waiting before the reader can say
- *  anything, so the cancel goes out first and the caret follows it. */
+/** 「和它聊聊」: the question is refused with the engine's clarify instruction —
+ *  the turn carries on and the model asks what the reader wants to clarify — and
+ *  the composer takes the turn to say it. */
 function chatAboutQuestion(actionId: string) {
-  void cancelAsk(actionId)
+  void clarifyAsk(actionId)
   emit('focus-composer')
 }
 </script>

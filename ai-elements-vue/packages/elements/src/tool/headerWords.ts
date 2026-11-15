@@ -91,6 +91,7 @@ export const HEADER_ACTION_ZH: Record<string, string> = {
   'Asked user': '已询问用户',
   'Asking user': '正在询问用户',
   'Failed to ask user': '询问用户失败',
+  'User declined to answer questions': '用户拒绝回答提问',
   'Skill': '技能',
   'Loading skill': '正在加载技能',
   'Sent a message to': '已向 … 发送消息',

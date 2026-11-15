@@ -339,7 +339,11 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 		}
 
 	case lower == "user_interaction":
-		if isFailed {
+		if isDenied {
+			// Claude Code's declined ask head: the sentence says what happened,
+			// and the body lists what was asked.
+			action = "User declined to answer questions"
+		} else if isFailed {
 			action = "Failed to " + FailedActionPhrase(lower)
 		} else if isRunning || isPending {
 			action = "Asking user"
@@ -520,6 +524,7 @@ func HeaderActions() []string {
 		// Notes and questions
 		"Notes", "Saving notes", "Failed to save notes",
 		"Asked user", "Asking user", "Failed to ask user",
+		"User declined to answer questions",
 		// Peers
 		"Sent a message to", "Sending a message to", "Could not send a message to",
 		"Sent a message", "Sending a message", "Could not send a message",

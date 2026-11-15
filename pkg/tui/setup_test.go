@@ -251,6 +251,10 @@ type fakeLogin struct {
 	// submitErr rejects the next pasted address, so a test can prove a rejected
 	// paste leaves the sign-in running.
 	submitErr error
+	// waitRelease, when a test installs one, is the sign-in still waiting for the
+	// person in the browser: Wait blocks on it until the test ends the flow (or
+	// the wait context is cancelled).
+	waitRelease chan error
 
 	submitted []string
 	canceled  bool
@@ -274,6 +278,14 @@ func (l *fakeLogin) Submit(_ context.Context, pasted string) error {
 }
 
 func (l *fakeLogin) Wait(ctx context.Context) error {
+	if l.waitRelease != nil {
+		select {
+		case err := <-l.waitRelease:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	// The test's flow is already finished: nothing waits for a person here.
 	if err := ctx.Err(); err != nil {
 		return nil
@@ -2118,5 +2130,126 @@ func TestOffersPageOpensOnALoginRowWhateverPathItShows(t *testing.T) {
 	}
 	if got := selector.multiDefaults[0]; !reflect.DeepEqual(got, []int{1}) {
 		t.Fatalf("checked rows = %v, want the already added row [1]", got)
+	}
+}
+
+// setupWaitSelector is a selector that can own the terminal during a sign-in
+// wait: it records that the setup asked, and answers either the flow's outcome
+// or the abandonment a person pressing Esc gives. Embedded in *fakeSelector so
+// every other page answers as before.
+type setupWaitSelector struct {
+	*fakeSelector
+	// awaitErr is what the wait answers instead of the flow's outcome:
+	// ErrCancelled for an abandoned sign-in, nil to deliver the outcome.
+	awaitErr error
+	// release, when set, ends the held login before the outcome is consumed, so
+	// a case that delivers the flow's outcome has one to deliver.
+	release func()
+
+	calls    int
+	doneLive bool
+}
+
+func (s *setupWaitSelector) AwaitSignIn(done <-chan error) error {
+	s.calls++
+	s.doneLive = done != nil
+	if s.release != nil {
+		s.release()
+	}
+	if s.awaitErr != nil {
+		return s.awaitErr
+	}
+	return <-done
+}
+
+// Esc on the wait page abandons the sign-in: the page stays in the transcript,
+// the flow is cancelled, nothing is written, and the wizard steps back to the
+// provider list instead of carrying on to the offers page.
+func TestConfigureSubscriptionWaitOwnsTheInputAndStepsBackOnEscape(t *testing.T) {
+	sub := openCodeLike()
+	headlessMachine(t)
+	out := &bytes.Buffer{}
+	selector := &setupWaitSelector{fakeSelector: &fakeSelector{confirms: []bool{true}}, awaitErr: ErrCancelled}
+	cfg := setupTestConfig(t, selector)
+	cfg.Output = out
+	// The flow is still waiting for the person in the browser: the wait must
+	// resolve it, not find it already finished.
+	sub.login.waitRelease = make(chan error, 1)
+
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil {
+		t.Fatalf("configure err=%v", err)
+	}
+	if ok {
+		t.Fatal("the setup saved after the sign-in was abandoned")
+	}
+	if selector.calls != 1 || !selector.doneLive {
+		t.Fatalf("wait calls = %d done live = %t, want one wait on a live channel", selector.calls, selector.doneLive)
+	}
+	for _, want := range []string{
+		"Open https://opencode.ai/auth and enter this code.",
+		"QK7M-2PLX",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("sign-in page = %q, want it to carry %q", out.String(), want)
+		}
+	}
+	if !sub.login.canceled {
+		t.Fatal("the abandoned sign-in was left running")
+	}
+	if sub.offerCalls != 0 || len(sub.provisioned) != 0 {
+		t.Fatalf("offers = %d provisioned = %d, want the wizard to step back", sub.offerCalls, len(sub.provisioned))
+	}
+	if opts.Provider != "" || opts.Model != "" {
+		t.Fatalf("options = %+v, want none", opts)
+	}
+}
+
+// A sign-in that finishes in the browser while the wait owns the input carries
+// on to the offers page exactly as Login.Wait did.
+func TestConfigureSubscriptionWaitDeliversTheOutcome(t *testing.T) {
+	sub := openCodeLike()
+	headlessMachine(t)
+	selector := &setupWaitSelector{fakeSelector: &fakeSelector{confirms: []bool{true}}}
+	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if selector.calls != 1 || !selector.doneLive {
+		t.Fatalf("wait calls = %d done live = %t, want one wait on a live channel", selector.calls, selector.doneLive)
+	}
+	if opts.Provider != "opencode-go" || opts.Model != "glm-5.3" {
+		t.Fatalf("options = %+v, want the plan's default offer", opts)
+	}
+}
+
+// A flow that failed on its own terms reaches the caller as that error: only the
+// person abandoning the sign-in is a step back.
+func TestConfigureSubscriptionWaitPropagatesTheFlowError(t *testing.T) {
+	sub := openCodeLike()
+	headlessMachine(t)
+	expired := errors.New("code expired")
+	sub.login.waitErr = expired
+	selector := &setupWaitSelector{fakeSelector: &fakeSelector{confirms: []bool{true}}}
+	_, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+	if !errors.Is(err, expired) {
+		t.Fatalf("configure err=%v, want the flow's error", err)
+	}
+	if ok {
+		t.Fatal("the setup saved after the sign-in failed")
+	}
+}
+
+// A selector that cannot own the terminal (a line selector, a non-TTY run) waits
+// for the flow's outcome instead, exactly as before.
+func TestConfigureSubscriptionPlainSelectorStillWaits(t *testing.T) {
+	sub := openCodeLike()
+	headlessMachine(t)
+	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, &fakeSelector{confirms: []bool{true}}), sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if opts.Provider != "opencode-go" || opts.Model != "glm-5.3" {
+		t.Fatalf("options = %+v, want the plan's default offer", opts)
 	}
 }

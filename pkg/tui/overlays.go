@@ -2182,7 +2182,8 @@ func approvalPlanFilePath(req turn.ToolApprovalRequest) string {
 //     (Submit button if multi-select) → "Chat about this".
 //   - Enter: select option (single-select auto-advances / auto-submits when
 //     only one question); toggle option (multi-select); confirm the Other text;
-//     advance from the Submit button; cancel from "Chat about this".
+//     advance from the Submit button; refuses the question from "Chat about
+//     this" (the turn continues, and the model asks what to clarify).
 //   - Space: toggle option (multi-select).
 //   - Tab / → : next question tab (or Submit tab).
 //   - Shift+Tab / ← : previous question tab.
@@ -2828,7 +2829,16 @@ func (o *questionOverlay) commitCurrent() (turn.ToolApprovalDecision, bool) {
 	}
 
 	if o.cursor == o.chatIdx() {
-		return turn.ToolApprovalDecision{Cancelled: true}, true
+		// Claude Code's "Chat about this": refused with the clarify instruction,
+		// not cancelled — the turn carries on and the model asks what the person
+		// wants to clarify. What they answered so far rides along: this is the
+		// last the model hears of the form.
+		//
+		// state.AskAnswer is strings and slices only, so the encode cannot fail.
+		encoded, _ := json.Marshal(o.formAnswer())
+		return turn.ToolApprovalDecision{
+			Denied: true, AskClarify: true, AskAnswerJSON: string(encoded),
+		}, true
 	}
 
 	if o.cursor == o.submitIdx() {
@@ -2874,6 +2884,18 @@ func (o *questionOverlay) advanceOrSubmit() (turn.ToolApprovalDecision, bool) {
 }
 
 func (o *questionOverlay) commitForm() turn.ToolApprovalDecision {
+	ans := o.formAnswer()
+	b, err := json.Marshal(ans)
+	if err != nil {
+		_, _ = fmt.Fprintf(o.out, "\r\nFailed to encode answer: %v\r\n", err)
+		return turn.ToolApprovalDecision{Cancelled: true}
+	}
+	return turn.ToolApprovalDecision{Approved: true, AskAnswerJSON: string(b)}
+}
+
+// formAnswer is the answer the form holds right now: the selections and the
+// Other text per question, skipping questions the person has not touched.
+func (o *questionOverlay) formAnswer() state.AskAnswer {
 	ans := state.AskAnswer{Answers: make([]state.AskAnswerItem, 0, len(o.form.Questions))}
 	for i, q := range o.form.Questions {
 		sel := o.answers[i]
@@ -2896,12 +2918,7 @@ func (o *questionOverlay) commitForm() turn.ToolApprovalDecision {
 		}
 		ans.Answers = append(ans.Answers, item)
 	}
-	b, err := json.Marshal(ans)
-	if err != nil {
-		_, _ = fmt.Fprintf(o.out, "\r\nFailed to encode answer: %v\r\n", err)
-		return turn.ToolApprovalDecision{Cancelled: true}
-	}
-	return turn.ToolApprovalDecision{Approved: true, AskAnswerJSON: string(b)}
+	return ans
 }
 
 // ---- rendering ----
@@ -3657,6 +3674,86 @@ func (s *rawSelector) dispatchMouse(mev sgrMouseEvent) {
 	}
 }
 
+const (
+	// How often the sign-in wait looks up from the terminal to ask whether the
+	// flow ended. One paint tick; long enough to cost nothing, short enough
+	// that the wizard resumes the moment the browser finishes.
+	connectWaitPollMillis = 50
+	// How long an ESC gets a second look before it counts as the Esc that
+	// abandons the sign-in. readKey reports rawKeyEscape both for a bare Esc
+	// and for the ESC of a report whose tail had not arrived inside its own
+	// 50 ms window (readKeyWithMode); one more look tells them apart, so a
+	// mouse report split across two writes cannot discard a sign-in.
+	connectWaitEscapeSettleMillis = 60
+)
+
+// AwaitSignIn owns the terminal while a sign-in waits for the person in the
+// browser. The page the flow printed is transcript text, so without an input
+// owner nothing on it can be selected: reports are decoded by the shared reader
+// and pile up in a channel the blocked input loop cannot drain. Owning the fd
+// directly makes the page behave like every other transcript page — drag to
+// select, release to copy — and lets Esc or Ctrl+C abandon the sign-in instead
+// of waiting out the setup window.
+func (s *rawSelector) AwaitSignIn(done <-chan error) error {
+	// Only a real interactive terminal has a viewport whose selection this wait
+	// can serve, and only where the fd can be polled can the wait also notice
+	// the flow ending. Everywhere else — the onboarding's own pages, piped
+	// stdin, Windows consoles — the answer is a plain wait, which is what
+	// Login.Wait already was there.
+	if s == nil || s.in == nil || !s.inViewportOverlay() || !canGateTerminalReads {
+		return <-done
+	}
+	release, ok := s.pauseSharedInput()
+	if !ok {
+		// Another modal owns the input (an approval overlay, a nested prompt).
+		// Wait without it rather than take it from something the user is
+		// answering.
+		return <-done
+	}
+	defer release()
+	fd := int(s.in.Fd())
+	for {
+		select {
+		case err := <-done:
+			return err
+		default:
+		}
+		readable, pollErr := pollReadableInputFD(fd, connectWaitPollMillis)
+		if pollErr != nil {
+			return fmt.Errorf("sign-in wait: %w", pollErr)
+		}
+		if !readable {
+			continue
+		}
+		key, readErr := s.readKey()
+		if readErr != nil {
+			// The terminal is gone (EOF or a read error). Waiting longer cannot
+			// help: report it instead of parking here for the setup's window.
+			return fmt.Errorf("sign-in wait: %w", readErr)
+		}
+		switch key.kind {
+		case rawKeyMouse:
+			s.dispatchMouse(key.mouse)
+		case rawKeyEscape:
+			if tail, _ := pollReadableInputFD(fd, connectWaitEscapeSettleMillis); tail {
+				// Part of the report was still in flight: it belongs to that
+				// gesture, not to the sign-in. The fragment is unusable on its
+				// own, so drop it (stdinReadMu is ours: nobody else can be
+				// mid-sequence) and keep waiting.
+				stdinReadMu.Lock()
+				drainImmediatelyAvailableInput(s.in)
+				stdinReadMu.Unlock()
+				continue
+			}
+			return ErrCancelled
+		case rawKeyCtrlC:
+			return ErrCancelled
+		}
+		// Keys typed during the wait are dropped: nothing on screen accepts
+		// text there, and that is the owner's decision rather than a gap.
+	}
+}
+
 // withCaretPlacer installs the caret hook for the duration of one modal and
 // returns the restore for its defer. Nested modals stack, so the previous
 // owner's hook is put back rather than dropped.
@@ -3756,6 +3853,26 @@ func (s *rawSelector) acquireComposerInput() (func(), error) {
 // (approvalOverlay, questionOverlay) must use this and cancel themselves
 // when ok==false instead of calling readKey() and deadlocking.
 func (s *rawSelector) tryAcquireComposerInput() (func(), bool) {
+	releaseReader, ok := s.pauseSharedInput()
+	if !ok {
+		return func() {}, false
+	}
+	if s.composer != nil {
+		s.composer.BeginComposerOverlay()
+	}
+	return func() {
+		if s.composer != nil {
+			s.composer.EndOverlay()
+		}
+		releaseReader()
+	}, true
+}
+
+// pauseSharedInput takes exclusive ownership of the terminal fd for a caller
+// that draws no overlay of its own: it pauses the shared input reader and waits
+// for it to acknowledge, so this caller's reads cannot race it. The returned
+// closure resumes the reader. ok is false when another modal already owns it.
+func (s *rawSelector) pauseSharedInput() (func(), bool) {
 	if !stdinReadMu.TryLock() {
 		return func() {}, false
 	}
@@ -3786,15 +3903,7 @@ func (s *rawSelector) tryAcquireComposerInput() (func(), bool) {
 	// readKey() call has exclusive access to stdin.
 	stdinReadMu.Lock()
 	stdinReadMu.Unlock()
-	if s.composer != nil {
-		s.composer.BeginComposerOverlay()
-	}
-	return func() {
-		if s.composer != nil {
-			s.composer.EndOverlay()
-		}
-		releaseInteractiveInputPause()
-	}, true
+	return func() { releaseInteractiveInputPause() }, true
 }
 
 // waitForComposerInput queues this overlay behind whichever surface owns the
