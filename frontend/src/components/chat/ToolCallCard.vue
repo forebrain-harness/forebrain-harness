@@ -454,7 +454,7 @@ const toolStatusLabel = computed(() => {
  */
 const title = computed(() => {
   // The engine's own header — the terminal's words for the call ("Read
-  // plans/100.md lines 1-96", "Ran ls", "Notes") — is the head whenever the
+  // plans/100.md lines 1-96", "Ran ls", "Saved notes") — is the head whenever the
   // gateway sent it. Everything below is the fallback for an older payload.
   if (props.step.header) return props.step.header
   // A question call's head says the one thing it did — that the agent asked —

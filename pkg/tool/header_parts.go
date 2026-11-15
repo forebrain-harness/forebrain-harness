@@ -327,16 +327,7 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 		suffix = DisplayLine(MemorySearchScopeLabel(meta.Input))
 
 	case lower == "intermediate_tool":
-		if isFailed {
-			action = "Failed to " + FailedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Saving notes"
-		} else {
-			action = "Notes"
-		}
-		if a := InputString(meta, "action"); a != "" {
-			target = a
-		}
+		action = intermediateNotesAction(meta, isFailed, isRunning || isPending)
 
 	case lower == "user_interaction":
 		if isDenied {
@@ -465,6 +456,32 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 	}
 }
 
+// intermediateNotesAction words a card of the built-in notes tool by the
+// operation it ran. The tool has three (append, read, clear), and the head
+// carries the operation inside the verb — "Saved notes", "Read notes" — so the
+// card never reads as the bare noun ("Notes") nor repeats the raw operation
+// beside the verb ("Notes read"), and no state claims a write it did not do.
+// The operation comes from the call's own action, lowercased and trimmed; a
+// call that named none, or one a later build adds, is the tool's own default,
+// append.
+func intermediateNotesAction(meta ToolMeta, isFailed, isProgressive bool) string {
+	failed, progressive, settled := "Failed to save notes", "Saving notes", "Saved notes"
+	switch strings.ToLower(strings.TrimSpace(InputString(meta, "action"))) {
+	case "read":
+		failed, progressive, settled = "Failed to read notes", "Reading notes", "Read notes"
+	case "clear":
+		failed, progressive, settled = "Failed to clear notes", "Clearing notes", "Cleared notes"
+	}
+	switch {
+	case isFailed:
+		return failed
+	case isProgressive:
+		return progressive
+	default:
+		return settled
+	}
+}
+
 // DisplayParts maps a card's tool title and summary to three user-facing
 // parts: action (past/progressive verb), target (the thing acted on), and
 // suffix (extra metadata like duration or exit status).
@@ -522,7 +539,9 @@ func HeaderActions() []string {
 		// Deliverables
 		"Presented files", "Presenting files", "Failed to present files",
 		// Notes and questions
-		"Notes", "Saving notes", "Failed to save notes",
+		"Saved notes", "Saving notes", "Failed to save notes",
+		"Read notes", "Reading notes", "Failed to read notes",
+		"Cleared notes", "Clearing notes", "Failed to clear notes",
 		"Asked user", "Asking user", "Failed to ask user",
 		"User declined to answer questions",
 		// Peers

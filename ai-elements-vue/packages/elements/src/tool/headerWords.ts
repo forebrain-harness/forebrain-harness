@@ -82,9 +82,17 @@ export const HEADER_ACTION_ZH: Record<string, string> = {
   'Failed to search memories': '搜索记忆失败',
   'Memory search denied': '搜索记忆被拒绝',
   'Memory search canceled': '搜索记忆已取消',
-  'Notes': '笔记',
+  // The built-in notes tool's three operations (pkg/tool/header_parts.go): the
+  // verb carries the operation, so there is no bare noun to word.
+  'Saved notes': '已保存笔记',
   'Saving notes': '正在保存笔记',
   'Failed to save notes': '保存笔记失败',
+  'Read notes': '已读取笔记',
+  'Reading notes': '正在读取笔记',
+  'Failed to read notes': '读取笔记失败',
+  'Cleared notes': '已清空笔记',
+  'Clearing notes': '正在清空笔记',
+  'Failed to clear notes': '清空笔记失败',
   'Presented files': '已交付文件',
   'Presenting files': '正在交付文件',
   'Failed to present files': '交付文件失败',

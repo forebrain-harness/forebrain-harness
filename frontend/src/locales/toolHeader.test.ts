@@ -27,6 +27,22 @@ describe('the card head vocabulary', () => {
     expect(headerActionWord('Something new', 'zh')).toBe('Something new')
   })
 
+  // The notes tool's three operations (pkg/tool/header_parts.go): every state
+  // says which one it is, and the bare noun is gone from the table — a head
+  // that reads 笔记 leaves the reader unable to tell a save from a read.
+  it('words each notes operation by what it did', () => {
+    expect(HEADER_ACTION_ZH['Notes']).toBeUndefined()
+    expect(headerActionWord('Saved notes', 'zh')).toBe('已保存笔记')
+    expect(headerActionWord('Saving notes', 'zh')).toBe('正在保存笔记')
+    expect(headerActionWord('Failed to save notes', 'zh')).toBe('保存笔记失败')
+    expect(headerActionWord('Read notes', 'zh')).toBe('已读取笔记')
+    expect(headerActionWord('Reading notes', 'zh')).toBe('正在读取笔记')
+    expect(headerActionWord('Failed to read notes', 'zh')).toBe('读取笔记失败')
+    expect(headerActionWord('Cleared notes', 'zh')).toBe('已清空笔记')
+    expect(headerActionWord('Clearing notes', 'zh')).toBe('正在清空笔记')
+    expect(headerActionWord('Failed to clear notes', 'zh')).toBe('清空笔记失败')
+  })
+
   it('words the three suffix shapes and leaves everything else alone', () => {
     expect(headerSuffixWords('lines 15-20', 'zh')).toBe('第 15-20 行')
     // The engine words a search's suffix as `matching “query”` (header_parts.go).

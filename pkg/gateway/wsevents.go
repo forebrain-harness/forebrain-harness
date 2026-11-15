@@ -771,7 +771,7 @@ func lastPlanProgressOfRun(ctx context.Context, runs runPlanEventLister, runID s
 }
 
 // A tool card's header is worded by the engine (tool.DisplayHeader) — the
-// terminal's words, "Read types.go lines 2-101", "Ran ls", "Notes" — so the
+// terminal's words, "Read types.go lines 2-101", "Ran ls", "Saved notes" — so the
 // web draws the same line the terminal does for the same call. The gateway
 // only supplies what the wording needs that a page cannot: the conversation's
 // own directory, which is what a path is shown relative to (a file inside the

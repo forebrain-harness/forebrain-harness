@@ -39,7 +39,21 @@ func TestDisplayHeaderIsTheTerminalsWording(t *testing.T) {
 	shell.Meta.Status = "running"
 	require.Equal(t, "Running ls plans/", header(shell))
 
-	require.Equal(t, "Notes", header(frame("intermediate_tool", ToolMeta{Status: "completed"})))
+	// The notes tool has three operations, and the head says which one ran: a
+	// settled card is never a bare noun. A call that named no operation (or one
+	// this build has no words for) is the tool's own default, append.
+	require.Equal(t, "Saved notes", header(frame("intermediate_tool", ToolMeta{Status: "completed"})))
+	require.Equal(t, "Saved notes", header(frame("intermediate_tool", ToolMeta{Status: "completed", Input: map[string]any{"action": ""}})))
+	require.Equal(t, "Saved notes", header(frame("intermediate_tool", ToolMeta{Status: "completed", Input: map[string]any{"action": "append"}})))
+	require.Equal(t, "Read notes", header(frame("intermediate_tool", ToolMeta{Status: "completed", Input: map[string]any{"action": "read"}})))
+	require.Equal(t, "Cleared notes", header(frame("intermediate_tool", ToolMeta{Status: "completed", Input: map[string]any{"action": "clear"}})))
+	require.Equal(t, "Saved notes", header(frame("intermediate_tool", ToolMeta{Status: "completed", Input: map[string]any{"action": "publish"}})))
+	require.Equal(t, "Saving notes", header(frame("intermediate_tool", ToolMeta{Status: "running", Input: map[string]any{"action": "append"}})))
+	require.Equal(t, "Reading notes", header(frame("intermediate_tool", ToolMeta{Status: "running", Input: map[string]any{"action": "read"}})))
+	require.Equal(t, "Clearing notes", header(frame("intermediate_tool", ToolMeta{Status: "running", Input: map[string]any{"action": "clear"}})))
+	require.Equal(t, "Failed to save notes", header(frame("intermediate_tool", ToolMeta{Status: "failed"})))
+	require.Equal(t, "Failed to read notes", header(frame("intermediate_tool", ToolMeta{Status: "failed", Input: map[string]any{"action": "read"}})))
+	require.Equal(t, "Failed to clear notes", header(frame("intermediate_tool", ToolMeta{Status: "failed", Input: map[string]any{"action": "clear"}})))
 	require.Equal(t, "Exited plan mode", header(frame("exit_plan_mode", ToolMeta{Status: "completed"})))
 	require.Equal(t, "Fetched https://example.com", header(frame("web_fetch", ToolMeta{Status: "completed", Input: map[string]any{"url": "https://example.com"}})))
 

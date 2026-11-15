@@ -263,7 +263,7 @@ export interface SubagentToolStep {
   summary: string
   /**
    * The card's header as the terminal words it ("Read plans/100.md lines 1-96",
-   * "Ran ls", "Notes"), from the engine — the gateway sends it with the step and
+   * "Ran ls", "Saved notes"), from the engine — the gateway sends it with the step and
    * with every stored row. The summary stands in only for an older payload that
    * lacks it.
    */

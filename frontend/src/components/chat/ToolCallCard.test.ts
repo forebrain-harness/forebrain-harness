@@ -374,6 +374,52 @@ describe('ToolCallCard', () => {
     expect(wrapper.get('.ttl .solo').text()).toBe('ran read a.go')
   })
 
+  // The notes tool says which operation ran (pkg/tool/header_parts.go), so the
+  // head is never the bare noun — and the parts path words it in the reader's
+  // language, not just the engine's English.
+  it('heads a notes card with the operation it ran, in the reader’s language', () => {
+    const read = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'intermediate_tool',
+          summary: 'saved intermediate notes',
+          header: 'Read notes',
+          headerParts: { action: 'Read notes' },
+        }),
+      },
+    })
+    expect(read.get('.ttl .solo').text()).toBe('Read notes')
+    read.unmount()
+
+    setLocale('zh')
+    const readZh = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'intermediate_tool',
+          summary: 'saved intermediate notes',
+          header: 'Read notes',
+          headerParts: { action: 'Read notes' },
+        }),
+      },
+    })
+    expect(readZh.get('.ttl .solo').text()).toBe('已读取笔记')
+    readZh.unmount()
+    setLocale('en')
+
+    // An older payload carries the joined header and no parts: the engine's
+    // own words stand as they are.
+    const saved = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({ toolName: 'intermediate_tool', summary: 'saved intermediate notes', header: 'Saved notes' }),
+      },
+    })
+    expect(saved.get('.ttl .solo').text()).toBe('Saved notes')
+    saved.unmount()
+  })
+
   it('draws a shell call’s body from its card facts — no Markdown body anywhere', () => {
     const wrapper = mount(ToolCallCard, {
       props: {

@@ -75,6 +75,65 @@ func TestDisplayHeaderPartsKeepTheDurationApart(t *testing.T) {
 	}
 }
 
+// TestIntermediateNotesHeaderPartsByActionAndState pins the notes card's head
+// in every state the call can settle in. The tool has three operations, so the
+// action carries the verb and the operation together and the target stays
+// empty: a settled head that only named the tool ("Notes") left the reader
+// unable to tell a save from a read, and a head that repeated the raw operation
+// after the verb ("Notes read") said the same thing twice.
+func TestIntermediateNotesHeaderPartsByActionAndState(t *testing.T) {
+	cwd := "/work/proj"
+	notes := func(status string, input map[string]any) DisplayFrame {
+		return DisplayFrame{
+			Title: "intermediate_tool", Final: true,
+			Meta: ToolMeta{ToolName: "intermediate_tool", Status: status, Input: input},
+		}
+	}
+	action := func(status string, input map[string]any) string {
+		return DisplayHeaderParts(notes(status, input), cwd).Action
+	}
+
+	// A call that named no operation, or one this build has no words for, is
+	// the tool's own default: append.
+	for _, input := range []map[string]any{nil, {"action": ""}, {"action": "append"}, {"action": "publish"}} {
+		require.Equal(t, "Saved notes", action("completed", input), "settled, input %v", input)
+		require.Equal(t, "Saving notes", action("running", input), "running, input %v", input)
+		require.Equal(t, "Saving notes", action("awaiting approval", input), "awaiting, input %v", input)
+		require.Equal(t, "Failed to save notes", action("failed", input), "failed, input %v", input)
+		// The operation is read off the input lowercased and trimmed.
+		if a, ok := input["action"]; ok && a == "append" {
+			require.Equal(t, "Saved notes", action("completed", map[string]any{"action": " APPEND "}))
+		}
+	}
+	read := map[string]any{"action": "read"}
+	require.Equal(t, "Read notes", action("completed", read))
+	require.Equal(t, "Reading notes", action("running", read))
+	require.Equal(t, "Reading notes", action("awaiting approval", read))
+	require.Equal(t, "Failed to read notes", action("failed", read))
+	clear := map[string]any{"action": "clear"}
+	require.Equal(t, "Cleared notes", action("completed", clear))
+	require.Equal(t, "Clearing notes", action("running", clear))
+	require.Equal(t, "Clearing notes", action("awaiting approval", clear))
+	require.Equal(t, "Failed to clear notes", action("failed", clear))
+
+	// The verb carries the operation: the raw enum is never the target.
+	for _, input := range []map[string]any{nil, {"action": "append"}, read, clear} {
+		for _, status := range []string{"completed", "running", "awaiting approval", "failed"} {
+			require.Empty(t, DisplayHeaderParts(notes(status, input), cwd).Target, "target, status %q input %v", status, input)
+		}
+	}
+
+	// A call the reader refused or dismissed never touched the notes, so its
+	// head is the generic refusal and names no operation at all.
+	require.Equal(t, HeaderParts{Action: "Canceled"}, DisplayHeaderParts(notes("canceled", read), cwd))
+	require.Equal(t, HeaderParts{Action: "Denied"}, DisplayHeaderParts(notes("denied", read), cwd))
+
+	// The time a save took rides apart from the words, as on every other card.
+	done := notes("completed", map[string]any{"action": "append"})
+	done.Duration = 1500 * time.Millisecond
+	require.Equal(t, HeaderParts{Action: "Saved notes", Duration: "1.5s"}, DisplayHeaderParts(done, cwd))
+}
+
 // TestDisplayHeaderPartsPeerTools pins the two peer cards' heads (plan 199
 // §3.2): a send names its recipient in a sentence, a listing has nobody to
 // name, and each state says its own verb — including the call that named no
@@ -175,6 +234,16 @@ func TestHeaderActionsCoverEveryKnownTool(t *testing.T) {
 	noDeletions := DisplayFrame{Title: "write_file", Final: true, Content: "",
 		Meta: ToolMeta{ToolName: "write_file", Status: "completed", Input: inputs["write_file"]}}
 	check(t, noDeletions)
+	// The notes tool owns three operations, and each names its own verb: an
+	// operation this build learns later still falls back to the append words,
+	// but the three it has are all in the table.
+	for _, operation := range []string{"append", "read", "clear"} {
+		for _, status := range statuses {
+			check(t, DisplayFrame{Title: "intermediate_tool", Final: true, Meta: ToolMeta{
+				ToolName: "intermediate_tool", Status: status, Input: map[string]any{"action": operation},
+			}})
+		}
+	}
 	// A skill card owns three headers of its own.
 	for _, status := range []string{"loading", "completed", "failed"} {
 		frameStatus := status

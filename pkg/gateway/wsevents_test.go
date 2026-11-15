@@ -1885,7 +1885,7 @@ func TestToolHeadersSayWhatTheTerminalSays(t *testing.T) {
 		"tool_name": "shell",
 		"tool_meta": map[string]any{"tool_name": "shell", "status": "running", "input": map[string]any{"command": "ls plans/"}},
 	}))
-	require.Equal(t, "Notes", headerOf(t, root, event.RunEventToolCompleted, map[string]any{
+	require.Equal(t, "Saved notes", headerOf(t, root, event.RunEventToolCompleted, map[string]any{
 		"tool_name": "intermediate_tool", "summary": "saved intermediate notes",
 		"tool_meta": map[string]any{"tool_name": "intermediate_tool", "status": "completed", "input": map[string]any{"action": ""}},
 	}))
@@ -1941,6 +1941,35 @@ func TestToolHeadersCarryTheirParts(t *testing.T) {
 	require.Equal(t, "Ran", out.Parts.Action)
 	require.Equal(t, "ls plans/", out.Parts.Target)
 	require.Equal(t, "1.2s", out.Parts.Duration)
+
+	// The notes card's three operations each name themselves, in the joined
+	// header and in the parts the page lays out: a settled card never reads as
+	// the bare noun, and the raw operation is never the target.
+	for _, operation := range []struct{ input, header string }{
+		{"append", "Saved notes"},
+		{"read", "Read notes"},
+		{"clear", "Cleared notes"},
+	} {
+		notesRaw, notesErr := json.Marshal(map[string]any{
+			"tool_name": "intermediate_tool", "summary": "saved intermediate notes",
+			"tool_meta": map[string]any{
+				"tool_name": "intermediate_tool", "status": "completed",
+				"input": map[string]any{"action": operation.input},
+			},
+		})
+		require.NoError(t, notesErr)
+		var notes struct {
+			Header string `json:"header"`
+			Parts  struct {
+				Action string `json:"action"`
+				Target string `json:"target"`
+			} `json:"header_parts"`
+		}
+		require.NoError(t, json.Unmarshal(toolEventPayloadWithHeader(root, event.RunEventToolCompleted, notesRaw), &notes))
+		require.Equal(t, operation.header, notes.Header, "joined header for %q", operation.input)
+		require.Equal(t, operation.header, notes.Parts.Action, "action part for %q", operation.input)
+		require.Equal(t, "", notes.Parts.Target, "target part for %q", operation.input)
+	}
 }
 
 // TestCanceledCallHeaderListKeepsTheCallIDs: the per-call headers of an

@@ -23,8 +23,10 @@ var toolNameMap = map[string]string{
 	"TaskUpdate":      "session_todo",
 	"TaskList":        "session_todo",
 	"AskUserQuestion": "user_interaction",
-	"Task":            "intermediate_tool",
-	"Agent":           "intermediate_tool",
+	// Claude Code's Task and Codex's Agent dispatch a subagent: they are the
+	// subagent tool under another name, not the built-in notes tool.
+	"Task":  "subagent_run",
+	"Agent": "subagent_run",
 }
 
 func mapToolName(name string) string {

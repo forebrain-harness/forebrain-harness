@@ -8,7 +8,7 @@ import (
 )
 
 // The wording of a tool card's header — "Read types.go lines 2-101", "Ran ls",
-// "Notes" — is the engine's (tool.DisplayHeader), shared with the web: the
+// "Saved notes" — is the engine's (tool.DisplayHeader), shared with the web: the
 // terminal's words are the standard and every surface draws the same ones. This
 // file only adapts the terminal's Frame to the engine's DisplayFrame.
 
