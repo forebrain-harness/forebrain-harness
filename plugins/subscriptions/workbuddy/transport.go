@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -169,6 +170,9 @@ const maxErrorBody = 64 << 10
 // isConversationRateLimitCapError looks for on a failed model request.
 const capCode = 6004
 
+// capCodeString is that code as the transport compares and spells it.
+const capCodeString = "6004"
+
 // classifyCap reads a refused model request for that code and, when the request
 // was for a free tier whose paid twin may be switched, records the spent window
 // and hands the layers above an OpenAI-shaped error they can classify.
@@ -193,8 +197,11 @@ func (t *Transport) classifyCap(creds Credentials, sentModel string, resp *http.
 	if err != nil {
 		return resp
 	}
+	if os.Getenv("WB_DEBUG_CAP") != "" {
+		fmt.Printf("DEBUG head=%q ct=%q code=%d sent=%q\n", string(head), resp.Header.Get("Content-Type"), resp.StatusCode, sentModel)
+	}
 	refusal, ok := readCapRefusal(head)
-	if !ok {
+	if !ok || !refusal.has(capCodeString) {
 		return resp
 	}
 	pair, ok := pairForFree(sentModel)
@@ -213,7 +220,7 @@ func (t *Transport) classifyCap(creds Credentials, sentModel string, resp *http.
 		"error": map[string]string{
 			"message": text,
 			"type":    "quota_exhausted",
-			"code":    strconv.Itoa(capCode),
+			"code":    capCodeString,
 		},
 	})
 	if err != nil {
@@ -233,59 +240,121 @@ type replayBody struct {
 	io.Closer
 }
 
-// capRefusal is one refusal read out of the product's envelope.
+// capRefusal is one answer read for the product's business code and prose.
 type capRefusal struct {
-	code  int64
+	// codes are the business codes the answer carries, in the client's own
+	// order (parseResponseBodyObject then extractRateLimitBizCode):
+	// error.data.code, error.code, then the body's own code — and, one document
+	// deeper, the same three inside a message field that carries the original
+	// answer as JSON.
+	codes []string
+	// prose is the human sentence, the deepest one the answer holds. This repo's
+	// own provider-error normalizer wraps a refused answer it does not recognize
+	// as {"error":{"message":"<original body>","type":"provider_error"}}, so the
+	// original's sentence is the one a person should read.
 	prose string
+}
+
+// has reports whether the answer carries one business code anywhere in it. The
+// code is matched across every place the client reads it, because a body that
+// arrived through a normalizer carries the transport's status as `code` and the
+// product's own code one document deeper.
+func (r capRefusal) has(code string) bool {
+	for _, candidate := range r.codes {
+		if candidate == code {
+			return true
+		}
+	}
+	return false
+}
+
+// maxCapEnvelopeDepth bounds the walk into a nested message document: the
+// normalizer nests one level, and the client reads message/details the same way
+// (matchesBusinessCode), so one step is enough and two is the guard.
+const maxCapEnvelopeDepth = 2
+
+// readCapRefusal reads one response body for the product's business code.
+func readCapRefusal(body []byte) (capRefusal, bool) {
+	return readCapEnvelope(body, 0)
+}
+
+func readCapEnvelope(body []byte, depth int) (capRefusal, bool) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return capRefusal{}, false
+	}
+	var envelope capErrorBody
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return capRefusal{}, false
+	}
+	var refusal capRefusal
+	if envelope.Error != nil && envelope.Error.Data != nil && envelope.Error.Data.Code != "" {
+		refusal.codes = append(refusal.codes, string(envelope.Error.Data.Code))
+	}
+	if envelope.Error != nil && envelope.Error.Code != "" {
+		refusal.codes = append(refusal.codes, string(envelope.Error.Code))
+	}
+	if envelope.Code != "" {
+		refusal.codes = append(refusal.codes, string(envelope.Code))
+	}
+	prose := strings.TrimSpace(envelope.Msg)
+	if prose == "" && envelope.Error != nil {
+		prose = strings.TrimSpace(envelope.Error.Message)
+	}
+	if depth < maxCapEnvelopeDepth && isJSONObject(prose) {
+		if inner, ok := readCapEnvelope([]byte(prose), depth+1); ok {
+			refusal.codes = append(refusal.codes, inner.codes...)
+			if inner.prose != "" {
+				prose = inner.prose
+			}
+		}
+	}
+	refusal.prose = prose
+	return refusal, len(refusal.codes) > 0
+}
+
+// isJSONObject reports whether text is a JSON object rather than a sentence.
+func isJSONObject(text string) bool {
+	text = strings.TrimSpace(text)
+	return len(text) > 1 && text[0] == '{'
 }
 
 // capErrorBody is that envelope as Step 0b recorded it — the family whose
 // unknown-model answer is {"code":11102,"msg":"model […] service info not
 // found","requestId":…,"retry_policy":{…}} — plus the OpenAI-shaped spelling a
-// gateway in front of it may use.
+// gateway in front of it may use, and the shape this repo's own normalizer
+// produces ({"error":{"message":"<original>","type":"provider_error"}}).
 type capErrorBody struct {
-	Code  json.Number `json:"code"`
-	Msg   string      `json:"msg"`
+	Code  bizCode `json:"code"`
+	Msg   string  `json:"msg"`
 	Error *struct {
-		Code    json.Number `json:"code"`
-		Message string      `json:"message"`
+		Code    bizCode `json:"code"`
+		Message string  `json:"message"`
 		Data    *struct {
-			Code json.Number `json:"code"`
+			Code bizCode `json:"code"`
 		} `json:"data"`
 	} `json:"error"`
 }
 
-// readCapRefusal answers the business code and the prose of one response body.
-// The code is read in the client's own order (parseResponseBodyObject then
-// extractRateLimitBizCode): error.data.code, then error.code, then the body's
-// own code.
-func readCapRefusal(body []byte) (capRefusal, bool) {
-	var envelope capErrorBody
-	if err := json.Unmarshal(bytes.TrimSpace(body), &envelope); err != nil {
-		return capRefusal{}, false
+// bizCode is one business code, spelled the ways these answers spell it: a JSON
+// number (what the product sends), a quoted number (what a gateway in front of
+// it passes on), or the original answer as JSON inside a message. Anything that
+// is not a whole number reads as no code at all, so the walk simply tries the
+// next place a code may live.
+type bizCode string
+
+func (c *bizCode) UnmarshalJSON(raw []byte) error {
+	text := strings.TrimSpace(string(raw))
+	text = strings.Trim(text, `"`)
+	text = strings.TrimSpace(text)
+	if text == "" || text == "null" {
+		return nil
 	}
-	refusal := capRefusal{prose: strings.TrimSpace(envelope.Msg)}
-	if envelope.Error != nil {
-		if refusal.prose == "" {
-			refusal.prose = strings.TrimSpace(envelope.Error.Message)
-		}
-		if envelope.Error.Data != nil {
-			if code, err := envelope.Error.Data.Code.Int64(); err == nil {
-				refusal.code = code
-				return refusal, true
-			}
-		}
-		if code, err := envelope.Error.Code.Int64(); err == nil {
-			refusal.code = code
-			return refusal, true
-		}
+	if _, err := strconv.ParseInt(text, 10, 64); err != nil {
+		return nil
 	}
-	code, err := envelope.Code.Int64()
-	if err != nil {
-		return capRefusal{}, false
-	}
-	refusal.code = code
-	return refusal, true
+	*c = bizCode(text)
+	return nil
 }
 
 // requestURL is where one request goes: always the product endpoint, whatever

@@ -3113,6 +3113,14 @@ func (s *streamState) dismissPaidTierOffer(renderer *Renderer) bool {
 // handlePaidTierNotification applies one offer message to the event loop's state,
 // reporting false for any other message. It draws the line once, under the
 // refusal that produced it.
+//
+// The line is a transcript FrameStatus row, not a strip above the composer: that
+// is the paradigm this terminal already uses for live notices about a finished
+// turn (auto-continue draws its wait the same way, notify.go's
+// AutoContinueScheduledMsg path and announceAutoContinue), and it keeps the
+// notice in scrollback where the failed turn's error is. The plan's "one line
+// above the composer" is realised by that sibling, deliberately, so the two
+// choices a spent allowance can offer read the same.
 func handlePaidTierNotification(renderer *Renderer, state *streamState, m any) bool {
 	msg, ok := m.(PaidTierOfferedMsg)
 	if !ok {

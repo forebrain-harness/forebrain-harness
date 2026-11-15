@@ -1636,6 +1636,12 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						}
 						pasteBurst.clearWindowAfterNonChar()
 						ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyPasteImage}
+					case 0x10:
+						// Ctrl+P answers a spent free tier with its paid twin. The
+						// key is always read; only a surface holding an offer
+						// consumes it, so it costs nothing ordinary typing.
+						flushBeforeHotkey()
+						ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyPaidTierSwitch}
 					case 0x18:
 						flushBeforeHotkey()
 						ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyAgentControlPrefix}

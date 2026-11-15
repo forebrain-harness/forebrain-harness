@@ -2712,3 +2712,27 @@ func TestReadRawInputEventsCtrlCCopiesASelection(t *testing.T) {
 		t.Fatalf("ctrl+c with nothing selected should clear the draft, got %#v", ev)
 	}
 }
+
+// TestReadRawInputEventsCtrlPEmitsThePaidTierSwitch pins the key the paid-tier
+// notice offers. A hotkey constant plus a comparison in the loop is not a key:
+// the byte has to be parsed into the event, or the notice promises something
+// that cannot be pressed.
+func TestReadRawInputEventsCtrlPEmitsThePaidTierSwitch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe error: %v", err)
+	}
+	defer r.Close()
+
+	events := readRawInputEvents(ctx, r, io.Discard, stubRawInputController{}, nil)
+	if _, err := w.Write([]byte{0x10}); err != nil {
+		t.Fatalf("write ctrl-p: %v", err)
+	}
+	ev := nextNonDraftEvent(t, events)
+	if ev.kind != inputEventHotkey || ev.hotkey != hotkeyPaidTierSwitch {
+		t.Fatalf("expected the paid-tier switch hotkey, got %#v", ev)
+	}
+	_ = w.Close()
+}

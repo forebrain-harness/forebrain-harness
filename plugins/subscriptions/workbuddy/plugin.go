@@ -293,7 +293,7 @@ func (workBuddySubscription) Offers(ctx context.Context, env subscription.Env) (
 		// The paid row of a pair the account can switch is not a row of its
 		// own: requests reach it through the switch, and provisioning it would
 		// give the picker the second identically-named row this replaces.
-		if eligible && pairedPaidRow(record.ID, resolved.pairs) {
+		if eligible && pairedPaidRow(record.ID, resolved.pairs, listed) {
 			continue
 		}
 		offer := subscription.Offer{
@@ -324,10 +324,11 @@ func (workBuddySubscription) Offers(ctx context.Context, env subscription.Env) (
 
 // pairedPaidRow reports whether id is the paid twin of a pair whose free row the
 // same catalog carries: without that free row the paid id is a model in its own
-// right and stays on the picker.
-func pairedPaidRow(id string, pairs []ratePair) bool {
+// right and stays on the picker, because dropping it would leave the pair with
+// no row at all.
+func pairedPaidRow(id string, pairs []ratePair, listed map[string]bool) bool {
 	for _, pair := range pairs {
-		if pair.PaidID == id && pair.FreeID != id {
+		if pair.PaidID == id && pair.FreeID != id && listed[pair.FreeID] {
 			return true
 		}
 	}

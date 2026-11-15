@@ -1633,7 +1633,7 @@ func TestTransportClassifiesCapCodeAndRecordsReset(t *testing.T) {
 	if err := json.Unmarshal(raw, &rewritten); err != nil {
 		t.Fatalf("body = %s, want the OpenAI error shape: %v", raw, err)
 	}
-	if rewritten.Error.Code != "6004" || rewritten.Error.Type != "quota_exhausted" {
+	if rewritten.Error.Code != capCodeString || rewritten.Error.Type != "quota_exhausted" {
 		t.Fatalf("rewritten error = %+v, want code 6004 and type quota_exhausted", rewritten.Error)
 	}
 	// The sentence stays the provider's, with its stamp spelled in the zone it
@@ -1936,4 +1936,114 @@ func recordCapHitWith(t *testing.T, home string, creds Credentials, reset time.T
 		return err
 	}
 	return nil
+}
+
+// TestTransportReadsAQuotedCapCode pins the other spelling of the same answer:
+// a gateway in front of the product sometimes quotes the code
+// ({"error":{"code":"6004",…}}), and the client's own reader accepts both. The
+// window is recorded and the body rewritten exactly as for a numeric code.
+func TestTransportReadsAQuotedCapCode(t *testing.T) {
+	home := t.TempDir()
+	creds := freshCredentials()
+	storeCredentials(t, nil, home, creds)
+	withCatalog(t, nil, nil)
+	now := time.Now().Round(0)
+	withRateLimitClock(t, now)
+	reset := now.Add(4 * time.Hour).Truncate(time.Hour).In(testCapResetTime().Location())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":"6004","type":"quota_exhausted","message":"免费额度已用尽，可在 ` +
+			reset.Format("2006-01-02 15:04:05") + ` 重置"}}`))
+	}))
+	t.Cleanup(server.Close)
+	withEndpoint(t, server)
+
+	transport := &Transport{Home: home}
+	req := httptest.NewRequest(http.MethodPost, "http://placeholder/v1/chat/completions",
+		strings.NewReader(`{"model":"hy4free","messages":[]}`))
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var rewritten struct {
+		Error struct {
+			Code string `json:"code"`
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &rewritten); err != nil {
+		t.Fatalf("body = %s, want the OpenAI error shape: %v", raw, err)
+	}
+	if rewritten.Error.Code != capCodeString || rewritten.Error.Type != "quota_exhausted" {
+		t.Fatalf("rewritten error = %+v, want the cap code and type", rewritten.Error)
+	}
+	stored, ok := capHitResetAt(home, capHitAccountKey(creds), "hy4free")
+	if !ok || !stored.Equal(reset) {
+		t.Fatalf("recorded reset = %s (ok=%v), want %s", stored, ok, reset)
+	}
+}
+
+// TestOffersKeepAPaidRowWhoseFreeTwinIsNotListed is the guard on the collapse:
+// the paid row is dropped only when the same catalog carries the free one, or a
+// pair whose free row the agent does not declare would lose both rows.
+func TestOffersKeepAPaidRowWhoseFreeTwinIsNotListed(t *testing.T) {
+	home := t.TempDir()
+	storeCredentials(t, nil, home, freshCredentials())
+	restoreShippedTable(t)
+	withCatalog(t, nil, nil)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/config" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// The agent declares the paid id alone; the free twin is in the catalog
+		// but not in the picker.
+		writeJSON(w, `{"code":0,"msg":"OK","data":{
+			"models":[{"id":"hy4free","name":"Hy4"},{"id":"hy4std","name":"Hy4"}],
+			"agents":[{"name":"cli","tags":["cli","model:craft"],"models":["hy4std"]}],
+			"productFeaturesConfig":{"ModelRateLimitCap":{"lines":[
+				{"allowPaidSwitch":true,"displayName":"Hy4","freeId":"hy4free","paidId":"hy4std"}]}}
+		}}`)
+	}))
+	t.Cleanup(server.Close)
+	withEndpoint(t, server)
+
+	offers, err := workBuddySubscription{}.Offers(context.Background(), subscription.Env{Home: home})
+	if err != nil {
+		t.Fatalf("offers: %v", err)
+	}
+	if len(offers) != 1 || offers[0].Model != "hy4std" {
+		t.Fatalf("offers = %v, want the paid row kept when its free twin is not on the picker", offerNames(offers))
+	}
+}
+
+// TestReadCapRefusalFollowsTheNormalizedBody pins the shape the transport
+// actually receives on the model path: this repo's own provider-error normalizer
+// wraps a refused answer it does not recognize as
+// {"error":{"message":"<original body>","type":"provider_error"}}, so the
+// product's code and sentence live one document deeper. Reading only the outer
+// envelope would leave every real cap refusal unclassified.
+func TestReadCapRefusalFollowsTheNormalizedBody(t *testing.T) {
+	wrapped := `{"error":{"code":400,"message":"{\"code\":6004,\"msg\":\"Hy4 的免费额度已用尽，可在 2026-11-16 00:00:00 重置\"}","type":"provider_error"}}`
+	refusal, ok := readCapRefusal([]byte(wrapped))
+	if !ok || !refusal.has(capCodeString) {
+		t.Fatalf("normalized body = %+v (ok=%v), want the product's code found inside the message", refusal, ok)
+	}
+	if !strings.Contains(refusal.prose, "免费额度已用尽") {
+		t.Fatalf("prose = %q, want the original sentence", refusal.prose)
+	}
+	if reset, _ := parseCapResetAt(refusal.prose); reset.IsZero() {
+		t.Fatalf("prose = %q, want the reset stamp still readable", refusal.prose)
+	}
+
+	// Any other business code is not this one, however deeply the body nests.
+	other := `{"error":{"code":400,"message":"{\"code\":11102,\"msg\":\"model not found\"}"}}`
+	refusal, ok = readCapRefusal([]byte(other))
+	if !ok || refusal.has(capCodeString) {
+		t.Fatalf("other-refusal body = %+v, want it classified as something else", refusal)
+	}
 }
