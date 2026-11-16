@@ -603,6 +603,43 @@ describe('PlanApprovalDock', () => {
     }
   })
 
+  // The picker is opened by a click whose button unmounts, so focus falls to
+  // the body; the dock reads Esc through a bubbling keydown on its own panel,
+  // where focus has to be for the key to arrive. The container therefore takes
+  // the keyboard on both screens (AskTabs' card root does the same).
+  it('keeps the picker focused so its own Esc is reachable on both screens', async () => {
+    const { wrapper } = mountDock(exitPlanAction(), {
+      handOffAvailable: true,
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', efforts: ['low', 'high'], defaultEffort: 'high' },
+      ],
+    })
+    await flushPromises()
+    expect(document.activeElement).toBe(document.body)
+
+    await wrapper.get('[data-testid="exit-plan-hand-off"]').trigger('click')
+    await flushPromises()
+    const pick = wrapper.get('.xp-pick')
+    expect(document.activeElement).toBe(pick.element)
+
+    // The model -> effort step repaints the same container: the click that
+    // moved to the level screen unmounted the row it was made on, and focus is
+    // back inside the panel so a second Esc still arrives.
+    await wrapper.findAll('[data-testid="exit-plan-hand-off-model"]')[1].trigger('click')
+    await flushPromises()
+    // The row configures a level, so its list is the two it offers (no bare
+    // 「默认」 row to duplicate it).
+    expect(wrapper.findAll('[data-testid="exit-plan-effort-option"]')).toHaveLength(2)
+    expect(document.activeElement).toBe(wrapper.get('.xp-pick').element)
+
+    // …and answering it hands the plan over, unchanged by the focus handling.
+    await wrapper.get('[data-testid="exit-plan-effort-back"]').trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(wrapper.get('.xp-pick').element)
+    wrapper.unmount()
+  })
+
   it('leaves a coding plan on the four verdicts it always had', async () => {
     const { wrapper } = mountDock(exitPlanAction(), {}, undefined, { sessionType: 'coding' })
     await flushPromises()

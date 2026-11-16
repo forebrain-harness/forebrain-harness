@@ -337,10 +337,8 @@ test('Esc on the level screen goes back to the models and sends nothing', async 
   await shot(page, 'exit-plan-effort-screen')
 
   // One Esc: back to the model list, the question and its rows as they were.
-  // The dock hears Esc through a bubbling keydown on its own panel, and the
-  // row it was clicked on has left the DOM, so the key is pressed on the list
-  // the click opened — the way the terminal's overlay always holds the keys.
-  await effort.first().focus()
+  // No help here: the picker holds the keyboard itself, so the key a reader
+  // presses right after clicking into it arrives (plan 310).
   await page.keyboard.press('Escape')
   await expect(effort).toHaveCount(0)
   await expect(page.locator('[data-testid="plan-review-model"]').first()).toBeVisible()
@@ -355,7 +353,6 @@ test('Esc on the level screen goes back to the models and sends nothing', async 
 
   // A second Esc folds the picker away for good; still nothing decided, and the
   // approval is back on its verdicts.
-  await page.locator('[data-testid="plan-review-model"]').first().focus()
   await page.keyboard.press('Escape')
   await expect(page.locator('[data-testid="exit-plan-ask-review"]')).toBeVisible()
   expect(requests).toBe(0)

@@ -48,8 +48,12 @@
         >{{ t('chat.exitPlanReviewStop') }}</button>
       </div>
       <!-- Choosing a reviewer: the list opens on the footer, the current one
-           marked; Esc folds it back. -->
-      <div v-else-if="picking" class="xp-pick">
+           marked; Esc folds it back. The container takes the keyboard as each
+           screen paints, because the button that opened it has just unmounted
+           and focus fell to the body — without it the dock's own Esc would
+           never fire, while the composer's Esc keeps meaning interrupt-the-run
+           (the pattern AskTabs' card root uses). -->
+      <div v-else-if="picking" ref="pickBox" class="xp-pick outline-none" tabindex="-1">
         <template v-if="effortStep">
           <button
             type="button"
@@ -266,7 +270,7 @@
  * the review flow are the ones the old thread card carried, moved here whole;
  * keep planning's words are required, and Esc on them is the wordless refusal.
  */
-import { computed, nextTick, onMounted, ref, withDefaults } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, withDefaults } from 'vue'
 import { Check, ChevronLeft, Eye, LoaderCircle, Map, Settings } from 'lucide-vue-next'
 import { Kbd } from '@repo/shadcn-vue/components/ui/kbd'
 import { MessageResponse } from '@repo/elements/message'
@@ -384,6 +388,23 @@ const feedbackField = ref<HTMLInputElement | null>(null)
 function bindFeedback(el: unknown) {
   feedbackField.value = (el as HTMLInputElement | null) ?? null
 }
+
+/** The picker's two screens are painted by a click that unmounts the control
+ *  it was made on, so focus lands on the body and the dock's Esc handler — a
+ *  bubbling keydown on the dock — would never hear the key. Take the keyboard
+ *  whenever a screen (re)paints, and only when nothing meaningful holds it: a
+ *  field the reader is typing in keeps its caret, and the feedback editor below
+ *  focuses itself. */
+const pickBox = ref<HTMLElement | null>(null)
+
+watch([picking, effortStep], async () => {
+  if (typeof document === 'undefined') return
+  await nextTick()
+  if (!picking.value) return
+  const active = document.activeElement
+  if (active && active !== document.body && active !== pickBox.value) return
+  pickBox.value?.focus({ preventScroll: true })
+})
 
 function keepPlanningChosen() {
   if (feedbackOpen.value) {
