@@ -279,16 +279,20 @@ test('handing the plan to another model approves with the row on the wire and th
   // The level screen, then the decision: the hand-off carries the level the
   // user picked, and the question names the executor it is about (plan 310).
   const effort = page.locator('[data-testid="exit-plan-effort-option"]')
-  await expect(effort).toHaveCount(3)
+  // This row configures no level of its own, so the bare 「默认」 row leads the
+  // catalog's low/high/max: four levels to choose from, in the chip's order.
+  await expect(effort).toHaveCount(4)
+  await expect(effort.first().locator('.elabel')).toHaveText('默认')
   await expect(page.locator('[data-testid="exit-plan-effort-question"]')).toContainText('用哪档思考强度？')
   const approve = page.waitForRequest((req) => req.url().includes('/approve') && req.method() === 'POST')
   await effort.nth(2).click()
   const body = await (await approve).postDataJSON()
   // The engine hands off by configured row id — two rows of one provider/model
-  // are two executors — never without one, and names the level with it.
+  // are two executors — never without one, and names the level with it: the
+  // third row is 高, which the engine knows as 'high'.
   expect(body?.hand_off_model).toMatchObject({
     id: expect.any(String), provider: expect.any(String), model: expect.any(String),
-    effort: expect.any(String),
+    effort: 'high',
   })
   await expect(dock).toHaveCount(0, { timeout: 30_000 })
   await shot(page, 'exit-plan-approval-handed-off')
@@ -311,7 +315,9 @@ test('Esc on the level screen goes back to the models and sends nothing', async 
   await signIn(page)
 
   const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan')
-  parkExitPlan(session, 'live')
+  // Its own suffix: the parked rows are keyed by it in the shared state
+  // database, and 'live' is the review test's above.
+  parkExitPlan(session, 'escape')
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   const dock = page.locator('[data-testid="exit-plan-approval"]')
@@ -331,6 +337,10 @@ test('Esc on the level screen goes back to the models and sends nothing', async 
   await shot(page, 'exit-plan-effort-screen')
 
   // One Esc: back to the model list, the question and its rows as they were.
+  // The dock hears Esc through a bubbling keydown on its own panel, and the
+  // row it was clicked on has left the DOM, so the key is pressed on the list
+  // the click opened — the way the terminal's overlay always holds the keys.
+  await effort.first().focus()
   await page.keyboard.press('Escape')
   await expect(effort).toHaveCount(0)
   await expect(page.locator('[data-testid="plan-review-model"]').first()).toBeVisible()
@@ -345,6 +355,7 @@ test('Esc on the level screen goes back to the models and sends nothing', async 
 
   // A second Esc folds the picker away for good; still nothing decided, and the
   // approval is back on its verdicts.
+  await page.locator('[data-testid="plan-review-model"]').first().focus()
   await page.keyboard.press('Escape')
   await expect(page.locator('[data-testid="exit-plan-ask-review"]')).toBeVisible()
   expect(requests).toBe(0)
@@ -375,6 +386,9 @@ test('a review handed back is asked again in its own conversation: the continuat
   const reviewer = page.locator('[data-testid="plan-review-model"]').first()
   await expect(reviewer).toBeVisible()
   await reviewer.click()
+  // A row that offers levels asks which one before anything is sent (plan
+  // 310): the second row is 低, so the reviewer runs at 'low'.
+  await page.locator('[data-testid="exit-plan-effort-option"]').nth(1).click()
   // The review runs as its own subagent and finishes into the planner; the
   // dock leaves until the planner asks again.
   await expect(dock).toHaveCount(0, { timeout: 180_000 })
