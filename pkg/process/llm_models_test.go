@@ -580,6 +580,69 @@ func TestUpsertLLMModelKeepsAndClearsTheStoredKey(t *testing.T) {
 	}
 }
 
+// The catalog provider a custom row may name is a tri-state input like the
+// other optional columns (owner 2026-11-16): nil keeps what the row stores, ""
+// clears it, and a create writes what the input names — normalized the one way
+// every ingress normalizes it.
+func TestUpsertLLMModelKeepsOrClearsTheCatalogProvider(t *testing.T) {
+	store, ctx := upsertEnvForTest(t)
+	key := "sk-1"
+	named := "alibaba"
+	if _, err := UpsertLLMModel(ctx, store.DB, LLMModelInput{
+		Provider: "custom", Model: "qwen4-max-preview", BaseURL: "https://api.example.com/v1", APIKey: &key,
+		CatalogProvider: &named,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rows, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].CatalogProvider != "alibaba" {
+		t.Fatalf("rows = %+v, want the row naming alibaba", rows)
+	}
+	if _, err := UpsertLLMModel(ctx, store.DB, LLMModelInput{
+		Provider: "custom", Model: "qwen4-max-preview", BaseURL: "https://api.example.com/v1",
+	}); err != nil {
+		t.Fatalf("upsert naming no provider: %v", err)
+	}
+	rows, err = store.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].CatalogProvider != "alibaba" {
+		t.Fatalf("rows = %+v; nil must keep the stored catalog provider", rows)
+	}
+	empty := ""
+	if _, err := UpsertLLMModel(ctx, store.DB, LLMModelInput{
+		Provider: "custom", Model: "qwen4-max-preview", BaseURL: "https://api.example.com/v1",
+		CatalogProvider: &empty,
+	}); err != nil {
+		t.Fatalf("upsert clearing the provider: %v", err)
+	}
+	rows, err = store.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].CatalogProvider != "" {
+		t.Fatalf("rows = %+v; an empty input must clear the catalog provider", rows)
+	}
+	slashed := "alibaba/"
+	if _, err := UpsertLLMModel(ctx, store.DB, LLMModelInput{
+		Provider: "custom", Model: "qwen4-max-preview", BaseURL: "https://api.example.com/v1",
+		CatalogProvider: &slashed,
+	}); err != nil {
+		t.Fatalf("upsert a slashed provider: %v", err)
+	}
+	rows, err = store.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].CatalogProvider != "alibaba" {
+		t.Fatalf("rows = %+v; the stored provider carries no surrounding slash", rows)
+	}
+}
+
 // A subscription's listing states a model's capabilities, and the row keeps
 // them: the window and the image switch are the row's own, so every reader sees
 // what the vendor said. An input that says nothing about a capability keeps the
@@ -996,6 +1059,39 @@ func TestInstallModelOverridesPublishesRegistryTablesAndRowCaps(t *testing.T) {
 	fresh, ok := llm.LookupRow("row-new", appcfg.CustomProvider, model)
 	if !ok || fresh.ContextWindow != 1 {
 		t.Fatalf("row-new hit = %+v ok=%v, want its own window", fresh, ok)
+	}
+}
+
+// A row that carries no capability column but names the provider its model
+// data lives under still installs itself, so the row's lookup reads that
+// entry's window (owner 2026-11-16). A row that names nothing stays out, and a
+// sibling that names no entry is untouched by the first one's key.
+func TestModelOverridesInstallRowsThatNameOnlyACatalogKey(t *testing.T) {
+	cat, err := llm.Parse([]byte(`{
+		"alibaba/qwen4-max-preview": {"id":"alibaba/qwen4-max-preview","limit":{"context":1000000,"output":262144}},
+		"acme/solo-model": {"id":"acme/solo-model","limit":{"context":8192}}
+	}`))
+	if err != nil {
+		t.Fatalf("parse catalog: %v", err)
+	}
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() {
+		llm.SetGlobalCatalogForTest(nil)
+		llm.SetModelOverrides(nil, nil)
+	})
+
+	root := appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-keyed", Provider: appcfg.CustomProvider, Model: "qwen4-max-preview", CatalogProvider: "alibaba"},
+		{ID: "row-plain", Provider: appcfg.CustomProvider, Model: "nothing-here"},
+	}}
+	installModelOverrides(root)
+
+	hit, ok := llm.LookupRow("row-keyed", appcfg.CustomProvider, "qwen4-max-preview")
+	if !ok || hit.ContextWindow != 1000000 || hit.DefaultMaxTokens != 262144 {
+		t.Fatalf("row-keyed hit = %+v ok=%v; want the entry its catalog provider names", hit, ok)
+	}
+	if _, ok := llm.LookupRow("row-plain", appcfg.CustomProvider, "nothing-here"); ok {
+		t.Fatal("a row that names no caps and no catalog entry must not install an override")
 	}
 }
 

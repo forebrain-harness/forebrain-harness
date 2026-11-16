@@ -385,6 +385,7 @@ const (
 	setupPageCredentials // the API key, or the subscription's sign-in
 	setupPageModel       // a built-in provider's model and its effort
 	setupPageCustomModel // custom: the model name, sent verbatim
+	setupPageCatalogProvider // custom: whose model data describes it (optional)
 	setupPageThinking    // custom: the levels a model no source knows supports
 	setupPageConnection  // custom: send one request before saving
 	setupPageOffers      // a subscription's models to add
@@ -439,6 +440,9 @@ type llmSetup struct {
 	// efforts are the thinking levels the user ticked for a model no source
 	// documents.
 	efforts []string
+	// catalogProvider is the provider whose official data describes the custom
+	// model (owner 2026-11-16); "" matches the model name alone.
+	catalogProvider string
 	// offers are the models the subscription's sign-in unlocked, and chosen are
 	// the rows the user ticked among them.
 	offers []subscription.Offer
@@ -489,6 +493,8 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 			forward, err = s.pickModel()
 		case setupPageCustomModel:
 			forward, err = s.customModel()
+		case setupPageCatalogProvider:
+			forward, err = s.pickCatalogProvider()
 		case setupPageThinking:
 			forward, err = s.customThinkingLevels()
 		case setupPageConnection:
@@ -549,7 +555,7 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 func (s *llmSetup) flowPages() []int {
 	switch {
 	case s.choice.Custom:
-		pages := []int{setupPageProvider, setupPageBaseURL, setupPageProtocol, setupPageCredentials, setupPageCustomModel}
+		pages := []int{setupPageProvider, setupPageBaseURL, setupPageProtocol, setupPageCredentials, setupPageCustomModel, setupPageCatalogProvider}
 		if s.asksThinkingLevels() {
 			pages = append(pages, setupPageThinking)
 		}
@@ -650,6 +656,9 @@ func (s *llmSetup) options() process.Options {
 			Model:       s.model,
 			URLVerbatim: s.urlVerbatim,
 			CapEfforts:  s.efforts,
+			// The page asked, so its answer is this configuration's fact: ''
+			// matches the model name alone (owner 2026-11-16).
+			CatalogProvider: s.catalogProvider,
 			// The page asked, so its answer is this configuration's fact.
 			SubagentAllowed: s.subagentAllowed,
 		}
@@ -1010,6 +1019,45 @@ func (s *llmSetup) customModel() (bool, error) {
 	}
 }
 
+// pickCatalogProvider asks which provider's official data describes the custom
+// model (owner 2026-11-16). It is optional and never sent with a request: the
+// answer decides which catalog entry the model's window, output limit and
+// levels are read from, and an empty answer matches the model name alone.
+func (s *llmSetup) pickCatalogProvider() (bool, error) {
+	const title = "Model provider (optional)\nThe provider whose official data describes this model, e.g. alibaba. Not sent with requests. Leave empty to match the model name alone."
+	value, ok, err := s.cfg.Selector.Input(title, s.catalogProvider)
+	if err != nil || !ok {
+		return false, err
+	}
+	s.catalogProvider = strings.Trim(strings.TrimSpace(value), "/")
+	return true, nil
+}
+
+// catalogLookupProvider is the provider the model catalog is asked about: the
+// one the page named, or the custom placeholder when it named none — which is
+// the one that matches a bare model name.
+func (s *llmSetup) catalogLookupProvider() string {
+	if provider := strings.TrimSpace(s.catalogProvider); provider != "" {
+		return provider
+	}
+	return appcfg.CustomProvider
+}
+
+// modelDataFact is what the catalog says about the custom model, as the review
+// lists it: the entry the name matched and its window, or the one sentence for
+// a name nothing describes.
+func (s *llmSetup) modelDataFact() string {
+	hit, ok := llm.Lookup(s.catalogLookupProvider(), s.model)
+	if !ok {
+		return "no official data for this name"
+	}
+	value := hit.CatalogID
+	if hit.ContextWindow > 0 {
+		value += " · " + formatTokensCompact(int(hit.ContextWindow)) + " window"
+	}
+	return value
+}
+
 // customThinkingLevels are the levels a person may tick for a model no source
 // documents, in the order the wire protocol takes them. The web form offers the
 // same six, so a level picked here is one that form shows too.
@@ -1032,7 +1080,7 @@ func (s *llmSetup) asksThinkingLevels() bool {
 	if !s.choice.Custom || s.model == "" {
 		return false
 	}
-	return len(turn.ModelReasoningEfforts(appcfg.CustomProvider, s.model)) == 0
+	return len(turn.ModelReasoningEfforts(s.catalogLookupProvider(), s.model)) == 0
 }
 
 // customThinkingLevels lets the user state the levels the model takes. Ticking
@@ -1898,6 +1946,7 @@ func (s *llmSetup) reviewFacts() []turn.StatusFact {
 			{Label: "Model", Value: s.model},
 			{Label: "Protocol", Value: s.protocolLabel()},
 			{Label: "Endpoint", Value: s.endpoint()},
+			{Label: "Model data", Value: s.modelDataFact()},
 			{Label: "Thinking", Value: thinkingLabel(s.efforts)},
 			{Label: "Subagents", Value: subagentAllowedLabel(s.subagentAllowed)},
 		}

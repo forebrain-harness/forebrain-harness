@@ -748,6 +748,12 @@ CREATE TABLE fb_llm_models (
   -- May the agent pick this row for a subagent on its own via the model
   -- argument (owner 2026-11-10)? Off by default; existing rows migrate as off.
   subagent_allowed INTEGER NOT NULL DEFAULT 0 CHECK (subagent_allowed IN (0, 1)),
+  -- The provider whose model data describes this row's model (owner
+  -- 2026-11-16): the row's own pair is what requests use, while this names the
+  -- catalog entry its capabilities, window and levels come from. '' means the
+  -- row's own provider/model pair. Only a custom row may name one, and it is
+  -- never sent with a request.
+  catalog_provider TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;

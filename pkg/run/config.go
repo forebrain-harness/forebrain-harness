@@ -2568,7 +2568,10 @@ func (r *Runner) agentModelRowFor(ctx context.Context) string {
 func (r *Runner) modelHitFor(ctx context.Context) (llm.Hit, bool) {
 	provider, model := r.agentModelFor(ctx)
 	if override, ok := SubagentModelOverrideFromContext(ctx); ok && override.Caps != nil {
-		hit, _ := llm.LookupCatalog(provider, model)
+		// The row's catalog key wins over the pair: a custom model whose data
+		// lives under another provider reads that entry exactly (owner
+		// 2026-11-16).
+		hit, _ := llm.LookupCatalogFor(provider, model, override.Caps.CatalogKey)
 		return llm.OverlayModelOverride(hit, *override.Caps), true
 	}
 	return llm.LookupRow(r.agentModelRowFor(ctx), provider, model)

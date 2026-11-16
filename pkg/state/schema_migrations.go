@@ -20,7 +20,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 36
+const stateSchemaVersion = 37
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -119,6 +119,12 @@ var stateSchemaMigrations = []schemaMigration{
 		apply:         migrateStateV35ToV36,
 		applyMySQL:    migrateStateV35ToV36MySQL,
 		applyPostgres: migrateStateV35ToV36Postgres,
+	},
+	{
+		version:       37,
+		apply:         migrateStateV36ToV37,
+		applyMySQL:    migrateStateV36ToV37MySQL,
+		applyPostgres: migrateStateV36ToV37Postgres,
 	},
 }
 
@@ -1987,6 +1993,68 @@ UPDATE fb_llm_models SET cap_images = NULL
  WHERE lower(provider) = 'volcengine' AND btrim(source) <> ''
    AND cap_images = 0 AND cap_context_window IS NULL`); err != nil {
 		return fmt.Errorf("clear fabricated volcengine image caps: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV36ToV37 adds the catalog provider a model row may name (owner
+// 2026-11-16): the provider whose model data describes this row's model, so a
+// custom model whose official data is filed under another provider reads that
+// entry's window, output limit and levels. '' — the value every existing row
+// keeps — means the row's own provider/model pair, so an upgrade changes no
+// answer. Only a custom row may name one and it is never sent with a request,
+// so SQLite's ADD COLUMN with a non-NULL default is the whole migration; a
+// database whose table already carries the column (a fixture built from the
+// current schema.sql with a lowered user_version) skips it instead of failing
+// on a duplicate.
+func migrateStateV36ToV37(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_llm_models') WHERE name='catalog_provider'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_llm_models ADD COLUMN catalog_provider TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_llm_models.catalog_provider: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV36ToV37MySQL is the same column in MySQL's types; the column is
+// checked in information_schema, then added.
+func migrateStateV36ToV37MySQL(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'fb_llm_models' AND column_name = 'catalog_provider'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_llm_models ADD COLUMN catalog_provider VARCHAR(191) NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_llm_models.catalog_provider: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV36ToV37Postgres is the same column in PostgreSQL's types. One
+// statement, no constraint to name, so the column's existence test is enough.
+func migrateStateV36ToV37Postgres(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = CURRENT_SCHEMA() AND table_name = 'fb_llm_models' AND column_name = 'catalog_provider'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE fb_llm_models ADD COLUMN catalog_provider TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_llm_models.catalog_provider: %w", err)
 	}
 	return nil
 }

@@ -676,6 +676,10 @@ CREATE TABLE fb_llm_models (
   source_plan TEXT NOT NULL DEFAULT '',
   url_verbatim BIGINT NOT NULL DEFAULT 0,
   subagent_allowed BIGINT NOT NULL DEFAULT 0,
+  -- The provider whose model data describes this row's model (owner
+  -- 2026-11-16); '' means the row's own provider/model pair. Never sent with a
+  -- request.
+  catalog_provider TEXT NOT NULL DEFAULT '',
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
   CHECK (TRIM(id) <> ''),

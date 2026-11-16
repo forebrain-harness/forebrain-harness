@@ -635,6 +635,10 @@ CREATE TABLE fb_llm_models (
   source_plan VARCHAR(64) NOT NULL DEFAULT '',
   url_verbatim BIGINT NOT NULL DEFAULT 0 CHECK (url_verbatim IN (0, 1)),
   subagent_allowed BIGINT NOT NULL DEFAULT 0 CHECK (subagent_allowed IN (0, 1)),
+  -- The provider whose model data describes this row's model (owner
+  -- 2026-11-16); '' means the row's own provider/model pair. Never sent with a
+  -- request.
+  catalog_provider VARCHAR(191) NOT NULL DEFAULT '',
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
   -- base_url has no length the store can promise: keyed over its SHA-256,

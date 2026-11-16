@@ -31,6 +31,11 @@ type LLMModelConfig struct {
 	// argument. Projected from the table row; authorization itself reads the
 	// table live.
 	SubagentAllowed bool
+	// CatalogProvider is the provider whose model data describes Model (owner
+	// 2026-11-16): the row's own Provider/Model stay what requests use, while
+	// this names the catalog entry its capabilities come from. "" means the
+	// row's own pair. Only a custom row may name one, and it is never sent.
+	CatalogProvider string
 }
 
 // LLMModelCaps overrides the model catalog for one row; a nil pointer, a nil

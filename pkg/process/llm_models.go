@@ -652,6 +652,11 @@ type LLMModelInput struct {
 	// stored value on an update and leaves the row without one on a create; a
 	// non-nil "" states the listing names no default.
 	CapDefaultEffort *string
+	// CatalogProvider is the provider whose model data describes this row's
+	// model (owner 2026-11-16), for a custom model whose official data is
+	// filed under another provider. nil keeps the stored value on an update;
+	// a non-nil "" clears it; a new row without one carries none.
+	CatalogProvider *string
 }
 
 // LLMModelHeld returns the row this install already holds for one endpoint, as a
@@ -755,6 +760,9 @@ func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, 
 		if in.CapDefaultEffort != nil {
 			row.CapDefaultEffort = strings.TrimSpace(*in.CapDefaultEffort)
 		}
+		if in.CatalogProvider != nil {
+			row.CatalogProvider = strings.Trim(strings.TrimSpace(*in.CatalogProvider), "/")
+		}
 		if source := strings.TrimSpace(in.Source); source != "" {
 			row.Source = source
 		}
@@ -806,6 +814,10 @@ func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, 
 	if in.SubagentAllowed != nil {
 		subagentAllowed = *in.SubagentAllowed
 	}
+	catalogProvider := ""
+	if in.CatalogProvider != nil {
+		catalogProvider = strings.Trim(strings.TrimSpace(*in.CatalogProvider), "/")
+	}
 	created, err := store.Create(ctx, state.LLMModel{
 		Provider:         provider,
 		Model:            model,
@@ -822,6 +834,7 @@ func UpsertLLMModel(ctx context.Context, db *sql.DB, in LLMModelInput) (string, 
 		SourcePlan:       strings.TrimSpace(in.SourcePlan),
 		URLVerbatim:      in.URLVerbatim,
 		SubagentAllowed:  subagentAllowed,
+		CatalogProvider:  catalogProvider,
 	})
 	if err != nil {
 		// A concurrent writer stored the same identity between the lookup and

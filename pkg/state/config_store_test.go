@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 )
 
@@ -398,6 +399,84 @@ func TestLLMModelCreateListRoundTrip(t *testing.T) {
 	}
 	if !got.URLVerbatim {
 		t.Fatal("url_verbatim did not survive")
+	}
+}
+
+// A row may name the provider whose model data describes its model (owner
+// 2026-11-16); the column survives a create, a read by id, an update that
+// changes it, and the list, and a row that names none reads as "".
+func TestLLMModelStoreCatalogProviderRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newLLMModelStoreForTest(t)
+	created, err := store.Create(ctx, LLMModel{
+		Provider:        "custom",
+		Model:           "qwen4-max-preview",
+		BaseURL:         "https://api.example.com/v1",
+		CatalogProvider: "alibaba",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.CatalogProvider != "alibaba" {
+		t.Fatalf("created catalog_provider = %q, want alibaba", created.CatalogProvider)
+	}
+	got, err := store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CatalogProvider != "alibaba" {
+		t.Fatalf("Get catalog_provider = %q, want alibaba", got.CatalogProvider)
+	}
+	if row, err := got.ConfigRow(); err != nil {
+		t.Fatal(err)
+	} else if row.CatalogProvider != "alibaba" {
+		t.Fatalf("ConfigRow catalog_provider = %q, want alibaba", row.CatalogProvider)
+	}
+	got.CatalogProvider = ""
+	if _, err := store.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.CatalogProvider != "" {
+		t.Fatalf("catalog_provider = %q after clearing, want empty", cleared.CatalogProvider)
+	}
+	cleared.CatalogProvider = "alibaba"
+	if _, err := store.Update(ctx, cleared); err != nil {
+		t.Fatal(err)
+	}
+	list, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].CatalogProvider != "alibaba" {
+		t.Fatalf("List = %+v, want one row naming alibaba", list)
+	}
+}
+
+// A row that only names a catalog entry — no cap_* at all — still installs an
+// override: the key is an instruction about where to read the capabilities
+// from (owner 2026-11-16). A row that names nothing stays out.
+func TestModelOverrideFromCapsCarriesTheCatalogKey(t *testing.T) {
+	if _, ok := ModelOverrideFromCaps(appcfg.LLMModelCaps{}, "", "qwen4-max-preview"); ok {
+		t.Fatal("a row with no caps and no catalog provider must install nothing")
+	}
+	override, ok := ModelOverrideFromCaps(appcfg.LLMModelCaps{}, "alibaba", "qwen4-max-preview")
+	if !ok {
+		t.Fatal("a row naming a catalog provider must install an override")
+	}
+	if override.CatalogKey != "alibaba/qwen4-max-preview" {
+		t.Fatalf("CatalogKey = %q, want alibaba/qwen4-max-preview", override.CatalogKey)
+	}
+	window := int64(64000)
+	withCaps, ok := ModelOverrideFromCaps(appcfg.LLMModelCaps{ContextWindow: &window}, "alibaba", "qwen4-max-preview")
+	if !ok || withCaps.CatalogKey != "alibaba/qwen4-max-preview" {
+		t.Fatalf("override = %+v ok=%v; want the key beside the caps", withCaps, ok)
+	}
+	if withCaps.ContextWindow == nil || *withCaps.ContextWindow != 64000 {
+		t.Fatalf("caps lost: %+v", withCaps)
 	}
 }
 

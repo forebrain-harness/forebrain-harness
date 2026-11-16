@@ -458,6 +458,11 @@ type LLMModel struct {
 	// identity; authorization checks read the table live, not this copy.
 	SubagentAllowed bool
 
+	// CatalogProvider names the provider whose model data describes Model
+	// (owner 2026-11-16): '' = the row's own provider/model pair. Only a custom
+	// row carries one, and it is never sent with a request.
+	CatalogProvider string
+
 	CreatedAt int64 // unix ms
 	UpdatedAt int64 // unix ms
 }
@@ -494,16 +499,24 @@ func (m LLMModel) ConfigRow() (appcfg.LLMModelConfig, error) {
 		},
 		URLVerbatim:     m.URLVerbatim,
 		SubagentAllowed: m.SubagentAllowed,
+		CatalogProvider: m.CatalogProvider,
 	}, nil
 }
 
 // ModelOverrideFromCaps projects a row's capability columns into the model
 // catalog's override type. ok is false for a row that names no capability at
-// all. It lives in pkg/state — which already imports pkg/config and pkg/llm —
-// rather than on appcfg.LLMModelCaps, because pkg/config's production files
-// do not import pkg/llm and must not start to (the package graph pins that).
-func ModelOverrideFromCaps(caps appcfg.LLMModelCaps) (llm.ModelOverride, bool) {
-	if caps.Images == nil && caps.PDF == nil && caps.Video == nil && caps.Audio == nil &&
+// all — unless it names the catalog entry its data lives under (owner
+// 2026-11-16), which is an instruction about where to read the capabilities
+// from even when the row overrides none of them. It lives in pkg/state — which
+// already imports pkg/config and pkg/llm — rather than on appcfg.LLMModelCaps,
+// because pkg/config's production files do not import pkg/llm and must not
+// start to (the package graph pins that).
+func ModelOverrideFromCaps(caps appcfg.LLMModelCaps, catalogProvider, model string) (llm.ModelOverride, bool) {
+	catalogKey := ""
+	if provider := strings.TrimSpace(catalogProvider); provider != "" {
+		catalogKey = llm.JoinProviderModel(provider, model)
+	}
+	if catalogKey == "" && caps.Images == nil && caps.PDF == nil && caps.Video == nil && caps.Audio == nil &&
 		caps.Reasoning == nil && caps.ReasoningOff == nil && caps.Efforts == nil &&
 		caps.ContextWindow == nil && caps.MaxOutput == nil {
 		return llm.ModelOverride{}, false
@@ -518,6 +531,7 @@ func ModelOverrideFromCaps(caps appcfg.LLMModelCaps) (llm.ModelOverride, bool) {
 		Efforts:        caps.Efforts,
 		ContextWindow:  caps.ContextWindow,
 		MaxOutput:      caps.MaxOutput,
+		CatalogKey:     catalogKey,
 	}, true
 }
 
@@ -559,7 +573,7 @@ func NormalizeLLMModelIdentity(m *LLMModel) {
 const llmModelColumns = `id, provider, model, base_url, api_path, api_key, params_json,
 cap_images, cap_pdf, cap_video, cap_audio, cap_reasoning, cap_reasoning_off,
 cap_efforts_json, cap_default_effort, cap_context_window, cap_max_output,
-source, source_plan, url_verbatim, subagent_allowed, created_at, updated_at`
+source, source_plan, url_verbatim, subagent_allowed, catalog_provider, created_at, updated_at`
 
 var (
 	llmModelListSQL = dbx.SQL{
@@ -578,24 +592,24 @@ var (
 		Postgres: `SELECT ` + llmModelColumns + ` FROM fb_llm_models WHERE provider=$1 AND model=$2 AND base_url=$3 AND api_path=$4`,
 	}
 	llmModelInsertSQL = dbx.SQL{
-		SQLite: `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		MySQL:  `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		SQLite: `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		MySQL:  `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		Postgres: `INSERT INTO fb_llm_models (` + llmModelColumns + `) VALUES
-		($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+		($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
 	}
 	llmModelUpdateSQL = dbx.SQL{
 		SQLite: `UPDATE fb_llm_models SET provider=?, model=?, base_url=?, api_path=?, api_key=?, params_json=?,
 		cap_images=?, cap_pdf=?, cap_video=?, cap_audio=?, cap_reasoning=?, cap_reasoning_off=?,
 		cap_efforts_json=?, cap_default_effort=?, cap_context_window=?, cap_max_output=?,
-		source=?, source_plan=?, url_verbatim=?, subagent_allowed=?, updated_at=? WHERE id=?`,
+		source=?, source_plan=?, url_verbatim=?, subagent_allowed=?, catalog_provider=?, updated_at=? WHERE id=?`,
 		MySQL: `UPDATE fb_llm_models SET provider=?, model=?, base_url=?, api_path=?, api_key=?, params_json=?,
 		cap_images=?, cap_pdf=?, cap_video=?, cap_audio=?, cap_reasoning=?, cap_reasoning_off=?,
 		cap_efforts_json=?, cap_default_effort=?, cap_context_window=?, cap_max_output=?,
-		source=?, source_plan=?, url_verbatim=?, subagent_allowed=?, updated_at=? WHERE id=?`,
+		source=?, source_plan=?, url_verbatim=?, subagent_allowed=?, catalog_provider=?, updated_at=? WHERE id=?`,
 		Postgres: `UPDATE fb_llm_models SET provider=$1, model=$2, base_url=$3, api_path=$4, api_key=$5, params_json=$6,
 		cap_images=$7, cap_pdf=$8, cap_video=$9, cap_audio=$10, cap_reasoning=$11, cap_reasoning_off=$12,
 		cap_efforts_json=$13, cap_default_effort=$14, cap_context_window=$15, cap_max_output=$16,
-		source=$17, source_plan=$18, url_verbatim=$19, subagent_allowed=$20, updated_at=$21 WHERE id=$22`,
+		source=$17, source_plan=$18, url_verbatim=$19, subagent_allowed=$20, catalog_provider=$21, updated_at=$22 WHERE id=$23`,
 	}
 	llmModelDeleteSQL = dbx.SQL{
 		SQLite:   `DELETE FROM fb_llm_models WHERE id=?`,
@@ -799,7 +813,7 @@ func llmModelInsertArgs(m LLMModel) []any {
 		llmModelEffortsJSON(m.CapEfforts), m.CapDefaultEffort,
 		int64PtrToNull(m.CapContextWindow), int64PtrToNull(m.CapMaxOutput),
 		m.Source, m.SourcePlan, boolToInt(m.URLVerbatim), boolToInt(m.SubagentAllowed),
-		m.CreatedAt, m.UpdatedAt,
+		m.CatalogProvider, m.CreatedAt, m.UpdatedAt,
 	}
 }
 
@@ -811,7 +825,7 @@ func llmModelUpdateArgs(m LLMModel) []any {
 		llmModelEffortsJSON(m.CapEfforts), m.CapDefaultEffort,
 		int64PtrToNull(m.CapContextWindow), int64PtrToNull(m.CapMaxOutput),
 		m.Source, m.SourcePlan, boolToInt(m.URLVerbatim), boolToInt(m.SubagentAllowed),
-		m.UpdatedAt, m.ID,
+		m.CatalogProvider, m.UpdatedAt, m.ID,
 	}
 }
 
@@ -841,7 +855,7 @@ func scanLLMModel(scanner interface{ Scan(...any) error }) (LLMModel, error) {
 		&m.ID, &m.Provider, &m.Model, &m.BaseURL, &m.APIPath, &m.APIKey, &m.ParamsJSON,
 		&images, &pdf, &video, &audio, &reasoning, &reasoningOff,
 		&effortsJSON, &m.CapDefaultEffort, &contextWindow, &maxOutput,
-		&m.Source, &m.SourcePlan, &urlVerbatim, &subagentAllowed, &m.CreatedAt, &m.UpdatedAt,
+		&m.Source, &m.SourcePlan, &urlVerbatim, &subagentAllowed, &m.CatalogProvider, &m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
 		return LLMModel{}, err
 	}

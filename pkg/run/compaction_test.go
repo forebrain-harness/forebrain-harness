@@ -1077,7 +1077,7 @@ func processModelOverridesFor(root *appcfg.Root) (map[string]llm.ModelOverride, 
 	byRow := make(map[string]llm.ModelOverride, len(root.LLMModels))
 	pairOf := make(map[string]string, len(root.LLMModels))
 	for _, row := range root.LLMModels {
-		override, ok := state.ModelOverrideFromCaps(row.Caps)
+		override, ok := state.ModelOverrideFromCaps(row.Caps, row.CatalogProvider, row.Model)
 		if !ok {
 			continue
 		}

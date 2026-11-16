@@ -404,6 +404,102 @@ func TestLLMModelsAPICatalogCaps(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, do(http.MethodGet, "/api/llm-models/catalog-caps").Code)
 }
 
+// useGatewayCatalog installs one test catalog for the models-page cases that
+// need named entries (the shipped catalog is the only layer they read).
+func useGatewayCatalog(t *testing.T, raw string) {
+	t.Helper()
+	cat, err := llm.Parse([]byte(raw))
+	require.NoError(t, err)
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() { llm.SetGlobalCatalogForTest(nil) })
+}
+
+// A custom row may name the provider whose official data describes its model
+// (owner 2026-11-16): the value travels back with the row, and the catalog
+// answer the drawer shows comes from that entry, named by catalog_id.
+func TestModelsAPIRoundTripsTheCatalogProvider(t *testing.T) {
+	useGatewayCatalog(t, `{
+		"alibaba/qwen4-max-preview": {"id":"alibaba/qwen4-max-preview","attachment":true,"reasoning":true,
+			"reasoning_options":[{"type":"effort","values":["low","high"]}],
+			"limit":{"context":1000000,"output":262144}}
+	}`)
+	_, do := modelsPageServer(t)
+	id := createModel(t, do, `{"provider":"custom","model":"qwen4-max-preview","base_url":"https://api.example.com/v1","api_path":"/chat/completions","api_key":"sk-custom","catalog_provider":"alibaba"}`)
+
+	rows, _ := llmModelRows(t, do)
+	row := llmModelByID(t, rows, id)
+	require.Equal(t, "alibaba", row["catalog_provider"])
+	require.Equal(t, "alibaba/qwen4-max-preview", row["catalog_id"])
+	caps, ok := row["catalog_caps"].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 1000000, caps["context_window"])
+
+	// The same row named through the capability endpoint the drawer asks.
+	rec := do(http.MethodPost, "/api/llm-models/catalog-caps",
+		`{"id":"`+id+`","provider":"custom","model":"qwen4-max-preview","base_url":"https://api.example.com/v1","catalog_provider":"alibaba"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body llmModelCapsBody
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "alibaba/qwen4-max-preview", body.CatalogID)
+	require.EqualValues(t, 1000000, *body.ContextWindow)
+}
+
+// Only a custom row names the provider its data lives under: a built-in
+// provider's row is described by its own pair, so the write is refused rather
+// than stored and ignored.
+func TestModelsAPIRefusesACatalogProviderOnABuiltinRow(t *testing.T) {
+	_, do := modelsPageServer(t)
+	rec := do(http.MethodPost, "/api/llm-models",
+		`{"provider":"openai","model":"gpt-5.5","base_url":"https://api.openai.com/v1","api_key":"sk-1","catalog_provider":"alibaba"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "只有自定义模型可以指定数据服务商")
+}
+
+// A row that stops being custom drops the provider it used to name: the value
+// describes a custom model's data, and a built-in row has none to describe.
+func TestModelsAPIClearsTheCatalogProviderWhenTheProviderChanges(t *testing.T) {
+	useGatewayCatalog(t, `{
+		"alibaba/qwen4-max-preview": {"id":"alibaba/qwen4-max-preview","limit":{"context":1000000}}
+	}`)
+	_, do := modelsPageServer(t)
+	id := createModel(t, do, `{"provider":"custom","model":"qwen4-max-preview","base_url":"https://api.example.com/v1","api_path":"/chat/completions","api_key":"sk-custom","catalog_provider":"alibaba"}`)
+
+	rec := do(http.MethodPut, "/api/llm-models/"+id,
+		`{"provider":"openai","model":"gpt-5.5","base_url":"https://api.openai.com/v1"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "catalog_provider")
+
+	rows, _ := llmModelRows(t, do)
+	row := llmModelByID(t, rows, id)
+	require.Equal(t, "openai", row["provider"])
+	require.NotContains(t, row, "catalog_provider")
+}
+
+// The capability endpoint answers from the entry the request names, and from
+// the model name alone when it names none: the two answers a drawer shows while
+// the person types.
+func TestModelsAPICatalogCapsEndpointHonoursTheCatalogProvider(t *testing.T) {
+	useGatewayCatalog(t, `{
+		"alibaba/qwen4-max-preview": {"id":"alibaba/qwen4-max-preview","limit":{"context":1000000,"output":262144}},
+		"zeta/qwen4-max-preview": {"id":"zeta/qwen4-max-preview","limit":{"context":2000000,"output":32768}}
+	}`)
+	_, do := modelsPageServer(t)
+
+	named := do(http.MethodGet, "/api/llm-models/catalog-caps?provider=custom&model=qwen4-max-preview&base_url=https://api.example.com/v1&catalog_provider=zeta")
+	require.Equal(t, http.StatusOK, named.Code, named.Body.String())
+	var withKey llmModelCapsBody
+	require.NoError(t, json.Unmarshal(named.Body.Bytes(), &withKey))
+	require.Equal(t, "zeta/qwen4-max-preview", withKey.CatalogID)
+	require.EqualValues(t, 2000000, *withKey.ContextWindow)
+
+	unnamed := do(http.MethodGet, "/api/llm-models/catalog-caps?provider=custom&model=qwen4-max-preview&base_url=https://api.example.com/v1")
+	require.Equal(t, http.StatusOK, unnamed.Code, unnamed.Body.String())
+	var withoutKey llmModelCapsBody
+	require.NoError(t, json.Unmarshal(unnamed.Body.Bytes(), &withoutKey))
+	require.Equal(t, "alibaba/qwen4-max-preview", withoutKey.CatalogID)
+	require.EqualValues(t, 1000000, *withoutKey.ContextWindow)
+}
+
 // The provider picker is the registry: the built-in providers in display order,
 // the sign-in ones marked, and the three protocols a custom model may name.
 func TestLLMModelsAPIProviders(t *testing.T) {

@@ -36,6 +36,10 @@ type Options struct {
 	// source documents — the custom form asks when nothing knows them. nil
 	// leaves the stored levels alone.
 	CapEfforts []string
+	// CatalogProvider is the provider whose model data describes a custom
+	// model (owner 2026-11-16); "" names none. Only a custom row may carry it,
+	// so Execute writes it only for provider "custom".
+	CatalogProvider string
 }
 
 type Report struct {
@@ -129,6 +133,13 @@ func Execute(rt Context, opts Options) (Report, error) {
 	if opts.CapEfforts != nil {
 		efforts := append([]string{}, opts.CapEfforts...)
 		in.CapEfforts = &efforts
+	}
+	// The catalog provider describes where a custom model's official data
+	// lives; a built-in provider's row is described by its own pair, so only a
+	// custom row is written with one (owner 2026-11-16).
+	if strings.EqualFold(strings.TrimSpace(opts.Provider), appcfg.CustomProvider) {
+		catalogProvider := strings.Trim(strings.TrimSpace(opts.CatalogProvider), "/")
+		in.CatalogProvider = &catalogProvider
 	}
 	// The api_key requirement is the write's to judge, not a gate here: a row
 	// a subscription's Provision already wrote keeps its stored key when the

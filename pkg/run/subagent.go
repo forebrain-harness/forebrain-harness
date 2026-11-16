@@ -4401,7 +4401,7 @@ func configuredRow(row state.LLMModel) (appcfg.AgentLLMProviderConfig, *llm.Mode
 	if err != nil {
 		return appcfg.AgentLLMProviderConfig{}, nil, err
 	}
-	caps, hasCaps := state.ModelOverrideFromCaps(configRow.Caps)
+	caps, hasCaps := state.ModelOverrideFromCaps(configRow.Caps, configRow.CatalogProvider, configRow.Model)
 	var override *llm.ModelOverride
 	if hasCaps {
 		override = &caps

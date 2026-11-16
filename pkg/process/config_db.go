@@ -298,9 +298,9 @@ func modelOverridesFor(rows []appcfg.LLMModelConfig) (map[string]llm.ModelOverri
 // modelOverrideForRow projects one row's capability columns into the lookup's
 // override type: the shared projection state.ModelOverrideFromCaps owns, so a
 // row installed into the catalog and a row read live by a dispatch agree.
-// ok is false for a row that names no capability at all.
+// ok is false for a row that names no capability and no catalog entry.
 func modelOverrideForRow(row appcfg.LLMModelConfig) (llm.ModelOverride, bool) {
-	return state.ModelOverrideFromCaps(row.Caps)
+	return state.ModelOverrideFromCaps(row.Caps, row.CatalogProvider, row.Model)
 }
 
 var (

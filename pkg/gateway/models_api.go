@@ -81,8 +81,16 @@ type llmModelRow struct {
 	SubagentAllowed bool   `json:"subagent_allowed"`
 	Protocol        string `json:"protocol"`
 	Endpoint        string `json:"endpoint"`
-	APIKeySet       bool   `json:"api_key_set"`
-	APIKeyLast4     string `json:"api_key_last4,omitempty"`
+	// CatalogProvider is the provider this row says its model's official data
+	// lives under (owner 2026-11-16); "" matches the model name alone. It is
+	// never sent with a request — it only decides which catalog entry
+	// CatalogID names.
+	CatalogProvider string `json:"catalog_provider,omitempty"`
+	// CatalogID is the catalog entry this answer came from, so the drawer can
+	// say which row its capabilities belong to.
+	CatalogID   string `json:"catalog_id,omitempty"`
+	APIKeySet   bool   `json:"api_key_set"`
+	APIKeyLast4 string `json:"api_key_last4,omitempty"`
 	// APIKey is the stored key in plaintext (owner 2026-11-07: the edit drawer
 	// must be able to reveal it). Empty for a row with no key. Never logged,
 	// never in an error, never in /choices or an event.
@@ -125,6 +133,9 @@ type llmModelWrite struct {
 	URLVerbatim *bool         `json:"url_verbatim"`
 	// SubagentAllowed is the authorization switch; nil leaves it alone.
 	SubagentAllowed *bool `json:"subagent_allowed"`
+	// CatalogProvider names the provider a custom model's official data lives
+	// under (owner 2026-11-16); nil leaves it alone, "" clears it.
+	CatalogProvider *string `json:"catalog_provider"`
 }
 
 // llmModelIdWrite is a body that addresses a stored row as well: the
@@ -141,6 +152,9 @@ type llmModelCapsBody struct {
 	llmModelCaps
 	EffortsKnown  bool   `json:"efforts_known"`
 	EffortsSource string `json:"efforts_source,omitempty"`
+	// CatalogID is the catalog entry the values came from ("" for a name the
+	// catalog does not describe), so the drawer shows what it matched.
+	CatalogID string `json:"catalog_id,omitempty"`
 }
 
 // llmProviderOption is one entry of the form's provider picker.
@@ -277,12 +291,15 @@ func llmModelCapsOfRow(row state.LLMModel) llmModelCaps {
 }
 
 // llmModelCatalogCaps is what the catalog says a model can do, without any
-// configured row's overrides (pkg/llm.LookupCatalog): the form's advanced
+// configured row's overrides (pkg/llm.LookupCatalogFor): the form's advanced
 // switches start here and send null for a value that still matches it.
-func llmModelCatalogCaps(provider, model string) llmModelCaps {
-	hit, ok := llm.LookupCatalog(provider, model)
+// catalogProvider is the row's own answer about where its data lives (owner
+// 2026-11-16); "" asks the model name alone. The second result names the entry
+// the answer came from.
+func llmModelCatalogCaps(provider, model, catalogProvider string) (llmModelCaps, string) {
+	hit, ok := llm.LookupCatalogFor(provider, model, llm.JoinProviderModel(catalogProvider, model))
 	if !ok {
-		return llmModelCaps{}
+		return llmModelCaps{}, ""
 	}
 	images, reasoning := hit.SupportsAttachments, hit.CanReason
 	caps := llmModelCaps{Images: &images, Reasoning: &reasoning}
@@ -297,7 +314,26 @@ func llmModelCatalogCaps(provider, model string) llmModelCaps {
 		output := hit.DefaultMaxTokens
 		caps.MaxOutput = &output
 	}
-	return caps
+	return caps, hit.CatalogID
+}
+
+// llmModelCatalogProviderOf reads the catalog provider a capability request
+// asks about: the body's answer when it names one (a pointer, so "" is an
+// answer), the stored row's when the body says nothing, "" otherwise.
+func llmModelCatalogProviderOf(write llmModelWrite, stored *state.LLMModel) string {
+	if write.CatalogProvider != nil {
+		return llmModelCatalogProvider(*write.CatalogProvider)
+	}
+	if stored != nil {
+		return stored.CatalogProvider
+	}
+	return ""
+}
+
+// llmModelCatalogProvider normalizes the provider a model's official data lives
+// under: trimmed, no surrounding slashes, empty for "the model name alone".
+func llmModelCatalogProvider(raw string) string {
+	return strings.Trim(strings.TrimSpace(raw), "/")
 }
 
 // llmModelApplyLiveCaps lays the live answer the process already holds for a
@@ -421,11 +457,12 @@ func (s *Server) llmModelRowOf(r *http.Request, scope llmModelScope, row state.L
 		SourcePlan:      row.SourcePlan,
 		Params:          row.ParamsJSON,
 		Caps:            llmModelCapsOfRow(row),
-		CatalogCaps:     llmModelCatalogCaps(row.Provider, row.Model),
+		CatalogProvider: row.CatalogProvider,
 		IsDefault:       row.ID == scope.defaultID,
 		DefaultFor:      llmModelDefaultFor(scope.cfg, row.ID),
 		CreatedAt:       row.CreatedAt,
 	}
+	out.CatalogCaps, out.CatalogID = llmModelCatalogCaps(row.Provider, row.Model, row.CatalogProvider)
 	out.EffortsKnown = llmModelApplyLiveCaps(row.ID, &out.CatalogCaps)
 	if sub, ok := gatewaySubscriptionByID(row.Source); ok {
 		label, labelZH := sub.Label()
@@ -791,6 +828,13 @@ func (s *Server) handleLLMModelCatalogCaps(w http.ResponseWriter, r *http.Reques
 			Model:    query.Get("model"),
 			BaseURL:  query.Get("base_url"),
 		}
+		if value, present := query["catalog_provider"]; present {
+			named := ""
+			if len(value) > 0 {
+				named = value[0]
+			}
+			write.CatalogProvider = &named
+		}
 		id = strings.TrimSpace(query.Get("id"))
 	case http.MethodPost:
 		var body llmModelIdWrite
@@ -830,7 +874,8 @@ func (s *Server) handleLLMModelCatalogCaps(w http.ResponseWriter, r *http.Reques
 	if write.APIKey != nil {
 		key = strings.TrimSpace(*write.APIKey)
 	}
-	body := llmModelCapsBody{llmModelCaps: llmModelCatalogCaps(provider, model)}
+	body := llmModelCapsBody{}
+	body.llmModelCaps, body.CatalogID = llmModelCatalogCaps(provider, model, llmModelCatalogProviderOf(write, stored))
 	if info, err := process.ResolveModelInfo(r.Context(), provider, model, source, key); err == nil {
 		body.Efforts = info.Efforts
 		body.DefaultEffort = info.DefaultEffort
@@ -969,6 +1014,20 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 	if err := s.llmModelCapsValid(r, provider, model, caps, row); err != nil {
 		return row, err
 	}
+	// 7. The provider a custom model's official data lives under (owner
+	// 2026-11-16). Only a custom row may name one — a built-in row's data is
+	// its own pair — and a row that is not custom carries none.
+	catalogProvider := row.CatalogProvider
+	if write.CatalogProvider != nil {
+		catalogProvider = llmModelCatalogProvider(*write.CatalogProvider)
+		if catalogProvider != "" && !custom {
+			return row, llmRefuse(r, http.StatusBadRequest,
+				"只有自定义模型可以指定数据服务商", "only a custom model names the provider its official data lives under")
+		}
+	}
+	if !custom {
+		catalogProvider = ""
+	}
 
 	key := row.APIKey
 	if write.APIKey != nil {
@@ -996,6 +1055,7 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 		SourcePlan:       row.SourcePlan,
 		URLVerbatim:      verbatim,
 		SubagentAllowed:  subagentAllowed,
+		CatalogProvider:  catalogProvider,
 		CreatedAt:        row.CreatedAt,
 	}
 	// A row a subscription wrote is recognised by its sign-in: its model, its
@@ -1004,7 +1064,8 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 	if stored != nil && strings.TrimSpace(stored.Source) != "" {
 		if row.Provider != stored.Provider || row.Model != stored.Model ||
 			row.BaseURL != stored.BaseURL || row.APIPath != stored.APIPath ||
-			row.APIKey != stored.APIKey || row.URLVerbatim != stored.URLVerbatim {
+			row.APIKey != stored.APIKey || row.URLVerbatim != stored.URLVerbatim ||
+			row.CatalogProvider != stored.CatalogProvider {
 			return row, llmRefuse(r, http.StatusBadRequest,
 				"订阅来的模型只能改高级配置；要换模型或协议请在订阅登录里重新选择",
 				"a model that came from a sign-in can only change its advanced settings; pick another model or protocol by signing in again")
@@ -1039,7 +1100,8 @@ func (s *Server) llmModelCapsValid(r *http.Request, provider, model string, caps
 	if effort := strings.TrimSpace(caps.DefaultEffort); effort != "" {
 		levels := caps.Efforts
 		if len(levels) == 0 {
-			levels = llmModelCatalogCaps(provider, model).Efforts
+			catalogCaps, _ := llmModelCatalogCaps(provider, model, stored.CatalogProvider)
+			levels = catalogCaps.Efforts
 		}
 		if !slices.Contains(levels, effort) {
 			return llmRefuse(r, http.StatusBadRequest,

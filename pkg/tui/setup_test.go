@@ -1257,10 +1257,11 @@ func stubLLMProbe(t *testing.T, errs ...error) *int {
 // customAnswers is one pass through the custom form: the address, the protocol,
 // the key and the model name.
 type customAnswers struct {
-	baseURL  string
-	protocol string
-	key      string
-	model    string
+	baseURL         string
+	protocol        string
+	key             string
+	model           string
+	catalogProvider string
 }
 
 // The custom form asks for the address, the protocol, the key and the model name,
@@ -1378,12 +1379,113 @@ func TestCustomModelKnownLevelsSkipTheQuestion(t *testing.T) {
 	}
 }
 
+// useSetupCatalogWith installs one test catalog and puts the build's own back
+// when the test ends, so a test can name the entries its case needs.
+func useSetupCatalogWith(t *testing.T, raw string) {
+	t.Helper()
+	cat, err := llm.Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse test catalog: %v", err)
+	}
+	llm.SetGlobalCatalogForTest(cat)
+	if data, err := llm.RepoModelsJSONForTest(); err == nil {
+		if embedded, err := llm.Parse(data); err == nil {
+			t.Cleanup(func() { llm.SetGlobalCatalogForTest(embedded) })
+		}
+	}
+}
+
+// The custom form asks whose official data describes the model after the model
+// name (owner 2026-11-16). The answer is optional, is saved on the row, and the
+// review shows what it matched before anything is written.
+func TestCustomModelFlowAsksForAnOptionalProvider(t *testing.T) {
+	useSetupCatalogWith(t, `{
+		"alibaba/qwen4-max-preview": {"id":"alibaba/qwen4-max-preview","reasoning":true,
+			"reasoning_options":[{"type":"effort","values":["low","high"]}],
+			"limit":{"context":1000000,"output":262144}}
+	}`)
+	stubLLMProbe(t)
+
+	// Empty answer: the page is there, and the row names no provider.
+	blank := &fakeSelector{confirms: []bool{false}, multiSelects: [][]int{{}}}
+	opts, ok, err := PromptMainLLMSetup(withCustomAnswers(setupTestConfig(t, blank), customAnswers{
+		baseURL:  "https://api.example.com/v1",
+		protocol: "OpenAI Chat Completions",
+		key:      "sk-blank",
+		model:    "qwen4-max-preview",
+	}))
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if opts.CatalogProvider != "" {
+		t.Fatalf("catalog provider = %q, want empty", opts.CatalogProvider)
+	}
+	if len(blank.inputLabels) != 4 {
+		t.Fatalf("input pages = %v, want the address, the key, the model and the provider", blank.inputLabels)
+	}
+	if !strings.HasPrefix(blank.inputLabels[3], "Model provider (optional)") {
+		t.Fatalf("fourth input page = %q, want the optional provider", blank.inputLabels[3])
+	}
+	if !strings.Contains(blank.inputLabels[3], "Leave empty to match the model name alone.") {
+		t.Fatalf("provider page = %q", blank.inputLabels[3])
+	}
+
+	// A typed provider is saved as typed, and the review names the entry the
+	// catalog matched.
+	typed := &fakeSelector{confirms: []bool{false}, multiSelects: [][]int{{}}}
+	opts, ok, err = PromptMainLLMSetup(withCustomAnswers(setupTestConfig(t, typed), customAnswers{
+		baseURL:         "https://api.example.com/v1",
+		protocol:        "OpenAI Chat Completions",
+		key:             "sk-typed",
+		model:           "qwen4-max-preview",
+		catalogProvider: "alibaba",
+	}))
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if opts.CatalogProvider != "alibaba" {
+		t.Fatalf("catalog provider = %q, want alibaba", opts.CatalogProvider)
+	}
+	facts := map[string]string{}
+	for _, fact := range typed.reviewFacts[0] {
+		facts[fact.Label] = fact.Value
+	}
+	if got := facts["Model data"]; got != "alibaba/qwen4-max-preview · 1M window" {
+		t.Fatalf("review Model data = %q, want the matched entry and its window (all: %+v)", got, facts)
+	}
+}
+
+// A bare custom model a catalog entry names by its last segment carries that
+// entry's levels, so the form does not ask for evidence it already has — even
+// when the person left the optional provider empty.
+func TestCustomModelFlowSkipsTheLevelsPageWhenTheCatalogKnowsTheModel(t *testing.T) {
+	useSetupCatalogWith(t, `{
+		"alibaba/qwen4-max-preview": {"id":"alibaba/qwen4-max-preview","reasoning":true,
+			"reasoning_options":[{"type":"effort","values":["low","high"]}],
+			"limit":{"context":1000000,"output":262144}}
+	}`)
+	stubLLMProbe(t)
+	selector := &fakeSelector{confirms: []bool{false}}
+	if _, ok, err := PromptMainLLMSetup(withCustomAnswers(setupTestConfig(t, selector), customAnswers{
+		baseURL:  "https://api.example.com/v1",
+		protocol: "OpenAI Chat Completions",
+		key:      "sk-known",
+		model:    "qwen4-max-preview",
+	})); err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if len(selector.multiLabels) != 0 {
+		t.Fatalf("multi-select pages = %v, want no thinking-levels page", selector.multiLabels)
+	}
+}
+
 // withCustomAnswers scripts a custom run's answers onto a config, from the
 // /connect first page: the provider list's «Custom model» row, then the
-// protocol, the address, the key and the model name.
+// protocol, the address, the key, the model name, and the optional provider
+// whose official data describes it (an unanswered page takes "").
 func withCustomAnswers(cfg PromptConfig, answers customAnswers) PromptConfig {
 	selector := cfg.Selector.(*fakeSelector)
-	selector.inputs = append([]string{answers.baseURL, answers.key, answers.model}, selector.inputs...)
+	selector.inputs = append([]string{answers.baseURL, answers.key, answers.model, answers.catalogProvider}, selector.inputs...)
 	selector.selects = append([]string{"Custom model", answers.protocol}, selector.selects...)
 	return cfg
 }
