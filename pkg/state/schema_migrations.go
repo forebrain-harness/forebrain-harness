@@ -2000,8 +2000,8 @@ UPDATE fb_llm_models SET cap_images = NULL
 // migrateStateV36ToV37 adds the catalog provider a model row may name (owner
 // 2026-11-16): the provider whose model data describes this row's model, so a
 // custom model whose official data is filed under another provider reads that
-// entry's window, output limit and levels. '' — the value every existing row
-// keeps — means the row's own provider/model pair, so an upgrade changes no
+// entry's window, output limit and levels. An empty value — what every existing
+// row keeps — means the row's own provider/model pair, so an upgrade changes no
 // answer. Only a custom row may name one and it is never sent with a request,
 // so SQLite's ADD COLUMN with a non-NULL default is the whole migration; a
 // database whose table already carries the column (a fixture built from the

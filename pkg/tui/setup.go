@@ -379,17 +379,17 @@ func providerChoiceHint(endpoint appcfg.ProviderEndpoint) string {
 // provider reached with a key, and a subscription ends on the models it offers.
 // Esc on any page goes back one; the first one closes the setup.
 const (
-	setupPageProvider    = iota + 1
-	setupPageBaseURL     // custom: the address requests go to
-	setupPageProtocol    // custom: the request shape
-	setupPageCredentials // the API key, or the subscription's sign-in
-	setupPageModel       // a built-in provider's model and its effort
-	setupPageCustomModel // custom: the model name, sent verbatim
+	setupPageProvider        = iota + 1
+	setupPageBaseURL         // custom: the address requests go to
+	setupPageProtocol        // custom: the request shape
+	setupPageCredentials     // the API key, or the subscription's sign-in
+	setupPageModel           // a built-in provider's model and its effort
+	setupPageCustomModel     // custom: the model name, sent verbatim
 	setupPageCatalogProvider // custom: whose model data describes it (optional)
-	setupPageThinking    // custom: the levels a model no source knows supports
-	setupPageConnection  // custom: send one request before saving
-	setupPageOffers      // a subscription's models to add
-	setupPageSubagents   // may the agent pick this row for subagents on its own?
+	setupPageThinking        // custom: the levels a model no source knows supports
+	setupPageConnection      // custom: send one request before saving
+	setupPageOffers          // a subscription's models to add
+	setupPageSubagents       // may the agent pick this row for subagents on its own?
 	setupPageReview
 )
 

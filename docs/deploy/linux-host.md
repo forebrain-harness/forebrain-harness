@@ -31,6 +31,10 @@ forebrain_v<版本>_linux_amd64.tar.gz     # 或 linux_arm64
 └── fonts/             # CJK 兜底字体
 ```
 
+`models.json` 是随包出厂的模型目录，优先作答；`/var/lib/forebrain/models.json`
+（即 `<FOREBRAIN_HOME>/models.json`）只补出厂目录里没有的 key——同名一律用出厂值，
+写坏了只记日志、不影响出厂目录（owner 2026-11-16）。
+
 有外网的机器上下载并校验（Release 页同时发布 sha256），拷进内网：
 
 ```bash

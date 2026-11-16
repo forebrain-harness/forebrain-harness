@@ -86,10 +86,24 @@ Layer assignment from `docs/plan/TUI_FIRST_RUNTIME_REFACTOR.md` §3.1/§11.1; a 
 
 ## Model data
 
-`assets/models.json` beside the binary is the catalog, and it is the only one:
-nothing is downloaded at runtime and no copy lives in a forebrain home (owner
-2026-11-09). Every process of a build reads the same file, and a build that ships
-no catalog reports that and runs with no catalog data instead of fetching one.
+`assets/models.json` beside the binary is the catalog, and it is the first one:
+nothing is downloaded at runtime, and every key it names answers from it. A
+models.json in the forebrain home (`<FOREBRAIN_HOME>/models.json`) is a
+supplement, not a second document: it only adds the keys the shipped file does
+not carry, a key both files name keeps the shipped value, and a home file that
+is not JSON is logged and ignored (owner 2026-11-16). The home file is how a
+model the build does not know — a preview id, a provider's new release — gets
+its window, output limit and thinking levels without a rebuild. A build that
+ships no catalog reports that and runs with no catalog data instead of
+fetching one.
+
+A custom model reads that data by name. The row's own provider/model are what
+requests use; a row may also name the provider its official data lives under
+(`catalog_provider`, asked on `/connect` as the optional 「Model provider」 page
+and on the models page's drawer, one rule on both surfaces), and the lookup
+then asks that catalog entry exactly. With no such provider the model name is
+matched: the exact key, then the unambiguous short name, then the first id in
+sorted order that contains it (`sonnet-4-6` reads `anthropic/claude-sonnet-4-6`).
 
 The catalog is regenerated offline from a models.dev snapshot, never by the
 running product: `scripts/merge-catalog-into-models.sh` takes the snapshot

@@ -405,13 +405,21 @@ func TestLLMModelsAPICatalogCaps(t *testing.T) {
 }
 
 // useGatewayCatalog installs one test catalog for the models-page cases that
-// need named entries (the shipped catalog is the only layer they read).
+// need named entries, and puts the package's own (TestMain's shipped catalog)
+// back when the test ends: a catalog left behind would answer for every test
+// that follows.
 func useGatewayCatalog(t *testing.T, raw string) {
 	t.Helper()
 	cat, err := llm.Parse([]byte(raw))
 	require.NoError(t, err)
 	llm.SetGlobalCatalogForTest(cat)
-	t.Cleanup(func() { llm.SetGlobalCatalogForTest(nil) })
+	t.Cleanup(func() {
+		if data, err := llm.RepoModelsJSONForTest(); err == nil {
+			if embedded, err := llm.Parse(data); err == nil {
+				llm.SetGlobalCatalogForTest(embedded)
+			}
+		}
+	})
 }
 
 // A custom row may name the provider whose official data describes its model
