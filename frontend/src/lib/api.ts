@@ -1426,6 +1426,9 @@ export interface LlmModelCatalogCaps extends LlmModelCaps {
   effortsKnown: boolean
   /** Which source answered ('chatgpt', 'volcengine', 'modelsdev'). */
   effortsSource?: string
+  /** The catalog entry the values came from ('' when nothing describes this
+   *  name), so the form can show what it matched. */
+  catalogId?: string
 }
 
 /** One row of the install-wide models table (plan 265). */
@@ -1449,6 +1452,12 @@ export interface LlmModelRow {
   subagentAllowed: boolean
   protocol: string
   endpoint: string
+  /** The provider this row says its model's official data lives under (owner
+   *  2026-11-16); absent means "match the model name alone". Never sent with a
+   *  request. */
+  catalogProvider?: string
+  /** The catalog entry this row's `catalogCaps` came from. */
+  catalogId?: string
   apiKeySet: boolean
   apiKeyLast4?: string
   /** The stored key in plaintext: the edit drawer reveals it. Never logged. */
@@ -1483,6 +1492,9 @@ export interface LlmModelWrite {
   caps?: LlmModelCaps
   urlVerbatim?: boolean
   subagentAllowed?: boolean
+  /** The provider a custom model's official data lives under; '' clears it,
+   *  omitted keeps it. */
+  catalogProvider?: string
 }
 
 /** One entry of the list every model picker reads (`/api/llm-models/choices`). */
@@ -4622,7 +4634,15 @@ export const forebrainApi = {
 
   /** What a model can do by default, for a form whose values may not be stored
    * yet. `effortsKnown` false means no source lists its levels. */
-  llmModelCatalogCaps(query: { provider: string; model: string; baseUrl?: string; id?: string }) {
+  llmModelCatalogCaps(query: {
+    provider: string
+    model: string
+    baseUrl?: string
+    id?: string
+    /** The row's own answer about where its data lives; '' asks the model name
+     *  alone. */
+    catalogProvider?: string
+  }) {
     return api.get<LlmModelCatalogCaps>('/llm-models/catalog-caps', { params: toSnakeCase(query) }).then((res) => res.data)
   },
 

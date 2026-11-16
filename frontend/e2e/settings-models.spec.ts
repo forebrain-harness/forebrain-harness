@@ -134,6 +134,74 @@ test('a custom model cannot be saved without a protocol', async ({ page }) => {
   await expect(row).toContainText('https://gateway.e2e.test/llm')
 })
 
+test('a custom model matches the entry its name is contained in, and remembers the provider it was told', async ({
+  page,
+}) => {
+  // Requirement 2 (owner 2026-11-16): a custom model is a name a person typed,
+  // and the shipped catalog files its entry under a provider and a release
+  // suffix the person did not type. `sonnet-4-6` is contained in
+  // `anthropic/claude-sonnet-4-6` but is no key's last segment, so only the
+  // name rule answers it — with the shipped catalog alone, no home file.
+  await openModels(page)
+
+  await page.click('[data-testid="models-add"]')
+  await page.click('[data-testid="models-provider-trigger"]')
+  await page.click('[data-provider="custom"]')
+  await page.fill('[data-testid="models-base-url"]', 'https://gateway.e2e.test/llm')
+  await page.click('[data-testid="models-protocol-trigger"]')
+  await page.click('[data-protocol="/chat/completions"]')
+  await page.fill('[data-testid="models-api-key"]', 'sk-e2e-catalog-3311')
+  await page.fill('[data-testid="models-model-name"]', 'sonnet-4-6')
+
+  // The provider is optional: empty means "match the model name alone", and the
+  // matched entry is shown with its window before anything is saved.
+  const provider = page.locator('[data-testid="models-catalog-provider"]')
+  await expect(provider).toHaveValue('')
+  await expect(page.locator('[data-testid="models-catalog-matched"]')).toContainText('anthropic/claude-sonnet-4-6')
+  await expect(page.locator('[data-testid="models-catalog-matched"]')).toContainText('1M')
+  await expect(page.locator('[data-testid="models-catalog-missing"]')).toHaveCount(0)
+  await shot(page, 'models-drawer-catalog-name-match')
+
+  // A provider the catalog has no such key for falls back to the name rule, so
+  // the answer does not change…
+  await provider.fill('anthropic')
+  await expect(page.locator('[data-testid="models-catalog-matched"]')).toContainText('anthropic/claude-sonnet-4-6')
+  // …and the exact key, once the name is the catalog's own, answers with the
+  // same entry.
+  await page.fill('[data-testid="models-model-name"]', 'claude-sonnet-4-6')
+  await expect(page.locator('[data-testid="models-catalog-matched"]')).toContainText('anthropic/claude-sonnet-4-6')
+  await expect(page.locator('[data-testid="models-catalog-missing"]')).toHaveCount(0)
+  await shot(page, 'models-drawer-catalog-exact-key')
+
+  await page.click('[data-testid="models-save"]')
+  const row = rowOf(page, 'claude-sonnet-4-6')
+  await expect(row).toBeVisible()
+
+  // The row keeps the provider it was told, and opening it again shows both the
+  // stored answer and the entry it matched.
+  await row.locator('[data-testid^="models-edit-"]').click()
+  await expect(page.locator('.forebrain-drawer-head b')).toHaveText('编辑模型')
+  await expect(page.locator('[data-testid="models-catalog-provider"]')).toHaveValue('anthropic')
+  await expect(page.locator('[data-testid="models-catalog-matched"]')).toContainText('anthropic/claude-sonnet-4-6')
+  await shot(page, 'models-drawer-catalog-edit')
+
+  // A built-in provider's row describes itself: the field disappears, the write
+  // is accepted without it, and the stored row carries none.
+  await page.click('[data-testid="models-provider-trigger"]')
+  await page.click('[data-provider="openai"]')
+  await expect(page.locator('[data-testid="models-catalog-provider"]')).toHaveCount(0)
+  await page.click('[data-testid="models-save"]')
+  await expect(page.locator('.forebrain-drawer-head')).toHaveCount(0)
+
+  const moved = rowOf(page, 'claude-sonnet-4-6')
+  await expect(moved).toHaveCount(1)
+  await moved.locator('[data-testid^="models-edit-"]').click()
+  await expect(page.locator('.forebrain-drawer-head b')).toHaveText('编辑模型')
+  await expect(page.locator('[data-testid="models-catalog-provider"]')).toHaveCount(0)
+  await shot(page, 'models-drawer-catalog-cleared')
+  await page.click('[data-testid="models-cancel"]')
+})
+
 test('the default model cannot be deleted, and the page names the agent that holds it', async ({ page }) => {
   // The seed writes through the gateway as this page: the session comes first.
   await preferChinese(page)

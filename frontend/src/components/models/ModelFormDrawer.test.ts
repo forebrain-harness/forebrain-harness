@@ -222,6 +222,66 @@ describe('ModelFormDrawer', () => {
 // The subagent authorization (plan 283) is the drawer's own switch under the
 // model name: it opens on the row's stored answer, a new row opens closed, and
 // the answer travels with the save — also for a row a sign-in wrote.
+describe('ModelFormDrawer catalog provider', () => {
+  beforeAll(() => {
+    vi.spyOn(forebrainApi, 'llmModelCatalogCaps').mockResolvedValue({ effortsKnown: false })
+  })
+
+  it('offers the provider field only for a custom model', async () => {
+    const builtIn = mountDrawer()
+    await flushPromises()
+    expect(builtIn.find('[data-testid="models-catalog-provider"]').exists()).toBe(false)
+    builtIn.unmount()
+
+    const custom = mountDrawer({
+      mode: 'add',
+      row: null,
+      presetProvider: 'custom',
+    })
+    await flushPromises()
+    expect(custom.find('[data-testid="models-catalog-provider"]').exists()).toBe(true)
+    expect(custom.text()).toContain('数据服务商（可选）')
+  })
+
+  it('fills the stored provider and sends it back with the row', async () => {
+    const update = vi.spyOn(forebrainApi, 'updateLlmModel').mockResolvedValue(row())
+    const wrapper = mountDrawer({
+      row: row({
+        provider: 'custom',
+        custom: true,
+        model: 'qwen4-max-preview',
+        catalogProvider: 'alibaba',
+        catalogId: 'alibaba/qwen4-max-preview',
+        catalogCaps: { contextWindow: 1000000 },
+      }),
+    })
+    await flushPromises()
+
+    const field = wrapper.find('[data-testid="models-catalog-provider"]')
+    expect((field.element as HTMLInputElement).value).toBe('alibaba')
+    // The matched entry and its window, in the terminal's compact spelling.
+    const matched = wrapper.find('[data-testid="models-catalog-matched"]')
+    expect(matched.exists()).toBe(true)
+    expect(matched.text()).toBe('官方数据：alibaba/qwen4-max-preview · 1M 窗口')
+    expect(wrapper.find('[data-testid="models-catalog-missing"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="models-save"]').trigger('click')
+    await flushPromises()
+    expect(update).toHaveBeenCalledTimes(1)
+    const body = update.mock.calls[0][1] as Record<string, unknown>
+    expect(body.catalogProvider).toBe('alibaba')
+  })
+
+  it('says so when nothing describes the model name', async () => {
+    const wrapper = mountDrawer({
+      row: row({ provider: 'custom', custom: true, model: 'nothing-at-all', catalogProvider: '', catalogId: '' }),
+    })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="models-catalog-matched"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="models-catalog-missing"]').text()).toContain('官方数据里没有这个模型')
+  })
+})
+
 describe('ModelFormDrawer subagent authorization', () => {
   it('opens on the stored answer and saves the change', async () => {
     const update = vi.spyOn(forebrainApi, 'updateLlmModel').mockResolvedValue(row({ subagentAllowed: true }))

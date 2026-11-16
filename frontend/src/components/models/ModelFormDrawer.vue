@@ -185,6 +185,23 @@
         <span v-if="isCustom" class="models-field__hint">{{ t('models.modelNameHint') }}</span>
       </div>
 
+      <!-- Which provider's official data describes this model (owner
+           2026-11-16): optional, never sent with a request, and it only decides
+           which catalog entry the window, output limit and levels come from. -->
+      <div v-if="isCustom" class="models-field">
+        <span class="models-field__label">{{ t('models.catalogProvider') }}</span>
+        <Input
+          v-model="draft.catalogProvider"
+          class="forebrain-field h-[32px] font-mono text-[12px]"
+          autocomplete="off"
+          spellcheck="false"
+          data-testid="models-catalog-provider"
+        />
+        <span class="models-field__hint">{{ t('models.catalogProviderHint') }}</span>
+        <span v-if="catalogMatched" class="models-field__ok" data-testid="models-catalog-matched">{{ catalogMatched }}</span>
+        <span v-else-if="catalogChecked" class="models-field__hint" data-testid="models-catalog-missing">{{ t('models.catalogNoMatch') }}</span>
+      </div>
+
       <!-- May the agent pick this row for a subagent on its own (plan 283)? The
            switch sits on the label's line, not centred on the label-and-hint
            block, so it reads as that field's own control. -->
@@ -305,6 +322,7 @@ import {
   type LlmProviderOption,
 } from '@/lib/api'
 import { useI18n } from '@/locales'
+import { formatTokenCount } from '@/lib/forebrainGatewayRuntime'
 
 const props = withDefaults(
   defineProps<{
@@ -341,6 +359,7 @@ interface Draft {
   apiPath: string
   verbatim: boolean
   model: string
+  catalogProvider: string
   subagentAllowed: boolean
   apiKey: string
   params: string
@@ -385,6 +404,7 @@ const storedPath = ref('')
 function blankDraft(): Draft {
   return {
     provider: '', endpointIndex: 0, baseUrl: '', apiPath: '', verbatim: false, model: '',
+    catalogProvider: '',
     // A new row starts closed: the agent picks only what the user opened
     // (owner 2026-11-10, plan 283).
     subagentAllowed: false, apiKey: '', params: '', caps: {}, efforts: [],
@@ -404,6 +424,23 @@ const endpoints = computed<LlmProviderEndpoint[]>(
 )
 
 const suggestions = computed(() => (isCustom.value ? [] : (props.suggestions[draft.provider] ?? [])))
+
+/** The catalog entry the last answer came from ('' when nothing matched). */
+const catalogId = ref('')
+/** True once a lookup has answered for the current provider and model name. */
+const catalogChecked = ref(false)
+/** True while the drawer is filling the draft from a stored row, so the
+ *  provider watcher does not mistake that for a person picking a provider. */
+let restoringDraft = false
+
+/** The matched entry and its window, in the terminal's compact spelling. */
+const catalogMatched = computed(() => {
+  if (!catalogId.value) return ''
+  return t('models.catalogMatched', {
+    model: catalogId.value,
+    window: formatTokenCount(catalogCaps.value.contextWindow),
+  })
+})
 
 /** Every field this form would store, so the section can say how many changed. */
 const capsWrite = computed<LlmModelCaps>(() => {
@@ -493,11 +530,19 @@ function resetForProvider(): void {
   draft.verbatim = false
   draft.caps = { ...catalogCaps.value }
   draft.efforts = []
+  // Only a custom row names the provider its data lives under (owner
+  // 2026-11-16): another provider's row is described by its own pair.
+  if (!isCustom.value) draft.catalogProvider = ''
 }
 
 watch(
   () => draft.provider,
   () => {
+    // Opening the drawer on a stored row writes its provider too, and that is
+    // not a person picking one: the row's own endpoint is already in the draft,
+    // so re-deriving it from the provider's first endpoint would empty a custom
+    // row's address and disable Save.
+    if (restoringDraft) return
     resetForProvider()
     void loadCaps()
   },
@@ -517,7 +562,7 @@ let capsTimer: ReturnType<typeof setTimeout> | null = null
 // The endpoint chips write the address; a chip clicked back to where it was
 // must not undo an edit the person made after it.
 watch(
-  () => [draft.provider, draft.model, draft.baseUrl] as const,
+  () => [draft.provider, draft.model, draft.baseUrl, draft.catalogProvider] as const,
   () => {
     void loadCaps()
   },
@@ -528,6 +573,7 @@ watch(
   () => [props.open, props.row?.id, props.mode] as const,
   () => {
     if (!props.open) return
+    restoringDraft = true
     testState.value = ''
     saveError.value = ''
     duplicateId.value = ''
@@ -547,6 +593,7 @@ watch(
         apiPath: row.apiPath,
         verbatim: row.urlVerbatim,
         model: row.model,
+        catalogProvider: row.catalogProvider ?? '',
         subagentAllowed: row.subagentAllowed,
         apiKey: row.apiKey ?? '',
         params: row.params ?? '',
@@ -554,10 +601,13 @@ watch(
         efforts: [...(row.caps.efforts ?? [])],
       } satisfies Partial<Draft>)
       catalogCaps.value = { ...row.catalogCaps }
+      catalogId.value = row.catalogId ?? ''
+      catalogChecked.value = true
       sourceEfforts.value = [...(row.catalogCaps.efforts ?? [])]
       effortsKnown.value = row.effortsKnown
       advancedOpen.value = false
       void loadCaps()
+      void settleRestore()
       return
     }
     originalKey.value = ''
@@ -569,19 +619,34 @@ watch(
       resetForProvider()
     }
     catalogCaps.value = {}
+    catalogId.value = ''
+    catalogChecked.value = false
     sourceEfforts.value = []
     effortsKnown.value = false
     advancedOpen.value = false
+    void settleRestore()
   },
   { immediate: true },
 )
+
+/**
+ * Marks the draft as restored, one tick after the assignment above: the
+ * provider watcher checks the flag to tell "the drawer filled this in" from
+ * "the person picked a provider".
+ */
+async function settleRestore(): Promise<void> {
+  await nextTick()
+  restoringDraft = false
+}
 
 async function loadCaps(): Promise<void> {
   if (capsTimer) clearTimeout(capsTimer)
   const provider = draft.provider
   const model = draft.model.trim()
+  const catalogProvider = draft.catalogProvider.trim()
   if (!provider || !model) {
     effortsLoading.value = false
+    catalogChecked.value = false
     return
   }
   effortsLoading.value = true
@@ -592,12 +657,18 @@ async function loadCaps(): Promise<void> {
         const answer = await forebrainApi.llmModelCatalogCaps({
           provider,
           model,
+          catalogProvider,
           baseUrl: draft.baseUrl,
           id: props.mode === 'edit' ? props.row?.id : undefined,
         })
+        // The answer is for one identity: a later keystroke owns the next one,
+        // and an answer for another provider or name would overwrite it.
         if (draft.provider !== provider || draft.model.trim() !== model) return
-        const { effortsKnown: known, effortsSource: _source, ...caps } = answer
+        if (draft.catalogProvider.trim() !== catalogProvider) return
+        const { effortsKnown: known, effortsSource: _source, catalogId: matched, ...caps } = answer
         catalogCaps.value = caps
+        catalogId.value = String(matched ?? '')
+        catalogChecked.value = true
         sourceEfforts.value = [...(caps.efforts ?? [])]
         effortsKnown.value = known
       } catch {
@@ -641,6 +712,9 @@ async function save(): Promise<void> {
       params: draft.params.trim(),
       caps: capsBody(),
       subagentAllowed: draft.subagentAllowed,
+      // Only a custom row names the provider its official data lives under;
+      // "" is an answer (match the model name alone), not "leave it alone".
+      ...(isCustom.value ? { catalogProvider: draft.catalogProvider.trim() } : {}),
       // An untouched key is the stored key: sending it back would be a write of
       // a value the person did not choose, and a blank one is not the clear.
       ...(draft.apiKey && draft.apiKey !== originalKey.value ? { apiKey: draft.apiKey } : {}),
