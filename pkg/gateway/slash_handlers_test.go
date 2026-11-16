@@ -190,7 +190,7 @@ func TestHandleMCPServersV1MarksOfficialRegistryURLs(t *testing.T) {
 // the same engine choice the terminal makes. The shared configuration file is
 // not rewritten: a pick there would retarget every other process and every
 // conversation that has not chosen yet.
-func TestWebModelPickerSwitchesTheModel(t *testing.T) {
+func TestTuiModelPickerSwitchesTheModel(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	t.Setenv("FOREBRAIN_WEB_MODEL_TEST_KEY", "test-key")
@@ -219,7 +219,7 @@ func TestWebModelPickerSwitchesTheModel(t *testing.T) {
 	// source any more (plan 189), and this server never ran an Open.
 	s.Env.AdoptConfig(&cfg)
 
-	res := parseSlashCommandWithOptions(s, "s1", "webchat", "/model", turn.Context{}, nil)
+	res := parseSlashCommandWithOptions(s, "s1", "tui", "/model", turn.Context{}, nil)
 	require.True(t, res.Handled)
 	require.NotNil(t, res.Picker, res.Reply)
 	require.Equal(t, "model", res.Picker.Command)
@@ -240,7 +240,7 @@ func TestWebModelPickerSwitchesTheModel(t *testing.T) {
 	require.False(t, other.Current)
 	require.Equal(t, "deepseek/deepseek-chat", other.Label)
 
-	chosen := parseSlashCommandWithOptions(s, "s1", "webchat", "/model", turn.Context{}, &turn.SlashChoice{Command: "model", Value: other.Value})
+	chosen := parseSlashCommandWithOptions(s, "s1", "tui", "/model", turn.Context{}, &turn.SlashChoice{Command: "model", Value: other.Value})
 	require.Equal(t, "Switched to deepseek/deepseek-chat.", chosen.Reply)
 	saved, err := loadPersistedDocumentForTest(cfgPath)
 	require.NoError(t, err)
@@ -498,7 +498,7 @@ func TestMCPServerToggleSharesTheTerminalsAction(t *testing.T) {
 
 // /clear works on the web the way it does in the terminal: the conversation
 // stays for reading, and nothing before it is sent to the model again.
-func TestWebClearStartsTheModelContextOver(t *testing.T) {
+func TestTuiClearStartsTheModelContextOver(t *testing.T) {
 	ctx := context.Background()
 	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
 	require.NoError(t, err)
@@ -511,7 +511,7 @@ func TestWebClearStartsTheModelContextOver(t *testing.T) {
 	}
 	s := &Server{Sessions: sessions}
 
-	res := turn.Execute(turn.Context{Surface: turn.SurfaceWebChat, SessionID: "s1", Sessions: sessions, Clear: s}, "/clear")
+	res := turn.Execute(turn.Context{Surface: turn.SurfaceTUI, SessionID: "s1", Sessions: sessions, Clear: s}, "/clear")
 	require.True(t, res.Handled)
 	require.Equal(t, turn.ContextClearedReply, res.Reply)
 

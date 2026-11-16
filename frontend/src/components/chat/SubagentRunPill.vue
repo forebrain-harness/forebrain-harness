@@ -85,7 +85,18 @@
           <dd class="is-mono">{{ usage }}</dd>
         </template>
       </dl>
-      <div class="subagent-run-foot">{{ t('chat.subagentRunFixed') }}</div>
+      <div class="subagent-run-foot">
+        <span>{{ t('chat.subagentRunFixed') }}</span>
+        <button
+          type="button"
+          class="subagent-run-context"
+          data-testid="subagent-view-context"
+          @click="viewContext"
+        >
+          <ScrollText aria-hidden="true" />
+          {{ t('chat.subagentViewContext') }}
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -94,18 +105,21 @@
 /**
  * A subagent's model and context, as one quiet pill in its tab's composer bar —
  * the ring with its percentage always written, then the model and the effort —
- * and the whole reading in a card above it. Everything here is read-only: the
- * spawn fixed the model and the effort, so the pill carries no caret and the
- * card carries no control.
+ * and the whole reading in a card above it. The reading is read-only: the spawn
+ * fixed the model and the effort, so the pill carries no caret. The card's one
+ * control opens the subagent's full context report — the panel /context used to
+ * draw, now reached by a button rather than a terminal-only command.
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { TriangleAlert } from 'lucide-vue-next'
+import { ScrollText, TriangleAlert } from 'lucide-vue-next'
 import type { SubagentTranscript } from '@/composables/useChatStream'
 import { formatTokenCount } from '@/lib/forebrainGatewayRuntime'
 import { effortLevelLabel } from '@/lib/effortLabel'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{ record: SubagentTranscript }>()
+
+const emit = defineEmits<{ (e: 'view-context'): void }>()
 
 const { t } = useI18n()
 const open = ref(false)
@@ -139,6 +153,11 @@ const usage = computed(() => {
   return t('chat.subagentRunUsageValue', { input: input || '0', output: output || '0' })
 })
 const warn = computed(() => percent.value != null && percent.value >= 80)
+
+function viewContext() {
+  open.value = false
+  emit('view-context')
+}
 
 function onDocPointerDown(event: PointerEvent) {
   if (!open.value) return
@@ -361,9 +380,36 @@ onUnmounted(() => {
 }
 
 .subagent-run-foot {
+  display: grid;
+  gap: 8px;
   border-top: 1px solid var(--forebrain-divider);
   padding-top: 9px;
   font-size: 11.5px;
   color: var(--forebrain-muted-text);
+}
+
+.subagent-run-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: start;
+  padding: 5px 9px;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 7px;
+  background: var(--forebrain-surface);
+  color: var(--forebrain-text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.subagent-run-context:hover {
+  background: var(--forebrain-bg-alt);
+  border-color: var(--forebrain-divider-strong);
+}
+
+.subagent-run-context svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
 }
 </style>

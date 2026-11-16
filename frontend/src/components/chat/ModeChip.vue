@@ -40,9 +40,9 @@
 <script setup lang="ts">
 /**
  * The composer's mode switch: Agent or Plan, for this conversation only. It
- * only calls the switch the page already owns — the same /plan command the
- * terminal's mode key sends — and is disabled while a run is going, because a
- * mode change can only ride the next turn.
+ * only calls the switch the page already owns — the gateway's switch_mode op,
+ * not a slash command — and is disabled while a run is going, because a mode
+ * change can only ride the next turn.
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Check, ChevronDown, Infinity as InfinityIcon, Map } from 'lucide-vue-next'

@@ -1710,11 +1710,14 @@ func TestHandleChatWSEstablishesANamedSessionBeforeItsSlashCommand(t *testing.T)
 		require.NoError(t, conn.WriteJSON(msg))
 	}
 	send("req-named", "client-named")
+	// /plan is terminal-only now, so the web chat answers it as unavailable —
+	// but the named session is still established before the slash is processed,
+	// and the reply is bound to that session, not to a minted default.
 	for {
 		var msg wsServerMsg
 		require.NoError(t, conn.ReadJSON(&msg))
-		require.NotEqual(t, "session_event_persistence_failed", msg.Message, "the mode change could not be recorded: %+v", msg)
-		if msg.RequestID == "req-named" && msg.Op == "mode_changed" {
+		if msg.RequestID == "req-named" && msg.Op == "slash_reply" {
+			require.Equal(t, "client-named", msg.SessionID)
 			break
 		}
 	}

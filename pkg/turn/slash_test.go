@@ -13,7 +13,9 @@ import (
 )
 
 func TestListSlashCommandsFiltersByPrefix(t *testing.T) {
-	records := ListSlashCommands(SurfaceWebChat, "pl", DiscoveryOptions{})
+	// /plan is terminal-only now; the prefix filter and its full record are
+	// exercised on the surface that still offers it.
+	records := ListSlashCommands(SurfaceTUI, "pl", DiscoveryOptions{})
 	require.Len(t, records, 1)
 	require.Equal(t, "plan", records[0].Name)
 	require.Equal(t, "plan", records[0].CanonicalName)
@@ -24,7 +26,9 @@ func TestListSlashCommandsFiltersByPrefix(t *testing.T) {
 }
 
 func TestListSlashCommandsSideConversationFiltersToSafeCommands(t *testing.T) {
-	records := ListSlashCommands(SurfaceWebChat, "", DiscoveryOptions{SideConversation: true})
+	// /status is the one built-in safe in a side conversation, and it is
+	// terminal-only now, so the filter is exercised on the terminal.
+	records := ListSlashCommands(SurfaceTUI, "", DiscoveryOptions{SideConversation: true})
 	require.NotEmpty(t, records)
 	names := make(map[string]bool, len(records))
 	for _, r := range records {
@@ -33,6 +37,17 @@ func TestListSlashCommandsSideConversationFiltersToSafeCommands(t *testing.T) {
 	require.True(t, names["status"])
 	require.False(t, names["plan"])
 	require.False(t, names["new"])
+
+	// The web chat's remaining built-ins (/compact, /init, /goal) are none of
+	// them side-conversation safe, so a web side conversation offers no built-in.
+	web := make(map[string]bool)
+	for _, r := range ListSlashCommands(SurfaceWebChat, "", DiscoveryOptions{SideConversation: true}) {
+		web[r.Name] = true
+	}
+	require.False(t, web["status"])
+	require.False(t, web["compact"])
+	require.False(t, web["init"])
+	require.False(t, web["goal"])
 }
 
 func TestExecuteSlashCommandDelegatesToUnifiedExecutor(t *testing.T) {
@@ -49,7 +64,7 @@ func TestExecuteSlashCommandDelegatesToUnifiedExecutor(t *testing.T) {
 func TestServiceSlashFacadeDelegatesToUnifiedRegistryAndExecutor(t *testing.T) {
 	svc := New(nil)
 
-	records := svc.ListSlashCommands(SurfaceWebChat, "pl", DiscoveryOptions{})
+	records := svc.ListSlashCommands(SurfaceTUI, "pl", DiscoveryOptions{})
 	require.Len(t, records, 1)
 	require.Equal(t, "plan", records[0].Name)
 
@@ -165,8 +180,9 @@ func contextForSurface(h *recordingSlashHandlers, surface Surface, channel, home
 }
 
 // TestSharedSlashCommandsDispatchIdenticallyOnBothSurfaces is P4-11's contract:
-// the eleven commands both surfaces offer must reach the same handler with the
-// same arguments and produce the same canonical Result, whichever surface asked.
+// the built-ins both surfaces offer (/compact, /init, /goal — every other
+// built-in is terminal-only now) must reach the same handler with the same
+// arguments and produce the same canonical Result, whichever surface asked.
 //
 // It compares the canonical fields, not the reply text -- a surface is allowed
 // to render differently (the web chat fences a diff, the terminal does not),
@@ -176,16 +192,10 @@ func TestSharedSlashCommandsDispatchIdenticallyOnBothSurfaces(t *testing.T) {
 	home := t.TempDir()
 	inputs := []string{
 		"/compact too long",
-		"/clear",
-		"/context",
-		"/status",
-		"/permissions explain Bash",
-		"/mcp",
-		"/sandbox",
-		"/diff HEAD~1",
-		"/model",
-		"/agent",
-		"/memories",
+		"/compact",
+		"/init",
+		"/goal ship the feature",
+		"/goal",
 	}
 	for _, input := range inputs {
 		t.Run(strings.TrimPrefix(strings.Fields(input)[0], "/"), func(t *testing.T) {
@@ -194,8 +204,11 @@ func TestSharedSlashCommandsDispatchIdenticallyOnBothSurfaces(t *testing.T) {
 			termRes := Execute(contextForSurface(term, SurfaceTUI, "tui", home), input)
 			webRes := Execute(contextForSurface(web, SurfaceWebChat, "webchat", home), input)
 
-			if !termRes.Handled || !webRes.Handled {
-				t.Fatalf("%q handled: terminal=%v web=%v; both surfaces offer this command",
+			// Inject-prompt commands (/init, /goal <objective>) answer with
+			// Handled=false and a continuation on both surfaces alike; the
+			// contract is that the flag matches, not that it is true.
+			if termRes.Handled != webRes.Handled {
+				t.Fatalf("%q handled differently: terminal=%v web=%v",
 					input, termRes.Handled, webRes.Handled)
 			}
 			if !slices.Equal(term.calls, web.calls) {
@@ -332,13 +345,16 @@ func TestUnknownCommandSuggestionsAndBareSlashCatalog(t *testing.T) {
 		require.True(t, res.Handled)
 		require.True(t, strings.HasPrefix(res.Reply, "Commands\n/"), res.Reply)
 		require.Contains(t, res.Reply, "\n\nSkills\n/context-save — save the session context")
-		require.Less(t, strings.Index(res.Reply, "/model —"), strings.Index(res.Reply, "Skills"))
+		require.Less(t, strings.Index(res.Reply, "/compact —"), strings.Index(res.Reply, "Skills"))
 
 		removed := Execute(Context{Home: t.TempDir(), SessionID: "s1", Surface: surface}, "/help")
 		require.True(t, removed.Handled)
 		require.True(t, strings.HasPrefix(removed.Reply, "There is no /help"), removed.Reply)
 	}
-	require.Equal(t, "There is no /modle; did you mean /model?", UnknownCommandReply(SurfaceWebChat, "modle", DiscoveryOptions{}))
+	// /model is terminal-only: a slip of it is suggested on the terminal but
+	// not on the web chat, where the model picker lives in the composer instead.
+	require.Equal(t, "There is no /modle; did you mean /model?", UnknownCommandReply(SurfaceTUI, "modle", DiscoveryOptions{}))
+	require.Equal(t, "There is no /modle; type / to see every command.", UnknownCommandReply(SurfaceWebChat, "modle", DiscoveryOptions{}))
 	require.Equal(t, "There is no /zzzq; type / to see every command.", UnknownCommandReply(SurfaceWebChat, "zzzq", DiscoveryOptions{}))
 }
 
@@ -379,19 +395,21 @@ func TestModelChoicesAreTheInstallWideModels(t *testing.T) {
 		"ConfiguredLLMs keeps the configured order the default's first-row fallback reads")
 }
 
-// /lsp is a tools-category panel command on both surfaces, next to /mcp.
+// /lsp is a tools-category panel command in the terminal, next to /mcp; the
+// web chat reaches language servers through its own panel, not a slash command.
 func TestLSPCommandTables(t *testing.T) {
 	cmd, ok := Find("lsp")
 	require.True(t, ok, "/lsp must be a builtin command")
-	require.Equal(t, []Surface{SurfaceWebChat, SurfaceTUI}, cmd.AllowedSurfaces)
+	require.Equal(t, []Surface{SurfaceTUI}, cmd.AllowedSurfaces)
 	require.Equal(t, "tools", cmd.Category)
 	require.Equal(t, "open-panel", cmd.ActionKind)
-	for _, surface := range []Surface{SurfaceWebChat, SurfaceTUI} {
-		names := make([]string, 0)
-		for _, c := range VisibleWithOptions(surface, DiscoveryOptions{}) {
-			names = append(names, c.Name)
-		}
-		require.Contains(t, names, "lsp", "surface %s: %v", surface, names)
+	names := make([]string, 0)
+	for _, c := range VisibleWithOptions(SurfaceTUI, DiscoveryOptions{}) {
+		names = append(names, c.Name)
+	}
+	require.Contains(t, names, "lsp")
+	for _, c := range VisibleWithOptions(SurfaceWebChat, DiscoveryOptions{}) {
+		require.NotEqual(t, "lsp", c.Name, "the web chat must not list /lsp")
 	}
 }
 

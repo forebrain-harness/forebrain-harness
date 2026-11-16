@@ -703,6 +703,70 @@ describe('useChatStream helpers', () => {
     }
   })
 
+  it('switches the conversation’s mode through the gateway’s switch_mode op', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const stream = useChatStream()
+      expect(stream.mode.value).toBe('agent')
+      const pending = stream.switchMode('plan', { sessionId: 's-mode' })
+      const socket = FakeChatWebSocket.instances[0]
+      expect(socket).toBeTruthy()
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      expect(sent).toMatchObject({ op: 'switch_mode', session_id: 's-mode', mode: 'plan' })
+
+      socket.message({ op: 'mode_changed', request_id: sent.request_id, session_id: 's-mode', data: { mode: 'plan', phase: 'drafting' } })
+      await pending
+      expect(stream.mode.value).toBe('plan')
+      expect(stream.modePhase.value).toBe('drafting')
+      expect(socket.readyState).toBe(FakeChatWebSocket.CLOSED)
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('rejects the mode switch when the gateway refuses it, leaving the mode unchanged', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const stream = useChatStream()
+      const pending = stream.switchMode('plan', { sessionId: 's-mode' })
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      socket.message({ op: 'run_error', request_id: sent.request_id, session_id: 's-mode', error: 'mode switch refused' })
+      await expect(pending).rejects.toThrow('mode switch refused')
+      expect(stream.mode.value).toBe('agent')
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('does nothing without a session to switch', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = ''
+      await stream.switchMode('plan')
+      expect(FakeChatWebSocket.instances).toHaveLength(0)
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
   it('withdraws a message when the user stops the compaction it waits on', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket

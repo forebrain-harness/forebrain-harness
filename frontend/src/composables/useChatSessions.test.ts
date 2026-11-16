@@ -97,4 +97,30 @@ describe('useChatSessions', () => {
     expect(store.sessions.value.map((row) => row.id)).toEqual(['match'])
     expect(store.hasMore.value).toBe(false)
   })
+
+  it('renames a conversation on the server and reflects the trimmed title in the list', async () => {
+    vi.spyOn(forebrainApi, 'chatSessions').mockResolvedValue({
+      records: [record('one', ''), record('two', '')], total: 2, page: 1, pageSize: 100,
+    })
+    const rename = vi.spyOn(forebrainApi, 'chatSessionTitle').mockResolvedValue({ ok: true, id: 'one', title: 'new title' })
+    const store = useChatSessions()
+    await store.fetchSessions()
+
+    await store.renameSession('one', '  new title  ')
+    expect(rename).toHaveBeenCalledWith('one', 'new title')
+    expect(store.sessions.value.find((row) => row.id === 'one')?.title).toBe('new title')
+    expect(store.sessions.value.find((row) => row.id === 'two')?.title).toBe('title-two')
+  })
+
+  it('keeps the old title when the rename fails, leaving the error to the caller', async () => {
+    vi.spyOn(forebrainApi, 'chatSessions').mockResolvedValue({
+      records: [record('one', '')], total: 1, page: 1, pageSize: 100,
+    })
+    vi.spyOn(forebrainApi, 'chatSessionTitle').mockRejectedValue(new Error('gateway down'))
+    const store = useChatSessions()
+    await store.fetchSessions()
+
+    await expect(store.renameSession('one', 'new title')).rejects.toThrow('gateway down')
+    expect(store.sessions.value.find((row) => row.id === 'one')?.title).toBe('title-one')
+  })
 })

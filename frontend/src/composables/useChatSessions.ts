@@ -140,8 +140,16 @@ async function createSession(opts: { title?: string; source?: '' | 'workshop'; p
   return created
 }
 
+/** Rename a conversation and reflect it in the loaded list. A failure is the
+ * caller's to show — the list keeps the old title until the server agrees. */
+async function renameSession(id: string, title: string) {
+  const trimmed = title.trim()
+  await forebrainApi.chatSessionTitle(id, trimmed)
+  sessions.value = sessions.value.map((row) => (row.id === id ? { ...row, title: trimmed } : row))
+}
+
 export function useChatSessions() {
-  return { sessions, loading, loadingMore, error, total, page, hasMore, search, projectFilter, fetchSessions, loadMore, createSession }
+  return { sessions, loading, loadingMore, error, total, page, hasMore, search, projectFilter, fetchSessions, loadMore, createSession, renameSession }
 }
 
 import { onTenantReset } from '@/composables/useTenantScope'

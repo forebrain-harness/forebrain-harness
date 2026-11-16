@@ -254,15 +254,12 @@ func (pickerSessions) ListChildSessionsRecent(context.Context, string, int) ([]s
 // On the web, /resume and /subagents offer conversations as pickers — never
 // the one the command was typed in — and a pick moves there.
 func TestResumeAndSubagentsOfferConversations(t *testing.T) {
-	ctx := Context{Surface: SurfaceWebChat, SessionID: "here", Sessions: &pickerSessions{}}
+	ctx := Context{Surface: SurfaceTUI, SessionID: "here", Sessions: &pickerSessions{}}
+	// /resume is terminal-only, and the terminal owns the selector natively
+	// rather than building a picker the way the web chat once did.
 	resume := Execute(ctx, "/resume")
-	require.NotNil(t, resume.Picker)
-	var ids []string
-	for _, item := range resume.Picker.Items {
-		ids = append(ids, item.Value)
-	}
-	require.Equal(t, []string{"older", "blank"}, ids)
-	require.Equal(t, "New conversation", resume.Picker.Items[1].Label, "a session titled by its id is untitled")
+	require.True(t, resume.Handled)
+	require.True(t, resume.SelectSession)
 
 	sub := Execute(ctx, "/subagents")
 	require.NotNil(t, sub.Picker)
@@ -311,7 +308,7 @@ func TestChooseSessionRefusesAnotherAgentsConversation(t *testing.T) {
 // again changes nothing, picking another switches.
 func TestAgentPickerSwitchesPrimaryAgents(t *testing.T) {
 	h := &recordingSlashHandlers{}
-	ctx := Context{Surface: SurfaceWebChat, SessionID: "s1", Agent: h}
+	ctx := Context{Surface: SurfaceTUI, SessionID: "s1", Agent: h}
 	res := Execute(ctx, "/agent")
 	require.NotNil(t, res.Picker)
 	require.Equal(t, []PickerItem{{Value: "main", Label: "main", Description: "/w/main", Current: true}, {Value: "ops", Label: "ops", Description: "/w/ops"}}, res.Picker.Items)
@@ -335,7 +332,7 @@ func TestExecLSPSlash(t *testing.T) {
 	require.True(t, res.Handled)
 	require.Equal(t, "lsp: unavailable", res.Reply)
 
-	res = Execute(Context{Surface: SurfaceWebChat, LSP: lspSlashStub{reply: "Language servers · 1 configured", handled: true}}, "/lsp")
+	res = Execute(Context{Surface: SurfaceTUI, LSP: lspSlashStub{reply: "Language servers · 1 configured", handled: true}}, "/lsp")
 	require.True(t, res.Handled)
 	require.Equal(t, "Language servers · 1 configured", res.Reply)
 }

@@ -4,8 +4,8 @@
          called and answered, in the order it produced them. -->
     <Conversation class="min-h-0 flex-1 overflow-y-auto">
       <ConversationContent class="px-[18px] pt-4 pb-3">
-        <!-- /context in this tab, drawn with the conversation's own panel so
-             the two reports are read the same way. -->
+        <!-- The subagent's full context report, drawn with the conversation's
+             own panel so the two reports are read the same way. -->
         <ContextDebugPanel
           v-if="context"
           :data="context.data"
@@ -91,7 +91,7 @@
               <ComposerPlusMenu subagent-view @insert="insertCommand" />
               <ViewModeChip v-model="viewMode" />
               <div class="flex items-center gap-1">
-                <SubagentRunPill :record="record" />
+                <SubagentRunPill :record="record" @view-context="emit('refresh-context')" />
                 <!-- The terminal's Ctrl+C in two presses: a running subagent
                      is interrupted and waits for the user's message; one that
                      waits is stopped. -->
@@ -129,7 +129,7 @@
              the bar's own order (plan 143, the terminal's rule). -->
         <div v-else class="subagent-idle-bar" data-testid="subagent-idle-bar">
           <ViewModeChip v-model="viewMode" />
-          <SubagentRunPill :record="record" />
+          <SubagentRunPill :record="record" @view-context="emit('refresh-context')" />
         </div>
       </PromptInputProvider>
     </div>
@@ -207,7 +207,7 @@ const props = withDefaults(defineProps<{
   autoContinue?: AutoContinueState | null
   /** A refusal from this tab's last submission, in the server's own words. */
   notice?: { title: string; detail: string } | null
-  /** Its own /context report, or null while none is open. */
+  /** Its own full context report, or null while none is open. */
   context?: { data: SessionContextDebug | null; loading: boolean } | null
   /** A read-only page (plan 153): a batch execution takes nobody's input, so
    *  even a running subagent's tab draws no composer — only the bar that reads

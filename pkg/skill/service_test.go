@@ -345,7 +345,7 @@ body
 	if !ok || cmd.Description == "shadow-plan-skill" {
 		t.Fatalf("/plan = %+v, want the built-in", cmd)
 	}
-	res := turn.Execute(turn.Context{Home: home, SessionID: "s1", Surface: turn.SurfaceWebChat}, "/plan")
+	res := turn.Execute(turn.Context{Home: home, SessionID: "s1", Surface: turn.SurfaceTUI}, "/plan")
 	if res.SkillName != "" || !res.ModeChanged {
 		t.Fatalf("/plan = %+v, want Plan mode entered", res)
 	}

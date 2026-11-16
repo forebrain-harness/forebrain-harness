@@ -519,9 +519,16 @@ function fillComposer(text: string) {
   promptRef.value?.restoreSubmission({ text, attachments: [], mentionImages: [] })
 }
 
-function selectMode(next: string) {
-  if (next === stream.mode.value) return
-  void sendDirect(next === 'plan' ? '/plan' : '/agent')
+async function selectMode(next: string) {
+  const target = next === 'plan' ? 'plan' : next === 'agent' ? 'agent' : null
+  if (!target || target === stream.mode.value || stream.isStreaming.value) return
+  const sid = await ensureSession()
+  if (!sid) return
+  try {
+    await stream.switchMode(target, { sessionId: sid })
+  } catch (e: unknown) {
+    notice.value = getErrorMessage(e)
+  }
 }
 
 async function sendDirect(text: string) {

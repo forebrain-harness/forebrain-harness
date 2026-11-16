@@ -70,34 +70,40 @@ func (s *Service) ExecuteSlashCommand(ctx Context, content string) Result {
 	return s.commands.Execute(ctx, content)
 }
 
+// The web chat's composer offers skills plus only the built-ins with no web UI
+// of their own (/compact, /init, /goal); every other built-in is terminal-only,
+// because the web reaches the same capability through its own panels and chips
+// (model/effort, mode, permissions, sessions, agents, context, usage). Typing a
+// terminal-only command on the web is answered as unavailable, never run.
+//
 // The SubagentView field on each command is the D4 classification: which
 // commands act on the subagent whose view they are typed in, which run
 // globally as before, and which are hidden there. It is a property of the
 // command (not of a surface), so the TUI and the web read one table.
 var commands = []Command{
-	{Name: "model", Description: "choose what model and reasoning effort to use", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "permissions", Description: "choose what Forebrain Harness is allowed to do", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[explain <tool>]", Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
-	{Name: "skills", Description: "run, add, create, improve, and toggle skills", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
-	{Name: "rename", Description: "rename the current thread", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<title>", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "new", Description: "start a new chat during a conversation", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "resume", Description: "resume a saved chat", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "model", Description: "choose what model and reasoning effort to use", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "permissions", Description: "choose what Forebrain Harness is allowed to do", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[explain <tool>]", Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "skills", Description: "run, add, create, improve, and toggle skills", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "rename", Description: "rename the current thread", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<title>", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "new", Description: "start a new chat during a conversation", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "resume", Description: "resume a saved chat", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "rewind", Description: "restore code and/or the conversation to before a message", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "fork", Description: "fork the current chat", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "fork", Description: "fork the current chat", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "init", Description: "analyze the repo and create/refresh FOREBRAIN.md guidance", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "compact", Description: "summarize conversation to prevent hitting the context limit", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "clear", Description: "clear conversation history and start fresh", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "context", Description: "inspect current context snapshot and compaction state", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewActs},
-	{Name: "memories", Description: "configure memory use and generation", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
-	{Name: "plan", Description: "switch to Plan mode, optionally starting toward a description", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[description]", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "agent", Description: "switch to another primary agent and its workspace", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "status", Description: "show current session configuration and usage", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, AvailableInSideConversation: true, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
-	{Name: "mcp", Description: "manage MCP servers: status, tools, authentication", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
-	{Name: "lsp", Description: "language servers: status, enable, restart, diagnostics", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
-	{Name: "peers", Description: "agents on this machine you can message, and held messages", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
-	{Name: "sandbox", Description: "show sandbox runtime mode and backend", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "clear", Description: "clear conversation history and start fresh", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "context", Description: "inspect current context snapshot and compaction state", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewActs},
+	{Name: "memories", Description: "configure memory use and generation", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "plan", Description: "switch to Plan mode, optionally starting toward a description", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[description]", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "agent", Description: "switch to another primary agent and its workspace", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "status", Description: "show current session configuration and usage", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, AvailableInSideConversation: true, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "mcp", Description: "manage MCP servers: status, tools, authentication", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "lsp", Description: "language servers: status, enable, restart, diagnostics", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "peers", Description: "agents on this machine you can message, and held messages", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "sandbox", Description: "show sandbox runtime mode and backend", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "config", Description: "browse and edit the installed configuration, section by section", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[section]", Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "exit", Description: "exit Forebrain Harness", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
-	{Name: "subagents", Description: "open one of this chat's subagent sessions", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "subagents", Description: "open one of this chat's subagent sessions", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "goal", Description: "run continuously toward an objective until done", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<objective>", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "connect", Description: "configure or switch LLM provider", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "migrate", Description: "migrate sessions, memories, skills, and MCP servers from another agent", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},

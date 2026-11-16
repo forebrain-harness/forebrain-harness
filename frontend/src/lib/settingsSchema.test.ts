@@ -7,7 +7,14 @@ import { beforeAll, describe, expect, it } from 'vitest'
 // same order, with the same wording, kinds, units, ranges, defaults, options
 // and visibility rules. A deviation anywhere is a failing test, not a review
 // note.
-import prototypeSource from '../../../docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/config-db-settings-preview.html?raw'
+//
+// The source read here is a tracked copy under frontend/, because the owner's
+// prototype lives under docs/plan/, which is gitignored: a fresh checkout has
+// no docs/plan, and a gate CI cannot run does not gate anything. The prototype
+// stays docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/config-db-settings-preview.html;
+// every change to it must land in this copy in the same commit, and the schema
+// change follows both.
+import prototypeSource from './testdata/config-db-settings-preview.html?raw'
 
 import {
   ALL_SETTINGS_FIELDS,

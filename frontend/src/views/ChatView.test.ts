@@ -41,6 +41,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
     olderLoading: unknown
     olderExhausted: unknown
     send: unknown
+    switchMode: unknown
     runtimeStatus: unknown
     isStreaming: unknown
     cancel: unknown
@@ -58,6 +59,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
   f.recallSubagentInput = vi.fn()
   f.loadSubagentBudget = vi.fn()
   f.send = vi.fn()
+  f.switchMode = vi.fn(async () => {})
   f.isStreaming = ref(false)
   f.cancel = vi.fn()
   f.sendPendingSteersAfterInterrupt = vi.fn()
@@ -110,6 +112,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       takeReturnedNotice: vi.fn(() => null),
       takeReturnedNoticeCode: vi.fn(() => null),
       send: f.send,
+      switchMode: f.switchMode,
       editLastQueuedMessage: vi.fn(),
       sendPendingSteersAfterInterrupt: f.sendPendingSteersAfterInterrupt,
       cancel: f.cancel,
@@ -1441,6 +1444,43 @@ describe('ChatView saves attachments into the project', () => {
 
     expect(upload).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('shot.png')
+    wrapper.unmount()
+  })
+})
+
+/**
+ * The composer's mode switch: Agent or Plan rides the gateway's switch_mode op
+ * for the open conversation, never a slash command. The web input box sends
+ * only skills and the few built-ins with no panel of their own, so the chip is
+ * the way to change mode — and a refused switch surfaces as the composer's
+ * own notice rather than a sent message.
+ */
+describe('ChatView mode switch', () => {
+  afterEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+  })
+
+  async function choosePlan(wrapper: Awaited<ReturnType<typeof mountView>>) {
+    await wrapper.find('[data-testid="mode-chip"]').trigger('click')
+    await wrapper.find('[data-testid="mode-option-plan"]').trigger('click')
+    await flushPromises()
+  }
+
+  it('switches the open conversation through the gateway op, not a send', async () => {
+    const wrapper = await mountView()
+    await choosePlan(wrapper)
+    expect(fake.switchMode).toHaveBeenCalledWith('plan', { sessionId: 's1' })
+    expect(fake.send).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('shows a refused switch as the composer’s own notice', async () => {
+    ;(fake.switchMode as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('mode switch refused'))
+    const wrapper = await mountView()
+    await choosePlan(wrapper)
+    expect(wrapper.text()).toContain('mode switch refused')
+    expect(fake.send).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })

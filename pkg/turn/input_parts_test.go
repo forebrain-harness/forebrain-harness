@@ -1133,7 +1133,9 @@ func TestExitIsTheTerminalsAlone(t *testing.T) {
 
 func TestSharedCommandsVisibleOnWebchatAndTUI(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"model"} {
+	// The built-ins both surfaces offer: every other built-in is terminal-only,
+	// the web chat reaching the same capability through its own panels and chips.
+	for _, name := range []string{"compact", "init", "goal"} {
 		for _, surface := range []Surface{SurfaceWebChat, SurfaceTUI} {
 			var found bool
 			for _, cmd := range VisibleWithOptions(surface, DiscoveryOptions{}) {

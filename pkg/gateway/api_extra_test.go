@@ -47,7 +47,9 @@ var _ tool.CodeIntelControl = (*lspControlDouble)(nil)
 
 func TestHandleSlashCommands(t *testing.T) {
 	s := &Server{}
-	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=webchat&q=pl", nil)
+	// /goal is one of the few built-ins the web chat still offers; /plan and
+	// the rest are terminal-only now.
+	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=webchat&q=goal", nil)
 	rr := httptest.NewRecorder()
 
 	s.handleSlashCommands(rr, req)
@@ -66,9 +68,9 @@ func TestHandleSlashCommands(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
 	require.Equal(t, "webchat", out.Surface)
-	require.Equal(t, "pl", out.Query)
+	require.Equal(t, "goal", out.Query)
 	require.Len(t, out.Records, 1)
-	require.Equal(t, "plan", out.Records[0].Name)
+	require.Equal(t, "goal", out.Records[0].Name)
 	require.Equal(t, "agent", out.Records[0].Category)
 	require.Equal(t, "inject-prompt", out.Records[0].ActionKind)
 	require.NotEmpty(t, out.Records[0].ArgumentHint)
@@ -77,7 +79,9 @@ func TestHandleSlashCommands(t *testing.T) {
 
 func TestHandleSlashCommandsSideConversationFilter(t *testing.T) {
 	s := &Server{}
-	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=webchat&side=1", nil)
+	// /status is the one side-conversation-safe built-in, and it is terminal-only
+	// now, so the filter is exercised on the terminal surface.
+	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=tui&side=1", nil)
 	rr := httptest.NewRecorder()
 
 	s.handleSlashCommands(rr, req)
@@ -100,7 +104,9 @@ func TestHandleSlashCommandsSideConversationFilter(t *testing.T) {
 
 func TestHandleSlashCommandsDuringRunFilter(t *testing.T) {
 	s := &Server{}
-	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=webchat&during_run=1", nil)
+	// The lifecycle commands and /status are terminal-only now, so the
+	// during-run filter is exercised on the terminal surface.
+	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=tui&during_run=1", nil)
 	rr := httptest.NewRecorder()
 
 	s.handleSlashCommands(rr, req)

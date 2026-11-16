@@ -1,0 +1,1527 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配置入库设置页</title>
+<style>
+/* 外框固定浅色（owner 2026-10-17）：不写任何深色覆盖 */
+:root{
+  --bg:#FFFFFF; --alt:#F7F8FA; --soft:#F2F4F7; --soft-2:#EAECF0;
+  --line:#E4E7EC; --line-2:#D0D5DD; --hair:#EEF0F3;
+  --ink:#101828; --ink-2:#475467; --muted:#667085; --quiet:#98A2B3;
+  --brand:#1F4A9E; --brand-hover:#173B80; --brand-soft:#EBF0F9; --brand-line:#C3D2EC; --brand-strong:#8FA9DA;
+  --ok:#067647; --ok-soft:#ECFDF3; --ok-line:#ABEFC6;
+  --warn:#B54708; --warn-soft:#FFFAEB; --warn-line:#FEDF89;
+  --danger:#B42318; --danger-soft:#FEF3F2; --danger-line:#FECDCA;
+  --rail-bg:#0F1D38; --rail-fg:#E7ECF5; --rail-fg-2:#9FB0CC; --rail-line:#1E3055; --rail-hover:#172A4D;
+  --rail-active:#1D3563; --rail-mark:#7EA2EA; --rail-btn:#3A67C6; --rail-field:#152646;
+  --ui:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI","Microsoft YaHei","Noto Sans SC",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --ease:cubic-bezier(.2,.7,.2,1);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:#F3F4F6;color:var(--ink);font:14px/1.6 var(--ui);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer}
+input,select,textarea{font:inherit;color:inherit}
+.ic{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+/* ---------- 外框 ---------- */
+.frame{max-width:1340px;margin:0 auto;padding:32px 24px 56px}
+.frame h1{font-size:22px;line-height:1.3;margin:0;font-weight:650;letter-spacing:-.01em}
+.frame .sub{margin:4px 0 0;color:var(--muted);font-size:13px}
+.notes{display:grid;grid-template-columns:1.35fr 1fr;gap:16px;margin:18px 0 20px}
+.note{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 18px}
+.note h2{font-size:14px;margin:0 0 6px;font-weight:600}
+.note ul,.note ol{margin:0;padding-left:18px;color:var(--ink-2);font-size:13px;line-height:1.75}
+.note code{font-family:var(--mono);font-size:12px;background:var(--soft);border-radius:4px;padding:0 4px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:8px;font-size:12.5px;color:var(--ink-2)}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.lg-dot{width:6px;height:6px;border-radius:50%;background:var(--brand)}
+.lg-ghost{width:22px;height:14px;border-radius:4px;outline:1px dashed var(--brand-strong);outline-offset:-1px}
+.lg-bar{width:2px;height:14px;border-radius:2px;background:var(--brand)}
+.toolbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:14px}
+.toolbar button{border:1px solid var(--line);background:#fff;color:var(--ink-2);font:500 12.5px/1 var(--ui);padding:8px 11px;border-radius:8px;transition:background .15s,color .15s,border-color .15s}
+.toolbar button:hover{color:var(--ink);border-color:var(--line-2)}
+.toolbar button[aria-pressed="true"]{background:var(--brand-soft);border-color:var(--brand-line);color:var(--brand)}
+.toolbar .sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+.toolbar .cand-tg{border-style:dashed;border-color:#E0A13A;color:#9A5B00;background:#FFF8EB}
+.toolbar .cand-tg[aria-pressed="false"]{border-style:solid;border-color:var(--line);color:var(--ink-2);background:#fff}
+.caption{margin:12px 2px 0;color:var(--muted);font-size:13px;max-width:80ch}
+.stage{display:flex;justify-content:center}
+
+/* ---------- 应用外壳（取自现有实现） ---------- */
+.app{position:relative;display:grid;grid-template-columns:264px minmax(0,1fr);width:100%;height:820px;background:var(--bg);
+  border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 10px 30px rgba(16,24,40,.07)}
+.stage.narrow .app{width:390px;grid-template-columns:minmax(0,1fr)}
+.stage.narrow .rail{display:none}
+
+.rail{background:var(--rail-bg);display:flex;flex-direction:column;gap:14px;padding:14px 12px;border-right:1px solid var(--rail-line);min-height:0}
+.brand{display:flex;align-items:center;gap:10px;padding:2px 4px}
+.brand svg{width:28px;height:28px;flex:none}
+.wm{font-size:15px;line-height:1.2;color:var(--rail-fg);white-space:nowrap;letter-spacing:.01em}
+.wm b{font-weight:600}
+.ver{display:block;font-size:10px;letter-spacing:.06em;color:var(--rail-fg-2)}
+.tenant{display:flex;align-items:center;gap:8px;width:100%;padding:9px 10px;text-align:left;background:var(--rail-field);border:1px solid var(--rail-line);border-left:2px solid var(--rail-btn);border-radius:8px}
+.tenant .l{display:block;font-size:11px;color:var(--rail-fg-2)}
+.tenant .n{display:block;font-size:13.5px;font-weight:600;color:#fff}
+.tenant .ic{color:var(--rail-fg-2);margin-left:auto;transition:transform .2s var(--ease)}
+.tenant[aria-expanded="true"] .ic{transform:rotate(180deg)}
+.rnav{display:flex;flex-direction:column;gap:2px}
+.rl{display:flex;align-items:center;gap:9px;border:0;background:transparent;border-radius:8px;padding:7px 10px;font-size:13px;color:var(--rail-fg-2);text-align:left;transition:background .14s,color .14s}
+.rl:hover{background:var(--rail-hover);color:var(--rail-fg)}
+.rl.on{background:var(--rail-active);color:#fff;font-weight:500}
+.rl .ic{width:15px;height:15px}
+.rfoot{margin-top:auto;padding-top:10px;border-top:1px solid var(--rail-line);display:flex;align-items:center;gap:4px}
+.rfoot .rl{flex:1}
+.rcollapse{width:32px;height:32px;border:0;border-radius:8px;background:transparent;color:var(--rail-fg-2);display:grid;place-items:center}
+
+.tmenu{position:absolute;left:264px;top:78px;z-index:15;width:300px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px rgba(16,24,40,.14);padding:4px;animation:pop .16s var(--ease)}
+.trow{display:flex;align-items:center;gap:2px;border-radius:7px;padding:2px 2px 2px 0}
+.trow:hover{background:var(--alt)}
+.topt{flex:1;min-width:0;border:0;background:transparent;text-align:left;padding:6px 8px}
+.topt b{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:500}
+.topt b i{width:6px;height:6px;border-radius:50%;background:var(--brand)}
+.topt span{display:block;font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.trow.on .topt b{color:var(--brand)}
+
+.work{display:flex;flex-direction:column;min-width:0;min-height:0;background:#fff}
+.top{height:48px;flex:none;display:flex;align-items:center;gap:10px;padding:0 20px;border-bottom:1px solid var(--line)}
+.top .t{font-weight:600;font-size:14px;white-space:nowrap}
+.top .sp{flex:1}
+.chipb{height:30px;display:inline-flex;align-items:center;gap:6px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:#fff;font-size:12px;color:var(--ink-2);white-space:nowrap}
+.chipb.sq{width:30px;padding:0;justify-content:center}
+.stage.narrow .top{padding:0 14px}
+.stage.narrow .chipb.hide-n{display:none}
+.body{flex:1;overflow:auto;scroll-behavior:smooth}
+
+/* ---------- 设置页 ---------- */
+.set{display:grid;grid-template-columns:176px minmax(0,780px);gap:40px;padding:22px 28px 72px}
+.subnav{position:sticky;top:22px;align-self:start;display:flex;flex-direction:column;gap:2px}
+.subnav .gl{padding:10px 12px 4px;font-size:11px;letter-spacing:.04em;color:var(--muted)}
+.subnav .gl:first-child{padding-top:0}
+.subnav button{border:0;background:transparent;text-align:left;border-radius:8px;padding:7px 12px;font-size:13px;color:var(--ink-2);transition:background .14s,color .14s}
+.subnav button:hover{background:var(--soft);color:var(--ink)}
+.subnav button.on{background:var(--brand-soft);color:var(--brand);font-weight:500}
+.content{min-width:0}
+.stage.narrow .set{grid-template-columns:minmax(0,1fr);gap:14px;padding:0 14px 48px}
+.stage.narrow .subnav{position:sticky;top:0;z-index:2;flex-direction:row;overflow-x:auto;gap:4px;background:#fff;padding:10px 0;margin:0 -14px;padding-left:14px;padding-right:14px;border-bottom:1px solid var(--line);scrollbar-width:none}
+.stage.narrow .subnav .gl{display:none}
+.stage.narrow .subnav button{white-space:nowrap;padding:6px 10px}
+
+/* 分组：一层，只有标题与配置键，无外框 */
+.grp+.grp,.grp+.block,.block+.grp{margin-top:36px}
+.grp-h{display:flex;align-items:baseline;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.grp-h h3{margin:0;font-size:14px;font-weight:600;letter-spacing:.005em;white-space:nowrap}
+.grp-note{font-size:12px;line-height:1.5;color:var(--muted)}
+.key{font-family:var(--mono);font-size:11.5px;color:var(--quiet)}
+
+/* 字段行：名称与说明在左，控件在右；三种状态都画在行的左缘 */
+.row{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 360px;column-gap:24px;align-items:center;padding:12px 0 12px 16px}
+.row+.row{border-top:1px solid var(--hair)}
+.rows.solo>.row:first-child{padding-top:2px}
+.row.stack{grid-template-columns:minmax(0,1fr);row-gap:10px}
+.lab{min-width:0}
+.lab b{font-size:13px;font-weight:500;color:var(--ink)}
+.lab b.ttl{font-size:14px;font-weight:600;letter-spacing:.005em}
+.fk{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom;font-family:var(--mono);font-size:11px;color:var(--quiet);margin-left:8px;white-space:nowrap}
+.lab .h{display:block;margin-top:2px;font-size:12px;line-height:1.5;color:var(--muted);transition:color .2s}
+.lab .h:empty{display:none}
+.lab-act{float:right;height:26px;padding:0 10px;font-size:12px;margin-top:-3px}
+.lab .h.lone{margin-top:0;font-size:12.5px;color:var(--ink-2)}
+.lab .h.warn{color:var(--warn)}
+.lab .h.bad{color:var(--danger)}
+.dot{position:absolute;left:2px;top:20px;width:6px;height:6px;border-radius:50%;background:var(--brand)}
+.row::before{content:"";position:absolute;left:-14px;top:10px;bottom:10px;width:2px;border-radius:2px;background:var(--brand);transform:scaleY(0);transition:transform .2s var(--ease)}
+.row.dirty::before{transform:scaleY(1)}
+.row.flash{animation:flash 1.6s ease-out}
+@keyframes flash{0%,25%{background:var(--brand-soft)}100%{background:transparent}}
+.rs{display:flex;justify-content:flex-end}
+.row.preset .lab{display:none}
+.row.preset>.ctl{grid-row:1}
+.ro{font-size:13px;color:var(--ink)}
+.ro.mono{font-family:var(--mono);font-size:12.5px}
+.ro.none{color:var(--quiet)}
+.stage.narrow .row{grid-template-columns:minmax(0,1fr);row-gap:10px;padding-left:14px}
+.stage.narrow .row::before{left:-2px}
+.stage.narrow .dot{left:0}
+
+/* 三态：开 / 关 / 默认。选「默认」时，默认值落在哪一格就用虚线框标出来 */
+.tri{display:inline-flex;background:var(--soft);border-radius:8px;padding:2px;gap:2px}
+.tri button{min-width:48px;height:26px;padding:0 11px;border:0;border-radius:6px;background:transparent;font-size:12.5px;color:var(--ink-2);transition:background .15s,color .15s,box-shadow .15s}
+.tri button:hover{color:var(--ink)}
+.tri button[aria-checked="true"]{background:#fff;color:var(--ink);font-weight:500;box-shadow:0 0 0 1px var(--line),0 1px 2px rgba(16,24,40,.06)}
+.tri button.ghost{color:var(--brand);outline:1px dashed var(--brand-strong);outline-offset:-3px}
+.tri.warn button[data-v="1"][aria-checked="true"]{color:var(--danger)}
+.tri button:focus-visible,.rd:focus-visible,.seg2 button:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+
+/* 开关：两态，默认值直接是它的初始状态 */
+.sw{position:relative;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--line-2);transition:background .18s}
+.sw i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.2);transition:transform .2s var(--ease)}
+.sw[aria-checked="true"]{background:var(--brand)}
+.sw[aria-checked="true"] i{transform:translateX(16px)}
+.sw.warn[aria-checked="true"]{background:var(--danger)}
+.sw:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+/* 原型标注：第二轮精简候选（只在原型里出现） */
+.cpill{display:inline-flex;align-items:center;height:18px;padding:0 6px;margin-left:8px;border-radius:4px;border:1px dashed #E0A13A;background:#FFF8EB;color:#9A5B00;font-size:11px;font-weight:500;vertical-align:1px;white-space:nowrap}
+.subnav .cpill{margin-left:6px}
+/* 凭据：像密码一样遮住，只露后四位 */
+.secrow{display:flex;gap:8px;align-items:center}
+.secrow .fld{flex:1;min-width:0}
+.masked{display:flex;align-items:center;background:var(--alt);color:var(--quiet);letter-spacing:.06em;cursor:default}
+.masked b{color:var(--ink-2);font-weight:500;letter-spacing:0;margin-left:2px}
+/* 工具栏里的总开关（同子代理页先例） */
+.tbsw{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-2);margin-right:4px;cursor:pointer}
+/* 配置文件编辑器：行号 + 高亮层 + 透明输入层 */
+.ed{display:grid;grid-template-columns:auto minmax(0,1fr);border:1px solid var(--line);border-radius:10px;background:#FBFBFC;overflow:hidden;transition:border-color .15s,box-shadow .15s}
+.ed:focus-within{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.ed-gut{margin:0;padding:12px 10px 12px 14px;text-align:right;color:var(--quiet);font:12.5px/1.75 var(--mono);user-select:none;border-right:1px solid var(--hair);background:#F5F6F8}
+.ed-body{position:relative;min-width:0}
+.ed-hl,.ed-ta{display:block;margin:0;padding:12px 16px;font:12.5px/1.75 var(--mono);white-space:pre;tab-size:2;border:0;width:100%;overflow:hidden}
+.ed-hl{color:var(--ink);pointer-events:none;min-height:100%}
+.ed-ta{position:absolute;inset:0;resize:none;background:transparent;color:transparent;caret-color:var(--ink);outline:none}
+.ed-ta::selection{background:rgba(31,74,158,.18);color:transparent}
+.y-k{color:#1F4A9E}.y-s{color:#067647}.y-n{color:#B54708}.y-b{color:#6B4C9A}.y-c{color:var(--quiet);font-style:italic}
+/* 文件不支持的配置项：一行红色波浪线，悬停提示「不存在」 */
+.y-x{text-decoration:underline wavy #D92D20;text-decoration-thickness:1px;text-underline-offset:4px;text-decoration-skip-ink:none}
+/* 跟着审批默认展开或收起的组 */
+.cond{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows .3s var(--ease),opacity .2s}
+.cond.open{grid-template-rows:1fr;opacity:1}
+.cond-in{min-height:0;overflow:hidden}
+.cond-in>.grp{margin-top:36px}
+.cond+.grp{margin-top:36px}
+
+/* 单选组（标准 16px 圆点） */
+.radios{display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center;min-height:28px}
+.rd{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--ink);cursor:pointer;border-radius:4px;user-select:none}
+.rd i{position:relative;width:16px;height:16px;border-radius:50%;border:1px solid var(--line-2);background:#fff;transition:border-color .15s}
+.rd i::after{content:"";position:absolute;inset:3.5px;border-radius:50%;background:var(--brand);transform:scale(0);transition:transform .16s var(--ease)}
+.rd.on i{border-color:var(--brand)}
+.rd.on i::after{transform:scale(1)}
+.rd.ghost{color:var(--brand)}
+.rd.ghost i{border:1px dashed var(--brand-strong)}
+.rd.warn.on{color:var(--danger)}
+.rd.warn.on i{border-color:var(--danger)}
+.rd.warn.on i::after{background:var(--danger)}
+.radios.vert{flex-direction:column;align-items:flex-start;gap:12px}
+.rd.desc{align-items:flex-start}
+.rd.desc i{margin-top:2px}
+.rd.desc span{display:grid;gap:1px}
+.rd.desc span b{font-weight:500}
+.rd.desc span small{font-size:12px;color:var(--muted);line-height:1.5}
+.custom{font-size:12px;color:var(--warn);margin-top:10px}
+
+/* 输入框 */
+.fld{width:100%;height:32px;border:1px solid var(--line);border-radius:6px;padding:0 10px;background:#fff;font-size:13px;outline:none;transition:border-color .15s,box-shadow .15s}
+.fld::placeholder{color:var(--quiet)}
+.fld:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.fld.mono{font-family:var(--mono);font-size:12px}
+.fld.bad{border-color:var(--danger)}
+textarea.fld{height:auto;min-height:76px;padding:8px 10px;line-height:1.6;resize:vertical}
+select.fld{appearance:none;padding-right:30px;background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 9px center}
+select.fld.unset{color:var(--quiet)}
+.numw{display:inline-flex;align-items:center;gap:10px}
+.numbox{display:inline-flex;align-items:center;width:156px;height:32px;border:1px solid var(--line);border-radius:6px;background:#fff;padding:0 10px;transition:border-color .15s,box-shadow .15s}
+.numbox:focus-within{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.numbox.bad{border-color:var(--danger)}
+.numbox.bad:focus-within{box-shadow:0 0 0 3px var(--danger-soft)}
+.numbox input{flex:1;min-width:0;border:0;outline:none;background:transparent;font-size:13px;font-variant-numeric:tabular-nums}
+.numbox input::placeholder{color:var(--quiet)}
+.numbox em{font-style:normal;font-size:12px;color:var(--muted);white-space:nowrap}
+.rng{font-size:11.5px;color:var(--quiet);font-variant-numeric:tabular-nums;white-space:nowrap}
+.sec{position:relative;display:block}
+.sec .fld{padding-right:36px}
+.sec .icbtn{position:absolute;right:1px;top:1px}
+
+.icbtn{width:30px;height:30px;border:0;border-radius:6px;background:transparent;color:var(--muted);display:grid;place-items:center;transition:background .14s,color .14s}
+.icbtn:hover{background:var(--soft);color:var(--ink)}
+.icbtn.dgr:hover{color:var(--danger)}
+.icbtn:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+.icbtn.sm{width:26px;height:26px}
+.icbtn.ph{visibility:hidden}
+
+/* 行编辑：列表 / 允许拒绝 / 两列 */
+.lrows{display:grid;gap:6px}
+.lrow{display:grid;grid-template-columns:minmax(0,1fr) 30px;gap:6px;align-items:center}
+.lrow.acc{grid-template-columns:minmax(0,1fr) auto 30px}
+.lrow.pair{grid-template-columns:minmax(0,.9fr) minmax(0,1.4fr) 30px}
+.lhead{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.4fr) 30px;gap:6px;font-size:11.5px;color:var(--muted);padding:0 2px}
+.addb{justify-self:start;display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border:1px dashed var(--line-2);border-radius:6px;background:#fff;font-size:12px;color:var(--ink-2);transition:border-color .15s,color .15s}
+.addb:hover{border-color:var(--brand-strong);color:var(--brand)}
+.seg2{display:inline-flex;background:var(--soft);border-radius:7px;padding:2px;gap:2px}
+.seg2 button{height:26px;padding:0 10px;border:0;border-radius:5px;background:transparent;font-size:12px;color:var(--ink-2)}
+.seg2 button[aria-checked="true"]{background:#fff;color:var(--ok);font-weight:500;box-shadow:0 0 0 1px var(--line)}
+.seg2 button.deny[aria-checked="true"],.seg2 button.wr[aria-checked="true"]{color:var(--ink)}
+.seg2 button.deny[aria-checked="true"]{color:var(--danger)}
+.tags{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:32px;border:1px solid var(--line);border-radius:6px;padding:4px 6px;background:#fff;transition:border-color .15s,box-shadow .15s}
+.tags:focus-within{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.tag{display:inline-flex;align-items:center;gap:2px;height:22px;padding:0 2px 0 8px;border-radius:5px;background:var(--soft);font-family:var(--mono);font-size:11.5px;color:var(--ink)}
+.tag button{width:18px;height:18px;border:0;border-radius:4px;background:transparent;color:var(--muted);display:grid;place-items:center}
+.tag button:hover{background:var(--soft-2);color:var(--ink)}
+.tag .ic{width:11px;height:11px}
+.tags input{flex:1;min-width:110px;border:0;outline:none;font-size:12.5px;background:transparent}
+.tags input::placeholder{color:var(--quiet)}
+.checks{display:flex;flex-wrap:wrap;gap:10px 22px}
+.ck{display:inline-flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}
+.ck input{appearance:none;width:16px;height:16px;margin:0;border:1px solid var(--line-2);border-radius:4px;background:#fff;display:grid;place-items:center;transition:background .15s,border-color .15s}
+.ck input:checked{background:var(--brand);border-color:var(--brand);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");background-size:12px;background-repeat:no-repeat;background-position:center}
+.ck input:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+
+/* 组底保存条：有改动才展开 */
+.tray{display:grid;grid-template-rows:0fr;transition:grid-template-rows .24s var(--ease)}
+.tray.open{grid-template-rows:1fr}
+.tray-in{min-height:0;overflow:hidden}
+.tray-bar{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 0 2px 16px;border-top:1px solid var(--hair);margin-top:2px}
+.okmsg{margin-right:auto;display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ok);animation:fadein .2s ease-out}
+.okmsg .ic{width:13px;height:13px;stroke-width:2.5}
+.errb{margin-right:auto;display:flex;gap:8px;align-items:flex-start;min-width:0;font-size:12.5px;color:var(--danger);animation:fadein .2s ease-out}
+.errb .ic{margin-top:3px}
+.errb b{font-weight:600;white-space:nowrap}
+.errb span{font-size:12.5px;color:var(--ink-2);word-break:break-word}
+
+/* 按钮 */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--soft);font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap;transition:background .15s,border-color .15s,opacity .15s}
+.btn:hover{background:var(--soft-2)}
+.btn.pri{background:var(--brand);border-color:var(--brand);color:#F5FFFF}
+.btn.pri:hover{background:var(--brand-hover);border-color:var(--brand-hover)}
+.btn.plain{background:#fff}
+.btn.plain:hover{background:var(--alt)}
+.btn.dgr{background:#fff;border-color:var(--danger);color:var(--danger)}
+.btn[disabled]{opacity:.55;cursor:default}
+.btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.btn .ic{width:13px;height:13px}
+
+/* 列表页：工具栏 + 表格 + 分页 + 说明 */
+.page{max-width:1000px;margin:0 auto;padding:20px 24px 48px}
+.tb{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.tb .grow{flex:1}
+.search{display:inline-flex;align-items:center;gap:7px;width:240px;height:32px;border:1px solid var(--line);border-radius:6px;padding:0 10px;color:var(--quiet);font-size:13px;background:#fff}
+.notice{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ok);animation:fadein .2s}
+.tbl{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:13px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.tbl th{height:38px;padding:0 12px;background:var(--alt);border-bottom:1px solid var(--line);font-size:12px;font-weight:500;color:var(--ink-2);text-align:left;white-space:nowrap}
+.tbl th.act,.tbl td.act{text-align:center}
+.tbl td{height:46px;padding:0 12px;border-bottom:1px solid var(--hair);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.tbl tr:last-child td{border-bottom:0}
+.tbl .mono{font-family:var(--mono);font-size:12px}
+.tbl .sub{display:block;font-size:11px;color:var(--muted);line-height:1.3}
+.cell{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acts{display:inline-flex;gap:2px;justify-content:center}
+.bdg{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:999px;font-size:11.5px;font-weight:500;white-space:nowrap;vertical-align:middle}
+.bdg.b{background:var(--brand-soft);color:var(--brand)}
+.bdg.ok{background:var(--ok-soft);color:var(--ok)}
+.bdg.wn{background:var(--warn-soft);color:var(--warn)}
+.bdg.g{background:var(--soft);color:var(--ink-2)}
+.pager{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:10px;font-size:12px;color:var(--muted)}
+.pg{height:26px;min-width:26px;padding:0 7px;border:1px solid var(--line);border-radius:6px;background:#fff;font-size:12px;color:var(--ink-2);display:inline-grid;place-items:center}
+.pg.on{border-color:var(--brand-line);background:var(--brand-soft);color:var(--brand)}
+.pg[disabled]{color:var(--quiet);background:var(--alt)}
+.pgsel{height:26px;padding:0 24px 0 8px;border:1px solid var(--line);border-radius:6px;font-size:12px;color:var(--ink-2);background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 7px center;appearance:none}
+.listnote{margin:8px 0 0;font-size:12px;color:var(--muted)}
+.lock{display:flex;align-items:center;gap:7px;margin-top:14px;font-size:12px;color:var(--muted)}
+.pathbar{display:flex;align-items:center;gap:4px;margin-bottom:6px}
+.pathbar code{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.stub{display:grid;place-items:center;height:240px;color:var(--quiet);font-size:13px;border:1px dashed var(--line);border-radius:10px}
+.dz{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);display:flex;align-items:center;gap:12px}
+.dz span{font-size:12px;color:var(--muted)}
+
+/* 弹窗与抽屉 */
+.mask{position:absolute;inset:0;z-index:20;background:rgba(16,24,40,.32);display:grid;place-items:center;animation:fadein .16s ease-out}
+.dlg{width:560px;max-width:calc(100% - 24px);max-height:88%;display:flex;flex-direction:column;background:#fff;border-radius:12px;box-shadow:0 22px 56px rgba(16,24,40,.22);animation:pop .2s var(--ease)}
+.dlg.wide{width:680px}
+.dlg-h{display:flex;align-items:center;gap:8px;padding:14px 12px 8px 20px}
+.dlg-h b{font-size:14px;font-weight:600;flex:1}
+.dlg-b{padding:4px 20px 18px;overflow:auto}
+.dlg-f{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+.dlg .row{grid-template-columns:minmax(0,1fr) 270px;column-gap:16px}
+.dlg .row.stack{grid-template-columns:minmax(0,1fr)}
+.dlg .rows>.row:first-child{padding-top:6px}
+.ff{display:grid;gap:6px;margin-top:14px}
+.ff:first-child{margin-top:6px}
+.ff>span{font-size:12px;font-weight:500;color:var(--ink-2)}
+.ff>span code{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--quiet);margin-left:6px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px;align-items:end}
+.grid2>.ff{margin-top:0}
+.dlg-b>.grid2:first-child,.dr-b>.grid2:first-child{margin-top:6px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:32px;border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+.chips .tag{font-family:var(--ui);font-size:12px}
+.mblock{margin:0 16px 12px;border:1px solid var(--danger-line);background:var(--danger-soft);border-radius:8px;padding:9px 12px;display:flex;gap:8px;align-items:flex-start;font-size:12.5px;color:var(--danger);animation:fadein .2s}
+.mblock .ic{margin-top:3px}
+.mblock b{display:block;font-weight:600}
+.mblock span{display:block;font-size:12.5px;color:var(--ink-2)}
+.dmask{position:absolute;inset:0;z-index:20;background:rgba(16,24,40,.18);animation:fadein .16s ease-out}
+.drawer{position:absolute;top:0;right:0;bottom:0;z-index:21;width:540px;max-width:100%;background:#fff;border-left:1px solid var(--line);box-shadow:-14px 0 34px rgba(16,24,40,.1);display:flex;flex-direction:column;animation:slide .26s var(--ease)}
+.dr-h{height:52px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px 0 20px;border-bottom:1px solid var(--line)}
+.dr-h b{flex:1;font-size:14px;font-weight:600}
+.dr-b{flex:1;overflow:auto;padding:6px 20px 20px}
+.dr-sec{margin-top:18px;padding-top:14px;border-top:1px solid var(--hair);font-size:12.5px;font-weight:600;color:var(--ink)}
+.dr-sec code{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--quiet);margin-left:6px}
+.kvh{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.6fr) 30px;gap:6px;font-size:11.5px;color:var(--muted);margin-top:8px}
+.kvr{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.6fr) 30px;gap:6px;margin-top:6px}
+.tip{position:fixed;z-index:999;background:#101828;color:#fff;font-size:12px;line-height:16px;padding:2px 7px;border-radius:5px;pointer-events:none;white-space:nowrap;transform:translate(-50%,-100%);margin-top:-6px}
+.tip[hidden]{display:none}
+
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+@keyframes pop{from{opacity:0;transform:translateY(6px) scale(.985)}to{opacity:1;transform:none}}
+@keyframes slide{from{transform:translateX(24px);opacity:.4}to{transform:none;opacity:1}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+/* chat composer mock (approval preset selector) */
+.chatpg{display:flex;flex-direction:column;justify-content:flex-end;height:100%;padding:24px 32px 28px;background:var(--bg)}
+.chatlog{flex:1;display:flex;flex-direction:column;gap:12px;justify-content:flex-end;max-width:760px;width:100%;margin:0 auto 18px}
+.bub{align-self:flex-end;max-width:70%;background:var(--soft);border-radius:10px;padding:9px 12px;font-size:13px;color:var(--ink)}
+.bub.a{align-self:flex-start;background:none;padding:0;color:var(--ink-2)}
+.cmp{max-width:760px;width:100%;margin:0 auto;border:1px solid var(--line-2);border-radius:12px;background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.cmp textarea{display:block;width:100%;min-height:64px;border:0;resize:none;outline:none;padding:12px 14px 4px;font:inherit;font-size:14px;color:var(--ink);background:transparent}
+.cmp textarea::placeholder{color:var(--quiet)}
+.cmpbar{display:flex;align-items:center;gap:8px;padding:6px 10px 10px}
+.cmpbar .sp{flex:1}
+.cmpbar select.fld{width:auto;height:28px;font-size:12px;padding:0 28px 0 9px}
+.cmpbar select.fld:disabled{background-color:var(--alt);color:var(--quiet);border-color:var(--line);cursor:not-allowed;opacity:1}
+.cmpbtn{width:28px;height:28px;border-radius:7px;border:1px solid var(--line);background:#fff;display:grid;place-items:center;color:var(--ink-2)}
+.cmpsend{width:30px;height:30px;border-radius:8px;border:0;background:var(--brand);color:#fff;display:grid;place-items:center}
+/* 子代理 Tab 内的「/goal 检查模型」分组沿用 .grp / .row 版式 */
+/* 模型下拉：搜索框 + 两行模型签名 + 选中态 */
+.mrel{position:relative}
+.combo{display:flex;align-items:center;gap:8px;width:100%;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:#fff;font-size:13px;text-align:left}
+.combo .ph{color:var(--quiet)}
+.combo>.ic:last-child{margin-left:auto;color:var(--muted)}
+.combo.tall{height:auto;min-height:32px;padding:5px 10px}
+.combo.tall .sig{flex:1}
+.combo.open{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.mmenu{position:absolute;z-index:15;width:420px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px rgba(16,24,40,.14);padding:4px;animation:pop .16s ease-out}
+.msrch{display:flex;align-items:center;gap:7px;height:30px;margin:2px 2px 4px;padding:0 9px;border-radius:6px;background:var(--alt);color:var(--quiet);font-size:12.5px}
+.msrch input{flex:1;min-width:0;border:0;outline:none;background:transparent;font-size:12.5px;color:var(--ink)}
+.msrch input::placeholder{color:var(--quiet)}
+.mlist{max-height:320px;overflow:auto}
+.mopt{display:flex;align-items:flex-start;gap:6px;width:100%;border:0;background:transparent;text-align:left;border-radius:7px;padding:6px 8px}
+.mopt:hover{background:var(--alt)}
+.mopt.on .sig b{color:var(--brand)}
+.mopt .lead{width:14px;flex:none;padding-top:3px;color:var(--brand)}
+.mopt .sig{flex:1}
+.sig{display:block;min-width:0}
+.sig b{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:500;color:var(--ink);white-space:nowrap}
+.sig b small{font-size:11.5px;font-weight:400;color:var(--muted)}
+.sig>span{display:block;font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.sig>span em{font-style:normal;color:var(--brand);background:var(--brand-soft);border-radius:3px;padding:0 3px;margin-left:1px}
+.ss-menu{right:0;top:38px}
+.ss-empty{padding:12px 10px;color:var(--quiet);font-size:12px}
+/* 下拉要能溢出卡片，故覆盖 .ss-card 的 overflow 并给头部补圆角 */
+/* 箭头区：hover 时向下箭头换成清空 x，移开恢复；x 可点击清空 */
+.ss-caret-zone{position:relative;flex:none;margin-left:auto;width:18px;height:20px;display:grid;place-items:center;color:var(--muted)}
+.ss-caret-zone .ss-caret{display:grid;place-items:center}
+.ss-caret-zone .ss-x{position:absolute;inset:0;display:none;place-items:center;cursor:pointer;color:var(--muted)}
+.ss-caret-zone:hover .ss-caret{visibility:hidden}
+.ss-caret-zone:hover .ss-x{display:grid}
+.ss-caret-zone .ss-x:hover{color:var(--danger)}
+/* 强度下拉与模型下拉同宽：都铺满 .row 的 360px 右列（.fld / .combo 均 width:100%），不另设固定宽 */
+.ss-row .rs .fld:disabled{background-color:var(--alt);color:var(--quiet);border-color:var(--line);cursor:not-allowed;opacity:1}
+.ss-row .ss-link{display:inline-block;margin-top:4px;padding:0;color:var(--brand);font-size:11.5px}
+.ss-grp .tray-bar .btn{cursor:pointer}
+@media(max-width:820px){.ss-menu{width:min(420px,92vw)}}
+</style>
+</head>
+<body>
+<div class="frame">
+  <h1>配置入库后的设置页</h1>
+  <p class="sub">plans/191 原型第八版，2026-10-30。网页与终端只放普通用户会用的配置（存数据库，下一轮生效）；其余高级项只在 forebrain.yaml 里，可在「配置文件」里编辑，重启后生效。</p>
+
+  <div class="notes">
+    <div class="note">
+      <h2>第八版（按 owner 意见改）</h2>
+      <ul>
+        <li><b>审批预设</b>：默认 / 完全访问（「只读」已删除；完全访问等同 YOLO），存数据库；id 为 <code>workspace_write</code> / <code>full_access</code>，会话级选择同一套。<b>无沙箱环境</b>：设置里「审批与沙箱」标签不出现；对话输入框（含技能工坊）保留审批预设选择框，固定「完全访问」、置灰不可改；直接按完全访问运行（见「无沙箱」「无沙箱·输入框」场景）。</li>
+        <li><b>权限档案整块去掉</b>（网页、终端、forebrain.yaml 都不再支持）。</li>
+        <li><b>第七轮</b>：保存条按钮改「取消 / 保存」；模型的 token 一律叫「词元」；阈值口径、远程压缩、使用记忆 / 生成记忆 / 专用工具三个开关删除（记忆功能一个开关全管，后台跑批项目不使用记忆）；交接提示词默认显示内置提示词。命令改写、命令执行审批、权限申请工具、外部上下文时停用改为固定开启、删除配置；跑批会话不生成记忆。</li>
+        <li><b>凭据只露后四位</b>：模型服务的 API Key、联网搜索与网页抓取的 Key、MCP 的 Bearer token 与 OAuth 客户端密钥、访问令牌、刷新令牌像密码一样遮住，点「更换」输入新值；库里照旧存明文。主代理显示名、描述用铅笔弹窗（已确认）。</li>
+        <li><b>标签</b>：常规〔外观 / 会话 / 审批与沙箱 / 子代理 / 联网工具〕· 全局服务〔MCP / 语言服务器 / 钩子 / 定时任务 / 记忆 / 共享技能〕· 高级〔配置文件 / 运行状态〕；技能推荐、语言服务器总开关在各自页面工具栏右侧。</li>
+        <li><b>「配置文件」保留 YAML 编辑器</b>：改的是磁盘上的 forebrain.yaml，保存后提示「已保存，重启后生效」。文件不支持的项（已取消、页面在管、拼错）画红色波浪线，悬停提示「不存在」，照常保存、读取时静默忽略；只有 YAML 语法错误才拒绝保存。</li>
+      </ul>
+      <div class="legend"><span><i class="lg-bar"></i>未保存的改动</span></div>
+    </div>
+    <div class="note">
+      <h2>配置来源（owner 2026-10-31 定稿）</h2>
+      <ul>
+        <li><b>页面上出现的配置项</b>：只存数据库、只在网页与终端读写，forebrain.yaml 里写了也不认（编辑器标「不存在」）。原「第二轮候选」全部留在页面。</li>
+        <li><b>库里一定有值</b>：初始化数据库时把全部默认值写进配置表，页面一律显示库里存的值；自动压缩阈值改为百分比（50%–90%，初始 90%）。</li>
+        <li><b>forebrain.yaml 只放</b>：网关监听地址、登录令牌与 ChatGPT 登录文件路径。其余一切（原型里能看到的全部）只存数据库。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="toolbar" id="scen" role="group" aria-label="场景"></div>
+  <div class="stage" id="stage"><div class="app" id="app"></div></div>
+  <p class="caption" id="cap"></p>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+/* ================= 图标（lucide） ================= */
+const I = {
+  plus:'<path d="M5 12h14"/><path d="M12 5v14"/>',
+  send:'<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
+  x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  check:'<path d="M20 6 9 17l-5-5"/>',
+  undo:'<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+  refresh:'<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+  pencil:'<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+  trash:'<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+  copy:'<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  lock:'<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  down:'<path d="m6 9 6 6 6-6"/>',
+  left:'<path d="m15 18-6-6 6-6"/>',
+  right:'<path d="m9 18 6-6-6-6"/>',
+  search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  settings:'<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  chat:'<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  folder:'<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  scroll:'<path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>',
+  sparkles:'<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
+  plug:'<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
+  users:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  boxes:'<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+  wrench:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  shield:'<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+  brain:'<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>',
+  langs:'<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/>',
+  moon:'<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  panel:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/>',
+  star:'<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>',
+  eye:'<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
+  alert:'<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
+  sliders:'<path d="M21 4h-7"/><path d="M10 4H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 20h-5"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/>',
+  login:'<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/>',
+  power:'<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>',
+};
+const icon = (n, c='') => `<svg class="ic ${c}" viewBox="0 0 24 24" aria-hidden="true">${I[n]}</svg>`;
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const $ = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => [...r.querySelectorAll(s)];
+const clone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+function norm(v){
+  if (v === '' || v === null) return undefined;
+  if (Array.isArray(v) && !v.length) return undefined;
+  if (v && typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).some(k => v[k])) return undefined;
+  return v;
+}
+
+/* ================= 字段描述（与终端 /config 的描述符表同构） ================= */
+const F = (p, label, kind, o = {}) => ({p, label, kind, ...o});
+const G = (id, title, key, fields, o = {}) => ({id, title, key, fields, ...o});
+const is = (p, v) => d => d[p] === v;
+const WS = 'agents.defaults.web_search', WF = 'agents.defaults.web_fetch', TE = 'agents.defaults.token_estimate';
+const CI = 'agents.defaults.context_inject', GR = 'agents.defaults.guardrails';
+// pkg/assembly/service.go:28 DefaultPrompt, shown verbatim as the field's default.
+const BUILTIN_HANDOFF = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
+const MODELS = ['deepseek-v4-flash','deepseek-v4-pro','glm-5.3','glm-5.3-air','qwen3:32b'];
+const PRESETS = [
+  ['workspace_write','默认','可以读写当前工作区的文件并运行命令；修改工作区外的文件需要审批。'],
+  ['full_access','完全访问','可以修改工作区外的文件并访问互联网，无需审批。谨慎使用。'],
+];
+
+const FORMS = {
+  approval: [
+    G('preset','审批预设','',[F('@preset','预设','preset')],{preset:true,note:'只对办公创作、创意编程项目生效'}),
+    G('sww','沙箱可写工作区','',[
+      F('sandbox_workspace_write.writable_roots','额外可写目录','list',{ph:'/绝对/路径',add:'添加目录'}),
+      F('sandbox_workspace_write.network_access','允许联网','bool',{def:true}),
+    ],{when:d => d['@preset'] === 'workspace_write'}),
+    G('batch','跑批项目','',[F('batch.sandbox_default','启用沙箱','bool',{def:true})],{keepLabel:true}),
+  ],
+  projbatch: [
+    G('pbatch','启用沙箱','',[F('project.batch_sandbox','启用沙箱','bool',{def:true})]),
+  ],
+  subagents: [
+    G('sa','子代理','',[
+      F('agents.defaults.enable_subagent','子代理功能','bool',{def:false,hint:'各主代理可在子代理页单独开关'}),
+      F('agents.defaults.execution.max_parallel_subagents','并行上限','num',{min:0,def:7,hint:'初始值按本机 CPU 核数减一'}),
+    ]),
+    // 跨进程对等通信的互通开关（plan 195）：行仅在 meta.claude_code_available
+    // 为真时显示；该值随 GET /api/settings 的 meta 到达草稿，条件与实现同形。
+    G('peers','对等通信','',[
+      F('peers.claude_code','与 Claude Code 互通','bool',{def:false,hint:'默认关；开关不同的 forebrain 进程互相看不见'}),
+    ],{when:d => d['claude_code_available'] === true}),
+  ],
+  net: [
+    G('ws','联网搜索','',[
+      F(WS+'.provider','服务','enum',{opts:[['','不启用'],['tavily','Tavily'],['brave','Brave'],['baidu','百度'],['deepseek','DeepSeek']],def:'',stack:true}),
+      F(WS+'.tavily.api_key','Tavily Key','secret',{when:is(WS+'.provider','tavily')}),
+      F(WS+'.tavily.search_depth','搜索深度','enum',{opts:[['basic','基础'],['advanced','深入']],def:'basic',when:is(WS+'.provider','tavily')}),
+      F(WS+'.brave.api_key','Brave Key','secret',{when:is(WS+'.provider','brave')}),
+      F(WS+'.baidu.api_key','百度 Key','secret',{when:is(WS+'.provider','baidu')}),
+      F(WS+'.deepseek.api_key','DeepSeek Key','secret',{when:is(WS+'.provider','deepseek')}),
+    ]),
+    G('wf','网页抓取','',[
+      F(WF+'.provider','服务','enum',{opts:[['','内置'],['deepseek','DeepSeek']],def:''}),
+      F(WF+'.deepseek.api_key','DeepSeek Key','secret',{when:is(WF+'.provider','deepseek')}),
+      F(WF+'.allow_private_ip','允许内网地址','bool',{def:false,warn:true}),
+    ]),
+  ],
+  session: [
+    G('cp','上下文压缩','',[
+      F('compact.auto_compact_percent','自动压缩阈值','num',{min:50,max:90,clamp:true,unit:'%',def:90,hint:'上下文用到模型窗口的这个比例时自动压缩；调低会更频繁压缩、缓存命中率下降'}),
+      F('compact.prompt','交接提示词','area',{def:BUILTIN_HANDOFF,rows:11,restore:true}),
+    ]),
+    G('net2','重试与超时','',[
+      F('agents.defaults.network_retry_max','网络重试上限','num',{min:0,max:15,clamp:true,unit:'次',def:10,hint:'0 关闭重试'}),
+      F('agents.defaults.stream_idle_timeout_seconds','流空闲超时','num',{min:0,max:1800,clamp:true,unit:'秒',def:300,hint:'0 关闭看门狗'}),
+    ]),
+    G('ci','上下文余量','',[
+      F(CI+'.model_context_tokens','上下文窗口','num',{min:0,unit:'词元',def:200000,hint:'查不到模型的窗口大小时，自动压缩与提醒都按这个值算'}),
+      F(CI+'.warn_remaining_percent','提醒余量','num',{min:1,max:50,clamp:true,unit:'%',def:12,hint:'剩余词元低于模型窗口的这个比例时标为吃紧'}),
+      F(CI+'.max_pre_hook_rules_chars','规则注入上限','num',{min:0,unit:'字',def:120000,hint:'每轮注入的规则指令最多这么多字'}),
+    ],{}),
+    G('gr','护栏','',[
+      F(GR+'.input.max_runes','单条消息上限','num',{min:0,unit:'字',def:200000,hint:'你发的一条消息超过这么多字时，这一轮会被拒绝'}),
+      F(GR+'.input.block_substrings','拦截片段','tags',{ph:'输入后回车',hint:'你发的消息含这些片段时，这一轮会被拒绝（不区分大小写）',stack:true}),
+    ],{}),
+    G('te','词元估算','',[
+      F(TE+'.download','自动下载分词器','bool',{def:true,hint:'缺少分词器文件时自动下载'}),
+      F(TE+'.hubs','下载源顺序','tags',{ph:'输入后回车',def:['huggingface','modelscope'],hint:'分词器的下载来源，按顺序尝试'}),
+      F(TE+'.huggingface_endpoint','HuggingFace 地址','text',{mono:true,def:'https://huggingface.co',hint:'可填镜像地址'}),
+      F(TE+'.modelscope_endpoint','ModelScope 地址','text',{mono:true,def:'https://modelscope.cn',hint:'可填镜像地址'}),
+      F(TE+'.default_tokenizer','默认分词器','text',{mono:true,def:'gpt-o200k',hint:'模型匹配不到分词器时用它'}),
+      F(TE+'.tokenizers','按模型指定','pairs',{cols:['模型前缀','分词器或绝对路径'],ph:['glm-','glm-4'],add:'添加映射',hint:'按模型名前缀指定分词器'}),
+    ],{}),
+  ],
+  memory: [
+    G('ms','记忆功能','',[
+      F('features.memories','记忆功能','bool',{def:true,hint:'记下你的偏好与要点，供以后的会话使用；仅对办公创作和创意编程类项目生效。跑批项目无记忆功能'}),
+    ],{flat:true,titleLabel:true}),
+    G('mr','模型','',[
+      F('memories.extract_model','抽取模型','model',{ph:'当前模型',def:'',hint:'从单个会话里提取记忆用的模型'}),
+      F('memories.consolidation_model','整合模型','model',{ph:'当前模型',def:'',hint:'把多次提取的记忆合并整理用的模型'}),
+    ]),
+    G('mq','检索与整合','',[
+      F('memories.search_top_k','检索条数','num',{min:1,max:20,clamp:true,unit:'条',def:5,hint:'每次查找记忆最多返回的条数'}),
+      F('memories.max_raw_memories_for_consolidation','整合上限','num',{min:1,max:4096,clamp:true,unit:'条',def:256,hint:'每次整合最多处理的记忆条数'}),
+    ]),
+    G('mo','会话处理','',[
+      F('memories.max_unused_days','未使用过期','num',{min:0,max:365,clamp:true,unit:'天',def:30,hint:'超过这么多天没用到的记忆会被清理'}),
+      F('memories.max_rollout_age_days','会话保留','num',{min:0,max:90,clamp:true,unit:'天',def:10,hint:'只从最近这么多天内更新过的会话提取记忆'}),
+      F('memories.max_rollouts_per_startup','每次处理会话数','num',{min:1,max:128,clamp:true,def:2,hint:'每次后台提取最多处理的会话数'}),
+      F('memories.min_rollout_idle_hours','会话空闲','num',{min:1,max:48,clamp:true,unit:'小时',def:6,hint:'会话闲置这么久之后才提取记忆'}),
+    ],{note:'你在终端或网页的会话里每发一条消息，后台就从当前会话以外、「会话保留」天内更新过且闲置满「会话空闲」时长的会话里，最多挑「每次处理会话数」个提取记忆'}),
+  ],
+  cron: [
+    G('cn','定时任务','',[F('cron.retention_days','执行记录保留','num',{min:1,max:3650,unit:'天',def:30,hint:'最后一次活动后保留的天数'})]),
+  ],
+};
+const TBSW = {
+  'features.lsp': F('features.lsp','语言服务器','bool',{def:true}),
+};
+const LSPM = G('lspm','参数','',[
+  F('lsp.recommendations','推荐安装','bool',{def:true,hint:'打开项目时提示安装缺少的语言服务器'}),
+  F('lsp.diagnostics.after_edit','编辑后诊断','bool',{def:true,hint:'改完文件把错误和警告告诉模型'}),
+  F('lsp.max_servers','并发上限','num',{min:1,max:32,unit:'台',def:6}),
+  F('lsp.idle_timeout','空闲退出','num',{min:0,max:86400,unit:'秒',def:600,range:'0 或 60–86400',hint:'0 不退出',
+    ok:v => v === 0 || (v >= 60 && v <= 86400)}),
+  F('lsp.request_timeout','请求超时','num',{min:1,max:600,unit:'秒',def:30}),
+  F('lsp.diagnostics.wait_ms','诊断等待','num',{min:0,max:30000,unit:'毫秒',def:2500,hint:'0 不等待'}),
+  F('lsp.diagnostics.min_severity','最低级别','enum',{opts:[['error','错误'],['warning','警告'],['information','信息'],['hint','提示']],def:'warning'}),
+  F('lsp.diagnostics.max_per_file','每文件上限','num',{min:1,max:200,unit:'条',def:20}),
+  F('lsp.diagnostics.max_files','文件数上限','num',{min:1,max:50,def:10}),
+  F('lsp.diagnostics.late_delivery','迟到诊断','bool',{def:true}),
+],{modal:true, validate:d => {
+  const v = d['lsp.idle_timeout'];
+  return v !== undefined && v !== 0 && (v < 60 || v > 86400) ? '空闲退出须为 0，或在 60–86400 秒之间' : '';
+}});
+
+const GROUPS = {};
+
+/* 「/goal 检查模型」区块的数据 */
+const SS_ROWS = [
+  {id:'goal-evaluator', when:'/goal 每轮结束后检查目标是否达成'},
+];
+/* 候选模型行：同名两行用接口地址区分；efforts / defaultEffort 是「设置 · 模型」页给该行的配置 */
+const SS_MODELS = [
+  {id:'llm-demo-01', model:'deepseek-v4-flash',   providerName:'深度求索',       base:'https://api.deepseek.com',                     path:'/chat/completions', efforts:['low','medium','high'],                  defaultEffort:'high'},
+  {id:'llm-demo-02', model:'deepseek-v4-flash',   providerName:'深度求索',       base:'https://llm-proxy.corp.example.com/deepseek', path:'/chat/completions', efforts:['low','high'],                           defaultEffort:'low'},
+  {id:'llm-demo-03', model:'doubao-seed-2.1-pro', providerName:'火山方舟',       base:'https://ark.cn-beijing.volces.com/api/coding', path:'/v1/messages',     efforts:['minimal','low','medium','high'],        defaultEffort:'high'},
+  {id:'llm-demo-04', model:'glm-5.3',             providerName:'火山方舟',       base:'https://ark.cn-beijing.volces.com/api/plan',   path:'/v1/messages',     efforts:['low','high','max'],                     defaultEffort:'max'},
+  {id:'llm-demo-05', model:'glm-5.3',             providerName:'智谱',           base:'https://open.bigmodel.cn/api/anthropic',       path:'/v1/messages',     efforts:['low','medium','high'],                  defaultEffort:'high'},
+  {id:'llm-demo-06', model:'LongCat-2.5',         providerName:'美团 LongCat',   base:'https://api.longcat.chat/openai/v1',           path:'/chat/completions', efforts:['low','medium','high'],                  defaultEffort:'medium'},
+  {id:'llm-demo-07', model:'hy3',                 providerName:'腾讯云 TokenHub', base:'https://tokenhub.tencentmaas.com/v1',          path:'/chat/completions', efforts:[],                                       defaultEffort:''},
+  {id:'llm-demo-08', model:'gpt-5.5',             providerName:'ChatGPT',        base:'https://chatgpt.com/backend-api/codex',        path:'/responses',       efforts:['minimal','low','medium','high','xhigh'], defaultEffort:'medium'},
+];
+const SS_LAB = {none:'关闭思考 none', minimal:'极低 minimal', low:'低 low', medium:'中 medium', high:'高 high', xhigh:'最高 xhigh', max:'极致 max'};
+const SS_DEFAULT = () => ({model:'', effort:''});
+let SS_DRAFT = {}, SS_SAVED = {}, SS_OPEN = true, SS_QUERY = '', SS_NOTICE = false;
+SS_ROWS.forEach(r => { SS_DRAFT[r.id] = SS_DEFAULT(); SS_SAVED[r.id] = SS_DEFAULT(); });
+const ssChanged = id => JSON.stringify(SS_DRAFT[id]) !== JSON.stringify(SS_SAVED[id]);
+const ssConfigured = id => !!(SS_DRAFT[id].model || SS_DRAFT[id].effort);
+
+/* 两行模型签名：名字 + 服务商 / 接口地址 + 高亮 API 路径 */
+const ssSig = x => `<span class="sig"><b>${esc(x.model)}<small>${esc(x.providerName)}</small></b><span>${esc(x.base)}${x.path ? `<em>${esc(x.path)}</em>` : ''}</span></span>`;
+/* 选中后的回显只显示模型名 + 服务商，不带接口地址 */
+const ssSigShort = x => `<span class="sig"><b>${esc(x.model)}<small>${esc(x.providerName)}</small></b></span>`;
+const ssHay = x => [x.model, x.providerName, x.base, x.path].join(' ').toLowerCase();
+/* 档位与默认值都取自所选模型行在「设置 · 模型」页的配置 */
+function ssEffortOptions(modelId){
+  const row = SS_MODELS.find(x => x.id === modelId);
+  const d = SS_DRAFT['goal-evaluator'];
+  if (!row) return `<option value="" selected>跟随主代理</option>`;
+  const levels = row.efforts;
+  const opts = [`<option value="" ${d.effort === '' ? 'selected' : ''}>跟随模型设置</option>`]
+    .concat(levels.map(v => `<option value="${v}" ${d.effort === v ? 'selected' : ''}>${esc(SS_LAB[v] || v)}</option>`));
+  if (d.effort && !levels.includes(d.effort)) opts.push(`<option value="${esc(d.effort)}" selected>${esc(SS_LAB[d.effort] || d.effort)}</option>`);
+  return opts.join('');
+}
+function ssModelOptions(){
+  const d = SS_DRAFT['goal-evaluator'], q = SS_QUERY.trim().toLowerCase();
+  const hits = SS_MODELS.filter(x => !q || ssHay(x).includes(q));
+  const items = hits.map(x => `<button type="button" class="mopt${d.model === x.id ? ' on' : ''}" role="option" aria-selected="${d.model === x.id}" data-ss="pick" data-id="${esc(x.id)}"><span class="lead">${d.model === x.id ? icon('check') : ''}</span>${ssSig(x)}</button>`).join('');
+  return items + (hits.length ? '' : `<div class="ss-empty">没有匹配的模型</div>`);
+}
+function ssModelMenu(){
+  return `<div class="msrch">${icon('search')}<input data-ss="search" value="${esc(SS_QUERY)}" placeholder="搜索模型、服务商或地址" aria-label="搜索模型"></div>
+    <div class="mlist" role="listbox">${ssModelOptions()}</div>`;
+}
+
+function systemSubagentsHTML(){
+  const r = SS_ROWS[0], d = SS_DRAFT[r.id];
+  const m = SS_MODELS.find(x => x.id === d.model);
+  const effortOpts = ssEffortOptions(d.model);
+  const effortHint = !m ? ''
+    : d.effort === m.defaultEffort ? (m.defaultEffort ? `模型页配置的默认强度：${SS_LAB[m.defaultEffort] || m.defaultEffort}` : '该模型未配置默认强度')
+    : `已改为 ${SS_LAB[d.effort] || d.effort}，仅影响目标检查子代理`;
+  const effortReset = !!m && d.effort !== m.defaultEffort;
+  const combo = `<button type="button" class="combo ss-combo${SS_OPEN ? ' open' : ''}" data-ss="combo" aria-haspopup="listbox" aria-expanded="${SS_OPEN}">${m ? ssSigShort(m) : '<span class="ph">跟随主代理</span>'}<span class="ss-caret-zone"><span class="ss-caret">${icon('down')}</span><span class="ss-x" data-ss="clear" role="button" tabindex="0" aria-label="清空选择" title="清空选择">${icon('x')}</span></span></button>${SS_OPEN ? `<div class="mmenu ss-menu">${ssModelMenu()}</div>` : ''}`;
+
+  return `<section class="grp ss-grp" data-grp="goal-check-model">
+    <header class="grp-h"><h3>/goal 检查模型</h3></header>
+    <div class="rows">
+      <div class="row ss-row${ssChanged(r.id) ? ' dirty' : ''}">
+        <div class="lab">
+          <b>使用的模型</b>
+        </div>
+        <div class="rs mrel">${combo}</div>
+      </div>
+      <div class="row ss-row${ssChanged(r.id) ? ' dirty' : ''}">
+        <div class="lab">
+          <b>思考强度</b>
+          ${effortHint ? `<span class="h">${esc(effortHint)}</span>` : ''}
+          ${effortReset ? `<span class="ss-link" role="button" tabindex="0" data-ss="effort-reset">恢复为模型默认</span>` : ''}
+        </div>
+        <div class="rs"><select class="fld${m ? '' : ' unset'}" data-ss="effort" data-id="${esc(r.id)}" ${d.model ? '' : 'disabled'}>${effortOpts}</select></div>
+      </div>
+    </div>
+    <div class="tray${ssChanged(r.id) || SS_NOTICE ? ' open' : ''}"><div class="tray-in"><div class="tray-bar">
+      <span class="okmsg" ${SS_NOTICE ? '' : 'hidden'}>${icon('check')}已保存，下一轮对话生效</span>
+      <span class="btn plain" role="button" tabindex="0" data-ss="discard">放弃更改</span>
+      <span class="btn pri" role="button" tabindex="0" data-ss="save">保存</span>
+    </div></div></div>
+  </section>`;
+}
+
+function ssToast(text){
+  const old = document.getElementById('ss-toast'); if (old) old.remove();
+  document.body.insertAdjacentHTML('beforeend', `<div id="ss-toast" style="position:fixed;right:26px;bottom:26px;z-index:99;background:var(--ink);color:#fff;border-radius:9px;padding:10px 16px;font-size:12.5px;box-shadow:0 8px 24px rgba(16,24,40,.18)">${esc(text)}</div>`);
+  setTimeout(() => { const n = document.getElementById('ss-toast'); if (n) n.remove(); }, 2600);
+}
+/* 「/goal 检查模型」区块的交互 */
+document.addEventListener('change', e => {
+  const t = e.target.closest('[data-ss="effort"]');
+  if (!t || !SS_DRAFT[t.dataset.id]) return;
+  SS_DRAFT[t.dataset.id].effort = t.value;
+  SS_NOTICE = false;
+  renderMain();
+});
+document.addEventListener('input', e => {
+  const t = e.target.closest('[data-ss="search"]');
+  if (!t) return;
+  SS_QUERY = t.value;
+  const list = document.querySelector('.ss-menu .mlist');
+  if (list) list.innerHTML = ssModelOptions();
+});
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-ss]');
+  if (!t){
+    if (SS_OPEN){ SS_OPEN = false; renderMain(); }
+    return;
+  }
+  if (t.tagName === 'SELECT' || t.tagName === 'INPUT') return;
+  const act = t.dataset.ss, id = t.dataset.id;
+  SS_NOTICE = false;
+  if (act === 'combo'){ SS_OPEN = !SS_OPEN; renderMain(); return; }
+  if (act === 'pick'){
+    const row = SS_MODELS.find(x => x.id === id);
+    SS_DRAFT['goal-evaluator'].model = id || '';
+    SS_DRAFT['goal-evaluator'].effort = row ? row.defaultEffort : '';
+    SS_OPEN = false; SS_QUERY = ''; renderMain(); return;
+  }
+  if (act === 'clear'){
+    SS_DRAFT['goal-evaluator'].model = '';
+    SS_DRAFT['goal-evaluator'].effort = '';
+    SS_OPEN = false; SS_QUERY = ''; renderMain(); return;
+  }
+  if (act === 'effort-reset'){
+    const row = SS_MODELS.find(x => x.id === SS_DRAFT['goal-evaluator'].model);
+    SS_DRAFT['goal-evaluator'].effort = row ? row.defaultEffort : '';
+    renderMain(); return;
+  }
+  if (act === 'discard'){ SS_DRAFT = JSON.parse(JSON.stringify(SS_SAVED)); renderMain(); return; }
+  if (act === 'save'){ SS_SAVED = JSON.parse(JSON.stringify(SS_DRAFT)); SS_NOTICE = true; renderMain(); return; }
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && SS_OPEN){ SS_OPEN = false; renderMain(); return; }
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const t = e.target.closest && e.target.closest('[data-ss][role="button"]');
+  if (t){ e.preventDefault(); t.click(); }
+});
+
+const FIELDS = {};
+Object.values(FORMS).flat().forEach(g => GROUPS[g.id] = g);
+Object.values(TBSW).forEach(f => { FIELDS[f.p] = f; });
+GROUPS[LSPM.id] = LSPM;
+Object.values(GROUPS).forEach(g => g.fields.forEach(f => { FIELDS[f.p] = f; f.g = g.id; }));
+
+/* ================= 数据 ================= */
+const SEED = {
+  '@preset':'workspace_write',
+  // 显示「与 Claude Code 互通」这一行所需的事实：本机装了 Claude Code。
+  // 生产环境里它不是配置值，而是 GET /api/settings 的 meta.claude_code_available。
+  'claude_code_available':true,
+  'sandbox_workspace_write.writable_roots':['/Users/doudou/.cache/pnpm','/Users/doudou/Library/Caches/go-build'],
+  'agents.defaults.enable_subagent':true,
+  [WS+'.provider']:'tavily', [WS+'.tavily.api_key']:'tvly-test-not-a-real-key-00000', [WS+'.tavily.search_depth']:'advanced',
+  [WF+'.provider']:'deepseek', [WF+'.deepseek.api_key']:'sk-test-not-a-real-key-0000000000000000',
+  'features.skill_offer':false,
+  'memories.extract_model':'deepseek-v4-flash',
+  'agents.defaults.execution.max_parallel_subagents':4, 
+  'memories.search_top_k':8, 'memories.max_unused_days':60, 'lsp.max_servers':8,
+  [GR+'.input.block_substrings']:['BEGIN RSA PRIVATE KEY','AKIA'],
+  [TE+'.hubs']:['modelscope','huggingface'], [TE+'.tokenizers']:[['glm-','glm-4'],['deepseek-','/Users/doudou/models/deepseek-v4/tokenizer.json']],
+};
+const YAML_INIT = `gateway:
+  http_addr: 127.0.0.1:8787
+  auth:
+    token: fbg_2b7d9c41e8a0f3561d2c9a7e
+`;
+// What forebrain.yaml supports: the startup section plus the hand-edited
+// advanced items. Anything else — removed, owned by the pages, or misspelled —
+// gets a wavy line and is silently ignored when the file is read. `1` is a
+// scalar, `ANY` a map whose keys the user names.
+const ANY = '*';
+const YAML_SCHEMA = {
+  gateway:{http_addr:1, auth:{token:1}},
+  credentials:{chatgpt:1},
+};
+// lintYAML returns the indexes of the lines whose key the file does not
+// support. Only the outermost unsupported key is marked; what nests under it
+// goes with it.
+function lintYAML(src){
+  const bad = new Set(), stack = [{indent:-1, node:YAML_SCHEMA}];
+  src.split('\n').forEach((line, i) => {
+    if (!line.trim() || /^\s*#/.test(line) || /^\s*-/.test(line)) return;
+    const m = line.match(/^(\s*)([\w.-]+)\s*:/);
+    if (!m) return;
+    const indent = m[1].length;
+    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) stack.pop();
+    const parent = stack[stack.length - 1].node;
+    let node;
+    if (parent === ANY || parent === null) node = parent;
+    else if (parent && typeof parent === 'object' && m[2] in parent) node = parent[m[2]];
+    else { bad.add(i); node = null; }
+    stack.push({indent, node});
+  });
+  return bad;
+}
+let SAVED = {}, DRAFT = {}, TRAY = {};
+const FLASH = new Set();
+function resetData(){
+  // forebrain writes every default into the config table when it initialises
+  // the database, so each stored field always has a value to show.
+  SAVED = {};
+  Object.values(FIELDS).forEach(f => { if (f.def !== undefined && f.kind !== 'preset') SAVED[f.p] = clone(f.def); });
+  Object.assign(SAVED, clone(SEED));
+  DRAFT = clone(SAVED); TRAY = {}; FLASH.clear();
+  S.yaml = S.yamlSaved = YAML_INIT; S.yamlErr = ''; S.yamlNote = '';
+}
+
+/* ================= 应用状态 ================= */
+const S = {route:'settings', tab:'subagents', overlay:null, tenant:false, narrow:false, notice:'', modalErr:'', yaml:'', yamlSaved:'', yamlErr:'', yamlNote:'',
+  cand:true, secEdit:new Set(), provKeyEdit:false};
+const TABS = [
+  ['常规', [['appearance','外观'],['session','会话'],['approval','审批与沙箱'],['subagents','子代理'],['net','联网工具']]],
+  ['全局服务', [['mcp','MCP'],['lsp','语言服务器'],['hooks','钩子'],['cron','定时任务'],['memory','记忆'],['skills','共享技能']]],
+  ['高级', [['config','配置文件'],['runtime','运行状态']]],
+];
+const NAV = [['projects','项目','folder'],['rules','规则指令','scroll'],['skills','技能','sparkles'],['mcp','MCP','plug'],
+  ['subagents','子代理','users'],['providers','模型服务','boxes'],['tools','工具','wrench'],['permissions','权限','shield'],['memories','记忆','brain']];
+const ROUTE_TITLE = Object.fromEntries([['settings','设置'],['chat','对话'],...NAV.map(n => [n[0], n[1]])]);
+
+/* ================= 字段渲染 ================= */
+function mask(v){ return `••••••••<b>${esc(String(v).slice(-4))}</b>`; }
+function rel(key, p){ return p.startsWith(key + '.') ? p.slice(key.length + 1) : (p === key ? '' : p); }
+// What a field is in effect: its stored value, or the default it shows when nothing is stored.
+function eff(f, v){ const n = norm(v); return n === undefined ? f.def : n; }
+function fieldDirty(f){ return !same(eff(f, DRAFT[f.p]), eff(f, SAVED[f.p])); }
+function groupDirty(g){ return g.fields.some(fieldDirty); }
+function badNum(f, v){
+  if (f.kind !== 'num' || v === undefined || f.clamp) return false;
+  if (f.ok) return !f.ok(v);
+  return v < (f.min ?? -Infinity) || (f.max !== undefined && v > f.max);
+}
+function rangeTxt(f){ return f.range ?? (f.max !== undefined ? `${f.min}–${f.max}` : ''); }
+
+function rowHTML(g, f, solo){
+  if (f.when && !f.when(DRAFT)) return '';
+  if (f.cand && !S.cand) return '';
+  const lone = !solo && !g.modal && !g.keepLabel && g.fields.length === 1 && f.kind !== 'preset';
+  const p = f.p, v = DRAFT[p];
+  const stack = f.stack || ['list','access','pairs','area','preset'].includes(f.kind);
+  const bad = badNum(f, v);
+  const hint = bad ? `范围 ${rangeTxt(f)}` : (f.hint ?? '');
+  return `<div class="row${stack ? ' stack' : ''}${f.kind === 'preset' ? ' preset' : ''}${fieldDirty(f) ? ' dirty' : ''}${FLASH.has(p) ? ' flash' : ''}" data-row="${p}">
+    <div class="lab">${f.restore ? `<button type="button" class="btn plain lab-act" data-restore="${p}"${same(eff(f, v), f.def) ? ' disabled' : ''}>恢复默认</button>` : ''}${lone ? '' : `<b${g.titleLabel ? ' class="ttl"' : ''}>${f.label}</b>${f.pend ? '<span class="cpill">待确认</span>' : ''}`}<span class="h${bad ? ' bad' : ''}${lone ? ' lone' : ''}">${esc(hint)}</span></div>
+    <div class="ctl">${ctlHTML(f, v, bad)}</div>
+  </div>`;
+}
+
+function ctlHTML(f, v, bad){
+  const p = f.p;
+  switch (f.kind){
+    case 'bool': {
+      const on = eff(f, v) === true;
+      return `<button type="button" role="switch" aria-checked="${on}" class="sw${f.warn ? ' warn' : ''}" data-sw="${p}" aria-label="${f.label}"><i></i></button>`;
+    }
+    case 'enum': {
+      const cur = eff(f, v) ?? '';
+      const o = ([val, txt]) => {
+        const on = cur === val;
+        return `<span role="radio" tabindex="0" aria-checked="${on}" class="rd${on ? ' on' : ''}" data-rd="${p}" data-v="${val}"><i></i>${txt}</span>`;
+      };
+      return `<div class="radios" role="radiogroup" aria-label="${f.label}">${f.opts.map(o).join('')}</div>`;
+    }
+    case 'preset': {
+      const cur = v;
+      const opts = PRESETS.map(([id, label, desc]) => `<span role="radio" tabindex="0" aria-checked="${cur === id}" class="rd desc${cur === id ? ' on' : ''}${id === 'full_access' ? ' warn' : ''}" data-rd="@preset" data-v="${id}"><i></i><span><b>${label}</b><small>${desc}</small></span></span>`).join('');
+      return `<div class="radios vert" role="radiogroup" aria-label="审批预设">${opts}</div>`;
+    }
+    case 'num':
+      return `<span class="numw"><span class="numbox${bad ? ' bad' : ''}"><input inputmode="numeric" data-p="${p}" data-num value="${v ?? ''}" placeholder="${esc(f.ph ?? f.def ?? '')}" aria-label="${f.label}"><em>${f.unit ?? ''}</em></span>${rangeTxt(f) ? `<span class="rng">${rangeTxt(f)}</span>` : ''}</span>`;
+    case 'text':
+      return `<input class="fld${f.mono ? ' mono' : ''}${bad ? ' bad' : ''}" data-p="${p}" value="${esc(v ?? '')}" placeholder="${esc(f.ph ?? '')}" aria-label="${f.label}">`;
+    case 'secret': {
+      const sv = SAVED[p] || '';
+      if (sv && !S.secEdit.has(p)) return `<span class="secrow"><span class="fld mono masked" aria-label="${f.label}，尾号 ${esc(sv.slice(-4))}">${mask(sv)}</span><button type="button" class="btn plain" data-secedit="${p}">更换</button></span>`;
+      return `<span class="secrow"><input type="password" class="fld mono" data-p="${p}" data-secret placeholder="${sv ? '输入新的 Key' : '输入 Key'}" autocomplete="new-password" spellcheck="false" aria-label="${f.label}">${sv ? `<button type="button" class="btn plain" data-seccancel="${p}">取消</button>` : ''}</span>`;
+    }
+    case 'area':
+      return `<textarea class="fld" rows="${f.rows ?? 3}" data-p="${p}" placeholder="${esc(f.ph ?? '')}" aria-label="${f.label}">${esc(eff(f, v) ?? '')}</textarea>`;
+    case 'select': case 'model': {
+      const opts = (f.kind === 'model' ? MODELS : f.opts).map(o => Array.isArray(o) ? o : [o, o]);
+      return `<select class="fld${v === undefined ? ' unset' : ''}${f.kind === 'model' ? ' mono' : ''}" data-p="${p}" aria-label="${f.label}"><option value="">${f.ph}</option>${opts.map(([val, txt]) => `<option value="${val}"${val === v ? ' selected' : ''}>${txt}</option>`).join('')}</select>`;
+    }
+    case 'list': {
+      const arr = v ?? [];
+      return `<div class="lrows">${arr.map((x, i) => `<div class="lrow"><input class="fld mono" data-p="${p}" data-i="${i}" value="${esc(x)}" placeholder="${esc(f.ph)}" aria-label="${f.label}"><button type="button" class="icbtn dgr" data-del="${p}" data-i="${i}" data-tip="删除" aria-label="删除">${icon('trash')}</button></div>`).join('')}<button type="button" class="addb" data-add="${p}">${icon('plus')}${f.add}</button></div>`;
+    }
+    case 'access': {
+      const arr = v ?? [];
+      return `<div class="lrows">${arr.map(([pat, acc], i) => `<div class="lrow acc"><input class="fld mono" data-p="${p}" data-i="${i}" data-c="0" value="${esc(pat)}" placeholder="${esc(f.ph)}" aria-label="${f.label}"><div class="seg2" role="radiogroup">${['allow','deny'].map(a => `<button type="button" role="radio" aria-checked="${acc === a}" class="${a}" data-acc="${p}" data-i="${i}" data-v="${a}">${a === 'allow' ? '允许' : '拒绝'}</button>`).join('')}</div><button type="button" class="icbtn dgr" data-del="${p}" data-i="${i}" data-tip="删除" aria-label="删除">${icon('trash')}</button></div>`).join('')}<button type="button" class="addb" data-add="${p}">${icon('plus')}${f.add}</button></div>`;
+    }
+    case 'pairs': {
+      const arr = v ?? [];
+      return `<div class="lrows">${arr.length ? `<div class="lhead"><span>${f.cols[0]}</span><span>${f.cols[1]}</span><span></span></div>` : ''}${arr.map(([a, b], i) => `<div class="lrow pair"><input class="fld mono" data-p="${p}" data-i="${i}" data-c="0" value="${esc(a)}" placeholder="${esc(f.ph[0])}" aria-label="${f.cols[0]}"><input class="fld mono" data-p="${p}" data-i="${i}" data-c="1" value="${esc(b)}" placeholder="${esc(f.ph[1])}" aria-label="${f.cols[1]}"><button type="button" class="icbtn dgr" data-del="${p}" data-i="${i}" data-tip="删除" aria-label="删除">${icon('trash')}</button></div>`).join('')}<button type="button" class="addb" data-add="${p}">${icon('plus')}${f.add}</button></div>`;
+    }
+    case 'tags': {
+      const arr = v ?? [];
+      return `<div class="tags">${arr.map((x, i) => `<span class="tag">${esc(x)}<button type="button" data-del="${p}" data-i="${i}" aria-label="移除 ${esc(x)}">${icon('x')}</button></span>`).join('')}<input data-tags="${p}" placeholder="${esc(f.ph)}" aria-label="${f.label}"></div>`;
+    }
+    case 'checks':
+      return `<div class="checks">${f.opts.map(([k, l]) => `<label class="ck"><input type="checkbox" data-chk="${p}" data-k="${k}"${v && v[k] ? ' checked' : ''}><span>${l}</span></label>`).join('')}</div>`;
+  }
+  return '';
+}
+
+function trayInner(g){
+  const st = TRAY[g.id], dirty = groupDirty(g);
+  if (st && st.state === 'saved' && !dirty) return `<span class="okmsg">${icon('check')}已保存，下一轮生效</span>`;
+  const saving = st && st.state === 'saving';
+  const err = st && st.state === 'error' ? `<div class="errb" role="alert">${icon('alert')}<div><b>保存失败</b> <span>${esc(st.msg)}</span></div></div>` : '';
+  return `${err}<button type="button" class="btn plain" data-discard="${g.id}"${saving ? ' disabled' : ''}>取消</button><button type="button" class="btn pri" data-save="${g.id}"${saving ? ' disabled' : ''}>${saving ? '保存中…' : '保存'}</button>`;
+}
+function trayOpen(g){ const st = TRAY[g.id]; return groupDirty(g) || !!(st && st.state !== 'saving'); }
+function groupHTML(g, solo){
+  if (g.cand && !S.cand) return '';
+  solo = solo || g.flat;
+  return `<section class="grp" data-grp="${g.id}">
+    ${solo ? '' : `<header class="grp-h"><h3>${g.title}</h3>${g.note ? `<span class="grp-note">${esc(g.note)}</span>` : ''}</header>`}
+    <div class="rows${solo ? ' solo' : ''}">${g.fields.map(f => rowHTML(g, f, solo)).join('')}</div>
+    ${g.modal ? '' : `<div class="tray${trayOpen(g) ? ' open' : ''}" data-tray="${g.id}"><div class="tray-in"><div class="tray-bar">${trayInner(g)}</div></div></div>`}
+  </section>`;
+}
+function updateTray(gid){
+  const g = GROUPS[gid], el = $(`[data-tray="${gid}"]`);
+  if (!el) return;
+  el.classList.toggle('open', trayOpen(g));
+  el.querySelector('.tray-bar').innerHTML = trayInner(g);
+}
+function renderGroup(gid){
+  const el = $(`[data-grp="${gid}"]`);
+  if (!el) return;
+  const solo = !el.querySelector('.grp-h');
+  const oldTray = el.querySelector('.tray'), wasOpen = !!(oldTray && oldTray.classList.contains('open'));
+  const wasDirty = new Set($$('.row.dirty', el).map(r => r.dataset.row));
+  el.outerHTML = groupHTML(GROUPS[gid], solo);
+  const nu = $(`[data-grp="${gid}"]`);
+  // Motion answers the change: a tray or a row bar that was not there slides in.
+  const tray = nu.querySelector('.tray');
+  const fresh = $$('.row.dirty', nu).filter(r => !wasDirty.has(r.dataset.row));
+  if (tray && tray.classList.contains('open') !== wasOpen){
+    const target = tray.classList.contains('open');
+    tray.classList.toggle('open', wasOpen);
+    void tray.offsetHeight;
+    tray.classList.toggle('open', target);
+  }
+  fresh.forEach(r => r.classList.remove('dirty'));
+  if (fresh.length){ void nu.offsetHeight; fresh.forEach(r => r.classList.add('dirty')); }
+}
+
+/* ================= 页面 ================= */
+function railHTML(){
+  return `<aside class="rail">
+    <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#7EA2EA"/><path d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z" fill="#0F1D38"/><rect x="18.5" y="20.5" width="4" height="4" rx="0.6" fill="#0F1D38"/></svg>
+      <span><span class="wm"><b>Forebrain</b> Harness</span><span class="ver">v0.42.0</span></span></div>
+    <button type="button" class="tenant" data-tenant aria-haspopup="listbox" aria-expanded="${S.tenant}"><span><span class="l">当前主代理（2）</span><span class="n">main</span></span>${icon('down')}</button>
+    <nav class="rnav" aria-label="导航">
+      <button type="button" class="rl" data-route="chat">${icon('chat')}<span>对话</span></button>
+      ${NAV.map(([k, l, ic]) => `<button type="button" class="rl${S.route === k ? ' on' : ''}" data-route="${k}">${icon(ic)}<span>${l}</span></button>`).join('')}
+    </nav>
+    <div class="rfoot"><button type="button" class="rl${S.route === 'settings' ? ' on' : ''}" data-route="settings">${icon('settings')}<span>设置</span></button><button type="button" class="rcollapse" data-tip="收起" aria-label="收起">${icon('panel')}</button></div>
+  </aside>`;
+}
+function tenantMenuHTML(){
+  if (!S.tenant) return '';
+  const rows = [['main','~/.forebrain/workspace',true],['research','~/.forebrain/workspaces/research',false]];
+  return `<div class="tmenu" role="listbox">${rows.map(([n, path, on]) => `<div class="trow${on ? ' on' : ''}">
+    <button type="button" class="topt" role="option" aria-selected="${on}"><b>${on ? '<i></i>' : ''}${n}</b><span>${path}</span></button>
+    <button type="button" class="icbtn sm" data-open="agent" data-agent="${n}" data-tip="编辑" aria-label="编辑 ${n}">${icon('pencil')}</button>
+    <button type="button" class="icbtn sm dgr${on || n === 'main' ? ' ph' : ''}" data-tip="删除" aria-label="删除 ${n}">${icon('trash')}</button>
+  </div>`).join('')}</div>`;
+}
+function topHTML(){
+  return `<header class="top"><span class="t">${ROUTE_TITLE[S.route] ?? ''}</span><span class="sp"></span>
+    <button type="button" class="chipb hide-n">${icon('plus')}新建主代理</button>
+    <button type="button" class="chipb">${icon('langs')}中文</button>
+    <button type="button" class="chipb sq" data-tip="深色" aria-label="深色">${icon('moon')}</button></header>`;
+}
+function settingsHTML(){
+  const nav = TABS.map(([gl, items]) => {
+    const vis = items.filter(([k, , c]) => (!c || S.cand) && !(S.nosandbox && k === 'approval'));
+    if (!vis.length) return '';
+    return `<div class="gl">${gl}</div>${vis.map(([k, l, c]) => `<button type="button" class="${S.tab === k ? 'on' : ''}" data-tab="${k}" role="tab" aria-selected="${S.tab === k}">${l}${c ? '<span class="cpill">候选</span>' : ''}</button>`).join('')}`;
+  }).join('');
+  return `<div class="set"><nav class="subnav" aria-label="设置">${nav}</nav><div class="content">${tabHTML()}</div></div>`;
+}
+function pager(total){
+  return `<div class="pager"><span>共 ${total} 条</span><select class="pgsel" aria-label="每页条数"><option>10 条/页</option><option>20 条/页</option></select><button type="button" class="pg" disabled aria-label="上一页">${icon('left')}</button><button type="button" class="pg on">1</button><button type="button" class="pg" disabled aria-label="下一页">${icon('right')}</button></div>`;
+}
+function act(ic, label, cls = '', attrs = ''){ return `<button type="button" class="icbtn sm ${cls}" data-tip="${label}" aria-label="${label}" ${attrs}>${icon(ic)}</button>`; }
+
+function tbsw(p){
+  const f = TBSW[p], on = eff(f, SAVED[p]) === true;
+  return `<label class="tbsw">${f.label}<button type="button" role="switch" aria-checked="${on}" class="sw" data-swnow="${p}" aria-label="${f.label}"><i></i></button></label>`;
+}
+// syntaxYAML finds the first line the YAML parser would refuse — the one
+// thing that stops a save.
+function syntaxYAML(src){
+  const lines = src.split('\n');
+  for (let i = 0; i < lines.length; i++){
+    const l = lines[i];
+    if (!l.trim() || /^\s*#/.test(l)) continue;
+    if (/^ *\t/.test(l)) return {line:i, msg:'缩进不能用 Tab'};
+    if (/^\s*-(\s|$)/.test(l)) continue;
+    if (!/^\s*[^:#\s][^:#]*:(\s|$)/.test(l)) return {line:i, msg:'缺少冒号'};
+    const v = l.slice(l.indexOf(':') + 1).trim();
+    if ((v.startsWith('"') && !/^".*"$/.test(v)) || (v.startsWith("'") && !/^'.*'$/.test(v))) return {line:i, msg:'引号没有闭合'};
+  }
+  return null;
+}
+function hlYAML(src){
+  const msgs = new Map([...lintYAML(src)].map(i => [i, '不存在']));
+  const syn = syntaxYAML(src);
+  if (syn) msgs.set(syn.line, syn.msg);
+  const wave = (i, html) => msgs.has(i) ? `<span class="y-x" data-msg="${msgs.get(i)}">${html}</span>` : html;
+  return src.split('\n').map((line, i) => {
+    const c = line.indexOf('#') === 0 || /^\s+#/.test(line);
+    if (c) return `<span class="y-c">${esc(line)}</span>`;
+    const m = line.match(/^(\s*)([\w.-]+)(:)(.*)$/);
+    if (!m) return line.trim() ? line.match(/^\s*/)[0] + wave(i, esc(line.trim())) : esc(line);
+    const v = m[4].trim();
+    let vv = esc(m[4]);
+    if (/^(true|false|null)$/.test(v)) vv = ` <span class="y-b">${esc(v)}</span>`;
+    else if (/^-?\d+(\.\d+)?$/.test(v)) vv = ` <span class="y-n">${esc(v)}</span>`;
+    else if (v) vv = ` <span class="y-s">${esc(v)}</span>`;
+    const body = `<span class="y-k">${esc(m[2])}</span>${m[3]}${vv}`;
+    return m[1] + wave(i, body);
+  }).join('\n') + '\n';
+}
+function gutter(src){ return src.replace(/\n$/, '').split('\n').map((_, i) => i + 1).join('\n'); }
+function tabHTML(){
+  const t = S.tab;
+  if (t === 'approval'){
+    const [pre, sww, batch] = FORMS.approval;
+    return groupHTML(pre) + `<div class="cond${sww.when(DRAFT) ? ' open' : ''}" data-cond="sww"><div class="cond-in">${groupHTML(sww)}</div></div>` + groupHTML(batch);
+  }
+  if (t === 'memory'){
+    const [ms, ...rest] = FORMS.memory;
+    const on = eff(FIELDS['features.memories'], DRAFT['features.memories']) !== false;
+    return groupHTML(ms) + `<div class="cond${on ? ' open' : ''}" data-cond="mem"><div class="cond-in">${rest.map(g => groupHTML(g)).join('')}</div></div>`
+      + `<div class="dz"><button type="button" class="btn dgr">重置记忆</button><span>删除全部记忆文件，不可恢复</span></div>`;
+  }
+  if (FORMS[t]){
+    const gs = FORMS[t].filter(g => !g.cand || S.cand);
+    let h = gs.map(g => groupHTML(g, gs.length === 1)).join('');
+    if (t === 'memory') h += `<div class="dz"><button type="button" class="btn dgr">重置记忆</button><span>删除全部记忆文件，不可恢复</span></div>`;
+    if (t === 'subagents') h += systemSubagentsHTML();
+    return h;
+  }
+  const notice = S.notice ? `<span class="notice">${icon('check')}${S.notice}</span>` : '';
+  if (t === 'lsp'){
+    const rows = [
+      ['gopls','go','运行中','ok','/Users/doudou/go/bin/gopls'],
+      ['typescript-language-server','typescript, javascript','未启动','g',''],
+      ['pyright','python','已停止','g','/opt/homebrew/bin/pyright-langserver'],
+    ];
+    return `<div class="tb"><span class="search">${icon('search')}搜索语言服务器</span>${notice}<span class="grow"></span>
+      ${tbsw('features.lsp')}
+      <button type="button" class="btn plain" data-open="lsp">${icon('sliders')}参数</button>
+      <button type="button" class="btn plain">${icon('plus')}添加服务器</button>
+      <button type="button" class="btn">${icon('refresh')}刷新</button></div>
+      <table class="tbl"><colgroup><col style="width:34%"><col style="width:14%"><col><col style="width:90px"></colgroup>
+      <thead><tr><th>服务器</th><th>状态</th><th>程序</th><th class="act">操作</th></tr></thead>
+      <tbody>${rows.map(r => `<tr><td><span class="mono cell">${r[0]}</span><span class="sub">${r[1]}</span></td><td><span class="bdg ${r[3]}">${r[2]}</span></td><td class="mono">${r[4] || '<span style="color:var(--quiet)">—</span>'}</td><td class="act"><span class="acts">${act('refresh','重启')}</span></td></tr>`).join('')}</tbody></table>
+      ${pager(3)}`;
+  }
+  if (t === 'skills'){
+    const rows = [['pdf','读写 PDF','内置'],['xlsx','读写表格','内置'],['weekly-report','按模板写周报','共享']];
+    return `<div class="tb"><span class="search">${icon('search')}搜索技能</span>${notice}<span class="grow"></span>
+      ${tbsw('features.skill_offer')}
+      <button type="button" class="btn pri">${icon('plus')}安装技能</button></div>
+      <table class="tbl"><colgroup><col style="width:26%"><col><col style="width:14%"><col style="width:90px"></colgroup>
+      <thead><tr><th>技能</th><th>说明</th><th>来源</th><th class="act">操作</th></tr></thead>
+      <tbody>${rows.map(r => `<tr><td class="mono">${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td class="act"><span class="acts">${act('eye','查看')}${act('trash','删除', r[2] === '内置' ? 'ph' : 'dgr')}</span></td></tr>`).join('')}</tbody></table>
+      ${pager(3)}`;
+  }
+  if (t === 'config'){
+    const dirty = S.yaml !== S.yamlSaved;
+    return `<div class="tb"><code style="font-family:var(--mono);font-size:12px;color:var(--muted)">~/.forebrain/forebrain.yaml</code><button type="button" class="icbtn sm" data-tip="复制路径" aria-label="复制路径">${icon('copy')}</button>
+      ${S.yamlNote ? `<span class="notice">${icon('check')}${S.yamlNote}</span>` : ''}<span class="grow"></span>
+      <button type="button" class="btn pri" data-yamlsave${dirty ? '' : ' disabled'}>保存</button>
+      <button type="button" class="btn" data-yamlreload>${icon('refresh')}刷新</button></div>
+      ${S.yamlErr ? `<div class="mblock" role="alert" style="margin:0 0 12px">${icon('alert')}<div><b>没有保存</b><span>${esc(S.yamlErr)}</span></div></div>` : ''}
+      <div class="ed"><pre class="ed-gut" aria-hidden="true">${gutter(S.yaml)}</pre><div class="ed-body"><pre class="ed-hl" aria-hidden="true">${hlYAML(S.yaml)}</pre><textarea class="ed-ta" spellcheck="false" autocapitalize="off" data-yaml aria-label="forebrain.yaml">${esc(S.yaml)}</textarea></div></div>
+      <p class="listnote">改动重启后生效</p>`;
+  }
+  const keep = {appearance:'外观', mcp:'MCP（全局）', hooks:'钩子', runtime:'运行状态'}[t];
+  return `<div class="stub">${keep}沿用现有页面${t === 'mcp' ? '；凭据明文同菜单栏 MCP' : ''}</div>`;
+}
+
+function providersHTML(){
+  const rows = [
+    ['deepseek','deepseek-v4-flash、deepseek-v4-pro','https://api.deepseek.com','sk-test-not-a-real-key-0000000000000000',true],
+    ['zhipu','glm-5.3、glm-5.3-air','https://open.bigmodel.cn/api/paas/v4','zhipu-test-key.demo-0000',false],
+    ['openrouter','qwen/qwen3-coder','https://openrouter.ai/api/v1','sk-or-test-not-real-0000000000',false],
+    ['ollama','qwen3:32b','http://127.0.0.1:11434','',false],
+  ];
+  return `<div class="page"><div class="tb"><span class="search">${icon('search')}搜索模型服务</span><span class="grow"></span>
+    <button type="button" class="btn pri" data-open="provider">${icon('plus')}添加</button>
+    <button type="button" class="btn">${icon('login')}连接 OpenCode</button><button type="button" class="btn">${icon('login')}连接 ChatGPT</button>
+    <button type="button" class="btn">${icon('refresh')}刷新</button></div>
+    <table class="tbl"><colgroup><col style="width:28%"><col style="width:19%"><col style="width:20%"><col><col style="width:110px"></colgroup>
+    <thead><tr><th>服务商</th><th>模型</th><th>Base URL</th><th>API Key</th><th class="act">操作</th></tr></thead>
+    <tbody>${rows.map(r => `<tr><td>${r[0]}${r[4] ? ' <span class="bdg b">默认 deepseek-v4-flash</span>' : ''}</td><td><span class="cell">${r[1]}</span></td><td><span class="cell mono" style="font-family:var(--mono);font-size:12px">${r[2]}</span></td>
+      <td>${r[3] ? `<span class="cell" style="font-family:var(--mono);font-size:12px;color:var(--quiet)">••••<b style="color:var(--ink-2);font-weight:500">${r[3].slice(-4)}</b></span>` : '<span style="color:var(--quiet)">无需</span>'}</td>
+      <td class="act"><span class="acts">${act('star','设为默认',r[4] ? 'ph' : '')}${act('pencil','编辑','', 'data-open="provider"')}${act('trash','删除','dgr')}</span></td></tr>`).join('')}</tbody></table>
+    ${pager(4)}</div>`;
+}
+function mcpHTML(){
+  const rows = [['linear','http','主代理','已启用'],['sentry','http','主代理','已启用'],['filesystem','stdio','全局','已启用']];
+  return `<div class="page"><div class="tb"><span class="search">${icon('search')}搜索 MCP 服务</span><span class="grow"></span><button type="button" class="btn pri">${icon('plus')}添加 MCP 服务</button></div>
+    <table class="tbl"><colgroup><col style="width:28%"><col style="width:14%"><col style="width:16%"><col><col style="width:110px"></colgroup>
+    <thead><tr><th>名称</th><th>类型</th><th>来源</th><th>状态</th><th class="act">操作</th></tr></thead>
+    <tbody>${rows.map(r => `<tr><td class="mono">${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td><span class="bdg ok">${r[3]}</span></td><td class="act"><span class="acts">${r[2] === '全局' ? act('eye','查看') + act('pencil','编辑','ph') : act('power','停用') + act('pencil','编辑','', 'data-open="mcp"')}${act('trash','删除', r[2] === '全局' ? 'ph' : 'dgr')}</span></td></tr>`).join('')}</tbody></table>
+    ${pager(3)}</div>`;
+}
+function mainHTML(){
+  if (S.route === 'settings') return settingsHTML();
+  if (S.route === 'providers') return providersHTML();
+  if (S.route === 'mcp') return mcpHTML();
+  if (S.route === 'chat') return chatHTML();
+  if (S.route === 'projects') return projectHTML();
+  return `<div class="page"><div class="stub">${ROUTE_TITLE[S.route]}沿用现有页面</div></div>`;
+}
+
+function projectHTML(){
+  const tabs = [['overview','概览'],['tasks','任务'],['files','文件'],['psettings','设置']];
+  const nav = `<div class="gl">订单对账 · 后台跑批</div>${tabs.map(([k, l]) => `<button type="button" class="${k === 'psettings' ? 'on' : ''}" role="tab" aria-selected="${k === 'psettings'}">${l}</button>`).join('')}`;
+  const body = S.nosandbox ? `<div class="stub">无沙箱环境：不显示「启用沙箱」</div>` : FORMS.projbatch.map(g => groupHTML(g)).join('');
+  return `<div class="set"><nav class="subnav" aria-label="项目空间">${nav}</nav><div class="content">${body}</div></div>`;
+}
+
+function chatHTML(){
+  const opts = S.nosandbox
+    ? `<select class="fld" aria-label="审批预设" disabled><option selected>完全访问</option></select>`
+    : `<select class="fld" aria-label="审批预设"><option selected>默认</option><option>完全访问</option></select>`;
+  return `<div class="chatpg">
+    <div class="chatlog"><div class="bub">把 docs 目录里的周报汇总成一页</div><div class="bub a">好的，我先读一下 docs 目录。</div></div>
+    <div class="cmp"><textarea placeholder="输入消息，@ 引用文件，/ 使用命令" aria-label="消息"></textarea>
+      <div class="cmpbar"><button type="button" class="cmpbtn" aria-label="添加附件">${icon('plus')}</button>
+        <select class="fld" aria-label="模型"><option>deepseek-v4-flash</option><option>glm-5.3</option></select>
+        ${opts}<span class="sp"></span><button type="button" class="cmpsend" aria-label="发送">${icon('send')}</button></div></div>
+  </div>`;
+}
+
+/* ================= 弹窗 / 抽屉 ================= */
+function ff(label, key, inner){ return `<label class="ff"><span>${label}</span>${inner}</label>`; }
+function overlayHTML(){
+  const o = S.overlay;
+  if (!o) return '';
+  const close = `<button type="button" class="icbtn" data-close data-tip="关闭" aria-label="关闭">${icon('x')}</button>`;
+  const foot = (save = '保存', attr = 'data-close') => `<div class="dlg-f"><button type="button" class="btn plain" data-close>取消</button><button type="button" class="btn pri" ${attr}>${save}</button></div>`;
+  if (o === 'lsp'){
+    return `<div class="mask" data-maskclose><div class="dlg wide" role="dialog" aria-modal="true" aria-label="语言服务器参数">
+      <div class="dlg-h"><b>语言服务器参数</b>${close}</div>
+      <div class="dlg-b">${groupHTML(LSPM, true)}</div>
+      ${S.modalErr ? `<div class="mblock" role="alert">${icon('alert')}<div><b>保存失败</b><span>${esc(S.modalErr)}</span></div></div>` : ''}
+      ${foot('保存','data-modalsave="lspm"')}</div></div>`;
+  }
+  if (o === 'provider'){
+    return `<div class="mask" data-maskclose><div class="dlg" role="dialog" aria-modal="true" aria-label="编辑模型服务">
+      <div class="dlg-h"><b>编辑模型服务</b>${close}</div>
+      <div class="dlg-b">
+        ${ff('服务商','',`<select class="fld"><option>deepseek</option></select>`)}
+        ${ff('Base URL','',`<input class="fld mono" value="https://api.deepseek.com">`)}
+        ${ff('模型','',`<div class="chips"><span class="tag">deepseek-v4-flash<button type="button" aria-label="移除">${icon('x')}</button></span><span class="tag">deepseek-v4-pro<button type="button" aria-label="移除">${icon('x')}</button></span><input style="border:0;outline:none;flex:1;min-width:80px;font-size:12.5px" placeholder="添加模型"></div>`)}
+        ${ff('API Key','',S.provKeyEdit
+          ? `<span class="secrow"><input type="password" class="fld mono" placeholder="输入新的 Key" autocomplete="new-password"><button type="button" class="btn plain" data-provkey>取消</button></span>`
+          : `<span class="secrow"><span class="fld mono masked">${mask('sk-test-not-a-real-key-0000000000000000')}</span><button type="button" class="btn plain" data-provkey>更换</button></span>`)}
+        ${ff('API 格式','',`<select class="fld"><option>OpenAI Chat Completions</option></select>`)}
+        ${ff('请求参数','',`<textarea class="fld mono" rows="3">{\n  "temperature": 0.6\n}</textarea>`)}
+      </div>${foot()}</div></div>`;
+  }
+  if (o === 'profile'){
+    const fsr = [['/Users/doudou/workspace','write'],['~/.ssh','deny'],['/tmp','write']];
+    return `<div class="mask" data-maskclose><div class="dlg" role="dialog" aria-modal="true" aria-label="编辑权限档案">
+      <div class="dlg-h"><b>编辑权限档案</b>${close}</div>
+      <div class="dlg-b">
+        <div class="grid2">${ff('名称','',`<input class="fld mono" value="ci-runner" readonly style="background:var(--alt);color:var(--ink-2)">`)}${ff('继承','',`<select class="fld"><option>工作区</option><option>只读</option></select>`)}</div>
+        ${ff('说明','',`<input class="fld" value="CI 里跑测试">`)}
+        <div class="ff"><span>文件系统</span><div class="lrows">${fsr.map(([pth, a]) => `<div class="lrow acc"><input class="fld mono" value="${pth}"><div class="seg2">${[['read','读'],['write','写'],['deny','拒绝']].map(([v, l]) => `<button type="button" role="radio" aria-checked="${a === v}" class="${v === 'deny' ? 'deny' : 'wr'}">${l}</button>`).join('')}</div><button type="button" class="icbtn dgr" aria-label="删除">${icon('trash')}</button></div>`).join('')}<button type="button" class="addb">${icon('plus')}添加路径</button></div></div>
+        <div class="ff"><span>网络</span><div style="display:flex;align-items:center;gap:10px;font-size:13px"><button type="button" role="switch" aria-checked="true" class="sw" aria-label="网络"><i></i></button>只放行下面的域名</div>
+          <div class="lrows" style="margin-top:6px">${[['registry.npmjs.org','allow'],['proxy.golang.org','allow']].map(([d, a]) => `<div class="lrow acc"><input class="fld mono" value="${d}"><div class="seg2"><button type="button" class="allow" aria-checked="${a === 'allow'}">允许</button><button type="button" class="deny" aria-checked="${a === 'deny'}">拒绝</button></div><button type="button" class="icbtn dgr" aria-label="删除">${icon('trash')}</button></div>`).join('')}<button type="button" class="addb">${icon('plus')}添加域名</button></div></div>
+        ${ff('其他设置（JSON）','',`<textarea class="fld mono" rows="3" placeholder="JSON">{}</textarea>`)}
+      </div>${foot()}</div></div>`;
+  }
+  if (o === 'agent'){
+    return `<div class="mask" data-maskclose><div class="dlg" role="dialog" aria-modal="true" aria-label="编辑主代理">
+      <div class="dlg-h"><b>编辑主代理</b>${close}</div>
+      <div class="dlg-b">
+        ${ff('名称','',`<input class="fld mono" value="${S.agent || 'research'}" readonly style="background:var(--alt);color:var(--ink-2)">`)}
+        ${ff('显示名','',`<input class="fld" value="调研助手">`)}
+        ${ff('描述','',`<textarea class="fld" rows="3">读论文、查资料、写调研摘要。</textarea>`)}
+      </div>${foot()}</div></div>`;
+  }
+  if (o === 'mcp'){
+    const kv = (rows) => `<div class="kvh"><span>名称</span><span>值</span><span></span></div>${rows.map(([k, v]) => {
+      const bearer = /^Bearer\s+/i.test(v);
+      const val = bearer
+        ? `<span class="secrow"><span class="fld mono masked">Bearer&nbsp;${mask(v.replace(/^Bearer\s+/i, ''))}</span><button type="button" class="btn plain">更换</button></span>`
+        : `<input class="fld mono" value="${v}" spellcheck="false">`;
+      return `<div class="kvr"><input class="fld mono" value="${k}">${val}<button type="button" class="icbtn dgr" aria-label="删除">${icon('trash')}</button></div>`;
+    }).join('')}<button type="button" class="addb" style="margin-top:6px">${icon('plus')}添加请求头</button>`;
+    const sec = (label, v) => `<div class="ff"><span>${label}</span><span class="secrow"><span class="fld mono masked" aria-label="${label}，尾号 ${v.slice(-4)}">${mask(v)}</span><button type="button" class="btn plain">更换</button></span></div>`;
+    return `<div class="dmask" data-close></div><aside class="drawer" role="dialog" aria-label="编辑 MCP 服务">
+      <div class="dr-h"><b>编辑 MCP 服务</b>${close}</div>
+      <div class="dr-b">
+        <div class="grid2">${ff('名称','',`<input class="fld mono" value="linear">`)}${ff('类型','',`<select class="fld"><option>http</option><option>stdio</option></select>`)}</div>
+        ${ff('地址','',`<input class="fld mono" value="https://mcp.linear.app/mcp">`)}
+        <div class="dr-sec">请求头</div>
+        ${kv([['Authorization','Bearer lin_api_Q8m2Rk5vT9xW3bN7pZ4cY6dF'],['X-Linear-Workspace','forebrain']])}
+        <div class="dr-sec">OAuth</div>
+        ${ff('方式','',`<select class="fld"><option>刷新令牌</option><option>静态令牌</option><option>客户端凭据</option><option>不启用</option></select>`)}
+        <div class="grid2">${ff('客户端 ID','',`<input class="fld mono" value="fb-linear-01">`)}${sec('客户端密钥','lin_oauth_cs_5Yx2Pq8Wm3Rt7Kv9')}</div>
+        ${sec('访问令牌','lin_oauth_at_9a8b7c6d5e4f3a2b1c0d')}
+        ${sec('刷新令牌','lin_oauth_rt_1f2e3d4c5b6a79880a1b')}
+        <div class="grid2">${ff('令牌地址','',`<input class="fld mono" value="https://api.linear.app/oauth/token">`)}${ff('授权范围','',`<input class="fld mono" value="read write">`)}</div>
+      </div>
+      <div class="dlg-f"><button type="button" class="btn plain" data-close>取消</button><button type="button" class="btn pri" data-close>保存</button></div>
+    </aside>`;
+  }
+  return '';
+}
+
+/* ================= 渲染与交互 ================= */
+function render(){
+  const app = $('#app');
+  $('#stage').classList.toggle('narrow', S.narrow);
+  app.innerHTML = railHTML() + `<div class="work">${topHTML()}<div class="body" id="body">${mainHTML()}</div></div>` + tenantMenuHTML() + overlayHTML();
+}
+function renderMain(){
+  const b = $('#body'), top = b ? b.scrollTop : 0;
+  if (!b) return render();
+  b.innerHTML = mainHTML(); b.scrollTop = top;
+}
+function renderOverlay(){
+  $$('.mask,.dmask,.drawer', $('#app')).forEach(n => n.remove());
+  $('#app').insertAdjacentHTML('beforeend', overlayHTML());
+}
+function flashNotice(text){
+  S.notice = text; renderMain();
+  clearTimeout(flashNotice.t);
+  flashNotice.t = setTimeout(() => { S.notice = ''; $$('.tb .notice').forEach(n => { if (!n.closest('[data-yamlsave]')) n.remove(); }); }, 2600);
+}
+function closeOverlay(){
+  S.overlay = null; S.modalErr = '';
+  LSPM.fields.forEach(f => DRAFT[f.p] = clone(SAVED[f.p]));
+  renderOverlay();
+}
+function setDraft(p, v, rerender){
+  DRAFT[p] = norm(v);
+  if (p === '@preset'){ const c = $('[data-cond="sww"]'); if (c) c.classList.toggle('open', DRAFT[p] === 'workspace_write'); }
+  if (p === 'features.memories'){ const c = $('[data-cond="mem"]'); if (c) c.classList.toggle('open', eff(FIELDS[p], DRAFT[p]) !== false); }
+  const g = FIELDS[p] && GROUPS[FIELDS[p].g];
+  if (g && TRAY[g.id] && TRAY[g.id].state !== 'saving') TRAY[g.id] = null;
+  if (rerender && g){ g.modal ? renderOverlay() : renderGroup(g.id); return; }
+  const row = $(`[data-row="${CSS.escape(p)}"]`);
+  if (row && FIELDS[p]) row.classList.toggle('dirty', fieldDirty(FIELDS[p]));
+  if (g && !g.modal) updateTray(g.id);
+}
+function commit(g){
+  g.fields.forEach(f => { SAVED[f.p] = clone(norm(DRAFT[f.p])); S.secEdit.delete(f.p); });
+}
+function save(gid){
+  const g = GROUPS[gid];
+  TRAY[gid] = {state:'saving'}; updateTray(gid);
+  setTimeout(() => {
+    const err = g.validate ? g.validate(DRAFT) : '';
+    if (err){ TRAY[gid] = {state:'error', msg:err}; updateTray(gid); return; }
+    commit(g);
+    TRAY[gid] = {state:'saved'};
+    renderMain();
+    if (FLASH.size) setTimeout(() => { FLASH.clear(); }, 1700);
+    setTimeout(() => { if (TRAY[gid] && TRAY[gid].state === 'saved'){ TRAY[gid] = null; updateTray(gid); } }, 2600);
+  }, 420);
+}
+
+document.addEventListener('click', e => {
+  if (S.tenant && !e.target.closest('.tmenu,.tenant')){
+    S.tenant = false; $$('.tmenu').forEach(n => n.remove());
+    const tb = $('.tenant'); if (tb) tb.setAttribute('aria-expanded', 'false');
+  }
+  const t = e.target.closest('button,[data-rd],[data-route],[data-tab],[data-maskclose],[data-close]');
+  if (!t) return;
+  const d = t.dataset;
+  if (d.maskclose !== undefined && e.target !== t) return;
+  if (d.scen){ applyScenario(d.scen); return; }
+  if (d.route){ S.route = d.route; S.tenant = false; S.overlay = null; render(); return; }
+  if (d.tab){ S.tab = d.tab; S.notice = ''; renderMain(); $('#body').scrollTop = 0; return; }
+  if (d.tenant !== undefined){ S.tenant = !S.tenant; render(); return; }
+  if (d.open){ S.overlay = d.open; S.agent = d.agent; S.tenant = false; S.modalErr = ''; render(); return; }
+  if (d.close !== undefined || d.maskclose !== undefined){ closeOverlay(); return; }
+  if (d.modalsave){
+    const g = GROUPS[d.modalsave], err = g.validate ? g.validate(DRAFT) : '';
+    if (err){ S.modalErr = err; renderOverlay(); return; }
+    commit(g); S.overlay = null; S.modalErr = '';
+    render(); flashNotice('已保存，下一轮生效');
+    return;
+  }
+  if (d.sw){ setDraft(d.sw, !eff(FIELDS[d.sw], DRAFT[d.sw]), true); return; }
+  if (d.secedit){ S.secEdit.add(d.secedit); renderGroup(FIELDS[d.secedit].g); const n = $(`[data-p="${CSS.escape(d.secedit)}"]`); if (n) n.focus(); return; }
+  if (d.seccancel){ S.secEdit.delete(d.seccancel); setDraft(d.seccancel, SAVED[d.seccancel], true); return; }
+  if (d.provkey !== undefined){ S.provKeyEdit = !S.provKeyEdit; renderOverlay(); return; }
+  if (d.candtoggle !== undefined){ S.cand = !S.cand; t.setAttribute('aria-pressed', S.cand); if (!S.cand && S.tab === 'session') S.tab = 'approval'; render(); return; }
+  if (d.swnow){
+    // A toolbar switch saves as it flips, like the subagent page's own switch.
+    const f = FIELDS[d.swnow], v = !eff(f, SAVED[d.swnow]);
+    SAVED[d.swnow] = DRAFT[d.swnow] = v; t.setAttribute('aria-checked', v);
+    flashNotice('已保存，下一轮生效'); return;
+  }
+  if (d.yamlsave !== undefined){
+    // Only a syntax error stops a save; an unsupported item is saved as written
+    // and ignored when the file is read.
+    const syn = syntaxYAML(S.yaml);
+    if (syn){ S.yamlErr = `第 ${syn.line + 1} 行${syn.msg}`; S.yamlNote = ''; renderMain(); return; }
+    S.yamlErr = ''; S.yamlSaved = S.yaml; S.yamlNote = '已保存，重启后生效'; renderMain(); return;
+  }
+  if (d.yamlreload !== undefined){ S.yaml = S.yamlSaved; S.yamlErr = ''; renderMain(); return; }
+  if (d.rd !== undefined){ setDraft(d.rd, d.v === '' ? undefined : d.v, true); return; }
+  if (d.acc){ const a = clone(DRAFT[d.acc]) || []; a[+d.i][1] = d.v; setDraft(d.acc, a, true); return; }
+  if (d.add){
+    const f = FIELDS[d.add], a = clone(DRAFT[d.add]) || [];
+    a.push(f.kind === 'access' ? ['', 'allow'] : f.kind === 'pairs' ? ['', ''] : '');
+    DRAFT[d.add] = a;
+    const g = GROUPS[f.g]; renderGroup(g.id); updateTray(g.id);
+    const ins = $$(`[data-row="${CSS.escape(d.add)}"] input[data-i="${a.length - 1}"]`); if (ins[0]) ins[0].focus();
+    return;
+  }
+  if (d.del){ const a = clone(DRAFT[d.del]) || []; a.splice(+d.i, 1); setDraft(d.del, a, true); return; }
+  if (d.reset){ setDraft(d.reset, undefined, true); return; }
+  // 恢复默认 only refills the field with the built-in text; the tray's 保存 writes it.
+  if (d.restore){ setDraft(d.restore, clone(FIELDS[d.restore].def), true); return; }
+  if (d.discard){ const g = GROUPS[d.discard]; g.fields.forEach(f => DRAFT[f.p] = clone(SAVED[f.p])); TRAY[g.id] = null; renderGroup(g.id); return; }
+  if (d.save){ save(d.save); return; }
+  if (d.copy !== undefined){ const tip = $('#tip'); tip.textContent = '已复制'; return; }
+});
+document.addEventListener('keydown', e => {
+  const t = e.target;
+  if ((e.key === 'Enter' || e.key === ' ') && t.dataset && t.dataset.rd !== undefined){ e.preventDefault(); t.click(); }
+  if (e.key === 'Enter' && t.dataset && t.dataset.tags){
+    e.preventDefault();
+    const v = t.value.trim(); if (!v) return;
+    const a = clone(DRAFT[t.dataset.tags]) || []; a.push(v);
+    setDraft(t.dataset.tags, a, true);
+    const n = $(`[data-tags="${CSS.escape(t.dataset.tags)}"]`); if (n) n.focus();
+  }
+  if (e.key === 'Escape' && S.overlay) closeOverlay();
+  else if (e.key === 'Escape' && S.tenant){ S.tenant = false; render(); }
+});
+document.addEventListener('input', e => {
+  if (e.target.dataset && e.target.dataset.yaml !== undefined){
+    const ta = e.target;
+    S.yaml = ta.value; S.yamlErr = ''; S.yamlNote = '';
+    ta.parentElement.querySelector('.ed-hl').innerHTML = hlYAML(S.yaml);
+    ta.closest('.ed').querySelector('.ed-gut').textContent = gutter(S.yaml);
+    const b = $('[data-yamlsave]'); if (b) b.disabled = S.yaml === S.yamlSaved;
+    $$('.content .mblock, .content .tb .notice').forEach(n => n.remove());
+    return;
+  }
+  const t = e.target, p = t.dataset && t.dataset.p;
+  if (!p || t.tagName === 'SELECT') return;
+  const f = FIELDS[p];
+  if (t.dataset.secret !== undefined){ setDraft(p, t.value === '' ? SAVED[p] : t.value, false); return; }
+  if (t.dataset.i !== undefined){
+    const a = clone(DRAFT[p]) || [];
+    if (t.dataset.c !== undefined) a[+t.dataset.i][+t.dataset.c] = t.value; else a[+t.dataset.i] = t.value;
+    DRAFT[p] = a; setDraft(p, a, false); return;
+  }
+  if (f.kind === 'num'){
+    const raw = t.value.replace(/[^\d]/g, ''); if (raw !== t.value) t.value = raw;
+    const v = raw === '' ? undefined : parseInt(raw, 10);
+    setDraft(p, v, false);
+    const row = t.closest('.row'), h = row.querySelector('.h'), box = t.closest('.numbox'), bad = badNum(f, v);
+    box.classList.toggle('bad', bad); h.classList.toggle('bad', bad); h.classList.remove('warn');
+    h.textContent = bad ? `范围 ${rangeTxt(f)}` : (f.hint ?? '');
+    return;
+  }
+  setDraft(p, t.value, false);
+  if (f && f.restore){ const btn = $(`[data-restore="${CSS.escape(p)}"]`); if (btn) btn.disabled = same(eff(f, DRAFT[p]), f.def); }
+});
+document.addEventListener('change', e => {
+  const t = e.target, p = t.dataset && t.dataset.p;
+  if (!p) return;
+  const f = FIELDS[p];
+  if (t.tagName === 'SELECT'){ setDraft(p, t.value, true); return; }
+  if (f && f.kind === 'num' && f.clamp && DRAFT[p] !== undefined && f.max !== undefined && DRAFT[p] > f.max){
+    t.value = f.max; setDraft(p, f.max, false);
+    const h = t.closest('.row').querySelector('.h');
+    h.textContent = `超过上限，按 ${f.max} 保存`; h.classList.add('warn');
+    setTimeout(() => { if (h.isConnected){ h.textContent = f.hint ?? ''; h.classList.remove('warn'); } }, 2600);
+  }
+});
+document.addEventListener('change', e => {
+  const t = e.target;
+  if (t.dataset && t.dataset.chk){
+    const o = clone(DRAFT[t.dataset.chk]) || {}; o[t.dataset.k] = t.checked;
+    setDraft(t.dataset.chk, o, false);
+  }
+});
+
+/* 统一的深色提示条 */
+const tip = $('#tip');
+function showTip(el){
+  const txt = el.dataset.tip; if (!txt) return;
+  const r = el.getBoundingClientRect();
+  if (el.classList.contains('cell') && el.scrollWidth <= el.clientWidth) return;
+  tip.textContent = txt; tip.hidden = false;
+  const w = tip.offsetWidth, x = Math.min(Math.max(r.left + r.width / 2, w / 2 + 8), innerWidth - w / 2 - 8);
+  tip.style.left = x + 'px'; tip.style.top = r.top + 'px';
+}
+document.addEventListener('mousemove', e => {
+  const ta = e.target.closest && e.target.closest('.ed-ta');
+  if (!ta) return;
+  const hit = $$('.y-x', ta.parentElement).find(sp => {
+    const r = sp.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top - 2 && e.clientY <= r.bottom + 5;
+  });
+  if (!hit){ tip.hidden = true; return; }
+  const r = hit.getBoundingClientRect();
+  tip.textContent = hit.dataset.msg; tip.hidden = false;
+  tip.style.left = Math.min(e.clientX, innerWidth - 40) + 'px'; tip.style.top = r.top + 'px';
+});
+document.addEventListener('mouseover', e => { const el = e.target.closest('[data-tip]'); if (el) showTip(el); else tip.hidden = true; });
+document.addEventListener('focusin', e => { const el = e.target.closest('[data-tip]'); if (el) showTip(el); });
+document.addEventListener('focusout', () => { tip.hidden = true; });
+document.addEventListener('scroll', () => { tip.hidden = true; }, true);
+
+/* ================= 场景 ================= */
+const SCEN = [
+  ['approval','审批与沙箱','审批与沙箱：审批预设是唯一的审批 / 沙箱配置项；选「默认」才展开沙箱可写工作区（额外可写目录、允许联网），点「完全访问」它会收起。'],
+  ['save','保存流程','记忆：一个「记忆功能」开关同时管使用、生成与专用工具；改动的行左侧出现竖条，组底展开保存条（取消 / 保存），保存后显示「已保存，下一轮生效」。图示记忆功能刚被关掉。'],
+  ['session','会话','会话：交接提示词图示为用户改过的文本，点「恢复默认」回显内置提示词（不落库），点保存才写入；整页（含上下文余量、护栏、词元估算）只存数据库。'],
+  ['net','联网工具','联网工具：联网搜索、网页抓取的 Key 只露后四位，点「更换」输入新值。'],
+  ['lsp2','语言服务器参数','语言服务器参数：全部十项只存数据库。'],
+  ['lsp','语言服务器','语言服务器：总开关在工具栏右侧，拨动即保存；「参数」弹窗只剩推荐安装、编辑后诊断两项，其余在 forebrain.yaml。'],
+  ['skills','共享技能','共享技能：技能推荐的开关挪到工具栏右侧，「功能开关」标签因此取消。'],
+  ['config','配置文件','配置文件：编辑磁盘上的 forebrain.yaml，保存后提示「已保存，重启后生效」。文件里只放网关监听地址、登录令牌与 ChatGPT 登录文件路径。'],
+  ['configerr','不存在的配置项','配置文件：文件不支持的项一律画红色波浪线，悬停提示「不存在」——已取消的（审批策略）、页面在管的（记忆的检索条数）、拼错的（gateway_url）都算；照常保存，读取时静默忽略。'],
+  ['configsyntax','YAML 语法错误','配置文件：只有 YAML 语法错误才拒绝保存——那一行同样画波浪线、悬停显示原因，保存时在上方说明第几行；文件不动。'],
+  ['providers','模型服务','菜单栏 → 模型服务（主代理级）：API Key 列只显示后四位。'],
+  ['providers2','模型服务弹窗','编辑模型服务：API Key 像密码一样遮住、只露后四位；点「更换」变成密码输入框，留空即不改。'],
+  ['mcp','MCP 凭据','菜单栏 → MCP（主代理级）：Authorization 请求头里的 Bearer token 与 OAuth 的客户端密钥、访问令牌、刷新令牌都遮住、只露后四位，点「更换」输入新值。'],
+  ['agent','编辑主代理','菜单栏主代理下拉：每行加铅笔，弹窗改显示名与描述（点铅笔打开）。main 与当前主代理仍不能删。'],
+  ['narrow','窄屏','窄屏 390px：设置子导航变成横向标签条，字段改为上下排列。'],
+  ['nosandbox','无沙箱','无沙箱环境：设置里「审批与沙箱」标签整个不出现，按完全访问（等同 YOLO）运行。'],
+  ['chat','对话输入框','有沙箱：对话输入框里的审批预设选择框可选「默认」「完全访问」（保持现状）。技能工坊的对话输入框相同。'],
+  ['batchproj','跑批项目设置','跑批项目空间 → 设置：「启用沙箱」开关，新建项目时取全局默认值（设置 → 审批与沙箱 → 跑批项目 → 启用沙箱），可单独关闭；关闭后该项目的任务按完全访问运行。跑批项目不显示项目信任度。无沙箱环境不显示此开关。'],
+  ['nosandboxchat','无沙箱·输入框','无沙箱：对话输入框保留审批预设选择框，固定选中「完全访问」、置灰、不能改。技能工坊的对话输入框相同。'],
+];
+function applyScenario(k){
+  resetData();
+  Object.assign(S, {route:'settings', overlay:null, tenant:false, narrow:false, nosandbox:false, notice:'', modalErr:'', provKeyEdit:false});
+  S.secEdit = new Set();
+  if (!S.cand && k === 'session'){ S.cand = true; const tg = $('[data-candtoggle]'); if (tg) tg.setAttribute('aria-pressed', 'true'); }
+  if (k === 'approval') S.tab = 'approval';
+  if (k === 'save'){ S.tab = 'memory'; DRAFT['features.memories'] = false; }
+  if (k === 'session'){ S.tab = 'session'; SAVED['compact.prompt'] = DRAFT['compact.prompt'] = '交接时用中文写摘要：目标、已完成、未完成、关键文件路径与下一步。'; }
+  if (k === 'net') S.tab = 'net';
+  if (k === 'lsp') S.tab = 'lsp';
+  if (k === 'lsp2'){ S.tab = 'lsp'; S.overlay = 'lsp'; }
+  if (k === 'skills') S.tab = 'skills';
+  if (k === 'config') S.tab = 'config';
+  if (k === 'configerr'){ S.tab = 'config'; S.yaml = YAML_INIT + '\napproval_policy: never\n\nmemories:\n  search_top_k: 8\n\ngateway_url: https://forebrain.example.com\n'; }
+  if (k === 'configsyntax'){ S.tab = 'config'; S.yaml = YAML_INIT.replace('    token: fbg_2b7d9c41e8a0f3561d2c9a7e', '    token fbg_2b7d9c41e8a0f3561d2c9a7e'); const syn = syntaxYAML(S.yaml); S.yamlErr = `第 ${syn.line + 1} 行${syn.msg}`; }
+  if (k === 'providers') S.route = 'providers';
+  if (k === 'providers2'){ S.route = 'providers'; S.overlay = 'provider'; }
+  if (k === 'mcp'){ S.route = 'mcp'; S.overlay = 'mcp'; }
+  if (k === 'agent'){ S.route = 'settings'; S.tab = 'approval'; S.tenant = true; }
+  if (k === 'agent2'){ S.overlay = 'agent'; S.agent = 'research'; }
+  if (k === 'nosandbox'){ S.nosandbox = true; S.tab = 'appearance'; }
+  if (k === 'chat'){ S.route = 'chat'; }
+  if (k === 'batchproj'){ S.route = 'projects'; }
+  if (k === 'nosandboxchat'){ S.nosandbox = true; S.route = 'chat'; }
+  if (k === 'narrow'){ S.narrow = true; S.tab = 'memory'; DRAFT['features.memories'] = false; }
+  const base = k.replace(/2$/, '');
+  $$('#scen button').forEach(b => b.setAttribute('aria-pressed', b.dataset.scen === base));
+  const s = SCEN.find(x => x[0] === base);
+  $('#cap').textContent = s ? s[2] : '';
+  render();
+}
+$('#scen').innerHTML = SCEN.map(([k, l], i) => `${i === 11 ? '<span class="sep"></span>' : ''}${i === 15 ? '<span class="sep"></span>' : ''}<button type="button" data-scen="${k}" aria-pressed="false">${l}</button>`).join('');
+const h = (location.hash.match(/s=([\w]+)/) || [])[1];
+if (/c=0/.test(location.hash)){ S.cand = false; $('[data-candtoggle]').setAttribute('aria-pressed', 'false'); }
+applyScenario(h || 'approval');
+</script>
+</body>
+</html>

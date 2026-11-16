@@ -195,12 +195,24 @@ describe('SubagentTab', () => {
     expect(wrapper.emitted('cancel-auto-continue')).toBeUndefined()
   })
 
-  it('draws its own /context report when one is open', () => {
+  it('draws its own full context report when one is open', () => {
     const closed = mountTab().wrapper
     expect(closed.find('context-debug-panel-stub').exists()).toBe(false)
 
     const open = mountTab({ context: { data: null, loading: true } }).wrapper
     expect(open.find('context-debug-panel-stub').exists()).toBe(true)
+  })
+
+  it('opens the full context report from the pill, running or idle', async () => {
+    const running = mountTab().wrapper
+    running.findComponent(SubagentRunPill).vm.$emit('view-context')
+    expect(running.emitted('refresh-context')).toHaveLength(1)
+    running.unmount()
+
+    const idle = mountTab({ record: record({ status: 'done' }) }).wrapper
+    idle.findComponent(SubagentRunPill).vm.$emit('view-context')
+    expect(idle.emitted('refresh-context')).toHaveLength(1)
+    idle.unmount()
   })
 
   it('draws no composer on a read-only page, only the bar that reads the run', () => {

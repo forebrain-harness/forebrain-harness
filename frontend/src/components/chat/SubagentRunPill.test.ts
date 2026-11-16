@@ -9,7 +9,8 @@ import SubagentRunPill from './SubagentRunPill.vue'
 /**
  * The pill in a subagent's composer bar: its context ring with the percentage
  * always written, the model it was dispatched on, the effort it was given, and
- * — opened — the whole reading in a card with no control in it.
+ * — opened — the whole reading in a card whose one control opens the subagent's
+ * full context report.
  */
 describe('SubagentRunPill', () => {
   beforeAll(() => setLocale('en'))
@@ -67,11 +68,21 @@ describe('SubagentRunPill', () => {
     expect(wrapper.get('[data-testid="subagent-context-window"]').text()).toBe('1M')
     expect(card.text()).toContain('12.4k in · 900 out')
     expect(card.text()).toContain('Model and reasoning are fixed at dispatch')
-    // Read-only: the card offers nothing to press.
-    expect(card.findAll('button, a')).toHaveLength(0)
+    // The reading is read-only; the card's one control opens the full context.
+    const buttons = card.findAll('button, a')
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0].attributes('data-testid')).toBe('subagent-view-context')
   })
 
-  it('warns once the window is nearly full, and says how to compact it', async () => {
+  it('opens the full context report from the card, then closes the card', async () => {
+    const wrapper = mountPill()
+    await wrapper.get('[data-testid="subagent-run-pill"]').trigger('click')
+    await wrapper.get('[data-testid="subagent-view-context"]').trigger('click')
+    expect(wrapper.emitted('view-context')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="subagent-run-card"]').exists()).toBe(false)
+  })
+
+  it('warns once the window is nearly full', async () => {
     const wrapper = mountPill({
       record: record({
         ...dispatched,
@@ -83,7 +94,7 @@ describe('SubagentRunPill', () => {
     expect(wrapper.get('.subagent-run-pill').classes()).toContain('is-warn')
 
     await wrapper.get('[data-testid="subagent-run-pill"]').trigger('click')
-    expect(wrapper.get('[data-testid="subagent-run-near-full"]').text()).toContain('/compact')
+    expect(wrapper.get('[data-testid="subagent-run-near-full"]').text()).toContain('Context is nearly full')
   })
 
   it('says the model alone when no budget ever arrived', () => {

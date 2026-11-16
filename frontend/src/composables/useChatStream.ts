@@ -6082,6 +6082,62 @@ export function useChatStream() {
   const lastSendEpochBySession = new Map<string, number>()
   let sendEpoch = 0
 
+  // Mode switching is its own gateway op, not a slash command: the web chat
+  // reaches plan/agent mode through the ModeChip, which sends switch_mode and
+  // reads the mode_changed reply. A short-lived socket carries the one op so a
+  // mode change never starts a run or disturbs the observer's event stream.
+  async function switchMode(next: SessionMode, options?: { sessionId?: string }): Promise<void> {
+    const sid = String(options?.sessionId ?? sessionId.value ?? '').trim()
+    if (!sid || typeof WebSocket === 'undefined') return
+    const requestId = `mode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const wsUrl = buildBrowserForebrainGatewayChatWsUrl()
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl)
+      let settled = false
+      const finish = (err?: Error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try { ws.close() } catch { /* noop */ }
+        if (err) reject(err)
+        else resolve()
+      }
+      const timer = setTimeout(() => finish(new Error('Mode switch timed out')), 10000)
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          op: 'switch_mode',
+          protocol_version: FOREBRAIN_GATEWAY_WS_PROTOCOL_VERSION,
+          request_id: requestId,
+          session_id: sid,
+          mode: next,
+        }))
+      }
+      ws.onerror = () => finish(new Error('WebSocket error'))
+      ws.onclose = () => finish()
+      ws.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(String(event.data)) as Record<string, unknown>
+          const hello = parseForebrainGatewayServerHello(raw)
+          if (hello?.protocolVersion && hello.protocolVersion !== FOREBRAIN_GATEWAY_WS_PROTOCOL_VERSION) {
+            finish(new Error(`Gateway protocol mismatch (client ${FOREBRAIN_GATEWAY_WS_PROTOCOL_VERSION}, server ${hello.protocolVersion})`))
+            return
+          }
+          const op = String(raw.op ?? '').trim()
+          if (op === 'mode_changed') {
+            const data = (raw.data && typeof raw.data === 'object') ? raw.data as Record<string, unknown> : raw
+            mode.value = normalizeMode(data.mode)
+            modePhase.value = String(data.phase ?? '').trim()
+            finish()
+          } else if (op === 'run_error') {
+            finish(new Error(String(raw.error ?? 'Mode switch refused')))
+          }
+        } catch {
+          // A malformed optional frame must not tear down the switch.
+        }
+      }
+    })
+  }
+
   async function send(userMessage: string, options?: SendOptions): Promise<void> {
     setError(null)
     // Sending moves the conversation on without the continuation. The runtime
@@ -7069,6 +7125,7 @@ export function useChatStream() {
     contextSignals,
     pendingActionsVersion,
     send,
+    switchMode,
     editLastQueuedMessage,
     sendPendingSteersAfterInterrupt,
     cancel,

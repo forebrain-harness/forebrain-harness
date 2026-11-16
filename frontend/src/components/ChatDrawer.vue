@@ -56,24 +56,44 @@
       </Select>
 
       <div class="chat-drawer-section">{{ t('chatDrawer.sessions') }}</div>
+      <p v-if="renameError" class="chat-drawer-hint chat-drawer-error" data-testid="drawer-rename-error">{{ t('chatDrawer.renameFailed') }}: {{ renameError }}</p>
       <div class="chat-drawer-list">
         <p v-if="loading" class="chat-drawer-hint">{{ t('chatDrawer.loading') }}</p>
         <p v-else-if="error" class="chat-drawer-hint chat-drawer-error">{{ error }}</p>
         <p v-else-if="!sessions.length && (query.trim() || projectFilter)" class="chat-drawer-hint">{{ t('chatDrawer.noMatch') }}</p>
         <p v-else-if="!sessions.length" class="chat-drawer-hint">{{ t('chatDrawer.empty') }}</p>
         <template v-else>
-          <button
+          <div
             v-for="row in sessions"
             :key="row.id"
-            type="button"
             class="chat-drawer-row"
             :class="{ 'chat-drawer-row--active': row.id === activeSessionId }"
-            @click="emit('select', row.id)"
+            data-testid="drawer-session-row"
           >
-            <span class="chat-drawer-row-main">
-              <span class="chat-drawer-row-title">{{ row.title }}</span>
-              <span v-if="row.projectName" class="chat-drawer-row-project">{{ row.projectName }}</span>
-            </span>
+            <input
+              v-if="renamingId === row.id"
+              :ref="setRenameInputRef"
+              v-model="renameDraft"
+              class="chat-drawer-rename-input"
+              type="text"
+              :aria-label="t('chatDrawer.rename')"
+              data-testid="drawer-rename-input"
+              @keydown.enter.prevent="commitRename(row.id)"
+              @keydown.escape.prevent="cancelRename"
+              @blur="commitRename(row.id)"
+              @click.stop
+            />
+            <button
+              v-else
+              type="button"
+              class="chat-drawer-row-select"
+              @click="emit('select', row.id)"
+            >
+              <span class="chat-drawer-row-main">
+                <span class="chat-drawer-row-title">{{ row.title }}</span>
+                <span v-if="row.projectName" class="chat-drawer-row-project">{{ row.projectName }}</span>
+              </span>
+            </button>
             <span
               v-if="beatOf(row.id)"
               class="chat-drawer-heart"
@@ -85,7 +105,17 @@
             >
               <Activity class="size-[13px]" aria-hidden="true" />
             </span>
-          </button>
+            <button
+              type="button"
+              class="chat-drawer-rename"
+              :aria-label="t('chatDrawer.rename')"
+              v-tip:top="t('chatDrawer.rename')"
+              data-testid="drawer-rename-button"
+              @click.stop="startRename(row)"
+            >
+              <Pencil class="size-[13px]" aria-hidden="true" />
+            </button>
+          </div>
           <button
             v-if="hasMore"
             type="button"
@@ -107,12 +137,12 @@
 
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
-import { Activity, Plus, Search, X } from 'lucide-vue-next'
+import { Activity, Pencil, Plus, Search, X } from 'lucide-vue-next'
 import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@repo/shadcn-vue/components/ui/select'
-import { useChatSessions } from '@/composables/useChatSessions'
+import { useChatSessions, type ChatSessionItem } from '@/composables/useChatSessions'
 import { useHeartbeats } from '@/composables/useHeartbeats'
-import { forebrainApi } from '@/lib/api'
+import { forebrainApi, getErrorMessage } from '@/lib/api'
 import { EMPTY_CHOICE, fromChoice, toChoice } from '@/lib/selectValue'
 import { useI18n } from '@/locales'
 
@@ -135,12 +165,57 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { sessions, loading, loadingMore, error, hasMore, projectFilter, fetchSessions, loadMore } = useChatSessions()
+const { sessions, loading, loadingMore, error, hasMore, projectFilter, fetchSessions, loadMore, renameSession } = useChatSessions()
 const { forSession: beatOf, refresh: refreshHeartbeats } = useHeartbeats()
 
 const query = ref('')
 const drawerRef = ref<HTMLElement | null>(null)
 let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+// Inline rename: the row's edit icon swaps its title for a field. Enter or
+// blur saves, Escape cancels; the list keeps the old title until the server
+// agrees, so a failed rename never leaves a title the agent does not have.
+const renamingId = ref<string | null>(null)
+const renameDraft = ref('')
+const renameInputRef = ref<HTMLInputElement | null>(null)
+const renameError = ref<string | null>(null)
+
+// A string ref inside v-for collects an array; only one row renames at a time,
+// so a function ref keeps the single live field instead.
+function setRenameInputRef(el: unknown) {
+  renameInputRef.value = (el as HTMLInputElement | null) ?? null
+}
+
+function startRename(row: ChatSessionItem) {
+  renameError.value = null
+  renamingId.value = row.id
+  renameDraft.value = row.title ?? ''
+  void nextTick(() => {
+    renameInputRef.value?.focus()
+    renameInputRef.value?.select()
+  })
+}
+
+function cancelRename() {
+  renamingId.value = null
+  renameDraft.value = ''
+}
+
+async function commitRename(id: string) {
+  // Enter commits and then the field unmounts; the blur that follows must not
+  // save a second time.
+  if (renamingId.value !== id) return
+  const title = renameDraft.value.trim()
+  const previous = sessions.value.find((row) => row.id === id)?.title
+  renamingId.value = null
+  renameDraft.value = ''
+  if (!title || title === previous) return
+  try {
+    await renameSession(id, title)
+  } catch (cause) {
+    renameError.value = getErrorMessage(cause)
+  }
+}
 
 // The search is the server's — the drawer holds one loaded page of the
 // list, and a local filter could only search what it happens to show. So
@@ -366,6 +441,39 @@ watch(() => props.open, async (open) => {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+.chat-drawer-row-select {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  text-align: left;
+  background: transparent;
+  color: inherit;
+}
+.chat-drawer-rename-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--forebrain-divider-strong);
+  border-radius: 6px;
+  padding: 3px 6px;
+  background: var(--forebrain-surface);
+  font-size: 12.5px;
+  color: var(--forebrain-text);
+  outline: none;
+}
+.chat-drawer-rename {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--forebrain-muted-text);
+}
+.chat-drawer-rename:hover {
+  background: var(--forebrain-button-alt-bg);
+  color: var(--forebrain-text);
 }
 .chat-drawer-row-title {
   min-width: 0;

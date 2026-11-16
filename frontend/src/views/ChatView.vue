@@ -122,8 +122,8 @@
                 <template v-for="(msg, idx) in messages" :key="msg.id ?? idx">
                   <!-- A message the session model could not take: it stays in
                        the thread and only the request was withheld, so the
-                       notice under it names the model and points at the way
-                       out it shares with the terminal — /model. -->
+                       notice under it names the model and offers the model
+                       picker as the way out. -->
                   <div
                     v-if="msg.role === 'notice' && msg.imageRefusal"
                     class="forebrain-err-block"
@@ -736,7 +736,7 @@
         />
       </SubagentDrawer>
       <!-- The agents on this machine (plan 200 §3): the same drawer the
-           subagents use, opened from the top bar's identity blocks or /peers. -->
+           subagents use, opened from the top bar's identity blocks. -->
       <PeerDrawer
         v-if="peerDrawerOpen"
         :held="heldPeers"
@@ -1373,10 +1373,11 @@ function insertPlusCommand(text: string) {
   promptRef.value?.restoreSubmission({ text, attachments: [], mentionImages: [] })
 }
 
-function runStarter(action: string) {  if (action === '@plan') {
-    // Mode selection is web plan 016; until then the starter types the plan
-    // command into the composer.
-    promptRef.value?.restoreSubmission({ text: '/plan ', attachments: [], mentionImages: [] })
+function runStarter(action: string) {
+  if (action === '@plan') {
+    // The Plan starter switches the conversation into Plan mode through the
+    // gateway's switch_mode op, the same path the mode chip uses.
+    void selectMode('plan')
     return
   }
   if (action === '@workshop') {
@@ -1692,6 +1693,7 @@ const {
   takeReturnedNotice,
   takeReturnedNoticeCode,
   send,
+  switchMode,
   choose,
   editLastQueuedMessage,
   cancel,
@@ -1861,7 +1863,8 @@ function imageRefusalKind(msg: { imageRefusal?: { kind?: 'unsupported' | 'reject
  * The sentence that goes with that kind: the model's catalog entry says it takes
  * no images, the provider refused one and the turn went on without it, or this
  * conversation already paid for that refusal and the turn was withheld. Three
- * facts, three sentences, one block — and one way out of all three, /model.
+ * facts, three sentences, one block — and one way out of all three, the model
+ * picker.
  */
 function imageRefusalSentence(msg: { imageRefusal?: { kind?: 'unsupported' | 'rejected' | 'remembered' } }): 'chat.imageRefusedLine' | 'chat.imageRejectedNow' | 'chat.imageRejectedRemembered' {
   switch (imageRefusalKind(msg)) {
@@ -2226,7 +2229,7 @@ const subagentSlashRecords = ref<SlashCommandRecord[]>([])
 /** The table is the same for every subagent, so it is fetched once per page. */
 let subagentSlashLoaded = false
 
-// /context for a subagent's view, drawn with the conversation's own panel.
+// The subagent's full context report, drawn with the conversation's own panel.
 const subagentContextTarget = ref('')
 const subagentContextDebug = ref<SessionContextDebug | null>(null)
 const subagentContextLoading = ref(false)
@@ -2498,7 +2501,7 @@ watch(sessionId, (sid, previousSid) => {
   // the tabs close with it rather than showing another conversation's file.
   planTabs.value = []
   planActive.value = ''
-  // One conversation's notices and /context report are not the next one's.
+  // One conversation's notices and context report are not the next one's.
   subagentNotices.value = {}
   subagentContextTarget.value = ''
   subagentContextDebug.value = null
@@ -2691,29 +2694,18 @@ async function stopSubagent(agentId: string) {
   }
 }
 
-function submitPlanCommand(cmd: string) {
-  if (isStreaming.value) return
-  send(cmd, {
-    sessionId: sessionId.value ?? undefined,
-  })
-}
-
-function enterPlanMode() {
-  submitPlanCommand('/plan')
-}
-
-function exitPlanMode() {
-  submitPlanCommand('/plan mode off')
-}
-
-function selectMode(next: string) {
-  if (next === 'agent') {
-    if (mode.value !== 'agent') exitPlanMode()
-    return
-  }
-  if (next === 'plan') {
-    if (mode.value !== 'plan') enterPlanMode()
-    return
+async function selectMode(next: string) {
+  const target = next === 'plan' ? 'plan' : next === 'agent' ? 'agent' : null
+  if (!target || mode.value === target || isStreaming.value) return
+  // Mode belongs to a conversation: a brand-new chat opens one first, the same
+  // way a send does, so the switch has a session to write into. The web chat
+  // switches mode through the gateway's switch_mode op, not a slash command.
+  const sid = await ensureSessionForSend()
+  if (!sid) return
+  try {
+    await switchMode(target, { sessionId: sid })
+  } catch (cause) {
+    composerNotice.value = { title: t('chat.requestFailed'), detail: getErrorMessage(cause) }
   }
 }
 
@@ -2892,11 +2884,11 @@ function isAllowedAttachmentType(mediaType: string, filename: string): boolean {
 
 /**
  * Sends what the composer submitted in a subagent's own view to that subagent.
- * Everything typed there belongs to the subagent: ordinary text runs its next
- * execution, a skill command is sent to it, /context acts on it, a command that
- * acts on the conversation runs there, and the ones hidden there answer with one
- * sentence — plan 007's D4, in this surface. /compact is one of the hidden ones:
- * it compacts the conversation, never a subagent (plan 142).
+ * Only ordinary text and skill commands belong to the subagent: text runs its
+ * next execution and a skill command is sent to it with the skill activated
+ * (plan 007's D4). Every built-in command — /compact, /context and the rest —
+ * belongs to the conversation, not the subagent, so this view refuses it with
+ * one sentence; the conversation's own composer and panels are where those run.
  */
 async function handleSubagentSubmit(agentId: string, message: { text: string; files?: unknown[] }) {
   const id = String(agentId ?? '').trim()
@@ -2916,18 +2908,10 @@ async function handleSubagentSubmit(agentId: string, message: { text: string; fi
   }
   if (text.startsWith('/')) {
     const name = slashCommandName(text)
-    if (name === 'context') {
-      await openSubagentContext(id)
-      return
-    }
+    // The subagent view's table is skills only: every built-in is hidden here
+    // because it belongs to the conversation, so a name the table does not know
+    // is refused with the same sentence the gateway answers.
     const record = subagentSlashRecords.value.find((row) => String(row.name ?? '').toLowerCase() === name)
-    if (record && record.category !== 'skill') {
-      // Runs exactly as it does in the conversation's view: the reply lands
-      // there, where the command acted.
-      nextSubmissionDisposition.value = 'steer'
-      await send(text, { sessionId: sessionId.value ?? undefined, activeInputDisposition: undefined })
-      return
-    }
     if (!record) {
       refuse(t('chat.subagentViewCommand'))
       return
@@ -2943,7 +2927,7 @@ async function handleSubagentSubmit(agentId: string, message: { text: string; fi
   await sendToSubagent(id, submission)
 }
 
-/** /context in a subagent's view, drawn with the conversation's own panel. */
+/** Opens a subagent's full context report, drawn with the conversation's own panel. */
 async function openSubagentContext(agentId: string) {
   const id = String(agentId ?? '').trim()
   if (!id) return
@@ -2971,18 +2955,6 @@ async function handleSubmit(message: { text: string; files?: { url?: string; fil
   // A send that goes through retires the busy notice: whatever ran on the
   // other end has ended, and this turn is the conversation's again.
   busyNotice.value = ''
-  if (text === '/memories' && files.length === 0 && !attachedByComposer && !isStreaming.value) {
-    await router.push({ name: 'memories' })
-    return
-  }
-  // /peers opens this surface's own panel — the drawer of agents on this
-  // machine — the way /memories opens the memories page (plan 200 §3). The
-  // command is the terminal's too, where it opens the picker; a surface owns
-  // its own panel, so the line is answered here rather than sent.
-  if (text === '/peers' && files.length === 0 && !attachedByComposer) {
-    togglePeerDrawer()
-    return
-  }
   // Everything the composer attached leaves it with this message at once, so
   // an image picked while the files upload belongs to the next one.
   await waitForPendingAttachUpload()

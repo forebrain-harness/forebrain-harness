@@ -45,7 +45,7 @@ func TestParseSlashCommandRejectsSkillsInlineArgs(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("---\nname: demo\ndescription: test\n---\n\nSkill body"), 0o600))
 
 	s := &Server{Home: home}
-	res := parseSlashCommand(s, "s1", "webchat", "/skills run demo follow up")
+	res := parseSlashCommand(s, "s1", "tui", "/skills run demo follow up")
 	require.True(t, res.Handled)
 	require.False(t, res.ShouldContinueRun)
 	require.Contains(t, res.Reply, "does not accept inline arguments")
@@ -306,7 +306,7 @@ body`), 0o600))
 	require.Contains(t, rr.Body.String(), `"enabled":true`)
 }
 
-func TestParseSlashCommandNewSwitchesWebchatSession(t *testing.T) {
+func TestParseSlashCommandNewSwitchesTuiSession(t *testing.T) {
 	home := t.TempDir()
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
 	require.NoError(t, err)
@@ -316,7 +316,7 @@ func TestParseSlashCommandNewSwitchesWebchatSession(t *testing.T) {
 		Home:     home,
 		Sessions: state.NewSessionStore(db, "main"),
 	}
-	res := parseSlashCommand(s, "s1", "webchat", "/new")
+	res := parseSlashCommand(s, "s1", "tui", "/new")
 	require.True(t, res.Handled)
 	require.True(t, res.SessionChanged)
 	require.True(t, res.SessionSwitched)
@@ -341,7 +341,7 @@ func TestParseSlashCommandNewDoesNotCopyPriorTranscriptIntoNewSession(t *testing
 		Home:     home,
 		Sessions: sessions,
 	}
-	res := parseSlashCommand(s, "s1", "webchat", "/new")
+	res := parseSlashCommand(s, "s1", "tui", "/new")
 	require.True(t, res.Handled)
 	require.True(t, res.SessionSwitched)
 	require.NotEmpty(t, res.SessionID)
@@ -352,7 +352,7 @@ func TestParseSlashCommandNewDoesNotCopyPriorTranscriptIntoNewSession(t *testing
 	require.Len(t, turns, 0)
 }
 
-func TestHandleChatWSNewOnlyBindsFreshSession(t *testing.T) {
+func TestHandleChatWSNewIsUnavailableOnWebchat(t *testing.T) {
 	home := t.TempDir()
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
 	require.NoError(t, err)
@@ -374,6 +374,8 @@ func TestHandleChatWSNewOnlyBindsFreshSession(t *testing.T) {
 	require.NoError(t, conn.ReadJSON(&connected))
 	require.Equal(t, "connected", connected.Op)
 
+	// /new is terminal-only: the web chat manages sessions through its own UI,
+	// so the socket refuses it without switching sessions or starting a run.
 	require.NoError(t, conn.WriteJSON(wsClientMsg{
 		Op:        "start_run",
 		RequestID: "req-new",
@@ -386,20 +388,17 @@ func TestHandleChatWSNewOnlyBindsFreshSession(t *testing.T) {
 		var msg wsServerMsg
 		require.NoError(t, conn.ReadJSON(&msg))
 		got = append(got, msg)
-		if msg.Op == "session_bound" && msg.RequestID == "req-new" {
+		if msg.Op == "slash_reply" && msg.RequestID == "req-new" {
 			break
 		}
 	}
-	require.Len(t, got, 1, "unexpected messages before session_bound: %s", mustJSON(t, got))
+	require.Len(t, got, 2, "a refused slash must emit only session_bound + slash_reply, got %s", mustJSON(t, got))
 	require.Equal(t, "session_bound", got[0].Op)
 	require.Equal(t, "req-new", got[0].RequestID)
-	require.NotEmpty(t, got[0].SessionID)
-	require.NotEqual(t, "old-session", got[0].SessionID)
-
-	require.NoError(t, conn.SetReadDeadline(time.Now().Add(100*time.Millisecond)))
-	var extra wsServerMsg
-	err = conn.ReadJSON(&extra)
-	require.Error(t, err, "session switch slash must not emit synthetic run events, got %s", mustJSON(t, extra))
+	require.Equal(t, "old-session", got[0].SessionID, "the web chat must not switch sessions for /new")
+	require.Equal(t, "slash_reply", got[1].Op)
+	require.Equal(t, "req-new", got[1].RequestID)
+	require.Contains(t, got[1].Text, "/new is unavailable in the web chat.")
 }
 
 // TestHandleChatWSSlashReplyIsUIOnly pins R-model on the web surface: a
@@ -502,13 +501,13 @@ func TestParseSlashCommandBlocksLifecycleSlashDuringRun(t *testing.T) {
 		Home:     home,
 		Sessions: state.NewSessionStore(db, "main"),
 	}
-	res := parseSlashCommandWithOptions(s, "s1", "webchat", "/new", turn.Context{DuringRun: true}, nil)
+	res := parseSlashCommandWithOptions(s, "s1", "tui", "/new", turn.Context{DuringRun: true}, nil)
 	require.True(t, res.Handled)
 	require.Contains(t, res.Reply, "/new is unavailable while a task is running.")
 	require.False(t, res.SessionSwitched)
 }
 
-func TestParseSlashCommandForkSwitchesWebchatSession(t *testing.T) {
+func TestParseSlashCommandForkSwitchesTuiSession(t *testing.T) {
 	home := t.TempDir()
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
 	require.NoError(t, err)
@@ -540,7 +539,7 @@ func TestParseSlashCommandForkSwitchesWebchatSession(t *testing.T) {
 		Env:      env,
 		Sessions: sessions,
 	}
-	res := parseSlashCommand(s, "parent", "webchat", "/fork")
+	res := parseSlashCommand(s, "parent", "tui", "/fork")
 	require.True(t, res.Handled)
 	require.True(t, res.SessionChanged)
 	require.True(t, res.SessionSwitched)
