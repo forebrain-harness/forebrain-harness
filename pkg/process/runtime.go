@@ -101,10 +101,10 @@ func resolveUncachedWithHooks(hooks StartupHooks) (Context, error) {
 	}
 	// Initialize the global model catalog so that provider validation and
 	// token-limit lookups are available to all downstream code: the catalog is
-	// the models.json this build ships beside its binary (owner 2026-11-09),
-	// so every process answers from the same data and no start waits on the
-	// network.
-	if err := llm.InitGlobalCatalog(); err != nil {
+	// the models.json this build ships beside its binary plus the rows this
+	// home's models.json adds to it (owner 2026-11-16), so every process
+	// answers from the same shipped data and no start waits on the network.
+	if err := llm.InitGlobalCatalog(home); err != nil {
 		slog.Warn("failed to initialize global model catalog", "err", err)
 	}
 	if err := runStartupHook(StartupMergeConfigEnv, hooks); err != nil {

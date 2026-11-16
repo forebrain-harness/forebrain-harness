@@ -37,10 +37,11 @@ func NewRuntimeHook(params HookParams) *Hook {
 	hook.RunRT = params.RunRT
 	hook.SkillHub = params.SkillHub
 	if params.Cfg != nil && params.PrimaryModel != nil {
-		// The catalog is the one this build ships beside its binary; a build
+		// The catalog is the one this build ships beside its binary plus the
+		// rows this home's models.json adds to it (owner 2026-11-16); a build
 		// that carries none leaves ModelLimitsProvider nil, and the assembly
 		// then reads the windows as unknown rather than failing.
-		if cat, err := llm.Resolve(); err == nil {
+		if cat, err := llm.ResolveFor(params.Home); err == nil {
 			hook.ModelLimitsProvider = func(sessionID string) (llm.Limits, bool) {
 				// The session's row wins over the catalog: a model page's
 				// context window applies to the row it was set on, and two rows

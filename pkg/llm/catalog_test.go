@@ -212,23 +212,21 @@ func writeShippedCatalog(t *testing.T, content []byte) string {
 	return filepath.Join(dir, "models.json")
 }
 
-// The catalog is the one this build ships beside its binary. A file of the same
-// name in the forebrain home is not a data source any more: it is not read,
-// nothing merges over the shipped row, and the file is left byte for byte alone
-// (owner 2026-11-09).
-func TestCatalogReadsTheShippedFileOnly(t *testing.T) {
+// The shipped catalog answers every key it names, and a home file of the same
+// name only adds the keys the shipped file lacks (owner 2026-11-16): a row the
+// build carries keeps the build's values, a model only the home knows joins the
+// lookup, and the home file is left byte for byte alone.
+func TestCatalogSupplementAddsOnlyWhatTheShippedFileLacks(t *testing.T) {
 	writeShippedCatalog(t, []byte(`{"openai/gpt-5":{"id":"openai/gpt-5","attachment":false,"limit":{"context":400000}}}`))
 	restoreGlobalCatalog(t)
 
-	// The home copy exists before the catalog is loaded: initializing must
-	// ignore it, and nothing may write it back.
 	home := t.TempDir()
-	homeCopy := []byte(`{"openai/gpt-5":{"attachment":true},"local/private-model":{"id":"local/private-model","limit":{"context":8192}}}`)
+	homeCopy := []byte(`{"openai/gpt-5":{"attachment":true,"limit":{"context":1000}},"local/private-model":{"id":"local/private-model","limit":{"context":8192}}}`)
 	homePath := filepath.Join(home, "models.json")
 	if err := os.WriteFile(homePath, homeCopy, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := InitGlobalCatalog(); err != nil {
+	if err := InitGlobalCatalog(home); err != nil {
 		t.Fatalf("InitGlobalCatalog: %v", err)
 	}
 
@@ -237,10 +235,11 @@ func TestCatalogReadsTheShippedFileOnly(t *testing.T) {
 		t.Fatal("openai/gpt-5 missing from the shipped catalog")
 	}
 	if hit.SupportsAttachments || hit.ContextWindow != 400000 {
-		t.Fatalf("hit = %+v; the home copy must not reach the answer", hit)
+		t.Fatalf("hit = %+v; a key both files name must answer from the shipped file", hit)
 	}
-	if _, ok := Lookup("local", "private-model"); ok {
-		t.Fatal("the home copy's model resolved; the home file must not be read")
+	joined, ok := Lookup("local", "private-model")
+	if !ok || joined.ContextWindow != 8192 {
+		t.Fatalf("hit = %+v ok=%v; a key only the home file names must join the lookup", joined, ok)
 	}
 	got, err := os.ReadFile(homePath)
 	if err != nil {
@@ -248,6 +247,54 @@ func TestCatalogReadsTheShippedFileOnly(t *testing.T) {
 	}
 	if !bytes.Equal(got, homeCopy) {
 		t.Fatal("the home copy was rewritten")
+	}
+}
+
+// A hand-edited home file that is not JSON costs the user its own rows and
+// nothing else: the shipped catalog still answers, and the failure is a log
+// line rather than a surface with no model data at all.
+func TestCatalogIgnoresABrokenSupplement(t *testing.T) {
+	writeShippedCatalog(t, []byte(`{"openai/gpt-5":{"id":"openai/gpt-5","limit":{"context":400000}}}`))
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "models.json"), []byte(`{"openai/gpt-5": [}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := ResolveFor(home)
+	if err != nil {
+		t.Fatalf("ResolveFor with a broken supplement: %v", err)
+	}
+	limits, ok := cat.Lookup("openai/gpt-5")
+	if !ok || limits.Context != 400000 {
+		t.Fatalf("limits = %+v ok=%v; the shipped catalog must still answer", limits, ok)
+	}
+}
+
+// The cache key carries the supplement's content, so replacing the home file
+// takes effect on the next resolve instead of answering from the first read.
+func TestCachedCatalogRebuildsWhenTheSupplementChanges(t *testing.T) {
+	writeShippedCatalog(t, []byte(`{"openai/gpt-5":{"id":"openai/gpt-5","limit":{"context":400000}}}`))
+	home := t.TempDir()
+	homePath := filepath.Join(home, "models.json")
+	if err := os.WriteFile(homePath, []byte(`{"local/private-model":{"id":"local/private-model","limit":{"context":8192}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, err := ResolveFor(home)
+	if err != nil {
+		t.Fatalf("ResolveFor: %v", err)
+	}
+	if limits, ok := first.Lookup("local/private-model"); !ok || limits.Context != 8192 {
+		t.Fatalf("limits = %+v ok=%v before the edit", limits, ok)
+	}
+
+	if err := os.WriteFile(homePath, []byte(`{"local/private-model":{"id":"local/private-model","limit":{"context":123456}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := ResolveFor(home)
+	if err != nil {
+		t.Fatalf("ResolveFor after the edit: %v", err)
+	}
+	if limits, ok := second.Lookup("local/private-model"); !ok || limits.Context != 123456 {
+		t.Fatalf("limits = %+v ok=%v after the edit; the cache kept the old supplement", limits, ok)
 	}
 }
 
@@ -260,7 +307,7 @@ func TestInitGlobalCatalogDoesNotWriteHome(t *testing.T) {
 	restoreGlobalCatalog(t)
 	home := t.TempDir()
 
-	if err := InitGlobalCatalog(); err != nil {
+	if err := InitGlobalCatalog(home); err != nil {
 		t.Fatalf("InitGlobalCatalog: %v", err)
 	}
 	hit, ok := Lookup("deepseek", "deepseek-chat")
@@ -611,6 +658,149 @@ func TestLookupCatalogSuffixPickIsDeterministic(t *testing.T) {
 		if hit.CatalogID != "alpha/dup" || hit.ContextWindow != 1 {
 			t.Fatalf("lookup %d = %+v; want the first id in sorted order (alpha/dup)", i, hit)
 		}
+	}
+}
+
+// The bug this plan fixes (owner 2026-11-16): the row is a bare custom model
+// whose name is the last segment of a catalog key, and only the home file names
+// it. Before the fix the home file was never read, so the lookup missed and the
+// 200K default stood in its place.
+func TestCustomModelFindsItsHomeCatalogRow(t *testing.T) {
+	writeShippedCatalog(t, []byte(`{
+		"openai/gpt-5": {"id":"openai/gpt-5","limit":{"context":400000}}
+	}`))
+	restoreGlobalCatalog(t)
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "models.json"), []byte(`{
+		"alibaba/qwen4-max-preview": {"id":"alibaba/qwen4-max-preview","limit":{"context":1000000,"output":262144}}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := ResolveFor(home)
+	if err != nil {
+		t.Fatalf("ResolveFor: %v", err)
+	}
+	SetGlobalCatalogForTest(cat)
+
+	hit, ok := Lookup("custom", "qwen4-max-preview")
+	if !ok {
+		t.Fatal("custom/qwen4-max-preview missed; the home row never reached the lookup")
+	}
+	if hit.ContextWindow != 1000000 {
+		t.Fatalf("context = %d, want 1000000 from the home row", hit.ContextWindow)
+	}
+}
+
+// A custom model is a name a person typed, and models.json files the entry
+// under a provider and a release suffix the person did not type:
+// "qwen4-max-preview" is contained in "alibaba/qwen4-max-preview-0915" but is
+// not its last segment, so neither the exact key nor the short-name rule
+// answers (owner 2026-11-16, requirement 2). Only the shipped catalog is
+// installed here.
+func TestCustomModelMatchesTheFirstCatalogEntryContainingItsID(t *testing.T) {
+	path := writeShippedCatalog(t, []byte(`{
+		"alibaba/qwen4-max-preview-0915": {"id":"alibaba/qwen4-max-preview-0915","attachment":true,"reasoning":true,
+			"limit":{"context":1000000,"output":262144},
+			"reasoning_options":[{"type":"effort","values":["low","high"]}]},
+		"openai/gpt-4o": {"id":"openai/gpt-4o","limit":{"context":128000}}
+	}`))
+	restoreGlobalCatalog(t)
+	cat, err := Load(path)
+	if err != nil {
+		t.Fatalf("load shipped catalog: %v", err)
+	}
+	SetGlobalCatalogForTest(cat)
+
+	hit, ok := Lookup("custom", "qwen4-max-preview")
+	if !ok {
+		t.Fatal("custom/qwen4-max-preview did not resolve through the containing rule")
+	}
+	if hit.CatalogID != "alibaba/qwen4-max-preview-0915" || hit.ContextWindow != 1000000 || hit.DefaultMaxTokens != 262144 || !hit.SupportsAttachments {
+		t.Fatalf("hit = %+v; want the alibaba/qwen4-max-preview-0915 entry", hit)
+	}
+	if levels, known := ReasoningEfforts("custom", "qwen4-max-preview"); !known || !reflect.DeepEqual(levels, []string{"low", "high"}) {
+		t.Fatalf("levels = %v known=%v; want the borrowed entry's levels", levels, known)
+	}
+}
+
+// The exact key still wins over any name that merely contains it.
+func TestLookupContainingPrefersTheExactKey(t *testing.T) {
+	cat, err := Parse([]byte(`{
+		"qwen4": {"id":"qwen4","limit":{"context":4096}},
+		"alibaba/qwen4": {"id":"alibaba/qwen4","limit":{"context":1000000}}
+	}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if m, ok := cat.LookupContaining("qwen4"); !ok || m.ID != "qwen4" {
+		t.Fatalf("LookupContaining(qwen4) = %+v ok=%v; want the exact key", m, ok)
+	}
+	only, err := Parse([]byte(`{
+		"qwen4": {"id":"qwen4","limit":{"context":4096}},
+		"alibaba/qwen4-max": {"id":"alibaba/qwen4-max","limit":{"context":1000000}}
+	}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if m, ok := only.LookupContaining("qwen4-max"); !ok || m.ID != "alibaba/qwen4-max" {
+		t.Fatalf("LookupContaining(qwen4-max) = %+v ok=%v; want the only id containing it", m, ok)
+	}
+	if m, ok := only.LookupContaining("nothing-like-this"); ok {
+		t.Fatalf("LookupContaining(nothing-like-this) = %+v; want no match", m)
+	}
+}
+
+// A row that names the entry its data lives under answers from that entry, not
+// from whichever id the name rule would have picked: two entries contain the
+// name, and the row's key chooses the one the person meant.
+func TestLookupRowAnswersFromItsCatalogKey(t *testing.T) {
+	installCatalogForOverrideTest(t, `{
+		"alibaba/qwen4-max-preview": {"id":"alibaba/qwen4-max-preview","limit":{"context":1000000}},
+		"zeta/qwen4-max-preview": {"id":"zeta/qwen4-max-preview","limit":{"context":2000000}},
+		"acme/solo-model": {"id":"acme/solo-model","limit":{"context":8192}}
+	}`)
+	SetModelOverrides(
+		map[string]ModelOverride{
+			"row-keyed": {CatalogKey: "zeta/qwen4-max-preview"},
+			"row-plain": {},
+		},
+		map[string]string{
+			"row-keyed": "custom/qwen4-max-preview",
+			"row-plain": "custom/solo-model",
+		},
+	)
+
+	hit, ok := LookupRow("row-keyed", "custom", "qwen4-max-preview")
+	if !ok || hit.CatalogID != "zeta/qwen4-max-preview" || hit.ContextWindow != 2000000 {
+		t.Fatalf("keyed row hit = %+v ok=%v; want the entry its catalog key names", hit, ok)
+	}
+	// A caller that knows only the pair keeps the name rule's deterministic
+	// first pick.
+	if hit, ok := Lookup("custom", "qwen4-max-preview"); !ok || hit.CatalogID != "alibaba/qwen4-max-preview" {
+		t.Fatalf("pair hit = %+v ok=%v; want the first id in sorted order", hit, ok)
+	}
+	// Another row is untouched by its sibling's key: its own pair still has to
+	// match something.
+	if hit, ok := LookupRow("row-plain", "custom", "solo-model"); !ok || hit.ContextWindow != 8192 {
+		t.Fatalf("plain row hit = %+v ok=%v; want the entry its own name matches", hit, ok)
+	}
+}
+
+// The thinking levels a row offers come from the entry its catalog key names,
+// the same way the windows do.
+func TestReasoningLevelsFollowTheCatalogKey(t *testing.T) {
+	installCatalogForOverrideTest(t, `{
+		"alibaba/qwen4-max-preview": {"id":"alibaba/qwen4-max-preview","reasoning":true,
+			"limit":{"context":1000000},"reasoning_options":[{"type":"effort","values":["low","high"]}]},
+		"zeta/qwen4-max-preview": {"id":"zeta/qwen4-max-preview","reasoning":true,
+			"limit":{"context":2000000},"reasoning_options":[{"type":"effort","values":["minimal","xhigh"]}]}
+	}`)
+	SetModelOverrides(
+		map[string]ModelOverride{"row-keyed": {CatalogKey: "zeta/qwen4-max-preview"}},
+		map[string]string{"row-keyed": "custom/qwen4-max-preview"},
+	)
+	if levels, known := ReasoningEffortsRow("row-keyed", "custom", "qwen4-max-preview"); !known || !reflect.DeepEqual(levels, []string{"minimal", "xhigh"}) {
+		t.Fatalf("levels = %v known=%v; want the entry the catalog key names", levels, known)
 	}
 }
 

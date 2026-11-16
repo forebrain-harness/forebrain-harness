@@ -216,10 +216,26 @@ type rawEntry struct {
 
 // Parse builds a Catalog from raw models.json bytes.
 func Parse(data []byte) (*Catalog, error) {
+	raw, err := parseRaw(data)
+	if err != nil {
+		return nil, err
+	}
+	return buildCatalog(raw), nil
+}
+
+// parseRaw unmarshals one models.json document into the entry map the catalog
+// is built from. It is separate from buildCatalog so the shipped file and the
+// home supplement merge as raw entries before either becomes a catalog.
+func parseRaw(data []byte) (map[string]rawEntry, error) {
 	var raw map[string]rawEntry
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("modelcatalog: parse: %w", err)
 	}
+	return raw, nil
+}
+
+// buildCatalog turns merged raw entries into the lookup tables.
+func buildCatalog(raw map[string]rawEntry) *Catalog {
 	c := &Catalog{
 		byID:     make(map[string]Limits, len(raw)),
 		bySuffix: make(map[string]Limits, len(raw)),
@@ -269,7 +285,7 @@ func Parse(data []byte) (*Catalog, error) {
 			delete(c.bySuffix, seg)
 		}
 	}
-	return c, nil
+	return c
 }
 
 // errNoCatalog reports that this build has no catalog to load at all. It is
@@ -284,12 +300,29 @@ var errModelDataNotFound = errors.New("model data not found; reinstall forebrain
 
 // Load reads the model catalog this build ships from basePath. There is one
 // file and one layer: models.json beside the binary, exactly as the build
-// carries it. Nothing merges over it and nothing is added beside it (owner
-// 2026-11-09); a configured row's own overrides are a separate layer that
+// carries it. A configured row's own overrides are a separate layer that
 // Lookup applies, not a second document. A missing base is errNoCatalog rather
 // than an empty catalog, because "this build carries no data" is a state the
 // caller has to be able to name.
+//
+// A home models.json is not part of this file; ResolveFor is the entry point
+// that layers it on (owner 2026-11-16), and Load stays "the shipped file
+// only".
 func Load(basePath string) (*Catalog, error) {
+	return LoadWithSupplement(basePath, "")
+}
+
+// LoadWithSupplement reads the shipped catalog from basePath and merges the
+// rows of supplementPath that basePath does not carry. The shipped file wins
+// every key both files name (owner 2026-11-16): the supplement exists to add
+// the models a build does not know, never to redefine one it does.
+//
+// The two files fail differently on purpose. A missing or broken base is the
+// build's problem: errNoCatalog for a missing file, the parse error naming the
+// byte for a broken one. A broken supplement is a hand-edited file in someone's
+// home, so it is logged and the shipped catalog answers alone — it must not be
+// able to take the whole catalog down.
+func LoadWithSupplement(basePath, supplementPath string) (*Catalog, error) {
 	baseData, err := readOptionalFile(basePath)
 	if err != nil {
 		return nil, err
@@ -297,13 +330,44 @@ func Load(basePath string) (*Catalog, error) {
 	if baseData == nil {
 		return nil, fmt.Errorf("%w at %q", errNoCatalog, basePath)
 	}
-	cat, err := Parse(baseData)
+	base, err := parseRaw(baseData)
 	if err != nil {
 		// The file is in the build, so a parse failure is a defect in the
 		// data: the error names the path and the byte, never "not found".
 		return nil, fmt.Errorf("%q: %w", basePath, err)
 	}
-	return cat, nil
+	supplementData, err := readOptionalFile(supplementPath)
+	if err != nil {
+		return nil, err
+	}
+	if supplementData != nil {
+		supplement, err := parseRaw(supplementData)
+		if err != nil {
+			slog.Warn("home model data ignored", "path", supplementPath, "err", err)
+		} else {
+			mergeSupplement(base, supplement)
+		}
+	}
+	return buildCatalog(base), nil
+}
+
+// mergeSupplement adds every entry of supplement the base does not already
+// name. Keys are compared the way lookups compare them (lowercased, trimmed),
+// so a supplement row only recolored in case is still the base's row and the
+// result does not depend on map iteration order.
+func mergeSupplement(base, supplement map[string]rawEntry) {
+	seen := make(map[string]bool, len(base))
+	for id := range base {
+		seen[strings.ToLower(strings.TrimSpace(id))] = true
+	}
+	for id, entry := range supplement {
+		key := strings.ToLower(strings.TrimSpace(id))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		base[id] = entry
+	}
 }
 
 // readOptionalFile reads path, reporting nil bytes when it does not exist.
@@ -374,6 +438,36 @@ func (c *Catalog) LookupModel(model string) (Model, bool) {
 	return Model{}, false
 }
 
+// LookupContaining returns the entry a custom model's typed-in name names when
+// no key is it: the first id in sorted order that contains the name, so a user
+// typing "qwen4-max-preview" gets the entry the catalog files under
+// "alibaba/qwen4-max-preview". The exact key still wins, and the first-in-
+// sorted-order tie-break is the same determinism LookupModel's short-name rule
+// gives (map iteration order is not stable run to run).
+func (c *Catalog) LookupContaining(model string) (Model, bool) {
+	if c == nil {
+		return Model{}, false
+	}
+	needle := strings.ToLower(strings.TrimSpace(model))
+	if needle == "" {
+		return Model{}, false
+	}
+	if m, ok := c.models[needle]; ok {
+		return m, true
+	}
+	matches := make([]string, 0, 2)
+	for id := range c.models {
+		if strings.Contains(id, needle) {
+			matches = append(matches, id)
+		}
+	}
+	if len(matches) == 0 {
+		return Model{}, false
+	}
+	sort.Strings(matches)
+	return c.models[matches[0]], true
+}
+
 // AllModels returns all models in the catalog.
 func (c *Catalog) AllModels() []Model {
 	if c == nil {
@@ -428,20 +522,33 @@ func lastSegment(id string) string {
 	return id
 }
 
-// Resolve loads the model catalog this build ships: models.json beside the
-// binary (see shippedCatalogPath), exactly as it was built. There is no home
-// copy and nothing merges over the file (owner 2026-11-09), so a catalog the
-// user's configuration changes is expressed as that row's overrides, not as a
-// second document. The result is cached per base path and file content, so a
-// replaced file takes effect on the next resolve.
+// Resolve loads the model catalog for a caller with no home at hand: the
+// shipped file alone, exactly as it was built. Surfaces start their catalog
+// through ResolveFor, which is this plus the home supplement.
 //
 // Only "there is no catalog anywhere" is reworded to the sentence a surface
 // may show. Every other failure is returned as it came: a catalog the build
 // shipped broken has to report the byte that broke, not look like a missing
 // file.
 func Resolve() (*Catalog, error) {
+	return ResolveFor("")
+}
+
+// ResolveFor loads the catalog the runtime answers from: the shipped
+// models.json beside the binary (see shippedCatalogPath), plus the rows of
+// <home>/models.json the shipped file does not carry (owner 2026-11-16). The
+// home file adds data for models a build does not know; it never redefines a
+// row the build ships, so a catalog the user's configuration changes is still
+// expressed as that row's overrides rather than as a second document. An empty
+// home reads the shipped file alone. The result is cached per pair of paths and
+// file contents, so replacing either file takes effect on the next resolve.
+func ResolveFor(home string) (*Catalog, error) {
 	basePath := shippedCatalogPath()
-	cat, err := loadCached(basePath)
+	supplementPath := ""
+	if h := strings.TrimSpace(home); h != "" {
+		supplementPath = filepath.Join(h, "models.json")
+	}
+	cat, err := loadCached(basePath, supplementPath)
 	if err == nil {
 		return cat, nil
 	}
@@ -471,15 +578,18 @@ var (
 	globalCatMu sync.RWMutex
 )
 
-func loadCached(basePath string) (*Catalog, error) {
+func loadCached(basePath, supplementPath string) (*Catalog, error) {
 	base := absolutePath(basePath)
-	key := base + "\x00" + fileDigest(basePath)
+	supplement := absolutePath(supplementPath)
+	// Both files are in the key: a supplement that changed has to rebuild the
+	// catalog even when the shipped file beside the binary did not.
+	key := base + "\x00" + fileDigest(basePath) + "\x00" + supplement + "\x00" + fileDigest(supplementPath)
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	if c, ok := cache[key]; ok {
 		return c, nil
 	}
-	c, err := Load(basePath)
+	c, err := LoadWithSupplement(basePath, supplementPath)
 	if err != nil {
 		return nil, err
 	}
@@ -513,12 +623,13 @@ func fileDigest(path string) string {
 }
 
 // InitGlobalCatalog initializes the global catalog from the models.json beside
-// the binary. It is the only model-data source: nothing is copied into a home
-// and nothing in a home is read (owner 2026-11-09), so every process on this
-// build answers from the same bytes, and a build with no catalog is a warning
-// its caller logs — not a catalog this process can download or invent.
-func InitGlobalCatalog() error {
-	cat, err := Resolve()
+// the binary, plus the rows <home>/models.json adds to it (owner 2026-11-16).
+// The shipped file is the source every key it names answers from, so every
+// process on this build shares those bytes; the home file only contributes
+// models the build does not know, and a build with no catalog is a warning its
+// caller logs — not a catalog this process can download or invent.
+func InitGlobalCatalog(home string) error {
+	cat, err := ResolveFor(home)
 	if err != nil {
 		return err
 	}
@@ -557,11 +668,27 @@ func Lookup(provider, apiModel string) (Hit, bool) {
 // catalog's entry for the pair, with that row's own overrides laid over it.
 // rowID "" behaves like Lookup.
 func LookupRow(rowID, provider, apiModel string) (Hit, bool) {
-	hit, ok := LookupCatalog(provider, apiModel)
-	if override, found := modelOverrideForRow(strings.TrimSpace(rowID), provider, apiModel); found {
+	override, found := modelOverrideForRow(strings.TrimSpace(rowID), provider, apiModel)
+	hit, ok := LookupCatalogFor(provider, apiModel, override.CatalogKey)
+	if found {
 		return applyModelOverride(hit, override), true
 	}
 	return hit, ok
+}
+
+// LookupCatalogFor is LookupCatalog for a row that names the catalog entry its
+// data lives under (a custom model's provider, owner 2026-11-16). catalogKey is
+// a "provider/model" key: when it names one, that key answers instead of the
+// row's own pair, so "qwen4-max-preview" under catalogKey
+// "alibaba/qwen4-max-preview" reads that entry exactly rather than through the
+// name-matching fallbacks. An empty or unusable key asks the row's own pair.
+func LookupCatalogFor(provider, apiModel, catalogKey string) (Hit, bool) {
+	if key := strings.TrimSpace(catalogKey); key != "" {
+		if i := strings.Index(key, "/"); i > 0 && i+1 < len(key) {
+			return LookupCatalog(key[:i], key[i+1:])
+		}
+	}
+	return LookupCatalog(provider, apiModel)
 }
 
 // LookupCatalog is Lookup without the configured-row override layer: the
@@ -586,8 +713,14 @@ func LookupCatalog(provider, apiModel string) (Hit, bool) {
 			hit, ok = hitFromModel(m), true
 		}
 	}
-	if !ok && cat != nil && strings.EqualFold(strings.TrimSpace(provider), customModelProvider) && strings.Contains(apiModel, "/") {
+	// A custom model is a name the user typed, so the catalog is asked again
+	// with the name alone: the exact key first, then the unambiguous short
+	// name, then the first id that contains it (a bare "qwen4-max-preview"
+	// borrows the row filed under "alibaba/qwen4-max-preview").
+	if !ok && cat != nil && strings.EqualFold(strings.TrimSpace(provider), customModelProvider) {
 		if m, found := cat.LookupModel(apiModel); found {
+			hit, ok = hitFromModel(m), true
+		} else if m, found := cat.LookupContaining(apiModel); found {
 			hit, ok = hitFromModel(m), true
 		}
 	}
@@ -630,6 +763,11 @@ type ModelOverride struct {
 	// ContextWindow and MaxOutput replace the windows the catalog carries;
 	// MaxOutput is the row's own output limit.
 	ContextWindow, MaxOutput *int64
+	// CatalogKey names the catalog entry this row's data lives under, as a
+	// "provider/model" key, for a row whose own pair the catalog does not
+	// carry (a custom model whose official data is filed under another
+	// provider, owner 2026-11-16). "" asks the row's own pair.
+	CatalogKey string
 }
 
 var (
