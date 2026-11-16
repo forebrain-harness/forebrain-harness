@@ -1099,3 +1099,40 @@ func TestExitPlanModeHandOffRecordsTheRowAndReturnsTheContract(t *testing.T) {
 		t.Fatalf("mode state must record the hand-off row: %+v", final)
 	}
 }
+
+// The tool package reads the hand-off answer with its own decoder (it cannot
+// import pkg/turn), so the level the user picked has to be read here too: the
+// executor dispatch resolves the mode-state row, and a level dropped on this
+// side would silently run at the row's own configuration.
+func TestActionHandOffModelCarriesEffort(t *testing.T) {
+	act := &state.Action{
+		ID: "a1", Kind: "exit_plan_mode", Status: state.ActionApproved,
+		AnswerJSON: `{"decision":"accept","hand_off_model":{"id":"llm_row2","provider":"zhipuai","model":"glm-5.3","effort":"medium"}}`,
+	}
+	handOff, ok := actionHandOffModel(act)
+	if !ok {
+		t.Fatal("an approved hand-off answer must decode")
+	}
+	if handOff.ModelID != "llm_row2" || handOff.Effort != "medium" {
+		t.Fatalf("hand-off = %+v, want the row and the picked level", handOff)
+	}
+}
+
+// An answer written before the second screen existed names the row alone: it
+// still decodes, with an empty level, and names the same row.
+func TestActionHandOffModelToleratesLegacyAnswer(t *testing.T) {
+	act := &state.Action{
+		ID: "a1", Kind: "exit_plan_mode", Status: state.ActionApproved,
+		AnswerJSON: `{"decision":"accept","hand_off_model":{"id":"llm_row2","provider":"zhipuai","model":"glm-5.3"}}`,
+	}
+	handOff, ok := actionHandOffModel(act)
+	if !ok {
+		t.Fatal("a legacy hand-off answer must still decode")
+	}
+	if handOff.ModelID != "llm_row2" || handOff.Provider != "zhipuai" || handOff.Model != "glm-5.3" {
+		t.Fatalf("hand-off = %+v, want the row the old answer named", handOff)
+	}
+	if handOff.Effort != "" {
+		t.Fatalf("hand-off level = %q, want the empty level that leaves the row's own configuration in charge", handOff.Effort)
+	}
+}

@@ -78,6 +78,16 @@ type approvalOverlay struct {
 	planReviewFilter   filterField
 	planReviewInFilter bool
 	planReviewFiltered []int
+	// planEffortPicking is true while the picker's second screen — the model's
+	// thinking levels — is open. planEffortModel is the row chosen on the first
+	// screen (it carries the levels and the configured one), planEffortOptions
+	// the levels drawn, "" being the bare 「Default」 entry a row without a
+	// configured level offers, and planEffortCursor the one under the ❯.
+	planEffortPicking bool
+	planEffortModel   turn.PlanReviewModelOption
+	planEffortPurpose planPickerPurpose
+	planEffortOptions []string
+	planEffortCursor  int
 	// focusStart and focusEnd are the rows [start, end) kept on screen as last
 	// rendered: the selected option, or the selected reviewer while picking —
 	// with the picker's question over the first and its key hint under the
@@ -610,6 +620,12 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		// the keys. The row is recorded here because the first paint
 		// anchors the picker on its question.
 		switch {
+		case o.planEffortPicking:
+			// The second screen names the model the levels belong to, so the
+			// row it is about is on screen rather than remembered.
+			o.planReviewTopRow = lineCount
+			writeLine("Which reasoning effort should %s use? (Esc to go back)",
+				planReviewModelDisplay(o.planEffortModel.Provider, o.planEffortModel.Model))
 		case o.planReviewPicking && o.planPickerPurpose == pickHandOff:
 			o.planReviewTopRow = lineCount
 			writeLine("Which model should carry out this plan? (Esc to go back)")
@@ -752,11 +768,45 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 			}
 		}
 		cursorLine = o.feedbackFirstRow + o.feedbackLayout.cursorRow
+	case o.planEffortPicking:
+		// The second screen is one column: the level, the id it sends when the
+		// two differ (only Off/none in English), and the gear on the level the
+		// row is configured with, tight against the name. The blank line the
+		// question needs under it is the one every panel's body gets (above),
+		// so adding another here would draw two.
+		for i, effort := range o.planEffortOptions {
+			lead := panelIndent
+			if i == o.planEffortCursor {
+				lead = panelCursor
+				o.focusStart = lineCount
+				if i == 0 {
+					o.focusStart = o.planReviewTopRow
+				}
+			}
+			label := turn.EffortEnglishLabel(effort)
+			row := lead + label
+			if effort != "" && !strings.EqualFold(effort, label) {
+				row += "  " + panelHintStyle.Render(effort)
+			}
+			if effort != "" && effort == strings.TrimSpace(o.planEffortModel.DefaultEffort) {
+				// The gear marks the level the model row itself configures — not
+				// the one being chosen — and it sits against the name (owner
+				// 2026-11-15: tight, never out in the description column).
+				row += " " + panelAccentStyle.Render(selectorGearGlyph)
+			}
+			writeLine("%s", row)
+			if i == o.planEffortCursor {
+				o.focusEnd = lineCount
+				focusToEnd = i == len(o.planEffortOptions)-1
+			}
+		}
 	case o.planReviewPicking:
 		models := o.planReviewVisible()
 		// The reviewer list carries the same filter bar every picker in this
 		// terminal does, in the same shape: air above it, a padded row, the
-		// text's row, a padded row, then air before the list it narrows.
+		// text's row, a padded row, then air before the list it narrows. The
+		// air above it is the blank every panel body opens with (above), so
+		// the bar does not add a second one.
 		if o.planReviewShowsFilter() {
 			field := o.planReviewFilter.pickerField(o.planReviewInFilter)
 			lines = append(lines, field.padRow(width))
@@ -920,6 +970,8 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 	switch {
 	case o.feedback != feedbackClosed:
 		writeLine("\x1b[2mEsc to refuse without words · Ctrl+J/Alt+Enter for newline · Enter to submit\x1b[0m")
+	case o.planEffortPicking:
+		writeLine("\x1b[2mEsc to go back · Enter to confirm\x1b[0m")
 	case o.planReviewPicking && o.planPickerPurpose == pickHandOff:
 		writeLine("\x1b[2mEsc to go back · Enter to hand off\x1b[0m")
 	case o.planReviewPicking:
@@ -985,6 +1037,10 @@ func (o *approvalOverlay) renderViewport() {
 func (o *approvalOverlay) handleKey(key parsedKey) (turn.ToolApprovalDecision, bool) {
 	if o.feedback != feedbackClosed {
 		return o.handleFeedbackKey(key)
+	}
+	// The second screen sits on top of the model list: it takes the keys first.
+	if o.planEffortPicking {
+		return o.handlePlanEffortKey(key)
 	}
 	if o.planReviewPicking {
 		return o.handlePlanReviewKey(key)
@@ -1422,6 +1478,84 @@ func (o *approvalOverlay) exitPlanReviewMode() {
 	o.planReviewFilter = filterField{}
 	o.planReviewInFilter = false
 	o.planReviewFiltered = o.planReviewFiltered[:0]
+	o.exitPlanEffortMode()
+}
+
+// enterPlanEffortMode opens the picker's second screen on the row chosen on the
+// first one: the levels that row offers, opening on the one it is configured
+// with (and on the bare 「Default」 entry, first, when it configures none). The
+// first screen's list, cursor and filter are left exactly as they are, so Esc
+// returns to the row the user picked in the list they picked it from.
+func (o *approvalOverlay) enterPlanEffortMode(selected turn.PlanReviewModelOption, purpose planPickerPurpose) {
+	options := append([]string(nil), selected.Efforts...)
+	if strings.TrimSpace(selected.DefaultEffort) == "" {
+		options = append([]string{""}, options...)
+	}
+	o.planEffortPicking = true
+	o.planEffortModel = selected
+	o.planEffortPurpose = purpose
+	o.planEffortOptions = options
+	o.planEffortCursor = 0
+	for i, effort := range options {
+		if effort != "" && effort == strings.TrimSpace(selected.DefaultEffort) {
+			o.planEffortCursor = i
+			break
+		}
+	}
+}
+
+// exitPlanEffortMode closes the second screen alone, leaving the model list (and
+// its filter) as the user left it.
+func (o *approvalOverlay) exitPlanEffortMode() {
+	o.planEffortPicking = false
+	o.planEffortModel = turn.PlanReviewModelOption{}
+	o.planEffortPurpose = pickReview
+	o.planEffortOptions = nil
+	o.planEffortCursor = 0
+}
+
+// planPickerDecision is what a finished pick decides: a hand-off approves the
+// exit and names the executor (the conversation's own model stays as the tech
+// lead), a review asks for the second opinion without deciding anything.
+func (o *approvalOverlay) planPickerDecision(selected turn.PlanReviewModelOption, purpose planPickerPurpose, effort string) turn.ToolApprovalDecision {
+	if purpose == pickHandOff {
+		option := selected
+		return turn.ToolApprovalDecision{Approved: true, HandOffModel: &option, Effort: effort}
+	}
+	option := selected
+	return turn.ToolApprovalDecision{RequestPlanReview: &option, Effort: effort}
+}
+
+// handlePlanEffortKey drives the second screen. It answers nothing until Enter:
+// ↑/↓ move the ❯, Esc returns to the model list, ctrl+c cancels like every
+// other screen, and digit/j/k shortcuts do not apply — a short list of levels
+// does not need them and a stray key must not settle a decision (plan 282).
+func (o *approvalOverlay) handlePlanEffortKey(key parsedKey) (turn.ToolApprovalDecision, bool) {
+	o.keepOptionsInView = true
+	switch key.kind {
+	case rawKeyEscape:
+		o.exitPlanEffortMode()
+	case rawKeyCtrlC:
+		return turn.ToolApprovalDecision{Cancelled: true}, true
+	case rawKeyUp:
+		noFilter := false
+		navigatePicker(&noFilter, &o.planEffortCursor, len(o.planEffortOptions), -1, false)
+	case rawKeyDown:
+		noFilter := false
+		navigatePicker(&noFilter, &o.planEffortCursor, len(o.planEffortOptions), 1, false)
+	case rawKeyEnter:
+		if len(o.planEffortOptions) == 0 {
+			return turn.ToolApprovalDecision{}, false
+		}
+		// The state is read before it is cleared: exitPlanEffortMode resets the
+		// model and the purpose, and a zero row would decide nothing.
+		effort := o.planEffortOptions[o.planEffortCursor]
+		model, purpose := o.planEffortModel, o.planEffortPurpose
+		o.exitPlanEffortMode()
+		o.exitPlanReviewMode()
+		return o.planPickerDecision(model, purpose, effort), true
+	}
+	return turn.ToolApprovalDecision{}, false
 }
 
 // handlePlanReviewKey drives the reviewer picker. Choosing a model returns a
@@ -1509,14 +1643,16 @@ func (o *approvalOverlay) handlePlanReviewKey(key parsedKey) (turn.ToolApprovalD
 		}
 		selected := models[o.planReviewCursor]
 		purpose := o.planPickerPurpose
-		o.exitPlanReviewMode()
-		// A hand-off pick approves the exit and names the executor; the
-		// conversation's own model stays as the tech lead. The current model
-		// may be picked: handing off to it is odd but sound.
-		if purpose == pickHandOff {
-			return turn.ToolApprovalDecision{Approved: true, HandOffModel: &selected}, true
+		// A row that offers thinking levels asks which one on a second screen,
+		// and the decision waits for it. A row that offers none — or a list
+		// built before offers carried levels — decides here, exactly as it
+		// always did (plan 310).
+		if len(selected.Efforts) != 0 {
+			o.enterPlanEffortMode(selected, purpose)
+			return turn.ToolApprovalDecision{}, false
 		}
-		return turn.ToolApprovalDecision{RequestPlanReview: &selected}, true
+		o.exitPlanReviewMode()
+		return o.planPickerDecision(selected, purpose, ""), true
 	case rawKeyRune:
 		// A picker with a filter types into it, the way every other picker
 		// does — j/k included — and a short list with no filter keeps its
@@ -4406,12 +4542,14 @@ const (
 	selectorResetStyle  = "\x1b[0m"
 )
 
-// Picker glyphs: the cursor on the selected row, and the check boxes of a
-// multi-select.
+// Picker glyphs: the cursor on the selected row, the check boxes of a
+// multi-select, and the gear that marks the level a model row is configured
+// with (an icon, not the words「model setting」— owner 2026-11-15).
 const (
 	selectorCursorGlyph    = "❯"
 	selectorCheckedGlyph   = "●"
 	selectorUncheckedGlyph = "○"
+	selectorGearGlyph      = "⚙"
 )
 
 // keyEditsTextField reports whether a key changes a text field's contents, and
@@ -5685,7 +5823,14 @@ func (p *richPickerState) panel(label string) slashPanel {
 			b.group(item.Category)
 			category = item.Category
 		}
-		b.selectableColumns(ci == p.cursor, "", item.Label, nameWidth, strings.TrimSpace(item.Description), item.ElideTail)
+		// The mark — the effort list's gear — is coloured here, in the one
+		// place a picker draws its rows: the item carries a bare glyph and the
+		// renderer owns the accent.
+		mark := ""
+		if item.Mark != "" {
+			mark = panelAccentStyle.Render(item.Mark)
+		}
+		b.selectableColumns(ci == p.cursor, "", item.Label, nameWidth, strings.TrimSpace(item.Description), item.ElideTail, mark)
 	}
 	if len(p.selectable) == 0 {
 		b.text(panelIndent, "No matches", nil)

@@ -926,9 +926,28 @@ func chooseModel(ctx Context, value string) Result {
 	if !settings.Selection.Set {
 		current = settings.LiveSelection.Effort
 	}
-	items := make([]PickerItem, len(chosen.ReasoningEfforts))
-	for i, effort := range chosen.ReasoningEfforts {
-		items[i] = PickerItem{Value: encodeEffortChoice(chosen.ID, chosen.Label, effort, changed), Label: effort, Current: effort == current}
+	configured := strings.TrimSpace(chosen.ConfiguredEffort)
+	ids := orderedEffortLevels(chosen.ReasoningEfforts)
+	// The same list the web's effort chip draws: the levels in the one fixed
+	// order, and a bare 「Default」 entry first when the conversation pins no
+	// level or the row configures none — the two cases where the empty level is
+	// a real choice rather than a second copy of a named one.
+	if current == "" || configured == "" {
+		ids = append([]string{""}, ids...)
+	}
+	items := make([]PickerItem, len(ids))
+	for i, effort := range ids {
+		items[i] = PickerItem{
+			Value: encodeEffortChoice(chosen.ID, chosen.Label, effort, changed),
+			// Label stays the raw level id: it is the protocol value the pick
+			// sends, and the web localizes it. ValueLabel is the terminal's
+			// English name; FromSetting marks the level the row configures,
+			// which is not Current (the level the conversation is pinned to).
+			Label:       effort,
+			ValueLabel:  EffortEnglishLabel(effort),
+			FromSetting: effort != "" && effort == configured,
+			Current:     effort == current,
+		}
 	}
 	return Result{Handled: true, Reply: reply, Picker: &Picker{Command: "model-effort", Title: "Reasoning effort", Hint: "How long " + name + " thinks before it answers", Items: items}}
 }
@@ -958,7 +977,11 @@ func chooseReasoningEffort(ctx Context, value string) Result {
 		}
 		at = slices.IndexFunc(choices, func(c ModelChoice) bool { return c.Label == label })
 	}
-	if at < 0 || !slices.Contains(choices[at].ReasoningEfforts, effort) {
+	// An empty effort is the bare 「Default」 entry, and it is a real choice:
+	// it pins the empty level, which the runner reads as「let the provider
+	// decide」— the one rule the web's save path already follows. A non-empty
+	// level still has to be one this row offers.
+	if at < 0 || (effort != "" && !slices.Contains(choices[at].ReasoningEfforts, effort)) {
 		return Result{Handled: true, Reply: "That reasoning effort is no longer offered for this model."}
 	}
 	chosen := choices[at]
@@ -971,12 +994,12 @@ func chooseReasoningEffort(ctx Context, value string) Result {
 			// The switch was already reported; its effort stayed as it was.
 			return Result{Handled: true}
 		}
-		return Result{Handled: true, Reply: "Still using " + llm.FormatProviderModelDisplay(chosen.Provider, chosen.Model) + " at " + effort + " reasoning effort."}
+		return Result{Handled: true, Reply: "Still using " + llm.FormatProviderModelDisplay(chosen.Provider, chosen.Model) + " at " + EffortEnglishLabel(effort) + " reasoning effort."}
 	}
 	if err := ctx.Model.SelectModel(ctx.commandContext(), ctx.SessionID, chosen, &effort); err != nil {
 		return Result{Handled: true, Reply: modelSelectionFailureReply(llm.FormatProviderModelDisplay(chosen.Provider, chosen.Model), err)}
 	}
-	return Result{Handled: true, Reply: "Reasoning effort set to " + effort + "."}
+	return Result{Handled: true, Reply: "Reasoning effort set to " + EffortEnglishLabel(effort) + "."}
 }
 
 // An effort choice carries the row it is for, the label it showed and whether

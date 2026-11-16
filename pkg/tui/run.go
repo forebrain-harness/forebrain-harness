@@ -5365,6 +5365,23 @@ func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Rend
 			// provider apart (plan 267).
 			items[i].ElideTail = item.EndpointTail
 		}
+		// The effort list draws what the web's effort chip draws: the level's
+		// English name, the raw level id written beside it only when the two
+		// differ (Off/none is the only such row in English), and the gear on
+		// the level the model row is configured with — both against the name,
+		// never out in the description column (owner 2026-11-15). An item
+		// drawn before the list carried a display name keeps its plain label.
+		if item.ValueLabel != "" {
+			display := item.ValueLabel
+			if item.Label != "" && !strings.EqualFold(item.Label, item.ValueLabel) {
+				display += "  " + item.Label
+			}
+			items[i].Label = display
+			items[i].Description = ""
+			if item.FromSetting {
+				items[i].Mark = selectorGearGlyph
+			}
+		}
 		if item.Current {
 			current = i
 		}

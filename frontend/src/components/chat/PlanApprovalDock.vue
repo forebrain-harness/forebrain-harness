@@ -50,25 +50,70 @@
       <!-- Choosing a reviewer: the list opens on the footer, the current one
            marked; Esc folds it back. -->
       <div v-else-if="picking" class="xp-pick">
-        <span class="cap">
-          {{ pickPurpose === 'handoff' ? t('chat.exitPlanHandOffChoose') : t('chat.exitPlanReviewChoose') }}
-        </span>
-        <span v-if="pickPurpose === 'handoff'" class="hint">{{ t('chat.exitPlanHandOffHint') }}</span>
-        <button
-          v-for="model in reviewModels"
-          :key="`${action.id}-model-${model.id || model.provider + '/' + model.model}-${model.provider}-${model.model}`"
-          type="button"
-          class="xp-model"
-          :disabled="submitting"
-          :data-testid="pickPurpose === 'handoff' ? 'exit-plan-hand-off-model' : 'plan-review-model'"
-          @click="pickModel(model)"
-        >
-          <span class="ml">
-            <span class="m">{{ modelLabel(model) }}</span>
-            <span v-if="model.endpoint" class="ep">{{ model.endpoint }}</span>
+        <template v-if="effortStep">
+          <button
+            type="button"
+            class="xp-back"
+            data-testid="exit-plan-effort-back"
+            :disabled="submitting"
+            @click="backToModels(action)"
+          >
+            <ChevronLeft class="size-[13px]" aria-hidden="true" />
+            {{ t('chat.exitPlanEffortBack') }}
+          </button>
+          <span class="cap" data-testid="exit-plan-effort-question">
+            {{ t('chat.exitPlanEffortChoose', { model: pickedModelLabel }) }}
           </span>
-          <span v-if="model.current" class="cur">{{ t('chat.exitPlanReviewCurrent') }}</span>
-        </button>
+          <button
+            v-for="opt in effortOptions"
+            :key="`${action.id}-effort-${opt.id || 'default'}`"
+            type="button"
+            class="xp-model xp-effort"
+            :class="opt.id === pickedEffort ? 'is-on' : ''"
+            :disabled="submitting"
+            data-testid="exit-plan-effort-option"
+            @click="choosePlanEffort(action, opt.id)"
+          >
+            <span class="eleft">
+              <Check v-if="opt.id === pickedEffort" class="echk" aria-hidden="true" />
+              <b class="elabel">{{ opt.label }}</b>
+              <code v-if="opt.id && opt.label.toLowerCase() !== opt.id.toLowerCase()" class="ev">{{ opt.id }}</code>
+              <!-- The gear marks the level the model row itself configures —
+                   an icon, not the words, and tight against the name (owner
+                   2026-11-15). Its wording lives in the tooltip. -->
+              <span
+                v-if="opt.fromSetting"
+                class="etag"
+                role="img"
+                :title="t('chat.effortModelSetting')"
+                :aria-label="t('chat.effortModelSetting')"
+              >
+                <Settings class="size-[14px]" aria-hidden="true" />
+              </span>
+            </span>
+          </button>
+        </template>
+        <template v-else>
+          <span class="cap">
+            {{ pickPurpose === 'handoff' ? t('chat.exitPlanHandOffChoose') : t('chat.exitPlanReviewChoose') }}
+          </span>
+          <span v-if="pickPurpose === 'handoff'" class="hint">{{ t('chat.exitPlanHandOffHint') }}</span>
+          <button
+            v-for="model in reviewModels"
+            :key="`${action.id}-model-${model.id || model.provider + '/' + model.model}-${model.provider}-${model.model}`"
+            type="button"
+            class="xp-model"
+            :disabled="submitting"
+            :data-testid="pickPurpose === 'handoff' ? 'exit-plan-hand-off-model' : 'plan-review-model'"
+            @click="choosePlanModel(action, model)"
+          >
+            <span class="ml">
+              <span class="m">{{ modelLabel(model) }}</span>
+              <span v-if="model.endpoint" class="ep">{{ model.endpoint }}</span>
+            </span>
+            <span v-if="model.current" class="cur">{{ t('chat.exitPlanReviewCurrent') }}</span>
+          </button>
+        </template>
       </div>
       <template v-else>
         <p class="q">{{ t(officeSession ? 'chat.officePlanQuestion' : 'chat.exitPlanQuestion') }}</p>
@@ -222,7 +267,7 @@
  * keep planning's words are required, and Esc on them is the wordless refusal.
  */
 import { computed, nextTick, onMounted, ref, withDefaults } from 'vue'
-import { Eye, LoaderCircle, Map } from 'lucide-vue-next'
+import { Check, ChevronLeft, Eye, LoaderCircle, Map, Settings } from 'lucide-vue-next'
 import { Kbd } from '@repo/shadcn-vue/components/ui/kbd'
 import { MessageResponse } from '@repo/elements/message'
 import { forebrainApi, type PlanReviewModelOption } from '@/lib/api'
@@ -258,8 +303,9 @@ const store = injectPendingActions()!
 // binds plain values, keyed by the action the input is parked on.
 const {
   exitPlanRequest, approveExitPlan, keepPlanning, keepPlanOnly, openPlanFeedback, closePlanFeedback,
-  toggleModelPicker, closeModelPicker, requestReview, stopReview, modelLabel, activeReviewLabel, clearContextLabel,
-  handOffTo, reviewAgain, refuseAndStop,
+  toggleModelPicker, closeModelPicker, stopReview, modelLabel, activeReviewLabel, clearContextLabel,
+  reviewAgain, refuseAndStop,
+  planEffortOptions, choosePlanModel, choosePlanEffort, backToModels,
 } = store
 
 /** The plan this approval is about, from the typed request the gate served. */
@@ -273,6 +319,18 @@ const picking = computed(() => Boolean(store.modelPicking.value[props.action.id]
 /** What the open picker is for: a reviewer, or the model the plan is handed to
  *  (plan 283). One list either way, two captions and two verdicts. */
 const pickPurpose = computed(() => store.modelPickPurpose.value[props.action.id] ?? 'review')
+/** Which screen of the picker is open: the model list, or the levels of the row
+ *  chosen on it (plan 310). */
+const effortStep = computed(() => store.modelPickStep.value[props.action.id] === 'effort')
+/** The row the level screen is about: the one carried from the model list. */
+const pickedModelOption = computed(() => store.pickedModel.value[props.action.id] ?? null)
+/** Its name, for the question that names it (owner feedback D). */
+const pickedModelLabel = computed(() =>
+  pickedModelOption.value ? modelLabel(pickedModelOption.value) : '',
+)
+/** The levels that row offers, marked and labelled the way the effort lists do. */
+const effortOptions = computed(() => planEffortOptions(pickedModelOption.value))
+const pickedEffort = computed(() => String(store.pickedEffort.value[props.action.id] ?? ''))
 const handOffAvailable = computed(() => Boolean(request.value?.handOffAvailable))
 const previousReview = computed(() => request.value?.previousPlanReview ?? null)
 const previousReviewLabel = computed(() =>
@@ -352,17 +410,14 @@ function handOffChosen() {
   toggleModelPicker(props.action, 'handoff')
 }
 
-function pickModel(model: PlanReviewModelOption) {
-  if (pickPurpose.value === 'handoff') {
-    void handOffTo(props.action, model)
+/** Esc backs the picker out one step at a time: from the level screen to the
+ *  model list, from the list to the verdicts; on the words it is the wordless
+ *  refusal — the plan approval's stop, not the field's collapse (129). */
+async function onEsc() {
+  if (picking.value && effortStep.value) {
+    backToModels(props.action)
     return
   }
-  void requestReview(props.action, model)
-}
-
-/** Esc backs the model picker out; on the words it is the wordless refusal —
- *  the plan approval's stop, not the field's collapse (129). */
-async function onEsc() {
   if (picking.value) {
     closeModelPicker(props.action)
     return
@@ -657,6 +712,71 @@ async function onEsc() {
   flex: none;
   font-size: 11.5px;
   color: var(--forebrain-muted-text);
+}
+
+/* The level screen (plan 310, prototype .xp-effort): the model card's own
+   visual, with the check, the label, the id written beside it when the two
+   differ, and the setting gear — all on the left, the gear tight against the
+   name (prototype .eleft gap:7px), never pushed to the far edge. */
+.xp-effort .eleft {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.xp-effort .echk {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  color: var(--forebrain-brand-1);
+}
+
+.xp-effort .elabel {
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+.xp-effort .ev {
+  font-family: var(--forebrain-mono-font);
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
+}
+
+.xp-effort .etag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--forebrain-brand-1);
+}
+
+.xp-effort .etag svg {
+  width: 14px;
+  height: 14px;
+}
+
+.xp-effort.is-on {
+  border-color: var(--forebrain-brand-1);
+  background: var(--forebrain-bg-alt);
+}
+
+.xp-back {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: none;
+  padding: 2px 0;
+  margin-bottom: 2px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+  cursor: pointer;
+}
+
+.xp-back:hover {
+  color: var(--forebrain-brand-1);
 }
 
 .gate-error {

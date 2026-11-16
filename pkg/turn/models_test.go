@@ -1032,3 +1032,19 @@ func TestProbeCarriesTheDiscoveryErrorUntouched(t *testing.T) {
 	check := ProbeChatGPTModels(context.Background(), path, &stubChatGPTSource{err: errors.New("registry timeout")})
 	require.Equal(t, want, check.Err)
 }
+
+// Every surface that offers thinking levels (the exit gate's effort screen,
+// /model's second step) draws them in the web chip's order, so the sort is
+// pinned here: known levels first in EFFORT_LEVELS order, the levels this
+// build does not rank after them in their original relative order, duplicates
+// and blanks dropped, and no level at all yields nothing to ask.
+func TestOrderedEffortLevelsPutsTheKnownLevelsFirst(t *testing.T) {
+	require.Equal(t, []string{"none", "low", "high"}, orderedEffortLevels([]string{"high", "low", "none"}))
+	require.Equal(t, []string{"minimal", "medium", "xhigh", "max"}, orderedEffortLevels([]string{"max", "xhigh", "medium", "minimal"}))
+	require.Equal(t, []string{"low", "high", "ultra", "turbo"},
+		orderedEffortLevels([]string{"ultra", "high", "low", "turbo"}), "unranked levels follow the known ones, in their own order")
+	require.Equal(t, []string{"low"}, orderedEffortLevels([]string{"low", "low", ""}), "duplicates and blanks collapse")
+	require.Equal(t, []string{"low", "high"}, orderedEffortLevels([]string{"HIGH", " low ", "Low"}))
+	require.Nil(t, orderedEffortLevels(nil))
+	require.Nil(t, orderedEffortLevels([]string{}))
+}

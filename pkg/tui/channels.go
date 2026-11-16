@@ -295,13 +295,24 @@ func approvalConfirmationDisplayText(msg string) string {
 	return strings.Join(strings.Fields(cleaned), " ")
 }
 
+// approvalEffortSuffix names the thinking level a review or hand-off was pinned
+// to, for the confirmation line; "" when none was picked, which is what keeps
+// the line every earlier decision printed byte for byte.
+func approvalEffortSuffix(effort string) string {
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return ""
+	}
+	return " (effort: " + turn.EffortEnglishLabel(effort) + ")"
+}
+
 func approvalConfirmationText(req turn.ToolApprovalRequest, decision turn.ToolApprovalDecision) (string, bool) {
 	// Requesting a review decides nothing: the approval is still open, and the
 	// confirmation says what was set in motion rather than what was allowed.
 	if decision.RequestPlanReview != nil {
 		return "You asked " + planReviewModelDisplay(
 			decision.RequestPlanReview.Provider, decision.RequestPlanReview.Model,
-		) + " to review the plan", true
+		) + " to review the plan" + approvalEffortSuffix(decision.Effort), true
 	}
 	// Continuing the previous review decides nothing either; the line says
 	// who is looking again, from the gate's own record of that review.
@@ -334,7 +345,7 @@ func approvalConfirmationText(req turn.ToolApprovalRequest, decision turn.ToolAp
 		case decision.Approved && decision.HandOffModel != nil:
 			return "You approved forebrain to exit plan mode and hand off to " + planReviewModelDisplay(
 				decision.HandOffModel.Provider, decision.HandOffModel.Model,
-			), true
+			) + approvalEffortSuffix(decision.Effort), true
 		case decision.Approved:
 			return "You approved forebrain to exit plan mode", true
 		case decision.Denied:
@@ -612,6 +623,11 @@ type SelectItem struct {
 	// path here, so a shortened URL still names its protocol (plan 267). ""
 	// means the description wraps as every other list's does.
 	ElideTail string
+	// Mark is a bare glyph drawn one space right of the label — the /model
+	// effort picker's gear on the level the model row is configured with. ""
+	// is no mark. The glyph is not styled here: the renderer colours it, so
+	// this type keeps no lipgloss dependency.
+	Mark string
 }
 
 type Selector interface {

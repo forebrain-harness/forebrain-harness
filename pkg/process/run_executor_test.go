@@ -1095,3 +1095,74 @@ func freshTask(t *testing.T, e *reviewingStubExecutor) string {
 	defer e.mu.Unlock()
 	return e.task
 }
+
+// effortRecordingExecutor keeps the model override the review dispatch pinned
+// onto its context: that override is what the subagent actually builds its
+// client from, so it is the only place a dropped level shows up.
+type effortRecordingExecutor struct {
+	effort   string
+	recorded bool
+}
+
+func (e *effortRecordingExecutor) RunSubagentExec(ctx context.Context, _ run.SubagentExecRequest) (string, error) {
+	if override, ok := run.SubagentModelOverrideFromContext(ctx); ok {
+		e.effort = override.Effort
+		e.recorded = true
+	}
+	return "looks fine", nil
+}
+
+func (e *effortRecordingExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn) {}
+
+func (e *effortRecordingExecutor) SubagentExecutionStarting(context.Context, string) {}
+
+func (e *effortRecordingExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {}
+
+// The reviewer the user picked runs at the level they picked: the override the
+// dispatch pins carries the level, which is what the executor's client reads
+// (an empty one would leave the row's own configuration in charge). A reviewer
+// dispatched at no level pins the empty one, unchanged.
+func TestPlanReviewOverrideCarriesThePickedEffort(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	if err := store.Ensure(context.Background(), "session-1", "session-1"); err != nil {
+		t.Fatalf("ensure conversation session: %v", err)
+	}
+	executor := &effortRecordingExecutor{}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, SessionStore: store}, SubagentExecutor: executor}
+	reviewer := &PlanReviewer{
+		Runner: runner, Model: turn.Model{ID: "row-2", Provider: "openai", Model: "gpt-4o", Effort: "xhigh"},
+		Config: planReviewRowConfig(), AgentName: "main",
+	}
+	ctx := tool.WithToolUseID(tool.WithRunID(llm.WithAgentSessionID(context.Background(), "session-1"), "parent-1"), "plan-review:r1")
+	if _, err := reviewer.Review(ctx, turn.Request{Plan: "# Plan\n\n1. Do the thing."}); err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if !executor.recorded {
+		t.Fatal("the dispatch pinned no model override at all")
+	}
+	if executor.effort != "xhigh" {
+		t.Fatalf("override effort = %q, want the level the user picked", executor.effort)
+	}
+
+	// A review asked without a level pins the empty one: the row decides.
+	plain := &effortRecordingExecutor{}
+	runner.SubagentExecutor = plain
+	noLevel := &PlanReviewer{
+		Runner: runner, Model: turn.Model{ID: "row-2", Provider: "openai", Model: "gpt-4o"},
+		Config: planReviewRowConfig(), AgentName: "main",
+	}
+	if _, err := noLevel.Review(ctx, turn.Request{Plan: "# Plan"}); err != nil {
+		t.Fatalf("Review without a level: %v", err)
+	}
+	if plain.effort != "" {
+		t.Fatalf("override effort = %q, want the empty level that leaves the row in charge", plain.effort)
+	}
+}

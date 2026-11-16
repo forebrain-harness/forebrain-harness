@@ -856,6 +856,44 @@ func TestPlanReviewModelOptionsFollowTheDisplayOrder(t *testing.T) {
 	require.False(t, options[2].Current)
 }
 
+// The exit gate's model picker opens a second screen of thinking levels, so
+// each offer carries the levels its row actually offers and the one the row is
+// configured with. The order is the one every other effort picker draws (the
+// web chip's EFFORT_LEVELS), not the catalog's file order — a row whose
+// reasoning_options list them as high/low/none must still offer none/low/high
+// — and a row that configures no effort says so with "".
+func TestPlanReviewModelOptionsCarryTheRowsEfforts(t *testing.T) {
+	data, err := llm.RepoModelsJSONForTest()
+	require.NoError(t, err)
+	repoCatalog, err := llm.Parse(data)
+	require.NoError(t, err)
+	cat, err := llm.Parse([]byte(`{
+		"openai/gpt-effort-a": {"id": "openai/gpt-effort-a", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["high", "low", "none"]}]},
+		"openai/gpt-effort-b": {"id": "openai/gpt-effort-b", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["medium", "minimal"]}]}
+	}`))
+	require.NoError(t, err)
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() { llm.SetGlobalCatalogForTest(repoCatalog) })
+
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-a", Provider: "openai", Model: "gpt-effort-a", BaseURL: "http://a.test",
+			Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"low"}}`)},
+		{ID: "row-b", Provider: "openai", Model: "gpt-effort-b", BaseURL: "http://b.test"},
+	}}
+	options := PlanReviewModelOptions(cfg, "main", "", "openai", "gpt-effort-a")
+	require.Len(t, options, 2)
+	byID := map[string]PlanReviewModelOption{}
+	for _, o := range options {
+		byID[o.ID] = o
+	}
+	require.Equal(t, []string{"none", "low", "high"}, byID["row-a"].Efforts, "the levels come in the one fixed order, not the catalog's")
+	require.Equal(t, "low", byID["row-a"].DefaultEffort, "the level the row is configured with is what the second screen opens on")
+	require.Equal(t, []string{"minimal", "medium"}, byID["row-b"].Efforts)
+	require.Equal(t, "", byID["row-b"].DefaultEffort, "a row that configures none reports none")
+}
+
 // TestPendingExitPlanRequestResolvesOnlyItsOwnSessionPlan is the gate-layer
 // regression test for the cross-conversation plan leak: the approval card the
 // user is looking at (TUI overlay and web card render the same request) must
@@ -1272,6 +1310,110 @@ func TestDecideHandOffModelValidatedAndRecorded(t *testing.T) {
 	if _, err := service.Decide(context.Background(), "a5", ApprovalReply{HandOffModel: other}); !errors.Is(err, ErrApprovalConflict) {
 		t.Fatalf("different model on the decided action = %v, want ErrApprovalConflict", err)
 	}
+}
+
+// The level the user picked after the model is part of the decision: it lands
+// in answer_json.hand_off_model.effort, and the replay reads it back — the row
+// alone would let the executor run at whatever the row configures, which is
+// exactly what the second screen exists to override.
+func TestHandOffAnswerCarriesThePickedEffort(t *testing.T) {
+	store := &approvalStoreStub{action: &state.Action{ID: "a1", Kind: "exit_plan_mode", Status: state.ActionPending, PayloadJSON: `{}`}}
+	service := ApprovalService{Actions: store}
+	handOff := &Model{ID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3", Effort: "high"}
+
+	result, err := service.Decide(context.Background(), "a1", ApprovalReply{HandOffModel: handOff})
+	require.NoError(t, err)
+	require.True(t, result.Approved)
+	require.Contains(t, store.action.AnswerJSON,
+		`"hand_off_model":{"id":"llm_row2","provider":"zhipuai","model":"glm-5.3","effort":"high"}`)
+
+	got, ok := ActionHandOffModel(store.action)
+	require.True(t, ok)
+	require.Equal(t, "high", got.Effort, "the replay reads the level back")
+
+	// The same decision replays idempotently, effort and all.
+	retry, err := service.Decide(context.Background(), "a1", ApprovalReply{HandOffModel: handOff})
+	require.NoError(t, err)
+	require.True(t, retry.Idempotent)
+}
+
+// An approved answer written before the picker had a second screen carries no
+// effort: it still decodes on every path that reads it back, and behaves the
+// way it always did — the executor runs at the row's own level.
+func TestHandOffAnswerWithoutEffortStillReplays(t *testing.T) {
+	legacy := `{"decision":"accept","clear_context":false,"plan_only":false,` +
+		`"hand_off_model":{"id":"llm_row2","provider":"zhipuai","model":"glm-5.3"}}`
+	act := &state.Action{
+		ID: "a-legacy", Kind: "exit_plan_mode", Status: state.ActionApproved,
+		PayloadJSON: `{}`, AnswerJSON: legacy,
+	}
+
+	// The reply writer's replay path decodes the old shape without complaint
+	// and materializes the same no-op effect it always did.
+	require.NoError(t, (ApprovalService{Actions: &approvalStoreStub{action: act}}).ApplyResolvedEffect(act, "run-1"))
+
+	got, ok := ActionHandOffModel(act)
+	require.True(t, ok, "an answer without an effort is still a hand-off")
+	require.Equal(t, Model{ID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3"}, got,
+		"the missing effort decodes as the empty level, with no other field disturbed")
+
+	// A surface that re-sends the same decision — the row alone, no level —
+	// is a retry, not a conflict: old clients keep working.
+	store := &approvalStoreStub{action: act}
+	retry, err := (ApprovalService{Actions: store}).Decide(context.Background(), "a-legacy",
+		ApprovalReply{HandOffModel: &Model{ID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3"}})
+	require.NoError(t, err)
+	require.True(t, retry.Idempotent)
+	require.Equal(t, legacy, act.AnswerJSON, "an idempotent retry rewrites nothing")
+}
+
+// The level is part of what the user decided: the same row at a different
+// level is a different answer, so a second dispatch does not read as a retry
+// of the first.
+func TestSameHandOffTreatsDifferentEffortsAsDifferent(t *testing.T) {
+	store := &approvalStoreStub{action: &state.Action{ID: "a1", Kind: "exit_plan_mode", Status: state.ActionPending, PayloadJSON: `{}`}}
+	service := ApprovalService{Actions: store}
+	_, err := service.Decide(context.Background(), "a1",
+		ApprovalReply{HandOffModel: &Model{ID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3", Effort: "high"}})
+	require.NoError(t, err)
+
+	// Same row, different level: not the same decision.
+	_, err = service.Decide(context.Background(), "a1",
+		ApprovalReply{HandOffModel: &Model{ID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3", Effort: "low"}})
+	require.ErrorIs(t, err, ErrApprovalConflict)
+
+	// And the level is compared with the same trimming every other field gets,
+	// so a round trip that pads it stays a retry.
+	retry, err := service.Decide(context.Background(), "a1",
+		ApprovalReply{HandOffModel: &Model{ID: "llm_row2", Provider: " zhipuai", Model: "glm-5.3", Effort: " high "}})
+	require.NoError(t, err)
+	require.True(t, retry.Idempotent)
+}
+
+// RunPlanReview rebuilds the reviewer from the run it is given, and that
+// rebuild is where a field goes missing quietly: the review has to reach the
+// reviewer at the level the user picked, or the second screen changes nothing.
+func TestRunPlanReviewKeepsTheModelsEffort(t *testing.T) {
+	ctx := context.Background()
+	stateRoot := t.TempDir()
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", "s1", "# Plan"))
+	reviewer := &modelRecordingReviewer{}
+	err := RunPlanReview(ctx, PlanReviewRun{
+		ActionID: "a-effort", Model: Model{ID: "row-2", Provider: "openai", Model: "gpt-4o", Effort: "xhigh"},
+		SessionID: "s1", StateRoot: stateRoot, ProjectKey: "proj",
+		Reviewer: reviewer,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "xhigh", reviewer.model.Effort, "the picked level reaches the reviewer")
+}
+
+// modelRecordingReviewer keeps the reviewer the run built, which is the only
+// place a dropped field shows up.
+type modelRecordingReviewer struct{ model Model }
+
+func (r *modelRecordingReviewer) Review(_ context.Context, req Request) (PlanReviewResult, error) {
+	r.model = req.Model
+	return PlanReviewResult{Model: req.Model, Text: "looks fine"}, nil
 }
 
 // gateEventsRuns serves one parked run plus a canned event log, the shape the

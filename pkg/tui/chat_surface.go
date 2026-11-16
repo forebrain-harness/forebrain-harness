@@ -661,7 +661,7 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 		return fmt.Errorf("empty action id")
 	}
 	if decision.RequestPlanReview != nil {
-		return s.completeSurfacePlanReviewRequest(ctx, actionID, *decision.RequestPlanReview)
+		return s.completeSurfacePlanReviewRequest(ctx, actionID, *decision.RequestPlanReview, decision.Effort)
 	}
 	if decision.RequestPlanReviewAgain {
 		return s.completeSurfacePlanReviewAgain(ctx, actionID)
@@ -724,7 +724,7 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 		// there (resumeAgentContext), so the conversation never displays them.
 		Permissions: decision.RequestPermissionsResponse, Reason: decision.DenyReason, ClearContext: decision.ClearContext, PlanOnly: decision.PlanOnly,
 		AskAnswerJSON: decision.AskAnswerJSON,
-		HandOffModel:  handOffModelOf(decision.HandOffModel),
+		HandOffModel:  handOffModelOf(decision.HandOffModel, decision.Effort),
 	})
 	if err != nil {
 		return err
@@ -1110,7 +1110,7 @@ func (s *ChatSession) SurfaceTranscript(ctx context.Context, sessionID string, l
 // verdict: the user asked another model to review the plan first. The action
 // stays pending, so the surface's approval loop prompts again once the review
 // is in — with the review attached to the rebuilt request.
-func (s *ChatSession) completeSurfacePlanReviewRequest(ctx context.Context, actionID string, selection turn.PlanReviewModelOption) error {
+func (s *ChatSession) completeSurfacePlanReviewRequest(ctx context.Context, actionID string, selection turn.PlanReviewModelOption, effort string) error {
 	act, err := s.actionSvc().Get(ctx, actionID)
 	if err != nil || act == nil {
 		return fmt.Errorf("load action: %w", err)
@@ -1121,13 +1121,14 @@ func (s *ChatSession) completeSurfacePlanReviewRequest(ctx context.Context, acti
 	if strings.TrimSpace(selection.Model) == "" {
 		return fmt.Errorf("plan review requires a model")
 	}
-	s.runPlanReview(ctx, actionID, selection, nil)
+	s.runPlanReview(ctx, actionID, selection, nil, effort)
 	return nil
 }
 
 // handOffModelOf projects the picked option into the reply's model shape:
-// nil stays nil, the fields are trimmed.
-func handOffModelOf(option *turn.PlanReviewModelOption) *turn.Model {
+// nil stays nil, the fields are trimmed, and the effort rides along so the
+// executor subagent runs at the level the user picked (empty = the row's own).
+func handOffModelOf(option *turn.PlanReviewModelOption, effort string) *turn.Model {
 	if option == nil {
 		return nil
 	}
@@ -1135,6 +1136,7 @@ func handOffModelOf(option *turn.PlanReviewModelOption) *turn.Model {
 		ID:       strings.TrimSpace(option.ID),
 		Provider: strings.TrimSpace(option.Provider),
 		Model:    strings.TrimSpace(option.Model),
+		Effort:   strings.TrimSpace(effort),
 	}
 }
 
@@ -1159,7 +1161,10 @@ func (s *ChatSession) completeSurfacePlanReviewAgain(ctx context.Context, action
 		return fmt.Errorf("there is no earlier review to continue")
 	}
 	prev := req.PreviousPlanReview
-	s.runPlanReview(ctx, actionID, prev.Model, &prev.PlanReviewAgain)
+	// A continuation runs on the reviewer the record carries, at the level the
+	// record carries: "review it again" opens no picker, so it passes no
+	// effort (§0.1 of plan 310).
+	s.runPlanReview(ctx, actionID, prev.Model, &prev.PlanReviewAgain, "")
 	return nil
 }
 
@@ -1175,7 +1180,7 @@ func (s *ChatSession) completeSurfacePlanReviewAgain(ctx context.Context, action
 // out of the shared flow (turn.RunPlanReview), and its closing event is also
 // its storage: this surface no longer keeps the result anywhere, so a restart
 // or another surface reading the conversation serves the same review.
-func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, selection turn.PlanReviewModelOption, again *turn.PlanReviewAgain) {
+func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, selection turn.PlanReviewModelOption, again *turn.PlanReviewAgain, effort string) {
 	if s == nil {
 		return
 	}
@@ -1183,6 +1188,7 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 		ID:       strings.TrimSpace(selection.ID),
 		Provider: strings.TrimSpace(selection.Provider),
 		Model:    strings.TrimSpace(selection.Model),
+		Effort:   strings.TrimSpace(effort),
 	}
 	reviewer, err := s.planReviewerFor(model)
 	if err != nil {

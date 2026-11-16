@@ -435,7 +435,13 @@ func (r *PlanReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanR
 	if err != nil {
 		return turn.PlanReviewResult{}, err
 	}
-	override := run.SubagentModelOverride{ModelID: modelID, Provider: r.Model.Provider, Model: r.Model.Model}
+	// The reviewer's own configuration is what an empty level leaves in charge
+	// (run.ConfiguredModelClientWithEffort): a level picked on the approval
+	// card's second screen is what overrides it.
+	override := run.SubagentModelOverride{
+		ModelID: modelID, Provider: r.Model.Provider, Model: r.Model.Model,
+		Effort: strings.TrimSpace(r.Model.Effort),
+	}
 	task := turn.BuildReReviewPrompt(req)
 	if req.Again == nil {
 		task = turn.BuildPrompt(req)
@@ -469,7 +475,10 @@ func planReviewModelRow(cfg *appcfg.Root, agentName string, model turn.Model) (s
 	if modelID == "" {
 		modelID = run.ModelIDForAgentModel(cfg, agentName, model.Provider, model.Model)
 	}
-	if _, err := run.ConfiguredModelClientWithEffort(cfg, agentName, modelID, model.Provider, model.Model, ""); err != nil {
+	// The row is resolved at the level the review will run at, so a level the
+	// row's protocol cannot send fails here — before the run opens — instead of
+	// reaching a client that would drop it.
+	if _, err := run.ConfiguredModelClientWithEffort(cfg, agentName, modelID, model.Provider, model.Model, strings.TrimSpace(model.Effort)); err != nil {
 		return "", err
 	}
 	return modelID, nil

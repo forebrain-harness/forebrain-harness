@@ -353,6 +353,256 @@ describe('PlanApprovalDock', () => {
     wrapper.unmount()
   })
 
+  // plan 310: a row that offers thinking levels opens a second screen before
+  // anything is sent; the question names that row and the list is the effort
+  // chip's — fixed order, the row's configured level marked with the gear.
+  it("offers the picked row's effort levels before it submits", async () => {
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    approve.mockClear()
+    review.mockClear()
+    const { wrapper } = mountDock(exitPlanAction(), {
+      handOffAvailable: true,
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        {
+          id: 'row-b', provider: 'zhipuai', model: 'glm-5.3',
+          efforts: ['none', 'low', 'medium', 'high'], defaultEffort: 'low',
+        },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-hand-off"]').trigger('click')
+    await nextTick()
+    const models = wrapper.findAll('[data-testid="exit-plan-hand-off-model"]')
+    expect(models).toHaveLength(2)
+    await models[1].trigger('click')
+    await nextTick()
+
+    // Nothing went out: the row that offers levels asks which one first.
+    expect(approve).not.toHaveBeenCalled()
+    expect(review).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="exit-plan-effort-question"]').text()).toBe('zhipuai/glm-5.3 用哪档思考强度？')
+    const options = wrapper.findAll('[data-testid="exit-plan-effort-option"]')
+    expect(options.map((row) => row.get('.elabel').text())).toEqual(['关闭思考', '低', '中', '高'])
+    // The id is written beside every translated label, exactly as the effort
+    // chip does it: in a Chinese interface 「低」 and `low` differ.
+    expect(options.map((row) => (row.find('.ev').exists() ? row.find('.ev').text() : ''))).toEqual(['none', 'low', 'medium', 'high'])
+    wrapper.unmount()
+  })
+
+  it("opens on the row's configured effort and marks it with the setting gear", async () => {
+    const { wrapper } = mountDock(exitPlanAction(), {
+      handOffAvailable: true,
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        {
+          id: 'row-b', provider: 'zhipuai', model: 'glm-5.3',
+          efforts: ['low', 'medium', 'high'], defaultEffort: 'medium',
+        },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-hand-off"]').trigger('click')
+    await nextTick()
+    await wrapper.findAll('[data-testid="exit-plan-hand-off-model"]')[1].trigger('click')
+    await nextTick()
+
+    const on = wrapper.get('[data-testid="exit-plan-effort-option"].is-on')
+    expect(on.get('.elabel').text()).toBe('中')
+    expect(on.find('.echk').exists()).toBe(true)
+    // The gear marks the row's own configured level — an icon with the words in
+    // its tooltip, not a text tag.
+    const gear = on.get('.etag')
+    expect(gear.attributes('aria-label')).toBe('模型设置')
+    expect(gear.attributes('title')).toBe('模型设置')
+    expect(gear.text()).toBe('')
+    expect(on.text()).not.toContain('模型设置')
+    wrapper.unmount()
+  })
+
+  it('offers 默认 for a row with no configured effort', async () => {
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    review.mockClear()
+    const { wrapper } = mountDock(exitPlanAction(), {
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', efforts: ['low', 'high'] },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-ask-review"]').trigger('click')
+    await nextTick()
+    await wrapper.findAll('[data-testid="plan-review-model"]')[1].trigger('click')
+    await nextTick()
+
+    const options = wrapper.findAll('[data-testid="exit-plan-effort-option"]')
+    expect(options.map((row) => row.get('.elabel').text())).toEqual(['默认', '低', '高'])
+    expect(options[0].get('.elabel').text()).toBe('默认')
+    // No row is configured with a level, so no gear anywhere.
+    expect(wrapper.findAll('.etag')).toHaveLength(0)
+
+    await options[0].trigger('click')
+    await flushPromises()
+    // The bare Default entry sends the empty level, which leaves the row's own
+    // configuration in charge.
+    expect(review).toHaveBeenCalledWith('act-exit', {
+      provider: 'zhipuai', model: 'glm-5.3', modelId: 'row-b',
+    })
+    wrapper.unmount()
+  })
+
+  it('skips the effort step for a row with no levels', async () => {
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    review.mockClear()
+    const { wrapper } = mountDock(exitPlanAction(), {
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3' },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-ask-review"]').trigger('click')
+    await nextTick()
+    await wrapper.findAll('[data-testid="plan-review-model"]')[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="exit-plan-effort-option"]').exists()).toBe(false)
+    expect(review).toHaveBeenCalledWith('act-exit', {
+      provider: 'zhipuai', model: 'glm-5.3', modelId: 'row-b',
+    })
+    wrapper.unmount()
+  })
+
+  it('Esc from the effort list returns to the models without a request', async () => {
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    approve.mockClear()
+    review.mockClear()
+    const { wrapper, store } = mountDock(exitPlanAction(), {
+      handOffAvailable: true,
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', efforts: ['low', 'high'], defaultEffort: 'high' },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-hand-off"]').trigger('click')
+    await nextTick()
+    await wrapper.findAll('[data-testid="exit-plan-hand-off-model"]')[1].trigger('click')
+    await nextTick()
+    expect(wrapper.findAll('[data-testid="exit-plan-effort-option"]')).toHaveLength(2)
+
+    // One Esc: back to the model list, still a hand-off, nothing sent.
+    await wrapper.get('[data-testid="exit-plan-approval"]').trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(wrapper.findAll('[data-testid="exit-plan-effort-option"]')).toHaveLength(0)
+    expect(wrapper.get('.xp-pick .cap').text()).toBe('交给哪个模型执行？')
+    expect(store.modelPickPurpose.value['act-exit']).toBe('handoff')
+    expect(approve).not.toHaveBeenCalled()
+    expect(review).not.toHaveBeenCalled()
+
+    // A second Esc folds the picker away; the hand-off purpose survives, so
+    // re-opening and picking still hands off (plan 289).
+    await wrapper.get('[data-testid="exit-plan-approval"]').trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(wrapper.findAll('.xp-pick')).toHaveLength(0)
+    expect(approve).not.toHaveBeenCalled()
+    expect(review).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('hands the plan over with the effort the user picked', async () => {
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    approve.mockClear()
+    const { wrapper } = mountDock(exitPlanAction(), {
+      handOffAvailable: true,
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', efforts: ['low', 'medium', 'high'], defaultEffort: 'low' },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-hand-off"]').trigger('click')
+    await nextTick()
+    await wrapper.findAll('[data-testid="exit-plan-hand-off-model"]')[1].trigger('click')
+    await nextTick()
+    await wrapper.findAll('[data-testid="exit-plan-effort-option"]')[2].trigger('click')
+    await flushPromises()
+    expect(approve).toHaveBeenCalledWith('act-exit', {
+      handOffModel: { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', effort: 'high' },
+    })
+    wrapper.unmount()
+  })
+
+  it('asks for a review with the effort the user picked', async () => {
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    review.mockClear()
+    const { wrapper } = mountDock(exitPlanAction(), {
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-ask-review"]').trigger('click')
+    await nextTick()
+    await wrapper.findAll('[data-testid="plan-review-model"]')[1].trigger('click')
+    await nextTick()
+    // Confirming the screen's own default sends that level, not the empty one.
+    await wrapper.findAll('[data-testid="exit-plan-effort-option"]')[1].trigger('click')
+    await flushPromises()
+    expect(review).toHaveBeenCalledWith('act-exit', {
+      provider: 'zhipuai', model: 'glm-5.3', modelId: 'row-b', effort: 'medium',
+    })
+    wrapper.unmount()
+  })
+
+  it('does not send effort when the review is asked again', async () => {
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    review.mockClear()
+    const { wrapper } = mountDock(exitPlanAction(), {
+      previousPlanReview: {
+        reviewId: 'plan-review:1',
+        agentId: 'agent-r1',
+        model: { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', efforts: ['low', 'high'], defaultEffort: 'high' },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-review-again"]').trigger('click')
+    await flushPromises()
+    expect(review).toHaveBeenCalledWith('act-exit', { again: true })
+    wrapper.unmount()
+  })
+
+  // The level names are i18n's, not the template's: the Chinese prototype is a
+  // prototype, and an English reader must see English (owner 2026-11-15).
+  it('names the levels in the interface language', async () => {
+    setLocale('en')
+    try {
+      const { wrapper } = mountDock(exitPlanAction(), {
+        planReviewModels: [
+          { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+          { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', efforts: ['low', 'high'], defaultEffort: 'high' },
+        ],
+      })
+      await flushPromises()
+      await wrapper.get('[data-testid="exit-plan-ask-review"]').trigger('click')
+      await nextTick()
+      await wrapper.findAll('[data-testid="plan-review-model"]')[1].trigger('click')
+      await nextTick()
+
+      expect(wrapper.get('[data-testid="exit-plan-effort-question"]').text())
+        .toBe('Which reasoning effort should zhipuai/glm-5.3 use?')
+      const options = wrapper.findAll('[data-testid="exit-plan-effort-option"]')
+      expect(options.map((row) => row.get('.elabel').text())).toEqual(['Low', 'High'])
+      expect(wrapper.get('.etag').attributes('aria-label')).toBe('Model setting')
+      expect(wrapper.get('[data-testid="exit-plan-effort-back"]').text()).toContain('Back to models')
+      wrapper.unmount()
+    } finally {
+      setLocale('zh')
+    }
+  })
+
   it('leaves a coding plan on the four verdicts it always had', async () => {
     const { wrapper } = mountDock(exitPlanAction(), {}, undefined, { sessionType: 'coding' })
     await flushPromises()

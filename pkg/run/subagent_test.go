@@ -9288,3 +9288,77 @@ func TestToolCompletedPayloadPrefersTheCapturedShape(t *testing.T) {
 		t.Fatalf("no-capture shape must keep the envelope: %#v", plain)
 	}
 }
+
+// The level the user picked on the approval card's second screen is the level
+// the executor subagent runs at: it overrides the row's own configuration, and
+// only for the row the hand-off named. A hand-off that named no level, and a
+// row that was not handed off at all, keep the row's own configuration — which
+// is what every record written before the second screen existed relies on.
+func TestHandOffPinnedEffortReachesTheOverride(t *testing.T) {
+	cfg := func() *appcfg.Root {
+		on := true
+		return &appcfg.Root{Agents: appcfg.AgentsSection{
+			Defaults: appcfg.AgentDefaults{EnableSubagent: &on},
+			Definitions: map[string]appcfg.AgentDefinition{
+				"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{}},
+			},
+		}}
+	}
+	fix := newModelArgumentFixture(t, cfg())
+	handedOff := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-effort-hand", BaseURL: "https://hand.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-hand", SubagentAllowed: true,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+	})
+	other := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-effort-other", BaseURL: "https://other.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-other", SubagentAllowed: true,
+		ParamsJSON: `{"reasoning":{"effort":"medium"}}`,
+	})
+	ctx := dispatchTestCtx()
+
+	// The approval named a level: it wins over the row's own.
+	if _, err := state.HandOffPlan(fix.fac.Owner.StateRoot(), "session-1", state.ModeAgent, state.PlanHandOff{
+		ModelID: handedOff.ID, Provider: handedOff.Provider, Model: handedOff.Model, Effort: "xhigh",
+	}); err != nil {
+		t.Fatalf("hand off: %v", err)
+	}
+	if got := handOffPlanEffort(ctx, fix.fac); got != "xhigh" {
+		t.Fatalf("handOffPlanEffort = %q, want the level the approval pinned", got)
+	}
+	pin, err := subagentModelOverrideForRef(ctx, fix.fac, handedOff.ID)
+	if err != nil {
+		t.Fatalf("subagentModelOverrideForRef(hand-off row): %v", err)
+	}
+	if pin.Effort != "xhigh" {
+		t.Fatalf("pinned effort = %q, want the level the user picked", pin.Effort)
+	}
+
+	// A row that was not handed off keeps its own configuration, even while a
+	// hand-off for another row is on record: the override is not a global.
+	otherPin, err := subagentModelOverrideForRef(ctx, fix.fac, other.ID)
+	if err != nil {
+		t.Fatalf("subagentModelOverrideForRef(other row): %v", err)
+	}
+	if otherPin.Effort != "medium" {
+		t.Fatalf("pinned effort = %q, want that row's own level", otherPin.Effort)
+	}
+
+	// The approval picked the model and no level (a row offering none, or a
+	// record written before the second screen existed): the row decides.
+	if _, err := state.HandOffPlan(fix.fac.Owner.StateRoot(), "session-1", state.ModeAgent, state.PlanHandOff{
+		ModelID: handedOff.ID, Provider: handedOff.Provider, Model: handedOff.Model,
+	}); err != nil {
+		t.Fatalf("hand off without a level: %v", err)
+	}
+	if got := handOffPlanEffort(ctx, fix.fac); got != "" {
+		t.Fatalf("handOffPlanEffort = %q, want none", got)
+	}
+	fallback, err := subagentModelOverrideForRef(ctx, fix.fac, handedOff.ID)
+	if err != nil {
+		t.Fatalf("subagentModelOverrideForRef(hand-off row): %v", err)
+	}
+	if fallback.Effort != "low" {
+		t.Fatalf("pinned effort = %q, want the row's own level", fallback.Effort)
+	}
+}

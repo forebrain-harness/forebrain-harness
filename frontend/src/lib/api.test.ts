@@ -119,6 +119,52 @@ describe('forebrain api primary agents', () => {
     expect(path).toBe('/api/actions/action-2/approve')
     expect(JSON.parse(String(init.body))).toEqual({ reason: '', plan_only: true })
   })
+
+  // The level picked on the approval card's second screen is part of the
+  // request, in both shapes the card sends it: inside hand_off_model for a
+  // hand-off, and as its own field for a review. A request that names no level
+  // sends no field at all, which is what tells the engine the row decides.
+  it('sends hand_off_model.effort and plan-review effort on the wire', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 'action-3', kind: 'exit_plan_mode', status: 'approved', payload_json: '{}', created_at: 1, updated_at: 2 }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await forebrainApi.actionsApprove('action-3', {
+      handOffModel: { id: 'row-2', provider: 'deepseek', model: 'deepseek-v4', effort: 'xhigh' },
+    })
+    const [, handOffInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(handOffInit.body))).toEqual({
+      reason: '',
+      hand_off_model: { id: 'row-2', provider: 'deepseek', model: 'deepseek-v4', effort: 'xhigh' },
+    })
+
+    await forebrainApi.actionsApprove('action-4', {
+      handOffModel: { id: 'row-2', provider: 'deepseek', model: 'deepseek-v4' },
+    })
+    const [, bareInit] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(String(bareInit.body))).toEqual({
+      reason: '',
+      hand_off_model: { id: 'row-2', provider: 'deepseek', model: 'deepseek-v4' },
+    })
+
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({}) })
+    await forebrainApi.actionPlanReview('action-5', {
+      provider: 'deepseek',
+      model: 'deepseek-v4',
+      modelId: 'row-2',
+      effort: 'high',
+    })
+    const [reviewPath, reviewInit] = fetchMock.mock.calls[2] as [string, RequestInit]
+    expect(reviewPath).toBe('/api/actions/action-5/plan-review')
+    expect(JSON.parse(String(reviewInit.body))).toEqual({
+      provider: 'deepseek',
+      model: 'deepseek-v4',
+      model_id: 'row-2',
+      effort: 'high',
+    })
+  })
 })
 
 /**

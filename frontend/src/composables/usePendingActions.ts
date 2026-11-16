@@ -1,6 +1,7 @@
 import { computed, ref, watch, type Ref } from 'vue'
 import { GatewayHttpError, getErrorMessage, forebrainApi, type PlanReviewModelOption, type SessionApprovalRequest } from '@/lib/api'
 import { approvalGateOf, type ApprovalFacts } from '@/lib/approvalGates'
+import { EFFORT_LEVELS, effortLevelLabel } from '@/lib/effortLabel'
 import { useI18n } from '@/locales'
 import {
   approvalDecisions,
@@ -34,6 +35,32 @@ export type ActionRow = {
   permissionSuggestion?: PermissionSuggestionRecord | null
   agentId?: string
   subagentType?: string
+}
+
+/** One row of the picker's second screen: the level's id, whether it is the
+ *  one the model row is configured with (the gear), and the localized label. */
+export type PlanEffortOption = { id: string; fromSetting: boolean; label: string }
+
+/**
+ * The thinking levels the approval card offers for one model, in the one order
+ * every effort picker draws (EFFORT_LEVELS, the seven known ones first, then
+ * any level this build does not rank), mirroring the web effort chip's own
+ * list: a row that configures a level opens on it and marks it with the
+ * setting gear, and the bare 「默认」 entry leads only when the row configures
+ * none — the approval card has no session-pinned level to duplicate, so that is
+ * the only case where the empty level is a real choice.
+ */
+export function planEffortOptions(model: PlanReviewModelOption | null): PlanEffortOption[] {
+  const efforts = model?.efforts ?? []
+  const known = EFFORT_LEVELS.filter((level) => efforts.includes(level))
+  const extra = efforts.filter((level) => !(EFFORT_LEVELS as readonly string[]).includes(level))
+  const configured = String(model?.defaultEffort ?? '')
+  const ids = configured === '' ? ['', ...known, ...extra] : [...known, ...extra]
+  return ids.map((id) => ({
+    id,
+    fromSetting: id !== '' && id === configured,
+    label: effortLevelLabel(id),
+  }))
 }
 
 export type AskAction = {
@@ -82,6 +109,13 @@ export function usePendingActions(options: {
   /** Why a model picker is open: picking a reviewer, or picking the model a
    *  plan is handed to (plan 283). The list is the same one either way. */
   const modelPickPurpose = ref<Record<string, 'review' | 'handoff'>>({})
+  /** Which of the picker's two screens is open (plan 310): the model list, or
+   *  the thinking levels of the row chosen on it. */
+  const modelPickStep = ref<Record<string, 'model' | 'effort'>>({})
+  /** The row carried from the first screen to the second, and the level the
+   *  second opens on. Nothing is sent until the level screen answers. */
+  const pickedModel = ref<Record<string, PlanReviewModelOption | null>>({})
+  const pickedEffort = ref<Record<string, string>>({})
   /** Whether an exit-plan card's feedback field is open, by action id. The
    *  field appears only after「继续规划」is chosen, the way the terminal's
    *  overlay asks for feedback after the verdict, and folds away again on any
@@ -417,6 +451,10 @@ export function usePendingActions(options: {
     const open = !modelPicking.value[a.id] || modelPickPurpose.value[a.id] !== purpose
     modelPicking.value = { ...modelPicking.value, [a.id]: open }
     modelPickPurpose.value = { ...modelPickPurpose.value, [a.id]: purpose }
+    // Opening always starts on the model list, with nothing carried over from
+    // a previous pass.
+    modelPickStep.value = { ...modelPickStep.value, [a.id]: 'model' }
+    clearPickedEffort(a)
   }
 
   /** Esc closes whichever picker is open without changing what it was for:
@@ -424,31 +462,103 @@ export function usePendingActions(options: {
    *  list and silently turn a hand-off into a review (plan 289). */
   function closeModelPicker(a: ActionRow) {
     modelPicking.value = { ...modelPicking.value, [a.id]: false }
+    clearPickedEffort(a)
+  }
+
+  /** Drops what the second screen was carrying: the row it was about and the
+   *  level it opened on. The key stays on 'model' — the screen the picker
+   *  returns to. */
+  function clearPickedEffort(a: ActionRow) {
+    pickedModel.value = { ...pickedModel.value, [a.id]: null }
+    pickedEffort.value = { ...pickedEffort.value, [a.id]: '' }
+    modelPickStep.value = { ...modelPickStep.value, [a.id]: 'model' }
+  }
+
+  /** Esc on the level screen goes back one step, not out of the picker: the
+   *  model list is exactly as it was, and what it was open for is unchanged
+   *  (289's rule — Esc never rewrites the purpose). */
+  function backToModels(a: ActionRow) {
+    const purpose = modelPickPurpose.value[a.id] ?? 'review'
+    pickedModel.value = { ...pickedModel.value, [a.id]: null }
+    pickedEffort.value = { ...pickedEffort.value, [a.id]: '' }
+    modelPickStep.value = { ...modelPickStep.value, [a.id]: 'model' }
+    modelPickPurpose.value = { ...modelPickPurpose.value, [a.id]: purpose }
+  }
+
+  /** Picking a model opens the level screen when the row offers levels, and
+   *  decides straight away when it offers none — the one-step pick a row
+   *  without levels has always had (plan 283). */
+  function choosePlanModel(a: ActionRow, model: PlanReviewModelOption) {
+    // Whether the second screen opens is decided by the levels the row offers,
+    // not by the length of the drawn list: a row that configures no default
+    // still gets a bare 「默认」 entry, so the two counts differ.
+    if ((model.efforts ?? []).length === 0) {
+      if (pickPurposeFor(a) === 'handoff') {
+        void handOffTo(a, model)
+        return
+      }
+      void requestReview(a, model)
+      return
+    }
+    pickedModel.value = { ...pickedModel.value, [a.id]: model }
+    pickedEffort.value = { ...pickedEffort.value, [a.id]: String(model.defaultEffort ?? '') }
+    modelPickStep.value = { ...modelPickStep.value, [a.id]: 'effort' }
+  }
+
+  function pickPurposeFor(a: ActionRow): 'review' | 'handoff' {
+    return modelPickPurpose.value[a.id] ?? 'review'
+  }
+
+  /** Answering the level screen is the decision: the model carried from the
+   *  first screen travels with the level, and the empty level (the bare
+   *  「默认」 row) leaves the model row's own configuration in charge. */
+  function choosePlanEffort(a: ActionRow, effort: string) {
+    const model = pickedModel.value[a.id] ?? null
+    const purpose = pickPurposeFor(a)
+    clearPickedEffort(a)
+    if (!model) return
+    if (purpose === 'handoff') {
+      void handOffTo(a, model, effort)
+      return
+    }
+    void requestReview(a, model, effort)
   }
 
   /** Asking for a review does not decide anything: the approval stays pending,
    * the review runs in the background, and the card learns its progress from
-   * the conversation's events. */
-  async function requestReview(a: ActionRow, model: PlanReviewModelOption) {
+   * the conversation's events. `effort` is the level picked on the second
+   * screen; omitted leaves the row's own configuration in charge. */
+  async function requestReview(a: ActionRow, model: PlanReviewModelOption, effort?: string) {
     modelPicking.value = { ...modelPicking.value, [a.id]: false }
     // The row the user picked goes with the pair: two rows of one
     // provider/model are two reviewers, and the row decides endpoint and key.
     await submitAction(a.id, () =>
-      forebrainApi.actionPlanReview(a.id, { provider: model.provider, model: model.model, modelId: model.id }),
+      forebrainApi.actionPlanReview(a.id, {
+        provider: model.provider,
+        model: model.model,
+        modelId: model.id,
+        ...(effort ? { effort } : {}),
+      }),
     )
   }
 
   /** Handing the plan to another model is a decision: the engine approves the
    *  exit-plan request with `hand_off_model`, so the primary agent dispatches
-   *  one executor subagent on that row (plan 283). */
-  async function handOffTo(a: ActionRow, model: PlanReviewModelOption) {
+   *  one executor subagent on that row (plan 283). The level picked on the
+   *  second screen rides along; omitted leaves the row's own. */
+  async function handOffTo(a: ActionRow, model: PlanReviewModelOption, effort?: string) {
     closePlanFeedback(a)
     modelPicking.value = { ...modelPicking.value, [a.id]: false }
     await submitAction(a.id, () =>
       forebrainApi.actionsApprove(a.id, {
         // The engine hands off by configured row id — two rows of one
         // provider/model are different executors — and refuses an empty one.
-        handOffModel: { id: String(model.id ?? ''), provider: model.provider, model: model.model },
+        handOffModel: {
+          id: String(model.id ?? ''),
+          provider: model.provider,
+          model: model.model,
+          ...(effort ? { effort } : {}),
+        },
       }),
     )
   }
@@ -606,6 +716,13 @@ export function usePendingActions(options: {
     closePlanFeedback,
     toggleModelPicker,
     closeModelPicker,
+    modelPickStep,
+    pickedModel,
+    pickedEffort,
+    planEffortOptions,
+    choosePlanModel,
+    choosePlanEffort,
+    backToModels,
     requestReview,
     handOffTo,
     reviewAgain,

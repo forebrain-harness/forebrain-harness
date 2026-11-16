@@ -485,6 +485,7 @@ func actionHandOffModel(act *state.Action) (state.PlanHandOff, bool) {
 			ID       string `json:"id"`
 			Provider string `json:"provider"`
 			Model    string `json:"model"`
+			Effort   string `json:"effort"`
 		} `json:"hand_off_model"`
 	}
 	_ = json.Unmarshal([]byte(act.AnswerJSON), &answer)
@@ -495,6 +496,7 @@ func actionHandOffModel(act *state.Action) (state.PlanHandOff, bool) {
 		ModelID:  strings.TrimSpace(answer.HandOffModel.ID),
 		Provider: strings.TrimSpace(answer.HandOffModel.Provider),
 		Model:    strings.TrimSpace(answer.HandOffModel.Model),
+		Effort:   strings.TrimSpace(answer.HandOffModel.Effort),
 	}
 	if handOff.Model == "" {
 		return state.PlanHandOff{}, false

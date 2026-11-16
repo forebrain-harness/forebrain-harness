@@ -10502,6 +10502,111 @@ func TestGatewayApproveHandOffModel(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "hand off needs a git repository")
 }
 
+// installRowEfforts gives the twin-row fixture's rows the thinking levels the
+// model table would project, the way adopting a configuration installs them.
+func installRowEfforts(t *testing.T) {
+	t.Helper()
+	llm.SetModelOverrides(
+		map[string]llm.ModelOverride{
+			"row-1": {Efforts: []string{"low", "high"}},
+			"row-2": {Efforts: []string{"high", "low"}},
+		},
+		map[string]string{"row-1": "openai/gpt-5.1", "row-2": "openai/gpt-5.1"},
+	)
+	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
+}
+
+// The level the user picked on the picker's second screen travels with the
+// hand-off: it lands in answer_json.hand_off_model, where the executor
+// dispatch reads it, and a request that names no level keeps the answer shape
+// every older client sends.
+func TestGatewayApproveHandOffCarriesEffort(t *testing.T) {
+	ctx := context.Background()
+	installRowEfforts(t)
+	s, _, actions, actionID, _ := handOffExitPlanServer(t, twinRowPlanReviewConfig())
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/approve",
+		map[string]any{"hand_off_model": map[string]string{
+			"id": "row-2", "provider": "openai", "model": "gpt-5.1", "effort": "high"}},
+		s.handleActionsApprove, "id", actionID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	act, err := actions.Get(ctx, actionID)
+	require.NoError(t, err)
+	require.Contains(t, act.AnswerJSON,
+		`"hand_off_model":{"id":"row-2","provider":"openai","model":"gpt-5.1","effort":"high"}`)
+
+	// A client that predates the second screen sends the row alone: the answer
+	// carries no effort field, exactly the shape it always wrote.
+	legacy, _, legacyActions, legacyAction, _ := handOffExitPlanServer(t, twinRowPlanReviewConfig())
+	rec = cronRequest(t, legacy, http.MethodPost, "/api/actions/"+legacyAction+"/approve",
+		map[string]any{"hand_off_model": map[string]string{"id": "row-2", "provider": "openai", "model": "gpt-5.1"}},
+		legacy.handleActionsApprove, "id", legacyAction)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	legacyAct, err := legacyActions.Get(ctx, legacyAction)
+	require.NoError(t, err)
+	require.Contains(t, legacyAct.AnswerJSON, `"hand_off_model":{"id":"row-2","provider":"openai","model":"gpt-5.1"}`)
+	require.NotContains(t, legacyAct.AnswerJSON, "effort", "no level asked for, none written")
+}
+
+// A level the row does not offer is a request the picker could never make: it
+// is refused before anything resolves, and the approval stays pending.
+func TestGatewayApproveRejectsAnEffortTheRowDoesNotOffer(t *testing.T) {
+	ctx := context.Background()
+	installRowEfforts(t)
+	s, _, actions, actionID, _ := handOffExitPlanServer(t, twinRowPlanReviewConfig())
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/approve",
+		map[string]any{"hand_off_model": map[string]string{
+			"id": "row-2", "provider": "openai", "model": "gpt-5.1", "effort": "max"}},
+		s.handleActionsApprove, "id", actionID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "reasoning effort is not offered for this model")
+	act, err := actions.Get(ctx, actionID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActionPending, act.Status, "a refused level resolves nothing")
+}
+
+// A review request names the level too: the reviewer runs at the level the
+// user picked on the second screen, and a level this row does not offer is
+// refused before the review starts — the picker could never have offered it.
+func TestPlanReviewCarriesEffortAndRejectsAnUnknownLevel(t *testing.T) {
+	installRowEfforts(t)
+	s, _, _, actionID, _ := exitPlanServer(t, twinRowPlanReviewConfig())
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1", "model_id": "row-2", "effort": "max"},
+		s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "reasoning effort is not offered for this model")
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1", "model_id": "row-2", "effort": "high"},
+		s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	// A client that predates the second screen sends no level and is still
+	// accepted: the reviewer runs at the row's own configuration.
+	plain, _, _, plainAction, _ := exitPlanServer(t, twinRowPlanReviewConfig())
+	rec = cronRequest(t, plain, http.MethodPost, "/api/actions/"+plainAction+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1", "model_id": "row-2"},
+		plain.handleActionPlanReview, "id", plainAction)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+}
+
+// "Review it again" runs on the reviewer the record carries, so the level the
+// body names is ignored exactly as its model pair is: a stale page cannot
+// change the level of a continuation.
+func TestPlanReviewAgainIgnoresTheBodysEffort(t *testing.T) {
+	installRowEfforts(t)
+	s, runs, _, actionID, _ := exitPlanServer(t, twinRowPlanReviewConfig())
+	seedPreviousReview(t, runs, "plan-review:r1")
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]any{"again": true, "model_id": "ignored", "provider": "ignored", "model": "ignored", "effort": "max"},
+		s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+}
+
 // The approval-request wire carries the two facts the new buttons need: the
 // previous review a "review it again" would continue, and whether a hand-off
 // is on offer at all.
@@ -10539,6 +10644,66 @@ func TestSessionApprovalRequestCarriesPreviousReviewAndHandOff(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	require.False(t, out.HandOffAvailable)
 	require.NotNil(t, out.PreviousPlanReview)
+}
+
+// Picking a model on the card opens a second screen of thinking levels, so the
+// wire carries what that screen shows: the row's levels in the one order every
+// effort picker draws (not the catalog's), the level the row is configured
+// with — the option it opens on — and nothing at all for a row that offers no
+// level, which is what keeps the picker on the model alone. The previous
+// review's model is the same shape, because it is the same offer.
+func TestSessionApprovalRequestCarriesRowEfforts(t *testing.T) {
+	// What adopting a configuration installs for each row's capabilities; the
+	// fixture names them here because it does not go through the model table.
+	llm.SetModelOverrides(
+		map[string]llm.ModelOverride{
+			"row-1": {Efforts: []string{"high", "low"}},
+			"row-2": {Efforts: []string{"medium"}},
+		},
+		map[string]string{"row-1": "openai/gpt-5.1", "row-2": "openai/gpt-5.1"},
+	)
+	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
+
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-1", Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://one.test/v1",
+			Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`)},
+		{ID: "row-2", Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://two.test/v1"},
+		{ID: "row-3", Provider: "openai", Model: "gpt-effort-none", APIKey: "sk-test", BaseURL: "http://three.test/v1"},
+	}}
+	s, runs, _, _, _ := exitPlanServer(t, cfg)
+	seedPreviousReview(t, runs, "plan-review:r1")
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/approval-request", nil, s.handleSessionApprovalRequest, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	type wireModel struct {
+		ID            string   `json:"id"`
+		Efforts       []string `json:"efforts"`
+		DefaultEffort string   `json:"default_effort"`
+	}
+	var out struct {
+		PlanReviewModels   []wireModel `json:"plan_review_models"`
+		PreviousPlanReview *struct {
+			Model wireModel `json:"model"`
+		} `json:"previous_plan_review"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out.PlanReviewModels, 3)
+	byID := map[string]wireModel{}
+	for _, option := range out.PlanReviewModels {
+		byID[option.ID] = option
+	}
+	require.Equal(t, []string{"low", "high"}, byID["row-1"].Efforts, "the levels come in the picker's order, not the row's")
+	require.Equal(t, "high", byID["row-1"].DefaultEffort, "the second screen opens on the level the row is configured with")
+	require.Equal(t, []string{"medium"}, byID["row-2"].Efforts)
+	require.Empty(t, byID["row-2"].DefaultEffort, "a row that configures no level opens on the bare list")
+	require.Empty(t, byID["row-3"].Efforts, "a row with no level says nothing, and the picker asks nothing")
+	require.Empty(t, byID["row-3"].DefaultEffort)
+
+	// The previous review's model is an offer of this same list, so it carries
+	// the same shape.
+	require.NotNil(t, out.PreviousPlanReview)
+	require.Equal(t, "row-2", out.PreviousPlanReview.Model.ID)
+	require.Equal(t, []string{"medium"}, out.PreviousPlanReview.Model.Efforts)
 }
 
 // "Review it again" continues the previous review's own subagent

@@ -7602,6 +7602,12 @@ type panelLine struct {
 	// wrapping. Only the /model picker sets it — an endpoint whose path names
 	// the protocol — so every other list still wraps.
 	elideTail string
+	// mark, when set, is an already-styled glyph drawn one space right of the
+	// name, ahead of any description column: the /model effort picker's gear on
+	// the level the model row is configured with. It stays against the name
+	// because out in the description column it would read as a fact about the
+	// endpoint rather than about the level (owner 2026-11-15).
+	mark string
 }
 
 // rows wraps the line at width.

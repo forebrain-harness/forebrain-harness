@@ -1652,7 +1652,7 @@ export interface ActionApprovalBody {
    * any other kind of gate, and never together with `clearContext` or
    * `planOnly`.
    */
-  handOffModel?: { id: string; provider: string; model: string }
+  handOffModel?: { id: string; provider: string; model: string; effort?: string }
 }
 
 /** One model a pending exit-plan approval may be handed to for a review. */
@@ -1669,6 +1669,13 @@ export interface PlanReviewModelOption {
   /** Where this row's requests go — shown under the name so two rows of one
    * provider/model are telling apart; never compared. */
   endpoint?: string
+  /** The thinking levels this row offers, in the one order every effort picker
+   * draws; absent (or empty) means nothing to ask. Picking this model opens the
+   * card's second screen on them. */
+  efforts?: string[]
+  /** The level this row is configured with: the one that screen opens on and
+   * marks with the setting gear; absent when the row configures none. */
+  defaultEffort?: string
 }
 
 /** One completed review a pending exit-plan approval already collected. */
@@ -3761,8 +3768,9 @@ export const forebrainApi = {
   },
 
   /** Ask one configured model to review a pending exit-plan approval. The
-   * review runs in the background; its events are its progress. */
-  actionPlanReview(id: string, body: { provider?: string; model?: string; modelId?: string; again?: boolean }) {
+   * review runs in the background; its events are its progress. `effort` is the
+   * thinking level picked after the model; omitted leaves the row's own. */
+  actionPlanReview(id: string, body: { provider?: string; model?: string; modelId?: string; effort?: string; again?: boolean }) {
     return gatewayFetch(`/api/actions/${encodeURIComponent(id)}/plan-review`, {
       method: 'POST',
       headers: {

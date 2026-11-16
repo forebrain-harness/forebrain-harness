@@ -613,7 +613,10 @@ func TestChooseModelUsesTheModelsOwnEffortLevels(t *testing.T) {
 		for _, item := range res.Picker.Items {
 			labels = append(labels, item.Label)
 		}
-		require.Equal(t, tc.want, labels, tc.model)
+		// This conversation pins no level, so the bare 「Default」 entry leads
+		// the list, exactly as the web's effort chip draws it; the model's own
+		// levels follow, in the one fixed order.
+		require.Equal(t, append([]string{""}, tc.want...), labels, tc.model)
 	}
 
 	// A level this model does not offer is refused rather than written.
@@ -720,7 +723,7 @@ func TestChooseReasoningEffortKeepsTheTwinRowItPicked(t *testing.T) {
 
 	res = Choose(f.ctx, SlashChoice{Command: "model-effort", Value: high})
 	require.True(t, res.Handled)
-	require.Equal(t, "Reasoning effort set to high.", res.Reply)
+	require.Equal(t, "Reasoning effort set to High.", res.Reply, "the reply names the level by its English display label")
 	require.Len(t, f.handler.chosen, 2, "calls = %v", f.calls())
 	require.Equal(t, second.Value, f.handler.chosen[1].ID, "the effort moved the conversation to the first twin")
 	require.NotEqual(t, items[0].Value, f.handler.chosen[1].ID)
@@ -778,7 +781,7 @@ func TestChooseReasoningEffortDoesNotWriteTheConfigFile(t *testing.T) {
 	value := encodeEffortChoice(f.choiceID(t, "openai", m.APIModel), f.choiceLabel(t, "openai", m.APIModel), "high", false)
 	res := Choose(f.ctx, SlashChoice{Command: "model-effort", Value: value})
 	require.True(t, res.Handled)
-	require.Equal(t, "Reasoning effort set to high.", res.Reply)
+	require.Equal(t, "Reasoning effort set to High.", res.Reply, "the reply names the level by its English display label")
 	require.NotEqual(t, -1, slices.Index(f.calls(), "select-effort(s1,high)"), "explicit effort pointer not passed: %v", f.calls())
 	after, err := os.ReadFile(f.cfgPath)
 	require.NoError(t, err)
@@ -1005,4 +1008,172 @@ func TestPlanReviewSelectionMatchesTheRowItNames(t *testing.T) {
 	anonymous := PlanReviewModelOption{Provider: "openai", Model: "gpt-4o"}
 	require.True(t, anonymous.MatchesSelection("", "openai", "gpt-4o"))
 	require.False(t, anonymous.MatchesSelection("row-1", "openai", "gpt-4o"))
+}
+
+// installRowEfforts gives one configured row the thinking levels the model
+// table would project, the way adopting a configuration installs them.
+func installRowEfforts(t *testing.T, rowID, pair string, efforts []string) {
+	t.Helper()
+	llm.SetModelOverrides(
+		map[string]llm.ModelOverride{rowID: {Efforts: efforts}},
+		map[string]string{rowID: pair},
+	)
+	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
+}
+
+// modelEffortFixture configures one openai/gpt-5 entry whose row configures
+// `configured` as its thinking level ("" = none), for a conversation pinned to
+// `pinned`.
+func modelEffortFixture(t *testing.T, configured, pinned string) *modelSelectionFixture {
+	t.Helper()
+	m := reasoningCapableModel(t)
+	params := ""
+	if configured != "" {
+		params = "          params:\n            reasoning:\n              effort: " + configured + "\n"
+	}
+	doc := "agents:\n  definitions:\n    main:\n      llm_providers:\n" +
+		"        - provider: openai\n          model: " + m.APIModel +
+		"\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://c.test/v1\n" + params
+	selection := ModelSelectionState{Provider: "openai", Model: m.APIModel, Set: true}
+	if pinned != "" {
+		selection.Effort = pinned
+	}
+	return newModelSelectionFixtureWith(t, doc, selection)
+}
+
+func effortPickerItems(t *testing.T, f *modelSelectionFixture, provider, model string) []PickerItem {
+	t.Helper()
+	res := Choose(f.ctx, SlashChoice{Command: "model", Value: f.choiceID(t, provider, model)})
+	require.True(t, res.Handled)
+	require.NotNil(t, res.Picker, "no effort page: %+v", res)
+	require.Equal(t, "model-effort", res.Picker.Command)
+	return res.Picker.Items
+}
+
+// The /model effort picker draws the same list the web's effort chip does: the
+// levels in the one fixed order (none brought to the front even when the row
+// lists it last), and the levels this build does not rank after the known ones.
+func TestModelEffortPickerMatchesTheWebChipOrder(t *testing.T) {
+	m := reasoningCapableModel(t)
+	f := modelEffortFixture(t, "", "low")
+	installRowEfforts(t, f.choiceID(t, "openai", m.APIModel), "openai/"+m.APIModel,
+		[]string{"high", "none", "medium", "low"})
+
+	var labels, values []string
+	for _, item := range effortPickerItems(t, f, "openai", m.APIModel) {
+		labels = append(labels, item.Label)
+		values = append(values, item.ValueLabel)
+	}
+	// This conversation is pinned to "low" and the row configures no level, so
+	// the bare Default entry leads; the row's levels follow in EFFORT_LEVELS
+	// order rather than the order the row listed them.
+	require.Equal(t, []string{"", "none", "low", "medium", "high"}, labels,
+		"the levels come in EFFORT_LEVELS order, not the row's")
+	require.Equal(t, []string{"Default", "Off", "Low", "Medium", "High"}, values,
+		"each level carries the English name the TUI shows")
+
+	// The approval gate's second screen sorts through the same helper, so the
+	// two pickers cannot drift apart.
+	require.Equal(t, []string{"none", "low", "medium", "high"},
+		orderedEffortLevels([]string{"high", "none", "medium", "low"}))
+}
+
+// The bare 「Default」 entry appears only when the empty level is a real choice:
+// the conversation pins no level, or the row configures none. When both have a
+// value, offering it would be a second copy of the one the row configures.
+func TestModelEffortPickerOffersDefaultOnlyWhenTheTruthIsToShow(t *testing.T) {
+	m := reasoningCapableModel(t)
+
+	// Nothing pinned: Default leads the list.
+	unpinned := modelEffortFixture(t, "", "")
+	require.Equal(t, "", effortPickerItems(t, unpinned, "openai", m.APIModel)[0].Label,
+		"an unpinned conversation starts on Default")
+
+	// A pinned level with a row that configures none: still Default first.
+	rowWithoutConfig := modelEffortFixture(t, "", "medium")
+	require.Equal(t, "", effortPickerItems(t, rowWithoutConfig, "openai", m.APIModel)[0].Label,
+		"a row that configures no level still offers the empty one")
+
+	// Both have a value: no Default entry at all.
+	bothSet := modelEffortFixture(t, "high", "medium")
+	for _, item := range effortPickerItems(t, bothSet, "openai", m.APIModel) {
+		require.NotEqual(t, "", item.Label,
+			"a pinned level with a configured row offers no Default entry")
+	}
+}
+
+// 「the level the row configures」 and 「the level this conversation uses」 are two
+// different facts: the gear marks the first, Current marks the second. Merging
+// them is what made the old picker look as though the setting had not taken.
+func TestModelEffortPickerMarksFromSettingApartFromCurrent(t *testing.T) {
+	m := reasoningCapableModel(t)
+	f := modelEffortFixture(t, "high", "medium")
+	installRowEfforts(t, f.choiceID(t, "openai", m.APIModel), "openai/"+m.APIModel,
+		[]string{"low", "medium", "high"})
+
+	var fromSetting, current []string
+	for _, item := range effortPickerItems(t, f, "openai", m.APIModel) {
+		if item.FromSetting {
+			fromSetting = append(fromSetting, item.Label)
+		}
+		if item.Current {
+			current = append(current, item.Label)
+		}
+	}
+	require.Equal(t, []string{"high"}, fromSetting, "the gear marks the level the row is configured with")
+	require.Equal(t, []string{"medium"}, current, "Current marks the level the conversation is pinned to")
+}
+
+// The English label table is a cross-surface contract: the TUI's lists and the
+// web's English UI must name the levels the same way.
+func TestEffortEnglishLabelMatchesTheWebEnTable(t *testing.T) {
+	for id, want := range map[string]string{
+		"":        "Default",
+		"none":    "Off",
+		"minimal": "Minimal",
+		"low":     "Low",
+		"medium":  "Medium",
+		"high":    "High",
+		"xhigh":   "xHigh",
+		"max":     "Max",
+	} {
+		require.Equal(t, want, EffortEnglishLabel(id), "level %q", id)
+	}
+	require.Equal(t, "ultra", EffortEnglishLabel("ultra"), "a level this build does not rank keeps its own id")
+	require.Equal(t, "High", EffortEnglishLabel(" HIGH "), "the id is matched case- and space-insensitively")
+}
+
+// The bare Default entry sends an empty level, and the encoded value has to
+// survive the round trip with its three companions intact.
+func TestEffortChoiceRoundTripsTheEmptyDefault(t *testing.T) {
+	value := encodeEffortChoice("row-2", "openai/gpt-5", "", false)
+	require.Len(t, strings.Split(value, "\n"), 4)
+	modelID, label, effort, modelChanged := decodeEffortChoice(value)
+	require.Equal(t, "row-2", modelID)
+	require.Equal(t, "openai/gpt-5", label)
+	require.Equal(t, "", effort)
+	require.False(t, modelChanged)
+}
+
+// Taking the bare Default entry is a real choice: it pins the empty level (the
+// provider decides), while a level the row does not offer is still refused.
+func TestChooseReasoningEffortAcceptsTheExplicitDefault(t *testing.T) {
+	m := reasoningCapableModel(t)
+	f := modelEffortFixture(t, "", "high")
+	value := encodeEffortChoice(f.choiceID(t, "openai", m.APIModel), f.choiceLabel(t, "openai", m.APIModel), "", false)
+
+	res := Choose(f.ctx, SlashChoice{Command: "model-effort", Value: value})
+	require.True(t, res.Handled)
+	require.Equal(t, "Reasoning effort set to Default.", res.Reply)
+	require.NotEqual(t, -1, slices.Index(f.calls(), "select-effort(s1,)"),
+		"the empty level must reach the runtime: %v", f.calls())
+
+	// An unknown non-empty level is still refused, and nothing is written.
+	before := len(f.handler.chosen)
+	stale := encodeEffortChoice(f.choiceID(t, "openai", m.APIModel), f.choiceLabel(t, "openai", m.APIModel), "ultra", false)
+	res = Choose(f.ctx, SlashChoice{Command: "model-effort", Value: stale})
+	require.True(t, res.Handled)
+	require.Equal(t, "That reasoning effort is no longer offered for this model.", res.Reply)
+	require.Len(t, f.handler.chosen, before, "an out-of-range level wrote anyway: %v", f.calls())
+	require.NotContains(t, res.Reply, "at  reasoning effort", "the reply must never spell an empty level into the sentence")
 }

@@ -221,11 +221,23 @@ test('asking for a review hands it to the planner: the card closes silently', as
   await expect(model).toBeVisible()
   // The row shows where its requests go, so twin rows are telling apart.
   await expect(model).toContainText('http')
-  const request = page.waitForRequest((req) => req.url().includes('/plan-review') && req.method() === 'POST')
   await model.click()
+  // A row that offers thinking levels asks which one on a second screen, and
+  // nothing goes out until it answers (plan 310). The catalog gives every
+  // model this run configures its own levels, so the screen is always there.
+  const effort = page.locator('[data-testid="exit-plan-effort-option"]')
+  await expect(effort.first()).toBeVisible()
+  await expect(page.locator('[data-testid="exit-plan-effort-question"]')).toContainText('用哪档思考强度？')
+  const request = page.waitForRequest((req) => req.url().includes('/plan-review') && req.method() === 'POST')
+  await effort.nth(1).click()
   const reviewRequest = await request
   expect(reviewRequest.url()).toContain('act-e2e-exitplan-live')
-  expect(await reviewRequest.postDataJSON()).toMatchObject({ model: expect.any(String), model_id: expect.any(String) })
+  expect(await reviewRequest.postDataJSON()).toMatchObject({
+    model: expect.any(String),
+    model_id: expect.any(String),
+    // The level the screen sent is the one the reviewer runs at.
+    effort: expect.any(String),
+  })
 
   // The review runs as its own subagent on the conversation's timeline…
   await expect(page.locator('[data-testid="subagent-call-card"]').first()).toBeVisible({ timeout: 120_000 })
@@ -263,12 +275,21 @@ test('handing the plan to another model approves with the row on the wire and th
   const rows = page.locator('[data-testid="exit-plan-hand-off-model"]')
   await expect(rows.nth(1)).toContainText('http')
 
-  const approve = page.waitForRequest((req) => req.url().includes('/approve') && req.method() === 'POST')
   await rows.nth(1).click()
+  // The level screen, then the decision: the hand-off carries the level the
+  // user picked, and the question names the executor it is about (plan 310).
+  const effort = page.locator('[data-testid="exit-plan-effort-option"]')
+  await expect(effort).toHaveCount(3)
+  await expect(page.locator('[data-testid="exit-plan-effort-question"]')).toContainText('用哪档思考强度？')
+  const approve = page.waitForRequest((req) => req.url().includes('/approve') && req.method() === 'POST')
+  await effort.nth(2).click()
   const body = await (await approve).postDataJSON()
   // The engine hands off by configured row id — two rows of one provider/model
-  // are two executors — never without one.
-  expect(body?.hand_off_model).toMatchObject({ id: expect.any(String), provider: expect.any(String), model: expect.any(String) })
+  // are two executors — never without one, and names the level with it.
+  expect(body?.hand_off_model).toMatchObject({
+    id: expect.any(String), provider: expect.any(String), model: expect.any(String),
+    effort: expect.any(String),
+  })
   await expect(dock).toHaveCount(0, { timeout: 30_000 })
   await shot(page, 'exit-plan-approval-handed-off')
 
@@ -281,6 +302,53 @@ test('handing the plan to another model approves with the row on the wire and th
   expect(answer).toMatch(/"id":"llm-[^"]+"/)
   expect(answer).toContain('"provider"')
   expect(answer).toContain('"model"')
+  expect(answer).toContain('"effort"')
+})
+
+test('Esc on the level screen goes back to the models and sends nothing', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan')
+  parkExitPlan(session, 'live')
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  const dock = page.locator('[data-testid="exit-plan-approval"]')
+  await expect(dock).toBeVisible()
+
+  // Count the decision requests this page makes: a step back must make none.
+  let requests = 0
+  page.on('request', (req) => {
+    if ((req.url().includes('/plan-review') || req.url().includes('/approve')) && req.method() === 'POST') requests += 1
+  })
+
+  await page.locator('[data-testid="exit-plan-ask-review"]').click()
+  const model = page.locator('[data-testid="plan-review-model"]').first()
+  await model.click()
+  const effort = page.locator('[data-testid="exit-plan-effort-option"]')
+  await expect(effort.first()).toBeVisible()
+  await shot(page, 'exit-plan-effort-screen')
+
+  // One Esc: back to the model list, the question and its rows as they were.
+  await page.keyboard.press('Escape')
+  await expect(effort).toHaveCount(0)
+  await expect(page.locator('[data-testid="plan-review-model"]').first()).toBeVisible()
+  expect(requests).toBe(0)
+
+  // The back button is the same step, from the screen itself.
+  await page.locator('[data-testid="plan-review-model"]').first().click()
+  await expect(effort.first()).toBeVisible()
+  await page.locator('[data-testid="exit-plan-effort-back"]').click()
+  await expect(effort).toHaveCount(0)
+  await expect(page.locator('[data-testid="plan-review-model"]').first()).toBeVisible()
+
+  // A second Esc folds the picker away for good; still nothing decided, and the
+  // approval is back on its verdicts.
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-testid="exit-plan-ask-review"]')).toBeVisible()
+  expect(requests).toBe(0)
+  await shot(page, 'exit-plan-effort-back-to-verdicts')
 })
 
 test('a review handed back is asked again in its own conversation: the continuation names the first review', async ({ page }) => {

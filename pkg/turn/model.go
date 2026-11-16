@@ -399,6 +399,15 @@ type PickerItem struct {
 	// api path, so an endpoint narrowed to "https://ark…/v1/messages" still
 	// names its protocol. "" leaves the description as it is.
 	EndpointTail string `json:"endpoint_tail,omitempty"`
+	// ValueLabel is the level's English display label, for the terminal picker
+	// only (the TUI is English-only per owner 2026-11-15). The web localizes
+	// from Label through effortLevelLabel(); Label stays the raw level id, so
+	// the wire value and the display name never have to agree.
+	ValueLabel string `json:"value_label,omitempty"`
+	// FromSetting marks the level the model row itself is configured with —
+	// not the level the conversation is pinned to, which is Current. The
+	// terminal draws a gear against it.
+	FromSetting bool `json:"from_setting,omitempty"`
 }
 
 // SlashChoice is a choice made in a Picker: the command that offered it and
@@ -642,6 +651,13 @@ type PlanReviewModelOption struct {
 	// a reviewer's identity is its row, ID.
 	Endpoint     string
 	EndpointTail string
+	// Efforts is the ordered list of reasoning levels this row actually
+	// offers, already trimmed to what its protocol can send. Empty = nothing
+	// to ask, so the picker closes on the model alone.
+	Efforts []string
+	// DefaultEffort is the level this row is configured with ("" when it
+	// configures none) — the effort the approval picker opens on.
+	DefaultEffort string
 }
 
 // MatchesSelection reports whether this option is what a review request
@@ -693,6 +709,10 @@ type ToolApprovalDecision struct {
 	PlanOnly                   bool
 	DenyReason                 string
 	RequestPlanReview          *PlanReviewModelOption
+	// Effort is the reasoning level picked after the model, on the picker's
+	// second screen: empty when the model's own configuration decides, which is
+	// what a row offering no level and a picker closed without one both send.
+	Effort string
 	// HandOffModel approves the exit-plan decision and hands the plan's
 	// implementation to this model: the conversation's model stays as the
 	// tech lead and one executor subagent runs on the selected row.

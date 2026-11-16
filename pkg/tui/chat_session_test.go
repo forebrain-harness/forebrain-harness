@@ -398,7 +398,13 @@ func TestTakePendingApprovalRestoresClearedContext(t *testing.T) {
 	}
 	defer db.Close()
 	actions := newTestActions(t, db)
-	act, err := actions.CreatePending(ctx, "s1", "exit_plan_mode", map[string]any{"session_id": "s1"})
+	// The action has to name the conversation whose plan file the fixture
+	// wrote, and that conversation needs a session row for the action's
+	// foreign key.
+	if err := state.NewSessionStore(actions.DB, "main").Ensure(ctx, "session-1", "session-1"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	act, err := actions.CreatePending(ctx, "session-1", "exit_plan_mode", map[string]any{"session_id": "session-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2003,7 +2009,8 @@ func TestChooseModelEffortLeavesTheConfigFileAlone(t *testing.T) {
 			xhigh = item.Value
 		}
 	}
-	require.Equal(t, "Reasoning effort set to xhigh.", chooseInSession(t, s, "model-effort", xhigh).Reply)
+	require.Equal(t, "Reasoning effort set to xHigh.", chooseInSession(t, s, "model-effort", xhigh).Reply,
+		"the reply names the level by its English display label (xHigh, as the web's en table spells it)")
 
 	// The effort is this conversation's, so its row carries it.
 	sel := s.sessionModelState("s1")
@@ -12917,6 +12924,12 @@ func newPlanReviewSession(t *testing.T, reviewer turn.Reviewer) (*ChatSession, *
 	actions := newTestActions(t, db)
 	if err := state.NewSessionStore(db, "main").Ensure(ctx, "session-1", "session-1"); err != nil {
 		t.Fatal(err)
+	}
+	// The action has to name the conversation whose plan file the fixture
+	// wrote, and that conversation needs a session row for the action's
+	// foreign key.
+	if err := state.NewSessionStore(actions.DB, "main").Ensure(ctx, "session-1", "session-1"); err != nil {
+		t.Fatalf("ensure session: %v", err)
 	}
 	act, err := actions.CreatePending(ctx, "session-1", "exit_plan_mode", map[string]any{"session_id": "session-1"})
 	if err != nil {
@@ -32348,4 +32361,55 @@ func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {
 		return appcfg.Root{}, err
 	}
 	return appcfg.ParseRootYAML(body)
+}
+
+// The level the user picked on the picker's second screen travels with the
+// decision: the surface names it on the review it dispatches, so the reviewer
+// runs at that level rather than at whatever the row configures. The hand-off
+// reply carries it the same way.
+func TestExitPlanReviewPickerPassesTheEffortItChose(t *testing.T) {
+	executor := &fakeSubagentExecutor{replies: []func(context.Context) (string, error){
+		func(context.Context) (string, error) { return "Verdict: rework.", nil },
+	}}
+	cs, actions := newReviewRunSession(t, executor)
+	ctx := context.Background()
+	// The action has to name the conversation whose plan file the fixture
+	// wrote, and that conversation needs a session row for the action's
+	// foreign key.
+	if err := state.NewSessionStore(actions.DB, "main").Ensure(ctx, "session-1", "session-1"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	act, err := actions.CreatePending(ctx, "session-1", "exit_plan_mode", map[string]any{"session_id": "session-1"})
+	if err != nil {
+		t.Fatalf("CreatePending: %v", err)
+	}
+	// No row id: the fixture configures its models as a pre-table list, whose
+	// ids are generated, so the pair is what names the row here.
+	selection := turn.PlanReviewModelOption{Provider: "anthropic", Model: "claude-sonnet-4"}
+	if err := cs.completeSurfacePlanReviewRequest(ctx, act.ID, selection, "xhigh"); err != nil {
+		t.Fatalf("completeSurfacePlanReviewRequest: %v", err)
+	}
+	if len(executor.calls) != 1 {
+		t.Fatalf("subagent calls=%d want 1", len(executor.calls))
+	}
+	override, ok := run.SubagentModelOverrideFromContext(executor.calls[0].ctx)
+	if !ok {
+		t.Fatal("the review dispatched no model override")
+	}
+	if override.Effort != "xhigh" {
+		t.Fatalf("override effort=%q, want the level the picker chose", override.Effort)
+	}
+	if override.Provider != "anthropic" || override.Model != "claude-sonnet-4" {
+		t.Fatalf("override model=%s/%s, want the reviewer the picker chose", override.Provider, override.Model)
+	}
+
+	// The hand-off reply carries the same level: it is what the executor
+	// subagent is dispatched under after the approval.
+	handOff := handOffModelOf(&turn.PlanReviewModelOption{ID: "row-3", Provider: "openai", Model: "gpt-4o"}, "medium")
+	if handOff == nil || handOff.Effort != "medium" || handOff.ID != "row-3" {
+		t.Fatalf("hand-off model=%#v, want the row with the picked level", handOff)
+	}
+	if bare := handOffModelOf(&turn.PlanReviewModelOption{ID: "row-3", Provider: "openai", Model: "gpt-4o"}, ""); bare.Effort != "" {
+		t.Fatalf("hand-off without a level = %q, want the empty one", bare.Effort)
+	}
 }

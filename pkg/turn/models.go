@@ -236,6 +236,74 @@ func trimToSendable(provider, model string, levels []string) []string {
 	return append([]string(nil), levels...)
 }
 
+// effortLevelOrder is the one order every effort picker draws its levels in:
+// the web chip's EFFORT_LEVELS (frontend/src/lib/effortLabel.ts). The catalog
+// lists a model's levels in file order, which is not that order, so every
+// surface that offers them — /model's second step, the exit gate's effort
+// screen — sorts through orderedEffortLevels first.
+var effortLevelOrder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// orderedEffortLevels puts levels in effortLevelOrder, appending the levels
+// this build does not rank after the known ones in their original relative
+// order. Levels are lower-cased and de-duplicated; no level at all yields nil,
+// which is what every caller reads as "nothing to ask".
+func orderedEffortLevels(levels []string) []string {
+	if len(levels) == 0 {
+		return nil
+	}
+	rank := make(map[string]int, len(effortLevelOrder))
+	for i, level := range effortLevelOrder {
+		rank[level] = i
+	}
+	present := make(map[string]bool, len(levels))
+	extra := make([]string, 0, len(levels))
+	for _, level := range levels {
+		level = strings.ToLower(strings.TrimSpace(level))
+		if level == "" || present[level] {
+			continue
+		}
+		present[level] = true
+		if _, known := rank[level]; !known {
+			extra = append(extra, level)
+		}
+	}
+	out := make([]string, 0, len(present))
+	for _, level := range effortLevelOrder {
+		if present[level] {
+			out = append(out, level)
+		}
+	}
+	return append(out, extra...)
+}
+
+// EffortEnglishLabel is the English name of one thinking level, the label
+// every terminal surface shows: the TUI is English-only (owner 2026-11-15), and
+// "" is the bare entry a row without a configured level offers. The table is
+// the one frontend/src/locales/index.ts carries for the web's English UI, kept
+// in step by TestEffortEnglishLabelMatchesTheWebEnTable. A level this build
+// does not rank is shown as its own id.
+func EffortEnglishLabel(id string) string {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case "":
+		return "Default"
+	case "none":
+		return "Off"
+	case "minimal":
+		return "Minimal"
+	case "low":
+		return "Low"
+	case "medium":
+		return "Medium"
+	case "high":
+		return "High"
+	case "xhigh":
+		return "xHigh"
+	case "max":
+		return "Max"
+	}
+	return strings.TrimSpace(id)
+}
+
 // anthropicClientProvider reports whether provider's models are served by this
 // build's Anthropic client on the strength of the provider name alone (the
 // protocol check in trimToSendable covers the rest).

@@ -50,6 +50,10 @@ type PlanHandOff struct {
 	ModelID  string `json:"model_id,omitempty"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
+	// Effort is the reasoning level the user picked for the executor subagent,
+	// empty when they picked none and the row's own configuration decides. A
+	// mode file written before the picker had a second screen decodes with "".
+	Effort string `json:"effort,omitempty"`
 }
 
 func modePath(home, sessionID string) string {

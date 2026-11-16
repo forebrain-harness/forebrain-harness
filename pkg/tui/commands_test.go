@@ -4962,3 +4962,58 @@ func TestPeerCardHeaderDrawsOneDirectionalMark(t *testing.T) {
 		})
 	}
 }
+
+// The /model effort picker draws the list the web's effort chip draws: the
+// level's English name, the raw id beside it only when the two differ, the gear
+// on the level the row is configured with — all against the name, with the
+// description column left empty — and an item that names no level keeps the
+// plain label it always had.
+func TestSlashModelEffortPickerRendersTheWebLabels(t *testing.T) {
+	session := &fakeSession{}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	selector := &stubSelector{selectRichOK: false}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	picker := &turn.Picker{Command: "model-effort", Title: "Reasoning effort", Items: []turn.PickerItem{
+		{Value: "a\n", Label: "", ValueLabel: "Default"},
+		{Value: "b\n", Label: "none", ValueLabel: "Off"},
+		{Value: "c\n", Label: "high", ValueLabel: "High", FromSetting: true, Current: true},
+		{Value: "d\n", Label: "xhigh", ValueLabel: "xHigh", Description: "out in the far column"},
+	}}
+	runSlashPicker(context.Background(), ctrl, renderer, nil, &streamState{sessionID: "s1"}, picker)
+
+	got := make([]SelectItem, len(selector.selectRichItems))
+	copy(got, selector.selectRichItems)
+	if len(got) != 4 {
+		t.Fatalf("picker rows = %+v", got)
+	}
+	if got[0].Label != "Default" || got[0].Mark != "" {
+		t.Fatalf("default row = %+v, want the bare Default entry", got[0])
+	}
+	if got[1].Label != "Off  none" {
+		t.Fatalf("off row label = %q, want the display name and the id it differs from", got[1].Label)
+	}
+	if got[2].Label != "High" {
+		t.Fatalf("high row label = %q, want the English name alone (High/high differ only by case)", got[2].Label)
+	}
+	if got[2].Mark != selectorGearGlyph {
+		t.Fatalf("high row mark = %q, want the gear on the level the row configures", got[2].Mark)
+	}
+	for i, item := range got {
+		if item.Description != "" {
+			t.Fatalf("row %d description = %q, want the single column the effort list draws", i, item.Description)
+		}
+	}
+	if got := selector.selectRichDefaultIdx; got != 2 {
+		t.Fatalf("picker opened on %d, want the item the conversation is pinned to (2)", got)
+	}
+
+	// The rendered row puts the gear tight against the name: one space, then
+	// the glyph — not out in a description column.
+	state := &richPickerState{items: got, selectable: []int{0, 1, 2, 3}, esc: "Esc", noFilter: true}
+	panel := state.panel("Reasoning effort")
+	rows := strings.Join(panel.layout(80, 20, 0, false).lines, "\n")
+	if !strings.Contains(rows, "High "+panelAccentStyle.Render(selectorGearGlyph)) {
+		t.Fatalf("rendered rows carry no tight gear:\n%s", rows)
+	}
+}

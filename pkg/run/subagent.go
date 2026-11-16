@@ -4571,6 +4571,25 @@ func handOffModelID(ctx context.Context, fac Factory) string {
 	return strings.TrimSpace(st.PlanHandOff.ModelID)
 }
 
+// handOffPlanEffort names the thinking level this conversation's approved
+// hand-off recorded, from the session's mode state; "" when the conversation
+// handed nothing off, named no level, or the state cannot be read — all three
+// leave the row's own configuration in charge.
+func handOffPlanEffort(ctx context.Context, fac Factory) string {
+	if fac.Owner == nil {
+		return ""
+	}
+	sid := llm.AgentSessionIDFromContext(ctx)
+	if strings.TrimSpace(sid) == "" {
+		return ""
+	}
+	st, err := state.Get(fac.Owner.StateRoot(), sid)
+	if err != nil || st.PlanHandOff == nil {
+		return ""
+	}
+	return strings.TrimSpace(st.PlanHandOff.Effort)
+}
+
 // subagentModelOverrideForRef resolves the model argument's row id into the
 // pin a dispatch runs under: the row read live, its client entry and its
 // version carried along, so this subagent's requests go to exactly this row
@@ -4587,11 +4606,21 @@ func subagentModelOverrideForRef(ctx context.Context, fac Factory, id string) (S
 		return SubagentModelOverride{}, err
 	}
 	entry, caps := usable.Entry, usable.Caps
+	// The row's own configuration is the level this dispatch runs at, unless
+	// the hand-off the user approved named one: then that is what they chose,
+	// and an empty one keeps the row in charge (every record written before
+	// the approval card had a second screen is that case).
+	effort := appcfg.ReasoningEffort(entry.Params)
+	if usable.HandedOff {
+		if picked := handOffPlanEffort(ctx, fac); picked != "" {
+			effort = picked
+		}
+	}
 	return SubagentModelOverride{
 		ModelID:  strings.TrimSpace(entry.ID),
 		Provider: strings.TrimSpace(entry.Provider),
 		Model:    strings.TrimSpace(entry.Model),
-		Effort:   appcfg.ReasoningEffort(entry.Params),
+		Effort:   effort,
 		Entry:    &entry,
 		Version:  usable.Row.UpdatedAt,
 		Caps:     caps,

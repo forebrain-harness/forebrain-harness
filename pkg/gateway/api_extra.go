@@ -4433,6 +4433,7 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 			ID       string `json:"id"`
 			Provider string `json:"provider"`
 			Model    string `json:"model"`
+			Effort   string `json:"effort,omitempty"`
 		} `json:"hand_off_model,omitempty"`
 	}
 	decoder := json.NewDecoder(r.Body)
@@ -4475,8 +4476,16 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		allowed := false
+		effort := strings.ToLower(strings.TrimSpace(body.HandOffModel.Effort))
 		for _, option := range req.PlanReviewModels {
 			if option.MatchesSelection(body.HandOffModel.ID, body.HandOffModel.Provider, body.HandOffModel.Model) {
+				// The level is validated against the row the request names, not
+				// against a global scale: a level this row does not offer is a
+				// request the picker could never have made.
+				if effort != "" && !effortOffered(option.Efforts, effort) {
+					http.Error(w, "reasoning effort is not offered for this model", http.StatusBadRequest)
+					return
+				}
 				allowed = true
 				break
 			}
@@ -4489,6 +4498,7 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 			ID:       strings.TrimSpace(body.HandOffModel.ID),
 			Provider: strings.TrimSpace(body.HandOffModel.Provider),
 			Model:    strings.TrimSpace(body.HandOffModel.Model),
+			Effort:   effort,
 		}
 	}
 	err := s.resolveGatewayApproval(r.Context(), id, reply)
@@ -4563,6 +4573,7 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 			ID:       option.ID,
 			Provider: option.Provider, Model: option.Model, ModelName: option.ModelName, Current: option.Current,
 			Endpoint: option.Endpoint,
+			Efforts:  option.Efforts, DefaultEffort: option.DefaultEffort,
 		})
 	}
 	reviews := make([]planReviewNoteWire, 0, len(req.PlanReviews))
@@ -4582,6 +4593,7 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 			Model: planReviewModelWire{
 				ID: prev.Model.ID, Provider: prev.Model.Provider, Model: prev.Model.Model, ModelName: prev.Model.ModelName,
 				Current: prev.Model.Current, Endpoint: prev.Model.Endpoint,
+				Efforts: prev.Model.Efforts, DefaultEffort: prev.Model.DefaultEffort,
 			},
 		}
 	}
@@ -4631,6 +4643,12 @@ type planReviewModelWire struct {
 	ModelName string `json:"model_name,omitempty"`
 	Current   bool   `json:"current,omitempty"`
 	Endpoint  string `json:"endpoint,omitempty"`
+	// Efforts and DefaultEffort are the row's thinking levels and the one it
+	// is configured with: the card's second screen offers them, and the one
+	// matching DefaultEffort opens with the setting gear. Absent for a row
+	// that offers none, which is what closes the picker on the model alone.
+	Efforts       []string `json:"efforts,omitempty"`
+	DefaultEffort string   `json:"default_effort,omitempty"`
 }
 
 type planReviewNoteWire struct {
@@ -4647,6 +4665,19 @@ type planReviewInFlightWire struct {
 	Model     string `json:"model"`
 	ModelName string `json:"model_name,omitempty"`
 	AgentID   string `json:"agent_id,omitempty"`
+}
+
+// effortOffered reports whether a row offers one thinking level. Both sides are
+// lower-cased and trimmed because the catalog's ids are lower case while a
+// request's may not be, and because pkg/config's WithReasoningEffort normalizes
+// the value the same way before it reaches a client.
+func effortOffered(efforts []string, want string) bool {
+	for _, e := range efforts {
+		if strings.ToLower(strings.TrimSpace(e)) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // handleActionPlanReview starts one second-opinion review of a parked
@@ -4673,6 +4704,11 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 		ModelID  string `json:"model_id"`
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
+		// Effort is the thinking level the user picked after the model: absent
+		// (or empty) leaves the row's own configuration in charge. A pointer so
+		// "not sent" and "sent empty" are the same thing, as they are for the
+		// pair above.
+		Effort *string `json:"effort,omitempty"`
 		// Again asks the previous review's own subagent to look at the revised
 		// plan (语义 6): the model fields are ignored — the reviewer that ran
 		// the first review runs this one, in its own conversation.
@@ -4730,7 +4766,12 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 	// run on credentials the session already has. An again-request runs on the
 	// previous review's model — the reviewer that wrote it continues it.
 	model := turn.Model{ID: strings.TrimSpace(body.ModelID), Provider: strings.TrimSpace(body.Provider), Model: strings.TrimSpace(body.Model)}
+	if body.Effort != nil {
+		model.Effort = strings.ToLower(strings.TrimSpace(*body.Effort))
+	}
 	if again != nil && req.PreviousPlanReview != nil {
+		// A continuation carries the reviewer, not the request's fields: the
+		// level the body names is ignored here exactly as its pair is.
 		model = turn.Model{
 			ID:       req.PreviousPlanReview.Model.ID,
 			Provider: req.PreviousPlanReview.Model.Provider,
@@ -4740,6 +4781,12 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 	allowed := false
 	for _, option := range s.approvalGate().ReviewModels(sid) {
 		if option.MatchesSelection(model.ID, model.Provider, model.Model) {
+			// The level is checked against the row that matched, not a global
+			// scale: the picker only ever offers this row's own levels.
+			if model.Effort != "" && !effortOffered(option.Efforts, model.Effort) {
+				http.Error(w, "reasoning effort is not offered for this model", http.StatusBadRequest)
+				return
+			}
 			allowed = true
 			break
 		}

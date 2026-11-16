@@ -10,6 +10,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -3872,5 +3873,354 @@ func TestAwaitSignInReportsAReadError(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the wait parked on a terminal that cannot deliver input")
+	}
+}
+
+// effortPlanReviewRequest is the exit-plan request whose picker offers rows with
+// thinking levels: the first non-current row carries a configured level, a
+// second row offers levels but configures none, and a third offers none at all —
+// that row keeps the one-step pick it has always had.
+func effortPlanReviewRequest(t *testing.T) turn.ToolApprovalRequest {
+	t.Helper()
+	req := handOffReviewRequest("")
+	req.PreviousPlanReview = nil
+	req.PlanReviewModels = []turn.PlanReviewModelOption{
+		{ID: "llm_row1", Provider: "zhipuai", Model: "glm-5.3", Current: true},
+		{ID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash",
+			Efforts: []string{"none", "low", "medium", "high", "xhigh"}, DefaultEffort: "low"},
+		{ID: "llm_row3", Provider: "anthropic", Model: "claude-opus-4-1",
+			Efforts: []string{"low", "medium"}},
+		{ID: "llm_row4", Provider: "openai", Model: "gpt-5.1"},
+	}
+	return req
+}
+
+// openEffortScreen puts an overlay on the picker's second screen for the row the
+// list opens on (or the purpose asked for), without going through the keyboard.
+func openEffortScreen(t *testing.T, req turn.ToolApprovalRequest, purpose planPickerPurpose) *approvalOverlay {
+	t.Helper()
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	overlay.enterPlanPickerMode(purpose)
+	if _, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyEnter}); done {
+		t.Fatal("picking a row that offers levels must open the second screen, not decide")
+	}
+	if !overlay.planEffortPicking {
+		t.Fatalf("second screen did not open: %#v", overlay.planReviewPicking)
+	}
+	return overlay
+}
+
+func effortScreenLines(t *testing.T, overlay *approvalOverlay, width int) []string {
+	t.Helper()
+	rendered, _ := overlay.buildApprovalContent(width)
+	lines := make([]string, len(rendered))
+	for i, line := range rendered {
+		lines[i] = stripANSI(line)
+	}
+	return lines
+}
+
+func indexOfLine(lines []string, want string) int {
+	for i, line := range lines {
+		if line == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// Choosing a row that offers levels asks which one on a second screen, opening
+// on the level the row is configured with: confirming there submits that level,
+// so a user who does not touch the list still pins a concrete level rather than
+// leaving the choice implicit.
+func TestExitPlanEffortPickerOpensOnTheRowsDefault(t *testing.T) {
+	decision, err := runOverlayWithKeys(t, effortPlanReviewRequest(t), []byte{'m', '\r', '\r'})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.RequestPlanReview == nil {
+		t.Fatalf("expected a review request, got %#v", decision)
+	}
+	if got := decision.RequestPlanReview.ID; got != "llm_row2" {
+		t.Fatalf("row=%q, want the row the list opened on", got)
+	}
+	if decision.Effort != "low" {
+		t.Fatalf("effort=%q, want the level the row is configured with", decision.Effort)
+	}
+}
+
+// The second screen asks its question naming the model, keeps air between the
+// question and the levels, lists them in the one order every picker draws, marks
+// the row's configured level with the gear tight against the name, and confirms
+// with the level the cursor is on.
+func TestExitPlanEffortPickerConfirmsWithThePickedLevel(t *testing.T) {
+	req := effortPlanReviewRequest(t)
+	overlay := openEffortScreen(t, req, pickReview)
+	lines := effortScreenLines(t, overlay, 120)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"Which reasoning effort should deepseek/deepseek-v4-flash use? (Esc to go back)",
+		"❯ Low ⚙",
+		"  Off  none",
+		"  xHigh",
+		"Esc to go back · Enter to confirm",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("second screen missing %q:\n%s", want, joined)
+		}
+	}
+	// Air between the question and the first level (owner feedback F).
+	question := indexOfLine(lines, "Which reasoning effort should deepseek/deepseek-v4-flash use? (Esc to go back)")
+	if question < 0 {
+		t.Fatalf("question row missing:\n%s", joined)
+	}
+	if lines[question+1] != "" {
+		t.Fatalf("no blank line under the question:\n%s", joined)
+	}
+	if strings.TrimSpace(lines[question+2]) != "Off  none" {
+		t.Fatalf("first level = %q, want the list in the one fixed order", lines[question+2])
+	}
+	if strings.TrimSpace(lines[question+3]) != "❯ Low ⚙" {
+		t.Fatalf("cursor row = %q, want the configured level, gear tight against the name", lines[question+3])
+	}
+
+	// One step down picks the next level up.
+	decision, done := overlay.handlePlanEffortKey(parsedKey{kind: rawKeyDown})
+	if done {
+		t.Fatalf("moving the cursor must not decide: %#v", decision)
+	}
+	decision, done = overlay.handlePlanEffortKey(parsedKey{kind: rawKeyEnter})
+	if !done {
+		t.Fatal("Enter on the second screen must decide")
+	}
+	if decision.RequestPlanReview == nil || decision.RequestPlanReview.ID != "llm_row2" {
+		t.Fatalf("decision=%#v, want a review request for the row the second screen is about", decision)
+	}
+	if decision.Effort != "medium" {
+		t.Fatalf("effort=%q, want the level the cursor was on", decision.Effort)
+	}
+}
+
+// A row that configures no level offers the bare 「Default」 entry first, and
+// taking it submits the empty level: the engine then leaves the row's own
+// configuration in charge.
+func TestExitPlanEffortPickerOffersDefaultForARowWithoutOne(t *testing.T) {
+	req := effortPlanReviewRequest(t)
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	overlay.enterPlanPickerMode(pickReview)
+	overlay.handlePlanReviewKey(parsedKey{kind: rawKeyDown}) // onto llm_row3: levels, no configured one
+	if _, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyEnter}); done {
+		t.Fatal("a row with levels must open the second screen")
+	}
+	lines := effortScreenLines(t, overlay, 120)
+	question := indexOfLine(lines, "Which reasoning effort should anthropic/claude-opus-4-1 use? (Esc to go back)")
+	if question < 0 {
+		t.Fatalf("question row missing:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.TrimSpace(lines[question+2]) != "❯ Default" {
+		t.Fatalf("first level = %q, want the bare Default entry", lines[question+2])
+	}
+	decision, done := overlay.handlePlanEffortKey(parsedKey{kind: rawKeyEnter})
+	if !done || decision.Effort != "" {
+		t.Fatalf("decision=%#v, want the empty level the Default entry sends", decision)
+	}
+	if decision.RequestPlanReview == nil || decision.RequestPlanReview.ID != "llm_row3" {
+		t.Fatalf("decision=%#v, want the review of the row the second screen is about", decision)
+	}
+}
+
+// Esc on the second screen goes back one step, not out of the picker: the model
+// list, its cursor and its filter are exactly as they were, a second Esc leaves
+// the picker without a request, and the approval is still there to answer.
+func TestExitPlanEffortPickerEscReturnsToTheModelList(t *testing.T) {
+	req := effortPlanReviewRequest(t)
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	overlay.enterPlanPickerMode(pickReview)
+	if _, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyEnter}); done {
+		t.Fatal("a row with levels must open the second screen")
+	}
+	if _, done := overlay.handlePlanEffortKey(parsedKey{kind: rawKeyEscape}); done {
+		t.Fatal("Esc on the second screen must not decide anything")
+	}
+	if overlay.planEffortPicking {
+		t.Fatal("Esc must close the second screen")
+	}
+	if !overlay.planReviewPicking {
+		t.Fatal("Esc must leave the model list open, not the picker")
+	}
+	if got := overlay.planReviewVisible()[overlay.planReviewCursor].ID; got != "llm_row2" {
+		t.Fatalf("cursor row=%q after Esc, want the row the user picked", got)
+	}
+	lines := effortScreenLines(t, overlay, 120)
+	if !strings.Contains(strings.Join(lines, "\n"), "Which model should review this plan? (Esc to go back)") {
+		t.Fatalf("back on the model list must show its question:\n%s", strings.Join(lines, "\n"))
+	}
+	// The second Esc leaves the picker for the verdict rows: nothing decided.
+	if _, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyEscape}); done {
+		t.Fatal("leaving the picker must not decide anything")
+	}
+	if overlay.planReviewPicking {
+		t.Fatal("the picker must be closed")
+	}
+}
+
+// Re-entering the draft row's second screen after Esc opens on the same level,
+// so backing out and back in does not silently move the choice.
+func TestExitPlanEffortPickerReopensOnTheSameLevel(t *testing.T) {
+	req := effortPlanReviewRequest(t)
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	overlay.enterPlanPickerMode(pickReview)
+	overlay.handlePlanReviewKey(parsedKey{kind: rawKeyEnter})
+	overlay.handlePlanEffortKey(parsedKey{kind: rawKeyDown})
+	overlay.handlePlanEffortKey(parsedKey{kind: rawKeyEscape})
+	overlay.handlePlanReviewKey(parsedKey{kind: rawKeyEnter})
+	if got := overlay.planEffortOptions[overlay.planEffortCursor]; got != "low" {
+		t.Fatalf("reopened on %q, want the row's configured level", got)
+	}
+}
+
+// A row that offers no levels keeps the one-step pick: Enter on the model list
+// decides, with the empty level that leaves the row in charge. This is the 283
+// behaviour the second screen must not take away.
+func TestExitPlanPickerSkipsEffortStepWhenTheRowHasNoLevels(t *testing.T) {
+	// The list opens on the first row that is not the conversation's own, so
+	// this fixture puts the row without levels there.
+	req := effortPlanReviewRequest(t)
+	req.PlanReviewModels = []turn.PlanReviewModelOption{
+		{ID: "llm_row1", Provider: "zhipuai", Model: "glm-5.3", Current: true},
+		{ID: "llm_row4", Provider: "openai", Model: "gpt-5.1"},
+	}
+	decision, err := runOverlayWithKeys(t, req, []byte{'m', '\r'})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.RequestPlanReview == nil {
+		t.Fatalf("expected a review request, got %#v", decision)
+	}
+	if decision.RequestPlanReview.ID != "llm_row4" {
+		t.Fatalf("row=%q, want the row without levels", decision.RequestPlanReview.ID)
+	}
+	if decision.Effort != "" {
+		t.Fatalf("effort=%q, want none — the row offers no level", decision.Effort)
+	}
+
+	// The same through the hand-off row: the second screen belongs to both
+	// purposes, and a row without levels decides on Enter there too.
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, effortPlanReviewRequest(t), nil)
+	overlay.enterHandOffMode()
+	for overlay.planReviewVisible()[overlay.planReviewCursor].ID != "llm_row4" {
+		if _, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyDown}); done {
+			t.Fatal("moving through the list must not decide")
+		}
+	}
+	decision, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyEnter})
+	if !done || !decision.Approved || decision.HandOffModel == nil || decision.HandOffModel.ID != "llm_row4" {
+		t.Fatalf("decision=%#v, want the hand-off to the row without levels", decision)
+	}
+	if decision.Effort != "" {
+		t.Fatalf("effort=%q, want none", decision.Effort)
+	}
+}
+
+// The hand-off row's second screen is the review row's, and its decision is the
+// approval: the hand-off names the executor and carries the level picked.
+func TestExitPlanEffortPickerHandsOffAtThePickedLevel(t *testing.T) {
+	decision, err := runOverlayWithKeys(t, effortPlanReviewRequest(t), []byte{'3', '\r', '\r', '\r'})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !decision.Approved || decision.HandOffModel == nil || decision.HandOffModel.ID != "llm_row2" {
+		t.Fatalf("decision=%#v, want the hand-off to the row the list opened on", decision)
+	}
+	if decision.Effort != "low" {
+		t.Fatalf("effort=%q, want the level the row is configured with", decision.Effort)
+	}
+}
+
+// Air, in the places the owner asked for it, one line each: between the second
+// screen's question and the levels it offers (review, hand-off and the row with
+// no configured level all share that branch), and between the first screen's
+// question and its filter bar.
+func TestExitPlanEffortPickerLeavesAirBelowTheQuestion(t *testing.T) {
+	cases := []struct {
+		name     string
+		req      turn.ToolApprovalRequest
+		purpose  planPickerPurpose
+		down     int
+		question string
+	}{
+		{name: "review", req: effortPlanReviewRequest(t), purpose: pickReview,
+			question: "Which reasoning effort should deepseek/deepseek-v4-flash use? (Esc to go back)"},
+		{name: "hand-off", req: effortPlanReviewRequest(t), purpose: pickHandOff,
+			question: "Which reasoning effort should deepseek/deepseek-v4-flash use? (Esc to go back)"},
+		{name: "no configured level", req: effortPlanReviewRequest(t), purpose: pickReview, down: 1,
+			question: "Which reasoning effort should anthropic/claude-opus-4-1 use? (Esc to go back)"},
+	}
+	for _, tc := range cases {
+		overlay := newApprovalOverlay(context.Background(), io.Discard, nil, tc.req, nil)
+		overlay.enterPlanPickerMode(tc.purpose)
+		for i := 0; i < tc.down; i++ {
+			overlay.handlePlanReviewKey(parsedKey{kind: rawKeyDown})
+		}
+		if _, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyEnter}); done {
+			t.Fatalf("%s: a row with levels must open the second screen", tc.name)
+		}
+		lines := effortScreenLines(t, overlay, 120)
+		at := indexOfLine(lines, tc.question)
+		if at < 0 {
+			t.Fatalf("%s: question row missing:\n%s", tc.name, strings.Join(lines, "\n"))
+		}
+		if lines[at+1] != "" {
+			t.Fatalf("%s: line under the question = %q, want blank", tc.name, lines[at+1])
+		}
+		if lines[at+2] == "" {
+			t.Fatalf("%s: a second blank line under the question is one too many:\n%s", tc.name, strings.Join(lines, "\n"))
+		}
+		if !strings.HasPrefix(strings.TrimSpace(lines[at+2]), "❯ ") && !strings.HasPrefix(strings.TrimSpace(lines[at+2]), "Off") &&
+			strings.Contains(lines[at+2], "reasoning effort") {
+			t.Fatalf("%s: the row under the air = %q, want a level", tc.name, lines[at+2])
+		}
+	}
+}
+
+// The first screen keeps the shape the source has: one question, then one blank
+// line of air, then the filter bar's padded row / text row / padded row, then one
+// blank line before the list it narrows.
+func TestExitPlanPickerLeavesAirAboveTheFilterBar(t *testing.T) {
+	req := handOffReviewRequest("")
+	req.PreviousPlanReview = nil
+	req.PlanReviewModels = nil
+	for i := 0; i < pickerFilterMinRows+2; i++ {
+		req.PlanReviewModels = append(req.PlanReviewModels, turn.PlanReviewModelOption{
+			ID: "row-" + strconv.Itoa(i), Provider: "openai", Model: "gpt-5.1",
+			Endpoint: "http://one.test/v1", EndpointTail: "/v1",
+		})
+	}
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	overlay.enterPlanReviewMode()
+	lines := effortScreenLines(t, overlay, 120)
+
+	question := indexOfLine(lines, "Which model should review this plan? (Esc to go back)")
+	if question < 0 {
+		t.Fatalf("question row missing:\n%s", strings.Join(lines, "\n"))
+	}
+	if lines[question+1] != "" {
+		t.Fatalf("line under the question = %q, want blank", lines[question+1])
+	}
+	// The three bar rows: a padded row, the field's text, another padded row.
+	if got := strings.TrimSpace(lines[question+2]); got != "" {
+		t.Fatalf("filter pad row = %q, want padding", lines[question+2])
+	}
+	if !strings.Contains(lines[question+3], "Type to filter") {
+		t.Fatalf("filter row = %q, want the field", lines[question+3])
+	}
+	if lines[question+4] != "" && strings.TrimSpace(lines[question+4]) != "" {
+		t.Fatalf("filter trailing pad = %q, want padding", lines[question+4])
+	}
+	if lines[question+5] != "" {
+		t.Fatalf("line under the bar = %q, want the one blank line before the list", lines[question+5])
+	}
+	if strings.TrimSpace(lines[question+6]) == "" {
+		t.Fatalf("a second blank under the bar is one too many:\n%s", strings.Join(lines, "\n"))
 	}
 }

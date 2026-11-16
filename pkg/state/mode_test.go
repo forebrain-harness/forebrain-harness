@@ -521,3 +521,57 @@ func TestHandOffPlanRecordsTheRowAndReentryClearsIt(t *testing.T) {
 		t.Fatalf("legacy state = %+v, want agent mode with no hand-off", old)
 	}
 }
+
+// The level the user picked rides in the same file as the row: it is what the
+// executor dispatch later reads to run the subagent at that level, and entering
+// plan mode again clears it with the rest of the hand-off.
+func TestHandOffPlanRecordsTheEffort(t *testing.T) {
+	home := t.TempDir()
+	sid := "sid-hand-off-effort"
+
+	if _, err := Switch(home, sid, ModePlan); err != nil {
+		t.Fatalf("Switch to plan: %v", err)
+	}
+	if _, err := HandOffPlan(home, sid, ModeAgent, PlanHandOff{
+		ModelID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3", Effort: "xhigh",
+	}); err != nil {
+		t.Fatalf("HandOffPlan: %v", err)
+	}
+	stored, err := Get(home, sid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.PlanHandOff == nil || stored.PlanHandOff.Effort != "xhigh" {
+		t.Fatalf("stored = %+v, want the picked level on the hand-off", stored.PlanHandOff)
+	}
+	raw, err := os.ReadFile(filepath.Join(home, "state", "modes", sid+".json"))
+	if err != nil {
+		t.Fatalf("read mode file: %v", err)
+	}
+	if !strings.Contains(string(raw), `"effort": "xhigh"`) {
+		t.Fatalf("mode file = %s, want the level in it", raw)
+	}
+
+	// Re-entering plan mode clears the whole hand-off, level included.
+	reentered, err := Switch(home, sid, ModePlan)
+	if err != nil {
+		t.Fatalf("Switch back to plan: %v", err)
+	}
+	if reentered.PlanHandOff != nil {
+		t.Fatalf("reentered = %+v, want no hand-off", reentered.PlanHandOff)
+	}
+
+	// A file written before the level existed reads back with an empty one.
+	legacy := filepath.Join(home, "state", "modes", "sid-legacy-effort.json")
+	if err := os.WriteFile(legacy, []byte(`{"mode":"agent","has_exited_plan":true,`+
+		`"plan_hand_off":{"model_id":"llm_row2","provider":"zhipuai","model":"glm-5.3"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old, err := Get(home, "sid-legacy-effort")
+	if err != nil {
+		t.Fatalf("Get legacy: %v", err)
+	}
+	if old.PlanHandOff == nil || old.PlanHandOff.ModelID != "llm_row2" || old.PlanHandOff.Effort != "" {
+		t.Fatalf("legacy hand-off = %+v, want the row with no level", old.PlanHandOff)
+	}
+}

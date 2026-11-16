@@ -82,6 +82,10 @@ type handOffModelJSON struct {
 	ID       string `json:"id,omitempty"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
+	// Effort is the reasoning level the user picked on the picker's second
+	// screen, omitted when they picked none: a decision written before the
+	// second screen existed decodes with "" and behaves exactly as it did.
+	Effort string `json:"effort,omitempty"`
 }
 
 // handOffModelJSONOf projects a reply's hand-off model into the answer shape,
@@ -94,6 +98,7 @@ func handOffModelJSONOf(m *Model) *handOffModelJSON {
 		ID:       strings.TrimSpace(m.ID),
 		Provider: strings.TrimSpace(m.Provider),
 		Model:    strings.TrimSpace(m.Model),
+		Effort:   strings.TrimSpace(m.Effort),
 	}
 }
 
@@ -258,6 +263,7 @@ func (s ApprovalService) ApplyResolvedEffect(action *state.Action, runID string)
 			ID:       answer.HandOffModel.ID,
 			Provider: answer.HandOffModel.Provider,
 			Model:    answer.HandOffModel.Model,
+			Effort:   answer.HandOffModel.Effort,
 		}
 	}
 	effect, err := s.effect(action, choice, ApprovalReply{
@@ -436,7 +442,10 @@ func sameApprovedReply(act *state.Action, choice string, reply ApprovalReply) bo
 		}
 		return strings.TrimSpace(a.ID) == strings.TrimSpace(b.ID) &&
 			strings.TrimSpace(a.Provider) == strings.TrimSpace(b.Provider) &&
-			strings.TrimSpace(a.Model) == strings.TrimSpace(b.Model)
+			strings.TrimSpace(a.Model) == strings.TrimSpace(b.Model) &&
+			// The level is part of what the user decided: the same row at two
+			// different levels is two different answers, not a retry.
+			strings.TrimSpace(a.Effort) == strings.TrimSpace(b.Effort)
 	}
 	return answer.Decision == choice && reflect.DeepEqual(answer.Exec, reply.Exec) &&
 		reflect.DeepEqual(answer.Update, reply.Update) &&
@@ -753,6 +762,7 @@ func ActionHandOffModel(action *state.Action) (Model, bool) {
 		ID:       strings.TrimSpace(answer.HandOffModel.ID),
 		Provider: strings.TrimSpace(answer.HandOffModel.Provider),
 		Model:    strings.TrimSpace(answer.HandOffModel.Model),
+		Effort:   strings.TrimSpace(answer.HandOffModel.Effort),
 	}, true
 }
 
@@ -1011,6 +1021,9 @@ type Model struct {
 	ID       string
 	Provider string
 	Model    string
+	// Effort is the reasoning level the user picked for this dispatch, empty
+	// when they picked none and the row's own configuration decides.
+	Effort string
 }
 
 // Display renders the model for a UI row or a confirmation line, in the same
@@ -1329,6 +1342,12 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvi
 			Current:      current,
 			Endpoint:     ModelEndpointLabel(entry.BaseURL, entry.APIPath, entry.URLVerbatim),
 			EndpointTail: endpointTail(entry),
+			// The offer carries the row's thinking levels so picking a model
+			// can open a second screen on them: the levels the row offers, in
+			// the one order every picker draws, and the one the row is
+			// configured with (what that screen opens on).
+			Efforts:       orderedEffortLevels(entry.ReasoningEfforts),
+			DefaultEffort: strings.TrimSpace(entry.ConfiguredEffort),
 		})
 	}
 	return out
@@ -1627,6 +1646,9 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 		ID:       strings.TrimSpace(in.Model.ID),
 		Provider: strings.TrimSpace(in.Model.Provider),
 		Model:    strings.TrimSpace(in.Model.Model),
+		// The level the user picked rides through to the dispatch: dropping it
+		// here would be a silent "you chose, nothing happened".
+		Effort: strings.TrimSpace(in.Model.Effort),
 	}
 	actionID := strings.TrimSpace(in.ActionID)
 	sessionID := strings.TrimSpace(in.SessionID)

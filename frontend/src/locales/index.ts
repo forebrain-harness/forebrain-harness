@@ -2244,6 +2244,9 @@ const zh = {
   'chat.exitPlanReviewStop': '停止',
   'chat.exitPlanReviewHint': '时间线里的“正在运行 1 个 plan-reviewer 任务…”卡片可以点进去看它在做什么。',
   'chat.exitPlanReviewCurrent': '当前',
+  // 选完模型后的第二屏（plan 310）：问句点名具体模型，返回入口回到模型列表。
+  'chat.exitPlanEffortChoose': '{model} 用哪档思考强度？',
+  'chat.exitPlanEffortBack': '返回选模型',
   // 办公创作的计划审批（plan 153 A9）：四选项里没有“清空上下文”，
   // “修改计划”与 coding 的“继续规划”是同一件事，只是文案按办公的说法。
   'chat.officePlanQuestion': '计划写好了，怎么处理？',
@@ -4765,6 +4768,8 @@ const en: Record<keyof typeof zh, string> = {
   'chat.exitPlanReviewStop': 'Stop',
   'chat.exitPlanReviewHint': 'Open the "Running 1 plan-reviewer task…" card in the timeline to watch it work.',
   'chat.exitPlanReviewCurrent': 'current',
+  'chat.exitPlanEffortChoose': 'Which reasoning effort should {model} use?',
+  'chat.exitPlanEffortBack': 'Back to models',
   'chat.officePlanQuestion': 'The plan is written — what next?',
   'chat.officePlanExecute': 'Run the plan',
   'chat.officePlanRevise': 'Revise the plan',

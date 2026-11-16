@@ -108,6 +108,11 @@ func elideEndpoint(url, tail string, width int) []string {
 // description is laid out exactly like a plain row.
 func (l panelLine) columnRows(width int) []string {
 	if strings.TrimSpace(l.text) == "" {
+		// A row with no description keeps its mark right after the name, one
+		// space over, so a gear never floats in a column of its own.
+		if l.mark != "" {
+			return panelLine{lead: l.lead, text: l.col + " " + l.mark}.rows(width)
+		}
 		return panelLine{lead: l.lead, text: l.col}.rows(width)
 	}
 	leadW := displayLineWidth(l.lead)
@@ -173,7 +178,13 @@ func (b *panelBuilder) tabs(chips []string) {
 // column panelColumnGap cells right of it — each left-aligned, the
 // description wrapping inside its own column. elideTail, when set, is the end
 // of desc that column must keep visible (an endpoint's api path); every other
-// row passes "" and wraps.
-func (b *panelBuilder) selectableColumns(selected bool, lead, name string, nameWidth int, desc, elideTail string) {
-	b.addSelectable(selected, panelLine{lead: lead, col: name, colWidth: nameWidth, text: desc, elideTail: elideTail})
+// row passes "" and wraps. mark, when given, is an already-styled glyph drawn
+// tight against the name — the /model effort picker's gear; no other list
+// passes one.
+func (b *panelBuilder) selectableColumns(selected bool, lead, name string, nameWidth int, desc, elideTail string, mark ...string) {
+	m := ""
+	if len(mark) > 0 {
+		m = mark[0]
+	}
+	b.addSelectable(selected, panelLine{lead: lead, col: name, colWidth: nameWidth, text: desc, elideTail: elideTail, mark: m})
 }
