@@ -320,7 +320,7 @@ describe('SubagentConfigDrawer', () => {
   // because the save writes every visible field — and its writes go to the
   // shared endpoints, never to an agent's.
   it('edits a shared definition through the global endpoints', async () => {
-    vi.spyOn(forebrainApi, 'sharedSubagents').mockResolvedValue({
+    vi.spyOn(forebrainApi, 'fetchSharedSubagents').mockResolvedValue({
       rows: [
         {
           ...detail({ name: 'repo-auditor', kind: 'shared', description: '审查一个仓库区域', systemPrompt: '你审查仓库。' }),
@@ -347,7 +347,7 @@ describe('SubagentConfigDrawer', () => {
   })
 
   it('creates a shared definition through the global create', async () => {
-    vi.spyOn(forebrainApi, 'sharedSubagents').mockResolvedValue({ rows: [], types: [] })
+    vi.spyOn(forebrainApi, 'fetchSharedSubagents').mockResolvedValue({ rows: [], types: [] })
     const wrapper = await openDrawer({ scope: 'global', agentId: undefined, name: undefined, mode: 'create' })
 
     expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('新建共享子代理')

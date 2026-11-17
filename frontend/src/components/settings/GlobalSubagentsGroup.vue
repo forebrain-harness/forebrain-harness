@@ -178,7 +178,7 @@ const columns: DataColumn[] = [
 async function load(): Promise<void> {
   error.value = ''
   try {
-    const listing = await forebrainApi.sharedSubagents()
+    const listing = await forebrainApi.fetchSharedSubagents()
     apply(listing)
   } catch (cause) {
     error.value = getErrorMessage(cause)

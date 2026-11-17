@@ -557,7 +557,7 @@ async function load() {
       : globalScope.value
         // The registry's own list carries the whole definition, prompt included:
         // there is no per-agent detail route for a subagent no agent owns.
-        ? forebrainApi.sharedSubagents().then(
+        ? forebrainApi.fetchSharedSubagents().then(
             (listing) => listing.rows.find((candidate) => candidate.name === subject.value) ?? null,
           )
         : forebrainApi.subagentConfig(agentId.value, subject.value)

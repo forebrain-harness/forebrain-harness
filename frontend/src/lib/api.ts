@@ -2931,7 +2931,7 @@ export const forebrainApi = {
   /** The install-wide shared subagent registry and the per-type default rows
    *  (plan 314). One definition every primary agent may enable; none of it is
    *  an agent's own, which is why this read takes no agent id. */
-  sharedSubagents() {
+  fetchSharedSubagents() {
     return api.get<SharedSubagentListing>(SHARED_SUBAGENTS_PATH).then((res) => ({
       rows: Array.isArray(res.data?.rows) ? res.data.rows : [],
       types: Array.isArray(res.data?.types) ? res.data.types : [],

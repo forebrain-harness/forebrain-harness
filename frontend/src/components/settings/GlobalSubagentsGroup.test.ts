@@ -78,7 +78,7 @@ async function mountGroup(): Promise<VueWrapper> {
 describe('GlobalSubagentsGroup', () => {
   beforeEach(() => {
     setLocale('zh')
-    vi.spyOn(forebrainApi, 'sharedSubagents').mockResolvedValue(listing())
+    vi.spyOn(forebrainApi, 'fetchSharedSubagents').mockResolvedValue(listing())
     vi.spyOn(forebrainApi, 'llmModelChoices').mockResolvedValue(choices)
   })
 
@@ -91,7 +91,7 @@ describe('GlobalSubagentsGroup', () => {
     const wrapper = await mountGroup()
 
     expect(wrapper.find('[data-group="shared-subagents"] h3').text()).toBe('全局共享子代理')
-    expect(vi.mocked(forebrainApi.sharedSubagents)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(forebrainApi.fetchSharedSubagents)).toHaveBeenCalledTimes(1)
 
     const row = wrapper.find('[data-shared-row="repo-auditor"]')
     expect(row.exists()).toBe(true)
@@ -158,7 +158,7 @@ describe('GlobalSubagentsGroup', () => {
     expect(vi.mocked(forebrainApi.createSharedSubagent)).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'repo-scout', description: 'finds the files a task touches', systemPrompt: 'You find files.' }),
     )
-    expect(vi.mocked(forebrainApi.sharedSubagents)).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(forebrainApi.fetchSharedSubagents)).toHaveBeenCalledTimes(2)
   })
 
   it('edits a definition through the global put and renders a refusal inline', async () => {
@@ -178,7 +178,7 @@ describe('GlobalSubagentsGroup', () => {
   })
 
   it('asks before deleting, and deletes the definition alone', async () => {
-    vi.mocked(forebrainApi.sharedSubagents)
+    vi.mocked(forebrainApi.fetchSharedSubagents)
       .mockResolvedValueOnce(listing())
       .mockResolvedValue(listing({ rows: [] }))
     const remove = vi.spyOn(forebrainApi, 'deleteSharedSubagent').mockResolvedValue(listing({ rows: [] }))
@@ -198,7 +198,7 @@ describe('GlobalSubagentsGroup', () => {
   })
 
   it('renders an empty registry as the sentence that says how to start one', async () => {
-    vi.mocked(forebrainApi.sharedSubagents).mockResolvedValue(listing({ rows: [] }))
+    vi.mocked(forebrainApi.fetchSharedSubagents).mockResolvedValue(listing({ rows: [] }))
     const wrapper = await mountGroup()
 
     expect(wrapper.find('[data-shared-empty]').text()).toBe(
