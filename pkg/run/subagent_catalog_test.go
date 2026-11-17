@@ -366,3 +366,163 @@ func TestBatchEnumDescriptionUsesBatchSentences(t *testing.T) {
 		}
 	}
 }
+
+// sharedCatalogTestConfig is one install-wide shared subagent (a pick-tier
+// custom definition with its own model row and a one-shot lifecycle) plus one
+// primary agent that may or may not have enabled it (plan 314).
+func sharedCatalogTestConfig(reference *appcfg.SubagentConfig) *appcfg.Root {
+	cfg := &appcfg.Root{
+		LLMModels: []appcfg.LLMModelConfig{{
+			ID: "llm-shared-audit", Provider: "deepseek", Model: "deepseek-v4-flash",
+			BaseURL: "http://audit.test/v1", APIKey: "key",
+		}},
+		Agents: appcfg.AgentsSection{
+			SharedSubagents: []appcfg.SubagentConfig{{
+				Name:            "repo-auditor",
+				Description:     "audits one repository area",
+				SystemPrompt:    "You audit repositories.",
+				Model:           "llm-shared-audit",
+				ReasoningEffort: "high",
+				Tools:           appcfg.SubagentToolsPick,
+				AllowedTools:    []string{"read_file", "code_search"},
+				Continuable:     subagentCatalogTestBool(false),
+			}},
+			Definitions: map[string]appcfg.AgentDefinition{"main": {Primary: true}},
+		},
+	}
+	if reference != nil {
+		def := cfg.Agents.Definitions["main"]
+		def.Subagents = append(def.Subagents, *reference)
+		cfg.Agents.Definitions["main"] = def
+	}
+	return cfg
+}
+
+// TestSharedSubagentCatalogIsDefaultDisabled pins the owner's rule (2026-11-16,
+// plan 314): a globally shared custom subagent runs for nobody until that
+// agent's own reference entry enables it. Absence, an explicit false and a
+// reference carrying anything but the switch all leave it off — which is the
+// opposite of a per-agent custom subagent's absent-means-on default.
+func TestSharedSubagentCatalogIsDefaultDisabled(t *testing.T) {
+	// No reference at all: not dispatchable, and not even known.
+	catalog := SubagentCatalogFor(sharedCatalogTestConfig(nil), "main")
+	for _, def := range catalog.Public() {
+		if def.Name == "repo-auditor" {
+			t.Fatal("a shared subagent with no reference entry must not be dispatchable")
+		}
+	}
+	if catalog.configures("repo-auditor") {
+		t.Fatal("an agent that never enabled a shared subagent does not configure it")
+	}
+	if _, err := catalog.ResolvePublic("repo-auditor"); err == nil {
+		t.Fatal("a shared subagent nobody enabled must not resolve")
+	}
+	if strings.Contains(catalog.EnumDescription(), "repo-auditor") {
+		t.Fatalf("the subagent_type schema names a shared subagent nobody enabled: %s", catalog.EnumDescription())
+	}
+
+	// An explicit false is the same as absence.
+	off := appcfg.SubagentConfig{Name: "repo-auditor", Enabled: subagentCatalogTestBool(false)}
+	catalog = SubagentCatalogFor(sharedCatalogTestConfig(&off), "main")
+	if catalog.configures("repo-auditor") {
+		t.Fatal("a reference entry that says false must not enable the shared subagent")
+	}
+	if _, err := catalog.ResolvePublic("repo-auditor"); err == nil {
+		t.Fatal("a switched-off shared subagent must not resolve")
+	}
+
+	// Enabled: dispatchable, with the registry's own definition.
+	on := appcfg.SubagentConfig{Name: "repo-auditor", Enabled: subagentCatalogTestBool(true)}
+	cfg := sharedCatalogTestConfig(&on)
+	catalog = SubagentCatalogFor(cfg, "main")
+	names := make([]string, 0, 8)
+	for _, def := range catalog.Public() {
+		names = append(names, def.Name)
+	}
+	want := append(append([]string{}, agent.PublicSubagentNames...), "repo-auditor")
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("Public() = %v, want the built-ins then the enabled shared subagent %v", names, want)
+	}
+	if !catalog.configures("repo-auditor") {
+		t.Fatal("an enabled shared subagent is configured by the agent that enabled it")
+	}
+	def, err := catalog.ResolvePublic("repo-auditor")
+	if err != nil {
+		t.Fatalf("an enabled shared subagent must resolve: %v", err)
+	}
+	if def.Name != "repo-auditor" || def.Description != "audits one repository area" || def.SystemPrompt != "You audit repositories." {
+		t.Fatalf("ResolvePublic(repo-auditor) = %+v, want the registry's definition", def)
+	}
+	// The definition's own lifecycle and tool policy travel with it: one
+	// reference entry is the whole difference between off and on.
+	if def.Continuable || !def.OneShot {
+		t.Fatalf("ResolvePublic(repo-auditor) = %+v, want the registry's one-shot lifecycle", def)
+	}
+	policy, ok := catalog.ToolPolicy("repo-auditor")
+	if !ok || policy.Mode != appcfg.SubagentToolsPick || len(policy.Allowed) != 2 {
+		t.Fatalf("ToolPolicy(repo-auditor) = %+v %v, want the registry's pick tier", policy, ok)
+	}
+	if prompt, ok := catalog.Prompt("repo-auditor"); !ok || prompt != "You audit repositories." {
+		t.Fatalf("Prompt(repo-auditor) = %q %v, want the registry's prompt", prompt, ok)
+	}
+	if !strings.Contains(catalog.EnumDescription(), "repo-auditor: audits one repository area.") {
+		t.Fatalf("the subagent_type schema omits the enabled shared subagent: %s", catalog.EnumDescription())
+	}
+}
+
+// TestSharedSubagentModelResolvesGlobally pins that a shared subagent's model is
+// the install-wide row it stores, resolved the same way for every agent that
+// enabled it — the goal check's precedent (plans 299, 314).
+func TestSharedSubagentModelResolvesGlobally(t *testing.T) {
+	on := appcfg.SubagentConfig{Name: "repo-auditor", Enabled: subagentCatalogTestBool(true)}
+	cfg := sharedCatalogTestConfig(&on)
+	modelID, provider, model, effort, ok := SubagentCatalogFor(cfg, "main").Model("repo-auditor")
+	if !ok || modelID != "llm-shared-audit" || provider != "deepseek" || model != "deepseek-v4-flash" || effort != "high" {
+		t.Fatalf("Model(repo-auditor) = %q %q %q %q %v", modelID, provider, model, effort, ok)
+	}
+	// The row is resolved by id, so another agent that enabled the same
+	// subagent reads the same model without listing it.
+	other := cfg.Agents.Definitions["main"]
+	other.Subagents = []appcfg.SubagentConfig{{Name: "repo-auditor", Enabled: subagentCatalogTestBool(true)}}
+	cfg.Agents.Definitions["other"] = other
+	if got, _, _, _, ok := SubagentCatalogFor(cfg, "other").Model("repo-auditor"); !ok || got != "llm-shared-audit" {
+		t.Fatalf("Model(repo-auditor) for another agent = %q %v, want the same row", got, ok)
+	}
+}
+
+// TestSharedSubagentCatalogKeepsTheAgentsOwnEntries pins the merge order and the
+// two rules side by side (plan 314): an agent's own custom subagents keep their
+// absent-means-enabled switch and come first, the enabled shared ones follow in
+// registry order, and an office conversation still dispatches them.
+func TestSharedSubagentCatalogKeepsTheAgentsOwnEntries(t *testing.T) {
+	on := appcfg.SubagentConfig{Name: "repo-auditor", Enabled: subagentCatalogTestBool(true)}
+	cfg := sharedCatalogTestConfig(&on)
+	def := cfg.Agents.Definitions["main"]
+	def.Subagents = append([]appcfg.SubagentConfig{{
+		Name: "repo-scout", Description: "finds files", SystemPrompt: "You scout.",
+	}}, def.Subagents...)
+	cfg.Agents.Definitions["main"] = def
+
+	catalog := SubagentCatalogFor(cfg, "main")
+	names := make([]string, 0, 8)
+	for _, d := range catalog.Public() {
+		names = append(names, d.Name)
+	}
+	want := append(append([]string{}, agent.PublicSubagentNames...), "repo-scout", "repo-auditor")
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("Public() = %v, want %v", names, want)
+	}
+	// Office projects dispatch the not-about-code built-ins plus every custom
+	// subagent, the shared ones included.
+	office := catalog.ForProjectType("office")
+	officeNames := make([]string, 0, 8)
+	for _, d := range office.Public() {
+		officeNames = append(officeNames, d.Name)
+	}
+	if strings.Join(officeNames, ",") != "general-purpose,explore,repo-scout,repo-auditor" {
+		t.Fatalf("office Public() = %v, want the office built-ins then the customs", officeNames)
+	}
+	if _, err := office.ResolvePublic("repo-auditor"); err != nil {
+		t.Fatalf("an office conversation must still dispatch an enabled shared subagent: %v", err)
+	}
+}

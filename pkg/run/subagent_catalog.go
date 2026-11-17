@@ -59,6 +59,13 @@ type SubagentCatalog struct {
 // SubagentCatalogFor reads one primary agent's subagent configuration. An
 // unknown or unnamed agent has none: the catalog then offers exactly the
 // built-in types, all of them enabled.
+//
+// The install-wide shared subagents (agents.shared_subagents) are merged in
+// here rather than stored per agent (plan 314): an agent's entry naming one is
+// its enable marker — the definition lives in the registry — and a shared
+// subagent runs nowhere until that marker says enabled: true. That is the
+// opposite of a per-agent custom subagent's absent-means-on switch, which is
+// why the two are read by different rules rather than one.
 func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
 	catalog := SubagentCatalog{cfg: cfg, agentName: agentName, entries: map[string]appcfg.SubagentConfig{}}
 	if cfg == nil {
@@ -72,12 +79,34 @@ func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
 	if !ok {
 		return catalog
 	}
+	shared := appcfg.SharedSubagentNames(cfg.Agents.SharedSubagents)
+	enabledShared := make(map[string]struct{}, len(shared))
 	for _, entry := range def.Subagents {
 		entry.Name = subagentKey(entry.Name)
+		if slices.Contains(shared, entry.Name) {
+			// A reference entry is the enable marker, never a definition.
+			if entry.Enabled != nil && *entry.Enabled {
+				enabledShared[entry.Name] = struct{}{}
+			}
+			continue
+		}
 		catalog.entries[entry.Name] = entry
 		if !isPublicSubagentName(entry.Name) {
 			catalog.customs = append(catalog.customs, entry)
 		}
+	}
+	// The registry's order decides where the merged ones sit: after this
+	// agent's own subagents, and only the ones it enabled.
+	for _, entry := range cfg.Agents.SharedSubagents {
+		entry.Name = subagentKey(entry.Name)
+		if _, on := enabledShared[entry.Name]; !on {
+			continue
+		}
+		// Enabled explicitly: the marker the merge answers for is this
+		// definition's presence, and subagentConfigEnabled reads absent as on.
+		entry.Enabled = appcfg.BoolPtr(true)
+		catalog.entries[entry.Name] = entry
+		catalog.customs = append(catalog.customs, entry)
 	}
 	return catalog
 }
