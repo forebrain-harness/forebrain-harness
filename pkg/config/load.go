@@ -212,6 +212,14 @@ func validateLoadedRoot(r *Root) error {
 	}); err != nil {
 		return err
 	}
+	// The per-type model rows are global for the same reason, and resolve
+	// against the same table: one verdict for the whole section (plan 315).
+	if err := ValidateSubagentModels(r.Agents.SubagentModels, func(ref string) bool {
+		_, ok := ResolveModelRef(r, "main", ref)
+		return ok
+	}); err != nil {
+		return err
+	}
 	if err := validatePrimaryAgents(r); err != nil {
 		return err
 	}
@@ -334,7 +342,6 @@ func Save(path string, r Root) error {
 	if persisted, err := LoadLegacyFileSections(path); err == nil {
 		restorePersistedSecrets(&r, persisted)
 	}
-	dropPlaceholderLLMProviders(&r)
 
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".json" {
@@ -347,30 +354,6 @@ func Save(path string, r Root) error {
 		return err
 	}
 	return writeFileAtomic(path, b, 0o600)
-}
-
-// dropPlaceholderLLMProviders removes provider entries that carry no settings.
-// A configuration written before the model table existed keeps one empty entry
-// in memory as the slot its model fills in, but persisting it writes a bare
-// `- {}` that documents nothing. Load recreates the slot, so removing it is
-// round-trip safe. It runs last, after validation has seen the in-memory shape.
-func dropPlaceholderLLMProviders(r *Root) {
-	if r == nil {
-		return
-	}
-	for name, def := range r.Agents.Definitions {
-		kept := make([]AgentLLMProviderConfig, 0, len(def.LLMProviders))
-		for _, provider := range def.LLMProviders {
-			if !rendersEmpty(provider) {
-				kept = append(kept, provider)
-			}
-		}
-		if len(kept) == len(def.LLMProviders) {
-			continue
-		}
-		def.LLMProviders = kept
-		r.Agents.Definitions[name] = def
-	}
 }
 
 // restorePersistedSecrets keeps the persisted form of every secret in a
@@ -454,8 +437,8 @@ func restoreSecretValues(dst, src reflect.Value) {
 // restoreSliceSecretsWithIdentity matches dst slice elements to src by
 // structural identity (equal non-secret fields), falling back to the element in
 // the same position only when the two name the same secret owner. This prevents
-// secret swaps when llm_providers are reordered, stops an entry that landed in
-// another provider's slot from being handed that provider's key, keeps a
+// secret swaps when a credential-bearing list is reordered, stops an entry that
+// landed in another entry's slot from being handed that entry's key, keeps a
 // login-backed entry keyless once a write cleared it, and drops a reference the
 // configuration itself attributes to another provider.
 func restoreSliceSecretsWithIdentity(dst, src reflect.Value) {
@@ -703,24 +686,15 @@ func normalize(r *Root) {
 		r.Agents.Definitions = map[string]AgentDefinition{}
 	}
 	if _, ok := r.Agents.Definitions["main"]; !ok {
-		r.Agents.Definitions["main"] = AgentDefinition{
-			LLMProviders: []AgentLLMProviderConfig{{}},
-		}
+		r.Agents.Definitions["main"] = AgentDefinition{}
 	}
-	mainDef := r.Agents.Definitions["main"]
-	if len(mainDef.LLMProviders) == 0 {
-		mainDef.LLMProviders = []AgentLLMProviderConfig{{}}
-	}
-	NormalizeLLMProviderEntries(&mainDef)
-	r.Agents.Definitions["main"] = mainDef
-	for k := range r.Agents.Definitions {
-		if k == "main" {
-			continue
-		}
-		d := r.Agents.Definitions[k]
-		NormalizeLLMProviderEntries(&d)
-		r.Agents.Definitions[k] = d
-	}
+	// A default_model written before the model table existed is a
+	// "provider/model" label. One a row still carries stays (it keeps naming
+	// that row); one nothing resolves to is an unset choice — the agent
+	// follows main's default — so an install whose lists are gone still boots
+	// with no migration (owner 2026-11-16: a legacy label means unset, plan
+	// 315).
+	clearUnresolvedDefaultModelLabels(r)
 	NormalizeMCPServers(r.Agents.Defaults.MCPServers)
 	for k := range r.Agents.Definitions {
 		d := r.Agents.Definitions[k]
@@ -729,6 +703,33 @@ func normalize(r *Root) {
 	}
 	normalizeSandboxConfig(r)
 	normalizeLSPSection(&r.LSP)
+}
+
+// clearUnresolvedDefaultModelLabels clears the default_model of every agent
+// whose stored reference is a legacy label the install no longer carries. Only
+// a value with a slash can be one; a row id is left alone even when the row is
+// gone, because the runtime skips a dangling id rather than refusing to start.
+func clearUnresolvedDefaultModelLabels(r *Root) {
+	if r == nil || len(r.Agents.Definitions) == 0 {
+		return
+	}
+	viewBuilt := false
+	var view []AgentLLMProviderConfig
+	for id, def := range r.Agents.Definitions {
+		ref := strings.TrimSpace(def.DefaultModel)
+		if !strings.Contains(ref, "/") {
+			continue
+		}
+		if !viewBuilt {
+			view = ConfiguredLLMs(r)
+			viewBuilt = true
+		}
+		if _, ok := resolveModelRef(r, view, id, ref); ok {
+			continue
+		}
+		def.DefaultModel = ""
+		r.Agents.Definitions[id] = def
+	}
 }
 
 // validateMCPToolApprovalModes validates every MCP server list the
@@ -924,21 +925,11 @@ func validatePrimaryAgents(r *Root) error {
 		if !primaryAgentIDPattern.MatchString(id) {
 			return fmt.Errorf("agents.definitions.%s: invalid agent id", id)
 		}
-		// A dangling default_model must never reach disk: the runtime treats
-		// an unresolvable default as an error (no fall-back to the first
-		// entry), so load, configuration application and every structured write
-		// path share
-		// this one verdict via validateLoadedRoot/Save. Only a legacy
-		// "provider/model" label that matches nothing is that error; a row id
-		// nothing carries is skipped by the runtime (the model page may delete
-		// it), so a stale id cannot keep the install from starting (plan 260).
-		if dm := strings.TrimSpace(def.DefaultModel); strings.Contains(dm, "/") {
-			if _, ok := ResolveModelRef(r, id, dm); !ok {
-				return fmt.Errorf(
-					"agents.definitions.%s.default_model: %q does not match any llm_providers entry on this agent's list",
-					id, def.DefaultModel)
-			}
-		}
+		// A default_model is a global model-table row id (plan 315): the
+		// runtime skips one naming no row (the model page may delete it), so a
+		// stale id cannot keep the install from starting (plan 260). A legacy
+		// "provider/model" label nothing resolves to has already been cleared
+		// by normalize, which is what makes an old install boot unchanged.
 		if err := ValidateAgentSubagents(id, def, builtInPublicSubagentNames, builtInSystemSubagentNames, func(ref string) bool {
 			// The same resolution a default_model reference gets: a row id this
 			// install carries (plan 262), or a legacy label. A label keeps its

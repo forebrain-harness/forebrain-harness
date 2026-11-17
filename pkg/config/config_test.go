@@ -26,7 +26,7 @@ func TestLoadAndSaveJSONYAML(t *testing.T) {
 	root := Root{
 		Gateway: Gateway{HTTPAddr: "127.0.0.1:6060"},
 		Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-			"main": {LLMProviders: []AgentLLMProviderConfig{{Provider: "openai", Model: "gpt"}}},
+			"main": {DisplayName: "main agent"},
 		}},
 	}
 	if err := Save(jsonPath, root); err != nil {
@@ -123,11 +123,6 @@ func TestSaveRejectsInvalidPrimaryAgentConfig(t *testing.T) {
 }
 
 func TestAgentLLMHelpersAndYAMLUnmarshal(t *testing.T) {
-	if EffectiveDefaultLLM(AgentDefinition{}) != nil {
-		t.Fatal("EffectiveDefaultLLM empty = non-nil")
-	}
-	NormalizeLLMProviderEntries(nil)
-
 	var cfg AgentLLMProviderConfig
 	raw := []byte("provider: openai\nmodel: gpt\nparams:\n  temperature: 0.1\n")
 	if err := yamlv2.Unmarshal(raw, &cfg); err != nil {
@@ -152,42 +147,6 @@ func TestAgentLLMHelpersAndYAMLUnmarshal(t *testing.T) {
 	}
 	if err := cfg.UnmarshalJSON([]byte(`{`)); err == nil {
 		t.Fatal("direct provider invalid json error = nil")
-	}
-}
-
-func TestLLMProviderModelArrayExpandsProviderEntries(t *testing.T) {
-	raw := []byte(`
-agents:
-  definitions:
-    main:
-      llm_providers:
-        - provider: openai
-          model:
-            - gpt-5.4
-            - gpt-5.5
-          api_key: ${OPENAI_API_KEY}
-          base_url: https://api.openai.com/v1
-`)
-	path := filepath.Join(t.TempDir(), "forebrain.yaml")
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	cfg, err := loadPersistedDocumentForTest(path)
-	if err != nil {
-		t.Fatalf("LoadPersisted: %v", err)
-	}
-	got := cfg.Agents.Definitions["main"].LLMProviders
-	if len(got) != 2 {
-		t.Fatalf("llm providers len=%d want 2: %+v", len(got), got)
-	}
-	if got[0].Provider != "openai" || got[0].Model != "gpt-5.4" {
-		t.Fatalf("first provider = %+v", got[0])
-	}
-	if got[1].Provider != "openai" || got[1].Model != "gpt-5.5" {
-		t.Fatalf("second provider = %+v", got[1])
-	}
-	if got[0].APIKey != "${OPENAI_API_KEY}" || got[1].APIKey != "${OPENAI_API_KEY}" {
-		t.Fatalf("expanded providers did not clone config: %+v", got)
 	}
 }
 
@@ -530,11 +489,9 @@ func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 		"agents:",
 		"  definitions:",
 		"    main:",
-		"      llm_providers: []",
+		"      display_name: main",
 		"    worker:",
-		"      llm_providers:",
-		"        - provider: openai",
-		"          model: gpt",
+		"      display_name: worker",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write normalize config: %v", err)
@@ -543,8 +500,13 @@ func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load normalize config: %v", err)
 	}
-	if cfg.Gateway.HTTPAddr != "127.0.0.1:8081" || len(cfg.Agents.Definitions["main"].LLMProviders) != 1 || len(cfg.Agents.Definitions["worker"].LLMProviders) != 1 {
+	if cfg.Gateway.HTTPAddr != "127.0.0.1:8081" {
 		t.Fatalf("normalize branches not applied: %+v", cfg)
+	}
+	for _, id := range []string{"main", "worker"} {
+		if _, ok := cfg.Agents.Definitions[id]; !ok {
+			t.Fatalf("definition %q missing after normalize: %+v", id, cfg.Agents.Definitions)
+		}
 	}
 
 	unknownConfigPath := filepath.Join(dir, "unknown-top-level.yaml")

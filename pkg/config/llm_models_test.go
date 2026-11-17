@@ -37,94 +37,49 @@ func TestNormalizeLLMModelIdentity(t *testing.T) {
 	}
 }
 
-// TestLegacyLLMModelID pins that the id a pre-table entry gets is stable
-// across spellings of one identity — plan 262's migration writes the same id
-// into fb_llm_models, so a reference recorded now must not drift.
-func TestLegacyLLMModelID(t *testing.T) {
-	t.Parallel()
-	same := []struct{ provider, model, baseURL, apiPath string }{
-		{"openai", "gpt-4o", "https://a.test", "/chat/completions"},
-		{"OpenAI", " gpt-4o ", "https://a.test/", ""},
-		{"openai", "gpt-4o", "https://a.test", "chat/completions/"},
-	}
-	want := LegacyLLMModelID(same[0].provider, same[0].model, same[0].baseURL, same[0].apiPath)
-	if len(want) != len(LegacyLLMModelIDPrefix)+16 || want[:len(LegacyLLMModelIDPrefix)] != LegacyLLMModelIDPrefix {
-		t.Fatalf("LegacyLLMModelID = %q, want %q followed by 16 hex digits", want, LegacyLLMModelIDPrefix)
-	}
-	for _, c := range same[1:] {
-		if got := LegacyLLMModelID(c.provider, c.model, c.baseURL, c.apiPath); got != want {
-			t.Fatalf("same identity spelled (%q, %q, %q, %q) = %q, want %q", c.provider, c.model, c.baseURL, c.apiPath, got, want)
-		}
-	}
-	if other := LegacyLLMModelID("openai", "gpt-4o", "https://b.test", "/chat/completions"); other == want {
-		t.Fatal("a different base_url got the same id")
-	}
-}
-
-// modelViewFixture is the install two table rows and two legacy lists compose
-// to: rows llm-1/llm-2, main's list (an empty placeholder, an entry naming
-// llm-1's endpoint, and a two-model entry), and worker's own entry.
+// modelViewFixture is the install two table rows and the per-type rows compose
+// to: rows llm-1/llm-2, a definition naming one of them, and a built-in
+// subagent type with a global row of its own.
 func modelViewFixture() Root {
 	return Root{
 		LLMModels: []LLMModelConfig{
 			{ID: "llm-1", Provider: "openai", Model: "gpt-4o", BaseURL: "https://table.test", APIKey: "table-key"},
 			{ID: "llm-2", Provider: "anthropic", Model: "claude-a", BaseURL: "https://table.test", APIKey: "table-key-2"},
+			{ID: "llm-3", Provider: "deepseek", Model: "deepseek-chat", BaseURL: "https://deepseek.test"},
 		},
-		Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-			"main": {
-				LLMProviders: []AgentLLMProviderConfig{
-					{},
-					{Provider: "openai", Model: "gpt-4o", BaseURL: "https://table.test", APIKey: "legacy-same-endpoint"},
-					{Provider: "deepseek", Models: StringList{"deepseek-chat", "deepseek-reasoner"}, BaseURL: "https://deepseek.test"},
-				},
+		Agents: AgentsSection{
+			Definitions: map[string]AgentDefinition{
+				"main":   {},
+				"worker": {DefaultModel: "llm-2"},
 			},
-			"worker": {
-				LLMProviders: []AgentLLMProviderConfig{
-					{Provider: "openai", Model: "gpt-4o", BaseURL: "https://worker.test", APIKey: "worker-key"},
-				},
+			SubagentModels: map[string]SubagentConfig{
+				"explore": {Model: "llm-3", ReasoningEffort: "high"},
 			},
-		}},
+		},
 	}
 }
 
-// TestConfiguredLLMs pins the view's order and its two merge rules: a table
-// row comes first and beats a legacy entry naming the same endpoint, and the
-// empty placeholder entry carries no identity at all.
+// TestConfiguredLLMs pins the view: the table's rows in stored order, one entry
+// per identity, and a copy whose mutation leaves the root alone.
 func TestConfiguredLLMs(t *testing.T) {
 	t.Parallel()
 	cfg := modelViewFixture()
 	view := ConfiguredLLMs(&cfg)
-	// Two rows, main's deepseek pair (its openai entry is the same endpoint as
-	// llm-1 and its placeholder is no identity), then worker's entry.
-	if len(view) != 5 {
-		t.Fatalf("ConfiguredLLMs = %d entries (%+v), want 5", len(view), view)
+	if len(view) != 3 {
+		t.Fatalf("ConfiguredLLMs = %d entries (%+v), want 3", len(view), view)
 	}
 	if view[0].ID != "llm-1" || view[0].Provider != "openai" || view[0].Model != "gpt-4o" || view[0].BaseURL != "https://table.test" {
 		t.Fatalf("view[0] = %+v, want the first table row", view[0])
 	}
-	if view[1].ID != "llm-2" || view[1].Provider != "anthropic" || view[1].Model != "claude-a" {
-		t.Fatalf("view[1] = %+v, want the second table row", view[1])
+	if view[2].ID != "llm-3" || view[2].Model != "deepseek-chat" || view[2].APIPath != "/chat/completions" {
+		t.Fatalf("view[2] = %+v, want the third row with its protocol path", view[2])
 	}
-	deepseek := view[2]
-	if deepseek.Provider != "deepseek" || deepseek.Model != "deepseek-chat" || deepseek.APIPath != "/chat/completions" {
-		t.Fatalf("view[2] = %+v, want main's first expanded deepseek entry", deepseek)
-	}
-	if deepseek.ID != LegacyLLMModelID("deepseek", "deepseek-chat", "https://deepseek.test", "") {
-		t.Fatalf("view[2].ID = %q, want the legacy id of the lifted entry", deepseek.ID)
-	}
-	if view[3].Provider != "deepseek" || view[3].Model != "deepseek-reasoner" {
-		t.Fatalf("view[3] = %+v, want main's second expanded deepseek entry", view[3])
-	}
-	if view[4].BaseURL != "https://worker.test" || view[4].APIKey != "worker-key" {
-		t.Fatalf("view[4] = %+v, want worker's own entry last", view[4])
-	}
-	for _, entry := range view {
-		if entry.Provider == "openai" && entry.BaseURL == "https://table.test" && entry.ID != "llm-1" {
-			t.Fatalf("a duplicate endpoint got id %q, want the table row's llm-1", entry.ID)
-		}
-		if entry.Provider == "" && entry.Model == "" {
-			t.Fatalf("the empty placeholder entry reached the view: %+v", entry)
-		}
+	duplicated := cfg
+	duplicated.LLMModels = append(append([]LLMModelConfig(nil), cfg.LLMModels...), LLMModelConfig{
+		ID: "llm-dup", Provider: "OpenAI", Model: " gpt-4o ", BaseURL: "https://table.test/",
+	})
+	if got := ConfiguredLLMs(&duplicated); len(got) != 3 {
+		t.Fatalf("ConfiguredLLMs with a duplicate identity = %d entries (%+v), want 3", len(got), got)
 	}
 	if got := ConfiguredLLMs(&Root{}); len(got) != 0 {
 		t.Fatalf("ConfiguredLLMs(empty root) = %+v, want none", got)
@@ -137,94 +92,65 @@ func TestConfiguredLLMs(t *testing.T) {
 }
 
 // TestEffectiveDefaultLLMFor pins the whole fall-back chain an empty model
-// selection walks, and the one case that stops it: a legacy label naming
-// nothing.
+// selection walks for a primary agent and for a built-in subagent type.
 func TestEffectiveDefaultLLMFor(t *testing.T) {
 	t.Parallel()
-	// A row id the view carries.
-	rowsOnly := modelViewFixture()
-	rowsOnly.Agents.Definitions["worker"] = AgentDefinition{DefaultModel: "llm-2"}
-	if got := EffectiveDefaultLLMFor(&rowsOnly, "worker"); got == nil || got.ID != "llm-2" || got.Model != "claude-a" {
+	// A definition naming a row id.
+	fixture := modelViewFixture()
+	if got := EffectiveDefaultLLMFor(&fixture, "worker"); got == nil || got.ID != "llm-2" || got.Model != "claude-a" {
 		t.Fatalf("default_model naming a row = %+v, want llm-2 anthropic/claude-a", got)
 	}
 
-	// A legacy label resolves inside the agent's own list, not main's entry
-	// naming the same pair on another endpoint.
-	ownLabel := modelViewFixture()
-	worker := ownLabel.Agents.Definitions["worker"]
-	worker.DefaultModel = "openai/gpt-4o"
-	ownLabel.Agents.Definitions["worker"] = worker
-	if got := EffectiveDefaultLLMFor(&ownLabel, "worker"); got == nil || got.BaseURL != "https://worker.test" || got.APIKey != "worker-key" {
-		t.Fatalf("legacy label = %+v, want worker's own entry", got)
+	// A built-in subagent type reads its global row, with the type's own
+	// reasoning effort applied on top of the row.
+	if got := EffectiveDefaultLLMFor(&fixture, "explore"); got == nil || got.ID != "llm-3" {
+		t.Fatalf("subagent type row = %+v, want llm-3", got)
 	}
-	// Same label, no own list: the view answers, so the run falls back to the
-	// first model the install has rather than refusing to start.
-	noOwnList := modelViewFixture()
-	noOwnList.Agents.Definitions["worker"] = AgentDefinition{DefaultModel: "openai/gpt-4o"}
-	if got := EffectiveDefaultLLMFor(&noOwnList, "worker"); got == nil || got.ID != "llm-1" {
-		t.Fatalf("legacy label without an own list = %+v, want the view's first row llm-1", got)
+	if got := ReasoningEffort(EffectiveDefaultLLMFor(&fixture, "explore").Params); got != "high" {
+		t.Fatalf("subagent type effort = %q, want the type's own high", got)
 	}
 
-	// No default_model, an own list: the agent's first entry.
-	ownFirst := modelViewFixture()
-	ownFirst.Agents.Definitions["worker"] = AgentDefinition{LLMProviders: []AgentLLMProviderConfig{
-		{Provider: "minimax", Model: "m1", BaseURL: "https://worker.test"},
-	}}
-	if got := EffectiveDefaultLLMFor(&ownFirst, "worker"); got == nil || got.Provider != "minimax" {
-		t.Fatalf("own list = %+v, want worker's first entry minimax", got)
-	}
-
-	// Nothing of its own: main's first entry.
+	// Nothing of its own: main's choice.
 	fromMain := modelViewFixture()
+	fromMain.Agents.Definitions["main"] = AgentDefinition{DefaultModel: "llm-1"}
 	fromMain.Agents.Definitions["worker"] = AgentDefinition{}
-	if got := EffectiveDefaultLLMFor(&fromMain, "worker"); got == nil || got.Model != "gpt-4o" || got.BaseURL != "https://table.test" {
-		t.Fatalf("worker inheriting main's list = %+v, want main's first entry openai/gpt-4o", got)
+	if got := EffectiveDefaultLLMFor(&fromMain, "worker"); got == nil || got.ID != "llm-1" {
+		t.Fatalf("worker inheriting main's choice = %+v, want llm-1", got)
+	}
+	// An unknown agent answers the same way: main's choice decides.
+	if got := EffectiveDefaultLLMFor(&fromMain, "nobody"); got == nil || got.ID != "llm-1" {
+		t.Fatalf("undefined agent = %+v, want main's choice llm-1", got)
 	}
 
-	// Main names a default: it resolves against the whole view.
-	mainDefault := Root{
-		LLMModels: []LLMModelConfig{
-			{ID: "llm-a", Provider: "openai", Model: "gpt-4o", BaseURL: "https://a.test"},
-			{ID: "llm-b", Provider: "anthropic", Model: "claude-a", BaseURL: "https://b.test"},
-		},
-		Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-			"main": {DefaultModel: "anthropic/claude-a"},
-			// No definition at all: the resolution starts at main's choice.
-			"worker": {},
-		}},
-	}
-	if got := EffectiveDefaultLLMFor(&mainDefault, "worker"); got == nil || got.ID != "llm-b" {
-		t.Fatalf("worker inheriting main's default_model = %+v, want llm-b", got)
-	}
-	if got := EffectiveDefaultLLMFor(&mainDefault, "nobody"); got == nil || got.ID != "llm-b" {
-		t.Fatalf("undefined agent = %+v, want main's default llm-b", got)
+	// Nothing configured anywhere but rows: the view's first row.
+	rowsOnly := modelViewFixture()
+	rowsOnly.Agents.Definitions["worker"] = AgentDefinition{}
+	if got := EffectiveDefaultLLMFor(&rowsOnly, "worker"); got == nil || got.ID != "llm-1" {
+		t.Fatalf("nothing named anywhere but rows = %+v, want the view's first row llm-1", got)
 	}
 
-	// Main has nothing but the placeholder: the view's first row.
-	rowsOnlyMain := modelViewFixture()
-	rowsOnlyMain.Agents.Definitions["main"] = AgentDefinition{LLMProviders: []AgentLLMProviderConfig{{}}}
-	rowsOnlyMain.Agents.Definitions["worker"] = AgentDefinition{}
-	if got := EffectiveDefaultLLMFor(&rowsOnlyMain, "worker"); got == nil || got.ID != "llm-1" {
-		t.Fatalf("nothing configured anywhere but rows = %+v, want the view's first row llm-1", got)
-	}
-
-	// A row id nobody carries is skipped, the next choice stands.
+	// A row id nobody carries is skipped (the model page may delete it), and
+	// the next choice stands.
 	danglingID := modelViewFixture()
-	workerDef := danglingID.Agents.Definitions["worker"]
-	workerDef.DefaultModel = "llm-gone"
-	workerDef.LLMProviders = []AgentLLMProviderConfig{{Provider: "minimax", Model: "m2", BaseURL: "https://worker.test"}}
-	danglingID.Agents.Definitions["worker"] = workerDef
-	if got := EffectiveDefaultLLMFor(&danglingID, "worker"); got == nil || got.Model != "m2" {
-		t.Fatalf("dangling row id = %+v, want the agent's own first entry minimax/m2", got)
+	danglingID.Agents.Definitions["worker"] = AgentDefinition{DefaultModel: "llm-gone"}
+	danglingID.Agents.Definitions["main"] = AgentDefinition{DefaultModel: "llm-3"}
+	if got := EffectiveDefaultLLMFor(&danglingID, "worker"); got == nil || got.ID != "llm-3" {
+		t.Fatalf("dangling row id = %+v, want the fall-back to main's llm-3", got)
 	}
 
-	// A legacy label naming nothing is the loader's verdict, not a fall-back.
+	// A legacy label nothing carries means "unset": the agent follows the
+	// global default instead of refusing to run (owner 2026-11-16).
 	danglingLabel := modelViewFixture()
-	broken := danglingLabel.Agents.Definitions["worker"]
-	broken.DefaultModel = "openai/not-configured"
-	danglingLabel.Agents.Definitions["worker"] = broken
-	if got := EffectiveDefaultLLMFor(&danglingLabel, "worker"); got != nil {
-		t.Fatalf("dangling label = %+v, want nil", got)
+	danglingLabel.Agents.Definitions["worker"] = AgentDefinition{DefaultModel: "openai/not-configured"}
+	if got := EffectiveDefaultLLMFor(&danglingLabel, "worker"); got == nil || got.ID != "llm-1" {
+		t.Fatalf("dangling label = %+v, want the view's first row llm-1", got)
+	}
+
+	// A label a row still carries keeps naming that row.
+	label := modelViewFixture()
+	label.Agents.Definitions["worker"] = AgentDefinition{DefaultModel: "Anthropic/claude-a"}
+	if got := EffectiveDefaultLLMFor(&label, "worker"); got == nil || got.ID != "llm-2" {
+		t.Fatalf("resolvable label = %+v, want llm-2", got)
 	}
 
 	// An install with no models configured and nothing named.
@@ -233,9 +159,32 @@ func TestEffectiveDefaultLLMFor(t *testing.T) {
 	}
 }
 
+// TestHasOwnModelChoice pins what makes a key "have a choice of its own": a
+// default_model reference, or a subagent type's global row.
+func TestHasOwnModelChoice(t *testing.T) {
+	t.Parallel()
+	cfg := modelViewFixture()
+	if !HasOwnModelChoice(&cfg, "worker") {
+		t.Fatal("worker names a default_model but reports no own choice")
+	}
+	if !HasOwnModelChoice(&cfg, "explore") {
+		t.Fatal("explore names a global row but reports no own choice")
+	}
+	if HasOwnModelChoice(&cfg, "main") {
+		t.Fatal("main names nothing but reports an own choice")
+	}
+	empty := Root{Agents: AgentsSection{
+		Definitions:    map[string]AgentDefinition{"explore": {}},
+		SubagentModels: map[string]SubagentConfig{"explore": {}},
+	}}
+	if HasOwnModelChoice(&empty, "explore") {
+		t.Fatal("a subagent type with no global row reports an own choice")
+	}
+}
+
 // TestResolveModelRef pins that a reference names exactly one row: by id when
-// two rows share a provider and model, by label inside the list that agent
-// wrote it against, and by the view's first match otherwise.
+// two rows share a provider and model, by label against the whole view, and
+// never by a value nothing carries.
 func TestResolveModelRef(t *testing.T) {
 	t.Parallel()
 	cfg := Root{
@@ -243,12 +192,7 @@ func TestResolveModelRef(t *testing.T) {
 			{ID: "llm-a", Provider: "openai", Model: "gpt-4o", BaseURL: "https://a.test"},
 			{ID: "llm-b", Provider: "openai", Model: "gpt-4o", BaseURL: "https://b.test"},
 		},
-		Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-			"main": {},
-			"worker": {LLMProviders: []AgentLLMProviderConfig{
-				{Provider: "openai", Model: "gpt-4o", BaseURL: "https://worker.test"},
-			}},
-		}},
+		Agents: AgentsSection{Definitions: map[string]AgentDefinition{"main": {}, "worker": {}}},
 	}
 	if got, ok := ResolveModelRef(&cfg, "worker", "llm-a"); !ok || got.BaseURL != "https://a.test" {
 		t.Fatalf("ref llm-a = %+v ok=%v, want the a-endpoint row", got, ok)
@@ -256,17 +200,47 @@ func TestResolveModelRef(t *testing.T) {
 	if got, ok := ResolveModelRef(&cfg, "worker", "llm-b"); !ok || got.BaseURL != "https://b.test" {
 		t.Fatalf("ref llm-b = %+v ok=%v, want the b-endpoint row", got, ok)
 	}
-	if got, ok := ResolveModelRef(&cfg, "worker", "OpenAI/gpt-4o"); !ok || got.BaseURL != "https://worker.test" {
-		t.Fatalf("label = %+v ok=%v, want worker's own entry", got, ok)
-	}
-	if got, ok := ResolveModelRef(&cfg, "main", "openai/gpt-4o"); !ok || got.ID != "llm-a" {
-		t.Fatalf("label without an own list = %+v ok=%v, want the view's first match llm-a", got, ok)
+	// A label is still resolvable, case-insensitively, by the first match.
+	if got, ok := ResolveModelRef(&cfg, "main", "OpenAI/gpt-4o"); !ok || got.ID != "llm-a" {
+		t.Fatalf("label = %+v ok=%v, want the view's first match llm-a", got, ok)
 	}
 	if _, ok := ResolveModelRef(&cfg, "main", "llm-gone"); ok {
 		t.Fatal("a reference no row carries resolved")
 	}
 	if _, ok := ResolveModelRef(&cfg, "main", "openai/gone"); ok {
 		t.Fatal("a label no entry carries resolved")
+	}
+}
+
+// TestValidateSubagentModels pins the one verdict the per-type global rows get:
+// only a public built-in may carry one, its model has to be a configured model,
+// and an effort means nothing without a model.
+func TestValidateSubagentModels(t *testing.T) {
+	t.Parallel()
+	resolves := func(ref string) bool { return ref == "llm-1" }
+	cases := []struct {
+		name    string
+		models  map[string]SubagentConfig
+		wantErr bool
+	}{
+		{"empty section", nil, false},
+		{"row naming a configured model", map[string]SubagentConfig{"explore": {Model: "llm-1"}}, false},
+		{"row left unset", map[string]SubagentConfig{"explore": {}}, false},
+		{"effort with a model", map[string]SubagentConfig{"plan": {Model: "llm-1", ReasoningEffort: "high"}}, false},
+		{"unknown model", map[string]SubagentConfig{"explore": {Model: "llm-gone"}}, true},
+		{"effort without a model", map[string]SubagentConfig{"explore": {ReasoningEffort: "high"}}, true},
+		{"custom name", map[string]SubagentConfig{"my-helper": {Model: "llm-1"}}, true},
+		{"system name", map[string]SubagentConfig{"guardian": {Model: "llm-1"}}, true},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateSubagentModels(c.models, resolves)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("ValidateSubagentModels(%v) err = %v, want error %v", c.models, err, c.wantErr)
+			}
+		})
 	}
 }
 

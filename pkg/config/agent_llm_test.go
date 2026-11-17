@@ -17,30 +17,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func testConfig() Root {
-	return Root{
-		Agents: AgentsSection{
-			Definitions: map[string]AgentDefinition{
-				"main": {
-					LLMProviders: []AgentLLMProviderConfig{
-						{
-							Provider: " openai ",
-							Model:    " gpt-4o ",
-							BaseURL:  " https://example.test ",
-							APIKey:   " key ",
-							Params:   LLMRequestParams(`{"temperature":0}`),
-						},
-						{Provider: "openai", Model: "gpt-4o-mini"},
-					},
-				},
-				"custom": {
-					LLMProviders: []AgentLLMProviderConfig{{Provider: "openai", Model: "custom-model"}},
-				},
-			},
-		},
-	}
-}
-
 func TestAgentLLMProviderConfigAPIPathJSON(t *testing.T) {
 	t.Parallel()
 
@@ -203,66 +179,23 @@ func TestCredentialBackedProviderMatchingIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestEffectiveDefaultLLM pins the three states of the default-model
-// resolution: absent default_model → first expanded entry; a configured
-// default_model → the matched entry; a configured default_model naming
-// nothing → nil (an error for callers, never a fall-back to the first entry).
-func TestEffectiveDefaultLLM(t *testing.T) {
-	t.Parallel()
-	def := AgentDefinition{
-		LLMProviders: []AgentLLMProviderConfig{
-			{Provider: "anthropic", Model: "claude-a", APIKey: "anthropic-key"},
-			{Provider: "openai", Models: StringList{"gpt-first", "deep/model-id"}, APIKey: "openai-key"},
-		},
-	}
-
-	if got := EffectiveDefaultLLM(def); got == nil || got.Provider != "anthropic" || got.Model != "claude-a" {
-		t.Fatalf("absent default_model = %+v, want first entry anthropic/claude-a", got)
-	}
-	if got := EffectiveDefaultLLM(AgentDefinition{}); got != nil {
-		t.Fatalf("empty definition = %+v, want nil", got)
-	}
-
-	// Case-insensitive pair match, including a model id that itself
-	// contains a slash (split on the FIRST slash only).
-	second := def
-	second.DefaultModel = " OpenAI / deep/model-id "
-	if got := EffectiveDefaultLLM(second); got == nil || got.Provider != "openai" || got.Model != "deep/model-id" {
-		t.Fatalf("default_model openai/deep/model-id = %+v, want the second expanded entry", got)
-	}
-
-	// Dangling value → nil, even though the list is non-empty.
-	dangling := def
-	dangling.DefaultModel = "openai/gone"
-	if got := EffectiveDefaultLLM(dangling); got != nil {
-		t.Fatalf("dangling default_model = %+v, want nil", got)
-	}
-
-	// Mutating the returned entry must not touch the definition's slice.
-	got := EffectiveDefaultLLM(def)
-	got.APIKey = "mutated"
-	if def.LLMProviders[0].APIKey != "anthropic-key" {
-		t.Fatal("returned entry aliases the definition's slice")
-	}
-}
-
 // TestValidateAgentLLMConfiguredUsesDefaultModel pins that completeness is
-// judged on the entry an empty selection actually resolves to, not the raw
-// first list entry.
+// judged on the row an empty selection actually resolves to, not the table's
+// first row.
 func TestValidateAgentLLMConfiguredUsesDefaultModel(t *testing.T) {
 	t.Parallel()
-	cfg := Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-		"main": {
-			LLMProviders: []AgentLLMProviderConfig{
-				{Provider: "openai", Model: "gpt-a", APIKey: "key", BaseURL: "https://a.test"},
-				{Provider: "anthropic", Model: "claude-b"}, // incomplete
-			},
-			DefaultModel: "anthropic/claude-b",
+	cfg := Root{
+		LLMModels: []LLMModelConfig{
+			{ID: "llm-a", Provider: "openai", Model: "gpt-a", APIKey: "key", BaseURL: "https://a.test"},
+			{ID: "llm-b", Provider: "anthropic", Model: "claude-b"}, // incomplete
 		},
-	}}}
+		Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+			"main": {DefaultModel: "llm-b"},
+		}},
+	}
 	v := ValidateAgentLLMConfigured(&cfg, "main")
 	if v.Provider != "anthropic" || v.Model != "claude-b" {
-		t.Fatalf("validation read %+v, want the default_model entry anthropic/claude-b", v)
+		t.Fatalf("validation read %+v, want the default_model row anthropic/claude-b", v)
 	}
 	if v.Complete() {
 		t.Fatal("incomplete default entry judged complete")

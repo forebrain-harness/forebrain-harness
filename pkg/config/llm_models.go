@@ -1,19 +1,17 @@
-// The install-wide model view: the fb_llm_models rows plus the entries a
-// pre-table agents.definitions.<id>.llm_providers list still carries, merged
-// into the one list every agent reads (plan 260).
+// The install-wide model view: the fb_llm_models rows, in the one list every
+// agent reads (plan 260). Every model choice — a primary agent's default, a
+// built-in subagent type's row, a subagent's own pin — is a reference to one of
+// these rows; nothing else configures a provider (plan 315).
 package config
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"log/slog"
 	"strings"
 	"sync"
 )
 
 // LLMModelConfig is one configured model as the runtime reads it: a row of the
-// install-wide fb_llm_models table, or an entry lifted from a pre-table
-// agents.definitions.<id>.llm_providers list (LegacyLLMModelID names those).
+// install-wide fb_llm_models table.
 type LLMModelConfig struct {
 	ID       string
 	Provider string
@@ -47,10 +45,6 @@ type LLMModelCaps struct {
 	ContextWindow, MaxOutput                           *int64
 }
 
-// LegacyLLMModelIDPrefix marks an id ConfiguredLLMs lifted out of a pre-table
-// list rather than read from fb_llm_models.
-const LegacyLLMModelIDPrefix = "llm-legacy-"
-
 // NormalizeLLMModelIdentity canonicalizes the four identity fields: provider
 // lower-cased, model trimmed (case kept), base URL without trailing slashes,
 // api_path with one leading slash and no trailing one. An empty api_path is
@@ -77,55 +71,37 @@ func NormalizeLLMModelIdentity(provider, model, baseURL, apiPath string) (string
 	return provider, model, baseURL, apiPath
 }
 
-// LegacyLLMModelID is the id a pre-table entry gets: stable across processes
-// and restarts, so a reference recorded against the lifted entry still names
-// the same row once plan 262's migration writes it into fb_llm_models.
-func LegacyLLMModelID(provider, model, baseURL, apiPath string) string {
-	provider, model, baseURL, apiPath = NormalizeLLMModelIdentity(provider, model, baseURL, apiPath)
-	sum := sha256.Sum256([]byte(provider + "\x00" + model + "\x00" + baseURL + "\x00" + apiPath))
-	return LegacyLLMModelIDPrefix + hex.EncodeToString(sum[:])[:16]
-}
-
 // ConfiguredLLMs is every model the install has configured, in the order the
 // configuration stores it — not the display order a picker draws (turn's
 // ModelChoices sorts its own projection; this order is what the default's
 // first-row fallback reads): the table's rows (root.LLMModels, already in
-// created_at order), then entries lifted from legacy llm_providers lists —
-// main's first, then every other definition by name, each list in stored
-// order, `model: [a, b]` expanded. Rows are de-duplicated by normalized
-// identity; the first wins, so a table row beats a legacy entry naming the
-// same endpoint.
+// created_at order). Rows are de-duplicated by normalized identity; the first
+// wins.
 func ConfiguredLLMs(root *Root) []AgentLLMProviderConfig {
 	if root == nil {
 		return nil
 	}
 	var out []AgentLLMProviderConfig
 	seen := make(map[string]bool)
-	add := func(entry AgentLLMProviderConfig) {
+	for _, row := range root.LLMModels {
+		entry := ProviderFromModelRow(row)
 		key := strings.Join([]string{entry.Provider, entry.Model, entry.BaseURL, entry.APIPath}, "\x00")
 		if seen[key] {
-			return
+			continue
 		}
 		seen[key] = true
-		out = append(out, CloneAgentLLMProviderConfig(entry))
-	}
-	for _, row := range root.LLMModels {
-		add(llmProviderFromModelRow(row))
-	}
-	for _, name := range legacyListAgentOrder(root.Agents.Definitions) {
-		for _, entry := range ownLegacyEntries(root.Agents.Definitions[name]) {
-			add(entry)
-		}
+		out = append(out, entry)
 	}
 	return out
 }
 
-// ResolveModelRef finds the row a stored reference names. A reference is a
-// row id (what every write stores from plan 262 on) or a legacy
-// "provider/model" label, split on the first slash. A label resolves inside
-// agentName's own legacy list first — the list it was written against — and
-// then against the whole view by provider+model (case-insensitive), first
-// match wins. ok is false when nothing matches.
+// ResolveModelRef finds the row a stored reference names. A reference is a row
+// id (what every write stores from plan 262 on) or a legacy "provider/model"
+// label, split on the first slash, resolved against the whole view by
+// provider+model (case-insensitive), first match wins. ok is false when
+// nothing matches. agentName no longer narrows the search — one install-wide
+// table serves every agent (plan 315) — it stays in the signature because every
+// caller names the agent whose reference it is.
 func ResolveModelRef(root *Root, agentName, ref string) (AgentLLMProviderConfig, bool) {
 	if root == nil {
 		return AgentLLMProviderConfig{}, false
@@ -134,25 +110,25 @@ func ResolveModelRef(root *Root, agentName, ref string) (AgentLLMProviderConfig,
 }
 
 // EffectiveDefaultLLMFor resolves the model an empty selection runs on for an
-// agent. In order: the agent's default_model reference; the first entry of the
-// agent's own legacy list; main's default_model reference; main's first own
-// legacy entry; the first row of the view. A reference that is a row id no
-// longer present is skipped (logged once per process at Warn) — a deleted row
-// must not stop the install; a legacy label that matches nothing returns nil,
-// the loader's existing verdict (validatePrimaryAgents) for a dangling label.
+// agent. In order: the key's own choice (a built-in subagent type's
+// agents.subagent_models row + effort, or a definition's default_model
+// reference); main's choice; the first row of the view. A reference that is a
+// row id no longer present is skipped (logged once per process at Warn), the
+// way a legacy label that matches nothing is: a deleted row must not stop the
+// install, and a label is an unset choice (plan 315).
 func EffectiveDefaultLLMFor(root *Root, agentName string) *AgentLLMProviderConfig {
 	if root == nil {
 		return nil
 	}
 	view := ConfiguredLLMs(root)
 	name := agentDefinitionKey(agentName)
-	if entry, decided := ownDefaultModel(root, view, name); decided {
+	if entry, decided := ownModelChoice(root, view, name); decided {
 		return entry
 	}
 	// An agent with nothing of its own runs on main's choice, the way the
 	// runtime resolved it before the table existed.
 	if name != "main" {
-		if entry, decided := ownDefaultModel(root, view, "main"); decided {
+		if entry, decided := ownModelChoice(root, view, "main"); decided {
 			return entry
 		}
 	}
@@ -163,20 +139,22 @@ func EffectiveDefaultLLMFor(root *Root, agentName string) *AgentLLMProviderConfi
 	return nil
 }
 
-// HasOwnModelChoice reports whether a definition picks its own model: a
-// default_model reference, or a legacy list of its own.
+// HasOwnModelChoice reports whether a key picks its own model: a built-in
+// subagent type with a global row of its own, or a definition with a
+// default_model reference.
 func HasOwnModelChoice(root *Root, agentName string) bool {
 	if root == nil {
 		return false
 	}
-	def, ok := root.Agents.Definitions[agentDefinitionKey(agentName)]
+	name := agentDefinitionKey(agentName)
+	if row, ok := root.Agents.SubagentModels[name]; ok && strings.TrimSpace(row.Model) != "" {
+		return true
+	}
+	def, ok := root.Agents.Definitions[name]
 	if !ok {
 		return false
 	}
-	if strings.TrimSpace(def.DefaultModel) != "" {
-		return true
-	}
-	return len(ownLegacyEntries(def)) > 0
+	return strings.TrimSpace(def.DefaultModel) != ""
 }
 
 // agentDefinitionKey is the definition key a caller's agent name reads as: an
@@ -189,11 +167,27 @@ func agentDefinitionKey(agentName string) string {
 	return name
 }
 
-// ownDefaultModel resolves the model a definition names for itself: its
-// default_model reference, else the first entry of its own legacy list.
-// decided reports that the answer is final — including a nil entry, which a
-// dangling legacy label produces (never a quiet fall-back to something else).
-func ownDefaultModel(root *Root, view []AgentLLMProviderConfig, name string) (*AgentLLMProviderConfig, bool) {
+// ownModelChoice resolves the model one key names for itself: for a built-in
+// subagent type its agents.subagent_models row — the row id resolved against
+// the view, carrying the row's own reasoning effort when the type names one —
+// and for a definition its default_model reference. decided reports that the
+// answer is final; a reference nothing resolves leaves the question open, so
+// the caller falls back to main's choice (never a quiet answer of "no model").
+func ownModelChoice(root *Root, view []AgentLLMProviderConfig, name string) (*AgentLLMProviderConfig, bool) {
+	if row, ok := root.Agents.SubagentModels[name]; ok {
+		ref := strings.TrimSpace(row.Model)
+		if ref != "" {
+			if entry, found := resolveModelRef(root, view, name, ref); found {
+				entry = CloneAgentLLMProviderConfig(entry)
+				if effort := strings.TrimSpace(row.ReasoningEffort); effort != "" {
+					entry.Params = WithReasoningEffort(entry.Params, effort)
+				}
+				return &entry, true
+			}
+			warnDanglingModelRefOnce(name, ref)
+			return nil, false
+		}
+	}
 	def, ok := root.Agents.Definitions[name]
 	if !ok {
 		return nil, false
@@ -203,16 +197,10 @@ func ownDefaultModel(root *Root, view []AgentLLMProviderConfig, name string) (*A
 			entry = CloneAgentLLMProviderConfig(entry)
 			return &entry, true
 		}
-		if strings.Contains(ref, "/") {
-			return nil, true
-		}
-		// A row the model page deleted: the install keeps running on the next
-		// choice rather than refusing to start.
+		// A row the model page deleted, or a label nothing carries any more:
+		// the install keeps running on the next choice rather than refusing to
+		// start.
 		warnDanglingModelRefOnce(name, ref)
-	}
-	if entries := ownLegacyEntries(def); len(entries) > 0 {
-		entry := CloneAgentLLMProviderConfig(entries[0])
-		return &entry, true
 	}
 	return nil, false
 }
@@ -236,13 +224,6 @@ func resolveModelRef(root *Root, view []AgentLLMProviderConfig, agentName, ref s
 	provider, model, _ := strings.Cut(ref, "/")
 	provider = strings.TrimSpace(provider)
 	model = strings.TrimSpace(model)
-	if def, ok := root.Agents.Definitions[agentDefinitionKey(agentName)]; ok {
-		for _, entry := range ownLegacyEntries(def) {
-			if equalFoldPair(entry.Provider, entry.Model, provider, model) {
-				return CloneAgentLLMProviderConfig(entry), true
-			}
-		}
-	}
 	for _, entry := range view {
 		if equalFoldPair(entry.Provider, entry.Model, provider, model) {
 			return CloneAgentLLMProviderConfig(entry), true
@@ -254,56 +235,6 @@ func resolveModelRef(root *Root, view []AgentLLMProviderConfig, agentName, ref s
 func equalFoldPair(provider, model, wantProvider, wantModel string) bool {
 	return strings.EqualFold(strings.TrimSpace(provider), strings.TrimSpace(wantProvider)) &&
 		strings.EqualFold(strings.TrimSpace(model), strings.TrimSpace(wantModel))
-}
-
-// legacyListAgentOrder is the order ConfiguredLLMs lifts legacy lists in:
-// main's first, then every other definition by name, so the view does not
-// depend on map iteration.
-func legacyListAgentOrder(defs map[string]AgentDefinition) []string {
-	ids := sortedDefinitionIDs(defs)
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id == "main" {
-			continue
-		}
-		out = append(out, id)
-	}
-	if _, ok := defs["main"]; ok {
-		out = append([]string{"main"}, out...)
-	}
-	return out
-}
-
-// ownLegacyEntries lifts a definition's pre-table list into view entries:
-// `model: [a, b]` expanded, the four identity fields normalized, and each
-// entry named by its deterministic LegacyLLMModelID. The empty placeholder
-// entry normalize() keeps so a primary agent has a slot to merge into carries
-// no identity and is skipped.
-func ownLegacyEntries(def AgentDefinition) []AgentLLMProviderConfig {
-	expanded := expandLLMProviderConfigs(def.LLMProviders)
-	out := make([]AgentLLMProviderConfig, 0, len(expanded))
-	for _, entry := range expanded {
-		if strings.TrimSpace(entry.Provider) == "" && strings.TrimSpace(entry.Model) == "" {
-			continue
-		}
-		out = append(out, llmProviderFromLegacyEntry(entry))
-	}
-	return out
-}
-
-// llmProviderFromLegacyEntry projects one pre-table list entry into the view.
-func llmProviderFromLegacyEntry(entry AgentLLMProviderConfig) AgentLLMProviderConfig {
-	out := CloneAgentLLMProviderConfig(entry)
-	out.Provider, out.Model, out.BaseURL, out.APIPath = NormalizeLLMModelIdentity(
-		entry.Provider, entry.Model, entry.BaseURL, entry.APIPath)
-	out.Models = nil
-	out.ID = LegacyLLMModelID(entry.Provider, entry.Model, entry.BaseURL, entry.APIPath)
-	return out
-}
-
-// llmProviderFromModelRow projects one fb_llm_models row into the view.
-func llmProviderFromModelRow(row LLMModelConfig) AgentLLMProviderConfig {
-	return ProviderFromModelRow(row)
 }
 
 // ModelEndpointLabel is the request URL a configured row sends to, as a picker
@@ -319,11 +250,11 @@ func ModelEndpointLabel(baseURL, apiPath string, urlVerbatim bool) string {
 	return base + strings.TrimSpace(apiPath)
 }
 
-// ProviderFromModelRow is llmProviderFromModelRow spelled for callers outside
-// the package (283: the subagent dispatch reads a row live and needs the same
-// entry the snapshot view would have projected). ConfiguredLLMs routes through
-// it, so a row read live and a row read through the snapshot carry the same
-// projection.
+// ProviderFromModelRow projects one fb_llm_models row into the entry the
+// runtime reads: a caller outside the package (283: the subagent dispatch reads
+// a row live and needs the same entry the snapshot view would have projected)
+// gets what ConfiguredLLMs gives, so a row read live and a row read through the
+// snapshot carry the same projection.
 func ProviderFromModelRow(row LLMModelConfig) AgentLLMProviderConfig {
 	provider, model, baseURL, apiPath := NormalizeLLMModelIdentity(
 		row.Provider, row.Model, row.BaseURL, row.APIPath)

@@ -6,6 +6,8 @@ import (
 	"math"
 	"regexp"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 )
@@ -18,6 +20,11 @@ type AgentsSection struct {
 	// goal check runs on the same row — which is why it sits beside Defaults
 	// and Definitions rather than inside them (plan 299).
 	GoalEvaluator SubagentConfig `yaml:"goal_evaluator,omitempty" json:"goal_evaluator,omitempty"`
+	// SubagentModels holds the install-wide default model row for each public
+	// built-in subagent type (plan 315): a global-table row id + reasoning
+	// effort, shared by every primary agent. An agent's own override
+	// (def.Subagents) still wins.
+	SubagentModels map[string]SubagentConfig `yaml:"subagent_models,omitempty" json:"subagent_models,omitempty"`
 }
 
 // MCPServersFor returns the MCP servers one primary agent owns, in
@@ -42,12 +49,12 @@ type AgentDefinition struct {
 	// to the shared list (agents.defaults.mcp_servers) rather than replacing
 	// it — an agent without its own entries uses every shared one — and a
 	// same-named entry here replaces the shared one whole.
-	MCPServers   []MCPServerConfig        `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
-	LLMProviders []AgentLLMProviderConfig `yaml:"llm_providers,omitempty" json:"llm_providers,omitempty"`
-	// DefaultModel is "provider/model" — this agent's default model. Empty
-	// (or absent) means the first llm_providers entry. It must name an entry
-	// on this agent's list; the loader and Save both reject a value nothing
-	// resolves to. The list's order is pure storage: nothing reorders it.
+	MCPServers []MCPServerConfig `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	// DefaultModel is the global model-table row id this agent's turns run
+	// on. Empty (or absent) follows main's choice, then the table's first
+	// row — the model a picker never has to name (plan 315). A stored value
+	// that names no row is skipped at run time rather than refused, so the
+	// settings page may delete the row it names.
 	DefaultModel string `yaml:"default_model,omitempty" json:"default_model,omitempty"`
 	// EnableSubagent is this primary agent's own subagent switch. Absent
 	// follows agents.defaults.enable_subagent; set, it decides on its own
@@ -333,6 +340,36 @@ func validateSubagentModel(where string, entry SubagentConfig, refResolves func(
 // writes, so a refusal names the row the user was editing.
 func ValidateGoalEvaluatorModel(entry SubagentConfig, refResolves func(string) bool) error {
 	return validateSubagentModel("agents.goal_evaluator", entry, refResolves)
+}
+
+// ValidateSubagentModels puts the install-wide per-type model rows
+// (agents.subagent_models) under the same rule a per-agent subagent entry gets:
+// validateSubagentModel, unmodified. Only a public built-in has a per-type
+// global row — a custom subagent belongs to the agent that declares it, and a
+// system subagent is dispatched by the system — so any other key is refused.
+// The load order does not matter: the rows are keyed, so the message names the
+// key that is wrong.
+func ValidateSubagentModels(models map[string]SubagentConfig, refResolves func(string) bool) error {
+	if len(models) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(models))
+	for key := range models {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		name := strings.ToLower(strings.TrimSpace(key))
+		where := "agents.subagent_models." + name
+		if !slices.Contains(builtInPublicSubagentNames, name) {
+			return fmt.Errorf("%s: only a built-in subagent has a global model row (%s)",
+				where, strings.Join(builtInPublicSubagentNames, ", "))
+		}
+		if err := validateSubagentModel(where, models[key], refResolves); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // subagentModelShape reports whether a model value has the legacy

@@ -88,13 +88,6 @@ func TestLLMRequestParamsAndProviderHelpers(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"provider":"openai","model":"gpt","params":{"temperature":0.1}}`), &AgentLLMProviderConfig{}); err != nil {
 		t.Fatalf("json.Unmarshal provider config should not fail: %v", err)
 	}
-	def := AgentDefinition{LLMProviders: []AgentLLMProviderConfig{{Provider: "a"}, {Provider: "b"}}}
-	if got := ResolvedLLMConfigs(def); len(got) != 2 || got[0].Provider != "a" {
-		t.Fatalf("ResolvedLLMConfigs = %#v", got)
-	}
-	if got := EffectiveDefaultLLM(def); got == nil || got.Provider != "a" {
-		t.Fatalf("EffectiveDefaultLLM = %#v", got)
-	}
 	cfg := AgentLLMProviderConfig{}
 	if err := json.Unmarshal([]byte(`{"provider":"openai","model":"gpt","api_key":"k","params":{"temperature":0.1}}`), &cfg); err != nil {
 		t.Fatalf("AgentLLMProviderConfig UnmarshalJSON: %v", err)
@@ -108,20 +101,21 @@ func TestLLMRequestParamsAndProviderHelpers(t *testing.T) {
 	if got, err := ParseLLMRequestParamsJSON(`{"a":1}`); err != nil || len(got) == 0 {
 		t.Fatalf("ParseLLMRequestParamsJSON = %q err=%v", string(got), err)
 	}
-	if got := ResolvedLLMConfigs(AgentDefinition{}); got != nil {
-		t.Fatalf("ResolvedLLMConfigs empty = %#v", got)
-	}
 }
 
 func TestChatGPTProviderDoesNotRequireAPIKeyInConfig(t *testing.T) {
-	cfg := &Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-		"main": {LLMProviders: []AgentLLMProviderConfig{{
+	cfg := &Root{
+		LLMModels: []LLMModelConfig{{
+			ID:       "llm-chatgpt",
 			Provider: "chatgpt",
 			Model:    "gpt-5.5",
 			BaseURL:  "https://chatgpt.com/backend-api/codex",
 			APIPath:  "/responses",
-		}}},
-	}}}
+		}},
+		Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+			"main": {DefaultModel: "llm-chatgpt"},
+		}},
+	}
 	validation := ValidateMainAgentLLMConfigured(cfg)
 	if !validation.Complete() {
 		t.Fatalf("ChatGPT provider should be complete, missing %v", validation.MissingFields())
@@ -230,31 +224,21 @@ func TestSaveKeepsExplicitFalseOverDefaultTrue(t *testing.T) {
 	}
 }
 
-// The placeholder provider slot normalize keeps in memory is not persisted, and
-// Load puts it back, so a save/load cycle is stable.
-func TestSaveDropsPlaceholderLLMProviderAndLoadRestoresIt(t *testing.T) {
-	loaded, text := saveAndRead(t, Root{})
-	if strings.Contains(text, "llm_providers:") {
-		t.Errorf("placeholder provider persisted:\n%s", text)
-	}
-	if got := len(loaded.Agents.Definitions["main"].LLMProviders); got != 1 {
-		t.Errorf("main provider slot not restored on load: got %d entries", got)
-	}
-}
-
-func TestSaveKeepsConfiguredLLMProvider(t *testing.T) {
+// A configured default_model survives a save/load cycle: it is the one model
+// setting an agent definition carries now (plan 315).
+func TestSaveKeepsConfiguredDefaultModel(t *testing.T) {
 	r := Root{}
 	normalize(&r)
 	main := r.Agents.Definitions["main"]
-	main.LLMProviders = []AgentLLMProviderConfig{{Model: "gpt-5"}}
+	main.DefaultModel = "llm-row-1"
 	r.Agents.Definitions["main"] = main
 
 	loaded, text := saveAndRead(t, r)
-	if !strings.Contains(text, "gpt-5") {
-		t.Fatalf("configured provider dropped:\n%s", text)
+	if !strings.Contains(text, "llm-row-1") {
+		t.Fatalf("configured default_model dropped:\n%s", text)
 	}
-	if got := loaded.Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-5" {
-		t.Fatalf("provider model = %q, want gpt-5", got)
+	if got := loaded.Agents.Definitions["main"].DefaultModel; got != "llm-row-1" {
+		t.Fatalf("default_model = %q, want llm-row-1", got)
 	}
 }
 
@@ -542,7 +526,7 @@ func TestLoadPersistedSkipsRuntimeEnvSecretsForReadModifyWrite(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "runtime-only-not-for-yaml")
 
 	path := filepath.Join(home, "forebrain.yaml")
-	body := "agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-test\n          api_key: ${OPENAI_API_KEY}\n"
+	body := "agents:\n  defaults:\n    web_search:\n      provider: tavily\n      tavily:\n        api_key: ${OPENAI_API_KEY}\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -551,16 +535,16 @@ func TestLoadPersistedSkipsRuntimeEnvSecretsForReadModifyWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
-	if got := runtimeCfg.Agents.Definitions["main"].LLMProviders[0].APIKey; got != "runtime-only-not-for-yaml" {
-		t.Fatalf("runtime Load API key = %q, want the expansion of the reference", got)
+	if runtimeCfg.Agents.Defaults.WebSearch.Tavily == nil || runtimeCfg.Agents.Defaults.WebSearch.Tavily.APIKey != "runtime-only-not-for-yaml" {
+		t.Fatalf("runtime Load API key = %+v, want the expansion of the reference", runtimeCfg.Agents.Defaults.WebSearch.Tavily)
 	}
 
 	persistedCfg, err := loadPersistedDocumentForTest(path)
 	if err != nil {
 		t.Fatalf("LoadPersisted error: %v", err)
 	}
-	if got := persistedCfg.Agents.Definitions["main"].LLMProviders[0].APIKey; got != "${OPENAI_API_KEY}" {
-		t.Fatalf("LoadPersisted API key = %q, want the reference as written", got)
+	if persistedCfg.Agents.Defaults.WebSearch.Tavily == nil || persistedCfg.Agents.Defaults.WebSearch.Tavily.APIKey != "${OPENAI_API_KEY}" {
+		t.Fatalf("LoadPersisted API key = %+v, want the reference as written", persistedCfg.Agents.Defaults.WebSearch.Tavily)
 	}
 	if err := Save(path, persistedCfg); err != nil {
 		t.Fatalf("Save error: %v", err)

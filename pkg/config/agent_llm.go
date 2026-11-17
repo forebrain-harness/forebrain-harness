@@ -1,4 +1,4 @@
-// Per-agent LLM provider config: models, request params, env, and validation.
+// One model as the runtime reads it: request params, env, and validation.
 package config
 
 import (
@@ -7,112 +7,6 @@ import (
 	"fmt"
 	"strings"
 )
-
-// Legacy: reads one definition's own pre-table list. Only the providers handler and agentyaml (both replaced by plan 262) and the plan 262 migration may call it.
-//
-// FindLLMProviderIndex returns the index of the first llm_providers entry
-// whose provider matches provider (case-insensitive, trimmed) and, when model
-// is non-empty, whose model also matches model, or -1 when none matches or the
-// list is empty. It is the add-or-replace lookup for flows such as /connect
-// that configure one provider+model connection per entry: an existing match is
-// updated in place rather than overwriting the primary slot, and the absence
-// of a match signals "add a new entry". Matching the model too is what lets a
-// second model under the same provider become its own entry instead of
-// replacing the model the provider's first entry carries. An empty model
-// carries no identity and falls back to the provider's first entry.
-func FindLLMProviderIndex(def AgentDefinition, provider, model string) int {
-	want := strings.TrimSpace(provider)
-	if want == "" {
-		return -1
-	}
-	wantModel := strings.TrimSpace(model)
-	for i, entry := range def.LLMProviders {
-		if !strings.EqualFold(strings.TrimSpace(entry.Provider), want) {
-			continue
-		}
-		if wantModel == "" || strings.EqualFold(strings.TrimSpace(entry.Model), wantModel) {
-			return i
-		}
-	}
-	return -1
-}
-
-// Legacy: reads one definition's own pre-table list. Only the providers handler and agentyaml (both replaced by plan 262) and the plan 262 migration may call it.
-func ResolvedLLMConfigs(def AgentDefinition) []AgentLLMProviderConfig {
-	if len(def.LLMProviders) == 0 {
-		return nil
-	}
-	out := expandLLMProviderConfigs(def.LLMProviders)
-	for i := range out {
-		out[i] = CloneAgentLLMProviderConfig(out[i])
-	}
-	return out
-}
-
-// Legacy: reads one definition's own pre-table list. Only the providers handler and agentyaml (both replaced by plan 262) and the plan 262 migration may call it.
-//
-// EffectiveDefaultLLM resolves the provider entry an empty (default) model
-// selection uses for this agent: def.DefaultModel when set, otherwise the
-// first llm_providers entry. DefaultModel is "provider/model" split on the
-// first slash — model ids may themselves contain slashes — and is matched
-// case-insensitively (values trimmed) against the expanded entries, so an
-// entry naming several models (model: [a, b]) resolves a second-item choice
-// too. A non-empty DefaultModel that matches no entry returns nil: callers
-// treat that as a configuration error, never a silent fall-back to the first
-// entry. An empty list also returns nil.
-func EffectiveDefaultLLM(def AgentDefinition) *AgentLLMProviderConfig {
-	expanded := expandLLMProviderConfigs(def.LLMProviders)
-	if dm := strings.TrimSpace(def.DefaultModel); dm != "" {
-		provider, model := dm, ""
-		if i := strings.Index(dm, "/"); i >= 0 {
-			provider, model = dm[:i], dm[i+1:]
-		}
-		provider = strings.TrimSpace(provider)
-		model = strings.TrimSpace(model)
-		for i := range expanded {
-			if strings.EqualFold(strings.TrimSpace(expanded[i].Provider), provider) &&
-				strings.EqualFold(strings.TrimSpace(expanded[i].Model), model) {
-				return &expanded[i]
-			}
-		}
-		return nil
-	}
-	if len(expanded) == 0 {
-		return nil
-	}
-	return &expanded[0]
-}
-
-func NormalizeLLMProviderEntries(def *AgentDefinition) {
-	if def == nil {
-		return
-	}
-	def.LLMProviders = expandLLMProviderConfigs(def.LLMProviders)
-}
-
-func expandLLMProviderConfigs(in []AgentLLMProviderConfig) []AgentLLMProviderConfig {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]AgentLLMProviderConfig, 0, len(in))
-	for _, item := range in {
-		models := append(StringList(nil), item.Models...)
-		if len(models) == 0 && item.Model != "" {
-			models = StringList{item.Model}
-		}
-		if len(models) == 0 {
-			out = append(out, CloneAgentLLMProviderConfig(item))
-			continue
-		}
-		for _, model := range models {
-			cp := CloneAgentLLMProviderConfig(item)
-			cp.Model = model
-			cp.Models = nil
-			out = append(out, cp)
-		}
-	}
-	return out
-}
 
 type LLMSummary struct {
 	Agent            string

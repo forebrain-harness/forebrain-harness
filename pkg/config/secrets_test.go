@@ -26,17 +26,21 @@ func TestRedactSecretsRoundTripsThroughASettingsForm(t *testing.T) {
 	}
 }
 
-// Provider keys live in a slice inside a map value, which is the shape the
-// walker has to reach for the settings screens to be safe.
-func TestRedactSecretsReachesProvidersInsideAgentDefinitions(t *testing.T) {
+// A secret nested in a slice inside a map value is the shape the walker has to
+// reach for the settings screens to be safe: an agent's own MCP server carries
+// the OAuth token the server was signed in with.
+func TestRedactSecretsReachesNestedSettingsInsideAgentDefinitions(t *testing.T) {
 	root := Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-		"main": {Primary: true, LLMProviders: []AgentLLMProviderConfig{{Provider: "openai", APIKey: "sk-live"}}},
+		"main": {Primary: true, MCPServers: []MCPServerConfig{{
+			Name:  "linear",
+			OAuth: MCPOAuthConfig{AccessToken: "tok-live"},
+		}}},
 	}}}
 	RedactSecrets(&root)
-	if got := root.Agents.Definitions["main"].LLMProviders[0].APIKey; got != RedactedSecretPlaceholder {
-		t.Fatalf("provider key = %q, want it hidden", got)
+	if got := root.Agents.Definitions["main"].MCPServers[0].OAuth.AccessToken; got != RedactedSecretPlaceholder {
+		t.Fatalf("oauth token = %q, want it hidden", got)
 	}
-	if got := root.Agents.Definitions["main"].LLMProviders[0].Provider; got != "openai" {
-		t.Fatalf("provider name must survive redaction, got %q", got)
+	if got := root.Agents.Definitions["main"].MCPServers[0].Name; got != "linear" {
+		t.Fatalf("the server name must survive redaction, got %q", got)
 	}
 }
