@@ -6061,12 +6061,13 @@ func (p *richPickerState) panel(label string) slashPanel {
 		}
 		// The mark — the effort list's gear — is coloured here, in the one
 		// place a picker draws its rows: the item carries a bare glyph and the
-		// renderer owns the accent.
+		// renderer owns the accent. The status is drawn by the row renderer
+		// itself, quiet, at the row's right edge (plan 313).
 		mark := ""
 		if item.Mark != "" {
 			mark = panelAccentStyle.Render(item.Mark)
 		}
-		b.selectableColumns(ci == p.cursor, "", item.Label, nameWidth, strings.TrimSpace(item.Description), item.ElideTail, mark)
+		b.selectableColumnsStatus(ci == p.cursor, "", item.Label, nameWidth, strings.TrimSpace(item.Description), item.ElideTail, item.Status, mark)
 	}
 	if len(p.selectable) == 0 {
 		b.text(panelIndent, "No matches", nil)

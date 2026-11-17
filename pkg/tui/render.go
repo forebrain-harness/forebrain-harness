@@ -7672,6 +7672,12 @@ type panelLine struct {
 	// because out in the description column it would read as a fact about the
 	// endpoint rather than about the level (owner 2026-11-15).
 	mark string
+	// status, when set, is the row's quiet marker in a track of its own at the
+	// panel's right edge — the /config definitions list's "Primary" (plan 313).
+	// It is drawn on the row's first line only, and dropped rather than wrapped
+	// when the row falls back to its stacked form: a status belongs to the
+	// row's identity, so it never takes a line of its own.
+	status string
 }
 
 // rows wraps the line at width.

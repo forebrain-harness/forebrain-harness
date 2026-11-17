@@ -22,6 +22,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"go.yaml.in/yaml/v2"
 )
 
@@ -1101,6 +1102,14 @@ func configMarshalDoc(doc any) (json.RawMessage, error) {
 	return raw, nil
 }
 
+// configEffortField reports whether a field stores a thinking level. Such a row
+// is plain text until plan 319 gives it a picker, but what it holds is a level:
+// the page names it through turn's table, not as the stored id.
+func configEffortField(field configField) bool {
+	path := configFieldPath(field)
+	return len(path) > 0 && path[len(path)-1] == "reasoning_effort"
+}
+
 // configFieldValueText is a field's value as the section page shows it.
 func configFieldValueText(field configField, value any, exists bool) string {
 	if configIsContainer(value) {
@@ -1116,6 +1125,17 @@ func configFieldValueText(field configField, value any, exists bool) string {
 		default:
 			return configBoolOffLabel
 		}
+	}
+	// A thinking level is a level even while its row is free text: the value
+	// reads through turn's one label table, never as the raw id (plan 313,
+	// 2026-11-17 reasoning-semantics correction). The picker that replaces the
+	// row is plan 319's.
+	if configEffortField(field) {
+		level, _ := value.(string)
+		if strings.TrimSpace(level) == "" {
+			return "unset"
+		}
+		return turn.EffortEnglishLabel(level)
 	}
 	// A stored section always carries its settings (plan 207 §3.2), so this is
 	// reached only by a leaf inside a table row — an optional field of an MCP

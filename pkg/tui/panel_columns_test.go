@@ -149,6 +149,66 @@ func TestPanelColumnsWithoutDescriptionMatchPlainRows(t *testing.T) {
 	}
 }
 
+// A row's status is a track of its own at the right edge — the /config
+// definitions list's "Primary" (plan 313): the description column narrows by it
+// so the two never meet, the status is drawn whole on the first line, and a row
+// without one is byte-for-byte what it was.
+func TestPanelColumnsDrawTheStatusAtTheRightEdge(t *testing.T) {
+	const width = 80
+	withStatus := panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items", status: "Primary"}
+	rows := withStatus.rows(width)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1: %q", len(rows), rows)
+	}
+	got := stripANSI(rows[0])
+	if !strings.HasSuffix(got, "Primary") {
+		t.Fatalf("row = %q, want the status at its right edge", got)
+	}
+	if w := displayLineWidth(got); w != width {
+		t.Fatalf("row is %d cells wide at width %d: %q", w, width, got)
+	}
+	if !strings.Contains(got, "4 items") {
+		t.Fatalf("row = %q, want the description in its column", got)
+	}
+	assertRowsFit(t, rows, width)
+
+	// Two rows: both statuses end at the same column, whatever their
+	// descriptions are, because the track is fixed rather than pushed along.
+	rowB := panelLine{lead: "  ", col: "review-agent", colWidth: 14, text: "2 items", status: "Primary"}
+	if a, b := stripANSI(withStatus.rows(width)[0]), stripANSI(rowB.rows(width)[0]); strings.Index(a, "Primary") != strings.Index(b, "Primary") {
+		t.Fatalf("statuses are not aligned:\n%q\n%q", a, b)
+	}
+
+	// A row without a status is untouched: it renders exactly like a plain row.
+	plain := panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items"}
+	bare := panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items"}
+	if len(plain.rows(width)) != len(bare.rows(width)) || plain.rows(width)[0] != bare.rows(width)[0] {
+		t.Fatalf("a statusless row changed: %q", plain.rows(width))
+	}
+
+	// A stacked row (name too wide for its column, narrow terminal) drops the
+	// status instead of wrapping it onto a line of its own.
+	stacked := panelLine{lead: "  ", col: "standard-api-key-for-china-pay-as-you-go", colWidth: 14, text: "dashscope", status: "Primary"}
+	for _, row := range stacked.rows(20) {
+		if strings.Contains(stripANSI(row), "Primary") {
+			t.Fatalf("a stacked row must drop its status: %q", stripANSI(row))
+		}
+		assertRowsFit(t, []string{row}, 20)
+	}
+
+	// The picker's own entry point carries the status through.
+	b := newPanelBuilder()
+	b.selectableColumnsStatus(false, "", "main", 14, "4 items", "", "Primary")
+	if len(b.body) != 1 || b.body[0].status != "Primary" {
+		t.Fatalf("the picker row carries no status: %+v", b.body)
+	}
+	b = newPanelBuilder()
+	b.selectableColumns(false, "", "main", 14, "4 items", "")
+	if len(b.body) != 1 || b.body[0].status != "" {
+		t.Fatalf("a statusless row picked one up: %+v", b.body)
+	}
+}
+
 // The tab bar wraps whole chips: a chip that no longer fits starts the next
 // row, a tab's name and its count never part across rows.
 func TestPanelChipsWrapWhole(t *testing.T) {

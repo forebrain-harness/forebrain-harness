@@ -106,20 +106,28 @@ func elideEndpoint(url, tail string, width int) []string {
 // description hung under the name — never indented to the description
 // column, which would float it in the middle of the panel. A row without a
 // description is laid out exactly like a plain row.
+//
+// A row with a status reserves that status a track of its own at the right
+// edge, and the description column narrows by it: the /config definitions
+// list's "Primary" marker (plan 313). The status is drawn whole on the row's
+// first line — it is never wrapped, truncated or given a line of its own — and
+// a stacked row drops it, the way the prototype hides its status column on a
+// narrow terminal.
 func (l panelLine) columnRows(width int) []string {
 	if strings.TrimSpace(l.text) == "" {
 		// A row with no description keeps its mark right after the name, one
 		// space over, so a gear never floats in a column of its own.
 		if l.mark != "" {
-			return panelLine{lead: l.lead, text: l.col + " " + l.mark}.rows(width)
+			return l.withStatus(panelLine{lead: l.lead, text: l.col + " " + l.mark}.rows(width), width)
 		}
-		return panelLine{lead: l.lead, text: l.col}.rows(width)
+		return l.withStatus(panelLine{lead: l.lead, text: l.col}.rows(width), width)
 	}
 	leadW := displayLineWidth(l.lead)
 	colW := min(l.colWidth, maxInt(1, (width-leadW)*2/5))
 	nameW := displayLineWidth(l.col)
+	statusW := l.statusTrackWidth()
 	pad := strings.Repeat(" ", leadW+colW+panelColumnGap)
-	texts := l.descriptionRows(maxInt(1, width-leadW-colW-panelColumnGap))
+	texts := l.descriptionRows(maxInt(1, width-leadW-colW-panelColumnGap-statusW))
 	render := func(chunk string) string {
 		if l.style != nil && chunk != "" {
 			return l.style.Render(chunk)
@@ -133,9 +141,34 @@ func (l panelLine) columnRows(width int) []string {
 		for _, chunk := range texts[1:] {
 			rows = append(rows, pad+render(chunk))
 		}
-		return rows
+		return l.withStatus(rows, width)
 	}
 	return l.columnRowsStacked(width)
+}
+
+// statusTrackWidth is the room a row's status takes out of its description
+// column: the label, the gap before it, and nothing when there is no status.
+func (l panelLine) statusTrackWidth() int {
+	if l.status == "" {
+		return 0
+	}
+	return displayLineWidth(l.status) + panelColumnGap
+}
+
+// withStatus puts the row's status in its track at the right edge of the first
+// line. No status — or no room left for one — leaves the rows exactly as they
+// were: the label is never shortened to fit, and never moves to a later line.
+func (l panelLine) withStatus(rows []string, width int) []string {
+	if l.status == "" || len(rows) == 0 {
+		return rows
+	}
+	pad := width - displayLineWidth(rows[0]) - displayLineWidth(l.status)
+	if pad < 0 {
+		return rows
+	}
+	styled := append([]string(nil), rows...)
+	styled[0] += strings.Repeat(" ", pad) + panelHintStyle.Render(l.status)
+	return styled
 }
 
 // columnRowsStacked lays a two-column row that ran out of column as a
@@ -182,9 +215,18 @@ func (b *panelBuilder) tabs(chips []string) {
 // tight against the name — the /model effort picker's gear; no other list
 // passes one.
 func (b *panelBuilder) selectableColumns(selected bool, lead, name string, nameWidth int, desc, elideTail string, mark ...string) {
+	b.selectableColumnsStatus(selected, lead, name, nameWidth, desc, elideTail, "", mark...)
+}
+
+// selectableColumnsStatus is selectableColumns with the row's status — the
+// quiet label in its own track at the panel's right edge, the /config
+// definitions list's "Primary" (plan 313). It is a second entry point rather
+// than a second variadic, so every list that draws no status keeps its call as
+// it was.
+func (b *panelBuilder) selectableColumnsStatus(selected bool, lead, name string, nameWidth int, desc, elideTail, status string, mark ...string) {
 	m := ""
 	if len(mark) > 0 {
 		m = mark[0]
 	}
-	b.addSelectable(selected, panelLine{lead: lead, col: name, colWidth: nameWidth, text: desc, elideTail: elideTail, mark: m})
+	b.addSelectable(selected, panelLine{lead: lead, col: name, colWidth: nameWidth, text: desc, elideTail: elideTail, mark: m, status: status})
 }

@@ -628,6 +628,11 @@ type SelectItem struct {
 	// is no mark. The glyph is not styled here: the renderer colours it, so
 	// this type keeps no lipgloss dependency.
 	Mark string
+	// Status is a short label drawn at the row's right edge, quiet and whole —
+	// the /config definitions list's "Primary" marker (plan 313, prototype
+	// scene primary-listed). "" is no status. Like the mark it is unstyled
+	// here: the renderer owns its colour, and a narrow row drops it.
+	Status string
 }
 
 type Selector interface {

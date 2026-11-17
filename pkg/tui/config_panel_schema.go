@@ -188,15 +188,14 @@ var configSectionSchemas = []configSectionSchema{
 			{
 				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows,
 				// A definition's default_model stays a free-text row on purpose:
-				// the panel is generic over the stored JSON, plan 313 rebuilds
-				// this panel with pickers, and plan 319 owns the field types
-				// (plan 315 Step 4 deferral).
-				Hint: "One agent id per row; a row holds its subagents, MCP and default model (a model row id)",
+				// the panel is generic over the stored JSON, and plan 319 owns
+				// the field types (plan 315 Step 4 deferral).
+				Hint: "One agent id per row; a row holds its subagents, MCP and default model (a model row id). An id naming a built-in subagent type is that type's install-wide default, which an agent's own subagent entry overrides",
 			},
 			// The install-wide model row of each public built-in subagent type
 			// (plan 315): a row id + reasoning effort, shared by every primary
-			// agent. Plain rows for now — plan 313 turns the panel into pickers
-			// and plan 319 gives this field the model+effort picker.
+			// agent. Plain rows for now — plan 319 gives this field the
+			// model+effort picker, and plan 313 keeps the rows as they are.
 			{
 				Path: "subagent_models", Label: "Subagent models", Kind: configFieldRows,
 				Hint: "One built-in type per row (explore, plan, general-purpose, verification); a row holds its model row id and thinking level",
@@ -225,7 +224,28 @@ var configSectionSchemas = []configSectionSchema{
 				Hint: "A model row id (the row chosen in Settings → Subagents); empty follows the primary agent",
 			},
 			{
+				// Free text is a stopgap here and on the plan reviewer's row
+				// below: the picker that replaces both needs plan 318's
+				// sendability rule and plan 319's field kind (plan 313,
+				// 2026-11-17 reasoning-semantics correction). Any surface that
+				// shows a level names it through turn.EffortEnglishLabel —
+				// there is no second label table.
 				Path: "goal_evaluator.reasoning_effort", Label: "Goal check thinking level", Kind: configFieldText,
+				Hint: "Empty follows that model row's default level; low, high and so on override it",
+			},
+			// The exit-plan approval's reviewer row (plan 313) is the goal
+			// check's sibling one setting down: system-dispatched, global on
+			// purpose, so it is two settings rather than a whole subagent entry
+			// (the plan 299 precedent above).
+			{
+				Path: "plan_reviewer.model", Label: "Plan reviewer model", Kind: configFieldText,
+				Hint: "A model row id (the row chosen in Settings → Subagents); empty follows the primary agent",
+			},
+			{
+				// The same stopgap as the goal check's row above (plan 313,
+				// 2026-11-17 reasoning-semantics correction): plan 319 replaces
+				// both with a picker over the chosen model row's levels.
+				Path: "plan_reviewer.reasoning_effort", Label: "Plan reviewer thinking level", Kind: configFieldText,
 				Hint: "Empty follows that model row's default level; low, high and so on override it",
 			},
 		},
