@@ -35,10 +35,10 @@ describe('auto-continue', () => {
     const state = { continueAt: at.toISOString(), code: 'rate_limit_quota' }
     const clockEn = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(at)
     const clockZh = new Intl.DateTimeFormat('zh-CN', { hour: 'numeric', minute: '2-digit' }).format(at)
-    expect(formatAutoContinueNotice(state, 'en', now)).toBe(`Usage limit reached · continuing automatically at ${clockEn}`)
-    expect(formatAutoContinueNotice(state, 'zh', now)).toBe(`用量已达上限 · 将在 ${clockZh} 自动继续`)
+    expect(formatAutoContinueNotice(state, 'en', now)).toBe(`Usage limit reached continuing automatically at ${clockEn}`)
+    expect(formatAutoContinueNotice(state, 'zh', now)).toBe(`用量已达上限 将在 ${clockZh} 自动继续`)
     expect(formatAutoContinueNotice({ ...state, code: 'rate_limit_throttle' }, 'en', now))
-      .toBe(`Rate limited · continuing automatically at ${clockEn}`)
+      .toBe(`Rate limited continuing automatically at ${clockEn}`)
   })
 
   it('names the day only when the continuation is not today', () => {

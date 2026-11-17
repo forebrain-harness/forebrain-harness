@@ -90,7 +90,7 @@ describe('ProjectTasks', () => {
     const row = wrapper.get('[data-task-row="tsk-1"]')
     expect(row.text()).toContain('审核三季度底稿')
     expect(row.text()).toContain('tsk-1')
-    expect(row.text()).toContain('业务系统 · ibs-audit')
+    expect(row.text()).toContain('业务系统 ibs-audit')
     expect(wrapper.get('[data-testid="task-status-tsk-1"]').text()).toBe('已停止')
     // Runs and files are the server's counts, and the updated column is the
     // row's own moment.

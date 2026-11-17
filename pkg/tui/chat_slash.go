@@ -1275,10 +1275,10 @@ func (s *ChatSession) startMCPLocalOAuth(serverName string, done func(result str
 			return
 		}
 		if registered {
-			done(name + ": authenticated · used on next reconnect")
+			done(name + ": authenticated used on next reconnect")
 			return
 		}
-		done(name + ": authenticated · tools available in a new session")
+		done(name + ": authenticated tools available in a new session")
 	}()
 	res := <-ready
 	if res.err != nil {
@@ -1596,7 +1596,7 @@ type skillsOutcome struct {
 	submitted  bool
 	done       bool
 	// notice, when set, is a success line the /skills list shows at its top
-	// on the next render — the "Published X v3 · new sessions use it" line a
+	// on the next render — the "Published X v3 new sessions use it" line a
 	// publish leaves behind.
 	notice string
 }
@@ -1844,9 +1844,9 @@ func (c *commandController) handleSkillEntry(ctx context.Context, entry skill.En
 func skillToggleStatusLine(entry skill.Entry) string {
 	name := strings.TrimSpace(entry.Name)
 	if entry.Enabled {
-		return panelOKStyle.Render("Enabled " + name + " · new sessions load it")
+		return panelOKStyle.Render("Enabled " + name + " new sessions load it")
 	}
-	return panelWarnStyle.Render("Disabled " + name + " · new sessions skip it")
+	return panelWarnStyle.Render("Disabled " + name + " new sessions skip it")
 }
 
 func (c *commandController) runSkillNow(entry skill.Entry) skillsOutcome {
@@ -2217,13 +2217,13 @@ func memorySkillDescription(item MemorySkillOption) string {
 		parts = append(parts, desc)
 	}
 	if state := memorySkillStateLabel(item); state != "" {
-		parts = append(parts, "· "+state)
+		parts = append(parts, ""+state)
 	}
 	if cmd := strings.TrimSpace(item.SlashCommand); cmd != "" {
-		parts = append(parts, "· adds "+cmd)
+		parts = append(parts, "adds "+cmd)
 	}
 	if shadowed := strings.TrimSpace(item.Shadows); shadowed != "" {
-		parts = append(parts, "· shadows "+shadowed)
+		parts = append(parts, "shadows "+shadowed)
 	}
 	return strings.Join(parts, " ")
 }

@@ -315,7 +315,7 @@ const previewAlt = computed(() => {
 
 /**
  * imageMetaLine is the muted caption under the thumbnail, aligned with the
- * TUI's "▤ name · WxH · bytes · scaled": every segment that is known appears,
+ * TUI's "▤ name WxH bytes scaled": every segment that is known appears,
  * every unknown one is omitted, and "scaled" only ever names a downscale the
  * engine actually ran.
  */
@@ -329,7 +329,7 @@ const imageMetaLine = computed(() => {
     segments.push(imageBytesLabel(props.step.previewBytes ?? 0))
   }
   if (props.step.previewScaled) segments.push('scaled')
-  return segments.join(' · ')
+  return segments.join(' ')
 })
 
 /**

@@ -598,7 +598,7 @@ func TestTransientStatusSourcesDoNotClearEachOther(t *testing.T) {
 	}
 
 	r.RenderTransientStatus(transientSourceWorking, "Working (5s • esc to interrupt)")
-	r.RenderTransientStatus(transientSourceMCP, "mcp 0/2 · connecting docs, slow · esc to skip")
+	r.RenderTransientStatus(transientSourceMCP, "mcp 0/2 connecting docs, slow esc to skip")
 	got := painted()
 	if !strings.Contains(got, "mcp 0/2") {
 		t.Fatalf("the MCP line must win while it is live:\n%s", got)
@@ -615,7 +615,7 @@ func TestTransientStatusSourcesDoNotClearEachOther(t *testing.T) {
 	}
 
 	// Symmetrically, the turn ending does not clear an MCP startup.
-	r.RenderTransientStatus(transientSourceMCP, "mcp 1/2 · connecting slow · esc to skip")
+	r.RenderTransientStatus(transientSourceMCP, "mcp 1/2 connecting slow esc to skip")
 	r.FinishTransientStatus(transientSourceWorking)
 	if got := painted(); !strings.Contains(got, "mcp 1/2") {
 		t.Fatalf("finishing the working line cleared the MCP line:\n%s", got)
@@ -626,12 +626,12 @@ func TestTransientStatusSourcesDoNotClearEachOther(t *testing.T) {
 	// line on screen.
 	r.FinishTransientStatus(transientSourceMCP)
 	r.RenderTransientStatus(transientSourceWorking, "Working (9s • esc to interrupt)")
-	r.RenderTransientStatus(transientSourceLSP, "lsp: installing rust-analyzer · fetching")
+	r.RenderTransientStatus(transientSourceLSP, "lsp: installing rust-analyzer fetching")
 	got = painted()
 	if !strings.Contains(got, "lsp: installing") || strings.Contains(got, "Working (9s") {
 		t.Fatalf("the lsp line must outrank the working line while MCP is quiet:\n%s", got)
 	}
-	r.RenderTransientStatus(transientSourceMCP, "mcp 1/2 · connecting slow")
+	r.RenderTransientStatus(transientSourceMCP, "mcp 1/2 connecting slow")
 	got = painted()
 	if !strings.Contains(got, "mcp 1/2") || strings.Contains(got, "lsp: installing") {
 		t.Fatalf("the MCP line must outrank the lsp install:\n%s", got)
@@ -772,7 +772,7 @@ func TestAutoContinueTranscriptLine(t *testing.T) {
 	}
 	clock := autoContinueClock(at, time.Now())
 	transcript := statusLines(renderer)
-	if want := "Usage limit reached · continuing automatically at " + clock + " · esc or type to cancel"; !strings.Contains(transcript, want) {
+	if want := "Usage limit reached continuing automatically at " + clock + " esc or type to cancel"; !strings.Contains(transcript, want) {
 		t.Fatalf("transcript = %q, want %q", transcript, want)
 	}
 	// The wait is announced in the transcript and nowhere else: the composer
@@ -998,12 +998,12 @@ func TestAutoContinueUIMessageFromEvents(t *testing.T) {
 func TestAutoContinueHeadlineNamesAThrottle(t *testing.T) {
 	now := time.Date(2026, 9, 29, 23, 0, 0, 0, time.UTC)
 	got := autoContinueTranscriptText(string(llm.ExplainRateLimitThrottle), now.Add(2*time.Minute), now, true)
-	if got != "Rate limited · continuing automatically at 11:02pm · esc or type to cancel" {
+	if got != "Rate limited continuing automatically at 11:02pm esc or type to cancel" {
 		t.Fatalf("transcript line = %q", got)
 	}
 	// A view with no input box can only be left, not typed out of.
 	got = autoContinueTranscriptText(string(llm.ExplainRateLimitThrottle), now.Add(2*time.Minute), now, false)
-	if got != "Rate limited · continuing automatically at 11:02pm · esc to cancel" {
+	if got != "Rate limited continuing automatically at 11:02pm esc to cancel" {
 		t.Fatalf("transcript line without typing = %q", got)
 	}
 }
@@ -1508,7 +1508,7 @@ func TestPaidTierNoticeLine(t *testing.T) {
 	if state.paidTierFor() == nil {
 		t.Fatal("the offer is not on the table")
 	}
-	want := "Free tier spent until 2026-11-16 08:00:00 (UTC+8). Ctrl-P use paid (Hy4) · Esc dismiss"
+	want := "Free tier spent until 2026-11-16 08:00:00 (UTC+8). Ctrl-P use paid (Hy4) Esc dismiss"
 	transcript := statusLines(renderer)
 	if !strings.Contains(transcript, want) {
 		t.Fatalf("transcript = %q, want %q", transcript, want)

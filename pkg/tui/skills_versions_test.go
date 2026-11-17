@@ -40,10 +40,10 @@ func TestSkillStatusPrefix(t *testing.T) {
 		status skillStatus
 		want   string
 	}{
-		{skillStatus{known: true, builtin: true}, "Built-in · "},
-		{skillStatus{known: true, label: skill.SkillStateDraft}, "Draft · "},
-		{skillStatus{known: true, label: skill.SkillStatePending, version: 3}, "v3 · unpublished changes · "},
-		{skillStatus{known: true, label: skill.SkillStatePublished, version: 3}, "v3 · "},
+		{skillStatus{known: true, builtin: true}, "Built-in "},
+		{skillStatus{known: true, label: skill.SkillStateDraft}, "Draft "},
+		{skillStatus{known: true, label: skill.SkillStatePending, version: 3}, "v3 unpublished changes "},
+		{skillStatus{known: true, label: skill.SkillStatePublished, version: 3}, "v3 "},
 		{skillStatus{}, ""},
 	}
 	for _, tc := range cases {
@@ -85,7 +85,7 @@ func TestShortRevisionAndUpdateDescription(t *testing.T) {
 	if shortRevision("d41c8e0aaaaaa") != "d41c8e0" {
 		t.Fatalf("short revision = %q", shortRevision("d41c8e0aaaaaa"))
 	}
-	if got := skillUpdateDescription(&skill.SkillUpdate{Rev: "d41c8e0aaaaaa", Date: "Oct 10", Files: 2}); got != "d41c8e0 · Oct 10 · 2 files" {
+	if got := skillUpdateDescription(&skill.SkillUpdate{Rev: "d41c8e0aaaaaa", Date: "Oct 10", Files: 2}); got != "d41c8e0 Oct 10 2 files" {
 		t.Fatalf("update description = %q", got)
 	}
 }

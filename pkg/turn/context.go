@@ -122,9 +122,9 @@ func contextWindowSection(g StatusContext) string {
 	var b strings.Builder
 	b.WriteString("Context window\n")
 	if g.UsedTokens > 0 {
-		fmt.Fprintf(&b, "  %s %d%% left · %s of %s", ContextGaugeBar(g.PercentLeft), g.PercentLeft, FormatTokens(g.UsedTokens), FormatTokens(g.WindowTokens))
+		fmt.Fprintf(&b, "  %s %d%% left %s of %s", ContextGaugeBar(g.PercentLeft), g.PercentLeft, FormatTokens(g.UsedTokens), FormatTokens(g.WindowTokens))
 	} else {
-		fmt.Fprintf(&b, "  Empty so far · %s", FormatTokens(g.WindowTokens))
+		fmt.Fprintf(&b, "  Empty so far %s", FormatTokens(g.WindowTokens))
 	}
 	if g.AutoCompactAt > 0 {
 		fmt.Fprintf(&b, "\n  Compacts automatically at %s", FormatTokens(g.AutoCompactAt))
@@ -167,11 +167,11 @@ func broughtInSection(snap contextSnapshot, ok bool) string {
 		}
 		switch {
 		case p.Included:
-			fmt.Fprintf(&b, "\n  %s · %s tokens", name, FormatTokens(p.EstimatedTokens))
+			fmt.Fprintf(&b, "\n  %s %s tokens", name, FormatTokens(p.EstimatedTokens))
 		case p.Reason == "budget":
-			fmt.Fprintf(&b, "\n  %s · left out, over the %s-token allowance", name, FormatTokens(snap.Budget.LimitTokens))
+			fmt.Fprintf(&b, "\n  %s left out, over the %s-token allowance", name, FormatTokens(snap.Budget.LimitTokens))
 		case p.Reason == "max_items":
-			fmt.Fprintf(&b, "\n  %s · left out, too many items", name)
+			fmt.Fprintf(&b, "\n  %s left out, too many items", name)
 		default:
 			continue
 		}
@@ -250,7 +250,7 @@ func filteringSection(store *state.Store) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Filtered tool output, across this agent's conversations\n  %d of %s trimmed before the model saw them · about %s tokens saved",
+	fmt.Fprintf(&b, "Filtered tool output, across this agent's conversations\n  %d of %s trimmed before the model saw them about %s tokens saved",
 		all.FilteredCommands, countNoun(int(all.TotalCommands), "output"), FormatTokens(int(all.SavedTokens)))
 	if all.Retrievals > 0 {
 		fmt.Fprintf(&b, "\n  The model fetched a full output back %s", countNoun(int(all.Retrievals), "time"))
@@ -260,7 +260,7 @@ func filteringSection(store *state.Store) string {
 		if err != nil || stats.TotalCommands == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "\n  %s · %d of %d trimmed · about %s tokens saved", kind.label, stats.FilteredCommands, stats.TotalCommands, FormatTokens(int(stats.SavedTokens)))
+		fmt.Fprintf(&b, "\n  %s %d of %d trimmed about %s tokens saved", kind.label, stats.FilteredCommands, stats.TotalCommands, FormatTokens(int(stats.SavedTokens)))
 	}
 	return b.String()
 }

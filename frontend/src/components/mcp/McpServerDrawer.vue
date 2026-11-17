@@ -579,7 +579,7 @@ const shadowedHint = computed(() => {
   return t('mcp.shadowedHint', { name: row.value?.shadowedByName || '—' })
 })
 
-/** The badge's words. A shadowed entry reads 未运行, not 未运行 · 被覆盖: the
+/** The badge's words. A shadowed entry reads 未运行, not 未运行 被覆盖: the
  * drawer has a line beside the badge for the reason. */
 const statusLabel = computed(() => (shadowedHint.value !== '' ? t('mcp.status.idle') : status.value.label))
 

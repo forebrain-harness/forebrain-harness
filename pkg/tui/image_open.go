@@ -161,13 +161,13 @@ func openImagePreview(renderer *Renderer, path, label string) {
 func imagePreviewFrameLine(meta tool.ToolMeta) string {
 	dims := ""
 	if meta.PreviewWidth > 0 && meta.PreviewHeight > 0 {
-		dims = fmt.Sprintf("%d×%d · ", meta.PreviewWidth, meta.PreviewHeight)
+		dims = fmt.Sprintf("%d×%d ", meta.PreviewWidth, meta.PreviewHeight)
 	}
-	line := fmt.Sprintf("▤ %s · %s%s", imagePreviewLabel(meta), dims, humanBytesLabel(meta.PreviewBytes))
+	line := fmt.Sprintf("▤ %s %s%s", imagePreviewLabel(meta), dims, humanBytesLabel(meta.PreviewBytes))
 	if meta.PreviewScaled {
-		line += " · scaled"
+		line += " scaled"
 	}
-	return line + " · click to open"
+	return line + " click to open"
 }
 
 // imagePreviewLabel names an image for a one-line marker: its file name, or,

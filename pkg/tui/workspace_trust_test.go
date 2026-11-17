@@ -66,7 +66,7 @@ func TestWorkspaceTrustPanelPaintsTheChosenPicture(t *testing.T) {
 		require.Contains(t, flat, want)
 	}
 	require.False(t, strings.Contains(flat, "❯ Trust and continue"), "the cursor must open on Quit, not on Trust and continue")
-	hint := "↑/↓ to navigate · Enter to confirm · Esc to quit"
+	hint := "↑/↓ to navigate Enter to confirm Esc to quit"
 	at := strings.LastIndex(flat, hint)
 	require.GreaterOrEqual(t, at, 0, "the hint line must be drawn")
 	require.False(t, strings.Contains(flat[at+len(hint):], "Esc to cancel"), "the hint must end with Esc to quit")

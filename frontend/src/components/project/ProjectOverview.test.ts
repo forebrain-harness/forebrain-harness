@@ -306,7 +306,7 @@ describe('ProjectOverview', () => {
     const batch = await mountTab({ projectType: 'batch', taskNotify: [{ channel: 'feishu', target: 'oc_1' }] })
     expect(batch.find('[data-testid="project-task-notify"]').exists()).toBe(true)
     expect(batch.get('[data-testid="project-task-notify"]').text()).toContain('任务通知')
-    expect(batch.get('[data-testid="task-notify-row-0"]').text()).toContain('飞书 · oc_1')
+    expect(batch.get('[data-testid="task-notify-row-0"]').text()).toContain('飞书 oc_1')
     batch.unmount()
   })
 })

@@ -969,19 +969,19 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 	writeLine("")
 	switch {
 	case o.feedback != feedbackClosed:
-		writeLine("\x1b[2mEsc to refuse without words · Ctrl+J/Alt+Enter for newline · Enter to submit\x1b[0m")
+		writeLine("\x1b[2mEsc to refuse without words Ctrl+J/Alt+Enter for newline Enter to submit\x1b[0m")
 	case o.planEffortPicking:
-		writeLine("\x1b[2mEsc to go back · Enter to confirm\x1b[0m")
+		writeLine("\x1b[2mEsc to go back Enter to confirm\x1b[0m")
 	case o.planReviewPicking && o.planPickerPurpose == pickHandOff:
-		writeLine("\x1b[2mEsc to go back · Enter to hand off\x1b[0m")
+		writeLine("\x1b[2mEsc to go back Enter to hand off\x1b[0m")
 	case o.planReviewPicking:
-		writeLine("\x1b[2mEsc to go back · Enter to request the review\x1b[0m")
+		writeLine("\x1b[2mEsc to go back Enter to request the review\x1b[0m")
 	default:
 		dismiss := "Esc to cancel"
 		if o.dismissDecision().Denied {
 			dismiss = "Esc to decline"
 		}
-		writeLine("\x1b[2m%s · ctrl+e to explain · ? for keys\x1b[0m", dismiss)
+		writeLine("\x1b[2m%s ctrl+e to explain ? for keys\x1b[0m", dismiss)
 	}
 	if focusToEnd {
 		o.focusEnd = lineCount
@@ -2419,7 +2419,7 @@ func approvalPlanFilePath(req turn.ToolApprovalRequest) string {
 //     is focused.
 //   - Submit button (multi-select only) to advance after toggling options.
 //   - Divider, then "Chat about this" footer action.
-//   - Bottom help line: "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"
+//   - Bottom help line: "Enter to select Tab/Arrow keys to navigate Esc to cancel"
 //     (or "↑/↓ to navigate" when there is a single question).
 //   - Submit review view when the Submit tab is focused.
 //
@@ -3255,11 +3255,11 @@ func (o *questionOverlay) renderQuestionView() {
 	}
 	// The overlay is soft-wrapped at paint, so the hint wraps whole.
 	if o.editingOther {
-		c.writeLine("\x1b[2mEnter to confirm · ←/→ to move cursor · ↑/↓ to leave the field · Esc to discard\x1b[0m")
+		c.writeLine("\x1b[2mEnter to confirm ←/→ to move cursor ↑/↓ to leave the field Esc to discard\x1b[0m")
 	} else if q.AllowMultiple {
-		c.writeLinef("\x1b[2mEnter to select · %s · Space to toggle · Esc to cancel\x1b[0m", helpNav)
+		c.writeLinef("\x1b[2mEnter to select %s Space to toggle Esc to cancel\x1b[0m", helpNav)
 	} else {
-		c.writeLinef("\x1b[2mEnter to select · %s · Esc to cancel\x1b[0m", helpNav)
+		c.writeLinef("\x1b[2mEnter to select %s Esc to cancel\x1b[0m", helpNav)
 	}
 
 	if o.showHelp {
@@ -3360,7 +3360,7 @@ func (o *questionOverlay) renderOtherRow(c *qlineCollector, q *state.AskQuestion
 		o.otherRow = len(c.lines)
 		o.otherPrefixWidth = lipgloss.Width(prefix)
 		c.writeLine(prefix + before + otherCaretCell + after)
-		c.writeLinef("%s\x1b[2mEnter to confirm · Esc to discard · ←/→ to move cursor · click to place the cursor\x1b[0m", strings.Repeat(" ", idxWidth+4))
+		c.writeLinef("%s\x1b[2mEnter to confirm Esc to discard ←/→ to move cursor click to place the cursor\x1b[0m", strings.Repeat(" ", idxWidth+4))
 		return
 	}
 	o.otherRow = -1
@@ -3485,7 +3485,7 @@ func (o *questionOverlay) renderSubmitView() {
 	}
 
 	c.writeLine("")
-	c.writeLine("\x1b[2mEnter to confirm · ↑/↓ to choose · Esc to cancel\x1b[0m")
+	c.writeLine("\x1b[2mEnter to confirm ↑/↓ to choose Esc to cancel\x1b[0m")
 
 	o.finishCollector(c)
 }
@@ -3740,7 +3740,7 @@ func (o *heldPeerOverlay) lines(width int) []string {
 		write("\x1b[2m", cause)
 	}
 	lines = append(lines, o.answersLine())
-	write("\x1b[2m", "←/→ to choose · enter to answer · esc to leave it held")
+	write("\x1b[2m", "←/→ to choose enter to answer esc to leave it held")
 	return lines
 }
 
@@ -5150,9 +5150,9 @@ func selectFooterHint(multi bool, esc string) string {
 		esc = "Esc to cancel"
 	}
 	if multi {
-		return "↑/↓ to navigate · Space to select · Enter to confirm · " + esc
+		return "↑/↓ to navigate Space to select Enter to confirm " + esc
 	}
-	return "↑/↓ to navigate · Enter to confirm · " + esc
+	return "↑/↓ to navigate Enter to confirm " + esc
 }
 
 // showPanel paints a selector's panel: pinned in the overlay area inside the
@@ -5341,10 +5341,10 @@ func memorySettingsPanel(cursor int, enabled, confirming bool) slashPanel {
 	if confirming {
 		rows = []string{"Reset this project's memories", "Reset everything (every project + global)", "Go back"}
 		b.title("Reset memories")
-		b.hint("↑/↓ to navigate · Enter to confirm · Esc to go back")
+		b.hint("↑/↓ to navigate Enter to confirm Esc to go back")
 	} else {
 		b.title("Memories")
-		b.hint("↑/↓ to navigate · Space to toggle · Enter to save · Esc to cancel")
+		b.hint("↑/↓ to navigate Space to toggle Enter to save Esc to cancel")
 	}
 	for i, row := range rows {
 		box := ""
@@ -5524,9 +5524,9 @@ func infoPanel(label string, body string, action string) slashPanel {
 		b.body = append(b.body, panelReportLine(row))
 	}
 	if action != "" {
-		b.hint("Enter to " + action + " · Esc to cancel · ↑/↓ PgUp/PgDn to scroll")
+		b.hint("Enter to " + action + " Esc to cancel ↑/↓ PgUp/PgDn to scroll")
 	} else {
-		b.hint("↑/↓ PgUp/PgDn to scroll · Enter or Esc to close")
+		b.hint("↑/↓ PgUp/PgDn to scroll Enter or Esc to close")
 	}
 	return b.panel()
 }
@@ -5754,7 +5754,7 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 func inputPanel(title string, value []rune, cursor int, secret bool, esc string) slashPanel {
 	b := newPanelBuilder()
 	pickerHead(b, title)
-	b.hint("Enter to confirm · " + esc)
+	b.hint("Enter to confirm " + esc)
 	p := b.panel()
 	if secret {
 		value = maskSecret(value)
@@ -5786,9 +5786,9 @@ func (s *rawSelector) Confirm(label string, defaultValue bool) (bool, bool, erro
 		return false, false, err
 	}
 	defer release()
-	keys := "Y to confirm · N or Enter to decline · "
+	keys := "Y to confirm N or Enter to decline "
 	if defaultValue {
-		keys = "Y or Enter to confirm · N to decline · "
+		keys = "Y or Enter to confirm N to decline "
 	}
 	b := newPanelBuilder()
 	pickerHead(b, label)
@@ -5857,7 +5857,7 @@ func (s *rawSelector) reviewWith(label string, facts []turn.StatusFact, actions 
 		for i, action := range actions {
 			b.selectable(i == cursor, "", action)
 		}
-		b.hint("↑/↓ to navigate · Enter to confirm · " + escHint)
+		b.hint("↑/↓ to navigate Enter to confirm " + escHint)
 		return b.panel()
 	}
 	s.showPanel(panel())

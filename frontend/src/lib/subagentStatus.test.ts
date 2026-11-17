@@ -47,11 +47,11 @@ describe('subagentStatus', () => {
 
   it('names a tab by type and task, or the type alone without a title', () => {
     expect(subagentTabLabel({ agentType: 'plan-reviewer', title: 'review plan 078' }))
-      .toBe('plan-reviewer · review plan 078')
+      .toBe('plan-reviewer review plan 078')
     expect(subagentTabLabel({ agentType: 'plan-reviewer' })).toBe('plan-reviewer')
     // A title of spaces is no title at all.
     expect(subagentTabLabel({ agentType: 'plan-reviewer', title: '  ' })).toBe('plan-reviewer')
     // A record older than the engine's naming rule still has a name to show.
-    expect(subagentTabLabel({ agentType: '', title: 'review plan 078' })).toBe('subagent · review plan 078')
+    expect(subagentTabLabel({ agentType: '', title: 'review plan 078' })).toBe('subagent review plan 078')
   })
 })

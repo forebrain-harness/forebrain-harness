@@ -8,7 +8,7 @@
       <div class="src" data-testid="models-source-card">
         <div class="src__head">
           <b>{{ t('models.sourceFrom') }}</b>
-          <span>{{ sourceRow.sourceName || sourceRow.source }}<template v-if="sourceRow.sourcePlan"> · {{ sourceRow.sourcePlan }}</template></span>
+          <span>{{ sourceRow.sourceName || sourceRow.source }}<template v-if="sourceRow.sourcePlan"> {{ sourceRow.sourcePlan }}</template></span>
           <BadgeComponent :variant="stateVariant" class="ml-auto" data-testid="models-source-state">{{ stateLabel }}</BadgeComponent>
         </div>
         <p>{{ sourceRow.loginBacked ? t('models.sourceLoginHint') : t('models.sourceKeyHint') }}</p>

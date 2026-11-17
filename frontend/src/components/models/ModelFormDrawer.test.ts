@@ -262,7 +262,7 @@ describe('ModelFormDrawer catalog provider', () => {
     // The matched entry and its window, in the terminal's compact spelling.
     const matched = wrapper.find('[data-testid="models-catalog-matched"]')
     expect(matched.exists()).toBe(true)
-    expect(matched.text()).toBe('官方数据：alibaba/qwen4-max-preview · 1M 窗口')
+    expect(matched.text()).toBe('官方数据：alibaba/qwen4-max-preview 1M 窗口')
     expect(wrapper.find('[data-testid="models-catalog-missing"]').exists()).toBe(false)
 
     await wrapper.find('[data-testid="models-save"]').trigger('click')

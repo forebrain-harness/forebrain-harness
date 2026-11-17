@@ -138,7 +138,7 @@ func FormatPermissionExplain(tool, input string, result safety.ExplainResult) st
 	}
 	b.WriteString("\nApproval mode: " + orDash(string(decision.Mode)))
 	if reason := strings.TrimSpace(decision.Reason); reason != "" {
-		b.WriteString("  ·  reason: " + reason)
+		b.WriteString("  reason: " + reason)
 	}
 	return strings.TrimSpace(b.String())
 }

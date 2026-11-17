@@ -12,7 +12,7 @@
     </div>
     <div class="mde-foot">
       <span>{{ languageLabel }}</span>
-      <span v-if="dirty" class="dirty">· {{ t('editor.modified') }}</span>
+      <span v-if="dirty" class="dirty">{{ t('editor.modified') }}</span>
       <span class="grow" />
       <div v-if="isMarkdown" class="mde-seg" role="group" :aria-label="t('editor.modeAria')">
         <button

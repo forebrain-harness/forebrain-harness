@@ -17,8 +17,8 @@
         <span v-if="rule.matched" class="forebrain-rule-mark" aria-hidden="true" />
         <span class="font-mono">{{ rule.toolName || '*' }}</span>
         <span v-if="rule.ruleContent" class="font-mono">{{ rule.ruleContent }}</span>
-        <span>· {{ permissionBehaviorLabel(rule.behavior) }}</span>
-        <span>· {{ permissionSourceLabel(rule.source) }}</span>
+        <span>{{ permissionBehaviorLabel(rule.behavior) }}</span>
+        <span>{{ permissionSourceLabel(rule.source) }}</span>
       </li>
     </ul>
   </div>

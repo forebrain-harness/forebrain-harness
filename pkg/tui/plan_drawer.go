@@ -132,7 +132,7 @@ func (l planDrawerLayout) planDrawerHint() string {
 	}
 	switch {
 	case l.above > 0 && l.below > 0:
-		return strconv.Itoa(l.above) + " above · " + strconv.Itoa(l.below) + " below"
+		return strconv.Itoa(l.above) + " above " + strconv.Itoa(l.below) + " below"
 	case l.above > 0:
 		return strconv.Itoa(l.above) + " above"
 	case l.below > 0:

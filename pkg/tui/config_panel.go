@@ -275,14 +275,14 @@ func (p *configPanel) sectionItems() ([]SelectItem, []string) {
 }
 
 func (p *configPanel) sectionDescription(schema configSectionSchema) string {
-	desc := schema.Title + " · " + schema.Summary
+	desc := schema.Title + " " + schema.Summary
 	switch {
 	case schema.YAMLOnly:
-		return "[YAML] " + desc + " · read-only"
+		return "[YAML] " + desc + " read-only"
 	case len(p.raw[schema.Name]) > 0:
-		return desc + " · set"
+		return desc + " set"
 	default:
-		return desc + " · default"
+		return desc + " default"
 	}
 }
 
@@ -378,12 +378,12 @@ func configFieldListed(field configField, claudeCode bool) bool {
 // sectionPrompt is the section page's heading: what the section is, what it
 // holds now, and the last outcome — a save's sentence or a refusal's text.
 func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice string) string {
-	head := schema.Name + " · " + schema.Title + "\n" + schema.Summary
+	head := schema.Name + " " + schema.Title + "\n" + schema.Summary
 	switch {
 	case len(p.raw[schema.Name]) == 0:
-		head += " · now: default (the database holds no record for this section)"
+		head += " now: default (the database holds no record for this section)"
 	default:
-		head += " · now: set"
+		head += " now: set"
 	}
 	if len(schema.Fields) == 0 {
 		head += "\nThis section has no setting editable from the terminal."
@@ -403,7 +403,7 @@ func (p *configPanel) showFileSection(schema configSectionSchema) {
 	}
 	content := body + "\n\n" + configFileOnlyNote
 	if overlay, ok := p.sel.(InfoOverlaySelector); ok {
-		if err := overlay.ShowInfo(schema.Name+" · "+schema.Title, content); err == nil {
+		if err := overlay.ShowInfo(schema.Name+" "+schema.Title, content); err == nil {
 			return
 		}
 	}
@@ -648,7 +648,7 @@ func configFieldDescription(doc any, field configField) string {
 	if strings.TrimSpace(field.Hint) == "" {
 		return state
 	}
-	return state + " · " + field.Hint
+	return state + " " + field.Hint
 }
 
 // configRowAdd and configRowUp own the row page's two action rows; a row's
@@ -757,7 +757,7 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 		{Label: configRowDropLabel, Description: "Removes it from this level; applies after you save"},
 		{Label: configRowBackLabel, Description: "Back to the row list"},
 	}
-	idx, ok, err := p.sel.SelectRich(field.Label+" · "+configRowLabel(key, 0, false), items, 0)
+	idx, ok, err := p.sel.SelectRich(field.Label+" "+configRowLabel(key, 0, false), items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -800,7 +800,7 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 	list := configContainerIsList(field, container)
 	key := ""
 	if !list {
-		name, ok, err := p.sel.Input(field.Label+" · key of the new row", "")
+		name, ok, err := p.sel.Input(field.Label+" key of the new row", "")
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -877,13 +877,13 @@ func (p *configPanel) chooseNewValue(label string, cur any) (any, bool, bool, er
 	}
 	switch idx {
 	case 0:
-		text, entered, err := p.sel.Input(label+" · value", configScalarText(cur))
+		text, entered, err := p.sel.Input(label+" value", configScalarText(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}
 		return text, false, true, nil
 	case 1:
-		text, entered, err := p.sel.Input(label+" · integer", configScalarInput(cur))
+		text, entered, err := p.sel.Input(label+" integer", configScalarInput(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}

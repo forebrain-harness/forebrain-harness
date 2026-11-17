@@ -34,7 +34,7 @@ describe('ArtifactCard', () => {
     const wrapper = mount(ArtifactCard, { props: { artifact: artifactOf() } })
 
     expect(wrapper.get('.m b').text()).toBe('Q3 经营分析报告.docx')
-    expect(wrapper.get('.m span').text()).toBe('文档 · 248.0 KB')
+    expect(wrapper.get('.m span').text()).toBe('文档 248.0 KB')
     // The glyph is the kind's own: a document, not a generic file.
     expect(wrapper.find('.art-file-icon svg').exists()).toBe(true)
   })
@@ -55,7 +55,7 @@ describe('ArtifactCard', () => {
     // psd / cad and the rest of the download-only kinds carry no preview.
     const downloadOnly = mount(ArtifactCard, { props: { artifact: artifactOf({ preview: '', kind: 'design' }) } })
     expect(downloadOnly.find('[data-testid="artifact-preview"]').exists()).toBe(false)
-    expect(downloadOnly.get('.m span').text()).toBe('设计稿 · 248.0 KB')
+    expect(downloadOnly.get('.m span').text()).toBe('设计稿 248.0 KB')
   })
 
   it('never previews a file whose bytes are gone', () => {

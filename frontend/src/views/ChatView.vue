@@ -2323,7 +2323,7 @@ function openPlanTab(plan: SessionPlan) {
     const { done, total } = planProgress(plan.markdown)
     planTabs.value = [...planTabs.value, {
       id,
-      label: `${t('chat.benchPlan')} · ${planTitle(plan.markdown) || plan.name}`,
+      label: `${t('chat.benchPlan')} ${planTitle(plan.markdown) || plan.name}`,
       path: plan.path,
       at: formatClock(plan.updatedAt),
       done,

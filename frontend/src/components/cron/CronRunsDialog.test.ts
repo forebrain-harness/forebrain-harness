@@ -57,7 +57,7 @@ describe('CronRunsDialog', () => {
       run({ id: 2, status: 'failed', startedAt: 1_700_000_600 }),
     ])
 
-    expect(wrapper.find('.forebrain-modal-title').text()).toBe('执行记录 · Nightly')
+    expect(wrapper.find('.forebrain-modal-title').text()).toBe('执行记录 Nightly')
 
     const headers = wrapper.findAll('thead th').map((th) => th.text())
     expect(headers).toEqual(['状态', '开始时间', '触发', '投递至', '操作'])

@@ -18,7 +18,7 @@ function stepOf(overrides: Partial<SubagentToolStep> = {}): SubagentToolStep {
   return {
     stepId: 'call-1',
     toolName: 'read_file',
-    summary: 'Read shot.png · image 1.4 MB',
+    summary: 'Read shot.png image 1.4 MB',
     status: 'completed',
     ...overrides,
   }
@@ -358,9 +358,9 @@ describe('ToolCallCard', () => {
   // call says "Ran"; every other tool names what it did.
   it('heads the card with the engine header and draws the state as an icon', () => {
     const wrapper = mount(ToolCallCard, {
-      props: { onLine: false, step: stepOf({ header: 'Read plans/100.md lines 1-96 · <0.1s', summary: 'ran read /abs/plans/100.md · lines 1-96' }) },
+      props: { onLine: false, step: stepOf({ header: 'Read plans/100.md lines 1-96 <0.1s', summary: 'ran read /abs/plans/100.md lines 1-96' }) },
     })
-    expect(wrapper.get('.ttl .solo').text()).toBe('Read plans/100.md lines 1-96 · <0.1s')
+    expect(wrapper.get('.ttl .solo').text()).toBe('Read plans/100.md lines 1-96 <0.1s')
     expect(wrapper.text()).not.toContain('ran read')
     // The state is an icon with its word as the label, not a word in the header.
     const state = wrapper.get('.tool-status')
@@ -598,14 +598,14 @@ describe('ToolCallCard gates', () => {
           status: 'denied',
           // The gateway's header parts for a refused ask (pkg/tool/header_parts.go).
           headerParts: { action: 'User declined to answer questions' },
-          output: '· 最多等待多久？ (60 秒 / 15 秒)',
+          output: '最多等待多久？ (60 秒 / 15 秒)',
           // The engine's clarify instruction for the model: never on the card.
           denyFeedback: 'The user wants to clarify these questions.',
         }),
       },
     })
     expect(wrapper.text()).toContain('用户拒绝回答提问')
-    expect(wrapper.text()).toContain('· 最多等待多久？ (60 秒 / 15 秒)')
+    expect(wrapper.text()).toContain('最多等待多久？ (60 秒 / 15 秒)')
     expect(wrapper.text()).not.toContain('The user wants to clarify')
     expect(wrapper.find('[data-testid="tool-refused"]').exists()).toBe(false)
     // The question replay is the card's whole body, so it is drawn open.
@@ -634,7 +634,7 @@ describe('ToolCallCard deliverables', () => {
   }
 
   /** The engine's own body for that card: one Markdown line per file. */
-  const displayBody = '- **Q3 经营分析报告** · document · 248.0 KB · `Q3 经营分析报告.docx`\n- **Q3 分渠道毛利** · spreadsheet · 79.0 KB · `Q3 分渠道毛利.xlsx`'
+  const displayBody = '- **Q3 经营分析报告** document 248.0 KB `Q3 经营分析报告.docx`\n- **Q3 分渠道毛利** spreadsheet 79.0 KB `Q3 分渠道毛利.xlsx`'
 
   it('draws a settled present_files card as its head alone', () => {
     const wrapper = mount(ToolCallCard, {
@@ -644,7 +644,7 @@ describe('ToolCallCard deliverables', () => {
         step: stepOf({
           toolName: 'present_files',
           summary: 'presented files',
-          header: 'Presented files · Q3 经营分析报告.docx',
+          header: 'Presented files Q3 经营分析报告.docx',
           headerParts: { action: '已交付文件', target: 'Q3 经营分析报告.docx' },
           output: displayBody,
           status: 'completed',

@@ -167,7 +167,7 @@ describe('McpServersTable', () => {
     expect(rowOf(wrapper, 'global:a').find('[data-testid="mcp-view-global:a"]').exists()).toBe(false)
 
     expect(wrapper.find('[data-testid="mcp-note"]').text()).toBe(
-      '对所有主代理生效，新会话起作用。同名条目被主代理或项目整条覆盖。~/.forebrain/forebrain.yaml · agents.defaults.mcp_servers；改动对新会话生效。',
+      '对所有主代理生效，新会话起作用。同名条目被主代理或项目整条覆盖。~/.forebrain/forebrain.yaml agents.defaults.mcp_servers；改动对新会话生效。',
     )
   })
 
@@ -211,7 +211,7 @@ describe('McpServersTable', () => {
     await rowOf(wrapper, 'global:a').find('[data-testid="mcp-view-global:a"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('[role="dialog"] b').text()).toBe('MCP 服务 · a')
+    expect(wrapper.find('[role="dialog"] b').text()).toBe('MCP 服务 a')
     expect(wrapper.find('[role="dialog"] [data-testid="mcp-save"]').exists()).toBe(false)
     expect(wrapper.find('[role="dialog"] [data-testid="mcp-edit-elsewhere"]').text()).toBe('在“设置 → MCP”修改')
   })
@@ -361,7 +361,7 @@ describe('McpServersTable', () => {
       row({ name: 'b', shadowedBy: 'agent', shadowedByName: 'main', running: false }),
     ])
 
-    expect(rowOf(wrapper, 'global:b').text()).toContain('未运行 · 被覆盖')
+    expect(rowOf(wrapper, 'global:b').text()).toContain('未运行 被覆盖')
     expect(rowOf(wrapper, 'global:b').text()).not.toContain('已连接')
   })
 

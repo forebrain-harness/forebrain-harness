@@ -284,7 +284,7 @@ func TestSkillInstallCardShowsTheOriginalError(t *testing.T) {
 func TestComposerStatusLineIsOneControlFreeRow(t *testing.T) {
 	r := &Renderer{}
 	const width = 60
-	out := r.renderComposerStatusLine("Tasks 0/5 · implement\tregistry\nfreeze · 177 tools", width)
+	out := r.renderComposerStatusLine("Tasks 0/5 implement\tregistry\nfreeze 177 tools", width)
 	if hasCursorMovingByte(out) {
 		t.Fatalf("status row carries a cursor-moving byte: %q", out)
 	}
@@ -883,7 +883,7 @@ func TestSubagentCardBodyIsFullBrightness(t *testing.T) {
 		Kind:    FrameFanout,
 		StepID:  "fanout-bright",
 		Final:   true,
-		Summary: "Ran 2 general-purpose tasks · 1 done, 1 failed",
+		Summary: "Ran 2 general-purpose tasks 1 done, 1 failed",
 		Content: "\x1b[32m✓\x1b[0m 任务16 migrate 导入\n  └ shell gofmt -l pkg cmd\n    … +30 tool uses\n" +
 			"\x1b[31m✗\x1b[0m 任务17 扩展目录\n  上游连接中断（EOF）\n",
 		FanoutLineAgents: []string{"subagent-8c5c", "subagent-8c5c", "subagent-8c5c", "subagent-37aa", "subagent-37aa"},
@@ -1186,10 +1186,10 @@ func TestPeerListCardDrawsAnAlignedRoster(t *testing.T) {
 		t.Fatalf("live and replayed cards differ:\nlive:\n%s\nreplayed:\n%s", strings.Join(live, "\n"), strings.Join(replayed, "\n"))
 	}
 	want := []string{
-		"  └ ✓ explore · da6b        finished  Extract plans 259-269 UI semantics",
-		"    ✓ explore · 7fe9        finished  Extract confirmed web prototype structure",
-		"    ○ forebrain-harness-c9  idle 45m  terminal · same tree",
-		"    ● proj-99               busy      Fix the login form · terminal · …/T/fb-proto-run/proj",
+		"  └ ✓ explore da6b          finished  Extract plans 259-269 UI semantics",
+		"    ✓ explore 7fe9          finished  Extract confirmed web prototype structure",
+		"    ○ forebrain-harness-c9  idle 45m  terminal same tree",
+		"    ● proj-99               busy      Fix the login form terminal …/T/fb-proto-run/proj",
 	}
 	var rows []string
 	for _, line := range live {
@@ -1215,7 +1215,7 @@ func TestPeerListCardFitsANarrowTerminal(t *testing.T) {
 	const width = 70
 	live, _ := peerListCardLines(t, peerListRosterAnswer, width)
 	joined := strings.Join(live, "\n")
-	for _, want := range []string{"Extract plans 259-269…", "terminal · same tree", "…/proj"} {
+	for _, want := range []string{"Extract plans 259-269…", "terminal same tree", "…/proj"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("narrow card missing %q:\n%s", want, joined)
 		}
@@ -1241,7 +1241,7 @@ func TestPeerListCardKeepsWhatTellsAgentsApart(t *testing.T) {
 	joined := strings.Join(live, "\n")
 	for _, want := range []string{
 		"○ forebrain-harness-b4",
-		"● forebrain-harn…Plan-263-executor  busy      Plan 263 executor · …/unionj-cloud/forebrain-harness",
+		"● forebrain-harn…Plan-263-executor  busy      Plan 263 executor …/unionj-cloud/forebrain-harness",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("roster missing %q:\n%s", want, joined)
@@ -1275,7 +1275,7 @@ func TestPeerListCardShowsTheRosterUnfolded(t *testing.T) {
 	full := renderBlockFull(b, 120, DiffThemeDark, 0)
 	lines, _ := foldBlock(b, full, 120, 0)
 	painted := stripANSI(strings.Join(lines, "\n"))
-	for _, want := range []string{"explore · da6b", "explore · 7fe9", "forebrain-harness-c9", "proj-99"} {
+	for _, want := range []string{"explore da6b", "explore 7fe9", "forebrain-harness-c9", "proj-99"} {
 		if !strings.Contains(painted, want) {
 			t.Fatalf("viewport card is missing %q:\n%s", want, painted)
 		}
@@ -1476,7 +1476,7 @@ func TestMigrationCardIsOneBlockFromPreviewToReport(t *testing.T) {
 	})
 	r.RenderFrame(Frame{
 		Kind: FrameMigration, StepID: migrationStepID,
-		Title: migrationTitleMigrating, Summary: "sessions 5/12 · s-fix.jsonl", Progress: 41,
+		Title: migrationTitleMigrating, Summary: "sessions 5/12 s-fix.jsonl", Progress: 41,
 	})
 	r.mu.Lock()
 	blocks := len(r.vm.blocks)
@@ -2081,7 +2081,7 @@ func TestMemorySearchCardBodyPathDoesNotWearTheHeaderAccent(t *testing.T) {
 		t.Fatalf("the card drew no body row under its header:\n%s", stripANSI(strings.Join(lines, "\n")))
 	}
 	header := strings.TrimRight(stripANSI(lines[bodyRow-1]), " ")
-	if !strings.HasSuffix(header, "· 0.7s") {
+	if !strings.HasSuffix(header, "0.7s") {
 		t.Fatalf("the header's last row must carry the elapsed time, not the body's: %q", header)
 	}
 	row := lines[bodyRow]

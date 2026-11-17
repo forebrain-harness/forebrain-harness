@@ -146,7 +146,7 @@ function facts(offer: SubscriptionOffer): string {
   const parts: string[] = []
   if (offer.contextWindow) parts.push(window(offer.contextWindow))
   if (offer.supportsImages) parts.push(t('models.capsImage'))
-  return parts.join(' · ')
+  return parts.join(' ')
 }
 
 /** A context window as the console writes it: 1M, 256K, or the number. */

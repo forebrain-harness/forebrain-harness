@@ -815,7 +815,7 @@ func replayWorkedFrame(line turn.RunWorkedLine, plan event.PlanProgress) Frame {
 		parts = append(parts, counters)
 	}
 	parts = append(parts, workedCompletionTime(line.FinishedAt.Local()))
-	return Frame{Kind: FrameStatus, Title: strings.Join(parts, " · "), RunID: line.RunID, Final: true}
+	return Frame{Kind: FrameStatus, Title: strings.Join(parts, " "), RunID: line.RunID, Final: true}
 }
 
 // replayCompactionMessage rebuilds a compaction's final card from the event
@@ -2257,7 +2257,7 @@ func replayToolSummary(toolName string, argsJSON string) string {
 }
 
 // replayToolStepSummary is the one line the live step hook put on a card at the
-// given phase ("running ls" when it was dispatched, "ran ls · 3 files" once it
+// given phase ("running ls" when it was dispatched, "ran ls 3 files" once it
 // answered).
 func replayToolStepSummary(toolName string, argsJSON string, kind string) string {
 	toolName = displayToolName(toolName)
@@ -2339,7 +2339,7 @@ func transcriptToolSummaryWithMeta(content string, meta tool.ToolMeta) string {
 			return status
 		default:
 			if invocation != "" {
-				return status + " · " + invocation
+				return status + " " + invocation
 			}
 			return status
 		}
@@ -2352,7 +2352,7 @@ func transcriptToolSummaryWithMeta(content string, meta tool.ToolMeta) string {
 			case "running":
 				return "running " + invocation
 			default:
-				return status + " · " + invocation
+				return status + " " + invocation
 			}
 		}
 		return status
@@ -2546,7 +2546,7 @@ func (c *commandController) handlePermissionsReport(sessionID string, args []str
 }
 
 // yoloPresetFixedNote is /permissions' whole answer in a --yolo process.
-const yoloPresetFixedNote = "Full Access · fixed by --yolo"
+const yoloPresetFixedNote = "Full Access fixed by --yolo"
 
 // handlePermissions opens the approval preset picker.
 //
@@ -2750,7 +2750,7 @@ func peerRowDescription(peer run.PeerEntry) string {
 	if peer.SameTree {
 		parts = append(parts, "same tree")
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // heldPeerRowDescription is why a held message waits, and the opening of what
@@ -2765,7 +2765,7 @@ func heldPeerRowDescription(held process.HeldPeerMessage) string {
 			parts = append(parts, preview)
 		}
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // migrateSession is the slice of ChatSession the /migrate flow drives: the
@@ -3022,9 +3022,9 @@ func (c *commandController) handleRewind(ctx context.Context, sessionID string) 
 	quoted := truncate(strings.TrimSpace(firstLine(res.AnchorText)), 60)
 	var summary string
 	if mode == turn.RewindModeCode {
-		summary = fmt.Sprintf("Rewound %d file(s) to before “%s” · /rewind to undo", len(res.Restored), quoted)
+		summary = fmt.Sprintf("Rewound %d file(s) to before “%s” /rewind to undo", len(res.Restored), quoted)
 	} else {
-		summary = fmt.Sprintf("Rewound to before “%s” · restored %d file(s) · /rewind to undo", quoted, len(res.Restored))
+		summary = fmt.Sprintf("Rewound to before “%s” restored %d file(s) /rewind to undo", quoted, len(res.Restored))
 	}
 	c.replaySession(sid, nil)
 	c.renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "rewind", Content: summary, Final: true})

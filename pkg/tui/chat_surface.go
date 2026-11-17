@@ -486,7 +486,7 @@ func (s *ChatSession) ListSessionsRecentPaged(ctx context.Context, limit, offset
 }
 
 // withExecutionStatuses appends how each batch execution among rows ended
-// (` · running` and the like), so /resume in a batch project reads as a task
+// (` running` and the like), so /resume in a batch project reads as a task
 // history rather than a list of identical titles. Everything else — an
 // ordinary conversation, a conversation in another kind of project — is left
 // exactly as the store returned it.
@@ -508,7 +508,7 @@ func (s *ChatSession) withExecutionStatuses(ctx context.Context, rows []state.Se
 	}
 	for i := range rows {
 		if status := strings.TrimSpace(statuses[rows[i].ID]); status != "" {
-			rows[i].Title = strings.TrimSpace(rows[i].Title) + " · " + status
+			rows[i].Title = strings.TrimSpace(rows[i].Title) + " " + status
 		}
 	}
 	return rows

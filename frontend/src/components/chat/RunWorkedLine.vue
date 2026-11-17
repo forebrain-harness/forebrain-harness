@@ -8,15 +8,12 @@
     <span class="h-px w-3 flex-none bg-[var(--forebrain-divider-strong)]" />
     <span class="whitespace-nowrap font-mono">{{ line.label }}</span>
     <template v-if="line.firstToken">
-      <span class="worked-dot" aria-hidden="true">·</span>
       <span class="whitespace-nowrap font-mono">{{ line.firstToken }}</span>
     </template>
     <template v-if="line.plan">
-      <span class="worked-dot" aria-hidden="true">·</span>
       <PlanProgressSegments class="font-mono" :plan="line.plan" />
     </template>
     <template v-if="line.time">
-      <span class="worked-dot" aria-hidden="true">·</span>
       <span class="whitespace-nowrap font-mono">{{ line.time }}</span>
     </template>
     <span class="h-px flex-1 bg-[var(--forebrain-divider-strong)]" />
@@ -50,10 +47,3 @@ const line = computed<WorkedLine>(() => {
   return { ...source, plan: { done: source.plan.done, total: source.plan.total } }
 })
 </script>
-
-<style scoped>
-.worked-dot {
-  flex: none;
-  color: var(--forebrain-muted-text);
-}
-</style>

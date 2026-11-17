@@ -133,7 +133,7 @@ func (p *projectServersPanelState) panel() slashPanel {
 	}
 	b.blank()
 	b.selectable(p.cursor == len(p.items), checkLead(p.always), "Always allow this project's servers")
-	b.hint("↑/↓ to navigate · Space to select · Enter to confirm · Esc to decline all")
+	b.hint("↑/↓ to navigate Space to select Enter to confirm Esc to decline all")
 	return b.panel()
 }
 

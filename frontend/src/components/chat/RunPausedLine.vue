@@ -16,7 +16,7 @@
  * Where the user interrupted a subagent from its tab: the step it was on
  * stopped, and it waits for their next message. It is ruled like the worked
  * line that closes a run (RunWorkedLine), because both mark where a run
- * stopped — the terminal prints this one as "Interrupted · waiting for your
+ * stopped — the terminal prints this one as "Interrupted waiting for your
  * message".
  */
 import { CirclePause } from 'lucide-vue-next'

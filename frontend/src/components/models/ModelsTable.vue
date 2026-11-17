@@ -137,7 +137,7 @@ function providerLine(row: LlmModelRow): string {
     return `${name}${plan}`
   })()
   if (!row.subagentAllowed) return line
-  return `${line} · ${t('models.subagentAllowedMark')}`
+  return `${line} ${t('models.subagentAllowedMark')}`
 }
 
 /** The path a row's requests really take. A row that stores none is the engine's

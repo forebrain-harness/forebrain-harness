@@ -3515,7 +3515,7 @@ func peerListCardRows(peers []tool.ReadablePeer) []peerListCardRow {
 		row.task = tool.DisplayLine(peer.Task)
 		row.name = peerRowDisplay(peer)
 		if sameLabel[row.name] > 1 && peer.Short != "" {
-			row.name += " · " + peer.Short
+			row.name += " " + peer.Short
 		}
 		if !peer.Own {
 			row.kind = peer.Kind
@@ -3579,7 +3579,7 @@ func fitPeerListDetail(row peerListCardRow, width int) string {
 	if width < peerListTaskMinWidth {
 		return ""
 	}
-	const sep = " · "
+	const sep = " "
 	sepW := runewidth.StringWidth(sep)
 	fits := func(text string) bool { return runewidth.StringWidth(text) <= width }
 	if full := joinNonEmpty(sep, row.task, row.kind, row.place); fits(full) {
@@ -4261,7 +4261,7 @@ func (r *Renderer) SetPeerCount(n int) {
 // batchReadOnlyFooterLabel is the footer's segment in a batch project: nothing
 // typed here runs, so the footer names what the terminal is instead of what
 // the next turn will be.
-const batchReadOnlyFooterLabel = "batch · read-only"
+const batchReadOnlyFooterLabel = "batch read-only"
 
 // SetBatchReadOnly says whether the conversation on screen is a batch
 // execution. The footer answers with the read-only segment for as long as it
@@ -4871,7 +4871,7 @@ func formatComposerPendingInputPreview(p ComposerPendingInputPreview, termWidth 
 	return lines
 }
 
-const composerQueueShortcutSeparator = " · "
+const composerQueueShortcutSeparator = " "
 
 // peerQueuedLine is a queued message as the preview rows show it: a peer
 // message waiting its turn is the sender's words, never the envelope the model
@@ -5418,7 +5418,7 @@ func (r *Renderer) renderFanout(f Frame) {
 	if summary != "" {
 		if f.Final {
 			if ds := formatDuration(f.Duration); ds != "" {
-				summary += " · " + ds
+				summary += " " + ds
 			}
 		}
 		headerLine := wrapToolDisplayLineWidth(fanoutHeaderLine(f, summary, r.spinnerPhase, r.diffTheme), "   ", r.layoutTermWidth())
@@ -5554,10 +5554,10 @@ func fanoutClockSuffix(f Frame, contentLine int) string {
 		return ""
 	}
 	if clock.End.IsZero() {
-		return " · " + formatWorkingElapsed(fanoutClockNow().Sub(clock.Start))
+		return " " + formatWorkingElapsed(fanoutClockNow().Sub(clock.Start))
 	}
 	if ds := formatDuration(clock.End.Sub(clock.Start)); ds != "" {
-		return " · " + ds
+		return " " + ds
 	}
 	return ""
 }
@@ -5671,8 +5671,8 @@ func limitVisualLines(text string, maxLines int) string {
 // differ by row kind: the primary row can still move focus (so it advertises
 // both arrows), while a focused subagent row advertises view/stop instead.
 const (
-	agentRosterPrimaryHint  = "↑/↓ to select · Enter to view"
-	agentRosterSubagentHint = "Enter to view · x to stop"
+	agentRosterPrimaryHint  = "↑/↓ to select Enter to view"
+	agentRosterSubagentHint = "Enter to view x to stop"
 )
 
 // agentRosterRowLabel is the readable name for a roster row: the subagent's
@@ -5847,7 +5847,7 @@ func formatAgentRosterLines(snapshot AgentRosterSnapshot, focused bool, marked i
 		name := agentRosterRowLabel(row)
 		if duplicated[name] > 1 {
 			if suffix := agentRosterRowSuffix(row); suffix != "" {
-				name += " · " + suffix
+				name += " " + suffix
 			}
 		}
 		line := fmt.Sprintf("%s %s", glyph, name)
@@ -5881,7 +5881,7 @@ func agentRosterHasRunningSubagent(snapshot AgentRosterSnapshot) bool {
 // usable: there is a running subagent to show, and the composer on screen takes
 // input. A subagent's view whose execution has ended has a read-only composer —
 // its reader drops every byte but Esc (see composerReadOnly) — so a roster
-// painted there advertised "Enter to view · x to stop" over rows that could
+// painted there advertised "Enter to view x to stop" over rows that could
 // never answer (owner report, 2026-10-30).
 func agentRosterOperable(snapshot AgentRosterSnapshot, composerTakesInput bool) bool {
 	return composerTakesInput && agentRosterHasRunningSubagent(snapshot)
@@ -5926,7 +5926,7 @@ func compactHeaderLine(f Frame, spinnerPhase int) string {
 	markerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true)
 	line := markerStyle.Render(marker) + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(compactTitleColor(f))).Bold(true).Render(title)
 	if detail := strings.TrimSpace(f.Summary); detail != "" {
-		line += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" · " + detail)
+		line += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" " + detail)
 	}
 	return line
 }
@@ -6037,7 +6037,7 @@ func (r *Renderer) renderMigration(f Frame) {
 }
 
 // migrationHeaderLine is a migration card's first line: a marker that spins
-// while the import runs, the state in bold, and the stage · count · detail
+// while the import runs, the state in bold, and the stage, count and detail
 // summary after it — the compact header's structure with the migration's own
 // state names.
 func migrationHeaderLine(f Frame, spinnerPhase int) string {
@@ -6049,7 +6049,7 @@ func migrationHeaderLine(f Frame, spinnerPhase int) string {
 	line := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(marker) +
 		" " + lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(title)
 	if detail := strings.TrimSpace(f.Summary); detail != "" {
-		line += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" · " + detail)
+		line += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" " + detail)
 	}
 	return line
 }
@@ -6108,7 +6108,7 @@ func (r *Renderer) renderGoal(f Frame) {
 	marker, color := goalMarker(f.Title)
 	header := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(marker + " " + strings.TrimSpace(f.Title))
 	if summary := strings.TrimSpace(f.Summary); summary != "" {
-		header += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" · " + summary)
+		header += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" " + summary)
 	}
 	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLineWidth(header, "  ", r.layoutTermWidth()))
 	if content := strings.TrimSpace(f.Content); content != "" {
@@ -6228,7 +6228,7 @@ func (r *Renderer) renderSkillInstall(f Frame) {
 		head = "installing"
 	}
 	if source != "" {
-		head += " · " + source
+		head += " " + source
 	}
 	line := headerStyle.Render(markerGlyph) + " " + headerStyle.Render(head)
 	segments := []string{}
@@ -6239,7 +6239,7 @@ func (r *Renderer) renderSkillInstall(f Frame) {
 		segments = append(segments, elapsed)
 	}
 	if len(segments) > 0 {
-		line += detailStyle.Render(" · " + strings.Join(segments, " · "))
+		line += detailStyle.Render(" " + strings.Join(segments, " "))
 	}
 
 	if !f.Final {
@@ -7907,7 +7907,7 @@ func panelScrollNote(above, below int) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return panelIndent + panelHintStyle.Render(strings.Join(parts, " · "))
+	return panelIndent + panelHintStyle.Render(strings.Join(parts, " "))
 }
 
 // drawUIPanel paints the /status or /mcp panel into the overlay area.
@@ -8101,7 +8101,7 @@ func buildStatusPanel(b *panelBuilder, panel *uiPanel) {
 	} else {
 		b.text(panelIndent, "No usage recorded yet — it appears after the first turn", nil)
 	}
-	b.hint("Esc to close · Tab to switch · PgUp/PgDn to scroll")
+	b.hint("Esc to close Tab to switch PgUp/PgDn to scroll")
 }
 
 // panelMCPCounts is the /status MCP row with each count in its state's colour.
@@ -8128,7 +8128,7 @@ func panelMCPCounts(l turn.MCPCountLine) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return strings.Join(parts, ", ") + " · /mcp"
+	return strings.Join(parts, ", ") + " /mcp"
 }
 
 func buildMCPPanel(b *panelBuilder, panel *uiPanel, spinner string) {
@@ -8195,7 +8195,7 @@ func buildMCPList(b *panelBuilder, panel *uiPanel, spinner string) {
 	for _, group := range inv.Groups {
 		b.group(groupTitle(group))
 		for _, e := range group.Entries {
-			b.selectable(row == panel.cursor, "", e.Name+" · "+mcpStatusText(e, spinner))
+			b.selectable(row == panel.cursor, "", e.Name+" "+mcpStatusText(e, spinner))
 			row++
 		}
 	}
@@ -8230,7 +8230,7 @@ func buildMCPList(b *panelBuilder, panel *uiPanel, spinner string) {
 		b.hint("Esc to close")
 		return
 	}
-	b.hint("↑/↓ to navigate · Enter to open · Esc to close")
+	b.hint("↑/↓ to navigate Enter to open Esc to close")
 }
 
 func buildMCPDetail(b *panelBuilder, panel *uiPanel, spinner string) {
@@ -8248,7 +8248,7 @@ func buildMCPDetail(b *panelBuilder, panel *uiPanel, spinner string) {
 		}
 	}
 	add("Status", turn.MCPServerStatusLabel(*entry))
-	add("Scope", strings.TrimSuffix(entry.Scope+" · "+entry.Source, " · "))
+	add("Scope", strings.TrimSuffix(entry.Scope+" "+entry.Source, " "))
 	add("Transport", entry.Transport)
 	add("Command", entry.Command)
 	add("URL", entry.URL)
@@ -8288,7 +8288,7 @@ func buildMCPDetail(b *panelBuilder, panel *uiPanel, spinner string) {
 		for i, row := range rows {
 			b.selectable(i == panel.cursor, "", row.label)
 		}
-		b.hint("↑/↓ to navigate · Enter to confirm · Esc to go back")
+		b.hint("↑/↓ to navigate Enter to confirm Esc to go back")
 		return
 	}
 	b.hint("Esc to go back")
@@ -8296,7 +8296,7 @@ func buildMCPDetail(b *panelBuilder, panel *uiPanel, spinner string) {
 
 func buildMCPTools(b *panelBuilder, panel *uiPanel) {
 	entry := panel.inv.Entry(panel.server)
-	b.title(panel.server + " · tools")
+	b.title(panel.server + " tools")
 	if entry == nil || len(entry.Tools) == 0 {
 		b.text(panelIndent, "No tools from this server in this session", nil)
 		b.hint("Esc to go back")
@@ -8306,11 +8306,11 @@ func buildMCPTools(b *panelBuilder, panel *uiPanel) {
 	for i, t := range entry.Tools {
 		b.selectable(i == panel.cursor, "", t.Name)
 	}
-	b.hint("↑/↓ to navigate · Enter for details · Esc to go back")
+	b.hint("↑/↓ to navigate Enter for details Esc to go back")
 }
 
 func buildMCPTool(b *panelBuilder, panel *uiPanel) {
-	b.title(panel.server + " · " + panel.tool)
+	b.title(panel.server + " " + panel.tool)
 	var tool *turn.MCPToolSummary
 	if entry := panel.inv.Entry(panel.server); entry != nil {
 		for i := range entry.Tools {
@@ -8337,7 +8337,7 @@ func buildMCPTool(b *panelBuilder, panel *uiPanel) {
 		b.text(panelIndent, "Parameters", &panelAccentStyle)
 		renderPanelParams(b, tool.Params, 0)
 	}
-	b.hint("PgUp/PgDn to scroll · Esc to go back")
+	b.hint("PgUp/PgDn to scroll Esc to go back")
 }
 
 // renderPanelParams draws the parameter table: one row per parameter — name,
@@ -8361,7 +8361,7 @@ func renderPanelParams(b *panelBuilder, params []turn.MCPToolParam, depth int) {
 		}
 		row := panelAccentStyle.Render(p.Name)
 		if len(facts) > 0 {
-			row += "  " + strings.Join(facts, " · ")
+			row += "  " + strings.Join(facts, " ")
 		}
 		b.text(indent, row, nil)
 		if p.Description != "" {
@@ -8376,7 +8376,7 @@ func renderPanelParams(b *panelBuilder, params []turn.MCPToolParam, depth int) {
 }
 
 func buildMCPResources(b *panelBuilder, panel *uiPanel) {
-	b.title(panel.server + " · resources")
+	b.title(panel.server + " resources")
 	res := panel.resources[panel.server]
 	switch {
 	case res == nil || res.loading:
@@ -8394,7 +8394,7 @@ func buildMCPResources(b *panelBuilder, panel *uiPanel) {
 			}
 		}
 	}
-	b.hint("PgUp/PgDn to scroll · Esc to go back")
+	b.hint("PgUp/PgDn to scroll Esc to go back")
 }
 
 // turnCountNoun renders "1 server" / "3 servers".
@@ -8446,7 +8446,7 @@ func lspProjectSubtitle(snap event.LSPSnapshot) string {
 	case snap.ProjectRoot == "":
 		return "No project: language servers start only in trusted projects"
 	case !snap.Trusted:
-		return snap.ProjectRoot + " · not trusted, servers do not start here"
+		return snap.ProjectRoot + " not trusted, servers do not start here"
 	case !snap.FeatureEnabled:
 		return "Turned off by features.lsp"
 	default:
@@ -8458,7 +8458,7 @@ func lspProjectSubtitle(snap event.LSPSnapshot) string {
 		}
 		// "enabled" is an adjective here (spec: "{n} enabled"), so unlike
 		// turnCountNoun's real nouns it never takes a plural s.
-		return snap.ProjectRoot + " · " + strconv.Itoa(enabled) + " enabled"
+		return snap.ProjectRoot + " " + strconv.Itoa(enabled) + " enabled"
 	}
 }
 
@@ -8477,7 +8477,7 @@ func buildLSPList(b *panelBuilder, panel *uiPanel, spinner string) {
 				b.group(heading)
 				first = false
 			}
-			b.selectable(row == panel.cursor, "", s.ID+" · "+lspStateText(s, spinner))
+			b.selectable(row == panel.cursor, "", s.ID+" "+lspStateText(s, spinner))
 			row++
 		}
 	}
@@ -8507,7 +8507,7 @@ func buildLSPList(b *panelBuilder, panel *uiPanel, spinner string) {
 		b.hint("Esc to close")
 		return
 	}
-	b.hint("↑/↓ to navigate · Enter to open · Esc to close")
+	b.hint("↑/↓ to navigate Enter to open Esc to close")
 }
 
 func buildLSPDetail(b *panelBuilder, panel *uiPanel, spinner string) {
@@ -8529,7 +8529,7 @@ func buildLSPDetail(b *panelBuilder, panel *uiPanel, spinner string) {
 	add("Scope", s.Scope)
 	add("Command", s.Command)
 	if s.BinaryPath != "" {
-		add("Binary", strings.TrimSuffix(s.BinaryPath+" · "+s.Version, " · "))
+		add("Binary", strings.TrimSuffix(s.BinaryPath+" "+s.Version, " "))
 	}
 	add("Roots", strings.Join(s.Roots, ", "))
 	if len(s.PIDs) > 0 {
@@ -8577,7 +8577,7 @@ func buildLSPDetail(b *panelBuilder, panel *uiPanel, spinner string) {
 		for i, row := range rows {
 			b.selectable(i == panel.cursor, "", row.label)
 		}
-		b.hint("↑/↓ to navigate · Enter to run · Esc to go back")
+		b.hint("↑/↓ to navigate Enter to run Esc to go back")
 		return
 	}
 	b.hint("Esc to go back")

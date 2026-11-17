@@ -81,7 +81,7 @@ describe('ShellCardBody', () => {
     const emitted = wrapper.emitted('open-doc')!
     const tab = emitted[emitted.length - 1]![0] as Record<string, unknown>
     expect(tab.kind).toBe('output')
-    expect(tab.label).toBe('输出 · go test ./pkg/...')
+    expect(tab.label).toBe('输出 go test ./pkg/...')
     expect(tab.command).toBe('go test ./pkg/...\ncd sub && go test')
     expect(tab.source).toEqual({ sessionId: 's-1', retrieveId: 9 })
 

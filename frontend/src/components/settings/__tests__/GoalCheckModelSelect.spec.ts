@@ -93,7 +93,7 @@ function settingsWith(values: Record<string, unknown>) {
   }
 }
 
-describe('GoalCheckModelSelect (设置 · 子代理 · /goal 检查模型)', () => {
+describe('GoalCheckModelSelect (设置 子代理 /goal 检查模型)', () => {
   beforeEach(() => {
     setLocale('zh')
     // The picker reads the one list every model picker reads.

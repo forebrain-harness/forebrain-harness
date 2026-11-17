@@ -3321,12 +3321,12 @@ func TestWorkingStatusFormatterAppendsLatestCounters(t *testing.T) {
 		return counters
 	}, nil)
 	got := formatter(20*time.Second, 2, "")
-	if got != "- Working (20s • esc to interrupt) · ☑1/3 · Writing tests" {
+	if got != "- Working (20s • esc to interrupt) ☑1/3 Writing tests" {
 		t.Fatalf("unexpected working status counters: %q", got)
 	}
 	counters = Counters{Tools: 3, InputTokens: 2000, OutputTokens: 1000, PlanDone: 2, PlanTotal: 3, PlanActive: "Reviewing the diff"}
 	got = formatter(21*time.Second, 3, "")
-	if got != "\\ Working (21s • esc to interrupt) · ☑2/3 · Reviewing the diff" {
+	if got != "\\ Working (21s • esc to interrupt) ☑2/3 Reviewing the diff" {
 		t.Fatalf("expected formatter to read latest counters each tick, got %q", got)
 	}
 }
@@ -3340,7 +3340,7 @@ func TestWorkingStatusFormatterAppendsFirstToken(t *testing.T) {
 		return Counters{PlanDone: 1, PlanTotal: 3, PlanActive: "Writing tests", FirstToken: 1200 * time.Millisecond}
 	}, nil)
 	got := formatter(20*time.Second, 0, "")
-	if got != "| Working (20s • esc to interrupt) · ☑1/3 · Writing tests · first token 1.2s" {
+	if got != "| Working (20s • esc to interrupt) ☑1/3 Writing tests first token 1.2s" {
 		t.Fatalf("working status with first token = %q", got)
 	}
 }
@@ -4696,7 +4696,7 @@ func TestHotkeyCycleDoesNothingUnderYOLOAndFooterDropsTheHint(t *testing.T) {
 	}
 
 	syncPlanModeIndicator(renderer, state)
-	if got := footer(); !strings.HasPrefix(got, fullAccessFixedFooterLabel+" · ") || strings.Contains(got, "shift+tab") {
+	if got := footer(); !strings.HasPrefix(got, fullAccessFixedFooterLabel+" ") || strings.Contains(got, "shift+tab") {
 		t.Fatalf("full access footer under --yolo = %q, want the segment without the hint", got)
 	}
 	for i := 0; i < 3; i++ {
@@ -4720,7 +4720,7 @@ func TestHotkeyCycleDoesNothingUnderYOLOAndFooterDropsTheHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	syncPlanModeIndicator(renderer, state)
-	if got := footer(); !strings.HasPrefix(got, planModeFixedFooterLabel+" · ") || strings.Contains(got, "shift+tab") {
+	if got := footer(); !strings.HasPrefix(got, planModeFixedFooterLabel+" ") || strings.Contains(got, "shift+tab") {
 		t.Fatalf("plan mode footer under --yolo = %q, want the segment without the hint", got)
 	}
 	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyCycleMode) {
@@ -4768,7 +4768,7 @@ func TestFormatWorkingCountersIncludesPlanProgress(t *testing.T) {
 		InputTokens:  1500,
 		OutputTokens: 300,
 	})
-	if got != "☑1/3 · Writing tests" {
+	if got != "☑1/3 Writing tests" {
 		t.Fatalf("working counters = %q, want plan progress and the active title only (agents, tools and tokens are no longer reported)", got)
 	}
 	if got := formatWorkingCounters(Counters{InputTokens: 1500, OutputTokens: 300, Tools: 2}); got != "" {
@@ -4783,7 +4783,7 @@ func TestWorkingStatusFormatterKeepsWorkingHeadlineAndShowsActiveTask(t *testing
 	counters := Counters{PlanDone: 1, PlanTotal: 3, PlanActive: "Writing tests", InputTokens: 1500, OutputTokens: 300}
 	formatter := workingStatusFormatter(func() Counters { return counters }, nil)
 	got := formatter(20*time.Second, 2, "")
-	if got != "- Working (20s • esc to interrupt) · ☑1/3 · Writing tests" {
+	if got != "- Working (20s • esc to interrupt) ☑1/3 Writing tests" {
 		t.Fatalf("working line = %q, want literal headline with checklist progress only", got)
 	}
 }
@@ -5433,7 +5433,7 @@ func goldenStatusPanel(t *testing.T, width, tab int) []string {
 		Model:       "deepseek-chat",
 		Endpoint:    "https://api.deepseek.com",
 		Permissions: turn.StatusPermissions{Preset: "Workspace", Matched: true, Rules: 3},
-		Sandbox:     "workspace-write · seatbelt",
+		Sandbox:     "workspace-write seatbelt",
 		MCP: turn.MCPInventorySource{
 			Servers: []appcfg.MCPServerConfig{{Name: "a"}, {Name: "b"}},
 			Runtime: &turn.MCPRuntimeView{Servers: []mcppkg.ServerRecord{
@@ -5492,7 +5492,7 @@ func TestStatusPanelGoldenWidths(t *testing.T) {
 		// A value longer than its column folds inside it: read the rows back
 		// with the folds and the alignment padding removed.
 		unfolded := strings.Join(strings.Fields(joined), "")
-		for _, want := range []string{"Status", "Usage", "Version:", "SessionID:", "d8f83e8d-c9ff-466d-9d60-3412e0d2d282", "Model:", "Permissions:", "1connected,1failed·/mcp", "deep/deeper"} {
+		for _, want := range []string{"Status", "Usage", "Version:", "SessionID:", "d8f83e8d-c9ff-466d-9d60-3412e0d2d282", "Model:", "Permissions:", "1connected,1failed/mcp", "deep/deeper"} {
 			if !strings.Contains(unfolded, want) {
 				t.Fatalf("width %d: panel missing %q:\n%s", width, want, joined)
 			}
@@ -5517,12 +5517,12 @@ func TestStatusPanelUsageTab(t *testing.T) {
 	lines, _ := panelTestLines(panel, 120, "⠋")
 	joined := strings.Join(strings.Fields(stripANSI(strings.Join(lines, "\n"))), " ")
 	for _, want := range []string{
-		"62% left · 48k of 128k",
+		"62% left 48k of 128k",
 		"Auto-compact at: 102k",
-		"Session: 1.9M input · 42k output · 38 requests",
-		"Cache hit rate: 94% · 1.79M read · 60k written · 51k uncached",
-		"Last turn: 48k input · 1.2k output · 91% cached",
-		"Work: plan set · 3 of 7 todos done",
+		"Session: 1.9M input 42k output 38 requests",
+		"Cache hit rate: 94% 1.79M read 60k written 51k uncached",
+		"Last turn: 48k input 1.2k output 91% cached",
+		"Work: plan set 3 of 7 todos done",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("usage tab missing %q:\n%s", want, joined)
@@ -5569,7 +5569,7 @@ func TestMCPPanelGoldenWidths(t *testing.T) {
 		lines, focus := panelTestLines(panel, width, "⠋")
 		assertRowsFit(t, lines, width)
 		joined := stripANSI(strings.Join(lines, "\n"))
-		for _, want := range []string{"Manage MCP servers", "4 servers", "Global MCPs (/home/tester/.forebrain/forebrain.yaml)", "codegraph · ✓ connected · 1 tool", "broken · ✗ failed", "⠋ connecting…", "paused · ○ disabled", "Logs: /home/tester/.forebrain/logs"} {
+		for _, want := range []string{"Manage MCP servers", "4 servers", "Global MCPs (/home/tester/.forebrain/forebrain.yaml)", "codegraph ✓ connected 1 tool", "broken ✗ failed", "⠋ connecting…", "paused ○ disabled", "Logs: /home/tester/.forebrain/logs"} {
 			if !strings.Contains(strings.Join(strings.Fields(joined), " "), want) {
 				t.Fatalf("width %d: mcp panel missing %q:\n%s", width, want, joined)
 			}
@@ -5807,11 +5807,11 @@ func TestLSPPanelListLayout(t *testing.T) {
 		joined := stripANSI(strings.Join(lines, "\n"))
 		for _, want := range []string{
 			"Language servers",
-			"/Users/tester/proj · 1 enabled",
+			"/Users/tester/proj 1 enabled",
 			"Enabled",
-			"gopls · ✓ ready · 2 errors",
+			"gopls ✓ ready 2 errors",
 			"Available",
-			"pyright · – not installed",
+			"pyright – not installed",
 			"Servers run on this machine outside the sandbox, only in trusted projects.",
 			"Recommendations are off (dismissed 5 times).",
 			"Turn recommendations back on",
@@ -5858,9 +5858,9 @@ func TestLSPPanelDetailAndActions(t *testing.T) {
 	folded := strings.Join(strings.Fields(detail), " ")
 	for _, want := range []string{
 		"gopls language server",
-		"State: ✓ ready · 2 errors",
+		"State: ✓ ready 2 errors",
 		"Languages: Go",
-		"Binary: /usr/local/bin/gopls · v0.20.0",
+		"Binary: /usr/local/bin/gopls v0.20.0",
 		"Processes: 4242",
 		"Open files: 3",
 		"Log: /state/lsp/gopls-ab12cd34.log",
@@ -7574,10 +7574,10 @@ func TestAutoContinueNoticeInASubagentViewSaysEscOnly(t *testing.T) {
 
 	state.announceAutoContinue(renderer)
 
-	if got := statusLinesFor(renderer, ""); !strings.HasSuffix(got, "· esc or type to cancel") {
+	if got := statusLinesFor(renderer, ""); !strings.HasSuffix(got, "esc or type to cancel") {
 		t.Fatalf("conversation notice = %q, want typing to cancel it", got)
 	}
-	if got := statusLinesFor(renderer, "task-b"); !strings.HasSuffix(got, "· esc to cancel") || strings.Contains(got, "type to cancel") {
+	if got := statusLinesFor(renderer, "task-b"); !strings.HasSuffix(got, "esc to cancel") || strings.Contains(got, "type to cancel") {
 		t.Fatalf("subagent notice = %q, want Esc alone", got)
 	}
 }
@@ -8046,7 +8046,7 @@ func TestWorkingLineShowsRetryStatus(t *testing.T) {
 
 	// Attempt 2 of 10 names the failure generically.
 	got := formatterFor(TransportRetryStatus{Retry: 2, Total: 10, Deadline: time.Now().Add(8 * time.Second)})(20*time.Second, 0, "")
-	if !strings.Contains(got, "Network error · Retrying in 8s · attempt 2/10") {
+	if !strings.Contains(got, "Network error Retrying in 8s attempt 2/10") {
 		t.Fatalf("retry line = %q, want the generic reason with the countdown and progress", got)
 	}
 	if strings.Contains(got, "Working") || strings.Contains(got, "esc to interrupt") {
@@ -8060,7 +8060,7 @@ func TestWorkingLineShowsRetryStatus(t *testing.T) {
 		{Retry: 2, Total: 2, Deadline: time.Now().Add(8 * time.Second)},
 	} {
 		got = formatterFor(s)(20*time.Second, 0, "")
-		want := fmt.Sprintf("Network error · Retrying in 8s · attempt %d/%d", s.Retry, s.Total)
+		want := fmt.Sprintf("Network error Retrying in 8s attempt %d/%d", s.Retry, s.Total)
 		if !strings.Contains(got, want) {
 			t.Fatalf("retry line = %q, want %q", got, want)
 		}
@@ -8070,7 +8070,7 @@ func TestWorkingLineShowsRetryStatus(t *testing.T) {
 	// error, not a network one — on every attempt.
 	for _, retry := range []int{1, 3} {
 		got = formatterFor(TransportRetryStatus{Retry: retry, Total: 10, Deadline: time.Now().Add(8 * time.Second), Status: 503})(20*time.Second, 0, "")
-		if want := fmt.Sprintf("API error · Retrying in 8s · attempt %d/10", retry); !strings.Contains(got, want) {
+		if want := fmt.Sprintf("API error Retrying in 8s attempt %d/10", retry); !strings.Contains(got, want) {
 			t.Fatalf("503 retry line = %q, want %q", got, want)
 		}
 		if strings.Contains(got, "Network error") {
@@ -8118,7 +8118,7 @@ func TestSubagentWorkingLineShowsItsOwnRetry(t *testing.T) {
 
 	formatter := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
 	sub := formatter(time.Second, 0, "task-1")
-	if !strings.Contains(sub, "Retrying in 8s · attempt 1/10") {
+	if !strings.Contains(sub, "Retrying in 8s attempt 1/10") {
 		t.Fatalf("subagent working line = %q, want its own retry status", sub)
 	}
 	if strings.Contains(sub, "Working (") {

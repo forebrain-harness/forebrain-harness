@@ -107,8 +107,8 @@ func TestContextReportReadsLikeTheConversation(t *testing.T) {
 	}, "s")
 
 	for _, want := range []string{
-		"Context window\n  " + ContextGaugeBar(88) + " 88% left · 24k of 200k\n  Compacts automatically at 180k",
-		"Brought into the last turn\n  Files read recently · 1.2k tokens\n  Git status and changes · left out, over the 1.8k-token allowance",
+		"Context window\n  " + ContextGaugeBar(88) + " 88% left 24k of 200k\n  Compacts automatically at 180k",
+		"Brought into the last turn\n  Files read recently 1.2k tokens\n  Git status and changes left out, over the 1.8k-token allowance",
 		"Compactions\n  2 compactions in this conversation; the latest, at " + at.Local().Format("Jan 2 15:04") + ", was automatic and took it from 182k to 12k tokens.",
 		"Kept out of the window\n  2 tool results too large for the window were saved to files the model reads as needed.",
 	} {
@@ -130,7 +130,7 @@ func TestContextReportBeforeTheFirstTurn(t *testing.T) {
 		Compactions: compactionLogStub{},
 		Gauge:       StatusContext{PercentLeft: 100, WindowTokens: 1_000_000, AutoCompactAt: 900_000},
 	}, "s")
-	want := "Context window\n  Empty so far · 1M\n  Compacts automatically at 900k\n\n" +
+	want := "Context window\n  Empty so far 1M\n  Compacts automatically at 900k\n\n" +
 		"Brought into the last turn\n  Nothing yet: this is recorded when a turn starts.\n\n" +
 		"Compactions\n  None in this conversation yet."
 	if reply != want {

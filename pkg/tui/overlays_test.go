@@ -1616,7 +1616,7 @@ func TestRichPickerLaysRowsInTwoColumns(t *testing.T) {
 		"❯ Default    Asks before edits and commands outside the workspace.",
 		"  Read only  Never writes.",
 		"",
-		"  ↑/↓ to navigate · Enter to confirm · Esc to cancel",
+		"  ↑/↓ to navigate Enter to confirm Esc to cancel",
 	}, filterBarPlain(80, "⌕", "Type to filter")))
 	for _, line := range richPickerPanelLines(t, p, "Permissions\nWhat may run without asking", 80) {
 		if strings.Contains(stripANSI(line), " — ") {
@@ -1642,7 +1642,7 @@ func TestRichPickerAlignsDescriptionsAcrossGroups(t *testing.T) {
 		"  DeepSeek",
 		"  deepseek-chat  fast and cheap",
 		"",
-		"  ↑/↓ to navigate · Enter to confirm · Esc to cancel",
+		"  ↑/↓ to navigate Enter to confirm Esc to cancel",
 	}, filterBarPlain(80, "⌕", "Type to filter")))
 }
 
@@ -3965,7 +3965,7 @@ func TestExitPlanEffortPickerConfirmsWithThePickedLevel(t *testing.T) {
 		"❯ Low ⚙",
 		"  Off  none",
 		"  xHigh",
-		"Esc to go back · Enter to confirm",
+		"Esc to go back Enter to confirm",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("second screen missing %q:\n%s", want, joined)
@@ -4361,7 +4361,7 @@ func devicePage(body string) ConnectPanelPage {
 	return ConnectPanelPage{
 		Title: "Sign in with OpenCode",
 		Body:  body,
-		Hint:  "Enter when signed in · Esc to cancel",
+		Hint:  "Enter when signed in Esc to cancel",
 	}
 }
 
@@ -4391,7 +4391,7 @@ func TestConnectPanelShowsThePageAndLeavesTheTranscript(t *testing.T) {
 	result := box.start(ctx, page, done, nil)
 
 	text := paintedPanel(t, box.r, "QK7M-2PLX")
-	for _, want := range []string{"Sign in with OpenCode", "https://opencode.ai/auth", "Code: QK7M-2PLX", "Enter when signed in · Esc to cancel"} {
+	for _, want := range []string{"Sign in with OpenCode", "https://opencode.ai/auth", "Code: QK7M-2PLX", "Enter when signed in Esc to cancel"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("panel = %q, want it to carry %q", text, want)
 		}
@@ -4453,7 +4453,7 @@ func TestConnectPanelCopiesTheCodeWhileTheFlowRuns(t *testing.T) {
 	}
 	// A tick that changes nothing on an unchanged page must not disturb it, and
 	// a changed one must repaint — the countdown case.
-	body.Store(body.Load().(string) + "\n\nWaiting for you to confirm in the browser · expires in 9:41")
+	body.Store(body.Load().(string) + "\n\nWaiting for you to confirm in the browser expires in 9:41")
 	paintedPanel(t, box.r, "expires in 9:41")
 	if text := paintedPanel(t, box.r, "QK7M-2PLX"); !strings.Contains(text, "Code: QK7M-2PLX") {
 		t.Fatalf("panel = %q, want the page still showing the code", text)
@@ -4506,7 +4506,7 @@ func TestConnectPanelEditsTheCallbackField(t *testing.T) {
 		return ConnectPanelPage{
 			Title:      "Sign in with ChatGPT",
 			Body:       "Open this URL on any device: https://auth.openai.com/authorize?state=synthetic\n\nSign in, then paste the address your browser ended on.",
-			Hint:       "Enter to submit · Esc to cancel",
+			Hint:       "Enter to submit Esc to cancel",
 			InputLabel: "Paste callback URL",
 		}
 	}
@@ -4561,7 +4561,7 @@ func TestConnectPanelRejectionKeepsTheFieldAndHidesTheError(t *testing.T) {
 		return ConnectPanelPage{
 			Title:      "Sign in with ChatGPT",
 			Body:       "https://auth.openai.com/authorize?state=synthetic",
-			Hint:       "Enter to submit · Esc to cancel",
+			Hint:       "Enter to submit Esc to cancel",
 			InputLabel: "Paste callback URL",
 		}
 	}
@@ -4622,7 +4622,7 @@ func TestConnectPanelEscapeAndContextReleaseTheStage(t *testing.T) {
 				return ConnectPanelPage{
 					Title:      "Sign in with ChatGPT",
 					Body:       "https://auth.openai.com/authorize?state=synthetic",
-					Hint:       "Enter to submit · Esc to cancel",
+					Hint:       "Enter to submit Esc to cancel",
 					InputLabel: "Paste callback URL",
 				}
 			}
@@ -4670,7 +4670,7 @@ func TestConnectPanelSubmitsOnceWhileItIsInFlight(t *testing.T) {
 	var calls atomic.Int64
 	release := make(chan struct{})
 	result := box.start(ctx, func() ConnectPanelPage {
-		return ConnectPanelPage{Title: "Sign in with ChatGPT", Hint: "Enter to submit · Esc to cancel", InputLabel: "Paste callback URL"}
+		return ConnectPanelPage{Title: "Sign in with ChatGPT", Hint: "Enter to submit Esc to cancel", InputLabel: "Paste callback URL"}
 	}, done, func(context.Context, string) error {
 		calls.Add(1)
 		<-release

@@ -308,7 +308,7 @@ const retryLine = computed(() =>
 // working line shows for the turn.
 const firstTokenSuffix = computed(() => {
   const wait = formatFirstTokenDuration(props.record.firstTokenMs)
-  return wait ? ` · ${t('chat.firstToken', { duration: wait })}` : ''
+  return wait ? ` ${t('chat.firstToken', { duration: wait })}` : ''
 })
 const workingLabel = computed(() =>
   retryLine.value ? retryLine.value.label : t('chat.subagentWorking', { duration: duration.value }) + firstTokenSuffix.value)

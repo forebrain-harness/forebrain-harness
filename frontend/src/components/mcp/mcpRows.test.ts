@@ -99,14 +99,14 @@ describe('mcpStatus', () => {
   it('carries the tool count only when a count was reported', () => {
     expect(mcpStatus(row({ running: true, toolCount: 5 }))).toEqual({
       tone: 'ok',
-      label: '已连接 · 5 个工具',
+      label: '已连接 5 个工具',
       tip: '',
     })
     expect(mcpStatus(row({ running: true, toolCount: 0 })).label).toBe('已连接')
     expect(mcpStatus(row({ running: true })).label).toBe('已连接')
     expect(mcpStatus(row({ scope: 'project', allowed: true, toolCount: 3 }))).toEqual({
       tone: 'ok',
-      label: '已允许 · 3 个工具',
+      label: '已允许 3 个工具',
       tip: '',
     })
     expect(mcpStatus(row({ scope: 'project', allowed: true })).label).toBe('已允许')
@@ -161,12 +161,12 @@ describe('mcpStatus', () => {
   it('names the layer that overrides a shared entry instead of calling it idle', () => {
     expect(mcpStatus(row({ scope: 'global', shadowedBy: 'agent', shadowedByName: 'main' }))).toEqual({
       tone: 'gray',
-      label: '未运行 · 被覆盖',
+      label: '未运行 被覆盖',
       tip: '被主代理 main 覆盖，未运行',
     })
     // The override outranks the runtime state a row could not have anyway: a
     // shadowed entry is not in the session.
-    expect(mcpStatus(row({ scope: 'global', shadowedBy: 'agent', running: false })).label).toBe('未运行 · 被覆盖')
+    expect(mcpStatus(row({ scope: 'global', shadowedBy: 'agent', running: false })).label).toBe('未运行 被覆盖')
   })
 
   it('reads the runtime’s whole connection state, not just "it exists"', () => {
@@ -200,7 +200,7 @@ describe('mcpStatus', () => {
     })
     // A failure keeps its own text, with the OAuth state after it.
     expect(mcpStatus(row({ error: 'unauthorized', authStatus: 'needs-auth' })).tip).toBe(
-      'unauthorized · OAuth 需要授权',
+      'unauthorized OAuth 需要授权',
     )
     // An authenticated or unknown state adds nothing.
     expect(mcpStatus(row({ running: true, authStatus: 'authenticated' })).tip).toBe('')

@@ -247,7 +247,7 @@
     </section>
 
     <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="drawerOpen = true">打开抽屉（只读）</Button>
-    <ForebrainDrawer :open="drawerOpen" title="MCP 服务 · github" readonly @close="drawerOpen = false">
+    <ForebrainDrawer :open="drawerOpen" title="MCP 服务 github" readonly @close="drawerOpen = false">
       <label class="forebrain-form-field">
         <span>名称</span>
         <Input class="forebrain-field h-[34px]" default-value="github" readonly />

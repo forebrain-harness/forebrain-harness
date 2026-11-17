@@ -22,7 +22,7 @@ describe('ToolOutput', () => {
   it('renders a display body as Markdown, not as JSON source', async () => {
     const wrapper = mount(ToolOutput, {
       props: {
-        output: '`MEMORY.md` · line 5\n\n> - **审批**浮层必须完整展示',
+        output: '`MEMORY.md` line 5\n\n> - **审批**浮层必须完整展示',
         errorText: undefined,
       },
     })

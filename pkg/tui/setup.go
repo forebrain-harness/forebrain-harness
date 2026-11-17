@@ -451,7 +451,7 @@ type llmSetup struct {
 	offers []subscription.Offer
 	chosen []int
 	// probes are the sign-in answers already given for this setup, one per
-	// subscription: the first page's «· Signed in» and the sign-in page ask the
+	// subscription: the first page's «Signed in» and the sign-in page ask the
 	// vendor once between them, never twice.
 	probes map[string]turn.SignInCheck
 	// subagentAllowed is the authorization page's answer: may the agent pick
@@ -749,7 +749,7 @@ func (s *llmSetup) providerRows() []providerRow {
 		choice := subscriptionChoice(sub)
 		description := choice.Hint
 		if s.probeSubscription(sub).State == turn.SignInUsable {
-			description += "  · Signed in"
+			description += "  Signed in"
 		}
 		rows = append(rows, providerRow{
 			item:   SelectItem{Label: choice.Label, Description: description, Category: providerSignInCategory},
@@ -960,7 +960,7 @@ func (s *llmSetup) endpoint() string {
 // the model is known: the protocol picked next decides whether a path is
 // appended to it.
 func (s *llmSetup) customBaseURL() (bool, error) {
-	const title = "Custom model · Base URL\nThe address requests go to; the protocol you pick next decides whether a path is appended."
+	const title = "Custom model Base URL\nThe address requests go to; the protocol you pick next decides whether a path is appended."
 	for {
 		value, ok, err := s.cfg.Selector.Input(title, s.baseURL)
 		if err != nil || !ok {
@@ -993,7 +993,7 @@ var customProtocols = []struct {
 // customProtocol asks which request shape the endpoint speaks. It is required:
 // the base URL alone says nothing about the body the model expects.
 func (s *llmSetup) customProtocol() (bool, error) {
-	const title = "Custom model · Protocol\nRequired. It decides the request format and whether a path is appended to the base URL."
+	const title = "Custom model Protocol\nRequired. It decides the request format and whether a path is appended to the base URL."
 	items := make([]SelectItem, len(customProtocols))
 	chosen := -1
 	for i, protocol := range customProtocols {
@@ -1061,7 +1061,7 @@ func (s *llmSetup) modelDataFact() string {
 	}
 	value := hit.CatalogID
 	if hit.ContextWindow > 0 {
-		value += " · " + formatTokensCompact(int(hit.ContextWindow)) + " window"
+		value += " " + formatTokensCompact(int(hit.ContextWindow)) + " window"
 	}
 	return value
 }
@@ -1098,7 +1098,7 @@ func (s *llmSetup) customThinkingLevels() (bool, error) {
 	items := make([]SelectItem, len(customThinkingLevels))
 	checked := make([]int, 0, len(s.efforts))
 	for i, level := range customThinkingLevels {
-		items[i] = SelectItem{Label: level.Level + " · " + level.Chinese, Description: level.English}
+		items[i] = SelectItem{Label: level.Level + " " + level.Chinese, Description: level.English}
 		if slices.Contains(s.efforts, level.Level) {
 			checked = append(checked, i)
 		}
@@ -1334,7 +1334,7 @@ func (p *signInPanel) page() ConnectPanelPage {
 		page.Body = p.pasteBody(info.AuthorizeURL)
 		if p.pasting.Load() {
 			page.InputLabel = "Paste callback URL"
-			page.Hint = "Enter to submit · Esc to cancel"
+			page.Hint = "Enter to submit Esc to cancel"
 		} else {
 			// The address has been handed over: there is nothing left to type,
 			// and the page says only what it is waiting for.
@@ -1342,7 +1342,7 @@ func (p *signInPanel) page() ConnectPanelPage {
 		}
 		return page
 	}
-	page.Hint = "Enter when signed in · Esc to cancel"
+	page.Hint = "Enter when signed in Esc to cancel"
 	page.Body = p.waitBody(info)
 	return page
 }
@@ -1409,7 +1409,7 @@ func (p *signInPanel) waitingLine(info subscription.DeviceCodeInfo) string {
 	if info.ExpiresAt.IsZero() {
 		return what
 	}
-	return what + " · expires in " + signInCountdown(info.ExpiresAt, time.Now())
+	return what + " expires in " + signInCountdown(info.ExpiresAt, time.Now())
 }
 
 // pasteCallback hands the field's text to the flow. It is the only submit the
@@ -2255,7 +2255,7 @@ func (s *llmSetup) reviewFacts() []turn.StatusFact {
 	}
 	provider := s.choice.Group
 	if s.choice.Group != "" && !strings.HasPrefix(s.choice.Label, s.choice.Group) {
-		provider += " · " + s.choice.Label
+		provider += " " + s.choice.Label
 	}
 	effort := reasoningEffortFromParamsJSON(s.params)
 	if effort == "" {
@@ -2263,7 +2263,7 @@ func (s *llmSetup) reviewFacts() []turn.StatusFact {
 	}
 	endpoint := s.baseURL
 	if s.apiPath != "" {
-		endpoint += " · " + s.apiPath
+		endpoint += " " + s.apiPath
 	}
 	return []turn.StatusFact{
 		{Label: "Provider", Value: provider},
@@ -2655,7 +2655,7 @@ func (c *commandController) runConnect(ctx context.Context, sessionID string, as
 	summary := strings.TrimSpace(opts.Provider)
 	if m := strings.TrimSpace(opts.Model); m != "" {
 		if summary != "" {
-			summary += " · " + m
+			summary += " " + m
 		} else {
 			summary = m
 		}

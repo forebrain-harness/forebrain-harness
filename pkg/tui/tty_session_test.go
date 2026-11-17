@@ -576,7 +576,7 @@ func TestEndsOnErrorRecognisesAStopsClosingLine(t *testing.T) {
 	const s = "approval continuation was interrupted after execution began; tool outcome is uncertain and was not retried"
 
 	vm := viewModel{}
-	vm.append(Frame{Kind: FrameStatus, Title: "Interrupted ·", Content: s, Final: true})
+	vm.append(Frame{Kind: FrameStatus, Title: "Interrupted", Content: s, Final: true})
 	if !vm.endsOnError(s) {
 		t.Fatal("a stop's closing line saying the sentence must count as the view having said it")
 	}

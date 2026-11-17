@@ -1057,7 +1057,7 @@ func StatusAgentLine(rep StatusReport) string {
 	agent := rep.AgentID
 	if rep.Mode != "" && rep.Mode != string(state.ModeAgent) {
 		if agent != "" {
-			agent += " · "
+			agent += " "
 		}
 		agent += rep.Mode
 		if rep.Phase != "" {
@@ -1093,10 +1093,10 @@ func StatusFacts(rep StatusReport) []StatusFact {
 		add("Sandbox", rep.Sandbox)
 	}
 	if counts := rep.MCP.Render(); counts != "" {
-		add("MCP servers", counts+" · /mcp")
+		add("MCP servers", counts+" /mcp")
 	}
 	if rep.LSP != "" {
-		add("Language servers", rep.LSP+" · /lsp")
+		add("Language servers", rep.LSP+" /lsp")
 	}
 	add("Instructions", RenderInstructionsLine(rep.Instructions))
 	add("Config files", strings.Join(rep.ConfigFiles, ", "))
@@ -1113,7 +1113,7 @@ func UsageFacts(rep StatusReport) []StatusFact {
 		}
 	}
 	if rep.Context.WindowTokens > 0 && rep.Context.UsedTokens > 0 {
-		add("Context", fmt.Sprintf("%s %d%% left · %s of %s",
+		add("Context", fmt.Sprintf("%s %d%% left %s of %s",
 			ContextGaugeBar(rep.Context.PercentLeft), rep.Context.PercentLeft,
 			FormatTokens(rep.Context.UsedTokens), FormatTokens(rep.Context.WindowTokens)))
 	}
@@ -1135,7 +1135,7 @@ func UsageFacts(rep StatusReport) []StatusFact {
 	if rep.Session.OutputTokensPerSecond > 0 {
 		session = append(session, fmt.Sprintf("%.1f tok/s", rep.Session.OutputTokensPerSecond))
 	}
-	add("Session", strings.Join(session, " · "))
+	add("Session", strings.Join(session, " "))
 	if rep.Session.CacheRead > 0 || rep.Session.CacheWritten > 0 {
 		cache := []string{fmt.Sprintf("%d%%", rep.Session.CacheHitPercent)}
 		for _, part := range []struct {
@@ -1146,10 +1146,10 @@ func UsageFacts(rep StatusReport) []StatusFact {
 				cache = append(cache, FormatTokens(part.n)+" "+part.label)
 			}
 		}
-		add("Cache hit rate", strings.Join(cache, " · "))
+		add("Cache hit rate", strings.Join(cache, " "))
 	}
 	if rep.LastTurn.InputTokens > 0 || rep.LastTurn.OutputTokens > 0 {
-		add("Last turn", fmt.Sprintf("%s input · %s output · %d%% cached",
+		add("Last turn", fmt.Sprintf("%s input %s output %d%% cached",
 			FormatTokens(rep.LastTurn.InputTokens), FormatTokens(rep.LastTurn.OutputTokens), rep.LastTurn.CacheHitPercent))
 	}
 	if rep.Work.PlanSet || rep.Work.Total > 0 {
@@ -1158,7 +1158,7 @@ func UsageFacts(rep StatusReport) []StatusFact {
 			work = "plan set"
 		}
 		if rep.Work.Total > 0 {
-			work += fmt.Sprintf(" · %d of %d todos done", rep.Work.Done, rep.Work.Total)
+			work += fmt.Sprintf(" %d of %d todos done", rep.Work.Done, rep.Work.Total)
 		}
 		add("Work", work)
 	}
@@ -1191,7 +1191,7 @@ func countNoun(n int, noun string) string {
 // describes.
 func StatusTitle(rep StatusReport) string {
 	if rep.Side {
-		return "Session Status · side conversation"
+		return "Session Status side conversation"
 	}
 	return "Session Status"
 }
@@ -1230,7 +1230,7 @@ func RenderPermissionsLine(p StatusPermissions) string {
 	if p.Rules > 0 {
 		parts = append(parts, countNoun(p.Rules, "rule"))
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // RenderInstructionsLine lists the instruction files in load order, each with

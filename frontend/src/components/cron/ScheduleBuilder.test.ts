@@ -89,7 +89,7 @@ describe('ScheduleBuilder', () => {
 
     // Nothing else looks at these two: a datetime-local or a time input that
     // lost its `type` is a free-text box, and no other test would say so.
-    await pickOption(modeTrigger(wrapper), '一次 · 指定时间')
+    await pickOption(modeTrigger(wrapper), '一次 指定时间')
     expect(wrapper.find('[data-testid="schedule-once-at"]').attributes('type')).toBe('datetime-local')
 
     await pickOption(modeTrigger(wrapper), '每天')
@@ -99,7 +99,7 @@ describe('ScheduleBuilder', () => {
   it('holds a typed count as a number, and an emptied one at the floor', async () => {
     vi.spyOn(forebrainApi, 'cronPreview').mockResolvedValue({ raw: 'in 3m', valid: true, kind: 'once-in', next: [] })
     const wrapper = mountBuilder()
-    await pickOption(modeTrigger(wrapper), '一次 · 多久之后')
+    await pickOption(modeTrigger(wrapper), '一次 多久之后')
 
     const count = wrapper.find('[data-testid="schedule-in-count"]')
     await count.setValue('3')

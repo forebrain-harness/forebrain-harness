@@ -1017,7 +1017,7 @@ func TestBuiltinApprovalPresets(t *testing.T) {
 		t.Fatalf("expected two presets, got %d", len(presets))
 	}
 	want := []ApprovalPreset{
-		{ID: PresetWorkspaceWrite, Label: "Default", Approval: ApprovalOnRequest, SandboxMode: appcfg.SandboxModeWorkspaceWrite},
+		{ID: PresetWorkspaceWrite, Label: "Workspace write", Approval: ApprovalOnRequest, SandboxMode: appcfg.SandboxModeWorkspaceWrite},
 		{ID: PresetFullAccess, Label: "Full Access", Approval: ApprovalNever, SandboxMode: appcfg.SandboxModeDangerFullAccess},
 	}
 	for i, w := range want {

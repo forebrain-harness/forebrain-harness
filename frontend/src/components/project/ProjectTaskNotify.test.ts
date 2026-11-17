@@ -87,7 +87,7 @@ describe('ProjectTaskNotify', () => {
     const wrapper = await mountSection()
 
     const row = wrapper.get('[data-testid="task-notify-row-0"]')
-    expect(row.text()).toContain('飞书 · oc_1')
+    expect(row.text()).toContain('飞书 oc_1')
     expect(row.text()).toContain('任务结束（成功或失败）时通知')
     expect(wrapper.text()).toContain('每条任务结束（成功或失败）后通知这里的目标；定时任务也走同一份配置。')
     wrapper.unmount()
@@ -129,7 +129,7 @@ describe('ProjectTaskNotify', () => {
 
     await wrapper.get('[data-testid="task-notify-add"]').trigger('click')
     await flushPromises()
-    expect(wrapper.get('[data-testid="task-notify-known"]').text()).toContain('飞书 · oc_1')
+    expect(wrapper.get('[data-testid="task-notify-known"]').text()).toContain('飞书 oc_1')
 
     await wrapper.get('[data-testid="task-notify-pick-email"]').trigger('click')
     await nextTick()

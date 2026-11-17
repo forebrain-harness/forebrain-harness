@@ -28,7 +28,7 @@
       <span v-if="percent != null && model" class="subagent-run-dv" aria-hidden="true" />
       <template v-if="model">
         <span class="subagent-run-model">{{ modelDisplay }}</span>
-        <span v-if="effort" class="subagent-run-effort">· {{ effort }}</span>
+        <span v-if="effort" class="subagent-run-effort">{{ effort }}</span>
       </template>
     </button>
 

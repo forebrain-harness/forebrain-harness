@@ -121,7 +121,7 @@ describe('approvalGates', () => {
     }
     const facts = approvalFacts('apply_patch', payload)
     // One line of facts, the way the prototype prints them (:3503).
-    expect(facts.facts).toEqual(['3 个文件 · +2 −2'])
+    expect(facts.facts).toEqual(['3 个文件 +2 −2'])
     expect(approvalQuestion('apply_patch', 'apply_patch', payload)).toBe('要应用这个补丁吗？')
     // Several files: one row each, with its own verb and counts, read from the
     // patch body itself; the representative hunk carries no numbers — the
@@ -296,21 +296,21 @@ describe('approvalGates', () => {
   })
 
   it('quotes the search and its cap, falling back to the tool default', () => {
-    expect(approvalFacts('web_search', { query: '  forebrain harness  ' }).facts).toEqual(['“forebrain harness” · 最多 5 条'])
-    expect(approvalFacts('web_search', { query: 'q', results_limit: 10 }).facts).toEqual(['“q” · 最多 10 条'])
+    expect(approvalFacts('web_search', { query: '  forebrain harness  ' }).facts).toEqual(['“forebrain harness” 最多 5 条'])
+    expect(approvalFacts('web_search', { query: 'q', results_limit: 10 }).facts).toEqual(['“q” 最多 10 条'])
     // The tool's own ceiling: the card never promises more than one call can ask.
-    expect(approvalFacts('web_search', { query: 'q', results_limit: 25 }).facts).toEqual(['“q” · 最多 10 条'])
+    expect(approvalFacts('web_search', { query: 'q', results_limit: 25 }).facts).toEqual(['“q” 最多 10 条'])
     expect(approvalQuestion('web_search', 'web_search', {})).toBe('要我搜一下公开网络吗？')
   })
 
   it('shows a memory note\'s file and scope beside its own scrollable body', () => {
     const project = approvalFacts('memory_note', { filename: 'note.md', note: '# body', scope: 'project' })
-    expect(project.facts).toEqual(['note.md · 项目记忆'])
+    expect(project.facts).toEqual(['note.md 项目记忆'])
     expect(project.bodyMarkdown).toBe('# body')
     const global = approvalFacts('memory_note', { filename: 'n.md', note: 'x', scope: 'global' })
-    expect(global.facts).toEqual(['n.md · 全局记忆'])
+    expect(global.facts).toEqual(['n.md 全局记忆'])
     // The scope defaults to the project's own memory.
-    expect(approvalFacts('memory_note', { filename: 'n.md' }).facts).toEqual(['n.md · 项目记忆'])
+    expect(approvalFacts('memory_note', { filename: 'n.md' }).facts).toEqual(['n.md 项目记忆'])
     expect(approvalQuestion('memory_note', 'memories_add_ad_hoc_note', {})).toBe('要我把这条记进长期记忆吗？')
   })
 

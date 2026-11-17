@@ -93,7 +93,7 @@ func TestBuildStatusReportAssemblesThePanel(t *testing.T) {
 		Endpoint:     "https://user:secret@api.example.com/v1?key=k",
 		MCP:          MCPInventorySource{Servers: []appcfg.MCPServerConfig{{Name: "docs"}}},
 		Permissions:  StatusPermissions{Preset: "Workspace", Matched: true, Rules: 3},
-		Sandbox:      "workspace-write · seatbelt",
+		Sandbox:      "workspace-write seatbelt",
 	})
 	out := RenderStatusMarkdown(rep)
 
@@ -103,18 +103,18 @@ func TestBuildStatusReportAssemblesThePanel(t *testing.T) {
 		"Model: openai/gpt-main",
 		// URL sanitization: credentials and query strings never render.
 		"https://api.example.com/v1",
-		"Workspace · 3 rules",
-		"workspace-write · seatbelt",
-		"MCP servers: 1 unknown · /mcp",
+		"Workspace 3 rules",
+		"workspace-write seatbelt",
+		"MCP servers: 1 unknown /mcp",
 		// Usage tab: the footer's context gauge, session totals whose input
 		// is everything sent (uncached + read + written), the hit rate over
 		// the same three, and the last turn summed the same way.
 		"Context: ",
 		"48k of ",
-		"Session: 1.9M input · 42k output · 38 requests",
-		"Cache hit rate: 94% · 1.79M read · 60k written · 51k uncached",
-		"Last turn: 48k input · 1.2k output · 87% cached",
-		"Work: plan set · 1 of 2 todos done",
+		"Session: 1.9M input 42k output 38 requests",
+		"Cache hit rate: 94% 1.79M read 60k written 51k uncached",
+		"Last turn: 48k input 1.2k output 87% cached",
+		"Work: plan set 1 of 2 todos done",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status markdown missing %q:\n%s", want, out)
@@ -163,7 +163,7 @@ func TestStatusSideConversationSaysWhoseSessionItIs(t *testing.T) {
 	out := RenderStatusMarkdown(BuildStatusReport(context.Background(), StatusSource{
 		StateRoot: t.TempDir(), SessionID: "side-1", Side: true,
 	}))
-	if !strings.HasPrefix(out, "Session Status · side conversation") || !strings.Contains(out, "Session ID: side-1") {
+	if !strings.HasPrefix(out, "Session Status side conversation") || !strings.Contains(out, "Session ID: side-1") {
 		t.Fatalf("side report:\n%s", out)
 	}
 }
@@ -171,10 +171,10 @@ func TestStatusSideConversationSaysWhoseSessionItIs(t *testing.T) {
 // TestStatusCustomPermissionsNeverShowPlaceholders pins the custom form: the
 // halves that are known are named, an unknown one is left out, never "-".
 func TestStatusCustomPermissionsNeverShowPlaceholders(t *testing.T) {
-	if got := RenderPermissionsLine(StatusPermissions{Approval: "on-request"}); got != "Custom · on-request" {
+	if got := RenderPermissionsLine(StatusPermissions{Approval: "on-request"}); got != "Custom on-request" {
 		t.Fatalf("custom line = %q", got)
 	}
-	if got := RenderPermissionsLine(StatusPermissions{Approval: "never", Sandbox: "read-only", Rules: 1}); got != "Custom · never · read-only · 1 rule" {
+	if got := RenderPermissionsLine(StatusPermissions{Approval: "never", Sandbox: "read-only", Rules: 1}); got != "Custom never read-only 1 rule" {
 		t.Fatalf("custom line = %q", got)
 	}
 }
@@ -914,7 +914,7 @@ func TestStatusFactsLSPRow(t *testing.T) {
 		labels = append(labels, f.Label)
 		values[f.Label] = f.Value
 	}
-	require.Equal(t, "2 running, 1 failed · /lsp", values["Language servers"])
+	require.Equal(t, "2 running, 1 failed /lsp", values["Language servers"])
 	require.Greater(t, slices.Index(labels, "Language servers"), slices.Index(labels, "MCP servers"), "the LSP row must follow MCP servers:\n%v", labels)
 }
 

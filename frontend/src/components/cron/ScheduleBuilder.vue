@@ -127,7 +127,7 @@
       <div v-else-if="preview && preview.valid" class="mt-1 text-[12px] text-[var(--forebrain-text-2)]">
         {{ t('cron.nextRuns') }}:
         <span v-for="(at, index) in preview.next" :key="at" class="font-mono text-[var(--forebrain-text)]">
-          {{ formatPreviewTime(at) }}{{ index < (preview.next?.length ?? 0) - 1 ? ' · ' : '' }}
+          {{ formatPreviewTime(at) }}{{ index < (preview.next?.length ?? 0) - 1 ? ' ' : '' }}
         </span>
       </div>
       <div v-else-if="preview && !preview.valid" class="mt-1 text-[12px] text-[var(--forebrain-danger)]" data-testid="schedule-error">{{ preview.error }}</div>

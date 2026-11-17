@@ -174,7 +174,7 @@ function showsView(row: SkillRecord) {
 function descriptionLine(row: SkillRecord): string {
   const parts = [row.description || '—']
   if (row.rootPath) parts.push(row.rootPath)
-  return parts.join(' · ')
+  return parts.join(' ')
 }
 
 function originLabel(origin: SkillRecord['origin']) {

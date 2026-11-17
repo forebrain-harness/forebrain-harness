@@ -13,7 +13,7 @@
       >
         <div class="min-w-0 flex-1">
           <b class="forebrain-cell-1 block text-[13px] font-medium text-[var(--forebrain-text)]">
-            {{ channelName(target.channel) }} · {{ target.target }}
+            {{ channelName(target.channel) }} {{ target.target }}
           </b>
           <span class="block text-[11.5px] text-[var(--forebrain-muted-text)]">{{ t('projects.taskNotifyRowHint') }}</span>
         </div>
@@ -88,7 +88,7 @@
           class="flex items-center gap-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2.5 py-1.5"
         >
           <div class="min-w-0 flex-1">
-            <b class="forebrain-cell-1 block text-[12.5px] font-medium text-[var(--forebrain-text)]">{{ channelName(row.channel) }} · {{ row.target }}</b>
+            <b class="forebrain-cell-1 block text-[12.5px] font-medium text-[var(--forebrain-text)]">{{ channelName(row.channel) }} {{ row.target }}</b>
             <span v-if="row.label" class="forebrain-cell-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ row.label }}</span>
           </div>
           <Button

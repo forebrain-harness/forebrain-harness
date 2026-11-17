@@ -41,7 +41,7 @@
         <span class="min-w-0 flex-1">
           <span class="flex min-w-0 items-baseline gap-1.5">
             <span class="min-w-0 truncate text-[13px] text-[var(--forebrain-text)]" v-tip:top.trunc="row.title || t('subagentCard.emptyTask')">{{ row.title || t('subagentCard.emptyTask') }}</span>
-            <span v-if="row.clock" data-testid="subagent-row-clock" class="shrink-0 text-xs tabular-nums text-[var(--forebrain-muted-text)]"> · {{ row.clock.label }}</span>
+            <span v-if="row.clock" data-testid="subagent-row-clock" class="shrink-0 text-xs tabular-nums text-[var(--forebrain-muted-text)]"> {{ row.clock.label }}</span>
           </span>
           <span
             v-if="detailOf(row)"
@@ -145,7 +145,7 @@ const header = computed(() => {
     if (v.breakdown.skipped > 0) tally.push(t('subagentCard.breakdownSkipped', { count: v.breakdown.skipped }))
     parts.push(tally.join(join))
   }
-  return parts.join(' · ')
+  return parts.join(' ')
 })
 
 /** A row's one gray line: what its dispatch last did, or what its query saw.
@@ -155,7 +155,7 @@ function detailOf(row: SubagentCallRowView): string {
   if (row.paused) return t('chat.subagentPaused')
   if (row.latestTool) {
     const more = row.moreToolUses
-      ? ` · ${t(row.moreToolUses === 1 ? 'subagentCard.moreToolUsesOne' : 'subagentCard.moreToolUsesOther', { count: row.moreToolUses })}`
+      ? ` ${t(row.moreToolUses === 1 ? 'subagentCard.moreToolUsesOne' : 'subagentCard.moreToolUsesOther', { count: row.moreToolUses })}`
       : ''
     return `${t('subagentCard.latestTool', { label: row.latestTool })}${more}`
   }
@@ -165,7 +165,7 @@ function detailOf(row: SubagentCallRowView): string {
       row.timedOut ? t('subagentCard.phrase.waitEnded') : '',
       row.stopRequested ? t('subagentCard.phrase.stopRequested') : '',
     ].filter(Boolean)
-    return parts.join(' · ')
+    return parts.join(' ')
   }
   if (row.status === 'waiting') return t('subagentCard.waiting')
   return ''

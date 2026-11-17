@@ -3,15 +3,12 @@
     <Loader2 class="run-status-spinner" aria-hidden="true" />
     <template v-if="reason">
       <span class="run-status-seg run-status-reason" :title="reason">{{ reason }}</span>
-      <span class="run-status-dot" aria-hidden="true">·</span>
     </template>
     <span class="run-status-seg run-status-label">{{ label }}</span>
     <template v-if="plan">
-      <span class="run-status-dot" aria-hidden="true">·</span>
       <PlanProgressSegments class="run-status-seg" :plan="plan" />
     </template>
     <template v-if="tail">
-      <span class="run-status-dot" aria-hidden="true">·</span>
       <span class="run-status-seg run-status-tail">{{ tail }}</span>
     </template>
   </div>
@@ -90,11 +87,6 @@ defineProps<{
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
-}
-
-.run-status-dot {
-  flex: none;
-  color: var(--forebrain-muted-text);
 }
 
 @keyframes run-status-spin {

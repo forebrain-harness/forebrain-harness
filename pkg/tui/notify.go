@@ -1620,7 +1620,7 @@ func subagentToolStepMsg(evt event.RunEvent, stepID, toolName, summary string, m
 			// The preview facts are what make this card the same card the
 			// conversation draws. Dropping them left a child agent's image
 			// step below the renderer's preview gate (render.go), so it
-			// painted the preformatted "path: … · image W×H · bytes" body
+			// painted the preformatted "path: … image W×H bytes" body
 			// instead of the ▤ marker line — and, with no preview path on the
 			// meta, the marker row stopped being a click target
 			// (imageMarkerAtScreenRow). Every other mirror of these facts
@@ -3155,7 +3155,7 @@ func paidTierNoticeText(view *paidTierView) string {
 	if !view.resetAt.IsZero() {
 		head += " until " + view.resetAt.In(paidTierClockZone).Format("2006-01-02 15:04:05") + " (UTC+8)"
 	}
-	return head + ". Ctrl-P use paid (" + paid + ") · Esc dismiss"
+	return head + ". Ctrl-P use paid (" + paid + ") Esc dismiss"
 }
 
 func paidTierUnavailableText(detail string) string {
@@ -3179,11 +3179,11 @@ func autoContinueHeadline(code string) string {
 // an input box to type into: a subagent's view has one only while that subagent
 // is running, and an execution waiting out a usage limit is not running.
 func autoContinueTranscriptText(code string, at, now time.Time, typingCancels bool) string {
-	hint := " · esc to cancel"
+	hint := " esc to cancel"
 	if typingCancels {
-		hint = " · esc or type to cancel"
+		hint = " esc or type to cancel"
 	}
-	return autoContinueHeadline(code) + " · continuing automatically at " + autoContinueClock(at, now) + hint
+	return autoContinueHeadline(code) + " continuing automatically at " + autoContinueClock(at, now) + hint
 }
 
 func autoContinueUnavailableText(detail string) string {

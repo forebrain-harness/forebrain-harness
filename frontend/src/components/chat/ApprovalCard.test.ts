@@ -198,7 +198,7 @@ describe('ApprovalCard', () => {
       id: 'act-patch', kind: 'apply_patch',
       payload: { apply_patch: true, resolved_paths: ['/w/a.go', '/w/b.go'], patch: '*** Begin Patch\n*** Update File: a.go\n@@\n-old\n+new\n' },
       decisions: ['accept', 'accept_for_session', 'cancel'],
-      question: '要应用这个补丁吗？', facts: ['2 个文件 · +1 −1'], buttons: ['应用', '本会话不再问', '不要应用'],
+      question: '要应用这个补丁吗？', facts: ['2 个文件 +1 −1'], buttons: ['应用', '本会话不再问', '不要应用'],
     },
     {
       id: 'act-shell-danger', kind: 'shell',
@@ -279,12 +279,12 @@ describe('ApprovalCard', () => {
     {
       id: 'act-search', kind: 'web_search', payload: { query: 'forebrain harness', results_limit: 5 },
       decisions: ['accept', 'cancel'],
-      question: '要我搜一下公开网络吗？', facts: ['“forebrain harness” · 最多 5 条'], buttons: ['搜索', '不要搜'],
+      question: '要我搜一下公开网络吗？', facts: ['“forebrain harness” 最多 5 条'], buttons: ['搜索', '不要搜'],
     },
     {
       id: 'act-memory', kind: 'memories_add_ad_hoc_note', payload: { filename: 'note.md', note: '# 一条要记的话', scope: 'project' },
       decisions: ['accept', 'decline'],
-      question: '要我把这条记进长期记忆吗？', facts: ['note.md · 项目记忆'], buttons: ['记住这条', '不要记'],
+      question: '要我把这条记进长期记忆吗？', facts: ['note.md 项目记忆'], buttons: ['记住这条', '不要记'],
     },
     {
       // A call no family claimed still leads with the engine's reason: it is

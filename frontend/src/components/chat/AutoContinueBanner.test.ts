@@ -22,7 +22,7 @@ describe('AutoContinueBanner', () => {
     const banner = wrapper.find('[data-testid="auto-continue-banner"]')
     expect(banner.exists()).toBe(true)
     expect(banner.attributes('role')).toBe('status')
-    expect(banner.text()).toContain('Usage limit reached · continuing automatically at')
+    expect(banner.text()).toContain('Usage limit reached continuing automatically at')
 
     await wrapper.find('[data-testid="auto-continue-cancel"]').trigger('click')
     expect(wrapper.emitted('cancel')).toHaveLength(1)

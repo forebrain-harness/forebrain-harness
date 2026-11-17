@@ -36,7 +36,7 @@ func TestTabbedPickerPanelGolden(t *testing.T) {
 		"  beta-long-name  A description long enough to wrap onto a second row at this",
 		strings.Repeat(" ", 18) + "width.",
 		"",
-		"  Tab to switch · ↑/↓ to navigate · Enter to confirm · Esc to cancel",
+		"  Tab to switch ↑/↓ to navigate Enter to confirm Esc to cancel",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("panel =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

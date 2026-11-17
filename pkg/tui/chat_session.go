@@ -148,7 +148,7 @@ type ChatSession struct {
 	// skillDraftMu guards skillDraftNotes: the skill names whose drafts the
 	// workshop wrote during the current turn (plan 037). The tool-step hook
 	// records a name from each skill write's structured output; the turn's
-	// end drains the list and leaves one "Draft <name> saved · /skills to
+	// end drains the list and leaves one "Draft <name> saved /skills to
 	// publish" line, which is the only hint the panel asks for.
 	skillDraftMu    sync.Mutex
 	skillDraftNotes []string
@@ -2925,7 +2925,7 @@ func userShellSummary(command string, res safety.CommandResult, err error) strin
 		return "failed: " + strings.TrimSpace(command)
 	}
 	if res.ExitCode != 0 {
-		return fmt.Sprintf("ran %s · exit %d", strings.TrimSpace(command), res.ExitCode)
+		return fmt.Sprintf("ran %s exit %d", strings.TrimSpace(command), res.ExitCode)
 	}
 	return "ran " + strings.TrimSpace(command)
 }

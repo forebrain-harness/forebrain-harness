@@ -358,7 +358,7 @@ function scopeLabel(scope: string): string {
 /** programText is the program column: the binary and the version it reported. */
 function programText(server: LspServerStatus): string {
   if (!server.binaryPath) return ''
-  return server.version ? `${server.binaryPath} · ${server.version}` : server.binaryPath
+  return server.version ? `${server.binaryPath} ${server.version}` : server.binaryPath
 }
 
 /** problemLine names the errors and warnings of an enabled server, each side only when it counts. */
@@ -367,12 +367,12 @@ function problemLine(server: LspServerStatus): string {
   const parts: string[] = []
   if (server.errors) parts.push(t('lsp.errorCount', { count: server.errors }))
   if (server.warnings) parts.push(t('lsp.warningCount', { count: server.warnings }))
-  return parts.join(' · ')
+  return parts.join(' ')
 }
 
 /** statusTip is what the state badge says on hover: the counts, then the last error. */
 function statusTip(server: LspServerStatus): string {
-  return [problemLine(server), server.lastError].filter(Boolean).join(' · ')
+  return [problemLine(server), server.lastError].filter(Boolean).join(' ')
 }
 
 /** installOutput is the install's tail with its error's first line in front. */

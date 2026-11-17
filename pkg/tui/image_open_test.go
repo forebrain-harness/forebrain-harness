@@ -68,7 +68,7 @@ func TestImageMarkerLineOmitsUnknownPixelSize(t *testing.T) {
 	zero := imagePreviewFrameLine(tool.ToolMeta{
 		PreviewKind: "image", PreviewPath: "/x/a.png", PreviewBytes: 123,
 	})
-	if want := "▤ a.png · 123 bytes · click to open"; zero != want {
+	if want := "▤ a.png 123 bytes click to open"; zero != want {
 		t.Fatalf("zero-dims marker = %q, want %q", zero, want)
 	}
 	if strings.Contains(zero, "0×0") {
@@ -79,7 +79,7 @@ func TestImageMarkerLineOmitsUnknownPixelSize(t *testing.T) {
 		PreviewKind: "image", PreviewPath: "/x/a.png",
 		PreviewWidth: 7, PreviewHeight: 3, PreviewBytes: 123,
 	})
-	if want := "▤ a.png · 7×3 · 123 bytes · click to open"; known != want {
+	if want := "▤ a.png 7×3 123 bytes click to open"; known != want {
 		t.Fatalf("known-dims marker = %q, want %q", known, want)
 	}
 }
@@ -257,8 +257,8 @@ func TestImageMarkerRowPredicateSkipsEveryHintRow(t *testing.T) {
 		line string
 		want bool
 	}{
-		{"marker line", "  └ ▤ shot.png · 640×480 · 602.7 KB · click to open", true},
-		{"wrapped marker continuation", "    4 KB · click to open", true},
+		{"marker line", "  └ ▤ shot.png 640×480 602.7 KB click to open", true},
+		{"wrapped marker continuation", "    4 KB click to open", true},
 		{"streaming hint", "    … 3 earlier lines", false},
 		{"fold hint", "    ··· 12 more lines (click to expand)", false},
 		{"card title", "● Read shot.png 0.3s", false},

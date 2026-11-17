@@ -62,7 +62,7 @@ const rows = computed(() => {
   for (const peer of peers) same.set(displayOf(peer), (same.get(displayOf(peer)) ?? 0) + 1)
   return peers.map((peer) => {
     let name = displayOf(peer)
-    if ((same.get(name) ?? 0) > 1 && peer.short) name += ` · ${peer.short}`
+    if ((same.get(name) ?? 0) > 1 && peer.short) name += ` ${peer.short}`
     return { peer, name, place: placeOf(peer), path: isPathPlace(peer) }
   })
 })
@@ -89,7 +89,7 @@ function placeOf(peer: ReadablePeer): string {
     const ago = agoLabel(peer.activeAgo)
     if (ago) parts.push(ago)
   }
-  return parts.join(' · ')
+  return parts.join(' ')
 }
 
 /** isPathPlace reports whether a row's place is a directory rather than a

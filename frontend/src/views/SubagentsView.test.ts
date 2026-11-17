@@ -189,7 +189,7 @@ describe('SubagentsView', () => {
     // The harness's own description is said in the page's words.
     expect(builtinRow.text()).toContain('只读调查：快速搜索代码，找文件与调用点')
     expect(builtinRow.text()).toContain('deepseek/deepseek-v4')
-    expect(builtinRow.text()).toContain(' · 高')
+    expect(builtinRow.text()).toContain('高')
     expect(builtinRow.text()).toContain('只读')
     expect(builtinRow.find('[data-testid="subagent-overridden-explore"]').text()).toBe('已改写')
 

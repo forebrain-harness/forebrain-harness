@@ -327,7 +327,7 @@ func tabbedFooterHint(switchable, multi bool, esc string) string {
 		parts = append(parts, "Space to select")
 	}
 	parts = append(parts, "Enter to confirm", esc)
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // SelectRichTabbed opens the tabbed picker and returns the index into items

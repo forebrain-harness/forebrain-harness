@@ -31,15 +31,15 @@ describe('PeerRosterCard', () => {
     const rows = wrapper.findAll('[data-testid="peer-roster-row"]')
     expect(rows).toHaveLength(4)
     expect(rows.map((row) => row.find('.nm').text())).toEqual([
-      'explore · da6b',
-      'explore · 7fe9',
+      'explore da6b',
+      'explore 7fe9',
       'proj-99',
       'proj-7',
     ])
     expect(rows.map((row) => row.find('.st').text())).toEqual(['进行中', '已完成', '空闲', '工作中'])
     // What each agent is doing, and where it works.
     expect(rows[0].find('.l2').text()).toBe('Extract UI semantics')
-    expect(rows[2].find('.l3').text()).toBe('终端 · 同目录 · 20 分钟前')
+    expect(rows[2].find('.l3').text()).toBe('终端 同目录 20 分钟前')
     expect(rows[2].find('.l3').classes()).not.toContain('path')
     expect(rows[3].find('.l3').text()).toBe('网页会话')
     // The identity block: outlined for this conversation's subagents, filled
@@ -61,7 +61,7 @@ describe('PeerRosterCard', () => {
     })
     const place = wrapper.find('.l3')
     expect(place.classes()).toContain('path')
-    expect(place.text()).toBe('终端 · /private/var/folders/kw/T/fb-proto-run/proj · 2 小时前')
+    expect(place.text()).toBe('终端 /private/var/folders/kw/T/fb-proto-run/proj 2 小时前')
   })
 
   it('says a roster is empty instead of drawing nothing', () => {

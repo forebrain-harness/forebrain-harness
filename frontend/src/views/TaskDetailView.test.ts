@@ -113,7 +113,7 @@ describe('TaskDetailView', () => {
     expect(facts).toContain('已完成')
     expect(facts).toContain('最新状态')
     expect(facts).toContain('tasks/tsk-1/3')
-    expect(wrapper.get('[data-testid="task-meta"]').text()).toContain('业务系统 · ibs-audit')
+    expect(wrapper.get('[data-testid="task-meta"]').text()).toContain('业务系统 ibs-audit')
     expect(wrapper.get('[data-testid="task-meta"]').text()).toContain('IB-0917')
     wrapper.unmount()
   })

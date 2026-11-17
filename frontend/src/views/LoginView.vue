@@ -64,7 +64,6 @@
     <div class="lp-foot">
       <span>{{ t('login.connectedTo') }}</span>
       <code>{{ host }}</code>
-      <span>·</span>
       <span>{{ version }}</span>
     </div>
   </main>

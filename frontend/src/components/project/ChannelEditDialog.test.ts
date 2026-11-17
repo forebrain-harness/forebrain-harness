@@ -62,7 +62,7 @@ describe('ChannelEditDialog', () => {
   it('names itself after the channel and every field by the key it reads', () => {
     const wrapper = mountDialog()
 
-    expect(wrapper.find('.forebrain-modal-title').text()).toBe('编辑通道 · 飞书')
+    expect(wrapper.find('.forebrain-modal-title').text()).toBe('编辑通道 飞书')
     const labels = wrapper.findAll('label > span').map((span) => span.text())
     expect(labels).toEqual(['app_id', 'app_secret', 'domain'])
     expect(wrapper.find('[data-testid="channel-field-app_id"]').attributes('value')).toBeUndefined()

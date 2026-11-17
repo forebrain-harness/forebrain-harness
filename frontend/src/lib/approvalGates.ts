@@ -414,7 +414,7 @@ function familyFacts(family: ApprovalFamily, payload: Record<string, unknown>): 
         facts: [[
           paths.length ? t('chat.approvalFactsFiles', { count: paths.length }) : '',
           `+${delta.added} −${delta.removed}`,
-        ].filter(Boolean).join(' · ')],
+        ].filter(Boolean).join(' ')],
         // Several files: one row each (the changed-files list every card
         // shares), then one representative hunk.
         ...(fileRows.length > 1 ? { patchFiles: fileRows } : {}),

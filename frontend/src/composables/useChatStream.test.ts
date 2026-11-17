@@ -318,18 +318,18 @@ describe('useChatStream helpers', () => {
     expect(workedLineText(formatWorkedDurationLabel(3723000))).toBe('Worked for 1h 02m 03s')
     expect(workedLineText(formatWorkedDurationLabel(undefined))).toBe('')
     const finished = todayAt(15, 4)
-    expect(workedLineText(formatWorkedDurationLabel(1200, undefined, finished.toISOString()))).toBe('Worked for 1s · 15:04')
+    expect(workedLineText(formatWorkedDurationLabel(1200, undefined, finished.toISOString()))).toBe('Worked for 1s 15:04')
     // A run that ended another day says which day: a bare clock would read as
     // today's (prototype :3840 "9月18日 23:12").
     const older = new Date(2026, 8, 25, 15, 4, 0)
-    expect(workedLineText(formatWorkedDurationLabel(1200, undefined, older.toISOString()))).toBe('Worked for 1s · Sep 25 15:04')
+    expect(workedLineText(formatWorkedDurationLabel(1200, undefined, older.toISOString()))).toBe('Worked for 1s Sep 25 15:04')
   })
 
   it('carries the checklist progress the engine reported, and drops empty checklists', () => {
     const finished = todayAt(15, 4)
     const withPlan = formatWorkedDurationLabel(72_000, undefined, finished.toISOString(), { done: 3, total: 5, active: 'short task' })
     expect(withPlan).toEqual({ label: 'Worked for 1m 12s', plan: { done: 3, total: 5, active: 'short task' }, time: '15:04' })
-    expect(workedLineText(withPlan)).toBe('Worked for 1m 12s · 3/5 · short task · 15:04')
+    expect(workedLineText(withPlan)).toBe('Worked for 1m 12s 3/5 short task 15:04')
     // A checklist of zero total is no checklist at all.
     expect(formatWorkedDurationLabel(1000, undefined, undefined, { done: 0, total: 0 }).plan).toBeUndefined()
   })
@@ -337,7 +337,7 @@ describe('useChatStream helpers', () => {
   it('names the first-token wait right after the worked duration', () => {
     const finished = todayAt(15, 4)
     expect(workedLineText(formatWorkedDurationLabel(12_000, undefined, finished.toISOString(), undefined, 1200)))
-      .toBe('Worked for 12s · first token 1.2s · 15:04')
+      .toBe('Worked for 12s first token 1.2s 15:04')
     // The reloaded message carries the wait; the worked line derives it the
     // same way the live one does.
     expect(workedLineText(workedLineOf({
@@ -345,7 +345,7 @@ describe('useChatStream helpers', () => {
       workedDurationMs: 12_000,
       firstTokenMs: 1200,
       runFinishedAt: finished.toISOString(),
-    }))).toBe('Worked for 12s · first token 1.2s · 15:04')
+    }))).toBe('Worked for 12s first token 1.2s 15:04')
     // A run that never measured one draws no segment.
     expect(workedLineText(formatWorkedDurationLabel(12_000, undefined, undefined, undefined, 0))).toBe('Worked for 12s')
     expect(workedLineText(workedLineOf({ role: 'assistant', workedDurationMs: 12_000 }))).toBe('Worked for 12s')
@@ -353,7 +353,7 @@ describe('useChatStream helpers', () => {
 
   it('appends the measured first-token wait to the running line', () => {
     expect(formatRuntimeStatusLabel({ kind: 'working', elapsedMs: 3000, firstTokenMs: 1200 }).label)
-      .toBe('Working (3s • esc to interrupt) · first token 1.2s')
+      .toBe('Working (3s • esc to interrupt) first token 1.2s')
     // Unknown stays off the line.
     expect(formatRuntimeStatusLabel({ kind: 'working', elapsedMs: 3000 }).label)
       .toBe('Working (3s • esc to interrupt)')
@@ -385,7 +385,7 @@ describe('useChatStream helpers', () => {
     const retry = (attempt: number, total: number, status = 0) =>
       ({ attempt, total, deadline: 0, status })
     expect(formatTransportRetryLine(retry(2, 10), t, 0).reason).toBe('Network error')
-    expect(formatTransportRetryLine(retry(2, 10), t, 0).label).toBe('Retrying in 0s · attempt 2/10')
+    expect(formatTransportRetryLine(retry(2, 10), t, 0).label).toBe('Retrying in 0s attempt 2/10')
     // Later attempts, the last included, never show the transport's own
     // sentence (method, URL, socket address).
     expect(formatTransportRetryLine(retry(3, 10), t, 0).reason).toBe('Network error')
@@ -397,7 +397,7 @@ describe('useChatStream helpers', () => {
     expect(formatTransportRetryLine(retry(3, 10, 503), t, 0).reason).toBe('API error')
     // The countdown is read against the moment passed in.
     expect(formatTransportRetryLine({ attempt: 1, total: 3, deadline: 8000, status: 0 }, t, 0).label)
-      .toBe('Retrying in 8s · attempt 1/3')
+      .toBe('Retrying in 8s attempt 1/3')
   })
 
   it('formats active runtime labels with interrupt hints', () => {
@@ -1535,7 +1535,7 @@ describe('useChatStream helpers', () => {
 
       const turn = stream.messages.value[1]
       expect(turn).toMatchObject({ role: 'assistant', workedDurationMs: 12000, firstTokenMs: 1200 })
-      expect(workedLineText(workedLineOf(turn)).startsWith('Worked for 12s · first token 1.2s')).toBe(true)
+      expect(workedLineText(workedLineOf(turn)).startsWith('Worked for 12s first token 1.2s')).toBe(true)
     } finally {
       chatMessagesSpy.mockRestore()
       sessionModeSpy.mockRestore()
@@ -1897,7 +1897,7 @@ describe('useChatStream helpers', () => {
       runEvent('tool_call_completed', {
         step_id: 'call-1',
         tool_name: 'shell',
-        summary: 'ran rg caller · 3 matches',
+        summary: 'ran rg caller 3 matches',
         display_body: 'pkg/run/subagent.go:1',
         tool_meta: { tool_name: 'shell', status: 'completed', agent_id: 'task-explore-1' },
       })
@@ -1950,7 +1950,7 @@ describe('useChatStream helpers', () => {
       expect(preamble).toMatchObject({ kind: 'assistant', text: 'Let me grep first.' })
       expect(toolBlock).toMatchObject({
         kind: 'tool',
-        step: { toolName: 'shell', summary: 'ran rg caller · 3 matches', status: 'completed', output: 'pkg/run/subagent.go:1' },
+        step: { toolName: 'shell', summary: 'ran rg caller 3 matches', status: 'completed', output: 'pkg/run/subagent.go:1' },
       })
       expect(answer).toMatchObject({ kind: 'assistant', text: 'Three callers, all in pkg/run.' })
 
@@ -6523,7 +6523,7 @@ describe('useChatStream stream_partial', () => {
       runEvent('tool_call_completed', {
         step_id: 'call-1',
         tool_name: 'shell',
-        summary: 'ran rg · 3 matches',
+        summary: 'ran rg 3 matches',
         display_body: 'a/b.go:1',
         tool_meta: { tool_name: 'shell', status: 'completed' },
       })

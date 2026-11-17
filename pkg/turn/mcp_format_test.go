@@ -76,7 +76,7 @@ func TestBuildMCPInventoryStatesAndNextSession(t *testing.T) {
 	if one.Status != MCPStatusConnected || one.Command != "global-one serve --mcp" || one.ToolCount != 1 || !one.DisabledNext || one.Auth != "none" {
 		t.Fatalf("global-one = %+v", one)
 	}
-	if got := MCPServerStatusLabel(*one); got != "✓ connected · 1 tool · disabled from next session" {
+	if got := MCPServerStatusLabel(*one); got != "✓ connected 1 tool disabled from next session" {
 		t.Fatalf("running-but-disabled label = %q", got)
 	}
 	if broken.Status != MCPStatusFailed || broken.Error != "connection refused" {
@@ -104,7 +104,7 @@ func TestBuildMCPInventoryStatesAndNextSession(t *testing.T) {
 	// Re-enabled mid-session, a server kept out of this one says what the next
 	// session will do.
 	paused.DisabledNext = false
-	if got := MCPServerStatusLabel(*paused); got != "○ disabled · enabled from next session" {
+	if got := MCPServerStatusLabel(*paused); got != "○ disabled enabled from next session" {
 		t.Fatalf("re-enabled label = %q", got)
 	}
 }
@@ -254,17 +254,17 @@ func TestLSPServerStateLabel(t *testing.T) {
 		{
 			"enabled with both problems",
 			event.LSPServerStatus{State: event.LSPStateReady, Enabled: true, Errors: 2, Warnings: 1},
-			"✓ ready · 2 errors, 1 warning",
+			"✓ ready 2 errors, 1 warning",
 		},
 		{
 			"enabled with errors only",
 			event.LSPServerStatus{State: event.LSPStateReady, Enabled: true, Errors: 1},
-			"✓ ready · 1 error",
+			"✓ ready 1 error",
 		},
 		{
 			"enabled with warnings only",
 			event.LSPServerStatus{State: event.LSPStateReady, Enabled: true, Warnings: 3},
-			"✓ ready · 3 warnings",
+			"✓ ready 3 warnings",
 		},
 		{
 			"disabled servers carry no problem counts",
@@ -311,14 +311,14 @@ func TestRenderLSPInventoryMarkdown(t *testing.T) {
 
 	got := RenderLSPInventoryMarkdown(base)
 	want := strings.Join([]string{
-		"Language servers · 2 configured, 1 enabled",
+		"Language servers 2 configured, 1 enabled",
 		"Project: /Users/tester/proj",
 		"",
 		"Enabled",
-		"- gopls · ✓ ready · 1 error · Go",
+		"- gopls ✓ ready 1 error Go",
 		"",
 		"Available",
-		"- pyright · ○ available · Python",
+		"- pyright ○ available Python",
 	}, "\n")
 	if got != want {
 		t.Fatalf("trusted project:\ngot:\n%s\nwant:\n%s", got, want)

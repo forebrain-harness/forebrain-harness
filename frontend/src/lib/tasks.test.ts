@@ -40,9 +40,9 @@ describe('the batch task vocabulary', () => {
   })
 
   it('says which door a task came in by, and what the door recorded', () => {
-    expect(taskSourceLabel('api', 'ibs-audit')).toBe('业务系统 · ibs-audit')
-    expect(taskSourceLabel('cron', '每个工作日 9:00')).toBe('定时任务 · 每个工作日 9:00')
-    expect(taskSourceLabel('web')).toBe('网页 · 手工新建')
+    expect(taskSourceLabel('api', 'ibs-audit')).toBe('业务系统 ibs-audit')
+    expect(taskSourceLabel('cron', '每个工作日 9:00')).toBe('定时任务 每个工作日 9:00')
+    expect(taskSourceLabel('web')).toBe('网页 手工新建')
     expect(taskSourceLabel('channel')).toBe('通道')
     expect(taskOriginLabel('channel')).toBe('通道')
   })

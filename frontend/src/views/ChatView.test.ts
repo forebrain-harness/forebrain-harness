@@ -519,7 +519,7 @@ describe('ChatView subagent drawer', () => {
       expect(useWorkbench().open.value).toBe(false)
       expect(drawer(wrapper).exists()).toBe(true)
       const planTab = wrapper.get('[data-testid="plan-tab-plan:add-auth.md"]')
-      expect(planTab.text()).toContain('Plan · Plan: add auth')
+      expect(planTab.text()).toContain('Plan Plan: add auth')
       expect(planTab.get('[role="tab"]').attributes('aria-selected')).toBe('true')
 
       // The document, rendered: its heading, its meta strip, its progress.
@@ -1863,7 +1863,7 @@ describe('ChatView delivers a turn once', () => {
       stepId: 'call-1',
       toolName: 'present_files',
       summary: 'presented files',
-      header: '已交付文件 · Q3 报告.docx',
+      header: '已交付文件 Q3 报告.docx',
       status: 'completed',
       result: PRESENTED,
     }

@@ -250,14 +250,14 @@ function sheetHeader(col: number): string {
 
 const sheetNote = computed(() => {
   const sheets = t('chat.artifactSheetCount', { count: sheetNames.value.length })
-  return sheetTruncated.value ? `${sheets} · ${t('chat.artifactSheetTruncated')}` : sheets
+  return sheetTruncated.value ? `${sheets} ${t('chat.artifactSheetTruncated')}` : sheets
 })
 
 const archivePage = computed(() => archiveEntries.value.slice(archiveOffset.value, archiveOffset.value + ARCHIVE_PAGE))
 
 const archiveNote = computed(() => {
   const total = t('chat.artifactEntryCount', { count: archiveEntries.value.length })
-  return archiveTruncated.value ? `${total} · ${t('chat.artifactEntriesTruncated')}` : total
+  return archiveTruncated.value ? `${total} ${t('chat.artifactEntriesTruncated')}` : total
 })
 
 function pageArchive(direction: number) {

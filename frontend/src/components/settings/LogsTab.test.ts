@@ -225,7 +225,7 @@ describe('LogsTab', () => {
     await flushPromises()
 
     expect(exchange).toHaveBeenCalledWith('2026-11-11', 'gw-1-000001')
-    expect(document.querySelector('[data-testid="log-drawer-title"]')?.textContent).toContain('模型调用 · 修复页脚 token 统计')
+    expect(document.querySelector('[data-testid="log-drawer-title"]')?.textContent).toContain('模型调用 修复页脚 token 统计')
     wrapper.unmount()
   })
 

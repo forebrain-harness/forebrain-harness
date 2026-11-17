@@ -49,7 +49,7 @@ describe('the card head vocabulary', () => {
     expect(headerSuffixWords('matching “go test”', 'zh')).toBe('匹配 “go test”')
     expect(headerSuffixWords('in this project', 'zh')).toBe('在 this project 中')
     // An MCP tool's own field summary is external wording — never translated.
-    expect(headerSuffixWords('repo: forebrain-harness · limit: 10', 'zh')).toBe('repo: forebrain-harness · limit: 10')
+    expect(headerSuffixWords('repo: forebrain-harness limit: 10', 'zh')).toBe('repo: forebrain-harness limit: 10')
     expect(headerSuffixWords('lines 15-20', 'en')).toBe('lines 15-20')
   })
 })

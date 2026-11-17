@@ -532,11 +532,11 @@ func TestSkillRowDescriptionNamesTheShadowingLayer(t *testing.T) {
 		ShadowedBy: []string{"/proj/.forebrain/skills/improve"},
 	}
 	origins := skillOriginsByPath([]skill.Entry{project, cross})
-	if got := skillRowDescription(project, origins, true); !strings.HasSuffix(got, "· shadows the Cross-tool copy") {
+	if got := skillRowDescription(project, origins, true); !strings.HasSuffix(got, "shadows the Cross-tool copy") {
 		t.Fatalf("winning copy description = %q", got)
 	}
 	got := skillRowDescription(cross, origins, true)
-	if !strings.HasPrefix(got, "(off) ") || !strings.HasSuffix(got, "· shadowed by the Project copy") {
+	if !strings.HasPrefix(got, "(off) ") || !strings.HasSuffix(got, "shadowed by the Project copy") {
 		t.Fatalf("shadowed copy description = %q", got)
 	}
 	if plain := skillRowDescription(cross, origins, false); strings.Contains(plain, "(off)") {
@@ -558,7 +558,7 @@ func TestMemoryImportRowsUseTwoColumns(t *testing.T) {
 	if rows[0].Label != "release-check" || rows[0].Category != "Memory" {
 		t.Fatalf("row = %+v", rows[0])
 	}
-	if rows[0].Description != "Verify a release · new · adds /release-check" {
+	if rows[0].Description != "Verify a release new adds /release-check" {
 		t.Fatalf("description = %q", rows[0].Description)
 	}
 	require.Equal(t, []string{"release-check"}, names)
@@ -795,7 +795,7 @@ func TestCommandControllerHandlePermissionsAppliesSelectedPreset(t *testing.T) {
 	if !ctrl.handlePermissions("s1") {
 		t.Fatalf("expected permissions command handled")
 	}
-	if got := selector.selectRichDefaultIdx; got != 0 || selector.selectRichItems[0].Label != "Default" {
+	if got := selector.selectRichDefaultIdx; got != 0 || selector.selectRichItems[0].Label != "Workspace write" {
 		t.Fatalf("expected the picker to open on the preset in force, got default idx %d", got)
 	}
 	if len(session.appliedPresets) != 1 || session.appliedPresets[0] != safety.PresetFullAccess {
@@ -815,7 +815,7 @@ func TestCommandControllerHandlePermissionsShowsEveryPreset(t *testing.T) {
 	if !ctrl.handlePermissions("s1") {
 		t.Fatalf("expected permissions command handled")
 	}
-	want := []string{"Default", "Full Access"}
+	want := []string{"Workspace write", "Full Access"}
 	if len(selector.selectRichItems) != len(want) {
 		t.Fatalf("unexpected picker items: %#v", selector.selectRichItems)
 	}
@@ -1875,7 +1875,7 @@ func TestReplaySubagentWorkerBodyWorkedLineClosesTheView(t *testing.T) {
 	if strings.TrimSpace(answer.Content) != "final answer" {
 		t.Fatalf("block before the closing line = %#v, want the execution's final answer", answer)
 	}
-	wantClosing := "Worked for 28s · first token 7.5s · " + endedAt.Local().Format("15:04")
+	wantClosing := "Worked for 28s first token 7.5s " + endedAt.Local().Format("15:04")
 	if closing := vm.blocks[5].frame; closing.Title != wantClosing {
 		t.Fatalf("closing title = %q, want %q", closing.Title, wantClosing)
 	}
@@ -3794,8 +3794,8 @@ func TestResumeClosesEveryRunWithItsWorkedLine(t *testing.T) {
 		}
 	}
 	want := []string{
-		"first answer", "Worked for 1s · " + finished.Local().Format("15:04"),
-		"second answer", "Worked for 1m 12s · " + finished.Add(time.Minute).Local().Format("15:04"),
+		"first answer", "Worked for 1s " + finished.Local().Format("15:04"),
+		"second answer", "Worked for 1m 12s " + finished.Add(time.Minute).Local().Format("15:04"),
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("replay = %q\nwant   %q", got, want)
@@ -3854,7 +3854,7 @@ func TestReplayWorkedLineCarriesFirstToken(t *testing.T) {
 		Worked:     12 * time.Second,
 		FirstToken: 1200 * time.Millisecond,
 	}
-	if got := replayWorkedFrame(line, event.PlanProgress{}).Title; !strings.HasPrefix(got, "Worked for 12s · first token 1.2s · ") {
+	if got := replayWorkedFrame(line, event.PlanProgress{}).Title; !strings.HasPrefix(got, "Worked for 12s first token 1.2s ") {
 		t.Fatalf("replayed worked title = %q, want the first-token segment after the duration", got)
 	}
 	line.FirstToken = 0
@@ -3929,8 +3929,8 @@ func TestResumedWorkedLineCarriesItsChecklistAndIsTheDrawerEntry(t *testing.T) {
 		}
 	}
 	require.Len(titles, 2, "one closing line per run")
-	require.Contains(titles[0], "☑2/3 · Writing tests", "the run's own checklist, as live reported it")
-	require.Contains(titles[1], "☑2/3 · Writing tests", "a run that updated nothing reports the state it inherited")
+	require.Contains(titles[0], "☑2/3 Writing tests", "the run's own checklist, as live reported it")
+	require.Contains(titles[1], "☑2/3 Writing tests", "a run that updated nothing reports the state it inherited")
 	require.NotContains(titles[1], "子代理事项")
 
 	// The replayed token is a drawer entry exactly like the live one.
@@ -3978,7 +3978,7 @@ func TestReplayClosesASilentFailedRunAfterItsError(t *testing.T) {
 			got = append(got, block.frame.Title)
 		}
 	}
-	want := []string{"user:hello", "error", "Worked for 2s · " + finished.Local().Format("15:04"), "user:again"}
+	want := []string{"user:hello", "error", "Worked for 2s " + finished.Local().Format("15:04"), "user:again"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("replay = %q\nwant   %q", got, want)
 	}
@@ -4322,10 +4322,10 @@ func TestReplayedQueryRowSettlesWhenItsEndCameFirst(t *testing.T) {
 		t.Fatalf("replayed call duration = %v, want the row's 1600ms", card.Duration)
 	}
 	rendered := strings.Join(renderFanoutForTest(*card), "\n")
-	if !strings.Contains(rendered, "Checked 1 general-purpose task · 1.6s") {
+	if !strings.Contains(rendered, "Checked 1 general-purpose task 1.6s") {
 		t.Fatalf("replayed header lost the call duration:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "✓ 读 README · 42s") {
+	if !strings.Contains(rendered, "✓ 读 README 42s") {
 		t.Fatalf("replayed query row did not settle with its execution's end:\n%s", rendered)
 	}
 }
@@ -4403,7 +4403,7 @@ func TestSkillEntryMenuDescriptions(t *testing.T) {
 	require.Equal(t, "2 files changed since v3", menu[0].desc)
 	require.Equal(t, "Compare the draft with v3", menu[1].desc)
 	require.Equal(t, "Keep v3, drop the unpublished changes", menu[2].desc)
-	require.Equal(t, "3 versions · compare or restore", menu[5].desc)
+	require.Equal(t, "3 versions compare or restore", menu[5].desc)
 }
 
 // The main list carries the status segment before the description, each piece
@@ -4429,10 +4429,10 @@ func TestSkillsListStatusSegments(t *testing.T) {
 		}
 		got[item.Label] = stripANSI(item.Description)
 	}
-	require.Equal(t, "Draft · Gateway 5xx triage", got["gateway-5xx"])
-	require.Equal(t, "v3 · unpublished changes · Runbook · update available", got["gateway-ops"])
-	require.Equal(t, "v1 · (off) Template", got["incident-review"])
-	require.Equal(t, "Built-in · Work on skills", got["skill-workshop"])
+	require.Equal(t, "Draft Gateway 5xx triage", got["gateway-5xx"])
+	require.Equal(t, "v3 unpublished changes Runbook update available", got["gateway-ops"])
+	require.Equal(t, "v1 (off) Template", got["incident-review"])
+	require.Equal(t, "Built-in Work on skills", got["skill-workshop"])
 }
 
 // A pending skill publishes through the confirm page and its release note, and
@@ -4460,7 +4460,7 @@ func TestSkillsPublishFlow(t *testing.T) {
 	require.Equal(t, "Publish v4", selector.reviewActions[0][0])
 	require.Equal(t, "Publish repo v4?\nNew sessions use v4; sessions already running keep v3.", selector.reviewLabels[0])
 	// The list came back with the success line.
-	if len(selector.richLabels) < 3 || !strings.Contains(stripANSI(selector.richLabels[2]), "Published repo v4 · new sessions use it") {
+	if len(selector.richLabels) < 3 || !strings.Contains(stripANSI(selector.richLabels[2]), "Published repo v4 new sessions use it") {
 		t.Fatalf("list notice missing: %#v", selector.richLabels)
 	}
 }
@@ -4563,7 +4563,7 @@ func TestSkillsToggleStaysInSheet(t *testing.T) {
 
 	require.Equal(t, []string{"/skills/.system/skill-workshop"}, session.appliedEnabledPaths)
 	require.GreaterOrEqual(t, len(selector.richLabels), 3)
-	if !strings.Contains(stripANSI(selector.richLabels[2]), "Disabled repo · new sessions skip it") {
+	if !strings.Contains(stripANSI(selector.richLabels[2]), "Disabled repo new sessions skip it") {
 		t.Fatalf("sheet did not show the toggle status: %#v", selector.richLabels)
 	}
 }
@@ -4602,7 +4602,7 @@ func TestSkillsDraftOnlyListed(t *testing.T) {
 		}
 		listed[item.Label] = stripANSI(item.Description)
 	}
-	require.Equal(t, "Draft · Gateway 5xx triage", listed["gateway-5xx"])
+	require.Equal(t, "Draft Gateway 5xx triage", listed["gateway-5xx"])
 	// Opening the draft-only skill offers publish, changes, workshop, discard.
 	require.Equal(t,
 		[]string{"Publish v1", "Show changes", "Continue in workshop", "Discard draft"},

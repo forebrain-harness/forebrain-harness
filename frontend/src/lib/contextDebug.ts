@@ -227,8 +227,8 @@ function timelineEntryToEvidence(item: SessionContextTimelineEntry): ContextDebu
     return {
       kind,
       title: toolName,
-      detail: detailParts.join(' · '),
-      meta: [String(item.callId ?? '').trim(), String(item.runId ?? '').trim(), String(item.createdAtUtc ?? '').trim()].filter(Boolean).join(' · '),
+      detail: detailParts.join(' '),
+      meta: [String(item.callId ?? '').trim(), String(item.runId ?? '').trim(), String(item.createdAtUtc ?? '').trim()].filter(Boolean).join(' '),
       tone: 'warning',
     }
   }
@@ -238,7 +238,7 @@ function timelineEntryToEvidence(item: SessionContextTimelineEntry): ContextDebu
     String(item.summarySource ?? '').trim(),
     String(item.boundaryId ?? '').trim(),
     String(item.createdAtUtc ?? '').trim(),
-  ].filter(Boolean).join(' · ')
+  ].filter(Boolean).join(' ')
   return {
     kind,
     title: trigger,
@@ -248,7 +248,7 @@ function timelineEntryToEvidence(item: SessionContextTimelineEntry): ContextDebu
       item.tokensBefore ? `${compactTokenCount(item.tokensBefore)} before` : '',
       item.tokensAfter ? `${compactTokenCount(item.tokensAfter)} after` : '',
       String(item.summary ?? '').trim(),
-    ].filter(Boolean).join(' · '),
+    ].filter(Boolean).join(' '),
     meta,
     tone: item.reactive ? 'warning' : 'healthy',
   }

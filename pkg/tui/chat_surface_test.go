@@ -452,13 +452,13 @@ func TestResumeListShowsExecutionStatus(t *testing.T) {
 	rows, err := s.ListSessionsRecent(ctx, 10)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
-	require.Equal(t, "monthly report · stopped", rows[0].Title)
+	require.Equal(t, "monthly report stopped", rows[0].Title)
 
 	// The same suffix on the paged read the picker browses with.
 	paged, err := s.ListSessionsRecentPaged(ctx, 10, 0)
 	require.NoError(t, err)
 	require.Len(t, paged, 1)
-	require.Equal(t, "monthly report · stopped", paged[0].Title)
+	require.Equal(t, "monthly report stopped", paged[0].Title)
 
 	// A conversation that is not an execution keeps the title the store gave
 	// it: nothing is appended where there is no status to report.

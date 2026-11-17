@@ -541,7 +541,7 @@ func Run(ctx context.Context, opts Options) error {
 				summary = fmt.Sprintf("%s %d/%d", migration.Stage, migration.Done, migration.Total)
 			}
 			if detail := strings.TrimSpace(migration.Detail); detail != "" {
-				summary += " · " + detail
+				summary += " " + detail
 			}
 			renderer.RenderFrame(Frame{
 				Kind: FrameMigration, StepID: migrationStepID,
@@ -598,7 +598,7 @@ func Run(ctx context.Context, opts Options) error {
 				handleLSPRecommendation(renderer, selector, &state, decider, lspMsg.Rec)
 			}
 		case LSPInstallProgressMsg:
-			renderer.RenderTransientStatus(transientSourceLSP, "lsp: installing "+lspMsg.ServerID+" · "+lspMsg.Line)
+			renderer.RenderTransientStatus(transientSourceLSP, "lsp: installing "+lspMsg.ServerID+" "+lspMsg.Line)
 		case LSPInstallDoneMsg:
 			renderer.FinishTransientStatus(transientSourceLSP)
 			if lspMsg.Err != "" {
@@ -1373,9 +1373,9 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		// Bare /rename asks for the name in place, saying what the
 		// conversation is called now, instead of answering with its usage.
 		if len(args) == 0 && cmds.selector != nil {
-			label := "Rename conversation · type the new name"
+			label := "Rename conversation type the new name"
 			if current := lookupSessionTitle(ctx, cmds.session, state.sessionID); current != "" && current != state.sessionID {
-				label = "Rename “" + current + "” · type the new name"
+				label = "Rename “" + current + "” type the new name"
 			}
 			name, ok, err := cmds.selector.Input(label, "")
 			if err != nil {
@@ -3731,7 +3731,7 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 // command's description in one column beside the names.
 func slashMenuPanel(o *SlashOverlay) slashPanel {
 	b := newPanelBuilder()
-	b.hint("↑/↓ to navigate · Tab to complete · Enter to run · Esc to close")
+	b.hint("↑/↓ to navigate Tab to complete Enter to run Esc to close")
 	if o == nil || len(o.Visible) == 0 {
 		b.text(panelIndent, "No matching commands", nil)
 		return b.panel()
@@ -4377,7 +4377,7 @@ func executePeerTurn(ctx context.Context, events <-chan inputEvent, notifyCh <-c
 			MarkdownBody: card.MarkdownBody, Marker: card.Marker, Final: true,
 		}
 	} else if name := strings.TrimSpace(prompt.FromName); name != "" {
-		frame.Title = "peer · " + name
+		frame.Title = "peer " + name
 	}
 	renderer.RenderFrame(frame)
 	sessionID, envelope := strings.TrimSpace(prompt.SessionID), prompt.Text
@@ -4793,7 +4793,7 @@ func mcpStartupStatusText(progress run.MCPStartupProgress, snapshot run.MCPSnaps
 	if progress.CanSkipOptional() {
 		parts = append(parts, "esc to skip")
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // workingStatusFormatter renders the live status line for whichever view it is
@@ -4827,12 +4827,12 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 			}
 			title := transientSpinnerFrame(tick) + " Working (" + formatWorkingElapsed(snap.Elapsed) + ")"
 			if counters := formatWorkingCounters(snap.Counters); counters != "" {
-				title += " · " + counters
+				title += " " + counters
 			}
 			// The wait this execution's model cost before its first output, live
 			// here the way the conversation's own Working line shows the turn's.
 			if wait := firstTokenLabel(snap.Counters.FirstToken); wait != "" {
-				title += " · " + wait
+				title += " " + wait
 			}
 			return title
 		}
@@ -4846,19 +4846,19 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 		working := "Working"
 		switch {
 		case counters.GoalChecking:
-			working = fmt.Sprintf("Checking whether the goal is met · after round %d", counters.GoalRound)
+			working = fmt.Sprintf("Checking whether the goal is met after round %d", counters.GoalRound)
 		case counters.GoalRound > 0:
-			working = fmt.Sprintf("Working toward the goal · round %d", counters.GoalRound)
+			working = fmt.Sprintf("Working toward the goal round %d", counters.GoalRound)
 		}
 		title := transientSpinnerFrame(tick) + " " + working + " (" + formatWorkingElapsed(elapsed) + " • esc to interrupt)"
 		if c := formatWorkingCounters(counters); c != "" {
-			title += " · " + c
+			title += " " + c
 		}
 		// How long the model took to start answering this turn, once the
 		// engine has measured it. It is the run's own figure, shown live here
 		// before the "Worked for" line repeats it when the turn ends.
 		if wait := firstTokenLabel(counters.FirstToken); wait != "" {
-			title += " · " + wait
+			title += " " + wait
 		}
 		return title
 	}
@@ -4875,8 +4875,8 @@ func transportRetryStatusLine(tick int, s TransportRetryStatus, now time.Time) s
 	if s.Status > 0 {
 		reason = "API error"
 	}
-	return transientSpinnerFrame(tick) + " " + reason + " · Retrying in " + formatRetryCountdown(s.Deadline.Sub(now)) +
-		" · attempt " + strconv.Itoa(s.Retry) + "/" + strconv.Itoa(s.Total)
+	return transientSpinnerFrame(tick) + " " + reason + " Retrying in " + formatRetryCountdown(s.Deadline.Sub(now)) +
+		" attempt " + strconv.Itoa(s.Retry) + "/" + strconv.Itoa(s.Total)
 }
 
 // formatRetryCountdown renders a remaining wait rounded up to the second:
@@ -4911,7 +4911,7 @@ func formatWorkingCounters(c Counters) string {
 	}
 	progress := "☑" + strconv.Itoa(c.PlanDone) + "/" + strconv.Itoa(c.PlanTotal)
 	if active := strings.TrimSpace(c.PlanActive); active != "" {
-		progress += " · " + active
+		progress += " " + active
 	}
 	return progress
 }
@@ -5691,7 +5691,7 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		renderer.RenderFrame(Frame{
 			Kind:    FrameStatus,
 			Title:   "agents cancelled",
-			Content: fmt.Sprintf("primary %d · subagents %d", summary.Main, summary.Subagents),
+			Content: fmt.Sprintf("primary %d subagents %d", summary.Main, summary.Subagents),
 		})
 		return true
 	case hotkeyCycleMode:

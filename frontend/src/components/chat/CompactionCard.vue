@@ -93,7 +93,7 @@ const runningDetail = computed(() => {
   const tokens = props.data.tokensBefore
     ? t('chat.compaction.tokens', { count: formatTokenCount(props.data.tokensBefore) })
     : ''
-  return [phase, tokens].filter(Boolean).join(' · ')
+  return [phase, tokens].filter(Boolean).join(' ')
 })
 
 const doneDetail = computed(() => {
@@ -106,7 +106,7 @@ const doneDetail = computed(() => {
       : t('chat.compaction.unchanged', { before: formatTokenCount(before), after: formatTokenCount(after) }))
   }
   if (props.data.duration) parts.push(props.data.duration)
-  return parts.join(' · ')
+  return parts.join(' ')
 })
 
 const open = ref(false)

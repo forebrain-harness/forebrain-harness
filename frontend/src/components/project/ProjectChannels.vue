@@ -49,7 +49,7 @@
         <span v-if="!row.configured" class="text-[var(--forebrain-muted-text)]">{{ t('channels.unconfigured') }}</span>
         <span v-else class="forebrain-cell-1">
           <template v-for="(part, index) in summaryOf(row)" :key="part.key">
-            <span v-if="index" class="text-[var(--forebrain-muted-text)]"> · </span>{{ part.key }}
+            <span v-if="index" class="text-[var(--forebrain-muted-text)]"> </span>{{ part.key }}
             <span class="font-mono text-[var(--forebrain-text-2)]">{{ part.value }}</span>
           </template>
         </span>

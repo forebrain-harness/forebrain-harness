@@ -215,7 +215,7 @@
           <div class="sec">
             {{ exchange.summary ? t('logs.events') : t('logs.responseBody') }}
             <span class="sp" />
-            <small>{{ t('logs.rawLines', { n: rawRows.length }) }} · {{ formatBytes(responsePayload.total) }}</small>
+            <small>{{ t('logs.rawLines', { n: rawRows.length }) }} {{ formatBytes(responsePayload.total) }}</small>
             <a class="btn plain sm" :href="downloadUrl('response')" download data-testid="log-drawer-raw-download">
               <Download class="ic" aria-hidden="true" />{{ t('logs.download') }}
             </a>
@@ -452,7 +452,7 @@ const recordFacts = computed<Fact[]>(() => {
   const record = props.record
   if (!record) return []
   const facts: Fact[] = [
-    { label: t('logs.factSource'), value: `${sourceText(record.source)} · ${record.host} · ${t('logs.factProcess', { pid: record.pid })}` },
+    { label: t('logs.factSource'), value: `${sourceText(record.source)} ${record.host} ${t('logs.factProcess', { pid: record.pid })}` },
   ]
   if (record.projectName) facts.push({ label: t('logs.factProject'), value: record.projectName })
   if (record.session) {
@@ -496,7 +496,7 @@ const callFacts = computed<Fact[]>(() => {
   if (view.scope.run) facts.push({ label: t('logs.factRun'), value: view.scope.run, mono: true, action: 'run' })
   facts.push({
     label: t('logs.factSource'),
-    value: `${sourceText(view.scope.source)} · ${view.scope.host} · ${t('logs.factProcess', { pid: view.scope.pid })}`,
+    value: `${sourceText(view.scope.source)} ${view.scope.host} ${t('logs.factProcess', { pid: view.scope.pid })}`,
   })
   const start = view.request?.t ?? view.response?.t ?? ''
   const end = view.response?.t ?? start

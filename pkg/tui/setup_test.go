@@ -623,7 +623,7 @@ func TestProviderPageMarksASubscriptionAlreadySignedIn(t *testing.T) {
 	withSubscriptions(t, sub)
 	setup := newLLMSetup(PromptConfig{Selector: &fakeSelector{}, Output: io.Discard, Home: t.TempDir()})
 	rows := setup.providerRows()
-	if !strings.HasSuffix(rows[0].item.Description, "· Signed in") {
+	if !strings.HasSuffix(rows[0].item.Description, "Signed in") {
 		t.Fatalf("signed-in row = %q, want the badge", rows[0].item.Description)
 	}
 	if sub.probeCalls != 1 {
@@ -1459,7 +1459,7 @@ func TestCustomModelFlowAsksForAnOptionalProvider(t *testing.T) {
 	for _, fact := range typed.reviewFacts[0] {
 		facts[fact.Label] = fact.Value
 	}
-	if got := facts["Model data"]; got != "alibaba/qwen4-max-preview · 1M window" {
+	if got := facts["Model data"]; got != "alibaba/qwen4-max-preview 1M window" {
 		t.Fatalf("review Model data = %q, want the matched entry and its window (all: %+v)", got, facts)
 	}
 }
@@ -2484,8 +2484,8 @@ func waitForPanelText(r *Renderer, needle string) string {
 // page happens to carry gets that page back instead of the sign-in page — and
 // then asserts on the wrong one. It is a race, so it only shows up sometimes.
 var confirmPageHints = []string{
-	"Y to confirm · N or Enter to decline",
-	"Y or Enter to confirm · N to decline",
+	"Y to confirm N or Enter to decline",
+	"Y or Enter to confirm N to decline",
 }
 
 // waitForSignInPage is waitForPanelText for a page that comes after that
@@ -2981,7 +2981,7 @@ func TestConnectSetupPanelArkPageAcrossMachines(t *testing.T) {
 		for _, want := range []string{
 			"Sign in with Volcengine Ark", "Opening your browser…",
 			"https://signin.volcengine.com/device?user_code=ABCD-1234", "Code: ABCD-1234",
-			"Waiting for you to confirm in the browser · expires in ",
+			"Waiting for you to confirm in the browser expires in ",
 		} {
 			if !strings.Contains(shown, want) {
 				t.Fatalf("panel = %q, want it to carry %q", shown, want)
@@ -3005,7 +3005,7 @@ func TestConnectSetupPanelArkPageAcrossMachines(t *testing.T) {
 		shown := devicePanelAnswers(t, sub, cfg, "y\r", "Open this URL on any device:")
 		for _, want := range []string{
 			"Open this URL on any device: https://signin.volcengine.com/device?user_code=ABCD-1234",
-			"Code: ABCD-1234", "Waiting for you to confirm · expires in ",
+			"Code: ABCD-1234", "Waiting for you to confirm expires in ",
 		} {
 			if !strings.Contains(shown, want) {
 				t.Fatalf("panel = %q, want it to carry %q", shown, want)

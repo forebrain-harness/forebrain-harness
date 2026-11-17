@@ -84,7 +84,7 @@
       <!-- A heartbeat keeps asking while nobody looks: the others are listed
            here so one left running elsewhere is never out of sight. -->
       <section v-if="others.length" class="heartbeat-others" data-testid="heartbeat-others">
-        <div class="heartbeat-others-title">{{ t('heartbeat.others') }} · {{ others.length }}</div>
+        <div class="heartbeat-others-title">{{ t('heartbeat.others') }} {{ others.length }}</div>
         <ul class="mt-1 space-y-0.5">
           <li v-for="beat in others" :key="beat.sessionId" class="heartbeat-other">
             <button
@@ -190,7 +190,7 @@ const scheduleText = computed(() => {
     ? [t('heartbeat.pausedHint')]
     : [statusOf(current), ...(current.nextRunAt ? [t('heartbeat.nextAt', { time: timeOf(current.nextRunAt) })] : [])]
   if (current.lastFiredAt) parts.push(t('heartbeat.lastAt', { time: timeOf(current.lastFiredAt) }))
-  return parts.join(' · ')
+  return parts.join(' ')
 })
 
 /** The form shows what is saved, or a fresh default when nothing is. */

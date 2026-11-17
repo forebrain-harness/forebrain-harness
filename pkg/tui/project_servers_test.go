@@ -62,7 +62,7 @@ func TestProjectServersPanelGolden(t *testing.T) {
 		"Language servers",
 		"● gopls",
 		"○ Always allow this project's servers",
-		"↑/↓ to navigate · Space to select · Enter to confirm · Esc to decline all",
+		"↑/↓ to navigate Space to select Enter to confirm Esc to decline all",
 	)
 
 	// One entry reads as one server and a kind with no entries draws no group.

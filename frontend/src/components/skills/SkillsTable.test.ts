@@ -65,8 +65,8 @@ describe('SkillsTable', () => {
     // 有更新 sits by the name, the layer badge in its own column, and the
     // layer's name is all it says — no primary agent name in front of it.
     expect(shared.findAll('.forebrain-badge').map((badge) => badge.text())).toEqual(['有更新', '共享', 'v2', '已启用'])
-    expect(shared.text()).toContain('shared · /h/golang-testing')
-    expect(shared.find('.forebrain-cell-1').text()).toBe('shared · /h/golang-testing')
+    expect(shared.text()).toContain('shared /h/golang-testing')
+    expect(shared.find('.forebrain-cell-1').text()).toBe('shared /h/golang-testing')
   })
 
   it('offers 查看, 下载 zip and 删除 as icon buttons, and no text button at all', () => {

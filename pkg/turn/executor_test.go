@@ -332,7 +332,7 @@ func TestExecLSPSlash(t *testing.T) {
 	require.True(t, res.Handled)
 	require.Equal(t, "lsp: unavailable", res.Reply)
 
-	res = Execute(Context{Surface: SurfaceTUI, LSP: lspSlashStub{reply: "Language servers · 1 configured", handled: true}}, "/lsp")
+	res = Execute(Context{Surface: SurfaceTUI, LSP: lspSlashStub{reply: "Language servers 1 configured", handled: true}}, "/lsp")
 	require.True(t, res.Handled)
-	require.Equal(t, "Language servers · 1 configured", res.Reply)
+	require.Equal(t, "Language servers 1 configured", res.Reply)
 }

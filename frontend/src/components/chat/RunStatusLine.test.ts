@@ -26,21 +26,22 @@ describe('RunStatusLine', () => {
     expect(segments[1]).toContain('3/5')
     expect(segments[1]).toContain('fix the middleware')
     expect(segments[2]).toBe('first token 1.2s')
-    expect(wrapper.findAll('.run-status-dot').map((dot) => dot.text())).toEqual(['·', '·'])
+    // No separator dot joins the segments (owner ruling): the flex gap does it.
+    expect(wrapper.text()).not.toContain('·')
     expect(wrapper.attributes('role')).toBe('status')
   })
 
   it('draws the state alone when the run has no checklist and no tail', () => {
     const wrapper = mount(RunStatusLine, { props: { label: 'Working (3s • esc to interrupt)' } })
-    expect(wrapper.findAll('.run-status-dot')).toHaveLength(0)
+    expect(wrapper.text()).not.toContain('·')
     expect(wrapper.findAll('.run-status-tail')).toHaveLength(0)
     expect(wrapper.findComponent(PlanProgressSegments).exists()).toBe(false)
     expect(wrapper.get('[role="status"]').text()).toBe('Working (3s • esc to interrupt)')
   })
 
-  it('keeps one dot between the checklist and the tail when there is no plan', () => {
+  it('keeps the tail its own segment, with no separator dot, when there is no plan', () => {
     const wrapper = mount(RunStatusLine, { props: { label: 'Working (3s)', tail: 'first token 0.9s' } })
-    expect(wrapper.findAll('.run-status-dot')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('·')
     expect(wrapper.findAll('.run-status-seg').map((seg) => seg.text())).toEqual(['Working (3s)', 'first token 0.9s'])
   })
 })

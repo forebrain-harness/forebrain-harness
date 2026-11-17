@@ -42,8 +42,8 @@
               </button>
             </span>
           </div>
-          <div class="mt-0.5 text-[11px] text-[var(--forebrain-text-2)]">{{ kindLabel(v) }}<span v-if="v.note"> · {{ v.note }}</span></div>
-          <div class="text-[11px] text-[var(--forebrain-muted-text)]">{{ formatTime(v.at) }}<span v-if="v.stat"> · {{ t('workshop.statLine', { added: v.stat.added, removed: v.stat.removed }) }}</span></div>
+          <div class="mt-0.5 text-[11px] text-[var(--forebrain-text-2)]">{{ kindLabel(v) }}<span v-if="v.note"> {{ v.note }}</span></div>
+          <div class="text-[11px] text-[var(--forebrain-muted-text)]">{{ formatTime(v.at) }}<span v-if="v.stat"> {{ t('workshop.statLine', { added: v.stat.added, removed: v.stat.removed }) }}</span></div>
           <div v-if="index === 0 && visibleVersions.length === 1" class="sr-only">{{ t('workshop.newest') }}</div>
         </div>
       </div>
@@ -127,7 +127,7 @@ const KIND_LABELS: Record<string, Parameters<typeof t>[0]> = {
 
 function kindLabel(v: SkillVersionRecord): string {
   const base = t(KIND_LABELS[v.kind] ?? 'workshop.versionKind.published')
-  return v.source ? `${base} · ${v.source}` : base
+  return v.source ? `${base} ${v.source}` : base
 }
 
 function formatTime(value: string): string {

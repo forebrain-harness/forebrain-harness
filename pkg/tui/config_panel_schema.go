@@ -114,7 +114,7 @@ var configSectionSchemas = []configSectionSchema{
 		Fields: []configField{{
 			Label: "Approval preset", Kind: configFieldEnum,
 			Options:      []string{"workspace_write", "full_access"},
-			OptionLabels: map[string]string{"workspace_write": "Default", "full_access": "Full access"},
+			OptionLabels: map[string]string{"workspace_write": "Workspace write", "full_access": "Full access"},
 			DefaultValue: "workspace_write",
 			Hint:         "Default: reads and writes inside the workspace proceed, anything outside it asks first; full access: nothing asks unless you refuse it. A change here affects new sessions only.",
 		}},

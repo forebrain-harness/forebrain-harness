@@ -66,7 +66,7 @@ describe('SubagentRunPill', () => {
     expect(card.text()).toContain('zhipuai/glm-5.3-flash')
     expect(card.text()).toContain('High')
     expect(wrapper.get('[data-testid="subagent-context-window"]').text()).toBe('1M')
-    expect(card.text()).toContain('12.4k in · 900 out')
+    expect(card.text()).toContain('12.4k in 900 out')
     expect(card.text()).toContain('Model and reasoning are fixed at dispatch')
     // The reading is read-only; the card's one control opens the full context.
     const buttons = card.findAll('button, a')

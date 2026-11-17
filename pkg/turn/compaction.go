@@ -46,7 +46,7 @@ func ExecuteCompact(ctx context.Context, sessionID string, svc Compactor) Compac
 	}
 	reply := "Context compacted"
 	if banner := assembly.FormatCompactBanner(assembly.CompactResultPayload(res), res.Duration); banner != "" {
-		reply += " · " + banner
+		reply += " " + banner
 	}
 	if res.Strategy == "local" {
 		reply += "\n\n" + assembly.WarningMessage

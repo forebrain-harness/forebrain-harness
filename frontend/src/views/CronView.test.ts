@@ -225,7 +225,7 @@ describe('CronView', () => {
     await flushPromises()
 
     expect(forebrainApi.cronRunsPage).toHaveBeenCalledWith('p1', 'j1', expect.objectContaining({ page: 1 }))
-    expect(wrapper.find('.forebrain-modal-title').text()).toBe('执行记录 · Nightly')
+    expect(wrapper.find('.forebrain-modal-title').text()).toBe('执行记录 Nightly')
     expect(wrapper.findAll('[data-cron-run]')).toHaveLength(1)
     // The table underneath keeps its rows: the history is over it, not in it.
     expect(wrapper.findAll('[data-cron-job]')).toHaveLength(2)

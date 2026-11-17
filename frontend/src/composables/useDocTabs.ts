@@ -12,7 +12,7 @@ import type { ArtifactView } from '@/lib/artifacts'
 export interface DocTab {
   id: string
   kind: 'command' | 'title' | 'output' | 'artifact'
-  /** What the tab says: 命令 · <第一行> / 标题 · <标题> (or its English word) /
+  /** What the tab says: 命令 <第一行> / 标题 <标题> (or its English word) /
    *  the delivered file's own name. */
   label: string
   /** The whole text the tab holds (empty for a delivered file). */

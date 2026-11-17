@@ -41,7 +41,7 @@ function awaitingDecision(row: McpServerRow): boolean {
  * server, it is a fact about a view that could not ask. */
 function toolSuffix(row: McpServerRow): string {
   const count = Number(row.toolCount ?? 0)
-  return count > 0 ? ` · ${t('mcp.toolsCount', { n: count })}` : ''
+  return count > 0 ? ` ${t('mcp.toolsCount', { n: count })}` : ''
 }
 
 /** The OAuth note a tip carries. A row whose credentials need the operator is
@@ -61,7 +61,7 @@ function oauthNote(row: McpServerRow): string {
  * mcpStatus is the one badge a row shows, in precedence order:
  *
  *   待确认 (a project entry nobody decided) → 已拒绝 (this project declined it) →
- *   未运行 · 被覆盖 (a higher layer's same-named entry wins) → 配置里已禁用
+ *   未运行 被覆盖 (a higher layer's same-named entry wins) → 配置里已禁用
  *   (`enabled: false`) → 已禁用 (the disable store keeps it out of the next
  *   session) → 连接失败 (the server's own text, verbatim) → 已允许 / 已连接
  *   (with the tool count when there is one) → 连接中 → 未运行.
@@ -136,7 +136,7 @@ export function mcpStatus(row: McpServerRow, opts: McpStatusOptions = {}): McpSt
  * credentials need the operator is not failing, it is waiting, so it rides the
  * tip rather than the label. */
 function withOAuth(row: McpServerRow, base = ''): string {
-  return [base, oauthNote(row)].filter((part) => part !== '').join(' · ')
+  return [base, oauthNote(row)].filter((part) => part !== '').join(' ')
 }
 
 /** One row's transport, in the short form the table's 类型 column shows: the

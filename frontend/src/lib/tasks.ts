@@ -113,7 +113,7 @@ export function taskOriginLabel(origin: string): string {
 export function taskSourceLabel(origin: string, originRef?: string): string {
   const label = taskOriginLabel(origin)
   const ref = String(originRef ?? '').trim()
-  return ref ? `${label} · ${ref}` : label
+  return ref ? `${label} ${ref}` : label
 }
 
 /** The words a finished execution's row ends on, when it has no error text of

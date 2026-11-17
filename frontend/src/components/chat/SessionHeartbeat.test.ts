@@ -97,7 +97,7 @@ describe('SessionHeartbeat', () => {
     await flushPromises()
 
     const others = wrapper.find('[data-testid="heartbeat-others"]')
-    expect(others.text()).toContain('Heartbeats in other conversations · 2')
+    expect(others.text()).toContain('Heartbeats in other conversations 2')
     expect(others.text()).toContain('Release watch')
     expect(others.text()).toContain('Untitled chat')
 

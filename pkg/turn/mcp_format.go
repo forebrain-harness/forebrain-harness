@@ -528,7 +528,7 @@ func MCPServerStatusLabel(e MCPServerEntry) string {
 	case MCPStatusConnected:
 		label = "✓ connected"
 		if e.ToolCount > 0 {
-			label += " · " + countNoun(e.ToolCount, "tool")
+			label += " " + countNoun(e.ToolCount, "tool")
 		}
 	case MCPStatusNeedsAuth:
 		label = "△ needs authentication"
@@ -549,17 +549,17 @@ func MCPServerStatusLabel(e MCPServerEntry) string {
 		}
 		label = "○ disabled"
 		if !e.DisabledNext {
-			return label + " · enabled from next session"
+			return label + " enabled from next session"
 		}
 		return label
 	default:
 		label = "unknown"
 	}
 	if e.DisabledNext {
-		label += " · disabled from next session"
+		label += " disabled from next session"
 	}
 	if e.DisabledByConfig {
-		label += " · disabled in config (enabled: false)"
+		label += " disabled in config (enabled: false)"
 	}
 	return label
 }
@@ -571,11 +571,11 @@ func RenderMCPInventoryMarkdown(inv MCPInventory) string {
 		return strings.TrimSpace("No MCP servers configured\n\n" + mcpConfigLocations(inv))
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "MCP servers · %s\n", countNoun(inv.Total, "server"))
+	fmt.Fprintf(&b, "MCP servers %s\n", countNoun(inv.Total, "server"))
 	for _, group := range inv.Groups {
 		fmt.Fprintf(&b, "\n%s (%s)\n", group.Label, group.Source)
 		for _, e := range group.Entries {
-			b.WriteString("- " + e.Name + " · " + MCPServerStatusLabel(e) + " · " + e.Transport + "\n")
+			b.WriteString("- " + e.Name + " " + MCPServerStatusLabel(e) + " " + e.Transport + "\n")
 			if e.Status == MCPStatusFailed && e.Error != "" {
 				b.WriteString("  Error: " + e.Error + "\n")
 			}
@@ -720,7 +720,7 @@ func LSPServerStateLabel(s event.LSPServerStatus) string {
 		if s.Warnings > 0 {
 			problems = append(problems, countNoun(s.Warnings, "warning"))
 		}
-		label += " · " + strings.Join(problems, ", ")
+		label += " " + strings.Join(problems, ", ")
 	}
 	return label
 }
@@ -779,7 +779,7 @@ func RenderLSPInventoryMarkdown(snap event.LSPSnapshot) string {
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Language servers · %d configured, %d enabled\n", len(snap.Servers), enabled)
+	fmt.Fprintf(&b, "Language servers %d configured, %d enabled\n", len(snap.Servers), enabled)
 	if snap.ProjectRoot == "" {
 		b.WriteString("No project: language servers start only in trusted projects\n")
 	} else if snap.Trusted {
@@ -800,7 +800,7 @@ func RenderLSPInventoryMarkdown(snap event.LSPSnapshot) string {
 				b.WriteString("\n" + heading + "\n")
 			}
 			entries++
-			b.WriteString("- " + s.ID + " · " + LSPServerStateLabel(s) + " · " + strings.Join(s.Languages, ", ") + "\n")
+			b.WriteString("- " + s.ID + " " + LSPServerStateLabel(s) + " " + strings.Join(s.Languages, ", ") + "\n")
 			if s.Enabled && s.LastError != "" {
 				b.WriteString("  Error: " + s.LastError + "\n")
 			}

@@ -28,7 +28,7 @@ describe('GoalLine', () => {
   it('opens with the objective and how the goal works', () => {
     const got = line({ phase: 'started', objective: 'make the tests pass' })
     expect(got.title).toBe('Goal')
-    expect(got.detail).toBe('works in rounds until a check of the workspace finds it met · Esc stops')
+    expect(got.detail).toBe('works in rounds until a check of the workspace finds it met Esc stops')
     expect(got.body).toBe('make the tests pass')
     expect(got.wrapper.find('button').exists()).toBe(false)
   })
@@ -43,10 +43,10 @@ describe('GoalLine', () => {
   })
 
   it.each<[Partial<ForebrainGoalLine>, string, string, string]>([
-    [{ status: 'done', rounds: 1, durationMs: 3_000 }, 'Goal met', '1 round · 3s', 'is-done'],
-    [{ status: 'done', rounds: 4, durationMs: 72_000 }, 'Goal met', '4 rounds · 1m 12s', 'is-done'],
-    [{ status: 'stuck', rounds: 2, durationMs: 1_000, why: 'the same edit twice' }, 'Goal stopped: no progress', '2 rounds · 1s', 'is-stopped'],
-    [{ status: 'capped', rounds: 100, durationMs: 3_725_000 }, 'Goal stopped: round limit reached', '100 rounds · 1h 02m 05s', 'is-stopped'],
+    [{ status: 'done', rounds: 1, durationMs: 3_000 }, 'Goal met', '1 round 3s', 'is-done'],
+    [{ status: 'done', rounds: 4, durationMs: 72_000 }, 'Goal met', '4 rounds 1m 12s', 'is-done'],
+    [{ status: 'stuck', rounds: 2, durationMs: 1_000, why: 'the same edit twice' }, 'Goal stopped: no progress', '2 rounds 1s', 'is-stopped'],
+    [{ status: 'capped', rounds: 100, durationMs: 3_725_000 }, 'Goal stopped: round limit reached', '100 rounds 1h 02m 05s', 'is-stopped'],
     [{ status: 'interrupted', rounds: 3 }, 'Goal stopped', 'interrupted in round 3', 'is-muted'],
     [{ status: 'failed', rounds: 2, why: 'provider returned 529' }, 'Goal stopped: error', 'after round 2', 'is-failed'],
     [{ status: 'failed', rounds: 2 }, 'Goal stopped: error', 'round 2 failed', 'is-failed'],

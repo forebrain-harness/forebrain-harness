@@ -8,7 +8,7 @@
     </span>
     <div class="m">
       <b :title="artifact.name">{{ artifact.title }}</b>
-      <span>{{ kindLabel }} · {{ sizeLabel }}</span>
+      <span>{{ kindLabel }} {{ sizeLabel }}</span>
     </div>
     <span v-if="artifact.missing" class="badge err" data-testid="artifact-missing">{{ t('chat.artifactMissing') }}</span>
     <span v-else-if="artifact.changed" class="badge warn" data-testid="artifact-changed">{{ t('chat.artifactChanged') }}</span>

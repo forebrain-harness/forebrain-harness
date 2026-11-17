@@ -56,5 +56,5 @@ export function subagentStatusLabel(status: SubagentTranscript['status']): strin
 export function subagentTabLabel(record: Pick<SubagentTranscript, 'agentType' | 'title'>): string {
   const type = record.agentType || t('agents.subagent')
   const title = (record.title ?? '').trim()
-  return title ? `${type} · ${title}` : type
+  return title ? `${type} ${title}` : type
 }

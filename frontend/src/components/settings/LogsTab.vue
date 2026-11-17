@@ -134,7 +134,7 @@
             >
               <span class="two">
                 <b>{{ option.title || option.id.slice(0, 12) }}</b>
-                <span>{{ option.id.slice(0, 12) }}… · {{ option.project }}</span>
+                <span>{{ option.id.slice(0, 12) }}… {{ option.project }}</span>
               </span>
               <small>{{ option.source }}</small>
             </button>

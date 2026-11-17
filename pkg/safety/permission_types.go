@@ -643,7 +643,7 @@ func BuiltinApprovalPresets() []ApprovalPreset {
 	return []ApprovalPreset{
 		{
 			ID:          PresetWorkspaceWrite,
-			Label:       "Default",
+			Label:       "Workspace write",
 			Description: "Forebrain Harness can read and edit files in the current workspace, and run commands. Approval is required to edit other files.",
 			Approval:    ApprovalOnRequest,
 			SandboxMode: appcfg.SandboxModeWorkspaceWrite,

@@ -1689,7 +1689,7 @@ func TestHandleContextSlashStatsUsesRunnerStateRoot(t *testing.T) {
 	reply, handled := s.HandleContextSlash(context.Background(), "s1", "tui", nil)
 	require.True(t, handled)
 	require.Contains(t, reply, "Filtered tool output, across this agent's conversations")
-	require.Contains(t, reply, "Shell commands · 1 of 1 trimmed · about 100 tokens saved")
+	require.Contains(t, reply, "Shell commands 1 of 1 trimmed about 100 tokens saved")
 }
 
 // TestManualCompactSlashEmitsRunningAndTerminalFailureEvents pins the manual
@@ -1847,7 +1847,7 @@ func TestHandleMCPSlashRendersInventory(t *testing.T) {
 
 	reply, handled := s.HandleMCPSlash("s1", "cli")
 	require.True(t, handled)
-	require.Contains(t, reply, "MCP servers · 1 server")
+	require.Contains(t, reply, "MCP servers 1 server")
 	require.Contains(t, reply, "docs")
 }
 
@@ -4475,7 +4475,7 @@ func TestPlanReviewPickerKeepsTheSelectionOnScreen(t *testing.T) {
 			t.Fatalf("model %d selected but not on screen:\n%s", i, screen)
 		}
 	}
-	const hint = "Esc to go back · Enter to request the review"
+	const hint = "Esc to go back Enter to request the review"
 	if strings.Contains(screen, question) || !strings.Contains(screen, hint) {
 		t.Fatalf("the last model must scroll the question away and bring the key hint along:\n%s", screen)
 	}
@@ -8704,7 +8704,7 @@ func TestPendingApprovalToolCallAllowedRootUsesUnresolvedOriginalCall(t *testing
 func compactCheckpointFrame() Frame {
 	return Frame{
 		Kind: FrameMemoryCompact, Title: compactTitleDone, StepID: "compact-1", Final: true,
-		Summary: "120k → 28k tokens (−76%) · 3s",
+		Summary: "120k → 28k tokens (−76%) 3s",
 		Content: "# Context Checkpoint: Filter pip artifacts\n\n## Goal\n\n- item one\n- item two\n- item three\n\nTrailing **prose** about the checkpoint.\n",
 	}
 }
@@ -8762,7 +8762,7 @@ func TestCompactBlockRendersCheckpointAsMarkdown(t *testing.T) {
 		t.Errorf("checkpoint body missing:\n%s", body)
 	}
 	// The banner belongs on the header line, next to the title.
-	if !strings.Contains(lines[0], compactTitleDone+" · 120k → 28k tokens (−76%) · 3s") {
+	if !strings.Contains(lines[0], compactTitleDone+" 120k → 28k tokens (−76%) 3s") {
 		t.Errorf("header lost the compact banner: %q", lines[0])
 	}
 }
@@ -8851,7 +8851,7 @@ func TestSoftwareCursorBlockAfterAmbiguousWidthRune(t *testing.T) {
 	setForcedTermSize(80, 24)
 	t.Cleanup(func() { setForcedTermSize(0, 0) })
 
-	text := "a·b"
+	text := "ab"
 	cursor := 3 // end of line
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
@@ -9256,7 +9256,7 @@ func TestComposerPreviewShortcutLinesPacksHintsPerRow(t *testing.T) {
 	// counts as 2) plus the 2-column indent and the reserved trailing column,
 	// but not for a third hint.
 	got := composerPreviewShortcutLines(hints, "  ", 15)
-	if len(got) != 2 || got[0] != "  aaaa · bbbb" || got[1] != "  cccc" {
+	if len(got) != 2 || got[0] != "  aaaa bbbb" || got[1] != "  cccc" {
 		t.Fatalf("expected the row to break between whole hints, got %#v", got)
 	}
 	if composerPreviewShortcutLines(nil, "  ", 100) != nil {
@@ -15527,7 +15527,7 @@ func TestDeclinedAskCardDrawsTheQuestionsNotTheClarifyText(t *testing.T) {
 	var out bytes.Buffer
 	NewRenderer(&out, &out).renderCompactFrame(frame, "tool", toolHeaderColor(frame))
 	plain := stripANSI(out.String())
-	for _, want := range []string{"User declined to answer questions", "· 最多等待多久？ (60 秒 / 15 秒)"} {
+	for _, want := range []string{"User declined to answer questions", "最多等待多久？ (60 秒 / 15 秒)"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("declined ask card missing %q:\n%s", want, plain)
 		}
@@ -16365,8 +16365,8 @@ func TestRawSelectorSelectRendersPanel(t *testing.T) {
 		"  two",
 		"  three",
 		"",
-		"  ↑/↓ to navigate · Enter to confirm ·",
-		"  Esc to cancel",
+		"  ↑/↓ to navigate Enter to confirm Esc",
+		"  to cancel",
 	}, filterBarPlain(40, "⌕", "Type to filter"))
 	if strings.Join(plain, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("panel = %q, want %q", plain, want)
@@ -16690,7 +16690,7 @@ func TestInputPanelShowsQuestionFieldAndKeys(t *testing.T) {
 	for _, line := range layout.lines {
 		plain = append(plain, stripANSI(line))
 	}
-	want := withFilterBar(1, []string{"  Base URL", "", "", "  Enter to confirm · Esc to cancel"}, filterBarPlain(60, "›", "A界B"))
+	want := withFilterBar(1, []string{"  Base URL", "", "", "  Enter to confirm Esc to cancel"}, filterBarPlain(60, "›", "A界B"))
 	if strings.Join(plain, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("panel = %q, want %q", plain, want)
 	}
@@ -17025,7 +17025,7 @@ func TestCompactFrameStartsAndStopsAnimationTicker(t *testing.T) {
 	r := NewRenderer(&out, &out)
 	r.EnableViewportMode()
 	t.Cleanup(r.DisableViewportMode)
-	r.RenderFrame(Frame{Kind: FrameMemoryCompact, Title: compactTitleRunning, Summary: "summarizing · 182.4k tokens", StepID: "compact-1", Progress: 37})
+	r.RenderFrame(Frame{Kind: FrameMemoryCompact, Title: compactTitleRunning, Summary: "summarizing 182.4k tokens", StepID: "compact-1", Progress: 37})
 
 	r.mu.Lock()
 	runningTicker := r.compactAnimationTicker
@@ -17039,7 +17039,7 @@ func TestCompactFrameStartsAndStopsAnimationTicker(t *testing.T) {
 	}
 	// The header and the bar are two lines: the bar never shares a line with
 	// the text.
-	lines, _ := renderFrameLinesWithAgents(Frame{Kind: FrameMemoryCompact, Title: compactTitleRunning, Summary: "summarizing · 182.4k tokens", StepID: "compact-1", Progress: 37}, 80, DiffThemeDark, 0)
+	lines, _ := renderFrameLinesWithAgents(Frame{Kind: FrameMemoryCompact, Title: compactTitleRunning, Summary: "summarizing 182.4k tokens", StepID: "compact-1", Progress: 37}, 80, DiffThemeDark, 0)
 	var header, bar string
 	for _, line := range lines {
 		line = stripAllANSI(line)
@@ -17053,11 +17053,11 @@ func TestCompactFrameStartsAndStopsAnimationTicker(t *testing.T) {
 	if header == "" || bar == "" || strings.Contains(header, "━") || strings.Contains(bar, compactTitleRunning) {
 		t.Fatalf("running compact card must put the bar on its own line:\n%s", painted)
 	}
-	if !strings.Contains(header, "summarizing · 182.4k tokens") || !strings.Contains(bar, " 37%") {
+	if !strings.Contains(header, "summarizing 182.4k tokens") || !strings.Contains(bar, " 37%") {
 		t.Fatalf("header %q / bar %q", header, bar)
 	}
 
-	r.RenderFrame(Frame{Kind: FrameMemoryCompact, Title: compactTitleDone, StepID: "compact-1", Summary: "182.4k → 12.3k tokens (−93%) · 14.2s", Final: true})
+	r.RenderFrame(Frame{Kind: FrameMemoryCompact, Title: compactTitleDone, StepID: "compact-1", Summary: "182.4k → 12.3k tokens (−93%) 14.2s", Final: true})
 	r.mu.Lock()
 	stoppedTicker := r.compactAnimationTicker
 	r.mu.Unlock()
@@ -18600,13 +18600,13 @@ func TestRendererAgentRosterDisambiguatesRepeatedNames(t *testing.T) {
 		},
 	}
 	got := strings.Join(formatAgentRosterLines(snapshot, false, 0, 120), "\n")
-	for _, want := range []string{"explore · 9f3a", "explore · 7d4e"} {
+	for _, want := range []string{"explore 9f3a", "explore 7d4e"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("repeated names must be disambiguated, missing %q in %q", want, got)
 		}
 	}
 	// The unique name stays clean.
-	if strings.Contains(got, "plan-reviewer · ") {
+	if strings.Contains(got, "plan-reviewer ") {
 		t.Fatalf("a unique name needs no suffix: %q", got)
 	}
 }
@@ -19208,7 +19208,7 @@ func TestRendererMCPAwaitingApprovalShowsHeaderOnly(t *testing.T) {
 		Kind:    FrameTool,
 		Title:   "mcp__codegraph__codegraph_explore",
 		Content: content,
-		Summary: "awaiting approval · codegraph.codegraph_explore query=x",
+		Summary: "awaiting approval codegraph.codegraph_explore query=x",
 	})
 	plain := stripANSI(out.String())
 	for _, sub := range []string{"why:", "params:", "produced:", "details:", "  └ "} {
@@ -19562,7 +19562,7 @@ func TestRendererFinalizePendingToolsMarksAwaitingApprovalAsCanceled(t *testing.
 			Status:   "awaiting approval",
 			Input:    map[string]any{"command": "go build ./..."},
 		},
-		Summary: "awaiting approval · go build ./...",
+		Summary: "awaiting approval go build ./...",
 	})
 
 	if len(r.vm.blocks) != 1 {
@@ -20579,7 +20579,7 @@ func TestRendererCanceledToolDisplaysCanceledAction(t *testing.T) {
 			Status:   "canceled",
 			Input:    map[string]any{"command": "go test ./..."},
 		},
-		Summary: "awaiting approval · go test ./...",
+		Summary: "awaiting approval go test ./...",
 	})
 
 	plain := stripANSI(out.String())
@@ -21868,13 +21868,13 @@ func TestInfoPanelFramesTheReport(t *testing.T) {
 		"    - backend: a seatbelt profile that is long enough to",
 		"      wrap",
 		"",
-		"  ↑/↓ PgUp/PgDn to scroll · Enter or Esc to close",
+		"  ↑/↓ PgUp/PgDn to scroll Enter or Esc to close",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("report panel = %q, want %q", got, want)
 	}
 	decision := plain(infoPanel("Migration preview", "From Codex", "import"))
-	if decision[0] != "  Migration preview" || decision[len(decision)-1] != "  Enter to import · Esc to cancel · ↑/↓ PgUp/PgDn to scroll" {
+	if decision[0] != "  Migration preview" || decision[len(decision)-1] != "  Enter to import Esc to cancel ↑/↓ PgUp/PgDn to scroll" {
 		t.Fatalf("decision panel = %q", decision)
 	}
 }
@@ -22256,10 +22256,10 @@ func TestStatusMarkdownRendersMCPCountsAndTokens(t *testing.T) {
 	for _, want := range []string{
 		"MCP servers: 1 connected, 1 failed",
 		"Model: openai/gpt-main",
-		"Workspace · 3 rules",
-		"62% left · 48k of 128k",
+		"Workspace 3 rules",
+		"62% left 48k of 128k",
 		"Auto-compact at: 102k",
-		"Session: 1.9M input · 42k output · 38 requests",
+		"Session: 1.9M input 42k output 38 requests",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status markdown missing %q:\n%s", want, out)
@@ -22608,7 +22608,7 @@ func TestSlashMenuPanelGroupsCommandsAndSkills(t *testing.T) {
 		"  Skills",
 		"  /caveman  talk less",
 		"",
-		"  ↑/↓ to navigate · Tab to complete · Enter to run · Esc to close",
+		"  ↑/↓ to navigate Tab to complete Enter to run Esc to close",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("menu = %q, want %q", got, want)
@@ -22641,7 +22641,7 @@ func TestSlashMenuPanelScrollsTheSelectionIntoView(t *testing.T) {
 		{Name: "connect", Description: "configure or switch LLM provider"},
 		{Name: "golang-continuous-integration", Description: "GitHub Actions CI/CD pipeline configuration for Golang projects with workflow files for test, lint and coverage jobs", Category: turn.SkillCategory},
 	}}
-	const hint = "  ↑/↓ to navigate · Tab to complete · Enter to run · Esc to close"
+	const hint = "  ↑/↓ to navigate Tab to complete Enter to run Esc to close"
 	got, layout := slashMenuPlain(slashMenuPanel(o), 80, 8, 0)
 	want := []string{
 		"",
@@ -23204,7 +23204,7 @@ func seedSubagentTranscript(t *testing.T, agentID string) *Renderer {
 	})
 	r.retainFrameLocked(Frame{
 		Kind: FrameStatus, Title: "subagent plan-reviewer ended",
-		Content: "plan-reviewer · ok", AgentID: agentID, SubagentLifecycleCard: true, Final: true,
+		Content: "plan-reviewer ok", AgentID: agentID, SubagentLifecycleCard: true, Final: true,
 	})
 	r.vpBodyHeight = 20
 	r.vpHeight = 20
@@ -23448,7 +23448,7 @@ func TestSubagentViewNamesTheAgentInTheFooterNotOnToolCards(t *testing.T) {
 	}
 	r.NoteSubagentSpawned(agentID, "explore", ComposerFooter{})
 	footer := stripANSI(r.composerFooterText(100))
-	if want := "viewing explore · bbfa · esc to return"; !strings.Contains(footer, want) {
+	if want := "viewing explore bbfa esc to return"; !strings.Contains(footer, want) {
 		t.Fatalf("footer = %q, want it to contain %q", footer, want)
 	}
 	r.SetActiveView("")
@@ -23553,7 +23553,7 @@ func TestComposerFooterAnnouncesTheSubagentView(t *testing.T) {
 	}
 	r.setActiveViewLocked("subagent-42")
 	got := stripANSI(r.composerFooterText(120))
-	if !strings.Contains(got, "viewing plan-reviewer · 42") || !strings.Contains(got, "esc to return") {
+	if !strings.Contains(got, "viewing plan-reviewer 42") || !strings.Contains(got, "esc to return") {
 		t.Fatalf("subagent view footer = %q", got)
 	}
 }
@@ -23577,7 +23577,7 @@ func TestSubagentFooterNamesThatSubagentsModelAndNotItsRun(t *testing.T) {
 
 	// The conversation's own footer is untouched by any of this.
 	primary := stripANSI(r.composerFooterText(140))
-	if !strings.Contains(primary, "deepseek/deepseek-v4-flash · medium") ||
+	if !strings.Contains(primary, "deepseek/deepseek-v4-flash medium") ||
 		!strings.Contains(primary, "97%") {
 		t.Fatalf("primary footer = %q", primary)
 	}
@@ -23586,7 +23586,7 @@ func TestSubagentFooterNamesThatSubagentsModelAndNotItsRun(t *testing.T) {
 	// conversation's, which the run may not be using at all.
 	r.setActiveViewLocked(agentID)
 	running := strings.TrimRight(stripANSI(r.composerFooterText(140)), " ")
-	if running != "viewing explore · bbfa · esc to return · openai/gpt-4.1-mini · low" {
+	if running != "viewing explore bbfa esc to return openai/gpt-4.1-mini low" {
 		t.Fatalf("own-model footer = %q", running)
 	}
 	if strings.Contains(running, "deepseek-v4-flash") {
@@ -23616,10 +23616,10 @@ func TestSubagentFooterNamesTheModelThisExecutionRunsOn(t *testing.T) {
 	})
 	r.setActiveViewLocked(agentID)
 	got := stripANSI(r.composerFooterText(140))
-	if !strings.Contains(got, "zhipuai/glm-5.3-flash · high") {
+	if !strings.Contains(got, "zhipuai/glm-5.3-flash high") {
 		t.Fatalf("subagent view footer = %q, want the model this execution runs on", got)
 	}
-	if strings.Contains(got, "glm-5.3 · xhigh") {
+	if strings.Contains(got, "glm-5.3 xhigh") {
 		t.Fatalf("subagent view footer borrowed the primary agent's model: %q", got)
 	}
 
@@ -23673,7 +23673,7 @@ func TestWorkingLineIsRenderedForTheViewOnScreen(t *testing.T) {
 	r := NewRenderer(nil, nil)
 	r.installTransientStatus(transientSourceWorking, func(view string) string {
 		if view == "" {
-			return "| Working (1m 15s • esc to interrupt) · ☑1/3"
+			return "| Working (1m 15s • esc to interrupt) ☑1/3"
 		}
 		return "| Working (57s)"
 	})
@@ -23735,7 +23735,7 @@ func TestSubagentViewIsClosedByItsOwnWorkedLine(t *testing.T) {
 		t.Fatal("the subagent's own view holds no frames")
 	}
 	closing := vm.blocks[len(vm.blocks)-1].frame
-	if closing.Kind != FrameStatus || !strings.HasPrefix(closing.Title, "Worked for 4m 12s · ") || !workedCompletionSuffix.MatchString(closing.Title) {
+	if closing.Kind != FrameStatus || !strings.HasPrefix(closing.Title, "Worked for 4m 12s ") || !workedCompletionSuffix.MatchString(closing.Title) {
 		t.Fatalf("closing frame = %#v, want this agent's own worked line with completion time", closing)
 	}
 	for _, b := range r.vm.blocks {
@@ -25000,7 +25000,7 @@ func TestFanoutHeaderIncludesExecutorDurationOnlyWhenFinal(t *testing.T) {
 	var out strings.Builder
 	r := NewRenderer(&out, &out)
 	r.renderFanout(Frame{Kind: FrameFanout, Final: true, Summary: "Ran 2 tasks", Duration: 1250 * time.Millisecond})
-	if got := stripANSI(out.String()); !strings.Contains(got, "Ran 2 tasks · 1.2s") {
+	if got := stripANSI(out.String()); !strings.Contains(got, "Ran 2 tasks 1.2s") {
 		t.Fatalf("final fanout header missing duration: %q", got)
 	}
 
@@ -26416,7 +26416,7 @@ func TestSelectionHighlightWideRunesAligned(t *testing.T) {
 // footer must carry no \x1b[K and end in the close sequence.
 func TestSelectionRowOnFullWidthFooterKeepsLastCell(t *testing.T) {
 	const termWidth = 40
-	footer := "\x1b[2m" + layoutComposerFooter("glm · high", "100%/1M", termWidth) + "\x1b[0m"
+	footer := "\x1b[2m" + layoutComposerFooter("glm high", "100%/1M", termWidth) + "\x1b[0m"
 	if w := lipgloss.Width(footer); w != termWidth {
 		t.Fatalf("fixture must be a full-width footer row, got %d columns", w)
 	}
@@ -26577,7 +26577,7 @@ func TestSelectionAbsentLeavesRowBytesUnchanged(t *testing.T) {
 		"plain text",
 		"\x1b[38;5;252;48;5;238m› text\x1b[38;5;252;48;5;238m   \x1b[0m",
 		renderComposerImagePlaceholder(0) + "look at this",
-		"\x1b[2m" + layoutComposerFooter("glm · high", "100%/1M", 40) + "\x1b[0m",
+		"\x1b[2m" + layoutComposerFooter("glm high", "100%/1M", 40) + "\x1b[0m",
 		"\x1b[1;93m•\x1b[0m \x1b[1;93mRan\x1b[0m echo\x1b[0m",
 	}
 	for _, row := range rows {
@@ -28712,7 +28712,7 @@ func TestViewportFoldHeaderWrapsAndDoesNotDuplicate(t *testing.T) {
 	vm.append(Frame{
 		Kind:    FrameTool,
 		Title:   "shell",
-		Summary: "ran " + headerText + " · exit 0",
+		Summary: "ran " + headerText + " exit 0",
 		Content: longBody,
 		Final:   true,
 	})
@@ -31725,7 +31725,7 @@ func TestHandleLSPSlashRendersSnapshot(t *testing.T) {
 	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
 	reply, handled = s.HandleLSPSlash("s1", "cli")
 	require.True(t, handled)
-	require.Contains(t, reply, "Language servers · 1 configured, 1 enabled")
+	require.Contains(t, reply, "Language servers 1 configured, 1 enabled")
 	require.Contains(t, reply, "gopls")
 }
 

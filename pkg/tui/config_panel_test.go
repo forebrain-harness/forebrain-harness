@@ -314,7 +314,7 @@ func TestConfigPanelOpensASectionByName(t *testing.T) {
 	if len(selector.richLabels) == 0 {
 		t.Fatal("no page opened")
 	}
-	if !strings.HasPrefix(selector.richLabels[0], "cron · Scheduled tasks") {
+	if !strings.HasPrefix(selector.richLabels[0], "cron Scheduled tasks") {
 		t.Fatalf("first page = %q, want the cron section page", selector.richLabels[0])
 	}
 }

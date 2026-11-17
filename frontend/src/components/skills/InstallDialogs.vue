@@ -9,7 +9,7 @@
       <div class="text-[14px] font-medium text-[var(--forebrain-text)]">
         {{ online ? t('skills.onlineInstall') : t('skills.offlineInstall') }}
       </div>
-      <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.installDestHint') }} · {{ destLabel }}</p>
+      <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.installDestHint') }} {{ destLabel }}</p>
 
       <p v-if="error" class="mt-3 rounded-lg bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
       <p v-else-if="notice" class="mt-3 rounded-lg bg-[var(--forebrand-soft,var(--forebrain-brand-soft))] px-3 py-2 text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>

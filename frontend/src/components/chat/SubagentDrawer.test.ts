@@ -52,7 +52,7 @@ describe('SubagentDrawer', () => {
   it('lists the open tabs in the order they were opened, one selected', () => {
     const wrapper = mountDrawer()
     const tabEls = wrapper.findAll('[role="tab"]')
-    expect(tabEls.map((tab) => tab.text())).toEqual(['general-purpose · task task-1', 'general-purpose · task task-2'])
+    expect(tabEls.map((tab) => tab.text())).toEqual(['general-purpose task task-1', 'general-purpose task task-2'])
     expect(tabEls.map((tab) => tab.attributes('aria-selected'))).toEqual(['true', 'false'])
     expect(wrapper.get('[data-testid="tab-body"]').text()).toBe('the tab')
   })
@@ -99,7 +99,7 @@ describe('SubagentDrawer', () => {
     const wrapper = mountDrawer()
     await wrapper.get('[data-testid="subagent-tab-close-task-2"]').trigger('click')
     expect(wrapper.emitted('close-tab')).toEqual([['task-2']])
-    expect(wrapper.get('[data-testid="subagent-tab-close-task-2"]').attributes('aria-label')).toBe('Close general-purpose · task task-2')
+    expect(wrapper.get('[data-testid="subagent-tab-close-task-2"]').attributes('aria-label')).toBe('Close general-purpose task task-2')
 
     await wrapper.get('[data-testid="subagent-drawer-collapse"]').trigger('click')
     expect(wrapper.emitted('collapse')).toHaveLength(1)
@@ -111,7 +111,7 @@ describe('SubagentDrawer', () => {
 
     await wrapper.get('[data-testid="subagent-drawer-add"]').trigger('click')
     const menu = wrapper.get('[data-testid="subagent-drawer-menu"]')
-    expect(menu.text()).toContain('Subagents in this conversation · 4')
+    expect(menu.text()).toContain('Subagents in this conversation 4')
     const rows = menu.findAll('[role="menuitem"]')
     expect(rows).toHaveLength(4)
     // Already open, or how it ended.
@@ -162,13 +162,13 @@ describe('SubagentDrawer', () => {
   }
 
   it('draws the open plan documents after the subagent tabs, without an unread dot', () => {
-    const wrapper = mountDrawer({ planTabs: [planTab('plan:a.md', 'Plan · Add auth'), planTab('plan:b.md', 'Plan · Add logs')] })
+    const wrapper = mountDrawer({ planTabs: [planTab('plan:a.md', 'Plan Add auth'), planTab('plan:b.md', 'Plan Add logs')] })
     const tabEls = wrapper.findAll('[role="tab"]')
     expect(tabEls.map((tab) => tab.text())).toEqual([
-      'general-purpose · task task-1',
-      'general-purpose · task task-2',
-      'Plan · Add auth',
-      'Plan · Add logs',
+      'general-purpose task task-1',
+      'general-purpose task task-2',
+      'Plan Add auth',
+      'Plan Add logs',
     ])
     // None of them is in front: a subagent tab is.
     expect(tabEls.map((tab) => tab.attributes('aria-selected'))).toEqual(['true', 'false', 'false', 'false'])
@@ -179,30 +179,30 @@ describe('SubagentDrawer', () => {
     // Opened between the two subagents: the tab bar is one list, so it sits
     // between them rather than being pushed to the end (prototype :4740).
     const wrapper = mountDrawer({
-      planTabs: [planTab('plan:a.md', 'Plan · Add auth')],
+      planTabs: [planTab('plan:a.md', 'Plan Add auth')],
       order: ['task-1', 'plan:a.md', 'task-2'],
     })
     const tabEls = wrapper.findAll('[role="tab"]')
     expect(tabEls.map((tab) => tab.text())).toEqual([
-      'general-purpose · task task-1',
-      'Plan · Add auth',
-      'general-purpose · task task-2',
+      'general-purpose task task-1',
+      'Plan Add auth',
+      'general-purpose task task-2',
     ])
   })
 
   it('draws every open tab even when the order has lost one', () => {
     // The order is bookkeeping, never the source of what is open: a stale list
     // cannot hide a live tab.
-    const wrapper = mountDrawer({ planTabs: [planTab('plan:a.md', 'Plan · Add auth')], order: [] })
+    const wrapper = mountDrawer({ planTabs: [planTab('plan:a.md', 'Plan Add auth')], order: [] })
     expect(wrapper.findAll('[role="tab"]').map((tab) => tab.text())).toEqual([
-      'general-purpose · task task-1',
-      'general-purpose · task task-2',
-      'Plan · Add auth',
+      'general-purpose task task-1',
+      'general-purpose task task-2',
+      'Plan Add auth',
     ])
   })
 
   it('selects and closes a plan tab the way a subagent tab is selected and closed', async () => {
-    const wrapper = mountDrawer({ planTabs: [planTab('plan:a.md', 'Plan · Add auth')], activePlan: 'plan:a.md' })
+    const wrapper = mountDrawer({ planTabs: [planTab('plan:a.md', 'Plan Add auth')], activePlan: 'plan:a.md' })
     const planTabEl = wrapper.get('[data-testid="plan-tab-plan:a.md"]')
     // In front: it reads as selected and carries the open treatment.
     expect(planTabEl.get('[role="tab"]').attributes('aria-selected')).toBe('true')
@@ -215,7 +215,7 @@ describe('SubagentDrawer', () => {
 
     await wrapper.get('[data-testid="plan-tab-close-plan:a.md"]').trigger('click')
     expect(wrapper.emitted('close-plan')).toEqual([['plan:a.md']])
-    expect(wrapper.get('[data-testid="plan-tab-close-plan:a.md"]').attributes('aria-label')).toBe('Close Plan · Add auth')
+    expect(wrapper.get('[data-testid="plan-tab-close-plan:a.md"]').attributes('aria-label')).toBe('Close Plan Add auth')
     // Closing the plan tab asks for nothing from the subagent tabs.
     expect(wrapper.emitted('close-tab')).toBeUndefined()
   })
@@ -226,7 +226,7 @@ describe('SubagentDrawer', () => {
     const doc: DocTab = {
       id: 'doc:command:x1',
       kind: 'command',
-      label: '命令 · cat <<\'EOF\'',
+      label: '命令 cat <<\'EOF\'',
       text: 'cat <<\'EOF\' > /tmp/x\nbody\nEOF',
       command: 'cat <<\'EOF\' > /tmp/x\nbody\nEOF',
     }
@@ -234,9 +234,9 @@ describe('SubagentDrawer', () => {
     // The tab sits where it was opened, among the subagent tabs, and in front.
     const tabEls = wrapper.findAll('[role="tab"]')
     expect(tabEls.map((tab) => tab.text())).toEqual([
-      'general-purpose · task task-1',
+      'general-purpose task task-1',
       doc.label,
-      'general-purpose · task task-2',
+      'general-purpose task task-2',
     ])
     expect(tabEls[1]!.attributes('aria-selected')).toBe('true')
     // Its glyph says it holds a command.
@@ -254,7 +254,7 @@ describe('SubagentDrawer', () => {
     const doc: DocTab = {
       id: 'doc:command:x2',
       kind: 'command',
-      label: '命令 · cat',
+      label: '命令 cat',
       text: command,
       command,
     }

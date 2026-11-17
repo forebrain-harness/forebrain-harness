@@ -57,7 +57,7 @@ func TestReducerStreamsAssistantAndFinalizesOnRunEnd(t *testing.T) {
 	if ev.Frames[0].Content != "helloworld" || !ev.Frames[0].Final {
 		t.Fatalf("unexpected final assistant frame: %#v", ev.Frames[0])
 	}
-	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 2m 00s · ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
+	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 2m 00s ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
 		t.Fatalf("worked status = %q, want the run's own duration and completion time", ev.WorkedStatus)
 	}
 }
@@ -125,7 +125,7 @@ func TestReducerAccumulatesLiveShellOutputInRunningFrame(t *testing.T) {
 // workedCompletionSuffix matches the " · HH:MM" the closing line ends with.
 // The minute is read off the wall clock at format time, so assertions pin the
 // shape, not the value.
-var workedCompletionSuffix = regexp.MustCompile(`· \d{2}:\d{2}$`)
+var workedCompletionSuffix = regexp.MustCompile(`\d{2}:\d{2}$`)
 
 func TestReducerAppendsCountersToWorkedStatus(t *testing.T) {
 	tracker := NewTracker()
@@ -151,7 +151,7 @@ func TestReducerAppendsCountersToWorkedStatus(t *testing.T) {
 		t.Fatalf("expected assistant frame, got %#v", ev.Frames)
 	}
 	got := ev.WorkedStatus
-	if !strings.HasPrefix(got, "Worked for 1m 02s · ☑1/2 · Writing tests · ") || !workedCompletionSuffix.MatchString(got) {
+	if !strings.HasPrefix(got, "Worked for 1m 02s ☑1/2 Writing tests ") || !workedCompletionSuffix.MatchString(got) {
 		t.Fatalf("unexpected worked status: %q", ev.WorkedStatus)
 	}
 }
@@ -165,7 +165,7 @@ func TestReducerShowsFirstTokenOnWorkedStatus(t *testing.T) {
 	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
 	_ = r.Reduce(FirstTokenMsg{RunID: "r1", Wait: 1200 * time.Millisecond})
 	ev := r.Reduce(RunEndedMsg{RunID: "r1", WorkedDuration: 12 * time.Second})
-	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 12s · first token 1.2s · ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
+	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 12s first token 1.2s ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
 		t.Fatalf("worked status = %q, want the measured 1.2s first token after the duration", ev.WorkedStatus)
 	}
 }
@@ -249,7 +249,7 @@ func TestReducerShowsWorkedStatusForInterruptedToolRun(t *testing.T) {
 	_ = r.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindTool, StepID: "read-1"}})
 	_ = r.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindAssistant, Content: "partial"}})
 	ev := r.Reduce(RunEndedMsg{RunID: "r1", WorkedDuration: 2 * time.Minute})
-	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 2m 00s · ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
+	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 2m 00s ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
 		t.Fatalf("interrupted turn = %q, want it closed by its own worked status and completion time", ev.WorkedStatus)
 	}
 }
@@ -265,7 +265,7 @@ func TestReducerShowsWorkedStatusForShortRun(t *testing.T) {
 	tracker.ObserveUsageDelta("r1", 1200, 80)
 	ev := r.Reduce(RunEndedMsg{RunID: "r1", WorkedDuration: 2 * time.Second, InputTokens: 1200, OutputTokens: 80})
 	got := ev.WorkedStatus
-	if !strings.HasPrefix(got, "Worked for 2s · ") || !workedCompletionSuffix.MatchString(got) {
+	if !strings.HasPrefix(got, "Worked for 2s ") || !workedCompletionSuffix.MatchString(got) {
 		t.Fatalf("short turn = %q", ev.WorkedStatus)
 	}
 }
@@ -282,7 +282,7 @@ func TestReducerShowsWorkedStatusForFailedRun(t *testing.T) {
 	var r Reducer
 	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
 	ev := r.Reduce(RunEndedMsg{RunID: "r1", WorkedDuration: 3 * time.Second, Error: "provider rejected max_tokens"})
-	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 3s · ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
+	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 3s ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
 		t.Fatalf("failed turn = %q, want it closed by its own worked status and completion time", ev.WorkedStatus)
 	}
 }
@@ -513,18 +513,18 @@ func TestReducerCompactionCardFollowsItsLifecycle(t *testing.T) {
 		t.Fatalf("started frames = %#v", started.Frames)
 	}
 	f := started.Frames[0]
-	if f.Kind != FrameMemoryCompact || f.Final || f.StepID != "compact-c1" || f.Title != compactTitleRunning || f.Summary != "starting · 182.4k tokens" || f.Progress != 0 {
+	if f.Kind != FrameMemoryCompact || f.Final || f.StepID != "compact-c1" || f.Title != compactTitleRunning || f.Summary != "starting 182.4k tokens" || f.Progress != 0 {
 		t.Fatalf("running frame = %#v", f)
 	}
 	if started.ComposerTokenStats != nil {
 		t.Fatal("a starting compaction must leave the footer alone, not read it as 0% left")
 	}
 	progress := r.Reduce(ContextCompactProgressMsg{CompactionID: "c1", Percent: 42, Phase: event.CompactPhaseSummarizing})
-	if len(progress.Frames) != 1 || progress.Frames[0].Progress != 42 || progress.Frames[0].Summary != "summarizing · 182.4k tokens" || progress.Frames[0].StepID != "compact-c1" {
+	if len(progress.Frames) != 1 || progress.Frames[0].Progress != 42 || progress.Frames[0].Summary != "summarizing 182.4k tokens" || progress.Frames[0].StepID != "compact-c1" {
 		t.Fatalf("progress frames = %#v", progress.Frames)
 	}
 	saving := r.Reduce(ContextCompactProgressMsg{CompactionID: "c1", Percent: 95, Phase: event.CompactPhaseSaving})
-	if saving.Frames[0].Summary != "saving checkpoint · 182.4k tokens" {
+	if saving.Frames[0].Summary != "saving checkpoint 182.4k tokens" {
 		t.Fatalf("saving frame = %#v", saving.Frames[0])
 	}
 	done := r.Reduce(ContextCompactedMsg{Payload: event.ContextCompactedPayload{CompactionID: "c1", Strategy: "local", TokensBefore: 182_400, TokensAfter: 12_300}})
@@ -1261,7 +1261,7 @@ func TestReducerSubagentEndedEmitsStatusFrameWithError(t *testing.T) {
 	if got := f.FanoutLineAgents[0]; got != "task-9" {
 		t.Fatalf("expected the task row to open task-9's view, got %q", got)
 	}
-	if f.Summary != "Ran 1 verification task · 0 done, 1 failed" {
+	if f.Summary != "Ran 1 verification task 0 done, 1 failed" {
 		t.Fatalf("expected the failure counted on the card, got %q", f.Summary)
 	}
 	if !strings.Contains(f.Content, "tool timed out") {
@@ -1832,13 +1832,13 @@ func TestQueryCardsShowTaskRowsNotJSON(t *testing.T) {
 			name: "wait timed out", tool: "subagent_wait", input: map[string]any{"task_id": "subagent-6e5c", "timeout_ms": 1000},
 			output:  `{"record":` + record("running", 1790000000, 0) + `,"timed_out":true}`,
 			running: "Waiting for 1 task…", done: "Waited for 1 general-purpose task",
-			rows: []string{"计划001 Go车道实施", "· still running when the wait ended"},
+			rows: []string{"计划001 Go车道实施", "still running when the wait ended"},
 		},
 		{
 			name: "close", tool: "subagent_close", input: map[string]any{"task_id": "subagent-6e5c"},
 			output:  `{"status":"cancel_requested","record":` + record("running", 1790000000, 0) + `}`,
 			running: "Stopping 1 task…", done: "Stopped 1 general-purpose task",
-			rows: []string{"计划001 Go车道实施", "· stop requested"},
+			rows: []string{"计划001 Go车道实施", "stop requested"},
 		},
 		{
 			name: "list", tool: "subagent_list", input: map[string]any{"limit": 20},
@@ -1847,9 +1847,9 @@ func TestQueryCardsShowTaskRowsNotJSON(t *testing.T) {
 				record("failed", 1790000000, 1790000128) + `]}`,
 			running: "Listing tasks…", done: "Listed 3 tasks",
 			rows: []string{
-				"✓ 计划001 Go车道实施 · 14m3s", "· general-purpose",
-				"计划001 Go车道实施", "· general-purpose",
-				"✗ 计划001 Go车道实施 · 2m8s", "· general-purpose",
+				"✓ 计划001 Go车道实施 14m3s", "general-purpose",
+				"计划001 Go车道实施", "general-purpose",
+				"✗ 计划001 Go车道实施 2m8s", "general-purpose",
 			},
 		},
 		{
@@ -1942,8 +1942,8 @@ func TestFanoutCardTakesSkippedOutcomesFromTheCallFacts(t *testing.T) {
 		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input,
 		Output: map[string]any{"output": `{"results":[{"index":0,"ok":true},{"index":1,"error":"skipped: empty prompt"}]}`},
 	})}))
-	if card.Summary != "Ran 2 general-purpose tasks · 1 done, 1 skipped" {
-		t.Fatalf("summary = %q, want Ran 2 general-purpose tasks · 1 done, 1 skipped", card.Summary)
+	if card.Summary != "Ran 2 general-purpose tasks 1 done, 1 skipped" {
+		t.Fatalf("summary = %q, want Ran 2 general-purpose tasks 1 done, 1 skipped", card.Summary)
 	}
 	lines := fanoutContentLines(card.Content)
 	sawEmpty, sawReason := false, false
@@ -1991,8 +1991,8 @@ func TestFanoutCardCountsInterruptedAsItsOwnOutcome(t *testing.T) {
 		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input,
 		Output: map[string]any{"output": `{"results":[{"index":0,"ok":true}]}`},
 	})}))
-	if !strings.HasSuffix(card.Summary, " · 1 done, 1 interrupted") {
-		t.Fatalf("summary = %q, want it to end with · 1 done, 1 interrupted", card.Summary)
+	if !strings.HasSuffix(card.Summary, " 1 done, 1 interrupted") {
+		t.Fatalf("summary = %q, want it to end with 1 done, 1 interrupted", card.Summary)
 	}
 	sawStop := false
 	for _, line := range fanoutContentLines(card.Content) {
@@ -2021,7 +2021,7 @@ func TestStoppedSubagentClosesItsViewQuietly(t *testing.T) {
 		want   string
 	}{
 		{name: "cancelled without a reason", status: "cancelled", title: "Cancelled"},
-		{name: "interrupted with its reason", status: "interrupted", err: reason, title: "Interrupted ·", want: reason},
+		{name: "interrupted with its reason", status: "interrupted", err: reason, title: "Interrupted", want: reason},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var r Reducer
@@ -2144,8 +2144,8 @@ func TestCancelledTasksAreCountedOnTheCard(t *testing.T) {
 		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input,
 		Output: map[string]any{"output": `{"results":[{"index":0,"ok":true},{"index":1,"ok":true},{"index":2,"ok":true}]}`},
 	})}))
-	if card.Summary != "Ran 3 general-purpose tasks · 1 done, 2 cancelled" {
-		t.Fatalf("summary = %q, want Ran 3 general-purpose tasks · 1 done, 2 cancelled", card.Summary)
+	if card.Summary != "Ran 3 general-purpose tasks 1 done, 2 cancelled" {
+		t.Fatalf("summary = %q, want Ran 3 general-purpose tasks 1 done, 2 cancelled", card.Summary)
 	}
 	for _, line := range fanoutContentLines(card.Content) {
 		if strings.Contains(line, "任务17") || strings.Contains(line, "任务18") {
@@ -2443,12 +2443,12 @@ func TestTaskRowsShowLiveAndFinalElapsed(t *testing.T) {
 	for _, line := range painted {
 		switch {
 		case strings.Contains(line, "任务17 扩展目录"):
-			if !strings.HasSuffix(strings.TrimSpace(line), "· 1m14s") {
+			if !strings.HasSuffix(strings.TrimSpace(line), "1m14s") {
 				t.Fatalf("ended row = %q, want the 1m14s final elapsed", line)
 			}
 			sawFinal = true
 		case strings.Contains(line, "任务16 migrate 导入"):
-			if !strings.HasSuffix(strings.TrimSpace(line), "· 3m 20s") {
+			if !strings.HasSuffix(strings.TrimSpace(line), "3m 20s") {
 				t.Fatalf("running row = %q, want the 3m 20s live clock", line)
 			}
 			sawLive = true
@@ -2473,7 +2473,7 @@ func TestTaskRowsShowLiveAndFinalElapsed(t *testing.T) {
 		t.Fatalf("single-task header = %q, want Ran 1 explore task without a duration", singleCard.Summary)
 	}
 	for _, line := range renderFanoutForTest(singleCard) {
-		if strings.HasPrefix(strings.TrimSpace(line), "●") && strings.Contains(line, " · ") {
+		if strings.HasPrefix(strings.TrimSpace(line), "●") && strings.Contains(line, formatWorkingElapsed(182*time.Second)) {
 			t.Fatalf("single-task header repeats the duration: %q", line)
 		}
 	}
@@ -2562,7 +2562,7 @@ func TestAbandonedExecutionEndsAtItsRealStopTime(t *testing.T) {
 	fanoutClockNow = func() time.Time { return t0.Add(2 * time.Hour) }
 	defer func() { fanoutClockNow = restore }()
 	for _, line := range renderFanoutForTest(card) {
-		if strings.Contains(line, "核对迁移") && !strings.HasSuffix(strings.TrimSpace(line), "· 30s") {
+		if strings.Contains(line, "核对迁移") && !strings.HasSuffix(strings.TrimSpace(line), "30s") {
 			t.Fatalf("row = %q, want the 30s final elapsed, not two hours", line)
 		}
 	}
@@ -4477,7 +4477,7 @@ func TestFitPaintRowKeepsOnePhysicalRow(t *testing.T) {
 // token stats on every frame, so the canvas budget is the full width and the
 // one-column courtesy margin stays with the producers.
 func TestFitPaintRowKeepsAFlushFooterRowIntact(t *testing.T) {
-	footer := layoutComposerFooter("glm · high", "177 tools · 33510k in / 162k out", 80)
+	footer := layoutComposerFooter("glm high", "177 tools 33510k in / 162k out", 80)
 	if w := lipgloss.Width(footer); w != 80 {
 		t.Fatalf("the fixture must be a flush footer, got %d columns", w)
 	}
@@ -4554,10 +4554,10 @@ func TestCanvasRowsNeverBreakTheirPhysicalRow(t *testing.T) {
 	} {
 		r.RenderFrame(f)
 	}
-	r.RenderTransientStatus("test", "Tasks 0/2 · implement\tregistry\nand more · 177 tools · 33510k in / 162k out")
+	r.RenderTransientStatus("test", "Tasks 0/2 implement\tregistry\nand more 177 tools 33510k in / 162k out")
 	assertPaintedCanvas(t, r, paintFrame(t, r, out), width)
 
-	r.RenderTransientStatus("test", "Tasks 1/2 · done")
+	r.RenderTransientStatus("test", "Tasks 1/2 done")
 	assertPaintedCanvas(t, r, paintFrame(t, r, out), width)
 }
 
@@ -4587,7 +4587,7 @@ func TestComposerVariantsStayWithinOnePhysicalRow(t *testing.T) {
 				{lead: panelCursor + "/x    ", text: "a description with\ttab long enough to wrap under its own column"},
 			},
 			focusStart: 0, focusEnd: 2,
-			hint: "↑/↓ to navigate · Tab to complete · Enter to run · Esc to close",
+			hint: "↑/↓ to navigate Tab to complete Enter to run Esc to close",
 		}}},
 		{"queued preview", ComposerRenderState{Text: "", Cursor: &cursor, PendingInput: ComposerPendingInputPreview{QueuedMessages: []string{"queued\tfollow-up"}}}},
 	}
@@ -4678,7 +4678,7 @@ func TestReducerDrawsAGoalsLines(t *testing.T) {
 	if len(done.Frames) != 2 || done.Frames[0].Content != "all green" {
 		t.Fatalf("the goal's end must first close the last round's answer: %#v", done.Frames)
 	}
-	if f := done.Frames[1]; f.Title != goalTitleDone || f.Summary != "2 rounds · 7s · click to see the check" || f.Content != "42 tests pass" || f.AgentID != "check-2" {
+	if f := done.Frames[1]; f.Title != goalTitleDone || f.Summary != "2 rounds 7s click to see the check" || f.Content != "42 tests pass" || f.AgentID != "check-2" {
 		t.Fatalf("done frame = %#v", f)
 	}
 	if c := tracker.SnapshotActiveRun(); c.GoalRound != 0 || c.GoalChecking {
@@ -4692,9 +4692,9 @@ func TestGoalCompletedFrameSaysHowTheGoalEnded(t *testing.T) {
 		title   string
 		summary string
 	}{
-		{event.GoalCompletedPayload{Status: event.GoalStatusDone, Rounds: 1, DurationMs: 3_000}, goalTitleDone, "1 round · 3s"},
-		{event.GoalCompletedPayload{Status: event.GoalStatusStuck, Rounds: 4, DurationMs: 72_000, Why: "the same edit twice"}, goalTitleStuck, "4 rounds · 1m 12s"},
-		{event.GoalCompletedPayload{Status: event.GoalStatusCapped, Rounds: 100, DurationMs: 1_000}, goalTitleCapped, "100 rounds · 1s"},
+		{event.GoalCompletedPayload{Status: event.GoalStatusDone, Rounds: 1, DurationMs: 3_000}, goalTitleDone, "1 round 3s"},
+		{event.GoalCompletedPayload{Status: event.GoalStatusStuck, Rounds: 4, DurationMs: 72_000, Why: "the same edit twice"}, goalTitleStuck, "4 rounds 1m 12s"},
+		{event.GoalCompletedPayload{Status: event.GoalStatusCapped, Rounds: 100, DurationMs: 1_000}, goalTitleCapped, "100 rounds 1s"},
 		{event.GoalCompletedPayload{Status: event.GoalStatusInterrupted, Rounds: 3}, goalTitleInterrupted, "interrupted in round 3"},
 		{event.GoalCompletedPayload{Status: event.GoalStatusFailed, Rounds: 2, Why: "529 overloaded"}, goalTitleFailed, "after round 2"},
 		{event.GoalCompletedPayload{Status: event.GoalStatusFailed, Rounds: 2}, goalTitleFailed, "round 2 failed"},
@@ -4716,7 +4716,7 @@ func TestRenderGoalLine(t *testing.T) {
 	lines := renderFrameLines(goalStartedFrame("r1", objective), 60, DiffThemeDark, 0)
 	painted := stripAllANSI(strings.Join(lines, "\n"))
 	squeeze := func(s string) string { return strings.Join(strings.Fields(strings.ReplaceAll(s, "└", "")), "") }
-	if !strings.HasPrefix(squeeze(painted), squeeze("◎ Goal · works in rounds until a check of the workspace finds it met · esc stops")) {
+	if !strings.HasPrefix(squeeze(painted), squeeze("◎ Goal works in rounds until a check of the workspace finds it met esc stops")) {
 		t.Fatalf("goal header:\n%s", painted)
 	}
 	if !strings.Contains(squeeze(painted), squeeze(objective)) {
@@ -4753,8 +4753,8 @@ func TestWorkingLineNamesTheGoalsRound(t *testing.T) {
 		want     string
 	}{
 		{Counters{}, " Working ("},
-		{Counters{GoalRound: 3}, " Working toward the goal · round 3 ("},
-		{Counters{GoalRound: 3, GoalChecking: true}, " Checking whether the goal is met · after round 3 ("},
+		{Counters{GoalRound: 3}, " Working toward the goal round 3 ("},
+		{Counters{GoalRound: 3, GoalChecking: true}, " Checking whether the goal is met after round 3 ("},
 	} {
 		counters := tt.counters
 		status := workingStatusFormatter(func() Counters { return counters }, nil)
@@ -5890,7 +5890,7 @@ func TestDeliverableCardHoldsNoBodyWhenCompleted(t *testing.T) {
 		content string
 		want    string
 	}{
-		{status: "completed", content: "- **q3.md** · markdown · 2.0 KB · `out/q3.md`", want: ""},
+		{status: "completed", content: "- **q3.md** markdown 2.0 KB `out/q3.md`", want: ""},
 		{status: "failed", content: "**error** (present_files)\n\n```\npermission denied\n```", want: "**error** (present_files)\n\n```\npermission denied\n```"},
 		{status: "cancelled", content: "Presented files.", want: "Presented files."},
 	} {
@@ -6017,7 +6017,7 @@ func TestDeliverablesFoldByFile(t *testing.T) {
 		if strings.Contains(plain, " · ") {
 			t.Fatalf("row %q draws a separator", plain)
 		}
-		for _, redundant := range []string{"markdown", "B ·", "KB", "out/", "db/"} {
+		for _, redundant := range []string{"markdown", "B", "KB", "out/", "db/"} {
 			if strings.Contains(plain, redundant) {
 				t.Fatalf("row %q repeats %q", plain, redundant)
 			}
@@ -6030,7 +6030,7 @@ func TestDeliverablesFoldByFile(t *testing.T) {
 	if len(folded) != toolOutputMaxLines+1 {
 		t.Fatalf("collapsed rows = %d, want %d files + hint:\n%s", len(folded), toolOutputMaxLines, strings.Join(folded, "\n"))
 	}
-	if plain := stripANSI(folded[len(folded)-1]); !strings.Contains(plain, "··· 1 more deliverable · click to show") {
+	if plain := stripANSI(folded[len(folded)-1]); !strings.Contains(plain, "··· 1 more deliverable click to show") {
 		t.Fatalf("hint = %q", plain)
 	}
 	if got := deliverableGroupsIn(folded[:len(folded)-1]); got != toolOutputMaxLines {
@@ -6075,7 +6075,7 @@ func TestDeliverablesFoldByFile(t *testing.T) {
 		t.Fatalf("clicking %q did not fold the group back", "click to hide")
 	}
 	again := renderViewport(&vm, 80, 20, 0, DiffThemeDark)
-	if plain := stripANSI(strings.Join(again.lines, "\n")); !strings.Contains(plain, "··· 1 more deliverable · click to show") {
+	if plain := stripANSI(strings.Join(again.lines, "\n")); !strings.Contains(plain, "··· 1 more deliverable click to show") {
 		t.Fatalf("folded-back screen:\n%s", plain)
 	}
 }
@@ -6095,7 +6095,7 @@ func TestDeliverablesFoldCountsFilesNotRows(t *testing.T) {
 		t.Fatalf("groups = %d, want %d files", got, len(rows))
 	}
 	folded, _ := foldBlockLines(block, full, 80, 0, "")
-	if plain := stripANSI(folded[len(folded)-1]); !strings.Contains(plain, "··· 47 more deliverables · click to show") {
+	if plain := stripANSI(folded[len(folded)-1]); !strings.Contains(plain, "··· 47 more deliverables click to show") {
 		t.Fatalf("hint = %q", plain)
 	}
 	if got := deliverableGroupsIn(folded[:len(folded)-1]); got != toolOutputMaxLines {
@@ -6138,7 +6138,7 @@ func replayedDeliverableTurns(worked bool, rows []tool.Deliverable) []state.Mess
 	raw, _ := json.Marshal(tool.ToolMeta{ToolName: "present_files", Status: "completed", Deliverables: rows})
 	parts, _ := json.Marshal([]map[string]any{{
 		"type":           "tool_display",
-		"body":           "- **q3.md** · markdown · 2.0 KB · `out/q3.md`",
+		"body":           "- **q3.md** markdown 2.0 KB `out/q3.md`",
 		"summary":        "ran present_files",
 		"tool_meta_json": string(raw),
 	}})

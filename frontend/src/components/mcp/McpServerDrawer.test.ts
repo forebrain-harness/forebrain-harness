@@ -122,13 +122,13 @@ describe('McpServerDrawer', () => {
 
   it('names the record in each mode', () => {
     expect(mountDrawer({ mode: 'new', scope: 'agent', agentId: 'a-1' }).find('.forebrain-drawer-head b').text()).toBe(
-      '添加 MCP 服务 · 主代理',
+      '添加 MCP 服务 主代理',
     )
     expect(mountDrawer({ mode: 'new', scope: 'project', projectId: 'p-1' }).find('.forebrain-drawer-head b').text()).toBe(
-      '添加 MCP 服务 · 项目',
+      '添加 MCP 服务 项目',
     )
-    expect(mountDrawer({ mode: 'edit', row: row() }).find('.forebrain-drawer-head b').text()).toBe('编辑 MCP 服务 · docs')
-    expect(mountDrawer({ mode: 'view', row: row() }).find('.forebrain-drawer-head b').text()).toBe('MCP 服务 · docs')
+    expect(mountDrawer({ mode: 'edit', row: row() }).find('.forebrain-drawer-head b').text()).toBe('编辑 MCP 服务 docs')
+    expect(mountDrawer({ mode: 'view', row: row() }).find('.forebrain-drawer-head b').text()).toBe('MCP 服务 docs')
   })
 
   it('draws a viewer with nothing to type in, no help text and one footer button', () => {
@@ -288,7 +288,7 @@ describe('McpServerDrawer', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="mcp-test-ok"]').text()).toBe('✓ 已连接')
-    expect(wrapper.find('[data-testid="mcp-test-summary"]').text()).toBe('12 个工具 · 1.3 s')
+    expect(wrapper.find('[data-testid="mcp-test-summary"]').text()).toBe('12 个工具 1.3 s')
     expect(wrapper.find('[data-testid="mcp-test-tools"]').exists()).toBe(false)
     await wrapper.find('[data-testid="mcp-test-tools-toggle"]').trigger('click')
     expect(wrapper.find('[data-testid="mcp-test-tools"]').text()).toContain('search_code')
@@ -317,7 +317,7 @@ describe('McpServerDrawer', () => {
     const wrapper = mountDrawer({ mode: 'edit', row: row({ env: { A: '1' } }) })
 
     expect(wrapper.find('[data-testid="mcp-advanced"] summary').text()).toContain(
-      '高级 · 环境变量、进程环境、命令校验、审批模式',
+      '高级 环境变量、进程环境、命令校验、审批模式',
     )
     expect(wrapper.find('[data-testid="mcp-inherit-parent-env"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="mcp-command-sha256"]').exists()).toBe(true)
@@ -328,7 +328,7 @@ describe('McpServerDrawer', () => {
     await pickOption(field(wrapper, 'mcp-transport'), 'http')
 
     const advanced = wrapper.find('[data-testid="mcp-advanced"]')
-    expect(advanced.find('summary').text()).toContain('高级 · 请求头、SSE、OAuth、审批模式')
+    expect(advanced.find('summary').text()).toContain('高级 请求头、SSE、OAuth、审批模式')
     expect(wrapper.find('[data-testid="mcp-disable-standalone-sse"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="mcp-oauth-mode"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="mcp-oauth-authorization-url"]').exists()).toBe(true)
@@ -390,7 +390,7 @@ describe('McpServerDrawer', () => {
     const box = wrapper.find('[data-testid="mcp-state"]')
     expect(box.text()).toContain('来源')
     expect(box.text()).toContain('全局')
-    expect(wrapper.find('[data-testid="mcp-state-status"]').text()).toBe('已连接 · 3 个工具')
+    expect(wrapper.find('[data-testid="mcp-state-status"]').text()).toBe('已连接 3 个工具')
     expect(wrapper.find('[data-testid="mcp-state-oauth"]').text()).toBe('需要授权')
     expect(wrapper.find('[data-testid="mcp-state-official"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="mcp-state-tools-toggle"]').text()).toBe('工具列表')

@@ -464,8 +464,8 @@ func TestPlanDrawerScroll(t *testing.T) {
 		planTodoItem("七", "pending"),
 	}})
 	both := buildPlanDrawerLayout(seven, 40, 5, 1, false)
-	if hint := both.planDrawerHint(); hint != "1 above · 3 below" {
-		t.Fatalf("hint = %q, want %q", hint, "1 above · 3 below")
+	if hint := both.planDrawerHint(); hint != "1 above 3 below" {
+		t.Fatalf("hint = %q, want %q", hint, "1 above 3 below")
 	}
 	overflowing := buildPlanDrawerLayout(frame, 40, 6, 1, false)
 	if overflowing.planDrawerMaxScroll() != overflowing.rowsTotal-len(overflowing.rows) {
@@ -768,7 +768,7 @@ func TestPlanDrawerSplitSurvivesAnOverlay(t *testing.T) {
 	cursor := 0
 	r.RenderComposerState(ComposerRenderState{Text: "draft", Cursor: &cursor})
 	r.installTransientStatus(transientSourceWorking, func(string) string {
-		return "| Working (3s • esc to interrupt) · ☑3/7"
+		return "| Working (3s • esc to interrupt) ☑3/7"
 	})
 	t.Cleanup(func() { r.FinishTransientStatus(transientSourceWorking) })
 
@@ -929,7 +929,7 @@ func installPlanProgressStatus(t *testing.T, r *Renderer, line string) {
 func TestPlanDrawerProgressTokenIsTheEntry(t *testing.T) {
 	r := newPlanDrawerScreen(t, 120, 40)
 	fillPlanDrawerTranscript(r)
-	installPlanProgressStatus(t, r, "| Working (3s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input_events.go 的鼠标交互")
+	installPlanProgressStatus(t, r, "| Working (3s • esc to interrupt) ☑3/7 修改 pkg/tui/input_events.go 的鼠标交互")
 
 	span := r.vpProgressSpan
 	if span.row < r.vpBodyHeight {
@@ -960,18 +960,18 @@ func TestPlanDrawerProgressTokenIsTheEntry(t *testing.T) {
 // A token the terminal width cut in half is not on screen, so it is not an
 // entry: the hit zone is only ever the whole token the user can see.
 func TestPlanDrawerTruncatedTokenHasNoHotZone(t *testing.T) {
-	if _, end, ok := planProgressToken("| Working (3s) · ☑12/1…"); ok {
+	if _, end, ok := planProgressToken("| Working (3s) ☑12/1…"); ok {
 		t.Fatalf("a truncated token (%q) registered a hot zone ending at %d", "☑12/1…", end)
 	}
 	r := newPlanDrawerScreen(t, 40, 24)
 	fillPlanDrawerTranscript(r)
-	installPlanProgressStatus(t, r, "| Working (3s • esc to interrupt) · ☑12/17")
+	installPlanProgressStatus(t, r, "| Working (3s • esc to interrupt) ☑12/17")
 	if r.vpProgressSpan.row >= 0 {
 		t.Fatalf("a token the 40-column line cut off registered a hot zone at %+v", r.vpProgressSpan)
 	}
 	// The whole token registers where it fits.
-	if start, end, ok := planProgressToken("☑3/7 · Step 3"); !ok || start != 0 || end != 4 {
-		t.Fatalf("planProgressToken(☑3/7 · Step 3) = (%d,%d,%v), want (0,4,true)", start, end, ok)
+	if start, end, ok := planProgressToken("☑3/7 Step 3"); !ok || start != 0 || end != 4 {
+		t.Fatalf("planProgressToken(☑3/7 Step 3) = (%d,%d,%v), want (0,4,true)", start, end, ok)
 	}
 }
 
@@ -1009,7 +1009,7 @@ func workedForTokenCell(t *testing.T, r *Renderer, token string) (row, col int) 
 func TestPlanDrawerWorkedForTokenIsTheEntry(t *testing.T) {
 	r := newPlanDrawerScreen(t, 120, 40)
 	fillPlanDrawerTranscript(r)
-	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s · ☑3/7 · 修改 pkg/tui 的鼠标交互 · 12:34", Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s ☑3/7 修改 pkg/tui 的鼠标交互 12:34", Final: true})
 
 	if got := len(r.vpHistoryProgress); got != 1 {
 		t.Fatalf("the run-closing row registered %d tokens, want 1: %#v", got, r.vpHistoryProgress)
@@ -1060,8 +1060,8 @@ func TestPlanDrawerWorkedForTokenIsTheEntry(t *testing.T) {
 func TestPlanDrawerWorkedForRowHoverHighlightsOnlyTheToken(t *testing.T) {
 	r, out := newPlanDrawerScreenWithOut(t, 120, 40)
 	fillPlanDrawerTranscript(r)
-	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s · ☑1/7 · 归档计划", Final: true})
-	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 03s · ☑3/7 · 新增回归测试", Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s ☑1/7 归档计划", Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 03s ☑3/7 新增回归测试", Final: true})
 	if got := len(r.vpHistoryProgress); got != 2 {
 		t.Fatalf("two run-closing rows registered %d tokens, want 2: %#v", got, r.vpHistoryProgress)
 	}
@@ -1125,7 +1125,7 @@ func TestPlanDrawerPlanTokenOutsideRunClosingRowsIsInert(t *testing.T) {
 	r.RenderFrame(Frame{Kind: FrameAssistant, Final: true, Content: "正文里的字面量 ☑9/9 不是抽屉入口"})
 	r.RenderFrame(Frame{Kind: FrameTool, StepID: "call-1", Title: "shell", Content: "☑9/9 也出现在工具输出里", Final: true})
 	// A subagent's closing row belongs to that agent's view, not to this one.
-	r.RenderFrame(Frame{Kind: FrameStatus, AgentID: "sub-1", Title: "Worked for 2s · ☑1/2", Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, AgentID: "sub-1", Title: "Worked for 2s ☑1/2", Final: true})
 
 	if got := len(r.vpHistoryProgress); got != 0 {
 		t.Fatalf("non-closing rows registered %d tokens: %#v", got, r.vpHistoryProgress)
@@ -1152,7 +1152,7 @@ func TestPlanDrawerPlanTokenOutsideRunClosingRowsIsInert(t *testing.T) {
 		AgentID: "sub-1",
 		Items:   []event.PlanUpdateItem{planTodoItem("子代理事项", "in_progress")},
 	}))
-	sub.RenderFrame(Frame{Kind: FrameStatus, AgentID: "sub-1", Title: "Worked for 2s · ☑1/2", Final: true})
+	sub.RenderFrame(Frame{Kind: FrameStatus, AgentID: "sub-1", Title: "Worked for 2s ☑1/2", Final: true})
 	if got := len(sub.vpHistoryProgress); got != 0 {
 		t.Fatalf("the conversation registered a subagent's closing row (%d tokens)", got)
 	}
@@ -1177,7 +1177,7 @@ func TestPlanDrawerPlanTokenOutsideRunClosingRowsIsInert(t *testing.T) {
 func TestPlanDrawerWorkedForTruncatedTokenHasNoHotZone(t *testing.T) {
 	r := newPlanDrawerScreen(t, 40, 24)
 	fillPlanDrawerTranscript(r)
-	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s · first token 12.4s · ☑3/7", Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s first token 12.4s ☑3/7", Final: true})
 	if got := len(r.vpHistoryProgress); got != 0 {
 		t.Fatalf("a token the 40-column rule cut off registered a hot zone at %#v", r.vpHistoryProgress)
 	}
@@ -1185,7 +1185,7 @@ func TestPlanDrawerWorkedForTruncatedTokenHasNoHotZone(t *testing.T) {
 	// The same width registers the whole token where the title leaves it room.
 	fit := newPlanDrawerScreen(t, 40, 24)
 	fillPlanDrawerTranscript(fit)
-	fit.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 3s · ☑3/7", Final: true})
+	fit.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 3s ☑3/7", Final: true})
 	if got := len(fit.vpHistoryProgress); got != 1 {
 		t.Fatalf("a fully drawn token registered %d hot zones, want 1: %#v", got, fit.vpHistoryProgress)
 	}
@@ -1370,7 +1370,7 @@ func TestPlanDrawerWheelScrollsTheList(t *testing.T) {
 func TestPlanDrawerHoverHighlightsOnlyTheToken(t *testing.T) {
 	r, out := newPlanDrawerScreenWithOut(t, 120, 40)
 	fillPlanDrawerTranscript(r)
-	installPlanProgressStatus(t, r, "| Working (3s • esc to interrupt) · ☑3/7")
+	installPlanProgressStatus(t, r, "| Working (3s • esc to interrupt) ☑3/7")
 	span := r.vpProgressSpan
 	if span.row < 0 {
 		t.Fatal("no progress hot zone to hover")

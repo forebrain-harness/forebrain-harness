@@ -243,7 +243,7 @@ func (r *Reducer) runningCompactionFrame(compactionID string, card *compactionCa
 		AgentID:  card.agentID,
 		RunID:    r.activeRunID,
 		Title:    compactTitleRunning,
-		Summary:  strings.Join(detail, " · "),
+		Summary:  strings.Join(detail, " "),
 		Progress: max(card.percent, 0),
 	}
 }
@@ -1180,7 +1180,7 @@ func fanoutCardHeader(fs *fanoutState) string {
 	}
 	if phase == "done" && !fs.Query {
 		if breakdown := fanoutOutcomeBreakdown(fs); breakdown != "" {
-			head += " · " + breakdown
+			head += " " + breakdown
 		}
 	}
 	return head
@@ -1978,7 +1978,7 @@ func (r *Reducer) formatWorkedStatusTitle(workDuration time.Duration, runID stri
 		}
 	}
 	parts = append(parts, workedCompletionTime(time.Now()))
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // workedCompletionTime renders the local wall-clock minute at which a run
@@ -2262,7 +2262,7 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 
 // subagentPausedLine is what a subagent's view says where the user
 // interrupted it: it stopped, and the next move is the user's.
-const subagentPausedLine = "Interrupted · waiting for your message"
+const subagentPausedLine = "Interrupted waiting for your message"
 
 // subagentPausedCardLine is the same pause on the task row of the card that
 // dispatched the subagent.
@@ -2301,9 +2301,6 @@ func (r *Reducer) subagentClosingFrames(agentID string, m SubagentEndedMsg) []Fr
 		title := "Cancelled"
 		if status == "interrupted" {
 			title = "Interrupted"
-		}
-		if errText != "" {
-			title += " ·"
 		}
 		return []Frame{{
 			Kind:    FrameStatus,
@@ -2348,12 +2345,12 @@ func (r *Reducer) subagentWorkedFrames(agentID string) []Frame {
 	}
 	title := workedForLabel(snap.Elapsed)
 	if counters := formatWorkingCounters(snap.Counters); counters != "" {
-		title += " · " + counters
+		title += " " + counters
 	}
 	// The wait this execution's own model cost before its first output, the
 	// same segment the conversation's closing line carries for the turn.
 	if wait := firstTokenLabel(snap.Counters.FirstToken); wait != "" {
-		title += " · " + wait
+		title += " " + wait
 	}
 	// The minute the run closed is the tracker's own clock for an ended run
 	// — a replay paints runs that finished long before, and now would stamp
@@ -2363,7 +2360,7 @@ func (r *Reducer) subagentWorkedFrames(agentID string) []Frame {
 	if snap.Ended && !snap.EndedAt.IsZero() {
 		completion = snap.EndedAt.Local()
 	}
-	title += " · " + workedCompletionTime(completion)
+	title += " " + workedCompletionTime(completion)
 	return []Frame{{
 		Kind:    FrameStatus,
 		Title:   title,
@@ -2536,7 +2533,7 @@ func renderFanoutContent(fs *fanoutState) (string, []string, []fanoutLineClock) 
 		clocks = append(clocks, fanoutLineClock{Start: t.StartedAt, End: t.EndedAt})
 		if fs.Query {
 			if phrase := fanoutQueryPhrase(fs, t); phrase != "" {
-				add("  · ", phrase)
+				add("  ", phrase)
 			}
 		}
 		// Reason line. The indent is repeated on every sentence so the whole
@@ -2584,7 +2581,7 @@ func fanoutQueryPhrase(fs *fanoutState, t *FanoutTaskState) string {
 	if t.StopRequested {
 		parts = append(parts, "stop requested")
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 func sessionSummary(m SessionSwitchedMsg) string {
@@ -3126,7 +3123,7 @@ func foldBlockLines(b *viewBlock, full []string, width int, spinnerPhase int, cw
 			noun = "deliverable"
 		}
 		return append(append([]string{}, full[:shown]...),
-			lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("  ··· %d more %s · click to show", more, noun))), 0
+			lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("  ··· %d more %s click to show", more, noun))), 0
 	}
 	if b.frame.Kind == FrameThinking {
 		if !b.frame.Final {
@@ -4133,7 +4130,7 @@ func joinFooterSegments(segments ...string) string {
 			kept = append(kept, segment)
 		}
 	}
-	return strings.Join(kept, " · ")
+	return strings.Join(kept, " ")
 }
 
 func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText, statusText, footerText string, previewLines []string, overlayRows []OverlayRow, roster AgentRosterSnapshot, termWidth int) composerBlock {
@@ -8269,7 +8266,7 @@ func (r *Renderer) ShowCtrlCExitHint(d time.Duration) {
 
 // clipboardImageHintText is the composer hint shown while the clipboard holds
 // an image.
-const clipboardImageHintText = "Image in clipboard · ctrl+v to paste"
+const clipboardImageHintText = "Image in clipboard ctrl+v to paste"
 
 // composerHintTimeout is how long a composer hint stays up once shown,
 // matching Claude Code's clipboard-image-hint (8s). A var, not a const, so
@@ -9061,7 +9058,7 @@ func goalStartedFrame(runID, objective string) Frame {
 	return Frame{
 		Kind: FrameGoal, StepID: "goal:" + strings.TrimSpace(runID) + ":start", RunID: runID, Final: true,
 		Title:   goalTitleStarted,
-		Summary: "works in rounds until a check of the workspace finds it met · esc stops",
+		Summary: "works in rounds until a check of the workspace finds it met esc stops",
 		Content: strings.TrimSpace(objective),
 	}
 }
@@ -9084,7 +9081,7 @@ func withGoalCheck(f Frame, checkAgentID string) Frame {
 	}
 	f.AgentID = checkAgentID
 	f.SubagentLifecycleCard = true
-	f.Summary += " · click to see the check"
+	f.Summary += " click to see the check"
 	return f
 }
 
@@ -9097,7 +9094,7 @@ func goalCompletedFrame(runID string, p event.GoalCompletedPayload) Frame {
 	if p.Rounds != 1 {
 		rounds = fmt.Sprintf("%d rounds", max(p.Rounds, 0))
 	}
-	f.Summary = rounds + " · " + formatWorkingElapsed(time.Duration(p.DurationMs)*time.Millisecond)
+	f.Summary = rounds + " " + formatWorkingElapsed(time.Duration(p.DurationMs)*time.Millisecond)
 	switch p.Status {
 	case event.GoalStatusDone:
 		f.Title = goalTitleDone

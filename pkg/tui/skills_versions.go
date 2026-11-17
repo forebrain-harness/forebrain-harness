@@ -357,18 +357,18 @@ func skillStatusFor(entry skill.Entry, state skill.SkillVersionState, ok bool) s
 
 // skillStatusPrefix is the status segment a row opens with, colored by role:
 // the version number dim, "Draft"/"unpublished changes" in the warning color,
-// the built-in layer in the glyph color. It ends in " · " so the description
+// the built-in layer in the glyph color. It ends in a space so the description
 // follows it directly.
 func skillStatusPrefix(entry skill.Entry, st skillStatus) string {
 	switch {
 	case st.builtin:
-		return panelGlyphStyle.Render("Built-in") + " · "
+		return panelGlyphStyle.Render("Built-in") + " "
 	case st.label == skill.SkillStateDraft:
-		return panelWarnStyle.Render("Draft") + " · "
+		return panelWarnStyle.Render("Draft") + " "
 	case st.label == skill.SkillStatePending:
-		return panelGlyphStyle.Render(fmt.Sprintf("v%d", st.version)) + " · " + panelWarnStyle.Render("unpublished changes") + " · "
+		return panelGlyphStyle.Render(fmt.Sprintf("v%d", st.version)) + " " + panelWarnStyle.Render("unpublished changes") + " "
 	case st.label == skill.SkillStatePublished:
-		return panelGlyphStyle.Render(fmt.Sprintf("v%d", st.version)) + " · "
+		return panelGlyphStyle.Render(fmt.Sprintf("v%d", st.version)) + " "
 	}
 	return ""
 }
@@ -385,18 +385,18 @@ func skillRowDescriptionWithStatus(entry skill.Entry, origins map[string]skill.O
 	}
 	head += strings.TrimSpace(entry.Description)
 	if st.update != nil {
-		head += " · " + panelAccentStyle.Render("update available")
+		head += " " + panelAccentStyle.Render("update available")
 	}
 	if head != "" {
 		parts = append(parts, head)
 	}
 	switch {
 	case len(entry.ShadowedBy) > 0:
-		parts = append(parts, "· shadowed by the "+origins[entry.ShadowedBy[0]].Label()+" copy")
+		parts = append(parts, "shadowed by the "+origins[entry.ShadowedBy[0]].Label()+" copy")
 	case len(entry.Shadows) == 1:
-		parts = append(parts, "· shadows the "+origins[entry.Shadows[0]].Label()+" copy")
+		parts = append(parts, "shadows the "+origins[entry.Shadows[0]].Label()+" copy")
 	case len(entry.Shadows) > 1:
-		parts = append(parts, "· shadows "+fmt.Sprintf("%d", len(entry.Shadows))+" other copies")
+		parts = append(parts, "shadows "+fmt.Sprintf("%d", len(entry.Shadows))+" other copies")
 	}
 	return strings.Join(parts, " ")
 }
@@ -449,7 +449,7 @@ func (c *commandController) draftHistoryDescription(entry skill.Entry, state ski
 	if diffs, err := c.session.SkillDiff(entry, fmt.Sprintf("v%d", state.DraftBase), "draft"); err == nil {
 		count = len(diffs)
 	}
-	return fmt.Sprintf("Based on v%d · %s changed", state.DraftBase, fileCountText(count))
+	return fmt.Sprintf("Based on v%d %s changed", state.DraftBase, fileCountText(count))
 }
 
 // versionHistoryDescription is one version row's second column: its date, its
@@ -467,7 +467,7 @@ func versionHistoryDescription(v skill.VersionRecord, current int) string {
 		parts = append(parts, note)
 	}
 	parts = append(parts, statText(v.Stat.Added, v.Stat.Removed))
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 func versionKindLabel(kind string) string {
@@ -532,9 +532,9 @@ func previousVersion(versions []skill.VersionRecord, v int) int {
 func skillHistoryTitle(entry skill.Entry, state skill.SkillVersionState) string {
 	name := strings.TrimSpace(entry.Name)
 	if state.Current > 0 {
-		return name + " · versions\n" + fmt.Sprintf("v%d is current", state.Current)
+		return name + " versions\n" + fmt.Sprintf("v%d is current", state.Current)
 	}
-	return name + " · versions"
+	return name + " versions"
 }
 
 // --- diff body (design 3.4) ---
@@ -601,7 +601,7 @@ func skillUpdateDescription(u *skill.SkillUpdate) string {
 	if u.Files > 0 {
 		parts = append(parts, fileCountText(u.Files))
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 func shortRevision(rev string) string {
@@ -696,7 +696,7 @@ func toggleMenuItem(entry skill.Entry) skillMenuItem {
 // status line — the toggle result when one was just applied, the row's own
 // status and description otherwise.
 func skillEntryTitle(entry skill.Entry, origins map[string]skill.Origin, st skillStatus, banner string) string {
-	head := strings.TrimSpace(entry.Name) + " · " + entry.Origin.Label()
+	head := strings.TrimSpace(entry.Name) + " " + entry.Origin.Label()
 	second := banner
 	if second == "" {
 		second = skillRowDescriptionWithStatus(entry, origins, true, st)
@@ -718,7 +718,7 @@ func skillHistoryDescription(n int) string {
 	if n == 1 {
 		return "1 version"
 	}
-	return fmt.Sprintf("%d versions · compare or restore", n)
+	return fmt.Sprintf("%d versions compare or restore", n)
 }
 
 // draftChangesDescription counts a never-published draft's files.
@@ -763,14 +763,14 @@ func (c *commandController) showSkillDetails(entry skill.Entry, st skillStatus) 
 	case st.label == skill.SkillStateDraft:
 		body = "Version: draft (not published)"
 	case st.version > 0 && st.hasDraft:
-		body = fmt.Sprintf("Version: v%d · unpublished changes", st.version)
+		body = fmt.Sprintf("Version: v%d unpublished changes", st.version)
 	case st.version > 0:
 		body = fmt.Sprintf("Version: v%d", st.version)
 	}
 	if detail, err := c.session.ApplySkillSelection(name); err == nil {
 		body += "\n" + strings.TrimSpace(detail)
 	}
-	label := name + " · " + entry.Origin.Label()
+	label := name + " " + entry.Origin.Label()
 	if info, ok := c.selector.(InfoOverlaySelector); ok {
 		if err := info.ShowInfo(label, body); err != nil {
 			c.renderer.PrintError(err)
@@ -784,9 +784,9 @@ func (c *commandController) showSkillDetails(entry skill.Entry, st skillStatus) 
 // snapshots of the skill, file by file, in the conversation's diff colors.
 func (c *commandController) showSkillChanges(entry skill.Entry, from, to string) {
 	name := strings.TrimSpace(entry.Name)
-	label := name + " · " + to
+	label := name + " " + to
 	if strings.TrimSpace(from) != "" {
-		label = name + " · " + from + " → " + to
+		label = name + " " + from + " → " + to
 	}
 	diffs, err := c.session.SkillDiff(entry, from, to)
 	if err != nil {
@@ -843,7 +843,7 @@ func (c *commandController) publishSkillFlow(entry skill.Entry, st skillStatus) 
 				c.renderer.PrintError(perr)
 				return skillsDone(), true
 			}
-			line := panelOKStyle.Render(fmt.Sprintf("Published %s v%d · new sessions use it", name, version))
+			line := panelOKStyle.Render(fmt.Sprintf("Published %s v%d new sessions use it", name, version))
 			return skillsNotice(line), true
 		case 1:
 			c.showSkillChanges(entry, from, "draft")
@@ -989,7 +989,7 @@ func (c *commandController) versionItemFlow(entry skill.Entry, state skill.Skill
 	for _, label := range labels {
 		items = append(items, SelectItem{Label: label})
 	}
-	idx, ok, err := c.selector.SelectRich(fmt.Sprintf("%s · v%d", name, v), items, 0)
+	idx, ok, err := c.selector.SelectRich(fmt.Sprintf("%s v%d", name, v), items, 0)
 	if err != nil {
 		c.renderer.PrintError(err)
 		return skillsDone(), true
@@ -1076,7 +1076,7 @@ func (s *ChatSession) flushSkillDraftNotes() []string {
 	return notes
 }
 
-// emitSkillDraftNotes leaves one "Draft <name> saved · /skills to publish"
+// emitSkillDraftNotes leaves one "Draft <name> saved /skills to publish"
 // line per skill the workshop wrote this turn. It is the only hint the design
 // allows — no panel opens on its own.
 func (s *ChatSession) emitSkillDraftNotes() {
@@ -1084,7 +1084,7 @@ func (s *ChatSession) emitSkillDraftNotes() {
 		s.notifyUI(NewMessageMsg{Msg: Message{
 			Kind:      MsgKindSystem,
 			Title:     "skills",
-			Content:   "Draft " + name + " saved · /skills to publish",
+			Content:   "Draft " + name + " saved /skills to publish",
 			Timestamp: time.Now(),
 		}})
 	}

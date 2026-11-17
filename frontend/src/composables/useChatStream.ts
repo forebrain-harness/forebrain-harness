@@ -1702,7 +1702,7 @@ export type TimelineBlock =
   /**
    * Where the user interrupted a subagent from its own tab: the step it was
    * on stopped, and the execution waits for the user's next message — the
-   * terminal's "Interrupted · waiting for your message" line.
+   * terminal's "Interrupted waiting for your message" line.
    */
   | { kind: 'paused'; id: string }
   /**
@@ -2392,7 +2392,7 @@ export interface WorkedPlanProgress {
 
 /**
  * The line that closes every run, however long and however it ended — the
- * terminal's "Worked for" line, as segments the template joins with " · ":
+ * terminal's "Worked for" line, as segments the template joins with " ":
  * the duration (a sub-second run counts as 1s), the checklist progress when
  * the turn had one, then the minute it finished when that is known.
  */
@@ -2503,7 +2503,7 @@ export function workedLineText(line: WorkedLine): string {
     line.time ?? '',
   ]
     .filter(Boolean)
-    .join(' · ')
+    .join(' ')
 }
 
 /**
@@ -2832,7 +2832,7 @@ export function formatRuntimeStatusLabel(status: RuntimeStatus, tr: TranslateFn 
   // The wait the run already spent on the model's first token, in the same
   // segment style the worked line uses, once it is known.
   const firstTokenDuration = formatFirstTokenDuration(status.firstTokenMs)
-  const firstToken = firstTokenDuration ? ` · ${tr('chat.firstToken', { duration: firstTokenDuration })}` : ''
+  const firstToken = firstTokenDuration ? ` ${tr('chat.firstToken', { duration: firstTokenDuration })}` : ''
   if (status.kind === 'working' && status.goalChecking) {
     return { label: tr('chat.goal.runtimeChecking', { round: status.goalRound ?? 1, duration }) + firstToken, plan }
   }

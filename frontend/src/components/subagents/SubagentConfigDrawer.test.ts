@@ -115,7 +115,7 @@ describe('SubagentConfigDrawer', () => {
     )
     const wrapper = await openDrawer()
 
-    expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('编辑内置子代理 · explore')
+    expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('编辑内置子代理 explore')
     expect((wrapper.find('[data-testid="subagent-prompt"]').element as HTMLTextAreaElement).value).toBe(prompt)
   })
 
@@ -223,7 +223,7 @@ describe('SubagentConfigDrawer', () => {
     )
     const wrapper = await openDrawer({ name: 'guardian', mode: 'view' })
 
-    expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('查看系统子代理 · guardian')
+    expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('查看系统子代理 guardian')
     expect(wrapper.findAll('input').every((input) => input.attributes('readonly') !== undefined)).toBe(true)
     // Both dropdowns are the library's triggers, and both are off: nothing here
     // is this page's to change.

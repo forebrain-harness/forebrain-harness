@@ -158,7 +158,7 @@ describe('ProjectChannels', () => {
     await wrapper.find('[data-testid="channel-edit-feishu"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('.forebrain-modal-title').text()).toBe('编辑通道 · 飞书')
+    expect(wrapper.find('.forebrain-modal-title').text()).toBe('编辑通道 飞书')
     expect(wrapper.find('[data-testid="channel-field-app_secret"]').attributes('type')).toBe('password')
   })
 })

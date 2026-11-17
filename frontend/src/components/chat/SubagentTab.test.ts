@@ -128,7 +128,7 @@ describe('SubagentTab', () => {
     const { wrapper } = mountTab({ record: record({ status: 'waiting_input', blocks: [{ kind: 'paused', id: 'paused:1' }] }) })
     expect(wrapper.find('textarea').exists()).toBe(true)
     expect(wrapper.find('[data-testid="subagent-working"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="run-paused-line"]').text()).toBe('Interrupted · waiting for your message')
+    expect(wrapper.get('[data-testid="run-paused-line"]').text()).toBe('Interrupted waiting for your message')
   })
 
   it('draws the working line between the transcript and the composer', async () => {

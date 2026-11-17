@@ -5,7 +5,7 @@
         <ImageIcon v-if="isImage(f)" class="ic" aria-hidden="true" />
         <FileText v-else class="ic" aria-hidden="true" />
         <span class="mono nm">{{ f.filename }}</span>
-        <span class="hint">{{ formatSize(f.size) }}<template v-if="f.fromClipboard"> · {{ t('chat.attachFromClipboard') }}</template></span>
+        <span class="hint">{{ formatSize(f.size) }}<template v-if="f.fromClipboard"> {{ t('chat.attachFromClipboard') }}</template></span>
       </div>
     </div>
 

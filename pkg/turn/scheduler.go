@@ -328,7 +328,7 @@ func fireTitle(job state.CronJob, started time.Time) string {
 	if name == "" {
 		name = state.SessionTitleFromContent(job.Prompt)
 	}
-	return name + " · " + started.Local().Format("2006-01-02 15:04")
+	return name + " " + started.Local().Format("2006-01-02 15:04")
 }
 
 // SettleFires closes every fire of this scheduler's tenant whose run has

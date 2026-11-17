@@ -120,7 +120,7 @@ describe('LspTab', () => {
     expect(row.text()).toContain('Go')
     expect(row.find('.scope-badge').text()).toContain('内置目录')
     expect(row.find('[data-state="ready"]').text()).toBe('已就绪')
-    expect(row.text()).toContain('/usr/local/bin/gopls · v0.20.0')
+    expect(row.text()).toContain('/usr/local/bin/gopls v0.20.0')
     expect(wrapper.find('[data-server="pyright"] [data-state="not_installed"]').text()).toBe('未安装')
   })
 
