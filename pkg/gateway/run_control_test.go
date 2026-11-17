@@ -1156,14 +1156,16 @@ func newAutoContinueGateway(t *testing.T) *autoContinueGateway {
 	t.Cleanup(stopLease)
 	executor := &recordingRunExecutor{answer: "picked up where it left off"}
 	// The web turn path resolves attachments through the session's runner.
-	cfg := &appcfg.Root{}
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
+	})}
 	// An Env turns the control plane's auth on, and token auth is the only
 	// authentication there is (plan 206): the fixture's pages present the token
 	// the way a browser presents its cookie.
 	cfg.Gateway.Auth.Token = "gw-secret"
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
-		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}},
+		DefaultModel: "llm-1",
 	}}
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())
@@ -2325,10 +2327,10 @@ func TestBindSessionReconcilesTheSessionsRunner(t *testing.T) {
 	sessions := state.NewSessionStore(db, "main")
 	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
 
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
-		}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	var resolves atomic.Int64
 	runner := &run.Runner{Deps: (&run.Deps{

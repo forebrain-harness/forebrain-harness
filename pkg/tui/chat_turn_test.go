@@ -241,10 +241,12 @@ func TestPrimaryFooterBudgetIsUnchangedByTheEngineMove(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	store := state.NewSessionStore(db, "main")
-	cfg := appcfg.Root{}
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "zhipuai", Model: "glm-5.3", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1",
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
-		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "zhipuai", Model: "glm-5.3", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}},
+		DefaultModel: "llm-1",
 	}}
 	s := sessionEnv{
 		Home:      home,
@@ -296,16 +298,22 @@ func TestSurfaceComposerTokenStatsMatchesLabel(t *testing.T) {
 	key := "${FOREBRAIN_FOOTER_ALIGN_TEST_KEY}"
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},           // file default, 1M
-			{Provider: "moonshotai", Model: "kimi-k2.7-code", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"}, // 262144
-			{Provider: "zhipuai", Model: "glm-4.5", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},           // 131072, the pin
+	// The install's model table: the file default (1M), a 262144 window, and
+	// the 131072 one the conversation pins.
+	cfg := &appcfg.Root{
+		LLMModels: modelRowsForTest(
+			appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},
+			appcfg.AgentLLMProviderConfig{Provider: "moonshotai", Model: "kimi-k2.7-code", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},
+			appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-4.5", APIKey: key, BaseURL: "http://127.0.0.1:9/v1"},
+		),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true, DefaultModel: "llm-1"},
 		}},
-	}}}
+	}
 	require.NoError(t, appcfg.Save(cfgPath, *cfg))
 	loaded, err := loadDocumentForTest(cfgPath)
 	require.NoError(t, err)
+	loaded.LLMModels = cfg.LLMModels
 	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -359,16 +367,15 @@ func newAuditHookEnv(t *testing.T) (*ChatSession, *run.Runner, *state.RunStore, 
 	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "sess-B", "sess-B"))
 
 	cfg := &appcfg.Root{
+		LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+			Provider: "openai",
+			Model:    "test-model",
+			APIKey:   "test-key",
+			BaseURL:  "http://127.0.0.1:9/v1",
+		}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
-				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "test-model",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
-				},
+				"main": {DefaultModel: "llm-1"},
 			},
 		},
 	}

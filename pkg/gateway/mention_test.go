@@ -531,10 +531,10 @@ func TestWebImageGateRefusesTheTurnNotTheAttachment(t *testing.T) {
 	// A runner whose configured session model is the text-only deepseek-v4-pro
 	// (owner-confirmed). TestMain installs the repository catalog, so the gate
 	// resolves it.
-	cfg := &appcfg.Root{}
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4-pro"})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
-		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-v4-pro"}},
+		DefaultModel: "llm-1",
 	}}
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main"}).WithConfig(cfg)}
 	s := &Server{Home: home, Files: files, Sessions: sessions, Projects: projects, Runner: runner}

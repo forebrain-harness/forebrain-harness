@@ -522,10 +522,8 @@ func TestParseSlashCommandForkSwitchesTuiSession(t *testing.T) {
 	// so the fixture needs a bound configuration and a loaded runner.
 	t.Setenv("FOREBRAIN_FORK_MODEL_TEST_KEY", "test-key")
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-4o", APIKey: "${FOREBRAIN_FORK_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"},
-		}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o", APIKey: "${FOREBRAIN_FORK_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, cfg))
 	env := (&process.Environment{Root: home, ConfigPath: cfgPath, Deps: &run.Deps{Home: home, AgentName: "main"}}).WithDepsConfig(&cfg)
@@ -950,8 +948,8 @@ func TestWorkshopTurnRunsInTheAgentSkillDirectory(t *testing.T) {
 	sessions := state.NewSessionStore(db, "main")
 	require.NoError(t, sessions.EnsureAt(ctx, "s-workshop", "s-workshop", state.SessionBirth{Source: state.SessionSourceWorkshop}))
 
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions, WorkspaceRoot: workspace}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())

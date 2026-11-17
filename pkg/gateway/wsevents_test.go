@@ -952,10 +952,12 @@ func TestHandleChatWSCompactStreamsItsLifecycleAndCanBeCancelled(t *testing.T) {
 	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
 	_, err = sessions.Append(ctx, "session-ws", "user", "a question worth compacting")
 	require.NoError(t, err)
-	cfg := &appcfg.Root{}
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: summarizer.URL + "/v1",
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
-		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: summarizer.URL + "/v1"}},
+		DefaultModel: "llm-1",
 	}}
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())
@@ -1109,13 +1111,15 @@ func TestHandleChatWSStoppingPreTurnCompactionWithdrawsTheTurn(t *testing.T) {
 			}
 			before, err := sessions.ListAllMessages(ctx, "session-ws", 0)
 			require.NoError(t, err)
-			cfg := &appcfg.Root{}
+			cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+				Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: model.URL + "/v1",
+			})}
 			// gpt-main is not in the model catalog, so the configured window is
 			// the denominator and 100 tokens puts the threshold at 90.
 			cfg.Agents.Defaults.ContextInject.ModelContextTokens = 100
 			cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 				Primary:      true,
-				LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: model.URL + "/v1"}},
+				DefaultModel: "llm-1",
 			}}
 			runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 			require.NoError(t, runner.Load())
@@ -1253,10 +1257,12 @@ func TestHandleChatWSHandsQueuedMessagesBackBeforeTheTurnEnds(t *testing.T) {
 
 			sessions := state.NewSessionStore(db, "main")
 			require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
-			cfg := &appcfg.Root{}
+			cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+				Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
+			})}
 			cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 				Primary:      true,
-				LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}},
+				DefaultModel: "llm-1",
 			}}
 			runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 			require.NoError(t, runner.Load())
@@ -1369,10 +1375,12 @@ func TestHandleChatWSTurnThatCannotRecordItsRunIsWithdrawn(t *testing.T) {
 	}))
 	defer model.Close()
 	sessions := state.NewSessionStore(db, "main")
-	cfg := &appcfg.Root{}
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: model.URL + "/v1",
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
-		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: model.URL + "/v1"}},
+		DefaultModel: "llm-1",
 	}}
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 	require.NoError(t, runner.Load())
@@ -1524,10 +1532,12 @@ func TestHandleChatWSKeepsAMessageTheModelCannotTakeAndRefusesIt(t *testing.T) {
 	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
 	seedWebImageConversation(t, ctx, sessions, "session-ws")
 
-	cfg := appcfg.Root{}
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "test-key", BaseURL: "http://model.invalid/v1",
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
-		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "test-key", BaseURL: "http://model.invalid/v1"}},
+		DefaultModel: "llm-1",
 	}}
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(&cfg), FileResolver: run.PathResolver{}}
 	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
@@ -1578,10 +1588,12 @@ func TestHandleChatWSRefusalNamesTheRememberedRejection(t *testing.T) {
 	// A model the catalog does not know: nothing but the record can refuse it.
 	require.NoError(t, sessions.RecordMediaRefusal(ctx, "session-ws", "acme", "vision-model", "image", "unsupported image"))
 
-	cfg := appcfg.Root{}
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "acme", Model: "vision-model", APIKey: "test-key", BaseURL: "http://model.invalid/v1",
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
-		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "acme", Model: "vision-model", APIKey: "test-key", BaseURL: "http://model.invalid/v1"}},
+		DefaultModel: "llm-1",
 	}}
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(&cfg), FileResolver: run.PathResolver{}}
 	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
@@ -1627,10 +1639,12 @@ func TestHandleChatWSRefusedImageMessageInABusySessionIsWithdrawn(t *testing.T) 
 	_, err = other.CreateRun(ctx, "session-ws", "in flight")
 	require.NoError(t, err)
 
-	cfg := appcfg.Root{}
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "test-key", BaseURL: "http://model.invalid/v1",
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
-		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "test-key", BaseURL: "http://model.invalid/v1"}},
+		DefaultModel: "llm-1",
 	}}
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(&cfg), FileResolver: run.PathResolver{}}
 	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}

@@ -187,7 +187,19 @@ var configSectionSchemas = []configSectionSchema{
 		Fields: []configField{
 			{
 				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows,
-				Hint: "One agent id per row; a row holds its providers, subagents, MCP and default model",
+				// A definition's default_model stays a free-text row on purpose:
+				// the panel is generic over the stored JSON, plan 313 rebuilds
+				// this panel with pickers, and plan 319 owns the field types
+				// (plan 315 Step 4 deferral).
+				Hint: "One agent id per row; a row holds its subagents, MCP and default model (a model row id)",
+			},
+			// The install-wide model row of each public built-in subagent type
+			// (plan 315): a row id + reasoning effort, shared by every primary
+			// agent. Plain rows for now — plan 313 turns the panel into pickers
+			// and plan 319 gives this field the model+effort picker.
+			{
+				Path: "subagent_models", Label: "Subagent models", Kind: configFieldRows,
+				Hint: "One built-in type per row (explore, plan, general-purpose, verification); a row holds its model row id and thinking level",
 			},
 			{
 				Path: "defaults.network_retry_max", Label: "Network retry limit", Kind: configFieldNumber,

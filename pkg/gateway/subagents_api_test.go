@@ -37,10 +37,11 @@ type subagentFixture struct {
 
 // newSubagentFixture builds the gateway over a forebrain.yaml whose "main" agent
 // carries the subagent configuration under test.
-func newSubagentFixture(t *testing.T, mutate func(*appcfg.AgentDefinition)) *subagentFixture {
+func newSubagentFixture(t *testing.T, mutate func(*appcfg.AgentDefinition), extra ...appcfg.AgentLLMProviderConfig) *subagentFixture {
 	t.Helper()
 	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
-		def := appcfg.AgentDefinition{Primary: true, LLMProviders: mcpWriteProvider()}
+		root.LLMModels = modelRowsForTest(append(mcpWriteProvider(), extra...)...)
+		def := appcfg.AgentDefinition{Primary: true, DefaultModel: "llm-1"}
 		if mutate != nil {
 			mutate(&def)
 		}
@@ -594,12 +595,12 @@ func TestSubagentModelSurfacesShowVendorListingDisplayName(t *testing.T) {
 	})
 	t.Cleanup(func() { llm.SetBuiltinModels("qodercn", nil) })
 	f := newSubagentFixture(t, func(def *appcfg.AgentDefinition) {
-		def.LLMProviders = append(def.LLMProviders, appcfg.AgentLLMProviderConfig{Provider: "qodercn", Model: "gfmodel"})
+		def.DefaultModel = "llm-1"
 		def.Subagents = []appcfg.SubagentConfig{
 			{Name: "solo", Description: "d", SystemPrompt: "p", Model: "qodercn/gfmodel"},
 			{Name: "duo", Description: "d", SystemPrompt: "p", Model: "qodercn/dmodel"},
 		}
-	})
+	}, appcfg.AgentLLMProviderConfig{Provider: "qodercn", Model: "gfmodel"})
 
 	rec := f.do(t, http.MethodGet, "/api/agents/primary/main/model-options", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

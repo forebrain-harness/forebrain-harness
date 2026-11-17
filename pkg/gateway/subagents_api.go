@@ -114,9 +114,8 @@ type subagentRow struct {
 	ModelEndpoint   string `json:"model_endpoint"`
 	ReasoningEffort string `json:"reasoning_effort"`
 	// ModelSource says where the model above came from: "agent" for this
-	// agent's own subagent configuration, "global" for the legacy per-type
-	// agents.definitions.<type>.llm_providers entry, empty for the
-	// conversation's model.
+	// agent's own subagent configuration, "global" for the install-wide per-type
+	// row (agents.subagent_models.<type>), empty for the conversation's model.
 	ModelSource string `json:"model_source"`
 	// Tools is the row's tool tier: read_only, edit, pick, or none for a type
 	// that has no tools at all. A built-in's tier is fixed by its type, so this
@@ -257,9 +256,8 @@ func systemSubagentRow(name string) subagentRow {
 
 // subagentRowModel fills a row's model fields with the model a subagent runs on,
 // in the order dispatch uses it: this agent's own entry for it, then — for a
-// built-in the model may dispatch — the legacy per-type definition
-// agents.definitions.<type>.llm_providers, and otherwise the conversation's
-// model. pkg/run's SubagentOwnModel is the same order and resolves the entry the
+// built-in the model may dispatch — the install-wide per-type row
+// agents.subagent_models.<type>, and otherwise the conversation's model. pkg/run's SubagentOwnModel is the same order and resolves the entry the
 // same way; a row that described a different one would be telling the user the
 // wrong thing about what will run.
 //

@@ -194,11 +194,8 @@ func TestTuiModelPickerSwitchesTheModel(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	t.Setenv("FOREBRAIN_WEB_MODEL_TEST_KEY", "test-key")
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-4o", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"},
-			{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"},
-		}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, cfg))
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
@@ -242,9 +239,7 @@ func TestTuiModelPickerSwitchesTheModel(t *testing.T) {
 
 	chosen := parseSlashCommandWithOptions(s, "s1", "tui", "/model", turn.Context{}, &turn.SlashChoice{Command: "model", Value: other.Value})
 	require.Equal(t, "Switched to deepseek/deepseek-chat.", chosen.Reply)
-	saved, err := loadPersistedDocumentForTest(cfgPath)
-	require.NoError(t, err)
-	require.Equal(t, "gpt-4o", saved.Agents.Definitions["main"].LLMProviders[0].Model, "the shared config file was rewritten")
+	require.Equal(t, "gpt-4o", s.Runner.Config().LLMModels[0].Model, "the configured model table was rewritten")
 	// The pick is the session's own durable selection; the runner's published
 	// default is what the next session without a row starts from.
 	row, hasRow, rowErr := sess.SessionModelSelection(context.Background(), "s1")
@@ -258,14 +253,13 @@ func TestGatewaySlashHelpersOnProductPaths(t *testing.T) {
 }
 
 func TestGatewayStatusAndModelHelpers(t *testing.T) {
-	cfg := &appcfg.Root{}
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(
+		appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "main-model"},
+		appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "worker-model"},
+	)}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {
-			LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "main-model"}},
-		},
-		"worker": {
-			LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "worker-model"}},
-		},
+		"main":   {DefaultModel: "llm-1"},
+		"worker": {DefaultModel: "llm-2"},
 	}
 	cfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{Name: "docs"}, {Name: "code"}}
 	s := &Server{
@@ -294,9 +288,9 @@ func TestHandleStatusSlashUsesRuntimeStores(t *testing.T) {
 	require.NoError(t, state.Save(stateRoot, "s1", state.List{Items: []state.Item{
 		{ID: "1", Content: "todo", Status: state.StatusPending},
 	}}))
-	cfg := &appcfg.Root{}
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-main"})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main"}}},
+		"main": {DefaultModel: "llm-1"},
 	}
 	s := &Server{
 		Home:   home,
@@ -530,12 +524,9 @@ func gatewayModelServer(t *testing.T) *Server {
 	t.Setenv("FOREBRAIN_GATEWAY_MODEL_TEST_KEY", "test-key")
 	home := t.TempDir()
 	key := "${FOREBRAIN_GATEWAY_MODEL_TEST_KEY}"
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-a", APIKey: key, BaseURL: "http://a.test/v1"},
-			{Provider: "openai", Model: "gpt-b", APIKey: key, BaseURL: "http://b.test/v1",
-				Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`)},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-a", APIKey: key, BaseURL: "http://a.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-b", APIKey: key, BaseURL: "http://b.test/v1",
+		Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`)}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
 	require.NoError(t, err)
@@ -597,7 +588,7 @@ func TestGatewayModelSettingsReadsSessionSelection(t *testing.T) {
 	// The catalog still comes from the live config.
 	settings, err := s.ModelSettings("s1")
 	require.NoError(t, err)
-	require.Len(t, settings.Config.Agents.Definitions["main"].LLMProviders, 2)
+	require.Len(t, settings.Config.LLMModels, 2)
 }
 
 func TestGatewayModelSettingsWithoutConfiguration(t *testing.T) {

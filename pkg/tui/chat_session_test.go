@@ -1465,8 +1465,14 @@ func mustPreset(t *testing.T, id string) safety.ApprovalPreset {
 func TestApplyPermissionPresetSetsSandboxAndApproval(t *testing.T) {
 	home := t.TempDir()
 	s := sessionEnv{
-		Home:    home,
-		Config:  appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite},
+		Home: home,
+		Config: appcfg.Root{
+			SandboxMode: appcfg.SandboxModeWorkspaceWrite,
+			LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+				Provider: "openai", Model: "gpt-old",
+				APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1",
+			}),
+		},
 		Sandbox: safety.NewManager(),
 		Runner:  &run.Runner{Deps: &run.Deps{Home: home}},
 	}.session()
@@ -1540,15 +1546,18 @@ func TestApplyPermissionPresetSurvivesConfigApply(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	require.NoError(t, os.WriteFile(cfgPath, []byte(
-		"sandbox_mode: workspace-write\n"+
-			"agents:\n  definitions:\n    main:\n      llm_providers:\n"+
-			"        - provider: openai\n          model: gpt-old\n"+
-			"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n",
+		"sandbox_mode: workspace-write\n", // the model table is state, not a file section
 	), 0o600))
 
 	s := sessionEnv{
-		Home:    home,
-		Config:  appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite},
+		Home: home,
+		Config: appcfg.Root{
+			SandboxMode: appcfg.SandboxModeWorkspaceWrite,
+			LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+				Provider: "openai", Model: "gpt-old",
+				APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1",
+			}),
+		},
 		Sandbox: safety.NewManager(),
 		Runner:  &run.Runner{Deps: &run.Deps{Home: home}},
 	}.session()
@@ -1570,10 +1579,7 @@ func TestApplyPermissionPresetSurvivesConfigApply(t *testing.T) {
 	// The file changing under the session does not undo the choice either: an
 	// edit made elsewhere reaches the session through the same reload.
 	require.NoError(t, os.WriteFile(cfgPath, []byte(
-		"approval_preset: full_access\n"+
-			"agents:\n  definitions:\n    main:\n      llm_providers:\n"+
-			"        - provider: openai\n          model: gpt-old\n"+
-			"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n",
+		"approval_preset: full_access\n",
 	), 0o600))
 	require.NoError(t, seedConfigFromFile(s))
 	require.Equal(t, appcfg.ApprovalPresetFullAccess, s.cfg().ApprovalPreset)
@@ -1622,19 +1628,19 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	require.NoError(t, os.WriteFile(cfgPath, []byte(
-		"sandbox_mode: workspace-write\n"+
-			"agents:\n  definitions:\n    main:\n      llm_providers:\n"+
-			"        - provider: openai\n          model: gpt-old\n"+
-			"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"+
-			"        - provider: openai\n          model: gpt-new\n"+
-			"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n",
-	), 0o600))
+	require.NoError(t, os.WriteFile(cfgPath, []byte("sandbox_mode: workspace-write\n"), 0o600))
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	s := sessionEnv{Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"), Sandbox: safety.NewManager(), Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	s := sessionEnv{
+		Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"), Sandbox: safety.NewManager(),
+		Config: appcfg.Root{LLMModels: modelRowsForTest(
+			appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-old", APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1"},
+			appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-new", APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1"},
+		)},
+		Runner: &run.Runner{Deps: &run.Deps{Home: home}},
+	}.session()
 	require.NoError(t, seedConfigFromFile(s))
 
 	_, err = s.ApplyPermissionPreset("s1", safety.PresetFullAccess)
@@ -1653,7 +1659,7 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 	// reads — is untouched.
 	require.Equal(t, appcfg.SandboxModeDangerFullAccess, sessionSandbox())
 	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
-	require.Equal(t, "gpt-old", appcfg.EffectiveDefaultLLM(s.cfg().Agents.Definitions["main"]).Model, "the shared config file was rewritten")
+	require.Equal(t, "gpt-old", s.cfg().LLMModels[0].Model, "the configured model table was rewritten")
 	require.Same(t, s.cfg(), s.runner().Config())
 	sel, hasRow, selErr := s.sessStore().SessionModelSelection(context.Background(), "s1")
 	require.NoError(t, selErr)
@@ -1743,25 +1749,15 @@ func TestManualCompactSlashEmitsRunningAndTerminalFailureEvents(t *testing.T) {
 
 func TestPrimaryAgentOptionsAndSwitchUseResolver(t *testing.T) {
 	home := t.TempDir()
-	cfg := appcfg.Root{}
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "gpt-5",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {
-			LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai",
-				Model:    "gpt-5",
-				APIKey:   "test-key",
-				BaseURL:  "http://127.0.0.1:9/v1",
-			}},
-		},
-		"review": {
-			Primary: true,
-			LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai",
-				Model:    "gpt-5",
-				APIKey:   "test-key",
-				BaseURL:  "http://127.0.0.1:9/v1",
-			}},
-		},
+		"main":   {DefaultModel: "llm-1"},
+		"review": {Primary: true, DefaultModel: "llm-1"},
 	}
 	runner := &run.Runner{Deps: (&run.Deps{Home: home}).WithConfig(&cfg)}
 	// Env is what production always has, and the session now reads the tool
@@ -1851,13 +1847,10 @@ func TestHandleMCPSlashRendersInventory(t *testing.T) {
 	require.Contains(t, reply, "docs")
 }
 
-func TestAvailableModelOptionsUseConfiguredLLMProvidersOnly(t *testing.T) {
+func TestAvailableModelOptionsUseTheConfiguredModelTableOnly(t *testing.T) {
 	codeModel := codeModelID("5.3")
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.1"},
-			{Provider: "openai", Model: codeModel},
-		}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: codeModel}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	home := t.TempDir()
 	require.NoError(t, appcfg.Save(filepath.Join(home, "forebrain.yaml"), cfg))
@@ -1890,13 +1883,13 @@ func TestAvailableModelOptionsUseConfiguredLLMProvidersOnly(t *testing.T) {
 }
 
 func TestCurrentModelReasoningEffortReadsPrimaryProviderParams(t *testing.T) {
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    codeModelID("5.3"),
+		Params:   appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {
-			LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai",
-				Model:    codeModelID("5.3"),
-				Params:   appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
-			}},
+			DefaultModel: "llm-1",
 		},
 	}}}
 	s := sessionEnv{Config: cfg, Runner: &run.Runner{Deps: (&run.Deps{}).WithConfig(&cfg)}}.session()
@@ -1918,11 +1911,8 @@ func TestConversationModelAnswersFollowTheSessionsOwnRow(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	sessStore := state.NewSessionStore(db, "main")
 
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-a", APIKey: "test-key", BaseURL: "https://a.example.invalid"},
-			{Provider: "openai", Model: "gpt-b", APIKey: "test-key", BaseURL: "https://b.example.invalid"},
-		}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-a", APIKey: "test-key", BaseURL: "https://a.example.invalid"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-b", APIKey: "test-key", BaseURL: "https://b.example.invalid"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(filepath.Join(home, "forebrain.yaml"), cfg))
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main", SessionStore: sessStore}).WithConfig(&cfg)}
@@ -1973,16 +1963,16 @@ func TestChooseModelEffortLeavesTheConfigFileAlone(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
 	model := codeModelID("5.3")
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    model,
+		APIKey:   "${OPENAI_API_KEY}",
+		BaseURL:  "https://fast.example/v1",
+		APIPath:  "/responses",
+		Params:   appcfg.LLMRequestParams(`{"stream":true,"reasoning":{"effort":"medium"}}`),
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {
-			LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai",
-				Model:    model,
-				APIKey:   "${OPENAI_API_KEY}",
-				BaseURL:  "https://fast.example/v1",
-				APIPath:  "/responses",
-				Params:   appcfg.LLMRequestParams(`{"stream":true,"reasoning":{"effort":"medium"}}`),
-			}},
+			DefaultModel: "llm-1",
 		},
 	}}}
 	require.NoError(t, appcfg.Save(filepath.Join(home, "forebrain.yaml"), cfg))
@@ -2018,12 +2008,10 @@ func TestChooseModelEffortLeavesTheConfigFileAlone(t *testing.T) {
 	require.Equal(t, model, sel.Model)
 	require.Equal(t, "xhigh", sel.Effort)
 
-	saved, err := loadDocumentForTest(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	got := saved.Agents.Definitions["main"].LLMProviders[0]
+	got := s.cfg().LLMModels[0]
 	require.Equal(t, "https://fast.example/v1", got.BaseURL)
 	require.Equal(t, "/responses", got.APIPath)
-	require.JSONEq(t, `{"stream":true,"reasoning":{"effort":"medium"}}`, string(got.Params), "the shared config file was rewritten")
+	require.JSONEq(t, `{"stream":true,"reasoning":{"effort":"medium"}}`, string(got.Params), "the configured model table was rewritten")
 }
 
 // TestChooseModelInTheTerminalLeavesTheConfigFileAlone pins the terminal half
@@ -2035,21 +2023,18 @@ func TestChooseModelEffortLeavesTheConfigFileAlone(t *testing.T) {
 func TestChooseModelInTheTerminalLeavesTheConfigFileAlone(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
-	cfg := appcfg.Root{
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"}, appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "gpt-4o-mini",
+		APIKey:   "${OPENAI_API_KEY}",
+		BaseURL:  "https://fast.example/v1",
+		APIPath:  "/responses",
+		Params:   appcfg.LLMRequestParams(`{"stream":true,"reasoning":{"effort":"high"}}`),
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{
-						{Provider: "openai", Model: "gpt-4o"},
-						{
-							Provider: "openai",
-							Model:    "gpt-4o-mini",
-							APIKey:   "${OPENAI_API_KEY}",
-							BaseURL:  "https://fast.example/v1",
-							APIPath:  "/responses",
-							Params:   appcfg.LLMRequestParams(`{"stream":true,"reasoning":{"effort":"high"}}`),
-						},
-					},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -2083,10 +2068,8 @@ func TestChooseModelInTheTerminalLeavesTheConfigFileAlone(t *testing.T) {
 	require.Equal(t, "gpt-4o-mini", row.Model)
 	require.Equal(t, "high", row.Effort)
 
-	saved, err := loadDocumentForTest(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	got := saved.Agents.Definitions["main"].LLMProviders[0]
-	require.Equal(t, "gpt-4o", got.Model, "the shared config file was rewritten")
+	got := s.cfg().LLMModels[0]
+	require.Equal(t, "gpt-4o", got.Model, "the configured model table was rewritten")
 	require.Empty(t, got.BaseURL)
 }
 
@@ -2097,26 +2080,23 @@ func TestChooseModelInTheTerminalLeavesTheConfigFileAlone(t *testing.T) {
 func TestChooseModelResolvesAgainstTheActiveAgent(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
-	cfg := appcfg.Root{
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "gpt-4o",
+	}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"}, appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "gpt-4o-mini",
+		APIKey:   "${OPENAI_API_KEY}",
+		BaseURL:  "https://writer.example/v1",
+		Params:   appcfg.LLMRequestParams(`{"stream":true}`),
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "gpt-4o",
-					}},
+					DefaultModel: "llm-1",
 				},
 				"writer": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{
-						{Provider: "openai", Model: "gpt-4o"},
-						{
-							Provider: "openai",
-							Model:    "gpt-4o-mini",
-							APIKey:   "${OPENAI_API_KEY}",
-							BaseURL:  "https://writer.example/v1",
-							Params:   appcfg.LLMRequestParams(`{"stream":true}`),
-						},
-					},
+					DefaultModel: "llm-2",
 				},
 			},
 		},
@@ -2142,11 +2122,9 @@ func TestChooseModelResolvesAgainstTheActiveAgent(t *testing.T) {
 	require.True(t, sel.Set)
 	require.Equal(t, "gpt-4o-mini", sel.Model)
 
-	saved, err := loadDocumentForTest(filepath.Join(home, "forebrain.yaml"))
-	require.NoError(t, err)
-	require.Equal(t, "gpt-4o", saved.Agents.Definitions["main"].LLMProviders[0].Model)
-	got := saved.Agents.Definitions["writer"].LLMProviders[0]
-	require.Equal(t, "gpt-4o", got.Model, "the shared config file was rewritten")
+	require.Equal(t, "gpt-4o", s.cfg().LLMModels[0].Model)
+	got := s.cfg().LLMModels[1]
+	require.Equal(t, "gpt-4o", got.Model, "the configured model table was rewritten")
 	require.Empty(t, got.BaseURL)
 }
 
@@ -5881,11 +5859,11 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 	runStore := &state.RunStore{DB: db, Owner: "tui-test"}
 	actions := newTestActions(t, db)
 
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "https://example.invalid",
+	}), Agents: appcfg.AgentsSection{
 		Definitions: map[string]appcfg.AgentDefinition{
-			"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "https://example.invalid",
-			}}},
+			"main": {Primary: true, DefaultModel: "llm-1"},
 		},
 	}}
 
@@ -8152,12 +8130,11 @@ func TestCharacterizationModelSwitchAppliesWithinSession(t *testing.T) {
 	sessionID := "char-model-switch"
 
 	t.Setenv("FOREBRAIN_CHARACTERIZATION_TEST_KEY", "test-key")
-	main := s.cfg().Agents.Definitions["main"]
-	main.LLMProviders[0].APIKey = "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}"
-	next := main.LLMProviders[0]
+	s.cfg().LLMModels[0].APIKey = "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}"
+	next := s.cfg().LLMModels[0]
+	next.ID = "llm-2"
 	next.Model = "gpt-main-v2"
-	main.LLMProviders = append(main.LLMProviders, next)
-	s.cfg().Agents.Definitions["main"] = main
+	s.cfg().LLMModels = append(s.cfg().LLMModels, next)
 	cfgPath := filepath.Join(s.home(), "forebrain.yaml")
 	if err := appcfg.Save(cfgPath, *s.cfg()); err != nil {
 		t.Fatalf("appcfg.Save (initial): %v", err)
@@ -8305,7 +8282,8 @@ func TestCharacterizationStablePrefixAcrossTurns(t *testing.T) {
 // also says a *new* session should be the one to pick a change up, but that
 // half is not assertable through a forebrain.yaml reload: what the prefix
 // contains is the system prompt plus the tool definitions, and
-// AgentDefinition carries neither — it has only Primary/LLMProviders/Channels,
+// AgentDefinition carries neither — it has only its switches, its MCP servers
+// and its subagents,
 // so switching the model (the realistic reload here) legitimately leaves the
 // prefix identical for old and new sessions alike. Asserting a difference
 // would mean contriving one rather than testing the shipped behaviour.
@@ -8317,7 +8295,7 @@ func TestCharacterizationPrefixSurvivesConfigApply(t *testing.T) {
 	// A saved config rejects a plaintext api_key, so the fixture references an
 	// env var the way a real config file would.
 	t.Setenv("FOREBRAIN_PREFIX_RELOAD_TEST_KEY", "test-key")
-	s.cfg().Agents.Definitions["main"].LLMProviders[0].APIKey = "${FOREBRAIN_PREFIX_RELOAD_TEST_KEY}"
+	s.cfg().LLMModels[0].APIKey = "${FOREBRAIN_PREFIX_RELOAD_TEST_KEY}"
 	cfgPath := filepath.Join(s.home(), "forebrain.yaml")
 	if err := appcfg.Save(cfgPath, *s.cfg()); err != nil {
 		t.Fatalf("appcfg.Save (initial): %v", err)
@@ -8331,12 +8309,9 @@ func TestCharacterizationPrefixSurvivesConfigApply(t *testing.T) {
 	}
 
 	updated := *s.cfg()
-	updated.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-main-v2",
-			APIKey: "${FOREBRAIN_PREFIX_RELOAD_TEST_KEY}", BaseURL: "https://example.invalid",
-		}}},
-	}
+	// The applied change is a file-carried setting: the model table is state,
+	// so it cannot be the thing the file changes (plan 315).
+	updated.ApprovalPreset = appcfg.ApprovalPresetFullAccess
 	if err := appcfg.Save(cfgPath, updated); err != nil {
 		t.Fatalf("appcfg.Save (updated): %v", err)
 	}
@@ -8344,8 +8319,8 @@ func TestCharacterizationPrefixSurvivesConfigApply(t *testing.T) {
 	if err := seedConfigFromFile(s); err != nil {
 		t.Fatalf("seedConfigFromFile: %v", err)
 	}
-	if got := s.cfg().Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-main-v2" {
-		t.Fatalf("model after reload = %q, want gpt-main-v2 — the reload did not actually apply, so this test would prove nothing", got)
+	if got := s.cfg().ApprovalPreset; got != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("approval preset after reload = %q, want the applied one — the reload did not actually apply, so this test would prove nothing", got)
 	}
 
 	if err := s.DispatchSurfaceTurn(context.Background(), turn.TurnSubmission{
@@ -9265,9 +9240,53 @@ func TestComposerPreviewShortcutLinesPacksHintsPerRow(t *testing.T) {
 }
 
 const connectTestConfig = "approval_preset: %MODE%\n" +
-	"agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
-	"        - provider: openai\n          model: %MODEL%\n" +
-	"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
+	"agents:\n  definitions:\n    main:\n      primary: true\n      default_model: llm-connect\n"
+
+// seedConnectModelRow stores the one model /connect works on, under the row id
+// the fixture's definition names: the second call replaces that row's model,
+// which is what a write path does (plan 315).
+func seedConnectModelRow(t *testing.T, home, model string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
+	db, err := state.OpenStateFromHome(context.Background(), home, "")
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	store := &state.LLMModelStore{DB: db}
+	row := state.LLMModel{
+		ID: "llm-connect", Provider: "openai", Model: model,
+		BaseURL: "http://localhost:0/v1", APIPath: "/chat/completions",
+		APIKey: "${OPENAI_API_KEY}",
+	}
+	if _, getErr := store.Get(context.Background(), row.ID); getErr == nil {
+		_, err = store.Update(context.Background(), row)
+	} else {
+		_, err = store.Create(context.Background(), row)
+	}
+	require.NoError(t, err)
+}
+
+func strPtr(v string) *string { return &v }
+
+// storeStoredSectionForTest writes one stored section the way a surface does:
+// the runtime settings live in the database, and the file keeps only its
+// startup sections (plans 187, 315).
+func storeStoredSectionForTest(t *testing.T, home, section, doc string) {
+	t.Helper()
+	// The section validator is process-wide: a fixture leaves it bound to its
+	// own home, and this write composes against that home's file. Clearing it
+	// here keeps the write judged by the store's own rules.
+	state.SetSectionValidator(nil)
+	t.Cleanup(func() { state.SetSectionValidator(nil) })
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
+	db, err := state.OpenStateFromHome(context.Background(), home, "")
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	if err := (&state.ConfigStore{DB: db}).UpdateSection(context.Background(), section, func(json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(doc), nil
+	}); err != nil {
+		t.Fatalf("store the %s section: %v", section, err)
+	}
+}
 
 func writeConnectConfig(t *testing.T, path, mode, model string) {
 	t.Helper()
@@ -9288,6 +9307,9 @@ func TestConnectRuntimeContextReadsCurrentFileNotStartupCache(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	writeConnectConfig(t, cfgPath, "workspace_write", "gpt-startup")
+	storeStoredSectionForTest(t, home, "approval_preset", `"workspace_write"`)
+	storeStoredSectionForTest(t, home, "agents", `{"definitions":{"main":{"primary":true,"default_model":"llm-connect"}}}`)
+	seedConnectModelRow(t, home, "gpt-startup")
 
 	process.ResetResolve()
 	t.Cleanup(process.ResetResolve)
@@ -9295,8 +9317,11 @@ func TestConnectRuntimeContextReadsCurrentFileNotStartupCache(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	// Something else in the session rewrites the file, as /permissions and /model do.
+	// Something else in the session changes both stores, as /permissions and
+	// /model do.
 	writeConnectConfig(t, cfgPath, "full_access", "gpt-chosen-in-session")
+	storeStoredSectionForTest(t, home, "approval_preset", `"full_access"`)
+	seedConnectModelRow(t, home, "gpt-chosen-in-session")
 
 	rt, err := connectRuntimeContext()
 	if err != nil {
@@ -9307,7 +9332,7 @@ func TestConnectRuntimeContextReadsCurrentFileNotStartupCache(t *testing.T) {
 	}
 	p := connectCurrentLLM(&rt.Config, "main")
 	if p == nil || p.Model != "gpt-chosen-in-session" {
-		t.Fatalf("model = %+v, want the value on disk", p)
+		t.Fatalf("model = %+v, want the value the store holds now", p)
 	}
 	// The persisted form keeps the reference, so saving cannot bake a resolved
 	// secret into the file.
@@ -9319,13 +9344,13 @@ func TestConnectRuntimeContextReadsCurrentFileNotStartupCache(t *testing.T) {
 // The prompt offers the active primary agent's current values as defaults, not
 // main's, so a session running another agent is not shown someone else's setup.
 func TestConnectCurrentValuesFollowTheNamedAgent(t *testing.T) {
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-main", BaseURL: "https://main.example/v1", APIPath: "/chat",
-		}}},
-		"review": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-review", BaseURL: "https://review.example/v1", APIPath: "/responses",
-		}}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-main", BaseURL: "https://main.example/v1", APIPath: "/chat",
+	}, appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-review", BaseURL: "https://review.example/v1", APIPath: "/responses",
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main":   {Primary: true, DefaultModel: "llm-1"},
+		"review": {Primary: true, DefaultModel: "llm-2"},
 	}}}
 
 	if got := connectCurrentBaseURL(&cfg, "review"); got != "https://review.example/v1" {
@@ -13709,9 +13734,12 @@ func (s *scriptedApprovalSink) PromptToolApproval(_ context.Context, req turn.To
 // planReviewConfig is a session that can run plan review: models configured.
 // The subagent switch is left unset because plan review does not depend on it.
 func planReviewConfig(providers ...appcfg.AgentLLMProviderConfig) *appcfg.Root {
-	return &appcfg.Root{Agents: appcfg.AgentsSection{
-		Definitions: map[string]appcfg.AgentDefinition{"main": {LLMProviders: providers}},
-	}}
+	return &appcfg.Root{
+		LLMModels: modelRowsForTest(providers...),
+		Agents: appcfg.AgentsSection{
+			Definitions: map[string]appcfg.AgentDefinition{"main": {Primary: true}},
+		},
+	}
 }
 
 func newReviewRunSession(t *testing.T, executor run.SubagentExecutor) (*ChatSession, *state.ActionService) {
@@ -22301,16 +22329,16 @@ func pickerModelID(version string) string {
 }
 
 func testConfig() appcfg.Root {
-	return appcfg.Root{
+	return appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "gpt-4o",
+		BaseURL:  "https://example.test",
+		APIKey:   "secret",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "gpt-4o",
-						BaseURL:  "https://example.test",
-						APIKey:   "secret",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -29104,8 +29132,8 @@ func configuredMainLLMTestConfig(t *testing.T) appcfg.Root {
 	if len(params) > 0 {
 		entry.Params = params
 	}
-	return appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{entry}},
+	return appcfg.Root{LLMModels: modelRowsForTest(entry), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 }
 
@@ -29329,19 +29357,16 @@ func TestCharacterizationConfigApplyKeepsEnvironmentConfigLive(t *testing.T) {
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
 
 	t.Setenv("FOREBRAIN_CHARACTERIZATION_TEST_KEY", "test-key")
-	s.cfg().Agents.Definitions["main"].LLMProviders[0].APIKey = "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}"
+	s.cfg().LLMModels[0].APIKey = "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}"
 	cfgPath := filepath.Join(s.home(), "forebrain.yaml")
 	if err := appcfg.Save(cfgPath, *s.cfg()); err != nil {
 		t.Fatalf("appcfg.Save (initial): %v", err)
 	}
 
 	updated := *s.cfg()
-	updated.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-main-v2",
-			APIKey: "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}", BaseURL: "https://example.invalid",
-		}}},
-	}
+	// The applied change is a file-carried setting: the model table is state
+	// and cannot be what the file changes (plan 315).
+	updated.ApprovalPreset = appcfg.ApprovalPresetFullAccess
 	if err := appcfg.Save(cfgPath, updated); err != nil {
 		t.Fatalf("appcfg.Save (updated): %v", err)
 	}
@@ -29350,16 +29375,16 @@ func TestCharacterizationConfigApplyKeepsEnvironmentConfigLive(t *testing.T) {
 		t.Fatalf("seedConfigFromFile = %v, want nil", err)
 	}
 
-	if got := s.cfg().Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-main-v2" {
-		t.Fatalf("session config model = %q, want the applied value", got)
+	if got := s.cfg().ApprovalPreset; got != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("session config approval preset = %q, want the applied value", got)
 	}
 	if s.Env == nil || s.Env.Deps.Config() == nil {
 		t.Fatal("characterization session must carry an Environment with a config")
 	}
-	if got := s.Env.Deps.Config().Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-main-v2" {
-		t.Fatalf("Environment config model = %q, want %q: applying a configuration must leave "+
+	if got := s.Env.Deps.Config().ApprovalPreset; got != appcfg.ApprovalPresetFullAccess {
+		t.Fatalf("Environment config approval preset = %q, want %q: applying a configuration must leave "+
 			"the Environment holding the live config, because the run executor resolves the "+
-			"agent state root from it", got, "gpt-main-v2")
+			"agent state root from it", got, appcfg.ApprovalPresetFullAccess)
 	}
 }
 
@@ -29377,7 +29402,7 @@ func TestCharacterizationConfigApplyKeepsTheSessionPermissionPreset(t *testing.T
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
 
 	t.Setenv("FOREBRAIN_CHARACTERIZATION_TEST_KEY", "test-key")
-	s.cfg().Agents.Definitions["main"].LLMProviders[0].APIKey = "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}"
+	s.cfg().LLMModels[0].APIKey = "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}"
 	// The file on disk asks for a writable workspace.
 	s.cfg().SandboxMode = appcfg.SandboxModeWorkspaceWrite
 	cfgPath := filepath.Join(s.home(), "forebrain.yaml")
@@ -29424,7 +29449,7 @@ func TestCharacterizationConfigApplyLetsYOLOOutrankTheSessionPreset(t *testing.T
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
 
 	t.Setenv("FOREBRAIN_CHARACTERIZATION_TEST_KEY", "test-key")
-	s.cfg().Agents.Definitions["main"].LLMProviders[0].APIKey = "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}"
+	s.cfg().LLMModels[0].APIKey = "${FOREBRAIN_CHARACTERIZATION_TEST_KEY}"
 	s.cfg().SandboxMode = appcfg.SandboxModeWorkspaceWrite
 	if err := appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()); err != nil {
 		t.Fatalf("appcfg.Save: %v", err)
@@ -29461,12 +29486,15 @@ func TestConfigApplyRepointsEveryConfigHolder(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
 	path := filepath.Join(home, "forebrain.yaml")
-	body := "agents:\n  definitions:\n    main:\n      llm_providers:\n" +
-		"        - provider: openai\n          model: gpt-old\n" +
-		"          api_key: ${FOREBRAIN_REPOINT_TEST_KEY}\n          base_url: http://localhost:0/v1\n"
+	body := "agents:\n  definitions:\n    main:\n      primary: true\n"
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 	cfg, err := loadDocumentForTest(path)
 	require.NoError(t, err)
+	// The model table is state, not a file section (plan 315).
+	cfg.LLMModels = modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-old",
+		APIKey: "${FOREBRAIN_REPOINT_TEST_KEY}", BaseURL: "http://localhost:0/v1",
+	})
 
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main"}).WithConfig(&cfg)}
 	require.NoError(t, runner.Load())
@@ -29474,11 +29502,13 @@ func TestConfigApplyRepointsEveryConfigHolder(t *testing.T) {
 	s.userHooks = &hook.Runtime{Home: home, Cfg: s.cfg()}
 
 	before := s.cfg()
-	require.NoError(t, os.WriteFile(path, []byte(strings.Replace(body, "gpt-old", "gpt-new", 1)), 0o600))
+	// The applied change rides a file-carried setting: the model table is
+	// state, so it cannot be what the file changes (plan 315).
+	require.NoError(t, os.WriteFile(path, []byte(body+"approval_preset: full_access\n"), 0o600))
 	require.NoError(t, seedConfigFromFile(s))
 
 	require.NotSame(t, before, s.cfg(), "an application must publish a new config, not mutate the old one in place")
-	require.Equal(t, "gpt-new", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
+	require.Equal(t, appcfg.ApprovalPresetFullAccess, s.cfg().ApprovalPreset)
 	require.Same(t, s.cfg(), s.Env.Deps.Config(),
 		"the session must read the environment's config, not a copy of it")
 	require.Same(t, s.cfg(), s.runner().Config(),
@@ -29590,6 +29620,12 @@ func seedConfigFromFile(s *ChatSession) error {
 	loaded, err := loadDocumentForTest(path)
 	if err != nil {
 		return fmt.Errorf("load %s: %w", path, err)
+	}
+	// The model table is state, not a file section (plan 315): the file
+	// contributes everything else, and the rows a fixture gave the environment
+	// survive the reload.
+	if cfg := s.cfg(); cfg != nil && len(cfg.LLMModels) > 0 {
+		loaded.LLMModels = cfg.LLMModels
 	}
 	safety.ApplyYOLO(&loaded)
 	effective := safety.EffectiveConfig(loaded, s.LaunchProject)
@@ -30843,13 +30879,12 @@ func newModelSelectionTestSession(t *testing.T) *ChatSession {
 	t.Helper()
 	t.Setenv("FOREBRAIN_MODEL_SELECTION_TEST_KEY", "test-key")
 	s := newCharacterizationSession(t, nil)
-	main := s.cfg().Agents.Definitions["main"]
-	main.LLMProviders[0].APIKey = "${FOREBRAIN_MODEL_SELECTION_TEST_KEY}"
-	second := main.LLMProviders[0]
+	s.cfg().LLMModels[0].APIKey = "${FOREBRAIN_MODEL_SELECTION_TEST_KEY}"
+	second := s.cfg().LLMModels[0]
+	second.ID = "llm-2"
 	second.Model = "gpt-other"
 	second.Params = appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`)
-	main.LLMProviders = append(main.LLMProviders, second)
-	s.cfg().Agents.Definitions["main"] = main
+	s.cfg().LLMModels = append(s.cfg().LLMModels, second)
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
 	// The pinned runtime follows the file the fixture just wrote.
 	require.NoError(t, seedConfigFromFile(s))
@@ -30963,19 +30998,17 @@ func TestNewSessionOpensOnTheMostRecentlyUsedModel(t *testing.T) {
 //
 // The reading is the session-row recency, so it keeps working after the user
 // edits the configured default: the third conversation still opens on the most
-// recently used model, not whatever llm_providers[0] says now.
+// recently used model, not whatever the configured default says now.
 func TestNewConversationOpensOnTheMostRecentlyUsedModelAndFooterNamesIt(t *testing.T) {
 	s := newModelSelectionTestSession(t)
 	ctx := context.Background()
 
 	// sess-a runs the entry that does not sit at the file's default position.
-	main := s.cfg().Agents.Definitions["main"]
-	for i := range main.LLMProviders {
-		if main.LLMProviders[i].Model == "gpt-main" {
-			main.LLMProviders[i].Params = appcfg.LLMRequestParams(`{"reasoning":{"effort":"low"}}`)
+	for i := range s.cfg().LLMModels {
+		if s.cfg().LLMModels[i].Model == "gpt-main" {
+			s.cfg().LLMModels[i].Params = appcfg.LLMRequestParams(`{"reasoning":{"effort":"low"}}`)
 		}
 	}
-	s.cfg().Agents.Definitions["main"] = main
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
 	require.NoError(t, seedConfigFromFile(s))
 	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
@@ -30984,16 +31017,14 @@ func TestNewConversationOpensOnTheMostRecentlyUsedModelAndFooterNamesIt(t *testi
 	// setConfiguredDefault is the user's own action on the file — the one
 	// thing that may change the configured default.
 	setConfiguredDefault := func(model string) {
-		providers := s.cfg().Agents.Definitions["main"]
 		at := -1
-		for i := range providers.LLMProviders {
-			if providers.LLMProviders[i].Model == model {
+		for i := range s.cfg().LLMModels {
+			if s.cfg().LLMModels[i].Model == model {
 				at = i
 			}
 		}
 		require.NotEqual(t, -1, at, "model %s is not configured", model)
-		providers.LLMProviders[0], providers.LLMProviders[at] = providers.LLMProviders[at], providers.LLMProviders[0]
-		s.cfg().Agents.Definitions["main"] = providers
+		s.cfg().LLMModels[0], s.cfg().LLMModels[at] = s.cfg().LLMModels[at], s.cfg().LLMModels[0]
 		require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
 		require.NoError(t, seedConfigFromFile(s))
 	}
@@ -31022,7 +31053,7 @@ func TestNewConversationOpensOnTheMostRecentlyUsedModelAndFooterNamesIt(t *testi
 
 	// The user then moves the configured default away from it.
 	setConfiguredDefault("gpt-main")
-	require.Equal(t, "gpt-main", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
+	require.Equal(t, "gpt-main", s.cfg().LLMModels[0].Model)
 
 	// A third conversation, opened from the second, still opens on the most
 	// recently used model — the row nothing has dethroned — and sess-a keeps
@@ -31224,9 +31255,7 @@ func TestResumeMissingStoredModelOpensWithWarning(t *testing.T) {
 	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other"}, nil))
 
 	// Remove the pinned pair from the config; the stored row is now stale.
-	main := s.cfg().Agents.Definitions["main"]
-	main.LLMProviders = main.LLMProviders[:1]
-	s.cfg().Agents.Definitions["main"] = main
+	s.cfg().LLMModels = s.cfg().LLMModels[:1]
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
 	require.NoError(t, seedConfigFromFile(s))
 
@@ -31281,9 +31310,7 @@ func TestSwitchFailureKeepsQueuedInputAndSession(t *testing.T) {
 	})
 	require.NoError(t, err)
 	// Remove that pair from the live config: the stored choice is stale.
-	main := s.cfg().Agents.Definitions["main"]
-	main.LLMProviders[0].Model = "gpt-renamed"
-	s.cfg().Agents.Definitions["main"] = main
+	s.cfg().LLMModels[0].Model = "gpt-renamed"
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
 
 	state := newSwitchState(s, "sess-a")
@@ -31334,11 +31361,8 @@ func newCrossProcessFixture(t *testing.T) *crossProcessFixture {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	key := "${FOREBRAIN_CROSS_PROCESS_TEST_KEY}"
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-m1", APIKey: key, BaseURL: "http://m1.test/v1"},
-			{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-m1", APIKey: key, BaseURL: "http://m1.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	writeCrossProcessConfig(t, cfgPath, cfg)
 	return &crossProcessFixture{home: home, cfgPath: cfgPath, cfg: cfg}
@@ -31351,6 +31375,7 @@ func (f *crossProcessFixture) loadRuntime(t *testing.T, sessionID string) *ChatS
 	t.Helper()
 	loaded, err := loadDocumentForTest(f.cfgPath)
 	require.NoError(t, err)
+	loaded.LLMModels = f.cfg.LLMModels
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(f.home, "state.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -31369,10 +31394,16 @@ func (f *crossProcessFixture) loadRuntime(t *testing.T, sessionID string) *ChatS
 	return &ChatSession{Env: env, tuiControl: run.NewController()}
 }
 
+// applyFileIn is the user's edit of the shared document: the file is
+// rewritten, and the model table the edit names is published to this process
+// the way a write path stores it (plan 315: the table is state, never a file
+// section).
 func (f *crossProcessFixture) applyFileIn(t *testing.T, s *ChatSession, cfg *appcfg.Root) {
 	t.Helper()
 	writeCrossProcessConfig(t, f.cfgPath, cfg)
+	s.cfg().LLMModels = cfg.LLMModels
 	require.NoError(t, seedConfigFromFile(s))
+	f.cfg = cfg
 }
 
 func requireModel(t *testing.T, s *ChatSession, provider, model, effort string) {
@@ -31417,7 +31448,7 @@ func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 	// The row names the configured row the pick chose, not just the pair it
 	// carries: two rows of one provider/model are told apart only by the id
 	// (plan 261), which is what a later read routes the conversation by.
-	require.Equal(t, appcfg.LegacyLLMModelID("openai", "gpt-m2", "http://m2.test/v1", ""), sel.ModelID)
+	require.Equal(t, "llm-2", sel.ModelID)
 
 	// The shared file is byte-identical: this is the channel that used to
 	// carry A's pick into every other process, every fresh runner, and every
@@ -31434,12 +31465,8 @@ func TestModelChoiceDoesNotLeakToSecondProcess(t *testing.T) {
 	// which is what a fresh conversation follows — the edited file default
 	// (gpt-m3) is only the fallback, not the decider.
 	key := "${FOREBRAIN_CROSS_PROCESS_TEST_KEY}"
-	edited := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-m3", APIKey: key, BaseURL: "http://m3.test/v1"},
-			{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"},
-			{Provider: "openai", Model: "gpt-m1", APIKey: key, BaseURL: "http://m1.test/v1"},
-		}},
+	edited := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-m3", APIKey: key, BaseURL: "http://m3.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-m1", APIKey: key, BaseURL: "http://m1.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	f.applyFileIn(t, f.b, edited)
 	requireModel(t, f.b, "openai", "gpt-m1", "high")
@@ -31461,11 +31488,8 @@ func TestCrossProcessProviderDetailsStillRefresh(t *testing.T) {
 	require.Equal(t, "http://m1.test/v1", run.PrimaryEndpoint(f.b.runner()))
 
 	key := "${FOREBRAIN_CROSS_PROCESS_TEST_KEY}"
-	rotated := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-m1", APIKey: "rotated-key", BaseURL: "http://rotated.test/v1"},
-			{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"},
-		}},
+	rotated := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-m1", APIKey: "rotated-key", BaseURL: "http://rotated.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	f.applyFileIn(t, f.b, rotated)
 	requireModel(t, f.b, "openai", "gpt-m1", "")
@@ -31474,10 +31498,8 @@ func TestCrossProcessProviderDetailsStillRefresh(t *testing.T) {
 	// Removing B's pair keeps B on the SAME model (the published snapshot's
 	// entry) — reload never fails on a missing pin and never switches models
 	// either; the conversation that pinned it is refused at its next turn.
-	withoutPair := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"},
-		}},
+	withoutPair := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-m2", APIKey: key, BaseURL: "http://m2.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	f.applyFileIn(t, f.b, withoutPair)
 	requireModel(t, f.b, "openai", "gpt-m1", "")
@@ -31489,11 +31511,10 @@ func TestCrossProcessProviderDetailsStillRefresh(t *testing.T) {
 func TestCrossProcessAgentSwitchDropsOldPin(t *testing.T) {
 	f := newCrossProcessFixture(t)
 	key := "${FOREBRAIN_CROSS_PROCESS_TEST_KEY}"
-	f.cfg.Agents.Definitions["reviewer"] = appcfg.AgentDefinition{
-		LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-review", APIKey: key, BaseURL: "http://review.test/v1"},
-		},
-	}
+	f.cfg.LLMModels = append(f.cfg.LLMModels, appcfg.LLMModelConfig{
+		ID: "llm-review", Provider: "openai", Model: "gpt-review", APIKey: key, BaseURL: "http://review.test/v1",
+	})
+	f.cfg.Agents.Definitions["reviewer"] = appcfg.AgentDefinition{DefaultModel: "llm-review"}
 	writeCrossProcessConfig(t, f.cfgPath, f.cfg)
 	f.a = f.loadRuntime(t, "sess-a")
 	requireModel(t, f.a, "openai", "gpt-m1", "")
@@ -31525,21 +31546,27 @@ func TestApplyConfigFromDiskKeepsServingWhenProvidersEmptied(t *testing.T) {
 	t.Setenv("FOREBRAIN_TUI_RELOAD_TEST_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	good := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-a",
-			APIKey: "${FOREBRAIN_TUI_RELOAD_TEST_KEY}", BaseURL: "http://a.test/v1",
-		}}},
+	good := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-a",
+		APIKey: "${FOREBRAIN_TUI_RELOAD_TEST_KEY}", BaseURL: "http://a.test/v1",
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, good))
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	s := sessionEnv{Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"),
-		Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	s := sessionEnv{
+		Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"),
+		Config: appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+			Provider: "openai", Model: "gpt-a",
+			APIKey: "${FOREBRAIN_TUI_RELOAD_TEST_KEY}", BaseURL: "http://a.test/v1",
+		})},
+		Runner: &run.Runner{Deps: &run.Deps{Home: home}},
+	}.session()
 	require.NoError(t, seedConfigFromFile(s))
 	live := s.cfg()
-	require.Equal(t, "gpt-a", live.Agents.Definitions["main"].LLMProviders[0].Model)
+	require.Equal(t, "gpt-a", live.LLMModels[0].Model)
 
 	// A config whose providers list is emptied parses and passes the startup
 	// check, and a reload must not fail on the missing pin either: the runner
@@ -31558,18 +31585,21 @@ func TestSelectModelConcurrentWithConfigApply(t *testing.T) {
 	t.Setenv("FOREBRAIN_TUI_CONCURRENT_TEST_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-a", APIKey: "${FOREBRAIN_TUI_CONCURRENT_TEST_KEY}", BaseURL: "http://a.test/v1"},
-			{Provider: "openai", Model: "gpt-b", APIKey: "${FOREBRAIN_TUI_CONCURRENT_TEST_KEY}", BaseURL: "http://b.test/v1"},
-		}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-a", APIKey: "${FOREBRAIN_TUI_CONCURRENT_TEST_KEY}", BaseURL: "http://a.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-b", APIKey: "${FOREBRAIN_TUI_CONCURRENT_TEST_KEY}", BaseURL: "http://b.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, cfg))
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	s := sessionEnv{Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"),
-		Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	s := sessionEnv{
+		Home: home, SQL: db, SessStore: state.NewSessionStore(db, "main"),
+		Config: appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+			Provider: "openai", Model: "gpt-a",
+			APIKey: "${FOREBRAIN_TUI_RELOAD_TEST_KEY}", BaseURL: "http://a.test/v1",
+		})},
+		Runner: &run.Runner{Deps: &run.Deps{Home: home}},
+	}.session()
 	require.NoError(t, seedConfigFromFile(s))
 
 	var wg sync.WaitGroup
@@ -31578,11 +31608,8 @@ func TestSelectModelConcurrentWithConfigApply(t *testing.T) {
 	// place, so two goroutines sharing one Root would race inside the save
 	// itself — a test bug, not the seam under test.
 	newReordered := func() appcfg.Root {
-		return appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-			"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-				{Provider: "openai", Model: "gpt-b", APIKey: "${FOREBRAIN_TUI_CONCURRENT_TEST_KEY}", BaseURL: "http://b.test/v1"},
-				{Provider: "openai", Model: "gpt-a", APIKey: "${FOREBRAIN_TUI_CONCURRENT_TEST_KEY}", BaseURL: "http://a.test/v1"},
-			}},
+		return appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-b", APIKey: "${FOREBRAIN_TUI_CONCURRENT_TEST_KEY}", BaseURL: "http://b.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-a", APIKey: "${FOREBRAIN_TUI_CONCURRENT_TEST_KEY}", BaseURL: "http://a.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true, DefaultModel: "llm-1"},
 		}}}
 	}
 	for range rounds {

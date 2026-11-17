@@ -72,17 +72,17 @@ func TestHandleSessionCompactSuccess(t *testing.T) {
 		_, _ = rw.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer fakeLLM.Close()
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "test-model",
+		APIKey:   "test-key",
+		BaseURL:  fakeLLM.URL,
+		APIPath:  "/v1/chat/completions",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "test-model",
-						APIKey:   "test-key",
-						BaseURL:  fakeLLM.URL,
-						APIPath:  "/v1/chat/completions",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,25 +22,15 @@ import (
 
 func TestPrimaryAgentsAPIListsAndSwitches(t *testing.T) {
 	home := t.TempDir()
-	cfg := &appcfg.Root{}
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "gpt-5",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {
-			LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai",
-				Model:    "gpt-5",
-				APIKey:   "test-key",
-				BaseURL:  "http://127.0.0.1:9/v1",
-			}},
-		},
-		"review": {
-			Primary: true,
-			LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai",
-				Model:    "gpt-5",
-				APIKey:   "test-key",
-				BaseURL:  "http://127.0.0.1:9/v1",
-			}},
-		},
+		"main":   {DefaultModel: "llm-1"},
+		"review": {Primary: true, DefaultModel: "llm-1"},
 	}
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
 	require.NoError(t, err)
@@ -418,4 +409,38 @@ func TestPrimaryAgentDeleteGuards(t *testing.T) {
 // home returns the temp home the CRUD fixture rooted its config in.
 func home() string {
 	return crudHome
+}
+
+// modelRowsForTest is how a fixture seeds the install's model table (plan 315):
+// one fb_llm_models row per model an entry names, with the row ids llm-1,
+// llm-2, … in order. A definition names one of them with default_model.
+// modelRowsForTest is how a fixture seeds the install's model table (plan 315):
+// one fb_llm_models row per model an entry names — `model: [a, b]` expanding
+// the way a provider list used to — with the row ids llm-1, llm-2, … in order.
+// A definition names one of them with default_model; a built-in subagent type
+// names one in agents.subagent_models.<type>.
+func modelRowsForTest(entries ...appcfg.AgentLLMProviderConfig) []appcfg.LLMModelConfig {
+	var rows []appcfg.LLMModelConfig
+	for _, entry := range entries {
+		models := append(appcfg.StringList(nil), entry.Models...)
+		if len(models) == 0 && entry.Model != "" {
+			models = appcfg.StringList{entry.Model}
+		}
+		if len(models) == 0 {
+			models = appcfg.StringList{""}
+		}
+		for _, model := range models {
+			rows = append(rows, appcfg.LLMModelConfig{
+				ID:          fmt.Sprintf("llm-%d", len(rows)+1),
+				Provider:    entry.Provider,
+				Model:       model,
+				BaseURL:     entry.BaseURL,
+				APIPath:     entry.APIPath,
+				APIKey:      entry.APIKey,
+				Params:      append(appcfg.LLMRequestParams(nil), entry.Params...),
+				URLVerbatim: entry.URLVerbatim,
+			})
+		}
+	}
+	return rows
 }

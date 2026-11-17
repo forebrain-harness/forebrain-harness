@@ -2392,7 +2392,7 @@ export interface SubagentConfigRow {
   model: string
   reasoningEffort: string
   /** Where the model above came from: this agent's own subagent configuration,
-   *  the legacy per-type `agents.definitions.<type>.llm_providers` entry, or —
+   *  the install-wide per-type row (`agents.subagent_models.<type>`), or —
    *  empty — the conversation's model. */
   modelSource: 'agent' | 'global' | ''
   tools: SubagentTools

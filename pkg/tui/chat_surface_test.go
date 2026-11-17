@@ -829,8 +829,8 @@ func TestDispatchSurfaceTurnModelOpensDialogWithoutTranscriptAppend(t *testing.T
 	s, cleanup := newSurfaceTestSession(t)
 	defer cleanup()
 
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5"}}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), cfg))
 	*s.cfg() = cfg

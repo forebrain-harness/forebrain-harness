@@ -89,12 +89,43 @@ func MainAgentLLMConfiguredWithConfig(cfg appcfg.Root) bool {
 
 func TestMainAgentLLMConfiguredTrueWhenMainLLMFullyConfigured(t *testing.T) {
 	process.ResetResolve()
+	// The section validator is process-wide and a previous test may have left
+	// one bound to its own home.
+	state.SetSectionValidator(nil)
+	t.Cleanup(func() { state.SetSectionValidator(nil) })
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_HOME", home)
 	t.Setenv("OPENAI_API_KEY", "sk-test")
-	cfg := "agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-5\n          api_key: ${OPENAI_API_KEY}\n          base_url: https://api.openai.com/v1\n"
-	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(cfg), 0o600); err != nil {
+	cfg := "agents:\n  definitions:\n    main:\n      primary: true\n      default_model: llm-main\n"
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
+	}
+	// The model itself is a row of the table (plan 315): /connect stores it
+	// there, and the completeness check reads it back from the composed
+	// configuration.
+	if err := os.MkdirAll(filepath.Join(home, "state"), 0o755); err != nil {
+		t.Fatalf("state dir: %v", err)
+	}
+	seedDB, err := state.OpenStateFromHome(context.Background(), home, "")
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	if _, err := (&state.LLMModelStore{DB: seedDB}).Create(context.Background(), state.LLMModel{
+		ID: "llm-main", Provider: "openai", Model: "gpt-5",
+		BaseURL: "https://api.openai.com/v1", APIPath: "/chat/completions", APIKey: "sk-test",
+	}); err != nil {
+		t.Fatalf("store the model row: %v", err)
+	}
+	// The definitions live in the database too (plan 187): the composed
+	// configuration is what the check reads, and the row is what it resolves.
+	if err := (&state.ConfigStore{DB: seedDB}).UpdateSection(context.Background(), "agents", func(json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"definitions":{"main":{"primary":true,"default_model":"llm-main"}}}`), nil
+	}); err != nil {
+		t.Fatalf("store the agents section: %v", err)
+	}
+	if err := seedDB.Close(); err != nil {
+		t.Fatalf("close state: %v", err)
 	}
 	ok, err := MainAgentLLMConfigured()
 	if err != nil {
@@ -4548,4 +4579,38 @@ func TestConnectDefaultEffortRendersSingleChoice(t *testing.T) {
 	if len(sub.provisioned) != 0 {
 		t.Fatalf("provisioned %+v, Esc writes nothing", sub.provisioned)
 	}
+}
+
+// modelRowsForTest is how a fixture seeds the install's model table (plan 315):
+// one fb_llm_models row per model an entry names, with the row ids llm-1,
+// llm-2, … in order. A definition names one of them with default_model.
+// modelRowsForTest is how a fixture seeds the install's model table (plan 315):
+// one fb_llm_models row per model an entry names — `model: [a, b]` expanding
+// the way a provider list used to — with the row ids llm-1, llm-2, … in order.
+// A definition names one of them with default_model; a built-in subagent type
+// names one in agents.subagent_models.<type>.
+func modelRowsForTest(entries ...appcfg.AgentLLMProviderConfig) []appcfg.LLMModelConfig {
+	var rows []appcfg.LLMModelConfig
+	for _, entry := range entries {
+		models := append(appcfg.StringList(nil), entry.Models...)
+		if len(models) == 0 && entry.Model != "" {
+			models = appcfg.StringList{entry.Model}
+		}
+		if len(models) == 0 {
+			models = appcfg.StringList{""}
+		}
+		for _, model := range models {
+			rows = append(rows, appcfg.LLMModelConfig{
+				ID:          fmt.Sprintf("llm-%d", len(rows)+1),
+				Provider:    entry.Provider,
+				Model:       model,
+				BaseURL:     entry.BaseURL,
+				APIPath:     entry.APIPath,
+				APIKey:      entry.APIKey,
+				Params:      append(appcfg.LLMRequestParams(nil), entry.Params...),
+				URLVerbatim: entry.URLVerbatim,
+			})
+		}
+	}
+	return rows
 }

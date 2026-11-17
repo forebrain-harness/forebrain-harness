@@ -456,7 +456,36 @@ func (p *configPanel) sectionDoc(name string) any {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil
 	}
+	if name == "agents" {
+		// The panel edits whatever keys the stored row holds, so a setting the
+		// schema retired is removed here rather than left to the descriptor
+		// table (plan 315): it can then be neither shown as a row nor written
+		// back by configMarshalDoc, and a save drops it from the store.
+		dropRetiredAgentKeys(doc)
+	}
 	return doc
+}
+
+// dropRetiredAgentKeys removes the per-agent settings the configuration no
+// longer carries from a decoded agents section. The one such key is an agent
+// definition's provider list: every model is a row of the global table now, and
+// every model choice is a reference to one (plan 315). It lives here rather
+// than in the schema because the panel's generic row editor is driven by the
+// document, not by a descriptor per row.
+func dropRetiredAgentKeys(doc any) {
+	section, ok := doc.(map[string]any)
+	if !ok {
+		return
+	}
+	definitions, ok := section["definitions"].(map[string]any)
+	if !ok {
+		return
+	}
+	for _, value := range definitions {
+		if definition, ok := value.(map[string]any); ok {
+			delete(definition, "llm_providers")
+		}
+	}
 }
 
 // configSectionNames lists the section names in the panel's own order, for
@@ -660,8 +689,9 @@ const (
 )
 
 // editRows edits one table or list as rows. A row that holds a table opens
-// its own rows one level down, so a provider inside an agent's llm_providers
-// is reachable without the panel knowing that shape in advance.
+// its own rows one level down, so a nested section — a subagent entry inside an
+// agent's list, an MCP server inside a profile — is reachable without the panel
+// knowing that shape in advance.
 func (p *configPanel) editRows(doc any, path []string, field configField) (any, string) {
 	notice := ""
 	for {

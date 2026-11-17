@@ -5362,9 +5362,8 @@ func exitPlanServer(t *testing.T, cfg *appcfg.Root) (*Server, *state.RunStore, *
 // overlay: for a parked exit-plan gate it carries the plan itself, the models
 // a review may be handed to, and nothing when no gate is open.
 func TestSessionApprovalRequestCarriesTheExitPlanCard(t *testing.T) {
-	// The rows come from the install's model table, the one source whose ids
-	// are kept verbatim; an id written into a definition's llm_providers list
-	// is rewritten to a content hash.
+	// The rows come from the install's model table, the one source of models
+	// and of the ids a reference names.
 	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
 		{ID: "row-1", Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://one.test/v1"},
 	}}
@@ -5431,8 +5430,8 @@ func TestSessionApprovalRequestCarriesTheExitPlanCard(t *testing.T) {
 // leaves the review's own dispatch record on the conversation.
 func TestActionPlanReviewValidatesBeforeStarting(t *testing.T) {
 	ctx := context.Background()
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test"}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	s, runs, actions, actionID, _ := exitPlanServer(t, cfg)
 
@@ -5553,10 +5552,10 @@ func (f *fakeGatewaySubagentExecutor) SubagentExecutionEnded(context.Context, ru
 // resumed turn cannot leave the machine.
 func TestActionPlanReviewDeliversOnDone(t *testing.T) {
 	ctx := context.Background()
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
-		}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	s, runs, actions, actionID, _ := exitPlanServer(t, cfg)
 	s.Runner.SubagentExecutor = &fakeGatewaySubagentExecutor{reply: "Verdict: rework the cache story."}
@@ -5607,10 +5606,10 @@ func TestActionPlanReviewDeliversOnDone(t *testing.T) {
 // that finishes first delivers against a closed gate and stays a card.
 func TestGatewayApproveCancelsAnInFlightPlanReview(t *testing.T) {
 	ctx := context.Background()
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
-		}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	s, runs, actions, actionID, _ := exitPlanServer(t, cfg)
 
@@ -5673,10 +5672,10 @@ func TestGatewayApproveCancelsAnInFlightPlanReview(t *testing.T) {
 // a client that went away between writing it and this lookup must not silently
 // lose the resumed run: the lookup ignores the request's cancellation.
 func TestResumeIfParkedStillDispatchesWhenTheRequestIsGone(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
-		}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	s, _, _, actionID, _ := exitPlanServer(t, cfg)
 
@@ -5703,10 +5702,10 @@ func TestResumeIfParkedStillDispatchesWhenTheRequestIsGone(t *testing.T) {
 // lookup finds no wait row and no goroutine is left behind writing into stores
 // the surface may be closing.
 func TestResumeIfParkedDispatchesNothingWithoutAParkedRun(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
-		}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	s, runs, _, actionID, _ := exitPlanServer(t, cfg)
 
@@ -5736,10 +5735,10 @@ func TestResumeIfParkedDispatchesNothingWithoutAParkedRun(t *testing.T) {
 // same way the first response did.
 func TestGatewayIdempotentApproveStillCancelsAnInFlightPlanReview(t *testing.T) {
 	ctx := context.Background()
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
-		}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	s, runs, actions, actionID, _ := exitPlanServer(t, cfg)
 
@@ -6325,12 +6324,8 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	t.Setenv("FOREBRAIN_WEB_MODEL_TEST_KEY", "test-key")
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"},
-			{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"},
-			{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://c.test/v1"},
-		}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://c.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, cfg))
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
@@ -6483,14 +6478,11 @@ func TestChatSessionModelPutWithoutAnEffortPinsTheRowsConfiguredEffort(t *testin
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	t.Setenv("FOREBRAIN_WEB_MODEL_EFFORT_KEY", "test-key")
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{
-				Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_EFFORT_KEY}", BaseURL: "http://a.test/v1",
-				Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
-			},
-			{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_EFFORT_KEY}", BaseURL: "http://c.test/v1"},
-		}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_EFFORT_KEY}", BaseURL: "http://a.test/v1",
+		Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
+	}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_EFFORT_KEY}", BaseURL: "http://c.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, cfg))
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
@@ -6582,9 +6574,7 @@ func TestChatSessionModelPutWithoutAnEffortPinsTheRowsConfiguredEffort(t *testin
 
 	// 4. The setting changing afterwards moves the option's mark and leaves the
 	// conversation alone: its row is the truth about what it runs on.
-	main := cfg.Agents.Definitions["main"]
-	main.LLMProviders[0].Params = appcfg.LLMRequestParams(`{"reasoning":{"effort":"max"}}`)
-	cfg.Agents.Definitions["main"] = main
+	cfg.LLMModels[0].Params = appcfg.LLMRequestParams(`{"reasoning":{"effort":"max"}}`)
 	s.Env.AdoptConfig(&cfg)
 	effort, defaults = readModel()
 	require.Equal(t, map[string]string{"glm-5.3-flash": "max", "deepseek-v4-pro": ""}, defaults)
@@ -6619,11 +6609,8 @@ func TestChatSessionModelEndpointsPickTheRow(t *testing.T) {
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	t.Setenv("FOREBRAIN_WEB_MODEL_TWIN_KEY", "test-key")
 	// Two rows for one provider and model, told apart only by their endpoint.
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_TWIN_KEY}", BaseURL: "http://eu.test/v1"},
-			{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_TWIN_KEY}", BaseURL: "http://us.test/v1"},
-		}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_TWIN_KEY}", BaseURL: "http://eu.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_TWIN_KEY}", BaseURL: "http://us.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, cfg))
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
@@ -6724,11 +6711,8 @@ func TestChatModelDefaultFollowsMostRecentlyUsed(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	t.Setenv("FOREBRAIN_WEB_MODEL_TEST_KEY", "test-key")
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"},
-			{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"},
-		}},
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, cfg))
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
@@ -6761,12 +6745,12 @@ func TestChatModelDefaultFollowsMostRecentlyUsed(t *testing.T) {
 }
 
 func TestSessionModelOptionsCarryOpenCodeEfforts(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "opencode-go",
-			Model:    "glm-5.3",
-			Models:   appcfg.StringList{"glm-5.3", "minimax-m3", "qwen3.8-max"},
-		}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "opencode-go",
+		Model:    "glm-5.3",
+		Models:   appcfg.StringList{"glm-5.3", "minimax-m3", "qwen3.8-max"},
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	options := (&Server{}).sessionModelOptions(cfg, "main")
 	require.Len(t, options, 3)
@@ -6875,8 +6859,9 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	var root appcfg.Root
+	root.LLMModels = modelRowsForTest(mcpWriteProvider()...)
 	root.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: mcpWriteProvider()},
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}
 	if mutate != nil {
 		mutate(&root)
@@ -6921,6 +6906,9 @@ func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName strin
 	if err != nil {
 		t.Fatalf("load fixture config: %v", err)
 	}
+	// The model table is state, not a file section (plan 315): the fixture
+	// gives every configuration it loads the rows it configured.
+	loaded.LLMModels = root.LLMModels
 	live := safety.EffectiveConfig(loaded, safety.ProjectContext{})
 	env.AdoptConfig(&live)
 	runner.SetConfig(&live)
@@ -8881,11 +8869,11 @@ func TestWithConfigSectionSerialisesWriters(t *testing.T) {
 		"every writer's increment must have landed")
 }
 
-// providerOrder lists the stored llm_providers' providers, in storage order.
+// providerOrder lists the model table's providers, in storage order.
 func providerOrder(t *testing.T, cfg appcfg.Root) []string {
 	t.Helper()
 	out := []string{}
-	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
+	for _, item := range cfg.LLMModels {
 		out = append(out, item.Provider)
 	}
 	return out
@@ -8894,18 +8882,18 @@ func providerOrder(t *testing.T, cfg appcfg.Root) []string {
 func providerOrderInYAML(t *testing.T, cfg appcfg.Root) []string {
 	t.Helper()
 	out := []string{}
-	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
+	for _, item := range cfg.LLMModels {
 		out = append(out, item.Provider)
 	}
 	return out
 }
 
-// providerModelOrderInYAML is the expanded provider/model order the file was
-// written in, one item per stored entry.
+// providerModelOrderInYAML is the expanded provider/model order the table holds,
+// one item per row.
 func providerModelOrderInYAML(t *testing.T, cfg appcfg.Root) []string {
 	t.Helper()
 	out := []string{}
-	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
+	for _, item := range cfg.LLMModels {
 		out = append(out, item.Provider+"/"+item.Model)
 	}
 	return out
@@ -8913,7 +8901,7 @@ func providerModelOrderInYAML(t *testing.T, cfg appcfg.Root) []string {
 
 func providerBaseURLInYAML(t *testing.T, cfg appcfg.Root, provider string) string {
 	t.Helper()
-	for _, item := range cfg.Agents.Definitions["main"].LLMProviders {
+	for _, item := range cfg.LLMModels {
 		if strings.EqualFold(strings.TrimSpace(item.Provider), provider) {
 			return strings.TrimSpace(item.BaseURL)
 		}

@@ -45,16 +45,16 @@ func TestMainAgentPlanUpdateIsBothDrawnAndPersisted(t *testing.T) {
 	run, err := runSvc.CreateRun(ctx, "sid", "coordinate work")
 	require.NoError(t, err)
 
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "test-model",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "test-model",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -117,16 +117,16 @@ func TestPreparedTUIRunKeepsItsAuditHookAfterForegroundCleanup(t *testing.T) {
 	require.NoError(t, statepkg.NewSessionStore(db, "main").Ensure(ctx, "session-a", "session-a"))
 	runRecord, err := runSvc.CreateRun(ctx, "session-a", "background task")
 	require.NoError(t, err)
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "test-model",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "test-model",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -165,16 +165,16 @@ func TestRunAuditStepHookPopulatesSubagentToolContent(t *testing.T) {
 	run, err := runSvc.CreateRun(ctx, "sid", "subagent work")
 	require.NoError(t, err)
 
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "test-model",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "test-model",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -239,16 +239,16 @@ func TestPlanReviewRunContextPublishesTheReviewersToolSteps(t *testing.T) {
 	run, err := runSvc.CreateRun(ctx, "sid", "review the plan")
 	require.NoError(t, err)
 
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "test-model",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "test-model",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -306,16 +306,16 @@ func TestRunAuditStepHookEmitsPrimaryToolMessagesDirectly(t *testing.T) {
 	run, err := runSvc.CreateRun(ctx, "sid", "inspect source")
 	require.NoError(t, err)
 
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "test-model",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "test-model",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -382,16 +382,16 @@ func TestRunAuditStepHookRecordsARefusalWithoutDrawingIt(t *testing.T) {
 	run, err := runSvc.CreateRun(ctx, "sid", "plan something")
 	require.NoError(t, err)
 
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "test-model",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "test-model",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -4236,10 +4236,12 @@ func TestSwitchStreamSessionBlanksTheBudgetWhenTheStoreCannotAnswer(t *testing.T
 // budget, the configured auto-compaction percent included, so a resumed session
 // about to compact does not read "100%".
 func TestSurfaceComposerTokenStatsCountsTheConfiguredAutoCompactPercent(t *testing.T) {
-	cfg := appcfg.Root{}
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "deepseek", Model: "deepseek-chat", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1",
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
-		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-chat", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}},
+		DefaultModel: "llm-1",
 	}}
 	// Half the model's window, instead of the default 90% of it.
 	cfg.Compact.AutoCompactPercent = 50
@@ -7781,8 +7783,8 @@ func TestToolOutputDeltaIsDrawnNotStored(t *testing.T) {
 	run, err := runSvc.CreateRun(ctx, "sid", "run a command")
 	require.NoError(t, err)
 
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "test-model", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "test-model", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	runner := &runpkg.Runner{Deps: (&runpkg.Deps{Home: t.TempDir()}).WithConfig(cfg)}
 	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()

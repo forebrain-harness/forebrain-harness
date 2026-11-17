@@ -661,10 +661,19 @@ func TestLLMModelsAPIReachesTheRuntimeSnapshot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("FOREBRAIN_MODELS_SNAPSHOT_KEY", "sk-snapshot-start")
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
-		"        - provider: deepseek\n          model: deepseek-v4\n" +
-		"          api_key: ${FOREBRAIN_MODELS_SNAPSHOT_KEY}\n          base_url: http://127.0.0.1:9/v1\n"
+	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      default_model: llm-start\n"
 	require.NoError(t, os.WriteFile(cfgPath, []byte(raw), 0o600))
+	// The model the process starts on lives in the table, which exists before
+	// the process opens its configuration (plan 315).
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
+	seedDB, err := state.OpenStateFromHome(ctx, home, "")
+	require.NoError(t, err)
+	_, err = (&state.LLMModelStore{DB: seedDB}).Create(ctx, state.LLMModel{
+		ID: "llm-start", Provider: "deepseek", Model: "deepseek-v4",
+		APIKey: "sk-snapshot-start", BaseURL: "http://127.0.0.1:9/v1",
+	})
+	require.NoError(t, err)
+	require.NoError(t, seedDB.Close())
 	env, err := process.Open(ctx, process.OpenOptions{Home: home, ConfigPath: cfgPath, NoLaunchProject: true, SessionSource: "webchat"})
 	require.NoError(t, err)
 	defer env.Close()
