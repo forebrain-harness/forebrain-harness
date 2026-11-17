@@ -195,7 +195,7 @@ describe('ToolCallCard', () => {
         }),
       },
     })
-    // Aligned with the TUI's ▤ line: WxH · bytes · scaled.
+    // Aligned with the TUI's ▤ line: WxH bytes scaled.
     expect(wrapper.text()).toContain('1200×600')
     expect(wrapper.text()).toContain('1.4 MB')
     expect(wrapper.text()).toContain('scaled')

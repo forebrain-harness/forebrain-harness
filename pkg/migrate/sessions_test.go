@@ -668,7 +668,7 @@ func TestReimportRebindsProjectlessMigratedConversations(t *testing.T) {
 	if nativeAfter.projectID != nativeBefore.projectID || nativeAfter.cwd != nativeBefore.cwd {
 		t.Fatalf("native row moved: %+v -> %+v", nativeBefore, nativeAfter)
 	}
-	if text := second.Text(); !strings.Contains(text, "Rebound conversations") || !strings.Contains(text, "· 2 rebound") {
+	if text := second.Text(); !strings.Contains(text, "Rebound conversations") || !strings.Contains(text, "2 rebound") {
 		t.Fatalf("report text =\n%s", text)
 	}
 	listed, err := state.NewSessionStore(opts.DB, "main").ListSessionsForProject(ctx, project.ID, 50, 0)

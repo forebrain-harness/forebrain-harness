@@ -251,9 +251,9 @@ func lspBinaryColumn(sc lsp.ServerConfig, det lsp.DetectResult) string {
 		}
 		return det.Path
 	case det.InstallCommand != "":
-		return "not installed · forebrain lsp install " + sc.ID
+		return "not installed forebrain lsp install " + sc.ID
 	default:
-		return "not installed · no install recipe on this system"
+		return "not installed no install recipe on this system"
 	}
 }
 
@@ -292,7 +292,7 @@ func runLSPDoctor(cmd *cobra.Command, _ []string) error {
 		if rep.Enabled {
 			state = "enabled"
 		}
-		fmt.Fprintf(out, "%s (%s) · %s\n", rep.ID, strings.Join(rep.Languages, ", "), state)
+		fmt.Fprintf(out, "%s (%s) %s\n", rep.ID, strings.Join(rep.Languages, ", "), state)
 		for _, check := range rep.Checks {
 			fmt.Fprintf(out, "  %-5s %-11s %s\n", check.Status, check.Name, check.Detail)
 			if check.Status == "fail" {

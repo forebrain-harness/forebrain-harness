@@ -455,7 +455,7 @@ func formatPresentFilesStep(evt StepEvent, maxBytes int) (string, bool) {
 		if label == "" || rel == "" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("- **%s** · %s · %s · `%s`", label, kind, HumanSize(size), rel))
+		lines = append(lines, fmt.Sprintf("- **%s** %s %s `%s`", label, kind, HumanSize(size), rel))
 	}
 	if len(lines) == 0 {
 		return "Presented files.", false

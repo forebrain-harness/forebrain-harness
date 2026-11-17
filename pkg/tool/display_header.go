@@ -128,9 +128,11 @@ func defaultToolInvocationTarget(title string, meta ToolMeta) string {
 	return invocation
 }
 
-// extractShellCommand extracts the shell command from the summary.
-// Summary looks like "> command" or "ran command"; trailing details such as
-// " · exit N" are omitted from the header.
+// extractShellCommand extracts the shell command from a summary written
+// before the copy rule dropped the separator. Summary looks like "> command"
+// or "ran command · detail"; a summary this build wrote joins its detail with
+// a space instead, so the caller reads the command from Meta.Invocation (or
+// Meta.Input) first and only falls back here for a row that kept neither.
 func extractShellCommand(summary string) string {
 	summary = strings.TrimSpace(summary)
 	if strings.HasPrefix(summary, "> ") {

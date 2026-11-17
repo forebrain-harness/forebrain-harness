@@ -55,7 +55,7 @@ describe('SettingsApprovalTab', () => {
     expect(radios).toHaveLength(2)
     expect(radios.map((radio) => radio.attributes('aria-checked'))).toEqual(['true', 'false'])
     expect(wrapper.findAll('.settings-radio').map((row) => row.text())).toEqual([
-      '默认可以读写当前工作区的文件并运行命令；修改工作区外的文件需要审批。',
+      'Workspace write可以读写当前工作区的文件并运行命令；修改工作区外的文件需要审批。',
       '完全访问可以修改工作区外的文件并访问互联网，无需审批。谨慎使用。',
     ])
     const preset = wrapper.find('[data-group="preset"]')

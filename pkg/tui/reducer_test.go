@@ -122,7 +122,7 @@ func TestReducerAccumulatesLiveShellOutputInRunningFrame(t *testing.T) {
 	}
 }
 
-// workedCompletionSuffix matches the " · HH:MM" the closing line ends with.
+// workedCompletionSuffix matches the " HH:MM" the closing line ends with.
 // The minute is read off the wall clock at format time, so assertions pin the
 // shape, not the value.
 var workedCompletionSuffix = regexp.MustCompile(`\d{2}:\d{2}$`)
@@ -494,7 +494,7 @@ func TestReducerContextCompactedEmitsBanner(t *testing.T) {
 	if f.Kind != FrameMemoryCompact || !f.Final || f.StepID != "compact-c1" || f.Title != compactTitleDone {
 		t.Fatalf("frame = %#v", f)
 	}
-	if f.Summary != "182.4k → 64k tokens (−64%) · 14.2s" {
+	if f.Summary != "182.4k → 64k tokens (−64%) 14.2s" {
 		t.Errorf("Summary = %q", f.Summary)
 	}
 	// The body is the checkpoint alone; debug fields stay out of the transcript.

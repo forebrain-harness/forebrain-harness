@@ -6486,7 +6486,7 @@ func TestCharacterizationToolCallTurn(t *testing.T) {
 
 // TestCharacterizationToolCallTurnPopulatesPerRunTrackerCounters guards a
 // regression where the Reducer's per-run Tracker bucket (what the "Worked
-// for N tools · X in / Y out" line reads via SnapshotRun) stayed at zero for
+// for N tools X in / Y out" line reads via SnapshotRun) stayed at zero for
 // every real turn, not just the first: production dispatch never sent the
 // RunStartedMsg the Tracker keys that bucket on, because turnBeforeAgent (the
 // one hook given the run's real ID before any tool/usage event for it can
@@ -14240,12 +14240,12 @@ func TestPromptMainLLMSetupQwenMethodsUseDistinctEndpoints(t *testing.T) {
 	}{
 		{
 			name:    "standard cn",
-			method:  "Standard · China — dashscope.aliyuncs.com",
+			method:  "Standard China — dashscope.aliyuncs.com",
 			wantURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 		},
 		{
 			name:    "coding global",
-			method:  "Coding Plan · Global — coding-intl.dashscope.aliyuncs.com",
+			method:  "Coding Plan Global — coding-intl.dashscope.aliyuncs.com",
 			wantURL: "https://coding-intl.dashscope.aliyuncs.com/v1",
 		},
 	}
@@ -20182,7 +20182,7 @@ func TestToolDisplayHeaderShellCommandAppearsOnce(t *testing.T) {
 			name:    "command omits exit status from summary",
 			command: "false",
 			input:   map[string]any{"command": "false"},
-			summary: "ran false · exit 1",
+			summary: "ran false exit 1",
 			want:    "Ran false",
 		},
 		{
@@ -20224,7 +20224,7 @@ func TestToolDisplayHeaderShellIgnoresNonExitSummaryDetail(t *testing.T) {
 		Kind:    FrameTool,
 		Title:   "shell",
 		Final:   true,
-		Summary: "ran git diff · 122.2 KB",
+		Summary: "ran git diff 122.2 KB",
 		ToolMeta: tool.ToolMeta{
 			ToolName: "shell",
 			Status:   "completed",
@@ -20262,7 +20262,7 @@ func TestToolDisplayHeaderOmitsOutputDerivedSuffixes(t *testing.T) {
 					},
 				},
 			},
-			wantContains:   []string{"Read /repo/hello.go lines 1-27 · 1.5s"},
+			wantContains:   []string{"Read /repo/hello.go lines 1-27 1.5s"},
 			wantNotContain: []string{"lines 1000-1000"},
 		},
 		{
@@ -20530,7 +20530,7 @@ func TestToolDisplayHeaderUnknownToolIsNamedByItsOwnName(t *testing.T) {
 		Kind:    FrameTool,
 		Title:   "unknown_tool",
 		Final:   true,
-		Summary: `ran unknown_tool {"path":"/repo/demo"} · 42 bytes`,
+		Summary: `ran unknown_tool {"path":"/repo/demo"} 42 bytes`,
 		ToolMeta: tool.ToolMeta{
 			ToolName:   "unknown_tool",
 			Status:     "completed",
@@ -20950,7 +20950,7 @@ func TestRendererNoOpEditCompletionShowsNoOutput(t *testing.T) {
 		StepID:   "call-edit-noop",
 		Final:    true,
 		Content:  "",
-		Summary:  "ran edit /repo/demo.go · demo.go",
+		Summary:  "ran edit /repo/demo.go demo.go",
 		FilePath: "/repo/demo.go",
 		ToolMeta: tool.ToolMeta{
 			ToolName:   "edit_file",
@@ -25098,7 +25098,7 @@ func TestNotifyToolStepHooksUsesLocalNotificationHookWhenNoExternalHook(t *testi
 			return got.Kind == MsgKindTool &&
 				got.ToolName == "read_file" &&
 				got.Content != "" &&
-				got.Summary == "ran read hello.go · 1 line" &&
+				got.Summary == "ran read hello.go 1 line" &&
 				got.ToolPhase == event.RunEventToolCompleted &&
 				got.Duration == 150*time.Millisecond
 		default:
@@ -25365,7 +25365,7 @@ func TestToolStepSummaryPrefersExplicitResultLinesOverPreviewInference(t *testin
 			"result_lines": 27,
 		},
 	})
-	require.Equal(t, "ran read hello.go · lines 1-27", got)
+	require.Equal(t, "ran read hello.go lines 1-27", got)
 }
 
 func TestNotifyToolStepHooksPropagatesStepID(t *testing.T) {
@@ -25468,7 +25468,7 @@ func TestNotifyToolStepHooksShowsReadFileCompletedWhenBatchStartedWasSuppressed(
 			return got.Kind == MsgKindTool &&
 				got.ToolName == "read_file" &&
 				got.StepID == "call-read-1" &&
-				got.Summary == "ran read server.go · 42 bytes"
+				got.Summary == "ran read server.go 42 bytes"
 		default:
 			return false
 		}
@@ -25599,7 +25599,7 @@ func TestToolStepSummaryUsesGenericOutputByteCount(t *testing.T) {
 			"stdout_bytes": 834,
 		},
 	})
-	require.Equal(t, "ran example_tool · 834 bytes", got)
+	require.Equal(t, "ran example_tool 834 bytes", got)
 }
 
 func TestToolStepSummaryExplainsShellGitCommandLifecycle(t *testing.T) {
@@ -25609,14 +25609,14 @@ func TestToolStepSummaryExplainsShellGitCommandLifecycle(t *testing.T) {
 		Input:    map[string]any{"command": "git diff --staged"},
 	}))
 
-	require.Equal(t, "awaiting approval · git status --porcelain=v1 -b", toolStepSummary(tool.StepEvent{
+	require.Equal(t, "awaiting approval git status --porcelain=v1 -b", toolStepSummary(tool.StepEvent{
 		Kind:     tool.StepKindToolCompleted,
 		ToolName: "shell",
 		Input:    map[string]any{"command": "git status --porcelain=v1 -b"},
 		Output:   map[string]any{"requires_action": true},
 	}))
 
-	require.Equal(t, "ran git diff · 122.2 KB", toolStepSummary(tool.StepEvent{
+	require.Equal(t, "ran git diff 122.2 KB", toolStepSummary(tool.StepEvent{
 		Kind:     tool.StepKindToolCompleted,
 		ToolName: "shell",
 		Input:    map[string]any{"command": "git diff"},
@@ -29201,8 +29201,8 @@ func TestSetupBackOnProvidersOpensOnTheChoiceMade(t *testing.T) {
 		want    []string
 	}{
 		{"single way in", []string{"OpenAI", "OpenAI"}, []string{"", "OpenAI"}},
-		{"by plan", []string{"Qwen Cloud", "Coding Plan · Global", "Qwen Cloud", "Coding Plan · Global"},
-			[]string{"", "", "Qwen Cloud", "Coding Plan · Global"}},
+		{"by plan", []string{"Qwen Cloud", "Coding Plan Global", "Qwen Cloud", "Coding Plan Global"},
+			[]string{"", "", "Qwen Cloud", "Coding Plan Global"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			title := "OpenAI API key"

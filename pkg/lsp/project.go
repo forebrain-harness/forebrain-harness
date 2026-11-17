@@ -60,7 +60,7 @@ func LoadProjectServers(projectRoot string) (map[string]appcfg.LSPServerConfig, 
 		return nil, []string{"file could not be read"}
 	}
 	if err := appcfg.RejectPlaintextConfigSecrets(path, b); err != nil {
-		return nil, []string{"lsp_servers.yaml contains a plaintext secret; use ${ENV_NAME} and set it under Settings · Variables"}
+		return nil, []string{"lsp_servers.yaml contains a plaintext secret; use ${ENV_NAME} and set it under Settings Variables"}
 	}
 	var top map[string]any
 	if err := yaml.Unmarshal(b, &top); err != nil {
@@ -397,7 +397,7 @@ func projectServerDetail(id string, srv appcfg.LSPServerConfig) string {
 		base = "no command"
 	}
 	if srv.Enabled != nil && *srv.Enabled {
-		base += " · turns it on"
+		base += " turns it on"
 	}
 	return base
 }

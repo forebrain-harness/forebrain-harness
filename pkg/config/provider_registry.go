@@ -125,10 +125,10 @@ var builtinProviders = []BuiltinProvider{
 		ID: "alibaba", Label: "Qwen Cloud", LabelZH: "通义千问",
 		APIKeyLabel: "Qwen API key",
 		Endpoints: []ProviderEndpoint{
-			{Label: "Standard · China", LabelZH: "标准版·国内", BaseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", APIPath: APIPathChatCompletions},
-			{Label: "Standard · Global", LabelZH: "标准版·国际", BaseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", APIPath: APIPathChatCompletions},
-			{Label: "Coding Plan · China", LabelZH: "编程套餐·国内", BaseURL: "https://coding.dashscope.aliyuncs.com/v1", APIPath: APIPathChatCompletions},
-			{Label: "Coding Plan · Global", LabelZH: "编程套餐·国际", BaseURL: "https://coding-intl.dashscope.aliyuncs.com/v1", APIPath: APIPathChatCompletions},
+			{Label: "Standard China", LabelZH: "标准版国内", BaseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", APIPath: APIPathChatCompletions},
+			{Label: "Standard Global", LabelZH: "标准版国际", BaseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", APIPath: APIPathChatCompletions},
+			{Label: "Coding Plan China", LabelZH: "编程套餐国内", BaseURL: "https://coding.dashscope.aliyuncs.com/v1", APIPath: APIPathChatCompletions},
+			{Label: "Coding Plan Global", LabelZH: "编程套餐国际", BaseURL: "https://coding-intl.dashscope.aliyuncs.com/v1", APIPath: APIPathChatCompletions},
 		},
 	},
 	{
@@ -188,11 +188,11 @@ var builtinProviders = []BuiltinProvider{
 		ID: "zhipuai", Label: "Z.AI", LabelZH: "智谱",
 		Endpoints: []ProviderEndpoint{
 			{BaseURL: "https://api.z.ai/api/paas/v4", APIPath: APIPathChatCompletions, Hint: "GLM via OpenAI-compatible endpoint"},
-			{Label: "Coding Plan · Global", LabelZH: "Coding Plan·国际", BaseURL: "https://api.z.ai/api/anthropic", APIPath: APIPathAnthropicMessages},
-			{Label: "Coding Plan · Global (OpenAI)", LabelZH: "Coding Plan·国际（OpenAI 兼容）", BaseURL: "https://api.z.ai/api/coding/paas/v4", APIPath: APIPathChatCompletions},
-			{Label: "Coding Plan · China", LabelZH: "Coding Plan·国内", BaseURL: "https://open.bigmodel.cn/api/anthropic", APIPath: APIPathAnthropicMessages},
-			{Label: "Coding Plan · China (OpenAI)", LabelZH: "Coding Plan·国内（OpenAI 兼容）", BaseURL: "https://open.bigmodel.cn/api/coding/paas/v4", APIPath: APIPathChatCompletions},
-			{Label: "Standard · China", LabelZH: "标准·国内", BaseURL: "https://open.bigmodel.cn/api/paas/v4", APIPath: APIPathChatCompletions},
+			{Label: "Coding Plan Global", LabelZH: "Coding Plan国际", BaseURL: "https://api.z.ai/api/anthropic", APIPath: APIPathAnthropicMessages},
+			{Label: "Coding Plan Global (OpenAI)", LabelZH: "Coding Plan国际（OpenAI 兼容）", BaseURL: "https://api.z.ai/api/coding/paas/v4", APIPath: APIPathChatCompletions},
+			{Label: "Coding Plan China", LabelZH: "Coding Plan国内", BaseURL: "https://open.bigmodel.cn/api/anthropic", APIPath: APIPathAnthropicMessages},
+			{Label: "Coding Plan China (OpenAI)", LabelZH: "Coding Plan国内（OpenAI 兼容）", BaseURL: "https://open.bigmodel.cn/api/coding/paas/v4", APIPath: APIPathChatCompletions},
+			{Label: "Standard China", LabelZH: "标准国内", BaseURL: "https://open.bigmodel.cn/api/paas/v4", APIPath: APIPathChatCompletions},
 		},
 	},
 	{
@@ -230,8 +230,8 @@ var builtinProviders = []BuiltinProvider{
 		Endpoints: []ProviderEndpoint{
 			{Label: "Coding Plan", LabelZH: "Coding Plan", BaseURL: "https://ark.cn-beijing.volces.com/api/coding", APIPath: APIPathAnthropicMessages},
 			{Label: "Agent Plan", LabelZH: "Agent Plan", BaseURL: "https://ark.cn-beijing.volces.com/api/plan", APIPath: APIPathAnthropicMessages},
-			{Label: "Coding Plan · OpenAI", LabelZH: "Coding Plan · OpenAI 兼容", BaseURL: "https://ark.cn-beijing.volces.com/api/coding/v3", APIPath: APIPathChatCompletions},
-			{Label: "Agent Plan · OpenAI", LabelZH: "Agent Plan · OpenAI 兼容", BaseURL: "https://ark.cn-beijing.volces.com/api/plan/v3", APIPath: APIPathChatCompletions},
+			{Label: "Coding Plan OpenAI", LabelZH: "Coding Plan OpenAI 兼容", BaseURL: "https://ark.cn-beijing.volces.com/api/coding/v3", APIPath: APIPathChatCompletions},
+			{Label: "Agent Plan OpenAI", LabelZH: "Agent Plan OpenAI 兼容", BaseURL: "https://ark.cn-beijing.volces.com/api/plan/v3", APIPath: APIPathChatCompletions},
 			{Label: "Pay as you go", LabelZH: "按量付费", BaseURL: "https://ark.cn-beijing.volces.com/api/v3", APIPath: APIPathChatCompletions},
 		},
 		Models: []BuiltinModel{

@@ -1858,7 +1858,7 @@ func TestToolHeadersSayWhatTheTerminalSays(t *testing.T) {
 	read := func(path string) map[string]any {
 		return map[string]any{
 			"tool_name": "read_file",
-			"summary":   "ran read " + path + " · lines 1-96",
+			"summary":   "ran read " + path + " lines 1-96",
 			"tool_meta": map[string]any{
 				"tool_name": "read_file", "status": "completed",
 				"input": map[string]any{"file_path": path}, "result_lines": 96,
@@ -1992,10 +1992,10 @@ func TestCanceledCallHeaderListKeepsTheCallIDs(t *testing.T) {
 // worded from what it kept, and a call the run never answered reads "Canceled
 // ..." — never "denied", nobody was asked.
 func TestStoredToolRowsAndCanceledCallsGetTheSameWording(t *testing.T) {
-	parts := `[{"text":"{}","type":"text"},{"type":"tool_display","body":"x","summary":"ran read /work/proj/a.md · lines 1-9","tool_meta_json":"{\"tool_name\":\"read_file\",\"status\":\"completed\",\"input\":{\"file_path\":\"/work/proj/a.md\"},\"result_lines\":9}"}]`
-	require.Equal(t, "Read a.md lines 1-9 · 2.0s", storedToolRowHeader("/work/proj", parts, "", 2*time.Second))
+	parts := `[{"text":"{}","type":"text"},{"type":"tool_display","body":"x","summary":"ran read /work/proj/a.md lines 1-9","tool_meta_json":"{\"tool_name\":\"read_file\",\"status\":\"completed\",\"input\":{\"file_path\":\"/work/proj/a.md\"},\"result_lines\":9}"}]`
+	require.Equal(t, "Read a.md lines 1-9 2.0s", storedToolRowHeader("/work/proj", parts, "", 2*time.Second))
 	header, headerParts, body, toolName := storedToolRowHeaderParts("/work/proj", parts, "", 2*time.Second)
-	require.Equal(t, "Read a.md lines 1-9 · 2.0s", header)
+	require.Equal(t, "Read a.md lines 1-9 2.0s", header)
 	require.Equal(t, tool.HeaderParts{Action: "Read", Target: "a.md", Suffix: "lines 1-9", Duration: "2.0s"}, headerParts)
 	require.Equal(t, "x", body)
 	require.Equal(t, "read_file", toolName)

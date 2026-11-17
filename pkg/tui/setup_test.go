@@ -1783,7 +1783,7 @@ var providerGroupsBeforeTheRegistry = []providerGroup{
 		Options: []providerChoice{
 			{
 				Group:           "Qwen Cloud",
-				Label:           "Standard · China",
+				Label:           "Standard China",
 				Hint:            "dashscope.aliyuncs.com",
 				Provider:        "alibaba",
 				DefaultBaseURL:  "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -1792,7 +1792,7 @@ var providerGroupsBeforeTheRegistry = []providerGroup{
 			},
 			{
 				Group:           "Qwen Cloud",
-				Label:           "Standard · Global",
+				Label:           "Standard Global",
 				Hint:            "dashscope-intl.aliyuncs.com",
 				Provider:        "alibaba",
 				DefaultBaseURL:  "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
@@ -1801,7 +1801,7 @@ var providerGroupsBeforeTheRegistry = []providerGroup{
 			},
 			{
 				Group:           "Qwen Cloud",
-				Label:           "Coding Plan · China",
+				Label:           "Coding Plan China",
 				Hint:            "coding.dashscope.aliyuncs.com",
 				Provider:        "alibaba",
 				DefaultBaseURL:  "https://coding.dashscope.aliyuncs.com/v1",
@@ -1810,7 +1810,7 @@ var providerGroupsBeforeTheRegistry = []providerGroup{
 			},
 			{
 				Group:           "Qwen Cloud",
-				Label:           "Coding Plan · Global",
+				Label:           "Coding Plan Global",
 				Hint:            "coding-intl.dashscope.aliyuncs.com",
 				Provider:        "alibaba",
 				DefaultBaseURL:  "https://coding-intl.dashscope.aliyuncs.com/v1",

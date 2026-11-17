@@ -11,7 +11,7 @@ import (
 
 // FormatCompactBanner is the one line a finished compaction is read by: how
 // much history there was, how much is left, and how long it took —
-// "182.4k → 12.3k tokens (−93%) · 14.2s". The rest of the record (trigger,
+// "182.4k → 12.3k tokens (−93%) 14.2s". The rest of the record (trigger,
 // strategy, boundary) is bookkeeping and stays out of the line.
 func FormatCompactBanner(payload event.ContextCompactedPayload, duration time.Duration) string {
 	parts := make([]string, 0, 2)
@@ -25,7 +25,7 @@ func FormatCompactBanner(payload event.ContextCompactedPayload, duration time.Du
 	if duration > 0 {
 		parts = append(parts, formatCompactDuration(duration))
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // FormatCompactOutput returns the body shown below the compact header: the

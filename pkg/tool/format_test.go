@@ -319,7 +319,7 @@ func TestReadableToolAnswerReadsThePeerTools(t *testing.T) {
 	// The card's fallback text names each agent once, and an empty roster
 	// says why it is empty.
 	answer, _ := ReadableToolAnswer("peer_list", roster, nil)
-	require.Equal(t, "explore · finished · Extract UI semantics\nexplore · finished · Extract structure\nproj-99 · idle\nproj-7 [3c1a] · busy · fix login", answer.String())
+	require.Equal(t, "explore finished Extract UI semantics\nexplore finished Extract structure\nproj-99 idle\nproj-7 [3c1a] busy fix login", answer.String())
 	empty, ok := ReadableToolAnswer("peer_list", `{"self":"parent","agents":[],"note":"No other agents are reachable right now."}`, nil)
 	require.True(t, ok)
 	require.Empty(t, empty.Peers)
@@ -747,7 +747,7 @@ func TestSummarizeToolStepPrefersExplicitResultLines(t *testing.T) {
 			"result_lines": 42,
 		},
 	})
-	if want := "ran read internal/foo.go · lines 1-42"; got != want {
+	if want := "ran read internal/foo.go lines 1-42"; got != want {
 		t.Fatalf("summary=%q want %q", got, want)
 	}
 }
@@ -1484,20 +1484,20 @@ func TestSummarizeToolStepMemoryToolsDescribeOutcome(t *testing.T) {
 			tool:   "memories_search",
 			input:  map[string]any{"queries": []any{"deploy"}},
 			output: map[string]any{"output": `{"queries":["deploy"],"matches":[{"path":"MEMORY.md","match_line_number":8,"content":"- deploy"}],"truncated":false}`},
-			want:   `searched memories "deploy" · 1 match`,
+			want:   `searched memories "deploy" 1 match`,
 		},
 		{
 			name:   "read reports line range",
 			tool:   "memories_read",
 			input:  map[string]any{"path": "MEMORY.md", "line_offset": float64(80), "max_lines": float64(30)},
 			output: map[string]any{"output": `{"path":"MEMORY.md","start_line_number":80,"content":"x","truncated":false}`},
-			want:   "read memory MEMORY.md · lines 80-109",
+			want:   "read memory MEMORY.md lines 80-109",
 		},
 		{
 			name:   "list counts entries",
 			tool:   "memories_list",
 			output: map[string]any{"output": `{"path":null,"entries":[{"path":"MEMORY.md","entry_type":"file"}],"truncated":false}`},
-			want:   "listed memories · 1 entry",
+			want:   "listed memories 1 entry",
 		},
 		{
 			// A replayed call carries the stored arguments but no result payload.
@@ -1720,7 +1720,7 @@ func TestMCPToolInputSummaryIsDeterministicAndSemantic(t *testing.T) {
 		"filters":     []any{"go", "test"},
 		"options":     map[string]any{"verbose": true},
 	}
-	want := `filters: ["go","test"] · max files: 5 · options: {"verbose":true} · project path: /repo`
+	want := `filters: ["go","test"] max files: 5 options: {"verbose":true} project path: /repo`
 	for range 10 {
 		if got := MCPToolInputSummary(input); got != want {
 			t.Fatalf("MCPToolInputSummary() = %q, want %q", got, want)
@@ -2134,14 +2134,14 @@ func TestFormatLSPStep(t *testing.T) {
 	if body != want {
 		t.Fatalf("body = %q, want fenced result text %q", body, want)
 	}
-	if summary := SummarizeToolStep(evt); summary != "looked up definition · 2 results" {
-		t.Fatalf("summary = %q, want %q", summary, "looked up definition · 2 results")
+	if summary := SummarizeToolStep(evt); summary != "looked up definition 2 results" {
+		t.Fatalf("summary = %q, want %q", summary, "looked up definition 2 results")
 	}
 
 	single := evt
 	single.Output = map[string]any{"output": "symbols in main.go: 1", "operation": "document_symbols", "result_count": 1}
-	if summary := SummarizeToolStep(single); summary != "looked up document_symbols · 1 result" {
-		t.Fatalf("singular summary = %q, want %q", summary, "looked up document_symbols · 1 result")
+	if summary := SummarizeToolStep(single); summary != "looked up document_symbols 1 result" {
+		t.Fatalf("singular summary = %q, want %q", summary, "looked up document_symbols 1 result")
 	}
 
 	// A step with no captured text renders no body rather than an empty fence.
@@ -2150,8 +2150,8 @@ func TestFormatLSPStep(t *testing.T) {
 	if body, _ := FormatToolStepResult(empty, DefaultMaxFormattedBody); body != "" {
 		t.Fatalf("empty-output body = %q, want empty", body)
 	}
-	if summary := SummarizeToolStep(empty); summary != "looked up hover · 0 results" {
-		t.Fatalf("empty summary = %q, want %q", summary, "looked up hover · 0 results")
+	if summary := SummarizeToolStep(empty); summary != "looked up hover 0 results" {
+		t.Fatalf("empty summary = %q, want %q", summary, "looked up hover 0 results")
 	}
 }
 
@@ -2393,7 +2393,7 @@ func TestSubagentCallFromStep(t *testing.T) {
 			name: "fanout settled from the results sidecar beside plain text",
 			evt: StepEvent{Kind: completed, ToolName: "subagent_fanout", Input: fanoutInput,
 				Output: map[string]any{
-					"output": "3 tasks · 1 ok · 2 failed · 9s\n\n## [1/3] First · ok · task_id=subagent-a\n…\n\n## [2/3] untitled prompt first line · cancelled · task_id=subagent-b\nerror: stopped\n\n## [3/3] Third · failed · task_id=subagent-c\nerror: provider refused",
+					"output": "3 tasks 1 ok 2 failed 9s\n\n## [1/3] First ok task_id=subagent-a\n…\n\n## [2/3] untitled prompt first line cancelled task_id=subagent-b\nerror: stopped\n\n## [3/3] Third failed task_id=subagent-c\nerror: provider refused",
 					"results": []map[string]any{
 						{"index": 0, "ok": true, "status": "", "error": ""},
 						{"index": 1, "ok": false, "status": "cancelled", "error": "stopped"},
@@ -2410,7 +2410,7 @@ func TestSubagentCallFromStep(t *testing.T) {
 			name: "fanout sidecar after a serialization round-trip still settles",
 			evt: StepEvent{Kind: completed, ToolName: "subagent_fanout", Input: fanoutInput,
 				Output: map[string]any{
-					"output": "2 tasks · 1 ok · 1 failed · 4s",
+					"output": "2 tasks 1 ok 1 failed 4s",
 					"results": []any{
 						map[string]any{"index": 0, "ok": true, "status": "", "error": ""},
 						map[string]any{"index": 1, "ok": false, "status": "", "error": "skipped due to fail_fast"},
@@ -2921,7 +2921,7 @@ func TestDeniedToolStepReadsAsTheRefusalEverywhere(t *testing.T) {
 			}},
 			// The engine's clarify instruction: the card must not print it.
 			feedback: "The user wants to clarify these questions.",
-			wantBody: "· 最多等待多久？ (60 秒 / 15 秒)",
+			wantBody: "最多等待多久？ (60 秒 / 15 秒)",
 		},
 		{name: "shell", toolName: "shell", feedback: "no", wantBody: ""},
 	}
@@ -3020,7 +3020,7 @@ func TestUserInteractionDeniedBodyReadsBothShapes(t *testing.T) {
 			"options": []any{map[string]any{"id": "原始报错", "label": "原始报错"}, map[string]any{"id": "结构化错误", "label": "结构化错误"}},
 		},
 	}}
-	want := "· 最多等待多久？ (60 秒 / 15 秒)\n· 安装失败时如何回报？ (原始报错 / 结构化错误)"
+	want := "最多等待多久？ (60 秒 / 15 秒)\n安装失败时如何回报？ (原始报错 / 结构化错误)"
 	if got := userInteractionDeclinedBody(modelArgs); got != want {
 		t.Fatalf("model-argument shape body = %q, want %q", got, want)
 	}
@@ -3031,8 +3031,8 @@ func TestUserInteractionDeniedBodyReadsBothShapes(t *testing.T) {
 	// readable question leaves the card on the ordinary empty-body path.
 	if got := userInteractionDeclinedBody(map[string]any{"questions": []any{
 		map[string]any{"header": "h", "question": "no options here"},
-	}}); got != "· no options here" {
-		t.Fatalf("option-less body = %q, want %q", got, "· no options here")
+	}}); got != "no options here" {
+		t.Fatalf("option-less body = %q, want %q", got, "no options here")
 	}
 	if got := userInteractionDeclinedBody(map[string]any{}); got != "" {
 		t.Fatalf("empty input body = %q, want empty", got)
@@ -3603,8 +3603,8 @@ func TestListUsableModelsCard(t *testing.T) {
 	answer, ok := ReadableToolAnswer("list_usable_models", roster, nil)
 	require.True(t, ok)
 	require.Equal(t,
-		"zhipuai/glm-5.3 · https://one.test/v1/chat/completions (current)\n"+
-			"zhipuai/glm-5.3 · https://two.test/anthropic/v1/messages (handed off)",
+		"zhipuai/glm-5.3 https://one.test/v1/chat/completions (current)\n"+
+			"zhipuai/glm-5.3 https://two.test/anthropic/v1/messages (handed off)",
 		answer.String())
 
 	empty, ok := ReadableToolAnswer("list_usable_models", `{"models":[],"note":"No model is allowed for subagents you pick. Omit model to run on the conversation's model."}`, nil)

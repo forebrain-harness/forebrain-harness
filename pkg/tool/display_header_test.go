@@ -29,7 +29,7 @@ func TestDisplayHeaderIsTheTerminalsWording(t *testing.T) {
 	read.Duration = 40 * time.Millisecond
 	require.Equal(t, "Read /etc/hosts lines 1-96", header(read))
 	read.Duration = 1200 * time.Millisecond
-	require.Equal(t, "Read /etc/hosts lines 1-96 · 1.2s", header(read))
+	require.Equal(t, "Read /etc/hosts lines 1-96 1.2s", header(read))
 	// The time itself is still a fact where one is stated for the model.
 	require.Equal(t, "<0.1s", FormatDuration(40*time.Millisecond))
 	require.Equal(t, "", FormatCardDuration(40*time.Millisecond))

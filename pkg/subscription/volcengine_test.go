@@ -264,7 +264,7 @@ func TestVolcengineOffersListTheTeamSeat(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, offers, 1)
 	require.Equal(t, volcengineAgentPlanTeam, offers[0].Plan)
-	require.Equal(t, "Agent Plan · Enterprise", offers[0].PlanLabel)
+	require.Equal(t, "Agent Plan Enterprise", offers[0].PlanLabel)
 	require.Equal(t, volcengineAgentBaseURL, offers[0].BaseURL)
 	require.False(t, offers[0].KeyRequired)
 
@@ -388,7 +388,7 @@ func TestVolcengineProvisionFetchesTheSeatKey(t *testing.T) {
 	env := testEnv(t)
 	seedVolcengineCredential(t, env, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
 	offers := []Offer{{
-		Subscription: volcengineID, Plan: volcengineAgentPlanTeam, PlanLabel: "Agent Plan · Enterprise",
+		Subscription: volcengineID, Plan: volcengineAgentPlanTeam, PlanLabel: "Agent Plan Enterprise",
 		Provider: volcengineID, Model: "doubao-seed-2.1-pro", BaseURL: volcengineAgentBaseURL, APIPath: "/v1/messages",
 	}}
 	ids, err := (volcengine{}).Provision(context.Background(), env, offers, ProvisionOptions{Key: "a-pasted-key"})
@@ -422,7 +422,7 @@ func TestVolcengineRefreshKeyAnswersEachKindOfRow(t *testing.T) {
 	stub.results[volcengineListSeatInfos] = `{"Data":[{"SeatID":"seat-1","BizInfo":"Enterprise","SeatStatus":2,"BillingStatus":2}]}`
 	stub.results[volcengineGetTeamSeatAPIKey] = `{"APIKey":"seat-key-first"}`
 	team, err := (volcengine{}).Provision(context.Background(), env, []Offer{{
-		Subscription: volcengineID, Plan: volcengineAgentPlanTeam, PlanLabel: "Agent Plan · Enterprise",
+		Subscription: volcengineID, Plan: volcengineAgentPlanTeam, PlanLabel: "Agent Plan Enterprise",
 		Provider: volcengineID, Model: "glm-5.3", BaseURL: volcengineAgentBaseURL, APIPath: "/v1/messages",
 	}}, ProvisionOptions{})
 	require.NoError(t, err)

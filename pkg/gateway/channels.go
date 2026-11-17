@@ -359,10 +359,10 @@ func (s *Server) batchNotifyText(ctx context.Context, end turn.BatchExecutionEnd
 	lines := []string{batchNotifyHeadline(end.Status) + title}
 	progress := "任务 " + end.Task.ID
 	if end.Execution.Seq > 0 {
-		progress += fmt.Sprintf(" · 第 %d 次执行", end.Execution.Seq)
+		progress += fmt.Sprintf(" 第 %d 次执行", end.Execution.Seq)
 	}
 	if worked := batchNotifyWorked(end.Execution); worked != "" {
-		progress += " · 用时 " + worked
+		progress += " 用时 " + worked
 	}
 	lines = append(lines, progress)
 	if summary := s.batchNotifySummary(ctx, end.SessionID); summary != "" {

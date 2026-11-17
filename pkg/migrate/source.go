@@ -89,7 +89,7 @@ func sourceSummary(root string, count func(string) (sourceCounts, error)) string
 	if len(parts) == 0 {
 		return root + " holds nothing to import"
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // SourceRootPrompt is the picker's source-directory question for one source:

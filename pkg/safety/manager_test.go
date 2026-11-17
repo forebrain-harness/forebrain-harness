@@ -448,7 +448,7 @@ func TestSandboxStatusLineReadsTheEffectiveStatus(t *testing.T) {
 
 	t.Setenv("PATH", "")
 	blocked := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}
-	if got := SandboxStatusLine(blocked); !strings.HasPrefix(got, "workspace-write · not enforced: ") {
+	if got := SandboxStatusLine(blocked); !strings.HasPrefix(got, "workspace-write not enforced: ") {
 		t.Fatalf("unavailable sandbox line = %q, want the mode and the reason", got)
 	}
 }

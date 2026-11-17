@@ -646,7 +646,7 @@ type SkillVersionRow struct {
 // ListVersioned returns every skill under the versioned layers with its
 // version state: published skills from the formal directories, plus the
 // skills that exist only as a draft, which no formal-directory scan can see
-// and which the listing owes a row ("Draft · …") all the same.
+// and which the listing owes a row ("Draft …") all the same.
 //
 // ctx carries the deadline for the upstream update probes. A probe that
 // fails, or a source that cannot be probed, simply leaves the row without an

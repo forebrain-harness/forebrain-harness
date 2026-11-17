@@ -76,7 +76,7 @@ func TestHandleContextSlashStatsUsesRunnerStateRoot(t *testing.T) {
 	reply, handled := s.HandleContextSlash(context.Background(), "s1", "webchat", nil)
 	require.True(t, handled)
 	require.Contains(t, reply, "Filtered tool output, across this agent's conversations")
-	require.Contains(t, reply, "MCP tools · 1 of 1 trimmed · about 200 tokens saved")
+	require.Contains(t, reply, "MCP tools 1 of 1 trimmed about 200 tokens saved")
 }
 
 func TestHandlePermissionsSlashGatewayExplain(t *testing.T) {
@@ -126,7 +126,7 @@ func TestHandleMCPSlashSummary(t *testing.T) {
 
 	reply, handled := s.HandleMCPSlash("s1", "webchat")
 	require.True(t, handled)
-	require.Contains(t, reply, "MCP servers · 1 server")
+	require.Contains(t, reply, "MCP servers 1 server")
 	require.Contains(t, reply, "github")
 	require.Contains(t, reply, "streamable_http")
 
@@ -729,7 +729,7 @@ func TestHandleLSPSlashRendersSnapshot(t *testing.T) {
 	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
 	reply, handled := s.HandleLSPSlash("s1", "webchat")
 	require.True(t, handled)
-	require.Contains(t, reply, "Language servers · 1 configured, 1 enabled")
+	require.Contains(t, reply, "Language servers 1 configured, 1 enabled")
 	require.Contains(t, reply, "gopls")
 
 	bare := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
@@ -755,5 +755,5 @@ func TestHandleStatusSlashIncludesLSPRow(t *testing.T) {
 	}
 	reply, handled := s.HandleStatusSlash("s1", "webchat", false)
 	require.True(t, handled)
-	require.Contains(t, reply, "Language servers: 1 running, 1 indexing · /lsp")
+	require.Contains(t, reply, "Language servers: 1 running, 1 indexing /lsp")
 }

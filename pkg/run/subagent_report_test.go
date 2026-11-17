@@ -137,7 +137,7 @@ func TestFanoutReportDeliversEveryReport(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		task := fmt.Sprintf("task-%d", i)
 		for _, want := range []string{
-			fmt.Sprintf("## [%d/6] T%d · ok", i+1, i),
+			fmt.Sprintf("## [%d/6] T%d ok", i+1, i),
 			"BEGIN " + task,
 			"END " + task,
 		} {
@@ -168,7 +168,7 @@ func TestFanoutReportTruncatesOnce(t *testing.T) {
 		report:                func(prompt string) string { return original },
 	}
 	report := fanoutReportFor(t, exec, `{"tasks":[{"title":"Big","prompt":"`+task+`","subagent_type":"general-purpose"}],"max_parallel":1}`)
-	if !strings.Contains(report, "## [1/1] Big · ok") {
+	if !strings.Contains(report, "## [1/1] Big ok") {
 		t.Fatalf("missing section header:\n%s", truncatePreviewText(report, 400))
 	}
 	if got := strings.Count(report, "[report cut from "); got != 1 {
@@ -212,7 +212,7 @@ func TestFanoutReportShrinksLargestFirst(t *testing.T) {
 		t.Fatalf("report paths = %d, want exactly 2", got)
 	}
 	for i := 0; i < 6; i++ {
-		if !strings.Contains(report, fmt.Sprintf("## [%d/6] T%d · ok", i+1, i)) {
+		if !strings.Contains(report, fmt.Sprintf("## [%d/6] T%d ok", i+1, i)) {
 			t.Fatalf("missing header of task %d:\n%s", i, truncatePreviewText(report, 400))
 		}
 	}

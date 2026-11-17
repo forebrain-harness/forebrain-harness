@@ -217,10 +217,10 @@ func TestPlanAndReportTextCarryLanguageServers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(plan.Text(), "Language servers: 1 enabled · 1 added") {
+	if !strings.Contains(plan.Text(), "Language servers: 1 enabled 1 added") {
 		t.Fatalf("plan text =\n%s", plan.Text())
 	}
-	if !strings.Contains(report.Text(), "Language servers: 1 enabled · 1 added · 0 skipped") {
+	if !strings.Contains(report.Text(), "Language servers: 1 enabled 1 added 0 skipped") {
 		t.Fatalf("report text =\n%s", report.Text())
 	}
 	if !strings.Contains(report.Text(), "\nLanguage servers\n") {

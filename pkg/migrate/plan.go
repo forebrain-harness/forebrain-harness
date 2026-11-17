@@ -259,23 +259,23 @@ func (p *Plan) Text() string {
 		fmt.Fprintf(&b, " (%s)", root)
 	}
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "  Conversations: %s, plus %s subagent transcripts · %s messages",
+	fmt.Fprintf(&b, "  Conversations: %s, plus %s subagent transcripts %s messages",
 		formatCount(int64(p.Sessions)), formatCount(int64(p.Subagents)), formatCount(int64(p.MessageRows)))
 	if p.Updated > 0 {
-		fmt.Fprintf(&b, " · %s to update (%s new messages)",
+		fmt.Fprintf(&b, " %s to update (%s new messages)",
 			formatCount(int64(p.Updated)), formatCount(int64(p.UpdatedMessages)))
 	}
 	if p.AlreadyHere > 0 {
-		fmt.Fprintf(&b, " · %s already here", formatCount(int64(p.AlreadyHere)))
+		fmt.Fprintf(&b, " %s already here", formatCount(int64(p.AlreadyHere)))
 	}
 	if p.Refused > 0 {
-		fmt.Fprintf(&b, " · %s cannot be imported", formatCount(int64(p.Refused)))
+		fmt.Fprintf(&b, " %s cannot be imported", formatCount(int64(p.Refused)))
 	}
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "  Memories: %d · Skills: %d · Plans: %d\n", p.Memories, p.Skills, p.Plans)
-	fmt.Fprintf(&b, "  MCP servers: %d global · %d in projects\n", p.MCPGlobal, p.MCPProject)
+	fmt.Fprintf(&b, "  Memories: %d Skills: %d Plans: %d\n", p.Memories, p.Skills, p.Plans)
+	fmt.Fprintf(&b, "  MCP servers: %d global %d in projects\n", p.MCPGlobal, p.MCPProject)
 	if p.LSPEnabled > 0 || p.LSPWritten > 0 {
-		fmt.Fprintf(&b, "  Language servers: %d enabled · %d added\n", p.LSPEnabled, p.LSPWritten)
+		fmt.Fprintf(&b, "  Language servers: %d enabled %d added\n", p.LSPEnabled, p.LSPWritten)
 	}
 	fmt.Fprintf(&b, "  Input history: %s lines\n", formatCount(int64(p.HistoryLines)))
 	if p.SourceBytes > 0 {
@@ -309,7 +309,7 @@ func writeImportNotes(b *strings.Builder, source Kind, dryRun bool, projects []P
 			}
 			b.WriteString(line + "\n")
 			for _, note := range project.Notes {
-				b.WriteString("    · " + note + "\n")
+				b.WriteString("    " + note + "\n")
 			}
 		}
 	}
@@ -324,7 +324,7 @@ func writeImportNotes(b *strings.Builder, source Kind, dryRun bool, projects []P
 			b.WriteString("\nNotes\n")
 			wrote = true
 		}
-		b.WriteString("  · " + notice + "\n")
+		b.WriteString("  " + notice + "\n")
 	}
 }
 
@@ -624,12 +624,12 @@ func (r *Report) Text() string {
 		if r.DryRun {
 			updatedWord = "to update"
 		}
-		fmt.Fprintf(&b, " · %d %s (%d new messages)", updated, updatedWord, updatedMessages)
+		fmt.Fprintf(&b, " %d %s (%d new messages)", updated, updatedWord, updatedMessages)
 	}
 	if rebound > 0 {
-		fmt.Fprintf(&b, " · %d rebound", rebound)
+		fmt.Fprintf(&b, " %d rebound", rebound)
 	}
-	fmt.Fprintf(&b, " · %d already here · %d failed · %d belong to another agent\n", skipped, failed, owned)
+	fmt.Fprintf(&b, " %d already here %d failed %d belong to another agent\n", skipped, failed, owned)
 	fmt.Fprintf(&b, "  Messages: %s\n", formatCount(int64(r.MessageRows)))
 	if len(r.Memories) > 0 {
 		written, skippedNotes := 0, 0
@@ -637,14 +637,14 @@ func (r *Report) Text() string {
 			written += len(memory.Written)
 			skippedNotes += len(memory.Skipped)
 		}
-		fmt.Fprintf(&b, "  Memories: %d written · %d skipped\n", written, skippedNotes)
+		fmt.Fprintf(&b, "  Memories: %d written %d skipped\n", written, skippedNotes)
 	}
 	if len(r.Skills) > 0 {
 		byStatus := map[string]int{}
 		for _, skill := range r.Skills {
 			byStatus[skill.Status]++
 		}
-		fmt.Fprintf(&b, "  Skills: %d installed · %d up to date · %d changed on both sides · %d read natively\n",
+		fmt.Fprintf(&b, "  Skills: %d installed %d up to date %d changed on both sides %d read natively\n",
 			byStatus["installed"], byStatus["up-to-date"], byStatus["diverged"], byStatus["native"])
 	}
 	if len(r.Plans) > 0 {
@@ -652,11 +652,11 @@ func (r *Report) Text() string {
 		for _, plan := range r.Plans {
 			byStatus[plan.Status]++
 		}
-		fmt.Fprintf(&b, "  Plans: %d installed · %d up to date · %d changed on both sides · %d skipped\n",
+		fmt.Fprintf(&b, "  Plans: %d installed %d up to date %d changed on both sides %d skipped\n",
 			byStatus["installed"], byStatus["up-to-date"], byStatus["diverged"], byStatus["skipped"])
 	}
 	if len(r.MCP) > 0 {
-		fmt.Fprintf(&b, "  MCP servers: %d written · %d skipped · %d read natively\n",
+		fmt.Fprintf(&b, "  MCP servers: %d written %d skipped %d read natively\n",
 			countStatus(r.MCP, "written"), countStatus(r.MCP, "skipped"), countStatus(r.MCP, "native"))
 	}
 	if len(r.LSP) > 0 {
@@ -664,11 +664,11 @@ func (r *Report) Text() string {
 		for _, entry := range r.LSP {
 			byStatus[entry.Status]++
 		}
-		fmt.Fprintf(&b, "  Language servers: %d enabled · %d added · %d skipped\n",
+		fmt.Fprintf(&b, "  Language servers: %d enabled %d added %d skipped\n",
 			byStatus["enabled"], byStatus["written"], byStatus["skipped"])
 	}
 	if r.History.SourceLines > 0 || r.History.Added > 0 {
-		fmt.Fprintf(&b, "  Input history: %d added · %d already there, of %d lines\n",
+		fmt.Fprintf(&b, "  Input history: %d added %d already there, of %d lines\n",
 			r.History.Added, r.History.Skipped, r.History.SourceLines)
 	}
 	if !r.DryRun && r.Consolidation != "" {
@@ -699,9 +699,9 @@ func (r *Report) Text() string {
 			}
 			// The id keeps every result identifiable, however titles collide.
 			if title := strings.TrimSpace(outcome.Title); title != "" {
-				fmt.Fprintf(&b, "%s%s · %d messages · %s\n", prefix, title, outcome.Messages, outcome.TargetID)
+				fmt.Fprintf(&b, "%s%s %d messages %s\n", prefix, title, outcome.Messages, outcome.TargetID)
 			} else {
-				fmt.Fprintf(&b, "%s%s · %d messages\n", prefix, outcome.TargetID, outcome.Messages)
+				fmt.Fprintf(&b, "%s%s %d messages\n", prefix, outcome.TargetID, outcome.Messages)
 			}
 		}
 	}
@@ -716,7 +716,7 @@ func (r *Report) Text() string {
 				prefix = "    ↳ "
 			}
 			if title := strings.TrimSpace(outcome.Title); title != "" {
-				fmt.Fprintf(&b, "%s%s · %s\n", prefix, title, outcome.TargetID)
+				fmt.Fprintf(&b, "%s%s %s\n", prefix, title, outcome.TargetID)
 			} else {
 				fmt.Fprintf(&b, "%s%s\n", prefix, outcome.TargetID)
 			}
@@ -725,7 +725,7 @@ func (r *Report) Text() string {
 	if orphans := orphanedSourceGone(r.Sessions); len(orphans) > 0 {
 		b.WriteString("\nConversations whose source transcripts are gone — they cannot be bound\n")
 		for _, outcome := range orphans {
-			fmt.Fprintf(&b, "  %s · %s\n", outcome.TargetID, outcome.Reason)
+			fmt.Fprintf(&b, "  %s %s\n", outcome.TargetID, outcome.Reason)
 		}
 	}
 	if len(r.Memories) > 0 {

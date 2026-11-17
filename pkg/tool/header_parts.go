@@ -131,6 +131,12 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 		}
 		target = InputString(meta, "command")
 		if target == "" {
+			// The summary joins its command and its details with a space, so
+			// the invocation is the only place that still holds the command
+			// alone. A row that kept neither falls back to the summary.
+			target = strings.TrimSpace(meta.Invocation)
+		}
+		if target == "" {
 			target = extractShellCommand(summary)
 		}
 
@@ -181,7 +187,7 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 		}
 		switch {
 		case target != "" && qualifier != "":
-			target = target + " · " + qualifier
+			target = target + " " + qualifier
 		case qualifier != "":
 			target = qualifier
 		}
@@ -492,7 +498,7 @@ func DisplayParts(f DisplayFrame, cwd string) (action, target, suffix string) {
 		if suffix == "" {
 			suffix = p.Duration
 		} else {
-			suffix = suffix + " · " + p.Duration
+			suffix = suffix + " " + p.Duration
 		}
 	}
 	return p.Action, p.Target, suffix

@@ -86,7 +86,7 @@ type DeviceCodeLogin interface {
 type Offer struct {
 	Subscription string // ID()
 	Plan         string // "" | "coding-plan" | "agent-plan" | "coding-plan-team" | "agent-plan-team"
-	PlanLabel    string // "Coding Plan" / "Agent Plan · 团队" …
+	PlanLabel    string // "Coding Plan" / "Agent Plan 团队" …
 	Provider     string
 	Model        string
 	// Name is the vendor's display name for Model, when its listing carries

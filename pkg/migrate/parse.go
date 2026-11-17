@@ -941,7 +941,7 @@ func boundaryDetail(rec *claudeRecord) string {
 			parts = append(parts, "duration "+(time.Duration(rec.CompactMetadata.DurationMs)*time.Millisecond).String())
 		}
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // decodeBlocks returns the content blocks of a raw content value, or nil when

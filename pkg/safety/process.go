@@ -426,7 +426,7 @@ func SandboxStatusLine(cfg *appcfg.Root) string {
 	case strings.TrimSpace(st.UnavailableReason) != "":
 		parts = append(parts, "not enforced: "+SandboxReasonInWords(st.UnavailableReason))
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // FormatSandboxReport says in words what the sandbox does to the commands

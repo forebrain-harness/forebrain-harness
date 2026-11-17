@@ -112,13 +112,13 @@ func fanoutSectionHeader(index, total int, r FanoutResult) string {
 	case r.Status == string(agent.StatusCancelled):
 		status = "cancelled"
 	}
-	head := fmt.Sprintf("## [%d/%d] %s · %s", index+1, total,
+	head := fmt.Sprintf("## [%d/%d] %s %s", index+1, total,
 		tool.SubagentTaskTitle(r.Title, r.Task), status)
 	if id := strings.TrimSpace(r.TaskID); id != "" {
-		head += " · task_id=" + id
+		head += " task_id=" + id
 	}
 	if ran := strings.TrimSpace(r.RanFor); ran != "" {
-		head += " · ran_for=" + ran
+		head += " ran_for=" + ran
 	}
 	return head
 }
@@ -197,12 +197,12 @@ func fanoutSummaryLine(results []FanoutResult) string {
 			longest = d
 		}
 	}
-	line := fmt.Sprintf("%d tasks · %d ok · %d failed", len(results), ok, failed)
+	line := fmt.Sprintf("%d tasks %d ok %d failed", len(results), ok, failed)
 	if cancelled > 0 {
-		line += fmt.Sprintf(" · %d cancelled", cancelled)
+		line += fmt.Sprintf(" %d cancelled", cancelled)
 	}
 	if ran := tool.FormatDuration(longest); ran != "" {
-		line += " · " + ran
+		line += " " + ran
 	}
 	return line
 }

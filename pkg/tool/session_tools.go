@@ -291,7 +291,7 @@ func emitPlanUpdateStep(ctx context.Context, st *State, l state.List) {
 	case 1:
 		payload.Explanation = activeLabels[0]
 	default:
-		payload.Explanation = strings.Join(activeLabels, " · ")
+		payload.Explanation = strings.Join(activeLabels, " ")
 	}
 	// The working line's task is derived once, here, by the one rule every
 	// surface shares — not re-derived by each reader of the payload.

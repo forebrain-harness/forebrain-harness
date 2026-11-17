@@ -57,7 +57,7 @@ func TestAgentModelResolvesEachKindOfAgent(t *testing.T) {
 
 	provider, model, effort := AgentModel(r, "session-1", nil)
 	if provider != "zhipuai" || model != "glm-5.3" || effort != "xhigh" {
-		t.Fatalf("primary = %s/%s · %s, want the conversation's model and its effort", provider, model, effort)
+		t.Fatalf("primary = %s/%s %s, want the conversation's model and its effort", provider, model, effort)
 	}
 
 	// A fork and a typed subagent without a chain of their own run on the
@@ -68,7 +68,7 @@ func TestAgentModelResolvesEachKindOfAgent(t *testing.T) {
 	} {
 		provider, model, effort = AgentModel(r, "session-1", entry)
 		if provider != "zhipuai" || model != "glm-5.3" || effort != "xhigh" {
-			t.Fatalf("%s = %s/%s · %s, want the conversation's model", entry.AgentKind, provider, model, effort)
+			t.Fatalf("%s = %s/%s %s, want the conversation's model", entry.AgentKind, provider, model, effort)
 		}
 	}
 
@@ -76,7 +76,7 @@ func TestAgentModelResolvesEachKindOfAgent(t *testing.T) {
 	// of them, with the effort that entry configures.
 	provider, model, effort = AgentModel(r, "session-1", &agent.HistoryEntry{AgentKind: "typed", AgentType: "explore"})
 	if provider != "deepseek" || model != "deepseek-v4-flash" || effort != "medium" {
-		t.Fatalf("typed with its own chain = %s/%s · %s", provider, model, effort)
+		t.Fatalf("typed with its own chain = %s/%s %s", provider, model, effort)
 	}
 
 	// A dispatch-time override outranks both, and its effort comes from the
@@ -87,7 +87,7 @@ func TestAgentModelResolvesEachKindOfAgent(t *testing.T) {
 		ModelProvider: "zhipuai", Model: "glm-5.3-flash",
 	})
 	if provider != "zhipuai" || model != "glm-5.3-flash" || effort != "high" {
-		t.Fatalf("override = %s/%s · %s, want the picked model and its own effort", provider, model, effort)
+		t.Fatalf("override = %s/%s %s, want the picked model and its own effort", provider, model, effort)
 	}
 }
 
@@ -137,7 +137,7 @@ func TestAgentModelAnswersTheEffortOfTheModelItNames(t *testing.T) {
 	for _, a := range agents {
 		provider, model, effort := AgentModel(r, sid, a.entry)
 		if provider != "zhipuai" || model != "glm-5.3" || effort != "xhigh" {
-			t.Fatalf("%s = %s/%s · %s, want the session's model with its own effort", a.name, provider, model, effort)
+			t.Fatalf("%s = %s/%s %s, want the session's model with its own effort", a.name, provider, model, effort)
 		}
 	}
 
@@ -148,7 +148,7 @@ func TestAgentModelAnswersTheEffortOfTheModelItNames(t *testing.T) {
 	for _, a := range agents {
 		provider, model, effort := AgentModel(r, sid, a.entry)
 		if provider != "zhipuai" || model != "glm-5.3" || effort != "" {
-			t.Fatalf("%s with an empty pin = %s/%s · %q, want the session's model and no effort", a.name, provider, model, effort)
+			t.Fatalf("%s with an empty pin = %s/%s %q, want the session's model and no effort", a.name, provider, model, effort)
 		}
 	}
 }

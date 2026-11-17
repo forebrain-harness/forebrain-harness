@@ -75,14 +75,14 @@ func TestPanelColumnsLongNameStacksUnderTheName(t *testing.T) {
 func TestPanelColumnsStackAsOneList(t *testing.T) {
 	p := slashPanel{body: []panelLine{
 		{lead: "  ", col: "Standard API Key for China (pay-as-you-go)", colWidth: 40, text: "dashscope.aliyuncs.com"},
-		{lead: "  ", col: "Coding Plan · Global", colWidth: 40, text: "coding-intl.dashscope.aliyuncs.com"},
+		{lead: "  ", col: "Coding Plan Global", colWidth: 40, text: "coding-intl.dashscope.aliyuncs.com"},
 	}}
 	layout := p.layout(75, 0, 0, false)
 	want := []string{
 		"",
 		"  Standard API Key for China (pay-as-you-go)",
 		"  dashscope.aliyuncs.com",
-		"  Coding Plan · Global",
+		"  Coding Plan Global",
 		"  coding-intl.dashscope.aliyuncs.com",
 		"",
 	}

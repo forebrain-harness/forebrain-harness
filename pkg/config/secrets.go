@@ -58,7 +58,7 @@ func scanPlaintextConfigSecrets(path string, keyPath []string, v interface{}) er
 			if isSecretLikeConfigKey(key) {
 				if !isAllowedConfigSecretValue(nextPath, rawValue) {
 					return fmt.Errorf(
-						"%s: plaintext secret is not allowed at %s; use ${ENV_NAME} and set it under Settings · Variables",
+						"%s: plaintext secret is not allowed at %s; use ${ENV_NAME} and set it under Settings Variables",
 						path,
 						strings.Join(nextPath, "."),
 					)

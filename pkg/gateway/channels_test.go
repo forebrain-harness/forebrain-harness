@@ -1515,7 +1515,7 @@ func TestBatchEndNotifiesTheOriginChat(t *testing.T) {
 	require.Eventually(t, func() bool { return len(rec.delivered()) == 1 }, 5*time.Second, 10*time.Millisecond)
 	text := rec.texts()[0]
 	require.Contains(t, text, "【任务完成】汇总上个月数据")
-	require.Contains(t, text, "任务 tsk-abc · 第 2 次执行 · 用时 1m23s")
+	require.Contains(t, text, "任务 tsk-abc 第 2 次执行 用时 1m23s")
 	require.Contains(t, text, "汇总.xlsx（2.0 KB）")
 	require.Contains(t, text, "明细.csv（512 B）")
 	require.NotContains(t, text, "查看：", "no observed origin, no link")

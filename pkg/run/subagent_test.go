@@ -1964,9 +1964,9 @@ func TestAwaitedSubagentStoppedByTheUserIsAnsweredAsStopped(t *testing.T) {
 	for _, want := range []string{
 		"2 tasks",
 		"1 cancelled",
-		"## [1/2] Stopped · cancelled",
+		"## [1/2] Stopped cancelled",
 		"next: " + subagentStoppedAdvice,
-		"## [2/2] Kept · ok",
+		"## [2/2] Kept ok",
 	} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("fanout report missing %q:\n%s", want, report)
@@ -2099,7 +2099,7 @@ func TestFanoutTellsTheDispatcherHowEachSubagentFailed(t *testing.T) {
 	}
 	report := out.(string)
 	for _, want := range []string{
-		"## [1/1] Probe · failed",
+		"## [1/1] Probe failed",
 		"error: " + strings.Join(strings.Fields(llm.ExplainError(limit)), " "),
 		"resets_at: 2026-10-31T22:09:05Z",
 		"next: " + subagentContinueAdvice + " " + subagentResetAdvice,
@@ -3012,7 +3012,7 @@ func TestSubagentFanoutGovernedOutputUsesUnifiedContextTruncation(t *testing.T) 
 	report := payloadText
 	// The three pieces of a cut report: its section header, the one cut
 	// sentence, the one path — and none of the old governor's markers.
-	if !strings.Contains(report, "## [1/1] inspect · ok") {
+	if !strings.Contains(report, "## [1/1] inspect ok") {
 		t.Fatalf("expected the task's section header, got %q", truncatePreviewText(report, 400))
 	}
 	if strings.Count(report, "[report cut from ") != 1 {
@@ -3897,8 +3897,8 @@ func TestSubagentFanoutResolvesChildApprovalsInPlace(t *testing.T) {
 		t.Fatalf("expected string payload, got %T", got)
 	}
 	for _, want := range []string{
-		"## [1/2] one · ok",
-		"## [2/2] two · ok",
+		"## [1/2] one ok",
+		"## [2/2] two ok",
 		"done:one",
 		"done:two",
 	} {

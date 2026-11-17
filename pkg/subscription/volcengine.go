@@ -350,9 +350,9 @@ func volcengineOffers(ctx context.Context, credential volcengineCredential, clie
 		if err != nil {
 			note(err)
 		} else {
-			label := "Agent Plan · Team"
+			label := "Agent Plan Team"
 			if biz := strings.TrimSpace(seat.BizInfo); biz != "" {
-				label = "Agent Plan · " + biz
+				label = "Agent Plan " + biz
 			}
 			offers = append(offers, volcengineModelOffers(volcengineAgentPlanTeam, label, models, false)...)
 		}

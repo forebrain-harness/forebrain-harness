@@ -60,19 +60,45 @@ func TestDisplayHeaderPartsKeepTheDurationApart(t *testing.T) {
 	require.Equal(t, "", got.Duration, "a card waiting on approval shows no duration")
 
 	// The joined header keeps its exact wording: the third part is the suffix
-	// and the duration, in that order, with " · " between them when both show.
+	// and the duration, in that order, with a space between them when both
+	// show.
 	for _, f := range []DisplayFrame{shellDone, read, running, awaiting} {
 		p := DisplayHeaderParts(f, cwd)
 		_, _, suffix := DisplayParts(f, cwd)
 		switch {
 		case p.Suffix != "" && p.Duration != "":
-			require.Equal(t, p.Suffix+" · "+p.Duration, suffix)
+			require.Equal(t, p.Suffix+" "+p.Duration, suffix)
 		case p.Duration != "":
 			require.Equal(t, p.Duration, suffix)
 		default:
 			require.Equal(t, p.Suffix, suffix)
 		}
 	}
+}
+
+// A shell row whose summary carries its detail after a space still names the
+// command alone in its header: the invocation holds the command the summary no
+// longer delimits.
+func TestDisplayHeaderPartsReadTheShellCommandWithoutItsDetail(t *testing.T) {
+	cwd := "/work/proj"
+
+	withInvocation := DisplayFrame{
+		Title: "shell", Summary: "ran ls -la 3 lines",
+		Meta:  ToolMeta{ToolName: "shell", Status: "completed", Invocation: "ls -la"},
+		Final: true,
+	}
+	got := DisplayHeaderParts(withInvocation, cwd)
+	require.Equal(t, HeaderParts{Action: "Ran", Target: "ls -la"}, got)
+
+	// A row that kept neither the command nor the invocation falls back to the
+	// summary, and a summary written before the copy rule still splits there.
+	legacy := DisplayFrame{
+		Title: "shell", Summary: "ran ls -la · 3 lines",
+		Meta:  ToolMeta{ToolName: "shell", Status: "completed"},
+		Final: true,
+	}
+	got = DisplayHeaderParts(legacy, cwd)
+	require.Equal(t, HeaderParts{Action: "Ran", Target: "ls -la"}, got)
 }
 
 // TestIntermediateNotesHeaderPartsByActionAndState pins the notes card's head

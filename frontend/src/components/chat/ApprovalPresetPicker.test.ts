@@ -78,7 +78,7 @@ describe('ApprovalPresetPicker', () => {
     vi.spyOn(forebrainApi, 'approvalPresetSwitch').mockResolvedValue({ visible: true, fixed: false })
     const wrapper = mountPicker('workspace_write')
     const button = wrapper.get('[data-testid="approval-picker"]')
-    await vi.waitFor(() => expect(button.text()).toBe('Default'))
+    await vi.waitFor(() => expect(button.text()).toBe('Workspace write'))
     expect(button.attributes('disabled')).toBeUndefined()
     await button.trigger('click')
     expect(wrapper.findAll('[role="option"]')).toHaveLength(2)
@@ -86,13 +86,13 @@ describe('ApprovalPresetPicker', () => {
 
   it('names the tier alone, without an approvals prefix', async () => {
     const wrapper = mountPicker('workspace_write')
-    await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Default'))
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Workspace write'))
     expect(wrapper.get('[data-testid="approval-picker"]').text()).not.toContain('Approvals:')
   })
 
   it('keeps the session-scoped switcher behind the button', async () => {
     const wrapper = mountPicker('workspace_write')
-    await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Default'))
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Workspace write'))
     // The tip still says what the button is, now that the label cannot.
     expect(wrapper.get('[data-testid="approval-picker"]').attributes('aria-label')).toBe('Approval mode for this session')
 
@@ -117,7 +117,7 @@ describe('ApprovalPresetPicker', () => {
       vi.spyOn(forebrainApi, 'approvalDefault').mockResolvedValue({ current: 'workspace_write' })
       const session = vi.spyOn(forebrainApi, 'sessionPreset').mockResolvedValue({ ok: true })
       const wrapper = mount(ApprovalPresetPicker, { props: { sessionId: null } })
-      await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Default'))
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Workspace write'))
       expect(wrapper.get('[data-testid="approval-picker"]').attributes('disabled')).toBeUndefined()
 
       await wrapper.get('[data-testid="approval-picker"]').trigger('click')
@@ -135,7 +135,7 @@ describe('ApprovalPresetPicker', () => {
     it('has no draft when nothing was picked', async () => {
       vi.spyOn(forebrainApi, 'approvalDefault').mockResolvedValue({ current: 'workspace_write' })
       const wrapper = mount(ApprovalPresetPicker, { props: { sessionId: null } })
-      await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Default'))
+      await vi.waitFor(() => expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Workspace write'))
       expect((wrapper.vm as unknown as { takeDraft: () => string | null }).takeDraft()).toBeNull()
     })
   })

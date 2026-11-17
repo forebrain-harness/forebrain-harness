@@ -506,13 +506,13 @@ func TestToolDisplayPartsLSP(t *testing.T) {
 	}
 
 	running, target, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", ToolMeta: tool.ToolMeta{Status: "running", Input: map[string]any{"operation": "definition", "symbol": "Query"}}}, "", "")
-	if running != "Looking up" || target != "definition · Query" {
-		t.Fatalf("running = (%q, %q), want Looking up / definition · Query", running, target)
+	if running != "Looking up" || target != "definition Query" {
+		t.Fatalf("running = (%q, %q), want Looking up / definition Query", running, target)
 	}
 
 	completed, target, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", Final: true, ToolMeta: input(map[string]any{"query": "auth.Loop"})}, "", "")
-	if completed != "Looked up" || target != "definition · auth.Loop" {
-		t.Fatalf("query target = (%q, %q), want Looked up / definition · auth.Loop", completed, target)
+	if completed != "Looked up" || target != "definition auth.Loop" {
+		t.Fatalf("query target = (%q, %q), want Looked up / definition auth.Loop", completed, target)
 	}
 
 	failed, _, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", ToolMeta: tool.ToolMeta{Status: "failed", Input: map[string]any{"operation": "hover", "file_path": "/repo/main.go", "line": 12}}}, "", "")
@@ -523,8 +523,8 @@ func TestToolDisplayPartsLSP(t *testing.T) {
 	cwd := t.TempDir()
 	p := filepath.Join(cwd, "main.go")
 	_, target, _ = toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", Final: true, ToolMeta: tool.ToolMeta{Input: map[string]any{"operation": "hover", "file_path": p, "line": 12}}}, "", cwd)
-	if target != "hover · main.go:12" {
-		t.Fatalf("file target = %q, want hover · main.go:12 (shortened like read_file)", target)
+	if target != "hover main.go:12" {
+		t.Fatalf("file target = %q, want hover main.go:12 (shortened like read_file)", target)
 	}
 
 	if phrase := failedActionPhrase("lsp"); phrase != "look up" {
@@ -1364,7 +1364,7 @@ func TestGenericToolCardReadsItsAnswer(t *testing.T) {
 
 // TestFastToolCardHeadersCarryNoTime pins the header of a call that took
 // under 100ms: it says nothing about the time — no "<0.1s", and no dangling
-// " · " where the time was — on the live card, folded or not, on a subagent
+// " " where the time was — on the live card, folded or not, on a subagent
 // task row, and on the card a resume replays; a slower call still says its
 // time.
 func TestFastToolCardHeadersCarryNoTime(t *testing.T) {

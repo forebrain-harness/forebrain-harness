@@ -390,7 +390,7 @@ func SummarizeToolStep(evt StepEvent) string {
 			return userInteractionLabel("asked user", evt)
 		}
 		if stepRequiresApproval(evt) {
-			return "awaiting approval · " + invocation
+			return "awaiting approval " + invocation
 		}
 		if toolName == "request_permissions" {
 			return requestPermissionsCompletionSummary(evt, invocation)
@@ -410,7 +410,7 @@ func SummarizeToolStep(evt StepEvent) string {
 				return "saved intermediate notes"
 			case "read":
 				if strings.TrimSpace(stringFromAny(evt.Output["content"])) == "" {
-					return "reviewed intermediate notes · empty"
+					return "reviewed intermediate notes empty"
 				}
 				return "reviewed intermediate notes"
 			case "clear":
@@ -444,7 +444,7 @@ func SummarizeToolStep(evt StepEvent) string {
 			if limit > 0 {
 				start := offset + 1 // 0-based offset → 1-based display
 				end := offset + limit
-				return "ran " + invocation + " · lines " + strconv.Itoa(start) + "-" + strconv.Itoa(end)
+				return "ran " + invocation + " lines " + strconv.Itoa(start) + "-" + strconv.Itoa(end)
 			}
 			// The LLM may omit offset/limit from its arguments, but the tool
 			// implementation always stores the effective normalized values in
@@ -454,27 +454,27 @@ func SummarizeToolStep(evt StepEvent) string {
 			if n := intFromAny(evt.Output["result_lines"]); n > 0 {
 				start := offset + 1
 				end := offset + n
-				return "ran " + invocation + " · lines " + strconv.Itoa(start) + "-" + strconv.Itoa(end)
+				return "ran " + invocation + " lines " + strconv.Itoa(start) + "-" + strconv.Itoa(end)
 			}
 		}
 		if preview := strings.TrimSpace(stringFromAny(evt.Output["stdout_preview"])); strings.EqualFold(preview, "no changes") {
-			return "ran " + invocation + " · no changes"
+			return "ran " + invocation + " no changes"
 		}
 		if n := intFromAny(evt.Output["stdout_bytes"]); n > 0 {
-			return "ran " + invocation + " · " + formatBytes(n)
+			return "ran " + invocation + " " + formatBytes(n)
 		}
 		if n, ok := firstInt(evt.Output, "result_lines", "stdout_lines"); ok {
-			return "ran " + invocation + " · " + formatCountLabel(n, "line", "lines")
+			return "ran " + invocation + " " + formatCountLabel(n, "line", "lines")
 		}
 		if text := strings.TrimSpace(stringFromAny(evt.Output["preview_text"])); text != "" {
-			return "ran " + invocation + " · " + formatLineCount(text)
+			return "ran " + invocation + " " + formatLineCount(text)
 		}
 		if n, ok := firstInt(evt.Output, "matches", "paths", "files", "roots", "items", "count", "tokens", "candidates"); ok {
 			suffix := formatCountForTool(toolName, n)
-			return "ran " + invocation + " · " + suffix
+			return "ran " + invocation + " " + suffix
 		}
 		if path := pathFromInputOrOutput(evt); path != "" {
-			return "ran " + invocation + " · " + pathBaseOrPath(path)
+			return "ran " + invocation + " " + pathBaseOrPath(path)
 		}
 		if len(evt.Output) > 0 {
 			return "ran " + invocation
@@ -595,12 +595,12 @@ func requestPermissionsCompletionSummary(evt StepEvent, invocation string) strin
 	switch status {
 	case "auto_approved":
 		if reason != "" {
-			return "auto-approved " + invocation + " · " + truncateSummary(reason)
+			return "auto-approved " + invocation + " " + truncateSummary(reason)
 		}
 		return "auto-approved " + invocation + " (no approval prompt needed)"
 	case "denied":
 		if reason != "" {
-			return "denied " + invocation + " · " + truncateSummary(reason)
+			return "denied " + invocation + " " + truncateSummary(reason)
 		}
 		return "denied " + invocation
 	case "approved":
@@ -656,7 +656,7 @@ func readImageStepSummary(evt StepEvent) string {
 	if label == "" {
 		label = "image"
 	}
-	return "Read " + label + " · image " + formatBytes(intFromAny(evt.Output["image_bytes"]))
+	return "Read " + label + " image " + formatBytes(intFromAny(evt.Output["image_bytes"]))
 }
 
 // isImageReadStep reports whether a read_file step handed back an image. Its
@@ -675,9 +675,9 @@ func readImageStepLine(evt StepEvent) string {
 	}
 	width := intFromAny(evt.Output["image_width"])
 	height := intFromAny(evt.Output["image_height"])
-	line := fmt.Sprintf("path: `%s` · image %dx%d · %s", path, width, height, formatBytes(intFromAny(evt.Output["image_bytes"])))
+	line := fmt.Sprintf("path: `%s` image %dx%d %s", path, width, height, formatBytes(intFromAny(evt.Output["image_bytes"])))
 	if boolFromAny(evt.Output["image_scaled"]) {
-		line += " · scaled"
+		line += " scaled"
 	}
 	return line
 }
@@ -701,10 +701,10 @@ func readPdfStepSummary(evt StepEvent) string {
 		label = "pdf"
 	}
 	pageCount := intFromAny(evt.Output["pdf_page_count"])
-	summary := "Read " + label + " · PDF " + strconv.Itoa(pageCount) + " pages"
+	summary := "Read " + label + " PDF " + strconv.Itoa(pageCount) + " pages"
 	if rendered := intFromAny(evt.Output["pdf_rendered"]); rendered > 0 && rendered < pageCount {
 		pages := intsFromAny(evt.Output["pdf_pages"])
-		summary += " · rendered pages " + strconv.Itoa(pages[0]) + "-" + strconv.Itoa(pages[len(pages)-1])
+		summary += " rendered pages " + strconv.Itoa(pages[0]) + "-" + strconv.Itoa(pages[len(pages)-1])
 	}
 	return summary
 }
@@ -1072,7 +1072,7 @@ func formatMemoryListResult(result any, maxBytes int) (string, bool) {
 			if strings.EqualFold(strings.TrimSpace(stringFromAny(item["entry_type"])), "directory") {
 				label = "folder"
 			}
-			fmt.Fprintf(&sb, "\n\n- %s · %s", markdownCode(entryPath), label)
+			fmt.Fprintf(&sb, "\n\n- %s %s", markdownCode(entryPath), label)
 		}
 	}
 	appendMemoryPagination(&sb, data)
@@ -1085,7 +1085,7 @@ func formatMemoryReadResult(result any, maxBytes int) (string, bool) {
 	start := intFromAny(data["start_line_number"])
 	content := strings.TrimRight(stringFromAny(data["content"]), "\n")
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s · starting at line %d", markdownCode(path), start)
+	fmt.Fprintf(&sb, "%s starting at line %d", markdownCode(path), start)
 	if content == "" {
 		sb.WriteString("\n\nThis file is empty.")
 	} else {
@@ -1139,7 +1139,7 @@ func formatMemorySearchResult(result any, maxBytes int) (string, bool) {
 		}
 		sb.WriteString(markdownCode(path))
 		if line > 0 {
-			fmt.Fprintf(&sb, " · line %d", line)
+			fmt.Fprintf(&sb, " line %d", line)
 		}
 		if content := strings.TrimRight(stringFromAny(item["content"]), "\n"); content != "" {
 			sb.WriteString("\n\n")
@@ -1353,7 +1353,7 @@ func MemoryReadLineRange(input map[string]any) (lo, hi int, ok bool) {
 }
 
 // memoryStepSummary describes a completed memory tool call by its outcome
-// (`searched memories "deploy" in MEMORY.md · 3 matches`). The generic summary
+// (`searched memories "deploy" in MEMORY.md 3 matches`). The generic summary
 // chain would otherwise repeat the path already in the invocation label, and
 // result counts are only claimed when the payload was actually readable.
 //
@@ -1375,7 +1375,7 @@ func memoryStepSummary(evt StepEvent, tool string) (string, bool) {
 		if count == "" {
 			return label
 		}
-		return label + " · " + count
+		return label + " " + count
 	}
 	path := firstString(evt.Input, "path")
 	switch tool {
@@ -1530,7 +1530,7 @@ func lspStepSummary(evt StepEvent) string {
 		return ""
 	}
 	if n, ok := firstInt(evt.Output, "result_count"); ok {
-		return "looked up " + operation + " · " + formatCountLabel(n, "result", "results")
+		return "looked up " + operation + " " + formatCountLabel(n, "result", "results")
 	}
 	return "looked up " + operation
 }
@@ -2375,7 +2375,7 @@ func userInteractionDeclinedBody(input map[string]any) string {
 	}
 	lines := make([]string, 0, len(questions))
 	for _, q := range questions {
-		line := "· " + q.Text()
+		line := "" + q.Text()
 		labels := make([]string, 0, len(q.Options))
 		for _, opt := range q.Options {
 			if opt.Label == "" {
@@ -2603,15 +2603,15 @@ func formatSubagentCallStep(evt StepEvent, maxBytes int) (string, bool) {
 		}
 		line.WriteString(name)
 		if t := strings.TrimSpace(task.AgentType); t != "" {
-			line.WriteString(" · ")
+			line.WriteString(" ")
 			line.WriteString(t)
 		}
 		if phrase := subagentTaskStatusPhrase(task); phrase != "" {
-			line.WriteString(" · ")
+			line.WriteString(" ")
 			line.WriteString(phrase)
 		}
 		if elapsed := subagentElapsedLabel(task.StartedAt, task.FinishedAt); elapsed != "" {
-			line.WriteString(" · ")
+			line.WriteString(" ")
 			line.WriteString(elapsed)
 		}
 		sb.WriteString(strings.TrimSpace(line.String()))
@@ -2794,7 +2794,7 @@ func toolInvocationLabel(evt StepEvent) string {
 	// remain compact and readable across arbitrary server schemas.
 	if display, ok := McpToolDisplayName(tool); ok {
 		if args := MCPToolInputSummary(evt.Input); args != "" {
-			return display + " · " + args
+			return display + " " + args
 		}
 		return display
 	}
@@ -3514,7 +3514,7 @@ func MCPToolInputSummary(input map[string]any) string {
 		value := mcpInputValueSummary(input[key])
 		parts = append(parts, mcpInputFieldLabel(key)+": "+value)
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 func mcpInputFieldLabel(key string) string {
@@ -4083,7 +4083,7 @@ func (a ReadableAnswer) String() string {
 			if name == "" {
 				name = peer.Name
 			}
-			line := strings.Join(nonEmptyText(name, peer.Status, peer.Task), " · ")
+			line := strings.Join(nonEmptyText(name, peer.Status, peer.Task), " ")
 			lines = append(lines, line)
 		}
 		if note := strings.TrimSpace(a.Note); note != "" {
@@ -4309,7 +4309,7 @@ type usableModelRow struct {
 }
 
 // readUsableModels reads a list_usable_models card: one line per model,
-// "provider/model · endpoint", with " (current)" / " (handed off)" naming the
+// "provider/model endpoint", with " (current)" / " (handed off)" naming the
 // rows those facts belong to. The raw JSON never reaches a card.
 func readUsableModels(content string) (ReadableAnswer, bool) {
 	for _, candidate := range toolAnswerCandidates(content) {
@@ -4322,7 +4322,7 @@ func readUsableModels(content string) (ReadableAnswer, bool) {
 		}
 		var lines []string
 		for _, row := range raw.Models {
-			line := fmt.Sprintf("%s/%s · %s", strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model), strings.TrimSpace(row.Endpoint))
+			line := fmt.Sprintf("%s/%s %s", strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model), strings.TrimSpace(row.Endpoint))
 			if row.Current {
 				line += " (current)"
 			}

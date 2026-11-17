@@ -39,7 +39,7 @@ func TestExecuteCompact(t *testing.T) {
 	if stub.id != "default" || got.Err != nil || got.Result.Summary != "summary" {
 		t.Fatalf("result = %#v, id = %q", got, stub.id)
 	}
-	want := "Context compacted 182.4k → 12.3k tokens (−93%) · 14.2s\n\n" + assembly.WarningMessage
+	want := "Context compacted 182.4k → 12.3k tokens (−93%) 14.2s\n\n" + assembly.WarningMessage
 	if got.Reply != want {
 		t.Fatalf("reply = %q", got.Reply)
 	}

@@ -252,7 +252,7 @@ func TestPostCompactHookCannotUndoACommittedCheckpoint(t *testing.T) {
 // without a unit glued to them, the saving as a percentage, and the time.
 func TestFormatCompactBannerReadsAsOneLine(t *testing.T) {
 	got := FormatCompactBanner(event.ContextCompactedPayload{TokensBefore: 182_400, TokensAfter: 12_300, ReplacedItems: 1}, 14_200_000_000)
-	if got != "182.4k → 12.3k tokens (−93%) · 14.2s" {
+	if got != "182.4k → 12.3k tokens (−93%) 14.2s" {
 		t.Fatalf("banner = %q", got)
 	}
 	if got := FormatCompactBanner(event.ContextCompactedPayload{TokensBefore: 355, TokensAfter: 355}, 0); got != "355 → 355 tokens" {

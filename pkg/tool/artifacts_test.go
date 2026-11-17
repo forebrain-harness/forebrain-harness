@@ -425,7 +425,7 @@ func TestPresentFilesCompletionCarriesStructuredRows(t *testing.T) {
 	}
 	body, _ := FormatToolStepResult(StepEvent{Kind: StepKindToolCompleted, ToolName: "present_files",
 		Output: payload.Output}, DefaultMaxFormattedBody)
-	if want := "- **PostgreSQL DDL** · text · 7 B · `ddl.sql`"; !strings.Contains(body, want) {
+	if want := "- **PostgreSQL DDL** text 7 B `ddl.sql`"; !strings.Contains(body, want) {
 		t.Fatalf("body %q lost %q", body, want)
 	}
 }
@@ -619,9 +619,9 @@ func TestFormatPresentFilesStepNeverShowsJSON(t *testing.T) {
 	}}
 	body, _ := FormatToolStepResult(normal, DefaultMaxFormattedBody)
 	wantLines := []string{
-		"- **Q3 report** · document · 1.2 MB · `outputs/a.docx`",
-		"- **b.pptx** · presentation · 512 B · `b.pptx`",
-		"- **c.pdf** · pdf · 1.2 MB · `c.pdf`",
+		"- **Q3 report** document 1.2 MB `outputs/a.docx`",
+		"- **b.pptx** presentation 512 B `b.pptx`",
+		"- **c.pdf** pdf 1.2 MB `c.pdf`",
 	}
 	for _, want := range wantLines {
 		if !strings.Contains(body, want) {

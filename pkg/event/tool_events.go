@@ -186,7 +186,7 @@ type ToolCallCompletedPayload struct {
 	ActionKind      string         `json:"action_kind,omitempty"`
 	RetainAsHistory bool           `json:"retain_as_history,omitempty"`
 	// Summary is the single line a surface labels the call with ("ran read_file
-	// · 42 bytes"), computed by the runtime so every surface agrees.
+	// 42 bytes"), computed by the runtime so every surface agrees.
 	Summary  string       `json:"summary,omitempty"`
 	ToolMeta ToolCallMeta `json:"tool_meta,omitempty"`
 }

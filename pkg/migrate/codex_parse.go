@@ -651,7 +651,7 @@ func (p *codexParser) compactedRow(payload json.RawMessage, ts int64) {
 			}
 		}
 	}
-	detail := fmt.Sprintf("compact boundary (migrated from codex) · window %d", item.WindowNumber)
+	detail := fmt.Sprintf("compact boundary (migrated from codex) window %d", item.WindowNumber)
 	part := state.CompactBoundaryPart{
 		Trigger:            "codex",
 		Strategy:           "migrated",

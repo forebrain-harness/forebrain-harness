@@ -674,7 +674,7 @@ func TestCtrlOIsUnboundAndNeverEntersTheComposer(t *testing.T) {
 // event.ToolCallMeta by subagentToolStepMsg, the one door between the event and
 // the card. A preview fact dropped at that door is not a lost detail: the frame
 // fails the renderer's preview gate, so the card falls back to the preformatted
-// "path: … · image W×H · bytes" body and the marker row stops being the row
+// "path: … image W×H bytes" body and the marker row stops being the row
 // that opens the file.
 func TestSubagentViewDrawsTheConversationImageCard(t *testing.T) {
 	const agentID = "task-explore-1"

@@ -2273,7 +2273,7 @@ func TestResumeReplayUsesSameDeduplicatedToolHeader(t *testing.T) {
 		t.Fatalf("expected replayed tool frame, blocks=%#v", renderer.vm.blocks)
 	}
 	header := ToolDisplayHeader(toolFrame, "")
-	if header != "Read /repo/hello.go lines 21-70 · 0.5s" {
+	if header != "Read /repo/hello.go lines 21-70 0.5s" {
 		t.Fatalf("header=%q", header)
 	}
 	if got := renderer.vm.blocks[len(renderer.vm.blocks)-1].frame; got.Kind != FrameStatus || got.Title != "resumed" {
@@ -3700,7 +3700,7 @@ func TestReplayTimelineRebuildsCompactionCards(t *testing.T) {
 	require.Equal([]string{
 		"user:first question", "assistant:first answer",
 		"user:second question",
-		compactTitleDone + ":182.4k → 12.3k tokens (−93%) · 14.2s",
+		compactTitleDone + ":182.4k → 12.3k tokens (−93%) 14.2s",
 		"assistant:second answer",
 		compactTitleCancelled + ":",
 	}, order)
