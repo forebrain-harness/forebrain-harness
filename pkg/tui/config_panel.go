@@ -811,7 +811,14 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 	for {
 		container, _ := configLookupValue(doc, path)
 		keys := configContainerKeys(container)
-		items, owners := p.rowItems(doc, path, container, keys, configContainerIsList(field, container))
+		list := configContainerIsList(field, container)
+		// An agent's subagent list carries a row for every shared subagent, the
+		// ones it has not enabled included: this page is where they are switched
+		// on (plan 314). Those rows have no entry in the document yet.
+		if list && agentSubagentsPath(path) {
+			keys = append(keys, missingSharedSubagentKeys(doc, container)...)
+		}
+		items, owners := p.rowItems(doc, path, container, keys, list)
 		idx, ok, err := p.sel.SelectRich(p.rowsPrompt(field, keys, notice), items, -1)
 		if err != nil {
 			p.printError(err)
@@ -840,11 +847,19 @@ func (p *configPanel) rowItems(doc any, path []string, container any, keys []str
 	items := make([]SelectItem, 0, len(keys)+2)
 	owners := make([]int, 0, len(keys)+2)
 	for i, key := range keys {
-		value, _ := configLookupValue(container, []string{key})
+		value, exists := configLookupValue(container, []string{key})
+		if !exists && list {
+			// A shared subagent this agent has not enabled has no entry: the row
+			// stands for the placeholder that says so, and nothing is written
+			// until the switch is turned on (plan 314).
+			if isSharedSubagentName(doc, key) {
+				value = map[string]any{"name": strings.ToLower(strings.TrimSpace(key)), "enabled": false}
+			}
+		}
 		items = append(items, SelectItem{
-			Label:       p.configRowLabelAt(path, key, i, list, value),
+			Label:       p.configRowLabelAt(doc, path, key, i, list, value),
 			Description: p.configRowSummary(doc, path, key, value),
-			Status:      configRowStatus(path, value),
+			Status:      p.configRowStatus(doc, path, key, value),
 		})
 		owners = append(owners, i)
 	}
@@ -858,10 +873,14 @@ func (p *configPanel) rowItems(doc any, path []string, container any, keys []str
 
 // configRowStatus is a row's right-edge marker (plan 313): the definitions
 // page marks the agents that are primary agents with the prototype's
-// primary-listed status. Every other row has none — a definition keyed by a
-// built-in subagent type is that type's install-wide default, not an agent,
-// and the loader's own rule is what decides.
-func configRowStatus(path []string, value any) string {
+// primary-listed status, and an agent's subagent list marks the shared
+// subagents (plan 314). Every other row has none — a definition keyed by a
+// built-in subagent type is that type's install-wide default, not an agent, and
+// the loader's own rule is what decides.
+func (p *configPanel) configRowStatus(doc any, path []string, key string, value any) string {
+	if agentSubagentsPath(path) && sharedRowName(doc, key, value) != "" {
+		return configSharedStatus
+	}
 	if len(path) != 1 || path[0] != configDefinitionsPath {
 		return ""
 	}
@@ -887,12 +906,11 @@ func configRowLabel(key string, index int, list bool) string {
 // configRowLabelAt names one stored row of a page. A shared subagent is named by
 // the name it carries: that is its identity in the registry, and a list of
 // "#1, #2" would say nothing about which subagent is which (plan 314).
-func (p *configPanel) configRowLabelAt(path []string, key string, index int, list bool, value any) string {
-	if list && len(path) == 1 && path[0] == configSharedSubagentsKey {
-		if row, ok := value.(map[string]any); ok {
-			if name := strings.TrimSpace(configStringField(row, "name")); name != "" {
-				return name
-			}
+func (p *configPanel) configRowLabelAt(doc any, path []string, key string, index int, list bool, value any) string {
+	named := agentSubagentsPath(path) || (len(path) == 1 && path[0] == configSharedSubagentsKey)
+	if named {
+		if name := sharedRowName(doc, key, value); name != "" {
+			return name
 		}
 	}
 	return configRowLabel(key, index, list)
@@ -955,6 +973,87 @@ const (
 	configSharedSubagentNotice = "A shared subagent: its definition is edited in Subagent models, only the switch is set here"
 )
 
+// agentSubagentsPath reports whether path is one primary agent's subagent list —
+// the one place a shared subagent is switched on or off for that agent (plan
+// 314). It is a path check rather than a field check because editRows hands the
+// same descriptor down at every nesting level.
+func agentSubagentsPath(path []string) bool {
+	return len(path) == 3 && path[0] == configDefinitionsPath && path[2] == configSubagentsKey
+}
+
+// sharedSubagentNamesIn lists the names of the shared custom subagents a staged
+// agents document holds, in registry order.
+func sharedSubagentNamesIn(doc any) []string {
+	registry, _ := configLookupValue(doc, []string{configSharedSubagentsKey})
+	rows, _ := registry.([]any)
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		entry, _ := row.(map[string]any)
+		if name := strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// configSharedSubagent finds one staged registry entry by name.
+func configSharedSubagent(doc any, name string) (map[string]any, bool) {
+	registry, _ := configLookupValue(doc, []string{configSharedSubagentsKey})
+	rows, _ := registry.([]any)
+	key := strings.ToLower(strings.TrimSpace(name))
+	for _, row := range rows {
+		entry, ok := row.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))) == key {
+			return entry, true
+		}
+	}
+	return nil, false
+}
+
+// isSharedSubagentName reports whether name is one of the registry's subagents.
+func isSharedSubagentName(doc any, name string) bool {
+	return slices.Contains(sharedSubagentNamesIn(doc), strings.ToLower(strings.TrimSpace(name)))
+}
+
+// sharedRowName is the shared subagent a row stands for, empty when it stands
+// for anything else: the name an entry carries, or — for a placeholder row that
+// has no entry yet — the registry name the row is keyed by (plan 314).
+func sharedRowName(doc any, key string, value any) string {
+	if entry, ok := value.(map[string]any); ok {
+		name := strings.ToLower(strings.TrimSpace(configStringField(entry, "name")))
+		if name != "" && isSharedSubagentName(doc, name) {
+			return name
+		}
+		return ""
+	}
+	if name := strings.ToLower(strings.TrimSpace(key)); isSharedSubagentName(doc, name) {
+		return name
+	}
+	return ""
+}
+
+// missingSharedSubagentKeys names the registry's subagents one agent's list has
+// no entry for: they are rows all the same, because a disabled shared subagent
+// is a row that says so with its switch off (owner 2026-11-16, plan 314).
+func missingSharedSubagentKeys(doc any, container any) []string {
+	rows, _ := container.([]any)
+	present := make([]string, 0, len(rows))
+	for _, row := range rows {
+		entry, _ := row.(map[string]any)
+		present = append(present, strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))))
+	}
+	missing := make([]string, 0, len(rows))
+	for _, name := range sharedSubagentNamesIn(doc) {
+		if !slices.Contains(present, name) {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
 // configRowSummary is a row's second column for the agents section: the value
 // as it stands, or — for one of an agent's subagent entries — the model it will
 // actually run on, in the order dispatch resolves it, and the verdict a system
@@ -972,6 +1071,9 @@ func (p *configPanel) configRowSummary(doc any, path []string, key string, value
 	}
 	if len(path) != 3 || path[0] != configDefinitionsPath || path[2] != configSubagentsKey {
 		return configRowDescription(value)
+	}
+	if shared := sharedRowName(doc, key, value); shared != "" {
+		return configSharedRowSummary(doc, shared)
 	}
 	row, ok := value.(map[string]any)
 	if !ok {
@@ -1070,6 +1172,12 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 	if configSystemSubagentRow(path, value) {
 		return doc, configSystemSubagentNotice
 	}
+	if agentSubagentsPath(path) {
+		if name := sharedRowName(doc, key, value); name != "" {
+			container, _ := configLookupValue(doc, path)
+			return p.editSharedSubagentRow(doc, path, container, name, field)
+		}
+	}
 	editLabel := configRowEditLabel
 	if configIsContainer(value) {
 		editLabel = configRowOpenLabel
@@ -1097,6 +1205,135 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 		return p.assign(doc, rowPath, nil, true, field.Label)
 	default:
 		return doc, ""
+	}
+}
+
+// editSharedSubagentRow is the whole of what an agent's page may do with a
+// shared subagent (plan 314): one switch, and the definition's own facts shown
+// read-only. The definition is the install-wide registry's, so it is edited on
+// the Subagent models page and every other row here says where it lives rather
+// than opening an editor this page does not have. The switch is staged in the
+// document like any other edit: enabling writes the reference entry, disabling
+// removes it, and a page closed without saving writes nothing.
+func (p *configPanel) editSharedSubagentRow(doc any, path []string, container any, name string, field configField) (any, string) {
+	enabled := sharedReferenceEnabled(container, name)
+	items := []SelectItem{
+		{Label: "Enabled", Description: configSharedSwitchText(enabled)},
+		{Label: "Description", Description: configSharedRowSummary(doc, name)},
+		{Label: "Model", Description: p.configSharedModelSummary(doc, name)},
+		{Label: "Tools", Description: configSharedToolsText(doc, name)},
+		{Label: configRowBackLabel, Description: "Back to the row list"},
+	}
+	idx, ok, err := p.sel.SelectRich(name+"\n"+configSharedSubagentNotice, items, 0)
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	if !ok || idx < 0 || idx >= len(items) {
+		return doc, ""
+	}
+	if idx == 0 {
+		updated, note := p.setSharedReference(doc, path, container, name, !enabled, field.Label)
+		if note != "" {
+			return updated, note
+		}
+		return updated, configSharedSwitchedNotice(name, !enabled)
+	}
+	if idx == len(items)-1 {
+		return doc, ""
+	}
+	return doc, configSharedSubagentNotice
+}
+
+// setSharedReference switches one shared subagent on or off in this agent's
+// list: on stores the reference entry — the name and enabled: true, because for
+// a shared subagent an absent switch means off — and off removes it.
+func (p *configPanel) setSharedReference(doc any, path []string, container any, name string, enabled bool, label string) (any, string) {
+	rows, _ := container.([]any)
+	next := make([]any, 0, len(rows)+1)
+	for _, row := range rows {
+		entry, _ := row.(map[string]any)
+		if strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))) == name {
+			continue
+		}
+		next = append(next, row)
+	}
+	if enabled {
+		next = append(next, map[string]any{"name": name, "enabled": true})
+	}
+	return p.assign(doc, path, next, false, label)
+}
+
+// sharedReferenceEnabled reports whether this agent's list switches one shared
+// subagent on: only the entry's explicit true does.
+func sharedReferenceEnabled(container any, name string) bool {
+	rows, _ := container.([]any)
+	for _, row := range rows {
+		entry, _ := row.(map[string]any)
+		if strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))) != name {
+			continue
+		}
+		enabled, _ := entry["enabled"].(bool)
+		return enabled
+	}
+	return false
+}
+
+// configSharedSwitchText is the switch row's line: what the state means for
+// this agent, not merely which way it points.
+func configSharedSwitchText(enabled bool) string {
+	if enabled {
+		return "On: this agent may dispatch it"
+	}
+	return "Off: this agent does not dispatch it"
+}
+
+// configSharedSwitchedNotice says what the staged edit did, in the terms the
+// page uses: the effect lands when the section is saved.
+func configSharedSwitchedNotice(name string, enabled bool) string {
+	if enabled {
+		return name + " enabled for this agent; save to apply"
+	}
+	return name + " disabled for this agent; save to apply"
+}
+
+// configSharedRowSummary is a shared subagent's row on an agent's page: the
+// registry's own description, marked as shared because the definition is not
+// this agent's to edit (plan 314).
+func configSharedRowSummary(doc any, name string) string {
+	if entry, ok := configSharedSubagent(doc, name); ok {
+		if text := strings.TrimSpace(configStringField(entry, "description")); text != "" {
+			return text + " (shared)"
+		}
+	}
+	return "(shared)"
+}
+
+// configSharedModelSummary is the model a shared subagent runs on, named the way
+// the model pickers name it, with the level beside it.
+func (p *configPanel) configSharedModelSummary(doc any, name string) string {
+	entry, ok := configSharedSubagent(doc, name)
+	if !ok {
+		return configFollowConversationModel
+	}
+	ref := strings.TrimSpace(configStringField(entry, "model"))
+	if ref == "" {
+		return configFollowConversationModel
+	}
+	return p.configModelLabel(ref) + " / " + configEffortSummary(configStringField(entry, "reasoning_effort"))
+}
+
+// configSharedToolsText is a shared subagent's tool tier as words.
+func configSharedToolsText(doc any, name string) string {
+	entry, _ := configSharedSubagent(doc, name)
+	switch tier := strings.TrimSpace(configStringField(entry, "tools")); tier {
+	case appcfg.SubagentToolsEdit:
+		return "edit: it may change the workspace"
+	case appcfg.SubagentToolsPick:
+		allowed, _ := entry["allowed_tools"].([]any)
+		return "pick: " + strconv.Itoa(len(allowed)) + " tools"
+	default:
+		return appcfg.SubagentToolsReadOnly
 	}
 }
 

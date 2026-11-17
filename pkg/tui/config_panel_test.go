@@ -1354,3 +1354,205 @@ func TestConfigPanelSchemaProjectionFieldsNameStoreSectionKeys(t *testing.T) {
 		t.Fatal("no projection section exists: the mechanism is unreachable")
 	}
 }
+
+// sharedRowsSession is one primary agent's page over an agents document holding
+// one shared registry entry, plus whatever entries the caller put on the agent
+// (plan 314).
+func sharedRowsSession(agentSubagents string) *configPanelTestSession {
+	agents := `{
+		"definitions":{"main":{"primary":true,"subagents":` + agentSubagents + `}},
+		"shared_subagents":[{"name":"repo-auditor","description":"audits one repository area","system_prompt":"You audit repositories.","model":"llm-1","reasoning_effort":"high","tools":"read_only"}],
+		"subagent_models":{"plan":{"model":"llm-1"}}
+	}`
+	session := newConfigPanelSession(map[string]string{"agents": agents})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	session.snapshot.ClaudeCode = false
+	return session
+}
+
+// agentSubagentsSteps walks from the section page to one agent's subagent list,
+// then runs the steps the caller scripts on that page.
+func agentSubagentsSteps(more []richStep) []richStep {
+	steps := []richStep{
+		{label: "Agent definitions", ok: true},
+		{label: "main", ok: true},
+		{label: configRowOpenLabel, ok: true},
+		{label: "subagents", ok: true},
+		{label: configRowOpenLabel, ok: true},
+	}
+	return append(steps, more...)
+}
+
+// savedAgentsDoc is the one agents write a run made, decoded.
+func savedAgentsDoc(t *testing.T, session *configPanelTestSession) map[string]any {
+	t.Helper()
+	if len(session.writes) != 1 {
+		t.Fatalf("expected one write, got %+v", session.writes)
+	}
+	if session.writes[0].section != "agents" {
+		t.Fatalf("the write went to %q, want agents", session.writes[0].section)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(session.writes[0].raw, &doc); err != nil {
+		t.Fatalf("the saved document does not parse: %v", err)
+	}
+	return doc
+}
+
+// agentSubagentsOf reads one agent's subagent entries out of a saved document.
+func agentSubagentsOf(t *testing.T, doc map[string]any, agent string) []map[string]any {
+	t.Helper()
+	definitions, _ := doc["definitions"].(map[string]any)
+	def, _ := definitions[agent].(map[string]any)
+	rows, _ := def["subagents"].([]any)
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		entry, _ := row.(map[string]any)
+		out = append(out, entry)
+	}
+	return out
+}
+
+// TestConfigPanelAgentPageListsSharedSubagentsDisabled pins the owner's rule on
+// the TUI side of the agent page (plan 314): a shared subagent is a row whether
+// or not this agent enabled it, it starts off, its description says it is shared
+// — and switching it on writes the reference entry, nothing else.
+func TestConfigPanelAgentPageListsSharedSubagentsDisabled(t *testing.T) {
+	session := sharedRowsSession(`[]`)
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "repo-auditor", ok: true},
+		{label: "Enabled", ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configSaveRowLabel, ok: true},
+	}), nil, "agents")
+
+	// The row list carries the shared subagent with its status and the
+	// registry's description marked as shared.
+	var rowsPage []SelectItem
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), "repo-auditor") {
+			rowsPage = items
+		}
+	}
+	if rowsPage == nil {
+		t.Fatalf("the agent's subagent list never showed the shared subagent: %v", selector.richLabels)
+	}
+	shared := findRow(t, rowsPage, "repo-auditor")
+	if shared.Status != configSharedStatus {
+		t.Fatalf("the shared row's status = %q, want %q", shared.Status, configSharedStatus)
+	}
+	if shared.Description != "audits one repository area (shared)" {
+		t.Fatalf("the shared row's description = %q, want the registry's description marked shared", shared.Description)
+	}
+
+	// Switching it on writes the reference entry: the name and enabled true.
+	entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+	if len(entries) != 1 {
+		t.Fatalf("saved subagents = %+v, want the one reference entry", entries)
+	}
+	if entries[0]["name"] != "repo-auditor" || entries[0]["enabled"] != true {
+		t.Fatalf("reference entry = %+v, want the name and enabled true", entries[0])
+	}
+	if _, ok := entries[0]["description"]; ok {
+		t.Fatalf("reference entry = %+v, want nothing but the name and the switch", entries[0])
+	}
+}
+
+// TestConfigPanelAgentPageDisablesASharedSubagent pins the other direction
+// (plan 314): switching an enabled shared subagent off removes the reference
+// entry, because absence is what disabled means.
+func TestConfigPanelAgentPageDisablesASharedSubagent(t *testing.T) {
+	session := sharedRowsSession(`[{"name":"repo-auditor","enabled":true},{"name":"db-migrator","description":"runs migrations","system_prompt":"You migrate."}]`)
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "repo-auditor", ok: true},
+		{label: "Enabled", ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configSaveRowLabel, ok: true},
+	}), nil, "agents")
+
+	entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+	if len(entries) != 1 {
+		t.Fatalf("saved subagents = %+v, want the per-agent custom subagent alone", entries)
+	}
+	if entries[0]["name"] != "db-migrator" {
+		t.Fatalf("saved subagents = %+v, want the shared reference gone", entries)
+	}
+}
+
+// TestConfigPanelAgentPageSharedDefinitionIsReadOnly pins the read-only half
+// (plan 314): a shared subagent's fields are facts this page shows, never
+// settings it edits, so opening one of them says where the definition lives and
+// writes nothing — while a per-agent custom subagent and a built-in override
+// keep their own editing.
+func TestConfigPanelAgentPageSharedDefinitionIsReadOnly(t *testing.T) {
+	session := sharedRowsSession(`[{"name":"explore","model":"llm-1"},{"name":"db-migrator","description":"runs migrations","system_prompt":"You migrate."}]`)
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "repo-auditor", ok: true},
+		{label: "Model", ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configRowBackLabel, ok: true},
+	}), nil, "agents")
+
+	// The definition's facts are on the page, read from the registry, and the
+	// page says where the definition itself is edited.
+	var sharedPage []SelectItem
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), "Description") && slices.Contains(rowLabels(items), "Enabled") {
+			sharedPage = items
+		}
+	}
+	if sharedPage == nil {
+		t.Fatalf("the shared subagent's page never opened: %v", selector.richLabels)
+	}
+	for label, want := range map[string]string{
+		"Description": "audits one repository area (shared)",
+		"Model":       "openai/gpt-main / High",
+		"Tools":       "read_only",
+		"Enabled":     "Off: this agent does not dispatch it",
+	} {
+		if got := findRow(t, sharedPage, label).Description; got != want {
+			t.Fatalf("%s row = %q, want %q", label, got, want)
+		}
+	}
+	if !strings.Contains(pageLabels(selector), configSharedSubagentNotice) {
+		t.Fatalf("the shared row's page does not say where the definition is edited: %s", pageLabels(selector))
+	}
+	// Nothing was staged by opening the definition's fields, and nothing was
+	// written: there are no edits to save.
+	if len(session.writes) != 0 {
+		t.Fatalf("opening a shared subagent's fields wrote %+v, want nothing", session.writes)
+	}
+
+	// A per-agent custom subagent keeps its own row and its own editing: it is
+	// not marked shared, and its description is its own.
+	var rowsPage []SelectItem
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), "repo-auditor") {
+			rowsPage = items
+		}
+	}
+	if rowsPage == nil {
+		t.Fatalf("the agent's subagent list never carried the shared row: %v", selector.richLabels)
+	}
+	// Exactly one row is marked shared: the per-agent entries the agent already
+	// had keep their own rows and no status — they are still its own to edit.
+	marked := make([]string, 0, len(rowsPage))
+	for _, item := range rowsPage {
+		if item.Status != "" {
+			marked = append(marked, item.Label+"="+item.Status)
+		}
+	}
+	if len(marked) != 1 || marked[0] != "repo-auditor="+configSharedStatus {
+		t.Fatalf("marked rows = %v, want the shared one alone: %+v", marked, rowsPage)
+	}
+}
