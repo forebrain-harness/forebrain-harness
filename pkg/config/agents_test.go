@@ -581,27 +581,27 @@ func TestLoadRejectsInvalidAgentSubagents(t *testing.T) {
 func TestValidateAgentSubagentsAcceptsAResolvableModelReference(t *testing.T) {
 	def := AgentDefinition{Primary: true, Subagents: []SubagentConfig{{Name: "explore", Model: "llm-0f3a9c"}}}
 	resolves := func(ref string) bool { return ref == "llm-0f3a9c" }
-	if err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, resolves); err != nil {
+	if err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, nil, resolves); err != nil {
 		t.Fatalf("a resolvable row id was refused: %v", err)
 	}
-	err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, func(string) bool { return false })
+	err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, nil, func(string) bool { return false })
 	if err == nil || !strings.Contains(err.Error(), `model "llm-0f3a9c" must be provider/model`) {
 		t.Fatalf("err = %v, want the shape sentence for a value that resolves to nothing", err)
 	}
 	// A nil checker is the shape-only verdict a caller without a configuration
 	// gets: an id has no such shape, so it is refused rather than guessed at.
-	if err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, nil); err == nil {
+	if err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, nil, nil); err == nil {
 		t.Fatal("a nil resolver accepted a value that only a row id could name")
 	}
 	// A "provider/model" label is accepted without resolving it: deleting a
 	// provider must not make an existing configuration unloadable.
 	label := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", Model: "openai/gone"}}}
-	if err := ValidateAgentSubagents("main", label, builtInPublicSubagentNames, builtInSystemSubagentNames, func(string) bool { return false }); err != nil {
+	if err := ValidateAgentSubagents("main", label, builtInPublicSubagentNames, builtInSystemSubagentNames, nil, func(string) bool { return false }); err != nil {
 		t.Fatalf("a dangling label was refused: %v", err)
 	}
 	// The effort rule is unchanged: it needs a model next to it.
 	effort := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", ReasoningEffort: "low"}}}
-	if err := ValidateAgentSubagents("main", effort, builtInPublicSubagentNames, builtInSystemSubagentNames, resolves); err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
+	if err := ValidateAgentSubagents("main", effort, builtInPublicSubagentNames, builtInSystemSubagentNames, nil, resolves); err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
 		t.Fatalf("err = %v, want the effort rule", err)
 	}
 }
@@ -891,6 +891,65 @@ func TestValidateSharedSubagents(t *testing.T) {
 	root.Agents.SharedSubagents[0].Description = ""
 	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "agents.shared_subagents[0]: description required") {
 		t.Fatalf("err = %v, want the loader to refuse a shared subagent with no description", err)
+	}
+}
+
+// A shared subagent is enabled for one agent by a reference entry — the name
+// and a switch — because the definition itself belongs to the install-wide
+// registry (plan 314). The table pins both halves of that rule: the reference
+// carries nothing else, and a name the registry does not hold is still a full
+// custom definition with its own description and prompt.
+func TestValidateAgentSubagentsSharedReferenceEntries(t *testing.T) {
+	resolves := func(ref string) bool { return ref == "llm-shared-row" }
+	shared := []string{"repo-auditor"}
+
+	// The enable marker: enabled true, and nothing else set.
+	enabled := AgentDefinition{Primary: true, Subagents: []SubagentConfig{{Name: "repo-auditor", Enabled: BoolPtr(true)}}}
+	if err := ValidateAgentSubagents("main", enabled, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err != nil {
+		t.Fatalf("a shared reference entry was refused: %v", err)
+	}
+	// The disabled form is the absence of a reference; a reference that says
+	// false is still well-formed configuration.
+	off := AgentDefinition{Subagents: []SubagentConfig{{Name: "repo-auditor", Enabled: BoolPtr(false)}}}
+	if err := ValidateAgentSubagents("main", off, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err != nil {
+		t.Fatalf("a switched-off shared reference was refused: %v", err)
+	}
+
+	// Every field of the definition is the registry's: setting one here would
+	// be a second definition the pages never show.
+	for _, tc := range []struct {
+		name  string
+		entry SubagentConfig
+	}{
+		{"description", SubagentConfig{Name: "repo-auditor", Description: "mine"}},
+		{"system_prompt", SubagentConfig{Name: "repo-auditor", SystemPrompt: "you are mine"}},
+		{"model", SubagentConfig{Name: "repo-auditor", Model: "llm-shared-row"}},
+		{"reasoning_effort", SubagentConfig{Name: "repo-auditor", ReasoningEffort: "low"}},
+		{"tools", SubagentConfig{Name: "repo-auditor", Tools: SubagentToolsReadOnly}},
+		{"allowed_tools", SubagentConfig{Name: "repo-auditor", AllowedTools: []string{"read_file"}}},
+		{"continuable", SubagentConfig{Name: "repo-auditor", Continuable: BoolPtr(false)}},
+	} {
+		t.Run(tc.name+" is refused", func(t *testing.T) {
+			def := AgentDefinition{Subagents: []SubagentConfig{tc.entry}}
+			err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves)
+			if err == nil || !strings.Contains(err.Error(), `"repo-auditor" references a shared subagent; only enabled may be set here`) {
+				t.Fatalf("err = %v, want the reference-entry refusal", err)
+			}
+		})
+	}
+
+	// A name no registry holds keeps the full-custom rule: description and
+	// prompt required.
+	own := AgentDefinition{Subagents: []SubagentConfig{{Name: "repo-scout", Enabled: BoolPtr(true)}}}
+	if err := ValidateAgentSubagents("main", own, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err == nil || !strings.Contains(err.Error(), "description required") {
+		t.Fatalf("err = %v, want a per-agent custom to keep its own body", err)
+	}
+
+	// A built-in override is untouched by the rule (ruling A, plan 314): model,
+	// effort, prompt and switch all still apply.
+	builtin := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", Model: "llm-shared-row", ReasoningEffort: "low", SystemPrompt: "search here", Enabled: BoolPtr(false)}}}
+	if err := ValidateAgentSubagents("main", builtin, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err != nil {
+		t.Fatalf("a built-in override was refused: %v", err)
 	}
 }
 

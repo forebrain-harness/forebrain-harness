@@ -618,7 +618,7 @@ func (s *Server) writeAgentSubagents(w http.ResponseWriter, r *http.Request, mut
 		// and the rule. A model without the legacy "provider/model" shape is a
 		// model reference (a fb_llm_models row id, plan 262), and resolves
 		// against the same root the write is landing in.
-		if err := config.ValidateAgentSubagents(id, write.def, agent.PublicSubagentNames, agent.SystemSubagentNames, func(ref string) bool {
+		if err := config.ValidateAgentSubagents(id, write.def, agent.PublicSubagentNames, agent.SystemSubagentNames, config.SharedSubagentNames(write.cfg.Agents.SharedSubagents), func(ref string) bool {
 			_, ok := config.ResolveModelRef(write.models, id, ref)
 			return ok
 		}); err != nil {

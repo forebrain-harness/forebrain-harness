@@ -949,7 +949,7 @@ func validatePrimaryAgents(r *Root) error {
 		// stale id cannot keep the install from starting (plan 260). A legacy
 		// "provider/model" label nothing resolves to has already been cleared
 		// by normalize, which is what makes an old install boot unchanged.
-		if err := ValidateAgentSubagents(id, def, builtInPublicSubagentNames, builtInSystemSubagentNames, func(ref string) bool {
+		if err := ValidateAgentSubagents(id, def, builtInPublicSubagentNames, builtInSystemSubagentNames, SharedSubagentNames(r.Agents.SharedSubagents), func(ref string) bool {
 			// The same resolution a default_model reference gets: a row id this
 			// install carries (plan 262), or a legacy label. A label keeps its
 			// own rule inside the check, so a dangling one still loads.

@@ -281,9 +281,15 @@ var subagentConfigNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
 // ValidateAgentSubagents checks one primary agent's subagent entries.
 // publicBuiltins are the built-in types an entry of that name overrides;
 // systemBuiltins are the types the system dispatches, which a configuration
-// must not touch. Names are passed in rather than imported so the loader can
-// report the rule without depending on the package that defines the
-// definitions.
+// must not touch; sharedNames are the install-wide shared custom subagents
+// (agents.shared_subagents) this agent may enable. Names are passed in rather
+// than imported so the loader can report the rule without depending on the
+// package that defines the definitions.
+//
+// A shared subagent is enabled for this agent by a reference entry — the name
+// and a switch, nothing else — because the definition is the registry's and no
+// agent edits it (plan 314). Absence means disabled, which is why the reference
+// carries enabled: true rather than the absent-means-on an override uses.
 //
 // The model a subagent entry names is deliberately not checked against the
 // agent's model list while it has the "provider/model" shape: deleting a
@@ -292,7 +298,7 @@ var subagentConfigNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
 // without that shape is a model reference — a fb_llm_models row id, which is
 // what a write stores from plan 262 on — and has to resolve through
 // refResolves; a nil refResolves checks the shape alone.
-func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins, systemBuiltins []string, refResolves func(string) bool) error {
+func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins, systemBuiltins, sharedNames []string, refResolves func(string) bool) error {
 	public := make(map[string]struct{}, len(publicBuiltins))
 	for _, name := range publicBuiltins {
 		public[name] = struct{}{}
@@ -318,6 +324,20 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 		if _, ok := public[name]; ok {
 			if strings.TrimSpace(entry.Description) != "" || strings.TrimSpace(entry.Tools) != "" || len(entry.AllowedTools) > 0 || entry.Continuable != nil {
 				return fmt.Errorf("%s: %q is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else", where, name)
+			}
+		} else if slices.Contains(sharedNames, name) {
+			// A shared subagent's enablement is this entry and nothing else: its
+			// description, prompt, model and tools belong to the registry
+			// (plan 314), so a set field here would be a second definition the
+			// page never shows.
+			if strings.TrimSpace(entry.Description) != "" ||
+				strings.TrimSpace(entry.SystemPrompt) != "" ||
+				strings.TrimSpace(entry.Model) != "" ||
+				strings.TrimSpace(entry.ReasoningEffort) != "" ||
+				strings.TrimSpace(entry.Tools) != "" ||
+				len(entry.AllowedTools) > 0 ||
+				entry.Continuable != nil {
+				return fmt.Errorf("%s: %q references a shared subagent; only enabled may be set here", where, name)
 			}
 		} else if err := validateCustomSubagentBody(where, entry); err != nil {
 			return err
