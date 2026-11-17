@@ -356,10 +356,7 @@ func Run(ctx context.Context, opts Options) error {
 		// what agent it belongs to directly rather than inferring it from the
 		// roster.
 		if msg, ok := m.(SubagentSpawnedMsg); ok {
-			renderer.NoteSubagentSpawned(msg.AgentID, msg.AgentType, ComposerFooter{
-				Model:           subagentModelFooterLabel(msg.ModelProvider, msg.Model),
-				ReasoningEffort: strings.TrimSpace(msg.ReasoningEffort),
-			})
+			noteSubagentSpawnedFacts(renderer, msg)
 		}
 		// The model entering or leaving Plan mode moves the footer at once,
 		// not only when its turn ends.
@@ -373,7 +370,7 @@ func Run(ctx context.Context, opts Options) error {
 			shouldRefreshWorking = true
 		case RunEndedMsg:
 			state.refreshAgentRoster(&reducer)
-			if !agentRosterHasRunningSubagent(state.agentRoster) {
+			if !agentRosterHasLiveSubagent(state.agentRoster) {
 				state.agentRosterFocused = false
 			}
 			rosterChanged = true
@@ -397,6 +394,12 @@ func Run(ctx context.Context, opts Options) error {
 			// the conversation sat idle kept no line at all, because nothing
 			// else would install one between turns.
 			state.agentWorking.sync(renderer, tracker)
+			// The roster row says which of these it is — "paused" while the
+			// execution waits for the reader — so the surface's own snapshot is
+			// rebuilt from the reducer here, or the row would keep saying
+			// "running" until some later lifecycle event happened to refresh it.
+			state.refreshAgentRoster(&reducer)
+			rosterChanged = true
 		}
 		// A switched result's success frames render only after the switch
 		// succeeded, in the session they describe; a failed activation discards
@@ -1208,6 +1211,23 @@ func summarizeComposerModel(session Session) string {
 		return model
 	}
 	return strings.Join(strings.Fields(summary), " ")
+}
+
+// noteSubagentSpawnedFacts records what one spawn announced about a subagent —
+// the kind of agent it is and the model that execution runs on — so that
+// subagent's view can be titled and its footer can name the model. Both faces
+// that draw that view feed it from the same notification: the live loop as the
+// spawn arrives, and the replay as it rebuilds a resumed conversation, since a
+// resumed view is opened long after the spawn the store remembers and the
+// roster row beside it is dropped the moment the subagent finishes.
+func noteSubagentSpawnedFacts(renderer *Renderer, msg SubagentSpawnedMsg) {
+	if renderer == nil {
+		return
+	}
+	renderer.NoteSubagentSpawned(msg.AgentID, msg.AgentType, ComposerFooter{
+		Model:           subagentModelFooterLabel(msg.ModelProvider, msg.Model),
+		ReasoningEffort: strings.TrimSpace(msg.ReasoningEffort),
+	})
 }
 
 // subagentModelFooterLabel names the model one spawned execution runs on the

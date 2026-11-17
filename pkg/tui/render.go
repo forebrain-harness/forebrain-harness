@@ -5903,6 +5903,12 @@ func formatAgentRosterLines(snapshot AgentRosterSnapshot, focused bool, marked i
 		if detail := agentRosterRowDetail(row); detail != "" {
 			line += "  " + detail
 		}
+		// The row says when its execution is waiting for the reader rather than
+		// working, so a paused subagent is not mistaken for a busy one: it is
+		// the row that needs a message, and nothing else on screen says so.
+		if strings.EqualFold(strings.TrimSpace(row.Status), "paused") {
+			line += " paused"
+		}
 		if focused && isMarked {
 			isPrimary := strings.EqualFold(strings.TrimSpace(row.Kind), "primary")
 			hint := agentRosterSubagentHint
@@ -5917,9 +5923,18 @@ func formatAgentRosterLines(snapshot AgentRosterSnapshot, focused bool, marked i
 	return lines
 }
 
-func agentRosterHasRunningSubagent(snapshot AgentRosterSnapshot) bool {
+// agentRosterHasLiveSubagent reports whether any subagent on the roster is
+// still a live conversation the reader can act on: running, or paused and
+// waiting for the message that resumes it. A paused one counts — it is exactly
+// the row that needs the reader — so the roster must not disappear from under
+// it; only an execution that ended leaves the roster with nothing to show.
+func agentRosterHasLiveSubagent(snapshot AgentRosterSnapshot) bool {
 	for _, row := range snapshot.Rows {
-		if strings.EqualFold(strings.TrimSpace(row.Kind), "subagent") && strings.EqualFold(strings.TrimSpace(row.Status), "running") {
+		if !strings.EqualFold(strings.TrimSpace(row.Kind), "subagent") {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(row.Status)) {
+		case "running", "paused":
 			return true
 		}
 	}
@@ -5927,13 +5942,13 @@ func agentRosterHasRunningSubagent(snapshot AgentRosterSnapshot) bool {
 }
 
 // agentRosterOperable reports whether the agent roster is both on screen and
-// usable: there is a running subagent to show, and the composer on screen takes
+// usable: there is a live subagent to show, and the composer on screen takes
 // input. A subagent's view whose execution has ended has a read-only composer —
 // its reader drops every byte but Esc (see composerReadOnly) — so a roster
 // painted there advertised "Enter to view x to stop" over rows that could
 // never answer (owner report, 2026-10-30).
 func agentRosterOperable(snapshot AgentRosterSnapshot, composerTakesInput bool) bool {
-	return composerTakesInput && agentRosterHasRunningSubagent(snapshot)
+	return composerTakesInput && agentRosterHasLiveSubagent(snapshot)
 }
 
 func thinkingDisplayLinesWithWidth(f Frame, termWidth int) []string {

@@ -1045,6 +1045,46 @@ func TestReplayAdoptsRunningSubagentWindows(t *testing.T) {
 	}
 }
 
+// A resumed subagent's view is titled and its footer names the model, because
+// the replay hands over the facts the spawn announced the way the live loop
+// does. Without that handover a resumed view's footer read only
+// "viewing <shortid> esc to return": the spawn was long over, and the roster row
+// that had once carried the name was gone.
+func TestReplayFeedsSubagentFooterFacts(t *testing.T) {
+	const agentID = "agent-facts"
+	base := time.Unix(100, 0).UTC()
+	session := &fakeSession{sessionEvents: []event.RunEvent{
+		event.NewRunEvent("spawn-facts", "child-facts", "s1", event.RunEventSubagentSpawned, event.SubagentSpawnedPayload{
+			AgentID: agentID, AgentType: "general-purpose", Task: "probe", ExecutionID: "exec-facts",
+			ModelProvider: "deepseek", Model: "deepseek-chat", ReasoningEffort: "high",
+		}, base),
+	}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	ctrl := newCommandController(session, renderer, &stubSelector{}, nil, "")
+	var live Reducer
+	live.WithTracker(NewTracker())
+	ctrl.replayCardsTo = &live
+	ctrl.printSessionResumeContext("s1")
+
+	left := renderer.subagentFooterLeftLocked(agentID)
+	for _, want := range []string{"general-purpose", "deepseek-chat", "high"} {
+		if !strings.Contains(left, want) {
+			t.Fatalf("resumed subagent footer = %q, want %q in it", left, want)
+		}
+	}
+	// The live spawn's facts are the same ones: replaying must not change what
+	// a spawn announced, so a re-delivery writes the same entries again.
+	noteSubagentSpawnedFacts(renderer, SubagentSpawnedMsg{
+		AgentID: agentID, AgentType: "general-purpose",
+		ModelProvider: "deepseek", Model: "deepseek-chat", ReasoningEffort: "high",
+	})
+	if again := renderer.subagentFooterLeftLocked(agentID); again != left {
+		t.Fatalf("re-recording the spawn changed the footer: %q -> %q", left, again)
+	}
+}
+
 func TestPrintSessionResumeContextInterleavesPrimaryAndSubagentHistory(t *testing.T) {
 	session := &fakeSession{
 		transcriptTurns: []state.Message{

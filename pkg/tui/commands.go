@@ -662,6 +662,15 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 	flush := func(pos int) {
 		for _, item := range pending[pos] {
 			if item.message != nil {
+				// The per-agent footer facts ride the spawn notification, so a
+				// replayed spawn has to hand them over the way the live loop
+				// does: the resumed conversation's subagent views are rebuilt
+				// here, long after the live spawn that first recorded them, and
+				// a view whose footer names only a short id cannot say which
+				// agent it is or what model it ran.
+				if msg, ok := item.message.(SubagentSpawnedMsg); ok {
+					noteSubagentSpawnedFacts(renderer, msg)
+				}
 				result := reducer.Reduce(item.message)
 				for _, frame := range result.Frames {
 					if frame.Kind != FrameThinking || frame.Final {

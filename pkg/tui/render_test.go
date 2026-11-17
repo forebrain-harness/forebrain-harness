@@ -2382,3 +2382,42 @@ func TestSubagentCardPausedRowIsOneRow(t *testing.T) {
 		t.Fatalf("paused row = %q", strings.Join(rows, "\n"))
 	}
 }
+
+// A paused subagent is still a conversation the reader can act on — it is the
+// one waiting for their message — so the roster keeps listing it and keeps
+// taking the keyboard, and its row says "paused" so it cannot be mistaken for
+// one that is still working.
+func TestRosterListsPausedSubagentAsPaused(t *testing.T) {
+	paused := AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "primary", Kind: "primary", Label: "main", Status: "running"},
+		{ID: "sub-paused", Kind: "subagent", Label: "general-purpose", Status: "paused", Title: "network probe"},
+	}}
+	if !agentRosterHasLiveSubagent(paused) {
+		t.Fatal("a paused subagent is a live conversation the roster must keep listing")
+	}
+	if !agentRosterOperable(paused, true) {
+		t.Fatal("the roster must stay operable while the only subagent is paused")
+	}
+	lines := formatAgentRosterLines(paused, false, -1, 120)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "paused") {
+		t.Fatalf("the paused row does not say paused:\n%s", joined)
+	}
+	if !strings.Contains(joined, "general-purpose  network probe paused") {
+		t.Fatalf("paused row = %q, want the detail followed by \"paused\"", joined)
+	}
+
+	running := AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "sub-running", Kind: "subagent", Label: "general-purpose", Status: "running", Title: "network probe"},
+	}}
+	if lines := formatAgentRosterLines(running, false, -1, 120); strings.Contains(strings.Join(lines, "\n"), "paused") {
+		t.Fatalf("a running row said paused: %q", lines)
+	}
+
+	// Only an ended execution leaves the roster with nothing to show.
+	if agentRosterHasLiveSubagent(AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "sub-done", Kind: "subagent", Label: "general-purpose", Status: "done"},
+	}}) {
+		t.Fatal("a finished subagent is not a live conversation")
+	}
+}

@@ -1681,6 +1681,10 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		if r.tracker != nil {
 			r.tracker.ObserveAgentPaused(agentID, false)
 		}
+		// The roster row says what the execution is doing, and it is working
+		// again: the row a pause marked "paused" goes back to "running" with
+		// the message that resumed it.
+		r.updateSubagentStatus(agentID, "running")
 		frames := []Frame{{
 			Kind:    FrameUser,
 			Title:   "you",
@@ -1702,6 +1706,11 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		if r.tracker != nil {
 			r.tracker.ObserveAgentPaused(agentID, true)
 		}
+		// The execution is not working — it is waiting for the user — and the
+		// roster row is the only place outside its own view that says so: a row
+		// still reading "running" leaves the reader unable to tell the subagent
+		// that needs them from the ones that are busy.
+		r.updateSubagentStatus(agentID, "paused")
 		frame := Frame{Kind: FrameStatus, Title: subagentPausedLine, RunID: firstNonEmpty(strings.TrimSpace(m.RunID), r.activeRunID), AgentID: agentID, Final: true}
 		frames := r.withFlushedBuffers(r.agentBuf(agentID), frame)
 		return EventResult{Frames: append(frames, r.setCardTaskPaused(agentID, true)...)}
@@ -4181,7 +4190,7 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 		displayText = composerText + "\x1b[38;5;245m " + cs.ArgumentHint + sharedBlockReset
 	}
 	layout := layoutNormalComposer(displayText, cs.Cursor, termWidth)
-	rosterVisible := len(overlayRows) == 0 && agentRosterHasRunningSubagent(roster)
+	rosterVisible := len(overlayRows) == 0 && agentRosterHasLiveSubagent(roster)
 	rosterLines := []string(nil)
 	if rosterVisible {
 		// The cursor is the renderer's own state — keyed by agent, kept on

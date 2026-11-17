@@ -6296,3 +6296,37 @@ func TestReplayToolStepMetaKeepsDeliverables(t *testing.T) {
 		t.Fatalf("replayed row = %+v", got.Deliverables[1])
 	}
 }
+
+// The roster row says what its execution is doing. A pause is what the reader
+// most needs to see — that agent is waiting for them — and the message that
+// resumes it takes the row back to working; without both the row read "running"
+// whether the subagent was busy or parked on the user.
+func TestSubagentPauseUpdatesRosterStatus(t *testing.T) {
+	const agentID = "agent-roster-pause"
+	tracker := NewTracker()
+	var red Reducer
+	red.WithTracker(tracker)
+	red.Reduce(SubagentSpawnedMsg{AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Task: "probe", Timestamp: time.Now()})
+
+	status := func() string {
+		for _, row := range red.AgentRosterSnapshot().Rows {
+			if row.ID == agentID {
+				return row.Status
+			}
+		}
+		return "<no row>"
+	}
+	if got := status(); got != "running" {
+		t.Fatalf("a freshly spawned subagent's row says %q", got)
+	}
+
+	red.Reduce(SubagentPausedMsg{AgentID: agentID})
+	if got := status(); got != "paused" {
+		t.Fatalf("the paused subagent's row says %q, want \"paused\"", got)
+	}
+
+	red.Reduce(SubagentInputDeliveredMsg{AgentID: agentID, Text: "go on"})
+	if got := status(); got != "running" {
+		t.Fatalf("the resumed subagent's row says %q, want \"running\"", got)
+	}
+}
