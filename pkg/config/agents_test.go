@@ -669,3 +669,121 @@ func TestBuiltInSubagentNameCopiesMatchAgentPackage(t *testing.T) {
 		t.Fatalf("builtInSystemSubagentNames = %#v, agent.SystemSubagentNames = %#v", builtInSystemSubagentNames, agent.SystemSubagentNames)
 	}
 }
+
+// The exit-plan approval's reviewer row is the goal check's sibling: global,
+// system-dispatched, and judged by the same rule — so the same table of cases,
+// with the refusal naming the row the settings page writes instead (plan 313).
+// The second half pins the loader's mount point for it, on an install with no
+// agents.definitions at all.
+func TestValidatePlanReviewerModel(t *testing.T) {
+	resolves := func(ref string) bool { return ref == "llm-plan-review" }
+	cases := []struct {
+		name  string
+		entry SubagentConfig
+		check func(t *testing.T, err error)
+	}{
+		{
+			name:  "effort without a model is refused",
+			entry: SubagentConfig{ReasoningEffort: "high"},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
+					t.Fatalf("err = %v, want the effort rule", err)
+				}
+				if !strings.Contains(err.Error(), "agents.plan_reviewer") {
+					t.Fatalf("err = %v, want the path the settings page writes", err)
+				}
+			},
+		},
+		{
+			name:  "a bare model name is refused",
+			entry: SubagentConfig{Model: "glm-5.3-flash"},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if err == nil || !strings.Contains(err.Error(), `model "glm-5.3-flash" must be provider/model`) {
+					t.Fatalf("err = %v, want the shape sentence", err)
+				}
+			},
+		},
+		{
+			name:  "a reference no row carries is refused",
+			entry: SubagentConfig{Model: "llm-no-such-row"},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if err == nil || !strings.Contains(err.Error(), `model "llm-no-such-row" must be provider/model`) {
+					t.Fatalf("err = %v, want the shape sentence for a value that resolves to nothing", err)
+				}
+			},
+		},
+		{
+			name:  "a configured row id is accepted",
+			entry: SubagentConfig{Model: "llm-plan-review", ReasoningEffort: "low"},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatalf("a resolvable row id was refused: %v", err)
+				}
+			},
+		},
+		{
+			name:  "a provider/model label is accepted",
+			entry: SubagentConfig{Model: "deepseek/deepseek-v4-pro"},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatalf("a provider/model label was refused: %v", err)
+				}
+			},
+		},
+		{
+			name:  "an empty row is accepted",
+			entry: SubagentConfig{},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatalf("the unconfigured row was refused: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.check(t, ValidatePlanReviewerModel(tc.entry, resolves))
+		})
+	}
+
+	// The loader runs it with no definitions present: the fresh install's
+	// shape, where validatePrimaryAgents has already returned.
+	root := Root{
+		LLMModels: []LLMModelConfig{{ID: "llm-plan-review", Provider: "deepseek", Model: "deepseek-v4-pro"}},
+		Agents: AgentsSection{
+			PlanReviewer: SubagentConfig{Model: "llm-plan-review", ReasoningEffort: "high"},
+		},
+	}
+	if err := FinishLoad(&root); err != nil {
+		t.Fatalf("a configured reviewer row was refused on an install with no definitions: %v", err)
+	}
+	root.Agents.PlanReviewer = SubagentConfig{ReasoningEffort: "high"}
+	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "agents.plan_reviewer: reasoning_effort requires model") {
+		t.Fatalf("err = %v, want the loader to refuse an effort with no model", err)
+	}
+}
+
+// ValidPrimaryAgentID is the loader's own id rule exported for the two
+// creation flows — the gateway's POST and the /config panel's add row (plan
+// 313). The pattern allows an underscore (the prototype's regex does not); the
+// prototype is not the rule.
+func TestValidPrimaryAgentID(t *testing.T) {
+	accepted := []string{"main", "review-agent", "a_b", "a", "agent123", strings.Repeat("a", 63)}
+	refused := []string{"", "Main", "-x", "1x", "a b", "a.b", "agent/one", strings.Repeat("a", 64)}
+	for _, id := range accepted {
+		if !ValidPrimaryAgentID(id) {
+			t.Errorf("ValidPrimaryAgentID(%q) = false, want true", id)
+		}
+	}
+	for _, id := range refused {
+		if ValidPrimaryAgentID(id) {
+			t.Errorf("ValidPrimaryAgentID(%q) = true, want false", id)
+		}
+	}
+}

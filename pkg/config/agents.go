@@ -20,6 +20,13 @@ type AgentsSection struct {
 	// goal check runs on the same row — which is why it sits beside Defaults
 	// and Definitions rather than inside them (plan 299).
 	GoalEvaluator SubagentConfig `yaml:"goal_evaluator,omitempty" json:"goal_evaluator,omitempty"`
+	// PlanReviewer is the exit-plan approval's reviewer, configured the same
+	// way the goal check is: one global row, because the system dispatches
+	// that subagent and no primary agent owns it (plan 313). It supplies the
+	// approval picker's default pre-selection only — the reviewer chosen on
+	// the approval card still wins — and an empty row leaves that default as
+	// it is.
+	PlanReviewer SubagentConfig `yaml:"plan_reviewer,omitempty" json:"plan_reviewer,omitempty"`
 	// SubagentModels holds the install-wide default model row for each public
 	// built-in subagent type (plan 315): a global-table row id + reasoning
 	// effort, shared by every primary agent. An agent's own override
@@ -340,6 +347,13 @@ func validateSubagentModel(where string, entry SubagentConfig, refResolves func(
 // writes, so a refusal names the row the user was editing.
 func ValidateGoalEvaluatorModel(entry SubagentConfig, refResolves func(string) bool) error {
 	return validateSubagentModel("agents.goal_evaluator", entry, refResolves)
+}
+
+// ValidatePlanReviewerModel is the same verdict for the exit-plan approval's
+// reviewer row (plan 313): the goal check's precedent one field over, with the
+// row's own configuration path as the where string.
+func ValidatePlanReviewerModel(entry SubagentConfig, refResolves func(string) bool) error {
+	return validateSubagentModel("agents.plan_reviewer", entry, refResolves)
 }
 
 // ValidateSubagentModels puts the install-wide per-type model rows

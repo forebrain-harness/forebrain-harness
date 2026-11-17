@@ -212,6 +212,15 @@ func validateLoadedRoot(r *Root) error {
 	}); err != nil {
 		return err
 	}
+	// The exit-plan approval's reviewer row is judged exactly the same way, for
+	// the same reasons: global, system-dispatched, and checked here so a fresh
+	// install with no definitions is still covered (plan 313).
+	if err := ValidatePlanReviewerModel(r.Agents.PlanReviewer, func(ref string) bool {
+		_, ok := ResolveModelRef(r, "main", ref)
+		return ok
+	}); err != nil {
+		return err
+	}
 	// The per-type model rows are global for the same reason, and resolve
 	// against the same table: one verdict for the whole section (plan 315).
 	if err := ValidateSubagentModels(r.Agents.SubagentModels, func(ref string) bool {
