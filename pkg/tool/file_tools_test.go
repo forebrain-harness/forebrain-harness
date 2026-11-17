@@ -1469,6 +1469,40 @@ func TestEditFileFailedMatchDoesNotWriteSnapshot(t *testing.T) {
 	})
 }
 
+// TestEditFileNoMatchAfterOwnWriteDoesNotClaimUnchangedSinceRead pins the fact
+// a no-match error may state. A successful edit moves the edit baseline to the
+// bytes it wrote (RememberWrite), so the file on disk is no longer the one the
+// last read_file returned: an error that says it is unchanged since that read
+// would send the model looking for an external edit that never happened — the
+// same false fact this tool no longer lets the run layer add.
+func TestEditFileNoMatchAfterOwnWriteDoesNotClaimUnchangedSinceRead(t *testing.T) {
+	dir := t.TempDir()
+	path, tool := editFileFixture(t, dir, "target.txt", "alpha\n")
+	if _, err := runEditFile(t, context.Background(), tool, path, "alpha", "beta", false); err != nil {
+		t.Fatalf("first edit failed: %v", err)
+	}
+	_, err := runEditFile(t, context.Background(), tool, path, "delta", "DELTA", false)
+	if err == nil {
+		t.Fatal("second edit must be refused")
+	}
+	if !errors.Is(err, ErrOldStringNotFound) {
+		t.Fatalf("error %v must wrap ErrOldStringNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "no changes were written") {
+		t.Fatalf("error %q must say nothing was written", err)
+	}
+	if strings.Contains(err.Error(), "unchanged since your last read_file") {
+		t.Fatalf("error %q must not claim the file is unchanged since the last read: the successful edit changed it", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read result: %v", readErr)
+	}
+	if string(got) != "beta\n" {
+		t.Fatalf("content = %q, want the successful edit's bytes and the refused edit's nothing", got)
+	}
+}
+
 // countSnapshots counts the .snapshot files a history dir holds.
 func countSnapshots(t *testing.T, hist string) int {
 	t.Helper()

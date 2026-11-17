@@ -1199,7 +1199,7 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			src := string(raw)
 			matches := findEditStringMatches(src, in.OldString)
 			if len(matches) == 0 {
-				return "", fmt.Errorf("%w: the current file content has no such text, and no changes were written (the file is unchanged since your last read_file). Re-read the lines you meant to change and copy them from that output verbatim.", ErrOldStringNotFound)
+				return "", fmt.Errorf("%w: the current file content has no such text, and no changes were written. Re-read the lines you meant to change and copy them from that output verbatim.", ErrOldStringNotFound)
 			}
 			if len(matches) > 1 && !in.ReplaceAll {
 				if strings.Contains(src, in.OldString) {
