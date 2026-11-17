@@ -873,9 +873,7 @@ func (s *llmSetup) pickProvider() (bool, error) {
 				method = i
 			}
 		}
-		idx, ok, err = s.cfg.Selector.SelectRich(
-			group.Label+"\nPlans are subscriptions; everything else is billed per use.\nThe endpoint is shown under each.",
-			methods, method)
+		idx, ok, err = s.cfg.Selector.SelectRich(group.Label, methods, method)
 		if err != nil {
 			return false, err
 		}
