@@ -229,6 +229,16 @@ func validateLoadedRoot(r *Root) error {
 	}); err != nil {
 		return err
 	}
+	// The shared custom subagent registry is install-wide too (plan 314): a
+	// shared subagent's model is a row of the same global table, and the entries
+	// are judged here so an install with no agent definitions at all — the shape
+	// a fresh one has — is still covered.
+	if err := ValidateSharedSubagents(r.Agents.SharedSubagents, builtInPublicSubagentNames, builtInSystemSubagentNames, func(ref string) bool {
+		_, ok := ResolveModelRef(r, "main", ref)
+		return ok
+	}); err != nil {
+		return err
+	}
 	if err := validatePrimaryAgents(r); err != nil {
 		return err
 	}

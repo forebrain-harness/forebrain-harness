@@ -32,6 +32,35 @@ type AgentsSection struct {
 	// effort, shared by every primary agent. An agent's own override
 	// (def.Subagents) still wins.
 	SubagentModels map[string]SubagentConfig `yaml:"subagent_models,omitempty" json:"subagent_models,omitempty"`
+	// SharedSubagents are the install-wide custom subagents every primary agent
+	// may consume (plan 314). Each is a full custom definition; enablement is
+	// per-agent (a reference entry in that agent's Subagents), so a shared
+	// definition carries no Enabled of its own — it is disabled for every agent
+	// until explicitly enabled (owner 2026-11-16).
+	SharedSubagents []SubagentConfig `yaml:"shared_subagents,omitempty" json:"shared_subagents,omitempty"`
+}
+
+// SharedSubagentNames lists the shared registry's names the way an agent's
+// reference entry and the dispatch catalog compare them: trimmed and
+// lower-case, in configuration order.
+func SharedSubagentNames(entries []SubagentConfig) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, strings.ToLower(strings.TrimSpace(entry.Name)))
+	}
+	return names
+}
+
+// SharedSubagentFor finds one shared definition by name; ok is false when the
+// registry does not hold it.
+func SharedSubagentFor(entries []SubagentConfig, name string) (SubagentConfig, bool) {
+	key := strings.ToLower(strings.TrimSpace(name))
+	for _, entry := range entries {
+		if strings.ToLower(strings.TrimSpace(entry.Name)) == key {
+			return entry, true
+		}
+	}
+	return SubagentConfig{}, false
 }
 
 // MCPServersFor returns the MCP servers one primary agent owns, in
@@ -290,28 +319,8 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 			if strings.TrimSpace(entry.Description) != "" || strings.TrimSpace(entry.Tools) != "" || len(entry.AllowedTools) > 0 || entry.Continuable != nil {
 				return fmt.Errorf("%s: %q is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else", where, name)
 			}
-		} else {
-			if strings.TrimSpace(entry.Description) == "" {
-				return fmt.Errorf("%s: description required", where)
-			}
-			if strings.TrimSpace(entry.SystemPrompt) == "" {
-				return fmt.Errorf("%s: system_prompt required", where)
-			}
-			switch tools := strings.TrimSpace(entry.Tools); tools {
-			case "", SubagentToolsReadOnly, SubagentToolsEdit, SubagentToolsPick:
-			default:
-				return fmt.Errorf("%s: tools %q must be %s, %s or %s", where, entry.Tools, SubagentToolsReadOnly, SubagentToolsEdit, SubagentToolsPick)
-			}
-			if strings.TrimSpace(entry.Tools) == SubagentToolsPick {
-				if len(entry.AllowedTools) == 0 {
-					return fmt.Errorf("%s: allowed_tools requires at least one tool with tools: %s", where, SubagentToolsPick)
-				}
-				for _, allowed := range entry.AllowedTools {
-					if strings.HasPrefix(strings.ToLower(strings.TrimSpace(allowed)), "subagent_") {
-						return fmt.Errorf("%s: allowed_tools cannot contain %q: a subagent cannot dispatch subagents", where, allowed)
-					}
-				}
-			}
+		} else if err := validateCustomSubagentBody(where, entry); err != nil {
+			return err
 		}
 		if err := validateSubagentModel(where, entry, refResolves); err != nil {
 			return err
@@ -354,6 +363,75 @@ func ValidateGoalEvaluatorModel(entry SubagentConfig, refResolves func(string) b
 // row's own configuration path as the where string.
 func ValidatePlanReviewerModel(entry SubagentConfig, refResolves func(string) bool) error {
 	return validateSubagentModel("agents.plan_reviewer", entry, refResolves)
+}
+
+// validateCustomSubagentBody checks the definition a custom subagent carries: a
+// description and a prompt to run on, a tool tier the loader accepts, and the
+// chosen tool set when the tier is pick. A per-agent custom subagent and an
+// install-wide shared one are judged by this one function (plan 314), so the two
+// cannot drift apart.
+func validateCustomSubagentBody(where string, entry SubagentConfig) error {
+	if strings.TrimSpace(entry.Description) == "" {
+		return fmt.Errorf("%s: description required", where)
+	}
+	if strings.TrimSpace(entry.SystemPrompt) == "" {
+		return fmt.Errorf("%s: system_prompt required", where)
+	}
+	switch tools := strings.TrimSpace(entry.Tools); tools {
+	case "", SubagentToolsReadOnly, SubagentToolsEdit, SubagentToolsPick:
+	default:
+		return fmt.Errorf("%s: tools %q must be %s, %s or %s", where, entry.Tools, SubagentToolsReadOnly, SubagentToolsEdit, SubagentToolsPick)
+	}
+	if strings.TrimSpace(entry.Tools) == SubagentToolsPick {
+		if len(entry.AllowedTools) == 0 {
+			return fmt.Errorf("%s: allowed_tools requires at least one tool with tools: %s", where, SubagentToolsPick)
+		}
+		for _, allowed := range entry.AllowedTools {
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(allowed)), "subagent_") {
+				return fmt.Errorf("%s: allowed_tools cannot contain %q: a subagent cannot dispatch subagents", where, allowed)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateSharedSubagents checks the install-wide custom subagent registry
+// (agents.shared_subagents, plan 314). Every entry is a full custom definition —
+// the same body a per-agent custom subagent carries — and its enablement is
+// per-agent, so an entry that carries Enabled is refused rather than stored and
+// silently ignored: the one rule about these subagents is that they run nowhere
+// until an agent's reference entry turns them on.
+//
+// A name that is a built-in type is refused: the four public types are
+// configured through their overrides and per-type rows, and the system's own
+// types are dispatched by the system, so a shared custom of that name would be
+// a second definition of something the runtime already resolves.
+func ValidateSharedSubagents(entries []SubagentConfig, publicBuiltins, systemBuiltins []string, refResolves func(string) bool) error {
+	seen := make(map[string]struct{}, len(entries))
+	for i, entry := range entries {
+		where := fmt.Sprintf("agents.shared_subagents[%d]", i)
+		name := strings.ToLower(strings.TrimSpace(entry.Name))
+		if !subagentConfigNamePattern.MatchString(name) {
+			return fmt.Errorf("%s: invalid name %q: use lower-case letters, digits and dashes, starting with a letter", where, entry.Name)
+		}
+		if slices.Contains(publicBuiltins, name) || slices.Contains(systemBuiltins, name) {
+			return fmt.Errorf("%s: %q is a built-in subagent type and cannot be a shared custom subagent", where, name)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("%s: duplicate shared subagent %q", where, name)
+		}
+		seen[name] = struct{}{}
+		if entry.Enabled != nil {
+			return fmt.Errorf("%s: a shared subagent's enablement is per-agent; remove enabled", where)
+		}
+		if err := validateCustomSubagentBody(where, entry); err != nil {
+			return err
+		}
+		if err := validateSubagentModel(where, entry, refResolves); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ValidateSubagentModels puts the install-wide per-type model rows
