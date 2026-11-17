@@ -44,6 +44,11 @@ func TestApplyComposedConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T)
 	if err != nil {
 		t.Fatalf("loadDocumentForTest(good): %v", err)
 	}
+	// The model table is state, not a file section (plan 315).
+	cfg.LLMModels = modelRowsFromEntriesForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-old",
+		APIKey: "${FOREBRAIN_ROLLBACK_TEST_KEY}", BaseURL: "http://localhost:0/v1",
+	})
 	live := &cfg
 
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main"}).WithConfig(live)}
@@ -60,16 +65,19 @@ func TestApplyComposedConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T)
 	// save-or-load-side guard would fail before anything was swapped, which is
 	// the state this test exists to rule out.
 	brokenCfg := cfg
+	// The pinned row keeps its identity but loses the key it ran on: the
+	// startup check only asks whether a model is configured, and building the
+	// client is what refuses it ("llm api_key is required"), which is the
+	// failure this test needs.
+	brokenCfg.LLMModels = []appcfg.LLMModelConfig{{
+		ID: "llm-1", Provider: "openai", Model: "gpt-old",
+		BaseURL: "http://localhost:0/v1", APIPath: "/chat/completions",
+	}}
 	brokenDefs := make(map[string]appcfg.AgentDefinition, len(cfg.Agents.Definitions))
 	for name, def := range cfg.Agents.Definitions {
 		brokenDefs[name] = def
 	}
-	brokenMain := brokenDefs["main"]
-	brokenMain.LLMProviders = []appcfg.AgentLLMProviderConfig{{
-		Provider: "openai", Model: "gpt-old",
-		BaseURL: "http://localhost:0/v1",
-	}}
-	brokenDefs["main"] = brokenMain
+	brokenDefs["main"] = appcfg.AgentDefinition{Primary: true, DefaultModel: "llm-1"}
 	brokenCfg.Agents.Definitions = brokenDefs
 
 	if err := env.applyComposedConfigLocked(brokenCfg); err == nil {
@@ -78,8 +86,8 @@ func TestApplyComposedConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T)
 	// The snapshot did reach the kernel — it passed the startup check and only
 	// the runner refused it — so the assertions below are about the rollback,
 	// not about an early return.
-	if got := env.RawConfigValue().Agents.Definitions["main"].LLMProviders; len(got) != 1 || got[0].APIKey != "" {
-		t.Fatalf("RawConfig = %+v, want the applied snapshot; the failure came before the runner was reached", got)
+	if got := env.RawConfigValue().LLMModels; len(got) != 1 || got[0].APIKey != "" {
+		t.Fatalf("RawConfig models = %+v, want the applied snapshot; the failure came before the runner was reached", got)
 	}
 
 	if env.deps().Config() != live {
@@ -88,8 +96,8 @@ func TestApplyComposedConfigRollsBackEveryFieldWhenRunnerLoadFails(t *testing.T)
 	if env.Runner.Config() != live {
 		t.Fatalf("Runner.AppCfg = %p, want it restored to the live config %p", env.Runner.Config(), live)
 	}
-	if got := env.Runner.Config().Agents.Definitions["main"].LLMProviders; len(got) != 1 || got[0].Model != "gpt-old" {
-		t.Fatalf("Runner.Config() providers = %+v, want the pre-apply gpt-old entry", got)
+	if got := env.Runner.Config().LLMModels; len(got) != 1 || got[0].Model != "gpt-old" {
+		t.Fatalf("Runner.Config() models = %+v, want the pre-apply gpt-old row", got)
 	}
 	if len(env.Runner.MCPServers) != 1 || env.Runner.MCPServers[0].Name != "keep-me" {
 		t.Fatalf("Runner.MCPServers = %+v, want the pre-apply entry restored", env.Runner.MCPServers)
@@ -124,13 +132,13 @@ func TestRefreshSandboxRuntimeReappliesFilesystemPolicyToInProcessTools(t *testi
 			t.Fatal(err)
 		}
 	}
-	cfg := appcfg.Root{
+	cfg := appcfg.Root{LLMModels: modelRowsFromEntriesForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-x",
+		APIKey: "${FOREBRAIN_SANDBOX_REFRESH_TEST_KEY}", BaseURL: "http://localhost:0/v1",
+	}),
 		SandboxMode: appcfg.SandboxModeWorkspaceWrite,
 		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-			"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai", Model: "gpt-x",
-				APIKey: "${FOREBRAIN_SANDBOX_REFRESH_TEST_KEY}", BaseURL: "http://localhost:0/v1",
-			}}},
+			"main": {Primary: true, DefaultModel: "llm-1"},
 		}},
 	}
 	cfg.SandboxWorkspaceWrite.WritableRoots = []string{first}
@@ -186,6 +194,10 @@ func TestApplyComposedConfigLeavesMCPServersFrozen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.LLMModels = modelRowsFromEntriesForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-old",
+		APIKey: "${FOREBRAIN_FREEZE_TEST_KEY}", BaseURL: "http://localhost:0/v1",
+	})
 	live := &cfg
 	runner := &run.Runner{Deps: (&run.Deps{Home: home, AgentName: "main"}).WithConfig(live)}
 	// The composition root resolved the effective list once at Open time; the
@@ -197,18 +209,11 @@ func TestApplyComposedConfigLeavesMCPServersFrozen(t *testing.T) {
 	}
 	env := (&Environment{Deps: &run.Deps{MCPServers: frozen}, Root: home, ConfigPath: cfgPath, Runner: runner}).WithDepsConfig(live)
 
-	const second = "agents:\n" +
+	const second = "approval_preset: full_access\nagents:\n" +
 		"  defaults:\n" +
 		"    mcp_servers:\n" +
 		"      - name: second-server\n" +
-		"        command: /usr/bin/false\n" +
-		"  definitions:\n" +
-		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-new\n" +
-		"          api_key: ${FOREBRAIN_FREEZE_TEST_KEY}\n" +
-		"          base_url: http://localhost:0/v1\n"
+		"        command: /usr/bin/false\n"
 	if err := os.WriteFile(cfgPath, []byte(second), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -216,10 +221,11 @@ func TestApplyComposedConfigLeavesMCPServersFrozen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	secondCfg.LLMModels = live.LLMModels
 	if err := env.applyComposedConfigLocked(secondCfg); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if got := env.Runner.Config().Agents.Definitions["main"].LLMProviders[0].Model; got != "gpt-new" {
+	if got := env.Runner.Config().ApprovalPreset; got != appcfg.ApprovalPresetFullAccess {
 		t.Fatalf("AppCfg should reflect the applied snapshot, got %q", got)
 	}
 	if len(env.Runner.MCPServers) != 1 || env.Runner.MCPServers[0].Name != "first-server" {
@@ -276,6 +282,11 @@ func TestApplyComposedConfigPropagatesToPoolEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The rotated model is a table row (plan 315): the file carries everything
+	// else, and the fixture states the table the reload propagates.
+	rotated := fixtureModelRows("http://propagated.test/v1")
+	rotated[0].APIKey = "rotated-key"
+	next.LLMModels = rotated
 	if err := env.applyComposedConfigLocked(next); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -308,14 +319,7 @@ func TestHandEditedConfigFileIsNotPickedUp(t *testing.T) {
 
 	// A file edit the old watcher would have picked up within its 400ms
 	// debounce: a different provider model, with no database row behind it.
-	body := "agents:\n" +
-		"  definitions:\n" +
-		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-hand-edited\n" +
-		"          api_key: ${FOREBRAIN_IMPORT_TEST_KEY}\n" +
-		"          base_url: http://hand-edited.test/v1\n"
+	body := "agents:\n  definitions:\n    main:\n      primary: true\n"
 	if err := os.WriteFile(env.ConfigPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -326,9 +330,10 @@ func TestHandEditedConfigFileIsNotPickedUp(t *testing.T) {
 	if env.deps().Config() != before {
 		t.Fatal("the live config moved under a file edit")
 	}
-	// The live configuration still runs on the imported model, which plan 262
-	// moved into the model table: the definition names that row.
-	if got := appcfg.EffectiveDefaultLLMFor(env.deps().Config(), "main"); got == nil || got.Model != "gpt-import" {
+	// The live configuration still runs on the model the fixture stored in the
+	// table: the definition names that row, and the file's dead section cannot
+	// move it.
+	if got := appcfg.EffectiveDefaultLLMFor(env.deps().Config(), "main"); got == nil || got.Model != "gpt-test" {
 		t.Fatalf("live provider model = %+v, want the imported gpt-import", got)
 	}
 
@@ -337,8 +342,8 @@ func TestHandEditedConfigFileIsNotPickedUp(t *testing.T) {
 	if err := env.SyncConfigFromDB(context.Background()); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if got := appcfg.EffectiveDefaultLLMFor(env.deps().Config(), "main"); got == nil || got.Model != "gpt-import" {
-		t.Fatalf("provider model after a sync = %+v, want the database's gpt-import (a hand edit is not a source)", got)
+	if got := appcfg.EffectiveDefaultLLMFor(env.deps().Config(), "main"); got == nil || got.Model != "gpt-test" {
+		t.Fatalf("provider model after a sync = %+v, want the database's row (a hand edit is not a source)", got)
 	}
 	if applied != 0 {
 		t.Fatalf("the unchanged composed configuration was applied %d times, want 0", applied)

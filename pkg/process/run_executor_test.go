@@ -101,21 +101,22 @@ func envWithFakeLLMForSource(t *testing.T, reply, sessionSource string) *Environ
 		"agents:\n" +
 		"  definitions:\n" +
 		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-test\n" +
-		"          api_key: ${FOREBRAIN_EXECUTOR_TEST_KEY}\n" +
-		"          base_url: " + srv.URL + "/v1\n" +
-		// The compat client streams by default; the canned server above answers
-		// with a plain JSON body, so the turn must ask for a non-streamed reply.
-		"          params:\n" +
-		"            stream: false\n"
-	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(cfg), 0o600); err != nil {
+		"      default_model: llm-executor\n"
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The model the turn runs on is a row of the install's table (plan 315):
+	// the compat client streams by default and the canned server above answers
+	// with a plain JSON body, so the row's params ask for a non-streamed reply.
+	seedModelTableForTest(t, Context{Home: home, ConfigPath: cfgPath}, state.LLMModel{
+		ID: "llm-executor", Provider: "openai", Model: "gpt-test",
+		APIKey: "${FOREBRAIN_EXECUTOR_TEST_KEY}", BaseURL: srv.URL + "/v1",
+		APIPath: "/chat/completions", ParamsJSON: `{"stream":false}`,
+	})
 	env, err := Open(context.Background(), OpenOptions{
 		Home:          home,
-		ConfigPath:    filepath.Join(home, "forebrain.yaml"),
+		ConfigPath:    cfgPath,
 		LaunchDir:     t.TempDir(),
 		SessionSource: sessionSource,
 	})
@@ -383,20 +384,12 @@ func TestExecutorDoesNotFinishARunPausedAtAnApprovalGate(t *testing.T) {
 	// it is not what these tests are about, and leaving it in the way would
 	// make them flaky for a reason unrelated to the adapter.
 	cfg := "features:\n" +
-		"  memories: false\n" +
-		"agents:\n" +
-		"  definitions:\n" +
-		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-test\n" +
-		"          api_key: ${FOREBRAIN_EXECUTOR_TEST_KEY}\n" +
-		"          base_url: " + srv.URL + "/v1\n" +
-		"          params:\n" +
-		"            stream: false\n"
-	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(cfg), 0o600); err != nil {
+		"  memories: false\n"
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	seedFileModelForTest(t, home, srv.URL+"/v1")
 	env, err := Open(context.Background(), OpenOptions{
 		Home: home, ConfigPath: filepath.Join(home, "forebrain.yaml"),
 		LaunchDir: t.TempDir(), SessionSource: "tui",
@@ -635,20 +628,12 @@ func envWithLLMServer(t *testing.T, srv *httptest.Server, launchDir string) *Env
 	// The background memory pipeline is off for these tests, for the same
 	// lifecycle reason envWithFakeLLMForSource documents.
 	cfg := "features:\n" +
-		"  memories: false\n" +
-		"agents:\n" +
-		"  definitions:\n" +
-		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-test\n" +
-		"          api_key: ${FOREBRAIN_EXECUTOR_TEST_KEY}\n" +
-		"          base_url: " + srv.URL + "/v1\n" +
-		"          params:\n" +
-		"            stream: false\n"
-	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(cfg), 0o600); err != nil {
+		"  memories: false\n"
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	seedFileModelForTest(t, home, srv.URL+"/v1")
 	env, err := Open(context.Background(), OpenOptions{
 		Home:          home,
 		ConfigPath:    filepath.Join(home, "forebrain.yaml"),
@@ -927,8 +912,7 @@ type WorkDirObservation struct {
 // planReviewRowConfig configures one provider/model twice — two rows that
 // differ by endpoint and key alone, the case a review request has to name a
 // row for. The rows come from the install's model table (cfg.LLMModels), the
-// one source whose ids are kept verbatim; ids written into a definition's
-// llm_providers list are rewritten to a content hash.
+// one source of models and of the ids a reference names.
 func planReviewRowConfig() *appcfg.Root {
 	return &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
 		{ID: "row-1", Provider: "openai", Model: "gpt-4o", BaseURL: "http://one.test/v1", APIKey: "key-one"},

@@ -93,19 +93,15 @@ func envWithMCPServers(t *testing.T, mcpSection string) (*Environment, *counting
 		mcpSection +
 		"  definitions:\n" +
 		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-test\n" +
-		"          api_key: ${FOREBRAIN_REQUIRED_MCP_KEY}\n" +
-		"          base_url: " + srv.URL + "/v1\n" +
-		"          params:\n" +
-		"            stream: false\n"
-	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(cfg), 0o600); err != nil {
+		"      primary: true\n"
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	seedFileModelForTest(t, home, srv.URL+"/v1")
 	env, err := Open(context.Background(), OpenOptions{
 		Home:          home,
-		ConfigPath:    filepath.Join(home, "forebrain.yaml"),
+		ConfigPath:    cfgPath,
 		LaunchDir:     t.TempDir(),
 		SessionSource: "webchat",
 	})
@@ -312,18 +308,17 @@ func envWithScriptedLLMOnModel(t *testing.T, model string, script []scriptedRepl
 		"    enable_subagent: true\n" +
 		"  definitions:\n" +
 		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: " + model + "\n" +
-		"          api_key: ${FOREBRAIN_SCRIPTED_LLM_KEY}\n" +
-		"          base_url: " + srv.srv.URL + "/v1\n" +
-		// The compat client streams by default; the scripted server answers
-		// with a plain JSON body, so the run must ask for a non-streamed reply.
-		"          params:\n" +
-		"            stream: false\n"
-	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(cfg), 0o600); err != nil {
+		"      primary: true\n"
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The compat client streams by default; the scripted server answers with a
+	// plain JSON body, so the row asks for a non-streamed reply (plan 315).
+	seedModelTableForTest(t, Context{Home: home, ConfigPath: cfgPath}, state.LLMModel{
+		ID: "llm-fixture", Provider: "openai", Model: model, APIKey: "${FOREBRAIN_SCRIPTED_LLM_KEY}",
+		BaseURL: srv.srv.URL + "/v1", APIPath: "/chat/completions", ParamsJSON: `{"stream":false}`,
+	})
 	env, err := Open(context.Background(), OpenOptions{
 		Home:          home,
 		ConfigPath:    filepath.Join(home, "forebrain.yaml"),

@@ -497,13 +497,13 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 			return nil, fmt.Errorf("sync legacy credential files: %w", err)
 		}
 	}
-	// The pre-table model configuration moves into fb_llm_models before
-	// anything reads the configuration (plan 262): the agents section stops
-	// carrying llm_providers, and every reference names a row instead of a
-	// "provider/model" label. Gated on content, so a legacy yaml imported into
-	// a fresh home later is migrated on the next start.
+	// The pre-table model references become row ids before anything reads the
+	// configuration (plans 262, 315): a stored reference names a row of
+	// fb_llm_models instead of a "provider/model" label. Gated on content, so a
+	// legacy yaml imported into a fresh home later is migrated on the next
+	// start.
 	if opts.Config == nil {
-		if err := migrateLegacyLLMModels(ctx, sqlDB, root); err != nil {
+		if err := migrateLegacyLLMModels(ctx, sqlDB); err != nil {
 			_ = sqlDB.Close()
 			return nil, fmt.Errorf("move model configurations into the state database: %w", err)
 		}
@@ -665,8 +665,8 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		IsBuiltin: turn.IsBuiltinName,
 	}}
 	// AgentName names the tenant this runner serves. It selects the agent's
-	// llm_providers and its channels, so leaving it unset would run a non-main
-	// primary agent on main's model.
+	// own model choice and its channels, so leaving it unset would run a
+	// non-main primary agent on main's model.
 	runner.AgentName = activeAgent.ID
 	runner.WorkspaceRoot = activeAgent.WorkspaceRoot
 	publishLSPRecommendations(env.lspManager, runner)

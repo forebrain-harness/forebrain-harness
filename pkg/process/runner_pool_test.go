@@ -25,14 +25,7 @@ func newPoolTestEnv(t *testing.T) (*Environment, *state.ProjectStore, *sql.DB) {
 	t.Setenv("FOREBRAIN_POOL_TEST_KEY", "test-key")
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	const body = "agents:\n" +
-		"  definitions:\n" +
-		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-test\n" +
-		"          api_key: ${FOREBRAIN_POOL_TEST_KEY}\n" +
-		"          base_url: http://localhost:0/v1\n"
+	const body = "agents:\n  definitions:\n    main:\n      primary: true\n"
 	if err := osWriteFile(cfgPath, body); err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +33,8 @@ func newPoolTestEnv(t *testing.T) (*Environment, *state.ProjectStore, *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The model table is state, not a file section (plan 315).
+	cfg.LLMModels = fixtureModelRows("http://localhost:0/v1")
 	live := &cfg
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
 	if err != nil {
@@ -909,20 +904,12 @@ func TestSweepToolStateCleansBaseAndPooledRunners(t *testing.T) {
 	}
 }
 
-// reorderedPoolConfig writes a config whose provider entry is rotated onto a
-// new credential and base URL, then loads it: the pointer a reload would
+// reorderedPoolConfig writes a config whose model row is rotated onto a new
+// credential and base URL, then loads it: the pointer a reload would
 // propagate.
 func reorderedPoolConfig(t *testing.T, cfgPath string) *appcfg.Root {
 	t.Helper()
-	t.Setenv("FOREBRAIN_POOL_ROTATED_TEST_KEY", "rotated-key")
-	body := "agents:\n" +
-		"  definitions:\n" +
-		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-test\n" +
-		"          api_key: ${FOREBRAIN_POOL_ROTATED_TEST_KEY}\n" +
-		"          base_url: http://rotated.test/v1\n"
+	body := "agents:\n  definitions:\n    main:\n      primary: true\n"
 	if err := osWriteFile(cfgPath, body); err != nil {
 		t.Fatal(err)
 	}
@@ -930,6 +917,9 @@ func reorderedPoolConfig(t *testing.T, cfgPath string) *appcfg.Root {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rotated := fixtureModelRows("http://rotated.test/v1")
+	rotated[0].APIKey = "rotated-key"
+	cfg.LLMModels = rotated
 	return &cfg
 }
 
@@ -1002,10 +992,8 @@ func TestRunnerPoolPropagateConfigKeepsEntryServingWhenPinRemoved(t *testing.T) 
 	pinnedBefore := run.PrimaryModelSelection(pooled)
 
 	// The pinned pair is gone from this config; another entry remains.
-	withoutPin := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-other", APIKey: "${FOREBRAIN_POOL_TEST_KEY}", BaseURL: "http://localhost:0/v1"},
-		}},
+	withoutPin := &appcfg.Root{LLMModels: modelRowsFromEntriesForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-other", APIKey: "${FOREBRAIN_POOL_TEST_KEY}", BaseURL: "http://localhost:0/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	err := env.pool.PropagateConfig(ctx, *withoutPin)
 	require.NoError(t, err, "a reload whose pin disappeared must not fail")
@@ -1083,17 +1071,12 @@ func TestProjectRunnerDerivesSandboxFromItsOwnTrust(t *testing.T) {
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	// No sandbox_mode or approval policy in the file, so the effective values
 	// are derived per project from its own trust decision.
-	const body = "agents:\n" +
-		"  definitions:\n" +
-		"    main:\n" +
-		"      llm_providers:\n" +
-		"        - provider: openai\n" +
-		"          model: gpt-test\n" +
-		"          api_key: ${FOREBRAIN_POOL_TRUST_KEY}\n" +
-		"          base_url: http://localhost:0/v1\n"
+	const body = "agents:\n  definitions:\n    main:\n      primary: true\n"
 	require.NoError(t, os.WriteFile(cfgPath, []byte(body), 0o600))
 	cfg, err := loadDocumentForTest(cfgPath)
 	require.NoError(t, err)
+	// The model table is state, not a file section (plan 315).
+	cfg.LLMModels = fixtureModelRows("http://localhost:0/v1")
 	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

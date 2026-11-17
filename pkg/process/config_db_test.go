@@ -168,9 +168,7 @@ func TestComposeConfigKeepsPlaintextSecrets(t *testing.T) {
   },
   "definitions": {
     "main": {
-      "llm_providers": [
-        {"provider": "deepseek", "model": "m1", "api_key": "sk-plain"}
-      ]
+      "default_model": "llm-kept"
     }
   }
 }`)
@@ -179,9 +177,8 @@ func TestComposeConfigKeepsPlaintextSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("composeConfig rejected a plaintext credential: %v", err)
 	}
-	prov := composed.Agents.Definitions["main"].LLMProviders
-	if len(prov) == 0 || prov[0].APIKey != "sk-plain" {
-		t.Fatalf("api_key = %+v, want the plaintext value preserved", prov)
+	if got := composed.Agents.Definitions["main"].DefaultModel; got != "llm-kept" {
+		t.Fatalf("default_model = %q, want the stored reference preserved", got)
 	}
 	servers := composed.Agents.Defaults.MCPServers
 	if len(servers) == 0 || servers[0].Headers["x-api-key"] != "hdr-plain" {
@@ -196,12 +193,10 @@ func TestComposeConfigExpandsEnvReferencesInDBSections(t *testing.T) {
 	t.Setenv("FOREBRAIN_COMPOSE_TEST_KEY", "sk-expanded")
 	env, ctx := composeEnvForTest(t, "gateway:\n  http_addr: 127.0.0.1:6060\n")
 	storeSectionForTest(t, env, ctx, "agents", `{
-  "definitions": {
-    "main": {
-      "llm_providers": [
-        {"provider": "deepseek", "model": "m1", "api_key": "${FOREBRAIN_COMPOSE_TEST_KEY}"}
-      ]
-    }
+  "defaults": {
+    "mcp_servers": [
+      {"name": "srv", "command": "run", "headers": {"x-api-key": "${FOREBRAIN_COMPOSE_TEST_KEY}"}}
+    ]
   }
 }`)
 
@@ -209,9 +204,9 @@ func TestComposeConfigExpandsEnvReferencesInDBSections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("composeConfig: %v", err)
 	}
-	prov := composed.Agents.Definitions["main"].LLMProviders
-	if len(prov) == 0 || prov[0].APIKey != "sk-expanded" {
-		t.Fatalf("api_key = %+v, want the expanded value", prov)
+	servers := composed.Agents.Defaults.MCPServers
+	if len(servers) == 0 || servers[0].Headers["x-api-key"] != "sk-expanded" {
+		t.Fatalf("mcp headers = %+v, want the expanded value", servers)
 	}
 }
 
@@ -267,9 +262,18 @@ func syncEnvForTest(t *testing.T) *Environment {
 	t.Helper()
 	t.Setenv("FOREBRAIN_IMPORT_TEST_KEY", "sk-sync")
 	home := importHomeForTest(t)
-	if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte(legacyImportYAML), 0o600); err != nil {
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte(legacyImportYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The retired provider list is dropped by the import (plan 315), and a
+	// runner still needs a model: the fixture stores the row and points main
+	// at it the way a fresh /connect does.
+	seedFileModelForTest(t, home, "http://localhost:0/v1")
+	storeAgentsSectionForTest(t, home, cfgPath, "agents", `{"definitions":{"main":{"primary":true,"default_model":"llm-fixture"}}}`)
+	// The file's preset, stored the way the import would have stored it: these
+	// tests move it to prove a changed section is applied.
+	storeAgentsSectionForTest(t, home, cfgPath, "approval_preset", `"full_access"`)
 	return importOpenForTest(t, home)
 }
 
@@ -470,17 +474,14 @@ func TestComposedStartupConfigTransitionCases(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("migrated home = (ok=%v, err=%v), want (true, nil)", ok, err)
 	}
-	// The import stored the ${ENV} reference (this home has no .env); the model
-	// migration moved the entry into fb_llm_models and resolved the reference
-	// there, and the definition names the row instead of carrying a list.
-	if len(composed.LLMModels) != 1 {
-		t.Fatalf("model rows = %+v, want the imported model", composed.LLMModels)
+	// Plan 315 retired the provider list, so the import left no model row and
+	// no reference behind: the model table is where a model is configured now,
+	// and nothing is migrated from the file.
+	if len(composed.LLMModels) != 0 {
+		t.Fatalf("model rows = %+v, want none: the retired list is dropped, not moved", composed.LLMModels)
 	}
-	if got := composed.LLMModels[0].APIKey; got != "sk-gate" {
-		t.Fatalf("composed api_key = %q, want the process environment's value", got)
-	}
-	if got := composed.Agents.Definitions["main"].DefaultModel; got != composed.LLMModels[0].ID {
-		t.Fatalf("default_model = %q, want the imported row %q", got, composed.LLMModels[0].ID)
+	if got := composed.Agents.Definitions["main"].DefaultModel; got != "" {
+		t.Fatalf("default_model = %q, want the retired label treated as unset", got)
 	}
 	if composed.Gateway.HTTPAddr != "127.0.0.1:6060" {
 		t.Fatalf("composed gateway.http_addr = %q, want the file's section", composed.Gateway.HTTPAddr)
@@ -652,11 +653,11 @@ func TestSyncConfigFromDBComposesFromDatabase(t *testing.T) {
 		t.Fatalf("applied approval_preset = %q, want the database's full_access", env.RawConfigValue().ApprovalPreset)
 	}
 	// The runtime sections the import moved are still there after the sync:
-	// the file holds none of them. The model itself is a row (plan 262), and
-	// the definition names it.
+	// the file holds none of them. The model itself is a row of the table the
+	// fixture seeded, and the definition names it.
 	raw := env.RawConfigValue()
-	if got := appcfg.EffectiveDefaultLLMFor(&raw, "main"); got == nil || got.Model != "gpt-import" {
-		t.Fatalf("reloaded provider model = %+v, want the imported gpt-import", got)
+	if got := appcfg.EffectiveDefaultLLMFor(&raw, "main"); got == nil || got.Model != "gpt-test" {
+		t.Fatalf("reloaded provider model = %+v, want the fixture's row", got)
 	}
 }
 
@@ -724,9 +725,7 @@ func TestUpdateRootSectionKeepsPlaintextCredentials(t *testing.T) {
 		cfg.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{
 			{Name: "srv", Command: "run", Headers: map[string]string{"x-api-key": "hdr-plain"}},
 		}
-		cfg.Agents.Definitions["main"] = appcfg.AgentDefinition{Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "deepseek", Model: "m1", APIKey: "sk-plain"},
-		}}
+		cfg.Agents.Definitions["main"] = appcfg.AgentDefinition{Primary: true, DefaultModel: "llm-kept"}
 		return nil
 	})
 	if err != nil {
@@ -736,8 +735,8 @@ func TestUpdateRootSectionKeepsPlaintextCredentials(t *testing.T) {
 	if err := env.SQL.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section = 'agents'`).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stored, "sk-plain") || !strings.Contains(stored, "hdr-plain") {
-		t.Fatalf("stored agents section lost a plaintext credential: %s", stored)
+	if !strings.Contains(stored, "llm-kept") || !strings.Contains(stored, "hdr-plain") {
+		t.Fatalf("stored agents section lost what the write stated: %s", stored)
 	}
 }
 

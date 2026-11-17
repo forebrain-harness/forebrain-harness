@@ -176,16 +176,15 @@ func seedModelRowForTest(t *testing.T, rt Context, provider, model, baseURL, key
 // twoPrimaryConfig defines a main and a non-main primary agent, each loadable
 // so Apply can actually rebuild the runner rather than failing on config.
 func twoPrimaryConfig() *appcfg.Root {
-	llm := []appcfg.AgentLLMProviderConfig{{
+	cfg := &appcfg.Root{LLMModels: modelRowsFromEntriesForTest(appcfg.AgentLLMProviderConfig{
 		Provider: "openai",
 		Model:    "gpt-5",
 		APIKey:   "test-key",
 		BaseURL:  "https://api.openai.com/v1",
-	}}
-	cfg := &appcfg.Root{}
+	})}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main":   {LLMProviders: llm},
-		"review": {Primary: true, LLMProviders: llm},
+		"main":   {DefaultModel: "llm-1"},
+		"review": {Primary: true, DefaultModel: "llm-1"},
 	}
 	return cfg
 }
@@ -465,23 +464,44 @@ func TestSwitchRebindsTenantScopedStores(t *testing.T) {
 }
 
 // newAgentTargetRuntime is a home whose stored agents section carries a main
-// and a review definition, each with a pre-table model list of its own — the
-// shape an install has before the model table took over.
+// and a review definition, each naming a row of the install's model table.
 func newAgentTargetRuntime(t *testing.T) Context {
 	t.Helper()
 	home := t.TempDir()
 	rt := Context{Home: home, ConfigPath: home + "/forebrain.yaml"}
 	seedAgentsSectionForTest(t, rt, `{"definitions":{
-		"main":{"primary":true,
-			"llm_providers":[{"provider":"openai","model":"gpt-old","api_key":"${OPENAI_API_KEY}","base_url":"https://api.openai.com/v1"}]},
-		"review":{"primary":true,
-			"llm_providers":[{"provider":"openai","model":"review-old","api_key":"${OPENAI_API_KEY}","base_url":"https://api.openai.com/v1"}]}}}`)
+		"main":{"primary":true,"default_model":"llm-main"},
+		"review":{"primary":true,"default_model":"llm-review"}}}`)
 	cfg, err := StartupConfig(context.Background(), home)
 	if err != nil {
 		t.Fatalf("read the stored configuration: %v", err)
 	}
+	// The model table is state, so it is attached to the composed
+	// configuration the flow reads — and stays out of the store, whose row
+	// count these tests assert on (plan 315).
+	cfg.LLMModels = []appcfg.LLMModelConfig{
+		{ID: "llm-main", Provider: "openai", Model: "gpt-old", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1"},
+		{ID: "llm-review", Provider: "openai", Model: "review-old", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1"},
+	}
 	rt.Config = cfg
 	return rt
+}
+
+// seedModelTableForTest stores model rows straight into the home's state
+// database — the table a composed configuration reads them from (plan 315).
+func seedModelTableForTest(t *testing.T, rt Context, rows ...state.LLMModel) {
+	t.Helper()
+	db, err := openStateForWrite(rt)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+	store := &state.LLMModelStore{DB: db}
+	for _, row := range rows {
+		if _, err := store.Create(context.Background(), row); err != nil {
+			t.Fatalf("store model row %s: %v", row.ID, err)
+		}
+	}
 }
 
 // seedAgentsSectionForTest writes the agents section straight into the state
@@ -500,10 +520,21 @@ func seedAgentsSectionForTest(t *testing.T, rt Context, doc string) {
 	}
 }
 
+// storeAgentTargetModels writes newAgentTargetRuntime's rows into the store as
+// well, for the tests that assert on the composed stored configuration.
+func storeAgentTargetModels(t *testing.T, rt Context) {
+	t.Helper()
+	seedModelTableForTest(t, rt,
+		state.LLMModel{ID: "llm-main", Provider: "openai", Model: "gpt-old", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1"},
+		state.LLMModel{ID: "llm-review", Provider: "openai", Model: "review-old", APIKey: "${OPENAI_API_KEY}", BaseURL: "https://api.openai.com/v1"},
+	)
+}
+
 // /connect configures the primary agent the session is actually running. Writing
 // main instead would save a provider nothing in that session reads.
 func TestExecuteConfiguresNamedAgentOnly(t *testing.T) {
 	rt := newAgentTargetRuntime(t)
+	storeAgentTargetModels(t, rt)
 
 	rep, err := Execute(rt, Options{
 		AgentName: "review",
@@ -523,11 +554,17 @@ func TestExecuteConfiguresNamedAgentOnly(t *testing.T) {
 	}
 
 	cfg := executeStoredConfig(t, rt)
-	if len(cfg.LLMModels) != 1 {
-		t.Fatalf("model rows = %+v, want only the one just configured", cfg.LLMModels)
+	var written *appcfg.LLMModelConfig
+	for i := range cfg.LLMModels {
+		if cfg.LLMModels[i].ID == rep.ModelID {
+			written = &cfg.LLMModels[i]
+		}
 	}
-	if row := cfg.LLMModels[0]; row.Provider != "anthropic" || row.Model != "claude-opus-4-7" || row.APIKey != "sk-live-secret" {
-		t.Fatalf("row = %+v, want the review agent's new model", row)
+	if written == nil {
+		t.Fatalf("model rows = %+v, want the one just configured (%s)", cfg.LLMModels, rep.ModelID)
+	}
+	if written.Provider != "anthropic" || written.Model != "claude-opus-4-7" || written.APIKey != "sk-live-secret" {
+		t.Fatalf("row = %+v, want the review agent's new model", *written)
 	}
 	if review := appcfg.EffectiveDefaultLLMFor(&cfg, "review"); review == nil || review.Model != "review-old" {
 		t.Fatalf("review default changed by an append-only write: %+v", review)
@@ -537,7 +574,7 @@ func TestExecuteConfiguresNamedAgentOnly(t *testing.T) {
 		t.Fatalf("main agent was rewritten by a setup aimed at review: %+v", main)
 	}
 	stored := executeStoredConfigDefinition(t, rt, "main")
-	if stored.DefaultModel != "" {
+	if stored.DefaultModel != "llm-main" {
 		t.Fatalf("main default_model = %q, want it untouched", stored.DefaultModel)
 	}
 }
@@ -566,6 +603,7 @@ func executeStoredConfigDefinition(t *testing.T, rt Context, agent string) appcf
 // An empty agent name stays main, so onboarding and `forebrain setup` are unchanged.
 func TestExecuteDefaultsToMainAgent(t *testing.T) {
 	rt := newAgentTargetRuntime(t)
+	storeAgentTargetModels(t, rt)
 
 	rep, err := Execute(rt, Options{
 		Provider: "openai",
@@ -584,11 +622,17 @@ func TestExecuteDefaultsToMainAgent(t *testing.T) {
 	}
 
 	cfg := executeStoredConfig(t, rt)
-	if len(cfg.LLMModels) != 1 {
-		t.Fatalf("model rows = %+v, want only the one just configured", cfg.LLMModels)
+	var written *appcfg.LLMModelConfig
+	for i := range cfg.LLMModels {
+		if cfg.LLMModels[i].ID == rep.ModelID {
+			written = &cfg.LLMModels[i]
+		}
 	}
-	if row := cfg.LLMModels[0]; row.Provider != "openai" || row.Model != "gpt-new" {
-		t.Fatalf("row = %+v, want main's new model", row)
+	if written == nil {
+		t.Fatalf("model rows = %+v, want the one just configured (%s)", cfg.LLMModels, rep.ModelID)
+	}
+	if written.Provider != "openai" || written.Model != "gpt-new" {
+		t.Fatalf("row = %+v, want main's new model", *written)
 	}
 	if review := appcfg.EffectiveDefaultLLMFor(&cfg, "review"); review == nil || review.Model != "review-old" {
 		t.Fatalf("review agent was rewritten: %+v", review)

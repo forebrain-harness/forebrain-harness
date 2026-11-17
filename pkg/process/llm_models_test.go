@@ -106,387 +106,33 @@ func modelRowForTest(t *testing.T, rows []state.LLMModel, provider, model, baseU
 	return state.LLMModel{}
 }
 
-// Two entries name the same provider and model at different endpoints, and the
-// default is written as the label they share: the label can only match the
-// first, which is what the runtime resolved before the table existed.
-func TestLLMModelsMigrateMovesLegacyEntriesAndKeepsTheFirstDefault(t *testing.T) {
-	env, ctx := migrateEnvForTest(t, `{"definitions":{"main":{"primary":true,
-		"llm_providers":[
-			{"provider":"openai","model":"gpt-x","api_key":"sk-first","base_url":"https://a.example.com/v1"},
-			{"provider":"openai","model":"gpt-x","api_key":"sk-second","base_url":"https://b.example.com/v1"}],
-		"default_model":"openai/gpt-x"}}}`, "")
+// A stored reference written before the model table existed is a
+// "provider/model" label. The migration rewrites the ones a row carries into
+// that row's id — the reference half of plan 262, which survives plan 315 —
+// and leaves the list-forming half, which no longer exists, alone.
+func TestLLMModelsMigrateRewritesALabelToTheRowsID(t *testing.T) {
+	env, ctx := migrateEnvForTest(t, `{"definitions":{"main":{"primary":true,"default_model":"openai/gpt-x"}}}`, "")
+	if _, err := (&state.LLMModelStore{DB: env.SQL}).Create(context.Background(), state.LLMModel{
+		ID: "llm-kept", Provider: "openai", Model: "gpt-x", APIKey: "sk-kept",
+		BaseURL: "https://a.example.com/v1", APIPath: "/chat/completions",
+	}); err != nil {
+		t.Fatalf("seed the row: %v", err)
+	}
 
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
+	if err := migrateLegacyLLMModels(context.Background(), env.SQL); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	rows := modelTableForTest(t, env, ctx)
-	if len(rows) != 2 {
-		t.Fatalf("rows = %d, want 2: %+v", len(rows), rows)
+	var agents appcfg.AgentsSection
+	if err := json.Unmarshal([]byte(storedSectionForTest(t, env, ctx, "agents")), &agents); err != nil {
+		t.Fatalf("read the agents section: %v", err)
 	}
-	for _, row := range rows {
-		if !strings.HasPrefix(row.ID, appcfg.LegacyLLMModelIDPrefix) {
-			t.Fatalf("row id %q does not carry the legacy prefix", row.ID)
-		}
-		if row.APIPath != "/chat/completions" {
-			t.Fatalf("row %s api_path = %q, want the protocol's default", row.ID, row.APIPath)
-		}
-	}
-	first := modelRowForTest(t, rows, "openai", "gpt-x", "https://a.example.com/v1")
-	second := modelRowForTest(t, rows, "openai", "gpt-x", "https://b.example.com/v1")
-	if first.ID == second.ID {
-		t.Fatal("the two endpoints collapsed into one row")
-	}
-	if first.APIKey != "sk-first" || second.APIKey != "sk-second" {
-		t.Fatalf("keys = %q/%q, want each endpoint's own", first.APIKey, second.APIKey)
-	}
-
-	section := storedSectionForTest(t, env, ctx, "agents")
-	if strings.Contains(section, "llm_providers") {
-		t.Fatalf("the agents section still carries llm_providers: %s", section)
-	}
-	if got := storedDefinitionForTest(t, env, ctx, "main").DefaultModel; got != first.ID {
-		t.Fatalf("default_model = %q, want the first entry's row %q", got, first.ID)
-	}
-}
-
-// The same model configured on two primary agents is one row, and the key it
-// keeps is the one the first definition carried.
-func TestLLMModelsMigrateDeduplicatesAcrossAgents(t *testing.T) {
-	env, ctx := migrateEnvForTest(t, `{"definitions":{
-		"main":{"primary":true,
-			"llm_providers":[{"provider":"openai","model":"gpt-x","api_key":"sk-main","base_url":"https://a.example.com/v1"}],
-			"default_model":"openai/gpt-x"},
-		"review":{"primary":true,
-			"llm_providers":[{"provider":"openai","model":"gpt-x","api_key":"sk-review","base_url":"https://a.example.com/v1"}],
-			"default_model":"openai/gpt-x"}}}`, "")
-
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	rows := modelTableForTest(t, env, ctx)
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1: %+v", len(rows), rows)
-	}
-	if rows[0].APIKey != "sk-main" {
-		t.Fatalf("key = %q, want main's entry (the first definition)", rows[0].APIKey)
-	}
-	if got := storedDefinitionForTest(t, env, ctx, "main").DefaultModel; got != rows[0].ID {
-		t.Fatalf("main default_model = %q, want %q", got, rows[0].ID)
-	}
-	if got := storedDefinitionForTest(t, env, ctx, "review").DefaultModel; got != rows[0].ID {
-		t.Fatalf("review default_model = %q, want %q", got, rows[0].ID)
-	}
-}
-
-// A stored ${NAME} reference becomes the plaintext it stood for — from the
-// home's .env first, then the process environment — and a reference that
-// resolves to nothing leaves an empty key with a warning that names no value.
-func TestLLMModelsMigrateResolvesKeyReferences(t *testing.T) {
-	const agents = `{"definitions":{"main":{"primary":true,
-		"llm_providers":[{"provider":"openai","model":"gpt-x","api_key":"${FOO_KEY}","base_url":"https://a.example.com/v1"}],
-		"default_model":"openai/gpt-x"}}}`
-
-	t.Run("from the legacy dotenv", func(t *testing.T) {
-		env, ctx := migrateEnvForTest(t, agents, "")
-		if err := os.WriteFile(filepath.Join(env.Root, ".env"), []byte("FOO_KEY=sk-from-dotenv\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("FOO_KEY", "")
-		if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
-		rows := modelTableForTest(t, env, ctx)
-		if len(rows) != 1 || rows[0].APIKey != "sk-from-dotenv" {
-			t.Fatalf("rows = %+v, want the .env's plaintext", rows)
-		}
-	})
-
-	t.Run("from the process environment", func(t *testing.T) {
-		env, ctx := migrateEnvForTest(t, agents, "")
-		t.Setenv("FOO_KEY", "sk-from-env")
-		if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
-		rows := modelTableForTest(t, env, ctx)
-		if len(rows) != 1 || rows[0].APIKey != "sk-from-env" {
-			t.Fatalf("rows = %+v, want the environment's plaintext", rows)
-		}
-	})
-
-	// A reference nothing resolves keeps its literal text: an empty key fails
-	// the whole start, while `${FOO_KEY}` is exactly what the models page has to
-	// show the operator to fix (plan 268 revision).
-	t.Run("unresolvable keeps the reference", func(t *testing.T) {
-		env, ctx := migrateEnvForTest(t, agents, "")
-		t.Setenv("FOO_KEY", "")
-		var logged bytes.Buffer
-		previous := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-		t.Cleanup(func() { slog.SetDefault(previous) })
-
-		if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
-		rows := modelTableForTest(t, env, ctx)
-		if len(rows) != 1 || rows[0].APIKey != "${FOO_KEY}" {
-			t.Fatalf("rows = %+v, want the reference as written", rows)
-		}
-		text := logged.String()
-		if !strings.Contains(text, "did not resolve") {
-			t.Fatalf("no warning about the unresolved key: %s", text)
-		}
-		if strings.Contains(text, "sk-") || strings.Contains(text, "FOO_KEY=") {
-			t.Fatalf("the log carries the key: %s", text)
-		}
-	})
-
-	// A login-backed provider keeps no key at all: its credential is the login
-	// file, and a literal ${...} would go out as the bearer token.
-	t.Run("unresolvable on a login-backed provider keeps no key", func(t *testing.T) {
-		const loginAgents = `{"definitions":{"main":{"primary":true,
-			"llm_providers":[{"provider":"opencode","model":"deepseek-v4-pro","api_key":"${OPENCODE_KEY}","base_url":"https://opencode.ai/inference"}],
-			"default_model":"opencode/deepseek-v4-pro"}}}`
-		env, ctx := migrateEnvForTest(t, loginAgents, "")
-		t.Setenv("OPENCODE_KEY", "")
-		if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
-		rows := modelTableForTest(t, env, ctx)
-		if len(rows) != 1 || rows[0].APIKey != "" {
-			t.Fatalf("rows = %+v, want no key on a login-backed row", rows)
-		}
-	})
-}
-
-// The memory pipeline's models and a subagent's model become row ids; a label
-// nothing resolves to is dropped from the subagent and falls back to "current"
-// in the memories.
-func TestLLMModelsMigrateRewritesSubagentAndMemoryReferences(t *testing.T) {
-	env, ctx := migrateEnvForTest(t, `{"definitions":{"main":{"primary":true,
-		"llm_providers":[{"provider":"openai","model":"gpt-x","api_key":"sk-1","base_url":"https://a.example.com/v1"}],
-		"default_model":"openai/gpt-x",
-		"subagents":[{"name":"explore","model":"openai/gpt-x"},{"name":"plan","model":"ghost/model"}]}}}`,
-		`{"extract_model":"openai/gpt-x","consolidation_model":"current"}`)
-
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	rows := modelTableForTest(t, env, ctx)
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1: %+v", len(rows), rows)
-	}
-	def := storedDefinitionForTest(t, env, ctx, "main")
-	if len(def.Subagents) != 2 {
-		t.Fatalf("subagents = %+v, want the two entries kept", def.Subagents)
-	}
-	if def.Subagents[0].Model != rows[0].ID {
-		t.Fatalf("explore model = %q, want the row id %q", def.Subagents[0].Model, rows[0].ID)
-	}
-	if def.Subagents[1].Model != "" {
-		t.Fatalf("plan model = %q, want the dangling label dropped", def.Subagents[1].Model)
-	}
-	memories := storedMemoriesForTest(t, env, ctx)
-	if memories.ExtractModel != rows[0].ID {
-		t.Fatalf("extract_model = %q, want the row id %q", memories.ExtractModel, rows[0].ID)
-	}
-	if memories.ConsolidationModel != appcfg.MemoryModelCurrent {
-		t.Fatalf("consolidation_model = %q, want %q unchanged", memories.ConsolidationModel, appcfg.MemoryModelCurrent)
-	}
-}
-
-// Two rows name the same provider and model at different endpoints, and a
-// subagent is pinned to the second of them by id. That is the configuration a
-// label cannot express, so the migration must leave it alone: rewriting it to
-// the first twin would silently move the subagent to another endpoint.
-func TestLLMModelsMigrateKeepsASubagentPinnedToItsRowID(t *testing.T) {
-	env, ctx := migrateEnvForTest(t, "", "")
-	key := "sk-1"
-	first, err := UpsertLLMModel(ctx, env.SQL, LLMModelInput{
-		Provider: "openai", Model: "gpt-x", BaseURL: "https://a.example.com/v1", APIKey: &key,
-	})
-	if err != nil {
-		t.Fatalf("first twin: %v", err)
-	}
-	second, err := UpsertLLMModel(ctx, env.SQL, LLMModelInput{
-		Provider: "openai", Model: "gpt-x", BaseURL: "https://b.example.com/v1", APIKey: &key,
-	})
-	if err != nil {
-		t.Fatalf("second twin: %v", err)
-	}
-	storeSectionForTest(t, env, ctx, "agents", `{"definitions":{"main":{"primary":true,`+
-		`"default_model":"`+first+`","subagents":[{"name":"explore","model":"`+second+`"}]}}}`)
-	stamp := storedSectionStampForTest(t, env, ctx, "agents")
-
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	def := storedDefinitionForTest(t, env, ctx, "main")
-	if len(def.Subagents) != 1 || def.Subagents[0].Model != second {
-		t.Fatalf("subagent model = %+v, want the twin it was pinned to (%q), not the first (%q)", def.Subagents, second, first)
-	}
-	if got := storedSectionStampForTest(t, env, ctx, "agents"); got != stamp {
-		t.Fatalf("a configuration that already names rows was rewritten (stamp %d -> %d)", stamp, got)
-	}
-}
-
-// A session's stored selection names the row it was running on, so a resumed
-// conversation keeps its model after the legacy lists are gone.
-func TestLLMModelsMigrateBackfillsSessionModelIDs(t *testing.T) {
-	env, ctx := migrateEnvForTest(t, `{"definitions":{"main":{"primary":true,
-		"llm_providers":[{"provider":"openai","model":"gpt-x","api_key":"sk-1","base_url":"https://a.example.com/v1"}],
-		"default_model":"openai/gpt-x"}}}`, "")
-	for _, stmt := range []string{
-		`INSERT INTO fb_sessions (id, agent_id, title, created_at, updated_at) VALUES ('s1','main','s1',1,1)`,
-		`INSERT INTO fb_session_model_state (session_id, provider, model, effort, model_id, updated_at)
-		 VALUES ('s1','openai','gpt-x','','',1)`,
-	} {
-		if _, err := env.SQL.ExecContext(ctx, dbx.Rebind(dbx.DialectOf(env.SQL), stmt)); err != nil {
-			t.Fatalf("seed session state: %v", err)
-		}
-	}
-
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	rows := modelTableForTest(t, env, ctx)
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1: %+v", len(rows), rows)
-	}
-	var modelID string
-	if err := env.SQL.QueryRowContext(ctx,
-		dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT model_id FROM fb_session_model_state WHERE session_id = ?`),
-		"s1").Scan(&modelID); err != nil {
-		t.Fatalf("read session model state: %v", err)
-	}
-	if modelID != rows[0].ID {
-		t.Fatalf("session model_id = %q, want %q", modelID, rows[0].ID)
-	}
-}
-
-// Running the migration twice changes nothing the second time: the rows are
-// reused and the sections are not rewritten.
-func TestLLMModelsMigrateIsIdempotent(t *testing.T) {
-	env, ctx := migrateEnvForTest(t, `{"definitions":{"main":{"primary":true,
-		"llm_providers":[{"provider":"openai","model":"gpt-x","api_key":"sk-1","base_url":"https://a.example.com/v1"}],
-		"default_model":"openai/gpt-x"}}}`,
-		`{"extract_model":"openai/gpt-x"}`)
-
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-		t.Fatalf("first migration: %v", err)
+	if got := agents.Definitions["main"].DefaultModel; got != "llm-kept" {
+		t.Fatalf("default_model = %q, want the row id llm-kept", got)
 	}
 	rows := modelTableForTest(t, env, ctx)
-	agents := storedSectionForTest(t, env, ctx, "agents")
-	memories := storedSectionForTest(t, env, ctx, "memories")
-	agentsStamp := storedSectionStampForTest(t, env, ctx, "agents")
-	memoriesStamp := storedSectionStampForTest(t, env, ctx, "memories")
-
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-		t.Fatalf("second migration: %v", err)
-	}
-	if again := modelTableForTest(t, env, ctx); len(again) != len(rows) {
-		t.Fatalf("rows after the second run = %d, want %d", len(again), len(rows))
-	}
-	if got := storedSectionForTest(t, env, ctx, "agents"); got != agents {
-		t.Fatalf("the agents section was rewritten by a second run:\n%s\n%s", agents, got)
-	}
-	if got := storedSectionForTest(t, env, ctx, "memories"); got != memories {
-		t.Fatalf("the memories section was rewritten by a second run:\n%s\n%s", memories, got)
-	}
-	if got := storedSectionStampForTest(t, env, ctx, "agents"); got != agentsStamp {
-		t.Fatalf("the agents section stamp moved from %d to %d", agentsStamp, got)
-	}
-	if got := storedSectionStampForTest(t, env, ctx, "memories"); got != memoriesStamp {
-		t.Fatalf("the memories section stamp moved from %d to %d", memoriesStamp, got)
-	}
-}
-
-// A row the user added first wins: the migration creates nothing and points
-// the references at the row that is already there.
-func TestLLMModelsMigrateReusesAnExistingRow(t *testing.T) {
-	env, ctx := migrateEnvForTest(t, `{"definitions":{"main":{"primary":true,
-		"llm_providers":[{"provider":"openai","model":"gpt-x","api_key":"sk-legacy","base_url":"https://a.example.com/v1"}],
-		"default_model":"openai/gpt-x"}}}`, "")
-	existing, err := (&state.LLMModelStore{DB: env.SQL}).Create(ctx, state.LLMModel{
-		ID: "llm-user-row", Provider: "openai", Model: "gpt-x", BaseURL: "https://a.example.com/v1", APIKey: "sk-user",
-	})
-	if err != nil {
-		t.Fatalf("store the user's row: %v", err)
-	}
-
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	rows := modelTableForTest(t, env, ctx)
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want only the user's: %+v", len(rows), rows)
-	}
-	if rows[0].ID != existing.ID || rows[0].APIKey != "sk-user" {
-		t.Fatalf("row = %+v, want the user's untouched", rows[0])
-	}
-	if got := storedDefinitionForTest(t, env, ctx, "main").DefaultModel; got != existing.ID {
-		t.Fatalf("default_model = %q, want the existing row %q", got, existing.ID)
-	}
-}
-
-// The placeholder normalize() keeps on main carries no model: it is stripped
-// and nothing is stored.
-func TestLLMModelsMigrateStripsThePlaceholder(t *testing.T) {
-	env, ctx := migrateEnvForTest(t, `{"definitions":{"main":{"primary":true,"llm_providers":[{}]}}}`, "")
-
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	if rows := modelTableForTest(t, env, ctx); len(rows) != 0 {
-		t.Fatalf("rows = %+v, want none for a placeholder", rows)
-	}
-	if section := storedSectionForTest(t, env, ctx, "agents"); strings.Contains(section, "llm_providers") {
-		t.Fatalf("the placeholder survived: %s", section)
-	}
-}
-
-// A login-backed row carries the endpoint the client builds from the login, so
-// the models page has a real path to show instead of "the login decides".
-func TestLLMModelsMigrateCompletesLoginEndpoints(t *testing.T) {
-	env, ctx := migrateEnvForTest(t, `{"definitions":{"main":{"primary":true,
-		"llm_providers":[
-			{"provider":"chatgpt","model":"gpt-5.5","base_url":"https://chatgpt.com/backend-api/codex"},
-			{"provider":"opencode-go","model":"claude-haiku-5-5","base_url":"https://opencode.ai/inference/go"},
-			{"provider":"opencode-go","model":"gpt-6-luna","base_url":"https://opencode.ai/inference/go"},
-			{"provider":"opencode-go","model":"glm-5.3","base_url":"https://opencode.ai/inference/go"}]}}}`, "")
-
-	if err := migrateLegacyLLMModels(ctx, env.SQL, env.Root); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	rows := modelTableForTest(t, env, ctx)
-	if len(rows) != 4 {
-		t.Fatalf("rows = %d, want 4: %+v", len(rows), rows)
-	}
-	for _, tc := range []struct {
-		provider, model, apiPath, source string
-	}{
-		{"chatgpt", "gpt-5.5", "/responses", "chatgpt"},
-		{"opencode-go", "claude-haiku-5-5", "/v1/messages", "opencode-go"},
-		{"opencode-go", "gpt-6-luna", "/responses", "opencode-go"},
-		{"opencode-go", "glm-5.3", "/chat/completions", "opencode-go"},
-	} {
-		row := modelForTest(t, rows, tc.provider, tc.model)
-		if row.APIPath != tc.apiPath {
-			t.Fatalf("%s/%s api_path = %q, want %q", tc.provider, tc.model, row.APIPath, tc.apiPath)
-		}
-		if row.Source != tc.source {
-			t.Fatalf("%s/%s source = %q, want %q", tc.provider, tc.model, row.Source, tc.source)
-		}
-		if row.BaseURL == "" {
-			t.Fatalf("%s/%s has no base_url", tc.provider, tc.model)
-		}
+	if len(rows) != 1 || rows[0].ID != "llm-kept" {
+		t.Fatalf("model table = %+v, want the one row the fixture seeded", rows)
 	}
 }
 
@@ -513,6 +159,8 @@ func upsertEnvForTest(t *testing.T) (*state.LLMModelStore, context.Context) {
 	t.Cleanup(func() { _ = db.Close() })
 	return &state.LLMModelStore{DB: db}, ctx
 }
+
+// provider, model, base URL and API path is one row.
 
 // Signing in again replaces the key it had, and the row keeps its id: the same
 // provider, model, base URL and API path is one row.
@@ -1225,5 +873,76 @@ func TestCustomProviderIDsAgree(t *testing.T) {
 	}
 	if err := VerifyProvider(appcfg.CustomProvider); err != nil {
 		t.Fatalf("VerifyProvider(custom) = %v", err)
+	}
+}
+
+// modelRowsFromEntriesForTest is how an in-memory fixture seeds the install's model table
+// (plan 315): one row per model an entry names — `model: [a, b]` expanding the
+// way a provider list used to — with the row ids llm-1, llm-2, … in order. A
+// definition names one of them with default_model; a built-in subagent type
+// names one in agents.subagent_models.<type>.
+func modelRowsFromEntriesForTest(entries ...appcfg.AgentLLMProviderConfig) []appcfg.LLMModelConfig {
+	var rows []appcfg.LLMModelConfig
+	for _, entry := range entries {
+		models := append(appcfg.StringList(nil), entry.Models...)
+		if len(models) == 0 && entry.Model != "" {
+			models = appcfg.StringList{entry.Model}
+		}
+		if len(models) == 0 {
+			models = appcfg.StringList{""}
+		}
+		for _, model := range models {
+			rows = append(rows, appcfg.LLMModelConfig{
+				ID:          fmt.Sprintf("llm-%d", len(rows)+1),
+				Provider:    entry.Provider,
+				Model:       model,
+				BaseURL:     entry.BaseURL,
+				APIPath:     entry.APIPath,
+				APIKey:      entry.APIKey,
+				Params:      append(appcfg.LLMRequestParams(nil), entry.Params...),
+				URLVerbatim: entry.URLVerbatim,
+			})
+		}
+	}
+	return rows
+}
+
+// seedFileModelForTest gives a file-seeded fixture the one model its runner
+// needs: a row of the install's table pointing at a dead endpoint, which every
+// fixture in this package replaces with a fake LLM anyway (plan 315 — a
+// configuration file cannot carry a model).
+func seedFileModelForTest(t *testing.T, home, baseURL string) {
+	t.Helper()
+	seedModelTableForTest(t, Context{Home: home, ConfigPath: filepath.Join(home, "forebrain.yaml")}, state.LLMModel{
+		ID: "llm-fixture", Provider: "openai", Model: "gpt-test",
+		APIKey: "test-key", BaseURL: baseURL, APIPath: "/chat/completions",
+		ParamsJSON: `{"stream":false}`,
+	})
+}
+
+// fixtureModelRows is the one-row table a fixture that loads a configuration
+// document and hands it straight to a runner needs (plan 315).
+func fixtureModelRows(baseURL string) []appcfg.LLMModelConfig {
+	return []appcfg.LLMModelConfig{{
+		ID: "llm-fixture", Provider: "openai", Model: "gpt-test",
+		APIKey: "test-key", BaseURL: baseURL, APIPath: "/chat/completions",
+		Params: appcfg.LLMRequestParams(`{"stream":false}`),
+	}}
+}
+
+// storeAgentsSectionForTest writes a raw stored section into the home's state
+// database before the process opens it — the fixture's way of stating what a
+// surface wrote (plan 315: the definitions live in the database).
+func storeAgentsSectionForTest(t *testing.T, home, cfgPath, section, doc string) {
+	t.Helper()
+	db, err := openStateForWrite(Context{Home: home, ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := (&state.ConfigStore{DB: db}).UpdateSection(context.Background(), section, func(json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(doc), nil
+	}); err != nil {
+		t.Fatalf("store the %s section: %v", section, err)
 	}
 }

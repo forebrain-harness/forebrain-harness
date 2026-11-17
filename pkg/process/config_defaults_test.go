@@ -120,18 +120,21 @@ func checkStoredDefault(t *testing.T, path string, typ reflect.Type, value any, 
 }
 
 // defaultsHomeForTest writes the one file-era section a home needs to get
-// through Open — the main agent's provider — and returns the home. Everything
-// else it holds comes from the registry under test.
+// through Open — the main agent's model reference — and the model it names into
+// the table (plan 315: the table is state, so a file cannot carry a model).
+// Everything else it holds comes from the registry under test.
 func defaultsHomeForTest(t *testing.T) string {
 	t.Helper()
 	home := importHomeForTest(t)
 	t.Setenv("OPENAI_API_KEY", "sk-defaults-test")
 	cfgPath := filepath.Join(home, "forebrain.yaml")
-	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
-		"        - provider: openai\n          model: gpt-main\n          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
+	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      default_model: llm-main\n"
 	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	seedModelTableForTest(t, Context{Home: home, ConfigPath: cfgPath},
+		state.LLMModel{ID: "llm-main", Provider: "openai", Model: "gpt-main", APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1"},
+	)
 	return home
 }
 
@@ -170,14 +173,13 @@ func TestOpenSeedsEveryStoredSectionWithDefaults(t *testing.T) {
 	require.Equal(t, wantParallel, *agents.Defaults.Execution.MaxParallelSubagents)
 	require.Equal(t, appcfg.WebSearchProviderNone, agents.Defaults.WebSearch.Provider)
 	require.Equal(t, appcfg.WebFetchProviderBuiltin, agents.Defaults.WebFetch.Provider)
-	// The imported model survived the top-up untouched: plan 262 moved it into
-	// the model table and resolved its ${ENV} reference into the row.
-	require.Nil(t, agents.Definitions["main"].LLMProviders, "the migration strips the pre-table list")
+	// The model the home configured survived the top-up untouched, and the
+	// definition still names it.
+	require.Equal(t, "llm-main", agents.Definitions["main"].DefaultModel)
 	models, err := (&state.LLMModelStore{DB: env.SQL}).List(context.Background())
 	require.NoError(t, err)
 	require.Len(t, models, 1)
 	require.Equal(t, "gpt-main", models[0].Model)
-	require.Equal(t, "sk-defaults-test", models[0].APIKey)
 
 	var compact appcfg.CompactSection
 	require.NoError(t, json.Unmarshal([]byte(rows["compact"]), &compact))
@@ -222,7 +224,7 @@ func TestStoredConfigDefaultsKeepStoredValues(t *testing.T) {
 	// agents carries a definition and one setting; everything else it lacks
 	// is what the top-up fills.
 	require.NoError(t, store.UpdateSection(ctx, "agents", func(json.RawMessage) (json.RawMessage, error) {
-		return json.RawMessage(`{"definitions":{"main":{"llm_providers":[{"provider":"openai","model":"gpt-kept","api_key":"sk-kept","base_url":"http://localhost:0/v1"}]}},"defaults":{"network_retry_max":3,"web_search":{"provider":""}}}`), nil
+		return json.RawMessage(`{"definitions":{"main":{"default_model":"llm-kept"}},"defaults":{"network_retry_max":3,"web_search":{"provider":""}}}`), nil
 	}))
 	require.NoError(t, store.UpdateSection(ctx, "approval_preset", func(json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`"full_access"`), nil
@@ -236,7 +238,7 @@ func TestStoredConfigDefaultsKeepStoredValues(t *testing.T) {
 	var agents appcfg.AgentsSection
 	require.NoError(t, json.Unmarshal([]byte(rows["agents"]), &agents))
 	require.Equal(t, 3, agents.Defaults.NetworkRetryMaxOrDefault(), "a stored value must not be overwritten by its default")
-	require.Equal(t, "sk-kept", agents.Definitions["main"].LLMProviders[0].APIKey)
+	require.Equal(t, "llm-kept", agents.Definitions["main"].DefaultModel)
 	require.Equal(t, appcfg.DefaultWarnRemainingPercent, agents.Defaults.ContextInject.WarnRemainingPercent)
 	require.NotNil(t, agents.Defaults.Execution.MaxParallelSubagents, "a missing leaf inside a stored section is filled")
 	// An empty explicit representation is written out; a set one is left.

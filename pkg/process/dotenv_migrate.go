@@ -121,7 +121,7 @@ func MigrateLegacyHome(ctx context.Context, home, cfgPath string) error {
 		return err
 	}
 	defer db.Close()
-	if err := migrateLegacyLLMModels(ctx, db, home); err != nil {
+	if err := migrateLegacyLLMModels(ctx, db); err != nil {
 		return fmt.Errorf("move model configurations into the state database: %w", err)
 	}
 	if err := migrateLegacyDotEnv(ctx, db, home, cfgPath); err != nil {

@@ -1,11 +1,11 @@
-// The model table's process-level write API, the one-time migration that moves
-// a pre-table install's model configuration into it, and the legacy reader the
-// migrations of the retired home .env need (plans 262, 268).
+// The model table's process-level write API, the one-time migration that
+// rewrites a pre-table install's model references into row ids, and the legacy
+// reader the migrations of the retired home .env need (plans 262, 268).
 //
 // Nothing in the runtime reads .env: the reader below exists only for the
 // one-time migrations that lift its values into the state database. The write
-// API is what a configuration surface calls instead of editing an agent's
-// llm_providers list, which no longer exists.
+// API is what a configuration surface calls to configure a model: the table is
+// the only place a provider and its credential live (plan 315).
 package process
 
 import (
@@ -26,8 +26,6 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	homepkg "github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
-	openaiauth "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
-	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
@@ -121,14 +119,19 @@ AND session_id IN (SELECT id FROM fb_sessions WHERE agent_id = $4)`,
 	}
 )
 
-// migrateLegacyLLMModels moves every model configuration still stored in the
-// agents section (llm_providers) into fb_llm_models and rewrites every
-// reference to a row id: agents' default_model, subagents' model, and the
-// memory models. It is gated on content, not on a marker — a legacy yaml
-// imported into a fresh home later (test harnesses do this) is migrated on the
-// next start the same way — and is idempotent: a row whose identity is already
-// in the table is reused, never duplicated.
-func migrateLegacyLLMModels(ctx context.Context, db *sql.DB, home string) error {
+// migrateLegacyLLMModels rewrites every model reference a pre-table install
+// stored as a legacy "provider/model" label into the row id of the model the
+// install already carries, and names the row every stored session selection was
+// running on (fb_session_model_state.model_id). It is gated on content, not on a
+// marker — a legacy yaml imported into a fresh home later (test harnesses do
+// this) is migrated on the next start the same way.
+//
+// The provider half of the old migration is gone with the lists it moved (plan
+// 315): the model table is the only place a model is configured, so a home that
+// kept models in the agents section keeps none of them — its references fall
+// back to the global default. No migration was written for those, by owner
+// ruling.
+func migrateLegacyLLMModels(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return fmt.Errorf("no state database")
 	}
@@ -163,34 +166,23 @@ func migrateLegacyLLMModels(ctx context.Context, db *sql.DB, home string) error 
 		rowIDs[row.ID] = true
 	}
 	if !legacyModelDataPresent(&root, rowIDs) {
-		// Nothing to move. A placeholder list is still stripped: it carries no
-		// model, and normalize() puts it back for main on every read.
-		if !hasLegacyProviderLists(agents) {
-			return nil
-		}
-		return rewriteLegacyModelSections(ctx, store, legacyModelEdits{})
+		return nil
 	}
 
-	// The view is what says which entry a stored reference names: table rows
-	// first, then the legacy lists, main's first.
+	// The view is what says which entry a stored reference names.
 	view := appcfg.ConfiguredLLMs(&root)
 	edits := planModelReferenceEdits(&root, view, rowIDs)
 
-	created, err := createLegacyModelRows(ctx, modelStore, view, readLegacyDotEnv(home))
-	if err != nil {
-		return err
-	}
 	if err := backfillSessionModelIDs(ctx, db, &root, view); err != nil {
 		return err
 	}
 	// The sections are rewritten last, through the store's transaction and
 	// its validator: a candidate the loader would refuse fails the whole
-	// start, and the rows already written are harmless — the next start
-	// reuses them.
+	// start.
 	if err := rewriteLegacyModelSections(ctx, store, edits); err != nil {
 		return err
 	}
-	slog.Info("moved model configurations into the state database", "rows", created)
+	slog.Info("rewrote legacy model references into row ids")
 	return nil
 }
 
@@ -213,15 +205,10 @@ func storedModelSections(sections map[string]json.RawMessage) (appcfg.AgentsSect
 }
 
 // legacyModelDataPresent reports whether any configuration still holds a
-// pre-table model: an llm_providers entry carrying a provider or a model, or a
-// reference that is a legacy "provider/model" label.
+// pre-table model reference: a "provider/model" label written before the model
+// table existed.
 func legacyModelDataPresent(root *appcfg.Root, rowIDs map[string]bool) bool {
 	for _, def := range root.Agents.Definitions {
-		for _, entry := range appcfg.ResolvedLLMConfigs(def) {
-			if strings.TrimSpace(entry.Provider) != "" || strings.TrimSpace(entry.Model) != "" {
-				return true
-			}
-		}
 		if legacyModelLabel(def.DefaultModel, rowIDs) {
 			return true
 		}
@@ -233,18 +220,6 @@ func legacyModelDataPresent(root *appcfg.Root, rowIDs map[string]bool) bool {
 	}
 	return legacyModelLabel(root.Memories.ExtractModel, rowIDs) ||
 		legacyModelLabel(root.Memories.ConsolidationModel, rowIDs)
-}
-
-// hasLegacyProviderLists reports whether any definition still carries an
-// llm_providers list at all — the placeholder-only case the migration strips
-// without moving anything.
-func hasLegacyProviderLists(agents appcfg.AgentsSection) bool {
-	for _, def := range agents.Definitions {
-		if len(def.LLMProviders) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 // legacyModelLabel reports whether a stored reference is a pre-table
@@ -309,16 +284,7 @@ func planModelReferenceEdits(root *appcfg.Root, view []appcfg.AgentLLMProviderCo
 	}
 	for name, def := range root.Agents.Definitions {
 		ref := strings.TrimSpace(def.DefaultModel)
-		switch {
-		case ref == "":
-			// An agent whose only choice is its own legacy list. The first
-			// expanded entry is what an empty default already resolves to, so
-			// the stored reference becomes that entry's row — the same answer
-			// EffectiveDefaultLLM gives, written down.
-			if id, ok := firstOwnLegacyModelID(root, view, name, def); ok {
-				edits.defaults[name] = id
-			}
-		case legacyModelLabel(ref, rowIDs):
+		if legacyModelLabel(ref, rowIDs) {
 			if id, ok := resolveModelRefID(root, view, name, ref); ok {
 				edits.defaults[name] = id
 			} else {
@@ -352,22 +318,6 @@ func planModelReferenceEdits(root *appcfg.Root, view []appcfg.AgentLLMProviderCo
 	return edits
 }
 
-// firstOwnLegacyModelID is the row an agent's own first legacy entry becomes.
-func firstOwnLegacyModelID(root *appcfg.Root, view []appcfg.AgentLLMProviderConfig, name string, def appcfg.AgentDefinition) (string, bool) {
-	for _, entry := range appcfg.ResolvedLLMConfigs(def) {
-		provider := strings.TrimSpace(entry.Provider)
-		model := strings.TrimSpace(entry.Model)
-		if provider == "" && model == "" {
-			continue
-		}
-		if id, ok := viewRowIDForIdentity(view, entry.Provider, entry.Model, entry.BaseURL, entry.APIPath); ok {
-			return id, true
-		}
-		return appcfg.LegacyLLMModelID(entry.Provider, entry.Model, entry.BaseURL, entry.APIPath), true
-	}
-	return "", false
-}
-
 // memoryModelEdit is the rewritten value of one memory model setting. The
 // settings page stores "current" or a model name; a "provider/model" label is
 // the only shape that never resolved, because the memory pipeline matches a
@@ -389,107 +339,6 @@ func memoryModelEdit(root *appcfg.Root, view []appcfg.AgentLLMProviderConfig, va
 		"model", value)
 	current := appcfg.MemoryModelCurrent
 	return &current, true
-}
-
-// createLegacyModelRows stores every legacy entry of the view as a row, keyed by
-// the deterministic id the view already gave it, and reports how many rows it
-// added. An entry whose identity the table already carries is left alone, so a
-// second start (or a row the user added first) never duplicates it.
-func createLegacyModelRows(ctx context.Context, store *state.LLMModelStore, view []appcfg.AgentLLMProviderConfig, dotenv map[string]string) (int, error) {
-	created := 0
-	for _, entry := range view {
-		if !strings.HasPrefix(entry.ID, appcfg.LegacyLLMModelIDPrefix) {
-			continue
-		}
-		provider := strings.TrimSpace(entry.Provider)
-		model := strings.TrimSpace(entry.Model)
-		baseURL := strings.TrimSpace(entry.BaseURL)
-		apiPath := strings.TrimSpace(entry.APIPath)
-		source := ""
-		if appcfg.CredentialsBackedProvider(provider) {
-			// A login row records the subscription that wrote it, and carries
-			// the endpoint the client builds from that login: the models page
-			// shows a real path rather than "the login decides" (owner
-			// 2026-11-07).
-			source = strings.ToLower(provider)
-			baseURL, apiPath = loginModelEndpoint(provider, model, baseURL, apiPath)
-		}
-		if _, found, err := store.FindByIdentity(ctx, provider, model, baseURL, apiPath); err != nil {
-			return created, fmt.Errorf("look up model %s/%s: %w", provider, model, err)
-		} else if found {
-			continue
-		}
-		key, ok := resolveLegacySecret(entry.APIKey, dotenv)
-		if !ok {
-			// The reference stays the row's value: it is the readable "this
-			// one still needs a key" marker the models page shows, and an
-			// empty key would fail the whole start instead (plan 268
-			// revision). A login-backed provider is the exception — its
-			// credential comes from the login file, and a literal ${...}
-			// would be sent as the bearer token, which is a 401 with nothing
-			// readable about it.
-			key = strings.TrimSpace(entry.APIKey)
-			if appcfg.CredentialsBackedProvider(provider) {
-				key = ""
-			}
-			slog.Warn("a model key reference did not resolve; set the key on the models page",
-				"provider", provider, "model", model)
-		}
-		if _, err := store.Create(ctx, state.LLMModel{
-			ID:         entry.ID,
-			Provider:   provider,
-			Model:      model,
-			BaseURL:    baseURL,
-			APIPath:    apiPath,
-			APIKey:     key,
-			ParamsJSON: string(entry.Params),
-			Source:     source,
-		}); err != nil {
-			var exists state.ErrLLMModelExists
-			if errors.As(err, &exists) {
-				continue
-			}
-			return created, fmt.Errorf("store model %s/%s: %w", provider, model, err)
-		}
-		created++
-	}
-	return created, nil
-}
-
-// loginModelEndpoint is the endpoint a login-backed model's requests go to,
-// which is also what the table has to carry: chatgpt speaks the Responses API
-// on the Codex backend, and an OpenCode model speaks whichever protocol its
-// model id names. A model with no chat protocol at all (gemini-*, which speaks
-// the Gemini native API, and jev-*, which is not a chat model) keeps the path
-// it was stored with and says so: the models page shows those as a native
-// protocol rather than a path block.
-func loginModelEndpoint(provider, model, baseURL, apiPath string) (string, string) {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "chatgpt":
-		return openaiauth.CodexBaseURL, "/responses"
-	case "opencode", "opencode-go":
-		if canonical := opencode.ProviderBaseURL(provider); canonical != "" {
-			baseURL = canonical
-		}
-		protocol, err := opencode.ProtocolFor(provider, model)
-		switch {
-		case errors.Is(err, opencode.ErrUnsupportedProtocol):
-			slog.Warn("a login model is not a chat model; keeping its stored API path",
-				"provider", provider, "model", model)
-			return baseURL, apiPath
-		case protocol == opencode.ProtocolGoogle:
-			slog.Warn("a login model speaks the Gemini native API; keeping its stored API path",
-				"provider", provider, "model", model)
-			return baseURL, apiPath
-		case protocol == opencode.ProtocolResponses:
-			return baseURL, "/responses"
-		case protocol == opencode.ProtocolAnthropic:
-			return baseURL, "/v1/messages"
-		default:
-			return baseURL, "/chat/completions"
-		}
-	}
-	return baseURL, apiPath
 }
 
 // backfillSessionModelIDs names the row every stored session selection was
@@ -532,10 +381,9 @@ func backfillSessionModelIDs(ctx context.Context, db *sql.DB, root *appcfg.Root,
 	return nil
 }
 
-// rewriteLegacyModelSections applies the planned references and drops every
-// llm_providers list, in one transaction over both sections. The values are
-// re-read inside it: the stored configuration is the truth, and a section the
-// database does not hold is never created here.
+// rewriteLegacyModelSections applies the planned references in one transaction
+// over both sections. The values are re-read inside it: the stored configuration
+// is the truth, and a section the database does not hold is never created here.
 func rewriteLegacyModelSections(ctx context.Context, store *state.ConfigStore, edits legacyModelEdits) error {
 	return store.UpdateSections(ctx, []string{"agents", "memories"}, func(cur map[string]json.RawMessage) (map[string]json.RawMessage, error) {
 		next := make(map[string]json.RawMessage, 2)
@@ -546,10 +394,6 @@ func rewriteLegacyModelSections(ctx context.Context, store *state.ConfigStore, e
 			}
 			changed := false
 			for name, def := range agents.Definitions {
-				if def.LLMProviders != nil {
-					def.LLMProviders = nil
-					changed = true
-				}
 				if value, ok := edits.defaults[name]; ok {
 					def.DefaultModel = value
 					changed = true

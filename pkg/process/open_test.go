@@ -25,17 +25,17 @@ import (
 )
 
 func activeAgentTestConfig() appcfg.Root {
-	return appcfg.Root{
+	return appcfg.Root{LLMModels: modelRowsFromEntriesForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-main",
+		APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1",
+	}, appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-review",
+		APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
-				"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-					Provider: "openai", Model: "gpt-main",
-					APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1",
-				}}},
-				"review": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-					Provider: "openai", Model: "gpt-review",
-					APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1",
-				}}},
+				"main":   {Primary: true, DefaultModel: "llm-1"},
+				"review": {Primary: true, DefaultModel: "llm-2"},
 			},
 		},
 	}
@@ -104,10 +104,10 @@ func TestContextSnapshotResolvesConfiguredPrimaryModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(llm.AssetsDirEnv, assets)
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Models: appcfg.StringList{"compact-test", "another-model"},
-		}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsFromEntriesForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Models: appcfg.StringList{"compact-test", "another-model"},
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main":   {Primary: true, DefaultModel: "llm-1"},
 		"review": {Primary: true},
 	}}}
 	for _, agentName := range []string{"main", "review"} {

@@ -165,15 +165,17 @@ func TestImportLegacyConfigRewritesYAMLAndSeedsDB(t *testing.T) {
 		t.Fatalf("backup does not hold the original file verbatim:\n%s", backupBytes)
 	}
 
-	// The composed runtime still resolves the agent the import moved: plan 262
-	// stored the imported key in the model table and gave the definition that
-	// row as its default.
-	models := importedModelsForTest(t, env)
-	if len(models) != 1 || models[0].APIKey != "sk-import" {
-		t.Fatalf("model rows = %+v, want the imported plaintext value", models)
+	// Plan 315 retired the provider list, so the typed import drops the key
+	// instead of moving it: the model table stays empty and the stored agents
+	// section carries no list at all. Nothing is migrated — owner ruling.
+	if models := importedModelsForTest(t, env); len(models) != 0 {
+		t.Fatalf("model rows = %+v, want none: the retired list is dropped, not moved", models)
 	}
-	if got := env.RawConfigValue().Agents.Definitions["main"].DefaultModel; got != models[0].ID {
-		t.Fatalf("composed default_model = %q, want the imported row %q", got, models[0].ID)
+	if agents := configRowsForTest(t, env.SQL)["agents"]; strings.Contains(agents, "llm_providers") {
+		t.Fatalf("the stored agents section still carries the retired key:\n%s", agents)
+	}
+	if got := env.RawConfigValue().Agents.Definitions["main"].DefaultModel; got != "" {
+		t.Fatalf("composed default_model = %q, want the retired label treated as unset", got)
 	}
 
 	// Second startup: fb_config is no longer empty, so nothing imports again
@@ -260,24 +262,13 @@ agents:
 	if strings.Contains(agents, "hdr-plain") {
 		t.Fatalf("the import baked one machine's value into fb_config:\n%s", agents)
 	}
-	// The LLM half moved with the models themselves (plan 262): the key the
-	// .env resolves is plaintext in the row, and it is nowhere in fb_config.
-	models := importedModelsForTest(t, env)
-	byModel := map[string]state.LLMModel{}
-	for _, row := range models {
-		byModel[row.Model] = row
+	// Plan 315 retired the provider list, so no model row is created from the
+	// file and no key of it reaches fb_config either.
+	if models := importedModelsForTest(t, env); len(models) != 0 {
+		t.Fatalf("model rows = %+v, want none: the retired list is dropped, not moved", models)
 	}
-	if got := byModel["gpt-import"].APIKey; got != "sk-legacy-plain" {
-		t.Fatalf("row key = %q, want the .env's plaintext value", got)
-	}
-	if strings.Contains(agents, "sk-legacy-plain") {
-		t.Fatalf("the key is still duplicated into fb_config:\n%s", agents)
-	}
-	// A reference nothing resolves keeps its literal text: the start must not
-	// fail over it (that test reaching here is the proof), and the models page
-	// shows exactly what is missing (plan 268 revision).
-	if got := byModel["gpt-fallback"].APIKey; got != "${FOREBRAIN_IMPORT_NOWHERE}" {
-		t.Fatalf("unresolvable reference produced key %q, want the reference as written", got)
+	if strings.Contains(agents, "sk-legacy-plain") || strings.Contains(agents, "llm_providers") {
+		t.Fatalf("the retired list reached fb_config:\n%s", agents)
 	}
 	// The .env itself is out of reach after this start (plan 268).
 	if _, err := os.Stat(filepath.Join(home, ".env")); !os.IsNotExist(err) {
@@ -542,8 +533,8 @@ func TestImportLegacyConfigSkipsWhenDBHoldsSections(t *testing.T) {
 	if env.RawConfigValue().ApprovalPreset != appcfg.ApprovalPresetFullAccess {
 		t.Fatalf("composed approval_preset = %q, want the database's full_access", env.RawConfigValue().ApprovalPreset)
 	}
-	if models := importedModelsForTest(t, env); len(models) != 1 || models[0].Model != "gpt-seeded" {
-		t.Fatalf("composed model rows = %+v, want the database's gpt-seeded", models)
+	if models := importedModelsForTest(t, env); len(models) != 0 {
+		t.Fatalf("composed model rows = %+v, want none: the retired list is dropped", models)
 	}
 }
 
