@@ -55,6 +55,20 @@ var zeroIsTheDefault = map[string]string{
 	"agents.goal_evaluator.tools":            "the check's tool set is read-only and fixed",
 	"agents.goal_evaluator.continuable":      "the check runs once per round",
 	"agents.goal_evaluator.enabled":          "the check is not a dispatchable type",
+	// The exit-plan reviewer's global row is the same shape one setting down
+	// (plan 313): it starts unconfigured and its empty value is the setting —
+	// no row is "leave the approval picker's default as it was", and no effort
+	// is "follow the model row's own default". Registering a model here would
+	// invent one the install never chose. The rest are a custom subagent's
+	// fields, which this row never carries: the reviewer's description, prompt,
+	// tool set and lifecycle are its built-in type's.
+	"agents.plan_reviewer.model":            "empty leaves the approval picker's default as it was",
+	"agents.plan_reviewer.reasoning_effort": "empty follows the model row's default",
+	"agents.plan_reviewer.description":      "the reviewer is not a dispatchable type",
+	"agents.plan_reviewer.system_prompt":    "the built-in prompt is the reviewer's",
+	"agents.plan_reviewer.tools":            "the reviewer's tool set is read-only and fixed",
+	"agents.plan_reviewer.continuable":      "the model never dispatches it; a review is continued only from the approval",
+	"agents.plan_reviewer.enabled":          "the reviewer is not a dispatchable type",
 }
 
 // TestStoredConfigDefaultsCoverEveryField is the registry's guard (plan 207
