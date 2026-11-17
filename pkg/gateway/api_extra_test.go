@@ -9986,6 +9986,73 @@ func TestSettingsPatchNormalizesGoalEvaluatorModelToRowID(t *testing.T) {
 	require.Equal(t, pro.ID, stored(t).Agents.GoalEvaluator.Model, "a refused write must not move the stored row")
 }
 
+// The exit-plan reviewer's row is the goal check's sibling (plan 313): the same
+// normalization on its model, the same refusal, and the same two paths accepted
+// by the write path — nothing else on that row is a setting at all.
+func TestSettingsPatchNormalizesPlanReviewerModelToRowID(t *testing.T) {
+	s, db := settingsServer(t)
+	ctx := context.Background()
+	store := &state.LLMModelStore{DB: db}
+	pro, err := store.Create(ctx, state.LLMModel{
+		Provider: "deepseek", Model: "deepseek-v4-pro",
+		BaseURL: "https://api.deepseek.com", APIPath: "/chat/completions", APIKey: "sk-review-pro",
+	})
+	require.NoError(t, err)
+
+	stored := func(t *testing.T) appcfg.Root {
+		t.Helper()
+		cfg, err := s.persistedConfig(ctx)
+		require.NoError(t, err)
+		return cfg
+	}
+	refusalOf := func(t *testing.T, body []byte) (path, message string) {
+		t.Helper()
+		var refusal struct {
+			Path    string `json:"path"`
+			Message string `json:"message"`
+		}
+		require.NoError(t, json.Unmarshal(body, &refusal))
+		return refusal.Path, refusal.Message
+	}
+
+	// Empty stays empty: no global row is a legitimate configuration.
+	saved := settingsPatch(t, s, map[string]any{"agents.plan_reviewer.model": ""}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Empty(t, stored(t).Agents.PlanReviewer.Model)
+
+	// A row id is the accepted form, and the id is what is stored.
+	saved = settingsPatch(t, s, map[string]any{"agents.plan_reviewer.model": pro.ID}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Equal(t, pro.ID, stored(t).Agents.PlanReviewer.Model)
+
+	// The effort is accepted next to a model, and stored as written.
+	saved = settingsPatch(t, s, map[string]any{"agents.plan_reviewer.reasoning_effort": "low"}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Equal(t, "low", stored(t).Agents.PlanReviewer.ReasoningEffort)
+
+	// A legacy label is translated to the row it names, never stored as a label.
+	saved = settingsPatch(t, s, map[string]any{"agents.plan_reviewer.model": "deepseek/deepseek-v4-pro"}, nil)
+	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
+	require.Equal(t, pro.ID, stored(t).Agents.PlanReviewer.Model)
+
+	// A value no row carries is refused with the goal check's sentence, naming
+	// the field, and the stored row does not move.
+	saved = settingsPatch(t, s, map[string]any{"agents.plan_reviewer.model": "deepseek/no-such-model"}, nil)
+	require.Equal(t, http.StatusBadRequest, saved.Code, saved.Body.String())
+	path, message := refusalOf(t, saved.Body.Bytes())
+	require.Equal(t, "agents.plan_reviewer.model", path)
+	require.Equal(t, "这个设置项要选一个已配置的模型", message)
+	require.Equal(t, pro.ID, stored(t).Agents.PlanReviewer.Model, "a refused write must not move the stored row")
+
+	// The row is two settings, not a whole subagent entry: any other field of
+	// it is not a registered path.
+	saved = settingsPatch(t, s, map[string]any{"agents.plan_reviewer.tools": "read_only"}, nil)
+	require.Equal(t, http.StatusBadRequest, saved.Code, saved.Body.String())
+	path, message = refusalOf(t, saved.Body.Bytes())
+	require.Equal(t, "agents.plan_reviewer.tools", path)
+	require.Equal(t, "没有这个配置项", message)
+}
+
 // TestSettingsGetMasksCredentials pins §0.20 on the wire: a credential the page
 // can show is reported as set plus its last four characters, and its plaintext
 // appears nowhere in the reply.

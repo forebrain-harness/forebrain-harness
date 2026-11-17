@@ -9266,6 +9266,11 @@ var settingsFieldList = []settingsField{
 	// subagent defaults rather than on the sidebar's subagent page.
 	{path: "agents.goal_evaluator.model", section: "agents", kind: settingsText},
 	{path: "agents.goal_evaluator.reasoning_effort", section: "agents", kind: settingsText},
+	// The exit-plan approval's reviewer is configured the same way (plan 313):
+	// one global row, system-dispatched, so the pair sits beside the goal
+	// check's rather than on the per-agent subagent page.
+	{path: "agents.plan_reviewer.model", section: "agents", kind: settingsText},
+	{path: "agents.plan_reviewer.reasoning_effort", section: "agents", kind: settingsText},
 
 	// 对等通信（只存库的段；行仅在检测到 Claude Code 时显示，见 meta）
 	{path: "peers.claude_code", section: "peers", kind: settingsBool, def: false},
@@ -9755,10 +9760,11 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: err.Error()})
 			return
 		}
-		// The /goal check's model is the same kind of choice one step
+		// The two system subagents' model rows — the /goal check's and the
+		// exit-plan reviewer's — are the same kind of choice one step
 		// narrower: a configured row and nothing else, because the engine
-		// resolves it globally (plan 299).
-		if err := normalizeGoalEvaluatorModelPath(&candidate, path); err != nil {
+		// resolves each globally (plans 299, 313).
+		if err := normalizeSystemModelPath(&candidate, path); err != nil {
 			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: err.Error()})
 			return
 		}
@@ -9834,22 +9840,35 @@ func normalizeMemoryModelPath(cfg *config.Root, path string) error {
 	return nil
 }
 
-// goalEvaluatorModelPath is the /goal check's model: one global row, chosen on
-// the settings page's subagent tab (plan 299).
-const goalEvaluatorModelPath = "agents.goal_evaluator.model"
+// The system subagents' model rows: the /goal check's (plan 299) and the
+// exit-plan approval's reviewer (plan 313). Each is one global row, chosen on
+// the settings page's subagent tab.
+const (
+	goalEvaluatorModelPath = "agents.goal_evaluator.model"
+	planReviewerModelPath  = "agents.plan_reviewer.model"
+)
 
-// normalizeGoalEvaluatorModelPath puts the goal check's model into the form the
-// engine resolves globally: the id of a configured model row (plan 299). Empty
-// is "follow the primary agent" and stays empty; a legacy "provider/model"
-// label resolves to the row it names; anything else is refused here rather
-// than by a goal check much later. The row id is what makes the choice global:
-// only the id branch of the reference resolution ignores the agent name, so a
-// stored label would silently become a per-agent reference.
-func normalizeGoalEvaluatorModelPath(cfg *config.Root, path string) error {
-	if cfg == nil || path != goalEvaluatorModelPath {
+// normalizeSystemModelPath puts one of those rows' models into the form the
+// engine resolves globally: the id of a configured model row. Empty is "no
+// global row" and stays empty; a legacy "provider/model" label resolves to the
+// row it names; anything else is refused here rather than by a round much
+// later. The row id is what makes the choice global: only the id branch of the
+// reference resolution ignores the agent name, so a stored label would silently
+// become a per-agent reference.
+func normalizeSystemModelPath(cfg *config.Root, path string) error {
+	if cfg == nil {
 		return nil
 	}
-	ref := strings.TrimSpace(cfg.Agents.GoalEvaluator.Model)
+	var row *config.SubagentConfig
+	switch path {
+	case goalEvaluatorModelPath:
+		row = &cfg.Agents.GoalEvaluator
+	case planReviewerModelPath:
+		row = &cfg.Agents.PlanReviewer
+	default:
+		return nil
+	}
+	ref := strings.TrimSpace(row.Model)
 	if ref == "" {
 		return nil
 	}
@@ -9857,7 +9876,7 @@ func normalizeGoalEvaluatorModelPath(cfg *config.Root, path string) error {
 	if !ok {
 		return fmt.Errorf("这个设置项要选一个已配置的模型")
 	}
-	cfg.Agents.GoalEvaluator.Model = strings.TrimSpace(entry.ID)
+	row.Model = strings.TrimSpace(entry.ID)
 	return nil
 }
 
@@ -9872,8 +9891,9 @@ func settingsCandidateLoads(candidate config.Root) error {
 	// The clone is a JSON round trip and the model table rides on the root as a
 	// runtime field, so put the rows back — exactly as the candidate above got
 	// them from the configuration it was read from. The loader's checks resolve
-	// model references by row id (agents.goal_evaluator.model among them, plan
-	// 299), and a probe without the table would refuse every one of them: the
+	// model references by row id (agents.goal_evaluator.model and
+	// agents.plan_reviewer.model among them, plans 299, 313), and a probe
+	// without the table would refuse every one of them: the
 	// answer has to be the one the composed configuration gets, and that
 	// configuration carries the table (process.composeSectionsFrom).
 	probe.LLMModels = candidate.LLMModels
