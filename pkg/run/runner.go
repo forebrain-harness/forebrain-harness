@@ -975,10 +975,10 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		r.permRuntimeGet().SetGuardian(guardianLLM, "")
 	}
 	// Build per-type LLM clients for built-in typed subagents (explore, plan,
-	// verification, general-purpose) so each can use a dedicated provider/model
-	// configured under agents.definitions[<type>].llm_providers. Types without a
-	// dedicated definition fall through to the main agent's LLM transparently
-	// via the typedSubagentProviderLLM wrapper.
+	// verification, general-purpose) so each can run on the global model row
+	// agents.subagent_models names for it. Types without a row of their own fall
+	// through to the main agent's LLM transparently via the
+	// typedSubagentProviderLLM wrapper.
 	typeLLMs := make(map[string]llm.LLM)
 	for _, typeName := range agent.PublicTypeNames() {
 		if !appcfg.HasOwnModelChoice(r.Config(), typeName) {

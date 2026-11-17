@@ -402,11 +402,9 @@ func TestRegisterSubagentToolOmitsTheFamilyWhenSubagentsAreDisabled(t *testing.T
 // Plan review is dispatched because the user asked for it, so it runs with
 // agents.defaults.enable_subagent unset (which means off).
 func TestRunPlanReviewSubagentRunsWithSubagentsDisabled(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{
 		Definitions: map[string]appcfg.AgentDefinition{
-			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-				{Provider: "openai", Model: "gpt-4o", APIKey: "key", BaseURL: "https://example.invalid"},
-			}},
+			"main": {DefaultModel: "llm-1"},
 		},
 	}}
 	probe := &dispatchProbe{}
@@ -428,15 +426,12 @@ func TestRunPlanReviewSubagentRunsWithSubagentsDisabled(t *testing.T) {
 // — with the effort that model's own configuration gives it — and the history
 // entry carries it, which is where the announcement read it from.
 func TestPlanReviewSpawnEventNamesTheChosenModel(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"}, appcfg.AgentLLMProviderConfig{
+		Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "key", BaseURL: "https://example.invalid",
+		Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
+	}), Agents: appcfg.AgentsSection{
 		Definitions: map[string]appcfg.AgentDefinition{
-			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-				{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
-				{
-					Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "key", BaseURL: "https://example.invalid",
-					Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
-				},
-			}},
+			"main": {DefaultModel: "llm-1"},
 		},
 	}}
 	probe := &dispatchProbe{}
@@ -1299,10 +1294,8 @@ func TestSubagentModelOverrideIgnoresAnEmptyModel(t *testing.T) {
 }
 
 func TestConfiguredModelClientRequiresTheExactPair(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-4o", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 	if _, err := ConfiguredModelClient(cfg, "main", "openai", "gpt-4o"); err != nil {
 		t.Fatalf("configured pair rejected: %v", err)
@@ -1322,11 +1315,8 @@ func TestConfiguredModelClientRequiresTheExactPair(t *testing.T) {
 // the single rule they share — a model this agent has no credentials for is
 // never silently swapped for another.
 func TestResolveAgentProviderSelectors(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-4o", APIKey: "key", BaseURL: "https://example.invalid"},
-			{Provider: "anthropic", Model: "claude-sonnet-4", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o", APIKey: "key", BaseURL: "https://example.invalid"}, appcfg.AgentLLMProviderConfig{Provider: "anthropic", Model: "claude-sonnet-4", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 	}}}
 
 	primary, err := resolveAgentProvider(cfg, "main", modelSelector{})
@@ -4315,14 +4305,12 @@ func (f *persistenceFixture) armForCompaction(systemPrompt string, contextTokens
 	owner := f.fac.Owner
 	owner.summaryLLM = f.llm
 	owner.transcript = transcriptSession{store: f.store, systemPrompt: systemPrompt}
-	owner.SetConfig(&appcfg.Root{
+	owner.SetConfig(&appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "unused-model", APIKey: "k", BaseURL: "https://example.invalid"}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				// A constructable client for the compaction's fallback path; the
 				// conversation summarizer answers before it is ever dialed.
-				"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-					{Provider: "openai", Model: "unused-model", APIKey: "k", BaseURL: "https://example.invalid"},
-				}},
+				"main": {DefaultModel: "llm-1"},
 			},
 			Defaults: appcfg.AgentDefaults{ContextInject: appcfg.ContextInjectConfig{ModelContextTokens: contextTokens}},
 		},
@@ -5203,13 +5191,9 @@ func TestSubagentUsageSnapshotIsPublishedForItsOwnView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
-		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{SubagentModels: map[string]appcfg.SubagentConfig{"explore": {Model: "llm-2"}}, Definitions: map[string]appcfg.AgentDefinition{
+		"main":    {Primary: true, DefaultModel: "llm-1"},
+		"explore": {},
 	}}}
 	probe := &budgetEventProbe{}
 	owner := &Runner{
@@ -5310,13 +5294,9 @@ func TestSubagentBudgetEventFiledOncePerResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
-		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{SubagentModels: map[string]appcfg.SubagentConfig{"explore": {Model: "llm-2"}}, Definitions: map[string]appcfg.AgentDefinition{
+		"main":    {Primary: true, DefaultModel: "llm-1"},
+		"explore": {},
 	}}}
 	probe := &budgetEventProbe{}
 	owner := &Runner{
@@ -5373,13 +5353,9 @@ func TestSubagentContextBudgetReadsItsWorkerSession(t *testing.T) {
 	}, "deepseek-v3.2", `{"input_tokens":12000,"output_tokens":800}`); err != nil {
 		t.Fatal(err)
 	}
-	fixture.fac.Owner.SetConfig(&appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
-		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
+	fixture.fac.Owner.SetConfig(&appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{SubagentModels: map[string]appcfg.SubagentConfig{"explore": {Model: "llm-2"}}, Definitions: map[string]appcfg.AgentDefinition{
+		"main":    {Primary: true, DefaultModel: "llm-1"},
+		"explore": {},
 	}}})
 	root := fixture.fac.subagentScopeRoot()
 	if err := agent.AppendHistory(root, agent.HistoryEntry{
@@ -6906,7 +6882,10 @@ func TestRegisterSubagentToolHonoursThePrimaryAgentSwitch(t *testing.T) {
 // and a second one it disabled, which is what the enum it is prompted with has
 // to reflect.
 func subagentCustomConfig() *appcfg.Root {
-	return &appcfg.Root{Agents: appcfg.AgentsSection{
+	return &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "deepseek", Model: "deepseek-v4-flash",
+		APIKey: "key", BaseURL: "http://flash.test/v1",
+	}), Agents: appcfg.AgentsSection{
 		Defaults: appcfg.AgentDefaults{EnableSubagent: boolPtr(true)},
 		Definitions: map[string]appcfg.AgentDefinition{
 			"main": {
@@ -6914,10 +6893,7 @@ func subagentCustomConfig() *appcfg.Root {
 				// The model a subagent's `model:` reference names has to be a
 				// row this agent actually holds: a reference that resolves to
 				// nothing pins nothing (plan 261).
-				LLMProviders: []appcfg.AgentLLMProviderConfig{{
-					Provider: "deepseek", Model: "deepseek-v4-flash",
-					APIKey: "key", BaseURL: "http://flash.test/v1",
-				}},
+				DefaultModel: "llm-1",
 				Subagents: []appcfg.SubagentConfig{
 					{Name: "verification", Enabled: boolPtr(false)},
 					{
@@ -7017,7 +6993,7 @@ func TestCustomSubagentModelAndEffortReachTheEntry(t *testing.T) {
 	}
 	// The pin carries the row, not just the pair: a client built for this run
 	// must reach the configured row, and the same pair may be configured twice.
-	if want := appcfg.LegacyLLMModelID("deepseek", "deepseek-v4-flash", "http://flash.test/v1", ""); pinned.ModelID != want {
+	if want := "llm-1"; pinned.ModelID != want {
 		t.Fatalf("the run's pinned model id = %q, want the configured row %q", pinned.ModelID, want)
 	}
 	if len(probe.spawned) != 1 {
@@ -7054,16 +7030,13 @@ func TestSubagentModelPinReachesItsRowsEndpoint(t *testing.T) {
 	defer second.Close()
 	t.Setenv("FOREBRAIN_TWIN_PIN_TEST_KEY", "test-key")
 	key := "${FOREBRAIN_TWIN_PIN_TEST_KEY}"
-	secondID := appcfg.LegacyLLMModelID("openai", "gpt-5", second.URL+"/v1", "")
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+	secondID := "llm-2"
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5", APIKey: key, BaseURL: first.URL + "/v1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5", APIKey: key, BaseURL: second.URL + "/v1"}), Agents: appcfg.AgentsSection{
 		Defaults: appcfg.AgentDefaults{EnableSubagent: boolPtr(true)},
 		Definitions: map[string]appcfg.AgentDefinition{
 			"main": {
-				Primary: true,
-				LLMProviders: []appcfg.AgentLLMProviderConfig{
-					{Provider: "openai", Model: "gpt-5", APIKey: key, BaseURL: first.URL + "/v1"},
-					{Provider: "openai", Model: "gpt-5", APIKey: key, BaseURL: second.URL + "/v1"},
-				},
+				Primary:      true,
+				DefaultModel: "llm-1",
 				Subagents: []appcfg.SubagentConfig{{
 					Name: "repo-scout", Description: "Finds the files a task touches", Model: secondID,
 				}},
@@ -7185,7 +7158,7 @@ func TestDispatchPinsTheSameModelItRecords(t *testing.T) {
 		t.Fatalf("dispatchSubagent: %v", err)
 	}
 	want := SubagentModelOverride{
-		ModelID:  appcfg.LegacyLLMModelID("deepseek", "deepseek-v4-flash", "http://flash.test/v1", ""),
+		ModelID:  "llm-1",
 		Provider: prep.entry.ModelProvider,
 		Model:    prep.entry.Model,
 		Effort:   prep.entry.ReasoningEffort,
@@ -7732,8 +7705,7 @@ func TestSteerRunningSubagentLeavesTheSurfaceAlone(t *testing.T) {
 
 // subagentRecordRowFactory configures one provider/model twice — two rows that
 // differ by endpoint and key alone. The rows live in the install's model table
-// (cfg.LLMModels) because a definition's llm_providers list has its ids
-// rewritten to a content hash.
+// (cfg.LLMModels), which is where every model a run can pin comes from.
 func subagentRecordRowFactory() Factory {
 	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
 		{ID: "row-1", Provider: "openai", Model: "gpt-4o", BaseURL: "http://one.test/v1", APIKey: "key-one"},
@@ -9094,12 +9066,10 @@ func TestSubagentPinKeepsTheRowsCapsThroughExecAndContinuation(t *testing.T) {
 func TestUsableModelsLegacyHandOffNeedsCredentials(t *testing.T) {
 	legacyCfg := func(key string) *appcfg.Root {
 		on := true
-		return &appcfg.Root{Agents: appcfg.AgentsSection{
+		return &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "legacy-m", BaseURL: "https://legacy.test/v1", APIKey: key}), Agents: appcfg.AgentsSection{
 			Defaults: appcfg.AgentDefaults{EnableSubagent: &on},
 			Definitions: map[string]appcfg.AgentDefinition{
-				"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-					{Provider: "openai", Model: "legacy-m", BaseURL: "https://legacy.test/v1", APIKey: key},
-				}},
+				"main": {DefaultModel: "llm-1"},
 			},
 		}}
 	}
@@ -9300,7 +9270,7 @@ func TestHandOffPinnedEffortReachesTheOverride(t *testing.T) {
 		return &appcfg.Root{Agents: appcfg.AgentsSection{
 			Defaults: appcfg.AgentDefaults{EnableSubagent: &on},
 			Definitions: map[string]appcfg.AgentDefinition{
-				"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{}},
+				"main": {},
 			},
 		}}
 	}

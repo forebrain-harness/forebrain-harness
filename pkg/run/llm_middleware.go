@@ -96,11 +96,6 @@ func NewLLMForAgentConfig(cfg *AgentConfigYAML) (llm.LLM, error) {
 		return nil, fmt.Errorf("nil agent config")
 	}
 	if len(cfg.LLMChain) == 0 {
-		if err := prepareAgentLLMChain(cfg); err != nil {
-			return nil, err
-		}
-	}
-	if len(cfg.LLMChain) == 0 {
 		// The same fact as an unresolvable selection: this agent has no model
 		// to run a turn on.
 		return nil, errModelNotConfigured

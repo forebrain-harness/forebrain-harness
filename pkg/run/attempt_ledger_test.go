@@ -141,8 +141,8 @@ func TestLLMAttemptLedgerFillsFromASupervisedRun(t *testing.T) {
 	model := &ledgerOverloadedLLM{}
 	restore := SetLLMOverrideForTest(model)
 	defer restore()
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: state.NewSessionStore(db, "main")}).WithConfig(cfg), FileResolver: PathResolver{}}
 	r.RunRT = runs

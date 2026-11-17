@@ -744,6 +744,9 @@ const (
 	goalCheckRowProvider = "deepseek"
 	goalCheckRowModel    = "deepseek-v4-flash"
 	goalCheckRowEffort   = "high"
+	// goalPrimaryRowID is the primary agent's own row: present so the fixture has
+	// a model the check must not use.
+	goalPrimaryRowID = "llm-primary-row"
 )
 
 // goalCheckConfig is an install whose settings page configured the goal
@@ -767,14 +770,17 @@ func goalCheckConfig() *appcfg.Root {
 				APIKey:   "sk-goal-check",
 				Caps:     appcfg.LLMModelCaps{DefaultEffort: goalCheckRowEffort},
 			},
+			{
+				ID: goalPrimaryRowID, Provider: "zhipuai", Model: "glm-5.3",
+				BaseURL: "https://example.invalid", APIPath: "/chat/completions", APIKey: "key",
+			},
 		},
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
 					Primary: true,
-					LLMProviders: []appcfg.AgentLLMProviderConfig{
-						{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
-					},
+					// The primary agent's own row is the table's third one.
+					DefaultModel: goalPrimaryRowID,
 				},
 			},
 			GoalEvaluator: appcfg.SubagentConfig{Model: goalCheckRowID},

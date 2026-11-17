@@ -281,14 +281,14 @@ func TestRunnerRunContentOverwritesErrorUsageWithWholeLoopTotal(t *testing.T) {
 func TestRunnerLoadsPrimaryAgentWithoutItsOwnProvider(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
-	cfg := appcfg.Root{
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "gpt-main",
+		APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
-				"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-					Provider: "openai", Model: "gpt-main",
-					APIKey: "${OPENAI_API_KEY}", BaseURL: "http://localhost:0/v1",
-				}}},
-				// No LLMProviders of its own.
+				"main": {Primary: true, DefaultModel: "llm-1"},
+				// No default_model of its own.
 				"review": {Primary: true},
 			},
 		},
@@ -317,11 +317,11 @@ func TestRunnerLoadsPrimaryAgentWithoutItsOwnProvider(t *testing.T) {
 // /status and /model while the runtime was running a. This is the single
 // place the two must agree.
 func TestPrimaryModelExpandsTheModelsList(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai",
-			Models:   appcfg.StringList{"gpt-5.4", "gpt-5.5"},
-		}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Models:   appcfg.StringList{"gpt-5.4", "gpt-5.5"},
+	}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 
 	provider, model := PrimaryModel(&Runner{Deps: (&Deps{AgentName: "main"}).WithConfig(cfg)})
@@ -331,8 +331,8 @@ func TestPrimaryModelExpandsTheModelsList(t *testing.T) {
 }
 
 func TestPrimaryModelFallsBackToMainAndNil(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main"}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-main"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 
 	// An empty AgentName resolves to main, the same fallback the runtime uses.
@@ -1972,12 +1972,20 @@ func TestMCPStartupIdleForReportsWhatIsRunning(t *testing.T) {
 // primaryModelTestKeyEnv is the env var the fixtures below expand api_key from.
 const primaryModelTestKeyEnv = "FOREBRAIN_PRIMARY_MODEL_TEST_KEY"
 
-// newPrimaryModelRoot builds an in-memory config whose main agent runs the
-// given provider entries in order.
+// newPrimaryModelRoot builds an in-memory config whose model table holds the
+// given entries in order — row ids llm-1, llm-2, … — and whose main agent runs
+// the first of them, the shape a definition's own provider list used to give.
 func newPrimaryModelRoot(entries ...appcfg.AgentLLMProviderConfig) *appcfg.Root {
-	return &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: entries},
-	}}}
+	root := &appcfg.Root{
+		LLMModels: modelRowsForTest(entries...),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true},
+		}},
+	}
+	if len(root.LLMModels) > 0 {
+		root.Agents.Definitions["main"] = appcfg.AgentDefinition{Primary: true, DefaultModel: root.LLMModels[0].ID}
+	}
+	return root
 }
 
 func primaryModelEntry(provider, model, apiKey, baseURL string, params appcfg.LLMRequestParams) appcfg.AgentLLMProviderConfig {
@@ -2100,7 +2108,7 @@ func TestLoadRefreshesPinnedProviderDetails(t *testing.T) {
 	}
 	// The config itself is not rewritten to the effective entry: the pinned
 	// empty effort overlay must not clear the file's effort.
-	if got := appcfg.ReasoningEffort(rotated.Agents.Definitions["main"].LLMProviders[0].Params); got != "high" {
+	if got := appcfg.ReasoningEffort(rotated.LLMModels[0].Params); got != "high" {
 		t.Fatalf("reloaded config entry's effort was cleared: %q", got)
 	}
 }
@@ -2208,9 +2216,9 @@ func TestSetPrimaryModelRollsBackOnLoadFailure(t *testing.T) {
 
 func TestLoadResetsPinWhenAgentChanges(t *testing.T) {
 	key := "${" + primaryModelTestKeyEnv + "}"
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main":   {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{primaryModelEntry("openai", "gpt-main", key, "http://main.test/v1", nil)}},
-		"review": {LLMProviders: []appcfg.AgentLLMProviderConfig{primaryModelEntry("anthropic", "claude-r", key, "http://r.test/v1", nil)}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(primaryModelEntry("openai", "gpt-main", key, "http://main.test/v1", nil), primaryModelEntry("anthropic", "claude-r", key, "http://r.test/v1", nil)), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main":   {Primary: true, DefaultModel: "llm-1"},
+		"review": {DefaultModel: "llm-2"},
 	}}}
 	t.Setenv(primaryModelTestKeyEnv, "test-key")
 	r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main"}).WithConfig(cfg)}
@@ -2229,9 +2237,11 @@ func TestLoadResetsPinWhenAgentChanges(t *testing.T) {
 	// than serving the old agent's runtime under the new tenant stores. The
 	// broken entry uses a provider no catalog knows, so no environment
 	// variable can make it build.
-	cfg.Agents.Definitions["broken-agent"] = appcfg.AgentDefinition{
-		LLMProviders: []appcfg.AgentLLMProviderConfig{primaryModelEntry("unknownprov", "gpt-broken", "k", "http://b.test/v1", nil)},
-	}
+	broken := primaryModelEntry("unknownprov", "gpt-broken", "k", "http://b.test/v1", nil)
+	cfg.LLMModels = append(cfg.LLMModels, appcfg.LLMModelConfig{
+		ID: "llm-broken", Provider: broken.Provider, Model: broken.Model, APIKey: broken.APIKey, BaseURL: broken.BaseURL,
+	})
+	cfg.Agents.Definitions["broken-agent"] = appcfg.AgentDefinition{DefaultModel: "llm-broken"}
 	r.AgentName = "broken-agent"
 	err := r.Load()
 	if !IsPrimaryModelRuntimeUncertain(err) {
@@ -2362,11 +2372,8 @@ func newSessionRoutingRunner(t *testing.T, override llm.LLM) (*Runner, *state.Se
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	store := state.NewSessionStore(db, "main")
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-a", APIKey: "${FOREBRAIN_SESSION_ROUTING_TEST_KEY}", BaseURL: "http://a.test/v1"},
-			{Provider: "openai", Model: "gpt-b", APIKey: "${FOREBRAIN_SESSION_ROUTING_TEST_KEY}", BaseURL: "http://b.test/v1"},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-a", APIKey: "${FOREBRAIN_SESSION_ROUTING_TEST_KEY}", BaseURL: "http://a.test/v1"}, appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-b", APIKey: "${FOREBRAIN_SESSION_ROUTING_TEST_KEY}", BaseURL: "http://b.test/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	if override != nil {
 		restore := SetLLMOverrideForTest(override)
@@ -2587,16 +2594,16 @@ func serializeToolTable(tools []*llm.Tool) string {
 // §8.5). CodeIntelTool is computed once at composition time, never re-derived
 // on reload.
 func TestLSPToolTableStableAcrossServerChanges(t *testing.T) {
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "qwen-test",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "qwen-test",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -2745,10 +2752,10 @@ func TestCodingLoadKeepsTheWorktreesDirectoryIgnored(t *testing.T) {
 		if out, err := exec.Command("git", "-C", project, "init", "-q").CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v\n%s", err, out)
 		}
-		cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai", Model: "qwen-test", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
-			}}},
+		cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+			Provider: "openai", Model: "qwen-test", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
+		}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {DefaultModel: "llm-1"},
 		}}}
 		r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main", ProjectType: projectType, ProjectRoot: project}).WithConfig(cfg)}
 		if err := r.Load(); err != nil {
@@ -2772,14 +2779,14 @@ func TestCodingLoadKeepsTheWorktreesDirectoryIgnored(t *testing.T) {
 // that moves breaks the prefix cache of every existing coding conversation.
 func TestSystemPromptFollowsProjectType(t *testing.T) {
 	newRunner := func(projectType string) *Runner {
-		cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+			Provider: "openai",
+			Model:    "qwen-test",
+			APIKey:   "test-key",
+			BaseURL:  "http://127.0.0.1:9/v1",
+		}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 			"main": {
-				LLMProviders: []appcfg.AgentLLMProviderConfig{{
-					Provider: "openai",
-					Model:    "qwen-test",
-					APIKey:   "test-key",
-					BaseURL:  "http://127.0.0.1:9/v1",
-				}},
+				DefaultModel: "llm-1",
 			},
 		}}}
 		r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main", ProjectType: projectType}).WithConfig(cfg)}

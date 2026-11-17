@@ -280,8 +280,8 @@ func TestConversationSummaryRequestStartsLikeTheConversation(t *testing.T) {
 	model := &recordingTextLLM{}
 	restore := SetLLMOverrideForTest(model)
 	defer restore()
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg), FileResolver: PathResolver{}}
 	if err := r.Load(); err != nil {
@@ -431,8 +431,8 @@ func TestSummaryChainHealsRefusedImage(t *testing.T) {
 	provider := &refusingImageSummaryLLM{}
 	restore := SetLLMOverrideForTest(provider)
 	defer restore()
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg), FileResolver: PathResolver{}}
 	if err := r.Load(); err != nil {
@@ -481,14 +481,20 @@ func TestSummaryChainHealsRefusedImage(t *testing.T) {
 // agent's 200k window and hit the provider's "context too long" before any
 // compaction ran.
 func TestCompactionSizesATypedSubagentByItsOwnModel(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
-		}},
-		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
-		}},
-	}}}
+	cfg := &appcfg.Root{
+		LLMModels: modelRowsForTest(
+			appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
+			appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
+		),
+		Agents: appcfg.AgentsSection{
+			Definitions: map[string]appcfg.AgentDefinition{
+				"main": {Primary: true, DefaultModel: "llm-1"},
+			},
+			SubagentModels: map[string]appcfg.SubagentConfig{
+				"explore": {Model: "llm-2"},
+			},
+		},
+	}
 	r := &Runner{Deps: (&Deps{}).WithConfig(cfg)}
 
 	// The context an explore subagent's own calls run under: its subtype, a

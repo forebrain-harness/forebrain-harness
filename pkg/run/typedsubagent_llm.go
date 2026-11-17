@@ -11,10 +11,10 @@ import (
 )
 
 // typedSubagentProviderLLM routes LLM Execute calls to a type-specific LLM
-// client when the context carries a subagent type that has a dedicated provider
-// configured (agents.definitions[<type>].llm_providers in forebrain.yaml). When no
-// dedicated LLM exists for the resolved type, the call falls through to the
-// inner (main agent) LLM, preserving the default behaviour.
+// client when the context carries a subagent type that has its own global model
+// row (agents.subagent_models.<type>). When no dedicated LLM exists for the
+// resolved type, the call falls through to the inner (main agent) LLM,
+// preserving the default behaviour.
 //
 // This wrapper sits below typedSubagentPromptLLM and
 // typedSubagentToolFilterLLM in the chain so that system-prompt replacement and

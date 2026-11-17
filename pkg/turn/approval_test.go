@@ -778,9 +778,8 @@ func TestPendingExitPlanRequestCarriesPlanReviewsAndModels(t *testing.T) {
 // whole URL. Two rows of one provider/model are two offers, each naming its
 // own endpoint.
 func TestPlanReviewModelOptionsCarryEachRowsEndpoint(t *testing.T) {
-	// The rows come from the install's model table, the one source whose ids
-	// are kept verbatim; an id written into a definition's llm_providers list
-	// is rewritten to a content hash.
+	// The rows come from the install's model table, the one source of models
+	// and of the ids a reference names.
 	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
 		{ID: "row-1", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://one.test"},
 		{ID: "row-2", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://two.test", APIPath: "/beta/chat/completions"},

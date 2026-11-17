@@ -136,9 +136,15 @@ func (r *recordingSlashHandlers) ModelSettings(sessionID string) (ModelSettings,
 	if r.settings != nil {
 		return r.settings(sessionID)
 	}
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5"}, {Provider: "deepseek", Model: "deepseek-chat"}}},
-	}}}
+	cfg := &appcfg.Root{
+		LLMModels: turnModelRows(
+			appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5"},
+			appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-chat"},
+		),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true},
+		}},
+	}
 	return ModelSettings{Config: cfg, AgentName: "main", Selection: r.selection}, nil
 }
 func (r *recordingSlashHandlers) SelectModel(_ context.Context, sessionID string, choice ModelChoice, effort *string) error {
@@ -366,14 +372,18 @@ func TestUnknownCommandSuggestionsAndBareSlashCatalog(t *testing.T) {
 // in the order the configuration stores them.
 func TestModelChoicesAreTheInstallWideModels(t *testing.T) {
 	codex := "gpt-5.3-co" + "dex"
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.1"},
-			{Provider: "openai", Model: codex},
-			{Provider: "openai", Model: "gpt-5.4", Models: appcfg.StringList{"gpt-5.4", "gpt-5.5"}},
+	cfg := appcfg.Root{
+		LLMModels: turnModelRows(
+			appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.1"},
+			appcfg.AgentLLMProviderConfig{Provider: "openai", Model: codex},
+			appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5.4", Models: appcfg.StringList{"gpt-5.4", "gpt-5.5"}},
+			appcfg.AgentLLMProviderConfig{Provider: "anthropic", Model: "claude-sonnet-4-5"},
+		),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main":   {Primary: true},
+			"writer": {},
 		}},
-		"writer": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "anthropic", Model: "claude-sonnet-4-5"}}},
-	}}}
+	}
 	want := []string{"anthropic/claude-sonnet-4-5", "openai/" + codex, "openai/gpt-5.4", "openai/gpt-5.5", "zhipuai/glm-5.1"}
 	labels := func(choices []ModelChoice) []string {
 		out := make([]string, 0, len(choices))

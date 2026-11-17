@@ -551,13 +551,16 @@ func TestDiscoverOpenCodeModelsCarriesReasoningEfforts(t *testing.T) {
 // models.json's, trimmed to what the protocol's client can send.
 func TestModelChoicesReasoningEffortsForOpenCode(t *testing.T) {
 	installRepoCatalog(t)
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "opencode-go", Model: "glm-5.3", Models: appcfg.StringList{
+	cfg := appcfg.Root{
+		LLMModels: turnModelRows(appcfg.AgentLLMProviderConfig{
+			Provider: "opencode-go", Model: "glm-5.3", Models: appcfg.StringList{
 				"glm-5.3", "minimax-m3", "qwen3.8-max", "gemini-4-argon-contributor", "qwen3.7-plus",
-			}},
+			},
+		}),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true},
 		}},
-	}}}
+	}
 	byModel := map[string][]string{}
 	for _, choice := range ModelChoices(&cfg, "main") {
 		byModel[choice.Model] = choice.ReasoningEfforts
@@ -575,9 +578,12 @@ func TestModelChoicesReasoningEffortsForOpenCode(t *testing.T) {
 // levels its own catalog row names, not a scale invented here.
 func TestModelChoicesKeepCatalogEffortLevels(t *testing.T) {
 	installRepoCatalog(t)
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5"}}},
-	}}}
+	cfg := appcfg.Root{
+		LLMModels: turnModelRows(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5"}),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true},
+		}},
+	}
 	choices := ModelChoices(&cfg, "main")
 	require.Len(t, choices, 1)
 	hit, ok := llm.Lookup("openai", "gpt-5")
@@ -594,9 +600,12 @@ func TestModelChoicesShowsVendorListingDisplayName(t *testing.T) {
 	installRepoCatalog(t)
 	llm.SetBuiltinModels("qodercn", []llm.Model{{ID: "gfmodel", Name: "GLM-5.3-Flash"}})
 	t.Cleanup(func() { llm.SetBuiltinModels("qodercn", nil) })
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "qodercn", Model: "gfmodel"}}},
-	}}}
+	cfg := appcfg.Root{
+		LLMModels: turnModelRows(appcfg.AgentLLMProviderConfig{Provider: "qodercn", Model: "gfmodel"}),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true},
+		}},
+	}
 	choices := ModelChoices(&cfg, "main")
 	require.Len(t, choices, 1)
 	require.Equal(t, "qodercn/GLM-5.3-Flash", choices[0].Label)
@@ -611,12 +620,15 @@ func TestModelChoicesShowsVendorListingDisplayName(t *testing.T) {
 // from ever disagreeing.
 func TestModelChoicesCarryTheRowsConfiguredEffort(t *testing.T) {
 	installRepoCatalog(t)
-	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-5", Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`)},
-			{Provider: "openai", Model: "gpt-5.5"},
+	cfg := appcfg.Root{
+		LLMModels: turnModelRows(
+			appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5", Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`)},
+			appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5.5"},
+		),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true},
 		}},
-	}}}
+	}
 	choices := ModelChoices(&cfg, "main")
 	require.Len(t, choices, 2)
 	require.Equal(t, "high", choices[0].ConfiguredEffort)

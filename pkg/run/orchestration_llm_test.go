@@ -2357,16 +2357,16 @@ func TestUsageAccountingWrapperDoesNotAdvertiseCompactionForLocalClient(t *testi
 // merely by inspection.
 func TestConcurrentLoadAndPermissionEvaluationDoNotRace(t *testing.T) {
 	home := t.TempDir()
-	r := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{
+	r := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "qwen-test",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "qwen-test",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},

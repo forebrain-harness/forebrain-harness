@@ -379,10 +379,8 @@ func mainModelRunner(t *testing.T, store *state.SessionStore, client llm.LLM, si
 	t.Helper()
 	restore := SetLLMOverrideForTest(client)
 	t.Cleanup(restore)
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main", SessionStore: store}).WithConfig(cfg), Events: sink, FileResolver: PathResolver{}}
 	if err := r.Load(); err != nil {

@@ -365,24 +365,28 @@ func TestTypedSubagentPromptDoesNotOverrideMainThreadPrompt(t *testing.T) {
 // A surface that draws "which model is this subagent on" must resolve it the
 // same way the runtime routes the call, or the footer claims a model nothing is
 // running. SubagentOwnModel answers for the types the runtime builds a client
-// for — the ones with their own agents.definitions[<type>].llm_providers chain —
-// and reports false for every other type, which falls through to the primary.
+// for — the ones with a global row of their own
+// (agents.subagent_models.<type>) — and reports false for every other type,
+// which falls through to the primary.
 func TestSubagentOwnModelMatchesWhatTheRuntimeRoutes(t *testing.T) {
-	cfg := &appcfg.Root{}
-	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(
+		appcfg.AgentLLMProviderConfig{
 			Provider: "deepseek", Model: "deepseek-v4-flash",
 			Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"medium"}}`),
-		}}},
-		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
+		},
+		appcfg.AgentLLMProviderConfig{
 			Provider: "openai", Model: "gpt-4.1-mini",
 			Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"low"}}`),
-		}}},
+		},
+	)}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
 		// Configured but not a built-in type: the runtime never builds a client
 		// for it, so neither may the display.
-		"reviewer": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
-			Provider: "openai", Model: "gpt-4.1",
-		}}},
+		"reviewer": {},
+	}
+	cfg.Agents.SubagentModels = map[string]appcfg.SubagentConfig{
+		"explore": {Model: "llm-2"},
 	}
 	r := &Runner{Deps: (&Deps{}).WithConfig(cfg)}
 
@@ -392,7 +396,7 @@ func TestSubagentOwnModelMatchesWhatTheRuntimeRoutes(t *testing.T) {
 	}
 	// The row id travels with the pair: that is what the client a run builds is
 	// resolved by, since the same pair may be configured more than once.
-	if want := appcfg.LegacyLLMModelID("openai", "gpt-4.1-mini", "", ""); modelID != want {
+	if want := "llm-2"; modelID != want {
 		t.Fatalf("explore model id = %q, want %q", modelID, want)
 	}
 	// plan is a built-in type with no chain of its own: it runs on the primary

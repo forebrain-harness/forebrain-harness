@@ -230,16 +230,16 @@ func TestRunnerKeepsPrefixWhenSkillFilesChangeMidSession(t *testing.T) {
 	writeRunnerSkillFile(t, filepath.Join(home, "workspace", "skills", "first-skill", "SKILL.md"),
 		"name: first-skill\ndescription: Present before the session started", "First body")
 
-	r := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{
+	r := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "qwen-test",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "qwen-test",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -774,9 +774,9 @@ func TestRunnerSkillRootsAgreeBetweenCatalogAndDiscovery(t *testing.T) {
 	writeRunnerSkillFile(t, filepath.Join(workspace, "skills", "ws-only", "SKILL.md"),
 		`name: ws-only`+"\ndescription: Workspace-scope skill", "Workspace body")
 
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "m", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}), Agents: appcfg.AgentsSection{
 		Definitions: map[string]appcfg.AgentDefinition{
-			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "m", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
+			"main": {DefaultModel: "llm-1"},
 		},
 	}}
 	r := &Runner{Deps: (&Deps{Home: home, WorkspaceRoot: workspace, LaunchProject: launch, ProjectRoot: project}).WithConfig(cfg)}

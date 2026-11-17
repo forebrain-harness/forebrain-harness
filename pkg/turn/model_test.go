@@ -335,21 +335,64 @@ type modelSelectionFixture struct {
 	// nil means "the same as selection", which is what every existing fixture
 	// assumes.
 	live *ModelSelectionState
+	// rows is the install's model table the fixture's configuration resolves
+	// against. It is a table of its own because fb_llm_models is where a model
+	// is configured (plan 315), and a configuration document cannot carry one.
+	rows []appcfg.LLMModelConfig
 }
 
-// modelSelectionFixtureConfig is the /model fixture's configuration: two
-// distinct providers, so a picker has something to switch between.
-const modelSelectionFixtureConfig = "agents:\n  definitions:\n    main:\n      llm_providers:\n        - provider: openai\n          model: gpt-5\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://a.test/v1\n        - provider: deepseek\n          model: deepseek-chat\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://b.test/v1\n"
+// turnModelRows is how a fixture seeds the install's model table (plan 315):
+// one row per model an entry names — `model: [a, b]` expanding the way a
+// provider list used to — with the row ids llm-1, llm-2, … in order.
+func turnModelRows(entries ...appcfg.AgentLLMProviderConfig) []appcfg.LLMModelConfig {
+	var rows []appcfg.LLMModelConfig
+	for _, entry := range entries {
+		models := append(appcfg.StringList(nil), entry.Models...)
+		if len(models) == 0 && entry.Model != "" {
+			models = appcfg.StringList{entry.Model}
+		}
+		for _, model := range models {
+			rows = append(rows, appcfg.LLMModelConfig{
+				ID:          fmt.Sprintf("llm-%d", len(rows)+1),
+				Provider:    entry.Provider,
+				Model:       model,
+				BaseURL:     entry.BaseURL,
+				APIPath:     entry.APIPath,
+				APIKey:      entry.APIKey,
+				Params:      append(appcfg.LLMRequestParams(nil), entry.Params...),
+				URLVerbatim: entry.URLVerbatim,
+			})
+		}
+	}
+	return rows
+}
+
+// modelSelectionFixtureConfig is the /model fixture's configuration: main runs
+// the model table's first row.
+const modelSelectionFixtureConfig = "agents:\n  definitions:\n    main:\n      default_model: llm-1\n"
+
+// modelSelectionDocDefaultRow is the configuration document whose main agent
+// runs the model table's first row.
+const modelSelectionDocDefaultRow = "agents:\n  definitions:\n    main:\n      default_model: llm-1\n"
+
+// modelSelectionFixtureRows are the two models the /model fixture's picker
+// switches between: two distinct providers, in table order.
+func modelSelectionFixtureRows() []appcfg.LLMModelConfig {
+	return turnModelRows(
+		appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-5", APIKey: "${FOREBRAIN_TURN_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"},
+		appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_TURN_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"},
+	)
+}
 
 func newModelSelectionFixture(t *testing.T, selection ModelSelectionState) *modelSelectionFixture {
 	t.Helper()
-	return newModelSelectionFixtureWith(t, modelSelectionFixtureConfig, selection)
+	return newModelSelectionFixtureWith(t, modelSelectionFixtureConfig, selection, modelSelectionFixtureRows()...)
 }
 
 // newModelSelectionFixtureWith is newModelSelectionFixture over a configuration
 // document of the test's own: twin rows of one provider/model, each with its
 // own endpoint, need a document nothing else in the fixture assumes.
-func newModelSelectionFixtureWith(t *testing.T, doc string, selection ModelSelectionState) *modelSelectionFixture {
+func newModelSelectionFixtureWith(t *testing.T, doc string, selection ModelSelectionState, rows ...appcfg.LLMModelConfig) *modelSelectionFixture {
 	t.Helper()
 	cfgPath := filepath.Join(t.TempDir(), "forebrain.yaml")
 	t.Setenv("FOREBRAIN_TURN_MODEL_TEST_KEY", "test-key")
@@ -371,6 +414,7 @@ func newModelSelectionFixtureWith(t *testing.T, doc string, selection ModelSelec
 			Sessions:       store,
 		},
 	}
+	fx.rows = rows
 	h.settings = fx.modelSettings
 	return fx
 }
@@ -382,6 +426,7 @@ func (f *modelSelectionFixture) modelSettings(_ string) (ModelSettings, error) {
 	if err != nil {
 		return ModelSettings{}, err
 	}
+	cfg.LLMModels = f.rows
 	live := f.handler.selection
 	if f.live != nil {
 		live = *f.live
@@ -422,6 +467,7 @@ func (f *modelSelectionFixture) reloadConfig(t *testing.T) *appcfg.Root {
 	t.Helper()
 	cfg, err := loadPersistedDocumentForTest(f.cfgPath)
 	require.NoError(t, err)
+	cfg.LLMModels = f.rows
 	return &cfg
 }
 
@@ -461,7 +507,7 @@ func TestChooseModelAppliesLiveSelectionWithoutWritingTheConfigFile(t *testing.T
 	after, err := os.ReadFile(f.cfgPath)
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(before, after), "the shared config file changed:\nbefore:\n%s\nafter:\n%s", before, after)
-	require.Equal(t, "gpt-5", f.reloadConfig(t).Agents.Definitions["main"].LLMProviders[0].Model, "config order was rewritten")
+	require.Equal(t, "gpt-5", f.reloadConfig(t).LLMModels[0].Model, "config order was rewritten")
 }
 
 func TestChooseModelSameSelectionIsNoOp(t *testing.T) {
@@ -535,12 +581,14 @@ func TestChooseModelClassifiesSelectionOutcomes(t *testing.T) {
 
 // addConfigEntry appends a provider entry to the fixture's config file, for
 // tests that need a specific catalog model configured.
+// addConfigEntry adds one more model to the fixture's table: what a write path
+// does when a model is configured (plan 315: the table is the only store).
 func (f *modelSelectionFixture) addConfigEntry(t *testing.T, provider, model string) {
 	t.Helper()
-	entry := fmt.Sprintf("        - provider: %s\n          model: %s\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://c.test/v1\n", provider, model)
-	raw, err := os.ReadFile(f.cfgPath)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(f.cfgPath, append(raw, []byte(entry)...), 0o600))
+	f.rows = append(f.rows, turnModelRows(appcfg.AgentLLMProviderConfig{
+		Provider: provider, Model: model,
+		APIKey: "${FOREBRAIN_TURN_MODEL_TEST_KEY}", BaseURL: "http://c.test/v1",
+	})...)
 }
 
 // reasoningCapableOpenAIModel picks a catalog model that reasons, so the
@@ -632,9 +680,11 @@ func TestChooseModelUsesTheModelsOwnEffortLevels(t *testing.T) {
 // tell apart.
 func twinModelFixture(t *testing.T, selection ModelSelectionState) *modelSelectionFixture {
 	t.Helper()
-	return newModelSelectionFixtureWith(t, "agents:\n  definitions:\n    main:\n      llm_providers:\n"+
-		"        - provider: deepseek\n          model: deepseek-v4-flash\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://one.test\n"+
-		"        - provider: deepseek\n          model: deepseek-v4-flash\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://two.test\n          api_path: /beta/chat/completions\n", selection)
+	return newModelSelectionFixtureWith(t, "agents:\n  definitions:\n    main:\n      default_model: llm-1\n", selection,
+		turnModelRows(
+			appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "${FOREBRAIN_TURN_MODEL_TEST_KEY}", BaseURL: "http://one.test"},
+			appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "${FOREBRAIN_TURN_MODEL_TEST_KEY}", BaseURL: "http://two.test", APIPath: "/beta/chat/completions"},
+		)...)
 }
 
 // TestModelPickerTellsTwinRowsApart pins plan 261's first item: two rows of one
@@ -926,7 +976,7 @@ func TestModelPickerMarksTheDefaultModelEntry(t *testing.T) {
 	seed, err := os.ReadFile(f.cfgPath)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(f.cfgPath, append([]byte(""), bytes.Replace(seed,
-		[]byte("    main:\n"), []byte("    main:\n      default_model: deepseek/deepseek-chat\n"), 1)...), 0o600))
+		[]byte("      default_model: llm-1\n"), []byte("      default_model: llm-2\n"), 1)...), 0o600))
 
 	res := execModel(f.ctx)
 	require.True(t, res.Handled)
@@ -1027,18 +1077,18 @@ func installRowEfforts(t *testing.T, rowID, pair string, efforts []string) {
 func modelEffortFixture(t *testing.T, configured, pinned string) *modelSelectionFixture {
 	t.Helper()
 	m := reasoningCapableModel(t)
-	params := ""
-	if configured != "" {
-		params = "          params:\n            reasoning:\n              effort: " + configured + "\n"
+	entry := appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: m.APIModel,
+		APIKey: "${FOREBRAIN_TURN_MODEL_TEST_KEY}", BaseURL: "http://c.test/v1",
 	}
-	doc := "agents:\n  definitions:\n    main:\n      llm_providers:\n" +
-		"        - provider: openai\n          model: " + m.APIModel +
-		"\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://c.test/v1\n" + params
+	if configured != "" {
+		entry.Params = appcfg.WithReasoningEffort(nil, configured)
+	}
 	selection := ModelSelectionState{Provider: "openai", Model: m.APIModel, Set: true}
 	if pinned != "" {
 		selection.Effort = pinned
 	}
-	return newModelSelectionFixtureWith(t, doc, selection)
+	return newModelSelectionFixtureWith(t, modelSelectionDocDefaultRow, selection, turnModelRows(entry)...)
 }
 
 func effortPickerItems(t *testing.T, f *modelSelectionFixture, provider, model string) []PickerItem {
@@ -1087,10 +1137,12 @@ func TestModelEffortPickerMatchesTheWebChipOrder(t *testing.T) {
 // row listed them.
 func TestModelEffortPickerOrdersTheRowsOwnLevelsWhenTheCatalogHasNone(t *testing.T) {
 	const model = "gpt-effort-none"
-	doc := "agents:\n  definitions:\n    main:\n      llm_providers:\n" +
-		"        - provider: openai\n          model: " + model +
-		"\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://c.test/v1\n"
-	f := newModelSelectionFixtureWith(t, doc, ModelSelectionState{Provider: "openai", Model: model, Set: true})
+	f := newModelSelectionFixtureWith(t, modelSelectionDocDefaultRow,
+		ModelSelectionState{Provider: "openai", Model: model, Set: true},
+		turnModelRows(appcfg.AgentLLMProviderConfig{
+			Provider: "openai", Model: model,
+			APIKey: "${FOREBRAIN_TURN_MODEL_TEST_KEY}", BaseURL: "http://c.test/v1",
+		})...)
 	installRowEfforts(t, f.choiceID(t, "openai", model), "openai/"+model,
 		[]string{"high", "none", "medium", "low"})
 

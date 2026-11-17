@@ -53,9 +53,8 @@ type LLMProviderYAML struct {
 }
 
 type AgentConfigYAML struct {
-	Description  string             `yaml:"description" json:"description"`
-	LLMProviders []LLMProviderYAML  `yaml:"llm_providers,omitempty" json:"llm_providers,omitempty"`
-	LLMChain     []*LLMProviderYAML `yaml:"-" json:"-"`
+	Description string             `yaml:"description" json:"description"`
+	LLMChain    []*LLMProviderYAML `yaml:"-" json:"-"`
 }
 
 func (p *LLMProviderYAML) UnmarshalYAML(n *yaml.Node) error {
@@ -111,12 +110,10 @@ func (p *LLMProviderYAML) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
-// LoadAgentConfigsFromRoot builds one entry per agent definition, resolving each
-// chain through resolvedAgentProviders so an agent that declares no providers
-// of its own inherits main's — the same fallback NewLLMForAgentType applies for
-// auxiliary agents. Without it, binding the runner to a primary agent that has
-// no llm_providers yet fails to load rather than running on main's provider
-// until the user configures one with /connect.
+// LoadAgentConfigsFromRoot builds one entry per agent definition from the
+// install-wide model table (resolvedAgentProviders): every agent reads the same
+// rows, and an empty table is an agent with no model to run on until the user
+// configures one with /connect.
 func LoadAgentConfigsFromRoot(cfg *appcfg.Root) (map[string]AgentConfigYAML, error) {
 	if cfg == nil || len(cfg.Agents.Definitions) == 0 {
 		return nil, fmt.Errorf("no agent definitions in config")
@@ -318,40 +315,15 @@ func resolvedAgentProviders(cfg *appcfg.Root, agentType string) []appcfg.AgentLL
 
 // effectiveDefaultProvider resolves the entry an empty model selection uses:
 // the answer the install-wide view gives for this agent
-// (appcfg.EffectiveDefaultLLMFor — its own default_model and legacy list
-// first, then main's, then the first configured row). A default_model that is
-// a legacy "provider/model" label nothing resolves to is an error naming the
-// value, the same verdict the loader refuses; a row id the model page deleted
-// falls back inside the view, so a deleted row cannot stop a run.
+// (appcfg.EffectiveDefaultLLMFor — its own choice, then main's, then the first
+// configured row). A reference the view cannot resolve is skipped inside the
+// view, so a deleted row cannot stop a run; with nothing configured at all the
+// answer is errModelNotConfigured, which callers read as "this feature is off".
 func effectiveDefaultProvider(cfg *appcfg.Root, agentType string) (appcfg.AgentLLMProviderConfig, error) {
 	if entry := appcfg.EffectiveDefaultLLMFor(cfg, agentType); entry != nil {
 		return *entry, nil
 	}
-	if ref := danglingDefaultModelLabel(cfg, agentType); ref != "" {
-		return appcfg.AgentLLMProviderConfig{}, fmt.Errorf("%w: agents.definitions.%s.default_model %q matches no llm_providers entry",
-			errModelNotConfigured, agentType, ref)
-	}
 	return appcfg.AgentLLMProviderConfig{}, errModelNotConfigured
-}
-
-// danglingDefaultModelLabel returns the legacy label the effective default
-// failed on, or "". It follows the ownership EffectiveDefaultLLMFor does: the
-// agent's own default_model when its definition names one, main's otherwise —
-// and only a label (one carrying a slash), never a row id.
-func danglingDefaultModelLabel(cfg *appcfg.Root, agentType string) string {
-	if def, ok := cfg.Agents.Definitions[agentType]; ok {
-		if ref := strings.TrimSpace(def.DefaultModel); strings.Contains(ref, "/") {
-			return ref
-		}
-	}
-	if agentType != "main" {
-		if def, ok := cfg.Agents.Definitions["main"]; ok {
-			if ref := strings.TrimSpace(def.DefaultModel); strings.Contains(ref, "/") {
-				return ref
-			}
-		}
-	}
-	return ""
 }
 
 func llmYAMLsFromResolved(cfgs []appcfg.AgentLLMProviderConfig) []*LLMProviderYAML {
@@ -372,49 +344,6 @@ func llmYAMLsFromResolved(cfgs []appcfg.AgentLLMProviderConfig) []*LLMProviderYA
 			MaxOutputTokens: c.MaxOutputTokens,
 			URLVerbatim:     c.URLVerbatim,
 		}
-	}
-	return out
-}
-
-func prepareAgentLLMChain(y *AgentConfigYAML) error {
-	if len(y.LLMProviders) == 0 {
-		return fmt.Errorf("missing llm_providers")
-	}
-	chain := make([]*LLMProviderYAML, 0, len(y.LLMProviders))
-	for i := range y.LLMProviders {
-		for _, p := range expandLLMProviderYAML(y.LLMProviders[i]) {
-			cp := p
-			chain = append(chain, &cp)
-		}
-	}
-	y.LLMChain = chain
-	return nil
-}
-
-func expandLLMProviderYAML(p LLMProviderYAML) []LLMProviderYAML {
-	models := append(appcfg.StringList(nil), p.Models...)
-	if len(models) == 0 && strings.TrimSpace(p.Model) != "" {
-		models = appcfg.StringList{strings.TrimSpace(p.Model)}
-	}
-	if len(models) == 0 {
-		return []LLMProviderYAML{{
-			Provider: p.Provider,
-			APIKey:   p.APIKey,
-			BaseURL:  p.BaseURL,
-			APIPath:  p.APIPath,
-			Params:   append(appcfg.LLMRequestParams(nil), p.Params...),
-		}}
-	}
-	out := make([]LLMProviderYAML, 0, len(models))
-	for _, model := range models {
-		out = append(out, LLMProviderYAML{
-			Provider: p.Provider,
-			Model:    strings.TrimSpace(model),
-			APIKey:   p.APIKey,
-			BaseURL:  p.BaseURL,
-			APIPath:  p.APIPath,
-			Params:   append(appcfg.LLMRequestParams(nil), p.Params...),
-		})
 	}
 	return out
 }
@@ -2713,10 +2642,9 @@ func PrimaryModelForSession(r *Runner, store *state.SessionStore, sessionID stri
 // AgentModel names the model one agent of a conversation runs on, and the
 // reasoning effort its configuration gives that model, the way the runtime
 // routes its calls. subagent is nil for the primary agent. A subagent
-// dispatched with a model override runs on it; a typed subagent whose
-// definition has llm_providers runs on the first of them; the primary
-// agent, a fork and a typed subagent without a chain of its own run on the
-// conversation's model.
+// dispatched with a model override runs on it; a typed subagent with a global
+// model row of its own (agents.subagent_models) runs on it; the primary agent, a
+// fork and a typed subagent without a row run on the conversation's model.
 func AgentModel(r *Runner, conversationSessionID string, subagent *agent.HistoryEntry) (provider, model, effort string) {
 	if subagent != nil && strings.TrimSpace(subagent.Model) != "" {
 		provider = strings.TrimSpace(subagent.ModelProvider)

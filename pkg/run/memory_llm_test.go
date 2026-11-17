@@ -583,10 +583,10 @@ func TestPromptPrefixBlockOrderStable(t *testing.T) {
 // single 665,000-token, entirely uncacheable request.
 func TestMemoryStage1RolloutLimitIsBoundedByAbsoluteCap(t *testing.T) {
 	cfgFor := func(provider, model string) *appcfg.Root {
-		return &appcfg.Root{
+		return &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: provider, Model: model}),
 			Agents: appcfg.AgentsSection{
 				Definitions: map[string]appcfg.AgentDefinition{
-					"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: provider, Model: model}}},
+					"main": {DefaultModel: "llm-1"},
 				},
 			},
 		}

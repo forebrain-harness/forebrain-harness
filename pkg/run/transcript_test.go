@@ -734,8 +734,8 @@ func TestHistoryUsesTheFileResolverWiredAfterLoad(t *testing.T) {
 	model := &recordingTextLLM{}
 	restore := SetLLMOverrideForTest(model)
 	defer restore()
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	r := &Runner{Deps: (&Deps{Home: home, AgentName: "main", SessionStore: sessions}).WithConfig(cfg)}
 	require.NoError(t, r.Load())

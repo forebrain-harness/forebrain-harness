@@ -32,24 +32,19 @@ import (
 // type's own chain, then the conversation's model — with the reasoning effort
 // that same configuration gives the model it names.
 func TestAgentModelResolvesEachKindOfAgent(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid",
+		Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"xhigh"}}`),
+	}, appcfg.AgentLLMProviderConfig{
+		Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "key", BaseURL: "https://example.invalid",
+		Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
+	}, appcfg.AgentLLMProviderConfig{
+		Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "key", BaseURL: "https://example.invalid",
+		Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"medium"}}`),
+	}), Agents: appcfg.AgentsSection{SubagentModels: map[string]appcfg.SubagentConfig{"explore": {Model: "llm-3"}},
 		Definitions: map[string]appcfg.AgentDefinition{
-			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-				{
-					Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid",
-					Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"xhigh"}}`),
-				},
-				{
-					Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "key", BaseURL: "https://example.invalid",
-					Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
-				},
-			}},
-			"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-				{
-					Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "key", BaseURL: "https://example.invalid",
-					Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"medium"}}`),
-				},
-			}},
+			"main":            {DefaultModel: "llm-1"},
+			"explore":         {},
 			"general-purpose": {},
 		},
 	}}
@@ -72,8 +67,9 @@ func TestAgentModelResolvesEachKindOfAgent(t *testing.T) {
 		}
 	}
 
-	// A typed subagent whose definition has llm_providers runs on the first
-	// of them, with the effort that entry configures.
+	// A typed subagent with a global row of its own
+	// (agents.subagent_models.explore) runs on it, with the effort that row
+	// configures.
 	provider, model, effort = AgentModel(r, "session-1", &agent.HistoryEntry{AgentKind: "typed", AgentType: "explore"})
 	if provider != "deepseek" || model != "deepseek-v4-flash" || effort != "medium" {
 		t.Fatalf("typed with its own chain = %s/%s %s", provider, model, effort)
@@ -172,11 +168,11 @@ func TestNewLLMForAgentTypeNilConfig(t *testing.T) {
 func TestResolvedAgentProvidersIsInstallWide(t *testing.T) {
 	mainProv := appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"}
 	dedProv := appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o-mini"}
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(mainProv, dedProv),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
-				"main":           {LLMProviders: []appcfg.AgentLLMProviderConfig{mainProv}},
-				"goal-evaluator": {LLMProviders: []appcfg.AgentLLMProviderConfig{dedProv}},
+				"main":           {DefaultModel: "llm-1"},
+				"goal-evaluator": {DefaultModel: "llm-2"},
 			},
 		},
 	}
@@ -282,17 +278,17 @@ func TestNewLLMFromYAMLRequiresExplicitMainFields(t *testing.T) {
 }
 
 func TestRunnerLoadDoesNotRegisterEnableThinkingTool(t *testing.T) {
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "qwen-test",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+		Params:   appcfg.LLMRequestParams(`{"enable_thinking":true}`),
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "qwen-test",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-						Params:   appcfg.LLMRequestParams(`{"enable_thinking":true}`),
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -348,16 +344,16 @@ description: Project review mode`, "Project body")
 description: Commit message mode`, "Hot body")
 	writeRunnerSkillFile(t, filepath.Join(home, "skills", "shared-deck", "SKILL.md"), `name: shared-deck
 description: Deck helper`, "Cold body")
-	cfg := &appcfg.Root{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai",
+		Model:    "qwen-test",
+		APIKey:   "test-key",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{
 			Definitions: map[string]appcfg.AgentDefinition{
 				"main": {
-					LLMProviders: []appcfg.AgentLLMProviderConfig{{
-						Provider: "openai",
-						Model:    "qwen-test",
-						APIKey:   "test-key",
-						BaseURL:  "http://127.0.0.1:9/v1",
-					}},
+					DefaultModel: "llm-1",
 				},
 			},
 		},
@@ -574,11 +570,11 @@ func toolTableWithoutSkills(t *testing.T) string {
 	if err := safety.MarkTrusted(home, trusted); err != nil {
 		t.Fatalf("trust bare project: %v", err)
 	}
-	bare := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{
+	bare := &Runner{Deps: (&Deps{Home: home}).WithConfig(&appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: "openai", Model: "qwen-test", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
+	}),
 		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
-				Provider: "openai", Model: "qwen-test", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
-			}}},
+			"main": {DefaultModel: "llm-1"},
 		}},
 	})}
 	if err := bare.Load(); err != nil {
@@ -738,14 +734,10 @@ func TestLSPReminderNeedsSession(t *testing.T) {
 // and model AgentModel resolves from its history entry. The two drifting is
 // how a compaction ends up sized by a model the run never talks to.
 func TestAgentModelAndRoutingAgree(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{SubagentModels: map[string]appcfg.SubagentConfig{"explore": {Model: "llm-2"}},
 		Definitions: map[string]appcfg.AgentDefinition{
-			"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-				{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
-			}},
-			"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-				{Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "key", BaseURL: "https://example.invalid"},
-			}},
+			"main":            {Primary: true, DefaultModel: "llm-1"},
+			"explore":         {},
 			"general-purpose": {},
 		},
 	}}
@@ -801,13 +793,9 @@ func TestAgentModelAndRoutingAgree(t *testing.T) {
 // never by the primary model's. A subagent on a smaller model would otherwise
 // read "75%" of a window it does not have.
 func TestContextBudgetUsesEachAgentsOwnModel(t *testing.T) {
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
-		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"}, appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{SubagentModels: map[string]appcfg.SubagentConfig{"explore": {Model: "llm-2"}}, Definitions: map[string]appcfg.AgentDefinition{
+		"main":            {Primary: true, DefaultModel: "llm-1"},
+		"explore":         {},
 		"general-purpose": {},
 	}}}
 	r := &Runner{Deps: (&Deps{}).WithConfig(cfg)}
@@ -897,7 +885,7 @@ func TestContextBudgetUsesEachAgentsOwnModel(t *testing.T) {
 	// The configured auto-compact limit is part of the budget, for the
 	// The configured auto-compaction percent is part of the budget, for the
 	// subagent's window as much as the primary's.
-	limited := &appcfg.Root{Agents: cfg.Agents, Compact: appcfg.CompactSection{AutoCompactPercent: 50}}
+	limited := &appcfg.Root{LLMModels: cfg.LLMModels, Agents: cfg.Agents, Compact: appcfg.CompactSection{AutoCompactPercent: 50}}
 	rl := &Runner{Deps: (&Deps{}).WithConfig(limited)}
 	// Half of the primary's 1M window, and half of the explore agent's 128k.
 	primary, ok := ContextBudget(rl, "conversation-1", nil, 500000)
@@ -1011,7 +999,7 @@ func TestPrimaryModelStateForSessionPrefersTheConversationsRow(t *testing.T) {
 	// Adopting a row adopts the configured row it resolves to, id included: a
 	// row written before ids existed still names one (plan 261).
 	adopted := PrimaryModelState{
-		ModelID:  appcfg.LegacyLLMModelID("openai", "gpt-b", "http://b.test/v1", ""),
+		ModelID:  "llm-2",
 		Provider: "openai", Model: "gpt-b", Effort: "high", Set: true,
 	}
 	if got := PrimaryModelStateForSession(runner, store, "conv-never-pinned"); got != adopted {
@@ -1050,7 +1038,7 @@ func TestRowLessSessionModelMirrorsTurnEntry(t *testing.T) {
 		t.Fatalf("Ensure fresh: %v", err)
 	}
 	if got := RowLessSessionModel(runner, store, "fresh"); got != (PrimaryModelState{
-		ModelID:  appcfg.LegacyLLMModelID("openai", "gpt-b", "http://b.test/v1", ""),
+		ModelID:  "llm-2",
 		Provider: "openai", Model: "gpt-b", Effort: "high", Set: true,
 	}) {
 		t.Fatalf("row-less rule for a fresh conversation = %+v, want the most recently used openai/gpt-b/high", got)
@@ -1105,7 +1093,7 @@ func TestRowLessSessionModelMirrorsTurnEntry(t *testing.T) {
 func TestSessionModelRowFallsBackWhenItsRowIsGone(t *testing.T) {
 	runner, store := newSessionRoutingRunner(t, nil)
 	ctx := context.Background()
-	surviving := appcfg.LegacyLLMModelID("openai", "gpt-b", "http://b.test/v1", "")
+	surviving := "llm-2"
 
 	if err := store.Ensure(ctx, "deleted-id", "deleted-id"); err != nil {
 		t.Fatalf("Ensure deleted-id: %v", err)
@@ -1415,31 +1403,14 @@ func TestNewLLMFromYAMLOpenCodeCredentialChain(t *testing.T) {
 }
 
 // TestOpenCodeLoginTokenIsWhatLeavesAfterConnect is the end-to-end shape of the
-// reported 401: an OpenCode entry saved with no api_key, next to a provider that
-// has one, must reach the wire with the opencode.json login — never with the
-// neighbour's key. The saved file is fed straight into NewLLMFromYAML, so both
-// halves are the production ones: config.Save's secret restore and the client's
-// credential resolution.
+// reported 401: a login-backed model row configured with no api_key must reach
+// the wire with the opencode.json login. The row is the whole configuration of a
+// model now (plan 315: the table is the only provider store), and the client's
+// credential resolution is the production one.
 func TestOpenCodeLoginTokenIsWhatLeavesAfterConnect(t *testing.T) {
-	homeRoot := t.TempDir()
-	t.Setenv("FOREBRAIN_HOME", homeRoot)
+	t.Setenv("FOREBRAIN_HOME", t.TempDir())
 	t.Setenv("OPENCODE_API_KEY", "")
-	t.Setenv("DEEPSEEK_API_KEY", "sk-deepseek-fixture")
-
-	path := filepath.Join(homeRoot, "forebrain.yaml")
-	seed := `agents:
-  definitions:
-    main:
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-chat
-        api_key: ${DEEPSEEK_API_KEY}
-        base_url: https://api.deepseek.com
-`
-	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
-		t.Fatalf("write seed: %v", err)
-	}
-	if err := opencode.Save(opencode.DefaultPath(homeRoot), opencode.Credentials{
+	if err := opencode.Save(opencode.DefaultPath(os.Getenv("FOREBRAIN_HOME")), opencode.Credentials{
 		AccessToken:  "access-token",
 		RefreshToken: "refresh-token",
 		ExpiresAt:    time.Now().Add(2 * time.Hour),
@@ -1447,33 +1418,11 @@ func TestOpenCodeLoginTokenIsWhatLeavesAfterConnect(t *testing.T) {
 		t.Fatalf("save OpenCode login: %v", err)
 	}
 
-	cfg, err := loadPersistedDocumentForTest(path)
-	if err != nil {
-		t.Fatalf("LoadPersisted: %v", err)
-	}
-	// The shape a login write leaves in a pre-table list, which this package
-	// writes by hand because it cannot import pkg/process: the login
-	// provider's entry carries no key and is promoted to the primary slot.
-	def := cfg.Agents.Definitions["main"]
-	def.LLMProviders = append([]appcfg.AgentLLMProviderConfig{{
+	entry := appcfg.AgentLLMProviderConfig{
 		Provider: "opencode-go",
 		Model:    "minimax-m3.1-flash-free",
 		BaseURL:  "https://opencode.ai/inference/go",
-	}}, def.LLMProviders...)
-	cfg.Agents.Definitions["main"] = def
-	if err := appcfg.Save(path, cfg); err != nil {
-		t.Fatalf("Save: %v", err)
 	}
-
-	saved, err := loadPersistedDocumentForTest(path)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	entry := saved.Agents.Definitions["main"].LLMProviders[0]
-	if !strings.EqualFold(entry.Provider, "opencode-go") {
-		t.Fatalf("primary entry = %q, want opencode-go", entry.Provider)
-	}
-
 	srv, calls := openCodeGateway(t)
 	runOpenCodeClient(t, &LLMProviderYAML{
 		Provider: entry.Provider,
@@ -1538,11 +1487,9 @@ func TestProviderInferenceIgnoresLoginBackedProviders(t *testing.T) {
 		}
 	}
 
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3"}), Agents: appcfg.AgentsSection{
 		Definitions: map[string]appcfg.AgentDefinition{
-			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
-				{Provider: "zhipuai", Model: "glm-5.3"},
-			}},
+			"main": {DefaultModel: "llm-1"},
 		},
 	}}
 	if got := ProviderForAgentModel(cfg, "main", "glm-5.3"); got != "zhipuai" {
@@ -1555,14 +1502,15 @@ func TestProviderInferenceIgnoresLoginBackedProviders(t *testing.T) {
 }
 
 // An empty model selector is the default model: default_model when main names
-// one, otherwise the first entry. A subagent type without providers of its
-// own inherits main's default through the same read.
+// one, otherwise the first row. A subagent type without a row of its own
+// inherits main's default through the same read, and a reference nothing
+// resolves to falls back rather than failing (plan 315).
 func TestResolveAgentProviderEmptySelectorUsesDefaultModel(t *testing.T) {
 	first := appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"}
 	second := appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4"}
 	newCfg := func(defaultModel string) *appcfg.Root {
-		return &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-			"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{first, second}, DefaultModel: defaultModel},
+		return &appcfg.Root{LLMModels: modelRowsForTest(first, second), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true, DefaultModel: defaultModel},
 		}}}
 	}
 
@@ -1570,21 +1518,31 @@ func TestResolveAgentProviderEmptySelectorUsesDefaultModel(t *testing.T) {
 	if err != nil || got.Model != first.Model {
 		t.Fatalf("absent default_model = %s/%v, want first entry %s", got.Provider, err, first.Model)
 	}
-	got, err = resolveAgentProvider(newCfg("deepseek/deepseek-v4"), "main", modelSelector{})
+	got, err = resolveAgentProvider(newCfg("llm-2"), "main", modelSelector{})
 	if err != nil || got.Provider != second.Provider || got.Model != second.Model {
-		t.Fatalf("default_model = %s/%v, want deepseek/deepseek-v4", got.Provider, err)
+		t.Fatalf("default_model = %s/%v, want the row llm-2 deepseek/deepseek-v4", got.Provider, err)
 	}
 	// A provider-less type definition inherits main's default, so background
 	// and user-session subagents read the same "default".
-	got, err = resolveAgentProvider(newCfg("deepseek/deepseek-v4"), "goal-evaluator", modelSelector{})
+	got, err = resolveAgentProvider(newCfg("llm-2"), "goal-evaluator", modelSelector{})
 	if err != nil || got.Model != second.Model {
 		t.Fatalf("type inheritance = %s/%v, want main's default deepseek-v4", got.Model, err)
 	}
-	// Dangling default_model is an error naming the value — no fall-back to
-	// the first entry.
-	_, err = resolveAgentProvider(newCfg("deepseek/gone"), "main", modelSelector{})
-	if err == nil || !strings.Contains(err.Error(), "default_model") || !errors.Is(err, errModelNotConfigured) {
-		t.Fatalf("dangling default_model error = %v", err)
+	// A default_model naming nothing — a deleted row, or a legacy label — is
+	// skipped: the install runs on the next choice instead of refusing.
+	got, err = resolveAgentProvider(newCfg("deepseek/gone"), "main", modelSelector{})
+	if err != nil || got.Model != first.Model {
+		t.Fatalf("dangling default_model = %s/%v, want the fall-back to %s", got.Provider, err, first.Model)
+	}
+	got, err = resolveAgentProvider(newCfg("llm-gone"), "main", modelSelector{})
+	if err != nil || got.Model != first.Model {
+		t.Fatalf("dangling row id = %s/%v, want the fall-back to %s", got.Provider, err, first.Model)
+	}
+	// With nothing configured at all the answer is the one "this feature is
+	// off" error.
+	empty := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{"main": {Primary: true}}}}
+	if _, err := resolveAgentProvider(empty, "main", modelSelector{}); !errors.Is(err, errModelNotConfigured) {
+		t.Fatalf("empty install error = %v, want errModelNotConfigured", err)
 	}
 }
 
@@ -1593,8 +1551,8 @@ func TestResolveAgentProviderEmptySelectorUsesDefaultModel(t *testing.T) {
 func TestResolveMemoryLLMProviderUsesDefaultModel(t *testing.T) {
 	first := appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"}
 	second := appcfg.AgentLLMProviderConfig{Provider: "deepseek", Model: "deepseek-v4"}
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{first, second}, DefaultModel: "deepseek/deepseek-v4"},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(first, second), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "deepseek/deepseek-v4"},
 	}}}
 	got := resolveMemoryLLMProvider(cfg, "main", "")
 	if got == nil || got.Provider != "deepseek" || got.Model != "deepseek-v4" {
@@ -1806,10 +1764,8 @@ func TestPublishContextBudget(t *testing.T) {
 	); err != nil {
 		t.Fatalf("AppendStructuredMessageForRun: %v", err)
 	}
-	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
-		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
-			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
-		}},
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, DefaultModel: "llm-1"},
 	}}}
 	probe := &budgetEventProbe{}
 	r := &Runner{Deps: (&Deps{SessionStore: sess}).WithConfig(cfg), Events: probe}
@@ -2717,4 +2673,40 @@ func TestPlanHandOffReminderIsTheTechLeadContract(t *testing.T) {
 	if text := allReminderText(inner3.gotMsgs); strings.Contains(text, planImplementationReminderMarker) {
 		t.Fatalf("kept-only session must not get an implementation reminder: %q", text)
 	}
+}
+
+// modelRowsForTest is how a fixture seeds the install's model table (plan 315):
+// one fb_llm_models row per model the entry names — `model: [a, b]` expanding
+// the way a provider list used to — with the row ids llm-1, llm-2, … in order.
+// A definition then names one of them with default_model, and a built-in
+// subagent type with agents.subagent_models.<type>.model.
+// modelRowsForTest is how a fixture seeds the install's model table (plan 315):
+// one fb_llm_models row per model the entry names — `model: [a, b]` expanding
+// the way a provider list used to — with the row ids llm-1, llm-2, … in order.
+// A definition then names one of them with default_model, and a built-in
+// subagent type with agents.subagent_models.<type>.model.
+func modelRowsForTest(entries ...appcfg.AgentLLMProviderConfig) []appcfg.LLMModelConfig {
+	var rows []appcfg.LLMModelConfig
+	for _, entry := range entries {
+		models := append(appcfg.StringList(nil), entry.Models...)
+		if len(models) == 0 && entry.Model != "" {
+			models = appcfg.StringList{entry.Model}
+		}
+		if len(models) == 0 {
+			models = appcfg.StringList{""}
+		}
+		for _, model := range models {
+			rows = append(rows, appcfg.LLMModelConfig{
+				ID:          fmt.Sprintf("llm-%d", len(rows)+1),
+				Provider:    entry.Provider,
+				Model:       model,
+				BaseURL:     entry.BaseURL,
+				APIPath:     entry.APIPath,
+				APIKey:      entry.APIKey,
+				Params:      append(appcfg.LLMRequestParams(nil), entry.Params...),
+				URLVerbatim: entry.URLVerbatim,
+			})
+		}
+	}
+	return rows
 }
