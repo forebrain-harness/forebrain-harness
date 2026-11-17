@@ -14,6 +14,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
 )
@@ -203,6 +204,154 @@ func TestSubagentListOrderKindsAndPaging(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	rec = f.do(t, http.MethodPost, "/api/agents/main/cancel", nil)
 	require.NotEqual(t, http.StatusNotFound, rec.Code, "the sibling param route must keep answering")
+}
+
+// newSubagentRootFixture is newSubagentFixture's sibling for configuration that
+// is not one agent's definition: the install-wide rows — agents.plan_reviewer
+// and agents.subagent_models — hang off the section itself (plans 313, 315).
+func newSubagentRootFixture(t *testing.T, mutate func(*appcfg.Root)) *subagentFixture {
+	t.Helper()
+	f := newMCPWriteFixture(t, mutate, "main", nil)
+	routes := NewRestServer("127.0.0.1:0")
+	f.server.AttachExtraRoutes(routes)
+	return &subagentFixture{mcpWriteFixture: f, routes: routes}
+}
+
+// seedGlobalModelRow adds one row to the fixture's install-wide model table —
+// state, not a file section (plan 315) — and returns its id: the reference a
+// global row stores. The file cannot carry it: the loader resolves references
+// against the table, and the table is born in the database the fixture opens
+// after the file is saved.
+func seedGlobalModelRow(t *testing.T, f *subagentFixture, provider, model string) string {
+	t.Helper()
+	row, err := (&state.LLMModelStore{DB: f.server.Env.SQL}).Create(context.Background(), state.LLMModel{
+		Provider: provider, Model: model,
+		BaseURL: "http://127.0.0.1:9/v1", APIPath: "/chat/completions", APIKey: "sk-subagent-global",
+	})
+	require.NoError(t, err)
+	return row.ID
+}
+
+// seedAgentsSection stores the fixture's agents section as the endpoints then
+// read it: the composed persisted configuration, changed and written back.
+func seedAgentsSection(t *testing.T, f *subagentFixture, mutate func(*appcfg.AgentsSection)) {
+	t.Helper()
+	root, err := f.server.Env.ComposedPersistedConfig(context.Background())
+	require.NoError(t, err)
+	mutate(&root.Agents)
+	seedConfigRoot(t, f.server.Env.SQL, root)
+}
+
+// TestSubagentPlanReviewerGlobalRow pins the one system row with an
+// install-wide model of its own (plan 313): the plan reviewer reports
+// agents.plan_reviewer as a label beside its identity, no other system row
+// carries one, and the row keeps the shape a system row has — no model of this
+// agent's, no switch.
+func TestSubagentPlanReviewerGlobalRow(t *testing.T) {
+	f := newSubagentRootFixture(t, nil)
+	rowID := seedGlobalModelRow(t, f, "openai", "gpt-main")
+	seedAgentsSection(t, f, func(agents *appcfg.AgentsSection) {
+		agents.PlanReviewer = appcfg.SubagentConfig{Model: rowID, ReasoningEffort: "high"}
+	})
+
+	rec := f.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rows := decodeSubagentPage(t, rec).Rows
+
+	reviewer := subagentRowByName(t, rows, "plan-reviewer")
+	require.Equal(t, subagentKindSystem, reviewer.Kind)
+	require.Equal(t, llm.FormatProviderModelDisplay("openai", "gpt-main"), reviewer.GlobalModelLabel)
+	require.Equal(t, "high", reviewer.GlobalReasoningEffort)
+	require.Empty(t, reviewer.Model, "a system row still carries no model of this agent's")
+	require.Nil(t, reviewer.Enabled, "a system row still has no switch")
+
+	// Only the reviewer has such a row.
+	for _, name := range append([]string{"goal-evaluator", "explore"}, agent.SystemSubagentNames...) {
+		if name == "plan-reviewer" {
+			continue
+		}
+		row := subagentRowByName(t, rows, name)
+		require.Empty(t, row.GlobalModelLabel, "%s names no install-wide row", name)
+		require.Empty(t, row.GlobalReasoningEffort, "%s names no install-wide row", name)
+	}
+
+	// No configured row: both fields are absent, and the row reads as before.
+	bare := newSubagentRootFixture(t, nil)
+	rec = bare.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	unconfigured := subagentRowByName(t, decodeSubagentPage(t, rec).Rows, "plan-reviewer")
+	require.Empty(t, unconfigured.GlobalModelLabel)
+	require.Empty(t, unconfigured.GlobalReasoningEffort)
+	require.NotContains(t, rec.Body.String(), "global_model_label",
+		"an unset row adds no field to the wire")
+
+	// A reference the table does not carry is never claimed: the loader refuses
+	// such a file, so this is the shape a hand-built root can still have, and
+	// the row must read as unconfigured rather than name a model nothing can
+	// run on.
+	root := &appcfg.Root{
+		LLMModels: []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}},
+		Agents: appcfg.AgentsSection{
+			PlanReviewer: appcfg.SubagentConfig{Model: "llm-no-such-row", ReasoningEffort: "low"},
+		},
+	}
+	stray := systemSubagentRow(root, "plan-reviewer")
+	require.Empty(t, stray.GlobalModelLabel)
+	require.Empty(t, stray.GlobalReasoningEffort)
+}
+
+// TestSubagentBuiltinModelSourcePrecedence pins the order dispatch uses for a
+// built-in the model may dispatch: this agent's own entry, then the
+// install-wide per-type row (agents.subagent_models, plan 315), then the
+// conversation's model — the order subagentRowModel and run.SubagentOwnModel
+// share (plan 313).
+func TestSubagentBuiltinModelSourcePrecedence(t *testing.T) {
+	// One fixture, three configurations of it: the row is seeded once, and each
+	// step rewrites the agents section the endpoints read.
+	f := newSubagentRootFixture(t, nil)
+	rowID := seedGlobalModelRow(t, f, "openai", "gpt-main")
+	exploreRow := func(t *testing.T) subagentRow {
+		t.Helper()
+		rec := f.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return subagentRowByName(t, decodeSubagentPage(t, rec).Rows, "explore")
+	}
+
+	// No entry of this agent's: the install-wide row is the model, and it is
+	// reported as such — with the row's own effort, which is what the run uses.
+	seedAgentsSection(t, f, func(agents *appcfg.AgentsSection) {
+		agents.SubagentModels = map[string]appcfg.SubagentConfig{
+			"explore": {Model: rowID, ReasoningEffort: "low"},
+		}
+	})
+	inherited := exploreRow(t)
+	require.Equal(t, subagentModelFromGlobal, inherited.ModelSource)
+	require.Equal(t, rowID, inherited.ModelID)
+	require.Equal(t, llm.FormatProviderModelDisplay("openai", "gpt-main"), inherited.ModelLabel)
+	require.Equal(t, "low", inherited.ReasoningEffort)
+
+	// An entry of its own wins over the install-wide row.
+	seedAgentsSection(t, f, func(agents *appcfg.AgentsSection) {
+		def := agents.Definitions["main"]
+		def.Subagents = []appcfg.SubagentConfig{{Name: "explore", Model: "openai/gpt-sub", ReasoningEffort: "high"}}
+		agents.Definitions["main"] = def
+	})
+	own := exploreRow(t)
+	require.Equal(t, subagentModelFromAgent, own.ModelSource)
+	require.Equal(t, "gpt-sub", own.Model)
+	require.Equal(t, "high", own.ReasoningEffort)
+	require.Equal(t, llm.FormatProviderModelDisplay("openai", "gpt-sub"), own.ModelLabel)
+
+	// Neither: the conversation's model, which is no source at all.
+	seedAgentsSection(t, f, func(agents *appcfg.AgentsSection) {
+		def := agents.Definitions["main"]
+		def.Subagents = nil
+		agents.Definitions["main"] = def
+		agents.SubagentModels = nil
+	})
+	neither := exploreRow(t)
+	require.Empty(t, neither.ModelSource)
+	require.Empty(t, neither.ModelLabel)
 }
 
 // TestSubagentDetailShowsThePromptInForce pins the drawer's read: the effective

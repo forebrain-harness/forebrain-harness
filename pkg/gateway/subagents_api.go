@@ -128,6 +128,14 @@ type subagentRow struct {
 	Enabled *bool `json:"enabled"`
 	// PromptOverridden marks a built-in whose system prompt this agent rewrote.
 	PromptOverridden bool `json:"prompt_overridden"`
+	// GlobalModelLabel and GlobalReasoningEffort are the install-wide row the
+	// system dispatches this type on, when the type has one: today only the
+	// plan reviewer, whose row lives in agents.plan_reviewer (plan 313).
+	// Display-only — dispatch for a system subagent is unchanged — and both
+	// stay empty when no row is configured or the stored reference names no
+	// row, because a model the engine cannot resolve is not a model to show.
+	GlobalModelLabel      string `json:"global_model_label,omitempty"`
+	GlobalReasoningEffort string `json:"global_reasoning_effort,omitempty"`
 }
 
 // subagentDetail is one row as the drawer opens it: the row, plus the prompt in
@@ -181,7 +189,7 @@ func subagentRowFor(cfg *config.Root, agentID, name string) (subagentRow, bool) 
 	key := subagentKey(name)
 	switch subagentKindFor(def, key) {
 	case subagentKindSystem:
-		return systemSubagentRow(key), true
+		return systemSubagentRow(cfg, key), true
 	case subagentKindBuiltin:
 		return builtinSubagentRow(cfg, agentID, key, subagentEntry(def, key)), true
 	case subagentKindCustom:
@@ -240,11 +248,13 @@ func customSubagentTools(entry config.SubagentConfig) string {
 
 // systemSubagentRow describes a subagent the system dispatches. It carries no
 // switch and no model of this agent's: the system chooses both when it calls
-// one.
-func systemSubagentRow(name string) subagentRow {
+// one. The plan reviewer is the one type with an install-wide row of its own
+// (agents.plan_reviewer, plan 313), so that row is reported as a label beside
+// the row's identity — display only; nothing here decides what runs.
+func systemSubagentRow(cfg *config.Root, name string) subagentRow {
 	// The name comes from the list this walks, so the definition is there.
 	def, _ := agent.ResolveSubtype(name)
-	return subagentRow{
+	row := subagentRow{
 		Name:         name,
 		Kind:         subagentKindSystem,
 		Description:  strings.TrimSpace(def.Description),
@@ -252,6 +262,18 @@ func systemSubagentRow(name string) subagentRow {
 		AllowedTools: []string{},
 		Continuable:  def.Continuable,
 	}
+	if name == run.PlanReviewSubagentType && cfg != nil {
+		entry := cfg.Agents.PlanReviewer
+		if ref := strings.TrimSpace(entry.Model); ref != "" {
+			// A reference that resolves to no row is not claimed: the engine
+			// would not run on it either.
+			if resolved, ok := config.ResolveModelRef(cfg, "main", ref); ok {
+				row.GlobalModelLabel = llm.FormatProviderModelDisplay(resolved.Provider, resolved.Model)
+				row.GlobalReasoningEffort = strings.TrimSpace(entry.ReasoningEffort)
+			}
+		}
+	}
+	return row
 }
 
 // subagentRowModel fills a row's model fields with the model a subagent runs on,
