@@ -298,12 +298,16 @@ import { useI18n, type I18nKey } from '@/locales'
 const props = defineProps<{
   /** Drawn while true; the record is read whenever it turns true. */
   open: boolean
-  /** The primary agent the form writes under. */
-  agentId: string
+  /** The primary agent the form writes under; absent in the shared scope, which
+   *  belongs to no agent (plan 314). */
+  agentId?: string
   /** The subagent being edited or viewed; absent when creating one. */
   name?: string
   /** 'create' adds one, 'edit' changes one, 'view' only reads one. */
   mode: 'create' | 'edit' | 'view'
+  /** Which registry the form writes: one agent's own subagents (the default),
+   *  or the install-wide shared one (plan 314). */
+  scope?: 'agent' | 'global'
 }>()
 
 const emit = defineEmits<{
@@ -331,6 +335,10 @@ interface SubagentForm {
 const readonly = computed(() => props.mode === 'view')
 const editable = computed(() => !readonly.value)
 const creating = computed(() => props.mode === 'create')
+/** The install-wide scope: a shared subagent is a custom definition, but it is
+ *  not this agent's, so it is written to the registry instead (plan 314). */
+const globalScope = computed(() => props.scope === 'global')
+const agentId = computed(() => props.agentId ?? '')
 /** The name the route carries: the record's identity, and what the title names. */
 const subject = computed(() => props.name ?? '')
 
@@ -371,10 +379,13 @@ function emptyForm(): SubagentForm {
 
 /** What kind of subagent the form is for: a create only makes a custom one. */
 const kind = computed(() => (creating.value ? 'custom' : (detail.value?.kind ?? 'custom')))
-const custom = computed(() => kind.value === 'custom')
+/** A shared definition is written whole, like a custom one — only its registry
+ *  differs, and it is never edited from an agent's page (plan 314). */
+const custom = computed(() => globalScope.value || kind.value === 'custom')
 
 const title = computed(() => {
-  if (creating.value) return t('subagents.drawerNew')
+  if (creating.value) return globalScope.value ? t('subagents.shared.drawerNew') : t('subagents.drawerNew')
+  if (globalScope.value) return t('subagents.shared.drawerEdit', { name: subject.value })
   if (readonly.value) return t('subagents.drawerViewSystem', { name: subject.value })
   if (kind.value === 'builtin') return t('subagents.drawerEditBuiltin', { name: subject.value })
   return t('subagents.drawerEdit', { name: subject.value })
@@ -462,8 +473,9 @@ const overridden = computed(() => Boolean(detail.value?.promptOverridden) && !re
 
 const footerNote = computed(() => {
   if (readonly.value) return t('subagents.footerSystem')
-  if (kind.value === 'builtin') return t('subagents.footerBuiltin', { id: props.agentId })
-  return t('subagents.footerCustom', { id: props.agentId })
+  if (globalScope.value) return t('subagents.shared.footer')
+  if (kind.value === 'builtin') return t('subagents.footerBuiltin', { id: agentId.value })
+  return t('subagents.footerCustom', { id: agentId.value })
 })
 
 /** A locale sentence, or the fallback when the page has no entry for the name
@@ -542,7 +554,13 @@ async function load() {
   try {
     const record: Promise<SubagentConfigDetail | null> = creating.value
       ? Promise.resolve(null)
-      : forebrainApi.subagentConfig(props.agentId, subject.value)
+      : globalScope.value
+        // The registry's own list carries the whole definition, prompt included:
+        // there is no per-agent detail route for a subagent no agent owns.
+        ? forebrainApi.sharedSubagents().then(
+            (listing) => listing.rows.find((candidate) => candidate.name === subject.value) ?? null,
+          )
+        : forebrainApi.subagentConfig(agentId.value, subject.value)
     // One list for every picker (plan 265/266): the install's configured rows,
     // each with the endpoint it calls, so a pin can name the row it means.
     const [loadedRecord, models] = await Promise.all([record, forebrainApi.llmModelChoices()])
@@ -628,12 +646,21 @@ async function save() {
   failure.value = ''
   failureIsSave.value = false
   try {
-    if (creating.value) {
+    if (globalScope.value) {
+      if (creating.value) {
+        const name = form.name.trim()
+        await forebrainApi.createSharedSubagent({ name, ...customBody() })
+        emit('saved', name)
+      } else {
+        await forebrainApi.updateSharedSubagent(subject.value, customBody())
+        emit('saved', subject.value)
+      }
+    } else if (creating.value) {
       const name = form.name.trim()
-      await forebrainApi.createSubagentConfig(props.agentId, { name, ...customBody() })
+      await forebrainApi.createSubagentConfig(agentId.value, { name, ...customBody() })
       emit('saved', name)
     } else {
-      await forebrainApi.updateSubagentConfig(props.agentId, subject.value, custom.value ? customBody() : builtinBody())
+      await forebrainApi.updateSubagentConfig(agentId.value, subject.value, custom.value ? customBody() : builtinBody())
       emit('saved', subject.value)
     }
   } catch (error) {

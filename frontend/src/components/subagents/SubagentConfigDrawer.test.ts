@@ -102,6 +102,8 @@ describe('SubagentConfigDrawer', () => {
     })
     vi.spyOn(forebrainApi, 'updateSubagentConfig').mockResolvedValue({ name: 'explore' })
     vi.spyOn(forebrainApi, 'createSubagentConfig').mockResolvedValue({ name: 'db-migrator' })
+    vi.spyOn(forebrainApi, 'updateSharedSubagent').mockResolvedValue({ rows: [], types: [] })
+    vi.spyOn(forebrainApi, 'createSharedSubagent').mockResolvedValue({ rows: [], types: [] })
   })
 
   afterEach(() => {
@@ -310,6 +312,54 @@ describe('SubagentConfigDrawer', () => {
     expect(forebrainApi.createSubagentConfig).toHaveBeenCalledWith(
       'main',
       expect.objectContaining({ name: 'db-migrator', continuable: false }),
+    )
+  })
+
+  // The install-wide scope (plan 314): the same form, a different registry. It
+  // reads the definition from the registry's own list — the prompt included,
+  // because the save writes every visible field — and its writes go to the
+  // shared endpoints, never to an agent's.
+  it('edits a shared definition through the global endpoints', async () => {
+    vi.spyOn(forebrainApi, 'sharedSubagents').mockResolvedValue({
+      rows: [
+        {
+          ...detail({ name: 'repo-auditor', kind: 'shared', description: '审查一个仓库区域', systemPrompt: '你审查仓库。' }),
+          defaultPrompt: undefined,
+        },
+      ],
+      types: [],
+    })
+    const wrapper = await openDrawer({ scope: 'global', agentId: undefined, name: 'repo-auditor', mode: 'edit' })
+
+    expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('编辑共享子代理 repo-auditor')
+    expect((wrapper.find('[data-testid="subagent-prompt"]').element as HTMLTextAreaElement).value).toBe('你审查仓库。')
+    expect(wrapper.find('[data-testid="subagent-note"]').text()).toContain('所有主代理共用')
+
+    await wrapper.find('[data-testid="subagent-description"]').setValue('审查仓库的改动')
+    await wrapper.find('[data-testid="subagent-save"]').trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.updateSubagentConfig).not.toHaveBeenCalled()
+    expect(forebrainApi.updateSharedSubagent).toHaveBeenCalledWith(
+      'repo-auditor',
+      expect.objectContaining({ description: '审查仓库的改动', systemPrompt: '你审查仓库。' }),
+    )
+  })
+
+  it('creates a shared definition through the global create', async () => {
+    vi.spyOn(forebrainApi, 'sharedSubagents').mockResolvedValue({ rows: [], types: [] })
+    const wrapper = await openDrawer({ scope: 'global', agentId: undefined, name: undefined, mode: 'create' })
+
+    expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('新建共享子代理')
+    await wrapper.find('[data-testid="subagent-name"]').setValue('repo-scout')
+    await wrapper.find('[data-testid="subagent-description"]').setValue('finds files')
+    await wrapper.find('[data-testid="subagent-prompt"]').setValue('You find files.')
+    await wrapper.find('[data-testid="subagent-save"]').trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.createSubagentConfig).not.toHaveBeenCalled()
+    expect(forebrainApi.createSharedSubagent).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'repo-scout', description: 'finds files', systemPrompt: 'You find files.' }),
     )
   })
 })

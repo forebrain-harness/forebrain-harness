@@ -227,6 +227,10 @@ func TestSharedSubagentListKeepsConfigOrder(t *testing.T) {
 	require.Equal(t, "low", listing.Rows[1].ReasoningEffort)
 	require.Equal(t, "openai/gpt-main", listing.Rows[1].ModelLabel)
 	require.Equal(t, subagentModelFromGlobal, listing.Rows[1].ModelSource)
+	// The definition's prompt travels with the row: the settings page edits it,
+	// and a form that opened without it would save an empty one over a real one.
+	require.Equal(t, "You audit repositories.", listing.Rows[1].SystemPrompt)
+	require.Nil(t, listing.Rows[1].DefaultPrompt, "a shared subagent is custom: it has no original to restore")
 }
 
 // TestSharedSubagentTypeDefaultRows pins the per-type global default rows the

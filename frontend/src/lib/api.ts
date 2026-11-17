@@ -2374,7 +2374,7 @@ export type AgentRosterResponse = {
 /** What kind of subagent a row is: a built-in the model may dispatch, one this
  *  primary agent defines itself, or a built-in the system dispatches at its own
  *  occasions and nobody configures. */
-export type SubagentKind = 'builtin' | 'custom' | 'system'
+export type SubagentKind = 'builtin' | 'custom' | 'shared' | 'system'
 
 /** A subagent's tool tier: reading only, everything an edit may do, the tools
  *  it picks one by one, or none at all. */
@@ -2455,6 +2455,50 @@ export interface SubagentConfigBody {
 function subagentScopedPath(agentId: string, tail: string): string {
   const base = `/agents/primary/${encodeURIComponent(agentId)}/subagents`
   return tail ? `${base}/${encodeURIComponent(tail)}` : base
+}
+
+/** The install-wide shared subagent registry's own prefix (plan 314): nobody's
+ *  agent, so no path under it carries an agent id. */
+const SHARED_SUBAGENTS_PATH = '/agents/subagents/shared'
+
+function sharedSubagentPath(name: string): string {
+  return `${SHARED_SUBAGENTS_PATH}/${encodeURIComponent(name)}`
+}
+
+/**
+ * One public built-in type's install-wide default model row
+ * (`agents.subagent_models.<type>`, plan 315), as the settings page edits it. An
+ * empty model is "no global default": the type follows the conversation's model
+ * until an agent's own entry pins one.
+ */
+export interface SubagentTypeDefault {
+  type: string
+  /** The model row id it names; empty when the type has no global row. */
+  model: string
+  /** The level that overrides the row's own; empty follows the row. */
+  reasoningEffort: string
+}
+
+/**
+ * One install-wide definition as the settings page edits it (plan 314): the row
+ * plus the prompt the drawer must show, because saving the form writes every
+ * visible field and a form that opened without the prompt would blank it. A
+ * shared subagent is a custom one, so it has no original to restore to.
+ */
+export interface SharedSubagentDetail extends SubagentConfigRow {
+  systemPrompt: string
+  defaultPrompt?: string
+}
+
+/**
+ * The shared subagent registry as the settings page reads it (plan 314): the
+ * install-wide custom definitions in configuration order, and the per-type
+ * default rows beside them. A registry row carries no switch — enablement is per
+ * agent, on that agent's own page.
+ */
+export interface SharedSubagentListing {
+  rows: SharedSubagentDetail[]
+  types: SubagentTypeDefault[]
 }
 
 const api = axios.create({
@@ -2882,6 +2926,39 @@ export const forebrainApi = {
   /** This primary agent's own subagent switch, and every row with it. */
   setAgentSubagentSwitch(agentId: string, enabled: boolean) {
     return putRaw<{ switch: boolean }>(`/agents/primary/${encodeURIComponent(agentId)}/subagent-switch`, { enabled })
+  },
+
+  /** The install-wide shared subagent registry and the per-type default rows
+   *  (plan 314). One definition every primary agent may enable; none of it is
+   *  an agent's own, which is why this read takes no agent id. */
+  sharedSubagents() {
+    return api.get<SharedSubagentListing>(SHARED_SUBAGENTS_PATH).then((res) => ({
+      rows: Array.isArray(res.data?.rows) ? res.data.rows : [],
+      types: Array.isArray(res.data?.types) ? res.data.types : [],
+    }))
+  },
+
+  /** Create one shared subagent. The answer is the whole registry, so the page
+   *  renders what the server now holds rather than predicting it. */
+  createSharedSubagent(body: SubagentConfigBody) {
+    return postRaw<SharedSubagentListing>(SHARED_SUBAGENTS_PATH, toSnakeCase(body))
+  },
+
+  /** Replace one shared definition whole. The name is the entry's identity and
+   *  comes from the route, so an update never renames. */
+  updateSharedSubagent(name: string, body: SubagentConfigBody) {
+    return putRaw<SharedSubagentListing>(sharedSubagentPath(name), toSnakeCase(body))
+  },
+
+  deleteSharedSubagent(name: string) {
+    return api.delete<SharedSubagentListing>(sharedSubagentPath(name)).then((res) => res.data)
+  },
+
+  /** One public type's install-wide default model row (plans 314, 315): a
+   *  configured row id plus the level that overrides the row's own, or both
+   *  empty for "no global default". */
+  updateSubagentTypeDefault(type: string, body: { model: string; reasoningEffort: string }) {
+    return putRaw<SharedSubagentListing>(`${SHARED_SUBAGENTS_PATH}/types/${encodeURIComponent(type)}`, toSnakeCase(body))
   },
 
   /** The global subagent switch (agents.defaults.enable_subagent), which every

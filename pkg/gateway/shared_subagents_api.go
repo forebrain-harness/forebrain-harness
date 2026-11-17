@@ -34,9 +34,13 @@ type sharedTypeRow struct {
 // sharedSubagentListing is the registry as the settings page reads it: the
 // shared custom subagents in configuration order, and the four per-type global
 // defaults beside them. The page renders both in one group (plan 314).
+//
+// A row is a subagentDetail rather than a plain row because the definition's
+// prompt is what the page edits: a list without it would leave the form saving
+// an empty prompt over a real one.
 type sharedSubagentListing struct {
-	Rows  []subagentRow   `json:"rows"`
-	Types []sharedTypeRow `json:"types"`
+	Rows  []subagentDetail `json:"rows"`
+	Types []sharedTypeRow  `json:"types"`
 }
 
 // handleSharedSubagentsList serves GET /agents/subagents/shared: the whole
@@ -55,13 +59,15 @@ func (s *Server) handleSharedSubagentsList(w http.ResponseWriter, r *http.Reques
 // nowhere else (plan 314).
 func sharedSubagentListingOf(cfg *config.Root) sharedSubagentListing {
 	out := sharedSubagentListing{
-		Rows:  make([]subagentRow, 0, len(cfg.Agents.SharedSubagents)),
+		Rows:  make([]subagentDetail, 0, len(cfg.Agents.SharedSubagents)),
 		Types: make([]sharedTypeRow, 0, len(agent.PublicSubagentNames)),
 	}
 	for _, entry := range cfg.Agents.SharedSubagents {
 		row := sharedSubagentRow(cfg, subagentKey(entry.Name), config.SubagentConfig{Name: entry.Name})
 		row.Enabled = nil
-		out.Rows = append(out.Rows, row)
+		// The definition's own prompt, and no original to restore to: a shared
+		// subagent is a custom one, so it has no built-in text behind it.
+		out.Rows = append(out.Rows, subagentDetail{subagentRow: row, SystemPrompt: strings.TrimSpace(entry.SystemPrompt)})
 	}
 	for _, name := range agent.PublicSubagentNames {
 		row := cfg.Agents.SubagentModels[name]
