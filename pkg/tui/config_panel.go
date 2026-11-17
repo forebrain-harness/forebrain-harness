@@ -15,11 +15,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -57,12 +61,16 @@ const (
 
 // configPanelSnapshot is what the panel reads when it opens: the stored
 // runtime sections as their own JSON, the forebrain.yaml sections as the
-// YAML text a reader would edit by hand, and whether this machine has Claude
-// Code — the condition the interop switch is shown under (owner 2026-10-30).
+// YAML text a reader would edit by hand, whether this machine has Claude
+// Code — the condition the interop switch is shown under (owner 2026-10-30) —
+// and the install-wide model table, which is state rather than a section and
+// is what turns a stored row id into the model name a reader recognises
+// (plan 313).
 type configPanelSnapshot struct {
 	Stored     map[string]json.RawMessage
 	File       map[string]string
 	ClaudeCode bool
+	Models     []appcfg.LLMModelConfig
 }
 
 // configPanelSession is what /config needs from a session — an optional
@@ -108,7 +116,12 @@ func (s *ChatSession) ConfigPanelSections(ctx context.Context) (configPanelSnaps
 	}
 	// Judged once per open: the interop switch is shown only on a machine
 	// that has Claude Code's directory (plan 195 §3.7).
-	return configPanelSnapshot{Stored: stored, File: file, ClaudeCode: process.ClaudeCodeDetected()}, nil
+	return configPanelSnapshot{
+		Stored: stored, File: file, ClaudeCode: process.ClaudeCodeDetected(),
+		// The model table is state, not a section: the panel only names row
+		// ids with it (plan 313).
+		Models: root.LLMModels,
+	}, nil
 }
 
 // UpdateConfigSection stores one section's JSON as its fb_config row — nil
@@ -148,6 +161,10 @@ type configPanel struct {
 	// claudeCode is whether this machine has Claude Code, read when the
 	// panel opened: a ClaudeCodeOnly field is offered only while it holds.
 	claudeCode bool
+	// models is the install-wide model table as the panel opened it: a stored
+	// row id is named through it, since no section carries the names (plan
+	// 313).
+	models []appcfg.LLMModelConfig
 }
 
 func newConfigPanel(sel Selector, renderer *Renderer, session configPanelSession) *configPanel {
@@ -175,6 +192,7 @@ func (c *commandController) handleConfig(ctx context.Context, args []string) boo
 	panel.raw = snapshot.Stored
 	panel.file = snapshot.File
 	panel.claudeCode = snapshot.ClaudeCode
+	panel.models = snapshot.Models
 	start := ""
 	if len(args) > 0 {
 		schema, known := panelSectionSchemaFor(args[0])
@@ -547,11 +565,11 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 	}
 	switch idx {
 	case 0:
-		return p.assign(doc, path, true, false)
+		return p.assign(doc, path, true, false, field.Label)
 	case 1:
-		return p.assign(doc, path, false, false)
+		return p.assign(doc, path, false, false, field.Label)
 	default:
-		return p.assign(doc, path, nil, true)
+		return p.assign(doc, path, nil, true, field.Label)
 	}
 }
 
@@ -592,9 +610,9 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 		return doc, ""
 	}
 	if idx == len(items)-1 {
-		return p.assign(doc, path, nil, true)
+		return p.assign(doc, path, nil, true, field.Label)
 	}
-	return p.assign(doc, path, field.Options[idx], false)
+	return p.assign(doc, path, field.Options[idx], false, field.Label)
 }
 
 // editNumber asks for an integer and holds it to the loader's bounds: an
@@ -612,7 +630,7 @@ func (p *configPanel) editNumber(doc any, path []string, field configField, cur 
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return p.assign(doc, path, nil, true)
+		return p.assign(doc, path, nil, true, field.Label)
 	}
 	value, convErr := strconv.Atoi(text)
 	if convErr != nil {
@@ -629,7 +647,7 @@ func (p *configPanel) editNumber(doc any, path []string, field configField, cur 
 		value = field.Max
 		notice = fmt.Sprintf("Stored as the maximum, %d", field.Max)
 	}
-	updated, note := p.assign(doc, path, value, false)
+	updated, note := p.assign(doc, path, value, false, field.Label)
 	if note != "" {
 		return updated, note
 	}
@@ -648,14 +666,16 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 		return doc, ""
 	}
 	if strings.TrimSpace(text) == "" {
-		return p.assign(doc, path, nil, true)
+		return p.assign(doc, path, nil, true, field.Label)
 	}
-	return p.assign(doc, path, text, false)
+	return p.assign(doc, path, text, false, field.Label)
 }
 
-// assign stages one edit in the document and reports its refusal, if any.
-func (p *configPanel) assign(doc any, path []string, value any, remove bool) (any, string) {
-	updated, err := configAssign(doc, path, value, remove)
+// assign stages one edit in the document and reports its refusal, if any. label
+// is the setting's own name, the one the panel showed the user: a refusal names
+// it rather than the configuration path it lives at (plan 313 Step 5b).
+func (p *configPanel) assign(doc any, path []string, value any, remove bool, label string) (any, string) {
+	updated, err := configAssign(doc, path, value, remove, label)
 	if err != nil {
 		p.printError(err)
 		return doc, err.Error()
@@ -692,13 +712,17 @@ const (
 // editRows edits one table or list as rows. A row that holds a table opens
 // its own rows one level down, so a nested section — a subagent entry inside an
 // agent's list, an MCP server inside a profile — is reachable without the panel
-// knowing that shape in advance.
-func (p *configPanel) editRows(doc any, path []string, field configField) (any, string) {
+// knowing that shape in advance. initialNotice, when given, is the page's first
+// outcome line: the guidance a created primary agent opens with (plan 313).
+func (p *configPanel) editRows(doc any, path []string, field configField, initialNotice ...string) (any, string) {
 	notice := ""
+	if len(initialNotice) > 0 {
+		notice = initialNotice[0]
+	}
 	for {
 		container, _ := configLookupValue(doc, path)
 		keys := configContainerKeys(container)
-		items, owners := p.rowItems(container, keys, configContainerIsList(field, container))
+		items, owners := p.rowItems(doc, path, container, keys, configContainerIsList(field, container))
 		idx, ok, err := p.sel.SelectRich(p.rowsPrompt(field, keys, notice), items, -1)
 		if err != nil {
 			p.printError(err)
@@ -719,13 +743,20 @@ func (p *configPanel) editRows(doc any, path []string, field configField) (any, 
 	}
 }
 
-// rowItems is one container's rows: every entry, then add and back.
-func (p *configPanel) rowItems(container any, keys []string, list bool) ([]SelectItem, []int) {
+// rowItems is one container's rows: every entry, then add and back. doc and the
+// row's own path travel with it because what a row means is a property of where
+// it sits: a definition's primary flag is its status marker, and a subagent
+// entry's model is read in the order dispatch reads it (plan 313).
+func (p *configPanel) rowItems(doc any, path []string, container any, keys []string, list bool) ([]SelectItem, []int) {
 	items := make([]SelectItem, 0, len(keys)+2)
 	owners := make([]int, 0, len(keys)+2)
 	for i, key := range keys {
 		value, _ := configLookupValue(container, []string{key})
-		items = append(items, SelectItem{Label: configRowLabel(key, i, list), Description: configRowDescription(value)})
+		items = append(items, SelectItem{
+			Label:       configRowLabel(key, i, list),
+			Description: p.configRowSummary(doc, path, key, value),
+			Status:      configRowStatus(path, value),
+		})
 		owners = append(owners, i)
 	}
 	items = append(items,
@@ -734,6 +765,25 @@ func (p *configPanel) rowItems(container any, keys []string, list bool) ([]Selec
 	)
 	owners = append(owners, configRowAdd, configRowUp)
 	return items, owners
+}
+
+// configRowStatus is a row's right-edge marker (plan 313): the definitions
+// page marks the agents that are primary agents with the prototype's
+// primary-listed status. Every other row has none — a definition keyed by a
+// built-in subagent type is that type's install-wide default, not an agent,
+// and the loader's own rule is what decides.
+func configRowStatus(path []string, value any) string {
+	if len(path) != 1 || path[0] != configDefinitionsPath {
+		return ""
+	}
+	row, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if primary, _ := row["primary"].(bool); primary {
+		return configPrimaryStatus
+	}
+	return ""
 }
 
 // configRowLabel names a row: a map's key as written in the configuration, a
@@ -756,6 +806,107 @@ func configRowDescription(value any) string {
 	return "= " + configScalarText(value)
 }
 
+// The agents section's parts the panel reads by name: the definitions map, the
+// subagents list inside one definition, and the install-wide per-type model
+// rows. Everything below keys on a row's real path, never on a descriptor's
+// Path: editRows hands the same field down at every nesting level, so a guard
+// reading field.Path alone would fire inside every agent's own rows (plan 313).
+const (
+	configDefinitionsPath   = "definitions"
+	configSubagentsKey      = "subagents"
+	configSubagentModelsKey = "subagent_models"
+	configPrimaryStatus     = "Primary"
+	// configSystemSubagentNotice is the prototype's refusal, word for word
+	// (plan 313, scene system-stray-entry): the panel says why before the
+	// loader does, and the loader still judges the save on its own.
+	configSystemSubagentNotice = "Dispatched by the system. Not configurable per agent; remove this entry."
+	// configFollowConversationModel is what a built-in type with no model of
+	// its own runs on, in the prototype's words (plan 313).
+	configFollowConversationModel = "Follow conversation model"
+	// configAgentOverridePrefix and configGlobalDefaultPrefix name where a
+	// subagent entry's model comes from. The prototype draws the same fact in a
+	// status column; the panel keeps it in the row's description.
+	configAgentOverridePrefix  = "agent override: "
+	configGlobalDefaultPrefix  = "global default: "
+	configPrimaryCreatedNotice = "Primary agent created in your draft. Add a model provider, then choose its default model."
+)
+
+// configRowSummary is a row's second column for the agents section: the value
+// as it stands, or — for one of an agent's subagent entries — the model it will
+// actually run on, in the order dispatch resolves it, and the verdict a system
+// subagent entry gets (plan 313). Everything else keeps configRowDescription.
+func (p *configPanel) configRowSummary(doc any, path []string, key string, value any) string {
+	if len(path) != 3 || path[0] != configDefinitionsPath || path[2] != configSubagentsKey {
+		return configRowDescription(value)
+	}
+	row, ok := value.(map[string]any)
+	if !ok {
+		return configRowDescription(value)
+	}
+	name := strings.ToLower(strings.TrimSpace(configStringField(row, "name")))
+	if name == "" {
+		return configRowDescription(value)
+	}
+	if slices.Contains(agent.SystemSubagentNames, name) {
+		return configSystemSubagentNotice
+	}
+	if !slices.Contains(agent.PublicSubagentNames, name) {
+		return configRowDescription(value)
+	}
+	// The order run.SubagentOwnModel answers with, read from the same section:
+	// this agent's entry, then the install-wide row of that type, then the
+	// conversation's model.
+	if ref := strings.TrimSpace(configStringField(row, "model")); ref != "" {
+		return configAgentOverridePrefix + ref
+	}
+	sectionRoot, _ := doc.(map[string]any)
+	typeRow, _ := configLookupValue(sectionRoot, []string{configSubagentModelsKey, name})
+	typeMap, _ := typeRow.(map[string]any)
+	if typeRef := strings.TrimSpace(configStringField(typeMap, "model")); typeRef != "" {
+		effort := configStringField(typeMap, "reasoning_effort")
+		return configGlobalDefaultPrefix + p.configModelLabel(typeRef) + " / " + turn.EffortEnglishLabel(effort)
+	}
+	return configFollowConversationModel
+}
+
+// configModelLabel names a stored model reference the way the pickers do: the
+// row's provider/model label when the install's table carries it, and the
+// reference as written when it does not (a row the settings page deleted is
+// skipped at run time, so the panel shows what is stored rather than nothing).
+func (p *configPanel) configModelLabel(ref string) string {
+	ref = strings.TrimSpace(ref)
+	root := appcfg.Root{LLMModels: p.models}
+	if entry, ok := appcfg.ResolveModelRef(&root, "main", ref); ok {
+		return llm.FormatProviderModelDisplay(entry.Provider, entry.Model)
+	}
+	return ref
+}
+
+// configSystemSubagentRow reports whether a row is one of an agent's subagent
+// entries naming a type the system dispatches. Its path is the guard's other
+// half: the same field descriptor travels into every agent definition, so
+// only the real path says which rows these are.
+func configSystemSubagentRow(path []string, value any) bool {
+	if len(path) != 3 || path[0] != configDefinitionsPath || path[2] != configSubagentsKey {
+		return false
+	}
+	row, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(configStringField(row, "name")))
+	return name != "" && slices.Contains(agent.SystemSubagentNames, name)
+}
+
+// configStringField reads one string field of a stored row.
+func configStringField(row map[string]any, field string) string {
+	if row == nil {
+		return ""
+	}
+	text, _ := row[field].(string)
+	return text
+}
+
 // rowsPrompt heads a row page: where the user is, how much is there, and the
 // last outcome.
 func (p *configPanel) rowsPrompt(field configField, keys []string, notice string) string {
@@ -775,10 +926,16 @@ func (p *configPanel) rowsPrompt(field configField, keys []string, notice string
 }
 
 // editRow is one row's menu: edit its value (or open it, when it is a table),
-// delete it, or go back.
+// delete it, or go back. One row is refused before its menu opens: a subagent
+// entry naming a system-dispatched type, which neither the loader nor the
+// runtime would let anyone configure (plan 313, prototype scene
+// system-stray-entry).
 func (p *configPanel) editRow(doc any, path []string, key string, field configField) (any, string) {
 	rowPath := configJoinPath(path, key)
 	value, _ := configLookupValue(doc, rowPath)
+	if configSystemSubagentRow(path, value) {
+		return doc, configSystemSubagentNotice
+	}
 	editLabel := configRowEditLabel
 	if configIsContainer(value) {
 		editLabel = configRowOpenLabel
@@ -803,7 +960,7 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 		}
 		return p.editRowValue(doc, rowPath, field, value)
 	case 1:
-		return p.assign(doc, rowPath, nil, true)
+		return p.assign(doc, rowPath, nil, true, field.Label)
 	default:
 		return doc, ""
 	}
@@ -821,14 +978,20 @@ func (p *configPanel) editRowValue(doc any, rowPath []string, field configField,
 	if !ok {
 		return doc, ""
 	}
-	return p.assign(doc, rowPath, value, false)
+	return p.assign(doc, rowPath, value, false, field.Label)
 }
 
 // addRow appends one row and, when the new row is an object, opens it so the
-// user shapes it straight away.
+// user shapes it straight away. The definitions map at the top level is the one
+// place a row is a primary agent: it asks for an id and a display name and
+// seeds the prototype's agent shape, instead of asking what type the value is
+// (plan 313, scene create-agent).
 func (p *configPanel) addRow(doc any, path []string, field configField) (any, string) {
 	container, _ := configLookupValue(doc, path)
 	list := configContainerIsList(field, container)
+	if !list && configPrimaryCreationPath(field, path) {
+		return p.addPrimaryAgent(doc, path, field, container)
+	}
 	key := ""
 	if !list {
 		name, ok, err := p.sel.Input(field.Label+" key of the new row", "")
@@ -872,12 +1035,98 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		rows[key] = value
 		next = rows
 	}
-	updated, note := p.assign(doc, path, next, false)
+	updated, note := p.assign(doc, path, next, false, field.Label)
 	if note != "" || !open {
 		return updated, note
 	}
 	opened, note := p.editRows(updated, childPath, field)
 	return opened, note
+}
+
+// configPrimaryCreationPath reports whether an add lands a new primary agent:
+// the definitions map, and the top level of the agents section. The path check
+// is not redundant with the field's — editRows hands the same descriptor down to
+// every nested row page, so inside one agent's definition the path is longer and
+// the guard must not fire there (plan 313).
+func configPrimaryCreationPath(field configField, path []string) bool {
+	return field.Path == configDefinitionsPath && len(path) == 1 && path[0] == configDefinitionsPath
+}
+
+// addPrimaryAgent creates one primary agent the way the prototype's create-agent
+// scene does (plan 313): an id and an optional display name, then the agent shape
+// the runtime needs — primary, no MCP servers of its own, no subagents yet — and
+// the new agent's own page, opened with the guidance that says what to do next.
+//
+// The two refusals are the ones this page owes the user: an id the loader would
+// reject, and an id naming a built-in subagent type. The latter would land a
+// definition IsEffectivePrimaryAgent never treats as a primary agent, because
+// that key is the type's install-wide default — so it is refused here and on the
+// gateway's create endpoint alike.
+func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField, container any) (any, string) {
+	name, ok, err := p.sel.Input("Agent id of the new primary agent", "")
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	if !ok {
+		return doc, ""
+	}
+	key := strings.TrimSpace(name)
+	if key == "" {
+		return doc, "the key may not be empty; nothing was written"
+	}
+	if !appcfg.ValidPrimaryAgentID(key) {
+		return doc, "use a lowercase agent id: letters, digits, hyphens or underscores, starting with a letter"
+	}
+	if appcfg.IsBuiltInSubagentDefinition(key) {
+		return doc, fmt.Sprintf("%q names a built-in subagent type, not a primary agent; choose a different id", key)
+	}
+	if rows, isMap := container.(map[string]any); isMap {
+		if _, dup := rows[key]; dup {
+			return doc, fmt.Sprintf("%q already exists", key)
+		}
+	}
+	display, ok, err := p.sel.Input("Display name (empty uses the title-cased id)", "")
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	if !ok {
+		return doc, ""
+	}
+	if display = strings.TrimSpace(display); display == "" {
+		display = configTitleCase(key)
+	}
+	rows, isMap := container.(map[string]any)
+	if !isMap || rows == nil {
+		rows = make(map[string]any, 1)
+	}
+	rows[key] = map[string]any{
+		"display_name": display,
+		"primary":      true,
+		"mcp_servers":  []any{},
+		"subagents":    []any{},
+	}
+	updated, note := p.assign(doc, path, rows, false, field.Label)
+	if note != "" {
+		return updated, note
+	}
+	opened, note := p.editRows(updated, configJoinPath(path, key), field, configPrimaryCreatedNotice)
+	return opened, note
+}
+
+// configTitleCase names a created agent that was given no display name, the
+// prototype's way (plan 313): underscores read as spaces, the first character is
+// upper-cased and the rest is left as written — review-agent reads Review-agent,
+// a_b reads A b.
+func configTitleCase(id string) string {
+	text := strings.ReplaceAll(strings.TrimSpace(id), "_", " ")
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
 }
 
 // chooseNewValue asks what a new (or replaced) value is, and returns it with
@@ -1034,7 +1283,7 @@ func configContainerLen(value any) int {
 // the maps on the way when the path does not exist yet — or, with remove, the
 // document with that leaf gone. Containers are edited in place and returned,
 // so a caller always keeps the value configAssign reported.
-func configAssign(doc any, path []string, value any, remove bool) (any, error) {
+func configAssign(doc any, path []string, value any, remove bool, label string) (any, error) {
 	if len(path) == 0 {
 		return value, nil
 	}
@@ -1053,7 +1302,7 @@ func configAssign(doc any, path []string, value any, remove bool) (any, error) {
 		if child == nil && !remove && len(rest) > 0 {
 			child = map[string]any{}
 		}
-		next, err := configAssign(child, rest, value, remove)
+		next, err := configAssign(child, rest, value, remove, label)
 		if err != nil {
 			return doc, err
 		}
@@ -1071,7 +1320,7 @@ func configAssign(doc any, path []string, value any, remove bool) (any, error) {
 		if index < 0 || index >= len(node) {
 			return doc, fmt.Errorf("list index %s is out of range", head)
 		}
-		next, err := configAssign(node[index], rest, value, remove)
+		next, err := configAssign(node[index], rest, value, remove, label)
 		if err != nil {
 			return doc, err
 		}
@@ -1081,7 +1330,23 @@ func configAssign(doc any, path []string, value any, remove bool) (any, error) {
 		node[index] = next
 		return node, nil
 	}
-	return doc, fmt.Errorf("%s is not an object or a list", strings.Join(path, "."))
+	// The setting's own name, never the dotted path it lives at: a rejection
+	// a reader cannot type anywhere is no explanation (plan 313 Step 5b).
+	if strings.TrimSpace(label) == "" {
+		label = configPathLabel(path[0])
+	}
+	return doc, fmt.Errorf("%s is not an object or a list", label)
+}
+
+// configPathLabel names one segment of a configuration path the way the row list
+// does: a map's key as written, a list's place by its 1-based number. A dotted
+// configuration path never reaches a reader — the panel speaks in row labels,
+// never in the names forebrain.yaml happens to use (plan 313 Step 5b).
+func configPathLabel(segment string) string {
+	if index, err := strconv.Atoi(segment); err == nil && index >= 0 {
+		return configRowLabel(segment, index, true)
+	}
+	return configRowLabel(segment, 0, false)
 }
 
 // configMarshalDoc renders the staged document as the bytes its row holds. A

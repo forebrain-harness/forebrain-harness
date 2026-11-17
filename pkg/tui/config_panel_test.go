@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -817,5 +818,295 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 			}
 			return true
 		})
+	}
+}
+
+// rowLabels is one page's labels, for the "is this setting reachable" checks.
+func rowLabels(items []SelectItem) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.Label)
+	}
+	return out
+}
+
+// findRow finds one page's row by label.
+func findRow(t *testing.T, items []SelectItem, label string) SelectItem {
+	t.Helper()
+	for _, item := range items {
+		if item.Label == label {
+			return item
+		}
+	}
+	t.Fatalf("no row labelled %q in %+v", label, rowLabels(items))
+	return SelectItem{}
+}
+
+// pageLabels joins every page's heading the panel showed, so a refusal or a
+// notice can be read where the user read it.
+func pageLabels(selector *scriptedSelector) string {
+	return strings.Join(selector.richLabels, "\n")
+}
+
+// The agents section reaches the plan reviewer's two global settings beside the
+// goal check's, and the definitions page marks a primary agent the way the
+// prototype does — a status at the row's right edge, with the description left
+// as the value it holds (plan 313).
+func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"subagents":[]}}}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Agent definitions", ok: true},
+		{ok: false},
+		{ok: false},
+	}, nil, "agents")
+
+	if len(selector.richItems) < 2 {
+		t.Fatalf("expected the section page and the definitions page, got %d", len(selector.richItems))
+	}
+	labels := rowLabels(selector.richItems[0])
+	for _, want := range []string{"Plan reviewer model", "Plan reviewer thinking level", "Goal check model"} {
+		if !slices.Contains(labels, want) {
+			t.Fatalf("the agents page is missing %q: %v", want, labels)
+		}
+	}
+
+	main := findRow(t, selector.richItems[1], "main")
+	if main.Status != configPrimaryStatus {
+		t.Fatalf("main's status = %q, want %q", main.Status, configPrimaryStatus)
+	}
+	if main.Description != "› 2 items" {
+		t.Fatalf("main's description = %q, want the value alone", main.Description)
+	}
+}
+
+// One agent's subagents read the way dispatch resolves them (plan 313): this
+// agent's own entry first, then the install-wide row of that type, then the
+// conversation's model — and an entry naming a system-dispatched type says so
+// and refuses to open.
+func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{
+		"definitions":{"main":{"primary":true,"subagents":[
+			{"name":"explore","model":"openai/gpt-sub"},
+			{"name":"plan"},
+			{"name":"verification"},
+			{"name":"db-migrator","description":"d","system_prompt":"p"},
+			{"name":"goal-evaluator"}
+		]}},
+		"subagent_models":{"plan":{"model":"llm-1","reasoning_effort":"xhigh"}}
+	}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Agent definitions", ok: true},
+		{label: "main", ok: true},
+		{label: configRowOpenLabel, ok: true},
+		{label: "subagents", ok: true},
+		{label: configRowOpenLabel, ok: true},
+		// The system entry refuses to open, and the page says why.
+		{label: "#5", ok: true},
+		{ok: false},
+		{ok: false},
+		{ok: false},
+		{ok: false},
+		{ok: false},
+	}, nil, "agents")
+
+	if len(selector.richItems) < 6 {
+		t.Fatalf("expected the subagent rows page, got %d pages", len(selector.richItems))
+	}
+	rows := selector.richItems[5]
+	cases := map[string]string{
+		"#1": "agent override: openai/gpt-sub",
+		"#2": "global default: openai/gpt-main / xHigh",
+		"#3": configFollowConversationModel,
+		"#4": "› 3 items",
+		"#5": configSystemSubagentNotice,
+	}
+	for label, want := range cases {
+		if row := findRow(t, rows, label); row.Description != want {
+			t.Errorf("%s = %q, want %q", label, row.Description, want)
+		}
+	}
+	if !strings.Contains(pageLabels(selector), configSystemSubagentNotice) {
+		t.Fatalf("the refusal must reach the page: %s", pageLabels(selector))
+	}
+	if len(session.writes) != 0 {
+		t.Fatalf("nothing here writes, got %+v", session.writes)
+	}
+}
+
+// Creating a primary agent is a guided flow, not a type menu (plan 313): an id,
+// an optional display name, the prototype's seed, and the new agent's own page
+// opened with the guidance that says what to do next.
+func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
+	newCase := func(t *testing.T, steps []richStep, inputs []selectorInput, stored string) (*configPanelTestSession, *scriptedSelector) {
+		t.Helper()
+		session := newConfigPanelSession(map[string]string{"agents": stored})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, steps, inputs, "agents")
+		return session, selector
+	}
+	openDefinitions := richStep{label: "Agent definitions", ok: true}
+	addRow := richStep{label: configAddRowLabel, ok: true}
+
+	t.Run("the id and the display name seed a primary agent", func(t *testing.T) {
+		session, selector := newCase(t,
+			[]richStep{
+				openDefinitions, addRow,
+				{ok: false}, // the new agent's page closes
+				{ok: false}, // the definitions page closes
+				{label: configSaveRowLabel, ok: true},
+				{ok: false},
+			},
+			[]selectorInput{{value: "review-agent", ok: true}, {value: "", ok: true}},
+			`{"definitions":{"main":{"primary":true}}}`,
+		)
+		if len(session.writes) != 1 {
+			t.Fatalf("expected one write, got %d", len(session.writes))
+		}
+		raw := string(session.writes[0].raw)
+		if !strings.Contains(raw, `"review-agent":{"display_name":"Review-agent","mcp_servers":[],"primary":true,"subagents":[]}`) {
+			t.Fatalf("raw = %s", raw)
+		}
+		// The guidance is the prototype's sentence, word for word, and it is on
+		// the page the creation opens.
+		if !strings.Contains(pageLabels(selector), configPrimaryCreatedNotice) {
+			t.Fatalf("the created agent must open with its guidance: %s", pageLabels(selector))
+		}
+	})
+
+	t.Run("a typed display name wins over the title-cased id", func(t *testing.T) {
+		session, _ := newCase(t,
+			[]richStep{openDefinitions, addRow, {ok: false}, {ok: false}, {label: configSaveRowLabel, ok: true}, {ok: false}},
+			[]selectorInput{{value: "a_b", ok: true}, {value: "Review Bot", ok: true}},
+			`{"definitions":{"main":{"primary":true}}}`,
+		)
+		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"a_b":{"display_name":"Review Bot"`) {
+			t.Fatalf("raw = %s", raw)
+		}
+	})
+
+	t.Run("an id the loader would refuse is refused here", func(t *testing.T) {
+		session, selector := newCase(t,
+			[]richStep{openDefinitions, addRow, {ok: false}, {ok: false}},
+			[]selectorInput{{value: "Bad ID", ok: true}},
+			`{"definitions":{"main":{"primary":true}}}`,
+		)
+		if !strings.Contains(pageLabels(selector), "use a lowercase agent id: letters, digits, hyphens or underscores, starting with a letter") {
+			t.Fatalf("the id rule must be stated: %s", pageLabels(selector))
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("a refused id writes nothing, got %+v", session.writes)
+		}
+	})
+
+	t.Run("a built-in subagent type is not a primary agent", func(t *testing.T) {
+		session, selector := newCase(t,
+			[]richStep{openDefinitions, addRow, {ok: false}, {ok: false}},
+			[]selectorInput{{value: "explore", ok: true}},
+			`{"definitions":{"main":{"primary":true}}}`,
+		)
+		if !strings.Contains(pageLabels(selector), `"explore" names a built-in subagent type, not a primary agent; choose a different id`) {
+			t.Fatalf("the type-name refusal must be stated: %s", pageLabels(selector))
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("a refused id writes nothing, got %+v", session.writes)
+		}
+	})
+
+	t.Run("an id that already exists is refused", func(t *testing.T) {
+		_, selector := newCase(t,
+			[]richStep{openDefinitions, addRow, {ok: false}, {ok: false}},
+			[]selectorInput{{value: "main", ok: true}},
+			`{"definitions":{"main":{"primary":true}}}`,
+		)
+		if !strings.Contains(pageLabels(selector), `"main" already exists`) {
+			t.Fatalf("the duplicate refusal must be stated: %s", pageLabels(selector))
+		}
+	})
+
+	t.Run("adding a key inside a definition keeps the ordinary type menu", func(t *testing.T) {
+		session, selector := newCase(t,
+			[]richStep{
+				openDefinitions,
+				{label: "main", ok: true},
+				{label: configRowOpenLabel, ok: true},
+				addRow,
+				{label: configNewTextRow, ok: true},
+				{ok: false},
+				{ok: false},
+				{label: configSaveRowLabel, ok: true},
+				{ok: false},
+			},
+			[]selectorInput{{value: "note", ok: true}, {value: "hello", ok: true}},
+			`{"definitions":{"main":{"primary":true}}}`,
+		)
+		// The guard is keyed on the real path, so the nested add still asks what
+		// type the value is — never for an agent id.
+		if !strings.Contains(pageLabels(selector), "What type is this row's value?") {
+			t.Fatalf("the nested add must keep the type menu: %s", pageLabels(selector))
+		}
+		if len(session.writes) != 1 || !strings.Contains(string(session.writes[0].raw), `"note":"hello"`) {
+			t.Fatalf("writes = %+v", session.writes)
+		}
+	})
+}
+
+// A save that names a system subagent entry is still the loader's to refuse: the
+// panel's early guard explains the row, and the validator judges the section.
+func TestConfigPanelSurfacesTheLoadersSystemEntryRefusal(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"subagents":[{"name":"goal-evaluator"}]}}}`})
+	session.writeErr = errStubSystemEntryRefusal
+	selector := &scriptedSelector{}
+	renderer := runConfigPanel(t, session, selector, []richStep{
+		{label: "Agent definitions", ok: true},
+		{ok: false},
+		{label: configSaveRowLabel, ok: true},
+		{ok: false},
+		{ok: false},
+	}, nil, "agents")
+
+	if !strings.Contains(pageLabels(selector), "is dispatched by the system and cannot be configured") {
+		t.Fatalf("the loader's refusal must reach the page: %s", pageLabels(selector))
+	}
+	if text := frameText(renderer); strings.Contains(text, configSavedNotice) {
+		t.Fatalf("a refused save must not report success: %s", text)
+	}
+}
+
+// errStubSystemEntryRefusal stands in for the loader's own sentence about a
+// system-dispatched subagent entry.
+var errStubSystemEntryRefusal = stubSystemEntryError{}
+
+type stubSystemEntryError struct{}
+
+func (stubSystemEntryError) Error() string {
+	return `agents.definitions.main.subagents[0]: "goal-evaluator" is dispatched by the system and cannot be configured`
+}
+
+// No page of the panel names a setting by its dotted configuration path: the
+// row that cannot hold settings is named the way the row list names it, so a
+// reader never sees a key they cannot type anywhere (plan 313 Step 5b).
+func TestConfigPanelNamesRowsWithoutADottedPath(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"defaults":"taken"}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Network retry limit", ok: true},
+		{ok: false},
+		{ok: false},
+	}, []selectorInput{{value: "5", ok: true}}, "agents")
+
+	pages := pageLabels(selector)
+	if !strings.Contains(pages, "Network retry limit is not an object or a list") {
+		t.Fatalf("the refusal must name the setting, not its path: %s", pages)
+	}
+	for _, leak := range []string{"defaults.network_retry_max", "network_retry_max is not"} {
+		if strings.Contains(pages, leak) {
+			t.Fatalf("a raw configuration key reached the page (%q): %s", leak, pages)
+		}
+	}
+	if len(session.writes) != 0 {
+		t.Fatalf("nothing landed, got %+v", session.writes)
 	}
 }
