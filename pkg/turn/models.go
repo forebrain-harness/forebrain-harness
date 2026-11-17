@@ -203,21 +203,42 @@ func ModelReasoningEffortsRow(modelID, provider, model string) []string {
 	return trimToSendable(provider, model, levels)
 }
 
-// trimToSendable keeps the levels this build can put on the wire for a model.
+// trimToSendable keeps the levels this build can put on the wire for a model,
+// in the order the caller named them.
+func trimToSendable(provider, model string, levels []string) []string {
+	return filterSendableEfforts(provider, model, "", levels)
+}
+
+// SetupReasoningEfforts is the thinking levels one model can actually be given,
+// in the one order every picker draws them in (effortLevelOrder). It is the
+// entry every surface that offers a level reads — the /connect default-effort
+// page, the web form's default dropdown and the gateway's validation — so a
+// level one of them offers is a level this build can send.
+//
+// apiPath is the protocol the row speaks, the same value pkg/run dispatches on:
+// a custom model's Messages endpoint drops the levels the Anthropic client
+// rejects even though its provider name says nothing about Anthropic. "" asks
+// the provider and model alone, which is what a row without a path means. The
+// input slice is never modified.
+func SetupReasoningEfforts(provider, model, apiPath string, levels []string) []string {
+	return filterSendableEfforts(provider, model, apiPath, orderedEffortLevels(levels))
+}
+
+// filterSendableEfforts keeps the levels this build can put on the wire for a
+// model.
 //
 // The deciding fact is which client pkg/run will build the request with, not
 // which provider the model belongs to: that dispatch is by protocol, and an
 // OpenCode model on the Anthropic path goes through the same client as the
 // anthropic provider — a client that drops a level it rejects and sends no
 // effort at all. Offering such a level would be exactly the fake option this
-// catalog exists to remove, so the protocol decides here too. The Google
-// generateContent client carries no effort parameter at all; the
-// OpenAI-compatible and Responses clients pass the parameter through, so they
-// send whatever the catalog names.
-func trimToSendable(provider, model string, levels []string) []string {
-	protocol, err := opencode.ProtocolFor(provider, model)
-	sendsThroughAnthropic := anthropicClientProvider(provider) || (err == nil && protocol == opencode.ProtocolAnthropic)
-	if sendsThroughAnthropic {
+// catalog exists to remove, so the protocol decides here too.
+func filterSendableEfforts(provider, model, apiPath string, levels []string) []string {
+	switch effortClientFor(provider, model, apiPath) {
+	case effortClientNoParameter:
+		// The generateContent client carries no effort parameter.
+		return nil
+	case effortClientAnthropic:
 		out := make([]string, 0, len(levels))
 		for _, level := range levels {
 			if anthropic.AcceptsEffort(level) {
@@ -229,11 +250,58 @@ func trimToSendable(provider, model string, levels []string) []string {
 		}
 		return out
 	}
-	if err == nil && protocol == opencode.ProtocolGoogle {
-		// The generateContent client carries no effort parameter.
-		return nil
-	}
+	// The OpenAI-compatible and Responses clients pass the parameter through,
+	// so they send whatever the level list names.
 	return append([]string(nil), levels...)
+}
+
+// effortClient is which client pkg/run builds for one model, as far as thinking
+// levels are concerned.
+type effortClient int
+
+const (
+	// effortClientPassThrough sends whatever level the params name.
+	effortClientPassThrough effortClient = iota
+	// effortClientAnthropic drops every level anthropic.AcceptsEffort rejects.
+	effortClientAnthropic
+	// effortClientNoParameter has no effort parameter to send.
+	effortClientNoParameter
+)
+
+// effortClientFor answers which client serves a model, in the order pkg/run
+// picks one: the two OpenCode ids first (their own protocol table), then a
+// provider a local subscription plugin registered a factory for (the factory
+// owns the request shape), then the Anthropic client by provider name and by
+// Messages path.
+func effortClientFor(provider, model, apiPath string) effortClient {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case opencodeProvider, opencodeGoProvider:
+		protocol, err := opencode.ProtocolFor(provider, model)
+		switch {
+		case err != nil:
+			return effortClientPassThrough
+		case protocol == opencode.ProtocolGoogle:
+			return effortClientNoParameter
+		case protocol == opencode.ProtocolAnthropic:
+			return effortClientAnthropic
+		}
+		return effortClientPassThrough
+	}
+	if llm.HasProviderFactory(provider) {
+		return effortClientPassThrough
+	}
+	if anthropicClientProvider(provider) || messagesAPIPath(apiPath) {
+		return effortClientAnthropic
+	}
+	return effortClientPassThrough
+}
+
+// messagesAPIPath reports whether a row's path asks for the Anthropic Messages
+// protocol, by the rule pkg/run dispatches on: the Messages client appends
+// "/v1/messages" to the base URL itself, so the stored path only names the
+// protocol, and a trailing slash is tolerated.
+func messagesAPIPath(path string) bool {
+	return strings.HasSuffix(strings.TrimSuffix(strings.TrimSpace(path), "/"), "/messages")
 }
 
 // effortLevelOrder is the one order every effort picker draws its levels in:

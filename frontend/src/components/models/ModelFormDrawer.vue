@@ -224,6 +224,7 @@
         :draft-efforts="draft.efforts"
         :source-efforts="sourceEfforts"
         :efforts-known="effortsKnown"
+        :options="effortOptions"
         :efforts-loading="effortsLoading"
         :params="draft.params"
         :changed-count="changedCount"
@@ -323,6 +324,7 @@ import {
 } from '@/lib/api'
 import { useI18n } from '@/locales'
 import { formatTokenCount } from '@/lib/forebrainGatewayRuntime'
+import { EFFORT_LEVELS } from '@/lib/effortLabel'
 
 const props = withDefaults(
   defineProps<{
@@ -456,6 +458,39 @@ const capsWrite = computed<LlmModelCaps>(() => {
   if (caps.maxOutput !== undefined && caps.maxOutput !== catalog.maxOutput) out.maxOutput = caps.maxOutput
   return out
 })
+
+/** The default-effort dropdown's levels, in the one picker order: the levels the
+ *  model can be given — a source's own list, trimmed by the answer to what this
+ *  protocol can send, or the boxes the person ticked — with `none` at their head
+ *  only where the model can turn thinking off and that answer can be sent. The
+ *  off capability is resolved by precedence, never by OR: the form's own switch
+ *  when it has been touched, then the catalog's, then a level list naming
+ *  `none` (plan 311). */
+const effortOptions = computed<string[]>(() => {
+  const named =
+    effortsKnown.value || sourceEfforts.value.length
+      ? [...sourceEfforts.value]
+      : [...draft.efforts]
+  const off = draft.caps.reasoningOff ?? catalogCaps.value.reasoningOff ?? named.includes('none')
+  // `none` is the capability, not one of the levels: it is in the list only when
+  // the answer above says so, whatever the source's own list carried.
+  const levels = named.filter((level) => level !== 'none')
+  if (off) levels.push('none')
+  return (EFFORT_LEVELS as readonly string[]).filter((level) => levels.includes(level))
+})
+
+/** A default the list no longer offers is not a choice anybody can make: the
+ *  page says 「默认」 instead of leaving a value the save would refuse. Switching
+ *  a protocol, withdrawing 「允许关闭思考」 or narrowing the levels all land
+ *  here. */
+watch(
+  effortOptions,
+  (levels) => {
+    const stored = String(draft.caps.defaultEffort ?? '')
+    if (stored && !levels.includes(stored)) setDefaultEffort('')
+  },
+  { immediate: true },
+)
 
 const changedCount = computed(() => Object.keys(capsWrite.value).length + (draft.params.trim() ? 1 : 0))
 
@@ -654,26 +689,45 @@ async function loadCaps(): Promise<void> {
     capsTimer = null
     void (async () => {
       try {
+        const apiPath = draft.apiPath
         const answer = await forebrainApi.llmModelCatalogCaps({
           provider,
           model,
           catalogProvider,
           baseUrl: draft.baseUrl,
+          // The protocol decides which levels can be sent, so the answer is
+          // about this endpoint's own shape (plan 311).
+          apiPath,
           id: props.mode === 'edit' ? props.row?.id : undefined,
         })
         // The answer is for one identity: a later keystroke owns the next one,
-        // and an answer for another provider or name would overwrite it.
+        // and an answer for another provider, name or protocol would overwrite it.
         if (draft.provider !== provider || draft.model.trim() !== model) return
         if (draft.catalogProvider.trim() !== catalogProvider) return
+        if (draft.apiPath !== apiPath) return
         const { effortsKnown: known, effortsSource: _source, catalogId: matched, ...caps } = answer
+        const previous = catalogCaps.value
         catalogCaps.value = caps
         catalogId.value = String(matched ?? '')
         catalogChecked.value = true
         sourceEfforts.value = [...(caps.efforts ?? [])]
         effortsKnown.value = known
+        // The switches start at the catalog's own answer, so one that still
+        // equals it is the catalog's answer and not the person's: a new answer
+        // — another endpoint's protocol, say — replaces it instead of leaving a
+        // stale override behind that would keep offering what this client
+        // cannot send.
+        if (draft.caps.reasoningOff !== undefined && draft.caps.reasoningOff === previous.reasoningOff) {
+          const next = { ...draft.caps }
+          delete next.reasoningOff
+          draft.caps = next
+        }
       } catch {
         // The lookup is a convenience: without it the checkboxes are offered,
-        // which is the same answer a model no source lists gets.
+        // which is the same answer a model no source lists gets. The last
+        // answer's levels go with it — they belong to another model, and the
+        // boxes read the draft's own answer now.
+        sourceEfforts.value = []
         effortsKnown.value = false
       } finally {
         effortsLoading.value = false

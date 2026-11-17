@@ -6,6 +6,7 @@ import forebrainApi, { GatewayHttpError, type LlmModelRow } from '@/lib/api'
 import { setLocale } from '@/locales'
 import { InlineTeleport } from '@/test-utils/portal'
 
+import ModelCapsFields from './ModelCapsFields.vue'
 import ModelFormDrawer from './ModelFormDrawer.vue'
 
 /**
@@ -313,5 +314,182 @@ describe('ModelFormDrawer subagent authorization', () => {
 
     const body = (create.mock.calls[0]?.[0] ?? {}) as Record<string, unknown>
     expect(body.subagentAllowed).toBe(false)
+  })
+})
+
+// The default thinking level shares the TUI's three-state rule (plan 311): the
+// dropdown offers what the model can be given — `none` among them only where the
+// model can turn thinking off *and* the protocol can send it — a stored value the
+// list no longer holds is reset rather than left to be refused, and the switch
+// beside it stays the capability it has always been.
+describe('ModelFormDrawer default effort', () => {
+  const OFF_LABEL = '关闭思考'
+
+  async function openAdvanced(wrapper: VueWrapper): Promise<void> {
+    await wrapper.find('[data-testid="models-advanced-toggle"]').trigger('click')
+    await flushPromises()
+  }
+
+  it('offers 关闭思考 where the model has the switch on', async () => {
+    vi.spyOn(forebrainApi, 'llmModelCatalogCaps').mockResolvedValue({
+      effortsKnown: true,
+      efforts: ['low', 'medium'],
+      reasoningOff: true,
+    })
+    const wrapper = mountDrawer({
+      row: row({ caps: { reasoningOff: true }, effortsKnown: true, catalogCaps: { efforts: ['low', 'medium'], reasoningOff: true } }),
+    })
+    await flushPromises()
+    await openAdvanced(wrapper)
+
+    const fields = wrapper.findComponent(ModelCapsFields)
+    expect(fields.props('options')).toEqual(['none', 'low', 'medium'])
+    expect(OFF_LABEL).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('leaves it out where the model cannot turn thinking off', async () => {
+    vi.spyOn(forebrainApi, 'llmModelCatalogCaps').mockResolvedValue({ effortsKnown: true, efforts: ['low', 'high'] })
+    const wrapper = mountDrawer({
+      row: row({ effortsKnown: true, catalogCaps: { efforts: ['low', 'high'] } }),
+    })
+    await flushPromises()
+    await openAdvanced(wrapper)
+
+    expect(wrapper.findComponent(ModelCapsFields).props('options')).toEqual(['low', 'high'])
+    wrapper.unmount()
+  })
+
+  it('withdrawing 允许关闭思考 removes it and resets a stored 关闭思考', async () => {
+    vi.spyOn(forebrainApi, 'llmModelCatalogCaps').mockResolvedValue({
+      effortsKnown: true,
+      efforts: ['none', 'low', 'high'],
+      reasoningOff: true,
+    })
+    const update = vi.spyOn(forebrainApi, 'updateLlmModel').mockResolvedValue(row())
+    const wrapper = mountDrawer({
+      row: row({
+        effortsKnown: true,
+        catalogCaps: { efforts: ['none', 'low', 'high'], reasoningOff: true },
+        caps: { reasoningOff: true, defaultEffort: 'none' },
+      }),
+    })
+    await flushPromises()
+    await openAdvanced(wrapper)
+    expect(wrapper.findComponent(ModelCapsFields).props('options')).toEqual(['none', 'low', 'high'])
+
+    // The person says the model cannot turn thinking off after all: an explicit
+    // no is not overruled by the catalog, and the stored 关闭思考 is no longer a
+    // value the list offers.
+    await wrapper.find('[data-switch="reasoningOff"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent(ModelCapsFields).props('options')).toEqual(['low', 'high'])
+
+    await wrapper.find('[data-testid="models-save"]').trigger('click')
+    await flushPromises()
+    const body = update.mock.calls[0][1] as Record<string, unknown>
+    expect((body.caps as Record<string, unknown>).defaultEffort).toBeUndefined()
+    expect((body.caps as Record<string, unknown>).reasoningOff).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('a protocol switch that makes the stored default illegal resets it', async () => {
+    vi.spyOn(forebrainApi, 'llmModelCatalogCaps').mockImplementation(async () => ({
+      effortsKnown: true,
+      // The Messages answer: none is not sendable, so the dropdown's list
+      // narrows and the stored default has no home.
+      efforts: ['low', 'medium'],
+    }))
+    const update = vi.spyOn(forebrainApi, 'updateLlmModel').mockResolvedValue(row())
+    const wrapper = mountDrawer({
+      row: row({ caps: { defaultEffort: 'none' }, catalogCaps: { efforts: ['none', 'low', 'medium'], reasoningOff: true } }),
+    })
+    // The capability lookup is debounced, so the answer for this endpoint is
+    // what the dropdown ends up holding.
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    await flushPromises()
+    await openAdvanced(wrapper)
+    expect(wrapper.findComponent(ModelCapsFields).props('options')).toEqual(['low', 'medium'])
+    await wrapper.find('[data-testid="models-save"]').trigger('click')
+    await flushPromises()
+    const body = update.mock.calls[0][1] as Record<string, unknown>
+    expect((body.caps as Record<string, unknown>).defaultEffort).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('saves 关闭思考 as default_effort none', async () => {
+    vi.spyOn(forebrainApi, 'llmModelCatalogCaps').mockResolvedValue({
+      effortsKnown: true,
+      efforts: ['low', 'medium'],
+      reasoningOff: true,
+    })
+    const update = vi.spyOn(forebrainApi, 'updateLlmModel').mockResolvedValue(row())
+    const wrapper = mountDrawer({
+      row: row({ caps: { reasoningOff: true } , catalogCaps: { efforts: ['low', 'medium'], reasoningOff: true } }),
+    })
+    await flushPromises()
+    await openAdvanced(wrapper)
+
+    wrapper.findComponent(ModelCapsFields).vm.$emit('update:defaultEffort', 'none')
+    await flushPromises()
+    await wrapper.find('[data-testid="models-save"]').trigger('click')
+    await flushPromises()
+
+    const body = update.mock.calls[0][1] as Record<string, unknown>
+    expect((body.caps as Record<string, unknown>).defaultEffort).toBe('none')
+    wrapper.unmount()
+  })
+
+  it('saving 默认 omits default_effort and still sends the whole caps block', async () => {
+    vi.spyOn(forebrainApi, 'llmModelCatalogCaps').mockResolvedValue({
+      effortsKnown: true,
+      efforts: ['low', 'medium'],
+      reasoningOff: true,
+    })
+    const update = vi.spyOn(forebrainApi, 'updateLlmModel').mockResolvedValue(row())
+    const wrapper = mountDrawer({
+      row: row({ caps: { reasoningOff: true, defaultEffort: 'low' }, catalogCaps: { efforts: ['low', 'medium'], reasoningOff: true } }),
+    })
+    await flushPromises()
+    await openAdvanced(wrapper)
+
+    wrapper.findComponent(ModelCapsFields).vm.$emit('update:defaultEffort', '')
+    await flushPromises()
+    await wrapper.find('[data-testid="models-save"]').trigger('click')
+    await flushPromises()
+
+    const body = update.mock.calls[0][1] as Record<string, unknown>
+    // The gateway replaces the whole caps block, so an omitted default is the
+    // clearing (plan 311 §2.2): the block is still sent.
+    expect(body).toHaveProperty('caps')
+    expect((body.caps as Record<string, unknown>).defaultEffort).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('a row no source lists offers the levels it declares, trimmed', async () => {
+    vi.spyOn(forebrainApi, 'llmModelCatalogCaps').mockResolvedValue({
+      effortsKnown: false,
+      // The gateway answered from the row's own declaration, already trimmed to
+      // what the protocol can send.
+      efforts: ['low'],
+    })
+    const wrapper = mountDrawer({
+      row: row({
+        provider: 'custom',
+        custom: true,
+        apiPath: '/v1/messages',
+        caps: { efforts: ['minimal', 'low'] },
+        effortsKnown: false,
+        catalogCaps: { efforts: ['low'] },
+      }),
+    })
+    await flushPromises()
+    await openAdvanced(wrapper)
+
+    const fields = wrapper.findComponent(ModelCapsFields)
+    expect(fields.props('options')).toEqual(['low'])
+    // The checkboxes still replay the row's own declaration.
+    expect(fields.props('draftEfforts')).toEqual(['minimal', 'low'])
+    wrapper.unmount()
   })
 })

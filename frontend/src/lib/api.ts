@@ -4642,6 +4642,10 @@ export const forebrainApi = {
     /** The row's own answer about where its data lives; '' asks the model name
      *  alone. */
     catalogProvider?: string
+    /** The protocol the form is on: it decides which levels can actually be
+     *  sent, so the dropdown never offers one the client drops. Omitted when
+     *  nobody has named one yet. */
+    apiPath?: string
   }) {
     return api.get<LlmModelCatalogCaps>('/llm-models/catalog-caps', { params: toSnakeCase(query) }).then((res) => res.data)
   },

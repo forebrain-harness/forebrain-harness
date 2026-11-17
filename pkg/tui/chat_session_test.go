@@ -14304,7 +14304,7 @@ func TestPromptMainLLMSetupChatGPTUsesOAuthWithoutAPIKey(t *testing.T) {
 	withSubscriptions(t, sub)
 	opened := browserMachine(t)
 	selector := &fakeSelector{
-		selects:  []string{"ChatGPT"},
+		selects:  []string{"ChatGPT", "gpt-future", reasoningEffortUnset, subagentsNo},
 		confirms: []bool{true},
 	}
 	opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
@@ -14530,24 +14530,29 @@ func (s *fakeSelector) Confirm(label string, defaultValue bool) (bool, bool, err
 func TestPromptMainLLMSetupPersistsReasoningEffort(t *testing.T) {
 	useSetupTestCatalog(t)
 	selector := &fakeSelector{
-		selects: []string{"Anthropic", "claude-sonnet-4-6", "high", subagentsYes},
+		selects: []string{"Anthropic", "claude-sonnet-4-6", "High", subagentsYes},
 		inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 	}
 	opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
 	if err != nil || !ok {
 		t.Fatalf("PromptMainLLMSetup ok=%t err=%v", ok, err)
 	}
-	if !opts.UpdateParams || opts.ParamsJSON != `{"reasoning":{"effort":"high"}}` {
-		t.Fatalf("params = %q (update=%t)", opts.ParamsJSON, opts.UpdateParams)
+	// The level is the model row's default (plan 311), not a param entry: the
+	// save writes cap_default_effort and drops any effort the params pinned.
+	if opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "high" {
+		t.Fatalf("cap default = %v, want high", opts.CapDefaultEffort)
+	}
+	if opts.UpdateParams || opts.ParamsJSON != "" {
+		t.Fatalf("params = %q (update=%t), want the save to write none", opts.ParamsJSON, opts.UpdateParams)
 	}
 	found := false
 	for _, label := range selector.selectLabels {
-		if strings.HasPrefix(label, "Reasoning effort\n") {
+		if strings.HasPrefix(label, "Default reasoning effort\nChoose the default for anthropic/claude-sonnet-4-6.") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected a reasoning effort prompt, got %#v", selector.selectLabels)
+		t.Fatalf("expected a default reasoning effort page, got %#v", selector.selectLabels)
 	}
 	// /connect walks the same authorization page as onboarding, after the
 	// model and before the review, and its answer rides the saved options.
@@ -14575,25 +14580,50 @@ func TestPromptMainLLMSetupProviderDefaultLeavesEffortUnset(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("PromptMainLLMSetup ok=%t err=%v", ok, err)
 	}
-	if opts.ParamsJSON != "" {
-		t.Fatalf("params = %q, want empty", opts.ParamsJSON)
+	// "The provider decides" is an answer the save states, not a missing one.
+	if opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "" {
+		t.Fatalf("cap default = %v, want an explicit empty answer", opts.CapDefaultEffort)
+	}
+	if opts.UpdateParams || opts.ParamsJSON != "" {
+		t.Fatalf("params = %q (update=%t), want the save to write none", opts.ParamsJSON, opts.UpdateParams)
 	}
 }
 
 func TestPromptMainLLMSetupKeepsOtherParamsWhenSettingEffort(t *testing.T) {
 	useSetupTestCatalog(t)
 	selector := &fakeSelector{
-		selects: []string{"Anthropic", "claude-sonnet-4-6", "low"},
-		inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
+		selects:  []string{"Anthropic", "claude-sonnet-4-6", "Low"},
+		inputs:   []string{"sk-test", "https://api.anthropic.com", ""},
+		confirms: []bool{true}, // the row exists, so the save asks before replacing it
 	}
 	cfg := setupTestConfig(t, selector)
-	cfg.Defaults = process.AgentLLMDefaults{Provider: "anthropic", ParamsJSON: `{"temperature":0.2}`}
+	// The row already carries request parameters and an effort: the save keeps
+	// the one and replaces the other with the row's default (plan 311).
+	params := `{"temperature":0.2,"reasoning":{"effort":"high"}}`
+	seedEffortRow(t, cfg, process.LLMModelInput{
+		Provider: "anthropic", Model: "claude-sonnet-4-6", BaseURL: "https://api.anthropic.com",
+		APIKey: strPtrTUI("sk-old"), ParamsJSON: &params,
+	})
 	opts, ok, err := PromptMainLLMSetup(cfg)
 	if err != nil || !ok {
 		t.Fatalf("PromptMainLLMSetup ok=%t err=%v", ok, err)
 	}
-	if !strings.Contains(opts.ParamsJSON, `"temperature":0.2`) || !strings.Contains(opts.ParamsJSON, `"effort":"low"`) {
-		t.Fatalf("params = %q", opts.ParamsJSON)
+	if opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "low" {
+		t.Fatalf("cap default = %v, want low", opts.CapDefaultEffort)
+	}
+	rep, err := process.Execute(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath, Config: appcfg.Root{}}, opts)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	row := readRow(t, cfg, rep.ModelID)
+	if !strings.Contains(row.ParamsJSON, `"temperature":0.2`) {
+		t.Fatalf("params = %q, want the other request fields kept", row.ParamsJSON)
+	}
+	if strings.Contains(row.ParamsJSON, `"effort"`) {
+		t.Fatalf("params = %q, want the stored effort removed", row.ParamsJSON)
+	}
+	if row.CapDefaultEffort != "low" {
+		t.Fatalf("cap_default_effort = %q, want low", row.CapDefaultEffort)
 	}
 }
 
@@ -29009,7 +29039,9 @@ func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 			selects: []string{
 				"OpenAI",
 				"gpt-5.5",
-				"high",
+				// The model's default thinking level (plan 311): the page names
+				// the levels the way every picker does.
+				"High",
 				// The subagent authorization page (283): onboarding asks it
 				// like /connect does, and the answer reaches the row.
 				subagentsYes,
@@ -29107,8 +29139,8 @@ func TestSelectLLMProviderUsesSelectorLabels(t *testing.T) {
 	home := t.TempDir()
 	choice, ok, err := PromptMainLLMSetup(PromptConfig{
 		Selector: &wizardSelector{
-			// provider, model, effort, then the subagent authorization page (283)
-			selects: []string{"Anthropic", "claude-sonnet-4-6", "high", subagentsNo},
+			// provider, model, the default level, then the authorization (283)
+			selects: []string{"Anthropic", "claude-sonnet-4-6", "High", subagentsNo},
 			inputs:  []string{"sk-test", "https://api.anthropic.com", ""},
 			confirms: []bool{
 				true,
@@ -29163,21 +29195,20 @@ func TestOnboardEscGoesBackAPage(t *testing.T) {
 	// drives: the model and its effort are asked again, and they open on what
 	// was chosen before.
 	selector := &backtrackSelector{fakeSelector: fakeSelector{
-		selects: []string{"OpenAI", "gpt-5.5", "high", "gpt-5.5", "low", subagentsNo},
+		selects: []string{"OpenAI", "gpt-5.5", "High", "Low", subagentsNo},
 		inputs:  []string{"sk-live-secret"},
 	}, backAt: map[string]int{"Subagents": 1}}
 	w := &Wizard{rt: process.Context{Home: home, ConfigPath: cfgPath}, out: io.Discard, selector: selector}
 	if err := w.run(context.Background()); err != nil {
 		t.Fatalf("run error: %v", err)
 	}
-	if got := strings.Join(selector.pages, " → "); got != "Welcome to Forebrain Harness → OpenAI API key → Model → Reasoning effort → Subagents → Model → Reasoning effort → Subagents → Review" {
+	if got := strings.Join(selector.pages, " → "); got != "Welcome to Forebrain Harness → OpenAI API key → Model → Default reasoning effort → Subagents → Default reasoning effort → Subagents → Review" {
 		t.Fatalf("pages = %s", got)
 	}
-	if got := selector.selectDefaults[3]; got != "gpt-5.5" {
-		t.Fatalf("model default on the way back = %q, want the model chosen before", got)
-	}
-	if got := selector.selectDefaults[4]; got != "high" {
-		t.Fatalf("effort default on the way back = %q, want the effort chosen before", got)
+	// Esc on the authorization lands on the level before it, and the page opens
+	// on the level answered there before.
+	if got := selector.selectDefaults[3]; got != "High" {
+		t.Fatalf("effort default on the way back = %q, want the level chosen before", got)
 	}
 	loaded := composedConfigForTest(t, home)
 	// The configured model is one row of the model table (plan 262), and the

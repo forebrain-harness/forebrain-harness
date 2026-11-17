@@ -1048,3 +1048,52 @@ func TestOrderedEffortLevelsPutsTheKnownLevelsFirst(t *testing.T) {
 	require.Nil(t, orderedEffortLevels(nil))
 	require.Nil(t, orderedEffortLevels([]string{}))
 }
+
+// The levels one model can be given, as every surface that offers them reads
+// them (plan 311): the one order the picker draws, and only the levels the
+// client pkg/run builds can actually send. A custom model's Messages endpoint
+// is the case a provider name alone cannot answer — the same level list is
+// offered whole on Chat Completions and trimmed on Messages — and a provider a
+// plugin registered a factory for keeps its levels whatever its path says,
+// because that factory builds the request.
+func TestSetupReasoningEfforts(t *testing.T) {
+	levels := []string{"High", " low ", "none", "low", "", "ultra"}
+	input := append([]string(nil), levels...)
+	require.Equal(t, []string{"none", "low", "high", "ultra"}, SetupReasoningEfforts("openai", "gpt-5", "", levels))
+	require.Equal(t, input, levels, "the caller's slice is never modified")
+
+	// A provider whose client is the Anthropic one drops the levels it rejects,
+	// by name ...
+	require.Equal(t, []string{"low", "medium", "high", "max"},
+		SetupReasoningEfforts("anthropic", "claude-sonnet-5", "", []string{"none", "minimal", "low", "medium", "high", "max"}))
+	require.Equal(t, []string{"low", "medium", "xhigh", "max"},
+		SetupReasoningEfforts("minimax", "MiniMax-M2.7", "", []string{"none", "low", "xhigh", "medium", "max"}))
+	// ... and by path, which is what a custom model names instead.
+	require.Equal(t, []string{"low", "medium"}, SetupReasoningEfforts("custom", "vendor-model", "/v1/messages",
+		[]string{"none", "minimal", "low", "medium"}))
+	require.Equal(t, []string{"low", "medium"}, SetupReasoningEfforts("custom", "vendor-model", "/messages/",
+		[]string{"none", "minimal", "low", "medium"}), "a trailing slash still names Messages")
+	// The other two protocols pass the parameter through.
+	require.Equal(t, []string{"none", "minimal", "low"},
+		SetupReasoningEfforts("custom", "vendor-model", "/chat/completions", []string{"low", "none", "minimal"}))
+	require.Equal(t, []string{"none", "minimal", "low"},
+		SetupReasoningEfforts("custom", "vendor-model", "/responses", []string{"low", "none", "minimal"}))
+
+	// The OpenCode ids decide by their own table: the generateContent client has
+	// no effort parameter at all, and the Anthropic one trims.
+	require.Nil(t, SetupReasoningEfforts("opencode-go", "gemini-4-argon-contributor", "/chat/completions",
+		[]string{"none", "low", "high"}))
+	require.Equal(t, []string{"low", "high"},
+		SetupReasoningEfforts("opencode", "claude-sonnet-4-5", "/chat/completions", []string{"none", "low", "high"}))
+
+	// A plugin's factory owns the request shape, so its provider is never
+	// mistaken for the Anthropic client by its path or by a name that looks
+	// like one.
+	llm.RegisterProviderFactory("plug311", func(llm.ProviderLLMRequest) (llm.LLM, error) { return nil, nil })
+	require.Equal(t, []string{"none", "low", "high"},
+		SetupReasoningEfforts("plug311", "claude-sonnet-4-5", "/v1/messages", []string{"none", "low", "high"}))
+
+	// Nothing to offer is nothing to ask.
+	require.Nil(t, SetupReasoningEfforts("openai", "gpt-5", "", nil))
+	require.Nil(t, SetupReasoningEfforts("openai", "gpt-5", "", []string{}))
+}

@@ -386,12 +386,13 @@ const (
 	setupPageBaseURL         // custom: the address requests go to
 	setupPageProtocol        // custom: the request shape
 	setupPageCredentials     // the API key, or the subscription's sign-in
-	setupPageModel           // a built-in provider's model and its effort
+	setupPageModel           // a built-in provider's model
 	setupPageCustomModel     // custom: the model name, sent verbatim
 	setupPageCatalogProvider // custom: whose model data describes it (optional)
 	setupPageThinking        // custom: the levels a model no source knows supports
+	setupPageEffort          // every group: the model's default thinking level
 	setupPageConnection      // custom: send one request before saving
-	setupPageOffers          // a subscription's models to add
+	setupPageOffers          // a subscription's model to add
 	setupPageSubagents       // may the agent pick this row for subagents on its own?
 	setupPageReview
 )
@@ -434,7 +435,6 @@ type llmSetup struct {
 	choice  providerChoice
 	apiKey  string
 	model   string
-	params  string
 	baseURL string
 	apiPath string
 	// urlVerbatim is 「自定义协议」: the request goes to baseURL exactly as
@@ -446,10 +446,12 @@ type llmSetup struct {
 	// catalogProvider is the provider whose official data describes the custom
 	// model (owner 2026-11-16); "" matches the model name alone.
 	catalogProvider string
-	// offers are the models the subscription's sign-in unlocked, and chosen are
-	// the rows the user ticked among them.
-	offers []subscription.Offer
-	chosen []int
+	// offers are the models the subscription's sign-in unlocked, and
+	// selectedOfferIdx is the one the user chose among them (-1 before the page
+	// is answered). One flow configures one model: the other rows the install
+	// already holds are neither re-written nor dropped.
+	offers           []subscription.Offer
+	selectedOfferIdx int
 	// probes are the sign-in answers already given for this setup, one per
 	// subscription: the first page's «Signed in» and the sign-in page ask the
 	// vendor once between them, never twice.
@@ -460,18 +462,27 @@ type llmSetup struct {
 	// subagentAnswered records that this flow already asked, so stepping back
 	// to the page shows this flow's answer rather than the stored switch.
 	subagentAnswered bool
-	// offerSubagent is the subscription flow's answer per offer index: which
-	// of the models the sign-in unlocked the agent may pick for subagents.
-	offerSubagent map[int]bool
-	// offerSubagentAnswered records that the subscription flow asked, so a
-	// step back to the model list keeps what was ticked there.
-	offerSubagentAnswered bool
+	// defaultEffort is the default thinking level this flow chose for the model
+	// being configured (plan 311), "" meaning the provider decides. effortAnswered
+	// records that the page was answered, and effortIdentity names the model and
+	// endpoint the answer belongs to, so a different one never inherits it.
+	defaultEffort  string
+	effortAnswered bool
+	effortIdentity string
+	// offDeclared is the custom form's answer to "can this model turn thinking
+	// off?": a capability, kept apart from the levels the row carries.
+	offDeclared bool
+	// thinkingAnswered records that the capability page was answered, so the
+	// page opens on this flow's ticks rather than on the stored row's.
+	thinkingAnswered bool
 	// db is the state database the rows are written to, opened on first use.
 	db *sql.DB
 }
 
 func newLLMSetup(cfg PromptConfig) *llmSetup {
-	return &llmSetup{cfg: cfg, page: setupPageProvider}
+	// -1 is "no model chosen yet": 0 would name the listing's first row before
+	// the page was answered.
+	return &llmSetup{cfg: cfg, page: setupPageProvider, selectedOfferIdx: -1}
 }
 
 func (s *llmSetup) run() (process.Options, bool, error) {
@@ -500,26 +511,18 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 			forward, err = s.pickCatalogProvider()
 		case setupPageThinking:
 			forward, err = s.customThinkingLevels()
+		case setupPageEffort:
+			forward, err = s.promptDefaultEffort()
 		case setupPageConnection:
 			forward, err = s.customTestConnection()
 		case setupPageOffers:
-			var done bool
-			done, err = s.pickOffers()
-			if err != nil {
-				if errors.Is(err, ErrCancelled) {
-					// The person cancelled the model request: step back to the
-					// list of sign-ins, not forward to a page that would fetch
-					// again (or back to one that would sign in again).
-					s.page, s.back = setupPageProvider, true
-					continue
-				}
-				return process.Options{}, false, err
-			}
-			if done {
-				logPromptChoice(s.cfg, "llmsetup.options_ready", s.choice, map[string]any{
-					"models": len(s.chosen), "provider": s.firstOffer().Provider,
-				})
-				return s.options(), true, nil
+			forward, err = s.pickOffers()
+			if err != nil && errors.Is(err, ErrCancelled) {
+				// The person cancelled the model request: step back to the
+				// list of sign-ins, not forward to a page that would fetch
+				// again (or back to one that would sign in again).
+				s.page, s.back = setupPageProvider, true
+				continue
 			}
 		case setupPageSubagents:
 			forward, err = s.pickSubagents()
@@ -534,6 +537,17 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 				return s.options(), true, nil
 			case setupReviewStartOver:
 				s.page, s.back = setupPageProvider, false
+				continue
+			case setupReviewEndpointChanged:
+				// A different endpoint is a different model row, so the level
+				// and the authorization below it are answered again.
+				s.page, s.back = setupPageEffort, true
+				continue
+			case setupReviewProvisionFailed:
+				// The sign-in's write failed: back to the list of models, with
+				// the login and the listing kept, so the same answer can be
+				// tried again or another model chosen.
+				s.page, s.back = setupPageOffers, true
 				continue
 			}
 		}
@@ -557,11 +571,12 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 
 // flowPages is the pages this choice's flow walks, in order. The custom form is
 // the long one — the address, the protocol, the key, the model, and only when
-// nothing knows the model's levels, the levels — while a subscription ends on
-// the models it offers and a provider reached with a key never sees those
-// pages at all. The subagent authorization is one page of its own before the
-// review (owner 2026-11-10): a subscription answers it inside the model list,
-// where the rows are already being ticked.
+// nothing knows the model's levels, the levels — while a subscription's model
+// list is one page on the way to the same pages every other way in passes. All
+// three end on the model's default thinking level and the subagent
+// authorization before the review, so nothing is written before the user has
+// seen what will be (plan 311): the effort page is the model's default, not an
+// override of an existing conversation.
 func (s *llmSetup) flowPages() []int {
 	switch {
 	case s.choice.Custom:
@@ -569,18 +584,18 @@ func (s *llmSetup) flowPages() []int {
 		if s.asksThinkingLevels() {
 			pages = append(pages, setupPageThinking)
 		}
-		return append(pages, setupPageConnection, setupPageSubagents, setupPageReview)
+		return append(pages, setupPageEffort, setupPageConnection, setupPageSubagents, setupPageReview)
 	case s.choice.Subscription != "":
 		// A sign-in this machine already holds — or one whose listing failed —
 		// has nothing to answer on its page: the probe decided it before the
 		// flow started. Leaving that page out keeps Esc where the user expects
 		// it, on the list of models, going back to the list of sign-ins.
 		if s.subscriptionSettled() {
-			return []int{setupPageProvider, setupPageOffers}
+			return []int{setupPageProvider, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
 		}
-		return []int{setupPageProvider, setupPageCredentials, setupPageOffers}
+		return []int{setupPageProvider, setupPageCredentials, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
 	default:
-		return []int{setupPageProvider, setupPageCredentials, setupPageModel, setupPageSubagents, setupPageReview}
+		return []int{setupPageProvider, setupPageCredentials, setupPageModel, setupPageEffort, setupPageSubagents, setupPageReview}
 	}
 }
 
@@ -624,37 +639,29 @@ func (s *llmSetup) step(pages []int, dir int) int {
 	return pages[at]
 }
 
-// effortAnswer is the reasoning effort answered on the model page before, as
-// the option it was picked from; empty before the page was answered.
-func (s *llmSetup) effortAnswer() string {
-	if s.model == "" {
-		return ""
-	}
-	if effort := reasoningEffortFromParamsJSON(s.params); effort != "" {
-		return effort
-	}
-	return reasoningEffortUnset
-}
-
 // resumeAt reopens the setup at page, keeping every answer given.
 func (s *llmSetup) resumeAt(page int) {
 	s.page, s.back = page, true
 }
 
-// options are the answers as what the setup saves. A subscription's first
-// chosen model is the one the agent takes: the rows themselves are already
-// written, and this is the entry the surface then switches the session to.
+// options are the answers as what the setup saves. All three ways in name the
+// model's default thinking level, so the row is configured by the one save the
+// review confirmed; a subscription's row is written by its own Provision just
+// before that, and this carries the same model to it (plan 311).
 func (s *llmSetup) options() process.Options {
+	// The page always answered: a nil pointer would mean "leave whatever the
+	// row has", and the review's confirmation is exactly the opposite.
+	effort := s.defaultEffort
 	if s.choice.Subscription != "" {
-		offer := s.firstOffer()
+		offer, _ := s.selectedOffer()
 		return process.Options{
 			Provider: offer.Provider,
 			Model:    offer.Model,
 			BaseURL:  offer.BaseURL,
 			APIPath:  offer.APIPath,
-			// The save rewrites this row, so it has to carry the tick the
-			// second check list took for it.
-			SubagentAllowed: s.offerSubagentFor(s.chosen),
+			// The page asked, so its answer is this configuration's fact.
+			SubagentAllowed:  s.subagentAllowed,
+			CapDefaultEffort: &effort,
 		}
 	}
 	if s.choice.Custom {
@@ -670,32 +677,35 @@ func (s *llmSetup) options() process.Options {
 			// matches the model name alone (owner 2026-11-16).
 			CatalogProvider: s.catalogProvider,
 			// The page asked, so its answer is this configuration's fact.
-			SubagentAllowed: s.subagentAllowed,
+			SubagentAllowed:  s.subagentAllowed,
+			CapDefaultEffort: &effort,
+		}
+		if s.thinkingAnswered {
+			// The off switch is a capability the page declared, never a level:
+			// an unanswered page states nothing about it.
+			off := s.offDeclared
+			opts.CapReasoningOff = &off
 		}
 		return opts
 	}
 	return process.Options{
-		Provider:     strings.TrimSpace(s.choice.Provider),
-		APIKey:       s.apiKey,
-		BaseURL:      s.baseURL,
-		APIPath:      s.apiPath,
-		Model:        s.model,
-		ParamsJSON:   s.params,
-		UpdateParams: true,
-		// The page asked, so its answer is this configuration's fact.
-		SubagentAllowed: s.subagentAllowed,
+		Provider:         strings.TrimSpace(s.choice.Provider),
+		APIKey:           s.apiKey,
+		BaseURL:          s.baseURL,
+		APIPath:          s.apiPath,
+		Model:            s.model,
+		SubagentAllowed:  s.subagentAllowed,
+		CapDefaultEffort: &effort,
 	}
 }
 
-// firstOffer is the model a finished subscription signs this agent in with: the
-// first row the user ticked, in the registry's own order.
-func (s *llmSetup) firstOffer() subscription.Offer {
-	for _, idx := range s.chosen {
-		if idx >= 0 && idx < len(s.offers) {
-			return s.offers[idx]
-		}
+// selectedOffer is the one model a subscription flow configures: the row its
+// model page chose, or none before that page was answered.
+func (s *llmSetup) selectedOffer() (subscription.Offer, bool) {
+	if s.selectedOfferIdx < 0 || s.selectedOfferIdx >= len(s.offers) {
+		return subscription.Offer{}, false
 	}
-	return subscription.Offer{}
+	return s.offers[s.selectedOfferIdx], true
 }
 
 // setChoice takes the provider the user picked. Picking another one drops
@@ -705,7 +715,7 @@ func (s *llmSetup) setChoice(choice providerChoice) {
 	if choice.Group == s.choice.Group && choice.Label == s.choice.Label {
 		return
 	}
-	*s = llmSetup{cfg: s.cfg, page: s.page, choice: choice}
+	*s = llmSetup{cfg: s.cfg, page: s.page, choice: choice, selectedOfferIdx: -1}
 	s.baseURL = firstNonEmpty(managedProviderCurrentBaseURL(s.cfg, choice), choice.DefaultBaseURL)
 	if choice.SupportsAPIPath && strings.TrimSpace(choice.Provider) == strings.TrimSpace(s.cfg.Defaults.Provider) {
 		s.apiPath = strings.TrimSpace(s.cfg.CurrentAPIPath)
@@ -1067,8 +1077,9 @@ func (s *llmSetup) modelDataFact() string {
 }
 
 // customThinkingLevels are the levels a person may tick for a model no source
-// documents, in the order the wire protocol takes them. The web form offers the
-// same six, so a level picked here is one that form shows too.
+// documents, in the one order every picker draws them (turn's effort order). The
+// web form offers the same six, so a level picked here is one that form shows
+// too, under the same name.
 var customThinkingLevels = []struct {
 	Level, English, Chinese string
 }{
@@ -1076,44 +1087,81 @@ var customThinkingLevels = []struct {
 	{"low", "Low", "低"},
 	{"medium", "Medium", "中"},
 	{"high", "High", "高"},
-	{"xhigh", "Highest", "最高"},
+	{"xhigh", "xHigh", "最高"},
 	{"max", "Max", "极致"},
 }
+
+// customThinkingOff is the capability page's seventh item: whether the model can
+// turn thinking off at all. It is a capability the row keeps in its own column,
+// never a level, so it is ticked independently of the six above and never
+// travels in the level list (plan 311).
+var customThinkingOff = struct{ Level, English, Chinese string }{"none", "Off", "关闭思考"}
 
 // asksThinkingLevels reports whether nothing documents this custom model's
 // thinking levels. That is the only case the form asks for them: a model the
 // catalog knows carries its own list, and asking would offer a choice the model
-// never agreed to.
+// never agreed to. The catalog's own answer is read, without a configured row's
+// override laid over it, so a sibling row's levels cannot decide this.
 func (s *llmSetup) asksThinkingLevels() bool {
 	if !s.choice.Custom || s.model == "" {
 		return false
 	}
-	return len(turn.ModelReasoningEfforts(s.catalogLookupProvider(), s.model)) == 0
+	hit, ok := llm.LookupCatalog(s.catalogLookupProvider(), s.model)
+	if !ok {
+		return true
+	}
+	levels, _ := hit.ReasoningEfforts()
+	return len(levels) == 0
 }
 
-// customThinkingLevels lets the user state the levels the model takes. Ticking
-// none is a valid answer — the model simply gets no effort picker.
+// customThinkingLevels lets the user state the levels the model takes and
+// whether it can turn thinking off. Ticking none is a valid answer — the model
+// simply gets no effort picker.
 func (s *llmSetup) customThinkingLevels() (bool, error) {
 	const title = "Thinking levels this model supports\nNo official levels found for this model, so tick the ones it takes. Leave empty to skip."
-	items := make([]SelectItem, len(customThinkingLevels))
-	checked := make([]int, 0, len(s.efforts))
-	for i, level := range customThinkingLevels {
-		items[i] = SelectItem{Label: level.Level + " " + level.Chinese, Description: level.English}
-		if slices.Contains(s.efforts, level.Level) {
-			checked = append(checked, i)
+	if !s.thinkingAnswered {
+		// The row this install already holds answers for it, so reconnecting
+		// opens on what it declares rather than on an empty list.
+		row, found, err := s.storedRow()
+		if err != nil {
+			return false, err
 		}
+		if found {
+			if row.CapEfforts != nil {
+				s.efforts = append([]string{}, row.CapEfforts...)
+			}
+			if row.CapReasoningOff != nil {
+				s.offDeclared = *row.CapReasoningOff
+			}
+		}
+	}
+	items := make([]SelectItem, 0, len(customThinkingLevels)+1)
+	checked := make([]int, 0, len(s.efforts)+1)
+	for _, level := range customThinkingLevels {
+		items = append(items, SelectItem{Label: level.Level + " " + level.Chinese, Description: level.English})
+		if slices.Contains(s.efforts, level.Level) {
+			checked = append(checked, len(items)-1)
+		}
+	}
+	items = append(items, SelectItem{Label: customThinkingOff.Level + " " + customThinkingOff.Chinese, Description: customThinkingOff.English})
+	if s.offDeclared {
+		checked = append(checked, len(items)-1)
 	}
 	idxs, ok, err := multiSelectRichTabbed(s.cfg.Selector, title, items, TabbedSelectOptions{Checked: checked})
 	if err != nil || !ok {
 		return false, err
 	}
 	efforts := make([]string, 0, len(idxs))
+	off := false
 	for _, idx := range idxs {
-		if idx >= 0 && idx < len(customThinkingLevels) {
+		switch {
+		case idx >= 0 && idx < len(customThinkingLevels):
 			efforts = append(efforts, customThinkingLevels[idx].Level)
+		case idx == len(customThinkingLevels):
+			off = true
 		}
 	}
-	s.efforts = efforts
+	s.efforts, s.offDeclared, s.thinkingAnswered = efforts, off, true
 	return true, nil
 }
 
@@ -1130,6 +1178,10 @@ func (s *llmSetup) customTestConnection() (bool, error) {
 		return true, nil
 	}
 	key := s.apiKey
+	params, err := s.probeParams()
+	if err != nil {
+		return false, err
+	}
 	start := time.Now()
 	probeErr := probeLLMModel(s.ctx(), process.LLMModelInput{
 		Provider:    appcfg.CustomProvider,
@@ -1138,6 +1190,7 @@ func (s *llmSetup) customTestConnection() (bool, error) {
 		APIPath:     s.apiPath,
 		APIKey:      &key,
 		URLVerbatim: s.urlVerbatim,
+		ParamsJSON:  params,
 	})
 	if probeErr != nil {
 		logPromptChoice(s.cfg, "llmsetup.connection_failed", s.choice, map[string]any{"error": errString(probeErr)})
@@ -1145,6 +1198,28 @@ func (s *llmSetup) customTestConnection() (bool, error) {
 	}
 	logPromptChoice(s.cfg, "llmsetup.connection_ok", s.choice, map[string]any{"model": s.model})
 	return true, s.note("Connection OK", s.model+" answered in "+probeElapsed(start)+".")
+}
+
+// probeParams is what the connection test sends: the request parameters the row
+// already carries, with the effort this flow just chose in place of whatever
+// they pinned. The probe has only the params to send a request with — it never
+// applies a row's default level — so the choice is projected into them here. It
+// is not what gets stored: the save keeps the level in the row's own column and
+// clears the params' effort (plan 311).
+func (s *llmSetup) probeParams() (*string, error) {
+	row, _, err := s.storedRow()
+	if err != nil {
+		return nil, err
+	}
+	base, err := appcfg.ParseLLMRequestParamsJSON(row.ParamsJSON)
+	if err != nil {
+		return nil, err
+	}
+	params := string(appcfg.WithReasoningEffort(base, s.defaultEffort))
+	if params == "" {
+		return nil, nil
+	}
+	return &params, nil
 }
 
 // probeElapsed names how long the test request took, in the one decimal a
@@ -1633,9 +1708,10 @@ func awaitSignInURL(ctx context.Context, login subscription.Login) string {
 	}
 }
 
-// pickOffers shows the models the sign-in unlocked and writes the ones the user
-// ticks. done is true once the rows are written; the first of them is the model
-// the surface then switches the session to.
+// pickOffers shows the models the sign-in unlocked and asks which one to
+// configure. One flow configures one model (plan 311): the rows this install
+// already holds are left exactly as they are, and nothing is written before the
+// review is confirmed.
 func (s *llmSetup) pickOffers() (bool, error) {
 	sub := s.subscription()
 	if sub == nil {
@@ -1660,83 +1736,44 @@ func (s *llmSetup) pickOffers() (bool, error) {
 			Category:    offer.PlanLabel,
 		}
 	}
-	title := label + "\nChoose the models to add; each row shows where requests go."
-	checked := s.chosen
-	if checked == nil {
-		checked = s.heldOffers()
-		if len(checked) == 0 {
-			checked = defaultOffers(s.offers)
+	title := label + "\nChoose the model to add; each row shows where requests go."
+	idx, ok, err := selectRichTabbed(s.cfg.Selector, title, items, TabbedSelectOptions{DefaultIdx: s.offersDefaultIdx()})
+	if err != nil || !ok {
+		return false, err
+	}
+	if idx < 0 || idx >= len(s.offers) {
+		return false, fmt.Errorf("%s named no model", label)
+	}
+	if idx != s.selectedOfferIdx {
+		// Another model is another row: the level and the authorization
+		// answered for the last one do not carry over.
+		s.defaultEffort, s.effortAnswered, s.effortIdentity = "", false, ""
+		s.subagentAnswered = false
+	}
+	s.selectedOfferIdx = idx
+	logPromptChoice(s.cfg, "llmsetup.offer_selected", s.choice, map[string]any{
+		"model": s.offers[idx].Model, "plan": s.offers[idx].Plan,
+	})
+	return true, nil
+}
+
+// offersDefaultIdx is the row the model list opens on: the one this flow
+// already chose, else the first the install holds — so /connect opens on the
+// truth rather than on the vendor's first row — else the listing's own default,
+// else its first row.
+func (s *llmSetup) offersDefaultIdx() int {
+	if s.selectedOfferIdx >= 0 && s.selectedOfferIdx < len(s.offers) {
+		return s.selectedOfferIdx
+	}
+	if held := s.heldOffers(); len(held) > 0 {
+		return held[0]
+	}
+	for i, offer := range s.offers {
+		if offer.Default {
+			return i
 		}
 	}
-	for {
-		idxs, ok, err := multiSelectRichTabbed(s.cfg.Selector, title, items, TabbedSelectOptions{Checked: checked})
-		if err != nil || !ok {
-			return false, err
-		}
-		if len(idxs) == 0 {
-			checked = nil
-			if err := s.note("Choose at least one model", "Tick the models to add with Space, then press Enter."); err != nil {
-				return false, err
-			}
-			continue
-		}
-		chosen := make([]subscription.Offer, 0, len(idxs))
-		for _, idx := range idxs {
-			if idx >= 0 && idx < len(s.offers) {
-				chosen = append(chosen, s.offers[idx])
-			}
-		}
-		// Which of these may the agent pick on its own? Asked before the rows
-		// are written, so the switch lands with them (owner 2026-11-10). Esc
-		// goes back to the model list.
-		allowed, ok, err := s.pickOfferSubagents(chosen, idxs)
-		if err != nil {
-			return false, err
-		}
-		if !ok {
-			checked = idxs
-			continue
-		}
-		env, err := s.subscriptionEnv()
-		if err != nil {
-			return false, err
-		}
-		ids, err := s.provisionWithPastedKey(sub, env, chosen)
-		if err != nil {
-			// The registry's own sentence: it names what the user has to do and
-			// never a key. Nothing it refused is written.
-			logPromptChoice(s.cfg, "llmsetup.provision_failed", s.choice, map[string]any{"error": errString(err)})
-			if noteErr := s.note("Adding the models failed", err.Error()); noteErr != nil {
-				return false, noteErr
-			}
-			checked = idxs
-			continue
-		}
-		// provisionRows writes one row per offer, in input order, so the ids
-		// line up with chosen and with the answers.
-		if len(ids) != len(allowed) {
-			return false, fmt.Errorf("%s wrote %d rows for %d models", label, len(ids), len(allowed))
-		}
-		models := &state.LLMModelStore{DB: env.DB}
-		var failed error
-		for i, id := range ids {
-			if err := models.SetSubagentAllowed(s.ctx(), id, allowed[i]); err != nil {
-				failed = err
-				break
-			}
-		}
-		if failed != nil {
-			logPromptChoice(s.cfg, "llmsetup.subagent_allowed.failed", s.choice, map[string]any{"error": errString(failed)})
-			if noteErr := s.note("Saving the subagent authorization failed", failed.Error()); noteErr != nil {
-				return false, noteErr
-			}
-			checked = idxs
-			continue
-		}
-		s.chosen = idxs
-		logPromptChoice(s.cfg, "llmsetup.provisioned", s.choice, map[string]any{"count": len(chosen)})
-		return true, nil
-	}
+	return 0
 }
 
 // provisionWithPastedKey writes the chosen offers and, when a plan answers that
@@ -1787,12 +1824,12 @@ func (s *llmSetup) pastedPlanKey(need subscription.ErrPlanKeyRequired) (string, 
 	}
 }
 
-// heldOffers is the check list's opening state when this install already holds
-// rows for the listed models: what /model already runs is ticked, so /connect
+// heldOffers names the listed models this install already holds a row for, in
+// the listing's order: the model page opens on the first of them, so /connect
 // opens on the truth instead of on the vendor listing's own first row. Nothing
-// held — a first sign-in — answers nil and leaves the page on defaultOffers. A
-// database it cannot read answers nil for the same reason: the write that
-// follows is where a broken install reports itself.
+// held — a first sign-in — answers nil, and the page falls back to the listing's
+// own default. A database it cannot read answers nil for the same reason: the
+// write that follows is where a broken install reports itself.
 func (s *llmSetup) heldOffers() []int {
 	db, err := s.stateDB()
 	if err != nil {
@@ -1809,22 +1846,6 @@ func (s *llmSetup) heldOffers() []int {
 		}
 	}
 	return held
-}
-
-// defaultOffers is what the offers page opens with: the models the subscription
-// marks as its default, or — when it marks none — its first row. Starting with
-// nothing ticked would make Enter a no-op.
-func defaultOffers(offers []subscription.Offer) []int {
-	checked := make([]int, 0, len(offers))
-	for i, offer := range offers {
-		if offer.Default {
-			checked = append(checked, i)
-		}
-	}
-	if len(checked) == 0 && len(offers) > 0 {
-		checked = append(checked, 0)
-	}
-	return checked
 }
 
 // offerDisplayName is what a picker calls an offer: the vendor's own name for
@@ -2002,27 +2023,292 @@ func (s *llmSetup) statusOutput(title string) io.Writer {
 	return s.cfg.Output
 }
 
-// pickModel asks which model to run and, when it reasons, how hard.
+// pickModel asks which model to run. How hard it thinks is the next page's
+// question, for every way in (plan 311), so the model answer is the model.
 func (s *llmSetup) pickModel() (bool, error) {
 	options := catalogModelOptions(s.choice.Provider)
-	for {
-		model, ok, err := promptModel(s.cfg.Selector, options, firstNonEmpty(s.model, strings.TrimSpace(s.cfg.Defaults.Model)))
-		if err != nil || !ok {
-			if err == nil {
-				logPromptChoice(s.cfg, "llmsetup.model_cancelled", s.choice, nil)
-			}
-			return false, err
+	model, ok, err := promptModel(s.cfg.Selector, options, firstNonEmpty(s.model, strings.TrimSpace(s.cfg.Defaults.Model)))
+	if err != nil || !ok {
+		if err == nil {
+			logPromptChoice(s.cfg, "llmsetup.model_cancelled", s.choice, nil)
 		}
-		params, ok, err := promptReasoningEffort(s.cfg, s.choice, model, s.effortAnswer())
-		if err != nil {
-			return false, err
-		}
-		if ok {
-			s.model, s.params = model, params
-			return true, nil
-		}
-		// Esc on the effort goes back to the models.
+		return false, err
 	}
+	s.model = model
+	return true, nil
+}
+
+// effortTarget is the model the default-effort page configures: the identity a
+// save writes, the provider whose model data describes it, and — for a
+// subscription — the listing that answered for that model.
+type effortTarget struct {
+	Provider string
+	Model    string
+	BaseURL  string
+	APIPath  string
+	// CatalogProvider is the provider the shipped catalog is asked about: the
+	// custom form's own answer, or the row's own provider.
+	CatalogProvider string
+	// Offer is the listing that unlocked this model, subscriptions only. Its
+	// zero value means no listing answered for it.
+	Offer subscription.Offer
+}
+
+// key is the model and endpoint a page's answer belongs to, so a different one
+// never inherits it.
+func (t effortTarget) key() string {
+	return strings.Join([]string{t.Provider, t.Model, t.BaseURL, t.APIPath}, "\x00")
+}
+
+// effortTargetFor is the model this flow configures, as the save will write it:
+// a subscription's selected row, or the answers on the form.
+func (s *llmSetup) effortTargetFor() effortTarget {
+	if offer, ok := s.selectedOffer(); ok {
+		provider, model, baseURL, apiPath := appcfg.NormalizeLLMModelIdentity(offer.Provider, offer.Model, offer.BaseURL, offer.APIPath)
+		return effortTarget{Provider: provider, Model: model, BaseURL: baseURL, APIPath: apiPath, CatalogProvider: provider, Offer: offer}
+	}
+	if s.choice.Custom {
+		_, model, baseURL, apiPath := appcfg.NormalizeLLMModelIdentity(appcfg.CustomProvider, s.model, s.baseURL, s.apiPath)
+		return effortTarget{
+			Provider: appcfg.CustomProvider, Model: model, BaseURL: baseURL, APIPath: apiPath,
+			CatalogProvider: s.catalogLookupProvider(),
+		}
+	}
+	provider, model, baseURL, apiPath := appcfg.NormalizeLLMModelIdentity(s.choice.Provider, s.model, s.baseURL, s.apiPath)
+	return effortTarget{Provider: provider, Model: model, BaseURL: baseURL, APIPath: apiPath, CatalogProvider: provider}
+}
+
+// effortLevels is one model's thinking levels as the default-effort page offers
+// them: the discrete levels a request can carry, and whether a mode that turns
+// thinking off belongs at their head. The two are different things — "Off" is
+// the capability, "Provider default" is saying nothing — so neither stands in
+// for the other.
+type effortLevels struct {
+	Levels []string
+	Off    bool
+}
+
+// empty reports whether the model offers nothing but the provider's own default.
+func (e effortLevels) empty() bool { return len(e.Levels) == 0 && !e.Off }
+
+// allows reports whether a saved answer is still one this model offers; "" is
+// always offered, because it is the provider's own default rather than a level.
+func (e effortLevels) allows(effort string) bool {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	switch {
+	case effort == "":
+		return true
+	case effort == "none":
+		return e.Off
+	}
+	return slices.Contains(e.Levels, effort)
+}
+
+// effortLevelsFor resolves the levels one model has, from the four sources that
+// may answer for it — this sign-in's listing, this flow's own capability page,
+// the row the save writes, and the shipped catalog — then keeps only the levels
+// the client that serves the model can send (plan 311 §2.3). Each source is an
+// answer, not a hint: a row that states "no discrete level" is not filled back
+// in from the catalog.
+//
+// The off switch is resolved by the same precedence and as strictly: it is a
+// capability, never a level, and a source that says "no" wins over a weaker one
+// that says "yes". It is never inferred from a level list, a protocol, a
+// provider name or a model name beyond the catalog's own `none` entry.
+func (s *llmSetup) effortLevelsFor(t effortTarget, row state.LLMModel, found bool) effortLevels {
+	catalogLevels, catalogKnown := []string(nil), false
+	if hit, ok := llm.LookupCatalog(t.CatalogProvider, t.Model); ok {
+		catalogLevels, catalogKnown = hit.ReasoningEfforts()
+	}
+	discrete, catalogOff := splitEffortOff(catalogLevels)
+
+	// The row's own levels answer two cases only: no catalog level to offer (the
+	// form's gap-filler), and a login-backed provider, whose levels are the
+	// account's live answer. A vendor's documented levels outrank a stale row
+	// (owner 2026-11-16), the same rule the runtime override follows.
+	rowLevels, rowLevelsKnown := []string(nil), false
+	rowOff, rowOffKnown := false, false
+	if found {
+		switch {
+		case row.CapReasoning != nil && !*row.CapReasoning:
+			rowLevels, rowLevelsKnown = nil, true
+		case row.CapEfforts != nil && (len(discrete) == 0 || llm.LoginBackedProvider(t.Provider)):
+			rowLevels, rowLevelsKnown = append([]string(nil), row.CapEfforts...), true
+		}
+		if row.CapReasoningOff != nil {
+			rowOff, rowOffKnown = *row.CapReasoningOff, true
+		}
+	}
+
+	// The strongest source that answers wins, for the levels and for the off
+	// switch separately: the listing that unlocked the model, then this flow's
+	// own capability page, then the row the save writes, then the catalog. An
+	// answer is an answer even when it is empty, so a form that withdrew its Off
+	// declaration is not overruled by the row it is replacing.
+	formLevels, formLevelsKnown := []string(nil), false
+	formOff, formOffKnown := false, false
+	if s.thinkingAnswered && t.Provider == appcfg.CustomProvider {
+		// The page is only asked when nothing documents the model, so its
+		// answer is the gap-filler itself and replaces the row's declaration.
+		formLevels, formLevelsKnown = append([]string(nil), s.efforts...), true
+		formOff, formOffKnown = s.offDeclared, true
+	}
+	offerLevels, offerLevelsKnown := []string(nil), false
+	offerOff, offerOffKnown := false, false
+	if t.Offer.Subscription != "" {
+		if t.Offer.Efforts != nil {
+			offerLevels, offerOff = splitEffortOff(t.Offer.Efforts)
+			offerLevelsKnown, offerOffKnown = true, true
+		}
+		if t.Offer.ReasoningOff != nil {
+			offerOff, offerOffKnown = *t.Offer.ReasoningOff, true
+		}
+	}
+
+	var levels []string
+	levelsKnown := false
+	var off, offKnown bool
+	take := func(candidate []string, candidateKnown bool, candidateOff bool, candidateOffKnown bool) {
+		if !levelsKnown && candidateKnown {
+			levels, levelsKnown = candidate, true
+		}
+		if !offKnown && candidateOffKnown {
+			off, offKnown = candidateOff, true
+		}
+	}
+	take(offerLevels, offerLevelsKnown, offerOff, offerOffKnown)
+	take(formLevels, formLevelsKnown, formOff, formOffKnown)
+	take(rowLevels, rowLevelsKnown, rowOff, rowOffKnown)
+	take(discrete, catalogKnown, catalogOff, true)
+
+	offered := append([]string(nil), levels...)
+	if off {
+		offered = append([]string{"none"}, offered...)
+	}
+	sendable := turn.SetupReasoningEfforts(t.Provider, t.Model, t.APIPath, offered)
+	levels, off = splitEffortOff(sendable)
+	return effortLevels{Levels: levels, Off: off}
+}
+
+// splitEffortOff separates the levels a listing names from the off switch it may
+// also name. "none" is not a level — turning thinking off is a capability the
+// row keeps in its own column — so it is read out here and never written back
+// into a level list (pkg/subscription's rule, splitThinkingOff).
+func splitEffortOff(efforts []string) ([]string, bool) {
+	levels := make([]string, 0, len(efforts))
+	off := false
+	for _, effort := range efforts {
+		level := strings.ToLower(strings.TrimSpace(effort))
+		switch level {
+		case "":
+			continue
+		case "none":
+			off = true
+			continue
+		}
+		levels = append(levels, level)
+	}
+	if len(levels) == 0 {
+		return nil, off
+	}
+	return levels, off
+}
+
+// effortPageChoices is the page's list: the off switch first (it is the extreme
+// of the same scale), the levels in the one picker order, and the provider's own
+// default last. values maps what the page shows to the wire id it saves, so
+// nothing is ever parsed back out of a label.
+func effortPageChoices(offered effortLevels) ([]string, map[string]string) {
+	labels := make([]string, 0, len(offered.Levels)+2)
+	values := make(map[string]string, len(offered.Levels)+2)
+	if offered.Off {
+		label := turn.EffortEnglishLabel("none")
+		labels = append(labels, label)
+		values[label] = "none"
+	}
+	for _, level := range offered.Levels {
+		label := turn.EffortEnglishLabel(level)
+		labels = append(labels, label)
+		values[label] = level
+	}
+	labels = append(labels, reasoningEffortUnset)
+	values[reasoningEffortUnset] = ""
+	return labels, values
+}
+
+// effortPageLabel names one wire id the way the page lists it.
+func effortPageLabel(effort string) string {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" {
+		return reasoningEffortUnset
+	}
+	return turn.EffortEnglishLabel(effort)
+}
+
+// effortDefault is where the page opens, and the one sentence to show when the
+// row's stored answer is no longer something this model can be given: this
+// flow's answer for the same model, then the row's own value (a params effort
+// outranks the row's default, because that is the one a request carries), then —
+// for a model this sign-in just listed — the listing's own default, and finally
+// the provider's own default, which is what a fresh row starts on.
+func (s *llmSetup) effortDefault(t effortTarget, row state.LLMModel, found bool, offered effortLevels) (string, string) {
+	if s.effortAnswered && s.effortIdentity == t.key() && offered.allows(s.defaultEffort) {
+		return effortPageLabel(s.defaultEffort), ""
+	}
+	if found {
+		for _, stored := range []string{reasoningEffortFromParamsJSON(row.ParamsJSON), row.CapDefaultEffort} {
+			stored = strings.ToLower(strings.TrimSpace(stored))
+			if stored == "" {
+				continue
+			}
+			if offered.allows(stored) {
+				return effortPageLabel(stored), ""
+			}
+			return reasoningEffortUnset, effortPageLabel(stored) + " is no longer available for this model; the provider's own default applies."
+		}
+		return reasoningEffortUnset, ""
+	}
+	if t.Offer.Subscription != "" {
+		if effort := strings.ToLower(strings.TrimSpace(t.Offer.DefaultEffort)); effort != "" && offered.allows(effort) {
+			return effortPageLabel(effort), ""
+		}
+	}
+	return reasoningEffortUnset, ""
+}
+
+// promptDefaultEffort is the page every group passes: the thinking level this
+// model runs at when a request names none (plan 311). It is answered for one
+// model and endpoint, so stepping back to it shows this flow's answer and a
+// different model starts over. Esc leaves without answering anything.
+func (s *llmSetup) promptDefaultEffort() (bool, error) {
+	target := s.effortTargetFor()
+	row, found, err := s.storedRow()
+	if err != nil {
+		return false, err
+	}
+	offered := s.effortLevelsFor(target, row, found)
+	labels, values := effortPageChoices(offered)
+	defaultLabel, note := s.effortDefault(target, row, found, offered)
+	title := "Default reasoning effort\nChoose the default for " + target.Provider + "/" + target.Model + "."
+	if offered.empty() {
+		title += "\nNo discrete reasoning levels are available for this model."
+	}
+	if note != "" {
+		title += "\n" + note
+	}
+	selected, ok, err := s.cfg.Selector.Select(title, labels, defaultLabel)
+	if err != nil || !ok {
+		return false, err
+	}
+	effort, known := values[selected]
+	if !known {
+		return false, fmt.Errorf("unknown reasoning effort %q", selected)
+	}
+	s.defaultEffort, s.effortAnswered, s.effortIdentity = effort, true, target.key()
+	logPromptChoice(s.cfg, "llmsetup.default_effort.selected", s.choice, map[string]any{
+		"model": target.Model, "endpoint": target.APIPath, "effort": effort,
+	})
+	return true, nil
 }
 
 type setupReviewAction int
@@ -2031,11 +2317,22 @@ const (
 	setupReviewBack setupReviewAction = iota
 	setupReviewSave
 	setupReviewStartOver
+	// setupReviewEndpointChanged is a review whose endpoint edit moved the
+	// model's identity: the default level and the authorization below it were
+	// answered for the old one, so they are asked again.
+	setupReviewEndpointChanged
+	// setupReviewProvisionFailed is a sign-in whose write failed: the flow goes
+	// back to the model list with the login and the listing kept.
+	setupReviewProvisionFailed
 )
 
 // review shows every answer before anything is saved, and is where the
 // endpoint is changed: most setups never need to. A model this install already
-// holds is never replaced silently — the save asks first.
+// holds is never replaced silently — the save asks first, except for a
+// subscription, whose key comes from the sign-in rather than from the page.
+//
+// The save is the one boundary: a subscription's row is written here, after the
+// confirmation, and never before it (plan 311).
 func (s *llmSetup) review() (setupReviewAction, error) {
 	save := "Save"
 	if s.cfg.Onboarding {
@@ -2043,7 +2340,9 @@ func (s *llmSetup) review() (setupReviewAction, error) {
 	}
 	const changeEndpoint, startOver = "Change endpoint…", "Start over"
 	actions := []string{save}
-	if !s.choice.Custom {
+	// A subscription's endpoint belongs to the plan it was listed under, so
+	// there is nothing to change here.
+	if !s.choice.Custom && s.choice.Subscription == "" {
 		actions = append(actions, changeEndpoint)
 	}
 	actions = append(actions, startOver)
@@ -2057,22 +2356,79 @@ func (s *llmSetup) review() (setupReviewAction, error) {
 		chosen = idx
 		switch actions[idx] {
 		case save:
-			replace, err := s.confirmReplace()
-			if err != nil {
-				return setupReviewBack, err
+			if s.choice.Subscription == "" {
+				replace, err := s.confirmReplace()
+				if err != nil {
+					return setupReviewBack, err
+				}
+				if !replace {
+					continue
+				}
 			}
-			if !replace {
-				continue
+			if s.choice.Subscription != "" {
+				if err := s.provisionSelected(); err != nil {
+					// The registry's own sentence: it names what the user has
+					// to do and never a key.
+					logPromptChoice(s.cfg, "llmsetup.provision_failed", s.choice, map[string]any{"error": errString(err)})
+					if noteErr := s.note("Adding the model failed", err.Error()); noteErr != nil {
+						return setupReviewBack, noteErr
+					}
+					return setupReviewProvisionFailed, nil
+				}
 			}
 			return setupReviewSave, nil
 		case startOver:
 			return setupReviewStartOver, nil
 		case changeEndpoint:
+			before := s.effortTargetFor().key()
 			if err := s.editEndpoint(); err != nil {
 				return setupReviewBack, err
 			}
+			if s.effortTargetFor().key() != before {
+				return setupReviewEndpointChanged, nil
+			}
 		}
 	}
+}
+
+// provisionSelected writes the one model a subscription flow configures and
+// proves the row it wrote is the row this flow's answers are about: the level
+// and the authorization are saved onto that row by the caller's own Execute, so
+// a row of another model would be configured with an answer nobody gave it.
+func (s *llmSetup) provisionSelected() error {
+	sub := s.subscription()
+	if sub == nil {
+		return fmt.Errorf("this sign-in has no subscription to add models from")
+	}
+	label, _ := sub.Label()
+	offer, ok := s.selectedOffer()
+	if !ok {
+		return fmt.Errorf("%s named no model to add", label)
+	}
+	env, err := s.subscriptionEnv()
+	if err != nil {
+		return err
+	}
+	// The offer travels unmodified: the listing's own capabilities and default
+	// are what the row is written with, and the user's choice is saved over it
+	// afterwards.
+	ids, err := s.provisionWithPastedKey(sub, env, []subscription.Offer{offer})
+	if err != nil {
+		return err
+	}
+	if len(ids) != 1 {
+		return fmt.Errorf("%s wrote %d rows for one model", label, len(ids))
+	}
+	target := s.effortTargetFor()
+	row, found, err := process.LLMModelHeld(s.ctx(), env.DB, target.Provider, target.Model, target.BaseURL, target.APIPath)
+	if err != nil {
+		return err
+	}
+	if found && row.ID != ids[0] {
+		return fmt.Errorf("%s wrote the model as row %s, but this model is row %s", label, ids[0], row.ID)
+	}
+	logPromptChoice(s.cfg, "llmsetup.provisioned", s.choice, map[string]any{"model": offer.Model})
+	return nil
 }
 
 // confirmReplace asks before a save that would replace the key of a row this
@@ -2127,12 +2483,15 @@ func subagentAllowedLabel(allowed bool) string {
 // storedRow is the row this flow's answers save over, when the install already
 // holds it.
 func (s *llmSetup) storedRow() (state.LLMModel, bool, error) {
-	provider, model, baseURL, apiPath := s.identity()
+	target := s.effortTargetFor()
 	db, err := s.stateDB()
 	if err != nil {
 		return state.LLMModel{}, false, err
 	}
-	return (&state.LLMModelStore{DB: db}).FindByIdentity(s.ctx(), provider, model, baseURL, apiPath)
+	// The row is read the way the save recognises it (plan 311): a login-backed
+	// provider's path is not part of its row, so an offer with no path of its
+	// own still finds the row written earlier under a display path.
+	return process.LLMModelHeld(s.ctx(), db, target.Provider, target.Model, target.BaseURL, target.APIPath)
 }
 
 // pickSubagents asks whether the agent may pick this row for a subagent on its
@@ -2168,80 +2527,13 @@ func (s *llmSetup) pickSubagents() (bool, error) {
 	return true, nil
 }
 
-// offerSubagentFor is the subscription answer for the row a finished flow
-// switches the session to: the first offer the user ticked.
-func (s *llmSetup) offerSubagentFor(chosen []int) bool {
-	for _, idx := range chosen {
-		if idx >= 0 && idx < len(s.offers) {
-			return s.offerSubagent[idx]
-		}
-	}
-	return false
-}
-
-// storedOfferAllowed reports whether an already configured offer row is open to
-// the agent already, which is the check list's default when this flow has not
-// answered yet.
-func (s *llmSetup) storedOfferAllowed(offer subscription.Offer) bool {
-	provider, model, baseURL, apiPath := appcfg.NormalizeLLMModelIdentity(offer.Provider, offer.Model, offer.BaseURL, offer.APIPath)
-	db, err := s.stateDB()
-	if err != nil {
-		return false
-	}
-	row, found, err := (&state.LLMModelStore{DB: db}).FindByIdentity(s.ctx(), provider, model, baseURL, apiPath)
-	if err != nil || !found {
-		return false
-	}
-	return row.SubagentAllowed
-}
-
-// pickOfferSubagents asks, for the models a sign-in unlocked, which of them the
-// agent may pick for subagents on its own (owner 2026-11-10). Esc goes back to
-// the model list, so a user who wants fewer rows can change them. The answer
-// comes back aligned with chosen.
-func (s *llmSetup) pickOfferSubagents(chosen []subscription.Offer, chosenIdxs []int) ([]bool, bool, error) {
-	items := make([]SelectItem, len(chosen))
-	checked := make([]int, 0, len(chosen))
-	for i, offer := range chosen {
-		items[i] = SelectItem{
-			Label:       offerDisplayName(offer),
-			Description: turn.ModelEndpointLabel(offer.BaseURL, offer.APIPath, false),
-			Category:    offer.PlanLabel,
-		}
-		allowed := false
-		if s.offerSubagentAnswered {
-			allowed = s.offerSubagent[chosenIdxs[i]]
-		} else {
-			allowed = s.storedOfferAllowed(offer)
-		}
-		if allowed {
-			checked = append(checked, i)
-		}
-	}
-	idxs, ok, err := multiSelectRichTabbed(s.cfg.Selector,
-		"Subagents\nWhich of these may the agent pick for subagents on its own?",
-		items, TabbedSelectOptions{Checked: checked})
-	if err != nil || !ok {
-		return nil, false, err
-	}
-	answers := make([]bool, len(chosen))
-	if s.offerSubagent == nil {
-		s.offerSubagent = make(map[int]bool, len(chosen))
-	}
-	for _, idx := range idxs {
-		if idx >= 0 && idx < len(answers) {
-			answers[idx] = true
-		}
-	}
-	for i, offerIdx := range chosenIdxs {
-		s.offerSubagent[offerIdx] = answers[i]
-	}
-	s.offerSubagentAnswered = true
-	return answers, true, nil
-}
-
-// reviewFacts are the answers as the review lists them.
+// reviewFacts are the answers as the review lists them: the model, where its
+// requests go, the default thinking level it runs at, and who may pick it for a
+// subagent. The custom form lists its declared levels beside the default —
+// capabilities and the default are two different answers, so they get two lines
+// (plan 311).
 func (s *llmSetup) reviewFacts() []turn.StatusFact {
+	effort := turn.StatusFact{Label: "Default reasoning effort", Value: effortPageLabel(s.defaultEffort)}
 	if s.choice.Custom {
 		return []turn.StatusFact{
 			{Label: "Provider", Value: appcfg.CustomProvider},
@@ -2249,17 +2541,23 @@ func (s *llmSetup) reviewFacts() []turn.StatusFact {
 			{Label: "Protocol", Value: s.protocolLabel()},
 			{Label: "Endpoint", Value: s.endpoint()},
 			{Label: "Model data", Value: s.modelDataFact()},
-			{Label: "Thinking", Value: thinkingLabel(s.efforts)},
+			{Label: "Supported thinking levels", Value: thinkingLabel(s.efforts, s.offDeclared)},
+			effort,
+			{Label: "Subagents", Value: subagentAllowedLabel(s.subagentAllowed)},
+		}
+	}
+	if offer, ok := s.selectedOffer(); ok {
+		return []turn.StatusFact{
+			{Label: "Provider", Value: offer.Provider},
+			{Label: "Model", Value: offerDisplayName(offer)},
+			{Label: "Endpoint", Value: turn.ModelEndpointLabel(offer.BaseURL, offer.APIPath, false)},
+			effort,
 			{Label: "Subagents", Value: subagentAllowedLabel(s.subagentAllowed)},
 		}
 	}
 	provider := s.choice.Group
 	if s.choice.Group != "" && !strings.HasPrefix(s.choice.Label, s.choice.Group) {
 		provider += " " + s.choice.Label
-	}
-	effort := reasoningEffortFromParamsJSON(s.params)
-	if effort == "" {
-		effort = "Provider default"
 	}
 	endpoint := s.baseURL
 	if s.apiPath != "" {
@@ -2268,8 +2566,8 @@ func (s *llmSetup) reviewFacts() []turn.StatusFact {
 	return []turn.StatusFact{
 		{Label: "Provider", Value: provider},
 		{Label: "Model", Value: s.model},
-		{Label: "Reasoning", Value: effort},
 		{Label: "Endpoint", Value: endpoint},
+		effort,
 		{Label: "Subagents", Value: subagentAllowedLabel(s.subagentAllowed)},
 	}
 }
@@ -2285,30 +2583,38 @@ func (s *llmSetup) protocolLabel() string {
 }
 
 // thinkingLabel is the levels a custom model was told to support, as the review
-// lists them.
-func thinkingLabel(efforts []string) string {
-	if len(efforts) == 0 {
+// lists them. The off switch is named apart from them because it is not one of
+// them: a model that can turn thinking off says so after the levels.
+func thinkingLabel(efforts []string, off bool) string {
+	label := strings.Join(efforts, ", ")
+	if off {
+		label = strings.TrimSpace(label + ", " + turn.EffortEnglishLabel("none"))
+	}
+	if label == "" {
 		return "Not set"
 	}
-	return strings.Join(efforts, ", ")
+	return label
 }
 
-// editEndpoint changes the base URL and, where the provider takes one, the
-// API path. Esc keeps what was there.
+// editEndpoint changes the base URL and, where the provider takes one, the API
+// path. Both answers land together: Esc on the second page keeps the endpoint
+// the flow had, rather than a half-changed identity a save would take for a
+// different row.
 func (s *llmSetup) editEndpoint() error {
 	baseURL, ok, err := s.cfg.Selector.Input("Base URL\nLeave empty for "+s.choice.DefaultBaseURL+".", s.baseURL)
 	if err != nil || !ok {
 		return err
 	}
-	s.baseURL = firstNonEmpty(strings.TrimSpace(baseURL), s.choice.DefaultBaseURL)
-	if !s.choice.SupportsAPIPath {
-		return nil
+	baseURL = firstNonEmpty(strings.TrimSpace(baseURL), s.choice.DefaultBaseURL)
+	apiPath := s.apiPath
+	if s.choice.SupportsAPIPath {
+		value, ok, err := s.cfg.Selector.Input("API path\nLeave empty for the provider's default.", s.apiPath)
+		if err != nil || !ok {
+			return err
+		}
+		apiPath = strings.TrimSpace(value)
 	}
-	apiPath, ok, err := s.cfg.Selector.Input("API path\nLeave empty for the provider's default.", s.apiPath)
-	if err != nil || !ok {
-		return err
-	}
-	s.apiPath = strings.TrimSpace(apiPath)
+	s.baseURL, s.apiPath = baseURL, apiPath
 	return nil
 }
 
@@ -2409,86 +2715,12 @@ func promptModel(selector SetupSelector, options []modelOption, defaultValue str
 	}
 }
 
-// reasoningEffortProviderDefault is used when neither the existing config nor
-// the model's own levels say otherwise.
-const reasoningEffortProviderDefault = "medium"
-
-// reasoningEffortUnset lets the operator keep the provider's own default
-// instead of pinning a level into the config.
+// reasoningEffortUnset is the page's "the provider decides" answer: it saves the
+// empty default, which is a different answer from turning thinking off.
 const reasoningEffortUnset = "Provider default"
 
-// promptReasoningEffort asks for the reasoning effort of the model just chosen
-// and returns the params JSON to persist with the provider entry. The levels
-// come from turn.ModelReasoningEfforts, the same answer /model and the gateway
-// read (models.json's reasoning_options, trimmed to what this build can send).
-// A model with no levels gets no question at all, so the request never carries
-// a parameter the provider would reject.
-func promptReasoningEffort(cfg PromptConfig, choice providerChoice, model string, previous string) (string, bool, error) {
-	existing := currentProviderParamsJSON(cfg, choice)
-	efforts := turn.ModelReasoningEfforts(choice.Provider, model)
-	defaultEffort := ""
-	// A model the catalog has levels for gets a sensible preselected one; unset
-	// lets the provider apply its own default otherwise.
-	if len(efforts) > 0 {
-		defaultEffort = reasoningEffortProviderDefault
-	}
-	if len(efforts) == 0 {
-		logPromptChoice(cfg, "llmsetup.reasoning_effort.not_supported", choice, map[string]any{"model": model})
-		return applyReasoningEffort(existing, ""), true, nil
-	}
-	return promptEffortChoice(cfg, choice, model, efforts, defaultEffort, previous)
-}
-
-// promptEffortChoice runs the shared effort prompt. defaultEffort is the
-// fallback only when neither the already-configured effort nor the record's
-// own default is usable for this model.
-func promptEffortChoice(cfg PromptConfig, choice providerChoice, model string, efforts []string, defaultEffort string, previous string) (string, bool, error) {
-	existing := currentProviderParamsJSON(cfg, choice)
-	options := append(append([]string{}, efforts...), reasoningEffortUnset)
-	current := reasoningEffortFromParamsJSON(existing)
-	defaultOption := ""
-	for _, effort := range efforts {
-		if effort == current {
-			defaultOption = effort
-			break
-		}
-		if defaultOption == "" && effort == strings.TrimSpace(defaultEffort) {
-			defaultOption = effort
-		}
-	}
-	if defaultOption == "" {
-		defaultOption = reasoningEffortUnset
-	}
-	// Back on this page, the answer given here before wins, when this model
-	// offers it.
-	for _, option := range options {
-		if option == previous {
-			defaultOption = previous
-		}
-	}
-	selected, ok, err := cfg.Selector.Select("Reasoning effort\nHow hard "+model+" thinks before it answers.", options, defaultOption)
-	if err != nil || !ok {
-		return "", false, err
-	}
-	effort := strings.ToLower(strings.TrimSpace(selected))
-	if effort == strings.ToLower(reasoningEffortUnset) {
-		effort = ""
-	}
-	logPromptChoice(cfg, "llmsetup.reasoning_effort.selected", choice, map[string]any{"model": model, "effort": effort})
-	return applyReasoningEffort(existing, effort), true, nil
-}
-
-// currentProviderParamsJSON returns the params already configured, but only
-// when the provider being configured is the one they belong to: carrying
-// another provider's params over would attach settings the new endpoint never
-// agreed to.
-func currentProviderParamsJSON(cfg PromptConfig, choice providerChoice) string {
-	if strings.TrimSpace(choice.Provider) != strings.TrimSpace(cfg.Defaults.Provider) {
-		return ""
-	}
-	return strings.TrimSpace(cfg.Defaults.ParamsJSON)
-}
-
+// reasoningEffortFromParamsJSON is the effort a row's own params pin, the one a
+// request carries before the row's default is filled in.
 func reasoningEffortFromParamsJSON(paramsJSON string) string {
 	payload := decodeParamsJSON(paramsJSON)
 	reasoning, _ := payload["reasoning"].(map[string]any)
@@ -2497,36 +2729,6 @@ func reasoningEffortFromParamsJSON(paramsJSON string) string {
 	}
 	effort, _ := reasoning["effort"].(string)
 	return strings.ToLower(strings.TrimSpace(effort))
-}
-
-// applyReasoningEffort writes the chosen effort into the existing params,
-// preserving every other request parameter already configured. An empty effort
-// removes the key so the provider default applies again.
-func applyReasoningEffort(paramsJSON string, effort string) string {
-	payload := decodeParamsJSON(paramsJSON)
-	if effort == "" {
-		if reasoning, ok := payload["reasoning"].(map[string]any); ok && reasoning != nil {
-			delete(reasoning, "effort")
-			if len(reasoning) == 0 {
-				delete(payload, "reasoning")
-			}
-		}
-	} else {
-		reasoning, _ := payload["reasoning"].(map[string]any)
-		if reasoning == nil {
-			reasoning = map[string]any{}
-			payload["reasoning"] = reasoning
-		}
-		reasoning["effort"] = effort
-	}
-	if len(payload) == 0 {
-		return ""
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return ""
-	}
-	return string(encoded)
 }
 
 func decodeParamsJSON(paramsJSON string) map[string]any {
@@ -2630,12 +2832,15 @@ func (c *commandController) runConnect(ctx context.Context, sessionID string, as
 	// order-freeze lands on the first entry, not the new one — and rep.ModelID
 	// is the row it stored, which is what tells twin rows apart.
 	if strings.TrimSpace(opts.Provider) != "" && strings.TrimSpace(opts.Model) != "" {
+		// The level the wizard chose is this conversation's own: passing nil
+		// would leave whatever effort the session held before, which is the one
+		// thing this flow just answered (plan 311).
 		selectErr := c.session.SelectModel(ctx, sessionID, turn.ModelChoice{
 			ID:               rep.ModelID,
 			Provider:         opts.Provider,
 			Model:            opts.Model,
-			ReasoningEfforts: turn.ModelReasoningEfforts(opts.Provider, opts.Model),
-		}, nil)
+			ReasoningEfforts: turn.ModelReasoningEffortsRow(rep.ModelID, opts.Provider, opts.Model),
+		}, opts.CapDefaultEffort)
 		if selectErr != nil {
 			switch turn.SelectionApplyOutcome(selectErr) {
 			case turn.ModelRuntimeUncertain:

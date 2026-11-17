@@ -36,10 +36,22 @@ type Options struct {
 	// source documents — the custom form asks when nothing knows them. nil
 	// leaves the stored levels alone.
 	CapEfforts []string
+	// CapReasoningOff is whether a mode that turns thinking off exists, as the
+	// custom form declared it (plan 311): a capability the row keeps in its own
+	// column, never a level. nil leaves the stored value alone.
+	CapReasoningOff *bool
 	// CatalogProvider is the provider whose model data describes a custom
 	// model (owner 2026-11-16); "" names none. Only a custom row may carry it,
 	// so Execute writes it only for provider "custom".
 	CatalogProvider string
+	// CapDefaultEffort is the default thinking level this flow chose for the
+	// row (plan 311). nil states nothing about it, so every non-interactive
+	// caller keeps its old behaviour; a non-nil value states the level, and a
+	// non-nil "" states "the provider decides". Either answer also drops the
+	// effort the row's own params pinned, because a stored reasoning.effort
+	// outranks the row's default and the new answer would otherwise never
+	// reach a request.
+	CapDefaultEffort *string
 }
 
 type Report struct {
@@ -134,6 +146,10 @@ func Execute(rt Context, opts Options) (Report, error) {
 		efforts := append([]string{}, opts.CapEfforts...)
 		in.CapEfforts = &efforts
 	}
+	if opts.CapReasoningOff != nil {
+		off := *opts.CapReasoningOff
+		in.CapReasoningOff = &off
+	}
 	// The catalog provider describes where a custom model's official data
 	// lives; a built-in provider's row is described by its own pair, so only a
 	// custom row is written with one (owner 2026-11-16).
@@ -160,6 +176,36 @@ func Execute(rt Context, opts Options) (Report, error) {
 	if opts.UpdateParams {
 		params := string(parsed)
 		in.ParamsJSON = &params
+	}
+	if opts.CapDefaultEffort != nil {
+		// The answer is about the row this save writes, so it is read back the
+		// way the write recognises it (a login-backed row carries no path of
+		// its own) and its params are the base the stale effort is removed
+		// from. A caller that sent no params of its own must not lose the ones
+		// the row already holds: only the effort goes.
+		held, found, err := LLMModelHeld(context.Background(), db, opts.Provider, opts.Model, opts.BaseURL, opts.APIPath)
+		if err != nil {
+			logSetupError(rt.Home, "setup.execute.read_error", opts, err.Error())
+			return rep, err
+		}
+		base := parsed
+		if !opts.UpdateParams {
+			base = nil
+			if found {
+				base, err = appcfg.ParseLLMRequestParamsJSON(held.ParamsJSON)
+				if err != nil {
+					// Params this build cannot read are not "no params": a
+					// silent empty map would throw away every other request
+					// field the row was configured with.
+					logSetupError(rt.Home, "setup.execute.params_error", opts, err.Error())
+					return rep, err
+				}
+			}
+		}
+		params := string(appcfg.WithReasoningEffort(base, ""))
+		in.ParamsJSON = &params
+		effort := strings.ToLower(strings.TrimSpace(*opts.CapDefaultEffort))
+		in.CapDefaultEffort = &effort
 	}
 	modelID, err := UpsertLLMModel(context.Background(), db, in)
 	if err != nil {

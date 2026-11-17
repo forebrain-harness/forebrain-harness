@@ -305,6 +305,14 @@ func llmModelCatalogCaps(provider, model, catalogProvider string) (llmModelCaps,
 	caps := llmModelCaps{Images: &images, Reasoning: &reasoning}
 	if efforts, known := hit.ReasoningEfforts(); known && len(efforts) > 0 {
 		caps.Efforts = efforts
+		// The catalog's off switch is its own level list naming "none": that is
+		// the capability, reported apart from the levels it appears in. Leaving
+		// it out made the form's own dropdown the only place the answer could
+		// come from, and it had none (plan 311).
+		if slices.Contains(efforts, "none") {
+			off := true
+			caps.ReasoningOff = &off
+		}
 	}
 	if hit.ContextWindow > 0 {
 		window := hit.ContextWindow
@@ -315,6 +323,27 @@ func llmModelCatalogCaps(provider, model, catalogProvider string) (llmModelCaps,
 		caps.MaxOutput = &output
 	}
 	return caps, hit.CatalogID
+}
+
+// llmSendableEfforts keeps the thinking levels this build can actually put on the
+// wire for a model, in the one order every picker draws them: the same decision
+// pkg/turn makes for the terminal's default-effort page, so a level one surface
+// offers is a level the other offers too (plan 311). apiPath is the protocol the
+// row speaks; "" leaves the decision to the provider and model.
+func llmSendableEfforts(provider, model, apiPath string, levels []string) []string {
+	return turn.SetupReasoningEfforts(provider, model, apiPath, levels)
+}
+
+// llmModelAPIPathOf is the protocol a capability request is about: the row's own
+// while editing, the one the form names while adding, "" when nobody said.
+func llmModelAPIPathOf(write llmModelWrite, stored *state.LLMModel) string {
+	if path := strings.TrimSpace(write.APIPath); path != "" {
+		return path
+	}
+	if stored != nil {
+		return strings.TrimSpace(stored.APIPath)
+	}
+	return ""
 }
 
 // llmModelCatalogProviderOf reads the catalog provider a capability request
@@ -464,6 +493,22 @@ func (s *Server) llmModelRowOf(r *http.Request, scope llmModelScope, row state.L
 	}
 	out.CatalogCaps, out.CatalogID = llmModelCatalogCaps(row.Provider, row.Model, row.CatalogProvider)
 	out.EffortsKnown = llmModelApplyLiveCaps(row.ID, &out.CatalogCaps)
+	// The form only offers the levels this build can send on the row's protocol,
+	// so the list is trimmed once the source has answered — after the live answer,
+	// which replaces the catalog's. A row no source lists but which declares its
+	// own levels is reported through the same answer, trimmed: otherwise a level
+	// the terminal refuses would sit in the web form's dropdown, and saving it
+	// would store a default the client silently drops (plan 311).
+	out.CatalogCaps.Efforts = llmSendableEfforts(row.Provider, row.Model, row.APIPath, out.CatalogCaps.Efforts)
+	if !out.EffortsKnown && row.CapEfforts != nil {
+		out.CatalogCaps.Efforts = llmSendableEfforts(row.Provider, row.Model, row.APIPath, row.CapEfforts)
+	}
+	// An off switch the protocol cannot send is not an answer this form can act
+	// on: the dropdown has no "none" to add, and the save refuses one. Reporting
+	// it would be the fake option the page exists to remove (plan 311 §2.1).
+	if out.CatalogCaps.ReasoningOff != nil && !slices.Contains(out.CatalogCaps.Efforts, "none") {
+		out.CatalogCaps.ReasoningOff = nil
+	}
 	if sub, ok := gatewaySubscriptionByID(row.Source); ok {
 		label, labelZH := sub.Label()
 		out.SourceName = llmText(r, labelZH, label)
@@ -813,10 +858,12 @@ func (s *Server) handleLLMModelTest(w http.ResponseWriter, r *http.Request) {
 // models.dev gives. efforts_known=false means no source lists them and the page
 // offers the checkboxes instead.
 //
-// The form's endpoint travels with the request but nothing here reads it: which
-// source answers is decided by the subscription that owns the row and by the
-// provider and model, never by the URL. The key is only ever in a body, because
-// a key in a URL would land in an access log.
+// The form's endpoint travels with the request and is read for one thing only:
+// the protocol decides which thinking levels can actually be sent, so the
+// dropdown never offers a level the client drops (plan 311). Which *source*
+// answers is still the subscription that owns the row and the provider and
+// model, never the URL. The key is only ever in a body, because a key in a URL
+// would land in an access log.
 func (s *Server) handleLLMModelCatalogCaps(w http.ResponseWriter, r *http.Request) {
 	var write llmModelWrite
 	var id string
@@ -827,6 +874,7 @@ func (s *Server) handleLLMModelCatalogCaps(w http.ResponseWriter, r *http.Reques
 			Provider: query.Get("provider"),
 			Model:    query.Get("model"),
 			BaseURL:  query.Get("base_url"),
+			APIPath:  query.Get("api_path"),
 		}
 		if value, present := query["catalog_provider"]; present {
 			named := ""
@@ -876,11 +924,26 @@ func (s *Server) handleLLMModelCatalogCaps(w http.ResponseWriter, r *http.Reques
 	}
 	body := llmModelCapsBody{}
 	body.llmModelCaps, body.CatalogID = llmModelCatalogCaps(provider, model, llmModelCatalogProviderOf(write, stored))
+	apiPath := llmModelAPIPathOf(write, stored)
 	if info, err := process.ResolveModelInfo(r.Context(), provider, model, source, key); err == nil {
 		body.Efforts = info.Efforts
 		body.DefaultEffort = info.DefaultEffort
 		body.EffortsKnown = true
 		body.EffortsSource = info.Origin
+	}
+	// The dropdown offers only what the row's protocol can send (plan 311): a
+	// custom Messages model must not show the levels its client drops. A row no
+	// source lists but which declares its own levels answers from that
+	// declaration, trimmed the same way, so the form's dropdown and the
+	// terminal's page agree.
+	body.Efforts = llmSendableEfforts(provider, model, apiPath, body.Efforts)
+	if !body.EffortsKnown && stored != nil && stored.CapEfforts != nil {
+		body.Efforts = llmSendableEfforts(provider, model, apiPath, stored.CapEfforts)
+	}
+	// Same rule as a row's own answer: an off switch the protocol cannot send is
+	// not offered, so the dropdown never shows a level the save would refuse.
+	if body.ReasoningOff != nil && !slices.Contains(body.Efforts, "none") {
+		body.ReasoningOff = nil
 	}
 	writeJSON(w, body)
 }
@@ -1011,7 +1074,7 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 	if write.Caps != nil {
 		caps = *write.Caps
 	}
-	if err := s.llmModelCapsValid(r, provider, model, caps, row); err != nil {
+	if err := s.llmModelCapsValid(r, provider, model, apiPath, caps, row); err != nil {
 		return row, err
 	}
 	// 7. The provider a custom model's official data lives under (owner
@@ -1075,7 +1138,7 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 }
 
 // llmModelCapsValid checks one row's capability overrides (rule 6 of plan 265).
-func (s *Server) llmModelCapsValid(r *http.Request, provider, model string, caps llmModelCaps, stored state.LLMModel) error {
+func (s *Server) llmModelCapsValid(r *http.Request, provider, model, apiPath string, caps llmModelCaps, stored state.LLMModel) error {
 	for _, level := range caps.Efforts {
 		if !slices.Contains(llmEffortLevels, strings.ToLower(strings.TrimSpace(level))) {
 			return llmRefuse(r, http.StatusBadRequest,
@@ -1103,7 +1166,25 @@ func (s *Server) llmModelCapsValid(r *http.Request, provider, model string, caps
 			catalogCaps, _ := llmModelCatalogCaps(provider, model, stored.CatalogProvider)
 			levels = catalogCaps.Efforts
 		}
-		if !slices.Contains(levels, effort) {
+		// Only the levels the row's protocol can send count as "one this model
+		// offers": a custom Messages model stores minimal at most in its own
+		// declaration, and a default the client silently drops is exactly the
+		// choice-that-never-applies this page exists to prevent (plan 311).
+		levels = llmSendableEfforts(provider, model, apiPath, levels)
+		if effort == "none" {
+			// Turning thinking off is a capability, not a level: it is allowed
+			// only where the model has it and the client can send it. A model
+			// that says it cannot turn thinking off never gets an explicit off,
+			// and neither does one whose protocol cannot say it.
+			if !llmModelOffCapable(provider, model, caps, stored) {
+				return llmRefuse(r, http.StatusBadRequest,
+					"默认思考强度必须是这个模型支持的档位", "the default level must be one this model offers")
+			}
+			if len(llmSendableEfforts(provider, model, apiPath, []string{"none"})) == 0 {
+				return llmRefuse(r, http.StatusBadRequest,
+					"默认思考强度必须是这个模型支持的档位", "the default level must be one this model offers")
+			}
+		} else if !slices.Contains(levels, effort) {
 			return llmRefuse(r, http.StatusBadRequest,
 				"默认思考强度必须是这个模型支持的档位", "the default level must be one this model offers")
 		}
@@ -1115,6 +1196,22 @@ func (s *Server) llmModelCapsValid(r *http.Request, provider, model string, caps
 		return llmRefuse(r, http.StatusBadRequest, "最大输出必须是正整数", "the output limit must be a positive number")
 	}
 	return nil
+}
+
+// llmModelOffCapable reports whether a model can turn thinking off at all, by the
+// one precedence every surface follows (plan 311): the write's own answer when it
+// gives one — an explicit "no" is not overruled by the row or the catalog — then
+// the stored row's, then the catalog's level list naming "none". It is never
+// inferred from a level list, a protocol or a name.
+func llmModelOffCapable(provider, model string, caps llmModelCaps, stored state.LLMModel) bool {
+	switch {
+	case caps.ReasoningOff != nil:
+		return *caps.ReasoningOff
+	case stored.CapReasoningOff != nil:
+		return *stored.CapReasoningOff
+	}
+	catalogCaps, _ := llmModelCatalogCaps(provider, model, stored.CatalogProvider)
+	return catalogCaps.ReasoningOff != nil && *catalogCaps.ReasoningOff
 }
 
 // isLLMProtocolPath reports whether apiPath is one of the three protocols a

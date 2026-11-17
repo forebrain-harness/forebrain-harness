@@ -361,14 +361,15 @@ func (s *fakeSubscription) Provision(_ context.Context, env subscription.Env, of
 			return nil, err
 		}
 	}
-	// Write the rows the way a real subscription's provisionRows does: the
-	// flow that saves the subagent switch addresses them by id, so the ids have
-	// to name rows that exist (a login-backed row holds no key; a key-backed plan
-	// carries the one the user pasted, plan 281).
+	// Write the rows the way a real subscription's provisionRows does — the
+	// capabilities its listing declared, the official default effort included —
+	// so the ids name rows that exist and a test can prove the user's answer
+	// lands over the official one (plan 311). A login-backed row holds no key; a
+	// key-backed plan carries the one the user pasted (plan 281).
 	ids := make([]string, len(offers))
 	key := strings.TrimSpace(opts.Key)
 	for i, offer := range offers {
-		id, err := process.UpsertLLMModel(context.Background(), env.DB, process.LLMModelInput{
+		input := process.LLMModelInput{
 			Provider:   offer.Provider,
 			Model:      offer.Model,
 			BaseURL:    offer.BaseURL,
@@ -376,7 +377,20 @@ func (s *fakeSubscription) Provision(_ context.Context, env subscription.Env, of
 			APIKey:     &key,
 			Source:     s.id,
 			SourcePlan: offer.Plan,
-		})
+		}
+		if levels, off := splitOfferEfforts(offer.Efforts); levels != nil || off {
+			if levels != nil {
+				input.CapEfforts = &levels
+			}
+			value := off
+			if offer.ReasoningOff != nil {
+				value = *offer.ReasoningOff
+			}
+			input.CapReasoningOff = &value
+		}
+		officialDefault := strings.TrimSpace(offer.DefaultEffort)
+		input.CapDefaultEffort = &officialDefault
+		id, err := process.UpsertLLMModel(context.Background(), env.DB, input)
 		if err != nil {
 			return nil, err
 		}
@@ -387,6 +401,29 @@ func (s *fakeSubscription) Provision(_ context.Context, env subscription.Env, of
 
 func (s *fakeSubscription) RefreshKey(context.Context, subscription.Env, string) error {
 	return subscription.ErrNoKeyToRefresh
+}
+
+// splitOfferEfforts separates the levels a listing names from the off switch it
+// may also name, the rule pkg/subscription's own Provision follows: "none" is a
+// capability the row keeps in its own column, never a level.
+func splitOfferEfforts(efforts []string) ([]string, bool) {
+	if efforts == nil {
+		return nil, false
+	}
+	levels := make([]string, 0, len(efforts))
+	off := false
+	for _, effort := range efforts {
+		level := strings.ToLower(strings.TrimSpace(effort))
+		switch level {
+		case "":
+			continue
+		case "none":
+			off = true
+			continue
+		}
+		levels = append(levels, level)
+	}
+	return levels, off
 }
 
 // chatGPTLike is the ChatGPT shape: a loopback callback flow, with the paste flow
@@ -637,13 +674,17 @@ func TestProviderPageMarksASubscriptionAlreadySignedIn(t *testing.T) {
 }
 
 // Choosing a subscription signs in, shows the models it unlocked with the
-// endpoint each one sends to, and writes only the rows the user ticks. The first
-// ticked row is the model the agent takes.
+// endpoint each one sends to, and writes only the model the user chose — one
+// flow configures one model, and the rows it already held keep everything they
+// had (plan 311).
 func TestConfigureSubscriptionAddsTheModelsTheUserTicks(t *testing.T) {
 	sub := chatGPTLike()
 	opened := browserMachine(t)
-	selector := &fakeSelector{confirms: []bool{true}, multiSelects: [][]int{{1}}}
-	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+	selector := &fakeSelector{confirms: []bool{true}, selects: []string{"gpt-second", reasoningEffortUnset, subagentsNo}}
+	cfg := setupTestConfig(t, selector)
+	// The other model was configured earlier and must not be written again.
+	otherID := offerRowSeed(t, cfg, sub, sub.offers[0], "sk-earlier-row")
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
@@ -654,7 +695,7 @@ func TestConfigureSubscriptionAddsTheModelsTheUserTicks(t *testing.T) {
 		t.Fatalf("opened %v, want the flow's authorize URL %q", *opened, sub.login.url)
 	}
 	if len(sub.provisioned) != 1 || len(sub.provisioned[0]) != 1 || sub.provisioned[0][0].Model != "gpt-second" {
-		t.Fatalf("provisioned %+v, want the one row ticked", sub.provisioned)
+		t.Fatalf("provisioned %+v, want the one model chosen", sub.provisioned)
 	}
 	if sub.envs[0].DB == nil || sub.envs[0].Home == "" {
 		t.Fatalf("provision env = %+v, want the home and its state database", sub.envs[0])
@@ -662,22 +703,28 @@ func TestConfigureSubscriptionAddsTheModelsTheUserTicks(t *testing.T) {
 	if opts.Provider != "chatgpt" || opts.Model != "gpt-second" || opts.BaseURL != openai.CodexBaseURL || opts.APIPath != "/responses" {
 		t.Fatalf("options = %+v", opts)
 	}
-	// The offers page names each model with the request URL its plan sends to.
-	if got := selector.multiOptions[0]; !reflect.DeepEqual(got, []string{"gpt-future", "gpt-second"}) {
+	// The model page names each model and nothing is ticked: one row is chosen,
+	// not a batch.
+	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{"gpt-future", "gpt-second"}) {
 		t.Fatalf("offer rows = %#v", got)
 	}
 	// It opens on the row the registry marks as the plan's default.
-	if got := selector.multiDefaults[0]; !reflect.DeepEqual(got, []int{0}) {
-		t.Fatalf("checked rows = %#v, want the plan's default", got)
+	if got := selector.selectDefaults[0]; got != "gpt-future" {
+		t.Fatalf("open row = %q, want the plan's default", got)
 	}
-	if !strings.HasPrefix(selector.multiLabels[0], "ChatGPT\nChoose the models to add; each row shows where requests go.") {
-		t.Fatalf("offers page title = %q", selector.multiLabels[0])
+	if !strings.HasPrefix(selector.selectLabels[0], "ChatGPT\nChoose the model to add; each row shows where requests go.") {
+		t.Fatalf("offers page title = %q", selector.selectLabels[0])
+	}
+	// The earlier row is exactly as it was: same key, same model, same source.
+	other := readRow(t, cfg, otherID)
+	if other.Model != "gpt-future" || other.APIKey != "sk-earlier-row" || other.Source != sub.id {
+		t.Fatalf("the other row = %+v, want it untouched", other)
 	}
 }
 
-// Both pages that list one batch of offers — the models to add, then the ones
-// the agent may pick for subagents on its own — call the models what the vendor
-// calls them, and fall back to the wire id only where the listing named none.
+// The model page calls each model what the vendor calls it, falling back to the
+// wire id only where the listing named none. What is written is still the wire
+// id: a display name never becomes a model.
 func TestOffersPageLabelsModelsByVendorName(t *testing.T) {
 	sub := qoderCNLike()
 	// The rows are login-backed: a provider nothing registered would need an API
@@ -688,23 +735,17 @@ func TestOffersPageLabelsModelsByVendorName(t *testing.T) {
 		ID: "qodercn", Label: "Qoder CN", LabelZH: "Qoder CN", LoginBacked: true,
 		Endpoints: []appcfg.ProviderEndpoint{{BaseURL: "https://gateway.qoder.com.cn"}},
 	})
-	selector := &fakeSelector{multiSelects: [][]int{{0, 1}}}
+	selector := &fakeSelector{selects: []string{"Qwen3.8-Max", reasoningEffortUnset, subagentsNo}}
 	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
 	want := []string{"Auto", "Qwen3.8-Max", "dmodel"}
-	if got := selector.multiOptions[0]; !reflect.DeepEqual(got, want) {
+	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("offer rows = %#v, want %#v", got, want)
 	}
-	if len(selector.multiOptions) < 2 {
-		t.Fatalf("pages drawn = %d, want the models list and the subagent list", len(selector.multiOptions))
-	}
-	if got := selector.multiOptions[1]; !reflect.DeepEqual(got, []string{"Auto", "Qwen3.8-Max"}) {
-		t.Fatalf("subagent rows = %#v, want the same names for the ticked models", got)
-	}
 	// What is written is still the wire id: a display name never becomes a model.
-	if opts.Model != "auto" || len(sub.provisioned) != 1 || sub.provisioned[0][1].Model != "qmodel_38max" {
+	if opts.Model != "qmodel_38max" || len(sub.provisioned) != 1 || sub.provisioned[0][0].Model != "qmodel_38max" {
 		t.Fatalf("options = %+v provisioned = %+v", opts, sub.provisioned)
 	}
 }
@@ -713,14 +754,15 @@ func TestOffersPageLabelsModelsByVendorName(t *testing.T) {
 // the list of sign-ins and the list of models, so Esc on the models goes back to
 // the page that asks. Only a page that will ask for a sign-in stays in the flow.
 func TestSubscriptionFlowDropsSettledSignInPage(t *testing.T) {
-	threePages := []int{setupPageProvider, setupPageCredentials, setupPageOffers}
+	settledPages := []int{setupPageProvider, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
+	threePages := []int{setupPageProvider, setupPageCredentials, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
 	for _, tc := range []struct {
 		name  string
 		check *turn.SignInCheck
 		want  []int
 	}{
-		{name: "a login that lists its models", check: &turn.SignInCheck{State: turn.SignInUsable}, want: []int{setupPageProvider, setupPageOffers}},
-		{name: "a login whose listing failed", check: &turn.SignInCheck{State: turn.SignInUnreachable}, want: []int{setupPageProvider, setupPageOffers}},
+		{name: "a login that lists its models", check: &turn.SignInCheck{State: turn.SignInUsable}, want: settledPages},
+		{name: "a login whose listing failed", check: &turn.SignInCheck{State: turn.SignInUnreachable}, want: settledPages},
 		{name: "no login", check: &turn.SignInCheck{State: turn.SignInMissing}, want: threePages},
 		{name: "a dead login", check: &turn.SignInCheck{State: turn.SignInDead}, want: threePages},
 		{name: "not probed yet", want: threePages},
@@ -745,7 +787,7 @@ func TestSubscriptionFlowDropsSettledSignInPage(t *testing.T) {
 // steps straight forward again — the page never moved.
 func TestEscOnOffersPageReturnsToProviderPage(t *testing.T) {
 	sub := qoderCNLike()
-	selector := &dismissingSelector{fakeSelector: &fakeSelector{}}
+	selector := &fakeSelector{}
 	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil {
 		t.Fatalf("configure: %v", err)
@@ -753,14 +795,20 @@ func TestEscOnOffersPageReturnsToProviderPage(t *testing.T) {
 	if ok {
 		t.Fatal("the setup saved itself after Esc on the model list")
 	}
-	if len(selector.multiLabels) != 1 {
-		t.Fatalf("the model list was drawn %d times, want once", len(selector.multiLabels))
+	if len(selector.selectLabels) != 2 || !strings.HasPrefix(selector.selectLabels[0], "Qoder CN\nCho") {
+		t.Fatalf("pages drawn = %#v, want the model list once", selector.selectLabels)
 	}
-	if len(selector.selectLabels) != 1 || !strings.HasPrefix(selector.selectLabels[0], "Connect a model") {
-		t.Fatalf("the page Esc landed on = %#v, want the list of sign-ins", selector.selectLabels)
+	if !strings.HasPrefix(selector.selectLabels[1], "Connect a model") {
+		t.Fatalf("the page Esc landed on = %#v, want the list of sign-ins", selector.selectLabels[1])
+	}
+	if len(selector.multiLabels) != 0 {
+		t.Fatalf("check lists = %#v, one model is chosen from a list, not ticked", selector.multiLabels)
 	}
 	if sub.startCalls != 0 {
 		t.Fatalf("sign-ins = %d, a login this machine holds must not sign in again", sub.startCalls)
+	}
+	if len(sub.provisioned) != 0 {
+		t.Fatalf("provisioned %+v, Esc writes nothing", sub.provisioned)
 	}
 	if opts.Provider != "" {
 		t.Fatalf("options = %+v, want none written", opts)
@@ -843,7 +891,7 @@ func TestConfigureSubscriptionReusesTheSavedSignIn(t *testing.T) {
 	sub := chatGPTLike()
 	sub.check = turn.SignInCheck{State: turn.SignInUsable}
 	opened := browserMachine(t)
-	selector := &fakeSelector{}
+	selector := &fakeSelector{selects: []string{"gpt-future", reasoningEffortUnset, subagentsNo}}
 	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
@@ -867,7 +915,7 @@ func TestConfigureSubscriptionReusesTheSavedSignIn(t *testing.T) {
 func TestConfigureSubscriptionMissingLoginRunsTheFlow(t *testing.T) {
 	sub := chatGPTLike()
 	opened := browserMachine(t)
-	selector := &fakeSelector{confirms: []bool{true}}
+	selector := &fakeSelector{confirms: []bool{true}, selects: []string{"gpt-future", reasoningEffortUnset, subagentsNo}}
 	_, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
@@ -904,7 +952,7 @@ func TestConfigureSubscriptionDeadLoginRunsTheFlow(t *testing.T) {
 	sub := chatGPTLike()
 	sub.check = turn.SignInCheck{State: turn.SignInDead, Err: errors.New("ChatGPT login expired; sign in again")}
 	browserMachine(t)
-	selector := &fakeSelector{confirms: []bool{true}}
+	selector := &fakeSelector{confirms: []bool{true}, selects: []string{"gpt-future", reasoningEffortUnset, subagentsNo}}
 	if _, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub); err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
@@ -957,7 +1005,7 @@ func TestConfigureSubscriptionFetchRetrySkipsRelogin(t *testing.T) {
 		return first.offers, nil
 	}
 	browserMachine(t)
-	selector := &fakeSelector{confirms: []bool{true, true}}
+	selector := &fakeSelector{confirms: []bool{true, true}, selects: []string{"gpt-future", reasoningEffortUnset, subagentsNo}}
 	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
@@ -980,7 +1028,7 @@ func TestConfigureSubscriptionPastesTheCallbackWhenHeadless(t *testing.T) {
 	sub := chatGPTLike()
 	opened := headlessMachine(t)
 	const pasted = "http://127.0.0.1:54623/auth/callback?code=abc"
-	selector := &fakeSelector{confirms: []bool{true}, inputs: []string{pasted}}
+	selector := &fakeSelector{confirms: []bool{true}, inputs: []string{pasted}, selects: []string{"gpt-future", reasoningEffortUnset, subagentsNo}}
 	_, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
@@ -1002,7 +1050,11 @@ func TestConfigureSubscriptionRejectedPasteTriesAgain(t *testing.T) {
 	sub := chatGPTLike()
 	headlessMachine(t)
 	sub.login.submitErr = errors.New("that address did not belong to this sign-in")
-	selector := &fakeSelector{confirms: []bool{true}, inputs: []string{"http://localhost/wrong", "http://127.0.0.1:54623/auth/callback?code=abc"}}
+	selector := &fakeSelector{
+		confirms: []bool{true},
+		inputs:   []string{"http://localhost/wrong", "http://127.0.0.1:54623/auth/callback?code=abc"},
+		selects:  []string{"gpt-future", reasoningEffortUnset, subagentsNo},
+	}
 	if _, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub); err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
@@ -1018,7 +1070,7 @@ func TestConfigureSubscriptionDeviceFlowShowsTheCode(t *testing.T) {
 	sub := openCodeLike()
 	opened := browserMachine(t)
 	out := &bytes.Buffer{}
-	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}})
+	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}, selects: []string{"glm-5.3", reasoningEffortUnset, subagentsNo}})
 	cfg.Output = out
 	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
 	if err != nil || !ok {
@@ -1050,7 +1102,11 @@ func TestConfigureSubscriptionAsksForTheKeyAPlanCannotFetch(t *testing.T) {
 	sub := volcengineLike()
 	const pasted = "ark-pasted-placeholder-key"
 	out := &bytes.Buffer{}
-	selector := &fakeSelector{confirms: []bool{true}, inputs: []string{pasted}}
+	selector := &fakeSelector{
+		confirms: []bool{true},
+		inputs:   []string{pasted},
+		selects:  []string{"doubao-seed-2.1-pro", reasoningEffortUnset, subagentsNo},
+	}
 	cfg := setupTestConfig(t, selector)
 	cfg.Output = out
 	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
@@ -1099,7 +1155,11 @@ func TestVolcengineSubscriptionSetupSavesThroughExecute(t *testing.T) {
 	t.Cleanup(func() { llm.SetBuiltinModels("volcengine", nil) })
 	sub := volcengineLike()
 	const pasted = "ark-pasted-placeholder-key"
-	selector := &fakeSelector{confirms: []bool{true}, inputs: []string{pasted}}
+	selector := &fakeSelector{
+		confirms: []bool{true},
+		inputs:   []string{pasted},
+		selects:  []string{"doubao-seed-2.1-pro", reasoningEffortUnset, subagentsNo},
+	}
 	cfg := setupTestConfig(t, selector)
 	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
 	if err != nil || !ok {
@@ -1164,7 +1224,9 @@ func TestConfigureSubscriptionWithoutModelsSaysSo(t *testing.T) {
 }
 
 // A refused write shows the registry's own sentence on the page and writes
-// nothing; the user can then choose again.
+// nothing; the user can then choose again. The write happens on the review's
+// save, after the confirmation, and a refusal returns to the model list with the
+// login and the listing kept (plan 311).
 func TestConfigureSubscriptionProvisionFailureKeepsThePage(t *testing.T) {
 	sub := chatGPTLike()
 	sub.provisionFn = func(call int) error {
@@ -1175,10 +1237,13 @@ func TestConfigureSubscriptionProvisionFailureKeepsThePage(t *testing.T) {
 	}
 	browserMachine(t)
 	out := &bytes.Buffer{}
-	// Two check lists per attempt now: the models to add, then which of them the
-	// agent may pick for subagents (283). The first attempt ticks row 0, the
-	// second row 1; neither opens the subagent switch.
-	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}, multiSelects: [][]int{{0}, {}, {1}, {}}})
+	cfg := setupTestConfig(t, &fakeSelector{
+		confirms: []bool{true},
+		selects: []string{
+			"gpt-future", reasoningEffortUnset, subagentsNo,
+			"gpt-second", reasoningEffortUnset, subagentsNo,
+		},
+	})
 	cfg.Output = out
 	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
 	if err != nil || !ok {
@@ -1191,7 +1256,10 @@ func TestConfigureSubscriptionProvisionFailureKeepsThePage(t *testing.T) {
 		t.Fatalf("page = %q, want the registry's sentence", out.String())
 	}
 	if opts.Model != "gpt-second" {
-		t.Fatalf("model = %q, want the row chosen on the second attempt", opts.Model)
+		t.Fatalf("model = %q, want the model chosen on the second attempt", opts.Model)
+	}
+	if sub.startCalls != 1 {
+		t.Fatalf("sign-ins = %d, a refused write must not sign in again", sub.startCalls)
 	}
 }
 
@@ -1225,7 +1293,7 @@ func TestSignInShowsALiveProgressLine(t *testing.T) {
 	browserMachine(t)
 	renderer := NewRenderer(nil, nil)
 	sel := &connectProgressSelector{
-		fakeSelector: &fakeSelector{confirms: []bool{true}},
+		fakeSelector: &fakeSelector{confirms: []bool{true}, selects: []string{"glm-5.3", reasoningEffortUnset, subagentsNo}},
 		raw:          newRawSelector(nil, renderer),
 	}
 	cfg := setupTestConfig(t, sel)
@@ -1315,11 +1383,12 @@ func TestCustomModelFlowSavesTheProviderItDescribes(t *testing.T) {
 		facts[fact.Label] = fact.Value
 	}
 	want := map[string]string{
-		"Provider": appcfg.CustomProvider,
-		"Model":    "gpt-4o-vendor",
-		"Protocol": "OpenAI Chat Completions",
-		"Endpoint": "https://api.example.com/v1/chat/completions",
-		"Thinking": "medium, high",
+		"Provider":                  appcfg.CustomProvider,
+		"Model":                     "gpt-4o-vendor",
+		"Protocol":                  "OpenAI Chat Completions",
+		"Endpoint":                  "https://api.example.com/v1/chat/completions",
+		"Supported thinking levels": "medium, high",
+		"Default reasoning effort":  reasoningEffortUnset,
 	}
 	for label, value := range want {
 		if facts[label] != value {
@@ -1359,8 +1428,8 @@ func TestCustomModelCustomProtocolSendsToTheURLAsIs(t *testing.T) {
 	if facts["Endpoint"] != "http://127.0.0.1:8731/v1" || facts["Protocol"] != "Custom protocol" {
 		t.Fatalf("review = %+v", facts)
 	}
-	if facts["Thinking"] != "Not set" {
-		t.Fatalf("review thinking = %q, want Not set", facts["Thinking"])
+	if facts["Supported thinking levels"] != "Not set" {
+		t.Fatalf("review levels = %q, want Not set", facts["Supported thinking levels"])
 	}
 }
 
@@ -1673,71 +1742,62 @@ func installRepoCatalog(t *testing.T) {
 	t.Cleanup(func() { llm.SetGlobalCatalogForTest(cat) })
 }
 
-// TestConfigureEffortPageUsesTheModelsLevels pins onboarding and /connect to
-// the same levels /model offers: the model's own catalog row, plus the
-// "Provider default" escape hatch — and no page at all for a model whose row
-// names no discrete level.
+// TestConfigureEffortPageUsesTheModelsLevels pins /connect to the same levels
+// /model offers: the model's own catalog row, plus the "Provider default" escape
+// hatch, and no guessed level for a model whose row names none (plan 311: the
+// page asks every model, and a model with nothing to pick is offered the
+// provider's own default alone).
 func TestConfigureEffortPageUsesTheModelsLevels(t *testing.T) {
 	installRepoCatalog(t)
 	for _, tc := range []struct {
-		provider    string
-		model       string
-		want        []string
-		wantDefault string
-		selects     []string
-		wantJSON    string
+		provider, model string
+		baseURL         string
+		want            []string
 	}{
 		{
-			provider: "openai", model: "gpt-5",
-			want:        []string{"minimal", "low", "medium", "high", reasoningEffortUnset},
-			wantDefault: reasoningEffortProviderDefault,
-			selects:     []string{"medium"},
-			wantJSON:    `{"reasoning":{"effort":"medium"}}`,
+			provider: "openai", model: "gpt-5", baseURL: "https://api.openai.com/v1",
+			want: []string{"Minimal", "Low", "Medium", "High", reasoningEffortUnset},
 		},
 		{
-			// The page opens on "medium" only when the model offers it;
-			// otherwise it opens on the provider's own default.
-			provider: "zhipuai", model: "glm-5.3-flash",
-			want:        []string{"low", "high", "max", reasoningEffortUnset},
-			wantDefault: reasoningEffortUnset,
-			selects:     []string{"max"},
-			wantJSON:    `{"reasoning":{"effort":"max"}}`,
+			provider: "openai", model: "gpt-5.5", baseURL: "https://api.openai.com/v1",
+			// This row's catalog entry names "none", so the off switch is part
+			// of the list — first, because it is the extreme of the same scale.
+			want: []string{"Off", "Low", "Medium", "High", "xHigh", reasoningEffortUnset},
 		},
 		{
-			// A toggle-only model: nothing to choose, so no page and no level.
-			provider: "zhipuai", model: "glm-4.5",
+			provider: "zhipuai", model: "glm-5.3-flash", baseURL: "https://api.z.ai/api/paas/v4",
+			want: []string{"Low", "High", "Max", reasoningEffortUnset},
 		},
 		{
-			// Not in the catalog at all: nothing to choose either.
-			provider: "openai", model: "not-a-model",
+			// A toggle-only model: nothing discrete to choose, so the page is the
+			// provider's own default.
+			provider: "zhipuai", model: "glm-4.5", baseURL: "https://api.z.ai/api/paas/v4",
+			want: []string{reasoningEffortUnset},
+		},
+		{
+			// Not in the catalog at all: the same answer.
+			provider: "openai", model: "not-a-model", baseURL: "https://api.openai.com/v1",
+			want: []string{reasoningEffortUnset},
 		},
 	} {
 		t.Run(tc.provider+"/"+tc.model, func(t *testing.T) {
-			selector := &fakeSelector{selects: tc.selects}
-			got, ok, err := promptReasoningEffort(PromptConfig{Selector: selector}, providerChoice{Provider: tc.provider}, tc.model, "")
-			if err != nil || !ok {
-				t.Fatalf("promptReasoningEffort ok=%t err=%v", ok, err)
+			cfg := setupTestConfig(t, &fakeSelector{})
+			setup := apiKeyEffortSetup(cfg, tc.provider, tc.model, tc.baseURL)
+			defer setup.closeState()
+			if ok, err := setup.promptDefaultEffort(); err != nil || !ok {
+				t.Fatalf("promptDefaultEffort ok=%t err=%v", ok, err)
 			}
-			if tc.want == nil {
-				if len(selector.selectOptions) != 0 {
-					t.Fatalf("selection pages = %#v, want no effort page", selector.selectOptions)
-				}
-				if got != "" {
-					t.Fatalf("params = %q, want no pinned effort", got)
-				}
-				return
-			}
+			selector := cfg.Selector.(*fakeSelector)
 			if len(selector.selectOptions) != 1 {
-				t.Fatalf("selection pages = %#v, want one effort page", selector.selectOptions)
+				t.Fatalf("pages = %#v, want one default-effort page", selector.selectOptions)
 			}
 			if !reflect.DeepEqual(selector.selectOptions[0], tc.want) {
-				t.Fatalf("effort options = %#v, want %#v", selector.selectOptions[0], tc.want)
+				t.Fatalf("options = %#v, want %#v", selector.selectOptions[0], tc.want)
 			}
-			if selector.selectDefaults[0] != tc.wantDefault {
-				t.Fatalf("effort default = %q, want %q", selector.selectDefaults[0], tc.wantDefault)
-			}
-			if got != tc.wantJSON {
-				t.Fatalf("params = %q, want %q", got, tc.wantJSON)
+			// No level is guessed: a fresh row starts on the provider's own
+			// default, whatever the model offers.
+			if got := selector.selectDefaults[0]; got != reasoningEffortUnset {
+				t.Fatalf("cursor = %q, want the provider default", got)
 			}
 		})
 	}
@@ -2031,43 +2091,46 @@ func TestConfigureSubscriptionWritesTheSubagentSwitchByRowID(t *testing.T) {
 	sub := chatGPTLike()
 	browserMachine(t)
 	cfg := setupTestConfig(t, &fakeSelector{
-		confirms:     []bool{true},
-		multiSelects: [][]int{{0, 1}, {1}},
+		confirms: []bool{true},
+		selects:  []string{"gpt-second", reasoningEffortUnset, subagentsYes},
 	})
 	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
+	if len(sub.provisioned) != 1 || len(sub.provisioned[0]) != 1 {
+		t.Fatalf("provisioned = %#v, want one write of the one model chosen", sub.provisioned)
+	}
+	// The switch is one page of its own now, not a check list of models.
 	selector := cfg.Selector.(*fakeSelector)
-	if len(selector.multiLabels) != 2 ||
-		!strings.HasPrefix(selector.multiLabels[0], "ChatGPT\n") ||
-		!strings.HasPrefix(selector.multiLabels[1], "Subagents\n") {
-		t.Fatalf("check lists = %#v, want the models and then the subagent authorization", selector.multiLabels)
+	if len(selector.multiLabels) != 0 {
+		t.Fatalf("check lists = %#v, the model and the authorization are single choices", selector.multiLabels)
 	}
-	if len(sub.provisioned) != 1 || len(sub.provisioned[0]) != 2 {
-		t.Fatalf("provisioned = %#v, want one write of the two ticked models", sub.provisioned)
+	subagentPage := false
+	for _, label := range selector.selectLabels {
+		if strings.HasPrefix(label, "Subagents\n") {
+			subagentPage = true
+		}
 	}
-	db, err := process.StateDB(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath})
+	if !subagentPage {
+		t.Fatalf("pages = %#v, want the subagent authorization page", selector.selectLabels)
+	}
+	// The rows the sign-in wrote are the model's; the switch, the default and
+	// the session's model are the caller's own Execute (plan 311).
+	if opts.Model != "gpt-second" || !opts.SubagentAllowed {
+		t.Fatalf("options = %+v, want the chosen model with this flow's answer", opts)
+	}
+	rt := process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath, Config: appcfg.Root{}}
+	rep, err := process.Execute(rt, opts)
 	if err != nil {
-		t.Fatalf("open state database: %v", err)
+		t.Fatalf("Execute: %v", err)
 	}
-	defer db.Close()
-	store := &state.LLMModelStore{DB: db}
-	for i, offer := range sub.provisioned[0] {
-		provider, model, baseURL, apiPath := appcfg.NormalizeLLMModelIdentity(offer.Provider, offer.Model, offer.BaseURL, offer.APIPath)
-		row, found, err := store.FindByIdentity(context.Background(), provider, model, baseURL, apiPath)
-		if err != nil || !found {
-			t.Fatalf("row %d: found=%t err=%v", i, found, err)
-		}
-		want := i == 1
-		if row.SubagentAllowed != want {
-			t.Fatalf("row %d (%s) SubagentAllowed = %t, want %t", i, row.Model, row.SubagentAllowed, want)
-		}
+	row := readRow(t, cfg, rep.ModelID)
+	if !row.SubagentAllowed {
+		t.Fatalf("row = %+v, want this flow's answer saved onto it", row)
 	}
-	// The session switches to the first model ticked, and the switch it carries
-	// is that row's own answer.
-	if opts.Model != "gpt-future" || opts.SubagentAllowed {
-		t.Fatalf("options = %+v, want the first offer with its own (closed) switch", opts)
+	if row.Source != sub.id {
+		t.Fatalf("row source = %q, want the sign-in that wrote it", row.Source)
 	}
 }
 
@@ -2142,7 +2205,7 @@ func TestConfigureSubscriptionDeviceFlowWithoutAUserCode(t *testing.T) {
 	sub.login = newFakeLogin("https://opencode.ai/auth", "")
 	opened := browserMachine(t)
 	out := &bytes.Buffer{}
-	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}})
+	cfg := setupTestConfig(t, &fakeSelector{confirms: []bool{true}, selects: []string{"glm-5.3", reasoningEffortUnset, subagentsNo}})
 	cfg.Output = out
 	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
 	if err != nil || !ok {
@@ -2198,7 +2261,7 @@ func TestOffersPageOpensOnTheModelsAlreadyAdded(t *testing.T) {
 		BaseURL: "https://ark.cn-beijing.volces.com/api/plan", APIPath: "/v1/messages",
 		Plan: "agent-plan", PlanLabel: "Agent Plan",
 	})
-	selector := &fakeSelector{inputs: []string{"placeholder-key"}, multiSelects: [][]int{{1}}}
+	selector := &fakeSelector{inputs: []string{"placeholder-key"}, selects: []string{"glm-5.3", reasoningEffortUnset, subagentsNo}}
 	cfg := setupTestConfig(t, selector)
 	offerRowSeed(t, cfg, sub, sub.offers[1], "placeholder-plan-key")
 
@@ -2209,8 +2272,8 @@ func TestOffersPageOpensOnTheModelsAlreadyAdded(t *testing.T) {
 	if opts.Model != "glm-5.3" {
 		t.Fatalf("options = %+v, want the model that was already added", opts)
 	}
-	if got := selector.multiDefaults[0]; !reflect.DeepEqual(got, []int{1}) {
-		t.Fatalf("checked rows = %v, want the already added row [1]", got)
+	if got := selector.selectDefaults[0]; got != "glm-5.3" {
+		t.Fatalf("the page opened on %q, want the already added row", got)
 	}
 }
 
@@ -2226,7 +2289,7 @@ func TestOffersPageOpensOnALoginRowWhateverPathItShows(t *testing.T) {
 	// openCodeLike's offers carry a path for the rows they write; a real login
 	// listing carries none.
 	sub.offers[1].APIPath = ""
-	selector := &fakeSelector{multiSelects: [][]int{{1}}}
+	selector := &fakeSelector{selects: []string{"kimi-k3", reasoningEffortUnset, subagentsNo}}
 	cfg := setupTestConfig(t, selector)
 	legacy := sub.offers[1]
 	legacy.APIPath = "/chat/completions"
@@ -2239,8 +2302,8 @@ func TestOffersPageOpensOnALoginRowWhateverPathItShows(t *testing.T) {
 	if opts.Model != "kimi-k3" {
 		t.Fatalf("options = %+v, want the model that was already added", opts)
 	}
-	if got := selector.multiDefaults[0]; !reflect.DeepEqual(got, []int{1}) {
-		t.Fatalf("checked rows = %v, want the already added row [1]", got)
+	if got := selector.selectDefaults[0]; got != "kimi-k3" {
+		t.Fatalf("the page opened on %q, want the row a legacy path wrote", got)
 	}
 }
 
@@ -2321,7 +2384,7 @@ func TestConfigureSubscriptionWaitOwnsTheInputAndStepsBackOnEscape(t *testing.T)
 func TestConfigureSubscriptionWaitDeliversTheOutcome(t *testing.T) {
 	sub := openCodeLike()
 	headlessMachine(t)
-	selector := &setupWaitSelector{fakeSelector: &fakeSelector{confirms: []bool{true}}}
+	selector := &setupWaitSelector{fakeSelector: &fakeSelector{confirms: []bool{true}, selects: []string{"glm-5.3", reasoningEffortUnset, subagentsNo}}}
 	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
@@ -2341,7 +2404,7 @@ func TestConfigureSubscriptionWaitPropagatesTheFlowError(t *testing.T) {
 	headlessMachine(t)
 	expired := errors.New("code expired")
 	sub.login.waitErr = expired
-	selector := &setupWaitSelector{fakeSelector: &fakeSelector{confirms: []bool{true}}}
+	selector := &setupWaitSelector{fakeSelector: &fakeSelector{confirms: []bool{true}, selects: []string{"glm-5.3", reasoningEffortUnset, subagentsNo}}}
 	_, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
 	if !errors.Is(err, expired) {
 		t.Fatalf("configure err=%v, want the flow's error", err)
@@ -2356,7 +2419,10 @@ func TestConfigureSubscriptionWaitPropagatesTheFlowError(t *testing.T) {
 func TestConfigureSubscriptionPlainSelectorStillWaits(t *testing.T) {
 	sub := openCodeLike()
 	headlessMachine(t)
-	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, &fakeSelector{confirms: []bool{true}}), sub)
+	opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, &fakeSelector{
+		confirms: []bool{true},
+		selects:  []string{"glm-5.3", reasoningEffortUnset, subagentsNo},
+	}), sub)
 	if err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
@@ -2850,7 +2916,10 @@ func TestConnectSetupPanelProvisionNoteErrorIsReported(t *testing.T) {
 	}
 	paintErr := errors.New("the report could not be painted")
 	out := &bytes.Buffer{}
-	cfg := setupTestConfig(t, &failingOverlaySelector{fakeSelector: &fakeSelector{}, err: paintErr})
+	cfg := setupTestConfig(t, &failingOverlaySelector{
+		fakeSelector: &fakeSelector{selects: []string{"glm-5.3", reasoningEffortUnset, subagentsNo}},
+		err:          paintErr,
+	})
 	cfg.Output = out
 	_, _, err := runSubscriptionSetup(t, cfg, sub)
 	if !errors.Is(err, paintErr) {
@@ -3246,5 +3315,1237 @@ func TestConnectSetupPanelFetchRetryReusesTheLogin(t *testing.T) {
 	}
 	if text := transcriptText(panel.render); text != "" {
 		t.Fatalf("transcript = %q, want the fetch state kept out of it", text)
+	}
+}
+
+// installEffortTestCatalog pins the catalog to the models the default-effort
+// page's cases need: one with discrete levels and no off switch, one that can
+// turn thinking off, one a source lists nothing for, and — for the custom form —
+// one whose levels only survive on a protocol that can send them.
+func installEffortTestCatalog(t *testing.T) {
+	t.Helper()
+	cat, err := llm.Parse([]byte(`{
+		"openai/levels-model": {"id": "openai/levels-model", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["low", "medium", "high"]}]},
+		"openai/off-model": {"id": "openai/off-model", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["none", "low", "medium"]}]},
+		"openai/toggle-model": {"id": "openai/toggle-model", "reasoning": true,
+			"reasoning_options": []},
+		"custom/messages-model": {"id": "custom/messages-model", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["none", "minimal", "low", "medium"]}]},
+		"anthropic/claude-off-model": {"id": "anthropic/claude-off-model", "reasoning": true,
+			"reasoning_options": [{"type": "effort", "values": ["none", "low", "high"]}]}
+	}`))
+	if err != nil {
+		t.Fatalf("parse effort test catalog: %v", err)
+	}
+	llm.SetGlobalCatalogForTest(cat)
+	t.Cleanup(func() { llm.SetGlobalCatalogForTest(cat) })
+}
+
+// readRow reads one stored model row back from the setup's own database: the
+// row is the proof a save landed, not the options it was given.
+func readRow(t *testing.T, cfg PromptConfig, id string) state.LLMModel {
+	t.Helper()
+	db, err := process.StateDB(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath})
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	defer db.Close()
+	row, err := (&state.LLMModelStore{DB: db}).Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("read row %q: %v", id, err)
+	}
+	return row
+}
+
+// seedEffortRow writes the row an earlier configuration would have left.
+func seedEffortRow(t *testing.T, cfg PromptConfig, in process.LLMModelInput) {
+	t.Helper()
+	db, err := process.StateDB(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath})
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	defer db.Close()
+	if _, err := process.UpsertLLMModel(context.Background(), db, in); err != nil {
+		t.Fatalf("seed the row: %v", err)
+	}
+}
+
+// apiKeyEffortSetup is the API-key group standing on its model page: the
+// provider, the model and the endpoint a save would write.
+func apiKeyEffortSetup(cfg PromptConfig, provider, model, baseURL string) *llmSetup {
+	setup := newLLMSetup(cfg)
+	setup.choice = providerChoice{Label: provider + " API key", Provider: provider, DefaultBaseURL: baseURL, SupportsAPIPath: true}
+	setup.model, setup.baseURL = model, baseURL
+	return setup
+}
+
+// subscriptionEffortSetup is the sign-in group with one model chosen from its
+// listing.
+func subscriptionEffortSetup(t *testing.T, cfg PromptConfig, offer subscription.Offer) *llmSetup {
+	t.Helper()
+	sub := &fakeSubscription{
+		id: "chatgpt", label: "ChatGPT",
+		check:  turn.SignInCheck{State: turn.SignInUsable},
+		offers: []subscription.Offer{offer},
+	}
+	withSubscriptions(t, sub)
+	setup := newLLMSetup(cfg)
+	setup.setChoice(subscriptionChoice(sub))
+	setup.offers = []subscription.Offer{offer}
+	setup.selectedOfferIdx = 0
+	return setup
+}
+
+// The page every group passes (plan 311): its list is what the model can
+// actually be given, its cursor is the truth already stored for that model and
+// endpoint — the params effort a request carries before the row's own default —
+// and "Provider default" is an answer like any other, not "unanswered".
+func TestConnectDefaultEffortDefaultSelection(t *testing.T) {
+	installEffortTestCatalog(t)
+
+	// The page answers with the label it was scripted, and the setup records
+	// the wire id behind it.
+	answer := func(t *testing.T, setup *llmSetup, label string) {
+		t.Helper()
+		selector := setup.cfg.Selector.(*fakeSelector)
+		selector.selects = append(selector.selects, label)
+		if ok, err := setup.promptDefaultEffort(); err != nil || !ok {
+			t.Fatalf("promptDefaultEffort ok=%t err=%v", ok, err)
+		}
+	}
+
+	t.Run("a fresh row starts on the provider default", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		setup := apiKeyEffortSetup(cfg, "openai", "levels-model", "https://api.openai.com/v1")
+		defer setup.closeState()
+		answer(t, setup, reasoningEffortUnset)
+		selector := cfg.Selector.(*fakeSelector)
+		if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{"Low", "Medium", "High", reasoningEffortUnset}) {
+			t.Fatalf("options = %#v", got)
+		}
+		if got := selector.selectDefaults[0]; got != reasoningEffortUnset {
+			t.Fatalf("cursor = %q, want the provider default", got)
+		}
+		if !strings.HasPrefix(selector.selectLabels[0], "Default reasoning effort\nChoose the default for openai/levels-model.") {
+			t.Fatalf("title = %q", selector.selectLabels[0])
+		}
+		// Provider default is an answer: "" here means "the provider decides",
+		// not "the page was never answered".
+		if !setup.effortAnswered || setup.defaultEffort != "" {
+			t.Fatalf("answer = %q answered=%t", setup.defaultEffort, setup.effortAnswered)
+		}
+		if setup.effortIdentity != setup.effortTargetFor().key() {
+			t.Fatalf("answer identity = %q, want the model's", setup.effortIdentity)
+		}
+	})
+
+	t.Run("the row's params effort is where the page opens", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		params := `{"reasoning":{"effort":"high"}}`
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "openai", Model: "levels-model", BaseURL: "https://api.openai.com/v1",
+			APIKey: strPtrTUI("sk-old"), ParamsJSON: &params,
+		})
+		setup := apiKeyEffortSetup(cfg, "openai", "levels-model", "https://api.openai.com/v1")
+		defer setup.closeState()
+		answer(t, setup, "Medium")
+		selector := cfg.Selector.(*fakeSelector)
+		if got := selector.selectDefaults[0]; got != "High" {
+			t.Fatalf("cursor = %q, want the stored effort", got)
+		}
+		if setup.defaultEffort != "medium" {
+			t.Fatalf("answer = %q, want medium", setup.defaultEffort)
+		}
+	})
+
+	t.Run("a stored effort the model no longer offers falls back with a note", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		params := `{"reasoning":{"effort":"xhigh"}}`
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "openai", Model: "levels-model", BaseURL: "https://api.openai.com/v1",
+			APIKey: strPtrTUI("sk-old"), ParamsJSON: &params,
+		})
+		setup := apiKeyEffortSetup(cfg, "openai", "levels-model", "https://api.openai.com/v1")
+		defer setup.closeState()
+		answer(t, setup, reasoningEffortUnset)
+		selector := cfg.Selector.(*fakeSelector)
+		if got := selector.selectDefaults[0]; got != reasoningEffortUnset {
+			t.Fatalf("cursor = %q, want the provider default", got)
+		}
+		if title := selector.selectLabels[0]; !strings.Contains(title, "xHigh is no longer available for this model") {
+			t.Fatalf("title = %q, want the note about the stale level", title)
+		}
+	})
+
+	t.Run("the row's own default effort is read when its params name none", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "openai", Model: "levels-model", BaseURL: "https://api.openai.com/v1",
+			APIKey: strPtrTUI("sk-old"), CapDefaultEffort: strPtrTUI("low"),
+		})
+		setup := apiKeyEffortSetup(cfg, "openai", "levels-model", "https://api.openai.com/v1")
+		defer setup.closeState()
+		answer(t, setup, "Low")
+		if got := cfg.Selector.(*fakeSelector).selectDefaults[0]; got != "Low" {
+			t.Fatalf("cursor = %q, want the row's default effort", got)
+		}
+	})
+
+	t.Run("stepping back shows this flow's own answer", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		setup := apiKeyEffortSetup(cfg, "openai", "levels-model", "https://api.openai.com/v1")
+		defer setup.closeState()
+		answer(t, setup, "High")
+		answer(t, setup, "High")
+		selector := cfg.Selector.(*fakeSelector)
+		if got := selector.selectDefaults[1]; got != "High" {
+			t.Fatalf("cursor on the page shown again = %q, want this flow's answer", got)
+		}
+	})
+
+	t.Run("picking Off records none, which is not the provider default", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		setup := apiKeyEffortSetup(cfg, "openai", "off-model", "https://api.openai.com/v1")
+		defer setup.closeState()
+		answer(t, setup, "Off")
+		selector := cfg.Selector.(*fakeSelector)
+		if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{"Off", "Low", "Medium", reasoningEffortUnset}) {
+			t.Fatalf("options = %#v, want the off switch first", got)
+		}
+		if setup.defaultEffort != "none" {
+			t.Fatalf("answer = %q, want none", setup.defaultEffort)
+		}
+	})
+
+	t.Run("a row that says the model cannot turn thinking off hides Off", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		off := false
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "openai", Model: "off-model", BaseURL: "https://api.openai.com/v1",
+			APIKey: strPtrTUI("sk-old"), CapReasoningOff: &off,
+		})
+		setup := apiKeyEffortSetup(cfg, "openai", "off-model", "https://api.openai.com/v1")
+		defer setup.closeState()
+		answer(t, setup, "Low")
+		if got := cfg.Selector.(*fakeSelector).selectOptions[0]; !reflect.DeepEqual(got, []string{"Low", "Medium", reasoningEffortUnset}) {
+			t.Fatalf("options = %#v, want no Off", got)
+		}
+	})
+
+	t.Run("a model nothing lists gets the provider default alone", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		setup := apiKeyEffortSetup(cfg, "openai", "toggle-model", "https://api.openai.com/v1")
+		defer setup.closeState()
+		answer(t, setup, reasoningEffortUnset)
+		selector := cfg.Selector.(*fakeSelector)
+		if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{reasoningEffortUnset}) {
+			t.Fatalf("options = %#v, want the provider default alone", got)
+		}
+		if title := selector.selectLabels[0]; !strings.Contains(title, "No discrete reasoning levels are available for this model.") {
+			t.Fatalf("title = %q, want the sentence for a model with no levels", title)
+		}
+	})
+
+	t.Run("a custom model on Messages is offered only what that client sends", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		setup := newLLMSetup(cfg)
+		setup.setChoice(customChoice())
+		setup.model, setup.baseURL = "messages-model", "https://api.example.test"
+		setup.apiPath = appcfg.APIPathAnthropicMessages
+		defer setup.closeState()
+		answer(t, setup, "Low")
+		selector := cfg.Selector.(*fakeSelector)
+		// The catalog names none and minimal; the Messages client sends
+		// neither, so Off is not offered and minimal is not either.
+		if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{"Low", "Medium", reasoningEffortUnset}) {
+			t.Fatalf("options = %#v", got)
+		}
+		if !strings.Contains(selector.selectLabels[0], "Choose the default for custom/messages-model.") {
+			t.Fatalf("title = %q, want the row's own provider", selector.selectLabels[0])
+		}
+	})
+
+	t.Run("an anthropic model that can turn thinking off still gets no Off", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		setup := apiKeyEffortSetup(cfg, "anthropic", "claude-off-model", "https://api.anthropic.com")
+		defer setup.closeState()
+		answer(t, setup, "High")
+		if got := cfg.Selector.(*fakeSelector).selectOptions[0]; !reflect.DeepEqual(got, []string{"Low", "High", reasoningEffortUnset}) {
+			t.Fatalf("options = %#v, want no Off for the Messages client", got)
+		}
+	})
+
+	t.Run("a new subscription row opens on the listing's own default", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		setup := subscriptionEffortSetup(t, cfg, subscription.Offer{
+			Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-future",
+			BaseURL: openai.CodexBaseURL, APIPath: "/responses",
+			Efforts: []string{"low", "medium", "high"}, DefaultEffort: "medium",
+		})
+		defer setup.closeState()
+		answer(t, setup, "High")
+		selector := cfg.Selector.(*fakeSelector)
+		if got := selector.selectDefaults[0]; got != "Medium" {
+			t.Fatalf("cursor = %q, want the listing's default", got)
+		}
+		if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{"Low", "Medium", "High", reasoningEffortUnset}) {
+			t.Fatalf("options = %#v", got)
+		}
+	})
+
+	t.Run("a row this install already holds keeps its own answer over the listing", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "chatgpt", Model: "gpt-future", BaseURL: openai.CodexBaseURL, APIPath: "/responses",
+		})
+		setup := subscriptionEffortSetup(t, cfg, subscription.Offer{
+			Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-future",
+			BaseURL: openai.CodexBaseURL, APIPath: "/responses",
+			Efforts: []string{"low", "medium", "high"}, DefaultEffort: "medium",
+		})
+		defer setup.closeState()
+		answer(t, setup, reasoningEffortUnset)
+		if got := cfg.Selector.(*fakeSelector).selectDefaults[0]; got != reasoningEffortUnset {
+			t.Fatalf("cursor = %q, want the provider default the row states", got)
+		}
+	})
+}
+
+// strPtrTUI is one string's pointer, for the inputs that take an optional value.
+func strPtrTUI(value string) *string { return &value }
+
+// boolPtrTUI is one bool's pointer, for the declarations a listing may name.
+func boolPtrTUI(value bool) *bool { return &value }
+
+// stubLLMProbeInput records the request the connection test would send, so a
+// test can prove which level actually travels on the wire.
+func stubLLMProbeInput(t *testing.T) *[]process.LLMModelInput {
+	t.Helper()
+	inputs := []process.LLMModelInput{}
+	previous := probeLLMModel
+	probeLLMModel = func(_ context.Context, in process.LLMModelInput) error {
+		inputs = append(inputs, in)
+		return nil
+	}
+	t.Cleanup(func() { probeLLMModel = previous })
+	return &inputs
+}
+
+// effortBackSelector steps back from any page whose title it names — the
+// default-effort page included, which the older backtrackSelector only drove for
+// the authorization page.
+type effortBackSelector struct {
+	fakeSelector
+	backAt map[string]int
+	pages  []string
+}
+
+func (s *effortBackSelector) remember(label string) bool {
+	title, _, _ := strings.Cut(label, "\n")
+	s.pages = append(s.pages, title)
+	if s.backAt[title] > 0 {
+		s.backAt[title]--
+		return true
+	}
+	return false
+}
+
+func (s *effortBackSelector) Select(label string, options []string, defaultOption string) (string, bool, error) {
+	if s.remember(label) {
+		return "", false, nil
+	}
+	return s.fakeSelector.Select(label, options, defaultOption)
+}
+
+func (s *effortBackSelector) SelectRich(label string, items []SelectItem, defaultIdx int) (int, bool, error) {
+	if s.remember(label) {
+		return -1, false, nil
+	}
+	return s.fakeSelector.SelectRich(label, items, defaultIdx)
+}
+
+// SelectRichTabbed is the tabbed spelling selectRichTabbed prefers; it has to
+// come back through this selector's own step-back.
+func (s *effortBackSelector) SelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error) {
+	return s.SelectRich(label, items, opts.DefaultIdx)
+}
+
+func (s *effortBackSelector) MultiSelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
+	if s.remember(label) {
+		return nil, false, nil
+	}
+	return s.fakeSelector.MultiSelectRichTabbed(label, items, opts)
+}
+
+// Every group passes the one default-effort page (plan 311): a subscription's
+// single model, a provider reached with a key, and the custom form whose
+// capability page stays a multi-select. The page's list is what the model can be
+// given — Off only where the model can turn thinking off *and* the client can
+// send it — and Provider default is always there.
+func TestConnectDefaultEffortAllGroups(t *testing.T) {
+	installEffortTestCatalog(t)
+
+	t.Run("a subscription passes the page and provisions one row", func(t *testing.T) {
+		sub := chatGPTLike()
+		sub.offers = []subscription.Offer{{
+			Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-offered",
+			BaseURL: openai.CodexBaseURL, APIPath: "/responses", PlanLabel: "ChatGPT plan", Default: true,
+			Efforts: []string{"low", "medium", "high"}, DefaultEffort: "medium",
+		}}
+		selector := &fakeSelector{
+			confirms: []bool{true},
+			selects:  []string{"gpt-offered", "High", subagentsNo},
+		}
+		opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		if len(sub.provisioned) != 1 || len(sub.provisioned[0]) != 1 || sub.provisioned[0][0].Model != "gpt-offered" {
+			t.Fatalf("provisioned %+v, want exactly the one model chosen", sub.provisioned)
+		}
+		// The listing's levels are the page's, and it opens on the listing's
+		// own default because this row is new.
+		if got := selector.selectOptions[1]; !reflect.DeepEqual(got, []string{"Low", "Medium", "High", reasoningEffortUnset}) {
+			t.Fatalf("effort page = %#v", got)
+		}
+		if got := selector.selectDefaults[1]; got != "Medium" {
+			t.Fatalf("effort cursor = %q, want the listing's default", got)
+		}
+		if opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "high" {
+			t.Fatalf("cap default = %v, want the level the user chose", opts.CapDefaultEffort)
+		}
+	})
+
+	t.Run("an api key passes the same page and writes no params", func(t *testing.T) {
+		selector := &fakeSelector{
+			selects: []string{"OpenAI", "levels-model", "High", subagentsYes},
+			inputs:  []string{"sk-live"},
+		}
+		opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		if opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "high" {
+			t.Fatalf("cap default = %v, want high", opts.CapDefaultEffort)
+		}
+		if opts.UpdateParams || opts.ParamsJSON != "" {
+			t.Fatalf("params = %q (update=%t), want the save to write none", opts.ParamsJSON, opts.UpdateParams)
+		}
+		effortPage := false
+		for _, label := range selector.selectLabels {
+			if strings.HasPrefix(label, "Default reasoning effort\nChoose the default for openai/levels-model.") {
+				effortPage = true
+			}
+		}
+		if !effortPage {
+			t.Fatalf("pages = %#v, want the default-effort page", selector.selectLabels)
+		}
+	})
+
+	t.Run("a custom model keeps its capability page and declares Off there", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{
+			confirms: []bool{false},
+			// minimal, low and the seventh item Off (plan 311).
+			multiSelects: [][]int{{0, 1, 6}},
+			selects:      []string{"Off"},
+		})
+		opts, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
+			baseURL: "https://api.example.com/v1", protocol: "OpenAI Chat Completions",
+			key: "sk-vendor", model: "gpt-4o-vendor",
+		}))
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		if !reflect.DeepEqual(opts.CapEfforts, []string{"minimal", "low"}) {
+			t.Fatalf("levels = %#v, want the six-level ticks and no none", opts.CapEfforts)
+		}
+		if opts.CapReasoningOff == nil || !*opts.CapReasoningOff {
+			t.Fatalf("reasoning off = %v, want the seventh item's own bool", opts.CapReasoningOff)
+		}
+		if opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "none" {
+			t.Fatalf("cap default = %v, want none", opts.CapDefaultEffort)
+		}
+		// The capability page is still a multi-select: that is a declaration of
+		// what the model takes, not a choice of models.
+		if len(cfg.Selector.(*fakeSelector).multiLabels) != 1 {
+			t.Fatalf("capability pages = %#v, want one", cfg.Selector.(*fakeSelector).multiLabels)
+		}
+	})
+
+	t.Run("a model with nothing to pick still gets the page", func(t *testing.T) {
+		selector := &fakeSelector{selects: []string{"OpenAI", "toggle-model", reasoningEffortUnset, subagentsNo}, inputs: []string{"sk-live"}}
+		opts, ok, err := PromptMainLLMSetup(setupTestConfig(t, selector))
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		var effortOptions []string
+		var title string
+		for i, label := range selector.selectLabels {
+			if strings.HasPrefix(label, "Default reasoning effort") {
+				effortOptions, title = selector.selectOptions[i], label
+			}
+		}
+		if !reflect.DeepEqual(effortOptions, []string{reasoningEffortUnset}) {
+			t.Fatalf("effort page = %#v, want the provider default alone", effortOptions)
+		}
+		if !strings.Contains(title, "No discrete reasoning levels are available for this model.") {
+			t.Fatalf("page = %q, want the sentence for a model with no levels", title)
+		}
+		if opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "" {
+			t.Fatalf("cap default = %v, want an explicit provider default", opts.CapDefaultEffort)
+		}
+	})
+
+	// Off is three states, not a toggle (plan 311): the model must be able to
+	// turn thinking off, and the client that serves it must be able to send it.
+	for _, tc := range []struct {
+		name     string
+		provider string
+		model    string
+		want     []string
+	}{
+		{
+			name: "off-capable on a protocol that sends it", provider: "OpenAI", model: "off-model",
+			want: []string{"Off", "Low", "Medium", reasoningEffortUnset},
+		},
+		{
+			name: "no off capability", provider: "OpenAI", model: "levels-model",
+			want: []string{"Low", "Medium", "High", reasoningEffortUnset},
+		},
+		{
+			name: "off-capable but the Messages client cannot send it", provider: "Anthropic", model: "claude-off-model",
+			want: []string{"Low", "High", reasoningEffortUnset},
+		},
+	} {
+		t.Run("Off: "+tc.name, func(t *testing.T) {
+			selector := &fakeSelector{selects: []string{tc.provider, tc.model, reasoningEffortUnset, subagentsNo}, inputs: []string{"sk-live"}}
+			cfg := setupTestConfig(t, selector)
+			if _, ok, err := PromptMainLLMSetup(cfg); err != nil || !ok {
+				t.Fatalf("configure err=%v ok=%t", err, ok)
+			}
+			for i, label := range selector.selectLabels {
+				if strings.HasPrefix(label, "Default reasoning effort") {
+					if got := selector.selectOptions[i]; !reflect.DeepEqual(got, tc.want) {
+						t.Fatalf("effort page = %#v, want %#v", got, tc.want)
+					}
+					return
+				}
+			}
+			t.Fatalf("pages = %#v, want the default-effort page", selector.selectLabels)
+		})
+	}
+}
+
+// Esc walks back one page at a time and writes nothing: from the level to the
+// model (or the custom capability page), from the authorization to the level, and
+// from the model list to the sign-ins. Changing what the level belongs to asks it
+// again; going back to the same one keeps the answer.
+func TestConnectDefaultEffortNavigation(t *testing.T) {
+	installEffortTestCatalog(t)
+
+	t.Run("Esc on the level returns to the model page", func(t *testing.T) {
+		selector := &effortBackSelector{
+			fakeSelector: fakeSelector{
+				selects: []string{"OpenAI", "levels-model"},
+				inputs:  []string{"sk-live"},
+			},
+			backAt: map[string]int{"Default reasoning effort": 1},
+		}
+		cfg := setupTestConfig(t, selector)
+		if _, _, err := PromptMainLLMSetup(cfg); err != nil {
+			t.Fatalf("configure: %v", err)
+		}
+		if got := strings.Join(selector.pages, " → "); !strings.Contains(got, "Model → Default reasoning effort → Model") {
+			t.Fatalf("pages = %s, want the level's Esc to land on the model page", got)
+		}
+	})
+
+	t.Run("Esc on a subscription's level returns to the model list and writes nothing", func(t *testing.T) {
+		sub := chatGPTLike()
+		selector := &effortBackSelector{
+			fakeSelector: fakeSelector{confirms: []bool{true}, selects: []string{"gpt-future"}},
+			backAt:       map[string]int{"Default reasoning effort": 1},
+		}
+		cfg := setupTestConfig(t, selector)
+		opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+		if err != nil {
+			t.Fatalf("configure: %v", err)
+		}
+		if ok || opts.Provider != "" {
+			t.Fatalf("ok=%t options=%+v, Esc writes nothing", ok, opts)
+		}
+		if len(sub.provisioned) != 0 {
+			t.Fatalf("provisioned %+v, nothing is written before the review", sub.provisioned)
+		}
+		if got := strings.Join(selector.pages, " → "); !strings.Contains(got, "ChatGPT → Default reasoning effort → ChatGPT") {
+			t.Fatalf("pages = %s, want the level's Esc to land on the model list", got)
+		}
+	})
+
+	t.Run("a custom model's level Esc goes to the capability page", func(t *testing.T) {
+		selector := &effortBackSelector{
+			fakeSelector: fakeSelector{
+				confirms:     []bool{false},
+				multiSelects: [][]int{{1}},
+				selects:      []string{"Custom model", "OpenAI Chat Completions"},
+				inputs:       []string{"https://api.example.com/v1", "sk-vendor", "gpt-4o-vendor", ""},
+			},
+			backAt: map[string]int{"Default reasoning effort": 1},
+		}
+		cfg := setupTestConfig(t, selector)
+		if _, _, err := PromptMainLLMSetup(cfg); err != nil {
+			t.Fatalf("configure: %v", err)
+		}
+		pages := strings.Join(selector.pages, " → ")
+		if !strings.Contains(pages, "Default reasoning effort → Thinking levels this model supports") {
+			t.Fatalf("pages = %s, want the level's Esc to land on the capability page", pages)
+		}
+	})
+
+	t.Run("changing the model asks the level again with that model's own list", func(t *testing.T) {
+		selector := &effortBackSelector{
+			fakeSelector: fakeSelector{
+				selects: []string{"OpenAI", "levels-model", "off-model", "Off", subagentsNo},
+				inputs:  []string{"sk-live"},
+			},
+			backAt: map[string]int{"Default reasoning effort": 1},
+		}
+		cfg := setupTestConfig(t, selector)
+		opts, ok, err := PromptMainLLMSetup(cfg)
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		if opts.Model != "off-model" || opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "none" {
+			t.Fatalf("options = %+v, want the second model with its own answer", opts)
+		}
+		// The level was asked twice — once per model — and the page the second
+		// model got lists that model's own levels, so nothing from the first
+		// travelled. (The first page was stepped back from, so its list is not in
+		// the answers the fake recorded.)
+		if got := strings.Count(strings.Join(selector.pages, " → "), "Default reasoning effort"); got != 2 {
+			t.Fatalf("pages = %s, want the level asked for each model", strings.Join(selector.pages, " → "))
+		}
+		at := -1
+		for i, label := range selector.selectLabels {
+			if strings.HasPrefix(label, "Default reasoning effort") {
+				at = i
+			}
+		}
+		if at < 0 || !reflect.DeepEqual(selector.selectOptions[at], []string{"Off", "Low", "Medium", reasoningEffortUnset}) {
+			t.Fatalf("effort page = %#v, want the second model's own list", selector.selectOptions)
+		}
+		if got := selector.selectDefaults[at]; got != reasoningEffortUnset {
+			t.Fatalf("second page cursor = %q, want the fresh model's default", got)
+		}
+	})
+}
+
+// The subscription's official default is capability data, not the user's answer:
+// Provision writes it, and the level the user chose is saved over it by the same
+// Execute that stores the authorization (plan 311).
+func TestConnectDefaultEffortSubscriptionPersistsAfterExecute(t *testing.T) {
+	sub := chatGPTLike()
+	sub.offers = []subscription.Offer{{
+		Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-official",
+		BaseURL: openai.CodexBaseURL, APIPath: "/responses", PlanLabel: "ChatGPT plan", Default: true,
+		Efforts: []string{"low", "medium", "high"}, ReasoningOff: boolPtrTUI(false), DefaultEffort: "medium",
+	}}
+	rt := func(cfg PromptConfig) process.Context {
+		return process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath, Config: appcfg.Root{}}
+	}
+
+	selector := &fakeSelector{confirms: []bool{true}, selects: []string{"gpt-official", "High", subagentsYes}}
+	cfg := setupTestConfig(t, selector)
+	opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	rep, err := process.Execute(rt(cfg), opts)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	row := readRow(t, cfg, rep.ModelID)
+	if row.CapDefaultEffort != "high" {
+		t.Fatalf("cap_default_effort = %q, want the user's level over the official one", row.CapDefaultEffort)
+	}
+	// The listing's other capabilities, its source and its authorization are all
+	// still the row's.
+	if row.Source != sub.id || row.SourcePlan != "coding-plan" && row.SourcePlan != "" {
+		t.Fatalf("row = %+v, want the sign-in's source kept", row)
+	}
+	if !reflect.DeepEqual(row.CapEfforts, []string{"low", "medium", "high"}) {
+		t.Fatalf("levels = %#v, want the listing's own", row.CapEfforts)
+	}
+	if row.CapReasoningOff == nil || *row.CapReasoningOff {
+		t.Fatalf("reasoning off = %v, want the listing's explicit no", row.CapReasoningOff)
+	}
+	if !row.SubagentAllowed {
+		t.Fatalf("row = %+v, want this flow's authorization", row)
+	}
+
+	// A second pass choosing the provider's own default clears both the level and
+	// the params effort, and the official default does not come back.
+	selector = &fakeSelector{confirms: []bool{true}, selects: []string{"gpt-official", reasoningEffortUnset, subagentsNo}}
+	cfg = setupTestConfig(t, selector)
+	seedEffortRow(t, cfg, process.LLMModelInput{
+		Provider: "chatgpt", Model: "gpt-official", BaseURL: openai.CodexBaseURL, APIPath: "/responses",
+		CapDefaultEffort: strPtrTUI("low"),
+	})
+	opts, ok, err = runSubscriptionSetup(t, cfg, sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	rep, err = process.Execute(rt(cfg), opts)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	row = readRow(t, cfg, rep.ModelID)
+	if row.CapDefaultEffort != "" {
+		t.Fatalf("cap_default_effort = %q, want it cleared", row.CapDefaultEffort)
+	}
+	if row.SubagentAllowed {
+		t.Fatalf("row = %+v, want the second pass's answer", row)
+	}
+}
+
+// One flow configures one row, chosen by its index: two models with one display
+// name stay separate, the same pair on another endpoint is its own row, and the
+// wire id — never the display name — is what gets written.
+func TestConnectDefaultEffortUsesSelectedIdentity(t *testing.T) {
+	installEffortTestCatalog(t)
+
+	appcfg.ResetProviderPluginsForTest()
+	t.Cleanup(appcfg.ResetProviderPluginsForTest)
+	appcfg.RegisterProviderPlugin(appcfg.BuiltinProvider{
+		ID: "qodercn", Label: "Qoder CN", LabelZH: "Qoder CN", LoginBacked: true,
+		Endpoints: []appcfg.ProviderEndpoint{{BaseURL: "https://gateway.qoder.com.cn"}},
+	})
+
+	t.Run("two models with one display name stay separate rows", func(t *testing.T) {
+		offerA := subscription.Offer{Subscription: "qodercn", Provider: "qodercn", Model: "plan-a-model", Name: "Same Name",
+			BaseURL: "https://gateway.qoder.com.cn", APIPath: "/plan-a", PlanLabel: "Plan A", Default: true}
+		offerB := subscription.Offer{Subscription: "qodercn", Provider: "qodercn", Model: "plan-b-model", Name: "Same Name",
+			BaseURL: "https://gateway.qoder.com.cn", APIPath: "/plan-b", PlanLabel: "Plan B"}
+		sub := &fakeSubscription{
+			id: "qodercn", label: "Qoder CN",
+			check:  turn.SignInCheck{State: turn.SignInUsable},
+			offers: []subscription.Offer{offerA, offerB},
+		}
+		selector := &fakeSelector{selects: []string{"Same Name", reasoningEffortUnset, subagentsNo}}
+		opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		// Both rows are offered under the same name; the one the page picked is
+		// the one written, and its own endpoint travels with it.
+		if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{"Same Name", "Same Name"}) {
+			t.Fatalf("offer rows = %#v", got)
+		}
+		if opts.Model != "plan-a-model" || opts.APIPath != "/plan-a" {
+			t.Fatalf("options = %+v, want the row the page opened on", opts)
+		}
+
+		// A listing that names only the other plan writes that plan's endpoint:
+		// the name is not what identifies the row.
+		onlyB := &fakeSubscription{
+			id: "qodercn", label: "Qoder CN",
+			check:  turn.SignInCheck{State: turn.SignInUsable},
+			offers: []subscription.Offer{offerB},
+		}
+		selector = &fakeSelector{selects: []string{"Same Name", reasoningEffortUnset, subagentsNo}}
+		opts, ok, err = runSubscriptionSetup(t, setupTestConfig(t, selector), onlyB)
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		if opts.Model != "plan-b-model" || opts.APIPath != "/plan-b" {
+			t.Fatalf("options = %+v, want the other plan's row", opts)
+		}
+	})
+
+	t.Run("the same pair on another endpoint keeps its own answer", func(t *testing.T) {
+		sub := &fakeSubscription{
+			id: "qodercn", label: "Qoder CN",
+			check: turn.SignInCheck{State: turn.SignInUsable},
+			offers: []subscription.Offer{
+				{Subscription: "qodercn", Provider: "qodercn", Model: "shared-model",
+					BaseURL: "https://gateway.qoder.com.cn", APIPath: "/primary", PlanLabel: "Plan A", Default: true},
+				{Subscription: "qodercn", Provider: "qodercn", Model: "shared-model",
+					BaseURL: "https://gateway.qoder.com.cn", APIPath: "/mirror", PlanLabel: "Plan B"},
+			},
+		}
+		withSubscriptions(t, sub)
+		cfg := setupTestConfig(t, &fakeSelector{selects: []string{"shared-model"}})
+		// The mirror row already exists with its own default; the primary one does
+		// not.
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "qodercn", Model: "shared-model", BaseURL: "https://gateway.qoder.com.cn",
+			APIPath: "/mirror", CapEfforts: &[]string{"low", "high"}, CapDefaultEffort: strPtrTUI("low"),
+		})
+		selector := cfg.Selector.(*fakeSelector)
+		selector.selects = []string{"shared-model"}
+		setup := newLLMSetup(cfg)
+		setup.setChoice(subscriptionChoice(sub))
+		setup.offers = sub.offers
+		setup.page = setupPageOffers
+		setup.selectedOfferIdx = -1
+		if ok, err := setup.pickOffers(); err != nil || !ok {
+			t.Fatalf("pickOffers ok=%t err=%v", ok, err)
+		}
+		// The page opened on the row this install already holds (the mirror).
+		if got := selector.selectDefaults[0]; got != "shared-model" {
+			t.Fatalf("open row = %q", got)
+		}
+		setup.selectedOfferIdx = 1
+		if ok, err := setup.promptDefaultEffort(); err != nil || !ok {
+			t.Fatalf("promptDefaultEffort ok=%t err=%v", ok, err)
+		}
+		if got := selector.selectDefaults[1]; got != "Low" {
+			t.Fatalf("effort cursor = %q, want the mirror row's own level", got)
+		}
+		setup.selectedOfferIdx = 0
+		selector.selects = append(selector.selects, reasoningEffortUnset)
+		if ok, err := setup.promptDefaultEffort(); err != nil || !ok {
+			t.Fatalf("promptDefaultEffort ok=%t err=%v", ok, err)
+		}
+		if got := selector.selectDefaults[2]; got != reasoningEffortUnset {
+			t.Fatalf("effort cursor = %q, want the primary row's empty answer, not the mirror's", got)
+		}
+		setup.closeState()
+	})
+
+	t.Run("the wire id is written, not the vendor's name", func(t *testing.T) {
+		sub := qoderCNLike()
+		selector := &fakeSelector{selects: []string{"Qwen3.8-Max", reasoningEffortUnset, subagentsNo}}
+		opts, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		if opts.Model != "qmodel_38max" {
+			t.Fatalf("model = %q, want the wire id", opts.Model)
+		}
+		if got := sub.provisioned[0][0].Model; got != "qmodel_38max" {
+			t.Fatalf("provisioned %q, want the wire id", got)
+		}
+	})
+
+	t.Run("a login row written with a display path is still the same row", func(t *testing.T) {
+		sub := openCodeLike()
+		sub.check = turn.SignInCheck{State: turn.SignInUsable}
+		// A real listing names no path; the row a legacy configuration wrote
+		// carries the one it displayed.
+		legacy := sub.offers[0]
+		legacy.APIPath = "/chat/completions"
+		cfg := setupTestConfig(t, &fakeSelector{selects: []string{"glm-5.3", "High", subagentsNo}})
+		legacyID := offerRowSeed(t, cfg, sub, legacy, "sk-legacy-row")
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: legacy.Provider, Model: legacy.Model, BaseURL: legacy.BaseURL, APIPath: legacy.APIPath,
+			CapEfforts: &[]string{"low", "high"},
+		})
+		// The target row is found through the same rule the save uses.
+		setup := newLLMSetup(cfg)
+		setup.setChoice(subscriptionChoice(sub))
+		setup.offers = sub.offers
+		setup.selectedOfferIdx = 0
+		if row, found, err := setup.storedRow(); err != nil || !found || row.ID != legacyID {
+			t.Fatalf("found=%t err=%v, want the legacy row recognised", found, err)
+		}
+		setup.closeState()
+		opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		rep, err := process.Execute(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath, Config: appcfg.Root{}}, opts)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		row := readRow(t, cfg, rep.ModelID)
+		if row.ID != legacyID || row.APIPath != "/chat/completions" {
+			t.Fatalf("row = %+v, want the legacy row updated in place", row)
+		}
+		if row.CapDefaultEffort != "high" {
+			t.Fatalf("cap_default_effort = %q, want the level saved on that row", row.CapDefaultEffort)
+		}
+	})
+}
+
+// The Off switch is a capability, not a level: the custom form's tick writes
+// cap_reasoning_off and never cap_efforts, withdrawing it removes Off from the
+// page while a stale "none" default falls back, and a source that says the model
+// cannot turn thinking off wins over a weaker one that says it can.
+func TestConnectDefaultEffortOffSplit(t *testing.T) {
+	installEffortTestCatalog(t)
+	rt := func(cfg PromptConfig) process.Context {
+		return process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath, Config: appcfg.Root{}}
+	}
+
+	t.Run("a custom model's Off tick is a column, never a level", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{
+			confirms:     []bool{false},
+			multiSelects: [][]int{{1, 2, 6}},
+			selects:      []string{"Off"},
+		})
+		opts, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
+			baseURL: "https://api.example.com/v1", protocol: "OpenAI Chat Completions",
+			key: "sk-vendor", model: "gpt-4o-vendor",
+		}))
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		rep, err := process.Execute(rt(cfg), opts)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		row := readRow(t, cfg, rep.ModelID)
+		if row.CapReasoningOff == nil || !*row.CapReasoningOff {
+			t.Fatalf("cap_reasoning_off = %v, want true", row.CapReasoningOff)
+		}
+		if !reflect.DeepEqual(row.CapEfforts, []string{"low", "medium"}) {
+			t.Fatalf("cap_efforts = %#v, want the levels without none", row.CapEfforts)
+		}
+		if row.CapDefaultEffort != "none" {
+			t.Fatalf("cap_default_effort = %q, want none", row.CapDefaultEffort)
+		}
+	})
+
+	t.Run("withdrawing the Off declaration removes it and the stale none falls back", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{
+			// Declining the connection test, then confirming the save over the
+			// row this install already holds.
+			confirms:     []bool{false, true},
+			multiSelects: [][]int{{1, 3}},
+		})
+		// The row declared Off and a none default last time; this pass ticks low
+		// and high and leaves Off unticked.
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "custom", Model: "gpt-4o-vendor", BaseURL: "https://api.example.com/v1",
+			APIPath: appcfg.APIPathChatCompletions, APIKey: strPtrTUI("sk-vendor"),
+			CapEfforts: &[]string{"low", "medium"}, CapReasoningOff: boolPtrTUI(true),
+			CapDefaultEffort: strPtrTUI("none"),
+		})
+		selector := cfg.Selector.(*fakeSelector)
+		opts, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
+			baseURL: "https://api.example.com/v1", protocol: "OpenAI Chat Completions",
+			key: "sk-vendor", model: "gpt-4o-vendor",
+		}))
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		// The capability page opened on the stored declaration; the save withdrew
+		// it, so the level page has no Off and the stale none is not offered.
+		if got := selector.multiDefaults[0]; !reflect.DeepEqual(got, []int{1, 2, 6}) {
+			t.Fatalf("capability page opened on %v, want the row's declaration replayed", got)
+		}
+		var effortOptions []string
+		for i, label := range selector.selectLabels {
+			if strings.HasPrefix(label, "Default reasoning effort") {
+				effortOptions = selector.selectOptions[i]
+			}
+		}
+		if !reflect.DeepEqual(effortOptions, []string{"Low", "High", reasoningEffortUnset}) {
+			t.Fatalf("effort page = %#v, want the levels just declared and no Off", effortOptions)
+		}
+		if opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "" {
+			t.Fatalf("cap default = %v, want the stale none replaced by the provider default", opts.CapDefaultEffort)
+		}
+	})
+
+	t.Run("an explicit no wins over the catalog's none", func(t *testing.T) {
+		cfg := setupTestConfig(t, &fakeSelector{})
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "openai", Model: "off-model", BaseURL: "https://api.openai.com/v1",
+			APIKey: strPtrTUI("sk-live"), CapReasoningOff: boolPtrTUI(false),
+		})
+		setup := apiKeyEffortSetup(cfg, "openai", "off-model", "https://api.openai.com/v1")
+		defer setup.closeState()
+		if ok, err := setup.promptDefaultEffort(); err != nil || !ok {
+			t.Fatalf("promptDefaultEffort ok=%t err=%v", ok, err)
+		}
+		if got := cfg.Selector.(*fakeSelector).selectOptions[0]; !reflect.DeepEqual(got, []string{"Low", "Medium", reasoningEffortUnset}) {
+			t.Fatalf("effort page = %#v, want the row's explicit no to hide Off", got)
+		}
+	})
+
+	t.Run("a subscription never touches the listing's off switch", func(t *testing.T) {
+		sub := chatGPTLike()
+		sub.offers = []subscription.Offer{{
+			Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-offered",
+			BaseURL: openai.CodexBaseURL, APIPath: "/responses", PlanLabel: "ChatGPT plan", Default: true,
+			Efforts: []string{"none", "low", "medium"},
+		}}
+		selector := &fakeSelector{confirms: []bool{true}, selects: []string{"gpt-offered", "Off", subagentsNo}}
+		cfg := setupTestConfig(t, selector)
+		opts, ok, err := runSubscriptionSetup(t, cfg, sub)
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		if opts.CapReasoningOff != nil {
+			t.Fatalf("options carry reasoning off = %v, want the listing to own it", *opts.CapReasoningOff)
+		}
+		if opts.CapDefaultEffort == nil || *opts.CapDefaultEffort != "none" {
+			t.Fatalf("cap default = %v, want none", opts.CapDefaultEffort)
+		}
+		// The offer travels unmodified: the wizard never rewrites its switch.
+		if sub.provisioned[0][0].ReasoningOff != nil {
+			t.Fatalf("offer reasoning off = %v, want the listing's own value", *sub.provisioned[0][0].ReasoningOff)
+		}
+	})
+}
+
+// The connection test carries the level this flow chose — it is the one request
+// that would catch a level the model refuses — and that level is still stored as
+// the row's own default, never as the params the probe sent. The session /connect
+// switches then receives the answer explicitly, so a level that was cleared stays
+// cleared (plan 311).
+func TestConnectDefaultEffortProbeAndSession(t *testing.T) {
+	installEffortTestCatalog(t)
+
+	t.Run("the probe sends the chosen level and the save stores it as a default", func(t *testing.T) {
+		probes := stubLLMProbeInput(t)
+		cfg := setupTestConfig(t, &fakeSelector{
+			confirms:     []bool{false, true},
+			multiSelects: [][]int{{1, 3}},
+			selects:      []string{"High"},
+		})
+		// The row already carries request parameters and a level of its own.
+		params := `{"temperature":0.2,"reasoning":{"effort":"low"}}`
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "custom", Model: "gpt-4o-vendor", BaseURL: "https://api.example.com/v1",
+			APIPath: appcfg.APIPathChatCompletions, APIKey: strPtrTUI("sk-vendor"),
+			ParamsJSON: &params, CapEfforts: &[]string{"low", "high"},
+		})
+		opts, ok, err := PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
+			baseURL: "https://api.example.com/v1", protocol: "OpenAI Chat Completions",
+			key: "sk-vendor", model: "gpt-4o-vendor",
+		}))
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		// The connection test is asked last, and it is the only "no" here.
+		selector := cfg.Selector.(*fakeSelector)
+		if len(selector.confirmLabels) < 1 || !strings.Contains(selector.confirmLabels[0], "Test connection?") {
+			t.Fatalf("confirmations = %#v, want the connection test first", selector.confirmLabels)
+		}
+		if len(*probes) != 0 {
+			t.Fatalf("probes = %d, want the test declined", len(*probes))
+		}
+		// The same flow with the test accepted sends one request carrying the
+		// level chosen on the page.
+		cfg = setupTestConfig(t, &fakeSelector{
+			confirms:     []bool{true, true},
+			multiSelects: [][]int{{1, 3}},
+			selects:      []string{"High"},
+		})
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "custom", Model: "gpt-4o-vendor", BaseURL: "https://api.example.com/v1",
+			APIPath: appcfg.APIPathChatCompletions, APIKey: strPtrTUI("sk-vendor"),
+			ParamsJSON: &params, CapEfforts: &[]string{"low", "high"},
+		})
+		opts, ok, err = PromptMainLLMSetup(withCustomAnswers(cfg, customAnswers{
+			baseURL: "https://api.example.com/v1", protocol: "OpenAI Chat Completions",
+			key: "sk-vendor", model: "gpt-4o-vendor",
+		}))
+		if err != nil || !ok {
+			t.Fatalf("configure err=%v ok=%t", err, ok)
+		}
+		if len(*probes) != 1 {
+			t.Fatalf("probes = %d, want one request", len(*probes))
+		}
+		sent := (*probes)[0].ParamsJSON
+		if sent == nil || !strings.Contains(*sent, `"effort":"high"`) {
+			t.Fatalf("probe params = %v, want the level chosen on the page", sent)
+		}
+		if !strings.Contains(*sent, `"temperature":0.2`) || strings.Contains(*sent, `"low"`) {
+			t.Fatalf("probe params = %q, want the row's other fields and no stale level", *sent)
+		}
+		// Nothing of the probe is what gets stored: the level is the row's
+		// default and the params keep their other fields only.
+		rep, err := process.Execute(process.Context{Home: cfg.Home, ConfigPath: cfg.ConfigPath, Config: appcfg.Root{}}, opts)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		row := readRow(t, cfg, rep.ModelID)
+		if row.CapDefaultEffort != "high" {
+			t.Fatalf("cap_default_effort = %q, want high", row.CapDefaultEffort)
+		}
+		if strings.Contains(row.ParamsJSON, `"effort"`) || !strings.Contains(row.ParamsJSON, `"temperature":0.2`) {
+			t.Fatalf("params = %q, want the effort cleared and the rest kept", row.ParamsJSON)
+		}
+	})
+
+	t.Run("the session is switched with the answer this flow gave", func(t *testing.T) {
+		// The row this flow updates already carries a level the user is about to
+		// replace: the session must take the new one, not the stored one.
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "forebrain.yaml"), []byte("agents: {}\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		t.Setenv("FOREBRAIN_HOME", home)
+		process.ResetResolve()
+		t.Cleanup(process.ResetResolve)
+		cfg := PromptConfig{Home: home, ConfigPath: filepath.Join(home, "forebrain.yaml")}
+		seedEffortRow(t, cfg, process.LLMModelInput{
+			Provider: "openai", Model: "levels-model", BaseURL: "https://api.openai.com/v1",
+			APIKey: strPtrTUI("sk-live"), CapDefaultEffort: strPtrTUI("low"),
+		})
+
+		for _, tc := range []struct {
+			name  string
+			label string
+			want  string
+		}{
+			{name: "a level", label: "High", want: "high"},
+			{name: "the provider's own default", label: reasoningEffortUnset, want: ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				selector := &fakeSelector{
+					selects:  []string{"OpenAI", "levels-model", tc.label, subagentsNo},
+					inputs:   []string{"sk-live"},
+					confirms: []bool{true},
+				}
+				session := &recordingSession{}
+				var out bytes.Buffer
+				c := &commandController{session: session, renderer: NewRenderer(&out, &out), selector: selector, home: home}
+				ask := func(prompt PromptConfig) (process.Options, bool, error) {
+					prompt.Selector = selector
+					prompt.Output = io.Discard
+					return PromptMainLLMSetup(prompt)
+				}
+				if !c.runConnect(context.Background(), "session-1", ask) {
+					t.Fatalf("runConnect printed an error: %q", out.String())
+				}
+				if session.synced != 1 {
+					t.Fatalf("SyncConfig calls = %d, want the config adopted before the model", session.synced)
+				}
+				if session.effort == nil {
+					t.Fatal("SelectModel was given no effort: the flow's answer would be lost")
+				}
+				if *session.effort != tc.want {
+					t.Fatalf("session effort = %q, want %q", *session.effort, tc.want)
+				}
+				if session.choice.Model != "levels-model" {
+					t.Fatalf("session choice = %+v", session.choice)
+				}
+				if session.choice.ID == "" {
+					t.Fatal("the session was not given the row the save wrote")
+				}
+				// The row the session was pointed at carries the same answer.
+				row := readRow(t, cfg, session.choice.ID)
+				if row.CapDefaultEffort != tc.want {
+					t.Fatalf("cap_default_effort = %q, want %q", row.CapDefaultEffort, tc.want)
+				}
+			})
+		}
+	})
+}
+
+// recordingSession is the slice of the session surface /connect drives: the
+// configuration adoption, the model switch, and the footer reads. Any other
+// method is a bug in this test.
+type recordingSession struct {
+	Session
+	synced int
+	choice turn.ModelChoice
+	effort *string
+}
+
+func (s *recordingSession) SyncConfig(context.Context) error {
+	s.synced++
+	return nil
+}
+
+func (s *recordingSession) SelectModel(_ context.Context, _ string, choice turn.ModelChoice, effort *string) error {
+	s.choice, s.effort = choice, effort
+	return nil
+}
+
+func (s *recordingSession) CurrentModelOption() string                 { return "openai/levels-model" }
+func (s *recordingSession) CurrentModelRowID() string                  { return "" }
+func (s *recordingSession) ModelSummaryString() string                 { return "openai/levels-model" }
+func (s *recordingSession) CurrentModelReasoningEffort() string        { return "" }
+func (s *recordingSession) SurfaceContextOccupancy(string) (int, bool) { return 0, false }
+func (s *recordingSession) SurfaceComposerTokenStats(string, int) ComposerTokenStats {
+	return ComposerTokenStats{}
+}
+
+// The model page and the default-effort page as a real terminal draws them and
+// reads them (plan 311): the model list is one choice among tabs, with no
+// checkbox glyph and no space-to-toggle hint, and the level page states the model
+// it configures in the page itself. Enter confirms the row the page opened on and
+// Esc walks back — the keys, not the fake selector's answers.
+func TestConnectDefaultEffortRendersSingleChoice(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	// One model per plan, so the picker draws a tab bar and the choice is a row
+	// among them rather than a name that could be confused with the endpoint.
+	sub.offers = []subscription.Offer{
+		{Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-future", BaseURL: openai.CodexBaseURL,
+			APIPath: "/responses", PlanLabel: "ChatGPT plan", Default: true,
+			Efforts: []string{"low", "medium", "high"}, DefaultEffort: "medium"},
+		{Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-second", BaseURL: openai.CodexBaseURL,
+			APIPath: "/responses", PlanLabel: "ChatGPT team", Efforts: []string{"low", "high"}},
+	}
+	panel := newConnectPanel(t, 100, 30)
+	cfg := setupTestConfig(t, panel)
+	answer := startConnectSetup(t, cfg, sub)
+
+	models := waitForPanelText(panel.render, "Choose the model to add")
+	for _, want := range []string{"ChatGPT", "ChatGPT plan 1", "ChatGPT team 1", "gpt-future", "Enter to confirm", "Esc to go back"} {
+		if !strings.Contains(models, want) {
+			t.Fatalf("model page = %q, want it to carry %q", models, want)
+		}
+	}
+	// Tab reaches the other plan's row: the tabs are the plans, and each one's
+	// model is its own row.
+	panel.typeKeys(t, "\t")
+	if other := waitForPanelText(panel.render, "gpt-second"); !strings.Contains(other, "gpt-second") {
+		t.Fatalf("other tab = %q, want the second plan's model", other)
+	}
+	panel.typeKeys(t, "\t")
+	waitForPanelText(panel.render, "gpt-future")
+	if strings.Contains(models, "Space to select") {
+		t.Fatalf("model page = %q, one model is chosen, not ticked", models)
+	}
+	if strings.ContainsAny(models, selectorCheckedGlyph+selectorUncheckedGlyph) {
+		t.Fatalf("model page = %q, want no check-box glyph on a single choice", models)
+	}
+
+	// Enter takes the row the page opened on — the plan's default — to the level
+	// page.
+	panel.typeKeys(t, "\r")
+	effort := waitForPanelText(panel.render, "Default reasoning effort")
+	for _, want := range []string{
+		"Choose the default for chatgpt/gpt-future.",
+		"Low", "Medium", "High", "Provider default",
+		"Enter to confirm", "Esc to go back",
+	} {
+		if !strings.Contains(effort, want) {
+			t.Fatalf("effort page = %q, want it to carry %q", effort, want)
+		}
+	}
+	if strings.Contains(effort, "Off") {
+		t.Fatalf("effort page = %q, this model cannot turn thinking off", effort)
+	}
+	// The wire ids are the levels' own; the page shows the names every other
+	// picker shows.
+	if strings.Contains(effort, "xHigh") && !strings.Contains(effort, "low") {
+		t.Fatalf("effort page = %q, want the levels the model offers", effort)
+	}
+
+	// Esc goes back to the model list, not out of the flow: the person is one
+	// page away from the answer they were giving.
+	panel.typeKeys(t, "\x1b")
+	back := waitForPanelText(panel.render, "Choose the model to add")
+	if !strings.Contains(back, "gpt-future") {
+		t.Fatalf("page after Esc = %q, want the model list", back)
+	}
+
+	got := panel.finish(t, answer)
+	if got.ok || got.opts.Provider != "" {
+		t.Fatalf("answer = %+v ok=%t, Esc writes nothing", got.opts, got.ok)
+	}
+	if len(sub.provisioned) != 0 {
+		t.Fatalf("provisioned %+v, Esc writes nothing", sub.provisioned)
 	}
 }

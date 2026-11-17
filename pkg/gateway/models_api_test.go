@@ -757,25 +757,188 @@ func TestLLMModelsAPICapsValidationFollowsTheShippedCatalog(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPut, "/api/llm-models/x", nil)
 
 	// Listed with levels: hand-entering them is refused.
-	err := s.llmModelCapsValid(r, "caps-test", "with-levels", llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{})
+	err := s.llmModelCapsValid(r, "caps-test", "with-levels", "", llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "官方文档")
 
 	// A stored row that already carries exactly these levels may send them
 	// back unchanged: the rule is about setting them now.
-	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "with-levels",
+	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "with-levels", "",
 		llmModelCaps{Efforts: []string{"low"}},
 		state.LLMModel{CapEfforts: []string{"low"}}))
 
 	// Listed without discrete levels: the user's pick is allowed.
-	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "without-levels",
+	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "without-levels", "",
 		llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{}))
 
 	// Not in the catalog at all: allowed, the same as before the catalog existed.
-	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "no-such-model",
+	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "no-such-model", "",
 		llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{}))
 
 	// The level names themselves are checked first, whatever the catalog says.
-	require.Error(t, s.llmModelCapsValid(r, "openai", "no-such-model",
+	require.Error(t, s.llmModelCapsValid(r, "openai", "no-such-model", "",
 		llmModelCaps{Efforts: []string{"ultra"}}, state.LLMModel{}))
+}
+
+// The models form's Off switch follows one rule on every surface (plan 311):
+// turning thinking off is a capability, so `default_effort:"none"` is stored only
+// where the model says it can turn thinking off *and* the client that serves it
+// can send it. The catalog's own answer is reported for the same reason, and a
+// level the protocol drops is never offered nor stored.
+func TestLLMModelCapsOffDefault(t *testing.T) {
+	useGatewayCatalog(t, `{
+		"openai/gateway-off-model": {"id":"openai/gateway-off-model","reasoning":true,
+			"reasoning_options":[{"type":"effort","values":["none","low","high"]}]},
+		"openai/gateway-plain-model": {"id":"openai/gateway-plain-model","reasoning":true,
+			"reasoning_options":[{"type":"effort","values":["low","high"]}]},
+		"custom/gateway-messages-model": {"id":"custom/gateway-messages-model","reasoning":true,
+			"reasoning_options":[{"type":"effort","values":["none","minimal","low","medium"]}]}
+	}`)
+
+	// Each case gets its own install: a row's identity is the provider, model,
+	// base URL and path, and two cases on one table would collide on it.
+	capsOf := func(t *testing.T, do gatewayDo, id string) llmModelCaps {
+		t.Helper()
+		rows, _ := llmModelRows(t, do)
+		row := llmModelByID(t, rows, id)
+		raw, err := json.Marshal(row["caps"])
+		require.NoError(t, err)
+		var caps llmModelCaps
+		require.NoError(t, json.Unmarshal(raw, &caps))
+		return caps
+	}
+
+	t.Run("an off-capable row stores none", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"openai","model":"gateway-off-model","base_url":"https://api.openai.com/v1","api_key":"sk-off"}`)
+		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"default_effort":"none"}}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, "none", capsOf(t, do, id).DefaultEffort)
+	})
+
+	t.Run("a model that cannot turn thinking off never stores none", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"openai","model":"gateway-plain-model","base_url":"https://api.openai.com/v1","api_key":"sk-plain"}`)
+		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"default_effort":"none"}}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "默认思考强度必须是这个模型支持的档位")
+		require.Empty(t, capsOf(t, do, id).DefaultEffort)
+	})
+
+	t.Run("the write's own no is not masked by the row's yes", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"openai","model":"gateway-off-model","base_url":"https://api.openai.com/v1","api_key":"sk-masked"}`)
+		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"reasoning_off":true}}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		// The row says it can turn thinking off; this write says it cannot, and
+		// an explicit no wins over the stored yes and the catalog's none.
+		rec = do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"reasoning_off":false,"default_effort":"none"}}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	})
+
+	t.Run("a protocol that cannot send none refuses it", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"custom","model":"gateway-messages-model","base_url":"https://llm.example.com","api_path":"/v1/messages","api_key":"sk-msg"}`)
+		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"reasoning_off":true,"default_effort":"none"}}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	})
+
+	t.Run("a level the protocol drops is never stored as the default", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		// A model nothing documents: its levels are the form's own declaration,
+		// which is what makes the sendability rule the only one that can refuse.
+		id := createModel(t, do, `{"provider":"custom","model":"undocumented-model","base_url":"https://llm.example.com","api_path":"/v1/messages","api_key":"sk-msg-level"}`)
+		// minimal is declared, and the Messages client sends no such level.
+		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["minimal","low"],"default_effort":"minimal"}}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		// The level the protocol does send is stored.
+		rec = do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["minimal","low"],"default_effort":"low"}}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, "low", capsOf(t, do, id).DefaultEffort)
+	})
+
+	t.Run("efforts never carry none", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"openai","model":"gateway-off-model","base_url":"https://api.openai.com/v1","api_key":"sk-levels"}`)
+		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["none","low"]}}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	})
+
+	t.Run("the catalog answer reports the off switch", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		rec := do(http.MethodGet, "/api/llm-models/catalog-caps?provider=openai&model=gateway-off-model")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body llmModelCapsBody
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.NotNil(t, body.ReasoningOff)
+		require.True(t, *body.ReasoningOff)
+		// The levels are reported as the catalog names them, none included.
+		require.Equal(t, []string{"none", "low", "high"}, body.Efforts)
+
+		rec = do(http.MethodGet, "/api/llm-models/catalog-caps?provider=openai&model=gateway-plain-model")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		body = llmModelCapsBody{}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Nil(t, body.ReasoningOff)
+	})
+
+	t.Run("the dropdown's levels follow the protocol the form is on", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		rec := do(http.MethodGet, "/api/llm-models/catalog-caps?provider=custom&model=gateway-messages-model&api_path=/v1/messages")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body llmModelCapsBody
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		// The Messages client sends neither none nor minimal, so the model's own
+		// off capability cannot be offered there either.
+		require.Equal(t, []string{"low", "medium"}, body.Efforts)
+		require.Nil(t, body.ReasoningOff)
+
+		// The same model on a protocol that sends everything keeps them.
+		rec = do(http.MethodGet, "/api/llm-models/catalog-caps?provider=custom&model=gateway-messages-model&api_path=/chat/completions")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		body = llmModelCapsBody{}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Equal(t, []string{"none", "minimal", "low", "medium"}, body.Efforts)
+		require.NotNil(t, body.ReasoningOff)
+		require.True(t, *body.ReasoningOff)
+	})
+
+	t.Run("a row no source lists answers from its own declaration", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"custom","model":"undocumented-model","base_url":"https://llm.example.com","api_path":"/v1/messages","api_key":"sk-decl","caps":{"efforts":["minimal","low"]}}`)
+		rec := do(http.MethodGet, "/api/llm-models/catalog-caps?id="+id+"&provider=custom&model=undocumented-model&base_url=https://llm.example.com")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body llmModelCapsBody
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.False(t, body.EffortsKnown)
+		// minimal is declared and the protocol drops it, so the dropdown offers
+		// only what the client can send; the checkbox data is untouched.
+		require.Equal(t, []string{"low"}, body.Efforts)
+
+		rows, _ := llmModelRows(t, do)
+		row := llmModelByID(t, rows, id)
+		require.Equal(t, []string{"minimal", "low"}, capsOf(t, do, id).Efforts,
+			"the row's own declaration is what the checkboxes replay")
+		require.Equal(t, false, row["efforts_known"])
+	})
+
+	t.Run("clearing the default reads back empty", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"openai","model":"gateway-off-model","base_url":"https://api.openai.com/v1","api_key":"sk-clear"}`)
+		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"default_effort":"high"}}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		// The form omits the field to clear it: the whole caps block is replaced.
+		rec = do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{}}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Empty(t, capsOf(t, do, id).DefaultEffort)
+	})
+
+	t.Run("no api path means no protocol filter", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		rec := do(http.MethodGet, "/api/llm-models/catalog-caps?provider=custom&model=gateway-messages-model")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body llmModelCapsBody
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Equal(t, []string{"none", "minimal", "low", "medium"}, body.Efforts)
+	})
 }

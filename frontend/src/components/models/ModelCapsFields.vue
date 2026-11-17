@@ -85,7 +85,7 @@
             </SelectTrigger>
             <SelectContent>
               <SelectItem :value="EMPTY_CHOICE">{{ t('chat.effortDefault') }}</SelectItem>
-              <SelectItem v-for="level in effortOptions" :key="level" :value="level">
+              <SelectItem v-for="level in options" :key="level" :value="level">
                 {{ effortLevelLabel(level) }} <span class="caps__en">{{ level }}</span>
               </SelectItem>
             </SelectContent>
@@ -191,6 +191,12 @@ const props = withDefaults(
     /** Levels a source listed; empty when none did. */
     sourceEfforts: string[]
     effortsKnown: boolean
+    /** The default-effort dropdown's levels, in picker order: the levels this
+     *  model can be given, `none` among them only where turning thinking off is
+     *  both possible and sendable. The caller computes them, because it is also
+     *  the one that has to reset a stored default those levels no longer offer
+     *  (plan 311). */
+    options: string[]
     effortsLoading?: boolean
     params: string
     open: boolean
@@ -220,12 +226,6 @@ const inputBoxes: { key: 'images' | 'pdf' | 'video' | 'audio'; label: I18nKey }[
 ]
 
 const defaultEffort = computed(() => String(props.draft.defaultEffort ?? ''))
-
-/** The dropdown's options: what a source listed, or what the person ticked. */
-const effortOptions = computed(() => {
-  if (props.effortsKnown) return props.sourceEfforts
-  return props.draftEfforts.filter((level) => level !== 'none')
-})
 
 /** The catalog's own number, as the box's placeholder — the number, nothing more. */
 function placeholder(value: number | undefined): string {
