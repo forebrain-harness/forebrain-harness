@@ -128,6 +128,15 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	agents.Put("/primary/:id/subagents/:name", s.handleAgentSubagentUpdate)
 	agents.Delete("/primary/:id/subagents/:name", s.handleAgentSubagentDelete)
 	agents.Put("/primary/:id/subagents/:name/enabled", s.handleAgentSubagentEnabled)
+	// The install-wide shared subagent registry (plan 314): one definition every
+	// primary agent may enable on its own page, plus the four per-type default
+	// model rows the settings page edits beside them. A different prefix from
+	// /primary/:id/subagents on purpose — this registry is nobody's agent.
+	agents.Get("/subagents/shared", s.handleSharedSubagentsList)
+	agents.Post("/subagents/shared", s.handleSharedSubagentCreate)
+	agents.Put("/subagents/shared/types/:type", s.handleSharedSubagentTypeUpdate)
+	agents.Put("/subagents/shared/:name", s.handleSharedSubagentUpdate)
+	agents.Delete("/subagents/shared/:name", s.handleSharedSubagentDelete)
 	agents.Get("/roster", s.handleAgentRoster)
 	// The cancels act on live state (the run controller, the input queue, a
 	// parked approval), so each one is registered with the table an
