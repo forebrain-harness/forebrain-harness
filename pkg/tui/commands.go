@@ -49,6 +49,13 @@ type commandController struct {
 	// finds no card to settle and opens an orphan while the replayed one
 	// ticks forever.
 	replayCardsTo *Reducer
+	// afterReplay, when wired by the main loop, runs once a replay has drawn
+	// everything it rebuilt and taken over its cards. A replay can leave a
+	// subagent running — the process it ran in may be gone, or the replayed
+	// conversation may still be running one — and the live line that reports
+	// it belongs to the subagents' own clock, so the surface re-syncs it from
+	// the state the replay just adopted.
+	afterReplay func()
 }
 
 func newCommandController(session Session, renderer *Renderer, selector Selector, readLine func(context.Context) (string, error), home string) *commandController {
@@ -163,6 +170,11 @@ func (c *commandController) replaySession(sessionID string, note func(messages i
 	// place.
 	if c.replayCardsTo != nil {
 		c.replayCardsTo.adoptReplayedCards(reducer)
+		// A subagent the replay left running is the same handover one level
+		// down: its own view, its roster row and the "Worked for" line that
+		// will close it all read from the live tracker, which the replayed
+		// window is now part of.
+		c.replayCardsTo.adoptReplayedRunningAgents(reducer)
 	}
 	c.renderer.EndBatch()
 	// Refresh the footer budget from the ACTIVE model-context projection, not
@@ -188,6 +200,9 @@ func (c *commandController) replaySession(sessionID string, note func(messages i
 		} else if found {
 			c.renderer.RestoreBrowseState(browse)
 		}
+	}
+	if c.afterReplay != nil {
+		c.afterReplay()
 	}
 }
 

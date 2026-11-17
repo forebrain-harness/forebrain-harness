@@ -219,17 +219,11 @@ var assistantMarkdown = goldmark.New(
 )
 
 type Renderer struct {
-	out             io.Writer
-	err             io.Writer
-	mu              sync.Mutex
+	out io.Writer
+	err io.Writer
+	mu  sync.Mutex
+	// transientActive is whether any source holds a live status line.
 	transientActive bool
-	// transientStatus renders the live status line for the view it is painted
-	// into, rather than holding a finished string. The line describes the run
-	// the reader is watching — the conversation's turn, or the subagent whose
-	// view is open — and which view that is changes independently of the
-	// producer that installed the line, so it can only be resolved at paint
-	// time. Nil when no status is live.
-	transientStatus func(view string) string
 	// transientSources holds one live status line per producer, keyed by source,
 	// and transientOrder is which of them wins when several are live at once.
 	//
@@ -995,6 +989,12 @@ const (
 	transientSourceMCP     = "mcp"
 	transientSourceLSP     = "lsp"
 	transientSourceWorking = "working"
+	// transientSourceAgentWorking is the subagents' own live line, shown in
+	// their views. It is a source of its own rather than part of the
+	// conversation's: its clock belongs to the subagents' executions, which
+	// start and end on their own schedule, so a turn ending can neither stop
+	// it nor restart it (plan SUBAGENT_WORKING_LINE_DECOUPLING).
+	transientSourceAgentWorking = "agent-working"
 	// transientSourceConnect is the line a /connect sign-in shows while the
 	// login blocks.
 	transientSourceConnect = "connect"
@@ -1004,6 +1004,18 @@ var transientSourcePriority = []string{
 	transientSourceMCP,
 	transientSourceLSP,
 	transientSourceWorking,
+	transientSourceAgentWorking,
+}
+
+// isTransientSourcePriority reports whether source is one this file knows, and
+// so one the priority walk has already asked about.
+func isTransientSourcePriority(source string) bool {
+	for _, known := range transientSourcePriority {
+		if source == known {
+			return true
+		}
+	}
+	return false
 }
 
 // RenderTransientStatus installs a fixed status line for one source: a producer
@@ -1035,41 +1047,58 @@ func (r *Renderer) installTransientStatus(source string, render func(view string
 }
 
 // transientStatusTextLocked renders the live status line for the view on
-// screen, from the highest-priority source that is live. Caller holds r.mu.
+// screen: the line of the first source, in priority order, that has something
+// to say about that view. Caller holds r.mu.
+//
+// A source yields to the next one by rendering nothing for the view being
+// painted, which is what keeps the lines independent. The conversation's turn
+// line has nothing to say inside a subagent's view, and the subagents' line has
+// nothing to say in the conversation; asking only whether a source is live
+// would let whichever is highest in the order hide the other's line for a view
+// it never draws.
 func (r *Renderer) transientStatusTextLocked() string {
 	if !r.transientActive {
 		return ""
 	}
-	if render := r.transientRenderLocked(); render != nil {
-		return render(r.activeView)
-	}
-	return ""
-}
-
-// transientRenderLocked picks the source whose line is on screen. Caller holds
-// r.mu.
-func (r *Renderer) transientRenderLocked() func(view string) string {
+	view := r.activeView
 	for _, source := range transientSourcePriority {
-		if render, ok := r.transientSources[source]; ok && render != nil {
-			return render
+		if text := r.transientSourceTextLocked(source, view); text != "" {
+			return text
 		}
 	}
 	// A source this file does not know about still gets to show: an unknown
 	// producer must not be silently invisible.
-	for _, render := range r.transientSources {
-		if render != nil {
-			return render
+	for source := range r.transientSources {
+		if isTransientSourcePriority(source) {
+			continue
+		}
+		if text := r.transientSourceTextLocked(source, view); text != "" {
+			return text
 		}
 	}
-	return nil
+	return ""
 }
 
-// syncTransientLocked mirrors the winning source into the single line the paint
-// path reads. Caller holds r.mu.
+// transientSourceTextLocked renders one source's line for view, "" when that
+// source is not live or has nothing to say about it. Caller holds r.mu.
+func (r *Renderer) transientSourceTextLocked(source, view string) string {
+	render := r.transientSources[source]
+	if render == nil {
+		return ""
+	}
+	return render(view)
+}
+
+// syncTransientLocked refreshes whether any source holds a live line, which is
+// the quick answer the paint path asks before it resolves one. Caller holds
+// r.mu.
 func (r *Renderer) syncTransientLocked() {
-	r.transientStatus = r.transientRenderLocked()
-	if r.transientStatus == nil {
-		r.transientActive = false
+	r.transientActive = false
+	for _, render := range r.transientSources {
+		if render != nil {
+			r.transientActive = true
+			return
+		}
 	}
 }
 
@@ -1124,7 +1153,25 @@ func (r *Renderer) StartTimedTransientStatus(source string, formatter transientS
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		started := time.Now()
+		// The line this source has on screen for the view that was open when it
+		// was last painted, and whether it has one at all yet.
+		lastText := ""
+		installed := false
 		paint := func(tick int) {
+			// A source that has nothing to say about the view on screen — the
+			// subagents' clock while the conversation is open, five times a
+			// second, for as long as they run — must not repaint the whole
+			// viewport to draw the same nothing. A source whose line did change
+			// still installs a formatter evaluated per paint, so opening another
+			// view takes effect at once rather than on the next tick.
+			r.mu.Lock()
+			view := r.activeView
+			r.mu.Unlock()
+			text := formatter(time.Since(started), tick, view)
+			if installed && text == lastText {
+				return
+			}
+			lastText, installed = text, true
 			r.installTransientStatus(source, func(view string) string {
 				return formatter(time.Since(started), tick, view)
 			})
@@ -1164,7 +1211,7 @@ func (r *Renderer) finishTransientLocked(source string) {
 	if !r.transientActive && r.transientSources == nil {
 		return
 	}
-	before := r.transientStatus
+	before := r.transientStatusTextLocked()
 	if source == "" {
 		r.transientSources = nil
 	} else {
@@ -1174,7 +1221,10 @@ func (r *Renderer) finishTransientLocked(source string) {
 	if !r.viewportMode {
 		return
 	}
-	if (before == nil) != (r.transientStatus == nil) {
+	// Compared as text, not as "was there a source at all": the line another
+	// source paints may be the same sentence, and removing a source that was
+	// silent for this view must not repaint the screen.
+	if before != r.transientStatusTextLocked() {
 		r.paintViewportLocked()
 	}
 }

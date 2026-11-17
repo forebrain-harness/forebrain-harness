@@ -962,6 +962,89 @@ func TestPrintSessionResumeContextRestoresSavedSubagentView(t *testing.T) {
 	}
 }
 
+// A resume of a conversation with a subagent still running restores that
+// agent's own window, not only its card. The replay's tracker saw it start;
+// the live tracker adopts the window, so the agent's view has its Working line,
+// the roster lists the row the reader opens that view by, and the end that
+// finally arrives draws the "Worked for" line closing it. A window the live
+// tracker already counts, and one the log closed, are left alone.
+func TestReplayAdoptsRunningSubagentWindows(t *testing.T) {
+	base := time.Unix(100, 0).UTC()
+	liveTracker := NewTracker()
+	var live Reducer
+	live.WithTracker(liveTracker)
+	// This process is already counting an agent of its own, the way /rewind
+	// replays a conversation this surface is still running.
+	liveTracker.ObserveAgent("agent-live", "exec-live", base.Add(-time.Minute))
+
+	spawn := func(id, child, execution string) event.RunEvent {
+		return event.NewRunEvent(id+"-spawn", child, "s1", event.RunEventSubagentSpawned, event.SubagentSpawnedPayload{
+			AgentID: id, AgentType: "general-purpose", Task: "probe", ExecutionID: execution,
+		}, base)
+	}
+	session := &fakeSession{sessionEvents: []event.RunEvent{
+		spawn("agent-running", "child-running", "exec-running"),
+		spawn("agent-paused", "child-paused", "exec-paused"),
+		event.NewRunEvent("paused", "child-paused", "s1", event.RunEventSubagentPaused, event.SubagentPausedPayload{
+			AgentID: "agent-paused", ExecutionID: "exec-paused",
+		}, base.Add(time.Second)),
+		spawn("agent-live", "child-live", "exec-replayed"),
+		spawn("agent-done", "child-done", "exec-done"),
+		event.NewRunEvent("done", "child-done", "s1", event.RunEventSubagentEnded, event.SubagentEndedPayload{
+			AgentID: "agent-done", AgentType: "general-purpose", Status: "ok", ExecutionID: "exec-done",
+		}, base.Add(2*time.Second)),
+	}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	ctrl := newCommandController(session, renderer, &stubSelector{}, nil, "")
+	ctrl.replayCardsTo = &live
+	ctrl.printSessionResumeContext("s1")
+
+	snap, ok := liveTracker.SnapshotAgentRun("agent-running")
+	if !ok || snap.Ended || snap.Paused {
+		t.Fatalf("the resumed conversation's running subagent = (%+v, %t), want a live window", snap, ok)
+	}
+	if paused, ok := liveTracker.SnapshotAgentRun("agent-paused"); !ok || !paused.Paused || paused.Ended {
+		t.Fatalf("the resumed conversation's paused subagent = (%+v, %t), want a paused live window", paused, ok)
+	}
+	if _, ok := liveTracker.SnapshotAgentRun("agent-done"); ok {
+		t.Fatal("a window the replay closed was adopted as running")
+	}
+	if window, _ := liveTracker.SnapshotAgentRun("agent-live"); window.Elapsed < 59*time.Second {
+		t.Fatalf("the live window was overwritten by the replay's: elapsed = %v", window.Elapsed)
+	}
+	if !liveTracker.HasActiveAgentRun() {
+		t.Fatal("the adopted windows do not keep the subagents' line live")
+	}
+	listed := map[string]bool{}
+	for _, row := range live.AgentRosterSnapshot().Rows {
+		listed[row.ID] = true
+	}
+	for _, id := range []string{"agent-running", "agent-paused"} {
+		if !listed[id] {
+			t.Fatalf("roster = %v, want a row for %s to open its view by", live.AgentRosterSnapshot().Rows, id)
+		}
+	}
+
+	// The end that arrives after the resume closes that agent's view the way it
+	// would have without one: its own "Worked for" line, from the start the
+	// adopted window kept.
+	var worked *Frame
+	for _, frame := range live.Reduce(SubagentEndedMsg{
+		AgentID: "agent-running", AgentType: "general-purpose", TaskID: "agent-running",
+		Status: "ok", ExecutionID: "exec-running", Timestamp: base.Add(3 * time.Minute),
+	}).Frames {
+		if frame.AgentID == "agent-running" && frame.Kind == FrameStatus && strings.HasPrefix(frame.Title, "Worked for ") {
+			closing := frame
+			worked = &closing
+		}
+	}
+	if worked == nil {
+		t.Fatal("the resumed subagent's end drew no Worked for line in its view")
+	}
+}
+
 func TestPrintSessionResumeContextInterleavesPrimaryAndSubagentHistory(t *testing.T) {
 	session := &fakeSession{
 		transcriptTurns: []state.Message{

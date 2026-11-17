@@ -642,6 +642,48 @@ func (r *Reducer) adoptReplayedCards(from *Reducer) {
 	r.endedExecutions = from.endedExecutions
 }
 
+// adoptReplayedRunningAgents takes over the subagent executions a resume's
+// replay left running. The replay's tracker saw their whole life — the spawn,
+// every counter, the pause and resume the log carries — and is then discarded
+// with the throwaway reducer, so without this the live tracker holds no window
+// for an agent that is still working: its view shows no Working line, and when
+// its end does arrive there is no start to count from, so the "Worked for" line
+// that closes that view is never drawn. Only windows still open are taken: a
+// finished one is the replay's account, already drawn, and copying it over
+// would re-open a clock the log closed. A window the live tracker already
+// knows wins, because it is the one this process is actually counting (/rewind
+// replays a conversation this surface is still running).
+func (r *Reducer) adoptReplayedRunningAgents(from *Reducer) {
+	if r == nil || from == nil || from.tracker == nil || r.tracker == nil {
+		return
+	}
+	from.tracker.mu.RLock()
+	defer from.tracker.mu.RUnlock()
+	r.tracker.mu.Lock()
+	defer r.tracker.mu.Unlock()
+	for _, id := range from.agentRosterOrder {
+		row, listed := from.agentRoster[id]
+		if !listed {
+			continue
+		}
+		run := from.tracker.agentRuns[id]
+		if run == nil || run.startedAt.IsZero() || !run.endedAt.IsZero() {
+			continue
+		}
+		if live := r.tracker.agentRuns[id]; live != nil && !live.startedAt.IsZero() {
+			continue
+		}
+		adopted := *run
+		if r.tracker.agentRuns == nil {
+			r.tracker.agentRuns = make(map[string]*agentRun)
+		}
+		r.tracker.agentRuns[id] = &adopted
+		// The row is what the reader navigates to the view by, so it comes with
+		// the window: a running agent the roster does not list cannot be opened.
+		r.upsertSubagentRoster(id, row.Label, row.Title, row.Task, row.Status)
+	}
+}
+
 // bindFanoutTaskToSpawn binds a spawned execution to a card task: the task now
 // runs as this agent, its clock starts at the spawn, and the agent's tool
 // messages find the row through cardTaskOfAgent. A task already settled by its
@@ -8749,6 +8791,27 @@ func (t *Tracker) SnapshotAgentRun(agentID string) (AgentRunSnapshot, bool) {
 	c := run.counters
 	c.Retry = t.retries[agentID]
 	return AgentRunSnapshot{Counters: c, Elapsed: until.Sub(run.startedAt), Ended: ended, EndedAt: run.endedAt, Paused: run.paused && !ended}, true
+}
+
+// HasActiveAgentRun reports whether any subagent execution is still running —
+// started, not ended, and not paused waiting for the user. It is the question
+// the subagents' own Working line asks of the whole set: whether it should be
+// live at all, judged the way SnapshotAgentRun judges a single agent, so the
+// line exists exactly while some view has something to say. Safe for concurrent
+// use.
+func (t *Tracker) HasActiveAgentRun() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for _, run := range t.agentRuns {
+		if run == nil || run.startedAt.IsZero() || !run.endedAt.IsZero() || run.paused {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // ObserveRunEnd folds provider-reported token usage into the session.

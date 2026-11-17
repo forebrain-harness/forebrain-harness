@@ -3288,7 +3288,7 @@ func TestHandleIdleHotkeyInterruptQuitsWithAlreadyFinishingController(t *testing
 
 func TestWorkingStatusFormatterIncludesSpinnerElapsedAndEscapeInterruptHint(t *testing.T) {
 	t.Setenv("TMUX", "")
-	formatter := workingStatusFormatter(nil, nil)
+	formatter := workingStatusFormatter(nil)
 	got := formatter(time.Second, 0, "")
 	if got != "| Working (1s • esc to interrupt)" {
 		t.Fatalf("unexpected working status title under 2s: %q", got)
@@ -3305,7 +3305,7 @@ func TestWorkingStatusFormatterIncludesSpinnerElapsedAndEscapeInterruptHint(t *t
 
 func TestWorkingStatusFormatterDoesNotAdvertiseBackgroundInTmux(t *testing.T) {
 	t.Setenv("TMUX", "/tmp/tmux-1000/default,12345,0")
-	formatter := workingStatusFormatter(nil, nil)
+	formatter := workingStatusFormatter(nil)
 	got := formatter(3*time.Second, 0, "")
 	if got != "| Working (3s • esc to interrupt)" {
 		t.Fatalf("unexpected background hint inside tmux: %q", got)
@@ -3319,7 +3319,7 @@ func TestWorkingStatusFormatterAppendsLatestCounters(t *testing.T) {
 	counters := Counters{Tools: 1, InputTokens: 1500, OutputTokens: 300, Agents: 1, PlanDone: 1, PlanTotal: 3, PlanActive: "Writing tests"}
 	formatter := workingStatusFormatter(func() Counters {
 		return counters
-	}, nil)
+	})
 	got := formatter(20*time.Second, 2, "")
 	if got != "- Working (20s • esc to interrupt) ☑1/3 Writing tests" {
 		t.Fatalf("unexpected working status counters: %q", got)
@@ -3338,7 +3338,7 @@ func TestWorkingStatusFormatterAppendsFirstToken(t *testing.T) {
 	t.Setenv("TMUX", "")
 	formatter := workingStatusFormatter(func() Counters {
 		return Counters{PlanDone: 1, PlanTotal: 3, PlanActive: "Writing tests", FirstToken: 1200 * time.Millisecond}
-	}, nil)
+	})
 	got := formatter(20*time.Second, 0, "")
 	if got != "| Working (20s • esc to interrupt) ☑1/3 Writing tests first token 1.2s" {
 		t.Fatalf("working status with first token = %q", got)
@@ -3360,24 +3360,27 @@ func TestWorkingStatusFormatterReportsTheSubagentWhoseViewIsOpen(t *testing.T) {
 	tracker.ObserveToolStep(agentID, "call-1", "shell", "")
 	tracker.ObserveSubagentUsage("run-1", agentID, 5000, 300)
 
-	formatter := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
+	// Two formatters, two sources: the conversation's line answers only for the
+	// conversation, and the subagents' line only for a subagent's view.
+	conversation := workingStatusFormatter(tracker.SnapshotActiveRun)
+	agent := agentWorkingStatusFormatter(tracker.SnapshotAgentRun)
 
-	if got := formatter(75*time.Second, 0, ""); got != "| Working (1m 15s • esc to interrupt)" {
+	if got := conversation(75*time.Second, 0, ""); got != "| Working (1m 15s • esc to interrupt)" {
 		t.Fatalf("conversation working line = %q", got)
 	}
-	if got := formatter(75*time.Second, 0, agentID); got != "| Working (57s)" {
+	if got := agent(75*time.Second, 0, agentID); got != "| Working (57s)" {
 		t.Fatalf("subagent working line = %q, want this subagent's own clock and spend", got)
 	}
 
 	// A finished subagent's view is closed by its own "Worked for" line; a
 	// working line that kept counting beside it would contradict it.
 	tracker.ObserveAgentEnded(agentID, time.Now())
-	if got := formatter(75*time.Second, 0, agentID); got != "" {
+	if got := agent(75*time.Second, 0, agentID); got != "" {
 		t.Fatalf("finished subagent still shows a working line: %q", got)
 	}
 	// An agent the tracker never saw start has nothing to report, and must not
 	// fall back to the conversation's figures.
-	if got := formatter(75*time.Second, 0, "subagent-unknown"); got != "" {
+	if got := agent(75*time.Second, 0, "subagent-unknown"); got != "" {
 		t.Fatalf("unknown view = %q, want no line", got)
 	}
 }
@@ -4783,7 +4786,7 @@ func TestFormatWorkingCountersIncludesPlanProgress(t *testing.T) {
 // "Working", never the title.
 func TestWorkingStatusFormatterKeepsWorkingHeadlineAndShowsActiveTask(t *testing.T) {
 	counters := Counters{PlanDone: 1, PlanTotal: 3, PlanActive: "Writing tests", InputTokens: 1500, OutputTokens: 300}
-	formatter := workingStatusFormatter(func() Counters { return counters }, nil)
+	formatter := workingStatusFormatter(func() Counters { return counters })
 	got := formatter(20*time.Second, 2, "")
 	if got != "- Working (20s • esc to interrupt) ☑1/3 Writing tests" {
 		t.Fatalf("working line = %q, want literal headline with checklist progress only", got)
@@ -7328,7 +7331,7 @@ func TestSubagentPauseIsDrawnInItsViewAndHidesItsWorkingLine(t *testing.T) {
 	tracker := NewTracker()
 	tracker.ObserveAgent("task-b", "exec-1", time.Now())
 	reducer := &Reducer{tracker: tracker}
-	format := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
+	format := agentWorkingStatusFormatter(tracker.SnapshotAgentRun)
 	if line := format(time.Second, 0, "task-b"); !strings.Contains(line, "Working") {
 		t.Fatalf("working line before the pause = %q, want Working", line)
 	}
@@ -8043,7 +8046,7 @@ func TestClearedTransportRetryWithdrawsTheFinalDeadAttempt(t *testing.T) {
 // "Working" segments.
 func TestWorkingLineShowsRetryStatus(t *testing.T) {
 	formatterFor := func(s TransportRetryStatus) transientStatusFormatter {
-		return workingStatusFormatter(func() Counters { return Counters{Retry: s} }, nil)
+		return workingStatusFormatter(func() Counters { return Counters{Retry: s} })
 	}
 
 	// Attempt 2 of 10 names the failure generically.
@@ -8118,15 +8121,15 @@ func TestSubagentWorkingLineShowsItsOwnRetry(t *testing.T) {
 	tracker.ObserveAgent("task-1", "exec-1", time.Now())
 	tracker.ObserveTransportRetry("task-1", 1, 10, 8*time.Second, 0)
 
-	formatter := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
-	sub := formatter(time.Second, 0, "task-1")
+	conversation := workingStatusFormatter(tracker.SnapshotActiveRun)
+	sub := agentWorkingStatusFormatter(tracker.SnapshotAgentRun)(time.Second, 0, "task-1")
 	if !strings.Contains(sub, "Retrying in 8s attempt 1/10") {
 		t.Fatalf("subagent working line = %q, want its own retry status", sub)
 	}
 	if strings.Contains(sub, "Working (") {
 		t.Fatalf("subagent working line = %q, must be the retry status alone", sub)
 	}
-	conv := formatter(time.Second, 0, "")
+	conv := conversation(time.Second, 0, "")
 	if !strings.Contains(conv, "Working (") || strings.Contains(conv, "Retrying in") {
 		t.Fatalf("conversation working line = %q, want the ordinary line with no retry status", conv)
 	}
@@ -8145,7 +8148,7 @@ func TestSubagentWorkingLineShowsFirstToken(t *testing.T) {
 	tracker.ObserveAgentFirstToken("task-ft", 300*time.Millisecond)
 	tracker.ObserveAgent("task-silent", "exec-silent", time.Now())
 
-	formatter := workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun)
+	formatter := agentWorkingStatusFormatter(tracker.SnapshotAgentRun)
 	sub := formatter(time.Second, 0, "task-ft")
 	if !strings.Contains(sub, "first token 1.2s") {
 		t.Fatalf("subagent working line = %q, want its first-token wait", sub)
@@ -8153,6 +8156,181 @@ func TestSubagentWorkingLineShowsFirstToken(t *testing.T) {
 	silent := formatter(time.Second, 0, "task-silent")
 	if strings.Contains(silent, "first token") {
 		t.Fatalf("silent subagent working line = %q, must show no first-token wait", silent)
+	}
+}
+
+// paintedComposer is the composer block as the terminal would show it, ANSI
+// stripped: the status line it carries is the one resolved for the view on
+// screen.
+func paintedComposer(r *Renderer) string {
+	cursor := 0
+	return stripANSI(strings.Join(r.buildComposerBlock(ComposerRenderState{Cursor: &cursor}, 120).lines, "\n"))
+}
+
+// The owner's report (2026-11-17), at the mechanism: the conversation's turn
+// ends while a subagent is still running, and that subagent's view keeps its own
+// Working line. The two lines are two sources whose lifetimes are their own, so
+// the turn's ending — which finishes the conversation's line and appends its
+// "Worked for" frame — cannot take the subagent's away.
+func TestSubagentWorkingLineSurvivesMainRunEnd(t *testing.T) {
+	const agentID = "subagent-survives"
+	tracker := NewTracker()
+	var red Reducer
+	red.WithTracker(tracker)
+	r := NewRenderer(nil, nil)
+	var line agentWorkingLine
+
+	// The turn starts: the conversation's own source, installed the way
+	// runTurnWithDispatch installs it.
+	red.Reduce(RunStartedMsg{RunID: "run-1"})
+	stopTurn := r.StartTimedTransientStatus(transientSourceWorking, workingStatusFormatter(tracker.SnapshotActiveRun))
+	stopped := false
+	stop := func() {
+		if !stopped {
+			stopped = true
+			stopTurn("")
+		}
+	}
+	defer func() {
+		stop()
+		r.FinishTransientStatus(transientSourceWorking)
+	}()
+
+	// A subagent is dispatched mid-turn: its own line starts, from its own
+	// lifecycle, without the turn telling it to.
+	red.Reduce(SubagentSpawnedMsg{AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Task: "probe", Timestamp: time.Now()})
+	line.sync(r, tracker)
+	require.Eventually(t, func() bool {
+		return r.TransientStatusSourceLive(transientSourceAgentWorking)
+	}, 2*time.Second, 5*time.Millisecond, "a running subagent must own its view's status line")
+
+	r.setActiveViewLocked(agentID)
+	if got := paintedComposer(r); !strings.Contains(got, "Working (") {
+		t.Fatalf("precondition: the subagent's view has no working line while the turn runs:\n%s", got)
+	}
+
+	// The turn ends: the handler finishes the conversation's source and appends
+	// the persistent "Worked for" frame, then the turn's defers stop its clock
+	// and finish it once more.
+	ev := red.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	if ev.WorkedStatus == "" {
+		t.Fatal("the turn's end produced no WorkedStatus")
+	}
+	r.FinishTransientStatus(transientSourceWorking)
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: ev.WorkedStatus, Final: true})
+	stop()
+	r.FinishTransientStatus(transientSourceWorking)
+
+	if snap, ok := tracker.SnapshotAgentRun(agentID); !ok || snap.Ended {
+		t.Fatalf("the subagent should still be running: ok=%t snap=%+v", ok, snap)
+	}
+	if got := paintedComposer(r); !strings.Contains(got, "Working (") {
+		t.Fatalf("the subagent's view lost its Working line when the turn ended:\n%s", got)
+	}
+	// The conversation's own view says nothing: its run is over.
+	r.setActiveViewLocked("")
+	if got := paintedComposer(r); strings.Contains(got, "Working (") {
+		t.Fatalf("the conversation shows a working line after its turn ended:\n%s", got)
+	}
+}
+
+// A subagent the user paused shows no line while it waits, and the line comes
+// back when a delivered message resumes it — with the conversation idle, since
+// nothing else would install one between turns.
+func TestSubagentWorkingLineResumesAfterPauseWhileMainIdle(t *testing.T) {
+	const agentID = "subagent-pause"
+	tracker := NewTracker()
+	var red Reducer
+	red.WithTracker(tracker)
+	r := NewRenderer(nil, nil)
+	var line agentWorkingLine
+	defer func() { line.sync(r, NewTracker()) }()
+
+	r.setActiveViewLocked(agentID)
+	red.Reduce(SubagentSpawnedMsg{AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Task: "probe", Timestamp: time.Now()})
+	line.sync(r, tracker)
+	require.Eventually(t, func() bool {
+		return r.TransientStatusSourceLive(transientSourceAgentWorking)
+	}, 2*time.Second, 5*time.Millisecond, "a running subagent must own its view's status line")
+	if got := paintedComposer(r); !strings.Contains(got, "Working (") {
+		t.Fatalf("the subagent's view has no working line while it runs:\n%s", got)
+	}
+
+	red.Reduce(SubagentPausedMsg{AgentID: agentID, RunID: "run-1"})
+	line.sync(r, tracker)
+	if r.TransientStatusSourceLive(transientSourceAgentWorking) {
+		t.Fatal("a paused subagent keeps a live working line")
+	}
+	if got := paintedComposer(r); strings.Contains(got, "Working (") {
+		t.Fatalf("a paused subagent's view still shows a working line:\n%s", got)
+	}
+
+	red.Reduce(SubagentInputDeliveredMsg{AgentID: agentID, RunID: "run-1", Text: "go on"})
+	line.sync(r, tracker)
+	require.Eventually(t, func() bool {
+		return r.TransientStatusSourceLive(transientSourceAgentWorking)
+	}, 2*time.Second, 5*time.Millisecond, "a resumed subagent must get its working line back")
+	if got := paintedComposer(r); !strings.Contains(got, "Working (") {
+		t.Fatalf("a resumed subagent's view shows no working line:\n%s", got)
+	}
+}
+
+// The subagents' line lives exactly as long as some subagent is running: the
+// first one ending leaves it alone, the last one ending stops its clock, so an
+// idle conversation carries no ticking source.
+func TestAgentWorkingSourceStopsWhenLastSubagentEnds(t *testing.T) {
+	tracker := NewTracker()
+	var red Reducer
+	red.WithTracker(tracker)
+	r := NewRenderer(nil, nil)
+	var line agentWorkingLine
+	defer func() { line.sync(r, NewTracker()) }()
+
+	started := time.Now()
+	for _, id := range []string{"agent-a", "agent-b"} {
+		red.Reduce(SubagentSpawnedMsg{AgentID: id, AgentType: "general-purpose", TaskID: id, Task: "probe", Timestamp: started})
+	}
+	line.sync(r, tracker)
+	require.Eventually(t, func() bool {
+		return r.TransientStatusSourceLive(transientSourceAgentWorking)
+	}, 2*time.Second, 5*time.Millisecond, "running subagents must own their status line")
+
+	red.Reduce(SubagentEndedMsg{AgentID: "agent-a", AgentType: "general-purpose", TaskID: "agent-a", Status: "ok", Timestamp: started.Add(time.Second)})
+	line.sync(r, tracker)
+	if !r.TransientStatusSourceLive(transientSourceAgentWorking) {
+		t.Fatal("the line stopped while a second subagent was still running")
+	}
+
+	red.Reduce(SubagentEndedMsg{AgentID: "agent-b", AgentType: "general-purpose", TaskID: "agent-b", Status: "ok", Timestamp: started.Add(2 * time.Second)})
+	line.sync(r, tracker)
+	if r.TransientStatusSourceLive(transientSourceAgentWorking) {
+		t.Fatal("the subagents' line outlived the last subagent")
+	}
+}
+
+// The conversation says nothing about subagents running behind it: with the
+// turn over, only their own views carry a working line.
+func TestMainViewShowsNoWorkingLineWhileOnlySubagentsRun(t *testing.T) {
+	const agentID = "subagent-background"
+	tracker := NewTracker()
+	var red Reducer
+	red.WithTracker(tracker)
+	r := NewRenderer(nil, nil)
+	var line agentWorkingLine
+	defer func() { line.sync(r, NewTracker()) }()
+
+	red.Reduce(SubagentSpawnedMsg{AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Task: "probe", Timestamp: time.Now()})
+	line.sync(r, tracker)
+	require.Eventually(t, func() bool {
+		return r.TransientStatusSourceLive(transientSourceAgentWorking)
+	}, 2*time.Second, 5*time.Millisecond, "a running subagent must own its view's status line")
+
+	if got := paintedComposer(r); strings.Contains(got, "Working (") {
+		t.Fatalf("the conversation shows a working line for a subagent's run:\n%s", got)
+	}
+	r.setActiveViewLocked(agentID)
+	if got := paintedComposer(r); !strings.Contains(got, "Working (") {
+		t.Fatalf("the subagent's view lost the line that belongs to it:\n%s", got)
 	}
 }
 

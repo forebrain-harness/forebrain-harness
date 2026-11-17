@@ -23759,6 +23759,63 @@ func TestWorkingLineIsRenderedForTheViewOnScreen(t *testing.T) {
 	}
 }
 
+// A source that has nothing to say about the view on screen yields to the next
+// one: the line on screen is the highest-priority source that draws something
+// for that view. This is what lets the conversation's turn and the subagents'
+// own runs share the screen without either hiding the other, and it takes
+// effect on the view switch itself rather than on the next tick of whichever
+// clock is running.
+func TestTransientSelectionFallsThroughEmptyViewRender(t *testing.T) {
+	const agentID = "subagent-42"
+	r := NewRenderer(nil, nil)
+	// The conversation's line, higher priority, says nothing inside a
+	// subagent's view.
+	r.installTransientStatus(transientSourceWorking, func(view string) string {
+		if view != "" {
+			return ""
+		}
+		return "| Working (1m 15s • esc to interrupt)"
+	})
+	// The subagents' line says nothing in the conversation.
+	r.installTransientStatus(transientSourceAgentWorking, func(view string) string {
+		if view != agentID {
+			return ""
+		}
+		return "| Working (57s)"
+	})
+	defer r.FinishAllTransientStatus()
+
+	cursor := 0
+	state := ComposerRenderState{Cursor: &cursor}
+	painted := func() string {
+		return stripANSI(strings.Join(r.buildComposerBlock(state, 120).lines, "\n"))
+	}
+
+	if got := painted(); !strings.Contains(got, "1m 15s") {
+		t.Fatalf("the conversation lost its own line to a silent one:\n%s", got)
+	}
+	r.setActiveViewLocked(agentID)
+	subagent := painted()
+	if !strings.Contains(subagent, "Working (57s)") {
+		t.Fatalf("the subagent's view has no line of its own:\n%s", subagent)
+	}
+	if strings.Contains(subagent, "esc to interrupt") {
+		t.Fatalf("the conversation's line leaked into the subagent's view:\n%s", subagent)
+	}
+
+	// The conversation's turn ending takes its source away; the subagent's view
+	// keeps the line that was never the turn's.
+	r.FinishTransientStatus(transientSourceWorking)
+	r.setActiveViewLocked("")
+	if got := painted(); strings.Contains(got, "Working (") {
+		t.Fatalf("the conversation still shows a line after its source ended:\n%s", got)
+	}
+	r.setActiveViewLocked(agentID)
+	if got := painted(); !strings.Contains(got, "Working (57s)") {
+		t.Fatalf("the subagent's view lost its line when the turn's source ended:\n%s", got)
+	}
+}
+
 // A subagent's own view is closed the way the conversation's is: by a "Worked
 // for" line stating how long that agent worked and the minute it finished. It
 // is that view's only account of its own run, so it is emitted for a short run

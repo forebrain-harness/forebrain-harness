@@ -4757,7 +4757,7 @@ func TestWorkingLineNamesTheGoalsRound(t *testing.T) {
 		{Counters{GoalRound: 3, GoalChecking: true}, " Checking whether the goal is met after round 3 ("},
 	} {
 		counters := tt.counters
-		status := workingStatusFormatter(func() Counters { return counters }, nil)
+		status := workingStatusFormatter(func() Counters { return counters })
 		if got := stripAllANSI(status(time.Second, 0, "")); !strings.Contains(got, tt.want) {
 			t.Errorf("working line = %q, want %q", got, tt.want)
 		}

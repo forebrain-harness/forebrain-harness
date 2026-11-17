@@ -250,6 +250,18 @@ func Run(ctx context.Context, opts Options) error {
 	// the resume — the reaper settling a subagent the killed process left
 	// running — settles the card on screen instead of opening an orphan.
 	cmds.replayCardsTo = &reducer
+	// The replayed conversation's running subagents reach this surface through
+	// the replay's own tracker, which the cards handover does not carry: the
+	// line that reports them is re-synced from what the replay adopted, and the
+	// surface's roster is rebuilt from it, so a subagent that was still running
+	// when the conversation was resumed is listed — and its view openable —
+	// the way it was before. Without the roster refresh the adopted row would
+	// live only in the reducer, which is not what draws the roster.
+	// (/resume, /rewind and a restored session all arrive here.)
+	cmds.afterReplay = func() {
+		state.refreshAgentRoster(&reducer)
+		state.agentWorking.sync(renderer, tracker)
+	}
 	var turnWorkedStatus string
 
 	// UI notifications are serialized through a queue and drained on the main
@@ -367,13 +379,24 @@ func Run(ctx context.Context, opts Options) error {
 			rosterChanged = true
 		case SubagentSpawnedMsg:
 			state.refreshAgentRoster(&reducer)
+			// The subagents' own Working line follows their executions: a spawn
+			// is one starting, and only that starts the line.
+			state.agentWorking.sync(renderer, tracker)
 			rosterChanged = true
 		case SubagentEndedMsg:
 			state.refreshAgentRoster(&reducer)
 			// Completion changes lifecycle state, not navigation. Keep a user
 			// who is reading this agent in its alt-screen VM; Escape/roster/card
 			// navigation still returns to the primary conversation.
+			state.agentWorking.sync(renderer, tracker)
 			rosterChanged = true
+		case SubagentPausedMsg, SubagentInputDeliveredMsg:
+			// A paused execution is not working, and a delivered message resumes
+			// one that was: the line is the subagents' own, so it starts and
+			// stops on these two as well. Without them a subagent resumed while
+			// the conversation sat idle kept no line at all, because nothing
+			// else would install one between turns.
+			state.agentWorking.sync(renderer, tracker)
 		}
 		// A switched result's success frames render only after the switch
 		// succeeded, in the session they describe; a failed activation discards
@@ -1820,6 +1843,10 @@ type streamState struct {
 	ctrlCExitAt             time.Time
 	agentControlPrefixArmed bool
 	agentRoster             AgentRosterSnapshot
+	// agentWorking is the subagents' own live Working line: started while any
+	// of them runs, stopped with the last one, whatever the conversation's turn
+	// is doing.
+	agentWorking agentWorkingLine
 	// agentRosterFocused is true once the user has moved keyboard focus onto
 	// the roster panel via Down. While false the keyboard is in the composer:
 	// arrows control input history as usual, the roster marks no row and shows
@@ -2072,6 +2099,11 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 		// startup, a migration and the previous session's working line all
 		// belonged to the session that just went away.
 		renderer.FinishAllTransientStatus()
+		// The subagents of the conversation being left are not this surface's
+		// any more: the tracker that was counting them has just been reset, so
+		// their line stops here and the replay of the conversation being opened
+		// re-syncs it from whatever that one has running.
+		state.agentWorking.sync(renderer, tracker)
 		renderer.ViewportResetSession()
 		// Re-seed the welcome banner so a fresh session (e.g. /new) opens with
 		// the same startup chrome the initial launch shows. ViewportResetSession
@@ -4081,7 +4113,7 @@ func runTurnWithDispatch(ctx context.Context, sigCh <-chan os.Signal, events <-c
 	// same resolution the request below will carry, so the line the user reads
 	// while the turn runs cannot name a model the turn does not go to.
 	refreshSessionFooter(renderer, session, sessionID)
-	stopStatus := renderer.StartTimedTransientStatus(transientSourceWorking, workingStatusFormatter(tracker.SnapshotActiveRun, tracker.SnapshotAgentRun))
+	stopStatus := renderer.StartTimedTransientStatus(transientSourceWorking, workingStatusFormatter(tracker.SnapshotActiveRun))
 	// Animate the terminal window/tab title for the duration of the turn,
 	// mirroring the transient "Working" line. On exit, settle back to the
 	// static session title — refreshed, because a first turn generates it.
@@ -4796,45 +4828,19 @@ func mcpStartupStatusText(progress run.MCPStartupProgress, snapshot run.MCPSnaps
 	return strings.Join(parts, " ")
 }
 
-// workingStatusFormatter renders the live status line for whichever view it is
-// painted into.
+// workingStatusFormatter renders the conversation's live status line: the clock
+// of the turn the user is waiting on, that Escape interrupts it, and the run's
+// counters.
 //
-// In the conversation it reports the turn the user is waiting on: its clock,
-// that Escape interrupts it, and the run's counters. Inside a subagent's view
-// it reports that subagent — its own clock and, when it runs one, its own
-// checklist — because
-// the transcript on screen is that agent's work, not the conversation's, and
-// the two agree about nothing: they started at different moments and spent
-// different amounts. The interrupt hint is dropped there because Escape returns
-// to the conversation from a subagent view rather than cancelling anything.
-//
-// A finished subagent shows no line at all: the "Worked for" status that closed
-// its own transcript is the last word on it, and a line that kept counting
-// would contradict it. Neither does one the user paused: it is waiting for
-// them, not working, and its view already says so.
-func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(string) (AgentRunSnapshot, bool)) transientStatusFormatter {
+// It says nothing inside a subagent's view. The transcript on screen there is
+// that agent's work, not the conversation's, and the two agree about nothing:
+// they started at different moments and spent different amounts. The subagents'
+// own line (agentWorkingStatusFormatter) is what that view shows, from a source
+// whose lifetime is theirs.
+func workingStatusFormatter(counterSnapshot func() Counters) transientStatusFormatter {
 	return func(elapsed time.Duration, tick int, view string) string {
-		if view = strings.TrimSpace(view); view != "" {
-			if agentSnapshot == nil {
-				return ""
-			}
-			snap, ok := agentSnapshot(view)
-			if !ok || snap.Ended || snap.Paused {
-				return ""
-			}
-			if snap.Counters.Retry.Active() {
-				return transportRetryStatusLine(tick, snap.Counters.Retry, time.Now())
-			}
-			title := transientSpinnerFrame(tick) + " Working (" + formatWorkingElapsed(snap.Elapsed) + ")"
-			if counters := formatWorkingCounters(snap.Counters); counters != "" {
-				title += " " + counters
-			}
-			// The wait this execution's model cost before its first output, live
-			// here the way the conversation's own Working line shows the turn's.
-			if wait := firstTokenLabel(snap.Counters.FirstToken); wait != "" {
-				title += " " + wait
-			}
-			return title
+		if strings.TrimSpace(view) != "" {
+			return ""
 		}
 		counters := Counters{}
 		if counterSnapshot != nil {
@@ -4862,6 +4868,79 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 		}
 		return title
 	}
+}
+
+// agentWorkingStatusFormatter renders one subagent's live status line, in that
+// subagent's own view: its own clock and, when it runs one, its own checklist.
+// The interrupt hint is dropped because Escape returns to the conversation from
+// a subagent view rather than cancelling anything.
+//
+// A finished subagent shows no line at all: the "Worked for" status that closed
+// its own transcript is the last word on it, and a line that kept counting
+// would contradict it. Neither does one the user paused: it is waiting for
+// them, not working, and its view already says so.
+//
+// In the conversation it says nothing: a running subagent is not what the
+// reader of the conversation's transcript is waiting on, and the turn's own
+// line (workingStatusFormatter) is the answer there.
+func agentWorkingStatusFormatter(agentSnapshot func(string) (AgentRunSnapshot, bool)) transientStatusFormatter {
+	return func(elapsed time.Duration, tick int, view string) string {
+		view = strings.TrimSpace(view)
+		if view == "" || agentSnapshot == nil {
+			return ""
+		}
+		snap, ok := agentSnapshot(view)
+		if !ok || snap.Ended || snap.Paused {
+			return ""
+		}
+		if snap.Counters.Retry.Active() {
+			return transportRetryStatusLine(tick, snap.Counters.Retry, time.Now())
+		}
+		title := transientSpinnerFrame(tick) + " Working (" + formatWorkingElapsed(snap.Elapsed) + ")"
+		if counters := formatWorkingCounters(snap.Counters); counters != "" {
+			title += " " + counters
+		}
+		// The wait this execution's model cost before its first output, live
+		// here the way the conversation's own Working line shows the turn's.
+		if wait := firstTokenLabel(snap.Counters.FirstToken); wait != "" {
+			title += " " + wait
+		}
+		return title
+	}
+}
+
+// agentWorkingLine owns the subagents' live Working line. Its lifetime is the
+// subagents' own executions — never the conversation's turn.
+//
+// One line used to serve both views, installed for the length of a turn: that
+// bound was invisible while a subagent ran inside the turn that dispatched it,
+// and wrong the moment the turn ended first, because the conversation's own
+// ending deleted the subagent's line out from under a view that was still
+// working. The turn installing or stopping its own line therefore says nothing
+// about this one; only the subagents' lifecycle does, which is why every
+// lifecycle notification syncs it.
+type agentWorkingLine struct {
+	stop func(finalText string)
+}
+
+// sync starts the subagents' line while any of them is running and stops it
+// once the last one ends or pauses.
+func (l *agentWorkingLine) sync(renderer *Renderer, tracker *Tracker) {
+	if l == nil || renderer == nil || tracker == nil {
+		return
+	}
+	if tracker.HasActiveAgentRun() {
+		if l.stop == nil {
+			l.stop = renderer.StartTimedTransientStatus(transientSourceAgentWorking,
+				agentWorkingStatusFormatter(tracker.SnapshotAgentRun))
+		}
+		return
+	}
+	if l.stop != nil {
+		l.stop("")
+		l.stop = nil
+	}
+	renderer.FinishTransientStatus(transientSourceAgentWorking)
 }
 
 // transportRetryStatusLine renders the Working line while a network retry is
