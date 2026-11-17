@@ -335,8 +335,18 @@ function providerModel(row: SubagentConfigRow): string {
   return [row.modelProvider, row.model].filter(Boolean).join('/')
 }
 
-/** What a system subagent runs on: the page's words for it, or 跟随主代理. */
+/**
+ * What a system subagent runs on. The plan reviewer's install-wide row is what
+ * the approval picker starts from (plan 313), so the page names it with the
+ * level it is configured with; every other system type — and a reviewer with no
+ * row — keeps the page's own words, or 跟随主代理.
+ */
 function systemModel(row: SubagentConfigRow): string {
+  const label = row.globalModelLabel ?? ''
+  if (label) {
+    const effort = row.globalReasoningEffort ? effortLevelLabel(row.globalReasoningEffort) : ''
+    return effort ? `${label} ${effort}` : label
+  }
   const key = `subagents.modelBySystem.${row.name}`
   const text = t(key as I18nKey)
   return text === key ? t('subagents.followPrimary') : text

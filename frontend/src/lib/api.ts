@@ -2402,6 +2402,13 @@ export interface SubagentConfigRow {
   enabled: boolean | null
   /** A built-in whose system prompt this primary agent rewrote. */
   promptOverridden: boolean
+  /** The install-wide row a system subagent is dispatched on, when the type has
+   *  one — today only the plan reviewer, whose row lives in
+   *  `agents.plan_reviewer` (plan 313). Display only: dispatch for a system
+   *  subagent is unchanged, and both stay absent when no row is configured or
+   *  the stored reference names no row. */
+  globalModelLabel?: string
+  globalReasoningEffort?: string
 }
 
 /** One row as the drawer opens it: the row plus the prompt that will actually

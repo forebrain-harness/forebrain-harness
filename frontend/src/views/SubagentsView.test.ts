@@ -199,6 +199,35 @@ describe('SubagentsView', () => {
     expect(systemRow.find('[data-testid="subagent-overridden-plan-reviewer"]').exists()).toBe(false)
   })
 
+  // The reviewer's install-wide row is the approval picker's default (plan 313):
+  // a configured row shows as the model and the level it carries, and a type
+  // without one keeps the page's own words.
+  it('shows the plan reviewer’s install-wide row, and only that row', async () => {
+    vi.mocked(forebrainApi.subagentConfigPage).mockResolvedValue({
+      rows: [
+        custom(),
+        builtin(),
+        system({ globalModelLabel: 'deepseek/deepseek-v4-pro', globalReasoningEffort: 'high' }),
+        system({ name: 'goal-evaluator', description: 'Checks the goal' }),
+      ],
+      total: 4,
+      page: 1,
+      pageSize: 10,
+      switch: false,
+      global: false,
+    })
+    const wrapper = await mountPage()
+
+    const reviewer = wrapper.find('[data-subagent-row="plan-reviewer"]')
+    expect(reviewer.text()).toContain('deepseek/deepseek-v4-pro')
+    // The level reads through the page's one effort table, on one line.
+    expect(reviewer.text()).toContain('高')
+    expect(reviewer.text()).not.toContain('审批时选择')
+
+    // A system type with no install-wide row keeps the fallback wording.
+    expect(wrapper.find('[data-subagent-row="goal-evaluator"]').text()).toContain('跟随主代理')
+  })
+
   it('gives each kind its own action column, the switch first and the icons after it', async () => {
     const wrapper = await mountPage()
     const labels = (name: string) =>
