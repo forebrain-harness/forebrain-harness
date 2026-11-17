@@ -337,6 +337,29 @@ func TestPrimaryAgentCreateRejectsDuplicateID(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rr.Code)
 }
 
+// A built-in subagent type is not a primary agent: its definitions key is the
+// type's install-wide default, which IsEffectivePrimaryAgent never treats as a
+// primary agent however it is flagged. Creating one is refused before anything
+// is written, with the verdict the /config panel's creation flow gives (plan
+// 313), and a real id still goes through.
+func TestPrimaryAgentCreateRejectsBuiltInSubagentTypeIDs(t *testing.T) {
+	for _, id := range []string{"explore", "plan", "general-purpose", "verification", "guardian", "cavecrew-investigator"} {
+		t.Run(id, func(t *testing.T) {
+			s, _ := crudServer(t)
+			rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]string{"id": id})
+			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			require.Contains(t, rr.Body.String(), "names a built-in subagent type, not a primary agent")
+			require.NotContains(t, configSectionRow(t, s.Env.SQL, "agents"), `"`+id+`":`,
+				"a refused create writes no definition")
+		})
+	}
+
+	s, _ := crudServer(t)
+	rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]string{"id": "review-agent"})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, configSectionRow(t, s.Env.SQL, "agents"), `"review-agent":`)
+}
+
 // The workspace root is derived from the agent id. A caller's expected root
 // is checked against it — not merely for existing somewhere — and a mismatch
 // is refused before anything is written.

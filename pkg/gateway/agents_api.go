@@ -556,6 +556,15 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid agent id", http.StatusBadRequest)
 		return
 	}
+	// A key naming a built-in subagent type is that type's install-wide default
+	// definition, which IsEffectivePrimaryAgent never treats as a primary agent
+	// however it is flagged — so creating one here would land a row that is not
+	// the agent the caller asked for. The /config panel's creation flow refuses
+	// the same keys (plan 313).
+	if config.IsBuiltInSubagentDefinition(id) {
+		http.Error(w, fmt.Sprintf("%q names a built-in subagent type, not a primary agent; choose a different id", id), http.StatusBadRequest)
+		return
+	}
 	// The write runs as one agents-section read-modify-write in the state
 	// database (plan 188 W6); written carries the section as stored, so the
 	// answer can show the agent the request created even though the running
