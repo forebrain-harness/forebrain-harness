@@ -10647,20 +10647,28 @@ func TestSessionApprovalRequestCarriesPreviousReviewAndHandOff(t *testing.T) {
 }
 
 // Picking a model on the card opens a second screen of thinking levels, so the
-// wire carries what that screen shows: the row's levels in the one order every
-// effort picker draws (not the catalog's), the level the row is configured
-// with — the option it opens on — and nothing at all for a row that offers no
-// level, which is what keeps the picker on the model alone. The previous
-// review's model is the same shape, because it is the same offer.
+// wire carries what that screen shows: the levels in the one order every effort
+// picker draws, the level the row is configured with — the option it opens on —
+// and nothing at all for a row that offers no level, which is what keeps the
+// picker on the model alone. Those levels are the catalog's whenever it
+// describes the model, so two rows of one provider/model share them and differ
+// by endpoint alone (owner 2026-11-16); a row the catalog does not name still
+// offers what it was configured with. The previous review's model is the same
+// shape, because it is the same offer.
 func TestSessionApprovalRequestCarriesRowEfforts(t *testing.T) {
 	// What adopting a configuration installs for each row's capabilities; the
 	// fixture names them here because it does not go through the model table.
+	// row-3 names a model the shipped catalog does not describe, so its own
+	// levels are the only answer it has.
 	llm.SetModelOverrides(
 		map[string]llm.ModelOverride{
 			"row-1": {Efforts: []string{"high", "low"}},
 			"row-2": {Efforts: []string{"medium"}},
+			"row-3": {Efforts: []string{"high", "low"}},
 		},
-		map[string]string{"row-1": "openai/gpt-5.1", "row-2": "openai/gpt-5.1"},
+		map[string]string{
+			"row-1": "openai/gpt-5.1", "row-2": "openai/gpt-5.1", "row-3": "openai/gpt-effort-none",
+		},
 	)
 	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
 
@@ -10677,6 +10685,7 @@ func TestSessionApprovalRequestCarriesRowEfforts(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	type wireModel struct {
 		ID            string   `json:"id"`
+		Endpoint      string   `json:"endpoint"`
 		Efforts       []string `json:"efforts"`
 		DefaultEffort string   `json:"default_effort"`
 	}
@@ -10692,18 +10701,26 @@ func TestSessionApprovalRequestCarriesRowEfforts(t *testing.T) {
 	for _, option := range out.PlanReviewModels {
 		byID[option.ID] = option
 	}
-	require.Equal(t, []string{"low", "high"}, byID["row-1"].Efforts, "the levels come in the picker's order, not the row's")
+	vendorLevels := []string{"none", "low", "medium", "high"}
+	require.Equal(t, vendorLevels, byID["row-1"].Efforts,
+		"the levels come in the picker's order, and a vendor that describes them decides them")
 	require.Equal(t, "high", byID["row-1"].DefaultEffort, "the second screen opens on the level the row is configured with")
-	require.Equal(t, []string{"medium"}, byID["row-2"].Efforts)
+	require.Equal(t, vendorLevels, byID["row-2"].Efforts,
+		"twins of one provider/model share the vendor's levels")
 	require.Empty(t, byID["row-2"].DefaultEffort, "a row that configures no level opens on the bare list")
-	require.Empty(t, byID["row-3"].Efforts, "a row with no level says nothing, and the picker asks nothing")
+	// Twins are still two offers: what tells them apart is where their
+	// requests go.
+	require.Equal(t, "http://one.test/v1/chat/completions", byID["row-1"].Endpoint)
+	require.Equal(t, "http://two.test/v1/chat/completions", byID["row-2"].Endpoint)
+	require.Equal(t, []string{"low", "high"}, byID["row-3"].Efforts,
+		"a row whose model the catalog does not describe offers the levels it was configured with")
 	require.Empty(t, byID["row-3"].DefaultEffort)
 
 	// The previous review's model is an offer of this same list, so it carries
 	// the same shape.
 	require.NotNil(t, out.PreviousPlanReview)
 	require.Equal(t, "row-2", out.PreviousPlanReview.Model.ID)
-	require.Equal(t, []string{"medium"}, out.PreviousPlanReview.Model.Efforts)
+	require.Equal(t, vendorLevels, out.PreviousPlanReview.Model.Efforts)
 }
 
 // "Review it again" continues the previous review's own subagent

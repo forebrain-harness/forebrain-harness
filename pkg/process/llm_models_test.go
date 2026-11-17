@@ -979,7 +979,9 @@ func TestProbeLLMModelRefusesSignInModels(t *testing.T) {
 // gets: the shipped catalog is the default, and the row's own capability
 // columns win over it. LookupCatalog stays the defaults-only answer the models
 // page compares against, so the row being edited never pollutes its own form
-// (plan 265).
+// (plan 265). The thinking levels are the one exception: when the catalog
+// describes them, they are the vendor's data and the row's stale column does
+// not shadow them (owner 2026-11-16, the same rule the web write path applies).
 func TestDatabaseCapsWinOverCatalog(t *testing.T) {
 	cat, err := llm.Parse([]byte(`{
 		"openai/gpt-4o": {"id":"openai/gpt-4o","limit":{"context":128000,"output":16384},
@@ -1005,8 +1007,8 @@ func TestDatabaseCapsWinOverCatalog(t *testing.T) {
 	if !ok || hit.ContextWindow != 64000 {
 		t.Fatalf("Lookup = %+v ok=%v, want the row's window", hit, ok)
 	}
-	if levels, known := hit.ReasoningEfforts(); !known || !reflect.DeepEqual(levels, []string{"high"}) {
-		t.Fatalf("levels = %v known=%v, want the row's levels", levels, known)
+	if levels, known := hit.ReasoningEfforts(); !known || !reflect.DeepEqual(levels, []string{"low", "high"}) {
+		t.Fatalf("levels = %v known=%v, want the catalog's: a vendor that describes the levels decides them", levels, known)
 	}
 
 	defaults, ok := llm.LookupCatalog("openai", "gpt-4o")

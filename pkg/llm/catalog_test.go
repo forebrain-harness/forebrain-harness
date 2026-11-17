@@ -516,21 +516,92 @@ func TestModelOverrideReplacesCapabilities(t *testing.T) {
 	}
 }
 
-// TestModelOverrideEffortsAndReasoningOff pins the levels a row names, with
-// "none" first when the row allows turning reasoning off.
+// TestModelOverrideEffortsAndReasoningOff pins the levels a row offers, with
+// "none" first when the row allows turning reasoning off. The levels themselves
+// are the catalog's: a row's own answer only fills in when the catalog has no
+// discrete level to offer (TestReasoningEffortsRowVendorLevelsWinOverStaleRowGapFiller),
+// so the row naming [medium] here changes nothing (owner 2026-11-16).
 func TestModelOverrideEffortsAndReasoningOff(t *testing.T) {
 	installCatalogForOverrideTest(t, overrideTestCatalog)
 	off := true
 	setOverridesByPair(map[string]ModelOverride{
-		"anthropic/claude-sonnet-5": {Efforts: []string{"low", "high"}, ReasoningOff: &off},
+		"anthropic/claude-sonnet-5": {Efforts: []string{"medium"}, ReasoningOff: &off},
 	})
 	if levels, known := ReasoningEfforts("anthropic", "claude-sonnet-5"); !known || !reflect.DeepEqual(levels, []string{"none", "low", "high"}) {
 		t.Fatalf("levels = %v known=%v; want [none low high]", levels, known)
 	}
 }
 
+// TestReasoningEffortsRowVendorLevelsWinOverStaleRowGapFiller pins the levels a
+// custom model offers once the catalog knows its vendor's data. The row's
+// cap_efforts_json is what the setup wizard asked when the catalog knew nothing
+// about the model — a gap-filler for a picker that had nothing to offer, not a
+// decision about the model. The catalog's reasoning_options are the single
+// source of that answer (FOREBRAIN.md, Model data), and the web write path
+// already refuses to hand-edit them ("this model's thinking levels are decided
+// by its vendor"), so the read path must not let the stale gap-filler shadow
+// them (owner's /model screen showed only Default/High for a model whose vendor
+// data names four levels).
+func TestReasoningEffortsRowVendorLevelsWinOverStaleRowGapFiller(t *testing.T) {
+	installCatalogForOverrideTest(t, `{
+	"custom/qwen4-max-preview": {"id":"custom/qwen4-max-preview","limit":{"context":262144,"output":65536},"reasoning":true,
+		"reasoning_options":[{"type":"effort","values":["none","low","high","xhigh"]}]}
+}`)
+	// What the wizard wrote before the catalog carried this model.
+	setOverridesByPair(map[string]ModelOverride{"custom/qwen4-max-preview": {Efforts: []string{"high"}}})
+	levels, known := ReasoningEffortsRow("custom/qwen4-max-preview", "custom", "qwen4-max-preview")
+	if !known || !reflect.DeepEqual(levels, []string{"none", "low", "high", "xhigh"}) {
+		t.Fatalf("levels = %v known=%v; want the catalog's [none low high xhigh] — the row's [high] is a stale gap-filler", levels, known)
+	}
+}
+
+// TestModelOverrideGapFillerLevelsStillFillIn pins the other half of the rule:
+// when the catalog has no discrete level to offer, the row's own answer is the
+// answer. That is a model the catalog does not name at all, and a model it
+// describes as reasoning with nothing to pick between (a toggle or a token
+// budget) — "the user's to pick" both times, never a level list to shadow.
+func TestModelOverrideGapFillerLevelsStillFillIn(t *testing.T) {
+	installCatalogForOverrideTest(t, `{
+	"acme/toggle-reasoner": {"id":"acme/toggle-reasoner","limit":{"context":1000,"output":100},"reasoning":true,
+		"reasoning_options":[]}
+}`)
+	setOverridesByPair(map[string]ModelOverride{
+		"custom/brand-new-model": {Efforts: []string{"low", "xhigh"}},
+		"acme/toggle-reasoner":   {Efforts: []string{"medium", "max"}},
+	})
+	for _, tc := range []struct {
+		provider, model string
+		want            []string
+	}{
+		{"custom", "brand-new-model", []string{"low", "xhigh"}},
+		{"acme", "toggle-reasoner", []string{"medium", "max"}},
+	} {
+		levels, known := ReasoningEfforts(tc.provider, tc.model)
+		if !known || !reflect.DeepEqual(levels, tc.want) {
+			t.Fatalf("%s/%s levels = %v known=%v; want the row's %v", tc.provider, tc.model, levels, known, tc.want)
+		}
+	}
+}
+
+// TestModelOverrideLoginBackedLevelsStayLive pins the account exception: a
+// login-backed provider's levels are the live listing after login, and
+// models.json carries its rows as reference data only (windows, modalities),
+// so the row's levels keep winning there (owner 2026-11-10). Only providers
+// whose data IS models.json fall under the vendor-wins rule.
+func TestModelOverrideLoginBackedLevelsStayLive(t *testing.T) {
+	installCatalogForOverrideTest(t, `{
+	"opencode-go/glm-4.6": {"id":"opencode-go/glm-4.6","limit":{"context":200000,"output":32000},"reasoning":true,
+		"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
+}`)
+	setOverridesByPair(map[string]ModelOverride{"opencode-go/glm-4.6": {Efforts: []string{"none", "max"}}})
+	if levels, known := ReasoningEfforts("opencode-go", "glm-4.6"); !known || !reflect.DeepEqual(levels, []string{"none", "max"}) {
+		t.Fatalf("levels = %v known=%v; want the account's live [none max] over the catalog's reference row", levels, known)
+	}
+}
+
 // TestModelOverrideCanReasonFalseDropsLevels pins "this model does not
-// reason": no levels at all, and that answer is known rather than missing.
+// reason": no levels at all, and that answer is known rather than missing —
+// the row's switch outranks the catalog's levels and its own Efforts alike.
 func TestModelOverrideCanReasonFalseDropsLevels(t *testing.T) {
 	installCatalogForOverrideTest(t, overrideTestCatalog)
 	no := false
@@ -898,11 +969,11 @@ func TestCatalogModalitiesFeedTheMediaCapabilities(t *testing.T) {
 
 	// A row's own switches win over the catalog, both ways.
 	off, on := false, true
-	overlaid := OverlayModelOverride(hit, ModelOverride{SupportsPDF: &off})
+	overlaid := OverlayModelOverride("acme", hit, ModelOverride{SupportsPDF: &off})
 	if overlaid.SupportsPDF || !overlaid.SupportsVideo {
 		t.Fatalf("overlaid = %+v, want the row to switch PDF off and leave video alone", overlaid)
 	}
-	overlaid = OverlayModelOverride(quiet, ModelOverride{SupportsAudio: &on})
+	overlaid = OverlayModelOverride("acme", quiet, ModelOverride{SupportsAudio: &on})
 	if !overlaid.SupportsAudio || overlaid.SupportsPDF {
 		t.Fatalf("overlaid = %+v, want the row to switch audio on", overlaid)
 	}

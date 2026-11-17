@@ -1053,6 +1053,8 @@ func effortPickerItems(t *testing.T, f *modelSelectionFixture, provider, model s
 // The /model effort picker draws the same list the web's effort chip does: the
 // levels in the one fixed order (none brought to the front even when the row
 // lists it last), and the levels this build does not rank after the known ones.
+// The levels themselves are the catalog's whenever it describes the model, so
+// the row's own stale list is not what the picker offers (owner 2026-11-16).
 func TestModelEffortPickerMatchesTheWebChipOrder(t *testing.T) {
 	m := reasoningCapableModel(t)
 	f := modelEffortFixture(t, "", "low")
@@ -1065,17 +1067,39 @@ func TestModelEffortPickerMatchesTheWebChipOrder(t *testing.T) {
 		values = append(values, item.ValueLabel)
 	}
 	// This conversation is pinned to "low" and the row configures no level, so
-	// the bare Default entry leads; the row's levels follow in EFFORT_LEVELS
-	// order rather than the order the row listed them.
-	require.Equal(t, []string{"", "none", "low", "medium", "high"}, labels,
-		"the levels come in EFFORT_LEVELS order, not the row's")
-	require.Equal(t, []string{"Default", "Off", "Low", "Medium", "High"}, values,
+	// the bare Default entry leads; the catalog's levels follow in EFFORT_LEVELS
+	// order — the row's list, which names "none" and drops "minimal", is not
+	// what the vendor says this model offers.
+	require.Equal(t, []string{"", "minimal", "low", "medium", "high"}, labels,
+		"the levels are the catalog's, in EFFORT_LEVELS order")
+	require.Equal(t, []string{"Default", "Minimal", "Low", "Medium", "High"}, values,
 		"each level carries the English name the TUI shows")
 
 	// The approval gate's second screen sorts through the same helper, so the
 	// two pickers cannot drift apart.
 	require.Equal(t, []string{"none", "low", "medium", "high"},
 		orderedEffortLevels([]string{"high", "none", "medium", "low"}))
+}
+
+// A row whose model the catalog does not describe keeps the levels it was
+// configured with — the setup wizard's gap-filler, the only answer it has — and
+// those still come out in the one order every picker draws, not the order the
+// row listed them.
+func TestModelEffortPickerOrdersTheRowsOwnLevelsWhenTheCatalogHasNone(t *testing.T) {
+	const model = "gpt-effort-none"
+	doc := "agents:\n  definitions:\n    main:\n      llm_providers:\n" +
+		"        - provider: openai\n          model: " + model +
+		"\n          api_key: ${FOREBRAIN_TURN_MODEL_TEST_KEY}\n          base_url: http://c.test/v1\n"
+	f := newModelSelectionFixtureWith(t, doc, ModelSelectionState{Provider: "openai", Model: model, Set: true})
+	installRowEfforts(t, f.choiceID(t, "openai", model), "openai/"+model,
+		[]string{"high", "none", "medium", "low"})
+
+	var labels []string
+	for _, item := range effortPickerItems(t, f, "openai", model) {
+		labels = append(labels, item.Label)
+	}
+	require.Equal(t, []string{"", "none", "low", "medium", "high"}, labels,
+		"a row the catalog does not describe still offers its own levels, in EFFORT_LEVELS order")
 }
 
 // The bare 「Default」 entry appears only when the empty level is a real choice:

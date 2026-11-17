@@ -2572,7 +2572,7 @@ func (r *Runner) modelHitFor(ctx context.Context) (llm.Hit, bool) {
 		// lives under another provider reads that entry exactly (owner
 		// 2026-11-16).
 		hit, _ := llm.LookupCatalogFor(provider, model, override.Caps.CatalogKey)
-		return llm.OverlayModelOverride(hit, *override.Caps), true
+		return llm.OverlayModelOverride(provider, hit, *override.Caps), true
 	}
 	return llm.LookupRow(r.agentModelRowFor(ctx), provider, model)
 }

@@ -657,7 +657,7 @@ func InitGlobalCatalog(home string) error {
 func Lookup(provider, apiModel string) (Hit, bool) {
 	hit, ok := LookupCatalog(provider, apiModel)
 	if override, found := modelOverrideForPair(provider, apiModel); found {
-		return applyModelOverride(hit, override), true
+		return applyModelOverride(provider, hit, override), true
 	}
 	return hit, ok
 }
@@ -671,7 +671,7 @@ func LookupRow(rowID, provider, apiModel string) (Hit, bool) {
 	override, found := modelOverrideForRow(strings.TrimSpace(rowID), provider, apiModel)
 	hit, ok := LookupCatalogFor(provider, apiModel, override.CatalogKey)
 	if found {
-		return applyModelOverride(hit, override), true
+		return applyModelOverride(provider, hit, override), true
 	}
 	return hit, ok
 }
@@ -852,13 +852,14 @@ func overrideForPairLocked(provider, apiModel string) (ModelOverride, bool) {
 // projection applyModelOverride makes, exported for a caller that read the row
 // live (a dispatch on a model the turn's configuration does not know yet, owner
 // 2026-11-10). A field the row says nothing about keeps the catalog's value.
-func OverlayModelOverride(hit Hit, override ModelOverride) Hit {
-	return applyModelOverride(hit, override)
+// provider is the row's own, not the catalog entry's it may borrow.
+func OverlayModelOverride(provider string, hit Hit, override ModelOverride) Hit {
+	return applyModelOverride(provider, hit, override)
 }
 
 // applyModelOverride lays one configured row's capabilities over a hit. A row
 // that says nothing about a field leaves the catalog's value in place.
-func applyModelOverride(hit Hit, override ModelOverride) Hit {
+func applyModelOverride(provider string, hit Hit, override ModelOverride) Hit {
 	if override.SupportsImages != nil {
 		hit.SupportsAttachments = *override.SupportsImages
 	}
@@ -887,11 +888,17 @@ func applyModelOverride(hit Hit, override ModelOverride) Hit {
 		hit.ReasoningOptions = nil
 		hit.ReasoningKnown = true
 	case override.Efforts != nil || override.ReasoningOff != nil:
-		var levels []string
-		if override.Efforts != nil {
+		levels, _ := effortsFromOptions(hit.ReasoningOptions, hit.ReasoningKnown)
+		// The row's own levels answer two cases: the catalog has no discrete
+		// level to offer (the setup wizard's gap-filler, asked when the file
+		// could not answer), and a login-backed provider, whose levels are the
+		// account's live answer and not models.json's (owner 2026-11-10).
+		// Otherwise the catalog's vendor data is the single source and the
+		// row's stale answer must not shadow it (owner 2026-11-16) — the same
+		// rule the web write path applies when it refuses to hand-edit the
+		// levels of a model its vendor describes.
+		if override.Efforts != nil && (len(levels) == 0 || LoginBackedProvider(provider)) {
 			levels = override.Efforts
-		} else {
-			levels, _ = effortsFromOptions(hit.ReasoningOptions, hit.ReasoningKnown)
 		}
 		if override.ReasoningOff != nil && *override.ReasoningOff {
 			levels = append([]string{"none"}, levels...)
