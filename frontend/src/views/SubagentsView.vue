@@ -30,6 +30,7 @@
               <SelectItem :value="EMPTY_CHOICE">{{ t('subagents.filterAll') }}</SelectItem>
               <SelectItem value="builtin">{{ t('subagents.kind.builtin') }}</SelectItem>
               <SelectItem value="custom">{{ t('subagents.kind.custom') }}</SelectItem>
+              <SelectItem value="shared">{{ t('subagents.kind.shared') }}</SelectItem>
               <SelectItem value="system">{{ t('subagents.kind.system') }}</SelectItem>
             </SelectContent>
           </Select>
@@ -151,6 +152,19 @@
               />
               <RowActionSlot />
             </template>
+            <!-- 共享: the definition belongs to the install-wide registry (设置 ·
+                 子代理 · 全局共享子代理), so this page has the switch and a
+                 read-only view — no edit and no delete (plan 314). -->
+            <template v-else-if="row.kind === 'shared'">
+              <RowAction
+                :icon="Eye"
+                :label="t('common.view')"
+                :name="row.name"
+                :data-testid="`subagent-view-${row.name}`"
+                @click="openView(row)"
+              />
+              <RowActionSlot />
+            </template>
             <template v-else>
               <RowAction
                 :icon="Eye"
@@ -199,7 +213,9 @@
  * creating, editing and viewing happen in the drawer, and a delete asks first.
  *
  * The table is the server's (plan 073): the search and the kind narrow it there,
- * the agent's own rows first and the newest of them at the top. The toolbar's
+ * the agent's own rows first and the newest of them at the top. A 共享 row is an
+ * install-wide definition this agent may dispatch: it is switched here and
+ * edited in 设置 · 子代理 (plan 314). The toolbar's
  * 子代理功能 switch is this agent's own — it follows the global default
  * (设置 → 子代理) until it is switched here — and switching it switches every row
  * under it, while a row switched on turns the toolbar's switch on and the last
@@ -309,12 +325,13 @@ watch(
 
 function kindLabel(kind: SubagentKind): string {
   if (kind === 'custom') return t('subagents.kind.custom')
+  if (kind === 'shared') return t('subagents.kind.shared')
   if (kind === 'system') return t('subagents.kind.system')
   return t('subagents.kind.builtin')
 }
 
 function kindVariant(kind: SubagentKind): 'default' | 'success' | 'gray' {
-  if (kind === 'custom') return 'default'
+  if (kind === 'custom' || kind === 'shared') return 'default'
   if (kind === 'system') return 'gray'
   return 'success'
 }
@@ -324,7 +341,9 @@ function kindVariant(kind: SubagentKind): 'default' | 'success' | 'gray' {
  * the page's words with the definition's English behind them.
  */
 function descriptionOf(row: SubagentConfigRow): string {
-  if (row.kind === 'custom') return row.description
+  // 自定义 and 共享 both carry their own description; only the harness's own
+  // kinds read the page's words with the definition's English behind them.
+  if (row.kind === 'custom' || row.kind === 'shared') return row.description
   const key = `subagents.desc.${row.name}`
   const text = t(key as I18nKey)
   return text === key ? row.description : text

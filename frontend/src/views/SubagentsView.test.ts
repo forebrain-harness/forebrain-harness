@@ -82,6 +82,28 @@ function builtin(overrides: Partial<SubagentConfigRow> = {}): SubagentConfigRow 
   }
 }
 
+/** A globally shared custom subagent (plan 314): an install-wide definition this
+ *  agent may dispatch, switched here and edited in 设置 · 子代理. */
+function shared(overrides: Partial<SubagentConfigRow> = {}): SubagentConfigRow {
+  return {
+    name: 'repo-auditor',
+    kind: 'shared',
+    description: '审查一个仓库区域的改动',
+    modelProvider: 'deepseek',
+    model: 'deepseek-v4-flash',
+    reasoningEffort: 'high',
+    modelSource: 'global',
+    tools: 'read_only',
+    allowedTools: [],
+    continuable: true,
+    // Default-disabled: the registry's definition is nobody's until this agent
+    // enables it.
+    enabled: false,
+    promptOverridden: false,
+    ...overrides,
+  }
+}
+
 function system(overrides: Partial<SubagentConfigRow> = {}): SubagentConfigRow {
   return {
     name: 'plan-reviewer',
@@ -118,8 +140,8 @@ describe('SubagentsView', () => {
 
   beforeEach(() => {
     vi.mocked(forebrainApi.subagentConfigPage).mockResolvedValue({
-      rows: [custom(), builtin(), system()],
-      total: 3,
+      rows: [custom(), builtin(), shared(), system()],
+      total: 4,
       page: 1,
       pageSize: 10,
       switch: false,
@@ -146,7 +168,7 @@ describe('SubagentsView', () => {
     expect(heads).toHaveLength(5)
     // 操作 is centred over its column (plan 079 step 9).
     expect(heads[4].classes()).toContain('text-center')
-    expect(wrapper.find('[data-testid="table-pager"]').text()).toContain('共 3 条')
+    expect(wrapper.find('[data-testid="table-pager"]').text()).toContain('共 4 条')
     expect(wrapper.find('p.forebrain-list-note').text()).toBe(
       '“内置”与“自定义”的子代理启用后由模型按说明派发；“系统”子代理在计划审阅、/goal、自动审批等场合由系统调用，只能查看。修改已保存，新会话生效。',
     )
@@ -160,6 +182,7 @@ describe('SubagentsView', () => {
       '全部类型',
       '内置',
       '自定义',
+      '共享',
       '系统',
     ])
   })
@@ -247,6 +270,14 @@ describe('SubagentsView', () => {
     expect(builtinRow.find('[data-testid="subagent-switch-explore"]').exists()).toBe(true)
     expect(labels('explore')).toEqual(['编辑 explore'])
     expect(builtinRow.find('.forebrain-icon-slot').exists()).toBe(true)
+
+    // 共享: the switch, and 查看 only — the definition belongs to the install-wide
+    // registry, so this page has neither 编辑 nor 删除 (plan 314).
+    const sharedRow = wrapper.find('[data-subagent-row="repo-auditor"]')
+    expect(sharedRow.find('[data-testid="subagent-switch-repo-auditor"]').exists()).toBe(true)
+    expect(labels('repo-auditor')).toEqual(['查看 repo-auditor'])
+    expect(sharedRow.find('.forebrain-badge').text()).toBe('共享')
+    expect(sharedRow.text()).toContain('审查一个仓库区域的改动')
 
     // 系统: no switch at all — a same-width hole keeps the icons aligned — and 查看 only.
     const systemRow = wrapper.find('[data-subagent-row="plan-reviewer"]')
