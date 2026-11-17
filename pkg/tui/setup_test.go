@@ -59,6 +59,30 @@ func TestStartupConfigErrorReportsUnconfiguredModel(t *testing.T) {
 	}
 }
 
+// The startup config error names the effective default entry — and only it.
+// The llm_providers fallback the sentence used to describe is retired with that
+// config key (plan 315), so naming it told the reader to edit something the
+// product no longer has; copy that outlives the feature it describes is the
+// defect, not a follow-up (owner 2026-11-17).
+func TestStartupConfigErrorNamesTheEffectiveDefaultEntryOnly(t *testing.T) {
+	const cfgPath = "/home/someone/.forebrain/forebrain.yaml"
+	msg := formatStartupConfigError("/home/someone", cfgPath, []string{"model", "api_key"})
+	if !strings.Contains(msg, "set the missing fields (model, api_key)") {
+		t.Fatalf("diagnostic must name the missing fields it was given, got %q", msg)
+	}
+	if !strings.Contains(msg, "on the effective default entry — agents.definitions.main.default_model's target — in "+cfgPath) {
+		t.Fatalf("diagnostic must name the effective default entry and the config it lives in, got %q", msg)
+	}
+	if strings.Contains(msg, "llm_providers") {
+		t.Fatalf("diagnostic names the retired llm_providers key, got %q", msg)
+	}
+	// The sentence is one clause with an em-dash aside; the middle dot the
+	// product retired from its copy is not part of it either.
+	if strings.Contains(msg, "·") {
+		t.Fatalf("diagnostic carries a middle dot, got %q", msg)
+	}
+}
+
 // The helpers below were production functions that only the tests ever
 // called: each is a thin composition of live code. They live here so the
 // production files carry no unused code while the tests keep exercising

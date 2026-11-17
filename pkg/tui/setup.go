@@ -3016,7 +3016,7 @@ func formatStartupConfigError(home, cfgPath string, missing []string) string {
 	var b strings.Builder
 	b.WriteString("main agent LLM is not fully configured; set the missing fields (")
 	b.WriteString(strings.Join(missing, ", "))
-	b.WriteString(") on the effective default entry — agents.definitions.main.default_model's target, or the first llm_providers entry — in ")
+	b.WriteString(") on the effective default entry — agents.definitions.main.default_model's target — in ")
 	b.WriteString(cfgPath)
 	b.WriteString(". Add a model with /connect, or on the web Models page.")
 	b.WriteString(" If this is the first setup, run `forebrain` or `forebrain gateway start` in a TTY.")
