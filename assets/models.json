@@ -3431,6 +3431,34 @@
         "temperature": true,
         "tool_call": true
     },
+    "alibaba/qwen4-max": {
+        "attachment": true,
+        "description": "Flagship multimodal model for coding, office productivity, frontend design, and complex agentic tasks",
+        "family": "qwen",
+        "id": "alibaba/qwen4-max",
+        "last_updated": "2026-11-16",
+        "limit": {
+            "context": 1000000,
+            "output": 262144
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Qwen4 Max",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-11-16",
+        "temperature": true,
+        "tool_call": true
+    },
     "alibaba/qwq-32b": {
         "attachment": false,
         "description": "Open reasoning model from the Qwen team for math, coding, and step-by-step problem solving",
@@ -3489,6 +3517,44 @@
         "release_date": "2025-03-05",
         "temperature": true,
         "tool_call": true
+    },
+    "allenai/olmocr-2-7b": {
+        "attachment": true,
+        "description": "Vision-language OCR model from Ai2 (Allen Institute for AI) that extracts text from documents where tables, equations, and poor-quality scans defeat traditional OCR",
+        "id": "allenai/olmocr-2-7b",
+        "last_updated": "2025-10-22",
+        "license": "Apache-2.0",
+        "limit": {
+            "context": 16384
+        },
+        "links": [
+            {
+                "label": "Paper",
+                "type": "paper",
+                "url": "https://arxiv.org/abs/2510.19817"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "olmOCR 2 7B",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2025-10-22",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/allenai/olmOCR-2-7B-1025"
+            }
+        ]
     },
     "amazon/nova-2-lite": {
         "attachment": true,
@@ -6749,6 +6815,34 @@
         "temperature": false,
         "tool_call": true
     },
+    "bytedance-seed/seed-2.1-lite": {
+        "attachment": true,
+        "description": "Omnimodal ByteDance Seed 2.1 model with native text, vision, and audio understanding, 1M context, and improved coding and agent task completion",
+        "family": "seed",
+        "id": "bytedance-seed/seed-2.1-lite",
+        "last_updated": "2026-09-15",
+        "limit": {
+            "context": 1024000,
+            "output": 256000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "audio",
+                "video"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Seed 2.1 Lite",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-09-15",
+        "temperature": true,
+        "tool_call": true
+    },
     "bytedance-seed/seed-2.1-pro": {
         "attachment": true,
         "description": "Flagship ByteDance Seed 2.1 model for complex multimodal reasoning, coding, and agents",
@@ -6756,7 +6850,7 @@
         "id": "bytedance-seed/seed-2.1-pro",
         "last_updated": "2026-06-23",
         "limit": {
-            "context": 256000,
+            "context": 1024000,
             "output": 256000
         },
         "modalities": {
@@ -6837,7 +6931,7 @@
         "id": "bytedance-seed/seed-evolving",
         "last_updated": "2026-06-23",
         "limit": {
-            "context": 256000,
+            "context": 1024000,
             "output": 256000
         },
         "modalities": {
@@ -8137,6 +8231,33 @@
                 "url": "https://huggingface.co/deepreinforce-ai/Ornith-1.0-9B"
             }
         ]
+    },
+    "deepreinforce/ornith-1.5-122b": {
+        "attachment": true,
+        "description": "Mixture-of-experts coding-reasoning model for agentic software tasks, tool use, and image understanding",
+        "family": "ornith",
+        "id": "deepreinforce/ornith-1.5-122b",
+        "last_updated": "2026-10-20",
+        "license": "MIT",
+        "limit": {
+            "context": 262144,
+            "output": 32768
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Ornith 1.5 122B",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-10-20",
+        "temperature": true,
+        "tool_call": true
     },
     "deepreinforce/ornith-1.5-35b-a3b": {
         "attachment": true,
@@ -11925,6 +12046,154 @@
         "temperature": false,
         "tool_call": true
     },
+    "google/gemini-4-carbon": {
+        "attachment": true,
+        "description": "Google's most capable reasoning model for complex software engineering, deep math and science, high factual accuracy, and long-horizon autonomous agents",
+        "family": "gemini",
+        "id": "google/gemini-4-carbon",
+        "knowledge": "2026-03",
+        "last_updated": "2026-11-10",
+        "limit": {
+            "context": 1048576,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "audio",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemini 4 Carbon",
+        "open_weights": false,
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        ],
+        "release_date": "2026-11-10",
+        "temperature": false,
+        "tool_call": true
+    },
+    "google/gemini-4-hydrogen": {
+        "attachment": true,
+        "benchmarks": [
+            {
+                "metric": "%",
+                "name": "SWE-sweep",
+                "score": 13.5,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/"
+            },
+            {
+                "metric": "cheating-adjusted",
+                "name": "Terminal-Bench",
+                "score": 57,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+                "version": "4.1"
+            },
+            {
+                "metric": "score",
+                "name": "Agents' Last Exam",
+                "score": 71.6,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+                "version": "1.1"
+            },
+            {
+                "metric": "%",
+                "name": "AutomationBench-AA",
+                "score": 76.1,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/"
+            },
+            {
+                "metric": "bank balance (USD)",
+                "name": "Vending-Bench",
+                "score": 14549,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+                "version": "2"
+            },
+            {
+                "metric": "offline subset",
+                "name": "OSWorld",
+                "score": 77.6,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+                "version": "2.1"
+            },
+            {
+                "metric": "Climb WSR accuracy",
+                "name": "MKA",
+                "score": 53.4,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/"
+            },
+            {
+                "metric": "%",
+                "name": "Chartography",
+                "score": 66.6,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/"
+            },
+            {
+                "metric": "%",
+                "name": "Terminal-Bench-Science",
+                "score": 51.4,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+                "version": "0.1"
+            },
+            {
+                "metric": "%",
+                "name": "HLE-Diamond",
+                "score": 58.8,
+                "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/"
+            }
+        ],
+        "description": "Google's Gemini 4 model for everyday coding and agentic workflows, with four thinking levels and a 1M-token context window",
+        "family": "gemini",
+        "id": "google/gemini-4-hydrogen",
+        "knowledge": "2026-03",
+        "last_updated": "2026-11-12",
+        "limit": {
+            "context": 1048576,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "audio",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemini 4 Hydrogen",
+        "open_weights": false,
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                ]
+            }
+        ],
+        "release_date": "2026-11-12",
+        "temperature": false,
+        "tool_call": true
+    },
     "google/gemini-embedding-001": {
         "attachment": false,
         "description": "Embedding model for semantic search, retrieval, clustering, and ranking pipelines",
@@ -12754,6 +13023,130 @@
             }
         ]
     },
+    "huawei/openpangu-2.0-flash": {
+        "attachment": false,
+        "benchmarks": [
+            {
+                "metric": "Avg@16",
+                "name": "AIME 2026",
+                "score": 93.3,
+                "source": "https://huggingface.co/openpangu/openPangu-2.0-Flash",
+                "variant": "thinking"
+            },
+            {
+                "metric": "Avg@3",
+                "name": "SWE-bench Verified",
+                "score": 63.1,
+                "source": "https://huggingface.co/openpangu/openPangu-2.0-Flash",
+                "variant": "thinking"
+            },
+            {
+                "metric": "Avg@3",
+                "name": "LiveCodeBench V6",
+                "score": 85.1,
+                "source": "https://huggingface.co/openpangu/openPangu-2.0-Flash",
+                "variant": "thinking"
+            },
+            {
+                "metric": "Avg@4",
+                "name": "GPQA-Diamond",
+                "score": 83.7,
+                "source": "https://huggingface.co/openpangu/openPangu-2.0-Flash",
+                "variant": "thinking"
+            }
+        ],
+        "description": "Huawei's 92B MoE lightweight (6B active) for fast agents and 512K context work, Ascend-native with slow/fast thinking",
+        "family": "pangu",
+        "id": "huawei/openpangu-2.0-flash",
+        "knowledge": "2026-06",
+        "last_updated": "2026-06-30",
+        "limit": {
+            "context": 524288,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "openPangu 2.0 Flash",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-06-30",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/openpangu/openPangu-2.0-Flash"
+            }
+        ]
+    },
+    "huawei/openpangu-2.0-pro": {
+        "attachment": false,
+        "benchmarks": [
+            {
+                "metric": "Avg@16",
+                "name": "AIME 2026",
+                "score": 95.4,
+                "source": "https://huggingface.co/openpangu/openPangu-2.0-Pro",
+                "variant": "thinking"
+            },
+            {
+                "metric": "Avg@3",
+                "name": "SWE-bench Verified",
+                "score": 68.5,
+                "source": "https://huggingface.co/openpangu/openPangu-2.0-Pro",
+                "variant": "thinking"
+            },
+            {
+                "metric": "Avg@3",
+                "name": "LiveCodeBench V6",
+                "score": 85.7,
+                "source": "https://huggingface.co/openpangu/openPangu-2.0-Pro",
+                "variant": "thinking"
+            },
+            {
+                "metric": "Avg@4",
+                "name": "GPQA-Diamond",
+                "score": 87.9,
+                "source": "https://huggingface.co/openpangu/openPangu-2.0-Pro",
+                "variant": "thinking"
+            }
+        ],
+        "description": "Huawei's 505B MoE flagship (18B active) for long-horizon agents and 512K context work, Ascend-native with slow/fast thinking",
+        "family": "pangu",
+        "id": "huawei/openpangu-2.0-pro",
+        "knowledge": "2026-06",
+        "last_updated": "2026-07-31",
+        "limit": {
+            "context": 524288,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "openPangu 2.0 Pro",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-07-31",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/openpangu/openPangu-2.0-Pro"
+            }
+        ]
+    },
     "ibm/granite-4-h-micro": {
         "attachment": false,
         "description": "Compact open-weight hybrid Granite model for lightweight enterprise chat and tool calling",
@@ -13169,6 +13562,38 @@
             }
         ]
     },
+    "inclusionai/ling-3.0-tiny": {
+        "attachment": false,
+        "description": "Lightweight hybrid-linear MoE reasoning model with 7.9B total and 1.3B active parameters for on-device deployment and offline agents",
+        "family": "ling",
+        "id": "inclusionai/ling-3.0-tiny",
+        "last_updated": "2026-08-07",
+        "license": "MIT",
+        "limit": {
+            "context": 131072,
+            "output": 32768
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Ling 3.0 Tiny",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-08-07",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/inclusionAI/Ling-3.0-tiny"
+            }
+        ]
+    },
     "inclusionai/ling-3.1-flash": {
         "attachment": false,
         "description": "Efficient model for low-latency assistance, extraction, and routine automation",
@@ -13191,6 +13616,33 @@
         "open_weights": true,
         "reasoning": true,
         "release_date": "2026-09-29",
+        "temperature": true,
+        "tool_call": true
+    },
+    "inclusionai/ling-3.2-flash": {
+        "attachment": true,
+        "description": "Native multimodal MoE model with 560B total and 25B active parameters for complex visual understanding, multimodal agents, 3D interaction, and medical imaging",
+        "family": "ling",
+        "id": "inclusionai/ling-3.2-flash",
+        "last_updated": "2026-11-05",
+        "limit": {
+            "context": 1000000,
+            "output": 32768
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Ling 3.2 Flash",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-11-05",
         "temperature": true,
         "tool_call": true
     },
@@ -13274,6 +13726,44 @@
         "temperature": false,
         "tool_call": false,
         "type": "decision"
+    },
+    "lightonai/lightonocr-2-1b": {
+        "attachment": true,
+        "description": "End-to-end 1B-parameter vision-language OCR model from the French company LightOn that converts documents (PDFs, scans, images) into clean, naturally ordered text without a brittle OCR pipeline",
+        "id": "lightonai/lightonocr-2-1b",
+        "last_updated": "2026-01-16",
+        "license": "apache-2.0",
+        "limit": {
+            "context": 16384
+        },
+        "links": [
+            {
+                "label": "Paper",
+                "type": "paper",
+                "url": "https://arxiv.org/abs/2601.14251"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "LightOnOCR 2 1B",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2026-01-16",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/lightonai/LightOnOCR-2-1B"
+            }
+        ]
     },
     "lightonai/lightonocr-3-0.8b": {
         "attachment": true,
@@ -13534,6 +14024,30 @@
         "release_date": "2026-09-25",
         "temperature": false,
         "tool_call": true
+    },
+    "meragpt/restyler-1": {
+        "attachment": false,
+        "description": "meraGPT model that rewrites machine-written prose so it reads as if a person wrote it, keeping its structure",
+        "id": "meragpt/restyler-1",
+        "last_updated": "2026-09-02",
+        "limit": {
+            "context": 4096,
+            "output": 2048
+        },
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Restyler 1",
+        "open_weights": false,
+        "reasoning": false,
+        "release_date": "2026-09-02",
+        "temperature": false,
+        "tool_call": false
     },
     "meta/llama-3.1-70b-instruct": {
         "attachment": false,
@@ -16057,7 +16571,13 @@
         ],
         "release_date": "2026-10-19",
         "temperature": true,
-        "tool_call": true
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash"
+            }
+        ]
     },
     "minimax/MiniMax-M3.1-Flash-Preview": {
         "attachment": true,
@@ -17120,6 +17640,16 @@
         "name": "Mistral Large (latest)",
         "open_weights": true,
         "reasoning": false,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        ],
         "release_date": "2024-11-01",
         "temperature": true,
         "tool_call": true,
@@ -18519,7 +19049,7 @@
         "last_updated": "2026-07-16",
         "limit": {
             "context": 1048576,
-            "output": 131072
+            "output": 1048576
         },
         "modalities": {
             "input": [
@@ -18556,7 +19086,7 @@
         "last_updated": "2026-10-23",
         "limit": {
             "context": 1048576,
-            "output": 131072
+            "output": 1048576
         },
         "modalities": {
             "input": [
@@ -18583,7 +19113,13 @@
         ],
         "release_date": "2026-10-23",
         "temperature": false,
-        "tool_call": true
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/moonshotai/Kimi-K3.1-Pro"
+            }
+        ]
     },
     "morph/morph-v3-fast": {
         "attachment": false,
@@ -21945,7 +22481,7 @@
             }
         ],
         "release_date": "2026-04-23",
-        "temperature": false,
+        "temperature": true,
         "tool_call": true
     },
     "openai/gpt-5.5-instant": {
@@ -22233,7 +22769,7 @@
             }
         ],
         "release_date": "2026-07-09",
-        "temperature": false,
+        "temperature": true,
         "tool_call": true
     },
     "openai/gpt-5.6-sol": {
@@ -22371,7 +22907,7 @@
             }
         ],
         "release_date": "2026-07-09",
-        "temperature": false,
+        "temperature": true,
         "tool_call": true
     },
     "openai/gpt-5.6-terra": {
@@ -22509,7 +23045,7 @@
             }
         ],
         "release_date": "2026-07-09",
-        "temperature": false,
+        "temperature": true,
         "tool_call": true
     },
     "openai/gpt-6-astra": {
@@ -22728,6 +23264,33 @@
         "temperature": false,
         "tool_call": true
     },
+    "openai/gpt-6-cyber": {
+        "attachment": true,
+        "description": "Cybersecurity model for finding and validating exploitable vulnerabilities in authorized security research",
+        "family": "gpt",
+        "id": "openai/gpt-6-cyber",
+        "last_updated": "2026-11-05",
+        "limit": {
+            "context": 1050000,
+            "input": 922000,
+            "output": 128000
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "GPT-6 Cyber",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-11-05",
+        "temperature": false,
+        "tool_call": true
+    },
     "openai/gpt-6-luna": {
         "attachment": true,
         "benchmarks": [
@@ -22778,7 +23341,7 @@
             }
         ],
         "release_date": "2026-09-22",
-        "temperature": false,
+        "temperature": true,
         "tool_call": true
     },
     "openai/gpt-6-sol": {
@@ -22859,7 +23422,7 @@
             }
         ],
         "release_date": "2026-09-22",
-        "temperature": false,
+        "temperature": true,
         "tool_call": true
     },
     "openai/gpt-6.1-sol": {
@@ -22942,7 +23505,7 @@
             }
         ],
         "release_date": "2026-10-26",
-        "temperature": false,
+        "temperature": true,
         "tool_call": true
     },
     "openai/gpt-image-1": {
@@ -23090,7 +23653,7 @@
         "last_updated": "2025-08-05",
         "limit": {
             "context": 131072,
-            "output": 32768
+            "output": 131072
         },
         "modalities": {
             "input": [
@@ -23122,7 +23685,7 @@
         "last_updated": "2025-08-05",
         "limit": {
             "context": 131072,
-            "output": 32768
+            "output": 131072
         },
         "modalities": {
             "input": [
@@ -23153,7 +23716,7 @@
         "last_updated": "2025-10-29",
         "limit": {
             "context": 131072,
-            "output": 32768
+            "output": 131072
         },
         "modalities": {
             "input": [
@@ -23606,7 +24169,7 @@
         "last_updated": "2023-11-06",
         "limit": {
             "context": 448,
-            "output": 4096
+            "output": 448
         },
         "modalities": {
             "input": [
@@ -23954,7 +24517,7 @@
                 "text"
             ]
         },
-        "name": "DeepSeek V4.1 Flash",
+        "name": "DeepSeek V4.1 Flash 1017",
         "reasoning": true,
         "reasoning_options": [
             {
@@ -24283,6 +24846,36 @@
             }
         ]
     },
+    "opencode-go/hy4-flash-free": {
+        "attachment": true,
+        "family": "Hy",
+        "id": "opencode-go/hy4-flash-free",
+        "limit": {
+            "context": 1048576,
+            "input": 983040,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Hy4 flash Free",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "none",
+                    "high"
+                ]
+            }
+        ]
+    },
     "opencode-go/hy4-preview": {
         "attachment": false,
         "family": "Hy",
@@ -24358,7 +24951,7 @@
         "id": "opencode-go/kimi-k3",
         "limit": {
             "context": 1048576,
-            "output": 131072
+            "output": 1048576
         },
         "modalities": {
             "input": [
@@ -24387,7 +24980,7 @@
         "id": "opencode-go/kimi-k3.1-pro",
         "limit": {
             "context": 1048576,
-            "output": 131072
+            "output": 1048576
         },
         "modalities": {
             "input": [
@@ -24853,6 +25446,44 @@
                 "values": [
                     "low",
                     "medium",
+                    "xhigh"
+                ]
+            },
+            {
+                "max": 262144,
+                "type": "budget_tokens"
+            }
+        ]
+    },
+    "opencode-go/qwen4-max": {
+        "attachment": true,
+        "family": "qwen4-max",
+        "id": "opencode-go/qwen4-max",
+        "limit": {
+            "context": 1000000,
+            "output": 262144
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Qwen4 Max",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "toggle"
+            },
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "high",
                     "xhigh"
                 ]
             },
@@ -25784,7 +26415,7 @@
                 "text"
             ]
         },
-        "name": "DeepSeek V4.1 Flash",
+        "name": "DeepSeek V4.1 Flash 1017",
         "reasoning": true,
         "reasoning_options": [
             {
@@ -26216,6 +26847,73 @@
                     "low",
                     "medium",
                     "high"
+                ]
+            }
+        ]
+    },
+    "opencode/gemini-4-carbon": {
+        "attachment": true,
+        "family": "gemini",
+        "id": "opencode/gemini-4-carbon",
+        "limit": {
+            "context": 1048576,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "audio",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemini 4 Carbon",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        ]
+    },
+    "opencode/gemini-4-hydrogen": {
+        "attachment": true,
+        "family": "gemini",
+        "id": "opencode/gemini-4-hydrogen",
+        "limit": {
+            "context": 1048576,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video",
+                "audio",
+                "pdf"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Gemini 4 Hydrogen",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
                 ]
             }
         ]
@@ -27419,7 +28117,6 @@
         "id": "opencode/hy3-free",
         "limit": {
             "context": 190000,
-            "input": 192000,
             "output": 64000
         },
         "modalities": {
@@ -27465,6 +28162,36 @@
         "name": "Hy3 preview Free",
         "reasoning": true,
         "reasoning_options": []
+    },
+    "opencode/hy4-flash-free": {
+        "attachment": true,
+        "family": "Hy",
+        "id": "opencode/hy4-flash-free",
+        "limit": {
+            "context": 1048576,
+            "input": 983040,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Hy4 flash Free",
+        "reasoning": true,
+        "reasoning_options": [
+            {
+                "type": "effort",
+                "values": [
+                    "none",
+                    "high"
+                ]
+            }
+        ]
     },
     "opencode/iceman-free": {
         "attachment": false,
@@ -27703,7 +28430,7 @@
         "id": "opencode/kimi-k3",
         "limit": {
             "context": 1048576,
-            "output": 131072
+            "output": 1048576
         },
         "modalities": {
             "input": [
@@ -28978,6 +29705,44 @@
             }
         ]
     },
+    "opendatalab/mineru2.5-2509-1.2b": {
+        "attachment": true,
+        "description": "1.2B-parameter vision-language model from OpenDataLab for two-step document parsing: global layout analysis on downsampled images, then fine-grained text, formula, and table recognition at native resolution",
+        "id": "opendatalab/mineru2.5-2509-1.2b",
+        "last_updated": "2025-09-17",
+        "license": "AGPL-3.0",
+        "limit": {
+            "context": 16384
+        },
+        "links": [
+            {
+                "label": "Paper",
+                "type": "paper",
+                "url": "https://arxiv.org/abs/2509.22186"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "MinerU2.5 2509 1.2B",
+        "open_weights": true,
+        "reasoning": false,
+        "release_date": "2025-09-17",
+        "temperature": true,
+        "tool_call": false,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/opendatalab/MinerU2.5-2509-1.2B"
+            }
+        ]
+    },
     "paddlepaddle/paddleocr-vl": {
         "attachment": true,
         "description": "Compact vision-language model for multilingual document parsing, OCR, tables, formulas, and charts",
@@ -29822,6 +30587,90 @@
         "release_date": "2025-12-08",
         "temperature": true,
         "tool_call": true
+    },
+    "respan/span-01": {
+        "attachment": false,
+        "description": "Behavior classifier for agent traces that applies plain-language definitions and returns present, absent, and not-observable probabilities in one forward pass",
+        "id": "respan/span-01",
+        "last_updated": "2026-09-24",
+        "limit": {
+            "context": 0,
+            "output": 0
+        },
+        "links": [
+            {
+                "type": "docs",
+                "url": "https://www.respan.ai/docs/documentation/span-01/concept"
+            },
+            {
+                "type": "announcement",
+                "url": "https://www.respan.ai/blog/introducing-span-1"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Span-01",
+        "open_weights": false,
+        "reasoning": false,
+        "release_date": "2026-09-24",
+        "temperature": false,
+        "tool_call": false,
+        "type": "decision"
+    },
+    "respan/span-02": {
+        "attachment": true,
+        "description": "Open-weight decision model with optional anytime reasoning over text, JSON state, and images, returning typed choices, yes/no probabilities, scores, and numbers",
+        "id": "respan/span-02",
+        "last_updated": "2026-10-15",
+        "license": "Apache-2.0",
+        "limit": {
+            "context": 131072,
+            "output": 32
+        },
+        "links": [
+            {
+                "type": "docs",
+                "url": "https://www.respan.ai/docs/documentation/span-02/concept"
+            },
+            {
+                "type": "announcement",
+                "url": "https://www.respan.ai/blog/introducing-span-2"
+            },
+            {
+                "type": "model_card",
+                "url": "https://huggingface.co/respanai/span-02"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Span-02",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-10-15",
+        "temperature": false,
+        "tool_call": false,
+        "type": "decision",
+        "weights": [
+            {
+                "format": "safetensors",
+                "label": "NVFP4/FP8 weights and Rust/CUDA inference engine",
+                "quantization": "NVFP4/FP8",
+                "url": "https://huggingface.co/respanai/span-02"
+            }
+        ]
     },
     "sakana/fugu": {
         "attachment": true,
@@ -30759,6 +31608,83 @@
             }
         ]
     },
+    "swiss-ai/apertus-v1.5-70b": {
+        "attachment": true,
+        "description": "Fully open multilingual multimodal reasoner from the Swiss AI Initiative with image and audio understanding, an optional thinking mode, and a 262K context window",
+        "id": "swiss-ai/apertus-v1.5-70b",
+        "last_updated": "2026-07-24",
+        "license": "Apache-2.0",
+        "limit": {
+            "context": 262144,
+            "output": 8192
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "audio"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Apertus 1.5 70B",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-07-24",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/swiss-ai/Apertus-v1.5-70B"
+            }
+        ]
+    },
+    "swiss-ai/apertus-v1.5-8b": {
+        "attachment": true,
+        "description": "Fully open 8B multilingual multimodal LLM from the Swiss AI Initiative (ETH Zurich, EPFL, CSCS) supporting 1,000+ languages, with weights, training data, and methods fully documented. Apache 2.0.",
+        "id": "swiss-ai/apertus-v1.5-8b",
+        "last_updated": "2026-10-15",
+        "license": "Apache-2.0",
+        "limit": {
+            "context": 262144
+        },
+        "links": [
+            {
+                "label": "Paper",
+                "type": "paper",
+                "url": "https://arxiv.org/abs/2610.15542"
+            },
+            {
+                "label": "Release notes",
+                "type": "blog",
+                "url": "https://huggingface.co/blog/swiss-ai/apertus-v15-release-notes"
+            }
+        ],
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "audio"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Apertus v1.5 8B",
+        "open_weights": true,
+        "reasoning": true,
+        "release_date": "2026-10-15",
+        "temperature": true,
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/swiss-ai/Apertus-v1.5-8B"
+            }
+        ]
+    },
     "tencent/hy-mt2-1.8b": {
         "attachment": false,
         "description": "Tencent Hy reasoning model for coding, instruction following, and agent tasks",
@@ -31171,6 +32097,33 @@
         "temperature": true,
         "tool_call": true
     },
+    "tencent/hy4-flash": {
+        "attachment": true,
+        "description": "Tencent's lower-cost Hy4 tier for everyday agent and productivity tasks, with image understanding and a 1M-token context window.",
+        "family": "Hy",
+        "id": "tencent/hy4-flash",
+        "last_updated": "2026-11-16",
+        "limit": {
+            "context": 1048576,
+            "input": 983040,
+            "output": 65536
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Hy4 flash",
+        "open_weights": false,
+        "reasoning": true,
+        "release_date": "2026-11-16",
+        "temperature": true,
+        "tool_call": true
+    },
     "tencent/hy4-preview": {
         "attachment": false,
         "description": "A next-generation productivity model with significantly enhanced Agent and complex task execution capabilities.",
@@ -31318,8 +32271,8 @@
         "description": "Multimodal MoE reasoning model (594B total, 17B active) for agentic coding, vision, and knowledge work",
         "family": "ling",
         "id": "thinkingmachines/inkling-2-small",
-        "last_updated": "2026-11-05",
-        "license": "Proprietary",
+        "last_updated": "2026-11-12",
+        "license": "Apache-2.0",
         "limit": {
             "context": 1048576,
             "output": 131072
@@ -31344,11 +32297,23 @@
             ]
         },
         "name": "Inkling 2 Small",
-        "open_weights": false,
+        "open_weights": true,
         "reasoning": true,
         "release_date": "2026-11-05",
         "temperature": true,
-        "tool_call": true
+        "tool_call": true,
+        "weights": [
+            {
+                "label": "Hugging Face (NVFP4)",
+                "quantization": "nvfp4",
+                "url": "https://huggingface.co/thinkingmachines/Inkling-2-Small"
+            },
+            {
+                "label": "Hugging Face (MXFP8)",
+                "quantization": "mxfp8",
+                "url": "https://huggingface.co/thinkingmachines/Inkling-2-Small-MXFP8"
+            }
+        ]
     },
     "thinkingmachines/inkling-small": {
         "attachment": true,
@@ -31516,6 +32481,31 @@
         "open_weights": false,
         "reasoning": false,
         "release_date": "2026-09-17",
+        "temperature": true,
+        "tool_call": true
+    },
+    "unbiased/pareto-26.10": {
+        "attachment": true,
+        "description": "Blended multimodal model that selects frontier and open models for each request and blends their outputs into one answer",
+        "id": "unbiased/pareto-26.10",
+        "last_updated": "2026-10-15",
+        "limit": {
+            "context": 1048576,
+            "output": 131072
+        },
+        "modalities": {
+            "input": [
+                "text",
+                "image"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "name": "Pareto 26.10",
+        "open_weights": false,
+        "reasoning": false,
+        "release_date": "2026-10-15",
         "temperature": true,
         "tool_call": true
     },
