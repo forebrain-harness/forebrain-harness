@@ -14,6 +14,7 @@ import (
 	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
@@ -329,7 +330,7 @@ func TestVolcengineProvisionWritesThePastedKey(t *testing.T) {
 
 	var key, source, plan, baseURL string
 	require.NoError(t, env.DB.QueryRowContext(context.Background(),
-		`SELECT api_key, source, source_plan, base_url FROM fb_llm_models WHERE id = ?`, ids[0]).
+		dbx.Rebind(dbx.DialectOf(env.DB), `SELECT api_key, source, source_plan, base_url FROM fb_llm_models WHERE id = ?`), ids[0]).
 		Scan(&key, &source, &plan, &baseURL))
 	require.Equal(t, pasted, key)
 	require.Equal(t, volcengineID, source)
@@ -360,7 +361,7 @@ func TestVolcengineProvisionKeepsTheKeyARowAlreadyHas(t *testing.T) {
 	require.Equal(t, ids, again)
 	var key string
 	require.NoError(t, env.DB.QueryRowContext(context.Background(),
-		`SELECT api_key FROM fb_llm_models WHERE id = ?`, ids[0]).Scan(&key))
+		dbx.Rebind(dbx.DialectOf(env.DB), `SELECT api_key FROM fb_llm_models WHERE id = ?`), ids[0]).Scan(&key))
 	require.Equal(t, "first-key-placeholder", key)
 }
 
@@ -396,7 +397,7 @@ func TestVolcengineProvisionFetchesTheSeatKey(t *testing.T) {
 
 	var key, plan string
 	require.NoError(t, env.DB.QueryRowContext(context.Background(),
-		`SELECT api_key, source_plan FROM fb_llm_models WHERE id = ?`, ids[0]).Scan(&key, &plan))
+		dbx.Rebind(dbx.DialectOf(env.DB), `SELECT api_key, source_plan FROM fb_llm_models WHERE id = ?`), ids[0]).Scan(&key, &plan))
 	require.Equal(t, "seat-key-placeholder", key)
 	require.Equal(t, volcengineAgentPlanTeam, plan)
 	require.Equal(t, map[string]any{"SeatId": "seat-1"}, stub.lastBody(t, volcengineGetTeamSeatAPIKey))
@@ -432,7 +433,7 @@ func TestVolcengineRefreshKeyAnswersEachKindOfRow(t *testing.T) {
 	require.NoError(t, (volcengine{}).RefreshKey(context.Background(), env, team[0]))
 	var key string
 	require.NoError(t, env.DB.QueryRowContext(context.Background(),
-		`SELECT api_key FROM fb_llm_models WHERE id = ?`, team[0]).Scan(&key))
+		dbx.Rebind(dbx.DialectOf(env.DB), `SELECT api_key FROM fb_llm_models WHERE id = ?`), team[0]).Scan(&key))
 	require.Equal(t, "seat-key-rotated", key)
 }
 
@@ -456,7 +457,7 @@ func countVolcengineRows(t *testing.T, env Env) int {
 	t.Helper()
 	var count int
 	require.NoError(t, env.DB.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM fb_llm_models WHERE source = ?`, volcengineID).Scan(&count))
+		dbx.Rebind(dbx.DialectOf(env.DB), `SELECT COUNT(*) FROM fb_llm_models WHERE source = ?`), volcengineID).Scan(&count))
 	return count
 }
 

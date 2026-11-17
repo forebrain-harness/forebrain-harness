@@ -26,6 +26,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -1364,7 +1365,7 @@ func TestProvisionWritesLoginBackedRows(t *testing.T) {
 	}
 	var provider, model, apiKey, source string
 	if err := db.QueryRowContext(context.Background(),
-		`select provider, model, api_key, source from fb_llm_models where id = ?`, ids[0]).
+		dbx.Rebind(dbx.DialectOf(db), `select provider, model, api_key, source from fb_llm_models where id = ?`), ids[0]).
 		Scan(&provider, &model, &apiKey, &source); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
