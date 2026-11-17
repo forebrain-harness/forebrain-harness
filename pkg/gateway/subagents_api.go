@@ -46,6 +46,10 @@ const (
 	subagentKindBuiltin = "builtin"
 	// subagentKindCustom is a subagent this primary agent defines itself.
 	subagentKindCustom = "custom"
+	// subagentKindShared is an install-wide custom subagent (plan 314): one
+	// definition every primary agent may consume, edited in the settings page's
+	// shared registry and, on this page, only switched on or off.
+	subagentKindShared = "shared"
 	// subagentKindSystem is a built-in the system dispatches at its own
 	// occasions. The page shows it; nothing here changes it.
 	subagentKindSystem = "system"
@@ -153,9 +157,12 @@ type subagentDetail struct {
 }
 
 // subagentNames lists every subagent the page shows, in its order: this agent's
-// custom subagents in configuration order, then the built-ins the model may
-// dispatch, then the ones the system dispatches.
-func subagentNames(def config.AgentDefinition) []string {
+// own entries (its custom subagents and the reference entries that enable a
+// shared one) in configuration order, then the shared registry's names it has
+// not referenced yet — a shared subagent is on this page whether or not the
+// agent enabled it, because that is where it gets enabled (plan 314) — then the
+// built-ins the model may dispatch, then the ones the system dispatches.
+func subagentNames(cfg *config.Root, def config.AgentDefinition) []string {
 	out := make([]string, 0, len(def.Subagents)+len(agent.PublicSubagentNames)+len(agent.SystemSubagentNames))
 	for _, entry := range def.Subagents {
 		name := subagentKey(entry.Name)
@@ -164,14 +171,37 @@ func subagentNames(def config.AgentDefinition) []string {
 		}
 		out = append(out, name)
 	}
+	for _, shared := range sharedSubagentDefinitions(cfg) {
+		name := subagentKey(shared.Name)
+		if name == "" || slices.Contains(out, name) {
+			continue
+		}
+		out = append(out, name)
+	}
 	out = append(out, agent.PublicSubagentNames...)
 	return append(out, agent.SystemSubagentNames...)
+}
+
+// sharedSubagentDefinitions is the install-wide registry, nil when there is no
+// configuration to read it from.
+func sharedSubagentDefinitions(cfg *config.Root) []config.SubagentConfig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Agents.SharedSubagents
+}
+
+// sharedSubagentName reports whether name is one of the install-wide shared
+// custom subagents (plan 314).
+func sharedSubagentName(cfg *config.Root, name string) bool {
+	_, ok := config.SharedSubagentFor(sharedSubagentDefinitions(cfg), name)
+	return ok
 }
 
 // subagentRows renders the page's rows in subagentNames order.
 func subagentRows(cfg *config.Root, agentID string) []subagentRow {
 	def := cfg.Agents.Definitions[agentID]
-	names := subagentNames(def)
+	names := subagentNames(cfg, def)
 	rows := make([]subagentRow, 0, len(names))
 	for _, name := range names {
 		if row, ok := subagentRowFor(cfg, agentID, name); ok {
@@ -183,17 +213,20 @@ func subagentRows(cfg *config.Root, agentID string) []subagentRow {
 
 // subagentRowFor renders one row. Which kind it is decides where its
 // description, its tools and its switch come from: a custom subagent's own
-// entry, this agent's override of a built-in, or the built-in definition.
+// entry, this agent's override of a built-in, the install-wide definition of a
+// shared subagent, or the built-in definition.
 func subagentRowFor(cfg *config.Root, agentID, name string) (subagentRow, bool) {
 	def := cfg.Agents.Definitions[agentID]
 	key := subagentKey(name)
-	switch subagentKindFor(def, key) {
+	switch subagentKindFor(cfg, def, key) {
 	case subagentKindSystem:
 		return systemSubagentRow(cfg, key), true
 	case subagentKindBuiltin:
 		return builtinSubagentRow(cfg, agentID, key, subagentEntry(def, key)), true
 	case subagentKindCustom:
 		return customSubagentRow(cfg, agentID, key, subagentEntry(def, key)), true
+	case subagentKindShared:
+		return sharedSubagentRow(cfg, key, subagentEntry(def, key)), true
 	}
 	return subagentRow{}, false
 }
@@ -276,6 +309,49 @@ func systemSubagentRow(cfg *config.Root, name string) subagentRow {
 	return row
 }
 
+// sharedSubagentRow describes an install-wide shared custom subagent (plan 314).
+// Everything a subagent is — description, tools, prompt, model, lifecycle — is
+// the registry's definition, never this agent's: the page shows one switch and
+// the facts behind it. Enabled comes from this agent's reference entry alone,
+// and it is false when there is none — a shared subagent runs nowhere until the
+// agent enables it (owner 2026-11-16), the opposite of a custom subagent's
+// absent-means-on switch.
+func sharedSubagentRow(cfg *config.Root, name string, entry config.SubagentConfig) subagentRow {
+	// The name comes from the registry this reads, so the definition is there.
+	shared, _ := config.SharedSubagentFor(sharedSubagentDefinitions(cfg), name)
+	allowed := make([]string, 0, len(shared.AllowedTools))
+	if customSubagentTools(shared) == config.SubagentToolsPick {
+		allowed = append(allowed, shared.AllowedTools...)
+	}
+	row := subagentRow{
+		Name:         name,
+		Kind:         subagentKindShared,
+		Description:  strings.TrimSpace(shared.Description),
+		Tools:        customSubagentTools(shared),
+		AllowedTools: allowed,
+		Continuable:  shared.Continuable == nil || *shared.Continuable,
+		Enabled:      config.BoolPtr(entry.Enabled != nil && *entry.Enabled),
+		// A shared subagent's model is the install-wide row it stores, so the
+		// page says the model came from there rather than from this agent.
+		ModelSource: subagentModelFromGlobal,
+	}
+	if ref := strings.TrimSpace(shared.Model); ref != "" {
+		row.ReasoningEffort = strings.TrimSpace(shared.ReasoningEffort)
+		// Resolved as main's row: the id branch ignores the agent name, which is
+		// exactly what makes a shared subagent's model global (the goal check's
+		// precedent, plans 299 and 314).
+		if resolved, found := config.ResolveModelRef(cfg, "main", ref); found {
+			subagentRowModelFields(&row, resolved)
+		} else {
+			row.ModelProvider, row.Model, _ = strings.Cut(ref, "/")
+			row.ModelProvider = strings.TrimSpace(row.ModelProvider)
+			row.Model = strings.TrimSpace(row.Model)
+			row.ModelLabel = llm.FormatProviderModelDisplay(row.ModelProvider, row.Model)
+		}
+	}
+	return row
+}
+
 // subagentRowModel fills a row's model fields with the model a subagent runs on,
 // in the order dispatch uses it: this agent's own entry for it, then — for a
 // built-in the model may dispatch — the install-wide per-type row
@@ -344,8 +420,15 @@ func subagentDetailFor(cfg *config.Root, agentID, name string) (subagentDetail, 
 	}
 	out := subagentDetail{subagentRow: row}
 	// Prompt is the effective text: a custom subagent's own, this agent's
-	// rewrite of a built-in, else the built-in's.
-	if prompt, found := run.SubagentCatalogFor(cfg, agentID).Prompt(row.Name); found {
+	// rewrite of a built-in, else the built-in's. A shared subagent's prompt is
+	// the registry's whether or not this agent enabled it — the definition is
+	// one text, and the page would otherwise describe a subagent it cannot show
+	// (plan 314).
+	if row.Kind == subagentKindShared {
+		if shared, ok := config.SharedSubagentFor(sharedSubagentDefinitions(cfg), row.Name); ok {
+			out.SystemPrompt = strings.TrimSpace(shared.SystemPrompt)
+		}
+	} else if prompt, found := run.SubagentCatalogFor(cfg, agentID).Prompt(row.Name); found {
 		out.SystemPrompt = prompt
 	}
 	if row.Kind != subagentKindCustom {
@@ -364,14 +447,19 @@ func subagentKey(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
-// subagentKindFor names what a subagent name is for this agent.
-func subagentKindFor(def config.AgentDefinition, name string) string {
+// subagentKindFor names what a subagent name is for this agent. The shared
+// registry is consulted before this agent's own entries: the loader lets a
+// shared name appear in them only as the reference entry that enables it, so an
+// entry of that name is a switch, not a definition (plan 314).
+func subagentKindFor(cfg *config.Root, def config.AgentDefinition, name string) string {
 	key := subagentKey(name)
 	switch {
 	case slices.Contains(agent.SystemSubagentNames, key):
 		return subagentKindSystem
 	case slices.Contains(agent.PublicSubagentNames, key):
 		return subagentKindBuiltin
+	case sharedSubagentName(cfg, key):
+		return subagentKindShared
 	case subagentEntryIndex(def.Subagents, key) >= 0:
 		return subagentKindCustom
 	}
@@ -472,18 +560,57 @@ func setSubagentRowEnabled(def *config.AgentDefinition, name string, enabled boo
 	}
 }
 
+// setSharedSubagentEnabled writes one shared subagent's switch for this agent
+// (plan 314). Enabling stores the reference entry — the name and enabled: true,
+// explicitly, because for a shared subagent an absent meaning "on" would turn
+// every one of them on the moment the registry grew one — and disabling removes
+// the entry, which is the same thing as absent.
+func setSharedSubagentEnabled(def *config.AgentDefinition, name string, enabled bool) {
+	key := subagentKey(name)
+	index := subagentEntryIndex(def.Subagents, key)
+	if !enabled {
+		if index >= 0 {
+			def.Subagents = append(def.Subagents[:index], def.Subagents[index+1:]...)
+		}
+		return
+	}
+	entry := config.SubagentConfig{Name: key, Enabled: config.BoolPtr(true)}
+	if index >= 0 {
+		def.Subagents[index] = entry
+		return
+	}
+	def.Subagents = append(def.Subagents, entry)
+}
+
+// sharedSubagentEnabled reports whether this agent's reference entry switches
+// one shared subagent on: only an explicit true does.
+func sharedSubagentEnabled(def config.AgentDefinition, name string) bool {
+	entry := subagentEntry(def, name)
+	return entry.Enabled != nil && *entry.Enabled
+}
+
 // subagentAllRowsDisabled reports whether every row that has a switch — the
-// built-ins the model may dispatch and this agent's own subagents — is off.
-// This is the other half of the linkage rule: the agent's switch says the
-// feature is on, and a list with nothing enabled says otherwise.
-func subagentAllRowsDisabled(def config.AgentDefinition) bool {
+// built-ins the model may dispatch, this agent's own subagents, and the shared
+// subagents it enabled — is off. This is the other half of the linkage rule:
+// the agent's switch says the feature is on, and a list with nothing enabled
+// says otherwise.
+func subagentAllRowsDisabled(cfg *config.Root, def config.AgentDefinition) bool {
 	for _, name := range agent.PublicSubagentNames {
 		if subagentEnabled(subagentEntry(def, name)) {
 			return false
 		}
 	}
+	shared := config.SharedSubagentNames(sharedSubagentDefinitions(cfg))
 	for _, entry := range def.Subagents {
-		if slices.Contains(agent.PublicSubagentNames, subagentKey(entry.Name)) {
+		key := subagentKey(entry.Name)
+		if slices.Contains(agent.PublicSubagentNames, key) {
+			continue
+		}
+		if slices.Contains(shared, key) {
+			// A reference entry's switch is read by its own rule: absent is off.
+			if sharedSubagentEnabled(def, key) {
+				return false
+			}
 			continue
 		}
 		if subagentEnabled(entry) {
@@ -659,9 +786,9 @@ func (s *Server) handleAgentSubagentsList(w http.ResponseWriter, r *http.Request
 	q := readListQuery(r)
 	kind := subagentKey(r.URL.Query().Get("kind"))
 	switch kind {
-	case "", subagentKindBuiltin, subagentKindCustom, subagentKindSystem:
+	case "", subagentKindBuiltin, subagentKindCustom, subagentKindShared, subagentKindSystem:
 	default:
-		failSubagentWrite(w, subagentBadRequest("kind must be builtin, custom or system, not %q", kind))
+		failSubagentWrite(w, subagentBadRequest("kind must be builtin, custom, shared or system, not %q", kind))
 		return
 	}
 	extra := map[string]any{
@@ -765,7 +892,14 @@ func (s *Server) handleAgentSubagentCreate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.writeAgentSubagents(w, r, func(write *subagentWrite) (any, error) {
-		if kind := subagentKindFor(write.def, name); kind != "" && kind != subagentKindCustom {
+		switch kind := subagentKindFor(&write.cfg, write.def, name); kind {
+		case "":
+		case subagentKindCustom:
+		case subagentKindShared:
+			// The registry owns the definition, so a per-agent subagent of the
+			// same name would be a second one nobody can edit here (plan 314).
+			return nil, subagentConflict("%q is a shared subagent: enable it here, or add a differently named one", name)
+		default:
 			return nil, subagentConflict("%q is a built-in subagent and cannot be redefined; override it or give yours another name", name)
 		}
 		if subagentEntryIndex(write.def.Subagents, name) >= 0 {
@@ -829,11 +963,13 @@ func subagentAllowedTools(in []string) []string {
 
 // handleAgentSubagentUpdate serves PUT /agents/primary/:id/subagents/:name.
 // A custom subagent is replaced whole; a built-in takes only the four settings
-// it can be configured with; a system subagent is refused.
+// it can be configured with; a shared subagent's definition is the registry's,
+// so only its switch moves here — through the enabled endpoint — and a system
+// subagent is refused.
 func (s *Server) handleAgentSubagentUpdate(w http.ResponseWriter, r *http.Request) {
 	name := subagentKey(pathParam(r, "name"))
 	s.writeAgentSubagents(w, r, func(write *subagentWrite) (any, error) {
-		switch subagentKindFor(write.def, name) {
+		switch subagentKindFor(&write.cfg, write.def, name) {
 		case subagentKindCustom:
 			var in config.SubagentConfig
 			if err := decodeSubagentBody(r, &in); err != nil {
@@ -865,6 +1001,11 @@ func (s *Server) handleAgentSubagentUpdate(w http.ResponseWriter, r *http.Reques
 			}
 			storeSubagentOverride(&write.def, entry)
 			return map[string]any{"name": name}, nil
+		case subagentKindShared:
+			// The definition is install-wide, so this page carries one fact
+			// about it: whether this agent may dispatch it. The switch has its
+			// own endpoint, and the web uses it (plan 314).
+			return nil, subagentBadRequest("%q is a shared subagent; edit it in Settings → Subagents, only enable/disable here", name)
 		case subagentKindSystem:
 			return nil, subagentBadRequest("%q is dispatched by the system and cannot be configured", name)
 		default:
@@ -885,18 +1026,21 @@ type subagentBuiltinWrite struct {
 }
 
 // handleAgentSubagentDelete serves DELETE /agents/primary/:id/subagents/:name.
-// Only a custom subagent can be deleted: a built-in is switched off instead, and
-// a system subagent was never this agent's to begin with.
+// Only a custom subagent can be deleted: a built-in is switched off instead, a
+// shared subagent is deleted in the registry it belongs to, and a system
+// subagent was never this agent's to begin with.
 func (s *Server) handleAgentSubagentDelete(w http.ResponseWriter, r *http.Request) {
 	name := subagentKey(pathParam(r, "name"))
 	s.writeAgentSubagents(w, r, func(write *subagentWrite) (any, error) {
-		switch subagentKindFor(write.def, name) {
+		switch subagentKindFor(&write.cfg, write.def, name) {
 		case subagentKindCustom:
 			index := subagentEntryIndex(write.def.Subagents, name)
 			write.def.Subagents = append(write.def.Subagents[:index], write.def.Subagents[index+1:]...)
 			return map[string]any{"name": name}, nil
 		case subagentKindBuiltin:
 			return nil, subagentBadRequest("%q is a built-in subagent: switch it off instead of deleting it", name)
+		case subagentKindShared:
+			return nil, subagentBadRequest("%q is a shared subagent; delete it in Settings → Subagents", name)
 		case subagentKindSystem:
 			return nil, subagentBadRequest("%q is dispatched by the system and cannot be deleted", name)
 		default:
@@ -922,9 +1066,13 @@ func (s *Server) handleAgentSubagentEnabled(w http.ResponseWriter, r *http.Reque
 	}
 	name := subagentKey(pathParam(r, "name"))
 	s.writeAgentSubagents(w, r, func(write *subagentWrite) (any, error) {
-		switch subagentKindFor(write.def, name) {
+		switch subagentKindFor(&write.cfg, write.def, name) {
 		case subagentKindBuiltin, subagentKindCustom:
 			setSubagentRowEnabled(&write.def, name, enabled)
+		case subagentKindShared:
+			// Absent is disabled, so switching one off removes the reference
+			// entry rather than storing a false (plan 314).
+			setSharedSubagentEnabled(&write.def, name, enabled)
 		case subagentKindSystem:
 			return nil, subagentBadRequest("%q is dispatched by the system and has no switch", name)
 		default:
@@ -936,7 +1084,7 @@ func (s *Server) handleAgentSubagentEnabled(w http.ResponseWriter, r *http.Reque
 		switch {
 		case enabled && !write.switchAfter():
 			write.def.EnableSubagent = config.BoolPtr(true)
-		case !enabled && subagentAllRowsDisabled(write.def):
+		case !enabled && subagentAllRowsDisabled(&write.cfg, write.def):
 			write.def.EnableSubagent = config.BoolPtr(false)
 		}
 		return map[string]any{"switch": write.switchAfter()}, nil
@@ -956,17 +1104,30 @@ func (s *Server) handleAgentSubagentSwitch(w http.ResponseWriter, r *http.Reques
 		write.def.EnableSubagent = config.BoolPtr(enabled)
 		// The custom names are collected first: setting a row may create or drop
 		// an entry, and the list being walked must not move underneath it.
+		shared := config.SharedSubagentNames(sharedSubagentDefinitions(&write.cfg))
 		custom := make([]string, 0, len(write.def.Subagents))
+		reference := make([]string, 0, len(write.def.Subagents))
 		for _, entry := range write.def.Subagents {
-			if name := subagentKey(entry.Name); !slices.Contains(agent.PublicSubagentNames, name) {
-				custom = append(custom, name)
+			name := subagentKey(entry.Name)
+			if slices.Contains(agent.PublicSubagentNames, name) {
+				continue
 			}
+			if slices.Contains(shared, name) {
+				reference = append(reference, name)
+				continue
+			}
+			custom = append(custom, name)
 		}
 		for _, name := range agent.PublicSubagentNames {
 			setSubagentRowEnabled(&write.def, name, enabled)
 		}
 		for _, name := range custom {
 			setSubagentRowEnabled(&write.def, name, enabled)
+		}
+		// A shared subagent follows the same switch, but its own rule: enabled
+		// stores the reference entry, disabled removes it (plan 314).
+		for _, name := range reference {
+			setSharedSubagentEnabled(&write.def, name, enabled)
 		}
 		return map[string]any{"switch": write.switchAfter()}, nil
 	})

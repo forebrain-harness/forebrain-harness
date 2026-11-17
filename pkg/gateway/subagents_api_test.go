@@ -845,3 +845,180 @@ func TestSubagentModelIsStoredAsARowID(t *testing.T) {
 	require.Equal(t, "https://api.openai.com/v1/chat/completions", row.ModelEndpoint)
 	require.Equal(t, "high", row.ReasoningEffort)
 }
+
+// sharedSubagentFixtureConfig gives the fixture one install-wide shared custom
+// subagent plus one primary agent that defines a custom subagent of its own
+// (plan 314): the two kinds the page has to tell apart.
+func sharedSubagentFixtureConfig(def *appcfg.AgentDefinition) func(*appcfg.Root) {
+	return func(root *appcfg.Root) {
+		root.Agents.SharedSubagents = []appcfg.SubagentConfig{{
+			Name:            "repo-auditor",
+			Description:     "audits one repository area",
+			SystemPrompt:    "You audit repositories.",
+			Model:           "openai/gpt-main",
+			ReasoningEffort: "high",
+			Tools:           appcfg.SubagentToolsReadOnly,
+		}}
+		*def = appcfg.AgentDefinition{
+			Primary:      true,
+			DefaultModel: "llm-1",
+			Subagents: []appcfg.SubagentConfig{{
+				Name:         "db-migrator",
+				Description:  "runs the database migrations",
+				SystemPrompt: "You migrate the database.",
+			}},
+		}
+		root.Agents.Definitions["main"] = *def
+	}
+}
+
+// TestSubagentSharedRowIsDefaultDisabledAndEnableable pins the owner's rule on
+// the agent page (plan 314): a shared custom subagent is listed for every
+// primary agent with its switch OFF, enabling writes the reference entry — the
+// name and enabled: true, nothing else — and disabling removes it, because
+// absent is what disabled means.
+func TestSubagentSharedRowIsDefaultDisabledAndEnableable(t *testing.T) {
+	var def appcfg.AgentDefinition
+	f := newSubagentRootFixture(t, sharedSubagentFixtureConfig(&def))
+
+	rec := f.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rows := decodeSubagentPage(t, rec).Rows
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		names = append(names, row.Name)
+	}
+	// The agent's own entries first — its custom subagent and any shared
+	// reference — then the shared registry's names it has not referenced, then
+	// the built-ins, then the system's (the order subagentNames pins).
+	want := append([]string{"db-migrator", "repo-auditor"}, agent.PublicSubagentNames...)
+	want = append(want, agent.SystemSubagentNames...)
+	require.Equal(t, want, names)
+
+	shared := subagentRowByName(t, rows, "repo-auditor")
+	require.Equal(t, subagentKindShared, shared.Kind)
+	require.NotNil(t, shared.Enabled)
+	require.False(t, *shared.Enabled, "a shared subagent runs nowhere until this agent enables it")
+	require.Equal(t, "audits one repository area", shared.Description)
+	require.Equal(t, appcfg.SubagentToolsReadOnly, shared.Tools)
+	require.True(t, shared.Continuable)
+	require.Equal(t, subagentModelFromGlobal, shared.ModelSource)
+	require.Equal(t, "high", shared.ReasoningEffort)
+
+	// Not enabled means nothing is stored for it.
+	for _, entry := range f.subagentEntries(t) {
+		require.NotEqual(t, "repo-auditor", entry.Name)
+	}
+	// The detail says what the registry says, so the drawer can show the
+	// definition the page does not let anyone edit.
+	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents/repo-auditor", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var detail subagentDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+	require.Equal(t, "You audit repositories.", detail.SystemPrompt)
+	require.Equal(t, "repo-auditor", detail.Name)
+
+	// Enabling writes the reference entry, and the row reads it back.
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/repo-auditor/enabled", map[string]any{"enabled": true})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	reference := findSubagentEntry(t, f.subagentEntries(t), "repo-auditor")
+	require.NotNil(t, reference.Enabled)
+	require.True(t, *reference.Enabled, "a shared reference carries enabled: true, never the absent-means-on default")
+	require.Empty(t, reference.Description)
+	require.Empty(t, reference.SystemPrompt)
+	require.Empty(t, reference.Model)
+	require.Empty(t, reference.Tools)
+
+	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rows = decodeSubagentPage(t, rec).Rows
+	require.True(t, *subagentRowByName(t, rows, "repo-auditor").Enabled)
+	// The name is listed once: the reference entry and the registry entry are
+	// the same row.
+	count := 0
+	for _, row := range rows {
+		if row.Name == "repo-auditor" {
+			count++
+		}
+	}
+	require.Equal(t, 1, count)
+
+	// The kind filter answers with it too.
+	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents?kind=shared", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	filtered := decodeSubagentPage(t, rec)
+	require.Len(t, filtered.Rows, 1)
+	require.Equal(t, "repo-auditor", filtered.Rows[0].Name)
+
+	// Disabling removes the entry: absence is what disabled means.
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/repo-auditor/enabled", map[string]any{"enabled": false})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, entry := range f.subagentEntries(t) {
+		require.NotEqual(t, "repo-auditor", entry.Name)
+	}
+	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.False(t, *subagentRowByName(t, decodeSubagentPage(t, rec).Rows, "repo-auditor").Enabled)
+}
+
+// TestSubagentSharedRowWritesAreRefused pins the read-only half (plan 314): the
+// definition belongs to the install-wide registry, so this page edits none of it
+// — no update, no delete — while a per-agent custom subagent and a built-in
+// override are still written here (ruling A).
+func TestSubagentSharedRowWritesAreRefused(t *testing.T) {
+	var def appcfg.AgentDefinition
+	sharedRegistry := sharedSubagentFixtureConfig(&def)
+	f := newSubagentRootFixture(t, func(root *appcfg.Root) {
+		sharedRegistry(root)
+		// A reference that enables it from the start, so the refusals are proved
+		// on an enabled row rather than on the absence of one.
+		main := root.Agents.Definitions["main"]
+		main.Subagents = append(main.Subagents, appcfg.SubagentConfig{Name: "repo-auditor", Enabled: appcfg.BoolPtr(true)})
+		root.Agents.Definitions["main"] = main
+	})
+
+	rec := f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/repo-auditor", map[string]any{
+		"model": "llm-1", "reasoning_effort": "low", "system_prompt": "mine now",
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "is a shared subagent; edit it in Settings → Subagents, only enable/disable here")
+	// Nothing was written by the refusal: the registry still carries the
+	// definition the settings page owns, and the reference entry is untouched.
+	auditor, ok := appcfg.SharedSubagentFor(f.config(t).Agents.SharedSubagents, "repo-auditor")
+	require.True(t, ok)
+	require.Equal(t, "high", auditor.ReasoningEffort)
+	require.Equal(t, "You audit repositories.", auditor.SystemPrompt)
+	require.True(t, *findSubagentEntry(t, f.subagentEntries(t), "repo-auditor").Enabled)
+
+	rec = f.do(t, http.MethodDelete, "/api/agents/primary/main/subagents/repo-auditor", nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "is a shared subagent; delete it in Settings → Subagents")
+	require.NotEmpty(t, findSubagentEntry(t, f.subagentEntries(t), "repo-auditor"))
+
+	// A per-agent subagent of a shared name is refused too: the registry owns
+	// the definition, so a second one here would be a duplicate nobody edits.
+	rec = f.do(t, http.MethodPost, "/api/agents/primary/main/subagents", map[string]any{
+		"name": "repo-auditor", "description": "mine", "system_prompt": "mine",
+	})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "is a shared subagent")
+
+	// Ruling A regression: a built-in keeps its override path and a per-agent
+	// custom subagent stays editable, with the shared registry present. The
+	// model is a row of the install-wide table, as every pin is since plan 315.
+	overrideRowID := seedGlobalModelRow(t, f, "openai", "gpt-override")
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{
+		"model": overrideRowID, "reasoning_effort": "low", "system_prompt": "search here",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	override := findSubagentEntry(t, f.subagentEntries(t), "explore")
+	require.Equal(t, overrideRowID, override.Model)
+	require.Equal(t, "low", override.ReasoningEffort)
+	require.Equal(t, "search here", override.SystemPrompt)
+
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/db-migrator", map[string]any{
+		"description": "runs migrations and seeds", "system_prompt": "You migrate and seed.",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "runs migrations and seeds", findSubagentEntry(t, f.subagentEntries(t), "db-migrator").Description)
+}
