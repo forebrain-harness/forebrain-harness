@@ -38,10 +38,8 @@ scratch_home() {
 }
 
 up() {
-  docker inspect fb-mysql >/dev/null 2>&1 || \
-    docker run -d --name fb-mysql -e MYSQL_ROOT_PASSWORD=fb -p 13306:3306 mysql:8.0 >/dev/null
-  docker inspect fb-pg >/dev/null 2>&1 || \
-    docker run -d --name fb-pg -e POSTGRES_PASSWORD=fb -p 15432:5432 postgres:14 >/dev/null
+  ensure_scratch_container fb-mysql -e MYSQL_ROOT_PASSWORD=fb -p 13306:3306 mysql:8.0
+  ensure_scratch_container fb-pg -e POSTGRES_PASSWORD=fb -p 15432:5432 postgres:14
   for _ in $(seq 1 60); do
     if docker exec fb-mysql mysqladmin ping -uroot -pfb --silent >/dev/null 2>&1 &&
        docker exec fb-pg pg_isready -U postgres >/dev/null 2>&1; then
@@ -52,6 +50,24 @@ up() {
   done
   echo "the servers did not come up" >&2
   return 1
+}
+
+# ensure_scratch_container <name> <docker run args...> puts one scratch server
+# into the running state, whether it has to be created or already exists and is
+# stopped. `docker inspect` only answers whether the container exists, so a
+# container a previous run left behind — every Docker Desktop restart stops
+# both — used to be skipped while nothing listened on its port, and the
+# readiness wait above timed out against a server that was already on disk.
+# Starting a container that is already up is a no-op that exits 0, so calling
+# this on a live pair changes nothing.
+ensure_scratch_container() {
+  local name=$1
+  shift
+  if docker inspect "$name" >/dev/null 2>&1; then
+    docker start "$name" >/dev/null
+    return 0
+  fi
+  docker run -d --name "$name" "$@" >/dev/null
 }
 
 # Every package with an engine arm, and the tests in it that need a server.
