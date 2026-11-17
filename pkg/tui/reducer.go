@@ -5977,8 +5977,8 @@ func (r *Renderer) appendFrameViewportLocked(f Frame) {
 //
 // The gate sits before retainFrameLocked, so the frames one RenderFrame call
 // produces are unaffected by each other: a terminal error is still retained in
-// the conversation and mirrored into the visible subagent view, exactly as
-// before. Only a second call for the same event is dropped.
+// the view it names, exactly as before. Only a second call for the same event is
+// dropped.
 func (r *Renderer) retainCardOnceLocked(f Frame) bool {
 	id := strings.TrimSpace(f.EventID)
 	if id == "" || f.Kind != FrameError {
@@ -6018,18 +6018,20 @@ func (r *Renderer) countNewMessageLocked(f Frame, visible *viewModel, blocksBefo
 // reports whether the visible transcript changed and needs a repaint. Caller
 // holds r.mu.
 func (r *Renderer) retainFrameLocked(f Frame) bool {
-	// Terminal errors with no owner are global: retain them in the primary
-	// transcript and mirror them into the currently visible subagent
-	// transcript — unless that view already ends on the same failure. A
-	// subagent stopped by a usage limit fails the turn that dispatched it with
-	// the very same sentence, so its view would otherwise read the news twice:
-	// once as its own "subagent failed" ending and again as the turn's error.
-	// An error that names the subagent it belongs to is not global
-	// and falls through to the per-agent routing below. A provider
-	// error can reach this point after RunEndedMsg has already rendered this
-	// turn's final Worked for status. Only move the error ahead of that status
-	// when the status is still the transcript tail; once newer blocks exist, the
-	// status belongs to an earlier turn and must remain an immutable boundary.
+	// A terminal error with no owner is the conversation's own: it is what
+	// failed the turn, or something the conversation itself could not do, and
+	// it belongs to the conversation's transcript alone. Each view tells its
+	// own story — a subagent's view holds only the frames that name it, its own
+	// error among them — so the conversation failing says nothing about a
+	// subagent that is still working, and must not appear in its view (owner
+	// 2026-11-17: the views are independent; an error that reaches a subagent's
+	// view without naming it is a mirror, not news).
+	//
+	// A provider error can reach this point after RunEndedMsg has already
+	// rendered this turn's final Worked for status. Only move the error ahead of
+	// that status when the status is still the transcript tail; once newer
+	// blocks exist, the status belongs to an earlier turn and must remain an
+	// immutable boundary.
 	if f.Kind == FrameError && f.AgentID == "" {
 		if n := len(r.vm.blocks); n > 0 {
 			tail := r.vm.blocks[n-1].frame
@@ -6042,11 +6044,6 @@ func (r *Renderer) retainFrameLocked(f Frame) bool {
 			}
 		} else {
 			r.vm.append(f)
-		}
-		if r.activeView != "" {
-			if vm := r.ensurePerAgentVM(r.activeView); !vm.endsOnError(f.Content) {
-				vm.append(f)
-			}
 		}
 		return true
 	}

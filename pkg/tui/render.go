@@ -927,24 +927,23 @@ func (r *Renderer) PrintApprovalConfirmation(agentID, text string, maxLines int,
 }
 
 // FinalizePendingTools marks any in-flight (running or awaiting-approval) tool
-// blocks as canceled. It is called when a run is aborted (e.g. the user
-// cancels a tool approval or interrupts the run with Ctrl+C) so the transcript
-// reflects the final state instead of leaving a stale "Running" frame that
-// never completes. Only affects viewport mode; in non-viewport mode the old
-// frame is already printed and cannot be revised.
+// block of the conversation's own view as canceled. It is called when a run is
+// aborted (e.g. the user cancels a tool approval or interrupts the run with
+// Ctrl+C) so the transcript reflects the final state instead of leaving a stale
+// "Running" frame that never completes. Only affects viewport mode; in
+// non-viewport mode the old frame is already printed and cannot be revised.
+//
+// Only the conversation's view: cancelling the conversation's turn says nothing
+// about a subagent that keeps running behind it, and a card in that agent's view
+// the cancel did not stop must not be marked canceled for it. A subagent's own
+// stale cards are closed by its own ending — FinalizeAgentPendingTools.
 func (r *Renderer) FinalizePendingTools() {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	changed := r.finalizePendingToolsVM(&r.vm)
-	for _, vm := range r.perAgentVM {
-		if r.finalizePendingToolsVM(vm) {
-			changed = true
-		}
-	}
-	if changed {
+	if r.finalizePendingToolsVM(&r.vm) {
 		r.paintViewportLocked()
 	}
 }

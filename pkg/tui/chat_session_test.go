@@ -19679,6 +19679,60 @@ func TestRendererFinalizePendingToolsMarksRunningAsCanceled(t *testing.T) {
 	}
 }
 
+// A cancel of the conversation's turn closes the conversation's own cards. A
+// subagent dispatched in the background keeps running behind it, so the call its
+// view shows in flight was not the one that was cancelled: it stays Running
+// until that agent's own ending settles it.
+func TestFinalizePendingToolsLeavesRunningSubagentCardsAlone(t *testing.T) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+
+	const agentID = "task-explore-3"
+	r.RenderFrame(Frame{
+		Kind:   FrameTool,
+		Title:  "shell",
+		StepID: "primary-call",
+		ToolMeta: tool.ToolMeta{
+			ToolName: "shell",
+			Status:   "running",
+			Input:    map[string]any{"command": "sleep 25"},
+		},
+	})
+	r.RenderFrame(Frame{
+		Kind:    FrameTool,
+		Title:   "shell",
+		StepID:  "subagent-call",
+		AgentID: agentID,
+		ToolMeta: tool.ToolMeta{
+			ToolName: "shell",
+			Status:   "running",
+			Input:    map[string]any{"command": "sleep 25"},
+			AgentID:  agentID,
+		},
+	})
+
+	r.FinalizePendingTools()
+
+	if !toolStatusCanceled(r.vm.blocks[0].frame) {
+		t.Fatalf("the conversation's own pending card stayed %q after its turn was cancelled", r.vm.blocks[0].frame.ToolMeta.Status)
+	}
+	vm := r.perAgentVM[agentID]
+	if vm == nil || len(vm.blocks) != 1 {
+		t.Fatalf("subagent view = %#v", vm)
+	}
+	if got := vm.blocks[0].frame.ToolMeta.Status; got != "running" {
+		t.Fatalf("the conversation's cancel marked the still-running subagent's card %q", got)
+	}
+
+	// Its own ending is what closes it.
+	r.FinalizeAgentPendingTools(agentID)
+	if got := vm.blocks[0].frame.ToolMeta.Status; got != "canceled" {
+		t.Fatalf("the subagent's own ending left its card %q", got)
+	}
+}
+
 // TestRendererFinalizePendingToolsLeavesCompletedToolsUnchanged verifies that
 // FinalizePendingTools does not touch tool frames that are already in a
 // terminal state (completed, failed).
@@ -28641,7 +28695,16 @@ func TestViewportSelectionExtractsOffScreenRows(t *testing.T) {
 	}
 }
 
-func TestViewportTerminalErrorMirrorsIntoActiveSubagentView(t *testing.T) {
+// An ownerless error belongs to the conversation's transcript.
+//
+// It used to be mirrored into whichever subagent view happened to be open, so a
+// conversation whose turn failed painted its error under a subagent's own
+// "subagent failed" and "Worked for" lines, in a view about a different run.
+// The owner's 2026-11-17 ruling that the views are independent revises that
+// contract: a view holds only the frames that name it, so a subagent's own error
+// still lands in its view by AgentID while the conversation's stays in the
+// conversation.
+func TestViewportTerminalErrorStaysOutOfSubagentView(t *testing.T) {
 	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
 		setForcedTermSize(0, 0)
@@ -28670,14 +28733,48 @@ func TestViewportTerminalErrorMirrorsIntoActiveSubagentView(t *testing.T) {
 		t.Fatalf("primary transcript error = %#v", r.vm.blocks)
 	}
 	vm := r.perAgentVM[agentID]
-	if vm == nil || len(vm.blocks) != 2 {
-		t.Fatalf("active subagent VM blocks = %#v", vm)
+	if vm == nil || len(vm.blocks) != 1 {
+		t.Fatalf("the conversation's error was mirrored into the subagent's view: %#v", vm)
 	}
-	if got := vm.blocks[1].frame; got.Kind != FrameError || got.Content != "context_length_exceeded: input too large" {
-		t.Fatalf("mirrored subagent error = %#v", got)
+	if painted := stripAllANSI(strings.Join(renderViewport(vm, 80, 24, 1<<30, DiffThemeDark).lines, "\n")); strings.Contains(painted, "context_length_exceeded") {
+		t.Fatalf("the subagent's viewport painted the conversation's error:\n%s", painted)
 	}
-	if painted := stripAllANSI(out.String()); !strings.Contains(painted, "context_length_exceeded: input too large") {
-		t.Fatalf("active subagent viewport did not repaint error:\n%s", painted)
+}
+
+// The mirrored error used to land after a subagent's closing "Worked for" line,
+// which is what the owner's screenshot showed. With ownerless errors confined to
+// the conversation, that view keeps only its own frames — and the conversation
+// still puts its error ahead of its own turn-final status, the position a reader
+// of a failed turn expects.
+func TestOwnerlessErrorAfterSubagentWorkedLineStaysInPrimary(t *testing.T) {
+	const agentID = "task-explore-2"
+	r := NewRenderer(nil, nil)
+	r.viewportMode = true
+
+	r.RenderFrame(Frame{Kind: FrameTool, StepID: "sub-call", AgentID: agentID, Title: "shell", Final: true,
+		ToolMeta: tool.ToolMeta{ToolName: "shell", Status: "completed", AgentID: agentID}})
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 42m 49s", AgentID: agentID, Final: true})
+	// The conversation's own turn closes behind the subagent that outlived it.
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1s", Final: true})
+
+	r.SetActiveView(agentID)
+	subBefore := len(r.perAgentVM[agentID].blocks)
+	r.RenderFrame(Frame{Kind: FrameError, Title: "error", Content: "token-plan.maas: no such host", Final: true})
+
+	if after := len(r.perAgentVM[agentID].blocks); after != subBefore {
+		t.Fatalf("the conversation's error was appended to the subagent's view (%d -> %d blocks)", subBefore, after)
+	}
+	tail := r.perAgentVM[agentID].blocks[subBefore-1].frame
+	if tail.Title != "Worked for 42m 49s" {
+		t.Fatalf("the subagent's view no longer ends on its own worked line: %#v", tail)
+	}
+
+	blocks := r.vm.blocks
+	if len(blocks) != 2 {
+		t.Fatalf("primary transcript = %#v, want the turn's status and the error", blocks)
+	}
+	if blocks[0].frame.Kind != FrameError || blocks[1].frame.Title != "Worked for 1s" {
+		t.Fatalf("the conversation's error must stay ahead of its turn-final status: %#v", blocks)
 	}
 }
 
@@ -29769,8 +29866,10 @@ func TestUnownedErrorStaysGlobal(t *testing.T) {
 // dispatched it with the very same sentence. With that subagent's view open,
 // the view read "subagent failed: <limit>", its "Worked for" line, and then
 // "error: <limit>" again — the turn's error mirrored in as global news the
-// view had just shown. The view says it once; the primary transcript keeps the
-// turn's error; and a global error that says something else is still mirrored.
+// view had just shown. The view says it once, from its own ending; the primary
+// transcript keeps the turn's error; and an ownerless error saying something
+// else does not enter the view either (owner 2026-11-17: the views are
+// independent, so the conversation's failures stay in the conversation).
 func TestTurnErrorRepeatingSubagentFailureIsNotMirroredTwice(t *testing.T) {
 	setForcedTermSize(80, 24)
 	t.Cleanup(func() {
@@ -29809,8 +29908,11 @@ func TestTurnErrorRepeatingSubagentFailureIsNotMirroredTwice(t *testing.T) {
 	}
 
 	render(red.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: "config reload failed: bad yaml", Timestamp: time.Now()}}))
-	if view := paint(r.perAgentVM[rosterKey]); !strings.Contains(view, "config reload failed: bad yaml") {
-		t.Fatalf("a global error saying something else must still be mirrored into the open view:\n%s", view)
+	if view := paint(r.perAgentVM[rosterKey]); strings.Contains(view, "config reload failed: bad yaml") {
+		t.Fatalf("an ownerless error entered the open subagent view:\n%s", view)
+	}
+	if primary := paint(&r.vm); !strings.Contains(primary, "config reload failed: bad yaml") {
+		t.Fatalf("an ownerless error must still land on the primary transcript:\n%s", primary)
 	}
 }
 
