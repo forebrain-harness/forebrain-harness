@@ -745,6 +745,43 @@ type ConnectWaitSelector interface {
 	AwaitSignIn(done <-chan error) error
 }
 
+// ConnectPanelPage is one stage of a /connect panel as its owner words it: the
+// head, the body that scrolls, the key hint pinned under it, and — while the
+// stage asks for one — the label of its editable field. It is a value, read by
+// the surface on every paint, so a stage that learns something new (a late
+// address, a ticking deadline) repaints by returning different words.
+type ConnectPanelPage struct {
+	Title string
+	Body  string
+	Hint  string
+	// InputLabel names the field this stage asks for, empty when it asks for
+	// none. The surface owns that field's text: what is typed, submitted and
+	// cleared is never the caller's.
+	InputLabel string
+}
+
+// ConnectPanelSelector is an optional capability of a selector that can show a
+// /connect stage as the command panel rather than as transcript text. A
+// sign-in's address, code, callback field, submit failure and fetch state all
+// belong there: written into the conversation they scroll away from the wait
+// that needs them, and the wait then blocks the very input loop that would let
+// the user copy them.
+type ConnectPanelSelector interface {
+	// TryRunConnectPanel owns the terminal from the stage's first paint to its
+	// end. page is called by the surface, outside its render lock, to ask what
+	// the stage says now; done carries the flow's own outcome and is the only
+	// signal that the work finished; submit, when not nil, hands over the
+	// field's text and may block, so it never runs on the paint path.
+	//
+	// handled=false reports no panel capability at all: the caller then takes
+	// its plain-text path exactly as before, and the surface has consumed
+	// nothing. A surface that has the capability but cannot take the terminal
+	// reports handled=true with the error, so a stage is never silently printed
+	// instead of shown.
+	TryRunConnectPanel(ctx context.Context, page func() ConnectPanelPage, done <-chan error,
+		submit func(context.Context, string) error) (handled bool, err error)
+}
+
 func NewSelector(out io.Writer, readLine func(context.Context) (string, error)) Selector {
 	return &lineSelector{out: out, readLine: readLine}
 }

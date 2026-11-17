@@ -130,6 +130,57 @@ func TestVolcengineDevicePollWaitsOutTheIntervalAndTakesTheCredential(t *testing
 	require.Equal(t, int64(900), credential.ExpiresAt-credential.IssuedAt)
 }
 
+// The code's deadline is one value: the page counts down to the moment the poll
+// loop stops asking at, and re-reading it cannot push it out. The clock here
+// moves past that life as soon as the flow has published it, so a poll that took
+// its own deadline from a later reading would keep asking — and the code the user
+// was told to type would outlive the page that showed it.
+func TestVolcengineDeviceInfoUsesPollDeadline(t *testing.T) {
+	stub, waits := newVolcengineStub(t)
+	env := testEnv(t)
+	stub.device = volcengineDeviceAuth{
+		DeviceCode: "device-code-1", UserCode: "ABCD-1234",
+		VerificationURI:         "https://signin.volcengine.com/device",
+		VerificationURIComplete: "https://signin.volcengine.com/device?user_code=ABCD-1234",
+		ExpiresIn:               600, Interval: 5,
+	}
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	readings := 0
+	clock := func() time.Time {
+		readings++
+		if readings == 1 {
+			return start
+		}
+		return start.Add(2 * time.Hour)
+	}
+	previous := newVolcengineSignIn
+	newVolcengineSignIn = func() *volcengineSignIn {
+		return &volcengineSignIn{Transport: stub.server.Client().Transport, Endpoint: stub.server.URL, Now: clock}
+	}
+	t.Cleanup(func() { newVolcengineSignIn = previous })
+
+	login, err := (volcengine{}).Start(context.Background(), env, FlowDeviceCode)
+	require.NoError(t, err)
+	err = login.Wait(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expired")
+
+	// The one deadline the console's ExpiresIn named, published whole.
+	info, ok := login.(DeviceCodeLogin)
+	require.True(t, ok, "the Ark login publishes its device-code snapshot")
+	first := info.DeviceCodeInfo()
+	require.Equal(t, "https://signin.volcengine.com/device?user_code=ABCD-1234", first.AuthorizeURL)
+	require.Equal(t, "ABCD-1234", first.UserCode)
+	require.Equal(t, start.Add(10*time.Minute), first.ExpiresAt)
+	// Reading it again — every repaint of the page does — names the same moment.
+	require.Equal(t, first, info.DeviceCodeInfo())
+
+	// The poll obeyed that deadline instead of taking a new one from the clock it
+	// read afterwards: it never asked the console for a token, and never slept.
+	require.Empty(t, stub.formsFor(volcengineTokenPath))
+	require.Empty(t, *waits)
+}
+
 // A denial and an expired code are the two answers that end the flow instead of
 // waiting: the wording carries the word the surfaces map.
 func TestVolcengineDevicePollEndsOnTheConsolesRefusals(t *testing.T) {
@@ -150,7 +201,8 @@ func TestVolcengineDevicePollEndsOnTheConsolesRefusals(t *testing.T) {
 				ExpiresIn: 600, Interval: 1,
 			}
 			stub.tokens = []stubAnswer{{status: http.StatusBadRequest, body: `{"error":"` + tc.code + `"}`}}
-			_, err := newVolcengineSignIn().poll(context.Background(), stub.device)
+			signIn := newVolcengineSignIn()
+			_, err := signIn.poll(context.Background(), stub.device, signIn.now().Add(10*time.Minute))
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tc.want)
 		})
@@ -168,12 +220,13 @@ func TestVolcengineDevicePollToleratesThenGivesUpOnBlips(t *testing.T) {
 	}
 	stub.tokens = []stubAnswer{blip, blip, blip, blip, blip,
 		{status: http.StatusOK, body: stubTokenBody(stubAccessToken(stubAccessKeyID, stubSecretKey, stubSession), stubRefresh, 900)}}
-	credential, err := newVolcengineSignIn().poll(context.Background(), stub.device)
+	signIn := newVolcengineSignIn()
+	credential, err := signIn.poll(context.Background(), stub.device, signIn.now().Add(10*time.Minute))
 	require.NoError(t, err, "five blips are inside the budget")
 	require.Equal(t, stubAccessKeyID, credential.AccessKeyID)
 
 	stub.tokens = []stubAnswer{blip, blip, blip, blip, blip, blip}
-	_, err = newVolcengineSignIn().poll(context.Background(), stub.device)
+	_, err = signIn.poll(context.Background(), stub.device, signIn.now().Add(10*time.Minute))
 	require.Error(t, err, "the sixth consecutive blip ends the poll")
 }
 

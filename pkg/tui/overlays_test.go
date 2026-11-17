@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/mattn/go-runewidth"
 )
@@ -4223,4 +4225,706 @@ func TestExitPlanPickerLeavesAirAboveTheFilterBar(t *testing.T) {
 	if strings.TrimSpace(lines[question+6]) == "" {
 		t.Fatalf("a second blank under the bar is one too many:\n%s", strings.Join(lines, "\n"))
 	}
+}
+
+// --- /connect panels (plan 312) ---
+
+// connectPanelBox is one running /connect panel as a test drives it: the keys
+// typed into the terminal it owns and the renderer its page is painted on.
+type connectPanelBox struct {
+	sel  *rawSelector
+	keys *os.File
+	r    *Renderer
+}
+
+func newConnectPanelBox(t *testing.T, width, height int) *connectPanelBox {
+	t.Helper()
+	r := newComposerRenderer(t, width, height)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		pr.Close()
+		pw.Close()
+	})
+	return &connectPanelBox{sel: newRawSelector(pr, r), keys: pw, r: r}
+}
+
+func (b *connectPanelBox) typeKeys(t *testing.T, keys string) {
+	t.Helper()
+	if _, err := b.keys.WriteString(keys); err != nil {
+		t.Fatalf("type %q: %v", keys, err)
+	}
+}
+
+// connectPanelResult is what one panel run answered.
+type connectPanelResult struct {
+	handled bool
+	err     error
+}
+
+// start runs the panel in the background, so the test types into it while it
+// owns the terminal.
+func (b *connectPanelBox) start(ctx context.Context, page func() ConnectPanelPage,
+	done <-chan error, submit func(context.Context, string) error) <-chan connectPanelResult {
+	result := make(chan connectPanelResult, 1)
+	go func() {
+		handled, err := b.sel.TryRunConnectPanel(ctx, page, done, submit)
+		result <- connectPanelResult{handled: handled, err: err}
+	}()
+	return result
+}
+
+// finish reads the panel's own answer within a deadline.
+func finishConnectPanel(t *testing.T, result <-chan connectPanelResult) connectPanelResult {
+	t.Helper()
+	select {
+	case got := <-result:
+		return got
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connect panel never returned")
+		return connectPanelResult{}
+	}
+}
+
+// paintedPanel carries needle and is the overlay area's plain text.
+func paintedPanel(t *testing.T, r *Renderer, needle string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.mu.Lock()
+		var b strings.Builder
+		on := r.overlayPanel != nil
+		for _, line := range r.vpLastComposer.lines {
+			b.WriteString(stripAnsi(line))
+			b.WriteByte('\n')
+		}
+		r.mu.Unlock()
+		if !on {
+			if time.Now().After(deadline) {
+				t.Fatalf("no panel is on screen; the overlay area shows nothing (waiting for %q)", needle)
+			}
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		text := b.String()
+		if strings.Contains(text, needle) || time.Now().After(deadline) {
+			if !strings.Contains(text, needle) {
+				t.Fatalf("the panel never showed %q:\n%s", needle, text)
+			}
+			return text
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// panelCellOf returns the screen cell of needle as the renderer itself resolves
+// a press: against the screen it recorded for this moment, not against a row
+// count a test guessed, because a panel opening changes how many rows the
+// transcript keeps.
+func panelCellOf(t *testing.T, r *Renderer, needle string, offset int) (col, row int) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.screenAtLocked(time.Now())
+	for row = 0; row < s.bodyHeight+len(s.composer.lines); row++ {
+		plain := stripAnsi(s.lineAt(row))
+		idx := strings.Index(plain, needle)
+		if idx < 0 {
+			continue
+		}
+		head := []rune(needle)
+		if offset > len(head) {
+			offset = len(head)
+		}
+		col = displayLineWidth(plain[:idx]) + displayLineWidth(string(head[:offset]))
+		return col, row
+	}
+	t.Fatalf("the panel does not show %q on the screen a press resolves against", needle)
+	return 0, 0
+}
+
+// waitForUntil waits until cond holds.
+func waitForUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func devicePage(body string) ConnectPanelPage {
+	return ConnectPanelPage{
+		Title: "Sign in with OpenCode",
+		Body:  body,
+		Hint:  "Enter when signed in · Esc to cancel",
+	}
+}
+
+// transcriptBefore is a conversation the panel must leave exactly as it is.
+func transcriptBefore(t *testing.T, r *Renderer, draft string) string {
+	t.Helper()
+	r.RenderFrame(Frame{Kind: FrameUser, Content: "what is on the screen before /connect", Final: true})
+	r.RenderComposerState(ComposerRenderState{Text: draft, Cursor: intPtr(len([]rune(draft)))})
+	before := strings.Join(r.vpLastRender.lines, "\n") + "\n---\n" + strings.Join(r.vpLastComposer.lines, "\n")
+	return before
+}
+
+func intPtr(i int) *int { return &i }
+
+// The sign-in page is the panel's, and the conversation it was opened over is
+// untouched: no page, no code and no fetch line goes into the transcript while
+// the person works in another window.
+func TestConnectPanelShowsThePageAndLeavesTheTranscript(t *testing.T) {
+	box := newConnectPanelBox(t, 100, 40)
+	before := transcriptBefore(t, box.r, "a draft I was typing")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	page := func() ConnectPanelPage {
+		return devicePage("Opening your browser…\n\nIf it did not open, visit: https://opencode.ai/auth\n\nCode:  QK7M-2PLX")
+	}
+	result := box.start(ctx, page, done, nil)
+
+	text := paintedPanel(t, box.r, "QK7M-2PLX")
+	for _, want := range []string{"Sign in with OpenCode", "https://opencode.ai/auth", "Code: QK7M-2PLX", "Enter when signed in · Esc to cancel"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("panel = %q, want it to carry %q", text, want)
+		}
+	}
+	after := strings.Join(box.r.vpLastRender.lines, "\n") + "\n---\n" + strings.Join(box.r.vpLastComposer.lines, "\n")
+	if strings.Count(after, "what is on the screen before /connect") != 1 {
+		t.Fatalf("the conversation above the panel changed:\n%s", after)
+	}
+	if strings.Contains(strings.SplitN(after, "\n---\n", 2)[0], "QK7M-2PLX") {
+		t.Fatalf("the code reached the transcript:\n%s", after)
+	}
+	if draftKept := box.r.composerState.Text; draftKept != "a draft I was typing" {
+		t.Fatalf("composer draft = %q, want it untouched", draftKept)
+	}
+	if before == after {
+		t.Fatal("the panel painted nothing at all")
+	}
+	// The flow's own outcome ends the page; no key is needed.
+	done <- errors.New("the console said no")
+	got := finishConnectPanel(t, result)
+	if !got.handled || got.err == nil || got.err.Error() != "the console said no" {
+		t.Fatalf("panel = %+v, want the flow's own error", got)
+	}
+	if text := box.r.overlayPanel; text != nil {
+		t.Fatal("the panel was left on screen after it ended")
+	}
+}
+
+// The code on the page is the panel's text, so a drag over it selects and copies
+// it exactly as transcript text does — and a repaint on the next tick keeps the
+// page it copied from.
+func TestConnectPanelCopiesTheCodeWhileTheFlowRuns(t *testing.T) {
+	prevClipboard := clipboardWriteText
+	clipboardWriteText = func(context.Context, string) error { return nil }
+	t.Cleanup(func() { clipboardWriteText = prevClipboard })
+
+	box := newConnectPanelBox(t, 100, 40)
+	transcriptBefore(t, box.r, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	// The stage's words are read by the panel's goroutine and rewritten by the
+	// test, so they travel through an atomic value.
+	var body atomic.Value
+	body.Store("If it did not open, visit: https://opencode.ai/auth\n\nCode: QK7M-2PLX")
+	result := box.start(ctx, func() ConnectPanelPage { return devicePage(body.Load().(string)) }, done, nil)
+	paintedPanel(t, box.r, "QK7M-2PLX")
+
+	col, row := panelCellOf(t, box.r, "QK7M-2PLX", 0)
+	// sgrDrag builds 1-based reports, as a terminal sends them.
+	if _, err := box.keys.Write(sgrDrag(col+1, row+1, len("QK7M-2PLX"))); err != nil {
+		t.Fatalf("write drag: %v", err)
+	}
+	waitForUntil(t, "the release to copy the code", func() bool {
+		return strings.Contains(selectCopiedText(box.r), "QK7M-2PLX")
+	})
+	if notice := copyNotice(box.r); !strings.HasPrefix(notice, "copied ") {
+		t.Fatalf("footer notice = %q, want the release's copy notice", notice)
+	}
+	// A tick that changes nothing on an unchanged page must not disturb it, and
+	// a changed one must repaint — the countdown case.
+	body.Store(body.Load().(string) + "\n\nWaiting for you to confirm in the browser · expires in 9:41")
+	paintedPanel(t, box.r, "expires in 9:41")
+	if text := paintedPanel(t, box.r, "QK7M-2PLX"); !strings.Contains(text, "Code: QK7M-2PLX") {
+		t.Fatalf("panel = %q, want the page still showing the code", text)
+	}
+	box.typeKeys(t, "\x1b")
+	if got := finishConnectPanel(t, result); !errors.Is(got.err, ErrCancelled) {
+		t.Fatalf("panel = %+v, want ErrCancelled for a bare Esc", got)
+	}
+	if depth := interactiveInputPauseDepth.Load(); depth != 0 {
+		t.Fatalf("input pause depth = %d, want the terminal handed back", depth)
+	}
+}
+
+// A page with no field cannot be confirmed from here: Enter is never what says
+// the sign-in worked, so the flow's own outcome stays the only end.
+func TestConnectPanelEnterDoesNotConfirmAPageWithoutAField(t *testing.T) {
+	box := newConnectPanelBox(t, 100, 40)
+	transcriptBefore(t, box.r, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	var submits atomic.Int64
+	result := box.start(ctx, func() ConnectPanelPage { return devicePage("Code: QK7M-2PLX") }, done,
+		func(context.Context, string) error { submits.Add(1); return nil })
+	paintedPanel(t, box.r, "QK7M-2PLX")
+	box.typeKeys(t, "\r\r\r")
+	// Enter must not end the panel: it is still painted a tick later...
+	time.Sleep(150 * time.Millisecond)
+	if got := submits.Load(); got != 0 {
+		t.Fatalf("submits = %d, want none from a page with no field", got)
+	}
+	paintedPanel(t, box.r, "QK7M-2PLX")
+	done <- nil
+	if got := finishConnectPanel(t, result); got.err != nil {
+		t.Fatalf("panel = %+v, want the flow's own success", got)
+	}
+}
+
+// The callback field is the panel's, and everything a person does in it — typing,
+// the arrows, backspace, delete, a selection, a paste, a wide character — lands
+// in one text the flow is handed once.
+func TestConnectPanelEditsTheCallbackField(t *testing.T) {
+	box := newConnectPanelBox(t, 100, 40)
+	transcriptBefore(t, box.r, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	submitted := make(chan string, 1)
+	page := func() ConnectPanelPage {
+		return ConnectPanelPage{
+			Title:      "Sign in with ChatGPT",
+			Body:       "Open this URL on any device: https://auth.openai.com/authorize?state=synthetic\n\nSign in, then paste the address your browser ended on.",
+			Hint:       "Enter to submit · Esc to cancel",
+			InputLabel: "Paste callback URL",
+		}
+	}
+	result := box.start(ctx, page, done, func(_ context.Context, pasted string) error {
+		submitted <- pasted
+		return nil
+	})
+	paintedPanel(t, box.r, "Paste callback URL")
+
+	box.typeKeys(t, "http://127.0.0.1:9/cb?code=ab界c")
+	// The arrows and the deletions act at the caret, the way the plain Input
+	// pages do: one rune back, delete forward, then space and paste the rest.
+	box.typeKeys(t, "\x1b[D\x7f")           // left, backspace
+	box.typeKeys(t, "\x1b[3~")              // delete
+	box.typeKeys(t, "X")                    // typed at the caret
+	box.typeKeys(t, "\x1b[200~YZ\x1b[201~") // bracketed paste
+	paintedPanel(t, box.r, "Paste callback URL")
+	box.typeKeys(t, "\r")
+
+	var got string
+	select {
+	case got = <-submitted:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the panel never submitted; it shows:\n%s", paintedPanel(t, box.r, "Paste callback URL"))
+	}
+	// The typed text lost its last rune to the backspace and its next one to the
+	// delete, and took X plus the pasted YZ before the Enter.
+	const want = "http://127.0.0.1:9/cb?code=abXYZ"
+	if got != want {
+		t.Fatalf("submitted %q, want %q", got, want)
+	}
+	if text := paintedPanel(t, box.r, "Paste callback URL"); strings.Contains(text, "That callback") {
+		t.Fatalf("panel = %q, want no rejection of an accepted address", text)
+	}
+	done <- nil
+	if got := finishConnectPanel(t, result); got.err != nil {
+		t.Fatalf("panel = %+v", got)
+	}
+}
+
+// A rejected paste leaves the field editable and says one safe line: the flow's
+// own error can quote the address, which carries a short-lived authorization
+// code, so it never reaches the panel.
+func TestConnectPanelRejectionKeepsTheFieldAndHidesTheError(t *testing.T) {
+	box := newConnectPanelBox(t, 100, 40)
+	transcriptBefore(t, box.r, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	var attempts atomic.Int64
+	page := func() ConnectPanelPage {
+		return ConnectPanelPage{
+			Title:      "Sign in with ChatGPT",
+			Body:       "https://auth.openai.com/authorize?state=synthetic",
+			Hint:       "Enter to submit · Esc to cancel",
+			InputLabel: "Paste callback URL",
+		}
+	}
+	result := box.start(ctx, page, done, func(_ context.Context, pasted string) error {
+		if attempts.Add(1) == 1 {
+			return errors.New("that address did not belong: code=synthetic-secret")
+		}
+		return nil
+	})
+	paintedPanel(t, box.r, "Paste callback URL")
+	box.typeKeys(t, "http://127.0.0.1:9/cb?code=synthetic-secret\r")
+	text := paintedPanel(t, box.r, "That callback was not accepted")
+	if strings.Contains(text, "did not belong") {
+		t.Fatalf("panel = %q, want the flow's error text kept out of it", text)
+	}
+	// Still editable: the corrected address replaces what was typed.
+	box.typeKeys(t, "\x15")
+	for range "http://127.0.0.1:9/cb?code=synthetic-secret" {
+		box.typeKeys(t, "\x7f")
+	}
+	box.typeKeys(t, "http://127.0.0.1:9/cb?code=synthetic-next\r")
+	waitForUntil(t, "the corrected address to be accepted", func() bool {
+		r := box.r
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.overlayPanel != nil && r.overlayPanel.field == nil
+	})
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("submits = %d, want the rejected one and its correction", got)
+	}
+	done <- nil
+	if got := finishConnectPanel(t, result); got.err != nil {
+		t.Fatalf("panel = %+v", got)
+	}
+}
+
+// Esc and the caller's context are the two ways a person leaves; both release
+// the terminal, and a submit still in flight is cancelled rather than left to
+// finish into a panel that is gone.
+func TestConnectPanelEscapeAndContextReleaseTheStage(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		leave func(box *connectPanelBox, cancel context.CancelFunc, t *testing.T)
+		want  func(err error) bool
+	}{
+		{"escape", func(box *connectPanelBox, _ context.CancelFunc, t *testing.T) { box.typeKeys(t, "\x1b") }, func(err error) bool { return errors.Is(err, ErrCancelled) }},
+		{"context", func(_ *connectPanelBox, cancel context.CancelFunc, _ *testing.T) { cancel() }, func(err error) bool { return errors.Is(err, context.Canceled) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			box := newConnectPanelBox(t, 100, 40)
+			transcriptBefore(t, box.r, "")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			started := make(chan struct{}, 1)
+			submitted := make(chan error, 1)
+			page := func() ConnectPanelPage {
+				return ConnectPanelPage{
+					Title:      "Sign in with ChatGPT",
+					Body:       "https://auth.openai.com/authorize?state=synthetic",
+					Hint:       "Enter to submit · Esc to cancel",
+					InputLabel: "Paste callback URL",
+				}
+			}
+			result := box.start(ctx, page, done, func(ctx context.Context, _ string) error {
+				started <- struct{}{}
+				<-ctx.Done() // a submit the flow has not answered yet
+				submitted <- ctx.Err()
+				return ctx.Err()
+			})
+			paintedPanel(t, box.r, "Paste callback URL")
+			box.typeKeys(t, "http://127.0.0.1:9/cb?code=synthetic\r")
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the panel never handed the address to the flow")
+			}
+			tc.leave(box, cancel, t)
+			got := finishConnectPanel(t, result)
+			if !got.handled || !tc.want(got.err) {
+				t.Fatalf("panel = %+v, want the person's own end", got)
+			}
+			select {
+			case err := <-submitted:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("submit ended with %v, want its context cancelled", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the submit in flight was left running after the panel closed")
+			}
+			if depth := interactiveInputPauseDepth.Load(); depth != 0 {
+				t.Fatalf("input pause depth = %d, want the terminal handed back", depth)
+			}
+		})
+	}
+}
+
+// Enter while a submit is in flight does not start another one: the panel keeps
+// one submission at a time, and the second Enter waits for the answer.
+func TestConnectPanelSubmitsOnceWhileItIsInFlight(t *testing.T) {
+	box := newConnectPanelBox(t, 100, 40)
+	transcriptBefore(t, box.r, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	var calls atomic.Int64
+	release := make(chan struct{})
+	result := box.start(ctx, func() ConnectPanelPage {
+		return ConnectPanelPage{Title: "Sign in with ChatGPT", Hint: "Enter to submit · Esc to cancel", InputLabel: "Paste callback URL"}
+	}, done, func(context.Context, string) error {
+		calls.Add(1)
+		<-release
+		return nil
+	})
+	paintedPanel(t, box.r, "Paste callback URL")
+	box.typeKeys(t, "http://127.0.0.1:9/cb?code=synthetic\r\r\r")
+	time.Sleep(100 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("submits = %d, want one at a time", got)
+	}
+	close(release)
+	waitForUntil(t, "the accepted submit to clear the field", func() bool {
+		box.r.mu.Lock()
+		defer box.r.mu.Unlock()
+		return box.r.overlayPanel != nil && box.r.overlayPanel.field == nil
+	})
+	done <- nil
+	if got := finishConnectPanel(t, result); got.err != nil {
+		t.Fatalf("panel = %+v", got)
+	}
+}
+
+// A surface with no panel capability is left completely alone: the page is never
+// asked for, the outcome is never consumed, and nothing is painted, so the caller
+// can take its plain-text path.
+func TestConnectPanelWithoutACapableSurfaceIsUnhandled(t *testing.T) {
+	out := &bytes.Buffer{}
+	plain := NewRenderer(out, out) // no viewport: no panel area to paint into
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+	sel := newRawSelector(pr, plain)
+	asked := 0
+	done := make(chan error, 1)
+	done <- nil
+	handled, err := sel.TryRunConnectPanel(context.Background(), func() ConnectPanelPage {
+		asked++
+		return devicePage("Code: QK7M-2PLX")
+	}, done, nil)
+	if handled || err != nil {
+		t.Fatalf("handled=%t err=%v, want the plain-text path", handled, err)
+	}
+	if asked != 0 {
+		t.Fatalf("the page was asked for %d times, want none", asked)
+	}
+	if len(done) != 1 {
+		t.Fatal("the panel consumed the flow's outcome")
+	}
+	if out.String() != "" {
+		t.Fatalf("output = %q, want nothing painted", out.String())
+	}
+}
+
+// The onboarding's own selector shows the same page: a standalone command owns
+// the whole screen, and its panel is that screen rather than a viewport overlay.
+func TestConnectPanelStandaloneShowsTheSamePage(t *testing.T) {
+	out := &lockedBuffer{}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+	sel := newStandaloneRawSelector(pr, out)
+	setForcedTermSize(80, 24)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
+	done := make(chan error, 1)
+	result := make(chan connectPanelResult, 1)
+	go func() {
+		handled, err := sel.TryRunConnectPanel(context.Background(),
+			func() ConnectPanelPage { return devicePage("Code: QK7M-2PLX") }, done, nil)
+		result <- connectPanelResult{handled: handled, err: err}
+	}()
+	waitForUntil(t, "the standalone page", func() bool {
+		return strings.Contains(out.String(), "QK7M-2PLX")
+	})
+	if text := out.String(); !strings.Contains(text, "Sign in with OpenCode") {
+		t.Fatalf("page = %q, want its title", text)
+	}
+	if _, err := pw.Write([]byte{0x1b}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := finishConnectPanel(t, result); !got.handled || !errors.Is(got.err, ErrCancelled) {
+		t.Fatalf("panel = %+v, want ErrCancelled for a bare Esc", got)
+	}
+}
+
+// Closing the terminal under the panel is an error the caller hears: the panel
+// comes back, clears itself and hands the input back, instead of parking on an fd
+// nobody will ever type into.
+func TestConnectPanelEndsWhenItsTerminalGoesAway(t *testing.T) {
+	box := newConnectPanelBox(t, 100, 40)
+	transcriptBefore(t, box.r, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	result := box.start(ctx, func() ConnectPanelPage { return devicePage("Code: QK7M-2PLX") }, done, nil)
+	paintedPanel(t, box.r, "QK7M-2PLX")
+
+	box.keys.Close()
+	got := finishConnectPanel(t, result)
+	if !got.handled {
+		t.Fatalf("panel = %+v, want the stage handled by the terminal that owned it", got)
+	}
+	if got.err == nil {
+		t.Fatal("the panel reported no error after its terminal went away")
+	}
+	if text := paintedPanelText(box.r); text != "" {
+		t.Fatalf("the panel was left on screen after its terminal went away:\n%s", text)
+	}
+	if depth := interactiveInputPauseDepth.Load(); depth != 0 {
+		t.Fatalf("input pause depth = %d, want the terminal handed back", depth)
+	}
+	if text := transcriptText(box.r); strings.Contains(text, "QK7M-2PLX") {
+		t.Fatalf("transcript = %q, want the page kept out of it", text)
+	}
+}
+
+// A surface that can show a panel and cannot take the terminal says so: the
+// stage is reported as handled and refused, never quietly printed into the
+// conversation instead — and the page is not even asked for, because nothing was
+// consumed or drawn.
+func TestConnectPanelReportsBusyInputInsteadOfPrinting(t *testing.T) {
+	box := newConnectPanelBox(t, 100, 40)
+	transcriptBefore(t, box.r, "")
+	done := make(chan error, 1)
+	asked := 0
+	// The lock acquireComposerInput TryLocks is held by what stands for another
+	// modal in front of the terminal.
+	stdinReadMu.Lock()
+	t.Cleanup(stdinReadMu.Unlock)
+
+	handled, err := box.sel.TryRunConnectPanel(context.Background(), func() ConnectPanelPage {
+		asked++
+		return devicePage("Code: QK7M-2PLX")
+	}, done, nil)
+	if !handled {
+		t.Fatalf("handled=%t, want the capability reported even while the terminal is held", handled)
+	}
+	if !errors.Is(err, errStdinBusy) {
+		t.Fatalf("err=%v, want errStdinBusy", err)
+	}
+	if asked != 0 {
+		t.Fatalf("the page was asked for %d times, want none before a terminal is held", asked)
+	}
+	if text := paintedPanelText(box.r); text != "" {
+		t.Fatalf("panel = %q, want nothing drawn over the conversation", text)
+	}
+	if text := transcriptText(box.r); strings.Contains(text, "QK7M-2PLX") || strings.Contains(text, "Sign in with") {
+		t.Fatalf("transcript = %q, want the page kept out of it", text)
+	}
+	if depth := interactiveInputPauseDepth.Load(); depth != 0 {
+		t.Fatalf("input pause depth = %d, want it untouched", depth)
+	}
+}
+
+// connectPanelPreviewFixture is one previewed /connect panel with a synthetic
+// sign-in behind it: no account, no network, nothing but the page a real flow
+// would paint. Every mode but the model fetch is the production page builder over
+// a placeholder login, so the preview draws the same words the app does.
+func connectPanelPreviewFixture(mode string) (func() ConnectPanelPage, func(context.Context, string) error) {
+	const address = "https://signin.example.test/authorize?user_code=QK7M-2PLX"
+	login := newPanelLogin(address, "")
+	stage := func(label, flow string) *signInPanel {
+		return &signInPanel{label: label, flow: flow, login: login, browser: &connectBrowser{}}
+	}
+	switch mode {
+	case "ark-local", "ark-headless":
+		login.publish(address, "QK7M-2PLX")
+		login.expires = time.Now().Add(9*time.Minute + 41*time.Second)
+		page := stage("Volcengine Ark", subscription.FlowDeviceCode)
+		return page.page, nil
+	case "browser":
+		page := stage("ChatGPT", subscription.FlowBrowserCallback)
+		return page.page, nil
+	case "paste":
+		page := stage("ChatGPT", subscription.FlowPasteCallback)
+		page.pasting.Store(true)
+		return page.page, page.pasteCallback
+	case "fetch":
+		return func() ConnectPanelPage {
+			return ConnectPanelPage{
+				Title: "OpenCode",
+				Body:  "Fetching this account's available models…",
+				Hint:  "Esc to cancel",
+			}
+		}, nil
+	}
+	return nil, nil
+}
+
+// TestConnectPanelInteractivePreview draws one /connect panel on the terminal the
+// test runs in. It is opt-in twice over — an explicit mode and a real terminal —
+// because it is the screen, not a buffer: the automated layout tests pin the same
+// page, and this one is what a person looks at before believing them.
+//
+//	FOREBRAIN_CONNECT_PANEL_PREVIEW=ark-headless go test -c -tags fts5 -o tui.test ./pkg/tui
+//	FOREBRAIN_CONNECT_PANEL_PREVIEW=ark-headless ./tui.test -test.run '^TestConnectPanelInteractivePreview$' -test.v
+//
+// The fake flow finishes on its own after 90 seconds; Esc or Ctrl+C leaves it at
+// once. Nothing here reaches a provider: the login, the address and the code are
+// placeholders.
+func TestConnectPanelInteractivePreview(t *testing.T) {
+	mode := strings.TrimSpace(os.Getenv("FOREBRAIN_CONNECT_PANEL_PREVIEW"))
+	if mode == "" {
+		t.Skip("set FOREBRAIN_CONNECT_PANEL_PREVIEW=ark-local|ark-headless|browser|paste|fetch to draw the panel on this terminal")
+	}
+	page, submit := connectPanelPreviewFixture(mode)
+	if page == nil {
+		t.Fatalf("unknown preview mode %q", mode)
+	}
+	session, err := newRawTerminalSession(os.Stdin)
+	if err != nil || session == nil {
+		t.Skipf("the preview needs a terminal on stdin: %v", err)
+	}
+	if err := session.EnterRaw(); err != nil {
+		t.Fatalf("raw mode: %v", err)
+	}
+	defer session.Restore()
+	render := NewRenderer(os.Stdout, os.Stdout)
+	render.EnableViewportMode()
+	defer render.DisableViewportMode()
+	// The conversation the panel lives over: a chat block and a draft, both of
+	// which the page must leave where they are.
+	render.RenderFrame(Frame{Kind: FrameUser, Content: "preview: the conversation keeps its own text", Final: true})
+	draft := "a draft while /connect runs"
+	render.RenderComposerState(ComposerRenderState{Text: draft, Cursor: intPtr(len([]rune(draft)))})
+	prevClipboard := clipboardWriteText
+	clipboardWriteText = func(context.Context, string) error { return nil }
+	defer func() { clipboardWriteText = prevClipboard }()
+	prevOpener, prevBrowser := browserOpener, localBrowser
+	browserOpener = func(string, func(error)) error { return nil }
+	// The paste flow is the one a machine without its own browser drives: this
+	// preview therefore has none, and the page says where to open the address.
+	localBrowser = func() bool { return mode != "ark-headless" && mode != "paste" }
+	defer func() { browserOpener, localBrowser = prevOpener, prevBrowser }()
+
+	// The flow's own completion, so the page never advances on an Enter the
+	// person pressed to see what it does.
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(90 * time.Second)
+		done <- nil
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	sel := newRawSelector(os.Stdin, render)
+	handled, panelErr := sel.TryRunConnectPanel(ctx, page, done, submit)
+	if !handled {
+		t.Fatalf("this terminal cannot show a panel: %v", panelErr)
+	}
+	t.Logf("preview %q ended with %v", mode, panelErr)
 }

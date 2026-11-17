@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
@@ -136,9 +137,12 @@ func (volcengine) Start(ctx context.Context, env Env, flow string) (Login, error
 		if err != nil {
 			return err
 		}
-		l.setURL(device.browserURL())
-		l.setUserCode(strings.TrimSpace(device.UserCode))
-		credential, err := signIn.poll(flowCtx, device)
+		// One deadline, taken here and handed to the poll loop: the countdown a
+		// surface paints counts to the same moment the flow stops asking, so a
+		// repaint cannot extend a code's life.
+		deadline := signIn.now().Add(time.Duration(device.ExpiresIn) * time.Second)
+		l.setDeviceCode(device.browserURL(), strings.TrimSpace(device.UserCode), deadline)
+		credential, err := signIn.poll(flowCtx, device, deadline)
 		if err != nil {
 			return err
 		}

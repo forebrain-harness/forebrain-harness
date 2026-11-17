@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -303,6 +305,10 @@ type fakeSubscription struct {
 	flows []string
 	check turn.SignInCheck
 	login *fakeLogin
+	// panelLogin is a sign-in a test drives from another goroutine: the values it
+	// publishes are read under a lock. When it is set, Start hands it back
+	// instead of login.
+	panelLogin *panelLogin
 
 	offers      []subscription.Offer
 	offersFn    func(call int) ([]subscription.Offer, error)
@@ -329,6 +335,9 @@ func (s *fakeSubscription) Probe(context.Context, subscription.Env) turn.SignInC
 func (s *fakeSubscription) Start(_ context.Context, _ subscription.Env, flow string) (subscription.Login, error) {
 	s.startCalls++
 	s.startedFlow = flow
+	if s.panelLogin != nil {
+		return s.panelLogin, nil
+	}
 	if s.login == nil {
 		s.login = newFakeLogin("https://signin.example.test/authorize", "")
 	}
@@ -2353,5 +2362,889 @@ func TestConfigureSubscriptionPlainSelectorStillWaits(t *testing.T) {
 	}
 	if opts.Provider != "opencode-go" || opts.Model != "glm-5.3" {
 		t.Fatalf("options = %+v, want the plan's default offer", opts)
+	}
+}
+
+// --- /connect panels: the surface a real terminal drives (plan 312) ---
+
+// connectPanel is /connect as a real terminal has it: the raw selector's own
+// pages, reading the keys a test types into its pipe, over a viewport renderer
+// the test reads the screen from. A sign-in's own address, code, callback field
+// and fetch state belong on that screen, never in the transcript.
+type connectPanel struct {
+	*rawSelector
+	keys   *os.File
+	render *Renderer
+}
+
+func newConnectPanel(t *testing.T, width, height int) *connectPanel {
+	t.Helper()
+	render := newComposerRenderer(t, width, height)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		pr.Close()
+		pw.Close()
+	})
+	return &connectPanel{rawSelector: newRawSelector(pr, render), keys: pw, render: render}
+}
+
+// typeKeys types what a person presses into the terminal the selector holds.
+func (p *connectPanel) typeKeys(t *testing.T, keys string) {
+	t.Helper()
+	if _, err := p.keys.WriteString(keys); err != nil {
+		t.Fatalf("type %q: %v", keys, err)
+	}
+}
+
+// setupAnswer is what one setup run returned.
+type setupAnswer struct {
+	opts process.Options
+	ok   bool
+	err  error
+}
+
+// start runs the setup on this subscription from its sign-in page.
+func startConnectSetup(t *testing.T, cfg PromptConfig, sub *fakeSubscription) <-chan setupAnswer {
+	t.Helper()
+	withSubscriptions(t, sub)
+	setup := newLLMSetup(cfg)
+	setup.setChoice(subscriptionChoice(sub))
+	setup.page = setupPageCredentials
+	answer := make(chan setupAnswer, 1)
+	go func() {
+		opts, ok, err := setup.run()
+		answer <- setupAnswer{opts: opts, ok: ok, err: err}
+	}()
+	return answer
+}
+
+// finish ends a run: Esc is the person leaving the page they are on, and closing
+// the pipe is the terminal going away, which ends whatever page the setup steps
+// back to.
+func (p *connectPanel) finish(t *testing.T, answer <-chan setupAnswer) setupAnswer {
+	t.Helper()
+	p.typeKeys(t, "\x1b")
+	p.keys.Close()
+	select {
+	case got := <-answer:
+		return got
+	case <-time.After(10 * time.Second):
+		t.Fatal("the setup did not return after the sign-in page was closed")
+		return setupAnswer{}
+	}
+}
+
+// transcriptText is everything the retained transcript holds: the container a
+// sign-in's own pages must stay out of.
+func transcriptText(r *Renderer) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var b strings.Builder
+	for _, block := range r.vm.blocks {
+		b.WriteString(stripAnsi(block.frame.Content))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// paintedPanelText is the panel the overlay area is showing, empty when none is.
+func paintedPanelText(r *Renderer) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.overlayPanel == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, line := range r.vpLastComposer.lines {
+		b.WriteString(stripAnsi(line))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// waitForPanelText waits until the painted panel carries needle and answers the
+// panel's text either way, so the caller decides what a miss means.
+func waitForPanelText(r *Renderer, needle string) string {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		text := paintedPanelText(r)
+		if strings.Contains(text, needle) || time.Now().After(deadline) {
+			return text
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// confirmPageHints are the key hints the confirmation a sign-in asks before it
+// starts draws, one per answer it opens on. Its text also names the provider
+// ("Sign in with <label>"), so a test that waits for a needle the confirmation
+// page happens to carry gets that page back instead of the sign-in page — and
+// then asserts on the wrong one. It is a race, so it only shows up sometimes.
+var confirmPageHints = []string{
+	"Y to confirm · N or Enter to decline",
+	"Y or Enter to confirm · N to decline",
+}
+
+// waitForSignInPage is waitForPanelText for a page that comes after that
+// confirmation: it refuses to hand the confirmation back, so a needle that is not
+// unique to the sign-in page fails loudly with the reason instead of being
+// asserted on.
+func waitForSignInPage(t *testing.T, r *Renderer, needle string) string {
+	t.Helper()
+	text := waitForPanelText(r, needle)
+	for _, hint := range confirmPageHints {
+		if strings.Contains(text, hint) {
+			t.Fatalf("the panel is still the confirmation page; pass a needle only the sign-in page carries (waiting for %q):\n%s", needle, text)
+		}
+	}
+	return text
+}
+
+// waitUntil waits until cond holds, and reports whether it did.
+func waitUntil(cond func() bool) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if cond() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// panelLogin is a sign-in the setup reads while a test drives it: the flow runs
+// in the setup's goroutine and the test publishes what it learns, so every field
+// is behind the lock.
+type panelLogin struct {
+	mu        sync.Mutex
+	url       string
+	code      string
+	expires   time.Time
+	submitted []string
+	canceled  bool
+	release   chan error
+}
+
+func newPanelLogin(url, code string) *panelLogin {
+	return &panelLogin{url: url, code: code, release: make(chan error, 1)}
+}
+
+// publish is the flow learning what its provider answered, later than it
+// started.
+func (l *panelLogin) publish(url, code string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.url, l.code = url, code
+}
+
+func (l *panelLogin) AuthorizeURL() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.url
+}
+
+func (l *panelLogin) UserCode() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.code
+}
+
+// DeviceCodeInfo is the whole snapshot a page reads to show an expiry, read under
+// one lock so a late address and its deadline cannot be paired with each other's
+// stale half.
+func (l *panelLogin) DeviceCodeInfo() subscription.DeviceCodeInfo {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return subscription.DeviceCodeInfo{AuthorizeURL: l.url, UserCode: l.code, ExpiresAt: l.expires}
+}
+
+func (l *panelLogin) Submit(_ context.Context, pasted string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.submitted = append(l.submitted, pasted)
+	return nil
+}
+
+func (l *panelLogin) Wait(ctx context.Context) error {
+	select {
+	case err := <-l.release:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (l *panelLogin) Cancel() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.canceled = true
+}
+
+func (l *panelLogin) sent() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.submitted...)
+}
+
+// A device-code sign-in's address and code are the panel's: printed into the
+// transcript they scroll away from the wait that needs them, which is the
+// reported bug — and it is the same for every subscription, not just Ark's.
+func TestConnectSetupPanelDeviceSignInStaysInThePanel(t *testing.T) {
+	sub := openCodeLike()
+	opened := browserMachine(t)
+	sub.panelLogin = newPanelLogin("https://opencode.ai/auth", "QK7M-2PLX")
+	panel := newConnectPanel(t, 100, 40)
+	cfg := setupTestConfig(t, panel)
+	cfg.Output = panel.render.OutputWriter()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cfg.Context = ctx
+	answer := startConnectSetup(t, cfg, sub)
+
+	panel.typeKeys(t, "y\r") // the confirmation page opens the sign-in
+	shown := waitForSignInPage(t, panel.render, "QK7M-2PLX")
+	failure := ""
+	if !strings.Contains(shown, "QK7M-2PLX") {
+		failure = fmt.Sprintf("the sign-in panel never showed the device code; the page went to the transcript instead:\n%s", transcriptText(panel.render))
+	} else if text := transcriptText(panel.render); strings.Contains(text, "QK7M-2PLX") || strings.Contains(text, "https://opencode.ai/auth") {
+		failure = fmt.Sprintf("the sign-in page was also written into the transcript:\n%s", text)
+	}
+	got := panel.finish(t, answer)
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	if len(*opened) != 1 || (*opened)[0] != "https://opencode.ai/auth" {
+		t.Fatalf("opened %v, want the sign-in page opened once", *opened)
+	}
+	if sub.offerCalls != 0 || len(sub.provisioned) != 0 || got.ok {
+		t.Fatalf("offers = %d provisioned = %d ok = %t, want the abandoned sign-in to write nothing", sub.offerCalls, len(sub.provisioned), got.ok)
+	}
+}
+
+// The paste flow keeps the address, the instruction and the field in one panel:
+// the address in the transcript is what the person has to copy back by hand, so
+// splitting them is the same bug in another flow.
+func TestConnectSetupPanelPasteSignInStaysInThePanel(t *testing.T) {
+	sub := chatGPTLike()
+	opened := headlessMachine(t)
+	sub.panelLogin = newPanelLogin("https://auth.openai.com/authorize?state=abc", "")
+	panel := newConnectPanel(t, 100, 40)
+	cfg := setupTestConfig(t, panel)
+	cfg.Output = panel.render.OutputWriter()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cfg.Context = ctx
+	answer := startConnectSetup(t, cfg, sub)
+
+	panel.typeKeys(t, "y\r")
+	shown := waitForSignInPage(t, panel.render, "auth.openai.com")
+	failure := ""
+	if !strings.Contains(shown, "auth.openai.com") {
+		failure = fmt.Sprintf("the paste panel never showed the address to open:\n%s", transcriptText(panel.render))
+	} else if text := transcriptText(panel.render); strings.Contains(text, "auth.openai.com") {
+		failure = fmt.Sprintf("the address went to the transcript as well:\n%s", text)
+	}
+	if failure == "" {
+		const callback = "http://127.0.0.1:9/auth/callback?code=synthetic"
+		panel.typeKeys(t, callback+"\r")
+		if !waitUntil(func() bool { return len(sub.panelLogin.sent()) == 1 }) {
+			failure = fmt.Sprintf("the panel never handed the pasted address to the flow; it shows:\n%s", paintedPanelText(panel.render))
+		} else if sent := sub.panelLogin.sent(); sent[0] != callback {
+			failure = fmt.Sprintf("submitted %q, want the pasted address", sent)
+		} else if text := paintedPanelText(panel.render); text == "" {
+			failure = "the panel closed on submit; the sign-in is still waiting for its turnaround"
+		}
+	}
+	got := panel.finish(t, answer)
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	if len(*opened) != 0 {
+		t.Fatalf("opened %v, want no browser on a machine that pastes the callback", *opened)
+	}
+	if sub.offerCalls != 0 || len(sub.provisioned) != 0 || got.ok {
+		t.Fatalf("offers = %d provisioned = %d ok = %t, want no model picked before the flow finishes", sub.offerCalls, len(sub.provisioned), got.ok)
+	}
+}
+
+// Fetching a saved account's models is a /connect step with a command panel's
+// status, and Esc cancels the request without signing in again.
+func TestConnectSetupPanelFetchStaysInThePanel(t *testing.T) {
+	sub := openCodeLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	browserMachine(t)
+	panel := newConnectPanel(t, 100, 40)
+	cfg := setupTestConfig(t, panel)
+	cfg.Output = panel.render.OutputWriter()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cfg.Context = ctx
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	// attempts counts the requests this test let the flow make. It is a channel
+	// because the request runs beside the setup's goroutine, which a cancelled
+	// fetch never joins: only an edge like this can observe it without a race.
+	attempts := make(chan struct{}, 4)
+	sub.offersFn = func(int) ([]subscription.Offer, error) {
+		attempts <- struct{}{}
+		<-release
+		return nil, errors.New("the listing was refused")
+	}
+	answer := startConnectSetup(t, cfg, sub)
+
+	shown := waitForPanelText(panel.render, "Fetching this account's available models")
+	failure := ""
+	if !strings.Contains(shown, "Fetching this account's available models") {
+		failure = fmt.Sprintf("the fetch never reached a panel; it was written to the transcript:\n%s", transcriptText(panel.render))
+	} else if text := transcriptText(panel.render); strings.Contains(text, "Fetching this account's") {
+		failure = fmt.Sprintf("the fetch state was written into the transcript as well:\n%s", text)
+	}
+	panel.typeKeys(t, "\x1b")
+	// Esc cancels this request and steps back to the list of sign-ins — not into a
+	// retry (which would fetch again) and not towards a page that would sign in
+	// again. The provider page's title is pickProvider's, for the onboarding this
+	// config is not (setupTestConfig leaves PromptConfig.Onboarding false).
+	if back := waitForPanelText(panel.render, "Connect a model"); !strings.Contains(back, "Connect a model") {
+		failure = fmt.Sprintf("Esc during the fetch did not return to the sign-in list; the panel shows:\n%s", back)
+	}
+	releaseOnce.Do(func() { close(release) })
+	panel.keys.Close()
+	var got setupAnswer
+	select {
+	case got = <-answer:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the setup did not return after the model request was cancelled")
+	}
+	if failure != "" {
+		t.Fatal(failure)
+	}
+	// Nothing was fetched again, nothing signed in again and nothing was written:
+	// a cancelled request is not a failure to retry and not a success to act on.
+	if got := len(attempts); got != 1 {
+		t.Fatalf("listing calls = %d, want the cancelled request alone", got)
+	}
+	if sub.startCalls != 0 {
+		t.Fatalf("sign-ins = %d, want none for a login this machine holds", sub.startCalls)
+	}
+	if got.ok || got.opts.Provider != "" {
+		t.Fatalf("configure ok=%t options=%+v, want the cancelled flow to write nothing", got.ok, got.opts)
+	}
+	if len(sub.provisioned) != 0 {
+		t.Fatalf("provisioned %+v, want nothing written", sub.provisioned)
+	}
+}
+
+// A selector with no panel cannot pretend the callback arrived: Esc on its paste
+// page is the person stepping back, not a sign-in that then waits out the setup
+// window.
+func TestConnectSetupPanelPlainPasteEscapeCancels(t *testing.T) {
+	sub := chatGPTLike()
+	headlessMachine(t)
+	sub.panelLogin = newPanelLogin("https://auth.openai.com/authorize?state=abc", "")
+	selector := &cancellingPasteSelector{fakeSelector: &fakeSelector{confirms: []bool{true}}}
+	cfg := setupTestConfig(t, selector)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cfg.Context = ctx
+	_, ok, err := runSubscriptionSetup(t, cfg, sub)
+	if err != nil || ok {
+		t.Fatalf("configure err=%v ok=%t, want the abandoned paste page to step back", err, ok)
+	}
+	if sent := sub.panelLogin.sent(); len(sent) != 0 {
+		t.Fatalf("submitted %v, want nothing handed to the flow", sent)
+	}
+	if sub.offerCalls != 0 || len(sub.provisioned) != 0 {
+		t.Fatalf("offers = %d provisioned = %d, want nothing fetched or written", sub.offerCalls, len(sub.provisioned))
+	}
+}
+
+// cancellingPasteSelector is a selector whose paste page the person leaves with
+// Esc: the plain contract's ok=false, and no error.
+type cancellingPasteSelector struct {
+	*fakeSelector
+}
+
+func (s *cancellingPasteSelector) Input(label string, defaultValue string) (string, bool, error) {
+	s.inputLabels = append(s.inputLabels, label)
+	return "", false, nil
+}
+
+// brokenPasteSelector is a selector whose paste page failed to read: the
+// terminal is gone and the setup has to report that, not call a progress stop it
+// never installed.
+type brokenPasteSelector struct {
+	*fakeSelector
+	err error
+}
+
+func (s *brokenPasteSelector) Input(string, string) (string, bool, error) {
+	return "", false, s.err
+}
+
+func TestConnectSetupPanelPlainPasteReadErrorIsReported(t *testing.T) {
+	sub := chatGPTLike()
+	headlessMachine(t)
+	sub.panelLogin = newPanelLogin("https://auth.openai.com/authorize?state=abc", "")
+	broken := errors.New("the terminal went away")
+	selector := &brokenPasteSelector{fakeSelector: &fakeSelector{confirms: []bool{true}}, err: broken}
+	_, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub)
+	if !errors.Is(err, broken) || ok {
+		t.Fatalf("configure err=%v ok=%t, want the read failure reported", err, ok)
+	}
+}
+
+// failingOverlaySelector is a selector that has an overlay and cannot paint it:
+// a report it cannot show is the caller's error, never a second copy written into
+// the transcript.
+type failingOverlaySelector struct {
+	*fakeSelector
+	err error
+}
+
+func (s *failingOverlaySelector) ShowInfo(string, string) error { return s.err }
+
+func (s *failingOverlaySelector) ConfirmInfo(string, string, string) (bool, error) {
+	return false, s.err
+}
+
+// A connection test whose report cannot be painted reports that failure instead
+// of downgrading the same words into the transcript.
+func TestConnectSetupPanelConnectionNoteErrorIsReported(t *testing.T) {
+	stubLLMProbe(t, errors.New("the API key was refused"))
+	paintErr := errors.New("the report could not be painted")
+	out := &bytes.Buffer{}
+	answers := &fakeSelector{multiSelects: [][]int{{}}}
+	cfg := withCustomAnswers(setupTestConfig(t, answers), customAnswers{
+		baseURL:  "https://api.example.com/v1",
+		protocol: "OpenAI Chat Completions",
+		key:      "sk-wrong",
+		model:    "gpt-4o",
+	})
+	cfg.Selector = &failingOverlaySelector{fakeSelector: answers, err: paintErr}
+	cfg.Output = out
+	_, _, err := PromptMainLLMSetup(cfg)
+	if !errors.Is(err, paintErr) {
+		t.Fatalf("configure err=%v, want the overlay's own failure", err)
+	}
+	if out.String() != "" {
+		t.Fatalf("output = %q, want the report not downgraded into it", out.String())
+	}
+}
+
+// The models page's own reports propagate the same way: a failed write is
+// reported, not retried in a loop while its explanation goes to the transcript.
+func TestConnectSetupPanelProvisionNoteErrorIsReported(t *testing.T) {
+	sub := openCodeLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	browserMachine(t)
+	sub.provisionFn = func(call int) error {
+		if call == 1 {
+			return errors.New("the console refused the write")
+		}
+		return nil
+	}
+	paintErr := errors.New("the report could not be painted")
+	out := &bytes.Buffer{}
+	cfg := setupTestConfig(t, &failingOverlaySelector{fakeSelector: &fakeSelector{}, err: paintErr})
+	cfg.Output = out
+	_, _, err := runSubscriptionSetup(t, cfg, sub)
+	if !errors.Is(err, paintErr) {
+		t.Fatalf("configure err=%v, want the overlay's own failure", err)
+	}
+	// The fetch line is that surface's plain text and belongs there; the report
+	// the overlay could not paint is what must not be downgraded into it.
+	if text := out.String(); strings.Contains(text, "Adding the models failed") || strings.Contains(text, "console refused") {
+		t.Fatalf("output = %q, want the unpaintable report kept out of it", text)
+	}
+}
+
+// A device-code page's countdown is the code's own life, to the second and never
+// negative: repainting it cannot extend it and an expired code does not become a
+// negative time.
+func TestConnectSetupPanelCountdownIsItsOwnDeadline(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		left time.Duration
+		want string
+	}{
+		{10 * time.Minute, "10:00"},
+		{9*time.Minute + 59*time.Second, "9:59"},
+		{time.Minute, "1:00"},
+		{59 * time.Second, "0:59"},
+		{time.Second, "0:01"},
+		{time.Millisecond, "0:01"},
+		{0, "0:00"},
+		{-time.Minute, "0:00"},
+	}
+	for _, tc := range cases {
+		if got := signInCountdown(now.Add(tc.left), now); got != tc.want {
+			t.Fatalf("countdown at %v = %q, want %q", tc.left, got, tc.want)
+		}
+	}
+}
+
+// A sign-in that issues no code is never described as one that asks for a code:
+// the same device flow is a plain browser confirmation for the plugins that use
+// it that way, and the page cannot know which it is before it has learned a code.
+func TestConnectSetupPanelNoCodePluginWordsNameNoCode(t *testing.T) {
+	prompt := signInPrompt("Qoder CN", subscription.FlowDeviceCode)
+	if strings.Contains(strings.ToLower(prompt), "code") {
+		t.Fatalf("sign-in prompt = %q, want no code it cannot know about", prompt)
+	}
+	if !strings.Contains(prompt, "opens the sign-in page for you to confirm") {
+		t.Fatalf("sign-in prompt = %q, want the code-neutral confirmation", prompt)
+	}
+	if got := signInWaitingText("Qoder CN", subscription.FlowDeviceCode, false); strings.Contains(got, "code") {
+		t.Fatalf("waiting text = %q, want no code it never showed", got)
+	}
+	if got := signInWaitingText("OpenCode", subscription.FlowDeviceCode, true); !strings.Contains(got, "confirm the code") {
+		t.Fatalf("waiting text = %q, want the code the flow issued", got)
+	}
+}
+
+// A login that publishes no snapshot still has the two getters every login has,
+// and a page built from them shows what they answer.
+func TestConnectSetupPanelReadsALoginWithoutASnapshot(t *testing.T) {
+	login := newFakeLogin("https://signin.example.test/authorize", "ABCD-1234")
+	if got := signInSnapshot(login); got.AuthorizeURL != "https://signin.example.test/authorize" || got.UserCode != "ABCD-1234" {
+		t.Fatalf("snapshot = %+v, want the getters' answers", got)
+	}
+	page := &signInPanel{label: "Example", flow: subscription.FlowDeviceCode, login: login, browser: &connectBrowser{}}
+	body := page.page().Body
+	for _, want := range []string{"https://signin.example.test/authorize", "Code: ABCD-1234"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("panel body = %q, want it to carry %q", body, want)
+		}
+	}
+	if strings.Contains(body, "expires in") {
+		t.Fatalf("panel body = %q, want no countdown for a flow that published no expiry", body)
+	}
+}
+
+// noCodeDeviceLike is a plugin-shaped device sign-in: the address to open, no
+// code at all, so nothing on the page may ask for one.
+func noCodeDeviceLike() *fakeSubscription {
+	sub := &fakeSubscription{
+		id: "plugin-device", label: "WorkBuddy",
+		flows: []string{subscription.FlowDeviceCode},
+		check: turn.SignInCheck{State: turn.SignInMissing},
+		offers: []subscription.Offer{
+			{Subscription: "plugin-device", Provider: "plugin-device", Model: "wb-model", BaseURL: "https://plugin.example.test", APIPath: "/v1/chat/completions", Default: true},
+		},
+	}
+	sub.panelLogin = newPanelLogin("https://plugin.example.test/authorize", "")
+	return sub
+}
+
+// devicePanelAnswers is what the panel showed — waiting for needle first — before
+// the sign-in was abandoned, for the device flows a test drives with the same
+// keys.
+func devicePanelAnswers(t *testing.T, sub *fakeSubscription, cfg PromptConfig, keys, needle string) string {
+	t.Helper()
+	panel, ok := cfg.Selector.(*connectPanel)
+	if !ok {
+		t.Fatalf("selector = %T, want the terminal panel", cfg.Selector)
+	}
+	answer := startConnectSetup(t, cfg, sub)
+	panel.typeKeys(t, keys)
+	shown := waitForSignInPage(t, panel.render, needle)
+	got := panel.finish(t, answer)
+	if got.ok {
+		t.Fatal("the abandoned sign-in saved a configuration")
+	}
+	if text := transcriptText(panel.render); text != "" {
+		t.Fatalf("the sign-in wrote into the transcript:\n%s", text)
+	}
+	return shown
+}
+
+// Ark's page is the address, the code and the countdown, and the same flow on a
+// machine with no browser is the address and the code alone — never a paste box,
+// never a fabricated code, and the browser opens at most once.
+func TestConnectSetupPanelArkPageAcrossMachines(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		sub := volcengineLike()
+		opened := browserMachine(t)
+		sub.panelLogin = newPanelLogin("https://signin.volcengine.com/device?user_code=ABCD-1234", "ABCD-1234")
+		sub.panelLogin.expires = time.Now().Add(10 * time.Minute)
+		panel := newConnectPanel(t, 100, 40)
+		cfg := setupTestConfig(t, panel)
+		cfg.Output = panel.render.OutputWriter()
+		// The confirmation page this sign-in asks first also says "Sign in with
+		// Volcengine Ark", so the needle is a line only the page after it draws.
+		shown := devicePanelAnswers(t, sub, cfg, "y\r", "If it did not open, visit:")
+		for _, want := range []string{
+			"Sign in with Volcengine Ark", "Opening your browser…",
+			"https://signin.volcengine.com/device?user_code=ABCD-1234", "Code: ABCD-1234",
+			"Waiting for you to confirm in the browser · expires in ",
+		} {
+			if !strings.Contains(shown, want) {
+				t.Fatalf("panel = %q, want it to carry %q", shown, want)
+			}
+		}
+		if strings.Contains(shown, "Paste callback") {
+			t.Fatalf("panel = %q, a device flow asks for no pasted address", shown)
+		}
+		if len(*opened) != 1 {
+			t.Fatalf("opened %v, want the page opened once", *opened)
+		}
+	})
+	t.Run("headless", func(t *testing.T) {
+		sub := volcengineLike()
+		opened := headlessMachine(t)
+		sub.panelLogin = newPanelLogin("https://signin.volcengine.com/device?user_code=ABCD-1234", "ABCD-1234")
+		sub.panelLogin.expires = time.Now().Add(10 * time.Minute)
+		panel := newConnectPanel(t, 100, 40)
+		cfg := setupTestConfig(t, panel)
+		cfg.Output = panel.render.OutputWriter()
+		shown := devicePanelAnswers(t, sub, cfg, "y\r", "Open this URL on any device:")
+		for _, want := range []string{
+			"Open this URL on any device: https://signin.volcengine.com/device?user_code=ABCD-1234",
+			"Code: ABCD-1234", "Waiting for you to confirm · expires in ",
+		} {
+			if !strings.Contains(shown, want) {
+				t.Fatalf("panel = %q, want it to carry %q", shown, want)
+			}
+		}
+		for _, unwanted := range []string{"Opening your browser", "Paste callback"} {
+			if strings.Contains(shown, unwanted) {
+				t.Fatalf("panel = %q, want no %q on a machine with no browser", shown, unwanted)
+			}
+		}
+		if len(*opened) != 0 {
+			t.Fatalf("opened %v, want no browser on a remote machine", *opened)
+		}
+	})
+}
+
+// A plugin's device sign-in issues no code, so its page shows none and asks for
+// none: the user confirms in the browser and the flow finishes on its own.
+func TestConnectSetupPanelNoCodeDeviceAsksForNoCode(t *testing.T) {
+	sub := noCodeDeviceLike()
+	browserMachine(t)
+	panel := newConnectPanel(t, 100, 40)
+	cfg := setupTestConfig(t, panel)
+	cfg.Output = panel.render.OutputWriter()
+	// The confirmation page also says "Sign in with WorkBuddy", so the needle is
+	// the address this fixture publishes, which only the page after it carries.
+	shown := devicePanelAnswers(t, sub, cfg, "y\r", "https://plugin.example.test/authorize")
+	if !strings.Contains(shown, "https://plugin.example.test/authorize") {
+		t.Fatalf("panel = %q, want the address to open", shown)
+	}
+	for _, unwanted := range []string{"Code:", "enter this code", "confirm the code", "Paste callback"} {
+		if strings.Contains(shown, unwanted) {
+			t.Fatalf("panel = %q, want no %q without a code", shown, unwanted)
+		}
+	}
+	if !strings.Contains(shown, "Waiting for you to finish signing in…") {
+		t.Fatalf("panel = %q, want the code-neutral wait", shown)
+	}
+}
+
+// A browser callback's panel carries the title, the address and the wait, and it
+// finishes without a key press: the callback is the flow's own news.
+func TestConnectSetupPanelBrowserCallbackFinishesWithoutAKey(t *testing.T) {
+	sub := chatGPTLike()
+	opened := browserMachine(t)
+	sub.panelLogin = newPanelLogin("https://auth.openai.com/authorize?state=synthetic", "")
+	panel := newConnectPanel(t, 100, 40)
+	cfg := setupTestConfig(t, panel)
+	cfg.Output = panel.render.OutputWriter()
+	answer := startConnectSetup(t, cfg, sub)
+	panel.typeKeys(t, "y\r")
+
+	shown := waitForSignInPage(t, panel.render, "auth.openai.com")
+	for _, want := range []string{
+		"Sign in with ChatGPT", "Opening your browser…", "If it did not open, visit: https://auth.openai.com/authorize?state=synthetic",
+		"Waiting for you to finish signing in…",
+	} {
+		if !strings.Contains(shown, want) {
+			t.Fatalf("panel = %q, want it to carry %q", shown, want)
+		}
+	}
+	for _, unwanted := range []string{"Code:", "127.0.0.1", "expires in"} {
+		if strings.Contains(shown, unwanted) {
+			t.Fatalf("panel = %q, want no invented %q", shown, unwanted)
+		}
+	}
+	// The browser finishes; no key is pressed for the sign-in itself, and the
+	// wizard carries on to the models the account unlocked.
+	sub.panelLogin.release <- nil
+	models := waitForPanelText(panel.render, "Choose the models to add")
+	if !strings.Contains(models, "ChatGPT") {
+		t.Fatalf("models page = %q, want the sign-in carried on to it", models)
+	}
+	if text := transcriptText(panel.render); text != "" {
+		t.Fatalf("the sign-in wrote into the transcript:\n%s", text)
+	}
+	panel.finish(t, answer)
+	if len(*opened) != 1 || (*opened)[0] != "https://auth.openai.com/authorize?state=synthetic" {
+		t.Fatalf("opened %v, want the page opened once", *opened)
+	}
+}
+
+// A browser this machine could not open leaves the address usable: the failure is
+// said on the page, whether it comes back at once or after the fact.
+func TestConnectSetupPanelBrowserOpenFailureStaysInThePanel(t *testing.T) {
+	cases := []struct {
+		name string
+		open func(url string, report func(error)) error
+	}{
+		{"sync", func(string, func(error)) error { return errors.New("no handler for https") }},
+		{"async", func(_ string, report func(error)) error {
+			report(errors.New("launch failed"))
+			return nil
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := openCodeLike()
+			previousOpener, previousBrowser := browserOpener, localBrowser
+			browserOpener, localBrowser = tc.open, func() bool { return true }
+			t.Cleanup(func() { browserOpener, localBrowser = previousOpener, previousBrowser })
+			sub.panelLogin = newPanelLogin("https://opencode.ai/auth", "QK7M-2PLX")
+			panel := newConnectPanel(t, 100, 40)
+			cfg := setupTestConfig(t, panel)
+			cfg.Output = panel.render.OutputWriter()
+			shown := devicePanelAnswers(t, sub, cfg, "y\r", "Could not open your browser; the link above still works.")
+			if !strings.Contains(shown, "Could not open your browser; the link above still works.") {
+				t.Fatalf("panel = %q, want the failure said on the page", shown)
+			}
+			if !strings.Contains(shown, "https://opencode.ai/auth") {
+				t.Fatalf("panel = %q, want the address still usable", shown)
+			}
+		})
+	}
+}
+
+// A sign-in whose address has not arrived yet says so, and the person can leave
+// at once: the page must not first block for the address.
+func TestConnectSetupPanelPreparingPageCanBeLeftAtOnce(t *testing.T) {
+	sub := openCodeLike()
+	browserMachine(t)
+	sub.panelLogin = newPanelLogin("", "")
+	panel := newConnectPanel(t, 100, 40)
+	cfg := setupTestConfig(t, panel)
+	cfg.Output = panel.render.OutputWriter()
+	answer := startConnectSetup(t, cfg, sub)
+	panel.typeKeys(t, "y\r")
+	shown := waitForSignInPage(t, panel.render, "Preparing sign-in…")
+	if !strings.Contains(shown, "Sign in with OpenCode") {
+		t.Fatalf("panel = %q, want the title before the flow names an address", shown)
+	}
+	if strings.Contains(shown, "Code:") {
+		t.Fatalf("panel = %q, want no empty code", shown)
+	}
+	// Esc leaves at once: the page is not held behind the wait for an address.
+	started := time.Now()
+	panel.typeKeys(t, "\x1b")
+	panel.keys.Close()
+	select {
+	case <-answer:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the page could not be left while the address was missing")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("leaving the page took %v, want at once", elapsed)
+	}
+}
+
+// An address and a code that arrive after the page opened are painted in place:
+// the page does not have to be reopened, and the browser is opened once.
+func TestConnectSetupPanelLateAddressRepaintsInPlace(t *testing.T) {
+	sub := openCodeLike()
+	opened := browserMachine(t)
+	sub.panelLogin = newPanelLogin("", "")
+	sub.panelLogin.expires = time.Now().Add(9*time.Minute + 41*time.Second)
+	panel := newConnectPanel(t, 100, 40)
+	cfg := setupTestConfig(t, panel)
+	cfg.Output = panel.render.OutputWriter()
+	answer := startConnectSetup(t, cfg, sub)
+	panel.typeKeys(t, "y\r")
+	waitForSignInPage(t, panel.render, "Preparing sign-in…")
+
+	sub.panelLogin.publish("https://opencode.ai/auth", "QK7M-2PLX")
+	shown := waitForSignInPage(t, panel.render, "QK7M-2PLX")
+	if !strings.Contains(shown, "Code: QK7M-2PLX") || !strings.Contains(shown, "expires in ") {
+		t.Fatalf("panel = %q, want the late code and its countdown", shown)
+	}
+	got := panel.finish(t, answer)
+	if got.ok {
+		t.Fatal("the abandoned sign-in saved a configuration")
+	}
+	if len(*opened) != 1 {
+		t.Fatalf("opened %v, want exactly one browser for one sign-in", *opened)
+	}
+	if text := transcriptText(panel.render); text != "" {
+		t.Fatalf("the sign-in wrote into the transcript:\n%s", text)
+	}
+}
+
+// A login this machine already holds never starts a flow: the models page follows
+// directly, and no sign-in page is painted at all.
+func TestConnectSetupPanelSignedInLoginSkipsTheSignIn(t *testing.T) {
+	sub := openCodeLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	browserMachine(t)
+	panel := newConnectPanel(t, 100, 40)
+	cfg := setupTestConfig(t, panel)
+	cfg.Output = panel.render.OutputWriter()
+	sub.provisionFn = func(call int) error {
+		if call == 1 {
+			return errors.New("the console refused the write")
+		}
+		return nil
+	}
+	sub.panelLogin = newPanelLogin("https://opencode.ai/auth", "QK7M-2PLX")
+	answer := startConnectSetup(t, cfg, sub)
+	// The models page follows the probe directly, with no sign-in page before it.
+	models := waitForPanelText(panel.render, "Choose the models to add")
+	if strings.Contains(models, "Sign in with") {
+		t.Fatalf("panel = %q, want no sign-in page for a login this machine holds", models)
+	}
+	panel.finish(t, answer)
+	if sub.startCalls != 0 {
+		t.Fatalf("sign-ins = %d, want a login this machine holds to be reused", sub.startCalls)
+	}
+	if text := transcriptText(panel.render); strings.Contains(text, "Sign in with") {
+		t.Fatalf("transcript = %q, want no sign-in page for a held login", text)
+	}
+}
+
+// A refused listing is retried on the saved login, and its page is released first:
+// the retry is the existing confirmation, not a second sign-in.
+func TestConnectSetupPanelFetchRetryReusesTheLogin(t *testing.T) {
+	sub := openCodeLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	browserMachine(t)
+	sub.offersFn = func(call int) ([]subscription.Offer, error) {
+		if call == 1 {
+			return nil, errors.New("fetch models: http 429")
+		}
+		return openCodeLike().offers, nil
+	}
+	panel := newConnectPanel(t, 100, 40)
+	cfg := setupTestConfig(t, panel)
+	cfg.Output = panel.render.OutputWriter()
+	answer := startConnectSetup(t, cfg, sub)
+	waitForPanelText(panel.render, "Fetching this account's available models")
+	// The failure releases the fetch page and asks the retry question.
+	waitForPanelText(panel.render, "Retry without signing in again?")
+	panel.typeKeys(t, "y")
+	waitForPanelText(panel.render, "Choose the models to add")
+	panel.finish(t, answer)
+	if sub.startCalls != 0 {
+		t.Fatalf("sign-ins = %d, want the retry to reuse the saved login", sub.startCalls)
+	}
+	if sub.offerCalls != 2 {
+		t.Fatalf("listing calls = %d, want exactly one retry", sub.offerCalls)
+	}
+	if text := transcriptText(panel.render); text != "" {
+		t.Fatalf("transcript = %q, want the fetch state kept out of it", text)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
@@ -58,6 +59,26 @@ type Login interface {
 	Submit(ctx context.Context, pasted string) error // paste_* only; error text is safe to show
 	Wait(ctx context.Context) error                  // returns when signed in, failed, or ctx ends
 	Cancel()
+}
+
+// DeviceCodeInfo is one device-code sign-in's whole display state: the page to
+// open, the code to confirm, and the moment the console stops accepting that
+// code. A field the flow has not learned yet is zero, and a flow the console
+// publishes no expiry for leaves ExpiresAt zero rather than guessing one.
+type DeviceCodeInfo struct {
+	AuthorizeURL string
+	UserCode     string
+	ExpiresAt    time.Time
+}
+
+// DeviceCodeLogin is the optional capability of a login that can hand the whole
+// snapshot over at once. A surface reads it instead of the two getters when it
+// shows a countdown: read separately, a late URL and its deadline could be
+// paired with each other's stale half, and a page repainted every second would
+// do exactly that. The required Login methods stay as they are, so a plugin that
+// cannot answer still signs in.
+type DeviceCodeLogin interface {
+	DeviceCodeInfo() DeviceCodeInfo
 }
 
 // Offer is one model a finished sign-in can write: the model, the endpoint its
@@ -263,7 +284,11 @@ type login struct {
 	mu   sync.Mutex
 	url  string
 	code string
-	err  error
+	// expires is when the console stops accepting the device code: the one
+	// deadline the flow's own poll loop obeys, published here so a countdown
+	// counts down to the same moment instead of one of its own.
+	expires time.Time
+	err     error
 }
 
 // startLogin runs one flow in the background and returns its handle. run
@@ -301,6 +326,23 @@ func (l *login) setUserCode(code string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.code = code
+}
+
+// setDeviceCode publishes everything a device-code page shows, under the one
+// lock that DeviceCodeInfo reads: the page cannot see a new address beside the
+// previous step's code or deadline.
+func (l *login) setDeviceCode(url, code string, expiresAt time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.url, l.code, l.expires = url, code, expiresAt
+}
+
+// DeviceCodeInfo is the snapshot a surface paints: one read, one consistent
+// page.
+func (l *login) DeviceCodeInfo() DeviceCodeInfo {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return DeviceCodeInfo{AuthorizeURL: l.url, UserCode: l.code, ExpiresAt: l.expires}
 }
 
 // AuthorizeURL is the URL the user has to open, empty until the flow knows it.

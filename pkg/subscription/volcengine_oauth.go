@@ -206,13 +206,14 @@ func (c *volcengineSignIn) startDevice(ctx context.Context) (volcengineDeviceAut
 
 // poll waits for the person to confirm the code and takes the credential the
 // console issues. One HTTP request per round: the loop owns the interval and
-// the slow_down backpressure, so a retrying transport would only break it.
-func (c *volcengineSignIn) poll(ctx context.Context, device volcengineDeviceAuth) (volcengineCredential, error) {
+// the slow_down backpressure, so a retrying transport would only break it. The
+// deadline is the caller's — the one it published for the page's countdown — so
+// waiting and showing cannot disagree about when the code dies.
+func (c *volcengineSignIn) poll(ctx context.Context, device volcengineDeviceAuth, deadline time.Time) (volcengineCredential, error) {
 	interval := time.Duration(device.Interval) * time.Second
 	if interval <= 0 {
 		interval = volcengineDefaultInterval
 	}
-	deadline := c.now().Add(time.Duration(device.ExpiresIn) * time.Second)
 	transient := 0
 	for {
 		now := c.now()

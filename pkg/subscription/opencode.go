@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
@@ -69,8 +70,12 @@ func (openCodeGo) Start(ctx context.Context, env Env, flow string) (Login, error
 		_, err := openCodeLogin(flowCtx, opencode.DefaultPath(env.Home), io.Discard,
 			func(string) error { return nil },
 			func(info opencode.LoginInfo) {
-				l.setURL(strings.TrimSpace(info.VerificationURL))
-				l.setUserCode(strings.TrimSpace(info.UserCode))
+				// Published as one snapshot: the Console names the address
+				// and the code in one answer, so a page reading them cannot
+				// catch half of it. There is no separate expiry to show — the
+				// Console publishes none for this code — and the login's own
+				// token lifetime is not it.
+				l.setDeviceCode(strings.TrimSpace(info.VerificationURL), strings.TrimSpace(info.UserCode), time.Time{})
 			},
 			// The web has its own progress UI, so the flow reports no stages.
 			nil,

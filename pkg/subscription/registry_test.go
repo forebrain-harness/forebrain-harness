@@ -3,12 +3,16 @@ package subscription
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
@@ -335,3 +339,99 @@ func TestOffersFromRecordsCarriesTheRecordsThinkingLevels(t *testing.T) {
 }
 
 func boolPointer(value bool) *bool { return &value }
+
+// The device-code snapshot is one value: a page that repaints every second reads
+// an address, a code and a deadline that were published together, never half of
+// one answer beside half of the last.
+func TestDeviceCodeInfoReadsOneSnapshot(t *testing.T) {
+	l := &login{}
+	stop := make(chan struct{})
+	published := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			l.setDeviceCode(
+				fmt.Sprintf("https://signin.example.test/%d", i),
+				fmt.Sprintf("CODE-%d", i),
+				time.Unix(int64(i), 0).UTC(),
+			)
+			select {
+			case published <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	select {
+	case <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the flow never published its first snapshot")
+	}
+	for i := 0; i < 2000; i++ {
+		info := l.DeviceCodeInfo()
+		var gen int
+		if _, err := fmt.Sscanf(info.AuthorizeURL, "https://signin.example.test/%d", &gen); err != nil {
+			t.Fatalf("snapshot %+v: the address did not name a publication: %v", info, err)
+		}
+		require.Equal(t, fmt.Sprintf("CODE-%d", gen), info.UserCode,
+			"snapshot %+v pairs a code with another publication's address", info)
+		require.True(t, info.ExpiresAt.Equal(time.Unix(int64(gen), 0).UTC()),
+			"snapshot %+v pairs a deadline with another publication's address", info)
+	}
+	close(stop)
+	writer.Wait()
+}
+
+// A login that has learned nothing yet answers zeros, and the two getters an
+// existing plugin already reads keep answering the same values.
+func TestDeviceCodeInfoIsZeroUntilTheFlowLearnsIt(t *testing.T) {
+	l := &login{}
+	require.Equal(t, DeviceCodeInfo{}, l.DeviceCodeInfo())
+
+	l.setURL("https://signin.example.test/authorize")
+	l.setUserCode("ABCD-1234")
+	require.Equal(t, "https://signin.example.test/authorize", l.AuthorizeURL())
+	require.Equal(t, "ABCD-1234", l.UserCode())
+	require.Equal(t, DeviceCodeInfo{
+		AuthorizeURL: "https://signin.example.test/authorize",
+		UserCode:     "ABCD-1234",
+	}, l.DeviceCodeInfo())
+
+	// A device flow the console publishes no expiry for says so with a zero
+	// deadline: the surface then shows no countdown instead of inventing one.
+	l.setDeviceCode("https://signin.example.test/next", "", time.Time{})
+	info := l.DeviceCodeInfo()
+	require.Equal(t, "https://signin.example.test/next", info.AuthorizeURL)
+	require.Empty(t, info.UserCode)
+	require.True(t, info.ExpiresAt.IsZero())
+}
+
+// OpenCode publishes the address and the code the Console named in one answer,
+// and has no expiry of its own to show: the login's token lifetime is not the
+// code's life.
+func TestDeviceCodeInfoOpenCodePublishesOneSnapshot(t *testing.T) {
+	stubOpenCodeLogin(t, func(ctx context.Context, path string, out io.Writer, openBrowser func(string) error,
+		onStart func(opencode.LoginInfo), onStage func(opencode.LoginStage)) (opencode.Credentials, error) {
+		onStart(opencode.LoginInfo{VerificationURL: "https://opencode.ai/auth", UserCode: "QK7M-2PLX"})
+		return opencode.Credentials{AccessToken: "token-placeholder"}, nil
+	})
+	login, err := (openCodeGo{}).Start(context.Background(), testEnv(t), FlowDeviceCode)
+	require.NoError(t, err)
+	snapshot, ok := login.(DeviceCodeLogin)
+	require.True(t, ok, "the OpenCode login publishes its device-code snapshot")
+	var info DeviceCodeInfo
+	require.Eventually(t, func() bool {
+		info = snapshot.DeviceCodeInfo()
+		return info.AuthorizeURL != ""
+	}, 5*time.Second, time.Millisecond, "the surface never learned the address and code")
+	require.Equal(t, "https://opencode.ai/auth", info.AuthorizeURL)
+	require.Equal(t, "QK7M-2PLX", info.UserCode)
+	require.True(t, info.ExpiresAt.IsZero(), "the Console publishes no expiry for this code")
+	require.NoError(t, login.Wait(context.Background()))
+}

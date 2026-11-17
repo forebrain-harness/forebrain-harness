@@ -4000,6 +4000,271 @@ func (s *rawSelector) AwaitSignIn(done <-chan error) error {
 	}
 }
 
+// connectPanelNotAccepted is what the panel says when the flow refused the
+// pasted address. The flow's own error is never shown: a callback URL carries a
+// short-lived authorization code, and an error that quotes it would put that
+// code in the transcript and in a screenshot.
+const connectPanelNotAccepted = "That callback was not accepted. Check the address and try again."
+
+// TryRunConnectPanel shows one /connect stage as the command panel and owns the
+// terminal until it ends. The work it waits for runs beside it — a device poll,
+// a browser callback, a model listing — so this loop is what keeps the panel
+// live: every tick it asks the stage what it now says, repaints only when that
+// changed, and watches three ends at once — the flow's outcome, the caller's
+// context, and the person pressing Esc.
+func (s *rawSelector) TryRunConnectPanel(ctx context.Context, page func() ConnectPanelPage,
+	done <-chan error, submit func(context.Context, string) error) (bool, error) {
+	// Only a surface that holds a real terminal can show a panel, and only
+	// where the fd can be polled can it also notice the work ending while it
+	// waits for a key. Everywhere else the caller keeps its transcript page,
+	// which is the whole answer there: a modal that cannot see the flow end
+	// would park on a prompt nobody can answer.
+	if s == nil || s.in == nil || page == nil || done == nil || ctx == nil ||
+		!canGateTerminalReads || !(s.inViewportOverlay() || s.standalone()) {
+		return false, nil
+	}
+	release, err := s.acquireComposerInput()
+	if err != nil {
+		// The panel is there and something else holds the terminal. Saying so is
+		// what keeps the stage from quietly falling back to the transcript.
+		return true, err
+	}
+	defer release()
+	s.resetOverlayViewportState()
+	s.discardPreOpenInput()
+
+	shown := ConnectPanelPage{}
+	shownStatus := ""
+	shownEditing := false
+	field := newTextField("")
+	status := ""
+	inflight := false
+	accepted := false
+	// results is buffered: a submit that finishes after this panel is gone must
+	// not be left holding a sender nobody will read.
+	results := make(chan error, 1)
+	submitCtx, cancelSubmit := context.WithCancel(ctx)
+	defer cancelSubmit()
+
+	editing := func() bool { return shown.InputLabel != "" && !inflight && !accepted }
+	panel := func() slashPanel { return s.connectPanel(shown, field, editing(), status) }
+	draw := func(top bool) {
+		if s.standalone() {
+			s.paintPage(panel())
+			return
+		}
+		// Only the first paint takes the top and the focus: a repaint on a tick
+		// must not undo a wheel scroll over a page the user is reading.
+		s.renderer.SetOverlayPanel(panel(), top, false)
+	}
+
+	defer s.withCaretPlacer(func(line, col int) {
+		if !editing() {
+			return
+		}
+		p := panel()
+		if p.field == nil || !s.onFieldBar(p, line) {
+			return
+		}
+		field.cursor = caretIndexForClick(field.value, p.field.textCol(), col)
+		draw(false)
+	})()
+	defer s.withPanelFieldProbe(panel, field.runes)()
+
+	painted := false
+	for {
+		// The flow's own answer outranks everything: it is the only signal that
+		// the work finished, and a key still in flight must not outlive it.
+		select {
+		case err := <-done:
+			return true, err
+		default:
+		}
+		select {
+		case err := <-results:
+			inflight = false
+			if err != nil {
+				status = connectPanelNotAccepted
+			} else {
+				accepted = true
+				status = ""
+				field = newTextField("")
+			}
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			return true, ctx.Err()
+		default:
+		}
+		// A repaint is the stage's news or this panel's own — a submit that
+		// finished, a field that opened or closed — and nothing else: a page
+		// whose words did not change must not disturb a scroll or a selection.
+		next := page()
+		editNow := next.InputLabel != "" && !inflight && !accepted
+		if !painted || next != shown || status != shownStatus || editNow != shownEditing {
+			shown, shownStatus, shownEditing = next, status, editNow
+			draw(!painted)
+			painted = true
+		}
+		readable, pollErr := pollReadableInputFD(int(s.in.Fd()), connectWaitPollMillis)
+		if pollErr != nil {
+			return true, fmt.Errorf("connect panel: %w", pollErr)
+		}
+		if !readable {
+			continue
+		}
+		key, readErr := s.readKey()
+		if readErr != nil {
+			// The terminal is gone (EOF or a read error): waiting longer cannot
+			// help, and the caller needs to hear it rather than park.
+			return true, fmt.Errorf("connect panel: %w", readErr)
+		}
+		switch key.kind {
+		case rawKeyNone:
+			continue
+		case rawKeyMouse:
+			s.dispatchMouse(key.mouse)
+			continue
+		case rawKeyEscape:
+			if tail, _ := pollReadableInputFD(int(s.in.Fd()), connectWaitEscapeSettleMillis); tail {
+				// Part of a report was still in flight: it belongs to that
+				// gesture, not to the sign-in (see AwaitSignIn).
+				stdinReadMu.Lock()
+				drainImmediatelyAvailableInput(s.in)
+				stdinReadMu.Unlock()
+				continue
+			}
+			return true, ErrCancelled
+		case rawKeyCtrlC:
+			return true, ErrCancelled
+		case rawKeyEnter:
+			if !editing() || submit == nil || inflight {
+				// A page with no field cannot be submitted, and a page the flow
+				// has not finished cannot be confirmed from here: Enter is never
+				// what says the sign-in worked.
+				continue
+			}
+			text := field.text()
+			if text == "" {
+				continue
+			}
+			inflight = true
+			status = ""
+			go func(pasted string) { results <- submit(submitCtx, pasted) }(text)
+			continue
+		}
+		if !editing() {
+			// Keys during the wait scroll the page — a long address wraps past
+			// the panel — and everything else is dropped: nothing on screen
+			// accepts text there.
+			switch key.kind {
+			case rawKeyUp:
+				s.scrollOverlay(-1)
+			case rawKeyDown:
+				s.scrollOverlay(1)
+			case rawKeyPageUp:
+				s.scrollOverlay(-10)
+			case rawKeyPageDown:
+				s.scrollOverlay(10)
+			case rawKeyHome:
+				s.scrollOverlay(-overlayScrollToEdge)
+			case rawKeyEnd:
+				s.scrollOverlay(overlayScrollToEdge)
+			}
+			continue
+		}
+		if field.edit(s, key, panel) {
+			draw(false)
+		}
+	}
+}
+
+// connectPanel lays one /connect stage out: the title, the field's own label and
+// the stage's words in the body — which scrolls, so a long OAuth address or a
+// rejected attempt never pushes the field off the screen — and the keys that end
+// it pinned underneath.
+func (s *rawSelector) connectPanel(page ConnectPanelPage, field *textField, editing bool,
+	status string) slashPanel {
+	b := newPanelBuilder()
+	pickerHead(b, page.Title)
+	if page.InputLabel != "" {
+		b.subtitle(page.InputLabel)
+	}
+	body := page.Body
+	if status != "" {
+		body = strings.TrimRight(body, "\n") + "\n\n" + status
+	}
+	for _, row := range strings.Split(strings.TrimRight(strings.ReplaceAll(body, "\r\n", "\n"), "\n"), "\n") {
+		b.body = append(b.body, panelReportLine(row))
+	}
+	b.hint(page.Hint)
+	p := b.panel()
+	if editing {
+		p.field = &panelField{text: field.runes(), cursor: field.cursor}
+	}
+	return p
+}
+
+// textField is one modal's editable text: the runes on screen and the caret in
+// them. The plain Input/Secret pages and /connect's callback field are the same
+// editing behaviour with different frames around them, so they share these key
+// rules instead of drifting into two sets.
+type textField struct {
+	value  []rune
+	cursor int
+}
+
+func newTextField(defaultValue string) *textField {
+	value := []rune(defaultValue)
+	return &textField{value: value, cursor: len(value)}
+}
+
+func (f *textField) runes() []rune { return f.value }
+
+// text is what the field hands over: the user's own paste, trimmed because a
+// terminal adds spaces and a browser's copy can carry a newline.
+func (f *textField) text() string { return strings.TrimSpace(string(f.value)) }
+
+// edit applies one editing key at the caret and reports whether the key was
+// one. A mouse selection is taken here, where the field's layout is the one the
+// selection was drawn on, and replaces the caret for this key.
+func (f *textField) edit(s *rawSelector, key parsedKey, panel func() slashPanel) bool {
+	sel := s.fieldSelection(key.kind, panel(), f.value)
+	cut := sel != nil
+	if cut {
+		f.value = deleteRuneRange(f.value, sel[0], sel[1])
+		f.cursor = sel[0]
+	}
+	switch key.kind {
+	case rawKeyLeft:
+		if f.cursor > 0 {
+			f.cursor--
+		}
+	case rawKeyRight:
+		if f.cursor < len(f.value) {
+			f.cursor++
+		}
+	case rawKeyBackspace:
+		if !cut {
+			f.value, f.cursor, _ = deleteRuneBeforeCursor(f.value, f.cursor)
+		}
+	case rawKeyDelete:
+		if !cut {
+			f.value, f.cursor, _ = deleteRuneAfterCursor(f.value, f.cursor)
+		}
+	case rawKeyPaste:
+		f.value, f.cursor = insertRunesAtCursor(f.value, f.cursor, []rune(key.text))
+	case rawKeyRune:
+		f.value, f.cursor = insertRunesAtCursor(f.value, f.cursor, []rune{key.r})
+	case rawKeySpace:
+		f.value, f.cursor = insertRunesAtCursor(f.value, f.cursor, []rune{' '})
+	default:
+		return false
+	}
+	return true
+}
+
 // withCaretPlacer installs the caret hook for the duration of one modal and
 // returns the restore for its defer. Nested modals stack, so the previous
 // owner's hook is put back rather than dropped.
@@ -5202,14 +5467,7 @@ func (s *rawSelector) showInfoBlock(label string, body string, action string) (b
 
 	panel := infoPanel(label, body, action)
 	render := func() { s.showPanel(panel) }
-	scroll := func(delta int) {
-		switch {
-		case s.standalone():
-			s.pageTop = max(0, s.pageTop+delta)
-		case s.renderer != nil && s.inViewportOverlay():
-			s.renderer.ViewportScrollOverlay(delta)
-		}
-	}
+	scroll := s.scrollOverlay
 	render()
 	for {
 		key, err := s.readKey()
@@ -5242,6 +5500,17 @@ func (s *rawSelector) showInfoBlock(label string, body string, action string) (b
 			}
 		}
 		render()
+	}
+}
+
+// scrollOverlay moves the panel body the surface is showing by delta rows: the
+// setup page's own offset outside the viewport, the overlay's offset inside it.
+func (s *rawSelector) scrollOverlay(delta int) {
+	switch {
+	case s.standalone():
+		s.pageTop = max(0, s.pageTop+delta)
+	case s.renderer != nil && s.inViewportOverlay():
+		s.renderer.ViewportScrollOverlay(delta)
 	}
 }
 
@@ -5441,9 +5710,8 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 		return "", false, err
 	}
 	defer release()
-	value := []rune(defaultValue)
-	cursor := len(value)
-	panel := func() slashPanel { return inputPanel(label, value, cursor, secret, s.escHint()) }
+	field := newTextField(defaultValue)
+	panel := func() slashPanel { return inputPanel(label, field.runes(), field.cursor, secret, s.escHint()) }
 	s.showPanel(panel())
 	// Clicks on the field row move the caret; the field's text starts after
 	// its bar's margin and glyph.
@@ -5452,24 +5720,15 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 		if !s.onFieldBar(p, line) {
 			return
 		}
-		cursor = caretIndexForClick(value, p.field.textCol(), col)
+		field.cursor = caretIndexForClick(field.value, p.field.textCol(), col)
 		s.showPanel(panel())
 	})()
-	defer s.withPanelFieldProbe(panel, func() []rune { return value })()
+	defer s.withPanelFieldProbe(panel, field.runes)()
 
 	for {
 		key, err := s.readKey()
 		if err != nil {
 			return "", false, err
-		}
-		// A selection replaces the caret for this key: it is taken here, where
-		// the field's layout is the one the selection was drawn on, and every
-		// edit branch below then works on the shortened value.
-		sel := s.fieldSelection(key.kind, panel(), value)
-		cut := sel != nil
-		if cut {
-			value = deleteRuneRange(value, sel[0], sel[1])
-			cursor = sel[0]
 		}
 		switch key.kind {
 		case rawKeyNone:
@@ -5478,34 +5737,11 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 			s.dispatchMouse(key.mouse)
 			continue
 		case rawKeyEnter:
-			return strings.TrimSpace(string(value)), true, nil
+			return field.text(), true, nil
 		case rawKeyEscape, rawKeyCtrlC:
 			return "", false, s.dismissed(key.kind)
-		case rawKeyLeft:
-			if cursor > 0 {
-				cursor--
-			}
-		case rawKeyRight:
-			if cursor < len(value) {
-				cursor++
-			}
-		case rawKeyBackspace:
-			if !cut {
-				value, cursor, _ = deleteRuneBeforeCursor(value, cursor)
-			}
-		case rawKeyDelete:
-			if !cut {
-				value, cursor, _ = deleteRuneAfterCursor(value, cursor)
-			}
-		case rawKeyPaste:
-			value, cursor = insertRunesAtCursor(value, cursor, []rune(key.text))
-		case rawKeyRune:
-			value, cursor = insertRunesAtCursor(value, cursor, []rune{key.r})
-		case rawKeySpace:
-			value, cursor = insertRunesAtCursor(value, cursor, []rune{' '})
-		case rawKeyTab:
-			continue
-		default:
+		}
+		if !field.edit(s, key, panel) {
 			continue
 		}
 		s.showPanel(panel())

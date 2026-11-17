@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -503,6 +506,13 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 			var done bool
 			done, err = s.pickOffers()
 			if err != nil {
+				if errors.Is(err, ErrCancelled) {
+					// The person cancelled the model request: step back to the
+					// list of sign-ins, not forward to a page that would fetch
+					// again (or back to one that would sign in again).
+					s.page, s.back = setupPageProvider, true
+					continue
+				}
 				return process.Options{}, false, err
 			}
 			if done {
@@ -1131,12 +1141,10 @@ func (s *llmSetup) customTestConnection() (bool, error) {
 	})
 	if probeErr != nil {
 		logPromptChoice(s.cfg, "llmsetup.connection_failed", s.choice, map[string]any{"error": errString(probeErr)})
-		s.note("Connection failed\n"+probeErr.Error(), "Nothing was saved.")
-		return false, nil
+		return false, s.note("Connection failed\n"+probeErr.Error(), "Nothing was saved.")
 	}
 	logPromptChoice(s.cfg, "llmsetup.connection_ok", s.choice, map[string]any{"model": s.model})
-	s.note("Connection OK", s.model+" answered in "+probeElapsed(start)+".")
-	return true, nil
+	return true, s.note("Connection OK", s.model+" answered in "+probeElapsed(start)+".")
 }
 
 // probeElapsed names how long the test request took, in the one decimal a
@@ -1148,17 +1156,21 @@ func probeElapsed(start time.Time) string {
 // note shows a report the user only has to read: an overlay when the selector
 // has one, the setup's own output otherwise. Both the head and the body reach
 // the text surface, because the head is where the outcome is stated.
-func (s *llmSetup) note(title, body string) {
+//
+// A report the overlay was asked to show and could not paint is the caller's
+// error. Writing the same words into the transcript instead would put a second
+// copy of the report in the container the user was not looking at, and hide the
+// fact that the surface is failing.
+func (s *llmSetup) note(title, body string) error {
 	if overlay, ok := s.cfg.Selector.(InfoOverlaySelector); ok {
-		if err := overlay.ShowInfo(title, strings.TrimSpace(body)); err == nil {
-			return
-		}
+		return overlay.ShowInfo(title, strings.TrimSpace(body))
 	}
 	status := s.statusOutput(title)
 	if status == nil {
-		return
+		return nil
 	}
-	fmt.Fprintln(status, strings.TrimSpace(title+"\n"+body))
+	_, err := fmt.Fprintln(status, strings.TrimSpace(title+"\n"+body))
+	return err
 }
 
 // signIn signs in to the subscription this choice names, and leaves what the
@@ -1200,63 +1212,277 @@ func (s *llmSetup) signIn(sub subscription.Subscription) (bool, error) {
 		return false, err
 	}
 	defer login.Cancel()
+	// One wait, started once and handed to whichever surface shows the sign-in:
+	// the panel below, or the plain-text page a selector without one prints.
+	// Starting it before the surface is asked is what lets a sign-in that needs
+	// no page at all still finish on its own.
+	waitCtx, cancelWait := context.WithCancel(ctx)
+	defer cancelWait()
+	outcome := make(chan error, 1)
+	go func() { outcome <- login.Wait(waitCtx) }()
+
+	stage := &signInPanel{label: label, flow: flow, login: login, browser: &connectBrowser{}}
+	stage.pasting.Store(flow == subscription.FlowPasteCallback)
+	// This machine opens the page once, as soon as the flow names one — for the
+	// panel and for the plain-text page alike, so one sign-in can never open two.
+	// It runs beside the surface because the address arrives while the surface is
+	// already showing the wait, and it is joined before this call returns: a
+	// sign-in that ended leaves nothing of itself running.
+	browserDone := make(chan struct{})
+	go func() {
+		defer close(browserDone)
+		stage.browser.openOnce(waitCtx, login, func(err error) {
+			logPromptChoice(s.cfg, "llmsetup.browser_open_failed", s.choice, map[string]any{"error": errString(err)})
+		})
+	}()
+	defer func() {
+		cancelWait()
+		<-browserDone
+	}()
+	if panel, ok := s.cfg.Selector.(ConnectPanelSelector); ok && panel != nil {
+		var submit func(context.Context, string) error
+		if flow == subscription.FlowPasteCallback {
+			submit = stage.pasteCallback
+		}
+		handled, panelErr := panel.TryRunConnectPanel(waitCtx, stage.page, outcome, submit)
+		if handled {
+			return s.signInAnswer(flow, panelErr)
+		}
+	}
+
+	// No panel capability: the page is text, which is what that surface has.
 	status := s.statusOutput("Sign in with " + label)
 	// The flow waits for a human in another window and prints nothing here, so
 	// without a live line the screen stands still and the user cannot tell a
 	// slow sign-in from a hang.
-	end := s.startConnectProgress(func() string { return signInWaitingText(label, flow) })
+	end := s.startConnectProgress(func() string { return signInWaitingText(label, flow, login.UserCode() != "") })
+	defer func() {
+		if end != nil {
+			end()
+		}
+	}()
 	address := awaitSignInURL(ctx, login)
 	if status != nil {
 		if page := signInPage(login, address, flow); page != "" {
 			fmt.Fprintln(status, page)
 		}
 	}
-	// The flow hands the page over and never opens it: only a surface sits in
-	// front of the user. A device code is no exception — the page it shows is the
-	// one to open, and Volcengine's carries the code already filled in — so a
-	// machine with a browser opens it and a remote one only prints it.
-	if address != "" && localBrowser() {
-		if openErr := browserOpener(address, func(err error) {
-			logPromptChoice(s.cfg, "llmsetup.browser_open_failed", s.choice, map[string]any{"error": errString(err)})
-		}); openErr != nil && status != nil {
-			fmt.Fprintln(status, "Could not open your browser; the link above still works.")
-		}
+	// The page is opened above, once, for both paths; waiting for that to finish
+	// is what lets its failure be printed under the page it belongs to. A device
+	// code is no exception — the page it shows is the one to open, and
+	// Volcengine's carries the code already filled in — while a remote machine
+	// only prints it.
+	<-browserDone
+	if note := stage.browser.failure(); note != "" && status != nil {
+		fmt.Fprintln(status, note)
 	}
 	if flow == subscription.FlowPasteCallback {
 		if err := s.pasteSignInCallback(ctx, login, status); err != nil {
-			end()
-			return false, err
+			return s.signInAnswer(flow, err)
 		}
 	}
 	// The page above is transcript text the person has to copy to another
 	// window, so the wait cannot keep the input loop: a selector that can own
 	// the terminal does, which is what makes the page selectable and what lets
 	// Esc abandon the sign-in instead of waiting out the setup window.
-	waitCtx, cancelWait := context.WithCancel(ctx)
-	defer cancelWait()
-	outcome := make(chan error, 1)
-	go func() { outcome <- login.Wait(waitCtx) }()
 	var waitErr error
 	if waiter, ok := s.cfg.Selector.(ConnectWaitSelector); ok && waiter != nil {
 		waitErr = waiter.AwaitSignIn(outcome)
 	} else {
 		waitErr = <-outcome
 	}
-	if end != nil {
-		end()
-	}
-	if errors.Is(waitErr, ErrCancelled) {
-		// The person abandoned the sign-in from the page it printed: the same
-		// answer Esc on this page always gave — the setup steps back a page and
-		// writes nothing.
+	return s.signInAnswer(flow, waitErr)
+}
+
+// signInAnswer turns one sign-in's end into what the wizard does next: a person
+// who left is a step back and writes nothing, the flow's own failure is that
+// error, and its success carries on to the models the sign-in unlocked.
+func (s *llmSetup) signInAnswer(flow string, err error) (bool, error) {
+	if errors.Is(err, ErrCancelled) {
+		// The person abandoned the sign-in: the same answer Esc on this page
+		// always gave — the setup steps back a page and writes nothing.
 		logPromptChoice(s.cfg, "llmsetup.sign_in_declined", s.choice, nil)
 		return false, nil
 	}
-	if waitErr != nil {
-		return false, waitErr
+	if err != nil {
+		return false, err
 	}
 	logPromptChoice(s.cfg, "llmsetup.signed_in", s.choice, map[string]any{"flow": flow})
 	return true, nil
+}
+
+// signInPanel is one running sign-in as the /connect panel shows it. It reads the
+// flow's own snapshot on every paint, so a late address, a code that arrives with
+// it and an expiry that keeps running all update in place, and it holds what this
+// machine did about the browser — opening that page is a surface's decision, never
+// the flow's.
+type signInPanel struct {
+	label   string
+	flow    string
+	login   subscription.Login
+	browser *connectBrowser
+	// pasting is true while the paste flow still needs the address the browser
+	// ended on: the page asks for the field until the flow has taken it.
+	pasting atomic.Bool
+}
+
+// page is the stage as the panel paints it now.
+func (p *signInPanel) page() ConnectPanelPage {
+	info := signInSnapshot(p.login)
+	page := ConnectPanelPage{Title: "Sign in with " + p.label}
+	if p.flow == subscription.FlowPasteCallback {
+		page.Body = p.pasteBody(info.AuthorizeURL)
+		if p.pasting.Load() {
+			page.InputLabel = "Paste callback URL"
+			page.Hint = "Enter to submit · Esc to cancel"
+		} else {
+			// The address has been handed over: there is nothing left to type,
+			// and the page says only what it is waiting for.
+			page.Hint = "Esc to cancel"
+		}
+		return page
+	}
+	page.Hint = "Enter when signed in · Esc to cancel"
+	page.Body = p.waitBody(info)
+	return page
+}
+
+// pasteBody is the paste flow's page: the address to open on any device, and then
+// — until the flow has taken the address back — what to do with the page the
+// browser ended on.
+func (p *signInPanel) pasteBody(url string) string {
+	if !p.pasting.Load() {
+		return "Waiting for the sign-in to finish…"
+	}
+	lines := p.pageLines(url, "")
+	lines = append(lines, "", "Sign in, then paste the address your browser ended on.")
+	return strings.Join(lines, "\n")
+}
+
+// waitBody is a browser or device sign-in's page: where to go, the code to
+// confirm when the flow issued one, and how long the console will keep it.
+func (p *signInPanel) waitBody(info subscription.DeviceCodeInfo) string {
+	lines := p.pageLines(info.AuthorizeURL, info.UserCode)
+	lines = append(lines, "", p.waitingLine(info))
+	return strings.Join(lines, "\n")
+}
+
+// pageLines is where the sign-in happens: the browser this machine opened, or —
+// on a machine without one — the address to open anywhere. Nothing is shown for
+// a field the flow has not published yet, so the page never invites the user to
+// open an empty address or type an empty code.
+func (p *signInPanel) pageLines(url, code string) []string {
+	lines := make([]string, 0, 4)
+	if url != "" {
+		if localBrowser() {
+			lines = append(lines, "Opening your browser…")
+			if p.browser.failure() != "" {
+				lines = append(lines, "", p.browser.failure())
+			}
+			lines = append(lines, "", "If it did not open, visit: "+url)
+		} else {
+			lines = append(lines, "Open this URL on any device: "+url)
+		}
+	}
+	if code != "" {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, "Code: "+code)
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "Preparing sign-in…")
+	}
+	return lines
+}
+
+// waitingLine is the page's live line: only a device flow that issued a code asks
+// to confirm one, and only a flow that published an expiry counts down to it.
+func (p *signInPanel) waitingLine(info subscription.DeviceCodeInfo) string {
+	what := "Waiting for you to finish signing in…"
+	switch {
+	case info.UserCode != "" && localBrowser():
+		what = "Waiting for you to confirm in the browser"
+	case info.UserCode != "":
+		what = "Waiting for you to confirm"
+	}
+	if info.ExpiresAt.IsZero() {
+		return what
+	}
+	return what + " · expires in " + signInCountdown(info.ExpiresAt, time.Now())
+}
+
+// pasteCallback hands the field's text to the flow. It is the only submit the
+// panel runs, off the paint path, and it clears the field once the flow has taken
+// the address: from then on the page is a wait, and there is nothing to type.
+func (p *signInPanel) pasteCallback(ctx context.Context, pasted string) error {
+	if err := p.login.Submit(ctx, pasted); err != nil {
+		return err
+	}
+	p.pasting.Store(false)
+	return nil
+}
+
+// signInSnapshot reads a login's device-code state: the whole snapshot when the
+// login publishes one, the two getters every login has otherwise.
+func signInSnapshot(login subscription.Login) subscription.DeviceCodeInfo {
+	if snapshot, ok := login.(subscription.DeviceCodeLogin); ok {
+		return snapshot.DeviceCodeInfo()
+	}
+	return subscription.DeviceCodeInfo{AuthorizeURL: login.AuthorizeURL(), UserCode: login.UserCode()}
+}
+
+// signInCountdown is how long the console will keep the code, to the second and
+// never below zero: a page repainted every second counts down to the same moment
+// the flow stops asking.
+func signInCountdown(expiresAt time.Time, now time.Time) string {
+	left := expiresAt.Sub(now)
+	if left < 0 {
+		left = 0
+	}
+	seconds := int(math.Ceil(left.Seconds()))
+	return fmt.Sprintf("%d:%02d", seconds/60, seconds%60)
+}
+
+// connectBrowser opens one sign-in's page at most once and remembers what this
+// machine reported, including a failure that arrives after the panel was already
+// painted.
+type connectBrowser struct {
+	mu   sync.Mutex
+	note string
+}
+
+func (b *connectBrowser) failure() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.note
+}
+
+func (b *connectBrowser) setFailure(note string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.note = note
+}
+
+// openOnce opens the page as soon as the flow publishes one. A machine with no
+// browser of its own opens nothing: the address on the page is the instruction
+// there, and a remote session must not have a browser invented for it.
+func (b *connectBrowser) openOnce(ctx context.Context, login subscription.Login, failed func(error)) {
+	address := awaitSignInURL(ctx, login)
+	if address == "" || !localBrowser() {
+		return
+	}
+	const note = "Could not open your browser; the link above still works."
+	err := browserOpener(address, func(err error) {
+		if err == nil {
+			return
+		}
+		b.setFailure(note)
+		failed(err)
+	})
+	if err != nil {
+		b.setFailure(note)
+	}
 }
 
 // pasteSignInCallback takes the address a browser on another machine ended on
@@ -1266,8 +1492,14 @@ func (s *llmSetup) pasteSignInCallback(ctx context.Context, login subscription.L
 	const title = "Finish signing in\nSign in, then paste the address your browser ended on."
 	for {
 		pasted, ok, err := s.cfg.Selector.Input(title, "")
-		if err != nil || !ok {
+		if err != nil {
 			return err
+		}
+		if !ok {
+			// Esc on the paste page: the person left the sign-in, which is the
+			// same answer the panel's Esc gives. Returning nil here used to let
+			// the setup carry on into a wait nobody could end.
+			return ErrCancelled
 		}
 		if err := login.Submit(ctx, strings.TrimSpace(pasted)); err != nil {
 			if status != nil {
@@ -1326,14 +1558,19 @@ func signInPrompt(label, flow string) string {
 		what = "opens the sign-in page, and takes back the address your browser ended on"
 	}
 	if flow == subscription.FlowDeviceCode {
-		what = "shows a code to confirm in the browser"
+		// Whether there is a code to type is the console's answer, and it has
+		// not answered yet: a plugin whose device flow is a plain browser
+		// confirmation issues none, and promising one sends the user hunting.
+		what = "opens the sign-in page for you to confirm"
 	}
 	return "Sign in with " + label + "\nForebrain Harness " + what + ", then offers the models your " + label + " plan includes."
 }
 
-// signInWaitingText is the live line while the sign-in runs.
-func signInWaitingText(label, flow string) string {
-	if flow == subscription.FlowDeviceCode {
+// signInWaitingText is the live line while the sign-in runs. A device flow that
+// issued no code asks for no code: the same flow is a plain browser confirmation
+// for the plugins that use it that way.
+func signInWaitingText(label, flow string, hasCode bool) string {
+	if flow == subscription.FlowDeviceCode && hasCode {
 		return "Waiting for you to confirm the code in " + label + "…"
 	}
 	return "Waiting for you to finish signing in…"
@@ -1437,8 +1674,10 @@ func (s *llmSetup) pickOffers() (bool, error) {
 			return false, err
 		}
 		if len(idxs) == 0 {
-			s.note("Choose at least one model", "Tick the models to add with Space, then press Enter.")
 			checked = nil
+			if err := s.note("Choose at least one model", "Tick the models to add with Space, then press Enter."); err != nil {
+				return false, err
+			}
 			continue
 		}
 		chosen := make([]subscription.Offer, 0, len(idxs))
@@ -1467,7 +1706,9 @@ func (s *llmSetup) pickOffers() (bool, error) {
 			// The registry's own sentence: it names what the user has to do and
 			// never a key. Nothing it refused is written.
 			logPromptChoice(s.cfg, "llmsetup.provision_failed", s.choice, map[string]any{"error": errString(err)})
-			s.note("Adding the models failed", err.Error())
+			if noteErr := s.note("Adding the models failed", err.Error()); noteErr != nil {
+				return false, noteErr
+			}
 			checked = idxs
 			continue
 		}
@@ -1486,7 +1727,9 @@ func (s *llmSetup) pickOffers() (bool, error) {
 		}
 		if failed != nil {
 			logPromptChoice(s.cfg, "llmsetup.subagent_allowed.failed", s.choice, map[string]any{"error": errString(failed)})
-			s.note("Saving the subagent authorization failed", failed.Error())
+			if noteErr := s.note("Saving the subagent authorization failed", failed.Error()); noteErr != nil {
+				return false, noteErr
+			}
 			checked = idxs
 			continue
 		}
@@ -1600,17 +1843,17 @@ func offerDisplayName(offer subscription.Offer) string {
 // half-configured provider is never written.
 func (s *llmSetup) fetchOffers(sub subscription.Subscription) ([]subscription.Offer, error) {
 	label, _ := sub.Label()
-	status := s.statusOutput("Sign in with " + label)
 	for {
-		fetchCtx, cancel := context.WithTimeout(s.ctx(), modelsDiscoveryTimeout)
-		if status != nil {
-			fmt.Fprintln(status, "Fetching this account's available models…")
-		}
-		offers, err := sub.Offers(fetchCtx, s.signInEnv())
-		cancel()
+		offers, err := s.fetchOffersOnce(sub, label)
 		if err == nil {
 			logPromptChoice(s.cfg, "llmsetup.models_fetched", s.choice, map[string]any{"count": len(offers)})
 			return offers, nil
+		}
+		if errors.Is(err, ErrCancelled) {
+			// The person cancelled this request. Nothing failed and nothing was
+			// written: the caller steps back to the sign-in list rather than
+			// offering a retry they just declined.
+			return nil, ErrCancelled
 		}
 		logPromptChoice(s.cfg, "llmsetup.models_failed", s.choice, map[string]any{"error": errString(err)})
 		retry, ok, confirmErr := s.cfg.Selector.Confirm("Fetching this account's models failed\nRetry without signing in again?", true)
@@ -1619,6 +1862,67 @@ func (s *llmSetup) fetchOffers(sub subscription.Subscription) ([]subscription.Of
 				"login saved, but the account's models could not be fetched: %w\nNo provider configuration was written; run /connect again later, or choose another provider", err)
 		}
 	}
+}
+
+// fetchOffersOnce asks for the account's models once, with the listing's own
+// budget, and shows it as a command panel status when the selector has one: the
+// request runs beside the page, so Esc cancels the request instead of waiting it
+// out — and never signs in again.
+func (s *llmSetup) fetchOffersOnce(sub subscription.Subscription, label string) ([]subscription.Offer, error) {
+	// The environment is read here, on the setup's own goroutine: opening the
+	// state database and closing it are the setup's, and the request must not
+	// reach into either.
+	env := s.signInEnv()
+	var offers []subscription.Offer
+	// Written by the request's own goroutine and read only after its outcome was
+	// received: the channel hands the write over, so there is nothing to lock. A
+	// cancelled request's result is never read at all.
+	work := func(ctx context.Context) error {
+		fetchCtx, cancel := context.WithTimeout(ctx, modelsDiscoveryTimeout)
+		defer cancel()
+		list, err := sub.Offers(fetchCtx, env)
+		if err != nil {
+			return err
+		}
+		offers = list
+		return nil
+	}
+	page := func() ConnectPanelPage {
+		return ConnectPanelPage{
+			Title: label,
+			Body:  "Fetching this account's available models…",
+			Hint:  "Esc to cancel",
+		}
+	}
+	if err := s.runConnectStage(page, work, nil); err != nil {
+		return nil, err
+	}
+	return offers, nil
+}
+
+// runConnectStage shows one /connect stage that reports its own progress and
+// waits for it: as the command panel when the selector has one, as text on the
+// configured output otherwise. work runs beside the page on the stage's own
+// context, which is cancelled when the person leaves the page.
+func (s *llmSetup) runConnectStage(page func() ConnectPanelPage, work func(context.Context) error,
+	submit func(context.Context, string) error) error {
+	stageCtx, cancel := context.WithCancel(s.ctx())
+	defer cancel()
+	outcome := make(chan error, 1)
+	go func() { outcome <- work(stageCtx) }()
+	if panel, ok := s.cfg.Selector.(ConnectPanelSelector); ok && panel != nil {
+		handled, err := panel.TryRunConnectPanel(stageCtx, page, outcome, submit)
+		if handled {
+			return err
+		}
+	}
+	// No panel capability: the stage's sentence is text, and the wait is the
+	// request's own, exactly as it was before there were panels.
+	shown := page()
+	if status := s.statusOutput(shown.Title); status != nil {
+		fmt.Fprintln(status, shown.Body)
+	}
+	return <-outcome
 }
 
 // signInEnv is what a sign-in reads before it writes anything: the same home and
