@@ -13,11 +13,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -1081,7 +1083,7 @@ func NewFileEditTool(st *State) (*llm.Tool, error) {
 func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, error) {
 	return llm.NewTool(
 		"edit_file",
-		"Use when making a targeted change to an existing file: replaces an exact, unique string (set replace_all for repeated text). Requires a prior read; old_string must match on-disk content exactly, including whitespace.",
+		"Use when making a targeted change to an existing file: replaces an exact, unique string (set replace_all for repeated text). Requires a prior read. Copy old_string from read_file output: the only differences tolerated are curly vs straight quotes, tabs vs spaces, trailing whitespace on a line and CRLF vs LF, and only while the match stays unique.",
 		func(ctx context.Context, in *FileEditInput) (string, error) {
 			if st == nil {
 				return "", fmt.Errorf("nil state")
@@ -1194,31 +1196,26 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			if strings.TrimSpace(in.OldString) == "" {
 				return "", fmt.Errorf("old_string required")
 			}
+			src := string(raw)
+			matches := findEditStringMatches(src, in.OldString)
+			if len(matches) == 0 {
+				return "", fmt.Errorf("%w: the current file content has no such text, and no changes were written (the file is unchanged since your last read_file). Re-read the lines you meant to change and copy them from that output verbatim.", ErrOldStringNotFound)
+			}
+			if len(matches) > 1 && !in.ReplaceAll {
+				if strings.Contains(src, in.OldString) {
+					return "", fmt.Errorf("old_string is not unique; set replace_all or include more context")
+				}
+				return "", fmt.Errorf("old_string is not unique after normalization (%d matches); no changes were written. Include more surrounding context so it matches once, or set replace_all", len(matches))
+			}
+			out, err := applyEditStringMatches(src, matches, in.OldString, in.NewString)
+			if err != nil {
+				return "", err
+			}
 			snapshotPath, err := st.SnapshotBeforeWrite(ctx, abs, raw, true)
 			if err != nil {
 				return "", err
 			}
-			src := string(raw)
-			oldString := in.OldString
-			actualOld := findActualEditString(src, oldString)
-			if actualOld != "" {
-				oldString = actualOld
-			}
-			newString := preserveTextEditQuoteStyle(in.OldString, oldString, in.NewString)
-			newString = preserveIndentationStyle(in.OldString, oldString, newString)
-			cnt := strings.Count(src, oldString)
-			if cnt == 0 {
-				return "", fmt.Errorf("%w: old_string does not match the current file content (the file itself is unchanged per the last read_file). Re-read the exact lines and copy the text verbatim, watching for tabs vs spaces and line endings", ErrOldStringNotFound)
-			}
-			if cnt > 1 && !in.ReplaceAll {
-				return "", fmt.Errorf("old_string is not unique; set replace_all or include more context")
-			}
-			var out string
-			if in.ReplaceAll {
-				out = strings.ReplaceAll(src, oldString, newString)
-			} else {
-				out = strings.Replace(src, oldString, newString, 1)
-			}
+			cnt := len(matches)
 			if err := atomicWrite(abs, []byte(out), 0o644); err != nil {
 				return "", err
 			}
@@ -2156,148 +2153,230 @@ func normalizeTextEditQuotes(s string) string {
 	return s
 }
 
-func findActualEditString(fileContent, searchString string) string {
-	if searchString == "" {
-		return ""
-	}
-	if strings.Contains(fileContent, searchString) {
-		return searchString
-	}
-	// Tolerate smart/curly quotes introduced by editors.
-	if actual := findViaQuoteNormalization(fileContent, searchString); actual != "" {
-		return actual
-	}
-	// Tolerate whitespace transcription differences (tabs vs spaces, trailing
-	// whitespace, CRLF vs LF) that occur when the caller retransmits text it
-	// read from a rendered view. Returns the exact on-disk substring so the
-	// caller replaces the real bytes.
-	if actual := findWhitespaceInsensitive(fileContent, searchString); actual != "" {
-		return actual
-	}
-	return ""
+// editStringMatch is one place old_string matches the file: a byte range of the
+// original content, Start inclusive and End exclusive.
+type editStringMatch struct {
+	Start int
+	End   int
 }
 
-// findViaQuoteNormalization is the curly/smart-quote tolerant matcher. Quote
-// normalization is a 1:1 rune replacement, so normalized positions map directly
-// back to original rune positions.
-func findViaQuoteNormalization(fileContent, searchString string) string {
-	normalizedSearch := normalizeTextEditQuotes(searchString)
-	normalizedFile := normalizeTextEditQuotes(fileContent)
-	byteIdx := strings.Index(normalizedFile, normalizedSearch)
-	if byteIdx < 0 {
-		return ""
-	}
-	startRune := len([]rune(normalizedFile[:byteIdx]))
-	searchRunes := len([]rune(normalizedSearch))
-	fileRunes := []rune(fileContent)
-	if startRune < 0 || startRune+searchRunes > len(fileRunes) {
-		return ""
-	}
-	return string(fileRunes[startRune : startRune+searchRunes])
+// editNormToken is one unit of the normalized form: the byte range it occupies
+// in the normalized text and the byte range it consumed in the original.
+type editNormToken struct {
+	NormStart int
+	NormEnd   int
+	OrigStart int
+	OrigEnd   int
 }
 
-// findWhitespaceInsensitive finds searchString within fileContent ignoring
-// differences in runs of spaces/tabs and in line endings (CRLF vs LF). On match
-// it returns the corresponding substring of the original fileContent so callers
-// replace the exact on-disk bytes. It preserves line structure (newlines are
-// not collapsed) to keep matches well-scoped.
-func findWhitespaceInsensitive(fileContent, searchString string) string {
-	if searchString == "" {
-		return ""
-	}
-	normFile, origIndex := collapseWhitespaceWithIndex(fileContent)
-	normSearch := collapseWhitespace(searchString)
-	if normSearch == "" {
-		return ""
-	}
-	idx := strings.Index(normFile, normSearch)
-	if idx < 0 {
-		return ""
-	}
-	startNorm := len([]rune(normFile[:idx]))
-	endNorm := startNorm + len([]rune(normSearch))
-	if startNorm >= len(origIndex) || endNorm > len(origIndex) {
-		return ""
-	}
-	origStart := origIndex[startNorm]
-	// The exclusive end is the start of the next normalized rune (so any
-	// trailing whitespace run that was collapsed is included), or the end of
-	// the file when the match reaches the last rune.
-	origEnd := -1
-	if endNorm < len(origIndex) {
-		origEnd = origIndex[endNorm]
-	}
-	fileRunes := []rune(fileContent)
-	if origEnd < 0 {
-		origEnd = len(fileRunes)
-	}
-	if origStart < 0 || origEnd > len(fileRunes) || origStart >= origEnd {
-		return ""
-	}
-	return string(fileRunes[origStart:origEnd])
+// editNormalizedText is one pass of the transcription tolerance over a string:
+// the normalized bytes plus the token stream that maps them back. Every token
+// covers a non-empty range on both sides, so a match that begins and ends on
+// token boundaries maps to the smallest original span that produced it and
+// never to bytes the match did not consume.
+type editNormalizedText struct {
+	Norm   string
+	Tokens []editNormToken
 }
 
-// collapseWhitespaceWithIndex collapses runs of spaces and tabs into a single
-// space and drops carriage returns (so CRLF matches LF). It returns the
-// normalized string plus origIndex, where origIndex[i] is the index (in the
-// collapseWhitespaceWithIndex produces a whitespace-normalized form of s for
-// fuzzy matching, together with origIndex, where origIndex[i] is the index (in
-// the original rune slice) of the rune that produced the i-th normalized rune.
-// Normalization rules (applied to both file and search so they stay aligned):
-//   - carriage returns are dropped, so CRLF matches LF;
-//   - runs of spaces/tabs are collapsed to a single space;
-//   - trailing whitespace on a line (spaces/tabs immediately before a newline
+// findEditStringMatches reports every place requested matches src.
 //
-// collapseWhitespaceWithIndex produces a whitespace-normalized form of s for
-// fuzzy matching, together with origIndex, where origIndex[i] is the index (in
-// the original rune slice) of the rune that produced the i-th normalized rune.
-// Normalization rules (applied to both file and search so they stay aligned):
-//   - carriage returns are dropped, so CRLF matches LF;
-//   - runs of spaces/tabs are collapsed to a single space;
-//   - trailing whitespace on a line (spaces/tabs immediately before a newline
-//     or end-of-file) is dropped, so "x   " matches "x".
-//
-// Newlines are preserved to keep matches line-scoped.
-func collapseWhitespaceWithIndex(s string) (string, []int) {
-	var b strings.Builder
-	origIndex := make([]int, 0, len(s))
-	runes := []rune(s)
-	n := len(runes)
-	i := 0
-	for i < n {
-		r := runes[i]
-		if r == '\r' {
-			i++
-			continue
+// Exact matches win outright: when the text appears verbatim, only those spans
+// are returned, so the tolerance never widens a write the caller asked for
+// precisely. Only when there is no exact match does the combined normalization
+// run — curly/straight quotes, runs of spaces and tabs, trailing whitespace on
+// a line, and CRLF vs LF, all in one pass so they can differ together — and
+// every normalized candidate is returned. The caller decides whether one
+// candidate is enough or replace_all covers them; picking one on the caller's
+// behalf is what let an ambiguous match edit the wrong line.
+func findEditStringMatches(src, requested string) []editStringMatch {
+	if src == "" || requested == "" {
+		return nil
+	}
+	var matches []editStringMatch
+	for from := 0; from < len(src); {
+		idx := strings.Index(src[from:], requested)
+		if idx < 0 {
+			break
 		}
-		if r == ' ' || r == '\t' {
-			// Extend over the full run of horizontal whitespace.
+		start := from + idx
+		matches = append(matches, editStringMatch{Start: start, End: start + len(requested)})
+		from = start + len(requested)
+	}
+	if len(matches) > 0 {
+		return matches
+	}
+	file := normalizeEditText(src)
+	want := normalizeEditText(requested).Norm
+	if want == "" {
+		return nil
+	}
+	for from := 0; from+len(want) <= len(file.Norm); {
+		idx := strings.Index(file.Norm[from:], want)
+		if idx < 0 {
+			break
+		}
+		normStart := from + idx
+		normEnd := normStart + len(want)
+		if start, end, ok := file.origSpan(normStart, normEnd); ok {
+			matches = append(matches, editStringMatch{Start: start, End: end})
+		}
+		from = normEnd
+	}
+	return matches
+}
+
+// origSpan maps a normalized byte range onto the smallest original byte range
+// that produced it. Both ends must land on token boundaries: a match starting
+// or ending inside a token cannot be attributed to whole original bytes, so it
+// is not a candidate. The exclusive end is the original end of the last token
+// the match consumed — not the start of the next one, which would swallow the
+// whitespace or carriage return that follows.
+func (n *editNormalizedText) origSpan(normStart, normEnd int) (int, int, bool) {
+	if normStart < 0 || normStart >= normEnd || normEnd > len(n.Norm) {
+		return 0, 0, false
+	}
+	first := sort.Search(len(n.Tokens), func(i int) bool { return n.Tokens[i].NormEnd > normStart })
+	if first >= len(n.Tokens) || n.Tokens[first].NormStart != normStart {
+		return 0, 0, false
+	}
+	last := sort.Search(len(n.Tokens), func(i int) bool { return n.Tokens[i].NormEnd >= normEnd })
+	if last >= len(n.Tokens) || n.Tokens[last].NormEnd != normEnd {
+		return 0, 0, false
+	}
+	return n.Tokens[first].OrigStart, n.Tokens[last].OrigEnd, true
+}
+
+// normalizeEditText produces the combined, reversible transcription tolerance
+// for s. Every accepted difference is folded into this one pass so quotes and
+// whitespace can differ at the same time and still line up:
+//   - curly single and double quotes fold onto their straight counterparts;
+//   - a run of spaces and tabs folds onto one space, and is dropped when it
+//     ends the line or the file, so "x   " matches "x";
+//   - CRLF folds onto LF and is one token covering both bytes;
+//   - a standalone CR is dropped, as it always was.
+//
+// Nothing semantic is folded. A leading "> " or "+", an escape sequence or a
+// stale sentence stays in the normalized text, so text copied from a quoted
+// view or a diff still fails to match instead of being guessed at.
+func normalizeEditText(s string) editNormalizedText {
+	var b strings.Builder
+	b.Grow(len(s))
+	n := editNormalizedText{Tokens: make([]editNormToken, 0, len(s))}
+	appendToken := func(emitted string, origStart, origEnd int) {
+		normStart := b.Len()
+		b.WriteString(emitted)
+		n.Tokens = append(n.Tokens, editNormToken{NormStart: normStart, NormEnd: b.Len(), OrigStart: origStart, OrigEnd: origEnd})
+	}
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == '\r' && i+1 < len(s) && s[i+1] == '\n':
+			appendToken("\n", i, i+2)
+			i += 2
+		case c == '\r':
+			i++
+		case c == ' ' || c == '\t':
 			j := i
-			for j < n && (runes[j] == ' ' || runes[j] == '\t') {
+			for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
 				j++
 			}
-			// If the run runs to end-of-line (next is newline) or end-of-file,
-			// drop it entirely (right-trim). Otherwise collapse to one space.
-			if j >= n || runes[j] == '\n' {
-				i = j
-				continue
+			// A run that ends the line — before CRLF, before LF or at the end
+			// of the file — is dropped, so trailing whitespace cannot make an
+			// otherwise identical line fail to match.
+			endsLine := j >= len(s) || s[j] == '\n' || (s[j] == '\r' && j+1 < len(s) && s[j+1] == '\n')
+			if !endsLine {
+				appendToken(" ", i, j)
 			}
-			b.WriteByte(' ')
-			origIndex = append(origIndex, i)
 			i = j
-			continue
+		default:
+			r, size := utf8.DecodeRuneInString(s[i:])
+			raw := s[i : i+size]
+			if r < utf8.RuneSelf {
+				appendToken(raw, i, i+size)
+			} else if folded := normalizeTextEditQuotes(raw); folded != raw {
+				appendToken(folded, i, i+size)
+			} else {
+				appendToken(raw, i, i+size)
+			}
+			i += size
 		}
-		b.WriteRune(r)
-		origIndex = append(origIndex, i)
-		i++
 	}
-	return b.String(), origIndex
+	n.Norm = b.String()
+	return n
 }
 
-// collapseWhitespace is the index-free variant used for the search string.
-func collapseWhitespace(s string) string {
-	norm, _ := collapseWhitespaceWithIndex(s)
-	return norm
+// applyEditStringMatches builds the post-edit content in one forward pass over
+// spans that are already sorted and disjoint. Each span's own on-disk text is
+// the style reference for its replacement, so a quote, indentation or line
+// ending the caller transcribed differently cannot leak into the file.
+func applyEditStringMatches(src string, matches []editStringMatch, requestedOld, requestedNew string) (string, error) {
+	var b strings.Builder
+	b.Grow(len(src))
+	prev := 0
+	for _, m := range matches {
+		if m.Start < prev || m.Start >= m.End || m.End > len(src) {
+			return "", fmt.Errorf("internal: invalid edit span %d..%d", m.Start, m.End)
+		}
+		actualOld := src[m.Start:m.End]
+		replacement := preserveTextEditQuoteStyle(requestedOld, actualOld, requestedNew)
+		replacement = preserveIndentationStyle(requestedOld, actualOld, replacement)
+		replacement, err := preserveTextEditLineEndings(requestedOld, actualOld, replacement)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(src[prev:m.Start])
+		b.WriteString(replacement)
+		prev = m.End
+	}
+	b.WriteString(src[prev:])
+	return b.String(), nil
+}
+
+// preserveTextEditLineEndings keeps the line endings the file already uses when
+// the caller's old_string carried different ones: a match that only leaned on
+// CRLF/LF normalization must not turn the file into a mixed-ending one.
+//
+// A matched region whose own text mixes CRLF and LF cannot say which style the
+// replacement should follow, so a normalized edit there is refused; the caller
+// can still edit it by sending the exact bytes.
+func preserveTextEditLineEndings(requestedOld, actualOld, newString string) (string, error) {
+	actualEOLs := editLineEndings(actualOld)
+	if len(actualEOLs) == 0 {
+		return newString, nil
+	}
+	if slices.Equal(actualEOLs, editLineEndings(requestedOld)) {
+		return newString, nil
+	}
+	crlf := actualEOLs[0] == "\r\n"
+	for _, eol := range actualEOLs[1:] {
+		if (eol == "\r\n") != crlf {
+			return "", fmt.Errorf("old_string matches this text only after normalizing line endings, and that text itself mixes CRLF and LF, so the replacement's line endings cannot be derived safely; no changes were written. Re-read the exact bytes and retry with old_string copied verbatim, including its line endings")
+		}
+	}
+	unified := strings.ReplaceAll(newString, "\r\n", "\n")
+	if crlf {
+		return strings.ReplaceAll(unified, "\n", "\r\n"), nil
+	}
+	return unified, nil
+}
+
+// editLineEndings lists the line endings of s in the order they appear, each
+// entry either CRLF or LF.
+func editLineEndings(s string) []string {
+	eols := make([]string, 0, strings.Count(s, "\n"))
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\r':
+			if i+1 < len(s) && s[i+1] == '\n' {
+				eols = append(eols, "\r\n")
+				i++
+			}
+		case '\n':
+			eols = append(eols, "\n")
+		}
+	}
+	return eols
 }
 
 func preserveTextEditQuoteStyle(oldString, actualOldString, newString string) string {

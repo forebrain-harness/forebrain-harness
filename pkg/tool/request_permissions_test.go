@@ -3468,10 +3468,244 @@ func TestPlanReviewerBlocksFileWrites(t *testing.T) {
 	}
 }
 
-func TestFindActualEditStringWithQuoteNormalization(t *testing.T) {
-	got := findActualEditString("say “hello” now", `say "hello" now`)
-	if got != "say “hello” now" {
-		t.Fatalf("actual=%q", got)
+// editMatchTexts renders a candidate list as the original substrings it covers,
+// which is exactly what a caller would replace.
+func editMatchTexts(src string, matches []editStringMatch) []string {
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, src[m.Start:m.End])
+	}
+	return out
+}
+
+// assertEditMatchSpans checks the invariant every candidate list must hold:
+// each span lies inside src and is non-empty, and the spans ascend without
+// overlapping, so a forward builder writes each original byte at most once.
+func assertEditMatchSpans(t *testing.T, src string, matches []editStringMatch) {
+	t.Helper()
+	if len(matches) == 0 {
+		t.Fatal("expected at least one candidate")
+	}
+	prev := 0
+	for i, m := range matches {
+		if m.Start < 0 || m.End > len(src) || m.Start >= m.End {
+			t.Fatalf("match %d = %d..%d is not a valid span of %d bytes", i, m.Start, m.End, len(src))
+		}
+		if i > 0 && m.Start < prev {
+			t.Fatalf("match %d starts at %d, before the previous match ended at %d", i, m.Start, prev)
+		}
+		prev = m.End
+	}
+}
+
+// assertEditMatchTexts fails unless the candidates cover exactly want, in order.
+func assertEditMatchTexts(t *testing.T, src string, matches []editStringMatch, want []string) {
+	t.Helper()
+	assertEditMatchSpans(t, src, matches)
+	if got := editMatchTexts(src, matches); !slices.Equal(got, want) {
+		t.Fatalf("candidates = %q, want %q", got, want)
+	}
+}
+
+func TestFindEditStringMatchesQuoteNormalization(t *testing.T) {
+	src := "say “hello” now"
+	matches := findEditStringMatches(src, `say "hello" now`)
+	assertEditMatchTexts(t, src, matches, []string{src})
+}
+
+func TestFindEditStringMatchesTabsVsSpaces(t *testing.T) {
+	// File on disk uses tabs (Go convention); the caller retransmits with
+	// leading spaces. The matcher must locate the exact on-disk text.
+	src := "func foo() {\n\tbody := \"x\"\n\treturn body\n}\n"
+	matches := findEditStringMatches(src, "    body := \"x\"\n    return body\n")
+	assertEditMatchTexts(t, src, matches, []string{"\tbody := \"x\"\n\treturn body\n"})
+}
+
+func TestFindEditStringMatchesCRLF(t *testing.T) {
+	// The file uses CRLF and the caller retransmits with LF: the candidate is
+	// the exact CRLF on-disk bytes.
+	src := "line one\r\nline two\r\n"
+	matches := findEditStringMatches(src, "line one\nline two\n")
+	assertEditMatchTexts(t, src, matches, []string{src})
+}
+
+func TestFindEditStringMatchesTrailingWhitespace(t *testing.T) {
+	// The file has trailing spaces on a line and the caller omits them, with
+	// the line ending itself also transcribed differently.
+	src := "func foo() {\n\tbody := \"x\"   \r\n}\r\n"
+	matches := findEditStringMatches(src, "\tbody := \"x\"\n}\n")
+	assertEditMatchTexts(t, src, matches, []string{"\tbody := \"x\"   \r\n}\r\n"})
+}
+
+func TestFindEditStringMatchesNoMatch(t *testing.T) {
+	src := "alpha beta gamma"
+	if got := findEditStringMatches(src, "delta"); len(got) != 0 {
+		t.Fatalf("expected no candidate, got %q", editMatchTexts(src, got))
+	}
+	if got := findEditStringMatches(src, "> alpha"); len(got) != 0 {
+		t.Fatalf("a quoted-view prefix must not be guessed away, got %q", editMatchTexts(src, got))
+	}
+}
+
+// TestFindEditStringMatchesCombinedDifferences pins the composition this plan is
+// about: quotes, a tab/space difference, trailing whitespace and a CRLF line
+// ending all in one candidate.
+func TestFindEditStringMatchesCombinedDifferences(t *testing.T) {
+	src := "intro\r\n\tmsg := “hi”  \r\nend\r\n"
+	matches := findEditStringMatches(src, "    msg := \"hi\"\n")
+	assertEditMatchTexts(t, src, matches, []string{"\tmsg := “hi”  \r\n"})
+}
+
+func TestFindEditStringMatchesReturnsEveryNormalizedCandidate(t *testing.T) {
+	src := "alpha  beta\nalpha beta\n"
+	matches := findEditStringMatches(src, "alpha\tbeta")
+	assertEditMatchTexts(t, src, matches, []string{"alpha  beta", "alpha beta"})
+}
+
+func TestFindEditStringMatchesKeepsMultibyteBoundaries(t *testing.T) {
+	src := "前文\t“中文” 尾部"
+	matches := findEditStringMatches(src, `"中文"`)
+	assertEditMatchTexts(t, src, matches, []string{"“中文”"})
+}
+
+// TestFindEditStringMatchesMinimalSpan pins the end of a span: it is the
+// original end of the last token the match consumed, so the whitespace or
+// carriage return that follows is left for the file, not eaten by the edit.
+func TestFindEditStringMatchesMinimalSpan(t *testing.T) {
+	tests := []struct {
+		name      string
+		src       string
+		requested string
+		want      string
+	}{
+		{
+			name:      "quote only before trailing spaces and CRLF",
+			src:       "“x”   \r\nnext\r\n",
+			requested: `"x"`,
+			want:      "“x”",
+		},
+		{
+			name:      "whitespace only before CRLF",
+			src:       "a  b\r\nnext\r\n",
+			requested: "a b",
+			want:      "a  b",
+		},
+		{
+			name:      "whitespace only before LF",
+			src:       "a  b\nnext\n",
+			requested: "a b",
+			want:      "a  b",
+		},
+		{
+			name:      "request without the final newline keeps the trailing CR",
+			src:       "alpha  \r\nbeta\r\n",
+			requested: "alpha\nbeta",
+			want:      "alpha  \r\nbeta",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			matches := findEditStringMatches(test.src, test.requested)
+			assertEditMatchTexts(t, test.src, matches, []string{test.want})
+		})
+	}
+}
+
+// TestFindEditStringMatchesExactPriority pins the compatibility contract: an
+// exact match always wins, and a normalized candidate earlier in the file never
+// adds a second span that would widen a replace_all write.
+func TestFindEditStringMatchesExactPriority(t *testing.T) {
+	src := "alpha  beta\nalpha beta\n"
+	matches := findEditStringMatches(src, "alpha beta")
+	assertEditMatchTexts(t, src, matches, []string{"alpha beta"})
+}
+
+func TestFindEditStringMatchesEveryExactSpan(t *testing.T) {
+	src := "x = 1\nx = 1\n"
+	matches := findEditStringMatches(src, "x = 1")
+	assertEditMatchTexts(t, src, matches, []string{"x = 1", "x = 1"})
+}
+
+// TestApplyEditStringMatches pins the forward builder: the first and last span,
+// adjacent spans, a span deleted to nothing and a replacement that itself
+// contains the old text all land exactly where the spans say, and every byte
+// between them is copied through untouched.
+func TestApplyEditStringMatches(t *testing.T) {
+	tests := []struct {
+		name      string
+		src       string
+		matches   []editStringMatch
+		oldString string
+		newString string
+		want      string
+	}{
+		{
+			name:      "first and last span",
+			src:       "A[one]B[two]C",
+			matches:   []editStringMatch{{Start: 1, End: 6}, {Start: 7, End: 12}},
+			oldString: "[one]",
+			newString: "<1>",
+			want:      "A<1>B<1>C",
+		},
+		{
+			name:      "adjacent spans",
+			src:       "xx",
+			matches:   []editStringMatch{{Start: 0, End: 1}, {Start: 1, End: 2}},
+			oldString: "x",
+			newString: "y",
+			want:      "yy",
+		},
+		{
+			name:      "deleted to nothing",
+			src:       "keep ME go",
+			matches:   []editStringMatch{{Start: 5, End: 7}},
+			oldString: "ME",
+			newString: "",
+			want:      "keep  go",
+		},
+		{
+			name:      "replacement contains the old text",
+			src:       "a NEEDLE b",
+			matches:   []editStringMatch{{Start: 2, End: 8}},
+			oldString: "NEEDLE",
+			newString: "NEEDLE NEEDLE",
+			want:      "a NEEDLE NEEDLE b",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := applyEditStringMatches(test.src, test.matches, test.oldString, test.newString)
+			if err != nil {
+				t.Fatalf("apply: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("content = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+// BenchmarkFindEditStringMatches measures the matcher on a one-megabyte file
+// whose target sits near the end and differs from the request in both quotes and
+// whitespace, so it exercises the normalization pass rather than the exact one.
+func BenchmarkFindEditStringMatches(b *testing.B) {
+	var sb strings.Builder
+	for sb.Len() < 1<<20 {
+		sb.WriteString("this line is filler text that repeats often\r\n")
+	}
+	sb.WriteString("\ttarget := “payload”  \r\n")
+	src := sb.String()
+	const requested = "    target := \"payload\"\n"
+	if got := findEditStringMatches(src, requested); len(got) != 1 {
+		b.Fatalf("candidates = %d, want 1", len(got))
+	}
+	b.SetBytes(int64(len(src)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := findEditStringMatches(src, requested); len(got) != 1 {
+			b.Fatalf("candidates = %d, want 1", len(got))
+		}
 	}
 }
 
@@ -3486,48 +3720,6 @@ func TestPreserveSingleQuoteContraction(t *testing.T) {
 	got := preserveTextEditQuoteStyle(`'test'`, `‘test’`, "'don't'")
 	if got != `‘don’t’` {
 		t.Fatalf("got %q", got)
-	}
-}
-
-func TestFindActualEditStringTabsVsSpaces(t *testing.T) {
-	// File on disk uses tabs (Go convention); the caller retransmits with
-	// leading spaces. The matcher should still locate the exact on-disk text.
-	file := "func foo() {\n\tbody := \"x\"\n\treturn body\n}\n"
-	search := "    body := \"x\"\n    return body\n"
-	got := findActualEditString(file, search)
-	want := "\tbody := \"x\"\n\treturn body\n"
-	if got != want {
-		t.Fatalf("got=%q want=%q", got, want)
-	}
-}
-
-func TestFindActualEditStringCRLF(t *testing.T) {
-	// File uses CRLF; caller retransmits with LF. Match should return the exact
-	// CRLF on-disk bytes.
-	file := "line one\r\nline two\r\n"
-	search := "line one\nline two\n"
-	got := findActualEditString(file, search)
-	want := "line one\r\nline two\r\n"
-	if got != want {
-		t.Fatalf("got=%q want=%q", got, want)
-	}
-}
-
-func TestFindActualEditStringTrailingWhitespace(t *testing.T) {
-	// File has trailing spaces on a line; caller omits them.
-	file := "func foo() {\n\tbody := \"x\"   \n}\n"
-	search := "\tbody := \"x\"\n}\n"
-	got := findActualEditString(file, search)
-	want := "\tbody := \"x\"   \n}\n"
-	if got != want {
-		t.Fatalf("got=%q want=%q", got, want)
-	}
-}
-
-func TestFindActualEditStringNoMatch(t *testing.T) {
-	got := findActualEditString("alpha beta gamma", "delta")
-	if got != "" {
-		t.Fatalf("expected empty, got=%q", got)
 	}
 }
 

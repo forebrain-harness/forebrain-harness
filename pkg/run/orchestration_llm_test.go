@@ -4836,6 +4836,27 @@ func (m *exitPlanCallLLM) Execute(_ context.Context, messages []llm.Message, _ [
 	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
 }
 
+// An old_string mismatch is the model's transcription problem, not evidence of
+// a concurrent edit: edit_file has already checked the read baseline and the
+// content hash before it reports no match, so nothing may tell the model the
+// file changed under it. That sentence sent a model here chasing a modification
+// that never happened.
+func TestToolResultOldStringMismatchDoesNotClaimExternalModification(t *testing.T) {
+	result := orchestratedToolResult{
+		call: llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "edit_file"}},
+		err:  fmt.Errorf("%w: no match", toolpkg.ErrOldStringNotFound),
+	}
+	text := toolResultMessage(result).TextContent()
+	for _, want := range []string{"old_string not found", "no match"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("tool result %q must keep %q", text, want)
+		}
+	}
+	if strings.Contains(text, "file was modified since you last read it") {
+		t.Fatalf("tool result %q must not claim the file was modified", text)
+	}
+}
+
 // The denial tool result carries its display half: the model still receives
 // the refusal's instruction text, while the card a replay draws from the
 // persisted row shows the one sentence the live card showed — the user's own

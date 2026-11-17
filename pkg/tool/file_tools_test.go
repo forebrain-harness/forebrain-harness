@@ -1063,6 +1063,467 @@ func TestEditFileToleratesTabsVsSpaces(t *testing.T) {
 	}
 }
 
+// editFileFixture writes content to a fresh file under dir, records the read a
+// real read_file would have left behind, and returns the path plus an edit tool
+// bound to that directory's state.
+func editFileFixture(t *testing.T, dir, name, content string) (string, *llm.Tool) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return path, editFileToolForExistingRead(t, NewState(dir), path)
+}
+
+// editFileToolForExistingRead records the file's current bytes as the state's
+// read baseline and returns an edit tool bound to that state.
+func editFileToolForExistingRead(t *testing.T, st *State, path string) *llm.Tool {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	st.RememberRead(path, fi.ModTime(), fi.Size(), raw)
+	tool, err := NewFileEditTool(st)
+	if err != nil {
+		t.Fatalf("NewFileEditTool: %v", err)
+	}
+	return tool
+}
+
+// runEditFile invokes edit_file with the given texts.
+func runEditFile(t *testing.T, ctx context.Context, tool *llm.Tool, path, oldString, newString string, replaceAll bool) (any, error) {
+	t.Helper()
+	args, err := json.Marshal(FileEditInput{FilePath: path, OldString: oldString, NewString: newString, ReplaceAll: replaceAll})
+	if err != nil {
+		t.Fatalf("marshal edit args: %v", err)
+	}
+	return tool.Handle(ctx, string(args))
+}
+
+// TestEditFileToleratesCombinedQuoteAndWhitespaceDifference pins the root cause
+// of the failure this plan opened on: the quote-only and whitespace-only
+// matchers never composed, so a caller whose old_string differed from disk in
+// both dimensions could not match text that was otherwise verbatim.
+func TestEditFileToleratesCombinedQuoteAndWhitespaceDifference(t *testing.T) {
+	dir := t.TempDir()
+	content := "package p\n\nfunc f() {\n\tmsg := “hi”\n\treturn\n}\n"
+	path, tool := editFileFixture(t, dir, "combined.go", content)
+	_, err := runEditFile(t, context.Background(), tool, path,
+		"    msg := \"hi\"\n    return\n",
+		"    msg := \"bye\"\n    return\n", false)
+	if err != nil {
+		t.Fatalf("edit failed (should tolerate quotes and indentation together): %v", err)
+	}
+	want := "package p\n\nfunc f() {\n\tmsg := “bye”\n\treturn\n}\n"
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("content after edit = %q, want %q", got, want)
+	}
+}
+
+// TestEditFileRejectsAmbiguousNormalizedMatch pins the safety half: a
+// normalized match that hits more than one place must be refused rather than
+// silently editing whichever candidate the matcher happened to find first.
+func TestEditFileRejectsAmbiguousNormalizedMatch(t *testing.T) {
+	dir := t.TempDir()
+	content := "alpha  beta\nalpha beta\n"
+	path, tool := editFileFixture(t, dir, "ambiguous.txt", content)
+	_, err := runEditFile(t, context.Background(), tool, path, "alpha\tbeta", "MATCHED", false)
+	if err == nil {
+		t.Fatal("ambiguous normalized match must be refused")
+	}
+	if !strings.Contains(err.Error(), "after normalization") || !strings.Contains(err.Error(), "not unique") {
+		t.Fatalf("error %q must say the match is not unique after normalization", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read result: %v", readErr)
+	}
+	if string(got) != content {
+		t.Fatalf("file changed by a refused edit: %q", got)
+	}
+}
+
+// TestEditFileReplaceAllNormalizedMatches pins the other half of the same
+// contract: replace_all covers every candidate of the matching level, and the
+// count it reports is what it actually wrote.
+func TestEditFileReplaceAllNormalizedMatches(t *testing.T) {
+	dir := t.TempDir()
+	content := "alpha  beta\nalpha beta\n"
+	path, tool := editFileFixture(t, dir, "replace-all.txt", content)
+	ctx := WithToolCompletionCapture(context.Background())
+	if _, err := runEditFile(t, ctx, tool, path, "alpha\tbeta", "ALPHA BETA", true); err != nil {
+		t.Fatalf("replace_all edit failed: %v", err)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if completion.Output["replaced"] != 2 {
+		t.Fatalf("replaced = %#v, want 2", completion.Output["replaced"])
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if want := "ALPHA BETA\nALPHA BETA\n"; string(got) != want {
+		t.Fatalf("content after replace_all = %q, want %q", got, want)
+	}
+}
+
+// TestEditFileExactMatchWinsOverNormalizedCandidates protects the compatibility
+// contract: an exact match, even when a normalized candidate sits earlier in the
+// file, is the one that is edited, so replace_all never widens a write the
+// caller did not ask for.
+func TestEditFileExactMatchWinsOverNormalizedCandidates(t *testing.T) {
+	dir := t.TempDir()
+	path, tool := editFileFixture(t, dir, "exact-wins.txt", "alpha  beta\nalpha beta\n")
+	if _, err := runEditFile(t, context.Background(), tool, path, "alpha beta", "ALPHA", false); err != nil {
+		t.Fatalf("exact edit failed: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if want := "alpha  beta\nALPHA\n"; string(got) != want {
+		t.Fatalf("content = %q, want the exact line replaced only: %q", got, want)
+	}
+}
+
+// TestEditFileReplaceAllMatchLevels pins what replace_all covers: every exact
+// occurrence is one level, refused without the flag and all rewritten with it,
+// and an exact match never takes a normalized candidate along with it.
+func TestEditFileReplaceAllMatchLevels(t *testing.T) {
+	t.Run("multiple exact matches", func(t *testing.T) {
+		dir := t.TempDir()
+		content := "x = 1\nx = 1\n"
+		path, tool := editFileFixture(t, dir, "exact.txt", content)
+		_, err := runEditFile(t, context.Background(), tool, path, "x = 1", "y = 1", false)
+		if err == nil || !strings.Contains(err.Error(), "not unique") {
+			t.Fatalf("replace_all=false must refuse repeated text, got err=%v", err)
+		}
+		if got, readErr := os.ReadFile(path); readErr != nil || string(got) != content {
+			t.Fatalf("content = %q (%v), want the file untouched: %q", got, readErr, content)
+		}
+		ctx := WithToolCompletionCapture(context.Background())
+		if _, err := runEditFile(t, ctx, tool, path, "x = 1", "y = 1", true); err != nil {
+			t.Fatalf("replace_all edit failed: %v", err)
+		}
+		completion, ok := ToolCompletionFromContext(ctx)
+		if !ok {
+			t.Fatal("expected tool completion capture")
+		}
+		if completion.Output["replaced"] != 2 {
+			t.Fatalf("replaced = %#v, want 2", completion.Output["replaced"])
+		}
+		if got, readErr := os.ReadFile(path); readErr != nil || string(got) != "y = 1\ny = 1\n" {
+			t.Fatalf("content = %q (%v), want both lines replaced", got, readErr)
+		}
+	})
+
+	t.Run("exact leaves the normalized candidate alone", func(t *testing.T) {
+		dir := t.TempDir()
+		path, tool := editFileFixture(t, dir, "mixed.txt", "alpha  beta\nalpha beta\n")
+		ctx := WithToolCompletionCapture(context.Background())
+		if _, err := runEditFile(t, ctx, tool, path, "alpha beta", "ALPHA", true); err != nil {
+			t.Fatalf("replace_all edit failed: %v", err)
+		}
+		completion, ok := ToolCompletionFromContext(ctx)
+		if !ok {
+			t.Fatal("expected tool completion capture")
+		}
+		if completion.Output["replaced"] != 1 {
+			t.Fatalf("replaced = %#v, want 1", completion.Output["replaced"])
+		}
+		if got, readErr := os.ReadFile(path); readErr != nil || string(got) != "alpha  beta\nALPHA\n" {
+			t.Fatalf("content = %q (%v), want only the exact line replaced", got, readErr)
+		}
+	})
+}
+
+// TestEditFilePreservesLineEndings pins the write-back side of the same
+// tolerance: a match that leaned on CRLF/LF normalization must produce the
+// disk's own line endings, a span must not swallow the bytes after it, and a
+// region whose own line endings are mixed may not be rewritten by a normalized
+// match at all.
+func TestEditFilePreservesLineEndings(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		oldString  string
+		newString  string
+		want       string
+		wantErrHas string
+	}{
+		{
+			name:      "CRLF file with LF request and trailing spaces",
+			content:   "alpha  \r\nbeta\t\r\n",
+			oldString: "alpha\nbeta\n",
+			newString: "ALPHA\nBETA\n",
+			want:      "ALPHA\r\nBETA\r\n",
+		},
+		{
+			name:      "LF file with CRLF request and trailing spaces",
+			content:   "alpha  \nbeta\n",
+			oldString: "alpha\r\nbeta\r\n",
+			newString: "ALPHA\r\nBETA\r\n",
+			want:      "ALPHA\nBETA\n",
+		},
+		{
+			name:      "request without the final newline keeps the trailing CRLF",
+			content:   "alpha  \r\nbeta\r\n",
+			oldString: "alpha\nbeta",
+			newString: "ALPHA\nBETA",
+			want:      "ALPHA\r\nBETA\r\n",
+		},
+		{
+			name:       "mixed line endings in the matched region are refused",
+			content:    "alpha\r\nbeta\n",
+			oldString:  "alpha\nbeta\n",
+			newString:  "ALPHA\nBETA\n",
+			want:       "alpha\r\nbeta\n",
+			wantErrHas: "line endings",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path, tool := editFileFixture(t, dir, "eol.txt", test.content)
+			_, err := runEditFile(t, context.Background(), tool, path, test.oldString, test.newString, false)
+			if test.wantErrHas != "" {
+				if err == nil {
+					t.Fatal("edit must be refused")
+				}
+				if !strings.Contains(err.Error(), test.wantErrHas) {
+					t.Fatalf("error %q must mention %q", err, test.wantErrHas)
+				}
+			} else if err != nil {
+				t.Fatalf("edit failed: %v", err)
+			}
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatalf("read result: %v", readErr)
+			}
+			if string(got) != test.want {
+				t.Fatalf("content = %q, want %q", got, test.want)
+			}
+		})
+	}
+
+	// A mixed-line-ending file stays editable through an exact match: the
+	// tolerance is what is refused, not the file.
+	t.Run("exact edit still handles mixed line endings", func(t *testing.T) {
+		dir := t.TempDir()
+		path, tool := editFileFixture(t, dir, "mixed.txt", "alpha\r\nbeta\n")
+		if _, err := runEditFile(t, context.Background(), tool, path, "alpha\r\nbeta\n", "ALPHA\r\nBETA\n", false); err != nil {
+			t.Fatalf("exact edit of a mixed-line-ending file failed: %v", err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read result: %v", err)
+		}
+		if want := "ALPHA\r\nBETA\n"; string(got) != want {
+			t.Fatalf("content = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestEditFileNormalizedSingleLineDoesNotConsumeFollowingBytes protects the
+// quote-only matcher: a single-line match must end at the last byte it consumed,
+// leaving the trailing whitespace and line ending that follow it alone.
+func TestEditFileNormalizedSingleLineDoesNotConsumeFollowingBytes(t *testing.T) {
+	dir := t.TempDir()
+	path, tool := editFileFixture(t, dir, "quotes.txt", "“x”   \r\nnext\r\n")
+	if _, err := runEditFile(t, context.Background(), tool, path, "\"x\"", "\"y\"", false); err != nil {
+		t.Fatalf("quote-normalized edit failed: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if want := "“y”   \r\nnext\r\n"; string(got) != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+// TestEditFileWhitespaceSingleLineDoesNotConsumeFollowingBytes is the defect
+// this plan fixes: the whitespace matcher ended a match at the start of the next
+// normalized token, so it swallowed the following CR and rewrote the line
+// ending as a lone LF.
+func TestEditFileWhitespaceSingleLineDoesNotConsumeFollowingBytes(t *testing.T) {
+	dir := t.TempDir()
+	path, tool := editFileFixture(t, dir, "whitespace.txt", "a  b\r\nnext\r\n")
+	if _, err := runEditFile(t, context.Background(), tool, path, "a b", "A B", false); err != nil {
+		t.Fatalf("whitespace-normalized edit failed: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if want := "A B\r\nnext\r\n"; string(got) != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+// snapshotTestState builds the state a rewind-aware edit runs against: a
+// history dir that records pre-write snapshots, a file-change ledger, and the
+// conversation the snapshots are filed under.
+func snapshotTestState(t *testing.T, dir, hist string) (*State, *recordingFileChanges, context.Context) {
+	t.Helper()
+	st := NewState(dir)
+	st.SetPrimaryWorkspaceBoundary("", dir, nil)
+	st.SetHistoryDir(hist)
+	rec := &recordingFileChanges{}
+	st.SetFileChangeRecorder(rec)
+	return st, rec, WithConversationSessionID(context.Background(), "parent")
+}
+
+// TestEditFileFailedMatchDoesNotWriteSnapshot pins the recovery half of the
+// contract: a match, uniqueness or line-ending failure never writes the target
+// and never leaves a rewind snapshot behind, because nothing was written.
+func TestEditFileFailedMatchDoesNotWriteSnapshot(t *testing.T) {
+	tests := []struct {
+		name      string
+		content   string
+		oldString string
+		newString string
+		wantErr   []string
+	}{
+		{
+			name:      "no match",
+			content:   "alpha\n",
+			oldString: "delta",
+			newString: "DELTA",
+			wantErr:   []string{"old_string not found", "no changes were written", "Re-read"},
+		},
+		{
+			name:      "ambiguous normalized match",
+			content:   "alpha  beta\nalpha beta\n",
+			oldString: "alpha\tbeta",
+			newString: "MATCHED",
+			wantErr:   []string{"after normalization"},
+		},
+		{
+			name:      "mixed line endings refused",
+			content:   "alpha\r\nbeta\n",
+			oldString: "alpha\nbeta\n",
+			newString: "ALPHA\nBETA\n",
+			wantErr:   []string{"line endings"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			hist := filepath.Join(t.TempDir(), "history")
+			st, rec, ctx := snapshotTestState(t, dir, hist)
+			path := filepath.Join(dir, "target.txt")
+			if err := os.WriteFile(path, []byte(test.content), 0o644); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			tool := editFileToolForExistingRead(t, st, path)
+			_, err := runEditFile(t, ctx, tool, path, test.oldString, test.newString, false)
+			if err == nil {
+				t.Fatal("edit must be refused")
+			}
+			for _, want := range test.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q must mention %q", err, want)
+				}
+			}
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatalf("read result: %v", readErr)
+			}
+			if string(got) != test.content {
+				t.Fatalf("file changed by a refused edit: %q", got)
+			}
+			if n := countSnapshots(t, hist); n != 0 {
+				t.Fatalf("refused edit left %d snapshots, want 0", n)
+			}
+			if len(rec.got) != 0 {
+				t.Fatalf("refused edit recorded %d file changes, want 0", len(rec.got))
+			}
+		})
+	}
+
+	t.Run("no match wraps the sentinel", func(t *testing.T) {
+		dir := t.TempDir()
+		st, _, _ := snapshotTestState(t, dir, "")
+		path := filepath.Join(dir, "target.txt")
+		if err := os.WriteFile(path, []byte("alpha\n"), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		tool := editFileToolForExistingRead(t, st, path)
+		_, err := runEditFile(t, context.Background(), tool, path, "delta", "DELTA", false)
+		if !errors.Is(err, ErrOldStringNotFound) {
+			t.Fatalf("error %v must wrap ErrOldStringNotFound", err)
+		}
+	})
+}
+
+// countSnapshots counts the .snapshot files a history dir holds.
+func countSnapshots(t *testing.T, hist string) int {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(hist, "*", "*", "*.snapshot"))
+	if err != nil {
+		t.Fatalf("glob snapshots: %v", err)
+	}
+	return len(matches)
+}
+
+// TestEditFileSuccessfulMatchWritesOneSnapshot protects the other side: a write
+// that does land keeps exactly one pre-write snapshot holding the bytes it
+// replaced, and exactly one ledger row.
+func TestEditFileSuccessfulMatchWritesOneSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	hist := filepath.Join(t.TempDir(), "history")
+	st, rec, ctx := snapshotTestState(t, dir, hist)
+	content := "package foo\n\nfunc bar() {\n\tvalue := 1\n}\n"
+	path := filepath.Join(dir, "foo.go")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	tool := editFileToolForExistingRead(t, st, path)
+	if _, err := runEditFile(t, ctx, tool, path, "    value := 1\n", "    value := 2\n", false); err != nil {
+		t.Fatalf("edit failed: %v", err)
+	}
+	snapshots, err := filepath.Glob(filepath.Join(hist, "*", "*", "*.snapshot"))
+	if err != nil {
+		t.Fatalf("glob snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshots = %d, want exactly 1", len(snapshots))
+	}
+	snapshot, err := os.ReadFile(snapshots[0])
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if string(snapshot) != content {
+		t.Fatalf("snapshot = %q, want the pre-write bytes %q", snapshot, content)
+	}
+	if len(rec.got) != 1 {
+		t.Fatalf("file changes = %d, want exactly 1", len(rec.got))
+	}
+	if rec.got[0].BeforeSnapshot != snapshots[0] {
+		t.Fatalf("recorded snapshot %q, want %q", rec.got[0].BeforeSnapshot, snapshots[0])
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read result: %v", err)
+	}
+	if want := "package foo\n\nfunc bar() {\n\tvalue := 2\n}\n"; string(got) != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
 // An edit approval carries the diff the engine computed, not the two texts a
 // card would have to guess from: the line counts are the engine's, and the one
 // hunk it ships is bounded so a stored payload stays small. The card that draws

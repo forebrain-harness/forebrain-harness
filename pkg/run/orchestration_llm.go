@@ -2369,10 +2369,11 @@ func rejectionStoppedResult(index int, call llm.ToolCall) orchestratedToolResult
 func toolResultMessage(result orchestratedToolResult) llm.Message {
 	var msg llm.Message
 	if result.err != nil {
+		// The tool's own error is the whole story. An old_string mismatch in
+		// particular is not evidence of an external edit — edit_file has already
+		// checked the read baseline and the content hash before it reports one —
+		// so nothing is added here to say the file changed.
 		text := fmt.Sprintf("Error executing tool '%s': %v", result.call.Function.Name, result.err)
-		if errors.Is(result.err, tool.ErrOldStringNotFound) {
-			text += "\n\nIMPORTANT: The file was modified since you last read it. Call read_file to get the current content before retrying edit_file — your old_string must match what is currently on disk."
-		}
 		msg = llm.ToolResultMessage(result.call.ID, llm.Text(text))
 	} else {
 		msg = llm.ToolResultMessage(result.call.ID, result.parts...)
