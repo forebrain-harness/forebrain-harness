@@ -567,43 +567,106 @@ func jsonFieldNames(typ reflect.Type) []string {
 // without adding a descriptor and the panel silently loses it, so the loss
 // fails here instead.
 func TestConfigPanelSchemaCoversEveryRootSection(t *testing.T) {
-	types := rootSectionTypes(t)
-	byName := make(map[string]configSectionSchema, len(configSectionSchemas))
-	for _, schema := range configSectionSchemas {
+	stored := make(map[string]bool)
+	for _, name := range process.RootConfigSections() {
+		stored[name] = true
+	}
+	for _, problem := range configSchemaCoverageProblems(rootSectionTypes(t), configSectionSchemas, stored) {
+		t.Error(problem)
+	}
+}
+
+// configSchemaCoverageProblems is the guard above as a function, so its new
+// projection rules can be proved against a table that is wrong on purpose
+// (plan 314). Every Root section needs a descriptor; every descriptor names a
+// Root section or projects one that is stored; and the read-only/editable split
+// lines up with the store's own section list.
+func configSchemaCoverageProblems(types map[string]reflect.Type, schemas []configSectionSchema, stored map[string]bool) []string {
+	var problems []string
+	byName := make(map[string]configSectionSchema, len(schemas))
+	for _, schema := range schemas {
 		if _, dup := byName[schema.Name]; dup {
-			t.Errorf("段 %q 有两条描述符", schema.Name)
+			problems = append(problems, "段 "+schema.Name+" 有两条描述符")
 		}
 		byName[schema.Name] = schema
 	}
 	for name := range types {
 		if _, ok := byName[name]; !ok {
-			t.Errorf("Root 的段 %q 没有描述符，/config 面板里看不到它", name)
+			problems = append(problems, "Root 的段 "+name+" 没有描述符，/config 面板里看不到它")
 		}
-	}
-	for name := range byName {
-		if _, ok := types[name]; !ok {
-			t.Errorf("描述符 %q 不是 Root 的段", name)
-		}
-	}
-
-	stored := make(map[string]bool)
-	for _, name := range process.RootConfigSections() {
-		stored[name] = true
 	}
 	for name, schema := range byName {
+		if _, ok := types[name]; ok {
+			continue
+		}
+		// A projection presents another section's document: its own name is
+		// not a Root section, and the section it presents has to be one.
+		if schema.StoreSection == "" {
+			problems = append(problems, "描述符 "+name+" 不是 Root 的段")
+			continue
+		}
+		if _, ok := types[schema.StoreSection]; !ok {
+			problems = append(problems, "投影段 "+name+" 的 StoreSection "+schema.StoreSection+" 不是 Root 的段")
+		}
+	}
+	for name, schema := range byName {
+		// The section whose row the descriptor reads and writes: itself, or the
+		// one a projection presents.
+		store := schema.storeSection()
 		if schema.YAMLOnly {
-			if stored[name] {
-				t.Errorf("%q 标了只读，却在 fb_config 的段表里", name)
+			if stored[store] {
+				problems = append(problems, name+" 标了只读，却在 fb_config 的段表里")
 			}
 			if schema.Tab != configTabFile {
-				t.Errorf("只读段 %q 必须归到 %q 页签", name, configTabFile)
+				problems = append(problems, "只读段 "+name+" 必须归到 "+configTabFile+" 页签")
 			}
 			continue
 		}
-		if !stored[name] {
-			t.Errorf("%q 可编辑，但不在 process.RootConfigSections() 里", name)
+		if !stored[store] {
+			problems = append(problems, name+" 可编辑，但不在 process.RootConfigSections() 里")
 		}
 	}
+	return problems
+}
+
+// The projection rules are guards, not conveniences (plan 314): a projection
+// that presents a section nothing stores would silently save nowhere, and one
+// that presents no section at all is a section the panel cannot read.
+func TestConfigPanelSchemaRejectsUnstoredProjections(t *testing.T) {
+	types := rootSectionTypes(t)
+	stored := map[string]bool{"agents": true}
+
+	unstored := append(append([]configSectionSchema{}, configSectionSchemas...),
+		configSectionSchema{Name: "ghost_models", Title: "Ghost", Summary: "s", Tab: configTabAgents, StoreSection: "ghost"})
+	if problems := configSchemaCoverageProblems(types, unstored, stored); !containsProblem(problems, "投影段 ghost_models 的 StoreSection ghost 不是 Root 的段") {
+		t.Fatalf("a projection of a section nothing stores passed the guard: %v", problems)
+	}
+
+	// A descriptor that names neither a Root section nor one to project is the
+	// pre-plan-314 failure, and it still fails.
+	orphan := append(append([]configSectionSchema{}, configSectionSchemas...),
+		configSectionSchema{Name: "ghost_models", Title: "Ghost", Summary: "s", Tab: configTabAgents})
+	if problems := configSchemaCoverageProblems(types, orphan, stored); !containsProblem(problems, "描述符 ghost_models 不是 Root 的段") {
+		t.Fatalf("a descriptor that is no section at all passed the guard: %v", problems)
+	}
+
+	// And a projection whose section exists but is not stored fails the
+	// editable/stored half of the rule.
+	notStored := configSectionSchema{Name: "agents", Title: "a", Summary: "s", Tab: configTabAgents, StoreSection: "definitions"}
+	if problems := configSchemaCoverageProblems(types, []configSectionSchema{notStored}, map[string]bool{}); !containsProblem(problems, "agents 可编辑，但不在 process.RootConfigSections() 里") {
+		t.Fatalf("a projection of a section the store does not hold passed the guard: %v", problems)
+	}
+}
+
+// containsProblem reports whether the guard's answer carries one exact problem,
+// so a test asserts on the rule rather than on the slice's shape.
+func containsProblem(problems []string, want string) bool {
+	for _, problem := range problems {
+		if problem == want {
+			return true
+		}
+	}
+	return false
 }
 
 // A descriptor's field paths are the section's own JSON keys, in both
@@ -611,10 +674,20 @@ func TestConfigPanelSchemaCoversEveryRootSection(t *testing.T) {
 // setting of a section is left without a way to reach it.
 func TestConfigPanelSchemaFieldsMatchTheirSection(t *testing.T) {
 	types := rootSectionTypes(t)
+	// A projection's fields are paths into the section it presents, so they are
+	// counted as reaching that section's settings (plan 314): moving a setting
+	// from one page to the other keeps it reachable, and neither page may leave
+	// one unreachable.
+	projected := make(map[string][]configField)
+	for _, schema := range configSectionSchemas {
+		if schema.StoreSection != "" {
+			projected[schema.StoreSection] = append(projected[schema.StoreSection], schema.Fields...)
+		}
+	}
 	for _, schema := range configSectionSchemas {
 		typ, ok := types[schema.Name]
 		if !ok {
-			continue // already reported by the coverage test
+			continue // a projection: checked by its own test and the coverage guard
 		}
 		if schema.YAMLOnly {
 			if len(schema.Fields) != 0 {
@@ -646,7 +719,8 @@ func TestConfigPanelSchemaFieldsMatchTheirSection(t *testing.T) {
 			names[name] = true
 		}
 		covered := make(map[string]bool)
-		for _, field := range schema.Fields {
+		fields := append(append([]configField{}, schema.Fields...), projected[schema.Name]...)
+		for _, field := range fields {
 			if field.Path == "" {
 				continue
 			}
@@ -865,9 +939,15 @@ func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
 		t.Fatalf("expected the section page and the definitions page, got %d", len(selector.richItems))
 	}
 	labels := rowLabels(selector.richItems[0])
-	for _, want := range []string{"Plan reviewer model", "Plan reviewer thinking level", "Goal check model"} {
-		if !slices.Contains(labels, want) {
-			t.Fatalf("the agents page is missing %q: %v", want, labels)
+	if !slices.Contains(labels, "Goal check model") {
+		t.Fatalf("the agents page is missing %q: %v", "Goal check model", labels)
+	}
+	// The plan reviewer's row moved to the "Subagent models" page, which is a
+	// projection of this same document (plan 314): one place owns every
+	// install-wide subagent row, and an agent page keeps only its own defaults.
+	for _, gone := range []string{"Plan reviewer model", "Plan reviewer thinking level"} {
+		if slices.Contains(labels, gone) {
+			t.Fatalf("the agents page still lists %q: %v", gone, labels)
 		}
 	}
 
@@ -1108,5 +1188,169 @@ func TestConfigPanelNamesRowsWithoutADottedPath(t *testing.T) {
 	}
 	if len(session.writes) != 0 {
 		t.Fatalf("nothing landed, got %+v", session.writes)
+	}
+}
+
+// The "Subagent models" page is a projection of the agents store (plan 314): it
+// presents the per-type defaults, the plan reviewer's global row and the shared
+// custom registry — every install-wide subagent row in one place — reads the
+// agents document, and saves back to it so the keys it does not show survive.
+func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
+	agents := `{
+		"definitions":{"main":{"primary":true,"subagents":[]}},
+		"plan_reviewer":{"model":"llm-2"},
+		"subagent_models":{"explore":{"model":"llm-1","reasoning_effort":"high"}},
+		"shared_subagents":[{"name":"repo-auditor","description":"audits one repository area","system_prompt":"You audit repositories.","tools":"read_only"}]
+	}`
+	session := newConfigPanelSession(map[string]string{"agents": agents})
+	session.snapshot.Models = []appcfg.LLMModelConfig{
+		{ID: "llm-1", Provider: "openai", Model: "gpt-main"},
+		{ID: "llm-2", Provider: "deepseek", Model: "deepseek-v4-pro"},
+	}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "explore", ok: true},
+		{label: "model", ok: true},
+		{label: configRowEditLabel, ok: true},
+		{label: configNewTextRow, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configSaveRowLabel, ok: true},
+	}, []selectorInput{{value: "llm-conditional", ok: true}}, "subagent_models")
+
+	if len(selector.richItems) == 0 {
+		t.Fatal("the projection page never opened")
+	}
+	page := selector.richItems[0]
+	// A per-type row reads the model and the level it names, and its status
+	// column says the row is this install's global default for the type.
+	explore := findRow(t, page, "explore")
+	if explore.Description != "openai/gpt-main / High" {
+		t.Fatalf("explore's description = %q, want the model and its level", explore.Description)
+	}
+	if explore.Status != configGlobalDefaultStatus {
+		t.Fatalf("explore's status = %q, want %q", explore.Status, configGlobalDefaultStatus)
+	}
+	// A type with no row of its own follows the conversation, and marks nothing.
+	verification := findRow(t, page, "verification")
+	if verification.Description != configFollowConversationModel || verification.Status != "" {
+		t.Fatalf("verification's row = %q %q, want the follow sentence and no status", verification.Description, verification.Status)
+	}
+	// The plan reviewer's global row reads the same way, with the status the
+	// prototype gives a system type's row.
+	reviewer := findRow(t, page, "plan-reviewer")
+	if reviewer.Description != "deepseek/deepseek-v4-pro / Row default" {
+		t.Fatalf("plan-reviewer's description = %q, want the model and the row default", reviewer.Description)
+	}
+	if reviewer.Status != configGlobalRowStatus {
+		t.Fatalf("plan-reviewer's status = %q, want %q", reviewer.Status, configGlobalRowStatus)
+	}
+	// The registry is one row of this page; its entries are its own page, named
+	// by the name each carries (the test below).
+	findRow(t, page, "Shared custom subagents")
+
+	// The save lands in the agents section — the document the page presents —
+	// and every key the page does not show comes back untouched.
+	if len(session.writes) != 1 {
+		t.Fatalf("expected one write, got %+v", session.writes)
+	}
+	if session.writes[0].section != "agents" {
+		t.Fatalf("the projection saved to %q, want the agents store", session.writes[0].section)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
+		t.Fatalf("the saved document does not parse: %v", err)
+	}
+	types, _ := saved["subagent_models"].(map[string]any)
+	exploreRow, _ := types["explore"].(map[string]any)
+	if got, _ := exploreRow["model"].(string); got != "llm-conditional" {
+		t.Fatalf("subagent_models.explore.model = %q, want the edited row", got)
+	}
+	if got, _ := exploreRow["reasoning_effort"].(string); got != "high" {
+		t.Fatalf("subagent_models.explore.reasoning_effort = %q, want the level it had", got)
+	}
+	reviewerRow, _ := saved["plan_reviewer"].(map[string]any)
+	if got, _ := reviewerRow["model"].(string); got != "llm-2" {
+		t.Fatalf("plan_reviewer.model = %q, want it untouched", got)
+	}
+	if _, ok := saved["definitions"]; !ok {
+		t.Fatal("the agents page's definitions were dropped from the saved document")
+	}
+	registry, _ := saved["shared_subagents"].([]any)
+	if len(registry) != 1 {
+		t.Fatalf("shared_subagents = %v, want the registry untouched", saved["shared_subagents"])
+	}
+}
+
+// A shared subagent is created from the projection page (plan 314): the add row
+// seeds a full definition — a name to type, the description a model reads, the
+// prompt to run on, and the read-only tier a subagent starts at — and opens it.
+// The entry lands under shared_subagents, and what the seed holds until it is
+// named is exactly what the loader refuses.
+func TestConfigPanelSubagentModelsSeedsASharedSubagent(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Shared custom subagents", ok: true},
+		{label: configAddRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configSaveRowLabel, ok: true},
+	}, nil, "subagent_models")
+
+	if len(session.writes) != 1 {
+		t.Fatalf("expected one write, got %+v", session.writes)
+	}
+	var saved struct {
+		Shared []appcfg.SubagentConfig `json:"shared_subagents"`
+	}
+	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
+		t.Fatalf("the saved document does not parse: %v", err)
+	}
+	if len(saved.Shared) != 1 {
+		t.Fatalf("shared_subagents = %+v, want the seeded entry", saved.Shared)
+	}
+	seed := saved.Shared[0]
+	if seed.Name != "" || seed.Description != "" || seed.SystemPrompt != "" || seed.Tools != appcfg.SubagentToolsReadOnly {
+		t.Fatalf("seeded entry = %+v, want the empty name and prompt with the read-only tier", seed)
+	}
+	// The seed is what the loader refuses until the name and the prompt are
+	// typed: the page hands the judgement to the registry's own validator.
+	if err := appcfg.ValidateSharedSubagents(saved.Shared, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "invalid name") {
+		t.Fatalf("err = %v, want the loader to refuse an unnamed shared subagent", err)
+	}
+}
+
+// The projection's field paths are keys of the section it presents (plan 314),
+// so a typo'd path is caught here rather than by a page that shows nothing. The
+// projection is skipped by the section-by-section check above (it is not a Root
+// section), which is why this test exists at all.
+func TestConfigPanelSchemaProjectionFieldsNameStoreSectionKeys(t *testing.T) {
+	types := rootSectionTypes(t)
+	projections := 0
+	for _, schema := range configSectionSchemas {
+		if schema.StoreSection == "" {
+			continue
+		}
+		projections++
+		typ, ok := types[schema.StoreSection]
+		if !ok {
+			t.Fatalf("投影段 %q 的 StoreSection %q 不是 Root 的段", schema.Name, schema.StoreSection)
+		}
+		if len(schema.Fields) == 0 {
+			t.Errorf("投影段 %q 没有任何可编辑字段", schema.Name)
+		}
+		names := make(map[string]bool)
+		for _, name := range jsonFieldNames(typ) {
+			names[name] = true
+		}
+		for _, field := range schema.Fields {
+			head := strings.Split(field.Path, ".")[0]
+			if !names[head] {
+				t.Errorf("投影段 %q 的字段 %q 指向 %q 中不存在的设置 %q", schema.Name, field.Label, schema.StoreSection, head)
+			}
+		}
+	}
+	if projections == 0 {
+		t.Fatal("no projection section exists: the mechanism is unreachable")
 	}
 }

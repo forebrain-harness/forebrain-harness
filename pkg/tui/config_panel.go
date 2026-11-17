@@ -298,7 +298,9 @@ func (p *configPanel) sectionDescription(schema configSectionSchema) string {
 	switch {
 	case schema.YAMLOnly:
 		return "[YAML] " + desc + " read-only"
-	case len(p.raw[schema.Name]) > 0:
+	case len(p.raw[schema.storeSection()]) > 0:
+		// A projection reads the section it presents: its own name is never a
+		// row in the store (plan 314).
 		return desc + " set"
 	default:
 		return desc + " default"
@@ -366,7 +368,8 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 		if !configFieldListed(field, p.claudeCode) {
 			continue
 		}
-		items = append(items, SelectItem{Label: field.Label, Description: configFieldDescription(doc, field)})
+		description, status := p.configFieldRow(doc, schema, field)
+		items = append(items, SelectItem{Label: field.Label, Description: description, Status: status})
 		owners = append(owners, i)
 	}
 	items = append(items,
@@ -375,6 +378,81 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 	)
 	owners = append(owners, configRowSave, configRowBack)
 	return items, owners
+}
+
+// configFieldRow is one setting's row on the section page: what it holds now,
+// then the hint. A projection's rows say what the stored row resolves to rather
+// than how many keys it holds (plan 314): the per-type defaults read as the model
+// and level they name, with the prototype's status column beside them.
+func (p *configPanel) configFieldRow(doc any, schema configSectionSchema, field configField) (string, string) {
+	if schema.StoreSection == "" {
+		return configFieldDescription(doc, field), ""
+	}
+	path := configFieldPath(field)
+	switch {
+	case len(path) == 2 && path[0] == configSubagentModelsKey:
+		return p.configSubagentTypeSummary(doc, path[1]), configSubagentTypeStatus(doc, path[1])
+	case len(path) == 1 && path[0] == configPlanReviewerKey:
+		return p.configGlobalRowSummary(doc, configPlanReviewerKey), configStatusIf(refOfRow(doc, configPlanReviewerKey) != "", configGlobalRowStatus)
+	}
+	return configFieldDescription(doc, field), ""
+}
+
+// refOfRow is one stored row's model reference, empty when it names none.
+func refOfRow(doc any, path ...string) string {
+	row, _ := configLookupValue(doc, path)
+	settings, _ := row.(map[string]any)
+	return strings.TrimSpace(configStringField(settings, "model"))
+}
+
+// configStatusIf is a status column's value when a row is configured, and the
+// empty column when it is not: an unconfigured row carries nothing to mark.
+func configStatusIf(configured bool, status string) string {
+	if !configured {
+		return ""
+	}
+	return status
+}
+
+// configSubagentTypeSummary is the prototype's per-type row description: the
+// install-wide row the type runs on, with the thinking level beside it, or the
+// sentence that says it follows the conversation. The level is named through
+// turn's one label table, and an empty stored level is the row's own default.
+func (p *configPanel) configSubagentTypeSummary(doc any, typeName string) string {
+	ref := refOfRow(doc, configSubagentModelsKey, typeName)
+	if ref == "" {
+		return configFollowConversationModel
+	}
+	settings, _ := configLookupValue(doc, []string{configSubagentModelsKey, typeName})
+	level, _ := settings.(map[string]any)
+	return p.configModelLabel(ref) + " / " + configEffortSummary(configStringField(level, "reasoning_effort"))
+}
+
+// configGlobalRowSummary is the plan reviewer's row: the model it names and the
+// level it runs with, or the sentence for a row nobody set.
+func (p *configPanel) configGlobalRowSummary(doc any, key string) string {
+	ref := refOfRow(doc, key)
+	if ref == "" {
+		return configFollowConversationModel
+	}
+	row, _ := configLookupValue(doc, []string{key})
+	settings, _ := row.(map[string]any)
+	return p.configModelLabel(ref) + " / " + configEffortSummary(configStringField(settings, "reasoning_effort"))
+}
+
+// configEffortSummary names a stored thinking level: empty is the model row's
+// own default, and everything else is the level through turn's one table.
+func configEffortSummary(level string) string {
+	if strings.TrimSpace(level) == "" {
+		return configRowDefaultEffort
+	}
+	return turn.EffortEnglishLabel(level)
+}
+
+// configSubagentTypeStatus is the prototype's status column for a per-type row:
+// the type has an install-wide default of its own once it names a model row.
+func configSubagentTypeStatus(doc any, typeName string) string {
+	return configStatusIf(refOfRow(doc, configSubagentModelsKey, typeName) != "", configGlobalDefaultStatus)
 }
 
 // configFieldListed reports whether the panel offers one field on this machine.
@@ -399,7 +477,7 @@ func configFieldListed(field configField, claudeCode bool) bool {
 func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice string) string {
 	head := schema.Name + " " + schema.Title + "\n" + schema.Summary
 	switch {
-	case len(p.raw[schema.Name]) == 0:
+	case len(p.raw[schema.storeSection()]) == 0:
 		head += " now: default (the database holds no record for this section)"
 	default:
 		head += " now: set"
@@ -433,19 +511,25 @@ func (p *configPanel) showFileSection(schema configSectionSchema) {
 
 // save writes the staged document through the session, and keeps the panel's
 // own copy in step so the section list's marker is right the moment it is
-// shown again.
+// shown again. A projection saves under the section it presents (plan 314): the
+// document is that section's whole row, so keys the projection does not show
+// travel back untouched and nothing is lost.
 func (p *configPanel) save(ctx context.Context, name string, doc any) error {
 	raw, err := configMarshalDoc(doc)
 	if err != nil {
 		return err
 	}
-	if err := p.session.UpdateConfigSection(ctx, name, raw); err != nil {
+	section := name
+	if schema, ok := configSectionSchemaFor(name); ok {
+		section = schema.storeSection()
+	}
+	if err := p.session.UpdateConfigSection(ctx, section, raw); err != nil {
 		return err
 	}
 	if len(raw) == 0 {
-		delete(p.raw, name)
+		delete(p.raw, section)
 	} else {
-		p.raw[name] = raw
+		p.raw[section] = raw
 	}
 	return nil
 }
@@ -465,9 +549,14 @@ func (p *configPanel) printError(err error) {
 
 // sectionDoc decodes the section's stored row into the generic tree the
 // editor stages edits in. An absent row is a nil document: every field then
-// reads as unset.
+// reads as unset. A projection decodes the row of the section it presents
+// (plan 314), which is the document its fields are paths into.
 func (p *configPanel) sectionDoc(name string) any {
-	raw := p.raw[name]
+	store := name
+	if schema, ok := configSectionSchemaFor(name); ok {
+		store = schema.storeSection()
+	}
+	raw := p.raw[store]
 	if len(raw) == 0 {
 		return nil
 	}
@@ -475,7 +564,7 @@ func (p *configPanel) sectionDoc(name string) any {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil
 	}
-	if name == "agents" {
+	if store == "agents" {
 		// The panel edits whatever keys the stored row holds, so a setting the
 		// schema retired is removed here rather than left to the descriptor
 		// table (plan 315): it can then be neither shown as a row nor written
@@ -753,7 +842,7 @@ func (p *configPanel) rowItems(doc any, path []string, container any, keys []str
 	for i, key := range keys {
 		value, _ := configLookupValue(container, []string{key})
 		items = append(items, SelectItem{
-			Label:       configRowLabel(key, i, list),
+			Label:       p.configRowLabelAt(path, key, i, list, value),
 			Description: p.configRowSummary(doc, path, key, value),
 			Status:      configRowStatus(path, value),
 		})
@@ -795,6 +884,20 @@ func configRowLabel(key string, index int, list bool) string {
 	return key
 }
 
+// configRowLabelAt names one stored row of a page. A shared subagent is named by
+// the name it carries: that is its identity in the registry, and a list of
+// "#1, #2" would say nothing about which subagent is which (plan 314).
+func (p *configPanel) configRowLabelAt(path []string, key string, index int, list bool, value any) string {
+	if list && len(path) == 1 && path[0] == configSharedSubagentsKey {
+		if row, ok := value.(map[string]any); ok {
+			if name := strings.TrimSpace(configStringField(row, "name")); name != "" {
+				return name
+			}
+		}
+	}
+	return configRowLabel(key, index, list)
+}
+
 // configRowDescription is a row's second column: what it holds right now.
 func configRowDescription(value any) string {
 	if configIsContainer(value) {
@@ -815,7 +918,24 @@ const (
 	configDefinitionsPath   = "definitions"
 	configSubagentsKey      = "subagents"
 	configSubagentModelsKey = "subagent_models"
-	configPrimaryStatus     = "Primary"
+	// configPlanReviewerKey and configSharedSubagentsKey are the two other
+	// install-wide rows in the agents section the "Subagent models" page presents
+	// (plan 314): the exit-plan reviewer's global row (plan 313) and the shared
+	// custom registry.
+	configPlanReviewerKey    = "plan_reviewer"
+	configSharedSubagentsKey = "shared_subagents"
+	configPrimaryStatus      = "Primary"
+	// The status column's words, from the prototype's "Subagent models" section
+	// (plan 314): a per-type row that names a model is this install's global
+	// default for that type, and the plan reviewer's row is the global row of a
+	// system type. A shared custom subagent is marked on an agent's page, where
+	// the switch beside it is the agent's.
+	configGlobalDefaultStatus = "Global default"
+	configGlobalRowStatus     = "Global row"
+	configSharedStatus        = "Shared"
+	// configRowDefaultEffort is what an empty stored level means on a row that
+	// names a model: the model row's own default (plan 313's reading, kept).
+	configRowDefaultEffort = "Row default"
 	// configSystemSubagentNotice is the prototype's refusal, word for word
 	// (plan 313, scene system-stray-entry): the panel says why before the
 	// loader does, and the loader still judges the save on its own.
@@ -829,6 +949,10 @@ const (
 	configAgentOverridePrefix  = "agent override: "
 	configGlobalDefaultPrefix  = "global default: "
 	configPrimaryCreatedNotice = "Primary agent created in your draft. Add a model provider, then choose its default model."
+	// configSharedSubagentNotice is what a read-only shared row answers when one
+	// of its definition's fields is opened: the definition is edited on the
+	// "Subagent models" page, never here (plan 314).
+	configSharedSubagentNotice = "A shared subagent: its definition is edited in Subagent models, only the switch is set here"
 )
 
 // configRowSummary is a row's second column for the agents section: the value
@@ -836,6 +960,16 @@ const (
 // actually run on, in the order dispatch resolves it, and the verdict a system
 // subagent entry gets (plan 313). Everything else keeps configRowDescription.
 func (p *configPanel) configRowSummary(doc any, path []string, key string, value any) string {
+	if len(path) == 1 && path[0] == configSharedSubagentsKey {
+		// A registry entry's own description is what a model reads when it
+		// chooses a subagent type, so it is what its row says (plan 314).
+		if row, ok := value.(map[string]any); ok {
+			if text := strings.TrimSpace(configStringField(row, "description")); text != "" {
+				return text
+			}
+		}
+		return configRowDescription(value)
+	}
 	if len(path) != 3 || path[0] != configDefinitionsPath || path[2] != configSubagentsKey {
 		return configRowDescription(value)
 	}
@@ -989,6 +1123,9 @@ func (p *configPanel) editRowValue(doc any, rowPath []string, field configField,
 func (p *configPanel) addRow(doc any, path []string, field configField) (any, string) {
 	container, _ := configLookupValue(doc, path)
 	list := configContainerIsList(field, container)
+	if list && len(path) == 1 && path[0] == configSharedSubagentsKey {
+		return p.addSharedSubagent(doc, path, field, container)
+	}
 	if !list && configPrimaryCreationPath(field, path) {
 		return p.addPrimaryAgent(doc, path, field, container)
 	}
@@ -1050,6 +1187,30 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 // the guard must not fire there (plan 313).
 func configPrimaryCreationPath(field configField, path []string) bool {
 	return field.Path == configDefinitionsPath && len(path) == 1 && path[0] == configDefinitionsPath
+}
+
+// addSharedSubagent seeds one registry entry and opens it (plan 314). A shared
+// subagent is a full custom definition, so the row starts with the fields the
+// loader requires — a name to type, a description the model reads, a prompt to
+// run on, and the read-only tool tier a subagent starts at — rather than asking
+// what type of value the row is. Saving is what judges it: the registry's
+// validator refuses an entry with no name, no description or no prompt, and its
+// own sentence is the one the page shows.
+func (p *configPanel) addSharedSubagent(doc any, path []string, field configField, container any) (any, string) {
+	seed := map[string]any{
+		"name":          "",
+		"description":   "",
+		"system_prompt": "",
+		"tools":         appcfg.SubagentToolsReadOnly,
+	}
+	rows, _ := container.([]any)
+	rows = append(append(make([]any, 0, len(rows)+1), rows...), seed)
+	updated, note := p.assign(doc, path, rows, false, field.Label)
+	if note != "" {
+		return updated, note
+	}
+	opened, note := p.editRows(updated, configJoinPath(path, strconv.Itoa(len(rows)-1)), field)
+	return opened, note
 }
 
 // addPrimaryAgent creates one primary agent the way the prototype's create-agent

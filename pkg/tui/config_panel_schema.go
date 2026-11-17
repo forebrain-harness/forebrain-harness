@@ -89,9 +89,24 @@ type configSectionSchema struct {
 	// startup section of forebrain.yaml, and it takes effect when the
 	// process restarts (plan 187 §1.1).
 	YAMLOnly bool
+	// StoreSection, when non-empty, marks this section a PROJECTION: it presents
+	// a curated view of another stored section's document and saves back to that
+	// section. The panel reads and writes p.raw[StoreSection]; Name is only what
+	// the user sees and types. "Subagent models" projects the agents store
+	// (plan 314). A projection is not itself a config.Root section.
+	StoreSection string
 	// Fields are the editable settings, in the order the section page shows
 	// them. A YAML-only section has none.
 	Fields []configField
+}
+
+// storeSection is the configuration section this descriptor reads and writes:
+// itself, or the section a projection presents.
+func (s configSectionSchema) storeSection() string {
+	if s.StoreSection != "" {
+		return s.StoreSection
+	}
+	return s.Name
 }
 
 // The picker's tabs. A terminal is wide enough for four short headings, and
@@ -233,21 +248,32 @@ var configSectionSchemas = []configSectionSchema{
 				Path: "goal_evaluator.reasoning_effort", Label: "Goal check thinking level", Kind: configFieldText,
 				Hint: "Empty follows that model row's default level; low, high and so on override it",
 			},
-			// The exit-plan approval's reviewer row (plan 313) is the goal
-			// check's sibling one setting down: system-dispatched, global on
-			// purpose, so it is two settings rather than a whole subagent entry
-			// (the plan 299 precedent above).
-			{
-				Path: "plan_reviewer.model", Label: "Plan reviewer model", Kind: configFieldText,
-				Hint: "A model row id (the row chosen in Settings → Subagents); empty follows the primary agent",
-			},
-			{
-				// The same stopgap as the goal check's row above (plan 313,
-				// 2026-11-17 reasoning-semantics correction): plan 319 replaces
-				// both with a picker over the chosen model row's levels.
-				Path: "plan_reviewer.reasoning_effort", Label: "Plan reviewer thinking level", Kind: configFieldText,
-				Hint: "Empty follows that model row's default level; low, high and so on override it",
-			},
+		},
+	},
+	{
+		// The install-wide subagent rows, as one page (plan 314). It is a
+		// projection of the agents store — the prototype's "Subagent models"
+		// section — because every row here lives in agents: the per-type defaults
+		// (agents.subagent_models, plan 315), the plan reviewer's global row
+		// (agents.plan_reviewer, plan 313, relocated here) and the shared custom
+		// registry (agents.shared_subagents, this plan's storage). The panel
+		// reads and writes the agents document either way, so a key this page
+		// does not show travels back untouched on save.
+		Name: "subagent_models", Title: "Subagent models", Tab: configTabAgents,
+		Summary:      "Install-wide defaults for built-in types, plan-reviewer and shared custom subagents",
+		StoreSection: "agents",
+		Fields: []configField{
+			// The four public per-type defaults: a global row id + thinking
+			// level each, which an agent's own override still outranks.
+			{Path: "subagent_models.general-purpose", Label: "general-purpose", Kind: configFieldRows, Hint: "Install-wide default model row for this type; an agent's own override still wins"},
+			{Path: "subagent_models.explore", Label: "explore", Kind: configFieldRows, Hint: "Install-wide default model row for this type; an agent's own override still wins"},
+			{Path: "subagent_models.plan", Label: "plan", Kind: configFieldRows, Hint: "Install-wide default model row for this type; an agent's own override still wins"},
+			{Path: "subagent_models.verification", Label: "verification", Kind: configFieldRows, Hint: "Install-wide default model row for this type; an agent's own override still wins"},
+			// The plan reviewer's row, the goal check's sibling one type over:
+			// a system-dispatched type whose row no primary agent owns.
+			{Path: "plan_reviewer", Label: "plan-reviewer", Kind: configFieldRows, Hint: "Global row for a system type, the goal-evaluator pattern; agent pages stay read-only"},
+			// The shared custom registry: one definition every agent may enable.
+			{Path: "shared_subagents", Label: "Shared custom subagents", Kind: configFieldRows, List: true, Hint: "Install-wide custom subagents every agent may enable; disabled per agent until enabled"},
 		},
 	},
 	{
