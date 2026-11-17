@@ -1105,6 +1105,211 @@ func runEditFile(t *testing.T, ctx context.Context, tool *llm.Tool, path, oldStr
 	return tool.Handle(ctx, string(args))
 }
 
+// editFileNoBaseline writes the fixture and returns the path, the state, and an
+// edit tool bound to that state — with no read baseline at all, the shape of a
+// conversation whose first touch of the file is the edit itself.
+func editFileNoBaseline(t *testing.T, dir, name, content string) (string, *State, *llm.Tool) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	st := NewState(dir)
+	st.SetPrimaryWorkspaceBoundary("", dir, nil)
+	tool, err := NewFileEditTool(st)
+	if err != nil {
+		t.Fatalf("NewFileEditTool: %v", err)
+	}
+	return path, st, tool
+}
+
+// writeToolNoBaseline returns a write tool over a state with no read baseline,
+// for the overwrites a conversation never read first.
+func writeToolNoBaseline(t *testing.T, dir string) (*State, *llm.Tool) {
+	t.Helper()
+	st := NewState(dir)
+	st.SetPrimaryWorkspaceBoundary("", dir, nil)
+	tool, err := NewFileWriteTool(st, nil)
+	if err != nil {
+		t.Fatalf("NewFileWriteTool: %v", err)
+	}
+	return st, tool
+}
+
+// TestEditFileWithoutPriorReadSucceedsAndRegistersBaseline pins read-on-edit:
+// a conversation that never read the file edits it, and the edit reads the file
+// itself — under the same lock, before any write — so the baseline it registers
+// is the pre-write bytes. What survives afterwards splits as it does for a real
+// read-then-edit: the persisted baseline holds the pre-write bytes, while the
+// in-memory one was moved to the edit's own output by RememberWrite.
+func TestEditFileWithoutPriorReadSucceedsAndRegistersBaseline(t *testing.T) {
+	dir := t.TempDir()
+	hist := filepath.Join(t.TempDir(), "history")
+	store := resumeProofStore(t, "unread-editor")
+	ctx := WithConversationSessionID(context.Background(), "unread-editor")
+	path, st, tool := editFileNoBaseline(t, dir, "notes.md", "alpha\nbeta\n")
+	st.SetHistoryDir(hist)
+	st.SetReadStateStore(store)
+	rec := &recordingFileChanges{}
+	st.SetFileChangeRecorder(rec)
+
+	if _, err := runEditFile(t, ctx, tool, path, "beta", "gamma", false); err != nil {
+		t.Fatalf("edit without a prior read: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "alpha\ngamma\n" {
+		t.Fatalf("file after the unread edit = %q, want the replacement landed", got)
+	}
+
+	states := st.ReadStates()
+	if len(states) != 1 {
+		t.Fatalf("the edit left %d baselines, want the one file it touched", len(states))
+	}
+	abs := states[0].AbsPath
+	persisted, ok, err := store.FileReadStateForSession(ctx, "unread-editor", abs)
+	if err != nil || !ok {
+		t.Fatalf("persisted baseline for the auto-read: ok=%v err=%v", ok, err)
+	}
+	if persisted.SHA256 != sha256Hex([]byte("alpha\nbeta\n")) {
+		t.Fatalf("persisted baseline SHA = %s, want the pre-write bytes", persisted.SHA256)
+	}
+	rs, ok := st.GetReadState(abs)
+	if !ok {
+		t.Fatal("no in-memory baseline after the unread edit")
+	}
+	if rs.SHA256Hex != sha256Hex([]byte("alpha\ngamma\n")) {
+		t.Fatalf("in-memory baseline SHA = %s, want the bytes the edit wrote", rs.SHA256Hex)
+	}
+	if n := countSnapshots(t, hist); n != 1 {
+		t.Fatalf("snapshots = %d, want exactly 1 for the successful write", n)
+	}
+	if len(rec.got) != 1 {
+		t.Fatalf("file changes = %d, want exactly 1", len(rec.got))
+	}
+}
+
+// TestEditFileWithoutPriorReadBadOldStillNotFound pins that removing the
+// must-read gate removes only the gate: an unread edit whose old_string is not
+// in the file still fails as a not-found match, writes nothing, and leaves no
+// snapshot behind.
+func TestEditFileWithoutPriorReadBadOldStillNotFound(t *testing.T) {
+	dir := t.TempDir()
+	hist := filepath.Join(t.TempDir(), "history")
+	path, st, tool := editFileNoBaseline(t, dir, "notes.md", "alpha\nbeta\n")
+	st.SetHistoryDir(hist)
+	rec := &recordingFileChanges{}
+	st.SetFileChangeRecorder(rec)
+	ctx := WithConversationSessionID(context.Background(), "unread-miss")
+
+	_, err := runEditFile(t, ctx, tool, path, "delta", "DELTA", false)
+	if !errors.Is(err, ErrOldStringNotFound) {
+		t.Fatalf("unread edit with a missing old_string err=%v, want ErrOldStringNotFound", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "alpha\nbeta\n" {
+		t.Fatalf("file after the refused unread edit = %q, want it untouched", got)
+	}
+	if n := countSnapshots(t, hist); n != 0 {
+		t.Fatalf("refused unread edit left %d snapshots, want 0", n)
+	}
+	if len(rec.got) != 0 {
+		t.Fatalf("refused unread edit recorded %d file changes, want 0", len(rec.got))
+	}
+}
+
+// TestEditFileAutoReadThenExternalChangeStillRejected pins the protection the
+// gate used to stand in for: the baseline an unread edit takes itself is a real
+// one, so a file rewritten behind the conversation's back afterwards — same
+// size, same mtime, different bytes — is refused and the external content
+// survives.
+func TestEditFileAutoReadThenExternalChangeStillRejected(t *testing.T) {
+	dir := t.TempDir()
+	store := resumeProofStore(t, "auto-external")
+	ctx := WithConversationSessionID(context.Background(), "auto-external")
+	path, st, tool := editFileNoBaseline(t, dir, "notes.md", "alpha\nbeta\n")
+	st.SetReadStateStore(store)
+
+	if _, err := runEditFile(t, ctx, tool, path, "beta", "gamma", false); err != nil {
+		t.Fatalf("edit without a prior read: %v", err)
+	}
+	rs, ok := st.GetReadState(path)
+	if !ok {
+		t.Fatal("no baseline after the unread edit")
+	}
+	external := []byte("alpha\nDELTA\n")
+	if err := os.WriteFile(path, external, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Same size, and the mtime restored to what the edit's own write left: only
+	// the content hash can tell the two apart, which is the check this rests on.
+	mod := rs.ModTime
+	if err := os.Chtimes(path, mod, mod); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runEditFile(t, ctx, tool, path, "DELTA", "gamma", false)
+	if err == nil || !strings.Contains(err.Error(), "file changed since last read") {
+		t.Fatalf("edit after an external change err=%v, want file changed since last read", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, external) {
+		t.Fatalf("file after the refused edit = %q, want the external content kept", got)
+	}
+}
+
+// TestEditFileAutoReadConcurrentSameFile pins that the read the edit takes for
+// an unread file cannot be raced into a lost edit: 64 concurrent edits, each
+// with its own old_string, all land and none is lost.
+func TestEditFileAutoReadConcurrentSameFile(t *testing.T) {
+	dir := t.TempDir()
+	hist := filepath.Join(t.TempDir(), "history")
+	const n = 64
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "line %02d marker-%02d\n", i, i)
+	}
+	path, st, tool := editFileNoBaseline(t, dir, "shared.txt", b.String())
+	st.SetHistoryDir(hist)
+	ctx := WithConversationSessionID(context.Background(), "concurrent")
+
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := runEditFile(t, ctx, tool, path,
+				fmt.Sprintf("marker-%02d", i), fmt.Sprintf("MARKER-%02d", i), false)
+			if err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent unread edit: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < n; i++ {
+		if want, old := fmt.Sprintf("MARKER-%02d", i), fmt.Sprintf("marker-%02d", i); !strings.Contains(string(got), want) || strings.Contains(string(got), old) {
+			t.Fatalf("marker %d lost or left unedited; file holds %q", i, got)
+		}
+	}
+}
+
 // TestEditFileToleratesCombinedQuoteAndWhitespaceDifference pins the root cause
 // of the failure this plan opened on: the quote-only and whitespace-only
 // matchers never composed, so a caller whose old_string differed from disk in
@@ -3300,33 +3505,80 @@ func TestEditFileAfterResumeStillRejectsExternalChange(t *testing.T) {
 }
 
 // TestReadBaselineDoesNotCrossSessions pins the boundary: a baseline belongs to
-// the conversation that took it, so a second conversation of the same agent,
-// editing the same unchanged file, still owes its own read.
+// the conversation that took it. The must-read refusal that used to enforce it
+// is gone (read-on-edit), so the boundary is pinned by what a second
+// conversation's own baseline holds: an unread bystander edit takes its own
+// baseline from the bytes on disk, files it under its own session, and never
+// inherits the reader's — which a fresh conversation proves when the file
+// changed outside after the reader's read and its edit still lands.
 func TestReadBaselineDoesNotCrossSessions(t *testing.T) {
 	readCtx := WithConversationSessionID(context.Background(), "reader")
 	store := resumeProofStore(t, "reader")
-	if err := store.Ensure(context.Background(), "bystander", "bystander"); err != nil {
-		t.Fatal(err)
+	for _, session := range []string{"bystander", "bystander2"} {
+		if err := store.Ensure(context.Background(), session, session); err != nil {
+			t.Fatal(err)
+		}
 	}
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "notes.md")
 	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	readForTest(t, readCtx, resumeProofState(t, tmp, store), path)
+	abs := readForTest(t, readCtx, resumeProofState(t, tmp, store), path)
 
+	// The bystander never read the file; read-on-edit succeeds and registers a
+	// baseline of its own, holding the pre-write bytes, under its own session.
 	other := resumeProofState(t, tmp, store)
 	editCtx := WithConversationSessionID(context.Background(), "bystander")
-	err := editForTest(other)(editCtx, path, "beta", "gamma")
-	if err == nil || !strings.Contains(err.Error(), "must read_file before edit") {
-		t.Fatalf("edit from a conversation that read nothing err=%v, want must read_file before edit", err)
+	if err := editForTest(other)(editCtx, path, "beta", "gamma"); err != nil {
+		t.Fatalf("edit from a conversation that read nothing: %v", err)
+	}
+	bystander, ok, err := store.FileReadStateForSession(editCtx, "bystander", abs)
+	if err != nil || !ok {
+		t.Fatalf("bystander baseline: ok=%v err=%v", ok, err)
+	}
+	if bystander.SHA256 != sha256Hex([]byte("alpha\nbeta\n")) {
+		t.Fatalf("bystander baseline SHA = %s, want the bytes its auto-read saw", bystander.SHA256)
+	}
+	reader, ok, err := store.FileReadStateForSession(readCtx, "reader", abs)
+	if err != nil || !ok {
+		t.Fatalf("reader baseline: ok=%v err=%v", ok, err)
+	}
+	if reader.SessionID != "reader" || reader.SHA256 != sha256Hex([]byte("alpha\nbeta\n")) {
+		t.Fatalf("reader baseline = %+v, want the reader's own row unchanged", reader)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "alpha\nbeta\n" {
-		t.Fatalf("file after the refused edit = %q, want it untouched", got)
+	if string(got) != "alpha\ngamma\n" {
+		t.Fatalf("file after the bystander edit = %q, want the replacement landed", got)
+	}
+
+	// The other direction: the reader reads a file, the file then changes
+	// outside, and a brand-new conversation edits text only the new bytes hold.
+	// It must not inherit the reader's stale baseline — its own auto-read is of
+	// the current bytes, so the edit lands rather than being refused as changed
+	// since a read it never took.
+	fresh := filepath.Join(tmp, "second.md")
+	if err := os.WriteFile(fresh, []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	readForTest(t, readCtx, resumeProofState(t, tmp, store), fresh)
+	if err := os.WriteFile(fresh, []byte("one\nTWO\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	freshState := resumeProofState(t, tmp, store)
+	freshCtx := WithConversationSessionID(context.Background(), "bystander2")
+	if err := editForTest(freshState)(freshCtx, fresh, "TWO", "three"); err != nil {
+		t.Fatalf("fresh conversation edit over an externally changed file: %v", err)
+	}
+	second, err := os.ReadFile(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second) != "one\nthree\n" {
+		t.Fatalf("file after the fresh conversation's edit = %q, want the replacement landed", second)
 	}
 }
 
@@ -3438,6 +3690,122 @@ func TestWriteFileAfterResumeRestoresReadBaseline(t *testing.T) {
 	}
 	if string(kept) != "one\nTWO\n" {
 		t.Fatalf("file after the refused write = %q, want the external content kept", kept)
+	}
+}
+
+// TestWriteFileOverwriteWithoutPriorReadSucceedsAndRegistersBaseline pins
+// read-on-write: an overwrite of a file the conversation never read reads it
+// first — under the same lock — so the baseline it registers holds the
+// pre-write bytes and the pre-write snapshot keeps them for rewind.
+func TestWriteFileOverwriteWithoutPriorReadSucceedsAndRegistersBaseline(t *testing.T) {
+	dir := t.TempDir()
+	hist := filepath.Join(t.TempDir(), "history")
+	store := resumeProofStore(t, "unread-writer")
+	ctx := WithConversationSessionID(context.Background(), "unread-writer")
+	path := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, tool := writeToolNoBaseline(t, dir)
+	st.SetHistoryDir(hist)
+	st.SetReadStateStore(store)
+	rec := &recordingFileChanges{}
+	st.SetFileChangeRecorder(rec)
+
+	args, err := json.Marshal(FileWriteInput{FilePath: path, Content: "new\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Handle(ctx, string(args)); err != nil {
+		t.Fatalf("overwrite without a prior read: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new\n" {
+		t.Fatalf("file after the unread overwrite = %q, want the new content", got)
+	}
+
+	states := st.ReadStates()
+	if len(states) != 1 {
+		t.Fatalf("the overwrite left %d baselines, want the one file it touched", len(states))
+	}
+	persisted, ok, err := store.FileReadStateForSession(ctx, "unread-writer", states[0].AbsPath)
+	if err != nil || !ok {
+		t.Fatalf("persisted baseline for the auto-read: ok=%v err=%v", ok, err)
+	}
+	if persisted.SHA256 != sha256Hex([]byte("old\n")) {
+		t.Fatalf("persisted baseline SHA = %s, want the pre-write bytes", persisted.SHA256)
+	}
+	snapshots, err := filepath.Glob(filepath.Join(hist, "*", "*", "*.snapshot"))
+	if err != nil {
+		t.Fatalf("glob snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshots = %d, want exactly 1 for the overwrite", len(snapshots))
+	}
+	snapshot, err := os.ReadFile(snapshots[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapshot) != "old\n" {
+		t.Fatalf("snapshot = %q, want the pre-write bytes", snapshot)
+	}
+	if len(rec.got) != 1 || !rec.got[0].ExistedBefore {
+		t.Fatalf("file changes = %+v, want one change over the existing file", rec.got)
+	}
+}
+
+// TestWriteFileOverwriteAutoReadThenExternalChangeStillRejected pins that the
+// baseline an unread overwrite takes itself guards what follows: a file
+// rewritten behind the conversation's back afterwards — same size, same mtime,
+// different bytes — refuses the next overwrite and the external content
+// survives.
+func TestWriteFileOverwriteAutoReadThenExternalChangeStillRejected(t *testing.T) {
+	dir := t.TempDir()
+	ctx := WithConversationSessionID(context.Background(), "unread-external")
+	path := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, tool := writeToolNoBaseline(t, dir)
+
+	write := func(content string) error {
+		args, err := json.Marshal(FileWriteInput{FilePath: path, Content: content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = tool.Handle(ctx, string(args))
+		return err
+	}
+	if err := write("first\n"); err != nil {
+		t.Fatalf("unread overwrite: %v", err)
+	}
+	rs, ok := st.GetReadState(path)
+	if !ok {
+		t.Fatal("no baseline after the unread overwrite")
+	}
+	external := []byte("third\n")
+	if err := os.WriteFile(path, external, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Same size, and the mtime restored to what the overwrite itself left: only
+	// the content hash can tell the two apart, which is the check this rests on.
+	mod := rs.ModTime
+	if err := os.Chtimes(path, mod, mod); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := write("zzz\n"); err == nil || !strings.Contains(err.Error(), "file changed since last read") {
+		t.Fatalf("overwrite after an external change err=%v, want file changed since last read", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, external) {
+		t.Fatalf("file after the refused overwrite = %q, want the external content kept", got)
 	}
 }
 

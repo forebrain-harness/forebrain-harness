@@ -873,7 +873,7 @@ type FileWriteInput struct {
 func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 	return llm.NewTool(
 		"write_file",
-		"Use when creating a new file or fully replacing one's contents (writes atomically). For a targeted change prefer edit_file. Overwriting an existing file requires a prior read.",
+		"Use when creating a new file or fully replacing one's contents (writes atomically). For a targeted change prefer edit_file. Overwriting an existing file reads it automatically first if this conversation has not read it.",
 		func(ctx context.Context, in *FileWriteInput) (string, error) {
 			if st == nil {
 				return "", fmt.Errorf("nil state")
@@ -938,30 +938,39 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			if fi, err := statFile(abs); err == nil && fi != nil {
 				// Overwriting a file this process read, or one the conversation
 				// read before a /resume put it here: a candidate baseline whose
-				// stat and content hash still have to match.
+				// stat and content hash still have to match. A conversation with
+				// no baseline at all owes no round trip: the read the overwrite
+				// was going to do anyway becomes the baseline, under the same
+				// lock the write holds.
 				rs, ok, rsErr := st.readStateForEdit(ctx, abs)
 				if rsErr != nil {
 					return "", rsErr
 				}
-				if ok {
-					if fi.ModTime().After(rs.ModTime) || fi.Size() != rs.Size {
-						return "", fmt.Errorf("file changed since last read")
-					}
-				} else if mapped, mappedOK := st.draftRedirectReadState(res, abs); mappedOK {
-					// The model read the formal file; the draft holds those very
-					// bytes, so the read it owes is satisfied by content, not by
-					// a matching mtime between two copies of one file.
-					rs, ok = mapped, true
-				}
+				mapped := false
 				if !ok {
-					return "", fmt.Errorf("must read_file before overwriting")
+					if mappedRS, mappedOK := st.draftRedirectReadState(res, abs); mappedOK {
+						// The model read the formal file; the draft holds those
+						// very bytes, so the read it owes is satisfied by
+						// content, not by a matching mtime between two copies
+						// of one file.
+						rs, ok, mapped = mappedRS, true, true
+					}
 				}
 				prev, err := os.ReadFile(abs)
 				if err != nil {
 					return "", err
 				}
-				if !readStateMatchesContent(rs, prev) {
-					return "", fmt.Errorf("file changed since last read")
+				if !ok {
+					if err := st.RememberReadForSession(ctx, abs, fi.ModTime(), fi.Size(), prev); err != nil {
+						return "", err
+					}
+				} else {
+					if !mapped && (fi.ModTime().After(rs.ModTime) || fi.Size() != rs.Size) {
+						return "", fmt.Errorf("file changed since last read")
+					}
+					if !readStateMatchesContent(rs, prev) {
+						return "", fmt.Errorf("file changed since last read")
+					}
 				}
 				before = append([]byte(nil), prev...)
 				existed = true
@@ -1083,7 +1092,7 @@ func NewFileEditTool(st *State) (*llm.Tool, error) {
 func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, error) {
 	return llm.NewTool(
 		"edit_file",
-		"Use when making a targeted change to an existing file: replaces an exact, unique string (set replace_all for repeated text). Requires a prior read. Copy old_string from read_file output: the only differences tolerated are curly vs straight quotes, tabs vs spaces, trailing whitespace on a line and CRLF vs LF, and only while the match stays unique.",
+		"Use when making a targeted change to an existing file: replaces an exact, unique string (set replace_all for repeated text). If this conversation has not read the file yet, edit_file reads it automatically before matching. Copy old_string from read_file output: the only differences tolerated are curly vs straight quotes, tabs vs spaces, trailing whitespace on a line and CRLF vs LF, and only while the match stays unique.",
 		func(ctx context.Context, in *FileEditInput) (string, error) {
 			if st == nil {
 				return "", fmt.Errorf("nil state")
@@ -1155,7 +1164,9 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			// The baseline may be this process's own read, or the one the
 			// conversation took before a /resume put it in this one. Either
 			// way it is only a candidate: the stat and the content hash below
-			// decide.
+			// decide. A conversation with no baseline at all owes no round
+			// trip: the read below this edit was going to do anyway becomes
+			// the baseline, taken under the same lock the write holds.
 			rs, ok, err := st.readStateForEdit(ctx, abs)
 			if err != nil {
 				return "", err
@@ -1171,22 +1182,25 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 					rs, ok, mapped = mappedRS, true, true
 				}
 			}
-			if !ok {
-				return "", fmt.Errorf("must read_file before edit")
-			}
 			fi, err := statFile(abs)
 			if err != nil {
 				return "", err
-			}
-			if !mapped && (fi.ModTime().After(rs.ModTime) || fi.Size() != rs.Size) {
-				return "", fmt.Errorf("file changed since last read")
 			}
 			raw, err := os.ReadFile(abs)
 			if err != nil {
 				return "", err
 			}
-			if !readStateMatchesContent(rs, raw) {
-				return "", fmt.Errorf("file changed since last read")
+			if !ok {
+				if err := st.RememberReadForSession(ctx, abs, fi.ModTime(), fi.Size(), raw); err != nil {
+					return "", err
+				}
+			} else {
+				if !mapped && (fi.ModTime().After(rs.ModTime) || fi.Size() != rs.Size) {
+					return "", fmt.Errorf("file changed since last read")
+				}
+				if !readStateMatchesContent(rs, raw) {
+					return "", fmt.Errorf("file changed since last read")
+				}
 			}
 			if opts.PrepareLocked != nil {
 				if err := opts.PrepareLocked(abs, raw, in); err != nil {

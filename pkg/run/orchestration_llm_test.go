@@ -1487,7 +1487,8 @@ func editOutsideWorkspace(t *testing.T, r *Runner, st *toolpkg.State, ctx contex
 	if err != nil {
 		t.Fatal(err)
 	}
-	// edit_file requires a prior read of the same file.
+	// Read first so the edit compares against a baseline this process took;
+	// read-on-edit would take one itself otherwise.
 	if _, err := readTool.Handle(toolpkg.WithPolicyApproved(ctx, true), `{"file_path":"`+target+`"}`); err != nil {
 		t.Fatalf("read before edit: %v", err)
 	}
@@ -1615,8 +1616,10 @@ func TestEditInsideAnotherPrimaryWorkspaceStaysRefused(t *testing.T) {
 }
 
 // The same holds for the rest of FOREBRAIN_HOME outside the active workspace.
-// A protected edit asks once. The read it owes is part of that same decision,
-// so it must not raise a second prompt about a change the user already approved.
+// A protected edit asks once, and the approved replay lands in that one answer:
+// the read the edit needs it now takes itself (read-on-edit) inside the same
+// approved call, so nothing raises a second prompt about a change the user
+// already approved.
 func TestEditInsideForebrainHomeAsksOnceAndLetsItsReadThrough(t *testing.T) {
 	home := t.TempDir()
 	activeWS := filepath.Join(home, "workspace")
@@ -1652,28 +1655,24 @@ func TestEditInsideForebrainHomeAsksOnceAndLetsItsReadThrough(t *testing.T) {
 		t.Fatal(aerr)
 	}
 
-	// Replaying the approved edit reveals the read it still owes.
-	_, err = wrapped(toolpkg.WithApprovedActionID(ctx, req.ActionID), arguments)
-	if err == nil || !strings.Contains(err.Error(), "read_file") {
-		t.Fatalf("approved edit error=%v want the read-before-edit requirement", err)
-	}
-
-	// That read is not a second question: the user already agreed to have this
-	// file changed, so it runs unasked.
-	readTool, err := toolpkg.NewFileReadTool(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, readErr := readTool.Handle(ctx, `{"file_path":"`+target+`"}`); readErr != nil {
-		t.Fatalf("read of an already-approved write target asked again or failed: %v", readErr)
-	}
-
+	// The approved replay succeeds in one call: the read it needs is the edit's
+	// own auto-read, taken under the approval the operator already gave.
 	if _, err = wrapped(toolpkg.WithApprovedActionID(ctx, req.ActionID), arguments); err != nil {
 		t.Fatalf("approved FOREBRAIN_HOME edit failed: %v", err)
 	}
 	raw, _ = os.ReadFile(target)
 	if string(raw) != "bye\n" {
 		t.Fatalf("approved edit did not land: %q", string(raw))
+	}
+
+	// Reading an already-approved write target is still not a second question:
+	// the user already agreed to have this file changed, so it runs unasked.
+	readTool, err := toolpkg.NewFileReadTool(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, readErr := readTool.Handle(ctx, `{"file_path":"`+target+`"}`); readErr != nil {
+		t.Fatalf("read of an already-approved write target asked again or failed: %v", readErr)
 	}
 }
 
