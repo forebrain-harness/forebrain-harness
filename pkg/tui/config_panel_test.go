@@ -356,7 +356,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 			name: "enum", section: "approval_preset",
 			steps: []richStep{
 				{label: "Approval preset", ok: true},
-				{label: "Approval preset", ok: true},
+				{label: "Default approval mode", ok: true},
 				{label: "Full access", ok: true},
 			},
 			want: `"full_access"`,
@@ -365,7 +365,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 			name: "number", section: "cron",
 			steps: []richStep{
 				{label: "Scheduled tasks", ok: true},
-				{label: "Keep days", ok: true},
+				{label: "Keep task records for", ok: true},
 			},
 			inputs: []selectorInput{{value: "45", ok: true}},
 			want:   `{"retention_days":45}`,
@@ -612,7 +612,7 @@ func TestConfigPanelEditFooterDefaultUnsets(t *testing.T) {
 		{label: "Scheduled tasks", ok: true},
 		{ok: false},
 	},
-		[]actionStep{{label: "Keep days", ok: true}, {ok: false}},
+		[]actionStep{{label: "Keep task records for", ok: true}, {ok: false}},
 		[]inputActionStep{{action: FooterActionDefault, ok: true}})
 
 	// The editor's footer offered exactly the Default action.
@@ -653,8 +653,8 @@ func TestConfigPanelBoolEnumChoiceHasNoDefault(t *testing.T) {
 		{
 			name:   "an enum",
 			stored: map[string]string{"lsp": `{"diagnostics":{"min_severity":"warning","late_delivery":true}}`},
-			steps:  []richStep{{label: "Language servers", ok: true}, {label: "Lowest severity", ok: true}},
-			want:   []string{"error", "warning", "information", "hint"},
+			steps:  []richStep{{label: "Language servers", ok: true}, {label: "Minimum severity", ok: true}},
+			want:   []string{"Error", "Warning", "Information", "Hint"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -738,14 +738,14 @@ func TestConfigPanelRefusesAnOutOfRangeNumber(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "Scheduled tasks", ok: true},
-		{label: "Keep days", ok: true},
-		{label: "Keep days", ok: true},
+		{label: "Keep task records for", ok: true},
+		{label: "Keep task records for", ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "99999", ok: true}, {value: "45", ok: true}})
 
 	// The refusal is the page's own line, so it is in the prompt the panel
 	// showed next — the user reads it before the value they retype.
-	if refusals := strings.Join(selector.richLabels, "\n"); !strings.Contains(refusals, "may not be larger than 3650") {
+	if refusals := strings.Join(selector.richLabels, "\n"); !strings.Contains(refusals, "Use a value no greater than 3650.") {
 		t.Fatalf("the refusal must be shown on the page; prompts:\n%s", refusals)
 	}
 	if len(session.writes) != 1 {
@@ -767,10 +767,35 @@ func TestConfigPanelClampsANumberToItsCeiling(t *testing.T) {
 		{ok: false},
 	}, []selectorInput{{value: "99", ok: true}})
 
-	if prompts := strings.Join(selector.richLabels, "\n"); !strings.Contains(prompts, "Stored as the maximum, 20") {
+	if prompts := strings.Join(selector.richLabels, "\n"); !strings.Contains(prompts, "Adjusted to the maximum: 20.") {
 		t.Fatalf("the clamp must be reported; prompts:\n%s", prompts)
 	}
 	if len(session.writes) != 1 || string(session.writes[0].raw) != `{"search_top_k":20}` {
+		t.Fatalf("writes = %+v", session.writes)
+	}
+}
+
+// The LSP idle exit's floor is its own rule (plan 327 D3, prototype
+// html:137): 0 is the default and every other value must be a real timeout,
+// so 1–59 are refused in the prototype's own words while 0 lands.
+func TestConfigPanelIdleTimeoutNeedsSixtySeconds(t *testing.T) {
+	session := newConfigPanelSession(nil)
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Language servers", ok: true},
+		{label: "Exit when idle for", ok: true},
+		{label: "Exit when idle for", ok: true},
+		{ok: false},
+	}, []selectorInput{{value: "30", ok: true}, {value: "0", ok: true}})
+
+	prompts := strings.Join(selector.richLabels, "\n")
+	if !strings.Contains(prompts, "Use 0 for the default, or at least 60 seconds.") {
+		t.Fatalf("the floor refusal must be shown on the page; prompts:\n%s", prompts)
+	}
+	if strings.Contains(prompts, "Use a value of at least") {
+		t.Fatalf("the floor is not the min bound; prompts:\n%s", prompts)
+	}
+	if len(session.writes) != 1 || string(session.writes[0].raw) != `{"idle_timeout":0}` {
 		t.Fatalf("writes = %+v", session.writes)
 	}
 }
@@ -800,12 +825,13 @@ func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 		t.Fatalf("a refused write stores nothing, got %+v", session.writes)
 	}
 	// The value did not land, so the page drawn after the refusal still reads
-	// the default: the refusal is not a half-applied edit.
+	// the default: the refusal is not a half-applied edit. The default an
+	// unset switch follows is the arrow's, per the prototype (plan 327 D6).
 	page := lastPageHeadlined(selector, "Feature switches")
 	if page == nil {
 		t.Fatalf("the features page was never drawn after the refusal: %v", selector.richLabels)
 	}
-	if row := findRow(t, page, "Memory"); row.Value != configDefaultStatus {
+	if row := findRow(t, page, "Memory"); row.Value != configDefaultArrow+configBoolOnLabel {
 		t.Fatalf("the refused value is on the page: %q", row.Value)
 	}
 }
@@ -914,7 +940,7 @@ func TestConfigPanelAddsAndDeletesARow(t *testing.T) {
 	selector = &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "Language servers", ok: true},
-		{label: "Servers", ok: true},
+		{label: "Configured servers", ok: true},
 		{label: "gopls", ok: true},
 		{label: "Server settings", ok: true},
 		{label: "legacy", ok: true},
@@ -1573,14 +1599,21 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 	if !strings.HasSuffix(memories, configBoolOnLabel) {
 		t.Fatalf("the Memory row = %q, want its value at the right edge", memories)
 	}
-	if !strings.Contains(memories, "On by default") {
+	if !strings.Contains(memories, "Remember useful context across conversations.") {
 		t.Fatalf("the Memory row = %q, want its hint beside the name", memories)
 	}
+	// An unset switch reads as the default it follows through the prototype's
+	// arrow (plan 327 D6) and carries the Default status beyond it (html:150).
 	servers := renderedRow(t, lines, "Language servers")
 	if !strings.HasSuffix(servers, configDefaultStatus) {
-		t.Fatalf("the Language servers row = %q, want the default it follows", servers)
+		t.Fatalf("the Language servers row = %q, want the Default status at the right edge", servers)
 	}
-	// Both values end at the same column: the track is fixed, not pushed along.
+	if !strings.Contains(servers, configDefaultArrow+configBoolOnLabel) {
+		t.Fatalf("the Language servers row = %q, want the arrow naming the default", servers)
+	}
+	// Both rows end at the same column: the tracks are fixed, not pushed
+	// along — a row with a status narrows its value column to make room for
+	// it, so the status is what ends at the edge there.
 	if endsAt(memories, configBoolOnLabel) != endsAt(servers, configDefaultStatus) {
 		t.Fatalf("the values are not aligned:\n%q\n%q", memories, servers)
 	}
@@ -2153,6 +2186,206 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 	})
 }
 
+// The reachable empty states say the prototype's words (plan 327 D4,
+// prototype html:156-157/169): an empty collection is two lines and an add
+// action, a section the Claude Code gate emptied says what is missing, and an
+// empty forebrain.yaml section says it holds nothing. The filter no-match
+// states are unreachable here — the /config pages draw no filter box at all
+// (plan 325 D6) — and so are loading, unavailable and closed: the panel reads
+// its sections in one synchronous snapshot.
+func TestConfigPanelEmptyStateCopy(t *testing.T) {
+	// An empty collection: the rows page's own two lines, with the add
+	// action the page offers.
+	session := newConfigPanelSession(map[string]string{"sandbox_workspace_write": `{"writable_roots":[]}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Workspace sandbox", ok: true},
+		{label: "Extra writable roots", ok: true},
+		{ok: false},
+		{ok: false},
+	}, nil)
+	rowsPrompt := selector.richLabels[2]
+	for _, want := range []string{"Nothing configured yet", "Add the first entry."} {
+		if !strings.Contains(rowsPrompt, want) {
+			t.Fatalf("the empty rows page is missing %q: %q", want, rowsPrompt)
+		}
+	}
+	if strings.Contains(rowsPrompt, "This level has no rows yet") {
+		t.Fatalf("the old empty line survived: %q", rowsPrompt)
+	}
+	if got := selector.richItems[2]; !slices.Contains(rowLabels(got), configAddRowLabel) {
+		t.Fatalf("the empty rows page offers no add action: %v", rowLabels(got))
+	}
+
+	// A section the Claude Code gate emptied: the page says what is missing.
+	session = newConfigPanelSession(nil)
+	selector = &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{{ok: false}}, nil, "peers")
+	peersPrompt := selector.richLabels[0]
+	for _, want := range []string{"No compatible installation found", "Claude Code interop appears when a local installation is available."} {
+		if !strings.Contains(peersPrompt, want) {
+			t.Fatalf("the gated peers page is missing %q: %q", want, peersPrompt)
+		}
+	}
+
+	// A forebrain.yaml section with nothing in it.
+	session = newConfigPanelSession(nil)
+	session.snapshot.File = map[string]string{"gateway": ""}
+	info := &infoPanelSelector{scriptedSelector: &scriptedSelector{}}
+	runConfigPanel(t, session, info, []richStep{{label: "Gateway", ok: true}}, nil)
+	if len(info.bodies) == 0 {
+		t.Fatal("the gateway section never opened")
+	}
+	for _, want := range []string{"Not configured", "This section has no explicit values in forebrain.yaml."} {
+		if !strings.Contains(info.bodies[0], want) {
+			t.Fatalf("the empty file section is missing %q: %q", want, info.bodies[0])
+		}
+	}
+}
+
+// The prototype's copy contract, pinned verbatim (plan 327 D5): the section
+// summaries and the field labels, hints and option labels the amended
+// prototype fixes, so a wording drift fails here rather than in a screenshot.
+func TestConfigPanelPrototypeCopy(t *testing.T) {
+	summaries := map[string]string{
+		"approval_preset":         "Choose what new sessions may do.",
+		"sandbox_workspace_write": "Control writable paths and network access.",
+		"batch":                   "Set the starting policy for new batch projects.",
+		"compact":                 "Keep long conversations within their context window.",
+		"memories":                "Tune retrieval, retention and background processing.",
+		"cron":                    "Choose how long task records are retained.",
+		"features":                "Enable memory and language intelligence.",
+		"agents":                  "Manage definitions, shared defaults and goal checks.",
+		"subagent_models":         "Install-wide defaults for built-in types and plan-reviewer.",
+		"hooks":                   "Run configured actions at lifecycle events.",
+		"lsp":                     "Manage servers, timeouts and diagnostic delivery.",
+		"peers":                   "Coordinate with other agent processes on this machine.",
+		"gateway":                 "Inspect the listening address and authentication.",
+		"credentials":             "Inspect external sign-in file locations.",
+	}
+	for name, want := range summaries {
+		schema, ok := configSectionSchemaFor(name)
+		if !ok {
+			t.Errorf("no %s section", name)
+			continue
+		}
+		if schema.Summary != want {
+			t.Errorf("%s's summary = %q, want the prototype's %q", name, schema.Summary, want)
+		}
+	}
+	// Representative field labels and hints, quoted from the prototype's own
+	// section table (html:72-87) — the corrections this plan exists for.
+	type fieldCopy struct{ section, path, label, hint string }
+	for _, want := range []fieldCopy{
+		{"approval_preset", "", "Default approval mode", "This setting affects new sessions, not the current conversation."},
+		{"sandbox_workspace_write", "network_access", "Network access", "Allow sandboxed commands to access the network."},
+		{"batch", "sandbox_default", "Sandbox new projects", "Existing batch projects keep their own sandbox policy."},
+		{"compact", "auto_compact_percent", "Auto-compact at", "Compact when context usage reaches this percentage."},
+		{"compact", "prompt", "Hand-off prompt", "Leave empty to use the built-in compaction prompt."},
+		{"memories", "max_raw_memories_for_consolidation", "Memories per consolidation", ""},
+		{"memories", "max_unused_days", "Expire unused memories after", ""},
+		{"memories", "max_rollout_age_days", "Keep records for", ""},
+		{"memories", "min_rollout_idle_hours", "Minimum idle time", ""},
+		{"cron", "retention_days", "Keep task records for", ""},
+		{"features", "memories", "Memory", "Remember useful context across conversations."},
+		{"agents", "defaults.network_retry_max", "Network retries", "Zero disables network retries."},
+		{"agents", "defaults.stream_idle_timeout_seconds", "Stream idle timeout", "Zero disables the watchdog. Positive values below 10 run as 10."},
+		{"agents", "defaults.context_inject.warn_remaining_percent", "Warn below remaining context", ""},
+		{"agents", "defaults.mcp_servers", "MCP servers", "Shared with all agents. Agent entries with the same name override these."},
+		{"agents", "goal_evaluator.model", "Goal check model", "The global model used to check goal progress."},
+		{"agents", "goal_evaluator.reasoning_effort", "Thinking level", "Choose a model first. Default follows that model row."},
+		{"hooks", "", "Hook events", "Command, prompt, agent and HTTP hooks are supported."},
+		{"lsp", "recommendations", "Recommend language servers", "Suggest useful servers for this project."},
+		{"lsp", "servers", "Configured servers", "Each server maps files and languages to a process."},
+		{"lsp", "max_servers", "Concurrent servers", ""},
+		{"lsp", "idle_timeout", "Exit when idle for", "Zero uses the default. Other values must be at least 60 seconds."},
+		{"lsp", "diagnostics.after_edit", "Diagnose after edits", "Request diagnostics after a file changes."},
+		{"lsp", "diagnostics.wait_ms", "Wait for diagnostics", "Zero does not wait."},
+		{"lsp", "diagnostics.min_severity", "Minimum severity", "Include this severity and all more severe diagnostics."},
+		{"lsp", "diagnostics.max_per_file", "Diagnostics per file", ""},
+		{"lsp", "diagnostics.max_files", "Files per report", ""},
+		{"lsp", "diagnostics.late_delivery", "Deliver late diagnostics", "Deliver diagnostics that arrive after the initial wait."},
+		{"peers", "claude_code", "Claude Code interop", "Processes with different interop settings cannot see each other."},
+	} {
+		schema, ok := configSectionSchemaFor(want.section)
+		if !ok {
+			t.Errorf("no %s section", want.section)
+			continue
+		}
+		found := false
+		for _, field := range schema.Fields {
+			if field.Path != want.path {
+				continue
+			}
+			found = true
+			if field.Label != want.label {
+				t.Errorf("%s.%s's label = %q, want %q", want.section, want.path, field.Label, want.label)
+			}
+			if field.Hint != want.hint {
+				t.Errorf("%s.%s's hint = %q, want %q", want.section, want.path, field.Hint, want.hint)
+			}
+		}
+		if !found {
+			t.Errorf("%s has no field at %q", want.section, want.path)
+		}
+	}
+	// An empty hint on a number is the allowed-range fallback (plan 327 D3):
+	// the hint the page shows, not the one the descriptor carries.
+	lsp, _ := configSectionSchemaFor("lsp")
+	for _, field := range lsp.Fields {
+		if field.Path == "max_servers" {
+			if got := configFieldHint(field); got != "Allowed range: 0–32 servers." {
+				t.Errorf("max_servers's help = %q, want the allowed-range fallback", got)
+			}
+		}
+	}
+}
+
+// An unset field reads as the default it follows through the prototype's
+// arrow, a stored number carries its unit, and an unset row carries the
+// Default status beyond its value (plan 327 D6, prototype html:117-118/150).
+func TestConfigPanelDefaultArrowUnitsAndStatus(t *testing.T) {
+	// A whole section nobody stored: every row is unset.
+	panel := sectionPanel(nil)
+	cases := []struct {
+		section, label, value string
+	}{
+		{"cron", "Keep task records for", "Default → 30 days"},
+		{"approval_preset", "Default approval mode", "Default → Workspace write"},
+		{"features", "Memory", "Default → On"},
+		{"agents", "Enable subagents", "Default → Off"},
+		{"compact", "Hand-off prompt", "Default → Built-in prompt"},
+		{"lsp", "Minimum severity", "Default → Warning"},
+	}
+	for _, tc := range cases {
+		schema, ok := configSectionSchemaFor(tc.section)
+		if !ok {
+			t.Fatalf("no %s section", tc.section)
+		}
+		items, _ := panel.fieldItems(schema, panel.sectionDoc(tc.section), false)
+		row := findRow(t, items, tc.label)
+		if row.Value != tc.value {
+			t.Errorf("%s's value = %q, want %q", tc.label, row.Value, tc.value)
+		}
+		if row.Status != configDefaultStatus {
+			t.Errorf("%s's status = %q, want %q", tc.label, row.Status, configDefaultStatus)
+		}
+	}
+
+	// A stored number carries the unit it is counted in and marks nothing.
+	panel = sectionPanel(map[string]string{"cron": `{"retention_days":45}`, "agents": `{"defaults":{"network_retry_max":10}}`})
+	cron, _ := configSectionSchemaFor("cron")
+	items, _ := panel.fieldItems(cron, panel.sectionDoc("cron"), false)
+	if row := findRow(t, items, "Keep task records for"); row.Value != "45 days" || row.Status != "" {
+		t.Fatalf("the stored number = %q %q, want 45 days and no status", row.Value, row.Status)
+	}
+	agents, _ := configSectionSchemaFor("agents")
+	items, _ = panel.fieldItems(agents, panel.sectionDoc("agents"), false)
+	if row := findRow(t, items, "Network retries"); row.Value != "10 attempts" || row.Status != "" {
+		t.Fatalf("the stored retries = %q %q, want 10 attempts and no status", row.Value, row.Status)
+	}
+}
+
 // A write that names a system subagent entry is still the loader's to refuse:
 // the panel's early guard explains the row, and the validator judges the
 // section the edit would store.
@@ -2161,7 +2394,7 @@ func TestConfigPanelSurfacesTheLoadersSystemEntryRefusal(t *testing.T) {
 	session.writeErr = errStubSystemEntryRefusal
 	selector := &scriptedSelector{}
 	renderer := runConfigPanel(t, session, selector, []richStep{
-		{label: "Network retry limit", ok: true},
+		{label: "Network retries", ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "5", ok: true}}, "agents")
 
@@ -2190,13 +2423,13 @@ func TestConfigPanelNamesRowsWithoutADottedPath(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"agents": `{"defaults":"taken"}`})
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Network retry limit", ok: true},
+		{label: "Network retries", ok: true},
 		{ok: false},
 		{ok: false},
 	}, []selectorInput{{value: "5", ok: true}}, "agents")
 
 	pages := pageLabels(selector)
-	if !strings.Contains(pages, "Network retry limit is not an object or a list") {
+	if !strings.Contains(pages, "Network retries is not an object or a list") {
 		t.Fatalf("the refusal must name the setting, not its path: %s", pages)
 	}
 	for _, leak := range []string{"defaults.network_retry_max", "network_retry_max is not"} {
@@ -2245,7 +2478,7 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	if explore.Value != "openai/gpt-main" || explore.Status != "High" {
 		t.Fatalf("explore's row = %q %q, want the named row and its level", explore.Value, explore.Status)
 	}
-	if explore.Description != "Install-wide per-type default. An agent's own override still wins; no default follows the conversation." {
+	if explore.Description != "Install-wide per-type default model row. An agent's own override still wins." {
 		t.Fatalf("explore's description = %q, want the prototype's help sentence", explore.Description)
 	}
 	// A type with no pin of its own follows the conversation, and marks nothing.
@@ -2597,11 +2830,11 @@ func configEffortModels() []appcfg.LLMModelConfig {
 
 // effortPickerItems is the page a level's picker drew: the one page whose rows
 // end in Row default.
-func effortPickerItems(t *testing.T, selector *scriptedSelector) []string {
+func effortPickerItems(t *testing.T, selector *scriptedSelector) []SelectItem {
 	t.Helper()
 	for _, items := range selector.richItems {
 		if slices.Contains(rowLabels(items), configRowDefaultEffort) {
-			return rowLabels(items)
+			return items
 		}
 	}
 	t.Fatalf("no effort picker opened: %v", selector.richLabels)
@@ -2617,11 +2850,11 @@ func TestConfigPanelEffortPickerOffersTheModelsLevels(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal check thinking level", ok: true},
+		{label: "Thinking level", ok: true},
 		{ok: false},
 	}, nil, "agents")
 
-	got := effortPickerItems(t, selector)
+	got := rowLabels(effortPickerItems(t, selector))
 	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
 	if !slices.Equal(got, want) {
 		t.Fatalf("picker = %v, want %v", got, want)
@@ -2639,11 +2872,11 @@ func TestConfigPanelEffortPickerOffersOffWhenTheRowAllowsIt(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal check thinking level", ok: true},
+		{label: "Thinking level", ok: true},
 		{ok: false},
 	}, nil, "agents")
 
-	got := effortPickerItems(t, selector)
+	got := rowLabels(effortPickerItems(t, selector))
 	want := []string{"Off", "Low", "Medium", "High", "xHigh", configRowDefaultEffort}
 	if !slices.Equal(got, want) {
 		t.Fatalf("picker = %v, want %v", got, want)
@@ -2659,11 +2892,11 @@ func TestConfigPanelEffortPickerDropsOffOnTheMessagesProtocol(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal check thinking level", ok: true},
+		{label: "Thinking level", ok: true},
 		{ok: false},
 	}, nil, "agents")
 
-	got := effortPickerItems(t, selector)
+	got := rowLabels(effortPickerItems(t, selector))
 	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
 	if !slices.Equal(got, want) {
 		t.Fatalf("picker = %v, want %v", got, want)
@@ -2679,7 +2912,7 @@ func TestConfigPanelEffortPickerNeedsAModel(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal check thinking level", ok: true},
+		{label: "Thinking level", ok: true},
 		{ok: false},
 	}, nil, "agents")
 
@@ -2712,7 +2945,7 @@ func TestConfigPanelEffortPickerWritesTheChosenLevel(t *testing.T) {
 			session.snapshot.Models = configEffortModels()
 			selector := &scriptedSelector{}
 			runConfigPanel(t, session, selector, []richStep{
-				{label: "Goal check thinking level", ok: true},
+				{label: "Thinking level", ok: true},
 				{label: tc.pick, ok: true},
 			}, nil, "agents")
 
@@ -2800,7 +3033,7 @@ func TestConfigPanelEffortPickerOnAStoredModelRow(t *testing.T) {
 		{label: configUpRowLabel, ok: true},
 	}, nil, "subagent_models")
 
-	got := effortPickerItems(t, selector)
+	got := rowLabels(effortPickerItems(t, selector))
 	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
 	if !slices.Equal(got, want) {
 		t.Fatalf("picker = %v, want %v", got, want)
@@ -2819,6 +3052,172 @@ func TestConfigPanelEffortPickerOnAStoredModelRow(t *testing.T) {
 	entries := agentSubagentsOf(t, doc, "main")
 	if len(entries) != 1 || entries[0]["reasoning_effort"] != nil {
 		t.Fatalf("subagents = %+v, want the entry as it was", entries)
+	}
+}
+
+// The effort value wording is the prototype's frozen two-word split (plan 327
+// D1, prototype html:117-118/127): a stored level — the empty string a Row
+// default pick stores included — is a choice and reads as the row's own
+// default, while an effort key nobody stored leaves the choice to the
+// provider; the projection's overview status reads the stored level alone and
+// carries nothing when no model is pinned.
+func TestConfigPanelEffortValueLabels(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
+	agents := `{
+		"definitions":{"main":{"primary":true,"subagents":[{"name":"explore","model":"llm-grok"}]}},
+		"goal_evaluator":{"model":"llm-grok"},
+		"plan_reviewer":{"model":"llm-grok"},
+		"subagent_models":{
+			"plan":{"model":"llm-grok","reasoning_effort":""},
+			"explore":{"model":"llm-grok"},
+			"verification":{}
+		}
+	}`
+
+	// Path (a), the section field: goal_evaluator.reasoning_effort is absent,
+	// so the provider decides.
+	session := newConfigPanelSession(map[string]string{"agents": agents})
+	session.snapshot.Models = configEffortModels()
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{{ok: false}}, nil, "agents")
+	sectionLevel := findRow(t, selector.richItems[0], "Thinking level")
+	if sectionLevel.Value != configProviderDefaultEffort {
+		t.Fatalf("the unset section level = %q, want %q", sectionLevel.Value, configProviderDefaultEffort)
+	}
+
+	// Path (b) and the type frames, over the projection's own page.
+	selector = &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "plan", ok: true},
+		{ok: false},
+		{label: "explore", ok: true},
+		{ok: false},
+	}, nil, "subagent_models")
+	overview := selector.richItems[0]
+	// The overview status names the stored level: "" is the row's own
+	// default, and a pin nobody set carries no status at all.
+	if plan := findRow(t, overview, "plan"); plan.Status != configRowDefaultEffort {
+		t.Fatalf("plan's status = %q, want %q", plan.Status, configRowDefaultEffort)
+	}
+	verification := findRow(t, overview, "verification")
+	if verification.Status != "" || verification.Value != configFollowConversation {
+		t.Fatalf("verification's row = %q %q, want the follow sentence and no status", verification.Value, verification.Status)
+	}
+	// The stored empty level on a type frame is the row's own default; the
+	// absent one beside it leaves the choice to the provider.
+	var planPage, explorePage []SelectItem
+	for _, items := range selector.richItems[1:] {
+		labels := rowLabels(items)
+		if !slices.Contains(labels, "Model") || !slices.Contains(labels, "Thinking level") {
+			continue
+		}
+		if slices.Contains(labels, "System prompt") {
+			continue // a definition's subagent entry, not a type frame
+		}
+		if planPage == nil {
+			planPage = items
+		} else {
+			explorePage = items
+		}
+	}
+	if planPage == nil || explorePage == nil {
+		t.Fatalf("both type frames must open: %v", selector.richLabels)
+	}
+	if got := findRow(t, planPage, "Thinking level").Value; got != configRowDefaultEffort {
+		t.Fatalf("the stored empty level = %q, want %q", got, configRowDefaultEffort)
+	}
+	if got := findRow(t, explorePage, "Thinking level").Value; got != configProviderDefaultEffort {
+		t.Fatalf("the unset frame level = %q, want %q", got, configProviderDefaultEffort)
+	}
+}
+
+// A choice page is the option list alone (plan 327 D2, owner 2026-11-18
+// 「删掉 Choose one 这种废话、无意义的文案」): no "Choose one", no "Choose one
+// model; …", no "Choose the default for …" — the head is the field's own label
+// (and help, where the schema carries one), and the option the field already
+// holds is the row carrying the check.
+func TestConfigPanelChoiceHeadCopy(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
+	agentsSchema, ok := configSectionSchemaFor("agents")
+	if !ok {
+		t.Fatal("no agents section")
+	}
+	var effortField, modelField configField
+	for _, field := range agentsSchema.Fields {
+		switch {
+		case field.Kind == configFieldEffort:
+			effortField = field
+		case field.Kind == configFieldModel:
+			modelField = field
+		}
+	}
+	if effortField.Label == "" || modelField.Label == "" {
+		t.Fatal("the agents section must carry the effort and model fields")
+	}
+	withHint := func(field configField) string {
+		if strings.TrimSpace(field.Hint) == "" {
+			return field.Label
+		}
+		return field.Label + "\n" + field.Hint
+	}
+
+	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{"model":"llm-grok","reasoning_effort":"low"}}`})
+	session.snapshot.Models = configEffortModels()
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: effortField.Label, ok: true},
+		{ok: false},
+		{label: modelField.Label, ok: true},
+		{ok: false},
+	}, nil, "agents")
+
+	for _, label := range selector.richLabels {
+		for _, filler := range []string{"Choose one", "Choose the default"} {
+			if strings.Contains(label, filler) {
+				t.Errorf("a choice page still carries the filler %q: %q", filler, label)
+			}
+		}
+	}
+	// The effort picker's head is the field's label and help; the model
+	// picker's is the label alone (its rows' descriptions say the rest).
+	if !slices.Contains(selector.richLabels, withHint(effortField)) {
+		t.Fatalf("the effort picker's head = %q, want the field's own label and help: %v", withHint(effortField), selector.richLabels)
+	}
+	if !slices.Contains(selector.richLabels, modelField.Label) {
+		t.Fatalf("the model picker's head = %q, want the label alone: %v", modelField.Label, selector.richLabels)
+	}
+	// The stored choices carry the check, and only they do.
+	if row := findRow(t, effortPickerItems(t, selector), "Low"); row.Status != configChoiceCheckStatus {
+		t.Fatalf("the stored level's option = %+v, want the check", row)
+	}
+	page := modelPickerPage(t, selector)
+	if row := findRow(t, page, "xai/grok-effort"); row.Status != configChoiceCheckStatus {
+		t.Fatalf("the stored model row = %+v, want the check", row)
+	}
+	if row := findRow(t, page, "Follow primary agent"); row.Status != "" {
+		t.Fatalf("the empty option carries %q, want no check while a row is stored", row.Status)
+	}
+
+	// A switch's choice page: the option it holds carries the check, and an
+	// unset switch names neither.
+	session = newConfigPanelSession(map[string]string{"features": `{"memories":true}`})
+	selector = &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Feature switches", ok: true},
+		{label: "Memory", ok: true},
+		{ok: false},
+		{label: "Language servers", ok: true},
+		{ok: false},
+		{ok: false},
+	}, nil)
+	pages := selector.richItems
+	on := findRow(t, pages[2], configBoolOnLabel)
+	off := findRow(t, pages[2], configBoolOffLabel)
+	if on.Status != configChoiceCheckStatus || off.Status != "" {
+		t.Fatalf("the switch's options = %q/%q, want the check on On alone", on.Status, off.Status)
+	}
+	if unset := findRow(t, pages[4], configBoolOnLabel); unset.Status != "" {
+		t.Fatalf("an unset switch's On option carries %q, want no check", unset.Status)
 	}
 }
 
@@ -2844,7 +3243,7 @@ func TestConfigPanelEffortPickerOnASubagentEntry(t *testing.T) {
 		{label: configUpRowLabel, ok: true},
 	}), nil, "agents")
 
-	got := effortPickerItems(t, selector)
+	got := rowLabels(effortPickerItems(t, selector))
 	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
 	if !slices.Equal(got, want) {
 		t.Fatalf("picker = %v, want %v", got, want)
@@ -2858,13 +3257,14 @@ func TestConfigPanelEffortPickerOnASubagentEntry(t *testing.T) {
 
 // --- Plan 324: the model picker and the type detail page ---
 
-// modelPickerPage is the one page a model picker drew, found by the sentence
-// under its title.
+// modelPickerPage is the one page a model picker drew, found by the empty
+// option every model picker lists first (plan 327 D2: the page's head is the
+// field's label alone, so the rows are what identify it).
 func modelPickerPage(t *testing.T, selector *scriptedSelector) []SelectItem {
 	t.Helper()
-	for i, label := range selector.richLabels {
-		if strings.Contains(label, configModelPickerSub) {
-			return selector.richItems[i]
+	for _, items := range selector.richItems {
+		if len(items) > 0 && strings.HasPrefix(items[0].Label, "Follow ") {
+			return items
 		}
 	}
 	t.Fatalf("no model picker opened: %v", selector.richLabels)
@@ -3210,7 +3610,7 @@ func TestConfigPanelModelPickerWritesPassTheStoreValidator(t *testing.T) {
 		t.Fatalf("the seed must be a pair the loader accepts: %v", err)
 	}
 	run(t, []richStep{
-		{label: "Goal check thinking level", ok: true},
+		{label: "Thinking level", ok: true},
 		{label: configRowDefaultEffort, ok: true},
 	}, "agents")
 	goal, _ = storedAgents(t)["goal_evaluator"].(map[string]any)
@@ -3277,7 +3677,7 @@ func TestConfigPanelNestedTemplateFields(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "Agents", ok: true},
-		{label: "Shared MCP servers", ok: true},
+		{label: "MCP servers", ok: true},
 		{label: "#1", ok: true},
 		{label: "Command", ok: true},
 		{ok: false},
@@ -3374,8 +3774,8 @@ func TestConfigPanelNestedTemplateExploreTypePage(t *testing.T) {
 	if model.Value != "openai/gpt-main" {
 		t.Fatalf("the Model row's value = %q, want the named row's label", model.Value)
 	}
-	if findRow(t, page, "Thinking level").Value != configDefaultStatus {
-		t.Fatalf("the unset level must read as the default it follows")
+	if findRow(t, page, "Thinking level").Value != configProviderDefaultEffort {
+		t.Fatalf("the unset level must read as the provider's own default")
 	}
 }
 

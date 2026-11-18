@@ -199,87 +199,87 @@ const (
 var configSectionSchemas = []configSectionSchema{
 	{
 		Name: "approval_preset", Title: "Approval preset", Tab: configTabApproval,
-		Summary: "Default approval mode for new sessions",
+		Summary: "Choose what new sessions may do.",
 		Fields: []configField{{
-			Label: "Approval preset", Kind: configFieldEnum,
+			Label: "Default approval mode", Kind: configFieldEnum,
 			Options:      []string{"workspace_write", "full_access"},
 			OptionLabels: map[string]string{"workspace_write": "Workspace write", "full_access": "Full access"},
 			DefaultValue: "workspace_write",
-			Hint:         "Default: reads and writes inside the workspace proceed, anything outside it asks first; full access: nothing asks unless you refuse it. A change here affects new sessions only.",
+			Hint:         "This setting affects new sessions, not the current conversation.",
 		}},
 	},
 	{
 		Name: "sandbox_workspace_write", Title: "Workspace sandbox", Tab: configTabApproval,
-		Summary: "Control writable paths and network access",
+		Summary: "Control writable paths and network access.",
 		Fields: []configField{
-			{Path: "writable_roots", Label: "Extra writable roots", Kind: configFieldRows, List: true, Hint: "One absolute path per row"},
-			{Path: "network_access", Label: "Allow network access", Kind: configFieldBool3, Group: "Network", Hint: "On by default"},
+			{Path: "writable_roots", Label: "Extra writable roots", Kind: configFieldRows, List: true, Hint: "Add absolute paths outside the current workspace."},
+			{Path: "network_access", Label: "Network access", Kind: configFieldBool3, DefaultValue: "true", Group: "Network", Hint: "Allow sandboxed commands to access the network."},
 		},
 	},
 	{
 		Name: "compact", Title: "Context compaction", Tab: configTabSession,
-		Summary: "Auto-compaction threshold and prompt",
+		Summary: "Keep long conversations within their context window.",
 		Fields: []configField{
 			{
-				Path: "auto_compact_percent", Label: "Auto-compact threshold (%)", Kind: configFieldNumber,
-				Min: 50, Max: 90, Clamp: true, Group: "Threshold",
-				Hint: "Default 90; compacts when the window reaches this percentage — range 50–90, past 90 is stored as 90",
+				Path: "auto_compact_percent", Label: "Auto-compact at", Kind: configFieldNumber,
+				Min: 50, Max: 90, Clamp: true, Unit: "%", DefaultValue: "90", Group: "Threshold",
+				Hint: "Compact when context usage reaches this percentage.",
 			},
-			{Path: "prompt", Label: "Hand-off prompt", Kind: configFieldText, Group: "Instructions", Hint: "Empty uses the built-in prompt"},
+			{Path: "prompt", Label: "Hand-off prompt", Kind: configFieldText, Multiline: true, DefaultValue: "Built-in prompt", Group: "Instructions", Hint: "Leave empty to use the built-in compaction prompt."},
 		},
 	},
 	{
 		Name: "batch", Title: "Batch projects", Tab: configTabApproval,
-		Summary: "Sandbox a new batch project starts with",
+		Summary: "Set the starting policy for new batch projects.",
 		Fields: []configField{{
-			Path: "sandbox_default", Label: "Enable sandbox", Kind: configFieldBool3,
-			Hint: "On by default; a new batch project starts from this value and manages its own afterwards",
+			Path: "sandbox_default", Label: "Sandbox new projects", Kind: configFieldBool3, DefaultValue: "true",
+			Hint: "Existing batch projects keep their own sandbox policy.",
 		}},
 	},
 	{
 		Name: "memories", Title: "Memory", Tab: configTabSession,
-		Summary: "Memory budgets and models; the switch lives under Feature switches → Memory",
+		Summary: "Tune retrieval, retention and background processing.",
 		Fields: []configField{
-			{Path: "search_top_k", Label: "Results per search", Kind: configFieldNumber, Group: "Retrieval", Min: 1, Max: 20, Clamp: true, Hint: "Default 5; past 20 is stored as 20"},
-			{Path: "max_raw_memories_for_consolidation", Label: "Raw memories per consolidation", Kind: configFieldNumber, Group: "Retrieval", Min: 1, Max: 4096, Clamp: true, Hint: "Default 256"},
-			{Path: "max_unused_days", Label: "Days before an unused memory expires", Kind: configFieldNumber, Group: "Retention", Min: 0, Max: 365, Clamp: true, Hint: "Default 30"},
-			{Path: "max_rollout_age_days", Label: "Days a record is kept", Kind: configFieldNumber, Group: "Retention", Min: 0, Max: 90, Clamp: true, Hint: "Default 10"},
-			{Path: "max_rollouts_per_startup", Label: "Records processed per startup", Kind: configFieldNumber, Group: "Processing", Min: 1, Max: 128, Clamp: true, Hint: "Default 2"},
-			{Path: "min_rollout_idle_hours", Label: "Idle hours before a record is processed", Kind: configFieldNumber, Group: "Processing", Min: 1, Max: 48, Clamp: true, Hint: "Default 6"},
+			{Path: "search_top_k", Label: "Results per search", Kind: configFieldNumber, DefaultValue: "5", Group: "Retrieval", Min: 1, Max: 20, Clamp: true, Unit: "results"},
+			{Path: "max_raw_memories_for_consolidation", Label: "Memories per consolidation", Kind: configFieldNumber, DefaultValue: "256", Group: "Retrieval", Min: 1, Max: 4096, Clamp: true, Unit: "memories"},
+			{Path: "max_unused_days", Label: "Expire unused memories after", Kind: configFieldNumber, DefaultValue: "30", Group: "Retention", Min: 0, Max: 365, Clamp: true, Unit: "days"},
+			{Path: "max_rollout_age_days", Label: "Keep records for", Kind: configFieldNumber, DefaultValue: "10", Group: "Retention", Min: 0, Max: 90, Clamp: true, Unit: "days"},
+			{Path: "max_rollouts_per_startup", Label: "Records per startup", Kind: configFieldNumber, DefaultValue: "2", Group: "Processing", Min: 1, Max: 128, Clamp: true, Unit: "records"},
+			{Path: "min_rollout_idle_hours", Label: "Minimum idle time", Kind: configFieldNumber, DefaultValue: "6", Group: "Processing", Min: 1, Max: 48, Clamp: true, Unit: "hours"},
 			// The stored value is a row of the global model table or the
 			// explicit "current" (the conversation's own model, plan 207
 			// §3.3): the picker stores one of those two, and the row shows
 			// what is in force.
-			{Path: "extract_model", Label: "Extraction model", Kind: configFieldModel, Group: "Models", ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory, Hint: "current = the conversation's own model"},
-			{Path: "consolidation_model", Label: "Consolidation model", Kind: configFieldModel, Group: "Models", ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory, Hint: "current = the conversation's own model"},
+			{Path: "extract_model", Label: "Extraction model", Kind: configFieldModel, Group: "Models", ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory},
+			{Path: "consolidation_model", Label: "Consolidation model", Kind: configFieldModel, Group: "Models", ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory},
 		},
 	},
 	{
 		Name: "cron", Title: "Scheduled tasks", Tab: configTabSession,
-		Summary: "How long a scheduled task's records are kept",
+		Summary: "Choose how long task records are retained.",
 		Fields: []configField{{
-			Path: "retention_days", Label: "Keep days", Kind: configFieldNumber, Group: "Retention",
-			Min: 1, Max: 3650, Hint: "Default 30; range 1–3650",
+			Path: "retention_days", Label: "Keep task records for", Kind: configFieldNumber, DefaultValue: "30", Group: "Retention",
+			Min: 1, Max: 3650, Unit: "days",
 		}},
 	},
 	{
 		Name: "features", Title: "Feature switches", Tab: configTabSession,
-		Summary: "Feature switches",
+		Summary: "Enable memory and language intelligence.",
 		Fields: []configField{
-			{Path: "memories", Label: "Memory", Kind: configFieldBool3, Hint: "On by default"},
-			{Path: "lsp", Label: "Language servers", Kind: configFieldBool3, Hint: "On by default"},
+			{Path: "memories", Label: "Memory", Kind: configFieldBool3, DefaultValue: "true", Hint: "Remember useful context across conversations."},
+			{Path: "lsp", Label: "Language servers", Kind: configFieldBool3, DefaultValue: "true", Hint: "Enable code intelligence and language diagnostics."},
 		},
 	},
 	{
 		Name: "agents", Title: "Agents", Tab: configTabAgents,
-		Summary: "Definitions, shared defaults and goal checks",
+		Summary: "Manage definitions, shared defaults and goal checks.",
 		Fields: []configField{
 			{
 				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows, Group: "Definitions",
 				// A definition's default_model is picked from the global model
 				// table like every model reference (plan 324): the row's page is
 				// the agent template, whose Default model field opens the picker.
-				Hint: "One agent id per row; a row holds its subagents, MCP and default model (a model row id). An id naming a built-in subagent type is that type's install-wide default, which an agent's own subagent entry overrides",
+				Hint: "Manage each primary agent and its own configuration.",
 			},
 			// The install-wide model row of each public built-in subagent type
 			// (plan 315): a row id + reasoning effort, shared by every primary
@@ -290,20 +290,19 @@ var configSectionSchemas = []configSectionSchema{
 				Hint: "One built-in type per row (explore, plan, general-purpose, verification); a row holds its model row id and thinking level",
 			},
 			{
-				Path: "defaults.network_retry_max", Label: "Network retry limit", Kind: configFieldNumber, Group: "Defaults",
-				Min: 0, Max: 15, Clamp: true, Hint: "Default 10; 0 turns retries off, past 15 runs as 15",
+				Path: "defaults.network_retry_max", Label: "Network retries", Kind: configFieldNumber, DefaultValue: "10", Group: "Defaults",
+				Min: 0, Max: 15, Clamp: true, Unit: "attempts", Hint: "Zero disables network retries.",
 			},
 			{
-				Path: "defaults.stream_idle_timeout_seconds", Label: "Stream idle timeout (s)", Kind: configFieldNumber, Group: "Defaults",
-				Min: 0, Max: 1800, Clamp: true, Hint: "Default 300; 0 turns the watchdog off",
+				Path: "defaults.stream_idle_timeout_seconds", Label: "Stream idle timeout", Kind: configFieldNumber, DefaultValue: "300", Group: "Defaults",
+				Min: 0, Max: 1800, Clamp: true, Unit: "seconds", Hint: "Zero disables the watchdog. Positive values below 10 run as 10.",
 			},
-			{Path: "defaults.enable_subagent", Label: "Enable subagents", Kind: configFieldBool3, Group: "Defaults", Hint: "Default: the built-in setting"},
+			{Path: "defaults.enable_subagent", Label: "Enable subagents", Kind: configFieldBool3, DefaultValue: "false", Group: "Defaults", Hint: "Allow the primary agent to delegate work."},
 			{
-				Path: "defaults.context_inject.warn_remaining_percent", Label: "Warn remaining (%)", Kind: configFieldNumber, Group: "Defaults",
-				Min: 1, Max: 50, Clamp: true,
-				Hint: "Default 12; warns when the remaining window falls below this percentage, range 1–50",
+				Path: "defaults.context_inject.warn_remaining_percent", Label: "Warn below remaining context", Kind: configFieldNumber, DefaultValue: "12", Group: "Defaults",
+				Min: 1, Max: 50, Clamp: true, Unit: "%",
 			},
-			{Path: "defaults.mcp_servers", Label: "Shared MCP servers", Kind: configFieldRows, Group: "Connections", Hint: "One server per row"},
+			{Path: "defaults.mcp_servers", Label: "MCP servers", Kind: configFieldRows, Group: "Connections", Hint: "Shared with all agents. Agent entries with the same name override these."},
 			// The /goal check's global row (plan 299) is two settings, not a
 			// whole subagent entry: it is dispatched by the system, so it has
 			// no name, description, prompt or tool policy to edit here, and a
@@ -311,11 +310,11 @@ var configSectionSchemas = []configSectionSchema{
 			{
 				Path: "goal_evaluator.model", Label: "Goal check model", Kind: configFieldModel, Group: "Goal checks",
 				ModelEmpty: "Follow primary agent", ModelFlavor: configModelFlavorModel,
-				Hint: "A model row id (the row chosen in Settings → Subagents); empty follows the primary agent",
+				Hint: "The global model used to check goal progress.",
 			},
 			{
-				Path: "goal_evaluator.reasoning_effort", Label: "Goal check thinking level", Kind: configFieldEffort, Group: "Goal checks",
-				Hint: "Empty follows that model row's default level; a level here overrides it",
+				Path: "goal_evaluator.reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Group: "Goal checks",
+				Hint: "Choose a model first. Default follows that model row.",
 			},
 		},
 	},
@@ -329,7 +328,11 @@ var configSectionSchemas = []configSectionSchema{
 		// reads and writes the agents document either way, so a key this page
 		// does not show travels back untouched on save.
 		Name: "subagent_models", Title: "Subagent models", Tab: configTabAgents,
-		Summary:      "Install-wide defaults for built-in types, plan-reviewer and shared custom subagents",
+		// The prototype's summary names the built-in types and the
+		// plan-reviewer alone; the shared custom registry row below is this
+		// panel's own legitimate extra (plan 314 storage), kept while the
+		// summary keeps the prototype's words (plan 327's flagged divergence).
+		Summary:      "Install-wide defaults for built-in types and plan-reviewer.",
 		StoreSection: "agents",
 		Fields: []configField{
 			// The four public per-type defaults: a global row id + thinking
@@ -337,10 +340,10 @@ var configSectionSchemas = []configSectionSchema{
 			// row's value column names the model row and its status the level
 			// in force (plan 324 D7), with the prototype's help sentence as
 			// the description.
-			{Path: "subagent_models.general-purpose", Label: "general-purpose", Kind: configFieldRows, Hint: "Install-wide per-type default. An agent's own override still wins; no default follows the conversation."},
-			{Path: "subagent_models.explore", Label: "explore", Kind: configFieldRows, Hint: "Install-wide per-type default. An agent's own override still wins; no default follows the conversation."},
-			{Path: "subagent_models.plan", Label: "plan", Kind: configFieldRows, Hint: "Install-wide per-type default. An agent's own override still wins; no default follows the conversation."},
-			{Path: "subagent_models.verification", Label: "verification", Kind: configFieldRows, Hint: "Install-wide per-type default. An agent's own override still wins; no default follows the conversation."},
+			{Path: "subagent_models.general-purpose", Label: "general-purpose", Kind: configFieldRows, Hint: "Install-wide per-type default model row. An agent's own override still wins."},
+			{Path: "subagent_models.explore", Label: "explore", Kind: configFieldRows, Hint: "Install-wide per-type default model row. An agent's own override still wins."},
+			{Path: "subagent_models.plan", Label: "plan", Kind: configFieldRows, Hint: "Install-wide per-type default model row. An agent's own override still wins."},
+			{Path: "subagent_models.verification", Label: "verification", Kind: configFieldRows, Hint: "Install-wide per-type default model row. An agent's own override still wins."},
 			// The plan reviewer's row, the goal check's sibling one type over:
 			// a system-dispatched type whose row no primary agent owns.
 			{Path: "plan_reviewer", Label: "plan-reviewer", Kind: configFieldRows, Hint: "Global row for a system type, the goal-evaluator pattern. Agent pages stay read-only."},
@@ -350,48 +353,50 @@ var configSectionSchemas = []configSectionSchema{
 	},
 	{
 		Name: "hooks", Title: "Hooks", Tab: configTabAgents,
-		Summary: "Run configured actions at lifecycle events",
+		Summary: "Run configured actions at lifecycle events.",
 		Fields: []configField{{
 			Label: "Hook events", Kind: configFieldRows,
-			Hint: "Command, prompt, agent and HTTP hooks are supported",
+			Hint: "Command, prompt, agent and HTTP hooks are supported.",
 		}},
 	},
 	{
 		Name: "lsp", Title: "Language servers", Tab: configTabAgents,
-		Summary: "Language server switches, limits and diagnostics",
+		Summary: "Manage servers, timeouts and diagnostic delivery.",
 		Fields: []configField{
-			{Path: "recommendations", Label: "Recommendations", Kind: configFieldBool3, Group: "Discovery", Hint: "On by default"},
-			{Path: "servers", Label: "Servers", Kind: configFieldRows, Group: "Discovery", Hint: "One server id per row; a row holds command, args, env and the rest"},
-			{Path: "max_servers", Label: "Concurrent servers limit", Kind: configFieldNumber, Group: "Lifecycle", Min: 0, Max: 32, Hint: "Default 6; range 1–32"},
-			{Path: "idle_timeout", Label: "Idle exit (s)", Kind: configFieldNumber, Group: "Lifecycle", Min: 0, Max: 86400, Hint: "Default 600; range 60–86400 when not 0"},
-			{Path: "request_timeout", Label: "Request timeout (s)", Kind: configFieldNumber, Group: "Lifecycle", Min: 0, Max: 600, Hint: "Default 30; range 1–600"},
-			{Path: "diagnostics.after_edit", Label: "Diagnose after edit", Kind: configFieldBool3, Group: "Diagnostics", Hint: "On by default"},
-			{Path: "diagnostics.wait_ms", Label: "Diagnostic wait (ms)", Kind: configFieldNumber, Group: "Diagnostics", Min: 0, Max: 30000, Hint: "Default 2500; 0 does not wait"},
+			{Path: "recommendations", Label: "Recommend language servers", Kind: configFieldBool3, DefaultValue: "true", Group: "Discovery", Hint: "Suggest useful servers for this project."},
+			{Path: "servers", Label: "Configured servers", Kind: configFieldRows, Group: "Discovery", Hint: "Each server maps files and languages to a process."},
+			{Path: "max_servers", Label: "Concurrent servers", Kind: configFieldNumber, DefaultValue: "6", Group: "Lifecycle", Min: 0, Max: 32, Unit: "servers"},
+			{Path: "idle_timeout", Label: "Exit when idle for", Kind: configFieldNumber, DefaultValue: "600", Group: "Lifecycle", Min: 0, Max: 86400, Unit: "seconds", Hint: "Zero uses the default. Other values must be at least 60 seconds."},
+			{Path: "request_timeout", Label: "Request timeout", Kind: configFieldNumber, DefaultValue: "30", Group: "Lifecycle", Min: 0, Max: 600, Unit: "seconds"},
+			{Path: "diagnostics.after_edit", Label: "Diagnose after edits", Kind: configFieldBool3, DefaultValue: "true", Group: "Diagnostics", Hint: "Request diagnostics after a file changes."},
+			{Path: "diagnostics.wait_ms", Label: "Wait for diagnostics", Kind: configFieldNumber, DefaultValue: "2500", Group: "Diagnostics", Min: 0, Max: 30000, Unit: "ms", Hint: "Zero does not wait."},
 			{
-				Path: "diagnostics.min_severity", Label: "Lowest severity", Kind: configFieldEnum, Group: "Diagnostics",
-				Options: []string{"error", "warning", "information", "hint"}, Hint: "Default warning",
+				Path: "diagnostics.min_severity", Label: "Minimum severity", Kind: configFieldEnum, DefaultValue: "warning", Group: "Diagnostics",
+				Options:      []string{"error", "warning", "information", "hint"},
+				OptionLabels: map[string]string{"error": "Error", "warning": "Warning", "information": "Information", "hint": "Hint"},
+				Hint:         "Include this severity and all more severe diagnostics.",
 			},
-			{Path: "diagnostics.max_per_file", Label: "Limit per file", Kind: configFieldNumber, Group: "Diagnostics", Min: 0, Max: 200, Hint: "Default 20; range 1–200"},
-			{Path: "diagnostics.max_files", Label: "File-count limit", Kind: configFieldNumber, Group: "Diagnostics", Min: 0, Max: 50, Hint: "Default 10; range 1–50"},
-			{Path: "diagnostics.late_delivery", Label: "Late diagnostics", Kind: configFieldBool3, Group: "Diagnostics", Hint: "On by default"},
+			{Path: "diagnostics.max_per_file", Label: "Diagnostics per file", Kind: configFieldNumber, DefaultValue: "20", Group: "Diagnostics", Min: 0, Max: 200, Unit: "items"},
+			{Path: "diagnostics.max_files", Label: "Files per report", Kind: configFieldNumber, DefaultValue: "10", Group: "Diagnostics", Min: 0, Max: 50, Unit: "files"},
+			{Path: "diagnostics.late_delivery", Label: "Deliver late diagnostics", Kind: configFieldBool3, DefaultValue: "true", Group: "Diagnostics", Hint: "Deliver diagnostics that arrive after the initial wait."},
 		},
 	},
 	{
 		Name: "peers", Title: "Peer messaging", Tab: configTabAgents,
-		Summary: "Agents' processes on this machine message each other",
+		Summary: "Coordinate with other agent processes on this machine.",
 		Fields: []configField{{
-			Path: "claude_code", Label: "Interoperate with Claude Code", Kind: configFieldBool3, ClaudeCodeOnly: true,
-			Hint: "Off by default; forebrain processes with different switches cannot see each other",
+			Path: "claude_code", Label: "Claude Code interop", Kind: configFieldBool3, DefaultValue: "false", ClaudeCodeOnly: true,
+			Hint: "Processes with different interop settings cannot see each other.",
 		}},
 	},
 	{
 		Name: "gateway", Title: "Gateway", Tab: configTabFile,
-		Summary:  "Listen address, authentication and outward links",
+		Summary:  "Inspect the listening address and authentication.",
 		YAMLOnly: true,
 	},
 	{
 		Name: "credentials", Title: "Credential files", Tab: configTabFile,
-		Summary:  "Where external credential files live",
+		Summary:  "Inspect external sign-in file locations.",
 		YAMLOnly: true,
 	},
 }
@@ -443,7 +448,7 @@ var configTemplates = map[string][]configField{
 	configTemplateAgent: {
 		{Path: "display_name", Label: "Display name", Kind: configFieldText},
 		{Path: "description", Label: "Description", Kind: configFieldText, Multiline: true, Hint: "Describe the role of this agent."},
-		{Path: "primary", Label: "Primary agent", Kind: configFieldBool3, Hint: "Mark this as a primary agent."},
+		{Path: "primary", Label: "Primary agent", Kind: configFieldBool3, DefaultValue: "false", Hint: "Mark this as a primary agent."},
 		{
 			Path: "default_model", Label: "Default model", Kind: configFieldModel, ModelFlavor: configModelFlavorGlobal,
 			Hint:            "Pick a row from the global model table (/connect or Settings → Models). A primary agent has no provider list of its own.",
@@ -474,7 +479,7 @@ var configTemplates = map[string][]configField{
 	},
 	configTemplateSubagent: {
 		{Path: "name", Label: "Type name", Kind: configFieldText, Hint: "Built-in overrides: general-purpose, explore, plan, verification."},
-		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3},
+		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3, DefaultValue: "true", Hint: "Choose an explicit value or inherit the default."},
 		{
 			Path: "model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorSubagent,
 			Hint:            "This agent's override. Empty follows the install-wide type default, then the conversation.",
@@ -495,8 +500,8 @@ var configTemplates = map[string][]configField{
 	},
 	configTemplateMCP: {
 		{Path: "name", Label: "Server name", Kind: configFieldText, Group: "Identity", Hint: "Unique within this server list."},
-		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3, Group: "Identity", Hint: "Keep the entry configured while disabling its tools."},
-		{Path: "required", Label: "Required", Kind: configFieldBool3, Group: "Identity", Hint: "A required server cannot be silently skipped."},
+		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3, DefaultValue: "true", Group: "Identity", Hint: "Keep the entry configured while disabling its tools."},
+		{Path: "required", Label: "Required", Kind: configFieldBool3, DefaultValue: "false", Group: "Identity", Hint: "A required server cannot be silently skipped."},
 		{
 			Path: "transport", Label: "Transport", Kind: configFieldEnum, Group: "Connection",
 			Options: []string{"stdio", "http", "sse"}, OptionLabels: map[string]string{"stdio": "Stdio", "http": "HTTP", "sse": "SSE"},
@@ -508,11 +513,11 @@ var configTemplates = map[string][]configField{
 		{Path: "headers", Label: "Headers", Kind: configFieldRows, Group: "Connection", Hint: "Header values remain masked."},
 		{Path: "oauth", Label: "OAuth", Kind: configFieldRows, Group: "Authentication", Hint: "Configure OAuth fields. No login is performed by this editor."},
 		{Path: "env", Label: "Environment", Kind: configFieldRows, Group: "Process", Hint: "Explicit environment variables for the server."},
-		{Path: "inherit_parent_env", Label: "Inherit environment", Kind: configFieldBool3, Group: "Process", Hint: "Include parent-process environment variables."},
-		{Path: "disable_standalone_sse", Label: "Disable standalone SSE", Kind: configFieldBool3, Group: "Process", Hint: "Disable the standalone SSE transport."},
+		{Path: "inherit_parent_env", Label: "Inherit environment", Kind: configFieldBool3, DefaultValue: "true", Group: "Process", Hint: "Include parent-process environment variables."},
+		{Path: "disable_standalone_sse", Label: "Disable standalone SSE", Kind: configFieldBool3, DefaultValue: "false", Group: "Process", Hint: "Disable the standalone SSE transport."},
 		{Path: "expected_command_sha256", Label: "Expected command SHA-256", Kind: configFieldText, Group: "Process", Hint: "Verify the executable digest."},
-		{Path: "startup_timeout", Label: "Startup timeout", Kind: configFieldNumber, Min: 0, Max: 1000000000, Unit: "seconds", Group: "Timeouts"},
-		{Path: "request_timeout", Label: "Request timeout", Kind: configFieldNumber, Min: 0, Max: 1000000000, Unit: "seconds", Group: "Timeouts"},
+		{Path: "startup_timeout", Label: "Startup timeout", Kind: configFieldNumber, Min: 0, Max: 1000000000, DefaultValue: "0", Unit: "seconds", Group: "Timeouts"},
+		{Path: "request_timeout", Label: "Request timeout", Kind: configFieldNumber, Min: 0, Max: 1000000000, DefaultValue: "0", Unit: "seconds", Group: "Timeouts"},
 		{
 			Path: "default_tools_approval_mode", Label: "Default tool approval", Kind: configFieldEnum, Group: "Tool permissions",
 			Options: []string{"auto", "prompt", "writes", "approve"}, OptionLabels: map[string]string{"auto": "Auto", "prompt": "Prompt", "writes": "Writes", "approve": "Approve"},
@@ -563,36 +568,36 @@ var configTemplates = map[string][]configField{
 		{Path: "headers", Label: "Headers", Kind: configFieldRows, Group: "Action", ShowFor: []string{"http"}, Hint: "Header values stay masked."},
 		{Path: "allowed_env_vars", Label: "Allowed environment variables", Kind: configFieldRows, List: true, Group: "Action", ShowFor: []string{"http"}, Hint: "Variables available to an HTTP hook."},
 		{Path: "if", Label: "Condition", Kind: configFieldText, Group: "Behavior", Hint: "Use the runtime permission-rule syntax."},
-		{Path: "timeout", Label: "Timeout", Kind: configFieldNumber, Min: 0, Max: 86400, Unit: "seconds", Group: "Behavior"},
+		{Path: "timeout", Label: "Timeout", Kind: configFieldNumber, Min: 0, Max: 86400, DefaultValue: "0", Unit: "seconds", Group: "Behavior"},
 		{Path: "status_message", Label: "Status message", Kind: configFieldText, Group: "Behavior", Hint: "Shown while the hook is running."},
-		{Path: "once", Label: "Run once", Kind: configFieldBool3, Group: "Behavior", Hint: "Run this action once per session."},
-		{Path: "async", Label: "Run asynchronously", Kind: configFieldBool3, Group: "Behavior", Hint: "Do not wait for the hook before continuing."},
-		{Path: "async_rewake", Label: "Wake after completion", Kind: configFieldBool3, Group: "Behavior", Hint: "Allow an asynchronous hook to wake the conversation."},
+		{Path: "once", Label: "Run once", Kind: configFieldBool3, DefaultValue: "false", Group: "Behavior", Hint: "Run this action once per session."},
+		{Path: "async", Label: "Run asynchronously", Kind: configFieldBool3, DefaultValue: "false", Group: "Behavior", Hint: "Do not wait for the hook before continuing."},
+		{Path: "async_rewake", Label: "Wake after completion", Kind: configFieldBool3, DefaultValue: "false", Group: "Behavior", Hint: "Allow an asynchronous hook to wake the conversation."},
 	},
 	configTemplateLSPServer: {
-		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3, Group: "Process", Hint: "Enable this configured language server."},
+		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3, DefaultValue: "true", Group: "Process", Hint: "Enable this configured language server."},
 		{Path: "command", Label: "Command", Kind: configFieldText, Group: "Process", Hint: "Executable to start."},
 		{Path: "args", Label: "Arguments", Kind: configFieldRows, List: true, Group: "Process", Hint: "One argument per row."},
 		{Path: "env", Label: "Environment", Kind: configFieldRows, Group: "Process", Hint: "Server environment variables."},
-		{Path: "env_passthrough", Label: "Inherited environment keys", Kind: configFieldRows, List: true, Group: "Process", Hint: "Explicit keys to pass through."},
+		{Path: "env_passthrough", Label: "Inherited environment keys", Kind: configFieldRows, List: true, Group: "Workspace", Hint: "Explicit keys to pass through."},
 		{Path: "extension_to_language", Label: "File extensions", Kind: configFieldRows, Group: "Workspace", Hint: "Map extensions to language IDs."},
 		{Path: "filenames", Label: "File names", Kind: configFieldRows, Group: "Workspace", Hint: "Map exact file names to language IDs."},
 		{Path: "root_markers", Label: "Root markers", Kind: configFieldRows, List: true, Group: "Workspace", Hint: "Files used to find the workspace root."},
 		{Path: "workspace_folder", Label: "Workspace folder", Kind: configFieldText, Group: "Workspace", Hint: "Optional workspace folder override."},
 		{Path: "initialization_options", Label: "Initialization options", Kind: configFieldRows, Group: "Configuration", Hint: "Arbitrary JSON object sent at startup."},
 		{Path: "settings", Label: "Server settings", Kind: configFieldRows, Group: "Configuration", Hint: "Arbitrary JSON configuration object."},
-		{Path: "startup_timeout", Label: "Startup timeout", Kind: configFieldNumber, Min: 0, Max: 600, Unit: "seconds", Group: "Lifecycle"},
-		{Path: "shutdown_timeout", Label: "Shutdown timeout", Kind: configFieldNumber, Min: 0, Max: 60, Unit: "seconds", Group: "Lifecycle"},
-		{Path: "restart_on_crash", Label: "Restart after crash", Kind: configFieldBool3, Group: "Lifecycle", Hint: "Restart the server after a crash."},
-		{Path: "max_restarts", Label: "Maximum restarts", Kind: configFieldNumber, Min: 0, Max: 20, Unit: "attempts", Group: "Lifecycle"},
-		{Path: "diagnostics", Label: "Diagnostics", Kind: configFieldBool3, Group: "Capabilities", Hint: "Receive diagnostics from this server."},
+		{Path: "startup_timeout", Label: "Startup timeout", Kind: configFieldNumber, Min: 0, Max: 600, DefaultValue: "0", Unit: "seconds", Group: "Lifecycle"},
+		{Path: "shutdown_timeout", Label: "Shutdown timeout", Kind: configFieldNumber, Min: 0, Max: 60, DefaultValue: "0", Unit: "seconds", Group: "Lifecycle"},
+		{Path: "restart_on_crash", Label: "Restart after crash", Kind: configFieldBool3, DefaultValue: "true", Group: "Lifecycle", Hint: "Restart the server after a crash."},
+		{Path: "max_restarts", Label: "Maximum restarts", Kind: configFieldNumber, Min: 0, Max: 20, DefaultValue: "0", Unit: "attempts", Group: "Lifecycle"},
+		{Path: "diagnostics", Label: "Diagnostics", Kind: configFieldBool3, DefaultValue: "true", Group: "Capabilities", Hint: "Receive diagnostics from this server."},
 		{
 			Path: "role", Label: "Role", Kind: configFieldEnum, Group: "Capabilities",
 			Options: []string{"primary", "diagnostics"}, OptionLabels: map[string]string{"primary": "Primary", "diagnostics": "Diagnostics"},
 			DefaultValue: "primary", Hint: "Choose the server role.",
 		},
 		{Path: "priority", Label: "Priority", Kind: configFieldNumber, Group: "Capabilities", Hint: "Enter an integer priority."},
-		{Path: "prewarm", Label: "Prewarm", Kind: configFieldBool3, Group: "Capabilities", Hint: "Start this server ahead of its first request."},
+		{Path: "prewarm", Label: "Prewarm", Kind: configFieldBool3, DefaultValue: "false", Group: "Capabilities", Hint: "Start this server ahead of its first request."},
 	},
 	// The path pseudo-template carries the one field its scalar row edits, so
 	// the row opens the editor directly instead of asking what type the value

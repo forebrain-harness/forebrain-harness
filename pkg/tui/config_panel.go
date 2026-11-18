@@ -34,7 +34,10 @@ import (
 // The panel's fixed rows and notice lines.
 const (
 	configBackRowLabel = "Back to sections"
-	configAddRowLabel  = "+ Add a row"
+	// configAddRowLabel is the add action drawn as a row — the line-mode
+	// ladder's stand-in for the footer's Add, in the prototype's own words
+	// for the one action an empty state offers (plan 327 D4).
+	configAddRowLabel  = "+ Add item"
 	configUpRowLabel   = "Up one level"
 	configRowEditLabel = "Edit"
 	configRowOpenLabel = "Open"
@@ -468,7 +471,7 @@ func (p *configPanel) configFieldRow(doc any, schema configSectionSchema, field 
 // thinking level in force, and the description carries the field's own help
 // sentence.
 func (p *configPanel) configTypePinRow(doc any, field configField, path []string) (string, string, string) {
-	description := strings.TrimSpace(field.Hint)
+	description := configFieldHint(field)
 	ref := refOfRow(doc, path...)
 	if ref == "" {
 		return description, configFollowConversation, ""
@@ -514,11 +517,25 @@ func configFieldListed(field configField, claudeCode bool) bool {
 // sectionPrompt is the section page's heading: what the section is, and the
 // last outcome — a value that did not land, or the row a page refused. The
 // section's own page names it by title, never by the key forebrain.yaml stores
-// it under (plan 321).
+// it under (plan 321). A section whose every field the Claude Code gate hid is
+// the prototype's empty state (plan 327 D4, prototype html:157): the page says
+// what is missing instead of showing nothing at all.
 func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice string) string {
 	head := schema.Title + "\n" + schema.Summary
 	if len(schema.Fields) == 0 {
 		head += "\nThis section has no setting editable from the terminal."
+	}
+	if !p.claudeCode && len(schema.Fields) > 0 {
+		gated := true
+		for _, field := range schema.Fields {
+			if !field.ClaudeCodeOnly {
+				gated = false
+				break
+			}
+		}
+		if gated {
+			head += "\nNo compatible installation found\nClaude Code interop appears when a local installation is available."
+		}
 	}
 	if notice != "" {
 		head += "\n" + notice
@@ -527,11 +544,13 @@ func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice 
 }
 
 // showFileSection shows a forebrain.yaml section the panel cannot write, with
-// the sentence that says where it is edited and when it takes effect.
+// the sentence that says where it is edited and when it takes effect. A file
+// with nothing in it is the prototype's own empty state (plan 327 D4,
+// prototype html:169), not a bare placeholder.
 func (p *configPanel) showFileSection(schema configSectionSchema) {
 	body := strings.TrimSpace(p.file[schema.Name])
 	if body == "" {
-		body = "(not configured)"
+		body = "Not configured\nThis section has no explicit values in forebrain.yaml."
 	}
 	content := body + "\n\n" + configFileOnlyNote
 	if overlay, ok := p.sel.(InfoOverlaySelector); ok {
@@ -688,6 +707,9 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 		if value {
 			defaultIdx = 0
 		}
+		// The option the field already holds carries the check (plan 327 D2);
+		// an unset switch names neither On nor Off.
+		items[defaultIdx].Status = configChoiceCheckStatus
 	}
 	idx, ok, err := selectRichPage(p.sel, p.fieldPrompt(field), items, defaultIdx)
 	if err != nil {
@@ -718,10 +740,12 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 		items = append(items, item)
 	}
 	defaultIdx := 0
+	current := -1
 	if text, ok := cur.(string); ok {
 		for i, option := range field.Options {
 			if option == text {
 				defaultIdx = i
+				current = i
 			}
 		}
 	} else if field.DefaultValue != "" {
@@ -730,6 +754,11 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 				defaultIdx = i
 			}
 		}
+	}
+	// The option the field already holds carries the check (plan 327 D2); an
+	// unset enum names none of them, preselected or not.
+	if current >= 0 {
+		items[current].Status = configChoiceCheckStatus
 	}
 	idx, ok, err := selectRichPage(p.sel, p.fieldPrompt(field), items, defaultIdx)
 	if err != nil {
@@ -762,18 +791,23 @@ func (p *configPanel) editNumber(doc any, path []string, field configField, cur 
 	}
 	value, convErr := strconv.Atoi(text)
 	if convErr != nil {
-		return doc, fmt.Sprintf("%q is not an integer; nothing was written", text)
+		return doc, "Enter a valid whole number."
 	}
 	if value < field.Min {
-		return doc, fmt.Sprintf("%s may not be smaller than %d; nothing was written", field.Label, field.Min)
+		return doc, fmt.Sprintf("Use a value of at least %d.", field.Min)
 	}
 	notice := ""
 	if field.Max > 0 && value > field.Max {
 		if !field.Clamp {
-			return doc, fmt.Sprintf("%s may not be larger than %d; nothing was written", field.Label, field.Max)
+			return doc, fmt.Sprintf("Use a value no greater than %d.", field.Max)
 		}
 		value = field.Max
-		notice = fmt.Sprintf("Stored as the maximum, %d", field.Max)
+		notice = fmt.Sprintf("Adjusted to the maximum: %d.", value)
+	}
+	// The LSP idle exit's own floor (plan 327 D3, prototype html:137): 0 is
+	// the default and everything else must be a real timeout.
+	if field.Path == "idle_timeout" && value != 0 && value < 60 {
+		return doc, "Use 0 for the default, or at least 60 seconds."
 	}
 	updated, note := p.assign(doc, path, value, false, field.Label)
 	if note != "" {
@@ -850,12 +884,22 @@ func (p *configPanel) editEffort(doc any, path []string, field configField, prom
 	stored := configStoredEffort(cur)
 	defaultIdx := len(levels)
 	for i, level := range levels {
-		items = append(items, SelectItem{Label: turn.EffortEnglishLabel(level)})
+		item := SelectItem{Label: turn.EffortEnglishLabel(level)}
 		if level == stored {
 			defaultIdx = i
+			// The level the field already holds carries the check (plan 327
+			// D2) — only when one is stored at all.
+			if cur != nil {
+				item.Status = configChoiceCheckStatus
+			}
 		}
+		items = append(items, item)
 	}
-	items = append(items, SelectItem{Label: configRowDefaultEffort})
+	rowDefault := SelectItem{Label: configRowDefaultEffort}
+	if cur != nil && stored == "" {
+		rowDefault.Status = configChoiceCheckStatus
+	}
+	items = append(items, rowDefault)
 	idx, ok, err := selectRichPage(p.sel, prompt, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
@@ -926,20 +970,40 @@ func (p *configPanel) editModel(doc any, path []string, field configField, cur a
 	defaultIdx := 0
 	for _, row := range p.models {
 		ids = append(ids, row.ID)
-		items = append(items, SelectItem{
+		item := SelectItem{
 			Label:       p.configModelRowLabel(row.ID),
 			Description: row.BaseURL + row.APIPath,
-		})
-		if row.ID == stored {
-			defaultIdx = len(items) - 1
 		}
+		if row.ID == stored {
+			defaultIdx = len(items)
+			// The row the reference already names carries the check (plan
+			// 327 D2); the empty option's own check is set below, where the
+			// flavor's empty value is known.
+			item.Status = configChoiceCheckStatus
+		}
+		items = append(items, item)
 	}
 	if stored != "" && stored != field.ModelEmptyValue && !slices.Contains(ids, stored) && field.ModelFlavor != configModelFlavorModel {
 		ids = append(ids, stored)
-		items = append(items, SelectItem{Label: p.configModelRowLabel(stored)})
+		items = append(items, SelectItem{Label: p.configModelRowLabel(stored), Status: configChoiceCheckStatus})
 		defaultIdx = len(items) - 1
 	}
-	idx, ok, err := selectRichPage(p.sel, field.Label+"\n"+configModelPickerSub, items, defaultIdx)
+	// The empty option is the current choice while the reference names no
+	// row of the table (plan 327 D2). The memory flavor's empty option is
+	// the explicit "current": it is the current choice only when that value
+	// is what is stored — an unset key is no choice at all — while every
+	// other flavor's empty is what an unset reference already means.
+	if field.ModelFlavor == configModelFlavorMemory {
+		if stored == field.ModelEmptyValue {
+			items[0].Status = configChoiceCheckStatus
+		}
+	} else if stored == "" {
+		items[0].Status = configChoiceCheckStatus
+	}
+	// The choice page is the option list alone (plan 327 D2, owner
+	// 2026-11-18): the field's own label heads it, with no instructional
+	// sub copy — the rows' descriptions already say where requests go.
+	idx, ok, err := selectRichPage(p.sel, field.Label, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1025,10 +1089,34 @@ func (p *configPanel) assign(doc any, path []string, value any, remove bool, lab
 
 // fieldPrompt is a field page's heading: its label, then what the field means.
 func (p *configPanel) fieldPrompt(field configField) string {
-	if strings.TrimSpace(field.Hint) == "" {
-		return field.Label
+	return configFieldHead(field)
+}
+
+// configFieldHead is a field page's head: the label, then the field's help
+// line — the hint the descriptor carries, or the allowed-range line a number
+// field without one falls back to (plan 327 D3, prototype html:35).
+func configFieldHead(field configField) string {
+	if hint := configFieldHint(field); hint != "" {
+		return field.Label + "\n" + hint
 	}
-	return field.Label + "\n" + field.Hint
+	return field.Label
+}
+
+// configFieldHint is one field's help line: the descriptor's own hint, or —
+// for a number the prototype gives no words of its own — its allowed range
+// with the unit it is counted in (plan 327 D3, prototype html:35).
+func configFieldHint(field configField) string {
+	if hint := strings.TrimSpace(field.Hint); hint != "" {
+		return hint
+	}
+	if field.Kind == configFieldNumber && field.Max > 0 {
+		unit := ""
+		if field.Unit != "" {
+			unit = " " + field.Unit
+		}
+		return fmt.Sprintf("Allowed range: %d–%d%s.", field.Min, field.Max, unit)
+	}
+	return ""
 }
 
 // configFieldDescription is a field's picker row: the hint that says what the
@@ -1038,10 +1126,23 @@ func (p *configPanel) fieldPrompt(field configField) string {
 // the install's table, the way the pickers do (plan 324 D6).
 func (p *configPanel) configFieldDescription(doc any, field configField) (string, string, string) {
 	value, exists := configLookupValue(doc, configFieldPath(field))
-	if field.Kind == configFieldModel {
-		return strings.TrimSpace(field.Hint), p.configModelValueText(field, value), ""
+	// A section that is its own setting (approval_preset, a bare string)
+	// reads the whole document at an empty path, which always answers
+	// present; an absent row is still an unset field.
+	if doc == nil {
+		exists = false
 	}
-	return strings.TrimSpace(field.Hint), configFieldValueText(field, value, exists), ""
+	// A row nobody set carries the prototype's Default status at its right
+	// edge (plan 327 D6, prototype html:150), beyond whatever its value
+	// column reads.
+	status := ""
+	if !exists {
+		status = configDefaultStatus
+	}
+	if field.Kind == configFieldModel {
+		return configFieldHint(field), p.configModelValueText(field, value), status
+	}
+	return configFieldHint(field), configFieldValueText(field, value, exists), status
 }
 
 // configRowAdd and configRowUp own the row page's two action rows; a row's
@@ -1277,12 +1378,23 @@ const (
 	// holds no row for the section, so it reads its built-in defaults — the
 	// prototype's own marker (plan 321).
 	configDefaultStatus = "Default"
+	// configDefaultArrow is how an unset field with a default of its own
+	// reads in the value column (plan 327 D6, prototype html:117): the word
+	// and the default it names, for a bool, a number with its unit, an
+	// enum's option or a prompt's built-in text.
+	configDefaultArrow = "Default → "
 	// A shared custom subagent is marked on an agent's page, where the switch
 	// beside it is the agent's.
 	configSharedStatus = "Shared"
 	// configRowDefaultEffort is what an empty stored level means on a row that
 	// names a model: the model row's own default (plan 313's reading, kept).
 	configRowDefaultEffort = "Row default"
+	// configProviderDefaultEffort is what an effort key nobody has stored
+	// reads as (plan 327 D1, prototype html:117): the provider behind the
+	// model row decides. A frozen prototype quirk keeps it apart from
+	// configRowDefaultEffort — a stored empty level is a choice (follow the
+	// row's own default); an absent key is no choice at all.
+	configProviderDefaultEffort = "Provider default"
 	// configEffortKey is the field every thinking level is stored under, and
 	// configEffortModelKey the sibling it belongs to: the two are keys of one
 	// stored map at every level of the agents section (plan 319).
@@ -1291,10 +1403,12 @@ const (
 	// configEffortHeading heads a level's picker when it is opened from a row
 	// rather than from a field of its own.
 	configEffortHeading = "Thinking level"
-	// configModelPickerSub is the one sentence under a model picker's title
-	// (plan 324): every model page offers the same rows, so the page's own
-	// words say what a row's description names.
-	configModelPickerSub = "Choose one model; each row shows where requests go."
+	// configChoiceCheckStatus marks the option a choice page's field already
+	// holds (plan 327 D2, the prototype's check column): the picker
+	// preselects the row and the right edge names it. A choice page shows
+	// the option list alone (owner 2026-11-18: no "Choose one" filler sub),
+	// so the head is the field's own label and help, nothing more.
+	configChoiceCheckStatus = "✓"
 	// configModelConversationDesc is the goal check's empty option (plan 324
 	// D1): its empty value is not an unset key read as a default, it is the
 	// conversation's own model.
@@ -1477,7 +1591,9 @@ func (p *configPanel) configRowColumns(doc any, path []string, key string, value
 	typeMap, _ := typeRow.(map[string]any)
 	if typeRef := strings.TrimSpace(configStringField(typeMap, "model")); typeRef != "" {
 		effort := configStringField(typeMap, "reasoning_effort")
-		return configGlobalDefaultPrefix + p.configModelLabel(typeRef) + " / " + turn.EffortEnglishLabel(effort), ""
+		// The level reads through effortLabel (plan 327 D1): an unset
+		// install-wide level is the row's own default, not a bare Default.
+		return configGlobalDefaultPrefix + p.configModelLabel(typeRef) + " / " + configEffortSummary(effort), ""
 	}
 	return configFollowConversation, ""
 }
@@ -1555,14 +1671,13 @@ func configStringField(row map[string]any, field string) string {
 }
 
 // rowsPrompt heads a row page: where the user is, how much is there, and the
-// last outcome.
+// last outcome. An empty collection is the prototype's empty state (plan 327
+// D4, prototype html:157): the two lines the page says, with the add action
+// the page's footer already carries.
 func (p *configPanel) rowsPrompt(field configField, keys []string, notice string) string {
-	head := field.Label
-	if strings.TrimSpace(field.Hint) != "" {
-		head += "\n" + field.Hint
-	}
+	head := configFieldHead(field)
 	if len(keys) == 0 {
-		head += "\nThis level has no rows yet"
+		head += "\nNothing configured yet\nAdd the first entry."
 	} else {
 		head += fmt.Sprintf("\n%d rows; open one to edit or delete it", len(keys))
 	}
@@ -1903,12 +2018,16 @@ func (p *configPanel) templateItems(template string, settings map[string]any, ta
 		if len(field.ShowFor) > 0 && !slices.Contains(field.ShowFor, hookType) {
 			continue
 		}
-		description := field.Hint
+		value, exists := configLookupValue(settings, []string{field.Path})
+		description := configFieldHint(field)
 		status := ""
 		if system {
 			description, status = configSystemSubagentNotice, configSystemStatus
+		} else if !exists {
+			// A field nobody set carries the Default status (plan 327 D6,
+			// prototype html:150); a system entry's verdict wins over it.
+			status = configDefaultStatus
 		}
-		value, exists := configLookupValue(settings, []string{field.Path})
 		items = append(items, SelectItem{
 			Label:       field.Label,
 			Description: description,
@@ -2846,8 +2965,10 @@ func configStoredEffort(value any) string {
 }
 
 // configFieldValueText is a field's value as the section page shows it in the
-// row's value column. An unset setting reads as the default it follows, which
-// is the one word the panel uses for it everywhere else (plan 321).
+// row's value column. An unset setting reads as the default it follows — the
+// prototype's own arrow naming which default (plan 327 D6, html:117), the
+// bare word alone when the prototype gives the field no default of its own —
+// and a stored number carries the unit it is counted in (html:118).
 func configFieldValueText(field configField, value any, exists bool) string {
 	if configIsContainer(value) {
 		return configContainerText(value)
@@ -2856,29 +2977,82 @@ func configFieldValueText(field configField, value any, exists bool) string {
 		boolean, ok := value.(bool)
 		switch {
 		case !ok:
-			return configDefaultStatus
+			return configFieldDefaultText(field)
 		case boolean:
 			return configBoolOnLabel
 		default:
 			return configBoolOffLabel
 		}
 	}
-	// A thinking level reads through turn's one label table, never as the raw
-	// id (plan 313, 2026-11-17 reasoning-semantics correction).
+	// A thinking level reads through the panel's own effort wording (plan 327
+	// D1, prototype html:117-118), never as the raw id: a stored level — the
+	// empty string included — is a choice, so "" is the row's own default,
+	// while a key nobody stored leaves the choice to the provider.
 	if configEffortField(field) {
 		level, _ := value.(string)
+		if !exists {
+			return configProviderDefaultEffort
+		}
 		if strings.TrimSpace(level) == "" {
-			return configDefaultStatus
+			return configRowDefaultEffort
 		}
 		return turn.EffortEnglishLabel(level)
+	}
+	// A stored number carries its unit ("10 attempts", plan 327 D6).
+	if field.Kind == configFieldNumber && field.Unit != "" {
+		if number, ok := value.(float64); ok {
+			return configNumberUnitText(number, field.Unit)
+		}
 	}
 	// A stored section always carries its settings (plan 207 §3.2), so this is
 	// reached only by a leaf inside a table row — an optional field of an MCP
 	// server or an LSP server, which no registered default covers.
 	if !exists || value == nil {
-		return configDefaultStatus
+		return configFieldDefaultText(field)
 	}
 	return configScalarText(value)
+}
+
+// configFieldDefaultText is an unset field's value column (plan 327 D6,
+// prototype html:117): a field the prototype gives a default of its own reads
+// as the arrow naming it, and every other field as the one bare word.
+func configFieldDefaultText(field configField) string {
+	def := strings.TrimSpace(field.DefaultValue)
+	if def == "" {
+		return configDefaultStatus
+	}
+	switch field.Kind {
+	case configFieldBool3:
+		switch def {
+		case "true":
+			return configDefaultArrow + configBoolOnLabel
+		case "false":
+			return configDefaultArrow + configBoolOffLabel
+		}
+		return configDefaultStatus
+	case configFieldEnum:
+		label := field.OptionLabels[def]
+		if label == "" {
+			label = configTitleCase(def)
+		}
+		return configDefaultArrow + label
+	case configFieldNumber:
+		if number, err := strconv.Atoi(def); err == nil {
+			return configDefaultArrow + configNumberUnitText(float64(number), field.Unit)
+		}
+		return configDefaultStatus
+	}
+	return configDefaultArrow + def
+}
+
+// configNumberUnitText is a stored number with the unit its descriptor counts
+// it in (plan 327 D6, prototype html:118).
+func configNumberUnitText(value float64, unit string) string {
+	text := strconv.FormatFloat(value, 'f', -1, 64)
+	if unit == "" {
+		return text
+	}
+	return text + " " + unit
 }
 
 // configContainerText is a table or list as a row's value column counts it: a
