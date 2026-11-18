@@ -1,6 +1,8 @@
 // The receiving pipeline's contract (plan 196 §4 step 3): admission, routing,
 // the inbound policy and its hold buffer, delivery into a running turn or as a
-// turn of its own, receipts, and idle subscriptions.
+// turn of its own, receipts, and idle subscriptions. The same table delivers a
+// finished subagent's report to the conversation that dispatched it (plan 306),
+// which is why those cases live here too.
 //
 // Every case points all four directory overrides at its own temporary
 // directories (peerTestDirsFor, from peers_test.go) — a test binary without them
@@ -11,6 +13,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1327,5 +1330,160 @@ func TestPeerForwardedToDispatcherNoteIsProviderNeutralAndActionable(t *testing.
 		if strings.Contains(peerForwardedToDispatcherNote, banned) {
 			t.Errorf("the note is provider-specific: contains %q", banned)
 		}
+	}
+}
+
+// subagentEndOf is one finished subagent execution as the run side reports it:
+// the conversation that dispatched it, its roster key, the budgeted report and
+// how it ended.
+func subagentEndOf(sessionID, agentKey, output string, err error) run.SubagentExecutionEnd {
+	return run.SubagentExecutionEnd{
+		ConversationSessionID: sessionID,
+		AgentKey:              agentKey,
+		Output:                output,
+		Err:                   err,
+	}
+}
+
+// oneWake returns the single turn the surface was asked to start.
+func oneWake(t *testing.T, view *peerTestView) PeerPrompt {
+	t.Helper()
+	view.mu.Lock()
+	defer view.mu.Unlock()
+	if len(view.wakes) != 1 {
+		t.Fatalf("wakes = %d, want exactly 1", len(view.wakes))
+	}
+	return view.wakes[0]
+}
+
+// A fire-and-forget subagent finishing is delivered to the idle conversation
+// that dispatched it, as a peer message from that subagent's roster key: that is
+// what wakes the dispatcher and lets it finish the job with nobody typing.
+// No surface hook is installed here — the delivery is the engine's own, not a
+// consequence of a surface arming a continuation (plan 306).
+func TestSubagentEndWakesTheIdleDispatcherWithItsReport(t *testing.T) {
+	view := &peerTestView{}
+	svc := startPeerTestService(t, "tui", "cli-subagent-report", view, nil)
+
+	svc.env.SubagentExecutionEnded(context.Background(),
+		subagentEndOf("cli-subagent-report", "log-287", "the report", nil))
+
+	prompt := oneWake(t, view)
+	if prompt.SessionID != "cli-subagent-report" {
+		t.Fatalf("woke %q, want the conversation that dispatched the subagent", prompt.SessionID)
+	}
+	if !strings.HasPrefix(prompt.Text, `<agent-message from="log-287">`) || !strings.HasSuffix(prompt.Text, "</agent-message>") {
+		t.Fatalf("wake text is not the peer envelope: %q", prompt.Text)
+	}
+	if !strings.Contains(prompt.Text, "the report") || !strings.Contains(prompt.Text, "log-287") {
+		t.Fatalf("wake text = %q, want the report and the subagent's name", prompt.Text)
+	}
+	if !strings.Contains(prompt.Text, "deliver the final result") {
+		t.Fatalf("wake text does not tell the dispatcher to finish: %q", prompt.Text)
+	}
+	if prompt.Origin != state.MessageOriginPeer {
+		t.Fatalf("wake origin = %q, want %q", prompt.Origin, state.MessageOriginPeer)
+	}
+	if prompt.FromName != "log-287" {
+		t.Fatalf("wake from = %q, want the roster key", prompt.FromName)
+	}
+	if prompt.MsgID == "" {
+		t.Fatal("wake carries no message id")
+	}
+	svc.noReceipt(t, "a subagent report")
+}
+
+// A report that lands while the dispatcher is still working goes into its run,
+// like any other peer message: the dispatch is one turn, so the report reaches
+// the model at its next tool boundary instead of starting a second turn.
+func TestSubagentEndSteersTheRunningDispatcher(t *testing.T) {
+	view := &peerTestView{}
+	svc := startPeerTestService(t, "tui", "cli-subagent-running", view, nil)
+	queue := svc.env.Control.SessionQueue("cli-subagent-running")
+	queue.Attach(run.NewTurnInputRuntime())
+	if !svc.env.Control.TrackRuntime("run-sub", "cli-subagent-running", func() {}, queue.Runtime()) {
+		t.Fatal("the test run was not tracked")
+	}
+
+	svc.env.SubagentExecutionEnded(context.Background(),
+		subagentEndOf("cli-subagent-running", "log-288", "the running report", nil))
+
+	entries := queue.Runtime().Snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("the runtime holds %d entries, want the report as one steer", len(entries))
+	}
+	if got := llm.TextContent(entries[0].Parts...); !strings.Contains(got, "the running report") {
+		t.Fatalf("steer = %q, want the report", got)
+	}
+	if entries[0].Origin != state.MessageOriginPeer {
+		t.Fatalf("steer origin = %q, want %q", entries[0].Origin, state.MessageOriginPeer)
+	}
+	if view.wakeCount() != 0 {
+		t.Fatal("a running dispatcher was woken as well as steered")
+	}
+}
+
+// Three ends are nobody's news. An awaited execution's dispatcher read the
+// report from the call that was waiting for it. A user's cancellation is the
+// user's own decision. A usage limit with a stated reset is the subagent's own
+// continuation to run — reporting it would wake the dispatcher with a failure
+// that is about to be resumed.
+func TestSubagentEndLeavesAwaitedCancelledAndUsageLimitAlone(t *testing.T) {
+	view := &peerTestView{}
+	const idle, running = "cli-subagent-skip", "cli-subagent-skip-running"
+	svc := startPeerTestService(t, "tui", idle, view, nil)
+	queue := svc.env.Control.SessionQueue(running)
+	queue.Attach(run.NewTurnInputRuntime())
+	if !svc.env.Control.TrackRuntime("run-skip", running, func() {}, queue.Runtime()) {
+		t.Fatal("the test run was not tracked")
+	}
+	// The fixture shape pkg/turn and pkg/run already build a spent allowance
+	// with: a 429 that names its reset (quotaError, usageLimitError).
+	usageLimit := &llm.APIError{
+		StatusCode: 429,
+		Message:    "you have used your weekly limit; it resets on 2026-11-01 06:09:05",
+		RateLimit:  &llm.RateLimit{Quota: true, Reason: "usage_limit_reached", ResetAt: time.Now().Add(time.Hour)},
+	}
+	ends := map[string]run.SubagentExecutionEnd{
+		"awaited":     {ConversationSessionID: idle, AgentKey: "log-289", Output: "awaited report", AwaitedByDispatcher: true},
+		"cancelled":   {ConversationSessionID: idle, AgentKey: "log-289", Output: "cancelled report", Err: context.Canceled},
+		"usage limit": {ConversationSessionID: idle, AgentKey: "log-289", Err: usageLimit},
+	}
+	for name, end := range ends {
+		svc.env.SubagentExecutionEnded(context.Background(), end)
+		runningEnd := end
+		runningEnd.ConversationSessionID = running
+		svc.env.SubagentExecutionEnded(context.Background(), runningEnd)
+		if steers := queue.Preview().Steers; len(steers) != 0 {
+			t.Fatalf("%s: a running dispatcher was steered with %q", name, steers)
+		}
+	}
+	if view.wakeCount() != 0 {
+		t.Fatalf("wakes = %d, want none for the three skipped ends", view.wakeCount())
+	}
+}
+
+// Any other failure is reported: the dispatcher is the only one who can decide
+// what to do about a subagent that did not finish, so it hears the error and
+// whatever partial report the execution produced.
+func TestSubagentEndReportsAFailure(t *testing.T) {
+	view := &peerTestView{}
+	svc := startPeerTestService(t, "tui", "cli-subagent-failed", view, nil)
+
+	svc.env.SubagentExecutionEnded(context.Background(),
+		subagentEndOf("cli-subagent-failed", "log-290", "half the work", errors.New("provider refused")))
+
+	prompt := oneWake(t, view)
+	if !strings.Contains(prompt.Text, "provider refused") {
+		t.Fatalf("wake text does not carry the error: %q", prompt.Text)
+	}
+	if !strings.Contains(prompt.Text, "half the work") {
+		t.Fatalf("wake text does not carry the partial report: %q", prompt.Text)
+	}
+	if !strings.Contains(prompt.Text, "Decide how to proceed") {
+		t.Fatalf("wake text does not ask the dispatcher to decide: %q", prompt.Text)
+	}
+	if prompt.FromName != "log-290" || prompt.Origin != state.MessageOriginPeer {
+		t.Fatalf("failure prompt = %+v, want the roster key as a peer message", prompt)
 	}
 }

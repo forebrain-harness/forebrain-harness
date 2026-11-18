@@ -159,6 +159,11 @@ type Environment struct {
 	// peers is this process's peer registration (plan 195); Close stops it
 	// before anything it reads from goes away.
 	peers *peerService
+	// peerDelivery is the in-process delivery table (deliverPrimary). It is
+	// wired even where the cross-process registration cannot run: a subagent
+	// reporting to its own dispatcher is in-process work and must not depend
+	// on the peer protocol being available (plan 306).
+	peerDelivery *peerInbox
 	// peerOut is this process's port onto the other processes' agents (plan
 	// 197): the peer tools reach it through Deps.Peers. It is built once and
 	// outlives the registration, because the tool table sits in the prompt

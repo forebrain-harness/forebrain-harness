@@ -302,6 +302,14 @@ func (env *Environment) StartPeers(ctx context.Context, s PeerSurface) (stop fun
 	}
 	svc.procStart, _ = peer.ProcStart(os.Getpid())
 	svc.inbox = newPeerInbox(svc, s)
+	// The inbox is also this process's delivery table for a conversation's own
+	// agent (deliverPrimary), and a subagent reporting to the dispatcher that
+	// started it is in-process work: it is wired here, before the peer.Enabled
+	// gate below, so the report reaches an idle dispatcher on a platform where
+	// the cross-process protocol cannot run (plan 306).
+	if env != nil {
+		env.peerDelivery = svc.inbox
+	}
 	// The receipts a peer sends about a message this process sent are what the
 	// sending conversation hears back (plan 197 §3.6): they go to this
 	// process's outbound table, which aggregates them into one note.
