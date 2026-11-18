@@ -3,6 +3,7 @@ package tool
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -128,35 +129,82 @@ func TestDiffBlocksIgnoreFencedPseudoHeaders(t *testing.T) {
 }
 
 func TestDiffBlocksNoteTexts(t *testing.T) {
-	if got := diffMoreFilesNote(true, 1, false); got != "… 1 more file changed" {
-		t.Fatalf("diffMoreFilesNote(true,1,false) = %q", got)
+	if got := diffMoreFilesNote(true, 1); got != "… 1 more file changed" {
+		t.Fatalf("diffMoreFilesNote(true,1) = %q", got)
 	}
-	if got := diffMoreFilesNote(true, 2, false); got != "… 2 more files changed" {
-		t.Fatalf("diffMoreFilesNote(true,2,false) = %q", got)
+	if got := diffMoreFilesNote(true, 2); got != "… 2 more files changed" {
+		t.Fatalf("diffMoreFilesNote(true,2) = %q", got)
 	}
-	if got := diffMoreFilesNote(false, 3, true); got != "3 files changed (binary, mode only or too large to show) (part of the diff is unavailable)" {
-		t.Fatalf("diffMoreFilesNote(false,3,true) = %q", got)
-	}
-	if got := diffUnavailableNote(1); got != "(file diff unavailable for this command; 1 file changed)" {
-		t.Fatalf("diffUnavailableNote(1) = %q", got)
-	}
-	if got := diffUnavailableNote(0); got != "(file diff unavailable for this command)" {
-		t.Fatalf("diffUnavailableNote(0) = %q", got)
+	if got := diffMoreFilesNote(false, 3); got != "3 files changed (binary, mode only or too large to show)" {
+		t.Fatalf("diffMoreFilesNote(false,3) = %q", got)
 	}
 	// Every note text must survive a round trip.
 	blocks := DiffBlocks{
 		Files: []DiffBlock{{Verb: "Updated", Path: "a.txt", Added: 1, Deleted: 1, UnifiedDiff: "@@ -1 +1 @@\n-a\n+b\n"}},
 		Notes: []string{
-			diffMoreFilesNote(true, 1, false),
-			diffMoreFilesNote(true, 2, false),
-			diffMoreFilesNote(false, 3, true),
-			diffUnavailableNote(1),
+			diffMoreFilesNote(true, 1),
+			diffMoreFilesNote(true, 2),
+			diffMoreFilesNote(false, 3),
 			diffNoteSkipped,
 			diffNoteShared,
 			diffNoteTreeMoved,
 		},
 	}
 	diffBlocksRoundTrip(t, blocks)
+}
+
+// Historical cards carry notes this engine no longer writes: the diff
+// machinery's own failures (owner 2026-11-18) and their "(part of the diff is
+// unavailable)" marker. Readers drop the first and strip the second, so an old
+// body reads like a new one, while files and command output stay intact.
+func TestDiffBlocksHistoricalUnavailableNotesFiltered(t *testing.T) {
+	body := "Updated `a.txt` (+1 -1)\n\n```diff\n@@ -1 +1 @@\n-a\n+b\n```\n\n" +
+		"(file diff unavailable for this command; 2 files changed)\n\n" +
+		"… 1 more file changed (part of the diff is unavailable)\n"
+	blocks, ok := ParseDiffBlocks(body)
+	if !ok {
+		t.Fatalf("ParseDiffBlocks ok=false for a body with a file block:\n%s", body)
+	}
+	if len(blocks.Files) != 1 || blocks.Files[0].Path != "a.txt" {
+		t.Fatalf("parsed files = %#v, want the single a.txt block", blocks.Files)
+	}
+	want := []string{"… 1 more file changed"}
+	if !reflect.DeepEqual(blocks.Notes, want) {
+		t.Fatalf("parsed notes = %#v, want %#v", blocks.Notes, want)
+	}
+	if !HasDiffBlocks(body) {
+		t.Fatalf("HasDiffBlocks = false for a body with a file block")
+	}
+
+	// A note-only body whose only note was dropped is not a diff block at all:
+	// the card renders the command output alone.
+	body = "(file diff unavailable for this command)\n"
+	if blocks, ok := ParseDiffBlocks(body); ok {
+		t.Fatalf("ParseDiffBlocks ok=true for a dropped-note-only body: %#v", blocks)
+	}
+	if HasDiffBlocks(body) {
+		t.Fatalf("HasDiffBlocks = true for a dropped-note-only body")
+	}
+
+	// The marker alone must not hide the count it was attached to.
+	body = "3 files changed (binary, mode only or too large to show) (part of the diff is unavailable)\n"
+	blocks, ok = ParseDiffBlocks(body)
+	if !ok {
+		t.Fatalf("ParseDiffBlocks ok=false for a count note:\n%s", body)
+	}
+	want = []string{"3 files changed (binary, mode only or too large to show)"}
+	if !reflect.DeepEqual(blocks.Notes, want) {
+		t.Fatalf("parsed notes = %#v, want %#v", blocks.Notes, want)
+	}
+
+	// Command output keeps lines that only look like the note.
+	body = "stdout:\n\n```text\n(file diff unavailable for this command)\n```\n"
+	if _, ok := ParseDiffBlocks(body); ok {
+		t.Fatalf("ParseDiffBlocks read a fenced line as a note: %q", body)
+	}
+	if HasDiffBlocks(body) {
+		t.Fatalf("HasDiffBlocks read a fenced line as a note: %q", body)
+	}
 }
 
 // A sibling whose name starts with ".." is still inside the directory: the

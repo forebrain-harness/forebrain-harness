@@ -41,6 +41,15 @@ const (
 	diffNoteTreeMoved = "(a git step in this command can move the working tree, so these may be its changes, not edits)"
 )
 
+// DiffUnavailableNotePrefix opens the note historical cards carry when the
+// diff machinery could not compute a diff. The engine no longer writes it
+// (owner 2026-11-18); readers drop it so old bodies read like new ones.
+const DiffUnavailableNotePrefix = "(file diff unavailable"
+
+// diffPartUnavailableSuffix is the marker historical cards carry on a
+// more-files note when part of the diff was unavailable.
+const diffPartUnavailableSuffix = " (part of the diff is unavailable)"
+
 // diffHunkUsage reports how many hunk body lines a unified diff carries and
 // how many bytes they span: every line after the first "@@" line that is not
 // itself a "@@" line.
@@ -205,7 +214,13 @@ func scanDiffBlocks(body string, stopEarly bool) (DiffBlocks, bool) {
 		}
 		if diffBlockNote(trimmed) {
 			flush()
-			blocks.Notes = append(blocks.Notes, trimmed)
+			// Historical bodies may carry the unavailable note the engine no
+			// longer writes: drop it, and strip the marker from the notes that
+			// survive it. A dropped note is not a block.
+			if strings.HasPrefix(trimmed, DiffUnavailableNotePrefix) {
+				continue
+			}
+			blocks.Notes = append(blocks.Notes, strings.TrimSuffix(trimmed, diffPartUnavailableSuffix))
 			if stopEarly {
 				return blocks, true
 			}
@@ -249,27 +264,12 @@ func diffFileCount(n int) string {
 
 // diffMoreFilesNote is the note for changed files the card did not show:
 // when some files are shown it counts the rest; when none are shown it says
-// why (binary, mode-only or too large). unavailable appends the marker.
-func diffMoreFilesNote(filesShown bool, n int, unavailable bool) string {
-	var note string
+// why (binary, mode-only or too large).
+func diffMoreFilesNote(filesShown bool, n int) string {
 	if filesShown {
-		note = fmt.Sprintf("… %d more %s changed", n, diffFilesWord(n))
-	} else {
-		note = diffFileCount(n) + " changed (binary, mode only or too large to show)"
+		return fmt.Sprintf("… %d more %s changed", n, diffFilesWord(n))
 	}
-	if unavailable {
-		note += " (part of the diff is unavailable)"
-	}
-	return note
-}
-
-// diffUnavailableNote is the note a card shows when the diff cannot be
-// computed at all, optionally counting the files that did change.
-func diffUnavailableNote(n int) string {
-	if n > 0 {
-		return "(file diff unavailable for this command; " + diffFileCount(n) + " changed)"
-	}
-	return "(file diff unavailable for this command)"
+	return diffFileCount(n) + " changed (binary, mode only or too large to show)"
 }
 
 // displayPathRelativeTo is how a card names a file: relative to dir when the
@@ -347,7 +347,9 @@ func applyPatchDiffBlocks(output map[string]any) (DiffBlocks, bool) {
 }
 
 // shellEditDiffBlocks turns the "shell_edit_diff" value of a shell completion
-// output into the diff blocks its card shows, with Claude Code's note set.
+// output into the diff blocks its card shows, with Claude Code's note set minus
+// the one this engine no longer speaks: the diff machinery's own failures stay
+// out of the card (owner 2026-11-18, see below).
 func shellEditDiffBlocks(output map[string]any) (DiffBlocks, bool) {
 	diff, ok := DecodeShellEditDiff(output["shell_edit_diff"])
 	if !ok {
@@ -356,10 +358,10 @@ func shellEditDiffBlocks(output map[string]any) (DiffBlocks, bool) {
 	if diff.Skipped {
 		return DiffBlocks{Notes: []string{diffNoteSkipped}}, true
 	}
-	if len(diff.Files) == 0 && diff.Unavailable {
-		return DiffBlocks{Notes: []string{diffUnavailableNote(diff.MoreFiles)}}, true
-	}
-	if len(diff.Files) == 0 && diff.Shared {
+	// The diff machinery's own failures are not user-facing (owner 2026-11-18):
+	// an unavailable diff leaves the card with the command output alone, and a
+	// count of changed files too large to show keeps the existing note wording.
+	if len(diff.Files) == 0 && diff.MoreFiles == 0 && diff.Shared {
 		return DiffBlocks{Notes: []string{diffNoteShared}}, true
 	}
 	blocks := DiffBlocks{}
@@ -381,7 +383,7 @@ func shellEditDiffBlocks(output map[string]any) (DiffBlocks, bool) {
 		})
 	}
 	if diff.MoreFiles > 0 {
-		blocks.Notes = append(blocks.Notes, diffMoreFilesNote(len(blocks.Files) > 0, diff.MoreFiles, diff.Unavailable))
+		blocks.Notes = append(blocks.Notes, diffMoreFilesNote(len(blocks.Files) > 0, diff.MoreFiles))
 	}
 	if diff.TreeMoved {
 		blocks.Notes = append(blocks.Notes, diffNoteTreeMoved)

@@ -4089,6 +4089,12 @@ func stripToolMetadataSections(content string) string {
 			continue
 		case strings.HasPrefix(trimmed, "**") && strings.HasSuffix(trimmed, "**"):
 			continue
+		case strings.HasPrefix(trimmed, tool.DiffUnavailableNotePrefix):
+			// A historical shell card's unavailable note is not command output:
+			// command output always sits inside a labelled fence, which never
+			// reaches this function. Drop the line like a metadata label, so an
+			// old card reads the way the engine writes it now (owner 2026-11-18).
+			continue
 		}
 		out = append(out, line)
 	}

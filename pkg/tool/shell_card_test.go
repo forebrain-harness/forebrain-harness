@@ -213,3 +213,33 @@ func TestParseFileDiffReadsAnEscalatedFence(t *testing.T) {
 	require.True(t, ok, "a shell card body must parse:\n%s", shellBody)
 	require.Equal(t, "```bash\nmake build\n```\ntail", card.Stdout)
 }
+
+// TestParseShellCardDropsHistoricalUnavailableNote pins the reader half of the
+// owner's 2026-11-18 ruling for the web surfaces: a card body written before
+// the engine stopped speaking about its own diff failures loses that note and
+// the "(part of the diff is unavailable)" marker, while the command output and
+// the files keep reading back exactly.
+func TestParseShellCardDropsHistoricalUnavailableNote(t *testing.T) {
+	body := "**shell**\n\n" +
+		"input:\n\n```json\n{\n  \"command\": \"touch marker.txt\"\n}\n```\n\n" +
+		"stdout:\n\n```text\ncreated marker.txt\n```\n\n" +
+		"Updated `a.txt` (+1 -1)\n\n```diff\n@@ -1 +1 @@\n-a\n+b\n```\n\n" +
+		"(file diff unavailable for this command; 2 files changed)\n\n" +
+		"… 1 more file changed (part of the diff is unavailable)\n"
+	card, ok := ParseShellCard(body)
+	require.True(t, ok, "a historical shell card body must parse:\n%s", body)
+	require.Equal(t, "created marker.txt", card.Stdout, "stdout must survive the filter:\n%s", body)
+	require.Len(t, card.Files, 1, "the file block must survive the filter:\n%s", body)
+	require.Equal(t, "a.txt", card.Files[0].Path)
+	require.Equal(t, []string{"… 1 more file changed"}, card.Notes, "notes read back without the dropped note and the marker:\n%s", body)
+
+	// The owner's case: the note was the whole diff section, so the card reads
+	// as a plain command result.
+	body = "**shell**\n\ninput:\n\n```json\n{\n  \"command\": \"go test ./...\"\n}\n```\n\n" +
+		"stdout:\n\n```text\nok\n```\n\n" +
+		"(file diff unavailable for this command)\n"
+	card, ok = ParseShellCard(body)
+	require.True(t, ok, "a note-only historical body must still parse as a shell card:\n%s", body)
+	require.Equal(t, "ok", card.Stdout)
+	require.Empty(t, card.Notes, "the unavailable note must not read back:\n%s", body)
+}

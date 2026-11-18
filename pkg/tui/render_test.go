@@ -2421,3 +2421,41 @@ func TestRosterListsPausedSubagentAsPaused(t *testing.T) {
 		t.Fatal("a finished subagent is not a live conversation")
 	}
 }
+
+// TestShellRawBodyDropsHistoricalUnavailableNote pins the TUI half of the
+// owner's 2026-11-18 ruling: a card body written before the engine stopped
+// speaking about its own diff failures must not fall back to showing that line
+// as command output. The engine writes no such body any more, so the shapes
+// here are hand-built, exactly as an old session stored them.
+func TestShellRawBodyDropsHistoricalUnavailableNote(t *testing.T) {
+	// A silent command's old card: no stdout section, so the body reaches the
+	// raw-body fallback, whose only content was the note.
+	silent := "**shell**\n\ninput:\n\n```json\n{\n  \"command\": \"touch marker.txt\"\n}\n```\n\n" +
+		"(file diff unavailable for this command)\n\n"
+	if _, ok := renderShellDiffCard(silent, DiffThemeDark, termWidthOrDefault()); ok {
+		t.Fatalf("renderShellDiffCard accepted a dropped-note-only body:\n%s", silent)
+	}
+	if got := formatShellOutput(silent); got != "" {
+		t.Fatalf("formatShellOutput = %q, want the empty state (the note is not output)", got)
+	}
+	if got := visibleToolOutput(silent); got != "" {
+		t.Fatalf("visibleToolOutput = %q, want the empty state (the note is not output)", got)
+	}
+
+	// The same note next to a stdout section: the sections path never sees the
+	// note, and the output reads as it always did.
+	withStdout := "**shell**\n\ninput:\n\n```json\n{\n  \"command\": \"go test ./...\"\n}\n```\n\n" +
+		"stdout:\n\n```text\nok  example.com/pkg\n```\n\n" +
+		"(file diff unavailable for this command)\n\n"
+	if got, want := formatShellOutput(withStdout), "ok  example.com/pkg"; got != want {
+		t.Fatalf("formatShellOutput = %q, want %q", got, want)
+	}
+
+	// Command output that merely prints the sentence is output: the fallback
+	// must not eat it.
+	printed := "**shell**\n\ninput:\n\n```json\n{\n  \"command\": \"echo note\"\n}\n```\n\n" +
+		"stdout:\n\n```text\n(file diff unavailable for this command)\n```\n\n"
+	if got, want := formatShellOutput(printed), "(file diff unavailable for this command)"; got != want {
+		t.Fatalf("formatShellOutput = %q, want %q", got, want)
+	}
+}

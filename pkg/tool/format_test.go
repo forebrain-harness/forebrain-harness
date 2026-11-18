@@ -886,10 +886,19 @@ func TestFormatToolStepResult_shellEditDiffNotes(t *testing.T) {
 		name  string
 		diff  ShellEditDiff
 		notes []string
+		// noBlocks: the card carries no diff section at all, only the command
+		// output (an unavailable diff with nothing to count).
+		noBlocks bool
 	}{
-		{"skipped", ShellEditDiff{Skipped: true}, []string{diffNoteSkipped}},
-		{"unavailable", ShellEditDiff{Unavailable: true, MoreFiles: 2}, []string{diffUnavailableNote(2)}},
-		{"shared", ShellEditDiff{Shared: true}, []string{diffNoteShared}},
+		{"skipped", ShellEditDiff{Skipped: true}, []string{diffNoteSkipped}, false},
+		{"unavailable", ShellEditDiff{Unavailable: true, MoreFiles: 2}, []string{"2 files changed (binary, mode only or too large to show)"}, false},
+		{"unavailable-empty", ShellEditDiff{Unavailable: true}, nil, true},
+		{"unavailable-shared", ShellEditDiff{Unavailable: true, Shared: true}, []string{diffNoteShared}, false},
+		{"shared", ShellEditDiff{Shared: true}, []string{diffNoteShared}, false},
+		{"shared-count", ShellEditDiff{Shared: true, MoreFiles: 2}, []string{
+			"2 files changed (binary, mode only or too large to show)",
+			diffNoteShared,
+		}, false},
 		{"full", ShellEditDiff{
 			Files: []ShellEditDiffFile{{
 				Path: "/repo/a.txt", DisplayPath: "a.txt", Status: "updated",
@@ -897,10 +906,10 @@ func TestFormatToolStepResult_shellEditDiffNotes(t *testing.T) {
 			}},
 			MoreFiles: 3, Unavailable: true, TreeMoved: true, Shared: true,
 		}, []string{
-			diffMoreFilesNote(true, 3, true),
+			diffMoreFilesNote(true, 3),
 			diffNoteTreeMoved,
 			diffNoteShared,
-		}},
+		}, false},
 	}
 	assertBody := func(t *testing.T, body string, notes []string, hasFiles bool) {
 		t.Helper()
@@ -934,7 +943,11 @@ func TestFormatToolStepResult_shellEditDiffNotes(t *testing.T) {
 			if trunc {
 				t.Fatal("unexpected truncation")
 			}
-			assertBody(t, body, tc.notes, len(tc.diff.Files) > 0)
+			if tc.noBlocks {
+				assertNoBlocks(t, body)
+			} else {
+				assertBody(t, body, tc.notes, len(tc.diff.Files) > 0)
+			}
 			// A replayed step carries the diff as plain JSON.
 			encoded, err := json.Marshal(live.Output)
 			if err != nil {
@@ -950,8 +963,27 @@ func TestFormatToolStepResult_shellEditDiffNotes(t *testing.T) {
 			if trunc {
 				t.Fatal("unexpected truncation on replay")
 			}
-			assertBody(t, body, tc.notes, len(tc.diff.Files) > 0)
+			if tc.noBlocks {
+				assertNoBlocks(t, body)
+			} else {
+				assertBody(t, body, tc.notes, len(tc.diff.Files) > 0)
+			}
 		})
+	}
+}
+
+// assertNoBlocks checks a card has no diff section: the engine speaks nothing
+// about its own diff failures, and nothing changed to count here.
+func assertNoBlocks(t *testing.T, body string) {
+	t.Helper()
+	if blocks, ok := ParseDiffBlocks(body); ok {
+		t.Fatalf("body carries diff blocks %#v:\n%s", blocks, body)
+	}
+	if strings.Contains(body, DiffUnavailableNotePrefix) {
+		t.Fatalf("body carries the unavailable note:\n%s", body)
+	}
+	if !strings.Contains(body, "done") {
+		t.Fatalf("body lost the command output:\n%s", body)
 	}
 }
 
