@@ -46,10 +46,15 @@ const (
 	// cannot write.
 	configFileOnlyNote = "This section is edited in forebrain.yaml by hand only; it applies after the process restarts"
 
-	configBoolOnLabel    = "On"
-	configBoolOffLabel   = "Off"
-	configBoolUnsetLabel = "Default (unset)"
-	configUnsetLabel     = "Default (unset)"
+	configBoolOnLabel  = "On"
+	configBoolOffLabel = "Off"
+	// configDefaultActionLabel and its one line are how the panel goes back to
+	// a setting's own default: an action on the choice page, never a value
+	// among the real ones (owner 2026-11-16 — "Default", not "Use default").
+	// The terminal's picker carries its actions as rows, so the action is the
+	// choice list's last row rather than a footer button.
+	configDefaultActionLabel = "Default"
+	configDefaultActionHint  = "Uses the setting's built-in default"
 
 	configNewTextRow   = "Text"
 	configNewNumberRow = "Number"
@@ -626,13 +631,15 @@ func (p *configPanel) editField(doc any, field configField) (any, string) {
 	}
 }
 
-// editBool3 is the three-state switch. "default" deletes the key instead of
-// writing false, because for a *bool that is what "unset" means.
+// editBool3 is the three-state switch: on, off, and the setting's own default,
+// which deletes the key instead of writing false. Only the two real values are
+// rows in the value list; going back to the default is the choice page's
+// `Default` action (owner 2026-11-16).
 func (p *configPanel) editBool3(doc any, path []string, field configField, cur any) (any, string) {
 	items := []SelectItem{
-		{Label: configBoolOnLabel, Description: "Writes true"},
-		{Label: configBoolOffLabel, Description: "Writes false"},
-		{Label: configBoolUnsetLabel, Description: "Leaves the key out, using the built-in default"},
+		{Label: configBoolOnLabel},
+		{Label: configBoolOffLabel},
+		{Label: configDefaultActionLabel, Description: configDefaultActionHint},
 	}
 	defaultIdx := len(items) - 1
 	if value, ok := cur.(bool); ok {
@@ -662,17 +669,18 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 // editEnum picks one of the values the loader accepts, so free text can never
 // reach the store with a mode it would reject. An option with a Chinese label
 // shows the label alone: the reader is choosing a behavior, not a
-// configuration key (plan 203 §0.8).
+// configuration key (plan 203 §0.8). The list holds the real values only; the
+// last row is the `Default` action, which deletes the key (owner 2026-11-16).
 func (p *configPanel) editEnum(doc any, path []string, field configField, cur any) (any, string) {
 	items := make([]SelectItem, 0, len(field.Options)+1)
 	for _, option := range field.Options {
-		item := SelectItem{Label: option, Description: "Writes " + option}
+		item := SelectItem{Label: option}
 		if label := field.OptionLabels[option]; label != "" {
 			item = SelectItem{Label: label}
 		}
 		items = append(items, item)
 	}
-	items = append(items, SelectItem{Label: configUnsetLabel, Description: "Leaves the key out, using the built-in default"})
+	items = append(items, SelectItem{Label: configDefaultActionLabel, Description: configDefaultActionHint})
 	defaultIdx := len(items) - 1
 	if text, ok := cur.(string); ok {
 		for i, option := range field.Options {

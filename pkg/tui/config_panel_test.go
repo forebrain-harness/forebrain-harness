@@ -417,7 +417,7 @@ func TestConfigPanelClearsAFieldToItsDefault(t *testing.T) {
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "features", ok: true},
 		{label: "Memory", ok: true},
-		{label: configBoolUnsetLabel, ok: true},
+		{label: configDefaultActionLabel, ok: true},
 		{ok: false},
 	}, nil)
 
@@ -428,6 +428,79 @@ func TestConfigPanelClearsAFieldToItsDefault(t *testing.T) {
 	// an absent row is how "this install uses the default" reads.
 	if raw := session.writes[0].raw; len(raw) != 0 {
 		t.Fatalf("raw = %s, want the row removed", raw)
+	}
+}
+
+// A choice page lists the real values and nothing else: the way back to the
+// setting's own default is the `Default` action at the end of the list, not a
+// third value that reads like one (owner 2026-11-16, plan 321 Step 3). The
+// action is what unsets an enum too, and it writes the key out.
+func TestConfigPanelChoiceListsHoldValuesAndTheDefaultAction(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stored  map[string]string
+		steps   []richStep
+		want    []string
+		raw     string
+		section string
+	}{
+		{
+			name:    "a boolean",
+			stored:  map[string]string{"features": `{"memories":true}`},
+			steps:   []richStep{{label: "features", ok: true}, {label: "Memory", ok: true}},
+			want:    []string{configBoolOnLabel, configBoolOffLabel, configDefaultActionLabel},
+			raw:     ``,
+			section: "features",
+		},
+		{
+			name:    "an enum",
+			stored:  map[string]string{"lsp": `{"diagnostics":{"min_severity":"warning","late_delivery":true}}`},
+			steps:   []richStep{{label: "lsp", ok: true}, {label: "Lowest severity", ok: true}},
+			want:    []string{"error", "warning", "information", "hint", configDefaultActionLabel},
+			raw:     `{"diagnostics":{"late_delivery":true}}`,
+			section: "lsp",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := newConfigPanelSession(tc.stored)
+			selector := &scriptedSelector{}
+			runConfigPanel(t, session, selector, tc.steps, nil)
+
+			// The section list, then the section's page, then the choice page.
+			if len(selector.richItems) < 3 {
+				t.Fatalf("the choice page never opened: %v", selector.richLabels)
+			}
+			choice := selector.richItems[2]
+			if got := rowLabels(choice); !slices.Equal(got, tc.want) {
+				t.Fatalf("choice list = %v, want the values and the action: %v", got, tc.want)
+			}
+			// The values carry nothing beside them; only the action explains
+			// itself.
+			for _, item := range choice[:len(choice)-1] {
+				if item.Description != "" {
+					t.Fatalf("%q carries %q; a value row names the value alone", item.Label, item.Description)
+				}
+			}
+			if action := choice[len(choice)-1]; action.Description != configDefaultActionHint {
+				t.Fatalf("the action reads %q, want %q", action.Description, configDefaultActionHint)
+			}
+
+			// Choosing it is the unset, and it writes: the confirmed action is
+			// the save here too.
+			session = newConfigPanelSession(tc.stored)
+			selector = &scriptedSelector{}
+			runConfigPanel(t, session, selector,
+				append(append([]richStep{}, tc.steps...), richStep{label: configDefaultActionLabel, ok: true}), nil)
+			if len(session.writes) != 1 {
+				t.Fatalf("the action is one write, got %+v", session.writes)
+			}
+			if session.writes[0].section != tc.section {
+				t.Fatalf("section = %q, want %q", session.writes[0].section, tc.section)
+			}
+			if got := string(session.writes[0].raw); got != tc.raw {
+				t.Fatalf("raw = %s, want %s", got, tc.raw)
+			}
+		})
 	}
 }
 
@@ -1049,23 +1122,23 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 	// three-state words. Named so a failure points at the constant rather than
 	// at a line number that moves.
 	chrome := map[string]string{
-		"configBackRowLabel":   configBackRowLabel,
-		"configAddRowLabel":    configAddRowLabel,
-		"configUpRowLabel":     configUpRowLabel,
-		"configRowEditLabel":   configRowEditLabel,
-		"configRowOpenLabel":   configRowOpenLabel,
-		"configRowDropLabel":   configRowDropLabel,
-		"configRowBackLabel":   configRowBackLabel,
-		"configFileOnlyNote":   configFileOnlyNote,
-		"configBoolOnLabel":    configBoolOnLabel,
-		"configBoolOffLabel":   configBoolOffLabel,
-		"configBoolUnsetLabel": configBoolUnsetLabel,
-		"configUnsetLabel":     configUnsetLabel,
-		"configNewTextRow":     configNewTextRow,
-		"configNewNumberRow":   configNewNumberRow,
-		"configNewTrueRow":     configNewTrueRow,
-		"configNewFalseRow":    configNewFalseRow,
-		"configNewObjectRow":   configNewObjectRow,
+		"configBackRowLabel":       configBackRowLabel,
+		"configAddRowLabel":        configAddRowLabel,
+		"configUpRowLabel":         configUpRowLabel,
+		"configRowEditLabel":       configRowEditLabel,
+		"configRowOpenLabel":       configRowOpenLabel,
+		"configRowDropLabel":       configRowDropLabel,
+		"configRowBackLabel":       configRowBackLabel,
+		"configFileOnlyNote":       configFileOnlyNote,
+		"configBoolOnLabel":        configBoolOnLabel,
+		"configBoolOffLabel":       configBoolOffLabel,
+		"configDefaultActionLabel": configDefaultActionLabel,
+		"configDefaultActionHint":  configDefaultActionHint,
+		"configNewTextRow":         configNewTextRow,
+		"configNewNumberRow":       configNewNumberRow,
+		"configNewTrueRow":         configNewTrueRow,
+		"configNewFalseRow":        configNewFalseRow,
+		"configNewObjectRow":       configNewObjectRow,
 	}
 	for name, text := range chrome {
 		check(name, text)
