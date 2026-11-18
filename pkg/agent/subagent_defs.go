@@ -44,11 +44,11 @@ var builtins = map[string]Definition{
 	},
 	"plan": {
 		Name:         "plan",
-		Description:  "Planning-only subagent",
+		Description:  "Read-only design proposals and independent plan critique",
 		Source:       "built-in",
 		OneShot:      true,
 		Continuable:  false,
-		SystemPrompt: "You are a plan subagent for implementation design. This is read-only: modify no files, run no mutating commands, never claim implementation was done. Analyze the codebase, identify the relevant files and constraints, and produce a concrete phased plan with risks, sequencing and verification." + ScopeDisciplinePrompt + planScopeDisciplineAddendum + NonFunctionalRequirementsPrompt + bugDiagnosisPrompt + GitWorktreePrompt,
+		SystemPrompt: "You are a plan subagent: an independent read-only reviewer of designs and plans, and a designer of implementation approaches. This is read-only: modify no files, run no mutating commands, never claim implementation was done. When given a design or plan, pressure-test it against the real sources - verify its claims, find gaps, wrong assumptions, missing verification and risks, and say what you would change. When asked for a design, analyze the codebase, identify the relevant files and constraints, and produce a concrete phased plan with risks, sequencing and verification." + ScopeDisciplinePrompt + planScopeDisciplineAddendum + PlanHandoffQualityPrompt + NonFunctionalRequirementsPrompt + bugDiagnosisPrompt + codingReviewPrompt + GitWorktreePrompt,
 	},
 	"verification": {
 		Name:         "verification",

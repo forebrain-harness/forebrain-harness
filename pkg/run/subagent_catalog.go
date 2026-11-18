@@ -22,7 +22,7 @@ const SubagentSourceCustom = tool.SubagentDefinitionSourceCustom
 var publicSubagentEnumSentences = map[string]string{
 	"general-purpose": "bounded independent implementation or general delegated work",
 	"explore":         "read-only investigation and locating facts",
-	"plan":            "read-only implementation design, sequencing, risks, and verification planning",
+	"plan":            "independent read-only critique of a design or plan, and read-only implementation design proposals",
 	"verification":    "falsify or verify an implementation with concrete checks",
 }
 

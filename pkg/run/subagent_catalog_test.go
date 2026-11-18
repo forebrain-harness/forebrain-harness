@@ -161,7 +161,7 @@ func TestSubagentCatalogEnumDescriptionNamesCustomSubagents(t *testing.T) {
 		"Optional public typed subagent.",
 		"general-purpose: bounded independent implementation or general delegated work.",
 		"explore: read-only investigation and locating facts.",
-		"plan: read-only implementation design, sequencing, risks, and verification planning.",
+		"plan: independent read-only critique of a design or plan, and read-only implementation design proposals.",
 		"repo-scout: Finds the files a task touches.",
 		"note-taker: Writes one note, then stops.",
 		"Omit subagent_type to fork the current agent.",
@@ -177,7 +177,7 @@ func TestSubagentCatalogEnumDescriptionNamesCustomSubagents(t *testing.T) {
 	// what an unconfigured agent's model reads, so nothing about the schema
 	// prompt changed for anyone who does not configure subagents.
 	var unconfigured strings.Builder
-	unconfigured.WriteString("Optional public typed subagent. general-purpose: bounded independent implementation or general delegated work. explore: read-only investigation and locating facts. plan: read-only implementation design, sequencing, risks, and verification planning. verification: falsify or verify an implementation with concrete checks. Omit subagent_type to fork the current agent. Fork inherits the parent conversation context, runs in the background, and keeps intermediate tool output out of the main context.")
+	unconfigured.WriteString("Optional public typed subagent. general-purpose: bounded independent implementation or general delegated work. explore: read-only investigation and locating facts. plan: independent read-only critique of a design or plan, and read-only implementation design proposals. verification: falsify or verify an implementation with concrete checks. Omit subagent_type to fork the current agent. Fork inherits the parent conversation context, runs in the background, and keeps intermediate tool output out of the main context.")
 	if got := SubagentCatalogFor(nil, "main").EnumDescription(); got != unconfigured.String() {
 		t.Fatalf("unconfigured description changed:\n got=%s\nwant=%s", got, unconfigured.String())
 	}

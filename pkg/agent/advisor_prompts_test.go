@@ -212,7 +212,7 @@ func TestNonFunctionalRequirementsPromptCoversEveryQuality(t *testing.T) {
 }
 
 // TestCodingRulesReachEveryCodingRole pins which coding subagent carries which
-// rule part: plan diagnoses, general-purpose diagnoses and executes, the
+// rule part: plan diagnoses and reviews, general-purpose diagnoses and executes, the
 // coding plan reviewer diagnoses and reviews; all three carry the
 // non-functional bar. The explorer and the verification agent carry none, and
 // office and batch keep the source-neutral reviewer.
@@ -221,7 +221,7 @@ func TestCodingRulesReachEveryCodingRole(t *testing.T) {
 		NonFunctionalRequirementsPrompt: {"general-purpose": true, "plan": true},
 		bugDiagnosisPrompt:              {"general-purpose": true, "plan": true},
 		bugExecutionPrompt:              {"general-purpose": true},
-		codingReviewPrompt:              {},
+		codingReviewPrompt:              {"plan": true},
 		GitWorktreePrompt:               {"general-purpose": true, "plan": true},
 	} {
 		for _, def := range ActiveDefinitions() {

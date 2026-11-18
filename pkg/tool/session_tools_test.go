@@ -482,6 +482,12 @@ func TestEnterPlanModeNoSessionFails(t *testing.T) {
 	}
 }
 
+func TestEnterPlanModeDescriptionGuidesThePlanSubagent(t *testing.T) {
+	if !strings.Contains(enterPlanModeDescription, "subagent_run subtype=plan") {
+		t.Fatal("enter_plan_mode description must guide the plan subagent for non-trivial designs")
+	}
+}
+
 type sessionToolCallLLM struct {
 	calls int
 }

@@ -1480,7 +1480,7 @@ func requireSubtypeGuide(t *testing.T, schema map[string]any, path ...string) {
 	for _, want := range []string{
 		"general-purpose: bounded independent implementation",
 		"explore: read-only investigation",
-		"plan: read-only implementation design",
+		"plan: independent read-only critique",
 		"verification: falsify or verify",
 		"Omit subagent_type to fork the current agent.",
 	} {

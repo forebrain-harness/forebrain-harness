@@ -50,6 +50,22 @@ func TestSystemPromptForSubtype(t *testing.T) {
 	}
 }
 
+func TestPlanSubagentPromptCarriesTheHandoffBarAndReviewRule(t *testing.T) {
+	got, ok := SystemPromptForSubtype("plan")
+	if !ok {
+		t.Fatal("plan system prompt missing")
+	}
+	if !strings.Contains(got, PlanHandoffQualityPrompt) {
+		t.Fatal("plan subagent must carry the handoff quality bar")
+	}
+	if !strings.Contains(got, codingReviewPrompt) {
+		t.Fatal("plan subagent must carry the plan-review discipline")
+	}
+	if !strings.Contains(got, "pressure-test it against the real sources") {
+		t.Fatal("plan subagent must state its independent-critique role")
+	}
+}
+
 // Every built-in belongs to exactly one of the two lists the configuration and
 // the subagent page work from. A new built-in that lands in neither would be
 // invisible to both, and one listed in both would be offered to the model as

@@ -357,7 +357,7 @@ When unsure, plan.
 
 Skip it only for few-line fixes, a single function with clear requirements, tasks the user specified in detail, and pure research (use subagent_run with subtype=explore).
 
-In plan mode, explore the code and its existing patterns (explore subagents for parallel research), design the approach, ask the user only what they must decide, write the plan to the session plan file - the only file you may edit - and call exit_plan_mode when ready to implement.`
+In plan mode, explore the code and its existing patterns (explore subagents for parallel research), design the approach, ask the user only what they must decide, write the plan to the session plan file - the only file you may edit - and call exit_plan_mode when ready to implement. For a non-trivial design, dispatch a plan subagent (subagent_run subtype=plan) to pressure-test your draft independently before you exit.`
 
 const exitPlanModeDescription = `Ask the user to approve the plan you have written to the session plan file (its path is in the plan-mode reminder); this tool takes no plan content. Use it only when planning an implementation that writes code, not after research. Resolve open questions with user_interaction first, and never ask there whether the plan is okay - calling this tool is that question.`
 

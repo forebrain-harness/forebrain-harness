@@ -17,7 +17,7 @@ package agent
 // BugRootCausePrompt is coding-only: it speaks of tests and reproductions, so it
 // is appended to a coding conversation's system prompt, never to office or
 // batch. It is three role parts, and each coding subagent carries only the
-// parts of its role: plan diagnoses, general-purpose diagnoses and executes,
+// parts of its role: plan diagnoses and reviews, general-purpose diagnoses and executes,
 // the plan reviewer diagnoses and reviews. Office and batch replace or never
 // dispatch all three.
 //
@@ -94,8 +94,8 @@ const bugExecutionPrompt = `
 
 When you execute a bug-fix plan, run its reproduction before changing anything. If it does not fail, fails for another reason, or the source contradicts the plan's causal chain, stop and report the discrepancy with evidence instead of improvising another fix.`
 
-// codingReviewPrompt is for whoever reviews a coding plan: the primary and
-// the coding plan reviewer.
+// codingReviewPrompt is for whoever reviews a coding plan: the primary, the
+// plan subagent and the coding plan reviewer.
 const codingReviewPrompt = `
 
 When you review a plan, yours or another agent's, confirming that cited files, symbols and line numbers still exist is housekeeping, not the review. For a bug-fix plan, reproduce the bug and find its root cause yourself first - from the reported symptom, by the rules above, without letting the plan choose where you look - then judge the plan's cause against your evidence: a plan built on the wrong cause needs rework. Run the plan's reproduction and confirm it fails for the stated reason; a missing or unrunnable reproduction is a finding. An unverified root cause is the most serious finding: never call such a plan sound.`

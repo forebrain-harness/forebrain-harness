@@ -2096,6 +2096,14 @@ func TestCodingPlanReminderUnchanged(t *testing.T) {
 	if !strings.Contains(got, "including every open question a plan review returned") {
 		t.Fatal("coding plan mode must say that review open questions reach the user")
 	}
+	// The plan subagent is the design's independent cold-read critic; only the
+	// main agent can dispatch it, so the guidance lives in the full reminder.
+	if !strings.Contains(got, "dispatch subagent_run subtype=plan for an independent cold-read critique") {
+		t.Fatal("coding plan reminder must guide the plan subagent for non-trivial designs")
+	}
+	if !strings.Contains(got, "- subagent_run subtype=plan: independent read-only critique") {
+		t.Fatal("coding plan reminder must name the plan subagent in tool guidance")
+	}
 	sparse := buildPlanModeReminder(filepath.Join("plans", "p", "s"), filepath.Join("plans", "p", "s", "plan.md"), true, "sparse", false, false)
 	if strings.Contains(sparse, agent.SinglePlanModePrompt) {
 		t.Fatal("coding sparse plan reminder must not repeat the single-plan workflow")
@@ -2107,6 +2115,9 @@ func TestCodingPlanReminderUnchanged(t *testing.T) {
 		sub := buildPlanModeReminder(filepath.Join("plans", "p", "s"), filepath.Join("plans", "p", "s", "plan.md"), true, kind, false, true)
 		if strings.Contains(sub, agent.SinglePlanModePrompt) {
 			t.Fatalf("coding %s subagent plan reminder must not repeat the single-plan workflow", kind)
+		}
+		if strings.Contains(sub, "cold-read critique") {
+			t.Fatalf("coding %s subagent plan reminder must not guide dispatching a subagent it cannot dispatch", kind)
 		}
 	}
 }

@@ -1179,7 +1179,7 @@ Phase 1 - Initial Understanding: explore the codebase. Use read_file for file co
 
 Phase 2 - Design: form an architectural approach. Identify files that will change, data flow, edge cases, error handling, test strategy.
 
-Phase 3 - Review: pressure-test the plan. Identify failure modes, missing tests, and unresolved decisions.
+Phase 3 - Review: pressure-test the plan. Identify failure modes, missing tests, and unresolved decisions. For a non-trivial design, dispatch subagent_run subtype=plan for an independent cold-read critique of your draft, and fold its findings into the plan.
 
 Phase 4 - Final Plan: write the plan to a new (or the current) plan file. Use clear sections (Context, Approach, Files to change, Verification, Tasks).
 
@@ -1189,6 +1189,7 @@ Phase 5 - Exit: call exit_plan_mode when the plan is complete and ready for user
 
 - read_file, code_search, references, definitions, list_directory, and shell (under the subagent's sandbox profile): free use
 - subagent_run subtype=explore, subagent_fanout subtype=explore: free use for research
+- subagent_run subtype=plan: independent read-only critique of your draft design or plan; it returns findings and cannot write files
 - user_interaction (canonical AskUserQuestion): free use to clarify approach
 - write_file, edit_file: ALLOWED only for files directly inside the plan directory above; all other paths blocked
 - read-only shell commands: free use, no prompt
