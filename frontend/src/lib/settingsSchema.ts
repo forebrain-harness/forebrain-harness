@@ -43,6 +43,16 @@ export type SettingsKind =
   | 'tags'
   | 'pairs'
   | 'model'
+  /**
+   * A thinking level. It has no option list of its own: what a level may be is a
+   * property of the model row chosen beside it, so the control reads that row's
+   * `efforts` from `GET /api/llm-models/choices` — already ordered and trimmed to
+   * the levels this build can send — and offers the row's own default, the empty
+   * value, for "no override" (plan 319). The two blocks that carry one are
+   * hand-written beside the schema rather than in `SETTINGS_FORMS` (plans
+   * 299/313), so this kind travels in their group's field list.
+   */
+  | 'effort'
   | 'secret'
   | 'preset'
 

@@ -123,7 +123,7 @@ const group: SettingsGroup = {
   titleKey: 'subagents.planReviewer.title',
   fields: [
     { path: MODEL_PATH, kind: 'model' },
-    { path: EFFORT_PATH, kind: 'text' },
+    { path: EFFORT_PATH, kind: 'effort' },
   ],
 }
 
@@ -155,7 +155,9 @@ const effortOptions = computed(() => {
 
 const hint = computed(() => {
   const row = selected.value
-  if (!row) return ''
+  // A level is the model row's, so without one there is nothing to pick and the
+  // block says which setting to choose first (the subagent drawer's own words).
+  if (!row) return t('subagents.effortNeedsModel')
   if (effectiveEffort.value === rowDefault.value) {
     return rowDefault.value
       ? t('subagents.planReviewer.hintRowDefault', { effort: effortText(rowDefault.value) })

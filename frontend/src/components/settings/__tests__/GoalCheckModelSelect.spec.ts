@@ -131,7 +131,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 检查模型)', () => {
     await flushPromises()
   }
 
-  it('opens unconfigured: both dropdowns say 跟随主代理, the level is disabled, no hint, no save bar', async () => {
+  it('opens unconfigured: both dropdowns say 跟随主代理, the level is disabled and says why, no save bar', async () => {
     const wrapper = await open({})
 
     expect(block(wrapper).attributes('data-group')).toBe('goal-check-model')
@@ -147,7 +147,9 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 检查模型)', () => {
     // One placeholder option and no levels: nothing to choose without a model.
     expect(select.findAll('option').map((option) => option.text())).toEqual(['跟随主代理'])
 
-    expect(hint(wrapper).exists()).toBe(false)
+    // A level is the model row's, so the disabled control says which setting
+    // comes first instead of explaining nothing (plan 319).
+    expect(hint(wrapper).text()).toBe('先指定模型再选思考强度')
     expect(block(wrapper).find('[data-goal-check-reset]').exists()).toBe(false)
     expect(block(wrapper).find('.gc__tray--open').exists()).toBe(false)
     // The frozen prototype draws the menu open.
@@ -290,7 +292,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 检查模型)', () => {
     expect(combo(wrapper).attributes('data-goal-check-model')).toBe('')
     expect(effort(wrapper).attributes('disabled')).toBeDefined()
     expect((effort(wrapper).element as HTMLSelectElement).value).toBe('')
-    expect(hint(wrapper).exists()).toBe(false)
+    expect(hint(wrapper).text()).toBe('先指定模型再选思考强度')
     expect(block(wrapper).find('[data-goal-check-reset]').exists()).toBe(false)
     expect(block(wrapper).find('.gcs__menu').exists()).toBe(false)
 
