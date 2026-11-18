@@ -90,6 +90,13 @@ func newConfigPanelSession(stored map[string]string) *configPanelTestSession {
 // inputs, and returns the renderer the frames landed on.
 func runConfigPanel(t *testing.T, session *configPanelTestSession, selector Selector, steps []richStep, inputs []selectorInput, args ...string) *Renderer {
 	t.Helper()
+	return runConfigPanelOn(t, session, selector, steps, inputs, args...)
+}
+
+// runConfigPanelOn is the same run over any session, so a case can hold the
+// panel against the store's own validator instead of a double.
+func runConfigPanelOn(t *testing.T, session Session, selector Selector, steps []richStep, inputs []selectorInput, args ...string) *Renderer {
+	t.Helper()
 	scripted, ok := selector.(*scriptedSelector)
 	if !ok {
 		scripted = selector.(*infoPanelSelector).scriptedSelector
@@ -428,6 +435,71 @@ func TestConfigPanelRefusesAnIncompleteHookBeforeWriting(t *testing.T) {
 	}
 	if !strings.Contains(pageLabels(selector), "http hook requires absolute url") {
 		t.Fatalf("the loader's refusal must reach the page: %s", pageLabels(selector))
+	}
+}
+
+// The one shape the prototype names — a hook switched to HTTP while it still
+// carries only a command — is judged by the store's own validator, and a
+// refusal is not applied: the section keeps the action it had (plan 321). The
+// write goes through the real store, so the validator here is the one the
+// panel meets in the application.
+func TestConfigPanelKeepsTheHookTheStoreRefusesToChange(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte("gateway:\n  http_addr: 127.0.0.1:9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state", "forebrain.state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	process.InstallConfigSectionValidator(cfgPath, db)
+	t.Cleanup(func() { state.SetSectionValidator(nil) })
+	env := &process.Environment{Root: home, SQL: db}
+	env.ConfigPath = cfgPath
+	session := &ChatSession{Env: env}
+
+	seed := `{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"project-check"}]}]}`
+	if err := session.UpdateConfigSection(ctx, "hooks", json.RawMessage(seed)); err != nil {
+		t.Fatalf("the seed must be a hook the loader accepts: %v", err)
+	}
+
+	selector := &scriptedSelector{}
+	runConfigPanelOn(t, session, selector, []richStep{
+		{label: "Hooks", ok: true},
+		{label: "Hook events", ok: true},
+		{label: "PreToolUse", ok: true},
+		{label: configRowOpenLabel, ok: true},
+		{label: "#1", ok: true},
+		{label: configRowOpenLabel, ok: true},
+		{label: "hooks", ok: true},
+		{label: configRowOpenLabel, ok: true},
+		{label: "#1", ok: true},
+		{label: configRowOpenLabel, ok: true},
+		{label: "type", ok: true},
+		{label: configRowEditLabel, ok: true},
+		{label: configNewTextRow, ok: true},
+	}, []selectorInput{{value: "http", ok: true}})
+
+	if !strings.Contains(pageLabels(selector), "http hook requires absolute url") {
+		t.Fatalf("the store's refusal must reach the page: %s", pageLabels(selector))
+	}
+	snapshot, err := session.ConfigPanelSections(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored appcfg.HooksSettings
+	if err := json.Unmarshal(snapshot.Stored["hooks"], &stored); err != nil {
+		t.Fatalf("the stored hooks do not parse: %v", err)
+	}
+	actions := stored["PreToolUse"][0].Hooks
+	if len(actions) != 1 || actions[0].Type != appcfg.HookTypeCommand || actions[0].Command != "project-check" {
+		t.Fatalf("the refused edit changed the stored action: %+v", actions)
 	}
 }
 
