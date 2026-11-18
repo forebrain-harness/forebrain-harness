@@ -1857,7 +1857,9 @@ type sessionModelOption struct {
 // choice itself carries (turn.ModelReasoningEfforts, which reads both the
 // catalog and this repository's OpenCode tables), and none at all for a model
 // with nothing to pick. The catalog is the single source: no list is invented
-// here.
+// here. Whichever source answers, the list comes back in the one order every
+// picker draws, so the web's menu, /model and the exit gate cannot list the same
+// model differently (plan 318 F5).
 func sessionModelEfforts(records []turn.ModelRecord, fallback []string, provider, model string) []string {
 	model = strings.TrimSpace(model)
 	for _, rec := range records {
@@ -1869,14 +1871,11 @@ func sessionModelEfforts(records []turn.ModelRecord, fallback []string, provider
 				}
 			}
 			if len(out) > 0 {
-				return out
+				return turn.OrderedEfforts(out)
 			}
 		}
 	}
-	if len(fallback) == 0 {
-		return nil
-	}
-	return append([]string(nil), fallback...)
+	return turn.OrderedEfforts(fallback)
 }
 
 // sessionModelSupportsImages reports whether one configured option accepts
@@ -1917,17 +1916,6 @@ func (s *Server) sessionModelOptions(cfg *config.Root, agentName string) []sessi
 		})
 	}
 	return options
-}
-
-// sessionModelEffortsFor names the reasoning levels one configured option
-// offers, straight from the shared catalog.
-func (s *Server) sessionModelEffortsFor(cfg *config.Root, agentName, provider, model string) []string {
-	for _, option := range s.sessionModelOptions(cfg, agentName) {
-		if strings.EqualFold(option.Provider, provider) && strings.EqualFold(option.Model, model) {
-			return option.Efforts
-		}
-	}
-	return nil
 }
 
 // handleChatSessionModelGet serves one conversation's effective model choice
@@ -2065,12 +2053,18 @@ func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Reques
 	model := strings.TrimSpace(body.Model)
 	options := s.sessionModelOptions(cfg, agentName)
 	var chosen turn.ModelChoice
+	// chosenEfforts is the level list of the row this request addresses, never of
+	// a twin that happens to name the same provider and model: two rows of one
+	// pair are two endpoints with their own capabilities, so validating against
+	// the first one's levels validated against the wrong row (plan 318 F6).
+	var chosenEfforts []string
 	if modelID := strings.TrimSpace(body.ModelID); modelID != "" {
 		// The id is the row the user picked: a row that is not offered cannot
 		// be reached, and a twin of the same pair is a different row.
 		for _, option := range options {
 			if option.ID == modelID {
 				chosen = turn.ModelChoice{ID: option.ID, Label: option.Label, Provider: option.Provider, Model: option.Model}
+				chosenEfforts = option.Efforts
 				break
 			}
 		}
@@ -2085,6 +2079,7 @@ func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Reques
 			matches++
 			if matches == 1 {
 				chosen = turn.ModelChoice{ID: option.ID, Label: option.Label, Provider: option.Provider, Model: option.Model}
+				chosenEfforts = option.Efforts
 			}
 		}
 		if matches > 1 {
@@ -2102,7 +2097,7 @@ func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Reques
 	var effort *string
 	if body.Effort != nil {
 		pinned := strings.TrimSpace(*body.Effort)
-		if pinned != "" && !slices.Contains(s.sessionModelEffortsFor(cfg, agentName, chosen.Provider, chosen.Model), pinned) {
+		if pinned != "" && !slices.Contains(chosenEfforts, pinned) {
 			http.Error(w, "reasoning effort is not offered for this model", http.StatusBadRequest)
 			return
 		}

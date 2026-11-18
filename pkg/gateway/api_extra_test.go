@@ -6759,6 +6759,110 @@ func TestSessionModelOptionsCarryOpenCodeEfforts(t *testing.T) {
 	require.Equal(t, []string{"low", "medium", "xhigh"}, options[2].Efforts, "the Anthropic client can send xhigh")
 }
 
+// One provider/model configured twice is two rows — two endpoints, two level
+// lists — and only the row's own id tells them apart. The options come back in
+// the one picker order however the row listed its levels, and a write is judged
+// against the row it addresses: the first twin's levels must not decide what the
+// second one may pin (plans 318 F5/F6).
+func TestChatSessionModelAddressesTheTwinRowItPins(t *testing.T) {
+	installTwinRowEfforts := func(t *testing.T, first, second []string) {
+		t.Helper()
+		const pair = "zhipuai/gateway-twin-model"
+		llm.SetModelOverrides(
+			map[string]llm.ModelOverride{
+				"llm-1": {Efforts: first},
+				"llm-2": {Efforts: second},
+			},
+			map[string]string{"llm-1": pair, "llm-2": pair},
+		)
+		t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
+	}
+
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	t.Setenv("FOREBRAIN_WEB_TWIN_MODEL_KEY", "test-key")
+	cfg := appcfg.Root{LLMModels: modelRowsForTest(
+		appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "gateway-twin-model", APIKey: "${FOREBRAIN_WEB_TWIN_MODEL_KEY}", BaseURL: "http://a.test/v1"},
+		appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "gateway-twin-model", APIKey: "${FOREBRAIN_WEB_TWIN_MODEL_KEY}", BaseURL: "http://b.test/v1"},
+	), Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {DefaultModel: "llm-1"},
+	}}}
+	require.NoError(t, appcfg.Save(cfgPath, cfg))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	require.NoError(t, sess.Ensure(context.Background(), "s1", "s1"))
+	env := (&process.Environment{Root: home, ConfigPath: cfgPath, Deps: &run.Deps{Home: home, AgentName: "main", SessionStore: sess}}).WithDepsConfig(&cfg)
+	runner := &run.Runner{Deps: env.Deps}
+	env.Runner = runner
+	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
+	s.Env.AdoptConfig(&cfg)
+
+	modelCall := func(method string, body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		var reader io.Reader
+		if body != nil {
+			raw, err := json.Marshal(body)
+			require.NoError(t, err)
+			reader = bytes.NewReader(raw)
+		}
+		req := httptest.NewRequest(method, "/api/chat/sessions/s1/model", reader)
+		req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{
+			{Key: "id", Value: "s1"},
+		}))
+		rec := httptest.NewRecorder()
+		if method == http.MethodGet {
+			s.handleChatSessionModelGet(rec, req)
+		} else {
+			s.handleChatSessionModelPut(rec, req)
+		}
+		return rec
+	}
+
+	// The orders are the rows' own, never the file's.
+	installTwinRowEfforts(t, []string{"high", "none", "low"}, []string{"max", "medium"})
+	rec := modelCall(http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got struct {
+		Options []struct {
+			ID      string   `json:"id"`
+			Efforts []string `json:"efforts"`
+		} `json:"options"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.Options, 2)
+	byID := map[string][]string{}
+	for _, option := range got.Options {
+		byID[option.ID] = option.Efforts
+	}
+	require.Equal(t, []string{"none", "low", "high"}, byID["llm-1"])
+	require.Equal(t, []string{"medium", "max"}, byID["llm-2"])
+
+	// The second twin accepts the level only it offers …
+	rec = modelCall(http.MethodPut, map[string]any{"model_id": "llm-2", "effort": "max"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	// … and refuses the one only the first twin offers.
+	rec = modelCall(http.MethodPut, map[string]any{"model_id": "llm-2", "effort": "low"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "reasoning effort is not offered")
+	// The first twin answers the other way round.
+	rec = modelCall(http.MethodPut, map[string]any{"model_id": "llm-1", "effort": "low"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = modelCall(http.MethodPut, map[string]any{"model_id": "llm-1", "effort": "max"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// A client that sends the pair alone cannot name one of two rows, so nothing
+	// is written rather than the first one being guessed.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "gateway-twin-model", "effort": "low"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "send model_id")
+
+	// An empty effort is still the explicit "model default" pin.
+	rec = modelCall(http.MethodPut, map[string]any{"model_id": "llm-2", "effort": ""})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
 // TestRewindRoutes pins the plan-033 HTTP surface: the six new routes answer,
 // and the removed rewind-last route is gone (a 404 on the real router).
 func TestRewindRoutes(t *testing.T) {

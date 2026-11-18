@@ -404,10 +404,103 @@ func TestLLMModelsAPICatalogCaps(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, do(http.MethodGet, "/api/llm-models/catalog-caps").Code)
 }
 
-// useGatewayCatalog installs one test catalog for the models-page cases that
-// need named entries, and puts the package's own (TestMain's shipped catalog)
-// back when the test ends: a catalog left behind would answer for every test
-// that follows.
+// A capability answer is only the levels the client that sends this row's
+// requests can carry, and efforts_known says whether anything positively listed
+// such a level at all (plan 318 F1/F4). It is the same answer the pickers, the
+// gate and the subagent drawer read, so the four shapes a row can have are
+// pinned here: catalog levels on a Messages endpoint, the same on chat
+// completions, a Google model, and a model whose only answer is a toggle.
+func TestLLMModelCapsReportOnlyWhatTheClientCanSend(t *testing.T) {
+	useGatewayCatalog(t, `{
+		"custom/gateway-trimmed-model": {"id":"custom/gateway-trimmed-model","reasoning":true,
+			"reasoning_options":[{"type":"effort","values":["minimal","low","medium","high"]}]},
+		"opencode-go/gemini-gateway-model": {"id":"opencode-go/gemini-gateway-model","reasoning":true,
+			"reasoning_options":[{"type":"effort","values":["none","low","high"]}]},
+		"openai/gateway-toggle-model": {"id":"openai/gateway-toggle-model","reasoning":true,
+			"reasoning_options":[{"type":"toggle"}]}
+	}`)
+
+	t.Run("a Messages row answers without the levels its client drops", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"custom","model":"gateway-trimmed-model","base_url":"https://llm.example.com","api_path":"/v1/messages","api_key":"sk-msg"}`)
+		rows, _ := llmModelRows(t, do)
+		row := llmModelByID(t, rows, id)
+		// minimal is the Anthropic client's to drop, so it is not an answer.
+		require.Equal(t, []string{"low", "medium", "high"}, llmModelCapsOf(t, row["catalog_caps"]).Efforts)
+		require.Equal(t, true, row["efforts_known"])
+
+		// The form asks the same question while the row is being written, and
+		// gets the same answer.
+		rec := do(http.MethodGet, "/api/llm-models/catalog-caps?provider=custom&model=gateway-trimmed-model&api_path=/v1/messages")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body llmModelCapsBody
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Equal(t, []string{"low", "medium", "high"}, body.Efforts)
+		require.True(t, body.EffortsKnown)
+	})
+
+	t.Run("the same model on chat completions keeps every level", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"custom","model":"gateway-trimmed-model","base_url":"https://llm.example.com","api_path":"/chat/completions","api_key":"sk-chat"}`)
+		rows, _ := llmModelRows(t, do)
+		row := llmModelByID(t, rows, id)
+		require.Equal(t, []string{"minimal", "low", "medium", "high"}, llmModelCapsOf(t, row["catalog_caps"]).Efforts)
+		require.Equal(t, true, row["efforts_known"])
+	})
+
+	t.Run("a Google model has no level to offer and says so", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		// The generateContent client carries no effort parameter, so every level
+		// the catalog names for this model is unsendable: efforts_known=false is
+		// the answer that lets the form offer the boxes instead of a dropdown
+		// built from an empty list (plan 318 F4).
+		rec := do(http.MethodGet, "/api/llm-models/catalog-caps?provider=opencode-go&model=gemini-gateway-model&api_path=/chat/completions")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body llmModelCapsBody
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Empty(t, body.Efforts)
+		require.False(t, body.EffortsKnown)
+		require.Empty(t, body.EffortsSource)
+	})
+
+	t.Run("a toggle-only model is unknown, and the person may pick the levels", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"openai","model":"gateway-toggle-model","base_url":"https://api.openai.com/v1","api_key":"sk-toggle"}`)
+		rows, _ := llmModelRows(t, do)
+		row := llmModelByID(t, rows, id)
+		require.Empty(t, llmModelCapsOf(t, row["catalog_caps"]).Efforts)
+		require.Equal(t, false, row["efforts_known"], "no source listed a level this build can send")
+
+		// The engine's gap-filler: what the person ticks is stored, and the row
+		// then reports it (still not as a source's answer).
+		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["high","low"]}}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		rows, _ = llmModelRows(t, do)
+		row = llmModelByID(t, rows, id)
+		require.Equal(t, []string{"low", "high"}, llmModelCapsOf(t, row["catalog_caps"]).Efforts,
+			"the declared levels are reported in the one picker order")
+		require.Equal(t, false, row["efforts_known"])
+	})
+
+	t.Run("a vendor that lists levels still decides them", func(t *testing.T) {
+		_, do := modelsPageServer(t)
+		id := createModel(t, do, `{"provider":"custom","model":"gateway-trimmed-model","base_url":"https://llm.example.com","api_path":"/chat/completions","api_key":"sk-vendor"}`)
+		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["xhigh"]}}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "官方文档")
+	})
+}
+
+// llmModelCapsOf decodes one capability answer the way the drawer reads it.
+func llmModelCapsOf(t *testing.T, raw any) llmModelCaps {
+	t.Helper()
+	encoded, err := json.Marshal(raw)
+	require.NoError(t, err)
+	var caps llmModelCaps
+	require.NoError(t, json.Unmarshal(encoded, &caps))
+	return caps
+}
+
 func useGatewayCatalog(t *testing.T, raw string) {
 	t.Helper()
 	cat, err := llm.Parse([]byte(raw))

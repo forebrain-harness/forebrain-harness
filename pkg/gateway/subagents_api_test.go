@@ -846,6 +846,66 @@ func TestSubagentModelIsStoredAsARowID(t *testing.T) {
 	require.Equal(t, "high", row.ReasoningEffort)
 }
 
+// A subagent's thinking level must be one its own model row can send (plan 318
+// F9). The row holds both facts — the protocol it speaks and the levels that
+// protocol carries — so a level the client would drop is refused at the write
+// instead of being stored and silently dropped at dispatch. A model that names
+// no row keeps today's behaviour (the dispatch client is the only judge), and an
+// empty level is never a level.
+func TestSubagentEffortMustBeOneItsModelRowCanSend(t *testing.T) {
+	f := newSubagentFixture(t, nil)
+	// A custom Messages row: the Anthropic client sends neither none nor
+	// minimal, and takes low..max.
+	messagesRow, err := process.UpsertLLMModel(context.Background(), f.server.Env.SQL, process.LLMModelInput{
+		Provider: appcfg.CustomProvider, Model: "vendor-messages", BaseURL: "https://llm.example.com",
+		APIPath: appcfg.APIPathAnthropicMessages, APIKey: stringPtr("sk-messages"),
+	})
+	require.NoError(t, err)
+
+	// The built-in rewrite path: minimal is a level this row cannot send.
+	rec := f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{
+		"model": messagesRow, "reasoning_effort": "minimal",
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "发不出这个思考强度")
+	require.Empty(t, f.subagentEntries(t), "a refused write stores nothing")
+
+	// The level it does send is stored.
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{
+		"model": messagesRow, "reasoning_effort": "high",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "high", findSubagentEntry(t, f.subagentEntries(t), "explore").ReasoningEffort)
+
+	// The custom-subagent path answers the same way: none is off, which this
+	// protocol cannot say either.
+	rec = f.do(t, http.MethodPost, "/api/agents/primary/main/subagents", map[string]any{
+		"name": "alpha", "description": "handles alpha", "system_prompt": "You handle alpha.",
+		"model": messagesRow, "reasoning_effort": "none",
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// Nothing named is the row's own default, which is always allowed.
+	rec = f.do(t, http.MethodPost, "/api/agents/primary/main/subagents", map[string]any{
+		"name": "alpha", "description": "handles alpha", "system_prompt": "You handle alpha.",
+		"model": messagesRow, "reasoning_effort": "",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// A model no row carries is not judged here: its levels are unknown to this
+	// process, and the dispatch client is the only thing that could know them.
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{
+		"model": "someone/vendor-model", "reasoning_effort": "minimal",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// The install-wide per-type row goes through the same rule.
+	rec = f.do(t, http.MethodPut, "/api/agents/subagents/shared/types/explore", map[string]any{
+		"model": messagesRow, "reasoning_effort": "minimal",
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
 // sharedSubagentFixtureConfig gives the fixture one install-wide shared custom
 // subagent plus one primary agent that defines a custom subagent of its own
 // (plan 314): the two kinds the page has to tell apart.

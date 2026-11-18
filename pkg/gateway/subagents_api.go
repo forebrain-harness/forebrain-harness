@@ -907,14 +907,18 @@ func (s *Server) handleAgentSubagentCreate(w http.ResponseWriter, r *http.Reques
 		}
 		// A new subagent goes to the front: the list is what the user just
 		// changed, and the row they created is the row they want to look at.
-		write.def.Subagents = append([]config.SubagentConfig{subagentEntryFrom(write, name, in, nil)}, write.def.Subagents...)
+		entry, err := subagentEntryFrom(write, r, name, in, nil)
+		if err != nil {
+			return nil, err
+		}
+		write.def.Subagents = append([]config.SubagentConfig{entry}, write.def.Subagents...)
 		return map[string]any{"name": name}, nil
 	})
 }
 
 // subagentEntryFrom builds a custom entry from a request, with the route's name
 // and the stored switch carried forward.
-func subagentEntryFrom(write *subagentWrite, name string, in config.SubagentConfig, stored *bool) config.SubagentConfig {
+func subagentEntryFrom(write *subagentWrite, r *http.Request, name string, in config.SubagentConfig, stored *bool) (config.SubagentConfig, error) {
 	entry := config.SubagentConfig{
 		Name:            subagentKey(name),
 		Description:     strings.TrimSpace(in.Description),
@@ -928,7 +932,47 @@ func subagentEntryFrom(write *subagentWrite, name string, in config.SubagentConf
 	if entry.Tools == config.SubagentToolsPick {
 		entry.AllowedTools = subagentAllowedTools(in.AllowedTools)
 	}
-	return entry
+	if err := subagentLevelRefused(r, write.models, write.agentID, entry); err != nil {
+		return config.SubagentConfig{}, err
+	}
+	return entry, nil
+}
+
+// subagentLevelRefused is the one rule a subagent's thinking level goes through:
+// it must be one the level's own model row can send.
+//
+// The row answers it, in the order the facts are certain. First the protocol the
+// row speaks: turn.SetupReasoningEfforts is the one decision about which levels
+// that protocol can carry, and a level it drops is one the client would swallow
+// (Messages) or never had a parameter for (Google). Then the model's own list,
+// when something knows it: a level this model does not offer is not a setting
+// that can apply. A model that resolves to no row (a bare "provider/model", or an
+// id the table no longer carries) is not judged here — its levels are unknown to
+// this process, and guessing would refuse a level the dispatch client can send.
+// Empty always means "follow the model row's default" and is never a level.
+func subagentLevelRefused(r *http.Request, models *config.Root, agentID string, entry config.SubagentConfig) error {
+	level := strings.TrimSpace(entry.ReasoningEffort)
+	if level == "" {
+		return nil
+	}
+	row, ok := config.ResolveModelRef(models, agentID, strings.TrimSpace(entry.Model))
+	if !ok {
+		return nil
+	}
+	refuse := func() error {
+		return subagentBadRequest("%s", llmText(r,
+			"这个模型和协议发不出这个思考强度",
+			"this model's protocol cannot send that thinking level"))
+	}
+	if len(turn.SetupReasoningEfforts(row.Provider, row.Model, row.APIPath, []string{level})) == 0 {
+		return refuse()
+	}
+	if levels, known := llm.ReasoningEffortsRow(row.ID, row.Provider, row.Model); known && len(levels) > 0 {
+		if !slices.Contains(turn.SetupReasoningEfforts(row.Provider, row.Model, row.APIPath, levels), level) {
+			return refuse()
+		}
+	}
+	return nil
 }
 
 // subagentModelRef puts a subagent's model choice into the form the
@@ -979,7 +1023,11 @@ func (s *Server) handleAgentSubagentUpdate(w http.ResponseWriter, r *http.Reques
 			// never moves here, and the stored switch stands unless the request
 			// carried one.
 			index := subagentEntryIndex(write.def.Subagents, name)
-			write.def.Subagents[index] = subagentEntryFrom(write, name, in, write.def.Subagents[index].Enabled)
+			entry, err := subagentEntryFrom(write, r, name, in, write.def.Subagents[index].Enabled)
+			if err != nil {
+				return nil, err
+			}
+			write.def.Subagents[index] = entry
 			return map[string]any{"name": name}, nil
 		case subagentKindBuiltin:
 			var in subagentBuiltinWrite
@@ -998,6 +1046,9 @@ func (s *Server) handleAgentSubagentUpdate(w http.ResponseWriter, r *http.Reques
 			// entry keeps the model this agent pinned, if any.
 			if in.ResetPrompt {
 				entry.SystemPrompt = ""
+			}
+			if err := subagentLevelRefused(r, write.models, write.agentID, entry); err != nil {
+				return nil, err
 			}
 			storeSubagentOverride(&write.def, entry)
 			return map[string]any{"name": name}, nil
@@ -1224,7 +1275,7 @@ func decodeSharedSubagentBody(r *http.Request) (config.SubagentConfig, error) {
 // reference nothing carries is left as written for the validator to refuse with
 // its own sentence. enabled is never stored, and the handler has already refused
 // one that arrived.
-func sharedSubagentEntry(models *config.Root, name string, in config.SubagentConfig) config.SubagentConfig {
+func sharedSubagentEntry(models *config.Root, r *http.Request, name string, in config.SubagentConfig) (config.SubagentConfig, error) {
 	entry := config.SubagentConfig{
 		Name:            subagentKey(name),
 		Description:     strings.TrimSpace(in.Description),
@@ -1243,7 +1294,10 @@ func sharedSubagentEntry(models *config.Root, name string, in config.SubagentCon
 	if entry.Tools == config.SubagentToolsPick {
 		entry.AllowedTools = subagentAllowedTools(in.AllowedTools)
 	}
-	return entry
+	if err := subagentLevelRefused(r, models, "main", entry); err != nil {
+		return config.SubagentConfig{}, err
+	}
+	return entry, nil
 }
 
 // writeSharedSubagents is the one write path behind the registry routes: one
@@ -1320,7 +1374,11 @@ func (s *Server) handleSharedSubagentCreate(w http.ResponseWriter, r *http.Reque
 		if sharedSubagentIndex(cfg.Agents.SharedSubagents, name) >= 0 {
 			return subagentConflict("a shared subagent named %q already exists", name)
 		}
-		cfg.Agents.SharedSubagents = append(cfg.Agents.SharedSubagents, sharedSubagentEntry(models, name, in))
+		entry, err := sharedSubagentEntry(models, r, name, in)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.SharedSubagents = append(cfg.Agents.SharedSubagents, entry)
 		return nil
 	})
 }
@@ -1340,7 +1398,11 @@ func (s *Server) handleSharedSubagentUpdate(w http.ResponseWriter, r *http.Reque
 		if index < 0 {
 			return subagentNotFound("no shared subagent named %q", name)
 		}
-		cfg.Agents.SharedSubagents[index] = sharedSubagentEntry(models, name, in)
+		entry, err := sharedSubagentEntry(models, r, name, in)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.SharedSubagents[index] = entry
 		return nil
 	})
 }
@@ -1408,6 +1470,9 @@ func (s *Server) handleSharedSubagentTypeUpdate(w http.ResponseWriter, r *http.R
 		if row.Model == "" && row.ReasoningEffort == "" {
 			delete(cfg.Agents.SubagentModels, typeName)
 			return nil
+		}
+		if err := subagentLevelRefused(r, models, "main", row); err != nil {
+			return err
 		}
 		if cfg.Agents.SubagentModels == nil {
 			cfg.Agents.SubagentModels = map[string]config.SubagentConfig{}
