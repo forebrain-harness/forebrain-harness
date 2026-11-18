@@ -4576,8 +4576,9 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 		models = append(models, planReviewModelWire{
 			ID:       option.ID,
 			Provider: option.Provider, Model: option.Model, ModelName: option.ModelName, Current: option.Current,
-			Endpoint: option.Endpoint,
-			Efforts:  option.Efforts, DefaultEffort: option.DefaultEffort,
+			Preferred: option.Preferred,
+			Endpoint:  option.Endpoint,
+			Efforts:   option.Efforts, DefaultEffort: option.DefaultEffort,
 		})
 	}
 	reviews := make([]planReviewNoteWire, 0, len(req.PlanReviews))
@@ -4653,6 +4654,11 @@ type planReviewModelWire struct {
 	// that offers none, which is what closes the picker on the model alone.
 	Efforts       []string `json:"efforts,omitempty"`
 	DefaultEffort string   `json:"default_effort,omitempty"`
+	// Preferred marks the reviewer the install configured
+	// (agents.plan_reviewer): the card opens its picker on that row, the way
+	// the terminal's cursor does. At most one offer carries it, and none does
+	// when the setting names no row of the table (plan 320).
+	Preferred bool `json:"preferred,omitempty"`
 }
 
 type planReviewNoteWire struct {

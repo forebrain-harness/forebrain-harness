@@ -10882,6 +10882,44 @@ func TestSessionApprovalRequestCarriesRowEfforts(t *testing.T) {
 	require.Equal(t, vendorLevels, out.PreviousPlanReview.Model.Efforts)
 }
 
+// The reviewer the install configured crosses the wire marked, so the web
+// picker opens on the row the terminal's cursor opens on: one setting, one row,
+// every surface (plan 320). No other offer says it, and the row in force keeps
+// its own mark beside it.
+func TestSessionApprovalRequestMarksTheConfiguredReviewer(t *testing.T) {
+	cfg := &appcfg.Root{
+		LLMModels: []appcfg.LLMModelConfig{
+			{ID: "row-1", Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://one.test/v1"},
+			{ID: "row-2", Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://two.test/v1"},
+		},
+		Agents: appcfg.AgentsSection{PlanReviewer: appcfg.SubagentConfig{Model: "row-2"}},
+	}
+	s, _, _, _, _ := exitPlanServer(t, cfg)
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/approval-request", nil, s.handleSessionApprovalRequest, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var out struct {
+		PlanReviewModels []struct {
+			ID        string `json:"id"`
+			Provider  string `json:"provider"`
+			Model     string `json:"model"`
+			Current   bool   `json:"current"`
+			Preferred bool   `json:"preferred"`
+		} `json:"plan_review_models"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out.PlanReviewModels, 2)
+	preferred := map[string]bool{}
+	for _, option := range out.PlanReviewModels {
+		preferred[option.ID] = option.Preferred
+		if option.ID == "row-1" {
+			require.True(t, option.Current, "the model in force keeps its own mark")
+		}
+	}
+	require.Equal(t, map[string]bool{"row-1": false, "row-2": true}, preferred,
+		"only the configured reviewer is the row the card opens on")
+}
+
 // "Review it again" continues the previous review's own subagent
 // conversation: the request ignores its model fields, the gate names the
 // review to continue, and the round announces itself with the review id it
