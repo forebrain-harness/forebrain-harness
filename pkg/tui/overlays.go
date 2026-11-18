@@ -4539,6 +4539,13 @@ const (
 	rawKeyEscape
 	rawKeyCtrlC
 	rawKeyCtrlE
+	// rawKeyCtrlA, rawKeyCtrlD and rawKeyCtrlU are the /config footer
+	// actions' keys (plan 326 D1): Ctrl+A adds and Ctrl+D removes — both
+	// reserved from the filter, so they fire even while one is active — and
+	// Ctrl+U carries the edit view's Default. No other modal reads them.
+	rawKeyCtrlA
+	rawKeyCtrlD
+	rawKeyCtrlU
 	rawKeyBackspace
 	rawKeyDelete // forward delete: an Apple fn+Delete or a PC's Delete (ESC[3~)
 	rawKeyTab
@@ -4587,6 +4594,12 @@ func (s *rawSelector) readKeyWithMode(multiline bool) (parsedKey, error) {
 		return parsedKey{kind: rawKeyCtrlC}, nil
 	case 0x05:
 		return parsedKey{kind: rawKeyCtrlE}, nil
+	case 0x01:
+		return parsedKey{kind: rawKeyCtrlA}, nil
+	case 0x04:
+		return parsedKey{kind: rawKeyCtrlD}, nil
+	case 0x15:
+		return parsedKey{kind: rawKeyCtrlU}, nil
 	case 0x1b:
 		// Check if more bytes follow within a short window (50ms).
 		// In a real terminal, escape sequences arrive as a burst; bare Esc
@@ -5708,25 +5721,40 @@ func (s *rawSelector) MultiSelect(label string, options []string, defaultOptions
 // --- Input ---
 
 func (s *rawSelector) Input(label string, defaultValue string) (string, bool, error) {
-	return s.input(label, defaultValue, false)
+	res, err := s.input(label, defaultValue, false, ActionOptions{})
+	if err != nil || !res.OK {
+		return "", false, err
+	}
+	return res.Text, true, nil
 }
 
 // Secret asks for a value that must not be shown, such as an API key: the
 // field masks what is typed or pasted and shows only its last characters,
 // enough to tell which key it is.
 func (s *rawSelector) Secret(label string, defaultValue string) (string, bool, error) {
-	return s.input(label, defaultValue, true)
+	res, err := s.input(label, defaultValue, true, ActionOptions{})
+	if err != nil || !res.OK {
+		return "", false, err
+	}
+	return res.Text, true, nil
 }
 
-func (s *rawSelector) input(label string, defaultValue string, secret bool) (string, bool, error) {
+// InputActions is Input with footer actions (plan 326 D1): the actions ride
+// the footer beside the confirm keys and fire on their own keys — the edit
+// view's Default on Ctrl+U — instead of interrupting the field.
+func (s *rawSelector) InputActions(label string, defaultValue string, opts ActionOptions) (InputResult, error) {
+	return s.input(label, defaultValue, false, opts)
+}
+
+func (s *rawSelector) input(label string, defaultValue string, secret bool, opts ActionOptions) (InputResult, error) {
 	release, err := s.acquireComposerInput()
 	if err != nil {
-		return "", false, err
+		return InputResult{}, err
 	}
 	defer release()
 	field := newTextField(defaultValue)
 	panel := func() slashPanel {
-		return inputPanel(label, field.runes(), field.cursor, secret, s.escHint())
+		return inputPanel(label, field.runes(), field.cursor, secret, s.escHint(), opts.FooterActions)
 	}
 	s.showPanel(panel())
 	// Clicks on the field row move the caret; the field's text starts after
@@ -5744,7 +5772,10 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 	for {
 		key, err := s.readKey()
 		if err != nil {
-			return "", false, err
+			return InputResult{}, err
+		}
+		if action, fired := inputActionKey(opts.FooterActions, key.kind); fired {
+			return InputResult{Action: action, OK: true}, nil
 		}
 		switch key.kind {
 		case rawKeyNone:
@@ -5753,9 +5784,9 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 			s.dispatchMouse(key.mouse)
 			continue
 		case rawKeyEnter:
-			return field.text(), true, nil
+			return InputResult{Text: field.text(), OK: true}, nil
 		case rawKeyEscape, rawKeyCtrlC:
-			return "", false, s.dismissed(key.kind)
+			return InputResult{}, s.dismissed(key.kind)
 		}
 		if !field.edit(s, key, panel) {
 			continue
@@ -5764,13 +5795,36 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 	}
 }
 
+// inputActionKey reports the footer action a key fires in an editor, if any:
+// the same reserved keys the pickers honor (plan 326 D1), with Default on
+// Ctrl+U the one an editor carries.
+func inputActionKey(actions []FooterAction, kind rawKey) (FooterActionKind, bool) {
+	for _, a := range actions {
+		switch {
+		case a.Kind == FooterActionAdd && kind == rawKeyCtrlA,
+			a.Kind == FooterActionRemove && kind == rawKeyCtrlD,
+			a.Kind == FooterActionDefault && kind == rawKeyCtrlU:
+			return a.Kind, true
+		}
+	}
+	return footerActionNone, false
+}
+
 // inputPanel lays a question out as a slash panel: the question in the head,
-// the answer as its field — masked when it is a secret — and the keys that
-// answer it.
-func inputPanel(title string, value []rune, cursor int, secret bool, esc string) slashPanel {
+// the answer as its field — masked when it is a secret — the keys that answer
+// it, and any footer actions beside them.
+func inputPanel(title string, value []rune, cursor int, secret bool, esc string, actions []FooterAction) slashPanel {
 	b := newPanelBuilder()
 	pickerHead(b, title)
-	b.hint("Enter to confirm " + esc)
+	hint := "Enter to confirm " + esc
+	for _, a := range actions {
+		if a.Key != "" {
+			hint += " " + a.Key + " " + a.Label
+		} else {
+			hint += " " + a.Label
+		}
+	}
+	b.hint(hint)
 	p := b.panel()
 	if secret {
 		value = maskSecret(value)
@@ -6016,6 +6070,9 @@ type richPickerState struct {
 	// other picker leaves it false and keeps the head and groups it has
 	// always drawn.
 	configPage bool
+	// actions are the footer actions the caller armed the picker with, if
+	// any (plan 326 D1); nil is the plain picker exactly as it was.
+	actions []FooterAction
 }
 
 func (p *richPickerState) rebuildSelectable() {
@@ -6106,15 +6163,78 @@ func (p *richPickerState) panel(label string) slashPanel {
 		}
 		b.selectableColumnsValue(ci == p.cursor, "", item.Label, nameWidth, strings.TrimSpace(item.Description), item.ElideTail, item.Value, item.Status, mark)
 	}
-	if len(p.selectable) == 0 {
+	if len(p.selectable) == 0 && !p.configPage {
 		b.text(panelIndent, "No matches", nil)
 	}
-	b.hint(selectFooterHint(false, p.esc))
+	b.hint(p.footerHint())
 	panel := b.panel()
 	if !p.noFilter {
 		panel.field = p.filter.pickerField(p.inFilter)
 	}
 	return panel
+}
+
+// footerHint is the picker's keys plus its footer actions: each active action
+// drawn as its key and label, so the footer says what the keys do. An action
+// that serves particular rows is drawn only while the cursor is on one of
+// them.
+func (p *richPickerState) footerHint() string {
+	hint := selectFooterHint(false, p.esc)
+	for i := range p.actions {
+		if !p.actionServesRow(i) {
+			continue
+		}
+		if key := p.actions[i].Key; key != "" {
+			hint += " " + key + " " + p.actions[i].Label
+		} else {
+			hint += " " + p.actions[i].Label
+		}
+	}
+	return hint
+}
+
+// actionServesRow reports whether the cursor is on a row the action serves;
+// a page-wide action always serves.
+func (p *richPickerState) actionServesRow(i int) bool {
+	if p.actions[i].RowActive == nil {
+		return true
+	}
+	row := p.absoluteRow()
+	return row >= 0 && p.actions[i].RowActive(row)
+}
+
+// fireAction reports the result of the footer action the key fires, if any.
+// The ctrl-held keys fire whatever the filter is doing; the plain letters
+// fire only on a picker that shows no filter box to feed (owner 2026-11-18).
+func (p *richPickerState) fireAction(kind rawKey, r rune) (ActionResult, bool) {
+	for i := range p.actions {
+		a := p.actions[i]
+		switch a.Kind {
+		case FooterActionAdd:
+			if kind != rawKeyCtrlA && !(p.noFilter && kind == rawKeyRune && r == 'a') {
+				continue
+			}
+		case FooterActionRemove:
+			if kind != rawKeyCtrlD && !(p.noFilter && kind == rawKeyRune && r == 'd') {
+				continue
+			}
+		case FooterActionDefault:
+			if kind != rawKeyCtrlU {
+				continue
+			}
+		default:
+			continue
+		}
+		if !p.actionServesRow(i) {
+			continue
+		}
+		row := -1
+		if a.RowActive != nil {
+			row = p.absoluteRow()
+		}
+		return ActionResult{Row: row, Action: a.Kind, OK: true}, true
+	}
+	return ActionResult{}, false
 }
 
 // nameWidth is the name column for every row the picker could show: the
@@ -6131,6 +6251,82 @@ func (p *richPickerState) nameWidth() int {
 	}
 	return min(width, panelNameColumnMax)
 }
+
+// --- footer actions (plan 326 D1) ---
+
+// FooterActionKind names what one footer action does. Esc is not one: backing
+// out stays the Esc ladder every picker already owns.
+type FooterActionKind int
+
+const (
+	footerActionNone FooterActionKind = iota
+	FooterActionAdd
+	FooterActionRemove
+	// FooterActionDefault restores a setting's own default — the edit view's
+	// one action.
+	FooterActionDefault
+)
+
+// FooterAction is one action a picker's or an editor's footer offers beyond
+// its keys. The key that fires it belongs to the surface, not the caller:
+// Add answers Ctrl+A, Remove Ctrl+D — both reserved from the filter, so they
+// fire even while one is active — and Default Ctrl+U, with the plain letters
+// a and d also firing on a picker that shows no filter box (owner
+// 2026-11-18). Key is how the footer writes it ("a", "^A"); empty draws the
+// label alone, the way the edit view's Default reads.
+type FooterAction struct {
+	Label string
+	Key   string
+	Kind  FooterActionKind
+	// RowActive, when set, names the rows the action serves: the footer draws
+	// it and its key fires only while the cursor is on an item it accepts,
+	// given as an index into items. nil serves the whole page.
+	RowActive func(itemIdx int) bool
+}
+
+// ActionOptions shapes a picker's or an editor's footer actions. With none,
+// the surface behaves exactly as its plain primitive does.
+type ActionOptions struct {
+	FooterActions []FooterAction
+	// Page draws the picker as one /config page (plan 325): airier rows,
+	// ruled group labels and no filter box. The plain picker keeps its own
+	// head and groups.
+	Page bool
+}
+
+// ActionResult is the outcome of an action-aware picker: the row Enter chose,
+// or the action that fired — on the row it fired on, when it serves rows.
+// Row is -1 whenever neither happened, and OK is false for Esc and Ctrl+C.
+type ActionResult struct {
+	Row    int
+	Action FooterActionKind
+	OK     bool
+}
+
+// InputResult is ActionResult's form for an editor with footer actions: the
+// text Enter saved, or the action that fired.
+type InputResult struct {
+	Text   string
+	Action FooterActionKind
+	OK     bool
+}
+
+// ActionRichSelector is an optional Selector capability for surfaces that
+// carry footer actions (plan 326 D1). Implemented by the interactive selector
+// without widening Selector; a selector without it keeps the plain
+// primitives, so every other caller is unaffected. The /config panel is the
+// one caller: its pages open through it when it is there and fall back to
+// tail action rows when it is not.
+type ActionRichSelector interface {
+	Selector
+	// SelectRichActions is SelectRich with footer actions; ActionOptions.Page
+	// draws it as one /config page instead.
+	SelectRichActions(label string, items []SelectItem, defaultIdx int, opts ActionOptions) (ActionResult, error)
+	// InputActions is Input with footer actions: the edit view's Default.
+	InputActions(label string, defaultValue string, opts ActionOptions) (InputResult, error)
+}
+
+var _ ActionRichSelector = (*rawSelector)(nil)
 
 func (s *rawSelector) SelectRich(label string, items []SelectItem, defaultIdx int) (int, bool, error) {
 	return s.selectRichPaged(label, items, defaultIdx, nil)
@@ -6155,9 +6351,6 @@ func (s *rawSelector) SelectRichPaged(label string, items []SelectItem, defaultI
 // never a behavior another picker gains: the page style travels with the
 // call.
 func (s *rawSelector) SelectRichPage(label string, items []SelectItem, defaultIdx int) (int, bool, error) {
-	if len(items) == 0 {
-		return -1, false, nil
-	}
 	p := &richPickerState{
 		items:      items,
 		selectable: make([]int, 0, len(items)),
@@ -6174,7 +6367,41 @@ func (s *rawSelector) SelectRichPage(label string, items []SelectItem, defaultId
 			break
 		}
 	}
-	return s.richKeyLoop(p, label, nil)
+	res, err := s.richKeyLoopResult(p, label, nil)
+	return res.Row, res.OK, err
+}
+
+// SelectRichActions is SelectRich with footer actions (plan 326 D1), or as
+// one /config page draws it when opts.Page is set. With no actions and no
+// Page it is SelectRich exactly; an empty item list still opens when actions
+// are armed — an empty collection's page is where its Add lives — and closes
+// as unset when none are.
+func (s *rawSelector) SelectRichActions(label string, items []SelectItem, defaultIdx int, opts ActionOptions) (ActionResult, error) {
+	if len(items) == 0 && len(opts.FooterActions) == 0 {
+		return ActionResult{Row: -1}, nil
+	}
+	p := &richPickerState{
+		items:      items,
+		selectable: make([]int, 0, len(items)),
+		esc:        s.escHint(),
+		configPage: opts.Page,
+		actions:    opts.FooterActions,
+	}
+	p.rebuildSelectable()
+	if opts.Page {
+		// The /config pages carry no filter box whatever their row count
+		// (plan 325 D6): the keyboard stays on the rows.
+		p.noFilter = true
+	} else {
+		p.noFilter = !pickerShowsFilter(len(p.selectable))
+	}
+	for ci, idx := range p.selectable {
+		if idx == defaultIdx {
+			p.cursor = ci
+			break
+		}
+	}
+	return s.richKeyLoopResult(p, label, nil)
 }
 
 func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultIdx int, fetchMore func() []SelectItem) (int, bool, error) {
@@ -6199,7 +6426,8 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 			break
 		}
 	}
-	return s.richKeyLoop(p, label, fetchMore)
+	res, err := s.richKeyLoopResult(p, label, fetchMore)
+	return res.Row, res.OK, err
 }
 
 // richKeyLoop is the rich picker's one key loop: it renders the state's panel
@@ -6207,9 +6435,17 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 // confirmation. The state carries everything the page draws, its config-page
 // style included (plan 325).
 func (s *rawSelector) richKeyLoop(p *richPickerState, label string, fetchMore func() []SelectItem) (int, bool, error) {
+	res, err := s.richKeyLoopResult(p, label, fetchMore)
+	return res.Row, res.OK, err
+}
+
+// richKeyLoopResult is richKeyLoop's action-aware core (plan 326 D1): a
+// footer action's key ends the picker with the action it fires instead of a
+// row, before any key the filter could take.
+func (s *rawSelector) richKeyLoopResult(p *richPickerState, label string, fetchMore func() []SelectItem) (ActionResult, error) {
 	release, err := s.acquireComposerInput()
 	if err != nil {
-		return -1, false, err
+		return ActionResult{}, err
 	}
 	defer release()
 
@@ -6225,9 +6461,12 @@ func (s *rawSelector) richKeyLoop(p *richPickerState, label string, fetchMore fu
 	for {
 		key, err := s.readKey()
 		if err != nil {
-			return -1, false, err
+			return ActionResult{}, err
 		}
 		p.filter.selection = s.fieldSelection(key.kind, p.panel(label), p.filter.runes())
+		if res, fired := p.fireAction(key.kind, key.r); fired {
+			return res, nil
+		}
 		if p.noFilter && editsFilter(key.kind) {
 			continue
 		}
@@ -6261,11 +6500,11 @@ func (s *rawSelector) richKeyLoop(p *richPickerState, label string, fetchMore fu
 			}
 		case rawKeyEnter:
 			if len(p.selectable) == 0 {
-				return -1, false, nil
+				return ActionResult{Row: -1}, nil
 			}
-			return p.absoluteRow(), true, nil
+			return ActionResult{Row: p.absoluteRow(), OK: true}, nil
 		case rawKeyEscape, rawKeyCtrlC:
-			return -1, false, s.dismissed(key.kind)
+			return ActionResult{Row: -1}, s.dismissed(key.kind)
 		case rawKeyBackspace:
 			if !p.inFilter && p.filter.text == "" {
 				continue

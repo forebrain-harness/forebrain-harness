@@ -48,13 +48,19 @@ const (
 
 	configBoolOnLabel  = "On"
 	configBoolOffLabel = "Off"
-	// configDefaultActionLabel and its one line are how the panel goes back to
-	// a setting's own default: an action on the choice page, never a value
-	// among the real ones (owner 2026-11-16 — "Default", not "Use default").
-	// The terminal's picker carries its actions as rows, so the action is the
-	// choice list's last row rather than a footer button.
+	// configDefaultActionLabel is how the edit view's footer action reads
+	// (plan 326 D4): an action on the editor of a text or number setting,
+	// never a value among the real ones and never a row of a choice list
+	// (owner 2026-11-18, strict 1:1 with the prototype).
 	configDefaultActionLabel = "Default"
-	configDefaultActionHint  = "Uses the setting's built-in default"
+	// The rows page's footer actions (plan 326 D2): add for the collection,
+	// remove for the entry row the cursor is on.
+	configAddActionLabel    = "Add"
+	configRemoveActionLabel = "Remove"
+	// The removal confirmation's two rows (plan 326 D5): Keep is
+	// preselected, so Enter alone changes nothing.
+	configRemoveConfirmLabel = "Remove item"
+	configKeepConfirmLabel   = "Keep item"
 
 	configNewTextRow   = "Text"
 	configNewNumberRow = "Number"
@@ -339,7 +345,9 @@ func (p *configPanel) sectionStatus(schema configSectionSchema) string {
 // editSection runs one section's page. It reports whether the panel stays
 // open: true means the user asked to go back to the list. Every field edit
 // writes the section as it is confirmed, so the page holds no draft and the
-// only way out is back (plan 321).
+// only way out is back (plan 321). On a selector with footer actions the way
+// back is the Esc ladder alone (plan 326 D2); without one the page keeps its
+// tail row, the line mode's ladder.
 func (p *configPanel) editSection(ctx context.Context, name string) bool {
 	schema, ok := configSectionSchemaFor(name)
 	if !ok {
@@ -359,12 +367,26 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 	}()
 	doc := p.sectionDoc(name)
 	notice := ""
+	actions := p.configActionSelector()
 	for {
-		items, owners := p.fieldItems(schema, doc)
-		idx, ok, err := selectRichPage(p.sel, p.sectionPrompt(schema, doc, notice), items, -1)
-		if err != nil {
-			p.printError(err)
-			return false
+		items, owners := p.fieldItems(schema, doc, actions == nil)
+		prompt := p.sectionPrompt(schema, doc, notice)
+		var idx int
+		var ok bool
+		if actions != nil {
+			res, err := actions.SelectRichActions(prompt, items, -1, configPageActions())
+			if err != nil {
+				p.printError(err)
+				return false
+			}
+			idx, ok = res.Row, res.OK
+		} else {
+			var err error
+			idx, ok, err = selectRichPage(p.sel, prompt, items, -1)
+			if err != nil {
+				p.printError(err)
+				return false
+			}
 		}
 		notice = ""
 		if !ok || idx < 0 || idx >= len(owners) {
@@ -385,11 +407,28 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 // for a reader who is looking for it.
 const configRowBack = -2
 
+// configActionSelector is the panel's selector when it can carry footer
+// actions, nil when it cannot (piped stdin, a scripted double). Those paths
+// keep the tail action rows the interactive pages replace with footer
+// actions and the Esc ladder (plan 326 D2).
+func (p *configPanel) configActionSelector() ActionRichSelector {
+	if actions, ok := p.sel.(ActionRichSelector); ok {
+		return actions
+	}
+	return nil
+}
+
+// configPageActions shapes one of the panel's action-aware pages: the
+// /config page style (plan 325) plus the footer actions given.
+func configPageActions(actions ...FooterAction) ActionOptions {
+	return ActionOptions{Page: true, FooterActions: actions}
+}
+
 // fieldItems is one section's page: its settings, each with the value it holds
-// in the row's value column and its hint beside the label, then the way back.
-// A field's Group names the fixed page section it renders under (plan 325
-// D2), the prototype's own labels.
-func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectItem, []int) {
+// in the row's value column and its hint beside the label, then the way back
+// when the page keeps its tail rows. A field's Group names the fixed page
+// section it renders under (plan 325 D2), the prototype's own labels.
+func (p *configPanel) fieldItems(schema configSectionSchema, doc any, tailRows bool) ([]SelectItem, []int) {
 	items := make([]SelectItem, 0, len(schema.Fields)+1)
 	owners := make([]int, 0, len(schema.Fields)+1)
 	for i, field := range schema.Fields {
@@ -400,8 +439,10 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 		items = append(items, SelectItem{Label: field.Label, Description: description, Value: value, Status: status, Category: field.Group})
 		owners = append(owners, i)
 	}
-	items = append(items, SelectItem{Label: configBackRowLabel, Description: "Back to the section list"})
-	owners = append(owners, configRowBack)
+	if tailRows {
+		items = append(items, SelectItem{Label: configBackRowLabel, Description: "Back to the section list"})
+		owners = append(owners, configRowBack)
+	}
 	return items, owners
 }
 
@@ -632,17 +673,16 @@ func (p *configPanel) editField(doc any, field configField) (any, string) {
 	}
 }
 
-// editBool3 is the three-state switch: on, off, and the setting's own default,
-// which deletes the key instead of writing false. Only the two real values are
-// rows in the value list; going back to the default is the choice page's
-// `Default` action (owner 2026-11-16).
+// editBool3 is the switch: on or off, the two real values alone (plan 326
+// D4, owner 2026-11-18 — no Default row, no choice-footer Default: going
+// back to a setting's own default is the edit view's action, and a boolean's
+// page offers none).
 func (p *configPanel) editBool3(doc any, path []string, field configField, cur any) (any, string) {
 	items := []SelectItem{
 		{Label: configBoolOnLabel},
 		{Label: configBoolOffLabel},
-		{Label: configDefaultActionLabel, Description: configDefaultActionHint},
 	}
-	defaultIdx := len(items) - 1
+	defaultIdx := 0
 	if value, ok := cur.(bool); ok {
 		defaultIdx = 1
 		if value {
@@ -657,23 +697,19 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 	if !ok {
 		return doc, ""
 	}
-	switch idx {
-	case 0:
+	if idx == 0 {
 		return p.assign(doc, path, true, false, field.Label)
-	case 1:
-		return p.assign(doc, path, false, false, field.Label)
-	default:
-		return p.assign(doc, path, nil, true, field.Label)
 	}
+	return p.assign(doc, path, false, false, field.Label)
 }
 
 // editEnum picks one of the values the loader accepts, so free text can never
 // reach the store with a mode it would reject. An option with a Chinese label
 // shows the label alone: the reader is choosing a behavior, not a
-// configuration key (plan 203 §0.8). The list holds the real values only; the
-// last row is the `Default` action, which deletes the key (owner 2026-11-16).
+// configuration key (plan 203 §0.8). The list holds the real values only
+// (plan 326 D4): no Default row — the edit view's footer owns that.
 func (p *configPanel) editEnum(doc any, path []string, field configField, cur any) (any, string) {
-	items := make([]SelectItem, 0, len(field.Options)+1)
+	items := make([]SelectItem, 0, len(field.Options))
 	for _, option := range field.Options {
 		item := SelectItem{Label: option}
 		if label := field.OptionLabels[option]; label != "" {
@@ -681,8 +717,7 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 		}
 		items = append(items, item)
 	}
-	items = append(items, SelectItem{Label: configDefaultActionLabel, Description: configDefaultActionHint})
-	defaultIdx := len(items) - 1
+	defaultIdx := 0
 	if text, ok := cur.(string); ok {
 		for i, option := range field.Options {
 			if option == text {
@@ -704,18 +739,17 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 	if !ok {
 		return doc, ""
 	}
-	if idx == len(items)-1 {
-		return p.assign(doc, path, nil, true, field.Label)
-	}
 	return p.assign(doc, path, field.Options[idx], false, field.Label)
 }
 
 // editNumber asks for an integer and holds it to the loader's bounds: an
 // out-of-range value is refused in the field's own words, and a bound the
 // loader simply honours (a clamp) lands on the bound with the panel saying
-// which value it stored.
+// which value it stored. The editor's footer carries Default (plan 326 D4):
+// Ctrl+U unsets the key; on a selector without footer actions an empty input
+// is the unset, as it always was.
 func (p *configPanel) editNumber(doc any, path []string, field configField, cur any) (any, string) {
-	text, ok, err := p.sel.Input(p.fieldPrompt(field), configScalarInput(cur))
+	text, ok, unset, err := p.editScalar(field, configScalarInput(cur))
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -723,8 +757,7 @@ func (p *configPanel) editNumber(doc any, path []string, field configField, cur 
 	if !ok {
 		return doc, ""
 	}
-	text = strings.TrimSpace(text)
-	if text == "" {
+	if unset {
 		return p.assign(doc, path, nil, true, field.Label)
 	}
 	value, convErr := strconv.Atoi(text)
@@ -749,10 +782,12 @@ func (p *configPanel) editNumber(doc any, path []string, field configField, cur 
 	return updated, notice
 }
 
-// editText takes free text. Empty means "unset": the key goes away rather
-// than storing an empty string the loader would read as an empty setting.
+// editText takes free text. The editor's footer carries Default (plan 326
+// D4): Ctrl+U unsets the key rather than storing an empty string the loader
+// would read as an empty setting; on a selector without footer actions an
+// empty input is the unset, as it always was.
 func (p *configPanel) editText(doc any, path []string, field configField, cur any) (any, string) {
-	text, ok, err := p.sel.Input(p.fieldPrompt(field), configScalarText(cur))
+	text, ok, unset, err := p.editScalar(field, configScalarText(cur))
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -760,10 +795,42 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 	if !ok {
 		return doc, ""
 	}
-	if strings.TrimSpace(text) == "" {
+	if unset {
 		return p.assign(doc, path, nil, true, field.Label)
 	}
+	if text == "" {
+		// Reached only on the action path — a fallback empty is the unset
+		// above — where the footer's Default is the way to unset (plan 326
+		// D4): an empty Enter saves nothing rather than an empty string.
+		return doc, "the value may not be empty; nothing was written"
+	}
 	return p.assign(doc, path, text, false, field.Label)
+}
+
+// editScalar opens a text or number setting's editor and reports what it
+// ended with: the text Enter saved, or the Default action having been fired
+// (plan 326 D4). On a selector without footer actions the Default action has
+// no key to fire, and an empty input stands for it — the line mode's ladder.
+func (p *configPanel) editScalar(field configField, value string) (text string, ok, unset bool, err error) {
+	actions := p.configActionSelector()
+	if actions == nil {
+		text, ok, err = p.sel.Input(p.fieldPrompt(field), value)
+		return text, ok, strings.TrimSpace(text) == "" && ok, err
+	}
+	res, err := actions.InputActions(p.fieldPrompt(field), value, configEditActions())
+	if err != nil || !res.OK {
+		return "", false, false, err
+	}
+	if res.Action == FooterActionDefault {
+		return "", true, true, nil
+	}
+	return res.Text, true, false, nil
+}
+
+// configEditActions is the edit view's footer: the one action the prototype
+// gives it, Default, on the key the editor reserves (plan 326 D1).
+func configEditActions() ActionOptions {
+	return ActionOptions{FooterActions: []FooterAction{{Label: configDefaultActionLabel, Kind: FooterActionDefault}}}
 }
 
 // editEffort is one thinking level's picker (plan 319): the levels the model
@@ -988,13 +1055,19 @@ const (
 // editRows edits one table or list as rows. A row that holds a table opens
 // its own rows one level down, so a nested section — a subagent entry inside an
 // agent's list, an MCP server inside a profile — is reachable without the panel
-// knowing that shape in advance. initialNotice, when given, is the page's first
-// outcome line: the guidance a created primary agent opens with (plan 313).
+// knowing that shape in advance. On a selector with footer actions the page is
+// the prototype's rows page (plan 326 D2): the footer adds a row (^A Add) and
+// removes the entry row under the cursor (^D Remove, through the
+// confirmation), Enter opens a row, and Esc backs out one level. Without the
+// capability the page keeps its tail action rows instead — the line mode's
+// ladder. initialNotice, when given, is the page's first outcome line: the
+// guidance a created primary agent opens with (plan 313).
 func (p *configPanel) editRows(doc any, path []string, field configField, initialNotice ...string) (any, string) {
 	notice := ""
 	if len(initialNotice) > 0 {
 		notice = initialNotice[0]
 	}
+	actions := p.configActionSelector()
 	for {
 		container, _ := configLookupValue(doc, path)
 		keys := configContainerKeys(container)
@@ -1005,35 +1078,95 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 		if list && agentSubagentsPath(path) {
 			keys = append(keys, missingSharedSubagentKeys(doc, container)...)
 		}
-		items, owners := p.rowItems(doc, path, container, keys, list)
-		idx, ok, err := selectRichPage(p.sel, p.rowsPrompt(field, keys, notice), items, -1)
+		prompt := p.rowsPrompt(field, keys, notice)
+		notice = ""
+		if actions == nil {
+			items, owners := p.rowItems(doc, path, container, keys, list, true)
+			idx, ok, err := selectRichPage(p.sel, prompt, items, -1)
+			if err != nil {
+				p.printError(err)
+				return doc, ""
+			}
+			if !ok || idx < 0 || idx >= len(owners) {
+				return doc, ""
+			}
+			switch owners[idx] {
+			case configRowAdd:
+				doc, notice = p.addRow(doc, path, field)
+			case configRowUp:
+				return doc, ""
+			default:
+				doc, notice = p.editRow(doc, path, keys[owners[idx]], field)
+			}
+			continue
+		}
+		items, _ := p.rowItems(doc, path, container, keys, list, false)
+		opts := configPageActions(
+			FooterAction{Label: configAddActionLabel, Key: "a", Kind: FooterActionAdd},
+			FooterAction{
+				Label: configRemoveActionLabel, Key: "d", Kind: FooterActionRemove,
+				// Remove serves the entry rows alone (plan 326 D2): the rows
+				// a template opens straight into an editor — a path, a
+				// string — never a container, a fixed field or a shared
+				// subagent's switch.
+				RowActive: func(itemIdx int) bool {
+					return itemIdx >= 0 && itemIdx < len(keys) && p.configRowIsEntry(doc, path, keys[itemIdx])
+				},
+			},
+		)
+		res, err := actions.SelectRichActions(prompt, items, -1, opts)
 		if err != nil {
 			p.printError(err)
 			return doc, ""
 		}
-		notice = ""
-		if !ok || idx < 0 || idx >= len(owners) {
-			return doc, ""
-		}
-		switch owners[idx] {
-		case configRowAdd:
+		switch {
+		case res.Action == FooterActionAdd:
 			doc, notice = p.addRow(doc, path, field)
-		case configRowUp:
-			return doc, ""
+		case res.Action == FooterActionRemove:
+			if res.Row < 0 || res.Row >= len(keys) {
+				continue
+			}
+			rowPath := configJoinPath(path, keys[res.Row])
+			if !p.confirmRemoveRow(items[res.Row].Label, doc, rowPath, field) {
+				continue
+			}
+			doc, notice = p.assign(doc, rowPath, nil, true, field.Label)
+		case res.OK && res.Row >= 0 && res.Row < len(keys):
+			doc, notice = p.editRow(doc, path, keys[res.Row], field)
 		default:
-			doc, notice = p.editRow(doc, path, keys[owners[idx]], field)
+			// Esc: up one level (plan 326 D3).
+			return doc, ""
 		}
 	}
 }
 
-// rowItems is one container's rows: every entry, then add and back. doc and the
-// row's own path travel with it because what a row means is a property of where
-// it sits: a definition's primary flag is its status marker, and a subagent
-// entry's model is read in the order dispatch reads it (plan 313). A generic
-// row carries what it holds in the value column (plan 325 D4) — a container
-// counted, a scalar as it reads — and keeps the description for the rows the
-// panel knows more about.
-func (p *configPanel) rowItems(doc any, path []string, container any, keys []string, list bool) ([]SelectItem, []int) {
+// configRowIsEntry reports whether one stored row is an entry of a removable
+// collection (plan 326 D2): a row the generic editor dispatches straight to
+// its text editor — a path row or a string row, the rows a template names —
+// and nothing else. A shared subagent's row is its switch, not an entry.
+func (p *configPanel) configRowIsEntry(doc any, path []string, key string) bool {
+	rowPath := configJoinPath(path, key)
+	value, _ := configLookupValue(doc, rowPath)
+	if agentSubagentsPath(path) && sharedRowName(doc, key, value) != "" {
+		return false
+	}
+	if configIsContainer(value) {
+		return false
+	}
+	if configTemplateFor(p.section, rowPath) == configTemplatePath {
+		return true
+	}
+	return configScalarRowTemplate(p.section, rowPath) == configTemplateString
+}
+
+// rowItems is one container's rows: every entry, then add and back when the
+// page keeps its tail rows. doc and the row's own path travel with it because
+// what a row means is a property of where it sits: a definition's primary
+// flag is its status marker, and a subagent entry's model is read in the
+// order dispatch reads it (plan 313). A generic row carries what it holds in
+// the value column (plan 325 D4) — a container counted, a scalar as it
+// reads — and keeps the description for the rows the panel knows more about.
+func (p *configPanel) rowItems(doc any, path []string, container any, keys []string, list bool, tailRows bool) ([]SelectItem, []int) {
 	items := make([]SelectItem, 0, len(keys)+2)
 	owners := make([]int, 0, len(keys)+2)
 	for i, key := range keys {
@@ -1055,11 +1188,13 @@ func (p *configPanel) rowItems(doc any, path []string, container any, keys []str
 		})
 		owners = append(owners, i)
 	}
-	items = append(items,
-		SelectItem{Label: configAddRowLabel, Description: "Adds a row at this level"},
-		SelectItem{Label: configUpRowLabel, Description: "Back up one level"},
-	)
-	owners = append(owners, configRowAdd, configRowUp)
+	if tailRows {
+		items = append(items,
+			SelectItem{Label: configAddRowLabel, Description: "Adds a row at this level"},
+			SelectItem{Label: configUpRowLabel, Description: "Back up one level"},
+		)
+		owners = append(owners, configRowAdd, configRowUp)
+	}
 	return items, owners
 }
 
@@ -1441,9 +1576,10 @@ func (p *configPanel) rowsPrompt(field configField, keys []string, notice string
 // resolves to a template opens that template's fixed-field page directly —
 // the prototype's direct-open, with no menu between the row and its fields —
 // and a scalar row inside a known collection opens its text editor the same
-// way. A row nothing knows keeps the generic menu: edit or open, delete,
-// back. Removal of a templated row is the footer's action, not a menu item
-// (plan 326 wires it).
+// way. A row nothing knows keeps the generic menu: edit or open, delete —
+// through the confirmation every removal asks for (plan 326 D5) — and the
+// way back, which the Esc ladder carries on a selector with footer actions
+// (plan 326 D2).
 func (p *configPanel) editRow(doc any, path []string, key string, field configField) (any, string) {
 	rowPath := configJoinPath(path, key)
 	value, _ := configLookupValue(doc, rowPath)
@@ -1473,7 +1609,9 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 	items := []SelectItem{
 		{Label: editLabel, Description: configRowDescription(value)},
 		{Label: configRowDropLabel, Description: "Removes it from this level"},
-		{Label: configRowBackLabel, Description: "Back to the row list"},
+	}
+	if p.configActionSelector() == nil {
+		items = append(items, SelectItem{Label: configRowBackLabel, Description: "Back to the row list"})
 	}
 	idx, ok, err := selectRichPage(p.sel, field.Label+" "+configRowLabel(key, 0, false), items, 0)
 	if err != nil {
@@ -1490,10 +1628,37 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 		}
 		return p.editRowValue(doc, rowPath, field, value)
 	case 1:
+		if !p.confirmRemoveRow(configRowLabel(key, 0, false), doc, rowPath, field) {
+			return doc, ""
+		}
 		return p.assign(doc, rowPath, nil, true, field.Label)
 	default:
 		return doc, ""
 	}
+}
+
+// confirmRemoveRow asks before any removal (plan 326 D5): the heading names
+// the row and shows what it holds — masked when the field is a secret — and
+// the rows are Remove item and Keep item with Keep preselected, so Enter
+// alone changes nothing. Esc keeps the row too.
+func (p *configPanel) confirmRemoveRow(label string, doc any, rowPath []string, field configField) bool {
+	value, _ := configLookupValue(doc, rowPath)
+	preview := configRowDescription(value)
+	if field.Secret {
+		if text, ok := value.(string); ok {
+			preview = string(maskSecret([]rune(text)))
+		}
+	}
+	items := []SelectItem{
+		{Label: configRemoveConfirmLabel},
+		{Label: configKeepConfirmLabel},
+	}
+	idx, ok, err := selectRichPage(p.sel, "Remove "+label+"?\n"+preview, items, 1)
+	if err != nil {
+		p.printError(err)
+		return false
+	}
+	return ok && idx == 0
 }
 
 // configTemplateFor resolves the template a stored row's real path names
@@ -1643,13 +1808,14 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 	if len(initialNotice) > 0 {
 		notice = initialNotice[0]
 	}
+	tailRows := p.configActionSelector() == nil
 	for {
 		value, _ := configLookupValue(doc, rowPath)
 		settings, _ := value.(map[string]any)
 		if settings == nil {
 			settings = map[string]any{}
 		}
-		items, rows := p.templateItems(template, settings)
+		items, rows := p.templateItems(template, settings, tailRows)
 		idx, ok, err := selectRichPage(p.sel, p.templatePrompt(template, title, settings, notice), items, -1)
 		if err != nil {
 			p.printError(err)
@@ -1716,11 +1882,12 @@ func configHookActionType(settings map[string]any) string {
 
 // templateItems is a template page's rows: the template's fields in their own
 // order under their groups, the keys the template does not name under the
-// additional-fields group, then the way up. customOnly hides the fields a
-// built-in or system entry cannot carry; showFor hides the fields another
-// action type owns; a system entry's every row carries the System status and
-// the verdict in place of its hint.
-func (p *configPanel) templateItems(template string, settings map[string]any) ([]SelectItem, []configTemplateRow) {
+// additional-fields group, then the way up when the page keeps its tail rows
+// (plan 326 D2: the Esc ladder carries it on a selector with footer
+// actions). customOnly hides the fields a built-in or system entry cannot
+// carry; showFor hides the fields another action type owns; a system entry's
+// every row carries the System status and the verdict in place of its hint.
+func (p *configPanel) templateItems(template string, settings map[string]any, tailRows bool) ([]SelectItem, []configTemplateRow) {
 	fields := configTemplates[template]
 	name := strings.ToLower(strings.TrimSpace(configStringField(settings, "name")))
 	system := configTemplateRowIsSystem(template, settings)
@@ -1764,8 +1931,10 @@ func (p *configPanel) templateItems(template string, settings map[string]any) ([
 		})
 		rows = append(rows, configTemplateRow{unknown: key})
 	}
-	items = append(items, SelectItem{Label: configUpRowLabel, Description: "Back up one level"})
-	rows = append(rows, configTemplateRow{up: true})
+	if tailRows {
+		items = append(items, SelectItem{Label: configUpRowLabel, Description: "Back up one level"})
+		rows = append(rows, configTemplateRow{up: true})
+	}
 	return items, rows
 }
 
@@ -1841,7 +2010,9 @@ func (p *configPanel) editSharedSubagentRow(doc any, path []string, container an
 		{Label: "Description", Description: configSharedRowSummary(doc, name)},
 		{Label: "Model", Description: p.configSharedModelSummary(doc, name)},
 		{Label: "Tools", Description: configSharedToolsText(doc, name)},
-		{Label: configRowBackLabel, Description: "Back to the row list"},
+	}
+	if p.configActionSelector() == nil {
+		items = append(items, SelectItem{Label: configRowBackLabel, Description: "Back to the row list"})
 	}
 	idx, ok, err := selectRichPage(p.sel, name+"\n"+configSharedSubagentNotice, items, 0)
 	if err != nil {
@@ -1857,9 +2028,6 @@ func (p *configPanel) editSharedSubagentRow(doc any, path []string, container an
 			return updated, note
 		}
 		return updated, configSharedSwitchedNotice(name, !enabled)
-	}
-	if idx == len(items)-1 {
-		return doc, ""
 	}
 	return doc, configSharedSubagentNotice
 }

@@ -110,6 +110,105 @@ func runConfigPanelOn(t *testing.T, session Session, selector Selector, steps []
 	return renderer
 }
 
+// actionPanelSelector is a scripted selector that carries the footer-action
+// capability (plan 326): the panel's interactive path opens through it, so a
+// test drives footer actions the way a keyboard does. Plain pages still play
+// through the scripted rich steps.
+type actionPanelSelector struct {
+	*scriptedSelector
+	actionSteps    []actionStep
+	actionIdx      int
+	inputSteps     []inputActionStep
+	inputIdx       int
+	labels         []string
+	items          [][]SelectItem
+	defaults       []int
+	actionDefaults []int
+	opts           []ActionOptions
+	inputLabels    []string
+	inputOpts      []ActionOptions
+}
+
+// An action step answers a footer action when its kind is set, and a row
+// otherwise — by label when set, else by index.
+type actionStep struct {
+	action FooterActionKind
+	row    int
+	label  string
+	ok     bool
+	err    error
+}
+
+// An input step answers an action-bearing editor: the action when its kind
+// is set, the typed text otherwise.
+type inputActionStep struct {
+	action FooterActionKind
+	value  string
+	ok     bool
+	err    error
+}
+
+// SelectRich records the row the caller preselected, so a test can read
+// which row a confirmation opens on.
+func (s *actionPanelSelector) SelectRich(label string, items []SelectItem, defaultIdx int) (int, bool, error) {
+	s.defaults = append(s.defaults, defaultIdx)
+	return s.scriptedSelector.SelectRich(label, items, defaultIdx)
+}
+
+func (s *actionPanelSelector) SelectRichActions(label string, items []SelectItem, defaultIdx int, opts ActionOptions) (ActionResult, error) {
+	s.labels = append(s.labels, label)
+	s.items = append(s.items, append([]SelectItem(nil), items...))
+	s.actionDefaults = append(s.actionDefaults, defaultIdx)
+	s.opts = append(s.opts, opts)
+	if s.actionIdx >= len(s.actionSteps) {
+		return ActionResult{Row: -1}, nil
+	}
+	step := s.actionSteps[s.actionIdx]
+	s.actionIdx++
+	if step.action != footerActionNone {
+		return ActionResult{Row: step.row, Action: step.action, OK: step.ok}, step.err
+	}
+	if step.label != "" {
+		for i, item := range items {
+			if item.Label == step.label {
+				return ActionResult{Row: i, OK: step.ok}, step.err
+			}
+		}
+		return ActionResult{Row: -1}, step.err
+	}
+	return ActionResult{Row: step.row, OK: step.ok}, step.err
+}
+
+func (s *actionPanelSelector) InputActions(label string, defaultValue string, opts ActionOptions) (InputResult, error) {
+	s.inputLabels = append(s.inputLabels, label)
+	s.inputOpts = append(s.inputOpts, opts)
+	if s.inputIdx >= len(s.inputSteps) {
+		return InputResult{}, nil
+	}
+	step := s.inputSteps[s.inputIdx]
+	s.inputIdx++
+	if step.action != footerActionNone {
+		return InputResult{Action: step.action, OK: step.ok}, step.err
+	}
+	return InputResult{Text: step.value, OK: step.ok}, step.err
+}
+
+// runActionConfigPanel drives the panel with a selector that carries the
+// footer-action capability (plan 326): rich steps for the plain pages,
+// action steps for the action-aware ones, input steps for the editors.
+func runActionConfigPanel(t *testing.T, session *configPanelTestSession, selector *actionPanelSelector, steps []richStep, actionSteps []actionStep, inputSteps []inputActionStep, args ...string) *Renderer {
+	t.Helper()
+	selector.richSteps = steps
+	selector.inputs = nil
+	selector.actionSteps = actionSteps
+	selector.inputSteps = inputSteps
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	ctrl.handleConfig(context.Background(), args)
+	return renderer
+}
+
 // frameText is everything the renderer retained as transcript frames: the
 // panel's result and refusal lines land here, not on the raw writer.
 func frameText(r *Renderer) string {
@@ -503,16 +602,26 @@ func TestConfigPanelKeepsTheHookTheStoreRefusesToChange(t *testing.T) {
 }
 
 // Clearing a switch deletes the key rather than storing false, because nil is
-// what selects the setting's default.
-func TestConfigPanelClearsAFieldToItsDefault(t *testing.T) {
-	session := newConfigPanelSession(map[string]string{"features": `{"memories":false}`})
-	selector := &scriptedSelector{}
-	runConfigPanel(t, session, selector, []richStep{
-		{label: "Feature switches", ok: true},
-		{label: "Memory", ok: true},
-		{label: configDefaultActionLabel, ok: true},
+// The edit view's footer carries Default (plan 326 D4): the action unsets
+// the key — Ctrl+U on a selector with footer actions — and it is the only
+// place Default appears. An empty Enter saves nothing.
+func TestConfigPanelEditFooterDefaultUnsets(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"scheduled_tasks": `{"retention_days":45}`})
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	runActionConfigPanel(t, session, selector, []richStep{
+		{label: "Scheduled tasks", ok: true},
 		{ok: false},
-	}, nil)
+	},
+		[]actionStep{{label: "Keep days", ok: true}, {ok: false}},
+		[]inputActionStep{{action: FooterActionDefault, ok: true}})
+
+	// The editor's footer offered exactly the Default action.
+	if len(selector.inputOpts) != 1 || len(selector.inputOpts[0].FooterActions) != 1 {
+		t.Fatalf("the editor's footer actions = %+v, want Default alone", selector.inputOpts)
+	}
+	if action := selector.inputOpts[0].FooterActions[0]; action.Label != configDefaultActionLabel || action.Kind != FooterActionDefault {
+		t.Fatalf("the edit footer's action = %+v, want Default", action)
+	}
 
 	if len(session.writes) != 1 {
 		t.Fatalf("expected one write, got %d", len(session.writes))
@@ -524,40 +633,34 @@ func TestConfigPanelClearsAFieldToItsDefault(t *testing.T) {
 	}
 }
 
-// A choice page lists the real values and nothing else: the way back to the
-// setting's own default is the `Default` action at the end of the list, not a
-// third value that reads like one (owner 2026-11-16, plan 321 Step 3). The
-// action is what unsets an enum too, and it writes the key out.
-func TestConfigPanelChoiceListsHoldValuesAndTheDefaultAction(t *testing.T) {
+// A choice page lists the real values and nothing else (plan 326 D4, owner
+// 2026-11-18): no Default row and no choice-footer Default — the way back to
+// a setting's own default is the edit view's footer action, which a boolean
+// and an enum never open.
+func TestConfigPanelBoolEnumChoiceHasNoDefault(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		stored  map[string]string
-		steps   []richStep
-		want    []string
-		raw     string
-		section string
+		name   string
+		stored map[string]string
+		steps  []richStep
+		want   []string
 	}{
 		{
-			name:    "a boolean",
-			stored:  map[string]string{"features": `{"memories":true}`},
-			steps:   []richStep{{label: "Feature switches", ok: true}, {label: "Memory", ok: true}},
-			want:    []string{configBoolOnLabel, configBoolOffLabel, configDefaultActionLabel},
-			raw:     ``,
-			section: "features",
+			name:   "a boolean",
+			stored: map[string]string{"features": `{"memories":true}`},
+			steps:  []richStep{{label: "Feature switches", ok: true}, {label: "Memory", ok: true}},
+			want:   []string{configBoolOnLabel, configBoolOffLabel},
 		},
 		{
-			name:    "an enum",
-			stored:  map[string]string{"lsp": `{"diagnostics":{"min_severity":"warning","late_delivery":true}}`},
-			steps:   []richStep{{label: "Language servers", ok: true}, {label: "Lowest severity", ok: true}},
-			want:    []string{"error", "warning", "information", "hint", configDefaultActionLabel},
-			raw:     `{"diagnostics":{"late_delivery":true}}`,
-			section: "lsp",
+			name:   "an enum",
+			stored: map[string]string{"lsp": `{"diagnostics":{"min_severity":"warning","late_delivery":true}}`},
+			steps:  []richStep{{label: "Language servers", ok: true}, {label: "Lowest severity", ok: true}},
+			want:   []string{"error", "warning", "information", "hint"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			session := newConfigPanelSession(tc.stored)
 			selector := &scriptedSelector{}
-			runConfigPanel(t, session, selector, tc.steps, nil)
+			runConfigPanel(t, session, selector, append(append([]richStep{}, tc.steps...), richStep{ok: false}, richStep{ok: false}), nil)
 
 			// The section list, then the section's page, then the choice page.
 			if len(selector.richItems) < 3 {
@@ -565,35 +668,66 @@ func TestConfigPanelChoiceListsHoldValuesAndTheDefaultAction(t *testing.T) {
 			}
 			choice := selector.richItems[2]
 			if got := rowLabels(choice); !slices.Equal(got, tc.want) {
-				t.Fatalf("choice list = %v, want the values and the action: %v", got, tc.want)
+				t.Fatalf("choice list = %v, want the values alone: %v", got, tc.want)
 			}
-			// The values carry nothing beside them; only the action explains
-			// itself.
-			for _, item := range choice[:len(choice)-1] {
+			for _, item := range choice {
+				if item.Label == configDefaultActionLabel {
+					t.Fatalf("the choice list carries a Default row; the edit view's footer owns that")
+				}
 				if item.Description != "" {
 					t.Fatalf("%q carries %q; a value row names the value alone", item.Label, item.Description)
 				}
 			}
-			if action := choice[len(choice)-1]; action.Description != configDefaultActionHint {
-				t.Fatalf("the action reads %q, want %q", action.Description, configDefaultActionHint)
-			}
-
-			// Choosing it is the unset, and it writes: the confirmed action is
-			// the save here too.
-			session = newConfigPanelSession(tc.stored)
-			selector = &scriptedSelector{}
-			runConfigPanel(t, session, selector,
-				append(append([]richStep{}, tc.steps...), richStep{label: configDefaultActionLabel, ok: true}), nil)
-			if len(session.writes) != 1 {
-				t.Fatalf("the action is one write, got %+v", session.writes)
-			}
-			if session.writes[0].section != tc.section {
-				t.Fatalf("section = %q, want %q", session.writes[0].section, tc.section)
-			}
-			if got := string(session.writes[0].raw); got != tc.raw {
-				t.Fatalf("raw = %s, want %s", got, tc.raw)
-			}
 		})
+	}
+}
+
+// Every removal asks first (plan 326 D5): the confirmation's rows are Remove
+// item and Keep item with Keep preselected — Enter alone changes nothing —
+// and its heading names the row and what it holds. The footer's Remove fires
+// on the entry row the cursor is on (plan 326 D2).
+func TestConfigPanelDeleteConfirmsKeepPreselected(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"sandbox_workspace_write": `{"writable_roots":["/a"]}`})
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	runActionConfigPanel(t, session, selector, []richStep{
+		{label: "Workspace sandbox", ok: true},
+		{label: configKeepConfirmLabel, ok: true},
+		{label: configRemoveConfirmLabel, ok: true},
+		{ok: false},
+	},
+		[]actionStep{
+			{label: "Extra writable roots", ok: true},
+			{action: FooterActionRemove, row: 0, ok: true},
+			{action: FooterActionRemove, row: 0, ok: true},
+			{ok: false},
+			{ok: false},
+		}, nil)
+
+	// Two confirmations opened — the first kept the row, so only the second
+	// wrote — and both preselected Keep. A list's row is named by its place,
+	// and the line under the heading shows what it holds.
+	confirmations := 0
+	for _, label := range selector.richLabels[1:] {
+		if strings.HasPrefix(label, "Remove #1?\n/a") {
+			confirmations++
+		}
+	}
+	if confirmations != 2 {
+		t.Fatalf("expected two removal confirmations headed with the row and its value, labels: %v", selector.richLabels)
+	}
+	// richLabels[0] is the section list; the confirmations follow it.
+	if selector.defaults[1] != 1 || selector.defaults[2] != 1 {
+		t.Fatalf("confirmation defaults = %v, want Keep (row 1) preselected", selector.defaults)
+	}
+	rows := selector.richItems[1]
+	if got := rowLabels(rows); !slices.Equal(got, []string{configRemoveConfirmLabel, configKeepConfirmLabel}) {
+		t.Fatalf("confirmation rows = %v", got)
+	}
+	if len(session.writes) != 1 {
+		t.Fatalf("expected the second confirmation alone to write, got %+v", session.writes)
+	}
+	if raw := string(session.writes[0].raw); raw != `{"writable_roots":[]}` {
+		t.Fatalf("raw = %s", raw)
 	}
 }
 
@@ -753,9 +887,9 @@ func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
 // Rows can be added and deleted, and a list's rows are its elements — the
 // shape an unset list section has no value to read the shape from. Each of
 // the two edits is its own write (plan 321). A writable root is a known
-// scalar row, so adding one opens its text editor directly (plan 329); a
-// row of a generic container keeps the menu, and with it the delete action
-// until the footer carries it (plan 326).
+// scalar row, so adding one opens its text editor directly (plan 329). A
+// delete asks first (plan 326 D5): the menu's delete opens the confirmation
+// whose Keep row is preselected, so choosing Remove item is what writes.
 func TestConfigPanelAddsAndDeletesARow(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"sandbox_workspace_write": `{"writable_roots":["/a"]}`})
 	selector := &scriptedSelector{}
@@ -785,6 +919,7 @@ func TestConfigPanelAddsAndDeletesARow(t *testing.T) {
 		{label: "Server settings", ok: true},
 		{label: "legacy", ok: true},
 		{label: configRowDropLabel, ok: true},
+		{label: configRemoveConfirmLabel, ok: true},
 		{ok: false},
 	}, nil)
 	if len(session.writes) != 1 {
@@ -1245,18 +1380,21 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 	// three-state words. Named so a failure points at the constant rather than
 	// at a line number that moves.
 	chrome := map[string]string{
+		"configRowBackLabel":       configRowBackLabel,
+		"configAddActionLabel":     configAddActionLabel,
+		"configRemoveActionLabel":  configRemoveActionLabel,
+		"configRemoveConfirmLabel": configRemoveConfirmLabel,
+		"configKeepConfirmLabel":   configKeepConfirmLabel,
 		"configBackRowLabel":       configBackRowLabel,
 		"configAddRowLabel":        configAddRowLabel,
 		"configUpRowLabel":         configUpRowLabel,
 		"configRowEditLabel":       configRowEditLabel,
 		"configRowOpenLabel":       configRowOpenLabel,
 		"configRowDropLabel":       configRowDropLabel,
-		"configRowBackLabel":       configRowBackLabel,
 		"configFileOnlyNote":       configFileOnlyNote,
 		"configBoolOnLabel":        configBoolOnLabel,
 		"configBoolOffLabel":       configBoolOffLabel,
 		"configDefaultActionLabel": configDefaultActionLabel,
-		"configDefaultActionHint":  configDefaultActionHint,
 		"configNewTextRow":         configNewTextRow,
 		"configNewNumberRow":       configNewNumberRow,
 		"configNewTrueRow":         configNewTrueRow,
@@ -1428,7 +1566,7 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 	if !ok {
 		t.Fatal("no features section")
 	}
-	items, _ := panel.fieldItems(features, panel.sectionDoc("features"))
+	items, _ := panel.fieldItems(features, panel.sectionDoc("features"), false)
 	lines := renderRichPage(items, features.Title, 120)
 
 	memories := renderedRow(t, lines, "Memory")
@@ -1463,7 +1601,7 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 	if !ok {
 		t.Fatal("no subagent_models section")
 	}
-	items, _ = projection.fieldItems(subagentModels, projection.sectionDoc("agents"))
+	items, _ = projection.fieldItems(subagentModels, projection.sectionDoc("agents"), false)
 	lines = renderRichPage(items, subagentModels.Title, 120)
 	for label, status := range map[string]string{
 		"plan":          "High",
@@ -1531,7 +1669,7 @@ func TestConfigPanelValueColumnNotElided(t *testing.T) {
 		t.Fatal("no subagent_models section")
 	}
 	doc := panel.sectionDoc("agents")
-	items, _ := panel.fieldItems(projection, doc)
+	items, _ := panel.fieldItems(projection, doc, false)
 	lines := renderRichPage(items, projection.Title, 120)
 	label := "openai/gpt-main (api.two.example.com)"
 	if displayLineWidth(label) <= panelNarrowValueColumnMax {
@@ -1548,7 +1686,7 @@ func TestConfigPanelValueColumnNotElided(t *testing.T) {
 	// The type page: its Model row carries the value right-aligned (D4).
 	explore, _ := configLookupValue(doc, []string{"subagent_models", "explore"})
 	exploreSettings, _ := explore.(map[string]any)
-	typeItems, _ := panel.templateItems(configTemplateTypeDef, exploreSettings)
+	typeItems, _ := panel.templateItems(configTemplateTypeDef, exploreSettings, false)
 	typeLines := renderRichPage(typeItems, "explore", 120)
 	modelRow := renderedRow(t, typeLines, "Model")
 	if !strings.HasSuffix(modelRow, "openai/gpt-main") || strings.Contains(modelRow, "…") {
@@ -1568,7 +1706,7 @@ func TestConfigPanelAirySpacing(t *testing.T) {
 	if !ok {
 		t.Fatal("no features section")
 	}
-	items, _ := panel.fieldItems(features, panel.sectionDoc("features"))
+	items, _ := panel.fieldItems(features, panel.sectionDoc("features"), false)
 	lines := renderRichPage(items, features.Title+"\n"+features.Summary, 120)
 	plain := stripANSIAll(lines)
 
@@ -3404,7 +3542,7 @@ func TestConfigPanelSubPagesHaveNoBreadcrumbOrTabs(t *testing.T) {
 	if !ok {
 		t.Fatal("no agents section")
 	}
-	items, _ := panel.fieldItems(agents, panel.sectionDoc("agents"))
+	items, _ := panel.fieldItems(agents, panel.sectionDoc("agents"), false)
 	lines := renderConfigPickerPage(items, agents.Title+"\n"+agents.Summary, 120)
 	plain := stripANSIAll(lines)
 	if len(plain) < 4 {
@@ -3461,7 +3599,7 @@ func TestConfigPanelFieldPageShowsGroups(t *testing.T) {
 	if !ok {
 		t.Fatal("no lsp section")
 	}
-	items, _ := panel.fieldItems(lsp, panel.sectionDoc("lsp"))
+	items, _ := panel.fieldItems(lsp, panel.sectionDoc("lsp"), false)
 	lines := renderConfigPickerPage(items, lsp.Title+"\n"+lsp.Summary, 120)
 	plain := stripANSIAll(lines)
 	found := map[string]int{}

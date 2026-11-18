@@ -2023,6 +2023,60 @@ func TestSelectRichKeyboardMovesBetweenTheFilterAndTheRows(t *testing.T) {
 	}
 }
 
+// A collection's footer actions fire while a filter is active (owner
+// 2026-11-18, plan 326 D1): Ctrl+A adds and Ctrl+D removes, the keys the
+// filter cannot take, so a narrowed list still grows and shrinks. The plain
+// letters fire only where no filter box is shown, Enter still chooses the
+// filtered row, and an action picker without actions is SelectRich exactly.
+func TestConfigPanelFilterActiveCollectionStillAddsRemoves(t *testing.T) {
+	actions := []FooterAction{
+		{Label: "Add", Key: "^A", Kind: FooterActionAdd},
+		{Label: "Remove", Key: "^D", Kind: FooterActionRemove},
+	}
+	// "al" narrows the list to alpha and puts the keyboard in the filter;
+	// the ctrl-held keys still fire from there.
+	sel := pickerKeys(t, "al\x01")
+	res, err := sel.SelectRichActions("Rows", manyItems(), -1, ActionOptions{FooterActions: actions})
+	if err != nil || !res.OK || res.Action != FooterActionAdd {
+		t.Fatalf("Ctrl+A under an active filter = %+v, %v; want the add action", res, err)
+	}
+	sel = pickerKeys(t, "al\x04")
+	res, err = sel.SelectRichActions("Rows", manyItems(), -1, ActionOptions{FooterActions: actions})
+	if err != nil || !res.OK || res.Action != FooterActionRemove {
+		t.Fatalf("Ctrl+D under an active filter = %+v, %v; want the remove action", res, err)
+	}
+	// Enter still confirms the row the filter left: alpha, the first row.
+	sel = pickerKeys(t, "al"+keyEnter)
+	res, err = sel.SelectRichActions("Rows", manyItems(), -1, ActionOptions{FooterActions: actions})
+	if err != nil || !res.OK || res.Action != footerActionNone || res.Row != 0 {
+		t.Fatalf("Enter under an active filter = %+v, %v; want row 0", res, err)
+	}
+
+	// A short list shows no filter box, so the plain letters fire instead.
+	sel = pickerKeys(t, "a")
+	res, err = sel.SelectRichActions("Rows", []SelectItem{{Label: "one"}, {Label: "two"}}, -1, ActionOptions{FooterActions: actions})
+	if err != nil || !res.OK || res.Action != FooterActionAdd {
+		t.Fatalf("a with no filter = %+v, %v; want the add action", res, err)
+	}
+	// An action that serves particular rows fires only on one of them, and
+	// its letter is swallowed — not typed into a filter it would feed —
+	// everywhere else.
+	sel = pickerKeys(t, "d"+keyDown+"d")
+	res, err = sel.SelectRichActions("Rows", []SelectItem{{Label: "one"}, {Label: "two"}}, -1, ActionOptions{
+		FooterActions: []FooterAction{{Label: "Remove", Key: "d", Kind: FooterActionRemove, RowActive: func(i int) bool { return i == 1 }}}})
+	if err != nil || !res.OK || res.Action != FooterActionRemove || res.Row != 1 {
+		t.Fatalf("d on the row it serves = %+v, %v; want remove on row 1", res, err)
+	}
+
+	// Without actions the capability is SelectRich exactly: ↓ Enter picks
+	// row 1.
+	sel = pickerKeys(t, keyDown+keyEnter)
+	res, err = sel.SelectRichActions("pick", manyItems(), -1, ActionOptions{})
+	if err != nil || !res.OK || res.Action != footerActionNone || res.Row != 1 {
+		t.Fatalf("no-action SelectRichActions = %+v, %v; want row 1 like SelectRich", res, err)
+	}
+}
+
 // In a multi-select Space toggles the focused row while the keyboard is on the
 // rows, and is a character of the filter while it is in the filter.
 func TestMultiSelectSpaceFollowsTheKeyboard(t *testing.T) {
@@ -2158,8 +2212,8 @@ func TestEveryPanelFieldIsThreeRows(t *testing.T) {
 		{"select", sel.panel(), false},
 		{"rich picker", rich.panel("pick"), false},
 		{"tabbed picker", tabbed.panel("Skills"), false},
-		{"form answer", inputPanel("Base URL", []rune("abc"), 3, false, "Esc to cancel"), false},
-		{"form secret", inputPanel("API key", []rune("sk-1"), 4, true, "Esc to cancel"), true},
+		{"form answer", inputPanel("Base URL", []rune("abc"), 3, false, "Esc to cancel", nil), false},
+		{"form secret", inputPanel("API key", []rune("sk-1"), 4, true, "Esc to cancel", nil), true},
 	} {
 		if tc.panel.field == nil {
 			t.Fatalf("%s: the panel has no field to lay out", tc.name)

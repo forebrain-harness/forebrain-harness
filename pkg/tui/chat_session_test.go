@@ -16743,7 +16743,7 @@ func TestRawSelectorInputEditsBracketedPasteAtCursor(t *testing.T) {
 // An input is a panel: the question, the field, and the keys that answer it.
 // The caret sits at the logical cursor, measured in display cells.
 func TestInputPanelShowsQuestionFieldAndKeys(t *testing.T) {
-	layout := inputPanel("Base URL", []rune("A界B"), 2, false, "Esc to cancel").layout(60, 0, 0, false)
+	layout := inputPanel("Base URL", []rune("A界B"), 2, false, "Esc to cancel", nil).layout(60, 0, 0, false)
 	var plain []string
 	for _, line := range layout.lines {
 		plain = append(plain, stripANSI(line))
@@ -16770,7 +16770,7 @@ func TestStandalonePromptPaintsASetupPage(t *testing.T) {
 	sel := newStandaloneRawSelector(nil, &out)
 	sel.SetupPage(2, 5)
 
-	sel.showPanel(inputPanel("URL", []rune("A界B"), 2, false, sel.escHint()))
+	sel.showPanel(inputPanel("URL", []rune("A界B"), 2, false, sel.escHint(), nil))
 
 	got := out.String()
 	for _, want := range []string{"Forebrain Harness", "Step 2 of 5", "━", "  URL", "›  A界B", "Esc to go back"} {
@@ -16795,7 +16795,7 @@ func TestSecretFieldIsMasked(t *testing.T) {
 		{"sk-1", "••••"},
 		{"sk-proj-abcdef1234", "••••••••••••••1234"},
 	} {
-		layout := inputPanel("OpenAI API key", []rune(tc.value), len(tc.value), true, "Esc to go back").layout(60, 0, 0, false)
+		layout := inputPanel("OpenAI API key", []rune(tc.value), len(tc.value), true, "Esc to go back", nil).layout(60, 0, 0, false)
 		if got := strings.TrimRight(stripANSI(layout.lines[layout.caretRow]), " "); got != "    ›  "+tc.want {
 			t.Fatalf("secret %q shows %q, want %q", tc.value, got, "    ›  "+tc.want)
 		}
