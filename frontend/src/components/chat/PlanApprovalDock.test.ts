@@ -557,7 +557,85 @@ describe('PlanApprovalDock', () => {
     wrapper.unmount()
   })
 
+  // The reviewer the install configured is the row the picker opens on, and
+  // Enter takes it — the terminal's cursor and Enter, on the card (plan 320).
+  // The level screen is one more Enter, on the level that screen opened on.
+  it('opens on the configured reviewer and takes it on Enter', async () => {
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    review.mockClear()
+    const { wrapper } = mountDock(exitPlanAction(), {
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', preferred: true },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-ask-review"]').trigger('click')
+    await nextTick()
+    // The mark is the configured reviewer's alone: the list still draws every
+    // row, and the one in force keeps just its own chip.
+    const rows = wrapper.findAll('[data-testid="plan-review-model"]')
+    expect(rows.map((row) => row.classes('is-on'))).toEqual([false, true])
+    expect(review).not.toHaveBeenCalled()
+
+    await wrapper.get('.xp-pick').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(review).toHaveBeenCalledWith('act-exit', {
+      provider: 'zhipuai', model: 'glm-5.3', modelId: 'row-b',
+    })
+    wrapper.unmount()
+
+    // A row that offers levels: Enter opens the second screen, and the second
+    // Enter sends the level it opened on.
+    const leveled = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    leveled.mockClear()
+    const second = mountDock(exitPlanAction(), {
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3', preferred: true,
+          efforts: ['low', 'high'], defaultEffort: 'high' },
+      ],
+    })
+    await flushPromises()
+    await second.wrapper.get('[data-testid="exit-plan-ask-review"]').trigger('click')
+    await nextTick()
+    await second.wrapper.get('.xp-pick').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(second.wrapper.get('[data-testid="exit-plan-effort-question"]').text())
+      .toContain('zhipuai/glm-5.3')
+    expect(leveled).not.toHaveBeenCalled()
+    await second.wrapper.get('.xp-pick').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(leveled).toHaveBeenCalledWith('act-exit', {
+      provider: 'zhipuai', model: 'glm-5.3', modelId: 'row-b', effort: 'high',
+    })
+    second.wrapper.unmount()
+  })
+
+  // Nothing marked leaves the click path alone: Enter submits nothing, the way
+  // it never did (plan 320).
+  it('takes nothing on Enter when no reviewer is configured', async () => {
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
+    review.mockClear()
+    const { wrapper } = mountDock(exitPlanAction(), {
+      planReviewModels: [
+        { id: 'row-a', provider: 'deepseek', model: 'deepseek-v4-flash', current: true },
+        { id: 'row-b', provider: 'zhipuai', model: 'glm-5.3' },
+      ],
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="exit-plan-ask-review"]').trigger('click')
+    await nextTick()
+    expect(wrapper.findAll('[data-testid="plan-review-model"]').map((row) => row.classes('is-on')))
+      .toEqual([false, false])
+    await wrapper.get('.xp-pick').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(review).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('does not send effort when the review is asked again', async () => {
+
     const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(true)
     review.mockClear()
     const { wrapper } = mountDock(exitPlanAction(), {

@@ -47,13 +47,21 @@
           @click="stopReview(action)"
         >{{ t('chat.exitPlanReviewStop') }}</button>
       </div>
-      <!-- Choosing a reviewer: the list opens on the footer, the current one
-           marked; Esc folds it back. The container takes the keyboard as each
-           screen paints, because the button that opened it has just unmounted
-           and focus fell to the body — without it the dock's own Esc would
-           never fire, while the composer's Esc keeps meaning interrupt-the-run
-           (the pattern AskTabs' card root uses). -->
-      <div v-else-if="picking" ref="pickBox" class="xp-pick outline-none" tabindex="-1">
+      <!-- Choosing a reviewer: the list opens on the footer, the reviewer the
+           install configured highlighted; Esc folds it back. The container
+           takes the keyboard as each screen paints, because the button that
+           opened it has just unmounted and focus fell to the body — without it
+           the dock's own Esc would never fire, while the composer's Esc keeps
+           meaning interrupt-the-run (the pattern AskTabs' card root uses). It
+           is also where Enter answers what the open screen starts on, the two
+           keys a terminal user presses here (plan 320). -->
+      <div
+        v-else-if="picking"
+        ref="pickBox"
+        class="xp-pick outline-none"
+        tabindex="-1"
+        @keydown.enter.self.prevent="enterTakesTheOpeningChoice"
+      >
         <template v-if="effortStep">
           <button
             type="button"
@@ -107,6 +115,7 @@
             :key="`${action.id}-model-${model.id || model.provider + '/' + model.model}-${model.provider}-${model.model}`"
             type="button"
             class="xp-model"
+            :class="model.preferred ? 'is-on' : ''"
             :disabled="submitting"
             :data-testid="pickPurpose === 'handoff' ? 'exit-plan-hand-off-model' : 'plan-review-model'"
             @click="choosePlanModel(action, model)"
@@ -445,6 +454,20 @@ async function onEsc() {
   }
   if (feedbackOpen.value) await refuseAndStop(props.action)
 }
+
+/** Enter answers what the open screen starts on, the way the terminal's Enter
+ *  does: on the model list the row the picker opens on — the reviewer the
+ *  install configured — and on the level screen the level that screen opened
+ *  on. Nothing marked takes nothing: the click path is all the list has, as it
+ *  always was (plan 320). */
+function enterTakesTheOpeningChoice() {
+  if (effortStep.value) {
+    choosePlanEffort(props.action, pickedEffort.value)
+    return
+  }
+  const opening = reviewModels.value.find((model) => model.preferred)
+  if (opening) choosePlanModel(props.action, opening)
+}
 </script>
 
 <style scoped>
@@ -706,6 +729,15 @@ async function onEsc() {
   background: var(--forebrain-bg-alt);
 }
 
+/* The row the picker opens on, marked one way on both screens: the reviewer
+   the install configured on the model list (plan 320), the level the level
+   screen opened on there. The level rows carry `xp-model` too, so this single
+   rule is both marks. */
+.xp-model.is-on {
+  border-color: var(--forebrain-brand-1);
+  background: var(--forebrain-bg-alt);
+}
+
 /* The name and, under it, where that row's requests go: two rows of one
    provider/model are one name twice, and the endpoint is what tells them
    apart. The current chip stays on its own line at the right. */
@@ -774,11 +806,6 @@ async function onEsc() {
 .xp-effort .etag svg {
   width: 14px;
   height: 14px;
-}
-
-.xp-effort.is-on {
-  border-color: var(--forebrain-brand-1);
-  background: var(--forebrain-bg-alt);
 }
 
 .xp-back {

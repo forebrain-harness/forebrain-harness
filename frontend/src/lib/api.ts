@@ -1688,6 +1688,11 @@ export interface PlanReviewModelOption {
   /** The level this row is configured with: the one that screen opens on and
    * marks with the setting gear; absent when the row configures none. */
   defaultEffort?: string
+  /** True for the reviewer the install configured (`agents.plan_reviewer`):
+   *  the picker opens on it, so the user who configured one does not pick it
+   *  by hand at every approval (plan 320). Absent for every other row, and for
+   *  all of them when the setting names no configured model. */
+  preferred?: boolean
 }
 
 /** One completed review a pending exit-plan approval already collected. */
