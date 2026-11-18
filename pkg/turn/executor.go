@@ -927,7 +927,7 @@ func chooseModel(ctx Context, value string) Result {
 		current = settings.LiveSelection.Effort
 	}
 	configured := strings.TrimSpace(chosen.ConfiguredEffort)
-	ids := orderedEffortLevels(chosen.ReasoningEfforts)
+	ids := OrderedEfforts(chosen.ReasoningEfforts)
 	// The same list the web's effort chip draws: the levels in the one fixed
 	// order, and a bare 「Default」 entry first when the conversation pins no
 	// level or the row configures none — the two cases where the empty level is

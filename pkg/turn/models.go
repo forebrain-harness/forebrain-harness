@@ -194,19 +194,23 @@ func ModelReasoningEfforts(provider, model string) []string {
 
 // ModelReasoningEffortsRow is ModelReasoningEfforts for a caller that knows the
 // configured row: the row's own levels win over the catalog's, and over a
-// same-pair sibling's (owner 2026-11-10).
+// same-pair sibling's (owner 2026-11-10). It asks the pair alone; a caller that
+// also holds the row's api_path — ModelChoices, which is where a picker's list
+// comes from — goes through modelReasoningEffortsForRow and gets the levels
+// trimmed by the protocol the row speaks.
 func ModelReasoningEffortsRow(modelID, provider, model string) []string {
+	return modelReasoningEffortsForRow(modelID, provider, model, "")
+}
+
+// modelReasoningEffortsForRow is ModelReasoningEffortsRow with the row's
+// protocol: the levels are trimmed once, by what the client that sends them
+// accepts (SetupReasoningEfforts), in the one order every picker draws.
+func modelReasoningEffortsForRow(modelID, provider, model, apiPath string) []string {
 	levels, known := llm.ReasoningEffortsRow(modelID, provider, model)
 	if !known {
 		return nil
 	}
-	return trimToSendable(provider, model, levels)
-}
-
-// trimToSendable keeps the levels this build can put on the wire for a model,
-// in the order the caller named them.
-func trimToSendable(provider, model string, levels []string) []string {
-	return filterSendableEfforts(provider, model, "", levels)
+	return SetupReasoningEfforts(provider, model, apiPath, levels)
 }
 
 // SetupReasoningEfforts is the thinking levels one model can actually be given,
@@ -221,24 +225,25 @@ func trimToSendable(provider, model string, levels []string) []string {
 // the provider and model alone, which is what a row without a path means. The
 // input slice is never modified.
 func SetupReasoningEfforts(provider, model, apiPath string, levels []string) []string {
-	return filterSendableEfforts(provider, model, apiPath, orderedEffortLevels(levels))
+	return filterSendableEfforts(provider, model, apiPath, OrderedEfforts(levels))
 }
 
 // filterSendableEfforts keeps the levels this build can put on the wire for a
-// model.
+// model, in the order the caller named them.
 //
 // The deciding fact is which client pkg/run will build the request with, not
 // which provider the model belongs to: that dispatch is by protocol, and an
 // OpenCode model on the Anthropic path goes through the same client as the
 // anthropic provider — a client that drops a level it rejects and sends no
 // effort at all. Offering such a level would be exactly the fake option this
-// catalog exists to remove, so the protocol decides here too.
+// catalog exists to remove, so the protocol decides here too, through the one
+// decision the client switch itself makes (opencode.ClientProtocol).
 func filterSendableEfforts(provider, model, apiPath string, levels []string) []string {
-	switch effortClientFor(provider, model, apiPath) {
-	case effortClientNoParameter:
+	switch opencode.ClientProtocol(provider, model, apiPath) {
+	case opencode.ProtocolGoogle:
 		// The generateContent client carries no effort parameter.
 		return nil
-	case effortClientAnthropic:
+	case opencode.ProtocolAnthropic:
 		out := make([]string, 0, len(levels))
 		for _, level := range levels {
 			if anthropic.AcceptsEffort(level) {
@@ -255,67 +260,19 @@ func filterSendableEfforts(provider, model, apiPath string, levels []string) []s
 	return append([]string(nil), levels...)
 }
 
-// effortClient is which client pkg/run builds for one model, as far as thinking
-// levels are concerned.
-type effortClient int
-
-const (
-	// effortClientPassThrough sends whatever level the params name.
-	effortClientPassThrough effortClient = iota
-	// effortClientAnthropic drops every level anthropic.AcceptsEffort rejects.
-	effortClientAnthropic
-	// effortClientNoParameter has no effort parameter to send.
-	effortClientNoParameter
-)
-
-// effortClientFor answers which client serves a model, in the order pkg/run
-// picks one: the two OpenCode ids first (their own protocol table), then a
-// provider a local subscription plugin registered a factory for (the factory
-// owns the request shape), then the Anthropic client by provider name and by
-// Messages path.
-func effortClientFor(provider, model, apiPath string) effortClient {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case opencodeProvider, opencodeGoProvider:
-		protocol, err := opencode.ProtocolFor(provider, model)
-		switch {
-		case err != nil:
-			return effortClientPassThrough
-		case protocol == opencode.ProtocolGoogle:
-			return effortClientNoParameter
-		case protocol == opencode.ProtocolAnthropic:
-			return effortClientAnthropic
-		}
-		return effortClientPassThrough
-	}
-	if llm.HasProviderFactory(provider) {
-		return effortClientPassThrough
-	}
-	if anthropicClientProvider(provider) || messagesAPIPath(apiPath) {
-		return effortClientAnthropic
-	}
-	return effortClientPassThrough
-}
-
-// messagesAPIPath reports whether a row's path asks for the Anthropic Messages
-// protocol, by the rule pkg/run dispatches on: the Messages client appends
-// "/v1/messages" to the base URL itself, so the stored path only names the
-// protocol, and a trailing slash is tolerated.
-func messagesAPIPath(path string) bool {
-	return strings.HasSuffix(strings.TrimSuffix(strings.TrimSpace(path), "/"), "/messages")
-}
-
 // effortLevelOrder is the one order every effort picker draws its levels in:
 // the web chip's EFFORT_LEVELS (frontend/src/lib/effortLabel.ts). The catalog
 // lists a model's levels in file order, which is not that order, so every
 // surface that offers them — /model's second step, the exit gate's effort
-// screen — sorts through orderedEffortLevels first.
+// screen, the web's chip and the gateway's session options — sorts through
+// OrderedEfforts first.
 var effortLevelOrder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
-// orderedEffortLevels puts levels in effortLevelOrder, appending the levels
-// this build does not rank after the known ones in their original relative
-// order. Levels are lower-cased and de-duplicated; no level at all yields nil,
-// which is what every caller reads as "nothing to ask".
-func orderedEffortLevels(levels []string) []string {
+// OrderedEfforts puts levels in effortLevelOrder, appending the levels this
+// build does not rank after the known ones in their original relative order.
+// Levels are lower-cased and de-duplicated; no level at all yields nil, which
+// is what every caller reads as "nothing to ask".
+func OrderedEfforts(levels []string) []string {
 	if len(levels) == 0 {
 		return nil
 	}
@@ -370,17 +327,6 @@ func EffortEnglishLabel(id string) string {
 		return "Max"
 	}
 	return strings.TrimSpace(id)
-}
-
-// anthropicClientProvider reports whether provider's models are served by this
-// build's Anthropic client on the strength of the provider name alone (the
-// protocol check in trimToSendable covers the rest).
-func anthropicClientProvider(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "anthropic", "minimax":
-		return true
-	}
-	return false
 }
 
 // DiscoverChatGPTModels returns the account's picker-visible subscription
@@ -886,7 +832,7 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 		if hit, ok := llm.LookupRow(choice.ID, provider, model); ok {
 			choice.SupportsImages = hit.SupportsAttachments
 		}
-		choice.ReasoningEfforts = ModelReasoningEffortsRow(choice.ID, provider, model)
+		choice.ReasoningEfforts = modelReasoningEffortsForRow(choice.ID, provider, model, choice.APIPath)
 		choice.ConfiguredEffort = appcfg.ReasoningEffort(configured.Params)
 		out = append(out, choice)
 	}

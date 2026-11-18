@@ -1128,7 +1128,7 @@ func TestModelEffortPickerMatchesTheWebChipOrder(t *testing.T) {
 	// The approval gate's second screen sorts through the same helper, so the
 	// two pickers cannot drift apart.
 	require.Equal(t, []string{"none", "low", "medium", "high"},
-		orderedEffortLevels([]string{"high", "none", "medium", "low"}))
+		OrderedEfforts([]string{"high", "none", "medium", "low"}))
 }
 
 // A row whose model the catalog does not describe keeps the levels it was
@@ -1201,22 +1201,124 @@ func TestModelEffortPickerMarksFromSettingApartFromCurrent(t *testing.T) {
 }
 
 // The English label table is a cross-surface contract: the TUI's lists and the
-// web's English UI must name the levels the same way.
+// web's English UI must name the levels the same way. The web is the source, not
+// a copy of it: the values are read out of its own locale file, so a wording
+// changed there fails here instead of drifting silently (plan 318 F8).
 func TestEffortEnglishLabelMatchesTheWebEnTable(t *testing.T) {
-	for id, want := range map[string]string{
-		"":        "Default",
-		"none":    "Off",
-		"minimal": "Minimal",
-		"low":     "Low",
-		"medium":  "Medium",
-		"high":    "High",
-		"xhigh":   "xHigh",
-		"max":     "Max",
-	} {
-		require.Equal(t, want, EffortEnglishLabel(id), "level %q", id)
+	keys := map[string]string{
+		"":        "chat.effortDefault",
+		"none":    "chat.effortNone",
+		"minimal": "chat.effortMinimal",
+		"low":     "chat.effortLow",
+		"medium":  "chat.effortMedium",
+		"high":    "chat.effortHigh",
+		"xhigh":   "chat.effortXhigh",
+		"max":     "chat.effortMax",
+	}
+	en := webLocaleBlock(t, "en")
+	zh := webLocaleBlock(t, "zh")
+	for id, key := range keys {
+		want, ok := en[key]
+		require.True(t, ok, "frontend/src/locales/index.ts en is missing %q", key)
+		require.Equal(t, want, EffortEnglishLabel(id),
+			"level %q is named %q in frontend/src/locales/index.ts (en %s)", id, want, key)
+		// en is typed Record<keyof typeof zh, string>, so the zh block defines the
+		// key set: a key only one block carries would not type-check.
+		require.NotEmpty(t, zh[key], "frontend/src/locales/index.ts zh is missing %q", key)
 	}
 	require.Equal(t, "ultra", EffortEnglishLabel("ultra"), "a level this build does not rank keeps its own id")
 	require.Equal(t, "High", EffortEnglishLabel(" HIGH "), "the id is matched case- and space-insensitively")
+}
+
+// The pickers share one order as well as one wording: the web chip's
+// EFFORT_LEVELS is the sequence every surface draws, read out of its own source
+// (plan 318 F5/F8).
+func TestEffortOrderMatchesTheWebEffortLevels(t *testing.T) {
+	want := webEffortLevels(t)
+	reversed := make([]string, 0, len(want))
+	for i := len(want) - 1; i >= 0; i-- {
+		reversed = append(reversed, want[i])
+	}
+	require.Equal(t, want, OrderedEfforts(reversed),
+		"frontend/src/lib/effortLabel.ts EFFORT_LEVELS is the order every picker draws")
+}
+
+// webLocaleBlock reads one locale block out of the web's own source: the values
+// are the contract, so the test reads the file rather than restating them.
+func webLocaleBlock(t *testing.T, locale string) map[string]string {
+	t.Helper()
+	text := readWebSource(t, filepath.Join("locales", "index.ts"))
+	out := map[string]string{}
+	inBlock := false
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "const "+locale) {
+			inBlock = true
+			continue
+		}
+		if !inBlock {
+			continue
+		}
+		if trimmed == "}" {
+			break
+		}
+		if key, value, ok := webLocaleEntry(trimmed); ok {
+			out[key] = value
+		}
+	}
+	require.NotEmpty(t, out, "frontend/src/locales/index.ts carries no %s block", locale)
+	return out
+}
+
+// webLocaleEntry reads one `'key': 'value',` line of a locale block.
+func webLocaleEntry(line string) (string, string, bool) {
+	if !strings.HasPrefix(line, "'") {
+		return "", "", false
+	}
+	keyEnd := strings.Index(line[1:], "':")
+	if keyEnd < 0 {
+		return "", "", false
+	}
+	rest := strings.TrimSpace(line[1+keyEnd+2:])
+	if !strings.HasPrefix(rest, "'") {
+		return "", "", false
+	}
+	valueEnd := strings.Index(rest[1:], "'")
+	if valueEnd < 0 {
+		return "", "", false
+	}
+	return line[1 : 1+keyEnd], rest[1 : 1+valueEnd], true
+}
+
+// webEffortLevels reads the web chip's EFFORT_LEVELS, the order every picker
+// draws its levels in.
+func webEffortLevels(t *testing.T) []string {
+	t.Helper()
+	const marker = "EFFORT_LEVELS = ["
+	text := readWebSource(t, filepath.Join("lib", "effortLabel.ts"))
+	start := strings.Index(text, marker)
+	require.GreaterOrEqual(t, start, 0, "frontend/src/lib/effortLabel.ts declares no %s", strings.TrimSpace(marker))
+	rest := text[start+len(marker):]
+	end := strings.Index(rest, "]")
+	require.GreaterOrEqual(t, end, 0, "frontend/src/lib/effortLabel.ts EFFORT_LEVELS is not closed")
+	var levels []string
+	for _, part := range strings.Split(rest[:end], ",") {
+		if part = strings.TrimSpace(part); len(part) >= 2 && strings.HasPrefix(part, "'") {
+			levels = append(levels, strings.Trim(part, "'"))
+		}
+	}
+	require.NotEmpty(t, levels, "frontend/src/lib/effortLabel.ts declares no level")
+	return levels
+}
+
+// readWebSource reads one file of the web surface's own source tree, so a test
+// pins what ships instead of a copy of it.
+func readWebSource(t *testing.T, rel string) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "frontend", "src", rel)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err, "read %s", path)
+	return string(data)
 }
 
 // The bare Default entry sends an empty level, and the encoded value has to

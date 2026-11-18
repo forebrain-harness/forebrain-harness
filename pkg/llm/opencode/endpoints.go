@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
 const (
@@ -142,6 +144,64 @@ var goAnthropicModels = []string{
 	"qwen3.8-flash",
 	"qwen3.7-plus",
 	"minimax-m3",
+}
+
+// ClientProtocol names the request shape a configured row speaks. It is the one
+// decision pkg/run's client switch and pkg/turn's sendability filter make, so a
+// thinking level a picker offers is a level the client that sends it accepts
+// (plan 318).
+//
+// The provider answers first, because it knows what a path cannot: anthropic and
+// minimax speak Messages by name, an OpenCode model is decided by its own
+// per-model table, and a provider a subscription plugin registered a factory for
+// builds the request its own way whatever the row says. The row's api_path
+// answers the rest — "/v1/messages" and "/responses" name a protocol rather than
+// a URL anything is sent to — and Chat Completions is what this build sends when
+// nothing names another.
+//
+// It decides a shape, never a refusal: a row this build cannot send at all (an
+// OpenCode id that is not a chat model, say) answers as Chat Completions here,
+// and the client that builds it reports the refusal.
+func ClientProtocol(provider, model, apiPath string) Protocol {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case providerConsole, providerGo:
+		protocol, err := ProtocolFor(provider, model)
+		if err != nil {
+			return ProtocolChatCompletions
+		}
+		return protocol
+	}
+	if llm.HasProviderFactory(provider) {
+		// The factory owns the endpoint and the request shape, so neither the
+		// provider's name nor its path says anything this build can act on.
+		return ProtocolChatCompletions
+	}
+	if anthropicClientProvider(provider) || isMessagesAPIPath(apiPath) {
+		return ProtocolAnthropic
+	}
+	if strings.Contains(strings.TrimSpace(apiPath), "/responses") {
+		return ProtocolResponses
+	}
+	return ProtocolChatCompletions
+}
+
+// anthropicClientProvider reports whether a provider's models are served by this
+// build's Anthropic client on the strength of the provider name alone.
+func anthropicClientProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "anthropic", "minimax":
+		return true
+	}
+	return false
+}
+
+// isMessagesAPIPath reports whether a row's path asks for the Anthropic Messages
+// protocol. The Messages client appends "/v1/messages" to the base URL itself, so
+// a stored path only says which protocol to speak; a trailing slash is tolerated
+// because a mirror's root often carries one.
+func isMessagesAPIPath(path string) bool {
+	return strings.HasSuffix(strings.TrimSuffix(strings.TrimSpace(path), "/"), "/messages")
 }
 
 // ClientBaseURL returns the base URL to hand a protocol client, which appends

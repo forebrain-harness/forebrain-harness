@@ -426,60 +426,60 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 		return nil, fmt.Errorf("llm base_url is required for provider %s", prov)
 	}
 	maxTokens := llm.OutputTokenCap(prov, model, cfg.MaxOutputTokens)
-	switch prov {
-	case "anthropic", "minimax":
+	// The provider has to be one this build knows before its row is dialled
+	// through an ordinary client; anthropic and minimax are named by the
+	// catalog and would pass this check anyway.
+	if !llm.KnownProvider(prov) {
+		return nil, fmt.Errorf("unsupported model provider: %s", prov)
+	}
+	// Which client a row speaks is one decision (opencode.ClientProtocol), the
+	// same one the thinking-level list is trimmed by: a level a picker offers is
+	// therefore a level this client can send. The path names the protocol, and
+	// the client it picks appends its own endpoint to the base URL — so
+	// "/v1/messages" here selects the Anthropic Messages client rather than a URL
+	// anything is sent to, exactly as "/responses" selects the Responses client.
+	// A provider whose endpoint serves Messages under its own name (a proxy, or a
+	// mirror of a Claude service) reaches it this way; anthropic and minimax
+	// speak it without being told.
+	switch opencode.ClientProtocol(prov, model, apiPath) {
+	case opencode.ProtocolAnthropic:
 		return wrapUsageAccountingLLM(anthropic.NewAgentLLM(apiKey, baseURL, model, int64(maxTokens), requestReasoningEffort(cfg.Params))), nil
-	default:
-		if !llm.KnownProvider(prov) {
-			return nil, fmt.Errorf("unsupported model provider: %s", prov)
+	case opencode.ProtocolResponses:
+		return wrapUsageAccountingLLM(openai.NewResponsesLLMWithCache(apiKey, baseURL, model, maxTokens, cfg.Params.Bytes(), openAIPromptCaching(prov))), nil
+	}
+	if cfg.URLVerbatim {
+		// 「自定义协议」: the request goes to base_url exactly as the user
+		// wrote it, Chat Completions shape, no path appended.
+		target, err := url.Parse(baseURL)
+		if err != nil || target.Host == "" {
+			return nil, fmt.Errorf("llm base_url is not a request URL: %s", baseURL)
 		}
-		// The path names the protocol, and the client it picks appends its own
-		// endpoint to the base URL — so "/v1/messages" here selects the Anthropic
-		// Messages client rather than a URL anything is sent to, exactly as
-		// "/responses" below selects the Responses client. A provider whose
-		// endpoint serves Messages under its own name (a proxy, or a mirror of a
-		// Claude service) reaches it this way; anthropic and minimax above speak
-		// it without being told.
-		if isAnthropicMessagesPath(apiPath) {
-			return wrapUsageAccountingLLM(anthropic.NewAgentLLM(apiKey, baseURL, model, int64(maxTokens), requestReasoningEffort(cfg.Params))), nil
-		}
-		if strings.Contains(apiPath, "/responses") {
-			return wrapUsageAccountingLLM(openai.NewResponsesLLMWithCache(apiKey, baseURL, model, maxTokens, cfg.Params.Bytes(), openAIPromptCaching(prov))), nil
-		}
-		if cfg.URLVerbatim {
-			// 「自定义协议」: the request goes to base_url exactly as the user
-			// wrote it, Chat Completions shape, no path appended.
-			target, err := url.Parse(baseURL)
-			if err != nil || target.Host == "" {
-				return nil, fmt.Errorf("llm base_url is not a request URL: %s", baseURL)
-			}
-			return wrapUsageAccountingLLM(openai.NewCompatLLMWithTransport(
-				apiKey,
-				baseURL,
-				model,
-				0,
-				maxTokens,
-				"",
-				cfg.Params.Bytes(),
-				&llm.ExactURLRoundTripper{Target: target},
-			)), nil
-		}
-		return wrapUsageAccountingLLM(openai.NewCompatLLMWithPromptCaching(
+		return wrapUsageAccountingLLM(openai.NewCompatLLMWithTransport(
 			apiKey,
 			baseURL,
 			model,
 			0,
 			maxTokens,
-			cfg.APIPath,
+			"",
 			cfg.Params.Bytes(),
-			// Same gate as the /responses path above. Spelling it out here
-			// again would leave this call site outside the reach of
-			// TestOpenAIPromptCachingOnlyTargetsOpenAI, which is the test that
-			// keeps prompt_cache_key from being sent to third-party endpoints
-			// that never asked for it.
-			openAIPromptCaching(prov),
+			&llm.ExactURLRoundTripper{Target: target},
 		)), nil
 	}
+	return wrapUsageAccountingLLM(openai.NewCompatLLMWithPromptCaching(
+		apiKey,
+		baseURL,
+		model,
+		0,
+		maxTokens,
+		cfg.APIPath,
+		cfg.Params.Bytes(),
+		// Same gate as the /responses path above. Spelling it out here
+		// again would leave this call site outside the reach of
+		// TestOpenAIPromptCachingOnlyTargetsOpenAI, which is the test that
+		// keeps prompt_cache_key from being sent to third-party endpoints
+		// that never asked for it.
+		openAIPromptCaching(prov),
+	)), nil
 }
 
 // errCustomProtocolMisuse refuses the custom protocol anywhere but on a custom
@@ -489,14 +489,6 @@ var errCustomProtocolMisuse = errors.New("custom protocol is only for custom mod
 
 func openAIPromptCaching(provider string) bool {
 	return strings.EqualFold(strings.TrimSpace(provider), "openai")
-}
-
-// isAnthropicMessagesPath reports whether a provider entry asks for the
-// Anthropic Messages protocol. The Messages client appends "/v1/messages" to
-// the base URL itself, so a stored path only says which protocol to speak; a
-// trailing slash is tolerated because a mirror's root often carries one.
-func isAnthropicMessagesPath(path string) bool {
-	return strings.HasSuffix(strings.TrimSuffix(strings.TrimSpace(path), "/"), "/messages")
 }
 
 // openCodePlaceholderKey is the key handed to a client whose real credential

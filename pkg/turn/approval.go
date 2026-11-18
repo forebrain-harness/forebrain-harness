@@ -1346,7 +1346,7 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvi
 			// can open a second screen on them: the levels the row offers, in
 			// the one order every picker draws, and the one the row is
 			// configured with (what that screen opens on).
-			Efforts:       orderedEffortLevels(entry.ReasoningEfforts),
+			Efforts:       OrderedEfforts(entry.ReasoningEfforts),
 			DefaultEffort: strings.TrimSpace(entry.ConfiguredEffort),
 		})
 	}

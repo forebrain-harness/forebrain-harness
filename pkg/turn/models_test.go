@@ -592,6 +592,46 @@ func TestModelChoicesKeepCatalogEffortLevels(t *testing.T) {
 	require.Equal(t, []string{"minimal", "low", "medium", "high"}, choices[0].ReasoningEfforts)
 }
 
+// A row's levels are its own *and* its protocol's: the same model offered on a
+// Messages endpoint drops what the Anthropic client cannot send, on Chat
+// Completions keeps every level, and a Google row has none to offer because the
+// generateContent client carries no effort parameter at all. The path travels
+// with the row (choice.APIPath), so the list a picker draws is the list the
+// client that sends the request accepts (plan 318 F2).
+func TestModelChoicesTrimTheRowsLevelsByItsOwnProtocol(t *testing.T) {
+	installRepoCatalog(t)
+	for _, tc := range []struct {
+		name     string
+		provider string
+		model    string
+		apiPath  string
+		want     []string
+	}{
+		{name: "messages endpoint drops what the client rejects", provider: "custom", model: "gpt-5",
+			apiPath: "/v1/messages", want: []string{"low", "medium", "high"}},
+		{name: "chat completions passes every level through", provider: "custom", model: "gpt-5",
+			apiPath: "/chat/completions", want: []string{"minimal", "low", "medium", "high"}},
+		{name: "no path asks the provider and model alone", provider: "openai", model: "gpt-5",
+			want: []string{"minimal", "low", "medium", "high"}},
+		{name: "the google client has no effort parameter", provider: "opencode-go",
+			model: "gemini-4-argon-contributor", apiPath: "/chat/completions", want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := appcfg.Root{
+				LLMModels: turnModelRows(appcfg.AgentLLMProviderConfig{
+					Provider: tc.provider, Model: tc.model, APIPath: tc.apiPath,
+				}),
+				Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+					"main": {Primary: true},
+				}},
+			}
+			choices := ModelChoices(&cfg, "main")
+			require.Len(t, choices, 1)
+			require.Equal(t, tc.want, choices[0].ReasoningEfforts)
+		})
+	}
+}
+
 // The picker label shows the vendor's own listing name when the builtin
 // table carries one (qodercn's gfmodel is sold as GLM-5.3-Flash); the wire id
 // stays the identity a pick stores. Catalog reference rows keep their wire
@@ -1051,14 +1091,14 @@ func TestProbeCarriesTheDiscoveryErrorUntouched(t *testing.T) {
 // build does not rank after them in their original relative order, duplicates
 // and blanks dropped, and no level at all yields nothing to ask.
 func TestOrderedEffortLevelsPutsTheKnownLevelsFirst(t *testing.T) {
-	require.Equal(t, []string{"none", "low", "high"}, orderedEffortLevels([]string{"high", "low", "none"}))
-	require.Equal(t, []string{"minimal", "medium", "xhigh", "max"}, orderedEffortLevels([]string{"max", "xhigh", "medium", "minimal"}))
+	require.Equal(t, []string{"none", "low", "high"}, OrderedEfforts([]string{"high", "low", "none"}))
+	require.Equal(t, []string{"minimal", "medium", "xhigh", "max"}, OrderedEfforts([]string{"max", "xhigh", "medium", "minimal"}))
 	require.Equal(t, []string{"low", "high", "ultra", "turbo"},
-		orderedEffortLevels([]string{"ultra", "high", "low", "turbo"}), "unranked levels follow the known ones, in their own order")
-	require.Equal(t, []string{"low"}, orderedEffortLevels([]string{"low", "low", ""}), "duplicates and blanks collapse")
-	require.Equal(t, []string{"low", "high"}, orderedEffortLevels([]string{"HIGH", " low ", "Low"}))
-	require.Nil(t, orderedEffortLevels(nil))
-	require.Nil(t, orderedEffortLevels([]string{}))
+		OrderedEfforts([]string{"ultra", "high", "low", "turbo"}), "unranked levels follow the known ones, in their own order")
+	require.Equal(t, []string{"low"}, OrderedEfforts([]string{"low", "low", ""}), "duplicates and blanks collapse")
+	require.Equal(t, []string{"low", "high"}, OrderedEfforts([]string{"HIGH", " low ", "Low"}))
+	require.Nil(t, OrderedEfforts(nil))
+	require.Nil(t, OrderedEfforts([]string{}))
 }
 
 // The levels one model can be given, as every surface that offers them reads
