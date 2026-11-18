@@ -52,8 +52,10 @@ cmd_serve() {
   mkdir -p "$HOME_DIR" "$PROJ"
   echo "scratch project for driving the forebrain TUI" > "$PROJ/README.md"
 
-  # api_key MUST be a ${ENV_NAME} reference: forebrain rejects a plaintext secret
-  # at startup and exits 1 before the TUI ever paints.
+  # Models live in the state database's model table, not the yaml (plans
+  # 262/315): a llm_providers list here configures nothing, and the startup
+  # gate would send a fresh home into the onboarding wizard. model_seed.sh
+  # below creates the database headlessly and seeds the fake provider's row.
   # ENABLE_SUBAGENT=1 turns the subagent tools on for the session: the plan
   # scripts that dispatch a subagent (roster, subagent cards, live continue)
   # need them, while every other script keeps the lean default. The switch the
@@ -77,11 +79,6 @@ agents:
   definitions:
     main:
       primary: true
-      llm_providers:
-      - provider: $provider
-        model: $model
-        api_key: \${FAKE_LLM_KEY}
-        base_url: http://127.0.0.1:$PORT
 YAML
   # NETWORK_RETRY_MAX pins agents.defaults.network_retry_max for the run: the
   # transport-retry scripts use it to watch a custom cap's n/total wording and
@@ -104,6 +101,8 @@ PY
   if [ -n "${COMPACT_LIMIT:-}" ]; then
     printf 'compact:\n  model_auto_compact_token_limit: %s\n' "$COMPACT_LIMIT" >> "$HOME_DIR/forebrain.yaml"
   fi
+
+  printf '%s' "sk-local-fake" | "$REPO/.claude/skills/run-forebrain/model_seed.sh" "$BIN" "$HOME_DIR" "$provider" "$model" "http://127.0.0.1:$PORT"
 
   # FAKE_MARKER rides through to the fake provider untouched (the streamtools
   # mode's first tool call touches it): the provider inherits this process's

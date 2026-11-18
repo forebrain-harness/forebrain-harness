@@ -221,6 +221,9 @@ class Server(http.server.ThreadingHTTPServer):
 
 
 if __name__ == "__main__":
+    # Bind before announcing LISTENING, like fake_provider.py: a held port
+    # must fail the starter's wait loudly, not let a stale proxy answer.
+    server = Server(("127.0.0.1", LISTEN_PORT), Handler)
     sys.stderr.write("LISTENING %d upstream=%s\n" % (LISTEN_PORT, UPSTREAM))
     sys.stderr.flush()
-    Server(("127.0.0.1", LISTEN_PORT), Handler).serve_forever()
+    server.serve_forever()

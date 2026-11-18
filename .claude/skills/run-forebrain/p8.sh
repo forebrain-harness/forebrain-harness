@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Drive the forebrain TUI against the REAL DeepSeek provider for P8 acceptance.
-# The API key stays in the environment (forebrain.yaml references ${DEEPSEEK_API_KEY}).
+# The API key comes from the environment and is seeded into the state
+# database's model table (model rows hold plaintext keys by design; the yaml
+# llm_providers list no longer configures anything — plans 262/315).
 #
 #   p8.sh build
 #   p8.sh start
@@ -59,19 +61,16 @@ agents:
     main:
       primary: true
       enable_subagent: true
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-flash
-        api_key: \${DEEPSEEK_API_KEY}
-        base_url: https://api.deepseek.com
 YAML
+
+  printf '%s' "$DEEPSEEK_API_KEY" | "$REPO/.claude/skills/run-forebrain/model_seed.sh" "$BIN" "$HOME_DIR" deepseek deepseek-flash "https://api.deepseek.com"
 
   local launch="$BIN"
   if [ -n "${RESUME_ID:-}" ]; then launch="$BIN resume $RESUME_ID"; fi
   tmux new-session -d -s "$SESSION" -x 120 -y 45 -c "$PROJ" \
     "DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY FOREBRAIN_HOME=$HOME_DIR $launch 2>$WORK/tui.err; echo EXIT=\$?; exec bash"
 
-  if wait_for 20 "Trust this directory?" 2>/dev/null; then
+  if wait_for 20 "Trust this folder?" 2>/dev/null; then
     tmux send-keys -t "$SESSION" Down Enter   # the page opens on Quit
     sleep 1
     tmux send-keys -t "$SESSION" Enter   # second confirmation pane, if any

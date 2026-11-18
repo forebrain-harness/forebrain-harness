@@ -67,9 +67,10 @@ go build -tags fts5 -o "$work/forebrain" ./cmd/forebrain
 
 write_home() {
   local home=$1 port=$2
-  # Secrets never live in forebrain.yaml: the gateway token and the provider key
-  # are ${ENV_NAME} references resolved from the environment the replica is
-  # started with — the home has no .env any more (plan 268).
+  # The gateway token is a ${ENV_NAME} reference resolved from the environment
+  # the replica is started with — the home has no .env any more (plan 268).
+  # Models live in the state database's model table, not the yaml (plans
+  # 262/315); the row is seeded through the gateway API once a replica is up.
   cat > "$home/forebrain.yaml" <<YAML
 gateway:
   http_addr: 127.0.0.1:$port
@@ -85,11 +86,6 @@ agents:
   definitions:
     main:
       primary: true
-      llm_providers:
-        - provider: deepseek
-          model: deepseek-v4-flash
-          api_key: \${FAKE_LLM_KEY}
-          base_url: http://127.0.0.1:$llm_port
 YAML
   chmod 600 "$home/forebrain.yaml"
 }
@@ -143,6 +139,11 @@ start_replica() {
 
 start_replica "$home_a" "$port_a" a
 start_replica "$home_b" "$port_b" b
+
+echo "== seed the model row through replica a's API (both replicas share the table)"
+printf '{"provider":"deepseek","model":"deepseek-v4-flash","base_url":"http://127.0.0.1:%s","api_key":"fake-key"}' "$llm_port" \
+  | curl -fsS -X POST "http://127.0.0.1:$port_a/api/llm-models" \
+      -H "Authorization: Bearer $token" -H 'Content-Type: application/json' --data @- > /dev/null
 
 echo "== assertions"
 mkdir -p "$work/project"

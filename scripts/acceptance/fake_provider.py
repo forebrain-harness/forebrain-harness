@@ -587,6 +587,10 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 if __name__ == "__main__":
+    # Bind before announcing: the scripts wait for the LISTENING line, and a
+    # port another provider already holds must fail that wait loudly instead
+    # of letting the stale provider answer this run's turns.
+    server = Server(("127.0.0.1", PORT), Handler)
     sys.stderr.write("LISTENING %d mode=%s\n" % (PORT, MODE))
     sys.stderr.flush()
-    Server(("127.0.0.1", PORT), Handler).serve_forever()
+    server.serve_forever()

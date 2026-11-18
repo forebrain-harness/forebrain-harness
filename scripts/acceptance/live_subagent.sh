@@ -85,7 +85,6 @@ cmd_start() {
   fi
   [ -n "$key" ] || die "credentials missing: set FOREBRAIN_E2E_ZHIPU_KEY or install ${ZHIPU_ENV}"
   ( umask 077; printf 'FOREBRAIN_E2E_ZHIPU_KEY=%s\n' "$key" > "$CREDS" )
-  unset key
 
   cat > "$HOME_DIR/forebrain.yaml" <<YAML
 approval_policy: on-request
@@ -95,15 +94,15 @@ agents:
   definitions:
     main:
       primary: true
-      llm_providers:
-      - provider: $PROVIDER
-        model: $MODEL
-        api_key: \${FOREBRAIN_E2E_ZHIPU_KEY}
-        base_url: http://127.0.0.1:$PROXY_PORT
 YAML
   if [ -n "${COMPACT_LIMIT:-}" ]; then
     printf 'compact:\n  model_auto_compact_token_limit: %s\n' "$COMPACT_LIMIT" >> "$HOME_DIR/forebrain.yaml"
   fi
+
+  # Models live in the state database's model table, not the yaml (plans
+  # 262/315). The key reaches the seed on stdin, never a command line.
+  printf '%s' "$key" | "$REPO/.claude/skills/run-forebrain/model_seed.sh" "$BIN" "$HOME_DIR" "$PROVIDER" "$MODEL" "http://127.0.0.1:$PROXY_PORT"
+  unset key
 
   python3 "$REPO/scripts/acceptance/flaky_proxy.py" "$PROXY_PORT" "$UPSTREAM" "$CONTROL" \
     > "$WORK/proxy.log" 2>&1 &
@@ -120,17 +119,22 @@ YAML
   tmux new-session -d -s "$SESSION" -x 120 -y 40 -c "$PROJ" \
     "set -a; . '$CREDS'; set +a; FOREBRAIN_HOME='$HOME_DIR' '$BIN' 2>'$WORK/tui.err'; echo EXIT=\$?; exec bash"
 
-  local trusted=no pane
+  local trusted=no quiet=0 pane
   for ((i = 0; i < 200; i++)); do
     pane="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)"
     case "$pane" in
-      *"Trust this directory?"*)
+      *"Trust this folder?"*)
         if [ "$trusted" = no ]; then
           tmux send-keys -t "$SESSION" Down Enter
           trusted=yes
         fi
+        quiet=0
         ;;
-      *"/ commands"*) break ;;
+      *"/ commands"*)
+        # The banner paints "/ commands" before the trust question does.
+        if [ "$trusted" = yes ] || [ "$quiet" -ge 15 ]; then break; fi
+        quiet=$((quiet + 1))
+        ;;
     esac
     sleep 0.2
   done

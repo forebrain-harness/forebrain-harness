@@ -81,11 +81,6 @@ agents:
     main:
       primary: true
       enable_subagent: false
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-chat
-        api_key: \${FAKE_LLM_KEY}
-        base_url: http://127.0.0.1:$PORT
 YAML
   else
     cat > "$HOME_DIR/forebrain.yaml" <<YAML
@@ -95,13 +90,12 @@ agents:
     main:
       primary: true
       enable_subagent: false
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-chat
-        api_key: \${FAKE_LLM_KEY}
-        base_url: http://127.0.0.1:$PORT
 YAML
   fi
+
+  # Models live in the state database's model table, not the yaml (plans
+  # 262/315); seed the fake provider's row the same way driver.sh does.
+  printf '%s' "sk-local-fake" | "$REPO/.claude/skills/run-forebrain/model_seed.sh" "$BIN" "$HOME_DIR" deepseek deepseek-chat "http://127.0.0.1:$PORT"
 
   start_provider "${2:-hang}"
 
@@ -110,11 +104,11 @@ YAML
   tmux new-session -d -s "$SESSION" -x 120 -y 40 -c "$PROJ" \
     "FAKE_LLM_KEY=sk-local-fake FOREBRAIN_HOME=$HOME_DIR $BIN 2>$WORK/tui.err; echo EXIT=\$?; exec bash"
 
-  local trusted=no i pane
+  local trusted=no quiet=0 i pane
   for ((i = 0; i < 300; i++)); do
     pane="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)"
     case "$pane" in
-      *"Trust this directory?"*)
+      *"Trust this folder?"*)
         if [ "$trusted" = no ]; then
           tmux send-keys -t "$SESSION" Down Enter   # the page opens on Quit
           trusted=yes
@@ -122,8 +116,13 @@ YAML
           first_frame_at=$(python3 -c 'import time; print(time.time())')
           echo "first_frame_after_trust_secs=$(python3 -c "print(round($first_frame_at-$started_at,2))")"
         fi
+        quiet=0
         ;;
-      *"/ commands"*) break ;;
+      *"/ commands"*)
+        # The banner paints "/ commands" before the trust question does.
+        if [ "$trusted" = yes ] || [ "$quiet" -ge 15 ]; then break; fi
+        quiet=$((quiet + 1))
+        ;;
     esac
     sleep 0.05
   done

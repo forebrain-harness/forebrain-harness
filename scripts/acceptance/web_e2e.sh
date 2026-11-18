@@ -168,11 +168,6 @@ agents:
   definitions:
     main:
       primary: true
-      llm_providers:
-      - provider: zhipuai
-        model: glm-5.3-flash
-        api_key: \${FOREBRAIN_E2E_ZHIPU_KEY}
-        base_url: http://127.0.0.1:$PROXY_PORT
 YAML
 else
   cat > "$HOME_DIR/forebrain.yaml" <<YAML
@@ -197,27 +192,6 @@ agents:
   definitions:
     main:
       primary: true
-      llm_providers:
-      - provider: deepseek
-        # The model every run uses (owner ruling 2026-10-22). The catalog gives
-        # it both image input and effort levels, which the composer and the
-        # image-refusal specs read.
-        model: deepseek-v4-flash
-        api_key: \${FAKE_LLM_KEY}
-        base_url: http://127.0.0.1:$LLM_PORT
-      # A second reasoning-capable entry, so the model chip has another option
-      # to switch to (chat-composer.spec.ts). The fake provider answers any
-      # model identity, and the chain never reaches it while the first works.
-      - provider: zhipuai
-        model: glm-5.3-flash
-        api_key: \${FAKE_LLM_KEY}
-        base_url: http://127.0.0.1:$LLM_PORT
-      # A text-only model (catalog attachment: false) for the image-refusal
-      # spec; the chain never reaches it while the first entry works.
-      - provider: deepseek
-        model: deepseek-v4-pro
-        api_key: \${FAKE_LLM_KEY}
-        base_url: http://127.0.0.1:$LLM_PORT
 YAML
 fi
 
@@ -280,6 +254,28 @@ for _ in $(seq 1 150); do
   sleep 0.2
 done
 curl -fsS "http://127.0.0.1:$GW_PORT/healthz" > /dev/null || die "gateway never answered /healthz"
+
+# 8b. Models live in the state database's model table, not the yaml (plans
+#     262/315): the gateway above created and imported it. Seed the rows the
+#     specs read; created_at order is the view order, so the primary model
+#     every run uses (owner ruling 2026-10-22) sorts first. Keys reach the
+#     seed on stdin, never a command line.
+SEED="$REPO/.claude/skills/run-forebrain/model_seed.sh"
+NOW_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
+if [ "$REAL_LLM" = "1" ]; then
+  printf '%s' "$FOREBRAIN_E2E_ZHIPU_KEY" | "$SEED" "$BIN" "$HOME_DIR" zhipuai glm-5.3-flash "http://127.0.0.1:$PROXY_PORT" e2e-primary "$NOW_MS"
+else
+  # The catalog gives deepseek-v4-flash both image input and effort levels,
+  # which the composer and the image-refusal specs read.
+  printf '%s' "sk-local-fake" | "$SEED" "$BIN" "$HOME_DIR" deepseek deepseek-v4-flash "http://127.0.0.1:$LLM_PORT" e2e-primary "$NOW_MS"
+  # A second reasoning-capable entry, so the model chip has another option to
+  # switch to (chat-composer.spec.ts). The fake provider answers any model
+  # identity, and the chain never reaches it while the first works.
+  printf '%s' "sk-local-fake" | "$SEED" "$BIN" "$HOME_DIR" zhipuai glm-5.3-flash "http://127.0.0.1:$LLM_PORT" e2e-second "$((NOW_MS + 1))"
+  # A text-only model (catalog attachment: false) for the image-refusal spec;
+  # the chain never reaches it while the first entry works.
+  printf '%s' "sk-local-fake" | "$SEED" "$BIN" "$HOME_DIR" deepseek deepseek-v4-pro "http://127.0.0.1:$LLM_PORT" e2e-textonly "$((NOW_MS + 2))"
+fi
 
 # 9. Browser suite: the specs this change touched (FOREBRAIN_E2E_SPEC, one or
 #    more files/globs, checked above), or the whole suite at a release gate.

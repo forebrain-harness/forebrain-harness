@@ -360,10 +360,14 @@ sessions.
   to know the response boundary was actually crossed — the line Esc-withdrawal
   turns on — wait on `$D provider-log` or the DB, which are producer-side, never
   on the screen.
-- **A plaintext `api_key` in `forebrain.yaml` is a hard startup failure**, not a
-  warning: `plaintext secret is not allowed at agents.definitions.main.llm_providers.[0].api_key`
-  and exit 1 before the TUI paints. It must be `${ENV_NAME}`, with the variable
-  exported into the process. The driver does this with `FAKE_LLM_KEY`.
+- **Models are configured in the state database, not the yaml.** The startup
+  gate judges by the install-wide model table (`fb_llm_models`, plans 262/315);
+  a yaml `llm_providers` list configures nothing, and a fresh home carrying
+  only such a list lands in the onboarding wizard instead of the composer.
+  `driver.sh serve` seeds the fake provider's row headlessly: one `gateway
+  start` pass creates the database, then `model_seed.sh` upserts the row
+  (`mcp_acc.sh` and `p8.sh` seed the same way). A model row's key is plaintext
+  in the table by design — the old `${ENV_NAME}` yaml rule no longer applies.
 - **`screen(1)` cannot drive this app**, even though macOS ships it and tmux is
   not installed. A detached `screen` session keeps no display buffer, so
   `hardcopy` writes a 0-byte file. tmux's `capture-pane` is the only capture

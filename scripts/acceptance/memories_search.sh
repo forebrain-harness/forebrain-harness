@@ -98,8 +98,8 @@ if ! touch "$HOME_DIR/dict/.accept-probe" 2>/dev/null; then
 fi
 rm -f "$HOME_DIR/dict/.accept-probe"
 
-# api_key MUST be a ${ENV_NAME} reference: forebrain rejects a plaintext secret
-# at startup and exits before the TUI paints. memories is on so the dedicated
+# Models live in the state database's model table, not the yaml (plans
+# 262/315); the seed below creates it. memories is on so the dedicated
 # memory tools are registered; use_memories and dedicated_tools default on.
 cat > "$HOME_DIR/forebrain.yaml" <<YAML
 approval_policy: on-request
@@ -109,19 +109,27 @@ agents:
   definitions:
     main:
       primary: true
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-v4-flash
-        api_key: \${FAKE_LLM_KEY}
-        base_url: http://127.0.0.1:$PORT
 YAML
+
+# Models live in the state database's model table, not the yaml (plans
+# 262/315); seed the fake provider's row the same way the driver does.
+printf '%s' "sk-local-fake" | "$REPO/.claude/skills/run-forebrain/model_seed.sh" "$BIN" "$HOME_DIR" deepseek deepseek-v4-flash "http://127.0.0.1:$PORT"
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 # The fake provider answers the first request with a memories_search call whose
 # queries are Chinese, which is what forces the dictionary to load, and later
-# requests with the plain answer text.
-FAKE_TOOL_NAME=memories_search \
-FAKE_TOOL_ARGS='{"queries":["006 计划 修法","待拍板 决策"]}' \
+# requests with the plain answer text. The script goes through FAKE_TOOL_SCRIPT
+# rather than FAKE_TOOL_NAME: only the multi-shot form streams its tool call,
+# and the single-shot JSON body sends the turn through the retry ladder before
+# the non-streaming fallback takes it — half a minute the wait below does not
+# have (the same shape multi-replica-test.sh documents).
+python3 - "$WORK/tools.json" <<'PY'
+import json, sys
+script = [["memories_search", json.dumps({"queries": ["006 计划 修法", "待拍板 决策"]}, ensure_ascii=False)]]
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    f.write(json.dumps(script, ensure_ascii=False))
+PY
+FAKE_TOOL_SCRIPT="$WORK/tools.json" \
   python3 "$REPO/scripts/acceptance/fake_provider.py" toolcall "$PORT" FAKE_ANSWER \
   > "$WORK/provider.log" 2>&1 &
 echo $! > "$WORK/provider.pid"
@@ -138,13 +146,19 @@ tmux new-session -d -s "$SESSION" -x 140 -y 50 -c "$PROJ" \
 # it inside the wait for the composer (a fixed window can miss a slow launch),
 # once: the page opens on Quit, so Down then Enter.
 trusted=no
+quiet=0
 for ((i = 0; i < 250; i++)); do
   pane="$(screen || true)"
   case "$pane" in
-    *"Trust this directory?"*)
+    *"Trust this folder?"*)
       if [ "$trusted" = no ]; then tmux send-keys -t "$SESSION" Down Enter; trusted=yes; fi
+      quiet=0
       ;;
-    *"/ commands"*) break ;;
+    *"/ commands"*)
+      # The banner paints "/ commands" before the trust question does.
+      if [ "$trusted" = yes ] || [ "$quiet" -ge 15 ]; then break; fi
+      quiet=$((quiet + 1))
+      ;;
   esac
   sleep 0.2
 done

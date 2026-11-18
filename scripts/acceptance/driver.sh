@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Drive the forebrain TUI from an agent: launch it against a provider whose
 # timing you control. Copy of the repo's run-forebrain driver, adapted for the
-# project-level MCP acceptance: the scratch project is a git repository the
-# driver pre-trusts, and project MCP files can be dropped into it.
+# project-level MCP acceptance: the scratch project is a git repository, the
+# driver answers the first-launch trust question, and project MCP files can be
+# dropped into it.
 #
 # Everything lives in an isolated FOREBRAIN_HOME and a throwaway project dir, so
 # nothing here touches the user's real config, sessions or credentials.
@@ -51,8 +52,10 @@ cmd_start() { # start [hang|stream|reply|drip] [answer-text] [drip-delay]
   fi
   echo "scratch project for driving the forebrain TUI" > "$PROJ/README.md"
 
-  # api_key MUST be a ${ENV_NAME} reference: forebrain rejects a plaintext secret
-  # at startup and exits 1 before the TUI ever paints.
+  # Models live in the state database's model table, not the yaml (plans
+  # 262/315): a llm_providers list here configures nothing, and the startup
+  # gate would send a fresh home into the onboarding wizard. model_seed.sh
+  # creates the database headlessly and seeds the fake provider's row.
   cat > "$HOME_DIR/forebrain.yaml" <<YAML
 approval_policy: on-request
 agents:
@@ -60,12 +63,9 @@ agents:
     main:
       primary: true
       enable_subagent: false
-      llm_providers:
-      - provider: deepseek
-        model: deepseek-v4-flash
-        api_key: \${FAKE_LLM_KEY}
-        base_url: http://127.0.0.1:$PORT
 YAML
+
+  printf '%s' "sk-local-fake" | "$REPO/.claude/skills/run-forebrain/model_seed.sh" "$BIN" "$HOME_DIR" deepseek deepseek-v4-flash "http://127.0.0.1:$PORT"
 
   python3 "$REPO/scripts/acceptance/fake_provider.py" "$mode" "$PORT" "$text" "$delay" \
     > "$WORK/provider.log" 2>&1 &
@@ -80,7 +80,39 @@ YAML
   tmux new-session -d -s "$SESSION" -x 140 -y 45 -c "$PROJ" \
     "FAKE_LLM_KEY=sk-local-fake FOREBRAIN_HOME=$HOME_DIR $BIN 2>$WORK/tui.err; echo EXIT=\$?; exec bash"
 
-  wait_for 20 "/ commands" || die "TUI never reached the composer; see $WORK/tui.err"
+  # First launch in a new directory asks whether the directory is trusted.
+  # Answered inside the wait for the composer rather than in a window of its
+  # own: a slow launch can put the prompt on screen after a fixed window has
+  # expired. The page opens on Quit, so Down then Enter, sent once. The banner
+  # paints "/ commands" before the question is painted, so one frame carrying
+  # that text does not prove the question is gone: accept it once the answer
+  # has been sent, or once it has been absent for 15 frames (3s).
+  local trusted=no quiet=0 i pane
+  for ((i = 0; i < 200; i++)); do
+    pane="$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || true)"
+    case "$pane" in
+      *"Trust this folder?"*)
+        if [ "$trusted" = no ]; then
+          tmux send-keys -t "$SESSION" Down Enter
+          trusted=yes
+        fi
+        quiet=0
+        ;;
+      *"/ commands"*)
+        if [ "$trusted" = yes ] || [ "$quiet" -ge 15 ]; then break; fi
+        quiet=$((quiet + 1))
+        ;;
+      *"EXIT="*)
+        die "the TUI exited during startup; see $WORK/tui.err"
+        ;;
+    esac
+    sleep 0.2
+  done
+  [ "$trusted" = yes ] || [ "$quiet" -ge 15 ] || die "TUI never reached the composer; see $WORK/tui.err"
+  if tmux capture-pane -t "$SESSION" -p 2>/dev/null | grep -qF "Trust this folder?"; then
+    die "the trust question is still unanswered; refusing to send keys"
+  fi
+  wait_for 25 "/ commands" || die "TUI never reached the composer; see $WORK/tui.err"
   echo "started: session=$SESSION provider=$mode port=$PORT home=$HOME_DIR proj=$PROJ"
 }
 

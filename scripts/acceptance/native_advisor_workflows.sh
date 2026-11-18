@@ -1193,14 +1193,6 @@ agents:
   definitions:
     main:
       primary: true
-      llm_providers:
-      - provider: $REAL_PROVIDER
-        model: $REAL_MODEL
-        api_key: \${FOREBRAIN_E2E_ZHIPU_KEY}
-        base_url: $REAL_BASE_URL
-        params:
-          reasoning:
-            effort: $REAL_REASONING_EFFORT
 YAML
 }
 
@@ -1220,6 +1212,16 @@ real_start() { # real_start <fixture> [--plan] [--type X] [--no-git]
   [ -n "$fixture" ] && cp -R "$FIXTURES/$fixture/." "$PROJ/" 2>/dev/null
   [ "$want_git" = no ] && rm -rf "$PROJ/.git"
   real_yaml
+  # Models live in the state database's model table, not the yaml (plans
+  # 262/315). The key reaches the seed on stdin from the 0600 creds file —
+  # never a command line — and the row keeps the reasoning effort the yaml
+  # entry used to carry as params.
+  local seed_key
+  seed_key="$(set -a; . "$CREDS"; set +a; printf '%s' "${FOREBRAIN_E2E_ZHIPU_KEY:-}")"
+  printf '%s' "$seed_key" | "$REPO/.claude/skills/run-forebrain/model_seed.sh" \
+    "$BIN" "$HOME_DIR" "$REAL_PROVIDER" "$REAL_MODEL" "$REAL_BASE_URL" \
+    harness-seeded-model "" "{\"reasoning\":{\"effort\":\"$REAL_REASONING_EFFORT\"}}"
+  unset seed_key
   tmux new-session -d -s "$SESSION" -x 150 -y 48 -c "$PROJ" \
     "set -a; . '$CREDS'; set +a; PATH='$FAKE_BIN:\$PATH' FOREBRAIN_HOME='$HOME_DIR' '$BIN' 2>'$LOGS/tui-real.err'; echo EXIT=\$?; exec bash"
   local i answered=no

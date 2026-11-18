@@ -138,7 +138,8 @@ open(sys.argv[1], "wb").write(png)
 PY
 note "wrote $SHAPE"
 
-# 3. Config. The key is referenced by ${ENV}, never written literally. The fake
+# 3. Config. The key is seeded into the state database's model table on stdin,
+#    never written to the yaml or a command line (plans 262/315). The fake
 #    MCP server declares no tool hints, so under the default approval mode its
 #    call requires approval; the scratch config sets approve explicitly so the
 #    MCP phase runs unattended (this is a scratch config, not product behaviour).
@@ -166,12 +167,10 @@ agents:
   definitions:
     main:
       primary: true
-      llm_providers:
-      - provider: ${PROVIDER}
-        model: $1
-        api_key: \${FOREBRAIN_E2E_DEEPSEEK_KEY}
-        base_url: ${BASE_URL}
 YAML
+  # Models live in the state database's model table, not the yaml (plans
+  # 262/315). The key goes to the seed on stdin, never a command line.
+  printf '%s' "$KEY" | "$REPO/.claude/skills/run-forebrain/model_seed.sh" "$BIN" "$HOME_DIR" "$PROVIDER" "$1" "$BASE_URL"
 }
 
 # --- tmux + DB helpers ----------------------------------------------------
@@ -201,13 +200,18 @@ start_tui() { # start_tui <model>
   write_config "$1"
   tmux new-session -d -s "$SESSION" -x 140 -y 45 -c "$PROJ" \
     "set -a; . '$CREDS'; set +a; FOREBRAIN_HOME='$HOME_DIR' '$BIN' 2>'$WORK/tui.err'; echo EXIT=\$?; exec bash"
-  local trusted=no p
+  local trusted=no quiet=0 p
   for ((i = 0; i < 250; i++)); do
     p="$(pane)"
     case "$p" in
-      *"Trust this directory?"*)
-        if [ "$trusted" = no ]; then tmux send-keys -t "$SESSION" Down Enter; trusted=yes; fi ;;
-      *"/ commands"*) break ;;
+      *"Trust this folder?"*)
+        if [ "$trusted" = no ]; then tmux send-keys -t "$SESSION" Down Enter; trusted=yes; fi
+        quiet=0 ;;
+      *"/ commands"*)
+        # The banner paints "/ commands" before the trust question does: only
+        # take it once trust is answered, or after 15 quiet frames (3s).
+        if [ "$trusted" = yes ] || [ "$quiet" -ge 15 ]; then break; fi
+        quiet=$((quiet + 1)) ;;
     esac
     sleep 0.2
   done
