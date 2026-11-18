@@ -3963,7 +3963,7 @@ func TestExitPlanEffortPickerConfirmsWithThePickedLevel(t *testing.T) {
 	for _, want := range []string{
 		"Which reasoning effort should deepseek/deepseek-v4-flash use? (Esc to go back)",
 		"❯ Low ⚙",
-		"  Off  none",
+		"  Off",
 		"  xHigh",
 		"Esc to go back Enter to confirm",
 	} {
@@ -3979,7 +3979,7 @@ func TestExitPlanEffortPickerConfirmsWithThePickedLevel(t *testing.T) {
 	if lines[question+1] != "" {
 		t.Fatalf("no blank line under the question:\n%s", joined)
 	}
-	if strings.TrimSpace(lines[question+2]) != "Off  none" {
+	if strings.TrimSpace(lines[question+2]) != "Off" {
 		t.Fatalf("first level = %q, want the list in the one fixed order", lines[question+2])
 	}
 	if strings.TrimSpace(lines[question+3]) != "❯ Low ⚙" {

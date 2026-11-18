@@ -1,0 +1,16 @@
+{
+  "name": "macos-disk-reclaim",
+  "current": 1,
+  "versions": [
+    {
+      "v": 1,
+      "at": "2026-11-18T08:43:36Z",
+      "kind": "published",
+      "stat": {
+        "files": 3,
+        "added": 225,
+        "removed": 0
+      }
+    }
+  ]
+}

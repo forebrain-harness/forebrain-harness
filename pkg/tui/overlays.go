@@ -769,11 +769,12 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		}
 		cursorLine = o.feedbackFirstRow + o.feedbackLayout.cursorRow
 	case o.planEffortPicking:
-		// The second screen is one column: the level, the id it sends when the
-		// two differ (only Off/none in English), and the gear on the level the
-		// row is configured with, tight against the name. The blank line the
-		// question needs under it is the one every panel's body gets (above),
-		// so adding another here would draw two.
+		// The second screen is one column: the level's English name alone —
+		// never the raw id beside it (owner 2026-11-18: "Off none" is verbose)
+		// — and the gear on the level the row is configured with, tight
+		// against the name. The blank line the question needs under it is the
+		// one every panel's body gets (above), so adding another here would
+		// draw two.
 		for i, effort := range o.planEffortOptions {
 			lead := panelIndent
 			if i == o.planEffortCursor {
@@ -785,9 +786,6 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 			}
 			label := turn.EffortEnglishLabel(effort)
 			row := lead + label
-			if effort != "" && !strings.EqualFold(effort, label) {
-				row += "  " + panelHintStyle.Render(effort)
-			}
 			if effort != "" && effort == strings.TrimSpace(o.planEffortModel.DefaultEffort) {
 				// The gear marks the level the model row itself configures — not
 				// the one being chosen — and it sits against the name (owner

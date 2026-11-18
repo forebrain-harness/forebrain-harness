@@ -5089,8 +5089,8 @@ func TestPeerCardHeaderDrawsOneDirectionalMark(t *testing.T) {
 }
 
 // The /model effort picker draws the list the web's effort chip draws: the
-// level's English name, the raw id beside it only when the two differ, the gear
-// on the level the row is configured with — all against the name, with the
+// level's English name alone (never the raw id beside it), the gear on the
+// level the row is configured with — all against the name, with the
 // description column left empty — and an item that names no level keeps the
 // plain label it always had.
 func TestSlashModelEffortPickerRendersTheWebLabels(t *testing.T) {
@@ -5115,11 +5115,11 @@ func TestSlashModelEffortPickerRendersTheWebLabels(t *testing.T) {
 	if got[0].Label != "Default" || got[0].Mark != "" {
 		t.Fatalf("default row = %+v, want the bare Default entry", got[0])
 	}
-	if got[1].Label != "Off  none" {
-		t.Fatalf("off row label = %q, want the display name and the id it differs from", got[1].Label)
+	if got[1].Label != "Off" {
+		t.Fatalf("off row label = %q, want the display name alone, never the raw id", got[1].Label)
 	}
 	if got[2].Label != "High" {
-		t.Fatalf("high row label = %q, want the English name alone (High/high differ only by case)", got[2].Label)
+		t.Fatalf("high row label = %q, want the English name alone", got[2].Label)
 	}
 	if got[2].Mark != selectorGearGlyph {
 		t.Fatalf("high row mark = %q, want the gear on the level the row configures", got[2].Mark)
