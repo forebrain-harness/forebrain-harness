@@ -1087,8 +1087,8 @@ func agentSubagentsPath(path []string) bool {
 	return len(path) == 3 && path[0] == configDefinitionsPath && path[2] == configSubagentsKey
 }
 
-// sharedSubagentNamesIn lists the names of the shared custom subagents a staged
-// agents document holds, in registry order.
+// sharedSubagentNamesIn lists the names of the shared custom subagents an agents
+// document holds, in registry order.
 func sharedSubagentNamesIn(doc any) []string {
 	registry, _ := configLookupValue(doc, []string{configSharedSubagentsKey})
 	rows, _ := registry.([]any)
@@ -1102,7 +1102,7 @@ func sharedSubagentNamesIn(doc any) []string {
 	return names
 }
 
-// configSharedSubagent finds one staged registry entry by name.
+// configSharedSubagent finds one registry entry by name.
 func configSharedSubagent(doc any, name string) (map[string]any, bool) {
 	registry, _ := configLookupValue(doc, []string{configSharedSubagentsKey})
 	rows, _ := registry.([]any)
@@ -1318,9 +1318,9 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 // shared subagent (plan 314): one switch, and the definition's own facts shown
 // read-only. The definition is the install-wide registry's, so it is edited on
 // the Subagent models page and every other row here says where it lives rather
-// than opening an editor this page does not have. The switch is staged in the
-// document like any other edit: enabling writes the reference entry, disabling
-// removes it, and a page closed without saving writes nothing.
+// than opening an editor this page does not have. The switch is one edit like
+// any other (plan 321): throwing it writes the reference entry, throwing it back
+// removes it, and Esc between the two writes nothing.
 func (p *configPanel) editSharedSubagentRow(doc any, path []string, container any, name string, field configField) (any, string) {
 	enabled := sharedReferenceEnabled(container, name)
 	items := []SelectItem{

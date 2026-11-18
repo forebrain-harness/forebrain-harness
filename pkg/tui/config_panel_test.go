@@ -2035,8 +2035,7 @@ func TestConfigPanelAgentPageSharedDefinitionIsReadOnly(t *testing.T) {
 	if !strings.Contains(pageLabels(selector), configSharedSubagentNotice) {
 		t.Fatalf("the shared row's page does not say where the definition is edited: %s", pageLabels(selector))
 	}
-	// Nothing was staged by opening the definition's fields, and nothing was
-	// written: there are no edits to save.
+	// Opening the definition's fields writes nothing: a fact is not an edit.
 	if len(session.writes) != 0 {
 		t.Fatalf("opening a shared subagent's fields wrote %+v, want nothing", session.writes)
 	}
