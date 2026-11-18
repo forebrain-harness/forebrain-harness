@@ -184,16 +184,16 @@ func TestConfigPanelHidesTheApprovalSectionsWithoutASandbox(t *testing.T) {
 	}
 }
 
-// A tri-state boolean lands as true, and only a save writes anything: the
-// panel says when a change takes effect instead of applying it.
-func TestConfigPanelSavesATriStateBoolean(t *testing.T) {
+// A tri-state boolean lands as true, and the confirmed edit is the write: there
+// is no save step to reach (plan 321). Success is silent — the panel says
+// nothing when a value lands.
+func TestConfigPanelWritesATriStateBooleanOnEnter(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	selector := &scriptedSelector{}
 	renderer := runConfigPanel(t, session, selector, []richStep{
 		{label: "features", ok: true},
 		{label: "Memory", ok: true},
 		{label: configBoolOnLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 	}, nil)
 
@@ -207,8 +207,205 @@ func TestConfigPanelSavesATriStateBoolean(t *testing.T) {
 	if string(write.raw) != `{"memories":true}` {
 		t.Fatalf("raw = %s", write.raw)
 	}
-	if text := frameText(renderer); !strings.Contains(text, configSavedNotice) {
-		t.Fatalf("the save must say when it takes effect; frames:\n%s", text)
+	if text := frameText(renderer); text != "" {
+		t.Fatalf("a value that lands says nothing; frames:\n%s", text)
+	}
+}
+
+// Every row kind writes on the confirmed edit, through the one store path, and
+// nothing short of a confirmed edit writes at all (plan 321 Step 6).
+func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stored  map[string]string
+		steps   []richStep
+		inputs  []selectorInput
+		section string
+		want    string
+	}{
+		{
+			name: "enum", section: "approval_preset",
+			steps: []richStep{
+				{label: "approval_preset", ok: true},
+				{label: "Approval preset", ok: true},
+				{label: "Full access", ok: true},
+			},
+			want: `"full_access"`,
+		},
+		{
+			name: "number", section: "cron",
+			steps: []richStep{
+				{label: "cron", ok: true},
+				{label: "Keep days", ok: true},
+			},
+			inputs: []selectorInput{{value: "45", ok: true}},
+			want:   `{"retention_days":45}`,
+		},
+		{
+			name: "text", section: "compact",
+			steps: []richStep{
+				{label: "compact", ok: true},
+				{label: "Hand-off prompt", ok: true},
+			},
+			inputs: []selectorInput{{value: "Keep it short.", ok: true}},
+			want:   `{"prompt":"Keep it short."}`,
+		},
+		{
+			name: "rows", section: "sandbox_workspace_write",
+			stored: map[string]string{"sandbox_workspace_write": `{"writable_roots":["/a"]}`},
+			steps: []richStep{
+				{label: "sandbox_workspace_write", ok: true},
+				{label: "Extra writable roots", ok: true},
+				{label: configAddRowLabel, ok: true},
+				{label: configNewTextRow, ok: true},
+			},
+			inputs: []selectorInput{{value: "/b", ok: true}},
+			want:   `{"writable_roots":["/a","/b"]}`,
+		},
+		{
+			name: "model ref", section: "agents",
+			steps: []richStep{
+				{label: "agents", ok: true},
+				{label: "Goal check model", ok: true},
+			},
+			inputs: []selectorInput{{value: "llm-1", ok: true}},
+			want:   `{"goal_evaluator":{"model":"llm-1"}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := newConfigPanelSession(tc.stored)
+			selector := &scriptedSelector{}
+			renderer := runConfigPanel(t, session, selector, tc.steps, tc.inputs)
+
+			if len(session.writes) != 1 {
+				t.Fatalf("the confirmed edit is one write, got %+v", session.writes)
+			}
+			if session.writes[0].section != tc.section {
+				t.Fatalf("section = %q, want %q", session.writes[0].section, tc.section)
+			}
+			if got := string(session.writes[0].raw); got != tc.want {
+				t.Fatalf("raw = %s, want %s", got, tc.want)
+			}
+			if text := frameText(renderer); text != "" {
+				t.Fatalf("a value that lands says nothing; frames:\n%s", text)
+			}
+		})
+	}
+}
+
+// A hook row is created complete and written once (plan 321, owner 2026-11-17):
+// the store refuses every partial hook, so the panel asks the type and the field
+// that type needs, and the row exists only as a candidate the loader accepts.
+func TestConfigPanelCreatesACompleteHookInOneWrite(t *testing.T) {
+	openHooks := []richStep{
+		{label: "hooks", ok: true},
+		{label: "Hook events", ok: true},
+		{label: configAddRowLabel, ok: true},
+		{label: "PreToolUse", ok: true},
+	}
+	openMatcher := []richStep{
+		{label: "PreToolUse", ok: true},
+		{label: configRowOpenLabel, ok: true},
+		{label: configAddRowLabel, ok: true},
+	}
+	for _, tc := range []struct {
+		name   string
+		steps  []richStep
+		inputs []selectorInput
+		want   string
+	}{
+		{
+			name:   "command",
+			steps:  append(append([]richStep{}, openMatcher...), richStep{label: "Command", ok: true}),
+			inputs: []selectorInput{{value: configHookAllToolsMatcher, ok: true}, {value: "project-check", ok: true}},
+			want:   `{"command":"project-check","type":"command"}`,
+		},
+		{
+			name:   "prompt",
+			steps:  append(append([]richStep{}, openMatcher...), richStep{label: "Prompt", ok: true}),
+			inputs: []selectorInput{{value: configHookAllToolsMatcher, ok: true}, {value: "Check the work is done.", ok: true}},
+			want:   `{"prompt":"Check the work is done.","type":"prompt"}`,
+		},
+		{
+			name:   "agent",
+			steps:  append(append([]richStep{}, openMatcher...), richStep{label: "Agent", ok: true}),
+			inputs: []selectorInput{{value: configHookAllToolsMatcher, ok: true}, {value: "Review the plan.", ok: true}},
+			want:   `{"prompt":"Review the plan.","type":"agent"}`,
+		},
+		{
+			name:   "http",
+			steps:  append(append([]richStep{}, openMatcher...), richStep{label: "HTTP", ok: true}),
+			inputs: []selectorInput{{value: configHookAllToolsMatcher, ok: true}, {value: "https://hooks.example.com/review", ok: true}},
+			want:   `{"type":"http","url":"https://hooks.example.com/review"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := newConfigPanelSession(nil)
+			selector := &scriptedSelector{}
+			runConfigPanel(t, session, selector, append(append([]richStep{}, openHooks...), tc.steps...), tc.inputs)
+
+			// The event's empty matcher list, then the complete matcher: never a
+			// candidate the loader refuses, and never a second write to finish
+			// one.
+			if len(session.writes) != 2 {
+				t.Fatalf("expected the event and the matcher, got %+v", session.writes)
+			}
+			if got := string(session.writes[0].raw); got != `{"PreToolUse":[]}` {
+				t.Fatalf("the event's row = %s", got)
+			}
+			raw := session.writes[1].raw
+			var hooks appcfg.HooksSettings
+			if err := json.Unmarshal(raw, &hooks); err != nil {
+				t.Fatalf("the written section does not parse: %v (%s)", err, raw)
+			}
+			if err := appcfg.ValidateHooksSettings(hooks); err != nil {
+				t.Fatalf("the panel wrote a hook the loader refuses: %v (%s)", err, raw)
+			}
+			matchers := hooks["PreToolUse"]
+			if len(matchers) != 1 || len(matchers[0].Hooks) != 1 {
+				t.Fatalf("matchers = %+v, want one matcher with one action", matchers)
+			}
+			// The stored action, as the row holds it: the type and the one field
+			// that type needs, and nothing a reader never asked for.
+			var events map[string][]struct {
+				Hooks []map[string]any `json:"hooks"`
+			}
+			if err := json.Unmarshal(raw, &events); err != nil {
+				t.Fatalf("the written section does not parse: %v (%s)", err, raw)
+			}
+			action, err := json.Marshal(events["PreToolUse"][0].Hooks[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(action); got != tc.want {
+				t.Fatalf("action = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// The other half of the same rule: an action the loader would refuse never
+// reaches a write, and the loader's own sentence is the page's next line, so a
+// matcher is never left holding an action the store would not take.
+func TestConfigPanelRefusesAnIncompleteHookBeforeWriting(t *testing.T) {
+	session := newConfigPanelSession(nil)
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "hooks", ok: true},
+		{label: "Hook events", ok: true},
+		{label: configAddRowLabel, ok: true},
+		{label: "PreToolUse", ok: true},
+		{label: "PreToolUse", ok: true},
+		{label: configRowOpenLabel, ok: true},
+		{label: configAddRowLabel, ok: true},
+		{label: "HTTP", ok: true},
+	}, []selectorInput{{value: configHookAllToolsMatcher, ok: true}, {value: "hooks.example.com/review", ok: true}})
+
+	if len(session.writes) != 1 {
+		t.Fatalf("only the event's row may land, got %+v", session.writes)
+	}
+	if !strings.Contains(pageLabels(selector), "http hook requires absolute url") {
+		t.Fatalf("the loader's refusal must reach the page: %s", pageLabels(selector))
 	}
 }
 
@@ -221,7 +418,6 @@ func TestConfigPanelClearsAFieldToItsDefault(t *testing.T) {
 		{label: "features", ok: true},
 		{label: "Memory", ok: true},
 		{label: configBoolUnsetLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 	}, nil)
 
@@ -244,7 +440,6 @@ func TestConfigPanelRefusesAnOutOfRangeNumber(t *testing.T) {
 		{label: "cron", ok: true},
 		{label: "Keep days", ok: true},
 		{label: "Keep days", ok: true},
-		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "99999", ok: true}, {value: "45", ok: true}})
 
@@ -269,7 +464,6 @@ func TestConfigPanelClampsANumberToItsCeiling(t *testing.T) {
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "memories", ok: true},
 		{label: "Results per search", ok: true},
-		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "99", ok: true}})
 
@@ -282,7 +476,8 @@ func TestConfigPanelClampsANumberToItsCeiling(t *testing.T) {
 }
 
 // A refused write keeps the panel open and repeats the validator's own words:
-// a section the loader will not compose is explained, never swallowed.
+// a section the loader will not compose is explained, never swallowed — and the
+// value the section holds is the one it held before the attempt (plan 321).
 func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	session.writeErr = errStubConfigRefusal
@@ -291,7 +486,6 @@ func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 		{label: "features", ok: true},
 		{label: "Memory", ok: true},
 		{label: configBoolOnLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 		{ok: false},
 	}, nil)
@@ -299,11 +493,20 @@ func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 	if prompts := strings.Join(selector.richLabels, "\n"); !strings.Contains(prompts, "config section memories: invalid") {
 		t.Fatalf("the refusal text must reach the page; prompts:\n%s", prompts)
 	}
-	if text := frameText(renderer); strings.Contains(text, configSavedNotice) {
-		t.Fatalf("a refused save must not report success; frames:\n%s", text)
+	if text := frameText(renderer); text != "" {
+		t.Fatalf("a refused write must not report anything but the page's line; frames:\n%s", text)
 	}
 	if len(session.writes) != 0 {
-		t.Fatalf("a refused save must not reach the store again, got %+v", session.writes)
+		t.Fatalf("a refused write stores nothing, got %+v", session.writes)
+	}
+	// The value did not land, so the page drawn after the refusal still reads
+	// the default: the refusal is not a half-applied edit.
+	page := lastPageWith(selector, "Memory")
+	if page == nil {
+		t.Fatalf("the features page was never drawn after the refusal: %v", selector.richLabels)
+	}
+	if row := findRow(t, page, "Memory"); !strings.HasPrefix(row.Description, "now: default") {
+		t.Fatalf("the refused value is on the page: %q", row.Description)
 	}
 }
 
@@ -372,7 +575,6 @@ func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
 		{label: configNewTextRow, ok: true},
 		{label: configUpRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "新", ok: true}})
 
@@ -385,7 +587,8 @@ func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
 }
 
 // Rows can be added and deleted, and a list's rows are its elements — the
-// shape an unset list section has no value to read the shape from.
+// shape an unset list section has no value to read the shape from. Each of the
+// two edits is its own write (plan 321).
 func TestConfigPanelAddsAndDeletesARow(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"sandbox_workspace_write": `{"writable_roots":["/a"]}`})
 	selector := &scriptedSelector{}
@@ -397,14 +600,16 @@ func TestConfigPanelAddsAndDeletesARow(t *testing.T) {
 		{label: "#1", ok: true},
 		{label: configRowDropLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "/b", ok: true}})
 
-	if len(session.writes) != 1 {
-		t.Fatalf("expected one write, got %d", len(session.writes))
+	if len(session.writes) != 2 {
+		t.Fatalf("expected the add and the delete to write, got %+v", session.writes)
 	}
-	if raw := string(session.writes[0].raw); raw != `{"writable_roots":["/b"]}` {
+	if raw := string(session.writes[0].raw); raw != `{"writable_roots":["/a","/b"]}` {
+		t.Fatalf("the added row = %s", raw)
+	}
+	if raw := string(session.writes[1].raw); raw != `{"writable_roots":["/b"]}` {
 		t.Fatalf("raw = %s", raw)
 	}
 }
@@ -420,7 +625,6 @@ func TestConfigPanelAddsToAnUnsetList(t *testing.T) {
 		{label: configAddRowLabel, ok: true},
 		{label: configNewTextRow, ok: true},
 		{label: configUpRowLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "/tmp2", ok: true}})
 
@@ -845,7 +1049,6 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 	// three-state words. Named so a failure points at the constant rather than
 	// at a line number that moves.
 	chrome := map[string]string{
-		"configSaveRowLabel":   configSaveRowLabel,
 		"configBackRowLabel":   configBackRowLabel,
 		"configAddRowLabel":    configAddRowLabel,
 		"configUpRowLabel":     configUpRowLabel,
@@ -853,7 +1056,6 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 		"configRowOpenLabel":   configRowOpenLabel,
 		"configRowDropLabel":   configRowDropLabel,
 		"configRowBackLabel":   configRowBackLabel,
-		"configSavedNotice":    configSavedNotice,
 		"configFileOnlyNote":   configFileOnlyNote,
 		"configBoolOnLabel":    configBoolOnLabel,
 		"configBoolOffLabel":   configBoolOffLabel,
@@ -915,6 +1117,17 @@ func findRow(t *testing.T, items []SelectItem, label string) SelectItem {
 	}
 	t.Fatalf("no row labelled %q in %+v", label, rowLabels(items))
 	return SelectItem{}
+}
+
+// lastPageWith is the last page the panel drew that holds a row labelled label:
+// the state a refusal is read in, rather than a page that closed after it.
+func lastPageWith(selector *scriptedSelector, label string) []SelectItem {
+	for i := len(selector.richItems) - 1; i >= 0; i-- {
+		if slices.Contains(rowLabels(selector.richItems[i]), label) {
+			return selector.richItems[i]
+		}
+	}
+	return nil
 }
 
 // pageLabels joins every page's heading the panel showed, so a refusal or a
@@ -1037,7 +1250,6 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 				openDefinitions, addRow,
 				{ok: false}, // the new agent's page closes
 				{ok: false}, // the definitions page closes
-				{label: configSaveRowLabel, ok: true},
 				{ok: false},
 			},
 			[]selectorInput{{value: "review-agent", ok: true}, {value: "", ok: true}},
@@ -1059,7 +1271,7 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 
 	t.Run("a typed display name wins over the title-cased id", func(t *testing.T) {
 		session, _ := newCase(t,
-			[]richStep{openDefinitions, addRow, {ok: false}, {ok: false}, {label: configSaveRowLabel, ok: true}, {ok: false}},
+			[]richStep{openDefinitions, addRow, {ok: false}, {ok: false}, {ok: false}},
 			[]selectorInput{{value: "a_b", ok: true}, {value: "Review Bot", ok: true}},
 			`{"definitions":{"main":{"primary":true}}}`,
 		)
@@ -1117,7 +1329,6 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 				{label: configNewTextRow, ok: true},
 				{ok: false},
 				{ok: false},
-				{label: configSaveRowLabel, ok: true},
 				{ok: false},
 			},
 			[]selectorInput{{value: "note", ok: true}, {value: "hello", ok: true}},
@@ -1134,25 +1345,23 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 	})
 }
 
-// A save that names a system subagent entry is still the loader's to refuse: the
-// panel's early guard explains the row, and the validator judges the section.
+// A write that names a system subagent entry is still the loader's to refuse:
+// the panel's early guard explains the row, and the validator judges the
+// section the edit would store.
 func TestConfigPanelSurfacesTheLoadersSystemEntryRefusal(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"subagents":[{"name":"goal-evaluator"}]}}}`})
 	session.writeErr = errStubSystemEntryRefusal
 	selector := &scriptedSelector{}
 	renderer := runConfigPanel(t, session, selector, []richStep{
-		{label: "Agent definitions", ok: true},
+		{label: "Network retry limit", ok: true},
 		{ok: false},
-		{label: configSaveRowLabel, ok: true},
-		{ok: false},
-		{ok: false},
-	}, nil, "agents")
+	}, []selectorInput{{value: "5", ok: true}}, "agents")
 
 	if !strings.Contains(pageLabels(selector), "is dispatched by the system and cannot be configured") {
 		t.Fatalf("the loader's refusal must reach the page: %s", pageLabels(selector))
 	}
-	if text := frameText(renderer); strings.Contains(text, configSavedNotice) {
-		t.Fatalf("a refused save must not report success: %s", text)
+	if text := frameText(renderer); text != "" {
+		t.Fatalf("a refused write reports the page's line alone: %s", text)
 	}
 }
 
@@ -1215,7 +1424,6 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 		{label: configRowEditLabel, ok: true},
 		{label: configNewTextRow, ok: true},
 		{label: configUpRowLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 	}, []selectorInput{{value: "llm-conditional", ok: true}}, "subagent_models")
 
 	if len(selector.richItems) == 0 {
@@ -1295,7 +1503,6 @@ func TestConfigPanelSubagentModelsSeedsASharedSubagent(t *testing.T) {
 		{label: configAddRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 	}, nil, "subagent_models")
 
 	if len(session.writes) != 1 {
@@ -1384,17 +1591,19 @@ func agentSubagentsSteps(more []richStep) []richStep {
 	return append(steps, more...)
 }
 
-// savedAgentsDoc is the one agents write a run made, decoded.
+// savedAgentsDoc is the agents document as the last write left it, decoded:
+// every edit writes the whole section, so the last row is the section's state.
 func savedAgentsDoc(t *testing.T, session *configPanelTestSession) map[string]any {
 	t.Helper()
-	if len(session.writes) != 1 {
-		t.Fatalf("expected one write, got %+v", session.writes)
+	if len(session.writes) == 0 {
+		t.Fatal("nothing was written")
 	}
-	if session.writes[0].section != "agents" {
-		t.Fatalf("the write went to %q, want agents", session.writes[0].section)
+	last := session.writes[len(session.writes)-1]
+	if last.section != "agents" {
+		t.Fatalf("the write went to %q, want agents", last.section)
 	}
 	var doc map[string]any
-	if err := json.Unmarshal(session.writes[0].raw, &doc); err != nil {
+	if err := json.Unmarshal(last.raw, &doc); err != nil {
 		t.Fatalf("the saved document does not parse: %v", err)
 	}
 	return doc
@@ -1427,7 +1636,6 @@ func TestConfigPanelAgentPageListsSharedSubagentsDisabled(t *testing.T) {
 		{label: configUpRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 	}), nil, "agents")
 
 	// The row list carries the shared subagent with its status and the
@@ -1474,7 +1682,6 @@ func TestConfigPanelAgentPageDisablesASharedSubagent(t *testing.T) {
 		{label: configUpRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 	}), nil, "agents")
 
 	entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
@@ -1697,7 +1904,6 @@ func TestConfigPanelEffortPickerWritesTheChosenLevel(t *testing.T) {
 			runConfigPanel(t, session, selector, []richStep{
 				{label: "Goal check thinking level", ok: true},
 				{label: tc.pick, ok: true},
-				{label: configSaveRowLabel, ok: true},
 			}, nil, "agents")
 
 			if len(session.writes) != 1 {
@@ -1785,7 +1991,6 @@ func TestConfigPanelEffortPickerOnAStoredModelRow(t *testing.T) {
 		{label: configAddRowLabel, ok: true},
 		{label: "Medium", ok: true},
 		{label: configUpRowLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 	}, []selectorInput{{value: configEffortKey, ok: true}}, "subagent_models")
 
 	got := effortPickerItems(t, selector)
@@ -1832,7 +2037,6 @@ func TestConfigPanelEffortPickerOnASubagentEntry(t *testing.T) {
 		{label: configUpRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
-		{label: configSaveRowLabel, ok: true},
 	}), nil, "agents")
 
 	got := effortPickerItems(t, selector)

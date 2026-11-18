@@ -277,10 +277,10 @@ var configSectionSchemas = []configSectionSchema{
 	},
 	{
 		Name: "hooks", Title: "Hooks", Tab: configTabAgents,
-		Summary: "Event hooks (command / prompt)",
+		Summary: "Run configured actions at lifecycle events",
 		Fields: []configField{{
 			Label: "Hook events", Kind: configFieldRows,
-			Hint: "One event name per row (e.g. pre_tool_use); a row holds its matcher list",
+			Hint: "Command, prompt, agent and HTTP hooks are supported",
 		}},
 	},
 	{

@@ -2,12 +2,13 @@
 // database stores, browsable and editable from the terminal, plus the two
 // forebrain.yaml sections the panel only shows.
 //
-// A save writes the section's JSON through the state store's one legal write
-// path — ConfigStore.UpdateSection, with the process-wide section validator
-// behind it — and nothing is applied here: the change lands on the next
-// turn's configuration sync. That is why every successful save says the same
-// sentence, and why a rejected write says the validator's own words instead
-// of a shape of its own.
+// A confirmed edit writes the section's JSON through the state store's one
+// legal write path — ConfigStore.UpdateSection, with the process-wide section
+// validator behind it — and nothing is applied here: the change lands on the
+// next turn's configuration sync. The write is the save (plan 321): the panel
+// keeps no draft, so what a page shows is what the database holds, and a
+// refused candidate leaves the section exactly as it was with the validator's
+// own words on the page.
 package tui
 
 import (
@@ -32,7 +33,6 @@ import (
 
 // The panel's fixed rows and notice lines.
 const (
-	configSaveRowLabel = "Save and apply"
 	configBackRowLabel = "Back to sections"
 	configAddRowLabel  = "+ Add a row"
 	configUpRowLabel   = "Up one level"
@@ -41,7 +41,6 @@ const (
 	configRowDropLabel = "Delete this row"
 	configRowBackLabel = "Back"
 
-	configSavedNotice = "Written to the database; applies from the next turn"
 	// configFileOnlyNote is the read-only tail every forebrain.yaml section
 	// carries: the panel must not look like an editor for a section it
 	// cannot write.
@@ -150,8 +149,8 @@ func (s *ChatSession) UpdateConfigSection(ctx context.Context, section string, r
 }
 
 // configPanel is the open /config panel: the snapshot it read when it opened
-// and the selector it drives. Every edit is staged in the section's own JSON
-// tree and written only when the user chooses to save.
+// and the selector it drives. An edit lands in the store as it is confirmed
+// (plan 321): the panel holds no draft of its own.
 type configPanel struct {
 	sel      Selector
 	renderer *Renderer
@@ -165,6 +164,11 @@ type configPanel struct {
 	// row id is named through it, since no section carries the names (plan
 	// 313).
 	models []appcfg.LLMModelConfig
+	// section is the stored section the open page writes — a projection
+	// writes the section it presents — and write is the call that stores it.
+	// Together they are the page's one write path (plan 321).
+	section string
+	write   func(raw json.RawMessage) error
 }
 
 func newConfigPanel(sel Selector, renderer *Renderer, session configPanelSession) *configPanel {
@@ -308,7 +312,9 @@ func (p *configPanel) sectionDescription(schema configSectionSchema) string {
 }
 
 // editSection runs one section's page. It reports whether the panel stays
-// open: true means the user asked to go back to the list.
+// open: true means the user asked to go back to the list. Every field edit
+// writes the section as it is confirmed, so the page holds no draft and the
+// only way out is back (plan 321).
 func (p *configPanel) editSection(ctx context.Context, name string) bool {
 	schema, ok := configSectionSchemaFor(name)
 	if !ok {
@@ -319,6 +325,13 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 		p.showFileSection(schema)
 		return true
 	}
+	p.section = schema.storeSection()
+	p.write = func(raw json.RawMessage) error {
+		return p.session.UpdateConfigSection(ctx, p.section, raw)
+	}
+	defer func() {
+		p.section, p.write = "", nil
+	}()
 	doc := p.sectionDoc(name)
 	notice := ""
 	for {
@@ -333,16 +346,6 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 			return true
 		}
 		switch owners[idx] {
-		case configRowSave:
-			if err := p.save(ctx, name, doc); err != nil {
-				// The validator's own words: a refusal is explained, never
-				// swallowed into a generic "save failed", and the staged
-				// edits stay on the page so they can be corrected.
-				notice = err.Error()
-				continue
-			}
-			p.renderSaved(name)
-			return true
 		case configRowBack:
 			return true
 		default:
@@ -352,18 +355,16 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 	}
 }
 
-// The page's two action rows carry negative owners so a field index and an
-// action never collide.
-const (
-	configRowSave = -1
-	configRowBack = -2
-)
+// The page's one action row carries a negative owner so a field index and an
+// action never collide. Backing out is also what Esc does; the row is there
+// for a reader who is looking for it.
+const configRowBack = -2
 
 // fieldItems is one section's page: its settings with their current values,
-// then save and back.
+// then the way back.
 func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectItem, []int) {
-	items := make([]SelectItem, 0, len(schema.Fields)+2)
-	owners := make([]int, 0, len(schema.Fields)+2)
+	items := make([]SelectItem, 0, len(schema.Fields)+1)
+	owners := make([]int, 0, len(schema.Fields)+1)
 	for i, field := range schema.Fields {
 		if !configFieldListed(field, p.claudeCode) {
 			continue
@@ -372,11 +373,8 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 		items = append(items, SelectItem{Label: field.Label, Description: description, Status: status})
 		owners = append(owners, i)
 	}
-	items = append(items,
-		SelectItem{Label: configSaveRowLabel, Description: "Writes the database (fb_config); applies from the next turn"},
-		SelectItem{Label: configBackRowLabel, Description: "Back to the section list; unsaved changes are dropped"},
-	)
-	owners = append(owners, configRowSave, configRowBack)
+	items = append(items, SelectItem{Label: configBackRowLabel, Description: "Back to the section list"})
+	owners = append(owners, configRowBack)
 	return items, owners
 }
 
@@ -509,36 +507,33 @@ func (p *configPanel) showFileSection(schema configSectionSchema) {
 	}
 }
 
-// save writes the staged document through the session, and keeps the panel's
-// own copy in step so the section list's marker is right the moment it is
-// shown again. A projection saves under the section it presents (plan 314): the
-// document is that section's whole row, so keys the projection does not show
-// travel back untouched and nothing is lost.
-func (p *configPanel) save(ctx context.Context, name string, doc any) error {
+// save writes the open page's document as its section's row — the one write
+// path an edit takes (plan 321) — and keeps the panel's own copy in step so the
+// section list's marker is right the moment it is shown again. A projection
+// saves under the section it presents (plan 314): the document is that
+// section's whole row, so keys the projection does not show travel back
+// untouched and nothing is lost.
+func (p *configPanel) save(doc any) error {
 	raw, err := configMarshalDoc(doc)
 	if err != nil {
 		return err
 	}
-	section := name
-	if schema, ok := configSectionSchemaFor(name); ok {
-		section = schema.storeSection()
-	}
-	if err := p.session.UpdateConfigSection(ctx, section, raw); err != nil {
+	if err := p.write(raw); err != nil {
 		return err
 	}
 	if len(raw) == 0 {
-		delete(p.raw, section)
+		delete(p.raw, p.section)
 	} else {
-		p.raw[section] = raw
+		p.raw[p.section] = raw
 	}
 	return nil
 }
 
-func (p *configPanel) renderSaved(name string) {
-	if p.renderer == nil {
-		return
-	}
-	p.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: name, Content: configSavedNotice, Final: true})
+// reloadSection re-reads the open page's document from what the store still
+// holds: a refused write is not applied, so the page must not keep showing the
+// value that did not land.
+func (p *configPanel) reloadSection() any {
+	return p.sectionDoc(p.section)
 }
 
 func (p *configPanel) printError(err error) {
@@ -835,14 +830,20 @@ func (p *configPanel) configModelEfforts(ref string) []string {
 	return turn.SetupReasoningEfforts(provider, model, apiPath, levels)
 }
 
-// assign stages one edit in the document and reports its refusal, if any. label
-// is the setting's own name, the one the panel showed the user: a refusal names
-// it rather than the configuration path it lives at (plan 313 Step 5b).
+// assign applies one edit and writes the section once: the confirmed edit is
+// the save (owner 2026-11-16, plan 321), so there is no draft to write later.
+// label is the setting's own name, the one the panel showed the user: a refusal
+// names it rather than the configuration path it lives at (plan 313 Step 5b). A
+// candidate the store refuses is not applied — the page is read back from what
+// the database still holds — and the validator's own words become its next line.
 func (p *configPanel) assign(doc any, path []string, value any, remove bool, label string) (any, string) {
 	updated, err := configAssign(doc, path, value, remove, label)
 	if err != nil {
 		p.printError(err)
 		return doc, err.Error()
+	}
+	if err := p.save(updated); err != nil {
+		return p.reloadSection(), err.Error()
 	}
 	return updated, ""
 }
@@ -940,7 +941,7 @@ func (p *configPanel) rowItems(doc any, path []string, container any, keys []str
 	}
 	items = append(items,
 		SelectItem{Label: configAddRowLabel, Description: "Adds a row at this level"},
-		SelectItem{Label: configUpRowLabel, Description: "Back up one level; rows already saved stay saved"},
+		SelectItem{Label: configUpRowLabel, Description: "Back up one level"},
 	)
 	owners = append(owners, configRowAdd, configRowUp)
 	return items, owners
@@ -1053,7 +1054,15 @@ const (
 	// status column; the panel keeps it in the row's description.
 	configAgentOverridePrefix  = "agent override: "
 	configGlobalDefaultPrefix  = "global default: "
-	configPrimaryCreatedNotice = "Primary agent created in your draft. Add a model provider, then choose its default model."
+	configPrimaryCreatedNotice = "Primary agent created. Choose its default model from the global model table."
+	// The hooks section's own words (plan 321): the event a matcher list
+	// belongs to, the matcher that starts one, the action a matcher runs, and
+	// the key a matcher's actions are stored under.
+	configHooksKey            = "hooks"
+	configHookEventHeading    = "Hook event"
+	configHookMatcherHeading  = "Tool matcher"
+	configHookAllToolsMatcher = "*"
+	configHookTypeHeading     = "Action type"
 	// configSharedSubagentNotice is what a read-only shared row answers when one
 	// of its definition's fields is opened: the definition is edited on the
 	// "Subagent models" page, never here (plan 314).
@@ -1271,7 +1280,7 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 	}
 	items := []SelectItem{
 		{Label: editLabel, Description: configRowDescription(value)},
-		{Label: configRowDropLabel, Description: "Removes it from this level; applies after you save"},
+		{Label: configRowDropLabel, Description: "Removes it from this level"},
 		{Label: configRowBackLabel, Description: "Back to the row list"},
 	}
 	idx, ok, err := p.sel.SelectRich(field.Label+" "+configRowLabel(key, 0, false), items, 0)
@@ -1375,13 +1384,13 @@ func configSharedSwitchText(enabled bool) string {
 	return "Off: this agent does not dispatch it"
 }
 
-// configSharedSwitchedNotice says what the staged edit did, in the terms the
-// page uses: the effect lands when the section is saved.
+// configSharedSwitchedNotice says what the edit did, in the terms the page
+// uses: the switch is written as it is thrown (plan 321).
 func configSharedSwitchedNotice(name string, enabled bool) string {
 	if enabled {
-		return name + " enabled for this agent; save to apply"
+		return name + " enabled for this agent"
 	}
-	return name + " disabled for this agent; save to apply"
+	return name + " disabled for this agent"
 }
 
 // configSharedRowSummary is a shared subagent's row on an agent's page: the
@@ -1448,9 +1457,13 @@ func (p *configPanel) editRowValue(doc any, rowPath []string, field configField,
 // user shapes it straight away. The definitions map at the top level is the one
 // place a row is a primary agent: it asks for an id and a display name and
 // seeds the prototype's agent shape, instead of asking what type the value is
-// (plan 313, scene create-agent).
+// (plan 313, scene create-agent). The hooks section is the one place a row must
+// be complete before it exists (plan 321), so it takes its own path.
 func (p *configPanel) addRow(doc any, path []string, field configField) (any, string) {
 	container, _ := configLookupValue(doc, path)
+	if hookRowsPage(field) {
+		return p.addHookRow(doc, path, field, container)
+	}
 	list := configContainerIsList(field, container)
 	if list && len(path) == 1 && path[0] == configSharedSubagentsKey {
 		return p.addSharedSubagent(doc, path, field, container)
@@ -1609,6 +1622,181 @@ func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField,
 	}
 	opened, note := p.editRows(updated, configJoinPath(path, key), field, configPrimaryCreatedNotice)
 	return opened, note
+}
+
+// hookRowsPage reports whether a row page is the hooks section's own tree. Its
+// single descriptor is the only rows field the schema gives no path of its own,
+// and editRows hands that same descriptor down at every level, so the path is
+// what says which level a row is being added to (plan 321).
+func hookRowsPage(field configField) bool {
+	return field.Kind == configFieldRows && len(configFieldPath(field)) == 0
+}
+
+// addHookRow creates a hooks section row the only way the loader accepts it. A
+// hook is validated whole — an action needs the field its type names, a matcher
+// needs at least one action, an event needs a matcher list — so every level asks
+// everything its row needs and writes the complete row in one candidate. The
+// store refuses each partial shape ({} , {type}, a command turned into an HTTP
+// hook without a url), which is why there is no draft for hooks and no second
+// write to finish one (plan 321, owner 2026-11-17).
+func (p *configPanel) addHookRow(doc any, path []string, field configField, container any) (any, string) {
+	switch {
+	case len(path) == 0:
+		return p.addHookEvent(doc, path, field, container)
+	case len(path) == 1:
+		return p.addHookMatcher(doc, path, field, container)
+	case len(path) == 3 && path[2] == configHooksKey:
+		return p.addHookAction(doc, path, field, container)
+	}
+	return doc, ""
+}
+
+// addHookEvent adds one event's matcher list. The loader accepts an event with
+// no matchers — that is a hook list nobody has configured yet — so the row is
+// complete as soon as it exists.
+func (p *configPanel) addHookEvent(doc any, path []string, field configField, container any) (any, string) {
+	events := appcfg.HookEventNames()
+	items := make([]SelectItem, 0, len(events))
+	for _, event := range events {
+		items = append(items, SelectItem{Label: event})
+	}
+	idx, ok, err := p.sel.SelectRich(configHookEventHeading, items, 0)
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	if !ok || idx < 0 || idx >= len(events) {
+		return doc, ""
+	}
+	rows, isMap := container.(map[string]any)
+	if !isMap || rows == nil {
+		rows = make(map[string]any, 1)
+	}
+	event := events[idx]
+	if _, dup := rows[event]; dup {
+		return doc, event + " is already configured"
+	}
+	rows[event] = []any{}
+	return p.assign(doc, path, rows, false, field.Label)
+}
+
+// addHookMatcher adds one matcher together with its first action: a matcher that
+// carries none is one the loader refuses, so the two are asked as one row and
+// written once.
+func (p *configPanel) addHookMatcher(doc any, path []string, field configField, container any) (any, string) {
+	pattern, ok, err := p.sel.Input(configHookMatcherHeading, configHookAllToolsMatcher)
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	if !ok {
+		return doc, ""
+	}
+	action, notice, ok := p.askHookAction()
+	if !ok {
+		return doc, notice
+	}
+	rows, _ := container.([]any)
+	rows = append(append(make([]any, 0, len(rows)+1), rows...), map[string]any{
+		"matcher": strings.TrimSpace(pattern),
+		"hooks":   []any{action},
+	})
+	return p.assign(doc, path, rows, false, field.Label)
+}
+
+// addHookAction appends one action to a matcher that already exists.
+func (p *configPanel) addHookAction(doc any, path []string, field configField, container any) (any, string) {
+	action, notice, ok := p.askHookAction()
+	if !ok {
+		return doc, notice
+	}
+	rows, _ := container.([]any)
+	rows = append(append(make([]any, 0, len(rows)+1), rows...), action)
+	return p.assign(doc, path, rows, false, field.Label)
+}
+
+// askHookAction asks one action's fields — the type it performs, then the field
+// that type requires, which is the list the prototype's hook template shows —
+// and answers the complete row. The loader's own validator judges the answers
+// before anything is written, so an action the store would refuse never reaches
+// a write and the page keeps the validator's sentence.
+func (p *configPanel) askHookAction() (map[string]any, string, bool) {
+	types := appcfg.PersistentHookTypes()
+	items := make([]SelectItem, 0, len(types))
+	defaultIdx := 0
+	for _, kind := range types {
+		items = append(items, SelectItem{Label: configHookTypeLabel(kind)})
+		if kind == appcfg.HookTypeCommand {
+			defaultIdx = len(items) - 1
+		}
+	}
+	idx, ok, err := p.sel.SelectRich(configHookTypeHeading, items, defaultIdx)
+	if err != nil {
+		p.printError(err)
+		return nil, "", false
+	}
+	if !ok || idx < 0 || idx >= len(types) {
+		return nil, "", false
+	}
+	kind := types[idx]
+	required, heading := configHookRequiredField(kind)
+	text, ok, err := p.sel.Input(heading, "")
+	if err != nil {
+		p.printError(err)
+		return nil, "", false
+	}
+	if !ok {
+		return nil, "", false
+	}
+	value := strings.TrimSpace(text)
+	if value == "" {
+		return nil, configHookTypeLabel(kind) + " hooks need a " + required + "; nothing was written", false
+	}
+	action := map[string]any{"type": kind, required: value}
+	if err := appcfg.ValidateHookCommand(configHookCommand(action)); err != nil {
+		return nil, err.Error(), false
+	}
+	return action, "", true
+}
+
+// configHookRequiredField is the one field an action of this type cannot do
+// without, and the heading its page asks it under: the loader's own rule, read
+// back as the panel's question.
+func configHookRequiredField(kind string) (string, string) {
+	switch kind {
+	case appcfg.HookTypeCommand:
+		return "command", "Command"
+	case appcfg.HookTypeHTTP:
+		return "url", "Request URL"
+	default:
+		return "prompt", "Prompt"
+	}
+}
+
+// configHookCommand is the typed row the loader judges, built from the same
+// answers the stored map is: one validator, so the panel and the store cannot
+// disagree about what a complete hook is.
+func configHookCommand(action map[string]any) appcfg.HookCommand {
+	kind, _ := action["type"].(string)
+	hook := appcfg.HookCommand{Type: kind}
+	switch kind {
+	case appcfg.HookTypeCommand:
+		hook.Command, _ = action["command"].(string)
+	case appcfg.HookTypeHTTP:
+		hook.URL, _ = action["url"].(string)
+	default:
+		hook.Prompt, _ = action["prompt"].(string)
+	}
+	return hook
+}
+
+// configHookTypeLabel names one action type the way the prototype lists them;
+// the stored value stays the loader's own id.
+func configHookTypeLabel(kind string) string {
+	if kind == appcfg.HookTypeHTTP {
+		return "HTTP"
+	}
+	return configTitleCase(kind)
 }
 
 // configTitleCase names a created agent that was given no display name, the
@@ -1845,7 +2033,7 @@ func configPathLabel(segment string) string {
 	return configRowLabel(segment, 0, false)
 }
 
-// configMarshalDoc renders the staged document as the bytes its row holds. A
+// configMarshalDoc renders the page's document as the bytes its row holds. A
 // section left with nothing in it stores no row at all: an absent row is how
 // "this install uses the default" reads everywhere else.
 func configMarshalDoc(doc any) (json.RawMessage, error) {
