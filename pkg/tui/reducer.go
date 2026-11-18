@@ -4135,8 +4135,20 @@ func (r *Renderer) composerFooterSidesLocked() (string, string) {
 			lead = fullAccessFixedFooterLabel
 		}
 	}
-	return joinFooterSegments(lead, r.footer.Model, r.footer.ReasoningEffort, peerTreeFooterSegment(r.peerCount)),
+	return joinFooterSegments(lead, r.footer.Model, effortFooterLabel(r.footer.ReasoningEffort), peerTreeFooterSegment(r.peerCount)),
 		formatComposerTokenStats(r.composerTokens.get(""))
+}
+
+// effortFooterLabel is the footer's thinking-level segment: the name the one
+// label table gives the level — none reads Off, xhigh reads xHigh, exactly as
+// /model and the web chip write them (plan 318 F7) — and nothing at all when the
+// row pins no level. The segment disappears rather than saying "Default": a
+// conversation that pins nothing has nothing to report.
+func effortFooterLabel(level string) string {
+	if strings.TrimSpace(level) == "" {
+		return ""
+	}
+	return turn.EffortEnglishLabel(level)
 }
 
 // peerTreeFooterSegment is the footer's ⇄ count: how many other agents are
@@ -4168,7 +4180,7 @@ func (r *Renderer) subagentFooterLeftLocked(agentID string) string {
 	model, effort := r.subagentModels[agentID].Model, r.subagentModels[agentID].ReasoningEffort
 	return joinFooterSegments(
 		"viewing "+joinFooterSegments(agentType, shortAgentID(agentID)),
-		"esc to return", model, effort,
+		"esc to return", model, effortFooterLabel(effort),
 	)
 }
 

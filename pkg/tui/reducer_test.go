@@ -5792,6 +5792,51 @@ func TestFooterSaysHowManyAgentsShareTheTree(t *testing.T) {
 	}
 }
 
+// The footer writes a thinking level the way every other surface does — the one
+// label table's name, never the stored id — so a conversation pinned to xhigh
+// reads xHigh and one pinned to none reads Off, in the conversation's own footer
+// and in a subagent view alike (plan 318 F7). A row that pins no level has no
+// segment at all rather than saying "Default": a conversation that pins nothing
+// has nothing to report.
+func TestComposerFooterUsesTheOneEffortLabelTable(t *testing.T) {
+	renderer := NewRenderer(io.Discard, io.Discard)
+	primary := func() string {
+		renderer.mu.Lock()
+		defer renderer.mu.Unlock()
+		return stripANSI(renderer.composerFooterText(140))
+	}
+
+	renderer.SetComposerFooter(ComposerFooter{Model: "zhipuai/glm-5.3", ReasoningEffort: "xhigh"})
+	if got := primary(); !strings.Contains(got, "zhipuai/glm-5.3 xHigh") || strings.Contains(got, "xhigh") {
+		t.Fatalf("footer = %q, want the level named xHigh", got)
+	}
+
+	renderer.SetComposerFooter(ComposerFooter{Model: "zhipuai/glm-5.3", ReasoningEffort: "none"})
+	got := primary()
+	if !strings.Contains(got, "zhipuai/glm-5.3 Off") {
+		t.Fatalf("footer = %q, want the level named Off", got)
+	}
+	if strings.Contains(got, "glm-5.3 none") || strings.Contains(got, "Default") {
+		t.Fatalf("footer = %q, want the level's name and no segment for an unpinned one", got)
+	}
+
+	renderer.SetComposerFooter(ComposerFooter{Model: "zhipuai/glm-5.3"})
+	if got := primary(); strings.Contains(got, "Default") || !strings.Contains(got, "zhipuai/glm-5.3") {
+		t.Fatalf("footer = %q, want the level segment gone when nothing is pinned", got)
+	}
+
+	// The subagent view reads the same table for the level its spawn announced.
+	const agentID = "subagent-bbfae04b-820d-421c-bf30-e67c406c0dda"
+	renderer.NoteSubagentSpawned(agentID, "explore", ComposerFooter{
+		Model: "openai/gpt-4.1-mini", ReasoningEffort: "none",
+	})
+	renderer.setActiveViewLocked(agentID)
+	view := strings.TrimRight(strings.TrimSpace(stripANSI(renderer.composerFooterText(140))), " ")
+	if !strings.HasSuffix(view, "openai/gpt-4.1-mini Off") {
+		t.Fatalf("subagent footer = %q, want the level named Off", view)
+	}
+}
+
 // A folded card rebuilds its head from statusMarker, so a peer send card must
 // answer there with the same glyph its expanded card draws: the collapsed head
 // is the same card. A call that has not gone out — running, parked at its gate,

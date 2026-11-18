@@ -1069,7 +1069,9 @@ func TestReplayFeedsSubagentFooterFacts(t *testing.T) {
 	ctrl.printSessionResumeContext("s1")
 
 	left := renderer.subagentFooterLeftLocked(agentID)
-	for _, want := range []string{"general-purpose", "deepseek-chat", "high"} {
+	// The level is written by the one label table every surface uses (plan 318):
+	// the recorded "high" reaches the footer as High.
+	for _, want := range []string{"general-purpose", "deepseek-chat", "High"} {
 		if !strings.Contains(left, want) {
 			t.Fatalf("resumed subagent footer = %q, want %q in it", left, want)
 		}

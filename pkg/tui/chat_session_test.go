@@ -23687,9 +23687,10 @@ func TestSubagentFooterNamesThatSubagentsModelAndNotItsRun(t *testing.T) {
 		Model: "openai/gpt-4.1-mini", ReasoningEffort: "low",
 	})
 
-	// The conversation's own footer is untouched by any of this.
+	// The conversation's own footer is untouched by any of this. The level is
+	// written by the one label table every surface uses (plan 318 F7).
 	primary := stripANSI(r.composerFooterText(140))
-	if !strings.Contains(primary, "deepseek/deepseek-v4-flash medium") ||
+	if !strings.Contains(primary, "deepseek/deepseek-v4-flash Medium") ||
 		!strings.Contains(primary, "97%") {
 		t.Fatalf("primary footer = %q", primary)
 	}
@@ -23698,7 +23699,7 @@ func TestSubagentFooterNamesThatSubagentsModelAndNotItsRun(t *testing.T) {
 	// conversation's, which the run may not be using at all.
 	r.setActiveViewLocked(agentID)
 	running := strings.TrimRight(stripANSI(r.composerFooterText(140)), " ")
-	if running != "viewing explore bbfa esc to return openai/gpt-4.1-mini low" {
+	if running != "viewing explore bbfa esc to return openai/gpt-4.1-mini Low" {
 		t.Fatalf("own-model footer = %q", running)
 	}
 	if strings.Contains(running, "deepseek-v4-flash") {
@@ -23728,10 +23729,10 @@ func TestSubagentFooterNamesTheModelThisExecutionRunsOn(t *testing.T) {
 	})
 	r.setActiveViewLocked(agentID)
 	got := stripANSI(r.composerFooterText(140))
-	if !strings.Contains(got, "zhipuai/glm-5.3-flash high") {
+	if !strings.Contains(got, "zhipuai/glm-5.3-flash High") {
 		t.Fatalf("subagent view footer = %q, want the model this execution runs on", got)
 	}
-	if strings.Contains(got, "glm-5.3 xhigh") {
+	if strings.Contains(got, "glm-5.3 xHigh") {
 		t.Fatalf("subagent view footer borrowed the primary agent's model: %q", got)
 	}
 
