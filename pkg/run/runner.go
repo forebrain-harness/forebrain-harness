@@ -1321,6 +1321,13 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		// peer coordination, and every guard then stays quiet.
 		Peers: r.Deps.Peers,
 	}
+	// The tools' context gauge: context_budget reports the calling agent's own
+	// window and headroom, measured by the footer's and the compaction's own
+	// math. Port, not injection — a number that changed every turn would break
+	// the prompt cache prefix, so the model asks for it instead.
+	rt.ContextGauge = func(ctx context.Context) (event.TokenBudgetUpdatedPayload, bool) {
+		return CallingAgentContextBudget(r, ctx)
+	}
 	// Reads feed the language servers that are already running (a baseline
 	// for the next edit's diagnostics); they never start one.
 	if ci := r.CodeIntel; ci != nil {

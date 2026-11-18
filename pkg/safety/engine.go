@@ -437,6 +437,12 @@ var safeReadOnlyTools = map[string]struct{}{
 	"Read": {},
 	"LS":   {},
 
+	// context_budget reads the calling agent's own context gauge — the very
+	// numbers the composer footer shows unprompted on every turn. It reaches
+	// no path, writes nothing and spawns nothing, so prompting for it would
+	// gate a figure the screen already displays.
+	"context_budget": {},
+
 	// The lsp tool asks the project's language servers about code the
 	// session can already read. A call that names a file is evaluated as
 	// Read (the permission layer maps it), so Read rules govern it; what

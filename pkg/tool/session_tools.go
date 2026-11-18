@@ -26,6 +26,14 @@ func registerSessionAndMemoryTools(a ToolAdder, st *State, rt *AgentToolRuntime)
 		return nil
 	}
 	if rt != nil {
+		// Before the state-root guard: every project type, and a runtime
+		// without a state root, can still ask how full its context is.
+		cb, err := newContextBudgetTool(rt)
+		if err != nil {
+			return err
+		}
+		registerToolMeta(st, cb, contextBudgetMeta, "session", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
+		_ = st.Register(a, cb)
 		stateRoot := rt.StateRoot()
 		if strings.TrimSpace(stateRoot) == "" {
 			return registerProductTools(a, st, rt)

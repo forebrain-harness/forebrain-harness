@@ -344,6 +344,13 @@ type AgentToolRuntime struct {
 	// git command that could sweep somebody else's uncommitted work. Nil means
 	// this machine has no peer coordination, and every guard stays quiet.
 	Peers PeerWorkTree
+	// ContextGauge is the tools' port onto the engine's context gauge — the one
+	// the footer, /context and the auto-compaction decision read — for the
+	// agent making the call: its own window, occupancy and auto-compact budget.
+	// context_budget reports it on demand, so a model asks for the real numbers
+	// instead of estimating how full its context feels. Nil means this runtime
+	// has no gauge to read, and the tool says so.
+	ContextGauge func(ctx context.Context) (event.TokenBudgetUpdatedPayload, bool)
 }
 
 // StateRoot returns the per-agent state root onto which the mode/plan/todo/

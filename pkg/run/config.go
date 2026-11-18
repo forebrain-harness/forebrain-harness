@@ -2725,29 +2725,60 @@ func ContextBudget(r *Runner, conversationSessionID string, subagent *agent.Hist
 	if r != nil {
 		cfg = r.Config()
 	}
+	payload, ok := contextBudgetPayload(usage, model, limits, cfg)
+	if !ok {
+		return event.TokenBudgetUpdatedPayload{}, false
+	}
+	if subagent != nil {
+		payload.AgentID = agent.RosterKey(subagent.TaskID, subagent.AgentType)
+	}
+	return payload, true
+}
+
+// CallingAgentContextBudget is the same gauge for the agent making the call in
+// ctx: the subagent whose worker session the context is bound to, else the
+// primary agent. It takes its model from agentModelFor — the resolution the
+// routing wrappers and that agent's own compaction read — so a subagent
+// measures against its dispatch-time model rather than the conversation's.
+// Usage 0 is a fresh context, which shows the whole window. ok is false when
+// there is nothing to measure: no store, no bound session, no reading.
+func CallingAgentContextBudget(r *Runner, ctx context.Context) (event.TokenBudgetUpdatedPayload, bool) {
+	if r == nil || r.SessionStore == nil || ctx == nil {
+		return event.TokenBudgetUpdatedPayload{}, false
+	}
+	sessionID := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
+	if sessionID == "" {
+		return event.TokenBudgetUpdatedPayload{}, false
+	}
+	usage, ok := ContextOccupancy(ctx, r.SessionStore, sessionID)
+	if !ok {
+		return event.TokenBudgetUpdatedPayload{}, false
+	}
+	_, model := r.agentModelFor(ctx)
+	limits, _ := r.modelHitFor(ctx)
+	return contextBudgetPayload(usage, model, limits, r.Config())
+}
+
+// contextBudgetPayload computes one agent's gauge from its measured usage and
+// reports it unless the calculation itself produced nothing to show — the same
+// condition the surface footers used before the computation moved here.
+func contextBudgetPayload(usage int, model string, limits llm.Hit, cfg *appcfg.Root) (event.TokenBudgetUpdatedPayload, bool) {
 	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, CompactBudgetOptions(cfg))
 	if usage > 0 {
-		// A measured context reports unless the calculation itself produced
-		// nothing to show — the same condition the surface footers used
-		// before the computation moved here.
 		if budget.PercentLeft <= 0 && budget.TokenUsage <= 0 {
 			return event.TokenBudgetUpdatedPayload{}, false
 		}
 	} else if budget.ContextWindow <= 0 {
 		return event.TokenBudgetUpdatedPayload{}, false
 	}
-	payload := event.TokenBudgetUpdatedPayload{
+	return event.TokenBudgetUpdatedPayload{
 		Model:                budget.Model,
 		TokenUsage:           budget.TokenUsage,
 		PercentLeft:          budget.PercentLeft,
 		ContextWindow:        budget.ContextWindow,
 		EffectiveWindow:      budget.EffectiveContextWindow,
 		AutoCompactThreshold: budget.AutoCompactThreshold,
-	}
-	if subagent != nil {
-		payload.AgentID = agent.RosterKey(subagent.TaskID, subagent.AgentType)
-	}
-	return payload, true
+	}, true
 }
 
 // PublishContextBudget files the conversation's measured context budget at a

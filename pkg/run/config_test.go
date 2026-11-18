@@ -1803,6 +1803,88 @@ func TestPublishContextBudget(t *testing.T) {
 	}
 }
 
+// CallingAgentContextBudget is context_budget's reading: the calling agent's
+// own gauge, from the same math and the same measurement as the footer's
+// ContextBudget — one source, so a model and the screen it sits beside cannot
+// disagree.
+func TestCallingAgentContextBudgetMatchesContextBudget(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ensureRunSessions(t, db, "session-1", "session-fresh")
+	sess := state.NewSessionStore(db, "main")
+	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, "session-1", "seed")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := sess.AppendStructuredMessageForRun(
+		ctx, "session-1", seedRun.ID, "assistant", "answer", "msg-1",
+		state.ContentPartsJSON(nil, "answer"), "glm-5.3",
+		`{"input_tokens":150000,"output_tokens":2500}`, "", "", state.MessageExecTiming{},
+	); err != nil {
+		t.Fatalf("AppendStructuredMessageForRun: %v", err)
+	}
+	cfg := &appcfg.Root{
+		LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"}),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true, DefaultModel: "llm-1"},
+		}},
+	}
+	r := &Runner{Deps: (&Deps{SessionStore: sess}).WithConfig(cfg)}
+
+	usage, ok := ContextOccupancy(ctx, sess, "session-1")
+	if !ok || usage != 152500 {
+		t.Fatalf("ContextOccupancy = %d, %v; want the measured 152500", usage, ok)
+	}
+	// A turn carries its selection in the context and has its row stored; both
+	// resolutions must name the same model.
+	sel := state.SessionModelSelection{ModelID: "llm-1", Provider: "zhipuai", Model: "glm-5.3"}
+	for _, sid := range []string{"session-1", "session-fresh"} {
+		if _, err := sess.SaveSessionModelSelection(ctx, sid, sel); err != nil {
+			t.Fatalf("SaveSessionModelSelection(%s): %v", sid, err)
+		}
+	}
+	carried := PrimaryModelState{ModelID: sel.ModelID, Provider: sel.Provider, Model: sel.Model}
+
+	callCtx := WithSessionModelSelection(llm.WithAgentSessionID(ctx, "session-1"), carried)
+	got, ok := CallingAgentContextBudget(r, callCtx)
+	if !ok {
+		t.Fatal("CallingAgentContextBudget returned false for a measured session")
+	}
+	want, ok := ContextBudget(r, "session-1", nil, usage)
+	if !ok {
+		t.Fatal("ContextBudget returned false for the same session")
+	}
+	if got != want {
+		t.Fatalf("calling-agent gauge = %+v, want the footer's %+v", got, want)
+	}
+	if got.TokenUsage != 152500 || got.PercentLeft != 83 || got.ContextWindow != 1000000 {
+		t.Fatalf("gauge = %+v, want 152500 used of 1000000 at 83%% left", got)
+	}
+
+	// A session with nothing measured yet is a fresh context: the whole window,
+	// nothing used — not an error and not a zero window.
+	freshCtx := WithSessionModelSelection(llm.WithAgentSessionID(ctx, "session-fresh"), carried)
+	fresh, ok := CallingAgentContextBudget(r, freshCtx)
+	if !ok || fresh.TokenUsage != 0 || fresh.PercentLeft != 100 || fresh.ContextWindow != 1000000 {
+		t.Fatalf("fresh context gauge = %+v, %v; want the whole 1M window at 100%%", fresh, ok)
+	}
+
+	// Nothing to read: no runner, no store, no bound session.
+	if _, ok := CallingAgentContextBudget(nil, callCtx); ok {
+		t.Fatal("CallingAgentContextBudget with no runner reported a gauge")
+	}
+	if _, ok := CallingAgentContextBudget(&Runner{Deps: &Deps{}}, callCtx); ok {
+		t.Fatal("CallingAgentContextBudget with no session store reported a gauge")
+	}
+	if _, ok := CallingAgentContextBudget(r, WithSessionModelSelection(ctx, carried)); ok {
+		t.Fatal("CallingAgentContextBudget with no bound session reported a gauge")
+	}
+}
+
 // --- office plan mode (plan 148) -----------------------------------------
 
 func newPlanToolForTest(t *testing.T, name string) *llm.Tool {
