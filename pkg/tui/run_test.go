@@ -3331,17 +3331,16 @@ func TestWorkingStatusFormatterAppendsLatestCounters(t *testing.T) {
 	}
 }
 
-// The live "Working" line reports how long the model took to start answering
-// the turn, once the engine has measured it, so the wait is visible before the
-// turn is over.
-func TestWorkingStatusFormatterAppendsFirstToken(t *testing.T) {
+// The live "Working" line says nothing about the first-token wait, even once
+// the engine has measured it: the terminal no longer shows the figure.
+func TestWorkingStatusFormatterOmitsFirstToken(t *testing.T) {
 	t.Setenv("TMUX", "")
 	formatter := workingStatusFormatter(func() Counters {
 		return Counters{PlanDone: 1, PlanTotal: 3, PlanActive: "Writing tests", FirstToken: 1200 * time.Millisecond}
 	})
 	got := formatter(20*time.Second, 0, "")
-	if got != "| Working (20s • esc to interrupt) ☑1/3 Writing tests first token 1.2s" {
-		t.Fatalf("working status with first token = %q", got)
+	if got != "| Working (20s • esc to interrupt) ☑1/3 Writing tests" {
+		t.Fatalf("working status with first token measured = %q", got)
 	}
 }
 
@@ -8135,11 +8134,10 @@ func TestSubagentWorkingLineShowsItsOwnRetry(t *testing.T) {
 	}
 }
 
-// A subagent's Working line carries its execution's first-token wait once the
-// engine has measured it, the same segment the conversation's own Working line
-// shows for the turn — and an execution that produced no output shows none,
-// not a "0s".
-func TestSubagentWorkingLineShowsFirstToken(t *testing.T) {
+// A subagent's Working line says nothing about its execution's first-token
+// wait — measured or not, the terminal no longer shows the figure — while the
+// tracker keeps the first wait it measured.
+func TestSubagentWorkingLineOmitsFirstToken(t *testing.T) {
 	tracker := NewTracker()
 	tracker.ObserveAgent("task-ft", "exec-ft", time.Now())
 	tracker.ObserveAgentFirstToken("task-ft", 1200*time.Millisecond)
@@ -8150,12 +8148,15 @@ func TestSubagentWorkingLineShowsFirstToken(t *testing.T) {
 
 	formatter := agentWorkingStatusFormatter(tracker.SnapshotAgentRun)
 	sub := formatter(time.Second, 0, "task-ft")
-	if !strings.Contains(sub, "first token 1.2s") {
-		t.Fatalf("subagent working line = %q, want its first-token wait", sub)
+	if strings.Contains(sub, "first token") {
+		t.Fatalf("subagent working line = %q, must show no first-token wait", sub)
 	}
 	silent := formatter(time.Second, 0, "task-silent")
 	if strings.Contains(silent, "first token") {
 		t.Fatalf("silent subagent working line = %q, must show no first-token wait", silent)
+	}
+	if snap, _ := tracker.SnapshotAgentRun("task-ft"); snap.Counters.FirstToken != 1200*time.Millisecond {
+		t.Fatalf("agent first token = %v, want the first measured 1.2s kept", snap.Counters.FirstToken)
 	}
 }
 

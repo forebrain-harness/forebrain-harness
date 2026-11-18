@@ -4880,12 +4880,6 @@ func workingStatusFormatter(counterSnapshot func() Counters) transientStatusForm
 		if c := formatWorkingCounters(counters); c != "" {
 			title += " " + c
 		}
-		// How long the model took to start answering this turn, once the
-		// engine has measured it. It is the run's own figure, shown live here
-		// before the "Worked for" line repeats it when the turn ends.
-		if wait := firstTokenLabel(counters.FirstToken); wait != "" {
-			title += " " + wait
-		}
 		return title
 	}
 }
@@ -4919,11 +4913,6 @@ func agentWorkingStatusFormatter(agentSnapshot func(string) (AgentRunSnapshot, b
 		title := transientSpinnerFrame(tick) + " Working (" + formatWorkingElapsed(snap.Elapsed) + ")"
 		if counters := formatWorkingCounters(snap.Counters); counters != "" {
 			title += " " + counters
-		}
-		// The wait this execution's model cost before its first output, live
-		// here the way the conversation's own Working line shows the turn's.
-		if wait := firstTokenLabel(snap.Counters.FirstToken); wait != "" {
-			title += " " + wait
 		}
 		return title
 	}

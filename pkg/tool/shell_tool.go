@@ -73,16 +73,16 @@ func agentRuntimeEnv(rt *AgentToolRuntime) []string {
 type ShellInput struct {
 	Command               string                           `json:"command" jsonschema:"description=Shell command to run."`
 	Description           string                           `json:"description,omitempty" jsonschema:"description=Human-readable description of what this command does."`
-	TimeoutMs             int                              `json:"timeout_ms,omitempty" jsonschema:"description=Timeout in milliseconds (default 10000)."`
+	TimeoutMs             int                              `json:"timeout_ms,omitempty" jsonschema:"description=Timeout in milliseconds (default 120000)."`
 	SandboxPermissions    safety.SandboxPermissions        `json:"sandbox_permissions,omitempty" jsonschema:"enum=use_default,enum=with_additional_permissions,enum=require_escalated" jsonschema_description:"Per-command sandbox override. Defaults to use_default; use with_additional_permissions with additional_permissions, or require_escalated for unsandboxed execution."`
 	AdditionalPermissions *safety.RequestPermissionProfile `json:"additional_permissions,omitempty" jsonschema_description:"Sandboxed filesystem or network access for this command; only with sandbox_permissions set to with_additional_permissions. Omit when not needed."`
 	Justification         string                           `json:"justification,omitempty" jsonschema_description:"User-facing approval question for require_escalated; omit otherwise."`
 	PrefixRule            []string                         `json:"prefix_rule,omitempty" jsonschema_description:"Reusable approval prefix for the command; only with sandbox_permissions require_escalated. Omit when not needed."`
 }
 
-const shellToolDescription = "Run a command - builds, tests, formatters, git - not file edits (use edit_file/write_file). The one exception is apply_patch, the only command in that shell call: a heredoc (apply_patch <<'PATCH' ... PATCH) with its terminator as the final nonblank line; run anything else in separate shell calls. Pass a description; timeout_ms defaults to 10000."
+const shellToolDescription = "Run a command - builds, tests, formatters, git - not file edits (use edit_file/write_file). The one exception is apply_patch, the only command in that shell call: a heredoc (apply_patch <<'PATCH' ... PATCH) with its terminator as the final nonblank line; run anything else in separate shell calls. Pass a description; timeout_ms defaults to 120000 - raise it for slow work (builds, installs, docker, du/find over large trees). A timed-out command is killed but its result keeps the partial output plus timed_out=true and the effective timeout_ms: output still growing means slow (retry with a larger timeout_ms); no output usually means blocked (investigate instead of retrying)."
 
-const defaultShellCommandTimeout = 10 * time.Second
+const defaultShellCommandTimeout = 120 * time.Second
 
 func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 	tool, err := llm.NewTool(
@@ -611,10 +611,18 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	// every other one: uncontained, and still confined to its own workspace by
 	// the request above (owner 2026-10-31, plans 215 §3.5 and 216).
 	res, decision, runErr := manager.RunCommand(ctx, cfg, commandRequest(effectiveSandboxPermissions))
-	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+	// The command's own deadline is a failed command, not a cancelled call:
+	// the backend already captured its partial output and exit 124, and the
+	// model needs both to tell "slow" from "wedged". Only the caller's
+	// cancellation still terminates the call here.
+	var timeoutErr *safety.TimeoutError
+	timedOut := errors.As(runErr, &timeoutErr)
+	if timedOut {
+		runErr = nil
+	} else if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 		return "", runErr
 	}
-	denied := decision.UseSandbox && safety.IsLikelySandboxDenied(decision, res)
+	denied := !timedOut && decision.UseSandbox && safety.IsLikelySandboxDenied(decision, res)
 	alreadyApproved := ApprovedActionIDFromContext(ctx) != ""
 	// A denied batch command is reported as denied. There is no one to ask
 	// whether it may run outside the sandbox, and the answer this whole branch
@@ -646,10 +654,14 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		}
 		if retry {
 			res, decision, runErr = manager.RunCommand(ctx, cfg, commandRequest(safety.SandboxPermissionsRequireEscalated))
-			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+			timeoutErr = nil
+			timedOut = errors.As(runErr, &timeoutErr)
+			if timedOut {
+				runErr = nil
+			} else if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 				return "", runErr
 			}
-			denied = decision.UseSandbox && safety.IsLikelySandboxDenied(decision, res)
+			denied = !timedOut && decision.UseSandbox && safety.IsLikelySandboxDenied(decision, res)
 		}
 	}
 	stdout := res.Stdout
@@ -684,6 +696,10 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		"stdout":    stdout,
 		"stderr":    stderr,
 		"exit_code": exitCode,
+	}
+	if timedOut {
+		resultPayload["timed_out"] = true
+		resultPayload["timeout_ms"] = int(timeout / time.Millisecond)
 	}
 	retrieveID := registerShellSpool(ctx, rt, req.command, res)
 	if retrieveID > 0 {
@@ -743,6 +759,9 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		CaptureToolCompletion(ctx, ToolCompletionPayload{
 			Output: appendToolExecutionMetadata(ctx, st, completionOutput, rt, safety.ToolKindShell),
 			Error: func() string {
+				if timedOut {
+					return fmt.Sprintf("command timed out after %s", timeout)
+				}
 				if runErr == nil {
 					return ""
 				}

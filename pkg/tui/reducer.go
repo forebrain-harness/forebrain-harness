@@ -2018,12 +2018,6 @@ func (r *Reducer) formatWorkedStatusTitle(workDuration time.Duration, runID stri
 	parts := []string{workedForLabel(workDuration)}
 	if r != nil && r.tracker != nil {
 		snapshot := r.tracker.SnapshotRun(runID)
-		// How long the model took to start answering sits right after the
-		// run's duration: both describe the wait the user felt, and the
-		// first-token figure is what started it.
-		if firstToken := firstTokenLabel(snapshot.FirstToken); firstToken != "" {
-			parts = append(parts, firstToken)
-		}
 		if counters := formatWorkingCounters(snapshot); counters != "" {
 			parts = append(parts, counters)
 		}
@@ -2064,27 +2058,10 @@ func workedForLabel(elapsed time.Duration) string {
 	return workedForPrefix + formatElapsedDuration(elapsed)
 }
 
-// firstTokenLabel renders how long a run waited for the model's first output,
-// e.g. "first token 1.2s". Empty when the run measured none — it produced no
-// output, or it was stored before turns kept this — so the segment is left out
-// rather than shown as "0s". The live "Working" line and both the live and
-// replayed "Worked for" lines share it, so they read the same.
-func firstTokenLabel(wait time.Duration) string {
-	if wait <= 0 {
-		return ""
-	}
-	return "first token " + formatFirstTokenDuration(wait)
-}
-
-// formatFirstTokenDuration renders a first-token wait to a tenth of a second
-// ("1.2s"). A minute or longer reuses the worked-line's minutes format, so a
-// slow start reads the way the run's own duration would.
-func formatFirstTokenDuration(wait time.Duration) string {
-	if wait >= time.Minute {
-		return formatElapsedDuration(wait)
-	}
-	return strconv.FormatFloat(wait.Seconds(), 'f', 1, 64) + "s"
-}
+// firstTokenLabel and formatFirstTokenDuration were removed with the TUI's
+// display of the first-token wait: the working and worked-for lines no longer
+// carry it. The measurement itself (tracker counters, FirstTokenMsg, the
+// persisted RunWorkedLine) stays — the web surface still renders it.
 
 // formatThoughtDurationLabel renders the elapsed thinking time for the "Thought"
 // disclosure header, e.g. "Thought for 1m 10s". Returns empty when elapsed is
@@ -2397,11 +2374,6 @@ func (r *Reducer) subagentWorkedFrames(agentID string) []Frame {
 	title := workedForLabel(snap.Elapsed)
 	if counters := formatWorkingCounters(snap.Counters); counters != "" {
 		title += " " + counters
-	}
-	// The wait this execution's own model cost before its first output, the
-	// same segment the conversation's closing line carries for the turn.
-	if wait := firstTokenLabel(snap.Counters.FirstToken); wait != "" {
-		title += " " + wait
 	}
 	// The minute the run closed is the tracker's own clock for an ended run
 	// — a replay paints runs that finished long before, and now would stamp
@@ -4139,16 +4111,17 @@ func (r *Renderer) composerFooterSidesLocked() (string, string) {
 		formatComposerTokenStats(r.composerTokens.get(""))
 }
 
-// effortFooterLabel is the footer's thinking-level segment: the name the one
-// label table gives the level — none reads Off, xhigh reads xHigh, exactly as
-// /model and the web chip write them (plan 318 F7) — and nothing at all when the
-// row pins no level. The segment disappears rather than saying "Default": a
-// conversation that pins nothing has nothing to report.
+// effortFooterLabel is the footer's thinking-level segment: the one label
+// table's name lowercased — none reads off, xhigh reads xhigh — because the
+// footer is an all-lowercase status line (owner 2026-11-18); /model and the
+// web chip keep the display names the label table gives. Nothing at all when
+// the row pins no level. The segment disappears rather than saying "Default":
+// a conversation that pins nothing has nothing to report.
 func effortFooterLabel(level string) string {
 	if strings.TrimSpace(level) == "" {
 		return ""
 	}
-	return turn.EffortEnglishLabel(level)
+	return strings.ToLower(turn.EffortEnglishLabel(level))
 }
 
 // peerTreeFooterSegment is the footer's ⇄ count: how many other agents are

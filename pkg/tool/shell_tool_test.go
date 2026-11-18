@@ -2342,3 +2342,103 @@ func TestBatchShellKeepsTheUsersConfigurationReachable(t *testing.T) {
 		t.Fatalf("reading through GIT_CONFIG_GLOBAL failed: exit=%d err=%v stderr=%s stdout=%q", exit, handleErr, stderr, stdout)
 	}
 }
+
+// TestShellTimeoutReturnsPartialOutputAndTimeoutFacts pins plan 323: the
+// command's own deadline is a failed command, not a cancelled call. The model
+// receives the partial output the backend captured, exit 124, and the two
+// timeout facts (timed_out, the effective timeout_ms) it needs to tell "slow"
+// from "wedged" — instead of the old bare "command timed out" error that
+// discarded everything.
+func TestShellTimeoutReturnsPartialOutputAndTimeoutFacts(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		command    string
+		wantStdout string
+	}{
+		{"partial output survives", "echo PARTIAL_OUTPUT_LINE; sleep 30", "PARTIAL_OUTPUT_LINE"},
+		{"no output means blocked", "sleep 30", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := NewState(t.TempDir())
+			tool, err := NewShellTool(st, &AgentToolRuntime{
+				Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+			})
+			if err != nil {
+				t.Fatalf("NewShellTool: %v", err)
+			}
+			out, err := tool.Handle(context.Background(), `{"command":"`+tc.command+`","timeout_ms":1000}`)
+			if err != nil {
+				t.Fatalf("timeout should be a failed result, not a tool error: %v", err)
+			}
+			outText, ok := out.(string)
+			if !ok {
+				t.Fatalf("expected string tool output, got %T", out)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(outText), &payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			got, _ := payload["stdout"].(string)
+			if tc.wantStdout == "" {
+				if got != "" {
+					t.Fatalf("stdout = %q, want empty for the blocked shape", got)
+				}
+			} else if !strings.Contains(got, tc.wantStdout) {
+				t.Fatalf("stdout = %q, want it to contain %q", got, tc.wantStdout)
+			}
+			if payload["exit_code"] != float64(124) {
+				t.Fatalf("exit_code = %#v, want 124", payload["exit_code"])
+			}
+			if payload["timed_out"] != true {
+				t.Fatalf("timed_out = %#v, want true", payload["timed_out"])
+			}
+			if payload["timeout_ms"] != float64(1000) {
+				t.Fatalf("timeout_ms = %#v, want 1000", payload["timeout_ms"])
+			}
+		})
+	}
+}
+
+// TestShellTimeoutReportsFailureOnTheCard pins the display half of plan 323:
+// the tool returns a nil error, but the completion capture still carries the
+// timeout as its Error — that is what every surface's "Failed to run" header
+// reads (stepStatusLabel only looks at evt.Error) — and the card body keeps
+// the partial output.
+func TestShellTimeoutReportsFailureOnTheCard(t *testing.T) {
+	st := NewState(t.TempDir())
+	tool, err := NewShellTool(st, &AgentToolRuntime{
+		Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := WithToolCompletionCapture(context.Background())
+	if _, err := tool.Handle(ctx, `{"command":"echo PARTIAL_OUTPUT_LINE; sleep 30","timeout_ms":1000}`); err != nil {
+		t.Fatalf("timeout should be a failed result, not a tool error: %v", err)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if !strings.Contains(completion.Error, "command timed out after") {
+		t.Fatalf("completion.Error = %q, want the timeout phrase with its duration", completion.Error)
+	}
+	if got, _ := completion.Output["stdout"].(string); !strings.Contains(got, "PARTIAL_OUTPUT_LINE") {
+		t.Fatalf("card stdout = %q, want the partial output", got)
+	}
+	if completion.Output["exit_code"] != 124 {
+		t.Fatalf("card exit_code = %#v, want 124", completion.Output["exit_code"])
+	}
+}
+
+// TestShellDefaultTimeoutIsTwoMinutes pins the default raise (plan 323): 10s
+// failed docker/du/build-class commands on their first attempt; 120s matches
+// Claude Code's Bash default. The description must teach the same number.
+func TestShellDefaultTimeoutIsTwoMinutes(t *testing.T) {
+	if defaultShellCommandTimeout != 120*time.Second {
+		t.Fatalf("defaultShellCommandTimeout = %s, want 2m0s", defaultShellCommandTimeout)
+	}
+	if !strings.Contains(shellToolDescription, "timeout_ms defaults to 120000") {
+		t.Fatalf("shellToolDescription must teach the 120000 default: %q", shellToolDescription)
+	}
+}

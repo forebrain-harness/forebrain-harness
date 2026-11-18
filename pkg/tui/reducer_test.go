@@ -156,30 +156,25 @@ func TestReducerAppendsCountersToWorkedStatus(t *testing.T) {
 	}
 }
 
-// The first-token wait the engine measured shows on the run's "Worked for"
-// line, right after the duration, once the turn ends.
-func TestReducerShowsFirstTokenOnWorkedStatus(t *testing.T) {
+// The run's "Worked for" line says nothing about the first-token wait,
+// measured or not: the terminal shows the figure nowhere, so the closing line
+// reports the duration, counters and clock alone. The tracker still records
+// the measurement — the persisted run line and the web surface read it.
+func TestReducerWorkedStatusOmitsFirstToken(t *testing.T) {
 	tracker := NewTracker()
 	var r Reducer
 	r.WithTracker(tracker)
 	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
 	_ = r.Reduce(FirstTokenMsg{RunID: "r1", Wait: 1200 * time.Millisecond})
 	ev := r.Reduce(RunEndedMsg{RunID: "r1", WorkedDuration: 12 * time.Second})
-	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 12s first token 1.2s ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
-		t.Fatalf("worked status = %q, want the measured 1.2s first token after the duration", ev.WorkedStatus)
-	}
-}
-
-// A run that measured no first token says nothing about it rather than
-// claiming "0s".
-func TestReducerOmitsUnknownFirstToken(t *testing.T) {
-	tracker := NewTracker()
-	var r Reducer
-	r.WithTracker(tracker)
-	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
-	ev := r.Reduce(RunEndedMsg{RunID: "r1", WorkedDuration: 2 * time.Second})
 	if strings.Contains(ev.WorkedStatus, "first token") {
 		t.Fatalf("worked status = %q, want no first-token segment", ev.WorkedStatus)
+	}
+	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 12s ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
+		t.Fatalf("worked status = %q, want the duration and completion clock alone", ev.WorkedStatus)
+	}
+	if got := tracker.SnapshotRun("r1").FirstToken; got != 1200*time.Millisecond {
+		t.Fatalf("first token = %v, want the measured 1.2s kept on the tracker", got)
 	}
 }
 
@@ -198,11 +193,11 @@ func TestFirstTokenIsKeptOncePerRun(t *testing.T) {
 	}
 }
 
-// A subagent execution's own first-token wait closes that subagent's view: a
-// FirstTokenMsg naming the agent lands on its tally, and its "Worked for"
-// line carries the wait the conversation's closing line carries for a turn.
-// A wait that names no agent keeps writing the run's, never an agent's.
-func TestSubagentWorkedFrameShowsFirstToken(t *testing.T) {
+// A subagent execution's own first-token wait no longer closes that subagent's
+// view — the segment is gone from the terminal's worked-for lines — but the
+// wait still lands on its tally, and a wait that names no agent keeps writing
+// the run's, never an agent's.
+func TestSubagentWorkedFrameOmitsFirstToken(t *testing.T) {
 	tracker := NewTracker()
 	r := (&Reducer{}).WithTracker(tracker)
 	tracker.ObserveAgent("task-ft-2", "exec-ft-2", time.Now().Add(-5*time.Second))
@@ -211,8 +206,8 @@ func TestSubagentWorkedFrameShowsFirstToken(t *testing.T) {
 	if len(frames) != 1 {
 		t.Fatalf("worked frames = %#v, want the closing line alone", frames)
 	}
-	if !strings.Contains(frames[0].Title, "first token 0.9s") {
-		t.Fatalf("worked title = %q, want the execution's first-token wait", frames[0].Title)
+	if strings.Contains(frames[0].Title, "first token") {
+		t.Fatalf("worked title = %q, want no first-token segment", frames[0].Title)
 	}
 	if snap, ok := tracker.SnapshotAgentRun("task-ft-2"); !ok || snap.Counters.FirstToken != 950*time.Millisecond {
 		t.Fatalf("agent counters = %+v, want the wait on that agent's tally", snap)
@@ -222,20 +217,6 @@ func TestSubagentWorkedFrameShowsFirstToken(t *testing.T) {
 	_ = r.Reduce(FirstTokenMsg{RunID: "r2", Wait: 700 * time.Millisecond})
 	if snap, _ := tracker.SnapshotAgentRun("task-ft-2"); snap.Counters.FirstToken != 950*time.Millisecond {
 		t.Fatalf("agent counters after the run's own wait = %+v, must keep the agent's 0.9s", snap)
-	}
-}
-
-// A sub-second wait reads to a tenth of a second; a slow start reads in the
-// worked line's own minutes format; an unmeasured one reads as nothing.
-func TestFirstTokenLabelFormatsTenthsAndMinutes(t *testing.T) {
-	if got := firstTokenLabel(1200 * time.Millisecond); got != "first token 1.2s" {
-		t.Fatalf("firstTokenLabel(1.2s) = %q", got)
-	}
-	if got := firstTokenLabel(90 * time.Second); got != "first token 1m 30s" {
-		t.Fatalf("firstTokenLabel(90s) = %q", got)
-	}
-	if got := firstTokenLabel(0); got != "" {
-		t.Fatalf("firstTokenLabel(0) = %q, want empty", got)
 	}
 }
 
@@ -5792,12 +5773,13 @@ func TestFooterSaysHowManyAgentsShareTheTree(t *testing.T) {
 	}
 }
 
-// The footer writes a thinking level the way every other surface does — the one
-// label table's name, never the stored id — so a conversation pinned to xhigh
-// reads xHigh and one pinned to none reads Off, in the conversation's own footer
-// and in a subagent view alike (plan 318 F7). A row that pins no level has no
-// segment at all rather than saying "Default": a conversation that pins nothing
-// has nothing to report.
+// The footer writes a thinking level all lowercase — the one label table's
+// name lowercased, never the capitalized display form — so a conversation
+// pinned to xhigh reads xhigh and one pinned to none reads off, in the
+// conversation's own footer and in a subagent view alike (owner 2026-11-18;
+// /model and the web chip keep the display names). A row that pins no level
+// has no segment at all rather than saying "Default": a conversation that
+// pins nothing has nothing to report.
 func TestComposerFooterUsesTheOneEffortLabelTable(t *testing.T) {
 	renderer := NewRenderer(io.Discard, io.Discard)
 	primary := func() string {
@@ -5807,16 +5789,16 @@ func TestComposerFooterUsesTheOneEffortLabelTable(t *testing.T) {
 	}
 
 	renderer.SetComposerFooter(ComposerFooter{Model: "zhipuai/glm-5.3", ReasoningEffort: "xhigh"})
-	if got := primary(); !strings.Contains(got, "zhipuai/glm-5.3 xHigh") || strings.Contains(got, "xhigh") {
-		t.Fatalf("footer = %q, want the level named xHigh", got)
+	if got := primary(); !strings.Contains(got, "zhipuai/glm-5.3 xhigh") || strings.Contains(got, "xHigh") {
+		t.Fatalf("footer = %q, want the level named xhigh", got)
 	}
 
 	renderer.SetComposerFooter(ComposerFooter{Model: "zhipuai/glm-5.3", ReasoningEffort: "none"})
 	got := primary()
-	if !strings.Contains(got, "zhipuai/glm-5.3 Off") {
-		t.Fatalf("footer = %q, want the level named Off", got)
+	if !strings.Contains(got, "zhipuai/glm-5.3 off") {
+		t.Fatalf("footer = %q, want the level named off", got)
 	}
-	if strings.Contains(got, "glm-5.3 none") || strings.Contains(got, "Default") {
+	if strings.Contains(got, "glm-5.3 none") || strings.Contains(got, "Default") || strings.Contains(got, "Off") {
 		t.Fatalf("footer = %q, want the level's name and no segment for an unpinned one", got)
 	}
 
@@ -5832,8 +5814,8 @@ func TestComposerFooterUsesTheOneEffortLabelTable(t *testing.T) {
 	})
 	renderer.setActiveViewLocked(agentID)
 	view := strings.TrimRight(strings.TrimSpace(stripANSI(renderer.composerFooterText(140))), " ")
-	if !strings.HasSuffix(view, "openai/gpt-4.1-mini Off") {
-		t.Fatalf("subagent footer = %q, want the level named Off", view)
+	if !strings.HasSuffix(view, "openai/gpt-4.1-mini off") {
+		t.Fatalf("subagent footer = %q, want the level named off", view)
 	}
 }
 

@@ -1175,15 +1175,15 @@ func TestPlanDrawerPlanTokenOutsideRunClosingRowsIsInert(t *testing.T) {
 
 // A token the row's width cut was never on screen, so it is not an entry.
 func TestPlanDrawerWorkedForTruncatedTokenHasNoHotZone(t *testing.T) {
-	r := newPlanDrawerScreen(t, 40, 24)
+	r := newPlanDrawerScreen(t, 24, 24)
 	fillPlanDrawerTranscript(r)
-	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1m 02s first token 12.4s ☑3/7", Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 1h 02m 03s ☑3/7", Final: true})
 	if got := len(r.vpHistoryProgress); got != 0 {
-		t.Fatalf("a token the 40-column rule cut off registered a hot zone at %#v", r.vpHistoryProgress)
+		t.Fatalf("a token the 24-column rule cut off registered a hot zone at %#v", r.vpHistoryProgress)
 	}
 
 	// The same width registers the whole token where the title leaves it room.
-	fit := newPlanDrawerScreen(t, 40, 24)
+	fit := newPlanDrawerScreen(t, 24, 24)
 	fillPlanDrawerTranscript(fit)
 	fit.RenderFrame(Frame{Kind: FrameStatus, Title: "Worked for 3s ☑3/7", Final: true})
 	if got := len(fit.vpHistoryProgress); got != 1 {

@@ -819,16 +819,10 @@ func isAbandonedRunError(p event.TurnErrorPayload) bool {
 }
 
 // replayWorkedFrame is the "Worked for" line that closed a run: how long it
-// took, how long it waited for the model's first output when the run measured
-// that, the run's checklist counters, and the minute it finished, read from the
+// took, the run's checklist counters, and the minute it finished, read from the
 // run's own clock and plan events.
 func replayWorkedFrame(line turn.RunWorkedLine, plan event.PlanProgress) Frame {
 	parts := []string{workedForLabel(line.Worked)}
-	// A run that measured no first token (it produced no output, or predates
-	// the measurement) drops the segment instead of showing a fake "0s".
-	if wait := firstTokenLabel(line.FirstToken); wait != "" {
-		parts = append(parts, wait)
-	}
 	// The counters the live line carried, in the same place and wording: the
 	// run's own checklist state, so a resumed row keeps its ☑N/M entry.
 	if counters := formatWorkingCounters(Counters{

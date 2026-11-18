@@ -1069,9 +1069,9 @@ func TestReplayFeedsSubagentFooterFacts(t *testing.T) {
 	ctrl.printSessionResumeContext("s1")
 
 	left := renderer.subagentFooterLeftLocked(agentID)
-	// The level is written by the one label table every surface uses (plan 318):
-	// the recorded "high" reaches the footer as High.
-	for _, want := range []string{"general-purpose", "deepseek-chat", "High"} {
+	// The level is the one label table's name lowercased (owner 2026-11-18):
+	// the recorded "high" reaches the footer as high.
+	for _, want := range []string{"general-purpose", "deepseek-chat", "high"} {
 		if !strings.Contains(left, want) {
 			t.Fatalf("resumed subagent footer = %q, want %q in it", left, want)
 		}
@@ -2000,7 +2000,7 @@ func TestReplaySubagentWorkerBodyWorkedLineClosesTheView(t *testing.T) {
 	if strings.TrimSpace(answer.Content) != "final answer" {
 		t.Fatalf("block before the closing line = %#v, want the execution's final answer", answer)
 	}
-	wantClosing := "Worked for 28s first token 7.5s " + endedAt.Local().Format("15:04")
+	wantClosing := "Worked for 28s " + endedAt.Local().Format("15:04")
 	if closing := vm.blocks[5].frame; closing.Title != wantClosing {
 		t.Fatalf("closing title = %q, want %q", closing.Title, wantClosing)
 	}
@@ -3969,22 +3969,18 @@ func TestReplayWorkedLinePerRun(t *testing.T) {
 	}
 }
 
-// A run that measured its first token closes its replayed "Worked for" line
-// with the same figure the live line showed, right after the duration; a run
-// that measured none drops the segment rather than showing "0s".
-func TestReplayWorkedLineCarriesFirstToken(t *testing.T) {
+// The replayed "Worked for" line carries no first-token wait, measured or not:
+// the terminal dropped the segment from its working and worked-for lines.
+func TestReplayWorkedLineOmitsFirstToken(t *testing.T) {
 	line := turn.RunWorkedLine{
 		RunID:      "run-1",
 		FinishedAt: time.UnixMilli(1790503290000),
 		Worked:     12 * time.Second,
 		FirstToken: 1200 * time.Millisecond,
 	}
-	if got := replayWorkedFrame(line, event.PlanProgress{}).Title; !strings.HasPrefix(got, "Worked for 12s first token 1.2s ") {
-		t.Fatalf("replayed worked title = %q, want the first-token segment after the duration", got)
-	}
-	line.FirstToken = 0
-	if got := replayWorkedFrame(line, event.PlanProgress{}).Title; strings.Contains(got, "first token") {
-		t.Fatalf("replayed worked title = %q, want no first-token segment for an unmeasured run", got)
+	want := "Worked for 12s " + line.FinishedAt.Local().Format("15:04")
+	if got := replayWorkedFrame(line, event.PlanProgress{}).Title; got != want {
+		t.Fatalf("replayed worked title = %q, want %q with no first-token segment", got, want)
 	}
 }
 
