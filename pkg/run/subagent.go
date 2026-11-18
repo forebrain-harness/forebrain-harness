@@ -1273,7 +1273,7 @@ func runSubagentExecution(ctx context.Context, fac Factory, record agent.History
 		if _, returned := ch.queue.Next(BoundaryInterrupted); len(returned) > 0 && surface.OnReturned != nil {
 			surface.OnReturned(ch.agentKey, returned)
 		}
-		reportSubagentExecutionEnded(fac, record, err, awaited)
+		reportSubagentExecutionEnded(fac, record, err, awaited, out)
 		return out, err
 	}
 }
@@ -1295,18 +1295,23 @@ func reportSubagentExecutionStarting(fac Factory, record agent.HistoryEntry) {
 // usage-limit failure is recognized by the scheduler the same way a primary
 // turn's is. awaited says the execution was run for a blocking call of the
 // dispatching agent, which receives the failure and continues the subagent
-// itself.
-func reportSubagentExecutionEnded(fac Factory, record agent.HistoryEntry, err error, awaited bool) {
+// itself. output is the report the execution ended with, budgeted here — the
+// one cut every report goes through — so the composition root hands its
+// dispatcher the head plus the path to the whole of an over-budget one instead
+// of growing a truncation of its own.
+func reportSubagentExecutionEnded(fac Factory, record agent.HistoryEntry, err error, awaited bool, output string) {
 	exec := subagentExecutorOf(fac)
 	if exec == nil {
 		return
 	}
+	inline, _ := budgetSubagentReport(fac, strings.TrimSpace(record.TaskID), output, subagentReportInlineChars)
 	exec.SubagentExecutionEnded(context.Background(), SubagentExecutionEnd{
 		ConversationSessionID: strings.TrimSpace(record.SessionID),
 		WorkerSessionID:       strings.TrimSpace(record.WorkerSessionID),
 		AgentKey:              subagentRosterKey(record),
 		RunID:                 strings.TrimSpace(record.RunID),
 		Err:                   err,
+		Output:                inline,
 		AwaitedByDispatcher:   awaited,
 	})
 }
@@ -4903,6 +4908,11 @@ type SubagentExecutionEnd struct {
 	RunID string
 	// Err is how the execution ended; nil when it succeeded.
 	Err error
+	// Output is the execution's final report, already budgeted (over-budget
+	// reports carry the cut head and the path to the whole). The composition
+	// root delivers it to the dispatching conversation when nobody awaited the
+	// execution; an awaited one received it through the blocking tool already.
+	Output string
 	// AwaitedByDispatcher is true when a blocking call of the dispatching
 	// agent was waiting for this execution (subagent_run, subagent_fanout,
 	// subagent_continue). That agent receives the failure and owns the

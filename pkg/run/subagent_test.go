@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -6020,6 +6021,83 @@ func TestEverySubagentExecutionIsReportedToItsScheduler(t *testing.T) {
 		t.Fatalf("awaited = %v %v %v, want true true false",
 			ends[0].AwaitedByDispatcher, ends[1].AwaitedByDispatcher, ends[2].AwaitedByDispatcher)
 	}
+}
+
+// reportSubagentExecutionEnd drives one subagent execution whose answer is
+// report and returns the end the composition root received. The factory carries
+// a tool state so an over-budget report has the spill directory every spill
+// writes into.
+func reportSubagentExecutionEnd(t *testing.T, conv, report string) SubagentExecutionEnd {
+	t.Helper()
+	fix := newPersistenceFixture(t, "worker system", report)
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	owner.Events = &channelEventProbe{}
+	fix.fac.Tools = toolpkg.NewState(t.TempDir())
+	rec := &recordingSchedulerExecutor{persistingSubagentExecutor: fix.executor}
+	owner.SubagentExecutor = rec
+	fix.ensureConversation(t, conv)
+
+	ctx := llm.WithAgentSessionID(context.Background(), conv)
+	ctx = toolpkg.WithRunID(ctx, "parent-run-report")
+	if _, err := execGeneralSubagent(ctx, fix.fac, "task-report", "title", "do work", "general-purpose", ""); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	_, ends := rec.reports()
+	if len(ends) != 1 {
+		t.Fatalf("ends = %d, want 1", len(ends))
+	}
+	if ends[0].ConversationSessionID != conv || ends[0].Err != nil {
+		t.Fatalf("end = %+v, want a successful end of %q", ends[0], conv)
+	}
+	return ends[0]
+}
+
+// The end report a subagent's execution hands its scheduler carries the
+// execution's own final answer, cut once by the report budget: within budget it
+// is the answer untouched, over budget it is the head on a line boundary plus
+// the one sentence naming the spilled whole, and the file behind that path is
+// the report byte for byte. The composition root forwards this text to an idle
+// dispatcher, so this is the only cut the report gets (plan 306).
+func TestSubagentExecutionEndCarriesTheBudgetedReport(t *testing.T) {
+	t.Run("short report is untouched", func(t *testing.T) {
+		short := "the router change is safe"
+		end := reportSubagentExecutionEnd(t, "conv-report-short", short)
+		if end.Output != short {
+			t.Fatalf("end report = %q, want the answer untouched", truncatePreviewText(end.Output, 200))
+		}
+		if strings.Contains(end.Output, "[report cut from ") {
+			t.Fatal("a short report must not carry a cut sentence")
+		}
+	})
+
+	t.Run("over-budget report is cut once with the path to the whole", func(t *testing.T) {
+		original := sizedReport("end-report", 600)
+		end := reportSubagentExecutionEnd(t, "conv-report-long", original)
+		if got := strings.Count(end.Output, "[report cut from "); got != 1 {
+			t.Fatalf("report cut sentences = %d, want exactly 1", got)
+		}
+		if got := strings.Count(end.Output, "the whole report is at "); got != 1 {
+			t.Fatalf("report paths = %d, want exactly 1", got)
+		}
+		body := end.Output
+		if idx := strings.Index(body, "\n[report cut from "); idx >= 0 {
+			body = body[:idx]
+		}
+		if n := utf8.RuneCountInString(body); n > subagentReportInlineChars {
+			t.Fatalf("report body is %d characters, over the single report budget", n)
+		}
+		if !strings.HasPrefix(body, "BEGIN end-report") {
+			t.Fatalf("the report head was lost: %q", truncatePreviewText(body, 120))
+		}
+		spilled, err := os.ReadFile(extractReportPath(t, end.Output))
+		if err != nil {
+			t.Fatalf("reading the spilled report: %v", err)
+		}
+		if string(spilled) != original {
+			t.Fatalf("spilled file differs from the original report (%d vs %d bytes)", len(spilled), len(original))
+		}
+	})
 }
 
 // TestUserCannotStartAnIdleSubagent pins the owner's rule (2026-10-26): an
