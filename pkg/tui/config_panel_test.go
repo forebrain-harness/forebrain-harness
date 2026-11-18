@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -1554,5 +1555,294 @@ func TestConfigPanelAgentPageSharedDefinitionIsReadOnly(t *testing.T) {
 	}
 	if len(marked) != 1 || marked[0] != "repo-auditor="+configSharedStatus {
 		t.Fatalf("marked rows = %v, want the shared one alone: %+v", marked, rowsPage)
+	}
+}
+
+// configEffortCatalog is the two models the effort picker's tests name: one with
+// four levels and no off switch, and one the catalog lets turn thinking off.
+const configEffortCatalog = `{
+	"xai/grok-effort": {"name": "Grok Effort", "reasoning": true,
+		"reasoning_options": [{"type": "effort", "values": ["low", "medium", "high", "xhigh"]}],
+		"limit": {"context": 200000, "output": 8000}},
+	"openai/gpt-off": {"name": "GPT Off", "reasoning": true,
+		"reasoning_options": [{"type": "effort", "values": ["none", "low", "medium", "high", "xhigh"]}],
+		"limit": {"context": 200000, "output": 8000}}
+}`
+
+// configEffortModels is the install-wide table a level is resolved through: the
+// row ids every effort row names.
+func configEffortModels() []appcfg.LLMModelConfig {
+	return []appcfg.LLMModelConfig{
+		{ID: "llm-grok", Provider: "xai", Model: "grok-effort"},
+		{ID: "llm-off", Provider: "openai", Model: "gpt-off"},
+		{ID: "llm-messages", Provider: "openai", Model: "gpt-off", APIPath: "/v1/messages"},
+	}
+}
+
+// effortPickerItems is the page a level's picker drew: the one page whose rows
+// end in Row default.
+func effortPickerItems(t *testing.T, selector *scriptedSelector) []string {
+	t.Helper()
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), configRowDefaultEffort) {
+			return rowLabels(items)
+		}
+	}
+	t.Fatalf("no effort picker opened: %v", selector.richLabels)
+	return nil
+}
+
+// A thinking level is not typed: the picker offers the levels the model row
+// beside it can be given, in the one order every picker draws them, and the
+// empty value last as the row's own default (plan 319).
+func TestConfigPanelEffortPickerOffersTheModelsLevels(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
+	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{"model":"llm-grok"}}`})
+	session.snapshot.Models = configEffortModels()
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Goal check thinking level", ok: true},
+		{ok: false},
+	}, nil, "agents")
+
+	got := effortPickerItems(t, selector)
+	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
+	if !slices.Equal(got, want) {
+		t.Fatalf("picker = %v, want %v", got, want)
+	}
+	if len(session.writes) != 0 {
+		t.Fatalf("opening the picker wrote %+v, want nothing", session.writes)
+	}
+}
+
+// The off switch is a capability of the row, not a level: a row the catalog lets
+// turn thinking off offers Off first, and the level it stores is the wire id.
+func TestConfigPanelEffortPickerOffersOffWhenTheRowAllowsIt(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
+	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{"model":"llm-off"}}`})
+	session.snapshot.Models = configEffortModels()
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Goal check thinking level", ok: true},
+		{ok: false},
+	}, nil, "agents")
+
+	got := effortPickerItems(t, selector)
+	want := []string{"Off", "Low", "Medium", "High", "xHigh", configRowDefaultEffort}
+	if !slices.Equal(got, want) {
+		t.Fatalf("picker = %v, want %v", got, want)
+	}
+}
+
+// A level the client cannot send is not offered, whatever the row declares: the
+// Messages protocol rejects "none" outright, so Off is missing there while the
+// same model on the chat-completions path offers it.
+func TestConfigPanelEffortPickerDropsOffOnTheMessagesProtocol(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
+	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{"model":"llm-messages"}}`})
+	session.snapshot.Models = configEffortModels()
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Goal check thinking level", ok: true},
+		{ok: false},
+	}, nil, "agents")
+
+	got := effortPickerItems(t, selector)
+	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
+	if !slices.Equal(got, want) {
+		t.Fatalf("picker = %v, want %v", got, want)
+	}
+}
+
+// A level belongs to the model beside it: with no model there is nothing to
+// offer, and the page says which setting to choose first instead of inventing a
+// list. The loader refuses such a pair too ("reasoning_effort requires model").
+func TestConfigPanelEffortPickerNeedsAModel(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
+	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{}}`})
+	session.snapshot.Models = configEffortModels()
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Goal check thinking level", ok: true},
+		{ok: false},
+	}, nil, "agents")
+
+	if !strings.Contains(pageLabels(selector), configEffortNeedsModelNotice) {
+		t.Fatalf("the page must say a model comes first: %v", selector.richLabels)
+	}
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), configRowDefaultEffort) {
+			t.Fatalf("a picker opened with no model beside it: %v", rowLabels(items))
+		}
+	}
+}
+
+// The picked level is what the store gets, and Row default stores nothing: the
+// key goes away, which is how "follow the model row's own default" reads.
+func TestConfigPanelEffortPickerWritesTheChosenLevel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pick string
+		want string
+		gone bool
+	}{
+		{name: "a level", pick: "xHigh", want: "xhigh"},
+		{name: "the row's default", pick: configRowDefaultEffort, gone: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useSetupCatalogWith(t, configEffortCatalog)
+			session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{"model":"llm-grok","reasoning_effort":"low"}}`})
+			session.snapshot.Models = configEffortModels()
+			selector := &scriptedSelector{}
+			runConfigPanel(t, session, selector, []richStep{
+				{label: "Goal check thinking level", ok: true},
+				{label: tc.pick, ok: true},
+				{label: configSaveRowLabel, ok: true},
+			}, nil, "agents")
+
+			if len(session.writes) != 1 {
+				t.Fatalf("expected one write, got %+v", session.writes)
+			}
+			var saved struct {
+				GoalCheck map[string]any `json:"goal_evaluator"`
+			}
+			if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
+				t.Fatalf("the saved document does not parse: %v", err)
+			}
+			level, ok := saved.GoalCheck["reasoning_effort"]
+			if tc.gone {
+				if ok {
+					t.Fatalf("row default stored %v, want the key gone", level)
+				}
+				return
+			}
+			if level != tc.want {
+				t.Fatalf("reasoning_effort = %v, want %q", level, tc.want)
+			}
+		})
+	}
+}
+
+// The level a row offers is the model row's, read through the one helper every
+// surface shares: a row id, a legacy pair, a row whose protocol drops Off, and a
+// reference nothing answers all read from the same table (plan 318/319).
+func TestConfigPanelEffortLevelsFollowTheModelRow(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
+	panel := &configPanel{models: configEffortModels()}
+	for _, tc := range []struct {
+		name string
+		ref  string
+		want []string
+	}{
+		{name: "a row id", ref: "llm-grok", want: []string{"low", "medium", "high", "xhigh"}},
+		{name: "an off-capable row", ref: "llm-off", want: []string{"none", "low", "medium", "high", "xhigh"}},
+		{name: "a legacy pair", ref: "xai/grok-effort", want: []string{"low", "medium", "high", "xhigh"}},
+		{name: "an unknown pair", ref: "xai/not-in-the-catalog"},
+		{name: "an unknown row id", ref: "llm-gone"},
+		{name: "no reference at all", ref: " "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := panel.configModelEfforts(tc.ref); !slices.Equal(got, tc.want) {
+				t.Fatalf("levels for %q = %v, want %v", tc.ref, got, tc.want)
+			}
+		})
+	}
+
+	// A row that declares the off switch itself carries it into the list: the
+	// row's own answer, over a catalog that names no "none".
+	off := true
+	llm.SetModelOverrides(map[string]llm.ModelOverride{"llm-grok": {ReasoningOff: &off}}, nil)
+	t.Cleanup(func() { llm.SetModelOverrides(nil, nil) })
+	if got, want := panel.configModelEfforts("llm-grok"), []string{"none", "low", "medium", "high", "xhigh"}; !slices.Equal(got, want) {
+		t.Fatalf("levels with the row's off switch = %v, want %v", got, want)
+	}
+}
+
+// A stored model row is where a level lives beside its model: the picker opens
+// from the row's own key, whether that key already holds a level or is being
+// added — a type row under subagent_models, the plan reviewer's global row, and
+// one entry of a definition's subagents list all read the same way (plan 319).
+func TestConfigPanelEffortPickerOnAStoredModelRow(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
+	agents := `{
+		"definitions":{"main":{"primary":true,"subagents":[{"name":"explore","model":"llm-grok"}]}},
+		"plan_reviewer":{"model":"llm-off"},
+		"subagent_models":{"plan":{"model":"llm-grok","reasoning_effort":"low"}}
+	}`
+	session := newConfigPanelSession(map[string]string{"agents": agents})
+	session.snapshot.Models = configEffortModels()
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		// The type row's own level, changed from the picker.
+		{label: "plan", ok: true},
+		{label: configEffortKey, ok: true},
+		{label: configRowEditLabel, ok: true},
+		{label: "High", ok: true},
+		{label: configUpRowLabel, ok: true},
+		// The plan reviewer's row has no level yet: adding the key asks the same
+		// picker, never the type list.
+		{label: "plan-reviewer", ok: true},
+		{label: configAddRowLabel, ok: true},
+		{label: "Medium", ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configSaveRowLabel, ok: true},
+	}, []selectorInput{{value: configEffortKey, ok: true}}, "subagent_models")
+
+	got := effortPickerItems(t, selector)
+	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
+	if !slices.Equal(got, want) {
+		t.Fatalf("picker = %v, want %v", got, want)
+	}
+	doc := savedAgentsDoc(t, session)
+	types, _ := doc["subagent_models"].(map[string]any)
+	plan, _ := types["plan"].(map[string]any)
+	if plan["reasoning_effort"] != "high" {
+		t.Fatalf("subagent_models.plan.reasoning_effort = %v, want the picked level", plan["reasoning_effort"])
+	}
+	reviewer, _ := doc["plan_reviewer"].(map[string]any)
+	if reviewer["reasoning_effort"] != "medium" {
+		t.Fatalf("plan_reviewer.reasoning_effort = %v, want the picked level", reviewer["reasoning_effort"])
+	}
+	// The definition's entry is untouched: nothing on this page edited it.
+	entries := agentSubagentsOf(t, doc, "main")
+	if len(entries) != 1 || entries[0]["reasoning_effort"] != nil {
+		t.Fatalf("subagents = %+v, want the entry as it was", entries)
+	}
+}
+
+// A definition's subagent list is the same rule one level deeper: the entry's
+// level is picked from the model the entry names, and the entry's own model is
+// the sibling the picker reads (plan 319).
+func TestConfigPanelEffortPickerOnASubagentEntry(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
+	session := newConfigPanelSession(map[string]string{"agents": `{
+		"definitions":{"main":{"primary":true,"subagents":[{"name":"explore","model":"llm-grok","reasoning_effort":"low"}]}}
+	}`})
+	session.snapshot.Models = configEffortModels()
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		// A per-agent entry is named by its place in the list, not by the type
+		// it overrides.
+		{label: configRowLabel("", 0, true), ok: true},
+		{label: configRowOpenLabel, ok: true},
+		{label: configEffortKey, ok: true},
+		{label: configRowEditLabel, ok: true},
+		{label: "xHigh", ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configUpRowLabel, ok: true},
+		{label: configSaveRowLabel, ok: true},
+	}), nil, "agents")
+
+	got := effortPickerItems(t, selector)
+	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
+	if !slices.Equal(got, want) {
+		t.Fatalf("picker = %v, want %v", got, want)
+	}
+	doc := savedAgentsDoc(t, session)
+	entries := agentSubagentsOf(t, doc, "main")
+	if len(entries) != 1 || entries[0]["reasoning_effort"] != "xhigh" {
+		t.Fatalf("subagents = %+v, want the picked level on the entry", entries)
 	}
 }

@@ -30,6 +30,11 @@ const (
 	configFieldNumber
 	// configFieldText is free text: a model name, a path, a command.
 	configFieldText
+	// configFieldEffort is a thinking level. It has no option list of its own:
+	// what a level may be is a property of the model row beside it, so the
+	// picker is built from that row's levels and the row's own default, and
+	// free text can never store a level the model cannot be given (plan 319).
+	configFieldEffort
 	// configFieldRows is a table or list — a map of profiles, of MCP
 	// servers, of hook events — edited as rows: open one to edit its own
 	// fields, add a row, delete a row.
@@ -202,15 +207,15 @@ var configSectionSchemas = []configSectionSchema{
 		Fields: []configField{
 			{
 				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows,
-				// A definition's default_model stays a free-text row on purpose:
-				// the panel is generic over the stored JSON, and plan 319 owns
-				// the field types (plan 315 Step 4 deferral).
+				// A definition's default_model stays a free-text row: the panel
+				// is generic over the stored JSON, so a model reference here is
+				// typed rather than picked.
 				Hint: "One agent id per row; a row holds its subagents, MCP and default model (a model row id). An id naming a built-in subagent type is that type's install-wide default, which an agent's own subagent entry overrides",
 			},
 			// The install-wide model row of each public built-in subagent type
 			// (plan 315): a row id + reasoning effort, shared by every primary
-			// agent. Plain rows for now — plan 319 gives this field the
-			// model+effort picker, and plan 313 keeps the rows as they are.
+			// agent. The level inside one of those rows is a picker, the model
+			// row it names supplying the levels (plan 319).
 			{
 				Path: "subagent_models", Label: "Subagent models", Kind: configFieldRows,
 				Hint: "One built-in type per row (explore, plan, general-purpose, verification); a row holds its model row id and thinking level",
@@ -239,14 +244,8 @@ var configSectionSchemas = []configSectionSchema{
 				Hint: "A model row id (the row chosen in Settings → Subagents); empty follows the primary agent",
 			},
 			{
-				// Free text is a stopgap here and on the plan reviewer's row
-				// below: the picker that replaces both needs plan 318's
-				// sendability rule and plan 319's field kind (plan 313,
-				// 2026-11-17 reasoning-semantics correction). Any surface that
-				// shows a level names it through turn.EffortEnglishLabel —
-				// there is no second label table.
-				Path: "goal_evaluator.reasoning_effort", Label: "Goal check thinking level", Kind: configFieldText,
-				Hint: "Empty follows that model row's default level; low, high and so on override it",
+				Path: "goal_evaluator.reasoning_effort", Label: "Goal check thinking level", Kind: configFieldEffort,
+				Hint: "Empty follows that model row's default level; a level here overrides it",
 			},
 		},
 	},

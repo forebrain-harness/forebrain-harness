@@ -624,6 +624,8 @@ func (p *configPanel) editField(doc any, field configField) (any, string) {
 		return p.editEnum(doc, path, field, cur)
 	case configFieldNumber:
 		return p.editNumber(doc, path, field, cur)
+	case configFieldEffort:
+		return p.editEffort(doc, path, field, p.fieldPrompt(field), cur)
 	default:
 		return p.editText(doc, path, field, cur)
 	}
@@ -758,6 +760,79 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 		return p.assign(doc, path, nil, true, field.Label)
 	}
 	return p.assign(doc, path, text, false, field.Label)
+}
+
+// editEffort is one thinking level's picker (plan 319): the levels the model
+// row beside it can be given, then the empty value — Row default, which follows
+// that row's own default — last. The level is a property of the model, never a
+// free string: a row without one has nothing to offer, because the loader
+// refuses an effort that names no model, so the page says which row to set
+// first and opens nothing.
+func (p *configPanel) editEffort(doc any, path []string, field configField, prompt string, cur any) (any, string) {
+	if configSiblingModelRef(doc, path) == "" {
+		return doc, configEffortNeedsModelNotice
+	}
+	levels := p.configEffortLevels(doc, path, cur)
+	items := make([]SelectItem, 0, len(levels)+1)
+	stored := configStoredEffort(cur)
+	defaultIdx := len(levels)
+	for i, level := range levels {
+		items = append(items, SelectItem{Label: turn.EffortEnglishLabel(level)})
+		if level == stored {
+			defaultIdx = i
+		}
+	}
+	items = append(items, SelectItem{Label: configRowDefaultEffort})
+	idx, ok, err := p.sel.SelectRich(prompt, items, defaultIdx)
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	if !ok || idx < 0 || idx >= len(items) {
+		return doc, ""
+	}
+	if idx == len(items)-1 {
+		return p.assign(doc, path, nil, true, field.Label)
+	}
+	return p.assign(doc, path, levels[idx], false, field.Label)
+}
+
+// configEffortLevels is what one stored level may be set to, in the one order
+// every effort picker draws: the model row's levels, and the level the row
+// already stores when the catalog no longer names it — it stays on the list so
+// the page shows what is configured instead of quietly reading as unset.
+func (p *configPanel) configEffortLevels(doc any, path []string, cur any) []string {
+	levels := p.configModelEfforts(configSiblingModelRef(doc, path))
+	if stored := configStoredEffort(cur); stored != "" && !slices.Contains(levels, stored) {
+		levels = append(levels, stored)
+	}
+	return levels
+}
+
+// configModelEfforts is what one stored model reference takes: the model row's
+// own levels over the catalog's, trimmed to the levels this build can put on the
+// wire for that row's protocol and put in the order every picker draws them
+// (turn.SetupReasoningEfforts). Off is one of them exactly when the row declares
+// it and the protocol can send it, which is the same rule the catalog's `none`
+// entry is read by. A reference nothing answers declines to guess: no levels.
+func (p *configPanel) configModelEfforts(ref string) []string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil
+	}
+	provider, model, apiPath, rowID := "", "", "", ""
+	if entry, ok := appcfg.ResolveModelRef(&appcfg.Root{LLMModels: p.models}, "main", ref); ok {
+		provider, model, apiPath, rowID = entry.Provider, entry.Model, entry.APIPath, entry.ID
+	} else if before, after, pair := strings.Cut(ref, "/"); pair {
+		// A reference the model table no longer carries: the pair is still what
+		// the catalog is asked about, and nothing is inferred past it.
+		provider, model = strings.ToLower(strings.TrimSpace(before)), strings.TrimSpace(after)
+	}
+	if provider == "" || model == "" {
+		return nil
+	}
+	levels, _ := llm.ReasoningEffortsRow(rowID, provider, model)
+	return turn.SetupReasoningEfforts(provider, model, apiPath, levels)
 }
 
 // assign stages one edit in the document and reports its refusal, if any. label
@@ -954,6 +1029,18 @@ const (
 	// configRowDefaultEffort is what an empty stored level means on a row that
 	// names a model: the model row's own default (plan 313's reading, kept).
 	configRowDefaultEffort = "Row default"
+	// configEffortKey is the field every thinking level is stored under, and
+	// configEffortModelKey the sibling it belongs to: the two are keys of one
+	// stored map at every level of the agents section (plan 319).
+	configEffortKey      = "reasoning_effort"
+	configEffortModelKey = "model"
+	// configEffortHeading heads a level's picker when it is opened from a row
+	// rather than from a field of its own.
+	configEffortHeading = "Thinking level"
+	// configEffortNeedsModelNotice is what a level's row answers while the model
+	// beside it names none: the level is the model's, and the loader refuses a
+	// pair whose level names no model at all.
+	configEffortNeedsModelNotice = "Choose a model before setting its thinking level."
 	// configSystemSubagentNotice is the prototype's refusal, word for word
 	// (plan 313, scene system-stray-entry): the panel says why before the
 	// loader does, and the loader still judges the save on its own.
@@ -1339,8 +1426,13 @@ func configSharedToolsText(doc any, name string) string {
 
 // editRowValue edits a row that holds a scalar. The value's type is the
 // user's choice rather than a guess: an env map needs text, a workspace_roots
-// map needs a boolean, and nothing in the document says which one this is.
+// map needs a boolean, and nothing in the document says which one this is. A
+// stored thinking level is the one scalar whose type is known — and whose
+// values are the model row's — so it opens its picker instead (plan 319).
 func (p *configPanel) editRowValue(doc any, rowPath []string, field configField, cur any) (any, string) {
+	if configEffortPath(rowPath) {
+		return p.editEffort(doc, rowPath, field, configEffortHeading, cur)
+	}
 	value, _, ok, err := p.chooseNewValue(field.Label, cur)
 	if err != nil {
 		p.printError(err)
@@ -1386,6 +1478,13 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 			}
 		}
 	}
+	// A thinking level is not typed even when its key is new: the picker reads
+	// the model row beside it, so the value comes from the same list an existing
+	// level is edited through (plan 319).
+	childPath := configJoinPath(path, key)
+	if !list && configEffortPath(childPath) {
+		return p.editEffort(doc, childPath, field, configEffortHeading, nil)
+	}
 	value, open, ok, err := p.chooseNewValue(field.Label, nil)
 	if err != nil {
 		p.printError(err)
@@ -1395,7 +1494,6 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		return doc, ""
 	}
 	var next any = value
-	childPath := configJoinPath(path, key)
 	if list {
 		rows, _ := container.([]any)
 		rows = append(append(make([]any, 0, len(rows)+1), rows...), value)
@@ -1765,12 +1863,40 @@ func configMarshalDoc(doc any) (json.RawMessage, error) {
 	return raw, nil
 }
 
-// configEffortField reports whether a field stores a thinking level. Such a row
-// is plain text until plan 319 gives it a picker, but what it holds is a level:
-// the page names it through turn's table, not as the stored id.
+// configEffortField reports whether a field stores a thinking level: what it
+// holds is a level, and the page names it through turn's table, not as the
+// stored id.
 func configEffortField(field configField) bool {
-	path := configFieldPath(field)
-	return len(path) > 0 && path[len(path)-1] == "reasoning_effort"
+	return configEffortPath(configFieldPath(field))
+}
+
+// configEffortPath reports whether path is one stored thinking level. It is a
+// path check rather than a field check because the level of a model row — a type
+// under subagent_models, the plan reviewer, one entry of a definition's
+// subagents — arrives through the generic row editor, which hands the same
+// descriptor down at every nesting level (plan 319).
+func configEffortPath(path []string) bool {
+	return len(path) > 0 && path[len(path)-1] == configEffortKey
+}
+
+// configSiblingModelRef is the model value beside one stored setting: an effort
+// and its model are two keys of the same map, so a level's model is its parent
+// path's "model".
+func configSiblingModelRef(doc any, path []string) string {
+	if len(path) < 2 {
+		return ""
+	}
+	sibling := append(append([]string(nil), path[:len(path)-1]...), configEffortModelKey)
+	value, _ := configLookupValue(doc, sibling)
+	ref, _ := value.(string)
+	return strings.TrimSpace(ref)
+}
+
+// configStoredEffort is a stored level as the pickers compare it: lower-cased
+// and trimmed, empty when the setting is unset or holds no string.
+func configStoredEffort(value any) string {
+	level, _ := value.(string)
+	return strings.ToLower(strings.TrimSpace(level))
 }
 
 // configFieldValueText is a field's value as the section page shows it.
@@ -1789,10 +1915,8 @@ func configFieldValueText(field configField, value any, exists bool) string {
 			return configBoolOffLabel
 		}
 	}
-	// A thinking level is a level even while its row is free text: the value
-	// reads through turn's one label table, never as the raw id (plan 313,
-	// 2026-11-17 reasoning-semantics correction). The picker that replaces the
-	// row is plan 319's.
+	// A thinking level reads through turn's one label table, never as the raw
+	// id (plan 313, 2026-11-17 reasoning-semantics correction).
 	if configEffortField(field) {
 		level, _ := value.(string)
 		if strings.TrimSpace(level) == "" {
