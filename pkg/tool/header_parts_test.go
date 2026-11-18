@@ -225,6 +225,7 @@ func TestHeaderActionsCoverEveryKnownTool(t *testing.T) {
 		"user_interaction":          {"questions": []any{}},
 		"peer_send":                 {"to": "builder", "message": "hello"},
 		"peer_list":                 {},
+		"context_budget":            {},
 		"mcp__github__create_issue": {"owner": "octocat", "repo": "hello", "title": "bug"},
 	}
 	retrieveWithQuery := map[string]any{"id": 7, "query": "go test"}
@@ -329,6 +330,24 @@ func TestListUsableModelsHeader(t *testing.T) {
 	require.Equal(t, HeaderParts{Action: "Listed usable models"}, DisplayHeaderParts(list("completed"), cwd))
 	require.Equal(t, HeaderParts{Action: "Listing usable models"}, DisplayHeaderParts(list("running"), cwd))
 	require.Equal(t, HeaderParts{Action: "Failed to list usable models"}, DisplayHeaderParts(list("failed"), cwd))
+}
+
+// The gauge card's head says what the call did, never the bare tool name: the
+// tool takes no arguments and its two numbers are the body's business, so the
+// head is the verb alone in every state.
+func TestDisplayHeaderPartsContextBudget(t *testing.T) {
+	cwd := "/work/proj"
+	gauge := func(status string) DisplayFrame {
+		return DisplayFrame{
+			Title: "context_budget", Final: true,
+			Meta: ToolMeta{ToolName: "context_budget", Status: status},
+		}
+	}
+	require.Equal(t, HeaderParts{Action: "Checked context budget"}, DisplayHeaderParts(gauge("completed"), cwd))
+	require.Equal(t, HeaderParts{Action: "Checking context budget"}, DisplayHeaderParts(gauge("running"), cwd))
+	require.Equal(t, HeaderParts{Action: "Checking context budget"}, DisplayHeaderParts(gauge("awaiting approval"), cwd))
+	require.Equal(t, HeaderParts{Action: "Failed to check context budget"}, DisplayHeaderParts(gauge("failed"), cwd))
+	require.Equal(t, HeaderParts{Action: "Canceled"}, DisplayHeaderParts(gauge("canceled"), cwd))
 }
 
 // A refused question says what happened instead of the generic "Denied": the

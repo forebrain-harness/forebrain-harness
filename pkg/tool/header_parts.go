@@ -403,6 +403,17 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 			action = "Listed usable models"
 		}
 
+	case lower == "context_budget":
+		// The gauge takes no arguments and its two numbers are the body's
+		// business, so the head is the verb alone — never the bare tool name.
+		if isFailed {
+			action = "Failed to " + FailedActionPhrase(lower)
+		} else if isRunning || isPending {
+			action = "Checking context budget"
+		} else {
+			action = "Checked context budget"
+		}
+
 	// --- MCP ---
 	case strings.HasPrefix(lower, "mcp__"):
 		action = "MCP"
@@ -556,6 +567,8 @@ func HeaderActions() []string {
 		"Listed agents", "Listing agents", "Failed to list agents",
 		// The model picker for subagents (283)
 		"Listed usable models", "Listing usable models", "Failed to list usable models",
+		// The caller's own context gauge
+		"Checked context budget", "Checking context budget", "Failed to check context budget",
 		// Skill and MCP cards
 		"Loading skill", "Skill",
 		"MCP",

@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -35,8 +36,12 @@ func contextBudgetTestTool(t *testing.T, gauge func(context.Context) (event.Toke
 	return tl
 }
 
-// The numbers a model acts on: both denominators stated, in tokens.
-func TestContextBudgetReportsAbsoluteTokens(t *testing.T) {
+// The contract: the two numbers a decision is made on, and nothing else. A
+// model needs the share of the auto-compaction budget still free and the
+// budget that share is measured against; used tokens, the whole window and the
+// remaining amounts derive from those, so sending them spends tokens on what
+// the model can compute itself.
+func TestContextBudgetReportsDecisionPair(t *testing.T) {
 	payload := contextBudgetPayloadFixture()
 	tl := contextBudgetTestTool(t, func(context.Context) (event.TokenBudgetUpdatedPayload, bool) {
 		return payload, true
@@ -50,28 +55,21 @@ func TestContextBudgetReportsAbsoluteTokens(t *testing.T) {
 	if !ok {
 		t.Fatalf("context_budget result type = %T, want string", raw)
 	}
-	var got contextBudgetOutput
+	var got map[string]any
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("context_budget output %q: %v", out, err)
 	}
-	want := contextBudgetOutput{
-		Model:                        "deepseek-v4.1-flash",
-		ContextWindowTokens:          1000000,
-		EffectiveInputWindowTokens:   1000000,
-		UsedTokens:                   333079,
-		UsedPercentOfWindow:          33,
-		RemainingTokensToWindow:      666921,
-		AutoCompactAtTokens:          900000,
-		RemainingTokensToAutoCompact: 566921,
-		PercentLeftBeforeAutoCompact: 63,
+	want := map[string]any{
+		"percent_left_before_auto_compact": float64(63),
+		"auto_compact_at_tokens":           float64(900000),
 	}
-	if got != want {
-		t.Fatalf("context_budget = %+v, want %+v", got, want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("context_budget = %v, want exactly %v", got, want)
 	}
 }
 
-// A fresh context is a legitimate reading, not an error: the whole window.
-func TestContextBudgetFreshContextShowsWholeWindow(t *testing.T) {
+// A fresh context is a legitimate reading, not an error: the whole budget.
+func TestContextBudgetFreshContextShowsWholeBudget(t *testing.T) {
 	tl := contextBudgetTestTool(t, func(context.Context) (event.TokenBudgetUpdatedPayload, bool) {
 		return event.TokenBudgetUpdatedPayload{
 			Model:                "glm-5.3",
@@ -89,11 +87,9 @@ func TestContextBudgetFreshContextShowsWholeWindow(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw.(string)), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.UsedTokens != 0 || got.UsedPercentOfWindow != 0 || got.RemainingTokensToWindow != 200000 {
-		t.Fatalf("fresh context = %+v, want 0 used of 200000", got)
-	}
-	if got.PercentLeftBeforeAutoCompact != 100 || got.RemainingTokensToAutoCompact != 180000 {
-		t.Fatalf("fresh context budget = %+v, want the whole 180000 auto-compact budget", got)
+	want := contextBudgetOutput{PercentLeftBeforeAutoCompact: 100, AutoCompactAtTokens: 180000}
+	if got != want {
+		t.Fatalf("fresh context budget = %+v, want %+v", got, want)
 	}
 }
 

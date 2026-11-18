@@ -254,6 +254,8 @@ func FailedActionPhrase(toolName string) string {
 		return "read memory"
 	case "memories_search":
 		return "search memories"
+	case "context_budget":
+		return "check context budget"
 	default:
 		return toolName
 	}
