@@ -4081,6 +4081,81 @@ func TestExitPlanEffortPickerReopensOnTheSameLevel(t *testing.T) {
 	}
 }
 
+// The picker opens on the reviewer the install configured — the offer carrying
+// Preferred — not on the first row that is not in force, for both purposes
+// (plan 320). The mark is a starting point, not the choice: ↓ still moves and
+// Enter records the row the user moved to.
+func TestExitPlanPickerOpensOnTheConfiguredReviewer(t *testing.T) {
+	req := effortPlanReviewRequest(t)
+	req.PlanReviewModels = []turn.PlanReviewModelOption{
+		{ID: "llm_row1", Provider: "zhipuai", Model: "glm-5.3", Current: true},
+		{ID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash"},
+		// The configured reviewer, third in the list: only the mark can put
+		// the cursor here.
+		{ID: "llm_row3", Provider: "openai", Model: "gpt-5.1", Preferred: true},
+		{ID: "llm_row4", Provider: "anthropic", Model: "claude-opus-4-1"},
+	}
+	cases := []struct {
+		name    string
+		purpose planPickerPurpose
+		review  bool
+	}{
+		{name: "review", purpose: pickReview, review: true},
+		{name: "hand-off", purpose: pickHandOff},
+	}
+	for _, tc := range cases {
+		overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+		overlay.enterPlanPickerMode(tc.purpose)
+		if got := overlay.planReviewVisible()[overlay.planReviewCursor].ID; got != "llm_row3" {
+			t.Fatalf("%s: cursor row = %q, want the configured reviewer", tc.name, got)
+		}
+		overlay.handlePlanReviewKey(parsedKey{kind: rawKeyDown})
+		decision, done := overlay.handlePlanReviewKey(parsedKey{kind: rawKeyEnter})
+		if !done {
+			t.Fatalf("%s: Enter on a row without levels must decide", tc.name)
+		}
+		if tc.review {
+			if decision.RequestPlanReview == nil || decision.RequestPlanReview.ID != "llm_row4" {
+				t.Fatalf("%s: decision=%#v, want the review of the row the user moved to", tc.name, decision)
+			}
+			continue
+		}
+		if decision.HandOffModel == nil || decision.HandOffModel.ID != "llm_row4" {
+			t.Fatalf("%s: decision=%#v, want the hand-off to the row the user moved to", tc.name, decision)
+		}
+	}
+}
+
+// A configured reviewer that is also the model in force is still where the list
+// opens: the install named it, and the current model is a legitimate reviewer.
+// Without a mark the list keeps opening on the first row that is not in force.
+func TestExitPlanPickerOpensOnTheConfiguredReviewerEvenWhenItIsInForce(t *testing.T) {
+	req := effortPlanReviewRequest(t)
+	req.PlanReviewModels = []turn.PlanReviewModelOption{
+		{ID: "llm_row1", Provider: "zhipuai", Model: "glm-5.3", Current: true, Preferred: true},
+		{ID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash"},
+	}
+	decision, err := runOverlayWithKeys(t, req, []byte{'m', '\r'})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decision.RequestPlanReview == nil || decision.RequestPlanReview.ID != "llm_row1" {
+		t.Fatalf("decision=%#v, want the review of the configured reviewer", decision)
+	}
+
+	// The same list with nothing configured: the old opening row, unchanged.
+	plain := effortPlanReviewRequest(t)
+	plain.PlanReviewModels = []turn.PlanReviewModelOption{
+		{ID: "llm_row1", Provider: "zhipuai", Model: "glm-5.3", Current: true},
+		{ID: "llm_row2", Provider: "deepseek", Model: "deepseek-v4-flash"},
+	}
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, plain, nil)
+	overlay.enterPlanReviewMode()
+	if got := overlay.planReviewVisible()[overlay.planReviewCursor].ID; got != "llm_row2" {
+		t.Fatalf("cursor row = %q, want the first row that is not in force", got)
+	}
+}
+
 // A row that offers no levels keeps the one-step pick: Enter on the model list
 // decides, with the empty level that leaves the row in charge. This is the 283
 // behaviour the second screen must not take away.

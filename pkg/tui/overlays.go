@@ -1442,10 +1442,12 @@ func (o *approvalOverlay) handleFeedbackKey(key parsedKey) (turn.ToolApprovalDec
 }
 
 // enterPlanPickerMode opens the shared model picker for one purpose. The
-// cursor starts on a model other than the conversation's own: a second
-// opinion is the point of the review row, a cheaper or stronger executor of
-// the hand-off row — and the current model is still one keypress away for
-// both, which is a legitimate choice.
+// cursor starts on the reviewer the install configured — the offer carrying
+// Preferred — so a user who set agents.plan_reviewer does not pick it by hand
+// at every approval. Without one it starts on a model other than the
+// conversation's own: a second opinion is the point of the review row, a
+// cheaper or stronger executor of the hand-off row — and the current model is
+// still one keypress away for both, which is a legitimate choice (plan 320).
 func (o *approvalOverlay) enterPlanPickerMode(purpose planPickerPurpose) {
 	o.planReviewPicking = true
 	o.planPickerPurpose = purpose
@@ -1454,11 +1456,25 @@ func (o *approvalOverlay) enterPlanPickerMode(purpose planPickerPurpose) {
 	o.planReviewInFilter = false
 	o.planReviewFiltered = o.planReviewFiltered[:0]
 	o.applyPlanReviewFilter()
+	opening := -1
 	for i, modelIdx := range o.planReviewFiltered {
-		if !o.req.PlanReviewModels[modelIdx].Current {
-			o.planReviewCursor = i
+		if o.req.PlanReviewModels[modelIdx].Preferred {
+			opening = i
 			break
 		}
+	}
+	if opening < 0 {
+		// No configured reviewer: the first row that is not the one in force,
+		// the row this list has always opened on.
+		for i, modelIdx := range o.planReviewFiltered {
+			if !o.req.PlanReviewModels[modelIdx].Current {
+				opening = i
+				break
+			}
+		}
+	}
+	if opening >= 0 {
+		o.planReviewCursor = opening
 	}
 }
 
