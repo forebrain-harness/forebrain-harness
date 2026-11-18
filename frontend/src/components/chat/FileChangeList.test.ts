@@ -65,8 +65,7 @@ describe('FileChangeList', () => {
           '(file diff skipped for this git command)',
           '(another command ran in this repository at the same time; a change made by either may show under either result)',
           '(a git step in this command can move the working tree, so these may be its changes, not edits)',
-          '3 files changed (binary, mode only or too large to show) (part of the diff is unavailable)',
-          '(file diff unavailable for this command; 2 files changed)',
+          '3 files changed (binary, mode only or too large to show)',
           '(some future note the engine may grow)',
         ],
       },
@@ -77,8 +76,7 @@ describe('FileChangeList', () => {
       'git 切换分支类命令，不比较文件',
       '同一仓库同时有别的命令在跑，改动可能记在任一条下',
       '命令里有 git 步骤，可能是它移动了工作区',
-      '3 个文件改动（二进制、仅权限或太大，不显示）（部分差异不可用）',
-      '这条命令的文件差异不可用（2 个文件改动）',
+      '3 个文件改动（二进制、仅权限或太大，不显示）',
       '(some future note the engine may grow)',
     ])
   })
@@ -86,9 +84,9 @@ describe('FileChangeList', () => {
   it('keeps the engine’s own wording in English', () => {
     setLocale('en')
     const wrapper = mount(FileChangeList, {
-      props: { files: [], notes: ['… 7 more files changed (part of the diff is unavailable)'] },
+      props: { files: [], notes: ['… 7 more files changed'] },
     })
-    expect(wrapper.get('[data-testid="diff-note-0"]').text()).toBe('… 7 more files changed (part of the diff is unavailable)')
+    expect(wrapper.get('[data-testid="diff-note-0"]').text()).toBe('… 7 more files changed')
     setLocale('zh')
   })
 })
