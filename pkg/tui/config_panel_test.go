@@ -118,7 +118,9 @@ func frameText(r *Renderer) string {
 
 // The panel opens on the section list, and that list is the whole stored
 // configuration plus the two file sections — the one place a reader checks
-// that a newly added section is reachable at all.
+// that a newly added section is reachable at all. A row is the section's title
+// with what it is for, marked Default while the database holds no row for it;
+// the name it is stored under is an argument, never a row label (plan 321).
 func TestConfigPanelListsEverySection(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	selector := &scriptedSelector{}
@@ -127,23 +129,43 @@ func TestConfigPanelListsEverySection(t *testing.T) {
 	if len(selector.richItems) != 1 {
 		t.Fatalf("expected the section list alone, got %d pages", len(selector.richItems))
 	}
-	got := map[string]bool{}
+	got := map[string]SelectItem{}
 	tabs := map[string]bool{}
 	for _, item := range selector.richItems[0] {
-		got[item.Label] = true
+		got[item.Label] = item
 		tabs[item.Category] = true
 		if strings.TrimSpace(item.Description) == "" {
 			t.Errorf("%s 的行没有说明", item.Label)
 		}
 	}
-	for _, name := range process.RootConfigSections() {
-		if !got[name] {
-			t.Errorf("段 %q 不在面板的段列表里", name)
+	for _, schema := range configSectionSchemas {
+		item, ok := got[schema.Title]
+		if !ok {
+			t.Errorf("段 %q 不在面板的段列表里", schema.Title)
+			continue
+		}
+		if _, leaked := got[schema.Name]; leaked && schema.Name != schema.Title {
+			t.Errorf("段的存储名 %q 出现在列表里", schema.Name)
+		}
+		if item.Description != schema.Summary {
+			t.Errorf("段 %q 的说明 = %q, want %q", schema.Title, item.Description, schema.Summary)
+		}
+		if want := configDefaultStatus; schema.YAMLOnly && item.Status != "" {
+			t.Errorf("只读段 %q 带了状态 %q", schema.Title, item.Status)
+		} else if !schema.YAMLOnly && item.Status != want {
+			t.Errorf("段 %q 的状态 = %q, want %q", schema.Title, item.Status, want)
 		}
 	}
-	for _, name := range []string{"gateway", "credentials"} {
-		if !got[name] {
-			t.Errorf("只读段 %q 不在面板的段列表里", name)
+	// A section the database holds stops reading as the default.
+	session = newConfigPanelSession(map[string]string{"cron": `{"retention_days":30}`})
+	selector = &scriptedSelector{}
+	runConfigPanel(t, session, selector, nil, nil)
+	if item := got["Scheduled tasks"]; item.Status != configDefaultStatus {
+		t.Fatalf("the empty session's row already reads %q", item.Status)
+	}
+	for _, item := range selector.richItems[0] {
+		if item.Label == "Scheduled tasks" && item.Status != "" {
+			t.Fatalf("a configured section carries %q, want no status", item.Status)
 		}
 	}
 	for _, tab := range []string{configTabApproval, configTabSession, configTabAgents, configTabFile} {
@@ -191,7 +213,7 @@ func TestConfigPanelWritesATriStateBooleanOnEnter(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	selector := &scriptedSelector{}
 	renderer := runConfigPanel(t, session, selector, []richStep{
-		{label: "features", ok: true},
+		{label: "Feature switches", ok: true},
 		{label: "Memory", ok: true},
 		{label: configBoolOnLabel, ok: true},
 		{ok: false},
@@ -226,7 +248,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 		{
 			name: "enum", section: "approval_preset",
 			steps: []richStep{
-				{label: "approval_preset", ok: true},
+				{label: "Approval preset", ok: true},
 				{label: "Approval preset", ok: true},
 				{label: "Full access", ok: true},
 			},
@@ -235,7 +257,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 		{
 			name: "number", section: "cron",
 			steps: []richStep{
-				{label: "cron", ok: true},
+				{label: "Scheduled tasks", ok: true},
 				{label: "Keep days", ok: true},
 			},
 			inputs: []selectorInput{{value: "45", ok: true}},
@@ -244,7 +266,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 		{
 			name: "text", section: "compact",
 			steps: []richStep{
-				{label: "compact", ok: true},
+				{label: "Context compaction", ok: true},
 				{label: "Hand-off prompt", ok: true},
 			},
 			inputs: []selectorInput{{value: "Keep it short.", ok: true}},
@@ -254,7 +276,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 			name: "rows", section: "sandbox_workspace_write",
 			stored: map[string]string{"sandbox_workspace_write": `{"writable_roots":["/a"]}`},
 			steps: []richStep{
-				{label: "sandbox_workspace_write", ok: true},
+				{label: "Workspace sandbox", ok: true},
 				{label: "Extra writable roots", ok: true},
 				{label: configAddRowLabel, ok: true},
 				{label: configNewTextRow, ok: true},
@@ -265,7 +287,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 		{
 			name: "model ref", section: "agents",
 			steps: []richStep{
-				{label: "agents", ok: true},
+				{label: "Agents", ok: true},
 				{label: "Goal check model", ok: true},
 			},
 			inputs: []selectorInput{{value: "llm-1", ok: true}},
@@ -298,7 +320,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 // that type needs, and the row exists only as a candidate the loader accepts.
 func TestConfigPanelCreatesACompleteHookInOneWrite(t *testing.T) {
 	openHooks := []richStep{
-		{label: "hooks", ok: true},
+		{label: "Hooks", ok: true},
 		{label: "Hook events", ok: true},
 		{label: configAddRowLabel, ok: true},
 		{label: "PreToolUse", ok: true},
@@ -391,7 +413,7 @@ func TestConfigPanelRefusesAnIncompleteHookBeforeWriting(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "hooks", ok: true},
+		{label: "Hooks", ok: true},
 		{label: "Hook events", ok: true},
 		{label: configAddRowLabel, ok: true},
 		{label: "PreToolUse", ok: true},
@@ -415,7 +437,7 @@ func TestConfigPanelClearsAFieldToItsDefault(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"features": `{"memories":false}`})
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "features", ok: true},
+		{label: "Feature switches", ok: true},
 		{label: "Memory", ok: true},
 		{label: configDefaultActionLabel, ok: true},
 		{ok: false},
@@ -447,7 +469,7 @@ func TestConfigPanelChoiceListsHoldValuesAndTheDefaultAction(t *testing.T) {
 		{
 			name:    "a boolean",
 			stored:  map[string]string{"features": `{"memories":true}`},
-			steps:   []richStep{{label: "features", ok: true}, {label: "Memory", ok: true}},
+			steps:   []richStep{{label: "Feature switches", ok: true}, {label: "Memory", ok: true}},
 			want:    []string{configBoolOnLabel, configBoolOffLabel, configDefaultActionLabel},
 			raw:     ``,
 			section: "features",
@@ -455,7 +477,7 @@ func TestConfigPanelChoiceListsHoldValuesAndTheDefaultAction(t *testing.T) {
 		{
 			name:    "an enum",
 			stored:  map[string]string{"lsp": `{"diagnostics":{"min_severity":"warning","late_delivery":true}}`},
-			steps:   []richStep{{label: "lsp", ok: true}, {label: "Lowest severity", ok: true}},
+			steps:   []richStep{{label: "Language servers", ok: true}, {label: "Lowest severity", ok: true}},
 			want:    []string{"error", "warning", "information", "hint", configDefaultActionLabel},
 			raw:     `{"diagnostics":{"late_delivery":true}}`,
 			section: "lsp",
@@ -510,7 +532,7 @@ func TestConfigPanelRefusesAnOutOfRangeNumber(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "cron", ok: true},
+		{label: "Scheduled tasks", ok: true},
 		{label: "Keep days", ok: true},
 		{label: "Keep days", ok: true},
 		{ok: false},
@@ -535,7 +557,7 @@ func TestConfigPanelClampsANumberToItsCeiling(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "memories", ok: true},
+		{label: "Memory", ok: true},
 		{label: "Results per search", ok: true},
 		{ok: false},
 	}, []selectorInput{{value: "99", ok: true}})
@@ -556,7 +578,7 @@ func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 	session.writeErr = errStubConfigRefusal
 	selector := &scriptedSelector{}
 	renderer := runConfigPanel(t, session, selector, []richStep{
-		{label: "features", ok: true},
+		{label: "Feature switches", ok: true},
 		{label: "Memory", ok: true},
 		{label: configBoolOnLabel, ok: true},
 		{ok: false},
@@ -574,7 +596,7 @@ func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 	}
 	// The value did not land, so the page drawn after the refusal still reads
 	// the default: the refusal is not a half-applied edit.
-	page := lastPageWith(selector, "Memory")
+	page := lastPageHeadlined(selector, "Feature switches")
 	if page == nil {
 		t.Fatalf("the features page was never drawn after the refusal: %v", selector.richLabels)
 	}
@@ -592,7 +614,7 @@ func TestConfigPanelOpensASectionByName(t *testing.T) {
 	if len(selector.richLabels) == 0 {
 		t.Fatal("no page opened")
 	}
-	if !strings.HasPrefix(selector.richLabels[0], "cron Scheduled tasks") {
+	if !strings.HasPrefix(selector.richLabels[0], "Scheduled tasks") {
 		t.Fatalf("first page = %q, want the cron section page", selector.richLabels[0])
 	}
 }
@@ -619,7 +641,7 @@ func TestConfigPanelShowsAFileSectionReadOnly(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	session.snapshot.File["gateway"] = "gateway:\n  http_addr: 127.0.0.1:8080\n"
 	selector := &infoPanelSelector{scriptedSelector: &scriptedSelector{}}
-	runConfigPanel(t, session, selector, []richStep{{label: "gateway", ok: true}, {ok: false}}, nil)
+	runConfigPanel(t, session, selector, []richStep{{label: "Gateway", ok: true}, {ok: false}}, nil)
 
 	if len(selector.bodies) != 1 {
 		t.Fatalf("expected one read-only overlay, got %d", len(selector.bodies))
@@ -639,7 +661,7 @@ func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"work":{"description":"旧"}}}`})
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "agents", ok: true},
+		{label: "Agents", ok: true},
 		{label: "Agent definitions", ok: true},
 		{label: "work", ok: true},
 		{label: configRowOpenLabel, ok: true},
@@ -666,7 +688,7 @@ func TestConfigPanelAddsAndDeletesARow(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"sandbox_workspace_write": `{"writable_roots":["/a"]}`})
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "sandbox_workspace_write", ok: true},
+		{label: "Workspace sandbox", ok: true},
 		{label: "Extra writable roots", ok: true},
 		{label: configAddRowLabel, ok: true},
 		{label: configNewTextRow, ok: true},
@@ -693,7 +715,7 @@ func TestConfigPanelAddsToAnUnsetList(t *testing.T) {
 	session := newConfigPanelSession(nil)
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "sandbox_workspace_write", ok: true},
+		{label: "Workspace sandbox", ok: true},
 		{label: "Extra writable roots", ok: true},
 		{label: configAddRowLabel, ok: true},
 		{label: configNewTextRow, ok: true},
@@ -715,7 +737,7 @@ func TestConfigPanelEscBacksOutOneLevel(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"work":{}}}`})
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "agents", ok: true},
+		{label: "Agents", ok: true},
 		{label: "Agent definitions", ok: true},
 		{ok: false}, // the row page closes
 		{ok: false}, // the section page closes
@@ -1192,11 +1214,11 @@ func findRow(t *testing.T, items []SelectItem, label string) SelectItem {
 	return SelectItem{}
 }
 
-// lastPageWith is the last page the panel drew that holds a row labelled label:
-// the state a refusal is read in, rather than a page that closed after it.
-func lastPageWith(selector *scriptedSelector, label string) []SelectItem {
+// lastPageHeadlined is the last page the panel drew under one heading: the
+// state a refusal is read in, rather than a page that closed after it.
+func lastPageHeadlined(selector *scriptedSelector, headline string) []SelectItem {
 	for i := len(selector.richItems) - 1; i >= 0; i-- {
-		if slices.Contains(rowLabels(selector.richItems[i]), label) {
+		if strings.HasPrefix(selector.richLabels[i], headline) {
 			return selector.richItems[i]
 		}
 	}

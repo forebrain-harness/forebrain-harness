@@ -140,8 +140,8 @@ var configSectionSchemas = []configSectionSchema{
 		}},
 	},
 	{
-		Name: "sandbox_workspace_write", Title: "Sandbox writable roots", Tab: configTabApproval,
-		Summary: "Write access and caching for the workspace-write sandbox",
+		Name: "sandbox_workspace_write", Title: "Workspace sandbox", Tab: configTabApproval,
+		Summary: "Control writable paths and network access",
 		Fields: []configField{
 			{Path: "writable_roots", Label: "Extra writable roots", Kind: configFieldRows, List: true, Hint: "One absolute path per row"},
 			{Path: "network_access", Label: "Allow network access", Kind: configFieldBool3, Hint: "On by default"},
@@ -203,7 +203,7 @@ var configSectionSchemas = []configSectionSchema{
 	},
 	{
 		Name: "agents", Title: "Agents", Tab: configTabAgents,
-		Summary: "Defaults, agent definitions and their providers, subagents, MCP",
+		Summary: "Definitions, shared defaults and goal checks",
 		Fields: []configField{
 			{
 				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows,
@@ -313,12 +313,12 @@ var configSectionSchemas = []configSectionSchema{
 	},
 	{
 		Name: "gateway", Title: "Gateway", Tab: configTabFile,
-		Summary:  "Listen address, authentication and outward links (read-only)",
+		Summary:  "Listen address, authentication and outward links",
 		YAMLOnly: true,
 	},
 	{
 		Name: "credentials", Title: "Credential files", Tab: configTabFile,
-		Summary:  "Where external credential files live (read-only)",
+		Summary:  "Where external credential files live",
 		YAMLOnly: true,
 	},
 }

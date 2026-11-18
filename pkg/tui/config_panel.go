@@ -238,7 +238,7 @@ func (p *configPanel) run(ctx context.Context, start string) {
 // chooseSection lists every section, tabbed by the group its descriptor names.
 func (p *configPanel) chooseSection() (string, bool) {
 	items, names := p.sectionItems()
-	label := "Configuration\nRuntime configuration sections. Saving writes the database and applies from the next turn; a [YAML] section is read-only."
+	label := "Configuration\nOpen a section to see and change its settings."
 	idx, ok, err := selectRichTabbed(p.sel, label, items, TabbedSelectOptions{DefaultIdx: 0})
 	if err != nil {
 		p.printError(err)
@@ -284,17 +284,19 @@ func panelSectionSchemaFor(name string) (configSectionSchema, bool) {
 	return configSectionSchema{}, false
 }
 
-// sectionItems is the section list: the name the user types, and a
-// description carrying its Chinese title, what it is for, and whether it is
-// set today.
+// sectionItems is the section list: the section's own title, what it is for,
+// and whether the database holds a row for it. The name a reader would type to
+// /config is an argument, not a row label — the panel speaks in titles, never
+// in the names forebrain.yaml happens to use (plan 321).
 func (p *configPanel) sectionItems() ([]SelectItem, []string) {
 	sections := panelSections()
 	items := make([]SelectItem, 0, len(sections))
 	names := make([]string, 0, len(sections))
 	for _, schema := range sections {
 		items = append(items, SelectItem{
-			Label:       schema.Name,
-			Description: p.sectionDescription(schema),
+			Label:       schema.Title,
+			Description: schema.Summary,
+			Status:      p.sectionStatus(schema),
 			Category:    schema.Tab,
 		})
 		names = append(names, schema.Name)
@@ -302,18 +304,14 @@ func (p *configPanel) sectionItems() ([]SelectItem, []string) {
 	return items, names
 }
 
-func (p *configPanel) sectionDescription(schema configSectionSchema) string {
-	desc := schema.Title + " " + schema.Summary
-	switch {
-	case schema.YAMLOnly:
-		return "[YAML] " + desc + " read-only"
-	case len(p.raw[schema.storeSection()]) > 0:
-		// A projection reads the section it presents: its own name is never a
-		// row in the store (plan 314).
-		return desc + " set"
-	default:
-		return desc + " default"
+// sectionStatus is the section list's right-edge word: a section the database
+// has no row for is the one reading its defaults, which is what the prototype's
+// own status column says. A section it holds says nothing.
+func (p *configPanel) sectionStatus(schema configSectionSchema) string {
+	if schema.YAMLOnly || len(p.raw[schema.storeSection()]) > 0 {
+		return ""
 	}
+	return configDefaultStatus
 }
 
 // editSection runs one section's page. It reports whether the panel stays
@@ -475,16 +473,12 @@ func configFieldListed(field configField, claudeCode bool) bool {
 	return true
 }
 
-// sectionPrompt is the section page's heading: what the section is, what it
-// holds now, and the last outcome — a save's sentence or a refusal's text.
+// sectionPrompt is the section page's heading: what the section is, and the
+// last outcome — a value that did not land, or the row a page refused. The
+// section's own page names it by title, never by the key forebrain.yaml stores
+// it under (plan 321).
 func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice string) string {
-	head := schema.Name + " " + schema.Title + "\n" + schema.Summary
-	switch {
-	case len(p.raw[schema.storeSection()]) == 0:
-		head += " now: default (the database holds no record for this section)"
-	default:
-		head += " now: set"
-	}
+	head := schema.Title + "\n" + schema.Summary
 	if len(schema.Fields) == 0 {
 		head += "\nThis section has no setting editable from the terminal."
 	}
@@ -503,7 +497,7 @@ func (p *configPanel) showFileSection(schema configSectionSchema) {
 	}
 	content := body + "\n\n" + configFileOnlyNote
 	if overlay, ok := p.sel.(InfoOverlaySelector); ok {
-		if err := overlay.ShowInfo(schema.Name+" "+schema.Title, content); err == nil {
+		if err := overlay.ShowInfo(schema.Title, content); err == nil {
 			return
 		}
 	}
@@ -1027,6 +1021,10 @@ const (
 	configPlanReviewerKey    = "plan_reviewer"
 	configSharedSubagentsKey = "shared_subagents"
 	configPrimaryStatus      = "Primary"
+	// configDefaultStatus is the section list's one status word: the database
+	// holds no row for the section, so it reads its built-in defaults — the
+	// prototype's own marker (plan 321).
+	configDefaultStatus = "Default"
 	// The status column's words, from the prototype's "Subagent models" section
 	// (plan 314): a per-type row that names a model is this install's global
 	// default for that type, and the plan reviewer's row is the global row of a
