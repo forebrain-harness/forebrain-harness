@@ -1273,6 +1273,80 @@ func TestOpenAIResponsesLLMIncludesConfiguredParamsInRequestBody(t *testing.T) {
 	}
 }
 
+// "Default" means no effort parameter on every protocol. This client used to be
+// handed a hardcoded medium, so the same row that sent nothing on
+// chat/completions sent medium here, decided only by the endpoint (plan 318 F3).
+// The automatic summary stays, because it is what brings reasoning summaries
+// back, and an empty level names nothing rather than sending "".
+func TestOpenAIResponsesSendsOnlyTheRowsOwnReasoningEffort(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params string
+		want   string // "" means the body carries no effort key at all
+	}{
+		{name: "a row that names no level sends none", params: `{"stream": false}`},
+		{name: "the row's level is sent verbatim", params: `{"stream": false, "reasoning": {"effort": "high"}}`, want: "high"},
+		{name: "an empty level names nothing", params: `{"stream": false, "reasoning": {"effort": ""}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capturedBody := captureResponsesRequestBody(t, tc.params)
+			reasoning, ok := capturedBody["reasoning"].(map[string]any)
+			if !ok {
+				t.Fatalf("reasoning = %v, want an object; body=%+v", capturedBody["reasoning"], capturedBody)
+			}
+			if reasoning["summary"] != "auto" {
+				t.Fatalf("reasoning.summary = %v, want auto; body=%+v", reasoning["summary"], capturedBody)
+			}
+			effort, present := reasoning["effort"]
+			if tc.want == "" {
+				if present {
+					t.Fatalf("reasoning.effort = %v, want no effort key; body=%+v", effort, capturedBody)
+				}
+				return
+			}
+			if !present || effort != tc.want {
+				t.Fatalf("reasoning.effort = %v (present=%v), want %q; body=%+v", effort, present, tc.want, capturedBody)
+			}
+		})
+	}
+}
+
+// captureResponsesRequestBody runs one execute with the given configured params
+// and returns the JSON body that reached the wire.
+func captureResponsesRequestBody(t *testing.T, paramsJSON string) map[string]any {
+	t.Helper()
+	var capturedBody map[string]any
+	testLLM, ok := newOpenAIResponsesLLM("sk-test", "http://example.invalid", "gpt-test", 16, []byte(paramsJSON)).(*openAIResponsesLLM)
+	if !ok {
+		t.Fatalf("newOpenAIResponsesLLM returned %T, want *openAIResponsesLLM", testLLM)
+	}
+	testLLM.client = openaigo.NewClient(
+		option.WithAPIKey("sk-test"),
+		option.WithBaseURL("http://example.invalid"),
+		option.WithHTTPClient(&http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				return nil, err
+			}
+			if err := json.Unmarshal(body, &capturedBody); err != nil {
+				return nil, err
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(syncResponsesBody("ok"))),
+			}, nil
+		})}),
+	)
+	if _, err := testLLM.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("test"))}, nil); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if capturedBody == nil {
+		t.Fatal("no request body was captured")
+	}
+	return capturedBody
+}
+
 func TestOpenAIResponsesStreamingSurfacesReasoningOnlyOutput(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"type":"response.reasoning_summary_text.delta","delta":"Need ","item_id":"rs_1","output_index":0,"summary_index":0,"sequence_number":1}`,

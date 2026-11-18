@@ -296,6 +296,29 @@ func cloneJSONMap(in map[string]any) map[string]any {
 	return out
 }
 
+// responsesReasoningParams is the thinking settings one request carries: what the
+// configured row names, and nothing else but the automatic summary.
+//
+// It used to be a hardcoded medium, which made "Default" mean two things — no
+// effort parameter at all on chat/completions, medium on this protocol — for the
+// same model and the same row, decided only by the endpoint (plan 318 F3). Now a
+// row that names no level sends none, exactly as it does on every other
+// protocol, and the provider applies its own. Summary stays automatic because it
+// is what brings reasoning summaries back; a row that names one, or any other
+// key this client does not model, still goes out as written. An empty value
+// names nothing and is dropped rather than sent as "".
+func responsesReasoningParams(overlay map[string]any) map[string]any {
+	out := map[string]any{"summary": string(shared.ReasoningSummaryAuto)}
+	named, _ := overlay["reasoning"].(map[string]any)
+	for key, value := range named {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) == "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
 func openAIResponsesInjectedRequestKey(k string) bool {
 	switch strings.ToLower(strings.TrimSpace(k)) {
 	case "input", "tools", "prompt_cache_key", "web_search":
@@ -988,10 +1011,6 @@ func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []l
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: input,
 		},
-		Reasoning: shared.ReasoningParam{
-			Effort:  shared.ReasoningEffortMedium,
-			Summary: shared.ReasoningSummaryAuto,
-		},
 		// The Responses API stores responses server-side by default. Forebrain Harness
 		// never references a stored response — it resends the full transcript
 		// every turn and uses no previous_response_id — so storing them buys
@@ -1010,15 +1029,19 @@ func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []l
 		params.PromptCacheKey = openaigo.String(key)
 	}
 	extra := cloneJSONMap(c.paramsOverlay)
+	if extra == nil {
+		extra = map[string]any{}
+	}
 	if hasOpaqueInput {
-		if extra == nil {
-			extra = map[string]any{}
-		}
 		extra["input"] = rawInput
 	}
-	if len(extra) > 0 {
-		params.SetExtraFields(extra)
-	}
+	// The thinking settings are the row's, never this client's: a row that names
+	// no level sends none, which is what "Default" means on every other protocol
+	// (plan 318 F3). They travel as an extra field rather than through the typed
+	// Reasoning param, which is how a row's own keys — summary included — reach
+	// the wire as written.
+	extra["reasoning"] = responsesReasoningParams(c.paramsOverlay)
+	params.SetExtraFields(extra)
 	ensureReasoningEncryptedContentIncluded(&params)
 
 	if len(tools) > 0 {
