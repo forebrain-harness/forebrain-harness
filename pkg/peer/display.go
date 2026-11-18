@@ -12,6 +12,12 @@ import (
 // costing more than a few passes.
 const maxDisplayUnwrap = 4
 
+// agentMessageTag is the in-process interjection element: pkg/run's
+// peerMessageText and pkg/process's subagentReportEnvelope write it for
+// main⇄subagent messages (plans 202/306). It never travels the socket, so
+// Parse — the wire reader — does not know it; the screen reads it here.
+const agentMessageTag = "agent-message"
+
 // machineValuePattern is the only shape an attribute value may have for the
 // display to drop it unseen: a machine token — ids, leases, versions — short
 // and without whitespace, so no sentence hides inside one. An attribute
@@ -39,7 +45,10 @@ type displayLevel struct {
 
 // DisplayText reads an envelope for the screen: who sent it, and the words
 // inside it. It is the reader a card, a held preview and a queue row use, and
-// it is deliberately looser than Parse.
+// it is deliberately looser than Parse. It knows both elements this product's
+// writers put in a peer row — the wire's cross-session-message and the
+// in-process agent-message — while Parse, the wire reader, stays blind to the
+// second.
 //
 // Parse is the model-facing reader and stays exact: it re-renders the element
 // and demands the input back byte for byte, so a hand-assembled or forged
@@ -113,7 +122,9 @@ func DisplayText(content string) (fromName, body string, ok bool) {
 }
 
 // readDisplayLevel reads one element: strictly when Parse accepts it, else
-// loosely, an opening tag made of nothing but name="value" attributes. It
+// loosely, an opening tag made of nothing but name="value" attributes. The
+// loose read knows both elements this product's writers put on the screen's
+// path — the wire's own envelopeTag and the in-process agentMessageTag. It
 // reports false for text that is not exactly one element, so the caller shows
 // that text as it arrived.
 func readDisplayLevel(s string) (displayLevel, bool) {
@@ -147,16 +158,20 @@ func readDisplayLevel(s string) (displayLevel, bool) {
 			body:       envelope.Body,
 		}, true
 	}
-	return readLooseLevel(s)
+	if level, ok := readLooseLevel(s, envelopeTag); ok {
+		return level, true
+	}
+	return readLooseLevel(s, agentMessageTag)
 }
 
 // readLooseLevel reads an element naming an attribute this build has never
-// heard of, which the strict reader rightly refuses. The opening tag must be
-// nothing but attributes — one stray character is prose, not transport — and
-// no attribute twice, because nothing says which value to believe.
-func readLooseLevel(s string) (displayLevel, bool) {
-	opening := "<" + envelopeTag
-	closing := "</" + envelopeTag + ">"
+// heard of, which the strict reader rightly refuses. The element is tag's own
+// (envelopeTag or agentMessageTag); the opening tag must be nothing but
+// attributes — one stray character is prose, not transport — and no attribute
+// twice, because nothing says which value to believe.
+func readLooseLevel(s, tag string) (displayLevel, bool) {
+	opening := "<" + tag
+	closing := "</" + tag + ">"
 	if !strings.HasPrefix(s, opening) || !strings.HasSuffix(s, closing) {
 		return displayLevel{}, false
 	}
@@ -194,6 +209,11 @@ func readLooseLevel(s string) (displayLevel, bool) {
 	}
 	if at != len(inner) {
 		return displayLevel{}, false
+	}
+	if tag == agentMessageTag && level.fromName == "" {
+		// The interjection names its sender in from itself; the element
+		// carries no from-name attribute.
+		level.fromName = level.from
 	}
 	level.body = strings.TrimSpace(s[end+1 : len(s)-len(closing)])
 	return level, true

@@ -10950,3 +10950,37 @@ func TestActionPlanReviewAgainContinuesThePreviousReview(t *testing.T) {
 	require.NotEqual(t, "plan-review:r1", payload.ReviewID)
 	require.Equal(t, "row-2", payload.ModelID, "the continuation runs on the reviewer that wrote the first review")
 }
+
+// TestChatMessagesPeerRowAgentMessageCarriesSenderBodyAndIdentity pins the
+// stored-history half of the interjection defect: a subagent's report rides
+// the in-process agent-message element (pkg/process's
+// subagentReportEnvelope), and the row used to arrive without a name or body,
+// so the page fell back to the raw content and drew the markup and an unknown
+// sender. The row now carries the roster key as the sender and the report's
+// own words.
+func TestChatMessagesPeerRowAgentMessageCarriesSenderBodyAndIdentity(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	letter := `<agent-message from="subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f">` +
+		"\nYour subagent finished successfully.\n\nIts final report:\n\nprobe report\n</agent-message>"
+	turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{
+		SessionID: "s1", ModelInput: letter, Origin: state.MessageOriginPeer, EnsureSession: true,
+	})
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var raw []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("rows = %s", rec.Body.String())
+	}
+	if raw[0]["peer_from_name"] != "subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f" ||
+		raw[0]["peer_body"] != "Your subagent finished successfully.\n\nIts final report:\n\nprobe report" {
+		t.Fatalf("peer fields = %#v", raw[0])
+	}
+}

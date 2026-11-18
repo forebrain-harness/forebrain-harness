@@ -32632,3 +32632,19 @@ func TestExitPlanReviewPickerPassesTheEffortItChose(t *testing.T) {
 		t.Fatalf("hand-off without a level = %q, want the empty one", bare.Effort)
 	}
 }
+
+// A queued peer note waiting its turn rides the in-process agent-message
+// element, and the queue preview shows the letter's own words — never the
+// element the model will read. The body stays within the preview's line
+// limit, so what is asserted on is the preview, not its ellipsis.
+func TestQueuePreviewUnwrapsAgentMessageSteer(t *testing.T) {
+	envelope := "<agent-message from=\"subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f\">\nplease review the probe report\n</agent-message>"
+	lines := queuePreviewPlainLines(ComposerPendingInputPreview{PendingSteers: []string{envelope}}, 100)
+	rendered := strings.Join(lines, "\n")
+	if strings.Contains(rendered, "<agent-message") {
+		t.Fatalf("queue preview kept the agent-message markup:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "please review the probe report") {
+		t.Fatalf("queue preview dropped the letter's words:\n%s", rendered)
+	}
+}

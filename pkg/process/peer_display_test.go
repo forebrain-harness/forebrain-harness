@@ -66,6 +66,21 @@ func TestPeerEnvelopeDisplay(t *testing.T) {
 	if got := peerPreview(wrapped); strings.Contains(got, "cross-session-message") {
 		t.Fatalf("peerPreview of the receiver's own wrapper kept the markup: %q", got)
 	}
+
+	// The in-process interjection (pkg/process's own subagentReportEnvelope
+	// and pkg/run's peerMessageText): the screen reads the roster key as the
+	// name and the report as the words, while the model-facing read keeps
+	// seeing the element verbatim.
+	interjection := `<agent-message from="subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f">` +
+		"\nYour subagent finished successfully.\n\nIts final report:\n\nprobe report\n</agent-message>"
+	if name, body, ok := PeerEnvelopeDisplay(interjection); !ok ||
+		name != "subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f" ||
+		body != "Your subagent finished successfully.\n\nIts final report:\n\nprobe report" {
+		t.Fatalf("PeerEnvelopeDisplay of the interjection = (%q, %q, %v)", name, body, ok)
+	}
+	if _, _, ok := ParsePeerEnvelope(interjection); ok {
+		t.Fatal("ParsePeerEnvelope accepted the in-process interjection")
+	}
 }
 
 // TestPeerEnvelopeBodyUnwrapsAnEnvelopeThisBuildCannotParse pins the held
@@ -107,5 +122,23 @@ func TestPeerPreviewShowsTheEnvelopeBody(t *testing.T) {
 	// Text that is not an envelope is shown as it arrived, as it always was.
 	if got := peerPreview("just a message"); got != "just a message" {
 		t.Fatalf("peerPreview of plain text = %q", got)
+	}
+
+	// A held letter whose body is itself the in-process interjection,
+	// re-wrapped by envelopeFor: the preview and the body quote the report's
+	// own words, and no name is adopted for a sender the wrapper did not
+	// vouch for (plan 249's single-name rule).
+	held := peer.Build(peer.Envelope{
+		From: "uds:/tmp/sender.sock",
+		Body: `<agent-message from="subagent-x">first line of the report</agent-message>`,
+	})
+	if got := peerPreview(held); strings.Contains(got, "agent-message") {
+		t.Fatalf("peerPreview of the wrapped interjection kept the markup: %q", got)
+	}
+	if got := peerEnvelopeBody(held); got != "first line of the report" {
+		t.Fatalf("peerEnvelopeBody of the wrapped interjection = %q", got)
+	}
+	if got := peerDisplayName(held); got != "" {
+		t.Fatalf("peerDisplayName of the wrapped interjection = %q, want empty", got)
 	}
 }

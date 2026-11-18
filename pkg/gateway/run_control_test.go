@@ -3067,3 +3067,61 @@ func TestPaidTierSocketOpsAckTheChoice(t *testing.T) {
 	require.Equal(t, wsOpPaidTierAck, reply.Op)
 	require.Equal(t, "unknown session", reply.Error)
 }
+
+// A subagent's report delivered into a running turn rides the in-process
+// agent-message element (pkg/process's subagentReportEnvelope): the delivery
+// carries the roster key and the report's words, while Text stays the element
+// the model reads.
+func TestRunQueueDeliveredAgentMessageCarriesTheLetterBody(t *testing.T) {
+	s := newRunInputTestServer(t)
+	runID := "run-delivered-agent-message"
+	q := trackedQueue(t, s, runID)
+	letter := `<agent-message from="subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f">` +
+		"\nYour subagent finished successfully.\n\nIts final report:\n\nprobe report\n</agent-message>"
+	require.True(t, q.Steer(run.Input{Text: letter, Origin: state.MessageOriginPeer}))
+
+	delivery := q.Runtime().BeginSteerDelivery(context.Background())
+	require.NotNil(t, delivery)
+	require.True(t, delivery.Commit())
+
+	events, err := s.RunRT.ListRunEvents(context.Background(), runID, 100)
+	require.NoError(t, err)
+	var delivered []event.InputDeliveredPayload
+	for _, evt := range events {
+		if evt.Type != event.RunEventInputDelivered {
+			continue
+		}
+		var p event.InputDeliveredPayload
+		require.NoError(t, json.Unmarshal(evt.Payload, &p))
+		delivered = append(delivered, p)
+	}
+	require.Len(t, delivered, 1)
+	require.Equal(t, state.MessageOriginPeer, delivered[0].Origin)
+	require.Equal(t, "subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f", delivered[0].FromName)
+	// The queue flattens every steer's text to one line before storing it
+	// (cleanInputText), so the letter reads as one line here; what matters is
+	// that its words — not the element they travelled in — are the body.
+	require.Equal(t, "Your subagent finished successfully. Its final report: probe report", delivered[0].PeerBody)
+	require.NotContains(t, delivered[0].PeerBody, "<agent-message")
+	require.Contains(t, delivered[0].Text, "<agent-message", "the model's own copy is the element it read")
+}
+
+// A queued interjection previews by its words: the display copy is unwrapped,
+// while the queue keeps the element it will hand the model.
+func TestPendingInputPreviewUnwrapsAgentMessage(t *testing.T) {
+	s := newRunInputTestServer(t)
+	runID := "run-pending-agent-message"
+	q := trackedQueue(t, s, runID)
+	letter := `<agent-message from="subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f">` +
+		"\nplease **review** line 12\n</agent-message>"
+	require.True(t, q.Steer(run.Input{Text: letter, Origin: state.MessageOriginPeer}))
+	require.True(t, q.FollowUp(run.Input{Text: "a message the person typed"}))
+
+	steps := pendingInputSteps(t, s, runID)
+	require.NotEmpty(t, steps)
+	last := steps[len(steps)-1]
+	require.Equal(t, []string{"please **review** line 12"}, last.PendingSteers)
+	require.Equal(t, []string{"a message the person typed"}, last.QueuedMessages)
+	require.Contains(t, q.Preview().Steers[0], "<agent-message",
+		"the queue still holds what the model reads")
+}

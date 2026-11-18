@@ -5138,3 +5138,33 @@ func TestSlashModelEffortPickerRendersTheWebLabels(t *testing.T) {
 		t.Fatalf("rendered rows carry no tight gear:\n%s", rows)
 	}
 }
+
+// A subagent's report and a peer_send note ride the in-process agent-message
+// element (pkg/process's subagentReportEnvelope, pkg/run's peerMessageText),
+// and the card must read them the way a cross-session letter reads: the
+// sender's roster key names it, and the report's own words — not the element
+// they travelled in — are the body.
+func TestReplayPeerRowAgentMessageNamesSenderAndDropsMarkup(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	text := "<agent-message from=\"subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f\">\nYour subagent finished successfully.\n\nIts final report:\n\nprobe report\n</agent-message>"
+	row := state.WithMessageOrigin(state.MessagePartsJSON(llm.UserMessage(llm.Text(text)), text), state.MessageOriginPeer)
+	replayTurnsToRenderer(renderer, []state.Message{{Role: "user", Content: text, PartsJSON: row}})
+
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+	}
+	card := renderer.vm.blocks[0].frame
+	wantTitle := "Received a message from subagent-0f4c9f2e-1b2a-4c3d-8e5f-6a7b8c9d0e1f"
+	if card.Kind != FrameSystem || card.Title != wantTitle {
+		t.Fatalf("agent-message row kind=%s title=%q want a system card naming the sender", card.Kind, card.Title)
+	}
+	if card.Content != "Your subagent finished successfully.\n\nIts final report:\n\nprobe report" {
+		t.Fatalf("agent-message row content=%q want the report's own words", card.Content)
+	}
+	if !card.MarkdownBody || card.Marker != "↘" {
+		t.Fatalf("agent-message row marker=%q markdown=%v want the peer card's own mark and Markdown", card.Marker, card.MarkdownBody)
+	}
+}
