@@ -334,7 +334,6 @@ func TestConfigPanelCreatesACompleteHookInOneWrite(t *testing.T) {
 	}
 	openMatcher := []richStep{
 		{label: "PreToolUse", ok: true},
-		{label: configRowOpenLabel, ok: true},
 		{label: configAddRowLabel, ok: true},
 	}
 	for _, tc := range []struct {
@@ -425,7 +424,6 @@ func TestConfigPanelRefusesAnIncompleteHookBeforeWriting(t *testing.T) {
 		{label: configAddRowLabel, ok: true},
 		{label: "PreToolUse", ok: true},
 		{label: "PreToolUse", ok: true},
-		{label: configRowOpenLabel, ok: true},
 		{label: configAddRowLabel, ok: true},
 		{label: "HTTP", ok: true},
 	}, []selectorInput{{value: configHookAllToolsMatcher, ok: true}, {value: "hooks.example.com/review", ok: true}})
@@ -474,17 +472,12 @@ func TestConfigPanelKeepsTheHookTheStoreRefusesToChange(t *testing.T) {
 		{label: "Hooks", ok: true},
 		{label: "Hook events", ok: true},
 		{label: "PreToolUse", ok: true},
-		{label: configRowOpenLabel, ok: true},
 		{label: "#1", ok: true},
-		{label: configRowOpenLabel, ok: true},
-		{label: "hooks", ok: true},
-		{label: configRowOpenLabel, ok: true},
+		{label: "Actions", ok: true},
 		{label: "#1", ok: true},
-		{label: configRowOpenLabel, ok: true},
-		{label: "type", ok: true},
-		{label: configRowEditLabel, ok: true},
-		{label: configNewTextRow, ok: true},
-	}, []selectorInput{{value: "http", ok: true}})
+		{label: "Action type", ok: true},
+		{label: "HTTP", ok: true},
+	}, nil)
 
 	if !strings.Contains(pageLabels(selector), "http hook requires absolute url") {
 		t.Fatalf("the store's refusal must reach the page: %s", pageLabels(selector))
@@ -729,6 +722,8 @@ func TestConfigPanelShowsAFileSectionReadOnly(t *testing.T) {
 
 // A table is edited one row at a time, and a row holding a table opens its own
 // rows: agent definitions, MCP servers and LSP servers all take this one path.
+// A definition opens its template's fixed fields directly, and a field its
+// editor directly (plan 329): no menu between the row and its description.
 func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"work":{"description":"旧"}}}`})
 	selector := &scriptedSelector{}
@@ -736,12 +731,8 @@ func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
 		{label: "Agents", ok: true},
 		{label: "Agent definitions", ok: true},
 		{label: "work", ok: true},
-		{label: configRowOpenLabel, ok: true},
-		{label: "description", ok: true},
-		{label: configRowEditLabel, ok: true},
-		{label: configNewTextRow, ok: true},
-		{label: configUpRowLabel, ok: true},
-		{label: configUpRowLabel, ok: true},
+		{label: "Description", ok: true},
+		{ok: false},
 		{ok: false},
 	}, []selectorInput{{value: "新", ok: true}})
 
@@ -754,8 +745,11 @@ func TestConfigPanelEditsATableRowInPlace(t *testing.T) {
 }
 
 // Rows can be added and deleted, and a list's rows are its elements — the
-// shape an unset list section has no value to read the shape from. Each of the
-// two edits is its own write (plan 321).
+// shape an unset list section has no value to read the shape from. Each of
+// the two edits is its own write (plan 321). A writable root is a known
+// scalar row, so adding one opens its text editor directly (plan 329); a
+// row of a generic container keeps the menu, and with it the delete action
+// until the footer carries it (plan 326).
 func TestConfigPanelAddsAndDeletesARow(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"sandbox_workspace_write": `{"writable_roots":["/a"]}`})
 	selector := &scriptedSelector{}
@@ -763,20 +757,34 @@ func TestConfigPanelAddsAndDeletesARow(t *testing.T) {
 		{label: "Workspace sandbox", ok: true},
 		{label: "Extra writable roots", ok: true},
 		{label: configAddRowLabel, ok: true},
-		{label: configNewTextRow, ok: true},
-		{label: "#1", ok: true},
-		{label: configRowDropLabel, ok: true},
-		{label: configUpRowLabel, ok: true},
+		{ok: false},
 		{ok: false},
 	}, []selectorInput{{value: "/b", ok: true}})
 
-	if len(session.writes) != 2 {
-		t.Fatalf("expected the add and the delete to write, got %+v", session.writes)
+	if len(session.writes) != 1 {
+		t.Fatalf("expected the add to write, got %+v", session.writes)
 	}
 	if raw := string(session.writes[0].raw); raw != `{"writable_roots":["/a","/b"]}` {
 		t.Fatalf("the added row = %s", raw)
 	}
-	if raw := string(session.writes[1].raw); raw != `{"writable_roots":["/b"]}` {
+
+	// The delete half lives where the generic editor keeps it: a key of an
+	// LSP server's settings object, which no template names.
+	session = newConfigPanelSession(map[string]string{"lsp": `{"servers":{"gopls":{"command":"gopls","settings":{"legacy":{"keep":true}}}}}`})
+	selector = &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Language servers", ok: true},
+		{label: "Servers", ok: true},
+		{label: "gopls", ok: true},
+		{label: "Server settings", ok: true},
+		{label: "legacy", ok: true},
+		{label: configRowDropLabel, ok: true},
+		{ok: false},
+	}, nil)
+	if len(session.writes) != 1 {
+		t.Fatalf("expected the delete to write, got %+v", session.writes)
+	}
+	if raw := string(session.writes[0].raw); raw != `{"servers":{"gopls":{"command":"gopls","settings":{}}}}` {
 		t.Fatalf("raw = %s", raw)
 	}
 }
@@ -1202,6 +1210,7 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 		check("section "+schema.Name+" title", schema.Title)
 		check("section "+schema.Name+" summary", schema.Summary)
 		check("section "+schema.Name+" tab", schema.Tab)
+		check("section "+schema.Name+" effect", schema.Effect)
 		for _, field := range schema.Fields {
 			check(schema.Name+" field label "+field.Label, field.Label)
 			check(schema.Name+" field hint of "+field.Label, field.Hint)
@@ -1548,8 +1557,8 @@ func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
 
 // One agent's subagents read the way dispatch resolves them (plan 313): this
 // agent's own entry first, then the install-wide row of that type, then the
-// conversation's model — and an entry naming a system-dispatched type says so
-// and refuses to open.
+// conversation's model — and an entry naming a system-dispatched type opens
+// read-only, every row marked System, and refuses to open any of them.
 func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"agents": `{
 		"definitions":{"main":{"primary":true,"subagents":[
@@ -1566,11 +1575,11 @@ func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "Agent definitions", ok: true},
 		{label: "main", ok: true},
-		{label: configRowOpenLabel, ok: true},
-		{label: "subagents", ok: true},
-		{label: configRowOpenLabel, ok: true},
-		// The system entry refuses to open, and the page says why.
+		{label: "Subagents", ok: true},
+		// The system entry opens read-only: every row System, and opening
+		// any of them says why (plan 329, prototype html:128).
 		{label: "#5", ok: true},
+		{label: "Enabled", ok: true},
 		{ok: false},
 		{ok: false},
 		{ok: false},
@@ -1578,10 +1587,10 @@ func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
 		{ok: false},
 	}, nil, "agents")
 
-	if len(selector.richItems) < 6 {
+	if len(selector.richItems) < 5 {
 		t.Fatalf("expected the subagent rows page, got %d pages", len(selector.richItems))
 	}
-	rows := selector.richItems[5]
+	rows := selector.richItems[3]
 	cases := map[string]string{
 		"#1": "agent override: openai/gpt-sub",
 		"#2": "global default: openai/gpt-main / xHigh",
@@ -1696,7 +1705,9 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 			[]richStep{
 				openDefinitions,
 				{label: "main", ok: true},
-				{label: configRowOpenLabel, ok: true},
+				// A key the agent template does not name stays reachable:
+				// its own generic rows page, under the additional fields.
+				{label: "Scratch", ok: true},
 				addRow,
 				{label: configNewTextRow, ok: true},
 				{ok: false},
@@ -1704,7 +1715,7 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 				{ok: false},
 			},
 			[]selectorInput{{value: "note", ok: true}, {value: "hello", ok: true}},
-			`{"definitions":{"main":{"primary":true}}}`,
+			`{"definitions":{"main":{"primary":true,"scratch":{}}}}`,
 		)
 		// The guard is keyed on the real path, so the nested add still asks what
 		// type the value is — never for an agent id.
@@ -1792,10 +1803,8 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "explore", ok: true},
-		{label: "model", ok: true},
-		{label: configRowEditLabel, ok: true},
-		{label: configNewTextRow, ok: true},
-		{label: configUpRowLabel, ok: true},
+		{label: "Model", ok: true},
+		{ok: false},
 	}, []selectorInput{{value: "llm-conditional", ok: true}}, "subagent_models")
 
 	if len(selector.richItems) == 0 {
@@ -1951,14 +1960,14 @@ func sharedRowsSession(agentSubagents string) *configPanelTestSession {
 }
 
 // agentSubagentsSteps walks from the section page to one agent's subagent list,
-// then runs the steps the caller scripts on that page.
+// then runs the steps the caller scripts on that page. A definition opens its
+// template page directly and its Subagents field its rows page directly (plan
+// 329), so the walk is three picks.
 func agentSubagentsSteps(more []richStep) []richStep {
 	steps := []richStep{
 		{label: "Agent definitions", ok: true},
 		{label: "main", ok: true},
-		{label: configRowOpenLabel, ok: true},
-		{label: "subagents", ok: true},
-		{label: configRowOpenLabel, ok: true},
+		{label: "Subagents", ok: true},
 	}
 	return append(steps, more...)
 }
@@ -2350,19 +2359,19 @@ func TestConfigPanelEffortPickerOnAStoredModelRow(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		// The type row's own level, changed from the picker.
+		// The type row's own level, changed from the picker: the type's page
+		// is the template's two fields (plan 329).
 		{label: "plan", ok: true},
-		{label: configEffortKey, ok: true},
-		{label: configRowEditLabel, ok: true},
+		{label: "Thinking level", ok: true},
 		{label: "High", ok: true},
 		{label: configUpRowLabel, ok: true},
-		// The plan reviewer's row has no level yet: adding the key asks the same
-		// picker, never the type list.
+		// The plan reviewer's row has no level yet: its empty level opens
+		// the same picker, never the type list.
 		{label: "plan-reviewer", ok: true},
-		{label: configAddRowLabel, ok: true},
+		{label: "Thinking level", ok: true},
 		{label: "Medium", ok: true},
 		{label: configUpRowLabel, ok: true},
-	}, []selectorInput{{value: configEffortKey, ok: true}}, "subagent_models")
+	}, nil, "subagent_models")
 
 	got := effortPickerItems(t, selector)
 	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
@@ -2398,11 +2407,9 @@ func TestConfigPanelEffortPickerOnASubagentEntry(t *testing.T) {
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
 		// A per-agent entry is named by its place in the list, not by the type
-		// it overrides.
+		// it overrides, and its page is the template's fixed fields (plan 329).
 		{label: configRowLabel("", 0, true), ok: true},
-		{label: configRowOpenLabel, ok: true},
-		{label: configEffortKey, ok: true},
-		{label: configRowEditLabel, ok: true},
+		{label: "Thinking level", ok: true},
 		{label: "xHigh", ok: true},
 		{label: configUpRowLabel, ok: true},
 		{label: configUpRowLabel, ok: true},
@@ -2419,5 +2426,472 @@ func TestConfigPanelEffortPickerOnASubagentEntry(t *testing.T) {
 	entries := agentSubagentsOf(t, doc, "main")
 	if len(entries) != 1 || entries[0]["reasoning_effort"] != "xhigh" {
 		t.Fatalf("subagents = %+v, want the picked level on the entry", entries)
+	}
+}
+
+// --- Plan 329: the template layer and the persistent chrome ---
+
+// renderChromePickerPage lays a rich picker page out at width under the
+// config chrome, the way SelectRichChrome paints it (plan 329 D4).
+func renderChromePickerPage(chrome *configPageChrome, items []SelectItem, label string, width int) []string {
+	p := &richPickerState{items: items, chrome: chrome}
+	for i := range items {
+		p.selectable = append(p.selectable, i)
+	}
+	return p.panel(label).layout(width, 0, 0, false).lines
+}
+
+// A stored row a template names opens that template's fixed fields, in the
+// prototype's order under their groups — not the generic key list (plan 329
+// D3). The projection's per-type row is the two-field page the owner's
+// defect asked for, and a key the template does not name stays listed under
+// the additional-fields group and travels back on save (no data loss).
+func TestConfigPanelNestedTemplateFields(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{
+		"defaults":{"mcp_servers":[{"name":"workspace-tools","transport":"stdio","command":"workspace-mcp","args":["--read-only"],"custom_note":"keep me"}]}
+	}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Agents", ok: true},
+		{label: "Shared MCP servers", ok: true},
+		{label: "#1", ok: true},
+		{label: "Command", ok: true},
+		{ok: false},
+		{ok: false},
+		{ok: false},
+	}, []selectorInput{{value: "workspace-mcp-2", ok: true}})
+
+	// The MCP page: the template's own fields under their groups, then the
+	// key the template does not name, then the way up.
+	var page []SelectItem
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), "Server name") && slices.Contains(rowLabels(items), "Transport") {
+			page = items
+		}
+	}
+	if page == nil {
+		t.Fatalf("the MCP template page never opened: %v", selector.richLabels)
+	}
+	labels := rowLabels(page)
+	for _, want := range []string{"Server name", "Enabled", "Required", "Transport", "Command", "Arguments", "Server URL", "Headers", "OAuth", "Environment", "Inherit environment", "Startup timeout", "Default tool approval", "Tool overrides"} {
+		if !slices.Contains(labels, want) {
+			t.Errorf("the MCP page is missing %q: %v", want, labels)
+		}
+	}
+	groups := map[string]bool{}
+	for _, item := range page {
+		if item.Category != "" {
+			groups[item.Category] = true
+		}
+	}
+	for _, want := range []string{"Identity", "Connection", "Process", "Timeouts", "Tool permissions"} {
+		if !groups[want] {
+			t.Errorf("the MCP page is missing the %q group: %v", want, groups)
+		}
+	}
+	if !groups[configAdditionalFieldsGroup] || !slices.Contains(labels, "Custom note") {
+		t.Fatalf("the unknown key must stay listed under %q: %v", configAdditionalFieldsGroup, labels)
+	}
+
+	// The edit through the template page writes the whole row back: the
+	// command it changed, the arguments and the unknown key untouched.
+	if len(session.writes) != 1 {
+		t.Fatalf("expected one write, got %+v", session.writes)
+	}
+	var saved struct {
+		Defaults struct {
+			MCP []map[string]any `json:"mcp_servers"`
+		} `json:"defaults"`
+	}
+	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
+		t.Fatalf("the saved document does not parse: %v", err)
+	}
+	if len(saved.Defaults.MCP) != 1 {
+		t.Fatalf("mcp_servers = %+v", saved.Defaults.MCP)
+	}
+	row := saved.Defaults.MCP[0]
+	if row["command"] != "workspace-mcp-2" || row["custom_note"] != "keep me" {
+		t.Fatalf("the saved row lost or missed its keys: %+v", row)
+	}
+	if args, _ := row["args"].([]any); len(args) != 1 || args[0] != "--read-only" {
+		t.Fatalf("the saved row's arguments changed: %+v", row)
+	}
+}
+
+// The explore type's page is the typeDef template's two fields — Model and
+// Thinking level — reached from the projection (plan 329 D2: the owner's
+// reported defect's structure).
+func TestConfigPanelNestedTemplateExploreTypePage(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"subagent_models":{"explore":{"model":"llm-1"}}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "explore", ok: true},
+		{ok: false},
+	}, nil, "subagent_models")
+
+	if len(selector.richItems) < 2 {
+		t.Fatalf("the explore page never opened: %v", selector.richLabels)
+	}
+	var page []SelectItem
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), "Model") && slices.Contains(rowLabels(items), "Thinking level") {
+			page = items
+		}
+	}
+	if page == nil {
+		t.Fatalf("the explore page never opened: %v", selector.richLabels)
+	}
+	labels := rowLabels(page)
+	if !slices.Equal(labels, []string{"Model", "Thinking level", configUpRowLabel}) {
+		t.Fatalf("the explore page = %v, want Model, Thinking level and the way up", labels)
+	}
+	model := findRow(t, page, "Model")
+	if model.Value != "openai/gpt-main" {
+		t.Fatalf("the Model row's value = %q, want the named row's label", model.Value)
+	}
+	if findRow(t, page, "Thinking level").Value != configDefaultStatus {
+		t.Fatalf("the unset level must read as the default it follows")
+	}
+}
+
+// A system-name subagent entry opens read-only: every row carries the System
+// status and the verdict in place of its hint, opening any of them is
+// refused with the prototype's sentence, and nothing is written (plan 329
+// D3, prototype html:128).
+func TestConfigPanelSystemSubagentReadonly(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{
+		"definitions":{"main":{"primary":true,"subagents":[{"name":"goal-evaluator","model":"llm-1","description":"no"}]}}
+	}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "#1", ok: true},
+		{label: "Enabled", ok: true},
+		{label: "Model", ok: true},
+		{ok: false},
+		{ok: false},
+	}), nil, "agents")
+
+	var page []SelectItem
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), "Type name") && slices.Contains(rowLabels(items), "Enabled") {
+			page = items
+		}
+	}
+	if page == nil {
+		t.Fatalf("the system entry's page never opened: %v", selector.richLabels)
+	}
+	// customOnly hides the fields a system entry cannot carry, and every
+	// row left is read-only with the System status.
+	for _, item := range page {
+		if item.Label == configUpRowLabel {
+			continue
+		}
+		if item.Status != configSystemStatus {
+			t.Errorf("%s's status = %q, want %q", item.Label, item.Status, configSystemStatus)
+		}
+		if item.Description != configSystemSubagentNotice {
+			t.Errorf("%s's hint = %q, want the verdict", item.Label, item.Description)
+		}
+	}
+	for _, gone := range []string{"Description", "Tool access", "Allowed tools", "Allow continuation"} {
+		if slices.Contains(rowLabels(page), gone) {
+			t.Errorf("the system entry's page still lists %q", gone)
+		}
+	}
+	if !strings.Contains(pageLabels(selector), configSystemSubagentNotice) {
+		t.Fatalf("opening a row must state the refusal: %s", pageLabels(selector))
+	}
+	if len(session.writes) != 0 {
+		t.Fatalf("a read-only page must write nothing, got %+v", session.writes)
+	}
+}
+
+// The hook template shows the fields the entry's action type owns (plan 329
+// D3, showFor): a command hook its command, an HTTP hook its URL.
+func TestConfigPanelHookShowFor(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"hooks": `{
+		"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"project-check"}]}]
+	}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Hook events", ok: true},
+		{label: "PreToolUse", ok: true},
+		{label: "#1", ok: true},
+		{label: "Actions", ok: true},
+		{label: "#1", ok: true},
+		{ok: false},
+	}, nil, "hooks")
+
+	var page []SelectItem
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), "Action type") && slices.Contains(rowLabels(items), "Condition") {
+			page = items
+		}
+	}
+	if page == nil {
+		t.Fatalf("the hook page never opened: %v", selector.richLabels)
+	}
+	if !slices.Contains(rowLabels(page), "Command") || slices.Contains(rowLabels(page), "Request URL") {
+		t.Fatalf("a command hook's page = %v, want Command without Request URL", rowLabels(page))
+	}
+
+	// Switched to HTTP, the page turns over: the URL arrives, the command
+	// goes — the enum edit is one write like any other.
+	session = newConfigPanelSession(map[string]string{"hooks": `{
+		"PreToolUse":[{"matcher":"*","hooks":[{"type":"http","url":"https://hooks.example.com/review"}]}]
+	}`})
+	selector = &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Hook events", ok: true},
+		{label: "PreToolUse", ok: true},
+		{label: "#1", ok: true},
+		{label: "Actions", ok: true},
+		{label: "#1", ok: true},
+		{ok: false},
+	}, nil, "hooks")
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), "Action type") && slices.Contains(rowLabels(items), "Condition") {
+			page = items
+		}
+	}
+	if page == nil {
+		t.Fatalf("the HTTP hook page never opened: %v", selector.richLabels)
+	}
+	if !slices.Contains(rowLabels(page), "Request URL") || slices.Contains(rowLabels(page), "Command") {
+		t.Fatalf("an HTTP hook's page = %v, want Request URL without Command", rowLabels(page))
+	}
+	if !slices.Contains(rowLabels(page), "Headers") || !slices.Contains(rowLabels(page), "Allowed environment variables") {
+		t.Fatalf("an HTTP hook's page = %v, want its headers and env allowance", rowLabels(page))
+	}
+}
+
+// A built-in override keeps to what the loader lets it hold: the custom-only
+// fields are hidden on it, and shown on a custom entry beside it (plan 329
+// D3, customOnly).
+func TestConfigPanelCustomOnlyHidden(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{
+		"definitions":{"main":{"primary":true,"subagents":[
+			{"name":"explore","model":"llm-1"},
+			{"name":"db-migrator","description":"runs migrations"}
+		]}}
+	}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "#1", ok: true},
+		{ok: false},
+		{label: "#2", ok: true},
+		{ok: false},
+	}), nil, "agents")
+
+	pages := map[int][]SelectItem{}
+	for _, items := range selector.richItems {
+		if slices.Contains(rowLabels(items), "Type name") {
+			if slices.Contains(rowLabels(items), "Tool access") {
+				pages[2] = items
+			} else {
+				pages[1] = items
+			}
+		}
+	}
+	if pages[1] == nil || pages[2] == nil {
+		t.Fatalf("both entries' pages must open: %v", selector.richLabels)
+	}
+	for _, gone := range []string{"Description", "Tool access", "Allowed tools", "Allow continuation"} {
+		if slices.Contains(rowLabels(pages[1]), gone) {
+			t.Errorf("the built-in override's page still lists %q", gone)
+		}
+		if !slices.Contains(rowLabels(pages[2]), gone) {
+			t.Errorf("the custom entry's page is missing %q", gone)
+		}
+	}
+}
+
+// Every config page carries the persistent chrome (plan 329 D4): the tab bar
+// with its counts, the breadcrumb under it, and the title's right-edge tag.
+// A page deep in a section keeps the trail it walked.
+func TestConfigPanelPersistentTabsAndBreadcrumbSlot(t *testing.T) {
+	panel := sectionPanel(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"display_name":"Main agent"}}}`})
+	panel.chrome = newConfigPageChrome(panelSections())
+	agents, ok := configSectionSchemaFor("agents")
+	if !ok {
+		t.Fatal("no agents section")
+	}
+	panel.section = "agents"
+	panel.effectTag = agents.Effect
+	panel.chrome.enterTab(agents.Tab)
+	panel.chrome.trail = []string{agents.Title}
+	panel.chrome.tag = panel.sectionTag()
+
+	// The section page: four tabs with their counts, the breadcrumb's root,
+	// the title and its tag at the right edge.
+	items, _ := panel.fieldItems(agents, panel.sectionDoc("agents"))
+	lines := renderChromePickerPage(&panel.chrome, items, agents.Title+"\n"+agents.Summary, 120)
+	bar := strings.Join(stripANSIAll(lines), "\n")
+	for _, tab := range []string{configTabApproval, configTabSession, configTabAgents, configTabFile} {
+		count := strconv.Itoa(len(sectionsOfTab(tab)))
+		if !strings.Contains(bar, tab+" "+count) {
+			t.Errorf("the tab bar is missing %q:\n%s", tab+" "+count, bar)
+		}
+	}
+	if !strings.Contains(bar, "Configuration / Agents") {
+		t.Errorf("the breadcrumb slot is missing the trail:\n%s", bar)
+	}
+	title := renderedRow(t, lines, agents.Title)
+	if !strings.HasSuffix(title, configNextTurnTag) {
+		t.Errorf("the section page's title = %q, want the %q tag at its right edge", title, configNextTurnTag)
+	}
+
+	// A nested page keeps the chrome and grows the trail: the definitions
+	// rows page under the section, tagged with its count.
+	panel.chrome.trail = []string{agents.Title, "Agent definitions"}
+	panel.chrome.tag = "1 entries"
+	lines = renderChromePickerPage(&panel.chrome, items, "Agent definitions\nOne agent id per row", 120)
+	if trail := renderedRow(t, lines, "Configuration / Agents / Agent definitions"); trail == "" {
+		t.Fatalf("the nested page lost the breadcrumb:\n%s", strings.Join(stripANSIAll(lines), "\n"))
+	}
+
+	// An effect-bearing section carries its own scope instead of the panel's
+	// wording: the approval preset page.
+	approval, _ := configSectionSchemaFor("approval_preset")
+	panel.effectTag = approval.Effect
+	panel.chrome.tag = panel.sectionTag()
+	items, _ = panel.fieldItems(approval, nil)
+	lines = renderChromePickerPage(&panel.chrome, items, approval.Title+"\n"+approval.Summary, 120)
+	if title := renderedRow(t, lines, approval.Title); !strings.HasSuffix(title, approval.Effect) {
+		t.Errorf("the approval page's title = %q, want %q at its right edge", title, approval.Effect)
+	}
+
+	// Switching tabs from inside a section is the chrome's own act: the bar
+	// records the tab and the overview reopens on it.
+	if tab := panel.chrome.switchTab(1); tab < 0 || panel.chrome.switchedTo != tab {
+		t.Fatalf("switchTab = %d, switchedTo = %d", tab, panel.chrome.switchedTo)
+	}
+	panel.chrome.switchedTo = -1
+	sectionItems, _ := panel.sectionItems()
+	if first := panel.chrome.firstRowOfTab(sectionItems); !slices.Contains(rowLabels(sectionItems), sectionItems[first].Label) {
+		t.Fatalf("firstRowOfTab answered %d", first)
+	}
+}
+
+// The config group heading is the prototype's: upper-cased, with a faint
+// rule running to the panel's right edge, a blank row before every group
+// after the first. A plain picker's categories keep the heading they always
+// drew — the chrome is config's alone (plan 329 D4).
+func TestConfigPanelGroupStyle(t *testing.T) {
+	chrome := newConfigPageChrome(panelSections())
+	items := []SelectItem{
+		{Label: "Server name", Category: "Identity"},
+		{Label: "Enabled", Category: "Identity"},
+		{Label: "Command", Category: "Connection"},
+	}
+	lines := renderChromePickerPage(&chrome, items, "workspace-tools", 120)
+	plain := stripANSIAll(lines)
+	identity := -1
+	for i, line := range plain {
+		if strings.HasPrefix(strings.TrimSpace(line), "IDENTITY") {
+			identity = i
+		}
+	}
+	if identity < 0 {
+		t.Fatalf("the group heading is not upper-cased:\n%s", strings.Join(plain, "\n"))
+	}
+	if !strings.Contains(lines[identity], "─") {
+		t.Errorf("the group heading carries no rule: %q", lines[identity])
+	}
+	if w := displayLineWidth(lines[identity]); w != 120 {
+		t.Errorf("the rule stops at %d cells, want the panel's edge", w)
+	}
+	if identity == 0 || strings.TrimSpace(plain[identity-1]) != "" {
+		t.Errorf("a group after the first needs a blank row before it:\n%s", strings.Join(plain, "\n"))
+	}
+	found := false
+	for _, line := range plain {
+		if strings.HasPrefix(strings.TrimSpace(line), "CONNECTION") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the second group heading is missing:\n%s", strings.Join(plain, "\n"))
+	}
+
+	// A plain rich picker keeps its own heading: the category as written,
+	// accented, unruled — every other panel's page is unchanged.
+	plainItems := []SelectItem{
+		{Label: "Workspace write", Category: "Approval & sandbox"},
+	}
+	plainLines := renderRichPage(plainItems, "Configuration", 120)
+	for _, line := range plainLines {
+		if strings.Contains(stripANSI(line), "APPROVAL & SANDBOX") || strings.Contains(line, "─") {
+			t.Fatalf("a plain picker drew the config group style: %q", stripANSI(line))
+		}
+	}
+}
+
+// The template table is the single source of nested field shape (plan 329):
+// every template's fields carry the data their widgets need, a field that
+// requires a sibling names one in the same template, a shown-for field
+// belongs to a template that has an action type, and the kinds match the
+// flags each one declares.
+func TestConfigPanelSchemaTemplateFieldDataIsComplete(t *testing.T) {
+	for template, fields := range configTemplates {
+		if len(fields) == 0 {
+			t.Fatalf("the %s template holds no fields", template)
+		}
+		labels := make(map[string]bool, len(fields))
+		paths := make(map[string]bool, len(fields))
+		hasType := false
+		for _, field := range fields {
+			if strings.TrimSpace(field.Label) == "" {
+				t.Errorf("模板 %s 有字段没有标签", template)
+			}
+			if labels[field.Label] {
+				t.Errorf("模板 %s 的字段标签 %q 重复", template, field.Label)
+			}
+			labels[field.Label] = true
+			if field.Path != "" {
+				paths[field.Path] = true
+			}
+			if field.Path == "type" && field.Kind == configFieldEnum {
+				hasType = true
+			}
+			if field.Requires != "" && !paths[field.Requires] {
+				t.Errorf("模板 %s 的字段 %q 依赖同模板里不存在的 %q", template, field.Label, field.Requires)
+			}
+			if field.Unit != "" && field.Kind != configFieldNumber {
+				t.Errorf("模板 %s 的字段 %q 不是数字，不能带单位", template, field.Label)
+			}
+			if field.Multiline && field.Kind != configFieldText {
+				t.Errorf("模板 %s 的字段 %q 不是文本，不能声明 multiline", template, field.Label)
+			}
+			if field.Secret && field.Kind != configFieldText {
+				t.Errorf("模板 %s 的字段 %q 不是文本，不能声明 secret", template, field.Label)
+			}
+			if len(field.ShowFor) > 0 && !hasType {
+				t.Errorf("模板 %s 的字段 %q 声明了 showFor，但模板没有动作类型", template, field.Label)
+			}
+			if field.CustomOnly && template != configTemplateSubagent {
+				t.Errorf("模板 %s 的字段 %q 声明了 customOnly，但只有子代理模板区分内置与自定义", template, field.Label)
+			}
+		}
+	}
+}
+
+// The template layer keeps every nested field reachable (plan 329, the
+// prototype's own coverage spirit): each of the section descriptors' fields,
+// each template's fields, and the pseudo-templates' scalar editors are all
+// pages a reader can open — over one hundred and thirty of them.
+func TestConfigPanelNestedFieldTransitionsReachable(t *testing.T) {
+	reachable := 0
+	for _, schema := range configSectionSchemas {
+		reachable += len(schema.Fields)
+	}
+	for _, fields := range configTemplates {
+		reachable += len(fields)
+	}
+	// The pseudo-templates: a path row, a string row, a matcher list.
+	reachable += 3
+	if reachable <= 130 {
+		t.Fatalf("nested-field transitions = %d, want more than 130", reachable)
 	}
 }

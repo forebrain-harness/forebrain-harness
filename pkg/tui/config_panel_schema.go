@@ -77,6 +77,43 @@ type configField struct {
 	// Hint is the one line the row carries under its value: what the field
 	// means, and what leaving it unset does.
 	Hint string
+
+	// The template layer's own metadata (plan 329). Everything below is read
+	// by the nested page renderer, never by the section pages above.
+
+	// Group names the fixed page section the field renders under, mirroring
+	// the prototype's group labels (a template field's Group; a section
+	// field's groups arrive with plan 325).
+	Group string
+	// Multiline marks a text field whose value holds lines (prompts,
+	// descriptions); the single-line editor stays until plan 328 wires the
+	// multiline one, and the flag is what tells it apart.
+	Multiline bool
+	// Secret marks a text field whose value must never be shown as it is
+	// (plan 328 wires the masked editor; the flag is the contract).
+	Secret bool
+	// CustomOnly hides the field on a row that names a built-in or
+	// system-dispatched subagent type: those entries take a model, a level,
+	// a prompt and a switch, nothing else — the loader's own rule, read
+	// ahead of the save.
+	CustomOnly bool
+	// ShowFor lists the sibling `type` values a field belongs to, in the
+	// hook template's own terms: a command hook shows its command and shell,
+	// an HTTP hook its URL and headers.
+	ShowFor []string
+	// Entry marks the rows of a removable collection (a path row, a string
+	// row): plan 326's footer removal is offered on these alone.
+	Entry bool
+	// Requires names the sibling key this field cannot be set without — a
+	// thinking level names no model of its own.
+	Requires string
+	// Unit names the number's unit in the row's value ("seconds", "items").
+	Unit string
+	// ModelEmpty and ModelEmptyValue are the model picker's empty option
+	// (plan 324): the label the empty value reads as, and the value that
+	// stores it ("" unsets the key). Set on fields that hold a model row id.
+	ModelEmpty      string
+	ModelEmptyValue string
 }
 
 // configSectionSchema is one section as the panel presents it.
@@ -100,6 +137,11 @@ type configSectionSchema struct {
 	// the user sees and types. "Subagent models" projects the agents store
 	// (plan 314). A projection is not itself a config.Root section.
 	StoreSection string
+	// Effect is the section's right-edge tag on its own page and every page
+	// below it (plan 329 D4): the scope a change here takes effect in —
+	// "New sessions only", "All primary agents". Empty means the section's
+	// pages carry the panel's own "Next turn" tag.
+	Effect string
 	// Fields are the editable settings, in the order the section page shows
 	// them. A YAML-only section has none.
 	Fields []configField
@@ -131,6 +173,7 @@ var configSectionSchemas = []configSectionSchema{
 	{
 		Name: "approval_preset", Title: "Approval preset", Tab: configTabApproval,
 		Summary: "Default approval mode for new sessions",
+		Effect:  "New sessions only",
 		Fields: []configField{{
 			Label: "Approval preset", Kind: configFieldEnum,
 			Options:      []string{"workspace_write", "full_access"},
@@ -162,6 +205,7 @@ var configSectionSchemas = []configSectionSchema{
 	{
 		Name: "batch", Title: "Batch projects", Tab: configTabApproval,
 		Summary: "Sandbox a new batch project starts with",
+		Effect:  "New batch projects",
 		Fields: []configField{{
 			Path: "sandbox_default", Label: "Enable sandbox", Kind: configFieldBool3,
 			Hint: "On by default; a new batch project starts from this value and manages its own afterwards",
@@ -260,6 +304,7 @@ var configSectionSchemas = []configSectionSchema{
 		// does not show travels back untouched on save.
 		Name: "subagent_models", Title: "Subagent models", Tab: configTabAgents,
 		Summary:      "Install-wide defaults for built-in types, plan-reviewer and shared custom subagents",
+		Effect:       "All primary agents",
 		StoreSection: "agents",
 		Fields: []configField{
 			// The four public per-type defaults: a global row id + thinking
@@ -332,4 +377,214 @@ func configSectionSchemaFor(name string) (configSectionSchema, bool) {
 		}
 	}
 	return configSectionSchema{}, false
+}
+
+// The nested templates' names (plan 329 D2). The object templates are the
+// fixed-field pages a stored row opens as; the three pseudo-templates name a
+// scalar row's editor instead of a page of fields — a path row and a string
+// row open a text editor, and a matcher list is the hooks section's own tree,
+// which keeps its rows page. Resolved from a row's real path shape, never
+// from a descriptor's Path (the generic editor hands the same field down at
+// every level).
+const (
+	configTemplateAgent           = "agent"
+	configTemplateSubagent        = "subagent"
+	configTemplateTypeDef         = "typeDef"
+	configTemplateGlobalSystemRow = "globalSystemRow"
+	configTemplateMCP             = "mcp"
+	configTemplateOAuth           = "oauth"
+	configTemplateToolApproval    = "toolApproval"
+	configTemplateMatcher         = "matcher"
+	configTemplateHook            = "hook"
+	configTemplateLSPServer       = "lspServer"
+	// configTemplateMatcherList is an event's matcher list under hooks.
+	configTemplateMatcherList = "matcherList"
+	// configTemplatePath is a writable-roots row: one absolute path.
+	configTemplatePath = "path"
+	// configTemplateString is one string element of a known collection.
+	configTemplateString = "string"
+)
+
+// configTemplates is the single source of every nested page's field shape:
+// what a stored row holds, in the order the prototype fixes, with the group
+// each field renders under and the rules that hide or gate it. A key the
+// template does not name still travels: the page lists it under its
+// additional-fields group and the save writes the section whole, so nothing
+// is lost. A future config field adds a descriptor here, not ad-hoc rows.
+var configTemplates = map[string][]configField{
+	configTemplateAgent: {
+		{Path: "display_name", Label: "Display name", Kind: configFieldText},
+		{Path: "description", Label: "Description", Kind: configFieldText, Multiline: true, Hint: "Describe the role of this agent."},
+		{Path: "primary", Label: "Primary agent", Kind: configFieldBool3, Hint: "Mark this as a primary agent."},
+		{
+			Path: "default_model", Label: "Default model", Kind: configFieldText,
+			Hint:            "Pick a row from the global model table (/connect or Settings → Models). A primary agent has no provider list of its own.",
+			ModelEmpty:      "Follow global default",
+			ModelEmptyValue: "",
+		},
+		{Path: "mcp_servers", Label: "MCP servers", Kind: configFieldRows, List: true, Group: "Models & connections", Hint: "Agent-specific entries augment or override shared servers."},
+		{Path: "enable_subagent", Label: "Enable subagents", Kind: configFieldBool3, Group: "Delegation", Hint: "Default inherits the shared subagent setting."},
+		{Path: "subagents", Label: "Subagents", Kind: configFieldRows, List: true, Group: "Delegation", Hint: "Built-in overrides and custom agent definitions."},
+	},
+	configTemplateTypeDef: {
+		{
+			Path: "model", Label: "Model", Kind: configFieldText,
+			Hint:            "The type's install-wide default model row, picked from the global model table. An agent's own override still wins.",
+			ModelEmpty:      "Follow conversation",
+			ModelEmptyValue: "",
+		},
+		{Path: "reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Requires: "model"},
+	},
+	configTemplateGlobalSystemRow: {
+		{
+			Path: "model", Label: "Model", Kind: configFieldText,
+			Hint:            "The global model the system dispatches this type on, picked from the global model table.",
+			ModelEmpty:      "Follow conversation",
+			ModelEmptyValue: "",
+		},
+		{Path: "reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Requires: "model"},
+	},
+	configTemplateSubagent: {
+		{Path: "name", Label: "Type name", Kind: configFieldText, Hint: "Built-in overrides: general-purpose, explore, plan, verification."},
+		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3},
+		{
+			Path: "model", Label: "Model", Kind: configFieldText,
+			Hint:            "This agent's override. Empty follows the install-wide type default, then the conversation.",
+			ModelEmpty:      "Follow primary agent",
+			ModelEmptyValue: "",
+		},
+		{Path: "reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Requires: "model"},
+		{Path: "system_prompt", Label: "System prompt", Kind: configFieldText, Multiline: true, Hint: "Leave empty to use the built-in prompt."},
+		{Path: "description", Label: "Description", Kind: configFieldText, Multiline: true, CustomOnly: true, Hint: "Custom subagents only."},
+		{
+			Path: "tools", Label: "Tool access", Kind: configFieldEnum, CustomOnly: true,
+			Options:      []string{"read_only", "edit", "pick"},
+			OptionLabels: map[string]string{"read_only": "Read only", "edit": "Edit", "pick": "Pick"},
+			DefaultValue: "read_only", Hint: "Custom subagents only.",
+		},
+		{Path: "allowed_tools", Label: "Allowed tools", Kind: configFieldRows, List: true, CustomOnly: true, Hint: "Used when tool access is Pick."},
+		{Path: "continuable", Label: "Allow continuation", Kind: configFieldBool3, CustomOnly: true, Hint: "Custom subagents only."},
+	},
+	configTemplateMCP: {
+		{Path: "name", Label: "Server name", Kind: configFieldText, Group: "Identity", Hint: "Unique within this server list."},
+		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3, Group: "Identity", Hint: "Keep the entry configured while disabling its tools."},
+		{Path: "required", Label: "Required", Kind: configFieldBool3, Group: "Identity", Hint: "A required server cannot be silently skipped."},
+		{
+			Path: "transport", Label: "Transport", Kind: configFieldEnum, Group: "Connection",
+			Options: []string{"stdio", "http", "sse"}, OptionLabels: map[string]string{"stdio": "Stdio", "http": "HTTP", "sse": "SSE"},
+			DefaultValue: "stdio", Hint: "Choose a local process or remote endpoint.",
+		},
+		{Path: "command", Label: "Command", Kind: configFieldText, Group: "Connection", Hint: "Program to start for stdio transport."},
+		{Path: "args", Label: "Arguments", Kind: configFieldRows, List: true, Group: "Connection", Hint: "One argument per row."},
+		{Path: "url", Label: "Server URL", Kind: configFieldText, Group: "Connection", Hint: "Absolute URL for HTTP or SSE transport."},
+		{Path: "headers", Label: "Headers", Kind: configFieldRows, Group: "Connection", Hint: "Header values remain masked."},
+		{Path: "oauth", Label: "OAuth", Kind: configFieldRows, Group: "Authentication", Hint: "Configure OAuth fields. No login is performed by this editor."},
+		{Path: "env", Label: "Environment", Kind: configFieldRows, Group: "Process", Hint: "Explicit environment variables for the server."},
+		{Path: "inherit_parent_env", Label: "Inherit environment", Kind: configFieldBool3, Group: "Process", Hint: "Include parent-process environment variables."},
+		{Path: "disable_standalone_sse", Label: "Disable standalone SSE", Kind: configFieldBool3, Group: "Process", Hint: "Disable the standalone SSE transport."},
+		{Path: "expected_command_sha256", Label: "Expected command SHA-256", Kind: configFieldText, Group: "Process", Hint: "Verify the executable digest."},
+		{Path: "startup_timeout", Label: "Startup timeout", Kind: configFieldNumber, Min: 0, Max: 1000000000, Unit: "seconds", Group: "Timeouts"},
+		{Path: "request_timeout", Label: "Request timeout", Kind: configFieldNumber, Min: 0, Max: 1000000000, Unit: "seconds", Group: "Timeouts"},
+		{
+			Path: "default_tools_approval_mode", Label: "Default tool approval", Kind: configFieldEnum, Group: "Tool permissions",
+			Options: []string{"auto", "prompt", "writes", "approve"}, OptionLabels: map[string]string{"auto": "Auto", "prompt": "Prompt", "writes": "Writes", "approve": "Approve"},
+			DefaultValue: "auto", Hint: "Set the approval mode for this server's tools.",
+		},
+		{Path: "tools", Label: "Tool overrides", Kind: configFieldRows, Group: "Tool permissions", Hint: "Override approval per tool."},
+	},
+	configTemplateOAuth: {
+		{Path: "mode", Label: "OAuth mode", Kind: configFieldText, Hint: "Enter the OAuth mode supported by this server."},
+		{Path: "access_token", Label: "Access token", Kind: configFieldText, Secret: true},
+		{Path: "token_type", Label: "Token type", Kind: configFieldText},
+		{Path: "client_id", Label: "Client ID", Kind: configFieldText},
+		{Path: "client_secret", Label: "Client secret", Kind: configFieldText, Secret: true},
+		{Path: "token_url", Label: "Token URL", Kind: configFieldText},
+		{Path: "authorization_url", Label: "Authorization URL", Kind: configFieldText},
+		{Path: "redirect_url", Label: "Redirect URL", Kind: configFieldText},
+		{Path: "refresh_token", Label: "Refresh token", Kind: configFieldText, Secret: true},
+		{Path: "scopes", Label: "Scopes", Kind: configFieldRows, List: true},
+	},
+	configTemplateToolApproval: {
+		{
+			Path: "approval_mode", Label: "Approval mode", Kind: configFieldEnum,
+			Options:      []string{"auto", "prompt", "writes", "approve"},
+			OptionLabels: map[string]string{"auto": "Auto", "prompt": "Prompt", "writes": "Writes", "approve": "Approve"},
+			DefaultValue: "auto", Hint: "Override the server-level tool approval policy.",
+		},
+	},
+	configTemplateMatcher: {
+		{Path: "matcher", Label: "Tool matcher", Kind: configFieldText, Hint: "Match tool names, or use * for all tools."},
+		{Path: "hooks", Label: "Actions", Kind: configFieldRows, List: true, Hint: "Actions run in their configured order."},
+	},
+	configTemplateHook: {
+		{
+			Path: "type", Label: "Action type", Kind: configFieldEnum, Group: "Action",
+			Options:      []string{"command", "prompt", "agent", "http"},
+			OptionLabels: map[string]string{"command": "Command", "prompt": "Prompt", "agent": "Agent", "http": "HTTP"},
+			DefaultValue: "command", Hint: "Choose the action this hook performs.",
+		},
+		{Path: "command", Label: "Command", Kind: configFieldText, Group: "Action", ShowFor: []string{"command"}, Hint: "Run by the runtime when the hook fires."},
+		{Path: "prompt", Label: "Prompt", Kind: configFieldText, Multiline: true, Group: "Action", ShowFor: []string{"prompt", "agent"}, Hint: "Instructions for the model."},
+		{Path: "url", Label: "Request URL", Kind: configFieldText, Group: "Action", ShowFor: []string{"http"}, Hint: "Absolute URL for the HTTP hook."},
+		{
+			Path: "shell", Label: "Shell", Kind: configFieldEnum, Group: "Action", ShowFor: []string{"command"},
+			Options: []string{"bash", "powershell"}, OptionLabels: map[string]string{"bash": "Bash", "powershell": "Powershell"},
+			DefaultValue: "bash", Hint: "Shell used by a command hook.",
+		},
+		{Path: "model", Label: "Model", Kind: configFieldText, Group: "Action", ShowFor: []string{"prompt", "agent"}, Hint: "Optional model override."},
+		{Path: "headers", Label: "Headers", Kind: configFieldRows, Group: "Action", ShowFor: []string{"http"}, Hint: "Header values stay masked."},
+		{Path: "allowed_env_vars", Label: "Allowed environment variables", Kind: configFieldRows, List: true, Group: "Action", ShowFor: []string{"http"}, Hint: "Variables available to an HTTP hook."},
+		{Path: "if", Label: "Condition", Kind: configFieldText, Group: "Behavior", Hint: "Use the runtime permission-rule syntax."},
+		{Path: "timeout", Label: "Timeout", Kind: configFieldNumber, Min: 0, Max: 86400, Unit: "seconds", Group: "Behavior"},
+		{Path: "status_message", Label: "Status message", Kind: configFieldText, Group: "Behavior", Hint: "Shown while the hook is running."},
+		{Path: "once", Label: "Run once", Kind: configFieldBool3, Group: "Behavior", Hint: "Run this action once per session."},
+		{Path: "async", Label: "Run asynchronously", Kind: configFieldBool3, Group: "Behavior", Hint: "Do not wait for the hook before continuing."},
+		{Path: "async_rewake", Label: "Wake after completion", Kind: configFieldBool3, Group: "Behavior", Hint: "Allow an asynchronous hook to wake the conversation."},
+	},
+	configTemplateLSPServer: {
+		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3, Group: "Process", Hint: "Enable this configured language server."},
+		{Path: "command", Label: "Command", Kind: configFieldText, Group: "Process", Hint: "Executable to start."},
+		{Path: "args", Label: "Arguments", Kind: configFieldRows, List: true, Group: "Process", Hint: "One argument per row."},
+		{Path: "env", Label: "Environment", Kind: configFieldRows, Group: "Process", Hint: "Server environment variables."},
+		{Path: "env_passthrough", Label: "Inherited environment keys", Kind: configFieldRows, List: true, Group: "Process", Hint: "Explicit keys to pass through."},
+		{Path: "extension_to_language", Label: "File extensions", Kind: configFieldRows, Group: "Workspace", Hint: "Map extensions to language IDs."},
+		{Path: "filenames", Label: "File names", Kind: configFieldRows, Group: "Workspace", Hint: "Map exact file names to language IDs."},
+		{Path: "root_markers", Label: "Root markers", Kind: configFieldRows, List: true, Group: "Workspace", Hint: "Files used to find the workspace root."},
+		{Path: "workspace_folder", Label: "Workspace folder", Kind: configFieldText, Group: "Workspace", Hint: "Optional workspace folder override."},
+		{Path: "initialization_options", Label: "Initialization options", Kind: configFieldRows, Group: "Configuration", Hint: "Arbitrary JSON object sent at startup."},
+		{Path: "settings", Label: "Server settings", Kind: configFieldRows, Group: "Configuration", Hint: "Arbitrary JSON configuration object."},
+		{Path: "startup_timeout", Label: "Startup timeout", Kind: configFieldNumber, Min: 0, Max: 600, Unit: "seconds", Group: "Lifecycle"},
+		{Path: "shutdown_timeout", Label: "Shutdown timeout", Kind: configFieldNumber, Min: 0, Max: 60, Unit: "seconds", Group: "Lifecycle"},
+		{Path: "restart_on_crash", Label: "Restart after crash", Kind: configFieldBool3, Group: "Lifecycle", Hint: "Restart the server after a crash."},
+		{Path: "max_restarts", Label: "Maximum restarts", Kind: configFieldNumber, Min: 0, Max: 20, Unit: "attempts", Group: "Lifecycle"},
+		{Path: "diagnostics", Label: "Diagnostics", Kind: configFieldBool3, Group: "Capabilities", Hint: "Receive diagnostics from this server."},
+		{
+			Path: "role", Label: "Role", Kind: configFieldEnum, Group: "Capabilities",
+			Options: []string{"primary", "diagnostics"}, OptionLabels: map[string]string{"primary": "Primary", "diagnostics": "Diagnostics"},
+			DefaultValue: "primary", Hint: "Choose the server role.",
+		},
+		{Path: "priority", Label: "Priority", Kind: configFieldNumber, Group: "Capabilities", Hint: "Enter an integer priority."},
+		{Path: "prewarm", Label: "Prewarm", Kind: configFieldBool3, Group: "Capabilities", Hint: "Start this server ahead of its first request."},
+	},
+	// The path pseudo-template carries the one field its scalar row edits, so
+	// the row opens the editor directly instead of asking what type the value
+	// is; a string row inherits the parent collection's own descriptor the
+	// same way. Entry marks the row as a removable collection item (plan
+	// 326's footer).
+	configTemplatePath: {
+		{Label: "Writable root", Kind: configFieldText, Entry: true, Hint: "Enter an absolute path."},
+	},
+}
+
+// configTemplateFields is one object template's fixed fields; a
+// pseudo-template answers none.
+func configTemplateFields(template string) []configField {
+	return configTemplates[template]
+}
+
+// configTemplateIsObject reports whether a template names a fixed-field page
+// rather than a scalar row's editor.
+func configTemplateIsObject(template string) bool {
+	_, ok := configTemplates[template]
+	return ok
 }

@@ -7690,6 +7690,10 @@ type panelLine struct {
 	// Like the status it is drawn on the first line only and dropped when the
 	// row falls back to its stacked form.
 	value string
+	// rule, when set, runs a faint rule from the line's text to the panel's
+	// right edge on its first row — the /config prototype's group label
+	// (plan 329 D4). Only a group heading carries it.
+	rule bool
 }
 
 // rows wraps the line at width.
@@ -7722,6 +7726,18 @@ func (l panelLine) rowsStacks(width int, stack bool) []string {
 			lead = strings.Repeat(" ", leadWidth)
 		}
 		rows[i] = lead + chunk
+	}
+	// A plain line may still carry right-edge furniture of its own: the
+	// tagged title's status track (plan 329 D4) and the group rule's run to
+	// the panel's edge. No selectable row reaches this branch — those hold a
+	// column — so no list changes with them.
+	if l.status != "" {
+		rows = l.withTrailingTracks(rows, width)
+	}
+	if l.rule && len(rows) > 0 {
+		if n := width - displayLineWidth(rows[0]) - 1; n > 0 {
+			rows[0] += " " + panelHintStyle.Render(strings.Repeat("─", n))
+		}
 	}
 	return rows
 }
@@ -8051,6 +8067,25 @@ func (b *panelBuilder) title(text string) {
 	b.head = append(b.head, panelLine{lead: panelIndent, text: text, style: &panelTitleStyle})
 }
 
+// titleWithTag adds the head's title row with a tag at the panel's right
+// edge (plan 329 D4): the scope a section's change takes effect in, a
+// collection's count, an editor's kind word. The tag is quiet and whole — it
+// never wraps and never takes a row of its own, and it is dropped rather
+// than pushed when the title leaves no room.
+func (b *panelBuilder) titleWithTag(text, tag string) {
+	b.head = append(b.head, panelLine{lead: panelIndent, text: text, style: &panelTitleStyle, status: tag})
+}
+
+// breadcrumb adds the breadcrumb row to the pinned head (plan 329 D4): the
+// trail joined root first, under the tab bar, so every page says where it
+// sits. An empty trail draws nothing — the head keeps its shape.
+func (b *panelBuilder) breadcrumb(trail []string) {
+	if len(trail) == 0 {
+		return
+	}
+	b.head = append(b.head, panelLine{lead: panelIndent, text: strings.Join(trail, " / "), style: &panelHintStyle})
+}
+
 // subtitle adds a plain row to the pinned head, under the title.
 func (b *panelBuilder) subtitle(text string) {
 	b.head = append(b.head, panelLine{lead: panelIndent, text: text})
@@ -8071,6 +8106,18 @@ func (b *panelBuilder) group(heading string) {
 	}
 	b.heading, b.grouped = len(b.body), 0
 	b.text(panelIndent, heading, &panelAccentStyle)
+}
+
+// groupRule opens a group the way the /config prototype styles one (plan 329
+// D4, .group-label): the heading upper-cased with a rule running from it to
+// the panel's right edge, faint so it reads as structure, not content. The
+// blank row before a non-first group is group's own, kept here.
+func (b *panelBuilder) groupRule(heading string) {
+	if len(b.body) > 0 {
+		b.blank()
+	}
+	b.heading, b.grouped = len(b.body), 0
+	b.body = append(b.body, panelLine{lead: panelIndent, text: strings.ToUpper(heading), style: &panelAccentStyle, rule: true})
 }
 
 // wrapPanelWords folds text at spaces to width display cells; only a token

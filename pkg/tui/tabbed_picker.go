@@ -468,3 +468,110 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 }
 
 var _ TabbedRichSelector = (*rawSelector)(nil)
+
+// configPageChrome is the /config panel's persistent chrome (plan 329 D4):
+// the tab bar, the breadcrumb slot and the open page's right-edge tag, drawn
+// on every view the panel opens — the prototype pins all three above the
+// body, whichever page is showing. The trail itself is recorded by the pages
+// as they nest; plan 326 wires its navigation.
+type configPageChrome struct {
+	// tabs and counts are the tab bar: every tab the sections this machine
+	// offers group under, in the picker's own order, with the section count
+	// beside each (the overview's own chips).
+	tabs   []string
+	counts []int
+	// active is the tab the open section sits in.
+	active int
+	// trail is the breadcrumb below the tab bar, root first; the panel
+	// prefixes the Configuration root itself when it draws.
+	trail []string
+	// tag is the open page's right-edge title tag: the section's effect
+	// scope, a collection's count, or an editor's kind word.
+	tag string
+	// switchedTo is the tab the user asked for from inside the section, -1
+	// while none was asked; the panel unwinds its pages and opens that tab's
+	// overview.
+	switchedTo int
+}
+
+// newConfigPageChrome builds the chrome over the sections this machine
+// offers, opening on the first tab.
+func newConfigPageChrome(sections []configSectionSchema) configPageChrome {
+	c := configPageChrome{switchedTo: -1}
+	seen := make(map[string]int)
+	for _, schema := range sections {
+		at, ok := seen[schema.Tab]
+		if !ok {
+			at = len(c.tabs)
+			seen[schema.Tab] = at
+			c.tabs = append(c.tabs, schema.Tab)
+			c.counts = append(c.counts, 0)
+		}
+		c.counts[at]++
+	}
+	return c
+}
+
+// enterTab moves the bar onto the tab a section belongs to.
+func (c *configPageChrome) enterTab(tab string) {
+	for i, name := range c.tabs {
+		if name == tab {
+			c.active = i
+			return
+		}
+	}
+}
+
+// firstRowOfTab is the overview's opening row over the section list: the
+// first row of the tab the bar is on, so a switch back to the overview lands
+// on the tab the user asked for.
+func (c *configPageChrome) firstRowOfTab(items []SelectItem) int {
+	tab := ""
+	if c.active >= 0 && c.active < len(c.tabs) {
+		tab = c.tabs[c.active]
+	}
+	for i, item := range items {
+		if item.Category == tab {
+			return i
+		}
+	}
+	return 0
+}
+
+// switchTab steps the bar to the next tab that holds sections, wrapping
+// around, and records the switch for the panel to unwind on. It answers the
+// tab it landed on, or -1 when there is no other tab to take.
+func (c *configPageChrome) switchTab(step int) int {
+	if len(c.tabs) < 2 {
+		return -1
+	}
+	for n := 1; n < len(c.tabs); n++ {
+		t := ((c.active+step*n)%len(c.tabs) + len(c.tabs)) % len(c.tabs)
+		if t == c.active || c.counts[t] == 0 {
+			continue
+		}
+		c.switchedTo = t
+		return t
+	}
+	return -1
+}
+
+// draw lays the chrome into a page's head: the tab bar, then the breadcrumb.
+// The page's own title (with its right-edge tag) is laid by the picker after
+// this, so the head reads bar, trail, title, subtitle.
+func (c *configPageChrome) draw(b *panelBuilder) {
+	chips := make([]string, len(c.tabs))
+	for i, name := range c.tabs {
+		text := name
+		if c.counts[i] > 0 {
+			text = name + " " + strconv.Itoa(c.counts[i])
+		}
+		if i == c.active {
+			chips[i] = panelTabStyle.Render(text)
+		} else {
+			chips[i] = text
+		}
+	}
+	b.tabs(chips)
+	b.breadcrumb(append([]string{"Configuration"}, c.trail...))
+}

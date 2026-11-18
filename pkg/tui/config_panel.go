@@ -174,6 +174,14 @@ type configPanel struct {
 	// Together they are the page's one write path (plan 321).
 	section string
 	write   func(raw json.RawMessage) error
+	// effectTag is the open section's own scope tag, carried at the right
+	// edge of every page below it (plan 329 D4); empty means the panel's own
+	// "Next turn" wording.
+	effectTag string
+	// chrome is the persistent head every page of the open section draws:
+	// the tab bar, the breadcrumb slot and the page's right-edge tag (plan
+	// 329 D4).
+	chrome configPageChrome
 }
 
 func newConfigPanel(sel Selector, renderer *Renderer, session configPanelSession) *configPanel {
@@ -217,8 +225,11 @@ func (c *commandController) handleConfig(ctx context.Context, args []string) boo
 
 // run walks the panel: the section list, then one section's page, until the
 // user closes it. Esc returns one level — from a section back to the list,
-// and from the list out of the panel.
+// and from the list out of the panel. Switching tabs from inside a section
+// (the picker's ←/→) unwinds to that tab's overview, which is where the
+// switch lands (plan 329 D4).
 func (p *configPanel) run(ctx context.Context, start string) {
+	p.chrome = newConfigPageChrome(panelSections())
 	name := start
 	for {
 		if name == "" {
@@ -231,15 +242,56 @@ func (p *configPanel) run(ctx context.Context, start string) {
 		if !p.editSection(ctx, name) {
 			return
 		}
+		if tab := p.chrome.switchedTo; tab >= 0 {
+			p.chrome.active, p.chrome.switchedTo = tab, -1
+		}
 		name = ""
 	}
+}
+
+// chromeSelect opens one rich picker page under the panel's persistent
+// chrome when the selector can draw it, and as the plain picker otherwise —
+// a scripted selector keeps recording the label it always saw (plan 329 D4).
+func (p *configPanel) chromeSelect(label string, items []SelectItem, defaultIdx int) (int, bool, error) {
+	if chrome, ok := p.sel.(configChromeSelector); ok {
+		return chrome.SelectRichChrome(&p.chrome, label, items, defaultIdx)
+	}
+	return p.sel.SelectRich(label, items, defaultIdx)
+}
+
+// chromeInput is chromeSelect's one-line-question form.
+func (p *configPanel) chromeInput(label, defaultValue string) (string, bool, error) {
+	if chrome, ok := p.sel.(configChromeSelector); ok {
+		return chrome.InputChrome(&p.chrome, label, defaultValue)
+	}
+	return p.sel.Input(label, defaultValue)
+}
+
+// pushTrail records one page on the breadcrumb and answers the pop that
+// leaves it, so the trail a nested editor builds unwinds with its call
+// frames (the slot itself is plan 329 D4; plan 326 wires its navigation).
+func (p *configPanel) pushTrail(label string) func() {
+	p.chrome.trail = append(p.chrome.trail, label)
+	at := len(p.chrome.trail)
+	return func() {
+		if len(p.chrome.trail) >= at {
+			p.chrome.trail = p.chrome.trail[:at-1]
+		}
+	}
+}
+
+// chromeSwitched reports whether the user asked for another tab from inside
+// the open pages: every loop unwinds without touching the document, and the
+// panel opens the tab's overview.
+func (p *configPanel) chromeSwitched() bool {
+	return p.chrome.switchedTo >= 0
 }
 
 // chooseSection lists every section, tabbed by the group its descriptor names.
 func (p *configPanel) chooseSection() (string, bool) {
 	items, names := p.sectionItems()
 	label := "Configuration\nOpen a section to see and change its settings."
-	idx, ok, err := selectRichTabbed(p.sel, label, items, TabbedSelectOptions{DefaultIdx: 0})
+	idx, ok, err := selectRichTabbed(p.sel, label, items, TabbedSelectOptions{DefaultIdx: p.chrome.firstRowOfTab(items)})
 	if err != nil {
 		p.printError(err)
 		return "", false
@@ -329,22 +381,29 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 		return true
 	}
 	p.section = schema.storeSection()
+	p.effectTag = schema.Effect
+	p.chrome.enterTab(schema.Tab)
+	p.chrome.trail = []string{schema.Title}
 	p.write = func(raw json.RawMessage) error {
 		return p.session.UpdateConfigSection(ctx, p.section, raw)
 	}
 	defer func() {
-		p.section, p.write = "", nil
+		p.section, p.write, p.effectTag = "", nil, ""
 	}()
 	doc := p.sectionDoc(name)
 	notice := ""
 	for {
 		items, owners := p.fieldItems(schema, doc)
-		idx, ok, err := p.sel.SelectRich(p.sectionPrompt(schema, doc, notice), items, -1)
+		p.chrome.tag = p.sectionTag()
+		idx, ok, err := p.chromeSelect(p.sectionPrompt(schema, doc, notice), items, -1)
 		if err != nil {
 			p.printError(err)
 			return false
 		}
 		notice = ""
+		if p.chromeSwitched() {
+			return true
+		}
 		if !ok || idx < 0 || idx >= len(owners) {
 			return true
 		}
@@ -356,6 +415,16 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 			doc, notice = updated, note
 		}
 	}
+}
+
+// sectionTag is the section page's own right-edge tag: the scope the
+// descriptor names, else the panel's one wording for when a change lands
+// (plan 329 D4).
+func (p *configPanel) sectionTag() string {
+	if p.effectTag != "" {
+		return p.effectTag
+	}
+	return configNextTurnTag
 }
 
 // The page's one action row carries a negative owner so a field index and an
@@ -606,11 +675,19 @@ func configSectionNames() []string {
 // editField routes one setting to its widget: a table opens its rows, a value
 // that turns out to be a table is edited as rows whatever the descriptor says
 // (that is how approval_policy's granular object is reached), and a scalar
-// gets the widget its kind names.
+// gets the widget its kind names. A table whose own place a template names
+// opens that template's fixed-field page instead of its rows (plan 329 D2):
+// the projection's per-type rows and the plan reviewer's global row are
+// two-field pages, not key lists.
 func (p *configPanel) editField(doc any, field configField) (any, string) {
 	path := configFieldPath(field)
 	cur, _ := configLookupValue(doc, path)
 	if field.Kind == configFieldRows || configIsContainer(cur) {
+		if template := configTemplateFor(p.section, path); configTemplateIsObject(template) && configIsContainer(cur) {
+			// The field is the row here (a projection's per-type field, the
+			// plan reviewer's global row), so its own label names the page.
+			return p.editTemplatePage(doc, path, template, field.Label)
+		}
 		return p.editRows(doc, path, field)
 	}
 	switch field.Kind {
@@ -632,6 +709,8 @@ func (p *configPanel) editField(doc any, field configField) (any, string) {
 // rows in the value list; going back to the default is the choice page's
 // `Default` action (owner 2026-11-16).
 func (p *configPanel) editBool3(doc any, path []string, field configField, cur any) (any, string) {
+	defer p.pushTrail(field.Label)()
+	p.chrome.tag = ""
 	items := []SelectItem{
 		{Label: configBoolOnLabel},
 		{Label: configBoolOffLabel},
@@ -644,7 +723,7 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 			defaultIdx = 0
 		}
 	}
-	idx, ok, err := p.sel.SelectRich(p.fieldPrompt(field), items, defaultIdx)
+	idx, ok, err := p.chromeSelect(p.fieldPrompt(field), items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -668,6 +747,8 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 // configuration key (plan 203 §0.8). The list holds the real values only; the
 // last row is the `Default` action, which deletes the key (owner 2026-11-16).
 func (p *configPanel) editEnum(doc any, path []string, field configField, cur any) (any, string) {
+	defer p.pushTrail(field.Label)()
+	p.chrome.tag = ""
 	items := make([]SelectItem, 0, len(field.Options)+1)
 	for _, option := range field.Options {
 		item := SelectItem{Label: option}
@@ -691,7 +772,7 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 			}
 		}
 	}
-	idx, ok, err := p.sel.SelectRich(p.fieldPrompt(field), items, defaultIdx)
+	idx, ok, err := p.chromeSelect(p.fieldPrompt(field), items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -710,7 +791,9 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 // loader simply honours (a clamp) lands on the bound with the panel saying
 // which value it stored.
 func (p *configPanel) editNumber(doc any, path []string, field configField, cur any) (any, string) {
-	text, ok, err := p.sel.Input(p.fieldPrompt(field), configScalarInput(cur))
+	defer p.pushTrail(field.Label)()
+	p.chrome.tag = "Number"
+	text, ok, err := p.chromeInput(p.fieldPrompt(field), configScalarInput(cur))
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -747,7 +830,9 @@ func (p *configPanel) editNumber(doc any, path []string, field configField, cur 
 // editText takes free text. Empty means "unset": the key goes away rather
 // than storing an empty string the loader would read as an empty setting.
 func (p *configPanel) editText(doc any, path []string, field configField, cur any) (any, string) {
-	text, ok, err := p.sel.Input(p.fieldPrompt(field), configScalarText(cur))
+	defer p.pushTrail(field.Label)()
+	p.chrome.tag = configEditorTag(field)
+	text, ok, err := p.chromeInput(p.fieldPrompt(field), configScalarText(cur))
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -761,6 +846,20 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 	return p.assign(doc, path, text, false, field.Label)
 }
 
+// configEditorTag is a text editor page's right-edge tag (plan 329 D4): the
+// prototype's own four words for what the page edits — a private value, a
+// number, multiline text, or plain text.
+func configEditorTag(field configField) string {
+	switch {
+	case field.Secret:
+		return "Private value"
+	case field.Multiline:
+		return "Multiline text"
+	default:
+		return "Text"
+	}
+}
+
 // editEffort is one thinking level's picker (plan 319): the levels the model
 // row beside it can be given, then the empty value — Row default, which follows
 // that row's own default — last. The level is a property of the model, never a
@@ -768,6 +867,8 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 // refuses an effort that names no model, so the page says which row to set
 // first and opens nothing.
 func (p *configPanel) editEffort(doc any, path []string, field configField, prompt string, cur any) (any, string) {
+	defer p.pushTrail(strings.SplitN(prompt, "\n", 2)[0])()
+	p.chrome.tag = ""
 	if configSiblingModelRef(doc, path) == "" {
 		return doc, configEffortNeedsModelNotice
 	}
@@ -782,7 +883,7 @@ func (p *configPanel) editEffort(doc any, path []string, field configField, prom
 		}
 	}
 	items = append(items, SelectItem{Label: configRowDefaultEffort})
-	idx, ok, err := p.sel.SelectRich(prompt, items, defaultIdx)
+	idx, ok, err := p.chromeSelect(prompt, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -887,6 +988,7 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 	if len(initialNotice) > 0 {
 		notice = initialNotice[0]
 	}
+	defer p.pushTrail(field.Label)()
 	for {
 		container, _ := configLookupValue(doc, path)
 		keys := configContainerKeys(container)
@@ -897,13 +999,17 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 		if list && agentSubagentsPath(path) {
 			keys = append(keys, missingSharedSubagentKeys(doc, container)...)
 		}
+		p.chrome.tag = configContainerText(container)
 		items, owners := p.rowItems(doc, path, container, keys, list)
-		idx, ok, err := p.sel.SelectRich(p.rowsPrompt(field, keys, notice), items, -1)
+		idx, ok, err := p.chromeSelect(p.rowsPrompt(field, keys, notice), items, -1)
 		if err != nil {
 			p.printError(err)
 			return doc, ""
 		}
 		notice = ""
+		if p.chromeSwitched() {
+			return doc, ""
+		}
 		if !ok || idx < 0 || idx >= len(owners) {
 			return doc, ""
 		}
@@ -1073,6 +1179,27 @@ const (
 	configHookMatcherHeading  = "Tool matcher"
 	configHookAllToolsMatcher = "*"
 	configHookTypeHeading     = "Action type"
+	// The stored keys the template layer resolves paths by (plan 329 D2):
+	// an MCP server list, its OAuth block and its per-tool overrides, an LSP
+	// server map, and the writable-roots list. Keys, not descriptors,
+	// because the generic editor hands the same field down every level.
+	configMCPKey           = "mcp_servers"
+	configMCPOAuthKey      = "oauth"
+	configMCPToolsKey      = "tools"
+	configLSPServersKey    = "servers"
+	configWritableRootsKey = "writable_roots"
+	// configAdditionalFieldsGroup heads the keys a row holds that its
+	// template does not name: they stay listed, editable through the generic
+	// editor, and the save writes them back untouched (no data loss).
+	configAdditionalFieldsGroup = "Additional fields"
+	// configSystemStatus is the right-edge word every row of a system
+	// entry's page carries (prototype html:128): the entry is dispatched by
+	// the system, so nothing on the page is this agent's to set.
+	configSystemStatus = "System"
+	// configNextTurnTag is the tag a section without a narrower scope of its
+	// own carries at its title's right edge: a change here lands on the next
+	// turn's configuration sync.
+	configNextTurnTag = "Next turn"
 	// configSharedSubagentNotice is what a read-only shared row answers when one
 	// of its definition's fields is opened: the definition is edited on the
 	// "Subagent models" page, never here (plan 314).
@@ -1267,33 +1394,46 @@ func (p *configPanel) rowsPrompt(field configField, keys []string, notice string
 	return head
 }
 
-// editRow is one row's menu: edit its value (or open it, when it is a table),
-// delete it, or go back. One row is refused before its menu opens: a subagent
-// entry naming a system-dispatched type, which neither the loader nor the
-// runtime would let anyone configure (plan 313, prototype scene
-// system-stray-entry).
+// editRow opens one row of a container (plan 329 D3). A row whose real path
+// resolves to a template opens that template's fixed-field page directly —
+// the prototype's direct-open, with no menu between the row and its fields —
+// and a scalar row inside a known collection opens its text editor the same
+// way. A row nothing knows keeps the generic menu: edit or open, delete,
+// back. Removal of a templated row is the footer's action, not a menu item
+// (plan 326 wires it).
 func (p *configPanel) editRow(doc any, path []string, key string, field configField) (any, string) {
 	rowPath := configJoinPath(path, key)
 	value, _ := configLookupValue(doc, rowPath)
-	if configSystemSubagentRow(path, value) {
-		return doc, configSystemSubagentNotice
-	}
 	if agentSubagentsPath(path) {
 		if name := sharedRowName(doc, key, value); name != "" {
 			container, _ := configLookupValue(doc, path)
 			return p.editSharedSubagentRow(doc, path, container, name, field)
 		}
 	}
+	container := configIsContainer(value)
+	switch template := configTemplateFor(p.section, rowPath); {
+	case container && configTemplateIsObject(template):
+		return p.editTemplatePage(doc, rowPath, template, configTemplateRowTitle(template, key, value))
+	case container && template == configTemplateMatcherList:
+		// An event's matcher list is a known rows page (plan 329 D2): it
+		// opens directly, the way the prototype's hook-event scene does.
+		return p.editRows(doc, rowPath, field)
+	case !container && template == configTemplatePath:
+		return p.editText(doc, rowPath, configTemplateFields(configTemplatePath)[0], value)
+	case !container && configScalarRowTemplate(p.section, rowPath) == configTemplateString:
+		return p.editText(doc, rowPath, field, value)
+	}
 	editLabel := configRowEditLabel
-	if configIsContainer(value) {
+	if container {
 		editLabel = configRowOpenLabel
 	}
+	p.chrome.tag = ""
 	items := []SelectItem{
 		{Label: editLabel, Description: configRowDescription(value)},
 		{Label: configRowDropLabel, Description: "Removes it from this level"},
 		{Label: configRowBackLabel, Description: "Back to the row list"},
 	}
-	idx, ok, err := p.sel.SelectRich(field.Label+" "+configRowLabel(key, 0, false), items, 0)
+	idx, ok, err := p.chromeSelect(field.Label+" "+configRowLabel(key, 0, false), items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1303,7 +1443,7 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 	}
 	switch idx {
 	case 0:
-		if configIsContainer(value) {
+		if container {
 			return p.editRows(doc, rowPath, field)
 		}
 		return p.editRowValue(doc, rowPath, field, value)
@@ -1314,6 +1454,340 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 	}
 }
 
+// configTemplateFor resolves the template a stored row's real path names
+// (plan 329 D2). section is the store section the page writes — a projection
+// presents the agents document under its own name, and the shapes are the
+// stored document's either way — and the path is the row's own place in that
+// document, never a descriptor's Path: the generic editor hands the same
+// field down at every nesting level, so only the real path says which row is
+// being opened. The empty answer means no template: the row keeps the
+// generic editor.
+func configTemplateFor(section string, path []string) string {
+	has := func(n int, head ...string) bool {
+		if len(path) < n {
+			return false
+		}
+		for i, key := range head {
+			if key != "" && path[i] != key {
+				return false
+			}
+		}
+		return true
+	}
+	is := func(n int, head ...string) bool { return len(path) == n && has(n, head...) }
+	switch section {
+	case "agents":
+		switch {
+		case is(2, configDefinitionsPath):
+			return configTemplateAgent
+		case is(4, configDefinitionsPath, "", configSubagentsKey):
+			return configTemplateSubagent
+		case is(2, configSharedSubagentsKey):
+			return configTemplateSubagent
+		case is(1, configPlanReviewerKey):
+			return configTemplateGlobalSystemRow
+		case is(2, configSubagentModelsKey):
+			return configTemplateTypeDef
+		case has(4, configDefinitionsPath, "", configMCPKey), has(3, "defaults", configMCPKey):
+			return configMCPSubtreeTemplate(path)
+		}
+	case "hooks":
+		switch {
+		case is(1):
+			return configTemplateMatcherList
+		case is(2):
+			return configTemplateMatcher
+		case is(4, "", "", configHooksKey):
+			return configTemplateHook
+		}
+	case "lsp":
+		if is(2, configLSPServersKey) {
+			return configTemplateLSPServer
+		}
+	case "sandbox_workspace_write":
+		if is(2, configWritableRootsKey) {
+			return configTemplatePath
+		}
+	}
+	return ""
+}
+
+// configMCPSubtreeTemplate resolves an MCP server's own subtree: the server
+// itself, its OAuth block, or one tool's approval override. path starts at
+// the server list's own key (definitions.<id>.mcp_servers… or
+// defaults.mcp_servers…), so the server's index is the segment after it.
+func configMCPSubtreeTemplate(path []string) string {
+	at := slices.Index(path, configMCPKey)
+	if at < 0 || len(path) < at+2 {
+		return ""
+	}
+	switch tail := path[at+2:]; {
+	case len(tail) == 0:
+		return configTemplateMCP
+	case len(tail) == 1 && tail[0] == configMCPOAuthKey:
+		return configTemplateOAuth
+	case len(tail) == 2 && tail[0] == configMCPToolsKey:
+		return configTemplateToolApproval
+	default:
+		return ""
+	}
+}
+
+// configScalarRowTemplate resolves the pseudo-template a scalar row edits
+// when its place in a known template is a collection of strings — an
+// argument, a scope, an environment value: the row opens the text editor
+// directly, under the parent collection's own descriptor, instead of asking
+// what type the value is. Called only for a row that resolved to no object
+// template and holds a scalar; the walk finds the nearest ancestor a
+// template names and crosses exactly one collection field into the element.
+func configScalarRowTemplate(section string, path []string) string {
+	for cut := len(path) - 1; cut > 0; cut-- {
+		template := configTemplateFor(section, path[:cut])
+		if !configTemplateIsObject(template) {
+			continue
+		}
+		rest := path[cut:]
+		if len(rest) != 2 {
+			continue
+		}
+		for _, field := range configTemplates[template] {
+			if field.Path == rest[0] && field.Kind == configFieldRows {
+				return configTemplateString
+			}
+		}
+	}
+	return ""
+}
+
+// configTemplateRowTitle is the title a templated row's page opens under: the
+// name the row carries when it has one — an agent's display name, a
+// subagent's or a server's name, a matcher's pattern — else the row list's
+// own label for it.
+func configTemplateRowTitle(template, key string, value any) string {
+	if settings, ok := value.(map[string]any); ok {
+		for _, candidate := range []string{"display_name", "name", "matcher"} {
+			if text := strings.TrimSpace(configStringField(settings, candidate)); text != "" {
+				return text
+			}
+		}
+	}
+	if index, err := strconv.Atoi(key); err == nil && index >= 0 {
+		return configRowLabel(key, index, true)
+	}
+	return key
+}
+
+// configTemplateRow is one row of a template page: the template's own field,
+// or a key the template does not name, or the page's one way up. field's Path
+// stays the template's own segment; the page joins it onto the row's path
+// when the field is opened, so no dotted path is ever built from stored keys.
+type configTemplateRow struct {
+	field   configField
+	unknown string // a key the template does not name, when set
+	up      bool
+}
+
+// editTemplatePage renders one stored row as its template's fixed-field page
+// (plan 329 D3): the fields in the template's order under their groups, the
+// value each holds in the row's value column, and the keys the template does
+// not name under an additional-fields group — opened through the generic
+// editor and preserved on save, because the write is the section's whole row
+// (no data loss). Enter opens a field's editor directly; nothing on this
+// page deletes the row (that is the footer's action, plan 326). A subagent
+// entry naming a system type renders every row read-only with the System
+// status and refuses to open any of them (prototype html:128).
+func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, title string, initialNotice ...string) (any, string) {
+	notice := ""
+	if len(initialNotice) > 0 {
+		notice = initialNotice[0]
+	}
+	defer p.pushTrail(title)()
+	for {
+		value, _ := configLookupValue(doc, rowPath)
+		settings, _ := value.(map[string]any)
+		if settings == nil {
+			settings = map[string]any{}
+		}
+		p.chrome.tag = p.sectionTag()
+		items, rows := p.templateItems(template, settings)
+		idx, ok, err := p.chromeSelect(p.templatePrompt(template, title, settings, notice), items, -1)
+		if err != nil {
+			p.printError(err)
+			return doc, ""
+		}
+		notice = ""
+		if p.chromeSwitched() {
+			return doc, ""
+		}
+		if !ok || idx < 0 || idx >= len(rows) {
+			return doc, ""
+		}
+		row := rows[idx]
+		if row.up {
+			return doc, ""
+		}
+		if configTemplateRowIsSystem(template, settings) {
+			return doc, configSystemSubagentNotice
+		}
+		if row.unknown != "" {
+			doc, notice = p.openUnknownTemplateKey(doc, rowPath, row.unknown)
+			continue
+		}
+		doc, notice = p.openTemplateField(doc, rowPath, row.field)
+	}
+}
+
+// templatePrompt heads a template page: the row's own title, the system
+// verdict when the whole page is read-only, and the last outcome.
+func (p *configPanel) templatePrompt(template, title string, settings map[string]any, notice string) string {
+	head := title
+	if configTemplateRowIsSystem(template, settings) {
+		head += "\n" + configSystemSubagentNotice
+	}
+	if notice != "" {
+		head += "\n" + notice
+	}
+	return head
+}
+
+// configTemplateRowIsSystem reports whether the whole page renders read-only:
+// a subagent entry naming a type the system dispatches (prototype html:128).
+func configTemplateRowIsSystem(template string, settings map[string]any) bool {
+	if template != configTemplateSubagent {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(configStringField(settings, "name")))
+	return name != "" && slices.Contains(agent.SystemSubagentNames, name)
+}
+
+// configTemplateNameIsBuiltinOrSystem reports whether a subagent entry's name
+// is one the loader keeps to a model, a level, a prompt and a switch: the
+// public built-in types and the system-dispatched ones.
+func configTemplateNameIsBuiltinOrSystem(name string) bool {
+	return name != "" && (slices.Contains(agent.PublicSubagentNames, name) || slices.Contains(agent.SystemSubagentNames, name))
+}
+
+// configHookActionType is the action a hook entry performs, in the loader's
+// own ids; an entry that names none is a command hook, the template's default
+// (prototype html:126 reads value?.type || 'command').
+func configHookActionType(settings map[string]any) string {
+	if kind := strings.TrimSpace(configStringField(settings, "type")); kind != "" {
+		return kind
+	}
+	return appcfg.HookTypeCommand
+}
+
+// templateItems is a template page's rows: the template's fields in their own
+// order under their groups, the keys the template does not name under the
+// additional-fields group, then the way up. customOnly hides the fields a
+// built-in or system entry cannot carry; showFor hides the fields another
+// action type owns; a system entry's every row carries the System status and
+// the verdict in place of its hint.
+func (p *configPanel) templateItems(template string, settings map[string]any) ([]SelectItem, []configTemplateRow) {
+	fields := configTemplates[template]
+	name := strings.ToLower(strings.TrimSpace(configStringField(settings, "name")))
+	system := configTemplateRowIsSystem(template, settings)
+	hookType := configHookActionType(settings)
+	known := make(map[string]bool, len(fields))
+	items := make([]SelectItem, 0, len(fields)+4)
+	rows := make([]configTemplateRow, 0, len(fields)+4)
+	for _, field := range fields {
+		known[field.Path] = true
+		if field.CustomOnly && configTemplateNameIsBuiltinOrSystem(name) {
+			continue
+		}
+		if len(field.ShowFor) > 0 && !slices.Contains(field.ShowFor, hookType) {
+			continue
+		}
+		description := field.Hint
+		status := ""
+		if system {
+			description, status = configSystemSubagentNotice, configSystemStatus
+		}
+		value, exists := configLookupValue(settings, []string{field.Path})
+		items = append(items, SelectItem{
+			Label:       field.Label,
+			Description: description,
+			Value:       p.configTemplateValueText(field, value, exists),
+			Status:      status,
+			Category:    field.Group,
+		})
+		rows = append(rows, configTemplateRow{field: field})
+	}
+	for _, key := range configContainerKeys(settings) {
+		if known[key] {
+			continue
+		}
+		value := settings[key]
+		items = append(items, SelectItem{
+			Label:       configTitleCase(key),
+			Description: "A key this page's template does not name; it is kept as it is",
+			Value:       configRowDescription(value),
+			Category:    configAdditionalFieldsGroup,
+		})
+		rows = append(rows, configTemplateRow{unknown: key})
+	}
+	items = append(items, SelectItem{Label: configUpRowLabel, Description: "Back up one level"})
+	rows = append(rows, configTemplateRow{up: true})
+	return items, rows
+}
+
+// configTemplateValueText is a template field's value column. A field that
+// holds a model row reference names it the way the pickers do, and its empty
+// value reads as the sentence the template gives it (the model picker's empty
+// option, plan 324); everything else keeps the panel's one value wording.
+func (p *configPanel) configTemplateValueText(field configField, value any, exists bool) string {
+	if field.ModelEmpty != "" {
+		ref, _ := value.(string)
+		if strings.TrimSpace(ref) == "" {
+			return field.ModelEmpty
+		}
+		return p.configModelLabel(ref)
+	}
+	return configFieldValueText(field, value, exists)
+}
+
+// openTemplateField opens one template field's editor directly (plan 329
+// D3): the widget is the field's own kind, at the field's real path inside
+// the row — a dispatch that mirrors editField without rooting a dotted path
+// through stored keys.
+func (p *configPanel) openTemplateField(doc any, rowPath []string, field configField) (any, string) {
+	path := configJoinPath(rowPath, field.Path)
+	cur, _ := configLookupValue(doc, path)
+	if field.Kind == configFieldRows || configIsContainer(cur) {
+		return p.editRows(doc, path, field)
+	}
+	switch field.Kind {
+	case configFieldBool3:
+		return p.editBool3(doc, path, field, cur)
+	case configFieldEnum:
+		return p.editEnum(doc, path, field, cur)
+	case configFieldNumber:
+		return p.editNumber(doc, path, field, cur)
+	case configFieldEffort:
+		return p.editEffort(doc, path, field, p.fieldPrompt(field), cur)
+	default:
+		return p.editText(doc, path, field, cur)
+	}
+}
+
+// openUnknownTemplateKey opens a key the row's template does not name
+// through the generic editor — a container as rows, a scalar with its type
+// asked — so the key stays reachable and its value travels back on save.
+// The descriptor carries the key as its path: the generic guards that read a
+// field's own path (the hooks tree's add, primary creation) must not mistake
+// this page for the section's own fields.
+func (p *configPanel) openUnknownTemplateKey(doc any, rowPath []string, key string) (any, string) {
+	path := configJoinPath(rowPath, key)
+	value, _ := configLookupValue(doc, path)
+	field := configField{Label: configTitleCase(key), Path: key}
+	if configIsContainer(value) {
+		field.Kind = configFieldRows
+		return p.editRows(doc, path, field)
+	}
+	return p.editRowValue(doc, path, field, value)
+}
+
 // editSharedSubagentRow is the whole of what an agent's page may do with a
 // shared subagent (plan 314): one switch, and the definition's own facts shown
 // read-only. The definition is the install-wide registry's, so it is edited on
@@ -1322,6 +1796,8 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 // any other (plan 321): throwing it writes the reference entry, throwing it back
 // removes it, and Esc between the two writes nothing.
 func (p *configPanel) editSharedSubagentRow(doc any, path []string, container any, name string, field configField) (any, string) {
+	defer p.pushTrail(name)()
+	p.chrome.tag = ""
 	enabled := sharedReferenceEnabled(container, name)
 	items := []SelectItem{
 		{Label: "Enabled", Description: configSharedSwitchText(enabled)},
@@ -1330,7 +1806,7 @@ func (p *configPanel) editSharedSubagentRow(doc any, path []string, container an
 		{Label: "Tools", Description: configSharedToolsText(doc, name)},
 		{Label: configRowBackLabel, Description: "Back to the row list"},
 	}
-	idx, ok, err := p.sel.SelectRich(name+"\n"+configSharedSubagentNotice, items, 0)
+	idx, ok, err := p.chromeSelect(name+"\n"+configSharedSubagentNotice, items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1483,7 +1959,8 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 	}
 	key := ""
 	if !list {
-		name, ok, err := p.sel.Input(field.Label+" key of the new row", "")
+		p.chrome.tag = ""
+		name, ok, err := p.chromeInput(field.Label+" key of the new row", "")
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -1507,6 +1984,35 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 	childPath := configJoinPath(path, key)
 	if !list && configEffortPath(childPath) {
 		return p.editEffort(doc, childPath, field, configEffortHeading, nil)
+	}
+	// A row whose place a known template names is not typed either (plan 329
+	// D3): a path row or a string row opens its text editor directly, the
+	// way opening the same row does. A list's new row sits at the index the
+	// append will land at, which is the place the template resolves by.
+	if list {
+		rows, _ := container.([]any)
+		childPath = configJoinPath(path, strconv.Itoa(len(rows)))
+		key = strconv.Itoa(len(rows))
+	}
+	if template := configTemplateFor(p.section, childPath); template == configTemplatePath || (template == "" && configScalarRowTemplate(p.section, childPath) == configTemplateString) {
+		p.chrome.tag = configEditorTag(field)
+		text, ok, err := p.chromeInput(p.fieldPrompt(field), "")
+		if err != nil {
+			p.printError(err)
+			return doc, ""
+		}
+		if !ok {
+			return doc, ""
+		}
+		if strings.TrimSpace(text) == "" {
+			return doc, "the value may not be empty; nothing was written"
+		}
+		if list {
+			rows, _ := container.([]any)
+			rows = append(append(make([]any, 0, len(rows)+1), rows...), text)
+			return p.assign(doc, path, rows, false, field.Label)
+		}
+		return p.assign(doc, childPath, text, false, field.Label)
 	}
 	value, open, ok, err := p.chooseNewValue(field.Label, nil)
 	if err != nil {
@@ -1533,6 +2039,11 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 	updated, note := p.assign(doc, path, next, false, field.Label)
 	if note != "" || !open {
 		return updated, note
+	}
+	// The new row opens the page its place names (plan 329 D3): a templated
+	// row opens its fixed-field page, a generic one its rows as before.
+	if template := configTemplateFor(p.section, childPath); configTemplateIsObject(template) {
+		return p.editTemplatePage(updated, childPath, template, configTemplateRowTitle(template, key, value))
 	}
 	opened, note := p.editRows(updated, childPath, field)
 	return opened, note
@@ -1567,7 +2078,7 @@ func (p *configPanel) addSharedSubagent(doc any, path []string, field configFiel
 	if note != "" {
 		return updated, note
 	}
-	opened, note := p.editRows(updated, configJoinPath(path, strconv.Itoa(len(rows)-1)), field)
+	opened, note := p.editRow(updated, path, strconv.Itoa(len(rows)-1), field)
 	return opened, note
 }
 
@@ -1582,7 +2093,8 @@ func (p *configPanel) addSharedSubagent(doc any, path []string, field configFiel
 // that key is the type's install-wide default — so it is refused here and on the
 // gateway's create endpoint alike.
 func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField, container any) (any, string) {
-	name, ok, err := p.sel.Input("Agent id of the new primary agent", "")
+	p.chrome.tag = ""
+	name, ok, err := p.chromeInput("Agent id of the new primary agent", "")
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1605,7 +2117,8 @@ func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField,
 			return doc, fmt.Sprintf("%q already exists", key)
 		}
 	}
-	display, ok, err := p.sel.Input("Display name (empty uses the title-cased id)", "")
+	p.chrome.tag = "Text"
+	display, ok, err := p.chromeInput("Display name (empty uses the title-cased id)", "")
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1630,7 +2143,11 @@ func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField,
 	if note != "" {
 		return updated, note
 	}
-	opened, note := p.editRows(updated, configJoinPath(path, key), field, configPrimaryCreatedNotice)
+	// The new agent opens its own template page — the fixed fields the
+	// prototype's agent template holds — with the guidance that says what to
+	// do next (plan 313); editTemplatePage keeps the notice as the page's
+	// first line.
+	opened, note := p.editTemplatePage(updated, configJoinPath(path, key), configTemplateAgent, display, configPrimaryCreatedNotice)
 	return opened, note
 }
 
@@ -1670,7 +2187,8 @@ func (p *configPanel) addHookEvent(doc any, path []string, field configField, co
 	for _, event := range events {
 		items = append(items, SelectItem{Label: event})
 	}
-	idx, ok, err := p.sel.SelectRich(configHookEventHeading, items, 0)
+	p.chrome.tag = ""
+	idx, ok, err := p.chromeSelect(configHookEventHeading, items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1694,7 +2212,8 @@ func (p *configPanel) addHookEvent(doc any, path []string, field configField, co
 // carries none is one the loader refuses, so the two are asked as one row and
 // written once.
 func (p *configPanel) addHookMatcher(doc any, path []string, field configField, container any) (any, string) {
-	pattern, ok, err := p.sel.Input(configHookMatcherHeading, configHookAllToolsMatcher)
+	p.chrome.tag = ""
+	pattern, ok, err := p.chromeInput(configHookMatcherHeading, configHookAllToolsMatcher)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1740,7 +2259,8 @@ func (p *configPanel) askHookAction() (map[string]any, string, bool) {
 			defaultIdx = len(items) - 1
 		}
 	}
-	idx, ok, err := p.sel.SelectRich(configHookTypeHeading, items, defaultIdx)
+	p.chrome.tag = ""
+	idx, ok, err := p.chromeSelect(configHookTypeHeading, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return nil, "", false
@@ -1750,7 +2270,8 @@ func (p *configPanel) askHookAction() (map[string]any, string, bool) {
 	}
 	kind := types[idx]
 	required, heading := configHookRequiredField(kind)
-	text, ok, err := p.sel.Input(heading, "")
+	p.chrome.tag = configEditorTag(configField{Kind: configFieldText})
+	text, ok, err := p.chromeInput(heading, "")
 	if err != nil {
 		p.printError(err)
 		return nil, "", false
@@ -1845,19 +2366,20 @@ func (p *configPanel) chooseNewValue(label string, cur any) (any, bool, bool, er
 	case map[string]any:
 		defaultIdx = 4
 	}
-	idx, ok, err := p.sel.SelectRich(label+"\nWhat type is this row's value?", items, defaultIdx)
+	p.chrome.tag = ""
+	idx, ok, err := p.chromeSelect(label+"\nWhat type is this row's value?", items, defaultIdx)
 	if err != nil || !ok {
 		return nil, false, false, err
 	}
 	switch idx {
 	case 0:
-		text, entered, err := p.sel.Input(label+" value", configScalarText(cur))
+		text, entered, err := p.chromeInput(label+" value", configScalarText(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}
 		return text, false, true, nil
 	case 1:
-		text, entered, err := p.sel.Input(label+" integer", configScalarInput(cur))
+		text, entered, err := p.chromeInput(label+" integer", configScalarInput(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}
