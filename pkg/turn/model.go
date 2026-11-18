@@ -645,6 +645,13 @@ type PlanReviewModelOption struct {
 	Model     string
 	ModelName string
 	Current   bool
+	// Preferred marks the reviewer the install configured for plan review
+	// (agents.plan_reviewer) once that reference resolves to this very row:
+	// the approval picker opens on it. At most one offer carries it, and none
+	// does when the setting is empty or names a row the table no longer has —
+	// a dangling reference behaves as unset (plan 315), so it must never
+	// become a cursor.
+	Preferred bool
 	// Endpoint is where this reviewer's requests go — the picker's second
 	// column; EndpointTail is the part a narrow column must keep, the api
 	// path (empty for a url-verbatim row). They are shown, never compared:

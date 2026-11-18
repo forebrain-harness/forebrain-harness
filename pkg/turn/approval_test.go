@@ -893,6 +893,115 @@ func TestPlanReviewModelOptionsCarryTheRowsEfforts(t *testing.T) {
 	require.Equal(t, "", byID["row-b"].DefaultEffort, "a row that configures none reports none")
 }
 
+// planReviewerConfig is the install's model table with the exit-plan reviewer
+// row configured against it: the approval picker opens on that row, and a
+// setting that names nothing of the table moves nothing.
+func planReviewerConfig(t *testing.T, ref string) *appcfg.Root {
+	t.Helper()
+	return &appcfg.Root{
+		LLMModels: []appcfg.LLMModelConfig{
+			{ID: "row-glm", Provider: "zhipuai", Model: "glm-5.3", BaseURL: "http://zhipu.test/api"},
+			{ID: "row-gpt", Provider: "openai", Model: "gpt-5.1", BaseURL: "http://openai.test/v1"},
+			{ID: "row-ds", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://deepseek.test"},
+		},
+		Agents: appcfg.AgentsSection{PlanReviewer: appcfg.SubagentConfig{Model: ref}},
+	}
+}
+
+func preferredOptionIDs(options []PlanReviewModelOption) []string {
+	var ids []string
+	for _, option := range options {
+		if option.Preferred {
+			ids = append(ids, option.ID)
+		}
+	}
+	return ids
+}
+
+// The reviewer the install configured is the one offer that opens marked, and
+// it is the row — never the provider/model label the picker draws — that
+// carries the mark (plan 320).
+func TestPlanReviewModelOptionsMarkTheConfiguredReviewer(t *testing.T) {
+	cfg := planReviewerConfig(t, "row-glm")
+	options := PlanReviewModelOptions(cfg, "main", "row-gpt", "openai", "gpt-5.1")
+	require.Len(t, options, 3)
+	require.Equal(t, []string{"row-glm"}, preferredOptionIDs(options),
+		"the configured reviewer is the row the picker opens on, and the only one")
+	for _, option := range options {
+		if option.ID == "row-gpt" {
+			require.True(t, option.Current, "the conversation's own model keeps its mark")
+			require.False(t, option.Preferred, "and is not what the picker opens on")
+		}
+	}
+
+	// A legacy label names the row it splits into, the way every other reader
+	// of the setting resolves it.
+	legacy := PlanReviewModelOptions(planReviewerConfig(t, "zhipuai/glm-5.3"), "main", "row-gpt", "openai", "gpt-5.1")
+	require.Equal(t, []string{"row-glm"}, preferredOptionIDs(legacy))
+}
+
+// An unset reviewer, and one that names a row the table no longer holds, mark
+// nothing: a dangling reference behaves as unset (plan 315), so the picker
+// keeps the opening row it has always had (plan 320).
+func TestPlanReviewModelOptionsMarkNothingWithoutAConfiguredRow(t *testing.T) {
+	for _, ref := range []string{"", "row-gone", "not/a/configured-row"} {
+		options := PlanReviewModelOptions(planReviewerConfig(t, ref), "main", "row-gpt", "openai", "gpt-5.1")
+		require.Len(t, options, 3)
+		require.Empty(t, preferredOptionIDs(options), "setting %q must move no cursor", ref)
+	}
+	// A config with no table at all has nothing to open on either.
+	require.Empty(t, PlanReviewModelOptions(&appcfg.Root{}, "main", "", "", ""))
+}
+
+// The row the picker opens on is the row the review records, so a decided
+// approval replays the reviewer it actually ran on — the options list, the
+// review request it produces and the started event's record are one row, not
+// three (plan 320).
+func TestConfiguredReviewerIsTheRowTheReviewRecords(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	stateRoot := t.TempDir()
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", sessionID, "# Plan"))
+
+	options := PlanReviewModelOptions(planReviewerConfig(t, "row-ds"), "main", "row-gpt", "openai", "gpt-5.1")
+	require.Equal(t, []string{"row-ds"}, preferredOptionIDs(options))
+	var opening PlanReviewModelOption
+	for _, option := range options {
+		if option.Preferred {
+			opening = option
+		}
+	}
+
+	var events []event.RunEvent
+	require.NoError(t, RunPlanReview(ctx, PlanReviewRun{
+		ActionID: "act-row",
+		// What a surface hands the review: the offer it opened on, projected
+		// into the request's model the way the TUI and the web both do.
+		Model:     Model{ID: opening.ID, Provider: opening.Provider, Model: opening.Model},
+		SessionID: sessionID, StateRoot: stateRoot, ProjectKey: "proj",
+		Reviewer: &recordingReviewer{},
+		Publish: func(ctx context.Context, evt event.RunEvent) error {
+			events = append(events, evt)
+			_, err := runs.AppendSessionEvent(ctx, state.SessionEvent{
+				ID: evt.ID, SessionID: sessionID, Type: evt.Type, Payload: evt.Payload,
+			})
+			return err
+		},
+	}))
+
+	var started event.PlanReviewStartedPayload
+	for _, evt := range events {
+		if evt.Type == event.RunEventPlanReviewStarted {
+			require.NoError(t, json.Unmarshal(evt.Payload, &started))
+		}
+	}
+	require.Equal(t, "row-ds", started.ModelID,
+		"the reviewer the install configured is the row the review opened on and recorded")
+	require.Equal(t, "deepseek-v4-flash", started.Model)
+}
+
 // TestPendingExitPlanRequestResolvesOnlyItsOwnSessionPlan is the gate-layer
 // regression test for the cross-conversation plan leak: the approval card the
 // user is looking at (TUI overlay and web card render the same request) must

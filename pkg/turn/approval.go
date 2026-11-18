@@ -1299,11 +1299,19 @@ func Truncate(s string, max int) string {
 // description column, so two rows of one provider/model stay apart — and the
 // row id, which is the reviewer's identity: a review request names the row the
 // user picked, and that row's endpoint and key serve it.
+//
+// One of them carries Preferred: the reviewer the install configured
+// (agents.plan_reviewer), so a user who configured one does not pick it by hand
+// at every approval. It is resolved through the same reference lookup the rest
+// of the configuration uses — by row id, or by the legacy label that names a
+// row — so a setting that names no row of the table marks nothing at all and
+// leaves the picker its old opening row (plan 320, plan 315's dangling rule).
 func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvider, currentModel string) []PlanReviewModelOption {
 	entries := ModelChoices(cfg, agentName)
 	if len(entries) == 0 {
 		return nil
 	}
+	preferred := preferredPlanReviewerRow(cfg)
 	seen := make(map[string]struct{}, len(entries))
 	out := make([]PlanReviewModelOption, 0, len(entries))
 	for _, entry := range entries {
@@ -1340,6 +1348,7 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvi
 			Model:        model,
 			ModelName:    llm.ListingDisplayName(provider, model),
 			Current:      current,
+			Preferred:    preferred != "" && strings.EqualFold(strings.TrimSpace(entry.ID), preferred),
 			Endpoint:     ModelEndpointLabel(entry.BaseURL, entry.APIPath, entry.URLVerbatim),
 			EndpointTail: endpointTail(entry),
 			// The offer carries the row's thinking levels so picking a model
@@ -1351,6 +1360,22 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvi
 		})
 	}
 	return out
+}
+
+// preferredPlanReviewerRow is the row id agents.plan_reviewer names, resolved
+// the way the reviewer resolves a reference itself: a row id, or a legacy
+// "provider/model" label split on its first slash. Empty when the setting is
+// empty or names nothing the table holds — a dangling reference behaves as
+// unset (plan 315), and an unset one must not move the cursor.
+func preferredPlanReviewerRow(cfg *appcfg.Root) string {
+	if cfg == nil {
+		return ""
+	}
+	row, ok := appcfg.ResolveModelRef(cfg, "main", strings.TrimSpace(cfg.Agents.PlanReviewer.Model))
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(row.ID)
 }
 
 // PlanReviewLog is where a conversation's plan-review records are read from:
