@@ -336,14 +336,15 @@ func TestPresentFilesRefusedForSubagents(t *testing.T) {
 	}
 }
 
-func TestPresentFilesRegisteredOnlyForOfficeAndBatch(t *testing.T) {
+func TestPresentFilesRegisteredForEveryProjectType(t *testing.T) {
 	for _, tc := range []struct {
 		projectType string
 		want        bool
 	}{
-		{projectType: state.ProjectTypeCoding, want: false},
+		{projectType: state.ProjectTypeCoding, want: true},
 		{projectType: state.ProjectTypeOffice, want: true},
 		{projectType: state.ProjectTypeBatch, want: true},
+		{projectType: "", want: true},
 	} {
 		st := NewState(t.TempDir())
 		a, err := agent.New(registryNoopLLM{}, "main", "test")
@@ -550,13 +551,19 @@ func TestBuildToolMetaCarriesDeliverableRows(t *testing.T) {
 
 // TestDeliverablesCrossTheEventBoundary pins the mirror: the canonical event
 // carries the same rows (they are what the web card and a replayed row read),
-// and the shape converts back into the tool's without loss.
+// and the shape converts back into the tool's without loss — except the
+// artifact id, which the event mirror has never carried: a replayed row
+// reads without one and the surfaces' dedup falls back to the composite key.
 func TestDeliverablesCrossTheEventBoundary(t *testing.T) {
 	evt := StepEvent{Kind: StepKindToolCompleted, ToolName: "present_files", StepID: "call_1",
 		Output: map[string]any{"presented": []any{map[string]any{
 			"id": "art-1", "name": "a.md", "rel_path": "out/a.md", "title": "Report",
 			"kind": "markdown", "preview": "markdown", "size": int64(2048),
 		}}}}
+	direct := DeliverablesFrom(evt.Output)
+	if len(direct) != 1 || direct[0].ID != "art-1" {
+		t.Fatalf("DeliverablesFrom = %#v, want the row carrying its artifact id", direct)
+	}
 	run, ok := RunEventFromStep(context.Background(), "sess", "run", "tui", evt)
 	if !ok {
 		t.Fatal("RunEventFromStep dropped the completed call")

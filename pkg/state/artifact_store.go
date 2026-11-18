@@ -123,6 +123,36 @@ SELECT ` + artifactColumns + `
  WHERE run_id=$1 AND agent_id=$2
  ORDER BY created_at, row_id`,
 	}
+	// artifactLatestByPathSQL is the turn-end top-up's session-level version
+	// check: the newest row a path already has, so a file whose bytes did not
+	// change since it was delivered is not delivered twice. The id column is
+	// a prefixed uuid, not a counter, so "newest" is delivery order — the
+	// same created_at/rowid pair every artifact list is ordered by.
+	artifactLatestByPathSQL = dbx.SQL{
+		SQLite: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE session_id=? AND agent_id=? AND path=?
+ ORDER BY created_at DESC, rowid DESC
+ LIMIT 1`,
+		MySQL: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE session_id=? AND agent_id=? AND path=?
+ ORDER BY created_at DESC, row_id DESC
+ LIMIT 1`,
+		Postgres: `
+SELECT ` + artifactColumns + `
+  FROM fb_artifacts
+ WHERE session_id=$1 AND agent_id=$2 AND path=$3
+ ORDER BY created_at DESC, row_id DESC
+ LIMIT 1`,
+	}
+	artifactCountByOriginSQL = dbx.SQL{
+		SQLite:   `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=? AND agent_id=? AND origin=?`,
+		MySQL:    `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=? AND agent_id=? AND origin=?`,
+		Postgres: `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=$1 AND agent_id=$2 AND origin=$3`,
+	}
 )
 
 // AddArtifact registers one delivered file under this agent's conversation.
@@ -257,4 +287,88 @@ func scanArtifact(rows *sql.Rows) (Artifact, error) {
 		&a.Path, &a.RelPath, &a.Name, &a.Title, &a.Description, &a.MIME, &a.Kind, &a.Preview,
 		&a.Size, &a.MTimeNS, &a.SHA256, &a.Origin, &a.CreatedAt)
 	return a, err
+}
+
+// LatestArtifactByPath is the newest row a path already has in this
+// conversation: the version check the turn-end deliverable top-up and the
+// batch outputs scan both make before registering a path again, so unchanged
+// bytes are not re-delivered under a new run. A path never delivered reads
+// as found=false.
+func (s *SessionStore) LatestArtifactByPath(ctx context.Context, sessionID, path string) (Artifact, bool, error) {
+	if s == nil || s.db == nil {
+		return Artifact{}, false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	path = strings.TrimSpace(path)
+	if sessionID == "" || path == "" {
+		return Artifact{}, false, nil
+	}
+	var a Artifact
+	err := s.db.QueryRowContext(ctx, artifactLatestByPathSQL.For(dbx.DialectOf(s.db)),
+		sessionID, s.AgentID(), path).Scan(&a.ID, &a.AgentID, &a.SessionID, &a.RunID, &a.ToolCallID,
+		&a.Path, &a.RelPath, &a.Name, &a.Title, &a.Description, &a.MIME, &a.Kind, &a.Preview,
+		&a.Size, &a.MTimeNS, &a.SHA256, &a.Origin, &a.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Artifact{}, false, nil
+	}
+	if err != nil {
+		return Artifact{}, false, err
+	}
+	return a, true, nil
+}
+
+// CountArtifactsByOrigin counts a conversation's delivered rows of one
+// origin. It is the batch outputs scan's trigger: the scan fires when the
+// model presented nothing, not when the conversation holds no rows at all —
+// a continue's earlier fallback rows must not suppress it.
+func (s *SessionStore) CountArtifactsByOrigin(ctx context.Context, sessionID, origin string) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return 0, nil
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, artifactCountByOriginSQL.For(dbx.DialectOf(s.db)),
+		sessionID, s.AgentID(), strings.TrimSpace(origin)).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// SessionProjectScope resolves the conversation's delivery scope in one read
+// pair: the project type the conversation froze at birth (a session this
+// agent does not own, or one that does not exist, reads as coding — the
+// behaviour of every conversation before types existed) and the root of the
+// project it belongs to (empty when it has none). The turn-end deliverable
+// top-up reads this to know which files are the conversation's to deliver
+// (pkg/turn/deliverables.go); it reuses the reads the project and file
+// stores already publish, so the scope is the same one every other surface
+// resolves.
+func (s *SessionStore) SessionProjectScope(ctx context.Context, sessionID string) (projectType, projectRoot string, err error) {
+	if s == nil || s.db == nil {
+		return ProjectTypeCoding, "", nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ProjectTypeCoding, "", nil
+	}
+	if err := s.db.QueryRowContext(ctx, projectSessionTypeSQL.For(dbx.DialectOf(s.db)),
+		sessionID, s.AgentID()).Scan(&projectType); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ProjectTypeCoding, "", nil
+		}
+		return "", "", err
+	}
+	if err := s.db.QueryRowContext(ctx, fileProjectRootSQL.For(dbx.DialectOf(s.db)),
+		sessionID).Scan(&projectRoot); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// A conversation with no project (a primary-agent workshop task)
+			// names no root to deliver inside.
+			return NormalizeProjectType(projectType), "", nil
+		}
+		return "", "", err
+	}
+	return NormalizeProjectType(projectType), strings.TrimSpace(projectRoot), nil
 }

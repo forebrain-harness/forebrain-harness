@@ -175,6 +175,12 @@ type RunEndedMsg struct {
 	WorkedDuration time.Duration
 	InputTokens    int // Phase 2 redesign: provider-reported prompt token count; 0 when provider doesn't expose it.
 	OutputTokens   int // Phase 2 redesign: provider-reported completion token count; 0 when provider doesn't expose it.
+	// RunArtifacts is every file the run delivered, read from the same rows
+	// the run's end event carries. The turn's deliverables group unions them
+	// with what the present_files steps showed live, so a file only the
+	// engine's turn-end top-up registered still appears — replayed from the
+	// same rows the web reads.
+	RunArtifacts event.RunArtifacts
 	// ClosesTurn marks the one run-end that also ends its whole turn: the
 	// dispatch that ran it, the approval resume that continued it, or the
 	// cancellation of the gate it was parked on. A turn's deliverables group is

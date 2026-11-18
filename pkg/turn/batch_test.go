@@ -533,6 +533,249 @@ func TestBatchFallbackArtifactsOnlyWhenNothingWasDelivered(t *testing.T) {
 	}
 }
 
+// triggerEnv is one batch execution whose conversation is bound to the batch
+// project, so the turn-end top-up resolves its scope the way a real one does.
+type triggerEnv struct {
+	projects *state.ProjectStore
+	sessions *state.SessionStore
+	runs     *state.RunStore
+	task     state.Task
+	exec     state.TaskExecution
+	root     string
+}
+
+func newTriggerEnv(t *testing.T) *triggerEnv {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	projects := state.NewProjectStore(db, "main")
+	sessions := state.NewSessionStore(db, "main")
+	root := t.TempDir()
+	p, err := projects.Create(ctx, state.CreateProjectInput{Name: "batch", Root: root, ProjectType: state.ProjectTypeBatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := projects.CreateTask(ctx, state.Task{ProjectID: p.ID, Title: "count rows"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sid = "s-bound"
+	if err := sessions.EnsureAt(ctx, sid, sid, state.SessionBirth{ProjectID: p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	exec, err := projects.AddTaskExecution(ctx, task.ID, sid, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"inputs", "outputs", ".work"} {
+		if err := os.MkdirAll(filepath.Join(exec.Workspace, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &triggerEnv{projects: projects, sessions: sessions, runs: &state.RunStore{DB: db}, task: task, exec: exec, root: root}
+}
+
+func (e *triggerEnv) service(onEnd func(context.Context, BatchExecutionEnd)) *Service {
+	return New(
+		WithSessionStore(e.sessions),
+		WithRunEventStore(e.runs),
+		WithBatchTasks(e.projects, e.sessions, onEnd),
+	)
+}
+
+func (e *triggerEnv) write(t *testing.T, rel, content string) string {
+	t.Helper()
+	path := filepath.Join(e.root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func (e *triggerEnv) sessionArtifacts(t *testing.T) map[string]state.Artifact {
+	t.Helper()
+	rows, _, err := e.sessions.ListArtifactsPage(context.Background(), e.exec.SessionID, 500, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]state.Artifact{}
+	for _, row := range rows {
+		out[row.Name] = row
+	}
+	return out
+}
+
+// TestBatchScanFiresOnZeroModelDelivery pins the deliberate trigger change
+// (plan 324): the outputs scan fires when the model presented nothing, even
+// though the conversation already holds fallback rows — a continue's earlier
+// collection must not make a silent turn look delivered.
+func TestBatchScanFiresOnZeroModelDelivery(t *testing.T) {
+	ctx := context.Background()
+	env := newTriggerEnv(t)
+	if err := os.WriteFile(filepath.Join(env.exec.Workspace, "outputs", "fresh.xlsx"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A row the conversation already holds — fallback, not model: under the
+	// old total==0 trigger this is what suppressed the scan.
+	if _, err := env.sessions.AddArtifact(ctx, state.Artifact{
+		SessionID: env.exec.SessionID, RunID: "run-old", Path: filepath.Join(env.root, "old.pdf"),
+		RelPath: "old.pdf", Name: "old.pdf", Kind: "document", Origin: state.ArtifactOriginFallback,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var ended []BatchExecutionEnd
+	env.service(func(_ context.Context, end BatchExecutionEnd) { ended = append(ended, end) }).
+		endBatchExecution(ctx, TurnRequest{SessionID: env.exec.SessionID}, "run-x", state.TaskStatusCompleted, "", nil)
+	files := env.sessionArtifacts(t)
+	if _, ok := files["fresh.xlsx"]; !ok {
+		t.Fatalf("outputs scan was suppressed by fallback rows: %v", files)
+	}
+	if _, ok := files["old.pdf"]; !ok {
+		t.Fatalf("the earlier fallback row disappeared: %v", files)
+	}
+	if len(ended) != 1 || len(ended[0].Artifacts) != 2 {
+		t.Fatalf("end report = %+v, want both rows", ended)
+	}
+}
+
+// TestBatchPartialModelDeliveryScanSuppressedTopUpFillsGap is the root cure
+// (b): a turn that presented some and missed some keeps the outputs scan
+// off (the model did deliver), and the engine's top-up registers the missed
+// tracked change anyway.
+func TestBatchPartialModelDeliveryScanSuppressedTopUpFillsGap(t *testing.T) {
+	ctx := context.Background()
+	env := newTriggerEnv(t)
+	presented := env.write(t, "tasks/t1/1/outputs/summary.docx", "the presented one")
+	missed := env.write(t, "tasks/t1/1/work/dataset.csv", "the missed one")
+	// A file only the outputs folder knows about: with the model having
+	// delivered, the scan stays off and this one is not the engine's to
+	// collect (nobody tracked it this turn).
+	if err := os.WriteFile(filepath.Join(env.exec.Workspace, "outputs", "untracked.xlsx"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var ended []BatchExecutionEnd
+	svc := env.service(func(_ context.Context, end BatchExecutionEnd) { ended = append(ended, end) })
+	run, err := env.runs.CreateRun(ctx, env.exec.SessionID, "count rows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.sessions.AddArtifact(ctx, state.Artifact{
+		SessionID: env.exec.SessionID, RunID: run.ID, Path: presented, RelPath: "summary.docx",
+		Name: "summary.docx", Kind: "document", SHA256: "presented", Origin: state.ArtifactOriginModel,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.sessions.RecordFileChange(ctx, state.FileChange{SessionID: env.exec.SessionID, RunID: run.ID, Path: missed}); err != nil {
+		t.Fatal(err)
+	}
+	svc.collectTurnDeliverables(ctx, env.exec.SessionID, run.ID, state.ProjectTypeBatch, env.root)
+	svc.endBatchExecution(ctx, TurnRequest{SessionID: env.exec.SessionID}, run.ID, state.TaskStatusCompleted, "", nil)
+	files := env.sessionArtifacts(t)
+	if row, ok := files["dataset.csv"]; !ok || row.Origin != state.ArtifactOriginFallback {
+		t.Fatalf("the missed tracked change was not topped up: %v", files)
+	}
+	if _, ok := files["untracked.xlsx"]; ok {
+		t.Fatalf("the outputs scan fired despite a model delivery: %v", files)
+	}
+	if len(ended[0].Artifacts) != 2 {
+		t.Fatalf("end report = %+v, want model row + fallback row", ended[0].Artifacts)
+	}
+}
+
+// TestBatchContinueSecondTurnScansAndDedups pins (c): the second turn of a
+// stopped execution scans again when its model presented nothing, reusing
+// the session-level version check so an unchanged output is not delivered
+// twice while a new one is collected.
+func TestBatchContinueSecondTurnScansAndDedups(t *testing.T) {
+	ctx := context.Background()
+	env := newTriggerEnv(t)
+	outDir := filepath.Join(env.exec.Workspace, "outputs")
+	if err := os.WriteFile(filepath.Join(outDir, "a.xlsx"), []byte("same"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Turn one: nothing presented, nothing tracked — the scan collects a.xlsx.
+	var ended []BatchExecutionEnd
+	svc := env.service(func(_ context.Context, end BatchExecutionEnd) { ended = append(ended, end) })
+	env.service(func(context.Context, BatchExecutionEnd) {}).
+		endBatchExecution(ctx, TurnRequest{SessionID: env.exec.SessionID}, "run-1", state.TaskStatusStopped, "", nil)
+	files := env.sessionArtifacts(t)
+	if len(files) != 1 || files["a.xlsx"].Origin != state.ArtifactOriginFallback {
+		t.Fatalf("turn one collected = %v", files)
+	}
+	// Turn two: a new output appeared; the old one did not change. The model
+	// presented nothing again, so the scan fires — and dedups a.xlsx.
+	if err := os.WriteFile(filepath.Join(outDir, "b.xlsx"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	svc.endBatchExecution(ctx, TurnRequest{SessionID: env.exec.SessionID}, "run-2", state.TaskStatusCompleted, "", nil)
+	files = env.sessionArtifacts(t)
+	if len(files) != 2 {
+		t.Fatalf("turn two collected = %v, want a.xlsx once and b.xlsx new", files)
+	}
+	if files["a.xlsx"].RunID == "run-2" {
+		t.Fatalf("unchanged a.xlsx was re-registered: %+v", files["a.xlsx"])
+	}
+	if files["b.xlsx"].RunID != "run-2" {
+		t.Fatalf("new b.xlsx was not collected under the second run: %+v", files["b.xlsx"])
+	}
+	if len(ended) != 1 || len(ended[0].Artifacts) != 2 {
+		t.Fatalf("end report = %+v, want both rows", ended)
+	}
+}
+
+// TestBatchApprovalRequiredRunsTheTopUp pins (d): an approval wait is
+// terminal for a batch turn, so its tracked writes are topped up and its
+// outputs scanned before the execution is failed with approval_required.
+func TestBatchApprovalRequiredRunsTheTopUp(t *testing.T) {
+	ctx := context.Background()
+	env := newTriggerEnv(t)
+	if err := os.WriteFile(filepath.Join(env.exec.Workspace, "outputs", "report.xlsx"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tracked := env.write(t, "tasks/t1/1/work/partial.csv", "half done\n")
+	svc := env.service(nil)
+	svc.runner = runFunc(func(runCtx context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+		run, err := env.runs.CreateRun(runCtx, env.exec.SessionID, "count rows")
+		if err != nil {
+			return nil, err
+		}
+		started(run.ID)
+		if err := env.sessions.RecordFileChange(runCtx, state.FileChange{SessionID: env.exec.SessionID, RunID: run.ID, Path: tracked}); err != nil {
+			return nil, err
+		}
+		return nil, &WaitingError{Request: &ToolApprovalRequest{ActionID: "act-1"}, Cause: errors.New("gate")}
+	})
+	out, err := svc.Submit(ctx, TurnRequest{
+		SessionID:  env.exec.SessionID,
+		UserText:   "count rows",
+		BatchInput: &BatchTurnInput{Text: "count rows"},
+	}, nil)
+	if out.Status != TurnWaitingApproval || err != nil {
+		t.Fatalf("outcome = %+v, err = %v", out, err)
+	}
+	files := env.sessionArtifacts(t)
+	if row, ok := files["partial.csv"]; !ok || row.Origin != state.ArtifactOriginFallback {
+		t.Fatalf("the approval turn's tracked write was not topped up: %v", files)
+	}
+	if _, ok := files["report.xlsx"]; !ok {
+		t.Fatalf("the approval turn's outputs were not scanned: %v", files)
+	}
+	exec, _, _, err := env.projects.ExecutionForSession(ctx, env.exec.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != state.TaskStatusFailed || exec.ErrorCode != "approval_required" {
+		t.Fatalf("execution = %+v, want failed approval_required", exec)
+	}
+}
+
 func TestAdmitBatchTurnWithoutATask(t *testing.T) {
 	env := newBatchEnv(t)
 	_, err := AdmitBatchTurn(context.Background(), env.projects, "s-other", "x", false)

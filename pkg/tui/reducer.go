@@ -421,12 +421,21 @@ const maxLiveToolOutputBytes = 256 * 1024
 // appendDeliverables adds rows to a turn's list, skipping the ones already
 // there: a step that is republished — the same completion reaching the reducer
 // twice — and the same file presented twice must not double a row in the
-// group. A row is identified by what a reader sees on it: its title, path and
-// size.
+// group. Two rows that both carry an artifact id are identified by it (two
+// different-content versions of one path are both kept, the way the web keeps
+// them); as soon as either side predates the id — a legacy replayed card —
+// the pair falls back to what a reader sees on it: title, path and size.
 func appendDeliverables(existing, rows []tool.Deliverable) []tool.Deliverable {
 	for _, row := range rows {
 		duplicate := false
 		for _, have := range existing {
+			if row.ID != "" && have.ID != "" {
+				if have.ID == row.ID {
+					duplicate = true
+					break
+				}
+				continue
+			}
 			if have.RelPath == row.RelPath && have.Size == row.Size && have.Title == row.Title {
 				duplicate = true
 				break
@@ -437,6 +446,21 @@ func appendDeliverables(existing, rows []tool.Deliverable) []tool.Deliverable {
 		}
 	}
 	return existing
+}
+
+// frameDeliverable converts one run-end artifact row into the deliverable
+// shape the group draws, carrying the row's id so the group dedupes by it —
+// a top-up row and a presented row for the same file are one entry, the way
+// the web merges them.
+func frameDeliverable(row event.Artifact) tool.Deliverable {
+	return tool.Deliverable{
+		ID:      row.ID,
+		Title:   firstNonEmpty(row.Title, row.Name),
+		Name:    row.Name,
+		Kind:    row.Kind,
+		RelPath: row.RelPath,
+		Size:    row.Size,
+	}
 }
 
 // takePendingDeliverables hands over the turn's presented files and clears the
@@ -1500,8 +1524,20 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		// id: one turn has exactly one producer, so it needs no identity to be
 		// recognized by, and a derived id would only invite a reader to key
 		// card deduplication on something that can repeat.
+		//
+		// The group is the union of what the present_files steps showed live
+		// with the run-end frame's artifact rows, deduped by artifact id:
+		// a file only the engine's turn-end top-up registered arrives in the
+		// frame's rows, and the web's group unions the same two sources —
+		// order is pinned here as presented first, frame-only after (the
+		// web's plan→presented→frame order differs slightly; content parity
+		// is the contract, not order).
 		if m.ClosesTurn {
-			if rows := r.takePendingDeliverables(); len(rows) > 0 {
+			rows := r.takePendingDeliverables()
+			for _, artifact := range m.RunArtifacts.Artifacts {
+				rows = appendDeliverables(rows, []tool.Deliverable{frameDeliverable(artifact)})
+			}
+			if len(rows) > 0 {
 				out = append(out, Frame{Kind: FrameDeliverables, Deliverables: rows, RunID: runID, Final: true})
 			}
 		}

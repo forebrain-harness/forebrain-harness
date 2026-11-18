@@ -2270,7 +2270,11 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			WorkedDuration: completion.Duration,
 			InputTokens:    runUsage.in,
 			OutputTokens:   runUsage.out,
-			ClosesTurn:     true,
+			// The run's delivered rows — presented and engine-topped-up alike
+			// — close the turn's group together with what the steps showed
+			// live; the same rows the web's frame carries.
+			RunArtifacts: s.runArtifacts(context.Background(), runUsage.runID),
+			ClosesTurn:   true,
 		})
 	}()
 	// This runs before RunEnded and before either ownership lock is released.

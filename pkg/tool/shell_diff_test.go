@@ -3,6 +3,7 @@ package tool
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -303,12 +304,28 @@ func TestShellEditDiffReadOnlyAndFailedCommands(t *testing.T) {
 	if run := beginShellEditDiff(ctx, "cat a.txt", root, true); run != nil {
 		t.Fatalf("read-only command snapshotted: %+v", run)
 	}
+	// A launch error wrote nothing, so its card reports no diff — the truth
+	// about the tree is that the command never touched it.
 	run := beginShellEditDiff(ctx, "make", root, false)
 	if run == nil {
 		t.Fatal("beginShellEditDiff returned nil")
 	}
-	if diff := run.finish(ctx, "make", 1, nil); diff != nil {
-		t.Fatalf("failed command produced a diff: %+v", diff)
+	if diff := run.finish(ctx, "make", 0, errors.New("launch failed")); diff != nil {
+		t.Fatalf("a launch error with no writes produced a diff: %+v", diff)
+	}
+	// A failed exit whose writes landed reports them (owner 2026-11-18
+	// 「纳入本期根治」): the card tells the truth about what the command did
+	// to the tree, and the turn-end top-up reads the same payload.
+	run = beginShellEditDiff(ctx, "make", root, false)
+	if run == nil {
+		t.Fatal("beginShellEditDiff returned nil")
+	}
+	if err := os.WriteFile(filepath.Join(root, "partial.o"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diff := run.finish(ctx, "make", 1, nil)
+	if diff == nil || len(diff.ChangedFiles) == 0 || diff.ChangedFiles[0] != filepath.Join(root, "partial.o") {
+		t.Fatalf("failed command must report its writes, got %+v", diff)
 	}
 	// grep's exit 1 means "no match", not failure.
 	run = beginShellEditDiff(ctx, "grep b a.txt", root, false)
@@ -325,11 +342,20 @@ func TestShellEditDiffReadOnlyAndFailedCommands(t *testing.T) {
 	if diff := run.finish(ctx, "git diff", 1, nil); diff == nil || len(diff.Files) == 0 {
 		t.Fatalf("git diff exit 1 must still diff, got %+v", diff)
 	}
+	// A cancelled command's writes landed before the cancellation: the diff
+	// runs detached from the cancelled context and reports them.
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	run = beginShellEditDiff(cancelCtx, "echo hi > x.txt", root, false)
+	if run == nil {
+		t.Fatal("beginShellEditDiff returned nil")
+	}
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	cancel()
-	if diff := run.finish(cancelCtx, "echo hi > x.txt", 0, nil); diff != nil {
-		t.Fatalf("canceled context produced a diff: %+v", diff)
+	diff = run.finish(cancelCtx, "echo hi > x.txt", 0, nil)
+	if diff == nil || len(diff.ChangedFiles) == 0 || diff.ChangedFiles[0] != filepath.Join(root, "x.txt") {
+		t.Fatalf("cancelled command must report its writes, got %+v", diff)
 	}
 }
 

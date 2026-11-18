@@ -497,6 +497,9 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 	for _, line := range workedLines {
 		closingRuns[line.RunID] = struct{}{}
 	}
+	// The frame-artifact half of every turn's deliverables group, read once
+	// from the terminal run-end events the log holds.
+	frameDeliverablesByRun := replayFrameDeliverables(events)
 	runEndFrames := make(map[string][]Frame)
 	supersededAbandons := supersededAbandonedErrors(events)
 	eventCount := 0
@@ -717,7 +720,7 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 				renderer.RenderFrame(frame)
 			}
 			if lastWorkedOfTurn[i] {
-				renderReplayDeliverables(renderer, reducer)
+				renderReplayDeliverables(renderer, reducer, frameDeliverablesByRun[line.RunID])
 			}
 			renderer.RenderFrame(replayWorkedFrame(line, planAtRun[line.RunID]))
 		}
@@ -727,7 +730,7 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 		// were already taken above and this draws nothing.
 		if i+1 == len(turns) || isUserTranscriptRow(turns[i+1]) {
 			flushReplayReducer(renderer, reducer)
-			renderReplayDeliverables(renderer, reducer)
+			renderReplayDeliverables(renderer, reducer, nil)
 		}
 	}
 	flush(len(turns))
@@ -766,14 +769,56 @@ func lastWorkedLinePerTurn(turns []state.Message, workedLines map[int]turn.RunWo
 }
 
 // renderReplayDeliverables draws the turn's deliverables group from the rows
-// the replayed transcript accumulated, and clears them. Nothing presented means
-// no group at all.
-func renderReplayDeliverables(renderer *Renderer, reducer *Reducer) {
+// the replayed transcript accumulated plus the artifact rows the closing
+// run-end carried, and clears the accumulator. Nothing presented and nothing
+// framed means no group at all.
+func renderReplayDeliverables(renderer *Renderer, reducer *Reducer, frameRows []tool.Deliverable) {
 	rows := reducer.takePendingDeliverables()
+	rows = appendDeliverables(rows, frameRows)
 	if len(rows) == 0 {
 		return
 	}
 	renderer.RenderFrame(Frame{Kind: FrameDeliverables, Deliverables: rows, Final: true})
+}
+
+// replayFrameDeliverables collects the artifact rows the conversation's
+// terminal run-end events carried, keyed by run: replay's half of the union
+// the live turn close draws. A replayed run-end synthesizes ClosesTurn=false
+// and never re-fires the live union, so without this the frame's rows — a
+// file only the engine's turn-end top-up registered, above all — would be
+// missing from a resumed conversation's group.
+func replayFrameDeliverables(events []event.RunEvent) map[string][]tool.Deliverable {
+	out := map[string][]tool.Deliverable{}
+	for _, evt := range events {
+		runID := strings.TrimSpace(evt.RunID)
+		if runID == "" {
+			continue
+		}
+		var rows event.RunArtifacts
+		switch evt.Type {
+		case event.RunEventTurnCompleted:
+			var p event.TurnCompletedPayload
+			if json.Unmarshal(evt.Payload, &p) == nil {
+				rows = p.RunArtifacts
+			}
+		case event.RunEventTurnCancelled:
+			var p event.TurnCancelledPayload
+			if json.Unmarshal(evt.Payload, &p) == nil {
+				rows = p.RunArtifacts
+			}
+		case event.RunEventTurnError:
+			var p event.TurnErrorPayload
+			if json.Unmarshal(evt.Payload, &p) == nil {
+				rows = p.RunArtifacts
+			}
+		default:
+			continue
+		}
+		for _, artifact := range rows.Artifacts {
+			out[runID] = appendDeliverables(out[runID], []tool.Deliverable{frameDeliverable(artifact)})
+		}
+	}
+	return out
 }
 
 // supersededAbandonedErrors finds the "process stopped" errors a run also has a

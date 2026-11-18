@@ -946,7 +946,10 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 			WorkedDuration: completion.Duration,
 			InputTokens:    runUsage.in,
 			OutputTokens:   runUsage.out,
-			ClosesTurn:     true,
+			// The resumed run's delivered rows close the turn's group the way
+			// the dispatch that started it would have.
+			RunArtifacts: s.runArtifacts(context.Background(), runUsage.runID),
+			ClosesTurn:   true,
 		})
 	}()
 	// Kept here rather than sunk into the engine (plan 307): "resumed" is the
@@ -1357,6 +1360,9 @@ func (s *ChatSession) abortPendingApproval(sessionID, actionID string) bool {
 				// Cancelling the gate ends the turn the parked dispatch
 				// suppressed its own run-end for.
 				ClosesTurn: true,
+				// Whatever the run delivered before the gate is still the
+				// turn's to show: the cancelled group closes complete.
+				RunArtifacts: s.runArtifacts(context.Background(), runID),
 			})
 		}
 	}

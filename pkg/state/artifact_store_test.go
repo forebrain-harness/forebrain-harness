@@ -95,6 +95,109 @@ func TestListArtifactsForRun(t *testing.T) {
 	}
 }
 
+// TestLatestArtifactByPathCountByOrigin pins the two reads the turn-end
+// deliverable top-up and the batch outputs scan share: the newest row a path
+// already holds (same-second deliveries ordered by row, so the version the
+// caller compares against is the one just written) and the per-origin count
+// the scan's trigger reads.
+func TestLatestArtifactByPathCountByOrigin(t *testing.T) {
+	ctx := context.Background()
+	s := newArtifactStoreForTest(t, "main")
+	if err := s.Ensure(ctx, "s", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.AddArtifact(ctx, Artifact{SessionID: "s", RunID: "run-1", Path: "/tmp/report.pdf", Name: "report.pdf", Kind: "document", SHA256: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddArtifact(ctx, Artifact{SessionID: "s", RunID: "run-1", Path: "/tmp/scratch.zip", Name: "scratch.zip", Kind: "archive", Origin: ArtifactOriginFallback}); err != nil {
+		t.Fatal(err)
+	}
+	// A second version of the same path, same second: row order decides.
+	second, err := s.AddArtifact(ctx, Artifact{SessionID: "s", RunID: "run-2", Path: "/tmp/report.pdf", Name: "report.pdf", Kind: "document", SHA256: "two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, found, err := s.LatestArtifactByPath(ctx, "s", "/tmp/report.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("a delivered path must read as found")
+	}
+	if latest.ID != second.ID || latest.SHA256 != "two" {
+		t.Fatalf("latest = id %s sha %s; want the second version (id %s, sha two)", latest.ID, latest.SHA256, second.ID)
+	}
+	if latest.ID == first.ID {
+		t.Fatal("the same-second tie must be broken by row order, not by id text")
+	}
+	if _, found, err := s.LatestArtifactByPath(ctx, "s", "/tmp/never-delivered"); err != nil || found {
+		t.Fatalf("undelivered path found = %v, err %v; want not found", found, err)
+	}
+	model, err := s.CountArtifactsByOrigin(ctx, "s", ArtifactOriginModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != 2 {
+		t.Fatalf("model-origin rows = %d, want 2", model)
+	}
+	fallback, err := s.CountArtifactsByOrigin(ctx, "s", ArtifactOriginFallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallback != 1 {
+		t.Fatalf("fallback-origin rows = %d, want 1", fallback)
+	}
+}
+
+// TestSessionProjectScope pins the delivery scope the turn-end top-up
+// resolves: a project-bound conversation reads its frozen type and the
+// project's root, a conversation without a project reads an empty root, and
+// an unknown conversation reads the coding default every pre-type
+// conversation had.
+func TestSessionProjectScope(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := NewSessionStore(db, "main")
+	projects := NewProjectStore(db, "main")
+	root := t.TempDir()
+	p, err := projects.Create(ctx, CreateProjectInput{Name: "office", Root: root, ProjectType: ProjectTypeOffice})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.EnsureAt(ctx, "bound", "bound", SessionBirth{ProjectID: p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.Ensure(ctx, "loose", "loose"); err != nil {
+		t.Fatal(err)
+	}
+	pt, gotRoot, err := sessions.SessionProjectScope(ctx, "bound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt != ProjectTypeOffice || gotRoot != root {
+		t.Fatalf("bound session scope = (%q, %q); want (office, %s)", pt, gotRoot, root)
+	}
+	pt, gotRoot, err = sessions.SessionProjectScope(ctx, "loose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt != ProjectTypeCoding || gotRoot != "" {
+		t.Fatalf("project-less session scope = (%q, %q); want (coding, \"\")", pt, gotRoot)
+	}
+	pt, gotRoot, err = sessions.SessionProjectScope(ctx, "unknown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt != ProjectTypeCoding || gotRoot != "" {
+		t.Fatalf("unknown session scope = (%q, %q); want the coding default", pt, gotRoot)
+	}
+}
+
 func TestArtifactsGoWithTheirSession(t *testing.T) {
 	ctx := context.Background()
 	s := newArtifactStoreForTest(t, "main")

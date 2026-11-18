@@ -2796,7 +2796,7 @@ func TestSystemPromptFollowsProjectType(t *testing.T) {
 		return r
 	}
 	coding := newRunner(state.ProjectTypeCoding).MainAgentDescription()
-	wantCoding := "Forebrain Harness agent" + agent.ScopeDisciplinePrompt + agent.NonFunctionalRequirementsPrompt + agent.BugRootCausePrompt + agent.GitWorktreePrompt + agent.SubagentUserRulingPrompt + agent.PlanHandoffQualityPrompt
+	wantCoding := "Forebrain Harness agent" + agent.ScopeDisciplinePrompt + agent.NonFunctionalRequirementsPrompt + agent.BugRootCausePrompt + agent.GitWorktreePrompt + agent.SubagentUserRulingPrompt + agent.CodingDeliveryPrompt + agent.PlanHandoffQualityPrompt
 	if coding != wantCoding {
 		t.Errorf("coding system prompt changed:\n got: %q\nwant: %q", coding, wantCoding)
 	}
@@ -2824,6 +2824,15 @@ func TestSystemPromptFollowsProjectType(t *testing.T) {
 	}
 	if strings.Contains(office, agent.GitWorktreePrompt) || strings.Contains(batch, agent.GitWorktreePrompt) {
 		t.Error("the git worktree location rule is coding-only and must not reach office or batch")
+	}
+	// The delivery completeness rule is the coding specialization of the shared
+	// prompt-driven delivery: office and batch carry their own delivery
+	// workflows (byte-frozen goldens), so the coding rule must stay out of them.
+	if strings.Contains(office, agent.CodingDeliveryPrompt) || strings.Contains(batch, agent.CodingDeliveryPrompt) {
+		t.Error("the coding delivery rule is coding-only and must not reach office or batch")
+	}
+	if !strings.Contains(coding, agent.CodingDeliveryPrompt) {
+		t.Error("a coding conversation must carry the delivery completeness rule")
 	}
 	if !strings.Contains(agent.GitWorktreePrompt, tool.WorktreesDirName+"/<name>") {
 		t.Errorf("the worktree rule does not name the %s directory the runtime ignores", tool.WorktreesDirName)

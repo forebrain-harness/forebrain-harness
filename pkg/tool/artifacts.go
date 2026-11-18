@@ -25,9 +25,9 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
-// presentFilesToolName is the one deliverable action. It is registered only
-// for office and batch conversations (the runner passes the session's project
-// type), and only the primary agent may call it.
+// presentFilesToolName is the one deliverable action. It is registered for
+// every project type (the runner passes the session's project type), and
+// only the primary agent may call it.
 const presentFilesToolName = "present_files"
 
 // presentFilesToolDescription is the tool's contract with the model, frozen
@@ -200,8 +200,8 @@ type presentFilesInput struct {
 const presentFilesToolNote = "The user now sees a download and preview card for each file."
 
 // newPresentFilesTool builds the deliverable tool. It needs the session
-// store (artifacts live in the state database) and is only wired up for
-// office and batch conversations.
+// store (artifacts live in the state database) and is wired up for every
+// project type with the same contract.
 func newPresentFilesTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 	return llm.NewTool(
 		presentFilesToolName,
@@ -320,6 +320,10 @@ func newPresentFilesTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 // deliverables group, a batch task's end notification — draws from these rows
 // instead of re-reading the JSON the model was handed.
 type Deliverable struct {
+	// ID is the artifact row's id, the identity both surfaces dedupe a turn's
+	// group by. Empty on rows a transcript predating the id carried (replayed
+	// legacy cards) — those fall back to the composite key.
+	ID      string `json:"id,omitempty"`
 	Title   string `json:"title,omitempty"`
 	Name    string `json:"name,omitempty"`
 	Kind    string `json:"kind,omitempty"`
@@ -345,6 +349,7 @@ func DeliverablesFrom(output map[string]any) []Deliverable {
 			continue
 		}
 		d := Deliverable{
+			ID:      strings.TrimSpace(stringFromAny(row["id"])),
 			Title:   strings.TrimSpace(stringFromAny(row["title"])),
 			Name:    strings.TrimSpace(stringFromAny(row["name"])),
 			Kind:    strings.TrimSpace(stringFromAny(row["kind"])),

@@ -5986,6 +5986,98 @@ func TestDeliverablesGroupDedupesRows(t *testing.T) {
 	}
 }
 
+// TestDeliverablesGroupDedupKeyIsArtifactID pins the dedup key the web uses:
+// rows carrying an artifact id are identified by it, so two
+// different-content versions of one path — same title, same path, same size
+// — are both kept, while the same id twice is one row. A row without an id
+// (a legacy replayed card) still falls back to the composite key.
+func TestDeliverablesGroupDedupKeyIsArtifactID(t *testing.T) {
+	v1 := tool.Deliverable{ID: "art-1", Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
+	v2 := tool.Deliverable{ID: "art-2", Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
+	r := &Reducer{}
+	r.Reduce(deliverableToolMessage([]tool.Deliverable{v1, v2, v1}, "completed", ""))
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	rows := ev.Frames[0].Deliverables
+	if len(rows) != 2 || rows[0].ID != "art-1" || rows[1].ID != "art-2" {
+		t.Fatalf("group rows = %#v, want both versions once each, keyed by id", rows)
+	}
+	// A legacy row without an id dedups against its composite as before.
+	legacy := tool.Deliverable{Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
+	r2 := &Reducer{}
+	r2.Reduce(deliverableToolMessage([]tool.Deliverable{legacy, legacy}, "completed", ""))
+	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	if rows := ev.Frames[0].Deliverables; len(rows) != 1 {
+		t.Fatalf("legacy composite rows = %#v, want one", rows)
+	}
+}
+
+// TestDeliverablesGroupUnionsFrameArtifacts pins the turn close's union: the
+// closing run-end's artifact rows join what the present_files steps showed
+// live, deduped by artifact id — a file only the engine's turn-end top-up
+// registered arrives in the frame's rows and still appears, and a file that
+// is both presented and framed shows once, in its presented place.
+func TestDeliverablesGroupUnionsFrameArtifacts(t *testing.T) {
+	presented := tool.Deliverable{ID: "art-1", Title: "2026 Q3 review", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
+	r := &Reducer{}
+	r.Reduce(deliverableToolMessage([]tool.Deliverable{presented}, "completed", ""))
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, RunArtifacts: event.RunArtifacts{Artifacts: []event.Artifact{
+		// The same file the step presented: same id, one row.
+		{ID: "art-1", Name: "q3.md", Title: "2026 Q3 review", Kind: "markdown", RelPath: "out/q3.md", Size: 2048},
+		// A file only the top-up registered: frame-only, after the presented.
+		{ID: "art-2", Name: "logo.png", Title: "logo.png", Kind: "image", RelPath: "assets/logo.png", Size: 521, Origin: state.ArtifactOriginFallback},
+	}}})
+	if len(ev.Frames) != 1 || ev.Frames[0].Kind != FrameDeliverables {
+		t.Fatalf("frames = %#v, want one deliverables group", ev.Frames)
+	}
+	rows := ev.Frames[0].Deliverables
+	if len(rows) != 2 {
+		t.Fatalf("group rows = %#v, want presented + top-up once each", rows)
+	}
+	if rows[0].ID != "art-1" || rows[1].ID != "art-2" {
+		t.Fatalf("group order = %#v, want the presented row first, frame-only after", rows)
+	}
+	// A turn that presented nothing still closes with the frame's rows.
+	r2 := &Reducer{}
+	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, RunArtifacts: event.RunArtifacts{Artifacts: []event.Artifact{
+		{ID: "art-2", Name: "logo.png", Title: "logo.png", Kind: "image", RelPath: "assets/logo.png", Size: 521},
+	}}})
+	if len(ev.Frames) != 1 || len(ev.Frames[0].Deliverables) != 1 || ev.Frames[0].Deliverables[0].ID != "art-2" {
+		t.Fatalf("top-up-only group = %#v", ev.Frames)
+	}
+}
+
+// TestDeliverablesGroupLiveReplayParity pins the two paths draw the identical
+// group: live reduces the closing run-end's RunArtifacts, replay reads the
+// same rows out of the stored terminal event — a turn whose only deliverable
+// was the engine's top-up looks the same resumed as it did live.
+func TestDeliverablesGroupLiveReplayParity(t *testing.T) {
+	artifacts := event.RunArtifacts{Artifacts: []event.Artifact{{
+		ID: "art-9", Name: "logo.png", Title: "logo.png", Kind: "image",
+		RelPath: "assets/logo.png", Size: 521, Origin: state.ArtifactOriginFallback,
+	}}}
+	// Live: the closing run-end carries the rows; the turn presented nothing.
+	live := (&Reducer{}).Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, RunArtifacts: artifacts})
+	if len(live.Frames) != 1 || live.Frames[0].Kind != FrameDeliverables {
+		t.Fatalf("live frames = %#v, want the top-up group", live.Frames)
+	}
+	liveLines, _ := renderFrameLinesWithAgents(live.Frames[0], 80, DiffThemeDark, 0)
+	if len(liveLines) == 0 {
+		t.Fatal("the live group rendered no lines")
+	}
+	// Replay: the same rows as the stored terminal run-end event carries
+	// them, unioned exactly the way the replay group draws them.
+	evt := event.NewRunEvent("", "run-1", "s-1", event.RunEventTurnCompleted,
+		event.TurnCompletedPayload{RunArtifacts: artifacts}, time.Unix(1700000000, 0))
+	replayRows := replayFrameDeliverables([]event.RunEvent{evt})["run-1"]
+	if len(replayRows) != 1 || replayRows[0].ID != "art-9" {
+		t.Fatalf("replay frame rows = %#v", replayRows)
+	}
+	replayLines, _ := renderFrameLinesWithAgents(Frame{Kind: FrameDeliverables, Deliverables: replayRows, Final: true}, 80, DiffThemeDark, 0)
+	if strings.Join(liveLines, "\n") != strings.Join(replayLines, "\n") {
+		t.Fatalf("live and replay groups differ:\nlive:   %q\nreplay: %q", liveLines, replayLines)
+	}
+}
+
 // TestWithdrawnTurnDropsItsDeliverables pins that a withdrawn turn is a turn
 // that never happened: its files do not leak into the next turn's group.
 func TestWithdrawnTurnDropsItsDeliverables(t *testing.T) {

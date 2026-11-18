@@ -61,6 +61,13 @@ type BatchTaskStore interface {
 type BatchArtifactStore interface {
 	ListArtifactsPage(ctx context.Context, sessionID string, limit, offset int) ([]state.Artifact, int, error)
 	AddArtifact(ctx context.Context, a state.Artifact) (state.Artifact, error)
+	// CountArtifactsByOrigin is the outputs scan's trigger read: the scan
+	// fires when the model presented nothing, so the count it wants is the
+	// model-origin one, not the conversation's whole holding.
+	CountArtifactsByOrigin(ctx context.Context, sessionID, origin string) (int, error)
+	// LatestArtifactByPath is the session-level version check that keeps an
+	// unchanged output from being re-registered under a continue's new run.
+	LatestArtifactByPath(ctx context.Context, sessionID, path string) (state.Artifact, bool, error)
 }
 
 // BatchExecutionEnd reports how one execution ended, with the final row and
@@ -326,9 +333,15 @@ func (s *Service) endBatchExecution(ctx context.Context, req TurnRequest, runID,
 	})
 	var artifacts []state.Artifact
 	if s.batchArtifacts != nil {
-		if _, total, err := s.batchArtifacts.ListArtifactsPage(ctx, sid, 1, 0); err != nil {
+		// The scan's trigger is "the model presented nothing" — the
+		// model-origin count is zero — not "the conversation holds no rows":
+		// a continue's earlier fallback rows must not suppress the scan of a
+		// turn whose model delivered nothing again (plan 324, deliberate
+		// change from the total==0 trigger).
+		modelCount, err := s.batchArtifacts.CountArtifactsByOrigin(ctx, sid, state.ArtifactOriginModel)
+		if err != nil {
 			slog.ErrorContext(ctx, "batch artifacts read", "session", sid, "err", err)
-		} else if total == 0 {
+		} else if modelCount == 0 {
 			// Nothing was presented, so the outputs folder is the deliverable:
 			// a task that produced files must not look like it produced none.
 			s.collectBatchFallbackArtifacts(ctx, sid, runID, exec.Workspace)
@@ -424,6 +437,15 @@ func (s *Service) collectBatchFallbackArtifacts(ctx context.Context, sessionID, 
 		sum, kind, mimeType, preview, size, mtimeNS, err := hashArtifactFile(path)
 		if err != nil {
 			slog.WarnContext(ctx, "batch fallback artifact skipped", "path", path, "err", err)
+			continue
+		}
+		// Session-level version check: an output whose bytes a continue's
+		// earlier run already registered stays delivered — a new run id alone
+		// is not a new version.
+		if latest, found, err := s.batchArtifacts.LatestArtifactByPath(ctx, sessionID, path); err != nil {
+			slog.WarnContext(ctx, "batch fallback version not read", "session", sessionID, "path", path, "err", err)
+			continue
+		} else if found && latest.SHA256 == sum {
 			continue
 		}
 		rel := filepath.Base(path)

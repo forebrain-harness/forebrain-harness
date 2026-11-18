@@ -1273,6 +1273,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		desc += agent.BugRootCausePrompt
 		desc += agent.GitWorktreePrompt
 		desc += agent.SubagentUserRulingPrompt
+		desc += agent.CodingDeliveryPrompt
 		// The project's own directory, never the agent's state workspace: a
 		// runtime without a project has no repository to keep tidy.
 		if root := r.launchProjectRoot(); root != "" {

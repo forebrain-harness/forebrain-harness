@@ -1046,18 +1046,12 @@ func beginShellEditDiff(ctx context.Context, command, cwd string, readOnly bool)
 	return run
 }
 
-// finish compares against the before snapshot once the command completed
-// successfully (per the exit-code semantics below); anything else releases the
-// run and reports nothing.
-func (r *shellEditDiffRun) finish(ctx context.Context, command string, exitCode int, runErr error) *ShellEditDiff {
-	if r == nil {
-		return nil
-	}
-	if ctx.Err() != nil || runErr != nil || shellExitIsFailure(command, exitCode) {
-		r.release()
-		return nil
-	}
-	r.release()
+// computeDiff is the one diff computation every command outcome shares: the
+// skipped/unavailable markers, the snapshot comparison, the subtraction of
+// this process's tool writes inside the window, and the shared/tree-moved
+// flags. It runs with the run already released, so r.shared holds its final
+// value.
+func (r *shellEditDiffRun) computeDiff(ctx context.Context, command string) *ShellEditDiff {
 	if r.skipped {
 		return &ShellEditDiff{Files: []ShellEditDiffFile{}, Skipped: true}
 	}
@@ -1090,6 +1084,36 @@ func (r *shellEditDiffRun) finish(ctx context.Context, command string, exitCode 
 	diff.Shared = r.shared
 	diff.TreeMoved = shellCommandMovesGitTree(command)
 	return diff
+}
+
+// finish compares against the before snapshot once the command completed. A
+// command that failed or was cancelled still had its writes land, so they are
+// reported too (owner 2026-11-18 「纳入本期根治」): the card tells the truth
+// about what the command did to the tree, and the turn-end deliverable top-up
+// reads the same payload. The diff runs detached from the command's own —
+// possibly cancelled — context, bounded by the snapshot family's outer
+// ceiling; a run with nothing watched or no before-snapshot has nothing to
+// compare against and stays silent, exactly as a launch error with no writes.
+func (r *shellEditDiffRun) finish(ctx context.Context, command string, exitCode int, runErr error) *ShellEditDiff {
+	if r == nil {
+		return nil
+	}
+	failed := ctx.Err() != nil || runErr != nil || shellExitIsFailure(command, exitCode)
+	r.release()
+	if !failed {
+		return r.computeDiff(ctx, command)
+	}
+	if r.skipped || r.unavailable || r.repo == nil {
+		return nil
+	}
+	// The internal git calls each carry their own sub-second timeout; the
+	// outer bound must cover the after-snapshot plus the per-file records, so
+	// it takes the first-snapshot ceiling rather than the steady one — a
+	// deadline tighter than the work would turn a real diff into an
+	// Unavailable marker the failure card was never allowed to show.
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shellDiffFirstTimeout)
+	defer cancel()
+	return r.computeDiff(dctx, command)
 }
 
 // dropExternalWrites removes the paths other tools wrote from a shell diff. A
