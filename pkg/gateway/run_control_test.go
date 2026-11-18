@@ -3009,17 +3009,24 @@ func TestPaidTierRESTOffersTakesAndDismisses(t *testing.T) {
 	require.Equal(t, 1, stub.calls)
 	require.Equal(t, "hy4free", stub.free)
 	require.True(t, stub.reset.Equal(reset), "the recorded window is the offer's: %v", stub.reset)
-	_, body = call(http.MethodGet, "")
-	require.Equal(t, false, body["pending"])
-	require.Eventually(t, func() bool {
-		return g.executor.last().UserText == turn.AutoContinuePrompt
-	}, 5*time.Second, 10*time.Millisecond, "the resent turn never ran")
 
-	// The resent turn met the same refusal in this fixture (the executor always
-	// answers with it), so the choice is on the table again — the switch does not
-	// swallow the second offer.
+	// The resend runs off this goroutine — the gateway starts a detached turn and
+	// answers the page without joining it — and this fixture's executor refuses
+	// every turn, so the choice lands on the table again: the switch does not
+	// swallow the second offer. The page's own answer is the only visible
+	// ordering (the turn is recorded before the refusal ends it, and the offer is
+	// filed after that), so wait for that answer rather than for the turn to start.
+	require.Eventually(t, func() bool {
+		_, answer := call(http.MethodGet, "")
+		return answer["pending"] == true
+	}, 5*time.Second, 10*time.Millisecond, "the resent turn's refusal put no offer back on the table")
 	_, body = call(http.MethodGet, "")
 	require.Equal(t, true, body["pending"])
+	offer, ok = body["offer"].(map[string]any)
+	require.True(t, ok, "the second offer travels with the answer: %v", body)
+	require.Equal(t, "hy4free", offer["free_model"])
+	require.Equal(t, turn.AutoContinuePrompt, g.executor.last().UserText, "the resent turn never ran")
+
 	_, _ = call(http.MethodPost, "dismiss")
 	// Nothing left on the table: the answer says so rather than pretending.
 	code, _ = call(http.MethodPost, "use")
