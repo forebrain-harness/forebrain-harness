@@ -39,6 +39,34 @@ const (
 	// servers, of hook events — edited as rows: open one to edit its own
 	// fields, add a row, delete a row.
 	configFieldRows
+	// configFieldModel is a reference to one row of the install's global
+	// model table. The global table is the only place a provider or an
+	// endpoint is configured, so every model choice picks a row by id
+	// (plan 324): the picker lists the table's rows, and free text can
+	// never name a provider the install does not carry.
+	configFieldModel
+)
+
+// configModelFlavor is which empty a model picker offers and what picking it
+// stores (plan 324 D1) — the four shapes the prototype fixes. global and
+// subagent draw the same list (the empty option's own label is the field's
+// metadata); model is the goal check's, whose empty option carries the
+// conversation sentence and keeps no stored reference that resolves to no
+// row; memory stores the explicit "current".
+type configModelFlavor int
+
+const (
+	// configModelFlavorGlobal is an install-wide row: a definition's
+	// default model, a built-in type's pin, the plan reviewer's row.
+	configModelFlavorGlobal configModelFlavor = iota
+	// configModelFlavorSubagent is one agent's own override on a type.
+	configModelFlavorSubagent
+	// configModelFlavorModel follows the conversation's model: the goal
+	// check's own row.
+	configModelFlavorModel
+	// configModelFlavorMemory names the model memory work runs on, with
+	// "current" as its explicit empty value.
+	configModelFlavorMemory
 )
 
 // configField describes one editable field of one section. Path is the
@@ -114,6 +142,9 @@ type configField struct {
 	// stores it ("" unsets the key). Set on fields that hold a model row id.
 	ModelEmpty      string
 	ModelEmptyValue string
+	// ModelFlavor is which model picker the field opens (plan 324 D1):
+	// which empty its rows offer and what picking the empty stores.
+	ModelFlavor configModelFlavor
 }
 
 // configSectionSchema is one section as the panel presents it.
@@ -221,12 +252,12 @@ var configSectionSchemas = []configSectionSchema{
 			{Path: "max_rollout_age_days", Label: "Days a record is kept", Kind: configFieldNumber, Min: 0, Max: 90, Clamp: true, Hint: "Default 10"},
 			{Path: "max_rollouts_per_startup", Label: "Records processed per startup", Kind: configFieldNumber, Min: 1, Max: 128, Clamp: true, Hint: "Default 2"},
 			{Path: "min_rollout_idle_hours", Label: "Idle hours before a record is processed", Kind: configFieldNumber, Min: 1, Max: 48, Clamp: true, Hint: "Default 6"},
-			// The stored value is a model name or the explicit "current" (the
-			// conversation's own model, plan 207 §3.3): the database always
-			// holds one, so the row shows what is in force instead of a
-			// "leave it empty" placeholder.
-			{Path: "extract_model", Label: "Extraction model", Kind: configFieldText, Hint: "current = the conversation's own model; a model name also works"},
-			{Path: "consolidation_model", Label: "Consolidation model", Kind: configFieldText, Hint: "current = the conversation's own model; a model name also works"},
+			// The stored value is a row of the global model table or the
+			// explicit "current" (the conversation's own model, plan 207
+			// §3.3): the picker stores one of those two, and the row shows
+			// what is in force.
+			{Path: "extract_model", Label: "Extraction model", Kind: configFieldModel, ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory, Hint: "current = the conversation's own model"},
+			{Path: "consolidation_model", Label: "Consolidation model", Kind: configFieldModel, ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory, Hint: "current = the conversation's own model"},
 		},
 	},
 	{
@@ -251,9 +282,9 @@ var configSectionSchemas = []configSectionSchema{
 		Fields: []configField{
 			{
 				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows,
-				// A definition's default_model stays a free-text row: the panel
-				// is generic over the stored JSON, so a model reference here is
-				// typed rather than picked.
+				// A definition's default_model is picked from the global model
+				// table like every model reference (plan 324): the row's page is
+				// the agent template, whose Default model field opens the picker.
 				Hint: "One agent id per row; a row holds its subagents, MCP and default model (a model row id). An id naming a built-in subagent type is that type's install-wide default, which an agent's own subagent entry overrides",
 			},
 			// The install-wide model row of each public built-in subagent type
@@ -284,7 +315,8 @@ var configSectionSchemas = []configSectionSchema{
 			// no name, description, prompt or tool policy to edit here, and a
 			// rows descriptor on the value would offer all of those.
 			{
-				Path: "goal_evaluator.model", Label: "Goal check model", Kind: configFieldText,
+				Path: "goal_evaluator.model", Label: "Goal check model", Kind: configFieldModel,
+				ModelEmpty: "Follow primary agent", ModelFlavor: configModelFlavorModel,
 				Hint: "A model row id (the row chosen in Settings → Subagents); empty follows the primary agent",
 			},
 			{
@@ -308,14 +340,17 @@ var configSectionSchemas = []configSectionSchema{
 		StoreSection: "agents",
 		Fields: []configField{
 			// The four public per-type defaults: a global row id + thinking
-			// level each, which an agent's own override still outranks.
-			{Path: "subagent_models.general-purpose", Label: "general-purpose", Kind: configFieldRows, Hint: "Install-wide default model row for this type; an agent's own override still wins"},
-			{Path: "subagent_models.explore", Label: "explore", Kind: configFieldRows, Hint: "Install-wide default model row for this type; an agent's own override still wins"},
-			{Path: "subagent_models.plan", Label: "plan", Kind: configFieldRows, Hint: "Install-wide default model row for this type; an agent's own override still wins"},
-			{Path: "subagent_models.verification", Label: "verification", Kind: configFieldRows, Hint: "Install-wide default model row for this type; an agent's own override still wins"},
+			// level each, which an agent's own override still outranks. The
+			// row's value column names the model row and its status the level
+			// in force (plan 324 D7), with the prototype's help sentence as
+			// the description.
+			{Path: "subagent_models.general-purpose", Label: "general-purpose", Kind: configFieldRows, Hint: "Install-wide per-type default. An agent's own override still wins; no default follows the conversation."},
+			{Path: "subagent_models.explore", Label: "explore", Kind: configFieldRows, Hint: "Install-wide per-type default. An agent's own override still wins; no default follows the conversation."},
+			{Path: "subagent_models.plan", Label: "plan", Kind: configFieldRows, Hint: "Install-wide per-type default. An agent's own override still wins; no default follows the conversation."},
+			{Path: "subagent_models.verification", Label: "verification", Kind: configFieldRows, Hint: "Install-wide per-type default. An agent's own override still wins; no default follows the conversation."},
 			// The plan reviewer's row, the goal check's sibling one type over:
 			// a system-dispatched type whose row no primary agent owns.
-			{Path: "plan_reviewer", Label: "plan-reviewer", Kind: configFieldRows, Hint: "Global row for a system type, the goal-evaluator pattern; agent pages stay read-only"},
+			{Path: "plan_reviewer", Label: "plan-reviewer", Kind: configFieldRows, Hint: "Global row for a system type, the goal-evaluator pattern. Agent pages stay read-only."},
 			// The shared custom registry: one definition every agent may enable.
 			{Path: "shared_subagents", Label: "Shared custom subagents", Kind: configFieldRows, List: true, Hint: "Install-wide custom subagents every agent may enable; disabled per agent until enabled"},
 		},
@@ -417,7 +452,7 @@ var configTemplates = map[string][]configField{
 		{Path: "description", Label: "Description", Kind: configFieldText, Multiline: true, Hint: "Describe the role of this agent."},
 		{Path: "primary", Label: "Primary agent", Kind: configFieldBool3, Hint: "Mark this as a primary agent."},
 		{
-			Path: "default_model", Label: "Default model", Kind: configFieldText,
+			Path: "default_model", Label: "Default model", Kind: configFieldModel, ModelFlavor: configModelFlavorGlobal,
 			Hint:            "Pick a row from the global model table (/connect or Settings → Models). A primary agent has no provider list of its own.",
 			ModelEmpty:      "Follow global default",
 			ModelEmptyValue: "",
@@ -428,7 +463,7 @@ var configTemplates = map[string][]configField{
 	},
 	configTemplateTypeDef: {
 		{
-			Path: "model", Label: "Model", Kind: configFieldText,
+			Path: "model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorGlobal,
 			Hint:            "The type's install-wide default model row, picked from the global model table. An agent's own override still wins.",
 			ModelEmpty:      "Follow conversation",
 			ModelEmptyValue: "",
@@ -437,7 +472,7 @@ var configTemplates = map[string][]configField{
 	},
 	configTemplateGlobalSystemRow: {
 		{
-			Path: "model", Label: "Model", Kind: configFieldText,
+			Path: "model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorGlobal,
 			Hint:            "The global model the system dispatches this type on, picked from the global model table.",
 			ModelEmpty:      "Follow conversation",
 			ModelEmptyValue: "",
@@ -448,7 +483,7 @@ var configTemplates = map[string][]configField{
 		{Path: "name", Label: "Type name", Kind: configFieldText, Hint: "Built-in overrides: general-purpose, explore, plan, verification."},
 		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3},
 		{
-			Path: "model", Label: "Model", Kind: configFieldText,
+			Path: "model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorSubagent,
 			Hint:            "This agent's override. Empty follows the install-wide type default, then the conversation.",
 			ModelEmpty:      "Follow primary agent",
 			ModelEmptyValue: "",

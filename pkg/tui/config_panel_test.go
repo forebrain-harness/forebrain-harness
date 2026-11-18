@@ -249,6 +249,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 		stored  map[string]string
 		steps   []richStep
 		inputs  []selectorInput
+		models  []appcfg.LLMModelConfig
 		section string
 		want    string
 	}{
@@ -292,17 +293,22 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 			want:   `{"writable_roots":["/a","/b"]}`,
 		},
 		{
+			// A model reference is picked, not typed (plan 324): the picker
+			// lists the install's global rows and the write stores the row's
+			// id.
 			name: "model ref", section: "agents",
+			models: []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}},
 			steps: []richStep{
 				{label: "Agents", ok: true},
 				{label: "Goal check model", ok: true},
+				{label: "openai/gpt-main", ok: true},
 			},
-			inputs: []selectorInput{{value: "llm-1", ok: true}},
-			want:   `{"goal_evaluator":{"model":"llm-1"}}`,
+			want: `{"goal_evaluator":{"model":"llm-1"}}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			session := newConfigPanelSession(tc.stored)
+			session.snapshot.Models = tc.models
 			selector := &scriptedSelector{}
 			renderer := runConfigPanel(t, session, selector, tc.steps, tc.inputs)
 
@@ -1156,9 +1162,23 @@ func TestConfigPanelSchemaFieldDataIsComplete(t *testing.T) {
 				if field.Max > 0 && field.Min > field.Max {
 					t.Errorf("%s.%s 的上下界反了：%d > %d", schema.Name, field.Label, field.Min, field.Max)
 				}
+			case configFieldModel:
+				// A model picker's rows come from the install's table, so the
+				// descriptor only has to say what its empty value reads as (plan
+				// 324) — and an explicit empty value is the memory flavor's
+				// "current" alone.
+				if strings.TrimSpace(field.ModelEmpty) == "" {
+					t.Errorf("%s.%s 是模型引用，必须写明空值读作什么", schema.Name, field.Label)
+				}
+				if field.ModelEmptyValue != "" && field.ModelFlavor != configModelFlavorMemory {
+					t.Errorf("%s.%s 只有记忆模型把空值存成显式值", schema.Name, field.Label)
+				}
 			default:
 				if len(field.Options) != 0 {
 					t.Errorf("%s.%s 不是枚举，却带着选项", schema.Name, field.Label)
+				}
+				if field.ModelEmpty != "" || field.ModelEmptyValue != "" {
+					t.Errorf("%s.%s 不是模型引用，却带着模型空值", schema.Name, field.Label)
 				}
 			}
 			if field.Clamp && field.Kind != configFieldNumber {
@@ -1423,10 +1443,15 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 		t.Fatalf("the values are not aligned:\n%q\n%q", memories, servers)
 	}
 
-	// A projection's page: the model and level beside the name, the row's own
-	// status at the right edge — value column and status column together.
+	// A projection's page (plan 324 D7): the five install-wide pins each name
+	// the model row their value column holds and the thinking level their
+	// status carries, with the prototype's help sentence as the description —
+	// a pin nobody set reads as the sentence it follows and marks nothing.
 	projection := sectionPanel(map[string]string{"agents": `{
-		"subagent_models":{"plan":{"model":"llm-1","reasoning_effort":"high"}},
+		"subagent_models":{
+			"plan":{"model":"llm-1","reasoning_effort":"high"},
+			"explore":{"model":"llm-1","reasoning_effort":"medium"}
+		},
 		"plan_reviewer":{"model":"llm-1"}
 	}`})
 	projection.models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
@@ -1436,13 +1461,33 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 	}
 	items, _ = projection.fieldItems(subagentModels, projection.sectionDoc("agents"))
 	lines = renderRichPage(items, subagentModels.Title, 120)
-	plan := renderedRow(t, lines, "plan")
-	if !strings.Contains(plan, "openai/gpt-main / High") || !strings.HasSuffix(plan, configGlobalDefaultStatus) {
-		t.Fatalf("the plan row = %q, want the model beside the name and its status at the edge", plan)
+	for label, status := range map[string]string{
+		"plan":          "High",
+		"explore":       "Medium",
+		"plan-reviewer": configRowDefaultEffort,
+	} {
+		row := renderedRow(t, lines, label)
+		if !strings.Contains(row, "openai/gpt-main") || !strings.HasSuffix(row, status) {
+			t.Fatalf("the %s row = %q, want the model row's label and %q at the edge", label, row, status)
+		}
 	}
-	unset := renderedRow(t, lines, "general-purpose")
-	if !strings.HasSuffix(unset, configFollowConversationModel) {
-		t.Fatalf("the general-purpose row = %q, want the sentence it follows", unset)
+	for _, label := range []string{"general-purpose", "verification"} {
+		unset := renderedRow(t, lines, label)
+		if !strings.HasSuffix(unset, configFollowConversation) {
+			t.Fatalf("the %s row = %q, want the sentence it follows", label, unset)
+		}
+	}
+	// The description is the prototype's help sentence; the value column
+	// holds the named row whole, not elided.
+	plan := renderedRow(t, lines, "plan")
+	if !strings.Contains(plan, "Install-wide per-type default") {
+		t.Fatalf("the plan row = %q, want the prototype's help sentence", plan)
+	}
+	if !strings.Contains(plan, "openai/gpt-main") || strings.Contains(plan, "openai/gp...") {
+		t.Fatalf("the plan row = %q, want the model row's label whole", plan)
+	}
+	if reviewer := renderedRow(t, lines, "plan-reviewer"); !strings.Contains(reviewer, "Global row for a system type") {
+		t.Fatalf("the plan-reviewer row = %q, want the globalSystem help sentence", reviewer)
 	}
 }
 
@@ -1594,7 +1639,7 @@ func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
 	cases := map[string]string{
 		"#1": "agent override: openai/gpt-sub",
 		"#2": "global default: openai/gpt-main / xHigh",
-		"#3": configFollowConversationModel,
+		"#3": configFollowConversation,
 		"#4": "3 entries",
 		"#5": configSystemSubagentNotice,
 	}
@@ -1788,6 +1833,8 @@ func TestConfigPanelNamesRowsWithoutADottedPath(t *testing.T) {
 // presents the per-type defaults, the plan reviewer's global row and the shared
 // custom registry — every install-wide subagent row in one place — reads the
 // agents document, and saves back to it so the keys it does not show survive.
+// Its rows read as the pins they are (plan 324 D7) and its Model field opens
+// the global-row picker, whose pick takes the pin's level with it (D5).
 func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	agents := `{
 		"definitions":{"main":{"primary":true,"subagents":[]}},
@@ -1804,42 +1851,44 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	runConfigPanel(t, session, selector, []richStep{
 		{label: "explore", ok: true},
 		{label: "Model", ok: true},
-		{ok: false},
-	}, []selectorInput{{value: "llm-conditional", ok: true}}, "subagent_models")
+		{label: "deepseek/deepseek-v4-pro", ok: true},
+	}, nil, "subagent_models")
 
 	if len(selector.richItems) == 0 {
 		t.Fatal("the projection page never opened")
 	}
 	page := selector.richItems[0]
-	// A per-type row reads the model and the level it names, and its status
-	// column says the row is this install's global default for the type.
+	// A per-type pin names the model row its value column holds, with the
+	// thinking level as its status and the prototype's help sentence as its
+	// description.
 	explore := findRow(t, page, "explore")
-	if explore.Description != "openai/gpt-main / High" {
-		t.Fatalf("explore's description = %q, want the model and its level", explore.Description)
+	if explore.Value != "openai/gpt-main" || explore.Status != "High" {
+		t.Fatalf("explore's row = %q %q, want the named row and its level", explore.Value, explore.Status)
 	}
-	if explore.Status != configGlobalDefaultStatus {
-		t.Fatalf("explore's status = %q, want %q", explore.Status, configGlobalDefaultStatus)
+	if explore.Description != "Install-wide per-type default. An agent's own override still wins; no default follows the conversation." {
+		t.Fatalf("explore's description = %q, want the prototype's help sentence", explore.Description)
 	}
-	// A type with no row of its own follows the conversation, and marks nothing.
+	// A type with no pin of its own follows the conversation, and marks nothing.
 	verification := findRow(t, page, "verification")
-	if verification.Description != configFollowConversationModel || verification.Status != "" {
-		t.Fatalf("verification's row = %q %q, want the follow sentence and no status", verification.Description, verification.Status)
+	if verification.Value != configFollowConversation || verification.Status != "" {
+		t.Fatalf("verification's row = %q %q, want the follow sentence and no status", verification.Value, verification.Status)
 	}
-	// The plan reviewer's global row reads the same way, with the status the
-	// prototype gives a system type's row.
+	// The plan reviewer's global row reads the same way, with the row default
+	// for a level nobody set.
 	reviewer := findRow(t, page, "plan-reviewer")
-	if reviewer.Description != "deepseek/deepseek-v4-pro / Row default" {
-		t.Fatalf("plan-reviewer's description = %q, want the model and the row default", reviewer.Description)
+	if reviewer.Value != "deepseek/deepseek-v4-pro" || reviewer.Status != configRowDefaultEffort {
+		t.Fatalf("plan-reviewer's row = %q %q, want the named row and the row default", reviewer.Value, reviewer.Status)
 	}
-	if reviewer.Status != configGlobalRowStatus {
-		t.Fatalf("plan-reviewer's status = %q, want %q", reviewer.Status, configGlobalRowStatus)
+	if reviewer.Description != "Global row for a system type, the goal-evaluator pattern. Agent pages stay read-only." {
+		t.Fatalf("plan-reviewer's description = %q, want the globalSystem help sentence", reviewer.Description)
 	}
 	// The registry is one row of this page; its entries are its own page, named
 	// by the name each carries (the test below).
 	findRow(t, page, "Shared custom subagents")
 
 	// The save lands in the agents section — the document the page presents —
-	// and every key the page does not show comes back untouched.
+	// and every key the page does not show comes back untouched. The pick
+	// changed the pin's model, so its level went with it in the same write.
 	if len(session.writes) != 1 {
 		t.Fatalf("expected one write, got %+v", session.writes)
 	}
@@ -1852,11 +1901,11 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	}
 	types, _ := saved["subagent_models"].(map[string]any)
 	exploreRow, _ := types["explore"].(map[string]any)
-	if got, _ := exploreRow["model"].(string); got != "llm-conditional" {
-		t.Fatalf("subagent_models.explore.model = %q, want the edited row", got)
+	if got, _ := exploreRow["model"].(string); got != "llm-2" {
+		t.Fatalf("subagent_models.explore.model = %q, want the picked row", got)
 	}
-	if got, _ := exploreRow["reasoning_effort"].(string); got != "high" {
-		t.Fatalf("subagent_models.explore.reasoning_effort = %q, want the level it had", got)
+	if _, kept := exploreRow["reasoning_effort"]; kept {
+		t.Fatalf("subagent_models.explore.reasoning_effort = %v, want the level dropped with the model it was chosen for", exploreRow["reasoning_effort"])
 	}
 	reviewerRow, _ := saved["plan_reviewer"].(map[string]any)
 	if got, _ := reviewerRow["model"].(string); got != "llm-2" {
@@ -2264,17 +2313,18 @@ func TestConfigPanelEffortPickerNeedsAModel(t *testing.T) {
 	}
 }
 
-// The picked level is what the store gets, and Row default stores nothing: the
-// key goes away, which is how "follow the model row's own default" reads.
+// The picked level is what the store gets, and Row default stores the empty
+// level itself (plan 324 D5): the loader reads "" as no override — the model
+// row's own default — and an unset key and an empty one mean the same thing
+// everywhere the level is read.
 func TestConfigPanelEffortPickerWritesTheChosenLevel(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		pick string
 		want string
-		gone bool
 	}{
 		{name: "a level", pick: "xHigh", want: "xhigh"},
-		{name: "the row's default", pick: configRowDefaultEffort, gone: true},
+		{name: "the row's default", pick: configRowDefaultEffort, want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			useSetupCatalogWith(t, configEffortCatalog)
@@ -2296,11 +2346,8 @@ func TestConfigPanelEffortPickerWritesTheChosenLevel(t *testing.T) {
 				t.Fatalf("the saved document does not parse: %v", err)
 			}
 			level, ok := saved.GoalCheck["reasoning_effort"]
-			if tc.gone {
-				if ok {
-					t.Fatalf("row default stored %v, want the key gone", level)
-				}
-				return
+			if !ok {
+				t.Fatalf("row default dropped the key, want the empty level stored")
 			}
 			if level != tc.want {
 				t.Fatalf("reasoning_effort = %v, want %q", level, tc.want)
@@ -2426,6 +2473,407 @@ func TestConfigPanelEffortPickerOnASubagentEntry(t *testing.T) {
 	entries := agentSubagentsOf(t, doc, "main")
 	if len(entries) != 1 || entries[0]["reasoning_effort"] != "xhigh" {
 		t.Fatalf("subagents = %+v, want the picked level on the entry", entries)
+	}
+}
+
+// --- Plan 324: the model picker and the type detail page ---
+
+// modelPickerPage is the one page a model picker drew, found by the sentence
+// under its title.
+func modelPickerPage(t *testing.T, selector *scriptedSelector) []SelectItem {
+	t.Helper()
+	for i, label := range selector.richLabels {
+		if strings.Contains(label, configModelPickerSub) {
+			return selector.richItems[i]
+		}
+	}
+	t.Fatalf("no model picker opened: %v", selector.richLabels)
+	return nil
+}
+
+// A model reference is picked from the install's global table, never typed
+// (plan 324): the picker's first row is the field's own empty value — the goal
+// check's carries the conversation sentence — and every row after it names a
+// model row and where its requests go. A stored reference the table does not
+// carry is not kept on the goal check's list.
+func TestConfigPanelModelPickerListsGlobalRows(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{"model":"llm-gone"}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{
+		{ID: "llm-main", Provider: "openai", Model: "gpt-main", BaseURL: "https://api.openai.com", APIPath: "/v1/chat/completions"},
+		{ID: "llm-claude", Provider: "anthropic", Model: "claude-sonnet-4-5", BaseURL: "https://eu.api.anthropic.com", APIPath: "/v1/messages"},
+	}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Goal check model", ok: true},
+		{ok: false},
+	}, nil, "agents")
+
+	page := modelPickerPage(t, selector)
+	labels := rowLabels(page)
+	want := []string{"Follow primary agent", "openai/gpt-main", "anthropic/claude-sonnet-4-5"}
+	if !slices.Equal(labels, want) {
+		t.Fatalf("picker = %v, want %v", labels, want)
+	}
+	empty := findRow(t, page, "Follow primary agent")
+	if empty.Description != configModelConversationDesc {
+		t.Fatalf("the goal check's empty option = %q, want the conversation sentence", empty.Description)
+	}
+	row := findRow(t, page, "openai/gpt-main")
+	if row.Description != "https://api.openai.com/v1/chat/completions" {
+		t.Fatalf("the row's description = %q, want where its requests go", row.Description)
+	}
+	if len(session.writes) != 0 {
+		t.Fatalf("opening the picker wrote %+v, want nothing", session.writes)
+	}
+}
+
+// A pin whose row the table no longer carries stays on the picker (plan 324
+// D1): it is labeled as written, appended after the real rows, and picking a
+// row replaces it.
+func TestConfigPanelModelPickerKeepsDanglingPin(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"subagent_models":{"explore":{"model":"llm-gone","reasoning_effort":"high"}}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "explore", ok: true},
+		{label: "Model", ok: true},
+		{label: "openai/gpt-main", ok: true},
+	}, nil, "subagent_models")
+
+	// The section row names the dangling pin as written, and the picker keeps
+	// it after the real rows with no description of its own.
+	if explore := findRow(t, selector.richItems[0], "explore"); explore.Value != "llm-gone" {
+		t.Fatalf("explore's value = %q, want the dangling reference as written", explore.Value)
+	}
+	page := modelPickerPage(t, selector)
+	want := []string{"Follow conversation", "openai/gpt-main", "llm-gone"}
+	if got := rowLabels(page); !slices.Equal(got, want) {
+		t.Fatalf("picker = %v, want %v", got, want)
+	}
+	if dangling := findRow(t, page, "llm-gone"); dangling.Description != "" {
+		t.Fatalf("the dangling pin = %q, want no description", dangling.Description)
+	}
+
+	// Picking the real row replaces the pin and takes its level along (D5).
+	doc := savedAgentsDoc(t, session)
+	types, _ := doc["subagent_models"].(map[string]any)
+	explore, _ := types["explore"].(map[string]any)
+	if got, _ := explore["model"].(string); got != "llm-1" {
+		t.Fatalf("subagent_models.explore.model = %q, want the picked row", got)
+	}
+	if _, kept := explore["reasoning_effort"]; kept {
+		t.Fatalf("the level stayed beside a model it was not chosen for: %v", explore["reasoning_effort"])
+	}
+}
+
+// Two rows of the install's table that share a provider and model are told
+// apart by their host (plan 324 D2): the label carries the base URL without
+// its scheme, and a row whose pair is unique stays bare. A reference nothing
+// carries is shown as written.
+func TestConfigPanelModelRowLabelDisambiguatesHost(t *testing.T) {
+	panel := &configPanel{models: []appcfg.LLMModelConfig{
+		{ID: "llm-main", Provider: "example", Model: "reasoner-pro", BaseURL: "https://models.example.com"},
+		{ID: "llm-eu", Provider: "example", Model: "reasoner-pro", BaseURL: "https://eu.models.example.com"},
+		{ID: "llm-fast", Provider: "example", Model: "fast-small", BaseURL: "https://models.example.com"},
+	}}
+	for _, tc := range []struct{ ref, want string }{
+		{"llm-main", "example/reasoner-pro (models.example.com)"},
+		{"llm-eu", "example/reasoner-pro (eu.models.example.com)"},
+		{"llm-fast", "example/fast-small"},
+		{"llm-gone", "llm-gone"},
+		{"example/reasoner-pro", "example/reasoner-pro (models.example.com)"},
+	} {
+		if got := panel.configModelRowLabel(tc.ref); got != tc.want {
+			t.Errorf("rowLabel(%q) = %q, want %q", tc.ref, got, tc.want)
+		}
+	}
+}
+
+// The type page's Model row opens the picker with its own empty value —
+// Follow conversation — and picking it clears the pin and its level in one
+// write (plan 324 D3/D5).
+func TestConfigPanelTypePageModelPickerFollowConversation(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"subagent_models":{"explore":{"model":"llm-1","reasoning_effort":"high"}}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "explore", ok: true},
+		{label: "Model", ok: true},
+		{label: "Follow conversation", ok: true},
+	}, nil, "subagent_models")
+
+	if got := rowLabels(modelPickerPage(t, selector))[0]; got != configFollowConversation {
+		t.Fatalf("the type page's empty option = %q, want %q", got, configFollowConversation)
+	}
+	if len(session.writes) != 1 {
+		t.Fatalf("expected one write, got %+v", session.writes)
+	}
+	doc := savedAgentsDoc(t, session)
+	types, _ := doc["subagent_models"].(map[string]any)
+	explore, kept := types["explore"].(map[string]any)
+	if !kept {
+		t.Fatalf("the type's row itself must stay: %v", doc)
+	}
+	if _, pin := explore["model"]; pin {
+		t.Fatalf("subagent_models.explore.model = %v, want the pin cleared", explore["model"])
+	}
+	if _, level := explore["reasoning_effort"]; level {
+		t.Fatalf("subagent_models.explore.reasoning_effort = %v, want the level cleared with the model", explore["reasoning_effort"])
+	}
+}
+
+// A definition's default model is picked from the global table (plan 324 D4):
+// the agent page's Default model row opens the picker, a row's id is what the
+// store gets, and the empty option unsets the key.
+func TestConfigPanelDefaultModelIsPicked(t *testing.T) {
+	models := []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	pick := []richStep{
+		{label: "Agent definitions", ok: true},
+		{label: "main", ok: true},
+		{label: "Default model", ok: true},
+	}
+	t.Run("a picked row stores its id", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+		session.snapshot.Models = models
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, append(append([]richStep{}, pick...), richStep{label: "openai/gpt-main", ok: true}), nil, "agents")
+
+		if empty := findRow(t, modelPickerPage(t, selector), "Follow global default"); empty.Label == "" {
+			t.Fatal("the definition's empty option is missing")
+		}
+		doc := savedAgentsDoc(t, session)
+		definitions, _ := doc["definitions"].(map[string]any)
+		main, _ := definitions["main"].(map[string]any)
+		if got, _ := main["default_model"].(string); got != "llm-1" {
+			t.Fatalf("definitions.main.default_model = %q, want the picked row's id", got)
+		}
+	})
+	t.Run("the empty option unsets the key", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"default_model":"llm-1"}}}`})
+		session.snapshot.Models = models
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, append(append([]richStep{}, pick...), richStep{label: "Follow global default", ok: true}), nil, "agents")
+
+		doc := savedAgentsDoc(t, session)
+		definitions, _ := doc["definitions"].(map[string]any)
+		main, _ := definitions["main"].(map[string]any)
+		if _, kept := main["default_model"]; kept {
+			t.Fatalf("definitions.main.default_model = %v, want the key gone", main["default_model"])
+		}
+	})
+}
+
+// The memory models' empty value is the explicit "current" (plan 324 D1): the
+// picker's first row follows the conversation, and picking it stores the
+// value the loader reads as the conversation's own model.
+func TestConfigPanelMemoryModelPickerFollowConversation(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"memories": `{"extract_model":"llm-1"}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Extraction model", ok: true},
+		{label: configFollowConversation, ok: true},
+	}, nil, "memories")
+
+	if got := rowLabels(modelPickerPage(t, selector))[0]; got != configFollowConversation {
+		t.Fatalf("the memory model's empty option = %q, want %q", got, configFollowConversation)
+	}
+	if len(session.writes) != 1 || session.writes[0].section != "memories" {
+		t.Fatalf("writes = %+v, want one write to the memories section", session.writes)
+	}
+	var saved struct {
+		ExtractModel string `json:"extract_model"`
+	}
+	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
+		t.Fatalf("the saved document does not parse: %v", err)
+	}
+	if saved.ExtractModel != "current" {
+		t.Fatalf("extract_model = %q, want the explicit current", saved.ExtractModel)
+	}
+}
+
+// Changing a model takes the level beside it in the same write (plan 324 D5):
+// one write, the new row's id, and no level left over from the old one.
+func TestConfigPanelModelChangeClearsEffort(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{"model":"llm-1","reasoning_effort":"high"}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{
+		{ID: "llm-1", Provider: "openai", Model: "gpt-main"},
+		{ID: "llm-2", Provider: "deepseek", Model: "deepseek-v4-pro"},
+	}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Goal check model", ok: true},
+		{label: "deepseek/deepseek-v4-pro", ok: true},
+	}, nil, "agents")
+
+	if len(session.writes) != 1 {
+		t.Fatalf("the change is one write, got %+v", session.writes)
+	}
+	var saved struct {
+		GoalCheck map[string]any `json:"goal_evaluator"`
+	}
+	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
+		t.Fatalf("the saved document does not parse: %v", err)
+	}
+	if got, _ := saved.GoalCheck["model"].(string); got != "llm-2" {
+		t.Fatalf("goal_evaluator.model = %q, want the picked row", got)
+	}
+	if _, kept := saved.GoalCheck["reasoning_effort"]; kept {
+		t.Fatalf("goal_evaluator.reasoning_effort = %v, want the old model's level gone", saved.GoalCheck["reasoning_effort"])
+	}
+}
+
+// Picking the row a reference already names changes nothing but the write
+// itself (plan 324 D5): the level it was chosen for stays.
+func TestConfigPanelModelSameRowKeepsEffort(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{"model":"llm-1","reasoning_effort":"high"}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Goal check model", ok: true},
+		{label: "openai/gpt-main", ok: true},
+	}, nil, "agents")
+
+	if len(session.writes) != 1 {
+		t.Fatalf("expected one write, got %+v", session.writes)
+	}
+	var saved struct {
+		GoalCheck map[string]any `json:"goal_evaluator"`
+	}
+	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
+		t.Fatalf("the saved document does not parse: %v", err)
+	}
+	if got, _ := saved.GoalCheck["model"].(string); got != "llm-1" {
+		t.Fatalf("goal_evaluator.model = %q, want the same row", got)
+	}
+	if got, _ := saved.GoalCheck["reasoning_effort"].(string); got != "high" {
+		t.Fatalf("goal_evaluator.reasoning_effort = %q, want the level it was chosen for", got)
+	}
+}
+
+// The picker's writes meet the store's own validator — the one the
+// application writes through, not the double (plan 324's stop condition,
+// checked head-on): a picked row's id, the empty level a Row default stores,
+// and a cleared or re-picked pin with its level dropped are all shapes the
+// loader accepts, and a landed write stays silent.
+func TestConfigPanelModelPickerWritesPassTheStoreValidator(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte("gateway:\n  http_addr: 127.0.0.1:9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state", "forebrain.state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	models := &state.LLMModelStore{DB: db}
+	main, err := models.Create(ctx, state.LLMModel{Provider: "openai", Model: "gpt-main", BaseURL: "https://api.openai.com", APIPath: "/v1/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepseek, err := models.Create(ctx, state.LLMModel{Provider: "deepseek", Model: "r1", BaseURL: "https://api.deepseek.com", APIPath: "/v1/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	process.InstallConfigSectionValidator(cfgPath, db)
+	t.Cleanup(func() { state.SetSectionValidator(nil) })
+	env := &process.Environment{Root: home, SQL: db}
+	env.ConfigPath = cfgPath
+	session := &ChatSession{Env: env}
+
+	storedAgents := func(t *testing.T) map[string]any {
+		t.Helper()
+		snapshot, err := session.ConfigPanelSections(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if len(snapshot.Stored["agents"]) == 0 {
+			return map[string]any{}
+		}
+		if err := json.Unmarshal(snapshot.Stored["agents"], &doc); err != nil {
+			t.Fatalf("the stored agents section does not parse: %v", err)
+		}
+		return doc
+	}
+	run := func(t *testing.T, steps []richStep, args ...string) {
+		t.Helper()
+		selector := &scriptedSelector{}
+		renderer := runConfigPanelOn(t, session, selector, steps, nil, args...)
+		if text := frameText(renderer); text != "" {
+			t.Fatalf("a write that lands says nothing; frames:\n%s", text)
+		}
+		for _, label := range selector.richLabels {
+			if strings.Contains(label, "the store refused") || strings.Contains(label, "invalid") {
+				t.Fatalf("a refusal reached the page: %s", pageLabels(selector))
+			}
+		}
+	}
+
+	// A picked row's id is what the store gets.
+	run(t, []richStep{
+		{label: "Goal check model", ok: true},
+		{label: "openai/gpt-main", ok: true},
+	}, "agents")
+	goal, _ := storedAgents(t)["goal_evaluator"].(map[string]any)
+	if got, _ := goal["model"].(string); got != main.ID {
+		t.Fatalf("goal_evaluator.model = %q, want the picked row's id %q", got, main.ID)
+	}
+
+	// Row default stores the empty level itself, and the loader reads it.
+	if err := session.UpdateConfigSection(ctx, "agents", json.RawMessage(`{"goal_evaluator":{"model":"`+main.ID+`","reasoning_effort":"low"}}`)); err != nil {
+		t.Fatalf("the seed must be a pair the loader accepts: %v", err)
+	}
+	run(t, []richStep{
+		{label: "Goal check thinking level", ok: true},
+		{label: configRowDefaultEffort, ok: true},
+	}, "agents")
+	goal, _ = storedAgents(t)["goal_evaluator"].(map[string]any)
+	if got, _ := goal["reasoning_effort"].(string); got != "" {
+		t.Fatalf("goal_evaluator.reasoning_effort = %q, want the empty level stored", got)
+	}
+
+	// A re-pinned type row drops its level in the same write, and the whole
+	// agents document the projection saves is a shape the loader accepts.
+	if err := session.UpdateConfigSection(ctx, "agents", json.RawMessage(`{"subagent_models":{"explore":{"model":"`+main.ID+`","reasoning_effort":"low"}}}`)); err != nil {
+		t.Fatalf("the seed must be a pin the loader accepts: %v", err)
+	}
+	run(t, []richStep{
+		{label: "explore", ok: true},
+		{label: "Model", ok: true},
+		{label: "deepseek/r1", ok: true},
+	}, "subagent_models")
+	types, _ := storedAgents(t)["subagent_models"].(map[string]any)
+	explore, _ := types["explore"].(map[string]any)
+	if got, _ := explore["model"].(string); got != deepseek.ID {
+		t.Fatalf("subagent_models.explore.model = %q, want the picked row's id %q", got, deepseek.ID)
+	}
+	if _, kept := explore["reasoning_effort"]; kept {
+		t.Fatalf("the level stayed beside a model it was not chosen for: %v", explore["reasoning_effort"])
+	}
+
+	// Clearing the pin leaves a row the loader still accepts — the store's
+	// own round-trip keeps the row with its normalized name key.
+	run(t, []richStep{
+		{label: "explore", ok: true},
+		{label: "Model", ok: true},
+		{label: configFollowConversation, ok: true},
+	}, "subagent_models")
+	types, _ = storedAgents(t)["subagent_models"].(map[string]any)
+	explore, kept := types["explore"].(map[string]any)
+	if !kept {
+		t.Fatalf("subagent_models.explore = %v, want the pin's row kept", types["explore"])
+	}
+	if _, pin := explore["model"]; pin {
+		t.Fatalf("subagent_models.explore.model = %v, want the pin cleared", explore["model"])
+	}
+	if _, level := explore["reasoning_effort"]; level {
+		t.Fatalf("subagent_models.explore.reasoning_effort = %v, want the level cleared with the pin", explore["reasoning_effort"])
 	}
 }
 
@@ -2866,6 +3314,18 @@ func TestConfigPanelSchemaTemplateFieldDataIsComplete(t *testing.T) {
 			}
 			if field.Secret && field.Kind != configFieldText {
 				t.Errorf("模板 %s 的字段 %q 不是文本，不能声明 secret", template, field.Label)
+			}
+			// A model field carries its empty option's label and flavor, and
+			// an explicit empty value is the memory flavor's alone (plan 324).
+			if field.Kind == configFieldModel {
+				if strings.TrimSpace(field.ModelEmpty) == "" {
+					t.Errorf("模板 %s 的字段 %q 是模型引用，必须写明空值读作什么", template, field.Label)
+				}
+				if field.ModelEmptyValue != "" && field.ModelFlavor != configModelFlavorMemory {
+					t.Errorf("模板 %s 的字段 %q 只有记忆模型把空值存成显式值", template, field.Label)
+				}
+			} else if field.ModelEmpty != "" || field.ModelEmptyValue != "" {
+				t.Errorf("模板 %s 的字段 %q 不是模型引用，却带着模型空值", template, field.Label)
 			}
 			if len(field.ShowFor) > 0 && !hasType {
 				t.Errorf("模板 %s 的字段 %q 声明了 showFor，但模板没有动作类型", template, field.Label)

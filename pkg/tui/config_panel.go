@@ -452,22 +452,34 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 
 // configFieldRow is one setting's row on the section page: the value it holds
 // in the row's value column, the hint beside it, and the status a projection
-// carries. A projection's rows say what the stored row resolves to rather than
-// how many keys it holds (plan 314): the per-type defaults read as the model and
-// level they name, which is the row's whole meaning, so it stays in the
-// description with the prototype's status column beside it.
+// carries. A projection's install-wide type pins read as what they resolve to
+// (plan 324 D7): the model row in the value column, the thinking level in
+// force as the status, and the prototype's help sentence as the description.
 func (p *configPanel) configFieldRow(doc any, schema configSectionSchema, field configField) (string, string, string) {
 	if schema.StoreSection == "" {
-		return configFieldDescription(doc, field)
+		return p.configFieldDescription(doc, field)
 	}
 	path := configFieldPath(field)
-	switch {
-	case len(path) == 2 && path[0] == configSubagentModelsKey:
-		return p.configSubagentTypeSummary(doc, path[1]), "", configSubagentTypeStatus(doc, path[1])
-	case len(path) == 1 && path[0] == configPlanReviewerKey:
-		return p.configGlobalRowSummary(doc, configPlanReviewerKey), "", configStatusIf(refOfRow(doc, configPlanReviewerKey) != "", configGlobalRowStatus)
+	if len(path) == 2 && path[0] == configSubagentModelsKey || len(path) == 1 && path[0] == configPlanReviewerKey {
+		return p.configTypePinRow(doc, field, path)
 	}
-	return configFieldDescription(doc, field)
+	return p.configFieldDescription(doc, field)
+}
+
+// configTypePinRow is one install-wide type pin's row on the projection's
+// section page (plan 324 D7): the value column names the model row the pin
+// stores — or the sentence for a pin nobody set — the status names the
+// thinking level in force, and the description carries the field's own help
+// sentence.
+func (p *configPanel) configTypePinRow(doc any, field configField, path []string) (string, string, string) {
+	description := strings.TrimSpace(field.Hint)
+	ref := refOfRow(doc, path...)
+	if ref == "" {
+		return description, configFollowConversation, ""
+	}
+	row, _ := configLookupValue(doc, path)
+	settings, _ := row.(map[string]any)
+	return description, p.configModelRowLabel(ref), configEffortSummary(configStringField(settings, configEffortKey))
 }
 
 // refOfRow is one stored row's model reference, empty when it names none.
@@ -477,41 +489,6 @@ func refOfRow(doc any, path ...string) string {
 	return strings.TrimSpace(configStringField(settings, "model"))
 }
 
-// configStatusIf is a status column's value when a row is configured, and the
-// empty column when it is not: an unconfigured row carries nothing to mark.
-func configStatusIf(configured bool, status string) string {
-	if !configured {
-		return ""
-	}
-	return status
-}
-
-// configSubagentTypeSummary is the prototype's per-type row description: the
-// install-wide row the type runs on, with the thinking level beside it, or the
-// sentence that says it follows the conversation. The level is named through
-// turn's one label table, and an empty stored level is the row's own default.
-func (p *configPanel) configSubagentTypeSummary(doc any, typeName string) string {
-	ref := refOfRow(doc, configSubagentModelsKey, typeName)
-	if ref == "" {
-		return configFollowConversationModel
-	}
-	settings, _ := configLookupValue(doc, []string{configSubagentModelsKey, typeName})
-	level, _ := settings.(map[string]any)
-	return p.configModelLabel(ref) + " / " + configEffortSummary(configStringField(level, "reasoning_effort"))
-}
-
-// configGlobalRowSummary is the plan reviewer's row: the model it names and the
-// level it runs with, or the sentence for a row nobody set.
-func (p *configPanel) configGlobalRowSummary(doc any, key string) string {
-	ref := refOfRow(doc, key)
-	if ref == "" {
-		return configFollowConversationModel
-	}
-	row, _ := configLookupValue(doc, []string{key})
-	settings, _ := row.(map[string]any)
-	return p.configModelLabel(ref) + " / " + configEffortSummary(configStringField(settings, "reasoning_effort"))
-}
-
 // configEffortSummary names a stored thinking level: empty is the model row's
 // own default, and everything else is the level through turn's one table.
 func configEffortSummary(level string) string {
@@ -519,12 +496,6 @@ func configEffortSummary(level string) string {
 		return configRowDefaultEffort
 	}
 	return turn.EffortEnglishLabel(level)
-}
-
-// configSubagentTypeStatus is the prototype's status column for a per-type row:
-// the type has an install-wide default of its own once it names a model row.
-func configSubagentTypeStatus(doc any, typeName string) string {
-	return configStatusIf(refOfRow(doc, configSubagentModelsKey, typeName) != "", configGlobalDefaultStatus)
 }
 
 // configFieldListed reports whether the panel offers one field on this machine.
@@ -699,6 +670,8 @@ func (p *configPanel) editField(doc any, field configField) (any, string) {
 		return p.editNumber(doc, path, field, cur)
 	case configFieldEffort:
 		return p.editEffort(doc, path, field, p.fieldPrompt(field), cur)
+	case configFieldModel:
+		return p.editModel(doc, path, field, cur)
 	default:
 		return p.editText(doc, path, field, cur)
 	}
@@ -865,7 +838,9 @@ func configEditorTag(field configField) string {
 // that row's own default — last. The level is a property of the model, never a
 // free string: a row without one has nothing to offer, because the loader
 // refuses an effort that names no model, so the page says which row to set
-// first and opens nothing.
+// first and opens nothing. Row default stores the empty level itself (plan
+// 324 D5): the loader reads "" as no override, and an unset key and an empty
+// one mean the same thing everywhere the level is read.
 func (p *configPanel) editEffort(doc any, path []string, field configField, prompt string, cur any) (any, string) {
 	defer p.pushTrail(strings.SplitN(prompt, "\n", 2)[0])()
 	p.chrome.tag = ""
@@ -892,7 +867,7 @@ func (p *configPanel) editEffort(doc any, path []string, field configField, prom
 		return doc, ""
 	}
 	if idx == len(items)-1 {
-		return p.assign(doc, path, nil, true, field.Label)
+		return p.assign(doc, path, "", false, field.Label)
 	}
 	return p.assign(doc, path, levels[idx], false, field.Label)
 }
@@ -935,6 +910,105 @@ func (p *configPanel) configModelEfforts(ref string) []string {
 	return turn.SetupReasoningEfforts(provider, model, apiPath, levels)
 }
 
+// editModel is one model reference's picker (plan 324): the field's own empty
+// value first — what empty means is a property of where the reference sits —
+// then the install's global model rows, each naming where its requests go. A
+// stored reference that names no row stays on the list (the goal check's
+// flavor keeps none), so a pin whose row was deleted reads as what it is
+// until it is re-picked. Changing or clearing the reference takes the
+// thinking level beside it in the same write (D5).
+func (p *configPanel) editModel(doc any, path []string, field configField, cur any) (any, string) {
+	defer p.pushTrail(field.Label)()
+	p.chrome.tag = ""
+	stored, _ := cur.(string)
+	stored = strings.TrimSpace(stored)
+	ids := []string{field.ModelEmptyValue}
+	items := []SelectItem{{Label: field.ModelEmpty}}
+	if field.ModelFlavor == configModelFlavorModel {
+		items[0].Description = configModelConversationDesc
+	}
+	defaultIdx := 0
+	for _, row := range p.models {
+		ids = append(ids, row.ID)
+		items = append(items, SelectItem{
+			Label:       p.configModelRowLabel(row.ID),
+			Description: row.BaseURL + row.APIPath,
+		})
+		if row.ID == stored {
+			defaultIdx = len(items) - 1
+		}
+	}
+	if stored != "" && stored != field.ModelEmptyValue && !slices.Contains(ids, stored) && field.ModelFlavor != configModelFlavorModel {
+		ids = append(ids, stored)
+		items = append(items, SelectItem{Label: p.configModelRowLabel(stored)})
+		defaultIdx = len(items) - 1
+	}
+	idx, ok, err := p.chromeSelect(field.Label+"\n"+configModelPickerSub, items, defaultIdx)
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	if !ok || idx < 0 || idx >= len(items) {
+		return doc, ""
+	}
+	return p.assignModel(doc, path, field, stored, ids[idx])
+}
+
+// assignModel stores one picked model reference and writes the section once
+// (plan 324 D5): the empty option unsets the key — the memory flavor's empty
+// is the explicit "current" — a row stores its id, and a reference that
+// changed or cleared drops the thinking level beside it in the same write;
+// picking the row it already names keeps the level it was chosen for.
+func (p *configPanel) assignModel(doc any, path []string, field configField, stored, picked string) (any, string) {
+	var value any
+	if picked != "" {
+		value = picked
+	}
+	updated, err := configAssign(doc, path, value, picked == "", field.Label)
+	if err != nil {
+		p.printError(err)
+		return doc, err.Error()
+	}
+	if picked == "" || picked != stored {
+		if updated, err = configDropSiblingEffort(updated, path, field.Label); err != nil {
+			p.printError(err)
+			return doc, err.Error()
+		}
+	}
+	if err := p.save(updated); err != nil {
+		return p.reloadSection(), err.Error()
+	}
+	return updated, ""
+}
+
+// configDropSiblingEffort removes the thinking level stored beside a model
+// reference (plan 324 D5): the level was chosen for the model that carried it,
+// so a reference that changes or clears takes its level along — one write,
+// never a level left beside a model it was not chosen for.
+func configDropSiblingEffort(doc any, path []string, label string) (any, error) {
+	if len(path) < 2 {
+		return doc, nil
+	}
+	sibling := configJoinPath(path[:len(path)-1], configEffortKey)
+	if _, exists := configLookupValue(doc, sibling); !exists {
+		return doc, nil
+	}
+	return configAssign(doc, sibling, nil, true, label)
+}
+
+// configModelValueText is a model reference as every value column shows it
+// (plan 324 D6): the row's label through the install's table, or the sentence
+// the field gives its empty value — the memory flavor's explicit "current"
+// reads the same as an unset key.
+func (p *configPanel) configModelValueText(field configField, value any) string {
+	ref, _ := value.(string)
+	ref = strings.TrimSpace(ref)
+	if ref == "" || (field.ModelEmptyValue != "" && ref == field.ModelEmptyValue) {
+		return field.ModelEmpty
+	}
+	return p.configModelRowLabel(ref)
+}
+
 // assign applies one edit and writes the section once: the confirmed edit is
 // the save (owner 2026-11-16, plan 321), so there is no draft to write later.
 // label is the setting's own name, the one the panel showed the user: a refusal
@@ -964,9 +1038,13 @@ func (p *configPanel) fieldPrompt(field configField) string {
 // configFieldDescription is a field's picker row: the hint that says what the
 // setting means beside the label, and the value it holds in the row's value
 // column — the panel's descriptions belong to settings, not to the values they
-// happen to hold right now (plan 321).
-func configFieldDescription(doc any, field configField) (string, string, string) {
+// happen to hold right now (plan 321). A model reference names its row through
+// the install's table, the way the pickers do (plan 324 D6).
+func (p *configPanel) configFieldDescription(doc any, field configField) (string, string, string) {
 	value, exists := configLookupValue(doc, configFieldPath(field))
+	if field.Kind == configFieldModel {
+		return strings.TrimSpace(field.Hint), p.configModelValueText(field, value), ""
+	}
 	return strings.TrimSpace(field.Hint), configFieldValueText(field, value, exists), ""
 }
 
@@ -1135,14 +1213,9 @@ const (
 	// holds no row for the section, so it reads its built-in defaults — the
 	// prototype's own marker (plan 321).
 	configDefaultStatus = "Default"
-	// The status column's words, from the prototype's "Subagent models" section
-	// (plan 314): a per-type row that names a model is this install's global
-	// default for that type, and the plan reviewer's row is the global row of a
-	// system type. A shared custom subagent is marked on an agent's page, where
-	// the switch beside it is the agent's.
-	configGlobalDefaultStatus = "Global default"
-	configGlobalRowStatus     = "Global row"
-	configSharedStatus        = "Shared"
+	// A shared custom subagent is marked on an agent's page, where the switch
+	// beside it is the agent's.
+	configSharedStatus = "Shared"
 	// configRowDefaultEffort is what an empty stored level means on a row that
 	// names a model: the model row's own default (plan 313's reading, kept).
 	configRowDefaultEffort = "Row default"
@@ -1154,6 +1227,14 @@ const (
 	// configEffortHeading heads a level's picker when it is opened from a row
 	// rather than from a field of its own.
 	configEffortHeading = "Thinking level"
+	// configModelPickerSub is the one sentence under a model picker's title
+	// (plan 324): every model page offers the same rows, so the page's own
+	// words say what a row's description names.
+	configModelPickerSub = "Choose one model; each row shows where requests go."
+	// configModelConversationDesc is the goal check's empty option (plan 324
+	// D1): its empty value is not an unset key read as a default, it is the
+	// conversation's own model.
+	configModelConversationDesc = "Use the model of the current conversation."
 	// configEffortNeedsModelNotice is what a level's row answers while the model
 	// beside it names none: the level is the model's, and the loader refuses a
 	// pair whose level names no model at all.
@@ -1162,9 +1243,10 @@ const (
 	// (plan 313, scene system-stray-entry): the panel says why before the
 	// loader does, and the loader still judges the save on its own.
 	configSystemSubagentNotice = "Dispatched by the system. Not configurable per agent; remove this entry."
-	// configFollowConversationModel is what a built-in type with no model of
-	// its own runs on, in the prototype's words (plan 313).
-	configFollowConversationModel = "Follow conversation model"
+	// configFollowConversation is what a built-in type with no model of its
+	// own runs on, in the prototype's words (plan 313; plan 324 D7 keeps the
+	// sentence and drops the trailing word).
+	configFollowConversation = "Follow conversation"
 	// configAgentOverridePrefix and configGlobalDefaultPrefix name where a
 	// subagent entry's model comes from. The prototype draws the same fact in a
 	// status column; the panel keeps it in the row's description.
@@ -1335,7 +1417,7 @@ func (p *configPanel) configRowSummary(doc any, path []string, key string, value
 		effort := configStringField(typeMap, "reasoning_effort")
 		return configGlobalDefaultPrefix + p.configModelLabel(typeRef) + " / " + turn.EffortEnglishLabel(effort)
 	}
-	return configFollowConversationModel
+	return configFollowConversation
 }
 
 // configModelLabel names a stored model reference the way the pickers do: the
@@ -1349,6 +1431,40 @@ func (p *configPanel) configModelLabel(ref string) string {
 		return llm.FormatProviderModelDisplay(entry.Provider, entry.Model)
 	}
 	return ref
+}
+
+// configModelRowLabel names a stored model reference the way the model
+// pickers' rows do (plan 324 D2): the display label every picker names a row
+// by, with the row's host appended when more than one row of the install's
+// table carries the same provider and model — two endpoints of one model are
+// the same name otherwise, and the base URL is the only thing that tells them
+// apart. A reference the table does not carry is shown as written, so a pin
+// whose row was deleted stays readable until it is re-picked.
+func (p *configPanel) configModelRowLabel(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	root := appcfg.Root{LLMModels: p.models}
+	entry, ok := appcfg.ResolveModelRef(&root, "main", ref)
+	if !ok {
+		return ref
+	}
+	label := llm.FormatProviderModelDisplay(entry.Provider, entry.Model)
+	shared := 0
+	for _, row := range p.models {
+		if strings.EqualFold(strings.TrimSpace(row.Provider), entry.Provider) && strings.TrimSpace(row.Model) == entry.Model {
+			shared++
+		}
+	}
+	if shared < 2 {
+		return label
+	}
+	host := strings.TrimPrefix(strings.TrimPrefix(entry.BaseURL, "https://"), "http://")
+	if host == "" {
+		return label
+	}
+	return label + " (" + host + ")"
 }
 
 // configSystemSubagentRow reports whether a row is one of an agent's subagent
@@ -1766,6 +1882,8 @@ func (p *configPanel) openTemplateField(doc any, rowPath []string, field configF
 		return p.editNumber(doc, path, field, cur)
 	case configFieldEffort:
 		return p.editEffort(doc, path, field, p.fieldPrompt(field), cur)
+	case configFieldModel:
+		return p.editModel(doc, path, field, cur)
 	default:
 		return p.editText(doc, path, field, cur)
 	}
@@ -1896,11 +2014,11 @@ func configSharedRowSummary(doc any, name string) string {
 func (p *configPanel) configSharedModelSummary(doc any, name string) string {
 	entry, ok := configSharedSubagent(doc, name)
 	if !ok {
-		return configFollowConversationModel
+		return configFollowConversation
 	}
 	ref := strings.TrimSpace(configStringField(entry, "model"))
 	if ref == "" {
-		return configFollowConversationModel
+		return configFollowConversation
 	}
 	return p.configModelLabel(ref) + " / " + configEffortSummary(configStringField(entry, "reasoning_effort"))
 }
@@ -1923,10 +2041,14 @@ func configSharedToolsText(doc any, name string) string {
 // user's choice rather than a guess: an env map needs text, a workspace_roots
 // map needs a boolean, and nothing in the document says which one this is. A
 // stored thinking level is the one scalar whose type is known — and whose
-// values are the model row's — so it opens its picker instead (plan 319).
+// values are the model row's — so it opens its picker instead (plan 319), and
+// so does a stored model reference whose place a model field names (plan 324).
 func (p *configPanel) editRowValue(doc any, rowPath []string, field configField, cur any) (any, string) {
 	if configEffortPath(rowPath) {
 		return p.editEffort(doc, rowPath, field, configEffortHeading, cur)
+	}
+	if model, ok := configModelFieldAt(p.section, rowPath); ok {
+		return p.editModel(doc, rowPath, model, cur)
 	}
 	value, _, ok, err := p.chooseNewValue(field.Label, cur)
 	if err != nil {
@@ -1937,6 +2059,32 @@ func (p *configPanel) editRowValue(doc any, rowPath []string, field configField,
 		return doc, ""
 	}
 	return p.assign(doc, rowPath, value, false, field.Label)
+}
+
+// configModelFieldAt resolves the model picker's descriptor for a stored
+// model reference the generic row editor reaches (plan 324 D4): the field its
+// place names — a field of the template the reference's row resolves to, else
+// the section schema's — so the picker reads the same as it does on the page
+// that names the field. The resolution is the scope: a plain text field that
+// happens to be named model (a hook action's optional override) names no
+// field of the model kind and keeps its text editor.
+func configModelFieldAt(section string, path []string) (configField, bool) {
+	if len(path) > 1 {
+		for _, field := range configTemplates[configTemplateFor(section, path[:len(path)-1])] {
+			if field.Path == path[len(path)-1] && field.Kind == configFieldModel {
+				return field, true
+			}
+		}
+	}
+	if schema, ok := configSectionSchemaFor(section); ok {
+		dotted := strings.Join(path, ".")
+		for _, field := range schema.Fields {
+			if field.Path == dotted && field.Kind == configFieldModel {
+				return field, true
+			}
+		}
+	}
+	return configField{}, false
 }
 
 // addRow appends one row and, when the new row is an object, opens it so the
