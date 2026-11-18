@@ -600,8 +600,8 @@ func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 	if page == nil {
 		t.Fatalf("the features page was never drawn after the refusal: %v", selector.richLabels)
 	}
-	if row := findRow(t, page, "Memory"); !strings.HasPrefix(row.Description, "now: default") {
-		t.Fatalf("the refused value is on the page: %q", row.Description)
+	if row := findRow(t, page, "Memory"); row.Value != configDefaultStatus {
+		t.Fatalf("the refused value is on the page: %q", row.Value)
 	}
 }
 
@@ -1225,10 +1225,215 @@ func lastPageHeadlined(selector *scriptedSelector, headline string) []SelectItem
 	return nil
 }
 
+// Every tab paints its sections as rows: the title in the name column, the
+// summary beside it, and the Default status at the right edge of every section
+// the database holds no row for (plan 321). The lines come from the picker's
+// own painters, so this reads what a screen shows, not the items it was handed.
+func TestConfigPanelRendersEveryTab(t *testing.T) {
+	panel := sectionPanel(nil)
+	items, _ := panel.sectionItems()
+	first := map[string]int{}
+	for i, item := range items {
+		if _, ok := first[item.Category]; !ok {
+			first[item.Category] = i
+		}
+	}
+	for _, tc := range []struct {
+		tab      string
+		titles   []string
+		readOnly bool
+	}{
+		{tab: configTabApproval, titles: []string{"Approval preset", "Workspace sandbox", "Batch projects"}},
+		{tab: configTabSession, titles: []string{"Context compaction", "Memory", "Scheduled tasks", "Feature switches"}},
+		{tab: configTabAgents, titles: []string{"Agents", "Subagent models", "Hooks", "Language servers", "Peer messaging"}},
+		{tab: configTabFile, titles: []string{"Gateway", "Credential files"}, readOnly: true},
+	} {
+		t.Run(tc.tab, func(t *testing.T) {
+			lines := renderTabbedPage(items, first[tc.tab], 120)
+			// The tab bar carries every tab and its row count, so a reader
+			// always sees where the four groups are.
+			bar := strings.Join(stripANSIAll(lines), "\n")
+			if chip := tc.tab + " " + strconv.Itoa(len(sectionsOfTab(tc.tab))); !strings.Contains(bar, chip) {
+				t.Fatalf("the tab bar is missing %q:\n%s", chip, bar)
+			}
+			for _, title := range tc.titles {
+				row := renderedRow(t, lines, title)
+				if !strings.Contains(row, panel.sectionSchema(title).Summary) {
+					t.Fatalf("%s's row carries no summary: %q", title, row)
+				}
+				// A section with no stored row reads Default, at the right
+				// edge of the panel. A file section is a read-only view with
+				// no marker of its own.
+				switch {
+				case tc.readOnly:
+					if strings.HasSuffix(row, configDefaultStatus) {
+						t.Fatalf("%s's row = %q, want no status", title, row)
+					}
+				case !strings.HasSuffix(row, configDefaultStatus):
+					t.Fatalf("%s's row = %q, want the status at its right edge", title, row)
+				}
+				// A row with a right-hand track is drawn to the panel's edge;
+				// either way it never overflows.
+				w := displayLineWidth(row)
+				if w > 120 {
+					t.Fatalf("%s's row is %d cells at width 120: %q", title, w, row)
+				}
+				if strings.HasSuffix(row, configDefaultStatus) && w != 120 {
+					t.Fatalf("%s's row is %d cells at width 120: %q", title, w, row)
+				}
+			}
+			// A narrow terminal keeps the rows inside its width.
+			for _, line := range renderTabbedPage(items, first[tc.tab], 68) {
+				if w := displayLineWidth(stripANSI(line)); w > 68 {
+					t.Fatalf("a row overflows a 68-cell panel: %q", stripANSI(line))
+				}
+			}
+		})
+	}
+}
+
+// sectionsOfTab counts the sections one tab lists.
+func sectionsOfTab(tab string) []configSectionSchema {
+	out := make([]configSectionSchema, 0, len(configSectionSchemas))
+	for _, schema := range panelSections() {
+		if schema.Tab == tab {
+			out = append(out, schema)
+		}
+	}
+	return out
+}
+
+// sectionSchema is one section by the title the list shows.
+func (p *configPanel) sectionSchema(title string) configSectionSchema {
+	for _, schema := range panelSections() {
+		if schema.Title == title {
+			return schema
+		}
+	}
+	return configSectionSchema{}
+}
+
+// A section page paints each setting as name, value and status: the hint beside
+// the name, the value it holds in a right-aligned track, and the marker a
+// projection puts beyond it (plan 321).
+func TestConfigPanelRendersTheValueColumn(t *testing.T) {
+	// A settings page: two switches, one set and one not, so the values differ.
+	panel := sectionPanel(map[string]string{"features": `{"memories":true}`})
+	features, ok := configSectionSchemaFor("features")
+	if !ok {
+		t.Fatal("no features section")
+	}
+	items, _ := panel.fieldItems(features, panel.sectionDoc("features"))
+	lines := renderRichPage(items, features.Title, 120)
+
+	memories := renderedRow(t, lines, "Memory")
+	if !strings.HasSuffix(memories, configBoolOnLabel) {
+		t.Fatalf("the Memory row = %q, want its value at the right edge", memories)
+	}
+	if !strings.Contains(memories, "On by default") {
+		t.Fatalf("the Memory row = %q, want its hint beside the name", memories)
+	}
+	servers := renderedRow(t, lines, "Language servers")
+	if !strings.HasSuffix(servers, configDefaultStatus) {
+		t.Fatalf("the Language servers row = %q, want the default it follows", servers)
+	}
+	// Both values end at the same column: the track is fixed, not pushed along.
+	if endsAt(memories, configBoolOnLabel) != endsAt(servers, configDefaultStatus) {
+		t.Fatalf("the values are not aligned:\n%q\n%q", memories, servers)
+	}
+
+	// A projection's page: the model and level beside the name, the row's own
+	// status at the right edge — value column and status column together.
+	projection := sectionPanel(map[string]string{"agents": `{
+		"subagent_models":{"plan":{"model":"llm-1","reasoning_effort":"high"}},
+		"plan_reviewer":{"model":"llm-1"}
+	}`})
+	projection.models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	subagentModels, ok := configSectionSchemaFor("subagent_models")
+	if !ok {
+		t.Fatal("no subagent_models section")
+	}
+	items, _ = projection.fieldItems(subagentModels, projection.sectionDoc("agents"))
+	lines = renderRichPage(items, subagentModels.Title, 120)
+	plan := renderedRow(t, lines, "plan")
+	if !strings.Contains(plan, "openai/gpt-main / High") || !strings.HasSuffix(plan, configGlobalDefaultStatus) {
+		t.Fatalf("the plan row = %q, want the model beside the name and its status at the edge", plan)
+	}
+	unset := renderedRow(t, lines, "general-purpose")
+	if !strings.HasSuffix(unset, configFollowConversationModel) {
+		t.Fatalf("the general-purpose row = %q, want the sentence it follows", unset)
+	}
+}
+
 // pageLabels joins every page's heading the panel showed, so a refusal or a
 // notice can be read where the user read it.
 func pageLabels(selector *scriptedSelector) string {
 	return strings.Join(selector.richLabels, "\n")
+}
+
+// endsAt is the cell column a row's last value ends at: byte offsets would
+// count a one-cell cursor glyph as three, so the prefix is measured in cells.
+func endsAt(row, value string) int {
+	at := strings.LastIndex(row, value)
+	if at < 0 {
+		return -1
+	}
+	return displayLineWidth(row[:at]) + displayLineWidth(value)
+}
+
+// sectionPanel is a panel over a stored configuration, for the render checks:
+// the rows the panel builds, laid out by the picker's own painters rather than
+// the fake selector, so an assertion reads what a screen shows.
+func sectionPanel(stored map[string]string) *configPanel {
+	session := newConfigPanelSession(stored)
+	panel := newConfigPanel(nil, nil, session)
+	snapshot, err := session.ConfigPanelSections(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	panel.raw = snapshot.Stored
+	panel.file = snapshot.File
+	return panel
+}
+
+// renderTabbedPage lays the tabbed picker out at width, opened on the tab that
+// holds items[start].
+func renderTabbedPage(items []SelectItem, start, width int) []string {
+	p := newTabbedPickerState(items, TabbedSelectOptions{DefaultIdx: start}, false, "")
+	return p.panel("Configuration").layout(width, 0, 0, false).lines
+}
+
+// renderRichPage lays a plain picker page out at width, the way SelectRich
+// paints it.
+func renderRichPage(items []SelectItem, label string, width int) []string {
+	p := &richPickerState{items: items}
+	for i := range items {
+		p.selectable = append(p.selectable, i)
+	}
+	return p.panel(label).layout(width, 0, 0, false).lines
+}
+
+// renderedRow is the painted line of one row, found by the name it starts with
+// once the row's margin is off.
+func renderedRow(t *testing.T, lines []string, name string) string {
+	t.Helper()
+	for _, line := range lines {
+		body := strings.TrimLeft(stripANSI(line), " ")
+		body = strings.TrimPrefix(body, selectorCursorGlyph+" ")
+		if strings.HasPrefix(body, name) {
+			return stripANSI(line)
+		}
+	}
+	t.Fatalf("no row %q among:\n%s", name, strings.Join(stripANSIAll(lines), "\n"))
+	return ""
+}
+
+func stripANSIAll(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, stripANSI(line))
+	}
+	return out
 }
 
 // The agents section reaches the plan reviewer's two global settings beside the
@@ -1264,7 +1469,7 @@ func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
 	if main.Status != configPrimaryStatus {
 		t.Fatalf("main's status = %q, want %q", main.Status, configPrimaryStatus)
 	}
-	if main.Description != "› 2 items" {
+	if main.Description != "2 entries" {
 		t.Fatalf("main's description = %q, want the value alone", main.Description)
 	}
 }
@@ -1309,7 +1514,7 @@ func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
 		"#1": "agent override: openai/gpt-sub",
 		"#2": "global default: openai/gpt-main / xHigh",
 		"#3": configFollowConversationModel,
-		"#4": "› 3 items",
+		"#4": "3 entries",
 		"#5": configSystemSubagentNotice,
 	}
 	for label, want := range cases {

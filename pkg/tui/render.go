@@ -7684,6 +7684,12 @@ type panelLine struct {
 	// when the row falls back to its stacked form: a status belongs to the
 	// row's identity, so it never takes a line of its own.
 	status string
+	// value, when set, is the row's value in a track of its own between the
+	// description and the status, right-aligned against it — the /config
+	// panel's name, value and status each in a column of their own (plan 321).
+	// Like the status it is drawn on the first line only and dropped when the
+	// row falls back to its stacked form.
+	value string
 }
 
 // rows wraps the line at width.

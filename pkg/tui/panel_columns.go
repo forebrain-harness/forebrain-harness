@@ -18,6 +18,11 @@ const panelColumnGap = 2
 // further to two fifths of the row.
 const panelNameColumnMax = 40
 
+// panelValueColumnMax caps a row's value track, so one long path or model name
+// cannot take the row: a longer value is elided with an ellipsis, the way the
+// prototype's value column cuts it. Only the /config panel sets a value.
+const panelValueColumnMax = 24
+
 // chipRows lays the chips out left to right, panelChipGap cells apart, wrapping
 // whole: a chip too wide to join the row starts the next one, so a tab's name
 // and its count never part across rows. A chip wider than the whole row only
@@ -107,27 +112,27 @@ func elideEndpoint(url, tail string, width int) []string {
 // column, which would float it in the middle of the panel. A row without a
 // description is laid out exactly like a plain row.
 //
-// A row with a status reserves that status a track of its own at the right
-// edge, and the description column narrows by it: the /config definitions
-// list's "Primary" marker (plan 313). The status is drawn whole on the row's
-// first line — it is never wrapped, truncated or given a line of its own — and
-// a stacked row drops it, the way the prototype hides its status column on a
-// narrow terminal.
+// A row with a value, a status, or both reserves each a track of its own at
+// the right edge and the description column narrows by them: the /config
+// panel's value column and its "Primary"/"Default" marker (plans 313, 321).
+// Both are drawn whole on the row's first line — never wrapped, truncated or
+// given a line of their own — and a stacked row drops them, the way the
+// prototype hides its right-hand columns on a narrow terminal.
 func (l panelLine) columnRows(width int) []string {
 	if strings.TrimSpace(l.text) == "" {
 		// A row with no description keeps its mark right after the name, one
 		// space over, so a gear never floats in a column of its own.
 		if l.mark != "" {
-			return l.withStatus(panelLine{lead: l.lead, text: l.col + " " + l.mark}.rows(width), width)
+			return l.withTrailingTracks(panelLine{lead: l.lead, text: l.col + " " + l.mark}.rows(width), width)
 		}
-		return l.withStatus(panelLine{lead: l.lead, text: l.col}.rows(width), width)
+		return l.withTrailingTracks(panelLine{lead: l.lead, text: l.col}.rows(width), width)
 	}
 	leadW := displayLineWidth(l.lead)
 	colW := min(l.colWidth, maxInt(1, (width-leadW)*2/5))
 	nameW := displayLineWidth(l.col)
-	statusW := l.statusTrackWidth()
+	tracksW := l.trailingTrackWidth()
 	pad := strings.Repeat(" ", leadW+colW+panelColumnGap)
-	texts := l.descriptionRows(maxInt(1, width-leadW-colW-panelColumnGap-statusW))
+	texts := l.descriptionRows(maxInt(1, width-leadW-colW-panelColumnGap-tracksW))
 	render := func(chunk string) string {
 		if l.style != nil && chunk != "" {
 			return l.style.Render(chunk)
@@ -141,33 +146,62 @@ func (l panelLine) columnRows(width int) []string {
 		for _, chunk := range texts[1:] {
 			rows = append(rows, pad+render(chunk))
 		}
-		return l.withStatus(rows, width)
+		return l.withTrailingTracks(rows, width)
 	}
 	return l.columnRowsStacked(width)
 }
 
-// statusTrackWidth is the room a row's status takes out of its description
-// column: the label, the gap before it, and nothing when there is no status.
-func (l panelLine) statusTrackWidth() int {
-	if l.status == "" {
-		return 0
+// trailingTracks is the row's right-hand tracks as they are drawn — the value,
+// the gap between the two, then the status — each trimmed and the value capped
+// so one long path cannot take the whole row. Empty when the row has neither.
+func (l panelLine) trailingTracks() []string {
+	tracks := make([]string, 0, 2)
+	if value := strings.TrimSpace(l.value); value != "" {
+		tracks = append(tracks, runewidth.Truncate(value, panelValueColumnMax, "…"))
 	}
-	return displayLineWidth(l.status) + panelColumnGap
+	if status := strings.TrimSpace(l.status); status != "" {
+		tracks = append(tracks, status)
+	}
+	return tracks
 }
 
-// withStatus puts the row's status in its track at the right edge of the first
-// line. No status — or no room left for one — leaves the rows exactly as they
-// were: the label is never shortened to fit, and never moves to a later line.
-func (l panelLine) withStatus(rows []string, width int) []string {
-	if l.status == "" || len(rows) == 0 {
+// trailingTrackWidth is the room a row's value and status take out of its
+// description column: both tracks, the gap before the first and the gap
+// between them, and nothing when the row carries neither.
+func (l panelLine) trailingTrackWidth() int {
+	tracks := l.trailingTracks()
+	if len(tracks) == 0 {
+		return 0
+	}
+	return displayLineWidth(strings.Join(tracks, strings.Repeat(" ", panelColumnGap))) + panelColumnGap
+}
+
+// withTrailingTracks puts the row's value and status in their tracks at the
+// right edge of the first line. Neither — or no room left for them — leaves the
+// rows exactly as they were: the label is never shortened to fit, and never
+// moves to a later line.
+func (l panelLine) withTrailingTracks(rows []string, width int) []string {
+	raw := l.trailingTracks()
+	if len(raw) == 0 || len(rows) == 0 {
 		return rows
 	}
-	pad := width - displayLineWidth(rows[0]) - displayLineWidth(l.status)
+	// The value reads in the terminal's own foreground — the brightness of a
+	// setting in force — while the status stays faint, as every status does.
+	drawn := make([]string, 0, len(raw))
+	for i, track := range raw {
+		if i == 0 && strings.TrimSpace(l.value) != "" {
+			drawn = append(drawn, track)
+			continue
+		}
+		drawn = append(drawn, panelHintStyle.Render(track))
+	}
+	gap := strings.Repeat(" ", panelColumnGap)
+	pad := width - displayLineWidth(rows[0]) - displayLineWidth(strings.Join(raw, gap))
 	if pad < 0 {
 		return rows
 	}
 	styled := append([]string(nil), rows...)
-	styled[0] += strings.Repeat(" ", pad) + panelHintStyle.Render(l.status)
+	styled[0] += strings.Repeat(" ", pad) + strings.Join(drawn, gap)
 	return styled
 }
 
@@ -215,7 +249,7 @@ func (b *panelBuilder) tabs(chips []string) {
 // tight against the name — the /model effort picker's gear; no other list
 // passes one.
 func (b *panelBuilder) selectableColumns(selected bool, lead, name string, nameWidth int, desc, elideTail string, mark ...string) {
-	b.selectableColumnsStatus(selected, lead, name, nameWidth, desc, elideTail, "", mark...)
+	b.selectableColumnsValue(selected, lead, name, nameWidth, desc, elideTail, "", "", mark...)
 }
 
 // selectableColumnsStatus is selectableColumns with the row's status — the
@@ -224,9 +258,17 @@ func (b *panelBuilder) selectableColumns(selected bool, lead, name string, nameW
 // than a second variadic, so every list that draws no status keeps its call as
 // it was.
 func (b *panelBuilder) selectableColumnsStatus(selected bool, lead, name string, nameWidth int, desc, elideTail, status string, mark ...string) {
+	b.selectableColumnsValue(selected, lead, name, nameWidth, desc, elideTail, "", status, mark...)
+}
+
+// selectableColumnsValue is the full row: the same two columns, then the
+// row's value in a right-aligned track and its status beyond it — the /config
+// panel's name, value and status (plan 321). A list that draws neither keeps
+// its own entry point above.
+func (b *panelBuilder) selectableColumnsValue(selected bool, lead, name string, nameWidth int, desc, elideTail, value, status string, mark ...string) {
 	m := ""
 	if len(mark) > 0 {
 		m = mark[0]
 	}
-	b.addSelectable(selected, panelLine{lead: lead, col: name, colWidth: nameWidth, text: desc, elideTail: elideTail, mark: m, status: status})
+	b.addSelectable(selected, panelLine{lead: lead, col: name, colWidth: nameWidth, text: desc, elideTail: elideTail, mark: m, value: value, status: status})
 }

@@ -633,6 +633,11 @@ type SelectItem struct {
 	// scene primary-listed). "" is no status. Like the mark it is unstyled
 	// here: the renderer owns its colour, and a narrow row drops it.
 	Status string
+	// Value is what the row holds, drawn right-aligned in a track of its own
+	// just left of the status — the /config panel's value column, so a list of
+	// settings reads as name, value and status (plan 321). "" is no value; the
+	// renderer caps and elides it, and a narrow row drops it.
+	Value string
 }
 
 type Selector interface {

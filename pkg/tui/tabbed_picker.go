@@ -279,7 +279,7 @@ func (p *tabbedPickerState) panel(label string) slashPanel {
 				lead = selectorCheckedGlyph + " "
 			}
 		}
-		b.selectableColumns(ci == p.cursor, lead, p.items[idx].Label, p.nameWidth, strings.TrimSpace(p.items[idx].Description), "")
+		b.selectableColumnsValue(ci == p.cursor, lead, p.items[idx].Label, p.nameWidth, strings.TrimSpace(p.items[idx].Description), "", p.items[idx].Value, p.items[idx].Status)
 	}
 	if len(p.visible) == 0 {
 		b.text(panelIndent, "No matches", nil)

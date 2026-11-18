@@ -363,8 +363,8 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 // for a reader who is looking for it.
 const configRowBack = -2
 
-// fieldItems is one section's page: its settings with their current values,
-// then the way back.
+// fieldItems is one section's page: its settings, each with the value it holds
+// in the row's value column and its hint beside the label, then the way back.
 func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectItem, []int) {
 	items := make([]SelectItem, 0, len(schema.Fields)+1)
 	owners := make([]int, 0, len(schema.Fields)+1)
@@ -372,8 +372,8 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 		if !configFieldListed(field, p.claudeCode) {
 			continue
 		}
-		description, status := p.configFieldRow(doc, schema, field)
-		items = append(items, SelectItem{Label: field.Label, Description: description, Status: status})
+		description, value, status := p.configFieldRow(doc, schema, field)
+		items = append(items, SelectItem{Label: field.Label, Description: description, Value: value, Status: status})
 		owners = append(owners, i)
 	}
 	items = append(items, SelectItem{Label: configBackRowLabel, Description: "Back to the section list"})
@@ -381,22 +381,24 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 	return items, owners
 }
 
-// configFieldRow is one setting's row on the section page: what it holds now,
-// then the hint. A projection's rows say what the stored row resolves to rather
-// than how many keys it holds (plan 314): the per-type defaults read as the model
-// and level they name, with the prototype's status column beside them.
-func (p *configPanel) configFieldRow(doc any, schema configSectionSchema, field configField) (string, string) {
+// configFieldRow is one setting's row on the section page: the value it holds
+// in the row's value column, the hint beside it, and the status a projection
+// carries. A projection's rows say what the stored row resolves to rather than
+// how many keys it holds (plan 314): the per-type defaults read as the model and
+// level they name, which is the row's whole meaning, so it stays in the
+// description with the prototype's status column beside it.
+func (p *configPanel) configFieldRow(doc any, schema configSectionSchema, field configField) (string, string, string) {
 	if schema.StoreSection == "" {
-		return configFieldDescription(doc, field), ""
+		return configFieldDescription(doc, field)
 	}
 	path := configFieldPath(field)
 	switch {
 	case len(path) == 2 && path[0] == configSubagentModelsKey:
-		return p.configSubagentTypeSummary(doc, path[1]), configSubagentTypeStatus(doc, path[1])
+		return p.configSubagentTypeSummary(doc, path[1]), "", configSubagentTypeStatus(doc, path[1])
 	case len(path) == 1 && path[0] == configPlanReviewerKey:
-		return p.configGlobalRowSummary(doc, configPlanReviewerKey), configStatusIf(refOfRow(doc, configPlanReviewerKey) != "", configGlobalRowStatus)
+		return p.configGlobalRowSummary(doc, configPlanReviewerKey), "", configStatusIf(refOfRow(doc, configPlanReviewerKey) != "", configGlobalRowStatus)
 	}
-	return configFieldDescription(doc, field), ""
+	return configFieldDescription(doc, field)
 }
 
 // refOfRow is one stored row's model reference, empty when it names none.
@@ -858,14 +860,13 @@ func (p *configPanel) fieldPrompt(field configField) string {
 	return field.Label + "\n" + field.Hint
 }
 
-// fieldDescription is a field's picker row: the value in force, then the hint.
-func configFieldDescription(doc any, field configField) string {
+// configFieldDescription is a field's picker row: the hint that says what the
+// setting means beside the label, and the value it holds in the row's value
+// column — the panel's descriptions belong to settings, not to the values they
+// happen to hold right now (plan 321).
+func configFieldDescription(doc any, field configField) (string, string, string) {
 	value, exists := configLookupValue(doc, configFieldPath(field))
-	state := "now: " + configFieldValueText(field, value, exists)
-	if strings.TrimSpace(field.Hint) == "" {
-		return state
-	}
-	return state + " " + field.Hint
+	return strings.TrimSpace(field.Hint), configFieldValueText(field, value, exists), ""
 }
 
 // configRowAdd and configRowUp own the row page's two action rows; a row's
@@ -994,15 +995,18 @@ func (p *configPanel) configRowLabelAt(doc any, path []string, key string, index
 	return configRowLabel(key, index, list)
 }
 
-// configRowDescription is a row's second column: what it holds right now.
+// configRowDescription is a row's second column: what it holds right now. A
+// container is counted in the prototype's own words and carries no arrow — the
+// row opens because it is a container, and a glyph promising it only decorates
+// the row (plan 321).
 func configRowDescription(value any) string {
 	if configIsContainer(value) {
-		return "› " + strconv.Itoa(configContainerLen(value)) + " items"
+		return configContainerText(value)
 	}
 	if value == nil {
 		return "(empty)"
 	}
-	return "= " + configScalarText(value)
+	return configScalarText(value)
 }
 
 // The agents section's parts the panel reads by name: the definitions map, the
@@ -2093,16 +2097,18 @@ func configStoredEffort(value any) string {
 	return strings.ToLower(strings.TrimSpace(level))
 }
 
-// configFieldValueText is a field's value as the section page shows it.
+// configFieldValueText is a field's value as the section page shows it in the
+// row's value column. An unset setting reads as the default it follows, which
+// is the one word the panel uses for it everywhere else (plan 321).
 func configFieldValueText(field configField, value any, exists bool) string {
 	if configIsContainer(value) {
-		return strconv.Itoa(configContainerLen(value)) + " items"
+		return configContainerText(value)
 	}
 	if field.Kind == configFieldBool3 {
 		boolean, ok := value.(bool)
 		switch {
 		case !ok:
-			return "default"
+			return configDefaultStatus
 		case boolean:
 			return configBoolOnLabel
 		default:
@@ -2114,7 +2120,7 @@ func configFieldValueText(field configField, value any, exists bool) string {
 	if configEffortField(field) {
 		level, _ := value.(string)
 		if strings.TrimSpace(level) == "" {
-			return "unset"
+			return configDefaultStatus
 		}
 		return turn.EffortEnglishLabel(level)
 	}
@@ -2122,9 +2128,19 @@ func configFieldValueText(field configField, value any, exists bool) string {
 	// reached only by a leaf inside a table row — an optional field of an MCP
 	// server or an LSP server, which no registered default covers.
 	if !exists || value == nil {
-		return "unset"
+		return configDefaultStatus
 	}
 	return configScalarText(value)
+}
+
+// configContainerText is a table or list as a row's value column counts it: a
+// list's items, a map's entries — the prototype's two words for the two shapes.
+func configContainerText(value any) string {
+	n := strconv.Itoa(configContainerLen(value))
+	if _, isList := value.([]any); isList {
+		return n + " items"
+	}
+	return n + " entries"
 }
 
 // configScalarText renders one scalar the way a row shows it.

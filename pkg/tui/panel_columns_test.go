@@ -149,6 +149,68 @@ func TestPanelColumnsWithoutDescriptionMatchPlainRows(t *testing.T) {
 	}
 }
 
+// A row's value and status are tracks of their own at the right edge, the value
+// first — the /config panel's name, value and status (plans 313, 321): the
+// description column narrows by both so they never meet, each is drawn whole on
+// the first line, and a row with neither is byte-for-byte what it was.
+func TestPanelColumnsDrawTheValueBeforeTheStatus(t *testing.T) {
+	const width = 80
+	withValue := panelLine{lead: "  ", col: "Auto-compact at", colWidth: 20, text: "Compacts when the window fills", value: "90 %", status: "Default"}
+	rows := withValue.rows(width)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1: %q", len(rows), rows)
+	}
+	got := stripANSI(rows[0])
+	if !strings.HasSuffix(got, "Default") {
+		t.Fatalf("row = %q, want the status at its right edge", got)
+	}
+	if valueAt, statusAt := strings.Index(got, "90 %"), strings.Index(got, "Default"); valueAt < 0 || valueAt > statusAt {
+		t.Fatalf("row = %q, want the value left of the status", got)
+	}
+	if w := displayLineWidth(got); w != width {
+		t.Fatalf("row is %d cells wide at width %d: %q", w, width, got)
+	}
+	if !strings.Contains(got, "Compacts when the window fills") {
+		t.Fatalf("row = %q, want the description in its column", got)
+	}
+	assertRowsFit(t, rows, width)
+
+	// Both tracks are fixed: two rows with different values line their values
+	// and their statuses up at the same columns.
+	rowB := panelLine{lead: "  ", col: "Auto-compact at", colWidth: 20, text: "Compacts when the window fills", value: "60 %", status: "Default"}
+	a, b := stripANSI(withValue.rows(width)[0]), stripANSI(rowB.rows(width)[0])
+	if strings.Index(a, "Default") != strings.Index(b, "Default") || strings.Index(a, "90 %") != strings.Index(b, "60 %") {
+		t.Fatalf("the tracks are not aligned:\n%q\n%q", a, b)
+	}
+
+	// A value longer than the track is elided, never pushed into the status.
+	long := panelLine{lead: "  ", col: "Model", colWidth: 20, text: "hint", value: "a-very-long-model-reference-that-cannot-fit", status: "Default"}
+	for _, row := range long.rows(width) {
+		if !strings.Contains(stripANSI(row), "…") {
+			t.Fatalf("a long value must be elided: %q", stripANSI(row))
+		}
+		assertRowsFit(t, []string{row}, width)
+	}
+
+	// A row with neither track is untouched.
+	plain := panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items"}
+	if plain.rows(width)[0] != (panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items"}).rows(width)[0] {
+		t.Fatalf("a trackless row changed: %q", plain.rows(width))
+	}
+
+	// The picker's own entry point carries both through.
+	builder := newPanelBuilder()
+	builder.selectableColumnsValue(false, "", "Auto-compact at", 20, "hint", "", "90 %", "Default")
+	if len(builder.body) != 1 || builder.body[0].value != "90 %" || builder.body[0].status != "Default" {
+		t.Fatalf("the picker row carries no value: %+v", builder.body)
+	}
+	builder = newPanelBuilder()
+	builder.selectableColumns(false, "", "main", 14, "4 items", "")
+	if len(builder.body) != 1 || builder.body[0].value != "" || builder.body[0].status != "" {
+		t.Fatalf("a trackless row picked one up: %+v", builder.body)
+	}
+}
+
 // A row's status is a track of its own at the right edge — the /config
 // definitions list's "Primary" (plan 313): the description column narrows by it
 // so the two never meet, the status is drawn whole on the first line, and a row
