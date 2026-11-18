@@ -8067,25 +8067,6 @@ func (b *panelBuilder) title(text string) {
 	b.head = append(b.head, panelLine{lead: panelIndent, text: text, style: &panelTitleStyle})
 }
 
-// titleWithTag adds the head's title row with a tag at the panel's right
-// edge (plan 329 D4): the scope a section's change takes effect in, a
-// collection's count, an editor's kind word. The tag is quiet and whole — it
-// never wraps and never takes a row of its own, and it is dropped rather
-// than pushed when the title leaves no room.
-func (b *panelBuilder) titleWithTag(text, tag string) {
-	b.head = append(b.head, panelLine{lead: panelIndent, text: text, style: &panelTitleStyle, status: tag})
-}
-
-// breadcrumb adds the breadcrumb row to the pinned head (plan 329 D4): the
-// trail joined root first, under the tab bar, so every page says where it
-// sits. An empty trail draws nothing — the head keeps its shape.
-func (b *panelBuilder) breadcrumb(trail []string) {
-	if len(trail) == 0 {
-		return
-	}
-	b.head = append(b.head, panelLine{lead: panelIndent, text: strings.Join(trail, " / "), style: &panelHintStyle})
-}
-
 // subtitle adds a plain row to the pinned head, under the title.
 func (b *panelBuilder) subtitle(text string) {
 	b.head = append(b.head, panelLine{lead: panelIndent, text: text})
@@ -8111,13 +8092,29 @@ func (b *panelBuilder) group(heading string) {
 // groupRule opens a group the way the /config prototype styles one (plan 329
 // D4, .group-label): the heading upper-cased with a rule running from it to
 // the panel's right edge, faint so it reads as structure, not content. The
-// blank row before a non-first group is group's own, kept here.
+// blank row before a group is the page's own spacing — laid by breathe, so a
+// /config page never doubles it (plan 325 D5).
 func (b *panelBuilder) groupRule(heading string) {
-	if len(b.body) > 0 {
-		b.blank()
-	}
 	b.heading, b.grouped = len(b.body), 0
 	b.body = append(b.body, panelLine{lead: panelIndent, text: strings.ToUpper(heading), style: &panelAccentStyle, rule: true})
+}
+
+// breathe puts one blank body row before a /config page's next row or group
+// (plan 325 D5), so the rows sit airier than the plain pickers' packed list.
+// It never doubles a blank that is already there, never cuts a group heading
+// from its first row, and adds nothing at the body's start: the layout itself
+// sets the head off the body with one blank line.
+func (b *panelBuilder) breathe() {
+	if len(b.body) == 0 {
+		return
+	}
+	if len(b.body)-1 == b.heading {
+		return
+	}
+	if line := b.body[len(b.body)-1]; line.text == "" && line.col == "" && len(line.chips) == 0 && line.mark == "" {
+		return
+	}
+	b.blank()
 }
 
 // wrapPanelWords folds text at spaces to width display cells; only a token

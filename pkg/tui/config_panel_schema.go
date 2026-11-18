@@ -110,8 +110,9 @@ type configField struct {
 	// by the nested page renderer, never by the section pages above.
 
 	// Group names the fixed page section the field renders under, mirroring
-	// the prototype's group labels (a template field's Group; a section
-	// field's groups arrive with plan 325).
+	// the prototype's group labels — a template field's Group (plan 329), a
+	// section field's (plan 325 D2). Fields of one group sit together in the
+	// order the prototype fixes; an empty Group renders under no heading.
 	Group string
 	// Multiline marks a text field whose value holds lines (prompts,
 	// descriptions); the single-line editor stays until plan 328 wires the
@@ -168,11 +169,6 @@ type configSectionSchema struct {
 	// the user sees and types. "Subagent models" projects the agents store
 	// (plan 314). A projection is not itself a config.Root section.
 	StoreSection string
-	// Effect is the section's right-edge tag on its own page and every page
-	// below it (plan 329 D4): the scope a change here takes effect in —
-	// "New sessions only", "All primary agents". Empty means the section's
-	// pages carry the panel's own "Next turn" tag.
-	Effect string
 	// Fields are the editable settings, in the order the section page shows
 	// them. A YAML-only section has none.
 	Fields []configField
@@ -204,7 +200,6 @@ var configSectionSchemas = []configSectionSchema{
 	{
 		Name: "approval_preset", Title: "Approval preset", Tab: configTabApproval,
 		Summary: "Default approval mode for new sessions",
-		Effect:  "New sessions only",
 		Fields: []configField{{
 			Label: "Approval preset", Kind: configFieldEnum,
 			Options:      []string{"workspace_write", "full_access"},
@@ -218,25 +213,24 @@ var configSectionSchemas = []configSectionSchema{
 		Summary: "Control writable paths and network access",
 		Fields: []configField{
 			{Path: "writable_roots", Label: "Extra writable roots", Kind: configFieldRows, List: true, Hint: "One absolute path per row"},
-			{Path: "network_access", Label: "Allow network access", Kind: configFieldBool3, Hint: "On by default"},
+			{Path: "network_access", Label: "Allow network access", Kind: configFieldBool3, Group: "Network", Hint: "On by default"},
 		},
 	},
 	{
 		Name: "compact", Title: "Context compaction", Tab: configTabSession,
 		Summary: "Auto-compaction threshold and prompt",
 		Fields: []configField{
-			{Path: "prompt", Label: "Hand-off prompt", Kind: configFieldText, Hint: "Empty uses the built-in prompt"},
 			{
 				Path: "auto_compact_percent", Label: "Auto-compact threshold (%)", Kind: configFieldNumber,
-				Min: 50, Max: 90, Clamp: true,
+				Min: 50, Max: 90, Clamp: true, Group: "Threshold",
 				Hint: "Default 90; compacts when the window reaches this percentage — range 50–90, past 90 is stored as 90",
 			},
+			{Path: "prompt", Label: "Hand-off prompt", Kind: configFieldText, Group: "Instructions", Hint: "Empty uses the built-in prompt"},
 		},
 	},
 	{
 		Name: "batch", Title: "Batch projects", Tab: configTabApproval,
 		Summary: "Sandbox a new batch project starts with",
-		Effect:  "New batch projects",
 		Fields: []configField{{
 			Path: "sandbox_default", Label: "Enable sandbox", Kind: configFieldBool3,
 			Hint: "On by default; a new batch project starts from this value and manages its own afterwards",
@@ -246,25 +240,25 @@ var configSectionSchemas = []configSectionSchema{
 		Name: "memories", Title: "Memory", Tab: configTabSession,
 		Summary: "Memory budgets and models; the switch lives under Feature switches → Memory",
 		Fields: []configField{
-			{Path: "search_top_k", Label: "Results per search", Kind: configFieldNumber, Min: 1, Max: 20, Clamp: true, Hint: "Default 5; past 20 is stored as 20"},
-			{Path: "max_raw_memories_for_consolidation", Label: "Raw memories per consolidation", Kind: configFieldNumber, Min: 1, Max: 4096, Clamp: true, Hint: "Default 256"},
-			{Path: "max_unused_days", Label: "Days before an unused memory expires", Kind: configFieldNumber, Min: 0, Max: 365, Clamp: true, Hint: "Default 30"},
-			{Path: "max_rollout_age_days", Label: "Days a record is kept", Kind: configFieldNumber, Min: 0, Max: 90, Clamp: true, Hint: "Default 10"},
-			{Path: "max_rollouts_per_startup", Label: "Records processed per startup", Kind: configFieldNumber, Min: 1, Max: 128, Clamp: true, Hint: "Default 2"},
-			{Path: "min_rollout_idle_hours", Label: "Idle hours before a record is processed", Kind: configFieldNumber, Min: 1, Max: 48, Clamp: true, Hint: "Default 6"},
+			{Path: "search_top_k", Label: "Results per search", Kind: configFieldNumber, Group: "Retrieval", Min: 1, Max: 20, Clamp: true, Hint: "Default 5; past 20 is stored as 20"},
+			{Path: "max_raw_memories_for_consolidation", Label: "Raw memories per consolidation", Kind: configFieldNumber, Group: "Retrieval", Min: 1, Max: 4096, Clamp: true, Hint: "Default 256"},
+			{Path: "max_unused_days", Label: "Days before an unused memory expires", Kind: configFieldNumber, Group: "Retention", Min: 0, Max: 365, Clamp: true, Hint: "Default 30"},
+			{Path: "max_rollout_age_days", Label: "Days a record is kept", Kind: configFieldNumber, Group: "Retention", Min: 0, Max: 90, Clamp: true, Hint: "Default 10"},
+			{Path: "max_rollouts_per_startup", Label: "Records processed per startup", Kind: configFieldNumber, Group: "Processing", Min: 1, Max: 128, Clamp: true, Hint: "Default 2"},
+			{Path: "min_rollout_idle_hours", Label: "Idle hours before a record is processed", Kind: configFieldNumber, Group: "Processing", Min: 1, Max: 48, Clamp: true, Hint: "Default 6"},
 			// The stored value is a row of the global model table or the
 			// explicit "current" (the conversation's own model, plan 207
 			// §3.3): the picker stores one of those two, and the row shows
 			// what is in force.
-			{Path: "extract_model", Label: "Extraction model", Kind: configFieldModel, ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory, Hint: "current = the conversation's own model"},
-			{Path: "consolidation_model", Label: "Consolidation model", Kind: configFieldModel, ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory, Hint: "current = the conversation's own model"},
+			{Path: "extract_model", Label: "Extraction model", Kind: configFieldModel, Group: "Models", ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory, Hint: "current = the conversation's own model"},
+			{Path: "consolidation_model", Label: "Consolidation model", Kind: configFieldModel, Group: "Models", ModelEmpty: "Follow conversation", ModelEmptyValue: "current", ModelFlavor: configModelFlavorMemory, Hint: "current = the conversation's own model"},
 		},
 	},
 	{
 		Name: "cron", Title: "Scheduled tasks", Tab: configTabSession,
 		Summary: "How long a scheduled task's records are kept",
 		Fields: []configField{{
-			Path: "retention_days", Label: "Keep days", Kind: configFieldNumber,
+			Path: "retention_days", Label: "Keep days", Kind: configFieldNumber, Group: "Retention",
 			Min: 1, Max: 3650, Hint: "Default 30; range 1–3650",
 		}},
 	},
@@ -281,7 +275,7 @@ var configSectionSchemas = []configSectionSchema{
 		Summary: "Definitions, shared defaults and goal checks",
 		Fields: []configField{
 			{
-				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows,
+				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows, Group: "Definitions",
 				// A definition's default_model is picked from the global model
 				// table like every model reference (plan 324): the row's page is
 				// the agent template, whose Default model field opens the picker.
@@ -292,35 +286,35 @@ var configSectionSchemas = []configSectionSchema{
 			// agent. The level inside one of those rows is a picker, the model
 			// row it names supplying the levels (plan 319).
 			{
-				Path: "subagent_models", Label: "Subagent models", Kind: configFieldRows,
+				Path: "subagent_models", Label: "Subagent models", Kind: configFieldRows, Group: "Definitions",
 				Hint: "One built-in type per row (explore, plan, general-purpose, verification); a row holds its model row id and thinking level",
 			},
 			{
-				Path: "defaults.network_retry_max", Label: "Network retry limit", Kind: configFieldNumber,
+				Path: "defaults.network_retry_max", Label: "Network retry limit", Kind: configFieldNumber, Group: "Defaults",
 				Min: 0, Max: 15, Clamp: true, Hint: "Default 10; 0 turns retries off, past 15 runs as 15",
 			},
 			{
-				Path: "defaults.stream_idle_timeout_seconds", Label: "Stream idle timeout (s)", Kind: configFieldNumber,
+				Path: "defaults.stream_idle_timeout_seconds", Label: "Stream idle timeout (s)", Kind: configFieldNumber, Group: "Defaults",
 				Min: 0, Max: 1800, Clamp: true, Hint: "Default 300; 0 turns the watchdog off",
 			},
-			{Path: "defaults.enable_subagent", Label: "Enable subagents", Kind: configFieldBool3, Hint: "Default: the built-in setting"},
+			{Path: "defaults.enable_subagent", Label: "Enable subagents", Kind: configFieldBool3, Group: "Defaults", Hint: "Default: the built-in setting"},
 			{
-				Path: "defaults.context_inject.warn_remaining_percent", Label: "Warn remaining (%)", Kind: configFieldNumber,
+				Path: "defaults.context_inject.warn_remaining_percent", Label: "Warn remaining (%)", Kind: configFieldNumber, Group: "Defaults",
 				Min: 1, Max: 50, Clamp: true,
 				Hint: "Default 12; warns when the remaining window falls below this percentage, range 1–50",
 			},
-			{Path: "defaults.mcp_servers", Label: "Shared MCP servers", Kind: configFieldRows, Hint: "One server per row"},
+			{Path: "defaults.mcp_servers", Label: "Shared MCP servers", Kind: configFieldRows, Group: "Connections", Hint: "One server per row"},
 			// The /goal check's global row (plan 299) is two settings, not a
 			// whole subagent entry: it is dispatched by the system, so it has
 			// no name, description, prompt or tool policy to edit here, and a
 			// rows descriptor on the value would offer all of those.
 			{
-				Path: "goal_evaluator.model", Label: "Goal check model", Kind: configFieldModel,
+				Path: "goal_evaluator.model", Label: "Goal check model", Kind: configFieldModel, Group: "Goal checks",
 				ModelEmpty: "Follow primary agent", ModelFlavor: configModelFlavorModel,
 				Hint: "A model row id (the row chosen in Settings → Subagents); empty follows the primary agent",
 			},
 			{
-				Path: "goal_evaluator.reasoning_effort", Label: "Goal check thinking level", Kind: configFieldEffort,
+				Path: "goal_evaluator.reasoning_effort", Label: "Goal check thinking level", Kind: configFieldEffort, Group: "Goal checks",
 				Hint: "Empty follows that model row's default level; a level here overrides it",
 			},
 		},
@@ -336,7 +330,6 @@ var configSectionSchemas = []configSectionSchema{
 		// does not show travels back untouched on save.
 		Name: "subagent_models", Title: "Subagent models", Tab: configTabAgents,
 		Summary:      "Install-wide defaults for built-in types, plan-reviewer and shared custom subagents",
-		Effect:       "All primary agents",
 		StoreSection: "agents",
 		Fields: []configField{
 			// The four public per-type defaults: a global row id + thinking
@@ -367,20 +360,20 @@ var configSectionSchemas = []configSectionSchema{
 		Name: "lsp", Title: "Language servers", Tab: configTabAgents,
 		Summary: "Language server switches, limits and diagnostics",
 		Fields: []configField{
-			{Path: "recommendations", Label: "Recommendations", Kind: configFieldBool3, Hint: "On by default"},
-			{Path: "servers", Label: "Servers", Kind: configFieldRows, Hint: "One server id per row; a row holds command, args, env and the rest"},
-			{Path: "max_servers", Label: "Concurrent servers limit", Kind: configFieldNumber, Min: 0, Max: 32, Hint: "Default 6; range 1–32"},
-			{Path: "idle_timeout", Label: "Idle exit (s)", Kind: configFieldNumber, Min: 0, Max: 86400, Hint: "Default 600; range 60–86400 when not 0"},
-			{Path: "request_timeout", Label: "Request timeout (s)", Kind: configFieldNumber, Min: 0, Max: 600, Hint: "Default 30; range 1–600"},
-			{Path: "diagnostics.after_edit", Label: "Diagnose after edit", Kind: configFieldBool3, Hint: "On by default"},
-			{Path: "diagnostics.wait_ms", Label: "Diagnostic wait (ms)", Kind: configFieldNumber, Min: 0, Max: 30000, Hint: "Default 2500; 0 does not wait"},
+			{Path: "recommendations", Label: "Recommendations", Kind: configFieldBool3, Group: "Discovery", Hint: "On by default"},
+			{Path: "servers", Label: "Servers", Kind: configFieldRows, Group: "Discovery", Hint: "One server id per row; a row holds command, args, env and the rest"},
+			{Path: "max_servers", Label: "Concurrent servers limit", Kind: configFieldNumber, Group: "Lifecycle", Min: 0, Max: 32, Hint: "Default 6; range 1–32"},
+			{Path: "idle_timeout", Label: "Idle exit (s)", Kind: configFieldNumber, Group: "Lifecycle", Min: 0, Max: 86400, Hint: "Default 600; range 60–86400 when not 0"},
+			{Path: "request_timeout", Label: "Request timeout (s)", Kind: configFieldNumber, Group: "Lifecycle", Min: 0, Max: 600, Hint: "Default 30; range 1–600"},
+			{Path: "diagnostics.after_edit", Label: "Diagnose after edit", Kind: configFieldBool3, Group: "Diagnostics", Hint: "On by default"},
+			{Path: "diagnostics.wait_ms", Label: "Diagnostic wait (ms)", Kind: configFieldNumber, Group: "Diagnostics", Min: 0, Max: 30000, Hint: "Default 2500; 0 does not wait"},
 			{
-				Path: "diagnostics.min_severity", Label: "Lowest severity", Kind: configFieldEnum,
+				Path: "diagnostics.min_severity", Label: "Lowest severity", Kind: configFieldEnum, Group: "Diagnostics",
 				Options: []string{"error", "warning", "information", "hint"}, Hint: "Default warning",
 			},
-			{Path: "diagnostics.max_per_file", Label: "Limit per file", Kind: configFieldNumber, Min: 0, Max: 200, Hint: "Default 20; range 1–200"},
-			{Path: "diagnostics.max_files", Label: "File-count limit", Kind: configFieldNumber, Min: 0, Max: 50, Hint: "Default 10; range 1–50"},
-			{Path: "diagnostics.late_delivery", Label: "Late diagnostics", Kind: configFieldBool3, Hint: "On by default"},
+			{Path: "diagnostics.max_per_file", Label: "Limit per file", Kind: configFieldNumber, Group: "Diagnostics", Min: 0, Max: 200, Hint: "Default 20; range 1–200"},
+			{Path: "diagnostics.max_files", Label: "File-count limit", Kind: configFieldNumber, Group: "Diagnostics", Min: 0, Max: 50, Hint: "Default 10; range 1–50"},
+			{Path: "diagnostics.late_delivery", Label: "Late diagnostics", Kind: configFieldBool3, Group: "Diagnostics", Hint: "On by default"},
 		},
 	},
 	{

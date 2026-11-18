@@ -86,9 +86,13 @@ type tabbedPickerState struct {
 	filter    filterField
 	inFilter  bool // the keyboard is in the filter, not on the rows
 	noFilter  bool // too few rows to need a filter: none is shown
-	multi     bool
-	checked   map[int]bool // indices into items (multi-select only)
-	esc       string
+	// configPage draws the picker as the /config overview (plan 325): airier
+	// rows and no filter box. Every other tabbed picker leaves it false and
+	// keeps the shape it has always drawn.
+	configPage bool
+	multi      bool
+	checked    map[int]bool // indices into items (multi-select only)
+	esc        string
 }
 
 // newTabbedPickerState opens on the row the options name — the row the user
@@ -272,6 +276,12 @@ func (p *tabbedPickerState) panel(label string) slashPanel {
 		b.tabs(p.tabChips())
 	}
 	for ci, idx := range p.visible {
+		if p.configPage {
+			// One blank line between rows — the overview breathes the way
+			// the prototype's padded rows do (plan 325 D5); the layout's own
+			// blank under the tab bar sets the first row off the bar.
+			b.breathe()
+		}
 		lead := ""
 		if p.multi {
 			lead = selectorUncheckedGlyph + " "
@@ -333,7 +343,18 @@ func tabbedFooterHint(switchable, multi bool, esc string) string {
 // SelectRichTabbed opens the tabbed picker and returns the index into items
 // of the row chosen.
 func (s *rawSelector) SelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error) {
-	p, ok, err := s.tabbedKeyLoop(label, items, opts, false)
+	p, ok, err := s.tabbedKeyLoop(label, items, opts, false, false)
+	if err != nil || !ok || p.current() < 0 {
+		return -1, false, err
+	}
+	return p.current(), true, nil
+}
+
+// SelectRichTabbedPage is SelectRichTabbed as the /config overview draws it
+// (plan 325): the tab bar stays — it is navigation, the way /status keeps
+// its own — with one blank line under it, airier rows and no filter box.
+func (s *rawSelector) SelectRichTabbedPage(label string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error) {
+	p, ok, err := s.tabbedKeyLoop(label, items, opts, false, true)
 	if err != nil || !ok || p.current() < 0 {
 		return -1, false, err
 	}
@@ -343,17 +364,18 @@ func (s *rawSelector) SelectRichTabbed(label string, items []SelectItem, opts Ta
 // MultiSelectRichTabbed opens the tabbed picker with check boxes and returns
 // the indices into items checked on confirm, ascending.
 func (s *rawSelector) MultiSelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
-	p, ok, err := s.tabbedKeyLoop(label, items, opts, true)
+	p, ok, err := s.tabbedKeyLoop(label, items, opts, true, false)
 	if err != nil || !ok {
 		return nil, false, err
 	}
 	return p.checkedIndices(), true, nil
 }
 
-// tabbedKeyLoop is the one key loop behind both tabbed primitives, shaped
+// tabbedKeyLoop is the one key loop behind the tabbed primitives, shaped
 // after selectRichPaged: it renders the panel, then reads keys until the user
-// confirms or cancels, reporting ok only for a confirmation.
-func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts TabbedSelectOptions, multi bool) (*tabbedPickerState, bool, error) {
+// confirms or cancels, reporting ok only for a confirmation. configPage draws
+// the loop's pages the /config panel's way (plan 325).
+func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts TabbedSelectOptions, multi, configPage bool) (*tabbedPickerState, bool, error) {
 	if len(items) == 0 {
 		return nil, false, nil
 	}
@@ -364,6 +386,12 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 	defer release()
 
 	p := newTabbedPickerState(items, opts, multi, s.escHint())
+	p.configPage = configPage
+	if configPage {
+		// The /config pages carry no filter box whatever their row count
+		// (plan 325 D6): the keyboard stays on the rows.
+		p.noFilter = true
+	}
 	s.showPanel(p.panel(label))
 	defer s.withCaretPlacer(func(line, col int) {
 		if s.placeFieldCaret(p.panel(label), &p.filter, line, col) {
@@ -469,109 +497,37 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 
 var _ TabbedRichSelector = (*rawSelector)(nil)
 
-// configPageChrome is the /config panel's persistent chrome (plan 329 D4):
-// the tab bar, the breadcrumb slot and the open page's right-edge tag, drawn
-// on every view the panel opens — the prototype pins all three above the
-// body, whichever page is showing. The trail itself is recorded by the pages
-// as they nest; plan 326 wires its navigation.
-type configPageChrome struct {
-	// tabs and counts are the tab bar: every tab the sections this machine
-	// offers group under, in the picker's own order, with the section count
-	// beside each (the overview's own chips).
-	tabs   []string
-	counts []int
-	// active is the tab the open section sits in.
-	active int
-	// trail is the breadcrumb below the tab bar, root first; the panel
-	// prefixes the Configuration root itself when it draws.
-	trail []string
-	// tag is the open page's right-edge title tag: the section's effect
-	// scope, a collection's count, or an editor's kind word.
-	tag string
-	// switchedTo is the tab the user asked for from inside the section, -1
-	// while none was asked; the panel unwinds its pages and opens that tab's
-	// overview.
-	switchedTo int
+// configPageSelector is what the /config panel's pages need of a selector
+// (plan 325): the same pickers every other slash panel opens, drawn as the
+// panel's own pages — airier rows, ruled group labels and no filter box. A
+// selector without the capability still serves the panel: its pages open as
+// the plain pickers, which is how a scripted selector keeps recording the
+// labels it always saw.
+type configPageSelector interface {
+	Selector
+	// SelectRichPage is SelectRich as one /config list page draws it.
+	SelectRichPage(label string, items []SelectItem, defaultIdx int) (int, bool, error)
+	// SelectRichTabbedPage is SelectRichTabbed as the /config overview draws
+	// it: the tab bar stays — it is navigation, the way /status keeps its own.
+	SelectRichTabbedPage(label string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error)
 }
 
-// newConfigPageChrome builds the chrome over the sections this machine
-// offers, opening on the first tab.
-func newConfigPageChrome(sections []configSectionSchema) configPageChrome {
-	c := configPageChrome{switchedTo: -1}
-	seen := make(map[string]int)
-	for _, schema := range sections {
-		at, ok := seen[schema.Tab]
-		if !ok {
-			at = len(c.tabs)
-			seen[schema.Tab] = at
-			c.tabs = append(c.tabs, schema.Tab)
-			c.counts = append(c.counts, 0)
-		}
-		c.counts[at]++
+var _ configPageSelector = (*rawSelector)(nil)
+
+// selectRichPage opens one /config list page when the selector can draw it
+// and the plain rich picker otherwise, so callers name the shape they want
+// without probing for the capability themselves (plan 325).
+func selectRichPage(sel Selector, label string, items []SelectItem, defaultIdx int) (int, bool, error) {
+	if pages, ok := sel.(configPageSelector); ok {
+		return pages.SelectRichPage(label, items, defaultIdx)
 	}
-	return c
+	return sel.SelectRich(label, items, defaultIdx)
 }
 
-// enterTab moves the bar onto the tab a section belongs to.
-func (c *configPageChrome) enterTab(tab string) {
-	for i, name := range c.tabs {
-		if name == tab {
-			c.active = i
-			return
-		}
+// selectRichTabbedPage is selectRichPage's tabbed form, for the overview.
+func selectRichTabbedPage(sel Selector, label string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error) {
+	if pages, ok := sel.(configPageSelector); ok {
+		return pages.SelectRichTabbedPage(label, items, opts)
 	}
-}
-
-// firstRowOfTab is the overview's opening row over the section list: the
-// first row of the tab the bar is on, so a switch back to the overview lands
-// on the tab the user asked for.
-func (c *configPageChrome) firstRowOfTab(items []SelectItem) int {
-	tab := ""
-	if c.active >= 0 && c.active < len(c.tabs) {
-		tab = c.tabs[c.active]
-	}
-	for i, item := range items {
-		if item.Category == tab {
-			return i
-		}
-	}
-	return 0
-}
-
-// switchTab steps the bar to the next tab that holds sections, wrapping
-// around, and records the switch for the panel to unwind on. It answers the
-// tab it landed on, or -1 when there is no other tab to take.
-func (c *configPageChrome) switchTab(step int) int {
-	if len(c.tabs) < 2 {
-		return -1
-	}
-	for n := 1; n < len(c.tabs); n++ {
-		t := ((c.active+step*n)%len(c.tabs) + len(c.tabs)) % len(c.tabs)
-		if t == c.active || c.counts[t] == 0 {
-			continue
-		}
-		c.switchedTo = t
-		return t
-	}
-	return -1
-}
-
-// draw lays the chrome into a page's head: the tab bar, then the breadcrumb.
-// The page's own title (with its right-edge tag) is laid by the picker after
-// this, so the head reads bar, trail, title, subtitle.
-func (c *configPageChrome) draw(b *panelBuilder) {
-	chips := make([]string, len(c.tabs))
-	for i, name := range c.tabs {
-		text := name
-		if c.counts[i] > 0 {
-			text = name + " " + strconv.Itoa(c.counts[i])
-		}
-		if i == c.active {
-			chips[i] = panelTabStyle.Render(text)
-		} else {
-			chips[i] = text
-		}
-	}
-	b.tabs(chips)
-	b.breadcrumb(append([]string{"Configuration"}, c.trail...))
+	return selectRichTabbed(sel, label, items, opts)
 }

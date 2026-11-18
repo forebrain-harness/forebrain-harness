@@ -174,14 +174,10 @@ type configPanel struct {
 	// Together they are the page's one write path (plan 321).
 	section string
 	write   func(raw json.RawMessage) error
-	// effectTag is the open section's own scope tag, carried at the right
-	// edge of every page below it (plan 329 D4); empty means the panel's own
-	// "Next turn" wording.
-	effectTag string
-	// chrome is the persistent head every page of the open section draws:
-	// the tab bar, the breadcrumb slot and the page's right-edge tag (plan
-	// 329 D4).
-	chrome configPageChrome
+	// overviewRow is the section list's opening row: the section the user
+	// last had open, so backing out of a page returns to where they were
+	// without the panel keeping any chrome of its own (plan 325).
+	overviewRow int
 }
 
 func newConfigPanel(sel Selector, renderer *Renderer, session configPanelSession) *configPanel {
@@ -225,12 +221,15 @@ func (c *commandController) handleConfig(ctx context.Context, args []string) boo
 
 // run walks the panel: the section list, then one section's page, until the
 // user closes it. Esc returns one level — from a section back to the list,
-// and from the list out of the panel. Switching tabs from inside a section
-// (the picker's ←/→) unwinds to that tab's overview, which is where the
-// switch lands (plan 329 D4).
+// and from the list out of the panel. The list reopens on the section that
+// was last open (plan 325).
 func (p *configPanel) run(ctx context.Context, start string) {
-	p.chrome = newConfigPageChrome(panelSections())
 	name := start
+	if start != "" {
+		if _, known := panelSectionSchemaFor(start); !known {
+			name = ""
+		}
+	}
 	for {
 		if name == "" {
 			chosen, ok := p.chooseSection()
@@ -242,56 +241,27 @@ func (p *configPanel) run(ctx context.Context, start string) {
 		if !p.editSection(ctx, name) {
 			return
 		}
-		if tab := p.chrome.switchedTo; tab >= 0 {
-			p.chrome.active, p.chrome.switchedTo = tab, -1
-		}
+		p.overviewRow = p.sectionRow(name)
 		name = ""
 	}
 }
 
-// chromeSelect opens one rich picker page under the panel's persistent
-// chrome when the selector can draw it, and as the plain picker otherwise —
-// a scripted selector keeps recording the label it always saw (plan 329 D4).
-func (p *configPanel) chromeSelect(label string, items []SelectItem, defaultIdx int) (int, bool, error) {
-	if chrome, ok := p.sel.(configChromeSelector); ok {
-		return chrome.SelectRichChrome(&p.chrome, label, items, defaultIdx)
-	}
-	return p.sel.SelectRich(label, items, defaultIdx)
-}
-
-// chromeInput is chromeSelect's one-line-question form.
-func (p *configPanel) chromeInput(label, defaultValue string) (string, bool, error) {
-	if chrome, ok := p.sel.(configChromeSelector); ok {
-		return chrome.InputChrome(&p.chrome, label, defaultValue)
-	}
-	return p.sel.Input(label, defaultValue)
-}
-
-// pushTrail records one page on the breadcrumb and answers the pop that
-// leaves it, so the trail a nested editor builds unwinds with its call
-// frames (the slot itself is plan 329 D4; plan 326 wires its navigation).
-func (p *configPanel) pushTrail(label string) func() {
-	p.chrome.trail = append(p.chrome.trail, label)
-	at := len(p.chrome.trail)
-	return func() {
-		if len(p.chrome.trail) >= at {
-			p.chrome.trail = p.chrome.trail[:at-1]
+// sectionRow is the section list's row for one section, so the list reopens
+// where the user left it; 0 when the list no longer holds it.
+func (p *configPanel) sectionRow(name string) int {
+	for i, schema := range panelSections() {
+		if schema.Name == name {
+			return i
 		}
 	}
-}
-
-// chromeSwitched reports whether the user asked for another tab from inside
-// the open pages: every loop unwinds without touching the document, and the
-// panel opens the tab's overview.
-func (p *configPanel) chromeSwitched() bool {
-	return p.chrome.switchedTo >= 0
+	return 0
 }
 
 // chooseSection lists every section, tabbed by the group its descriptor names.
 func (p *configPanel) chooseSection() (string, bool) {
 	items, names := p.sectionItems()
 	label := "Configuration\nOpen a section to see and change its settings."
-	idx, ok, err := selectRichTabbed(p.sel, label, items, TabbedSelectOptions{DefaultIdx: p.chrome.firstRowOfTab(items)})
+	idx, ok, err := selectRichTabbedPage(p.sel, label, items, TabbedSelectOptions{DefaultIdx: p.overviewRow})
 	if err != nil {
 		p.printError(err)
 		return "", false
@@ -381,29 +351,22 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 		return true
 	}
 	p.section = schema.storeSection()
-	p.effectTag = schema.Effect
-	p.chrome.enterTab(schema.Tab)
-	p.chrome.trail = []string{schema.Title}
 	p.write = func(raw json.RawMessage) error {
 		return p.session.UpdateConfigSection(ctx, p.section, raw)
 	}
 	defer func() {
-		p.section, p.write, p.effectTag = "", nil, ""
+		p.section, p.write = "", nil
 	}()
 	doc := p.sectionDoc(name)
 	notice := ""
 	for {
 		items, owners := p.fieldItems(schema, doc)
-		p.chrome.tag = p.sectionTag()
-		idx, ok, err := p.chromeSelect(p.sectionPrompt(schema, doc, notice), items, -1)
+		idx, ok, err := selectRichPage(p.sel, p.sectionPrompt(schema, doc, notice), items, -1)
 		if err != nil {
 			p.printError(err)
 			return false
 		}
 		notice = ""
-		if p.chromeSwitched() {
-			return true
-		}
 		if !ok || idx < 0 || idx >= len(owners) {
 			return true
 		}
@@ -417,16 +380,6 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 	}
 }
 
-// sectionTag is the section page's own right-edge tag: the scope the
-// descriptor names, else the panel's one wording for when a change lands
-// (plan 329 D4).
-func (p *configPanel) sectionTag() string {
-	if p.effectTag != "" {
-		return p.effectTag
-	}
-	return configNextTurnTag
-}
-
 // The page's one action row carries a negative owner so a field index and an
 // action never collide. Backing out is also what Esc does; the row is there
 // for a reader who is looking for it.
@@ -434,6 +387,8 @@ const configRowBack = -2
 
 // fieldItems is one section's page: its settings, each with the value it holds
 // in the row's value column and its hint beside the label, then the way back.
+// A field's Group names the fixed page section it renders under (plan 325
+// D2), the prototype's own labels.
 func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectItem, []int) {
 	items := make([]SelectItem, 0, len(schema.Fields)+1)
 	owners := make([]int, 0, len(schema.Fields)+1)
@@ -442,7 +397,7 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any) ([]SelectI
 			continue
 		}
 		description, value, status := p.configFieldRow(doc, schema, field)
-		items = append(items, SelectItem{Label: field.Label, Description: description, Value: value, Status: status})
+		items = append(items, SelectItem{Label: field.Label, Description: description, Value: value, Status: status, Category: field.Group})
 		owners = append(owners, i)
 	}
 	items = append(items, SelectItem{Label: configBackRowLabel, Description: "Back to the section list"})
@@ -682,8 +637,6 @@ func (p *configPanel) editField(doc any, field configField) (any, string) {
 // rows in the value list; going back to the default is the choice page's
 // `Default` action (owner 2026-11-16).
 func (p *configPanel) editBool3(doc any, path []string, field configField, cur any) (any, string) {
-	defer p.pushTrail(field.Label)()
-	p.chrome.tag = ""
 	items := []SelectItem{
 		{Label: configBoolOnLabel},
 		{Label: configBoolOffLabel},
@@ -696,7 +649,7 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 			defaultIdx = 0
 		}
 	}
-	idx, ok, err := p.chromeSelect(p.fieldPrompt(field), items, defaultIdx)
+	idx, ok, err := selectRichPage(p.sel, p.fieldPrompt(field), items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -720,8 +673,6 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 // configuration key (plan 203 §0.8). The list holds the real values only; the
 // last row is the `Default` action, which deletes the key (owner 2026-11-16).
 func (p *configPanel) editEnum(doc any, path []string, field configField, cur any) (any, string) {
-	defer p.pushTrail(field.Label)()
-	p.chrome.tag = ""
 	items := make([]SelectItem, 0, len(field.Options)+1)
 	for _, option := range field.Options {
 		item := SelectItem{Label: option}
@@ -745,7 +696,7 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 			}
 		}
 	}
-	idx, ok, err := p.chromeSelect(p.fieldPrompt(field), items, defaultIdx)
+	idx, ok, err := selectRichPage(p.sel, p.fieldPrompt(field), items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -764,9 +715,7 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 // loader simply honours (a clamp) lands on the bound with the panel saying
 // which value it stored.
 func (p *configPanel) editNumber(doc any, path []string, field configField, cur any) (any, string) {
-	defer p.pushTrail(field.Label)()
-	p.chrome.tag = "Number"
-	text, ok, err := p.chromeInput(p.fieldPrompt(field), configScalarInput(cur))
+	text, ok, err := p.sel.Input(p.fieldPrompt(field), configScalarInput(cur))
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -803,9 +752,7 @@ func (p *configPanel) editNumber(doc any, path []string, field configField, cur 
 // editText takes free text. Empty means "unset": the key goes away rather
 // than storing an empty string the loader would read as an empty setting.
 func (p *configPanel) editText(doc any, path []string, field configField, cur any) (any, string) {
-	defer p.pushTrail(field.Label)()
-	p.chrome.tag = configEditorTag(field)
-	text, ok, err := p.chromeInput(p.fieldPrompt(field), configScalarText(cur))
+	text, ok, err := p.sel.Input(p.fieldPrompt(field), configScalarText(cur))
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -819,20 +766,6 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 	return p.assign(doc, path, text, false, field.Label)
 }
 
-// configEditorTag is a text editor page's right-edge tag (plan 329 D4): the
-// prototype's own four words for what the page edits — a private value, a
-// number, multiline text, or plain text.
-func configEditorTag(field configField) string {
-	switch {
-	case field.Secret:
-		return "Private value"
-	case field.Multiline:
-		return "Multiline text"
-	default:
-		return "Text"
-	}
-}
-
 // editEffort is one thinking level's picker (plan 319): the levels the model
 // row beside it can be given, then the empty value — Row default, which follows
 // that row's own default — last. The level is a property of the model, never a
@@ -842,8 +775,6 @@ func configEditorTag(field configField) string {
 // 324 D5): the loader reads "" as no override, and an unset key and an empty
 // one mean the same thing everywhere the level is read.
 func (p *configPanel) editEffort(doc any, path []string, field configField, prompt string, cur any) (any, string) {
-	defer p.pushTrail(strings.SplitN(prompt, "\n", 2)[0])()
-	p.chrome.tag = ""
 	if configSiblingModelRef(doc, path) == "" {
 		return doc, configEffortNeedsModelNotice
 	}
@@ -858,7 +789,7 @@ func (p *configPanel) editEffort(doc any, path []string, field configField, prom
 		}
 	}
 	items = append(items, SelectItem{Label: configRowDefaultEffort})
-	idx, ok, err := p.chromeSelect(prompt, items, defaultIdx)
+	idx, ok, err := selectRichPage(p.sel, prompt, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -918,8 +849,6 @@ func (p *configPanel) configModelEfforts(ref string) []string {
 // until it is re-picked. Changing or clearing the reference takes the
 // thinking level beside it in the same write (D5).
 func (p *configPanel) editModel(doc any, path []string, field configField, cur any) (any, string) {
-	defer p.pushTrail(field.Label)()
-	p.chrome.tag = ""
 	stored, _ := cur.(string)
 	stored = strings.TrimSpace(stored)
 	ids := []string{field.ModelEmptyValue}
@@ -943,7 +872,7 @@ func (p *configPanel) editModel(doc any, path []string, field configField, cur a
 		items = append(items, SelectItem{Label: p.configModelRowLabel(stored)})
 		defaultIdx = len(items) - 1
 	}
-	idx, ok, err := p.chromeSelect(field.Label+"\n"+configModelPickerSub, items, defaultIdx)
+	idx, ok, err := selectRichPage(p.sel, field.Label+"\n"+configModelPickerSub, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1066,7 +995,6 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 	if len(initialNotice) > 0 {
 		notice = initialNotice[0]
 	}
-	defer p.pushTrail(field.Label)()
 	for {
 		container, _ := configLookupValue(doc, path)
 		keys := configContainerKeys(container)
@@ -1077,17 +1005,13 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 		if list && agentSubagentsPath(path) {
 			keys = append(keys, missingSharedSubagentKeys(doc, container)...)
 		}
-		p.chrome.tag = configContainerText(container)
 		items, owners := p.rowItems(doc, path, container, keys, list)
-		idx, ok, err := p.chromeSelect(p.rowsPrompt(field, keys, notice), items, -1)
+		idx, ok, err := selectRichPage(p.sel, p.rowsPrompt(field, keys, notice), items, -1)
 		if err != nil {
 			p.printError(err)
 			return doc, ""
 		}
 		notice = ""
-		if p.chromeSwitched() {
-			return doc, ""
-		}
 		if !ok || idx < 0 || idx >= len(owners) {
 			return doc, ""
 		}
@@ -1105,7 +1029,10 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 // rowItems is one container's rows: every entry, then add and back. doc and the
 // row's own path travel with it because what a row means is a property of where
 // it sits: a definition's primary flag is its status marker, and a subagent
-// entry's model is read in the order dispatch reads it (plan 313).
+// entry's model is read in the order dispatch reads it (plan 313). A generic
+// row carries what it holds in the value column (plan 325 D4) — a container
+// counted, a scalar as it reads — and keeps the description for the rows the
+// panel knows more about.
 func (p *configPanel) rowItems(doc any, path []string, container any, keys []string, list bool) ([]SelectItem, []int) {
 	items := make([]SelectItem, 0, len(keys)+2)
 	owners := make([]int, 0, len(keys)+2)
@@ -1119,9 +1046,11 @@ func (p *configPanel) rowItems(doc any, path []string, container any, keys []str
 				value = map[string]any{"name": strings.ToLower(strings.TrimSpace(key)), "enabled": false}
 			}
 		}
+		description, rowValue := p.configRowColumns(doc, path, key, value)
 		items = append(items, SelectItem{
 			Label:       p.configRowLabelAt(doc, path, key, i, list, value),
-			Description: p.configRowSummary(doc, path, key, value),
+			Description: description,
+			Value:       rowValue,
 			Status:      p.configRowStatus(doc, path, key, value),
 		})
 		owners = append(owners, i)
@@ -1278,10 +1207,6 @@ const (
 	// entry's page carries (prototype html:128): the entry is dispatched by
 	// the system, so nothing on the page is this agent's to set.
 	configSystemStatus = "System"
-	// configNextTurnTag is the tag a section without a narrower scope of its
-	// own carries at its title's right edge: a change here lands on the next
-	// turn's configuration sync.
-	configNextTurnTag = "Next turn"
 	// configSharedSubagentNotice is what a read-only shared row answers when one
 	// of its definition's fields is opened: the definition is edited on the
 	// "Subagent models" page, never here (plan 314).
@@ -1369,55 +1294,57 @@ func missingSharedSubagentKeys(doc any, container any) []string {
 	return missing
 }
 
-// configRowSummary is a row's second column for the agents section: the value
-// as it stands, or — for one of an agent's subagent entries — the model it will
-// actually run on, in the order dispatch resolves it, and the verdict a system
-// subagent entry gets (plan 313). Everything else keeps configRowDescription.
-func (p *configPanel) configRowSummary(doc any, path []string, key string, value any) string {
+// configRowColumns is one stored row's two text columns for the agents
+// section: the description a reader reads and the value the right edge holds
+// (plan 325 D4) — or, for one of an agent's subagent entries, the model it
+// will actually run on in the order dispatch resolves it, and the verdict a
+// system subagent entry gets (plan 313), carried as the description alone.
+// Everything else keeps configRowDescription, now as the row's value.
+func (p *configPanel) configRowColumns(doc any, path []string, key string, value any) (string, string) {
 	if len(path) == 1 && path[0] == configSharedSubagentsKey {
 		// A registry entry's own description is what a model reads when it
 		// chooses a subagent type, so it is what its row says (plan 314).
 		if row, ok := value.(map[string]any); ok {
 			if text := strings.TrimSpace(configStringField(row, "description")); text != "" {
-				return text
+				return text, ""
 			}
 		}
-		return configRowDescription(value)
+		return "", configRowDescription(value)
 	}
 	if len(path) != 3 || path[0] != configDefinitionsPath || path[2] != configSubagentsKey {
-		return configRowDescription(value)
+		return "", configRowDescription(value)
 	}
 	if shared := sharedRowName(doc, key, value); shared != "" {
-		return configSharedRowSummary(doc, shared)
+		return configSharedRowSummary(doc, shared), ""
 	}
 	row, ok := value.(map[string]any)
 	if !ok {
-		return configRowDescription(value)
+		return "", configRowDescription(value)
 	}
 	name := strings.ToLower(strings.TrimSpace(configStringField(row, "name")))
 	if name == "" {
-		return configRowDescription(value)
+		return "", configRowDescription(value)
 	}
 	if slices.Contains(agent.SystemSubagentNames, name) {
-		return configSystemSubagentNotice
+		return configSystemSubagentNotice, ""
 	}
 	if !slices.Contains(agent.PublicSubagentNames, name) {
-		return configRowDescription(value)
+		return "", configRowDescription(value)
 	}
 	// The order run.SubagentOwnModel answers with, read from the same section:
 	// this agent's entry, then the install-wide row of that type, then the
 	// conversation's model.
 	if ref := strings.TrimSpace(configStringField(row, "model")); ref != "" {
-		return configAgentOverridePrefix + ref
+		return configAgentOverridePrefix + ref, ""
 	}
 	sectionRoot, _ := doc.(map[string]any)
 	typeRow, _ := configLookupValue(sectionRoot, []string{configSubagentModelsKey, name})
 	typeMap, _ := typeRow.(map[string]any)
 	if typeRef := strings.TrimSpace(configStringField(typeMap, "model")); typeRef != "" {
 		effort := configStringField(typeMap, "reasoning_effort")
-		return configGlobalDefaultPrefix + p.configModelLabel(typeRef) + " / " + turn.EffortEnglishLabel(effort)
+		return configGlobalDefaultPrefix + p.configModelLabel(typeRef) + " / " + turn.EffortEnglishLabel(effort), ""
 	}
-	return configFollowConversation
+	return configFollowConversation, ""
 }
 
 // configModelLabel names a stored model reference the way the pickers do: the
@@ -1543,13 +1470,12 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 	if container {
 		editLabel = configRowOpenLabel
 	}
-	p.chrome.tag = ""
 	items := []SelectItem{
 		{Label: editLabel, Description: configRowDescription(value)},
 		{Label: configRowDropLabel, Description: "Removes it from this level"},
 		{Label: configRowBackLabel, Description: "Back to the row list"},
 	}
-	idx, ok, err := p.chromeSelect(field.Label+" "+configRowLabel(key, 0, false), items, 0)
+	idx, ok, err := selectRichPage(p.sel, field.Label+" "+configRowLabel(key, 0, false), items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1717,24 +1643,19 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 	if len(initialNotice) > 0 {
 		notice = initialNotice[0]
 	}
-	defer p.pushTrail(title)()
 	for {
 		value, _ := configLookupValue(doc, rowPath)
 		settings, _ := value.(map[string]any)
 		if settings == nil {
 			settings = map[string]any{}
 		}
-		p.chrome.tag = p.sectionTag()
 		items, rows := p.templateItems(template, settings)
-		idx, ok, err := p.chromeSelect(p.templatePrompt(template, title, settings, notice), items, -1)
+		idx, ok, err := selectRichPage(p.sel, p.templatePrompt(template, title, settings, notice), items, -1)
 		if err != nil {
 			p.printError(err)
 			return doc, ""
 		}
 		notice = ""
-		if p.chromeSwitched() {
-			return doc, ""
-		}
 		if !ok || idx < 0 || idx >= len(rows) {
 			return doc, ""
 		}
@@ -1914,8 +1835,6 @@ func (p *configPanel) openUnknownTemplateKey(doc any, rowPath []string, key stri
 // any other (plan 321): throwing it writes the reference entry, throwing it back
 // removes it, and Esc between the two writes nothing.
 func (p *configPanel) editSharedSubagentRow(doc any, path []string, container any, name string, field configField) (any, string) {
-	defer p.pushTrail(name)()
-	p.chrome.tag = ""
 	enabled := sharedReferenceEnabled(container, name)
 	items := []SelectItem{
 		{Label: "Enabled", Description: configSharedSwitchText(enabled)},
@@ -1924,7 +1843,7 @@ func (p *configPanel) editSharedSubagentRow(doc any, path []string, container an
 		{Label: "Tools", Description: configSharedToolsText(doc, name)},
 		{Label: configRowBackLabel, Description: "Back to the row list"},
 	}
-	idx, ok, err := p.chromeSelect(name+"\n"+configSharedSubagentNotice, items, 0)
+	idx, ok, err := selectRichPage(p.sel, name+"\n"+configSharedSubagentNotice, items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -2107,8 +2026,7 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 	}
 	key := ""
 	if !list {
-		p.chrome.tag = ""
-		name, ok, err := p.chromeInput(field.Label+" key of the new row", "")
+		name, ok, err := p.sel.Input(field.Label+" key of the new row", "")
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -2143,8 +2061,7 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		key = strconv.Itoa(len(rows))
 	}
 	if template := configTemplateFor(p.section, childPath); template == configTemplatePath || (template == "" && configScalarRowTemplate(p.section, childPath) == configTemplateString) {
-		p.chrome.tag = configEditorTag(field)
-		text, ok, err := p.chromeInput(p.fieldPrompt(field), "")
+		text, ok, err := p.sel.Input(p.fieldPrompt(field), "")
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -2241,8 +2158,7 @@ func (p *configPanel) addSharedSubagent(doc any, path []string, field configFiel
 // that key is the type's install-wide default — so it is refused here and on the
 // gateway's create endpoint alike.
 func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField, container any) (any, string) {
-	p.chrome.tag = ""
-	name, ok, err := p.chromeInput("Agent id of the new primary agent", "")
+	name, ok, err := p.sel.Input("Agent id of the new primary agent", "")
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -2265,8 +2181,7 @@ func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField,
 			return doc, fmt.Sprintf("%q already exists", key)
 		}
 	}
-	p.chrome.tag = "Text"
-	display, ok, err := p.chromeInput("Display name (empty uses the title-cased id)", "")
+	display, ok, err := p.sel.Input("Display name (empty uses the title-cased id)", "")
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -2335,8 +2250,7 @@ func (p *configPanel) addHookEvent(doc any, path []string, field configField, co
 	for _, event := range events {
 		items = append(items, SelectItem{Label: event})
 	}
-	p.chrome.tag = ""
-	idx, ok, err := p.chromeSelect(configHookEventHeading, items, 0)
+	idx, ok, err := selectRichPage(p.sel, configHookEventHeading, items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -2360,8 +2274,7 @@ func (p *configPanel) addHookEvent(doc any, path []string, field configField, co
 // carries none is one the loader refuses, so the two are asked as one row and
 // written once.
 func (p *configPanel) addHookMatcher(doc any, path []string, field configField, container any) (any, string) {
-	p.chrome.tag = ""
-	pattern, ok, err := p.chromeInput(configHookMatcherHeading, configHookAllToolsMatcher)
+	pattern, ok, err := p.sel.Input(configHookMatcherHeading, configHookAllToolsMatcher)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -2407,8 +2320,7 @@ func (p *configPanel) askHookAction() (map[string]any, string, bool) {
 			defaultIdx = len(items) - 1
 		}
 	}
-	p.chrome.tag = ""
-	idx, ok, err := p.chromeSelect(configHookTypeHeading, items, defaultIdx)
+	idx, ok, err := selectRichPage(p.sel, configHookTypeHeading, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return nil, "", false
@@ -2418,8 +2330,7 @@ func (p *configPanel) askHookAction() (map[string]any, string, bool) {
 	}
 	kind := types[idx]
 	required, heading := configHookRequiredField(kind)
-	p.chrome.tag = configEditorTag(configField{Kind: configFieldText})
-	text, ok, err := p.chromeInput(heading, "")
+	text, ok, err := p.sel.Input(heading, "")
 	if err != nil {
 		p.printError(err)
 		return nil, "", false
@@ -2514,20 +2425,19 @@ func (p *configPanel) chooseNewValue(label string, cur any) (any, bool, bool, er
 	case map[string]any:
 		defaultIdx = 4
 	}
-	p.chrome.tag = ""
-	idx, ok, err := p.chromeSelect(label+"\nWhat type is this row's value?", items, defaultIdx)
+	idx, ok, err := selectRichPage(p.sel, label+"\nWhat type is this row's value?", items, defaultIdx)
 	if err != nil || !ok {
 		return nil, false, false, err
 	}
 	switch idx {
 	case 0:
-		text, entered, err := p.chromeInput(label+" value", configScalarText(cur))
+		text, entered, err := p.sel.Input(label+" value", configScalarText(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}
 		return text, false, true, nil
 	case 1:
-		text, entered, err := p.chromeInput(label+" integer", configScalarInput(cur))
+		text, entered, err := p.sel.Input(label+" integer", configScalarInput(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}

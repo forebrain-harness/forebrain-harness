@@ -1230,10 +1230,10 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 		check("section "+schema.Name+" title", schema.Title)
 		check("section "+schema.Name+" summary", schema.Summary)
 		check("section "+schema.Name+" tab", schema.Tab)
-		check("section "+schema.Name+" effect", schema.Effect)
 		for _, field := range schema.Fields {
 			check(schema.Name+" field label "+field.Label, field.Label)
 			check(schema.Name+" field hint of "+field.Label, field.Hint)
+			check(schema.Name+" field group of "+field.Label, field.Group)
 			// The keys are stored values and never shown; only the labels are.
 			for stored, label := range field.OptionLabels {
 				check(schema.Name+" option label "+stored, label)
@@ -1358,10 +1358,14 @@ func TestConfigPanelRendersEveryTab(t *testing.T) {
 				t.Fatalf("the tab bar is missing %q:\n%s", chip, bar)
 			}
 			for _, title := range tc.titles {
-				row := renderedRow(t, lines, title)
-				if !strings.Contains(row, panel.sectionSchema(title).Summary) {
-					t.Fatalf("%s's row carries no summary: %q", title, row)
+				// The fixed status track narrows the description column (plan
+				// 325 D3), so the longest summary folds onto continuations under
+				// its row; the whole text still reads there.
+				full := renderedRowText(t, lines, title)
+				if !strings.Contains(full, panel.sectionSchema(title).Summary) {
+					t.Fatalf("%s's row carries no summary: %q", title, full)
 				}
+				row := renderedRow(t, lines, title)
 				// A section with no stored row reads Default, at the right
 				// edge of the panel. A file section is a read-only view with
 				// no marker of its own.
@@ -1507,6 +1511,172 @@ func endsAt(row, value string) int {
 	return displayLineWidth(row[:at]) + displayLineWidth(value)
 }
 
+// The value column holds a model row's whole label (plan 325 D3): the cap is
+// 44 cells now, so a disambiguated label — the same provider and model on two
+// endpoints — reads whole where the old 24-cell cap elided it, and a type
+// page's Model row carries its value right-aligned the same way (D4).
+func TestConfigPanelValueColumnNotElided(t *testing.T) {
+	panel := sectionPanel(map[string]string{"agents": `{
+		"subagent_models":{
+			"plan":{"model":"row-2","reasoning_effort":"high"},
+			"explore":{"model":"row-2"}
+		}
+	}`})
+	panel.models = []appcfg.LLMModelConfig{
+		{ID: "row-1", Provider: "openai", Model: "gpt-main", BaseURL: "https://api.one.example.com"},
+		{ID: "row-2", Provider: "openai", Model: "gpt-main", BaseURL: "https://api.two.example.com"},
+	}
+	projection, ok := configSectionSchemaFor("subagent_models")
+	if !ok {
+		t.Fatal("no subagent_models section")
+	}
+	doc := panel.sectionDoc("agents")
+	items, _ := panel.fieldItems(projection, doc)
+	lines := renderRichPage(items, projection.Title, 120)
+	label := "openai/gpt-main (api.two.example.com)"
+	if displayLineWidth(label) <= panelNarrowValueColumnMax {
+		t.Fatalf("the fixture's label must outgrow the old cap: %q", label)
+	}
+	plan := renderedRow(t, lines, "plan")
+	if !strings.Contains(plan, label) || strings.Contains(plan, "…") {
+		t.Fatalf("the plan row = %q, want the whole disambiguated label in the value track", plan)
+	}
+	if !strings.HasSuffix(plan, "High") {
+		t.Fatalf("the plan row = %q, want the level's status beyond the value", plan)
+	}
+
+	// The type page: its Model row carries the value right-aligned (D4).
+	explore, _ := configLookupValue(doc, []string{"subagent_models", "explore"})
+	exploreSettings, _ := explore.(map[string]any)
+	typeItems, _ := panel.templateItems(configTemplateTypeDef, exploreSettings)
+	typeLines := renderRichPage(typeItems, "explore", 120)
+	modelRow := renderedRow(t, typeLines, "Model")
+	if !strings.HasSuffix(modelRow, "openai/gpt-main") || strings.Contains(modelRow, "…") {
+		t.Fatalf("the type page's Model row = %q, want its value right-aligned", modelRow)
+	}
+}
+
+// The /config pages breathe (owner 2026-11-18 「选项和tabs组件标题之间拉开间距」
+// 「布局太拥挤了」, plan 325 D5): one blank line under the head or tab bar
+// before the first row, one blank line between rows, the blank line between
+// groups kept — never doubled, never cutting a heading from its rows. At 68
+// columns the focused row and the footer stay reachable: the layout scrolls
+// to the focus and keeps the keys.
+func TestConfigPanelAirySpacing(t *testing.T) {
+	panel := sectionPanel(map[string]string{"features": `{"memories":true}`})
+	features, ok := configSectionSchemaFor("features")
+	if !ok {
+		t.Fatal("no features section")
+	}
+	items, _ := panel.fieldItems(features, panel.sectionDoc("features"))
+	lines := renderRichPage(items, features.Title+"\n"+features.Summary, 120)
+	plain := stripANSIAll(lines)
+
+	// One blank line under the head, before the first row.
+	if strings.TrimSpace(plain[2]) != "" {
+		t.Fatalf("the line under the head = %q, want a blank one:\n%s", plain[2], strings.Join(plain, "\n"))
+	}
+	memories, servers := -1, -1
+	for i, line := range plain {
+		body := strings.TrimPrefix(strings.TrimSpace(line), selectorCursorGlyph+" ")
+		switch {
+		case strings.HasPrefix(body, "Memory"):
+			memories = i
+		case strings.HasPrefix(body, "Language servers"):
+			servers = i
+		}
+	}
+	if memories < 0 || servers < 0 {
+		t.Fatalf("the features page lost its rows:\n%s", strings.Join(plain, "\n"))
+	}
+	// One blank line between the two rows — the air the owner asked for.
+	if servers != memories+2 || strings.TrimSpace(plain[memories+1]) != "" {
+		t.Fatalf("the rows are cramped:\n%s", strings.Join(plain, "\n"))
+	}
+	// Never doubled: no two blank lines sit together.
+	for i := 1; i < len(plain); i++ {
+		if strings.TrimSpace(plain[i]) == "" && strings.TrimSpace(plain[i-1]) == "" {
+			t.Fatalf("a doubled blank at line %d:\n%s", i, strings.Join(plain, "\n"))
+		}
+	}
+
+	// The overview: one blank line under the tab bar, one between rows.
+	sectionItems, _ := panel.sectionItems()
+	overview := stripANSIAll(renderTabbedPage(sectionItems, 0, 120))
+	tabBar := -1
+	for i, line := range overview {
+		if strings.Contains(line, configTabApproval) {
+			tabBar = i
+			break
+		}
+	}
+	if tabBar < 0 || tabBar >= len(overview)-1 || strings.TrimSpace(overview[tabBar+1]) != "" {
+		t.Fatalf("the overview's tab bar is not followed by one blank line:\n%s", strings.Join(overview, "\n"))
+	}
+
+	// At 68 columns the focused row and the footer stay reachable.
+	state := newTabbedPickerState(sectionItems, TabbedSelectOptions{DefaultIdx: 4}, false, "")
+	state.configPage = true
+	state.noFilter = true
+	narrow := state.panel("Configuration\nOpen a section to see and change its settings.").layout(68, 14, 0, true)
+	joined := strings.Join(stripANSIAll(narrow.lines), "\n")
+	if !strings.Contains(joined, selectorCursorGlyph) {
+		t.Fatalf("the focused row is not reachable at 68 columns:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Esc to cancel") {
+		t.Fatalf("the footer keys are not reachable at 68 columns:\n%s", joined)
+	}
+	for _, line := range narrow.lines {
+		if w := displayLineWidth(stripANSI(line)); w > 68 {
+			t.Fatalf("a row overflows a 68-cell panel: %q", stripANSI(line))
+		}
+	}
+}
+
+// The /config pages carry no filter box (owner 2026-11-18 「删掉…所有的filter
+// 输入框，不需要」, plan 325 D6): a page with more rows than every other
+// picker's threshold still renders no filter field — the overview neither —
+// while another panel's picker over the same rows keeps its filter.
+func TestConfigPanelNoFilterBox(t *testing.T) {
+	if !pickerShowsFilter(8) {
+		t.Fatal("the fixture needs a row count every other picker filters at")
+	}
+	rows := make([]SelectItem, 0, 8)
+	for i := 0; i < 8; i++ {
+		rows = append(rows, SelectItem{Label: "setting-" + strconv.Itoa(i)})
+	}
+	page := &richPickerState{items: rows, configPage: true, noFilter: true}
+	for i := range rows {
+		page.selectable = append(page.selectable, i)
+	}
+	if field := page.panel("Memory").field; field != nil {
+		t.Fatalf("the config page carries a filter field: %+v", field)
+	}
+	for _, line := range page.panel("Memory").layout(120, 0, 0, false).lines {
+		if strings.Contains(stripANSI(line), "Type to filter") {
+			t.Fatalf("the config page drew a filter box: %q", stripANSI(line))
+		}
+	}
+
+	// The overview neither, over the whole section list.
+	panel := sectionPanel(nil)
+	sectionItems, _ := panel.sectionItems()
+	overview := newTabbedPickerState(sectionItems, TabbedSelectOptions{}, false, "")
+	overview.configPage = true
+	overview.noFilter = true
+	if field := overview.panel("Configuration").field; field != nil {
+		t.Fatalf("the config overview carries a filter field: %+v", field)
+	}
+
+	// Another panel's picker over the same rows keeps its filter.
+	other := &richPickerState{items: rows}
+	other.rebuildSelectable()
+	other.noFilter = !pickerShowsFilter(len(other.selectable))
+	if field := other.panel("Memory").field; field == nil {
+		t.Fatal("a plain picker lost its filter")
+	}
+}
+
 // sectionPanel is a panel over a stored configuration, for the render checks:
 // the rows the panel builds, laid out by the picker's own painters rather than
 // the fake selector, so an assertion reads what a screen shows.
@@ -1522,17 +1692,21 @@ func sectionPanel(stored map[string]string) *configPanel {
 	return panel
 }
 
-// renderTabbedPage lays the tabbed picker out at width, opened on the tab that
-// holds items[start].
+// renderTabbedPage lays the config overview out at width, opened on the tab
+// that holds items[start]: the tabbed picker as the panel's own page draws it
+// (plan 325) — blank line under the tab bar, airier rows, no filter box.
 func renderTabbedPage(items []SelectItem, start, width int) []string {
 	p := newTabbedPickerState(items, TabbedSelectOptions{DefaultIdx: start}, false, "")
+	p.configPage = true
+	p.noFilter = true
 	return p.panel("Configuration").layout(width, 0, 0, false).lines
 }
 
-// renderRichPage lays a plain picker page out at width, the way SelectRich
-// paints it.
+// renderRichPage lays one /config list page out at width, the way the panel's
+// pages draw them (plan 325): the plain rich picker with ruled groups, a blank
+// line under the head, airier rows and no filter box.
 func renderRichPage(items []SelectItem, label string, width int) []string {
-	p := &richPickerState{items: items}
+	p := &richPickerState{items: items, configPage: true, noFilter: true}
 	for i := range items {
 		p.selectable = append(p.selectable, i)
 	}
@@ -1552,6 +1726,63 @@ func renderedRow(t *testing.T, lines []string, name string) string {
 	}
 	t.Fatalf("no row %q among:\n%s", name, strings.Join(stripANSIAll(lines), "\n"))
 	return ""
+}
+
+// renderedRowText is one row's whole description: the description column of
+// its line plus the wrapped continuations under it. The fixed status track
+// narrows the column (plan 325 D3), so a long summary folds across lines, and
+// the track itself sits at the line's right edge — two or more spaces off the
+// text, which is what tells it from the description's own single spaces.
+func renderedRowText(t *testing.T, lines []string, name string) string {
+	t.Helper()
+	for i, line := range lines {
+		body := strings.TrimLeft(stripANSI(line), " ")
+		body = strings.TrimPrefix(body, selectorCursorGlyph+" ")
+		if !strings.HasPrefix(body, name) {
+			continue
+		}
+		parts := splitRowColumns(stripANSI(line))
+		if len(parts) < 2 {
+			t.Fatalf("row %q carries no description column: %q", name, stripANSI(line))
+		}
+		text := parts[1]
+		for _, next := range lines[i+1:] {
+			plain := stripANSI(next)
+			if !strings.HasPrefix(plain, "    ") {
+				break
+			}
+			text += " " + strings.TrimSpace(plain)
+		}
+		return text
+	}
+	t.Fatalf("no row %q among:\n%s", name, strings.Join(stripANSIAll(lines), "\n"))
+	return ""
+}
+
+// splitRowColumns splits a painted row into the columns its layout keeps
+// apart: the name, the description, then the value and status tracks. A run
+// of two or more spaces is a column gap; a single space is inside a column.
+func splitRowColumns(row string) []string {
+	parts := make([]string, 0, 4)
+	field, run := "", 0
+	for _, r := range row {
+		if r == ' ' {
+			run++
+			continue
+		}
+		if run >= 2 && field != "" {
+			parts = append(parts, field)
+			field = ""
+		} else if run == 1 && field != "" {
+			field += " "
+		}
+		run = 0
+		field += string(r)
+	}
+	if field != "" {
+		parts = append(parts, field)
+	}
+	return parts
 }
 
 func stripANSIAll(lines []string) []string {
@@ -1595,8 +1826,13 @@ func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
 	if main.Status != configPrimaryStatus {
 		t.Fatalf("main's status = %q, want %q", main.Status, configPrimaryStatus)
 	}
-	if main.Description != "2 entries" {
-		t.Fatalf("main's description = %q, want the value alone", main.Description)
+	// A generic container row counts what it holds in the value column (plan
+	// 325 D4), not the description.
+	if main.Value != "2 entries" {
+		t.Fatalf("main's value = %q, want the count alone", main.Value)
+	}
+	if main.Description != "" {
+		t.Fatalf("main's description = %q, want none", main.Description)
 	}
 }
 
@@ -1636,17 +1872,23 @@ func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
 		t.Fatalf("expected the subagent rows page, got %d pages", len(selector.richItems))
 	}
 	rows := selector.richItems[3]
+	// The entries the panel knows more about carry their fact as the
+	// description; the custom entry — a plain container — counts what it
+	// holds in the value column (plan 325 D4).
 	cases := map[string]string{
 		"#1": "agent override: openai/gpt-sub",
 		"#2": "global default: openai/gpt-main / xHigh",
 		"#3": configFollowConversation,
-		"#4": "3 entries",
 		"#5": configSystemSubagentNotice,
 	}
 	for label, want := range cases {
 		if row := findRow(t, rows, label); row.Description != want {
 			t.Errorf("%s = %q, want %q", label, row.Description, want)
 		}
+	}
+	custom := findRow(t, rows, "#4")
+	if custom.Value != "3 entries" || custom.Description != "" {
+		t.Errorf("#4 = %q / %q, want the count in the value column alone", custom.Value, custom.Description)
 	}
 	if !strings.Contains(pageLabels(selector), configSystemSubagentNotice) {
 		t.Fatalf("the refusal must reach the page: %s", pageLabels(selector))
@@ -2877,16 +3119,12 @@ func TestConfigPanelModelPickerWritesPassTheStoreValidator(t *testing.T) {
 	}
 }
 
-// --- Plan 329: the template layer and the persistent chrome ---
+// --- Plan 325: the config pages as plain shared pickers ---
 
-// renderChromePickerPage lays a rich picker page out at width under the
-// config chrome, the way SelectRichChrome paints it (plan 329 D4).
-func renderChromePickerPage(chrome *configPageChrome, items []SelectItem, label string, width int) []string {
-	p := &richPickerState{items: items, chrome: chrome}
-	for i := range items {
-		p.selectable = append(p.selectable, i)
-	}
-	return p.panel(label).layout(width, 0, 0, false).lines
+// renderChromePickerPage was the chrome-page helper of plan 329; the pages it
+// laid out are the plain config pages now (plan 325).
+func renderConfigPickerPage(items []SelectItem, label string, width int) []string {
+	return renderRichPage(items, label, width)
 }
 
 // A stored row a template names opens that template's fixed fields, in the
@@ -3155,120 +3393,119 @@ func TestConfigPanelCustomOnlyHidden(t *testing.T) {
 	}
 }
 
-// Every config page carries the persistent chrome (plan 329 D4): the tab bar
-// with its counts, the breadcrumb under it, and the title's right-edge tag.
-// A page deep in a section keeps the trail it walked.
-func TestConfigPanelPersistentTabsAndBreadcrumbSlot(t *testing.T) {
+// A /config sub-page is a plain shared picker, the way every other slash
+// panel's page is (owner 2026-11-18, plan 325 D1): its head is the title and
+// the subtitle alone — no breadcrumb line, no persistent tab bar, no tagged
+// title — while the overview keeps its tab bar, which is navigation the way
+// /status keeps its own.
+func TestConfigPanelSubPagesHaveNoBreadcrumbOrTabs(t *testing.T) {
 	panel := sectionPanel(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"display_name":"Main agent"}}}`})
-	panel.chrome = newConfigPageChrome(panelSections())
 	agents, ok := configSectionSchemaFor("agents")
 	if !ok {
 		t.Fatal("no agents section")
 	}
-	panel.section = "agents"
-	panel.effectTag = agents.Effect
-	panel.chrome.enterTab(agents.Tab)
-	panel.chrome.trail = []string{agents.Title}
-	panel.chrome.tag = panel.sectionTag()
-
-	// The section page: four tabs with their counts, the breadcrumb's root,
-	// the title and its tag at the right edge.
 	items, _ := panel.fieldItems(agents, panel.sectionDoc("agents"))
-	lines := renderChromePickerPage(&panel.chrome, items, agents.Title+"\n"+agents.Summary, 120)
-	bar := strings.Join(stripANSIAll(lines), "\n")
+	lines := renderConfigPickerPage(items, agents.Title+"\n"+agents.Summary, 120)
+	plain := stripANSIAll(lines)
+	if len(plain) < 4 {
+		t.Fatalf("the section page is too short to check:\n%s", strings.Join(plain, "\n"))
+	}
+	// The head is the title and the subtitle alone, then the page's own
+	// blank line (plan 325 D5): anything else — a tab bar, a breadcrumb —
+	// would take one of these lines.
+	if strings.TrimSpace(plain[0]) != agents.Title {
+		t.Fatalf("the page's first head line = %q, want the title", plain[0])
+	}
+	if strings.TrimSpace(plain[1]) != agents.Summary {
+		t.Fatalf("the page's second head line = %q, want the summary", plain[1])
+	}
+	if strings.TrimSpace(plain[2]) != "" {
+		t.Fatalf("the line under the head = %q, want the blank line before the first row", plain[2])
+	}
+	for i, line := range plain {
+		if i < 3 {
+			continue
+		}
+		if trail := strings.TrimSpace(line); strings.HasPrefix(trail, "Configuration") && strings.Contains(trail, " / ") {
+			t.Errorf("a breadcrumb line survived: %q", line)
+		}
+		for _, tab := range []string{configTabApproval, configTabSession, configTabAgents, configTabFile} {
+			if strings.HasPrefix(strings.TrimSpace(line), tab+" ") {
+				t.Errorf("the sub-page carries the persistent tab bar: %q", line)
+			}
+		}
+	}
+
+	// The overview keeps its tab bar — navigation, the way /status keeps its
+	// own.
+	sectionItems, _ := panel.sectionItems()
+	overview := renderTabbedPage(sectionItems, 0, 120)
+	bar := strings.Join(stripANSIAll(overview), "\n")
 	for _, tab := range []string{configTabApproval, configTabSession, configTabAgents, configTabFile} {
 		count := strconv.Itoa(len(sectionsOfTab(tab)))
 		if !strings.Contains(bar, tab+" "+count) {
-			t.Errorf("the tab bar is missing %q:\n%s", tab+" "+count, bar)
+			t.Errorf("the overview's tab bar is missing %q:\n%s", tab+" "+count, bar)
 		}
-	}
-	if !strings.Contains(bar, "Configuration / Agents") {
-		t.Errorf("the breadcrumb slot is missing the trail:\n%s", bar)
-	}
-	title := renderedRow(t, lines, agents.Title)
-	if !strings.HasSuffix(title, configNextTurnTag) {
-		t.Errorf("the section page's title = %q, want the %q tag at its right edge", title, configNextTurnTag)
-	}
-
-	// A nested page keeps the chrome and grows the trail: the definitions
-	// rows page under the section, tagged with its count.
-	panel.chrome.trail = []string{agents.Title, "Agent definitions"}
-	panel.chrome.tag = "1 entries"
-	lines = renderChromePickerPage(&panel.chrome, items, "Agent definitions\nOne agent id per row", 120)
-	if trail := renderedRow(t, lines, "Configuration / Agents / Agent definitions"); trail == "" {
-		t.Fatalf("the nested page lost the breadcrumb:\n%s", strings.Join(stripANSIAll(lines), "\n"))
-	}
-
-	// An effect-bearing section carries its own scope instead of the panel's
-	// wording: the approval preset page.
-	approval, _ := configSectionSchemaFor("approval_preset")
-	panel.effectTag = approval.Effect
-	panel.chrome.tag = panel.sectionTag()
-	items, _ = panel.fieldItems(approval, nil)
-	lines = renderChromePickerPage(&panel.chrome, items, approval.Title+"\n"+approval.Summary, 120)
-	if title := renderedRow(t, lines, approval.Title); !strings.HasSuffix(title, approval.Effect) {
-		t.Errorf("the approval page's title = %q, want %q at its right edge", title, approval.Effect)
-	}
-
-	// Switching tabs from inside a section is the chrome's own act: the bar
-	// records the tab and the overview reopens on it.
-	if tab := panel.chrome.switchTab(1); tab < 0 || panel.chrome.switchedTo != tab {
-		t.Fatalf("switchTab = %d, switchedTo = %d", tab, panel.chrome.switchedTo)
-	}
-	panel.chrome.switchedTo = -1
-	sectionItems, _ := panel.sectionItems()
-	if first := panel.chrome.firstRowOfTab(sectionItems); !slices.Contains(rowLabels(sectionItems), sectionItems[first].Label) {
-		t.Fatalf("firstRowOfTab answered %d", first)
 	}
 }
 
-// The config group heading is the prototype's: upper-cased, with a faint
-// rule running to the panel's right edge, a blank row before every group
-// after the first. A plain picker's categories keep the heading they always
-// drew — the chrome is config's alone (plan 329 D4).
-func TestConfigPanelGroupStyle(t *testing.T) {
-	chrome := newConfigPageChrome(panelSections())
-	items := []SelectItem{
-		{Label: "Server name", Category: "Identity"},
-		{Label: "Enabled", Category: "Identity"},
-		{Label: "Command", Category: "Connection"},
+// A /config field page groups its settings under the prototype's ruled labels
+// (plan 325 D2): upper-cased, a faint rule running to the panel's right edge,
+// one blank line before every group after the first — and no heading row
+// above them, no effect tag anywhere (owner 2026-11-18). A plain picker's
+// categories keep the heading they always drew — the ruled group is the
+// config page's alone.
+func TestConfigPanelFieldPageShowsGroups(t *testing.T) {
+	panel := sectionPanel(nil)
+	lsp, ok := configSectionSchemaFor("lsp")
+	if !ok {
+		t.Fatal("no lsp section")
 	}
-	lines := renderChromePickerPage(&chrome, items, "workspace-tools", 120)
+	items, _ := panel.fieldItems(lsp, panel.sectionDoc("lsp"))
+	lines := renderConfigPickerPage(items, lsp.Title+"\n"+lsp.Summary, 120)
 	plain := stripANSIAll(lines)
-	identity := -1
+	found := map[string]int{}
 	for i, line := range plain {
-		if strings.HasPrefix(strings.TrimSpace(line), "IDENTITY") {
-			identity = i
+		// The heading carries its rule to the edge, so it is matched by its
+		// upper-cased prefix alone.
+		for _, group := range []string{"Discovery", "Lifecycle", "Diagnostics"} {
+			if strings.HasPrefix(strings.TrimSpace(line), strings.ToUpper(group)) {
+				found[group] = i
+			}
 		}
 	}
-	if identity < 0 {
-		t.Fatalf("the group heading is not upper-cased:\n%s", strings.Join(plain, "\n"))
+	if len(found) != 3 {
+		t.Fatalf("the lsp page does not show every group: %v\n%s", found, strings.Join(plain, "\n"))
 	}
-	if !strings.Contains(lines[identity], "─") {
-		t.Errorf("the group heading carries no rule: %q", lines[identity])
+	if !(found["Discovery"] < found["Lifecycle"] && found["Lifecycle"] < found["Diagnostics"]) {
+		t.Fatalf("the groups are out of order: %v", found)
 	}
-	if w := displayLineWidth(lines[identity]); w != 120 {
-		t.Errorf("the rule stops at %d cells, want the panel's edge", w)
-	}
-	if identity == 0 || strings.TrimSpace(plain[identity-1]) != "" {
-		t.Errorf("a group after the first needs a blank row before it:\n%s", strings.Join(plain, "\n"))
-	}
-	found := false
-	for _, line := range plain {
-		if strings.HasPrefix(strings.TrimSpace(line), "CONNECTION") {
-			found = true
+	for group, at := range found {
+		if !strings.Contains(lines[at], "─") {
+			t.Errorf("the %s heading carries no rule: %q", group, lines[at])
+		}
+		if w := displayLineWidth(lines[at]); w != 120 {
+			t.Errorf("the %s rule stops at %d cells, want the panel's edge", group, w)
+		}
+		if at == 0 || strings.TrimSpace(plain[at-1]) != "" {
+			t.Errorf("the %s group needs a blank row before it:\n%s", group, strings.Join(plain, "\n"))
 		}
 	}
-	if !found {
-		t.Fatalf("the second group heading is missing:\n%s", strings.Join(plain, "\n"))
+	// No heading row between the head and the groups: the head is the title
+	// and the summary alone, then the page's own blank line.
+	if strings.TrimSpace(plain[0]) != lsp.Title || strings.TrimSpace(plain[1]) != lsp.Summary || strings.TrimSpace(plain[2]) != "" {
+		t.Fatalf("the head carries more than the title and summary:\n%s", strings.Join(plain[:4], "\n"))
 	}
 
 	// A plain rich picker keeps its own heading: the category as written,
 	// accented, unruled — every other panel's page is unchanged.
-	plainItems := []SelectItem{
+	plainPicker := &richPickerState{items: []SelectItem{
 		{Label: "Workspace write", Category: "Approval & sandbox"},
+	}}
+	for i := range plainPicker.items {
+		plainPicker.selectable = append(plainPicker.selectable, i)
 	}
-	plainLines := renderRichPage(plainItems, "Configuration", 120)
+	plainLines := plainPicker.panel("Configuration").layout(120, 0, 0, false).lines
 	for _, line := range plainLines {
 		if strings.Contains(stripANSI(line), "APPROVAL & SANDBOX") || strings.Contains(line, "─") {
 			t.Fatalf("a plain picker drew the config group style: %q", stripANSI(line))

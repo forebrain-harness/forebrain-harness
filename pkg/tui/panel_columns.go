@@ -20,8 +20,23 @@ const panelNameColumnMax = 40
 
 // panelValueColumnMax caps a row's value track, so one long path or model name
 // cannot take the row: a longer value is elided with an ellipsis, the way the
-// prototype's value column cuts it. Only the /config panel sets a value.
-const panelValueColumnMax = 24
+// prototype's value column cuts it (.item-value max-width:44ch, plan 325 D3).
+// Only the /config panel sets a value.
+const panelValueColumnMax = 44
+
+// panelNarrowValueColumnMax is the cap the same track takes on a narrow
+// terminal (the prototype's .narrow .item-value max-width:24ch, plan 325 D3).
+const panelNarrowValueColumnMax = 24
+
+// panelNarrowWidth is the width below which a panel is narrow: its rows hide
+// the status and cap the value tighter (prototype .terminal.narrow, applied
+// under 100 columns, plan 325 D3).
+const panelNarrowWidth = 100
+
+// panelStatusColumnMax is the status track's fixed width, so every status on
+// a page ends at the same column whatever its own length (the prototype's
+// .field-table .item-status flex-basis:16ch, plan 325 D3).
+const panelStatusColumnMax = 16
 
 // chipRows lays the chips out left to right, panelChipGap cells apart, wrapping
 // whole: a chip too wide to join the row starts the next one, so a tab's name
@@ -130,7 +145,7 @@ func (l panelLine) columnRows(width int) []string {
 	leadW := displayLineWidth(l.lead)
 	colW := min(l.colWidth, maxInt(1, (width-leadW)*2/5))
 	nameW := displayLineWidth(l.col)
-	tracksW := l.trailingTrackWidth()
+	tracksW := l.trailingTrackWidth(width)
 	pad := strings.Repeat(" ", leadW+colW+panelColumnGap)
 	texts := l.descriptionRows(maxInt(1, width-leadW-colW-panelColumnGap-tracksW))
 	render := func(chunk string) string {
@@ -151,25 +166,47 @@ func (l panelLine) columnRows(width int) []string {
 	return l.columnRowsStacked(width)
 }
 
-// trailingTracks is the row's right-hand tracks as they are drawn — the value,
-// the gap between the two, then the status — each trimmed and the value capped
-// so one long path cannot take the whole row. Empty when the row has neither.
-func (l panelLine) trailingTracks() []string {
+// trailingTracks is the row's right-hand tracks as they are drawn at width —
+// the value, the gap between the two, then the status. The value takes the
+// room it needs capped at panelValueColumnMax (24 on a narrow panel) and is
+// elided only when that cap bites; the status sits in a fixed
+// panelStatusColumnMax track so the statuses of one page align, and a narrow
+// panel hides it the way the prototype's does (plan 325 D3). Empty when the
+// row has neither.
+func (l panelLine) trailingTracks(width int) []string {
 	tracks := make([]string, 0, 2)
 	if value := strings.TrimSpace(l.value); value != "" {
-		tracks = append(tracks, runewidth.Truncate(value, panelValueColumnMax, "…"))
+		cap := panelValueColumnMax
+		if width < panelNarrowWidth {
+			cap = panelNarrowValueColumnMax
+		}
+		tracks = append(tracks, runewidth.Truncate(value, cap, "…"))
 	}
-	if status := strings.TrimSpace(l.status); status != "" {
-		tracks = append(tracks, status)
+	if width >= panelNarrowWidth {
+		if status := strings.TrimSpace(l.status); status != "" {
+			tracks = append(tracks, padStatusTrack(status))
+		}
 	}
 	return tracks
 }
 
+// padStatusTrack lays one status in the fixed status track: left-padded to
+// panelStatusColumnMax cells so it right-aligns with every other status on
+// the page. A status longer than the track keeps its whole word — statuses
+// are the panel's own vocabulary, and none of it is that long.
+func padStatusTrack(status string) string {
+	pad := panelStatusColumnMax - displayLineWidth(status)
+	if pad <= 0 {
+		return status
+	}
+	return strings.Repeat(" ", pad) + status
+}
+
 // trailingTrackWidth is the room a row's value and status take out of its
-// description column: both tracks, the gap before the first and the gap
-// between them, and nothing when the row carries neither.
-func (l panelLine) trailingTrackWidth() int {
-	tracks := l.trailingTracks()
+// description column at width: both tracks, the gap before the first and the
+// gap between them, and nothing when the row carries neither.
+func (l panelLine) trailingTrackWidth(width int) int {
+	tracks := l.trailingTracks(width)
 	if len(tracks) == 0 {
 		return 0
 	}
@@ -181,7 +218,7 @@ func (l panelLine) trailingTrackWidth() int {
 // rows exactly as they were: the label is never shortened to fit, and never
 // moves to a later line.
 func (l panelLine) withTrailingTracks(rows []string, width int) []string {
-	raw := l.trailingTracks()
+	raw := l.trailingTracks(width)
 	if len(raw) == 0 || len(rows) == 0 {
 		return rows
 	}

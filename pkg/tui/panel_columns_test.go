@@ -152,9 +152,12 @@ func TestPanelColumnsWithoutDescriptionMatchPlainRows(t *testing.T) {
 // A row's value and status are tracks of their own at the right edge, the value
 // first — the /config panel's name, value and status (plans 313, 321): the
 // description column narrows by both so they never meet, each is drawn whole on
-// the first line, and a row with neither is byte-for-byte what it was.
+// the first line, and a row with neither is byte-for-byte what it was. The
+// status sits in a fixed 16-cell track and a narrow panel (under 100 columns,
+// plan 325 D3) hides it and caps the value at 24 cells instead — which is why
+// this page is laid out at 120.
 func TestPanelColumnsDrawTheValueBeforeTheStatus(t *testing.T) {
-	const width = 80
+	const width = 120
 	withValue := panelLine{lead: "  ", col: "Auto-compact at", colWidth: 20, text: "Compacts when the window fills", value: "90 %", status: "Default"}
 	rows := withValue.rows(width)
 	if len(rows) != 1 {
@@ -183,8 +186,23 @@ func TestPanelColumnsDrawTheValueBeforeTheStatus(t *testing.T) {
 		t.Fatalf("the tracks are not aligned:\n%q\n%q", a, b)
 	}
 
+	// A row whose status is a different word still lines its value up with
+	// theirs: the status track is a fixed 16 cells, so the value ends at the
+	// same column whatever the status says (plan 325 D3).
+	rowC := panelLine{lead: "  ", col: "Auto-compact at", colWidth: 20, text: "Compacts when the window fills", value: "60 %", status: "Row default"}
+	c := stripANSI(rowC.rows(width)[0])
+	if endsAt(a, "90 %") != endsAt(c, "60 %") {
+		t.Fatalf("the values do not align across statuses:\n%q\n%q", a, c)
+	}
+
 	// A value longer than the track is elided, never pushed into the status.
-	long := panelLine{lead: "  ", col: "Model", colWidth: 20, text: "hint", value: "a-very-long-model-reference-that-cannot-fit", status: "Default"}
+	// The cap is 44 cells (plan 325 D3), so this 43-cell reference stays
+	// whole and only a longer one meets the ellipsis.
+	short := panelLine{lead: "  ", col: "Model", colWidth: 20, text: "hint", value: "a-very-long-model-reference-that-cannot-fit", status: "Default"}
+	if long := stripANSI(short.rows(width)[0]); strings.Contains(long, "…") {
+		t.Fatalf("a 43-cell value must fit the 44-cell cap: %q", long)
+	}
+	long := panelLine{lead: "  ", col: "Model", colWidth: 20, text: "hint", value: "a-very-long-model-reference-that-cannot-fit-at-all", status: "Default"}
 	for _, row := range long.rows(width) {
 		if !strings.Contains(stripANSI(row), "…") {
 			t.Fatalf("a long value must be elided: %q", stripANSI(row))
@@ -196,6 +214,29 @@ func TestPanelColumnsDrawTheValueBeforeTheStatus(t *testing.T) {
 	plain := panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items"}
 	if plain.rows(width)[0] != (panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items"}).rows(width)[0] {
 		t.Fatalf("a trackless row changed: %q", plain.rows(width))
+	}
+
+	// A narrow panel hides the status and caps the value at 24 cells (plan
+	// 325 D3): the value stays, right-aligned at the edge it has.
+	narrow := withValue.rows(88)
+	if len(narrow) == 0 {
+		t.Fatal("the narrow row rendered nothing")
+	}
+	for _, row := range narrow {
+		if strings.Contains(stripANSI(row), "Default") {
+			t.Fatalf("a narrow panel must hide the status: %q", stripANSI(row))
+		}
+		assertRowsFit(t, []string{row}, 88)
+	}
+	if row := stripANSI(narrow[0]); !strings.HasSuffix(row, "90 %") {
+		t.Fatalf("the narrow row = %q, want the value at its right edge", row)
+	}
+	longNarrow := panelLine{lead: "  ", col: "Model", colWidth: 20, text: "hint", value: "a-very-long-model-reference-that-cannot-fit", status: "Default"}
+	for _, row := range longNarrow.rows(88) {
+		if !strings.Contains(stripANSI(row), "…") {
+			t.Fatalf("a long value must be elided on a narrow panel: %q", stripANSI(row))
+		}
+		assertRowsFit(t, []string{row}, 88)
 	}
 
 	// The picker's own entry point carries both through.
@@ -214,9 +255,12 @@ func TestPanelColumnsDrawTheValueBeforeTheStatus(t *testing.T) {
 // A row's status is a track of its own at the right edge — the /config
 // definitions list's "Primary" (plan 313): the description column narrows by it
 // so the two never meet, the status is drawn whole on the first line, and a row
-// without one is byte-for-byte what it was.
+// without one is byte-for-byte what it was. The track is fixed 16 cells wide
+// (plan 325 D3) — so statuses of different lengths still end at one column —
+// and a narrow panel (under 100 columns) hides it, which is why this page is
+// laid out at 120.
 func TestPanelColumnsDrawTheStatusAtTheRightEdge(t *testing.T) {
-	const width = 80
+	const width = 120
 	withStatus := panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items", status: "Primary"}
 	rows := withStatus.rows(width)
 	if len(rows) != 1 {
@@ -241,11 +285,26 @@ func TestPanelColumnsDrawTheStatusAtTheRightEdge(t *testing.T) {
 		t.Fatalf("statuses are not aligned:\n%q\n%q", a, b)
 	}
 
+	// A longer status keeps its whole word and still ends at the same column:
+	// the track pads on the left, it never pushes the status out.
+	rowC := panelLine{lead: "  ", col: "review-agent", colWidth: 14, text: "2 items", status: "Row default"}
+	if a, c := stripANSI(withStatus.rows(width)[0]), stripANSI(rowC.rows(width)[0]); endsAt(a, "Primary") != endsAt(c, "Row default") {
+		t.Fatalf("statuses of different lengths do not align:\n%q\n%q", a, c)
+	}
+
 	// A row without a status is untouched: it renders exactly like a plain row.
 	plain := panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items"}
 	bare := panelLine{lead: "  ", col: "main", colWidth: 14, text: "4 items"}
 	if len(plain.rows(width)) != len(bare.rows(width)) || plain.rows(width)[0] != bare.rows(width)[0] {
 		t.Fatalf("a statusless row changed: %q", plain.rows(width))
+	}
+
+	// A narrow panel hides the status entirely (plan 325 D3).
+	for _, row := range withStatus.rows(88) {
+		if strings.Contains(stripANSI(row), "Primary") {
+			t.Fatalf("a narrow panel must hide the status: %q", stripANSI(row))
+		}
+		assertRowsFit(t, []string{row}, 88)
 	}
 
 	// A stacked row (name too wide for its column, narrow terminal) drops the

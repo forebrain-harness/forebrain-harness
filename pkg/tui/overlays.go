@@ -5149,18 +5149,11 @@ func (f *filterField) panelField() *panelField {
 // pickerHead puts a picker's label in its panel's head: the first line as the
 // title, the lines after it as the subtitle.
 func pickerHead(b *panelBuilder, label string) {
-	pickerHeadTag(b, label, "")
-}
-
-// pickerHeadTag is pickerHead with the title's right-edge tag (plan 329 D4):
-// the page-top tag the /config prototype pins beside every page's title. An
-// empty tag is the plain head every other picker draws.
-func pickerHeadTag(b *panelBuilder, label, tag string) {
 	lines := compactNonEmpty(strings.Split(strings.ReplaceAll(label, "\r", ""), "\n"))
 	if len(lines) == 0 {
 		return
 	}
-	b.titleWithTag(lines[0], tag)
+	b.title(lines[0])
 	if len(lines) > 1 {
 		b.subtitle(strings.Join(lines[1:], " "))
 	}
@@ -5726,12 +5719,6 @@ func (s *rawSelector) Secret(label string, defaultValue string) (string, bool, e
 }
 
 func (s *rawSelector) input(label string, defaultValue string, secret bool) (string, bool, error) {
-	return s.inputWith(nil, label, defaultValue, secret)
-}
-
-// inputWith is the input page under an optional chrome head (plan 329 D4):
-// nil keeps the plain question page every other caller opens.
-func (s *rawSelector) inputWith(chrome *configPageChrome, label string, defaultValue string, secret bool) (string, bool, error) {
 	release, err := s.acquireComposerInput()
 	if err != nil {
 		return "", false, err
@@ -5739,7 +5726,7 @@ func (s *rawSelector) inputWith(chrome *configPageChrome, label string, defaultV
 	defer release()
 	field := newTextField(defaultValue)
 	panel := func() slashPanel {
-		return inputPanelChrome(chrome, label, field.runes(), field.cursor, secret, s.escHint())
+		return inputPanel(label, field.runes(), field.cursor, secret, s.escHint())
 	}
 	s.showPanel(panel())
 	// Clicks on the field row move the caret; the field's text starts after
@@ -5781,20 +5768,8 @@ func (s *rawSelector) inputWith(chrome *configPageChrome, label string, defaultV
 // the answer as its field — masked when it is a secret — and the keys that
 // answer it.
 func inputPanel(title string, value []rune, cursor int, secret bool, esc string) slashPanel {
-	return inputPanelChrome(nil, title, value, cursor, secret, esc)
-}
-
-// inputPanelChrome is inputPanel under the /config panel's chrome head (plan
-// 329 D4): the tab bar, the breadcrumb and the tagged title above the
-// question. A nil chrome is the plain panel.
-func inputPanelChrome(chrome *configPageChrome, title string, value []rune, cursor int, secret bool, esc string) slashPanel {
 	b := newPanelBuilder()
-	if chrome != nil {
-		chrome.draw(b)
-		pickerHeadTag(b, title, chrome.tag)
-	} else {
-		pickerHead(b, title)
-	}
+	pickerHead(b, title)
 	b.hint("Enter to confirm " + esc)
 	p := b.panel()
 	if secret {
@@ -6036,12 +6011,11 @@ type richPickerState struct {
 	inFilter   bool   // the keyboard is in the filter, not on the rows
 	noFilter   bool   // too few rows to need a filter: none is shown
 	esc        string // what Esc does, for the key hint
-	// chrome, when set, is the /config panel's persistent head (plan 329 D4):
-	// the tab bar and the breadcrumb above the page's own title, the title's
-	// right-edge tag, group headings ruled the prototype's way, and ←/→
-	// asking for the next tab. Every other picker leaves it nil and keeps
-	// the head and groups it has always drawn.
-	chrome *configPageChrome
+	// configPage draws the picker as one of the /config panel's own pages
+	// (plan 325): airier rows, ruled group labels and no filter box. Every
+	// other picker leaves it false and keeps the head and groups it has
+	// always drawn.
+	configPage bool
 }
 
 func (p *richPickerState) rebuildSelectable() {
@@ -6097,26 +6071,30 @@ func (s *rawSelector) renderRichPicker(p *richPickerState, label string) {
 func (p *richPickerState) panel(label string) slashPanel {
 	b := newPanelBuilder()
 	b.unmarked = p.inFilter
-	if p.chrome != nil {
-		p.chrome.draw(b)
-		pickerHeadTag(b, label, p.chrome.tag)
-	} else {
-		pickerHead(b, label)
-	}
+	pickerHead(b, label)
 	nameWidth := p.nameWidth()
 	category := ""
 	for ci, idx := range p.selectable {
 		item := p.items[idx]
 		if item.Category != category && item.Category != "" {
-			if p.chrome != nil {
+			if p.configPage {
 				// The /config prototype's group label: upper-cased, ruled to
-				// the edge (plan 329 D4). The plain picker keeps its own
-				// heading, and so does every other panel.
+				// the edge (plan 329 D4), one blank line before it (plan 325
+				// D5). The plain picker keeps its own heading, and so does
+				// every other panel.
+				b.breathe()
 				b.groupRule(item.Category)
 			} else {
 				b.group(item.Category)
 			}
 			category = item.Category
+		}
+		if p.configPage {
+			// One blank line between rows, and one before each group after
+			// the first — the page breathes the way the prototype's padded
+			// rows do (plan 325 D5); the layout's own blank under the head
+			// sets the first row off the head.
+			b.breathe()
 		}
 		// The mark — the effort list's gear — is coloured here, in the one
 		// place a picker draws its rows: the item carries a bare glyph and the
@@ -6170,14 +6148,13 @@ func (s *rawSelector) SelectRichPaged(label string, items []SelectItem, defaultI
 	return s.selectRichPaged(label, items, defaultIdx, fetchMore)
 }
 
-// SelectRichChrome opens the rich picker under the /config panel's
-// persistent chrome (plan 329 D4): the tab bar and the breadcrumb above the
-// page's own tagged title, group headings ruled the prototype's way, and ←/→
-// asking for the next tab — which ends the page with no choice and records
-// the tab in the chrome, for the panel to unwind to that tab's overview. It
-// is a capability the panel probes for, never a behavior another picker
-// gains: the chrome travels with the call.
-func (s *rawSelector) SelectRichChrome(chrome *configPageChrome, label string, items []SelectItem, defaultIdx int) (int, bool, error) {
+// SelectRichPage is SelectRich as one of the /config panel's list pages draws
+// it (plan 325): the plain picker — title, rows, hint — with the prototype's
+// content structure only: ruled group labels, a blank line under the head,
+// airier rows and no filter box. It is a capability the panel probes for,
+// never a behavior another picker gains: the page style travels with the
+// call.
+func (s *rawSelector) SelectRichPage(label string, items []SelectItem, defaultIdx int) (int, bool, error) {
 	if len(items) == 0 {
 		return -1, false, nil
 	}
@@ -6185,10 +6162,12 @@ func (s *rawSelector) SelectRichChrome(chrome *configPageChrome, label string, i
 		items:      items,
 		selectable: make([]int, 0, len(items)),
 		esc:        s.escHint(),
-		chrome:     chrome,
+		configPage: true,
 	}
 	p.rebuildSelectable()
-	p.noFilter = !pickerShowsFilter(len(p.selectable))
+	// The /config pages carry no filter box whatever their row count (plan
+	// 325 D6): the keyboard stays on the rows.
+	p.noFilter = true
 	for ci, idx := range p.selectable {
 		if idx == defaultIdx {
 			p.cursor = ci
@@ -6197,25 +6176,6 @@ func (s *rawSelector) SelectRichChrome(chrome *configPageChrome, label string, i
 	}
 	return s.richKeyLoop(p, label, nil)
 }
-
-// InputChrome is SelectRichChrome's one-line-question form: the same chrome
-// around an input page. The arrows stay the caret's, the way they are in any
-// input — a tab switch is a list page's question.
-func (s *rawSelector) InputChrome(chrome *configPageChrome, label, defaultValue string) (string, bool, error) {
-	return s.inputWith(chrome, label, defaultValue, false)
-}
-
-// configChromeSelector is what the /config panel's pages need of a selector
-// to draw their persistent chrome (plan 329 D4). A selector without the
-// capability still serves the panel: its pages open as the plain pickers,
-// which is how a scripted selector keeps recording the labels it always saw.
-type configChromeSelector interface {
-	Selector
-	SelectRichChrome(chrome *configPageChrome, label string, items []SelectItem, defaultIdx int) (int, bool, error)
-	InputChrome(chrome *configPageChrome, label, defaultValue string) (string, bool, error)
-}
-
-var _ configChromeSelector = (*rawSelector)(nil)
 
 func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultIdx int, fetchMore func() []SelectItem) (int, bool, error) {
 	if len(items) == 0 {
@@ -6242,10 +6202,10 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 	return s.richKeyLoop(p, label, fetchMore)
 }
 
-// richKeyLoop is the rich picker's one key loop (plan 329 D4): it renders the
-// state's panel and reads keys until the user confirms or cancels, reporting
-// ok only for a confirmation. The state carries everything the page draws,
-// the chrome included.
+// richKeyLoop is the rich picker's one key loop: it renders the state's panel
+// and reads keys until the user confirms or cancels, reporting ok only for a
+// confirmation. The state carries everything the page draws, its config-page
+// style included (plan 325).
 func (s *rawSelector) richKeyLoop(p *richPickerState, label string, fetchMore func() []SelectItem) (int, bool, error) {
 	release, err := s.acquireComposerInput()
 	if err != nil {
@@ -6323,19 +6283,6 @@ func (s *rawSelector) richKeyLoop(p *richPickerState, label string, fetchMore fu
 				p.rebuildSelectable()
 			}
 		case rawKeyLeft:
-			if p.chrome != nil && !p.inFilter {
-				// A chrome page's ←/→ walk the tab bar instead (plan 329 D4):
-				// the switch ends the page with no choice, and the chrome
-				// records the tab the panel unwinds to.
-				step := -1
-				if key.kind == rawKeyRight {
-					step = 1
-				}
-				if p.chrome.switchTab(step) >= 0 {
-					return -1, false, nil
-				}
-				continue
-			}
 			if !p.inFilter {
 				continue
 			}
