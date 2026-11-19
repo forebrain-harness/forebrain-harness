@@ -676,16 +676,9 @@ func TestProviderPageListsThreeGroups(t *testing.T) {
 	if rows[0].item.Label != "ChatGPT" {
 		t.Fatalf("first sign-in row = %q", rows[0].item.Label)
 	}
-	// The row says what signing in gets the user, in the registry's own words.
-	if got := rows[0].item.Description; got != "Use Codex included with your ChatGPT plan" {
-		t.Fatalf("sign-in row description = %q", got)
-	}
 	last := rows[len(rows)-1]
 	if last.item.Label != "Custom model" || last.choice.Provider != appcfg.CustomProvider || !last.choice.Custom {
 		t.Fatalf("custom row = %+v", last)
-	}
-	if got := last.item.Description; got != "OpenAI- or Anthropic-compatible, or custom protocol" {
-		t.Fatalf("custom row description = %q", got)
 	}
 	// No sign-in provider is reachable from the API key group.
 	for _, row := range rows {
@@ -715,8 +708,8 @@ func TestProviderPageMarksASubscriptionAlreadySignedIn(t *testing.T) {
 	withSubscriptions(t, sub)
 	setup := newLLMSetup(PromptConfig{Selector: &fakeSelector{}, Output: io.Discard, Home: t.TempDir()})
 	rows := setup.providerRows()
-	if !strings.HasSuffix(rows[0].item.Description, "Signed in") {
-		t.Fatalf("signed-in row = %q, want the badge", rows[0].item.Description)
+	if rows[0].item.Status != "Signed in" {
+		t.Fatalf("signed-in row = %+v, want the badge", rows[0].item)
 	}
 	if sub.probeCalls != 1 {
 		t.Fatalf("probe calls = %d, want one", sub.probeCalls)
@@ -2122,13 +2115,13 @@ func TestRegistryCarriesTheClientConstants(t *testing.T) {
 		t.Fatalf("opencode-go endpoint = %+v, want %q", openCode.Endpoints, opencode.ProviderBaseURL("opencode-go"))
 	}
 	// The first page's sign-in rows are generated from those same registry
-	// endpoints: the wording under each one is the endpoint's own.
+	// endpoints.
 	chatGPTRow := subscriptionChoice(chatGPTLike())
-	if chatGPTRow.Provider != "chatgpt" || chatGPTRow.Hint != "Use Codex included with your ChatGPT plan" {
+	if chatGPTRow.Provider != "chatgpt" {
 		t.Fatalf("generated chatgpt row = %+v", chatGPTRow)
 	}
 	openCodeRow := subscriptionChoice(openCodeLike())
-	if openCodeRow.Provider != "opencode-go" || openCodeRow.Hint != "Device-code login; use your Go/Go Plus quota" {
+	if openCodeRow.Provider != "opencode-go" {
 		t.Fatalf("generated opencode-go row = %+v", openCodeRow)
 	}
 	// A sign-in's endpoint comes from the login, never from the row, so the row

@@ -736,7 +736,6 @@ func customChoice() providerChoice {
 	return providerChoice{
 		Group:    providerCustomCategory,
 		Label:    "Custom model",
-		Hint:     "OpenAI- or Anthropic-compatible, or custom protocol",
 		Provider: appcfg.CustomProvider,
 		Custom:   true,
 	}
@@ -757,19 +756,19 @@ func (s *llmSetup) providerRows() []providerRow {
 	rows := make([]providerRow, 0, len(subscriptions())+len(providerGroups)+1)
 	for _, sub := range subscriptions() {
 		choice := subscriptionChoice(sub)
-		description := choice.Hint
+		status := ""
 		if s.probeSubscription(sub).State == turn.SignInUsable {
-			description += "  Signed in"
+			status = "Signed in"
 		}
 		rows = append(rows, providerRow{
-			item:   SelectItem{Label: choice.Label, Description: description, Category: providerSignInCategory},
+			item:   SelectItem{Label: choice.Label, Category: providerSignInCategory, Status: status},
 			choice: choice,
 		})
 	}
 	for _, group := range providerGroups {
 		group := group
 		row := providerRow{
-			item:  SelectItem{Label: group.Label, Description: providerGroupBlurb(group), Category: providerAPIKeyCategory},
+			item:  SelectItem{Label: group.Label, Category: providerAPIKeyCategory},
 			group: &group,
 		}
 		if len(group.Options) == 1 {
@@ -782,7 +781,7 @@ func (s *llmSetup) providerRows() []providerRow {
 	}
 	custom := customChoice()
 	rows = append(rows, providerRow{
-		item:   SelectItem{Label: custom.Label, Description: custom.Hint, Category: providerCustomCategory},
+		item:   SelectItem{Label: custom.Label, Category: providerCustomCategory},
 		choice: custom,
 	})
 	return rows
@@ -805,18 +804,12 @@ func providerRowHolds(row providerRow, choice providerChoice) bool {
 	}
 }
 
-// subscriptionChoice is one subscription's row: its name, and what signing in
-// to it gets the user.
+// subscriptionChoice is one subscription's row: its name.
 func subscriptionChoice(sub subscription.Subscription) providerChoice {
 	label, _ := sub.Label()
-	hint := ""
-	if provider, ok := appcfg.BuiltinProviderByID(sub.ID()); ok && len(provider.Endpoints) > 0 {
-		hint = providerChoiceHint(provider.Endpoints[0])
-	}
 	choice := providerChoice{
 		Group:        label,
 		Label:        label,
-		Hint:         hint,
 		Provider:     sub.ID(),
 		Subscription: sub.ID(),
 	}
@@ -915,15 +908,6 @@ func categoryOf(choice providerChoice) string {
 	default:
 		return providerAPIKeyCategory
 	}
-}
-
-// providerGroupBlurb is what a provider's row says about it: its one way in,
-// or how many plans it offers.
-func providerGroupBlurb(group providerGroup) string {
-	if len(group.Options) == 1 {
-		return group.Options[0].Hint
-	}
-	return fmt.Sprintf("%d plans by region and billing", len(group.Options))
 }
 
 // credentials asks for the provider's API key, or signs in to the subscription
