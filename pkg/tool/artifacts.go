@@ -1,11 +1,15 @@
 // Deliverables: the present_files tool, the file classification every
 // artifact surface shares, and the card formatting for the tool's steps.
 //
-// A deliverable exists only when the model says so: present_files registers
-// each presented file in fb_artifacts, and every surface that shows what a
-// conversation delivered — the web card, the run's end frame, a batch task's
-// integrator — reads that table. Intermediate scripts and scratch files are
-// never artifacts because the model never presents them.
+// A deliverable exists when the model says so: present_files registers each
+// presented file in fb_artifacts when the model judges the work complete and
+// hands it over, and every surface that shows what a conversation delivered —
+// the web card, the run's end frame, a batch task's integrator — reads that
+// table. Intermediate scripts and scratch files are never artifacts because
+// the model never presents them. Batch conversations carry one harness rule
+// on top (an integration surface, not an end user): at each execution end the
+// engine also registers the not-yet-delivered files left in the protocol
+// folder outputs/ (pkg/turn/batch.go).
 package tool
 
 import (
