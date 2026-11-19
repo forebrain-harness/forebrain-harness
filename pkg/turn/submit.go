@@ -252,15 +252,6 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		// pre-approved (plan 150). Reaching this branch means that policy is
 		// not in force, so the execution is failed with the reason rather than
 		// left running with nobody to answer the gate.
-		// The top-up runs only for a batch turn here: an interactive turn is
-		// NOT over — its approval resume presents in the same turn — while a
-		// batch approval_required is terminal, so its writes need collecting
-		// now.
-		if batchTurn {
-			if pt, root := s.deliverableScope(context.WithoutCancel(ctx), req.SessionID); root != "" {
-				s.collectTurnDeliverables(context.WithoutCancel(ctx), req.SessionID, runID, pt, root)
-			}
-		}
 		endBatch(state.TaskStatusFailed, "approval_required", err)
 		out.Status = TurnWaitingApproval
 		out.Approval = waiting.Request
@@ -273,12 +264,6 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		return out, nil
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		s.autoContinue.turnEnded(ctx, req, runID, nil)
-		// The top-up runs before the execution is settled and before the
-		// terminal event: whatever the surfaces read next — the batch end
-		// report, the run-end frame — must already see every row.
-		if pt, root := s.deliverableScope(context.WithoutCancel(ctx), req.SessionID); root != "" {
-			s.collectTurnDeliverables(context.WithoutCancel(ctx), req.SessionID, runID, pt, root)
-		}
 		endBatch(state.TaskStatusStopped, "", err)
 		out.Status = TurnCancelled
 		out.Error = err
@@ -291,9 +276,6 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 	case err != nil:
 		out.Status = TurnFailed
 		out.Error = err
-		if pt, root := s.deliverableScope(context.WithoutCancel(ctx), req.SessionID); root != "" {
-			s.collectTurnDeliverables(context.WithoutCancel(ctx), req.SessionID, runID, pt, root)
-		}
 		endBatch(state.TaskStatusFailed, "", err)
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnError})
 		telemetry.Emit(ctx, slog.LevelError, "turn", "turn failed",
@@ -312,9 +294,6 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		return out, err
 	default:
 		s.autoContinue.turnEnded(ctx, req, runID, nil)
-		if pt, root := s.deliverableScope(context.WithoutCancel(ctx), req.SessionID); root != "" {
-			s.collectTurnDeliverables(context.WithoutCancel(ctx), req.SessionID, runID, pt, root)
-		}
 		endBatch(state.TaskStatusCompleted, "", nil)
 		out.Status = TurnCompleted
 		out.Result = result
