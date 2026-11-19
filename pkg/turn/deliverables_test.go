@@ -2,19 +2,17 @@ package turn
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
-	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 // deliverableEnv is one project conversation with its real stores, so the
-// top-up is exercised against the same reads and writes production uses.
+// delivery assertions run against the same reads and writes production uses.
 type deliverableEnv struct {
 	projects *state.ProjectStore
 	sessions *state.SessionStore
@@ -71,39 +69,6 @@ func (e *deliverableEnv) recordChange(t *testing.T, runID, path string, deleted 
 	}
 }
 
-// shellStepWithChangedPaths records one completed shell step whose raw output
-// carries a shell_edit_diff with the given changed paths — the shape a
-// successful AND (plan 324 rev 4) a failed command's step both carry.
-func (e *deliverableEnv) shellStepWithChangedPaths(t *testing.T, runID string, paths ...string) {
-	t.Helper()
-	payload, err := json.Marshal(map[string]any{
-		"tool": "shell",
-		"output": map[string]any{
-			"shell_edit_diff": map[string]any{
-				"files":         []any{},
-				"changed_files": paths,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.runs.AppendSessionEvent(context.Background(), state.SessionEvent{
-		ID: "evt-" + runID + "-" + filepath.Base(paths[0]), SessionID: e.session, RunID: runID,
-		Type: event.RunEventToolCompleted, Payload: payload,
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func (e *deliverableEnv) service() *Service {
-	return New(
-		WithSessionStore(e.sessions),
-		WithRunEventStore(e.runs),
-		WithBatchTasks(nil, e.sessions, nil),
-	)
-}
-
 func (e *deliverableEnv) runArtifacts(t *testing.T, runID string) []state.Artifact {
 	t.Helper()
 	rows, err := e.sessions.ListArtifactsForRun(context.Background(), runID)
@@ -113,208 +78,99 @@ func (e *deliverableEnv) runArtifacts(t *testing.T, runID string) []state.Artifa
 	return rows
 }
 
-// TestTurnTopUpRegistersUnpresentedFileToolWrite is the root case (a): a
-// file-tool change the model never presented is registered as the run's
-// fallback deliverable, root-relative, hash-stamped.
-func TestTurnTopUpRegistersUnpresentedFileToolWrite(t *testing.T) {
-	env := newDeliverableEnv(t, state.ProjectTypeCoding)
-	path := env.write(t, "src/main.go", "package main\n")
-	env.recordChange(t, env.runID, path, false)
-	env.service().collectTurnDeliverables(context.Background(), env.session, env.runID, state.ProjectTypeCoding, env.root)
-	rows := env.runArtifacts(t, env.runID)
-	if len(rows) != 1 {
-		t.Fatalf("run artifacts = %+v, want one fallback row", rows)
-	}
-	row := rows[0]
-	if row.Origin != state.ArtifactOriginFallback || row.RelPath != "src/main.go" || row.Name != "main.go" {
-		t.Fatalf("fallback row = %+v", row)
-	}
-	if row.SHA256 == "" || row.Size != int64(len("package main\n")) {
-		t.Fatalf("fallback row not hash-stamped: %+v", row)
-	}
-}
-
-// TestTurnTopUpSkipsModelPresentedSameBytes pins the session-level version
-// check (b): a path already delivered with these bytes — by the model or by
-// an earlier turn of the conversation — is not delivered again.
-func TestTurnTopUpSkipsModelPresentedSameBytes(t *testing.T) {
-	env := newDeliverableEnv(t, state.ProjectTypeCoding)
-	path := env.write(t, "report.pdf", "bytes")
-	env.recordChange(t, env.runID, path, false)
-	if _, err := env.sessions.AddArtifact(context.Background(), state.Artifact{
-		SessionID: env.session, RunID: env.runID, Path: path, RelPath: "report.pdf",
-		Name: "report.pdf", Kind: "document", SHA256: rowsOf(t, path), Origin: state.ArtifactOriginModel,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	env.service().collectTurnDeliverables(context.Background(), env.session, env.runID, state.ProjectTypeCoding, env.root)
-	if rows := env.runArtifacts(t, env.runID); len(rows) != 1 || rows[0].Origin != state.ArtifactOriginModel {
-		t.Fatalf("artifacts = %+v, want the single model row untouched", rows)
-	}
-}
-
-// TestTurnTopUpRegistersReEditedFileAsNewVersion pins (c): a file edited
-// again after it was presented is re-delivered — a path with new bytes is a
-// new version, exactly what presenting it again would record.
-func TestTurnTopUpRegistersReEditedFileAsNewVersion(t *testing.T) {
-	env := newDeliverableEnv(t, state.ProjectTypeCoding)
-	path := env.write(t, "report.pdf", "old")
-	if _, err := env.sessions.AddArtifact(context.Background(), state.Artifact{
-		SessionID: env.session, RunID: env.runID, Path: path, RelPath: "report.pdf",
-		Name: "report.pdf", Kind: "document", SHA256: rowsOf(t, path), Origin: state.ArtifactOriginModel,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("new bytes"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	env.recordChange(t, env.runID, path, false)
-	env.service().collectTurnDeliverables(context.Background(), env.session, env.runID, state.ProjectTypeCoding, env.root)
-	rows := env.runArtifacts(t, env.runID)
-	if len(rows) != 2 {
-		t.Fatalf("artifacts = %+v, want a model row and a new fallback version", rows)
-	}
-	if rows[1].Origin != state.ArtifactOriginFallback || rows[1].SHA256 == rows[0].SHA256 {
-		t.Fatalf("new version = %+v", rows[1])
-	}
-}
-
-// TestTurnTopUpExcludesDeletedOutsideAndEmpty pins (d) and (j): a deleted
-// ledger row is not a deliverable, a path outside the project root is not
-// either, and a turn with no run id has nothing to key the read on.
-func TestTurnTopUpExcludesDeletedOutsideAndEmpty(t *testing.T) {
-	env := newDeliverableEnv(t, state.ProjectTypeCoding)
-	gone := env.write(t, "gone.txt", "x")
-	env.recordChange(t, env.runID, gone, true)
-	outside := filepath.Join(t.TempDir(), "elsewhere.txt")
-	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	env.recordChange(t, env.runID, outside, false)
-	env.service().collectTurnDeliverables(context.Background(), env.session, env.runID, state.ProjectTypeCoding, env.root)
-	if rows := env.runArtifacts(t, env.runID); len(rows) != 0 {
-		t.Fatalf("artifacts = %+v, want none", rows)
-	}
-	// A missing file since the write is skipped, not fatal.
-	env.recordChange(t, env.runID, filepath.Join(env.root, "vanished.txt"), false)
-	// No run id: no-op, whatever the ledger holds.
-	env.service().collectTurnDeliverables(context.Background(), env.session, "", state.ProjectTypeCoding, env.root)
-	if rows := env.runArtifacts(t, ""); len(rows) != 0 {
-		t.Fatalf("empty run artifacts = %+v, want none", rows)
-	}
-}
-
-// TestTurnTopUpRegistersShellChangedFilesIncludingBinary pins (f): the shell
-// union reads the raw completion payloads' ChangedFiles, where binary and
-// large files live — files that never appear in the diff's file records.
-func TestTurnTopUpRegistersShellChangedFilesIncludingBinary(t *testing.T) {
-	env := newDeliverableEnv(t, state.ProjectTypeCoding)
-	bin := env.write(t, "assets/logo.png", "\x89PNG")
-	env.shellStepWithChangedPaths(t, env.runID, bin)
-	env.service().collectTurnDeliverables(context.Background(), env.session, env.runID, state.ProjectTypeCoding, env.root)
-	rows := env.runArtifacts(t, env.runID)
-	if len(rows) != 1 || rows[0].RelPath != "assets/logo.png" || rows[0].Origin != state.ArtifactOriginFallback {
-		t.Fatalf("artifacts = %+v, want the binary as a fallback row", rows)
-	}
-}
-
-// TestTurnTopUpCoversFailedShellSteps pins (k): a failed command's step
-// carries the same raw payload shape (rev 4), so its writes are topped up
-// too.
-func TestTurnTopUpCoversFailedShellSteps(t *testing.T) {
-	env := newDeliverableEnv(t, state.ProjectTypeCoding)
-	path := env.write(t, "out/partial.csv", "a,b\n")
-	env.shellStepWithChangedPaths(t, env.runID, path)
-	env.service().collectTurnDeliverables(context.Background(), env.session, env.runID, state.ProjectTypeCoding, env.root)
-	if rows := env.runArtifacts(t, env.runID); len(rows) != 1 || rows[0].RelPath != "out/partial.csv" {
-		t.Fatalf("artifacts = %+v, want the failed command's write", rows)
-	}
-}
-
-// TestTurnTopUpCoversSubagentWrites pins (g): a subagent run hangs off the
-// primary's tree, so the ledger rows it recorded under its own run id are
-// the turn's to deliver.
-func TestTurnTopUpCoversSubagentWrites(t *testing.T) {
-	env := newDeliverableEnv(t, state.ProjectTypeCoding)
-	child, err := env.runs.CreateSubagentRun(context.Background(), env.runID, env.session, "sub work")
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := env.write(t, "src/child.go", "package child\n")
-	env.recordChange(t, child.ID, path, false)
-	env.service().collectTurnDeliverables(context.Background(), env.session, env.runID, state.ProjectTypeCoding, env.root)
-	if rows := env.runArtifacts(t, env.runID); len(rows) != 1 {
-		t.Fatalf("artifacts = %+v, want the subagent's write under the primary run", rows)
-	}
-}
-
-// TestTurnTopUpRunsOnACancelledTurn pins (h): a cancelled turn's writes
-// already landed and are still delivered — the top-up detaches from the
-// turn's cancellation, and Submit's cancelled branch still reaches it.
-func TestTurnTopUpRunsOnACancelledTurn(t *testing.T) {
-	env := newDeliverableEnv(t, state.ProjectTypeCoding)
-	path := env.write(t, "src/main.go", "package main\n")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	// The direct call survives the cancelled context…
-	env.recordChange(t, env.runID, path, false)
-	env.service().collectTurnDeliverables(ctx, env.session, env.runID, state.ProjectTypeCoding, env.root)
-	if rows := env.runArtifacts(t, env.runID); len(rows) != 1 {
-		t.Fatalf("direct call on a cancelled ctx delivered %+v, want one row", rows)
-	}
-	// …and so does Submit's cancelled branch, end to end.
-	second := env.write(t, "src/other.go", "package other\n")
-	svc := env.service()
-	svc.runner = runFunc(func(runCtx context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
-		started(env.runID)
-		env.recordChange(t, env.runID, second, false)
-		return nil, runCtx.Err()
-	})
-	out, err := svc.Submit(ctx, TurnRequest{SessionID: env.session, UserText: "go"}, nil)
-	if out.Status != TurnCancelled || !errors.Is(err, context.Canceled) {
-		t.Fatalf("outcome = %+v, err = %v", out, err)
-	}
-	if rows := env.runArtifacts(t, env.runID); len(rows) != 2 {
-		t.Fatalf("artifacts after a cancelled turn = %+v, want both writes", rows)
-	}
-}
-
-// TestTurnTopUpBatchScratchExcluded pins (i): batch mirrors the outputs
-// scan's scratch rule — nothing under a dot directory is a deliverable —
-// while coding and office deliver any file of the project.
-func TestTurnTopUpBatchScratchExcluded(t *testing.T) {
-	for _, tc := range []struct {
-		projectType string
-		want        int
-	}{
-		{state.ProjectTypeBatch, 0},
-		// Coding's rule is the owner's: every file the turn changed, whatever
-		// its name or directory — scratch included.
-		{state.ProjectTypeCoding, 2},
-	} {
-		env := newDeliverableEnv(t, tc.projectType)
-		env.write(t, "tasks/t1/1/.work/scratch.tmp", "x")
-		hidden := env.write(t, "tasks/t1/1/outputs/.hidden/report.pdf", "x")
-		env.recordChange(t, env.runID, hidden, false)
-		env.recordChange(t, env.runID, filepath.Join(env.root, "tasks", "t1", "1", ".work", "scratch.tmp"), false)
-		env.service().collectTurnDeliverables(context.Background(), env.session, env.runID, tc.projectType, env.root)
-		if rows := env.runArtifacts(t, env.runID); len(rows) != tc.want {
-			t.Fatalf("%s artifacts = %+v, want %d rows", tc.projectType, rows, tc.want)
+// TestSubmitInteractiveTurnRegistersNoFallbackArtifacts pins the owner's
+// 2026-11-19 contract: office and coding deliver only what the model
+// presents, when the model judges the work complete. The engine registers
+// nothing on its own at any terminal branch — a helper script the model
+// kept out of the delivery set stays out, even though the ledger tracked
+// the write.
+func TestSubmitInteractiveTurnRegistersNoFallbackArtifacts(t *testing.T) {
+	for _, pt := range []string{state.ProjectTypeOffice, state.ProjectTypeCoding} {
+		for _, outcome := range []struct {
+			name string
+			err  error
+		}{
+			{"completed", nil},
+			{"cancelled", context.Canceled},
+			{"failed", errors.New("boom")},
+		} {
+			t.Run(pt+"/"+outcome.name, func(t *testing.T) {
+				env := newDeliverableEnv(t, pt)
+				rel := "src/main.go"
+				if pt == state.ProjectTypeOffice {
+					rel = ".work/helper.py"
+				}
+				path := env.write(t, rel, "package main\n")
+				svc := New(
+					WithSessionStore(env.sessions),
+					WithRunEventStore(env.runs),
+					WithBatchTasks(nil, env.sessions, nil),
+					WithRunExecutor(runFunc(func(runCtx context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+						run, err := env.runs.CreateRun(runCtx, env.session, "work")
+						if err != nil {
+							return nil, err
+						}
+						started(run.ID)
+						if err := env.sessions.RecordFileChange(runCtx, state.FileChange{
+							SessionID: env.session, RunID: run.ID, Path: path,
+						}); err != nil {
+							return nil, err
+						}
+						return &agent.Result{}, outcome.err
+					})),
+				)
+				out, err := svc.Submit(context.Background(), TurnRequest{SessionID: env.session}, nil)
+				if err != nil && outcome.err == nil {
+					t.Fatalf("submit: %v", err)
+				}
+				if rows := env.runArtifacts(t, out.RunID); len(rows) != 0 {
+					t.Fatalf("%s %s turn registered engine-side artifacts: %+v", pt, outcome.name, rows)
+				}
+			})
 		}
 	}
 }
 
-// TestTurnTopUpNoScopeIsNoOp pins the boundary: a conversation whose session
-// store cannot name a project root (a workshop task, a service built without
-// the scope read) delivers nothing the engine did not already — the prompt
-// keeps the delivery duty, the guarantee simply has no anchor.
-func TestTurnTopUpNoScopeIsNoOp(t *testing.T) {
-	env := newDeliverableEnv(t, state.ProjectTypeCoding)
-	path := env.write(t, "src/main.go", "package main\n")
-	env.recordChange(t, env.runID, path, false)
-	env.service().collectTurnDeliverables(context.Background(), env.session, env.runID, state.ProjectTypeCoding, "")
-	if rows := env.runArtifacts(t, env.runID); len(rows) != 0 {
-		t.Fatalf("artifacts = %+v, want none without a root", rows)
+// TestSubmitKeepsModelPresentedArtifacts is the positive control: removing
+// the engine-side collection must not touch what the model itself delivered.
+func TestSubmitKeepsModelPresentedArtifacts(t *testing.T) {
+	env := newDeliverableEnv(t, state.ProjectTypeOffice)
+	deliverable := env.write(t, "2026Q3-report.docx", "final")
+	scratch := env.write(t, ".work/helper.py", "print(1)\n")
+	svc := New(
+		WithSessionStore(env.sessions),
+		WithRunEventStore(env.runs),
+		WithBatchTasks(nil, env.sessions, nil),
+		WithRunExecutor(runFunc(func(runCtx context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+			run, err := env.runs.CreateRun(runCtx, env.session, "work")
+			if err != nil {
+				return nil, err
+			}
+			started(run.ID)
+			for _, p := range []string{deliverable, scratch} {
+				if err := env.sessions.RecordFileChange(runCtx, state.FileChange{
+					SessionID: env.session, RunID: run.ID, Path: p,
+				}); err != nil {
+					return nil, err
+				}
+			}
+			if _, err := env.sessions.AddArtifact(runCtx, state.Artifact{
+				SessionID: env.session, RunID: run.ID, Path: deliverable,
+				RelPath: "2026Q3-report.docx", Name: "2026Q3-report.docx",
+				Kind: "document", SHA256: rowsOf(t, deliverable), Origin: state.ArtifactOriginModel,
+			}); err != nil {
+				return nil, err
+			}
+			return &agent.Result{}, nil
+		})),
+	)
+	out, err := svc.Submit(context.Background(), TurnRequest{SessionID: env.session}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := env.runArtifacts(t, out.RunID)
+	if len(rows) != 1 || rows[0].Origin != state.ArtifactOriginModel || rows[0].Name != "2026Q3-report.docx" {
+		t.Fatalf("artifacts = %+v, want exactly the model-presented deliverable", rows)
 	}
 }
 
