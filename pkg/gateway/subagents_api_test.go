@@ -452,9 +452,9 @@ func TestSubagentCreatePrependsAndRefusesCollisions(t *testing.T) {
 			want: http.StatusBadRequest, text: "invalid name",
 		},
 		{
-			name: "a description nobody wrote",
-			body: map[string]any{"name": "gamma", "system_prompt": "p"},
-			want: http.StatusBadRequest, text: "description required",
+			name: "a prompt nobody wrote",
+			body: map[string]any{"name": "gamma"},
+			want: http.StatusBadRequest, text: "system_prompt required",
 		},
 		{
 			name: "a subagent that would dispatch subagents",
@@ -1195,12 +1195,6 @@ func TestSharedSubagentCreateRefusals(t *testing.T) {
 			want:   `a shared subagent named "repo-auditor" already exists`,
 		},
 		{
-			name:   "no description",
-			body:   map[string]any{"name": "repo-scout", "system_prompt": "p"},
-			status: http.StatusBadRequest,
-			want:   "description required",
-		},
-		{
 			name:   "no system prompt",
 			body:   map[string]any{"name": "repo-scout", "description": "d"},
 			status: http.StatusBadRequest,
@@ -1235,6 +1229,14 @@ func TestSharedSubagentCreateRefusals(t *testing.T) {
 	// Every refusal left the registry as it was.
 	require.Len(t, f.config(t).Agents.SharedSubagents, 1)
 	require.Equal(t, "repo-auditor", f.config(t).Agents.SharedSubagents[0].Name)
+
+	// A description is optional (owner 2026-11-19): the model dispatches the
+	// subagent by name, so one that has none runs on its prompt alone.
+	rec := f.do(t, http.MethodPost, "/api/agents/subagents/shared", map[string]any{"name": "repo-scout", "system_prompt": "p"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, f.config(t).Agents.SharedSubagents, 2)
+	require.Equal(t, "repo-scout", f.config(t).Agents.SharedSubagents[1].Name)
+	require.Empty(t, f.config(t).Agents.SharedSubagents[1].Description)
 }
 
 // TestSharedSubagentDeleteDropsEveryReference pins the one cross-agent write

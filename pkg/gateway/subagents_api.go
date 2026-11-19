@@ -1367,11 +1367,9 @@ func (s *Server) handleSharedSubagentCreate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.writeSharedSubagents(w, r, func(cfg, models *config.Root) error {
-		// The names the loader refuses are the two built-in lists: the four the
-		// model may dispatch and the six the system does — the latter includes
-		// the system subagent types that are not dispatchable definitions at all
-		// (plan-reviewer, goal-evaluator).
-		if config.IsBuiltInSubagentDefinition(name) || slices.Contains(agent.SystemSubagentNames, name) {
+		// The names the loader reserves are one rule for both roles (P3 ruling
+		// #8): the four the model may dispatch and the two the system does.
+		if config.IsReservedDefinitionID(name) {
 			return subagentConflict("%q is a built-in subagent type and cannot be a shared custom subagent", name)
 		}
 		if sharedSubagentIndex(cfg.Agents.SharedSubagents, name) >= 0 {

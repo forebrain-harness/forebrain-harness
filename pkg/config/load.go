@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -236,6 +237,11 @@ func validateLoadedRoot(r *Root) error {
 		return err
 	}
 	if err := validatePrimaryAgents(r); err != nil {
+		return err
+	}
+	// The subagent role's own definitions (P3): judged after the primary ones,
+	// which own the id pattern and the per-agent subagent entries.
+	if err := validateDefinitionRoles(r); err != nil {
 		return err
 	}
 	return nil
@@ -930,6 +936,87 @@ func IsBuiltInSubagentDefinition(id string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	_, ok := builtInSubagentDefinitionNames[id]
 	return ok
+}
+
+// IsReservedDefinitionID reports whether id names a subagent type the runtime
+// already owns: the four public built-ins the model may dispatch and the two
+// the system dispatches itself. Both roles refuse to be created under one of
+// these keys — a definitions entry under them is a built-in's shell rather than
+// a definition a person wrote (P3 ruling #8) — so every write path that creates
+// a definition asks this one function.
+//
+// The loader does not refuse them: definitions.explore is a live shell key an
+// install may already carry (its default_model is the built-in type's
+// install-wide model choice), and refusing it at load would unload that install.
+func IsReservedDefinitionID(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	return IsBuiltInSubagentDefinition(id) || slices.Contains(builtInSystemSubagentNames, id)
+}
+
+// definitionCarriesSubagentBody reports whether a definition carries any field
+// of the subagent role. It is what separates a subagent definition from the two
+// shapes that must stay inert: a bare `{primary: false}` (an agent that never
+// chose a role) and a built-in key's shell (description and default_model
+// only). The description is deliberately not one of these fields — both roles
+// carry it.
+func definitionCarriesSubagentBody(def AgentDefinition) bool {
+	return strings.TrimSpace(def.Model) != "" ||
+		strings.TrimSpace(def.ReasoningEffort) != "" ||
+		strings.TrimSpace(def.SystemPrompt) != "" ||
+		strings.TrimSpace(def.Tools) != "" ||
+		len(def.AllowedTools) > 0 ||
+		def.Continuable != nil
+}
+
+// validateDefinitionRoles judges the definitions validatePrimaryAgents does not
+// claim: the ones playing the subagent role (P3 ruling #16). A primary-role
+// definition keeps today's rules untouched, subagent-only fields included — they
+// are ignored there, not refused (ruling #17's refusals belong to the write
+// paths, which know a role is being chosen).
+//
+// A subagent-role definition is validated only when it carries the subagent
+// body: a bare `{primary: false}` and a built-in key's shell keep loading
+// exactly as they did before, which is what makes this change invisible to the
+// configurations already stored (the loader must never refuse a configuration it
+// accepted). When it does carry the body, its id is held to the subagent name
+// pattern and its body to the same rules a custom subagent entry gets, minus the
+// description.
+func validateDefinitionRoles(r *Root) error {
+	if r == nil || r.Agents.Definitions == nil {
+		return nil
+	}
+	for _, id := range sortedDefinitionIDs(r.Agents.Definitions) {
+		def := r.Agents.Definitions[id]
+		if IsEffectivePrimaryAgent(id, def) || !definitionCarriesSubagentBody(def) {
+			continue
+		}
+		where := fmt.Sprintf("agents.definitions.%s", id)
+		if !subagentConfigNamePattern.MatchString(id) {
+			return fmt.Errorf("%s: invalid subagent id %q: use lower-case letters, digits and dashes, starting with a letter", where, id)
+		}
+		// The body the two rules below judge. The description is not part of it
+		// (both roles carry one, and neither has to), and neither Name nor
+		// Continuable is judged here.
+		entry := SubagentConfig{
+			SystemPrompt:    def.SystemPrompt,
+			Model:           def.Model,
+			ReasoningEffort: def.ReasoningEffort,
+			Tools:           def.Tools,
+			AllowedTools:    def.AllowedTools,
+		}
+		if err := validateCustomSubagentBody(where, entry); err != nil {
+			return err
+		}
+		if err := validateSubagentModel(where, where+": thinking level requires a model.", entry, func(ref string) bool {
+			// The same resolution every other model reference gets: a row of the
+			// install-wide table, or a legacy label one of them carries.
+			_, ok := ResolveModelRef(r, id, ref)
+			return ok
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validatePrimaryAgents(r *Root) error {

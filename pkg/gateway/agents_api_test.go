@@ -344,9 +344,10 @@ func TestPrimaryAgentCreateRejectsDuplicateID(t *testing.T) {
 // type's install-wide default, which IsEffectivePrimaryAgent never treats as a
 // primary agent however it is flagged. Creating one is refused before anything
 // is written, with the verdict the /config panel's creation flow gives (plan
-// 313), and a real id still goes through.
+// 313), and a real id still goes through. The six reserved keys are the four the
+// model may dispatch and the two the system dispatches itself (P3 ruling #8).
 func TestPrimaryAgentCreateRejectsBuiltInSubagentTypeIDs(t *testing.T) {
-	for _, id := range []string{"explore", "plan", "general-purpose", "verification"} {
+	for _, id := range []string{"explore", "plan", "general-purpose", "verification", "plan-reviewer", "goal-evaluator"} {
 		t.Run(id, func(t *testing.T) {
 			s, _ := crudServer(t)
 			rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]string{"id": id})

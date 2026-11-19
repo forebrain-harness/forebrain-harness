@@ -387,7 +387,9 @@ func llmModelApplyLiveCaps(rowID, provider, model, apiPath string, caps *llmMode
 
 // llmModelDefaultFor names the agents whose default_model is this row, by
 // display name. The reference is an explicit choice, so a row one of them runs
-// on cannot be deleted behind its back.
+// on cannot be deleted behind its back. A subagent definition's own Model is not
+// a default and this helper does not look at it: nothing falls back to that row
+// when it goes, the subagent simply follows the conversation's model.
 func llmModelDefaultFor(cfg *config.Root, id string) []string {
 	if cfg == nil || strings.TrimSpace(id) == "" {
 		return nil

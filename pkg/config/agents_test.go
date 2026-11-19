@@ -525,11 +525,6 @@ func TestLoadRejectsInvalidAgentSubagents(t *testing.T) {
 			want:  "is a built-in",
 		},
 		{
-			name:  "custom without a description",
-			entry: "        - name: scout\n          system_prompt: p\n",
-			want:  "description required",
-		},
-		{
 			name:  "custom without a system prompt",
 			entry: "        - name: scout\n          description: d\n",
 			want:  "system_prompt required",
@@ -571,6 +566,14 @@ func TestLoadRejectsInvalidAgentSubagents(t *testing.T) {
 				t.Fatalf("error %q does not name the entry and %q", err, tc.want)
 			}
 		})
+	}
+
+	// A description is optional (owner 2026-11-19): the model dispatches a
+	// custom subagent by its name, so a subagent that has none runs on its
+	// prompt alone. The prompt itself stays required.
+	path := writeConfigFile(t, "agents:\n  definitions:\n    main:\n      primary: true\n      subagents:\n        - name: scout\n          system_prompt: p\n")
+	if _, err := loadPersistedDocumentForTest(path); err != nil {
+		t.Fatalf("a custom subagent with no description was refused: %v", err)
 	}
 }
 
@@ -792,9 +795,8 @@ func TestValidateSharedSubagents(t *testing.T) {
 			entry: SubagentConfig{Name: valid.Name, Description: valid.Description, SystemPrompt: valid.SystemPrompt, Model: "llm-shared-row", ReasoningEffort: "low"},
 		},
 		{
-			name:  "missing description is refused",
+			name:  "a description-less definition is accepted",
 			entry: SubagentConfig{Name: valid.Name, SystemPrompt: valid.SystemPrompt},
-			want:  "description required",
 		},
 		{
 			name:  "missing system_prompt is refused",
@@ -887,9 +889,9 @@ func TestValidateSharedSubagents(t *testing.T) {
 	if err := FinishLoad(&root); err != nil {
 		t.Fatalf("a configured shared subagent was refused on an install with no definitions: %v", err)
 	}
-	root.Agents.SharedSubagents[0].Description = ""
-	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "agents.shared_subagents[0]: description required") {
-		t.Fatalf("err = %v, want the loader to refuse a shared subagent with no description", err)
+	root.Agents.SharedSubagents[0].SystemPrompt = ""
+	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "agents.shared_subagents[0]: system_prompt required") {
+		t.Fatalf("err = %v, want the loader to refuse a shared subagent with no prompt", err)
 	}
 }
 
@@ -937,10 +939,9 @@ func TestValidateAgentSubagentsSharedReferenceEntries(t *testing.T) {
 		})
 	}
 
-	// A name no registry holds keeps the full-custom rule: description and
-	// prompt required.
+	// A name no registry holds keeps the full-custom rule: a prompt required.
 	own := AgentDefinition{Subagents: []SubagentConfig{{Name: "repo-scout", Enabled: BoolPtr(true)}}}
-	if err := ValidateAgentSubagents("main", own, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err == nil || !strings.Contains(err.Error(), "description required") {
+	if err := ValidateAgentSubagents("main", own, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err == nil || !strings.Contains(err.Error(), "system_prompt required") {
 		t.Fatalf("err = %v, want a per-agent custom to keep its own body", err)
 	}
 
@@ -968,5 +969,155 @@ func TestValidPrimaryAgentID(t *testing.T) {
 		if ValidPrimaryAgentID(id) {
 			t.Errorf("ValidPrimaryAgentID(%q) = true, want false", id)
 		}
+	}
+}
+
+// The unified definition's role split (P3, owner rulings #16/#17): a definition
+// IsEffectivePrimaryAgent claims keeps today's rules — its subagent-only fields
+// are ignored rather than refused — while one carrying the subagent body is
+// judged as a subagent definition. The shapes that carry no body stay exactly as
+// inert as they were, because a configuration that loads today must keep
+// loading: a bare `{primary: false}` and a built-in key's shell (description and
+// default_model) are not subagent definitions.
+func TestValidateDefinitionRoles(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		want  string                       // the sentence the refusal must carry; empty means accepted
+		check func(t *testing.T, cfg Root) // what an accepted configuration must hold
+	}{
+		{
+			name: "a description-less subagent definition loads",
+			body: "    repo-auditor:\n      primary: false\n      system_prompt: You audit repositories.\n",
+			check: func(t *testing.T, cfg Root) {
+				t.Helper()
+				def := cfg.Agents.Definitions["repo-auditor"]
+				if def.SystemPrompt != "You audit repositories." || def.Primary {
+					t.Fatalf("definition = %+v, want the subagent body kept", def)
+				}
+			},
+		},
+		{
+			name: "a subagent body without a prompt is refused",
+			body: "    repo-auditor:\n      primary: false\n      model: deepseek/deepseek-v4-flash\n",
+			want: "agents.definitions.repo-auditor: system_prompt required",
+		},
+		{
+			name: "a bare primary false stays inert",
+			body: "    worker:\n      primary: false\n",
+			check: func(t *testing.T, cfg Root) {
+				t.Helper()
+				if _, ok := cfg.Agents.Definitions["worker"]; !ok {
+					t.Fatal("a bare {primary: false} definition was dropped")
+				}
+			},
+		},
+		{
+			name: "a built-in key's shell keeps its presentation",
+			body: "    explore:\n      primary: true\n      description: searches the tree\n      default_model: llm-shell\n",
+			check: func(t *testing.T, cfg Root) {
+				t.Helper()
+				def := cfg.Agents.Definitions["explore"]
+				if def.Description != "searches the tree" || def.DefaultModel != "llm-shell" {
+					t.Fatalf("shell = %+v, want its presentation kept", def)
+				}
+			},
+		},
+		{
+			name: "the primary role's fields are ignored on a subagent definition",
+			body: "    worker:\n      primary: false\n      enable_subagent: true\n      mcp_servers:\n        - name: docs\n          command: /bin/docs\n      subagents:\n        - name: scout\n          system_prompt: p\n",
+			check: func(t *testing.T, cfg Root) {
+				t.Helper()
+				def := cfg.Agents.Definitions["worker"]
+				if def.EnableSubagent == nil || len(def.MCPServers) != 1 || len(def.Subagents) != 1 {
+					t.Fatalf("definition = %+v, want the primary-role fields kept and ignored", def)
+				}
+			},
+		},
+		{
+			name: "the subagent role's fields are ignored on a primary",
+			body: "    main:\n      primary: true\n      model: glm-5.3-flash\n      reasoning_effort: high\n      tools: everything\n",
+		},
+		{
+			name: "an unknown tool tier is refused",
+			body: "    repo-auditor:\n      primary: false\n      system_prompt: p\n      tools: everything\n",
+			want: `agents.definitions.repo-auditor: tools "everything" must be read_only, edit or pick`,
+		},
+		{
+			name: "an effort without a model is refused",
+			body: "    repo-auditor:\n      primary: false\n      system_prompt: p\n      reasoning_effort: low\n",
+			want: "agents.definitions.repo-auditor: thinking level requires a model.",
+		},
+		{
+			name: "an id a subagent name cannot carry is refused",
+			body: "    repo_auditor:\n      primary: false\n      system_prompt: p\n",
+			want: "agents.definitions.repo_auditor: invalid subagent id",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigFile(t, "agents:\n  definitions:\n"+tc.body)
+			cfg, err := loadPersistedDocumentForTest(path)
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err = %v, want %q", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a configuration that must keep loading was refused: %v", err)
+			}
+			if tc.check != nil {
+				tc.check(t, cfg)
+			}
+		})
+	}
+}
+
+// Order is configuration, not a runtime detail: the shared registry's order has
+// to survive the merge into definitions (P3 ruling #5), so it round-trips
+// through both encodings. A definition without one gains no key at all: every
+// field the subagent role added is omitted when unset, which is what keeps the
+// JSON a write stores today byte-for-byte (pkg/tui's pinned new-definition bytes
+// among them).
+func TestAgentDefinitionOrderRoundTrips(t *testing.T) {
+	def := AgentDefinition{Primary: false, SystemPrompt: "p", Order: 3}
+	yamlBody, err := yaml.Marshal(def)
+	if err != nil {
+		t.Fatalf("yaml marshal: %v", err)
+	}
+	if !strings.Contains(string(yamlBody), "order: 3") {
+		t.Fatalf("yaml omitted the order:\n%s", yamlBody)
+	}
+	var fromYAML AgentDefinition
+	if err := yaml.Unmarshal(yamlBody, &fromYAML); err != nil {
+		t.Fatalf("yaml unmarshal: %v", err)
+	}
+	if fromYAML.Order != 3 {
+		t.Fatalf("yaml round trip lost the order: %+v", fromYAML)
+	}
+	jsonBody, err := json.Marshal(def)
+	if err != nil {
+		t.Fatalf("json marshal: %v", err)
+	}
+	if !strings.Contains(string(jsonBody), `"order":3`) {
+		t.Fatalf("json omitted the order: %s", jsonBody)
+	}
+	var fromJSON AgentDefinition
+	if err := json.Unmarshal(jsonBody, &fromJSON); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
+	}
+	if fromJSON.Order != 3 {
+		t.Fatalf("json round trip lost the order: %+v", fromJSON)
+	}
+
+	plain := AgentDefinition{Primary: true, DisplayName: "Helper"}
+	got, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatalf("json marshal: %v", err)
+	}
+	want := `{"primary":true,"display_name":"Helper"}`
+	if string(got) != want {
+		t.Fatalf("a definition without the new fields serialises as\n%s\nwant\n%s", got, want)
 	}
 }

@@ -100,6 +100,40 @@ type AgentDefinition struct {
 	// public built-in override it for this agent, any other name declares a
 	// custom subagent. See SubagentConfig.
 	Subagents []SubagentConfig `yaml:"subagents,omitempty" json:"subagents,omitempty"`
+
+	// The fields below are the subagent role's body (P3 ruling #16): a
+	// definition whose role is the subagent's — Primary false, and not one of
+	// the keys IsEffectivePrimaryAgent claims — is the definition of that
+	// install-wide subagent, and these are its model, prompt and tool policy.
+	// They mirror SubagentConfig's fields one for one. A primary-role
+	// definition ignores them rather than refusing them: flipping Primary by
+	// hand must not leave an install that cannot load (ruling #17's refusals
+	// belong to the write paths, which are choosing a role when they refuse).
+	//
+	// Model is the global model-table row id the subagent dispatches on; empty
+	// follows the conversation. A stored value naming no row is skipped at run
+	// time rather than refused, the way DefaultModel's is: the loader's
+	// normalize clears a dangling default_model and leaves this field alone, so
+	// a label nothing resolves to stays as stored and the subagent runs on the
+	// session's model.
+	Model string `yaml:"model,omitempty" json:"model,omitempty"`
+	// ReasoningEffort applies only with Model set.
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	// SystemPrompt is the prompt the subagent runs on; a triggered subagent
+	// body requires one.
+	SystemPrompt string `yaml:"system_prompt,omitempty" json:"system_prompt,omitempty"`
+	// Tools is read_only | edit | pick for the subagent role (empty means
+	// read_only), and AllowedTools is the chosen set when Tools is pick.
+	Tools        string   `yaml:"tools,omitempty" json:"tools,omitempty"`
+	AllowedTools []string `yaml:"allowed_tools,omitempty" json:"allowed_tools,omitempty"`
+	// Continuable false makes the subagent one-shot; nil means continuable.
+	Continuable *bool `yaml:"continuable,omitempty" json:"continuable,omitempty"`
+	// Order is the position the definition held in the configuration it came
+	// from: the shared-subagent registry's order, which the merge into these
+	// definitions has to keep (P3 ruling #5: an order field, never a
+	// map→slice conversion). Only the migration writes it; 0 means unordered
+	// and a definition without it lists by id, exactly as before.
+	Order int `yaml:"order,omitempty" json:"order,omitempty"`
 }
 
 // SubagentConfig is one entry of a primary agent's subagent configuration.
@@ -394,14 +428,13 @@ func ValidatePlanReviewerModel(entry SubagentConfig, refResolves func(string) bo
 }
 
 // validateCustomSubagentBody checks the definition a custom subagent carries: a
-// description and a prompt to run on, a tool tier the loader accepts, and the
-// chosen tool set when the tier is pick. A per-agent custom subagent and an
-// install-wide shared one are judged by this one function (plan 314), so the two
-// cannot drift apart.
+// prompt to run on, a tool tier the loader accepts, and the chosen tool set when
+// the tier is pick. A per-agent custom subagent, an install-wide shared one and
+// a subagent-role definition are judged by this one function (plans 314, P3), so
+// the three cannot drift apart. The description is not required: the dispatch
+// catalog falls back to the name for a subagent that has none (owner
+// 2026-11-19, the /config add-agent form's rule).
 func validateCustomSubagentBody(where string, entry SubagentConfig) error {
-	if strings.TrimSpace(entry.Description) == "" {
-		return fmt.Errorf("%s: description required", where)
-	}
 	if strings.TrimSpace(entry.SystemPrompt) == "" {
 		return fmt.Errorf("%s: system_prompt required", where)
 	}

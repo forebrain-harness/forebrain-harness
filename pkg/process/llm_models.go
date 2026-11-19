@@ -208,8 +208,16 @@ func storedModelSections(sections map[string]json.RawMessage) (appcfg.AgentsSect
 // pre-table model reference: a "provider/model" label written before the model
 // table existed.
 func legacyModelDataPresent(root *appcfg.Root, rowIDs map[string]bool) bool {
-	for _, def := range root.Agents.Definitions {
+	for id, def := range root.Agents.Definitions {
 		if legacyModelLabel(def.DefaultModel, rowIDs) {
+			return true
+		}
+		// A subagent-role definition's own model is rewritten the same way, but
+		// only when a row carries what the label names: a label nothing
+		// resolves to keeps its stored value (only default_model is cleared on
+		// load), so counting it here would leave this pass re-running on every
+		// start and rewriting nothing.
+		if _, ok := subagentModelRow(root, id, def, rowIDs); ok {
 			return true
 		}
 		for _, sub := range def.Subagents {
@@ -220,6 +228,21 @@ func legacyModelDataPresent(root *appcfg.Root, rowIDs map[string]bool) bool {
 	}
 	return legacyModelLabel(root.Memories.ExtractModel, rowIDs) ||
 		legacyModelLabel(root.Memories.ConsolidationModel, rowIDs)
+}
+
+// subagentModelRow names the row that a subagent-role definition's own model
+// reference resolves to, when the reference is a pre-table label. The field
+// belongs to the subagent role (P3 ruling #16): a primary-role definition
+// ignores it, so nothing is rewritten there.
+func subagentModelRow(root *appcfg.Root, id string, def appcfg.AgentDefinition, rowIDs map[string]bool) (string, bool) {
+	if appcfg.IsEffectivePrimaryAgent(id, def) {
+		return "", false
+	}
+	ref := strings.TrimSpace(def.Model)
+	if !legacyModelLabel(ref, rowIDs) {
+		return "", false
+	}
+	return resolveModelRefID(root, appcfg.ConfiguredLLMs(root), id, ref)
 }
 
 // legacyModelLabel reports whether a stored reference is a pre-table
@@ -270,6 +293,7 @@ func resolveModelRefID(root *appcfg.Root, view []appcfg.AgentLLMProviderConfig, 
 type legacyModelEdits struct {
 	defaults    map[string]string         // agent -> the definition's new default_model
 	subagents   map[string]map[int]string // agent -> subagent index -> new model
+	models      map[string]string         // agent -> the subagent-role definition's new model
 	extract     *string
 	consolidate *string
 }
@@ -281,8 +305,12 @@ func planModelReferenceEdits(root *appcfg.Root, view []appcfg.AgentLLMProviderCo
 	edits := legacyModelEdits{
 		defaults:  make(map[string]string, len(root.Agents.Definitions)),
 		subagents: make(map[string]map[int]string),
+		models:    make(map[string]string),
 	}
 	for name, def := range root.Agents.Definitions {
+		if id, ok := subagentModelRow(root, name, def, rowIDs); ok {
+			edits.models[name] = id
+		}
 		ref := strings.TrimSpace(def.DefaultModel)
 		if legacyModelLabel(ref, rowIDs) {
 			if id, ok := resolveModelRefID(root, view, name, ref); ok {
@@ -396,6 +424,10 @@ func rewriteLegacyModelSections(ctx context.Context, store *state.ConfigStore, e
 			for name, def := range agents.Definitions {
 				if value, ok := edits.defaults[name]; ok {
 					def.DefaultModel = value
+					changed = true
+				}
+				if value, ok := edits.models[name]; ok {
+					def.Model = value
 					changed = true
 				}
 				if slots, ok := edits.subagents[name]; ok {

@@ -559,9 +559,10 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 	// A key naming a built-in subagent type is that type's install-wide default
 	// definition, which IsEffectivePrimaryAgent never treats as a primary agent
 	// however it is flagged — so creating one here would land a row that is not
-	// the agent the caller asked for. The /config panel's creation flow refuses
-	// the same keys (plan 313).
-	if config.IsBuiltInSubagentDefinition(id) {
+	// the agent the caller asked for. The six reserved keys are refused for both
+	// roles, by the one rule the shared registry's create uses (P3 ruling #8);
+	// the /config panel's creation flow refuses them too (plan 313).
+	if config.IsReservedDefinitionID(id) {
 		http.Error(w, fmt.Sprintf("%q names a built-in subagent type, not a primary agent; choose a different id", id), http.StatusBadRequest)
 		return
 	}

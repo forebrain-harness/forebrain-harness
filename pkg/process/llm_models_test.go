@@ -136,6 +136,47 @@ func TestLLMModelsMigrateRewritesALabelToTheRowsID(t *testing.T) {
 	}
 }
 
+// The unified definition carries the subagent role's own model (P3 ruling #16),
+// so a legacy label written there is rewritten into the row id exactly like a
+// default_model — in the same pass, each landing in its own field. Two labels
+// stay as stored: one on a primary-role definition, whose role ignores the
+// field, and one nothing resolves to (only default_model is cleared on load, so
+// the subagent follows the conversation's model instead).
+func TestLLMModelsMigrateRewritesASubagentDefinitionsLabel(t *testing.T) {
+	env, ctx := migrateEnvForTest(t, `{"definitions":{
+		"main":{"primary":true,"default_model":"deepseek/deepseek-v4-flash"},
+		"worker":{"primary":false,"system_prompt":"p","model":"deepseek/deepseek-v4-flash"},
+		"reviewer":{"primary":false,"system_prompt":"p","model":"openai/gone"},
+		"helper":{"primary":true,"model":"openai/gpt-x"}}}`, "")
+	if _, err := (&state.LLMModelStore{DB: env.SQL}).Create(context.Background(), state.LLMModel{
+		ID: "llm-deepseek", Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "sk-deepseek",
+		BaseURL: "https://api.deepseek.com/v1", APIPath: "/chat/completions",
+	}); err != nil {
+		t.Fatalf("seed the row: %v", err)
+	}
+
+	if err := migrateLegacyLLMModels(context.Background(), env.SQL); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	worker := storedDefinitionForTest(t, env, ctx, "worker")
+	if worker.Model != "llm-deepseek" {
+		t.Fatalf("worker model = %q, want the row id llm-deepseek", worker.Model)
+	}
+	if worker.Primary || worker.SystemPrompt != "p" {
+		t.Fatalf("worker = %+v, want its role and body untouched", worker)
+	}
+	if got := storedDefinitionForTest(t, env, ctx, "main").DefaultModel; got != "llm-deepseek" {
+		t.Fatalf("main default_model = %q, want the same row id", got)
+	}
+	if got := storedDefinitionForTest(t, env, ctx, "reviewer").Model; got != "openai/gone" {
+		t.Fatalf("reviewer model = %q, want a dangling label left as stored", got)
+	}
+	if got := storedDefinitionForTest(t, env, ctx, "helper").Model; got != "openai/gpt-x" {
+		t.Fatalf("helper model = %q, want a primary-role definition's field left alone", got)
+	}
+}
+
 func modelForTest(t *testing.T, rows []state.LLMModel, provider, model string) state.LLMModel {
 	t.Helper()
 	for _, row := range rows {
