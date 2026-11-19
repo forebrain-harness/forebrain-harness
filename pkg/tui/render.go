@@ -6144,9 +6144,12 @@ func migrationMarker(f Frame, spinnerPhase int) (string, string) {
 // what kind of file it is and the suffix says it again, so the class is not
 // spelled out; the size is not repeated either, and no separator is drawn
 // between facts a row does not need to state. The label is the path the file
-// is located by — the workspace-relative path the row carries, the absolute
-// path of a run artifact outside it, and only a legacy row with neither falls
-// back to its name. The model's semantic title never labels a row.
+// is located by — the workspace-relative path the row carries, or the
+// absolute path an in-project row arrived with, drawn relative to the
+// project root so the row locates its file inside the project (a row outside
+// it is not a deliverable and never gets here; owner 2026-11-19). Only a
+// legacy row with neither falls back to its name. The model's semantic title
+// never labels a row.
 //
 // A row whose path the turn changed ends in its net counts, styled the way
 // the diff body marks additions and removals; a file the turn did not count
@@ -6163,6 +6166,16 @@ func (r *Renderer) renderDeliverables(f Frame) {
 		}
 		if label == "" {
 			continue
+		}
+		if r.cwd != "" && filepath.IsAbs(filepath.FromSlash(label)) {
+			// An in-project absolute path is drawn the way the web draws it:
+			// relative to the project root. The guard on r.cwd matters —
+			// DisplayPath falls back to the process cwd when cwd is empty,
+			// which would strip a prefix the project filter judged by
+			// nothing. A root spelled through a symlink can keep its
+			// absolute form here when the prefix does not strip lexically:
+			// cosmetic only, the row is kept either way.
+			label = tool.DisplayPath(filepath.FromSlash(label), r.cwd)
 		}
 		row := tool.ArtifactKindGlyph(d.Kind) + " " + label
 		if added, deleted, ok := r.deliverableDiffCounts(label, f.TurnDiffs); ok {

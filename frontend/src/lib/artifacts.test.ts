@@ -109,6 +109,35 @@ describe('the delivery group of one turn', () => {
     expect(group[0].name).toBe('Q3 报告.docx')
   })
 
+  it('drops out-of-project rows: a kept plan outside the project is not a deliverable', () => {
+    // The one row that lives outside the project is a kept plan (plans are
+    // stored under the workspace root); owner 2026-11-19: being inside the
+    // project is a necessary condition for a deliverable.
+    const outside = planArtifactOf({
+      planOnly: true,
+      planFile: '/Users/me/.forebrain/workspace/plans/年度审计计划.md',
+      artifact: { id: 'p1', name: '年度审计计划.md', kind: 'markdown', preview: 'markdown', size: 9216 },
+    }, 'session-1')
+    const inProject = runFrameArtifacts({
+      artifacts: [{ id: 'a1', sessionId: 'session-1', path: '/Users/me/projects/audit/out/report.md', name: 'report.md', kind: 'text', preview: 'text', size: 10 }],
+    })
+
+    const group = turnDeliverables(
+      { presented: [], plan: outside ? [outside] : [], frame: inProject, fallback: [] },
+      '/Users/me/projects/audit',
+    )
+    expect(group.map((row) => row.id)).toEqual(['a1'])
+
+    // A root the surface does not know must not silently drop rows.
+    const noRoot = turnDeliverables({ presented: [], plan: outside ? [outside] : [], frame: [], fallback: [] }, '')
+    expect(noRoot.map((row) => row.id)).toEqual(['p1'])
+    const blankRoot = turnDeliverables({ presented: [], plan: outside ? [outside] : [], frame: [], fallback: [] }, '   ')
+    expect(blankRoot.map((row) => row.id)).toEqual(['p1'])
+    // An undefined root keeps the rows too (the parameter is optional).
+    const undefinedRoot = turnDeliverables({ presented: [], plan: outside ? [outside] : [], frame: [], fallback: [] })
+    expect(undefinedRoot.map((row) => row.id)).toEqual(['p1'])
+  })
+
   it('merges every source by id, each file once', () => {
     // The same two files also arrive on the run's end frame and in the
     // conversation's list, plus one only the frame knew about.

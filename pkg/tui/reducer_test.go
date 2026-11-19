@@ -6290,7 +6290,8 @@ func TestDeliverablesFoldCountsFilesNotRows(t *testing.T) {
 
 // TestDeliverableRowsAreClickable pins the hover highlight: every row of the
 // group is a click target, the first one included, because the group has no
-// header.
+// header. A group too short to fold is clickable the same way — its rows open
+// files, they do not need a fold to be worth clicking.
 func TestDeliverableRowsAreClickable(t *testing.T) {
 	vm := viewModel{}
 	vm.append(Frame{Kind: FrameDeliverables, Deliverables: manyDeliverables(5), Final: true})
@@ -6302,6 +6303,219 @@ func TestDeliverableRowsAreClickable(t *testing.T) {
 		if !vr.isClickableRow(row, &vm) {
 			t.Fatalf("row %d of the group is not clickable", row)
 		}
+	}
+
+	small := viewModel{}
+	small.append(Frame{Kind: FrameDeliverables, Deliverables: deliverableRows(), Final: true})
+	svr := renderViewport(&small, 80, 20, 0, DiffThemeDark)
+	for row := 0; row < 2; row++ {
+		if !svr.isClickableRow(row, &small) {
+			t.Fatalf("row %d of the small group is not clickable", row)
+		}
+	}
+}
+
+// deliverableClickRenderer builds a renderer the way the TUI launches: a
+// project root cached for path-relative work, viewport mode on, one
+// deliverables group painted. The opener is stubbed and returned with what it
+// was asked to open.
+func deliverableClickRenderer(t *testing.T, rows []tool.Deliverable, cwd string, scrollOffset int) (*Renderer, *[]string) {
+	t.Helper()
+	opened := stubImageOpener(t)
+	r := NewRenderer(io.Discard, io.Discard).WithWorkingDir(cwd)
+	r.viewportMode = true
+	r.vm.append(Frame{Kind: FrameDeliverables, Deliverables: rows, Final: true})
+	r.vpHeight, r.vpBodyHeight = 10, 10
+	r.vpLastRender = renderViewport(&r.vm, 80, 10, scrollOffset, DiffThemeDark, cwd)
+	return r, opened
+}
+
+// deliverableRowOf returns the 0-based screen row of the painted line naming
+// needle, skipping hint rows, or -1.
+func deliverableRowOf(lines []string, needle string) int {
+	for i, line := range lines {
+		plain := stripANSI(line)
+		if strings.Contains(plain, needle) && !strings.HasPrefix(strings.TrimSpace(plain), "···") {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestDeliverableClickOpensTheClickedFile pins what a click on the group now
+// does: the file row opens its file with the OS viewer (a relative label is
+// joined against the project root), a wrapped continuation opens the same
+// file, the fold hint row keeps toggling and opens nothing, a group too short
+// to fold opens on any of its rows, a modal overlay leaves it all inert, a
+// double click opens once, and a group scrolled so its top is off the screen
+// still opens the clicked file — not an earlier one.
+func TestDeliverableClickOpensTheClickedFile(t *testing.T) {
+	cwd := t.TempDir()
+	t.Run("relative rows open joined against the project root", func(t *testing.T) {
+		rows := []tool.Deliverable{
+			{ID: "a1", Name: "report.md", Kind: "markdown", RelPath: "out/report.md"},
+			{ID: "a2", Name: "data.json", Kind: "text", RelPath: "data.json"},
+		}
+		r, opened := deliverableClickRenderer(t, rows, cwd, 0)
+		row := deliverableRowOf(r.vpLastRender.lines, "out/report.md")
+		if row < 0 {
+			t.Fatalf("no painted row for out/report.md:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+		}
+		clickRow(t, r, row)
+		if len(*opened) != 1 || (*opened)[0] != filepath.Join(cwd, "out", "report.md") {
+			t.Fatalf("opened = %v, want [%s]", *opened, filepath.Join(cwd, "out", "report.md"))
+		}
+		row = deliverableRowOf(r.vpLastRender.lines, "data.json")
+		clickRow(t, r, row)
+		if len(*opened) != 2 || (*opened)[1] != filepath.Join(cwd, "data.json") {
+			t.Fatalf("opened = %v, want the second file too", *opened)
+		}
+	})
+
+	t.Run("a wrapped continuation opens the same file", func(t *testing.T) {
+		r, opened := deliverableClickRenderer(t, manyDeliverables(2), cwd, 0)
+		// A label longer than the row wraps: its glyph line starts the file
+		// and the label rows continue it. Clicking any of them opens that
+		// file.
+		labelRow := deliverableRowOf(r.vpLastRender.lines, "out/f00-")
+		if labelRow < 1 || startsDeliverableRow(stripANSI(r.vpLastRender.lines[labelRow])) {
+			t.Fatalf("the wrapping fixture painted no continuation row for f00:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+		}
+		want := filepath.Join(cwd, "out", "f00-很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名.txt")
+		clickRow(t, r, labelRow)
+		clickRow(t, r, labelRow+1)
+		if len(*opened) != 2 || (*opened)[0] != want || (*opened)[1] != want {
+			t.Fatalf("opened = %v, want the first file twice", *opened)
+		}
+	})
+
+	t.Run("the hint row toggles and opens nothing; a file row opens and stays", func(t *testing.T) {
+		r, opened := deliverableClickRenderer(t, manyDeliverables(5), cwd, 0)
+		hint := -1
+		for i, line := range r.vpLastRender.lines {
+			if strings.Contains(stripANSI(line), "more deliverable") {
+				hint = i
+				break
+			}
+		}
+		if hint < 0 {
+			t.Fatalf("no fold hint painted:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+		}
+		clickRow(t, r, hint)
+		if len(*opened) != 0 {
+			t.Fatalf("the hint row opened %v", *opened)
+		}
+		if !strings.Contains(stripANSI(strings.Join(r.vpLastRender.lines, "\n")), "click to hide") {
+			t.Fatal("clicking the hint row did not expand the group")
+		}
+		row := deliverableRowOf(r.vpLastRender.lines, "out/f01.txt")
+		clickRow(t, r, row)
+		if len(*opened) != 1 || (*opened)[0] != filepath.Join(cwd, "out", "f01.txt") {
+			t.Fatalf("opened = %v, want [%s]", *opened, filepath.Join(cwd, "out", "f01.txt"))
+		}
+		if !strings.Contains(stripANSI(strings.Join(r.vpLastRender.lines, "\n")), "click to hide") {
+			t.Fatal("opening a file row folded the group")
+		}
+	})
+
+	t.Run("a modal overlay leaves the rows inert", func(t *testing.T) {
+		r, opened := deliverableClickRenderer(t, deliverableRows(), cwd, 0)
+		row := deliverableRowOf(r.vpLastRender.lines, "out/q3.md")
+		if row < 0 {
+			t.Fatal("no painted row for out/q3.md")
+		}
+		r.mu.Lock()
+		r.overlayActive = true
+		r.mu.Unlock()
+		clickRow(t, r, row)
+		if len(*opened) != 0 {
+			t.Fatalf("a modal overlay must not open files: %v", *opened)
+		}
+		r.mu.Lock()
+		r.overlayActive = false
+		r.mu.Unlock()
+		clickRow(t, r, row)
+		if len(*opened) != 1 || (*opened)[0] != filepath.Join(cwd, "out", "q3.md") {
+			t.Fatalf("after the overlay closed, opened = %v", *opened)
+		}
+	})
+
+	t.Run("a double click opens once", func(t *testing.T) {
+		r, opened := deliverableClickRenderer(t, deliverableRows(), cwd, 0)
+		row := deliverableRowOf(r.vpLastRender.lines, "out/q3.md")
+		clickRow(t, r, row) // clickRow resets the multi-click clock: a single click
+		if len(*opened) != 1 {
+			t.Fatalf("the first click opened %v", *opened)
+		}
+		// The second press lands within the threshold on the same cell, so it
+		// advances to word selection and never arms a plain click.
+		r.ViewportSelectStart(0, row)
+		r.ViewportSelectEnd(0, row)
+		if len(*opened) != 1 {
+			t.Fatalf("the second click of a double click opened %v", *opened)
+		}
+	})
+
+	t.Run("a scrolled group opens the clicked file, not an earlier one", func(t *testing.T) {
+		// Expanded 50-file group painted with the block's top scrolled off:
+		// the window opens on a wrapped continuation, so a count over the
+		// painted window alone loses the file above it and lands one early.
+		r, opened := deliverableClickRenderer(t, manyDeliverables(50), cwd, 13)
+		r.mu.Lock()
+		for _, b := range r.vm.blocks {
+			b.expanded = true
+		}
+		r.mu.Unlock()
+		r.vpLastRender = renderViewport(&r.vm, 80, 10, 13, DiffThemeDark, cwd)
+		if top := stripANSI(r.vpLastRender.lines[0]); startsDeliverableRow(top) {
+			t.Fatalf("the fixture wants the window to open mid-file, got a file start: %q", top)
+		}
+		row := deliverableRowOf(r.vpLastRender.lines, "out/f09.txt")
+		if row < 0 {
+			t.Fatalf("f09 not on the scrolled screen:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+		}
+		clickRow(t, r, row)
+		if len(*opened) != 1 || (*opened)[0] != filepath.Join(cwd, "out", "f09.txt") {
+			t.Fatalf("opened = %v, want [%s]", *opened, filepath.Join(cwd, "out", "f09.txt"))
+		}
+	})
+}
+
+// TestDeliverableGroupDropsOutOfProjectRows pins the owner ruling of
+// 2026-11-19: a file created or modified this turn but outside the project
+// workspace is not a deliverable — being inside is a necessary condition. A
+// kept plan is the one artifact registered outside the project (plans live in
+// the workspace root), and its row reached the painted group on every surface
+// as an absolute path. The painted group must not carry it, and an in-project
+// row that only named its absolute path must still paint — by the relative
+// path, the way the web labels it.
+func TestDeliverableGroupDropsOutOfProjectRows(t *testing.T) {
+	cwd := t.TempDir()
+	inside := filepath.Join(cwd, "out", "report.md")
+	r := NewRenderer(io.Discard, io.Discard).WithWorkingDir(cwd)
+	r.viewportMode = true
+	r.vpHeight, r.vpBodyHeight = 20, 20
+
+	ev := (&Reducer{}).Reduce(RunEndedMsg{
+		RunID:      "run-1",
+		ClosesTurn: true,
+		RunArtifacts: event.RunArtifacts{Artifacts: []event.Artifact{
+			{ID: "p1", Path: "/outside/plans/plan.md", Name: "plan.md", Kind: "markdown", Origin: "plan"},
+			{ID: "a1", Path: inside, Name: "report.md", Kind: "markdown"},
+		}},
+	})
+	if len(ev.Frames) != 1 || ev.Frames[0].Kind != FrameDeliverables {
+		t.Fatalf("closing frames = %#v, want one deliverables group", ev.Frames)
+	}
+	for _, f := range ev.Frames {
+		r.RenderFrame(f)
+	}
+	painted := stripANSI(strings.Join(r.vpLastRender.lines, "\n"))
+	if strings.Contains(painted, "plan.md") {
+		t.Fatalf("the out-of-project plan row must not paint:\n%s", painted)
+	}
+	if !strings.Contains(painted, "out/report.md") || strings.Contains(painted, inside) {
+		t.Fatalf("the in-project row must paint once, by its relative path:\n%s", painted)
 	}
 }
 

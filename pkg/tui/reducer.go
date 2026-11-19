@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -469,9 +470,12 @@ func appendDeliverables(existing, rows []tool.Deliverable) []tool.Deliverable {
 // shape the group draws, carrying the row's id so the group dedupes by it —
 // a top-up row and a presented row for the same file are one entry, the way
 // the web merges them. The label rule is the path (owner 2026-11-19): a row
-// the frame gave a relative path keeps it, and a run artifact outside the
-// workspace — registered by its absolute path, with no relative one — keeps
-// that, so every row can be located.
+// the frame gave a relative path keeps it, and a row that only carries its
+// absolute path keeps that. The renderer drops rows outside the project at
+// the group's one entry (filterDeliverablesWithinProject) and relativizes an
+// in-project absolute path at draw time, so every painted row locates its
+// file inside the project — being inside it is a deliverable's necessary
+// condition.
 func frameDeliverable(row event.Artifact) tool.Deliverable {
 	return tool.Deliverable{
 		ID:      row.ID,
@@ -481,6 +485,44 @@ func frameDeliverable(row event.Artifact) tool.Deliverable {
 		RelPath: firstNonEmpty(row.RelPath, row.Path),
 		Size:    row.Size,
 	}
+}
+
+// filterDeliverablesWithinProject keeps the rows a deliverables group may
+// draw. The owner ruled (2026-11-19) that a file created or modified this
+// turn but outside the project workspace is not a deliverable — being inside
+// the project is a necessary condition. Registration already refuses
+// present_files paths outside the project; the one row that lands outside is
+// a kept plan (plans live in the workspace root), and it used to reach the
+// group on every surface as an absolute path. A row that names no path is
+// dropped: an invisible row would still count toward the fold threshold and
+// would misalign the click index against the rows painted behind it. A
+// relative one is in the project by construction; an absolute one is kept
+// only when it lands inside cwd, the project root the renderer was launched
+// with. A root the renderer does not know keeps every row — the same keep
+// the web applies when it has no root.
+//
+// It returns a new slice: rows can share a backing array with the replay
+// mapper's per-run accumulations, and filtering in place would silently drop
+// rows from a group still to be drawn.
+func filterDeliverablesWithinProject(rows []tool.Deliverable, cwd string) []tool.Deliverable {
+	if len(rows) == 0 {
+		return rows
+	}
+	kept := make([]tool.Deliverable, 0, len(rows))
+	for _, row := range rows {
+		label := strings.TrimSpace(row.RelPath)
+		if label == "" {
+			label = strings.TrimSpace(row.Name)
+		}
+		if label == "" {
+			continue
+		}
+		if !filepath.IsAbs(filepath.FromSlash(label)) || cwd == "" ||
+			tool.PathWithinRoot(filepath.FromSlash(label), cwd) {
+			kept = append(kept, row)
+		}
+	}
+	return kept
 }
 
 // takePendingDeliverables hands over the turn's presented files and clears the
@@ -2915,6 +2957,11 @@ func (vr viewportRender) maxScrollOffset() int {
 // finalized thinking, and compact blocks toggle on ANY row within the block —
 // the whole preview area is clickable, matching the "click preview to expand"
 // interaction promised by the truncation hint. Blank gaps always return false.
+//
+// A deliverables group used to toggle on any row too; since its rows open
+// files instead, only its fold hint row still toggles — a click on a file row
+// must not fold the group out from under the row being opened, and a small
+// group (nothing to fold) refuses everywhere.
 func (m *viewModel) toggleAtScreenRow(vr viewportRender, screenRow int) bool {
 	blockID, isHeader := vr.blockAtRow(screenRow)
 	if blockID < 0 {
@@ -2923,6 +2970,16 @@ func (m *viewModel) toggleAtScreenRow(vr viewportRender, screenRow int) bool {
 	b := m.blockByID(blockID)
 	if b == nil || !b.collapsible {
 		return false
+	}
+	if b.frame.Kind == FrameDeliverables {
+		// The early branch also bypasses the header lookup below: the fold
+		// reports header 0, which would read the group's first file row as a
+		// header and fold on it.
+		if !deliverableHintRow(vr, screenRow) {
+			return false
+		}
+		b.expanded = !b.expanded
+		return true
 	}
 	span, ok := vr.spanForBlock(blockID)
 	if !ok || span.headerRow < 0 {
@@ -2935,9 +2992,10 @@ func (m *viewModel) toggleAtScreenRow(vr viewportRender, screenRow int) bool {
 		}
 	} else {
 		kind := b.frame.Kind
+		// FrameDeliverables never reaches here: the early branch above owns
+		// it, its hint being the one toggle target.
 		fullBodyClickable := kind == FrameTool ||
 			kind == FrameMemoryCompact ||
-			kind == FrameDeliverables ||
 			(kind == FrameThinking && b.frame.Final)
 		if !fullBodyClickable {
 			return false
@@ -3025,6 +3083,75 @@ func isImageMarkerRow(line string) bool {
 	return strings.HasPrefix(plain, "  └ ") || strings.HasPrefix(plain, "    ")
 }
 
+// deliverableHintRow reports whether a painted screen row is a deliverables
+// group's fold hint — "··· N more deliverables click to show" collapsed, or
+// "··· click to hide" expanded. The hint is painted in a Faint style, so the
+// style is stripped before its leading ellipsis is read. It is the one row of
+// the group that still toggles the fold; every other row opens its file.
+func deliverableHintRow(vr viewportRender, screenRow int) bool {
+	if screenRow < 0 || screenRow >= len(vr.lines) {
+		return false
+	}
+	plain := strings.TrimSpace(sgrPattern.ReplaceAllString(vr.lines[screenRow], ""))
+	return strings.HasPrefix(plain, "···")
+}
+
+// deliverableAtScreenRow resolves a 0-based screen row to the delivered file
+// whose row was clicked: the label the group paints for that deliverable,
+// relative or absolute exactly as the frame carried it — the caller joins a
+// relative label against the project root before opening. A long label's
+// wrapped continuation rows answer with the same file, and the fold hint row
+// answers nothing: it is the toggle target, not a file row.
+//
+// The count runs over the block's full cached lines, not over the painted
+// window: vr.lines only carries the visible slice, so a group whose top had
+// scrolled off would lose the file rows above it and open the wrong file. The
+// full lines and the painted ones agree line for line up to the hint
+// (foldBlockLines only slices the prefix and appends the hint), and every
+// frame mutation invalidates the cache and repaints through the same path —
+// the same base the fold reads back.
+func (m *viewModel) deliverableAtScreenRow(vr viewportRender, screenRow int) (label string, ok bool) {
+	blockID, _ := vr.blockAtRow(screenRow)
+	if blockID < 0 {
+		return "", false
+	}
+	b := m.blockByID(blockID)
+	if b == nil || b.frame.Kind != FrameDeliverables {
+		return "", false
+	}
+	if deliverableHintRow(vr, screenRow) {
+		return "", false
+	}
+	span, ok := vr.spanForBlock(blockID)
+	if !ok {
+		return "", false
+	}
+	local := vr.firstRow + screenRow - span.startRow
+	if local < 0 || local >= len(b.cache.lines) {
+		return "", false
+	}
+	// Count the file rows down to and including the clicked row; a wrapped
+	// continuation starts none, so it stays inside its own file.
+	index := -1
+	for i := 0; i <= local; i++ {
+		if i == 0 || startsDeliverableRow(sgrPattern.ReplaceAllString(b.cache.lines[i], "")) {
+			index++
+		}
+	}
+	if index < 0 || index >= len(b.frame.Deliverables) {
+		return "", false
+	}
+	row := b.frame.Deliverables[index]
+	label = strings.TrimSpace(row.RelPath)
+	if label == "" {
+		label = strings.TrimSpace(row.Name)
+	}
+	if label == "" {
+		return "", false
+	}
+	return label, true
+}
+
 // agentAtLocalRow resolves a screen row to the subagent owning that row within
 // this block. Only multi-agent blocks (fanout) carry the per-line map; blocks
 // without one report nothing.
@@ -3076,6 +3203,14 @@ func (vr viewportRender) isClickableRow(screenRow int, vm *viewModel) bool {
 		if _, ok := b.agentAtLocalRow(vr, screenRow); ok {
 			return true
 		}
+		// Every row of a deliverables group is a click target — the file rows
+		// open their file, the hint row folds — including a group too short
+		// to fold at all, so the answer comes before the two bails below
+		// (a headerless small group fails both span.headerRow < 0 and
+		// !b.collapsible).
+		if b.frame.Kind == FrameDeliverables {
+			return true
+		}
 	}
 	span, ok := vr.spanForBlock(blockID)
 	if !ok || span.headerRow < 0 {
@@ -3088,11 +3223,6 @@ func (vr viewportRender) isClickableRow(screenRow int, vm *viewModel) bool {
 	kind := b.frame.Kind
 	if kind == FrameMemoryCompact {
 		// Both the header and the truncated checkpoint preview toggle.
-		return true
-	}
-	if kind == FrameDeliverables {
-		// Every row of the group toggles it, the first one included: the group
-		// has no header, so a click anywhere in it means the same thing.
 		return true
 	}
 	if kind == FrameTool || (kind == FrameThinking && b.frame.Final) {
@@ -6056,6 +6186,17 @@ func (r *Renderer) WithdrawDeadStreamBlocks(agentID string, finishedThinking boo
 // yank the viewport back to the bottom — instead the frame is counted as an
 // unseen message so the floating control can announce it. Caller holds r.mu.
 func (r *Renderer) appendFrameViewportLocked(f Frame) {
+	if f.Kind == FrameDeliverables {
+		// The group's one entry, live and replay alike (both close through
+		// RenderFrame): rows outside the project are not deliverables (owner
+		// 2026-11-19) and are dropped before anything counts or paints them,
+		// so the fold sees the kept rows and a group left with none is not
+		// built at all.
+		f.Deliverables = filterDeliverablesWithinProject(f.Deliverables, r.cwd)
+		if len(f.Deliverables) == 0 {
+			return
+		}
+	}
 	if !r.retainCardOnceLocked(f) {
 		return
 	}
@@ -6660,22 +6801,36 @@ func (r *Renderer) viewportClickToggleAt(col, row int, at time.Time) bool {
 
 // transcriptClickLocked does what a plain click on screen row row of s does to
 // the transcript: it opens the subagent view of the card under it, or folds or
-// expands the block, and names the image to open when the row is an image
-// step's marker line. The image is resolved before the fold toggle, which
-// repaints and can shift every row below the click; the caller starts the
-// viewer once r.mu is released, as starting a process is not a paint. A row
-// outside the transcript, or a screen of a view since left, does nothing.
-// Caller holds r.mu.
+// expands the block, and names the file to open when the row is an image
+// step's marker line or a deliverables group's file row. The file is resolved
+// before the fold toggle, which repaints and can shift every row below the
+// click; the caller starts the viewer once r.mu is released, as starting a
+// process is not a paint. A row outside the transcript, or a screen of a view
+// since left, does nothing. Caller holds r.mu.
 func (r *Renderer) transcriptClickLocked(s shownScreen, row int) (changed bool, imagePath, imageLabel string) {
 	if row < 0 || row >= s.bodyHeight || s.view != r.activeView {
 		return false, "", ""
 	}
 	vm := r.activeVMLocked()
 	// A modal overlay owns the composer area while it is up, so the hint rows
-	// the click would answer on are not painted: the image row stays inert
-	// instead of accepting a gesture whose only feedback cannot be shown.
+	// the click would answer on are not painted: the image row and the
+	// deliverable rows stay inert instead of accepting a gesture whose only
+	// feedback cannot be shown.
 	if !r.overlayActive {
 		imagePath, imageLabel, _ = vm.imageMarkerAtScreenRow(s.render, row)
+		if imagePath == "" {
+			// A deliverables row names its file the way a marker names an
+			// image: the label is resolved to a path here — a relative one
+			// against the project root the renderer launched with — and the
+			// same caller seam opens it.
+			if label, ok := vm.deliverableAtScreenRow(s.render, row); ok {
+				imagePath = label
+				if !filepath.IsAbs(filepath.FromSlash(label)) {
+					imagePath = filepath.Join(r.cwd, label)
+				}
+				imageLabel = label
+			}
+		}
 	}
 	if r.openAgentViewAtRowLocked(s.render, row) {
 		return true, imagePath, imageLabel

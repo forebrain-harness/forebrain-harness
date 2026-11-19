@@ -1824,7 +1824,8 @@ function deliverablesOf(msg: ChatMessage): ArtifactView[] {
   const fallback = runId ? artifactsByRun.value.get(runId) ?? [] : []
   // The rows are located by path and counted by the turn's own diffs
   // (owner 2026-11-19), both against the session's project root, and both
-  // after the merge: one decoration over the turn's one group.
+  // after the merge: one decoration over the turn's one group. The root also
+  // bounds the group: a row outside the project is not a deliverable.
   const root = sessionProject.value?.root
   const totals = turnDiffTotals(msg.turnDiffs, root)
   return turnDeliverables({
@@ -1832,7 +1833,7 @@ function deliverablesOf(msg: ChatMessage): ArtifactView[] {
     plan,
     frame: msg.artifacts ?? [],
     fallback,
-  }).map((row) => {
+  }, root).map((row) => {
     const displayPath = displayPathOf(row, root)
     const counts = totals.get(displayPath)
     return {

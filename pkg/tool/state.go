@@ -1136,10 +1136,10 @@ func (s *State) GuardWrite(ctx context.Context, absPath string) error {
 
 // pathWithinWorkspace reports whether absPath lands inside the batch task's
 // directory, after resolving both sides: a symlink inside the workspace is a
-// write outside it. pathWithinRoot normalizes through EvalSymlinks (and through
+// write outside it. PathWithinRoot normalizes through EvalSymlinks (and through
 // the deepest existing parent when the target does not exist yet).
 func pathWithinWorkspace(absPath, workspace string) bool {
-	return pathWithinRoot(absPath, workspace)
+	return PathWithinRoot(absPath, workspace)
 }
 
 // ProtectedWriteReason returns the one sentence the approval prompt shows for a
@@ -2274,7 +2274,7 @@ func (s *State) SetPrimaryWorkspaceBoundary(home string, active string, siblings
 		if root == "" || root == active {
 			return false
 		}
-		if oldActive != "" && oldActive != active && pathWithinRoot(root, oldActive) {
+		if oldActive != "" && oldActive != active && PathWithinRoot(root, oldActive) {
 			return false
 		}
 		for _, sibling := range normalizedSiblings {
@@ -2379,7 +2379,7 @@ func (s *State) PathInsidePrimaryHome(path string) bool {
 	s.mu.Lock()
 	home := s.primaryHomeRoot
 	s.mu.Unlock()
-	return home != "" && pathWithinRoot(path, home)
+	return home != "" && PathWithinRoot(path, home)
 }
 
 // PrimaryHome returns the primary agent's FOREBRAIN_HOME, the tree holding its
@@ -2465,7 +2465,12 @@ func normalizeViaExistingParent(raw string) (string, bool) {
 	}
 }
 
-func pathWithinRoot(path, root string) bool {
+// PathWithinRoot reports whether path lands inside root after both sides are
+// normalized through EvalSymlinks (through the deepest existing parent when
+// the target does not exist yet), so a symlinked spelling of one directory
+// cannot part two answers about the same file. It is the one containment
+// predicate the package shares.
+func PathWithinRoot(path, root string) bool {
 	path = normalizeRootPath(path)
 	root = normalizeRootPath(root)
 	if path == "" || root == "" {
@@ -2479,7 +2484,7 @@ func pathWithinRoot(path, root string) bool {
 }
 
 func pathsOverlap(a, b string) bool {
-	return pathWithinRoot(a, b) || pathWithinRoot(b, a)
+	return PathWithinRoot(a, b) || PathWithinRoot(b, a)
 }
 
 func (s *State) AllowedRoots() []string {

@@ -139,9 +139,9 @@ func (s *State) LoadedSkillForPath(path string) (LoadedSkill, bool) {
 	items := s.LoadedSkills()
 	var matched LoadedSkill
 	for _, item := range items {
-		within := pathWithinRoot(normalized, item.RootDir) || pathWithinRoot(lexical, item.RootDir)
+		within := PathWithinRoot(normalized, item.RootDir) || PathWithinRoot(lexical, item.RootDir)
 		if !within && item.Version > 0 {
-			within = pathWithinRoot(normalized, item.PinnedDir()) || pathWithinRoot(lexical, item.PinnedDir())
+			within = PathWithinRoot(normalized, item.PinnedDir()) || PathWithinRoot(lexical, item.PinnedDir())
 		}
 		if !within {
 			continue
@@ -272,7 +272,7 @@ func matchSkillPath(requested string, item LoadedSkill) (skillPathMatch, bool) {
 					file = abs
 				}
 			}
-			shortened := pathWithinRoot(item.RootDir, parent)
+			shortened := PathWithinRoot(item.RootDir, parent)
 			if file != "" || shortened {
 				return skillPathMatch{Skill: item, File: file, Shortened: shortened}, true
 			}

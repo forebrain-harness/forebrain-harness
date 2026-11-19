@@ -173,7 +173,7 @@ func (s *ReviewWriteScope) shellWritableRoots() []string {
 func (s *ReviewWriteScope) admitWrite(absPath string) error {
 	absPath = filepath.Clean(absPath)
 	for _, root := range s.ownRoots() {
-		if pathWithinRoot(absPath, root) {
+		if PathWithinRoot(absPath, root) {
 			return nil
 		}
 	}
@@ -181,7 +181,7 @@ func (s *ReviewWriteScope) admitWrite(absPath string) error {
 	if s.worktree != "" {
 		free += " or " + s.worktree + " (a git worktree there may change any file)"
 	}
-	if !pathWithinRoot(absPath, s.projectRoot) {
+	if !PathWithinRoot(absPath, s.projectRoot) {
 		return fmt.Errorf("plan review: %s is outside the project and the review's own directories %s", absPath, free)
 	}
 	rel, err := filepath.Rel(normalizeRootPath(s.projectRoot), normalizeRootPath(absPath))

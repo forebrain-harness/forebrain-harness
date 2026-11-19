@@ -97,7 +97,7 @@ func (b BatchBoundary) PrunesReadDir(dir string) bool {
 		return false
 	}
 	for _, root := range append(append([]string{}, b.Readable...), b.Writable...) {
-		if pathWithinRoot(root, dir) {
+		if PathWithinRoot(root, dir) {
 			return false
 		}
 	}
@@ -109,7 +109,7 @@ func (b BatchBoundary) inside(path string, roots []string) bool {
 		return false
 	}
 	for _, root := range roots {
-		if pathWithinRoot(path, root) {
+		if PathWithinRoot(path, root) {
 			return true
 		}
 	}

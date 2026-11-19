@@ -399,6 +399,27 @@ export function dedupeArtifacts(rows: ArtifactView[]): ArtifactView[] {
 }
 
 /**
+ * withinProjectRoot says whether a delivered row may sit in the group: the
+ * owner ruled (2026-11-19) that a file created or modified this turn but
+ * outside the project workspace is not a deliverable — being inside the
+ * project is a necessary condition. The one row that lives outside is a kept
+ * plan (plans are stored under the workspace root), which used to reach the
+ * group by its absolute path. A row the surface cannot judge keeps: a root
+ * that is missing or blank must not silently drop rows (displayPathOf with a
+ * blank base would read every absolute row as outside), and a row that names
+ * no absolute path is in the project by construction. An absolute row is
+ * judged by the same rule the label is drawn by — outside, displayPathOf
+ * hands the path back unchanged.
+ */
+export function withinProjectRoot(row: { path?: unknown; relPath?: unknown; name?: unknown }, root?: string): boolean {
+  if ((root ?? '').trim() === '') return true
+  const slashed = String(row.path ?? '').trim().replace(/\\/g, '/')
+  const absolute = /^[a-zA-Z]:/.test(slashed) || slashed.startsWith('/')
+  if (!absolute) return true
+  return displayPathOf(row, root) !== slashed
+}
+
+/**
  * turnDeliverables is the turn's one delivery group (plan 153 A7, owner
  * 2026-10-27): every source of delivered files — a "keep the plan only" exit's
  * plan, what each `present_files` card named, the run's end frame, and, after
@@ -410,7 +431,9 @@ export function dedupeArtifacts(rows: ArtifactView[]): ArtifactView[] {
  * only a frame or the list knew about. Deduplication keeps the first
  * occurrence, so a file that is both presented and listed keeps its presented
  * place, and a reloaded turn — its card rebuilt from the same structured rows
- * — shows exactly what the live one did.
+ * — shows exactly what the live one did. Rows outside the session's project
+ * root are not deliverables (owner 2026-11-19) and are dropped once, over the
+ * merged group; a root the surface does not know drops nothing.
  */
 export function turnDeliverables(input: {
   /** The rows each `present_files` card of this turn named. */
@@ -421,6 +444,7 @@ export function turnDeliverables(input: {
   frame: ArtifactView[]
   /** The artifact list's rows for this run (a reload's fallback). */
   fallback: ArtifactView[]
-}): ArtifactView[] {
+}, root?: string): ArtifactView[] {
   return dedupeArtifacts([...input.plan, ...input.presented, ...input.frame, ...input.fallback])
+    .filter((row) => withinProjectRoot(row, root))
 }

@@ -121,9 +121,11 @@ func openInBrowser(url string, failed func(error)) error {
 	return startDetached(failed, name, args...)
 }
 
-// openImagePreview hands one already-resolved image step to the system viewer.
-// A click resolves it on the screen its press landed on (viewportRelease). A
-// miss is not an error worth saying: the marker line is the affordance, so
+// openImagePreview hands one already-resolved file to the system viewer. A
+// click resolves it on the screen its press landed on (viewportRelease): an
+// image step's marker line, or a deliverables group's file row — the transcript
+// click names either through the same returned slots. A miss is not an error
+// worth saying: the marker line is the affordance, so
 // nothing at all happens when no file was named. A file that was named and
 // could not be opened is said on the composer's hint rows — the rows the
 // clipboard's paste hint uses — because the click is a gesture the user can
