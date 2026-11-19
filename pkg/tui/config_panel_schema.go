@@ -126,6 +126,26 @@ type configField struct {
 	// a prompt and a switch, nothing else — the loader's own rule, read
 	// ahead of the save.
 	CustomOnly bool
+	// The unified agent definition's role flags (P3, the prototype's agent
+	// template). The two are mutually exclusive — a page renders one role's
+	// fields, never both — and only the agent template carries them.
+	//
+	// PrimaryOnly hides the field unless the definition plays the primary
+	// role (primary is true or unset): the connections and delegation a
+	// primary agent owns, and the model its turns run on.
+	PrimaryOnly bool
+	// SubagentOnly hides the field unless the definition plays the subagent
+	// role (primary false): the body an install-wide subagent runs on.
+	SubagentOnly bool
+	// KeyName marks the field that names the definition itself (the map
+	// key): editable while a create has not landed the definition, read-only
+	// afterwards — the prototype's keyName createOnly field, whose opening
+	// on a saved page is refused with the created-fields sentence.
+	KeyName bool
+	// CreateEditable marks a field the create form lets the user set and a
+	// saved definition locks (the prototype's createEditable flag). Opening
+	// it on a saved page is refused with the created-fields sentence.
+	CreateEditable bool
 	// ShowFor lists the sibling `type` values a field belongs to, in the
 	// hook template's own terms: a command hook shows its command and shell,
 	// an HTTP hook its URL and headers.
@@ -448,19 +468,48 @@ const (
 // additional-fields group and the save writes the section whole, so nothing
 // is lost. A future config field adds a descriptor here, not ad-hoc rows.
 var configTemplates = map[string][]configField{
+	// The unified agent definition (P3, the prototype's agent template field
+	// for field): Name names the definition itself and Primary is decided at
+	// create — both read-only on a saved page — and every other field belongs
+	// to one of the two roles, shown by the role the definition plays. The
+	// system prompt is the one field both roles share, and its help says what
+	// each role does with it. Order carries no groups: the prototype draws
+	// this page's fields flat.
 	configTemplateAgent: {
+		{Path: "name", Label: "Name", Kind: configFieldText, KeyName: true,
+			Hint: "Lowercase letters, numbers and hyphens. This is the configuration key."},
 		{Path: "display_name", Label: "Display name", Kind: configFieldText},
 		{Path: "description", Label: "Description", Kind: configFieldText, Multiline: true, Hint: "Describe the role of this agent."},
-		{Path: "primary", Label: "Primary agent", Kind: configFieldBool3, DefaultValue: "false", Hint: "Mark this as a primary agent."},
+		{Path: "primary", Label: "Primary", Kind: configFieldBool3, DefaultValue: "false", CreateEditable: true,
+			Hint: "Set when the definition was created; it cannot be changed afterwards."},
+		// The one field both roles carry, saying something different about
+		// each (the prototype's helpPrimary/helpSubagent); the page picks the
+		// sentence the definition's role names.
+		{Path: "system_prompt", Label: "System prompt", Kind: configFieldText, Multiline: true},
 		{
-			Path: "default_model", Label: "Default model", Kind: configFieldModel, ModelFlavor: configModelFlavorGlobal,
+			Path: "default_model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorGlobal, PrimaryOnly: true,
 			Hint:            "Pick a row from the global model table (/connect or Settings → Models). A primary agent has no provider list of its own.",
 			ModelEmpty:      "Follow global default",
 			ModelEmptyValue: "",
 		},
-		{Path: "mcp_servers", Label: "MCP servers", Kind: configFieldRows, List: true, Group: "Models & connections", Hint: "Agent-specific entries augment or override shared servers."},
-		{Path: "enable_subagent", Label: "Enable subagents", Kind: configFieldBool3, Group: "Delegation", Hint: "Default inherits the shared subagent setting."},
-		{Path: "subagents", Label: "Subagents", Kind: configFieldRows, List: true, Group: "Delegation", Hint: "Built-in overrides and custom agent definitions."},
+		{Path: "mcp_servers", Label: "MCP servers", Kind: configFieldRows, List: true, PrimaryOnly: true, Hint: "Agent-specific entries augment or override shared servers."},
+		{Path: "enable_subagent", Label: "Enable subagents", Kind: configFieldBool3, PrimaryOnly: true, Hint: "Default inherits the shared subagent setting."},
+		{Path: "subagents", Label: "Subagents", Kind: configFieldRows, List: true, PrimaryOnly: true, Hint: "Built-in overrides and custom agent definitions."},
+		{
+			Path: "model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorGlobal, SubagentOnly: true,
+			Hint:            "The model this subagent definition runs on; empty follows the conversation.",
+			ModelEmpty:      "Follow conversation",
+			ModelEmptyValue: "",
+		},
+		{Path: "reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Requires: "model", SubagentOnly: true},
+		{
+			Path: "tools", Label: "Tool access", Kind: configFieldEnum, SubagentOnly: true,
+			Options:      []string{"read_only", "edit", "pick"},
+			OptionLabels: map[string]string{"read_only": "Read-only", "edit": "Edit", "pick": "Pick"},
+			DefaultValue: "edit", Hint: "Empty means Edit.",
+		},
+		{Path: "allowed_tools", Label: "Allowed tools", Kind: configFieldRows, List: true, SubagentOnly: true, Hint: "Used when tool access is Pick."},
+		{Path: "continuable", Label: "Allow continuation", Kind: configFieldBool3, SubagentOnly: true, DefaultValue: "true", Hint: "A subagent that cannot continue is one-shot."},
 	},
 	configTemplateTypeDef: {
 		{

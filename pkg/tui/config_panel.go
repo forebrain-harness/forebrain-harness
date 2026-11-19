@@ -1481,10 +1481,18 @@ func (p *configPanel) configRowStatus(doc any, path []string, key string, value 
 	if !ok {
 		return ""
 	}
-	if primary, _ := row["primary"].(bool); primary {
+	// The prototype's three words (its agent-list rows): an explicit false is
+	// the install-wide subagent role, a true is a primary agent, and a
+	// definition that never chose is just an agent.
+	primary, isBool := row["primary"].(bool)
+	switch {
+	case isBool && !primary:
+		return configSubagentStatus
+	case primary:
 		return configPrimaryStatus
+	default:
+		return configAgentStatus
 	}
-	return ""
 }
 
 // configRowLabel names a row: a map's key as written in the configuration, a
@@ -1538,6 +1546,15 @@ const (
 	// definitions map like every other definition (P3).
 	configPlanReviewerKey = "plan_reviewer"
 	configPrimaryStatus   = "Primary"
+	// The other two role words the prototype's definitions list writes (P3):
+	// an explicit primary:false is the install-wide subagent role, and a
+	// definition that never chose a role is just an agent.
+	configSubagentStatus = "Subagent"
+	configAgentStatus    = "Agent"
+	// The created-fields sentence (the prototype's keyName/createEditable
+	// readOnly help, word for word): what opening the name or the primary
+	// switch on a saved definition answers.
+	configCreatedFieldsNotice = "Set when the definition was created; it cannot be changed."
 	// configDefaultStatus is the section list's one status word: the database
 	// holds no row for the section, so it reads its built-in defaults — the
 	// prototype's own marker (plan 321).
@@ -1606,9 +1623,8 @@ const (
 	// configAgentOverridePrefix and configGlobalDefaultPrefix name where a
 	// subagent entry's model comes from. The prototype draws the same fact in a
 	// status column; the panel keeps it in the row's description.
-	configAgentOverridePrefix  = "agent override: "
-	configGlobalDefaultPrefix  = "global default: "
-	configPrimaryCreatedNotice = "Primary agent created. Choose its default model from the global model table."
+	configAgentOverridePrefix = "agent override: "
+	configGlobalDefaultPrefix = "global default: "
 	// The hooks section's own words (plan 321): the event a matcher list
 	// belongs to, the matcher that starts one, the action a matcher runs, and
 	// the key a matcher's actions are stored under.
@@ -2195,6 +2211,12 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 		if configTemplateRowIsSystem(template, settings) {
 			return doc, configSystemSubagentNotice
 		}
+		// The two fields a create decides (the prototype's keyName and
+		// createEditable): opening either on a saved definition answers with
+		// the created-fields sentence instead of an editor.
+		if template == configTemplateAgent && (row.field.KeyName || row.field.CreateEditable) {
+			return doc, configCreatedFieldsNotice
+		}
 		if row.unknown != "" {
 			doc, notice = p.openUnknownTemplateKey(doc, rowPath, row.unknown)
 			continue
@@ -2233,6 +2255,15 @@ func configTemplateNameIsBuiltinOrSystem(name string) bool {
 	return name != "" && (slices.Contains(agent.PublicSubagentNames, name) || slices.Contains(agent.SystemSubagentNames, name))
 }
 
+// configAgentRolePrimary reports whether a definition's page renders the
+// primary role's fields: primary true, or a definition that never chose a role
+// (the same reading the loader's IsEffectivePrimaryAgent applies to everything
+// but the built-in keys). An explicit false plays the subagent role.
+func configAgentRolePrimary(settings map[string]any) bool {
+	primary, isBool := settings["primary"].(bool)
+	return !isBool || primary
+}
+
 // configHookActionType is the action a hook entry performs, in the loader's
 // own ids; an entry that names none is a command hook, the template's default
 // (prototype html:126 reads value?.type || 'command').
@@ -2255,6 +2286,7 @@ func (p *configPanel) templateItems(template string, settings map[string]any, ta
 	name := strings.ToLower(strings.TrimSpace(configStringField(settings, "name")))
 	system := configTemplateRowIsSystem(template, settings)
 	hookType := configHookActionType(settings)
+	rolePrimary := configAgentRolePrimary(settings)
 	known := make(map[string]bool, len(fields))
 	items := make([]SelectItem, 0, len(fields)+4)
 	rows := make([]configTemplateRow, 0, len(fields)+4)
@@ -2263,11 +2295,29 @@ func (p *configPanel) templateItems(template string, settings map[string]any, ta
 		if field.CustomOnly && configTemplateNameIsBuiltinOrSystem(name) {
 			continue
 		}
+		// The unified definition renders one role's fields (P3): the flags
+		// are mutually exclusive, so a page never shows both roles' Model
+		// rows. A role nobody chose reads as the primary role's.
+		if template == configTemplateAgent && field.PrimaryOnly && !rolePrimary {
+			continue
+		}
+		if template == configTemplateAgent && field.SubagentOnly && rolePrimary {
+			continue
+		}
 		if len(field.ShowFor) > 0 && !slices.Contains(field.ShowFor, hookType) {
 			continue
 		}
 		value, exists := configLookupValue(settings, []string{field.Path})
 		description := configFieldHint(field)
+		if template == configTemplateAgent && field.Path == "system_prompt" {
+			// The one field both roles carry, saying something different
+			// about each (the prototype's helpPrimary/helpSubagent).
+			if rolePrimary {
+				description = "Appended to the end of the built-in system prompt. It never replaces it."
+			} else {
+				description = "Replaces the built-in system prompt whole."
+			}
+		}
 		status := ""
 		if system {
 			description, status = configSystemSubagentNotice, configSystemStatus
@@ -2565,7 +2615,7 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 	}
 	list := configContainerIsList(field, container)
 	if !list && configPrimaryCreationPath(field, path) {
-		return p.addPrimaryAgent(doc, path, field, container)
+		return p.addAgentDefinition(doc, path, field, container)
 	}
 	key := ""
 	if !list {
@@ -2665,84 +2715,263 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 	return opened, note
 }
 
-// configPrimaryCreationPath reports whether an add lands a new primary agent:
-// the definitions map, and the top level of the agents section. The path check
-// is not redundant with the field's — editRows hands the same descriptor down to
-// every nested row page, so inside one agent's definition the path is longer and
-// the guard must not fire there (plan 313).
+// configPrimaryCreationPath reports whether an add lands a new definition in
+// the agents section's definitions map: the unified create form's one gate.
+// The path check is not redundant with the field's — editRows hands the same
+// descriptor down to every nested row page, so inside one agent's definition
+// the path is longer and the guard must not fire there (plan 313).
 func configPrimaryCreationPath(field configField, path []string) bool {
 	return field.Path == configDefinitionsPath && len(path) == 1 && path[0] == configDefinitionsPath
 }
 
-// addPrimaryAgent creates one primary agent the way the prototype's create-agent
-// scene does (plan 313, copy plan 328 D4, prototype html:161): an id and an
-// optional display name, then the agent shape the runtime needs — primary, no
-// MCP servers of its own, no subagents yet — and the new agent's own page,
-// opened with the guidance that says what to do next.
+// The unified create's own copy (P3; every sentence is the prototype's or the
+// panel's existing wording, never an invented one).
+const (
+	// configKeyNameHint is the name field's own help (the prototype's keyName
+	// field, word for word).
+	configKeyNameHint = "Lowercase letters, numbers and hyphens. This is the configuration key."
+	// configReservedIDRefusal is the six-name refusal (the prototype's
+	// renameDefinition, word for word); the loader refuses them too, but the
+	// form owes the sentence before the write.
+	configReservedIDRefusal = "Those names are the 6 built-in subagents. Choose a different ID."
+	// configPrimaryIDRefusal is the primary id's rule, the loader's own
+	// (plan 328 D4): it takes underscores as well as the prototype's letters,
+	// numbers and hyphens, and the help says so — the loader is the authority.
+	configPrimaryIDRefusal = "Use a lowercase agent ID with letters, numbers, hyphens or underscores, starting with a letter."
+	// configCreateHeldNotice answers a value the create form holds while the
+	// name has not landed: the panel's Enter persists, and this says where the
+	// value went.
+	configCreateHeldNotice = "Held with the new agent; it saves when the name is confirmed."
+	// configCreateNameFirstNotice answers a field whose editor needs a saved
+	// section to read and write: the model rows and the collections.
+	configCreateNameFirstNotice = "Confirm the name first; the rest saves on the page that follows."
+	// configCreateRoleNotice answers a role flip that cleared the other
+	// role's held values (owner ruling: 切角色时清掉对方的字段).
+	configCreateRoleNotice = "Role switched. The other role's held values were cleared."
+)
+
+// The two roles' field keys, the sets a role flip clears (the prototype's
+// stageValue clears the primary-only keys on primary:false; the same rule
+// applies symmetrically).
+var (
+	configPrimaryOnlyKeys  = []string{"mcp_servers", "enable_subagent", "subagents"}
+	configSubagentOnlyKeys = []string{"model", "reasoning_effort", "tools", "allowed_tools", "continuable"}
+)
+
+// addAgentDefinition is the unified create (P3, the prototype's agent create
+// scene): one single-page form — the same fields a saved definition's page
+// renders — held as a draft until the name lands. The name and the primary
+// switch are the two fields the create decides; every other field the role's
+// page shows is held with the draft and saves with the name, after which the
+// panel's own Enter-persists-per-field rule takes over on the saved page.
+// Nothing writes until a valid name confirms, so backing out of an unnamed
+// draft discards silently, and a refused name keeps the form and every held
+// value.
 //
-// The three refusals are the ones this page owes the user: an id the loader
-// would reject, an id naming a built-in subagent type, and a duplicate key.
-// The id's rule is the loader's own (plan 328 D4): it takes underscores as
-// well as the prototype's letters, numbers and hyphens, and the help says so —
-// the loader is the authority and stays out of scope here. The latter guard
-// exists because that key is the type's install-wide default, so a definition
-// under it is one IsEffectivePrimaryAgent never treats as a primary agent;
-// it is refused here and on the gateway's create endpoint alike.
-func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField, container any) (any, string) {
-	name, ok, err := p.sel.Input("New primary agent\nAgent ID\nLowercase letters, numbers, hyphens or underscores. The ID becomes the configuration key.", "")
+// The draft starts as a primary agent (the prototype's startAdd seed) and the
+// primary switch flips the role in place, clearing the other role's held
+// values. The refusals are the prototype's and the loader's: an empty key, a
+// key the role's pattern refuses (the primary's here, the subagent's through
+// the loader's own sentence on the write), one of the six reserved subagent
+// names, and a duplicate.
+func (p *configPanel) addAgentDefinition(doc any, path []string, field configField, container any) (any, string) {
+	draft := map[string]any{"primary": true}
+	tailRows := p.configActionSelector() == nil
+	notice := ""
+	for {
+		items, rows := p.templateItems(configTemplateAgent, draft, tailRows)
+		idx, ok, err := selectRichPage(p.sel, "New agent\n"+notice, items, -1)
+		if err != nil {
+			p.printError(err)
+			return doc, ""
+		}
+		notice = ""
+		if !ok || idx < 0 || idx >= len(rows) {
+			// Back out of an unnamed draft: nothing was written, so nothing
+			// is discarded but the held values.
+			return doc, ""
+		}
+		row := rows[idx]
+		switch {
+		case row.up:
+			return doc, ""
+		case row.field.KeyName:
+			updated, key, landed, held := p.commitAgentName(doc, path, field, container, draft)
+			if !landed {
+				notice = held
+				continue
+			}
+			// The name landed: the definition exists, and the page it opens
+			// is the saved definition's own, where every further confirm
+			// persists per field.
+			return p.editTemplatePage(updated, configJoinPath(path, key), configTemplateAgent, key)
+		case row.field.CreateEditable:
+			if !p.editAgentDraftPrimary(draft) {
+				return doc, ""
+			}
+			notice = configCreateRoleNotice
+		default:
+			held, fieldNotice := p.editAgentDraftField(draft, row.field)
+			if !held {
+				return doc, ""
+			}
+			notice = fieldNotice
+		}
+	}
+}
+
+// commitAgentName validates the name the create form holds and, on the first
+// good one, writes the definition whole — the draft under its real key, the
+// one store write that materialises it. A refusal returns landed=false with
+// the notice the form re-renders under, every held value intact. landed=true
+// hands back the updated document and the key that landed.
+func (p *configPanel) commitAgentName(doc any, path []string, field configField, container any, draft map[string]any) (any, string, bool, string) {
+	name, ok, err := p.sel.Input("New agent\nName\n"+configKeyNameHint, "")
 	if err != nil {
 		p.printError(err)
-		return doc, ""
+		return doc, "", false, ""
 	}
 	if !ok {
-		return doc, ""
+		return doc, "", false, ""
 	}
 	key := strings.TrimSpace(name)
 	if key == "" {
-		return doc, "A key is required."
+		return doc, "", false, "A key is required."
 	}
-	if !appcfg.ValidPrimaryAgentID(key) {
-		return doc, "Use a lowercase agent ID with letters, numbers, hyphens or underscores, starting with a letter."
+	if configAgentRolePrimary(draft) && !appcfg.ValidPrimaryAgentID(key) {
+		return doc, "", false, configPrimaryIDRefusal
 	}
-	if appcfg.IsBuiltInSubagentDefinition(key) {
-		return doc, fmt.Sprintf("%q names a built-in subagent type, not a primary agent; choose a different id", key)
+	if appcfg.IsReservedDefinitionID(key) {
+		return doc, "", false, configReservedIDRefusal
 	}
 	if rows, isMap := container.(map[string]any); isMap {
 		if _, dup := rows[key]; dup {
-			return doc, "That key already exists. Choose a different key."
+			return doc, "", false, "That key already exists. Choose a different key."
 		}
-	}
-	display, ok, err := p.sel.Input("New primary agent\nDisplay name\nLeave empty to use the title-cased ID. The new agent starts as a primary agent with no provider list; pick its default model from the global model table.", "")
-	if err != nil {
-		p.printError(err)
-		return doc, ""
-	}
-	if !ok {
-		return doc, ""
-	}
-	if display = strings.TrimSpace(display); display == "" {
-		display = configTitleCase(key)
 	}
 	rows, isMap := container.(map[string]any)
 	if !isMap || rows == nil {
 		rows = make(map[string]any, 1)
 	}
-	rows[key] = map[string]any{
-		"display_name": display,
-		"primary":      true,
-		"mcp_servers":  []any{},
-		"subagents":    []any{},
-	}
+	rows[key] = draft
 	updated, note := p.assign(doc, path, rows, false, field.Label)
 	if note != "" {
-		return updated, note
+		// The loader refused the shape (a subagent id its pattern refuses, a
+		// body it will not take): the form stays with every held value.
+		return doc, "", false, note
 	}
-	// The new agent opens its own template page — the fixed fields the
-	// prototype's agent template holds — with the guidance that says what to
-	// do next (plan 313); editTemplatePage keeps the notice as the page's
-	// first line.
-	opened, note := p.editTemplatePage(updated, configJoinPath(path, key), configTemplateAgent, display, configPrimaryCreatedNotice)
-	return opened, note
+	return updated, key, true, ""
+}
+
+// editAgentDraftPrimary flips the create draft's role and clears the other
+// role's held values. It reports false to leave the form, true to re-render it.
+func (p *configPanel) editAgentDraftPrimary(draft map[string]any) bool {
+	items := []SelectItem{{Label: configBoolOnLabel}, {Label: configBoolOffLabel}}
+	if configAgentRolePrimary(draft) {
+		items[0].Status = configChoiceCheckStatus
+	} else {
+		items[1].Status = configChoiceCheckStatus
+	}
+	idx, ok, err := selectRichPage(p.sel, "New agent\nPrimary\n"+configCreatedFieldsNotice, items, 0)
+	if err != nil {
+		p.printError(err)
+		return false
+	}
+	if !ok || idx < 0 || idx > 1 {
+		return false
+	}
+	next := idx == 0
+	if next == configAgentRolePrimary(draft) {
+		return true
+	}
+	draft["primary"] = next
+	for _, key := range configPrimaryOnlyKeys {
+		if !next {
+			delete(draft, key)
+		}
+	}
+	for _, key := range configSubagentOnlyKeys {
+		if next {
+			delete(draft, key)
+		}
+	}
+	return true
+}
+
+// editAgentDraftField holds one non-deciding field's value with the draft.
+// Simple values type or pick straight into the draft; the fields whose
+// editors need a stored row or a saved section to read and write — the model
+// rows and the collections — ask for the name first instead. It reports
+// false to leave the form, true to re-render it under the notice it names.
+func (p *configPanel) editAgentDraftField(draft map[string]any, field configField) (bool, string) {
+	switch field.Kind {
+	case configFieldModel, configFieldEffort, configFieldRows:
+		return true, configCreateNameFirstNotice
+	case configFieldEnum:
+		items := make([]SelectItem, 0, len(field.Options))
+		current := strings.TrimSpace(configStringField(draft, field.Path))
+		if current == "" {
+			current = field.DefaultValue
+		}
+		for _, option := range field.Options {
+			item := SelectItem{Label: option}
+			if label, ok := field.OptionLabels[option]; ok {
+				item.Label = label
+			}
+			if option == current {
+				item.Status = configChoiceCheckStatus
+			}
+			items = append(items, item)
+		}
+		idx, ok, err := selectRichPage(p.sel, "New agent\n"+field.Label, items, 0)
+		if err != nil {
+			p.printError(err)
+			return false, ""
+		}
+		if !ok || idx < 0 || idx >= len(field.Options) {
+			return false, ""
+		}
+		draft[field.Path] = field.Options[idx]
+		return true, configCreateHeldNotice
+	case configFieldBool3:
+		items := []SelectItem{{Label: configBoolOnLabel}, {Label: configBoolOffLabel}}
+		current := true
+		if value, isBool := draft[field.Path].(bool); isBool {
+			current = value
+		} else if field.DefaultValue == "false" {
+			current = false
+		}
+		defaultIdx := 0
+		if !current {
+			defaultIdx = 1
+		}
+		items[defaultIdx].Status = configChoiceCheckStatus
+		idx, ok, err := selectRichPage(p.sel, "New agent\n"+field.Label, items, defaultIdx)
+		if err != nil {
+			p.printError(err)
+			return false, ""
+		}
+		if !ok || idx < 0 || idx > 1 {
+			return false, ""
+		}
+		draft[field.Path] = idx == 0
+		return true, configCreateHeldNotice
+	default:
+		text, ok, err := p.sel.Input("New agent\n"+field.Label, configStringField(draft, field.Path))
+		if err != nil {
+			p.printError(err)
+			return false, ""
+		}
+		if !ok {
+			return false, ""
+		}
+		if strings.TrimSpace(text) == "" {
+			delete(draft, field.Path)
+			return true, configCreateHeldNotice
+		}
+		draft[field.Path] = text
+		return true, configCreateHeldNotice
+	}
 }
 
 // hookRowsPage reports whether a row page is the hooks section's own tree. Its
