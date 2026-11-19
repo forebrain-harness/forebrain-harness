@@ -1171,6 +1171,52 @@ func TestReducerMaintainsSubagentRosterRows(t *testing.T) {
 	}
 }
 
+// Stored lifecycle events of the deleted subagent types (guardian,
+// cavecrew-*) must replay by their stored title and type: the reducer draws
+// what the event says and never consults the live registry, so an old
+// transcript keeps its account of runs that happened instead of skipping or
+// erroring on them.
+func TestReducerReplaysDeletedSubagentTypesByStoredFacts(t *testing.T) {
+	for _, agentType := range []string{"guardian", "cavecrew-investigator", "cavecrew-builder", "cavecrew-reviewer"} {
+		t.Run(agentType, func(t *testing.T) {
+			var r Reducer
+			_ = r.Reduce(RunStartedMsg{RunID: "parent-1"})
+			spawned := r.Reduce(SubagentSpawnedMsg{
+				AgentID:     "task-old",
+				AgentType:   agentType,
+				TaskID:      "task-old",
+				Title:       "stored title",
+				Task:        "inspect the old run",
+				ExecutionID: "exec-old",
+			})
+			card := lastFanoutFrame(t, spawned)
+			if !strings.Contains(card.Content, "stored title") {
+				t.Fatalf("the card must show the stored title, got %q", card.Content)
+			}
+			if !strings.Contains(card.Summary, agentType) {
+				t.Fatalf("the card header must name the stored type %q, got %q", agentType, card.Summary)
+			}
+			if rows := r.AgentRosterSnapshot().Rows; len(rows) != 1 || rows[0].Label != agentType {
+				t.Fatalf("the roster must label the row by the stored type, got %#v", rows)
+			}
+			ended := r.Reduce(SubagentEndedMsg{
+				AgentID:     "task-old",
+				AgentType:   agentType,
+				TaskID:      "task-old",
+				Status:      "done",
+				ExecutionID: "exec-old",
+			})
+			final := lastFanoutFrame(t, ended)
+			if !strings.Contains(final.Content, "stored title") || !strings.Contains(final.Summary, agentType) {
+				t.Fatalf("the settled card must keep the stored facts, got content=%q summary=%q", final.Content, final.Summary)
+			}
+			if rows := r.AgentRosterSnapshot().Rows; len(rows) != 0 {
+				t.Fatalf("the ended replay must clear the roster row, got %#v", rows)
+			}
+		})
+	}
+}
+
 func TestReducerSubagentEndedRemovesRosterRow(t *testing.T) {
 	var r Reducer
 	_ = r.Reduce(SubagentSpawnedMsg{

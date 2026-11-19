@@ -343,7 +343,7 @@ func TestPrimaryAgentCreateRejectsDuplicateID(t *testing.T) {
 // is written, with the verdict the /config panel's creation flow gives (plan
 // 313), and a real id still goes through.
 func TestPrimaryAgentCreateRejectsBuiltInSubagentTypeIDs(t *testing.T) {
-	for _, id := range []string{"explore", "plan", "general-purpose", "verification", "guardian", "cavecrew-investigator"} {
+	for _, id := range []string{"explore", "plan", "general-purpose", "verification"} {
 		t.Run(id, func(t *testing.T) {
 			s, _ := crudServer(t)
 			rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]string{"id": id})

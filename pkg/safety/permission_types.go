@@ -550,9 +550,8 @@ func (p *RequestPermissionProfile) UnmarshalJSON(data []byte) error {
 }
 
 type RequestPermissionsResponse struct {
-	Permissions      RequestPermissionProfile `json:"permissions"`
-	Scope            PermissionGrantScope     `json:"scope"`
-	StrictAutoReview bool                     `json:"strict_auto_review,omitempty"`
+	Permissions RequestPermissionProfile `json:"permissions"`
+	Scope       PermissionGrantScope     `json:"scope"`
 }
 
 // FileSystemPermissionGrant is a normalized runtime grant. Turn grants only
@@ -596,13 +595,12 @@ type PermissionUpdate struct {
 	Destination PermissionDestination `json:"destination"`
 	SessionID   string                `json:"session_id,omitempty"`
 
-	Behavior              PermissionBehavior          `json:"behavior,omitempty"`
-	Rules                 []PermissionRuleValue       `json:"rules,omitempty"`
-	Mode                  PermissionMode              `json:"mode,omitempty"`
-	SandboxMode           appcfg.SandboxMode          `json:"sandbox_mode,omitempty"`
-	FileSystemGrants      []FileSystemPermissionGrant `json:"file_system_grants,omitempty"`
-	NetworkGrants         []NetworkPermissionGrant    `json:"network_grants,omitempty"`
-	StrictAutoReviewRunID string                      `json:"strict_auto_review_run_id,omitempty"`
+	Behavior         PermissionBehavior          `json:"behavior,omitempty"`
+	Rules            []PermissionRuleValue       `json:"rules,omitempty"`
+	Mode             PermissionMode              `json:"mode,omitempty"`
+	SandboxMode      appcfg.SandboxMode          `json:"sandbox_mode,omitempty"`
+	FileSystemGrants []FileSystemPermissionGrant `json:"file_system_grants,omitempty"`
+	NetworkGrants    []NetworkPermissionGrant    `json:"network_grants,omitempty"`
 }
 
 // Preset ids are the stable wire values; the labels are what a picker shows.
@@ -753,7 +751,6 @@ const (
 	DecisionAcceptAndRemember             ApprovalDecisionName = "accept_and_remember"
 	DecisionAcceptWithExecPolicyAmendment ApprovalDecisionName = "accept_with_execpolicy_amendment"
 	DecisionGrantForTurn                  ApprovalDecisionName = "grant_for_turn"
-	DecisionGrantForTurnStrictAutoReview  ApprovalDecisionName = "grant_for_turn_with_strict_auto_review"
 	DecisionGrantForSession               ApprovalDecisionName = "grant_for_session"
 	DecisionDecline                       ApprovalDecisionName = "decline"
 	DecisionCancel                        ApprovalDecisionName = "cancel"

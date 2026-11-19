@@ -57,7 +57,6 @@ describe('usePendingActions approvalDecisionLabel', () => {
       ['shell_outside_sandbox', 'cancel', '不要运行'],
       // A permission request.
       ['request_permissions', 'grant_for_turn', '本轮允许'],
-      ['request_permissions', 'grant_for_turn_with_strict_auto_review', '本轮允许，自动审查'],
       ['request_permissions', 'grant_for_session', '本会话允许'],
       ['request_permissions', 'decline', '不授予'],
       // An MCP call.
@@ -105,7 +104,7 @@ describe('usePendingActions approvalDecisionLabel', () => {
     expect(approvalDecisionLabel({ decision: 'cancel' }, action)).toBe('不要取')
   })
 
-  it('says no engine word anywhere in the ten decision ids', () => {
+  it('says no engine word anywhere in the eight decision ids', () => {
     // The two engine-word buttons the retired generic card printed, spliced
     // so this file keeps the retirement grep over the tree at zero hits.
     const retiredWords = ['批' + '准一次', '拒绝并中' + '断本轮']
@@ -115,7 +114,7 @@ describe('usePendingActions approvalDecisionLabel', () => {
     ]
     const decisions = [
       'accept', 'accept_for_session', 'accept_and_remember', 'accept_with_execpolicy_amendment',
-      'grant_for_turn', 'grant_for_turn_with_strict_auto_review',
+      'grant_for_turn',
       'grant_for_session', 'decline', 'cancel',
     ] as const
     for (const family of families) {
@@ -133,7 +132,6 @@ describe('usePendingActions approvalDecisionLabel', () => {
     expect(label('accept', 'file_write')).toBe('Write')
     expect(label('accept', 'file_write', { removed: 3 })).toBe('Overwrite')
     expect(label('accept', 'shell_outside_sandbox')).toBe('Run outside the sandbox')
-    expect(label('grant_for_turn_with_strict_auto_review', 'request_permissions')).toBe('Allow this turn, auto-reviewed')
     expect(label('cancel', 'protected_read')).toBe("Don't read")
     expect(label('decline', 'memory_note')).toBe("Don't keep it")
     expect(label('cancel', 'fallback')).toBe("Don't allow")

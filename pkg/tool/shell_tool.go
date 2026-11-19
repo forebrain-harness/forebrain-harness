@@ -632,12 +632,12 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		sandboxRetryApprovalAllowed(snap.ApprovalPolicy) && !denyReadRestricted {
 		// An approved replay retries directly; otherwise the approval surface
 		// decides. It answers "no approval needed" whenever policy already
-		// authorizes this command — a remembered rule, YOLO, or an automatic
-		// reviewer that allowed it — and that answer means the escalated run may
-		// proceed. Reporting the denial instead sends the model back a failure
-		// it is expected to answer by asking for escalation itself: the same
-		// approval, one wasted round-trip later.
-		retry := alreadyApproved && !strictAutoReviewEnabled(ctx, rt, RunIDFromContext(ctx))
+		// authorizes this command — a remembered rule or YOLO — and that
+		// answer means the escalated run may proceed. Reporting the denial
+		// instead sends the model back a failure it is expected to answer by
+		// asking for escalation itself: the same approval, one wasted
+		// round-trip later.
+		retry := alreadyApproved
 		if !retry {
 			// Not an error yet: the denial is about to become an approval
 			// request or an authorized retry. Only a denial nothing can answer
@@ -1167,9 +1167,6 @@ func shellAssessmentRequiresApproval(ctx context.Context, st *State, rt *AgentTo
 	if sandboxBypass && !bypassApproved {
 		return true
 	}
-	if ApprovedActionIDFromContext(ctx) == "" && strictAutoReviewEnabled(ctx, rt, RunIDFromContext(ctx)) {
-		return true
-	}
 	if assessment.Dangerous != nil || assessment.UsedComplexParsing {
 		if shellBuiltinRequiresApproval(cmd) {
 			return true
@@ -1194,22 +1191,6 @@ func shellAssessmentRequiresApproval(ctx context.Context, st *State, rt *AgentTo
 		}
 	}
 	_, _, _ = st, readOnlyCommand, sandboxBypass
-	return false
-}
-
-func strictAutoReviewEnabled(ctx context.Context, rt *AgentToolRuntime, runID string) bool {
-	if rt == nil || (rt.PermissionSnapshotForSession == nil && rt.PermissionSnapshot == nil) {
-		return false
-	}
-	runID = strings.TrimSpace(runID)
-	if runID == "" {
-		return false
-	}
-	for _, enabledRunID := range permissionSnapshotForContext(ctx, nil, rt).StrictAutoReviewRunIDs {
-		if strings.TrimSpace(enabledRunID) == runID {
-			return true
-		}
-	}
 	return false
 }
 
@@ -1758,7 +1739,7 @@ func shellSandboxProfile(ctx context.Context) (safety.Profile, bool) {
 	subtype := strings.ToLower(strings.TrimSpace(SubagentTypeFromContext(ctx)))
 	readOnlyWorker := false
 	switch subtype {
-	case "explore", "plan", "plan-reviewer", "cavecrew-investigator", "cavecrew-reviewer":
+	case "explore", "plan", "plan-reviewer", "goal-evaluator", "verification":
 		// plan-reviewer included: a coding review writes its tests with the
 		// file tools and everything else in its scratch directory, which
 		// runSandboxedShellCommand adds as the shell's only write exception.

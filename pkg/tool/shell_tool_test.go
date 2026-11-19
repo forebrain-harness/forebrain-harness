@@ -162,21 +162,6 @@ func TestAdditionalPermissionsPreapprovedWithSessionSnapshotOnly(t *testing.T) {
 	}
 }
 
-func TestStrictAutoReviewUsesOwningSessionSnapshot(t *testing.T) {
-	rt := &AgentToolRuntime{PermissionSnapshotForSession: func(sessionID string) safety.Snapshot {
-		if sessionID == "session-1" {
-			return safety.Snapshot{StrictAutoReviewRunIDs: []string{"run-1"}}
-		}
-		return safety.Snapshot{}
-	}}
-	if !strictAutoReviewEnabled(llm.WithAgentSessionID(context.Background(), "session-1"), rt, "run-1") {
-		t.Fatal("owning session did not observe strict auto review")
-	}
-	if strictAutoReviewEnabled(llm.WithAgentSessionID(context.Background(), "session-2"), rt, "run-1") {
-		t.Fatal("strict auto review leaked through a global snapshot")
-	}
-}
-
 func TestShellToolDescriptionExplainsStandaloneApplyPatch(t *testing.T) {
 	tool, err := NewShellTool(NewState(t.TempDir()), nil)
 	if err != nil {

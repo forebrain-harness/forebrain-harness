@@ -19,14 +19,10 @@ var envReferencePattern = regexp.MustCompile(`\$\{([^}]+)\}`)
 var primaryAgentIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
 
 var builtInSubagentDefinitionNames = map[string]struct{}{
-	"general-purpose":       {},
-	"explore":               {},
-	"plan":                  {},
-	"verification":          {},
-	"cavecrew-investigator": {},
-	"cavecrew-builder":      {},
-	"cavecrew-reviewer":     {},
-	"guardian":              {},
+	"general-purpose": {},
+	"explore":         {},
+	"plan":            {},
+	"verification":    {},
 }
 
 // builtInPublicSubagentNames and builtInSystemSubagentNames are this package's
@@ -38,7 +34,7 @@ var builtInSubagentDefinitionNames = map[string]struct{}{
 // so add a new built-in to both places.
 var builtInPublicSubagentNames = []string{"general-purpose", "explore", "plan", "verification"}
 
-var builtInSystemSubagentNames = []string{"plan-reviewer", "goal-evaluator", "guardian", "cavecrew-investigator", "cavecrew-builder", "cavecrew-reviewer"}
+var builtInSystemSubagentNames = []string{"plan-reviewer", "goal-evaluator"}
 
 func Load(path string) (Root, error) {
 	r, err := loadPersisted(path)

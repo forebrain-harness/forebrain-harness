@@ -1636,7 +1636,6 @@ export interface ActionRecord {
 export interface RequestPermissionsResponse {
   permissions: Record<string, unknown>
   scope: 'turn' | 'session'
-  strictAutoReview?: boolean
 }
 
 export interface ActionApprovalBody {

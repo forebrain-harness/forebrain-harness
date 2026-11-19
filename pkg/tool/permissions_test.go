@@ -102,16 +102,12 @@ func TestGrantedPathsAreAvailableToInProcessFileTools(t *testing.T) {
 // instead of quietly being described as fully tooled.
 func TestBuiltinSubagentToolsTier(t *testing.T) {
 	want := map[string]string{
-		"general-purpose":       appcfg.SubagentToolsEdit,
-		"explore":               appcfg.SubagentToolsReadOnly,
-		"plan":                  appcfg.SubagentToolsReadOnly,
-		"verification":          appcfg.SubagentToolsReadOnly,
-		"plan-reviewer":         appcfg.SubagentToolsReadOnly,
-		"goal-evaluator":        appcfg.SubagentToolsReadOnly,
-		"guardian":              SubagentToolsNone,
-		"cavecrew-investigator": appcfg.SubagentToolsReadOnly,
-		"cavecrew-builder":      appcfg.SubagentToolsEdit,
-		"cavecrew-reviewer":     appcfg.SubagentToolsReadOnly,
+		"general-purpose": appcfg.SubagentToolsEdit,
+		"explore":         appcfg.SubagentToolsReadOnly,
+		"plan":            appcfg.SubagentToolsReadOnly,
+		"verification":    appcfg.SubagentToolsReadOnly,
+		"plan-reviewer":   appcfg.SubagentToolsReadOnly,
+		"goal-evaluator":  appcfg.SubagentToolsReadOnly,
 	}
 	for name, tier := range want {
 		if got := BuiltinSubagentToolsTier(name); got != tier {
@@ -125,11 +121,6 @@ func TestBuiltinSubagentToolsTier(t *testing.T) {
 	}
 	if got := BuiltinSubagentToolsTier("  EXPLORE "); got != appcfg.SubagentToolsReadOnly {
 		t.Errorf("the tier must be read the way the policy is: got %q", got)
-	}
-	// The guardian is the one type with no tools at all, which is why its prompt
-	// tells it not to use any.
-	if guardian := BuiltinSubagentToolsTier("guardian"); guardian != SubagentToolsNone {
-		t.Fatalf("guardian = %q, want %q", guardian, SubagentToolsNone)
 	}
 }
 

@@ -49,29 +49,6 @@ func TestStoreFilesystemGrantSnapshotsAreDefensiveCopies(t *testing.T) {
 	}
 }
 
-func TestStoreStrictAutoReviewIsSessionScoped(t *testing.T) {
-	store := NewStore()
-	ApplyUpdate(store, PermissionUpdate{
-		Type: UpdateAddPermissionGrants, Destination: DestinationSession,
-		SessionID: "session-1", StrictAutoReviewRunID: "run-1",
-	})
-	if !store.StrictAutoReviewEnabledForSession("session-1", "run-1") {
-		t.Fatal("owning session did not receive strict auto review")
-	}
-	if store.StrictAutoReviewEnabledForSession("session-2", "run-1") {
-		t.Fatal("strict auto review leaked to another session")
-	}
-	if got := store.SnapshotForSession("session-1").StrictAutoReviewRunIDs; len(got) != 1 || got[0] != "run-1" {
-		t.Fatalf("owning snapshot run IDs=%v", got)
-	}
-	if got := store.SnapshotForSession("session-2").StrictAutoReviewRunIDs; len(got) != 0 {
-		t.Fatalf("other snapshot run IDs=%v", got)
-	}
-	if got := store.Snapshot().StrictAutoReviewRunIDs; len(got) != 0 {
-		t.Fatalf("global snapshot leaked session run IDs=%v", got)
-	}
-}
-
 func TestStoreRejectsUnscopedRuntimeGrants(t *testing.T) {
 	store := NewStore()
 	entry := FileSystemPermissionEntry{Path: NewFileSystemPermissionPath("/tmp/external"), Access: FileSystemAccessRead}

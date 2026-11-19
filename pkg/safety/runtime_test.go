@@ -1,16 +1,12 @@
 package safety
 
 import (
-	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
-	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
 func newGitProject(t *testing.T) string {
@@ -134,125 +130,6 @@ func TestLoadDropsHandEditedProjectAllowRules(t *testing.T) {
 	}
 	if d := rt.Evaluate("", "Bash", "rm -rf /", nil, false); d.BypassSandbox {
 		t.Fatal("a hand-edited project rule granted sandbox bypass")
-	}
-}
-
-type guardianScriptLLM struct {
-	outputs  []string
-	err      error
-	calls    int
-	tools    [][]*llm.Tool
-	messages [][]llm.Message
-}
-
-func (g *guardianScriptLLM) Execute(_ context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
-	g.calls++
-	g.tools = append(g.tools, tools)
-	g.messages = append(g.messages, append([]llm.Message(nil), messages...))
-	if g.err != nil {
-		return nil, g.err
-	}
-	output := ""
-	if len(g.outputs) > 0 {
-		index := g.calls - 1
-		if index >= len(g.outputs) {
-			index = len(g.outputs) - 1
-		}
-		output = g.outputs[index]
-	}
-	message := llm.AssistantMessage([]llm.ContentPart{llm.Text(output)})
-	return &llm.Result{Message: &message}, nil
-}
-
-func TestGuardianIncludesConfiguredApprovalPolicy(t *testing.T) {
-	client := &guardianScriptLLM{outputs: []string{`{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"authorized"}`}}
-	_, err := NewGuardianReviewer(client, "Deny production changes.").Review(context.Background(), "run-1", nil, "shell", map[string]any{"command": "pwd"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(client.messages) != 1 || len(client.messages[0]) != 2 {
-		t.Fatalf("expected one system+user request, got %+v", client.messages)
-	}
-	// The policy travels in the user message, NOT the system block: a system
-	// block that varies with the policy turns every policy change into a fresh
-	// prompt-cache generation for these one-shot review calls.
-	if !strings.Contains(client.messages[0][1].TextContent(), "Deny production changes.") {
-		t.Fatalf("configured policy missing from guardian user message: %+v", client.messages[0])
-	}
-	// The system block must be byte-identical across every review, which is
-	// what lets a provider serve it from cache.
-	if got := client.messages[0][0].TextContent(); got != guardianSystemPrompt {
-		t.Fatalf("guardian system block is not the stable constant:\n%q", got)
-	}
-	if strings.Contains(client.messages[0][0].TextContent(), "Deny production changes.") {
-		t.Fatal("policy leaked into the cacheable system block")
-	}
-}
-
-func TestGuardianApplyPatchAssessmentOmitsPatchText(t *testing.T) {
-	prompt, err := guardianReviewPrompt(nil, "apply_patch", map[string]any{
-		"patch":          "*** Begin Patch\n+secret\n*** End Patch",
-		"resolved_paths": []string{"/repo/a.go"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(prompt, "+secret") || !strings.Contains(prompt, "/repo/a.go") {
-		t.Fatalf("prompt=%s", prompt)
-	}
-}
-
-func TestGuardianReviewIsStructuredIsolatedAndRetries(t *testing.T) {
-	client := &guardianScriptLLM{outputs: []string{
-		`not json`,
-		`{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"explicitly requested"}`,
-	}}
-	reviewer := NewGuardianReviewer(client)
-	// The run id is handed to review directly now; the reviewer no longer digs
-	// it back out of the context.
-	decision, err := reviewer.Review(context.Background(), "run-1", []llm.Message{llm.UserMessage(llm.Text("run tests"))}, "shell", map[string]any{"command": "go test ./..."})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if decision.Outcome != "allow" || client.calls != 2 {
-		t.Fatalf("decision=%+v calls=%d", decision, client.calls)
-	}
-	for _, tools := range client.tools {
-		if len(tools) != 0 {
-			t.Fatalf("guardian must execute without tools: %#v", tools)
-		}
-	}
-}
-
-func TestGuardianFailsClosedAfterThreeAttempts(t *testing.T) {
-	client := &guardianScriptLLM{err: errors.New("review backend unavailable")}
-	_, err := NewGuardianReviewer(client).Review(context.Background(), "run-1", nil, "shell", map[string]any{"command": "date"})
-	if err == nil || !strings.Contains(err.Error(), "failed closed after 3 attempts") {
-		t.Fatalf("expected fail-closed error, got %v", err)
-	}
-	if client.calls != guardianMaxAttempts {
-		t.Fatalf("calls=%d want=%d", client.calls, guardianMaxAttempts)
-	}
-}
-
-func TestGuardianCircuitOpensAfterThreeConsecutiveDenials(t *testing.T) {
-	client := &guardianScriptLLM{outputs: []string{`{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"not authorized"}`}}
-	reviewer := NewGuardianReviewer(client)
-	// The circuit breaker is keyed by the run id, which review now takes
-	// directly instead of reading back out of the context.
-	ctx := context.Background()
-	for i := 0; i < guardianConsecutive; i++ {
-		decision, err := reviewer.Review(ctx, "run-2", nil, "shell", map[string]any{"command": "publish"})
-		if err != nil || decision.Outcome != "deny" {
-			t.Fatalf("review %d: decision=%+v err=%v", i, decision, err)
-		}
-	}
-	_, err := reviewer.Review(ctx, "run-2", nil, "shell", map[string]any{"command": "publish"})
-	if err == nil || !strings.Contains(err.Error(), "circuit breaker") {
-		t.Fatalf("expected circuit breaker, got %v", err)
-	}
-	if client.calls != guardianConsecutive {
-		t.Fatalf("open circuit called model again: calls=%d", client.calls)
 	}
 }
 

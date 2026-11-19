@@ -499,7 +499,7 @@ func prefixStateFor(key string) *prefixKeyState {
 func prefixGroupFor(key string) string {
 	if key == "" {
 		// Requests with no session identity are the auxiliary one-shots:
-		// memory extraction, consolidation, guardian reviews.
+		// memory extraction and consolidation.
 		return "aux"
 	}
 	return "main"

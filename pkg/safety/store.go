@@ -5,7 +5,6 @@ import (
 	"os"
 	"reflect"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -28,9 +27,6 @@ type Store struct {
 	// request_permissions. They are deliberately not persisted as settings.
 	fileSystemGrants []FileSystemPermissionGrant
 	networkGrants    []NetworkPermissionGrant
-	// strictAutoReviewRunIDs maps run IDs to their owning session. An empty
-	// owner is reserved for process-level callers that do not have a session.
-	strictAutoReviewRunIDs map[string]string
 	// sandboxAvailable reports whether a sandbox backend will contain shell
 	// commands that run without approval.
 	sandboxAvailable bool
@@ -52,22 +48,20 @@ type Snapshot struct {
 	// SandboxMode is the conversation's own sandbox mode when it chose one
 	// (see ConfigForSnapshot), and empty when it runs under the configured
 	// mode.
-	SandboxMode            appcfg.SandboxMode                                                `json:"sandbox_mode,omitempty"`
-	ApprovalPolicy         ApprovalPolicy                                                    `json:"approval_policy"`
-	Rules                  map[PermissionSource]map[PermissionBehavior][]PermissionRuleValue `json:"rules"`
-	FileSystemGrants       []FileSystemPermissionGrant                                       `json:"file_system_grants,omitempty"`
-	NetworkGrants          []NetworkPermissionGrant                                          `json:"network_grants,omitempty"`
-	StrictAutoReviewRunIDs []string                                                          `json:"strict_auto_review_run_ids,omitempty"`
+	SandboxMode      appcfg.SandboxMode                                                `json:"sandbox_mode,omitempty"`
+	ApprovalPolicy   ApprovalPolicy                                                    `json:"approval_policy"`
+	Rules            map[PermissionSource]map[PermissionBehavior][]PermissionRuleValue `json:"rules"`
+	FileSystemGrants []FileSystemPermissionGrant                                       `json:"file_system_grants,omitempty"`
+	NetworkGrants    []NetworkPermissionGrant                                          `json:"network_grants,omitempty"`
 }
 
 func NewStore() *Store {
 	return &Store{
-		mode:                   ModeOnRequest,
-		sessionModes:           make(map[string]PermissionMode),
-		sessionSandbox:         make(map[string]sessionSandboxChoice),
-		approvalPolicy:         ApprovalPolicy{Mode: ApprovalOnRequest},
-		rules:                  make(map[PermissionSource]map[PermissionBehavior][]PermissionRuleValue),
-		strictAutoReviewRunIDs: make(map[string]string),
+		mode:           ModeOnRequest,
+		sessionModes:   make(map[string]PermissionMode),
+		sessionSandbox: make(map[string]sessionSandboxChoice),
+		approvalPolicy: ApprovalPolicy{Mode: ApprovalOnRequest},
+		rules:          make(map[PermissionSource]map[PermissionBehavior][]PermissionRuleValue),
 	}
 }
 
@@ -106,17 +100,6 @@ func (s *Store) SnapshotForSession(sessionID string) Snapshot {
 			out.SandboxMode = choice.mode
 		}
 	}
-	for runID, ownerSessionID := range s.strictAutoReviewRunIDs {
-		if sessionID == "" {
-			if ownerSessionID != "" {
-				continue
-			}
-		} else if ownerSessionID != "" && ownerSessionID != sessionID {
-			continue
-		}
-		out.StrictAutoReviewRunIDs = append(out.StrictAutoReviewRunIDs, runID)
-	}
-	sort.Strings(out.StrictAutoReviewRunIDs)
 	if out.Mode == "" {
 		out.Mode = ModeOnRequest
 	}
@@ -445,7 +428,6 @@ func (s *Store) ClearRuntimeGrants() {
 	delete(s.rules, SourceSession)
 	s.fileSystemGrants = nil
 	s.networkGrants = nil
-	s.strictAutoReviewRunIDs = make(map[string]string)
 	s.sessionModes = make(map[string]PermissionMode)
 	s.sessionSandbox = make(map[string]sessionSandboxChoice)
 }
@@ -566,46 +548,6 @@ func (s *Store) NetworkGrants() []NetworkPermissionGrant {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]NetworkPermissionGrant(nil), s.networkGrants...)
-}
-
-func (s *Store) EnableStrictAutoReview(runID string) {
-	s.EnableStrictAutoReviewForSession("", runID)
-}
-
-func (s *Store) EnableStrictAutoReviewForSession(sessionID, runID string) {
-	if s == nil {
-		return
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	runID = strings.TrimSpace(runID)
-	if runID == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.strictAutoReviewRunIDs == nil {
-		s.strictAutoReviewRunIDs = make(map[string]string)
-	}
-	s.strictAutoReviewRunIDs[runID] = sessionID
-}
-
-func (s *Store) StrictAutoReviewEnabled(runID string) bool {
-	return s.StrictAutoReviewEnabledForSession("", runID)
-}
-
-func (s *Store) StrictAutoReviewEnabledForSession(sessionID, runID string) bool {
-	if s == nil {
-		return false
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	runID = strings.TrimSpace(runID)
-	if runID == "" {
-		return false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	ownerSessionID, ok := s.strictAutoReviewRunIDs[runID]
-	return ok && (ownerSessionID == "" || ownerSessionID == sessionID)
 }
 
 func normalizeFileSystemGrant(grant FileSystemPermissionGrant) FileSystemPermissionGrant {
@@ -978,7 +920,6 @@ func ApplyUpdate(store *Store, u PermissionUpdate) {
 		for _, grant := range u.NetworkGrants {
 			store.AddNetworkGrant(grant)
 		}
-		store.EnableStrictAutoReviewForSession(u.SessionID, u.StrictAutoReviewRunID)
 	}
 }
 

@@ -816,13 +816,6 @@ var typedSubagentDisallowedTools = map[string]map[string]struct{}{
 	"verification": {
 		"write_file": {}, "edit_file": {},
 	},
-	"cavecrew-investigator": {
-		"write_file": {}, "edit_file": {},
-	},
-	"cavecrew-builder": {},
-	"cavecrew-reviewer": {
-		"write_file": {}, "edit_file": {},
-	},
 }
 
 // TypedSubagentBlocksFileWrites reports whether a typed subagent's own policy
@@ -841,25 +834,12 @@ func TypedSubagentBlocksFileWrites(subagentType string) bool {
 	return write && edit
 }
 
-// SubagentToolsNone is the tool tier of a subagent type that has no tools at
-// all, which is a different claim from a read-only one.
-const SubagentToolsNone = "none"
-
-// guardianSubagentType is the one type with no tools: its prompt answers a
-// structured allow/deny decision from the evidence it is given, so it is
-// described as such rather than as a read-only agent that could have looked.
-const guardianSubagentType = "guardian"
-
 // BuiltinSubagentToolsTier names the tool tier a built-in subagent type carries,
 // for the surfaces that describe one without running it: read_only when its type
-// forbids the two file-writing tools, none for the guardian's tool-less
-// reviewer, and edit otherwise. The tier is a property of the type, not of a
-// configuration, because a built-in's tools are fixed.
+// forbids the two file-writing tools, and edit otherwise. The tier is a property
+// of the type, not of a configuration, because a built-in's tools are fixed.
 func BuiltinSubagentToolsTier(subagentType string) string {
 	name := strings.ToLower(strings.TrimSpace(subagentType))
-	if name == guardianSubagentType {
-		return SubagentToolsNone
-	}
 	if TypedSubagentBlocksFileWrites(name) {
 		return appcfg.SubagentToolsReadOnly
 	}

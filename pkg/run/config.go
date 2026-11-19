@@ -239,7 +239,7 @@ func resolveAgentLLM(cfg *appcfg.Root, agentType string, sel modelSelector) (app
 // agents.definitions[agentType] and falling back to the main agent's providers.
 //
 // It returns (nil, nil) when nothing resolves: its callers are auxiliary model
-// users (the goal evaluator, the guardian reviewer, context compaction) that
+// users (the goal evaluator, context compaction) that
 // treat an unconfigured model as "this feature is off" rather than as a failure.
 func NewLLMForAgentType(cfg *appcfg.Root, agentType string) (llm.LLM, error) {
 	_, client, err := resolveAgentLLM(cfg, agentType, modelSelector{})

@@ -221,11 +221,11 @@ describe('SubagentConfigDrawer', () => {
 
   it('draws a system subagent with nothing to change and one way out', async () => {
     vi.mocked(forebrainApi.subagentConfig).mockResolvedValue(
-      detail({ name: 'guardian', kind: 'system', tools: 'none', enabled: null, systemPrompt: 'You are the guardian.' }),
+      detail({ name: 'goal-evaluator', kind: 'system', tools: 'read_only', enabled: null, systemPrompt: 'You check whether the objective is met.' }),
     )
-    const wrapper = await openDrawer({ name: 'guardian', mode: 'view' })
+    const wrapper = await openDrawer({ name: 'goal-evaluator', mode: 'view' })
 
-    expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('查看系统子代理 guardian')
+    expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('查看系统子代理 goal-evaluator')
     expect(wrapper.findAll('input').every((input) => input.attributes('readonly') !== undefined)).toBe(true)
     // Both dropdowns are the library's triggers, and both are off: nothing here
     // is this page's to change.
@@ -233,10 +233,10 @@ describe('SubagentConfigDrawer', () => {
     expect(triggers).toHaveLength(2)
     expect(triggers.every((trigger) => trigger.attributes('disabled') !== undefined)).toBe(true)
     expect(wrapper.find('textarea').attributes('readonly')).toBeDefined()
-    expect((wrapper.find('[data-testid="subagent-prompt"]').element as HTMLTextAreaElement).value).toBe('You are the guardian.')
+    expect((wrapper.find('[data-testid="subagent-prompt"]').element as HTMLTextAreaElement).value).toBe('You check whether the objective is met.')
     // 何时调用 and the tool tier are the harness's facts about it.
-    expect((wrapper.find('[data-testid="subagent-when"]').element as HTMLInputElement).value).toBe('审批模式开启自动审查时')
-    expect((wrapper.find('[data-testid="subagent-tools-fixed"]').element as HTMLInputElement).value).toBe('无工具（内置，不能改）')
+    expect((wrapper.find('[data-testid="subagent-when"]').element as HTMLInputElement).value).toBe('/goal 每轮结束后')
+    expect((wrapper.find('[data-testid="subagent-tools-fixed"]').element as HTMLInputElement).value).toBe('只读（内置，不能改）')
     expect(wrapper.find('[data-testid="subagent-note"]').text()).toBe('系统子代理只能查看。')
 
     const foot = wrapper.find('.forebrain-drawer-foot')

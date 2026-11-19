@@ -370,9 +370,6 @@ func applyRequestPermissionsResponse(rt *AgentToolRuntime, response safety.Reque
 		}
 		update.NetworkGrants = append(update.NetworkGrants, grant)
 	}
-	if response.StrictAutoReview && response.Scope == safety.GrantScopeTurn {
-		update.StrictAutoReviewRunID = strings.TrimSpace(runID)
-	}
 	if len(update.FileSystemGrants) > 0 || len(update.NetworkGrants) > 0 {
 		rt.ApplyPermissionUpdate(update)
 	}
@@ -465,9 +462,6 @@ func PermissionUpdateFromApprovedAction(kind, payloadJSON, answerJSON, runID str
 			grant.RunID = strings.TrimSpace(runID)
 		}
 		update.NetworkGrants = append(update.NetworkGrants, grant)
-	}
-	if response.StrictAutoReview && response.Scope == safety.GrantScopeTurn {
-		update.StrictAutoReviewRunID = strings.TrimSpace(runID)
 	}
 	if len(update.FileSystemGrants) == 0 && len(update.NetworkGrants) == 0 {
 		return safety.PermissionUpdate{}, false

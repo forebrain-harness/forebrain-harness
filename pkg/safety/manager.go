@@ -404,12 +404,11 @@ func (m *Manager) cfgOrCached(cfg *appcfg.Root) *appcfg.Root {
 
 func clonePermissionSnapshot(in Snapshot) Snapshot {
 	out := Snapshot{
-		Mode:                   in.Mode,
-		ApprovalPolicy:         in.ApprovalPolicy,
-		Rules:                  map[PermissionSource]map[PermissionBehavior][]PermissionRuleValue{},
-		FileSystemGrants:       cloneFilesystemGrants(in.FileSystemGrants),
-		NetworkGrants:          append([]NetworkPermissionGrant(nil), in.NetworkGrants...),
-		StrictAutoReviewRunIDs: append([]string(nil), in.StrictAutoReviewRunIDs...),
+		Mode:             in.Mode,
+		ApprovalPolicy:   in.ApprovalPolicy,
+		Rules:            map[PermissionSource]map[PermissionBehavior][]PermissionRuleValue{},
+		FileSystemGrants: cloneFilesystemGrants(in.FileSystemGrants),
+		NetworkGrants:    append([]NetworkPermissionGrant(nil), in.NetworkGrants...),
 	}
 	for src, byBehavior := range in.Rules {
 		out.Rules[src] = map[PermissionBehavior][]PermissionRuleValue{}

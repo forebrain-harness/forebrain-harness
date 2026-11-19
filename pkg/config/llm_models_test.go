@@ -230,7 +230,7 @@ func TestValidateSubagentModels(t *testing.T) {
 		{"unknown model", map[string]SubagentConfig{"explore": {Model: "llm-gone"}}, true},
 		{"effort without a model", map[string]SubagentConfig{"explore": {ReasoningEffort: "high"}}, true},
 		{"custom name", map[string]SubagentConfig{"my-helper": {Model: "llm-1"}}, true},
-		{"system name", map[string]SubagentConfig{"guardian": {Model: "llm-1"}}, true},
+		{"system name", map[string]SubagentConfig{"goal-evaluator": {Model: "llm-1"}}, true},
 	}
 	for _, c := range cases {
 		c := c

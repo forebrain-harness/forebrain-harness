@@ -81,10 +81,6 @@ describe('approval suggestions', () => {
       'grant_for_session',
       'decline',
     ])
-    // Approving a permission request is a question of how long the grant lasts,
-    // not of who reviews it: the strict auto-review answer is gone from every
-    // surface (plan 203), and the frontend never adds it on its own.
-    expect(decisions.map((item) => item.decision)).not.toContain('grant_for_turn_with_strict_auto_review')
   })
 })
 

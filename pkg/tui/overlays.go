@@ -164,7 +164,6 @@ type overlayChoice struct {
 	isReviewAgain bool
 	clearContext  bool
 	planOnly      bool
-	strictReview  bool
 	commandPrefix safety.ExecPolicyAmendment
 	// commandRules is the server-proposed rule set a remembered Bash command
 	// stores, which replaces ruleContent when the row carries one.
@@ -296,8 +295,6 @@ func buildProposedOverlayChoices(req turn.ToolApprovalRequest) []overlayChoice {
 			}
 		case safety.DecisionGrantForTurn:
 			choices = append(choices, overlayChoice{label: "Yes, grant these permissions for this turn", allowOnce: true})
-		case safety.DecisionGrantForTurnStrictAutoReview:
-			choices = append(choices, overlayChoice{label: "Yes, grant for this turn with strict auto review", allowOnce: true, strictReview: true})
 		case safety.DecisionGrantForSession:
 			choices = append(choices, overlayChoice{label: "Yes, grant these permissions for this session", dst: safety.DestinationSession})
 		case safety.DecisionDecline:
@@ -1779,10 +1776,8 @@ func (o *approvalOverlay) commit() turn.ToolApprovalDecision {
 	if o.req.RequestedPermissions != nil && !choice.denyOnce && !choice.cancel {
 		response := *o.req.RequestedPermissions
 		response.Scope = safety.GrantScopeTurn
-		response.StrictAutoReview = choice.strictReview
 		if choice.dst == safety.DestinationSession {
 			response.Scope = safety.GrantScopeSession
-			response.StrictAutoReview = false
 		}
 		return turn.ToolApprovalDecision{Approved: true, RequestPermissionsResponse: &response}
 	}

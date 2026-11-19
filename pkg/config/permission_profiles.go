@@ -20,8 +20,8 @@ const (
 // ever set by a permission profile, and profiles are internal implementation of
 // the approval presets now (plan 203). The managed proxy that consumed them and
 // the per-host network approvals built on it are gone (plan 206), so what stays
-// is the data shape alone, the way the guardian code does — a future surface can
-// bring interception back without re-deriving it.
+// is the data shape alone — a future surface can bring interception back
+// without re-deriving it.
 type NetworkMITMConfig struct {
 	Hooks   map[string]NetworkMITMHook   `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 	Actions map[string]NetworkMITMAction `yaml:"actions,omitempty" json:"actions,omitempty"`

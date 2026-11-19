@@ -248,9 +248,9 @@ describe('ApprovalCard', () => {
           network: { enabled: true },
         },
       },
-      decisions: ['grant_for_turn', 'grant_for_turn_with_strict_auto_review', 'grant_for_session', 'decline'],
+      decisions: ['grant_for_turn', 'grant_for_session', 'decline'],
       question: '要给它这些权限吗？', facts: ['可读 ~/notes', '可写 /tmp/out', '可访问网络'],
-      buttons: ['本轮允许', '本轮允许，自动审查', '本会话允许', '不授予'],
+      buttons: ['本轮允许', '本会话允许', '不授予'],
     },
     {
       id: 'act-enter-plan', kind: 'enter_plan_mode', payload: { reason: '改动跨三个包，先写计划再动手', action: 'enter' },

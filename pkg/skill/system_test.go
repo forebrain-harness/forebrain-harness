@@ -365,7 +365,7 @@ func TestInstall_AllSkillDirsExtracted(t *testing.T) {
 	// Hub loads these recursively via scanSkillDir depth=1.
 	nestedSkills := map[string][]string{
 		"caveman": {
-			"caveman", "cavecrew", "caveman-commit",
+			"caveman", "caveman-commit",
 			"caveman-compress", "caveman-help", "caveman-review", "caveman-stats",
 		},
 	}

@@ -7,7 +7,7 @@ import (
 )
 
 func TestResolveSubtypeBuiltins(t *testing.T) {
-	for _, name := range []string{"general-purpose", "explore", "plan", "verification", "cavecrew-investigator", "cavecrew-builder", "cavecrew-reviewer", "guardian"} {
+	for _, name := range []string{"general-purpose", "explore", "plan", "verification"} {
 		def, err := ResolveSubtype(name)
 		if err != nil {
 			t.Fatalf("resolve %s: %v", name, err)
@@ -102,7 +102,7 @@ func TestSubagentNameListsCoverEveryBuiltin(t *testing.T) {
 	}
 }
 
-func TestPublicAndCavecrewPrivateTypeNamesAreSeparated(t *testing.T) {
+func TestPublicAndSystemTypeNamesAreSeparated(t *testing.T) {
 	if got, want := PublicTypeNames(), []string{"general-purpose", "explore", "plan", "verification"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("PublicTypeNames = %#v, want %#v", got, want)
 	}
@@ -110,19 +110,16 @@ func TestPublicAndCavecrewPrivateTypeNamesAreSeparated(t *testing.T) {
 	for _, name := range PublicTypeNames() {
 		public[name] = struct{}{}
 	}
-	// The reserved subtypes are spelled out here rather than read from a
-	// production list: nothing in the runtime enumerates them, so a list living
-	// in production would exist only for this assertion.
-	for _, name := range cavecrewPrivateTypeNames {
+	// The system-dispatched subtypes are spelled out here rather than read
+	// from a production list: the assertion is that the two sets stay
+	// disjoint, so reading the same list twice would prove nothing.
+	for _, name := range []string{"plan-reviewer", "goal-evaluator"} {
 		if _, ok := public[name]; ok {
-			t.Fatalf("cavecrew-private subtype %q is public", name)
+			t.Fatalf("system subtype %q is public", name)
 		}
-	}
-	if got, ok := SystemPromptForSubtype("goal-evaluator"); !ok || got == "" {
-		t.Fatalf("goal-evaluator system prompt missing")
-	}
-	if got, ok := SystemPromptForSubtype("guardian"); !ok || got == "" {
-		t.Fatalf("guardian system prompt missing")
+		if got, ok := SystemPromptForSubtype(name); !ok || got == "" {
+			t.Fatalf("%s system prompt missing", name)
+		}
 	}
 }
 
@@ -157,8 +154,3 @@ func TestFileAccessScopeSystemPromptOffersEscalationInsteadOfRefusal(t *testing.
 		}
 	}
 }
-
-// cavecrewPrivateTypeNames are the built-in subtypes reserved for cavecrew.
-// They resolve to a definition but must never surface in the public
-// subagent_type enum.
-var cavecrewPrivateTypeNames = []string{"cavecrew-investigator", "cavecrew-builder", "cavecrew-reviewer"}

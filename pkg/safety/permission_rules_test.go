@@ -3038,8 +3038,7 @@ func TestNetworkBlockedIgnoresAmbiguousConnectErrors(t *testing.T) {
 }
 
 // Approving a permission request is a question of how long the grant lasts, not
-// of who reviews it (plan 203): three answers, no reviewer, and no strict
-// auto-review answer at all.
+// of who reviews it (plan 203): three answers and no reviewer.
 func TestRequestPermissionsOffersThreeDecisions(t *testing.T) {
 	options := BuildApprovalDecisionOptions("request_permissions", "request_permissions", map[string]any{
 		"permissions": map[string]any{"network": map[string]any{"enabled": true}},
@@ -3055,11 +3054,6 @@ func TestRequestPermissionsOffersThreeDecisions(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("decisions = %v, want %v", got, want)
-		}
-	}
-	for _, decision := range got {
-		if decision == DecisionGrantForTurnStrictAutoReview {
-			t.Fatalf("the strict auto-review answer is still offered: %v", got)
 		}
 	}
 }

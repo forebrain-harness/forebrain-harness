@@ -1488,25 +1488,6 @@ func requireSubtypeGuide(t *testing.T, schema map[string]any, path ...string) {
 			t.Fatalf("description missing %q:\n%s", want, desc)
 		}
 	}
-	// Spelled out here: the runtime does not enumerate the reserved subtypes,
-	// so a production list would exist only for this assertion.
-	for _, forbidden := range []string{"cavecrew-investigator", "cavecrew-builder", "cavecrew-reviewer"} {
-		if containsSubtypeName(gotNames, forbidden) {
-			t.Fatalf("public enum contains cavecrew-private subtype %q: %#v", forbidden, gotNames)
-		}
-		if strings.Contains(desc, forbidden) {
-			t.Fatalf("public subtype description contains cavecrew-private subtype %q:\n%s", forbidden, desc)
-		}
-	}
-}
-
-func containsSubtypeName(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
-			return true
-		}
-	}
-	return false
 }
 
 func TestPrepareSubagentExecutionForksWhenSubtypeIsOmitted(t *testing.T) {

@@ -13,7 +13,7 @@ import { pickOption, seedProjectSession, shot, signIn } from './support'
  * answer of the detail endpoint and of `GET /api/config` (the file's own text).
  *
  * The subagents the harness ships are fixed: the four the model may dispatch,
- * then the six the system dispatches on its own occasions. The seeds are this
+ * then the two the system dispatches on its own occasions. The seeds are this
  * agent's custom subagents and are removed in each case's `finally` — the
  * gateway and its configuration file are shared with every other spec in the
  * run.
@@ -22,7 +22,7 @@ import { pickOption, seedProjectSession, shot, signIn } from './support'
 /** The built-ins the model may dispatch, in the order the page lists them. */
 const BUILTINS = ['general-purpose', 'explore', 'plan', 'verification']
 /** The ones the system dispatches: nobody configures them, and they come last. */
-const SYSTEM = ['plan-reviewer', 'goal-evaluator', 'guardian', 'cavecrew-investigator', 'cavecrew-builder', 'cavecrew-reviewer']
+const SYSTEM = ['plan-reviewer', 'goal-evaluator']
 
 /** The run's own skill fixture, installed where a case needs a skill to open. */
 const SKILL_ZIP = process.env.E2E_SKILL_ZIP ?? ''
@@ -199,22 +199,19 @@ test('the page lists the agent’s subagents in configuration order, ten to a pa
     expect(headers).not.toContain('状态')
 
     // This agent's own first, then the four built-ins, then the system ones —
-    // eleven rows, so the first page carries the first ten.
-    await expect.poll(() => rowNames(page), { timeout: 20_000 }).toEqual([custom, ...BUILTINS, ...SYSTEM.slice(0, 5)])
+    // seven rows, so the first page carries them all.
+    await expect.poll(() => rowNames(page), { timeout: 20_000 }).toEqual([custom, ...BUILTINS, ...SYSTEM])
     await expect(page.locator('[data-testid="table-pager"]')).toHaveCount(1)
-    await expect(page.locator('[data-testid="pager-total"]')).toHaveText(/共 11 条/)
+    await expect(page.locator('[data-testid="pager-total"]')).toHaveText(/共 7 条/)
 
     // The kind each row is tells the rest of the table where it came from.
-    expect(await columnTexts(page, 2)).toEqual(['自定义', '内置', '内置', '内置', '内置', '系统', '系统', '系统', '系统', '系统'])
+    expect(await columnTexts(page, 2)).toEqual(['自定义', '内置', '内置', '内置', '内置', '系统', '系统'])
     await page.mouse.move(2, 2)
     await shot(page, 'p079-list-page-1')
 
-    // The eleventh row is the last system one, on its own page.
-    await page.click('[data-testid="pager-page-2"]')
-    await expect(page.locator('[data-testid="pager-page-2"]')).toHaveAttribute('aria-current', 'page')
-    await expect.poll(() => rowNames(page), { timeout: 20_000 }).toEqual([SYSTEM[5]])
-    await expect(page.locator('[data-testid="pager-total"]')).toHaveText(/共 11 条/)
-    await shot(page, 'p079-list-page-2')
+    // Seven rows fit one page of ten: there is no second page to turn to.
+    await expect(page.locator('[data-testid="pager-page-1"]')).toHaveAttribute('aria-current', 'page')
+    await expect(page.locator('[data-testid="pager-page-2"]')).toHaveCount(0)
   } finally {
     await page.request.delete(agentSubagents(agentId, custom))
   }

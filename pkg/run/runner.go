@@ -296,12 +296,7 @@ type Runner struct {
 // that lock, and the two deliberate exceptions below, are written down.
 type runnerLocks struct {
 	// load guards main, mainCfg, forkLLM, tools, userTracer, mcpReg and
-	// memPipeline. The guardian used to be in this list; it now lives on
-	// safety.Runtime, which does its own locking, and actionHook reads it
-	// unguarded by design — that relies on a configuration being applied only
-	// at a turn boundary, never inside an active run (see
-	// process.Environment.SyncConfigFromDB), which this lock does not
-	// affect either way. permRuntime's lazy creation deliberately does
+	// memPipeline. permRuntime's lazy creation deliberately does
 	// NOT use this lock — see permRuntimeOnce's comment on the Runner struct
 	// for why nesting it inside loadLocked (which already holds load) would
 	// self-deadlock.
@@ -486,9 +481,6 @@ func addModelSetupHint(err error) error {
 
 func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (string, bool, error) {
 	pay := payloadToMap(payload)
-	strictAutoReview := r != nil && r.permRuntimeGet().StrictAutoReviewEnabledForSession(
-		tool.ConversationSessionIDFromContext(ctx), r.policyRunIDForTool(ctx), r.Config(),
-	)
 	exitPlanMode := strings.EqualFold(strings.TrimSpace(kind), "exit_plan_mode")
 	isRequestPermissions := strings.EqualFold(strings.TrimSpace(kind), "request_permissions")
 	isApplyPatch := strings.EqualFold(strings.TrimSpace(kind), "apply_patch")
@@ -564,7 +556,7 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 		case safety.BehaviorDeny:
 			return "", false, formatPermissionDenyError(decision, kind, pay)
 		case safety.BehaviorAllow:
-			if !exitPlanMode && !strictAutoReview && (!forceToolApproval || decision.Matched != nil) {
+			if !exitPlanMode && (!forceToolApproval || decision.Matched != nil) {
 				if isRequestPermissions {
 					tool.CapturePolicyApprovalReason(ctx, requestPermissionsApprovalExemptionReason(decision))
 				}
@@ -623,28 +615,6 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 		case "deny":
 			return "", false, fmt.Errorf("permission denied by PermissionRequest hook: %s", hookMessage)
 		}
-	}
-	// The strict auto-review decision (grant_for_turn_with_strict_auto_review)
-	// is no longer offered on any surface, so nothing can turn this on. The
-	// whole guardian path is kept as dead code rather than deleted: approval is
-	// handed to a person now (owner 2026-10-31), and the reviewer is a feature
-	// that may come back.
-	if strictAutoReview && !exitPlanMode {
-		if r.permRuntimeGet().Guardian() == nil {
-			return "", false, fmt.Errorf("automatic approval review is unavailable")
-		}
-		transcript, transcriptErr := r.guardianTranscript(ctx)
-		if transcriptErr != nil {
-			return "", false, fmt.Errorf("automatic approval review failed closed: %w", transcriptErr)
-		}
-		review, reviewErr := r.permRuntimeGet().Guardian().Review(ctx, tool.RunIDFromContext(ctx), transcript, kind, pay)
-		if reviewErr != nil {
-			return "", false, reviewErr
-		}
-		if review.Outcome != "allow" {
-			return "", false, fmt.Errorf("permission denied by automatic approval review (%s): %s", review.RiskLevel, review.Rationale)
-		}
-		return "", false, nil
 	}
 	if r.Actions == nil {
 		return "", false, fmt.Errorf("approval required for %q but actions service is unavailable", kind)
@@ -874,17 +844,6 @@ func (r *Runner) applyPatchSessionApproval(ctx context.Context, payload map[stri
 	return true, nil
 }
 
-func (r *Runner) guardianTranscript(ctx context.Context) ([]llm.Message, error) {
-	if r == nil || r.SessionStore == nil {
-		return nil, nil
-	}
-	sessionID := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
-	if sessionID == "" {
-		return nil, nil
-	}
-	return r.SessionStore.ListTranscriptMessages(ctx, sessionID, 40)
-}
-
 func payloadString(payload map[string]any, key string) string {
 	value, _ := payload[key].(string)
 	return value
@@ -963,16 +922,6 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 		if err != nil {
 			return err
 		}
-	}
-	r.permRuntimeGet().SetGuardian(nil, "")
-	guardianLLM, guardianErr := NewLLMForAgentType(r.Config(), "guardian")
-	if guardianErr != nil {
-		slog.Warn("initialize automatic approval reviewer", "err", guardianErr)
-	} else if guardianLLM != nil {
-		// The policy text the auto-review configuration used to carry is gone
-		// with the configuration (plan 203); the guardian client itself stays
-		// wired for the kept-dead-code path.
-		r.permRuntimeGet().SetGuardian(guardianLLM, "")
 	}
 	// Build per-type LLM clients for built-in typed subagents (explore, plan,
 	// verification, general-purpose) so each can run on the global model row

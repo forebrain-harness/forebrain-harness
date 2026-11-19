@@ -3701,13 +3701,8 @@ func TestApprovalOverlayRequestPermissionsScopeChoices(t *testing.T) {
 	if err != nil || !turnDecision.Approved || turnDecision.RequestPermissionsResponse == nil || turnDecision.RequestPermissionsResponse.Scope != safety.GrantScopeTurn {
 		t.Fatalf("turn decision=%+v err=%v", turnDecision, err)
 	}
-	// Three rows and no reviewer: the option list carries no strict auto-review
-	// choice any more (plan 203), so a second row down is "for this session".
-	for _, choice := range buildOverlayChoices(req, 0) {
-		if choice.strictReview {
-			t.Fatalf("the request_permissions overlay still offers strict auto review: %+v", choice)
-		}
-	}
+	// Three rows and no reviewer (plan 203): a second row down is "for this
+	// session".
 	sessionDecision, err := runOverlayWithKeys(t, req, []byte{0x1b, '[', 'B', '\r'})
 	if err != nil || !sessionDecision.Approved || sessionDecision.RequestPermissionsResponse == nil || sessionDecision.RequestPermissionsResponse.Scope != safety.GrantScopeSession {
 		t.Fatalf("session decision=%+v err=%v", sessionDecision, err)

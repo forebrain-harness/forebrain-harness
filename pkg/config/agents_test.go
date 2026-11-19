@@ -511,7 +511,7 @@ func TestLoadRejectsInvalidAgentSubagents(t *testing.T) {
 		},
 		{
 			name:  "system subagent",
-			entry: "        - name: guardian\n          system_prompt: p\n",
+			entry: "        - name: goal-evaluator\n          system_prompt: p\n",
 			want:  "cannot be configured",
 		},
 		{

@@ -649,7 +649,6 @@ export function usePendingActions(options: {
       case 'accept_and_remember': return t('chat.approvalScopeAlways')
       case 'accept_with_execpolicy_amendment': return t('chat.approvalScopeThisCommand')
       case 'grant_for_turn': return t('chat.approvalYesGrantTurn')
-      case 'grant_for_turn_with_strict_auto_review': return t('chat.approvalYesGrantTurnReviewed')
       case 'grant_for_session': return t('chat.approvalYesGrantSession')
       case 'decline': return family === 'memory_note' ? t('chat.approvalMemoryNo') : t('chat.approvalNoGrant')
       case 'cancel':

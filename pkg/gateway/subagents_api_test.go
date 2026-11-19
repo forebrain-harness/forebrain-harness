@@ -15,7 +15,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
-	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -163,9 +162,9 @@ func TestSubagentListOrderKindsAndPaging(t *testing.T) {
 	require.Equal(t, appcfg.SubagentToolsReadOnly, builtin.Tools)
 	require.False(t, builtin.Continuable)
 
-	system := subagentRowByName(t, page.Rows, "guardian")
+	system := subagentRowByName(t, page.Rows, "goal-evaluator")
 	require.Equal(t, subagentKindSystem, system.Kind)
-	require.Equal(t, tool.SubagentToolsNone, system.Tools)
+	require.Equal(t, appcfg.SubagentToolsReadOnly, system.Tools)
 	require.Nil(t, system.Enabled, "a system subagent has no switch")
 
 	// The kind filter narrows the same rows.
@@ -190,8 +189,8 @@ func TestSubagentListOrderKindsAndPaging(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	paged := decodeSubagentPage(t, rec)
 	require.Equal(t, len(want), paged.Total)
-	require.Equal(t, 3, paged.Page)
-	require.Len(t, paged.Rows, len(want)-2*5)
+	require.Equal(t, 2, paged.Page)
+	require.Len(t, paged.Rows, len(want)-5)
 
 	// A kind the endpoint does not know is refused rather than answered empty.
 	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents?kind=elsewhere", nil)
@@ -377,10 +376,10 @@ func TestSubagentDetailShowsThePromptInForce(t *testing.T) {
 
 	// A system subagent is readable for the same reason a built-in is: a person
 	// cannot judge what the system does with it from the code.
-	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents/guardian", nil)
+	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents/goal-evaluator", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
-	original, ok = agent.SystemPromptForSubtype("guardian")
+	original, ok = agent.SystemPromptForSubtype("goal-evaluator")
 	require.True(t, ok)
 	require.Equal(t, original, detail.SystemPrompt)
 	require.NotNil(t, detail.DefaultPrompt)
@@ -560,7 +559,7 @@ func TestSubagentBuiltinSwitchAndLinkage(t *testing.T) {
 	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/plan/enabled", map[string]any{})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 
-	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/guardian/enabled", map[string]any{"enabled": false})
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/goal-evaluator/enabled", map[string]any{"enabled": false})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }
 

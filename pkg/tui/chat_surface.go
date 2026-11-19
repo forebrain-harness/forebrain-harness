@@ -867,9 +867,6 @@ func approvalChoice(act *state.Action, decision turn.ToolApprovalDecision) strin
 			if response.Scope == safety.GrantScopeSession {
 				return "grant_for_session"
 			}
-			if response.StrictAutoReview {
-				return "grant_for_turn_with_strict_auto_review"
-			}
 		}
 		return "grant_for_turn"
 	}

@@ -319,7 +319,6 @@ func TestHTTPRequestPermissionsDecisionControlsScope(t *testing.T) {
 	var response safety.RequestPermissionsResponse
 	require.NoError(t, json.Unmarshal([]byte(stored.AnswerJSON), &response))
 	require.Equal(t, safety.GrantScopeSession, response.Scope)
-	require.False(t, response.StrictAutoReview)
 	require.NotNil(t, response.Permissions.Network)
 	require.True(t, response.Permissions.Network.AllowsNetwork())
 }

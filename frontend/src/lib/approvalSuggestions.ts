@@ -4,7 +4,6 @@ export type ApprovalDecisionName =
   | 'accept_and_remember'
   | 'accept_with_execpolicy_amendment'
   | 'grant_for_turn'
-  | 'grant_for_turn_with_strict_auto_review'
   | 'grant_for_session'
   | 'decline'
   | 'cancel'
@@ -122,7 +121,6 @@ function normalizeDecisionName(input: string): ApprovalDecisionName | null {
     case 'accept_for_session':
     case 'accept_and_remember':
     case 'grant_for_turn':
-    case 'grant_for_turn_with_strict_auto_review':
     case 'grant_for_session':
     case 'decline':
     case 'cancel':

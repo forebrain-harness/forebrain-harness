@@ -3370,42 +3370,11 @@ func TestVisibleToolsForSubagentSubtype(t *testing.T) {
 func TestRequestPermissionsVisibleToEveryTypedSubagent(t *testing.T) {
 	for _, subtype := range []string{
 		"general-purpose", "explore", "plan", "plan-reviewer", "verification",
-		"cavecrew-investigator", "cavecrew-builder", "cavecrew-reviewer",
 	} {
 		visible := VisibleToolsForSubagentSubtype(subtype, []string{"read_file", "request_permissions"})
 		if !containsTool(visible, "request_permissions") {
 			t.Fatalf("%s cannot ask for permissions: %v", subtype, visible)
 		}
-	}
-}
-
-func TestVisibleToolsCavecrewInvestigator(t *testing.T) {
-	tools := []string{"read_file", "shell", "write_file", "edit_file"}
-	visible := VisibleToolsForSubagentSubtype("cavecrew-investigator", tools)
-	if containsTool(visible, "write_file") || containsTool(visible, "edit_file") {
-		t.Fatalf("cavecrew-investigator leaked mutating tools: %v", visible)
-	}
-	if !containsTool(visible, "read_file") || !containsTool(visible, "shell") {
-		t.Fatalf("cavecrew-investigator lost shell: %v", visible)
-	}
-}
-
-func TestVisibleToolsCavecrewBuilder(t *testing.T) {
-	tools := []string{"read_file", "shell", "write_file", "edit_file", "request_permissions"}
-	visible := VisibleToolsForSubagentSubtype("cavecrew-builder", tools)
-	if !containsTool(visible, "read_file") || !containsTool(visible, "edit_file") || !containsTool(visible, "write_file") || !containsTool(visible, "shell") {
-		t.Fatalf("cavecrew-builder lost allowed tools: %v", visible)
-	}
-}
-
-func TestVisibleToolsCavecrewReviewer(t *testing.T) {
-	tools := []string{"read_file", "shell", "write_file", "edit_file"}
-	visible := VisibleToolsForSubagentSubtype("cavecrew-reviewer", tools)
-	if containsTool(visible, "write_file") || containsTool(visible, "edit_file") {
-		t.Fatalf("cavecrew-reviewer leaked mutating tools: %v", visible)
-	}
-	if !containsTool(visible, "read_file") || !containsTool(visible, "shell") {
-		t.Fatalf("cavecrew-reviewer lost shell: %v", visible)
 	}
 }
 
@@ -4587,34 +4556,45 @@ func TestPermissionUpdateFromApprovedActionUsesGrantedSubset(t *testing.T) {
 	}
 }
 
-func TestPermissionUpdateFromApprovedActionScopesStrictReviewToTurn(t *testing.T) {
+// A pre-203 action row can still carry strict_auto_review:true together with
+// real grants. Replaying it must materialize exactly the grants an ordinary
+// answer carries — the flag is inert now that the automatic reviewer is
+// deleted — and must never revive a review gate. The fixture deliberately
+// carries a grant: with no grants the replay is a refused no-op and would pass
+// even while the flag still enabled review.
+func TestPermissionUpdateFromApprovedActionLegacyStrictAnswerIsInert(t *testing.T) {
 	requested := t.TempDir()
-	payload, _ := json.Marshal(map[string]any{
-		"cwd": requested,
-		"permissions": safety.RequestPermissionProfile{FileSystem: &safety.FileSystemPermissionProfile{Entries: []safety.FileSystemPermissionEntry{{
-			Path: safety.FileSystemPermissionPath{Path: requested}, Access: safety.FileSystemAccessRead,
-		}}}},
-	})
-	answer, _ := json.Marshal(safety.RequestPermissionsResponse{
-		Scope:            safety.GrantScopeTurn,
-		StrictAutoReview: true,
-		Permissions: safety.RequestPermissionProfile{FileSystem: &safety.FileSystemPermissionProfile{Entries: []safety.FileSystemPermissionEntry{{
-			Path: safety.FileSystemPermissionPath{Path: requested}, Access: safety.FileSystemAccessRead,
-		}}}},
-	})
-	update, ok := PermissionUpdateFromApprovedAction(requestPermissionsActionKind, string(payload), string(answer), "run-strict")
-	if !ok || update.StrictAutoReviewRunID != "run-strict" || len(update.FileSystemGrants) != 1 {
-		t.Fatalf("update=%+v ok=%v", update, ok)
-	}
-
-	var sessionResponse safety.RequestPermissionsResponse
-	if err := json.Unmarshal(answer, &sessionResponse); err != nil {
-		t.Fatal(err)
-	}
-	sessionResponse.Scope = safety.GrantScopeSession
-	sessionAnswer, _ := json.Marshal(sessionResponse)
-	if update, ok := PermissionUpdateFromApprovedAction(requestPermissionsActionKind, string(payload), string(sessionAnswer), "run-strict"); ok {
-		t.Fatalf("session-scoped strict review must grant nothing: %+v", update)
+	profile := safety.RequestPermissionProfile{FileSystem: &safety.FileSystemPermissionProfile{Entries: []safety.FileSystemPermissionEntry{{
+		Path: safety.FileSystemPermissionPath{Path: requested}, Access: safety.FileSystemAccessRead,
+	}}}}
+	payload, _ := json.Marshal(map[string]any{"cwd": requested, "permissions": profile})
+	for _, scope := range []safety.PermissionGrantScope{safety.GrantScopeTurn, safety.GrantScopeSession} {
+		legacy, _ := json.Marshal(map[string]any{
+			"scope":              scope,
+			"strict_auto_review": true,
+			"permissions":        profile,
+		})
+		plain, _ := json.Marshal(safety.RequestPermissionsResponse{Scope: scope, Permissions: profile})
+		legacyUpdate, ok := PermissionUpdateFromApprovedAction(requestPermissionsActionKind, string(payload), string(legacy), "run-legacy")
+		if !ok || len(legacyUpdate.FileSystemGrants) != 1 {
+			t.Fatalf("scope %s: the legacy strict answer must replay its grant: update=%+v ok=%v", scope, legacyUpdate, ok)
+		}
+		plainUpdate, ok := PermissionUpdateFromApprovedAction(requestPermissionsActionKind, string(payload), string(plain), "run-legacy")
+		if !ok {
+			t.Fatalf("scope %s: plain answer refused: %+v", scope, plainUpdate)
+		}
+		if !reflect.DeepEqual(legacyUpdate, plainUpdate) {
+			t.Fatalf("scope %s: the strict flag changed the replayed effect:\nlegacy=%+v\nplain =%+v", scope, legacyUpdate, plainUpdate)
+		}
+		// Applying the replayed update is the rest of the old revival chain:
+		// it must land the grant in the store and nothing else.
+		store := safety.NewStore()
+		legacyUpdate.SessionID = "session-1"
+		safety.ApplyUpdate(store, legacyUpdate)
+		snapshot := store.SnapshotForSession("session-1")
+		if len(snapshot.FileSystemGrants) != 1 || snapshot.FileSystemGrants[0].Scope != scope {
+			t.Fatalf("scope %s: snapshot grants=%+v", scope, snapshot.FileSystemGrants)
+		}
 	}
 }
 

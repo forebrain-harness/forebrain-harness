@@ -1770,65 +1770,6 @@ func TestSanitizePathSegment(t *testing.T) {
 	}
 }
 
-// guardianScriptLLM replays scripted guardian verdicts. pkg/safety has its own
-// copy for the reviewer's own tests; this one serves the Runner-level tests
-// that check how the guardian is wired in, and the two packages' test binaries
-// are independent.
-type guardianScriptLLM struct {
-	outputs []string
-	err     error
-	calls   int
-	tools   [][]*llm.Tool
-	prompts []string
-}
-
-func (g *guardianScriptLLM) Execute(_ context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
-	g.calls++
-	g.tools = append(g.tools, tools)
-	for _, m := range messages {
-		g.prompts = append(g.prompts, m.TextContent())
-	}
-	if g.err != nil {
-		return nil, g.err
-	}
-	out := ""
-	if len(g.outputs) > 0 {
-		out = g.outputs[0]
-		if len(g.outputs) > 1 {
-			g.outputs = g.outputs[1:]
-		}
-	}
-	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text(out)})
-	return &llm.Result{Message: &msg}, nil
-}
-
-func TestStrictAutoReviewForcesGuardianUnderNeverPolicy(t *testing.T) {
-	client := &guardianScriptLLM{outputs: []string{`{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"approved for this turn"}`}}
-	store := safety.NewStore()
-	store.SetApprovalPolicy(safety.ApprovalPolicy{Mode: safety.ApprovalNever})
-	store.EnableStrictAutoReview("run-strict")
-	store.SetSandboxAvailable(true)
-	permRT := safety.NewRuntimeWithStore(store)
-	permRT.SetGuardian(client, "")
-	runner := &Runner{Deps: (&Deps{}).WithConfig(&appcfg.Root{}), permRuntime: permRT}
-	ctx := toolpkg.WithRunID(context.Background(), "run-strict")
-	_, pending, err := runner.actionHook(ctx, "shell", map[string]any{"command": "make release"})
-	if err != nil || pending {
-		t.Fatalf("strict review should allow the reviewed command: pending=%v err=%v", pending, err)
-	}
-	if client.calls != 1 {
-		t.Fatalf("guardian calls=%d want=1", client.calls)
-	}
-
-	_, pending, err = runner.actionHook(toolpkg.WithRunID(context.Background(), "another-run"), "shell", map[string]any{"command": "make release"})
-	if err != nil || pending {
-		t.Fatalf("never policy should run sandboxed shell without prompting: pending=%v err=%v", pending, err)
-	}
-	if client.calls != 1 {
-		t.Fatal("strict review must remain scoped to its run")
-	}
-}
-
 // A subagent's sidechain log is written under the factory's workspace root, and
 // the SubagentStop hook is later handed a path rebuilt from the hook runtime's
 // root. Both are seeded from Runner.workspaceRoot, and Factory has its own

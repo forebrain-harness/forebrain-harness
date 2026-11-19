@@ -518,9 +518,9 @@ func (s ApprovalService) decidePermissions(ctx context.Context, act *state.Actio
 }
 
 func normalizedPermissionsDecision(act *state.Action, choice string, response *safety.RequestPermissionsResponse) (safety.RequestPermissionsResponse, error) {
-	// The strict auto-review answer is not one of the options the service
-	// offers (plan 203), so a client that sends it is refused like any other
-	// name outside the list rather than quietly downgraded to a plain grant.
+	// Only the two grant decisions the service offers are accepted (plan
+	// 203); a client that sends any other name is refused rather than quietly
+	// downgraded to a plain grant.
 	if choice != "grant_for_turn" && choice != "grant_for_session" {
 		return safety.RequestPermissionsResponse{}, fmt.Errorf("unsupported request_permissions decision %q", choice)
 	}
@@ -536,9 +536,6 @@ func normalizedPermissionsDecision(act *state.Action, choice string, response *s
 	}
 	copy := *response
 	copy.Scope = safety.GrantScopeTurn
-	// No surface offers strict auto review any more, and the answer that asked
-	// for it is refused above; the reviewer path stays as dead code, closed.
-	copy.StrictAutoReview = false
 	if choice == "grant_for_session" {
 		copy.Scope = safety.GrantScopeSession
 	}
