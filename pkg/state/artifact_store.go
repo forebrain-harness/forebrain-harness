@@ -148,11 +148,6 @@ SELECT ` + artifactColumns + `
  ORDER BY created_at DESC, row_id DESC
  LIMIT 1`,
 	}
-	artifactCountByOriginSQL = dbx.SQL{
-		SQLite:   `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=? AND agent_id=? AND origin=?`,
-		MySQL:    `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=? AND agent_id=? AND origin=?`,
-		Postgres: `SELECT COUNT(*) FROM fb_artifacts WHERE session_id=$1 AND agent_id=$2 AND origin=$3`,
-	}
 )
 
 // AddArtifact registers one delivered file under this agent's conversation.
@@ -290,10 +285,9 @@ func scanArtifact(rows *sql.Rows) (Artifact, error) {
 }
 
 // LatestArtifactByPath is the newest row a path already has in this
-// conversation: the version check the turn-end deliverable top-up and the
-// batch outputs scan both make before registering a path again, so unchanged
-// bytes are not re-delivered under a new run. A path never delivered reads
-// as found=false.
+// conversation: the version check the batch outputs scan makes before
+// registering a path again, so unchanged bytes are not re-delivered under a
+// new run. A path never delivered reads as found=false.
 func (s *SessionStore) LatestArtifactByPath(ctx context.Context, sessionID, path string) (Artifact, bool, error) {
 	if s == nil || s.db == nil {
 		return Artifact{}, false, nil
@@ -315,60 +309,4 @@ func (s *SessionStore) LatestArtifactByPath(ctx context.Context, sessionID, path
 		return Artifact{}, false, err
 	}
 	return a, true, nil
-}
-
-// CountArtifactsByOrigin counts a conversation's delivered rows of one
-// origin. It is the batch outputs scan's trigger: the scan fires when the
-// model presented nothing, not when the conversation holds no rows at all —
-// a continue's earlier fallback rows must not suppress it.
-func (s *SessionStore) CountArtifactsByOrigin(ctx context.Context, sessionID, origin string) (int, error) {
-	if s == nil || s.db == nil {
-		return 0, nil
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return 0, nil
-	}
-	var n int
-	if err := s.db.QueryRowContext(ctx, artifactCountByOriginSQL.For(dbx.DialectOf(s.db)),
-		sessionID, s.AgentID(), strings.TrimSpace(origin)).Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
-}
-
-// SessionProjectScope resolves the conversation's delivery scope in one read
-// pair: the project type the conversation froze at birth (a session this
-// agent does not own, or one that does not exist, reads as coding — the
-// behaviour of every conversation before types existed) and the root of the
-// project it belongs to (empty when it has none). The turn-end deliverable
-// top-up reads this to know which files are the conversation's to deliver
-// (pkg/turn/deliverables.go); it reuses the reads the project and file
-// stores already publish, so the scope is the same one every other surface
-// resolves.
-func (s *SessionStore) SessionProjectScope(ctx context.Context, sessionID string) (projectType, projectRoot string, err error) {
-	if s == nil || s.db == nil {
-		return ProjectTypeCoding, "", nil
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return ProjectTypeCoding, "", nil
-	}
-	if err := s.db.QueryRowContext(ctx, projectSessionTypeSQL.For(dbx.DialectOf(s.db)),
-		sessionID, s.AgentID()).Scan(&projectType); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ProjectTypeCoding, "", nil
-		}
-		return "", "", err
-	}
-	if err := s.db.QueryRowContext(ctx, fileProjectRootSQL.For(dbx.DialectOf(s.db)),
-		sessionID).Scan(&projectRoot); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// A conversation with no project (a primary-agent workshop task)
-			// names no root to deliver inside.
-			return NormalizeProjectType(projectType), "", nil
-		}
-		return "", "", err
-	}
-	return NormalizeProjectType(projectType), strings.TrimSpace(projectRoot), nil
 }
