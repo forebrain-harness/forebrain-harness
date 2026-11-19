@@ -61,10 +61,6 @@ type BatchTaskStore interface {
 type BatchArtifactStore interface {
 	ListArtifactsPage(ctx context.Context, sessionID string, limit, offset int) ([]state.Artifact, int, error)
 	AddArtifact(ctx context.Context, a state.Artifact) (state.Artifact, error)
-	// CountArtifactsByOrigin is the outputs scan's trigger read: the scan
-	// fires when the model presented nothing, so the count it wants is the
-	// model-origin one, not the conversation's whole holding.
-	CountArtifactsByOrigin(ctx context.Context, sessionID, origin string) (int, error)
 	// LatestArtifactByPath is the session-level version check that keeps an
 	// unchanged output from being re-registered under a continue's new run.
 	LatestArtifactByPath(ctx context.Context, sessionID, path string) (state.Artifact, bool, error)
@@ -333,19 +329,15 @@ func (s *Service) endBatchExecution(ctx context.Context, req TurnRequest, runID,
 	})
 	var artifacts []state.Artifact
 	if s.batchArtifacts != nil {
-		// The scan's trigger is "the model presented nothing" — the
-		// model-origin count is zero — not "the conversation holds no rows":
-		// a continue's earlier fallback rows must not suppress the scan of a
-		// turn whose model delivered nothing again (plan 324, deliberate
-		// change from the total==0 trigger).
-		modelCount, err := s.batchArtifacts.CountArtifactsByOrigin(ctx, sid, state.ArtifactOriginModel)
-		if err != nil {
-			slog.ErrorContext(ctx, "batch artifacts read", "session", sid, "err", err)
-		} else if modelCount == 0 {
-			// Nothing was presented, so the outputs folder is the deliverable:
-			// a task that produced files must not look like it produced none.
-			s.collectBatchFallbackArtifacts(ctx, sid, runID, exec.Workspace)
-		}
+		// The outputs folder is the protocol location the batch prompt names
+		// (write every deliverable into outputs/). Every execution end reads
+		// it — completed, failed, stopped, approval_required — so a turn that
+		// presented some and missed some still delivers the rest, and a task
+		// that produced files never looks like it produced none. The scan's
+		// session-level sha check keeps an unchanged output from being
+		// registered twice. Batch is an integration surface, not an end user:
+		// this harness rule is the owner's explicit exemption (2026-11-19).
+		s.collectBatchFallbackArtifacts(ctx, sid, runID, exec.Workspace)
 		artifacts, _, _ = s.batchArtifacts.ListArtifactsPage(ctx, sid, batchArtifactListLimit, 0)
 	}
 	if s.batchOnEnd != nil {
