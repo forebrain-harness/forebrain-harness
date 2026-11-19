@@ -2187,16 +2187,17 @@ func TestSetPrimaryModelNoOpForSameSelection(t *testing.T) {
 
 func TestSetPrimaryModelRollsBackOnLoadFailure(t *testing.T) {
 	key := "${" + primaryModelTestKeyEnv + "}"
-	// gpt-b resolves but cannot build (a provider no catalog knows, so no
-	// environment variable can rescue it), while the pinned gpt-a stays
+	// gpt-b resolves but cannot build because it has no API key — a
+	// completeness gap no environment variable can fill (plan 268: a stored
+	// row is used exactly as it was stored) — while the pinned gpt-a stays
 	// buildable.
 	cfg := newPrimaryModelRoot(
 		primaryModelEntry("openai", "gpt-a", key, "http://a.test/v1", nil),
-		primaryModelEntry("unknownprov", "gpt-b", "k", "http://b.test/v1", nil),
+		primaryModelEntry("openai", "gpt-b", "", "http://b.test/v1", nil),
 	)
 	r := loadPrimaryModelRunner(t, cfg)
 
-	err := r.SetPrimaryModel("unknownprov", "gpt-b", nil)
+	err := r.SetPrimaryModel("openai", "gpt-b", nil)
 	if err == nil {
 		t.Fatal("unbuildable selection returned nil")
 	}
@@ -2235,9 +2236,9 @@ func TestLoadResetsPinWhenAgentChanges(t *testing.T) {
 
 	// A failed agent-boundary rebuild leaves the runner fail-closed rather
 	// than serving the old agent's runtime under the new tenant stores. The
-	// broken entry uses a provider no catalog knows, so no environment
-	// variable can make it build.
-	broken := primaryModelEntry("unknownprov", "gpt-broken", "k", "http://b.test/v1", nil)
+	// broken entry has no API key, so no environment variable can make it
+	// build (completeness, not catalog knowledge).
+	broken := primaryModelEntry("openai", "gpt-broken", "", "http://b.test/v1", nil)
 	cfg.LLMModels = append(cfg.LLMModels, appcfg.LLMModelConfig{
 		ID: "llm-broken", Provider: broken.Provider, Model: broken.Model, APIKey: broken.APIKey, BaseURL: broken.BaseURL,
 	})
