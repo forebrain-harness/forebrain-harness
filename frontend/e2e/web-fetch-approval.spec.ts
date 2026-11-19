@@ -143,7 +143,7 @@ test('a fetch gate hangs on the fetching call and asks about its page', async ({
   const searchCard = page.locator(`[data-testid="pending-approval"][data-action-id="act-e2e-websearch"]`)
   await expect(searchCard).toBeVisible()
   await expect(searchCard).toContainText('要我搜一下公开网络吗？')
-  await expect(searchCard).toContainText('“gateway session cookie” · 最多 5 条')
+  await expect(searchCard).toContainText('“gateway session cookie” 最多 5 条')
   await expect(searchCard).not.toContainText('权限记忆')
   await expect(searchCard).not.toContainText('web_search')
 

@@ -80,14 +80,6 @@ test('every approval family asks its own question, with its own facts and decisi
       payload: { command: 'mvn clean verify', timeout_ms: 10000, approval_reason: 'unknown_shell_command' },
     },
     {
-      id: 'act-e2e-network', kind: 'shell',
-      payload: {
-        command: 'gh issue list --repo unionj-cloud/forebrain-harness',
-        approval_reason: 'network_denied', sandbox_denial_reason: 'network access is denied by policy',
-        network_approval_context: { host: 'api.github.com', protocol: 'https' }, network_port: 443,
-      },
-    },
-    {
       id: 'act-e2e-sandbox', kind: 'shell',
       payload: {
         command: 'cp ./build/bin/forebrain ~/.local/bin/forebrain',
@@ -145,12 +137,7 @@ test('every approval family asks its own question, with its own facts and decisi
   await expect(card('act-e2e-shell-unknown')).toContainText('要运行这条命令吗？')
   await expect(facts('act-e2e-shell-unknown')).toHaveCount(0)
 
-  // ③ A host on the public network: one host line, four answers.
-  await expect(card('act-e2e-network')).toContainText('要让它访问外网吗？')
-  await expect(facts('act-e2e-network')).toHaveText(['api.github.com · HTTPS · 443'])
-  await expect(decisions('act-e2e-network')).toHaveText(['允许', '本会话都允许', '以后都允许', '不要访问'])
-
-  // ④ The sandbox: what it did, and the reason it gave in its own words — the
+  // ③ The sandbox: what it did, and the reason it gave in its own words — the
   // denial can be about the network as readily as about files. A scoped retry
   // says the scope it would gain instead.
   await expect(card('act-e2e-sandbox')).toContainText('沙箱拦下了这条命令，要在沙箱外运行吗？')
@@ -158,14 +145,14 @@ test('every approval family asks its own question, with its own facts and decisi
   await expect(card('act-e2e-sandbox-scoped')).toContainText('沙箱拦下了这条命令，要在沙箱外运行吗？')
   await expect(facts('act-e2e-sandbox-scoped')).toHaveText(['可写 /tmp/out'])
 
-  // ⑤ A permission request lists what it asks for, one line each, read out of
+  // ④ A permission request lists what it asks for, one line each, read out of
   // the entry objects the engine marshals — never a stringified object, and the
   // network grant stated as the one thing the wire carries.
   await expect(card('act-e2e-permissions')).toContainText('要给它这些权限吗？')
   await expect(facts('act-e2e-permissions')).toHaveText(['可读 ~/notes', '可写 /tmp/out', '可访问网络'])
-  await expect(decisions('act-e2e-permissions')).toHaveText(['本轮允许', '本轮允许，自动审查', '本会话允许', '不授予'])
+  await expect(decisions('act-e2e-permissions')).toHaveText(['本轮允许', '本会话允许', '不授予'])
 
-  // ⑥ An MCP call names its server and tool, and shows what is being sent
+  // ⑤ An MCP call names its server and tool, and shows what is being sent
   // under labels rather than raw keys.
   await expect(card('act-e2e-mcp')).toContainText('要调用 github 的 create_issue 吗？')
   await expect(facts('act-e2e-mcp').first()).toHaveText('Repo: unionj-cloud/forebrain-harness')

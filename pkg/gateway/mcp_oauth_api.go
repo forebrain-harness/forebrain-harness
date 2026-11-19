@@ -360,9 +360,18 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 	workspace := ""
 	agents := appcfg.AgentsSection{}
 	agentName := ""
-	if cfg := s.liveCfg(); cfg != nil { // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
-		agents = cfg.Agents
+	// This page lists what the configuration holds — the shared layer and the
+	// agent's own — so it reads the persisted config every other management
+	// read (handleMCPServersV1) uses. The runtime snapshot is composed once at
+	// startup, so a layer written after it (the shared list or the agent's
+	// servers, both written from this same page) never appears in it, and the
+	// tab would list the project's entries alone.
+	persisted, err := s.persistedConfig(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+	agents = persisted.Agents
 	if s.Runner != nil {
 		workspace = s.Runner.WorkspaceRoot
 		agentName = s.Runner.AgentName

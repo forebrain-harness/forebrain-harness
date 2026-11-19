@@ -66,7 +66,7 @@ test('weekly multi-select builds a cron the engine previews', async ({ page }) =
 test('relative one-shot saves as in 30m', async ({ page }) => {
   await signIn(page)
   await openNewJob(page, 'relative brief')
-  await pickOption(page, 'schedule-mode', '一次 · 多久之后')
+  await pickOption(page, 'schedule-mode', '一次 多久之后')
   await page.fill('[data-testid="schedule-in-count"]', '30')
   await pickOption(page, 'schedule-in-unit', '分钟')
   await expect(page.locator('[data-testid="schedule-preview"] code')).toHaveText('in 30m', { timeout: 10_000 })
@@ -89,7 +89,7 @@ test('a schedule below the engine floor refuses to save', async ({ page }) => {
 test('edit switches delivery to record-only', async ({ page }) => {
   await signIn(page)
   await openNewJob(page, 'delivery brief')
-  await pickOption(page, 'schedule-mode', '一次 · 多久之后')
+  await pickOption(page, 'schedule-mode', '一次 多久之后')
   await page.fill('[data-testid="schedule-in-count"]', '30')
   await pickOption(page, 'cron-deliver', '只记录，不投递')
   await saveAndExpectRow(page, 'delivery brief', 'in 30m')
@@ -113,7 +113,7 @@ test('run now shows up in the run history', async ({ page }) => {
   test.info().setTimeout(120_000)
   await signIn(page)
   await openNewJob(page, 'runnow brief')
-  await pickOption(page, 'schedule-mode', '一次 · 多久之后')
+  await pickOption(page, 'schedule-mode', '一次 多久之后')
   await page.fill('[data-testid="schedule-in-count"]', '30')
   await saveAndExpectRow(page, 'runnow brief', 'in 30m')
 

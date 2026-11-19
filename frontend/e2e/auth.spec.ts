@@ -64,7 +64,7 @@ test('sign-in unlocks every page without 401', async ({ page }) => {
   expect(unauthorized()).toEqual([])
   // The surfaces the original 401 report named all answered 200 — the
   // memories page now lists files, which is its request.
-  for (const probe of ['/api/providers', '/api/hooks', '/api/memories/files']) {
+  for (const probe of ['/api/llm-providers', '/api/hooks', '/api/memories/files']) {
     expect(okPaths, `${probe} must have answered 200`).toContain(probe)
   }
   await shot(page, '03-pages-after-signin')

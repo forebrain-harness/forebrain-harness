@@ -223,8 +223,9 @@ test('the project table pages, sorts from its header and pins to the top', async
     await expect(nameHeader).toHaveAttribute('aria-sort', 'ascending')
     // A→Z, and the pinned project is still the first row.
     await expect(rows.first()).toHaveAttribute('data-project-row', pinned.name)
-    await expect(page.locator(`[data-project-row="${seeded[3].name}"] td`).nth(3)).toHaveText('1')
-    await expect(page.locator(`[data-project-row="${seeded[0].name}"] td`).nth(3)).toHaveText('0')
+    // 项目 / 类型 / 根目录 / 描述 / 对话: the count is the fifth cell.
+    await expect(page.locator(`[data-project-row="${seeded[3].name}"] td`).nth(4)).toHaveText('1')
+    await expect(page.locator(`[data-project-row="${seeded[0].name}"] td`).nth(4)).toHaveText('0')
 
     // Z→A turns the column around; the pin still leads.
     await nameHeader.locator('button').click()

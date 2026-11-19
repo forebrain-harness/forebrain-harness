@@ -89,7 +89,7 @@ test('the log page shows a turn, its call and its payloads', async ({ page }) =>
   const latest = times.indexOf([...times].sort().at(-1) ?? '')
   await modelRows.nth(latest).click()
   const drawer = page.locator('[data-testid="log-drawer-title"]')
-  await expect(drawer).toContainText('模型调用 · logs e2e turn')
+  await expect(drawer).toContainText('模型调用 logs e2e turn')
   await expect(page.locator('[data-testid="log-drawer-overview"]')).toBeVisible()
   await page.waitForTimeout(400)
   await shot(page, 'logs-call-overview')

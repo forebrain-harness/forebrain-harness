@@ -56,7 +56,7 @@ async function createOnceJob(page: Page, projectId: string, name: string, prompt
   await expect(page.locator('[data-testid="cron-editor"]')).toBeVisible()
   await page.fill('[data-testid="cron-name"]', name)
   await page.fill('[data-testid="cron-prompt"]', prompt)
-  await pickOption(page, 'schedule-mode', '一次 · 多久之后')
+  await pickOption(page, 'schedule-mode', '一次 多久之后')
   await page.fill('[data-testid="schedule-in-count"]', '30')
   await pickOption(page, 'schedule-in-unit', '分钟')
   await page.click('[data-testid="cron-save"]')

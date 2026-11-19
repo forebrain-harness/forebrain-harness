@@ -187,7 +187,7 @@ test('the workbench keeps the questions it was asked and the plans it wrote', as
   const drawer = page.locator('[data-testid="subagent-drawer"]')
   await expect(drawer).toBeVisible()
   const planTab = drawer.locator('[data-testid="plan-tab-plan:newer-plan.md"]')
-  await expect(planTab).toContainText('计划 · Plan: 网页上的计划历史')
+  await expect(planTab).toContainText('计划 Plan: 网页上的计划历史')
   await expect(planTab.locator('[role="tab"]')).toHaveAttribute('aria-selected', 'true')
 
   // The file, rendered as a document: a heading, its checklist, its section.

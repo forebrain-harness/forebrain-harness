@@ -22,13 +22,12 @@ const (
 	minOptions   = 2
 	maxOptions   = 4
 
-	maxHeaderLen       = 12
 	maxOptionLabelWord = 5
 	maxOtherTextLen    = 2000
 )
 
 // The bounds below mirror validateInput (minQuestions/maxQuestions,
-// minOptions/maxOptions, maxHeaderLen). Declaring them in the schema instead of
+// minOptions/maxOptions). Declaring them in the schema instead of
 // only in prose lets a caller get the shape right on the first attempt rather
 // than through a rejected call.
 
@@ -39,7 +38,7 @@ type Input struct {
 
 // Question defines a single user-facing question.
 type Question struct {
-	Header      string   `json:"header" jsonschema:"minLength=1,maxLength=12" jsonschema_description:"Very short label (max 12 chars). Must be unique across questions."`
+	Header      string   `json:"header" jsonschema:"minLength=1" jsonschema_description:"Short label. Must be unique across questions."`
 	Question    string   `json:"question" jsonschema:"minLength=1" jsonschema_description:"The complete question to ask the user"`
 	MultiSelect bool     `json:"multiSelect" jsonschema:"description=Allow multiple selections"`
 	Options     []Choice `json:"options" jsonschema:"minItems=2,maxItems=4" jsonschema_description:"Available choices (2-4 options)"`
@@ -154,9 +153,6 @@ func validateInput(input *Input) error {
 		header := strings.TrimSpace(q.Header)
 		if header == "" {
 			return ErrHeaderRequired
-		}
-		if utf8.RuneCountInString(header) > maxHeaderLen {
-			return ErrHeaderTooLong
 		}
 
 		normalizedHeader := strings.ToLower(header)
@@ -410,9 +406,6 @@ var ErrTooManyQuestions = errors.New("too many questions")
 
 // ErrHeaderRequired is returned when a question header is empty.
 var ErrHeaderRequired = errors.New("question header required")
-
-// ErrHeaderTooLong is returned when a question header exceeds the maximum length.
-var ErrHeaderTooLong = errors.New("question header too long")
 
 // ErrDuplicateQuestionHeader is returned when duplicated headers are provided.
 var ErrDuplicateQuestionHeader = errors.New("duplicate question header")

@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
 
 import { seedSessionInRoot, signIn, shot } from './support'
@@ -255,9 +256,12 @@ test('handing the plan to another model approves with the row on the wire and th
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  // The launch project is a git repository and the config holds other models,
-  // so the gate offers the hand-off for real (plan 283).
-  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan')
+  // The hand-off needs somewhere to run the executor (a git repository, plan
+  // 283) and the config holds other models: this project is a repository of
+  // its own, so the gate offers the row for real.
+  const repo = mkdtempSync(join(process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan-git-'))
+  execFileSync('git', ['init', '-q', repo])
+  const session = await seedSessionInRoot(page, repo, 'e2e-exit-plan')
   parkExitPlan(session, 'handoff')
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
@@ -303,7 +307,10 @@ test('handing the plan to another model approves with the row on the wire and th
   const answer = execFileSync('sqlite3', ['-cmd', '.timeout 5000', stateDb(),
     `SELECT answer_json FROM fb_actions WHERE id='act-e2e-exitplan-handoff'`], { encoding: 'utf8' })
   expect(answer).toContain('hand_off_model')
-  expect(answer).toMatch(/"id":"llm-[^"]+"/)
+  // The id is the configured row's own (the harness seeds ids like
+  // e2e-textonly), never empty: the engine routes the hand-off by row, not by
+  // provider/model pair.
+  expect(answer).toMatch(/"id":"[^"]+"/)
   expect(answer).toContain('"provider"')
   expect(answer).toContain('"model"')
   expect(answer).toContain('"effort"')

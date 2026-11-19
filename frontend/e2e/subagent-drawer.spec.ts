@@ -185,8 +185,8 @@ test('a dispatched subagent opens beside the conversation, not in place of it', 
   // started on.
   const picker = page.locator('[data-testid="approval-picker"]')
   await page.click('[data-testid="approval-picker"]')
-  await page.click('[data-testid="approval-option-auto"]')
-  await expect(picker).toHaveText('Default')
+  await page.click('[data-testid="approval-option-workspace_write"]')
+  await expect(picker).toHaveText('Workspace write')
   await expect(picker).not.toContainText('Approvals:')
 
   // The right-hand column holds one of the two at a time, and the open tab
@@ -244,7 +244,10 @@ test("a running subagent's own tab carries its working line and its context pill
   await expect(card).toContainText('650k / 1M')
   await expect(card).toContainText('zhipuai/glm-5.3-flash')
   await expect(card.locator('[data-testid="subagent-context-window"]')).toHaveText('1M')
-  await expect(card.locator('button, a')).toHaveCount(0)
+  // The card is a reading, not a control surface: its one control opens the
+  // subagent's context document, and nothing in it links out.
+  await expect(card.locator('button, a')).toHaveCount(1)
+  await expect(card.locator('[data-testid="subagent-view-context"]')).toBeVisible()
   // Every label occupies exactly one line beside its value: the prototype's
   // 76px label column is what its Chinese labels measure, and an English one
   // that is longer ("Context window") widens its own column instead of folding.

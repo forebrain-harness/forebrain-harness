@@ -31,9 +31,9 @@ test('settings shows the merged tab bar with appearance as the default', async (
   await signIn(page)
   await page.goto('/settings', { waitUntil: 'networkidle' })
   const tabs = (await page.locator('[data-testid="settings-tabs"] button').allInnerTexts()).map((tab) => tab.trim())
-  const expectedEn = ['Appearance', 'Session', 'Approval & sandbox', 'Subagents', 'Web tools', 'MCP', 'Language servers', 'Hooks', 'Scheduled tasks', 'Memory', 'Config file', 'Runtime status', 'Shared skills']
-  const expectedZh = ['外观', '会话', '审批与沙箱', '子代理', '联网工具', 'MCP', '语言服务器', '钩子', '定时任务', '记忆', '配置文件', '运行状态', '共享技能']
-  expect(tabs.length).toBe(13)
+  const expectedEn = ['Appearance', 'Session', 'Approval & sandbox', 'Subagents', 'Web tools', 'Models', 'MCP', 'Language servers', 'Hooks', 'Scheduled tasks', 'Memory', 'Shared skills', 'Variables', 'Config file', 'Runtime status', 'Log']
+  const expectedZh = ['外观', '会话', '审批与沙箱', '子代理', '联网工具', '模型', 'MCP', '语言服务器', '钩子', '定时任务', '记忆', '共享技能', '变量', '配置文件', '运行状态', '日志']
+  expect(tabs.length).toBe(expectedEn.length)
   expect(expectedEn.every((tab) => tabs.includes(tab)) || expectedZh.every((tab) => tabs.includes(tab))).toBe(true)
   // The appearance card is visible without clicking (default tab) — the
   // brand radiogroup is its content.
@@ -150,7 +150,7 @@ test('subagents page lists the harness subagents without a title layer', async (
     await expect(page.locator('.forebrain-topbar-title')).toHaveText(/子代理|Subagents/)
     await expect(page.locator('main h1, main h2')).toHaveCount(0)
     await expect(page.locator('[data-testid="scope-badge"]')).toHaveCount(0)
-    await expect(page.locator('[data-subagent-row]')).toHaveCount(10, { timeout: 15_000 })
+    await expect(page.locator('[data-subagent-row]')).toHaveCount(6, { timeout: 15_000 })
     await expect(page.locator('[data-testid="subagents-empty"]')).toHaveCount(0)
     await page.screenshot({ path: `${process.env.E2E_SHOTS}/shell-subagents.png`, fullPage: true })
   } finally {

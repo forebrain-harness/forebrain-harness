@@ -70,7 +70,13 @@ test('sorting and paging across a seeded store', async ({ page }) => {
   await updated.locator('button').click()
   await expect(updated).toHaveAttribute('aria-sort', 'ascending', { timeout: 10_000 })
   await expect(page.locator('[data-testid="pager-page-1"]')).toHaveAttribute('aria-current', 'page')
-  await expect(page.locator('[data-memory-file]').first()).toHaveAttribute('data-memory-file', 'notes/bulk-00.md', { timeout: 10_000 })
+  // The store is shared with the specs that ran before this one, so the oldest
+  // file is whatever the API names — the row must be that file, not a page the
+  // order happens to produce.
+  const oldest = await page.request.get('/api/memories/files?scope=global&sort=updated&order=asc&page=1&page_size=10')
+  const oldestName = String(((await oldest.json()) as { files?: { path: string }[] }).files?.[0]?.path ?? '')
+  expect(oldestName).toBeTruthy()
+  await expect(page.locator('[data-memory-file]').first()).toHaveAttribute('data-memory-file', oldestName, { timeout: 10_000 })
 })
 
 test('search matches content and file names', async ({ page }) => {

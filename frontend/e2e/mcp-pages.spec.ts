@@ -147,7 +147,7 @@ test('settings · MCP lists the shared layer only, and edits one entry in the dr
     await expect(page.locator('[data-testid="table-pager"]')).toHaveCount(1)
     // 全局 b is overridden by 主代理 b: the row stays and says what it is actually
     // doing, instead of claiming an entry that never runs is merely idle.
-    await expect(page.locator('[data-mcp-row="global:b"] .forebrain-badge', { hasText: '未运行 · 被覆盖' })).toBeVisible({
+    await expect(page.locator('[data-mcp-row="global:b"] .forebrain-badge', { hasText: '未运行 被覆盖' })).toBeVisible({
       timeout: 15_000,
     })
     await page.mouse.move(2, 2)
@@ -158,7 +158,7 @@ test('settings · MCP lists the shared layer only, and edits one entry in the dr
     await page.click('[data-testid="mcp-edit-global:b"]')
     const drawer = page.locator('.forebrain-drawer')
     await expect(drawer).toBeVisible()
-    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('编辑 MCP 服务 · b')
+    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('编辑 MCP 服务 b')
     await expect(drawer.locator('[data-testid="mcp-cancel"]')).toBeVisible()
     await expect(drawer.locator('[data-testid="mcp-save"]')).toBeVisible()
     await page.screenshot({ path: join(shots, '074-drawer-edit.png') })
@@ -230,7 +230,7 @@ test('the menu bar names MCP, and its page puts the agent layer first', async ({
     await page.click('[data-testid="mcp-view-global:a"]')
     const drawer = page.locator('.forebrain-drawer')
     await expect(drawer).toBeVisible()
-    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('MCP 服务 · a')
+    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('MCP 服务 a')
     await expect(drawer.locator('input:not([readonly])')).toHaveCount(0)
     await expect(drawer.locator('select:not([disabled])')).toHaveCount(0)
     await expect(drawer.locator('button[role="switch"]:not([disabled])')).toHaveCount(0)
@@ -353,7 +353,7 @@ test('adding a name the project already has keeps the drawer open and says why',
 
     await page.click('[data-testid="mcp-add"]')
     const drawer = page.locator('.forebrain-drawer')
-    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('添加 MCP 服务 · 项目')
+    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('添加 MCP 服务 项目')
     await drawer.locator('[data-testid="mcp-name"]').fill('d')
     await drawer.locator('[data-testid="mcp-save"]').click()
 
@@ -380,7 +380,7 @@ test('a connection test against a dead address says the failure in its own words
 
     await page.click('[data-testid="mcp-add"]')
     const drawer = page.locator('.forebrain-drawer')
-    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('添加 MCP 服务 · 项目')
+    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('添加 MCP 服务 项目')
     await drawer.locator('[data-testid="mcp-name"]').fill('e2e-dead')
     // 类型 is a shadcn select now, so the option is picked rather than
     // selected: the visible label is what the trigger shows.

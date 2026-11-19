@@ -161,7 +161,9 @@ function onSecret(path: string, value: string): void {
   gap: 10px;
   padding: 14px 16px;
   border: 1px solid var(--forebrain-divider);
-  border-radius: 12px;
+  /* A container, so the radius scale's 8px (CARD_RADIUS_UNIFY_8PX): 12px is
+     the composer's alone. */
+  border-radius: 8px;
   background: var(--forebrain-bg-alt);
 }
 /* The unsaved marker: a line down the group's left edge while one row differs

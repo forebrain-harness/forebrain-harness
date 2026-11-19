@@ -242,7 +242,7 @@ test('editing a built-in stores its model, effort and prompt, and the table says
     await page.click('[data-testid="subagent-edit-explore"]')
     const drawer = page.locator('.forebrain-drawer')
     await expect(drawer).toBeVisible()
-    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('编辑内置子代理 · explore')
+    await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('编辑内置子代理 explore')
     await expect(drawer.locator('[data-testid="subagent-prompt"]')).toHaveValue(defaultPrompt)
     await expect(drawer.locator('[data-testid="subagent-overridden"]')).toHaveCount(0)
 
@@ -440,7 +440,7 @@ test('a system subagent opens read-only, with its prompt and only 关闭', async
   await view.click()
   const drawer = page.locator('.forebrain-drawer')
   await expect(drawer).toBeVisible()
-  await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('查看系统子代理 · plan-reviewer')
+  await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('查看系统子代理 plan-reviewer')
   await expect(drawer.locator('.forebrain-drawer-head .forebrain-badge')).toContainText('只读')
   await expect(drawer.locator('[data-testid="subagent-prompt"]')).toHaveAttribute('readonly', '')
   const prompt = await drawer.locator('[data-testid="subagent-prompt"]').inputValue()

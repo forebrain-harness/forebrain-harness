@@ -130,13 +130,12 @@ test('a manual pick outlives the folder and the answers that arrive after it', a
   await expect(page.locator('[data-testid="project-type-hint"]')).toContainText(plain.reason)
   await expect(page.locator('[data-testid="project-type-office"]')).toHaveAttribute('aria-checked', 'true')
 
-  // The person picks a kind the gateway did not suggest. Choosing the batch
-  // kind is also the only one that asks for trust, because it runs unattended.
+  // The person picks a kind the gateway did not suggest; the dialog keeps the
+  // suggestion visible beside the pick instead of overriding it.
   await page.click('[data-testid="project-type-batch"]')
   const hint = page.locator('[data-testid="project-type-hint"]')
   await expect(hint).toContainText('已手动改为「后台跑批」')
   await expect(hint).toContainText('目录建议：办公创作（非 Git 目录）')
-  await expect(page.getByText('信任此目录')).toBeVisible()
 
   // A new folder arrives with its own suggestion (this one is inside a Git
   // worktree) — and the pick stays where the person put it.

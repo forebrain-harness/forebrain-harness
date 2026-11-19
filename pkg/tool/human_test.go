@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestAdapterPassthroughDescriptionPreviewRecommended(t *testing.T) {
@@ -283,5 +284,51 @@ func TestAskRejectsMissingAnswer(t *testing.T) {
 	}})
 	if !errors.Is(err, ErrAnswerRequired) {
 		t.Fatalf("expected ErrAnswerRequired, got %v", err)
+	}
+}
+
+// A question header carries the answer key on every surface, so it is not
+// capped: a header past the old 12-rune limit (and non-ASCII) still validates
+// and round-trips as the answer key.
+func TestAskAcceptsHeaderWithoutLengthLimit(t *testing.T) {
+	t.Parallel()
+
+	header := "选择哪一份实施方案并确认执行顺序"
+	if n := utf8.RuneCountInString(header); n <= 12 {
+		t.Fatalf("header must exceed the removed 12-rune cap, got %d runes", n)
+	}
+	tool, err := New(WithInteractor(func(_ context.Context, in *Input) (map[string]Answer, error) {
+		return map[string]Answer{in.Questions[0].Header: {Selections: []string{"A"}}}, nil
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error creating tool: %v", err)
+	}
+
+	out, err := tool.ask(context.Background(), &Input{Questions: []Question{
+		{
+			Header:   header,
+			Question: "Which plan?",
+			Options:  []Choice{{Label: "A", Description: "first"}, {Label: "B", Description: "second"}},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected ask error: %v", err)
+	}
+	if _, ok := out.Answers[header]; !ok {
+		t.Fatalf("expected answer keyed by the full header %q, got %#v", header, out.Answers)
+	}
+
+	// The schema the model reads must not declare a cap the validator no
+	// longer enforces.
+	props, _ := tool.Tool().InputSchema()["properties"].(map[string]any)
+	questions, _ := props["questions"].(map[string]any)
+	items, _ := questions["items"].(map[string]any)
+	qProps, _ := items["properties"].(map[string]any)
+	headerSchema, ok := qProps["header"].(map[string]any)
+	if !ok {
+		t.Fatalf("header property not found in the tool schema: %#v", tool.Tool().InputSchema())
+	}
+	if limit, capped := headerSchema["maxLength"]; capped {
+		t.Fatalf("header schema still caps its length: %v", limit)
 	}
 }

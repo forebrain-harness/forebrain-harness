@@ -3,7 +3,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { shot, signIn } from './support'
 
 /**
- * Settings · 子代理 · 「/goal 检查模型」(plan 299 §2, §5.2): the one system subagent
+ * Settings · 子代理 · 「/goal 评估模型」(plan 299 §2, §5.2): the one system subagent
  * the settings page configures. The block is the third group of the tab —
  * after the subagent defaults (and after the peer switch where this machine has
  * Claude Code) — and its two rows save through `PATCH /api/settings`.
@@ -80,7 +80,7 @@ test('the goal-check block is the subagents tab’s last group and opens unconfi
   await openBlock(page)
 
   const block = page.locator('[data-group="goal-check-model"]')
-  await expect(block.locator('h3')).toHaveText('/goal 检查模型')
+  await expect(block.locator('h3')).toHaveText('/goal 评估模型')
   // §2: the title carries no explanation under it.
   await expect(block.locator('.gc__head p')).toHaveCount(0)
 
@@ -105,7 +105,8 @@ test('the goal-check block is the subagents tab’s last group and opens unconfi
   await expect(block.locator('[data-goal-check-model]')).toContainText('跟随主代理')
   await expect(block.locator('[data-goal-check-effort]')).toBeDisabled()
   await expect(block.locator('[data-goal-check-effort]')).toHaveValue('')
-  await expect(block.locator('[data-goal-check-hint]')).toHaveCount(0)
+  // The block explains what an unconfigured level needs: pick a model first.
+  await expect(block.locator('[data-goal-check-hint]')).toHaveCount(1)
   await shot(page, 'settings-goal-check-unconfigured')
 })
 
@@ -150,7 +151,7 @@ test('picks a row, stores its id and the live level, then overrides and clears',
 
   // An override is stored as itself, and the hint and the reset link say so.
   await block.locator('[data-goal-check-effort]').selectOption('low')
-  await expect(block.locator('[data-goal-check-hint]')).toHaveText('已改为 低 low，仅影响目标检查子代理')
+  await expect(block.locator('[data-goal-check-hint]')).toHaveText('已改为 低 low，仅影响目标评估子代理')
   await expect(block.locator('[data-goal-check-reset]')).toHaveText('恢复为模型默认')
   await block.locator('[data-goal-check-save]').click()
   await expect(block.locator('[data-goal-check-saved]')).toHaveText('✓ 已保存，下一轮对话生效')
@@ -163,7 +164,7 @@ test('picks a row, stores its id and the live level, then overrides and clears',
   await page.reload({ waitUntil: 'networkidle' })
   await dismissMenu(page)
   await expect(block.locator('[data-goal-check-effort]')).toHaveValue('low')
-  await expect(block.locator('[data-goal-check-hint]')).toHaveText('已改为 低 low，仅影响目标检查子代理')
+  await expect(block.locator('[data-goal-check-hint]')).toHaveText('已改为 低 low，仅影响目标评估子代理')
   await block.locator('[data-goal-check-reset]').click()
   await expect(block.locator('[data-goal-check-effort]')).toHaveValue('high')
   await expect(block.locator('[data-goal-check-hint]')).toHaveText('模型页配置的默认强度：高 high')
@@ -179,7 +180,8 @@ test('picks a row, stores its id and the live level, then overrides and clears',
   await expect(block.locator('[data-goal-check-model]')).toContainText('跟随主代理')
   await expect(block.locator('[data-goal-check-effort]')).toBeDisabled()
   await expect(block.locator('[data-goal-check-effort]')).toHaveValue('')
-  await expect(block.locator('[data-goal-check-hint]')).toHaveCount(0)
+  // The block explains what an unconfigured level needs: pick a model first.
+  await expect(block.locator('[data-goal-check-hint]')).toHaveCount(1)
 
   await block.locator('[data-goal-check-save]').click()
   await expect(block.locator('[data-goal-check-saved]')).toHaveText('✓ 已保存，下一轮对话生效')

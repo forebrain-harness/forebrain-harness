@@ -809,6 +809,80 @@ func TestQuestionOverlayReopenResetsScrollOffset(t *testing.T) {
 	}
 }
 
+// A question header is arbitrary model text and the tab chip is the only place
+// the terminal shows it; that chip row is one logical overlay line, so the
+// paint must fold a header longer than the terminal — including one with no
+// space to break at — onto further rows inside the overlay's width instead of
+// running it off the card.
+func TestQuestionHeaderChipWrapsAtTheTerminalWidth(t *testing.T) {
+	setForcedTermSize(40, 16)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
+
+	out := newApprovalPaintWriter()
+	r := NewRenderer(out, out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+	r.RenderFrame(Frame{Kind: FrameSystem, Title: "sys", Content: "context", Final: true})
+
+	// One header with no break opportunities at all and one CJK phrase: every
+	// terminal width below the header's own must still hold the tab row.
+	headers := []string{
+		"交付方式与修改范围以及验收标准请在此一并确认清楚再继续往下走",
+		"AVeryLongHeaderWithoutAnySpacesToBreakAtAllAVeryLongHeaderWithout",
+	}
+	questions := make([]state.AskQuestion, len(headers))
+	for i, header := range headers {
+		questions[i] = state.AskQuestion{
+			ID:     header,
+			Prompt: fmt.Sprintf("Question %d", i+1),
+			Options: []state.AskOption{
+				{ID: "a", Label: "A"},
+				{ID: "b", Label: "B"},
+			},
+			AllowOther: true,
+		}
+	}
+	payload, err := json.Marshal(state.AskForm{Title: "Pick one", Questions: questions})
+	if err != nil {
+		t.Fatalf("marshal form: %v", err)
+	}
+
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		readEnd.Close()
+		writeEnd.Close()
+	})
+
+	rs := newRawSelector(readEnd, r)
+	overlay, err := newQuestionOverlay(context.Background(), out, rs, turn.ToolApprovalRequest{AskFormJSON: string(payload)})
+	if err != nil {
+		t.Fatalf("newQuestionOverlay: %v", err)
+	}
+	overlay.render()
+
+	width := 40 - viewportRightPadding
+	r.mu.Lock()
+	rows, refs := r.overlayComposerLinesLocked(width)
+	r.mu.Unlock()
+
+	navRows := 0
+	for i, row := range rows {
+		if refs[i].line != 0 {
+			continue
+		}
+		navRows++
+		if got := runewidth.StringWidth(stripAnsi(row)); got > width {
+			t.Fatalf("tab row %d is %d cells wide, wider than the overlay's %d: %q", i, got, width, stripAnsi(row))
+		}
+	}
+	if navRows < 2 {
+		t.Fatalf("a header wider than the terminal must wrap the tab row, got %d row(s)", navRows)
+	}
+}
+
 // TestSelectorInputClickInsertsAtTheClickedPosition drives the modal text input
 // end to end: click into the middle of the value, type, and the character lands
 // where the click was.

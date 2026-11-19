@@ -189,6 +189,8 @@ test('the top bar carries the breadcrumb and 项目设置 is the first tab of on
     'input:project-settings-name',
     'input:project-settings-root:readonly',
     'input:project-settings-description',
+    // 类型 is a button pair (后台跑批 / 助手), not a plain field.
+    'button:project-type-change',
     'input:project-settings-icon',
     'input:project-settings-key:readonly',
     'textarea:project-instructions',
@@ -354,7 +356,7 @@ test('the channel table masks secrets, disables what is unconfigured, and edits 
   // Editing 飞书 writes that one kind; Telegram's configuration survives.
   await page.locator('[data-testid="channel-edit-feishu"]').click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog).toContainText('编辑通道 · 飞书')
+  await expect(dialog).toContainText('编辑通道 飞书')
   await expect(dialog.locator('[data-testid="channel-field-app_secret"]')).toHaveValue('')
   await expect(dialog.locator('[data-testid="channel-secret-hint"]')).toBeVisible()
   await pageShot(page, '075-channel-edit.png')
@@ -385,6 +387,12 @@ test('every project tab is a search box over a table, and none draws a heading',
 
     const toolbar = page.locator('main .forebrain-list-toolbar')
     await expect(toolbar, `${tab} has no toolbar`).toHaveCount(1, { timeout: 20_000 })
+    if (tab === 'mcp' || tab === 'lsp') {
+      // These two tabs open with their own 「始终允许」 switch, which the design
+      // puts at the toolbar's left edge; their search box follows it.
+      await expect(toolbar.locator('[data-testid="project-servers-auto-allow"]')).toBeVisible()
+      continue
+    }
     const firstChild = await toolbar.evaluate((node) => {
       const first = node.firstElementChild as HTMLElement | null
       return first ? `${first.tagName.toLowerCase()}|${(first as HTMLInputElement).type ?? ''}` : ''

@@ -25,7 +25,11 @@
         :data-testid="`ask-tab-${i}`"
         :data-answered="answered(i) ? 'true' : 'false'"
         :class="[
-          'rounded-full border px-2 py-0.5',
+          // A header carries whatever the model wrote, and a tab is the only
+          // place it shows: the chip may shrink under its own content and
+          // break a header with no space in it, so a long one wraps inside
+          // the row instead of running past the card.
+          'min-w-0 max-w-full break-words rounded-full border px-2 py-0.5',
           current === i
             ? 'border-[var(--forebrain-brand-border)] bg-[var(--forebrain-bg-alt)] font-medium text-[var(--forebrain-text)]'
             : answered(i)

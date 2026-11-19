@@ -142,7 +142,7 @@ test('a long call keeps a one-line header; the whole command opens from the eye'
   await expect(page.locator('.tool-card-body').first()).not.toContainText(command)
 
   // The truncated head carries the eye; it opens the command as a document
-  // tab of the drawer, labeled 命令 · <first line>, and the tab's page holds
+  // tab of the drawer, labeled 命令 <first line>, and the tab's page holds
   // the steps of the chain.
   const eye = headers(page).nth(0).locator('[data-testid="tool-show-all"]')
   await expect(eye).toBeVisible()
@@ -151,7 +151,7 @@ test('a long call keeps a one-line header; the whole command opens from the eye'
   await expect(drawer).toBeVisible()
   // (The tab element alone: its close button's testid shares the prefix.)
   const docTab = drawer.locator('.subagent-drawer-tab[data-testid^="doc-tab-"]')
-  await expect(docTab).toContainText(`命令 · ${command.slice(0, 20)}`)
+  await expect(docTab).toContainText(`命令 ${command}`)
   await expect(drawer.locator('[data-testid="tool-doc-command"]')).toBeVisible()
   // The chain reads one step per row: the pipe inside $( ), then the &&.
   await expect(drawer.locator('[data-testid="tool-doc-command"] .step')).toHaveCount(3)
@@ -282,6 +282,57 @@ test('the agent’s questions come one screen at a time, behind tabs', async ({ 
   ])
   await expect(page.locator('[data-testid="pending-question"]')).toHaveCount(0, { timeout: 30_000 })
   await shot(page, 'message-cards-ask-answered')
+})
+
+// A header has no length cap (the tool's schema declares none), and the tab
+// chip is the only place the card shows one. The chip may shrink below its own
+// content and break a header with no space in it, so a long one wraps inside
+// the tab row instead of running past the card's edge.
+test('a header too long for the tab row wraps inside its chip', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const session = await seedProjectSession(page, 'message-cards-ask-long-header')
+  const now = Math.floor(Date.now() / 1000)
+  const actionId = 'act-e2e-cards-ask-long-header'
+  // No spaces anywhere: the worst case for wrapping, and the one that used to
+  // spill out of the card.
+  const header = 'AVeryLongHeaderWithoutAnySpacesToBreakAtAll'.repeat(3)
+  sqlite(`
+    INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at)
+      VALUES('${actionId}', '${session}', 'user_interaction', 'pending', '${sqlJson({
+        questions: [
+          {
+            id: header,
+            header,
+            prompt: '唯一的提问',
+            options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+            allow_multiple: false,
+            allow_other: true,
+          },
+        ],
+      })}', ${now - 60}, ${now - 60});
+  `)
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  const card = page.locator('[data-testid="pending-question"]')
+  await expect(card).toBeVisible()
+
+  const chip = card.locator('[data-testid="ask-tab-0"]')
+  await expect(chip).toContainText(header)
+
+  const nav = card.locator('[data-testid="ask-tabs-nav"]')
+  const chipBox = await chip.boundingBox()
+  const navBox = await nav.boundingBox()
+  if (!chipBox || !navBox) throw new Error('the tab row must be laid out')
+
+  // Inside the row it sits in, wrapping onto more than the one line a chip
+  // takes at 22px — and with nothing clipped inside the chip either.
+  expect(chipBox.x + chipBox.width).toBeLessThanOrEqual(navBox.x + navBox.width + 1)
+  expect(chipBox.height).toBeGreaterThan(30)
+  expect(await chip.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
+  await shot(page, 'message-cards-ask-long-header')
 })
 
 // The card's footer prints Esc; this is Esc, on the real page, through the real
@@ -482,7 +533,7 @@ test('a tool with no card of its own lists its answer, never the JSON it arrived
   await expect(rosterRow).toHaveCount(1)
   await expect(rosterRow).toContainText('proj-99')
   await expect(rosterRow).toContainText('空闲')
-  await expect(rosterRow).toContainText('终端 · 同目录 · 20 分钟前')
+  await expect(rosterRow).toContainText('终端 同目录 20 分钟前')
   await expect(rosterRow.locator('[data-testid="peer-mark"]')).toHaveText('99')
 
   // peer_send is the message that left, and what a busy recipient does with
@@ -653,7 +704,7 @@ test('a shell card shows only its output, and a truncated one opens the whole of
   // The whole output opens as a document tab of the drawer.
   const drawer = page.locator('[data-testid="subagent-drawer"]')
   await expect(drawer).toBeVisible()
-  await expect(drawer.locator('.subagent-drawer-tab[data-testid^="doc-tab-"]')).toContainText('输出 · go vet')
+  await expect(drawer.locator('.subagent-drawer-tab[data-testid^="doc-tab-"]')).toContainText('输出 go vet')
   const doc = drawer.locator('[data-testid="tool-doc-output"]')
   await expect(doc).toBeVisible()
   await expect(doc.locator('pre')).toContainText('log line 40')

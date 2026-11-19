@@ -127,7 +127,7 @@ test('a fanout card carries its tasks, their clocks, and nothing raw', async ({ 
   const rows = page.locator('[data-testid="subagent-task-row"]')
   await expect(rows).toHaveCount(3)
   await expect(rows.nth(0)).toContainText('任务16 migrate 导入')
-  await expect(rows.nth(0).locator('[data-testid="subagent-row-clock"]')).toHaveText(' · 20s')
+  await expect(rows.nth(0).locator('[data-testid="subagent-row-clock"]')).toHaveText('20s')
   await expect(rows.nth(1)).toContainText('任务17 扩展目录')
   const walking = rows.nth(1).locator('[data-testid="subagent-row-clock"]')
   const startedAt = await walking.innerText()
@@ -257,7 +257,7 @@ test('the five lifecycle verbs each draw their own card, none with raw material'
   await shot(page, 'subagent-cards-five')
 })
 
-/** Seconds out of a row clock's " · 20s"-shaped label. */
+/** Seconds out of a row clock's "20s"-shaped label. */
 function secondsOf(clock: string): number {
   const match = /(\d+)h (?:(\d+)m )?(?:(\d+)s)?|(\d+)m (?:(\d+)s)?|(\d+)s/.exec(clock.trim())
   if (!match) throw new Error(`not a clock: ${clock}`)

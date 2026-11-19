@@ -331,7 +331,7 @@ test('a subagent run hangs on the activity line, and its cut head opens in the d
   // (The tab element alone: its close button's testid shares the prefix.)
   const docTab = drawer.locator('.subagent-drawer-tab[data-testid^="doc-tab-"]')
   await expect(docTab).toHaveCount(1)
-  await expect(docTab).toContainText(`命令 · ${command.slice(0, 20)}`)
+  await expect(docTab).toContainText(`命令 ${command}`)
   await expect(drawer.locator('[data-testid="tool-doc-command"]')).toBeVisible()
   await shot(page, 'subagent-conversation-doc-tab')
 })

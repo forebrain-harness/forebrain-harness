@@ -32,8 +32,10 @@ async function createProject(page: Page, name: string): Promise<string> {
   await page.getByRole('textbox', { name: /项目名|Project name/ }).fill(name)
   await page.getByRole('textbox', { name: /绝对路径|absolute path/i }).fill(root)
   await page.click('button:has-text("创建"), button:has-text("Create")')
-  await page.waitForURL(/\/projects\/.+\/overview$/, { timeout: 15_000 })
-  return page.url().match(/\/projects\/([^/]+)\/overview/)![1]
+  // Creating lands on the project's own page; its 项目设置 tab is the nested
+  // /overview route, so both shapes are this helper's answer.
+  await page.waitForURL(/\/projects\/[^/]+(\/overview)?$/, { timeout: 15_000 })
+  return page.url().match(/\/projects\/([^/]+)/)![1]
 }
 
 test('agent rules page creates and edits a bootstrap file', async ({ page }) => {
@@ -160,7 +162,7 @@ test('session picker switches the approval preset', async ({ page }) => {
   // message opens: it is usable, showing the agent default (plan 203).
   const picker = page.locator('[data-testid="approval-picker"]')
   await expect(picker).toBeEnabled()
-  await expect(picker).toContainText(/默认|Default/)
+  await expect(picker).toContainText('Workspace write')
   // Open a conversation (plan 029: every conversation belongs to a project).
   const readOnlySession = await seedProjectSession(page, 'rules-a')
   await page.goto(`/?session=${readOnlySession}`, { waitUntil: 'networkidle' })

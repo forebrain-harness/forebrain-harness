@@ -567,7 +567,7 @@
                     @typed="cancelAutoContinue('')"
                     @escape="cancelAutoContinue('')" />
                 </PromptInputBody>
-                <PromptInputFooter class="!px-2 !pb-2">
+                <PromptInputFooter class="!px-2 !pb-2 flex-wrap">
                   <!-- The composer's own bar, in the prototype's order (:503,
                        gap 8px): on the left the "+", the mode and the approval
                        preset; on the right the context ring, the model, the
@@ -575,8 +575,11 @@
                        or not its data has landed yet, so the bar keeps its
                        shape from the first frame — the effort chip is the one
                        exception: once the data says the model has no levels,
-                       it is not drawn. -->
-                  <div class="flex min-w-0 flex-1 items-center gap-2">
+                       it is not drawn. The row wraps because a narrow composer
+                       (the subagent drawer is open) cannot hold two groups
+                       side by side: they used to overlap, and the model chip
+                       took the clicks meant for the approval preset. -->
+                  <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
                     <ComposerPlusMenu :disabled="composerLocked" @insert="insertPlusCommand" />
                     <ModeChip :mode="mode" :disabled="isStreaming || composerLocked" @select="selectMode" />
                     <ApprovalPresetPicker ref="approvalPickerRef" :session-id="sessionId" />

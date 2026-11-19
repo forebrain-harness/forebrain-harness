@@ -160,7 +160,10 @@ test('只要计划 keeps the plan as the turn\'s deliverable and runs nothing', 
   // One row, and it is the plan file (the card titles itself by the plan's own
   // heading, so the row's name is the attribute the file is known by).
   await expect(reloaded.locator('[data-testid="artifact-card"]')).toHaveCount(1)
-  await expect(reloaded.locator('[data-testid="artifact-card"] b')).toHaveAttribute('title', 'plan.md')
+  // The row is titled by the location the file is known by (owner 2026-11-19):
+  // the displayed path, of which plan.md is the last segment.
+  const title = await reloaded.locator('[data-testid="artifact-card"] b').getAttribute('title')
+  expect(title?.endsWith('/plan.md') || title === 'plan.md').toBe(true)
 
   // A plan is readable in the drawer: the markdown preview is the plan.
   await card.locator('[data-testid="artifact-preview"]').click()
