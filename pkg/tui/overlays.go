@@ -5741,9 +5741,163 @@ func (s *rawSelector) Secret(label string, defaultValue string) (string, bool, e
 
 // InputActions is Input with footer actions (plan 326 D1): the actions ride
 // the footer beside the confirm keys and fire on their own keys — the edit
-// view's Default on Ctrl+U — instead of interrupting the field.
+// view's Default on Ctrl+U — instead of interrupting the field. With
+// Multiline set it is the textarea instead (plan 328 D2).
 func (s *rawSelector) InputActions(label string, defaultValue string, opts ActionOptions) (InputResult, error) {
+	if opts.Multiline {
+		return s.inputMultiline(label, defaultValue, opts)
+	}
 	return s.input(label, defaultValue, false, opts)
+}
+
+// inputMultiline is the editor a multiline setting opens (plan 328 D2, the
+// prototype's textarea): plain Enter starts a new line and Ctrl+Enter — the
+// LF every terminal this panel runs in sends for it — saves; Esc leaves with
+// nothing, and the footer's actions keep their own keys. The whole text stays
+// on screen: the lines above the caret are pinned in the head, the caret's
+// own line is the field, the lines below ride the body. The saved text is
+// handed over untrimmed — a prompt's whitespace is part of it.
+func (s *rawSelector) inputMultiline(label string, defaultValue string, opts ActionOptions) (InputResult, error) {
+	release, err := s.acquireComposerInput()
+	if err != nil {
+		return InputResult{}, err
+	}
+	defer release()
+	value := []rune(defaultValue)
+	cursor := len(value)
+	panel := func() slashPanel {
+		return multilinePanel(label, value, cursor, s.escHint(), opts.FooterActions)
+	}
+	s.showPanel(panel())
+	for {
+		key, err := s.readKeyWithMode(true)
+		if err != nil {
+			return InputResult{}, err
+		}
+		if action, fired := inputActionKey(opts.FooterActions, key.kind); fired {
+			return InputResult{Action: action, OK: true}, nil
+		}
+		switch key.kind {
+		case rawKeyNone:
+			continue
+		case rawKeyMouse:
+			s.dispatchMouse(key.mouse)
+			continue
+		case rawKeyEscape, rawKeyCtrlC:
+			return InputResult{}, s.dismissed(key.kind)
+		case rawKeyNewline:
+			return InputResult{Text: string(value), OK: true}, nil
+		case rawKeyEnter:
+			value, cursor = insertRunesAtCursor(value, cursor, []rune{'\n'})
+		case rawKeyUp:
+			cursor = multilineMove(value, cursor, -1)
+		case rawKeyDown:
+			cursor = multilineMove(value, cursor, 1)
+		case rawKeyHome:
+			cursor = multilineLineStart(value, cursor)
+		case rawKeyEnd:
+			cursor = multilineLineEnd(value, cursor)
+		case rawKeyLeft:
+			if cursor > 0 {
+				cursor--
+			}
+		case rawKeyRight:
+			if cursor < len(value) {
+				cursor++
+			}
+		case rawKeyBackspace:
+			value, cursor, _ = deleteRuneBeforeCursor(value, cursor)
+		case rawKeyDelete:
+			value, cursor, _ = deleteRuneAfterCursor(value, cursor)
+		case rawKeyPaste:
+			value, cursor = insertRunesAtCursor(value, cursor, []rune(key.text))
+		case rawKeyRune:
+			value, cursor = insertRunesAtCursor(value, cursor, []rune{key.r})
+		case rawKeySpace:
+			value, cursor = insertRunesAtCursor(value, cursor, []rune{' '})
+		default:
+			continue
+		}
+		s.showPanel(panel())
+	}
+}
+
+// multilineMove moves the caret one line up or down, keeping the column it
+// stands at the way an editor does: a line shorter than the column lands on
+// its end.
+func multilineMove(value []rune, cursor, dir int) int {
+	start := multilineLineStart(value, cursor)
+	col := cursor - start
+	if dir < 0 {
+		if start == 0 {
+			return 0
+		}
+		prevEnd := start - 1
+		prevStart := multilineLineStart(value, prevEnd)
+		return min(prevStart+col, prevEnd)
+	}
+	end := multilineLineEnd(value, cursor)
+	if end >= len(value) {
+		return len(value)
+	}
+	nextEnd := multilineLineEnd(value, end+1)
+	return min(end+1+col, nextEnd)
+}
+
+// multilineLineStart is the index the caret's line begins at: just past the
+// previous newline, or the text's own start.
+func multilineLineStart(value []rune, cursor int) int {
+	for i := cursor - 1; i >= 0; i-- {
+		if value[i] == '\n' {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// multilineLineEnd is the index the caret's line ends at: the newline that
+// closes it, or the text's own end.
+func multilineLineEnd(value []rune, cursor int) int {
+	for i := cursor; i < len(value); i++ {
+		if value[i] == '\n' {
+			return i
+		}
+	}
+	return len(value)
+}
+
+// multilinePanel lays the multiline editor out: the question in the head,
+// the lines above the caret under it, the caret's line as the field, the
+// lines below as the body, and the keys that answer it.
+func multilinePanel(title string, value []rune, cursor int, esc string, actions []FooterAction) slashPanel {
+	b := newPanelBuilder()
+	pickerHead(b, title)
+	start := multilineLineStart(value, cursor)
+	if start > 0 {
+		// Every finished line above the caret, the newline that closed the
+		// last of them aside.
+		for _, line := range strings.Split(string(value[:start-1]), "\n") {
+			b.subtitle(line)
+		}
+	}
+	end := multilineLineEnd(value, cursor)
+	if end < len(value) {
+		for _, line := range strings.Split(string(value[end+1:]), "\n") {
+			b.text(panelIndent, line, nil)
+		}
+	}
+	hint := "Ctrl+Enter to save Enter for a new line " + esc
+	for _, a := range actions {
+		if a.Key != "" {
+			hint += " " + a.Key + " " + a.Label
+		} else {
+			hint += " " + a.Label
+		}
+	}
+	b.hint(hint)
+	p := b.panel()
+	p.field = &panelField{text: value[start:end], cursor: cursor - start}
+	return p
 }
 
 func (s *rawSelector) input(label string, defaultValue string, secret bool, opts ActionOptions) (InputResult, error) {
@@ -6292,6 +6446,11 @@ type ActionOptions struct {
 	// ruled group labels and no filter box. The plain picker keeps its own
 	// head and groups.
 	Page bool
+	// Multiline opens the editor as the prototype's textarea (plan 328 D2):
+	// plain Enter starts a new line and Ctrl+Enter saves. Only a multiline
+	// setting's editor sets it; every other caller keeps the one-line field
+	// whose Enter confirms.
+	Multiline bool
 }
 
 // ActionResult is the outcome of an action-aware picker: the row Enter chose,

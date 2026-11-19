@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -44,10 +45,11 @@ const (
 	configRowDropLabel = "Delete this row"
 	configRowBackLabel = "Back"
 
-	// configFileOnlyNote is the read-only tail every forebrain.yaml section
-	// carries: the panel must not look like an editor for a section it
-	// cannot write.
-	configFileOnlyNote = "This section is edited in forebrain.yaml by hand only; it applies after the process restarts"
+	// configFileOnlyNote is the amber note every forebrain.yaml section
+	// carries (plan 328 D1, prototype html:169): the panel must not look
+	// like an editor for a section it cannot write, and the sentence is the
+	// prototype's own.
+	configFileOnlyNote = "Edit forebrain.yaml manually. Restart the process to apply."
 
 	configBoolOnLabel  = "On"
 	configBoolOffLabel = "Off"
@@ -69,7 +71,12 @@ const (
 	configNewNumberRow = "Number"
 	configNewTrueRow   = "On"
 	configNewFalseRow  = "Off"
-	configNewObjectRow = "Object"
+	configNewListRow   = "List"
+	// configNewBooleanRow is the value-type toggle's boolean row (plan 328
+	// D4): the type is one row, and its value is picked as the two real
+	// ones rather than typed (owner 2026-11-18: a choice lists real values).
+	configNewBooleanRow = "Boolean"
+	configNewObjectRow  = "Object"
 )
 
 // configPanelSnapshot is what the panel reads when it opens: the stored
@@ -543,24 +550,139 @@ func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice 
 	return head
 }
 
-// showFileSection shows a forebrain.yaml section the panel cannot write, with
-// the sentence that says where it is edited and when it takes effect. A file
-// with nothing in it is the prototype's own empty state (plan 327 D4,
-// prototype html:169), not a bare placeholder.
+// showFileSection shows a forebrain.yaml section the panel cannot write
+// (plan 328 D1, prototype html:169): the amber note under the title, the
+// prototype's two views as the page's own toggle rows — the one in force
+// carries the check — and the view's content as the rows under them. The page
+// is read-only: no editor opens from it, and Esc is the way out. A file with
+// nothing in it is the prototype's own empty state (plan 327 D4), shown under
+// the same toggle.
 func (p *configPanel) showFileSection(schema configSectionSchema) {
-	body := strings.TrimSpace(p.file[schema.Name])
-	if body == "" {
-		body = "Not configured\nThis section has no explicit values in forebrain.yaml."
-	}
-	content := body + "\n\n" + configFileOnlyNote
-	if overlay, ok := p.sel.(InfoOverlaySelector); ok {
-		if err := overlay.ShowInfo(schema.Title, content); err == nil {
+	view := 0
+	for {
+		items := []SelectItem{
+			{Label: configFileReadableRow},
+			{Label: configFileYAMLRow},
+		}
+		items[view].Status = configChoiceCheckStatus
+		items = append(items, p.fileSectionRows(schema, view == 1)...)
+		idx, ok, err := selectRichPage(p.sel, schema.Title+"\n"+configFileOnlyNote, items, view)
+		if err != nil {
+			p.printError(err)
 			return
 		}
+		if !ok || idx < 0 || idx > 1 {
+			return
+		}
+		view = idx
 	}
-	if p.renderer != nil {
-		p.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: schema.Name, Content: content, Final: true})
+}
+
+// The file view's two toggle rows (plan 328 D1, prototype html:169).
+const (
+	configFileReadableRow = "Readable view"
+	configFileYAMLRow     = "YAML view"
+	// The facts both sections share: where the settings live and when they
+	// take effect.
+	configFileSourceFact   = "Source"
+	configFileAppliesFact  = "Applies after"
+	configFileSourceValue  = "forebrain.yaml"
+	configFileRestartValue = "Process restart"
+)
+
+// fileSectionRows is the file view's content rows: the readable view's facts
+// as name-and-value rows, or the YAML as numbered lines. Nothing here opens
+// an editor; the rows are the section's own text.
+func (p *configPanel) fileSectionRows(schema configSectionSchema, yamlView bool) []SelectItem {
+	body := strings.TrimSpace(p.file[schema.Name])
+	if body == "" {
+		return []SelectItem{
+			{Label: "Not configured"},
+			{Label: "This section has no explicit values in forebrain.yaml."},
+		}
 	}
+	if yamlView {
+		return configFileYAMLRows(p.file[schema.Name])
+	}
+	return p.configFileFactRows(schema)
+}
+
+// configFileYAMLRows is the YAML view: the file's own lines, numbered, with
+// every value a secret's key holds redacted before it is shown (plan 328 D1
+// and D3: the token reads [redacted], never as it is).
+func configFileYAMLRows(text string) []SelectItem {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	items := make([]SelectItem, 0, len(lines))
+	for i, line := range lines {
+		shown := line
+		if m := configYAMLKeyLine.FindStringSubmatch(line); m != nil && strings.TrimSpace(m[3]) != "" && configIsSecretPath(m[2]) {
+			shown = m[1] + m[2] + ": [redacted]"
+		}
+		items = append(items, SelectItem{Label: strconv.Itoa(i + 1), Description: shown})
+	}
+	return items
+}
+
+// configYAMLKeyLine matches one YAML mapping line's key, so the YAML view can
+// redact a value without re-writing the file's own text.
+var configYAMLKeyLine = regexp.MustCompile(`^(\s*)([A-Za-z_][A-Za-z0-9_-]*):(.*)$`)
+
+// configFileFactRows is the readable view's facts grid (plan 328 D1,
+// prototype html:169): what the section holds in the words a reader needs,
+// then the two facts every file section shares.
+func (p *configPanel) configFileFactRows(schema configSectionSchema) []SelectItem {
+	facts := make([]SelectItem, 0, 5)
+	switch schema.Name {
+	case "gateway":
+		var section struct {
+			Gateway appcfg.Gateway `yaml:"gateway"`
+		}
+		if err := yaml.Unmarshal([]byte(p.file[schema.Name]), &section); err == nil {
+			token := configFileText(section.Gateway.Auth.Token)
+			if token != configSecretUnsetStatus {
+				// The file views redact rather than hide (prototype
+				// html:169): the word says a value is there without
+				// saying anything about it.
+				token = "[redacted]"
+			}
+			facts = append(facts,
+				configFileFact("Listen address", configFileText(section.Gateway.HTTPAddr)),
+				configFileFact("Authentication", "Token authentication"),
+				configFileFact("Token", token),
+			)
+		}
+	case "credentials":
+		var section struct {
+			Credentials appcfg.CredentialsSection `yaml:"credentials"`
+		}
+		if err := yaml.Unmarshal([]byte(p.file[schema.Name]), &section); err == nil {
+			facts = append(facts,
+				configFileFact("ChatGPT sign-in", configFileText(section.Credentials.ChatGPT)),
+				configFileFact("Relative paths", "Resolved from FOREBRAIN_HOME"),
+				configFileFact("Default", "FOREBRAIN_HOME/auth.json"),
+			)
+		}
+	}
+	facts = append(facts,
+		configFileFact(configFileSourceFact, configFileSourceValue),
+		configFileFact(configFileAppliesFact, configFileRestartValue),
+	)
+	return facts
+}
+
+// configFileFact is one fact row: the name in the label column, the value in
+// the row's own right-hand track.
+func configFileFact(label, value string) SelectItem {
+	return SelectItem{Label: label, Value: value}
+}
+
+// configFileText is a fact's value when the section does not say: the
+// prototype's own two words for an absent setting.
+func configFileText(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return configSecretUnsetStatus
+	}
+	return value
 }
 
 // save writes the open page's document as its section's row — the one write
@@ -819,9 +941,11 @@ func (p *configPanel) editNumber(doc any, path []string, field configField, cur 
 // editText takes free text. The editor's footer carries Default (plan 326
 // D4): Ctrl+U unsets the key rather than storing an empty string the loader
 // would read as an empty setting; on a selector without footer actions an
-// empty input is the unset, as it always was.
+// empty input is the unset, as it always was. A multiline field keeps its own
+// whitespace and an empty save is its unset (plan 328 D2): an empty prompt
+// means no prompt, not a prompt that says nothing.
 func (p *configPanel) editText(doc any, path []string, field configField, cur any) (any, string) {
-	text, ok, unset, err := p.editScalar(field, configScalarText(cur))
+	text, ok, unset, err := p.editScalar(field, configScalarInput(cur))
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -831,6 +955,12 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 	}
 	if unset {
 		return p.assign(doc, path, nil, true, field.Label)
+	}
+	if field.Multiline {
+		if strings.TrimSpace(text) == "" {
+			return p.assign(doc, path, nil, true, field.Label)
+		}
+		return p.assign(doc, path, text, false, field.Label)
 	}
 	if text == "" {
 		// Reached only on the action path — a fallback empty is the unset
@@ -845,13 +975,17 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 // ended with: the text Enter saved, or the Default action having been fired
 // (plan 326 D4). On a selector without footer actions the Default action has
 // no key to fire, and an empty input stands for it — the line mode's ladder.
+// A multiline field opens the textarea instead (plan 328 D2): plain Enter
+// starts a new line, Ctrl+Enter saves.
 func (p *configPanel) editScalar(field configField, value string) (text string, ok, unset bool, err error) {
 	actions := p.configActionSelector()
 	if actions == nil {
 		text, ok, err = p.sel.Input(p.fieldPrompt(field), value)
 		return text, ok, strings.TrimSpace(text) == "" && ok, err
 	}
-	res, err := actions.InputActions(p.fieldPrompt(field), value, configEditActions())
+	opts := configEditActions()
+	opts.Multiline = field.Multiline
+	res, err := actions.InputActions(p.fieldPrompt(field), value, opts)
 	if err != nil || !res.OK {
 		return "", false, false, err
 	}
@@ -859,6 +993,31 @@ func (p *configPanel) editScalar(field configField, value string) (text string, 
 		return "", true, true, nil
 	}
 	return res.Text, true, false, nil
+}
+
+// editSecret replaces one secret (plan 328 D3, prototype html:106/118/159).
+// The editor opens empty-handed — a replacement is what it asks for, never
+// the stored value, which would leak through the field — and the interactive
+// selector's Secret field masks what is typed. An empty answer writes
+// nothing: removing the secret is the row's Remove action. A line-based
+// selector reads its answers in the clear, so on one of those the edit is
+// refused outright rather than echoed.
+func (p *configPanel) editSecret(doc any, path []string, field configField, cur any) (any, string) {
+	if p.configActionSelector() == nil {
+		return doc, configSecretLineNotice
+	}
+	replacement, ok, err := p.sel.Secret(field.Label+"\n"+configSecretReplacementLabel, "")
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	if !ok {
+		return doc, ""
+	}
+	if strings.TrimSpace(replacement) == "" {
+		return doc, configSecretEmptyNotice
+	}
+	return p.assign(doc, path, replacement, false, field.Label)
 }
 
 // configEditActions is the edit view's footer: the one action the prototype
@@ -1421,6 +1580,20 @@ const (
 	// (plan 313, scene system-stray-entry): the panel says why before the
 	// loader does, and the loader still judges the save on its own.
 	configSystemSubagentNotice = "Dispatched by the system. Not configurable per agent; remove this entry."
+	// The secret column's two words (plan 328 D3, prototype html:118): a set
+	// value is hidden and an unset one says so.
+	configSecretHiddenStatus = "[hidden]"
+	configSecretUnsetStatus  = "Not set"
+	// configSecretReplacementLabel is the private editor's own name for what
+	// it asks (prototype html:159): a replacement, never the stored value.
+	configSecretReplacementLabel = "Replacement value"
+	// configSecretEmptyNotice answers an empty replacement (plan 328 D3):
+	// nothing was asked for, so nothing is written.
+	configSecretEmptyNotice = "no replacement was given; nothing was written"
+	// configSecretLineNotice refuses the private edit on a selector that
+	// reads its answers in the clear (plan 328 D3): a piped line has no
+	// screen to hide a secret on, so the edit is refused rather than echoed.
+	configSecretLineNotice = "This value is private and cannot be typed on a non-interactive terminal."
 	// configFollowConversation is what a built-in type with no model of its
 	// own runs on, in the prototype's words (plan 313; plan 324 D7 keeps the
 	// sentence and drops the trailing word).
@@ -1550,6 +1723,11 @@ func missingSharedSubagentKeys(doc any, container any) []string {
 // system subagent entry gets (plan 313), carried as the description alone.
 // Everything else keeps configRowDescription, now as the row's value.
 func (p *configPanel) configRowColumns(doc any, path []string, key string, value any) (string, string) {
+	// A row whose place names a secret never shows what it holds (plan 328
+	// D3): the value column answers with the mask, whatever the row's shape.
+	if configIsSecretPath(append(path, key)...) {
+		return "", configSecretDisplay(value, true)
+	}
 	if len(path) == 1 && path[0] == configSharedSubagentsKey {
 		// A registry entry's own description is what a model reads when it
 		// chooses a subagent type, so it is what its row says (plan 314).
@@ -1698,6 +1876,12 @@ func (p *configPanel) rowsPrompt(field configField, keys []string, notice string
 func (p *configPanel) editRow(doc any, path []string, key string, field configField) (any, string) {
 	rowPath := configJoinPath(path, key)
 	value, _ := configLookupValue(doc, rowPath)
+	// A scalar row at a secret's place never opens the plain text editor
+	// (plan 328 D3): its editor asks for a replacement instead, empty-handed,
+	// so the stored value is never handed to a field that would show it.
+	if !configIsContainer(value) && configIsSecretPath(rowPath...) {
+		return p.editSecret(doc, rowPath, field, value)
+	}
 	if agentSubagentsPath(path) {
 		if name := sharedRowName(doc, key, value); name != "" {
 			container, _ := configLookupValue(doc, path)
@@ -1721,8 +1905,12 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 	if container {
 		editLabel = configRowOpenLabel
 	}
+	rowDescription := configRowDescription(value)
+	if configIsSecretPath(rowPath...) {
+		rowDescription = configSecretDisplay(value, true)
+	}
 	items := []SelectItem{
-		{Label: editLabel, Description: configRowDescription(value)},
+		{Label: editLabel, Description: rowDescription},
 		{Label: configRowDropLabel, Description: "Removes it from this level"},
 	}
 	if p.configActionSelector() == nil {
@@ -1753,16 +1941,15 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 }
 
 // confirmRemoveRow asks before any removal (plan 326 D5): the heading names
-// the row and shows what it holds — masked when the field is a secret — and
-// the rows are Remove item and Keep item with Keep preselected, so Enter
-// alone changes nothing. Esc keeps the row too.
+// the row and shows what it holds — hidden whole when the field is a secret
+// (plan 328 D3: no characters of one are ever on the page) — and the rows are
+// Remove item and Keep item with Keep preselected, so Enter alone changes
+// nothing. Esc keeps the row too.
 func (p *configPanel) confirmRemoveRow(label string, doc any, rowPath []string, field configField) bool {
 	value, _ := configLookupValue(doc, rowPath)
 	preview := configRowDescription(value)
-	if field.Secret {
-		if text, ok := value.(string); ok {
-			preview = string(maskSecret([]rune(text)))
-		}
+	if field.Secret || configIsSecretPath(rowPath...) {
+		preview = configSecretDisplay(value, true)
 	}
 	items := []SelectItem{
 		{Label: configRemoveConfirmLabel},
@@ -2082,6 +2269,11 @@ func (p *configPanel) openTemplateField(doc any, rowPath []string, field configF
 	if field.Kind == configFieldRows || configIsContainer(cur) {
 		return p.editRows(doc, path, field)
 	}
+	// A scalar field at a secret's place is asked for the private way (plan
+	// 328 D3): the plain editor would open on the stored value.
+	if field.Secret || configIsSecretPath(path...) {
+		return p.editSecret(doc, path, field, cur)
+	}
 	switch field.Kind {
 	case configFieldBool3:
 		return p.editBool3(doc, path, field, cur)
@@ -2256,6 +2448,12 @@ func (p *configPanel) editRowValue(doc any, rowPath []string, field configField,
 	if model, ok := configModelFieldAt(p.section, rowPath); ok {
 		return p.editModel(doc, rowPath, model, cur)
 	}
+	// A secret's replacement is asked for the same way at the generic row
+	// (plan 328 D3): the type menu would open a plain text editor on the
+	// stored value.
+	if configIsSecretPath(rowPath...) {
+		return p.editSecret(doc, rowPath, field, cur)
+	}
 	value, _, ok, err := p.chooseNewValue(field.Label, cur)
 	if err != nil {
 		p.printError(err)
@@ -2313,7 +2511,9 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 	}
 	key := ""
 	if !list {
-		name, ok, err := p.sel.Input(field.Label+" key of the new row", "")
+		// The add view's own copy (plan 328 D4, prototype html:160): the
+		// heading names the page it adds to, and the key is a key.
+		name, ok, err := p.sel.Input("Add to "+field.Label+"\nKey", "")
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -2323,11 +2523,11 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		}
 		key = strings.TrimSpace(name)
 		if key == "" {
-			return doc, "the key may not be empty; nothing was written"
+			return doc, "A key is required."
 		}
 		if rows, isMap := container.(map[string]any); isMap {
 			if _, dup := rows[key]; dup {
-				return doc, fmt.Sprintf("%q already exists", key)
+				return doc, "That key already exists. Choose a different key."
 			}
 		}
 	}
@@ -2348,6 +2548,12 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		key = strconv.Itoa(len(rows))
 	}
 	if template := configTemplateFor(p.section, childPath); template == configTemplatePath || (template == "" && configScalarRowTemplate(p.section, childPath) == configTemplateString) {
+		// A new row at a secret's place is asked for the private way (plan
+		// 328 D3): the value typed into a plain field would read back off
+		// the screen. Map rows only — a list's append is not a path yet.
+		if !list && configIsSecretPath(childPath...) {
+			return p.editSecret(doc, childPath, field, nil)
+		}
 		text, ok, err := p.sel.Input(p.fieldPrompt(field), "")
 		if err != nil {
 			p.printError(err)
@@ -2435,17 +2641,21 @@ func (p *configPanel) addSharedSubagent(doc any, path []string, field configFiel
 }
 
 // addPrimaryAgent creates one primary agent the way the prototype's create-agent
-// scene does (plan 313): an id and an optional display name, then the agent shape
-// the runtime needs — primary, no MCP servers of its own, no subagents yet — and
-// the new agent's own page, opened with the guidance that says what to do next.
+// scene does (plan 313, copy plan 328 D4, prototype html:161): an id and an
+// optional display name, then the agent shape the runtime needs — primary, no
+// MCP servers of its own, no subagents yet — and the new agent's own page,
+// opened with the guidance that says what to do next.
 //
-// The two refusals are the ones this page owes the user: an id the loader would
-// reject, and an id naming a built-in subagent type. The latter would land a
-// definition IsEffectivePrimaryAgent never treats as a primary agent, because
-// that key is the type's install-wide default — so it is refused here and on the
-// gateway's create endpoint alike.
+// The three refusals are the ones this page owes the user: an id the loader
+// would reject, an id naming a built-in subagent type, and a duplicate key.
+// The id's rule is the loader's own (plan 328 D4): it takes underscores as
+// well as the prototype's letters, numbers and hyphens, and the help says so —
+// the loader is the authority and stays out of scope here. The latter guard
+// exists because that key is the type's install-wide default, so a definition
+// under it is one IsEffectivePrimaryAgent never treats as a primary agent;
+// it is refused here and on the gateway's create endpoint alike.
 func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField, container any) (any, string) {
-	name, ok, err := p.sel.Input("Agent id of the new primary agent", "")
+	name, ok, err := p.sel.Input("New primary agent\nAgent ID\nLowercase letters, numbers, hyphens or underscores. The ID becomes the configuration key.", "")
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -2455,20 +2665,20 @@ func (p *configPanel) addPrimaryAgent(doc any, path []string, field configField,
 	}
 	key := strings.TrimSpace(name)
 	if key == "" {
-		return doc, "the key may not be empty; nothing was written"
+		return doc, "A key is required."
 	}
 	if !appcfg.ValidPrimaryAgentID(key) {
-		return doc, "use a lowercase agent id: letters, digits, hyphens or underscores, starting with a letter"
+		return doc, "Use a lowercase agent ID with letters, numbers, hyphens or underscores, starting with a letter."
 	}
 	if appcfg.IsBuiltInSubagentDefinition(key) {
 		return doc, fmt.Sprintf("%q names a built-in subagent type, not a primary agent; choose a different id", key)
 	}
 	if rows, isMap := container.(map[string]any); isMap {
 		if _, dup := rows[key]; dup {
-			return doc, fmt.Sprintf("%q already exists", key)
+			return doc, "That key already exists. Choose a different key."
 		}
 	}
-	display, ok, err := p.sel.Input("Display name (empty uses the title-cased id)", "")
+	display, ok, err := p.sel.Input("New primary agent\nDisplay name\nLeave empty to use the title-cased ID. The new agent starts as a primary agent with no provider list; pick its default model from the global model table.", "")
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -2691,54 +2901,72 @@ func configTitleCase(id string) string {
 }
 
 // chooseNewValue asks what a new (or replaced) value is, and returns it with
-// whether the caller should open it for editing.
+// whether the caller should open it for editing. The value-type toggle is the
+// prototype's five (plan 328 D4, html:160): text, number, boolean, object,
+// list. A boolean's value is picked as the two real ones rather than typed
+// (owner 2026-11-18: a choice lists real values), and a number takes decimals
+// the way the prototype's generic editor does.
 func (p *configPanel) chooseNewValue(label string, cur any) (any, bool, bool, error) {
 	items := []SelectItem{
 		{Label: configNewTextRow, Description: "String"},
-		{Label: configNewNumberRow, Description: "Integer"},
-		{Label: configNewTrueRow, Description: "Boolean true"},
-		{Label: configNewFalseRow, Description: "Boolean false"},
+		{Label: configNewNumberRow, Description: "Number"},
+		{Label: configNewBooleanRow, Description: "True or false"},
 		{Label: configNewObjectRow, Description: "Empty object; open it to edit"},
+		{Label: configNewListRow, Description: "Empty list; open it to edit"},
 	}
 	defaultIdx := 0
-	switch value := cur.(type) {
+	switch cur.(type) {
 	case bool:
-		defaultIdx = 3
-		if value {
-			defaultIdx = 2
-		}
+		defaultIdx = 2
 	case float64, int, int64, json.Number:
 		defaultIdx = 1
 	case map[string]any:
+		defaultIdx = 3
+	case []any:
 		defaultIdx = 4
 	}
-	idx, ok, err := selectRichPage(p.sel, label+"\nWhat type is this row's value?", items, defaultIdx)
+	idx, ok, err := selectRichPage(p.sel, label+"\nValue type", items, defaultIdx)
 	if err != nil || !ok {
 		return nil, false, false, err
 	}
 	switch idx {
 	case 0:
-		text, entered, err := p.sel.Input(label+" value", configScalarText(cur))
+		text, entered, err := p.sel.Input(label+"\nValue", configScalarInput(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}
 		return text, false, true, nil
 	case 1:
-		text, entered, err := p.sel.Input(label+" integer", configScalarInput(cur))
+		text, entered, err := p.sel.Input(label+"\nValue", configScalarInput(cur))
 		if err != nil || !entered {
 			return nil, false, false, err
 		}
-		value, convErr := strconv.Atoi(strings.TrimSpace(text))
+		// The generic number takes decimals (plan 328 D4, prototype
+		// html:125): an editor's own bounds are the descriptor's business,
+		// this row has none.
+		value, convErr := strconv.ParseFloat(strings.TrimSpace(text), 64)
 		if convErr != nil {
-			return nil, false, false, fmt.Errorf("%q is not an integer", strings.TrimSpace(text))
+			return nil, false, false, fmt.Errorf("Enter a valid number.")
 		}
 		return value, false, true, nil
 	case 2:
-		return true, false, true, nil
+		boolItems := []SelectItem{
+			{Label: configNewTrueRow, Description: "Boolean true"},
+			{Label: configNewFalseRow, Description: "Boolean false"},
+		}
+		boolIdx := 0
+		if boolean, isBool := cur.(bool); isBool && !boolean {
+			boolIdx = 1
+		}
+		picked, ok, err := selectRichPage(p.sel, label+"\nValue", boolItems, boolIdx)
+		if err != nil || !ok {
+			return nil, false, false, err
+		}
+		return picked == 0, false, true, nil
 	case 3:
-		return false, false, true, nil
-	default:
 		return map[string]any{}, true, true, nil
+	default:
+		return []any{}, true, true, nil
 	}
 }
 
@@ -2970,6 +3198,12 @@ func configStoredEffort(value any) string {
 // bare word alone when the prototype gives the field no default of its own —
 // and a stored number carries the unit it is counted in (html:118).
 func configFieldValueText(field configField, value any, exists bool) string {
+	// A secret is never the value the column shows (plan 328 D3): the field's
+	// own flag, or its place in the document naming one, answers first —
+	// before any default an unset setting would read as.
+	if field.Secret || configIsSecretPath(field.Path) {
+		return configSecretDisplay(value, exists)
+	}
 	if configIsContainer(value) {
 		return configContainerText(value)
 	}
@@ -3074,7 +3308,10 @@ func configScalarText(value any) string {
 		if strings.TrimSpace(scalar) == "" {
 			return "(empty)"
 		}
-		return scalar
+		// A stored multiline value shows its line breaks as the marker the
+		// prototype's one row carries (plan 328 D2, html:118): the row is one
+		// line, the editor is where the text keeps its shape.
+		return strings.ReplaceAll(scalar, "\n", " ↵ ")
 	case bool:
 		if scalar {
 			return configBoolOnLabel
@@ -3095,6 +3332,8 @@ func configScalarText(value any) string {
 
 // configScalarInput is a scalar as a text field opens on it: empty when the
 // setting is unset, so the field does not carry "unset" as if it were a value.
+// The string is the stored one as it is — the editor, not the row, is where a
+// multiline value keeps its shape, so nothing rendered ever feeds a field.
 func configScalarInput(value any) string {
 	if value == nil {
 		return ""
@@ -3113,4 +3352,31 @@ func configScalarInput(value any) string {
 		return scalar.String()
 	}
 	return ""
+}
+
+// configSecretPathPattern names the places whose values the panel never shows
+// (plan 328 D3, prototype html:106): the prototype's own expression, matched
+// against the dotted path, quirk included — token_url and a headers entry
+// mask the same as token itself.
+var configSecretPathPattern = regexp.MustCompile(`(?i)(api_key|token|secret|password|headers)`)
+
+// configIsSecretPath reports whether a setting's place in the document is one
+// the panel masks. The path's own words decide, the way the prototype's
+// isSecret does; a descriptor's Secret flag is the second half, for the fields
+// a template names.
+func configIsSecretPath(path ...string) bool {
+	return configSecretPathPattern.MatchString(strings.Join(path, "."))
+}
+
+// configSecretDisplay is a secret's value column (plan 328 D3, prototype
+// html:118): a set value reads as hidden and an unset one says so — the value
+// itself is never on the page.
+func configSecretDisplay(value any, exists bool) string {
+	if !exists || value == nil {
+		return configSecretUnsetStatus
+	}
+	if text, ok := value.(string); ok && strings.TrimSpace(text) == "" {
+		return configSecretUnsetStatus
+	}
+	return configSecretHiddenStatus
 }

@@ -127,6 +127,12 @@ type actionPanelSelector struct {
 	opts           []ActionOptions
 	inputLabels    []string
 	inputOpts      []ActionOptions
+	// secretLabels and secretDefaults record the private editor's asks
+	// (plan 328 D3): the label it opened under and the initial value it
+	// was handed, which must be empty — a replacement is asked for, never
+	// the stored secret.
+	secretLabels   []string
+	secretDefaults []string
 }
 
 // An action step answers a footer action when its kind is set, and a row
@@ -191,6 +197,20 @@ func (s *actionPanelSelector) InputActions(label string, defaultValue string, op
 		return InputResult{Action: step.action, OK: step.ok}, step.err
 	}
 	return InputResult{Text: step.value, OK: step.ok}, step.err
+}
+
+// Secret records the private editor's ask, then answers it from the same
+// input steps the action-bearing editors read: only one editor is open at a
+// time, so the two share one queue.
+func (s *actionPanelSelector) Secret(label string, defaultValue string) (string, bool, error) {
+	s.secretLabels = append(s.secretLabels, label)
+	s.secretDefaults = append(s.secretDefaults, defaultValue)
+	if s.inputIdx >= len(s.inputSteps) {
+		return "", false, nil
+	}
+	step := s.inputSteps[s.inputIdx]
+	s.inputIdx++
+	return step.value, step.ok, step.err
 }
 
 // runActionConfigPanel drives the panel with a selector that carries the
@@ -866,24 +886,288 @@ func TestConfigPanelRejectsAnUnknownSectionName(t *testing.T) {
 	}
 }
 
-// A forebrain.yaml section is shown, never edited, and says where it is
-// edited and when it takes effect.
-func TestConfigPanelShowsAFileSectionReadOnly(t *testing.T) {
+// A forebrain.yaml section is shown, never edited, the prototype's way (plan
+// 328 D1, html:169): the amber note under the title, the Readable/YAML toggle
+// as the page's own rows, the readable view's facts, the YAML view's numbered
+// lines — and the gateway token redacted in both. No editor opens from the
+// page, so nothing is ever typed into it.
+func TestConfigPanelFileViewReadableAndYaml(t *testing.T) {
 	session := newConfigPanelSession(nil)
-	session.snapshot.File["gateway"] = "gateway:\n  http_addr: 127.0.0.1:8080\n"
-	selector := &infoPanelSelector{scriptedSelector: &scriptedSelector{}}
-	runConfigPanel(t, session, selector, []richStep{{label: "Gateway", ok: true}, {ok: false}}, nil)
+	session.snapshot.File["gateway"] = "gateway:\n  http_addr: 127.0.0.1:8080\n  auth:\n    token: hunter2-gateway-token\n"
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Gateway", ok: true},
+		{label: configFileYAMLRow, ok: true},
+		{ok: false},
+	}, nil)
 
-	if len(selector.bodies) != 1 {
-		t.Fatalf("expected one read-only overlay, got %d", len(selector.bodies))
+	if len(selector.richItems) < 3 {
+		t.Fatalf("the view pages never opened: %v", selector.richLabels)
 	}
-	body := selector.bodies[0]
-	if !strings.Contains(body, "http_addr: 127.0.0.1:8080") || !strings.Contains(body, configFileOnlyNote) {
-		t.Fatalf("body = %q", body)
+	// The readable view's facts (prototype html:169), as the page's rows.
+	readable := selector.richItems[1]
+	facts := map[string]string{}
+	for _, item := range readable {
+		facts[item.Label] = item.Value
+	}
+	for label, want := range map[string]string{
+		"Listen address": "127.0.0.1:8080",
+		"Authentication": "Token authentication",
+		"Token":          "[redacted]",
+		"Source":         "forebrain.yaml",
+		"Applies after":  "Process restart",
+	} {
+		if facts[label] != want {
+			t.Fatalf("readable fact %q = %q, want %q; facts: %v", label, facts[label], want, facts)
+		}
+	}
+	// The YAML view: the file's own lines, numbered, with the token's value
+	// redacted. The two toggle rows ride above them.
+	yamlRows := selector.richItems[2]
+	if len(yamlRows) != 6 || yamlRows[0].Label != configFileReadableRow || yamlRows[1].Label != configFileYAMLRow {
+		t.Fatalf("the YAML view numbers its lines; rows: %+v", yamlRows)
+	}
+	if yamlRows[2].Label != "1" || yamlRows[5].Label != "4" {
+		t.Fatalf("the YAML view numbers its lines; rows: %+v", yamlRows)
+	}
+	if yamlRows[5].Description != "    token: [redacted]" {
+		t.Fatalf("the token line = %q, want it redacted", yamlRows[5].Description)
+	}
+	// The note says where the section is edited, and no editor ever opened.
+	if !strings.Contains(pageLabels(selector), configFileOnlyNote) {
+		t.Fatalf("the amber note must head the view: %s", pageLabels(selector))
+	}
+	if selector.inputIdx != 0 {
+		t.Fatalf("a file section has no inputs, got %d", selector.inputIdx)
+	}
+	// The stored token is never on any page, either view.
+	for _, items := range selector.richItems {
+		for _, item := range items {
+			for _, text := range []string{item.Label, item.Description, item.Value, item.Status} {
+				if strings.Contains(text, "hunter2-gateway-token") {
+					t.Fatalf("the gateway token reached the page: %q", text)
+				}
+			}
+		}
+	}
+	for _, label := range selector.richLabels {
+		if strings.Contains(label, "hunter2-gateway-token") {
+			t.Fatalf("the gateway token reached a heading: %q", label)
+		}
 	}
 	if len(session.writes) != 0 {
 		t.Fatalf("a file section must never be written, got %+v", session.writes)
 	}
+}
+
+// An empty forebrain.yaml section keeps the toggle and says the prototype's
+// two lines under it (plan 327 D4, plan 328 D1).
+func TestConfigPanelFileViewEmptySection(t *testing.T) {
+	session := newConfigPanelSession(nil)
+	session.snapshot.File["credentials"] = ""
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Credential files", ok: true},
+		{ok: false},
+	}, nil)
+
+	if len(selector.richItems) < 2 {
+		t.Fatalf("the view page never opened: %v", selector.richLabels)
+	}
+	rows := selector.richItems[1]
+	if len(rows) < 4 || rows[0].Label != configFileReadableRow || rows[1].Label != configFileYAMLRow {
+		t.Fatalf("the toggle must head the page: %+v", rows)
+	}
+	if rows[2].Label != "Not configured" || rows[3].Label != "This section has no explicit values in forebrain.yaml." {
+		t.Fatalf("the empty state = %+v", rows[2:])
+	}
+}
+
+// Secrets never reach a page (plan 328 D3, prototype html:106/118): a value
+// at a masked path — an MCP server's header values, the oauth tokens — reads
+// [hidden] or Not set in every column, the delete preview hides it whole, and
+// the edit asks for a replacement empty-handed. On a line-based selector the
+// private edit is refused rather than echoed.
+func TestConfigPanelMasksSecrets(t *testing.T) {
+	stored := `{"definitions":{"main":{"primary":true,"mcp_servers":[{"name":"api","transport":"http","url":"https://api.internal","headers":{"Authorization":"Bearer sk-live-9999","X-Trace":"t1"}}]}}}`
+	walkToHeaders := []richStep{
+		{label: "Agents", ok: true},
+		{label: "Agent definitions", ok: true},
+		{label: "main", ok: true},
+		{label: "MCP servers", ok: true},
+		{label: "#1", ok: true},
+		{label: "Headers", ok: true},
+	}
+
+	t.Run("the stored value is hidden in every column", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": stored})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, append(append([]richStep{}, walkToHeaders...), richStep{ok: false}, richStep{ok: false}, richStep{ok: false}, richStep{ok: false}, richStep{ok: false}), nil)
+
+		// The Headers field's own row on the server's page: a map at a
+		// masked path is hidden, not counted.
+		server := lastPageHeadlined(selector, "api")
+		if server == nil {
+			t.Fatalf("the server page never opened: %v", selector.richLabels)
+		}
+		if row := findRow(t, server, "Headers"); row.Value != configSecretHiddenStatus {
+			t.Fatalf("the Headers row's value = %q, want %q", row.Value, configSecretHiddenStatus)
+		}
+		// The entries under it: each header's value column.
+		headers := lastPageHeadlined(selector, "Headers")
+		if headers == nil {
+			t.Fatalf("the headers page never opened: %v", selector.richLabels)
+		}
+		if row := findRow(t, headers, "Authorization"); row.Value != configSecretHiddenStatus {
+			t.Fatalf("the Authorization row's value = %q, want %q", row.Value, configSecretHiddenStatus)
+		}
+		if row := findRow(t, headers, "X-Trace"); row.Value != configSecretHiddenStatus {
+			t.Fatalf("the X-Trace row's value = %q, want %q", row.Value, configSecretHiddenStatus)
+		}
+		// And nowhere else did the value slip through.
+		for _, items := range selector.richItems {
+			for _, item := range items {
+				for _, text := range []string{item.Label, item.Description, item.Value, item.Status} {
+					if strings.Contains(text, "sk-live-9999") || strings.Contains(text, "Bearer") {
+						t.Fatalf("a secret reached the page: %q", text)
+					}
+				}
+			}
+		}
+		for _, label := range selector.richLabels {
+			if strings.Contains(label, "sk-live-9999") || strings.Contains(label, "Bearer") {
+				t.Fatalf("a secret reached a heading: %q", label)
+			}
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("browsing writes nothing, got %+v", session.writes)
+		}
+	})
+
+	t.Run("the line mode refuses the private edit", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": stored})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, append(append([]richStep{}, walkToHeaders...),
+			richStep{label: "Authorization", ok: true}, richStep{ok: false}, richStep{ok: false}), nil)
+
+		if !strings.Contains(pageLabels(selector), configSecretLineNotice) {
+			t.Fatalf("the line mode must refuse the private edit: %s", pageLabels(selector))
+		}
+		if selector.inputIdx != 0 {
+			t.Fatalf("the secret was asked in the clear, got %d inputs", selector.inputIdx)
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("a refused edit writes nothing, got %+v", session.writes)
+		}
+	})
+
+	t.Run("the replacement is asked empty-handed and lands", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": stored})
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		// The section list, the agent's page and the server's page are plain
+		// pages (rich steps); the section's fields and the rows pages carry
+		// footer actions (action steps); the private editor answers from the
+		// input steps.
+		runActionConfigPanel(t, session, selector,
+			[]richStep{
+				{label: "Agents", ok: true},
+				{label: "MCP servers", ok: true},
+				{label: "Headers", ok: true},
+			},
+			[]actionStep{
+				{label: "Agent definitions", ok: true},
+				{label: "main", ok: true},
+				{label: "#1", ok: true},
+				{label: "Authorization", ok: true},
+			},
+			[]inputActionStep{{value: "Bearer sk-rotated-4242", ok: true}})
+
+		if len(session.writes) != 1 {
+			t.Fatalf("expected one write, got %d; secrets asked: %v", len(session.writes), selector.secretLabels)
+		}
+		if raw := string(session.writes[0].raw); !strings.Contains(raw, "sk-rotated-4242") {
+			t.Fatalf("the replacement must land, raw = %s", raw)
+		}
+		// The private editor opened empty-handed: the stored secret was
+		// never handed to a field, and neither secret reached a page.
+		if len(selector.secretLabels) != 1 {
+			t.Fatalf("the private editor never opened: %v", selector.richLabels)
+		}
+		if selector.secretDefaults[0] != "" {
+			t.Fatalf("the private editor must start empty, got %q", selector.secretDefaults[0])
+		}
+		if !strings.Contains(selector.secretLabels[0], configSecretReplacementLabel) {
+			t.Fatalf("the private editor's prompt = %q", selector.secretLabels[0])
+		}
+		for _, items := range selector.richItems {
+			for _, item := range items {
+				for _, text := range []string{item.Label, item.Description, item.Value, item.Status} {
+					if strings.Contains(text, "sk-live-9999") || strings.Contains(text, "sk-rotated-4242") {
+						t.Fatalf("a secret reached the page: %q", text)
+					}
+				}
+			}
+		}
+		for _, label := range selector.richLabels {
+			if strings.Contains(label, "sk-live-9999") || strings.Contains(label, "sk-rotated-4242") {
+				t.Fatalf("a secret reached a heading: %q", label)
+			}
+		}
+	})
+}
+
+// The multiline editor saves what was typed, untrimmed, and an empty save is
+// the unset (plan 328 D2): a prompt with no words is no prompt. The editor
+// opens as the prototype's textarea — the capability the interactive selector
+// is asked for — and the single-line ladder keeps working under it.
+func TestConfigPanelMultilineSavesOnCtrlEnter(t *testing.T) {
+	t.Run("the text keeps its whitespace and newlines", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"compact": `{}`})
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		runActionConfigPanel(t, session, selector,
+			[]richStep{{label: "Context compaction", ok: true}, {ok: false}},
+			[]actionStep{{label: "Hand-off prompt", ok: true}, {ok: false}},
+			[]inputActionStep{{value: "  keep my spaces \nand my second line ", ok: true}})
+
+		if len(selector.inputOpts) != 1 || !selector.inputOpts[0].Multiline {
+			t.Fatalf("the multiline field must open the textarea, opts = %+v", selector.inputOpts)
+		}
+		if len(session.writes) != 1 {
+			t.Fatalf("expected one write, got %d", len(session.writes))
+		}
+		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"prompt":"  keep my spaces \nand my second line "`) {
+			t.Fatalf("the multiline value must keep its shape, raw = %s", raw)
+		}
+	})
+
+	t.Run("an empty save unsets the key", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"compact": `{"prompt":"old words"}`})
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		runActionConfigPanel(t, session, selector,
+			[]richStep{{label: "Context compaction", ok: true}, {ok: false}},
+			[]actionStep{{label: "Hand-off prompt", ok: true}, {ok: false}},
+			[]inputActionStep{{value: " ", ok: true}})
+
+		if len(session.writes) != 1 || len(session.writes[0].raw) != 0 {
+			t.Fatalf("an empty multiline save unsets the key, writes = %+v", session.writes)
+		}
+	})
+
+	t.Run("a single-line field still opens the one-line editor", func(t *testing.T) {
+		session := newConfigPanelSession(nil)
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		runActionConfigPanel(t, session, selector,
+			[]richStep{{label: "Scheduled tasks", ok: true}, {ok: false}},
+			[]actionStep{{label: "Keep task records for", ok: true}, {ok: false}},
+			[]inputActionStep{{value: "45", ok: true}})
+
+		if len(selector.inputOpts) != 1 || selector.inputOpts[0].Multiline {
+			t.Fatalf("a single-line field keeps the one-line editor, opts = %+v", selector.inputOpts)
+		}
+		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"retention_days":45`) {
+			t.Fatalf("raw = %s", raw)
+		}
+	})
 }
 
 // A table is edited one row at a time, and a row holding a table opens its own
@@ -1425,7 +1709,14 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 		"configNewNumberRow":       configNewNumberRow,
 		"configNewTrueRow":         configNewTrueRow,
 		"configNewFalseRow":        configNewFalseRow,
+		"configNewBooleanRow":      configNewBooleanRow,
+		"configNewListRow":         configNewListRow,
 		"configNewObjectRow":       configNewObjectRow,
+		"configSecretHiddenStatus": configSecretHiddenStatus,
+		"configSecretUnsetStatus":  configSecretUnsetStatus,
+		"configSecretLineNotice":   configSecretLineNotice,
+		"configFileReadableRow":    configFileReadableRow,
+		"configFileYAMLRow":        configFileYAMLRow,
 	}
 	for name, text := range chrome {
 		check(name, text)
@@ -2125,7 +2416,7 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 			[]selectorInput{{value: "Bad ID", ok: true}},
 			`{"definitions":{"main":{"primary":true}}}`,
 		)
-		if !strings.Contains(pageLabels(selector), "use a lowercase agent id: letters, digits, hyphens or underscores, starting with a letter") {
+		if !strings.Contains(pageLabels(selector), "Use a lowercase agent ID with letters, numbers, hyphens or underscores, starting with a letter.") {
 			t.Fatalf("the id rule must be stated: %s", pageLabels(selector))
 		}
 		if len(session.writes) != 0 {
@@ -2153,7 +2444,7 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 			[]selectorInput{{value: "main", ok: true}},
 			`{"definitions":{"main":{"primary":true}}}`,
 		)
-		if !strings.Contains(pageLabels(selector), `"main" already exists`) {
+		if !strings.Contains(pageLabels(selector), "That key already exists. Choose a different key.") {
 			t.Fatalf("the duplicate refusal must be stated: %s", pageLabels(selector))
 		}
 	})
@@ -2177,7 +2468,7 @@ func TestConfigPanelCreatesAPrimaryAgent(t *testing.T) {
 		)
 		// The guard is keyed on the real path, so the nested add still asks what
 		// type the value is — never for an agent id.
-		if !strings.Contains(pageLabels(selector), "What type is this row's value?") {
+		if !strings.Contains(pageLabels(selector), "Value type") {
 			t.Fatalf("the nested add must keep the type menu: %s", pageLabels(selector))
 		}
 		if len(session.writes) != 1 || !strings.Contains(string(session.writes[0].raw), `"note":"hello"`) {
@@ -2231,14 +2522,15 @@ func TestConfigPanelEmptyStateCopy(t *testing.T) {
 	// A forebrain.yaml section with nothing in it.
 	session = newConfigPanelSession(nil)
 	session.snapshot.File = map[string]string{"gateway": ""}
-	info := &infoPanelSelector{scriptedSelector: &scriptedSelector{}}
-	runConfigPanel(t, session, info, []richStep{{label: "Gateway", ok: true}}, nil)
-	if len(info.bodies) == 0 {
+	info := &scriptedSelector{}
+	runConfigPanel(t, session, info, []richStep{{label: "Gateway", ok: true}, {ok: false}}, nil)
+	if len(info.richItems) < 2 {
 		t.Fatal("the gateway section never opened")
 	}
+	empty := rowLabels(info.richItems[1])
 	for _, want := range []string{"Not configured", "This section has no explicit values in forebrain.yaml."} {
-		if !strings.Contains(info.bodies[0], want) {
-			t.Fatalf("the empty file section is missing %q: %q", want, info.bodies[0])
+		if !slices.Contains(empty, want) {
+			t.Fatalf("the empty file section is missing %q: %v", want, empty)
 		}
 	}
 }
@@ -2414,6 +2706,85 @@ type stubSystemEntryError struct{}
 
 func (stubSystemEntryError) Error() string {
 	return `agents.definitions.main.subagents[0]: "goal-evaluator" is dispatched by the system and cannot be configured`
+}
+
+// The prototype's validation rules are the store's, surfaced word for word
+// (plan 328 D5): the built-in restriction and the effort that requires a
+// model are enforced where the section is written, and the panel's own gates
+// — the effort picker's notice, the read-only system row, the fields a
+// built-in row never offers — keep the same states from being reached. This
+// pins the parity: each refusal reaches the page as the store said it, and
+// nothing is written.
+func TestConfigPanelValidationMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stored  map[string]string
+		err     error
+		steps   []richStep
+		inputs  []selectorInput
+		section string
+		want    string
+	}{
+		{
+			name:    "a built-in given settings it cannot take",
+			stored:  map[string]string{"agents": `{"definitions":{"main":{"primary":true,"subagents":[{"name":"explore","description":"no"}]}}}`},
+			err:     stubBuiltInRestrictionError{},
+			steps:   []richStep{{label: "Network retries", ok: true}, {ok: false}},
+			inputs:  []selectorInput{{value: "5", ok: true}},
+			section: "agents",
+			want:    `is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else`,
+		},
+		{
+			name:    "a goal check level without a model",
+			stored:  map[string]string{"agents": `{"definitions":{"main":{"primary":true}},"goal_evaluator":{"reasoning_effort":"high"}}`},
+			err:     stubEffortNeedsModelError{where: "agents.goal_evaluator"},
+			steps:   []richStep{{label: "Network retries", ok: true}, {ok: false}},
+			inputs:  []selectorInput{{value: "5", ok: true}},
+			section: "agents",
+			want:    "agents.goal_evaluator: reasoning_effort requires model",
+		},
+		{
+			name:    "a per-type level without a model",
+			stored:  map[string]string{"agents": `{"definitions":{"main":{"primary":true}},"subagent_models":{"explore":{"reasoning_effort":"high"}}}`},
+			err:     stubEffortNeedsModelError{where: "subagent_models.explore"},
+			steps:   []richStep{{label: "Network retries", ok: true}, {ok: false}},
+			inputs:  []selectorInput{{value: "5", ok: true}},
+			section: "agents",
+			want:    "subagent_models.explore: reasoning_effort requires model",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := newConfigPanelSession(tc.stored)
+			session.writeErr = tc.err
+			selector := &scriptedSelector{}
+			runConfigPanel(t, session, selector, tc.steps, tc.inputs, tc.section)
+
+			if !strings.Contains(pageLabels(selector), tc.want) {
+				t.Fatalf("the store's refusal must reach the page: %s", pageLabels(selector))
+			}
+			if len(session.writes) != 0 {
+				t.Fatalf("a refused candidate writes nothing, got %+v", session.writes)
+			}
+		})
+	}
+}
+
+// stubBuiltInRestrictionError stands in for the loader's own sentence about a
+// built-in subagent entry given settings it cannot take
+// (pkg/config/agents.go: the where-prefixed wording, no trailing period).
+type stubBuiltInRestrictionError struct{}
+
+func (stubBuiltInRestrictionError) Error() string {
+	return `agents.definitions.main.subagents[0]: "explore" is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else`
+}
+
+// stubEffortNeedsModelError stands in for the loader's own sentence about a
+// thinking level that names no model (pkg/config/agents.go
+// validateSubagentModel, per row: goal evaluator, plan reviewer, type row).
+type stubEffortNeedsModelError struct{ where string }
+
+func (e stubEffortNeedsModelError) Error() string {
+	return e.where + ": reasoning_effort requires model"
 }
 
 // No page of the panel names a setting by its dotted configuration path: the
