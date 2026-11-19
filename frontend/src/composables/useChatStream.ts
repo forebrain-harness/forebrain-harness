@@ -1762,7 +1762,7 @@ export type TimelineBlock =
 export interface SubagentTranscript {
   agentId: string
   agentType: string
-  /** What its dispatch called it, e.g. "Goal check". */
+  /** What its dispatch called it, e.g. "Goal Evaluator". */
   title?: string
   task: string
   status: 'running' | 'waiting_approval' | 'waiting_input' | 'done' | 'failed' | 'cancelled' | 'interrupted'

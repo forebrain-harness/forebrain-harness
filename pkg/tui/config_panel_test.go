@@ -419,7 +419,7 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 			models: []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}},
 			steps: []richStep{
 				{label: "Agents", ok: true},
-				{label: "Goal check model", ok: true},
+				{label: "Goal Evaluator model", ok: true},
 				{label: "openai/gpt-main", ok: true},
 			},
 			want: `{"goal_evaluator":{"model":"llm-1"}}`,
@@ -2321,8 +2321,8 @@ func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
 		t.Fatalf("expected the section page and the definitions page, got %d", len(selector.richItems))
 	}
 	labels := rowLabels(selector.richItems[0])
-	if !slices.Contains(labels, "Goal check model") {
-		t.Fatalf("the agents page is missing %q: %v", "Goal check model", labels)
+	if !slices.Contains(labels, "Goal Evaluator model") {
+		t.Fatalf("the agents page is missing %q: %v", "Goal Evaluator model", labels)
 	}
 	// The plan reviewer's row moved to the "Subagents" page, which is a
 	// projection of this same document (plan 314): one place owns every
@@ -2596,7 +2596,7 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 		"memories":                "Tune retrieval, retention and background processing.",
 		"cron":                    "Choose how long task records are retained.",
 		"features":                "Enable memory and language intelligence.",
-		"agents":                  "Manage definitions, shared defaults and goal checks.",
+		"agents":                  "Manage definitions, shared defaults.",
 		"subagent_models":         "Install-wide defaults for built-in types, plan-reviewer and shared custom subagents.",
 		"hooks":                   "Run configured actions at lifecycle events.",
 		"lsp":                     "Manage servers, timeouts and diagnostic delivery.",
@@ -2633,7 +2633,7 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 		{"agents", "defaults.stream_idle_timeout_seconds", "Stream idle timeout", "Zero disables the watchdog. Positive values below 10 run as 10."},
 		{"agents", "defaults.context_inject.warn_remaining_percent", "Warn below remaining context", ""},
 		{"agents", "defaults.mcp_servers", "MCP servers", "Shared with all agents. Agent entries with the same name override these."},
-		{"agents", "goal_evaluator.model", "Goal check model", "The global model used to check goal progress."},
+		{"agents", "goal_evaluator.model", "Goal Evaluator model", "The global model used to check goal progress."},
 		{"agents", "goal_evaluator.reasoning_effort", "Thinking level", "Choose a model first. Default follows that model row."},
 		{"hooks", "", "Hook events", "Command, prompt, agent and HTTP hooks are supported."},
 		{"lsp", "recommendations", "Recommend language servers", "Suggest useful servers for this project."},
@@ -2790,7 +2790,7 @@ func TestConfigPanelValidationMessages(t *testing.T) {
 			steps:   []richStep{{label: "Network retries", ok: true}, {ok: false}},
 			inputs:  []selectorInput{{value: "5", ok: true}},
 			section: "agents",
-			want:    "Thinking level requires a goal check model.",
+			want:    "Thinking level requires a Goal Evaluator model.",
 		},
 		{
 			name:    "a per-type level without a model",
@@ -2843,7 +2843,7 @@ func (e stubEffortNeedsModelError) Error() string {
 type stubGoalCheckEffortError struct{}
 
 func (stubGoalCheckEffortError) Error() string {
-	return "Thinking level requires a goal check model."
+	return "Thinking level requires a Goal Evaluator model."
 }
 
 // No page of the panel names a setting by its dotted configuration path: the
@@ -3715,7 +3715,7 @@ func TestConfigPanelModelPickerListsGlobalRows(t *testing.T) {
 	}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal check model", ok: true},
+		{label: "Goal Evaluator model", ok: true},
 		{ok: false},
 	}, nil, "agents")
 
@@ -3913,7 +3913,7 @@ func TestConfigPanelModelChangeClearsEffort(t *testing.T) {
 	}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal check model", ok: true},
+		{label: "Goal Evaluator model", ok: true},
 		{label: "deepseek/deepseek-v4-pro", ok: true},
 	}, nil, "agents")
 
@@ -3941,7 +3941,7 @@ func TestConfigPanelModelSameRowKeepsEffort(t *testing.T) {
 	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal check model", ok: true},
+		{label: "Goal Evaluator model", ok: true},
 		{label: "openai/gpt-main", ok: true},
 	}, nil, "agents")
 
@@ -4028,7 +4028,7 @@ func TestConfigPanelModelPickerWritesPassTheStoreValidator(t *testing.T) {
 
 	// A picked row's id is what the store gets.
 	run(t, []richStep{
-		{label: "Goal check model", ok: true},
+		{label: "Goal Evaluator model", ok: true},
 		{label: "openai/gpt-main", ok: true},
 	}, "agents")
 	goal, _ := storedAgents(t)["goal_evaluator"].(map[string]any)

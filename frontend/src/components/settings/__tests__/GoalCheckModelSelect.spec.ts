@@ -8,7 +8,7 @@ import { mountSettingsTab } from '../form/settingsTestHost'
 import SettingsSubagentsTab from '../SettingsSubagentsTab.vue'
 
 /**
- * 设置 · 子代理 · 「/goal 检查模型」(plan 299 §2, §5.2). The block is the picker
+ * 设置 · 子代理 · 「/goal 评估模型」(plan 299 §2, §5.2). The block is the picker
  * plus the level that belongs to the chosen row, so the cases here mount the
  * tab it lives in and drive the block: the unconfigured state, the menu and its
  * search, picking a row (and what the level then shows), switching rows,
@@ -93,7 +93,7 @@ function settingsWith(values: Record<string, unknown>) {
   }
 }
 
-describe('GoalCheckModelSelect (设置 子代理 /goal 检查模型)', () => {
+describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
   beforeEach(() => {
     setLocale('zh')
     // The picker reads the one list every model picker reads.
@@ -135,7 +135,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 检查模型)', () => {
     const wrapper = await open({})
 
     expect(block(wrapper).attributes('data-group')).toBe('goal-check-model')
-    expect(block(wrapper).find('h3').text()).toBe('/goal 检查模型')
+    expect(block(wrapper).find('h3').text()).toBe('/goal 评估模型')
     // The prototype draws no explanation under the group title (§2).
     expect(block(wrapper).find('.gc__head p').exists()).toBe(false)
 
@@ -220,7 +220,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 检查模型)', () => {
     await pick(wrapper, 'llm-a')
 
     await chooseLevel(wrapper, 'low')
-    expect(hint(wrapper).text()).toBe('已改为 低 low，仅影响目标检查子代理')
+    expect(hint(wrapper).text()).toBe('已改为 低 low，仅影响目标评估子代理')
     expect(block(wrapper).find('[data-goal-check-reset]').text()).toBe('恢复为模型默认')
     expect((effort(wrapper).element as HTMLSelectElement).value).toBe('low')
 
@@ -256,7 +256,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 检查模型)', () => {
       'agents.goal_evaluator.model': 'llm-a',
       'agents.goal_evaluator.reasoning_effort': 'low',
     })
-    expect(hint(wrapper).text()).toBe('已改为 低 low，仅影响目标检查子代理')
+    expect(hint(wrapper).text()).toBe('已改为 低 low，仅影响目标评估子代理')
 
     // Choosing the default level explicitly is the same setting as "follow it".
     await chooseLevel(wrapper, 'high')
@@ -333,7 +333,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 检查模型)', () => {
     })
     expect(combo(wrapper).text()).toContain('glm-5.3')
     expect((effort(wrapper).element as HTMLSelectElement).value).toBe('low')
-    expect(hint(wrapper).text()).toBe('已改为 低 low，仅影响目标检查子代理')
+    expect(hint(wrapper).text()).toBe('已改为 低 low，仅影响目标评估子代理')
     expect(block(wrapper).find('[data-goal-check-reset]').exists()).toBe(true)
     expect(block(wrapper).find('.gc__tray--open').exists()).toBe(false)
   })

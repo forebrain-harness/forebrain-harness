@@ -383,7 +383,7 @@ func validateSubagentModel(where, levelNeedsModel string, entry SubagentConfig, 
 // configuration path the settings page writes, so a shape refusal still names
 // the row the user was editing.
 func ValidateGoalEvaluatorModel(entry SubagentConfig, refResolves func(string) bool) error {
-	return validateSubagentModel("agents.goal_evaluator", "Thinking level requires a goal check model.", entry, refResolves)
+	return validateSubagentModel("agents.goal_evaluator", "Thinking level requires a Goal Evaluator model.", entry, refResolves)
 }
 
 // ValidatePlanReviewerModel is the same verdict for the exit-plan approval's

@@ -272,7 +272,7 @@ var configSectionSchemas = []configSectionSchema{
 	},
 	{
 		Name: "agents", Title: "Agents", Tab: configTabAgents,
-		Summary: "Manage definitions, shared defaults and goal checks.",
+		Summary: "Manage definitions, shared defaults.",
 		Fields: []configField{
 			{
 				Path: "definitions", Label: "Agent definitions", Kind: configFieldRows, Group: "Definitions",
@@ -308,12 +308,12 @@ var configSectionSchemas = []configSectionSchema{
 			// no name, description, prompt or tool policy to edit here, and a
 			// rows descriptor on the value would offer all of those.
 			{
-				Path: "goal_evaluator.model", Label: "Goal check model", Kind: configFieldModel, Group: "Goal checks",
+				Path: "goal_evaluator.model", Label: "Goal Evaluator model", Kind: configFieldModel, Group: "Goal Evaluator",
 				ModelEmpty: "Follow primary agent", ModelFlavor: configModelFlavorModel,
 				Hint: "The global model used to check goal progress.",
 			},
 			{
-				Path: "goal_evaluator.reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Group: "Goal checks",
+				Path: "goal_evaluator.reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Group: "Goal Evaluator",
 				Hint: "Choose a model first. Default follows that model row.",
 			},
 		},

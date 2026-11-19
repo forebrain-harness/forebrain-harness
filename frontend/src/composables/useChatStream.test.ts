@@ -3265,7 +3265,7 @@ describe('conversation tool and approval timeline', () => {
     expect(stream.runtimeStatus.value.goalRound).toBe(1)
 
     runEvent(socket, 'evt-3', 3, 'run-goal', 'live-goal', 'subagent_spawned', {
-      agent_id: 'check-1', agent_type: 'goal-evaluator', task_id: 'check-1', title: 'Goal check', task: 'Objective: make the tests pass', execution_id: 'exec-1',
+      agent_id: 'check-1', agent_type: 'goal-evaluator', task_id: 'check-1', title: 'Goal Evaluator', task: 'Objective: make the tests pass', execution_id: 'exec-1',
     })
     expect(stream.runtimeStatus.value.goalChecking).toBe(true)
     runEvent(socket, 'evt-4', 4, 'run-goal', 'live-goal', 'subagent_ended', {

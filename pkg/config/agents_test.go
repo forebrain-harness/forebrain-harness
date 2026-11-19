@@ -619,7 +619,7 @@ func TestValidateGoalEvaluatorModel(t *testing.T) {
 	// prefix.
 	effort := SubagentConfig{ReasoningEffort: "high"}
 	err := ValidateGoalEvaluatorModel(effort, resolves)
-	if err == nil || err.Error() != "Thinking level requires a goal check model." {
+	if err == nil || err.Error() != "Thinking level requires a Goal Evaluator model." {
 		t.Fatalf("err = %v, want the goal row's effort sentence", err)
 	}
 
@@ -651,7 +651,7 @@ func TestValidateGoalEvaluatorModel(t *testing.T) {
 		t.Fatalf("a configured goal-check row was refused on an install with no definitions: %v", err)
 	}
 	root.Agents.GoalEvaluator = SubagentConfig{ReasoningEffort: "high"}
-	if err := FinishLoad(&root); err == nil || err.Error() != "Thinking level requires a goal check model." {
+	if err := FinishLoad(&root); err == nil || err.Error() != "Thinking level requires a Goal Evaluator model." {
 		t.Fatalf("err = %v, want the loader to refuse an effort with no model", err)
 	}
 }

@@ -4670,7 +4670,7 @@ func TestReducerDrawsAGoalsLines(t *testing.T) {
 	}
 
 	_ = r.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindAssistant, RunID: "r1", Content: "fixed the parser"}})
-	spawned := r.Reduce(SubagentSpawnedMsg{AgentID: "check-1", AgentType: "goal-evaluator", Title: "Goal check", Task: "Objective: make the tests pass"})
+	spawned := r.Reduce(SubagentSpawnedMsg{AgentID: "check-1", AgentType: "goal-evaluator", Title: "Goal Evaluator", Task: "Objective: make the tests pass"})
 	for _, f := range spawned.Frames {
 		if f.SubagentLifecycleCard {
 			t.Fatalf("the goal's check drew a card of its own: %#v", f)

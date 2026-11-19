@@ -88,7 +88,7 @@ describe('GoalCheckModelGroup', () => {
 
   it('draws the model and a level taken from that model', async () => {
     const wrapper = await mountGroup()
-    expect(wrapper.find('[data-group="goal-check-model"] h3').text()).toBe('/goal 检查模型')
+    expect(wrapper.find('[data-group="goal-check-model"] h3').text()).toBe('/goal 评估模型')
     expect(wrapper.text()).toContain('思考强度')
     // The empty value first (follow the row), then exactly the row's levels.
     expect(effortValues(wrapper)).toEqual(['', 'low', 'high'])

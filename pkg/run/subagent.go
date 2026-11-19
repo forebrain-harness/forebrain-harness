@@ -5128,18 +5128,18 @@ func planReviewWorkspaceBrief(scope *tool.ReviewWriteScope) string {
 // subagents, because the user asked for it with /goal.
 func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID string, err error) {
 	if r.SubagentExecutor == nil {
-		return "", "", fmt.Errorf("the goal check requires the in-process subagent executor")
+		return "", "", fmt.Errorf("the Goal Evaluator requires the in-process subagent executor")
 	}
 	prep, output, err := dispatchSubagent(ctx, r.subagentFactory(), subagentDispatch{
 		taskID:  newSubagentTaskID(),
-		title:   "Goal check",
+		title:   "Goal Evaluator",
 		task:    task,
 		subtype: GoalCheckSubagentType,
 		resolve: agent.ResolveSubtype,
 		run: func(runCtx context.Context, fac Factory, prep preparedSubagent) (string, error) {
 			approve := tool.SubagentApprovalHookFromContext(runCtx, factoryToolsState(fac))
 			return runSubagentExecution(subagentExecContext(prep), fac, prep.entry, func(execCtx context.Context) (string, error) {
-				return runAcrossApprovals(execCtx, approve, prep.superviseRunID, "goal check",
+				return runAcrossApprovals(execCtx, approve, prep.superviseRunID, "Goal Evaluator",
 					func(attemptCtx context.Context, superviseRunID string) (string, error) {
 						return executeSubagent(
 							attemptCtx, fac, prep.entry, prep.task, nil, superviseRunID, prep.parentRunID,
