@@ -368,8 +368,8 @@ func TestBatchEnumDescriptionUsesBatchSentences(t *testing.T) {
 }
 
 // sharedCatalogTestConfig is one install-wide shared subagent (a pick-tier
-// custom definition with its own model row and a one-shot lifecycle) plus one
-// primary agent that may or may not have enabled it (plan 314).
+// subagent-role definition with its own model row and a one-shot lifecycle) plus
+// one primary agent that may or may not have enabled it (plan 314, P3).
 func sharedCatalogTestConfig(reference *appcfg.SubagentConfig) *appcfg.Root {
 	cfg := &appcfg.Root{
 		LLMModels: []appcfg.LLMModelConfig{{
@@ -377,17 +377,20 @@ func sharedCatalogTestConfig(reference *appcfg.SubagentConfig) *appcfg.Root {
 			BaseURL: "http://audit.test/v1", APIKey: "key",
 		}},
 		Agents: appcfg.AgentsSection{
-			SharedSubagents: []appcfg.SubagentConfig{{
-				Name:            "repo-auditor",
-				Description:     "audits one repository area",
-				SystemPrompt:    "You audit repositories.",
-				Model:           "llm-shared-audit",
-				ReasoningEffort: "high",
-				Tools:           appcfg.SubagentToolsPick,
-				AllowedTools:    []string{"read_file", "code_search"},
-				Continuable:     subagentCatalogTestBool(false),
-			}},
-			Definitions: map[string]appcfg.AgentDefinition{"main": {Primary: true}},
+			Definitions: map[string]appcfg.AgentDefinition{
+				"main": {Primary: true},
+				"repo-auditor": {
+					Primary:         false,
+					Order:           1,
+					Description:     "audits one repository area",
+					SystemPrompt:    "You audit repositories.",
+					Model:           "llm-shared-audit",
+					ReasoningEffort: "high",
+					Tools:           appcfg.SubagentToolsPick,
+					AllowedTools:    []string{"read_file", "code_search"},
+					Continuable:     subagentCatalogTestBool(false),
+				},
+			},
 		},
 	}
 	if reference != nil {
@@ -399,7 +402,7 @@ func sharedCatalogTestConfig(reference *appcfg.SubagentConfig) *appcfg.Root {
 }
 
 // TestSharedSubagentCatalogIsDefaultDisabled pins the owner's rule (2026-11-16,
-// plan 314): a globally shared custom subagent runs for nobody until that
+// plan 314): a globally shared subagent definition runs for nobody until that
 // agent's own reference entry enables it. Absence, an explicit false and a
 // reference carrying anything but the switch all leave it off — which is the
 // opposite of a per-agent custom subagent's absent-means-on default.
@@ -451,22 +454,65 @@ func TestSharedSubagentCatalogIsDefaultDisabled(t *testing.T) {
 		t.Fatalf("an enabled shared subagent must resolve: %v", err)
 	}
 	if def.Name != "repo-auditor" || def.Description != "audits one repository area" || def.SystemPrompt != "You audit repositories." {
-		t.Fatalf("ResolvePublic(repo-auditor) = %+v, want the registry's definition", def)
+		t.Fatalf("ResolvePublic(repo-auditor) = %+v, want the definition's body", def)
 	}
 	// The definition's own lifecycle and tool policy travel with it: one
 	// reference entry is the whole difference between off and on.
 	if def.Continuable || !def.OneShot {
-		t.Fatalf("ResolvePublic(repo-auditor) = %+v, want the registry's one-shot lifecycle", def)
+		t.Fatalf("ResolvePublic(repo-auditor) = %+v, want the definition's one-shot lifecycle", def)
 	}
 	policy, ok := catalog.ToolPolicy("repo-auditor")
 	if !ok || policy.Mode != appcfg.SubagentToolsPick || len(policy.Allowed) != 2 {
-		t.Fatalf("ToolPolicy(repo-auditor) = %+v %v, want the registry's pick tier", policy, ok)
+		t.Fatalf("ToolPolicy(repo-auditor) = %+v %v, want the definition's pick tier", policy, ok)
 	}
 	if prompt, ok := catalog.Prompt("repo-auditor"); !ok || prompt != "You audit repositories." {
-		t.Fatalf("Prompt(repo-auditor) = %q %v, want the registry's prompt", prompt, ok)
+		t.Fatalf("Prompt(repo-auditor) = %q %v, want the definition's prompt", prompt, ok)
 	}
 	if !strings.Contains(catalog.EnumDescription(), "repo-auditor: audits one repository area.") {
 		t.Fatalf("the subagent_type schema omits the enabled shared subagent: %s", catalog.EnumDescription())
+	}
+}
+
+// TestSharedSubagentCatalogKeepsAnAgentsOwnCollision pins the one case both
+// shapes name the same thing (P3): an agent's entry carrying a body of its own is
+// its custom subagent even under an install-wide definition's name, and the
+// catalog dispatches what the agent wrote. The definition is not merged in for
+// that name — there is one entry, and it is the agent's.
+func TestSharedSubagentCatalogKeepsAnAgentsOwnCollision(t *testing.T) {
+	cfg := sharedCatalogTestConfig(nil)
+	def := cfg.Agents.Definitions["main"]
+	def.Subagents = []appcfg.SubagentConfig{{
+		Name:         "repo-auditor",
+		Description:  "mine",
+		SystemPrompt: "You audit for this agent.",
+		Tools:        appcfg.SubagentToolsEdit,
+	}}
+	cfg.Agents.Definitions["main"] = def
+
+	catalog := SubagentCatalogFor(cfg, "main")
+	resolved, err := catalog.ResolvePublic("repo-auditor")
+	if err != nil {
+		t.Fatalf("the agent's own entry must resolve: %v", err)
+	}
+	if resolved.SystemPrompt != "You audit for this agent." || resolved.Description != "mine" {
+		t.Fatalf("ResolvePublic(repo-auditor) = %+v, want the agent's own body", resolved)
+	}
+	if policy, ok := catalog.ToolPolicy("repo-auditor"); !ok || policy.Mode != appcfg.SubagentToolsEdit {
+		t.Fatalf("ToolPolicy(repo-auditor) = %+v %v, want the agent's own tier", policy, ok)
+	}
+	// The definition's model is not the agent's: an entry that names none
+	// follows the conversation, so the merge must not have replaced it.
+	if modelID, _, _, _, ok := catalog.Model("repo-auditor"); ok {
+		t.Fatalf("Model(repo-auditor) = %q, want the agent's entry (no model) rather than the definition's row", modelID)
+	}
+	// And it is listed once, in the position the agent's own entries have.
+	names := make([]string, 0, 8)
+	for _, d := range catalog.Public() {
+		names = append(names, d.Name)
+	}
+	want := append(append([]string{}, agent.PublicSubagentNames...), "repo-auditor")
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("Public() = %v, want %v", names, want)
 	}
 }
 
@@ -493,7 +539,7 @@ func TestSharedSubagentModelResolvesGlobally(t *testing.T) {
 // TestSharedSubagentCatalogKeepsTheAgentsOwnEntries pins the merge order and the
 // two rules side by side (plan 314): an agent's own custom subagents keep their
 // absent-means-enabled switch and come first, the enabled shared ones follow in
-// registry order, and an office conversation still dispatches them.
+// their configured order, and an office conversation still dispatches them.
 func TestSharedSubagentCatalogKeepsTheAgentsOwnEntries(t *testing.T) {
 	on := appcfg.SubagentConfig{Name: "repo-auditor", Enabled: subagentCatalogTestBool(true)}
 	cfg := sharedCatalogTestConfig(&on)

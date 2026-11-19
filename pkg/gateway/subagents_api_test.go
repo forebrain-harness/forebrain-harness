@@ -909,19 +909,20 @@ func TestSubagentEffortMustBeOneItsModelRowCanSend(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }
 
-// sharedSubagentFixtureConfig gives the fixture one install-wide shared custom
-// subagent plus one primary agent that defines a custom subagent of its own
-// (plan 314): the two kinds the page has to tell apart.
+// sharedSubagentFixtureConfig gives the fixture one install-wide shared subagent
+// definition plus one primary agent that defines a custom subagent of its own
+// (plan 314, P3): the two kinds the page has to tell apart.
 func sharedSubagentFixtureConfig(def *appcfg.AgentDefinition) func(*appcfg.Root) {
 	return func(root *appcfg.Root) {
-		root.Agents.SharedSubagents = []appcfg.SubagentConfig{{
-			Name:            "repo-auditor",
+		root.Agents.Definitions["repo-auditor"] = appcfg.AgentDefinition{
+			Primary:         false,
+			Order:           1,
 			Description:     "audits one repository area",
 			SystemPrompt:    "You audit repositories.",
 			Model:           "openai/gpt-main",
 			ReasoningEffort: "high",
 			Tools:           appcfg.SubagentToolsReadOnly,
-		}}
+		}
 		*def = appcfg.AgentDefinition{
 			Primary:      true,
 			DefaultModel: "llm-1",
@@ -1047,7 +1048,7 @@ func TestSubagentSharedRowWritesAreRefused(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "is a shared subagent; edit it in Settings → Subagents, only enable/disable here")
 	// Nothing was written by the refusal: the registry still carries the
 	// definition the settings page owns, and the reference entry is untouched.
-	auditor, ok := appcfg.SharedSubagentFor(f.config(t).Agents.SharedSubagents, "repo-auditor")
+	auditor, ok := f.config(t).Agents.Definitions["repo-auditor"]
 	require.True(t, ok)
 	require.Equal(t, "high", auditor.ReasoningEffort)
 	require.Equal(t, "You audit repositories.", auditor.SystemPrompt)
@@ -1086,6 +1087,16 @@ func TestSubagentSharedRowWritesAreRefused(t *testing.T) {
 	require.Equal(t, "runs migrations and seeds", findSubagentEntry(t, f.subagentEntries(t), "db-migrator").Description)
 }
 
+// sharedListingNames is the listing's row names in the order the page renders
+// them.
+func sharedListingNames(listing sharedSubagentListing) []string {
+	names := make([]string, 0, len(listing.Rows))
+	for _, row := range listing.Rows {
+		names = append(names, row.Name)
+	}
+	return names
+}
+
 // sharedTypeRowByName finds one built-in type's default row in the listing.
 func sharedTypeRowByName(t *testing.T, rows []sharedTypeRow, name string) sharedTypeRow {
 	t.Helper()
@@ -1107,10 +1118,10 @@ func decodeSharedRegistry(t *testing.T, rec *httptest.ResponseRecorder) sharedSu
 	return listing
 }
 
-// TestSharedSubagentCreatePersistsARowModel pins the create (plan 314): one
-// definition lands in agents.shared_subagents, its model is stored as the id of
-// the row it named — the form that resolves for every agent that enables it —
-// and the answer is the registry the page then renders.
+// TestSharedSubagentCreatePersistsARowModel pins the create (plan 314, P3): one
+// subagent-role definition lands in agents.definitions, its model is stored as
+// the id of the row it named — the form that resolves for every agent that
+// enables it — and the answer is the listing the page then renders.
 func TestSharedSubagentCreatePersistsARowModel(t *testing.T) {
 	f := newSubagentRootFixture(t, nil)
 	rowID := seedGlobalModelRow(t, f, "deepseek", "deepseek-v4-flash")
@@ -1126,14 +1137,14 @@ func TestSharedSubagentCreatePersistsARowModel(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	stored := f.config(t).Agents.SharedSubagents
-	require.Len(t, stored, 1)
-	require.Equal(t, "repo-auditor", stored[0].Name)
-	require.Equal(t, rowID, stored[0].Model, "the model is the row id, not the label it was sent as")
-	require.Equal(t, "high", stored[0].ReasoningEffort)
-	require.Equal(t, appcfg.SubagentToolsPick, stored[0].Tools)
-	require.Equal(t, []string{"read_file", "code_search"}, stored[0].AllowedTools)
-	require.Nil(t, stored[0].Enabled, "a shared definition carries no switch of its own")
+	stored, ok := f.config(t).Agents.Definitions["repo-auditor"]
+	require.True(t, ok, "the shared subagent is a definition like any other")
+	require.False(t, stored.Primary, "it plays the subagent role")
+	require.Equal(t, "You audit repositories.", stored.SystemPrompt)
+	require.Equal(t, rowID, stored.Model, "the model is the row id, not the label it was sent as")
+	require.Equal(t, "high", stored.ReasoningEffort)
+	require.Equal(t, appcfg.SubagentToolsPick, stored.Tools)
+	require.Equal(t, []string{"read_file", "code_search"}, stored.AllowedTools)
 
 	listing := decodeSharedRegistry(t, rec)
 	require.Len(t, listing.Rows, 1)
@@ -1156,8 +1167,9 @@ func TestSharedSubagentCreatePersistsARowModel(t *testing.T) {
 		"model":         "deepseek/deepseek-v4-flash",
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.Equal(t, rowID, f.config(t).Agents.SharedSubagents[0].Model)
-	require.Empty(t, f.config(t).Agents.SharedSubagents[0].Tools, "the update replaces the definition whole")
+	require.Equal(t, rowID, f.config(t).Agents.Definitions["repo-auditor"].Model)
+	require.Empty(t, f.config(t).Agents.Definitions["repo-auditor"].Tools, "the update replaces the body whole")
+	require.Equal(t, 0, f.config(t).Agents.Definitions["repo-auditor"].Order, "the update keeps the position the definition had")
 }
 
 // TestSharedSubagentCreateRefusals pins what a create may not do (plan 314): a
@@ -1166,9 +1178,9 @@ func TestSharedSubagentCreatePersistsARowModel(t *testing.T) {
 // agent's business rather than the registry's.
 func TestSharedSubagentCreateRefusals(t *testing.T) {
 	f := newSubagentRootFixture(t, func(root *appcfg.Root) {
-		root.Agents.SharedSubagents = []appcfg.SubagentConfig{{
-			Name: "repo-auditor", Description: "audits one repository area", SystemPrompt: "You audit repositories.",
-		}}
+		root.Agents.Definitions["repo-auditor"] = appcfg.AgentDefinition{
+			Primary: false, Order: 1, Description: "audits one repository area", SystemPrompt: "You audit repositories.",
+		}
 	})
 	cases := []struct {
 		name   string
@@ -1192,7 +1204,7 @@ func TestSharedSubagentCreateRefusals(t *testing.T) {
 			name:   "a duplicate",
 			body:   map[string]any{"name": "repo-auditor", "description": "d", "system_prompt": "p"},
 			status: http.StatusConflict,
-			want:   `a shared subagent named "repo-auditor" already exists`,
+			want:   `a subagent definition named "repo-auditor" already exists`,
 		},
 		{
 			name:   "no system prompt",
@@ -1204,7 +1216,7 @@ func TestSharedSubagentCreateRefusals(t *testing.T) {
 			name:   "a name the loader rejects",
 			body:   map[string]any{"name": "repo_scout", "description": "d", "system_prompt": "p"},
 			status: http.StatusBadRequest,
-			want:   "invalid name",
+			want:   "invalid subagent id",
 		},
 		{
 			name:   "enabled",
@@ -1226,17 +1238,21 @@ func TestSharedSubagentCreateRefusals(t *testing.T) {
 			require.Contains(t, rec.Body.String(), tc.want)
 		})
 	}
-	// Every refusal left the registry as it was.
-	require.Len(t, f.config(t).Agents.SharedSubagents, 1)
-	require.Equal(t, "repo-auditor", f.config(t).Agents.SharedSubagents[0].Name)
+	// Every refusal left the definitions as they were.
+	require.Equal(t, "audits one repository area", f.config(t).Agents.Definitions["repo-auditor"].Description)
+	_, created := f.config(t).Agents.Definitions["repo-scout"]
+	require.False(t, created, "no refusal stored a definition")
 
 	// A description is optional (owner 2026-11-19): the model dispatches the
 	// subagent by name, so one that has none runs on its prompt alone.
 	rec := f.do(t, http.MethodPost, "/api/agents/subagents/shared", map[string]any{"name": "repo-scout", "system_prompt": "p"})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.Len(t, f.config(t).Agents.SharedSubagents, 2)
-	require.Equal(t, "repo-scout", f.config(t).Agents.SharedSubagents[1].Name)
-	require.Empty(t, f.config(t).Agents.SharedSubagents[1].Description)
+	scout, ok := f.config(t).Agents.Definitions["repo-scout"]
+	require.True(t, ok)
+	require.Empty(t, scout.Description)
+	require.False(t, scout.Primary)
+	// The listing orders by Order: the entry that carries one comes first.
+	require.Equal(t, []string{"repo-auditor", "repo-scout"}, sharedListingNames(decodeSharedRegistry(t, rec)))
 }
 
 // TestSharedSubagentDeleteDropsEveryReference pins the one cross-agent write
@@ -1245,9 +1261,11 @@ func TestSharedSubagentCreateRefusals(t *testing.T) {
 // would make the configuration unloadable.
 func TestSharedSubagentDeleteDropsEveryReference(t *testing.T) {
 	f := newSubagentRootFixture(t, func(root *appcfg.Root) {
-		root.Agents.SharedSubagents = []appcfg.SubagentConfig{
-			{Name: "repo-auditor", Description: "audits one repository area", SystemPrompt: "You audit repositories."},
-			{Name: "note-taker", Description: "writes one note", SystemPrompt: "You take notes."},
+		root.Agents.Definitions["repo-auditor"] = appcfg.AgentDefinition{
+			Primary: false, Order: 1, Description: "audits one repository area", SystemPrompt: "You audit repositories.",
+		}
+		root.Agents.Definitions["note-taker"] = appcfg.AgentDefinition{
+			Primary: false, Order: 2, Description: "writes one note", SystemPrompt: "You take notes.",
 		}
 		// Two agents, both with a reference entry for the definition under test
 		// plus one of their own subagents that must survive the delete.
@@ -1266,8 +1284,10 @@ func TestSharedSubagentDeleteDropsEveryReference(t *testing.T) {
 	rec := f.do(t, http.MethodDelete, "/api/agents/subagents/shared/repo-auditor", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	cfg := f.config(t)
-	require.Len(t, cfg.Agents.SharedSubagents, 1)
-	require.Equal(t, "note-taker", cfg.Agents.SharedSubagents[0].Name)
+	_, stillThere := cfg.Agents.Definitions["repo-auditor"]
+	require.False(t, stillThere)
+	_, noteTaker := cfg.Agents.Definitions["note-taker"]
+	require.True(t, noteTaker)
 	for _, id := range []string{"main", "helper"} {
 		names := make([]string, 0, len(cfg.Agents.Definitions[id].Subagents))
 		for _, entry := range cfg.Agents.Definitions[id].Subagents {
@@ -1278,6 +1298,13 @@ func TestSharedSubagentDeleteDropsEveryReference(t *testing.T) {
 	// The deleted name no longer answers, and a second delete is a 404.
 	rec = f.do(t, http.MethodDelete, "/api/agents/subagents/shared/repo-auditor", nil)
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	// A key playing the primary role is not a shared subagent: this route
+	// deletes install-wide subagents and never an agent (P3).
+	rec = f.do(t, http.MethodDelete, "/api/agents/subagents/shared/main", nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"main" is not a shared subagent`)
+	_, keptMain := f.config(t).Agents.Definitions["main"]
+	require.True(t, keptMain, "the primary agent survived the delete it was refused")
 	// The agent page no longer lists it.
 	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -1286,14 +1313,18 @@ func TestSharedSubagentDeleteDropsEveryReference(t *testing.T) {
 	}
 }
 
-// TestSharedSubagentListKeepsConfigOrder pins the list's order (plan 314): the
-// registry in configuration order, whatever order the settings page wrote it in,
-// with each row's model named rather than identified.
+// TestSharedSubagentListKeepsConfigOrder pins the list's order (plan 314, P3): the
+// definitions in the order the merge carried out of the registry, whatever order
+// the settings page wrote them in, with each row's model named rather than
+// identified.
 func TestSharedSubagentListKeepsConfigOrder(t *testing.T) {
 	f := newSubagentRootFixture(t, func(root *appcfg.Root) {
-		root.Agents.SharedSubagents = []appcfg.SubagentConfig{
-			{Name: "note-taker", Description: "writes one note", SystemPrompt: "You take notes."},
-			{Name: "repo-auditor", Description: "audits one repository area", SystemPrompt: "You audit repositories.", Model: "openai/gpt-main", ReasoningEffort: "low"},
+		root.Agents.Definitions["repo-auditor"] = appcfg.AgentDefinition{
+			Primary: false, Order: 2, Description: "audits one repository area",
+			SystemPrompt: "You audit repositories.", Model: "openai/gpt-main", ReasoningEffort: "low",
+		}
+		root.Agents.Definitions["note-taker"] = appcfg.AgentDefinition{
+			Primary: false, Order: 1, Description: "writes one note", SystemPrompt: "You take notes.",
 		}
 	})
 	rec := f.do(t, http.MethodGet, "/api/agents/subagents/shared", nil)

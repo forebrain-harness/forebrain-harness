@@ -322,18 +322,22 @@ var configSectionSchemas = []configSectionSchema{
 		// The install-wide subagent rows, as one page (plan 314). It is a
 		// projection of the agents store — the prototype's "Subagents"
 		// section — because every row here lives in agents: the per-type defaults
-		// (agents.subagent_models, plan 315), the plan reviewer's global row
-		// (agents.plan_reviewer, plan 313, relocated here) and the shared custom
-		// registry (agents.shared_subagents, this plan's storage). The panel
+		// (agents.subagent_models, plan 315) and the plan reviewer's global row
+		// (agents.plan_reviewer, plan 313, relocated here). A shared subagent
+		// definition lives where every other definition does
+		// (agents.definitions, P3), so it is edited on the Agents page. The panel
 		// reads and writes the agents document either way, so a key this page
 		// does not show travels back untouched on save.
 		Name: "subagent_models", Title: "Subagents", Tab: configTabAgents,
-		// The title and summary name the section's whole scope (owner
-		// 2026-11-18): the page also creates and manages shared custom
-		// subagents, not only models, so the umbrella word is Subagents and
-		// the summary names the built-in types, the plan-reviewer and the
-		// shared custom registry. The prototype carries the same sentence.
-		Summary:      "Install-wide defaults for built-in types, plan-reviewer and shared custom subagents.",
+		// The summary is the prototype's own sentence for these rows (its typeDef
+		// template reads "Install-wide default model and thinking level; an
+		// agent's own override still wins."): the page holds the install-wide
+		// model rows of the built-in types and the plan reviewer. The shared
+		// subagent definitions are definitions, edited on the Agents page (P3), so
+		// the earlier wording that named them is gone — the prototype never had
+		// it. The prototype deletes this page in favour of its "Built-in
+		// subagents" group, which is P4's work.
+		Summary:      "Install-wide default model and thinking level; an agent's own override still wins.",
 		StoreSection: "agents",
 		Fields: []configField{
 			// The four public per-type defaults: a global row id + thinking
@@ -348,8 +352,6 @@ var configSectionSchemas = []configSectionSchema{
 			// The plan reviewer's row, the goal check's sibling one type over:
 			// a system-dispatched type whose row no primary agent owns.
 			{Path: "plan_reviewer", Label: "plan-reviewer", Kind: configFieldRows, Hint: "Global row for a system type, the goal-evaluator pattern. Agent pages stay read-only."},
-			// The shared custom registry: one definition every agent may enable.
-			{Path: "shared_subagents", Label: "Shared custom subagents", Kind: configFieldRows, List: true, Hint: "Install-wide custom subagents every agent may enable; disabled per agent until enabled"},
 		},
 	},
 	{

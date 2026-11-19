@@ -158,10 +158,10 @@ type subagentDetail struct {
 
 // subagentNames lists every subagent the page shows, in its order: this agent's
 // own entries (its custom subagents and the reference entries that enable a
-// shared one) in configuration order, then the shared registry's names it has
-// not referenced yet — a shared subagent is on this page whether or not the
-// agent enabled it, because that is where it gets enabled (plan 314) — then the
-// built-ins the model may dispatch, then the ones the system dispatches.
+// shared one) in configuration order, then the install-wide definitions' names
+// it has not referenced yet — a shared subagent is on this page whether or not
+// the agent enabled it, because that is where it gets enabled (plan 314) — then
+// the built-ins the model may dispatch, then the ones the system dispatches.
 func subagentNames(cfg *config.Root, def config.AgentDefinition) []string {
 	out := make([]string, 0, len(def.Subagents)+len(agent.PublicSubagentNames)+len(agent.SystemSubagentNames))
 	for _, entry := range def.Subagents {
@@ -171,9 +171,8 @@ func subagentNames(cfg *config.Root, def config.AgentDefinition) []string {
 		}
 		out = append(out, name)
 	}
-	for _, shared := range sharedSubagentDefinitions(cfg) {
-		name := subagentKey(shared.Name)
-		if name == "" || slices.Contains(out, name) {
+	for _, name := range config.SubagentDefinitionNames(subagentDefinitions(cfg)) {
+		if slices.Contains(out, name) {
 			continue
 		}
 		out = append(out, name)
@@ -182,19 +181,26 @@ func subagentNames(cfg *config.Root, def config.AgentDefinition) []string {
 	return append(out, agent.SystemSubagentNames...)
 }
 
-// sharedSubagentDefinitions is the install-wide registry, nil when there is no
-// configuration to read it from.
-func sharedSubagentDefinitions(cfg *config.Root) []config.SubagentConfig {
+// subagentDefinitions is the agents section's definitions map, nil when there is
+// no configuration to read it from.
+func subagentDefinitions(cfg *config.Root) map[string]config.AgentDefinition {
 	if cfg == nil {
 		return nil
 	}
-	return cfg.Agents.SharedSubagents
+	return cfg.Agents.Definitions
+}
+
+// subagentDefinitionFor is the install-wide subagent definition name refers to,
+// nil-safe about a configuration the caller does not have.
+func subagentDefinitionFor(cfg *config.Root, name string) (config.SubagentConfig, bool) {
+	return config.SubagentDefinitionFor(subagentDefinitions(cfg), name)
 }
 
 // sharedSubagentName reports whether name is one of the install-wide shared
-// custom subagents (plan 314).
+// subagents a primary agent may enable (plan 314, P3: they are the definitions
+// whose key plays the subagent role).
 func sharedSubagentName(cfg *config.Root, name string) bool {
-	_, ok := config.SharedSubagentFor(sharedSubagentDefinitions(cfg), name)
+	_, ok := subagentDefinitionFor(cfg, name)
 	return ok
 }
 
@@ -311,14 +317,14 @@ func systemSubagentRow(cfg *config.Root, name string) subagentRow {
 
 // sharedSubagentRow describes an install-wide shared custom subagent (plan 314).
 // Everything a subagent is — description, tools, prompt, model, lifecycle — is
-// the registry's definition, never this agent's: the page shows one switch and
-// the facts behind it. Enabled comes from this agent's reference entry alone,
-// and it is false when there is none — a shared subagent runs nowhere until the
-// agent enables it (owner 2026-11-16), the opposite of a custom subagent's
-// absent-means-on switch.
+// the install-wide definition's, never this agent's: the page shows one switch
+// and the facts behind it. Enabled comes from this agent's reference entry
+// alone, and it is false when there is none — a shared subagent runs nowhere
+// until the agent enables it (owner 2026-11-16), the opposite of a custom
+// subagent's absent-means-on switch.
 func sharedSubagentRow(cfg *config.Root, name string, entry config.SubagentConfig) subagentRow {
-	// The name comes from the registry this reads, so the definition is there.
-	shared, _ := config.SharedSubagentFor(sharedSubagentDefinitions(cfg), name)
+	// The name comes from the definitions this reads, so the definition is there.
+	shared, _ := subagentDefinitionFor(cfg, name)
 	allowed := make([]string, 0, len(shared.AllowedTools))
 	if customSubagentTools(shared) == config.SubagentToolsPick {
 		allowed = append(allowed, shared.AllowedTools...)
@@ -425,7 +431,7 @@ func subagentDetailFor(cfg *config.Root, agentID, name string) (subagentDetail, 
 	// one text, and the page would otherwise describe a subagent it cannot show
 	// (plan 314).
 	if row.Kind == subagentKindShared {
-		if shared, ok := config.SharedSubagentFor(sharedSubagentDefinitions(cfg), row.Name); ok {
+		if shared, ok := subagentDefinitionFor(cfg, row.Name); ok {
 			out.SystemPrompt = strings.TrimSpace(shared.SystemPrompt)
 		}
 	} else if prompt, found := run.SubagentCatalogFor(cfg, agentID).Prompt(row.Name); found {
@@ -447,23 +453,40 @@ func subagentKey(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
-// subagentKindFor names what a subagent name is for this agent. The shared
-// registry is consulted before this agent's own entries: the loader lets a
-// shared name appear in them only as the reference entry that enables it, so an
-// entry of that name is a switch, not a definition (plan 314).
+// subagentKindFor names what a subagent name is for this agent. An entry of this
+// agent's that carries a body of its own is its custom subagent even under an
+// install-wide definition's name (P3): that is the one case the two shapes
+// collide in, dispatch reads the agent's definition, and the page says the same.
+// Otherwise an install-wide definition comes before the agent's own entries,
+// because the only entry the loader lets it appear in is the bare reference that
+// enables it (plan 314).
 func subagentKindFor(cfg *config.Root, def config.AgentDefinition, name string) string {
 	key := subagentKey(name)
-	switch {
-	case slices.Contains(agent.SystemSubagentNames, key):
+	if slices.Contains(agent.SystemSubagentNames, key) {
 		return subagentKindSystem
-	case slices.Contains(agent.PublicSubagentNames, key):
+	}
+	if slices.Contains(agent.PublicSubagentNames, key) {
 		return subagentKindBuiltin
-	case sharedSubagentName(cfg, key):
-		return subagentKindShared
-	case subagentEntryIndex(def.Subagents, key) >= 0:
+	}
+	if subagentEntryIndex(def.Subagents, key) >= 0 {
+		if subagentReferenceEntry(config.SubagentDefinitionNames(subagentDefinitions(cfg)), subagentEntry(def, key)) {
+			return subagentKindShared
+		}
 		return subagentKindCustom
 	}
+	if sharedSubagentName(cfg, key) {
+		return subagentKindShared
+	}
 	return ""
+}
+
+// subagentReferenceEntry reports whether an agent's entry is the bare reference
+// that enables an install-wide subagent definition: the name is one of those
+// definitions and the entry carries no body of its own. The loader draws the
+// line in the same place, so an entry with a description, a prompt or a tool
+// policy is this agent's custom subagent whatever else shares its name.
+func subagentReferenceEntry(shared []string, entry config.SubagentConfig) bool {
+	return slices.Contains(shared, subagentKey(entry.Name)) && !config.SubagentEntryCarriesBody(entry)
 }
 
 // subagentEntry returns the configured entry for name, zero when there is none.
@@ -600,13 +623,13 @@ func subagentAllRowsDisabled(cfg *config.Root, def config.AgentDefinition) bool 
 			return false
 		}
 	}
-	shared := config.SharedSubagentNames(sharedSubagentDefinitions(cfg))
+	shared := config.SubagentDefinitionNames(subagentDefinitions(cfg))
 	for _, entry := range def.Subagents {
 		key := subagentKey(entry.Name)
 		if slices.Contains(agent.PublicSubagentNames, key) {
 			continue
 		}
-		if slices.Contains(shared, key) {
+		if subagentReferenceEntry(shared, entry) {
 			// A reference entry's switch is read by its own rule: absent is off.
 			if sharedSubagentEnabled(def, key) {
 				return false
@@ -745,7 +768,7 @@ func (s *Server) writeAgentSubagents(w http.ResponseWriter, r *http.Request, mut
 		// and the rule. A model without the legacy "provider/model" shape is a
 		// model reference (a fb_llm_models row id, plan 262), and resolves
 		// against the same root the write is landing in.
-		if err := config.ValidateAgentSubagents(id, write.def, agent.PublicSubagentNames, agent.SystemSubagentNames, config.SharedSubagentNames(write.cfg.Agents.SharedSubagents), func(ref string) bool {
+		if err := config.ValidateAgentSubagents(id, write.def, agent.PublicSubagentNames, agent.SystemSubagentNames, config.SubagentDefinitionNames(write.cfg.Agents.Definitions), func(ref string) bool {
 			_, ok := config.ResolveModelRef(write.models, id, ref)
 			return ok
 		}); err != nil {
@@ -1158,7 +1181,7 @@ func (s *Server) handleAgentSubagentSwitch(w http.ResponseWriter, r *http.Reques
 		write.def.EnableSubagent = config.BoolPtr(enabled)
 		// The custom names are collected first: setting a row may create or drop
 		// an entry, and the list being walked must not move underneath it.
-		shared := config.SharedSubagentNames(sharedSubagentDefinitions(&write.cfg))
+		shared := config.SubagentDefinitionNames(write.cfg.Agents.Definitions)
 		custom := make([]string, 0, len(write.def.Subagents))
 		reference := make([]string, 0, len(write.def.Subagents))
 		for _, entry := range write.def.Subagents {
@@ -1166,7 +1189,7 @@ func (s *Server) handleAgentSubagentSwitch(w http.ResponseWriter, r *http.Reques
 			if slices.Contains(agent.PublicSubagentNames, name) {
 				continue
 			}
-			if slices.Contains(shared, name) {
+			if subagentReferenceEntry(shared, entry) {
 				reference = append(reference, name)
 				continue
 			}
@@ -1187,14 +1210,19 @@ func (s *Server) handleAgentSubagentSwitch(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// --- the install-wide shared subagent registry (plan 314) -------------------
+// --- the install-wide shared subagents (plan 314, P3) -----------------------
 //
 // One definition every primary agent may consume: the settings page creates,
 // edits and deletes it through the routes below, and each agent's own page only
 // switches it on or off. That split is the whole shape of this section — a write
-// lands in agents.shared_subagents, never in any agent's entry, with the one
-// exception of a delete, which also drops the reference entries that would
-// otherwise name a shared subagent that no longer exists.
+// lands in agents.definitions under a key playing the subagent role, never in
+// any agent's entry, with the one exception of a delete, which also drops the
+// reference entries that would otherwise name a shared subagent that no longer
+// exists.
+//
+// The routes and the {rows, types} answer are the shape the web's Settings →
+// Subagents page reads and writes, and they stay until that page moves onto the
+// unified definitions (I5): the storage moved, the contract did not.
 //
 // It lives here rather than in a file of its own because it is the same HTTP
 // family as the per-agent routes above: the same stored section, the same write
@@ -1209,9 +1237,10 @@ type sharedTypeRow struct {
 	ReasoningEffort string `json:"reasoning_effort"`
 }
 
-// sharedSubagentListing is the registry as the settings page reads it: the
-// shared custom subagents in configuration order, and the four per-type global
-// defaults beside them. The page renders both in one group (plan 314).
+// sharedSubagentListing is the shared definitions as the settings page reads
+// them: the subagent-role definitions in their configured order, and the four
+// per-type global defaults beside them. The page renders both in one group
+// (plan 314).
 //
 // A row is a subagentDetail rather than a plain row because the definition's
 // prompt is what the page edits: a list without it would leave the form saving
@@ -1221,8 +1250,8 @@ type sharedSubagentListing struct {
 	Types []sharedTypeRow  `json:"types"`
 }
 
-// handleSharedSubagentsList serves GET /agents/subagents/shared: the whole
-// registry and the per-type rows.
+// handleSharedSubagentsList serves GET /agents/subagents/shared: every shared
+// definition and the per-type rows.
 func (s *Server) handleSharedSubagentsList(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.persistedConfig(r.Context())
 	if err != nil {
@@ -1232,16 +1261,21 @@ func (s *Server) handleSharedSubagentsList(w http.ResponseWriter, r *http.Reques
 	writeAgentsJSON(w, sharedSubagentListingOf(&cfg))
 }
 
-// sharedSubagentListingOf renders the registry. A registry row carries no
-// switch: enablement is per agent, so it is read on that agent's page and
-// nowhere else (plan 314).
+// sharedSubagentListingOf renders the shared definitions. A shared row carries no
+// switch of its own: enablement is per agent, so it is read on that agent's page
+// and nowhere else (plan 314).
 func sharedSubagentListingOf(cfg *config.Root) sharedSubagentListing {
+	names := config.SubagentDefinitionNames(subagentDefinitions(cfg))
 	out := sharedSubagentListing{
-		Rows:  make([]subagentDetail, 0, len(cfg.Agents.SharedSubagents)),
+		Rows:  make([]subagentDetail, 0, len(names)),
 		Types: make([]sharedTypeRow, 0, len(agent.PublicSubagentNames)),
 	}
-	for _, entry := range cfg.Agents.SharedSubagents {
-		row := sharedSubagentRow(cfg, subagentKey(entry.Name), config.SubagentConfig{Name: entry.Name})
+	for _, name := range names {
+		entry, ok := subagentDefinitionFor(cfg, name)
+		if !ok {
+			continue
+		}
+		row := sharedSubagentRow(cfg, name, config.SubagentConfig{Name: name})
 		row.Enabled = nil
 		// The definition's own prompt, and no original to restore to: a shared
 		// subagent is a custom one, so it has no built-in text behind it.
@@ -1258,9 +1292,9 @@ func sharedSubagentListingOf(cfg *config.Root) sharedSubagentListing {
 	return out
 }
 
-// decodeSharedSubagentBody reads one registry write. enabled is refused rather
-// than dropped: a shared subagent's enablement is per agent, so a client that
-// sent one would otherwise be told it was stored.
+// decodeSharedSubagentBody reads one shared definition write. enabled is refused
+// rather than dropped: a shared subagent's enablement is per agent, so a client
+// that sent one would otherwise be told it was stored.
 func decodeSharedSubagentBody(r *http.Request) (config.SubagentConfig, error) {
 	var in config.SubagentConfig
 	if err := decodeSubagentBody(r, &in); err != nil {
@@ -1272,15 +1306,16 @@ func decodeSharedSubagentBody(r *http.Request) (config.SubagentConfig, error) {
 	return in, nil
 }
 
-// sharedSubagentEntry builds a registry definition from a request. The model is
-// stored as the id of the row it names (plan 262's rule, kept here because a
-// shared subagent's model resolves globally for every agent that enables it); a
+// sharedSubagentEntry builds a shared definition's body from a request: the
+// subagent role's fields, and nothing of the primary role's. The model is stored
+// as the id of the row it names (plan 262's rule, kept here because a shared
+// subagent's model resolves globally for every agent that enables it); a
 // reference nothing carries is left as written for the validator to refuse with
 // its own sentence. enabled is never stored, and the handler has already refused
 // one that arrived.
-func sharedSubagentEntry(models *config.Root, r *http.Request, name string, in config.SubagentConfig) (config.SubagentConfig, error) {
-	entry := config.SubagentConfig{
-		Name:            subagentKey(name),
+func sharedSubagentEntry(models *config.Root, r *http.Request, name string, in config.SubagentConfig) (config.AgentDefinition, error) {
+	def := config.AgentDefinition{
+		Primary:         false,
 		Description:     strings.TrimSpace(in.Description),
 		SystemPrompt:    strings.TrimSpace(in.SystemPrompt),
 		ReasoningEffort: strings.TrimSpace(in.ReasoningEffort),
@@ -1289,30 +1324,39 @@ func sharedSubagentEntry(models *config.Root, r *http.Request, name string, in c
 	}
 	if ref := strings.TrimSpace(in.Model); ref != "" {
 		if row, ok := config.ResolveModelRef(models, "main", ref); ok {
-			entry.Model = strings.TrimSpace(row.ID)
+			def.Model = strings.TrimSpace(row.ID)
 		} else {
-			entry.Model = ref
+			def.Model = ref
 		}
 	}
-	if entry.Tools == config.SubagentToolsPick {
-		entry.AllowedTools = subagentAllowedTools(in.AllowedTools)
+	if def.Tools == config.SubagentToolsPick {
+		def.AllowedTools = subagentAllowedTools(in.AllowedTools)
 	}
-	if err := subagentLevelRefused(r, models, "main", entry); err != nil {
-		return config.SubagentConfig{}, err
+	// The body a subagent runs on is what makes this key a subagent definition at
+	// all (P3): without it the entry would be an inert definition that neither
+	// dispatch nor the listing ever shows, so this write path — the one choosing a
+	// role — refuses it with the loader's own sentence.
+	if strings.TrimSpace(def.SystemPrompt) == "" {
+		return config.AgentDefinition{}, subagentBadRequest("%s: system_prompt required", subagentKey(name))
 	}
-	return entry, nil
+	if err := subagentLevelRefused(r, models, "main", config.SubagentConfig{
+		Name: subagentKey(name), Model: def.Model, ReasoningEffort: def.ReasoningEffort,
+	}); err != nil {
+		return config.AgentDefinition{}, err
+	}
+	return def, nil
 }
 
-// writeSharedSubagents is the one write path behind the registry routes: one
-// read-modify-write of the agents section in the state database, with the
-// loader's verdict on the configuration the change would produce.
+// writeSharedSubagents is the one write path behind the shared-definition
+// routes: one read-modify-write of the agents section in the state database,
+// with the loader's verdict on the configuration the change would produce.
 //
 // The verdict runs on a probe root that carries the model table: the section
 // callback's root holds the agents section alone, and both a shared subagent's
 // model and a per-type row are references into the install-wide table, which
 // that root does not have (the same reason writeAgentSubagents reads the
 // persisted configuration first).
-func (s *Server) writeSharedSubagents(w http.ResponseWriter, r *http.Request, mutate func(cfg, models *config.Root) error) {
+func (s *Server) writeSharedSubagents(w http.ResponseWriter, r *http.Request, name string, mutate func(cfg, models *config.Root) error) {
 	persisted, err := s.persistedConfig(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1335,26 +1379,34 @@ func (s *Server) writeSharedSubagents(w http.ResponseWriter, r *http.Request, mu
 		failSubagentWrite(w, err)
 		return
 	}
-	// A session freezes its subagent types when it starts, so the pooled runners
-	// are rebuilt before the answer goes out: a definition added or removed here
-	// is what the next session may dispatch.
-	s.rebindAgentRunners()
+	// A session freezes its subagent types when it starts, so the write is
+	// adopted before the answer goes out: a definition added or removed here is
+	// what the next session may dispatch. A failure is the request's failure —
+	// answering success would describe a configuration the process cannot use.
+	if err := s.adoptAgentWrite(r.Context(), name); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeAgentsJSON(w, sharedSubagentListingOf(&written))
 }
 
-// sharedSubagentIndex finds one registry entry by name.
-func sharedSubagentIndex(entries []config.SubagentConfig, name string) int {
-	key := subagentKey(name)
-	for i, entry := range entries {
-		if subagentKey(entry.Name) == key {
-			return i
-		}
+// sharedSubagent is one install-wide subagent definition as these routes write
+// it: the definition the key holds, and whether that key plays the role at all.
+// A key a primary agent carries is not one of these, so no route here edits or
+// deletes it.
+func sharedSubagent(cfg *config.Root, name string) (config.AgentDefinition, bool) {
+	if cfg == nil {
+		return config.AgentDefinition{}, false
 	}
-	return -1
+	def, ok := cfg.Agents.Definitions[name]
+	if !ok || !config.IsSubagentRoleDefinition(name, def) {
+		return config.AgentDefinition{}, false
+	}
+	return def, true
 }
 
 // handleSharedSubagentCreate serves POST /agents/subagents/shared: a new shared
-// custom subagent, appended in configuration order.
+// custom subagent, listed after the ones that carry an order.
 func (s *Server) handleSharedSubagentCreate(w http.ResponseWriter, r *http.Request) {
 	in, err := decodeSharedSubagentBody(r)
 	if err != nil {
@@ -1366,27 +1418,32 @@ func (s *Server) handleSharedSubagentCreate(w http.ResponseWriter, r *http.Reque
 		failSubagentWrite(w, subagentBadRequest("a shared subagent needs a name"))
 		return
 	}
-	s.writeSharedSubagents(w, r, func(cfg, models *config.Root) error {
+	s.writeSharedSubagents(w, r, name, func(cfg, models *config.Root) error {
 		// The names the loader reserves are one rule for both roles (P3 ruling
 		// #8): the four the model may dispatch and the two the system does.
 		if config.IsReservedDefinitionID(name) {
 			return subagentConflict("%q is a built-in subagent type and cannot be a shared custom subagent", name)
 		}
-		if sharedSubagentIndex(cfg.Agents.SharedSubagents, name) >= 0 {
-			return subagentConflict("a shared subagent named %q already exists", name)
+		if _, exists := cfg.Agents.Definitions[name]; exists {
+			return subagentConflict("a subagent definition named %q already exists", name)
 		}
 		entry, err := sharedSubagentEntry(models, r, name, in)
 		if err != nil {
 			return err
 		}
-		cfg.Agents.SharedSubagents = append(cfg.Agents.SharedSubagents, entry)
+		if cfg.Agents.Definitions == nil {
+			cfg.Agents.Definitions = map[string]config.AgentDefinition{}
+		}
+		cfg.Agents.Definitions[name] = entry
 		return nil
 	})
 }
 
 // handleSharedSubagentUpdate serves PUT /agents/subagents/shared/:name: the
-// definition is replaced whole. The name is the entry's identity and comes from
-// the route, so an update never renames.
+// definition's subagent body is replaced whole. The name is the definition's
+// identity and comes from the route, so an update never renames; its order and
+// its display name are the definition's own and survive an edit the form does
+// not carry them in.
 func (s *Server) handleSharedSubagentUpdate(w http.ResponseWriter, r *http.Request) {
 	name := subagentKey(pathParam(r, "name"))
 	in, err := decodeSharedSubagentBody(r)
@@ -1394,16 +1451,18 @@ func (s *Server) handleSharedSubagentUpdate(w http.ResponseWriter, r *http.Reque
 		failSubagentWrite(w, err)
 		return
 	}
-	s.writeSharedSubagents(w, r, func(cfg, models *config.Root) error {
-		index := sharedSubagentIndex(cfg.Agents.SharedSubagents, name)
-		if index < 0 {
+	s.writeSharedSubagents(w, r, name, func(cfg, models *config.Root) error {
+		stored, ok := sharedSubagent(cfg, name)
+		if !ok {
 			return subagentNotFound("no shared subagent named %q", name)
 		}
 		entry, err := sharedSubagentEntry(models, r, name, in)
 		if err != nil {
 			return err
 		}
-		cfg.Agents.SharedSubagents[index] = entry
+		entry.Order = stored.Order
+		entry.DisplayName = stored.DisplayName
+		cfg.Agents.Definitions[name] = entry
 		return nil
 	})
 }
@@ -1415,14 +1474,19 @@ func (s *Server) handleSharedSubagentUpdate(w http.ResponseWriter, r *http.Reque
 // shared subagent (the loader refuses one that does not), so leaving the
 // references behind would leave an install that cannot start — and the removal
 // lands in the same agents-section transaction as the definition itself.
+//
+// A key playing the primary role is not a shared subagent and is refused: this
+// route deletes install-wide subagents, never an agent.
 func (s *Server) handleSharedSubagentDelete(w http.ResponseWriter, r *http.Request) {
 	name := subagentKey(pathParam(r, "name"))
-	s.writeSharedSubagents(w, r, func(cfg, _ *config.Root) error {
-		index := sharedSubagentIndex(cfg.Agents.SharedSubagents, name)
-		if index < 0 {
+	s.writeSharedSubagents(w, r, name, func(cfg, _ *config.Root) error {
+		if _, ok := sharedSubagent(cfg, name); !ok {
+			if _, exists := cfg.Agents.Definitions[name]; exists {
+				return subagentBadRequest("%q is not a shared subagent: it is a primary agent's definition", name)
+			}
 			return subagentNotFound("no shared subagent named %q", name)
 		}
-		cfg.Agents.SharedSubagents = append(cfg.Agents.SharedSubagents[:index], cfg.Agents.SharedSubagents[index+1:]...)
+		delete(cfg.Agents.Definitions, name)
 		for id, def := range cfg.Agents.Definitions {
 			kept := make([]config.SubagentConfig, 0, len(def.Subagents))
 			for _, entry := range def.Subagents {
@@ -1459,7 +1523,7 @@ func (s *Server) handleSharedSubagentTypeUpdate(w http.ResponseWriter, r *http.R
 		failSubagentWrite(w, err)
 		return
 	}
-	s.writeSharedSubagents(w, r, func(cfg, models *config.Root) error {
+	s.writeSharedSubagents(w, r, typeName, func(cfg, models *config.Root) error {
 		row := config.SubagentConfig{ReasoningEffort: strings.TrimSpace(in.ReasoningEffort)}
 		if ref := strings.TrimSpace(in.Model); ref != "" {
 			resolved, ok := config.ResolveModelRef(models, "main", ref)

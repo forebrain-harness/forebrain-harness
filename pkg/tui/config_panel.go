@@ -1496,12 +1496,12 @@ func configRowLabel(key string, index int, list bool) string {
 	return key
 }
 
-// configRowLabelAt names one stored row of a page. A shared subagent is named by
-// the name it carries: that is its identity in the registry, and a list of
-// "#1, #2" would say nothing about which subagent is which (plan 314).
+// configRowLabelAt names one stored row of a page. On an agent's subagent list a
+// shared subagent is named by the name it carries: that is its identity in the
+// definitions map, and a list of "#1, #2" would say nothing about which subagent
+// is which (plan 314).
 func (p *configPanel) configRowLabelAt(doc any, path []string, key string, index int, list bool, value any) string {
-	named := agentSubagentsPath(path) || (len(path) == 1 && path[0] == configSharedSubagentsKey)
-	if named {
+	if agentSubagentsPath(path) {
 		if name := sharedRowName(doc, key, value); name != "" {
 			return name
 		}
@@ -1532,13 +1532,12 @@ const (
 	configDefinitionsPath   = "definitions"
 	configSubagentsKey      = "subagents"
 	configSubagentModelsKey = "subagent_models"
-	// configPlanReviewerKey and configSharedSubagentsKey are the two other
-	// install-wide rows in the agents section the "Subagents" page presents
-	// (plan 314): the exit-plan reviewer's global row (plan 313) and the shared
-	// custom registry.
-	configPlanReviewerKey    = "plan_reviewer"
-	configSharedSubagentsKey = "shared_subagents"
-	configPrimaryStatus      = "Primary"
+	// configPlanReviewerKey is the other install-wide row in the agents
+	// section the "Subagents" page presents (plans 313, 314): the exit-plan
+	// reviewer's global row. The shared subagent definitions live in the
+	// definitions map like every other definition (P3).
+	configPlanReviewerKey = "plan_reviewer"
+	configPrimaryStatus   = "Primary"
 	// configDefaultStatus is the section list's one status word: the database
 	// holds no row for the section, so it reads its built-in defaults — the
 	// prototype's own marker (plan 321).
@@ -1649,39 +1648,106 @@ func agentSubagentsPath(path []string) bool {
 	return len(path) == 3 && path[0] == configDefinitionsPath && path[2] == configSubagentsKey
 }
 
-// sharedSubagentNamesIn lists the names of the shared custom subagents an agents
-// document holds, in registry order.
+// sharedSubagentNamesIn lists the names of the install-wide shared subagents an
+// agents document holds, in their configured order. They are definitions whose
+// key plays the subagent role (P3): not a built-in type's shell, not a primary
+// agent, and carrying the body a subagent runs on. The panel reaches the section
+// as a document, so the rule reads the keys and fields it holds rather than the
+// configuration types (appcfg.IsReservedDefinitionID is the same list of built-in
+// keys the write paths refuse).
 func sharedSubagentNamesIn(doc any) []string {
-	registry, _ := configLookupValue(doc, []string{configSharedSubagentsKey})
-	rows, _ := registry.([]any)
+	definitions, _ := configLookupValue(doc, []string{configDefinitionsPath})
+	rows, _ := definitions.(map[string]any)
 	names := make([]string, 0, len(rows))
-	for _, row := range rows {
-		entry, _ := row.(map[string]any)
-		if name := strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))); name != "" {
+	for key := range rows {
+		name := strings.ToLower(strings.TrimSpace(key))
+		if configSubagentDefinition(rows[key], name) {
 			names = append(names, name)
 		}
 	}
+	sort.SliceStable(names, func(i, j int) bool {
+		left, right := configDefinitionOrder(rows[names[i]]), configDefinitionOrder(rows[names[j]])
+		if left != right {
+			// A definition nobody positioned (0) lists after the ordered ones,
+			// the way pkg/config's SubagentDefinitionNames reads the field.
+			if left == 0 {
+				return false
+			}
+			if right == 0 {
+				return true
+			}
+			return left < right
+		}
+		return names[i] < names[j]
+	})
 	return names
 }
 
-// configSharedSubagent finds one registry entry by name.
-func configSharedSubagent(doc any, name string) (map[string]any, bool) {
-	registry, _ := configLookupValue(doc, []string{configSharedSubagentsKey})
-	rows, _ := registry.([]any)
-	key := strings.ToLower(strings.TrimSpace(name))
-	for _, row := range rows {
-		entry, ok := row.(map[string]any)
-		if !ok {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))) == key {
-			return entry, true
-		}
+// configSubagentDefinition reports whether one definitions entry plays the
+// subagent role: the role flag is not set, the key is not a built-in type's, and
+// the entry carries the body a subagent runs on.
+func configSubagentDefinition(value any, name string) bool {
+	entry, ok := value.(map[string]any)
+	if !ok {
+		return false
 	}
-	return nil, false
+	if primary, _ := entry["primary"].(bool); primary {
+		return false
+	}
+	if appcfg.IsReservedDefinitionID(name) {
+		return false
+	}
+	return strings.TrimSpace(configStringField(entry, "description")) != "" ||
+		strings.TrimSpace(configStringField(entry, "system_prompt")) != "" ||
+		strings.TrimSpace(configStringField(entry, "model")) != "" ||
+		strings.TrimSpace(configStringField(entry, "reasoning_effort")) != "" ||
+		strings.TrimSpace(configStringField(entry, "tools")) != "" ||
+		configListLen(entry["allowed_tools"]) > 0 ||
+		entry["continuable"] != nil
 }
 
-// isSharedSubagentName reports whether name is one of the registry's subagents.
+// configDefinitionOrder reads a definition's order field: the position the
+// migration gave it when it came out of the shared-subagent registry. 0 is
+// "unordered", and a document the panel loaded as YAML carries the number in
+// whatever type that decoder used.
+func configDefinitionOrder(value any) int {
+	entry, ok := value.(map[string]any)
+	if !ok {
+		return 0
+	}
+	switch order := entry["order"].(type) {
+	case float64:
+		return int(order)
+	case int:
+		return order
+	case int64:
+		return int(order)
+	default:
+		return 0
+	}
+}
+
+// configListLen counts a document list's elements, 0 for anything that is not a
+// list.
+func configListLen(value any) int {
+	list, _ := value.([]any)
+	return len(list)
+}
+
+// configSharedSubagent finds one shared subagent definition by name.
+func configSharedSubagent(doc any, name string) (map[string]any, bool) {
+	definitions, _ := configLookupValue(doc, []string{configDefinitionsPath})
+	rows, _ := definitions.(map[string]any)
+	key := strings.ToLower(strings.TrimSpace(name))
+	entry, ok := rows[key].(map[string]any)
+	if !ok || !configSubagentDefinition(entry, key) {
+		return nil, false
+	}
+	return entry, true
+}
+
+// isSharedSubagentName reports whether name is one of the shared subagents the
+// definitions map holds.
 func isSharedSubagentName(doc any, name string) bool {
 	return slices.Contains(sharedSubagentNamesIn(doc), strings.ToLower(strings.TrimSpace(name)))
 }
@@ -1733,16 +1799,6 @@ func (p *configPanel) configRowColumns(doc any, path []string, key string, value
 	// D3): the value column answers with the mask, whatever the row's shape.
 	if configIsSecretPath(append(path, key)...) {
 		return "", configSecretDisplay(value, true)
-	}
-	if len(path) == 1 && path[0] == configSharedSubagentsKey {
-		// A registry entry's own description is what a model reads when it
-		// chooses a subagent type, so it is what its row says (plan 314).
-		if row, ok := value.(map[string]any); ok {
-			if text := strings.TrimSpace(configStringField(row, "description")); text != "" {
-				return text, ""
-			}
-		}
-		return "", configRowDescription(value)
 	}
 	if len(path) != 3 || path[0] != configDefinitionsPath || path[2] != configSubagentsKey {
 		return "", configRowDescription(value)
@@ -1997,8 +2053,6 @@ func configTemplateFor(section string, path []string) string {
 		case is(2, configDefinitionsPath):
 			return configTemplateAgent
 		case is(4, configDefinitionsPath, "", configSubagentsKey):
-			return configTemplateSubagent
-		case is(2, configSharedSubagentsKey):
 			return configTemplateSubagent
 		case is(1, configPlanReviewerKey):
 			return configTemplateGlobalSystemRow
@@ -2510,9 +2564,6 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		return p.addHookRow(doc, path, field, container)
 	}
 	list := configContainerIsList(field, container)
-	if list && len(path) == 1 && path[0] == configSharedSubagentsKey {
-		return p.addSharedSubagent(doc, path, field, container)
-	}
 	if !list && configPrimaryCreationPath(field, path) {
 		return p.addPrimaryAgent(doc, path, field, container)
 	}
@@ -2621,30 +2672,6 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 // the guard must not fire there (plan 313).
 func configPrimaryCreationPath(field configField, path []string) bool {
 	return field.Path == configDefinitionsPath && len(path) == 1 && path[0] == configDefinitionsPath
-}
-
-// addSharedSubagent seeds one registry entry and opens it (plan 314). A shared
-// subagent is a full custom definition, so the row starts with the fields the
-// loader requires — a name to type, a description the model reads, a prompt to
-// run on, and the read-only tool tier a subagent starts at — rather than asking
-// what type of value the row is. Saving is what judges it: the registry's
-// validator refuses an entry with no name, no description or no prompt, and its
-// own sentence is the one the page shows.
-func (p *configPanel) addSharedSubagent(doc any, path []string, field configField, container any) (any, string) {
-	seed := map[string]any{
-		"name":          "",
-		"description":   "",
-		"system_prompt": "",
-		"tools":         appcfg.SubagentToolsReadOnly,
-	}
-	rows, _ := container.([]any)
-	rows = append(append(make([]any, 0, len(rows)+1), rows...), seed)
-	updated, note := p.assign(doc, path, rows, false, field.Label)
-	if note != "" {
-		return updated, note
-	}
-	opened, note := p.editRow(updated, path, strconv.Itoa(len(rows)-1), field)
-	return opened, note
 }
 
 // addPrimaryAgent creates one primary agent the way the prototype's create-agent

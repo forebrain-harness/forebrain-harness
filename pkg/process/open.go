@@ -492,6 +492,18 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 			return nil, fmt.Errorf("seed stored configuration defaults: %w", err)
 		}
 	}
+	// The install-wide shared subagent registry becomes agent definitions (P3):
+	// a content migration over the agents section, run once, after the import has
+	// materialised a file-era section and before the model references are
+	// rewritten — a merged definition's model reference is rewritten by that
+	// pass. A registry the store does not hold is a no-op, which is what makes a
+	// second start cheap and idempotent.
+	if opts.Config == nil {
+		if err := migrateSharedSubagents(ctx, sqlDB); err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("merge shared subagents into agent definitions: %w", err)
+		}
+	}
 	// The one-time final sync of plan 188 W12: the 187→188 transition kept
 	// writing the login files and the MCP overlay tree, so whichever side is
 	// newer wins into the database here — and nothing writes those files

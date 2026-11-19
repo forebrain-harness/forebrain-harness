@@ -60,12 +60,15 @@ type SubagentCatalog struct {
 // unknown or unnamed agent has none: the catalog then offers exactly the
 // built-in types, all of them enabled.
 //
-// The install-wide shared subagents (agents.shared_subagents) are merged in
-// here rather than stored per agent (plan 314): an agent's entry naming one is
-// its enable marker — the definition lives in the registry — and a shared
-// subagent runs nowhere until that marker says enabled: true. That is the
-// opposite of a per-agent custom subagent's absent-means-on switch, which is
-// why the two are read by different rules rather than one.
+// The install-wide subagent definitions (agents.definitions, a key playing the
+// subagent role) are merged in here rather than stored per agent (plan 314, P3):
+// an agent's entry naming one is its enable marker — the definition is the
+// install's — and such a subagent runs nowhere until that marker says enabled:
+// true. That is the opposite of a per-agent custom subagent's absent-means-on
+// switch, which is why the two are read by different rules rather than one. An
+// entry of that name carrying a body of its own is a custom subagent instead
+// (pkg/config's ValidateAgentSubagents draws the same line), and the agent's own
+// definition wins at dispatch the way an override of a built-in does.
 func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
 	catalog := SubagentCatalog{cfg: cfg, agentName: agentName, entries: map[string]appcfg.SubagentConfig{}}
 	if cfg == nil {
@@ -79,11 +82,11 @@ func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
 	if !ok {
 		return catalog
 	}
-	shared := appcfg.SharedSubagentNames(cfg.Agents.SharedSubagents)
+	shared := appcfg.SubagentDefinitionNames(cfg.Agents.Definitions)
 	enabledShared := make(map[string]struct{}, len(shared))
 	for _, entry := range def.Subagents {
 		entry.Name = subagentKey(entry.Name)
-		if slices.Contains(shared, entry.Name) {
+		if slices.Contains(shared, entry.Name) && !appcfg.SubagentEntryCarriesBody(entry) {
 			// A reference entry is the enable marker, never a definition.
 			if entry.Enabled != nil && *entry.Enabled {
 				enabledShared[entry.Name] = struct{}{}
@@ -95,16 +98,21 @@ func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
 			catalog.customs = append(catalog.customs, entry)
 		}
 	}
-	// The registry's order decides where the merged ones sit: after this
-	// agent's own subagents, and only the ones it enabled.
-	for _, entry := range cfg.Agents.SharedSubagents {
-		entry.Name = subagentKey(entry.Name)
-		if _, on := enabledShared[entry.Name]; !on {
+	// The definitions' own order decides where the merged ones sit: after this
+	// agent's own subagents, and only the ones it enabled. The entry carries no
+	// Enabled of its own: the marker above was the switch, and
+	// subagentConfigEnabled reads absent as on.
+	for _, name := range shared {
+		if _, on := enabledShared[name]; !on {
 			continue
 		}
-		// Enabled explicitly: the marker the merge answers for is this
-		// definition's presence, and subagentConfigEnabled reads absent as on.
-		entry.Enabled = appcfg.BoolPtr(true)
+		if _, own := catalog.entries[name]; own {
+			continue
+		}
+		entry, found := appcfg.SubagentDefinitionFor(cfg.Agents.Definitions, name)
+		if !found {
+			continue
+		}
 		catalog.entries[entry.Name] = entry
 		catalog.customs = append(catalog.customs, entry)
 	}

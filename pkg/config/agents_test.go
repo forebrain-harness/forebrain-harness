@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -771,135 +772,12 @@ func TestValidatePlanReviewerModel(t *testing.T) {
 	}
 }
 
-// The install-wide shared custom subagent registry (plan 314): every entry is a
-// full custom definition, its enablement is per-agent rather than its own, and a
-// built-in type's name belongs to that type. The table below is the whole rule
-// set, and the second half pins the loader's mount point for it — an install
-// with no agents.definitions at all, which is what a fresh one looks like.
-func TestValidateSharedSubagents(t *testing.T) {
-	resolves := func(ref string) bool { return ref == "llm-shared-row" }
-	valid := SubagentConfig{
-		Name:         "repo-auditor",
-		Description:  "audits one repository area",
-		SystemPrompt: "You audit repositories.",
-	}
-	cases := []struct {
-		name   string
-		entry  SubagentConfig
-		want   string // the sentence the refusal must carry; empty means accepted
-		suffix string
-	}{
-		{name: "a full definition is accepted", entry: valid},
-		{
-			name:  "a row-id model is accepted",
-			entry: SubagentConfig{Name: valid.Name, Description: valid.Description, SystemPrompt: valid.SystemPrompt, Model: "llm-shared-row", ReasoningEffort: "low"},
-		},
-		{
-			name:  "a description-less definition is accepted",
-			entry: SubagentConfig{Name: valid.Name, SystemPrompt: valid.SystemPrompt},
-		},
-		{
-			name:  "missing system_prompt is refused",
-			entry: SubagentConfig{Name: valid.Name, Description: valid.Description},
-			want:  "system_prompt required",
-		},
-		{
-			name:  "a public built-in name is refused",
-			entry: SubagentConfig{Name: "explore", Description: valid.Description, SystemPrompt: valid.SystemPrompt},
-			want:  `"explore" is a built-in subagent type and cannot be a shared custom subagent`,
-		},
-		{
-			name:  "a system type name is refused",
-			entry: SubagentConfig{Name: "plan-reviewer", Description: valid.Description, SystemPrompt: valid.SystemPrompt},
-			want:  `"plan-reviewer" is a built-in subagent type and cannot be a shared custom subagent`,
-		},
-		{
-			name:   "a duplicate is refused",
-			entry:  valid,
-			want:   `duplicate shared subagent "repo-auditor"`,
-			suffix: "twice: " + valid.Name,
-		},
-		{
-			name:  "an entry carrying enabled is refused",
-			entry: SubagentConfig{Name: valid.Name, Description: valid.Description, SystemPrompt: valid.SystemPrompt, Enabled: BoolPtr(true)},
-			want:  "a shared subagent's enablement is per-agent; remove enabled",
-		},
-		{
-			name:  "an effort without a model is refused",
-			entry: SubagentConfig{Name: valid.Name, Description: valid.Description, SystemPrompt: valid.SystemPrompt, ReasoningEffort: "high"},
-			want:  "agents.shared_subagents[0]: thinking level requires a model",
-		},
-		{
-			name:  "a bare model name is refused",
-			entry: SubagentConfig{Name: valid.Name, Description: valid.Description, SystemPrompt: valid.SystemPrompt, Model: "glm-5.3-flash"},
-			want:  `model "glm-5.3-flash" must be provider/model`,
-		},
-		{
-			name:  "an unknown tool tier is refused",
-			entry: SubagentConfig{Name: valid.Name, Description: valid.Description, SystemPrompt: valid.SystemPrompt, Tools: "everything"},
-			want:  `tools "everything" must be read_only, edit or pick`,
-		},
-		{
-			name:  "pick without allowed_tools is refused",
-			entry: SubagentConfig{Name: valid.Name, Description: valid.Description, SystemPrompt: valid.SystemPrompt, Tools: SubagentToolsPick},
-			want:  "allowed_tools requires at least one tool with tools: pick",
-		},
-		{
-			name:  "an invalid name is refused",
-			entry: SubagentConfig{Name: "Repo_Auditor", Description: valid.Description, SystemPrompt: valid.SystemPrompt},
-			want:  `invalid name "Repo_Auditor"`,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			entries := []SubagentConfig{tc.entry}
-			if tc.suffix != "" {
-				entries = append(entries, tc.entry)
-			}
-			err := ValidateSharedSubagents(entries, builtInPublicSubagentNames, builtInSystemSubagentNames, resolves)
-			if tc.want == "" {
-				if err != nil {
-					t.Fatalf("a valid shared subagent was refused: %v", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v, want %q", err, tc.want)
-			}
-		})
-	}
-
-	// An empty registry is nothing to check, which is what every install that
-	// never created one carries.
-	if err := ValidateSharedSubagents(nil, builtInPublicSubagentNames, builtInSystemSubagentNames, nil); err != nil {
-		t.Fatalf("an empty registry was refused: %v", err)
-	}
-
-	// The loader runs it with no definitions present: the fresh install's
-	// shape, where validatePrimaryAgents has already returned.
-	root := Root{
-		LLMModels: []LLMModelConfig{{ID: "llm-shared-row", Provider: "deepseek", Model: "deepseek-v4-flash"}},
-		Agents: AgentsSection{
-			SharedSubagents: []SubagentConfig{{
-				Name: valid.Name, Description: valid.Description, SystemPrompt: valid.SystemPrompt,
-				Model: "llm-shared-row", ReasoningEffort: "low",
-			}},
-		},
-	}
-	if err := FinishLoad(&root); err != nil {
-		t.Fatalf("a configured shared subagent was refused on an install with no definitions: %v", err)
-	}
-	root.Agents.SharedSubagents[0].SystemPrompt = ""
-	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "agents.shared_subagents[0]: system_prompt required") {
-		t.Fatalf("err = %v, want the loader to refuse a shared subagent with no prompt", err)
-	}
-}
-
 // A shared subagent is enabled for one agent by a reference entry — the name
-// and a switch — because the definition itself belongs to the install-wide
-// registry (plan 314). The table pins both halves of that rule: the reference
-// carries nothing else, and a name the registry does not hold is still a full
-// custom definition with its own description and prompt.
+// and a switch — because the definition itself is the install's (plan 314, P3).
+// The table pins both halves of that rule: the bare reference enables, and an
+// entry of the same name carrying a body of its own is this agent's custom
+// subagent instead, judged as one. That collision is the one case both shapes
+// name the same thing, and dispatch reads the agent's own entry.
 func TestValidateAgentSubagentsSharedReferenceEntries(t *testing.T) {
 	resolves := func(ref string) bool { return ref == "llm-shared-row" }
 	shared := []string{"repo-auditor"}
@@ -916,30 +794,39 @@ func TestValidateAgentSubagentsSharedReferenceEntries(t *testing.T) {
 		t.Fatalf("a switched-off shared reference was refused: %v", err)
 	}
 
-	// Every field of the definition is the registry's: setting one here would
-	// be a second definition the pages never show.
+	// A body of its own makes the entry a custom subagent of this agent even
+	// under the definition's name: it is held to the custom body's rules, so
+	// without a prompt of its own it is refused — the reference rule, which
+	// refuses a body outright, no longer applies (P3).
 	for _, tc := range []struct {
 		name  string
 		entry SubagentConfig
 	}{
 		{"description", SubagentConfig{Name: "repo-auditor", Description: "mine"}},
-		{"system_prompt", SubagentConfig{Name: "repo-auditor", SystemPrompt: "you are mine"}},
-		{"model", SubagentConfig{Name: "repo-auditor", Model: "llm-shared-row"}},
-		{"reasoning_effort", SubagentConfig{Name: "repo-auditor", ReasoningEffort: "low"}},
 		{"tools", SubagentConfig{Name: "repo-auditor", Tools: SubagentToolsReadOnly}},
-		{"allowed_tools", SubagentConfig{Name: "repo-auditor", AllowedTools: []string{"read_file"}}},
+		{"model", SubagentConfig{Name: "repo-auditor", Model: "llm-shared-row"}},
 		{"continuable", SubagentConfig{Name: "repo-auditor", Continuable: BoolPtr(false)}},
 	} {
-		t.Run(tc.name+" is refused", func(t *testing.T) {
+		t.Run(tc.name+" makes it a custom entry", func(t *testing.T) {
 			def := AgentDefinition{Subagents: []SubagentConfig{tc.entry}}
 			err := ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves)
-			if err == nil || !strings.Contains(err.Error(), `"repo-auditor" references a shared subagent; only enabled may be set here`) {
-				t.Fatalf("err = %v, want the reference-entry refusal", err)
+			if err == nil || !strings.Contains(err.Error(), "system_prompt required") {
+				t.Fatalf("err = %v, want the custom body's own rule", err)
 			}
 		})
 	}
 
-	// A name no registry holds keeps the full-custom rule: a prompt required.
+	// Complete, the collision is a custom subagent of this agent and loads: the
+	// agent's definition wins at dispatch rather than being a second reference.
+	custom := AgentDefinition{Subagents: []SubagentConfig{{
+		Name: "repo-auditor", Description: "mine", SystemPrompt: "you are mine",
+		Model: "llm-shared-row", ReasoningEffort: "low", Tools: SubagentToolsReadOnly,
+	}}}
+	if err := ValidateAgentSubagents("main", custom, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err != nil {
+		t.Fatalf("a custom entry sharing a definition's name was refused: %v", err)
+	}
+
+	// A name no definition holds keeps the full-custom rule: a prompt required.
 	own := AgentDefinition{Subagents: []SubagentConfig{{Name: "repo-scout", Enabled: BoolPtr(true)}}}
 	if err := ValidateAgentSubagents("main", own, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err == nil || !strings.Contains(err.Error(), "system_prompt required") {
 		t.Fatalf("err = %v, want a per-agent custom to keep its own body", err)
@@ -950,6 +837,38 @@ func TestValidateAgentSubagentsSharedReferenceEntries(t *testing.T) {
 	builtin := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", Model: "llm-shared-row", ReasoningEffort: "low", SystemPrompt: "search here", Enabled: BoolPtr(false)}}}
 	if err := ValidateAgentSubagents("main", builtin, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err != nil {
 		t.Fatalf("a built-in override was refused: %v", err)
+	}
+}
+
+// The install-wide subagent definitions are the definitions whose key plays the
+// subagent role (P3), and their order is the one the migration carried out of
+// the shared-subagent registry: the entries that carry an Order ascend, and the
+// ones nobody positioned follow by id. A primary agent, a built-in type's shell
+// and a definition with no subagent body are none of them.
+func TestSubagentDefinitionNamesKeepsConfiguredOrder(t *testing.T) {
+	defs := map[string]AgentDefinition{
+		"main":       {Primary: true},
+		"explore":    {Primary: true, Description: "shell", DefaultModel: "llm-1"},
+		"worker":     {Primary: false},
+		"zeta":       {Primary: false, SystemPrompt: "z"},
+		"alpha":      {Primary: false, SystemPrompt: "a"},
+		"repo-docs":  {Primary: false, SystemPrompt: "docs", Order: 2},
+		"repo-tests": {Primary: false, SystemPrompt: "tests", Order: 1},
+	}
+	got := SubagentDefinitionNames(defs)
+	want := []string{"repo-tests", "repo-docs", "alpha", "zeta"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("SubagentDefinitionNames = %v, want the ordered ones first, then the rest by id (%v)", got, want)
+	}
+
+	entry, ok := SubagentDefinitionFor(defs, "repo-docs")
+	if !ok || entry.Name != "repo-docs" || entry.SystemPrompt != "docs" {
+		t.Fatalf("SubagentDefinitionFor = %+v %v, want the definition's body", entry, ok)
+	}
+	for _, name := range []string{"main", "explore", "worker", "missing"} {
+		if _, ok := SubagentDefinitionFor(defs, name); ok {
+			t.Fatalf("SubagentDefinitionFor(%q) claimed a key that is not a subagent definition", name)
+		}
 	}
 }
 

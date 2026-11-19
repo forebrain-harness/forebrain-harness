@@ -32,35 +32,74 @@ type AgentsSection struct {
 	// effort, shared by every primary agent. An agent's own override
 	// (def.Subagents) still wins.
 	SubagentModels map[string]SubagentConfig `yaml:"subagent_models,omitempty" json:"subagent_models,omitempty"`
-	// SharedSubagents are the install-wide custom subagents every primary agent
-	// may consume (plan 314). Each is a full custom definition; enablement is
-	// per-agent (a reference entry in that agent's Subagents), so a shared
-	// definition carries no Enabled of its own — it is disabled for every agent
-	// until explicitly enabled (owner 2026-11-16).
-	SharedSubagents []SubagentConfig `yaml:"shared_subagents,omitempty" json:"shared_subagents,omitempty"`
 }
 
-// SharedSubagentNames lists the shared registry's names the way an agent's
-// reference entry and the dispatch catalog compare them: trimmed and
-// lower-case, in configuration order.
-func SharedSubagentNames(entries []SubagentConfig) []string {
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, strings.ToLower(strings.TrimSpace(entry.Name)))
+// IsSubagentRoleDefinition reports whether the definitions entry id plays the
+// install-wide subagent role (P3): it is the definition of a subagent every
+// primary agent may consume, and the per-agent entry naming it is the switch
+// that enables it. It is the subagent counterpart of IsEffectivePrimaryAgent,
+// and the two never claim the same key.
+//
+// A built-in type's key is a shell rather than a definition — its default_model
+// is the type's install-wide model choice — and a definition carrying none of
+// the subagent body is an agent that never chose a role, so neither is one of
+// these. There is no registry left for the definitions to live in (P3: the
+// shared_subagents list was merged into the definitions map), which is why the
+// predicate is structural.
+func IsSubagentRoleDefinition(id string, def AgentDefinition) bool {
+	if IsEffectivePrimaryAgent(id, def) || IsReservedDefinitionID(id) {
+		return false
 	}
+	return definitionCarriesSubagentBody(def)
+}
+
+// SubagentDefinitionNames lists the subagent-role definitions' keys the way the
+// dispatch catalog and the per-agent listing order them: the ones carrying an
+// Order ascending, then the rest by id. Order is what keeps the order the
+// shared-subagent registry had before its merge (P3 ruling #5), and 0 means
+// unordered — a definition nobody positioned lists by its key, as before.
+func SubagentDefinitionNames(defs map[string]AgentDefinition) []string {
+	names := make([]string, 0, len(defs))
+	for id, def := range defs {
+		if IsSubagentRoleDefinition(id, def) {
+			names = append(names, id)
+		}
+	}
+	sort.SliceStable(names, func(i, j int) bool {
+		left, right := defs[names[i]].Order, defs[names[j]].Order
+		if left != right {
+			if left == 0 {
+				return false
+			}
+			if right == 0 {
+				return true
+			}
+			return left < right
+		}
+		return names[i] < names[j]
+	})
 	return names
 }
 
-// SharedSubagentFor finds one shared definition by name; ok is false when the
-// registry does not hold it.
-func SharedSubagentFor(entries []SubagentConfig, name string) (SubagentConfig, bool) {
+// SubagentDefinitionFor finds one install-wide subagent definition by name and
+// returns its body as the SubagentConfig every dispatch path reads; ok is false
+// when no definition of that name plays the subagent role.
+func SubagentDefinitionFor(defs map[string]AgentDefinition, name string) (SubagentConfig, bool) {
 	key := strings.ToLower(strings.TrimSpace(name))
-	for _, entry := range entries {
-		if strings.ToLower(strings.TrimSpace(entry.Name)) == key {
-			return entry, true
-		}
+	def, ok := defs[key]
+	if !ok || !IsSubagentRoleDefinition(key, def) {
+		return SubagentConfig{}, false
 	}
-	return SubagentConfig{}, false
+	return SubagentConfig{
+		Name:            key,
+		Description:     def.Description,
+		SystemPrompt:    def.SystemPrompt,
+		Model:           def.Model,
+		ReasoningEffort: def.ReasoningEffort,
+		Tools:           def.Tools,
+		AllowedTools:    def.AllowedTools,
+		Continuable:     def.Continuable,
+	}, true
 }
 
 // MCPServersFor returns the MCP servers one primary agent owns, in
@@ -315,15 +354,25 @@ var subagentConfigNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
 // ValidateAgentSubagents checks one primary agent's subagent entries.
 // publicBuiltins are the built-in types an entry of that name overrides;
 // systemBuiltins are the types the system dispatches, which a configuration
-// must not touch; sharedNames are the install-wide shared custom subagents
-// (agents.shared_subagents) this agent may enable. Names are passed in rather
-// than imported so the loader can report the rule without depending on the
-// package that defines the definitions.
+// must not touch; sharedNames are the install-wide subagent definitions
+// (agents.definitions, a definition whose key plays the subagent role) this
+// agent may enable. Names are passed in rather than imported so the loader can
+// report the rule without depending on the package that defines the
+// definitions.
 //
-// A shared subagent is enabled for this agent by a reference entry — the name
-// and a switch, nothing else — because the definition is the registry's and no
-// agent edits it (plan 314). Absence means disabled, which is why the reference
-// carries enabled: true rather than the absent-means-on an override uses.
+// An install-wide subagent is enabled for this agent by a reference entry — the
+// name and a switch, nothing else — because the definition is the install's and
+// no agent edits it (plan 314, P3). Absence means disabled, which is why the
+// reference carries enabled: true rather than the absent-means-on an override
+// uses.
+//
+// The classification is the entry's own shape (P3): a name that is also an
+// install-wide definition is a reference only while the entry carries nothing
+// but that name and the switch. An entry carrying a body of its own — a
+// description, a prompt, tools — is a custom subagent of this agent that
+// happens to share the definition's name, and it is judged as one. That is the
+// one case the shapes collide in, and the agent's own definition wins at
+// dispatch, exactly as an override of a built-in does.
 //
 // The model a subagent entry names is deliberately not checked against the
 // agent's model list while it has the "provider/model" shape: deleting a
@@ -355,32 +404,41 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 		if _, ok := system[name]; ok {
 			return fmt.Errorf("%s: %q is dispatched by the system and cannot be configured.", where, name)
 		}
-		if _, ok := public[name]; ok {
+		_, publicBuiltin := public[name]
+		switch {
+		case publicBuiltin:
 			if strings.TrimSpace(entry.Description) != "" || strings.TrimSpace(entry.Tools) != "" || len(entry.AllowedTools) > 0 || entry.Continuable != nil {
 				return fmt.Errorf("%s: %q is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else.", where, name)
 			}
-		} else if slices.Contains(sharedNames, name) {
-			// A shared subagent's enablement is this entry and nothing else: its
-			// description, prompt, model and tools belong to the registry
-			// (plan 314), so a set field here would be a second definition the
-			// page never shows.
-			if strings.TrimSpace(entry.Description) != "" ||
-				strings.TrimSpace(entry.SystemPrompt) != "" ||
-				strings.TrimSpace(entry.Model) != "" ||
-				strings.TrimSpace(entry.ReasoningEffort) != "" ||
-				strings.TrimSpace(entry.Tools) != "" ||
-				len(entry.AllowedTools) > 0 ||
-				entry.Continuable != nil {
-				return fmt.Errorf("%s: %q references a shared subagent; only enabled may be set here", where, name)
+		case slices.Contains(sharedNames, name) && !SubagentEntryCarriesBody(entry):
+			// The reference that enables an install-wide definition: the name
+			// and the switch, so there is no body to judge.
+		default:
+			if err := validateCustomSubagentBody(where, entry); err != nil {
+				return err
 			}
-		} else if err := validateCustomSubagentBody(where, entry); err != nil {
-			return err
 		}
 		if err := validateSubagentModel(where, where+": thinking level requires a model.", entry, refResolves); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// SubagentEntryCarriesBody reports whether an agent's subagent entry carries a
+// body of its own, as opposed to being the bare reference that enables an
+// install-wide definition: a description, a prompt, a model, a level, a tool
+// policy or a lifecycle. The two shapes never mean the same thing twice — a name
+// that is also a definition is a reference while it carries nothing else, and a
+// custom subagent of this agent the moment it does (P3).
+func SubagentEntryCarriesBody(entry SubagentConfig) bool {
+	return strings.TrimSpace(entry.Description) != "" ||
+		strings.TrimSpace(entry.SystemPrompt) != "" ||
+		strings.TrimSpace(entry.Model) != "" ||
+		strings.TrimSpace(entry.ReasoningEffort) != "" ||
+		strings.TrimSpace(entry.Tools) != "" ||
+		len(entry.AllowedTools) > 0 ||
+		entry.Continuable != nil
 }
 
 // validateSubagentModel enforces the "provider/model" shape and the rule that
@@ -451,45 +509,6 @@ func validateCustomSubagentBody(where string, entry SubagentConfig) error {
 			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(allowed)), "subagent_") {
 				return fmt.Errorf("%s: allowed_tools cannot contain %q: a subagent cannot dispatch subagents", where, allowed)
 			}
-		}
-	}
-	return nil
-}
-
-// ValidateSharedSubagents checks the install-wide custom subagent registry
-// (agents.shared_subagents, plan 314). Every entry is a full custom definition —
-// the same body a per-agent custom subagent carries — and its enablement is
-// per-agent, so an entry that carries Enabled is refused rather than stored and
-// silently ignored: the one rule about these subagents is that they run nowhere
-// until an agent's reference entry turns them on.
-//
-// A name that is a built-in type is refused: the four public types are
-// configured through their overrides and per-type rows, and the system's own
-// types are dispatched by the system, so a shared custom of that name would be
-// a second definition of something the runtime already resolves.
-func ValidateSharedSubagents(entries []SubagentConfig, publicBuiltins, systemBuiltins []string, refResolves func(string) bool) error {
-	seen := make(map[string]struct{}, len(entries))
-	for i, entry := range entries {
-		where := fmt.Sprintf("agents.shared_subagents[%d]", i)
-		name := strings.ToLower(strings.TrimSpace(entry.Name))
-		if !subagentConfigNamePattern.MatchString(name) {
-			return fmt.Errorf("%s: invalid name %q: use lower-case letters, digits and dashes, starting with a letter", where, entry.Name)
-		}
-		if slices.Contains(publicBuiltins, name) || slices.Contains(systemBuiltins, name) {
-			return fmt.Errorf("%s: %q is a built-in subagent type and cannot be a shared custom subagent", where, name)
-		}
-		if _, dup := seen[name]; dup {
-			return fmt.Errorf("%s: duplicate shared subagent %q", where, name)
-		}
-		seen[name] = struct{}{}
-		if entry.Enabled != nil {
-			return fmt.Errorf("%s: a shared subagent's enablement is per-agent; remove enabled", where)
-		}
-		if err := validateCustomSubagentBody(where, entry); err != nil {
-			return err
-		}
-		if err := validateSubagentModel(where, where+": thinking level requires a model.", entry, refResolves); err != nil {
-			return err
 		}
 	}
 	return nil

@@ -2604,7 +2604,7 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 		"cron":                    "Choose how long task records are retained.",
 		"features":                "Enable memory and language intelligence.",
 		"agents":                  "Manage definitions, shared defaults.",
-		"subagent_models":         "Install-wide defaults for built-in types, plan-reviewer and shared custom subagents.",
+		"subagent_models":         "Install-wide default model and thinking level; an agent's own override still wins.",
 		"hooks":                   "Run configured actions at lifecycle events.",
 		"lsp":                     "Manage servers, timeouts and diagnostic delivery.",
 		"peers":                   "Coordinate with other agent processes on this machine.",
@@ -2880,17 +2880,16 @@ func TestConfigPanelNamesRowsWithoutADottedPath(t *testing.T) {
 }
 
 // The "Subagents" page is a projection of the agents store (plan 314): it
-// presents the per-type defaults, the plan reviewer's global row and the shared
-// custom registry — every install-wide subagent row in one place — reads the
+// presents the per-type defaults and the plan reviewer's global row — every
+// install-wide subagent row that is not a definition in one place — reads the
 // agents document, and saves back to it so the keys it does not show survive.
 // Its rows read as the pins they are (plan 324 D7) and its Model field opens
 // the global-row picker, whose pick takes the pin's level with it (D5).
 func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	agents := `{
-		"definitions":{"main":{"primary":true,"subagents":[]}},
+		"definitions":{"main":{"primary":true,"subagents":[]},"repo-auditor":{"primary":false,"description":"audits one repository area","system_prompt":"You audit repositories.","tools":"read_only"}},
 		"plan_reviewer":{"model":"llm-2"},
-		"subagent_models":{"explore":{"model":"llm-1","reasoning_effort":"high"}},
-		"shared_subagents":[{"name":"repo-auditor","description":"audits one repository area","system_prompt":"You audit repositories.","tools":"read_only"}]
+		"subagent_models":{"explore":{"model":"llm-1","reasoning_effort":"high"}}
 	}`
 	session := newConfigPanelSession(map[string]string{"agents": agents})
 	session.snapshot.Models = []appcfg.LLMModelConfig{
@@ -2932,9 +2931,13 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	if reviewer.Description != "Global row for a system type, the goal-evaluator pattern. Agent pages stay read-only." {
 		t.Fatalf("plan-reviewer's description = %q, want the globalSystem help sentence", reviewer.Description)
 	}
-	// The registry is one row of this page; its entries are its own page, named
-	// by the name each carries (the test below).
-	findRow(t, page, "Shared custom subagents")
+	// A subagent-role definition is not a row of this page: it lives in the
+	// definitions map, where every other definition does (P3).
+	for _, item := range page {
+		if item.Label == "Shared custom subagents" {
+			t.Fatalf("the projection still carries the removed shared-subagent registry row: %+v", item)
+		}
+	}
 
 	// The save lands in the agents section — the document the page presents —
 	// and every key the page does not show comes back untouched. The pick
@@ -2964,47 +2967,16 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	if _, ok := saved["definitions"]; !ok {
 		t.Fatal("the agents page's definitions were dropped from the saved document")
 	}
-	registry, _ := saved["shared_subagents"].([]any)
-	if len(registry) != 1 {
-		t.Fatalf("shared_subagents = %v, want the registry untouched", saved["shared_subagents"])
+	// A definition the page does not show travels back untouched, its subagent
+	// body included: the save writes the section whole.
+	definitions, _ := saved["definitions"].(map[string]any)
+	auditor, _ := definitions["repo-auditor"].(map[string]any)
+	if got, _ := auditor["system_prompt"].(string); got != "You audit repositories." {
+		t.Fatalf("definitions.repo-auditor.system_prompt = %v, want the definition untouched", auditor["system_prompt"])
 	}
-}
-
-// A shared subagent is created from the projection page (plan 314): the add row
-// seeds a full definition — a name to type, the description a model reads, the
-// prompt to run on, and the read-only tier a subagent starts at — and opens it.
-// The entry lands under shared_subagents, and what the seed holds until it is
-// named is exactly what the loader refuses.
-func TestConfigPanelSubagentModelsSeedsASharedSubagent(t *testing.T) {
-	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
-	selector := &scriptedSelector{}
-	runConfigPanel(t, session, selector, []richStep{
-		{label: "Shared custom subagents", ok: true},
-		{label: configAddRowLabel, ok: true},
-		{label: configUpRowLabel, ok: true},
-		{label: configUpRowLabel, ok: true},
-	}, nil, "subagent_models")
-
-	if len(session.writes) != 1 {
-		t.Fatalf("expected one write, got %+v", session.writes)
-	}
-	var saved struct {
-		Shared []appcfg.SubagentConfig `json:"shared_subagents"`
-	}
-	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
-		t.Fatalf("the saved document does not parse: %v", err)
-	}
-	if len(saved.Shared) != 1 {
-		t.Fatalf("shared_subagents = %+v, want the seeded entry", saved.Shared)
-	}
-	seed := saved.Shared[0]
-	if seed.Name != "" || seed.Description != "" || seed.SystemPrompt != "" || seed.Tools != appcfg.SubagentToolsReadOnly {
-		t.Fatalf("seeded entry = %+v, want the empty name and prompt with the read-only tier", seed)
-	}
-	// The seed is what the loader refuses until the name and the prompt are
-	// typed: the page hands the judgement to the registry's own validator.
-	if err := appcfg.ValidateSharedSubagents(saved.Shared, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "invalid name") {
-		t.Fatalf("err = %v, want the loader to refuse an unnamed shared subagent", err)
+	// The registry key is gone from the configuration, so nothing writes it.
+	if _, stale := saved["shared_subagents"]; stale {
+		t.Fatalf("the saved document carries the removed shared_subagents key: %v", saved["shared_subagents"])
 	}
 }
 
@@ -3044,12 +3016,14 @@ func TestConfigPanelSchemaProjectionFieldsNameStoreSectionKeys(t *testing.T) {
 }
 
 // sharedRowsSession is one primary agent's page over an agents document holding
-// one shared registry entry, plus whatever entries the caller put on the agent
-// (plan 314).
+// one install-wide shared subagent definition, plus whatever entries the caller
+// put on the agent (plan 314, P3).
 func sharedRowsSession(agentSubagents string) *configPanelTestSession {
 	agents := `{
-		"definitions":{"main":{"primary":true,"subagents":` + agentSubagents + `}},
-		"shared_subagents":[{"name":"repo-auditor","description":"audits one repository area","system_prompt":"You audit repositories.","model":"llm-1","reasoning_effort":"high","tools":"read_only"}],
+		"definitions":{
+			"main":{"primary":true,"subagents":` + agentSubagents + `},
+			"repo-auditor":{"primary":false,"order":1,"description":"audits one repository area","system_prompt":"You audit repositories.","model":"llm-1","reasoning_effort":"high","tools":"read_only"}
+		},
 		"subagent_models":{"plan":{"model":"llm-1"}}
 	}`
 	session := newConfigPanelSession(map[string]string{"agents": agents})
@@ -3119,10 +3093,12 @@ func TestConfigPanelAgentPageListsSharedSubagentsDisabled(t *testing.T) {
 	}), nil, "agents")
 
 	// The row list carries the shared subagent with its status and the
-	// registry's description marked as shared.
+	// definition's description marked as shared. The page is the agent's own
+	// subagent list, not the definitions page that also lists the definition.
 	var rowsPage []SelectItem
 	for _, items := range selector.richItems {
-		if slices.Contains(rowLabels(items), "repo-auditor") {
+		labels := rowLabels(items)
+		if slices.Contains(labels, "repo-auditor") && !slices.Contains(labels, "main") {
 			rowsPage = items
 		}
 	}
@@ -3221,10 +3197,13 @@ func TestConfigPanelAgentPageSharedDefinitionIsReadOnly(t *testing.T) {
 	}
 
 	// A per-agent custom subagent keeps its own row and its own editing: it is
-	// not marked shared, and its description is its own.
+	// not marked shared, and its description is its own. The agent's own
+	// subagent list is the page that holds the definition's name without the
+	// definitions page's rows.
 	var rowsPage []SelectItem
 	for _, items := range selector.richItems {
-		if slices.Contains(rowLabels(items), "repo-auditor") {
+		labels := rowLabels(items)
+		if slices.Contains(labels, "repo-auditor") && !slices.Contains(labels, "main") {
 			rowsPage = items
 		}
 	}

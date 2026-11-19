@@ -226,16 +226,6 @@ func validateLoadedRoot(r *Root) error {
 	}); err != nil {
 		return err
 	}
-	// The shared custom subagent registry is install-wide too (plan 314): a
-	// shared subagent's model is a row of the same global table, and the entries
-	// are judged here so an install with no agent definitions at all — the shape
-	// a fresh one has — is still covered.
-	if err := ValidateSharedSubagents(r.Agents.SharedSubagents, builtInPublicSubagentNames, builtInSystemSubagentNames, func(ref string) bool {
-		_, ok := ResolveModelRef(r, "main", ref)
-		return ok
-	}); err != nil {
-		return err
-	}
 	if err := validatePrimaryAgents(r); err != nil {
 		return err
 	}
@@ -1032,7 +1022,7 @@ func validatePrimaryAgents(r *Root) error {
 		// stale id cannot keep the install from starting (plan 260). A legacy
 		// "provider/model" label nothing resolves to has already been cleared
 		// by normalize, which is what makes an old install boot unchanged.
-		if err := ValidateAgentSubagents(id, def, builtInPublicSubagentNames, builtInSystemSubagentNames, SharedSubagentNames(r.Agents.SharedSubagents), func(ref string) bool {
+		if err := ValidateAgentSubagents(id, def, builtInPublicSubagentNames, builtInSystemSubagentNames, SubagentDefinitionNames(r.Agents.Definitions), func(ref string) bool {
 			// The same resolution a default_model reference gets: a row id this
 			// install carries (plan 262), or a legacy label. A label keeps its
 			// own rule inside the check, so a dangling one still loads.
