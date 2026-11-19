@@ -9,11 +9,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -466,4 +469,76 @@ func modelRowsForTest(entries ...appcfg.AgentLLMProviderConfig) []appcfg.LLMMode
 		}
 	}
 	return rows
+}
+
+// TestPrimaryAgentCreateAcceptsModelRowReferences pins the section-write
+// contract (owner 2026-11-19, reported bug): the agents section is written on
+// its own, so the root handed to the validator carries no model table. A global
+// row that references a model-table row id must still validate — the reference
+// resolves against the install's table, not against the empty section root.
+func TestPrimaryAgentCreateAcceptsModelRowReferences(t *testing.T) {
+	f := newSubagentRootFixture(t, nil)
+	rowID := seedGlobalModelRow(t, f, "anthropic", "claude-sonnet-4-5")
+	seedAgentsSection(t, f, func(a *appcfg.AgentsSection) {
+		a.GoalEvaluator = appcfg.SubagentConfig{Model: rowID, ReasoningEffort: "high"}
+	})
+
+	rec := f.do(t, http.MethodPost, "/api/agents/primary", map[string]any{"id": "e2e-probe", "name": "E2E probe"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestPrimaryAgentCreateAdoptsItsWrite pins the second half of the create bug
+// (owner 2026-11-19). The section lands in the state database, but the process
+// keeps running the snapshot it loaded until a reload composes it again: a
+// create that is not adopted answers 200 while the very next call still reports
+// the agent as unknown — exactly what the switch that follows a create does.
+//
+// The environment is opened the way a process opens it (ComposedPersistedConfig
+// over the state database), because a hand-built environment answers nothing
+// about adoption: its configuration is set directly rather than composed.
+func TestPrimaryAgentCreateAdoptsItsWrite(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      default_model: llm-start\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(raw), 0o600))
+	// An install that would create an agent runs on a model: the row lives in
+	// the table, which exists before the process opens its configuration.
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
+	seedDB, err := state.OpenStateFromHome(ctx, home, "")
+	require.NoError(t, err)
+	_, err = (&state.LLMModelStore{DB: seedDB}).Create(ctx, state.LLMModel{
+		ID: "llm-start", Provider: "deepseek", Model: "deepseek-v4",
+		APIKey: "sk-adopt-start", BaseURL: "http://127.0.0.1:9/v1",
+	})
+	require.NoError(t, err)
+	require.NoError(t, seedDB.Close())
+	env, err := process.Open(ctx, process.OpenOptions{Home: home, ConfigPath: cfgPath, NoLaunchProject: true, SessionSource: "webchat"})
+	require.NoError(t, err)
+	defer env.Close()
+	// Open installs three process-wide handles over this home — the section
+	// validator, the model catalog overrides and the OAuth overlay store — and
+	// they outlive the environment. Clearing them keeps a later test in this
+	// binary from resolving anything out of a home that is already gone.
+	t.Cleanup(func() {
+		state.SetSectionValidator(nil)
+		llm.SetModelOverrides(nil, nil)
+		mcp.SetOAuthOverlayStore(nil)
+	})
+
+	s := &Server{Home: home, Env: env, Runner: env.Runner, Sessions: env.Deps.SessionStore, RunRT: env.Deps.RunRT}
+	srv := NewRestServer("")
+	s.AttachExtraRoutes(srv)
+	body := strings.NewReader(`{"id":"e2e-probe","name":"E2E probe"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/primary", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Server.Handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// The running configuration — what a switch reads — must already know it.
+	lists, err := run.LoadAgentConfigsFromRoot(s.liveCfg())
+	require.NoError(t, err)
+	_, found := lists["e2e-probe"]
+	require.True(t, found, "the created agent is missing from the running configuration")
 }

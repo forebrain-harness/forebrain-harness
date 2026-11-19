@@ -1325,7 +1325,7 @@ func (s *Server) writeSharedSubagents(w http.ResponseWriter, r *http.Request, mu
 		}
 		probe := persisted
 		probe.Agents = cfg.Agents
-		if err := validateLoadedRootForAgents(&probe); err != nil {
+		if err := s.validateLoadedRootForAgents(r.Context(), &probe); err != nil {
 			return subagentBadRequest("%v", err)
 		}
 		written = probe

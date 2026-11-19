@@ -232,7 +232,7 @@ var configSectionSchemas = []configSectionSchema{
 		Name: "batch", Title: "Batch projects", Tab: configTabApproval,
 		Summary: "Set the starting policy for new batch projects.",
 		Fields: []configField{{
-			Path: "sandbox_default", Label: "Sandbox new projects", Kind: configFieldBool3, DefaultValue: "true",
+			Path: "sandbox_default", Label: "Enable sandbox", Kind: configFieldBool3, DefaultValue: "true",
 			Hint: "Existing batch projects keep their own sandbox policy.",
 		}},
 	},

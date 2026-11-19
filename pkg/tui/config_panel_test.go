@@ -639,8 +639,15 @@ func TestConfigPanelEditFooterDefaultUnsets(t *testing.T) {
 	if len(selector.inputOpts) != 1 || len(selector.inputOpts[0].FooterActions) != 1 {
 		t.Fatalf("the editor's footer actions = %+v, want Default alone", selector.inputOpts)
 	}
-	if action := selector.inputOpts[0].FooterActions[0]; action.Label != configDefaultActionLabel || action.Kind != FooterActionDefault {
+	action := selector.inputOpts[0].FooterActions[0]
+	if action.Label != configDefaultActionLabel || action.Kind != FooterActionDefault {
 		t.Fatalf("the edit footer's action = %+v, want Default", action)
+	}
+	// The footer shows the key beside the label whenever the action has one
+	// (owner 2026-11-19): Default fires on Ctrl+U, so it must read as a keyed
+	// action rather than a bare word.
+	if action.Key != configDefaultActionKey {
+		t.Fatalf("the edit footer's Default key = %q, want %q", action.Key, configDefaultActionKey)
 	}
 
 	if len(session.writes) != 1 {
@@ -2620,7 +2627,7 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 	for _, want := range []fieldCopy{
 		{"approval_preset", "", "Default approval mode", "This setting affects new sessions, not the current conversation."},
 		{"sandbox_workspace_write", "network_access", "Network access", "Allow sandboxed commands to access the network."},
-		{"batch", "sandbox_default", "Sandbox new projects", "Existing batch projects keep their own sandbox policy."},
+		{"batch", "sandbox_default", "Enable sandbox", "Existing batch projects keep their own sandbox policy."},
 		{"compact", "auto_compact_percent", "Auto-compact at", "Compact when context usage reaches this percentage."},
 		{"compact", "prompt", "Hand-off prompt", "Leave empty to use the built-in compaction prompt."},
 		{"memories", "max_raw_memories_for_consolidation", "Memories per consolidation", ""},

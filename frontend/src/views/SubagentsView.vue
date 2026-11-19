@@ -101,7 +101,10 @@
               class="font-mono"
               v-tip:top="row.modelSource === 'global' ? t('subagents.modelFromGlobal', { name: row.name }) : ''"
             >{{ providerModel(row) }}</span>
-            <span v-if="row.reasoningEffort" class="text-[var(--forebrain-muted-text)]"> {{ effortLevelLabel(row.reasoningEffort) }}</span>
+            <!-- The space rides in the expression: the template compiler
+                 condenses a leading space inside an element away, which butts
+                 the effort against the pair. -->
+            <span v-if="row.reasoningEffort" class="text-[var(--forebrain-muted-text)]">{{ ' ' + effortLevelLabel(row.reasoningEffort) }}</span>
           </template>
           <span v-else class="text-[var(--forebrain-muted-text)]">{{ t('subagents.followPrimary') }}</span>
         </template>

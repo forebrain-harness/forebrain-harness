@@ -15,8 +15,7 @@ import { pickOption, seedProjectSession, shot, signIn } from './support'
  * The subagents the harness ships are fixed: the four the model may dispatch,
  * then the two the system dispatches on its own occasions. The seeds are this
  * agent's custom subagents and are removed in each case's `finally` — the
- * gateway and its configuration file are shared with every other spec in the
- * run.
+ * gateway and its state database are shared with every other spec in the run.
  */
 
 /** The built-ins the model may dispatch, in the order the page lists them. */
@@ -73,13 +72,6 @@ async function subagentDetail(page: Page, agentId: string, name: string): Promis
   return (await answer.json()) as Record<string, unknown>
 }
 
-/** The configuration file's own text, as `GET /api/config` serves it. */
-async function configYAML(page: Page): Promise<string> {
-  const answer = await page.request.get('/api/config')
-  if (!answer.ok()) throw new Error(`config failed: ${answer.status()} ${await answer.text()}`)
-  return String(((await answer.json()) as { yaml?: string }).yaml ?? '')
-}
-
 /** The models this agent may pin a subagent to, each with the efforts it takes. */
 async function modelOptions(page: Page, agentId: string): Promise<{ key: string; efforts: string[] }[]> {
   const answer = await page.request.get(`/api/agents/primary/${encodeURIComponent(agentId)}/model-options`)
@@ -89,6 +81,17 @@ async function modelOptions(page: Page, agentId: string): Promise<{ key: string;
     key: `${option.provider ?? ''}/${option.model ?? ''}`,
     efforts: Array.isArray(option.efforts) ? option.efforts : [],
   }))
+}
+
+/** One row of the drawer's model select, picked by the position it holds in the
+ * agent's own model list. Its items name each model by the address it calls —
+ * the signature — rather than the `provider/model` pair the API names it with,
+ * so the text is not what a case can look for; the position is, because the
+ * drawer offers the model-options answer in that order with 跟随主代理 standing
+ * in for the empty choice at the top. */
+async function pickModel(page: Page, index: number): Promise<void> {
+  await page.click('[data-testid="subagent-model"]')
+  await page.getByRole('option').nth(index + 1).click()
 }
 
 /** The rows as drawn, in order: each row's `data-subagent-row` is its name. */
@@ -224,7 +227,8 @@ test('editing a built-in stores its model, effort and prompt, and the table says
 
   // A model that can reason: the effort select belongs to the model beside it.
   const options = await modelOptions(page, agentId)
-  const pinnable = options.find((option) => option.efforts.length > 0)
+  const pinnableIndex = options.findIndex((option) => option.efforts.length > 0)
+  const pinnable = options[pinnableIndex]
   if (!pinnable) throw new Error(`no model with reasoning levels: ${JSON.stringify(options)}`)
   const effort = pinnable.efforts.includes('high') ? 'high' : pinnable.efforts[0]
   const label = EFFORT_LABEL[effort] ?? effort
@@ -248,7 +252,7 @@ test('editing a built-in stores its model, effort and prompt, and the table says
 
     const reload = nextListLoad(page)
     await drawer.locator('[data-testid="subagent-prompt"]').fill(prompt)
-    await pickOption(page, 'subagent-model', pinnable.key)
+    await pickModel(page, pinnableIndex)
     await pickOption(page, 'subagent-effort', label)
     await drawer.locator('[data-testid="subagent-save"]').click()
     await reload
@@ -258,23 +262,17 @@ test('editing a built-in stores its model, effort and prompt, and the table says
     // agent's own.
     const row = page.locator('[data-subagent-row="explore"]')
     await expect(row.locator('[data-testid="subagent-overridden-explore"]')).toBeVisible({ timeout: 20_000 })
-    await expect(row.locator('td:nth-child(3)')).toContainText(pinnable.key)
-    await expect(row.locator('td:nth-child(3)')).toContainText(`· ${label}`)
+    await expect(row.locator('td:nth-child(3)')).toContainText(`${pinnable.key} ${label}`)
     await page.mouse.move(2, 2)
     await shot(page, 'p079-builtin-rewritten')
 
-    // The file carries the same three settings: the answer of the write and the
-    // configuration text are the two halves of "it saved".
+    // The record reads back the same three settings: a later open of the drawer
+    // shows what this save wrote.
     const detail = await subagentDetail(page, agentId, 'explore')
     expect(detail.prompt_overridden).toBe(true)
     expect(String(detail.system_prompt).trim()).toBe(prompt)
     expect(`${String(detail.model_provider)}/${String(detail.model)}`).toBe(pinnable.key)
     expect(detail.reasoning_effort).toBe(effort)
-
-    const yaml = await configYAML(page)
-    expect(yaml).toMatch(/system_prompt:\s*["']?E2E-079 explore prompt/)
-    expect(yaml).toMatch(new RegExp(`model:\\s*["']?${pinnable.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
-    expect(yaml).toMatch(new RegExp(`reasoning_effort:\\s*["']?${effort}`))
   } finally {
     // The override entry says nothing once both are cleared, so the built-in
     // goes back to following the harness.
@@ -313,12 +311,11 @@ test('恢复默认 clears the rewrite and leaves the model alone', async ({ page
     await expect(page.locator('.forebrain-drawer')).toHaveCount(0, { timeout: 20_000 })
 
     // The badge is gone, the prompt in force is the original again, and the
-    // file no longer holds a rewrite at all.
+    // record no longer holds a rewrite at all.
     await expect(page.locator('[data-testid="subagent-overridden-explore"]')).toHaveCount(0, { timeout: 20_000 })
     const detail = await subagentDetail(page, agentId, 'explore')
     expect(detail.prompt_overridden).toBe(false)
     expect(String(detail.system_prompt)).toBe(defaultPrompt)
-    expect(await configYAML(page)).not.toContain('system_prompt')
     await page.mouse.move(2, 2)
     await shot(page, 'p079-restored-default')
   } finally {
@@ -374,13 +371,10 @@ test('a new custom subagent lands first, wearing the tools it was given', async 
     await page.mouse.move(2, 2)
     await shot(page, 'p079-created-custom')
 
-    // The file holds the tier and the two tools it names.
+    // The record holds the tier and the two tools it names.
     const detail = await subagentDetail(page, agentId, name)
     expect(detail.tools).toBe('pick')
     expect([...((detail.allowed_tools as string[]) ?? [])].sort()).toEqual([...picks].sort())
-    const yaml = await configYAML(page)
-    expect(yaml).toContain(`name: ${name}`)
-    expect(yaml).toMatch(/tools:\s*["']?pick/)
   } finally {
     await page.request.delete(agentSubagents(agentId, name))
   }
@@ -466,21 +460,21 @@ test('设置 · 子代理 writes the global switch', async ({ page }) => {
   const before = await readDefaults()
   try {
     await page.goto('/settings?tab=subagents', { waitUntil: 'networkidle' })
-    const switchRow = page.locator('[data-testid="subagents-feature-switch"]')
-    const toggle = switchRow.locator('button[role="switch"]')
+    // The row is the schema-driven form's switch: the wire path is what names it.
+    const toggle = page.locator('[data-switch="agents.defaults.enable_subagent"]')
     await expect(toggle).toHaveAttribute('aria-checked', String(before), { timeout: 20_000 })
-    // Nothing to save until the form differs from the file.
-    const save = page.locator('[data-testid="subagents-feature-save"]')
-    await expect(save).toBeDisabled()
+    // A group's save bar exists only while one of its rows differs from the store.
+    const save = page.locator('[data-save="sa"]')
+    await expect(save).toHaveCount(0)
 
     await toggle.click()
     await expect(toggle).toHaveAttribute('aria-checked', String(!before))
-    await expect(save).toBeEnabled()
+    await expect(save).toBeVisible()
     await save.click()
 
-    // The answer of the write, and the state of the file behind it.
+    // The answer of the write, and the state of the store behind it.
     await expect.poll(readDefaults, { timeout: 20_000 }).toBe(!before)
-    await expect(save).toBeDisabled()
+    await expect(save).toHaveCount(0)
     await page.mouse.move(2, 2)
     await shot(page, 'p079-settings-subagents')
   } finally {

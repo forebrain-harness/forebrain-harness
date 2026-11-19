@@ -58,6 +58,9 @@ const (
 	// never a value among the real ones and never a row of a choice list
 	// (owner 2026-11-18, strict 1:1 with the prototype).
 	configDefaultActionLabel = "Default"
+	// configDefaultActionKey is how that action's key reads in the footer: the
+	// editor reserves Ctrl+U for it (plan 326 D1).
+	configDefaultActionKey = "Ctrl+U"
 	// The rows page's footer actions (plan 326 D2): add for the collection,
 	// remove for the entry row the cursor is on.
 	configAddActionLabel    = "Add"
@@ -1021,9 +1024,12 @@ func (p *configPanel) editSecret(doc any, path []string, field configField, cur 
 }
 
 // configEditActions is the edit view's footer: the one action the prototype
-// gives it, Default, on the key the editor reserves (plan 326 D1).
+// gives it, Default, on the key the editor reserves (plan 326 D1). The key is
+// carried on the action so the footer shows it beside the label — an action
+// whose key is empty reads as a bare word (owner 2026-11-19: show the key
+// whenever the action has one).
 func configEditActions() ActionOptions {
-	return ActionOptions{FooterActions: []FooterAction{{Label: configDefaultActionLabel, Kind: FooterActionDefault}}}
+	return ActionOptions{FooterActions: []FooterAction{{Label: configDefaultActionLabel, Key: configDefaultActionKey, Kind: FooterActionDefault}}}
 }
 
 // editEffort is one thinking level's picker (plan 319): the levels the model

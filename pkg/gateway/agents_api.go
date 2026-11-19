@@ -582,7 +582,7 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 			DisplayName: strings.TrimSpace(req.Name),
 			Description: strings.TrimSpace(req.Description),
 		}
-		if err := validateLoadedRootForAgents(cfg); err != nil {
+		if err := s.validateLoadedRootForAgents(r.Context(), cfg); err != nil {
 			return configBadRequest("%v", err)
 		}
 		// The workspace root is derived from the tenant key (<home>/workspaces/
@@ -619,11 +619,35 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 			break
 		}
 	}
+	// The row is persisted; the process still runs on its own snapshot until a
+	// reload. Adopt the write before answering, so the agent this response
+	// announces exists for the next call — a create is followed by a switch in
+	// the same breath (plan 079), and that switch reads the running config.
+	if err := s.adoptAgentWrite(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writePrimaryAgentsListing(w, resolver)
 }
 
 // derivedWorkspaceRoot is the workspace root the resolver assigns id under
 // cfg — the one place that convention lives.
+// adoptAgentWrite makes a primary-agent write visible to the running process.
+// The section goes to the state database; the runners keep the snapshot they
+// loaded until a reload composes it again, and a create/update/delete that is
+// not adopted answers 200 while the very next call still reports the agent as
+// unknown. A failure here is the request's failure: answering success would
+// describe configuration the process cannot use.
+func (s *Server) adoptAgentWrite(ctx context.Context, id string) error {
+	if s == nil || s.Env == nil {
+		return nil
+	}
+	if err := s.Env.SyncConfigFromDB(ctx); err != nil {
+		return fmt.Errorf("apply agent %q: %w", id, err)
+	}
+	return nil
+}
+
 func derivedWorkspaceRoot(home string, cfg *config.Root, id string) (string, error) {
 	resolver, err := config.NewResolver(strings.TrimSpace(home), cfg)
 	if err != nil {
@@ -658,7 +682,20 @@ func writePrimaryAgentsListing(w http.ResponseWriter, resolver *config.Resolver)
 
 // validateLoadedRootForAgents applies the loader's own validation to the
 // about-to-be-written root, so a config the CLI would reject never lands.
-func validateLoadedRootForAgents(cfg *config.Root) error {
+//
+// A section write hands the validator a root holding that one section, so the
+// install-wide model table — one row per model in its own table, not a section
+// — is absent from it. A global subagent row that names a model-table row id
+// must still resolve (owner 2026-11-19: creating an agent failed with
+// "must be provider/model" whenever a row pointed at the table), while a
+// reference naming nothing stays refused. The table is therefore borrowed from
+// the persisted configuration before validating.
+func (s *Server) validateLoadedRootForAgents(ctx context.Context, cfg *config.Root) error {
+	if cfg != nil && len(cfg.LLMModels) == 0 && s != nil && s.Env != nil {
+		if stored, err := s.Env.ComposedPersistedConfig(ctx); err == nil {
+			cfg.LLMModels = stored.LLMModels
+		}
+	}
 	return config.ValidateAgentRoot(cfg)
 }
 
@@ -683,7 +720,7 @@ func (s *Server) handlePrimaryAgentUpdate(w http.ResponseWriter, r *http.Request
 		def.DisplayName = strings.TrimSpace(req.Name)
 		def.Description = strings.TrimSpace(req.Description)
 		cfg.Agents.Definitions[id] = def
-		if err := validateLoadedRootForAgents(cfg); err != nil {
+		if err := s.validateLoadedRootForAgents(r.Context(), cfg); err != nil {
 			return configBadRequest("%v", err)
 		}
 		written = *cfg
@@ -695,6 +732,10 @@ func (s *Server) handlePrimaryAgentUpdate(w http.ResponseWriter, r *http.Request
 	}
 	resolver, err := config.NewResolver(s.Home, &written)
 	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.adoptAgentWrite(r.Context(), id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -729,6 +770,10 @@ func (s *Server) handlePrimaryAgentDelete(w http.ResponseWriter, r *http.Request
 	})
 	if err != nil {
 		failConfigSection(w, err)
+		return
+	}
+	if err := s.adoptAgentWrite(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	resolver, err := config.NewResolver(s.Home, &written)

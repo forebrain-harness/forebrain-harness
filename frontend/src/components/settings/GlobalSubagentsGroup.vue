@@ -79,7 +79,10 @@
       <template #cell-model="{ row }">
         <span v-if="row.model" class="font-mono">{{ providerModel(row) }}</span>
         <span v-else class="text-[var(--forebrain-muted-text)]">{{ t('subagents.followPrimary') }}</span>
-        <span v-if="row.reasoningEffort" class="text-[var(--forebrain-muted-text)]"> {{ effortLevelLabel(row.reasoningEffort) }}</span>
+        <!-- The space rides in the expression: the template compiler condenses
+             a leading space inside an element away, which butts the effort
+             against the pair. -->
+        <span v-if="row.reasoningEffort" class="text-[var(--forebrain-muted-text)]">{{ ' ' + effortLevelLabel(row.reasoningEffort) }}</span>
       </template>
       <template #cell-tools="{ row }">{{ toolsLabel(row) }}</template>
       <template #cell-actions="{ row }">
