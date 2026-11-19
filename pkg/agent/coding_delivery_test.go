@@ -26,6 +26,8 @@ func TestCodingDeliveryPromptCoversTheCompletenessRule(t *testing.T) {
 		"A turn that changed no files answers directly",
 		"another agent's concurrent changes",
 		"A deleted file cannot be presented",
+		"deliver exactly those",
+		"When you judge the turn's work complete",
 	} {
 		if !strings.Contains(CodingDeliveryPrompt, want) {
 			t.Errorf("CodingDeliveryPrompt missing %q", want)
