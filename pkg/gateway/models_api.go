@@ -109,8 +109,10 @@ type llmModelRow struct {
 	// Caps is this row's own overrides, CatalogCaps what the catalog says
 	// without them.
 	Caps llmModelCaps `json:"caps"`
-	// EffortsKnown reports that a source listed this model's thinking levels —
-	// the page then shows them read-only instead of offering the checkboxes.
+	// EffortsKnown reports that a source listed this model's thinking levels,
+	// marking the catalog-sourced answer for display and reference. The row's
+	// own caps stay editable either way and are stored as the user's assertion
+	// (owner 2026-11-19): catalog-sourced levels are not immutable.
 	EffortsKnown bool         `json:"efforts_known"`
 	CatalogCaps  llmModelCaps `json:"catalog_caps"`
 	IsDefault    bool         `json:"is_default"`
@@ -510,15 +512,18 @@ func (s *Server) llmModelRowOf(r *http.Request, scope llmModelScope, row state.L
 	// as the boxes to tick (plan 318 F4).
 	out.EffortsKnown = len(out.CatalogCaps.Efforts) > 0
 	// A row no source lists levels for keeps the ones it declares, trimmed the
-	// same way: otherwise a level the terminal refuses would sit in the web
-	// form's dropdown, and saving it would store a default the client silently
-	// drops (plan 311).
+	// same way: the picker offers only levels this row's client can send.
+	// Storing an unsendable default is allowed now — the client drops it on
+	// the way out — so this trimming exists for picker clarity, not to prevent
+	// a refused save (plan 311; owner 2026-11-19).
 	if !out.EffortsKnown && row.CapEfforts != nil {
 		out.CatalogCaps.Efforts = llmSendableEfforts(row.Provider, row.Model, row.APIPath, row.CapEfforts)
 	}
-	// An off switch the protocol cannot send is not an answer this form can act
-	// on: the dropdown has no "none" to add, and the save refuses one. Reporting
+	// An off switch the protocol cannot send is not an answer this picker can
+	// offer: the dropdown only names levels the client can send, so reporting
 	// it would be the fake option the page exists to remove (plan 311 §2.1).
+	// The save no longer refuses an unsendable default — it stores the user's
+	// assertion as asked (owner 2026-11-19); this trimming is display only.
 	if out.CatalogCaps.ReasoningOff != nil && !slices.Contains(out.CatalogCaps.Efforts, "none") {
 		out.CatalogCaps.ReasoningOff = nil
 	}
@@ -1086,9 +1091,11 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 		return row, llmRefuse(r, http.StatusBadRequest,
 			"请求参数必须是 JSON 对象", "the request parameters must be a JSON object")
 	}
-	// 4. The capability overrides. Levels the vendor's own list documents are
-	// read-only: submitting a different set by hand would describe a model
-	// nobody can send.
+	// 4. The capability overrides. The levels, the default level and the off
+	// switch are the user's assertion, stored as asked apart from the
+	// vocabulary whitelist above and the positive-number checks below (owner
+	// 2026-11-19). A level this row's client cannot send is silently dropped
+	// on the way out; the remote endpoint decides.
 	caps := llmModelCapsOfRow(row)
 	if write.Caps != nil {
 		caps = *write.Caps
