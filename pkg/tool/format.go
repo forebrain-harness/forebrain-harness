@@ -2679,18 +2679,25 @@ func subagentElapsedLabel(startedAt, finishedAt int64) string {
 }
 
 // ToolStepHoldsNoCard reports whether a tool step's transcript card is
-// withheld: the exit-plan gate's wait lives entirely in its approval prompt,
-// so no surface paints a card for it while the call runs, awaits the
+// withheld. Two calls hold none: present_files, in every state — it is the
+// delivery pipeline's own machinery, the turn's deliverables group is the one
+// account of the files it handed over, and its failures are not the user's to
+// debug — and the exit-plan gate's wait, which lives entirely in its approval
+// prompt, so no surface paints a card while the call runs, awaits the
 // decision, or was abandoned to that wait — waiting, abandoned and canceled
-// hold no card. Only the settled answers draw: the user's denial, a failure,
-// the exit itself.
+// hold no card. Only the gate's settled answers draw: the user's denial, a
+// failure, the exit itself.
 func ToolStepHoldsNoCard(toolName, status string) bool {
-	if !strings.EqualFold(strings.TrimSpace(toolName), "exit_plan_mode") {
-		return false
-	}
-	switch strings.TrimSpace(status) {
-	case "running", "awaiting approval", "canceled":
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "present_files":
 		return true
+	case "exit_plan_mode":
+		switch strings.TrimSpace(status) {
+		case "running", "awaiting approval", "canceled":
+			return true
+		default:
+			return false
+		}
 	default:
 		return false
 	}

@@ -99,6 +99,19 @@ export interface ArtifactView {
   previewUrl?: string
   /** `…/entries`, for an archive's directory list. */
   entriesUrl?: string
+  /** The row's own absolute path, when a source carried it (a REST row, a
+   *  kept plan's envelope). Audit fact, read by displayPathOf. */
+  path?: string
+  /** The same file relative to the project directory, when a source carried
+   *  it. The structured rows' `rel_path`. */
+  relPath?: string
+  /** The label the delivery row draws (owner 2026-11-19): the path the file
+   *  is located by, computed once per delivery by displayPathOf. */
+  displayPath?: string
+  /** The turn's own net change to this file, when the turn counted it: the
+   *  pair a delivered row ends in. */
+  added?: number
+  deleted?: number
 }
 
 /** A kind's label key and glyph. The keys live in the locale tables. */
@@ -200,6 +213,8 @@ export function artifactView(sessionId: string, raw: unknown): ArtifactView | nu
   const preview = artifactPreview(row.preview)
   const built = urlsFor(sessionId, id, preview)
   const title = String(row.title ?? '').trim() || name
+  const path = String(row.path ?? '').trim()
+  const relPath = String(row.relPath ?? '').trim()
   return {
     sessionId,
     id,
@@ -207,6 +222,8 @@ export function artifactView(sessionId: string, raw: unknown): ArtifactView | nu
     origin: artifactOrigin(row.origin),
     name,
     title,
+    ...(path ? { path } : {}),
+    ...(relPath ? { relPath } : {}),
     kind: artifactKind(row.kind),
     preview,
     size: Number(row.size) || 0,
@@ -249,8 +266,11 @@ export function artifactsOfPresentFiles(result: unknown, sessionId: string): Art
 
 /**
  * planArtifactOf reads the artifact an `exit_plan_mode` kept as a deliverable
- * (plan 148): the call's envelope carries `{plan_only, artifact:{id,name,
- * kind,preview,size}}` and registers that file with origin `plan`.
+ * (plan 148): the call's envelope carries `{plan_only, plan_file, artifact:
+ * {id,name,kind,preview,size}}` and registers that file with origin `plan`.
+ * The artifact subset names no path, but the envelope's own plan file is one
+ * (a kept plan lives outside the project), so it reaches the row: the group's
+ * row can be located by it.
  */
 export function planArtifactOf(result: unknown, sessionId: string): ArtifactView | null {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return null
@@ -259,7 +279,90 @@ export function planArtifactOf(result: unknown, sessionId: string): ArtifactView
   const view = artifactView(sessionId, envelope.artifact)
   // The envelope names no origin: a file reached through this call is the
   // plan that was kept, which is what registration records with it.
-  return view ? { ...view, origin: 'plan' } : null
+  if (!view) return null
+  const planFile = String(envelope.planFile ?? envelope.plan_file ?? '').trim()
+  return { ...view, origin: 'plan', ...(view.path || planFile ? { path: view.path || planFile } : {}) }
+}
+
+/**
+ * displayPathOf is the label a delivered row draws (owner 2026-11-19): the
+ * path the file is located by. An absolute path inside the session's project
+ * root loses the root prefix — the boundary is a whole separator, so
+ * `/work/a` is not inside `/work/ab` — and one outside it stays absolute; a
+ * root is required before any absolute path is relativized. Absolute means
+ * any of the three shapes the shipped targets produce: a POSIX root (`/…`), a
+ * Windows drive letter (`C:/…`, case-insensitive — the drive, and with it the
+ * whole comparison, as Windows compares paths) and a UNC share
+ * (`//server/share/…`, case-insensitive the same way); POSIX paths stay
+ * case-sensitive, the way Linux compares them. A structured row without an
+ * absolute path reads its `relPath`, and a legacy row with neither falls back
+ * to its name. Relative output always speaks `/`.
+ */
+export function displayPathOf(row: { path?: unknown; relPath?: unknown; name?: unknown }, root?: string): string {
+  const toSlashes = (value: string): string => value.replace(/\\/g, '/')
+  const path = toSlashes(String(row.path ?? '').trim())
+  const relPath = toSlashes(String(row.relPath ?? '').trim())
+  const name = String(row.name ?? '').trim()
+  const base = root ? toSlashes(String(root).trim().replace(/\/+$/, '')) : ''
+  // A Windows-style path compares case-insensitively across its whole length
+  // (drive letters, UNC hosts and shares are case-insensitive there); a POSIX
+  // path compares case-sensitively.
+  const windowsStyle = /^[a-zA-Z]:/.test(path) || path.startsWith('//')
+  if (windowsStyle || path.startsWith('/')) {
+    if (base) {
+      const fold = (value: string): string => (windowsStyle ? value.toLowerCase() : value)
+      if (fold(path) === fold(base)) return '.'
+      if (fold(path.slice(0, base.length + 1)) === `${fold(base)}/`) {
+        return path.slice(base.length + 1)
+      }
+    }
+    return path
+  }
+  if (path) return path
+  return relPath || name
+}
+
+/** One counted file of a turn, as `turn_diff_updated` carries it. Kept
+ *  structural here so this module owns no socket types. */
+export interface TurnDiffEntry {
+  path?: string | number | undefined
+  old_path?: string | number | undefined
+  status?: string | undefined
+  added?: number | undefined
+  deleted?: number | undefined
+  binary?: boolean | undefined
+}
+
+/**
+ * turnDiffTotals aggregates a turn's own diffs into the counts its delivered
+ * rows end in, keyed by the same display path the rows are labeled by — one
+ * pass per turn, so no row re-scans the diffs. The wire's counts are
+ * `omitempty`: a created file carries `added` alone and a deleted one
+ * `deleted` alone, so a missing side on a counted diff is zero. A binary
+ * change, a row with no number on either side (mode-only, malformed), and a
+ * pair of zeros say nothing — they are not guessed into a pair.
+ */
+export function turnDiffTotals(turnDiffs: readonly TurnDiffEntry[] | undefined, root?: string): ReadonlyMap<string, { added: number; deleted: number }> {
+  const totals = new Map<string, { added: number; deleted: number }>()
+  if (!turnDiffs?.length) return totals
+  for (const entry of turnDiffs) {
+    if (!entry || typeof entry !== 'object' || entry.binary === true) continue
+    const addedRaw = Number(entry.added)
+    const deletedRaw = Number(entry.deleted)
+    const hasAdded = Number.isFinite(addedRaw)
+    const hasDeleted = Number.isFinite(deletedRaw)
+    // A counted diff has a number on at least one side; the protocol reads
+    // the missing side as zero.
+    if (!hasAdded && !hasDeleted) continue
+    const added = hasAdded ? addedRaw : 0
+    const deleted = hasDeleted ? deletedRaw : 0
+    if (added === 0 && deleted === 0) continue
+    const key = displayPathOf({ path: String(entry.path ?? entry.old_path ?? '') }, root)
+    if (!key) continue
+    const have = totals.get(key)
+    totals.set(key, have ? { added: have.added + added, deleted: have.deleted + deleted } : { added, deleted })
+  }
+  return totals
 }
 
 /**

@@ -3127,6 +3127,20 @@ func TestToolStepHoldsNoCard(t *testing.T) {
 			t.Fatalf("exit_plan_mode/%q must hold no card", status)
 		}
 	}
+	// present_files is delivery plumbing, not conversation: whatever state its
+	// call is in — running, settled, failed or abandoned — no surface paints a
+	// card for it. The turn's deliverables group is the one account of the
+	// files, so a card would always be a second one.
+	for _, status := range []string{"running", "awaiting approval", "completed", "failed", "cancelled", "canceled", ""} {
+		if !ToolStepHoldsNoCard("present_files", status) {
+			t.Fatalf("present_files/%q must hold no card", status)
+		}
+	}
+	for _, name := range []string{"Present_Files", "  PRESENT_FILES  ", "\tpresent_files\n"} {
+		if !ToolStepHoldsNoCard(name, "running") {
+			t.Fatalf("%q must hold no card: the name is normalized", name)
+		}
+	}
 	for _, tc := range []struct{ tool, status string }{
 		{"exit_plan_mode", "denied"},
 		{"exit_plan_mode", "completed"},

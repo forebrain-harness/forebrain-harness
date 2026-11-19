@@ -908,9 +908,9 @@ import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
-import { artifactsOfPresentFiles, planArtifactOf, turnDeliverables, type ArtifactView } from '@/lib/artifacts'
+import { artifactsOfPresentFiles, displayPathOf, planArtifactOf, turnDeliverables, turnDiffTotals, type ArtifactView } from '@/lib/artifacts'
 import { docTabFor } from '@/composables/useDocTabs'
-import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, timelineBlockKey, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript, type TimelineBlock } from '@/composables/useChatStream'
+import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, stepHoldsNoCard, timelineBlockKey, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript, type TimelineBlock } from '@/composables/useChatStream'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { providePendingActions } from '@/composables/providePendingActions'
 import type { DocTab } from '@/composables/useDocTabs'
@@ -1732,11 +1732,16 @@ const { viewMode } = useViewMode(() => String(sessionId.value ?? ''))
 
 /**
  * drawnBlocks is what the timeline draws under the mode in force: the same
- * blocks, minus the ones concise withholds. In the default mode it is the list
- * itself, so nothing about a stored message changes.
+ * blocks, minus the ones concise withholds, minus a present_files call — its
+ * card is the delivery pipeline's own machinery, and the turn's delivery
+ * group is the one account of the files (owner 2026-11-19). The block itself
+ * stays on the message: the group and the fallbacks behind it read it. In the
+ * default mode everything else is the list itself, so nothing about a stored
+ * message changes.
  */
 function drawnBlocks(blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['blocks']> {
-  return (blocks ?? []).filter((block) => blockVisibleIn(viewMode.value, block.kind))
+  return (blocks ?? []).filter((block) => blockVisibleIn(viewMode.value, block.kind)
+    && !(block.kind === 'tool' && stepHoldsNoCard(block.step)))
 }
 
 /**
@@ -1814,11 +1819,24 @@ function deliverablesOf(msg: ChatMessage): ArtifactView[] {
   }
   const runId = String(msg.runId ?? '').trim()
   const fallback = runId ? artifactsByRun.value.get(runId) ?? [] : []
+  // The rows are located by path and counted by the turn's own diffs
+  // (owner 2026-11-19), both against the session's project root, and both
+  // after the merge: one decoration over the turn's one group.
+  const root = sessionProject.value?.root
+  const totals = turnDiffTotals(msg.turnDiffs, root)
   return turnDeliverables({
     presented,
     plan,
     frame: msg.artifacts ?? [],
     fallback,
+  }).map((row) => {
+    const displayPath = displayPathOf(row, root)
+    const counts = totals.get(displayPath)
+    return {
+      ...row,
+      displayPath,
+      ...(counts ? { added: counts.added, deleted: counts.deleted } : {}),
+    }
   })
 }
 

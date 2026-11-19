@@ -2059,6 +2059,184 @@ describe('ChatView delivers a turn once', () => {
     setLocale('en')
     wrapper.unmount()
   })
+
+  // The session's project root, so the rows' display paths can be relativized
+  // against it (the page reads it from the session's own facts).
+  function mockSessionProject(root?: string) {
+    const spy = vi.spyOn(forebrainApi, 'chatSession').mockResolvedValue({
+      id: 's1',
+      title: '季度汇报',
+      project: root ? { id: 'p1', name: 'proj', root } : null,
+    })
+    return () => spy.mockRestore()
+  }
+
+  /**
+   * A turn that presents a file, with the turn's own diff for it (owner
+   * 2026-11-19): no present_files card is drawn — the block stays as data for
+   * the group — and the group's one row is the file's path under the project
+   * root, carrying the turn's counts. The model's semantic title is not the
+   * row's label.
+   */
+  it('draws no present card and labels the delivered row by path with counts', async () => {
+    setLocale('zh')
+    const restore = mockSessionProject('/work/proj')
+    try {
+      ;(fake as { messages: { value: unknown[] } }).messages.value = [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          runId: 'run-1',
+          blocks: [
+            {
+              kind: 'tool',
+              step: {
+                stepId: 'call-1',
+                toolName: 'present_files',
+                summary: 'presented files',
+                status: 'completed',
+                result: {
+                  presented: [
+                    { id: 'a1', name: 'Q3 报告.docx', relPath: 'deliverables/Q3 报告.docx', title: 'Q3 报告的语义化标题', kind: 'document', preview: 'docx', size: 253952 },
+                    { id: 'a2', name: '毛利.xlsx', relPath: 'deliverables/毛利.xlsx', kind: 'spreadsheet', preview: 'sheet', size: 80896 },
+                  ],
+                },
+              },
+            },
+            { kind: 'assistant', text: '材料都做好了。', open: false },
+          ],
+          artifacts: [
+            { id: 'a1', sessionId: 's1', name: 'Q3 报告.docx', relPath: 'deliverables/Q3 报告.docx', kind: 'document', preview: 'docx', size: 253952 },
+            { id: 'a2', sessionId: 's1', name: '毛利.xlsx', relPath: 'deliverables/毛利.xlsx', kind: 'spreadsheet', preview: 'sheet', size: 80896 },
+          ],
+          turnDiffs: [
+            { path: '/work/proj/deliverables/Q3 报告.docx', status: 'added', added: 2 },
+          ],
+        },
+      ]
+      const wrapper = await mountView({ ToolCallCard: false })
+      await flushPromises()
+
+      // No present_files card anywhere on the page.
+      expect(wrapper.text()).not.toContain('已交付文件')
+      expect(wrapper.text()).not.toContain('present_files')
+
+      const group = wrapper.get('[data-testid="artifact-list"]')
+      const rows = group.findAll('[data-testid="artifact-card"]')
+      expect(rows).toHaveLength(2)
+      const labels = rows.map((row) => row.get('.m b').text())
+      expect(labels[0]).toBe('deliverables/Q3 报告.docx')
+      expect(labels[1]).toBe('deliverables/毛利.xlsx')
+      // The semantic title is not the row's label.
+      expect(labels.join('\n')).not.toContain('语义化标题')
+      // The counted row shows the turn's net pair; the uncounted one shows none.
+      expect(rows[0].get('[data-testid="artifact-added"]').text()).toBe('+2')
+      expect(rows[0].get('[data-testid="artifact-deleted"]').text()).toBe('-0')
+      expect(rows[1].find('[data-testid="artifact-added"]').exists()).toBe(false)
+      setLocale('en')
+      wrapper.unmount()
+    } finally {
+      restore()
+    }
+  })
+
+  /**
+   * A reloaded turn whose frame is gone: the present block keeps no
+   * structured rows, so the conversation's artifact list is the only source
+   * of the files — the REST rows carry the path facts — and the turn's diffs
+   * arrive as `turn_diff_updated` facts on the message.
+   */
+  it('labels a REST-only turn by path and counts it from its diffs', async () => {
+    setLocale('zh')
+    const restore = mockSessionProject('/work/proj')
+    try {
+      ;(fake as { messages: { value: unknown[] } }).messages.value = [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          runId: 'run-1',
+          blocks: [
+            { kind: 'tool', step: { stepId: 'call-1', toolName: 'present_files', summary: 'presented files', header: '已交付文件', status: 'completed' } },
+            { kind: 'assistant', text: '材料都做好了。', open: false },
+          ],
+          turnDiffs: [
+            { path: '/work/proj/deliverables/Q3 报告.docx', status: 'modified', added: 5, deleted: 3 },
+          ],
+        },
+      ]
+      listArtifacts([
+        { id: 'a1', sessionId: 's1', runId: 'run-1', origin: 'model', name: 'Q3 报告.docx', path: '/work/proj/deliverables/Q3 报告.docx', relPath: 'deliverables/Q3 报告.docx', kind: 'document', preview: 'docx', size: 253952 },
+      ])
+      const wrapper = await mountView()
+      await flushPromises()
+
+      expect(wrapper.text()).not.toContain('已交付文件')
+      const rows = wrapper.findAll('[data-testid="artifact-card"]')
+      expect(rows).toHaveLength(1)
+      expect(rows[0].get('.m b').text()).toBe('deliverables/Q3 报告.docx')
+      expect(rows[0].get('[data-testid="artifact-added"]').text()).toBe('+5')
+      expect(rows[0].get('[data-testid="artifact-deleted"]').text()).toBe('-3')
+      setLocale('en')
+      wrapper.unmount()
+    } finally {
+      restore()
+    }
+  })
+
+  /**
+   * A turn an approval resumed presents one file per run: the group is the
+   * union of both runs' presented rows, deduped, and each row carries the
+   * turn's accumulated counts for its own path.
+   */
+  it('groups both runs of a resumed turn, each row with its own counts', async () => {
+    setLocale('zh')
+    const restore = mockSessionProject('/work/proj')
+    try {
+      const presentedIn = (stepId: string, id: string, name: string, relPath: string) => ({
+        kind: 'tool',
+        step: {
+          stepId,
+          toolName: 'present_files',
+          summary: 'presented files',
+          status: 'completed',
+          result: { presented: [{ id, name, relPath, kind: 'document', preview: 'docx', size: 12 }] },
+        },
+      })
+      ;(fake as { messages: { value: unknown[] } }).messages.value = [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: '',
+          runId: 'run-2',
+          blocks: [
+            presentedIn('call-1', 'a1', 'Q3 报告.docx', 'deliverables/Q3 报告.docx'),
+            presentedIn('call-2', 'a2', '毛利.xlsx', 'deliverables/毛利.xlsx'),
+            { kind: 'assistant', text: '都做好了。', open: false },
+          ],
+          turnDiffs: [
+            { path: '/work/proj/deliverables/Q3 报告.docx', status: 'modified', added: 2, deleted: 1 },
+            { path: '/work/proj/deliverables/毛利.xlsx', status: 'modified', added: 4, deleted: 0 },
+          ],
+        },
+      ]
+      const wrapper = await mountView()
+      await flushPromises()
+
+      expect(wrapper.text()).not.toContain('已交付文件')
+      const rows = wrapper.findAll('[data-testid="artifact-card"]')
+      expect(rows).toHaveLength(2)
+      expect(rows[0].get('.m b').text()).toBe('deliverables/Q3 报告.docx')
+      expect(rows[0].get('[data-testid="artifact-added"]').text()).toBe('+2')
+      expect(rows[1].get('.m b').text()).toBe('deliverables/毛利.xlsx')
+      expect(rows[1].get('[data-testid="artifact-added"]').text()).toBe('+4')
+      setLocale('en')
+      wrapper.unmount()
+    } finally {
+      restore()
+    }
+  })
 })
 
 /**

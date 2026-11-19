@@ -774,11 +774,14 @@ func lastWorkedLinePerTurn(turns []state.Message, workedLines map[int]turn.RunWo
 // framed means no group at all.
 func renderReplayDeliverables(renderer *Renderer, reducer *Reducer, frameRows []tool.Deliverable) {
 	rows := reducer.takePendingDeliverables()
+	// Taken at the turn boundary whether or not a group is drawn: counts the
+	// turn earned cannot leak into the next one.
+	diffs := reducer.takePendingTurnDiffs()
 	rows = appendDeliverables(rows, frameRows)
 	if len(rows) == 0 {
 		return
 	}
-	renderer.RenderFrame(Frame{Kind: FrameDeliverables, Deliverables: rows, Final: true})
+	renderer.RenderFrame(Frame{Kind: FrameDeliverables, Deliverables: rows, TurnDiffs: diffs, Final: true})
 }
 
 // replayFrameDeliverables collects the artifact rows the conversation's
@@ -2067,7 +2070,12 @@ func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[str
 	// The gate's wait holds no card on any surface, live included, and a
 	// canceled gate was abandoned to that same wait: replay records the
 	// abandonment only in the approval confirmation line, never in a card.
-	if tool.ToolStepHoldsNoCard(toolName, meta.Status) {
+	// A present_files record is hidden the same way — except when it carries
+	// structured deliverables: those rows are the turn's group, so the record
+	// must still reach the reducer, which hides its card and collects them.
+	// A legacy present record without rows drew a card that said nothing the
+	// group does not; it draws nothing now.
+	if tool.ToolStepHoldsNoCard(toolName, meta.Status) && len(meta.Deliverables) == 0 {
 		return Message{}, "", false
 	}
 	summary := strings.TrimSpace(transcriptToolSummaryWithMeta(body, meta))

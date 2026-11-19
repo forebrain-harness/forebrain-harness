@@ -4,9 +4,11 @@ import {
   artifactOrigin,
   artifactView,
   artifactsOfPresentFiles,
+  displayPathOf,
   planArtifactOf,
   runFrameArtifacts,
   turnDeliverables,
+  turnDiffTotals,
 } from './artifacts'
 
 /** A `present_files` completion's own rows (pkg/tool/artifacts.go). */
@@ -165,5 +167,125 @@ describe('the delivery group of one turn', () => {
     const group = turnDeliverables({ presented, plan: plan ? [plan] : [], frame: [], fallback: [] })
 
     expect(group.map((row) => row.id)).toEqual(['p1', 'a1', 'a2'])
+  })
+})
+/**
+ * The row's label is a path the reader can locate (owner 2026-11-19): inside
+ * the session's project root it is relative to that root, outside it it stays
+ * absolute, and the root boundary is a separator match — `/work/a` is not
+ * inside `/work/ab`. A structured row without an absolute path keeps its
+ * relPath, and a legacy row with neither falls back to its name.
+ */
+describe('displayPathOf', () => {
+  it('relativizes an absolute path inside the project root', () => {
+    expect(displayPathOf({ path: '/work/proj/deliverables/季度报告.md' }, '/work/proj')).toBe('deliverables/季度报告.md')
+    // The boundary is a separator: a sibling directory that shares a prefix
+    // is outside, and its file stays absolute.
+    expect(displayPathOf({ path: '/work/proj2/交付说明.docx' }, '/work/proj')).toBe('/work/proj2/交付说明.docx')
+  })
+
+  it('keeps an outside-root path absolute, and never relativizes without a root', () => {
+    expect(displayPathOf({ path: '/var/tmp/渠道分布.png' }, '/work/proj')).toBe('/var/tmp/渠道分布.png')
+    expect(displayPathOf({ path: '/work/proj/报告.md' }, '')).toBe('/work/proj/报告.md')
+    expect(displayPathOf({ path: '/work/proj/报告.md' })).toBe('/work/proj/报告.md')
+  })
+
+  it('reads a structured row without an absolute path from its relPath, then its name', () => {
+    expect(displayPathOf({ relPath: 'deliverables/notes.md' }, '/work/proj')).toBe('deliverables/notes.md')
+    expect(displayPathOf({ name: 'legacy.docx' }, '/work/proj')).toBe('legacy.docx')
+  })
+
+  it('speaks forward slashes whatever the platform wrote', () => {
+    expect(displayPathOf({ path: '/work/proj\\子目录\\报告.md' }, '/work/proj')).toBe('子目录/报告.md')
+    expect(displayPathOf({ relPath: 'deliverables\\notes.md' }, '/work/proj')).toBe('deliverables/notes.md')
+  })
+
+  it('hands a kept plan outside the root its absolute path from the envelope', () => {
+    // The envelope's plan_file is the one path fact a kept-plan artifact row
+    // carries (its artifact subset names no path), so it reaches the row.
+    const kept = planArtifactOf({
+      planOnly: true,
+      planFile: '/Users/who/.forebrain/plans/s1/plan.md',
+      artifact: { id: 'p9', name: 'plan.md', kind: 'markdown', preview: 'markdown', size: 138 },
+    }, 'session-1')
+    expect(displayPathOf(kept ?? {}, '/work/proj')).toBe('/Users/who/.forebrain/plans/s1/plan.md')
+  })
+
+  // Windows is a shipped target (forebrain-win32-x64): a delivered row can
+  // carry a drive-letter or UNC path, and the same inside/outside rule holds.
+  it('relativizes a Windows drive-letter path inside the project root', () => {
+    expect(displayPathOf({ path: 'C:/work/proj/docs/a.md' }, 'C:/work/proj')).toBe('docs/a.md')
+    // Backslashes arrive from the platform's own separators; output stays `/`.
+    expect(displayPathOf({ path: 'C:\\work\\proj\\docs\\a.md' }, 'C:\\work\\proj')).toBe('docs/a.md')
+  })
+
+  it('keeps a Windows path outside the root absolute', () => {
+    expect(displayPathOf({ path: 'C:/other/a.md' }, 'C:/work/proj')).toBe('C:/other/a.md')
+    // A different drive is a different volume, however alike the directories.
+    expect(displayPathOf({ path: 'D:/work/proj/a.md' }, 'C:/work/proj')).toBe('D:/work/proj/a.md')
+  })
+
+  it('relativizes across drive-letter case, on segment boundaries only', () => {
+    // Windows compares paths case-insensitively, the drive included.
+    expect(displayPathOf({ path: 'c:/WORK/PROJ/docs/a.md' }, 'C:/work/proj')).toBe('docs/a.md')
+    // The boundary is still a whole separator: a sibling directory that
+    // shares the name prefix is outside and stays absolute.
+    expect(displayPathOf({ path: 'C:/work/proj2/a.md' }, 'C:/work/proj')).toBe('C:/work/proj2/a.md')
+  })
+
+  it('relativizes a UNC path inside its share root', () => {
+    expect(displayPathOf({ path: '//server/share/docs/a.md' }, '//server/share')).toBe('docs/a.md')
+    // Another share is outside; host and share names compare without case.
+    expect(displayPathOf({ path: '//server/share/docs/a.md' }, '//other/share')).toBe('//server/share/docs/a.md')
+    expect(displayPathOf({ path: '//Server/Share/docs/a.md' }, '//server/share')).toBe('docs/a.md')
+  })
+
+  it('keeps POSIX matching case-sensitive, unlike Windows paths', () => {
+    expect(displayPathOf({ path: '/Work/Proj/docs/a.md' }, '/work/proj')).toBe('/Work/Proj/docs/a.md')
+  })
+})
+
+/**
+ * The counts a delivered row shows come from the turn's own diffs
+ * (`turn_diff_updated`): one aggregation per turn, keyed by the same display
+ * path the rows are labeled by. The wire's counts are `omitempty` — a created
+ * file carries `added` alone, a deleted one `deleted` alone — so a missing
+ * side on a counted diff is zero, while a binary, mode-only or malformed row
+ * shows nothing at all rather than a guessed pair.
+ */
+describe('turnDiffTotals', () => {
+  it('aggregates the same path across entries and keys them by display path', () => {
+    const totals = turnDiffTotals([
+      { path: '/work/proj/deliverables/report.md', added: 2, deleted: 1 },
+      { path: 'deliverables/report.md', added: 3, deleted: 2 },
+      { path: '/work/proj/deliverables/other.md', added: 4, deleted: 4 },
+    ], '/work/proj')
+    expect(totals.get('deliverables/report.md')).toEqual({ added: 5, deleted: 3 })
+    expect(totals.has('deliverables/other.md')).toBe(true)
+  })
+
+  it('reads the omitempty protocol: a missing side is zero on a counted diff', () => {
+    const totals = turnDiffTotals([
+      { path: 'deliverables/created.md', status: 'added', added: 2 },
+      { path: 'deliverables/gone.md', status: 'deleted', deleted: 3 },
+    ])
+    expect(totals.get('deliverables/created.md')).toEqual({ added: 2, deleted: 0 })
+    expect(totals.get('deliverables/gone.md')).toEqual({ added: 0, deleted: 3 })
+  })
+
+  it('shows nothing for binary, numberless or all-zero rows', () => {
+    const totals = turnDiffTotals([
+      { path: 'out/app.bin', binary: true, added: 9, deleted: 9 },
+      { path: 'docs/mode.md', status: 'changed' },
+      { path: 'docs/zero.md', added: 0, deleted: 0 },
+    ])
+    expect(totals.has('out/app.bin')).toBe(false)
+    expect(totals.has('docs/mode.md')).toBe(false)
+    expect(totals.has('docs/zero.md')).toBe(false)
+  })
+
+  it('relates nothing when there are no diffs at all', () => {
+    expect(turnDiffTotals(undefined, '/work/proj').size).toBe(0)
+    expect(turnDiffTotals([], '/work/proj').size).toBe(0)
   })
 })

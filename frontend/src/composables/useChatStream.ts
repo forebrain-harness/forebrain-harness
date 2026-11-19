@@ -1067,13 +1067,18 @@ function isExitPlanGate(toolName: string): boolean {
 }
 
 /**
- * stepHoldsNoCard reports whether a tool step's card is withheld: the
- * exit-plan gate while the call runs, awaits the decision, or was abandoned to
- * that wait - waiting, abandoned and canceled hold no card. Only the settled
- * answers draw: the user's denial, a failure, the exit itself.
+ * stepHoldsNoCard reports whether a tool step's card is withheld, bound to the
+ * runtime's tool.ToolStepHoldsNoCard. present_files holds no card in any
+ * state: it is the delivery pipeline's own machinery, the turn's delivery
+ * group is the one account of the files, and its failures are not the
+ * user's to debug. The exit-plan gate's wait is withheld while the call runs,
+ * awaits the decision, or was abandoned to it - only its settled answers
+ * draw: the user's denial, a failure, the exit itself.
  */
-function stepHoldsNoCard(step: { toolName: string; status: string }): boolean {
-  return isExitPlanGate(step.toolName) && ['running', 'awaiting approval', 'canceled'].includes(String(step.status ?? '').trim().toLowerCase())
+export function stepHoldsNoCard(step: { toolName: string; status: string }): boolean {
+  const name = String(step.toolName ?? '').trim().toLowerCase()
+  if (name === 'present_files') return true
+  return isExitPlanGate(name) && ['running', 'awaiting approval', 'canceled'].includes(String(step.status ?? '').trim().toLowerCase())
 }
 
 /**
@@ -5253,8 +5258,10 @@ export function useChatStream() {
     )
     // The exit-plan gate's wait paints no card: its approval prompt is the
     // whole wait (stepHoldsNoCard). Its anchor still marks where the call was
-    // made, so the gate's records land there.
-    if (stepHoldsNoCard(step)) {
+    // made, so the gate's records land there. Every other call — a
+    // present_files included, though it too holds no card — keeps the block
+    // path: the block is data, and the timeline decides what is drawn.
+    if (isExitPlanGate(step.toolName) && stepHoldsNoCard(step)) {
       ensureGateAnchor(assistantMessageId, step.stepId, '')
       return
     }

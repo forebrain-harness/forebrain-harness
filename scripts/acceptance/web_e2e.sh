@@ -237,6 +237,35 @@ else
   grep -q LISTENING "$WORK/proxy.log" || die "flaky proxy never bound port $PROXY_PORT"
 fi
 
+# 6b. Models live in the state database's model table, not the yaml (plans
+#     262/315). Seed the rows BEFORE the gateway starts: it composes its config
+#     from the database once at startup and builds the project runner pool from
+#     that snapshot (open.go / runner_pool.go), and a seed that only writes
+#     SQLite after the fact leaves the running gateway with no models — the
+#     fake provider then sees zero requests and the specs time out. The seed's
+#     headless init pass runs the same binary against the same home and yaml,
+#     so it must resolve the same ${FOREBRAIN_GATEWAY_TOKEN} the real gateway
+#     below gets. created_at order is the view order, so the primary model
+#     every run uses (owner ruling 2026-10-22) sorts first. Keys reach the
+#     seed on stdin, never a command line.
+export FOREBRAIN_GATEWAY_TOKEN="$TOKEN"
+SEED="$REPO/.claude/skills/run-forebrain/model_seed.sh"
+NOW_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
+if [ "$REAL_LLM" = "1" ]; then
+  printf '%s' "$FOREBRAIN_E2E_ZHIPU_KEY" | "$SEED" "$BIN" "$HOME_DIR" zhipuai glm-5.3-flash "http://127.0.0.1:$PROXY_PORT" e2e-primary "$NOW_MS"
+else
+  # The catalog gives deepseek-v4-flash both image input and effort levels,
+  # which the composer and the image-refusal specs read.
+  printf '%s' "sk-local-fake" | "$SEED" "$BIN" "$HOME_DIR" deepseek deepseek-v4-flash "http://127.0.0.1:$LLM_PORT" e2e-primary "$NOW_MS"
+  # A second reasoning-capable entry, so the model chip has another option to
+  # switch to (chat-composer.spec.ts). The fake provider answers any model
+  # identity, and the chain never reaches it while the first works.
+  printf '%s' "sk-local-fake" | "$SEED" "$BIN" "$HOME_DIR" zhipuai glm-5.3-flash "http://127.0.0.1:$LLM_PORT" e2e-second "$((NOW_MS + 1))"
+  # A text-only model (catalog attachment: false) for the image-refusal spec;
+  # the chain never reaches it while the first entry works.
+  printf '%s' "sk-local-fake" | "$SEED" "$BIN" "$HOME_DIR" deepseek deepseek-v4-pro "http://127.0.0.1:$LLM_PORT" e2e-textonly "$((NOW_MS + 2))"
+fi
+
 # 7. Gateway. `exec` is load-bearing: without it $! is the subshell, the trap
 #    kills only the wrapper, and the orphaned gateway poisons the next run
 #    (bind panic here, and a stale token answering every request).
@@ -254,28 +283,6 @@ for _ in $(seq 1 150); do
   sleep 0.2
 done
 curl -fsS "http://127.0.0.1:$GW_PORT/healthz" > /dev/null || die "gateway never answered /healthz"
-
-# 8b. Models live in the state database's model table, not the yaml (plans
-#     262/315): the gateway above created and imported it. Seed the rows the
-#     specs read; created_at order is the view order, so the primary model
-#     every run uses (owner ruling 2026-10-22) sorts first. Keys reach the
-#     seed on stdin, never a command line.
-SEED="$REPO/.claude/skills/run-forebrain/model_seed.sh"
-NOW_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
-if [ "$REAL_LLM" = "1" ]; then
-  printf '%s' "$FOREBRAIN_E2E_ZHIPU_KEY" | "$SEED" "$BIN" "$HOME_DIR" zhipuai glm-5.3-flash "http://127.0.0.1:$PROXY_PORT" e2e-primary "$NOW_MS"
-else
-  # The catalog gives deepseek-v4-flash both image input and effort levels,
-  # which the composer and the image-refusal specs read.
-  printf '%s' "sk-local-fake" | "$SEED" "$BIN" "$HOME_DIR" deepseek deepseek-v4-flash "http://127.0.0.1:$LLM_PORT" e2e-primary "$NOW_MS"
-  # A second reasoning-capable entry, so the model chip has another option to
-  # switch to (chat-composer.spec.ts). The fake provider answers any model
-  # identity, and the chain never reaches it while the first works.
-  printf '%s' "sk-local-fake" | "$SEED" "$BIN" "$HOME_DIR" zhipuai glm-5.3-flash "http://127.0.0.1:$LLM_PORT" e2e-second "$((NOW_MS + 1))"
-  # A text-only model (catalog attachment: false) for the image-refusal spec;
-  # the chain never reaches it while the first entry works.
-  printf '%s' "sk-local-fake" | "$SEED" "$BIN" "$HOME_DIR" deepseek deepseek-v4-pro "http://127.0.0.1:$LLM_PORT" e2e-textonly "$((NOW_MS + 2))"
-fi
 
 # 9. Browser suite: the specs this change touched (FOREBRAIN_E2E_SPEC, one or
 #    more files/globs, checked above), or the whole suite at a release gate.

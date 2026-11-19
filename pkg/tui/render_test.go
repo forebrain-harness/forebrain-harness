@@ -2175,7 +2175,7 @@ func TestDeliverableGlyphWidthIsMeasured(t *testing.T) {
 		}
 	}
 	f := Frame{Kind: FrameDeliverables, Deliverables: []tool.Deliverable{
-		{Title: strings.Repeat("很长的中文标题", 6), Kind: "presentation", RelPath: "输出/季度回顾.pptx", Size: 1259520},
+		{Title: strings.Repeat("很长的中文标题", 6), Kind: "presentation", RelPath: "输出/" + strings.Repeat("很长的中文路径", 6) + "/季度回顾.pptx", Size: 1259520},
 		{Title: "ddl.sql", Kind: "text", RelPath: "db/ddl.sql", Size: 288},
 	}}
 	for _, width := range []int{40, 80} {
@@ -2199,6 +2199,93 @@ func TestDeliverableGlyphWidthIsMeasured(t *testing.T) {
 		}
 		if startsDeliverableRow(plain[1]) {
 			t.Fatalf("width %d: wrapped row %q looks like a new deliverable", width, plain[1])
+		}
+	}
+}
+
+// TestDeliverableRowShowsThePathNotTheTitle pins the row's label rule: a row
+// is located by its path — the workspace-relative path for files inside the
+// project, the absolute path for a run artifact outside it — and the model's
+// semantic title never reaches the row. A row with no path and no name has
+// nothing to locate and draws no line.
+func TestDeliverableRowShowsThePathNotTheTitle(t *testing.T) {
+	f := Frame{Kind: FrameDeliverables, Deliverables: []tool.Deliverable{
+		{Title: "完成结果文档的语义说明", Name: "result.md", Kind: "markdown", RelPath: filepath.ToSlash(filepath.Join("docs", "nested", "result.md"))},
+		{Title: "外部计划文件", Name: "plan.md", Kind: "markdown", RelPath: "/var/elsewhere/plan.md"},
+		{Title: "title only", Kind: "text"},
+	}}
+	lines, _ := renderFrameLinesWithAgents(f, 100, DiffThemeDark, 0)
+	plain := stripANSI(strings.Join(lines, "\n"))
+	if strings.Contains(plain, "完成结果文档的语义说明") || strings.Contains(plain, "外部计划文件") {
+		t.Fatalf("a semantic title became the row's label:\n%s", plain)
+	}
+	if !strings.Contains(plain, filepath.ToSlash(filepath.Join("docs", "nested", "result.md"))) {
+		t.Fatalf("the workspace-relative nested path is missing:\n%s", plain)
+	}
+	if !strings.Contains(plain, "/var/elsewhere/plan.md") {
+		t.Fatalf("the out-of-scope absolute path is missing:\n%s", plain)
+	}
+	if strings.Contains(plain, "title only") {
+		t.Fatalf("a row with no path and no name drew a line:\n%s", plain)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("rows = %d, want the two located files only: %q", len(lines), lines)
+	}
+}
+
+// TestDeliverableRowShowsTurnDiffCounts pins the counts rule: a row whose path
+// the turn changed carries its net +N -N at the end of the line — multiple
+// changes to the same path add up, an absolute diff path under the working
+// directory matches the row's relative one, and a binary change or a path the
+// turn never touched shows nothing rather than a guessed zero pair.
+func TestDeliverableRowShowsTurnDiffCounts(t *testing.T) {
+	const cwd = "/w"
+	rel := filepath.ToSlash(filepath.Join("docs", "result.md"))
+	absDiff := filepath.Join(cwd, "docs", "result.md")
+	f := Frame{Kind: FrameDeliverables, Deliverables: []tool.Deliverable{
+		{Title: "result", Name: "result.md", Kind: "markdown", RelPath: rel},
+		{Title: "bin", Name: "app.bin", Kind: "other", RelPath: "out/app.bin"},
+		{Title: "untouched", Name: "notes.md", Kind: "markdown", RelPath: "docs/notes.md"},
+	}}
+	f.TurnDiffs = []event.TurnDiffFile{
+		{Path: absDiff, Added: 2, Deleted: 0},
+		{Path: rel, Added: 3, Deleted: 1},
+		{Path: "out/app.bin", Binary: true, Status: "modified"},
+		{Path: "docs/notes.md", Added: 0, Deleted: 0},
+	}
+	lines, _ := renderFrameLinesWithAgents(f, 100, DiffThemeDark, 0, cwd)
+	plain := stripANSI(strings.Join(lines, "\n"))
+	for _, want := range []string{"+5", "-1"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("the accumulated counts %q are missing:\n%s", want, plain)
+		}
+	}
+	row := ""
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, rel) {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("the delivered row is missing:\n%s", plain)
+	}
+	if !strings.Contains(row, "+5") || !strings.Contains(row, "-1") {
+		t.Fatalf("row %q carries the wrong counts", row)
+	}
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "app.bin") && (strings.Contains(line, "+") || strings.Contains(line, "-")) {
+			t.Fatalf("a binary change shows counts: %q", line)
+		}
+		if strings.Contains(line, "notes.md") && (strings.Contains(line, "+0") || strings.Contains(line, "-0")) {
+			t.Fatalf("an unchanged file shows a zero pair: %q", line)
+		}
+	}
+	// A width that forces the path to wrap still fits the terminal: the counts
+	// ride the row, not the terminal's edge.
+	narrow, _ := renderFrameLinesWithAgents(f, 34, DiffThemeDark, 0, cwd)
+	for i, line := range narrow {
+		if w := lipgloss.Width(line); w > 34 {
+			t.Fatalf("width 34: row %d is %d columns: %q", i, w, line)
 		}
 	}
 }

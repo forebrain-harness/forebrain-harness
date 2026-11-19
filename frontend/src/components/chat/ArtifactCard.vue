@@ -7,9 +7,13 @@
       <component :is="icon" />
     </span>
     <div class="m">
-      <b :title="artifact.name">{{ artifact.title }}</b>
+      <b :title="label">{{ label }}</b>
       <span>{{ kindLabel }} {{ sizeLabel }}</span>
     </div>
+    <span v-if="artifact.added != null && artifact.deleted != null" class="art-counts">
+      <span class="art-added" data-testid="artifact-added">+{{ artifact.added }}</span>
+      <span class="art-deleted" data-testid="artifact-deleted">-{{ artifact.deleted }}</span>
+    </span>
     <span v-if="artifact.missing" class="badge err" data-testid="artifact-missing">{{ t('chat.artifactMissing') }}</span>
     <span v-else-if="artifact.changed" class="badge warn" data-testid="artifact-changed">{{ t('chat.artifactChanged') }}</span>
     <span class="a">
@@ -66,6 +70,11 @@ const icon = computed<Component>(() => artifactKindIcon(props.artifact.kind))
 const kindLabel = computed(() => t(artifactKindLabelKey(props.artifact.kind)))
 const sizeLabel = computed(() => humanSize(props.artifact.size))
 
+/** The row's label is the path the file is located by (owner 2026-11-19): the
+ *  display path, with the name standing in only for a legacy row that never
+ *  carried one. The model's semantic title is not a location. */
+const label = computed(() => props.artifact.displayPath || props.artifact.name)
+
 /** A file is previewable only when it says how and can actually be read: a
  *  row whose bytes are gone has nothing to draw. */
 const canPreview = computed(() => props.artifact.preview !== '' && props.artifact.contentUrl !== '' && !props.artifact.missing)
@@ -117,6 +126,25 @@ const canPreview = computed(() => props.artifact.preview !== '' && props.artifac
 .m span {
   font: 11.5px/1.4 var(--forebrain-ui-font);
   color: var(--forebrain-muted-text);
+}
+
+/* The turn's own net change to the file, one pair, after the path: additions
+   and deletions in the diff's own colours, monospaced so the pair lines up
+   across rows, and never squeezing the row's actions. */
+.art-counts {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: none;
+  font: 600 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.art-added {
+  color: var(--forebrain-success);
+}
+
+.art-deleted {
+  color: var(--forebrain-danger);
 }
 
 .a {
