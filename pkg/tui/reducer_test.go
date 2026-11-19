@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -5884,13 +5885,15 @@ func deliverableRows() []tool.Deliverable {
 func manyDeliverables(n int) []tool.Deliverable {
 	rows := make([]tool.Deliverable, 0, n)
 	for i := 0; i < n; i++ {
-		name := fmt.Sprintf("file-%02d.txt", i)
+		rel := fmt.Sprintf("out/f%02d.txt", i)
 		if i%2 == 0 {
-			name = fmt.Sprintf("file-%02d-%s.txt", i, strings.Repeat("很长的文件名", 6))
+			// The label is the path, so this is the row that wraps.
+			rel = fmt.Sprintf("out/f%02d-%s.txt", i, strings.Repeat("很长的文件名", 6))
 		}
+		name := fmt.Sprintf("file-%02d.txt", i)
 		rows = append(rows, tool.Deliverable{
 			Title: name, Name: name, Kind: "text",
-			RelPath: fmt.Sprintf("out/f%02d.txt", i), Size: int64(1000 + i),
+			RelPath: rel, Size: int64(1000 + i),
 		})
 	}
 	return rows
@@ -5907,37 +5910,43 @@ func deliverableToolMessage(rows []tool.Deliverable, status, content string) New
 	}}
 }
 
-// TestDeliverableCardHoldsNoBodyWhenCompleted pins the one card rule: a call
-// that delivered files says so on its header and leaves the list to the turn's
-// group, while a failed, refused or canceled call keeps its body — that text is
-// the only explanation the user gets.
-func TestDeliverableCardHoldsNoBodyWhenCompleted(t *testing.T) {
+// TestPresentFilesHoldsNoCardButKeepsDeliverables pins the hidden plumbing
+// rule: a present_files call draws no card in any state — its rows are the
+// turn's group, its failure is not the user's to debug — while the structured
+// rows it reported still reach that group at the turn's close. A record with
+// no rows (a legacy "Presented files." card) draws nothing anywhere.
+func TestPresentFilesHoldsNoCardButKeepsDeliverables(t *testing.T) {
 	for _, tc := range []struct {
 		status  string
 		content string
-		want    string
 	}{
-		{status: "completed", content: "- **q3.md** markdown 2.0 KB `out/q3.md`", want: ""},
-		{status: "failed", content: "**error** (present_files)\n\n```\npermission denied\n```", want: "**error** (present_files)\n\n```\npermission denied\n```"},
-		{status: "cancelled", content: "Presented files.", want: "Presented files."},
+		{status: "running", content: ""},
+		{status: "awaiting approval", content: ""},
+		{status: "completed", content: "- **q3.md** markdown 2.0 KB `out/q3.md`"},
+		{status: "failed", content: "**error** (present_files)\n\n```\npermission denied\n```"},
+		{status: "cancelled", content: "Presented files."},
 	} {
 		r := &Reducer{}
 		frames := r.Reduce(deliverableToolMessage(deliverableRows(), tc.status, tc.content)).Frames
-		if len(frames) == 0 || frames[0].Kind != FrameTool {
-			t.Fatalf("%s: frames = %#v, want a tool card", tc.status, frames)
-		}
-		if got := frames[0].Content; got != tc.want {
-			t.Fatalf("%s: card body = %q, want %q", tc.status, got, tc.want)
+		if len(frames) != 0 {
+			t.Fatalf("%s: frames = %#v, want no card at all", tc.status, frames)
 		}
 	}
-	// A step recorded before the tool reported rows keeps its prose and gives
-	// the turn no deliverables at all.
+	// The hidden card's rows survive: the turn closes with one group holding
+	// both files.
 	r := &Reducer{}
-	frames := r.Reduce(deliverableToolMessage(nil, "completed", "Presented files.")).Frames
-	if len(frames) == 0 || frames[0].Content != "Presented files." {
-		t.Fatalf("legacy card body = %#v, want its prose", frames)
+	r.Reduce(deliverableToolMessage(deliverableRows(), "completed", ""))
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	if len(ev.Frames) != 1 || ev.Frames[0].Kind != FrameDeliverables || len(ev.Frames[0].Deliverables) != 2 {
+		t.Fatalf("closing frames = %#v, want the hidden call's two rows in one group", ev.Frames)
 	}
-	if got := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true}).Frames; len(got) != 0 {
+	// A step recorded before the tool reported rows draws nothing and gives
+	// the turn no deliverables at all.
+	r2 := &Reducer{}
+	if frames := r2.Reduce(deliverableToolMessage(nil, "completed", "Presented files.")).Frames; len(frames) != 0 {
+		t.Fatalf("legacy rowless card = %#v, want nothing drawn", frames)
+	}
+	if got := r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true}).Frames; len(got) != 0 {
 		t.Fatalf("a turn that presented no rows drew %#v", got)
 	}
 }
@@ -6125,10 +6134,10 @@ func TestDeliverablesFoldByFile(t *testing.T) {
 	if len(full) != len(four) {
 		t.Fatalf("four short rows rendered %d rows: %q", len(full), full)
 	}
-	// A row is the name and nothing else (owner ruling): the glyph carries the
-	// class and the suffix repeats it, so neither the class, the size nor the
-	// path is drawn, and no separator appears between facts.
-	if got, want := stripANSI(full[0]), "  ¶ q3.md"; got != want {
+	// A row is the file's path and nothing else (owner rulings): the glyph
+	// carries the class and the suffix repeats it, so neither the class nor
+	// the size is drawn, and no separator appears between facts.
+	if got, want := stripANSI(full[0]), "  ¶ out/q3.md"; got != want {
 		t.Fatalf("row = %q, want %q", got, want)
 	}
 	for _, row := range full {
@@ -6136,7 +6145,7 @@ func TestDeliverablesFoldByFile(t *testing.T) {
 		if strings.Contains(plain, " · ") {
 			t.Fatalf("row %q draws a separator", plain)
 		}
-		for _, redundant := range []string{"markdown", "B", "KB", "out/", "db/"} {
+		for _, redundant := range []string{"markdown", "B", "KB"} {
 			if strings.Contains(plain, redundant) {
 				t.Fatalf("row %q repeats %q", plain, redundant)
 			}
@@ -6317,10 +6326,14 @@ func TestReplayDrawsTheGroupAboveItsWorkedLine(t *testing.T) {
 	if len(frames[group].Deliverables) != 2 {
 		t.Fatalf("replayed group rows = %#v", frames[group].Deliverables)
 	}
-	// The card above it carries no body: its rows are the group's.
-	for _, f := range frames[:group] {
-		if f.Kind == FrameTool && strings.TrimSpace(f.Content) != "" {
-			t.Fatalf("replayed card still carries a body: %q", f.Content)
+	// No present_files card exists at all on replay either: the hidden call's
+	// records leave the group as the only trace of the delivery.
+	for _, f := range frames {
+		if f.Kind == FrameTool && strings.EqualFold(strings.TrimSpace(f.ToolMeta.ToolName), "present_files") {
+			t.Fatalf("replay drew a present_files card: %#v", f)
+		}
+		if f.Kind == FrameTool && strings.EqualFold(strings.TrimSpace(f.Title), "present_files") {
+			t.Fatalf("replay drew a present_files card: %#v", f)
 		}
 	}
 }
@@ -6379,26 +6392,253 @@ func TestReplayKeepsOneGroupPerTurnAcrossRuns(t *testing.T) {
 	}
 }
 
-// TestCompletedDeliverableCardDrawsNoPlaceholderBody pins what the card looks
-// like once its rows moved to the group: its header alone, not the "(no
-// output)" placeholder that would read as an output that went missing. A card
-// without rows keeps the placeholder every other empty card uses.
-func TestCompletedDeliverableCardDrawsNoPlaceholderBody(t *testing.T) {
-	card := Frame{Kind: FrameTool, Title: "present_files", Summary: "ran present_files", Final: true,
-		ToolMeta: tool.ToolMeta{ToolName: "present_files", Status: "completed", Deliverables: deliverableRows()}}
-	lines, _ := renderFrameLinesWithAgents(card, 80, DiffThemeDark, 0)
-	if plain := stripANSI(strings.Join(lines, "\n")); strings.Contains(plain, toolNoOutputText) {
-		t.Fatalf("the delivered card drew the placeholder:\n%s", plain)
-	}
-	if len(lines) == 0 || strings.TrimSpace(stripANSI(lines[0])) == "" {
-		t.Fatalf("the delivered card drew no header at all: %q", lines)
-	}
+// fileToolDiffMessage is a main-agent file tool's completed card body as the
+// engine formats it: the turn diff section the deliverables' counts read back.
+func fileToolDiffMessage(stepID, path string, added, deleted int) NewMessageMsg {
+	return NewMessageMsg{Msg: Message{
+		Kind: MsgKindTool, StepID: stepID, ToolName: "write_file",
+		Content:   fmt.Sprintf("turn diff: `%s` (+%d/-%d)\n\n```diff\n+%s\n```", path, added, deleted, "line"),
+		ToolMeta:  tool.ToolMeta{ToolName: "write_file", Status: "completed"},
+		Timestamp: time.Unix(1700000000, 0),
+	}}
+}
 
-	empty := Frame{Kind: FrameTool, Title: "present_files", Summary: "ran present_files", Final: true,
-		ToolMeta: tool.ToolMeta{ToolName: "present_files", Status: "completed"}}
-	lines, _ = renderFrameLinesWithAgents(empty, 80, DiffThemeDark, 0)
-	if plain := stripANSI(strings.Join(lines, "\n")); !strings.Contains(plain, toolNoOutputText) {
-		t.Fatalf("an empty card without rows lost its placeholder:\n%s", plain)
+// shellToolDiffMessage is a main-agent shell call's completed body with two
+// changed-file blocks (ParseDiffBlocks' own format).
+func shellToolDiffMessage(stepID string, files ...[3]any) NewMessageMsg {
+	var sb strings.Builder
+	sb.WriteString("**shell**\n\noutput:\n```json\n{\"exit_code\": 0}\n```\n\n")
+	for _, f := range files {
+		fmt.Fprintf(&sb, "Updated `%s` (+%d -%d)\n", f[0], f[1], f[2])
+	}
+	return NewMessageMsg{Msg: Message{
+		Kind: MsgKindTool, StepID: stepID, ToolName: "shell",
+		Content:   sb.String(),
+		ToolMeta:  tool.ToolMeta{ToolName: "shell", Status: "completed"},
+		Timestamp: time.Unix(1700000000, 0),
+	}}
+}
+
+// TestTurnDiffRowsCollectFromMainAgentToolBodies pins the collection: the
+// counts a deliverable row shows come from the turn's own tool bodies — one
+// file tool's diff section and a shell call's changed-file blocks — with a
+// republished step (started/completed, live/canonical) overwriting its own
+// counts instead of doubling them, and two different steps touching the same
+// path adding up, the way one turn's net change reads.
+func TestTurnDiffRowsCollectFromMainAgentToolBodies(t *testing.T) {
+	r := &Reducer{}
+	r.Reduce(fileToolDiffMessage("call_w", "docs/result.md", 2, 0))
+	r.Reduce(shellToolDiffMessage("call_s", [3]any{"docs/result.md", 3, 1}, [3]any{"other.txt", 9, 9}))
+	// The same step republished with new counts replaces its own row.
+	r.Reduce(fileToolDiffMessage("call_w", "docs/result.md", 4, 2))
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	var group *Frame
+	for i := range ev.Frames {
+		if ev.Frames[i].Kind == FrameDeliverables {
+			group = &ev.Frames[i]
+		}
+	}
+	// No deliverables were presented: the counts are still collected and
+	// cleared at the close even when no group is drawn.
+	if group != nil {
+		t.Fatalf("a turn with no deliverables drew %#v", group)
+	}
+	// Ask again with a presented row so the group carries them.
+	r2 := &Reducer{}
+	r2.Reduce(fileToolDiffMessage("call_w", "docs/result.md", 4, 2))
+	r2.Reduce(shellToolDiffMessage("call_s", [3]any{"docs/result.md", 3, 1}, [3]any{"other.txt", 9, 9}))
+	r2.Reduce(deliverableToolMessage([]tool.Deliverable{{Title: "result", Name: "result.md", Kind: "markdown", RelPath: "docs/result.md"}}, "completed", ""))
+	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	if len(ev.Frames) != 1 || ev.Frames[0].Kind != FrameDeliverables {
+		t.Fatalf("frames = %#v, want the deliverables group", ev.Frames)
+	}
+	diffs := ev.Frames[0].TurnDiffs
+	var resultAdded, resultDeleted, otherAdded, otherDeleted int
+	seenResult, seenOther := false, false
+	for _, d := range diffs {
+		switch filepath.ToSlash(filepath.Clean(d.Path)) {
+		case "docs/result.md":
+			seenResult = true
+			resultAdded += d.Added
+			resultDeleted += d.Deleted
+		case "other.txt":
+			seenOther = true
+			otherAdded += d.Added
+			otherDeleted += d.Deleted
+		}
+	}
+	// call_w overwrote to (+4/-2), call_s added (+3/-1): the turn's net for
+	// the delivered path is +7/-3; the undelivered path is collected too.
+	if !seenResult || resultAdded != 7 || resultDeleted != 3 {
+		t.Fatalf("result.md counts = +%d/-%d (seen %v), want +7/-3", resultAdded, resultDeleted, seenResult)
+	}
+	if !seenOther || otherAdded != 9 || otherDeleted != 9 {
+		t.Fatalf("other.txt counts = +%d/-%d (seen %v), want +9/-9", otherAdded, otherDeleted, seenOther)
+	}
+	// The close took them: a second close draws nothing.
+	if ev := r2.Reduce(RunEndedMsg{RunID: "run-2", ClosesTurn: true}); len(ev.Frames) != 0 {
+		t.Fatalf("counts survived the close: %#v", ev.Frames)
+	}
+}
+
+// TestTurnDiffRowsNeedSettledBodies pins the boundary: output deltas (a
+// running call's fragments) and subagent calls contribute no counts — the
+// subagent's files are not this conversation's deliverables.
+func TestTurnDiffRowsNeedSettledBodies(t *testing.T) {
+	r := &Reducer{}
+	delta := fileToolDiffMessage("call_d", "docs/a.md", 5, 5)
+	delta.Msg.ToolOutputDelta = true
+	r.Reduce(delta)
+	sub := fileToolDiffMessage("call_sub", "docs/b.md", 6, 6)
+	sub.Msg.AgentID = "agent-1"
+	r.Reduce(sub)
+	r.Reduce(deliverableToolMessage([]tool.Deliverable{{Name: "a.md", Kind: "markdown", RelPath: "docs/a.md"}}, "completed", ""))
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	if len(ev.Frames) != 1 || len(ev.Frames[0].TurnDiffs) != 0 {
+		t.Fatalf("turn diffs = %#v, want none from deltas or subagent calls", ev.Frames[0].TurnDiffs)
+	}
+}
+
+// TestWithdrawnTurnDropsItsTurnDiffs pins that a withdrawn turn is a turn that
+// never happened: its counts do not leak into the next turn's group.
+func TestWithdrawnTurnDropsItsTurnDiffs(t *testing.T) {
+	live := &foregroundTurn{}
+	withdrawn := &foregroundTurn{}
+	withdrawn.withdraw()
+	r := &Reducer{}
+	r.Reduce(RunStartedMsg{RunID: "run-1", turn: live})
+	r.Reduce(fileToolDiffMessage("call_w", "docs/result.md", 2, 0))
+	if ev := r.Reduce(RunEndedMsg{RunID: "run-1", turn: withdrawn, ClosesTurn: true}); len(ev.Frames) != 0 {
+		t.Fatalf("a withdrawn turn drew %#v", ev.Frames)
+	}
+	r.Reduce(deliverableToolMessage([]tool.Deliverable{{Name: "result.md", Kind: "markdown", RelPath: "docs/result.md"}}, "completed", ""))
+	ev := r.Reduce(RunEndedMsg{RunID: "run-2", turn: &foregroundTurn{}, ClosesTurn: true})
+	if len(ev.Frames) != 1 || len(ev.Frames[0].TurnDiffs) != 0 {
+		t.Fatalf("the next turn inherited counts: %#v", ev.Frames[0].TurnDiffs)
+	}
+}
+
+// replayedDeliverableTurnsWithBody builds a stored transcript of one turn whose
+// tool rows carry the given display bodies, so replayed diff collection can be
+// pinned against the same bodies the live path parsed.
+func replayedDeliverableTurnsWithBody(t *testing.T, worked bool, rows []tool.Deliverable, bodies map[string]string) []state.Message {
+	t.Helper()
+	turns := replayedDeliverableTurns(worked, rows)
+	raw, _ := json.Marshal(tool.ToolMeta{ToolName: "present_files", Status: "completed", Deliverables: rows})
+	out := make([]state.Message, 0, len(turns)+len(bodies))
+	out = append(out, turns[0])
+	row := 2
+	for stepID, body := range bodies {
+		p, err := json.Marshal([]map[string]any{{
+			"type": "tool_result_meta", "tool_call_id": stepID,
+		}, {
+			"type":           "tool_display",
+			"body":           body,
+			"summary":        "ran a tool",
+			"tool_meta_json": string(raw),
+		}})
+		if err != nil {
+			t.Fatalf("marshal display parts: %v", err)
+		}
+		call := state.Message{
+			RowID: int64(row), RunID: "run-1", Role: "tool", ToolStepID: stepID,
+			PartsJSON: string(p), CreatedAt: 1700000101,
+		}
+		if worked {
+			call.RunStartedAtMs = 1700000000000
+			call.RunFinishedAtMs = 1700000120000
+			call.RunWorkedMs = 12000
+		}
+		out = append(out, call)
+		row++
+	}
+	out = append(out, turns[len(turns)-1])
+	return out
+}
+
+// TestReplayAttachesTurnDiffsToTheGroup pins the replay seam: the counts are
+// read back from the same stored display bodies, attached to the group at the
+// turn's last worked line, kept across an approval resume's two runs, and not
+// leaked into the next turn.
+func TestReplayAttachesTurnDiffsToTheGroup(t *testing.T) {
+	bodies := map[string]string{
+		"call_w": fmt.Sprintf("turn diff: `%s` (+2/-0)\n\n```diff\n+line\n```", "docs/result.md"),
+		"call_s": "**shell**\n\nUpdated `docs/result.md` (+3 -1)\n",
+	}
+	turns := replayedDeliverableTurnsWithBody(t, true, []tool.Deliverable{{Name: "result.md", Kind: "markdown", RelPath: "docs/result.md"}}, bodies)
+	frames := replayDeliverableBlocks(t, turns)
+	var group *Frame
+	for i := range frames {
+		if frames[i].Kind == FrameDeliverables {
+			if group != nil {
+				t.Fatalf("replay drew %d groups", 2)
+			}
+			group = &frames[i]
+		}
+	}
+	if group == nil {
+		t.Fatalf("replay lost the group (frames %#v)", frames)
+	}
+	var added, deleted int
+	for _, d := range group.TurnDiffs {
+		if filepath.ToSlash(filepath.Clean(d.Path)) == "docs/result.md" {
+			added += d.Added
+			deleted += d.Deleted
+		}
+	}
+	if added != 5 || deleted != 1 {
+		t.Fatalf("replayed counts = +%d/-%d, want +5/-1 from both bodies", added, deleted)
+	}
+}
+
+// TestReplayAttachesTurnDiffsWithoutARunEnd pins the crashed-turn case: a turn
+// that recorded no run-end line still ends where the next person's message
+// begins, and the counts it earned are not lost.
+func TestReplayAttachesTurnDiffsWithoutARunEnd(t *testing.T) {
+	bodies := map[string]string{
+		"call_w": fmt.Sprintf("turn diff: `%s` (+2/-0)\n\n```diff\n+line\n```", "docs/result.md"),
+	}
+	turns := replayedDeliverableTurnsWithBody(t, false, []tool.Deliverable{{Name: "result.md", Kind: "markdown", RelPath: "docs/result.md"}}, bodies)
+	frames := replayDeliverableBlocks(t, turns)
+	var group *Frame
+	for i := range frames {
+		if frames[i].Kind == FrameDeliverables {
+			group = &frames[i]
+		}
+	}
+	if group == nil {
+		t.Fatalf("a turn with no run-end lost its group (frames %#v)", frames)
+	}
+	if len(group.TurnDiffs) != 1 || group.TurnDiffs[0].Added != 2 {
+		t.Fatalf("replayed diffs = %#v, want the stored body's +2", group.TurnDiffs)
+	}
+}
+
+// TestReplayKeepsTheNextTurnsTurnDiffsSeparate pins the turn boundary on
+// replay: the next person's message closes the turn, and its counts do not
+// leak into that next turn's group.
+func TestReplayKeepsTheNextTurnsTurnDiffsSeparate(t *testing.T) {
+	bodies := map[string]string{
+		"call_w": fmt.Sprintf("turn diff: `%s` (+2/-0)\n\n```diff\n+line\n```", "docs/result.md"),
+	}
+	turns := replayedDeliverableTurnsWithBody(t, true, []tool.Deliverable{{Name: "result.md", Kind: "markdown", RelPath: "docs/result.md"}}, bodies)
+	next := append([]state.Message{}, turns...)
+	next = append(next,
+		state.Message{RowID: 9, RunID: "run-2", Role: "user", Content: "next turn", CreatedAt: 1700000300},
+		state.Message{RowID: 10, RunID: "run-2", Role: "assistant", Content: "answer", CreatedAt: 1700000400},
+	)
+	frames := replayDeliverableBlocks(t, next)
+	groups := 0
+	for i := range frames {
+		if frames[i].Kind == FrameDeliverables {
+			groups++
+			if len(frames[i].TurnDiffs) != 1 {
+				t.Fatalf("group diffs = %#v", frames[i].TurnDiffs)
+			}
+		}
+	}
+	if groups != 1 {
+		t.Fatalf("replay drew %d groups, want 1", groups)
 	}
 }
 

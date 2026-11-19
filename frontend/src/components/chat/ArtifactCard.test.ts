@@ -39,6 +39,45 @@ describe('ArtifactCard', () => {
     expect(wrapper.find('.art-file-icon svg').exists()).toBe(true)
   })
 
+  // The row's label is the path the file is located by (owner 2026-11-19):
+  // the display path, not the model's semantic title.
+  it('labels the row by its display path, tipped with the whole path', () => {
+    const artifact = artifactOf({
+      title: '本季度经营结论的语义化标题',
+      displayPath: 'deliverables/Q3 经营分析报告.docx',
+    })
+    const wrapper = mount(ArtifactCard, { props: { artifact } })
+
+    const label = wrapper.get('.m b')
+    expect(label.text()).toBe('deliverables/Q3 经营分析报告.docx')
+    expect(label.attributes('title')).toBe('deliverables/Q3 经营分析报告.docx')
+    expect(wrapper.text()).not.toContain('本季度经营结论的语义化标题')
+  })
+
+  it('falls back to the name when the row carries no display path', () => {
+    const wrapper = mount(ArtifactCard, { props: { artifact: artifactOf({ displayPath: undefined, title: '毛利表' }) } })
+    expect(wrapper.get('.m b').text()).toBe('Q3 经营分析报告.docx')
+  })
+
+  // The turn's own counts ride the row: green additions, red deletions, both
+  // as one pair — and nothing at all when the turn did not count the file.
+  it('shows the turn diff counts as a styled pair when the file was counted', () => {
+    const wrapper = mount(ArtifactCard, { props: { artifact: artifactOf({ added: 5, deleted: 3 }) } })
+
+    const added = wrapper.get('[data-testid="artifact-added"]')
+    const deleted = wrapper.get('[data-testid="artifact-deleted"]')
+    expect(added.text()).toBe('+5')
+    expect(deleted.text()).toBe('-3')
+    expect(added.classes()).toContain('art-added')
+    expect(deleted.classes()).toContain('art-deleted')
+  })
+
+  it('renders no count placeholders when the file was not counted', () => {
+    const wrapper = mount(ArtifactCard, { props: { artifact: artifactOf() } })
+    expect(wrapper.find('[data-testid="artifact-added"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="artifact-deleted"]').exists()).toBe(false)
+  })
+
   it('sizes a file as pkg/tool/artifacts.go HumanSize does', () => {
     expect(humanSize(0)).toBe('0 B')
     expect(humanSize(999)).toBe('999 B')

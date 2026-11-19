@@ -106,7 +106,8 @@ test('the model delivers three files: one group at the end, each downloadable an
   await expectAssistantReply(page)
 
   // One call, one group: the three files are the turn's deliverables, drawn
-  // once — a second copy inside the tool card is exactly what A7 forbids.
+  // once — the call itself holds no card at all (owner 2026-11-19), so there
+  // is no second copy anywhere to forbid.
   const group = page.locator('[data-testid="artifact-list"]')
   await expect(group).toHaveCount(1)
   await expect(group).toBeVisible()
@@ -114,16 +115,22 @@ test('the model delivers three files: one group at the end, each downloadable an
   await expect(group).toContainText('3 个文件')
   const cards = group.locator('[data-testid="artifact-card"]')
   await expect(cards).toHaveCount(3)
-  await expect(cards.nth(0)).toContainText('季度报告')
+  // The rows are located by path, not by the model's semantic titles: the
+  // files sit under the project's deliverables/ directory, and the label is
+  // exactly the path — never the title the model gave.
+  await expect(cards.nth(0).locator('.m b')).toHaveText(`deliverables/${MD_NAME}`)
   await expect(cards.nth(0)).toContainText('Markdown')
-  await expect(cards.nth(1)).toContainText('渠道分布')
+  await expect(cards.nth(1).locator('.m b')).toHaveText(`deliverables/${PNG_NAME}`)
   await expect(cards.nth(1)).toContainText('图片')
-  await expect(cards.nth(2)).toContainText('交付说明')
+  await expect(cards.nth(2).locator('.m b')).toHaveText(`deliverables/${DOCX_NAME}`)
   await expect(cards.nth(2)).toContainText('文档')
   // Nothing was folded away: three rows fit without the quiet "show the rest".
   await expect(group.locator('[data-testid="artifact-list-more"]')).toHaveCount(0)
-  // The call's own card says what it did, once.
-  await expect(page.locator('.chat-shell main')).toContainText('已交付文件')
+  // The delivery call draws no card on the page: neither the localized head
+  // nor the tool's own name is anywhere in the main area.
+  const main = page.locator('.chat-shell main')
+  await expect(main).not.toContainText('已交付文件')
+  await expect(main).not.toContainText('Presented files')
 
   // The group closes the turn: it sits below the assistant's last words.
   const reply = page.locator('.is-assistant').last()
@@ -132,6 +139,18 @@ test('the model delivers three files: one group at the end, each downloadable an
   expect(replyBox && groupBox).toBeTruthy()
   expect(groupBox!.y).toBeGreaterThan(replyBox!.y)
   await shot(page, 'p153-artifacts-group')
+
+  // A reload answers the same way: the hidden call's records survive as the
+  // group's data, and the paths and the hidden card stay as they were live.
+  await page.reload({ waitUntil: 'networkidle' })
+  await expect(group).toHaveCount(1)
+  await expect(group).toContainText('本轮交付物')
+  await expect(cards).toHaveCount(3)
+  await expect(cards.nth(0)).toContainText(`deliverables/${MD_NAME}`)
+  await expect(cards.nth(1)).toContainText(`deliverables/${PNG_NAME}`)
+  await expect(cards.nth(2)).toContainText(`deliverables/${DOCX_NAME}`)
+  await expect(main).not.toContainText('已交付文件')
+  await expect(main).not.toContainText('Presented files')
 
   // Every row downloads: the link is the engine's own attachment route.
   for (const [index, name] of [MD_NAME, PNG_NAME, DOCX_NAME].entries()) {

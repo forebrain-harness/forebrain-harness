@@ -160,6 +160,10 @@ type Frame struct {
 	// each one renders as its own line, and the block folds by rows, not by
 	// rendered lines (a long title wraps).
 	Deliverables []tool.Deliverable
+	// TurnDiffs is the turn's own file changes, as its tool bodies reported
+	// them; it rides the FrameDeliverables frame so a row can end in its net
+	// +N -N. Read-only facts for the group's rows, never drawn on their own.
+	TurnDiffs []event.TurnDiffFile
 }
 
 // TransportRetryStatus is the network retry an agent is waiting on, read by
@@ -406,6 +410,19 @@ type Reducer struct {
 	// there — or when a withdrawn turn's rows would otherwise leak into the
 	// next turn's group.
 	pendingDeliverables []tool.Deliverable
+	// pendingTurnDiffs is what this turn's own tool calls changed, one entry
+	// per step and path, overwritten when the same step is republished (a
+	// started/completed pair, or the canonical re-delivery of a step the live
+	// path already showed). The turn's group carries them when it closes, and
+	// the boundary clears them so the next turn starts at zero.
+	pendingTurnDiffs []pendingTurnDiff
+}
+
+// pendingTurnDiff is one step's counts for one path, keyed so a republished
+// step replaces its own counts instead of doubling them.
+type pendingTurnDiff struct {
+	key  string
+	file event.TurnDiffFile
 }
 
 // compactionCard is what a running compaction's card shows between events.
@@ -451,14 +468,17 @@ func appendDeliverables(existing, rows []tool.Deliverable) []tool.Deliverable {
 // frameDeliverable converts one run-end artifact row into the deliverable
 // shape the group draws, carrying the row's id so the group dedupes by it —
 // a top-up row and a presented row for the same file are one entry, the way
-// the web merges them.
+// the web merges them. The label rule is the path (owner 2026-11-19): a row
+// the frame gave a relative path keeps it, and a run artifact outside the
+// workspace — registered by its absolute path, with no relative one — keeps
+// that, so every row can be located.
 func frameDeliverable(row event.Artifact) tool.Deliverable {
 	return tool.Deliverable{
 		ID:      row.ID,
 		Title:   firstNonEmpty(row.Title, row.Name),
 		Name:    row.Name,
 		Kind:    row.Kind,
-		RelPath: row.RelPath,
+		RelPath: firstNonEmpty(row.RelPath, row.Path),
 		Size:    row.Size,
 	}
 }
@@ -472,6 +492,63 @@ func (r *Reducer) takePendingDeliverables() []tool.Deliverable {
 	rows := r.pendingDeliverables
 	r.pendingDeliverables = nil
 	return rows
+}
+
+// takePendingTurnDiffs hands over the turn's collected per-step counts and
+// clears the accumulator, so no count can cross a turn boundary.
+func (r *Reducer) takePendingTurnDiffs() []event.TurnDiffFile {
+	if r == nil || len(r.pendingTurnDiffs) == 0 {
+		return nil
+	}
+	out := make([]event.TurnDiffFile, 0, len(r.pendingTurnDiffs))
+	for _, entry := range r.pendingTurnDiffs {
+		out = append(out, entry.file)
+	}
+	r.pendingTurnDiffs = nil
+	return out
+}
+
+// collectTurnDiffs reads one settled main-agent tool body's change counts into
+// the turn's accumulator: a file tool's turn diff section names one path, a
+// shell card's changed-file blocks name several. Paths and counts are kept as
+// the body stated them — the surface matches them against the deliverables by
+// path. Nothing is parsed from streaming fragments (their tail is not the
+// body) or from a subagent's calls (its files are not this conversation's
+// deliverables).
+func (r *Reducer) collectTurnDiffs(msg Message) {
+	if msg.ToolOutputDelta || strings.TrimSpace(msg.AgentID) != "" {
+		return
+	}
+	body := strings.TrimSpace(msg.Content)
+	if body == "" {
+		return
+	}
+	var rows []event.TurnDiffFile
+	if diff, ok := tool.ParseFileDiff(body); ok {
+		rows = []event.TurnDiffFile{{Path: diff.Path, Added: diff.Added, Deleted: diff.Deleted}}
+	} else if card, ok := tool.ParseShellCard(body); ok {
+		for _, f := range card.Files {
+			rows = append(rows, event.TurnDiffFile{Path: f.Path, Added: f.Added, Deleted: f.Deleted})
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	stepID := strings.TrimSpace(msg.StepID)
+	for _, row := range rows {
+		key := stepID + "\x00" + row.Path
+		replaced := false
+		for i := range r.pendingTurnDiffs {
+			if r.pendingTurnDiffs[i].key == key {
+				r.pendingTurnDiffs[i].file = row
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			r.pendingTurnDiffs = append(r.pendingTurnDiffs, pendingTurnDiff{key: key, file: row})
+		}
+	}
 }
 
 func liveToolOutputKey(msg Message) string {
@@ -1469,8 +1546,9 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			}
 			// A withdrawn turn is presented as a turn that never happened, so
 			// the files it presented go with it: keeping them would leak the
-			// rows into the next turn's group.
+			// rows into the next turn's group. Its diff counts go the same way.
 			r.pendingDeliverables = nil
+			r.pendingTurnDiffs = nil
 			return EventResult{}
 		}
 		if runID == "" {
@@ -1534,11 +1612,12 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		// is the contract, not order).
 		if m.ClosesTurn {
 			rows := r.takePendingDeliverables()
+			diffs := r.takePendingTurnDiffs()
 			for _, artifact := range m.RunArtifacts.Artifacts {
 				rows = appendDeliverables(rows, []tool.Deliverable{frameDeliverable(artifact)})
 			}
 			if len(rows) > 0 {
-				out = append(out, Frame{Kind: FrameDeliverables, Deliverables: rows, RunID: runID, Final: true})
+				out = append(out, Frame{Kind: FrameDeliverables, Deliverables: rows, TurnDiffs: diffs, RunID: runID, Final: true})
 			}
 		}
 		return EventResult{Frames: out, WorkedStatus: worked}
@@ -2235,8 +2314,20 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		buf := r.agentBuf("")
 		return r.withFlushedBuffers(buf, r.buildFrame(FrameUser, "you", msg), msg.Timestamp)
 	case MsgKindTool:
-		// The exit-plan gate's wait, and a wait abandoned before it resolved,
-		// hold no card on any surface (tool.ToolStepHoldsNoCard). Every tool
+		// The hidden calls' facts are collected first, before any card
+		// decision can drop them: a delivered call hands its rows to the
+		// turn's deliverables group, and the turn's diff counts are read from
+		// the settled bodies of the conversation's own tool calls.
+		if strings.TrimSpace(msg.AgentID) == "" {
+			if len(msg.ToolMeta.Deliverables) > 0 {
+				r.pendingDeliverables = appendDeliverables(r.pendingDeliverables, msg.ToolMeta.Deliverables)
+			}
+			r.collectTurnDiffs(msg)
+		}
+		// The exit-plan gate's wait, a wait abandoned before it resolved, and
+		// a present_files call in any state hold no card on any surface
+		// (tool.ToolStepHoldsNoCard): the gate's wait lives in its approval
+		// prompt, and the delivery's account is the turn's group. Every tool
 		// message reaches the transcript through here — the main agent's own
 		// step hook, the published-event funnel, replay — so this is the one
 		// place the rule is applied. The call still ends the response that
@@ -2244,17 +2335,6 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		// would have sealed it.
 		if tool.ToolStepHoldsNoCard(firstNonEmpty(msg.ToolName, msg.ToolMeta.ToolName), msg.ToolMeta.Status) {
 			return r.flushBufferedText(r.agentBuf(strings.TrimSpace(msg.AgentID)), msg.Timestamp)
-		}
-		// A delivered call hands its rows to the turn's deliverables group, and
-		// a completed one then has nothing left to say on its own card: the
-		// header is the card, the rows are the group's. A failed, refused or
-		// canceled call keeps its body — that text is the only explanation the
-		// user gets — and only the main agent delivers at all.
-		if strings.TrimSpace(msg.AgentID) == "" && len(msg.ToolMeta.Deliverables) > 0 {
-			r.pendingDeliverables = appendDeliverables(r.pendingDeliverables, msg.ToolMeta.Deliverables)
-			if strings.EqualFold(strings.TrimSpace(msg.ToolMeta.Status), "completed") {
-				msg.Content = ""
-			}
 		}
 		stepID := strings.TrimSpace(msg.StepID)
 		outputKey := liveToolOutputKey(msg)

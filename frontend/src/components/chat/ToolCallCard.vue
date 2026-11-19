@@ -34,12 +34,7 @@
         </Button>
       </template>
     </ToolHeader>
-    <!-- A delivered set of files is drawn once, at the end of the turn (plan
-         153 A7, owner 2026-10-27): the card is its head alone — the action and
-         the files it named — and the files themselves are met in the turn's
-         delivery group, under its last words. Its body is the engine's
-         per-file list, which would be that group a second time. -->
-    <ToolContent v-if="!deliversAtTurnEnd" class="tool-card-body">
+    <ToolContent class="tool-card-body">
       <!-- While the call waits on the reader, what the decision turns on is
            the panel (plan 138): the gate's facts replace the result the call
            has not produced yet. -->
@@ -550,18 +545,6 @@ watch(headInputs, () => nextTick(() => {
 }))
 
 const showEye = computed(() => truncated.value || multiLineCommand.value)
-
-/**
- * deliversAtTurnEnd marks the call whose result is the turn's delivery (plan
- * 153 A7): a settled `present_files` says what was handed back in its head,
- * and the files are drawn once, in the group under the turn's last words. The
- * body is withheld — not replaced — because its own text is the same list, and
- * two accounts of one delivery is exactly what the rule forbids.
- */
-const deliversAtTurnEnd = computed(() => (
-  String(props.step.toolName ?? '').trim() === 'present_files'
-  && toolStatus.value === 'done'
-))
 
 /** A kept-plan exit (plan 148): the plan is the deliverable, nothing ran. */
 const isKeptPlan = computed(() => (

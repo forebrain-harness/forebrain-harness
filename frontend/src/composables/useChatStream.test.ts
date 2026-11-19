@@ -3201,6 +3201,70 @@ describe('conversation tool and approval timeline', () => {
     await pendingSend
   }))
 
+  // A present_files call is delivery plumbing, not conversation: the block
+  // stays as data for the turn's delivery group, and the group's merge across
+  // an approval resume must never depend on the run-end frame alone — the
+  // resumed run's frame lists only its own files, and the first run's
+  // presented rows would be lost with the block. No gate anchor is created
+  // for a present call: it is not a gate.
+  it('keeps both runs presented rows as data when a resumed run closes with only its own artifact', withFakeWebSocket(async () => {
+    const { stream, socket, pendingSend } = await startLiveStream('live-cross-run', 'run-1')
+
+    const presentedOf = (stepId: string, id: string, name: string, relPath: string, kind: string, preview: string, size: number) => ({
+      toolName: 'present_files', stepId, summary: 'presented files',
+      output: { output: JSON.stringify({ presented: [{ id, name, rel_path: relPath, kind, preview, size }] }) },
+    })
+    runEvent(socket, 'evt-1', 1, 'run-1', 'live-cross-run', 'tool_call_completed', presentedOf('call-p1', 'a1', 'report.md', 'deliverables/report.md', 'markdown', 'markdown', 10))
+    // The approval resumes the turn as a second run of the same answer.
+    runEvent(socket, 'evt-2', 2, 'run-2', 'live-cross-run', 'turn_started', {})
+    runEvent(socket, 'evt-3', 3, 'run-2', 'live-cross-run', 'tool_call_completed', presentedOf('call-p2', 'a2', 'chart.png', 'deliverables/chart.png', 'image', 'image', 20))
+    // An ordinary tool of the resumed run still draws its card.
+    runEvent(socket, 'evt-4', 4, 'run-2', 'live-cross-run', 'tool_call_completed', { toolName: 'shell', stepId: 'call-s', summary: 'ran ls' })
+    runEvent(socket, 'evt-5', 5, 'run-2', 'live-cross-run', 'turn_completed', {
+      text: 'done',
+      artifacts: [{ id: 'a2', sessionId: 'live-cross-run', name: 'chart.png', kind: 'image', preview: 'image', size: 20 }],
+    })
+    socket.message({ op: 'run_completed', request_id: 'req-probe', run_id: 'run-2', data: { text: 'done' } })
+
+    const host = stream.messages.value.find((message) => (message.blocks ?? []).some((block) => block.kind === 'tool'))
+    const steps = (host?.blocks ?? []).flatMap((block) => (block.kind === 'tool' ? [block.step] : []))
+    const presentBlocks = steps.filter((step) => step.toolName === 'present_files')
+    expect(presentBlocks.map((step) => step.stepId)).toEqual(['call-p1', 'call-p2'])
+    expect((host?.blocks ?? []).filter((block) => block.kind === 'gate')).toEqual([])
+    expect(steps.some((step) => step.toolName === 'shell')).toBe(true)
+    // The run-end frame lists only the resumed run's file; the first run's
+    // presented row survives in its block for the delivery group to merge.
+    expect(host?.artifacts?.map((row) => row.id)).toEqual(['a2'])
+    await pendingSend
+  }))
+
+  // The history path keeps the same data: a reloaded turn's present calls —
+  // the assistant row's call and the orphan tool row a repair left behind —
+  // keep their blocks, so the delivery group can merge them. Whether a card
+  // is drawn is the timeline's decision (drawnBlocks), not this conversion's.
+  it('keeps a present_files call and an orphan tool row as data in history', () => {
+    const meta = JSON.stringify({ tool_name: 'present_files', status: 'completed' })
+    const toolParts = (callId: string) => JSON.stringify([
+      { type: 'tool_result_meta', tool_call_id: callId },
+      { type: 'tool_display', body: 'Presented files.', summary: 'presented files', tool_meta_json: meta },
+    ])
+    const assistantParts = JSON.stringify([
+      { type: 'text', text: '' },
+      { type: 'tool_calls', tool_calls: [
+        { id: 'call-p', type: 'function', function: { name: 'present_files', arguments: '{}' } },
+        { id: 'call-o', type: 'function', function: { name: 'present_files', arguments: '{}' } },
+      ] },
+    ])
+    const history = conversationFromTranscript([
+      { id: 'u1', rowId: 1, role: 'user', content: 'present the files' },
+      { id: 'a1', rowId: 2, role: 'assistant', content: '', partsJson: assistantParts },
+      { id: 't1', rowId: 3, role: 'tool', content: 'ok', toolStepId: 'call-p', partsJson: toolParts('call-p') },
+      { id: 't2', rowId: 4, role: 'tool', content: 'ok', toolStepId: 'call-o', partsJson: toolParts('call-o') },
+    ] as unknown as Parameters<typeof conversationFromTranscript>[0])
+    const blocks = history.flatMap((message) => message.blocks ?? []).filter((block) => block.kind === 'tool')
+    expect(blocks.map((block) => block.kind === 'tool' ? block.step.toolName : '')).toEqual(['present_files', 'present_files'])
+  })
+
   // A running call streams its output as it happens: the fragments append to
   // the live card's output (the shell body reads their tail), and the
   // completion's own facts replace them (plan 137).

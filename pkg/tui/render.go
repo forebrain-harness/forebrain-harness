@@ -2291,14 +2291,6 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 					_, _ = fmt.Fprintln(r.out)
 					return
 				}
-				// A call that delivered files says so on its header and nothing
-				// more: the rows are the turn's deliverables group, and the card
-				// is its title alone. The placeholder would read as an output
-				// that went missing.
-				if strings.EqualFold(title, "present_files") && len(f.ToolMeta.Deliverables) > 0 {
-					_, _ = fmt.Fprintln(r.out)
-					return
-				}
 				// A refused call never ran, so an empty body is its norm: the
 				// refusal's own words riding the meta are the body when the user
 				// wrote any (plan 154), and the faint placeholder stands in only
@@ -6144,22 +6136,28 @@ func migrationMarker(f Frame, spinnerPhase int) (string, string) {
 // goal ended.
 // renderDeliverables draws a turn's "deliverables" group: one line per
 // presented file, led by the glyph of its class. The group has no header —
-// the rows are the whole statement, and the card above already said the files
-// were handed over — so every row is indented two cells to sit with the other
-// card bodies, and a row a long label wraps continues one cell further in.
+// the rows are the whole statement — so every row is indented two cells to
+// sit with the other card bodies, and a row a long label wraps continues one
+// cell further in.
 //
 // A row is the file's label and nothing else (owner rulings): the glyph says
 // what kind of file it is and the suffix says it again, so the class is not
 // spelled out; the size is not repeated either, and no separator is drawn
-// between facts a row does not need to state. The label is the title the model
-// gave the file, and its name when it gave none.
+// between facts a row does not need to state. The label is the path the file
+// is located by — the workspace-relative path the row carries, the absolute
+// path of a run artifact outside it, and only a legacy row with neither falls
+// back to its name. The model's semantic title never labels a row.
+//
+// A row whose path the turn changed ends in its net counts, styled the way
+// the diff body marks additions and removals; a file the turn did not count
+// says nothing rather than a guessed pair of zeros.
 //
 // The first row's indent is drawn here rather than through wrapToolDisplayRows,
 // whose word splitter would eat a leading run of spaces; the fold reads the
 // same indent back (startsDeliverableRow) to count rows by deliverable.
 func (r *Renderer) renderDeliverables(f Frame) {
 	for _, d := range f.Deliverables {
-		label := strings.TrimSpace(d.Title)
+		label := strings.TrimSpace(d.RelPath)
 		if label == "" {
 			label = strings.TrimSpace(d.Name)
 		}
@@ -6167,9 +6165,61 @@ func (r *Renderer) renderDeliverables(f Frame) {
 			continue
 		}
 		row := tool.ArtifactKindGlyph(d.Kind) + " " + label
+		if added, deleted, ok := r.deliverableDiffCounts(label, f.TurnDiffs); ok {
+			p := diffPaletteFor(r.diffTheme)
+			row += " " + p.count(p.addMarker, fmt.Sprintf("+%d", added)) +
+				" " + p.count(p.delMarker, fmt.Sprintf("-%d", deleted))
+		}
 		body := wrapToolDisplayLineWidth(row, "    ", r.layoutTermWidth())
 		_, _ = fmt.Fprintln(r.out, "  "+body)
 	}
+}
+
+// deliverableDiffCounts sums the turn's own counts for one delivered path:
+// every entry the turn collected for it adds up, the way one turn's net
+// change reads. Each diff path is drawn the way the row's path is — relative
+// to the working directory when it falls under it — and both sides are then
+// compared as cleaned, slashed canonical keys, so two spellings of one file
+// cannot part them. A binary entry carries no line counts, and a pair of
+// zeros is not a change: neither says anything on the row.
+func (r *Renderer) deliverableDiffCounts(label string, diffs []event.TurnDiffFile) (int, int, bool) {
+	if len(diffs) == 0 {
+		return 0, 0, false
+	}
+	target := deliverableDiffPathKey(label, r.cwd)
+	if target == "" {
+		return 0, 0, false
+	}
+	added, deleted, matched := 0, 0, false
+	for _, d := range diffs {
+		if d.Binary {
+			continue
+		}
+		if deliverableDiffPathKey(d.Path, r.cwd) != target {
+			continue
+		}
+		matched = true
+		added += d.Added
+		deleted += d.Deleted
+	}
+	if !matched || (added == 0 && deleted == 0) {
+		return 0, 0, false
+	}
+	return added, deleted, true
+}
+
+// deliverableDiffPathKey is the canonical key a deliverable's path and a
+// diff's path are matched by: the diff's absolute path is first drawn
+// relative to the working directory (a path under it becomes the relative
+// path the row carries), then both are cleaned and slashed — a Windows
+// backslash join or a trailing slash cannot part two spellings of one file.
+// The deliverable's own path is already the slash form the row displays.
+func deliverableDiffPathKey(path, cwd string) string {
+	drawn := strings.TrimSpace(path)
+	if drawn == "" {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Clean(tool.DisplayPath(drawn, cwd)))
 }
 
 // renderGoal draws one /goal line: the objective it opened with, each
@@ -6686,6 +6736,16 @@ func (p diffPalette) meta(text string) string {
 		return text
 	}
 	return "\x1b[38;5;" + p.gutterColor + "m" + text + "\x1b[0m"
+}
+
+// count renders one of a deliverable row's +N / -N counts in the same colour
+// the diff body marks additions and removals with, so the pair reads as the
+// diff's own accounting wherever the row lands.
+func (p diffPalette) count(marker, text string) string {
+	if p.noColor || marker == "" {
+		return text
+	}
+	return "\x1b[38;5;" + marker + "m" + text + "\x1b[0m"
 }
 
 // sequence turns one chroma style colour into the SGR escape the terminal will
