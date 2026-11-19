@@ -912,9 +912,6 @@ func TestCustomProviderIDsAgree(t *testing.T) {
 	if !llm.KnownProvider(appcfg.CustomProvider) {
 		t.Fatal("llm does not accept the custom-model provider id")
 	}
-	if err := VerifyProvider(appcfg.CustomProvider); err != nil {
-		t.Fatalf("VerifyProvider(custom) = %v", err)
-	}
 }
 
 // modelRowsFromEntriesForTest is how an in-memory fixture seeds the install's model table

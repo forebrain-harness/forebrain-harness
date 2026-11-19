@@ -2803,3 +2803,49 @@ func modelRowsForTest(entries ...appcfg.AgentLLMProviderConfig) []appcfg.LLMMode
 	}
 	return rows
 }
+
+// TestNewLLMFromYAMLRunsProviderTheBuildDoesNotKnow pins the run-side half of
+// the "configure it and it runs" invariant (owner 2026-11-19): a complete row
+// whose provider this build knows nothing about builds a client and dials, the
+// api_path alone choosing the protocol. The request reaching the endpoint —
+// not merely the client constructing — is the point.
+func TestNewLLMFromYAMLRunsProviderTheBuildDoesNotKnow(t *testing.T) {
+	for _, k := range []string{
+		"OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY",
+	} {
+		t.Setenv(k, "")
+	}
+
+	t.Run("an unknown provider dials chat completions with its key", func(t *testing.T) {
+		srv, calls := openCodeGateway(t)
+		runOpenCodeClient(t, &LLMProviderYAML{
+			Provider: "novendor-xyz", Model: "fake-1", APIKey: "sk-novendor",
+			BaseURL: srv.URL + "/v1", APIPath: "/chat/completions",
+		})
+		got := calls()
+		if len(got) == 0 {
+			t.Fatal("no request reached the endpoint")
+		}
+		if !strings.Contains(got[0].Path, "/chat/completions") {
+			t.Fatalf("request path = %q, want it naming /chat/completions", got[0].Path)
+		}
+		if got[0].Auth != "Bearer sk-novendor" {
+			t.Fatalf("Authorization = %q, want the row's key", got[0].Auth)
+		}
+	})
+
+	t.Run("an unknown provider dials messages when the path names them", func(t *testing.T) {
+		srv, calls := openCodeGateway(t)
+		runOpenCodeClient(t, &LLMProviderYAML{
+			Provider: "novendor-xyz", Model: "fake-1", APIKey: "sk-novendor",
+			BaseURL: srv.URL, APIPath: "/v1/messages",
+		})
+		got := calls()
+		if len(got) == 0 {
+			t.Fatal("no request reached the endpoint")
+		}
+		if !strings.Contains(got[0].Path, "/v1/messages") {
+			t.Fatalf("request path = %q, want it naming /v1/messages", got[0].Path)
+		}
+	})
+}

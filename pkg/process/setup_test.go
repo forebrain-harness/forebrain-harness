@@ -299,3 +299,37 @@ func TestExecuteModelDefaultEffort(t *testing.T) {
 		}
 	})
 }
+
+// TestExecuteSavesProviderTheBuildDoesNotKnow pins the save-side half of the
+// "configure it and it runs" invariant (owner 2026-11-19): a complete row whose
+// provider the build carries no knowledge of is saved and read back, because
+// knowledge is a capability reference, not a permission gate. Completeness
+// still refuses.
+func TestExecuteSavesProviderTheBuildDoesNotKnow(t *testing.T) {
+	t.Run("an unknown provider is saved as typed", func(t *testing.T) {
+		install := newDefaultEffortInstall(t)
+		rep, err := Execute(install.rt, Options{
+			Provider: "novendor-xyz", Model: "fake-1",
+			BaseURL: "https://api.novendor.example/v1",
+			APIPath: "/chat/completions", APIKey: "sk-x",
+		})
+		if err != nil {
+			t.Fatalf("Execute(novendor-xyz): %v", err)
+		}
+		row := install.row(rep.ModelID)
+		if row.Provider != "novendor-xyz" || row.Model != "fake-1" {
+			t.Fatalf("row = %s/%s, want novendor-xyz/fake-1", row.Provider, row.Model)
+		}
+	})
+
+	t.Run("a missing key still refuses the save", func(t *testing.T) {
+		install := newDefaultEffortInstall(t)
+		if _, err := Execute(install.rt, Options{
+			Provider: "novendor-xyz", Model: "fake-1",
+			BaseURL: "https://api.novendor.example/v1",
+			APIPath: "/chat/completions",
+		}); err == nil {
+			t.Fatal("Execute saved a row without a key")
+		}
+	})
+}

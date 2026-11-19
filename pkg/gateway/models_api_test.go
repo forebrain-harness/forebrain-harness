@@ -482,12 +482,17 @@ func TestLLMModelCapsReportOnlyWhatTheClientCanSend(t *testing.T) {
 		require.Equal(t, false, row["efforts_known"])
 	})
 
-	t.Run("a vendor that lists levels still decides them", func(t *testing.T) {
+	t.Run("a vendor that lists levels no longer decides them", func(t *testing.T) {
+		// Owner 2026-11-19: a row's levels are the user's assertion, so the
+		// catalog naming levels for a model no longer refuses a hand edit.
 		_, do := modelsPageServer(t)
 		id := createModel(t, do, `{"provider":"custom","model":"gateway-trimmed-model","base_url":"https://llm.example.com","api_path":"/chat/completions","api_key":"sk-vendor"}`)
 		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["xhigh"]}}`)
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		require.Contains(t, rec.Body.String(), "官方文档")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		rows, _ := llmModelRows(t, do)
+		row := llmModelByID(t, rows, id)
+		require.Equal(t, []string{"xhigh"}, llmModelCapsOf(t, row["caps"]).Efforts,
+			"the user's assertion is stored even though the catalog lists its own levels")
 	})
 }
 
@@ -840,13 +845,16 @@ func TestLLMModelsAPIReachesTheRuntimeSnapshot(t *testing.T) {
 	require.NotContains(t, runtimeModels(t), "deepseek-snapshot")
 }
 
-// TestLLMModelsAPICapsValidationFollowsTheShippedCatalog pins the "official
-// levels" rule against the offline catalog (owner 2026-11-09): a model the
-// catalog lists with levels has them decided by its vendor; a model the catalog
-// does not list, or lists without discrete levels, keeps the user's pick.
-func TestLLMModelsAPICapsValidationFollowsTheShippedCatalog(t *testing.T) {
+// TestLLMModelsAPICapsValidationVocabularyOnly pins the write path's remaining
+// capability refusals (owner 2026-11-19): the level vocabulary is checked
+// whatever the catalog says, and the catalog itself is no longer a refusal
+// authority — the 2026-11-09 "official levels" rule is overridden, so a model
+// listed with levels, listed without them, or absent from the catalog all
+// store the user's pick.
+func TestLLMModelsAPICapsValidationVocabularyOnly(t *testing.T) {
 	// The built-in table is a row of the same default layer the shipped catalog
-	// fills, so this pins the rule without disturbing the package's catalog.
+	// fills, so this pins the vocabulary rule without disturbing the package's
+	// catalog.
 	llm.SetBuiltinModels("caps-test", []llm.Model{
 		{ID: "with-levels", Provider: "caps-test", APIModel: "with-levels",
 			ReasoningOptions: []llm.ReasoningOption{{Type: "effort", Values: []string{"low", "high"}}},
@@ -858,13 +866,12 @@ func TestLLMModelsAPICapsValidationFollowsTheShippedCatalog(t *testing.T) {
 	s := &Server{}
 	r := httptest.NewRequest(http.MethodPut, "/api/llm-models/x", nil)
 
-	// Listed with levels: hand-entering them is refused.
-	err := s.llmModelCapsValid(r, "caps-test", "with-levels", "", llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "官方文档")
+	// Listed with levels: hand-entering them is stored (owner 2026-11-19).
+	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "with-levels", "",
+		llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{}))
 
 	// A stored row that already carries exactly these levels may send them
-	// back unchanged: the rule is about setting them now.
+	// back unchanged, the same as any other write.
 	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "with-levels", "",
 		llmModelCaps{Efforts: []string{"low"}},
 		state.LLMModel{CapEfforts: []string{"low"}}))
@@ -873,20 +880,22 @@ func TestLLMModelsAPICapsValidationFollowsTheShippedCatalog(t *testing.T) {
 	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "without-levels", "",
 		llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{}))
 
-	// Not in the catalog at all: allowed, the same as before the catalog existed.
+	// Not in the catalog at all: allowed, the same as any listed model now.
 	require.NoError(t, s.llmModelCapsValid(r, "caps-test", "no-such-model", "",
 		llmModelCaps{Efforts: []string{"low"}}, state.LLMModel{}))
 
-	// The level names themselves are checked first, whatever the catalog says.
+	// The level names themselves are checked first, whatever the catalog says:
+	// the vocabulary whitelist is a completeness check, not a knowledge gate.
 	require.Error(t, s.llmModelCapsValid(r, "openai", "no-such-model", "",
 		llmModelCaps{Efforts: []string{"ultra"}}, state.LLMModel{}))
 }
 
-// The models form's Off switch follows one rule on every surface (plan 311):
-// turning thinking off is a capability, so `default_effort:"none"` is stored only
-// where the model says it can turn thinking off *and* the client that serves it
-// can send it. The catalog's own answer is reported for the same reason, and a
-// level the protocol drops is never offered nor stored.
+// The models form's capability answers are the user's assertion (owner
+// 2026-11-19): `default_effort:"none"` and any declared level are stored as
+// asked, whatever the catalog or the protocol can send — a level the client
+// drops is silently not sent, and the remote endpoint decides. Only the level
+// vocabulary is refused. The catalog's own answer is still *reported* (read
+// projection, plan 311), unchanged by this.
 func TestLLMModelCapsOffDefault(t *testing.T) {
 	useGatewayCatalog(t, `{
 		"openai/gateway-off-model": {"id":"openai/gateway-off-model","reasoning":true,
@@ -918,42 +927,46 @@ func TestLLMModelCapsOffDefault(t *testing.T) {
 		require.Equal(t, "none", capsOf(t, do, id).DefaultEffort)
 	})
 
-	t.Run("a model that cannot turn thinking off never stores none", func(t *testing.T) {
+	t.Run("none is stored even where the catalog lists no off switch", func(t *testing.T) {
+		// Owner 2026-11-19: the user's assertion is stored; the endpoint
+		// decides what a request carries.
 		_, do := modelsPageServer(t)
 		id := createModel(t, do, `{"provider":"openai","model":"gateway-plain-model","base_url":"https://api.openai.com/v1","api_key":"sk-plain"}`)
 		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"default_effort":"none"}}`)
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		require.Contains(t, rec.Body.String(), "默认思考强度必须是这个模型支持的档位")
-		require.Empty(t, capsOf(t, do, id).DefaultEffort)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, "none", capsOf(t, do, id).DefaultEffort)
 	})
 
-	t.Run("the write's own no is not masked by the row's yes", func(t *testing.T) {
+	t.Run("the write's own no is stored as asked, row's yes or not", func(t *testing.T) {
 		_, do := modelsPageServer(t)
 		id := createModel(t, do, `{"provider":"openai","model":"gateway-off-model","base_url":"https://api.openai.com/v1","api_key":"sk-masked"}`)
 		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"reasoning_off":true}}`)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		// The row says it can turn thinking off; this write says it cannot, and
-		// an explicit no wins over the stored yes and the catalog's none.
+		// The row says it can turn thinking off; this write says it cannot and
+		// names none anyway. Self-contradictory input is stored as asked —
+		// refusing it would be knowledge acting as an authority again.
 		rec = do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"reasoning_off":false,"default_effort":"none"}}`)
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, "none", capsOf(t, do, id).DefaultEffort)
 	})
 
-	t.Run("a protocol that cannot send none refuses it", func(t *testing.T) {
+	t.Run("none is stored even on a protocol that cannot send it", func(t *testing.T) {
 		_, do := modelsPageServer(t)
 		id := createModel(t, do, `{"provider":"custom","model":"gateway-messages-model","base_url":"https://llm.example.com","api_path":"/v1/messages","api_key":"sk-msg"}`)
 		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"reasoning_off":true,"default_effort":"none"}}`)
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 
-	t.Run("a level the protocol drops is never stored as the default", func(t *testing.T) {
+	t.Run("a level the protocol drops is stored as the default it names", func(t *testing.T) {
 		_, do := modelsPageServer(t)
-		// A model nothing documents: its levels are the form's own declaration,
-		// which is what makes the sendability rule the only one that can refuse.
+		// A model nothing documents: its levels are the form's own declaration.
+		// minimal is declared even though the Messages client sends no such
+		// level — the write stores it (owner 2026-11-19).
 		id := createModel(t, do, `{"provider":"custom","model":"undocumented-model","base_url":"https://llm.example.com","api_path":"/v1/messages","api_key":"sk-msg-level"}`)
-		// minimal is declared, and the Messages client sends no such level.
 		rec := do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["minimal","low"],"default_effort":"minimal"}}`)
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		// The level the protocol does send is stored.
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, "minimal", capsOf(t, do, id).DefaultEffort)
+		// The level the protocol does send is stored too.
 		rec = do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["minimal","low"],"default_effort":"low"}}`)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		require.Equal(t, "low", capsOf(t, do, id).DefaultEffort)
@@ -1043,4 +1056,42 @@ func TestLLMModelCapsOffDefault(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 		require.Equal(t, []string{"none", "minimal", "low", "medium"}, body.Efforts)
 	})
+}
+
+// TestModelsAPIAcceptsProviderTheBuildDoesNotKnow pins the web write path's
+// half of the "configure it and it runs" invariant (owner 2026-11-19): a
+// complete row naming a provider the build carries no data for is created,
+// updated and given capability assertions like any other row; only
+// completeness and the level vocabulary refuse.
+func TestModelsAPIAcceptsProviderTheBuildDoesNotKnow(t *testing.T) {
+	_, do := modelsPageServer(t)
+
+	id := createModel(t, do, `{"provider":"novendor-xyz","model":"fake-1","base_url":"https://api.novendor.example/v1","api_path":"/chat/completions","api_key":"sk-x"}`)
+	rows, _ := llmModelRows(t, do)
+	row := llmModelByID(t, rows, id)
+	require.Equal(t, "novendor-xyz", row["provider"])
+	require.Equal(t, "fake-1", row["model"])
+
+	// An update on the unknown provider behaves like any other row's.
+	rec := do(http.MethodPut, "/api/llm-models/"+id,
+		`{"provider":"novendor-xyz","model":"fake-2","base_url":"https://api.novendor.example/v1","api_path":"/chat/completions","api_key":"sk-x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// A default effort the catalog knows nothing about is stored as the
+	// user's assertion (the old knowledge gate would 400 this).
+	rec = do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"default_effort":"high"}}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rows, _ = llmModelRows(t, do)
+	row = llmModelByID(t, rows, id)
+	require.Equal(t, "high", llmModelCapsOf(t, row["caps"]).DefaultEffort)
+
+	// Completeness still refuses: a row without a base URL is not a row.
+	rec = do(http.MethodPost, "/api/llm-models",
+		`{"provider":"novendor-xyz","model":"fake-1","api_key":"sk-x"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "请填写接口地址")
+
+	// The level vocabulary still refuses, whatever the catalog knows.
+	rec = do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["ultra"]}}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }

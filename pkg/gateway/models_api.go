@@ -1033,18 +1033,17 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 		subagentAllowed = *write.SubagentAllowed
 	}
 
-	// 1. A provider the form offers, or the custom one. A sign-in-backed
-	// provider is added by signing in, never typed in (plan 264/265).
+	// A sign-in-backed provider is added by signing in, never typed in
+	// (plan 264/265). Everything else — a provider the form offers, the
+	// custom one, or an id this build has no data for — is accepted as
+	// typed: knowledge is a capability reference, not a permission gate
+	// (owner 2026-11-19).
 	custom := provider == config.CustomProvider
-	if _, known := config.BuiltinProviderByID(provider); !custom && !known {
-		return row, llmRefuse(r, http.StatusBadRequest,
-			"请选择内置服务商，或自定义", "choose a built-in provider, or custom")
-	}
 	if stored == nil && config.CredentialsBackedProvider(provider) {
 		return row, llmRefuse(r, http.StatusBadRequest,
 			"请通过订阅登录添加", "add this model by signing in to its subscription")
 	}
-	// 2. The identity a row cannot be without.
+	// 1. The identity a row cannot be without.
 	if model == "" {
 		return row, llmRefuse(r, http.StatusBadRequest, "请填写模型名", "a model name is required")
 	}
@@ -1055,7 +1054,7 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 		return row, llmRefuse(r, http.StatusBadRequest,
 			"接口地址必须是 http(s) 地址", "the base URL must be an http(s) URL")
 	}
-	// 3. The protocol. 「自定义协议」 sends to base_url exactly as stored, so
+	// 2. The protocol. 「自定义协议」 sends to base_url exactly as stored, so
 	// its path only names the request shape and is always Chat Completions;
 	// only a custom model may use it. A custom model otherwise names one of the
 	// three protocols; a built-in provider's path may be any path it serves.
@@ -1077,7 +1076,7 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 		return row, llmRefuse(r, http.StatusBadRequest,
 			"请选择接口协议", "choose the API protocol")
 	}
-	// 5. Request parameters are the provider's own fields, merged into the
+	// 3. Request parameters are the provider's own fields, merged into the
 	// request: anything but a JSON object would be a body nothing can send.
 	params := row.ParamsJSON
 	if write.Params != nil {
@@ -1087,7 +1086,7 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 		return row, llmRefuse(r, http.StatusBadRequest,
 			"请求参数必须是 JSON 对象", "the request parameters must be a JSON object")
 	}
-	// 6. The capability overrides. Levels the vendor's own list documents are
+	// 4. The capability overrides. Levels the vendor's own list documents are
 	// read-only: submitting a different set by hand would describe a model
 	// nobody can send.
 	caps := llmModelCapsOfRow(row)
@@ -1097,7 +1096,7 @@ func (s *Server) llmModelFromWrite(r *http.Request, write llmModelWrite, stored 
 	if err := s.llmModelCapsValid(r, provider, model, apiPath, caps, row); err != nil {
 		return row, err
 	}
-	// 7. The provider a custom model's official data lives under (owner
+	// 5. The provider a custom model's official data lives under (owner
 	// 2026-11-16). Only a custom row may name one — a built-in row's data is
 	// its own pair — and a row that is not custom carries none.
 	catalogProvider := row.CatalogProvider
@@ -1166,49 +1165,11 @@ func (s *Server) llmModelCapsValid(r *http.Request, provider, model, apiPath str
 				"a thinking level must be minimal, low, medium, high, xhigh or max")
 		}
 	}
-	// A row that already carries levels keeps them: the rule is about setting
-	// them now, and refusing an unchanged value would lock the whole row.
-	if len(caps.Efforts) > 0 && !slices.Equal(caps.Efforts, stored.CapEfforts) {
-		// Only a model the catalog lists WITH levels has them decided by its
-		// vendor. The answer is the shipped catalog's (owner 2026-11-09), so
-		// this is offline and stable across an install; a model it does not
-		// list, and one it lists without discrete levels (a toggle or no
-		// reasoning_options), is the user's to pick.
-		if info, err := process.ResolveModelInfo(r.Context(), provider, model, stored.Source, stored.APIKey); err == nil && len(info.Efforts) > 0 {
-			return llmRefuse(r, http.StatusBadRequest,
-				"这个模型的思考强度由官方文档决定",
-				"this model's thinking levels are decided by its vendor, not by hand")
-		}
-	}
-	if effort := strings.TrimSpace(caps.DefaultEffort); effort != "" {
-		levels := caps.Efforts
-		if len(levels) == 0 {
-			catalogCaps, _ := llmModelCatalogCaps(provider, model, stored.CatalogProvider, apiPath)
-			levels = catalogCaps.Efforts
-		}
-		// Only the levels the row's protocol can send count as "one this model
-		// offers": a custom Messages model stores minimal at most in its own
-		// declaration, and a default the client silently drops is exactly the
-		// choice-that-never-applies this page exists to prevent (plan 311).
-		levels = llmSendableEfforts(provider, model, apiPath, levels)
-		if effort == "none" {
-			// Turning thinking off is a capability, not a level: it is allowed
-			// only where the model has it and the client can send it. A model
-			// that says it cannot turn thinking off never gets an explicit off,
-			// and neither does one whose protocol cannot say it.
-			if !llmModelOffCapable(provider, model, apiPath, caps, stored) {
-				return llmRefuse(r, http.StatusBadRequest,
-					"默认思考强度必须是这个模型支持的档位", "the default level must be one this model offers")
-			}
-			if len(llmSendableEfforts(provider, model, apiPath, []string{"none"})) == 0 {
-				return llmRefuse(r, http.StatusBadRequest,
-					"默认思考强度必须是这个模型支持的档位", "the default level must be one this model offers")
-			}
-		} else if !slices.Contains(levels, effort) {
-			return llmRefuse(r, http.StatusBadRequest,
-				"默认思考强度必须是这个模型支持的档位", "the default level must be one this model offers")
-		}
-	}
+	// Levels and the default level are the user's assertion, not the
+	// catalog's (owner 2026-11-19): apart from the vocabulary check above
+	// and the numeric checks below, this build stores what the write asks
+	// for. A level the client cannot send is silently dropped on the way
+	// out; the remote endpoint decides whether a request succeeds.
 	if caps.ContextWindow != nil && *caps.ContextWindow <= 0 {
 		return llmRefuse(r, http.StatusBadRequest, "上下文窗口必须是正整数", "the context window must be a positive number")
 	}
@@ -1216,22 +1177,6 @@ func (s *Server) llmModelCapsValid(r *http.Request, provider, model, apiPath str
 		return llmRefuse(r, http.StatusBadRequest, "最大输出必须是正整数", "the output limit must be a positive number")
 	}
 	return nil
-}
-
-// llmModelOffCapable reports whether a model can turn thinking off at all, by the
-// one precedence every surface follows (plan 311): the write's own answer when it
-// gives one — an explicit "no" is not overruled by the row or the catalog — then
-// the stored row's, then the catalog's level list naming "none" for the protocol
-// the row speaks. It is never inferred from a level list, a protocol or a name.
-func llmModelOffCapable(provider, model, apiPath string, caps llmModelCaps, stored state.LLMModel) bool {
-	switch {
-	case caps.ReasoningOff != nil:
-		return *caps.ReasoningOff
-	case stored.CapReasoningOff != nil:
-		return *stored.CapReasoningOff
-	}
-	catalogCaps, _ := llmModelCatalogCaps(provider, model, stored.CatalogProvider, apiPath)
-	return catalogCaps.ReasoningOff != nil && *catalogCaps.ReasoningOff
 }
 
 // isLLMProtocolPath reports whether apiPath is one of the three protocols a

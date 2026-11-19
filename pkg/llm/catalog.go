@@ -1006,13 +1006,21 @@ func AllModels() []Model {
 	return cat.AllModels()
 }
 
-// KnownProvider reports whether provider is a known LLM provider. The set of
-// known providers is derived entirely from models.json (each catalog key's
-// prefix before the first '/'), plus the built-in model table a provider with
-// no catalog rows is installed through (volcengine, byteplus), plus the
-// reserved custom-model provider, which by definition accepts anything. When
-// the global catalog is not loaded the function is permissive (returns true)
-// so callers without a catalog are not blocked.
+// KnownProvider reports whether this build carries capability data for a
+// provider — a data-availability query, never a permission gate. The set is
+// derived entirely from models.json (each catalog key's prefix before the
+// first '/'), plus the built-in model table a provider with no catalog rows
+// is installed through (volcengine, byteplus), plus the reserved
+// custom-model provider, which by definition accepts anything. When the
+// global catalog is not loaded the function is permissive (returns true) so
+// callers without a catalog are not blocked.
+//
+// Nothing here may refuse a configuration or a run: a complete row
+// (provider/model/base_url/key, or login credentials, plus a protocol path)
+// must be saveable and dialable no matter what this build knows (owner
+// 2026-11-19). Refusals are allowed only for completeness, protocol
+// consistency and vocabulary checks; whether a request succeeds is decided
+// by the remote endpoint.
 func KnownProvider(provider string) bool {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	if p == "" {

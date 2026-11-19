@@ -426,12 +426,6 @@ func NewLLMFromYAML(cfg *LLMProviderYAML) (llm.LLM, error) {
 		return nil, fmt.Errorf("llm base_url is required for provider %s", prov)
 	}
 	maxTokens := llm.OutputTokenCap(prov, model, cfg.MaxOutputTokens)
-	// The provider has to be one this build knows before its row is dialled
-	// through an ordinary client; anthropic and minimax are named by the
-	// catalog and would pass this check anyway.
-	if !llm.KnownProvider(prov) {
-		return nil, fmt.Errorf("unsupported model provider: %s", prov)
-	}
 	// Which client a row speaks is one decision (opencode.ClientProtocol), the
 	// same one the thinking-level list is trimmed by: a level a picker offers is
 	// therefore a level this client can send. The path names the protocol, and

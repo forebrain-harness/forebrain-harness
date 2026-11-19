@@ -239,10 +239,6 @@ func Execute(rt Context, opts Options) (Report, error) {
 		}
 	}
 	ResetResolve()
-	if err := VerifyProvider(strings.TrimSpace(opts.Provider)); err != nil {
-		logSetupError(rt.Home, "setup.execute.provider_error", opts, err.Error())
-		return rep, err
-	}
 	updated := readDefaultAgentLLMDefaults(rt.Home, agentName)
 	rep.AgentName = agentName
 	rep.Provider = updated.Provider
