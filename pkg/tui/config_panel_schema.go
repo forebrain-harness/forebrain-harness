@@ -166,7 +166,7 @@ type configSectionSchema struct {
 	// StoreSection, when non-empty, marks this section a PROJECTION: it presents
 	// a curated view of another stored section's document and saves back to that
 	// section. The panel reads and writes p.raw[StoreSection]; Name is only what
-	// the user sees and types. "Subagent models" projects the agents store
+	// the user sees and types. "Subagents" projects the agents store
 	// (plan 314). A projection is not itself a config.Root section.
 	StoreSection string
 	// Fields are the editable settings, in the order the section page shows
@@ -320,19 +320,20 @@ var configSectionSchemas = []configSectionSchema{
 	},
 	{
 		// The install-wide subagent rows, as one page (plan 314). It is a
-		// projection of the agents store — the prototype's "Subagent models"
+		// projection of the agents store — the prototype's "Subagents"
 		// section — because every row here lives in agents: the per-type defaults
 		// (agents.subagent_models, plan 315), the plan reviewer's global row
 		// (agents.plan_reviewer, plan 313, relocated here) and the shared custom
 		// registry (agents.shared_subagents, this plan's storage). The panel
 		// reads and writes the agents document either way, so a key this page
 		// does not show travels back untouched on save.
-		Name: "subagent_models", Title: "Subagent models", Tab: configTabAgents,
-		// The prototype's summary names the built-in types and the
-		// plan-reviewer alone; the shared custom registry row below is this
-		// panel's own legitimate extra (plan 314 storage), kept while the
-		// summary keeps the prototype's words (plan 327's flagged divergence).
-		Summary:      "Install-wide defaults for built-in types and plan-reviewer.",
+		Name: "subagent_models", Title: "Subagents", Tab: configTabAgents,
+		// The title and summary name the section's whole scope (owner
+		// 2026-11-18): the page also creates and manages shared custom
+		// subagents, not only models, so the umbrella word is Subagents and
+		// the summary names the built-in types, the plan-reviewer and the
+		// shared custom registry. The prototype carries the same sentence.
+		Summary:      "Install-wide defaults for built-in types, plan-reviewer and shared custom subagents.",
 		StoreSection: "agents",
 		Fields: []configField{
 			// The four public per-type defaults: a global row id + thinking

@@ -557,7 +557,7 @@ func TestLoadRejectsInvalidAgentSubagents(t *testing.T) {
 		{
 			name:  "reasoning effort without a model",
 			entry: "        - name: explore\n          reasoning_effort: low\n",
-			want:  "reasoning_effort requires model",
+			want:  "thinking level requires a model",
 		},
 	}
 	for _, tc := range cases {
@@ -601,7 +601,7 @@ func TestValidateAgentSubagentsAcceptsAResolvableModelReference(t *testing.T) {
 	}
 	// The effort rule is unchanged: it needs a model next to it.
 	effort := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", ReasoningEffort: "low"}}}
-	if err := ValidateAgentSubagents("main", effort, builtInPublicSubagentNames, builtInSystemSubagentNames, nil, resolves); err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
+	if err := ValidateAgentSubagents("main", effort, builtInPublicSubagentNames, builtInSystemSubagentNames, nil, resolves); err == nil || !strings.Contains(err.Error(), "thinking level requires a model") {
 		t.Fatalf("err = %v, want the effort rule", err)
 	}
 }
@@ -617,7 +617,7 @@ func TestValidateGoalEvaluatorModel(t *testing.T) {
 	// An effort needs a model next to it, exactly as for a per-agent entry.
 	effort := SubagentConfig{ReasoningEffort: "high"}
 	err := ValidateGoalEvaluatorModel(effort, resolves)
-	if err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
+	if err == nil || !strings.Contains(err.Error(), "thinking level requires a model") {
 		t.Fatalf("err = %v, want the effort rule", err)
 	}
 	if !strings.Contains(err.Error(), "agents.goal_evaluator") {
@@ -652,7 +652,7 @@ func TestValidateGoalEvaluatorModel(t *testing.T) {
 		t.Fatalf("a configured goal-check row was refused on an install with no definitions: %v", err)
 	}
 	root.Agents.GoalEvaluator = SubagentConfig{ReasoningEffort: "high"}
-	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
+	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "thinking level requires a model") {
 		t.Fatalf("err = %v, want the loader to refuse an effort with no model", err)
 	}
 }
@@ -687,7 +687,7 @@ func TestValidatePlanReviewerModel(t *testing.T) {
 			entry: SubagentConfig{ReasoningEffort: "high"},
 			check: func(t *testing.T, err error) {
 				t.Helper()
-				if err == nil || !strings.Contains(err.Error(), "reasoning_effort requires model") {
+				if err == nil || !strings.Contains(err.Error(), "thinking level requires a model") {
 					t.Fatalf("err = %v, want the effort rule", err)
 				}
 				if !strings.Contains(err.Error(), "agents.plan_reviewer") {
@@ -764,7 +764,7 @@ func TestValidatePlanReviewerModel(t *testing.T) {
 		t.Fatalf("a configured reviewer row was refused on an install with no definitions: %v", err)
 	}
 	root.Agents.PlanReviewer = SubagentConfig{ReasoningEffort: "high"}
-	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "agents.plan_reviewer: reasoning_effort requires model") {
+	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "agents.plan_reviewer: thinking level requires a model") {
 		t.Fatalf("err = %v, want the loader to refuse an effort with no model", err)
 	}
 }
@@ -826,7 +826,7 @@ func TestValidateSharedSubagents(t *testing.T) {
 		{
 			name:  "an effort without a model is refused",
 			entry: SubagentConfig{Name: valid.Name, Description: valid.Description, SystemPrompt: valid.SystemPrompt, ReasoningEffort: "high"},
-			want:  "agents.shared_subagents[0]: reasoning_effort requires model",
+			want:  "agents.shared_subagents[0]: thinking level requires a model",
 		},
 		{
 			name:  "a bare model name is refused",

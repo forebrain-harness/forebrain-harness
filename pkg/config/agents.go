@@ -319,11 +319,11 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 		}
 		seen[name] = struct{}{}
 		if _, ok := system[name]; ok {
-			return fmt.Errorf("%s: %q is dispatched by the system and cannot be configured", where, name)
+			return fmt.Errorf("%s: %q is dispatched by the system and cannot be configured.", where, name)
 		}
 		if _, ok := public[name]; ok {
 			if strings.TrimSpace(entry.Description) != "" || strings.TrimSpace(entry.Tools) != "" || len(entry.AllowedTools) > 0 || entry.Continuable != nil {
-				return fmt.Errorf("%s: %q is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else", where, name)
+				return fmt.Errorf("%s: %q is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else.", where, name)
 			}
 		} else if slices.Contains(sharedNames, name) {
 			// A shared subagent's enablement is this entry and nothing else: its
@@ -353,11 +353,15 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 // a reasoning effort only means something next to an explicit model. A value
 // without that shape must name a configured model reference (a row id);
 // anything else keeps the shape error, so a bare model name is still refused.
+// The effort refusal is the settings page's own words — thinking level, the
+// label every surface gives reasoning_effort — because one shared rule serves
+// every row that carries the pair (goal check, plan reviewer, type row,
+// per-agent entry).
 func validateSubagentModel(where string, entry SubagentConfig, refResolves func(string) bool) error {
 	model := strings.TrimSpace(entry.Model)
 	if model == "" {
 		if strings.TrimSpace(entry.ReasoningEffort) != "" {
-			return fmt.Errorf("%s: reasoning_effort requires model", where)
+			return fmt.Errorf("%s: thinking level requires a model.", where)
 		}
 		return nil
 	}

@@ -743,12 +743,61 @@ func TestConfigPanelDeleteConfirmsKeepPreselected(t *testing.T) {
 	if got := rowLabels(rows); !slices.Equal(got, []string{configRemoveConfirmLabel, configKeepConfirmLabel}) {
 		t.Fatalf("confirmation rows = %v", got)
 	}
+	// The Remove row alone is the danger row (prototype .item.danger): the
+	// choice that discards the item is the one the renderer paints red.
+	if !rows[0].Danger || rows[1].Danger {
+		t.Fatalf("confirmation danger flags = %v/%v, want Remove only", rows[0].Danger, rows[1].Danger)
+	}
 	if len(session.writes) != 1 {
 		t.Fatalf("expected the second confirmation alone to write, got %+v", session.writes)
 	}
 	if raw := string(session.writes[0].raw); raw != `{"writable_roots":[]}` {
 		t.Fatalf("raw = %s", raw)
 	}
+}
+
+// The confirmation's Remove row is painted the panel's own failure red, the
+// prototype's .item.danger .item-label — and nothing else is: Keep stays the
+// terminal's foreground, and a picker no list armed with the flag carries no
+// red at all, so the colour cannot leak into another panel.
+func TestConfigPanelRemoveConfirmRowIsRed(t *testing.T) {
+	useANSI256ColorProfile(t)
+	items := []SelectItem{
+		{Label: configRemoveConfirmLabel, Danger: true},
+		{Label: configKeepConfirmLabel},
+	}
+	lines := renderRichPage(items, "Remove #1?\n/a", 120)
+	remove := rawRowFor(t, lines, configRemoveConfirmLabel)
+	if !strings.Contains(remove, panelFailStyle.Render(configRemoveConfirmLabel)) {
+		t.Fatalf("the Remove row is not painted the failure red: %q", remove)
+	}
+	if keep := rawRowFor(t, lines, configKeepConfirmLabel); strings.Contains(keep, "\x1b[38;5;203m") {
+		t.Fatalf("the Keep row took the danger colour: %q", keep)
+	}
+
+	// Another panel's picker over rows that set no flag: no red anywhere.
+	plain := &richPickerState{items: []SelectItem{{Label: configRemoveConfirmLabel}, {Label: configKeepConfirmLabel}}}
+	plain.rebuildSelectable()
+	for _, line := range plain.panel("Pick one").layout(120, 0, 0, false).lines {
+		if strings.Contains(line, "\x1b[38;5;203m") {
+			t.Fatalf("a picker without a danger row drew the failure red: %q", line)
+		}
+	}
+}
+
+// rawRowFor is one row's painted line, before ANSI is stripped, found by the
+// name it starts with once the row's margin is off.
+func rawRowFor(t *testing.T, lines []string, name string) string {
+	t.Helper()
+	for _, line := range lines {
+		body := strings.TrimLeft(stripANSI(line), " ")
+		body = strings.TrimPrefix(body, selectorCursorGlyph+" ")
+		if strings.HasPrefix(body, name) {
+			return line
+		}
+	}
+	t.Fatalf("no row %q among:\n%s", name, strings.Join(stripANSIAll(lines), "\n"))
+	return ""
 }
 
 // A number outside the loader's range never reaches the store, and the page
@@ -1801,7 +1850,7 @@ func TestConfigPanelRendersEveryTab(t *testing.T) {
 	}{
 		{tab: configTabApproval, titles: []string{"Approval preset", "Workspace sandbox", "Batch projects"}},
 		{tab: configTabSession, titles: []string{"Context compaction", "Memory", "Scheduled tasks", "Feature switches"}},
-		{tab: configTabAgents, titles: []string{"Agents", "Subagent models", "Hooks", "Language servers", "Peer messaging"}},
+		{tab: configTabAgents, titles: []string{"Agents", "Subagents", "Hooks", "Language servers", "Peer messaging"}},
 		{tab: configTabFile, titles: []string{"Gateway", "Credential files"}, readOnly: true},
 	} {
 		t.Run(tc.tab, func(t *testing.T) {
@@ -2275,7 +2324,7 @@ func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
 	if !slices.Contains(labels, "Goal check model") {
 		t.Fatalf("the agents page is missing %q: %v", "Goal check model", labels)
 	}
-	// The plan reviewer's row moved to the "Subagent models" page, which is a
+	// The plan reviewer's row moved to the "Subagents" page, which is a
 	// projection of this same document (plan 314): one place owns every
 	// install-wide subagent row, and an agent page keeps only its own defaults.
 	for _, gone := range []string{"Plan reviewer model", "Plan reviewer thinking level"} {
@@ -2548,7 +2597,7 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 		"cron":                    "Choose how long task records are retained.",
 		"features":                "Enable memory and language intelligence.",
 		"agents":                  "Manage definitions, shared defaults and goal checks.",
-		"subagent_models":         "Install-wide defaults for built-in types and plan-reviewer.",
+		"subagent_models":         "Install-wide defaults for built-in types, plan-reviewer and shared custom subagents.",
 		"hooks":                   "Run configured actions at lifecycle events.",
 		"lsp":                     "Manage servers, timeouts and diagnostic delivery.",
 		"peers":                   "Coordinate with other agent processes on this machine.",
@@ -2705,7 +2754,7 @@ var errStubSystemEntryRefusal = stubSystemEntryError{}
 type stubSystemEntryError struct{}
 
 func (stubSystemEntryError) Error() string {
-	return `agents.definitions.main.subagents[0]: "goal-evaluator" is dispatched by the system and cannot be configured`
+	return `agents.definitions.main.subagents[0]: "goal-evaluator" is dispatched by the system and cannot be configured.`
 }
 
 // The prototype's validation rules are the store's, surfaced word for word
@@ -2732,7 +2781,7 @@ func TestConfigPanelValidationMessages(t *testing.T) {
 			steps:   []richStep{{label: "Network retries", ok: true}, {ok: false}},
 			inputs:  []selectorInput{{value: "5", ok: true}},
 			section: "agents",
-			want:    `is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else`,
+			want:    `is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else.`,
 		},
 		{
 			name:    "a goal check level without a model",
@@ -2741,7 +2790,7 @@ func TestConfigPanelValidationMessages(t *testing.T) {
 			steps:   []richStep{{label: "Network retries", ok: true}, {ok: false}},
 			inputs:  []selectorInput{{value: "5", ok: true}},
 			section: "agents",
-			want:    "agents.goal_evaluator: reasoning_effort requires model",
+			want:    "agents.goal_evaluator: thinking level requires a model",
 		},
 		{
 			name:    "a per-type level without a model",
@@ -2750,7 +2799,7 @@ func TestConfigPanelValidationMessages(t *testing.T) {
 			steps:   []richStep{{label: "Network retries", ok: true}, {ok: false}},
 			inputs:  []selectorInput{{value: "5", ok: true}},
 			section: "agents",
-			want:    "subagent_models.explore: reasoning_effort requires model",
+			want:    "subagent_models.explore: thinking level requires a model",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2771,11 +2820,11 @@ func TestConfigPanelValidationMessages(t *testing.T) {
 
 // stubBuiltInRestrictionError stands in for the loader's own sentence about a
 // built-in subagent entry given settings it cannot take
-// (pkg/config/agents.go: the where-prefixed wording, no trailing period).
+// (pkg/config/agents.go: the where-prefixed wording).
 type stubBuiltInRestrictionError struct{}
 
 func (stubBuiltInRestrictionError) Error() string {
-	return `agents.definitions.main.subagents[0]: "explore" is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else`
+	return `agents.definitions.main.subagents[0]: "explore" is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else.`
 }
 
 // stubEffortNeedsModelError stands in for the loader's own sentence about a
@@ -2784,7 +2833,7 @@ func (stubBuiltInRestrictionError) Error() string {
 type stubEffortNeedsModelError struct{ where string }
 
 func (e stubEffortNeedsModelError) Error() string {
-	return e.where + ": reasoning_effort requires model"
+	return e.where + ": thinking level requires a model."
 }
 
 // No page of the panel names a setting by its dotted configuration path: the
@@ -2813,7 +2862,7 @@ func TestConfigPanelNamesRowsWithoutADottedPath(t *testing.T) {
 	}
 }
 
-// The "Subagent models" page is a projection of the agents store (plan 314): it
+// The "Subagents" page is a projection of the agents store (plan 314): it
 // presents the per-type defaults, the plan reviewer's global row and the shared
 // custom registry — every install-wide subagent row in one place — reads the
 // agents document, and saves back to it so the keys it does not show survive.
@@ -3276,7 +3325,7 @@ func TestConfigPanelEffortPickerDropsOffOnTheMessagesProtocol(t *testing.T) {
 
 // A level belongs to the model beside it: with no model there is nothing to
 // offer, and the page says which setting to choose first instead of inventing a
-// list. The loader refuses such a pair too ("reasoning_effort requires model").
+// list. The loader refuses such a pair too ("thinking level requires a model.").
 func TestConfigPanelEffortPickerNeedsAModel(t *testing.T) {
 	useSetupCatalogWith(t, configEffortCatalog)
 	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{}}`})

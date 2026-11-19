@@ -85,7 +85,7 @@ func ValidateHookCommand(h HookCommand) error {
 
 func ValidateHookMatcher(m HookMatcher) error {
 	if len(m.Hooks) == 0 {
-		return fmt.Errorf("hook matcher requires hooks")
+		return fmt.Errorf("add at least one action to the matcher.")
 	}
 	for i, h := range m.Hooks {
 		if err := ValidateHookCommand(h); err != nil {
@@ -145,9 +145,13 @@ func ValidateHooksSettings(hooks HooksSettings) error {
 		if !ValidHookEventName(event) {
 			return fmt.Errorf("unsupported hook event: %s", event)
 		}
-		for i, matcher := range matchers {
+		// The event is the where a refusal names (the prototype's own shape,
+		// "<event>: add at least one action to the matcher."); a matcher's
+		// place in the list says nothing a user can type, so the index stays
+		// off the sentence.
+		for _, matcher := range matchers {
 			if err := ValidateHookMatcher(matcher); err != nil {
-				return fmt.Errorf("%s matcher %d: %w", event, i, err)
+				return fmt.Errorf("%s: %w", event, err)
 			}
 		}
 	}

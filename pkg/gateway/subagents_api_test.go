@@ -468,7 +468,7 @@ func TestSubagentCreatePrependsAndRefusesCollisions(t *testing.T) {
 		{
 			name: "an effort without a model",
 			body: map[string]any{"name": "epsilon", "description": "d", "system_prompt": "p", "reasoning_effort": "high"},
-			want: http.StatusBadRequest, text: "reasoning_effort requires model",
+			want: http.StatusBadRequest, text: "thinking level requires a model",
 		},
 	}
 	for _, tc := range cases {
@@ -1337,7 +1337,7 @@ func TestSharedSubagentTypeDefaultRows(t *testing.T) {
 	// The level needs a model beside it, and only a built-in type has a row.
 	rec = f.do(t, http.MethodPut, "/api/agents/subagents/shared/types/plan", map[string]any{"reasoning_effort": "low"})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	require.Contains(t, rec.Body.String(), "reasoning_effort requires model")
+	require.Contains(t, rec.Body.String(), "thinking level requires a model")
 	rec = f.do(t, http.MethodPut, "/api/agents/subagents/shared/types/repo-auditor", map[string]any{"model": rowID})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	require.Contains(t, rec.Body.String(), "only a built-in subagent has an install-wide model row")

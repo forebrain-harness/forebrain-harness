@@ -1527,7 +1527,7 @@ const (
 	configSubagentsKey      = "subagents"
 	configSubagentModelsKey = "subagent_models"
 	// configPlanReviewerKey and configSharedSubagentsKey are the two other
-	// install-wide rows in the agents section the "Subagent models" page presents
+	// install-wide rows in the agents section the "Subagents" page presents
 	// (plan 314): the exit-plan reviewer's global row (plan 313) and the shared
 	// custom registry.
 	configPlanReviewerKey    = "plan_reviewer"
@@ -1631,8 +1631,8 @@ const (
 	configSystemStatus = "System"
 	// configSharedSubagentNotice is what a read-only shared row answers when one
 	// of its definition's fields is opened: the definition is edited on the
-	// "Subagent models" page, never here (plan 314).
-	configSharedSubagentNotice = "A shared subagent: its definition is edited in Subagent models, only the switch is set here"
+	// "Subagents" page, never here (plan 314).
+	configSharedSubagentNotice = "A shared subagent: its definition is edited in Subagents, only the switch is set here"
 )
 
 // agentSubagentsPath reports whether path is one primary agent's subagent list —
@@ -1944,7 +1944,8 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 // the row and shows what it holds — hidden whole when the field is a secret
 // (plan 328 D3: no characters of one are ever on the page) — and the rows are
 // Remove item and Keep item with Keep preselected, so Enter alone changes
-// nothing. Esc keeps the row too.
+// nothing. Esc keeps the row too. The Remove row is a danger row (prototype
+// .item.danger): the choice that discards the row is the red one.
 func (p *configPanel) confirmRemoveRow(label string, doc any, rowPath []string, field configField) bool {
 	value, _ := configLookupValue(doc, rowPath)
 	preview := configRowDescription(value)
@@ -1952,7 +1953,7 @@ func (p *configPanel) confirmRemoveRow(label string, doc any, rowPath []string, 
 		preview = configSecretDisplay(value, true)
 	}
 	items := []SelectItem{
-		{Label: configRemoveConfirmLabel},
+		{Label: configRemoveConfirmLabel, Danger: true},
 		{Label: configKeepConfirmLabel},
 	}
 	idx, ok, err := selectRichPage(p.sel, "Remove "+label+"?\n"+preview, items, 1)
@@ -2310,7 +2311,7 @@ func (p *configPanel) openUnknownTemplateKey(doc any, rowPath []string, key stri
 // editSharedSubagentRow is the whole of what an agent's page may do with a
 // shared subagent (plan 314): one switch, and the definition's own facts shown
 // read-only. The definition is the install-wide registry's, so it is edited on
-// the Subagent models page and every other row here says where it lives rather
+// the Subagents page and every other row here says where it lives rather
 // than opening an editor this page does not have. The switch is one edit like
 // any other (plan 321): throwing it writes the reference entry, throwing it back
 // removes it, and Esc between the two writes nothing.

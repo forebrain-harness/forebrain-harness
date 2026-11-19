@@ -6315,7 +6315,15 @@ func (p *richPickerState) panel(label string) slashPanel {
 		if item.Mark != "" {
 			mark = panelAccentStyle.Render(item.Mark)
 		}
-		b.selectableColumnsValue(ci == p.cursor, "", item.Label, nameWidth, strings.TrimSpace(item.Description), item.ElideTail, item.Value, item.Status, mark)
+		// A danger row's label takes the panel's own failure red (prototype
+		// .item.danger): the delete confirmation's Remove item, the choice
+		// that discards the row. Widths still measure the bare label —
+		// displayLineWidth skips the SGR — and no other list sets the flag.
+		name := item.Label
+		if item.Danger {
+			name = panelFailStyle.Render(name)
+		}
+		b.selectableColumnsValue(ci == p.cursor, "", name, nameWidth, strings.TrimSpace(item.Description), item.ElideTail, item.Value, item.Status, mark)
 	}
 	if len(p.selectable) == 0 && !p.configPage {
 		b.text(panelIndent, "No matches", nil)

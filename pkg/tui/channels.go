@@ -638,6 +638,11 @@ type SelectItem struct {
 	// settings reads as name, value and status (plan 321). "" is no value; the
 	// renderer caps and elides it, and a narrow row drops it.
 	Value string
+	// Danger marks the row's label destructive — the /config delete
+	// confirmation's Remove item (prototype .item.danger), so the row that
+	// discards work reads as the risky one. Like the mark it carries no style:
+	// the renderer owns the colour, and no other list sets it.
+	Danger bool
 }
 
 type Selector interface {

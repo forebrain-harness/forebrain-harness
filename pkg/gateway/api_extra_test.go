@@ -10055,7 +10055,7 @@ func TestSettingsPatchNormalizesGoalEvaluatorModelToRowID(t *testing.T) {
 		return refusal.Path, refusal.Message
 	}
 
-	// An effort with no model is refused: reasoning_effort requires model, the
+	// An effort with no model is refused: thinking level requires a model, the
 	// same rule every per-agent entry gets, and the refusal names the item the
 	// page edited.
 	saved := settingsPatch(t, s, map[string]any{"agents.goal_evaluator.reasoning_effort": "high"}, nil)
