@@ -2786,11 +2786,11 @@ func TestConfigPanelValidationMessages(t *testing.T) {
 		{
 			name:    "a goal check level without a model",
 			stored:  map[string]string{"agents": `{"definitions":{"main":{"primary":true}},"goal_evaluator":{"reasoning_effort":"high"}}`},
-			err:     stubEffortNeedsModelError{where: "agents.goal_evaluator"},
+			err:     stubGoalCheckEffortError{},
 			steps:   []richStep{{label: "Network retries", ok: true}, {ok: false}},
 			inputs:  []selectorInput{{value: "5", ok: true}},
 			section: "agents",
-			want:    "agents.goal_evaluator: thinking level requires a model",
+			want:    "Thinking level requires a goal check model.",
 		},
 		{
 			name:    "a per-type level without a model",
@@ -2829,11 +2829,21 @@ func (stubBuiltInRestrictionError) Error() string {
 
 // stubEffortNeedsModelError stands in for the loader's own sentence about a
 // thinking level that names no model (pkg/config/agents.go
-// validateSubagentModel, per row: goal evaluator, plan reviewer, type row).
+// validateSubagentModel, where-prefixed: plan reviewer, type row, per-agent
+// entry).
 type stubEffortNeedsModelError struct{ where string }
 
 func (e stubEffortNeedsModelError) Error() string {
 	return e.where + ": thinking level requires a model."
+}
+
+// stubGoalCheckEffortError stands in for the loader's own sentence about a
+// goal check thinking level that names no model: the goal row's own words,
+// with no where prefix.
+type stubGoalCheckEffortError struct{}
+
+func (stubGoalCheckEffortError) Error() string {
+	return "Thinking level requires a goal check model."
 }
 
 // No page of the panel names a setting by its dotted configuration path: the
@@ -3325,7 +3335,8 @@ func TestConfigPanelEffortPickerDropsOffOnTheMessagesProtocol(t *testing.T) {
 
 // A level belongs to the model beside it: with no model there is nothing to
 // offer, and the page says which setting to choose first instead of inventing a
-// list. The loader refuses such a pair too ("thinking level requires a model.").
+// list. The loader refuses such a pair too ("Thinking level requires a goal
+// check model.").
 func TestConfigPanelEffortPickerNeedsAModel(t *testing.T) {
 	useSetupCatalogWith(t, configEffortCatalog)
 	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{}}`})

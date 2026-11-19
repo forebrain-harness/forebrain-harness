@@ -1058,7 +1058,10 @@ func (s *Server) handleAgentSubagentUpdate(w http.ResponseWriter, r *http.Reques
 			// own endpoint, and the web uses it (plan 314).
 			return nil, subagentBadRequest("%q is a shared subagent; edit it in Settings → Subagents, only enable/disable here", name)
 		case subagentKindSystem:
-			return nil, subagentBadRequest("%q is dispatched by the system and cannot be configured", name)
+			// The loader's own refusal for a system-dispatched name, in its shape:
+			// the agent's id as the where prefix and the same sentence, period
+			// included (pkg/config's agents.go is the single authority).
+			return nil, subagentBadRequest("%s: %q is dispatched by the system and cannot be configured.", write.agentID, name)
 		default:
 			return nil, subagentNotFound("no subagent named %q", name)
 		}

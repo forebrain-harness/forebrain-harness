@@ -614,14 +614,13 @@ func TestValidateAgentSubagentsAcceptsAResolvableModelReference(t *testing.T) {
 func TestValidateGoalEvaluatorModel(t *testing.T) {
 	resolves := func(ref string) bool { return ref == "llm-goal-check" }
 
-	// An effort needs a model next to it, exactly as for a per-agent entry.
+	// An effort needs a model next to it, and the goal row says so in its own
+	// words: the sentence names the model it waits for and carries no path
+	// prefix.
 	effort := SubagentConfig{ReasoningEffort: "high"}
 	err := ValidateGoalEvaluatorModel(effort, resolves)
-	if err == nil || !strings.Contains(err.Error(), "thinking level requires a model") {
-		t.Fatalf("err = %v, want the effort rule", err)
-	}
-	if !strings.Contains(err.Error(), "agents.goal_evaluator") {
-		t.Fatalf("err = %v, want the path the settings page writes", err)
+	if err == nil || err.Error() != "Thinking level requires a goal check model." {
+		t.Fatalf("err = %v, want the goal row's effort sentence", err)
 	}
 
 	// A reference no row carries is refused, naming the row.
@@ -652,7 +651,7 @@ func TestValidateGoalEvaluatorModel(t *testing.T) {
 		t.Fatalf("a configured goal-check row was refused on an install with no definitions: %v", err)
 	}
 	root.Agents.GoalEvaluator = SubagentConfig{ReasoningEffort: "high"}
-	if err := FinishLoad(&root); err == nil || !strings.Contains(err.Error(), "thinking level requires a model") {
+	if err := FinishLoad(&root); err == nil || err.Error() != "Thinking level requires a goal check model." {
 		t.Fatalf("err = %v, want the loader to refuse an effort with no model", err)
 	}
 }

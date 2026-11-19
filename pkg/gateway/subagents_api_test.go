@@ -674,6 +674,10 @@ func TestSubagentSystemUpdateIsRefused(t *testing.T) {
 			"system_prompt": "rewritten", "model": "openai/gpt-sub",
 		})
 		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", name, rec.Body.String())
+		// The refusal is the loader's own sentence for the same verdict — the
+		// agent id as the where prefix, period included — so the web and the
+		// CLI cannot say it two ways (pkg/config/agents.go).
+		require.Contains(t, rec.Body.String(), `main: "`+name+`" is dispatched by the system and cannot be configured.`, "%s: %s", name, rec.Body.String())
 	}
 	require.Empty(t, f.subagentEntries(t), "a refused write changes nothing")
 }

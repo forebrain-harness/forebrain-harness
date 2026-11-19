@@ -342,7 +342,7 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 		} else if err := validateCustomSubagentBody(where, entry); err != nil {
 			return err
 		}
-		if err := validateSubagentModel(where, entry, refResolves); err != nil {
+		if err := validateSubagentModel(where, where+": thinking level requires a model.", entry, refResolves); err != nil {
 			return err
 		}
 	}
@@ -356,12 +356,14 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 // The effort refusal is the settings page's own words — thinking level, the
 // label every surface gives reasoning_effort — because one shared rule serves
 // every row that carries the pair (goal check, plan reviewer, type row,
-// per-agent entry).
-func validateSubagentModel(where string, entry SubagentConfig, refResolves func(string) bool) error {
+// per-agent entry). levelNeedsModel is that refusal for the row being judged:
+// every row but the goal check's is the where prefix plus the shared sentence,
+// while the goal check's names the model it waits for with no prefix.
+func validateSubagentModel(where, levelNeedsModel string, entry SubagentConfig, refResolves func(string) bool) error {
 	model := strings.TrimSpace(entry.Model)
 	if model == "" {
 		if strings.TrimSpace(entry.ReasoningEffort) != "" {
-			return fmt.Errorf("%s: thinking level requires a model.", where)
+			return errors.New(levelNeedsModel)
 		}
 		return nil
 	}
@@ -375,18 +377,20 @@ func validateSubagentModel(where string, entry SubagentConfig, refResolves func(
 }
 
 // ValidateGoalEvaluatorModel puts the settings page's one global subagent row
-// under the same rule every per-agent entry gets: validateSubagentModel,
-// unmodified. The where string is the configuration path the settings page
-// writes, so a refusal names the row the user was editing.
+// under the same rule every per-agent entry gets: validateSubagentModel, with
+// the goal check's own effort sentence — the prototype's words, naming the
+// model the row waits for, with no path prefix. The where string stays the
+// configuration path the settings page writes, so a shape refusal still names
+// the row the user was editing.
 func ValidateGoalEvaluatorModel(entry SubagentConfig, refResolves func(string) bool) error {
-	return validateSubagentModel("agents.goal_evaluator", entry, refResolves)
+	return validateSubagentModel("agents.goal_evaluator", "Thinking level requires a goal check model.", entry, refResolves)
 }
 
 // ValidatePlanReviewerModel is the same verdict for the exit-plan approval's
 // reviewer row (plan 313): the goal check's precedent one field over, with the
 // row's own configuration path as the where string.
 func ValidatePlanReviewerModel(entry SubagentConfig, refResolves func(string) bool) error {
-	return validateSubagentModel("agents.plan_reviewer", entry, refResolves)
+	return validateSubagentModel("agents.plan_reviewer", "agents.plan_reviewer: thinking level requires a model.", entry, refResolves)
 }
 
 // validateCustomSubagentBody checks the definition a custom subagent carries: a
@@ -451,7 +455,7 @@ func ValidateSharedSubagents(entries []SubagentConfig, publicBuiltins, systemBui
 		if err := validateCustomSubagentBody(where, entry); err != nil {
 			return err
 		}
-		if err := validateSubagentModel(where, entry, refResolves); err != nil {
+		if err := validateSubagentModel(where, where+": thinking level requires a model.", entry, refResolves); err != nil {
 			return err
 		}
 	}
@@ -481,7 +485,7 @@ func ValidateSubagentModels(models map[string]SubagentConfig, refResolves func(s
 			return fmt.Errorf("%s: only a built-in subagent has a global model row (%s)",
 				where, strings.Join(builtInPublicSubagentNames, ", "))
 		}
-		if err := validateSubagentModel(where, models[key], refResolves); err != nil {
+		if err := validateSubagentModel(where, where+": thinking level requires a model.", models[key], refResolves); err != nil {
 			return err
 		}
 	}
