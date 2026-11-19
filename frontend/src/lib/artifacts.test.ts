@@ -210,6 +210,39 @@ describe('displayPathOf', () => {
     }, 'session-1')
     expect(displayPathOf(kept ?? {}, '/work/proj')).toBe('/Users/who/.forebrain/plans/s1/plan.md')
   })
+
+  // Windows is a shipped target (forebrain-win32-x64): a delivered row can
+  // carry a drive-letter or UNC path, and the same inside/outside rule holds.
+  it('relativizes a Windows drive-letter path inside the project root', () => {
+    expect(displayPathOf({ path: 'C:/work/proj/docs/a.md' }, 'C:/work/proj')).toBe('docs/a.md')
+    // Backslashes arrive from the platform's own separators; output stays `/`.
+    expect(displayPathOf({ path: 'C:\\work\\proj\\docs\\a.md' }, 'C:\\work\\proj')).toBe('docs/a.md')
+  })
+
+  it('keeps a Windows path outside the root absolute', () => {
+    expect(displayPathOf({ path: 'C:/other/a.md' }, 'C:/work/proj')).toBe('C:/other/a.md')
+    // A different drive is a different volume, however alike the directories.
+    expect(displayPathOf({ path: 'D:/work/proj/a.md' }, 'C:/work/proj')).toBe('D:/work/proj/a.md')
+  })
+
+  it('relativizes across drive-letter case, on segment boundaries only', () => {
+    // Windows compares paths case-insensitively, the drive included.
+    expect(displayPathOf({ path: 'c:/WORK/PROJ/docs/a.md' }, 'C:/work/proj')).toBe('docs/a.md')
+    // The boundary is still a whole separator: a sibling directory that
+    // shares the name prefix is outside and stays absolute.
+    expect(displayPathOf({ path: 'C:/work/proj2/a.md' }, 'C:/work/proj')).toBe('C:/work/proj2/a.md')
+  })
+
+  it('relativizes a UNC path inside its share root', () => {
+    expect(displayPathOf({ path: '//server/share/docs/a.md' }, '//server/share')).toBe('docs/a.md')
+    // Another share is outside; host and share names compare without case.
+    expect(displayPathOf({ path: '//server/share/docs/a.md' }, '//other/share')).toBe('//server/share/docs/a.md')
+    expect(displayPathOf({ path: '//Server/Share/docs/a.md' }, '//server/share')).toBe('docs/a.md')
+  })
+
+  it('keeps POSIX matching case-sensitive, unlike Windows paths', () => {
+    expect(displayPathOf({ path: '/Work/Proj/docs/a.md' }, '/work/proj')).toBe('/Work/Proj/docs/a.md')
+  })
 })
 
 /**

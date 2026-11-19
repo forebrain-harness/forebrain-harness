@@ -289,9 +289,14 @@ export function planArtifactOf(result: unknown, sessionId: string): ArtifactView
  * path the file is located by. An absolute path inside the session's project
  * root loses the root prefix — the boundary is a whole separator, so
  * `/work/a` is not inside `/work/ab` — and one outside it stays absolute; a
- * root is required before any absolute path is relativized. A structured row
- * without an absolute path reads its `relPath`, and a legacy row with neither
- * falls back to its name. Relative output always speaks `/`.
+ * root is required before any absolute path is relativized. Absolute means
+ * any of the three shapes the shipped targets produce: a POSIX root (`/…`), a
+ * Windows drive letter (`C:/…`, case-insensitive — the drive, and with it the
+ * whole comparison, as Windows compares paths) and a UNC share
+ * (`//server/share/…`, case-insensitive the same way); POSIX paths stay
+ * case-sensitive, the way Linux compares them. A structured row without an
+ * absolute path reads its `relPath`, and a legacy row with neither falls back
+ * to its name. Relative output always speaks `/`.
  */
 export function displayPathOf(row: { path?: unknown; relPath?: unknown; name?: unknown }, root?: string): string {
   const toSlashes = (value: string): string => value.replace(/\\/g, '/')
@@ -299,9 +304,17 @@ export function displayPathOf(row: { path?: unknown; relPath?: unknown; name?: u
   const relPath = toSlashes(String(row.relPath ?? '').trim())
   const name = String(row.name ?? '').trim()
   const base = root ? toSlashes(String(root).trim().replace(/\/+$/, '')) : ''
-  if (path.startsWith('/')) {
-    if (base && (path === base || path.startsWith(`${base}/`))) {
-      return path === base ? '.' : path.slice(base.length + 1)
+  // A Windows-style path compares case-insensitively across its whole length
+  // (drive letters, UNC hosts and shares are case-insensitive there); a POSIX
+  // path compares case-sensitively.
+  const windowsStyle = /^[a-zA-Z]:/.test(path) || path.startsWith('//')
+  if (windowsStyle || path.startsWith('/')) {
+    if (base) {
+      const fold = (value: string): string => (windowsStyle ? value.toLowerCase() : value)
+      if (fold(path) === fold(base)) return '.'
+      if (fold(path.slice(0, base.length + 1)) === `${fold(base)}/`) {
+        return path.slice(base.length + 1)
+      }
     }
     return path
   }
