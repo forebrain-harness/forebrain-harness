@@ -512,7 +512,10 @@ func TestSubmitBatchUsageLimitFailsWithoutContinuation(t *testing.T) {
 	}
 }
 
-func TestBatchFallbackArtifactsOnlyWhenNothingWasDelivered(t *testing.T) {
+// TestBatchScanRegistersOutputsFiles pins the outputs scan itself: every
+// regular file in outputs/ is registered under the ending run, hash-stamped,
+// and nothing else changes.
+func TestBatchScanRegistersOutputsFiles(t *testing.T) {
 	ctx := context.Background()
 	env := newBatchEnv(t)
 	outDir := filepath.Join(env.exec.Workspace, "outputs")
@@ -534,7 +537,7 @@ func TestBatchFallbackArtifactsOnlyWhenNothingWasDelivered(t *testing.T) {
 }
 
 // triggerEnv is one batch execution whose conversation is bound to the batch
-// project, so the turn-end top-up resolves its scope the way a real one does.
+// project, so the execution-end epilogue reads the same stores a real one does.
 type triggerEnv struct {
 	projects *state.ProjectStore
 	sessions *state.SessionStore
@@ -612,10 +615,9 @@ func (e *triggerEnv) sessionArtifacts(t *testing.T) map[string]state.Artifact {
 	return out
 }
 
-// TestBatchScanFiresOnZeroModelDelivery pins the deliberate trigger change
-// (plan 324): the outputs scan fires when the model presented nothing, even
-// though the conversation already holds fallback rows — a continue's earlier
-// collection must not make a silent turn look delivered.
+// TestBatchScanFiresOnZeroModelDelivery pins that the scan runs at every
+// execution end; pre-existing fallback rows never suppress it and the end
+// report carries every row.
 func TestBatchScanFiresOnZeroModelDelivery(t *testing.T) {
 	ctx := context.Background()
 	env := newTriggerEnv(t)
@@ -645,18 +647,18 @@ func TestBatchScanFiresOnZeroModelDelivery(t *testing.T) {
 	}
 }
 
-// TestBatchPartialModelDeliveryScanSuppressedTopUpFillsGap is the root cure
-// (b): a turn that presented some and missed some keeps the outputs scan
-// off (the model did deliver), and the engine's top-up registers the missed
-// tracked change anyway.
-func TestBatchPartialModelDeliveryScanSuppressedTopUpFillsGap(t *testing.T) {
+// TestBatchPartialModelDeliveryScanFillsOutputsGap pins the always-on
+// outputs scan (owner 2026-11-19): a turn that presented some and missed
+// some still delivers the rest of outputs/, while a tracked change
+// outside the protocol folder is never the engine's to deliver.
+func TestBatchPartialModelDeliveryScanFillsOutputsGap(t *testing.T) {
 	ctx := context.Background()
 	env := newTriggerEnv(t)
-	presented := env.write(t, "tasks/t1/1/outputs/summary.docx", "the presented one")
+	presented := filepath.Join(env.exec.Workspace, "outputs", "summary.docx")
+	if err := os.WriteFile(presented, []byte("the presented one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	missed := env.write(t, "tasks/t1/1/work/dataset.csv", "the missed one")
-	// A file only the outputs folder knows about: with the model having
-	// delivered, the scan stays off and this one is not the engine's to
-	// collect (nobody tracked it this turn).
 	if err := os.WriteFile(filepath.Join(env.exec.Workspace, "outputs", "untracked.xlsx"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -667,24 +669,26 @@ func TestBatchPartialModelDeliveryScanSuppressedTopUpFillsGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := env.sessions.AddArtifact(ctx, state.Artifact{
-		SessionID: env.exec.SessionID, RunID: run.ID, Path: presented, RelPath: "summary.docx",
-		Name: "summary.docx", Kind: "document", SHA256: "presented", Origin: state.ArtifactOriginModel,
+		SessionID: env.exec.SessionID, RunID: run.ID, Path: presented, RelPath: "outputs/summary.docx",
+		Name: "summary.docx", Kind: "document", SHA256: rowsOf(t, presented), Origin: state.ArtifactOriginModel,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.sessions.RecordFileChange(ctx, state.FileChange{SessionID: env.exec.SessionID, RunID: run.ID, Path: missed}); err != nil {
 		t.Fatal(err)
 	}
-	svc.collectTurnDeliverables(ctx, env.exec.SessionID, run.ID, state.ProjectTypeBatch, env.root)
 	svc.endBatchExecution(ctx, TurnRequest{SessionID: env.exec.SessionID}, run.ID, state.TaskStatusCompleted, "", nil)
 	files := env.sessionArtifacts(t)
-	if row, ok := files["dataset.csv"]; !ok || row.Origin != state.ArtifactOriginFallback {
-		t.Fatalf("the missed tracked change was not topped up: %v", files)
+	if row, ok := files["summary.docx"]; !ok || row.Origin != state.ArtifactOriginModel {
+		t.Fatalf("the presented deliverable must stay the model's single row: %v", files)
 	}
-	if _, ok := files["untracked.xlsx"]; ok {
-		t.Fatalf("the outputs scan fired despite a model delivery: %v", files)
+	if row, ok := files["untracked.xlsx"]; !ok || row.Origin != state.ArtifactOriginFallback {
+		t.Fatalf("the missed output was not collected by the always-on scan: %v", files)
 	}
-	if len(ended[0].Artifacts) != 2 {
+	if _, ok := files["dataset.csv"]; ok {
+		t.Fatalf("a tracked change outside outputs/ must not be delivered: %v", files)
+	}
+	if len(ended) != 1 || len(ended[0].Artifacts) != 2 {
 		t.Fatalf("end report = %+v, want model row + fallback row", ended[0].Artifacts)
 	}
 }
@@ -730,10 +734,11 @@ func TestBatchContinueSecondTurnScansAndDedups(t *testing.T) {
 	}
 }
 
-// TestBatchApprovalRequiredRunsTheTopUp pins (d): an approval wait is
-// terminal for a batch turn, so its tracked writes are topped up and its
-// outputs scanned before the execution is failed with approval_required.
-func TestBatchApprovalRequiredRunsTheTopUp(t *testing.T) {
+// TestBatchApprovalRequiredStillScansOutputs pins (d): an approval wait is
+// terminal for a batch turn, so its outputs are scanned before the execution
+// is failed with approval_required — while a tracked write outside outputs/
+// is never the engine's to deliver.
+func TestBatchApprovalRequiredStillScansOutputs(t *testing.T) {
 	ctx := context.Background()
 	env := newTriggerEnv(t)
 	if err := os.WriteFile(filepath.Join(env.exec.Workspace, "outputs", "report.xlsx"), []byte("x"), 0o644); err != nil {
@@ -761,8 +766,8 @@ func TestBatchApprovalRequiredRunsTheTopUp(t *testing.T) {
 		t.Fatalf("outcome = %+v, err = %v", out, err)
 	}
 	files := env.sessionArtifacts(t)
-	if row, ok := files["partial.csv"]; !ok || row.Origin != state.ArtifactOriginFallback {
-		t.Fatalf("the approval turn's tracked write was not topped up: %v", files)
+	if _, ok := files["partial.csv"]; ok {
+		t.Fatalf("a tracked change outside outputs/ must not be delivered: %v", files)
 	}
 	if _, ok := files["report.xlsx"]; !ok {
 		t.Fatalf("the approval turn's outputs were not scanned: %v", files)
