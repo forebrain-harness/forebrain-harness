@@ -332,6 +332,94 @@ func TestPrimaryAgentCreatePersistsDefinition(t *testing.T) {
 	require.DirExists(t, filepath.Join(home(), "workspaces", "helper", "skills"))
 }
 
+// The unified create's subagent role (P3): primary false lands the definition
+// with the body it runs on, and the listing answers without it — the response
+// is the primary agents' listing, which a subagent definition is not part of.
+func TestPrimaryAgentCreateSubagentDefinition(t *testing.T) {
+	s, _ := crudServer(t)
+	rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]any{
+		"id":            "repo-auditor",
+		"description":   "audits one repository area",
+		"primary":       false,
+		"system_prompt": "You audit repositories.",
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	// The listing is the primary agents' alone: the new definition plays the
+	// subagent role, which no primary listing carries.
+	require.NotContains(t, rr.Body.String(), "repo-auditor")
+
+	stored := configSectionRow(t, s.Env.SQL, "agents")
+	require.Contains(t, stored, `"repo-auditor":{"primary":false,"description":"audits one repository area","system_prompt":"You audit repositories."}`)
+	// A subagent definition owns no workspace: none is materialised for it.
+	_, err := os.Stat(filepath.Join(home(), "workspaces", "repo-auditor"))
+	require.True(t, os.IsNotExist(err))
+}
+
+// The subagent role's create refusals: a body nobody wrote (the write-path
+// requirement the shared routes carry too), a workspace it cannot own, and a
+// subagent body beside primary true.
+func TestPrimaryAgentCreateSubagentRefusals(t *testing.T) {
+	s, _ := crudServer(t)
+	cases := []struct {
+		name string
+		body map[string]any
+		want string
+	}{
+		{
+			name: "no system prompt",
+			body: map[string]any{"id": "repo-auditor", "primary": false},
+			want: "system_prompt required",
+		},
+		{
+			name: "a workspace root it cannot own",
+			body: map[string]any{"id": "repo-auditor", "primary": false, "system_prompt": "p", "workspace_root": "/tmp/elsewhere"},
+			want: "no workspace root of its own",
+		},
+		{
+			name: "a subagent body beside primary true",
+			body: map[string]any{"id": "helper", "system_prompt": "p"},
+			want: "carries no subagent body",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", tc.body)
+			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			require.Contains(t, rr.Body.String(), tc.want)
+			require.NotContains(t, configSectionRow(t, s.Env.SQL, "agents"), `"`+tc.body["id"].(string)+`":`,
+				"a refused create writes no definition")
+		})
+	}
+}
+
+// The update judges the request by the stored role (P3): a subagent
+// definition's body is replaced whole and its role, display name and order
+// stay; a primary's page refuses the body fields.
+func TestPrimaryAgentUpdateSubagentBody(t *testing.T) {
+	s, _ := crudServer(t)
+	seed := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]any{
+		"id": "repo-auditor", "primary": false, "system_prompt": "You audit repositories.",
+	})
+	require.Equal(t, http.StatusOK, seed.Code, seed.Body.String())
+
+	raw, _ := json.Marshal(map[string]any{"system_prompt": "You audit everything."})
+	rr := httptest.NewRecorder()
+	req := withID(httptest.NewRequest(http.MethodPut, "/api/agents/primary/repo-auditor", bytes.NewReader(raw)), "repo-auditor")
+	s.handlePrimaryAgentUpdate(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	stored := configSectionRow(t, s.Env.SQL, "agents")
+	require.Contains(t, stored, `"repo-auditor":{"primary":false,"system_prompt":"You audit everything."}`)
+	require.NotContains(t, stored, "You audit repositories.")
+
+	// A primary's update refuses the body fields.
+	raw, _ = json.Marshal(map[string]any{"system_prompt": "p"})
+	rr = httptest.NewRecorder()
+	req = withID(httptest.NewRequest(http.MethodPut, "/api/agents/primary/main", bytes.NewReader(raw)), "main")
+	s.handlePrimaryAgentUpdate(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "carries no subagent body")
+}
+
 func TestPrimaryAgentCreateRejectsDuplicateID(t *testing.T) {
 	s, _ := crudServer(t)
 	rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]string{
@@ -352,7 +440,7 @@ func TestPrimaryAgentCreateRejectsBuiltInSubagentTypeIDs(t *testing.T) {
 			s, _ := crudServer(t)
 			rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]string{"id": id})
 			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
-			require.Contains(t, rr.Body.String(), "names a built-in subagent type, not a primary agent")
+			require.Contains(t, rr.Body.String(), "names a built-in subagent type")
 			require.NotContains(t, configSectionRow(t, s.Env.SQL, "agents"), `"`+id+`":`,
 				"a refused create writes no definition")
 		})

@@ -2806,8 +2806,18 @@ export const forebrainApi = {
     return postJson<PrimaryAgentsResponse, { agentId: string }>('/agents/primary/switch', { agentId })
   },
 
-  createPrimaryAgent(body: { id: string; name?: string; description?: string; workspaceRoot?: string }) {
-    return postJson<PrimaryAgentsResponse, { id: string; name?: string; description?: string; workspaceRoot?: string }>('/agents/primary', body)
+  /** The unified definition create (P3): primary absent or true is a primary
+   *  agent; primary false is an install-wide subagent definition, which
+   *  carries the prompt it runs on. */
+  createPrimaryAgent(body: {
+    id: string
+    name?: string
+    description?: string
+    workspaceRoot?: string
+    primary?: boolean
+    systemPrompt?: string
+  }) {
+    return postJson<PrimaryAgentsResponse, typeof body>('/agents/primary', body)
   },
 
   /**

@@ -205,3 +205,117 @@ describe('App primary-agent pencil dialog', () => {
     wrapper.unmount()
   })
 })
+
+describe('App unified agent create dialog', () => {
+  beforeAll(() => setLocale('zh'))
+
+  // The shell is attached to the document so the teleported dialog is
+  // reachable, which is exactly why it must unmount even when an assertion
+  // throws: a shell left behind drives the next test's clicks, and the next
+  // test's spies answer them.
+  let shell: VueWrapper | null = null
+
+  beforeEach(() => {
+    shell = null
+    const { activeId, records } = usePrimaryAgents()
+    activeId.value = ''
+    records.value = []
+    vi.stubGlobal('matchMedia', () => ({
+      matches: false,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+  })
+
+  afterEach(() => {
+    shell?.unmount()
+    shell = null
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  const mountShellWithModal = async (): Promise<VueWrapper> => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+    shell = mount(App, {
+      attachTo: document.body,
+      global: { plugins: [router], directives: { tip }, stubs: { ChatDrawer: true } },
+    })
+    await flushPromises()
+    return shell
+  }
+
+  async function openDialog(wrapper: VueWrapper): Promise<void> {
+    await wrapper.find('[aria-label="主代理"]').trigger('click')
+    const create = document.querySelector('[data-testid="new-agent"]')
+    expect(create).not.toBeNull()
+    create!.dispatchEvent(new Event('click', { bubbles: true }))
+    await flushPromises()
+  }
+
+  it('creates a primary agent by default and switches to it', async () => {
+    vi.spyOn(forebrainApi, 'primaryAgents').mockResolvedValue(roster('main') as PrimaryAgentsResponse)
+    vi.spyOn(forebrainApi, 'primaryAgentSwitch').mockResolvedValue(roster('helper') as PrimaryAgentsResponse)
+    const create = vi.spyOn(forebrainApi, 'createPrimaryAgent').mockResolvedValue(roster('helper') as PrimaryAgentsResponse)
+    const wrapper = await mountShellWithModal()
+    await vi.waitFor(() => expect(usePrimaryAgents().activeId.value).toBe('main'))
+
+    await openDialog(wrapper)
+    const name = document.querySelector('[data-testid="new-agent-name"]') as HTMLInputElement
+    await new DOMWrapper(name).setValue('helper')
+    // The switch is on: a primary agent is what the dialog has always made.
+    await new DOMWrapper(document.querySelector('[data-testid="new-agent-create"]') as HTMLElement).trigger('click')
+    await flushPromises()
+
+    expect(create).toHaveBeenCalledWith({ id: 'helper' })
+  })
+
+  it('creates a subagent definition with its prompt and switches nowhere', async () => {
+    vi.spyOn(forebrainApi, 'primaryAgents').mockResolvedValue(roster('main') as PrimaryAgentsResponse)
+    const create = vi.spyOn(forebrainApi, 'createPrimaryAgent').mockResolvedValue(roster('main') as PrimaryAgentsResponse)
+    const switchSpy = vi.spyOn(forebrainApi, 'primaryAgentSwitch')
+    const wrapper = await mountShellWithModal()
+    await vi.waitFor(() => expect(usePrimaryAgents().activeId.value).toBe('main'))
+
+    await openDialog(wrapper)
+    // The switch is the library's own button: a click toggles it and emits
+    // the update the v-model carries.
+    await new DOMWrapper(document.querySelector('[data-testid="new-agent-primary"]')).trigger('click')
+    await flushPromises()
+    const prompt = document.querySelector('[data-testid="new-agent-system-prompt"]') as HTMLTextAreaElement
+    expect(prompt).not.toBeNull()
+    await new DOMWrapper(prompt).setValue('You audit repositories.')
+    const name = document.querySelector('[data-testid="new-agent-name"]') as HTMLInputElement
+    await new DOMWrapper(name).setValue('repo-auditor')
+    await new DOMWrapper(document.querySelector('[data-testid="new-agent-create"]') as HTMLElement).trigger('click')
+    await flushPromises()
+
+    expect(create).toHaveBeenCalledWith({ id: 'repo-auditor', primary: false, systemPrompt: 'You audit repositories.' })
+    // A subagent definition joins no tenant switch: the shell stays on main.
+    expect(switchSpy).not.toHaveBeenCalled()
+  })
+
+  it('refuses a subagent definition without its prompt before calling', async () => {
+    vi.spyOn(forebrainApi, 'primaryAgents').mockResolvedValue(roster('main') as PrimaryAgentsResponse)
+    const create = vi.spyOn(forebrainApi, 'createPrimaryAgent')
+    const wrapper = await mountShellWithModal()
+    await vi.waitFor(() => expect(usePrimaryAgents().activeId.value).toBe('main'))
+
+    await openDialog(wrapper)
+    // The switch is the library's own button: a click toggles it and emits
+    // the update the v-model carries.
+    await new DOMWrapper(document.querySelector('[data-testid="new-agent-primary"]')).trigger('click')
+    await flushPromises()
+    const name = document.querySelector('[data-testid="new-agent-name"]') as HTMLInputElement
+    await new DOMWrapper(name).setValue('repo-auditor')
+    await new DOMWrapper(document.querySelector('[data-testid="new-agent-create"]') as HTMLElement).trigger('click')
+    await flushPromises()
+
+    expect(create).not.toHaveBeenCalled()
+    expect((document.querySelector('[data-testid="new-agent-error"]') as HTMLElement).textContent).toContain('子代理定义需要系统提示词')
+  })
+})

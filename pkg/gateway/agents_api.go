@@ -525,6 +525,29 @@ type primaryAgentWriteRequest struct {
 	Name          string `json:"name"`
 	Description   string `json:"description"`
 	WorkspaceRoot string `json:"workspace_root"`
+	// The unified definition's role decision and the subagent body (P3):
+	// Primary absent means a primary agent — every caller before the unified
+	// form sent none. The body fields belong to the subagent role alone; a
+	// create that names them beside primary:true is refused, and an update
+	// judges them by the definition's stored role.
+	Primary         *bool    `json:"primary"`
+	SystemPrompt    string   `json:"system_prompt"`
+	Model           string   `json:"model"`
+	ReasoningEffort string   `json:"reasoning_effort"`
+	Tools           string   `json:"tools"`
+	AllowedTools    []string `json:"allowed_tools"`
+	Continuable     *bool    `json:"continuable"`
+}
+
+// carriesSubagentBody reports whether the request carries any field of the
+// subagent role, which is what a write refuses when the role is the primary's.
+func (req *primaryAgentWriteRequest) carriesSubagentBody() bool {
+	return strings.TrimSpace(req.SystemPrompt) != "" ||
+		strings.TrimSpace(req.Model) != "" ||
+		strings.TrimSpace(req.ReasoningEffort) != "" ||
+		strings.TrimSpace(req.Tools) != "" ||
+		len(req.AllowedTools) > 0 ||
+		req.Continuable != nil
 }
 
 func decodePrimaryAgentBody(w http.ResponseWriter, r *http.Request, req *primaryAgentWriteRequest) bool {
@@ -563,8 +586,27 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 	// roles, by the one rule the shared registry's create uses (P3 ruling #8);
 	// the /config panel's creation flow refuses them too (plan 313).
 	if config.IsReservedDefinitionID(id) {
-		http.Error(w, fmt.Sprintf("%q names a built-in subagent type, not a primary agent; choose a different id", id), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("%q names a built-in subagent type; choose a different id", id), http.StatusBadRequest)
 		return
+	}
+	// The role is the create's one decision (P3): absent or true is a primary
+	// agent — every caller before the unified form sent none — and false is an
+	// install-wide subagent definition, which carries the body it runs on and
+	// none of a primary agent's workspace.
+	primary := req.Primary == nil || *req.Primary
+	if primary && req.carriesSubagentBody() {
+		http.Error(w, "a primary agent carries no subagent body; create it as a subagent definition instead", http.StatusBadRequest)
+		return
+	}
+	if !primary {
+		if strings.TrimSpace(req.SystemPrompt) == "" {
+			http.Error(w, fmt.Sprintf("agents.definitions.%s: system_prompt required", id), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.WorkspaceRoot) != "" {
+			http.Error(w, "a subagent definition has no workspace root of its own", http.StatusBadRequest)
+			return
+		}
 	}
 	// The write runs as one agents-section read-modify-write in the state
 	// database (plan 188 W6); written carries the section as stored, so the
@@ -578,11 +620,36 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 		if _, exists := cfg.Agents.Definitions[id]; exists {
 			return configConflict("agent id already exists")
 		}
-		cfg.Agents.Definitions[id] = config.AgentDefinition{
-			Primary:     true,
+		definition := config.AgentDefinition{
 			DisplayName: strings.TrimSpace(req.Name),
 			Description: strings.TrimSpace(req.Description),
 		}
+		if primary {
+			definition.Primary = true
+		} else {
+			// The subagent role's body (P3 ruling #16): what the subagent
+			// runs on. The model is stored as the row id it names when one
+			// resolves, and left for the loader's verdict otherwise — the
+			// same treatment every stored reference gets.
+			definition.SystemPrompt = strings.TrimSpace(req.SystemPrompt)
+			definition.ReasoningEffort = strings.TrimSpace(req.ReasoningEffort)
+			definition.Tools = strings.TrimSpace(req.Tools)
+			if definition.Tools == config.SubagentToolsPick {
+				definition.AllowedTools = req.AllowedTools
+			}
+			if req.Continuable != nil {
+				definition.Continuable = req.Continuable
+			}
+			if ref := strings.TrimSpace(req.Model); ref != "" {
+				if persisted, err := s.persistedConfig(r.Context()); err == nil {
+					if row, ok := config.ResolveModelRef(&persisted, "main", ref); ok {
+						ref = strings.TrimSpace(row.ID)
+					}
+				}
+				definition.Model = ref
+			}
+		}
+		cfg.Agents.Definitions[id] = definition
 		if err := s.validateLoadedRootForAgents(r.Context(), cfg); err != nil {
 			return configBadRequest("%v", err)
 		}
@@ -716,10 +783,40 @@ func (s *Server) handlePrimaryAgentUpdate(w http.ResponseWriter, r *http.Request
 		if !exists {
 			return &configSectionError{status: http.StatusNotFound, msg: "agent not found"}
 		}
-		// The ID is the tenant key and never moves; only the presentation
-		// fields are editable.
-		def.DisplayName = strings.TrimSpace(req.Name)
-		def.Description = strings.TrimSpace(req.Description)
+		// The ID is the tenant key and never moves, and neither does the role
+		// (P3): Primary was the create's decision, so this write judges the
+		// request by the role the stored definition plays. A primary keeps
+		// today's presentation-only edit; a subagent definition takes its
+		// body whole — the same shape the shared routes write — and keeps its
+		// display name, order and role.
+		if def.Primary {
+			if req.carriesSubagentBody() {
+				return configBadRequest("a primary agent carries no subagent body; its definition is not a subagent definition")
+			}
+			def.DisplayName = strings.TrimSpace(req.Name)
+			def.Description = strings.TrimSpace(req.Description)
+		} else {
+			def.Description = strings.TrimSpace(req.Description)
+			def.SystemPrompt = strings.TrimSpace(req.SystemPrompt)
+			def.ReasoningEffort = strings.TrimSpace(req.ReasoningEffort)
+			def.Tools = strings.TrimSpace(req.Tools)
+			if def.Tools == config.SubagentToolsPick {
+				def.AllowedTools = req.AllowedTools
+			} else {
+				def.AllowedTools = nil
+			}
+			def.Continuable = req.Continuable
+			if ref := strings.TrimSpace(req.Model); ref != "" {
+				if persisted, err := s.persistedConfig(r.Context()); err == nil {
+					if row, ok := config.ResolveModelRef(&persisted, "main", ref); ok {
+						ref = strings.TrimSpace(row.ID)
+					}
+				}
+				def.Model = ref
+			} else {
+				def.Model = ""
+			}
+		}
 		cfg.Agents.Definitions[id] = def
 		if err := s.validateLoadedRootForAgents(r.Context(), cfg); err != nil {
 			return configBadRequest("%v", err)

@@ -257,7 +257,20 @@
           @keyup.enter="submitNewAgent"
         />
       </label>
-      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('agents.newHint') }}</p>
+      <label class="mt-1 flex items-center gap-2 text-[12px] text-[var(--forebrain-text)]">
+        <SwitchComponent v-model="newAgentPrimary" data-testid="new-agent-primary" />
+        <span>{{ t('agents.newPrimaryLabel') }}</span>
+      </label>
+      <label v-if="!newAgentPrimary" class="mt-1 block">
+        <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('agents.newSystemPrompt') }}</span>
+        <textarea
+          v-model="newAgentSystemPrompt"
+          rows="3"
+          class="forebrain-field mt-1 w-full font-mono"
+          data-testid="new-agent-system-prompt"
+        />
+      </label>
+      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ newAgentPrimary ? t('agents.newHint') : t('agents.newSubagentHint') }}</p>
       <p v-if="newAgentError" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="new-agent-error">{{ newAgentError }}</p>
       <template #footer>
         <Button type="button" class="forebrain-btn forebrain-btn-ghost h-auto text-xs" @click="closeNewAgent">{{ t('common.cancel') }}</Button>
@@ -362,6 +375,7 @@ import { computed, defineComponent, nextTick, onMounted, onUnmounted, ref, watch
 import { useRoute, useRouter } from 'vue-router'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { Input } from '@repo/shadcn-vue/components/ui/input'
+import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import ChatDrawer from '@/components/ChatDrawer.vue'
 import AppTooltip from '@/components/common/AppTooltip.vue'
 import BrandMark from '@/components/BrandMark.vue'
@@ -434,6 +448,11 @@ const newAgentOpen = ref(false)
 const newAgentName = ref('')
 const newAgentError = ref('')
 const newAgentBusy = ref(false)
+/** The create's one role decision (P3): on is a primary agent — every
+ *  caller before the unified form created only those — and off is an
+ *  install-wide subagent definition, which carries the prompt it runs on. */
+const newAgentPrimary = ref(true)
+const newAgentSystemPrompt = ref('')
 /** The name field is the library's Input, so the element is its `$el`. */
 const newAgentInputRef = ref<{ $el: unknown } | null>(null)
 const deleteTarget = ref('')
@@ -503,10 +522,25 @@ function createAgentErrorText(cause: unknown): string {
  */
 async function submitNewAgent() {
   if (newAgentBusy.value || !newAgentValid.value) return
+  if (!newAgentPrimary.value && newAgentSystemPrompt.value.trim() === '') {
+    newAgentError.value = t('agents.newSystemPromptRequired')
+    return
+  }
   const id = newAgentName.value.trim()
   newAgentBusy.value = true
   newAgentError.value = ''
   try {
+    if (!newAgentPrimary.value) {
+      // A subagent definition joins no tenant switch: it is the install's
+      // to dispatch, and the Settings → Subagents page is where it is edited.
+      await forebrainApi.createPrimaryAgent({
+        id,
+        primary: false,
+        systemPrompt: newAgentSystemPrompt.value.trim(),
+      })
+      closeNewAgent()
+      return
+    }
     await forebrainApi.createPrimaryAgent({ id })
     // The open conversation belonged to the agent being left.
     if (route.query.session) {
