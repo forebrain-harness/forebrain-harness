@@ -128,6 +128,12 @@ type SubagentContinueInput struct {
 	TaskID  string `json:"task_id,omitempty" jsonschema:"description=Async subagent task id returned by subagent_send or subagent_run."`
 	RunID   string `json:"run_id,omitempty" jsonschema:"description=Child run id when available."`
 	Message string `json:"message" jsonschema:"description=Self-contained follow-up instructions for the selected subagent."`
+	// Model is fixed text for the same reason as SubagentInput.Model: it names
+	// no model and no tool, so the definition never moves with the table.
+	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model to run this continuation on. Omit to keep the model the subagent already runs on."`
+	// ReasoningEffort is fixed text; see SubagentInput.ReasoningEffort. The
+	// continuation keeps its current level when this is empty (owner 2026-11-20).
+	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this continuation, one of the levels the subagent's model supports. Omit to keep the level the subagent already runs at."`
 }
 
 type SubagentLookupInput struct {

@@ -9413,6 +9413,22 @@ func TestSubagentContinueRePinsEffort(t *testing.T) {
 	}
 }
 
+func TestSubagentContinueModelArgumentDescriptionsAreFixedText(t *testing.T) {
+	typ := reflect.TypeOf(SubagentContinueInput{})
+	for field, want := range map[string]string{
+		"Model":           "Optional id of a configured model to run this continuation on. Omit to keep the model the subagent already runs on.",
+		"ReasoningEffort": "Optional thinking level for this continuation, one of the levels the subagent's model supports. Omit to keep the level the subagent already runs at.",
+	} {
+		f, ok := typ.FieldByName(field)
+		if !ok {
+			t.Fatalf("SubagentContinueInput has no %s field", field)
+		}
+		if tag, _ := f.Tag.Lookup("jsonschema_description"); tag != want {
+			t.Fatalf("SubagentContinueInput.%s description =\n%q\nwant the fixed text", field, tag)
+		}
+	}
+}
+
 // A dispatch admitted as the conversation's current row (switch off) keeps
 // that authorization for its whole life: the continuation rereads the row
 // for live data, not to re-judge a choice the user already made (plan 334).
