@@ -6041,36 +6041,58 @@ func TestDeliverablesGroupDedupesRows(t *testing.T) {
 	}
 }
 
-// TestDeliverablesGroupDedupKeyIsArtifactID pins the dedup key the web uses:
-// rows carrying an artifact id are identified by it, so two
-// different-content versions of one path — same title, same path, same size
-// — are both kept, while the same id twice is one row. A row without an id
-// (a legacy replayed card) still falls back to the composite key.
-func TestDeliverablesGroupDedupKeyIsArtifactID(t *testing.T) {
+// TestDeliverablesGroupOneRowPerFile pins the group's key: one row per file,
+// including when a turn presented the same path twice. present_files records a
+// new artifact row per presentation, so two versions of one path carry two
+// ids — keying by id drew the file twice (the owner's screenshot). The later
+// row's content holds the first presentation's place.
+func TestDeliverablesGroupOneRowPerFile(t *testing.T) {
 	v1 := tool.Deliverable{ID: "art-1", Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
-	v2 := tool.Deliverable{ID: "art-2", Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
+	v2 := tool.Deliverable{ID: "art-2", Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 4096}
+	other := tool.Deliverable{ID: "art-3", Title: "logo.png", Name: "logo.png", Kind: "image", RelPath: "assets/logo.png", Size: 521}
 	r := &Reducer{}
-	r.Reduce(deliverableToolMessage([]tool.Deliverable{v1, v2, v1}, "completed", ""))
+	r.Reduce(deliverableToolMessage([]tool.Deliverable{v1, other, v2}, "completed", ""))
 	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
 	rows := ev.Frames[0].Deliverables
-	if len(rows) != 2 || rows[0].ID != "art-1" || rows[1].ID != "art-2" {
-		t.Fatalf("group rows = %#v, want both versions once each, keyed by id", rows)
+	if len(rows) != 2 {
+		t.Fatalf("group rows = %#v, want one row per file", rows)
 	}
-	// A legacy row without an id dedups against its composite as before.
-	legacy := tool.Deliverable{Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
+	if rows[0].ID != "art-2" || rows[0].Size != 4096 || rows[1].ID != "art-3" {
+		t.Fatalf("group = %#v, want the latest version of out/q3.md in its first place", rows)
+	}
+	// The same row reaching the reducer twice (a republished step) is one row.
 	r2 := &Reducer{}
-	r2.Reduce(deliverableToolMessage([]tool.Deliverable{legacy, legacy}, "completed", ""))
+	r2.Reduce(deliverableToolMessage([]tool.Deliverable{v1, v1}, "completed", ""))
 	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
-	if rows := ev.Frames[0].Deliverables; len(rows) != 1 {
-		t.Fatalf("legacy composite rows = %#v, want one", rows)
+	if rows := ev.Frames[0].Deliverables; len(rows) != 1 || rows[0].ID != "art-1" {
+		t.Fatalf("republished rows = %#v, want one", rows)
+	}
+	// A legacy row without an id keys by its path too, and the later version
+	// wins even when its size and title differ from the first.
+	legacy := tool.Deliverable{Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
+	legacyLater := tool.Deliverable{Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 4096}
+	r3 := &Reducer{}
+	r3.Reduce(deliverableToolMessage([]tool.Deliverable{legacy, legacyLater}, "completed", ""))
+	ev = r3.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	if rows := ev.Frames[0].Deliverables; len(rows) != 1 || rows[0].Size != 4096 {
+		t.Fatalf("legacy path rows = %#v, want one holding the later version", rows)
+	}
+	// One file name in two directories is two files.
+	first := tool.Deliverable{ID: "art-4", Title: "report.md", Name: "report.md", Kind: "markdown", RelPath: "reports/report.md"}
+	second := tool.Deliverable{ID: "art-5", Title: "report.md", Name: "report.md", Kind: "markdown", RelPath: "archive/report.md"}
+	r4 := &Reducer{}
+	r4.Reduce(deliverableToolMessage([]tool.Deliverable{first, second}, "completed", ""))
+	ev = r4.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	if rows := ev.Frames[0].Deliverables; len(rows) != 2 {
+		t.Fatalf("one name in two directories = %#v, want two rows", rows)
 	}
 }
 
 // TestDeliverablesGroupUnionsFrameArtifacts pins the turn close's union: the
 // closing run-end's artifact rows join what the present_files steps showed
-// live, deduped by artifact id — a file only the engine's turn-end top-up
-// registered arrives in the frame's rows and still appears, and a file that
-// is both presented and framed shows once, in its presented place.
+// live, one row per file — a file only the batch collection registered arrives
+// in the frame's rows and still appears, and a file that is both presented and
+// framed shows once, in its presented place.
 func TestDeliverablesGroupUnionsFrameArtifacts(t *testing.T) {
 	presented := tool.Deliverable{ID: "art-1", Title: "2026 Q3 review", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
 	r := &Reducer{}
@@ -6649,6 +6671,31 @@ func TestReplayKeepsOneGroupPerTurnAcrossRuns(t *testing.T) {
 	// The same file presented by both runs is one row, not two.
 	if len(frames[group].Deliverables) != 1 {
 		t.Fatalf("group rows = %#v", frames[group].Deliverables)
+	}
+}
+
+// TestReplayFrameDeliverablesOneRowPerFile pins the replay half of the group's
+// key: a terminal event carrying two presented versions of one path — what a
+// turn that presented a file twice stored — replays as one row, the later
+// version's, in the first place, not two.
+func TestReplayFrameDeliverablesOneRowPerFile(t *testing.T) {
+	payload, err := json.Marshal(event.TurnCompletedPayload{RunArtifacts: event.RunArtifacts{Artifacts: []event.Artifact{
+		{ID: "art-1", Name: "README.md", Title: "plans/README.md", Kind: "markdown", RelPath: "plans/README.md", Size: 869854},
+		{ID: "art-2", Name: "README.md", Title: "plans/README.md", Kind: "markdown", RelPath: "plans/README.md", Size: 871486},
+		{ID: "art-3", Name: "logo.png", Title: "logo.png", Kind: "image", RelPath: "assets/logo.png", Size: 521},
+	}}})
+	if err != nil {
+		t.Fatalf("marshal turn-completed payload: %v", err)
+	}
+	rows := replayFrameDeliverables([]event.RunEvent{{Type: event.RunEventTurnCompleted, RunID: "run-1", Payload: payload}})["run-1"]
+	if len(rows) != 2 {
+		t.Fatalf("replayed frame rows = %#v, want one row per file", rows)
+	}
+	if rows[0].ID != "art-2" || rows[0].Size != 871486 {
+		t.Fatalf("replayed rows = %#v, want the later version of plans/README.md first", rows)
+	}
+	if rows[1].ID != "art-3" {
+		t.Fatalf("replayed rows = %#v, want the other file after it", rows)
 	}
 }
 

@@ -138,7 +138,7 @@ describe('the delivery group of one turn', () => {
     expect(undefinedRoot.map((row) => row.id)).toEqual(['p1'])
   })
 
-  it('merges every source by id, each file once', () => {
+  it('merges every source by path, each file once', () => {
     // The same two files also arrive on the run's end frame and in the
     // conversation's list, plus one only the frame knew about.
     const frame = runFrameArtifacts({
@@ -157,6 +157,86 @@ describe('the delivery group of one turn', () => {
     expect(group.map((row) => row.id)).toEqual(['a1', 'a2', 'a9'])
   })
 
+  it('draws one row per file: a path presented twice holds its later version', () => {
+    // `present_files` records a new version row on every presentation
+    // (pkg/tool/artifacts.go), so a turn that presented plans/README.md twice
+    // carries two ids for one file. Keying the group by id drew it twice; the
+    // file is one row, in its first place, holding the later version's content.
+    const earlier = artifactsOfPresentFiles({
+      presented: [{ id: 'art-1', name: 'README.md', relPath: 'plans/README.md', title: 'plans/README.md', kind: 'markdown', size: 869854 }],
+    }, 'session-1')
+    const other = artifactsOfPresentFiles({
+      presented: [{ id: 'art-3', name: 'logo.png', relPath: 'assets/logo.png', kind: 'image', size: 521 }],
+    }, 'session-1')
+    const later = artifactsOfPresentFiles({
+      presented: [{ id: 'art-2', name: 'README.md', relPath: 'plans/README.md', title: 'plans/README.md', kind: 'markdown', size: 871486 }],
+    }, 'session-1')
+
+    const group = turnDeliverables({ presented: [...earlier, ...other, ...later], plan: [], frame: [], fallback: [] }, '/Users/me/projects/audit')
+
+    expect(group.map((row) => row.id)).toEqual(['art-2', 'art-3'])
+    expect(group[0].size).toBe(871486)
+  })
+
+  it('merges one path across every source, the latest version winning the row', () => {
+    const presented = artifactsOfPresentFiles({
+      presented: [{ id: 'art-1', name: 'a.md', relPath: 'out/a.md', kind: 'markdown', size: 10 }],
+    }, 'session-1')
+    const frame = runFrameArtifacts({
+      artifacts: [{ id: 'art-2', sessionId: 'session-1', path: '/Users/me/projects/audit/out/a.md', relPath: 'out/a.md', name: 'a.md', kind: 'markdown', size: 20 }],
+    })
+    const fallback = [artifactView('session-1', { id: 'art-3', name: 'a.md', relPath: 'out/a.md', kind: 'markdown', size: 30 })!]
+
+    const group = turnDeliverables({ presented, plan: [], frame, fallback }, '/Users/me/projects/audit')
+
+    expect(group.map((row) => row.id)).toEqual(['art-3'])
+    expect(group[0].size).toBe(30)
+  })
+
+  it('keeps the same file name in two directories as two files', () => {
+    const rows = artifactsOfPresentFiles({
+      presented: [
+        { id: 'r1', name: 'report.md', relPath: 'reports/report.md', kind: 'markdown', size: 10 },
+        { id: 'r2', name: 'report.md', relPath: 'archive/report.md', kind: 'markdown', size: 20 },
+      ],
+    }, 'session-1')
+
+    const group = turnDeliverables({ presented: rows, plan: [], frame: [], fallback: [] }, '/Users/me/projects/audit')
+
+    expect(group.map((row) => row.relPath)).toEqual(['reports/report.md', 'archive/report.md'])
+  })
+
+  it('merges a presented row with its frame row when the root is unknown', () => {
+    // A session whose project root is unknown is reachable (a conversation
+    // with no project): displayPathOf cannot relativize an absolute path
+    // without a root, so the frame row labels itself by its absolute path
+    // while the presented row keeps its relPath. Keying by relPath first keeps
+    // one row where keying by the drawn label would split it in two.
+    const presented = artifactsOfPresentFiles({
+      presented: [{ id: 'a1', name: 'report.md', relPath: 'out/report.md', kind: 'markdown', size: 10 }],
+    }, 'session-1')
+    const frame = runFrameArtifacts({
+      artifacts: [{ id: 'a1', sessionId: 'session-1', path: '/Users/me/projects/audit/out/report.md', relPath: 'out/report.md', name: 'report.md', kind: 'markdown', size: 10 }],
+    })
+
+    const group = turnDeliverables({ presented, plan: [], frame, fallback: [] })
+
+    expect(group.map((row) => row.id)).toEqual(['a1'])
+  })
+
+  it('merges two versions of one relPath when the root is unknown', () => {
+    const presented = artifactsOfPresentFiles({
+      presented: [
+        { id: 'a1', name: 'report.md', relPath: 'out/report.md', kind: 'markdown', size: 10 },
+        { id: 'a2', name: 'report.md', relPath: 'out/report.md', kind: 'markdown', size: 20 },
+      ],
+    }, 'session-1')
+
+    const group = turnDeliverables({ presented, plan: [], frame: [], fallback: [] })
+
+    expect(group.map((row) => row.id)).toEqual(['a2'])
+  })
+
   it('keeps the presented rows of a reloaded turn, whose frame is gone', () => {
     // A reload rebuilds the card from the same structured rows and has no end
     // frame left: the group is still the presented files, once.
@@ -168,8 +248,13 @@ describe('the delivery group of one turn', () => {
   })
 
   it('puts the kept plan first, once, even when the frame lists it too', () => {
+    // The production frame's plan row carries the plan's path (the artifact
+    // was registered with Path, pkg/tool/session_tools.go), which is the same
+    // absolute-or-envelope path planArtifactOf hands the plan row: the two
+    // rows name one file and merge. Without the path the frame row would be
+    // keyed by its bare name and split into a second row.
     const frame = runFrameArtifacts({
-      artifacts: [{ id: 'p1', sessionId: 'session-1', runId: 'run-1', name: '年度审计计划.md', kind: 'markdown', preview: 'markdown', size: 9216, origin: 'plan' }],
+      artifacts: [{ id: 'p1', sessionId: 'session-1', runId: 'run-1', path: 'plans/年度审计计划.md', name: '年度审计计划.md', kind: 'markdown', preview: 'markdown', size: 9216, origin: 'plan' }],
     })
 
     const group = turnDeliverables({ presented: [], plan: plan ? [plan] : [], frame, fallback: [] })

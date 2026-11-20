@@ -1800,7 +1800,8 @@ const artifactsByRun = computed(() => {
  * A7, owner 2026-10-27): the kept plan, the files each `present_files` card of
  * the turn named, what the run's end frame listed, and — for a turn whose
  * frame is gone — what the conversation's artifact list holds for its run,
- * merged by id. The cards themselves draw no files: this group is the one
+ * merged by file path (one row per file, the later version's content in the
+ * first place). The cards themselves draw no files: this group is the one
  * place they are met, under the turn's last words.
  */
 function deliverablesOf(msg: ChatMessage): ArtifactView[] {

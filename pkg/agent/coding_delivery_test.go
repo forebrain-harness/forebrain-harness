@@ -17,14 +17,19 @@ func TestCodingDeliveryPromptNamesTheDeliveryTool(t *testing.T) {
 // TestCodingDeliveryPromptCoversTheCompletenessRule pins the owner's
 // completeness ruling (2026-11-18): every file the turn touched is a
 // deliverable — no kind excluded — with the boundaries that keep the set
-// honest (not another agent's work, deleted files named in prose, turns
-// that changed nothing answer directly).
+// honest (not the work of an agent this turn did not dispatch, deleted files
+// named in prose, turns that changed nothing answer directly), and the
+// ownership rule a dispatched subagent needs (its changes are the turn's, a
+// worktree checkout included, located under that checkout's own directory).
 func TestCodingDeliveryPromptCoversTheCompletenessRule(t *testing.T) {
 	for _, want := range []string{
 		"every file this turn created or modified",
 		"No kind of file is excluded",
 		"A turn that changed no files answers directly",
-		"another agent's concurrent changes",
+		"agents you did not dispatch",
+		"its changes are this turn's changes",
+		"including files inside a worktree",
+		"relative to that checkout",
 		"A deleted file cannot be presented",
 		"deliver exactly those",
 		"When you judge the turn's work complete",

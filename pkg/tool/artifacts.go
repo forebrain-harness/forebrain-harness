@@ -324,9 +324,12 @@ func newPresentFilesTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 // deliverables group, a batch task's end notification — draws from these rows
 // instead of re-reading the JSON the model was handed.
 type Deliverable struct {
-	// ID is the artifact row's id, the identity both surfaces dedupe a turn's
-	// group by. Empty on rows a transcript predating the id carried (replayed
-	// legacy cards) — those fall back to the composite key.
+	// ID is the artifact row's id: the identity of this version of the file,
+	// not of the file. A turn's deliverables group keys by the path it draws
+	// — present_files records a new row each time a path is presented, so one
+	// file delivered twice carries two ids — and the id travels with the row
+	// as the version it holds. Empty on rows a transcript predating the id
+	// carried (replayed legacy cards).
 	ID      string `json:"id,omitempty"`
 	Title   string `json:"title,omitempty"`
 	Name    string `json:"name,omitempty"`

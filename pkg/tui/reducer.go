@@ -436,46 +436,61 @@ type compactionCard struct {
 
 const maxLiveToolOutputBytes = 256 * 1024
 
-// appendDeliverables adds rows to a turn's list, skipping the ones already
-// there: a step that is republished — the same completion reaching the reducer
-// twice — and the same file presented twice must not double a row in the
-// group. Two rows that both carry an artifact id are identified by it (two
-// different-content versions of one path are both kept, the way the web keeps
-// them); as soon as either side predates the id — a legacy replayed card —
-// the pair falls back to what a reader sees on it: title, path and size.
+// appendDeliverables adds rows to a turn's group, one row per file: a row whose
+// path the group already holds replaces that row in place — the later version's
+// content, the first presentation's position — and a path it does not hold is
+// appended. A step republished (the same completion reaching the reducer twice)
+// therefore cannot double a row, and neither can one file presented twice. A
+// row with no path at all is kept as it arrives: it names no file identity to
+// merge by, and the renderer drops a row it cannot label.
 func appendDeliverables(existing, rows []tool.Deliverable) []tool.Deliverable {
 	for _, row := range rows {
-		duplicate := false
-		for _, have := range existing {
-			if row.ID != "" && have.ID != "" {
-				if have.ID == row.ID {
-					duplicate = true
-					break
-				}
-				continue
-			}
-			if have.RelPath == row.RelPath && have.Size == row.Size && have.Title == row.Title {
-				duplicate = true
+		key := deliverablePathKey(row)
+		if key == "" {
+			existing = append(existing, row)
+			continue
+		}
+		at := -1
+		for i := range existing {
+			if deliverablePathKey(existing[i]) == key {
+				at = i
 				break
 			}
 		}
-		if !duplicate {
+		if at < 0 {
 			existing = append(existing, row)
+			continue
 		}
+		existing[at] = row
 	}
 	return existing
 }
 
+// deliverablePathKey is the file identity a deliverables group dedupes by: the
+// path the group draws (RelPath, falling back to Name), cleaned and slashed.
+// The artifact id identifies a version row — present_files records a new row
+// each time a path is presented — so it cannot key the group.
+func deliverablePathKey(d tool.Deliverable) string {
+	p := strings.TrimSpace(d.RelPath)
+	if p == "" {
+		p = strings.TrimSpace(d.Name)
+	}
+	if p == "" {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Clean(p))
+}
+
 // frameDeliverable converts one run-end artifact row into the deliverable
-// shape the group draws, carrying the row's id so the group dedupes by it —
-// a top-up row and a presented row for the same file are one entry, the way
-// the web merges them. The label rule is the path (owner 2026-11-19): a row
-// the frame gave a relative path keeps it, and a row that only carries its
-// absolute path keeps that. The renderer drops rows outside the project at
-// the group's one entry (filterDeliverablesWithinProject) and relativizes an
-// in-project absolute path at draw time, so every painted row locates its
-// file inside the project — being inside it is a deliverable's necessary
-// condition.
+// shape the group draws. The group keys by the path it draws, so a framed row
+// and a presented row for the same file are one entry, the way the web merges
+// them; the id travels with the row as the version it holds. The label rule is
+// the path (owner 2026-11-19): a row the frame gave a relative path keeps it,
+// and a row that only carries its absolute path keeps that. The renderer drops
+// rows outside the project at the group's one entry
+// (filterDeliverablesWithinProject) and relativizes an in-project absolute path
+// at draw time, so every painted row locates its file inside the project —
+// being inside it is a deliverable's necessary condition.
 func frameDeliverable(row event.Artifact) tool.Deliverable {
 	return tool.Deliverable{
 		ID:      row.ID,
@@ -1646,12 +1661,14 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		// card deduplication on something that can repeat.
 		//
 		// The group is the union of what the present_files steps showed live
-		// with the run-end frame's artifact rows, deduped by artifact id:
-		// a file only the engine's turn-end top-up registered arrives in the
-		// frame's rows, and the web's group unions the same two sources —
-		// order is pinned here as presented first, frame-only after (the
-		// web's plan→presented→frame order differs slightly; content parity
-		// is the contract, not order).
+		// with the run-end frame's artifact rows, one row per file: a file
+		// both sources know is one row, in its presented place, holding the
+		// later row's content. A file only the frame knows about — a batch
+		// task's collected output, registered without a present_files call —
+		// arrives in the frame's rows, and the web's group unions the same
+		// two sources — order is pinned here as presented first, frame-only
+		// after (the web's plan→presented→frame order differs slightly;
+		// content parity is the contract, not order).
 		if m.ClosesTurn {
 			rows := r.takePendingDeliverables()
 			diffs := r.takePendingTurnDiffs()

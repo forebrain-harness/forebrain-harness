@@ -386,14 +386,47 @@ export function runFrameArtifacts(payload: unknown, sessionId = ''): ArtifactVie
   })
 }
 
-/** Rows by id, the first of a repeated id winning and delivery order kept. */
-export function dedupeArtifacts(rows: ArtifactView[]): ArtifactView[] {
-  const seen = new Set<string>()
+/**
+ * groupKey is the file a delivery group row is identified by — the same file
+ * identity the terminal draws with (pkg/tui/reducer.go's deliverablePathKey).
+ * The artifact id cannot be it: `present_files` records a new version row each
+ * time a path is presented, so one file delivered twice carries two ids.
+ *
+ * relPath first, because the structured rows of every source carry the
+ * project-relative path — a presented row and the run-end frame's row of one
+ * file agree on it whatever root the surface knows, so a session whose project
+ * root is unknown still merges them instead of splitting them. Plan rows carry
+ * no relPath (a kept plan lives outside the project), so they fall back to the
+ * label displayPathOf draws, which is the absolute path the exit envelope and
+ * the frame both name.
+ */
+const groupKey = (row: ArtifactView, root?: string): string => {
+  const rel = String(row.relPath ?? '').trim().replace(/\\/g, '/')
+  return rel || displayPathOf(row, root)
+}
+
+/**
+ * dedupeArtifacts merges rows into one row per file: the first occurrence sets
+ * the position, a later row for the same file replaces its content — the newest
+ * presentation wins the id, the size and the title, the place stays. A row that
+ * names no file at all has no identity to merge by and is kept as it arrives.
+ */
+export function dedupeArtifacts(rows: ArtifactView[], root?: string): ArtifactView[] {
+  const indexByKey = new Map<string, number>()
   const out: ArtifactView[] = []
   for (const row of rows) {
-    if (seen.has(row.id)) continue
-    seen.add(row.id)
-    out.push(row)
+    const key = groupKey(row, root)
+    if (!key) {
+      out.push(row)
+      continue
+    }
+    const at = indexByKey.get(key)
+    if (at === undefined) {
+      indexByKey.set(key, out.length)
+      out.push(row)
+    } else {
+      out[at] = row
+    }
   }
   return out
 }
@@ -424,16 +457,19 @@ export function withinProjectRoot(row: { path?: unknown; relPath?: unknown; name
  * 2026-10-27): every source of delivered files — a "keep the plan only" exit's
  * plan, what each `present_files` card named, the run's end frame, and, after
  * a reload, what the conversation's artifact list holds for that run — merged
- * by id into the single list the turn shows once, under its last words.
+ * by file path into the single list the turn shows once, under its last words.
+ * One row per file: a path the turn presented twice is one row, holding the
+ * later version's content.
  *
  * Order carries meaning: the plan comes first (it is what the reader asked
  * for), then the files in the order the model presented them, then whatever
- * only a frame or the list knew about. Deduplication keeps the first
- * occurrence, so a file that is both presented and listed keeps its presented
- * place, and a reloaded turn — its card rebuilt from the same structured rows
- * — shows exactly what the live one did. Rows outside the session's project
- * root are not deliverables (owner 2026-11-19) and are dropped once, over the
- * merged group; a root the surface does not know drops nothing.
+ * only a frame or the list knew about. The first occurrence keeps its
+ * position while a later row for the same file supplies the content, so a file
+ * that is both presented and listed keeps its presented place, and a reloaded
+ * turn — its card rebuilt from the same structured rows — shows exactly what
+ * the live one did. Rows outside the session's project root are not
+ * deliverables (owner 2026-11-19) and are dropped once, over the merged group;
+ * a root the surface does not know drops nothing.
  */
 export function turnDeliverables(input: {
   /** The rows each `present_files` card of this turn named. */
@@ -445,6 +481,6 @@ export function turnDeliverables(input: {
   /** The artifact list's rows for this run (a reload's fallback). */
   fallback: ArtifactView[]
 }, root?: string): ArtifactView[] {
-  return dedupeArtifacts([...input.plan, ...input.presented, ...input.frame, ...input.fallback])
+  return dedupeArtifacts([...input.plan, ...input.presented, ...input.frame, ...input.fallback], root)
     .filter((row) => withinProjectRoot(row, root))
 }
