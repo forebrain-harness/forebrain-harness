@@ -12,8 +12,8 @@
        that row's own default and the level only when it overrides it. The row
        supplies the exit-plan approval picker's default; the reviewer chosen on
        the approval card still wins. -->
-  <section class="pr" data-group="plan-reviewer-model">
-    <header class="pr__head">
+  <div :class="bare ? 'pr pr--bare' : 'pr'" data-group="plan-reviewer-model">
+    <header v-if="!bare" class="pr__head">
       <h3>{{ t('subagents.planReviewer.title') }}</h3>
     </header>
 
@@ -83,7 +83,7 @@
         </div>
       </div>
     </div>
-  </section>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -108,7 +108,7 @@ import { useI18n } from '@/locales'
 
 import type { SettingsRefusal, useSettingsForm } from '@/components/settings/form/useSettingsForm'
 
-const props = defineProps<{ form: ReturnType<typeof useSettingsForm> }>()
+const props = withDefaults(defineProps<{ form: ReturnType<typeof useSettingsForm>; bare?: boolean }>(), { bare: false })
 
 const MODEL_PATH = 'agents.plan_reviewer.model'
 const EFFORT_PATH = 'agents.plan_reviewer.reasoning_effort'

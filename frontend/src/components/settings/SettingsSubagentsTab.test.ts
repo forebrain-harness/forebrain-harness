@@ -39,10 +39,11 @@ describe('SettingsSubagentsTab', () => {
     // The tab's only group carries no title of its own (§0.5): the two rows'
     // names are the headings.
     // The tab's schema-driven group carries no title of its own (§0.5): the two
-    // rows' names are the headings. The /goal check's block after it does have
-    // one (plan 299), so this asks about the group, not the whole tab.
+    // rows' names are the headings. The built-in card (P4) does have one, and
+    // the /goal check's rows fold into it bare — no heading of their own.
     expect(wrapper.find('[data-group="sa"] h3').exists()).toBe(false)
-    expect(wrapper.find('[data-group="goal-check-model"] h3').text()).toBe('/goal 评估模型')
+    expect(wrapper.find('[data-group="builtin-subagents"] h3').text()).toBe('内置子代理')
+    expect(wrapper.find('[data-group="goal-check-model"] h3').exists()).toBe(false)
     const enable = wrapper.find('[data-field="agents.defaults.enable_subagent"]')
     expect(enable.find('b').text()).toBe('子代理功能')
     expect(enable.find('.settings-row__hint').text()).toBe('各主代理可在子代理页单独开关')

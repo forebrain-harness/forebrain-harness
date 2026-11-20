@@ -135,7 +135,10 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
     const wrapper = await open({})
 
     expect(block(wrapper).attributes('data-group')).toBe('goal-check-model')
-    expect(block(wrapper).find('h3').text()).toBe('/goal 评估模型')
+    // The block folds into the built-in card bare (P4): the card carries the
+    // heading, the rows themselves carry none.
+    expect(block(wrapper).find('h3').exists()).toBe(false)
+    expect(wrapper.find('[data-group="builtin-subagents"] h3').text()).toBe('内置子代理')
     // The prototype draws no explanation under the group title (§2).
     expect(block(wrapper).find('.gc__head p').exists()).toBe(false)
 

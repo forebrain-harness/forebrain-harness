@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { defineComponent, onMounted } from 'vue'
 
 import tip from '@/directives/tip'
 import { forebrainApi, type LlmModelChoice, type SharedSubagentDetail, type SharedSubagentListing } from '@/lib/api'
 import { setLocale } from '@/locales'
 import { InlineTeleport } from '@/test-utils/portal'
+import { useSettingsForm } from '@/components/settings/form/useSettingsForm'
 
 import GlobalSubagentsGroup from './GlobalSubagentsGroup.vue'
 
@@ -66,12 +68,22 @@ const choices: LlmModelChoice[] = [
 ]
 
 async function mountGroup(): Promise<VueWrapper> {
-  const wrapper = mount(GlobalSubagentsGroup, {
+  const Host = defineComponent({
+    components: { UnderTest: GlobalSubagentsGroup },
+    setup() {
+      const form = useSettingsForm()
+      onMounted(() => void form.load())
+      return { form }
+    },
+    template: '<UnderTest :form="form" />',
+  })
+  const wrapper = mount(Host, {
     attachTo: document.body,
     global: { stubs: { teleport: InlineTeleport }, directives: { tip } },
   })
   mounted.push(wrapper)
   await flushPromises()
+  await wrapper.vm.$nextTick()
   return wrapper
 }
 
@@ -79,6 +91,7 @@ describe('GlobalSubagentsGroup', () => {
   beforeEach(() => {
     setLocale('zh')
     vi.spyOn(forebrainApi, 'fetchSharedSubagents').mockResolvedValue(listing())
+    vi.spyOn(forebrainApi, 'settings').mockResolvedValue({ values: {}, secrets: {} } as never)
     vi.spyOn(forebrainApi, 'llmModelChoices').mockResolvedValue(choices)
   })
 

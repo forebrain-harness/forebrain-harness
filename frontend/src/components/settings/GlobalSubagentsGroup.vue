@@ -9,26 +9,16 @@
 
        Every write answers with the whole registry, so this group renders what
        the server holds rather than predicting it. -->
-  <section class="gs" data-group="shared-subagents">
+  <!-- The built-in subagent types' install-wide rows (P4): one card, the
+       four public types' per-type rows and the two system types' model rows
+       (the /goal check and the exit-plan reviewer, whose groups fold in here
+       bare). Same semantics as the panel's Built-in subagents page, on the
+       settings surface this install uses. -->
+  <section v-if="props.form" class="gs" data-group="builtin-subagents">
     <header class="gs__head">
-      <h3>{{ t('subagents.shared.title') }}</h3>
-      <Button
-        type="button"
-        class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs"
-        data-testid="shared-subagents-new"
-        @click="openNew"
-      >
-        <Plus class="size-3.5" aria-hidden="true" />{{ t('subagents.shared.new') }}
-      </Button>
+      <h3>{{ t('subagents.builtin.title') }}</h3>
     </header>
-
-    <p v-if="error" class="gs__err" role="alert" data-shared-error>{{ error }}</p>
-
-    <!-- The per-type defaults: the install-wide row a built-in type runs on
-         when an agent's own entry names none (plan 315). Editing writes
-         agents.subagent_models.<type>; there is no provider to edit anywhere. -->
     <div class="gs__types" data-shared-types>
-      <b class="gs__sub">{{ t('subagents.shared.typesTitle') }}</b>
       <div v-for="entry in types" :key="entry.type" class="gs__type" :data-shared-type="entry.type">
         <span class="gs__typename font-mono">{{ entry.type }}</span>
         <GoalCheckModelSelect
@@ -62,7 +52,24 @@
           ✓ {{ t('subagents.shared.typeSaved') }}
         </span>
       </div>
+      <GoalCheckModelGroup v-if="props.form" bare :form="props.form" />
+      <PlanReviewerModelGroup v-if="props.form" bare :form="props.form" />
     </div>
+  </section>
+  <section class="gs" data-group="shared-subagents">
+    <header class="gs__head">
+      <h3>{{ t('subagents.shared.title') }}</h3>
+      <Button
+        type="button"
+        class="forebrain-btn forebrain-btn-primary h-auto gap-1.5 text-xs"
+        data-testid="shared-subagents-new"
+        @click="openNew"
+      >
+        <Plus class="size-3.5" aria-hidden="true" />{{ t('subagents.shared.new') }}
+      </Button>
+    </header>
+
+    <p v-if="error" class="gs__err" role="alert" data-shared-error>{{ error }}</p>
 
     <p v-if="!rows.length" class="gs__empty" data-shared-empty>{{ t('subagents.shared.empty') }}</p>
     <DataTable
@@ -146,6 +153,9 @@ import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
 import GoalCheckModelSelect from '@/components/settings/GoalCheckModelSelect.vue'
+import GoalCheckModelGroup from '@/components/settings/GoalCheckModelGroup.vue'
+import PlanReviewerModelGroup from '@/components/settings/PlanReviewerModelGroup.vue'
+import type { useSettingsForm } from '@/components/settings/form/useSettingsForm'
 import SubagentConfigDrawer from '@/components/subagents/SubagentConfigDrawer.vue'
 import { useModelChoices } from '@/composables/useModelChoices'
 import {
@@ -157,6 +167,13 @@ import {
 } from '@/lib/api'
 import { effortLevelLabel } from '@/lib/effortLabel'
 import { useI18n } from '@/locales'
+
+const props = defineProps<{
+  /** The settings form the two system rows read and write: their paths live
+   *  in the same PATCH the tab's own groups use. Absent renders the registry
+   *  alone (the component tests do exactly that). */
+  form?: ReturnType<typeof useSettingsForm>
+}>()
 
 const { t } = useI18n()
 const { choices, ensureChoices } = useModelChoices()

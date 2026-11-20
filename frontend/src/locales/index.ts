@@ -741,6 +741,7 @@ const zh = {
   // 设置 · 子代理 · 「全局共享子代理」（plan 314）：一份定义所有主代理共用，
   // 每个主代理在自己的子代理页单独启用；同一组里还有四个内置类型的全局默认行。
   'subagents.shared.title': '全局共享子代理',
+  'subagents.builtin.title': '内置子代理',
   'subagents.shared.empty': '还没有共享子代理。新建一个之后，每个主代理都能在自己的子代理页启用它。',
   'subagents.shared.new': '新建共享子代理',
   'subagents.shared.drawerNew': '新建共享子代理',
@@ -3303,6 +3304,7 @@ const en: Record<keyof typeof zh, string> = {
   'subagents.planReviewer.save': 'Save',
   'subagents.planReviewer.saved': 'Saved, applies to the next turn',
   'subagents.shared.title': 'Shared subagents',
+  'subagents.builtin.title': 'Built-in subagents',
   'subagents.shared.empty': 'No shared subagents yet. Once one exists, every primary agent can enable it on its own subagents page.',
   'subagents.shared.new': 'New shared subagent',
   'subagents.shared.drawerNew': 'New shared subagent',

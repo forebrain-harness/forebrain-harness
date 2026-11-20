@@ -465,12 +465,18 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any, tailRows b
 // (plan 324 D7): the model row in the value column, the thinking level in
 // force as the status, and the prototype's help sentence as the description.
 func (p *configPanel) configFieldRow(doc any, schema configSectionSchema, field configField) (string, string, string) {
-	if schema.StoreSection == "" {
-		return p.configFieldDescription(doc, field)
-	}
-	path := configFieldPath(field)
-	if len(path) == 2 && path[0] == configSubagentModelsKey || len(path) == 1 && path[0] == configPlanReviewerKey {
-		return p.configTypePinRow(doc, field, path)
+	if field.Kind == configFieldBuiltinSubagents {
+		// The entry names what the page behind it holds: the count of the
+		// per-type rows someone pinned, out of the six types (P4).
+		pins, _ := configLookupValue(doc, configFieldPath(field))
+		rows, _ := pins.(map[string]any)
+		set := 0
+		for _, row := range rows {
+			if refOfRow(row) != "" {
+				set++
+			}
+		}
+		return configFieldHint(field), fmt.Sprintf("%d of 6 types pinned", set), ""
 	}
 	return p.configFieldDescription(doc, field)
 }
@@ -482,6 +488,9 @@ func (p *configPanel) configFieldRow(doc any, schema configSectionSchema, field 
 // sentence.
 func (p *configPanel) configTypePinRow(doc any, field configField, path []string) (string, string, string) {
 	description := configFieldHint(field)
+	if description == "" {
+		description = "Install-wide default model and thinking level; an agent's own override still wins."
+	}
 	ref := refOfRow(doc, path...)
 	if ref == "" {
 		return description, configFollowConversation, ""
@@ -496,6 +505,94 @@ func refOfRow(doc any, path ...string) string {
 	row, _ := configLookupValue(doc, path)
 	settings, _ := row.(map[string]any)
 	return strings.TrimSpace(configStringField(settings, "model"))
+}
+
+// editBuiltinSubagents is the Built-in subagents entry's page (P4, the
+// prototype's builtinSubagents kind): the six built-in types, each one row
+// naming the install-wide model row and thinking level it runs on, each
+// opening the model-and-level page its kind fixes — a type's own template for
+// the four the model may dispatch, the system row's for the two the system
+// dispatches. The rows live under three agents-section keys, which is why the
+// page is rendered here rather than read off the descriptor: the four public
+// types under subagent_models, the plan reviewer under plan_reviewer, and the
+// goal evaluator under goal_evaluator.
+func (p *configPanel) editBuiltinSubagents(doc any, field configField) (any, string) {
+	names := make([]string, 0, len(agent.PublicSubagentNames)+len(agent.SystemSubagentNames))
+	names = append(names, agent.PublicSubagentNames...)
+	names = append(names, agent.SystemSubagentNames...)
+	tailRows := p.configActionSelector() == nil
+	for {
+		items := p.builtinSubagentItems(doc)
+		rows := make([]struct {
+			name     string
+			path     []string
+			template string
+		}, 0, len(names))
+		for _, name := range names {
+			path := configBuiltinRowPath(name)
+			template := configTemplateTypeDef
+			if slices.Contains(agent.SystemSubagentNames, name) {
+				template = configTemplateGlobalSystemRow
+			}
+			rows = append(rows, struct {
+				name     string
+				path     []string
+				template string
+			}{name, path, template})
+		}
+		if tailRows {
+			items = append(items, SelectItem{Label: configUpRowLabel, Description: "Back up one level"})
+			rows = append(rows, struct {
+				name     string
+				path     []string
+				template string
+			}{})
+		}
+		idx, ok, err := selectRichPage(p.sel, p.fieldPrompt(field), items, -1)
+		if err != nil {
+			p.printError(err)
+			return doc, ""
+		}
+		if !ok || idx < 0 || idx >= len(rows) {
+			return doc, ""
+		}
+		row := rows[idx]
+		if row.name == "" {
+			return doc, ""
+		}
+		doc, _ = p.editTemplatePage(doc, row.path, row.template, row.name)
+	}
+}
+
+// builtinSubagentItems is the entry page's six rows (P4): one per built-in
+// type, in the prototype's order — the four the model may dispatch, then the
+// two the system dispatches — each naming the model row its pin stores and
+// the thinking level in force, with the prototype's help sentence beside the
+// name.
+func (p *configPanel) builtinSubagentItems(doc any) []SelectItem {
+	names := make([]string, 0, len(agent.PublicSubagentNames)+len(agent.SystemSubagentNames))
+	names = append(names, agent.PublicSubagentNames...)
+	names = append(names, agent.SystemSubagentNames...)
+	items := make([]SelectItem, 0, len(names))
+	for _, name := range names {
+		description, value, status := p.configTypePinRow(doc, configField{Hint: ""}, configBuiltinRowPath(name))
+		items = append(items, SelectItem{Label: name, Description: description, Value: value, Status: status})
+	}
+	return items
+}
+
+// configBuiltinRowPath is the agents-section key one built-in type's
+// install-wide row lives under (the prototype's builtinPath): the four public
+// types are per-type rows, the two system types are global rows of their own.
+func configBuiltinRowPath(name string) []string {
+	switch name {
+	case "plan-reviewer":
+		return []string{configPlanReviewerKey}
+	case "goal-evaluator":
+		return []string{configGoalEvaluatorKey}
+	default:
+		return []string{configSubagentModelsKey, name}
+	}
 }
 
 // configEffortSummary names a stored thinking level: empty is the model row's
@@ -793,6 +890,9 @@ func configSectionNames() []string {
 func (p *configPanel) editField(doc any, field configField) (any, string) {
 	path := configFieldPath(field)
 	cur, _ := configLookupValue(doc, path)
+	if field.Kind == configFieldBuiltinSubagents {
+		return p.editBuiltinSubagents(doc, field)
+	}
 	if field.Kind == configFieldRows || configIsContainer(cur) {
 		if template := configTemplateFor(p.section, path); configTemplateIsObject(template) && configIsContainer(cur) {
 			// The field is the row here (a projection's per-type field, the
@@ -1131,6 +1231,10 @@ func (p *configPanel) editModel(doc any, path []string, field configField, cur a
 	items := []SelectItem{{Label: field.ModelEmpty}}
 	if field.ModelFlavor == configModelFlavorModel {
 		items[0].Description = configModelConversationDesc
+	} else {
+		// The row templates' own sentence for an unset pin (P4): the type
+		// row's and the system row's empty choices each say what it means.
+		items[0].Description = field.ModelEmptyDesc
 	}
 	defaultIdx := 0
 	for _, row := range p.models {
@@ -1545,7 +1649,10 @@ const (
 	// reviewer's global row. The shared subagent definitions live in the
 	// definitions map like every other definition (P3).
 	configPlanReviewerKey = "plan_reviewer"
-	configPrimaryStatus   = "Primary"
+	// configGoalEvaluatorKey is the /goal check's global row (plan 299), the
+	// plan reviewer's sibling one type over (P4's Built-in subagents page).
+	configGoalEvaluatorKey = "goal_evaluator"
+	configPrimaryStatus    = "Primary"
 	// The other two role words the prototype's definitions list writes (P3):
 	// an explicit primary:false is the install-wide subagent role, and a
 	// definition that never chose a role is just an agent.

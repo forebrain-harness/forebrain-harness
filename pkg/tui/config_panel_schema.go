@@ -45,6 +45,12 @@ const (
 	// (plan 324): the picker lists the table's rows, and free text can
 	// never name a provider the install does not carry.
 	configFieldModel
+	// configFieldBuiltinSubagents is the one entry that opens the six
+	// built-in subagent types' install-wide model rows (P4, the prototype's
+	// builtinSubagents kind): the page is rendered by the panel, not from
+	// the descriptor's path, because the six rows live under three
+	// different agents-section keys.
+	configFieldBuiltinSubagents
 )
 
 // configModelFlavor is which empty a model picker offers and what picking it
@@ -163,6 +169,10 @@ type configField struct {
 	// stores it ("" unsets the key). Set on fields that hold a model row id.
 	ModelEmpty      string
 	ModelEmptyValue string
+	// ModelEmptyDesc is the empty option's own description, where the
+	// prototype gives the sentence a page of its own (P4): the type row's
+	// and the system row's empty choices each say what an unset pin means.
+	ModelEmptyDesc string
 	// ModelFlavor is which model picker the field opens (plan 324 D1):
 	// which empty its rows offer and what picking the empty stores.
 	ModelFlavor configModelFlavor
@@ -301,13 +311,17 @@ var configSectionSchemas = []configSectionSchema{
 				// the agent template, whose Default model field opens the picker.
 				Hint: "Manage each primary agent and its own configuration.",
 			},
-			// The install-wide model row of each public built-in subagent type
-			// (plan 315): a row id + reasoning effort, shared by every primary
-			// agent. The level inside one of those rows is a picker, the model
-			// row it names supplying the levels (plan 319).
+			// The six built-in subagent types' install-wide rows (P4, the
+			// prototype's builtinSubagents entry, one row under Defaults):
+			// the four public types' per-type rows (agents.subagent_models,
+			// plan 315) and the two system types' global rows
+			// (agents.plan_reviewer, plan 313; agents.goal_evaluator,
+			// plan 299) behind one page. Each carries an install-wide model
+			// row and thinking level, which an agent's own override still
+			// outranks.
 			{
-				Path: "subagent_models", Label: "Subagent models", Kind: configFieldRows, Group: "Definitions",
-				Hint: "One built-in type per row (explore, plan, general-purpose, verification); a row holds its model row id and thinking level",
+				Path: "subagent_models", Label: "Built-in subagents", Kind: configFieldBuiltinSubagents, Group: "Defaults",
+				Hint: "The 6 built-in subagent types, always on. Each carries an install-wide model and thinking level; an agent may override them.",
 			},
 			{
 				Path: "defaults.network_retry_max", Label: "Network retries", Kind: configFieldNumber, DefaultValue: "10", Group: "Defaults",
@@ -323,55 +337,6 @@ var configSectionSchemas = []configSectionSchema{
 				Min: 1, Max: 50, Clamp: true, Unit: "%",
 			},
 			{Path: "defaults.mcp_servers", Label: "MCP servers", Kind: configFieldRows, Group: "Connections", Hint: "Shared with all agents. Agent entries with the same name override these."},
-			// The /goal check's global row (plan 299) is two settings, not a
-			// whole subagent entry: it is dispatched by the system, so it has
-			// no name, description, prompt or tool policy to edit here, and a
-			// rows descriptor on the value would offer all of those.
-			{
-				Path: "goal_evaluator.model", Label: "Goal Evaluator model", Kind: configFieldModel, Group: "Goal Evaluator",
-				ModelEmpty: "Follow primary agent", ModelFlavor: configModelFlavorModel,
-				Hint: "The global model used to check goal progress.",
-			},
-			{
-				Path: "goal_evaluator.reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Group: "Goal Evaluator",
-				Hint: "Choose a model first. Default follows that model row.",
-			},
-		},
-	},
-	{
-		// The install-wide subagent rows, as one page (plan 314). It is a
-		// projection of the agents store — the prototype's "Subagents"
-		// section — because every row here lives in agents: the per-type defaults
-		// (agents.subagent_models, plan 315) and the plan reviewer's global row
-		// (agents.plan_reviewer, plan 313, relocated here). A shared subagent
-		// definition lives where every other definition does
-		// (agents.definitions, P3), so it is edited on the Agents page. The panel
-		// reads and writes the agents document either way, so a key this page
-		// does not show travels back untouched on save.
-		Name: "subagent_models", Title: "Subagents", Tab: configTabAgents,
-		// The summary is the prototype's own sentence for these rows (its typeDef
-		// template reads "Install-wide default model and thinking level; an
-		// agent's own override still wins."): the page holds the install-wide
-		// model rows of the built-in types and the plan reviewer. The shared
-		// subagent definitions are definitions, edited on the Agents page (P3), so
-		// the earlier wording that named them is gone — the prototype never had
-		// it. The prototype deletes this page in favour of its "Built-in
-		// subagents" group, which is P4's work.
-		Summary:      "Install-wide default model and thinking level; an agent's own override still wins.",
-		StoreSection: "agents",
-		Fields: []configField{
-			// The four public per-type defaults: a global row id + thinking
-			// level each, which an agent's own override still outranks. The
-			// row's value column names the model row and its status the level
-			// in force (plan 324 D7), with the prototype's help sentence as
-			// the description.
-			{Path: "subagent_models.general-purpose", Label: "general-purpose", Kind: configFieldRows, Hint: "Install-wide per-type default model row. An agent's own override still wins."},
-			{Path: "subagent_models.explore", Label: "explore", Kind: configFieldRows, Hint: "Install-wide per-type default model row. An agent's own override still wins."},
-			{Path: "subagent_models.plan", Label: "plan", Kind: configFieldRows, Hint: "Install-wide per-type default model row. An agent's own override still wins."},
-			{Path: "subagent_models.verification", Label: "verification", Kind: configFieldRows, Hint: "Install-wide per-type default model row. An agent's own override still wins."},
-			// The plan reviewer's row, the goal check's sibling one type over:
-			// a system-dispatched type whose row no primary agent owns.
-			{Path: "plan_reviewer", Label: "plan-reviewer", Kind: configFieldRows, Hint: "Global row for a system type, the goal-evaluator pattern. Agent pages stay read-only."},
 		},
 	},
 	{
@@ -516,6 +481,7 @@ var configTemplates = map[string][]configField{
 			Path: "model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorGlobal,
 			Hint:            "The type's install-wide default model row, picked from the global model table. An agent's own override still wins.",
 			ModelEmpty:      "Follow conversation",
+			ModelEmptyDesc:  "No default; the type follows the conversation model.",
 			ModelEmptyValue: "",
 		},
 		{Path: "reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Requires: "model"},
@@ -525,6 +491,7 @@ var configTemplates = map[string][]configField{
 			Path: "model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorGlobal,
 			Hint:            "The global model the system dispatches this type on, picked from the global model table.",
 			ModelEmpty:      "Follow conversation",
+			ModelEmptyDesc:  "No global pin; the system chooses at dispatch.",
 			ModelEmptyValue: "",
 		},
 		{Path: "reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Requires: "model"},

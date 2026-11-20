@@ -6,13 +6,12 @@
        than schema-driven, so they sit beside the tab's form instead of inside
        SETTINGS_FORMS — see the note at the top of settingsSchema.ts. Two of
        them: the /goal check (plan 299) and the exit-plan reviewer (plan 313). -->
-  <GoalCheckModelGroup :form="form" />
-  <PlanReviewerModelGroup :form="form" />
-  <!-- The install-wide shared subagent registry and the four built-in types'
-       default model rows (plans 314, 315). A registry rather than a group of
-       scalar settings, so it keeps its own state and writes through the
-       subagent endpoints instead of the settings form. -->
-  <GlobalSubagentsGroup />
+  <!-- The built-in subagent types' install-wide rows (P4): the four public
+       types' per-type rows and the two system types' model rows, one card —
+       and the install-wide shared subagent registry beside them (plans 314,
+       315). The registry keeps its own state and writes through the subagent
+       endpoints instead of the settings form. -->
+  <GlobalSubagentsGroup :form="form" />
 </template>
 
 <script setup lang="ts">
@@ -32,8 +31,6 @@
  * rather than a form.
  */
 import GlobalSubagentsGroup from '@/components/settings/GlobalSubagentsGroup.vue'
-import GoalCheckModelGroup from '@/components/settings/GoalCheckModelGroup.vue'
-import PlanReviewerModelGroup from '@/components/settings/PlanReviewerModelGroup.vue'
 import SettingsTabForm from '@/components/settings/form/SettingsTabForm.vue'
 import type { useSettingsForm } from '@/components/settings/form/useSettingsForm'
 

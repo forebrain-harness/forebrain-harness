@@ -421,7 +421,9 @@ func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
 			models: []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}},
 			steps: []richStep{
 				{label: "Agents", ok: true},
-				{label: "Goal Evaluator model", ok: true},
+				{label: "Built-in subagents", ok: true},
+				{label: "goal-evaluator", ok: true},
+				{label: "Model", ok: true},
 				{label: "openai/gpt-main", ok: true},
 			},
 			want: `{"goal_evaluator":{"model":"llm-1"}}`,
@@ -1619,6 +1621,13 @@ func TestConfigPanelSchemaFieldsMatchTheirSection(t *testing.T) {
 				continue
 			}
 			covered[head] = true
+			// The Built-in subagents entry owns the three keys its page
+			// renders (P4): the per-type rows and the two system types'
+			// global rows are reachable through it alone.
+			if field.Kind == configFieldBuiltinSubagents {
+				covered["plan_reviewer"] = true
+				covered["goal_evaluator"] = true
+			}
 		}
 		if whole {
 			// A descriptor on the section value itself edits the whole
@@ -1859,7 +1868,7 @@ func TestConfigPanelRendersEveryTab(t *testing.T) {
 	}{
 		{tab: configTabApproval, titles: []string{"Approval preset", "Workspace sandbox", "Batch projects"}},
 		{tab: configTabSession, titles: []string{"Context compaction", "Memory", "Scheduled tasks", "Feature switches"}},
-		{tab: configTabAgents, titles: []string{"Agents", "Subagents", "Hooks", "Language servers", "Peer messaging"}},
+		{tab: configTabAgents, titles: []string{"Agents", "Hooks", "Language servers", "Peer messaging"}},
 		{tab: configTabFile, titles: []string{"Gateway", "Credential files"}, readOnly: true},
 	} {
 		t.Run(tc.tab, func(t *testing.T) {
@@ -1967,24 +1976,31 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 		t.Fatalf("the values are not aligned:\n%q\n%q", memories, servers)
 	}
 
-	// A projection's page (plan 324 D7): the five install-wide pins each name
-	// the model row their value column holds and the thinking level their
-	// status carries, with the prototype's help sentence as the description —
-	// a pin nobody set reads as the sentence it follows and marks nothing.
-	projection := sectionPanel(map[string]string{"agents": `{
+	// The Built-in subagents entry's page (P4, plan 324 D7): the six
+	// install-wide pins each name the model row their value column holds and
+	// the thinking level their status carries, with the prototype's help
+	// sentence as the description — a pin nobody set reads as the sentence it
+	// follows and marks nothing.
+	builtin := sectionPanel(map[string]string{"agents": `{
 		"subagent_models":{
 			"plan":{"model":"llm-1","reasoning_effort":"high"},
 			"explore":{"model":"llm-1","reasoning_effort":"medium"}
 		},
 		"plan_reviewer":{"model":"llm-1"}
 	}`})
-	projection.models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
-	subagentModels, ok := configSectionSchemaFor("subagent_models")
+	builtin.models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	agentsSchema, ok := configSectionSchemaFor("agents")
 	if !ok {
-		t.Fatal("no subagent_models section")
+		t.Fatal("no agents section")
 	}
-	items, _ = projection.fieldItems(subagentModels, projection.sectionDoc("agents"), false)
-	lines = renderRichPage(items, subagentModels.Title, 120)
+	items, _ = builtin.fieldItems(agentsSchema, builtin.sectionDoc("agents"), true)
+	lines = renderRichPage(items, "Agents", 120)
+	entry := renderedRow(t, lines, "Built-in subagents")
+	if !strings.Contains(entry, "2 of 6 types pinned") {
+		t.Fatalf("the entry row = %q, want the pin count", entry)
+	}
+	items = builtin.builtinSubagentItems(builtin.sectionDoc("agents"))
+	lines = renderRichPage(items, "Built-in subagents", 120)
 	for label, status := range map[string]string{
 		"plan":          "High",
 		"explore":       "Medium",
@@ -2004,14 +2020,11 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 	// The description is the prototype's help sentence; the value column
 	// holds the named row whole, not elided.
 	plan := renderedRow(t, lines, "plan")
-	if !strings.Contains(plan, "Install-wide per-type default") {
+	if !strings.Contains(plan, "Install-wide default model and thinking level") {
 		t.Fatalf("the plan row = %q, want the prototype's help sentence", plan)
 	}
 	if !strings.Contains(plan, "openai/gpt-main") || strings.Contains(plan, "openai/gp...") {
 		t.Fatalf("the plan row = %q, want the model row's label whole", plan)
-	}
-	if reviewer := renderedRow(t, lines, "plan-reviewer"); !strings.Contains(reviewer, "Global row for a system type") {
-		t.Fatalf("the plan-reviewer row = %q, want the globalSystem help sentence", reviewer)
 	}
 }
 
@@ -2046,13 +2059,9 @@ func TestConfigPanelValueColumnNotElided(t *testing.T) {
 		{ID: "row-1", Provider: "openai", Model: "gpt-main", BaseURL: "https://api.one.example.com"},
 		{ID: "row-2", Provider: "openai", Model: "gpt-main", BaseURL: "https://api.two.example.com"},
 	}
-	projection, ok := configSectionSchemaFor("subagent_models")
-	if !ok {
-		t.Fatal("no subagent_models section")
-	}
 	doc := panel.sectionDoc("agents")
-	items, _ := panel.fieldItems(projection, doc, false)
-	lines := renderRichPage(items, projection.Title, 120)
+	items := panel.builtinSubagentItems(doc)
+	lines := renderRichPage(items, "Built-in subagents", 120)
 	label := "openai/gpt-main (api.two.example.com)"
 	if displayLineWidth(label) <= panelNarrowValueColumnMax {
 		t.Fatalf("the fixture's label must outgrow the old cap: %q", label)
@@ -2334,8 +2343,8 @@ func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
 		t.Fatalf("expected the section page and the definitions page, got %d", len(selector.richItems))
 	}
 	labels := rowLabels(selector.richItems[0])
-	if !slices.Contains(labels, "Goal Evaluator model") {
-		t.Fatalf("the agents page is missing %q: %v", "Goal Evaluator model", labels)
+	if !slices.Contains(labels, "Built-in subagents") {
+		t.Fatalf("the agents page is missing %q: %v", "Built-in subagents", labels)
 	}
 	// The plan reviewer's row moved to the "Subagents" page, which is a
 	// projection of this same document (plan 314): one place owns every
@@ -2795,7 +2804,6 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 		"cron":                    "Choose how long task records are retained.",
 		"features":                "Enable memory and language intelligence.",
 		"agents":                  "Manage definitions, shared defaults.",
-		"subagent_models":         "Install-wide default model and thinking level; an agent's own override still wins.",
 		"hooks":                   "Run configured actions at lifecycle events.",
 		"lsp":                     "Manage servers, timeouts and diagnostic delivery.",
 		"peers":                   "Coordinate with other agent processes on this machine.",
@@ -2831,8 +2839,7 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 		{"agents", "defaults.stream_idle_timeout_seconds", "Stream idle timeout", "Zero disables the watchdog. Positive values below 10 run as 10."},
 		{"agents", "defaults.context_inject.warn_remaining_percent", "Warn below remaining context", ""},
 		{"agents", "defaults.mcp_servers", "MCP servers", "Shared with all agents. Agent entries with the same name override these."},
-		{"agents", "goal_evaluator.model", "Goal Evaluator model", "The global model used to check goal progress."},
-		{"agents", "goal_evaluator.reasoning_effort", "Thinking level", "Choose a model first. Default follows that model row."},
+		{"agents", "subagent_models", "Built-in subagents", "The 6 built-in subagent types, always on. Each carries an install-wide model and thinking level; an agent may override them."},
 		{"hooks", "", "Hook events", "Command, prompt, agent and HTTP hooks are supported."},
 		{"lsp", "recommendations", "Recommend language servers", "Suggest useful servers for this project."},
 		{"lsp", "servers", "Configured servers", "Each server maps files and languages to a process."},
@@ -3070,13 +3077,14 @@ func TestConfigPanelNamesRowsWithoutADottedPath(t *testing.T) {
 	}
 }
 
-// The "Subagents" page is a projection of the agents store (plan 314): it
-// presents the per-type defaults and the plan reviewer's global row — every
-// install-wide subagent row that is not a definition in one place — reads the
-// agents document, and saves back to it so the keys it does not show survive.
-// Its rows read as the pins they are (plan 324 D7) and its Model field opens
-// the global-row picker, whose pick takes the pin's level with it (D5).
-func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
+// The Built-in subagents entry is the six install-wide rows in one page
+// (P4, the prototype's builtinSubagents kind): the four public types' pins
+// under agents.subagent_models and the two system types' global rows under
+// agents.plan_reviewer and agents.goal_evaluator, each read as the pin it is
+// (plan 324 D7) and saved back to the agents section, whose unseen keys
+// survive the write. Its Model field opens the global-row picker, whose pick
+// takes the pin's level with it (D5).
+func TestConfigPanelBuiltinSubagentsEntryProjectsTheAgentsStore(t *testing.T) {
 	agents := `{
 		"definitions":{"main":{"primary":true,"subagents":[]},"repo-auditor":{"primary":false,"description":"audits one repository area","system_prompt":"You audit repositories.","tools":"read_only"}},
 		"plan_reviewer":{"model":"llm-2"},
@@ -3089,23 +3097,24 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
 		{label: "explore", ok: true},
 		{label: "Model", ok: true},
 		{label: "deepseek/deepseek-v4-pro", ok: true},
-	}, nil, "subagent_models")
+	}, nil, "agents")
 
-	if len(selector.richItems) == 0 {
-		t.Fatal("the projection page never opened")
+	if len(selector.richItems) < 2 {
+		t.Fatal("the entry page never opened")
 	}
-	page := selector.richItems[0]
-	// A per-type pin names the model row its value column holds, with the
-	// thinking level as its status and the prototype's help sentence as its
-	// description.
+	page := selector.richItems[1]
+	// A pin names the model row its value column holds, with the thinking
+	// level as its status and the prototype's help sentence as its
+	// description — the one sentence all six rows carry.
 	explore := findRow(t, page, "explore")
 	if explore.Value != "openai/gpt-main" || explore.Status != "High" {
 		t.Fatalf("explore's row = %q %q, want the named row and its level", explore.Value, explore.Status)
 	}
-	if explore.Description != "Install-wide per-type default model row. An agent's own override still wins." {
+	if explore.Description != "Install-wide default model and thinking level; an agent's own override still wins." {
 		t.Fatalf("explore's description = %q, want the prototype's help sentence", explore.Description)
 	}
 	// A type with no pin of its own follows the conversation, and marks nothing.
@@ -3119,16 +3128,8 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	if reviewer.Value != "deepseek/deepseek-v4-pro" || reviewer.Status != configRowDefaultEffort {
 		t.Fatalf("plan-reviewer's row = %q %q, want the named row and the row default", reviewer.Value, reviewer.Status)
 	}
-	if reviewer.Description != "Global row for a system type, the goal-evaluator pattern. Agent pages stay read-only." {
-		t.Fatalf("plan-reviewer's description = %q, want the globalSystem help sentence", reviewer.Description)
-	}
-	// A subagent-role definition is not a row of this page: it lives in the
-	// definitions map, where every other definition does (P3).
-	for _, item := range page {
-		if item.Label == "Shared custom subagents" {
-			t.Fatalf("the projection still carries the removed shared-subagent registry row: %+v", item)
-		}
-	}
+	// The goal evaluator is the sixth row, the plan reviewer's sibling.
+	findRow(t, page, "goal-evaluator")
 
 	// The save lands in the agents section — the document the page presents —
 	// and every key the page does not show comes back untouched. The pick
@@ -3137,7 +3138,7 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 		t.Fatalf("expected one write, got %+v", session.writes)
 	}
 	if session.writes[0].section != "agents" {
-		t.Fatalf("the projection saved to %q, want the agents store", session.writes[0].section)
+		t.Fatalf("the page saved to %q, want the agents store", session.writes[0].section)
 	}
 	var saved map[string]any
 	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
@@ -3158,57 +3159,8 @@ func TestConfigPanelSubagentModelsProjectsTheAgentsStore(t *testing.T) {
 	if _, ok := saved["definitions"]; !ok {
 		t.Fatal("the agents page's definitions were dropped from the saved document")
 	}
-	// A definition the page does not show travels back untouched, its subagent
-	// body included: the save writes the section whole.
-	definitions, _ := saved["definitions"].(map[string]any)
-	auditor, _ := definitions["repo-auditor"].(map[string]any)
-	if got, _ := auditor["system_prompt"].(string); got != "You audit repositories." {
-		t.Fatalf("definitions.repo-auditor.system_prompt = %v, want the definition untouched", auditor["system_prompt"])
-	}
-	// The registry key is gone from the configuration, so nothing writes it.
-	if _, stale := saved["shared_subagents"]; stale {
-		t.Fatalf("the saved document carries the removed shared_subagents key: %v", saved["shared_subagents"])
-	}
 }
 
-// The projection's field paths are keys of the section it presents (plan 314),
-// so a typo'd path is caught here rather than by a page that shows nothing. The
-// projection is skipped by the section-by-section check above (it is not a Root
-// section), which is why this test exists at all.
-func TestConfigPanelSchemaProjectionFieldsNameStoreSectionKeys(t *testing.T) {
-	types := rootSectionTypes(t)
-	projections := 0
-	for _, schema := range configSectionSchemas {
-		if schema.StoreSection == "" {
-			continue
-		}
-		projections++
-		typ, ok := types[schema.StoreSection]
-		if !ok {
-			t.Fatalf("投影段 %q 的 StoreSection %q 不是 Root 的段", schema.Name, schema.StoreSection)
-		}
-		if len(schema.Fields) == 0 {
-			t.Errorf("投影段 %q 没有任何可编辑字段", schema.Name)
-		}
-		names := make(map[string]bool)
-		for _, name := range jsonFieldNames(typ) {
-			names[name] = true
-		}
-		for _, field := range schema.Fields {
-			head := strings.Split(field.Path, ".")[0]
-			if !names[head] {
-				t.Errorf("投影段 %q 的字段 %q 指向 %q 中不存在的设置 %q", schema.Name, field.Label, schema.StoreSection, head)
-			}
-		}
-	}
-	if projections == 0 {
-		t.Fatal("no projection section exists: the mechanism is unreachable")
-	}
-}
-
-// sharedRowsSession is one primary agent's page over an agents document holding
-// one install-wide shared subagent definition, plus whatever entries the caller
-// put on the agent (plan 314, P3).
 func sharedRowsSession(agentSubagents string) *configPanelTestSession {
 	agents := `{
 		"definitions":{
@@ -3457,6 +3409,8 @@ func TestConfigPanelEffortPickerOffersTheModelsLevels(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
 		{label: "Thinking level", ok: true},
 		{ok: false},
 	}, nil, "agents")
@@ -3479,6 +3433,8 @@ func TestConfigPanelEffortPickerOffersOffWhenTheRowAllowsIt(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
 		{label: "Thinking level", ok: true},
 		{ok: false},
 	}, nil, "agents")
@@ -3499,6 +3455,8 @@ func TestConfigPanelEffortPickerDropsOffOnTheMessagesProtocol(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
 		{label: "Thinking level", ok: true},
 		{ok: false},
 	}, nil, "agents")
@@ -3520,6 +3478,8 @@ func TestConfigPanelEffortPickerNeedsAModel(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
 		{label: "Thinking level", ok: true},
 		{ok: false},
 	}, nil, "agents")
@@ -3553,6 +3513,8 @@ func TestConfigPanelEffortPickerWritesTheChosenLevel(t *testing.T) {
 			session.snapshot.Models = configEffortModels()
 			selector := &scriptedSelector{}
 			runConfigPanel(t, session, selector, []richStep{
+				{label: "Built-in subagents", ok: true},
+				{label: "goal-evaluator", ok: true},
 				{label: "Thinking level", ok: true},
 				{label: tc.pick, ok: true},
 			}, nil, "agents")
@@ -3627,6 +3589,7 @@ func TestConfigPanelEffortPickerOnAStoredModelRow(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
 		// The type row's own level, changed from the picker: the type's page
 		// is the template's two fields (plan 329).
 		{label: "plan", ok: true},
@@ -3639,7 +3602,7 @@ func TestConfigPanelEffortPickerOnAStoredModelRow(t *testing.T) {
 		{label: "Thinking level", ok: true},
 		{label: "Medium", ok: true},
 		{label: configUpRowLabel, ok: true},
-	}, nil, "subagent_models")
+	}, nil, "agents")
 
 	got := rowLabels(effortPickerItems(t, selector))
 	want := []string{"Low", "Medium", "High", "xHigh", configRowDefaultEffort}
@@ -3682,27 +3645,43 @@ func TestConfigPanelEffortValueLabels(t *testing.T) {
 		}
 	}`
 
-	// Path (a), the section field: goal_evaluator.reasoning_effort is absent,
-	// so the provider decides.
+	// Path (a), the goal evaluator's own frame: its reasoning_effort key is
+	// absent, so the provider decides.
 	session := newConfigPanelSession(map[string]string{"agents": agents})
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
-	runConfigPanel(t, session, selector, []richStep{{ok: false}}, nil, "agents")
-	sectionLevel := findRow(t, selector.richItems[0], "Thinking level")
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
+		{ok: false},
+		{ok: false},
+	}, nil, "agents")
+	var goalPage []SelectItem
+	for _, items := range selector.richItems {
+		if _, ok := findRowLoose(items, "Thinking level"); ok {
+			goalPage = items
+			break
+		}
+	}
+	if goalPage == nil {
+		t.Fatalf("the goal evaluator's page never opened: %v", selector.richLabels)
+	}
+	sectionLevel := findRow(t, goalPage, "Thinking level")
 	if sectionLevel.Value != configProviderDefaultEffort {
-		t.Fatalf("the unset section level = %q, want %q", sectionLevel.Value, configProviderDefaultEffort)
+		t.Fatalf("the unset frame level = %q, want %q", sectionLevel.Value, configProviderDefaultEffort)
 	}
 
 	// Path (b) and the type frames, over the projection's own page.
 	selector = &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
 		{label: "plan", ok: true},
 		{ok: false},
 		{label: "explore", ok: true},
 		{ok: false},
-	}, nil, "subagent_models")
-	overview := selector.richItems[0]
-	// The overview status names the stored level: "" is the row's own
+	}, nil, "agents")
+	overview := selector.richItems[1]
+	// The entry page's status names the stored level: "" is the row's own
 	// default, and a pin nobody set carries no status at all.
 	if plan := findRow(t, overview, "plan"); plan.Status != configRowDefaultEffort {
 		t.Fatalf("plan's status = %q, want %q", plan.Status, configRowDefaultEffort)
@@ -3746,12 +3725,10 @@ func TestConfigPanelEffortValueLabels(t *testing.T) {
 // holds is the row carrying the check.
 func TestConfigPanelChoiceHeadCopy(t *testing.T) {
 	useSetupCatalogWith(t, configEffortCatalog)
-	agentsSchema, ok := configSectionSchemaFor("agents")
-	if !ok {
-		t.Fatal("no agents section")
-	}
+	// The goal evaluator's frame carries the pair (P4): its page is the
+	// system row's template, whose fields the choice copy is judged on.
 	var effortField, modelField configField
-	for _, field := range agentsSchema.Fields {
+	for _, field := range configTemplates[configTemplateGlobalSystemRow] {
 		switch {
 		case field.Kind == configFieldEffort:
 			effortField = field
@@ -3760,7 +3737,7 @@ func TestConfigPanelChoiceHeadCopy(t *testing.T) {
 		}
 	}
 	if effortField.Label == "" || modelField.Label == "" {
-		t.Fatal("the agents section must carry the effort and model fields")
+		t.Fatal("the system row template must carry the effort and model fields")
 	}
 	withHint := func(field configField) string {
 		if strings.TrimSpace(field.Hint) == "" {
@@ -3773,6 +3750,8 @@ func TestConfigPanelChoiceHeadCopy(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
 		{label: effortField.Label, ok: true},
 		{ok: false},
 		{label: modelField.Label, ok: true},
@@ -3802,7 +3781,7 @@ func TestConfigPanelChoiceHeadCopy(t *testing.T) {
 	if row := findRow(t, page, "xai/grok-effort"); row.Status != configChoiceCheckStatus {
 		t.Fatalf("the stored model row = %+v, want the check", row)
 	}
-	if row := findRow(t, page, "Follow primary agent"); row.Status != "" {
+	if row := findRow(t, page, "Follow conversation"); row.Status != "" {
 		t.Fatalf("the empty option carries %q, want no check while a row is stored", row.Status)
 	}
 
@@ -3892,19 +3871,21 @@ func TestConfigPanelModelPickerListsGlobalRows(t *testing.T) {
 	}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal Evaluator model", ok: true},
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
+		{label: "Model", ok: true},
 		{ok: false},
 	}, nil, "agents")
 
 	page := modelPickerPage(t, selector)
 	labels := rowLabels(page)
-	want := []string{"Follow primary agent", "openai/gpt-main", "anthropic/claude-sonnet-4-5"}
+	want := []string{"Follow conversation", "openai/gpt-main", "anthropic/claude-sonnet-4-5", "llm-gone"}
 	if !slices.Equal(labels, want) {
 		t.Fatalf("picker = %v, want %v", labels, want)
 	}
-	empty := findRow(t, page, "Follow primary agent")
-	if empty.Description != configModelConversationDesc {
-		t.Fatalf("the goal check's empty option = %q, want the conversation sentence", empty.Description)
+	empty := findRow(t, page, "Follow conversation")
+	if empty.Description != "No global pin; the system chooses at dispatch." {
+		t.Fatalf("the goal check's empty option = %q, want the system row's sentence", empty.Description)
 	}
 	row := findRow(t, page, "openai/gpt-main")
 	if row.Description != "https://api.openai.com/v1/chat/completions" {
@@ -3923,14 +3904,15 @@ func TestConfigPanelModelPickerKeepsDanglingPin(t *testing.T) {
 	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
 		{label: "explore", ok: true},
 		{label: "Model", ok: true},
 		{label: "openai/gpt-main", ok: true},
-	}, nil, "subagent_models")
+	}, nil, "agents")
 
 	// The section row names the dangling pin as written, and the picker keeps
 	// it after the real rows with no description of its own.
-	if explore := findRow(t, selector.richItems[0], "explore"); explore.Value != "llm-gone" {
+	if explore := findRow(t, selector.richItems[1], "explore"); explore.Value != "llm-gone" {
 		t.Fatalf("explore's value = %q, want the dangling reference as written", explore.Value)
 	}
 	page := modelPickerPage(t, selector)
@@ -3985,10 +3967,11 @@ func TestConfigPanelTypePageModelPickerFollowConversation(t *testing.T) {
 	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
 		{label: "explore", ok: true},
 		{label: "Model", ok: true},
 		{label: "Follow conversation", ok: true},
-	}, nil, "subagent_models")
+	}, nil, "agents")
 
 	if got := rowLabels(modelPickerPage(t, selector))[0]; got != configFollowConversation {
 		t.Fatalf("the type page's empty option = %q, want %q", got, configFollowConversation)
@@ -4090,7 +4073,9 @@ func TestConfigPanelModelChangeClearsEffort(t *testing.T) {
 	}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal Evaluator model", ok: true},
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
+		{label: "Model", ok: true},
 		{label: "deepseek/deepseek-v4-pro", ok: true},
 	}, nil, "agents")
 
@@ -4118,7 +4103,9 @@ func TestConfigPanelModelSameRowKeepsEffort(t *testing.T) {
 	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
-		{label: "Goal Evaluator model", ok: true},
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
+		{label: "Model", ok: true},
 		{label: "openai/gpt-main", ok: true},
 	}, nil, "agents")
 
@@ -4205,7 +4192,9 @@ func TestConfigPanelModelPickerWritesPassTheStoreValidator(t *testing.T) {
 
 	// A picked row's id is what the store gets.
 	run(t, []richStep{
-		{label: "Goal Evaluator model", ok: true},
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
+		{label: "Model", ok: true},
 		{label: "openai/gpt-main", ok: true},
 	}, "agents")
 	goal, _ := storedAgents(t)["goal_evaluator"].(map[string]any)
@@ -4218,6 +4207,8 @@ func TestConfigPanelModelPickerWritesPassTheStoreValidator(t *testing.T) {
 		t.Fatalf("the seed must be a pair the loader accepts: %v", err)
 	}
 	run(t, []richStep{
+		{label: "Built-in subagents", ok: true},
+		{label: "goal-evaluator", ok: true},
 		{label: "Thinking level", ok: true},
 		{label: configRowDefaultEffort, ok: true},
 	}, "agents")
@@ -4232,10 +4223,11 @@ func TestConfigPanelModelPickerWritesPassTheStoreValidator(t *testing.T) {
 		t.Fatalf("the seed must be a pin the loader accepts: %v", err)
 	}
 	run(t, []richStep{
+		{label: "Built-in subagents", ok: true},
 		{label: "explore", ok: true},
 		{label: "Model", ok: true},
 		{label: "deepseek/r1", ok: true},
-	}, "subagent_models")
+	}, "agents")
 	types, _ := storedAgents(t)["subagent_models"].(map[string]any)
 	explore, _ := types["explore"].(map[string]any)
 	if got, _ := explore["model"].(string); got != deepseek.ID {
@@ -4248,10 +4240,11 @@ func TestConfigPanelModelPickerWritesPassTheStoreValidator(t *testing.T) {
 	// Clearing the pin leaves a row the loader still accepts — the store's
 	// own round-trip keeps the row with its normalized name key.
 	run(t, []richStep{
+		{label: "Built-in subagents", ok: true},
 		{label: "explore", ok: true},
 		{label: "Model", ok: true},
 		{label: configFollowConversation, ok: true},
-	}, "subagent_models")
+	}, "agents")
 	types, _ = storedAgents(t)["subagent_models"].(map[string]any)
 	explore, kept := types["explore"].(map[string]any)
 	if !kept {
@@ -4358,9 +4351,10 @@ func TestConfigPanelNestedTemplateExploreTypePage(t *testing.T) {
 	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, []richStep{
+		{label: "Built-in subagents", ok: true},
 		{label: "explore", ok: true},
 		{ok: false},
-	}, nil, "subagent_models")
+	}, nil, "agents")
 
 	if len(selector.richItems) < 2 {
 		t.Fatalf("the explore page never opened: %v", selector.richLabels)

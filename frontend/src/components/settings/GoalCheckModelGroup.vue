@@ -11,8 +11,8 @@
        holds a configured row's id, `agents.goal_evaluator.reasoning_effort` holds
        "" while the level equals that row's own default (a live reading of the
        model page) and the level only when it overrides it. -->
-  <section class="gc" data-group="goal-check-model">
-    <header class="gc__head">
+  <div :class="bare ? 'gc gc--bare' : 'gc'" data-group="goal-check-model">
+    <header v-if="!bare" class="gc__head">
       <h3>{{ t('subagents.goalCheck.title') }}</h3>
     </header>
 
@@ -82,7 +82,7 @@
         </div>
       </div>
     </div>
-  </section>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -102,7 +102,7 @@ import { useI18n } from '@/locales'
 
 import type { SettingsRefusal, useSettingsForm } from '@/components/settings/form/useSettingsForm'
 
-const props = defineProps<{ form: ReturnType<typeof useSettingsForm> }>()
+const props = withDefaults(defineProps<{ form: ReturnType<typeof useSettingsForm>; bare?: boolean }>(), { bare: false })
 
 const MODEL_PATH = 'agents.goal_evaluator.model'
 const EFFORT_PATH = 'agents.goal_evaluator.reasoning_effort'
