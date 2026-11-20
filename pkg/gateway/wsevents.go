@@ -979,7 +979,7 @@ func shellCardFor(toolName, body string) *tool.ShellCard {
 func readableAnswerFor(toolName, body string, input map[string]any) *tool.ReadableAnswer {
 	answer, ok := tool.ReadableToolAnswer(toolName, body, input)
 	// A roster with nobody in it is still the card: its note is the answer.
-	if !ok || (len(answer.Rows) == 0 && len(answer.Peers) == 0 && answer.Send == nil &&
+	if !ok || (len(answer.Rows) == 0 && len(answer.Peers) == 0 && len(answer.Models) == 0 && answer.Send == nil &&
 		strings.TrimSpace(answer.Text) == "" && strings.TrimSpace(answer.Note) == "") {
 		return nil
 	}

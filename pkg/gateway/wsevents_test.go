@@ -2285,6 +2285,24 @@ func TestReadableAnswerRidesTheStepTheEventAndTheStoredRow(t *testing.T) {
 	require.NotContains(t, gatewayToolCompletedStepData("call-3", "tool read_file", "read_file", nil, "", `{"name":"pkg"}`, "", "", tool.ToolMeta{ToolName: "read_file"}), "readable_answer")
 }
 
+// TestReadableAnswerCarriesTheUsableModelsRoster: a list_usable_models answer
+// reaches the page as the card's roster, and one with no models but a note is
+// still a card rather than nothing (plan 337).
+func TestReadableAnswerCarriesTheUsableModelsRoster(t *testing.T) {
+	roster := `{"models":[{"id":"llm_a","provider":"zhipuai","model":"glm-5.3","efforts":["low","medium","high"],"default_effort":"medium","current":true}],"note":""}`
+	answer := readableAnswerFor("list_usable_models", roster, nil)
+	require.NotNil(t, answer)
+	require.Len(t, answer.Models, 1)
+	require.Equal(t, "zhipuai", answer.Models[0].Provider)
+	require.Equal(t, "glm-5.3", answer.Models[0].Model)
+	require.True(t, answer.Models[0].Current)
+
+	empty := readableAnswerFor("list_usable_models", `{"models":[],"note":"No model is allowed for subagents you pick."}`, nil)
+	require.NotNil(t, empty)
+	require.Empty(t, empty.Models)
+	require.Equal(t, "No model is allowed for subagents you pick.", empty.Note)
+}
+
 // TestGatewayToolMetaPayloadCarriesTheRefusalWords: the live step's tool_meta
 // is a field whitelist, so the refusal's own words must be named in it — the
 // reloaded rows carry the whole meta and would otherwise know more than the
