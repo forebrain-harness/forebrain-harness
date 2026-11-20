@@ -135,6 +135,13 @@
         v-else-if="peerSend && !step.error"
         :send="step.readableAnswer!.send!"
       />
+      <!-- A list_usable_models answer is the model roster, drawn as provider
+           groups with the thinking levels as chips (plan 337); an empty roster
+           still draws its own localized state. -->
+      <UsableModelsCard
+        v-else-if="usableModels && !step.error"
+        :answer="step.readableAnswer!"
+      />
       <!-- A call whose body is its answer itself — a tool with no card of its
            own, a row a migrated session recorded — lists the answer's fields
            and its text, read by the engine; never the JSON it arrived in. -->
@@ -222,6 +229,7 @@ import ShellCardBody from './ShellCardBody.vue'
 import ToolAnswerBody from './ToolAnswerBody.vue'
 import PeerRosterCard from './PeerRosterCard.vue'
 import PeerSendCard from './PeerSendCard.vue'
+import UsableModelsCard from './UsableModelsCard.vue'
 import ToolGateFacts from './ToolGateFacts.vue'
 import ToolGateFooter from './ToolGateFooter.vue'
 
@@ -492,6 +500,13 @@ const peerRoster = computed(() => {
 
 /** A peer_send answer draws the message and its delivery. */
 const peerSend = computed(() => Boolean(props.step.readableAnswer?.send))
+
+/** A list_usable_models answer draws the model roster; an empty roster still
+ * draws its own localized state, which is why the note counts. */
+const usableModels = computed(() => {
+  const answer = props.step.readableAnswer
+  return Boolean(answer && ((answer.models?.length ?? 0) > 0 || answer.note))
+})
 
 const exitCode = computed(() => props.step.shellCard?.exitCode ?? null)
 

@@ -148,6 +148,41 @@ describe('ToolCallCard', () => {
     expect(failed.text()).toContain('no agent named')
   })
 
+  it('draws a usable-models roster as its own card, and replays an older text-only answer as fields', () => {
+    const roster = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'list_usable_models',
+          summary: 'list_usable_models',
+          output: 'output:',
+          readableAnswer: {
+            rows: [],
+            models: [{ provider: 'zhipuai', model: 'glm-5.3', efforts: ['low', 'medium'], defaultEffort: 'medium' }],
+          },
+        }),
+      },
+    })
+    expect(roster.find('[data-testid="usable-models"]').exists()).toBe(true)
+    expect(roster.find('[data-testid="tool-answer"]').exists()).toBe(false)
+    expect(roster.text()).toContain('glm-5.3')
+
+    // A stored row from before the roster field still reads as its own facts.
+    const replayed = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'list_usable_models',
+          summary: 'list_usable_models',
+          output: 'output:',
+          readableAnswer: { rows: [], text: 'glm-5.3 (zhipuai) — thinking: low, medium' },
+        }),
+      },
+    })
+    expect(replayed.find('[data-testid="usable-models"]').exists()).toBe(false)
+    expect(replayed.find('[data-testid="tool-answer"]').exists()).toBe(true)
+  })
+
   it('reads an answer that is text as Markdown, and a failed call keeps its error', async () => {
     const text = mount(ToolCallCard, {
       props: { open: true, step: stepOf({ toolName: 'TaskCreate', summary: 'TaskCreate', output: 'output:', readableAnswer: { rows: [], text: 'Task **#6** created' } }) },
