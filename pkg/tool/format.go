@@ -4021,6 +4021,11 @@ type ReadableAnswer struct {
 	Note string `json:"note,omitempty"`
 	// Send is a peer_send answer: the message that went out, and where it went.
 	Send *ReadablePeerSend `json:"send,omitempty"`
+	// Models is a list_usable_models answer's roster, in the answer's own
+	// order, grouped by provider on the surface. The row id is the LLM's
+	// dispatch argument, never a person's reading, so it is not here at all
+	// (owner 2026-11-20, plan 337).
+	Models []ReadableModel `json:"models,omitempty"`
 }
 
 // ReadablePeer is one agent of a peer_list answer, as a card shows it. The
@@ -4051,6 +4056,20 @@ type ReadablePeer struct {
 	Own  bool   `json:"own,omitempty"`
 	Mark string `json:"mark,omitempty"`
 	Tone int    `json:"tone,omitempty"`
+}
+
+// ReadableModel is one row of a list_usable_models roster, as a card shows it:
+// the label a person reads, its provider, the thinking levels it can run at and
+// the one it runs at by default, and the two flags naming the conversation's
+// current row and an approved hand-off's row. The wire id is deliberately
+// absent — a surface never shows it (owner 2026-11-20).
+type ReadableModel struct {
+	Provider      string   `json:"provider"`
+	Model         string   `json:"model"`
+	Efforts       []string `json:"efforts,omitempty"`
+	DefaultEffort string   `json:"default_effort,omitempty"`
+	Current       bool     `json:"current,omitempty"`
+	HandedOff     bool     `json:"handed_off,omitempty"`
 }
 
 // ReadablePeerSend is a peer_send answer's card: the message that went out,
@@ -4334,6 +4353,7 @@ func readUsableModels(content string) (ReadableAnswer, bool) {
 			continue
 		}
 		var lines []string
+		var models []ReadableModel
 		for _, row := range raw.Models {
 			line := fmt.Sprintf("%s (%s)", strings.TrimSpace(row.Model), strings.TrimSpace(row.Provider))
 			if len(row.Efforts) > 0 {
@@ -4349,8 +4369,16 @@ func readUsableModels(content string) (ReadableAnswer, bool) {
 				line += " (handed off)"
 			}
 			lines = append(lines, line)
+			models = append(models, ReadableModel{
+				Provider:      strings.TrimSpace(row.Provider),
+				Model:         strings.TrimSpace(row.Model),
+				Efforts:       row.Efforts,
+				DefaultEffort: strings.TrimSpace(row.DefaultEffort),
+				Current:       row.Current,
+				HandedOff:     row.HandedOff,
+			})
 		}
-		return ReadableAnswer{Text: strings.Join(lines, "\n"), Note: strings.TrimSpace(raw.Note)}, true
+		return ReadableAnswer{Text: strings.Join(lines, "\n"), Note: strings.TrimSpace(raw.Note), Models: models}, true
 	}
 	return ReadableAnswer{}, false
 }
