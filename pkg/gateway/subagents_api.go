@@ -243,15 +243,16 @@ func subagentRowFor(cfg *config.Root, agentID, name string) (subagentRow, bool) 
 func builtinSubagentRow(cfg *config.Root, agentID, name string, entry config.SubagentConfig) subagentRow {
 	// The name comes from the list this walks, so the definition is there.
 	def, _ := agent.ResolvePublicSubtype(name)
+	// A built-in is always on (P5): the row carries no switch, and the prompt
+	// rewrite it once reported is retired with it.
 	row := subagentRow{
-		Name:             name,
-		Kind:             subagentKindBuiltin,
-		Description:      strings.TrimSpace(def.Description),
-		Tools:            tool.BuiltinSubagentToolsTier(name),
-		AllowedTools:     []string{},
-		Continuable:      def.Continuable,
-		Enabled:          config.BoolPtr(subagentEnabled(entry)),
-		PromptOverridden: strings.TrimSpace(entry.SystemPrompt) != "",
+		Name:         name,
+		Kind:         subagentKindBuiltin,
+		Description:  strings.TrimSpace(def.Description),
+		Tools:        tool.BuiltinSubagentToolsTier(name),
+		AllowedTools: []string{},
+		Continuable:  def.Continuable,
+		Enabled:      nil,
 	}
 	subagentRowModel(cfg, agentID, name, &row, entry)
 	return row
@@ -276,13 +277,14 @@ func customSubagentRow(cfg *config.Root, agentID, name string, entry config.Suba
 	return row
 }
 
-// customSubagentTools is a custom subagent's tool tier. Empty is read_only:
-// a subagent that may edit the codebase is a deliberate choice, never a default.
+// customSubagentTools is a custom subagent's tool tier. Empty is Edit (owner
+// 2026-11-18): the workspace is the default working set, and an explicit
+// read_only — the choice, not the absence of one — is what restricts it.
 func customSubagentTools(entry config.SubagentConfig) string {
 	if tools := strings.TrimSpace(entry.Tools); tools != "" {
 		return tools
 	}
-	return config.SubagentToolsReadOnly
+	return config.SubagentToolsEdit
 }
 
 // systemSubagentRow describes a subagent the system dispatches. It carries no
@@ -618,11 +620,9 @@ func sharedSubagentEnabled(def config.AgentDefinition, name string) bool {
 // the agent's switch says the feature is on, and a list with nothing enabled
 // says otherwise.
 func subagentAllRowsDisabled(cfg *config.Root, def config.AgentDefinition) bool {
-	for _, name := range agent.PublicSubagentNames {
-		if subagentEnabled(subagentEntry(def, name)) {
-			return false
-		}
-	}
+	// The built-ins are always on (P5) and carry no switch, so the linkage
+	// counts the switchable rows alone: a custom subagent's own switch and a
+	// shared definition's reference entry.
 	shared := config.SubagentDefinitionNames(subagentDefinitions(cfg))
 	for _, entry := range def.Subagents {
 		key := subagentKey(entry.Name)
@@ -1053,22 +1053,20 @@ func (s *Server) handleAgentSubagentUpdate(w http.ResponseWriter, r *http.Reques
 			write.def.Subagents[index] = entry
 			return map[string]any{"name": name}, nil
 		case subagentKindBuiltin:
+			// A built-in's entry is a model-and-level pin (P5): the prompt
+			// rewrite and the switch are retired, so a write carrying either
+			// is refused rather than stored and silently dropped.
 			var in subagentBuiltinWrite
 			if err := decodeSubagentBody(r, &in); err != nil {
 				return nil, err
 			}
-			stored := subagentEntry(write.def, name)
+			if strings.TrimSpace(in.SystemPrompt) != "" || in.Enabled != nil {
+				return nil, subagentBadRequest("%q is a built-in: it takes a model and a reasoning effort, nothing else.", name)
+			}
 			entry := config.SubagentConfig{
 				Name:            name,
 				Model:           subagentModelRef(write, in.Model),
 				ReasoningEffort: strings.TrimSpace(in.ReasoningEffort),
-				SystemPrompt:    strings.TrimSpace(in.SystemPrompt),
-				Enabled:         subagentEnabledAfterUpdate(stored.Enabled, in.Enabled),
-			}
-			// "Restore the default" clears the rewrite and nothing else: the
-			// entry keeps the model this agent pinned, if any.
-			if in.ResetPrompt {
-				entry.SystemPrompt = ""
 			}
 			if err := subagentLevelRefused(r, write.models, write.agentID, entry); err != nil {
 				return nil, err
@@ -1144,7 +1142,9 @@ func (s *Server) handleAgentSubagentEnabled(w http.ResponseWriter, r *http.Reque
 	name := subagentKey(pathParam(r, "name"))
 	s.writeAgentSubagents(w, r, func(write *subagentWrite) (any, error) {
 		switch subagentKindFor(&write.cfg, write.def, name) {
-		case subagentKindBuiltin, subagentKindCustom:
+		case subagentKindBuiltin:
+			return nil, subagentBadRequest("%q is a built-in: it is always on and has no switch", name)
+		case subagentKindCustom:
 			setSubagentRowEnabled(&write.def, name, enabled)
 		case subagentKindShared:
 			// Absent is disabled, so switching one off removes the reference
@@ -1195,9 +1195,8 @@ func (s *Server) handleAgentSubagentSwitch(w http.ResponseWriter, r *http.Reques
 			}
 			custom = append(custom, name)
 		}
-		for _, name := range agent.PublicSubagentNames {
-			setSubagentRowEnabled(&write.def, name, enabled)
-		}
+		// The built-ins are always on (P5) and carry no switch, so switching
+		// the feature moves the switchable rows alone.
 		for _, name := range custom {
 			setSubagentRowEnabled(&write.def, name, enabled)
 		}

@@ -265,9 +265,11 @@ describe('SubagentsView', () => {
     expect(labels('db-migrator')).toEqual(['编辑 db-migrator', '删除 db-migrator'])
     expect(customRow.find('.forebrain-icon-slot').exists()).toBe(false)
 
-    // 内置: the same switch, 编辑 and a hole where 删除 would be.
+    // 内置: always on (P5) — no switch where the switchable rows carry one,
+    // and 编辑 beside the hole where 删除 would be.
     const builtinRow = wrapper.find('[data-subagent-row="explore"]')
-    expect(builtinRow.find('[data-testid="subagent-switch-explore"]').exists()).toBe(true)
+    expect(builtinRow.find('[data-testid="subagent-switch-explore"]').exists()).toBe(false)
+    expect(builtinRow.find('.sa-sw-slot').exists()).toBe(true)
     expect(labels('explore')).toEqual(['编辑 explore'])
     expect(builtinRow.find('.forebrain-icon-slot').exists()).toBe(true)
 
@@ -299,10 +301,10 @@ describe('SubagentsView', () => {
   it('switches one row and reloads, because the toolbar’s switch may move with it', async () => {
     const wrapper = await mountPage()
 
-    await wrapper.find('[data-testid="subagent-switch-explore"]').trigger('click')
+    await wrapper.find('[data-testid="subagent-switch-db-migrator"]').trigger('click')
     await flushPromises()
 
-    expect(vi.mocked(forebrainApi.setSubagentEnabled)).toHaveBeenCalledWith('main', 'explore', false)
+    expect(vi.mocked(forebrainApi.setSubagentEnabled)).toHaveBeenCalledWith('main', 'db-migrator', false)
     expect(vi.mocked(forebrainApi.subagentConfigPage)).toHaveBeenCalledTimes(2)
   })
 

@@ -188,7 +188,10 @@ func (c SubagentCatalog) ResolvePublic(name string) (agent.Definition, error) {
 // with a project-type wording (office and batch workers, the coding plan
 // reviewer) reads that wording.
 func (c SubagentCatalog) Prompt(name string) (string, bool) {
-	if entry, ok := c.entries[subagentKey(name)]; ok {
+	// A public built-in's entry is a model-and-level pin (P5): it carries no
+	// prompt of its own, and the custom ones beside it in this map do — so
+	// the read skips the built-ins rather than the whole map.
+	if entry, ok := c.entries[subagentKey(name)]; ok && !isPublicSubagentName(entry.Name) {
 		if prompt := strings.TrimSpace(entry.SystemPrompt); prompt != "" {
 			return prompt, true
 		}
@@ -240,7 +243,10 @@ func (c SubagentCatalog) ToolPolicy(name string) (tool.SubagentToolPolicy, bool)
 	}
 	mode := strings.TrimSpace(entry.Tools)
 	if mode == "" {
-		mode = appcfg.SubagentToolsReadOnly
+		// Empty is Edit (owner 2026-11-18): a custom subagent may change the
+		// workspace unless it is told otherwise. An explicit read_only stays
+		// read-only — the choice, not the absence of one, is what restricts.
+		mode = appcfg.SubagentToolsEdit
 	}
 	policy := tool.SubagentToolPolicy{Mode: mode}
 	if mode == appcfg.SubagentToolsPick {
@@ -312,11 +318,13 @@ func (c SubagentCatalog) configures(name string) bool {
 }
 
 func (c SubagentCatalog) builtinEnabled(name string) bool {
+	// A built-in is always on (P5): the entry's switch is retired, so the
+	// only gate left is office's — a batch project runs the office workers
+	// alone.
 	if c.office() && !slices.Contains(agent.OfficeSubagentNames, name) {
 		return false
 	}
-	entry, ok := c.entries[name]
-	return !ok || subagentConfigEnabled(entry)
+	return true
 }
 
 // customDefinition is the agent.Definition a custom subagent runs under. Its

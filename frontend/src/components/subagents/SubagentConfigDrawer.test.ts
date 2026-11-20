@@ -110,15 +110,18 @@ describe('SubagentConfigDrawer', () => {
     vi.restoreAllMocks()
   })
 
-  it('shows a built-in prompt in full, word for word', async () => {
-    const prompt = 'You are the explore subagent.\n' + '它要回答的四件事写在这里。\n'.repeat(60)
+  it('shows a built-in as its model and level alone, with no prompt field', async () => {
+    // A built-in's entry is a pin (P5): the prompt rewrite and its badge
+    // retire, so the drawer offers the model and the level and nothing else.
     vi.mocked(forebrainApi.subagentConfig).mockResolvedValue(
-      detail({ systemPrompt: prompt, defaultPrompt: 'You are the explore subagent.' }),
+      detail({ systemPrompt: 'You are the explore subagent.', defaultPrompt: 'You are the explore subagent.' }),
     )
     const wrapper = await openDrawer()
 
     expect(wrapper.find('.forebrain-drawer-head b').text()).toBe('编辑内置子代理 explore')
-    expect((wrapper.find('[data-testid="subagent-prompt"]').element as HTMLTextAreaElement).value).toBe(prompt)
+    expect(wrapper.find('[data-testid="subagent-prompt"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="subagent-overridden"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="subagent-restore"]').exists()).toBe(false)
   })
 
   it('disables the effort while the model follows the primary agent', async () => {
@@ -182,9 +185,9 @@ describe('SubagentConfigDrawer', () => {
     )
   })
 
-  it('clears the rewrite rather than writing it back, once 恢复默认 is pressed', async () => {
+  it("clears a custom subagent rewrite rather than writing it back, once 恢复默认 is pressed", async () => {
     vi.mocked(forebrainApi.subagentConfig).mockResolvedValue(
-      detail({ promptOverridden: true, systemPrompt: 'MY OWN EXPLORE', defaultPrompt: 'THE HARNESS ONE' }),
+      detail({ kind: 'custom', promptOverridden: true, systemPrompt: 'MY OWN SCOUT', defaultPrompt: 'THE HARNESS ONE' }),
     )
     const wrapper = await openDrawer()
 
@@ -197,22 +200,28 @@ describe('SubagentConfigDrawer', () => {
     await wrapper.find('[data-testid="subagent-save"]').trigger('click')
     await flushPromises()
 
+    // The custom body is written whole: the fields the restore did not touch
+    // ride along as the record held them.
     expect(forebrainApi.updateSubagentConfig).toHaveBeenCalledWith('main', 'explore', {
+      description: 'Read-only investigation: searches the code, finds files and call sites',
       model: '',
       reasoningEffort: '',
-      resetPrompt: true,
+      systemPrompt: 'THE HARNESS ONE',
+      tools: 'read_only',
+      allowedTools: [],
+      continuable: false,
     })
     expect(wrapper.emitted('saved')).toEqual([['explore']])
   })
 
-  it('writes a built-in prompt only when it was rewritten here', async () => {
+  it('writes a built-in as its model and level alone', async () => {
     const wrapper = await openDrawer()
 
     await wrapper.find('[data-testid="subagent-save"]').trigger('click')
     await flushPromises()
 
-    // An untouched prompt travels not at all: writing it would pin the text as
-    // this agent's rewrite of a built-in that still follows the harness.
+    // The pin is all a built-in's write carries (P5): the prompt and the
+    // switch are retired, and the gateway refuses them.
     expect(forebrainApi.updateSubagentConfig).toHaveBeenCalledWith('main', 'explore', {
       model: '',
       reasoningEffort: '',

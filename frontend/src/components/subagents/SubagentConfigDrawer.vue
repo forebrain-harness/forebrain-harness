@@ -185,7 +185,10 @@
         <Input class="forebrain-field h-[34px]" :model-value="fixedToolsText" readonly data-testid="subagent-tools-fixed" />
       </label>
 
-      <div class="sa-field">
+      <!-- A built-in's prompt is the harness's own (P5): the rewrite and its
+           badge retire, so the field shows for a custom subagent's own prompt
+           and for a system subagent's read-only view of what runs. -->
+      <div v-if="custom || kind === 'system'" class="sa-field">
         <span class="sa-label sa-plab">
           <span>{{ t('subagents.fieldPrompt') }}</span>
           <BadgeComponent v-if="overridden" variant="warning" data-testid="subagent-overridden">
@@ -370,7 +373,7 @@ function emptyForm(): SubagentForm {
     description: '',
     model: '',
     reasoningEffort: '',
-    tools: 'read_only',
+    tools: 'edit',
     allowedTools: [],
     continuable: true,
     prompt: '',
@@ -633,10 +636,9 @@ function customBody(): SubagentConfigBody {
 /** A built-in takes the model, the effort and its prompt — and its prompt only
  * when it was rewritten here. */
 function builtinBody(): SubagentConfigBody {
-  const body: SubagentConfigBody = { model: form.model, reasoningEffort: form.reasoningEffort }
-  if (resetPrompt.value) body.resetPrompt = true
-  else if (form.prompt.trim() !== openedPrompt.value.trim()) body.systemPrompt = form.prompt.trim()
-  return body
+  // A built-in's pin is a model and a level (P5): the body carries nothing
+  // else, because the gateway refuses the retired fields.
+  return { model: form.model, reasoningEffort: form.reasoningEffort }
 }
 
 async function save() {

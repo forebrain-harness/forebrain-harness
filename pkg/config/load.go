@@ -706,6 +706,13 @@ func normalize(r *Root) {
 	// with no migration (owner 2026-11-16: a legacy label means unset, plan
 	// 315).
 	clearUnresolvedDefaultModelLabels(r)
+	// A public built-in's entry is a model-and-level pin now (P5): the prompt
+	// rewrite and the switch it once carried are retired settings, dropped
+	// here unconditionally — a stored prompt the user wrote too, which is the
+	// difference from the label rule above, where only a value nothing
+	// resolves to is cleared (owner 2026-11-19). The retirement is in-memory,
+	// so a stored row loses nothing until the next write of its section.
+	stripRetiredBuiltinEntryFields(r)
 	NormalizeMCPServers(r.Agents.Defaults.MCPServers)
 	for k := range r.Agents.Definitions {
 		d := r.Agents.Definitions[k]
@@ -714,6 +721,35 @@ func normalize(r *Root) {
 	}
 	normalizeSandboxConfig(r)
 	normalizeLSPSection(&r.LSP)
+}
+
+// stripRetiredBuiltinEntryFields drops the two fields a public built-in's
+// entry no longer carries (P5): the system prompt rewrite and the switch.
+// Normalize is in-memory, so nothing stored is destroyed; the next write of
+// the agents section persists the stripped shape. A system type's entry never
+// had either to begin with — the loader refuses those entries whole.
+func stripRetiredBuiltinEntryFields(r *Root) {
+	if r == nil || len(r.Agents.Definitions) == 0 {
+		return
+	}
+	for id, def := range r.Agents.Definitions {
+		changed := false
+		for i, entry := range def.Subagents {
+			if !IsBuiltInSubagentDefinition(entry.Name) {
+				continue
+			}
+			if strings.TrimSpace(entry.SystemPrompt) == "" && entry.Enabled == nil {
+				continue
+			}
+			entry.SystemPrompt = ""
+			entry.Enabled = nil
+			def.Subagents[i] = entry
+			changed = true
+		}
+		if changed {
+			r.Agents.Definitions[id] = def
+		}
+	}
 }
 
 // clearUnresolvedDefaultModelLabels clears the default_model of every agent

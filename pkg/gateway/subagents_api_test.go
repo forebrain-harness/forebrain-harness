@@ -482,33 +482,35 @@ func TestSubagentCreatePrependsAndRefusesCollisions(t *testing.T) {
 }
 
 // TestSubagentBuiltinRewriteAndRestoreDefault pins the two halves of the prompt
-// override: the rewrite is what the row and the drawer then read, and restoring
-// the default drops the override entry rather than storing an empty one.
-func TestSubagentBuiltinRewriteAndRestoreDefault(t *testing.T) {
+// TestSubagentBuiltinWriteIsAPin pins the built-in write's shape (P5): a
+// model and a level land as the entry, the retired prompt and switch are
+// refused on the write, and the row reads the pin back with no badge.
+func TestSubagentBuiltinWriteIsAPin(t *testing.T) {
 	f := newSubagentFixture(t, nil)
 
 	rec := f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{
-		"system_prompt":    "You are my explorer.",
 		"model":            "openai/gpt-sub",
 		"reasoning_effort": "low",
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	entry := findSubagentEntry(t, f.subagentEntries(t), "explore")
-	require.Equal(t, "You are my explorer.", entry.SystemPrompt)
 	require.Equal(t, "openai/gpt-sub", entry.Model)
 	require.Equal(t, "low", entry.ReasoningEffort)
+	require.Empty(t, entry.SystemPrompt)
+	require.Nil(t, entry.Enabled)
 
-	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents/explore", nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var detail subagentDetail
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
-	require.True(t, detail.PromptOverridden)
-	require.Equal(t, "You are my explorer.", detail.SystemPrompt)
-	require.NotNil(t, detail.DefaultPrompt)
-	original, _ := agent.SystemPromptForSubtype("explore")
-	require.Equal(t, original, *detail.DefaultPrompt)
+	// The retired fields are refused: the pin is all a built-in takes.
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{
+		"system_prompt": "You are my explorer.",
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "it takes a model and a reasoning effort, nothing else.")
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{
+		"enabled": false,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 
-	// The row says the same thing about the model, and where it came from.
+	// The row says what it will run on, and carries no rewrite badge.
 	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	row := subagentRowByName(t, decodeSubagentPage(t, rec).Rows, "explore")
@@ -516,55 +518,59 @@ func TestSubagentBuiltinRewriteAndRestoreDefault(t *testing.T) {
 	require.Equal(t, "gpt-sub", row.Model)
 	require.Equal(t, "low", row.ReasoningEffort)
 	require.Equal(t, subagentModelFromAgent, row.ModelSource)
-	require.True(t, row.PromptOverridden)
+	require.False(t, row.PromptOverridden)
 
-	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{"reset_prompt": true})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.Empty(t, f.subagentEntries(t), "an override that only repeats the default is dropped")
-
-	rec = f.do(t, http.MethodGet, "/api/agents/primary/main/subagents/explore", nil)
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
-	require.False(t, detail.PromptOverridden)
-	require.Equal(t, original, detail.SystemPrompt)
+	// The switch endpoint is gone with the switch: a built-in is always on.
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore/enabled", map[string]any{"enabled": false})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "always on and has no switch")
 }
 
-// TestSubagentBuiltinSwitchAndLinkage pins one row's switch and the rule that
-// ties it to the agent's own: the last row switched off switches the feature off
-// here, and switching any row on switches it on.
-func TestSubagentBuiltinSwitchAndLinkage(t *testing.T) {
-	f := newSubagentFixture(t, nil)
+// TestSubagentSwitchAndLinkage pins the linkage on the row that has a switch
+// (P5): a custom subagent's own switch, with the agent's following it — and a
+// built-in answers that it is always on and carries none.
+func TestSubagentSwitchAndLinkage(t *testing.T) {
+	f := newSubagentFixture(t, func(def *appcfg.AgentDefinition) {
+		def.Subagents = append(def.Subagents, appcfg.SubagentConfig{
+			Name: "solo", Description: "d", SystemPrompt: "p",
+		})
+	})
 
+	// A built-in has no switch: always on, by the rule the row renders.
 	rec := f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/plan/enabled", map[string]any{"enabled": false})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "always on and has no switch")
+
+	// A custom subagent's switch drives the agent's own: on follows on, and
+	// the last switchable row switched off takes it off.
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/solo/enabled", map[string]any{"enabled": false})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var ack struct {
 		Switch bool `json:"switch"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ack))
-	require.False(t, ack.Switch, "three other rows are still on")
-	entry := findSubagentEntry(t, f.subagentEntries(t), "plan")
+	require.False(t, ack.Switch)
+	entry := findSubagentEntry(t, f.subagentEntries(t), "solo")
 	require.NotNil(t, entry.Enabled)
 	require.False(t, *entry.Enabled)
 
-	// Switching a row on can only mean the feature is on for this agent: the
-	// agent's own switch follows, without the user having to find it.
-	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/plan/enabled", map[string]any{"enabled": true})
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/solo/enabled", map[string]any{"enabled": true})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ack))
 	require.True(t, ack.Switch)
 	def := f.mainDefinition(t)
 	require.NotNil(t, def.EnableSubagent)
 	require.True(t, *def.EnableSubagent)
-	require.Empty(t, f.subagentEntries(t), "a built-in back at its default needs no entry")
 
-	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/plan/enabled", map[string]any{})
+	// A body that names no switch at all stays refused.
+	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/solo/enabled", map[string]any{})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 
+	// The system type's refusal is its own sentence.
 	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/goal-evaluator/enabled", map[string]any{"enabled": false})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }
 
-// TestSubagentRowSwitchLinkageWhenEveryRowIsOff pins the other half: a list with
-// nothing enabled says the feature is off for this agent.
 func TestSubagentRowSwitchLinkageWhenEveryRowIsOff(t *testing.T) {
 	f := newSubagentFixture(t, func(def *appcfg.AgentDefinition) {
 		def.EnableSubagent = appcfg.BoolPtr(true)
@@ -612,11 +618,8 @@ func TestSubagentAgentSwitchRewritesEveryRow(t *testing.T) {
 	def := f.mainDefinition(t)
 	require.NotNil(t, def.EnableSubagent)
 	require.False(t, *def.EnableSubagent)
-	for _, name := range agent.PublicSubagentNames {
-		entry := findSubagentEntry(t, def.Subagents, name)
-		require.NotNil(t, entry.Enabled, "%s must carry the switch", name)
-		require.False(t, *entry.Enabled)
-	}
+	// The built-ins are always on (P5) and carry no switch, so the toolbar
+	// writes the switchable row alone — no pin entries are created for them.
 	solo := findSubagentEntry(t, def.Subagents, "solo")
 	require.NotNil(t, solo.Enabled)
 	require.False(t, *solo.Enabled)
@@ -625,7 +628,7 @@ func TestSubagentAgentSwitchRewritesEveryRow(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	for _, row := range decodeSubagentPage(t, rec).Rows {
 		if row.Enabled == nil {
-			require.Equal(t, subagentKindSystem, row.Kind, "%s: only a system row has no switch", row.Name)
+			require.NotEqual(t, subagentKindCustom, row.Kind, "%s: a custom row carries a switch", row.Name)
 			continue
 		}
 		require.False(t, *row.Enabled, "%s is off", row.Name)
@@ -636,7 +639,7 @@ func TestSubagentAgentSwitchRewritesEveryRow(t *testing.T) {
 	def = f.mainDefinition(t)
 	require.NotNil(t, def.EnableSubagent)
 	require.True(t, *def.EnableSubagent)
-	require.Len(t, def.Subagents, 1, "a built-in back at its default needs no entry: %+v", def.Subagents)
+	require.Len(t, def.Subagents, 1, "a built-in never gained an entry: %+v", def.Subagents)
 	require.Equal(t, "solo", def.Subagents[0].Name)
 	require.Nil(t, def.Subagents[0].Enabled)
 }
@@ -787,9 +790,17 @@ func TestSubagentModelSurfacesShowVendorListingDisplayName(t *testing.T) {
 // off would come back on. Status codes are collected and asserted on the main
 // goroutine only.
 func TestSubagentRowSwitchesDoNotLoseUpdates(t *testing.T) {
-	f := newSubagentFixture(t, nil)
+	f := newSubagentFixture(t, func(def *appcfg.AgentDefinition) {
+		// Four custom rows to race: the built-ins have no switch to race on
+		// (P5), and the lost-update shape is about the section's writers.
+		for _, name := range []string{"row-a", "row-b", "row-c", "row-d"} {
+			def.Subagents = append(def.Subagents, appcfg.SubagentConfig{
+				Name: name, Description: "raced", SystemPrompt: "You race.",
+			})
+		}
+	})
 
-	names := []string{"general-purpose", "explore", "plan", "verification"}
+	names := []string{"row-a", "row-b", "row-c", "row-d"}
 	codes := make([]int, len(names))
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -1072,13 +1083,13 @@ func TestSubagentSharedRowWritesAreRefused(t *testing.T) {
 	// model is a row of the install-wide table, as every pin is since plan 315.
 	overrideRowID := seedGlobalModelRow(t, f, "openai", "gpt-override")
 	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/explore", map[string]any{
-		"model": overrideRowID, "reasoning_effort": "low", "system_prompt": "search here",
+		"model": overrideRowID, "reasoning_effort": "low",
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	override := findSubagentEntry(t, f.subagentEntries(t), "explore")
 	require.Equal(t, overrideRowID, override.Model)
 	require.Equal(t, "low", override.ReasoningEffort)
-	require.Equal(t, "search here", override.SystemPrompt)
+	require.Empty(t, override.SystemPrompt)
 
 	rec = f.do(t, http.MethodPut, "/api/agents/primary/main/subagents/db-migrator", map[string]any{
 		"description": "runs migrations and seeds", "system_prompt": "You migrate and seed.",

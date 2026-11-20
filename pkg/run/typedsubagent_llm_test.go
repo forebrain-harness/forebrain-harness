@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -426,7 +427,9 @@ func typedPromptTestContext(subtype string) context.Context {
 // A rewrite of a built-in subagent's prompt is what the model actually receives:
 // it replaces the built-in text whole, and the engine still appends the file
 // access scope after it.
-func TestTypedSubagentPromptUsesTheAgentsRewrite(t *testing.T) {
+func TestTypedSubagentPromptUsesTheBuiltinText(t *testing.T) {
+	// A built-in's pin carries no prompt (P5): the built-in text is what a
+	// typed run of it gets, whatever an older stored row held.
 	inner := &captureLLM{}
 	wrapped := wrapTypedSubagentPromptLLM(inner, SubagentCatalogFor(catalogTestConfig(), "main").Prompt)
 	_, err := wrapped.Execute(typedPromptTestContext("explore"), []llm.Message{
@@ -439,12 +442,13 @@ func TestTypedSubagentPromptUsesTheAgentsRewrite(t *testing.T) {
 	if len(inner.messages) == 0 {
 		t.Fatal("no messages captured")
 	}
+	builtin, _ := agent.SystemPromptForSubtype("explore")
 	got := inner.messages[0].TextContent()
-	if !strings.HasPrefix(got, "Search only what the task names.") {
-		t.Fatalf("the rewrite did not reach the model: %q", got)
+	if !strings.HasPrefix(got, builtin) {
+		t.Fatalf("the built-in prompt did not reach the model: %q", got)
 	}
 	if !strings.Contains(got, "FILE ACCESS SCOPE") {
-		t.Fatalf("the file access scope was dropped from the rewritten prompt: %q", got)
+		t.Fatalf("the file access scope was dropped from the prompt: %q", got)
 	}
 }
 

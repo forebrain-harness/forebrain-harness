@@ -114,7 +114,9 @@
             <!-- The row switch comes first: switching one may move this
                  agent's own switch in the toolbar, which is why every
                  write reloads the list instead of predicting the answer. -->
-            <span v-if="row.kind !== 'system'" class="sa-sw">
+            <!-- The built-ins are always on (P5) and carry no switch; the
+                 system types are dispatched by the system. -->
+            <span v-if="row.kind === 'custom' || row.kind === 'shared'" class="sa-sw">
               <SwitchComponent
                 :model-value="row.enabled === true"
                 :disabled="saving"

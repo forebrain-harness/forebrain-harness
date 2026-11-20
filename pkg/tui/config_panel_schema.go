@@ -132,6 +132,11 @@ type configField struct {
 	// a prompt and a switch, nothing else — the loader's own rule, read
 	// ahead of the save.
 	CustomOnly bool
+	// HideOnBuiltin hides the field on an agent's entry naming one of the
+	// four public built-in types (P5): such an entry is a model-and-level
+	// pin, so the prompt rewrite and the switch it once carried are retired
+	// — hidden here, and dropped from the stored row on load.
+	HideOnBuiltin bool
 	// The unified agent definition's role flags (P3, the prototype's agent
 	// template). The two are mutually exclusive — a page renders one role's
 	// fields, never both — and only the agent template carries them.
@@ -498,7 +503,6 @@ var configTemplates = map[string][]configField{
 	},
 	configTemplateSubagent: {
 		{Path: "name", Label: "Type name", Kind: configFieldText, Hint: "Built-in overrides: general-purpose, explore, plan, verification."},
-		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3, DefaultValue: "true", Hint: "Choose an explicit value or inherit the default."},
 		{
 			Path: "model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorSubagent,
 			Hint:            "This agent's override. Empty follows the install-wide type default, then the conversation.",
@@ -506,7 +510,10 @@ var configTemplates = map[string][]configField{
 			ModelEmptyValue: "",
 		},
 		{Path: "reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Requires: "model"},
-		{Path: "system_prompt", Label: "System prompt", Kind: configFieldText, Multiline: true, Hint: "Leave empty to use the built-in prompt."},
+		// The prompt rewrite and the switch are the two fields a built-in's
+		// pin retires (P5): hidden on a built-in's entry, judged on a custom
+		// one.
+		{Path: "system_prompt", Label: "System prompt", Kind: configFieldText, Multiline: true, HideOnBuiltin: true, Hint: "Leave empty to use the built-in prompt."},
 		{Path: "description", Label: "Description", Kind: configFieldText, Multiline: true, CustomOnly: true, Hint: "Custom subagents only."},
 		{
 			Path: "tools", Label: "Tool access", Kind: configFieldEnum, CustomOnly: true,
@@ -516,6 +523,7 @@ var configTemplates = map[string][]configField{
 		},
 		{Path: "allowed_tools", Label: "Allowed tools", Kind: configFieldRows, List: true, CustomOnly: true, Hint: "Used when tool access is Pick."},
 		{Path: "continuable", Label: "Allow continuation", Kind: configFieldBool3, CustomOnly: true, Hint: "Custom subagents only."},
+		{Path: "enabled", Label: "Enabled", Kind: configFieldBool3, DefaultValue: "true", HideOnBuiltin: true, Hint: "Choose an explicit value or inherit the default."},
 	},
 	configTemplateMCP: {
 		{Path: "name", Label: "Server name", Kind: configFieldText, Group: "Identity", Hint: "Unique within this server list."},

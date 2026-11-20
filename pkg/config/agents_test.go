@@ -449,11 +449,14 @@ agents:
 	if override.Name != "explore" || override.Model != "deepseek/deepseek-v4-flash" || override.ReasoningEffort != "low" {
 		t.Fatalf("built-in override read back wrong: %+v", override)
 	}
-	if override.SystemPrompt != "Search only the files the task names." {
-		t.Fatalf("override system_prompt = %q", override.SystemPrompt)
+	// The pin is all the entry carries (P5): the prompt rewrite and the
+	// switch the stored row held are stripped in memory — the next write of
+	// the section persists the stripped shape, and nothing stored is deleted.
+	if override.SystemPrompt != "" {
+		t.Fatalf("override system_prompt = %q, want the retired rewrite stripped", override.SystemPrompt)
 	}
-	if override.Enabled == nil || !*override.Enabled {
-		t.Fatalf("override enabled = %v, want true", override.Enabled)
+	if override.Enabled != nil {
+		t.Fatalf("override enabled = %v, want the retired switch stripped", override.Enabled)
 	}
 	custom := def.Subagents[1]
 	if custom.Name != "repo-scout" || custom.Description != "Finds the files a task touches" || custom.SystemPrompt != "You are repo-scout." {
@@ -832,11 +835,16 @@ func TestValidateAgentSubagentsSharedReferenceEntries(t *testing.T) {
 		t.Fatalf("err = %v, want a per-agent custom to keep its own body", err)
 	}
 
-	// A built-in override is untouched by the rule (ruling A, plan 314): model,
-	// effort, prompt and switch all still apply.
+	// A built-in's pin is a model and a level (P5): the prompt rewrite and
+	// the switch it once carried are refused on the write path — normalize
+	// strips the stored ones, so the refusal is the write's alone.
 	builtin := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", Model: "llm-shared-row", ReasoningEffort: "low", SystemPrompt: "search here", Enabled: BoolPtr(false)}}}
-	if err := ValidateAgentSubagents("main", builtin, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err != nil {
-		t.Fatalf("a built-in override was refused: %v", err)
+	if err := ValidateAgentSubagents("main", builtin, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err == nil || !strings.Contains(err.Error(), "it takes a model and a reasoning effort, nothing else.") {
+		t.Fatalf("err = %v, want a built-in's retired fields refused", err)
+	}
+	pin := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", Model: "llm-shared-row", ReasoningEffort: "low"}}}
+	if err := ValidateAgentSubagents("main", pin, builtInPublicSubagentNames, builtInSystemSubagentNames, shared, resolves); err != nil {
+		t.Fatalf("a built-in's model-and-level pin was refused: %v", err)
 	}
 }
 

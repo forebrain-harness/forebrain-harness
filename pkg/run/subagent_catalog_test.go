@@ -11,22 +11,21 @@ import (
 
 func subagentCatalogTestBool(v bool) *bool { return &v }
 
-// catalogTestConfig is one primary agent with a disabled built-in, a rewrite of
-// another built-in, and two custom subagents (one pick, one one-shot).
+// catalogTestConfig is one primary agent with a built-in pin and two custom
+// subagents (one pick, one one-shot). The built-ins are always on (P5): their
+// entries carry a model and a level, never the retired switch or rewrite.
 func catalogTestConfig() *appcfg.Root {
 	return &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {
 			Primary: true,
 			Subagents: []appcfg.SubagentConfig{
 				{
-					Name:    "verification",
-					Enabled: subagentCatalogTestBool(false),
+					Name: "verification",
 				},
 				{
 					Name:            "explore",
 					Model:           "deepseek/deepseek-v4-flash",
 					ReasoningEffort: "low",
-					SystemPrompt:    "Search only what the task names.",
 				},
 				{
 					Name:         "repo-scout",
@@ -52,7 +51,7 @@ func TestSubagentCatalogListsEnabledBuiltinsThenCustom(t *testing.T) {
 	for _, def := range catalog.Public() {
 		names = append(names, def.Name)
 	}
-	want := []string{"general-purpose", "explore", "plan", "repo-scout", "note-taker"}
+	want := []string{"general-purpose", "explore", "plan", "verification", "repo-scout", "note-taker"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("Public() = %v, want %v", names, want)
 	}
@@ -66,20 +65,19 @@ func TestSubagentCatalogListsEnabledBuiltinsThenCustom(t *testing.T) {
 	}
 }
 
-func TestSubagentCatalogDisabledBuiltinIsRefusedWithReason(t *testing.T) {
+func TestSubagentCatalogResolvePublic(t *testing.T) {
 	catalog := SubagentCatalogFor(catalogTestConfig(), "main")
-	if _, err := catalog.ResolvePublic("verification"); err == nil {
-		t.Fatal("a disabled built-in must not resolve")
-	} else if !strings.Contains(err.Error(), `"verification" is disabled for this agent`) {
-		t.Fatalf("error %q does not say the type is disabled for this agent", err)
-	}
-	if def, err := catalog.ResolvePublic(" EXPLORE "); err != nil || def.Name != "explore" {
-		t.Fatalf("an enabled built-in must resolve: def=%+v err=%v", def, err)
+	// A built-in is always on (P5): every one of them resolves, however its
+	// entry is pinned, and case and spaces wash out.
+	for _, name := range []string{"verification", " EXPLORE "} {
+		if def, err := catalog.ResolvePublic(name); err != nil || def.Name != strings.ToLower(strings.TrimSpace(name)) {
+			t.Fatalf("an always-on built-in must resolve: %q def=%+v err=%v", name, def, err)
+		}
 	}
 	if _, err := catalog.ResolvePublic("no-such-agent-type"); err == nil {
 		t.Fatal("an unknown type must not resolve")
-	} else if !strings.Contains(err.Error(), "repo-scout") || strings.Contains(err.Error(), "verification") {
-		t.Fatalf("error %q must list the available types, which excludes the disabled one", err)
+	} else if !strings.Contains(err.Error(), "repo-scout") {
+		t.Fatalf("error %q must list the available types", err)
 	}
 	// A disabled custom subagent is refused the same way: the model was told
 	// about it by an older enum and must learn why it cannot have it.
@@ -93,10 +91,13 @@ func TestSubagentCatalogDisabledBuiltinIsRefusedWithReason(t *testing.T) {
 	}
 }
 
-func TestSubagentCatalogPromptPrefersRewriteThenBuiltin(t *testing.T) {
+func TestSubagentCatalogPromptPrefersCustomThenBuiltin(t *testing.T) {
 	catalog := SubagentCatalogFor(catalogTestConfig(), "main")
-	if got, ok := catalog.Prompt("explore"); !ok || got != "Search only what the task names." {
-		t.Fatalf("Prompt(explore) = %q, %v; want the agent's rewrite", got, ok)
+	// A built-in's pin carries no prompt (P5): the built-in text answers,
+	// whatever older stored rows held — normalize strips them.
+	builtinExplore, _ := agent.SystemPromptForSubtype("explore")
+	if got, ok := catalog.Prompt("explore"); !ok || got != builtinExplore {
+		t.Fatalf("Prompt(explore) = %q, %v; want the built-in prompt", got, ok)
 	}
 	builtin, _ := agent.SystemPromptForSubtype("plan")
 	if got, ok := catalog.Prompt("plan"); !ok || got != builtin {
@@ -144,10 +145,11 @@ func TestSubagentCatalogCustomDefinitionFields(t *testing.T) {
 	if policy.Blocks("read_file") || !policy.Blocks("write_file") || !policy.Blocks("subagent_run") {
 		t.Fatalf("pick policy must allow only the chosen tools: %+v", policy)
 	}
-	// A custom subagent with no tools mode is read-only, the narrowest policy.
+	// A custom subagent with no tools mode is Edit (owner 2026-11-18): the
+	// workspace is the default working set, not a choice someone made.
 	policy, ok = catalog.ToolPolicy("note-taker")
-	if !ok || policy.Mode != appcfg.SubagentToolsReadOnly || !policy.Blocks("write_file") {
-		t.Fatalf("ToolPolicy(note-taker) = %+v, %v; want read_only", policy, ok)
+	if !ok || policy.Mode != appcfg.SubagentToolsEdit || policy.Blocks("write_file") {
+		t.Fatalf("ToolPolicy(note-taker) = %+v, %v; want edit", policy, ok)
 	}
 	if _, ok := catalog.ToolPolicy("explore"); ok {
 		t.Fatal("a built-in keeps its static tool policy; the catalog must not answer one")
@@ -170,8 +172,10 @@ func TestSubagentCatalogEnumDescriptionNamesCustomSubagents(t *testing.T) {
 			t.Fatalf("description is missing %q: %s", want, got)
 		}
 	}
-	if strings.Contains(got, "verification:") {
-		t.Fatalf("description names a disabled built-in: %s", got)
+	// A built-in is always on (P5), so the description names all six types
+	// and never a disabled one.
+	if !strings.Contains(got, "verification:") {
+		t.Fatalf("description must name the always-on built-in: %s", got)
 	}
 	// The sentence the tool shipped before per-agent configuration is exactly
 	// what an unconfigured agent's model reads, so nothing about the schema
@@ -259,7 +263,7 @@ func TestOfficeCatalogOffersOnlyGeneralPurposeAndExplore(t *testing.T) {
 	for _, def := range coding.Public() {
 		codingNames = append(codingNames, def.Name)
 	}
-	codingWant := []string{"general-purpose", "explore", "plan", "repo-scout", "note-taker"}
+	codingWant := []string{"general-purpose", "explore", "plan", "verification", "repo-scout", "note-taker"}
 	if strings.Join(codingNames, ",") != strings.Join(codingWant, ",") {
 		t.Fatalf("coding Public() = %v, want %v", codingNames, codingWant)
 	}
@@ -298,11 +302,17 @@ func TestProjectTypeCatalogUsesDistinctSubagentPromptsUnlessConfigured(t *testin
 	if !ok || strings.Contains(codingPrompt, "office task") {
 		t.Errorf("coding Prompt(general-purpose) = %q, want the coding built-in", codingPrompt)
 	}
-	// The configured rewrite of explore wins in every project type.
+	// A built-in's pin carries no prompt (P5): the project-type wording
+	// answers in its own projects, and the coding built-in text elsewhere —
+	// a stored rewrite is retired, and normalize strips it.
 	for _, projectType := range []string{"", "office", "batch"} {
 		prompt, ok := base.ForProjectType(projectType).Prompt("explore")
-		if !ok || prompt != "Search only what the task names." {
-			t.Errorf("Prompt(explore, %q) = %q, want the configured rewrite", projectType, prompt)
+		want, wantOk := agent.ProjectTypeSubagentPrompt("explore", projectType)
+		if !wantOk {
+			want, wantOk = agent.SystemPromptForSubtype("explore")
+		}
+		if !ok || prompt != want {
+			t.Errorf("Prompt(explore, %q) = %q, want the project wording", projectType, prompt)
 		}
 	}
 }

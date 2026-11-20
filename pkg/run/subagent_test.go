@@ -7007,8 +7007,10 @@ func TestSubagentTypeEnumListsCustomAndHidesDisabled(t *testing.T) {
 	if !strings.Contains(enum, "repo-scout") {
 		t.Fatalf("enum %q does not offer the agent's own subagent", enum)
 	}
-	if strings.Contains(enum, "verification") {
-		t.Fatalf("enum %q offers a subagent this agent disabled", enum)
+	// A built-in is always on (P5): the enum offers it whatever its entry
+	// pins, and a disabled custom subagent is what stays hidden.
+	if !strings.Contains(enum, "verification") {
+		t.Fatalf("enum %q must offer the always-on built-in", enum)
 	}
 	description := fmt.Sprint(field["description"])
 	if !strings.Contains(description, "Finds the files a task touches") {

@@ -192,7 +192,9 @@ type SubagentConfig struct {
 	Model string `yaml:"model,omitempty" json:"model,omitempty"`
 	// ReasoningEffort applies only with Model set.
 	ReasoningEffort string `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
-	// Tools is read_only | edit | pick (custom only; empty means read_only).
+	// Tools is read_only | edit | pick (custom only; empty means edit — a
+	// custom subagent may change the workspace unless it is told otherwise,
+	// owner 2026-11-18).
 	Tools string `yaml:"tools,omitempty" json:"tools,omitempty"`
 	// AllowedTools is the chosen tool set for Tools: pick.
 	AllowedTools []string `yaml:"allowed_tools,omitempty" json:"allowed_tools,omitempty"`
@@ -407,8 +409,13 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 		_, publicBuiltin := public[name]
 		switch {
 		case publicBuiltin:
-			if strings.TrimSpace(entry.Description) != "" || strings.TrimSpace(entry.Tools) != "" || len(entry.AllowedTools) > 0 || entry.Continuable != nil {
-				return fmt.Errorf("%s: %q is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else.", where, name)
+			// A built-in's pin is a model and a level (P5): the prompt
+			// rewrite and the switch it once carried are retired — normalize
+			// drops the stored ones, and a write that carries either is
+			// refused here.
+			if strings.TrimSpace(entry.Description) != "" || strings.TrimSpace(entry.SystemPrompt) != "" ||
+				strings.TrimSpace(entry.Tools) != "" || len(entry.AllowedTools) > 0 || entry.Continuable != nil || entry.Enabled != nil {
+				return fmt.Errorf("%s: %q is a built-in: it takes a model and a reasoning effort, nothing else.", where, name)
 			}
 		case slices.Contains(sharedNames, name) && !SubagentEntryCarriesBody(entry):
 			// The reference that enables an install-wide definition: the name

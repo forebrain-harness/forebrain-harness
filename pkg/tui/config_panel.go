@@ -863,8 +863,30 @@ func dropRetiredAgentKeys(doc any) {
 		return
 	}
 	for _, value := range definitions {
-		if definition, ok := value.(map[string]any); ok {
-			delete(definition, "llm_providers")
+		definition, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		delete(definition, "llm_providers")
+		// A public built-in's entry is a model-and-level pin (P5): the
+		// prompt rewrite and the switch it once carried are retired, so the
+		// panel drops them here — the same in-memory retirement the loader's
+		// normalize applies, and a save persists the stripped shape.
+		entries, ok := definition["subagents"].([]any)
+		if !ok {
+			continue
+		}
+		for _, row := range entries {
+			entry, ok := row.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := entry["name"].(string)
+			if !slices.Contains(agent.PublicSubagentNames, strings.ToLower(strings.TrimSpace(name))) {
+				continue
+			}
+			delete(entry, "system_prompt")
+			delete(entry, "enabled")
 		}
 	}
 }
@@ -2400,6 +2422,11 @@ func (p *configPanel) templateItems(template string, settings map[string]any, ta
 	for _, field := range fields {
 		known[field.Path] = true
 		if field.CustomOnly && configTemplateNameIsBuiltinOrSystem(name) {
+			continue
+		}
+		// A built-in's pin retires the prompt rewrite and the switch (P5):
+		// hidden on its entry, dropped from the stored row on load.
+		if field.HideOnBuiltin && slices.Contains(agent.PublicSubagentNames, name) {
 			continue
 		}
 		// The unified definition renders one role's fields (P3): the flags
