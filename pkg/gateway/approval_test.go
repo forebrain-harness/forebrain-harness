@@ -838,6 +838,57 @@ func TestGatewaySubagentApprovalCancelEndsTheChild(t *testing.T) {
 	require.Contains(t, err.Error(), "cancelled while waiting for tool approval")
 }
 
+// The live subagent gate names its gated call on the request, the same call the
+// detached and inline paths and the terminal now name (the ask branch made the
+// terminal's subagent approval carry tool_step_id). A surface anchors the gate's
+// records to that call; without it a web-dispatched subagent gate cannot place them.
+func TestGatewaySubagentApprovalRequestNamesTheGatedCall(t *testing.T) {
+	s, actions := newApprovalHTTPServer(t)
+	ctx := context.Background()
+	action, err := actions.CreatePending(ctx, "session-1", "shell", map[string]any{"command": "ls", "session_id": "session-1"})
+	require.NoError(t, err)
+	rae := &tool.RequiresActionError{
+		RunID: "child-run-1", ActionID: action.ID, ActionKind: "shell", ToolName: "shell",
+		OriginatingToolCallID: "call-sub-1",
+	}
+	var captured wsServerMsg
+	writeMsg := func(m wsServerMsg) { captured = m }
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, err := actions.Cancel(context.Background(), action.ID, "not now")
+		require.NoError(t, err)
+	}()
+	_, err = s.promptGatewaySubagentApproval(ctx, rae, "req-1", "session-1", writeMsg)
+	require.Error(t, err)
+	require.Equal(t, "requires_action", captured.Op)
+	data, ok := captured.Data.(map[string]any)
+	require.True(t, ok, "requires_action data must be a map")
+	require.Equal(t, "call-sub-1", data["tool_step_id"], "the live subagent gate must name its gated call")
+}
+
+// A gate whose call nothing names carries no tool_step_id: neither an
+// originating id nor a snapshot pending call. The key is absent, not empty.
+func TestGatewaySubagentApprovalRequestOmitsUnnamedCall(t *testing.T) {
+	s, actions := newApprovalHTTPServer(t)
+	ctx := context.Background()
+	action, err := actions.CreatePending(ctx, "session-1", "shell", map[string]any{"command": "ls", "session_id": "session-1"})
+	require.NoError(t, err)
+	rae := &tool.RequiresActionError{RunID: "child-run-1", ActionID: action.ID, ActionKind: "shell", ToolName: "shell"}
+	var captured wsServerMsg
+	writeMsg := func(m wsServerMsg) { captured = m }
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, err := actions.Cancel(context.Background(), action.ID, "not now")
+		require.NoError(t, err)
+	}()
+	_, err = s.promptGatewaySubagentApproval(ctx, rae, "req-1", "session-1", writeMsg)
+	require.Error(t, err)
+	data, ok := captured.Data.(map[string]any)
+	require.True(t, ok)
+	_, present := data["tool_step_id"]
+	require.False(t, present, "an unnamed call must not carry a tool_step_id key")
+}
+
 // The live dispatcher owns the resume before the request goes out, while the
 // durable wait remains available for restart recovery.
 func TestGatewaySubagentApprovalReleasesTheParkBeforeAsking(t *testing.T) {

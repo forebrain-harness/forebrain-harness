@@ -92,8 +92,10 @@ Modes:
           5-word cap and which carries five options, past the old 4-option
           cap — the real overlay must appear in the subagent's view instead of
           a "missing ask form payload" failure. Answering it (Enter) resumes
-          the subagent, which answers with the answer text; the conversation's
-          later requests answer with a fixed line. Needs ENABLE_SUBAGENT=1.
+          the subagent, which finishes with the fixed line "answer received,
+          subagent done" — the answer-text argument is unused in this mode;
+          the conversation's later requests answer "primary done".
+          Needs ENABLE_SUBAGENT=1.
   overflow-usage
           drive "a context overflow with usage, and the window the engine
           learns from it moving the compaction trigger" (plan 283 F3). Every
@@ -961,9 +963,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         label runs far past the old 5-word cap and which carries five options,
         past the old 4-option cap: the shapes that used to die on the first
         attempt, now rendered by the real overlay. The subagent's next request
-        — carrying the answer — gets the answer text, and the conversation's
-        later requests answer with a fixed line, so the whole loop completes.
-        Needs ENABLE_SUBAGENT=1.
+        — carrying the answer — finishes with the fixed line "answer received,
+        subagent done" (the answer-text argument is unused in this mode), and
+        the conversation's later requests answer "primary done", so the whole
+        loop completes. Needs ENABLE_SUBAGENT=1.
         """
         system, _ = _system_and_last_user(body)
         self.send_response(200)
@@ -990,8 +993,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 sys.stderr.flush()
                 self.write_event(chunk(delta={"role": "assistant", "content": "answer received, subagent done"}))
                 self.write_event(chunk(finish="stop"))
-                self.write_raw(b"data: [DONE]\n\n")
-                self.write_raw(b"")
         elif next(SUBAGENT_ASK_MAIN) == 0:
             self.write_event(chunk(delta={
                 "role": "assistant",

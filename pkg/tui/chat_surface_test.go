@@ -1945,3 +1945,76 @@ func TestInPlaceApprovalPromptFailureShowsFailedCard(t *testing.T) {
 		t.Fatalf("failed prompt left parked ask pending (swept Canceled); want failed card")
 	}
 }
+
+// The failed card is not only painted live: its failed completion is filed on
+// the run, because that row is what a resumed conversation replays. Without it
+// the call has no result row and replayOrphanToolCallMessage sweeps it into a
+// lying "Canceled (no output)" — the error the user caused nothing of.
+func TestInPlaceApprovalPromptFailurePersistsFailedCompletion(t *testing.T) {
+	cs, runs, _, runID, rae := inlineGateSession(t, "user_interaction")
+	cs.SetToolApprovalSink(&failingApprovalSink{err: errors.New("overlay boom")})
+	_, _ = cs.resolveInlineApproval(inlineGateCtx(runID), rae)
+
+	completed, err := runs.ListSessionEventsOfType(context.Background(), "s1", event.RunEventToolCompleted, 10)
+	require.NoError(t, err)
+	var found *event.ToolCallCompletedPayload
+	for i := range completed {
+		var p event.ToolCallCompletedPayload
+		require.NoError(t, json.Unmarshal(completed[i].Payload, &p))
+		if p.StepID == "call-inline" && strings.EqualFold(p.ToolMeta.Status, "failed") && strings.Contains(p.Error, "overlay boom") {
+			found = &p
+			break
+		}
+	}
+	require.NotNil(t, found, "no failed tool_completed row for call-inline; replay would draw Canceled")
+}
+
+// A subagent's gate fails its in-place prompt: the failed card must land in the
+// child's own view (AgentID on the live message and on the filed completion),
+// not the primary agent's. An empty AgentID is the primary's gate; this one is
+// the child's, so the routing fact is the child id.
+func TestInPlaceApprovalPromptFailureRoutesFailedCardToChild(t *testing.T) {
+	cs, runs, act, runID, rae := inlineGateSession(t, "user_interaction")
+	rae.AgentID = "worker-1"
+	rae.SubagentType = "explore"
+	rae.AskFormJSON = act.PayloadJSON
+	// The subagent path files the completion on the dispatching conversation,
+	// recovered from the durable dispatch ledger (startSubagent writes it at
+	// spawn). Seed that record so the gate's run resolves to "s1"; without it
+	// req.SessionID is empty and persistRunEvent silently skips the row.
+	if err := agent.AppendHistory(cs.stateRoot(), agent.HistoryEntry{
+		RunID: runID, SessionID: "s1", Status: agent.StatusRunning,
+	}); err != nil {
+		t.Fatalf("AppendHistory error: %v", err)
+	}
+	cs.SetToolApprovalSink(&failingApprovalSink{err: errors.New("overlay boom")})
+	failed := make(chan Message, 4)
+	cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool &&
+			m.Msg.StepID == "call-inline" && strings.EqualFold(m.Msg.ToolMeta.Status, "failed") {
+			failed <- m.Msg
+		}
+	})
+	_, _ = cs.resolveSubagentApproval(inlineGateCtx(runID), rae)
+	select {
+	case m := <-failed:
+		require.Equal(t, "worker-1", strings.TrimSpace(m.AgentID), "live failed card must route to the child view")
+		require.Contains(t, m.Content, "overlay boom")
+	case <-time.After(2 * time.Second):
+		t.Fatalf("subagent failed prompt drew no failed card")
+	}
+
+	completed, err := runs.ListSessionEventsOfType(context.Background(), "s1", event.RunEventToolCompleted, 10)
+	require.NoError(t, err)
+	var found *event.ToolCallCompletedPayload
+	for i := range completed {
+		var p event.ToolCallCompletedPayload
+		require.NoError(t, json.Unmarshal(completed[i].Payload, &p))
+		if p.StepID == "call-inline" && strings.EqualFold(p.ToolMeta.Status, "failed") {
+			found = &p
+			break
+		}
+	}
+	require.NotNil(t, found, "no failed completion filed for the child's call")
+	require.Equal(t, "worker-1", strings.TrimSpace(found.ToolMeta.AgentID), "filed completion must carry the child agent id")
+}

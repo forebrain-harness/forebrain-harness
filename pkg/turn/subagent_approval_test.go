@@ -45,6 +45,32 @@ func TestSubagentApprovalRequestNamesTheWorker(t *testing.T) {
 	require.Equal(t, "Requested by a subagent.", anonymous.Description)
 }
 
+// The request anchors to the call the gate names; when the thrower could not
+// name it, the snapshot's pending call of the gated tool is the same identity.
+// The ask form rides along so an in-place surface can render the question.
+func TestSubagentApprovalRequestFallsBackToSnapshotCall(t *testing.T) {
+	snapshot := []llm.Message{
+		llm.UserMessage(llm.Text("ask me")),
+		llm.AssistantMessage(nil, llm.ToolCall{ID: "call-ask-9", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "user_interaction", Arguments: "{}"}}),
+	}
+	form := `{"kind":"user_interaction","questions":[]}`
+
+	// No originating id: fall back to the snapshot's pending user_interaction call.
+	fallback := SubagentApprovalRequest(SubagentApprovalGate{
+		ActionID: "act-1", RunID: "child-1", ToolName: "user_interaction",
+		Session: snapshot, AskFormJSON: form,
+	}, "session-1", nil)
+	require.Equal(t, "call-ask-9", fallback.ToolStepID)
+	require.Equal(t, form, fallback.AskFormJSON)
+
+	// An originating id wins over the snapshot.
+	named := SubagentApprovalRequest(SubagentApprovalGate{
+		ActionID: "act-1", RunID: "child-1", ToolName: "user_interaction",
+		OriginatingToolCallID: "call-orig", Session: snapshot, AskFormJSON: form,
+	}, "session-1", nil)
+	require.Equal(t, "call-orig", named.ToolStepID)
+}
+
 // A denial is an answer the child continues from; only a cancellation ends the
 // run, because there is nothing to continue with.
 func TestSubagentApprovalResumeContext(t *testing.T) {

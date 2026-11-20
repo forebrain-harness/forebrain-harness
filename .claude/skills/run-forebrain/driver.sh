@@ -119,7 +119,7 @@ PY
   echo "serving: provider=$mode port=$PORT home=$HOME_DIR"
 }
 
-cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer] [answer-text] [drip-delay]
+cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer|subagent-ask] [answer-text] [drip-delay]
   local mode="${1:-hang}"
   cmd_serve "$@"
 
@@ -326,7 +326,7 @@ case "${1:-}" in
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
   build                  build the binary into $WORK
-  start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer] [answer-text] [drip-delay]
+  start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer|subagent-ask] [answer-text] [drip-delay]
                          launch the TUI against a fake provider (default: hang)
                          drip = stream word by word; the only mode that proves
                          streaming actually renders
@@ -363,6 +363,15 @@ usage: driver.sh <command>
                         one delta and hangs, so the subagent keeps running;
                         FAKE_SUBAGENT_STEER_FINISH=1 finishes it instead, so
                         its answer goes back to the main agent
+                        subagent-ask = the main agent dispatches a
+                        general-purpose probe (needs ENABLE_SUBAGENT=1); the
+                        subagent's own request answers with a user_interaction
+                        call whose first option label runs far past the old
+                        5-word cap and which carries five options, past the old
+                        4-option cap, so the real question overlay must render
+                        in the subagent's view; answering it (Enter) resumes the
+                        subagent, which finishes with a fixed line (the
+                        answer-text argument is unused)
                          RESUME_ID=<session> resumes that session instead of
                          starting a new one (does not reset the home)
                          ENABLE_SUBAGENT=1 enables the subagent tools

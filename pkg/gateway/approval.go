@@ -336,6 +336,7 @@ func (s *Server) promptGatewaySubagentApproval(
 	data["action_kind"] = gate.ActionKind
 	data["agent_id"] = gate.AgentID
 	data["subagent_type"] = gate.SubagentType
+	data = withApprovalToolStepID(data, rae)
 	writeMsg(wsServerMsg{
 		Op: "requires_action", RequestID: requestID, RunID: gate.RunID, SessionID: sessionID,
 		Data: data, Message: turn.SubagentApprovalDescription(gate) + " Awaiting approval to continue.",
