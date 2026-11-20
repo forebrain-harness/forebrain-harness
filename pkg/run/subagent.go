@@ -105,6 +105,9 @@ type SubagentInput struct {
 	// edit or the roster state would change the tool definition and every
 	// cached prompt prefix with it.
 	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
+	// ReasoningEffort is fixed text for the same reason as Model: it names no
+	// model and no tool, so the definition never moves with the table.
+	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this subagent, one of the levels the chosen model supports. Omit to run at the model's default thinking level."`
 }
 
 type SubagentSendInput struct {
@@ -117,6 +120,8 @@ type SubagentSendInput struct {
 	Worktree string `json:"worktree,omitempty" jsonschema_description:"Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id; see SubagentInput.Model.
 	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
+	// ReasoningEffort is fixed text; see SubagentInput.ReasoningEffort.
+	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this subagent, one of the levels the chosen model supports. Omit to run at the model's default thinking level."`
 }
 
 type SubagentContinueInput struct {
@@ -151,6 +156,8 @@ type SubagentTask struct {
 	Worktree string `json:"worktree,omitempty" jsonschema_description:"Optional git worktree to run this subagent in: a short kebab-case name. The worktree is created at <main worktree>/.worktrees/<name> on a new branch <name> from HEAD, and every file and shell tool of the subagent works inside it. Omit to run in the conversation's directory."`
 	// Model is a configured row id; see SubagentInput.Model.
 	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
+	// ReasoningEffort is fixed text; see SubagentInput.ReasoningEffort.
+	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this subagent, one of the levels the chosen model supports. Omit to run at the model's default thinking level."`
 }
 
 func subagentTypeEnumValues(cat SubagentCatalog) []any {

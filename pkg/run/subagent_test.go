@@ -9120,6 +9120,19 @@ func TestSubagentModelArgumentDescriptionIsFixedText(t *testing.T) {
 	}
 }
 
+func TestSubagentReasoningEffortArgumentDescriptionIsFixedText(t *testing.T) {
+	const want = "Optional thinking level for this subagent, one of the levels the chosen model supports. Omit to run at the model's default thinking level."
+	for _, typ := range []reflect.Type{reflect.TypeOf(SubagentInput{}), reflect.TypeOf(SubagentSendInput{}), reflect.TypeOf(SubagentTask{})} {
+		field, ok := typ.FieldByName("ReasoningEffort")
+		if !ok {
+			t.Fatalf("%s has no ReasoningEffort field", typ.Name())
+		}
+		if tag, _ := field.Tag.Lookup("jsonschema_description"); tag != want {
+			t.Fatalf("%s.ReasoningEffort description =\n%q\nwant the fixed text", typ.Name(), tag)
+		}
+	}
+}
+
 // list_usable_models reads the table live on every call: a row added after
 // the tools were registered (after this turn's configuration was adopted)
 // lists immediately, the conversation's own row is marked current, the
