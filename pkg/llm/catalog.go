@@ -312,10 +312,11 @@ func Load(basePath string) (*Catalog, error) {
 	return LoadWithSupplement(basePath, "")
 }
 
-// LoadWithSupplement reads the shipped catalog from basePath and merges the
-// rows of supplementPath that basePath does not carry. The shipped file wins
-// every key both files name (owner 2026-11-16): the supplement exists to add
-// the models a build does not know, never to redefine one it does.
+// LoadWithSupplement reads the shipped catalog from basePath and layers the
+// rows of supplementPath onto it. The shipped file wins every value it states
+// for a key both files name (owner 2026-11-16): the supplement adds the models
+// a build does not know and fills reasoning_options for a shipped row that
+// states no levels, but never redefines a value the shipped row states.
 //
 // The two files fail differently on purpose. A missing or broken base is the
 // build's problem: errNoCatalog for a missing file, the parse error naming the
@@ -351,21 +352,41 @@ func LoadWithSupplement(basePath, supplementPath string) (*Catalog, error) {
 	return buildCatalog(base), nil
 }
 
-// mergeSupplement adds every entry of supplement the base does not already
-// name. Keys are compared the way lookups compare them (lowercased, trimmed),
-// so a supplement row only recolored in case is still the base's row and the
-// result does not depend on map iteration order.
+// mergeSupplement layers the home supplement onto the shipped base. A key only
+// the supplement names joins the base whole. A key both name keeps every value
+// the shipped row states (owner 2026-11-16); the one exception is
+// reasoning_options, whose absence is distinguishable from a stated empty list,
+// so a shipped row that says nothing about levels takes the supplement's. Keys
+// are compared the way lookups compare them (lowercased, trimmed), so a
+// supplement row only recolored in case is still the base's row and the result
+// does not depend on map iteration order.
 func mergeSupplement(base, supplement map[string]rawEntry) {
-	seen := make(map[string]bool, len(base))
+	baseByKey := make(map[string]string, len(base))
 	for id := range base {
-		seen[strings.ToLower(strings.TrimSpace(id))] = true
+		baseByKey[strings.ToLower(strings.TrimSpace(id))] = id
 	}
+	done := make(map[string]bool, len(supplement))
 	for id, entry := range supplement {
 		key := strings.ToLower(strings.TrimSpace(id))
-		if key == "" || seen[key] {
+		if key == "" || done[key] {
 			continue
 		}
-		seen[key] = true
+		done[key] = true
+		if baseID, exists := baseByKey[key]; exists {
+			// The shipped file wins every value it states (owner 2026-11-16).
+			// reasoning_options is the one field whose absence is distinguishable
+			// from a stated empty list, so a shipped row that says nothing about
+			// levels takes the supplement's — the home file's documented job is to
+			// give a model its thinking levels without a rebuild. A shipped row
+			// that names options (even []) keeps them.
+			baseEntry := base[baseID]
+			if baseEntry.ReasoningOptions == nil && entry.ReasoningOptions != nil {
+				baseEntry.ReasoningOptions = entry.ReasoningOptions
+				base[baseID] = baseEntry
+			}
+			continue
+		}
+		baseByKey[key] = id
 		base[id] = entry
 	}
 }
@@ -535,13 +556,14 @@ func Resolve() (*Catalog, error) {
 }
 
 // ResolveFor loads the catalog the runtime answers from: the shipped
-// models.json beside the binary (see shippedCatalogPath), plus the rows of
-// <home>/models.json the shipped file does not carry (owner 2026-11-16). The
-// home file adds data for models a build does not know; it never redefines a
-// row the build ships, so a catalog the user's configuration changes is still
-// expressed as that row's overrides rather than as a second document. An empty
-// home reads the shipped file alone. The result is cached per pair of paths and
-// file contents, so replacing either file takes effect on the next resolve.
+// models.json beside the binary (see shippedCatalogPath), layered with
+// <home>/models.json (owner 2026-11-16). The home file adds data for models a
+// build does not know and fills reasoning_options for a shipped row that states
+// no levels; it never redefines a value the shipped row states, so a catalog the
+// user's configuration changes is still expressed as that row's overrides rather
+// than as a second document. An empty home reads the shipped file alone. The
+// result is cached per pair of paths and file contents, so replacing either file
+// takes effect on the next resolve.
 func ResolveFor(home string) (*Catalog, error) {
 	basePath := shippedCatalogPath()
 	supplementPath := ""
@@ -623,11 +645,12 @@ func fileDigest(path string) string {
 }
 
 // InitGlobalCatalog initializes the global catalog from the models.json beside
-// the binary, plus the rows <home>/models.json adds to it (owner 2026-11-16).
-// The shipped file is the source every key it names answers from, so every
-// process on this build shares those bytes; the home file only contributes
-// models the build does not know, and a build with no catalog is a warning its
-// caller logs — not a catalog this process can download or invent.
+// the binary, layered with <home>/models.json (owner 2026-11-16). The shipped
+// file is the source every value it states answers from, so every process on
+// this build shares those bytes; the home file contributes models the build does
+// not know and fills reasoning_options a shipped row leaves unstated, and a build
+// with no catalog is a warning its caller logs — not a catalog this process can
+// download or invent.
 func InitGlobalCatalog(home string) error {
 	cat, err := ResolveFor(home)
 	if err != nil {

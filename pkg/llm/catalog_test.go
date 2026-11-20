@@ -250,6 +250,111 @@ func TestCatalogSupplementAddsOnlyWhatTheShippedFileLacks(t *testing.T) {
 	}
 }
 
+// A shipped row that names a model but says nothing about its reasoning levels
+// (no reasoning_options field) takes the levels the home file states for that
+// same key — the home file's documented job is to give a model its thinking
+// levels without a rebuild. Every other value the shipped row states stays the
+// shipped row's: the home file's conflicting window here must not leak across.
+func TestCatalogSupplementFillsAbsentReasoningOptions(t *testing.T) {
+	writeShippedCatalog(t, []byte(`{"deepseek/deepseek-v4.1-flash":{"id":"deepseek/deepseek-v4.1-flash","reasoning":true,"limit":{"context":1000000,"output":384000}}}`))
+	restoreGlobalCatalog(t)
+
+	home := t.TempDir()
+	homeCopy := []byte(`{"deepseek/deepseek-v4.1-flash":{"reasoning_options":[{"type":"toggle"},{"type":"effort","values":["low","high","max"]}],"limit":{"context":1000}}}`)
+	if err := os.WriteFile(filepath.Join(home, "models.json"), homeCopy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := InitGlobalCatalog(home); err != nil {
+		t.Fatalf("InitGlobalCatalog: %v", err)
+	}
+
+	levels, known := ReasoningEfforts("deepseek", "deepseek-v4.1-flash")
+	if !known {
+		t.Fatal("reasoning levels are unknown; the home file's reasoning_options did not reach the shipped row")
+	}
+	if want := []string{"low", "high", "max"}; !reflect.DeepEqual(levels, want) {
+		t.Fatalf("levels = %v, want %v", levels, want)
+	}
+	hit, ok := Lookup("deepseek", "deepseek-v4.1-flash")
+	if !ok {
+		t.Fatal("deepseek/deepseek-v4.1-flash missing from the catalog")
+	}
+	if hit.ContextWindow != 1000000 {
+		t.Fatalf("ContextWindow = %d, want the shipped 1000000; gap-fill must not copy the home file's other fields", hit.ContextWindow)
+	}
+}
+
+// The gap-fill is narrow: a shipped row that already names reasoning_options
+// keeps them (even an empty list), a row neither file states levels for stays
+// unknown, and filling absent levels never copies the home row's other fields.
+func TestCatalogSupplementKeepsShippedReasoningOptions(t *testing.T) {
+	cases := []struct {
+		name           string
+		shipped        string
+		home           string
+		wantKnown      bool
+		wantLevels     []string
+		wantAttachment bool
+	}{
+		{
+			name:       "shipped states options, home conflicts",
+			shipped:    `{"openai/gpt-5":{"id":"openai/gpt-5","reasoning_options":[{"type":"effort","values":["low","high"]}],"limit":{"context":400000}}}`,
+			home:       `{"openai/gpt-5":{"reasoning_options":[{"type":"effort","values":["max"]}]}}`,
+			wantKnown:  true,
+			wantLevels: []string{"low", "high"},
+		},
+		{
+			name:      "shipped states an empty list",
+			shipped:   `{"openai/gpt-5":{"id":"openai/gpt-5","reasoning_options":[],"limit":{"context":400000}}}`,
+			home:      `{"openai/gpt-5":{"reasoning_options":[{"type":"effort","values":["low"]}]}}`,
+			wantKnown: true,
+		},
+		{
+			name:      "neither file states levels",
+			shipped:   `{"openai/gpt-5":{"id":"openai/gpt-5","limit":{"context":400000}}}`,
+			home:      `{"openai/gpt-5":{"limit":{"context":1000}}}`,
+			wantKnown: false,
+		},
+		{
+			name:       "gap-fill copies no other field",
+			shipped:    `{"openai/gpt-5":{"id":"openai/gpt-5","attachment":false,"limit":{"context":400000}}}`,
+			home:       `{"openai/gpt-5":{"attachment":true,"reasoning_options":[{"type":"effort","values":["low","high","max"]}],"limit":{"context":1000}}}`,
+			wantKnown:  true,
+			wantLevels: []string{"low", "high", "max"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeShippedCatalog(t, []byte(tc.shipped))
+			restoreGlobalCatalog(t)
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, "models.json"), []byte(tc.home), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := InitGlobalCatalog(home); err != nil {
+				t.Fatalf("InitGlobalCatalog: %v", err)
+			}
+			levels, known := ReasoningEfforts("openai", "gpt-5")
+			if known != tc.wantKnown {
+				t.Fatalf("known = %v, want %v", known, tc.wantKnown)
+			}
+			if !reflect.DeepEqual(levels, tc.wantLevels) {
+				t.Fatalf("levels = %v, want %v", levels, tc.wantLevels)
+			}
+			hit, ok := Lookup("openai", "gpt-5")
+			if !ok {
+				t.Fatal("openai/gpt-5 missing from the catalog")
+			}
+			if hit.ContextWindow != 400000 {
+				t.Fatalf("ContextWindow = %d, want the shipped 400000", hit.ContextWindow)
+			}
+			if hit.SupportsAttachments != tc.wantAttachment {
+				t.Fatalf("SupportsAttachments = %v, want %v; gap-fill must not copy the home row's other fields", hit.SupportsAttachments, tc.wantAttachment)
+			}
+		})
+	}
+}
+
 // A hand-edited home file that is not JSON costs the user its own rows and
 // nothing else: the shipped catalog still answers, and the failure is a log
 // line rather than a surface with no model data at all.

@@ -89,11 +89,14 @@ Layer assignment from `docs/plan/TUI_FIRST_RUNTIME_REFACTOR.md` §3.1/§11.1; a 
 `assets/models.json` beside the binary is the catalog, and it is the first one:
 nothing is downloaded at runtime, and every key it names answers from it. A
 models.json in the forebrain home (`<FOREBRAIN_HOME>/models.json`) is a
-supplement, not a second document: it only adds the keys the shipped file does
-not carry, a key both files name keeps the shipped value, and a home file that
-is not JSON is logged and ignored (owner 2026-11-16). The home file is how a
-model the build does not know — a preview id, a provider's new release — gets
-its window, output limit and thinking levels without a rebuild. A build that
+supplement, not a second document: it adds the keys the shipped file does not
+carry, and for a key both files name the shipped row keeps every value it states
+— except reasoning_options, which a shipped row that states no levels takes from
+the home row — and a home file that is not JSON is logged and ignored (owner
+2026-11-16). The home file is how a model the build does not know — a preview id,
+a provider's new release — gets its window, output limit and thinking levels
+without a rebuild, and how a model the build knows but whose row states no
+thinking levels gets them. A build that
 ships no catalog reports that and runs with no catalog data instead of
 fetching one.
 
