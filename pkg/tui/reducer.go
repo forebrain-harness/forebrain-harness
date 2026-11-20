@@ -3304,6 +3304,7 @@ func toolPreviewUsesRenderedBody(f Frame) bool {
 		strings.EqualFold(title, "memories_add_ad_hoc_note") ||
 		strings.EqualFold(title, "retrieve_output") ||
 		isMemoryQueryTool(title) ||
+		strings.EqualFold(title, "list_usable_models") ||
 		isMCPToolTitle(title) || isDiffTool(title) ||
 		shellFrameHasDiffBlocks(f)
 }

@@ -21024,6 +21024,89 @@ func TestRendererMemoryNoteUsesSemanticHeaderAndMarkdownBody(t *testing.T) {
 	}
 }
 
+func TestRendererUsableModelsCardRendersMarkdownRoster(t *testing.T) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	roster := `{"models":[` +
+		`{"id":"llm_a","provider":"zhipuai","model":"glm-5.3","current":true,"efforts":["low","medium","high"],"default_effort":"medium"},` +
+		`{"id":"llm_b","provider":"qodercn","model":"DeepSeek-Flash","handed_off":true}` +
+		`]}`
+	r.renderCompactFrame(Frame{
+		Kind:    FrameTool,
+		Title:   "list_usable_models",
+		Content: roster,
+		Final:   true,
+		ToolMeta: tool.ToolMeta{
+			ToolName: "list_usable_models",
+			Status:   "completed",
+		},
+	}, "tool", "214")
+	plain := stripANSI(out.String())
+	for _, want := range []string{"zhipuai", "glm-5.3", "DeepSeek-Flash", "thinking: low, medium, high", "default medium", "current", "handed off", "└"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("expected %q in rendered card, got %q", want, plain)
+		}
+	}
+	for _, leak := range []string{"Models:", "Id:", "llm_a", "llm_b", "endpoint", `"models"`, "{", "```", "Provider:"} {
+		if strings.Contains(plain, leak) {
+			t.Fatalf("rendered card exposed %q:\n%s", leak, plain)
+		}
+	}
+
+	// The live card's output envelope renders line-for-line the same as the
+	// replayed row's bare JSON.
+	var liveOut bytes.Buffer
+	live := NewRenderer(&liveOut, &liveOut)
+	envelope := "output:\n\n```json\n{\"output\":" + strconv.Quote(roster) + "}\n```"
+	live.renderCompactFrame(Frame{
+		Kind:    FrameTool,
+		Title:   "list_usable_models",
+		Content: envelope,
+		Final:   true,
+		ToolMeta: tool.ToolMeta{
+			ToolName: "list_usable_models",
+			Status:   "completed",
+		},
+	}, "tool", "214")
+	if plain != stripANSI(liveOut.String()) {
+		t.Fatalf("live and replayed cards differ:\nlive:\n%s\nreplayed:\n%s", stripANSI(liveOut.String()), plain)
+	}
+
+	// An empty roster carries its note, not the JSON or the old "Models:" label.
+	var emptyOut bytes.Buffer
+	empty := NewRenderer(&emptyOut, &emptyOut)
+	empty.renderCompactFrame(Frame{
+		Kind:    FrameTool,
+		Title:   "list_usable_models",
+		Content: `{"models":[],"note":"No model is allowed for subagents you pick. Omit model to run on the conversation's model."}`,
+		Final:   true,
+		ToolMeta: tool.ToolMeta{
+			ToolName: "list_usable_models",
+			Status:   "completed",
+		},
+	}, "tool", "214")
+	emptyPlain := stripANSI(emptyOut.String())
+	// The card wraps the note at its content width; collapse that wrapping so
+	// the assertion checks the note's words, not the wrap points.
+	flat := strings.Join(strings.Fields(emptyPlain), " ")
+	note := "No model is allowed for subagents you pick. Omit model to run on the conversation's model."
+	if !strings.Contains(flat, strings.Join(strings.Fields(note), " ")) {
+		t.Fatalf("expected the empty-roster note, got %q", emptyPlain)
+	}
+	if strings.Contains(emptyPlain, "Models:") {
+		t.Fatalf("empty roster must not show the old label: %q", emptyPlain)
+	}
+}
+
+func TestUsableModelsPreviewUsesRenderedBody(t *testing.T) {
+	if !toolPreviewUsesRenderedBody(Frame{Kind: FrameTool, Title: "list_usable_models"}) {
+		t.Fatal("toolPreviewUsesRenderedBody(list_usable_models tool) = false, want true")
+	}
+	if toolPreviewUsesRenderedBody(Frame{Kind: FrameAssistant, Title: "list_usable_models"}) {
+		t.Fatal("toolPreviewUsesRenderedBody(assistant frame titled list_usable_models) = true, want false")
+	}
+}
+
 func TestMemoryNoteToolDisplayPartsAreTruthfulForTerminalStates(t *testing.T) {
 	for _, tc := range []struct {
 		status string

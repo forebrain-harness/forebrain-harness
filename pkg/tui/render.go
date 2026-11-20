@@ -2347,6 +2347,26 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 				return
 			}
 		}
+		// list_usable_models' answer is a model roster in JSON: the card draws it as
+		// grouped Markdown — a provider heading, one bullet per model label with its
+		// thinking levels — in full-body and compact mode alike, never as the JSON
+		// or the generic "Field: value" tree. The row id is the LLM's argument and
+		// never reaches the card (owner 2026-11-20).
+		if strings.EqualFold(title, "list_usable_models") && !toolStatusFailed(f) {
+			if md, ok := tool.FormatUsableModelsMarkdown(f.Content); ok {
+				contentWidth := maxCardContentWidth(r.layoutTermWidth()) - 2
+				if contentWidth < 20 {
+					contentWidth = 20
+				}
+				rendered := renderAssistantMarkdownWithWidth(md, contentWidth, r.diffTheme)
+				if rendered == "" {
+					rendered = md
+				}
+				_, _ = fmt.Fprintln(r.out, prefixLines(rendered, "  └ ", "    "))
+				_, _ = fmt.Fprintln(r.out)
+				return
+			}
+		}
 		// MCP tool results carry their payload as a JSON transport envelope whose
 		// text blocks are Markdown. Extract every text block from the RAW frame
 		// content once and render it as Markdown here, before the generic
@@ -2891,6 +2911,13 @@ func formatToolContentWithInput(title, content, cwd string, input map[string]any
 	// lines and read the result line as a label.
 	if lower == "peer_send" {
 		return content
+	}
+	// list_usable_models: the card's body is the grouped Markdown roster, not the
+	// generic "Field: value" tree the fall-through would build from the JSON.
+	if lower == "list_usable_models" {
+		if md, ok := tool.FormatUsableModelsMarkdown(content); ok {
+			return md
+		}
 	}
 	if lower == "web_search" || lower == "websearch" {
 		if formatted, recognized := tool.FormatWebSearchResult(content); recognized {
