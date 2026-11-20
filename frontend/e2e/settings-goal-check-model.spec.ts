@@ -80,7 +80,8 @@ test('the goal-check block is the subagents tab’s last group and opens unconfi
   await openBlock(page)
 
   const block = page.locator('[data-group="goal-check-model"]')
-  await expect(block.locator('h3')).toHaveText('/goal 评估模型')
+  await expect(block.locator('h3')).toHaveCount(0)
+  await expect(page.locator('[data-group="builtin-subagents"] h3')).toHaveText('内置子代理')
   // §2: the title carries no explanation under it.
   await expect(block.locator('.gc__head p')).toHaveCount(0)
 
