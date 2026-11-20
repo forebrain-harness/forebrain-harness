@@ -550,7 +550,7 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 // adding one or flipping an authorization switch never moves the tool
 // definition (and every cached prompt prefix with it). The list itself is
 // read live from the model table on every call.
-const listUsableModelsDescription = "List the configured models you may run a subagent on, read live from the model table. Pass a model's id as the model argument of subagent_run, subagent_send or subagent_fanout. Pick a model by its id; the model field is the name a person reads. Each row lists the thinking levels it can run at (efforts) and the level it runs at by default (default_effort)."
+const listUsableModelsDescription = "List the configured models you may run a subagent on, read live from the model table. Pass a model's id as the model argument of subagent_run, subagent_send or subagent_fanout. Pick a model by its id; the model field is the name a person reads. Each row lists the thinking levels it can run at (efforts) and the level it runs at by default (default_effort). Pass reasoning_effort on the dispatch to run the subagent at one of the chosen model's thinking levels; omit it to run at that model's default."
 
 // listUsableModels answers what usableModels reads: the rows the agent may
 // pick for a subagent, each under the name a person reads (the label, the
