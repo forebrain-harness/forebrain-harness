@@ -9147,8 +9147,11 @@ func TestListUsableModelsToolReadsTheTableLive(t *testing.T) {
 		t.Fatalf("list_usable_models: %v", err)
 	}
 	text, _ := out.(string)
-	if !strings.Contains(text, rowID) || !strings.Contains(text, "https://one.test/v1/chat/completions") {
+	if !strings.Contains(text, rowID) {
 		t.Fatalf("live row missing from %s", text)
+	}
+	if strings.Contains(text, `"endpoint"`) {
+		t.Fatalf("the endpoint is gone from the answer: %s", text)
 	}
 	if strings.Contains(text, "key-one") || strings.Contains(text, "api_key") {
 		t.Fatalf("a credential leaked into the answer: %s", text)
@@ -9180,6 +9183,81 @@ func TestListUsableModelsToolReadsTheTableLive(t *testing.T) {
 	_, err = tool.Handle(toolpkg.WithSubagentRun(ctx, true), `{}`)
 	if err == nil || !strings.Contains(err.Error(), "only available to the primary agent") {
 		t.Fatalf("guard inside a subagent = %v", err)
+	}
+}
+
+// list_usable_models rows carry what the model needs to pick: the name a
+// person reads (the label, the wire id when no listing carries one), the
+// thinking levels the row can run at in picker order, and the default level —
+// only when it is one of those levels, because a default outside the list
+// would teach a fake option. The endpoint is gone: twin rows differ by id.
+func TestListUsableModelsRowsCarryLabelsAndEfforts(t *testing.T) {
+	llm.SetBuiltinModels("labelprov", []llm.Model{{ID: "wire-id", Name: "Readable Label"}})
+	t.Cleanup(func() { llm.SetBuiltinModels("labelprov", nil) })
+
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	labeled := fix.insertModelRow(t, state.LLMModel{
+		Provider: "labelprov", Model: "wire-id", BaseURL: "https://label.test/v1", APIPath: "/chat/completions",
+		APIKey: "key-label", SubagentAllowed: true,
+		CapEfforts: []string{"high", "low", "medium"}, CapDefaultEffort: "medium",
+	})
+	plain := fix.insertModelRow(t, state.LLMModel{
+		Provider: "labelprov", Model: "plain-wire", BaseURL: "https://label.test/v1", APIPath: "/chat/completions",
+		APIKey: "key-plain", SubagentAllowed: true,
+	})
+	offList := fix.insertModelRow(t, state.LLMModel{
+		Provider: "labelprov", Model: "off-default", BaseURL: "https://label.test/v1", APIPath: "/chat/completions",
+		APIKey: "key-off", SubagentAllowed: true,
+		CapEfforts: []string{"low", "medium", "high"}, CapDefaultEffort: "max",
+	})
+	noLevels := fix.insertModelRow(t, state.LLMModel{
+		Provider: "labelprov", Model: "levelless", BaseURL: "https://label.test/v1", APIPath: "/chat/completions",
+		APIKey: "key-none", SubagentAllowed: true,
+		CapEfforts: []string{},
+	})
+
+	text, err := listUsableModels(dispatchTestCtx(), fix.fac)
+	if err != nil {
+		t.Fatalf("listUsableModels: %v", err)
+	}
+	if strings.Contains(text, `"endpoint"`) {
+		t.Fatalf("the endpoint is gone from the answer: %s", text)
+	}
+	var payload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		t.Fatalf("unmarshal %s: %v", text, err)
+	}
+	rows := map[string]map[string]any{}
+	for _, row := range payload.Models {
+		rows[row["id"].(string)] = row
+	}
+	if len(rows) != 4 {
+		t.Fatalf("rows = %v, want the four seeded rows", rows)
+	}
+
+	labeledRow := rows[labeled.ID]
+	if labeledRow["model"] != "Readable Label" {
+		t.Fatalf("model = %v, want the builtin label", labeledRow["model"])
+	}
+	if !reflect.DeepEqual(labeledRow["efforts"], []any{"low", "medium", "high"}) {
+		t.Fatalf("efforts = %v, want picker-ordered levels", labeledRow["efforts"])
+	}
+	if labeledRow["default_effort"] != "medium" {
+		t.Fatalf("default_effort = %v, want medium", labeledRow["default_effort"])
+	}
+
+	if rows[plain.ID]["model"] != "plain-wire" {
+		t.Fatalf("model = %v, want the wire id when no listing carries a label", rows[plain.ID]["model"])
+	}
+
+	if _, ok := rows[offList.ID]["default_effort"]; ok {
+		t.Fatalf("a default outside the sendable levels must not be reported: %v", rows[offList.ID])
+	}
+
+	if _, ok := rows[noLevels.ID]["efforts"]; ok {
+		t.Fatalf("a row with explicitly no levels must carry no efforts key: %v", rows[noLevels.ID])
 	}
 }
 

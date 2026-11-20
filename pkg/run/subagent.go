@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -542,12 +543,14 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 // adding one or flipping an authorization switch never moves the tool
 // definition (and every cached prompt prefix with it). The list itself is
 // read live from the model table on every call.
-const listUsableModelsDescription = "List the configured models you may run a subagent on, read live from the model table. Pass a model's id as the model argument of subagent_run, subagent_send or subagent_fanout. Pick a model by its id. Rows with the same provider/model are different models; their endpoint shows how they differ."
+const listUsableModelsDescription = "List the configured models you may run a subagent on, read live from the model table. Pass a model's id as the model argument of subagent_run, subagent_send or subagent_fanout. Pick a model by its id; the model field is the name a person reads. Each row lists the thinking levels it can run at (efforts) and the level it runs at by default (default_effort)."
 
 // listUsableModels answers what usableModels reads: the rows the agent may
-// pick for a subagent, their endpoint (how twin rows differ) and whether each
-// is the conversation's current row. No key or any other credential ever
-// appears in the answer.
+// pick for a subagent, each under the name a person reads (the label, the
+// wire id when no listing carries one), the thinking levels the row can run
+// at and the level it runs at by default, and — only when true — whether it
+// is the conversation's current row or a handed-off one. No key or any other
+// credential ever appears in the answer.
 func listUsableModels(ctx context.Context, fac Factory) (string, error) {
 	models, err := usableModels(ctx, fac)
 	if err != nil {
@@ -562,14 +565,31 @@ func listUsableModels(ctx context.Context, fac Factory) (string, error) {
 		Note   string           `json:"note,omitempty"`
 	}{}
 	for _, m := range models {
-		out.Models = append(out.Models, map[string]any{
-			"id":         m.Row.ID,
-			"provider":   m.Row.Provider,
-			"model":      m.Row.Model,
-			"endpoint":   appcfg.ModelEndpointLabel(m.Row.BaseURL, m.Row.APIPath, m.Row.URLVerbatim),
-			"current":    current != "" && m.Row.ID == current,
-			"handed_off": m.HandedOff,
-		})
+		label := llm.ListingDisplayName(m.Entry.Provider, m.Entry.Model)
+		if label == "" {
+			label = m.Entry.Model
+		}
+		row := map[string]any{
+			"id":       m.Entry.ID,
+			"provider": m.Entry.Provider,
+			"model":    label,
+		}
+		if current != "" && m.Row.ID == current {
+			row["current"] = true
+		}
+		if m.HandedOff {
+			row["handed_off"] = true
+		}
+		if efforts := usableModelEfforts(m); len(efforts) > 0 {
+			row["efforts"] = efforts
+			// The default is only worth reporting when it is a level the model
+			// can actually be given: a default outside the sendable list would
+			// teach the model a fake option.
+			if def := appcfg.ReasoningEffort(m.Entry.Params); def != "" && slices.Contains(efforts, def) {
+				row["default_effort"] = def
+			}
+		}
+		out.Models = append(out.Models, row)
 	}
 	if len(out.Models) == 0 {
 		out.Note = "No model is allowed for subagents you pick. Omit model to run on the conversation's model."
