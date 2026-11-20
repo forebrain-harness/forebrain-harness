@@ -1,11 +1,10 @@
 package tui
 
 import (
-	"fmt"
-
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
