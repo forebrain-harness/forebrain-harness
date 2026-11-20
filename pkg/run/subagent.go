@@ -3187,6 +3187,66 @@ func refuseGoneCustomSubagent(fac Factory, record agent.HistoryEntry) error {
 	return fmt.Errorf("subagent type %q no longer exists for this agent", strings.TrimSpace(record.AgentType))
 }
 
+// applySubagentContinueModel re-pins a continuation's record to the model and
+// thinking level the caller named (plan 336). A named model is resolved exactly
+// as a dispatch resolves it (subagentModelOverrideForRef): authorization,
+// protocol and membership checks, the normalized level, the current-row
+// authorization flag. A level alone is judged against the record's own row when
+// that row resolves, and applied unjudged when it does not — the same "a model
+// this process knows no levels for is not judged" rule a dispatch follows
+// (owner 2026-11-20: first-call success over harness gatekeeping). Empty model
+// and level leave the record untouched: a continuation keeps what it runs on.
+func applySubagentContinueModel(ctx context.Context, fac Factory, record agent.HistoryEntry, in *SubagentContinueInput) (agent.HistoryEntry, error) {
+	if in == nil {
+		return record, nil
+	}
+	model := strings.TrimSpace(in.Model)
+	effort := strings.ToLower(strings.TrimSpace(in.ReasoningEffort))
+	if model == "" && effort == "" {
+		return record, nil
+	}
+	if model != "" {
+		pin, err := subagentModelOverrideForRef(ctx, fac, model, effort)
+		if err != nil {
+			return agent.HistoryEntry{}, err
+		}
+		record.ModelProvider = pin.Provider
+		record.Model = pin.Model
+		record.ModelID = pin.ModelID
+		record.ReasoningEffort = pin.Effort
+		record.ModelLive = pin.Entry != nil
+		record.ModelAuthorizedAsCurrent = pin.AuthorizedAsCurrent
+		return record, nil
+	}
+	// A level alone: judge it against the record's own row when that row
+	// resolves. A record that names no model at all has nothing to attach the
+	// level to — the same structural refusal a dispatch gives an effort
+	// without a model.
+	modelID := strings.TrimSpace(record.ModelID)
+	if modelID == "" {
+		modelID = ModelIDForAgentModel(fac.appConfig(), fac.AgentName, record.ModelProvider, record.Model)
+	}
+	if modelID == "" && strings.TrimSpace(record.Model) == "" {
+		return agent.HistoryEntry{}, fmt.Errorf("reasoning_effort needs a model argument naming the row it applies to; pass model, or omit reasoning_effort.")
+	}
+	if modelID != "" {
+		// The dispatch's current-row authorization persists for this record's
+		// life (plan 334): assert it for this read only, exactly as
+		// subagentRecordPin does, so nothing else sees the assertion.
+		readCtx := ctx
+		if record.ModelAuthorizedAsCurrent {
+			readCtx = WithSessionModelSelection(ctx, PrimaryModelState{ModelID: modelID})
+		}
+		if usable, err := usableModelByID(readCtx, fac, modelID); err == nil {
+			if err := dispatchEffortRefused(usable.Entry, usable, effort); err != nil {
+				return agent.HistoryEntry{}, err
+			}
+		}
+	}
+	record.ReasoningEffort = effort
+	return record, nil
+}
+
 func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentContinueInput) (agent.HistoryEntry, error) {
 	msg := ""
 	if in != nil {
@@ -3222,6 +3282,14 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 	// the tree the record names, and running it in the conversation's directory
 	// would leave its edits where nobody looks for them.
 	if err := subagentWorktreeMissing(record); err != nil {
+		return agent.HistoryEntry{}, err
+	}
+	// A continuation may re-pin the model and level it runs on (plan 336): the
+	// dispatcher's choice for this round, judged the way a fresh dispatch
+	// judges it. The record copy carries the choice into continueSubagentRecord,
+	// which pins from it and persists it on finish (finishSubagentExecution).
+	record, err = applySubagentContinueModel(ctx, fac, record, in)
+	if err != nil {
 		return agent.HistoryEntry{}, err
 	}
 	// The tool path passes no parts (its message is text alone) and no
