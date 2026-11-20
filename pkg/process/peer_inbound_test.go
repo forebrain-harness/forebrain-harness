@@ -1463,6 +1463,48 @@ func TestSubagentEndLeavesAwaitedCancelledAndUsageLimitAlone(t *testing.T) {
 	}
 }
 
+// A delivered report is latched against its execution, so a later wait omits
+// it; a refused delivery, an awaited end and a wait-live end are never latched
+// (plan 338).
+func TestSubagentEndMarksReportHandedOnlyOnDelivery(t *testing.T) {
+	view := &peerTestView{}
+	const idle, running = "cli-subagent-handed", "cli-subagent-handed-running"
+	svc := startPeerTestService(t, "tui", idle, view, nil)
+	queue := svc.env.Control.SessionQueue(running)
+	queue.Attach(run.NewTurnInputRuntime())
+	if !svc.env.Control.TrackRuntime("run-handed", running, func() {}, queue.Runtime()) {
+		t.Fatal("the test run was not tracked")
+	}
+
+	delivered := run.SubagentExecutionEnd{
+		ConversationSessionID: idle, AgentKey: "log-338", Output: "delivered report",
+		ExecutionID: "exec-338-delivered",
+	}
+	svc.env.SubagentExecutionEnded(context.Background(), delivered)
+	if prompts := oneWake(t, view); !strings.Contains(prompts.Text, "delivered report") {
+		t.Fatalf("the running dispatcher's report = %q", prompts.Text)
+	}
+	if !run.SubagentReportHanded("exec-338-delivered") {
+		t.Fatal("a delivered report must be marked handed")
+	}
+
+	awaited := delivered
+	awaited.ExecutionID = "exec-338-awaited"
+	awaited.AwaitedByDispatcher = true
+	waiting := delivered
+	waiting.ExecutionID = "exec-338-waiting"
+	waiting.DispatcherWaiting = true
+	for name, end := range map[string]run.SubagentExecutionEnd{"awaited": awaited, "waiting": waiting} {
+		svc.env.SubagentExecutionEnded(context.Background(), end)
+		if steers := queue.Preview().Steers; len(steers) != 0 {
+			t.Fatalf("%s: a running dispatcher was steered with %q", name, steers)
+		}
+		if run.SubagentReportHanded(end.ExecutionID) {
+			t.Fatalf("%s: an undelivered report was marked handed", name)
+		}
+	}
+}
+
 // Any other failure is reported: the dispatcher is the only one who can decide
 // what to do about a subagent that did not finish, so it hears the error and
 // whatever partial report the execution produced.

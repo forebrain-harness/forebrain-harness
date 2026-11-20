@@ -6009,6 +6009,86 @@ func TestEverySubagentExecutionIsReportedToItsScheduler(t *testing.T) {
 // report and returns the end the composition root received. The factory carries
 // a tool state so an over-budget report has the spill directory every spill
 // writes into.
+// A live subagent_wait owns the report: while a dispatcher is blocked on it,
+// the execution-end event says so, and the source then emits no peer message —
+// the wait itself returns the whole record (plan 338).
+func TestSubagentExecutionEndSkipsReportWhenAWaitIsLive(t *testing.T) {
+	f := newPeerFixture(t, state.ProjectTypeCoding)
+	entry := f.record(t, "task-report-live-wait", "conv-report-live-wait", agent.StatusRunning)
+	rec := &recordingSchedulerExecutor{persistingSubagentExecutor: &persistingSubagentExecutor{}}
+	f.fac.Owner.SubagentExecutor = rec
+	handle := agent.RegistryFor(f.fac.subagentScopeRoot()).Start(entry, func() {})
+
+	reg, ok := aToolByName(f.agent, "subagent_wait")
+	if !ok {
+		t.Fatal("subagent_wait is not registered")
+	}
+	payload := `{"task_id":"task-report-live-wait","timeout_ms":8000}`
+	type waitOutcome struct {
+		text string
+		err  error
+	}
+	waiting := make(chan waitOutcome, 1)
+	go func() {
+		result, err := reg.Handle(primaryContext("conv-report-live-wait"), payload)
+		text, _ := result.(string)
+		waiting <- waitOutcome{text: text, err: err}
+	}()
+
+	ch := subagentChannelFor(f.fac, entry)
+	deadline := time.Now().Add(5 * time.Second)
+	for !ch.hasLiveWait() {
+		if time.Now().After(deadline) {
+			t.Fatal("the blocking wait never registered on the channel")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	out, err := runSubagentExecution(context.Background(), f.fac, entry,
+		func(context.Context) (string, error) { return "the report", nil })
+	if err != nil || out != "the report" {
+		t.Fatalf("runSubagentExecution = (%q, %v)", out, err)
+	}
+	_, ends := rec.reports()
+	if len(ends) != 1 {
+		t.Fatalf("ends = %d, want 1", len(ends))
+	}
+	end := ends[0]
+	if !end.DispatcherWaiting {
+		t.Fatalf("end = %+v, want DispatcherWaiting while a wait was blocked", end)
+	}
+	if end.AwaitedByDispatcher {
+		t.Fatalf("end = %+v, a wait must not transfer continuation ownership", end)
+	}
+	if end.Output != "the report" {
+		t.Fatalf("end output = %q, want the report", end.Output)
+	}
+
+	// Release the wait with a terminal record; the answer carries the whole
+	// report and no "already delivered" note, because nothing was delivered.
+	handle.Finish(agent.HistoryEntry{
+		TaskID: entry.TaskID, AgentType: entry.AgentType,
+		SessionID: entry.SessionID, WorkerSessionID: entry.WorkerSessionID,
+		Status: agent.StatusOK, Output: "the report",
+	})
+	select {
+	case got := <-waiting:
+		if got.err != nil {
+			t.Fatalf("subagent_wait: %v", got.err)
+		}
+		answer := decodePeerAnswer(t, got.text)
+		record, _ := answer["record"].(map[string]any)
+		if record["output"] != "the report" {
+			t.Fatalf("wait record = %#v, want the full report", record)
+		}
+		if _, flagged := answer["report_already_delivered_as_message"]; flagged {
+			t.Fatalf("answer = %#v, a live wait is the single channel and must not be flagged", answer)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("the wait did not return when the handle finished")
+	}
+}
+
 func reportSubagentExecutionEnd(t *testing.T, conv, report string) SubagentExecutionEnd {
 	t.Helper()
 	fix := newPersistenceFixture(t, "worker system", report)

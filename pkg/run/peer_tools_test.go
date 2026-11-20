@@ -338,6 +338,58 @@ func TestSubagentWaitReturnsWhenASubagentWrites(t *testing.T) {
 	}
 }
 
+// A finished execution whose report already reached its dispatcher as a peer
+// message answers a later wait with status and a pointer instead of the same
+// words again; an unmarked one, and a record still running, keep their body
+// (plan 338).
+func TestSubagentWaitOmitsReportAlreadyDeliveredAsMessage(t *testing.T) {
+	f := newPeerFixture(t, state.ProjectTypeCoding)
+	seed := func(taskID, conversationSessionID, executionID string, status agent.Status, output string) {
+		t.Helper()
+		entry := f.record(t, taskID, conversationSessionID, status)
+		entry.ExecutionID = executionID
+		entry.Output = output
+		if err := agent.AppendHistory(f.root, entry); err != nil {
+			t.Fatalf("append history: %v", err)
+		}
+	}
+	waitAnswer := func(taskID, conversationSessionID string) map[string]any {
+		t.Helper()
+		text, err := f.call(t, primaryContext(conversationSessionID), "subagent_wait", map[string]any{
+			"task_id": taskID, "timeout_ms": 8000,
+		})
+		if err != nil {
+			t.Fatalf("subagent_wait: %v", err)
+		}
+		return decodePeerAnswer(t, text)
+	}
+
+	seed("task-wait-handed", "conv-wait-handed", "exec-wait-handed", agent.StatusOK, "r")
+	MarkSubagentReportHanded("exec-wait-handed")
+	handed := waitAnswer("task-wait-handed", "conv-wait-handed")
+	record, _ := handed["record"].(map[string]any)
+	progress, _ := handed["progress"].(map[string]any)
+	if record["output"] != nil || progress["last_message"] != nil || handed["report_already_delivered_as_message"] != true {
+		t.Fatalf("handed answer = %#v, want an emptied report and the delivered note", handed)
+	}
+
+	seed("task-wait-plain", "conv-wait-plain", "exec-wait-plain", agent.StatusOK, "r")
+	plain := waitAnswer("task-wait-plain", "conv-wait-plain")
+	record, _ = plain["record"].(map[string]any)
+	if record["output"] != "r" {
+		t.Fatalf("plain record = %#v, want the report kept", record)
+	}
+	if _, flagged := plain["report_already_delivered_as_message"]; flagged {
+		t.Fatalf("plain answer = %#v, nothing was delivered for it", plain)
+	}
+
+	seed("task-wait-running", "conv-wait-running", "exec-wait-running", agent.StatusRunning, "")
+	running := waitAnswer("task-wait-running", "conv-wait-running")
+	if _, flagged := running["report_already_delivered_as_message"]; flagged {
+		t.Fatalf("running answer = %#v, a running record is never redacted", running)
+	}
+}
+
 // The wait tool itself answers with the progress and the arrival flag, and its
 // four descriptions are the stable text the prompt prefix is built from.
 func TestSubagentWaitReportsAMessageFromASubagent(t *testing.T) {
