@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -387,6 +388,65 @@ func TestSubagentWaitOmitsReportAlreadyDeliveredAsMessage(t *testing.T) {
 	running := waitAnswer("task-wait-running", "conv-wait-running")
 	if _, flagged := running["report_already_delivered_as_message"]; flagged {
 		t.Fatalf("running answer = %#v, a running record is never redacted", running)
+	}
+}
+
+// TestSubagentReportHandedLatchIsBounded pins the cap on the handed-report
+// latch: a long-lived process (the gateway) must not grow one entry per
+// delivered execution forever. It floods the global latch with cap+1 ids, so
+// it must run alone in the sequential phase — no t.Parallel().
+func TestSubagentReportHandedLatchIsBounded(t *testing.T) {
+	// Eviction leg: cap+1 distinct marks evict the oldest, keep the newest,
+	// and hold the table at exactly cap entries.
+	for i := 0; i <= subagentReportHandedCap; i++ {
+		MarkSubagentReportHanded(fmt.Sprintf("exec-latch-bound-%d", i))
+	}
+	if SubagentReportHanded("exec-latch-bound-0") {
+		t.Fatalf("oldest id exec-latch-bound-0 handed = true, want false (evicted)")
+	}
+	newest := fmt.Sprintf("exec-latch-bound-%d", subagentReportHandedCap)
+	if !SubagentReportHanded(newest) {
+		t.Fatalf("newest id %s handed = false, want true", newest)
+	}
+	subagentReportHandedMu.Lock()
+	gotLen := len(subagentReportHanded)
+	subagentReportHandedMu.Unlock()
+	if gotLen != subagentReportHandedCap {
+		t.Fatalf("len(subagentReportHanded) = %d, want %d", gotLen, subagentReportHandedCap)
+	}
+
+	// Re-mark idempotence + LRU leg: re-marking an id already in the table
+	// refreshes it to the front without growing the table, so the next new
+	// mark evicts the back (exec-latch-bound-2), not the just-refreshed id 1.
+	MarkSubagentReportHanded("exec-latch-bound-1")
+	subagentReportHandedMu.Lock()
+	gotLen = len(subagentReportHanded)
+	subagentReportHandedMu.Unlock()
+	if gotLen != subagentReportHandedCap {
+		t.Fatalf("after re-mark len(subagentReportHanded) = %d, want %d", gotLen, subagentReportHandedCap)
+	}
+	MarkSubagentReportHanded("exec-latch-bound-new")
+	if SubagentReportHanded("exec-latch-bound-2") {
+		t.Fatalf("exec-latch-bound-2 handed = true, want false (evicted as back)")
+	}
+	if !SubagentReportHanded("exec-latch-bound-1") {
+		t.Fatalf("exec-latch-bound-1 handed = false, want true (refreshed to front)")
+	}
+	if !SubagentReportHanded("exec-latch-bound-new") {
+		t.Fatalf("exec-latch-bound-new handed = false, want true")
+	}
+
+	// Empty-id leg: a blank id names no execution, so it neither grows the
+	// table nor reads back as handed.
+	MarkSubagentReportHanded("   ")
+	subagentReportHandedMu.Lock()
+	gotLen = len(subagentReportHanded)
+	subagentReportHandedMu.Unlock()
+	if gotLen != subagentReportHandedCap {
+		t.Fatalf("after blank mark len(subagentReportHanded) = %d, want %d", gotLen, subagentReportHandedCap)
+	}
+	if SubagentReportHanded("") {
+		t.Fatalf("empty id handed = true, want false")
 	}
 }
 
