@@ -302,17 +302,41 @@ var deliverableTextExts = map[string]bool{
 	".gitignore": true, ".gitattributes": true, ".editorconfig": true, ".dockerfile": true,
 }
 
+// deliverableBinaryExts names the extensions that are never text, whatever
+// their first 8KB look like: a truncated or corrupt image still belongs in the
+// image viewer, and Go's content sniffer answers text/plain for high bytes that
+// are not control characters, so the payload alone cannot decide this. Keep
+// .bin/.dat and other ambiguous suffixes OUT of this map — they must keep the
+// sniff below, which is what TestIsTextFileSniffMatrix pins.
+var deliverableBinaryExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+	".bmp": true, ".ico": true, ".tif": true, ".tiff": true, ".heic": true, ".avif": true,
+	".pdf": true, ".zip": true, ".gz": true, ".tgz": true, ".bz2": true, ".xz": true,
+	".7z": true, ".rar": true, ".tar": true,
+	".docx": true, ".xlsx": true, ".pptx": true,
+	".mp3": true, ".mp4": true, ".mov": true, ".avi": true, ".mkv": true, ".flac": true,
+	".wav": true, ".ogg": true, ".webm": true, ".m4a": true,
+	".woff": true, ".woff2": true, ".ttf": true, ".otf": true,
+	".sqlite": true, ".db": true, ".silk": true,
+}
+
 // isTextFile decides "VS Code or the platform viewer": a known text extension
-// wins outright; otherwise the first 8KB are sniffed — a NUL byte means binary,
-// valid UTF-8 means text, and the remainder goes to the content sniffer the
-// image path already trusts (llm.ImageMIMEType's http.DetectContentType).
+// wins outright, a known binary extension loses outright (the sniff cannot be
+// trusted there — see the map above), and everything else has its first 8KB
+// sniffed — a NUL byte means binary, valid UTF-8 means text, and the remainder
+// goes to the content sniffer the image path already trusts
+// (llm.ImageMIMEType's http.DetectContentType).
 func isTextFile(path string) bool {
-	if deliverableTextExts[strings.ToLower(filepath.Ext(path))] {
+	ext := strings.ToLower(filepath.Ext(path))
+	if deliverableTextExts[ext] {
 		return true
 	}
 	switch strings.ToLower(filepath.Base(path)) {
 	case "makefile", "dockerfile", "justfile", "rakefile", "gemfile":
 		return true
+	}
+	if deliverableBinaryExts[ext] {
+		return false
 	}
 	f, err := os.Open(path)
 	if err != nil {

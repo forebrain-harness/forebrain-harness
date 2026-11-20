@@ -443,6 +443,10 @@ func TestIsTextFileSniffMatrix(t *testing.T) {
 		{"Makefile", []byte("all:\n\techo hi\n"), true},
 		{"empty", nil, true},
 		{"shot.png", []byte("\x89PNG\r\n\x1a\nIHDR garbage"), false},
+		// Nothing here sniffs as binary (Go answers text/plain for this 4-byte
+		// prefix), so only the extension can keep a truncated image out of the
+		// text editor.
+		{"truncated.png", []byte("\x89PNG"), false},
 		{"nul.bin", []byte("hello\x00world"), false},
 		// Invalid UTF-8 is not enough on its own: Go's sniffer answers
 		// text/plain for high bytes that are no control characters, so the
