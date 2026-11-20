@@ -16,6 +16,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -349,10 +350,12 @@ func peerSendToOtherProcess(ctx context.Context, fac Factory, to, message string
 // closed — a batch task refuses people, not its own agents — and the message
 // reaches the dispatching model at its next tool boundary. A dispatcher with
 // no run in flight is not woken here: the message waits in the queue for the
-// run that comes next.
+// run that comes next. It enters the queue marked as the peer letter it is,
+// parts kept verbatim, so the surface draws the sender's card and the model
+// runs it as the peer turn a letter from another process runs as.
 func peerSendToDispatcher(fac Factory, conversationSessionID, text string) string {
 	queue := fac.ownerControl().SessionQueue(conversationSessionID)
-	if !queue.SteerFromAgent(Input{Text: text}) {
+	if !queue.SteerFromAgent(Input{Text: text, Parts: []llm.ContentPart{llm.Text(text)}, Origin: state.MessageOriginPeer}) {
 		return peerAnswerJSON(peerSendAnswer{
 			Status: "queued",
 			Hint:   "Your dispatcher is not running now; it will see this when it next runs.",
@@ -366,7 +369,10 @@ func peerSendToDispatcher(fac Factory, conversationSessionID, text string) strin
 // subagents. An idle subagent takes no message: it has handed its result back,
 // and what it does next is the dispatcher's decision. A name the conversation's
 // ledger does not hold answers errPeerNoSuchAgentInConversation, which is the
-// caller's cue to look for the agent in another process.
+// caller's cue to look for the agent in another process. The message travels
+// marked as a peer letter and with its parts verbatim, the shape a letter from
+// another process arrives in, so the subagent's view draws its sender's card
+// and its body keeps the paragraphs the sender wrote.
 func peerSendToSubagent(fac Factory, conversationSessionID, to, text string) (string, error) {
 	ch, _, err := subagentChannelForConversation(fac.Owner, conversationSessionID, to)
 	if errors.Is(err, ErrSubagentNotFound) {
@@ -375,7 +381,7 @@ func peerSendToSubagent(fac Factory, conversationSessionID, to, text string) (st
 	if err != nil {
 		return "", err
 	}
-	delivery, err := steerRunningSubagent(ch, Input{Text: text})
+	delivery, err := steerRunningSubagent(ch, Input{Text: text, Parts: []llm.ContentPart{llm.Text(text)}, Origin: state.MessageOriginPeer})
 	if errors.Is(err, ErrSubagentNotRunning) {
 		return peerAnswerJSON(peerSendAnswer{
 			Status: "idle",

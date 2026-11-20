@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	toolpkg "github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
@@ -742,5 +743,80 @@ func TestPeerToolDescriptionsNameNoVendor(t *testing.T) {
 				t.Fatalf("description %q names %q", description, brand)
 			}
 		}
+	}
+}
+
+// queuedSteers is a conversation queue's steer lane as the engine keeps it:
+// origin and parts included, which the preview's text form does not carry.
+func queuedSteers(t *testing.T, q *InputQueue) []Input {
+	t.Helper()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]Input(nil), q.steers...)
+}
+
+// A message the dispatching agent writes to a running subagent travels marked
+// as another agent's letter and with its words verbatim, the shape a letter
+// from another process arrives in. Without the mark the subagent's own view
+// drew the sender's words as the person's, and without the parts the queue's
+// flattened text lost the paragraphs the sender wrote.
+func TestPeerSendMarksAMessageToASubagentAsAPeerLetter(t *testing.T) {
+	f := newPeerFixture(t, state.ProjectTypeCoding)
+	entry := f.record(t, "task-peer-letter", "conv-peer-letter", agent.StatusRunning)
+	ch := f.running(t, entry)
+	ch.queue.Attach(NewTurnInputRuntime())
+
+	message := "line one\nline two"
+	answer, err := f.call(t, primaryContext("conv-peer-letter"), "peer_send", map[string]any{
+		"to": "task-peer-letter", "message": message,
+	})
+	if err != nil {
+		t.Fatalf("peer_send: %v", err)
+	}
+	if got := decodePeerAnswer(t, answer)["status"]; got != "delivered" {
+		t.Fatalf("status = %v, want delivered", got)
+	}
+	steers := queuedSteers(t, ch.queue)
+	if len(steers) != 1 {
+		t.Fatalf("queued steers = %#v, want the message", steers)
+	}
+	if steers[0].Origin != state.MessageOriginPeer {
+		t.Fatalf("queued steer origin = %q, want %q: the subagent's view cannot draw the sender's card without it", steers[0].Origin, state.MessageOriginPeer)
+	}
+	if got, want := llm.TextContent(steers[0].Parts...), peerMessageText(peerParentName, message); got != want {
+		t.Fatalf("queued steer parts = %q, want %q verbatim", got, want)
+	}
+}
+
+// A subagent's answer to its dispatcher carries the same two marks: the
+// conversation draws it as the sender's card, and runs it as the peer turn a
+// letter from another process runs as, rather than folding it into the next
+// thing the person types.
+func TestPeerSendMarksASubagentsAnswerAsAPeerLetter(t *testing.T) {
+	f := newPeerFixture(t, state.ProjectTypeCoding)
+	entry := f.record(t, "task-peer-child-letter", "conv-peer-letter-parent", agent.StatusRunning)
+	f.running(t, entry)
+	queue := f.owner.Control.SessionQueue("conv-peer-letter-parent")
+	queue.Attach(NewTurnInputRuntime())
+
+	message := "the router lives in pkg/run\nand its test next to it"
+	answer, err := f.call(t, subagentContext("task-peer-child-letter", "conv-peer-letter-parent"), "peer_send", map[string]any{
+		"to": "parent", "message": message,
+	})
+	if err != nil {
+		t.Fatalf("peer_send: %v", err)
+	}
+	if got := decodePeerAnswer(t, answer)["status"]; got != "delivered" {
+		t.Fatalf("status = %v, want delivered", got)
+	}
+	steers := queuedSteers(t, queue)
+	if len(steers) != 1 {
+		t.Fatalf("queued steers = %#v, want the subagent's answer", steers)
+	}
+	if steers[0].Origin != state.MessageOriginPeer {
+		t.Fatalf("queued steer origin = %q, want %q: the dispatcher's view cannot draw the sender's card without it", steers[0].Origin, state.MessageOriginPeer)
+	}
+	if got, want := llm.TextContent(steers[0].Parts...), peerMessageText("task-peer-child-letter", message); got != want {
+		t.Fatalf("queued steer parts = %q, want %q verbatim", got, want)
 	}
 }

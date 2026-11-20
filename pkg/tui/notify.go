@@ -496,16 +496,17 @@ type SubagentEndedMsg struct {
 	Timestamp  time.Time
 }
 
-// SubagentInputDeliveredMsg is a message the user sent a running subagent that
-// was handed to its model at a tool boundary (the engine's
-// subagent_input_delivered event). The reducer draws it as a user message in
-// that subagent's own view, the way a delivered steer is drawn in the
-// conversation, so a message queued and then delivered does not silently
-// vanish from the preview.
+// SubagentInputDeliveredMsg is a message handed to a running subagent at a
+// tool boundary (the engine's subagent_input_delivered event). The reducer
+// draws it in that subagent's own view, the way a delivered steer is drawn in
+// the conversation, so a message queued and then delivered does not silently
+// vanish from the preview. Origin decides which card: the person's own words
+// when it is empty, a peer's letter when another agent wrote it.
 type SubagentInputDeliveredMsg struct {
 	AgentID string
 	RunID   string
 	Text    string
+	Origin  string
 }
 
 // SubagentPausedMsg is a subagent the user interrupted from its own view (the
@@ -1043,12 +1044,13 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 			s.notifyUIForSession(evt.SessionID, SubagentEndedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error, Output: p.Output, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, FirstToken: time.Duration(p.FirstTokenMs) * time.Millisecond, FinishedAt: time.UnixMilli(p.FinishedAtMs), Timestamp: evt.CreatedAt})
 		}
 	case event.RunEventSubagentInputDelivered:
-		// A message the user sent a running subagent was handed to its model at
-		// a tool boundary: it is drawn as a user message in that subagent's own
-		// view, exactly as a delivered steer is drawn in the conversation.
+		// A message reached a running subagent's model at a tool boundary: it
+		// is drawn in that subagent's own view, exactly as a delivered steer is
+		// drawn in the conversation — the person's own words as theirs, a peer
+		// letter as the card its sender's name belongs on.
 		var p event.SubagentInputDeliveredPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && strings.TrimSpace(p.AgentID) != "" && strings.TrimSpace(p.Text) != "" {
-			s.notifyUIForSession(evt.SessionID, SubagentInputDeliveredMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID, Text: strings.TrimSpace(p.Text)})
+			s.notifyUIForSession(evt.SessionID, SubagentInputDeliveredMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID, Text: strings.TrimSpace(p.Text), Origin: strings.TrimSpace(p.Origin)})
 		}
 	case event.RunEventSubagentPaused:
 		var p event.SubagentPausedPayload

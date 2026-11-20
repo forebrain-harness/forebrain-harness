@@ -1608,13 +1608,14 @@ func replaySubagentRunEventMessage(evt event.RunEvent) (any, bool) {
 		}
 		return replayApprovalMessage(evt, p.AgentID, p.ActionID, p.ActionKind, firstNonEmpty(p.Decision, "resolved"), p.Reason), true
 	case event.RunEventSubagentInputDelivered:
-		// A message the user sent this subagent, replayed as the user message it
-		// was in that subagent's own view.
+		// A message handed to this subagent, replayed in that subagent's own
+		// view: the person's message as theirs, a peer letter as the card its
+		// sender is named on.
 		var p event.SubagentInputDeliveredPayload
 		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" || strings.TrimSpace(p.Text) == "" {
 			return nil, false
 		}
-		return SubagentInputDeliveredMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID, Text: strings.TrimSpace(p.Text)}, true
+		return SubagentInputDeliveredMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID, Text: strings.TrimSpace(p.Text), Origin: strings.TrimSpace(p.Origin)}, true
 	case event.RunEventSubagentPaused:
 		// The user interrupted this subagent from its view, replayed where it
 		// happened.

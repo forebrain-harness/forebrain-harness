@@ -20,6 +20,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/peer"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -6994,5 +6995,88 @@ func TestSubagentPauseUpdatesRosterStatus(t *testing.T) {
 	red.Reduce(SubagentInputDeliveredMsg{AgentID: agentID, Text: "go on"})
 	if got := status(); got != "running" {
 		t.Fatalf("the resumed subagent's row says %q, want \"running\"", got)
+	}
+}
+
+// A peer message handed to a running subagent draws in that subagent's own
+// view the card the conversation draws for the same letter — the sender named,
+// the words inside the envelope, Markdown as it was written — instead of the
+// person's own user row. Both envelope shapes are covered, the one a socket
+// delivers and the in-process one; a message the person typed keeps their own
+// card, and so does a replayed event from before the payload named an origin.
+func TestSubagentPeerDeliveryDrawsTheSenderCard(t *testing.T) {
+	crossSession := peer.Build(peer.Envelope{From: "uds:/tmp/a.sock", FromName: "builder", Body: "please review a.go\nsecond line"})
+	inProcess := `<agent-message from="parent">
+line one
+line two
+</agent-message>`
+	cases := []struct {
+		name      string
+		origin    string
+		text      string
+		wantKind  FrameKind
+		wantTitle string
+		wantBody  string
+	}{
+		{
+			name:      "another session's letter",
+			origin:    state.MessageOriginPeer,
+			text:      crossSession,
+			wantKind:  FrameSystem,
+			wantTitle: "Received a message from builder",
+			wantBody:  "please review a.go\nsecond line",
+		},
+		{
+			name:      "the dispatcher's message",
+			origin:    state.MessageOriginPeer,
+			text:      inProcess,
+			wantKind:  FrameSystem,
+			wantTitle: "Received a message from parent",
+			wantBody:  "line one\nline two",
+		},
+		{
+			name:      "the person's own message",
+			text:      "go on",
+			wantKind:  FrameUser,
+			wantTitle: "you",
+			wantBody:  "go on",
+		},
+		{
+			name:      "an event from before the payload named an origin",
+			text:      crossSession,
+			wantKind:  FrameUser,
+			wantTitle: "you",
+			wantBody:  crossSession,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var r Reducer
+			frames := r.Reduce(SubagentInputDeliveredMsg{
+				AgentID: "task-peer", RunID: "run-peer", Origin: tc.origin, Text: tc.text,
+			}).Frames
+			if len(frames) == 0 {
+				t.Fatal("no frame drawn for the delivered message")
+			}
+			card := frames[0]
+			if card.Kind != tc.wantKind || card.Title != tc.wantTitle {
+				t.Fatalf("card = %s %q, want %s %q", card.Kind, card.Title, tc.wantKind, tc.wantTitle)
+			}
+			if card.Content != tc.wantBody {
+				t.Fatalf("card content = %q, want %q", card.Content, tc.wantBody)
+			}
+			if card.AgentID != "task-peer" || card.RunID != "run-peer" || !card.Final {
+				t.Fatalf("card = %#v, want it retained in task-peer's view as a final frame", card)
+			}
+			if tc.wantKind != FrameSystem {
+				return
+			}
+			if card.Marker != "↘" || !card.MarkdownBody {
+				t.Fatalf("card mark = %q markdown = %v, want the peer card's own mark and Markdown", card.Marker, card.MarkdownBody)
+			}
+			if strings.Contains(card.Content, "<cross-session-message") || strings.Contains(card.Content, "<agent-message") {
+				t.Fatalf("card content = %q, want the envelope gone and only its words left", card.Content)
+			}
+		})
 	}
 }

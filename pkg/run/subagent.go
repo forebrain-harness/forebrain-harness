@@ -1012,7 +1012,10 @@ func (ch *subagentChannel) beginAttempt(ctx context.Context, fac Factory, ex *su
 }
 
 // publishInputDelivered draws each steer the runtime handed the model as a
-// user message in the subagent's own view.
+// message in the subagent's own view. Its origin comes with it: the person's
+// own interjection is their words, while a peer message is another agent's
+// letter and has to be drawn as one. The text travels as it was written,
+// newlines kept, so a letter's body reads the way its sender set it down.
 func (ch *subagentChannel) publishInputDelivered(fac Factory, ex *subagentExecution, delivered []TurnInputEntry) {
 	own := fac.Owner
 	if own == nil || own.Events == nil {
@@ -1022,7 +1025,7 @@ func (ch *subagentChannel) publishInputDelivered(fac Factory, ex *subagentExecut
 		if entry.Mode != TurnInputModeSteer {
 			continue
 		}
-		text := strings.Join(strings.Fields(llm.TextWithoutImageSourceNotes(entry.Parts)), " ")
+		text := strings.TrimSpace(llm.TextWithoutImageSourceNotes(entry.Parts))
 		if text == "" {
 			continue
 		}
@@ -1030,6 +1033,7 @@ func (ch *subagentChannel) publishInputDelivered(fac Factory, ex *subagentExecut
 			AgentID:     ch.agentKey,
 			ExecutionID: ex.executionID,
 			Text:        text,
+			Origin:      strings.TrimSpace(entry.Origin),
 		})
 	}
 }

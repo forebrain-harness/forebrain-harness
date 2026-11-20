@@ -547,13 +547,19 @@ type SubagentSpawnedPayload struct {
 	Origin string `json:"origin,omitempty"`
 }
 
-// SubagentInputDeliveredPayload reports a message the user sent a running
-// subagent, handed to the model at a tool boundary. A surface renders it as a
-// user message in that subagent's own view.
+// SubagentInputDeliveredPayload reports a message handed to a running
+// subagent at a tool boundary. A surface renders it in that subagent's own
+// view: as a user message when the person sent it, as a peer's card when
+// Origin says another agent wrote it.
 type SubagentInputDeliveredPayload struct {
 	AgentID     string `json:"agent_id,omitempty"`
 	ExecutionID string `json:"execution_id,omitempty"`
 	Text        string `json:"text,omitempty"`
+	// Origin is the delivered message's own origin, when it had one: a peer
+	// message handed to a running subagent is another agent's letter, and the
+	// surface has to draw it as such rather than as the person's own words.
+	// Empty for everything the person typed.
+	Origin string `json:"origin,omitempty"`
 }
 
 // SubagentPausedPayload names the subagent whose execution the user

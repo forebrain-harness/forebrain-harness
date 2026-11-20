@@ -1843,9 +1843,13 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		frame := Frame{Kind: FramePlan, Title: planTitle(m.Payload), Content: planText(m.Payload), RunID: r.activeRunID, Final: true, AgentID: agentID}
 		return EventResult{Frames: r.withFlushedBuffers(r.agentBuf(agentID), frame)}
 	case SubagentInputDeliveredMsg:
-		// A message the user sent this subagent reached its model: it is a user
-		// message in that subagent's own view, the way a delivered steer is one
-		// in the conversation. It never appears in the primary transcript.
+		// A message reached this subagent's model: it belongs in that
+		// subagent's own view, the way a delivered steer is one in the
+		// conversation. It never appears in the primary transcript. Whose
+		// message it is decides the card: the person's own words are a user
+		// message, while a peer letter draws the sender's card — the one
+		// peerOriginCard defines for every surface — rather than the person's,
+		// and rather than the envelope it travelled in.
 		text := strings.TrimSpace(m.Text)
 		agentID := strings.TrimSpace(m.AgentID)
 		if text == "" || agentID == "" {
@@ -1859,14 +1863,27 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		// again: the row a pause marked "paused" goes back to "running" with
 		// the message that resumed it.
 		r.updateSubagentStatus(agentID, "running")
-		frames := []Frame{{
+		frame := Frame{
 			Kind:    FrameUser,
 			Title:   "you",
 			Content: text,
 			RunID:   strings.TrimSpace(m.RunID),
 			AgentID: agentID,
 			Final:   true,
-		}}
+		}
+		if drawn, ok := peerOriginCard(m.Origin, text); ok {
+			frame = Frame{
+				Kind:         FrameSystem,
+				Title:        drawn.Title,
+				Content:      drawn.Content,
+				MarkdownBody: drawn.MarkdownBody,
+				Marker:       drawn.Marker,
+				RunID:        strings.TrimSpace(m.RunID),
+				AgentID:      agentID,
+				Final:        true,
+			}
+		}
+		frames := []Frame{frame}
 		return EventResult{Frames: append(frames, r.setCardTaskPaused(agentID, false)...)}
 	case SubagentPausedMsg:
 		// The user interrupted this subagent from its view and it now waits
