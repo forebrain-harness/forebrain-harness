@@ -50,6 +50,12 @@ type HistoryEntry struct {
 	// than trusting the pin's recorded copy, so the round runs on the row's
 	// current key and endpoint.
 	ModelLive bool   `json:"model_live,omitempty"`
+	// ModelAuthorizedAsCurrent marks a live pin the dispatch admitted as the
+	// conversation's own current row with the switch off (plan 331's
+	// exception): the user's choice for this conversation, authorized once at
+	// dispatch. A continuation honors it for the record's whole life instead
+	// of re-judging the switch against today's selection (plan 334).
+	ModelAuthorizedAsCurrent bool `json:"model_authorized_as_current,omitempty"`
 	DefSource string `json:"definition_source,omitempty"`
 	// ModelProvider and Model are the model a dispatch-time override put
 	// this agent on; empty when it runs on its definition's or the

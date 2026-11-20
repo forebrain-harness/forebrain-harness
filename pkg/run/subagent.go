@@ -4408,6 +4408,11 @@ type SubagentModelOverride struct {
 	// added after this turn's configuration was adopted runs on its own
 	// settings rather than on the catalog's alone (owner 2026-11-10).
 	Caps *llm.ModelOverride
+	// AuthorizedAsCurrent says the resolution admitted a switch-off row as
+	// the conversation's current model (plan 331): the one exception that
+	// lives on the dispatch ctx alone, so the dispatch records it for the
+	// continuation (plan 334).
+	AuthorizedAsCurrent bool
 }
 
 func (o SubagentModelOverride) valid() bool {
