@@ -1341,7 +1341,7 @@ func runSubagentExecution(ctx context.Context, fac Factory, record agent.History
 		if _, returned := ch.queue.Next(BoundaryInterrupted); len(returned) > 0 && surface.OnReturned != nil {
 			surface.OnReturned(ch.agentKey, returned)
 		}
-		reportSubagentExecutionEnded(fac, record, err, awaited, out)
+		reportSubagentExecutionEnded(fac, record, err, awaited, ch.hasLiveWait(), out)
 		return out, err
 	}
 }
@@ -1363,11 +1363,13 @@ func reportSubagentExecutionStarting(fac Factory, record agent.HistoryEntry) {
 // usage-limit failure is recognized by the scheduler the same way a primary
 // turn's is. awaited says the execution was run for a blocking call of the
 // dispatching agent, which receives the failure and continues the subagent
-// itself. output is the report the execution ended with, budgeted here — the
+// itself. dispatcherWaiting says a subagent_wait was still blocked on the
+// subagent when it ended, so the report source emits no peer message (plan 338).
+// output is the report the execution ended with, budgeted here — the
 // one cut every report goes through — so the composition root hands its
 // dispatcher the head plus the path to the whole of an over-budget one instead
 // of growing a truncation of its own.
-func reportSubagentExecutionEnded(fac Factory, record agent.HistoryEntry, err error, awaited bool, output string) {
+func reportSubagentExecutionEnded(fac Factory, record agent.HistoryEntry, err error, awaited, dispatcherWaiting bool, output string) {
 	exec := subagentExecutorOf(fac)
 	if exec == nil {
 		return
@@ -1381,6 +1383,8 @@ func reportSubagentExecutionEnded(fac Factory, record agent.HistoryEntry, err er
 		Err:                   err,
 		Output:                inline,
 		AwaitedByDispatcher:   awaited,
+		ExecutionID:           strings.TrimSpace(record.ExecutionID),
+		DispatcherWaiting:     dispatcherWaiting,
 	})
 }
 
@@ -5203,6 +5207,17 @@ type SubagentExecutionEnd struct {
 	// subagent_continue). That agent receives the failure and owns the
 	// continuation, so the scheduler arms none for the subagent itself.
 	AwaitedByDispatcher bool
+	// ExecutionID is the execution this end reports. It is the latch key for
+	// "this report already reached the dispatcher as a peer message": a wait
+	// that arrives after a delivery reads it back and omits the body instead of
+	// repeating it (plan 338).
+	ExecutionID string
+	// DispatcherWaiting is true when a subagent_wait was still blocked on this
+	// subagent at the moment the execution ended: that call receives the final
+	// record itself, so the automatic peer report would be the same words twice.
+	// Unlike AwaitedByDispatcher it carries no continuation ownership — a
+	// usage-limit failure must still arm the subagent's own continuation.
+	DispatcherWaiting bool
 }
 
 // SubagentTurn is what one subagent execution produced, handed to the
