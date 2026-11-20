@@ -220,7 +220,7 @@ test('the page lists the agent’s subagents in configuration order, ten to a pa
   }
 })
 
-test('editing a built-in stores its model, effort and prompt, and the table says so', async ({ page }) => {
+test('editing a built-in pins its model and level, and the table says so', async ({ page }) => {
   test.info().setTimeout(150_000)
   await signIn(page)
   const agentId = await activeAgentId(page)
@@ -232,95 +232,43 @@ test('editing a built-in stores its model, effort and prompt, and the table says
   if (!pinnable) throw new Error(`no model with reasoning levels: ${JSON.stringify(options)}`)
   const effort = pinnable.efforts.includes('high') ? 'high' : pinnable.efforts[0]
   const label = EFFORT_LABEL[effort] ?? effort
-  const prompt = 'E2E-079 explore prompt'
 
   try {
-    const before = await subagentDetail(page, agentId, 'explore')
-    const defaultPrompt = String(before.default_prompt ?? '')
-    // The drawer's box is the harness's own text, word for word: a reader
-    // comparing a rewrite against "see the source" cannot judge anything.
-    expect(defaultPrompt.trim().length).toBeGreaterThan(0)
-
     await page.goto('/subagents', { waitUntil: 'networkidle' })
     await expect(page.locator('[data-testid="subagent-edit-explore"]')).toBeVisible({ timeout: 20_000 })
     await page.click('[data-testid="subagent-edit-explore"]')
     const drawer = page.locator('.forebrain-drawer')
     await expect(drawer).toBeVisible()
     await expect(drawer.locator('.forebrain-drawer-head b')).toHaveText('编辑内置子代理 explore')
-    await expect(drawer.locator('[data-testid="subagent-prompt"]')).toHaveValue(defaultPrompt)
+    // A built-in's entry is a model and a level (P5): the prompt rewrite and
+    // its badge retired with the switch.
+    await expect(drawer.locator('[data-testid="subagent-prompt"]')).toHaveCount(0)
     await expect(drawer.locator('[data-testid="subagent-overridden"]')).toHaveCount(0)
 
     const reload = nextListLoad(page)
-    await drawer.locator('[data-testid="subagent-prompt"]').fill(prompt)
     await pickModel(page, pinnableIndex)
     await pickOption(page, 'subagent-effort', label)
     await drawer.locator('[data-testid="subagent-save"]').click()
     await reload
     await expect(page.locator('.forebrain-drawer')).toHaveCount(0, { timeout: 20_000 })
 
-    // The row now says what it will run on, and that its prompt is this
-    // agent's own.
+    // The row says what it will run on, and carries no rewrite badge.
     const row = page.locator('[data-subagent-row="explore"]')
-    await expect(row.locator('[data-testid="subagent-overridden-explore"]')).toBeVisible({ timeout: 20_000 })
+    await expect(row.locator('[data-testid="subagent-overridden-explore"]')).toHaveCount(0, { timeout: 20_000 })
     await expect(row.locator('td:nth-child(3)')).toContainText(`${pinnable.key} ${label}`)
     await page.mouse.move(2, 2)
-    await shot(page, 'p079-builtin-rewritten')
+    await shot(page, 'p079-builtin-pinned')
 
-    // The record reads back the same three settings: a later open of the drawer
-    // shows what this save wrote.
+    // The record reads the pin back: the model and the level, no rewrite.
     const detail = await subagentDetail(page, agentId, 'explore')
-    expect(detail.prompt_overridden).toBe(true)
-    expect(String(detail.system_prompt).trim()).toBe(prompt)
     expect(`${String(detail.model_provider)}/${String(detail.model)}`).toBe(pinnable.key)
     expect(detail.reasoning_effort).toBe(effort)
-  } finally {
-    // The override entry says nothing once both are cleared, so the built-in
-    // goes back to following the harness.
-    await page.request.put(agentSubagents(agentId, 'explore'), {
-      data: { model: '', reasoning_effort: '', reset_prompt: true },
-    })
-  }
-})
-
-test('恢复默认 clears the rewrite and leaves the model alone', async ({ page }) => {
-  test.info().setTimeout(120_000)
-  await signIn(page)
-  const agentId = await activeAgentId(page)
-  const prompt = 'E2E-079 rewritten prompt to be restored'
-  await write(page, 'PUT', agentSubagents(agentId, 'explore'), { system_prompt: prompt })
-  try {
-    await page.goto('/subagents', { waitUntil: 'networkidle' })
-    const row = page.locator('[data-subagent-row="explore"]')
-    await expect(row.locator('[data-testid="subagent-overridden-explore"]')).toBeVisible({ timeout: 20_000 })
-
-    await page.click('[data-testid="subagent-edit-explore"]')
-    const drawer = page.locator('.forebrain-drawer')
-    await expect(drawer.locator('[data-testid="subagent-overridden"]')).toBeVisible()
-    await expect(drawer.locator('[data-testid="subagent-prompt"]')).toHaveValue(prompt)
-
-    // 恢复默认 puts the harness's own text back in the box and marks the save
-    // as "clear the rewrite"; the badge goes with it.
-    await drawer.locator('[data-testid="subagent-restore"]').click()
-    await expect(drawer.locator('[data-testid="subagent-overridden"]')).toHaveCount(0)
-    const defaultPrompt = String((await subagentDetail(page, agentId, 'explore')).default_prompt ?? '')
-    await expect(drawer.locator('[data-testid="subagent-prompt"]')).toHaveValue(defaultPrompt)
-
-    const reload = nextListLoad(page)
-    await drawer.locator('[data-testid="subagent-save"]').click()
-    await reload
-    await expect(page.locator('.forebrain-drawer')).toHaveCount(0, { timeout: 20_000 })
-
-    // The badge is gone, the prompt in force is the original again, and the
-    // record no longer holds a rewrite at all.
-    await expect(page.locator('[data-testid="subagent-overridden-explore"]')).toHaveCount(0, { timeout: 20_000 })
-    const detail = await subagentDetail(page, agentId, 'explore')
     expect(detail.prompt_overridden).toBe(false)
-    expect(String(detail.system_prompt)).toBe(defaultPrompt)
-    await page.mouse.move(2, 2)
-    await shot(page, 'p079-restored-default')
   } finally {
+    // The pin clears to nothing, so the built-in goes back to following the
+    // conversation's model.
     await page.request.put(agentSubagents(agentId, 'explore'), {
-      data: { model: '', reasoning_effort: '', reset_prompt: true },
+      data: { model: '', reasoning_effort: '' },
     })
   }
 })
@@ -380,40 +328,48 @@ test('a new custom subagent lands first, wearing the tools it was given', async 
   }
 })
 
-test('the page switch and the rows switch each other', async ({ page }) => {
+test('the page switch and the custom rows switch each other', async ({ page }) => {
   test.info().setTimeout(150_000)
   await signIn(page)
   const agentId = await activeAgentId(page)
+  const custom = 'e2e-079-switch'
+  await write(page, 'POST', agentSubagents(agentId), {
+    name: custom,
+    description: 'E2E 079 的开关子代理',
+    system_prompt: 'E2E-079 switch prompt',
+  })
   try {
     await page.goto('/subagents', { waitUntil: 'networkidle' })
     const pageSwitch = page.locator('[data-testid="subagents-switch"]')
     // The run's configuration has the feature on and this agent sets no switch
     // of its own, so the toolbar follows the global default.
     await expect(pageSwitch).toHaveAttribute('aria-checked', 'true', { timeout: 20_000 })
-    for (const name of BUILTINS) await expect(rowSwitch(page, name)).toHaveAttribute('aria-checked', 'true')
 
-    // Off: every row under it follows, since none of them can run without it.
+    // The built-ins are always on (P5): their rows carry no switch at all.
+    for (const name of BUILTINS) {
+      await expect(page.locator(`[data-testid="subagent-switch-${name}"]`)).toHaveCount(0)
+    }
+
+    // Off: the switchable rows under it follow, since none of them can run
+    // without the feature.
     await flip(page, pageSwitch, false)
-    for (const name of BUILTINS) await expect(rowSwitch(page, name)).toHaveAttribute('aria-checked', 'false')
+    await expect(rowSwitch(page, custom)).toHaveAttribute('aria-checked', 'false')
     await page.mouse.move(2, 2)
     await shot(page, 'p079-switch-off')
 
     // One row back on: the feature has to be on for it to run, so the toolbar
     // follows the row.
-    await flip(page, rowSwitch(page, 'explore'), true)
+    await flip(page, rowSwitch(page, custom), true)
     await expect(pageSwitch).toHaveAttribute('aria-checked', 'true', { timeout: 20_000 })
-    for (const name of BUILTINS.filter((builtin) => builtin !== 'explore')) {
-      await expect(rowSwitch(page, name)).toHaveAttribute('aria-checked', 'false')
-    }
 
-    // The last row off is a list that dispatches nothing: the feature follows
-    // it off.
-    await flip(page, rowSwitch(page, 'explore'), false)
+    // The last switchable row off is a list that dispatches nothing the
+    // switches own: the feature follows it off.
+    await flip(page, rowSwitch(page, custom), false)
     await expect(pageSwitch).toHaveAttribute('aria-checked', 'false', { timeout: 20_000 })
     await page.mouse.move(2, 2)
     await shot(page, 'p079-switch-linkage')
   } finally {
-    // Leave the run as it was found: the feature on, and every row with it.
+    await page.request.delete(agentSubagents(agentId, custom))
     await page.request.put(`/api/agents/primary/${encodeURIComponent(agentId)}/subagent-switch`, { data: { enabled: true } })
   }
 })
