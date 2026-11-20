@@ -344,6 +344,42 @@ func TestReadableToolAnswerReadsThePeerTools(t *testing.T) {
 	require.False(t, ok)
 }
 
+// list_usable_models reads the model roster as the facts the web card draws —
+// provider, label, thinking levels and default, current/handed-off flags — and
+// never carries the row id, which is the LLM's dispatch argument rather than a
+// person's reading (owner 2026-11-20, plan 337).
+func TestReadableToolAnswerReadsUsableModels(t *testing.T) {
+	t.Parallel()
+	body := `{"models":[` +
+		`{"id":"llm_a","provider":"zhipuai","model":"glm-5.3","efforts":["low","medium","high"],"default_effort":"medium","current":true},` +
+		`{"id":"llm_b","provider":"qodercn","model":"DeepSeek-Flash","handed_off":true}],"note":""}`
+	answer, ok := ReadableToolAnswer("list_usable_models", body, nil)
+	require.True(t, ok)
+	require.Len(t, answer.Models, 2)
+	require.Equal(t, "zhipuai", answer.Models[0].Provider)
+	require.Equal(t, "glm-5.3", answer.Models[0].Model)
+	require.Equal(t, []string{"low", "medium", "high"}, answer.Models[0].Efforts)
+	require.Equal(t, "medium", answer.Models[0].DefaultEffort)
+	require.True(t, answer.Models[0].Current)
+	require.False(t, answer.Models[0].HandedOff)
+	require.Equal(t, "qodercn", answer.Models[1].Provider)
+	require.Equal(t, "DeepSeek-Flash", answer.Models[1].Model)
+	require.Empty(t, answer.Models[1].Efforts)
+	require.True(t, answer.Models[1].HandedOff)
+	// The id is the LLM's argument, never a reader's: no field may carry it.
+	b, err := json.Marshal(answer)
+	require.NoError(t, err)
+	require.NotContains(t, string(b), "llm_a")
+	require.NotContains(t, string(b), "llm_b")
+	// The flat Text line stays for replay of older sessions.
+	require.Contains(t, answer.Text, "glm-5.3")
+
+	empty, ok := ReadableToolAnswer("list_usable_models", `{"models":[],"note":"No model is allowed for subagents you pick."}`, nil)
+	require.True(t, ok)
+	require.Empty(t, empty.Models)
+	require.Equal(t, "No model is allowed for subagents you pick.", empty.Note)
+}
+
 // ReadableToolAnswer leaves alone a body some renderer reads on its own, even
 // when that body is JSON — a read .json file is the file — and reads a
 // migrated search's links the way the native search card lists them.
