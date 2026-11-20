@@ -2521,11 +2521,18 @@ func subagentRecordPin(ctx context.Context, fac Factory, record agent.HistoryEnt
 		return SubagentModelOverride{}, err
 	}
 	entry, caps := reread.Entry, reread.Caps
+	// The dispatched level is part of the model this run was pinned to: a
+	// continuation keeps it, exactly as the configured-type path freezes it.
+	// Only a record that never named one falls back to the row's default.
+	effort := strings.TrimSpace(record.ReasoningEffort)
+	if effort == "" {
+		effort = appcfg.ReasoningEffort(entry.Params)
+	}
 	return SubagentModelOverride{
 		ModelID:  strings.TrimSpace(entry.ID),
 		Provider: strings.TrimSpace(entry.Provider),
 		Model:    strings.TrimSpace(entry.Model),
-		Effort:   appcfg.ReasoningEffort(entry.Params),
+		Effort:   effort,
 		Entry:    &entry,
 		Version:  reread.Row.UpdatedAt,
 		Caps:     caps,

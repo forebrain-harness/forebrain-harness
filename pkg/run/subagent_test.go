@@ -9341,6 +9341,37 @@ func TestSubagentPinKeepsTheRowsCapsThroughExecAndContinuation(t *testing.T) {
 	}
 }
 
+// A continuation keeps the level the dispatch ran at; only a record without
+// one falls back to the row's current default.
+func TestSubagentRecordPinKeepsTheDispatchedEffort(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	row := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-effort-cont", BaseURL: "https://cont.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-cont", SubagentAllowed: true,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+	})
+	ctx := dispatchTestCtx()
+	record := agent.HistoryEntry{
+		ModelProvider: "openai", Model: "gpt-effort-cont",
+		ModelID: row.ID, ModelLive: true, ReasoningEffort: "xhigh",
+	}
+	pin, err := subagentRecordPin(ctx, fix.fac, record)
+	if err != nil {
+		t.Fatalf("subagentRecordPin: %v", err)
+	}
+	if pin.Effort != "xhigh" {
+		t.Fatalf("continuation effort = %q, want the dispatched level", pin.Effort)
+	}
+	record.ReasoningEffort = ""
+	pin, err = subagentRecordPin(ctx, fix.fac, record)
+	if err != nil {
+		t.Fatalf("subagentRecordPin without a level: %v", err)
+	}
+	if pin.Effort != "low" {
+		t.Fatalf("continuation effort = %q, want the row's default", pin.Effort)
+	}
+}
+
 // A pre-table configuration entry can still be named by this conversation's
 // hand-off even though list_usable_models only walks DB rows. The legacy
 // fallback must honor the same credential rule as the DB-row dispatch path:
