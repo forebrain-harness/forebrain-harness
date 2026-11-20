@@ -2018,7 +2018,10 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	// continuation rereads and re-authorizes that row (subagentRecordPin),
 	// because the model argument is a choice the switch governs. A configured
 	// type's row is read again at every dispatch by definition, so marking it
-	// live would put a configured dispatch through that switch.
+	// live would put a configured dispatch through that switch. The one
+	// waiver persists: a row admitted as the conversation's current keeps
+	// that authorization in the record (ModelAuthorizedAsCurrent), so a
+	// continuation does not re-judge it against a later selection (plan 334).
 	modelLive := false
 	// The /goal check takes its model from the settings page alone (plan 299):
 	// a dispatch-time pin is a caller's choice, and the check is not the
@@ -2066,6 +2069,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 		entry.ModelID = strings.TrimSpace(pin.ModelID)
 		entry.ReasoningEffort = strings.TrimSpace(pin.Effort)
 		entry.ModelLive = modelLive
+		entry.ModelAuthorizedAsCurrent = pin.AuthorizedAsCurrent
 		cctx = WithSubagentModelOverride(cctx, pin)
 	}
 	// The worker session is born before anything can reference it. Its row is
@@ -2516,7 +2520,16 @@ func subagentRecordPin(ctx context.Context, fac Factory, record agent.HistoryEnt
 	if !record.ModelLive || modelID == "" {
 		return pin, nil
 	}
-	reread, err := usableModelByID(ctx, fac, modelID)
+	// The dispatch's current-row authorization persists for this record's
+	// life: assert it for the re-read only, by naming the pinned row as the
+	// selection this check sees. The continuation's request context is built
+	// from ctx, never from rereadCtx, so nothing else reads this assertion.
+	// Credentials are still checked — the waiver is the switch alone.
+	rereadCtx := ctx
+	if record.ModelAuthorizedAsCurrent {
+		rereadCtx = WithSessionModelSelection(ctx, PrimaryModelState{ModelID: modelID})
+	}
+	reread, err := usableModelByID(rereadCtx, fac, modelID)
 	if err != nil {
 		return SubagentModelOverride{}, err
 	}
@@ -4743,6 +4756,10 @@ func subagentModelOverrideForRef(ctx context.Context, fac Factory, id, effort st
 	if err != nil {
 		return SubagentModelOverride{}, err
 	}
+	// A switch-off row that resolved at all was admitted as the
+	// conversation's current model — the only way past the switch for a
+	// non-hand-off row — so record that authorization for the continuation.
+	authorizedAsCurrent := !usable.HandedOff && !usable.Row.SubagentAllowed
 	entry, caps := usable.Entry, usable.Caps
 	if effort == "" {
 		effort = appcfg.ReasoningEffort(entry.Params)
@@ -4757,6 +4774,9 @@ func subagentModelOverrideForRef(ctx context.Context, fac Factory, id, effort st
 		Entry:    &entry,
 		Version:  usable.Row.UpdatedAt,
 		Caps:     caps,
+		// The flag stands apart from the row's live data: it records how the
+		// dispatch was admitted, not what the row is.
+		AuthorizedAsCurrent: authorizedAsCurrent,
 	}, nil
 }
 
