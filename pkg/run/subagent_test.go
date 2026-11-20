@@ -9736,6 +9736,12 @@ func TestSubagentReasoningEffortValidation(t *testing.T) {
 	if pin, err := subagentModelOverrideForRef(ctx, fix.fac, known.ID, " high "); err != nil || pin.Effort != "high" {
 		t.Fatalf("trimmed member level = (%q, %v), want high", pin.Effort, err)
 	}
+	if pin, err := subagentModelOverrideForRef(ctx, fix.fac, known.ID, "High"); err != nil || pin.Effort != "high" {
+		t.Fatalf("capitalized member level = (%q, %v), want the normalized high", pin.Effort, err)
+	}
+	if pin, err := subagentModelOverrideForRef(ctx, fix.fac, known.ID, " HIGH "); err != nil || pin.Effort != "high" {
+		t.Fatalf("mixed-case member level = (%q, %v), want the normalized high", pin.Effort, err)
+	}
 	if _, err := subagentModelOverrideForRef(ctx, fix.fac, known.ID, "xhigh"); err == nil ||
 		!strings.Contains(err.Error(), "does not offer") || !strings.Contains(err.Error(), "low, medium, high") {
 		t.Fatalf("non-member level must be refused with the offered list: %v", err)
