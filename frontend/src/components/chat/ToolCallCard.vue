@@ -492,10 +492,13 @@ const isShellBody = computed(() => (
 
 /** A non-zero exit rides the head left of the duration; 0 and absent are the same. */
 /** A peer_list answer draws the roster; an empty roster still draws its own
- * empty state, which is why the note counts. */
+ * empty state, which is why the note counts. A list_usable_models answer is
+ * the model roster's own card even when empty (plan 337 Q4): its note must
+ * not route it here. */
 const peerRoster = computed(() => {
   const answer = props.step.readableAnswer
-  return Boolean(answer && ((answer.peers?.length ?? 0) > 0 || answer.note))
+  const isModelRoster = String(props.step.toolName ?? '').trim().toLowerCase() === 'list_usable_models'
+  return Boolean(answer && !isModelRoster && ((answer.peers?.length ?? 0) > 0 || answer.note))
 })
 
 /** A peer_send answer draws the message and its delivery. */
