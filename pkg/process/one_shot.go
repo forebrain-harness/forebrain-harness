@@ -89,6 +89,11 @@ func (env *Environment) deliverSubagentReport(end run.SubagentExecutionEnd) {
 	switch {
 	case end.AwaitedByDispatcher, sessionID == "":
 		return
+	case end.DispatcherWaiting:
+		// A dispatcher blocked on subagent_wait receives the final record from
+		// that call itself, so a peer message here would be the same report a
+		// second time (plan 338).
+		return
 	case errors.Is(end.Err, context.Canceled):
 		return
 	case subagentEndWaitsForItsContinuation(end.Err):
@@ -114,6 +119,11 @@ func (env *Environment) deliverSubagentReport(end run.SubagentExecutionEnd) {
 		// One attempt, no retry: the conversation may have moved on, and the
 		// report is a courtesy to a dispatcher that is no longer waiting.
 		slog.Debug("subagent report was not delivered", "session_id", sessionID, "agent", agentKey, "reason", refusal)
+	} else {
+		// Only a delivered report is marked: a later subagent_wait reads this
+		// latch and omits the body. A refused delivery stays unmarked so the
+		// wait still returns the whole result (plan 338).
+		run.MarkSubagentReportHanded(end.ExecutionID)
 	}
 }
 

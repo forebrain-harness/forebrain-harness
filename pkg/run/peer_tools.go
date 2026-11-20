@@ -500,6 +500,38 @@ func signalPeerMessage(conversationSessionID string) {
 	}
 }
 
+var (
+	subagentReportHandedMu sync.Mutex
+	subagentReportHanded   = map[string]struct{}{}
+)
+
+// MarkSubagentReportHanded records that one execution's final report reached
+// its dispatcher as a peer message, so a later subagent_wait omits the report
+// body instead of repeating it (plan 338). Empty ids name no execution and are
+// ignored.
+func MarkSubagentReportHanded(executionID string) {
+	key := strings.TrimSpace(executionID)
+	if key == "" {
+		return
+	}
+	subagentReportHandedMu.Lock()
+	subagentReportHanded[key] = struct{}{}
+	subagentReportHandedMu.Unlock()
+}
+
+// SubagentReportHanded reports whether the report for executionID was handed
+// to the dispatcher as a peer message.
+func SubagentReportHanded(executionID string) bool {
+	key := strings.TrimSpace(executionID)
+	if key == "" {
+		return false
+	}
+	subagentReportHandedMu.Lock()
+	defer subagentReportHandedMu.Unlock()
+	_, ok := subagentReportHanded[key]
+	return ok
+}
+
 // subagentWaitResult is one wait's answer: the subagent's record, whether the
 // wait ran out of time, and whether a message from a subagent ended it early.
 type subagentWaitResult struct {
