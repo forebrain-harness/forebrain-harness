@@ -9372,6 +9372,79 @@ func TestSubagentRecordPinKeepsTheDispatchedEffort(t *testing.T) {
 	}
 }
 
+// A dispatch admitted as the conversation's current row (switch off) keeps
+// that authorization for its whole life: the continuation rereads the row
+// for live data, not to re-judge a choice the user already made (plan 334).
+func TestCurrentRowDispatchKeepsAuthorizationThroughContinuation(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	row := fix.insertModelRow(t, state.LLMModel{
+		Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://cur.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-cur", SubagentAllowed: false,
+	})
+	ctx := dispatchTestCtx()
+	sel := WithSessionModelSelection(ctx, PrimaryModelState{ModelID: row.ID, Provider: "zhipuai", Model: "glm-5.3"})
+
+	pin, err := subagentModelOverrideForRef(sel, fix.fac, row.ID, "")
+	if err != nil {
+		t.Fatalf("dispatch on the current row: %v", err)
+	}
+	if !pin.AuthorizedAsCurrent {
+		t.Fatal("a switch-off row admitted as the conversation's current must carry the authorization flag")
+	}
+
+	// The dispatch writes the flag into the record.
+	_, _, dispatchErr := dispatchSubagent(WithSubagentModelOverride(sel, pin), fix.fac, subagentDispatch{
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			if !prep.entry.ModelAuthorizedAsCurrent {
+				t.Error("prepareSubagent dropped the current-row authorization from the record")
+			}
+			return "done", nil
+		},
+	})
+	if dispatchErr != nil {
+		t.Fatalf("dispatchSubagent: %v", dispatchErr)
+	}
+
+	record := agent.HistoryEntry{
+		SessionID:                "session-1",
+		ModelProvider:            pin.Provider,
+		Model:                    pin.Model,
+		ModelID:                  pin.ModelID,
+		ModelLive:                true,
+		ReasoningEffort:          pin.Effort,
+		ModelAuthorizedAsCurrent: true,
+	}
+	// Path 1: startSubagentContinuation's base — Background + session id only.
+	base := llm.WithAgentSessionID(context.Background(), "session-1")
+	if _, err := subagentRecordPin(base, fix.fac, record); err != nil {
+		t.Fatalf("surface continuation of a current-row dispatch: %v", err)
+	}
+	// Path 2: the conversation moved to another model; the authorization
+	// persists for the subagent's life, not the selection's.
+	other := fix.insertModelRow(t, state.LLMModel{
+		Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "https://other.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-other", SubagentAllowed: true,
+	})
+	switched := WithSessionModelSelection(ctx, PrimaryModelState{ModelID: other.ID, Provider: "deepseek", Model: "deepseek-v4-flash"})
+	if _, err := subagentRecordPin(switched, fix.fac, record); err != nil {
+		t.Fatalf("tool continuation after a model switch: %v", err)
+	}
+
+	// A record without the flag keeps today's re-authorization: a switch-off
+	// row that is nobody's current choice still refuses.
+	plain := record
+	plain.ModelAuthorizedAsCurrent = false
+	if _, err := subagentRecordPin(base, fix.fac, plain); err == nil || !strings.Contains(err.Error(), "not one you may pick") {
+		t.Fatalf("unflagged record must keep the switch refusal: %v", err)
+	}
+
+	// The waiver never outlives the credentials: a keyless row still fails.
+	fix.updateModelRow(t, row, func(r *state.LLMModel) { r.APIKey = "" })
+	if _, err := subagentRecordPin(base, fix.fac, record); err == nil || !strings.Contains(err.Error(), "has no credentials") {
+		t.Fatalf("credential revocation must still refuse: %v", err)
+	}
+}
+
 // A pre-table configuration entry can still be named by this conversation's
 // hand-off even though list_usable_models only walks DB rows. The legacy
 // fallback must honor the same credential rule as the DB-row dispatch path:
