@@ -497,6 +497,11 @@ func newUserInteractionTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) 
 			ToolName:     userInteractionToolName,
 			AgentID:      form.AgentID,
 			SubagentType: form.SubagentType,
+			// The gate carries its own form and call so a surface that answers
+			// it in place (a subagent's overlay, a plan review) can render the
+			// question and anchor the card without re-reading the action store.
+			AskFormJSON:           a.PayloadJSON,
+			OriginatingToolCallID: ToolUseIDFromContext(ctx),
 			ToolInput: map[string]any{
 				"action_id": a.ID,
 				"kind":      userInteractionToolName,

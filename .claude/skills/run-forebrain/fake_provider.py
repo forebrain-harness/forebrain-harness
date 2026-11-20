@@ -84,6 +84,16 @@ Modes:
           then hangs. That delta is what commits the steer's delivery, and the
           hang keeps the execution running, so no execution-end repaint can
           hide a preview that failed to drop the delivered steer.
+  subagent-ask
+          drive "a subagent asks the user a question and the run must not die".
+          The conversation's first request dispatches a general-purpose probe
+          (subagent_run); the subagent's own request is answered with a
+          user_interaction call whose first option label runs far past the old
+          5-word cap and which carries five options, past the old 4-option
+          cap — the real overlay must appear in the subagent's view instead of
+          a "missing ask form payload" failure. Answering it (Enter) resumes
+          the subagent, which answers with the answer text; the conversation's
+          later requests answer with a fixed line. Needs ENABLE_SUBAGENT=1.
   overflow-usage
           drive "a context overflow with usage, and the window the engine
           learns from it moving the compaction trigger" (plan 283 F3). Every
@@ -296,6 +306,25 @@ SUBAGENT_NET_PROBE_ARGS = json.dumps({
 SUBAGENT_LIMIT_RESETS_AT = []
 SUBAGENT_LIMIT_MAIN = itertools.count()
 SUBAGENT_STEER_MAIN = itertools.count()
+SUBAGENT_ASK_MAIN = itertools.count()
+# The "subagent-ask" mode's gate: the first option's label is far past the old
+# 5-word cap and the question carries five options, past the old 4-option cap —
+# the shapes the validator used to reject on the subagent's first attempt, and
+# the ones the overlay must now render wrapped.
+SUBAGENT_ASK_ARGUMENTS = json.dumps({
+    "questions": [{
+        "header": "实施方案",
+        "question": "子代理在继续任务前需要你确认实施方案。",
+        "multiSelect": False,
+        "options": [
+            {"label": "采用方案一并同步通知所有关联的下游服务负责人", "description": "先改核心链路，再广播变更"},
+            {"label": "方案二：灰度发布", "description": "先放 5% 流量观察"},
+            {"label": "方案三：只改配置不动代码", "description": "通过开关切换行为"},
+            {"label": "方案四：回滚到上一个稳定版本", "description": "放弃本次变更"},
+            {"label": "方案五：交给主代理自行裁量决定", "description": "不再询问，直接继续"},
+        ],
+    }],
+})
 
 # The "overflow-usage" mode's tunables: the model's true window, and the
 # once-only latch so the post-compaction retry goes through. The filler reply
@@ -533,6 +562,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if MODE == "subagent-steer":
             self.serve_subagent_steer(body)
+            return
+
+        if MODE == "subagent-ask":
+            self.serve_subagent_ask(body)
             return
 
         if MODE == "overflow-usage":
@@ -906,6 +939,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "tool_calls": [{
                     "index": 0,
                     "id": "call_steer_main_0",
+                    "type": "function",
+                    "function": {"name": "subagent_run", "arguments": SUBAGENT_NET_PROBE_ARGS},
+                }],
+            }))
+            self.write_event(chunk(finish="tool_calls"))
+        else:
+            self.write_event(chunk(delta={"role": "assistant", "content": "primary done"}))
+            self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
+    def serve_subagent_ask(self, body):
+        """Drive "a subagent asks the user a question", told apart by request
+        content rather than request order.
+
+        The conversation's first request dispatches a general-purpose probe
+        (subagent_run, which the primary agent waits on). The subagent's own
+        request (its system prompt carries the general-purpose mark) without a
+        tool result is answered with a user_interaction call whose first option
+        label runs far past the old 5-word cap and which carries five options,
+        past the old 4-option cap: the shapes that used to die on the first
+        attempt, now rendered by the real overlay. The subagent's next request
+        — carrying the answer — gets the answer text, and the conversation's
+        later requests answer with a fixed line, so the whole loop completes.
+        Needs ENABLE_SUBAGENT=1.
+        """
+        system, _ = _system_and_last_user(body)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if SUBAGENT_SYSTEM_MARK in system:
+            if not _has_tool_result(body):
+                sys.stderr.write("SUBAGENT-ASK handing out the gate\n")
+                sys.stderr.flush()
+                self.write_event(chunk(delta={
+                    "role": "assistant",
+                    "content": "asking before continuing",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_ask_sub_0",
+                        "type": "function",
+                        "function": {"name": "user_interaction", "arguments": SUBAGENT_ASK_ARGUMENTS},
+                    }],
+                }))
+                self.write_event(chunk(finish="tool_calls"))
+            else:
+                sys.stderr.write("SUBAGENT-ASK answered after the gate\n")
+                sys.stderr.flush()
+                self.write_event(chunk(delta={"role": "assistant", "content": "answer received, subagent done"}))
+                self.write_event(chunk(finish="stop"))
+                self.write_raw(b"data: [DONE]\n\n")
+                self.write_raw(b"")
+        elif next(SUBAGENT_ASK_MAIN) == 0:
+            self.write_event(chunk(delta={
+                "role": "assistant",
+                "content": "delegating the probe",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_ask_main_0",
                     "type": "function",
                     "function": {"name": "subagent_run", "arguments": SUBAGENT_NET_PROBE_ARGS},
                 }],

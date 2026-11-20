@@ -1515,9 +1515,17 @@ func (s *ChatSession) answerInPlaceApproval(
 	if err != nil {
 		select {
 		case leaseErr := <-leaseLost:
+			// The lease moved: another surface owns the question now and the
+			// child continues under it. Drawing Failed here would lie about a
+			// question that is still being asked somewhere else.
 			return nil, fmt.Errorf("refresh subagent approval continuation: %w", leaseErr)
 		default:
 		}
+		// The prompt itself failed (an overlay the surface could not build, not
+		// an answer). The parked ask step must end as a failed card with the
+		// error on it before anything sweeps the still-pending step into a
+		// lying "Canceled (no output)".
+		s.notifyInPlaceFailedCard(ctx, gate, req, err)
 		_, _ = s.actionSvc().Cancel(context.Background(), gate.ActionID, "approval for "+who+" failed")
 		return nil, err
 	}
@@ -1597,6 +1605,46 @@ func (s *ChatSession) answerInPlaceApproval(
 // because the runtime's own denied step is recorded for replay but drawn by
 // nothing — the step hook leaves denied steps to the surface that heard the
 // words.
+// notifyInPlaceFailedCard ends a parked ask step with the error that killed its
+// in-place prompt, live and on the replay. The step hook's same-StepID rule
+// replaces the pending card with this failed one, and the persisted canonical
+// completion is what a resumed conversation draws — so the error the user
+// caused nothing of is not swept into a lying "Canceled (no output)".
+func (s *ChatSession) notifyInPlaceFailedCard(ctx context.Context, gate turn.SubagentApprovalGate, req turn.ToolApprovalRequest, promptErr error) {
+	if s == nil || promptErr == nil {
+		return
+	}
+	stepID := strings.TrimSpace(req.ToolStepID)
+	toolName := strings.TrimSpace(req.ToolName)
+	if stepID == "" || toolName == "" {
+		return
+	}
+	input := map[string]any{}
+	if raw := strings.TrimSpace(req.ToolInputJSON); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &input); err != nil {
+			input = map[string]any{"raw": raw}
+		}
+	}
+	failed := tool.StepEvent{
+		Kind:     tool.StepKindToolCompleted,
+		StepID:   stepID,
+		ToolName: toolName,
+		Input:    input,
+		Error:    promptErr.Error(),
+	}
+	// Under the child's own agent id the card lands in its view; an empty one
+	// is the primary agent's gate and stays in the main view.
+	stepCtx := tool.WithHookAgentID(ctx, strings.TrimSpace(gate.AgentID))
+	// The canonical failed completion, filed on the run that owns the call:
+	// the replay reads the same row the live card came from.
+	for _, canonical := range turn.CanonicalEventsFromStep(stepCtx, req.SessionID, gate.RunID, "tui", failed) {
+		if !event.IsPushOnlyStreamEvent(canonical.Type) {
+			s.persistRunEvent(stepCtx, canonical)
+		}
+	}
+	s.notifyToolStepHooks(stepCtx, req.SessionID, gate.RunID, "tui", failed)
+}
+
 func (s *ChatSession) notifyInPlaceRefusedCard(gate turn.SubagentApprovalGate, req turn.ToolApprovalRequest, decision turn.ToolApprovalDecision) {
 	if s == nil {
 		return
@@ -1665,8 +1713,12 @@ func (s *ChatSession) planReviewToolApprovalRequest(sessionID string, rae *tool.
 		ToolInput:    rae.ToolInput,
 		AgentID:      rae.AgentID,
 		SubagentType: run.PlanReviewSubagentType,
+		ToolStepID:   turn.ApprovalToolStepID(rae),
 	})
 	req.Description = "Requested by the plan reviewer."
+	// The reviewer's ask overlay reads the same form the gate parked with;
+	// without it the reviewer's question dies like a subagent's did.
+	req.AskFormJSON = strings.TrimSpace(rae.AskFormJSON)
 	return req
 }
 

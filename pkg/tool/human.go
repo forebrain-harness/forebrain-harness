@@ -17,23 +17,19 @@ const (
 	toolName        = "user_interaction"
 	toolDescription = "Use this tool to ask the user one or more structured questions and collect their answers. Every question always includes an 'Other' option that lets the user type a custom free-text answer instead of choosing a predefined option."
 
-	minQuestions = 1
-	maxQuestions = 4
-	minOptions   = 2
-	maxOptions   = 4
-
-	maxOptionLabelWord = 5
-	maxOtherTextLen    = 2000
+	minQuestions    = 1
+	minOptions      = 1
+	maxOtherTextLen = 2000
 )
 
-// The bounds below mirror validateInput (minQuestions/maxQuestions,
-// minOptions/maxOptions). Declaring them in the schema instead of
-// only in prose lets a caller get the shape right on the first attempt rather
-// than through a rejected call.
+// The bounds below mirror validateInput (minQuestions, minOptions). Only the
+// structural minimums are declared in the schema: a label or description the
+// model writes longer than an arbitrary cap used to get the whole call
+// rejected, so the caps are gone and the surfaces wrap long text instead.
 
 // Input defines the user interaction request.
 type Input struct {
-	Questions []Question `json:"questions" jsonschema:"minItems=1,maxItems=4" jsonschema_description:"Questions to ask the user (1-4 questions)"`
+	Questions []Question `json:"questions" jsonschema:"minItems=1" jsonschema_description:"Questions to ask the user"`
 }
 
 // Question defines a single user-facing question.
@@ -41,13 +37,13 @@ type Question struct {
 	Header      string   `json:"header" jsonschema:"minLength=1" jsonschema_description:"Short label. Must be unique across questions."`
 	Question    string   `json:"question" jsonschema:"minLength=1" jsonschema_description:"The complete question to ask the user"`
 	MultiSelect bool     `json:"multiSelect" jsonschema:"description=Allow multiple selections"`
-	Options     []Choice `json:"options" jsonschema:"minItems=2,maxItems=4" jsonschema_description:"Available choices (2-4 options)"`
+	Options     []Choice `json:"options" jsonschema:"minItems=1" jsonschema_description:"Available choices"`
 }
 
 // Choice defines a single selectable option for a question.
 type Choice struct {
-	Label       string `json:"label" jsonschema:"minLength=1" jsonschema_description:"Display text for this option (1-5 words)"`
-	Description string `json:"description" jsonschema:"minLength=1" jsonschema_description:"Explanation of this option"`
+	Label       string `json:"label" jsonschema:"minLength=1" jsonschema_description:"Display text for this option"`
+	Description string `json:"description,omitempty" jsonschema_description:"Optional explanation of this option"`
 	Preview     string `json:"preview,omitempty" jsonschema_description:"Optional preview content rendered when this option is focused (mockups, code snippets, comparisons)"`
 	Recommended bool   `json:"recommended,omitempty" jsonschema:"description=Mark this option as the recommended default; renderers may display a (recommended) suffix"`
 }
@@ -144,9 +140,6 @@ func validateInput(input *Input) error {
 	if len(questions) < minQuestions {
 		return ErrQuestionsRequired
 	}
-	if len(questions) > maxQuestions {
-		return ErrTooManyQuestions
-	}
 
 	seenHeaders := map[string]struct{}{}
 	for _, q := range questions {
@@ -166,7 +159,7 @@ func validateInput(input *Input) error {
 			return ErrQuestionTextRequired
 		}
 
-		if len(q.Options) < minOptions || len(q.Options) > maxOptions {
+		if len(q.Options) < minOptions {
 			return ErrInvalidOptionCount
 		}
 
@@ -174,15 +167,6 @@ func validateInput(input *Input) error {
 			label := strings.TrimSpace(option.Label)
 			if label == "" {
 				return ErrOptionLabelRequired
-			}
-
-			words := strings.Fields(label)
-			if len(words) == 0 || len(words) > maxOptionLabelWord {
-				return ErrOptionLabelTooLong
-			}
-
-			if strings.TrimSpace(option.Description) == "" {
-				return ErrOptionDescriptionRequired
 			}
 		}
 	}
@@ -401,9 +385,6 @@ var ErrInteractionFailed = errors.New("user interaction failed")
 // ErrQuestionsRequired is returned when no questions are provided.
 var ErrQuestionsRequired = errors.New("at least one question is required")
 
-// ErrTooManyQuestions is returned when the number of questions exceeds the supported limit.
-var ErrTooManyQuestions = errors.New("too many questions")
-
 // ErrHeaderRequired is returned when a question header is empty.
 var ErrHeaderRequired = errors.New("question header required")
 
@@ -413,17 +394,11 @@ var ErrDuplicateQuestionHeader = errors.New("duplicate question header")
 // ErrQuestionTextRequired is returned when a question text is empty.
 var ErrQuestionTextRequired = errors.New("question text required")
 
-// ErrInvalidOptionCount is returned when a question has an unsupported number of options.
-var ErrInvalidOptionCount = errors.New("question must define between 2 and 4 options")
+// ErrInvalidOptionCount is returned when a question has no options at all.
+var ErrInvalidOptionCount = errors.New("question must define at least one option")
 
 // ErrOptionLabelRequired is returned when an option label is empty.
 var ErrOptionLabelRequired = errors.New("option label required")
-
-// ErrOptionLabelTooLong is returned when an option label exceeds the allowed word count.
-var ErrOptionLabelTooLong = errors.New("option label must contain between 1 and 5 words")
-
-// ErrOptionDescriptionRequired is returned when an option description is empty.
-var ErrOptionDescriptionRequired = errors.New("option description required")
 
 // ErrInvalidAnswerHeader is returned when answers include unknown question headers.
 var ErrInvalidAnswerHeader = errors.New("invalid answer header")

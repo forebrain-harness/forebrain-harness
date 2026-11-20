@@ -492,6 +492,11 @@ type RequiresActionError struct {
 	ToolName              string
 	ToolInput             any
 	OriginatingToolCallID string
+	// AskFormJSON carries the ask form a user_interaction gate parked with
+	// (the action's stored payload). Surfaces that answer the gate where the
+	// call waits render the question overlay from it; without it the overlay
+	// has nothing to show and the waiting run dies.
+	AskFormJSON string
 	// SessionSnapshot is the LLM session at the moment the RAE fired. It
 	// includes the assistant tool_use that triggered the approval gate and may
 	// include tool_result messages for earlier calls from the same assistant

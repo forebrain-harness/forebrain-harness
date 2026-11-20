@@ -2564,6 +2564,62 @@ func TestAskUserQuestionToolCreatesPendingActionAndResumesWithAnswer(t *testing.
 	}
 }
 
+// The ask gate's RAE must carry the form payload it parked and the LLM call
+// that raised it: surfaces that answer the gate in place render the question
+// overlay from this payload and anchor the card to that call.
+func TestAskUserQuestionGateCarriesFormAndCall(t *testing.T) {
+	db := openToolTestDB(t)
+	if err := state.NewSessionStore(db, "main").Ensure(context.Background(), "session-1", "session-1"); err != nil {
+		t.Fatal(err)
+	}
+	actions := &state.ActionService{DB: db}
+	runs := &state.RunStore{DB: db}
+	askRun, err := runs.CreateRun(context.Background(), "session-1", "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	askTool, err := newUserInteractionTool(NewState(t.TempDir()), &AgentToolRuntime{
+		Actions: actions,
+		RunRT:   runs,
+	})
+	if err != nil {
+		t.Fatalf("newUserInteractionTool: %v", err)
+	}
+	input := map[string]any{
+		"questions": []map[string]any{{
+			"header":   "q1",
+			"question": "Pick one?",
+			"options": []map[string]any{
+				{"label": "a", "description": "A"},
+				{"label": "b", "description": "B"},
+			},
+		}},
+	}
+	inputJSON := mustJSON(t, input)
+	ctx := WithToolUseID(
+		WithRunID(WithConversationSessionID(context.Background(), "session-1"), askRun.ID),
+		"call-ask-1",
+	)
+	if _, err := askTool.Handle(ctx, inputJSON); err == nil {
+		t.Fatal("expected RequiresActionError")
+	} else {
+		var req *RequiresActionError
+		if !errors.As(err, &req) {
+			t.Fatalf("err=%T %[1]v want RequiresActionError", err)
+		}
+		act, err := actions.Get(context.Background(), req.ActionID)
+		if err != nil {
+			t.Fatalf("actions.Get: %v", err)
+		}
+		if got := strings.TrimSpace(req.AskFormJSON); got != strings.TrimSpace(act.PayloadJSON) {
+			t.Fatalf("AskFormJSON=%q want action payload %q", got, act.PayloadJSON)
+		}
+		if req.OriginatingToolCallID != "call-ask-1" {
+			t.Fatalf("OriginatingToolCallID=%q want call-ask-1", req.OriginatingToolCallID)
+		}
+	}
+}
+
 func openToolTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"), nil)

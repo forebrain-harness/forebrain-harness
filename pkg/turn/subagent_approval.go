@@ -38,6 +38,12 @@ type SubagentApprovalGate struct {
 	ToolInput    any
 	AgentID      string
 	SubagentType string
+	// AskFormJSON is the ask form a user_interaction gate parked with, and
+	// OriginatingToolCallID the LLM call that raised it. A surface that answers
+	// in place renders its question overlay from the form and anchors the card
+	// to the call; both are empty for every other gate kind.
+	AskFormJSON           string
+	OriginatingToolCallID string
 	// Session is the child's orchestration snapshot at the moment it parked,
 	// which is what the resume replays.
 	Session []llm.Message
@@ -58,7 +64,11 @@ func SubagentApprovalGateFromError(err error) (SubagentApprovalGate, bool) {
 		ToolInput:    rae.ToolInput,
 		AgentID:      strings.TrimSpace(rae.AgentID),
 		SubagentType: strings.TrimSpace(rae.SubagentType),
-		Session:      rae.SessionSnapshot,
+		AskFormJSON:  strings.TrimSpace(rae.AskFormJSON),
+		// Fall back to the snapshot the gate carried when the thrower could not
+		// name its call; the snapshot's pending call is the same identity.
+		OriginatingToolCallID: ApprovalToolStepID(rae),
+		Session:               rae.SessionSnapshot,
 	}, true
 }
 
@@ -80,6 +90,10 @@ func SubagentApprovalDescription(gate SubagentApprovalGate) string {
 // conversation, while the worker session is an implementation detail that
 // disappears when the task ends.
 func SubagentApprovalRequest(gate SubagentApprovalGate, sessionID string, eval ApprovalEvaluator) ToolApprovalRequest {
+	stepID := strings.TrimSpace(gate.OriginatingToolCallID)
+	if stepID == "" {
+		stepID = PendingApprovalToolStepID(gate.Session, gate.ToolName)
+	}
 	req, _, _ := BuildToolApprovalRequest(ApprovalSource{
 		SessionID:    strings.TrimSpace(sessionID),
 		ActionID:     gate.ActionID,
@@ -89,8 +103,12 @@ func SubagentApprovalRequest(gate SubagentApprovalGate, sessionID string, eval A
 		ToolInput:    gate.ToolInput,
 		AgentID:      gate.AgentID,
 		SubagentType: gate.SubagentType,
+		ToolStepID:   stepID,
 	}, eval)
 	req.Description = SubagentApprovalDescription(gate)
+	// The question a surface renders comes from the gate's own form; an empty
+	// form here is what turned every subagent ask into a dead run.
+	req.AskFormJSON = strings.TrimSpace(gate.AskFormJSON)
 	return req
 }
 

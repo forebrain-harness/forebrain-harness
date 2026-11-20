@@ -181,7 +181,7 @@ func (s *ActionService) CreateAsk(ctx context.Context, form AskForm) (*Action, e
 	}
 	for i := range form.Questions {
 		q := form.Questions[i]
-		if strings.TrimSpace(q.ID) == "" || strings.TrimSpace(q.Prompt) == "" || len(q.Options) < 2 {
+		if strings.TrimSpace(q.ID) == "" || strings.TrimSpace(q.Prompt) == "" || len(q.Options) < 1 {
 			return nil, fmt.Errorf("invalid question")
 		}
 		for j := range q.Options {

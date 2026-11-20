@@ -311,7 +311,7 @@ func TestServiceValidationAndErrors(t *testing.T) {
 	badForms := []AskForm{
 		{Questions: []AskQuestion{{ID: "", Prompt: "p", Options: []AskOption{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}}}},
 		{Questions: []AskQuestion{{ID: "q", Prompt: "", Options: []AskOption{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}}}},
-		{Questions: []AskQuestion{{ID: "q", Prompt: "p", Options: []AskOption{{ID: "a", Label: "A"}}}}},
+		{Questions: []AskQuestion{{ID: "q", Prompt: "p"}}},
 		{Questions: []AskQuestion{{ID: "q", Prompt: "p", Options: []AskOption{{ID: "", Label: "A"}, {ID: "b", Label: "B"}}}}},
 		{Questions: []AskQuestion{{ID: "q", Prompt: "p", Options: []AskOption{{ID: "a", Label: ""}, {ID: "b", Label: "B"}}}}},
 	}
@@ -319,6 +319,14 @@ func TestServiceValidationAndErrors(t *testing.T) {
 		if _, err := svc.CreateAsk(ctx, form); err == nil {
 			t.Fatalf("expected invalid form error for %+v", form)
 		}
+	}
+	// One option is a legal ask now (the "Other" free-text choice is always
+	// there beside it): the old 2-option minimum rejected forms the tool
+	// accepts.
+	if _, err := svc.CreateAsk(ctx, AskForm{SessionID: "conv", Questions: []AskQuestion{{
+		ID: "q", Prompt: "p", Options: []AskOption{{ID: "only", Label: "Only"}},
+	}}}); err != nil {
+		t.Fatalf("one-option ask rejected: %v", err)
 	}
 
 	if _, err := svc.Get(ctx, " "); !errors.Is(err, ErrActionNotFound) {

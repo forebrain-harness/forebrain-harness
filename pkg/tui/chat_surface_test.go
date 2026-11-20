@@ -1885,3 +1885,63 @@ func TestResumeDrawsThePeerLetterItsSenderWrote(t *testing.T) {
 		t.Fatalf("replayed letter head = %q, want the sender's card", got)
 	}
 }
+
+// ---- fix-user-interaction-subagent-ask: ask gates carry their form ----
+
+// A subagent's user_interaction gate reaches its overlay through the RAE the
+// interactor throws; the gate the surface builds from it must carry the ask
+// form payload, or newQuestionOverlay refuses with "missing ask form payload"
+// and the whole child run dies.
+func TestSubagentAskGateCarriesTheForm(t *testing.T) {
+	cs, _, act, runID, rae := inlineGateSession(t, "user_interaction")
+	rae.AgentID = "worker-1"
+	rae.SubagentType = "explore"
+	// The interactor now throws the gate with its form; this line is the new
+	// contract the subagent path consumes.
+	rae.AskFormJSON = act.PayloadJSON
+	sink := &scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Approved: true}}}
+	cs.SetToolApprovalSink(sink)
+	if _, err := cs.resolveSubagentApproval(inlineGateCtx(runID), rae); err != nil {
+		t.Fatalf("resolveSubagentApproval: %v", err)
+	}
+	if len(sink.requests) != 1 {
+		t.Fatalf("prompts=%d want 1", len(sink.requests))
+	}
+	got := strings.TrimSpace(sink.requests[0].AskFormJSON)
+	if got == "" {
+		t.Fatalf("subagent ask gate carried no form payload; overlay fails 'missing ask form payload'")
+	}
+	if got != strings.TrimSpace(act.PayloadJSON) {
+		t.Fatalf("AskFormJSON=%q want action payload", got)
+	}
+}
+
+type failingApprovalSink struct{ err error }
+
+func (s *failingApprovalSink) PromptToolApproval(context.Context, turn.ToolApprovalRequest) (turn.ToolApprovalDecision, error) {
+	return turn.ToolApprovalDecision{}, s.err
+}
+
+// When the in-place approval prompt itself fails (an overlay construction
+// error, not an answer), the parked ask step must end as a failed card with
+// the error on it — not stay pending to be swept into a lying "Canceled".
+func TestInPlaceApprovalPromptFailureShowsFailedCard(t *testing.T) {
+	cs, _, _, runID, rae := inlineGateSession(t, "user_interaction")
+	cs.SetToolApprovalSink(&failingApprovalSink{err: errors.New("overlay boom")})
+	failed := make(chan Message, 4)
+	cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool &&
+			m.Msg.StepID == "call-inline" && strings.EqualFold(m.Msg.ToolMeta.Status, "failed") {
+			failed <- m.Msg
+		}
+	})
+	_, _ = cs.resolveInlineApproval(inlineGateCtx(runID), rae)
+	select {
+	case m := <-failed:
+		if !strings.Contains(m.Content, "overlay boom") {
+			t.Fatalf("failed card body = %q, want the prompt error", m.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("failed prompt left parked ask pending (swept Canceled); want failed card")
+	}
+}
