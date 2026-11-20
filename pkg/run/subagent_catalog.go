@@ -284,7 +284,14 @@ func (c SubagentCatalog) EnumDescription() string {
 		if !subagentConfigEnabled(entry) {
 			continue
 		}
-		fmt.Fprintf(&b, " %s: %s.", entry.Name, strings.TrimSpace(entry.Description))
+		// A description is optional (P5): a subagent without one is
+		// dispatched by its name alone, so the sentence names the name and
+		// nothing else rather than reading "name: ."
+		if description := strings.TrimSpace(entry.Description); description != "" {
+			fmt.Fprintf(&b, " %s: %s.", entry.Name, description)
+		} else {
+			fmt.Fprintf(&b, " %s.", entry.Name)
+		}
 	}
 	b.WriteString(" Omit subagent_type to fork the current agent. Fork inherits the parent conversation context, runs in the background, and keeps intermediate tool output out of the main context.")
 	return b.String()
