@@ -424,7 +424,7 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 				return string(b), nil
 			}
 			if in != nil {
-				pin, err := subagentModelOverrideForRef(ctx, fac, in.Model)
+				pin, err := subagentModelOverrideForRef(ctx, fac, in.Model, in.ReasoningEffort)
 				if err != nil {
 					return "", err
 				}
@@ -3561,7 +3561,7 @@ func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error 
 			// tasks running and the other half reporting a model error.
 			taskPins := make([]SubagentModelOverride, len(in.Tasks))
 			for i := range in.Tasks {
-				pin, err := subagentModelOverrideForRef(ctx, fac, in.Tasks[i].Model)
+				pin, err := subagentModelOverrideForRef(ctx, fac, in.Tasks[i].Model, in.Tasks[i].ReasoningEffort)
 				if err != nil {
 					return "", err
 				}
@@ -3754,7 +3754,7 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 				return string(b), nil
 			}
 			if in != nil {
-				pin, err := subagentModelOverrideForRef(ctx, fac, in.Model)
+				pin, err := subagentModelOverrideForRef(ctx, fac, in.Model, in.ReasoningEffort)
 				if err != nil {
 					return "", err
 				}
@@ -4710,34 +4710,21 @@ func handOffModelID(ctx context.Context, fac Factory) string {
 	return strings.TrimSpace(st.PlanHandOff.ModelID)
 }
 
-// handOffPlanEffort names the thinking level this conversation's approved
-// hand-off recorded, from the session's mode state; "" when the conversation
-// handed nothing off, named no level, or the state cannot be read — all three
-// leave the row's own configuration in charge.
-func handOffPlanEffort(ctx context.Context, fac Factory) string {
-	if fac.Owner == nil {
-		return ""
-	}
-	sid := llm.AgentSessionIDFromContext(ctx)
-	if strings.TrimSpace(sid) == "" {
-		return ""
-	}
-	st, err := state.Get(fac.Owner.StateRoot(), sid)
-	if err != nil || st.PlanHandOff == nil {
-		return ""
-	}
-	return strings.TrimSpace(st.PlanHandOff.Effort)
-}
-
 // subagentModelOverrideForRef resolves the model argument's row id into the
 // pin a dispatch runs under: the row read live, its client entry and its
 // version carried along, so this subagent's requests go to exactly this row
 // even when it joined the table after this turn's configuration was adopted.
 // An empty id is no statement — the zero override leaves the dispatch on its
-// ordinary model chain.
-func subagentModelOverrideForRef(ctx context.Context, fac Factory, id string) (SubagentModelOverride, error) {
+// ordinary model chain. effort is the caller's reasoning_effort argument: the
+// user's approval choices reach it through the prompt, never through session
+// state (owner 2026-11-20); empty runs at the row's own default level.
+func subagentModelOverrideForRef(ctx context.Context, fac Factory, id, effort string) (SubagentModelOverride, error) {
 	id = strings.TrimSpace(id)
+	effort = strings.TrimSpace(effort)
 	if id == "" {
+		if effort != "" {
+			return SubagentModelOverride{}, fmt.Errorf("reasoning_effort needs a model argument naming the row it applies to; pass model, or omit reasoning_effort.")
+		}
 		return SubagentModelOverride{}, nil
 	}
 	usable, err := usableModelByID(ctx, fac, id)
@@ -4745,15 +4732,10 @@ func subagentModelOverrideForRef(ctx context.Context, fac Factory, id string) (S
 		return SubagentModelOverride{}, err
 	}
 	entry, caps := usable.Entry, usable.Caps
-	// The row's own configuration is the level this dispatch runs at, unless
-	// the hand-off the user approved named one: then that is what they chose,
-	// and an empty one keeps the row in charge (every record written before
-	// the approval card had a second screen is that case).
-	effort := appcfg.ReasoningEffort(entry.Params)
-	if usable.HandedOff {
-		if picked := handOffPlanEffort(ctx, fac); picked != "" {
-			effort = picked
-		}
+	if effort == "" {
+		effort = appcfg.ReasoningEffort(entry.Params)
+	} else if err := dispatchEffortRefused(entry, usable, effort); err != nil {
+		return SubagentModelOverride{}, err
 	}
 	return SubagentModelOverride{
 		ModelID:  strings.TrimSpace(entry.ID),
@@ -4764,6 +4746,25 @@ func subagentModelOverrideForRef(ctx context.Context, fac Factory, id string) (S
 		Version:  usable.Row.UpdatedAt,
 		Caps:     caps,
 	}, nil
+}
+
+// dispatchEffortRefused judges one reasoning_effort argument with the same
+// semantics the gateway's subagentLevelRefused applies to a saved config:
+// the protocol check always runs; the membership check only when the row's
+// level list is known and non-empty — a model this process knows no levels
+// for is not judged, and guessing would refuse a level the client can send.
+func dispatchEffortRefused(entry appcfg.AgentLLMProviderConfig, usable usableModel, effort string) error {
+	display := llm.FormatProviderModel(entry.Provider, entry.Model)
+	if len(sendableEffortLevels(entry.Provider, entry.Model, entry.APIPath, []string{effort})) == 0 {
+		return fmt.Errorf("model %q (provider/model) cannot send thinking level %q on its protocol; omit reasoning_effort to run at the model's default thinking level.", display, effort)
+	}
+	if raw := usableModelRawLevels(usable); len(raw) > 0 {
+		levels := sendableEffortLevels(entry.Provider, entry.Model, entry.APIPath, raw)
+		if !slices.Contains(levels, effort) {
+			return fmt.Errorf("model %q (provider/model) does not offer thinking level %q; it runs at: %s. Omit reasoning_effort to run at the model's default thinking level.", display, effort, strings.Join(levels, ", "))
+		}
+	}
+	return nil
 }
 
 type subagentModelOverrideKey struct{}

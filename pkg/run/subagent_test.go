@@ -9292,7 +9292,7 @@ func TestSubagentPinKeepsTheRowsCapsThroughExecAndContinuation(t *testing.T) {
 	}
 
 	ctx := dispatchTestCtx()
-	pin, err := subagentModelOverrideForRef(ctx, fix.fac, row.ID)
+	pin, err := subagentModelOverrideForRef(ctx, fix.fac, row.ID, "")
 	if err != nil {
 		t.Fatalf("subagentModelOverrideForRef: %v", err)
 	}
@@ -9541,12 +9541,12 @@ func TestToolCompletedPayloadPrefersTheCapturedShape(t *testing.T) {
 	}
 }
 
-// The level the user picked on the approval card's second screen is the level
-// the executor subagent runs at: it overrides the row's own configuration, and
-// only for the row the hand-off named. A hand-off that named no level, and a
-// row that was not handed off at all, keep the row's own configuration — which
-// is what every record written before the second screen existed relies on.
-func TestHandOffPinnedEffortReachesTheOverride(t *testing.T) {
+// The level the user picked on the approval card travels through the prompt
+// and comes back as the dispatch's reasoning_effort argument — never read
+// back from session state (owner 2026-11-20). A hand-off record's Effort
+// feeds the contract text; the dispatch itself runs at the row's own default
+// unless the argument names a level.
+func TestHandOffEffortIsAnArgumentNotStateReadBack(t *testing.T) {
 	cfg := func() *appcfg.Root {
 		on := true
 		return &appcfg.Root{Agents: appcfg.AgentsSection{
@@ -9568,49 +9568,38 @@ func TestHandOffPinnedEffortReachesTheOverride(t *testing.T) {
 		ParamsJSON: `{"reasoning":{"effort":"medium"}}`,
 	})
 	ctx := dispatchTestCtx()
-
-	// The approval named a level: it wins over the row's own.
 	if _, err := state.HandOffPlan(fix.fac.Owner.StateRoot(), "session-1", state.ModeAgent, state.PlanHandOff{
 		ModelID: handedOff.ID, Provider: handedOff.Provider, Model: handedOff.Model, Effort: "xhigh",
 	}); err != nil {
 		t.Fatalf("hand off: %v", err)
 	}
-	if got := handOffPlanEffort(ctx, fix.fac); got != "xhigh" {
-		t.Fatalf("handOffPlanEffort = %q, want the level the approval pinned", got)
-	}
-	pin, err := subagentModelOverrideForRef(ctx, fix.fac, handedOff.ID)
+
+	// The record names xhigh, but the dispatch passed no argument: the row's
+	// own default decides. The state is the prompt's source, not the pin's.
+	pin, err := subagentModelOverrideForRef(ctx, fix.fac, handedOff.ID, "")
 	if err != nil {
 		t.Fatalf("subagentModelOverrideForRef(hand-off row): %v", err)
 	}
-	if pin.Effort != "xhigh" {
-		t.Fatalf("pinned effort = %q, want the level the user picked", pin.Effort)
+	if pin.Effort != "low" {
+		t.Fatalf("pinned effort = %q, want the row's own level — state must not be read back", pin.Effort)
 	}
 
-	// A row that was not handed off keeps its own configuration, even while a
-	// hand-off for another row is on record: the override is not a global.
-	otherPin, err := subagentModelOverrideForRef(ctx, fix.fac, other.ID)
+	// The argument is the channel: the level the prompt told the model to
+	// pass arrives as the pin's effort.
+	explicit, err := subagentModelOverrideForRef(ctx, fix.fac, handedOff.ID, "xhigh")
+	if err != nil {
+		t.Fatalf("subagentModelOverrideForRef(hand-off row, xhigh): %v", err)
+	}
+	if explicit.Effort != "xhigh" {
+		t.Fatalf("pinned effort = %q, want the argument's level", explicit.Effort)
+	}
+
+	// A row that was not handed off keeps its own configuration too.
+	otherPin, err := subagentModelOverrideForRef(ctx, fix.fac, other.ID, "")
 	if err != nil {
 		t.Fatalf("subagentModelOverrideForRef(other row): %v", err)
 	}
 	if otherPin.Effort != "medium" {
 		t.Fatalf("pinned effort = %q, want that row's own level", otherPin.Effort)
-	}
-
-	// The approval picked the model and no level (a row offering none, or a
-	// record written before the second screen existed): the row decides.
-	if _, err := state.HandOffPlan(fix.fac.Owner.StateRoot(), "session-1", state.ModeAgent, state.PlanHandOff{
-		ModelID: handedOff.ID, Provider: handedOff.Provider, Model: handedOff.Model,
-	}); err != nil {
-		t.Fatalf("hand off without a level: %v", err)
-	}
-	if got := handOffPlanEffort(ctx, fix.fac); got != "" {
-		t.Fatalf("handOffPlanEffort = %q, want none", got)
-	}
-	fallback, err := subagentModelOverrideForRef(ctx, fix.fac, handedOff.ID)
-	if err != nil {
-		t.Fatalf("subagentModelOverrideForRef(hand-off row): %v", err)
-	}
-	if fallback.Effort != "low" {
-		t.Fatalf("pinned effort = %q, want the row's own level", fallback.Effort)
 	}
 }
