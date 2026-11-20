@@ -29,6 +29,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	toolpkg "github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -8713,6 +8714,53 @@ func TestSubagentFanoutModelArgumentResolvesAllOrNothing(t *testing.T) {
 	}
 	if !ids[rowA] || !ids[rowB] {
 		t.Fatalf("pins = %+v, want each task on its own row", pins)
+	}
+}
+
+// TestSendableEffortLevelsMatchThePickerSetup pins run's local effort mirror
+// against the picker's own setup (pkg/turn): the roster must report exactly
+// the levels turn.SetupReasoningEfforts would offer for the same row, because
+// a level the picker cannot send is a fake option. The matrix is turn's own
+// TestSetupReasoningEfforts, minus its plugin-factory case (that one needs a
+// registered global factory). pkg/run cannot import pkg/turn in production
+// code, so this parity lives here in the test.
+func TestSendableEffortLevelsMatchThePickerSetup(t *testing.T) {
+	levels := []string{"High", " low ", "none", "low", "", "ultra"}
+	input := append([]string(nil), levels...)
+	if got := sendableEffortLevels("openai", "gpt-5", "", levels); !reflect.DeepEqual(got, []string{"none", "low", "high", "ultra"}) {
+		t.Fatalf("sendableEffortLevels = %v, want [none low high ultra]", got)
+	}
+	if !reflect.DeepEqual(input, levels) {
+		t.Fatal("the caller's slice is never modified")
+	}
+
+	cases := []struct {
+		provider string
+		model    string
+		apiPath  string
+		levels   []string
+		want     []string
+	}{
+		{"anthropic", "claude-sonnet-5", "", []string{"none", "minimal", "low", "medium", "high", "max"}, []string{"low", "medium", "high", "max"}},
+		{"minimax", "MiniMax-M2.7", "", []string{"none", "low", "xhigh", "medium", "max"}, []string{"low", "medium", "xhigh", "max"}},
+		{"custom", "vendor-model", "/v1/messages", []string{"none", "minimal", "low", "medium"}, []string{"low", "medium"}},
+		{"custom", "vendor-model", "/messages/", []string{"none", "minimal", "low", "medium"}, []string{"low", "medium"}},
+		{"custom", "vendor-model", "/chat/completions", []string{"low", "none", "minimal"}, []string{"none", "minimal", "low"}},
+		{"custom", "vendor-model", "/responses", []string{"low", "none", "minimal"}, []string{"none", "minimal", "low"}},
+		{"opencode-go", "gemini-4-argon-contributor", "/chat/completions", []string{"none", "low", "high"}, nil},
+		{"opencode", "claude-sonnet-4-5", "/chat/completions", []string{"none", "low", "high"}, []string{"low", "high"}},
+		{"openai", "gpt-5", "", nil, nil},
+		{"openai", "gpt-5", "", []string{}, nil},
+	}
+	for _, tc := range cases {
+		got := sendableEffortLevels(tc.provider, tc.model, tc.apiPath, tc.levels)
+		picker := turn.SetupReasoningEfforts(tc.provider, tc.model, tc.apiPath, tc.levels)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("sendableEffortLevels(%q, %q, %q, %v) = %v, want %v", tc.provider, tc.model, tc.apiPath, tc.levels, got, tc.want)
+		}
+		if !reflect.DeepEqual(got, picker) {
+			t.Fatalf("sendableEffortLevels(%q, %q, %q, %v) = %v, but the picker offers %v", tc.provider, tc.model, tc.apiPath, tc.levels, got, picker)
+		}
 	}
 }
 

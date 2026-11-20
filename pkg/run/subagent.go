@@ -17,6 +17,8 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/anthropic"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -4556,6 +4558,87 @@ func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, 
 		return usableModel{}, fmt.Errorf("model %q (provider/model) has no credentials; %s", llm.FormatProviderModel(row.Provider, row.Model), modelPickGuidance(ctx, fac))
 	}
 	return usableModel{Row: row, Entry: entry, Caps: caps, HandedOff: handedOff}, nil
+}
+
+// dispatchEffortOrder mirrors turn.effortLevelOrder: the one order every
+// effort picker draws its levels in. pkg/run cannot import pkg/turn (the
+// package graph pins Layer 3's zero same-layer edges), so the order lives
+// here too; TestSendableEffortLevelsMatchThePickerSetup pins the parity.
+var dispatchEffortOrder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// orderedEffortLevels mirrors turn.OrderedEfforts: lower-case, de-duplicate,
+// rank by dispatchEffortOrder, unknown levels after the known ones in their
+// original relative order; no levels yields nil. The input is never modified.
+func orderedEffortLevels(levels []string) []string {
+	if len(levels) == 0 {
+		return nil
+	}
+	rank := make(map[string]int, len(dispatchEffortOrder))
+	for i, level := range dispatchEffortOrder {
+		rank[level] = i
+	}
+	present := make(map[string]bool, len(levels))
+	extra := make([]string, 0, len(levels))
+	for _, level := range levels {
+		level = strings.ToLower(strings.TrimSpace(level))
+		if level == "" || present[level] {
+			continue
+		}
+		present[level] = true
+		if _, known := rank[level]; !known {
+			extra = append(extra, level)
+		}
+	}
+	out := make([]string, 0, len(present))
+	for _, level := range dispatchEffortOrder {
+		if present[level] {
+			out = append(out, level)
+		}
+	}
+	return append(out, extra...)
+}
+
+// sendableEffortLevels mirrors turn.SetupReasoningEfforts: order the levels,
+// then keep only what the client this row speaks can put on the wire
+// (opencode.ClientProtocol is the same decision pkg/run/config.go builds the
+// client with). Google's generateContent carries no effort parameter;
+// Anthropic's Messages client drops the levels AcceptsEffort rejects.
+func sendableEffortLevels(provider, model, apiPath string, levels []string) []string {
+	levels = orderedEffortLevels(levels)
+	switch opencode.ClientProtocol(provider, model, apiPath) {
+	case opencode.ProtocolGoogle:
+		return nil
+	case opencode.ProtocolAnthropic:
+		out := make([]string, 0, len(levels))
+		for _, level := range levels {
+			if anthropic.AcceptsEffort(level) {
+				out = append(out, level)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+	return append([]string(nil), levels...)
+}
+
+// usableModelRawLevels is the row's own level list before the protocol trim:
+// the live capability projection wins (a row added mid-turn is not in the
+// installed override registry), the catalog answers through ReasoningEffortsRow
+// otherwise. A non-nil empty CapEfforts means "explicitly no levels".
+func usableModelRawLevels(m usableModel) []string {
+	if m.Caps != nil && m.Caps.Efforts != nil {
+		return m.Caps.Efforts
+	}
+	levels, _ := llm.ReasoningEffortsRow(m.Entry.ID, m.Entry.Provider, m.Entry.Model)
+	return levels
+}
+
+// usableModelEfforts is what list_usable_models reports: the levels this
+// build can actually send for the row, in picker order.
+func usableModelEfforts(m usableModel) []string {
+	return sendableEffortLevels(m.Entry.Provider, m.Entry.Model, m.Entry.APIPath, usableModelRawLevels(m))
 }
 
 // handOffModelID names the row this conversation's approved hand-off recorded,
