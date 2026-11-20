@@ -796,19 +796,19 @@ func newExitPlanModeToolFor(st *State, stateRoot, projectKey string, rt *AgentTo
 						return "", err
 					}
 					st.SetRuntimeSessionMode(ctx, sid, string(restored), planDir)
-				display := llm.FormatProviderModel(handOff.Provider, handOff.Model)
-				ref := strings.TrimSpace(handOff.ModelID) // B1 guarantees a row id
-				handOffModel := map[string]any{"id": handOff.ModelID, "provider": handOff.Provider, "model": handOff.Model}
-				if eff := strings.TrimSpace(handOff.Effort); eff != "" {
-					handOffModel["effort"] = eff
-				}
-				b, _ := json.Marshal(map[string]any{
-					"mode":           string(restored),
-					"plan_file":      planFile,
-					"hand_off_model": handOffModel,
-					"message":        "Exited plan mode. The user handed this plan to " + display + ": dispatch one executor subagent on that model to carry it out in its own git worktree, then review its work. Do not implement the plan yourself.",
-					"on_completion":  HandOffPlanExecutionPrompt(planFile, display, ref, handOff.Effort),
-				})
+					display := llm.FormatProviderModel(handOff.Provider, handOff.Model)
+					ref := strings.TrimSpace(handOff.ModelID) // B1 guarantees a row id
+					handOffModel := map[string]any{"id": handOff.ModelID, "provider": handOff.Provider, "model": handOff.Model}
+					if eff := strings.TrimSpace(handOff.Effort); eff != "" {
+						handOffModel["effort"] = eff
+					}
+					b, _ := json.Marshal(map[string]any{
+						"mode":           string(restored),
+						"plan_file":      planFile,
+						"hand_off_model": handOffModel,
+						"message":        "Exited plan mode. The user handed this plan to " + display + ": dispatch one executor subagent on that model to carry it out in its own git worktree, then review its work. Do not implement the plan yourself.",
+						"on_completion":  HandOffPlanExecutionPrompt(planFile, display, ref, handOff.Effort),
+					})
 					return string(b), nil
 				}
 				if planOnly {
