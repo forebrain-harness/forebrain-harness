@@ -14,12 +14,13 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
-// imagePreviewOpener launches a file with the operating system's viewer. It is
-// a variable so a test can inject a fake and assert whether (and what) it was
-// asked to open; production uses the platform's own handler. An error it
-// returns is a launch that never happened; failed is called, from another
-// goroutine, when a launch that did start ends unsuccessfully.
-var imagePreviewOpener = openWithSystemViewer
+// imagePreviewOpener launches a file with the viewer that fits it: text files
+// go to VS Code (Source Control diff when git tracks them), everything else to
+// the operating system's viewer. It is a variable so a test can inject a fake
+// and assert whether (and what) it was asked to open. An error it returns is a
+// launch that never happened; failed is called, from another goroutine, when a
+// launch that did start ends unsuccessfully.
+var imagePreviewOpener = openDeliveredFile
 
 // openWithSystemViewer opens path with the platform's default application.
 // Starting rather than waiting is deliberate: the viewer owns the screen until
