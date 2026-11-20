@@ -4309,13 +4309,13 @@ type usableModelsAnswer struct {
 // runs at by default; the flags name the conversation's own row and the row
 // an approved hand-off pinned.
 type usableModelRow struct {
-	ID           string   `json:"id"`
-	Provider     string   `json:"provider"`
-	Model        string   `json:"model"`
-	Efforts      []string `json:"efforts"`
+	ID            string   `json:"id"`
+	Provider      string   `json:"provider"`
+	Model         string   `json:"model"`
+	Efforts       []string `json:"efforts"`
 	DefaultEffort string   `json:"default_effort"`
-	Current      bool     `json:"current"`
-	HandedOff    bool     `json:"handed_off"`
+	Current       bool     `json:"current"`
+	HandedOff     bool     `json:"handed_off"`
 }
 
 // readUsableModels reads a list_usable_models card: one line per model,

@@ -29,8 +29,8 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
-	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	toolpkg "github.com/forebrain-harness/forebrain-harness/pkg/tool"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
 // dispatchProbe captures what every subagent dispatch must produce, whoever
