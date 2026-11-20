@@ -9603,3 +9603,81 @@ func TestHandOffEffortIsAnArgumentNotStateReadBack(t *testing.T) {
 		t.Fatalf("pinned effort = %q, want that row's own level", otherPin.Effort)
 	}
 }
+
+// reasoning_effort is judged with the gateway's saved-config semantics: the
+// protocol check always, the membership check only when the row's levels are
+// known and non-empty, unknown models unjudged, empty always the row default.
+func TestSubagentReasoningEffortValidation(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	known := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-effort-known", BaseURL: "https://known.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-known", SubagentAllowed: true,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	claude := fix.insertModelRow(t, state.LLMModel{
+		Provider: "anthropic", Model: "claude-effort", BaseURL: "https://claude.test",
+		APIPath: "/v1/messages", APIKey: "key-claude", SubagentAllowed: true,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	unknown := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-effort-unknown", BaseURL: "https://unknown.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-unknown", SubagentAllowed: true,
+	})
+	ctx := dispatchTestCtx()
+
+	if pin, err := subagentModelOverrideForRef(ctx, fix.fac, known.ID, ""); err != nil || pin.Effort != "low" {
+		t.Fatalf("empty effort = (%q, %v), want the row default low", pin.Effort, err)
+	}
+	if pin, err := subagentModelOverrideForRef(ctx, fix.fac, known.ID, " high "); err != nil || pin.Effort != "high" {
+		t.Fatalf("trimmed member level = (%q, %v), want high", pin.Effort, err)
+	}
+	if _, err := subagentModelOverrideForRef(ctx, fix.fac, known.ID, "xhigh"); err == nil ||
+		!strings.Contains(err.Error(), "does not offer") || !strings.Contains(err.Error(), "low, medium, high") {
+		t.Fatalf("non-member level must be refused with the offered list: %v", err)
+	}
+	if _, err := subagentModelOverrideForRef(ctx, fix.fac, claude.ID, "none"); err == nil ||
+		!strings.Contains(err.Error(), "cannot send thinking level") {
+		t.Fatalf("anthropic protocol must refuse none: %v", err)
+	}
+	if pin, err := subagentModelOverrideForRef(ctx, fix.fac, unknown.ID, "xhigh"); err != nil || pin.Effort != "xhigh" {
+		t.Fatalf("a model with no known levels is not judged: (%q, %v)", pin.Effort, err)
+	}
+	if _, err := subagentModelOverrideForRef(ctx, fix.fac, "", "high"); err == nil ||
+		!strings.Contains(err.Error(), "reasoning_effort needs a model argument") {
+		t.Fatalf("effort without model must be refused, not silently dropped: %v", err)
+	}
+}
+
+// All three dispatch tools plumb reasoning_effort into the pin resolver: a
+// level the row cannot run fails the call before anything executes.
+func TestSubagentDispatchToolsCarryReasoningEffort(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	row := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-effort-plumb", BaseURL: "https://plumb.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-plumb", SubagentAllowed: true,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, fix.fac); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	ctx := dispatchTestCtx()
+	inputs := map[string]string{
+		"subagent_run":    `{"title":"t","task":"do it","model":"` + row.ID + `","reasoning_effort":"xhigh"}`,
+		"subagent_send":   `{"title":"t","task":"do it","model":"` + row.ID + `","reasoning_effort":"xhigh"}`,
+		"subagent_fanout": `{"max_parallel":1,"tasks":[{"title":"t","prompt":"do it","model":"` + row.ID + `","reasoning_effort":"xhigh"}]}`,
+	}
+	for name, input := range inputs {
+		tl, ok := aToolByName(a, name)
+		if !ok {
+			t.Fatalf("%s not registered", name)
+		}
+		if _, err := tl.Handle(ctx, input); err == nil || !strings.Contains(err.Error(), "does not offer thinking level") {
+			t.Fatalf("%s must refuse the non-member level before dispatching: %v", name, err)
+		}
+	}
+}
