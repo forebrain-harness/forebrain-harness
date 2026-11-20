@@ -9413,6 +9413,182 @@ func TestSubagentContinueRePinsEffort(t *testing.T) {
 	}
 }
 
+// Plan 336's remaining legs (owner 2026-11-20): a level alone judges only when
+// the record's row resolves (unknown rows are not judged, a dispatch rule); a
+// named model re-pins through the dispatch resolver, whose authorization,
+// protocol and credential rules are its own; the current-row authorization
+// persists into the level-only read (plan 334).
+func TestSubagentContinueRePinsModelAndEdgeCases(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	row := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-cont-edge", BaseURL: "https://cont.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-cont", SubagentAllowed: true,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	claude := fix.insertModelRow(t, state.LLMModel{
+		Provider: "anthropic", Model: "claude-cont", BaseURL: "https://claude.test",
+		APIPath: "/v1/messages", APIKey: "key-claude", SubagentAllowed: true,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	unknown := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-cont-unknown", BaseURL: "https://unk.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-unk", SubagentAllowed: true,
+	})
+	other := fix.insertModelRow(t, state.LLMModel{
+		Provider: "deepseek", Model: "deepseek-cont", BaseURL: "https://ds.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-ds", SubagentAllowed: true,
+		ParamsJSON: `{"reasoning":{"effort":"medium"}}`,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	off := fix.insertModelRow(t, state.LLMModel{
+		Provider: "zhipuai", Model: "glm-off", BaseURL: "https://off.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-off", SubagentAllowed: false,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	current := fix.insertModelRow(t, state.LLMModel{
+		Provider: "zhipuai", Model: "glm-current", BaseURL: "https://cur.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-cur", SubagentAllowed: false,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	ctx := dispatchTestCtx()
+
+	// Protocol check always runs: the anthropic protocol cannot send "none".
+	rec := agent.HistoryEntry{ModelProvider: claude.Provider, Model: claude.Model,
+		ModelID: claude.ID, ModelLive: true, ReasoningEffort: "low"}
+	if _, err := applySubagentContinueModel(ctx, fix.fac, rec, &SubagentContinueInput{ReasoningEffort: "none"}); err == nil ||
+		!strings.Contains(err.Error(), "cannot send thinking level") {
+		t.Fatalf("protocol must refuse none on anthropic: %v", err)
+	}
+
+	// An unknown-level row is not judged: the level is applied as given.
+	recUnknown := agent.HistoryEntry{ModelProvider: unknown.Provider, Model: unknown.Model,
+		ModelID: unknown.ID, ModelLive: true, ReasoningEffort: "low"}
+	got, err := applySubagentContinueModel(ctx, fix.fac, recUnknown, &SubagentContinueInput{ReasoningEffort: "xhigh"})
+	if err != nil || got.ReasoningEffort != "xhigh" {
+		t.Fatalf("unknown-level row continue = (%q, %v), want xhigh applied", got.ReasoningEffort, err)
+	}
+
+	// A record with no model at all cannot take a level: the same structural
+	// refusal a dispatch gives an effort without a model.
+	if _, err := applySubagentContinueModel(ctx, fix.fac, agent.HistoryEntry{}, &SubagentContinueInput{ReasoningEffort: "high"}); err == nil ||
+		!strings.Contains(err.Error(), "reasoning_effort needs a model argument") {
+		t.Fatalf("effort without any model must be refused: %v", err)
+	}
+
+	// A named model re-pins the record through the dispatch resolver; an empty
+	// level adopts the new row's default, a named one overrides it.
+	rePinned := agent.HistoryEntry{ModelProvider: row.Provider, Model: row.Model,
+		ModelID: row.ID, ModelLive: true, ReasoningEffort: "low"}
+	got, err = applySubagentContinueModel(ctx, fix.fac, rePinned, &SubagentContinueInput{Model: other.ID})
+	if err != nil {
+		t.Fatalf("re-pin model: %v", err)
+	}
+	if got.ModelID != other.ID || got.Model != other.Model || !got.ModelLive || got.ReasoningEffort != "medium" {
+		t.Fatalf("re-pin = (%s/%s live=%v effort=%q), want other row with its default medium",
+			got.ModelID, got.Model, got.ModelLive, got.ReasoningEffort)
+	}
+	got, err = applySubagentContinueModel(ctx, fix.fac, rePinned, &SubagentContinueInput{Model: other.ID, ReasoningEffort: "High"})
+	if err != nil || got.ReasoningEffort != "high" {
+		t.Fatalf("re-pin model+effort = (%q, %v), want high", got.ReasoningEffort, err)
+	}
+
+	// The resolver's authorization is the dispatch's own: a switch-off row that
+	// is nobody's current choice is refused.
+	if _, err := applySubagentContinueModel(ctx, fix.fac, rePinned, &SubagentContinueInput{Model: off.ID}); err == nil ||
+		!strings.Contains(err.Error(), "not one you may pick") {
+		t.Fatalf("switch-off row must be refused on model re-pin: %v", err)
+	}
+
+	// The current-row authorization persists into the level-only read (plan
+	// 334): a switch-off row admitted as the conversation's own keeps its level
+	// change readable even though this ctx carries no selection.
+	curRec := agent.HistoryEntry{ModelProvider: current.Provider, Model: current.Model,
+		ModelID: current.ID, ModelLive: true, ReasoningEffort: "low", ModelAuthorizedAsCurrent: true}
+	got, err = applySubagentContinueModel(ctx, fix.fac, curRec, &SubagentContinueInput{ReasoningEffort: "high"})
+	if err != nil || got.ReasoningEffort != "high" {
+		t.Fatalf("current-row level change = (%q, %v), want high", got.ReasoningEffort, err)
+	}
+	if pin, err := subagentRecordPin(ctx, fix.fac, got); err != nil || pin.Effort != "high" {
+		t.Fatalf("continuation pin = (%q, %v), want high", pin.Effort, err)
+	}
+
+	// Credential revocation is the real row's business, surfaced by the pin
+	// re-read rather than a harness gate: the helper applies the level, and the
+	// continuation refuses on the dead key.
+	fix.updateModelRow(t, row, func(r *state.LLMModel) { r.APIKey = "" })
+	deadRec := agent.HistoryEntry{ModelProvider: row.Provider, Model: row.Model,
+		ModelID: row.ID, ModelLive: true, ReasoningEffort: "low"}
+	got, err = applySubagentContinueModel(ctx, fix.fac, deadRec, &SubagentContinueInput{ReasoningEffort: "high"})
+	if err != nil || got.ReasoningEffort != "high" {
+		t.Fatalf("credential-dead continue = (%q, %v), want the level applied", got.ReasoningEffort, err)
+	}
+	if _, err := subagentRecordPin(ctx, fix.fac, got); err == nil || !strings.Contains(err.Error(), "has no credentials") {
+		t.Fatalf("pin re-read must refuse the dead key: %v", err)
+	}
+}
+
+// The re-pin is not just returned: it is the record the continuation runs on
+// and persists (finishSubagentExecution appends the final record), so a later
+// continuation inherits the new level.
+func TestSubagentContinuePersistsThePinnedLevel(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	row := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-cont-persist", BaseURL: "https://cont.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-cont", SubagentAllowed: true,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	fix.fac.Owner.SubagentExecutor = &fixedSubagentExecutor{output: "continued"}
+	record := agent.HistoryEntry{
+		TaskID:          "task-cont-persist",
+		RunID:           "child-cont-persist",
+		ParentRunID:     "parent-1",
+		SessionID:       "session-1",
+		WorkerSessionID: "session-1",
+		Task:            "research auth",
+		Status:          agent.StatusOK,
+		Output:          "found auth.go:12",
+		StartedAt:       10,
+		UpdatedAt:       20,
+		FinishedAt:      20,
+		AgentType:       "fork",
+		RuntimeKind:     "fork_subagent",
+		Continuable:     true,
+		DefSource:       "parent",
+		ModelProvider:   row.Provider,
+		Model:           row.Model,
+		ModelID:         row.ID,
+		ModelLive:       true,
+		ReasoningEffort: "low",
+	}
+	if err := agent.AppendHistory(fix.fac.subagentScopeRoot(), record); err != nil {
+		t.Fatalf("append history: %v", err)
+	}
+	ctx := toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "session-1"), "parent-1")
+	got, err := continueSubagentExecution(ctx, fix.fac, &SubagentContinueInput{
+		TaskID: record.TaskID, Message: "carry on", ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatalf("continueSubagentExecution: %v", err)
+	}
+	if got.ReasoningEffort != "high" {
+		t.Fatalf("returned record effort = %q, want high", got.ReasoningEffort)
+	}
+	merged, ok, err := agent.GetMerged(fix.fac.subagentScopeRoot(), agent.Query{
+		TaskID: record.TaskID, SessionID: "session-1", ParentRunID: "parent-1", Limit: 1,
+	})
+	if err != nil || !ok {
+		t.Fatalf("GetMerged: ok=%v err=%v", ok, err)
+	}
+	if merged.ReasoningEffort != "high" {
+		t.Fatalf("persisted effort = %q, want high", merged.ReasoningEffort)
+	}
+}
+
 func TestSubagentContinueModelArgumentDescriptionsAreFixedText(t *testing.T) {
 	typ := reflect.TypeOf(SubagentContinueInput{})
 	for field, want := range map[string]string{
