@@ -9372,6 +9372,47 @@ func TestSubagentRecordPinKeepsTheDispatchedEffort(t *testing.T) {
 	}
 }
 
+// A continuation may re-pin the model and level it runs on (plan 336): a
+// level alone is judged against the record's own row, and the choice persists
+// for the record's life. Empty model and level keep what it already runs on.
+func TestSubagentContinueRePinsEffort(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	row := fix.insertModelRow(t, state.LLMModel{
+		Provider: "openai", Model: "gpt-cont", BaseURL: "https://cont.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-cont", SubagentAllowed: true,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+		CapEfforts: []string{"low", "medium", "high"},
+	})
+	ctx := dispatchTestCtx()
+	record := agent.HistoryEntry{
+		ModelProvider: "openai", Model: "gpt-cont",
+		ModelID: row.ID, ModelLive: true, ReasoningEffort: "low",
+	}
+
+	// A level alone re-pins the record; the continuation pin reads the new one.
+	got, err := applySubagentContinueModel(ctx, fix.fac, record, &SubagentContinueInput{ReasoningEffort: "High"})
+	if err != nil {
+		t.Fatalf("continue effort: %v", err)
+	}
+	if got.ReasoningEffort != "high" {
+		t.Fatalf("continue effort = %q, want the normalized high", got.ReasoningEffort)
+	}
+	if pin, err := subagentRecordPin(ctx, fix.fac, got); err != nil || pin.Effort != "high" {
+		t.Fatalf("continuation pin = (%q, %v), want high", pin.Effort, err)
+	}
+
+	// Empty keeps the record's level (owner Q3).
+	if got, err := applySubagentContinueModel(ctx, fix.fac, record, &SubagentContinueInput{}); err != nil || got.ReasoningEffort != "low" {
+		t.Fatalf("empty continue = (%q, %v), want the kept low", got.ReasoningEffort, err)
+	}
+
+	// A non-member level is refused with the offered list.
+	if _, err := applySubagentContinueModel(ctx, fix.fac, record, &SubagentContinueInput{ReasoningEffort: "xhigh"}); err == nil ||
+		!strings.Contains(err.Error(), "does not offer") || !strings.Contains(err.Error(), "low, medium, high") {
+		t.Fatalf("non-member continue level must be refused: %v", err)
+	}
+}
+
 // A dispatch admitted as the conversation's current row (switch off) keeps
 // that authorization for its whole life: the continuation rereads the row
 // for live data, not to re-judge a choice the user already made (plan 334).
