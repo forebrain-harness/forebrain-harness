@@ -985,7 +985,7 @@ func TestCodingExitPlanModeNeedsNoPlanMode(t *testing.T) {
 // drifted sentence here is a behavior change, not a wording tweak. The
 // rendering must also consume every placeholder — no %! artifact survives.
 func TestHandOffContractRendersVerbatim(t *testing.T) {
-	rendered := HandOffPlanExecutionPrompt("/plans/283/plan.md", "zhipuai/glm-5.3", "llm_row2")
+	rendered := HandOffPlanExecutionPrompt("/plans/283/plan.md", "zhipuai/glm-5.3", "llm_row2", "xhigh")
 	if strings.Contains(rendered, "%!") {
 		t.Fatalf("a placeholder was not consumed:\n%s", rendered)
 	}
@@ -1005,7 +1005,9 @@ You do not implement the plan yourself. One executor subagent does, on zhipuai/g
 
 ## Dispatch exactly one executor
 
-Read the whole plan file now. Call subagent_run with subagent_type "general-purpose", model "llm_row2", a short title, and a task made of these four parts, in order:
+Read the whole plan file now. Call subagent_run with subagent_type "general-purpose", model "llm_row2", reasoning_effort "xhigh", a short title, and a task made of these four parts, in order:
+
+The model and thinking level in that call are the user's own approval choices: pass them exactly as written. Never substitute another model or thinking level, and never add a thinking level the call does not name.
 
 1. Where to work. Pick a short kebab-case name after the plan (the plan file name is the natural source) and pass it as subagent_run's "worktree" argument. The dispatch creates <main worktree>/.worktrees/<name> on a new branch <name> from HEAD and runs the executor inside it: every read, edit, command and commit happens there and nowhere else. Your brief tells the executor it is already in that worktree; never ask it to create one.
 2. This preamble, word for word:
@@ -1051,7 +1053,12 @@ NOTES: deviations, revision rounds, anything left unresolved`
 	if rendered != want {
 		t.Fatalf("contract drifted:\n got: %q\nwant: %q", rendered, want)
 	}
-	for _, marker := range []string{"subagent_run", ".worktrees", "llm_row2", state.ImplementationHeading, "general-purpose"} {
+	// An approval that named no level names none in the contract either.
+	plain := HandOffPlanExecutionPrompt("/plans/283/plan.md", "zhipuai/glm-5.3", "llm_row2", "")
+	if wantPlain := strings.ReplaceAll(want, `model "llm_row2", reasoning_effort "xhigh"`, `model "llm_row2"`); plain != wantPlain {
+		t.Fatalf("no-level contract drifted:\n got: %q\nwant: %q", plain, wantPlain)
+	}
+	for _, marker := range []string{"subagent_run", ".worktrees", "llm_row2", "reasoning_effort", state.ImplementationHeading, "general-purpose"} {
 		if !strings.Contains(rendered, marker) {
 			t.Fatalf("contract missing %q", marker)
 		}
@@ -1084,6 +1091,9 @@ func TestExitPlanModeHandOffRecordsTheRowAndReturnsTheContract(t *testing.T) {
 	if !has || handOff["id"] != "llm_row2" || handOff["provider"] != "zhipuai" || handOff["model"] != "glm-5.3" {
 		t.Fatalf("result must carry the hand-off row: %s", raw)
 	}
+	if _, hasEffort := handOff["effort"]; hasEffort {
+		t.Fatalf("an approval that named no level must carry no effort key: %s", raw)
+	}
 	if want := "Exited plan mode. The user handed this plan to zhipuai/glm-5.3: dispatch one executor subagent on that model to carry it out in its own git worktree, then review its work. Do not implement the plan yourself."; obj["message"] != want {
 		t.Fatalf("message must be the verbatim hand-off sentence:\n got: %q\nwant: %q", obj["message"], want)
 	}
@@ -1092,6 +1102,9 @@ func TestExitPlanModeHandOffRecordsTheRowAndReturnsTheContract(t *testing.T) {
 		if !strings.Contains(on, marker) {
 			t.Fatalf("on_completion missing %q: %s", marker, on)
 		}
+	}
+	if strings.Contains(on, "reasoning_effort") {
+		t.Fatal("an approval that named no level must not name one in the contract")
 	}
 	if strings.Contains(on, "You are the primary executor") {
 		t.Fatal("a handed-off plan must not run the self-execution contract")
@@ -1106,10 +1119,45 @@ func TestExitPlanModeHandOffRecordsTheRowAndReturnsTheContract(t *testing.T) {
 	}
 }
 
+// The level the user picked rides the result and the contract as arguments
+// for the dispatch: the result map names it, on_completion tells the model to
+// pass it to subagent_run, and the mode state still records it so the
+// recurring reminder keeps naming it.
+func TestExitPlanModeHandOffCarriesThePickedLevelIntoTheContract(t *testing.T) {
+	st, rt, home, sid := officePlanOnlySetup(t, `{"decision":"accept","hand_off_model":{"id":"llm_row2","provider":"zhipuai","model":"glm-5.3","effort":"medium"}}`)
+	tool, err := newExitPlanModeToolFor(st, home, "", rt)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	tctx := withSession(context.Background(), sid)
+	tctx = WithConversationSessionID(tctx, "conv-office-exit-effort")
+	tctx = WithRunID(tctx, "run-office-exit-effort")
+	raw, err := tool.Handle(tctx, `{}`)
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw.(string)), &obj); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	handOff, _ := obj["hand_off_model"].(map[string]any)
+	if handOff["effort"] != "medium" {
+		t.Fatalf("result must carry the picked level: %s", raw)
+	}
+	on, _ := obj["on_completion"].(string)
+	if !strings.Contains(on, `model "llm_row2", reasoning_effort "medium"`) {
+		t.Fatalf("the contract must name both approval choices as arguments: %s", on)
+	}
+	final, _ := state.Get(home, sid)
+	if final.PlanHandOff == nil || final.PlanHandOff.Effort != "medium" {
+		t.Fatalf("mode state must still record the level for the reminder: %+v", final.PlanHandOff)
+	}
+}
+
 // The tool package reads the hand-off answer with its own decoder (it cannot
-// import pkg/turn), so the level the user picked has to be read here too: the
-// executor dispatch resolves the mode-state row, and a level dropped on this
-// side would silently run at the row's own configuration.
+// import pkg/turn), so the level the user picked has to be read here too: it
+// feeds the contract prompt and the recurring reminder, and a level dropped
+// on this side would silently run at the row's own configuration.
 func TestActionHandOffModelCarriesEffort(t *testing.T) {
 	act := &state.Action{
 		ID: "a1", Kind: "exit_plan_mode", Status: state.ActionApproved,

@@ -621,8 +621,9 @@ func ApprovedPlanExecutionPrompt(planFile string) string {
 // on the chosen model in its own git worktree, and the verdict is the tech
 // lead's own review. It is the twin of planExecutionContractFormat above and
 // must move with it when either changes. The placeholders are the plan file
-// path (%[1]s), the model's display name (%[2]s, used twice), the model
-// reference passed to subagent_run (%[3]s, always the configured row id) and
+// path (%[1]s), the model's display name (%[2]s, used twice), the model-and-
+// level argument clause passed to subagent_run (%[3]s: always the configured
+// row id, plus reasoning_effort when the approval named one) and
 // state.ImplementationHeading (%[4]s).
 const planHandOffContractFormat = `You are the tech lead for an approved plan. The user handed its implementation to another model, %[2]s. The plan file is:
 
@@ -640,7 +641,9 @@ You do not implement the plan yourself. One executor subagent does, on %[2]s, in
 
 ## Dispatch exactly one executor
 
-Read the whole plan file now. Call subagent_run with subagent_type "general-purpose", model "%[3]s", a short title, and a task made of these four parts, in order:
+Read the whole plan file now. Call subagent_run with subagent_type "general-purpose", %[3]s, a short title, and a task made of these four parts, in order:
+
+The model and thinking level in that call are the user's own approval choices: pass them exactly as written. Never substitute another model or thinking level, and never add a thinking level the call does not name.
 
 1. Where to work. Pick a short kebab-case name after the plan (the plan file name is the natural source) and pass it as subagent_run's "worktree" argument. The dispatch creates <main worktree>/.worktrees/<name> on a new branch <name> from HEAD and runs the executor inside it: every read, edit, command and commit happens there and nowhere else. Your brief tells the executor it is already in that worktree; never ask it to create one.
 2. This preamble, word for word:
@@ -685,10 +688,17 @@ BLOCKED BECAUSE: what stopped it
 NOTES: deviations, revision rounds, anything left unresolved`
 
 // HandOffPlanExecutionPrompt is the contract the tech lead executes a handed-
-// off plan under. modelRef is what the dispatch passes to subagent_run's
-// model argument: the configured row id, never a provider/model pair.
-func HandOffPlanExecutionPrompt(planFile, modelDisplay, modelRef string) string {
-	return fmt.Sprintf(planHandOffContractFormat, planFile, modelDisplay, modelRef, state.ImplementationHeading)
+// off plan under. modelRef is the configured row id, never a provider/model
+// pair; effort is the level the user picked on the approval card ("" when
+// they picked none). Both travel to the dispatch through this prompt: the
+// model passes them as subagent_run's model and reasoning_effort arguments,
+// and the dispatch never reads them back from session state.
+func HandOffPlanExecutionPrompt(planFile, modelDisplay, modelRef, effort string) string {
+	args := fmt.Sprintf("model %q", modelRef)
+	if effort = strings.TrimSpace(effort); effort != "" {
+		args += fmt.Sprintf(", reasoning_effort %q", effort)
+	}
+	return fmt.Sprintf(planHandOffContractFormat, planFile, modelDisplay, args, state.ImplementationHeading)
 }
 
 // newExitPlanModeToolFor is newExitPlanModeTool for a concrete runtime. A nil
@@ -786,15 +796,19 @@ func newExitPlanModeToolFor(st *State, stateRoot, projectKey string, rt *AgentTo
 						return "", err
 					}
 					st.SetRuntimeSessionMode(ctx, sid, string(restored), planDir)
-					display := llm.FormatProviderModel(handOff.Provider, handOff.Model)
-					ref := strings.TrimSpace(handOff.ModelID) // B1 guarantees a row id
-					b, _ := json.Marshal(map[string]any{
-						"mode":           string(restored),
-						"plan_file":      planFile,
-						"hand_off_model": map[string]any{"id": handOff.ModelID, "provider": handOff.Provider, "model": handOff.Model},
-						"message":        "Exited plan mode. The user handed this plan to " + display + ": dispatch one executor subagent on that model to carry it out in its own git worktree, then review its work. Do not implement the plan yourself.",
-						"on_completion":  HandOffPlanExecutionPrompt(planFile, display, ref),
-					})
+				display := llm.FormatProviderModel(handOff.Provider, handOff.Model)
+				ref := strings.TrimSpace(handOff.ModelID) // B1 guarantees a row id
+				handOffModel := map[string]any{"id": handOff.ModelID, "provider": handOff.Provider, "model": handOff.Model}
+				if eff := strings.TrimSpace(handOff.Effort); eff != "" {
+					handOffModel["effort"] = eff
+				}
+				b, _ := json.Marshal(map[string]any{
+					"mode":           string(restored),
+					"plan_file":      planFile,
+					"hand_off_model": handOffModel,
+					"message":        "Exited plan mode. The user handed this plan to " + display + ": dispatch one executor subagent on that model to carry it out in its own git worktree, then review its work. Do not implement the plan yourself.",
+					"on_completion":  HandOffPlanExecutionPrompt(planFile, display, ref, handOff.Effort),
+				})
 					return string(b), nil
 				}
 				if planOnly {

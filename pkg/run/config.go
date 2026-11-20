@@ -1005,7 +1005,7 @@ func buildPlanHandOffReminder(planFile string, h state.PlanHandOff, kind string)
 	}
 	display := llm.FormatProviderModel(h.Provider, h.Model)
 	ref := strings.TrimSpace(h.ModelID)
-	return planImplementationReminderMarker + " - read carefully.\n\n" + tool.HandOffPlanExecutionPrompt(planFile, display, ref)
+	return planImplementationReminderMarker + " - read carefully.\n\n" + tool.HandOffPlanExecutionPrompt(planFile, display, ref, h.Effort)
 }
 
 // analyzePlanReminders inspects the LLM-bound message slice to derive the
