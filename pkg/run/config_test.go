@@ -2732,6 +2732,14 @@ func TestPlanHandOffReminderIsTheTechLeadContract(t *testing.T) {
 		t.Fatalf("a handed-off plan must not run the self-execution contract: %q", text)
 	}
 
+	// The level the approval named rides the same contract as an argument.
+	withLevel := buildPlanHandOffReminder("/plans/p/plan.md", state.PlanHandOff{
+		ModelID: "llm_row2", Provider: "zhipuai", Model: "glm-5.3", Effort: "xhigh",
+	}, "full")
+	if !strings.Contains(withLevel, `model "llm_row2", reasoning_effort "xhigh"`) {
+		t.Fatalf("the reminder must name both approval choices as arguments: %q", withLevel)
+	}
+
 	// The sparse form keeps the same core: review the worktree, record the
 	// verdict — with the shared marker and heading.
 	sparse := buildPlanHandOffReminder("/plans/p/plan.md", handOff, "sparse")
