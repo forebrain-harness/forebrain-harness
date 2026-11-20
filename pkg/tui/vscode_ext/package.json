@@ -1,0 +1,11 @@
+{
+  "name": "deliverable-open",
+  "displayName": "Forebrain Deliverable Open",
+  "description": "Opens Forebrain TUI deliverables as Source Control diffs with unchanged regions collapsed.",
+  "version": "0.1.0",
+  "publisher": "forebrain",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onUri"],
+  "main": "./extension.js"
+}
