@@ -4745,7 +4745,10 @@ func handOffModelID(ctx context.Context, fac Factory) string {
 // state (owner 2026-11-20); empty runs at the row's own default level.
 func subagentModelOverrideForRef(ctx context.Context, fac Factory, id, effort string) (SubagentModelOverride, error) {
 	id = strings.TrimSpace(id)
-	effort = strings.TrimSpace(effort)
+	// The argument is free text from the model, not a picker value: judge it
+	// in the canonical case the level lists and the wire params already use
+	// (WithReasoningEffort lowercases), so "High" is the level "high".
+	effort = strings.ToLower(strings.TrimSpace(effort))
 	if id == "" {
 		if effort != "" {
 			return SubagentModelOverride{}, fmt.Errorf("reasoning_effort needs a model argument naming the row it applies to; pass model, or omit reasoning_effort.")
