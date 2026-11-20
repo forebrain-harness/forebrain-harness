@@ -771,6 +771,12 @@ type subagentChannel struct {
 	mu      sync.Mutex
 	running *subagentExecution
 	surface SubagentSurface
+	// waiters counts this conversation's subagent_wait calls blocked on a
+	// running execution of this subagent (mu-guarded): the execution-end report
+	// reads it, because a dispatcher that is waiting already receives the final
+	// record from its own call, so the automatic peer report would be the same
+	// words twice (plan 338).
+	waiters int
 	// title is the task title the record the channel was built from carried,
 	// so a listing of live subagents (LiveSubagents) can show it without
 	// re-reading the ledger. Written under subagentChannelsMu, the lock the
@@ -912,6 +918,33 @@ func (ch *subagentChannel) setRunning(ex *subagentExecution) {
 	ch.mu.Lock()
 	ch.running = ex
 	ch.mu.Unlock()
+}
+
+// addWaiter registers one subagent_wait call blocked on this channel's
+// running execution, and removeWaiter releases it again. Every return path of
+// the wait runs the removal (deferred), so the count only ever names waits that
+// are actually blocked. It is clamped at zero because a stray removal must not
+// drive it negative.
+func (ch *subagentChannel) addWaiter() {
+	ch.mu.Lock()
+	ch.waiters++
+	ch.mu.Unlock()
+}
+
+func (ch *subagentChannel) removeWaiter() {
+	ch.mu.Lock()
+	if ch.waiters > 0 {
+		ch.waiters--
+	}
+	ch.mu.Unlock()
+}
+
+// hasLiveWait reports whether a dispatcher's subagent_wait is still blocked on
+// this subagent at the moment the execution ends (plan 338).
+func (ch *subagentChannel) hasLiveWait() bool {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	return ch.waiters > 0
 }
 
 // openFirstTokenWindow starts the first-token clock of the execution taking
@@ -3945,6 +3978,14 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			}
 			query := lookupQueryFromContext(ctx, in)
 			if handle, ok := agent.RegistryFor(fac.subagentScopeRoot()).Get(query); ok && handle != nil {
+				// The wait is registered for its whole blocking life: the
+				// execution-end report reads the count and emits no peer message
+				// while a dispatcher is waiting, because that dispatcher gets
+				// the final record from this call itself (plan 338). The defer
+				// runs on every return path of this closure.
+				ch := subagentChannelFor(fac, handle.Snapshot())
+				ch.addWaiter()
+				defer ch.removeWaiter()
 				waitCtx, cancel := context.WithTimeout(ctx, timeout)
 				defer cancel()
 				wait := awaitSubagent(handle, waitCtx, tool.ConversationSessionIDFromContext(ctx))
