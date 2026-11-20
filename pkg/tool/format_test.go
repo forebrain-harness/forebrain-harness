@@ -3671,6 +3671,53 @@ func TestListUsableModelsCard(t *testing.T) {
 	require.Equal(t, "glm-5.3 (zhipuai)", legacy.String())
 }
 
+// The same roster as the TUI card's Markdown source: provider headings in
+// first-seen order, one bullet per model label, thinking levels and the
+// current/handed-off marks — and the row id, the LLM's dispatch argument,
+// never on the page.
+func TestFormatUsableModelsMarkdown(t *testing.T) {
+	roster := `{"models":[` +
+		`{"id":"llm_a","provider":"zhipuai","model":"glm-5.3","current":true,"efforts":["low","medium","high"],"default_effort":"medium"},` +
+		`{"id":"llm_b","provider":"qodercn","model":"DeepSeek-Flash","handed_off":true},` +
+		`{"id":"llm_c","provider":"zhipuai","model":"glm-5.3-flash"}` +
+		`]}`
+	want := "**zhipuai**\n" +
+		"- glm-5.3 — thinking: low, medium, high (default medium) *(current)*\n" +
+		"- glm-5.3-flash\n\n" +
+		"**qodercn**\n" +
+		"- DeepSeek-Flash *(handed off)*"
+	got, ok := FormatUsableModelsMarkdown(roster)
+	require.True(t, ok)
+	require.Equal(t, want, got)
+	for _, id := range []string{"llm_a", "llm_b", "llm_c"} {
+		require.NotContains(t, got, id)
+	}
+
+	// An empty roster carries the note verbatim.
+	empty, ok := FormatUsableModelsMarkdown(`{"models":[],"note":"No model is allowed for subagents you pick. Omit model to run on the conversation's model."}`)
+	require.True(t, ok)
+	require.Equal(t, "No model is allowed for subagents you pick. Omit model to run on the conversation's model.", empty)
+
+	// A replayed old-session row (endpoint, no efforts) reads as its bare
+	// label plus flags; the endpoint the engine dropped never comes back.
+	old := `{"models":[{"id":"llm_c","provider":"zhipuai","model":"glm-5.3","endpoint":"https://one.test/v1/chat/completions","current":false,"handed_off":false}]}`
+	got, ok = FormatUsableModelsMarkdown(old)
+	require.True(t, ok)
+	require.Equal(t, "**zhipuai**\n- glm-5.3", got)
+	require.NotContains(t, got, "endpoint")
+
+	// The live card's output envelope reads the same as a replayed row.
+	live := "output:\n\n```json\n{\"output\":" + strconv.Quote(roster) + "}\n```"
+	envelope, ok := FormatUsableModelsMarkdown(live)
+	require.True(t, ok)
+	require.Equal(t, want, envelope)
+
+	for _, body := range []string{"not json", `{"foo":1}`, ""} {
+		_, ok := FormatUsableModelsMarkdown(body)
+		require.False(t, ok, "body %q", body)
+	}
+}
+
 // A handed-off exit states where the plan went — the card says the model,
 // not the tech-lead instructions, which are the model-facing contract's
 // business and stay out of the card.

@@ -4355,6 +4355,58 @@ func readUsableModels(content string) (ReadableAnswer, bool) {
 	return ReadableAnswer{}, false
 }
 
+// FormatUsableModelsMarkdown is list_usable_models' answer as the TUI card's
+// Markdown source: one bold heading per provider in first-seen order, one
+// bullet per model under it — the label a person reads, its thinking levels
+// and default, and the current/handed-off marks. The row id is the LLM's
+// dispatch argument, never a person's reading, so it never appears here
+// (owner 2026-11-20). ok is false for content that is not this answer.
+func FormatUsableModelsMarkdown(body string) (string, bool) {
+	for _, candidate := range toolAnswerCandidates(body) {
+		var raw usableModelsAnswer
+		if json.Unmarshal([]byte(candidate), &raw) != nil {
+			continue
+		}
+		if raw.Models == nil && strings.TrimSpace(raw.Note) == "" {
+			continue
+		}
+		if len(raw.Models) == 0 {
+			note := strings.TrimSpace(raw.Note)
+			if note == "" {
+				return "", false
+			}
+			return note, true
+		}
+		var groups []string
+		seen := map[string]int{}
+		for _, row := range raw.Models {
+			provider := strings.TrimSpace(row.Provider)
+			idx, ok := seen[provider]
+			if !ok {
+				idx = len(groups)
+				seen[provider] = idx
+				groups = append(groups, "**"+provider+"**")
+			}
+			bullet := "- " + strings.TrimSpace(row.Model)
+			if len(row.Efforts) > 0 {
+				bullet += " — thinking: " + strings.Join(row.Efforts, ", ")
+				if def := strings.TrimSpace(row.DefaultEffort); def != "" {
+					bullet += " (default " + def + ")"
+				}
+			}
+			if row.Current {
+				bullet += " *(current)*"
+			}
+			if row.HandedOff {
+				bullet += " *(handed off)*"
+			}
+			groups[idx] += "\n" + bullet
+		}
+		return strings.Join(groups, "\n\n"), true
+	}
+	return "", false
+}
+
 // peerRosterAnswer is peer_list's answer as pkg/run writes it: the caller's
 // own name, the agents it can address, and the note an empty roster carries.
 type peerRosterAnswer struct {
