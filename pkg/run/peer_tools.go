@@ -3,6 +3,7 @@
 package run
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -500,27 +501,51 @@ func signalPeerMessage(conversationSessionID string) {
 	}
 }
 
+// subagentReportHandedCap bounds the handed-report latch: one entry per
+// delivered execution would otherwise grow for the life of the process.
+// Eviction drops the oldest deliveries first, so a wait that arrives only
+// after this many newer deliveries reads the report again (the pre-338
+// behavior) instead of omitting it — a duplicate, never a loss: a refused
+// delivery is never marked (owner 2026-11-20).
+const subagentReportHandedCap = 4096
+
 var (
-	subagentReportHandedMu sync.Mutex
-	subagentReportHanded   = map[string]struct{}{}
+	subagentReportHandedMu    sync.Mutex
+	subagentReportHanded      = map[string]*list.Element{}
+	subagentReportHandedOrder = list.New() // front = newest, back = evicted first
 )
 
 // MarkSubagentReportHanded records that one execution's final report reached
 // its dispatcher as a peer message, so a later subagent_wait omits the report
 // body instead of repeating it (plan 338). Empty ids name no execution and are
-// ignored.
+// ignored. The latch is capped (subagentReportHandedCap); re-marking a known
+// execution refreshes it rather than growing the table.
 func MarkSubagentReportHanded(executionID string) {
 	key := strings.TrimSpace(executionID)
 	if key == "" {
 		return
 	}
 	subagentReportHandedMu.Lock()
-	subagentReportHanded[key] = struct{}{}
-	subagentReportHandedMu.Unlock()
+	defer subagentReportHandedMu.Unlock()
+	if el, ok := subagentReportHanded[key]; ok {
+		subagentReportHandedOrder.MoveToFront(el)
+		return
+	}
+	subagentReportHanded[key] = subagentReportHandedOrder.PushFront(key)
+	for subagentReportHandedOrder.Len() > subagentReportHandedCap {
+		oldest := subagentReportHandedOrder.Back()
+		if oldest == nil {
+			break
+		}
+		subagentReportHandedOrder.Remove(oldest)
+		delete(subagentReportHanded, oldest.Value.(string))
+	}
 }
 
 // SubagentReportHanded reports whether the report for executionID was handed
-// to the dispatcher as a peer message.
+// to the dispatcher as a peer message. Reading refreshes the entry's place in
+// the eviction order, the same touch the peer guard's bucket table gives a
+// sender it still hears from.
 func SubagentReportHanded(executionID string) bool {
 	key := strings.TrimSpace(executionID)
 	if key == "" {
@@ -528,7 +553,10 @@ func SubagentReportHanded(executionID string) bool {
 	}
 	subagentReportHandedMu.Lock()
 	defer subagentReportHandedMu.Unlock()
-	_, ok := subagentReportHanded[key]
+	el, ok := subagentReportHanded[key]
+	if ok {
+		subagentReportHandedOrder.MoveToFront(el)
+	}
 	return ok
 }
 
