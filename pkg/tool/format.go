@@ -4303,21 +4303,27 @@ type usableModelsAnswer struct {
 	Note   string           `json:"note"`
 }
 
-// usableModelRow is one row of that answer. The endpoint is how twin rows of
-// one provider/model differ; the flags name the conversation's own row and
-// the row an approved hand-off pinned.
+// usableModelRow is one row of that answer. The model field is the name a
+// person reads (the label, the wire id when no listing carries one); efforts
+// are the thinking levels the row can run at and default_effort the one it
+// runs at by default; the flags name the conversation's own row and the row
+// an approved hand-off pinned.
 type usableModelRow struct {
-	ID        string `json:"id"`
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	Endpoint  string `json:"endpoint"`
-	Current   bool   `json:"current"`
-	HandedOff bool   `json:"handed_off"`
+	ID           string   `json:"id"`
+	Provider     string   `json:"provider"`
+	Model        string   `json:"model"`
+	Efforts      []string `json:"efforts"`
+	DefaultEffort string   `json:"default_effort"`
+	Current      bool     `json:"current"`
+	HandedOff    bool     `json:"handed_off"`
 }
 
 // readUsableModels reads a list_usable_models card: one line per model,
-// "provider/model endpoint", with " (current)" / " (handed off)" naming the
-// rows those facts belong to. The raw JSON never reaches a card.
+// "model (provider) — thinking: levels (default d)", with " (current)" /
+// " (handed off)" naming the rows those facts belong to. The raw JSON never
+// reaches a card. A replayed old-session row (endpoint, no efforts) reads as
+// its bare "model (provider)" — the new struct simply ignores the fields it
+// no longer knows.
 func readUsableModels(content string) (ReadableAnswer, bool) {
 	for _, candidate := range toolAnswerCandidates(content) {
 		var raw usableModelsAnswer
@@ -4329,7 +4335,13 @@ func readUsableModels(content string) (ReadableAnswer, bool) {
 		}
 		var lines []string
 		for _, row := range raw.Models {
-			line := fmt.Sprintf("%s/%s %s", strings.TrimSpace(row.Provider), strings.TrimSpace(row.Model), strings.TrimSpace(row.Endpoint))
+			line := fmt.Sprintf("%s (%s)", strings.TrimSpace(row.Model), strings.TrimSpace(row.Provider))
+			if len(row.Efforts) > 0 {
+				line += " — thinking: " + strings.Join(row.Efforts, ", ")
+				if strings.TrimSpace(row.DefaultEffort) != "" {
+					line += " (default " + strings.TrimSpace(row.DefaultEffort) + ")"
+				}
+			}
 			if row.Current {
 				line += " (current)"
 			}
