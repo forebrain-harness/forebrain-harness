@@ -183,6 +183,43 @@ describe('ToolCallCard', () => {
     expect(replayed.find('[data-testid="tool-answer"]').exists()).toBe(true)
   })
 
+  it('draws an empty model roster as its own empty state, not the peer roster', () => {
+    // The engine notes only an empty roster, and that note is the model
+    // card's own localized state (plan 337 Q4) — it must not route the
+    // answer to the peer roster, whose empty words are a different fact.
+    const empty = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'list_usable_models',
+          summary: 'list_usable_models',
+          output: 'output:',
+          readableAnswer: { rows: [], note: "No model is allowed for subagents you pick. Omit model to run on the conversation's model." },
+        }),
+      },
+    })
+    expect(empty.find('[data-testid="usable-models-empty"]').exists()).toBe(true)
+    expect(empty.find('[data-testid="peer-roster-empty"]').exists()).toBe(false)
+    expect(empty.text()).toContain('No model can be dispatched to a subagent.')
+    expect(empty.text()).not.toContain('No model is allowed for subagents you pick.')
+
+    // The peer roster keeps its own empty state: the guard excludes the
+    // model tool only, never a peer_list answer.
+    const peers = mount(ToolCallCard, {
+      props: {
+        open: true,
+        step: stepOf({
+          toolName: 'peer_list',
+          summary: 'peer_list',
+          output: 'output:',
+          readableAnswer: { rows: [], peers: [], note: 'No agents can be messaged.' },
+        }),
+      },
+    })
+    expect(peers.find('[data-testid="peer-roster-empty"]').exists()).toBe(true)
+    expect(peers.find('[data-testid="usable-models"]').exists()).toBe(false)
+  })
+
   it('reads an answer that is text as Markdown, and a failed call keeps its error', async () => {
     const text = mount(ToolCallCard, {
       props: { open: true, step: stepOf({ toolName: 'TaskCreate', summary: 'TaskCreate', output: 'output:', readableAnswer: { rows: [], text: 'Task **#6** created' } }) },
