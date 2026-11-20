@@ -117,6 +117,25 @@ func buildSubagentProgress(ctx context.Context, fac Factory, record agent.Histor
 	return p
 }
 
+// redactHandedSubagentReport drops the report body from a finished record whose
+// report already reached the dispatcher as a peer message, so the wait answers
+// with status and a pointer instead of the same words twice (plan 338). A
+// record that is still running, or one whose execution never delivered a
+// message, keeps its output; callers also clear the progress's LastMessage
+// copy when this reports true.
+func redactHandedSubagentReport(record agent.HistoryEntry) (agent.HistoryEntry, bool) {
+	switch record.Status {
+	case agent.StatusOK, agent.StatusFailed, agent.StatusCancelled:
+	default:
+		return record, false
+	}
+	if !SubagentReportHanded(record.ExecutionID) {
+		return record, false
+	}
+	record.Output = ""
+	return record, true
+}
+
 // subagentProgressRows keeps the rows a step and a message are read from, in
 // the order the subagent wrote them.
 func subagentProgressRows(rows []state.Message) []state.Message {

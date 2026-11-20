@@ -3993,9 +3993,18 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 				waitCtx, cancel := context.WithTimeout(ctx, timeout)
 				defer cancel()
 				wait := awaitSubagent(handle, waitCtx, tool.ConversationSessionIDFromContext(ctx))
+				record, redacted := redactHandedSubagentReport(wait.record)
+				progress := buildSubagentProgress(ctx, fac, record)
+				if redacted {
+					// The 600-rune copy of the same report goes with the body.
+					progress.LastMessage = ""
+				}
 				resp := map[string]any{
-					"record":   wait.record,
-					"progress": buildSubagentProgress(ctx, fac, wait.record),
+					"record":   record,
+					"progress": progress,
+				}
+				if redacted {
+					resp["report_already_delivered_as_message"] = true
 				}
 				if wait.timedOut {
 					resp["timed_out"] = true
@@ -4013,10 +4022,19 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCat
 			if !ok {
 				return "", fmt.Errorf("subagent not found")
 			}
-			b, _ := json.Marshal(map[string]any{
+			record, redacted := redactHandedSubagentReport(record)
+			progress := buildSubagentProgress(ctx, fac, record)
+			if redacted {
+				progress.LastMessage = ""
+			}
+			resp := map[string]any{
 				"record":   record,
-				"progress": buildSubagentProgress(ctx, fac, record),
-			})
+				"progress": progress,
+			}
+			if redacted {
+				resp["report_already_delivered_as_message"] = true
+			}
+			b, _ := json.Marshal(resp)
 			return string(b), nil
 		},
 	); err != nil {
