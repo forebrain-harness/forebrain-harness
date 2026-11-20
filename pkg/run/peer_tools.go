@@ -534,9 +534,6 @@ func MarkSubagentReportHanded(executionID string) {
 	subagentReportHanded[key] = subagentReportHandedOrder.PushFront(key)
 	for subagentReportHandedOrder.Len() > subagentReportHandedCap {
 		oldest := subagentReportHandedOrder.Back()
-		if oldest == nil {
-			break
-		}
 		subagentReportHandedOrder.Remove(oldest)
 		delete(subagentReportHanded, oldest.Value.(string))
 	}
