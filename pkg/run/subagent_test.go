@@ -8819,6 +8819,88 @@ func TestUsableModelsListAndDispatchAgree(t *testing.T) {
 	if usable, err := usableModelByID(ctx, fix.fac, handed); err != nil || !usable.HandedOff {
 		t.Fatalf("dispatch check for the handed-off row = %+v, %v", usable, err)
 	}
+
+	// The conversation's selection admits the row it names the same way: the
+	// pair must list and resolve it even though its switch is off.
+	selCtx := WithSessionModelSelection(ctx, PrimaryModelState{ModelID: denied, Provider: "zhipuai", Model: "glm-5.3-flash"})
+	listed, err = usableModels(selCtx, fix.fac)
+	if err != nil {
+		t.Fatalf("usableModels with a selection: %v", err)
+	}
+	got = map[string]bool{}
+	for _, m := range listed {
+		got[m.Row.ID] = true
+	}
+	if !got[denied] {
+		t.Fatalf("the selected row must list: %v", got)
+	}
+	if usable, err := usableModelByID(selCtx, fix.fac, denied); err != nil {
+		t.Fatalf("dispatch check for the selected row: %v", err)
+	} else if usable.HandedOff {
+		t.Fatal("the selected row is not the hand-off row and must not carry its flag")
+	}
+}
+
+// The conversation's own model lists and dispatches without the switch: the
+// selection is the user's own choice for this conversation, the same family as
+// the hand-off exception — but the credential rule stays, because a row nobody
+// can call is not a model to run on.
+func TestUsableModelsIncludesTheCurrentRowWithoutTheSwitch(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	id := fix.seedModelRow(t, "zhipuai", "glm-5.3", "https://cur.test/v1", "key-cur", false)
+
+	// Without a selection the row is exactly what its switch says: off.
+	ctx := dispatchTestCtx()
+	listed, err := usableModels(ctx, fix.fac)
+	if err != nil {
+		t.Fatalf("usableModels: %v", err)
+	}
+	for _, m := range listed {
+		if m.Row.ID == id {
+			t.Fatal("a switched-off row must not list while no selection names it")
+		}
+	}
+	if _, err := usableModelByID(ctx, fix.fac, id); err == nil || !strings.Contains(err.Error(), "not one you may pick for subagents") {
+		t.Fatalf("dispatch check without a selection = %v, want the switch refusal", err)
+	}
+
+	// The selection names it: it lists unflagged and dispatch resolves.
+	sel := WithSessionModelSelection(ctx, PrimaryModelState{ModelID: id, Provider: "zhipuai", Model: "glm-5.3"})
+	listed, err = usableModels(sel, fix.fac)
+	if err != nil {
+		t.Fatalf("usableModels with a selection: %v", err)
+	}
+	found := false
+	for _, m := range listed {
+		if m.Row.ID == id {
+			found = !m.HandedOff
+		}
+	}
+	if !found {
+		t.Fatalf("selected row missing or flagged in %#v", listed)
+	}
+	if usable, err := usableModelByID(sel, fix.fac, id); err != nil {
+		t.Fatalf("dispatch check for the selected row: %v", err)
+	} else if usable.HandedOff {
+		t.Fatal("the selected row is not the hand-off row and must not carry its flag")
+	}
+
+	// A selection naming a row without credentials changes nothing: the
+	// exception waives the switch, never the credential rule.
+	keyless := fix.seedModelRow(t, "deepseek", "deepseek-v4-flash", "https://keyless.test/v1", "", false)
+	selKeyless := WithSessionModelSelection(ctx, PrimaryModelState{ModelID: keyless, Provider: "deepseek", Model: "deepseek-v4-flash"})
+	listed, err = usableModels(selKeyless, fix.fac)
+	if err != nil {
+		t.Fatalf("usableModels with a keyless selection: %v", err)
+	}
+	for _, m := range listed {
+		if m.Row.ID == keyless {
+			t.Fatal("a row without credentials must not list, selection or not")
+		}
+	}
+	if _, err := usableModelByID(selKeyless, fix.fac, keyless); err == nil || !strings.Contains(err.Error(), "has no credentials") {
+		t.Fatalf("dispatch check for a keyless selected row = %v, want the credential refusal", err)
+	}
 }
 
 // The client cache keys a live row by its version: a row edited mid-run (new

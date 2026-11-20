@@ -4459,9 +4459,11 @@ type usableModel struct {
 // (owner 2026-11-10) and credentials exist (a stored key, or a provider whose
 // login is the credential). The conversation's hand-off row joins the list
 // without the switch — the user picked it themselves — flagged so the model
-// can tell why it is there. This and usableModelByID are the one query pair
-// behind both list_usable_models and the dispatch's own check, so what the
-// model sees listed is exactly what it may dispatch on.
+// can tell why it is there; so does the conversation's current row, the
+// user's own choice for this conversation, unflagged because it needs no
+// explaining. This and usableModelByID are the one query pair behind both
+// list_usable_models and the dispatch's own check, so what the model sees
+// listed is exactly what it may dispatch on.
 func usableModels(ctx context.Context, fac Factory) ([]usableModel, error) {
 	if fac.Owner == nil || fac.Owner.Deps == nil || fac.Owner.Deps.SessionStore == nil {
 		return nil, fmt.Errorf("model store unavailable")
@@ -4471,6 +4473,10 @@ func usableModels(ctx context.Context, fac Factory) ([]usableModel, error) {
 		return nil, err
 	}
 	handOff := handOffModelID(ctx, fac)
+	current := ""
+	if sel, ok := SessionModelSelectionFromContext(ctx); ok {
+		current = strings.TrimSpace(sel.ModelID)
+	}
 	out := make([]usableModel, 0, len(rows))
 	for _, row := range rows {
 		entry, caps, cerr := configuredRow(row)
@@ -4487,6 +4493,18 @@ func usableModels(ctx context.Context, fac Factory) ([]usableModel, error) {
 				continue
 			}
 			out = append(out, usableModel{Row: row, Entry: entry, Caps: caps, HandedOff: true})
+			continue
+		}
+		if current != "" && strings.TrimSpace(row.ID) == current {
+			// The conversation's own model is the user's own choice for this
+			// conversation — the switch's "only the user's own choices use it"
+			// (owner 2026-11-10) already admits it, the same family as the
+			// hand-off exception. It still needs credentials: a row nobody can
+			// call is not a model to run on.
+			if !credentialed {
+				continue
+			}
+			out = append(out, usableModel{Row: row, Entry: entry, Caps: caps})
 			continue
 		}
 		if !row.SubagentAllowed || !credentialed {
@@ -4514,7 +4532,9 @@ func modelPickGuidance(ctx context.Context, fac Factory) string {
 // usableModelByID resolves one row id the way usableModels lists it, with the
 // three refusal texts the model reads (语义 9): an unknown id, a row the
 // switch does not allow, a row without credentials. The hand-off row resolves
-// without the switch, exactly as it lists.
+// without the switch, exactly as it lists; so does the conversation's current
+// row — the user's own choice for this conversation — so the pair never
+// teaches the model an id the dispatch would refuse.
 func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -4551,7 +4571,11 @@ func usableModelByID(ctx context.Context, fac Factory, id string) (usableModel, 
 	}
 	credentialed := strings.TrimSpace(row.APIKey) != "" || appcfg.CredentialsBackedProvider(row.Provider)
 	handedOff := strings.TrimSpace(row.ID) == handOffModelID(ctx, fac) && handOffModelID(ctx, fac) != ""
-	if !handedOff && !row.SubagentAllowed {
+	isCurrent := false
+	if sel, ok := SessionModelSelectionFromContext(ctx); ok {
+		isCurrent = strings.TrimSpace(row.ID) != "" && strings.TrimSpace(sel.ModelID) == strings.TrimSpace(row.ID)
+	}
+	if !handedOff && !isCurrent && !row.SubagentAllowed {
 		return usableModel{}, fmt.Errorf("model %q (provider/model) is not one you may pick for subagents; %s", llm.FormatProviderModel(row.Provider, row.Model), modelPickGuidance(ctx, fac))
 	}
 	if !credentialed {

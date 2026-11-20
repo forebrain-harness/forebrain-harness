@@ -879,6 +879,26 @@ func TestToolOrchestrationKeepsListUsableModelsForAHandedOffRow(t *testing.T) {
 	}
 }
 
+// The conversation's current row is part of usableModels' answer (the user
+// picked it for this conversation themselves), so the tool stays offered even
+// though the row's switch is off.
+func TestToolOrchestrationKeepsListUsableModelsForTheCurrentRow(t *testing.T) {
+	runner, models, _ := rosterFixture(t)
+	ctx0 := context.Background()
+	row, err := models.Create(ctx0, state.LLMModel{
+		Provider: "zhipuai", Model: "glm-5.3", BaseURL: "https://roster.test/v1", APIPath: "/chat/completions",
+		APIKey: "k", SubagentAllowed: false,
+	})
+	if err != nil {
+		t.Fatalf("create model row: %v", err)
+	}
+	ctx0 = WithSessionModelSelection(ctx0, PrimaryModelState{ModelID: row.ID, Provider: "zhipuai", Model: "glm-5.3"})
+	names := rosterRequestTools(t, runner, llm.WithAgentSessionID(ctx0, "session-1"))
+	if !containsString(names, "list_usable_models") {
+		t.Fatalf("the conversation's current row keeps list_usable_models offered; got %v", names)
+	}
+}
+
 // A failed model-table query keeps the tool offered: a broken store must not
 // silently rewrite the tool table (fail-open, the old behavior).
 func TestToolOrchestrationKeepsListUsableModelsWhenTheModelStoreFails(t *testing.T) {
