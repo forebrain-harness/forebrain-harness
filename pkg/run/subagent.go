@@ -107,7 +107,7 @@ type SubagentInput struct {
 	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 	// ReasoningEffort is fixed text for the same reason as Model: it names no
 	// model and no tool, so the definition never moves with the table.
-	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this subagent, one of the levels the chosen model supports. Omit to run at the model's default thinking level."`
+	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this subagent: one of the chosen model's levels, or a level for the conversation's own model when model is omitted. Omit to run at the model's default thinking level."`
 }
 
 type SubagentSendInput struct {
@@ -121,7 +121,7 @@ type SubagentSendInput struct {
 	// Model is a configured row id; see SubagentInput.Model.
 	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 	// ReasoningEffort is fixed text; see SubagentInput.ReasoningEffort.
-	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this subagent, one of the levels the chosen model supports. Omit to run at the model's default thinking level."`
+	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this subagent: one of the chosen model's levels, or a level for the conversation's own model when model is omitted. Omit to run at the model's default thinking level."`
 }
 
 type SubagentContinueInput struct {
@@ -163,7 +163,7 @@ type SubagentTask struct {
 	// Model is a configured row id; see SubagentInput.Model.
 	Model string `json:"model,omitempty" jsonschema_description:"Optional id of a configured model you may run a subagent on. Omit to use the model this subagent type is configured with, else the conversation's model."`
 	// ReasoningEffort is fixed text; see SubagentInput.ReasoningEffort.
-	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this subagent, one of the levels the chosen model supports. Omit to run at the model's default thinking level."`
+	ReasoningEffort string `json:"reasoning_effort,omitempty" jsonschema_description:"Optional thinking level for this subagent: one of the chosen model's levels, or a level for the conversation's own model when model is omitted. Omit to run at the model's default thinking level."`
 }
 
 func subagentTypeEnumValues(cat SubagentCatalog) []any {
@@ -3231,8 +3231,10 @@ func refuseGoneCustomSubagent(fac Factory, record agent.HistoryEntry) error {
 // authorization flag. A level alone is judged against the record's own row when
 // that row resolves, and applied unjudged when it does not — the same "a model
 // this process knows no levels for is not judged" rule a dispatch follows
-// (owner 2026-11-20: first-call success over harness gatekeeping). Empty model
-// and level leave the record untouched: a continuation keeps what it runs on.
+// (owner 2026-11-20: first-call success over harness gatekeeping). A record
+// that names no model takes the model its run would use, at the given level.
+// Empty model and level leave the record untouched: a continuation keeps what
+// it runs on.
 func applySubagentContinueModel(ctx context.Context, fac Factory, record agent.HistoryEntry, in *SubagentContinueInput) (agent.HistoryEntry, error) {
 	if in == nil {
 		return record, nil
@@ -3256,15 +3258,36 @@ func applySubagentContinueModel(ctx context.Context, fac Factory, record agent.H
 		return record, nil
 	}
 	// A level alone: judge it against the record's own row when that row
-	// resolves. A record that names no model at all has nothing to attach the
-	// level to — the same structural refusal a dispatch gives an effort
-	// without a model.
+	// resolves. A record that names no model at all takes the model its run
+	// would use — the type's configured one, else the conversation's — pinned
+	// onto the record so the level has a client to ride, and applied as given
+	// (owner 2026-11-20: first-call success over harness gatekeeping).
 	modelID := strings.TrimSpace(record.ModelID)
 	if modelID == "" {
 		modelID = ModelIDForAgentModel(fac.appConfig(), fac.AgentName, record.ModelProvider, record.Model)
 	}
 	if modelID == "" && strings.TrimSpace(record.Model) == "" {
-		return agent.HistoryEntry{}, fmt.Errorf("reasoning_effort needs a model argument naming the row it applies to; pass model, or omit reasoning_effort.")
+		// The model an unpinned continuation runs on: the type's configured
+		// one, else the conversation's — the turn's own selection first, the
+		// same source the unpinned run's client chain reads. The row id comes
+		// from the same source as the pair.
+		provider, model := "", ""
+		if ownID, p, m, _, ok := SubagentOwnModel(fac.Owner, record.AgentType); ok {
+			modelID, provider, model = ownID, p, m
+		} else if sel := currentSessionModelSelection(ctx, fac); strings.TrimSpace(sel.Model) != "" {
+			modelID, provider, model = strings.TrimSpace(sel.ModelID), sel.Provider, sel.Model
+		}
+		if strings.TrimSpace(model) == "" {
+			return record, nil
+		}
+		if modelID == "" {
+			modelID = ModelIDForAgentModel(fac.appConfig(), fac.AgentName, provider, model)
+		}
+		record.ModelProvider = strings.TrimSpace(provider)
+		record.Model = strings.TrimSpace(model)
+		record.ModelID = modelID
+		record.ReasoningEffort = effort
+		return record, nil
 	}
 	if modelID != "" {
 		// The dispatch's current-row authorization persists for this record's
@@ -4872,6 +4895,20 @@ func handOffModelID(ctx context.Context, fac Factory) string {
 	return strings.TrimSpace(st.PlanHandOff.ModelID)
 }
 
+// currentSessionModelSelection answers which model this conversation's primary
+// agent runs on: the selection the turn carries, else the session's own choice
+// resolved the way every surface reads it (PrimaryModelStateForSession).
+func currentSessionModelSelection(ctx context.Context, fac Factory) PrimaryModelState {
+	if sel, ok := SessionModelSelectionFromContext(ctx); ok {
+		return sel
+	}
+	var store *state.SessionStore
+	if fac.Owner != nil && fac.Owner.Deps != nil {
+		store = fac.Owner.Deps.SessionStore
+	}
+	return PrimaryModelStateForSession(fac.Owner, store, llm.AgentSessionIDFromContext(ctx))
+}
+
 // subagentModelOverrideForRef resolves the model argument's row id into the
 // pin a dispatch runs under: the row read live, its client entry and its
 // version carried along, so this subagent's requests go to exactly this row
@@ -4879,17 +4916,42 @@ func handOffModelID(ctx context.Context, fac Factory) string {
 // An empty id is no statement — the zero override leaves the dispatch on its
 // ordinary model chain. effort is the caller's reasoning_effort argument: the
 // user's approval choices reach it through the prompt, never through session
-// state (owner 2026-11-20); empty runs at the row's own default level.
+// state (owner 2026-11-20); empty runs at the row's own default level. An
+// effort without a model is a level for the conversation's own model: the
+// dispatch pins the row the primary agent runs on and applies the level as
+// given, unjudged — the caller asked for a thinking level, not for a model
+// pick (owner 2026-11-20: first-call success over harness gatekeeping).
 func subagentModelOverrideForRef(ctx context.Context, fac Factory, id, effort string) (SubagentModelOverride, error) {
 	id = strings.TrimSpace(id)
 	// The argument is free text from the model, not a picker value: judge it
 	// in the canonical case the level lists and the wire params already use
 	// (WithReasoningEffort lowercases), so "High" is the level "high".
 	effort = strings.ToLower(strings.TrimSpace(effort))
-	if id == "" {
-		if effort != "" {
-			return SubagentModelOverride{}, fmt.Errorf("reasoning_effort needs a model argument naming the row it applies to; pass model, or omit reasoning_effort.")
+	levelOnly := id == "" && effort != ""
+	if levelOnly {
+		sel := currentSessionModelSelection(ctx, fac)
+		id = strings.TrimSpace(sel.ModelID)
+		if id == "" {
+			id = ModelIDForAgentModel(fac.appConfig(), fac.AgentName, sel.Provider, sel.Model)
 		}
+		if id == "" {
+			// No row to read (a hand-built configuration names no ids): the
+			// pair is the pin, resolved against the configuration the same
+			// way an unpinned dispatch's model is.
+			return SubagentModelOverride{
+				Provider: strings.TrimSpace(sel.Provider),
+				Model:    strings.TrimSpace(sel.Model),
+				Effort:   effort,
+			}, nil
+		}
+		// The defaulted row is the conversation's own choice: name it as the
+		// selection this resolution sees, so the switch admits it exactly as
+		// it admits the current row — the same assertion subagentRecordPin
+		// makes for a persisted authorization. Nothing else reads it: the
+		// caller's context is never this copy.
+		ctx = WithSessionModelSelection(ctx, PrimaryModelState{ModelID: id})
+	}
+	if id == "" {
 		return SubagentModelOverride{}, nil
 	}
 	usable, err := usableModelByID(ctx, fac, id)
@@ -4903,8 +4965,10 @@ func subagentModelOverrideForRef(ctx context.Context, fac Factory, id, effort st
 	entry, caps := usable.Entry, usable.Caps
 	if effort == "" {
 		effort = appcfg.ReasoningEffort(entry.Params)
-	} else if err := dispatchEffortRefused(entry, usable, effort); err != nil {
-		return SubagentModelOverride{}, err
+	} else if !levelOnly {
+		if err := dispatchEffortRefused(entry, usable, effort); err != nil {
+			return SubagentModelOverride{}, err
+		}
 	}
 	return SubagentModelOverride{
 		ModelID:  strings.TrimSpace(entry.ID),

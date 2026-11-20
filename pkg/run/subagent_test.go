@@ -9201,7 +9201,7 @@ func TestSubagentModelArgumentDescriptionIsFixedText(t *testing.T) {
 }
 
 func TestSubagentReasoningEffortArgumentDescriptionIsFixedText(t *testing.T) {
-	const want = "Optional thinking level for this subagent, one of the levels the chosen model supports. Omit to run at the model's default thinking level."
+	const want = "Optional thinking level for this subagent: one of the chosen model's levels, or a level for the conversation's own model when model is omitted. Omit to run at the model's default thinking level."
 	for _, typ := range []reflect.Type{reflect.TypeOf(SubagentInput{}), reflect.TypeOf(SubagentSendInput{}), reflect.TypeOf(SubagentTask{})} {
 		field, ok := typ.FieldByName("ReasoningEffort")
 		if !ok {
@@ -9552,11 +9552,14 @@ func TestSubagentContinueRePinsModelAndEdgeCases(t *testing.T) {
 		t.Fatalf("unknown-level row continue = (%q, %v), want xhigh applied", got.ReasoningEffort, err)
 	}
 
-	// A record with no model at all cannot take a level: the same structural
-	// refusal a dispatch gives an effort without a model.
-	if _, err := applySubagentContinueModel(ctx, fix.fac, agent.HistoryEntry{}, &SubagentContinueInput{ReasoningEffort: "high"}); err == nil ||
-		!strings.Contains(err.Error(), "reasoning_effort needs a model argument") {
-		t.Fatalf("effort without any model must be refused: %v", err)
+	// A record with no model at all takes the conversation's own model at
+	// the given level — the same default a dispatch gives an effort without
+	// a model (owner 2026-11-20), pinned onto the record so the level rides
+	// a client.
+	selCtx := WithSessionModelSelection(ctx, PrimaryModelState{ModelID: current.ID, Provider: current.Provider, Model: current.Model})
+	noModel, err := applySubagentContinueModel(selCtx, fix.fac, agent.HistoryEntry{}, &SubagentContinueInput{ReasoningEffort: "high"})
+	if err != nil || noModel.ModelID != current.ID || noModel.Model != current.Model || noModel.ReasoningEffort != "high" {
+		t.Fatalf("model-less record continue = (%+v, %v), want the current row at high", noModel, err)
 	}
 
 	// A named model re-pins the record through the dispatch resolver; an empty
@@ -10066,9 +10069,19 @@ func TestSubagentReasoningEffortValidation(t *testing.T) {
 	if pin, err := subagentModelOverrideForRef(ctx, fix.fac, unknown.ID, "xhigh"); err != nil || pin.Effort != "xhigh" {
 		t.Fatalf("a model with no known levels is not judged: (%q, %v)", pin.Effort, err)
 	}
-	if _, err := subagentModelOverrideForRef(ctx, fix.fac, "", "high"); err == nil ||
-		!strings.Contains(err.Error(), "reasoning_effort needs a model argument") {
-		t.Fatalf("effort without model must be refused, not silently dropped: %v", err)
+	// reasoning_effort without model lands on the conversation's own model,
+	// applied as given — even a level outside the row's list, and even when
+	// the row is switch-off (owner 2026-11-20: first-call success over
+	// harness gatekeeping).
+	selCtx := WithSessionModelSelection(ctx, PrimaryModelState{ModelID: known.ID, Provider: known.Provider, Model: known.Model})
+	if pin, err := subagentModelOverrideForRef(selCtx, fix.fac, "", "xhigh"); err != nil ||
+		pin.ModelID != known.ID || pin.Model != known.Model || pin.Effort != "xhigh" || pin.Entry == nil {
+		t.Fatalf("effort without model = (%+v, %v), want the current row pinned at xhigh", pin, err)
+	}
+	// No current model to attach the level to is no refusal either: the
+	// dispatch stays on its ordinary chain.
+	if pin, err := subagentModelOverrideForRef(ctx, fix.fac, "", "high"); err != nil || strings.TrimSpace(pin.Model) != "" {
+		t.Fatalf("effort with no current model = (%+v, %v), want no pin and no refusal", pin, err)
 	}
 }
 
@@ -10102,5 +10115,110 @@ func TestSubagentDispatchToolsCarryReasoningEffort(t *testing.T) {
 		if _, err := tl.Handle(ctx, input); err == nil || !strings.Contains(err.Error(), "does not offer thinking level") {
 			t.Fatalf("%s must refuse the non-member level before dispatching: %v", name, err)
 		}
+	}
+}
+
+// reasoning_effort without model is a level for the conversation's own model
+// (owner 2026-11-20): all three dispatch tools run it on the row the primary
+// agent runs on, first call succeeds, and the level is applied as given — even
+// outside the row's list, and even when the row is switch-off, because the
+// conversation's own model is the user's own choice.
+func TestSubagentDispatchToolsEffortAloneRunsOnTheConversationsModel(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	current := fix.insertModelRow(t, state.LLMModel{
+		Provider: "deepseek", Model: "deepseek-flash", BaseURL: "https://cur.test/v1",
+		APIPath: "/chat/completions", APIKey: "key-cur", SubagentAllowed: false,
+		ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+		CapEfforts: []string{"low", "medium"},
+	})
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := RegisterSubagentTool(a, fix.fac); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	ctx := WithSessionModelSelection(dispatchTestCtx(), PrimaryModelState{ModelID: current.ID, Provider: current.Provider, Model: current.Model})
+	inputs := map[string]string{
+		"subagent_run":    `{"title":"t","task":"do it","subagent_type":"general-purpose","reasoning_effort":"high"}`,
+		"subagent_send":   `{"title":"t","task":"do it","subagent_type":"general-purpose","reasoning_effort":"high"}`,
+		"subagent_fanout": `{"max_parallel":1,"tasks":[{"title":"t","prompt":"do it","subagent_type":"general-purpose","reasoning_effort":"high"}]}`,
+	}
+	for name, input := range inputs {
+		tl, ok := aToolByName(a, name)
+		if !ok {
+			t.Fatalf("%s not registered", name)
+		}
+		out, err := tl.Handle(ctx, input)
+		if err != nil {
+			t.Fatalf("%s with reasoning_effort alone: %v", name, err)
+		}
+		if text, _ := out.(string); strings.Contains(text, `"ok":false`) {
+			t.Fatalf("%s result = %s", name, text)
+		}
+	}
+	// subagent_send runs async: its pin lands when the execution starts.
+	deadline := time.Now().Add(5 * time.Second)
+	var pins []SubagentModelOverride
+	for time.Now().Before(deadline) {
+		if pins = fix.capture.pinsOf(); len(pins) >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(pins) != 3 {
+		t.Fatalf("captured pins = %d, want 3", len(pins))
+	}
+	for _, pin := range pins {
+		if pin.ModelID != current.ID || pin.Provider != current.Provider || pin.Model != current.Model || pin.Effort != "high" {
+			t.Fatalf("pin = %+v, want the conversation's row at high", pin)
+		}
+		if pin.Entry == nil {
+			t.Fatalf("pin = %+v, want the live row entry", pin)
+		}
+	}
+	records, err := agent.ListHistory(fix.fac.subagentScopeRoot(), agent.Query{SessionID: "session-1", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("persisted records = %d, want 3", len(records))
+	}
+	for _, rec := range records {
+		if rec.ModelID != current.ID || rec.Model != current.Model || rec.ReasoningEffort != "high" {
+			t.Fatalf("record = %+v, want the conversation's row at high", rec)
+		}
+		if !rec.ModelAuthorizedAsCurrent || !rec.ModelLive {
+			t.Fatalf("record = %+v, want the live row admitted as the conversation's own", rec)
+		}
+	}
+}
+
+// With no selection on the dispatching context, the session's own stored row
+// answers: a level alone still lands on the conversation's model, read live
+// and admitted past the switch as the user's own choice.
+func TestSubagentEffortAloneFallsBackToTheStoredSessionRow(t *testing.T) {
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	current := fix.insertModelRow(t, state.LLMModel{
+		ID: "llm-stored-current", Provider: "deepseek", Model: "deepseek-flash",
+		BaseURL: "https://cur.test/v1", APIPath: "/chat/completions", APIKey: "key-cur",
+		SubagentAllowed: false, ParamsJSON: `{"reasoning":{"effort":"low"}}`,
+		CapEfforts: []string{"low", "medium"},
+	})
+	cfg := subagentsEnabledConfig()
+	cfg.LLMModels = modelRowsForTest(appcfg.AgentLLMProviderConfig{
+		Provider: current.Provider, Model: current.Model, BaseURL: current.BaseURL,
+		APIPath: current.APIPath, APIKey: current.APIKey,
+	})
+	cfg.LLMModels[0].ID = current.ID
+	fix.fac.Owner.Deps.WithConfig(cfg)
+	if stored, err := fix.fac.Owner.Deps.SessionStore.SaveSessionModelSelection(context.Background(), "session-1", state.SessionModelSelection{
+		ModelID: current.ID, Provider: current.Provider, Model: current.Model, Effort: "low",
+	}); err != nil || !stored {
+		t.Fatalf("save session selection: stored=%v err=%v", stored, err)
+	}
+	pin, err := subagentModelOverrideForRef(dispatchTestCtx(), fix.fac, "", "high")
+	if err != nil || pin.ModelID != current.ID || pin.Model != current.Model || pin.Effort != "high" || pin.Entry == nil || !pin.AuthorizedAsCurrent {
+		t.Fatalf("effort alone on the stored row = (%+v, %v), want the current row at high", pin, err)
 	}
 }
