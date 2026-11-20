@@ -830,6 +830,21 @@ export interface ReadableAnswer {
   note?: string
   /** A peer_send answer: the message that went out, and where it went. */
   send?: ReadablePeerSend
+  /** A list_usable_models answer's roster, in the answer's own order. */
+  models?: ReadableModel[]
+}
+
+/**
+ * One row of a list_usable_models roster (pkg/tool ReadableModel). The wire id
+ * is absent on purpose — a surface never shows it (owner 2026-11-20).
+ */
+export interface ReadableModel {
+  provider: string
+  model: string
+  efforts?: string[]
+  defaultEffort?: string
+  current?: boolean
+  handedOff?: boolean
 }
 
 /**
@@ -926,6 +941,23 @@ export function readableAnswerFrom(raw: unknown): ReadableAnswer | undefined {
       }]
     })
     : []
+  const models = Array.isArray(answer.models)
+    ? answer.models.flatMap((item): ReadableModel[] => {
+      if (!item || typeof item !== 'object') return []
+      const row = item as Record<string, unknown>
+      const provider = String(row.provider ?? '').trim()
+      const model = String(row.model ?? '').trim()
+      if (!provider && !model) return []
+      return [{
+        provider,
+        model,
+        ...(Array.isArray(row.efforts) ? { efforts: row.efforts.filter((e): e is string => typeof e === 'string') } : {}),
+        ...(stringOrUndefined(row.defaultEffort) ? { defaultEffort: String(row.defaultEffort) } : {}),
+        ...(row.current === true ? { current: true } : {}),
+        ...(row.handedOff === true ? { handedOff: true } : {}),
+      }]
+    })
+    : []
   const note = String(answer.note ?? '').trim()
   const rawSend = answer.send && typeof answer.send === 'object' && !Array.isArray(answer.send)
     ? answer.send as Record<string, unknown>
@@ -943,11 +975,12 @@ export function readableAnswerFrom(raw: unknown): ReadableAnswer | undefined {
     : undefined
   const send = sendFields && Object.keys(sendFields).length > 0 ? sendFields : undefined
   const text = String(answer.text ?? '').trim()
-  if (rows.length === 0 && !text && peers.length === 0 && !note && !send) return undefined
+  if (rows.length === 0 && !text && peers.length === 0 && models.length === 0 && !note && !send) return undefined
   return {
     rows,
     ...(text ? { text } : {}),
     ...(peers.length ? { peers } : {}),
+    ...(models.length ? { models } : {}),
     ...(note ? { note } : {}),
     ...(send ? { send } : {}),
   }
