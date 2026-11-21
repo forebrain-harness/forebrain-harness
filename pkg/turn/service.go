@@ -60,6 +60,9 @@ type Service struct {
 	chatgptModels      ChatGPTModelsSource
 	opencodeModels     OpenCodeModelsSource
 	autoContinue       *autoContinuer
+	// suggestions offers the idle composer's next-step ghost text after a turn
+	// ends (suggestion.go). Nil leaves every turn without an offer.
+	suggestions *suggester
 	// paidTier is the choice a spent free tier offers (paid_tier.go): the
 	// sibling of auto-continue, holding the offers waiting for the reader's
 	// answer per conversation.

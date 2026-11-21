@@ -72,6 +72,13 @@ const (
 	RunEventAutoContinueScheduled = "auto_continue_scheduled"
 	RunEventAutoContinueStarted   = "auto_continue_started"
 	RunEventAutoContinueCancelled = "auto_continue_cancelled"
+	// The prompt-suggestion lifecycle: after a turn ends the engine predicts the
+	// user's next message and offers it as ghost text in an idle, empty composer.
+	// Suggested carries the prediction. It is push-only by design: the ghost is
+	// live state about an idle composer, so a page opened later must not replay a
+	// stale suggestion. The unused-offer backoff throttles generation silently —
+	// it announces nothing.
+	RunEventPromptSuggested = "prompt_suggested"
 	// RunEventPaidTierOffered announces a choice where the other two announce a
 	// wait: a request the provider refused because a free tier's allowance is
 	// spent, on a product that sells a paid twin of the same model row. The
@@ -135,7 +142,7 @@ const (
 // pushed to whoever is watching and never stored.
 func IsPushOnlyStreamEvent(eventType string) bool {
 	switch eventType {
-	case RunEventAssistantDelta, RunEventAssistantDone, RunEventReasoningDelta, RunEventReasoningDone, RunEventToolOutputDelta, RunEventTransportRetry, RunEventFirstToken:
+	case RunEventAssistantDelta, RunEventAssistantDone, RunEventReasoningDelta, RunEventReasoningDone, RunEventToolOutputDelta, RunEventTransportRetry, RunEventFirstToken, RunEventPromptSuggested:
 		return true
 	}
 	return false
@@ -343,6 +350,13 @@ type AutoContinueScheduledPayload struct {
 	// empty for the conversation's own. It is what routes the notice to that
 	// subagent's view rather than the primary one.
 	AgentID string `json:"agent_id,omitempty"`
+}
+
+// PromptSuggestedPayload carries the engine's prediction of the user's next
+// message, offered as ghost text in an idle, empty composer. Suggestion is the
+// sanitized, filter-passing text; empty means nothing is offered.
+type PromptSuggestedPayload struct {
+	Suggestion string `json:"suggestion"`
 }
 
 // AutoContinueStartedPayload marks the wait running out: the continuation turn

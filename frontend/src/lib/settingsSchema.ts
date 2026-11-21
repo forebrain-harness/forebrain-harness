@@ -294,6 +294,12 @@ export const SETTINGS_FORMS: Record<string, SettingsGroup[]> = {
         }),
       ],
     },
+    {
+      id: 'ps',
+      titleKey: 'settings.groupPromptSuggestions',
+      titleLabel: true,
+      fields: [field('features.prompt_suggestions', 'bool', { def: true })],
+    },
   ],
   memory: [
     {

@@ -4777,6 +4777,118 @@ describe('timeline block key', () => {
  * after the binding change it, and the replay that overlaps the history rows
  * changes nothing — it may describe a wait a restarted gateway no longer has.
  */
+// The idle composer's next-step ghost (plan 344) is the conversation's own live
+// fact, push-only: a prediction sets it, a new turn or leaving the session drops
+// it, and a replayed copy on bind says nothing. Accept and dismiss hand the same
+// choice the terminal's key presses give to the gateway.
+describe('next-step suggestion ghost (push-only)', () => {
+  beforeAll(() => setLocale('en'))
+  afterAll(() => setLocale('en'))
+
+  function observerEvent(socket: FakeChatWebSocket, id: string, sequence: number, type: string, payload: Record<string, unknown>) {
+    socket.message({
+      op: 'run_event',
+      data: { id, sequence, type, run_id: 'ended-run', session_id: 's1', created_at: '2026-11-21T08:00:00Z', payload },
+    })
+  }
+
+  async function mountStream(events: unknown[] = []) {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = [
+      vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([]),
+      vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' }),
+      vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+        sessionId: 's1', nextCursor: 0, highWater: events.length, hasMore: false, schemaVersion: 1, events,
+      } as never),
+      vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
+    ]
+    const stream = useChatStream()
+    stream.switchToSession('s1')
+    await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+    const observer = FakeChatWebSocket.instances[0]!
+    observer.open()
+    observer.message({ op: 'session_bound', session_id: 's1', data: { cursor: 0, high_water: events.length } })
+    const restore = () => {
+      for (const spy of spies) spy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+    return { stream, observer, restore }
+  }
+
+  it('shows a live prediction, ignores its replay, and clears it on a new turn', async () => {
+    const { stream, observer, restore } = await mountStream()
+    try {
+      expect(stream.suggestion.value).toBeNull()
+      observerEvent(observer, 'evt-sugg', 6, 'prompt_suggested', { suggestion: 'run the tests' })
+      expect(stream.suggestion.value).toBe('run the tests')
+      // The same event arriving again draws nothing more.
+      observerEvent(observer, 'evt-sugg', 6, 'prompt_suggested', { suggestion: 'run the tests' })
+      expect(stream.suggestion.value).toBe('run the tests')
+      // A new turn supersedes the idle ghost: a throttled engine that generates
+      // nothing this turn must not leave a stale prediction showing.
+      observerEvent(observer, 'evt-start', 7, 'turn_started', {})
+      expect(stream.suggestion.value).toBeNull()
+      // An empty prediction clears the ghost rather than showing a blank one.
+      observerEvent(observer, 'evt-sugg-2', 8, 'prompt_suggested', { suggestion: '   ' })
+      expect(stream.suggestion.value).toBeNull()
+    } finally {
+      restore()
+    }
+  })
+
+  it('never replays a prediction on bind: only a live one sets the ghost', async () => {
+    const { stream, observer, restore } = await mountStream([
+      { id: 'evt-old', sequence: 1, schemaVersion: 1, sessionId: 's1', runId: 'old-run', type: 'prompt_suggested', createdAt: '2026-11-21T07:00:00Z', payload: { suggestion: 'stale ghost' } },
+    ])
+    try {
+      expect(stream.suggestion.value).toBeNull()
+      observerEvent(observer, 'evt-live', 2, 'prompt_suggested', { suggestion: 'run the tests' })
+      expect(stream.suggestion.value).toBe('run the tests')
+    } finally {
+      restore()
+    }
+  })
+
+  it('accept and dismiss hand the choice to the gateway and drop the ghost', async () => {
+    const { stream, observer, restore } = await mountStream()
+    const suggSpy = vi.spyOn(forebrainApi, 'promptSuggestion').mockResolvedValue({ session_id: 's1' })
+    try {
+      // Nothing showing: neither answer fires a request.
+      expect(stream.acceptSuggestion()).toBe(false)
+      expect(stream.dismissSuggestion()).toBe(false)
+      expect(suggSpy).not.toHaveBeenCalled()
+
+      observerEvent(observer, 'evt-sugg', 6, 'prompt_suggested', { suggestion: 'run the tests' })
+      expect(stream.acceptSuggestion()).toBe(true)
+      expect(stream.suggestion.value).toBeNull()
+      expect(suggSpy).toHaveBeenCalledWith('s1', 'accept')
+
+      observerEvent(observer, 'evt-sugg-2', 7, 'prompt_suggested', { suggestion: 'run the tests' })
+      expect(stream.dismissSuggestion()).toBe(true)
+      expect(stream.suggestion.value).toBeNull()
+      expect(suggSpy).toHaveBeenCalledWith('s1', 'dismiss')
+      expect(suggSpy).toHaveBeenCalledTimes(2)
+    } finally {
+      suggSpy.mockRestore()
+      restore()
+    }
+  })
+
+  it('clears the ghost when the page leaves the session', async () => {
+    const { stream, observer, restore } = await mountStream()
+    try {
+      observerEvent(observer, 'evt-sugg', 6, 'prompt_suggested', { suggestion: 'run the tests' })
+      expect(stream.suggestion.value).toBe('run the tests')
+      stream.resetForNewChat()
+      expect(stream.suggestion.value).toBeNull()
+    } finally {
+      restore()
+    }
+  })
+})
+
 describe('auto-continue after a usage limit', () => {
   beforeAll(() => setLocale('en'))
   afterAll(() => setLocale('en'))

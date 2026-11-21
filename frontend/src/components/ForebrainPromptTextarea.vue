@@ -41,6 +41,13 @@ const props = defineProps<{
   botsFetchDone?: boolean
   duringRun?: boolean
   /**
+   * The idle composer's next-step ghost (plan 344): a prediction of the reader's
+   * next message, drawn as the placeholder while the draft is empty and no run is
+   * in flight. Tab / Right / End takes it into the draft; Enter on an empty draft
+   * sends it directly. The text is the model's own output, never a locale string.
+   */
+  suggestion?: string | null
+  /**
    * The composer's queue preview shows a message. Recalling the newest one
    * (Shift+← or Alt+↑) works whenever one is shown: a subagent's view keeps
    * its own queue while the conversation is idle, and a page reloaded mid-run
@@ -82,6 +89,10 @@ const emit = defineEmits<{
   // waiting on a usage limit, as they do in the terminal.
   (e: 'typed'): void
   (e: 'escape'): void
+  // The reader took the idle composer's next-step ghost into the draft (Tab /
+  // Right / End). The host tells the engine, which clears the unused-offer
+  // backoff at accept time, as the terminal's key press does (plan 344).
+  (e: 'suggestion-accepted'): void
   // Files the user just attached (picked, dropped or pasted), handed up for
   // the "save to" dialog when attachSave is on. They are already gone from the
   // composer's own list.
@@ -158,6 +169,14 @@ const modelValue = computed({
   get: () => textInput.value,
   set: (val) => setTextInput(String(val)),
 })
+
+// The ghost rides the placeholder (plan 344): it shows only while the draft is
+// empty and no run is in flight, so a prediction never overlays real input and
+// never appears mid-run. The moment the reader types, the draft is non-empty and
+// the ordinary placeholder returns.
+const effectivePlaceholder = computed(() =>
+  textInput.value === '' && !props.duringRun && props.suggestion ? props.suggestion : props.placeholder,
+)
 
 /**
  * Inserts a workspace path picked outside the composer (the file tree). It
@@ -723,9 +742,28 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
+  // The idle composer's next-step ghost (plan 344): with an empty draft and a
+  // suggestion showing, Tab / Right / End takes it into the draft — never sends.
+  // The menus above already returned when open, so this only fires on a bare idle
+  // composer. The host tells the engine to clear the backoff at accept time.
+  if (!props.duringRun && textInput.value === '' && props.suggestion &&
+    (e.key === 'Tab' || e.key === 'ArrowRight' || e.key === 'End')) {
+    e.preventDefault()
+    setTextInput(props.suggestion)
+    emit('suggestion-accepted')
+    return
+  }
+
   if (e.key === 'Enter') {
     if (isComposing.value || e.shiftKey) return
     e.preventDefault()
+    // Enter on an empty draft with a ghost showing sends the prediction directly
+    // (CC's enter-on-empty): fill it first so the submit carries the offered text,
+    // which the engine then reads as an acceptance. submitForm reads the ref after
+    // its files await, by which time the synchronous setTextInput has landed.
+    if (!props.duringRun && textInput.value === '' && props.suggestion) {
+      setTextInput(props.suggestion)
+    }
     submitForm()
   }
 
@@ -818,7 +856,7 @@ function onRootRowClick(e: MouseEvent) {
     </ul>
     <div class="relative">
     <textarea ref="textareaRef" v-model="modelValue" data-slot="input-group-control" name="message"
-      :placeholder="placeholder" :disabled="disabled" :class="cn(
+      :placeholder="effectivePlaceholder" :disabled="disabled" :class="cn(
         'max-h-48 min-h-11 w-full min-w-0 flex-1 resize-none overflow-y-auto rounded-none border-0 bg-transparent px-3 py-3 align-top text-base leading-normal shadow-none !outline-none focus:!outline-none focus-visible:!outline-none focus:!ring-0 focus-visible:!ring-0 dark:bg-transparent md:text-sm placeholder:text-muted-foreground [field-sizing:fixed]',
         props.class,
       )

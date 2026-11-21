@@ -2971,6 +2971,12 @@ export function useChatStream() {
   // model row the product also sells as a paid twin. The runtime holds it (the
   // terminal answers the same one), so the page only shows and answers it.
   const paidTierOffer = ref<PaidTierOffer | null>(null)
+  // suggestion is the idle composer's next-step ghost (plan 344): the runtime's
+  // prediction of the reader's next message, push-only live state. It is never
+  // replayed on bind and never persisted — a page opened after a turn ended sees
+  // no stale offer. The conversation's own composer shows it; subagent runs are
+  // suppressed engine-side, so there is no per-agent map.
+  const suggestion = ref<string | null>(null)
   const subagentAutoContinue = ref<Record<string, AutoContinueState>>({})
   // The peer facts (plan 200 §3): the messages waiting for this conversation's
   // person, and the drawer's view of the machine — the files being edited under
@@ -3710,6 +3716,19 @@ export function useChatStream() {
   }
 
   /**
+   * applyPromptSuggestedEvent shows the idle composer's next-step ghost (plan
+   * 344). The event is push-only: it carries no sequence and is never replayed,
+   * so a historical copy (a reconnect's overlap) says nothing — only a live
+   * prediction sets the ghost. An empty suggestion clears it.
+   */
+  function applyPromptSuggestedEvent(evt: ForebrainRunEvent, historical: boolean) {
+    if (historical) return
+    const payload = (evt.payload ?? {}) as Record<string, unknown>
+    const text = String(payload.suggestion ?? '').trim()
+    suggestion.value = text || null
+  }
+
+  /**
    * applyBoundAutoContinues restores what a freshly bound page should show:
    * the conversation's own wait and each subagent's, from the binding's list
    * (falling back to the single auto_continue an older server sends).
@@ -3882,6 +3901,12 @@ export function useChatStream() {
     if (sid && sid !== String(sessionId.value ?? '').trim()) return
     if (AUTO_CONTINUE_EVENT_TYPES.has(String(evt.type))) {
       if (rememberObservedEvent(evt)) applyAutoContinueEvent(evt, historical)
+      return
+    }
+    // The next-step ghost is the conversation's own live fact, filed under the
+    // run that ended (plan 344). Push-only: read here, never from the timeline.
+    if (String(evt.type) === 'prompt_suggested') {
+      if (rememberObservedEvent(evt)) applyPromptSuggestedEvent(evt, historical)
       return
     }
     // A refused turn whose row has a paid twin: live state of the conversation,
@@ -4174,6 +4199,7 @@ export function useChatStream() {
 	  observerHighWater = 0
 	  autoContinueSequence = 0
 	  autoContinue.value = null
+	  suggestion.value = null
 	  paidTierOffer.value = null
 	  subagentAutoContinue.value = {}
 	  heldPeers.value = []
@@ -5647,6 +5673,10 @@ export function useChatStream() {
     switch (evt.type) {
       case 'turn_started':
         setError(null)
+        // A new turn supersedes the idle ghost (plan 344): clear it so a throttled
+        // engine that generates nothing this turn cannot leave a stale prediction
+        // showing once the run ends.
+        suggestion.value = null
         activeRunId = String(evt.runId ?? '').trim() || null
         if (activeRunId) void flushHeldIntoRun(activeRunId)
 		if (activeRunId) {
@@ -6136,6 +6166,30 @@ export function useChatStream() {
     return true
   }
 
+  /**
+   * acceptSuggestion records the reader taking the ghost into the draft (Tab /
+   * Right / End): the ghost clears at once and the engine drops the unused-offer
+   * backoff, so every-turn generation resumes — the terminal's accept path (plan
+   * 344). The draft itself is filled by the composer before this is called.
+   */
+  function acceptSuggestion(): boolean {
+    if (!suggestion.value) return false
+    suggestion.value = null
+    const sid = String(sessionId.value ?? '').trim()
+    if (sid) void forebrainApi.promptSuggestion(sid, 'accept').catch(() => { /* the offer may already have ended */ })
+    return true
+  }
+
+  /** dismissSuggestion drops the ghost because the reader started typing their
+   *  own message; generation stays off until the next turn boundary. */
+  function dismissSuggestion(): boolean {
+    if (!suggestion.value) return false
+    suggestion.value = null
+    const sid = String(sessionId.value ?? '').trim()
+    if (sid) void forebrainApi.promptSuggestion(sid, 'dismiss').catch(() => { /* the offer may already have ended */ })
+    return true
+  }
+
   /** autoContinueForView is the wait to show in one view: "" the conversation's. */
   function autoContinueForView(view: string): AutoContinueState | null {
     const key = String(view ?? '').trim()
@@ -6605,6 +6659,10 @@ export function useChatStream() {
 			  }
               if (AUTO_CONTINUE_EVENT_TYPES.has(String(runEvent.type))) {
                 if (rememberObservedEvent(runEvent)) applyAutoContinueEvent(runEvent, false)
+                return
+              }
+              if (String(runEvent.type) === 'prompt_suggested') {
+                if (rememberObservedEvent(runEvent)) applyPromptSuggestedEvent(runEvent, false)
                 return
               }
               if (String(runEvent.type) === 'heartbeat_fired') {
@@ -7184,6 +7242,9 @@ export function useChatStream() {
     paidTierOffer,
     usePaidTier,
     dismissPaidTierOffer,
+    suggestion,
+    acceptSuggestion,
+    dismissSuggestion,
     heldPeers,
     peerDirectory,
     peerDirectoryPage,

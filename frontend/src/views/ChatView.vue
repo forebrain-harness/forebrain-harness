@@ -559,12 +559,14 @@
                 <PromptInputBody>
                   <ForebrainPromptTextarea ref="promptRef" :placeholder="composerPlaceholder" :bots="availableBots"
                     :bots-fetch-done="botsFetchDone" :during-run="isStreaming" :queue-visible="composerQueueVisible"
+                    :suggestion="suggestion"
                     :disabled="composerLocked" :scope="workbenchScope" attach-save
                     @files-picked="onFilesPicked"
                     @queue-follow-up="markNextSubmissionAsQueued"
                     @edit-last-queued="restoreLastQueuedMessage"
                     @interrupt-run="interruptAndSendPendingSteers"
-                    @typed="cancelAutoContinue('')"
+                    @suggestion-accepted="acceptSuggestion"
+                    @typed="onComposerTyped"
                     @escape="cancelAutoContinue('')" />
                 </PromptInputBody>
                 <PromptInputFooter class="!px-2 !pb-2 flex-wrap">
@@ -1674,6 +1676,9 @@ const {
   paidTierOffer,
   usePaidTier,
   dismissPaidTierOffer,
+  suggestion,
+  acceptSuggestion,
+  dismissSuggestion,
   heldPeers,
   peerDirectory,
   peerDirectoryPage,
@@ -2661,6 +2666,15 @@ const submitStatus = computed(() => (isStreaming.value ? 'streaming' : 'ready'))
 const composerPlaceholder = computed(() => (
   composerLocked.value ? t('chat.placeholderLocked') : t('chat.placeholder')
 ))
+
+// Typing in the idle composer stops a continuation waiting on a usage limit and
+// dismisses the next-step ghost (plan 344): once the reader writes their own
+// message, the prediction is gone and does not return if they clear the draft
+// again. Both calls no-op when there is nothing to clear.
+function onComposerTyped() {
+  cancelAutoContinue('')
+  dismissSuggestion()
+}
 
 // One button, two jobs: it submits a turn, or it stops the one running — so its
 // name has to say which of the two it is about to do.

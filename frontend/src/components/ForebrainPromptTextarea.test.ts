@@ -333,4 +333,61 @@ describe('ForebrainPromptTextarea', () => {
       search.mockRestore()
     }
   })
+
+  // The idle composer's next-step ghost (plan 344): with an empty draft and a
+  // prediction showing, Tab / Right / End takes it into the draft without sending,
+  // Enter sends it directly, and a non-empty draft or a run in flight ignores it.
+  describe('next-step suggestion ghost', () => {
+    it('shows the prediction as the placeholder only while idle and empty', async () => {
+      const { composer, context } = mountComposer({ suggestion: 'run the tests', placeholder: 'Type a message' })
+      await nextTick()
+      expect(composer.find('textarea').attributes('placeholder')).toBe('run the tests')
+      context().setTextInput('x')
+      await nextTick()
+      expect(composer.find('textarea').attributes('placeholder')).toBe('Type a message')
+    })
+
+    it('hides the prediction while a run is in flight', async () => {
+      const { composer } = mountComposer({ suggestion: 'run the tests', placeholder: 'Type a message', duringRun: true })
+      await nextTick()
+      expect(composer.find('textarea').attributes('placeholder')).toBe('Type a message')
+    })
+
+    it.each(['Tab', 'ArrowRight', 'End'])('takes the ghost into the draft on %s without sending', async (key) => {
+      const { wrapper, composer, context } = mountComposer({ suggestion: 'run the tests' })
+      await composer.find('textarea').trigger('keydown', { key })
+      await nextTick()
+      expect(context().textInput.value).toBe('run the tests')
+      expect(composer.emitted('suggestion-accepted')).toHaveLength(1)
+      expect(wrapper.emitted('submit')).toBeUndefined()
+    })
+
+    it('sends the ghost directly on Enter with an empty draft', async () => {
+      const { wrapper, composer } = mountComposer({ suggestion: 'run the tests' })
+      await composer.find('textarea').trigger('keydown', { key: 'Enter' })
+      await vi.waitFor(() => expect(wrapper.emitted('submit')).toHaveLength(1))
+      expect(wrapper.emitted('submit')![0][0]).toMatchObject({ text: 'run the tests' })
+    })
+
+    it('leaves a non-empty draft alone: Enter sends the draft, Tab does not accept', async () => {
+      const { wrapper, composer, context } = mountComposer({ suggestion: 'run the tests' })
+      context().setTextInput('my own message')
+      await nextTick()
+      await composer.find('textarea').trigger('keydown', { key: 'Tab' })
+      await nextTick()
+      expect(context().textInput.value).toBe('my own message')
+      expect(composer.emitted('suggestion-accepted')).toBeUndefined()
+      await composer.find('textarea').trigger('keydown', { key: 'Enter' })
+      await vi.waitFor(() => expect(wrapper.emitted('submit')).toHaveLength(1))
+      expect(wrapper.emitted('submit')![0][0]).toMatchObject({ text: 'my own message' })
+    })
+
+    it('does not accept the ghost during a run', async () => {
+      const { composer, context } = mountComposer({ suggestion: 'run the tests', duringRun: true })
+      await composer.find('textarea').trigger('keydown', { key: 'ArrowRight' })
+      await nextTick()
+      expect(context().textInput.value).toBe('')
+      expect(composer.emitted('suggestion-accepted')).toBeUndefined()
+    })
+  })
 })

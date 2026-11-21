@@ -46,6 +46,7 @@ export type ForebrainRunEventType =
   | 'auto_continue_scheduled'
   | 'auto_continue_started'
   | 'auto_continue_cancelled'
+  | 'prompt_suggested'
   | 'heartbeat_fired'
   | 'transport_retry'
   | 'response_notice'

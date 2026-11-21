@@ -591,6 +591,9 @@ const FORMS = {
       F(TE+'.default_tokenizer','默认分词器','text',{mono:true,def:'gpt-o200k',hint:'模型匹配不到分词器时用它'}),
       F(TE+'.tokenizers','按模型指定','pairs',{cols:['模型前缀','分词器或绝对路径'],ph:['glm-','glm-4'],add:'添加映射',hint:'按模型名前缀指定分词器'}),
     ],{}),
+    G('ps','下一步推荐','',[
+      F('features.prompt_suggestions','下一步推荐','bool',{def:true,hint:'输入框空闲且为空时，预测你下一条消息并以灰字显示；按 Tab 或右方向键填入草稿，确认后再发送'}),
+    ],{flat:true,titleLabel:true}),
   ],
   memory: [
     G('ms','记忆功能','',[

@@ -141,13 +141,18 @@ type Environment struct {
 	// LSP is the process-wide language-server pool; lspManager is the
 	// primary runner's view of it. Project runners get their own managers
 	// from the same pool (see RunnerPool).
-	LSP            *lsp.Pool
-	lspManager     *lsp.Manager
-	cronOnce       sync.Once
-	cron           *CronService
-	rulesHook      *assembly.PreHook
-	ctxHook        *assembly.Hook
-	OnConfigReload func(*appcfg.Root)
+	LSP        *lsp.Pool
+	lspManager *lsp.Manager
+	cronOnce   sync.Once
+	cron       *CronService
+	// suggestionBackoff is the install-wide prompt-suggestion backoff state
+	// (plan 344), built once on first use and shared by every surface this
+	// process serves, so the unused-offer streak is one install-wide fact.
+	suggestionBackoffOnce sync.Once
+	suggestionBackoff     *suggestionBackoffStore
+	rulesHook             *assembly.PreHook
+	ctxHook               *assembly.Hook
+	OnConfigReload        func(*appcfg.Root)
 	// OnSubagentExecution reports every subagent execution's start and end to
 	// the surface that opened the session, so it can arm the subagent's own
 	// auto-continue. Nil — a one-shot run, a channel with nobody to cancel a

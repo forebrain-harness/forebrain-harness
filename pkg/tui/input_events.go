@@ -51,12 +51,15 @@ const (
 type inputHotkey string
 
 const (
-	hotkeyInterrupt          inputHotkey = "interrupt"
-	hotkeyEscapeInterrupt    inputHotkey = "escape_interrupt"
-	hotkeyClearInput         inputHotkey = "clear_input"
-	hotkeyPasteImage         inputHotkey = "paste_image"
-	hotkeyBackground         inputHotkey = "background"
-	hotkeyQueueFollowUp      inputHotkey = "queue_follow_up"
+	hotkeyInterrupt       inputHotkey = "interrupt"
+	hotkeyEscapeInterrupt inputHotkey = "escape_interrupt"
+	hotkeyClearInput      inputHotkey = "clear_input"
+	hotkeyPasteImage      inputHotkey = "paste_image"
+	hotkeyBackground      inputHotkey = "background"
+	hotkeyQueueFollowUp   inputHotkey = "queue_follow_up"
+	// hotkeyAcceptSuggestion is Tab / Right on the empty idle composer while a
+	// next-step ghost is drawn: it fills the draft without sending (plan 344).
+	hotkeyAcceptSuggestion   inputHotkey = "accept_suggestion"
 	hotkeyEditLastQueued     inputHotkey = "edit_last_queued"
 	hotkeyOverlayUp          inputHotkey = "overlay_up"
 	hotkeyOverlayDown        inputHotkey = "overlay_down"
@@ -90,6 +93,12 @@ var slashOverlayActive atomic.Bool
 // mentionOverlayActive gates whether Up/Down route to overlay nav and Tab
 // routes to overlay-accept instead of queue-follow-up.
 var mentionOverlayActive atomic.Bool
+
+// suggestionAcceptActive reports whether the idle composer is drawing a
+// next-step ghost over an empty draft: Tab / Right then accept it into the
+// draft instead of their usual queue / cursor move. Set by run.go's
+// renderComposerWithState. Atomic for race-free reader access.
+var suggestionAcceptActive atomic.Bool
 
 // agentRosterActive reports whether the agent roster panel is currently
 // visible (a subagent is running). Gates whether a bare Down at an empty
@@ -1492,6 +1501,10 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 									ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyPanelRight}
 									continue
 								}
+								if suggestionAcceptActive.Load() && len(line) == 0 {
+									ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyAcceptSuggestion}
+									continue
+								}
 								if cursor < len(line) {
 									cursor++
 									ch <- inputEvent{kind: inputEventDraft, draft: string(line), cursor: cursor}
@@ -1676,6 +1689,10 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						}
 						if mentionOverlayActive.Load() {
 							ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyOverlayAccept}
+							continue
+						}
+						if suggestionAcceptActive.Load() && len(line) == 0 {
+							ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyAcceptSuggestion}
 							continue
 						}
 						ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyQueueFollowUp}

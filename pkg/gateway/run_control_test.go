@@ -3038,6 +3038,81 @@ func TestPaidTierRESTOffersTakesAndDismisses(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code, "another agent's session is not this page's to answer")
 }
 
+// suggestionBackoffStub lets the REST face's accept be seen reaching the engine:
+// Accept clears the install-wide unused-offer streak, Dismiss leaves it standing.
+type suggestionBackoffStub struct {
+	mu     sync.Mutex
+	streak int
+}
+
+func (s *suggestionBackoffStub) Streak() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streak
+}
+func (s *suggestionBackoffStub) SetStreak(v int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.streak = v
+}
+func (s *suggestionBackoffStub) FirstStart() time.Time { return time.Time{} }
+
+func TestPromptSuggestionRESTAcceptsAndDismisses(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	backoff := &suggestionBackoffStub{streak: 20}
+	g.server.Core.SetPromptSuggestions(turn.PromptSuggestionConfig{
+		Generate: func(_ context.Context, _, _ string) (string, error) { return "run the tests", nil },
+		Enabled:  true,
+		Surfaces: []turn.Surface{turn.SurfaceWebChat},
+		Backoff:  backoff,
+	})
+	call := func(method, target string) (int, map[string]any) {
+		t.Helper()
+		req := httptest.NewRequest(method, target, nil)
+		rec := httptest.NewRecorder()
+		g.server.handlePromptSuggestion(rec, req)
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body
+	}
+
+	// Accept reaches the engine: the install-wide unused-offer streak clears at
+	// once, the way the terminal's Tab does (CC clears the backoff at accept time).
+	code, body := call(http.MethodPost, "/api/prompt-suggestion?session_id=session-ws&action=accept")
+	require.Equal(t, http.StatusOK, code, "%v", body)
+	require.Equal(t, true, body["accepted"])
+	require.Equal(t, "session-ws", body["session_id"])
+	require.Equal(t, 0, backoff.Streak(), "accept clears the unused-offer backoff")
+
+	// Dismiss is a different answer: it hides the ghost but is not an ignore, so
+	// the streak standing is left untouched.
+	backoff.SetStreak(20)
+	code, body = call(http.MethodPost, "/api/prompt-suggestion?session_id=session-ws&action=dismiss")
+	require.Equal(t, http.StatusOK, code, "%v", body)
+	require.Equal(t, true, body["dismissed"])
+	require.Equal(t, 20, backoff.Streak(), "dismiss is not an ignore: the streak stands")
+
+	// The face validates its inputs before touching the engine.
+	code, _ = call(http.MethodPost, "/api/prompt-suggestion?session_id=session-ws&action=bogus")
+	require.Equal(t, http.StatusBadRequest, code)
+	code, _ = call(http.MethodPost, "/api/prompt-suggestion?action=accept")
+	require.Equal(t, http.StatusBadRequest, code, "a message without its session is refused")
+	code, _ = call(http.MethodGet, "/api/prompt-suggestion?session_id=session-ws&action=accept")
+	require.Equal(t, http.StatusMethodNotAllowed, code, "the ghost is push-only: there is no GET")
+	code, _ = call(http.MethodPost, "/api/prompt-suggestion?session_id=someone-else&action=accept")
+	require.Equal(t, http.StatusNotFound, code, "another agent's session is not this page's to answer")
+
+	// A gateway with no engine still answers the face rather than panicking.
+	bare := &Server{Sessions: g.sessions}
+	req := httptest.NewRequest(http.MethodPost, "/api/prompt-suggestion?session_id=session-ws&action=accept", nil)
+	rec := httptest.NewRecorder()
+	bare.handlePromptSuggestion(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, false, body["accepted"])
+	require.Equal(t, false, body["dismissed"])
+}
+
 func TestPaidTierSocketOpsAckTheChoice(t *testing.T) {
 	g := newAutoContinueGateway(t)
 	reset := time.Now().Add(time.Hour).Round(time.Second)

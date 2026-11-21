@@ -5093,6 +5093,23 @@ export const forebrainApi = {
       .then((res) => res.data)
   },
 
+  /**
+   * Answers the idle composer's next-step ghost (plan 344): `accept` records the
+   * reader taking it into the draft (Tab / Right / End), clearing the unused-offer
+   * backoff at once; `dismiss` records the reader typing their own message. The
+   * ghost is the runtime's, so this is the same answer the terminal's key press
+   * gives. Push-only live state — there is no pending offer to fetch on bind.
+   */
+  promptSuggestion(sessionId: string, action: 'accept' | 'dismiss') {
+    return api
+      .post<{ session_id: string; accepted?: boolean; dismissed?: boolean }>(
+        '/prompt-suggestion',
+        undefined,
+        { params: { session_id: sessionId, action } },
+      )
+      .then((res) => res.data)
+  },
+
   /** The offer a freshly loaded page should already be showing, if any. */
   pendingPaidTierOffer(sessionId: string) {
     return api

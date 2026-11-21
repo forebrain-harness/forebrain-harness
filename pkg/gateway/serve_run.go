@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -229,6 +230,16 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	// the session shows it and can cancel it.
 	core.SetAutoContinue(gw.autoContinueConfig())
 	defer core.StopAutoContinue()
+	// The web composer's next-step ghost uses the same engine state machine as
+	// the terminal's; the offer and its backoff notice reach every page through
+	// the run-event bus (push-only, never replayed).
+	core.SetPromptSuggestions(gw.promptSuggestionConfig())
+	h.OnConfigReload = func(next *config.Root) {
+		if next == nil {
+			return
+		}
+		core.SetPromptSuggestionsEnabled(next.EffectiveFeatures().PromptSuggestions)
+	}
 	// Every subagent execution reports its start and end here, so the engine
 	// arms that subagent's own auto-continue the way it arms the
 	// conversation's. The surface is declared at registration because the

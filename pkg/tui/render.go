@@ -4456,6 +4456,9 @@ type ComposerRenderState struct {
 	// OverlayRows is the @ mention menu under the composer.
 	OverlayRows  []OverlayRow
 	ArgumentHint string
+	// SuggestionGhost is the next-step offer drawn dim over an empty draft
+	// (plan 344); empty whenever the composer holds text or a menu owns the keys.
+	SuggestionGhost string
 	// ReadOnly draws the composer with no input box and no caret: the view it
 	// belongs to takes no typing. It is a subagent's view while that subagent
 	// is idle — the raw reader takes no edits there either (composerReadOnly).

@@ -929,6 +929,7 @@ func materializeOptionalDefaults(r *Root) {
 	features := r.EffectiveFeatures()
 	r.Features.Memories = BoolPtr(features.Memories)
 	r.Features.LSP = BoolPtr(features.LSP)
+	r.Features.PromptSuggestions = BoolPtr(features.PromptSuggestions)
 
 	lsp := r.EffectiveLSP()
 	r.LSP.Recommendations = BoolPtr(lsp.Recommendations)

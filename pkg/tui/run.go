@@ -346,6 +346,9 @@ func Run(ctx context.Context, opts Options) error {
 		if handleAutoContinueNotification(renderer, &state, m) {
 			return
 		}
+		if handlePromptSuggestionNotification(renderer, &state, m) {
+			return
+		}
 		if handlePaidTierNotification(renderer, &state, m) {
 			return
 		}
@@ -829,6 +832,10 @@ func Run(ctx context.Context, opts Options) error {
 			}
 		}
 		line := state.composer.Text
+		// enteredLine records that this pass's text came from an Enter keypress
+		// (the reader's line event), the only gesture the empty-composer ghost
+		// direct-send answers; the event itself is scoped to the wait below.
+		enteredLine := false
 		if state.holdComposer {
 			line = ""
 		} else {
@@ -970,6 +977,11 @@ func Run(ctx context.Context, opts Options) error {
 					// the reader is taking the conversation somewhere themselves.
 					if strings.TrimSpace(draft) != "" {
 						state.cancelAutoContinue(renderer)
+						// The same gesture dismisses the next-step ghost: the
+						// reader is writing their own next message, not taking
+						// the offered one, and clearing back to empty must not
+						// bring the offer back.
+						state.dismissSuggestion()
 					}
 					state.releaseRosterFocusForEdit(draft, cursor)
 					state.prepareHistoryDraft(ev, draft)
@@ -993,6 +1005,7 @@ func Run(ctx context.Context, opts Options) error {
 				}
 				line = ev.line
 				if ev.kind == inputEventLine {
+					enteredLine = true
 					state.enrichSubmittedInputHistory(ev)
 				}
 				if ev.kind == inputEventLine && state.handleAgentRosterLineInput(opts.Session, renderer, tracker, strings.TrimSpace(line)) {
@@ -1018,9 +1031,23 @@ func Run(ctx context.Context, opts Options) error {
 			}
 		}
 		if strings.TrimSpace(line) == "" && len(state.composer.Attachments) == 0 && len(state.composer.PendingPastes) == 0 {
-			state.resumeInputReadIfNeeded()
-			renderComposerWithState(renderer, &state)
-			continue
+			// Enter on an empty composer with a next-step ghost sends the ghost
+			// directly (the decided Claude Code alignment): the offer becomes
+			// this turn's text without a draft stop. Tab/Right still only fill
+			// the draft. With no ghost the empty Enter stays the no-op it was.
+			// A ghost naming the loop's own quit words is never direct-sent:
+			// quitting takes a deliberate draft and Enter, not one keystroke
+			// on an offer the reader may not have read.
+			ghost := state.suggestionGhost()
+			quitWord := strings.ToLower(strings.TrimSpace(ghost)) == "exit" || strings.ToLower(strings.TrimSpace(ghost)) == "quit"
+			if enteredLine && ghost != "" && !quitWord {
+				line = ghost
+				state.suggestion = ""
+			} else {
+				state.resumeInputReadIfNeeded()
+				renderComposerWithState(renderer, &state)
+				continue
+			}
 		}
 		// Enter on Active overlay substitutes the highlighted row from Visible
 		// for the "/" or "/prefix" the user typed and dispatches that command,
@@ -1805,6 +1832,13 @@ type streamState struct {
 	// It belongs to the conversation's own view: the allowance is the
 	// conversation's, not a subagent's.
 	paidTier *paidTierView
+	// suggestion is the engine's next-step offer for the idle composer, drawn
+	// as dim ghost text while the draft is empty. suggestionDismissed records
+	// the reader typing over it (clearing the draft back to empty does not
+	// restore it). The unused-offer backoff throttles generation in the engine
+	// and is never mirrored here: a throttled offer is simply quieter.
+	suggestion          string
+	suggestionDismissed bool
 	// peerDue are the peer messages waiting for a turn of this conversation,
 	// oldest first: the engine wakes the surface once per accepted message, and
 	// each is a turn of its own, so the idle loop runs them the way it runs a
@@ -3581,6 +3615,11 @@ func (s *streamState) resetComposerForActiveRunDraft() {
 	s.holdComposer = false
 	s.clearHistoryBrowse()
 	s.clearRestoredQueuedSubmission()
+	// The composer left the idle-empty state the ghost belongs to: whatever it
+	// now holds (a submission, a restored queue) is the reader's own text, so
+	// the offer must not survive it and reappear over an empty draft later.
+	s.suggestion = ""
+	s.suggestionDismissed = false
 }
 
 // resetComposerAfterQueue clears the composer once its text has left for a
@@ -3700,6 +3739,58 @@ func mergeComposerSubmissions(items []ComposerSubmission) ComposerSubmission {
 // to the legacy single-line composer render when the overlay is nil. Also
 // keeps the slashOverlayActive atomic gate in sync with the live overlay so
 // the raw reader routes arrow keys to overlay nav vs. history nav correctly.
+// suggestionGhost is the next-step offer the idle composer may draw: only the
+// conversation's own view, only an empty draft, only while no turn owns the
+// keys, and only until the reader types over it.
+func (s *streamState) suggestionGhost() string {
+	if s == nil || s.suggestion == "" || s.suggestionDismissed {
+		return ""
+	}
+	if s.composerView != "" || s.activeForeground != nil || s.agentRosterFocused {
+		return ""
+	}
+	if strings.TrimSpace(s.composer.DraftText) != "" {
+		return ""
+	}
+	return s.suggestion
+}
+
+// dismissSuggestion hides the offer for good because the reader started typing.
+func (s *streamState) dismissSuggestion() {
+	if s == nil {
+		return
+	}
+	s.suggestion = ""
+	s.suggestionDismissed = true
+	// The engine stops generating too, so a prediction already in flight cannot
+	// land and repaint the ghost the reader just typed over.
+	if c, ok := s.session.(suggestionController); ok {
+		c.DismissSuggestion(s.sessionID)
+	}
+}
+
+// acceptSuggestionIntoDraft fills the composer with the offer without sending
+// it: Tab / Right hand the reader a draft to edit, exactly as the ghost promises.
+func (s *streamState) acceptSuggestionIntoDraft(session Session, renderer *Renderer) bool {
+	ghost := s.suggestionGhost()
+	if ghost == "" {
+		return false
+	}
+	cursor := len([]rune(ghost))
+	s.composer.DraftText = ghost
+	s.composer.Cursor = composerCursorClamp(ghost, cursor)
+	s.composer.HandleDraftUpdate(ghost, session)
+	s.seedReader(ghost, cursor)
+	s.suggestion = ""
+	// Taking the offer is an acceptance: the engine clears its unused-offer
+	// backoff, so generation resumes every turn (CC's onTabOnEmpty).
+	if c, ok := s.session.(suggestionController); ok {
+		c.AcceptSuggestion(s.sessionID)
+	}
+	renderComposerWithState(renderer, s)
+	return true
+}
+
 func renderComposerWithState(renderer *Renderer, state *streamState) {
 	if renderer == nil || state == nil {
 		return
@@ -3743,6 +3834,13 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 		}
 	}
 	agentRosterStopArmed.Store(rosterStopArmed)
+	// The ghost and the accept gate live only in the bare idle composer: an open
+	// slash or mention menu owns Tab/Right for its own acceptance first.
+	ghost := state.suggestionGhost()
+	if (overlay != nil && overlay.Active) || (mentionOv != nil && mentionOv.Active) {
+		ghost = ""
+	}
+	suggestionAcceptActive.Store(ghost != "")
 	if overlay == nil || !overlay.Active {
 		var hint string
 		if overlay != nil && overlay.HintCommand != nil && showArgumentHint(state.composer.DraftText, overlay.HintCommand) {
@@ -3754,14 +3852,15 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 		}
 		cursor := state.composerDisplayCursor()
 		renderer.RenderComposerState(ComposerRenderState{
-			Text:          state.composerDisplay(),
-			Cursor:        &cursor,
-			PendingInput:  state.composerPendingInputPreview(),
-			AgentRoster:   state.agentRoster,
-			RosterFocused: state.agentRosterFocused,
-			ArgumentHint:  hint,
-			OverlayRows:   rows,
-			ReadOnly:      idle != "",
+			Text:            state.composerDisplay(),
+			Cursor:          &cursor,
+			PendingInput:    state.composerPendingInputPreview(),
+			AgentRoster:     state.agentRoster,
+			RosterFocused:   state.agentRosterFocused,
+			ArgumentHint:    hint,
+			SuggestionGhost: ghost,
+			OverlayRows:     rows,
+			ReadOnly:        idle != "",
 		})
 		return
 	}
@@ -5699,6 +5798,12 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		if skipper, ok := session.(mcpStartupSkipper); ok && skipper.SkipOptionalMCPStartup() {
 			return true
 		}
+		return true
+	case hotkeyAcceptSuggestion:
+		state.agentControlPrefixArmed = false
+		// Tab / Right on the empty idle composer take the ghost into the draft
+		// without sending it; with no ghost the key stays the no-op it was.
+		state.acceptSuggestionIntoDraft(session, renderer)
 		return true
 	case hotkeyQueueFollowUp:
 		state.agentControlPrefixArmed = false

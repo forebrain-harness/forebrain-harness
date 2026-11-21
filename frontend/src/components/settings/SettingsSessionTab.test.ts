@@ -6,10 +6,11 @@ import { setLocale } from '@/locales'
 import { mountSettingsTab } from './form/settingsTestHost'
 import SettingsSessionTab from './SettingsSessionTab.vue'
 
-/** The conversation's own settings (plan 191 §0.13, §4.3): five groups —
+/** The conversation's own settings (plan 191 §0.13, §4.3): six groups —
  * compaction, retries and timeouts, the context's headroom, the input
- * guardrails, and the token estimator. The handoff prompt's 恢复默认 only puts
- * the built-in text back on screen; saving is a separate click. */
+ * guardrails, the token estimator, and the next-step suggestions switch
+ * (plan 344). The handoff prompt's 恢复默认 only puts the built-in text back on
+ * screen; saving is a separate click. */
 describe('SettingsSessionTab', () => {
   const BUILTIN_PROMPT = 'You are performing a CONTEXT CHECKPOINT COMPACTION.'
 
@@ -51,7 +52,7 @@ describe('SettingsSessionTab', () => {
     return wrapper
   }
 
-  it('draws the prototype\'s five groups in its order', async () => {
+  it('draws the prototype\'s six groups in its order', async () => {
     const wrapper = await mountTab()
     expect(wrapper.findAll('.settings-group').map((group) => group.attributes('data-group'))).toEqual([
       'cp',
@@ -59,6 +60,7 @@ describe('SettingsSessionTab', () => {
       'ci',
       'gr',
       'te',
+      'ps',
     ])
     expect(wrapper.findAll('.settings-group h3').map((title) => title.text())).toEqual([
       '上下文压缩',
@@ -67,6 +69,9 @@ describe('SettingsSessionTab', () => {
       '护栏',
       '词元估算',
     ])
+    // The next-step switch is a lone title-label group (like memory): its name
+    // rides the row's bold label rather than a group heading.
+    expect(wrapper.find('[data-group="ps"] .settings-row__title').text()).toBe('下一步推荐')
   })
 
   it('shows the stored handoff prompt, restores the built-in one on screen only', async () => {

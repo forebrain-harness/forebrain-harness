@@ -4454,6 +4454,10 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 	displayText := composerText
 	if cs.ArgumentHint != "" {
 		displayText = composerText + "\x1b[38;5;245m " + cs.ArgumentHint + sharedBlockReset
+	} else if cs.SuggestionGhost != "" && strings.TrimSpace(composerText) == "" {
+		// The next-step ghost: dim placeholder text the reader can take with
+		// Tab/Right or send with Enter, never part of the draft itself.
+		displayText = "\x1b[38;5;245m" + cs.SuggestionGhost + sharedBlockReset
 	}
 	layout := layoutNormalComposer(displayText, cs.Cursor, termWidth)
 	rosterVisible := len(overlayRows) == 0 && agentRosterHasLiveSubagent(roster)

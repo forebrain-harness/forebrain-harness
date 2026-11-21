@@ -294,10 +294,11 @@ var configSectionSchemas = []configSectionSchema{
 	},
 	{
 		Name: "features", Title: "Feature switches", Tab: configTabSession,
-		Summary: "Enable memory and language intelligence.",
+		Summary: "Enable memory, language intelligence and next-step suggestions.",
 		Fields: []configField{
 			{Path: "memories", Label: "Memory", Kind: configFieldBool3, DefaultValue: "true", Hint: "Remember useful context across conversations."},
 			{Path: "lsp", Label: "Language servers", Kind: configFieldBool3, DefaultValue: "true", Hint: "Enable code intelligence and language diagnostics."},
+			{Path: "prompt_suggestions", Label: "Next-step suggestions", Kind: configFieldBool3, DefaultValue: "true", Hint: "Predict your next message as ghost text in the idle composer; Tab or Right takes it."},
 		},
 	},
 	{

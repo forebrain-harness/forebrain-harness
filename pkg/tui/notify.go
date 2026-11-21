@@ -1166,6 +1166,12 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		if msg, ok := autoContinueUIMessage(evt); ok {
 			s.notifyUIForSession(evt.SessionID, msg)
 		}
+	// The idle composer's next-step offer: a live-only fact, drawn by the
+	// composer rather than replayed. The unused-offer backoff is silent.
+	case event.RunEventPromptSuggested:
+		if msg, ok := promptSuggestionUIMessage(evt); ok {
+			s.notifyUIForSession(evt.SessionID, msg)
+		}
 	// The paid-tier choice is the sibling of that wait: it is drawn from the
 	// engine's own offer, so answering it on either surface answers the same one.
 	case event.RunEventPaidTierOffered:
@@ -1742,6 +1748,11 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 			Events:   event.SinkFunc(s.publishRunEvent),
 			Surfaces: []turn.Surface{turn.SurfaceTUI},
 		}),
+		// The idle composer's next-step ghost: after a turn ends the engine
+		// predicts the reader's next message and this surface draws it while the
+		// draft is empty (plan 344). Tab/Right take it into the draft; Enter on
+		// the empty composer sends it.
+		turn.WithPromptSuggestions(s.promptSuggestionConfig(cfg.EffectiveFeatures().PromptSuggestions)),
 		turn.WithRunExecutor(env.NewRunExecutor(memory.SessionSourceTUI, process.RunExecutorOptions{
 			PreviewMax: 4096,
 			Finish:     s.tuiFinish,
@@ -1793,6 +1804,9 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 		// snapshot is applied at a turn boundary, which is the only way a
 		// changed configuration reaches a running process (plan 189).
 		s.adoptConfig(next)
+		// The features gate moves with the composed configuration; re-enabling
+		// lifts the unused-offer backoff (the engine keeps the streak otherwise).
+		s.Core.SetPromptSuggestionsEnabled(next.EffectiveFeatures().PromptSuggestions)
 	}
 	// Every subagent execution reports its start and end here, so the engine
 	// arms that subagent's own auto-continue the same way it arms the
@@ -1818,6 +1832,21 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 	runner.Events = event.SinkFunc(s.publishRunEvent)
 	s.userHooks = newUserHooks(s, env)
 	return s, nil
+}
+
+// promptSuggestionConfig builds the engine's next-step offer port for this
+// surface: generation is the assembly service's cached-prefix fork of the
+// conversation, reached through the same per-session runner compaction uses.
+func (s *ChatSession) promptSuggestionConfig(enabled bool) turn.PromptSuggestionConfig {
+	return turn.PromptSuggestionConfig{
+		Generate: func(ctx context.Context, sessionID, _ string) (string, error) {
+			return run.CompactionService(s.conversationRunner(sessionID), s.sessStore()).SuggestNextStep(ctx, sessionID)
+		},
+		Events:   event.SinkFunc(s.publishRunEvent),
+		Surfaces: []turn.Surface{turn.SurfaceTUI},
+		Enabled:  enabled,
+		Backoff:  s.Env.SuggestionBackoff(),
+	}
 }
 
 func newUserHooks(s *ChatSession, env *process.Environment) *hook.Runtime {
@@ -2620,6 +2649,45 @@ func handleAutoContinueNotification(renderer *Renderer, state *streamState, m an
 	return false
 }
 
+// PromptSuggestedMsg carries the engine's next-step offer for the idle
+// composer: the ghost text drawn while the draft is empty, until the reader
+// accepts it, types over it, or starts another turn.
+type PromptSuggestedMsg struct {
+	SessionID  string
+	RunID      string
+	Suggestion string
+}
+
+// promptSuggestionUIMessage turns a suggestion lifecycle event into the message
+// the event loop acts on.
+func promptSuggestionUIMessage(evt event.RunEvent) (any, bool) {
+	switch evt.Type {
+	case event.RunEventPromptSuggested:
+		var p event.PromptSuggestedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.Suggestion) == "" {
+			return nil, false
+		}
+		return PromptSuggestedMsg{SessionID: evt.SessionID, RunID: evt.RunID, Suggestion: p.Suggestion}, true
+	}
+	return nil, false
+}
+
+// handlePromptSuggestionNotification applies one suggestion message to the
+// event loop's state, reporting false for any other message.
+func handlePromptSuggestionNotification(renderer *Renderer, state *streamState, m any) bool {
+	switch msg := m.(type) {
+	case PromptSuggestedMsg:
+		if state == nil || !sameSessionID(msg.SessionID, state.sessionID) {
+			return true
+		}
+		state.suggestion = msg.Suggestion
+		state.suggestionDismissed = false
+		renderComposerWithState(renderer, state)
+		return true
+	}
+	return false
+}
+
 // setAutoContinue records one view's pending continuation.
 func (s *streamState) setAutoContinue(view string, entry *autoContinueView) {
 	if s == nil {
@@ -3059,6 +3127,31 @@ func (s *ChatSession) DismissPaidTierOffer(sessionID string) bool {
 		return false
 	}
 	return s.Core.DismissPaidTierOffer(sessionID)
+}
+
+// suggestionController is the optional half of Session that moves the idle
+// composer's next-step offer: taking it into the draft, or typing over it.
+type suggestionController interface {
+	AcceptSuggestion(sessionID string)
+	DismissSuggestion(sessionID string)
+}
+
+// AcceptSuggestion records the reader taking the ghost into the draft, clearing
+// the engine's unused-offer backoff so generation resumes every turn.
+func (s *ChatSession) AcceptSuggestion(sessionID string) {
+	if s == nil || s.Core == nil {
+		return
+	}
+	s.Core.AcceptSuggestion(sessionID)
+}
+
+// DismissSuggestion hides the ghost because the reader is typing their own next
+// message; the engine stops generating until the next turn.
+func (s *ChatSession) DismissSuggestion(sessionID string) {
+	if s == nil || s.Core == nil {
+		return
+	}
+	s.Core.DismissSuggestion(sessionID)
 }
 
 // setPaidTierOffer records the offer on the table.

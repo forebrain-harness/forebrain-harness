@@ -396,6 +396,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	api.Delete("/auto-continue", s.handleAutoContinue)
 	api.Get("/paid-tier-offer", s.handlePaidTierOffer)
 	api.Post("/paid-tier-offer", s.handlePaidTierOffer)
+	api.Post("/prompt-suggestion", s.handlePromptSuggestion)
 
 	// The agents other processes on this machine host, and the answers to a
 	// held peer message (plan 200 §3). The drawer reads the first; the banner's
@@ -9347,6 +9348,7 @@ var settingsFieldList = []settingsField{
 
 	// 共享技能、语言服务器
 	{path: "features.lsp", section: "features", kind: settingsBool, def: true},
+	{path: "features.prompt_suggestions", section: "features", kind: settingsBool, def: true},
 	{path: "lsp.recommendations", section: "lsp", kind: settingsBool, def: true},
 	{path: "lsp.diagnostics.after_edit", section: "lsp", kind: settingsBool, def: true},
 	{path: "lsp.max_servers", section: "lsp", kind: settingsNumber, def: 6, rule: "1–32 台"},

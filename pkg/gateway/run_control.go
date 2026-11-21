@@ -1380,6 +1380,22 @@ func (s *Server) autoContinueConfig() turn.AutoContinueConfig {
 	}
 }
 
+// promptSuggestionConfig is the web half of the idle composer's next-step ghost
+// (plan 344): the same engine state machine the terminal uses, generating
+// through the session's own runner and publishing on the same run-event bus so
+// every page watching the session draws the same offer.
+func (s *Server) promptSuggestionConfig() turn.PromptSuggestionConfig {
+	return turn.PromptSuggestionConfig{
+		Generate: func(ctx context.Context, sessionID, _ string) (string, error) {
+			return run.CompactionService(s.runnerFor(ctx, sessionID), s.Sessions).SuggestNextStep(ctx, sessionID)
+		},
+		Events:   s.RunEvents(),
+		Surfaces: []turn.Surface{turn.SurfaceWebChat},
+		Enabled:  s.Env.Deps.Config().EffectiveFeatures().PromptSuggestions,
+		Backoff:  s.Env.SuggestionBackoff(),
+	}
+}
+
 // detachedTurn is a turn the runtime starts with no page behind it: a
 // continuation after a usage limit, a heartbeat. Every page observing the
 // session watches it through the event log; nothing owns it but the run.
@@ -1990,6 +2006,47 @@ func (s *Server) handlePaidTierOffer(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
+// handlePromptSuggestion answers the idle composer's next-step ghost (plan 344):
+// POST ?action=accept records the reader taking it into the draft (Tab / Right /
+// End), clearing the unused-offer backoff at once; ?action=dismiss records the
+// reader typing their own message, hiding it until the next turn boundary. These
+// are the same answers the terminal's key presses give. The ghost is push-only
+// live state, so there is no GET: a freshly bound page never replays an old offer.
+func (s *Server) handlePromptSuggestion(w http.ResponseWriter, r *http.Request) {
+	sid := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sid == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.Core == nil {
+		writeAgentsJSON(w, map[string]any{"session_id": sid, "accepted": false, "dismissed": false})
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("action"))) {
+	case "accept":
+		s.Core.AcceptSuggestion(sid)
+		writeAgentsJSON(w, map[string]any{"session_id": sid, "accepted": true})
+	case "dismiss":
+		s.Core.DismissSuggestion(sid)
+		writeAgentsJSON(w, map[string]any{"session_id": sid, "dismissed": true})
+	default:
+		http.Error(w, "action must be accept or dismiss", http.StatusBadRequest)
 	}
 }
 

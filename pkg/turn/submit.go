@@ -101,6 +101,7 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 	// Any turn reaching the session supersedes a continuation still waiting
 	// on a usage limit: the conversation has moved on without it.
 	s.autoContinue.turnStarting(ctx, req.SessionID)
+	s.suggestions.turnStarting(ctx, req)
 	unlock := func() {}
 	if s.locker != nil {
 		var err error
@@ -288,12 +289,14 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		// surface, so the terminal and the web schedule, show and cancel the
 		// same continuation.
 		s.autoContinue.turnEnded(ctx, req, runID, err)
+		s.suggestions.turnEnded(ctx, req, runID)
 		// A refusal that names a paid twin is not a wait but a choice, and the
 		// same branch is where the reader's answer reaches every surface.
 		s.offerPaidTier(ctx, req, runID, err)
 		return out, err
 	default:
 		s.autoContinue.turnEnded(ctx, req, runID, nil)
+		s.suggestions.turnEnded(ctx, req, runID)
 		endBatch(state.TaskStatusCompleted, "", nil)
 		out.Status = TurnCompleted
 		out.Result = result
