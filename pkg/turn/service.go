@@ -73,8 +73,9 @@ type Service struct {
 	// conversation is, and the transition that starts it. Nil leaves every
 	// turn on the ordinary path.
 	batchTasks BatchTaskStore
-	// batchArtifacts collects a task's deliverables when the model presented
-	// none, and is what BatchExecutionEnd carries.
+	// batchArtifacts is the artifact store the engine registers deliverables
+	// through: the batch outputs scan and the coding turn-end top-up share it,
+	// so both read the same session-level version check.
 	batchArtifacts BatchArtifactStore
 	// batchOnEnd is told how every execution ended. A surface that notifies an
 	// integrating system passes it.

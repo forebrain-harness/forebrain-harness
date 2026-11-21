@@ -177,6 +177,11 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		Runs:    runSvc,
 		Publish: gw.publishGatewayRunEvent,
 		Recover: func(context.Context) { gw.recoverResolvedApprovalWaitsOnce() },
+		Settle: func(ctx context.Context, sid, rid string) {
+			if gw.Core != nil {
+				gw.Core.CollectRunDeliverables(ctx, sid, rid)
+			}
+		},
 	}.Start(ctx)
 	defer stopReaper()
 	// The gateway registers as a local peer too (plan 195): the same

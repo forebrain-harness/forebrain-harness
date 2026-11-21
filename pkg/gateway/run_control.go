@@ -378,6 +378,12 @@ func (s *Server) cancelRun(ctx context.Context, sessionID, runID string) (invoke
 		turn.FinalizeCancel(ctx, s.RunRT, runID)
 	}
 	if parked {
+		// A parked run's turn already returned at its gate, so nothing will top
+		// its deliverables up: settle them here, before the caller writes the
+		// run_cancelled message whose frame reads the rows.
+		if s.Core != nil {
+			s.Core.CollectRunDeliverables(ctx, sessionID, runID)
+		}
 		s.finishRun(ctx, sessionID, runID, state.RunStatusCancelled)
 	}
 	return invoked, parked

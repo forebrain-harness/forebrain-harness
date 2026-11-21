@@ -558,6 +558,12 @@ func (s *Server) cancelGatewayRunDirect(sessionID, runID string) {
 	_ = s.RunRT.ClearWait(ctx, runID)
 	turn.FinalizeCancel(ctx, s.RunRT, runID)
 	s.finishRun(ctx, sessionID, runID, state.RunStatusCancelled)
+	// This run already returned at its gate, so no turn end will settle its
+	// deliverables: register them before the frame that lists them. (The
+	// running-cancel path must not do this — its own turn end does.)
+	if s.Core != nil {
+		s.Core.CollectRunDeliverables(ctx, sessionID, runID)
+	}
 	_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventTurnCancelled, event.TurnCancelledPayload{Message: "cancelled"})
 }
 
@@ -715,6 +721,11 @@ func (s *Server) expireGatewayApproval(ctx context.Context, actionID string) {
 			}, time.Now(),
 		))
 	} else {
+		// An expired or failed gate leaves this run no later turn end, so its
+		// deliverables are settled before the error frame that lists them.
+		if s.Core != nil {
+			s.Core.CollectRunDeliverables(ctx, sessionID, runID)
+		}
 		_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: reason, Message: reason})
 	}
 }

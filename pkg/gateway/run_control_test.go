@@ -224,6 +224,136 @@ func TestHandleRunCancelFinishesARunParkedOnApproval(t *testing.T) {
 	require.Equal(t, []string{event.RunEventQueuedInputReleased, event.RunEventTurnCancelled}, order)
 }
 
+// newDeliverableGateway builds a gateway server on a coding project's
+// conversation with the deliverable engine wired the way the process wires it,
+// so a cancel path's frame can be read back with the rows the top-up settled.
+type deliverableGateway struct {
+	server   *Server
+	runs     *state.RunStore
+	actions  *state.ActionService
+	sessions *state.SessionStore
+	root     string
+}
+
+func newDeliverableGateway(t *testing.T) *deliverableGateway {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	root := t.TempDir()
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{
+		Name: "demo", Root: root, ProjectType: state.ProjectTypeCoding,
+	})
+	require.NoError(t, err)
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.EnsureAt(ctx, "sid", "sid", state.SessionBirth{ProjectID: project.ID}))
+	runs := &state.RunStore{DB: db, Owner: "gateway-test"}
+	actions := &state.ActionService{DB: db}
+	s := &Server{
+		Home:     home,
+		RunRT:    runs,
+		Actions:  actions,
+		Sessions: sessions,
+		Core: turn.New(
+			turn.WithSessionStore(sessions),
+			turn.WithRunEventStore(runs),
+			turn.WithBatchTasks(nil, sessions, nil),
+		),
+	}
+	return &deliverableGateway{server: s, runs: runs, actions: actions, sessions: sessions, root: root}
+}
+
+// writeTracked writes one file into the project and records the write in the
+// conversation's ledger, the way a file tool does.
+func (e *deliverableGateway) writeTracked(t *testing.T, runID, rel string) string {
+	t.Helper()
+	path := filepath.Join(e.root, filepath.FromSlash(rel))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("written by the run\n"), 0o644))
+	require.NoError(t, e.sessions.RecordFileChange(context.Background(), state.FileChange{
+		SessionID: "sid", RunID: runID, Path: path,
+	}))
+	return path
+}
+
+// frameRelPaths reads back the delivered files one persisted terminal frame
+// carries.
+func (e *deliverableGateway) frameRelPaths(t *testing.T, runID, eventType string) []string {
+	t.Helper()
+	records, err := e.runs.ListRunEventsOfTypes(context.Background(), runID, eventType)
+	require.NoError(t, err)
+	require.NotEmpty(t, records, "run %s has no %s frame", runID, eventType)
+	// The terminal payloads embed RunArtifacts, so the files ride the frame at
+	// the top level.
+	var payload struct {
+		Artifacts []event.Artifact `json:"artifacts"`
+	}
+	last := records[len(records)-1]
+	require.NoError(t, json.Unmarshal(last.Payload, &payload), "decode %s payload: %s", eventType, string(last.Payload))
+	out := make([]string, 0, len(payload.Artifacts))
+	for _, a := range payload.Artifacts {
+		out = append(out, a.RelPath)
+	}
+	return out
+}
+
+func (e *deliverableGateway) runArtifacts(t *testing.T, runID string) []state.Artifact {
+	t.Helper()
+	rows, err := e.sessions.ListArtifactsForRun(context.Background(), runID)
+	require.NoError(t, err)
+	return rows
+}
+
+// TestCancelParkedRunFrameCarriesSettledDeliverables pins the parked cancel's
+// frame: cancelRun ends a run nothing is driving, so it settles the run's
+// deliverables before the turn_cancelled frame that lists them.
+func TestCancelParkedRunFrameCarriesSettledDeliverables(t *testing.T) {
+	env := newDeliverableGateway(t)
+	ctx := context.Background()
+	run, err := env.runs.CreateRun(ctx, "sid", "work")
+	require.NoError(t, err)
+	env.writeTracked(t, run.ID, ".worktrees/demo/src/a.go")
+	require.True(t, env.server.runController().Track(run.ID, "sid", func() {}))
+	require.True(t, env.server.runController().WaitApproval(run.ID))
+
+	cancelRunRequest(t, env.server, run.ID)
+
+	rows := env.runArtifacts(t, run.ID)
+	require.Len(t, rows, 1, "the parked run's write is a deliverable")
+	require.Equal(t, state.ArtifactOriginFallback, rows[0].Origin)
+	require.Equal(t, []string{".worktrees/demo/src/a.go"}, env.frameRelPaths(t, run.ID, event.RunEventTurnCancelled))
+}
+
+// TestCancelledApprovalRecoveryFrameCarriesSettledDeliverables pins the other
+// direct ending: a cancelled gate's run goes through cancelGatewayRunDirect,
+// which never reaches cancelRun, so it settles before its own frame.
+func TestCancelledApprovalRecoveryFrameCarriesSettledDeliverables(t *testing.T) {
+	env := newDeliverableGateway(t)
+	ctx := context.Background()
+	run, err := env.runs.CreateRun(ctx, "sid", "work")
+	require.NoError(t, err)
+	env.writeTracked(t, run.ID, ".worktrees/demo/pkg/a.go")
+	action, err := env.actions.CreatePending(ctx, "sid", "shell", map[string]any{"command": "go build", "session_id": "sid"})
+	require.NoError(t, err)
+	require.NoError(t, env.runs.SetWaitingAction(ctx, run.ID, state.Wait{
+		RunID: run.ID, ActionID: action.ID, ToolName: "shell",
+	}))
+	_, err = env.actions.Cancel(ctx, action.ID, "not now")
+	require.NoError(t, err)
+	stored, err := env.actions.Get(ctx, action.ID)
+	require.NoError(t, err)
+
+	env.server.abortGatewayRunForAction(stored)
+
+	rows := env.runArtifacts(t, run.ID)
+	require.Len(t, rows, 1, "the cancelled gate's run is still a deliverable")
+	require.Equal(t, state.ArtifactOriginFallback, rows[0].Origin)
+	require.Equal(t, []string{".worktrees/demo/pkg/a.go"}, env.frameRelPaths(t, run.ID, event.RunEventTurnCancelled))
+}
+
 func cancelRunRequest(t *testing.T, s *Server, runID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/cancel", nil)
@@ -1461,11 +1591,18 @@ func TestADetachedTurnThatFailsBeforeTheExecutorRanIsFailedBeforeItsEndIsReporte
 // startGatewayReaper wires the fixture exactly the way RunServeBlocking
 // does, so these tests observe the production composition.
 func (g *autoContinueGateway) startGatewayReaper() func() {
-	return turn.AbandonedRunReaper{
+	reaper := turn.AbandonedRunReaper{
 		Runs:    g.server.RunRT,
 		Publish: g.server.publishGatewayRunEvent,
 		Recover: func(context.Context) { g.server.recoverResolvedApprovalWaitsOnce() },
-	}.Start(context.Background())
+	}
+	// Start's own first pass runs in the background, so a caller does not hold
+	// its startup for it. A test that asserts on that pass — either the ending
+	// it reports or the run it deliberately leaves alone — takes the pass here,
+	// where it is finished before the assertion runs. The reap is a
+	// compare-and-swap, so the loop's own first pass then finds nothing.
+	reaper.ReapOnce(context.Background())
+	return reaper.Start(context.Background())
 }
 
 // ageIntoAbandonment moves a run and its owner's last heartbeat into the

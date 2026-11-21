@@ -158,3 +158,46 @@ func TestArtifactsGoWithTheirSession(t *testing.T) {
 		t.Fatalf("get after session delete = %v, want ErrArtifactNotFound", err)
 	}
 }
+
+func TestSessionProjectScope(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := NewSessionStore(db, "main")
+	projects := NewProjectStore(db, "main")
+	root := t.TempDir()
+	p, err := projects.Create(ctx, CreateProjectInput{Name: "office", Root: root, ProjectType: ProjectTypeOffice})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.EnsureAt(ctx, "bound", "bound", SessionBirth{ProjectID: p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.Ensure(ctx, "loose", "loose"); err != nil {
+		t.Fatal(err)
+	}
+	pt, gotRoot, err := sessions.SessionProjectScope(ctx, "bound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt != ProjectTypeOffice || gotRoot != root {
+		t.Fatalf("bound session scope = (%q, %q); want (office, %s)", pt, gotRoot, root)
+	}
+	pt, gotRoot, err = sessions.SessionProjectScope(ctx, "loose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt != ProjectTypeCoding || gotRoot != "" {
+		t.Fatalf("project-less session scope = (%q, %q); want (coding, \"\")", pt, gotRoot)
+	}
+	pt, gotRoot, err = sessions.SessionProjectScope(ctx, "unknown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt != ProjectTypeCoding || gotRoot != "" {
+		t.Fatalf("unknown session scope = (%q, %q); want the coding default", pt, gotRoot)
+	}
+}

@@ -517,6 +517,12 @@ func (s *Server) interruptUncertainGatewayApproval(wait state.Wait) {
 	}
 	s.runController().Cancel(wait.RunID, errors.New(reason))
 	s.finishRun(ctx, sessionID, wait.RunID, state.RunStatusFailed)
+	// This run ends here, with no turn end of its own to settle it: register
+	// what it wrote before the frame that lists it. (A subagent's run settles
+	// nothing — the seam's own guard answers that.)
+	if s.Core != nil {
+		s.Core.CollectRunDeliverables(ctx, sessionID, wait.RunID)
+	}
 	_ = s.publishGatewayRunEvent(ctx, sessionID, wait.RunID, event.RunEventTurnError, event.TurnErrorPayload{Error: reason, Message: reason})
 	if strings.TrimSpace(wait.AgentID) != "" {
 		parentRunID := ""
@@ -5116,6 +5122,11 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 		_ = s.RunRT.ClearWait(ctx, runID)
 		reason := firstNonEmptyString(action.Error, "approval action failed")
 		s.finishRun(ctx, rn.SessionID, runID, state.RunStatusFailed)
+		// The continuation failed, so no turn end will follow: settle the
+		// deliverables before the error frame that lists them.
+		if s.Core != nil {
+			s.Core.CollectRunDeliverables(ctx, rn.SessionID, runID)
+		}
 		_ = s.publishGatewayRunEvent(ctx, rn.SessionID, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: reason, Message: reason})
 		return
 	case state.ActionApproved, state.ActionAnswered, state.ActionDenied:

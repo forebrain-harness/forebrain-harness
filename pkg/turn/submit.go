@@ -268,6 +268,14 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		endBatch(state.TaskStatusStopped, "", err)
 		out.Status = TurnCancelled
 		out.Error = err
+		// The turn's own writes are its deliverables even when the model
+		// presented none (deliverables.go), and every surface's closing frame
+		// reads the rows when this returns: settle them before the terminal
+		// event goes out, and let the turn's own cancellation through — the
+		// files already landed.
+		if pt, root := s.deliverableScope(ctx, req.SessionID); root != "" {
+			s.collectTurnDeliverables(ctx, req.SessionID, runID, pt, root)
+		}
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnCancelled})
 		telemetry.Emit(ctx, slog.LevelInfo, "turn", "turn cancelled",
 			slog.String("session", req.SessionID), slog.String("run", runID),
@@ -278,6 +286,11 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		out.Status = TurnFailed
 		out.Error = err
 		endBatch(state.TaskStatusFailed, "", err)
+		// A failed turn still wrote what it wrote, and its error frame lists the
+		// turn's deliverables: settle before the event goes out.
+		if pt, root := s.deliverableScope(ctx, req.SessionID); root != "" {
+			s.collectTurnDeliverables(ctx, req.SessionID, runID, pt, root)
+		}
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnError})
 		telemetry.Emit(ctx, slog.LevelError, "turn", "turn failed",
 			slog.String("session", req.SessionID), slog.String("run", runID),
@@ -300,6 +313,11 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		endBatch(state.TaskStatusCompleted, "", nil)
 		out.Status = TurnCompleted
 		out.Result = result
+		// The completed frame is where a coding turn's list comes from: settle
+		// the turn's writes before the event that carries it goes out.
+		if pt, root := s.deliverableScope(ctx, req.SessionID); root != "" {
+			s.collectTurnDeliverables(ctx, req.SessionID, runID, pt, root)
+		}
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnCompleted})
 		// The answer's size and preview come from the result the run produced
 		// (its text parts, nil-safe); a run that said nothing omits both rather

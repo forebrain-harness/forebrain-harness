@@ -1283,6 +1283,18 @@ func (s *ChatSession) abortPendingApproval(sessionID, actionID string) bool {
 	// surface's foreground run and could otherwise tear down the parent (or a
 	// sibling) and reset the primary assistant buffer.
 	scopedToSubagent := p != nil && (strings.TrimSpace(p.AgentID) != "" || strings.TrimSpace(p.SubagentType) != "")
+	// A parked primary run will never reach a turn end: its Submit returned at
+	// the gate. The engine therefore never tops its deliverables up, so this
+	// surface settles them now, before it reads the rows for the cancel frame
+	// below — the frame otherwise lists only what the model presented.
+	//
+	// A subagent's gate belongs to that child inside the still-running parent
+	// turn: settling here would register a mid-write snapshot of the parent's
+	// run and duplicate the rows at its own turn end. Only a parked primary
+	// run has no later turn end to settle it.
+	if !scopedToSubagent && runID != "" && s.Core != nil {
+		s.Core.CollectRunDeliverables(context.Background(), sessionID, runID)
+	}
 	cancelledActive := false
 	controllerRunID := runID
 	if scopedToSubagent {

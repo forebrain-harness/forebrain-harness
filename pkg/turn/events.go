@@ -470,6 +470,10 @@ type AbandonedRunReaper struct {
 	// row and is skipped by the reap; without this it would stay running until
 	// some process restarted or reopened its session.
 	Recover func(ctx context.Context)
+	// Settle registers a reaped primary run's coding deliverables before its
+	// ending is published: the process died before its turn end, so nothing
+	// else will. Nil is a surface that does not settle.
+	Settle func(ctx context.Context, sessionID, runID string)
 }
 
 // ReapOnce settles every abandoned run this process can see and reports each
@@ -488,6 +492,13 @@ func (r AbandonedRunReaper) ReapOnce(ctx context.Context) {
 	}
 	for _, run := range reaped {
 		if run.ParentRunID == "" {
+			// The ending this publishes is the frame that lists the run's
+			// deliverables, and the process that would have topped them up is
+			// gone: settle first. A subagent's writes need no settle of their
+			// own — the parent's run-tree read covers them.
+			if r.Settle != nil {
+				r.Settle(ctx, run.SessionID, run.ID)
+			}
 			_ = r.Publish(ctx, run.SessionID, run.ID, event.RunEventTurnError, event.TurnErrorPayload{
 				Error: AbandonedRunReason, Message: AbandonedRunReason,
 				Detail: &event.TurnErrorDetail{Code: "run_abandoned"},
@@ -529,15 +540,19 @@ func (r AbandonedRunReaper) subagentSpawnFacts(ctx context.Context, runID string
 	return event.SubagentSpawnedPayload{}, false
 }
 
-// Start reaps once now and then every state.RunOwnerLease, until stop. The
-// interval matches the lease: a dead process's runs become readable as
-// abandoned exactly one cycle after its last heartbeat expires.
+// Start then reaps every state.RunOwnerLease, until stop. The interval matches
+// the lease: a dead process's runs become readable as abandoned exactly one
+// cycle after its last heartbeat expires. The first reap runs in the loop's own
+// goroutine rather than before it: settling a dead run's deliverables can take
+// up to turnDeliverableTimeout each, and a process must not hold its startup
+// for the runs another one left behind (owner, 2026-11-21 — the frame is a
+// cycle late instead).
 func (r AbandonedRunReaper) Start(ctx context.Context) (stop func()) {
-	r.ReapOnce(ctx)
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		r.ReapOnce(ctx)
 		ticker := time.NewTicker(state.RunOwnerLease)
 		defer ticker.Stop()
 		for {

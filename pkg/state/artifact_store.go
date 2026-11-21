@@ -285,9 +285,9 @@ func scanArtifact(rows *sql.Rows) (Artifact, error) {
 }
 
 // LatestArtifactByPath is the newest row a path already has in this
-// conversation: the version check the batch outputs scan makes before
-// registering a path again, so unchanged bytes are not re-delivered under a
-// new run. A path never delivered reads as found=false.
+// conversation: the version check the batch outputs scan and the coding
+// turn-end top-up make before registering a path again, so unchanged bytes are
+// not re-delivered under a new run. A path never delivered reads as found=false.
 func (s *SessionStore) LatestArtifactByPath(ctx context.Context, sessionID, path string) (Artifact, bool, error) {
 	if s == nil || s.db == nil {
 		return Artifact{}, false, nil
@@ -309,4 +309,36 @@ func (s *SessionStore) LatestArtifactByPath(ctx context.Context, sessionID, path
 		return Artifact{}, false, err
 	}
 	return a, true, nil
+}
+
+// SessionProjectScope resolves the delivery scope one conversation froze at
+// birth: the project type it belongs to and the root of that project (empty
+// for a conversation with no project). It is what the turn-end deliverable
+// top-up anchors containment to, so a write outside the project is never
+// registered as that conversation's deliverable.
+func (s *SessionStore) SessionProjectScope(ctx context.Context, sessionID string) (projectType, projectRoot string, err error) {
+	if s == nil || s.db == nil {
+		return ProjectTypeCoding, "", nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ProjectTypeCoding, "", nil
+	}
+	if err := s.db.QueryRowContext(ctx, projectSessionTypeSQL.For(dbx.DialectOf(s.db)),
+		sessionID, s.AgentID()).Scan(&projectType); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ProjectTypeCoding, "", nil
+		}
+		return "", "", err
+	}
+	if err := s.db.QueryRowContext(ctx, fileProjectRootSQL.For(dbx.DialectOf(s.db)),
+		sessionID).Scan(&projectRoot); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// A conversation with no project (a primary-agent workshop task)
+			// names no root to deliver inside.
+			return NormalizeProjectType(projectType), "", nil
+		}
+		return "", "", err
+	}
+	return NormalizeProjectType(projectType), strings.TrimSpace(projectRoot), nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -531,4 +532,160 @@ func TestRunArtifactsOfConvertsRows(t *testing.T) {
 	require.Equal(t, event.RunArtifacts{}, RunArtifactsOf(context.Background(), &stubArtifactLister{rows: []state.Artifact{row}}, "  "))
 	failing := &stubArtifactLister{err: context.DeadlineExceeded}
 	require.Equal(t, event.RunArtifacts{}, RunArtifactsOf(context.Background(), failing, "run-1"))
+}
+
+// TestAbandonedRunReaperSettlesDeliverablesBeforeTheEnding pins the crash path:
+// a process that died mid-turn never reached its turn end, so the reap settles
+// that run's deliverables before it publishes the ending whose frame lists
+// them — and settles nothing for a subagent, whose writes the parent's own
+// run-tree settle covers.
+func TestAbandonedRunReaperSettlesDeliverablesBeforeTheEnding(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	require.NoError(t, sessions.Ensure(ctx, "s2", "s2"))
+	dead := &state.RunStore{DB: db, Owner: "owner-dead"}
+	stop, err := dead.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	primary, err := dead.CreateRun(ctx, "s1", "a turn the process never finished")
+	require.NoError(t, err)
+	parent, err := dead.CreateRun(ctx, "s2", "parent")
+	require.NoError(t, err)
+	child, err := dead.CreateSubagentRun(ctx, parent.ID, "s2", "child task")
+	require.NoError(t, err)
+	_, _, err = dead.AppendSessionEventOnce(ctx, state.SessionEvent{
+		RunID: child.ID, SessionID: "s2", Type: event.RunEventSubagentSpawned,
+		Payload: mustMarshalTurnEvent(t, event.SubagentSpawnedPayload{
+			AgentID: "agent-7", AgentType: "general-purpose", TaskID: "agent-7",
+			ParentRunID: parent.ID, ExecutionID: child.ID,
+		}),
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	// The owner dies: its lease row goes away with it.
+	stop()
+
+	var mu sync.Mutex
+	var order []string
+	reaper := AbandonedRunReaper{
+		Runs: dead,
+		Settle: func(_ context.Context, _, runID string) {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, "settle:"+runID)
+		},
+		Publish: func(_ context.Context, _, runID, eventType string, _ any) error {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, "publish:"+runID+":"+eventType)
+			return nil
+		},
+	}
+	reaper.ReapOnce(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Contains(t, order, "publish:"+primary.ID+":"+event.RunEventTurnError, "the abandoned primary run must really be reaped: %v", order)
+	require.Contains(t, order, "publish:"+parent.ID+":"+event.RunEventTurnError, "the abandoned parent run must really be reaped: %v", order)
+	require.NotContains(t, order, "settle:"+child.ID, "a subagent's writes ride the parent's settle: %v", order)
+	for _, runID := range []string{primary.ID, parent.ID} {
+		settleAt, publishAt := -1, -1
+		for i, step := range order {
+			switch step {
+			case "settle:" + runID:
+				settleAt = i
+			case "publish:" + runID + ":" + event.RunEventTurnError:
+				publishAt = i
+			}
+		}
+		require.NotEqual(t, -1, settleAt, "run %s was published without being settled: %v", runID, order)
+		require.Less(t, settleAt, publishAt, "run %s was settled after its ending went out: %v", runID, order)
+	}
+}
+
+// TestCollectRunDeliverablesSettlesOnlyTopLevelRuns pins the seam's guard: a
+// surface settling a subagent's parked run must register nothing, because the
+// parent's own turn-end settle covers those writes — and the version check is
+// per conversation and path, so a child settling first would make the parent
+// skip the very bytes it is supposed to deliver.
+func TestCollectRunDeliverablesSettlesOnlyTopLevelRuns(t *testing.T) {
+	env := newDeliverableEnv(t, state.ProjectTypeCoding)
+	ctx := context.Background()
+	parent, err := env.runs.CreateRun(ctx, env.session, "parent work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := env.runs.CreateSubagentRun(ctx, parent.ID, env.session, "child work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := env.write(t, "src/a.go", "package a\n")
+	env.recordChange(t, child.ID, written, false)
+	svc := New(
+		WithSessionStore(env.sessions),
+		WithRunEventStore(env.runs),
+		WithBatchTasks(nil, env.sessions, nil),
+	)
+
+	svc.CollectRunDeliverables(ctx, env.session, child.ID)
+	if rows := env.runArtifacts(t, child.ID); len(rows) != 0 {
+		t.Fatalf("a subagent run settled %+v, want nothing", rows)
+	}
+
+	svc.CollectRunDeliverables(ctx, env.session, parent.ID)
+	rows := env.runArtifacts(t, parent.ID)
+	if len(rows) != 1 || rows[0].RelPath != "src/a.go" || rows[0].RunID != parent.ID {
+		t.Fatalf("parent artifacts = %+v, want its subagent's write under the parent run", rows)
+	}
+}
+
+// TestAbandonedRunReaperStartDoesNotWaitForItsFirstPass pins the owner's
+// 2026-11-21 choice: settling a dead process's deliverables can take up to the
+// top-up's own ceiling per run, so Start hands the first pass to its loop
+// instead of running it on the caller's goroutine. A process must come up even
+// while another one's runs are still being settled.
+func TestAbandonedRunReaperStartDoesNotWaitForItsFirstPass(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "s1", "s1"))
+	dead := &state.RunStore{DB: db, Owner: "owner-dead"}
+	stopLease, err := dead.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	_, err = dead.CreateRun(ctx, "s1", "a turn the process never finished")
+	require.NoError(t, err)
+	stopLease()
+
+	settling := make(chan struct{})
+	release := make(chan struct{})
+	reaper := AbandonedRunReaper{
+		Runs: dead,
+		Settle: func(context.Context, string, string) {
+			close(settling)
+			<-release
+		},
+		Publish: func(context.Context, string, string, string, any) error { return nil },
+	}
+	started := make(chan struct{})
+	var stop func()
+	go func() {
+		defer close(started)
+		stop = reaper.Start(ctx)
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start blocked on its first pass")
+	}
+	select {
+	case <-settling:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first pass never ran in the background")
+	}
+	close(release)
+	stop()
 }

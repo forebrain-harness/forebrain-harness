@@ -1206,6 +1206,248 @@ func TestSubagentApprovalCancelDoesNotCancelForegroundParent(t *testing.T) {
 	}
 }
 
+// codingDeliverableSession is one coding project's conversation with the
+// deliverable engine wired the way the process wires it: the turn service reads
+// its scope, its write ledger and its artifacts from the same stores.
+type codingDeliverableSession struct {
+	cs       *ChatSession
+	sessions *state.SessionStore
+	runs     *state.RunStore
+	actions  *state.ActionService
+	root     string
+}
+
+func newCodingDeliverableSession(t *testing.T) *codingDeliverableSession {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	root := t.TempDir()
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{
+		Name: "demo", Root: root, ProjectType: state.ProjectTypeCoding,
+	})
+	if err != nil {
+		t.Fatalf("Create project error: %v", err)
+	}
+	sessions := state.NewSessionStore(db, "main")
+	if err := sessions.EnsureAt(ctx, "s1", "s1", state.SessionBirth{ProjectID: project.ID}); err != nil {
+		t.Fatalf("EnsureAt error: %v", err)
+	}
+	actions := newTestActions(t, db)
+	runs := &state.RunStore{DB: db}
+	cs := sessionEnv{Home: home, ActionSvc: actions, RunSvc: runs, SessStore: sessions}.session()
+	cs.Core = turn.New(
+		turn.WithSessionStore(sessions),
+		turn.WithRunEventStore(runs),
+		turn.WithBatchTasks(nil, sessions, nil),
+		turn.WithSessionSource("tui-test"),
+	)
+	return &codingDeliverableSession{cs: cs, sessions: sessions, runs: runs, actions: actions, root: root}
+}
+
+// writeTracked writes one file into the project and records the write in the
+// conversation's ledger, the way a file tool does.
+func (e *codingDeliverableSession) writeTracked(t *testing.T, runID, rel string) string {
+	t.Helper()
+	path := filepath.Join(e.root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("written by the turn\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.sessions.RecordFileChange(context.Background(), state.FileChange{
+		SessionID: "s1", RunID: runID, Path: path,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// turnCancelledArtifacts reads back the delivered files the run's
+// turn_cancelled frame carries.
+func (e *codingDeliverableSession) turnCancelledArtifacts(t *testing.T, runID string) event.RunArtifacts {
+	t.Helper()
+	return e.frameArtifacts(t, runID, event.RunEventTurnCancelled)
+}
+
+func (e *codingDeliverableSession) frameArtifacts(t *testing.T, runID, eventType string) event.RunArtifacts {
+	t.Helper()
+	records, err := e.runs.ListRunEventsOfTypes(context.Background(), runID, eventType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) == 0 {
+		t.Fatalf("run %s has no %s frame", runID, eventType)
+	}
+	// The terminal payloads embed RunArtifacts, so the files ride the frame at
+	// the top level.
+	var payload struct {
+		Artifacts []event.Artifact `json:"artifacts"`
+	}
+	if err := json.Unmarshal(records[len(records)-1].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return event.RunArtifacts{Artifacts: payload.Artifacts}
+}
+
+func (e *codingDeliverableSession) runArtifacts(t *testing.T, runID string) []state.Artifact {
+	t.Helper()
+	rows, err := e.sessions.ListArtifactsForRun(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+// deliveredRelPaths names the files a frame lists.
+func deliveredRelPaths(artifacts event.RunArtifacts) []string {
+	out := make([]string, 0, len(artifacts.Artifacts))
+	for _, a := range artifacts.Artifacts {
+		out = append(out, a.RelPath)
+	}
+	return out
+}
+
+// TestAbortPendingApprovalDeliversWrittenFiles pins the parked-cancel frame:
+// the gated run will never reach a turn end, so the surface settles its
+// deliverables before it writes the cancel frame — which therefore lists the
+// file the turn wrote, not only what the model presented.
+func TestAbortPendingApprovalDeliversWrittenFiles(t *testing.T) {
+	ctx := context.Background()
+	env := newCodingDeliverableSession(t)
+	run, err := env.runs.CreateRun(ctx, "s1", "work")
+	if err != nil {
+		t.Fatalf("CreateRun error: %v", err)
+	}
+	env.writeTracked(t, run.ID, ".worktrees/demo/src/a.go")
+	action, err := env.actions.CreatePending(ctx, "s1", "shell", map[string]any{"command": "go test", "session_id": "s1"})
+	if err != nil {
+		t.Fatalf("CreatePending error: %v", err)
+	}
+	if err := env.runs.SetWaitingAction(ctx, run.ID, state.Wait{RunID: run.ID, ActionID: action.ID, ToolName: "shell"}); err != nil {
+		t.Fatalf("SetWaitingAction error: %v", err)
+	}
+	ended := make(chan RunEndedMsg, 4)
+	env.cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(RunEndedMsg); ok {
+			ended <- m
+		}
+	})
+	env.cs.tuiTrack(run.ID, "s1", func() {})
+	if !env.cs.tuiController().WaitApproval(run.ID) {
+		t.Fatal("expected the controller to enter approval wait")
+	}
+	env.cs.setPendingApproval(&chatApprovalResume{ActionID: action.ID, RunID: run.ID, SessionID: "s1"})
+
+	if !env.cs.abortPendingApproval("s1", action.ID) {
+		t.Fatal("expected the cancellation to be handled")
+	}
+	rows := env.runArtifacts(t, run.ID)
+	if len(rows) != 1 || rows[0].Origin != state.ArtifactOriginFallback || rows[0].RelPath != ".worktrees/demo/src/a.go" {
+		t.Fatalf("artifacts = %+v, want the parked turn's write as a fallback row", rows)
+	}
+	if got := deliveredRelPaths(env.turnCancelledArtifacts(t, run.ID)); len(got) != 1 || got[0] != ".worktrees/demo/src/a.go" {
+		t.Fatalf("turn_cancelled frame lists %v, want the parked turn's write", got)
+	}
+	msg := requireUIMessage(t, ended)
+	if got := deliveredRelPaths(msg.RunArtifacts); len(got) != 1 || got[0] != ".worktrees/demo/src/a.go" {
+		t.Fatalf("run-ended frame lists %v, want the parked turn's write", got)
+	}
+}
+
+// TestSubagentApprovalCancelRegistersNoDeliverables pins the guard: a
+// subagent's gate belongs to a child inside the still-running parent turn, so
+// cancelling it settles nothing. The parent's own turn end still delivers the
+// writes — a mid-write snapshot registered here would duplicate them.
+func TestSubagentApprovalCancelRegistersNoDeliverables(t *testing.T) {
+	ctx := context.Background()
+	env := newCodingDeliverableSession(t)
+	parent, err := env.runs.CreateRun(ctx, "s1", "parent work")
+	if err != nil {
+		t.Fatalf("CreateRun error: %v", err)
+	}
+	child, err := env.runs.CreateSubagentRun(ctx, parent.ID, "s1", "child work")
+	if err != nil {
+		t.Fatalf("CreateSubagentRun error: %v", err)
+	}
+	env.writeTracked(t, parent.ID, "src/a.go")
+	action, err := env.actions.CreatePending(ctx, "s1", "shell", map[string]any{
+		"command": "dangerous", "session_id": "s1", "agent_id": "agent-child", "subagent_type": "explore",
+	})
+	if err != nil {
+		t.Fatalf("CreatePending error: %v", err)
+	}
+	if err := env.runs.SetWaitingAction(ctx, parent.ID, state.Wait{
+		RunID: parent.ID, ActionID: action.ID, ToolName: "shell",
+		AgentID: "agent-child", SubagentType: "explore", SubagentRunID: child.ID,
+	}); err != nil {
+		t.Fatalf("SetWaitingAction error: %v", err)
+	}
+	env.cs.tuiTrack(parent.ID, "s1", func() {})
+	ctl := env.cs.tuiController()
+	ctl.Track(child.ID, "s1", func() {})
+	if !ctl.WaitApproval(child.ID) {
+		t.Fatal("expected child controller state to enter approval wait")
+	}
+	env.cs.setPendingApproval(&chatApprovalResume{
+		ActionID: action.ID, RunID: parent.ID, SubagentRunID: child.ID, SessionID: "s1",
+		AgentID: "agent-child", SubagentType: "explore",
+	})
+
+	if !env.cs.abortPendingApproval("s1", action.ID) {
+		t.Fatal("expected subagent approval cancellation to be handled")
+	}
+	if rows := env.runArtifacts(t, parent.ID); len(rows) != 0 {
+		t.Fatalf("parent run holds %+v, want no settled rows from a child's gate", rows)
+	}
+	// The parent's own turn end still delivers the write, once, under its run.
+	env.cs.Core.CollectRunDeliverables(ctx, "s1", parent.ID)
+	rows := env.runArtifacts(t, parent.ID)
+	if len(rows) != 1 || rows[0].RelPath != "src/a.go" || rows[0].Origin != state.ArtifactOriginFallback {
+		t.Fatalf("parent run artifacts = %+v, want the write settled by the parent", rows)
+	}
+}
+
+// TestRecoveredExpiredApprovalDeliversWrittenFiles pins the fenced-run path: a
+// process died holding an approval, the action expired, and the recovery ends
+// the run itself — so it settles the deliverables before the error frame that
+// lists them.
+func TestRecoveredExpiredApprovalDeliversWrittenFiles(t *testing.T) {
+	ctx := context.Background()
+	env := newCodingDeliverableSession(t)
+	run, err := env.runs.CreateRun(ctx, "s1", "work")
+	if err != nil {
+		t.Fatalf("CreateRun error: %v", err)
+	}
+	env.writeTracked(t, run.ID, ".worktrees/demo/pkg/a.go")
+	action, err := env.actions.CreatePending(ctx, "s1", "shell", map[string]any{"command": "go build", "session_id": "s1"})
+	if err != nil {
+		t.Fatalf("CreatePending error: %v", err)
+	}
+	if err := env.runs.SetWaitingAction(ctx, run.ID, state.Wait{RunID: run.ID, ActionID: action.ID, ToolName: "shell"}); err != nil {
+		t.Fatalf("SetWaitingAction error: %v", err)
+	}
+	if _, err := env.actions.ExpireIfPending(ctx, action.ID, "approval ttl expired"); err != nil {
+		t.Fatalf("ExpireIfPending error: %v", err)
+	}
+
+	env.cs.recoverResolvedApprovalWaitsOnce("s1")
+
+	rows := env.runArtifacts(t, run.ID)
+	if len(rows) != 1 || rows[0].RelPath != ".worktrees/demo/pkg/a.go" || rows[0].Origin != state.ArtifactOriginFallback {
+		t.Fatalf("artifacts = %+v, want the fenced run's write as a fallback row", rows)
+	}
+	if got := deliveredRelPaths(env.frameArtifacts(t, run.ID, event.RunEventTurnError)); len(got) != 1 || got[0] != ".worktrees/demo/pkg/a.go" {
+		t.Fatalf("turn_error frame lists %v, want the fenced run's write", got)
+	}
+}
+
 func TestCancelActiveRunReturnsFalseForAlreadyFinishingController(t *testing.T) {
 	cs := sessionEnv{}.session()
 	ctl := cs.tuiController()

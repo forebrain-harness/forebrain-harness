@@ -1783,6 +1783,11 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 		Runs:    env.Deps.RunRT,
 		Publish: s.publishTUIRunEvent,
 		Recover: func(context.Context) { s.recoverResolvedApprovalWaitsOnce(s.preferredSessionID()) },
+		Settle: func(ctx context.Context, sid, rid string) {
+			if s.Core != nil {
+				s.Core.CollectRunDeliverables(ctx, sid, rid)
+			}
+		},
 	}.Start(ctx)
 	// This process registers itself as a local peer (plan 195): one socket,
 	// one rendezvous record kept current with this surface's session and

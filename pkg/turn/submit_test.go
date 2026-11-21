@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
+	"github.com/google/uuid"
 )
 
 func TestSubmitOutcomes(t *testing.T) {
@@ -1324,56 +1326,52 @@ func (e *deliverableEnv) runArtifacts(t *testing.T, runID string) []state.Artifa
 	return rows
 }
 
-// TestSubmitInteractiveTurnRegistersNoFallbackArtifacts pins the owner's
-// 2026-11-19 contract: office and coding deliver only what the model
-// presents, when the model judges the work complete. The engine registers
-// nothing on its own at any terminal branch — a helper script the model
-// kept out of the delivery set stays out, even though the ledger tracked
-// the write.
-func TestSubmitInteractiveTurnRegistersNoFallbackArtifacts(t *testing.T) {
-	for _, pt := range []string{state.ProjectTypeOffice, state.ProjectTypeCoding} {
-		for _, outcome := range []struct {
-			name string
-			err  error
-		}{
-			{"completed", nil},
-			{"cancelled", context.Canceled},
-			{"failed", errors.New("boom")},
-		} {
-			t.Run(pt+"/"+outcome.name, func(t *testing.T) {
-				env := newDeliverableEnv(t, pt)
-				rel := "src/main.go"
-				if pt == state.ProjectTypeOffice {
-					rel = ".work/helper.py"
-				}
-				path := env.write(t, rel, "package main\n")
-				svc := New(
-					WithSessionStore(env.sessions),
-					WithRunEventStore(env.runs),
-					WithBatchTasks(nil, env.sessions, nil),
-					WithRunExecutor(runFunc(func(runCtx context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
-						run, err := env.runs.CreateRun(runCtx, env.session, "work")
-						if err != nil {
-							return nil, err
-						}
-						started(run.ID)
-						if err := env.sessions.RecordFileChange(runCtx, state.FileChange{
-							SessionID: env.session, RunID: run.ID, Path: path,
-						}); err != nil {
-							return nil, err
-						}
-						return &agent.Result{}, outcome.err
-					})),
-				)
-				out, err := svc.Submit(context.Background(), TurnRequest{SessionID: env.session}, nil)
-				if err != nil && outcome.err == nil {
-					t.Fatalf("submit: %v", err)
-				}
-				if rows := env.runArtifacts(t, out.RunID); len(rows) != 0 {
-					t.Fatalf("%s %s turn registered engine-side artifacts: %+v", pt, outcome.name, rows)
-				}
-			})
-		}
+// TestSubmitOfficeTurnRegistersNoFallbackArtifacts pins the half of the
+// owner's 2026-11-19/2026-11-21 contract that stands: an office conversation
+// delivers only what the model presents, when the model judges the work
+// complete. A helper script the model kept out of the delivery set stays out,
+// even though the ledger tracked the write. Coding is the exception — the work
+// is the deliverable there — and its turns are pinned by the
+// TestSubmitCoding* cases below.
+func TestSubmitOfficeTurnRegistersNoFallbackArtifacts(t *testing.T) {
+	const pt = state.ProjectTypeOffice
+	for _, outcome := range []struct {
+		name string
+		err  error
+	}{
+		{"completed", nil},
+		{"cancelled", context.Canceled},
+		{"failed", errors.New("boom")},
+	} {
+		t.Run(pt+"/"+outcome.name, func(t *testing.T) {
+			env := newDeliverableEnv(t, pt)
+			path := env.write(t, ".work/helper.py", "package main\n")
+			svc := New(
+				WithSessionStore(env.sessions),
+				WithRunEventStore(env.runs),
+				WithBatchTasks(nil, env.sessions, nil),
+				WithRunExecutor(runFunc(func(runCtx context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+					run, err := env.runs.CreateRun(runCtx, env.session, "work")
+					if err != nil {
+						return nil, err
+					}
+					started(run.ID)
+					if err := env.sessions.RecordFileChange(runCtx, state.FileChange{
+						SessionID: env.session, RunID: run.ID, Path: path,
+					}); err != nil {
+						return nil, err
+					}
+					return &agent.Result{}, outcome.err
+				})),
+			)
+			out, err := svc.Submit(context.Background(), TurnRequest{SessionID: env.session}, nil)
+			if err != nil && outcome.err == nil {
+				t.Fatalf("submit: %v", err)
+			}
+			if rows := env.runArtifacts(t, out.RunID); len(rows) != 0 {
+				t.Fatalf("%s %s turn registered engine-side artifacts: %+v", pt, outcome.name, rows)
+			}
+		})
 	}
 }
 
@@ -1418,6 +1416,226 @@ func TestSubmitKeepsModelPresentedArtifacts(t *testing.T) {
 	if len(rows) != 1 || rows[0].Origin != state.ArtifactOriginModel || rows[0].Name != "2026Q3-report.docx" {
 		t.Fatalf("artifacts = %+v, want exactly the model-presented deliverable", rows)
 	}
+}
+
+// submitCodingTurn runs one coding conversation's turn whose run already exists
+// — so a test can fill the ledger of that run and of the subagent runs it
+// spawned before the turn reaches its terminal branch — and returns the rows
+// the turn's run holds when Submit comes back, with the outcome.
+func (e *deliverableEnv) submitCodingTurn(t *testing.T, outcome error, prepare func(parent *state.Run) error) ([]state.Artifact, TurnOutcome) {
+	t.Helper()
+	ctx := context.Background()
+	parent, err := e.runs.CreateRun(ctx, e.session, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepare != nil {
+		if err := prepare(parent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := New(
+		WithSessionStore(e.sessions),
+		WithRunEventStore(e.runs),
+		WithBatchTasks(nil, e.sessions, nil),
+		WithRunExecutor(runFunc(func(context.Context, TurnRequest, func(string)) (*agent.Result, error) {
+			return &agent.Result{}, outcome
+		})),
+	)
+	// The executor's run is the one the test prepared: announcing its id is
+	// what tells the top-up whose tree to read.
+	svc.runner = runFunc(func(_ context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+		started(parent.ID)
+		return &agent.Result{}, outcome
+	})
+	out, err := svc.Submit(ctx, TurnRequest{SessionID: e.session}, nil)
+	if err != nil && outcome == nil {
+		t.Fatalf("submit: %v", err)
+	}
+	return e.runArtifacts(t, out.RunID), out
+}
+
+// TestSubmitCodingTurnRegistersUnpresentedWrittenFiles is the defect the plan
+// fixes: a coding turn's subagent writes inside a worktree, the model presents
+// only the plan files, and the worktree's file never reached the delivery list.
+// The turn-end top-up must register it as a fallback row beside what the model
+// presented.
+func TestSubmitCodingTurnRegistersUnpresentedWrittenFiles(t *testing.T) {
+	env := newDeliverableEnv(t, state.ProjectTypeCoding)
+	presented := env.write(t, "plans/x.md", "# plan\n")
+	worktreeFile := env.write(t, ".worktrees/demo/src/a.go", "package a\n")
+	rows, out := env.submitCodingTurn(t, nil, func(parent *state.Run) error {
+		env.recordChange(t, parent.ID, presented, false)
+		if _, err := env.sessions.AddArtifact(context.Background(), state.Artifact{
+			SessionID: env.session, RunID: parent.ID, Path: presented,
+			RelPath: "plans/x.md", Name: "x.md", Kind: "document",
+			SHA256: rowsOf(t, presented), Origin: state.ArtifactOriginModel,
+		}); err != nil {
+			return err
+		}
+		child, err := env.runs.CreateSubagentRun(context.Background(), parent.ID, env.session, "executor")
+		if err != nil {
+			return err
+		}
+		env.recordChange(t, child.ID, worktreeFile, false)
+		return nil
+	})
+	if len(rows) != 2 {
+		t.Fatalf("artifacts = %+v, want the presented plan and the worktree write", rows)
+	}
+	var fallback []state.Artifact
+	for _, row := range rows {
+		if row.Origin == state.ArtifactOriginFallback {
+			fallback = append(fallback, row)
+		}
+	}
+	if len(fallback) != 1 {
+		t.Fatalf("fallback rows = %+v, want exactly the worktree file", fallback)
+	}
+	if rows[0].Origin != state.ArtifactOriginModel && rows[1].Origin != state.ArtifactOriginModel {
+		t.Fatalf("the model's presentation was replaced: %+v", rows)
+	}
+	if rel := fallback[0].RelPath; rel != ".worktrees/demo/src/a.go" {
+		t.Fatalf("fallback RelPath = %q, want the worktree-relative path", rel)
+	}
+	if fallback[0].RunID != out.RunID {
+		t.Fatalf("fallback row belongs to run %q, want the turn's run %q", fallback[0].RunID, out.RunID)
+	}
+}
+
+// TestSubmitCodingTurnWithNoPresentationStillListsWrites is the worst case the
+// owner chose: a coding turn that presented nothing still delivers the files
+// its tools wrote.
+func TestSubmitCodingTurnWithNoPresentationStillListsWrites(t *testing.T) {
+	env := newDeliverableEnv(t, state.ProjectTypeCoding)
+	written := env.write(t, ".worktrees/demo/src/a.go", "package a\n")
+	rows, _ := env.submitCodingTurn(t, nil, func(parent *state.Run) error {
+		env.recordChange(t, parent.ID, written, false)
+		return nil
+	})
+	if len(rows) != 1 || rows[0].Origin != state.ArtifactOriginFallback || rows[0].RelPath != ".worktrees/demo/src/a.go" {
+		t.Fatalf("artifacts = %+v, want exactly the write as a fallback row", rows)
+	}
+}
+
+// TestSubmitCodingTurnShellStepWorktreePathRegisters pins the second source of
+// the tracked write set: a shell step's changed_files, which carries the paths
+// the file-change ledger never saw (a command that wrote the file itself).
+func TestSubmitCodingTurnShellStepWorktreePathRegisters(t *testing.T) {
+	env := newDeliverableEnv(t, state.ProjectTypeCoding)
+	written := env.write(t, ".worktrees/demo/pkg/a.go", "package a\n")
+	rows, _ := env.submitCodingTurn(t, nil, func(parent *state.Run) error {
+		child, err := env.runs.CreateSubagentRun(context.Background(), parent.ID, env.session, "executor")
+		if err != nil {
+			return err
+		}
+		return env.appendShellStep(child.ID, written)
+	})
+	if len(rows) != 1 || rows[0].Origin != state.ArtifactOriginFallback || rows[0].RelPath != ".worktrees/demo/pkg/a.go" {
+		t.Fatalf("artifacts = %+v, want the shell step's write as a fallback row", rows)
+	}
+}
+
+// TestSubmitCodingTurnPresentThenEditRegistersNewVersion pins the version
+// comparison: presenting one version does not cover the bytes the turn wrote
+// afterwards, and the newer version is registered under the same path.
+func TestSubmitCodingTurnPresentThenEditRegistersNewVersion(t *testing.T) {
+	env := newDeliverableEnv(t, state.ProjectTypeCoding)
+	presented := env.write(t, "plans/x.md", "# plan v1\n")
+	rows, _ := env.submitCodingTurn(t, nil, func(parent *state.Run) error {
+		env.recordChange(t, parent.ID, presented, false)
+		if _, err := env.sessions.AddArtifact(context.Background(), state.Artifact{
+			SessionID: env.session, RunID: parent.ID, Path: presented,
+			RelPath: "plans/x.md", Name: "x.md", Kind: "document",
+			SHA256: rowsOf(t, presented), Origin: state.ArtifactOriginModel,
+		}); err != nil {
+			return err
+		}
+		// The same turn edits the file again after presenting it.
+		env.write(t, "plans/x.md", "# plan v2\n")
+		env.recordChange(t, parent.ID, presented, false)
+		return nil
+	})
+	if len(rows) != 2 {
+		t.Fatalf("artifacts = %+v, want the presented version and the edit", rows)
+	}
+	if rows[0].RelPath != rows[1].RelPath || rows[0].SHA256 == rows[1].SHA256 {
+		t.Fatalf("artifacts = %+v, want two versions of one path", rows)
+	}
+	if rows[1].Origin != state.ArtifactOriginFallback {
+		t.Fatalf("the later version's origin = %q, want fallback", rows[1].Origin)
+	}
+}
+
+// TestSubmitCodingTopUpSkipsDeletedGitAndOutside pins what a deliverable is
+// not: a deleted write, git metadata, and anything outside the project.
+func TestSubmitCodingTopUpSkipsDeletedGitAndOutside(t *testing.T) {
+	env := newDeliverableEnv(t, state.ProjectTypeCoding)
+	deleted := env.write(t, "src/gone.go", "package gone\n")
+	gitMeta := env.write(t, ".git/x", "ref\n")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("elsewhere"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := env.submitCodingTurn(t, nil, func(parent *state.Run) error {
+		for _, path := range []string{deleted, gitMeta, outside} {
+			env.recordChange(t, parent.ID, path, path == deleted)
+		}
+		return nil
+	})
+	if len(rows) != 0 {
+		t.Fatalf("artifacts = %+v, want none of the deleted, git or outside paths", rows)
+	}
+}
+
+// TestSubmitCodingTopUpTruncatesAtLimitSorted pins the cap's reproducibility:
+// 250 candidates register exactly the 200 whose paths sort first, so two runs
+// over one write set deliver the same rows.
+func TestSubmitCodingTopUpTruncatesAtLimitSorted(t *testing.T) {
+	env := newDeliverableEnv(t, state.ProjectTypeCoding)
+	const candidates = 250
+	var all []string
+	for i := 0; i < candidates; i++ {
+		all = append(all, env.write(t, fmt.Sprintf("pkg/f%03d/a.go", i), "package a\n"))
+	}
+	rows, _ := env.submitCodingTurn(t, nil, func(parent *state.Run) error {
+		for _, path := range all {
+			env.recordChange(t, parent.ID, path, false)
+		}
+		return nil
+	})
+	if len(rows) != turnDeliverablePathLimit {
+		t.Fatalf("registered %d rows, want the cap of %d", len(rows), turnDeliverablePathLimit)
+	}
+	got := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		got[row.RelPath] = true
+	}
+	for i := 0; i < turnDeliverablePathLimit; i++ {
+		rel := fmt.Sprintf("pkg/f%03d/a.go", i)
+		if !got[rel] {
+			t.Fatalf("the sorted prefix is missing %q", rel)
+		}
+	}
+}
+
+// appendShellStep stores one completed shell step whose diff reports the given
+// changed files, the way the tool layer leaves it for the top-up to read.
+func (e *deliverableEnv) appendShellStep(runID string, changed ...string) error {
+	payload, err := json.Marshal(map[string]any{
+		"output": map[string]any{
+			"shell_edit_diff": map[string]any{"changed_files": changed},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = e.runs.AppendSessionEvent(context.Background(), state.SessionEvent{
+		ID: uuid.NewString(), SessionID: e.session, RunID: runID,
+		Type:    event.RunEventToolCompleted,
+		Payload: payload,
+	})
+	return err
 }
 
 // rowsOf hashes a file the way the store's rows do.

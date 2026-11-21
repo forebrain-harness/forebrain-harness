@@ -6,10 +6,14 @@
 // hands it over, and every surface that shows what a conversation delivered —
 // the web card, the run's end frame, a batch task's integrator — reads that
 // table. Intermediate scripts and scratch files are never artifacts because
-// the model never presents them. Batch conversations carry one harness rule
-// on top (an integration surface, not an end user): at each execution end the
-// engine also registers the not-yet-delivered files left in the protocol
-// folder outputs/ (pkg/turn/batch.go).
+// the model never presents them. Two harness rules sit on top. Batch
+// conversations (an integration surface, not an end user): at each execution
+// end the engine also registers the not-yet-delivered files left in the
+// protocol folder outputs/ (pkg/turn/batch.go). Coding conversations (owner
+// 2026-11-21): the work is the deliverable, so at each turn's end the engine
+// also registers every file the turn's file tools wrote inside the project
+// that the model did not present (pkg/turn/deliverables.go) — there a
+// presentation adds the title and description rather than the entry.
 package tool
 
 import (

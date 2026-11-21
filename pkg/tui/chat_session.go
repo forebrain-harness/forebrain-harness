@@ -1126,6 +1126,12 @@ func (s *ChatSession) interruptUncertainTUIApproval(sessionID string, wait state
 		return
 	}
 	_ = s.runSvc().SetStatus(bg, wait.RunID, state.RunStatusFailed)
+	// This run ends here, with no turn end of its own to settle it: register
+	// what it wrote before the frame that lists it. A subagent's run is the
+	// seam's own guard's business (it settles nothing for a child).
+	if s.Core != nil {
+		s.Core.CollectRunDeliverables(bg, sessionID, wait.RunID)
+	}
 	_ = s.publishTUIRunEvent(bg, sessionID, wait.RunID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
 	if strings.TrimSpace(wait.AgentID) != "" {
 		run, _ := s.runSvc().GetRun(bg, wait.RunID)
@@ -1157,6 +1163,11 @@ func (s *ChatSession) failRecoveredApproval(sessionID, actionID, reason string) 
 	bg := context.Background()
 	_ = s.runSvc().ClearWait(bg, runID)
 	_ = s.runSvc().SetStatus(bg, runID, state.RunStatusFailed)
+	// An expired or failed gate leaves this run no later turn end, so its
+	// deliverables are settled before the error frame that lists them.
+	if s.Core != nil {
+		s.Core.CollectRunDeliverables(bg, sessionID, runID)
+	}
 	// Publishing the turn error is what draws it, live as on replay.
 	_ = s.publishTUIRunEvent(bg, sessionID, runID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
 	s.tuiController().Cancel(runID, errors.New(reason))

@@ -31,8 +31,12 @@ func TestCodingDeliveryPromptCoversTheCompletenessRule(t *testing.T) {
 		"including files inside a worktree",
 		"relative to that checkout",
 		"A deleted file cannot be presented",
-		"deliver exactly those",
+		"present exactly those",
 		"When you judge the turn's work complete",
+		// The engine's half: the model's presentation is the title and the
+		// description, not the completeness of the list (owner 2026-11-21).
+		"The engine also registers, at the turn's end, every file this turn's file tools wrote inside the project that you did not present",
+		"presenting a file yourself is what gives it a title and description, not what makes the list complete",
 	} {
 		if !strings.Contains(CodingDeliveryPrompt, want) {
 			t.Errorf("CodingDeliveryPrompt missing %q", want)
