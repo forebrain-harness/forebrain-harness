@@ -25,7 +25,7 @@ Executor model: the one the user named if they named one (`execute 003 <model>`)
 
 The subagent prompt must contain, in order:
 
-1. **The full plan text, inlined, then its file path.** The worktree contains only committed files — if the backlog is uncommitted, the executor can't read it. Never summarize or shorten it.
+1. **Where to work.** The brief places the executor: you are already inside `<main worktree>/.worktrees/<name>`, on the branch `<name>` the dispatch created from HEAD; every read, edit, command and commit happens there and nowhere else, so never create the worktree yourself.
 2. The executor preamble, word for word:
 
 > You are the executor for the implementation plan below. Work only inside the git worktree named above. Follow the plan step by step. Run every verification command and confirm the expected result before moving on. Touch only the files the plan lists as in scope. If any STOP condition occurs, stop immediately and report. Do not improvise around obstacles. A fresh worktree has no installed dependencies or build output: install and build what the verification commands need first. Commit your work in the worktree, on its own branch, following the plan's git workflow when it has one; never push, merge or touch any other branch. Skip any instruction to update a backlog index or the plan file: your reviewer maintains them. Before reporting, audit every claim in your report against an actual tool result from this session; only report what you can point to evidence for, and if a verification failed or was skipped, say so plainly. When finished, reply with exactly the report format below.
@@ -40,6 +40,8 @@ STOPPED BECAUSE: (only if STOPPED) which STOP condition, what was observed
 FILES CHANGED: list
 NOTES: deviations, surprises, judgment calls
 ```
+
+4. **The full plan text, inlined, then its file path.** The worktree contains only committed files — if the backlog is uncommitted, the executor can't read it. Never summarize or shorten it.
 
 Note on fresh worktrees: they share history but not installed dependencies or build output — the executor must install what the verification commands need first, and a check that resolves from a built artifact may need one build even though the plan's command table (recon'd in the main tree) didn't mention it. Expect this; it isn't a deviation.
 
