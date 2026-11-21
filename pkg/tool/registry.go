@@ -179,8 +179,8 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 		registerMeta(tLSP, lspToolDescription, "code", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
 	}
 	// Deliverables belong to the conversation, not the process: every
-	// project type registers the tool with the same contract, so a coding
-	// session hands back finished files exactly like an office or batch one.
+	// project type registers the tool, so a coding session hands back
+	// finished files exactly like an office or batch one.
 	var tPresent *llm.Tool
 	if rt != nil {
 		tPresent, err = newPresentFilesTool(st, rt)
@@ -313,7 +313,8 @@ type AgentToolRuntime struct {
 	ProjectKey          string
 	// ProjectType is the session's project type. It gates the batch posture
 	// (batchProject) and the session-tool set; present_files is registered
-	// for every type with the same contract.
+	// for every type, and its description and result sentence are chosen by
+	// this type (presentFilesCopyFor).
 	ProjectType string
 	// BatchSandbox is the batch project's sandbox switch (plans/216): with it
 	// off — and on a machine with no sandbox to begin with — a batch task's

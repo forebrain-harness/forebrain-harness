@@ -14,6 +14,13 @@
 // also registers every file the turn's file tools wrote inside the project
 // that the model did not present (pkg/turn/deliverables.go) — there a
 // presentation adds the title and description rather than the entry.
+//
+// What counts as a deliverable is also the project type's own rule, so the
+// tool's description and the sentence its result carries are chosen per type
+// (presentFilesCopyFor): a coding conversation is asked for the files the
+// turn changed, an office one for the finished documents it produced and a
+// batch task for what it left in outputs/ — one contract, three sets of
+// words.
 package tool
 
 import (
@@ -38,10 +45,15 @@ import (
 // only the primary agent may call it.
 const presentFilesToolName = "present_files"
 
-// presentFilesToolDescription is the tool's contract with the model, frozen
-// verbatim in testdata/present_files_description.golden: teaching the model
-// when to deliver is prompt work, but what the tool does is this text.
-const presentFilesToolDescription = "Use when your work produced files the user (or the system that started this task) should receive: documents, spreadsheets, slides, PDFs, images, audio or video, HTML or Markdown pages, archives. Call it once, after the files are final, listing every deliverable; the user gets a download and preview card for each one. Do not present intermediate scripts, scratch data or files you did not finish. Paths must be inside the project directory — save or copy a deliverable there first if it was written elsewhere. Presenting the same path again later records a new version."
+// The tool's contract with the model, one set of words per project type
+// (presentFilesCopyFor): each description leads with that type's delivery
+// rule — the first rule the type's prompt states — and closes with the
+// mechanics all three share. Teaching the model when to deliver is prompt
+// work; what the tool does is this text. Each is frozen verbatim in
+// testdata/present_files_description_<type>.golden.
+const presentFilesToolDescriptionCoding = "When the user's message names the files to deliver, present exactly those — no others and none missing — even if this turn changed more. Otherwise, in this project the work itself is the deliverable: every file this turn created or modified inside the project directory — source code, scripts, configuration, data, documents, images, audio or video, archives; no kind of file is excluded. Do not present a file this turn did not change, a deleted file, or a file created only to have something to present. Call it once, after the files are final, listing every deliverable; each one gets a download and preview card. Paths must be inside the project directory — save or copy a deliverable there first if it was written elsewhere. Presenting the same path again later records a new version."
+const presentFilesToolDescriptionOffice = "When the user's message names the files to deliver, present exactly those — no others and none missing. Otherwise the deliverables are the finished work this turn produced: documents, spreadsheets, slides, PDFs, images, audio or video, HTML or Markdown pages, archives. Do not present helper scripts, intermediate data or scratch files (they belong in the project's .work/ folder) unless the user explicitly asked for them, or anything you have not finished. Call it once, after the files are final, listing every deliverable; each one gets a download and preview card. Paths must be inside the project directory — save or copy a deliverable there first if it was written elsewhere. Presenting the same path again later records a new version."
+const presentFilesToolDescriptionBatch = "When the task message names the files to deliver, present exactly those — no others and none missing. Otherwise the deliverables are the files in this execution's outputs/ folder (the task workspace), which the calling system reads as the task's result. Never present helper scripts or intermediate data from .work/, and never a file that is not final. Call it once, after the files are final, listing every deliverable; each one gets a download and preview card. Paths must be inside the project directory — save or copy a deliverable there first if it was written elsewhere. Presenting the same path again later records a new version."
 
 // artifactClass is one row of the classification table below.
 type artifactClass struct {
@@ -200,20 +212,41 @@ type presentFileInput struct {
 }
 
 type presentFilesInput struct {
-	Files []presentFileInput `json:"files" jsonschema:"minItems=1,maxItems=20" jsonschema_description:"Every final deliverable of this task, in the order the user should see them."`
+	Files []presentFileInput `json:"files" jsonschema:"minItems=1" jsonschema_description:"Every final deliverable of this task, in the order the user should see them."`
 }
 
-// presentFilesToolNote is the one sentence the tool answers with; the card
-// the user sees is drawn from the rows it wrote, not from this text.
-const presentFilesToolNote = "The user now sees a download and preview card for each file."
+// The one sentence the tool answers with, per receiver: a person reading the
+// conversation, or the calling system that handed a batch task over. The card
+// is drawn from the rows it wrote, not from this text.
+const presentFilesToolNoteUser = "The user now sees a download and preview card for each file."
+const presentFilesToolNoteBatch = "The calling system receives the task's result, with a download and preview card for each file."
+
+// presentFilesCopyFor is one project type's model-visible wording: the tool's
+// description and the sentence its result carries. The behaviour behind the
+// words is one contract in all three. The value arrives normalized
+// (pkg/run/runner.go ProjectType), so the comparison matches batchProject's;
+// keep the wording in step with agent.CodingDeliveryPrompt /
+// agent.OfficeWorkPrompt / agent.BatchTaskPrompt — those prompts name this
+// tool, and a mismatch is the defect this selector exists to remove.
+func presentFilesCopyFor(projectType string) (description, note string) {
+	switch projectType {
+	case state.ProjectTypeOffice:
+		return presentFilesToolDescriptionOffice, presentFilesToolNoteUser
+	case state.ProjectTypeBatch:
+		return presentFilesToolDescriptionBatch, presentFilesToolNoteBatch
+	default:
+		return presentFilesToolDescriptionCoding, presentFilesToolNoteUser
+	}
+}
 
 // newPresentFilesTool builds the deliverable tool. It needs the session
 // store (artifacts live in the state database) and is wired up for every
-// project type with the same contract.
+// project type: the words are that type's, the behaviour is one contract.
 func newPresentFilesTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
+	desc, note := presentFilesCopyFor(rt.ProjectType)
 	return llm.NewTool(
 		presentFilesToolName,
-		presentFilesToolDescription,
+		desc,
 		func(ctx context.Context, in *presentFilesInput) (string, error) {
 			if rt == nil || rt.Sess == nil {
 				return "", fmt.Errorf("present_files unavailable")
@@ -267,7 +300,7 @@ func newPresentFilesTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			// (the failure's own words ride evt.Error, never this payload).
 			rows := make([]any, 0, len(staged))
 			payload := func() map[string]any {
-				return map[string]any{"presented": rows, "note": presentFilesToolNote}
+				return map[string]any{"presented": rows, "note": note}
 			}
 			for _, s := range staged {
 				sum, kind, mimeType, preview, err := hashAndClassifyFile(s.resolved)

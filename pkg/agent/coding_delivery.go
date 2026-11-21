@@ -8,7 +8,7 @@ package agent
 // the turn's end (pkg/turn/deliverables.go), so what present_files still
 // owns is the title and the description of each file, not the completeness
 // of the list: the model presents when it judges the work complete. The
-// shared tool description stays frozen.
+// tool description is chosen per project type.
 const CodingDeliveryPrompt = `
 
 # Hand over every file this turn touched

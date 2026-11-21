@@ -117,21 +117,35 @@ func TestClassifyArtifactTable(t *testing.T) {
 	}
 }
 
-func TestPresentFilesDescriptionGolden(t *testing.T) {
-	st := NewState(t.TempDir())
-	tool, err := newPresentFilesTool(st, &AgentToolRuntime{Sess: newStateSessionStoreForTest(t)})
-	if err != nil {
-		t.Fatalf("newPresentFilesTool: %v", err)
-	}
-	if got := tool.Description(); got != presentFilesToolDescription {
-		t.Fatalf("Description() drifted from the constant:\n%q\n%q", got, presentFilesToolDescription)
-	}
-	golden, err := os.ReadFile(filepath.Join("testdata", "present_files_description.golden"))
-	if err != nil {
-		t.Fatalf("read golden: %v", err)
-	}
-	if want := strings.TrimSuffix(string(golden), "\n"); want != presentFilesToolDescription {
-		t.Fatalf("golden drifted from the constant:\n%q\n%q", want, presentFilesToolDescription)
+// TestPresentFilesDescriptionPerProjectType pins each project type's own
+// description: the tool a session gets must say what that type's prompt asks
+// for, and the golden beside it is the text a reviewer diffs.
+func TestPresentFilesDescriptionPerProjectType(t *testing.T) {
+	for _, tc := range []struct {
+		projectType string
+		description string
+		golden      string
+	}{
+		{projectType: state.ProjectTypeCoding, description: presentFilesToolDescriptionCoding, golden: "present_files_description_coding.golden"},
+		{projectType: state.ProjectTypeOffice, description: presentFilesToolDescriptionOffice, golden: "present_files_description_office.golden"},
+		{projectType: state.ProjectTypeBatch, description: presentFilesToolDescriptionBatch, golden: "present_files_description_batch.golden"},
+	} {
+		st := NewState(t.TempDir())
+		tl, err := newPresentFilesTool(st, &AgentToolRuntime{Sess: newStateSessionStoreForTest(t), ProjectType: tc.projectType})
+		if err != nil {
+			t.Fatalf("newPresentFilesTool(%s): %v", tc.projectType, err)
+		}
+		got := tl.Description()
+		if got != tc.description {
+			t.Fatalf("%s: Description() drifted from the constant:\n%q\n%q", tc.projectType, got, tc.description)
+		}
+		golden, err := os.ReadFile(filepath.Join("testdata", tc.golden))
+		if err != nil {
+			t.Fatalf("read golden %s: %v", tc.golden, err)
+		}
+		if want := strings.TrimSuffix(string(golden), "\n"); want != tc.description {
+			t.Fatalf("%s: golden drifted from the constant:\n%q\n%q", tc.projectType, want, tc.description)
+		}
 	}
 }
 
@@ -358,6 +372,11 @@ func TestPresentFilesRegisteredForEveryProjectType(t *testing.T) {
 		for _, tool := range a.Tools() {
 			if tool.Name() == "present_files" {
 				registered = true
+				// The registered tool carries this type's words, not a
+				// neighbour's: one registration site, per-type text.
+				if want, _ := presentFilesCopyFor(tc.projectType); tool.Description() != want {
+					t.Fatalf("project type %q registered present_files with another type's description:\n%q\n%q", tc.projectType, tool.Description(), want)
+				}
 			}
 		}
 		if registered != tc.want {
@@ -643,6 +662,221 @@ func TestFormatPresentFilesStepNeverShowsJSON(t *testing.T) {
 		body, _ = FormatToolStepResult(bad, DefaultMaxFormattedBody)
 		if body != "Presented files." {
 			t.Fatalf("malformed output body = %q, want the fallback line", body)
+		}
+	}
+}
+
+// presentFilesMechanicsSentence is the closing sentence all three
+// descriptions share verbatim: the tool's mechanics have one wording, only
+// what counts as a deliverable changes with the project type.
+const presentFilesMechanicsSentence = "Call it once, after the files are final, listing every deliverable; each one gets a download and preview card. Paths must be inside the project directory — save or copy a deliverable there first if it was written elsewhere. Presenting the same path again later records a new version."
+
+// TestPresentFilesDescriptionNamesEachTypesRule pins that each project type
+// is taught its own delivery rule — and not another type's.
+func TestPresentFilesDescriptionNamesEachTypesRule(t *testing.T) {
+	coding, office, batch := presentFilesToolDescriptionCoding, presentFilesToolDescriptionOffice, presentFilesToolDescriptionBatch
+
+	for name, desc := range map[string]string{"coding": coding, "office": office, "batch": batch} {
+		// The first rule of all three is the user's named set.
+		if !strings.Contains(desc, "present exactly those") {
+			t.Errorf("%s: description lost the named-set rule:\n%s", name, desc)
+		}
+		if !strings.HasSuffix(desc, presentFilesMechanicsSentence) {
+			t.Errorf("%s: description does not end with the shared mechanics sentence:\n%s", name, desc)
+		}
+	}
+
+	for _, want := range []string{"source code, scripts", "no kind of file is excluded"} {
+		if !strings.Contains(coding, want) {
+			t.Errorf("coding: description lost %q:\n%s", want, coding)
+		}
+	}
+	// The office exclusion is exactly what a coding turn must not be told.
+	if strings.Contains(coding, "intermediate scripts") {
+		t.Errorf("coding: description still teaches the office rule:\n%s", coding)
+	}
+
+	for _, want := range []string{"helper scripts", ".work/", "unless the user explicitly asked for them"} {
+		if !strings.Contains(office, want) {
+			t.Errorf("office: description lost %q:\n%s", want, office)
+		}
+	}
+	if strings.Contains(office, "source code, scripts") {
+		t.Errorf("office: description teaches the coding rule:\n%s", office)
+	}
+
+	for _, want := range []string{"outputs/", ".work/", "calling system"} {
+		if !strings.Contains(batch, want) {
+			t.Errorf("batch: description lost %q:\n%s", want, batch)
+		}
+	}
+
+	if coding == office || coding == batch || office == batch {
+		t.Fatal("two project types share one description: the selector is not choosing")
+	}
+}
+
+// TestPresentFilesNoteNamesTheReceiver pins the sentence the model reads back:
+// the receiver differs between a conversation and a calling system.
+func TestPresentFilesNoteNamesTheReceiver(t *testing.T) {
+	for _, tc := range []struct {
+		projectType string
+		want        string
+	}{
+		{projectType: state.ProjectTypeCoding, want: presentFilesToolNoteUser},
+		{projectType: state.ProjectTypeOffice, want: presentFilesToolNoteUser},
+		{projectType: state.ProjectTypeBatch, want: presentFilesToolNoteBatch},
+	} {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "delivered.txt"), []byte("final"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ctx := presentFilesTestCtx(t, root)
+		sess := newStateSessionStoreForTest(t)
+		if err := sess.Ensure(ctx, "sess-art", "conversation"); err != nil {
+			t.Fatal(err)
+		}
+		tl, err := newPresentFilesTool(NewState(t.TempDir()), &AgentToolRuntime{Sess: sess, ProjectType: tc.projectType})
+		if err != nil {
+			t.Fatalf("newPresentFilesTool(%s): %v", tc.projectType, err)
+		}
+		args, _ := json.Marshal(presentFilesInput{Files: []presentFileInput{{Path: "delivered.txt"}}})
+		out, err := tl.Handle(ctx, string(args))
+		if err != nil {
+			t.Fatalf("%s: present_files: %v", tc.projectType, err)
+		}
+		text, _ := out.(string)
+		var payload struct {
+			Note string `json:"note"`
+		}
+		if err := json.Unmarshal([]byte(text), &payload); err != nil {
+			t.Fatalf("%s: result is not the JSON payload: %v\n%s", tc.projectType, err, text)
+		}
+		if payload.Note != tc.want {
+			t.Fatalf("%s: note = %q, want %q", tc.projectType, payload.Note, tc.want)
+		}
+		if tc.projectType == state.ProjectTypeBatch && strings.Contains(payload.Note, "The user") {
+			t.Fatalf("batch: note still addresses a person: %q", payload.Note)
+		}
+	}
+}
+
+// TestPresentFilesSchemaHasNoFileCap pins that the schema declares no ceiling
+// the tool no longer enforces: one call lists the whole deliverable set, and
+// the count is bounded by the model's context, not by a number in the schema.
+func TestPresentFilesSchemaHasNoFileCap(t *testing.T) {
+	tl, err := newPresentFilesTool(NewState(t.TempDir()), &AgentToolRuntime{Sess: newStateSessionStoreForTest(t)})
+	if err != nil {
+		t.Fatalf("newPresentFilesTool: %v", err)
+	}
+	props, _ := tl.InputSchema()["properties"].(map[string]any)
+	files, ok := props["files"].(map[string]any)
+	if !ok {
+		t.Fatalf("files property not found in the tool schema: %#v", tl.InputSchema())
+	}
+	if limit, capped := files["maxItems"]; capped {
+		t.Fatalf("files schema still caps the count: %v", limit)
+	}
+	raw, declared := files["minItems"]
+	if !declared {
+		t.Fatalf("files schema lost its one-file minimum: %#v", files)
+	}
+	if b, _ := json.Marshal(raw); string(b) != "1" {
+		t.Fatalf("files minItems = %s, want 1", b)
+	}
+}
+
+// TestPresentFilesAcceptsPastTheOldCap is the runtime half of the removed
+// ceiling: a call listing more files than the schema used to allow is
+// recorded whole, not rejected.
+func TestPresentFilesAcceptsPastTheOldCap(t *testing.T) {
+	root := t.TempDir()
+	files := make([]presentFileInput, 0, 21)
+	for i := 0; i < 21; i++ {
+		name := fmt.Sprintf("part-%02d.txt", i)
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, presentFileInput{Path: name})
+	}
+	ctx := presentFilesTestCtx(t, root)
+	sess := newStateSessionStoreForTest(t)
+	if err := sess.Ensure(ctx, "sess-art", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	tl, err := newPresentFilesTool(NewState(t.TempDir()), &AgentToolRuntime{Sess: sess, ProjectType: state.ProjectTypeCoding})
+	if err != nil {
+		t.Fatalf("newPresentFilesTool: %v", err)
+	}
+	args, _ := json.Marshal(presentFilesInput{Files: files})
+	out, err := tl.Handle(ctx, string(args))
+	if err != nil {
+		t.Fatalf("present_files refused 21 files: %v", err)
+	}
+	text, _ := out.(string)
+	var payload struct {
+		Presented []map[string]any `json:"presented"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		t.Fatalf("result is not the JSON payload: %v", err)
+	}
+	if len(payload.Presented) != 21 {
+		t.Fatalf("presented = %d rows, want 21", len(payload.Presented))
+	}
+	rows, err := sess.ListArtifactsForRun(context.Background(), "run-art")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 21 {
+		t.Fatalf("artifact rows = %d, want 21", len(rows))
+	}
+}
+
+// TestPresentFilesDescriptionDefaultsToCoding pins the default arm: a runtime
+// with no project type, or a type the tool does not know, is a coding session
+// — the same normalization the runner and NormalizeProjectType apply.
+func TestPresentFilesDescriptionDefaultsToCoding(t *testing.T) {
+	for _, projectType := range []string{"", "wiki"} {
+		desc, note := presentFilesCopyFor(projectType)
+		if desc != presentFilesToolDescriptionCoding {
+			t.Fatalf("project type %q did not fall back to the coding description:\n%s", projectType, desc)
+		}
+		if note != presentFilesToolNoteUser {
+			t.Fatalf("project type %q: note = %q, want %q", projectType, note, presentFilesToolNoteUser)
+		}
+	}
+}
+
+// TestPresentFilesDescriptionKeepsThePromptPhrases cross-checks the tool's
+// text against the prompts that name the tool: the two are written in two
+// packages, and a phrase that drifts apart is the mismatch this selector
+// exists to remove. The shared fragment is verb-neutral on purpose — the
+// prompts say "deliver", the tool says "present".
+func TestPresentFilesDescriptionKeepsThePromptPhrases(t *testing.T) {
+	shared := "exactly those — no others and none missing"
+	for name, desc := range map[string]string{
+		"coding": presentFilesToolDescriptionCoding,
+		"office": presentFilesToolDescriptionOffice,
+		"batch":  presentFilesToolDescriptionBatch,
+	} {
+		if !strings.Contains(desc, shared) {
+			t.Errorf("%s: description lost the shared named-set fragment %q", name, shared)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		a, b   string
+		shared string
+	}{
+		{name: "coding delivery", a: presentFilesToolDescriptionCoding, b: agent.CodingDeliveryPrompt, shared: "every file this turn created or modified"},
+		{name: "office work", a: presentFilesToolDescriptionOffice, b: agent.OfficeWorkPrompt, shared: ".work/"},
+		{name: "batch task", a: presentFilesToolDescriptionBatch, b: agent.BatchTaskPrompt, shared: "outputs/"},
+	} {
+		if !strings.Contains(tc.a, tc.shared) {
+			t.Errorf("%s: tool description lost %q", tc.name, tc.shared)
+		}
+		if !strings.Contains(tc.b, tc.shared) {
+			t.Errorf("%s: prompt lost %q", tc.name, tc.shared)
 		}
 	}
 }
