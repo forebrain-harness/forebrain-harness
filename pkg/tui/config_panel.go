@@ -1,6 +1,5 @@
 // The /config panel (plan 190): every configuration section the state
-// database stores, browsable and editable from the terminal, plus the two
-// forebrain.yaml sections the panel only shows.
+// database stores, browsable and editable from the terminal.
 //
 // A confirmed edit writes the section's JSON through the state store's one
 // legal write path — ConfigStore.UpdateSection, with the process-wide section
@@ -29,7 +28,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
-	"go.yaml.in/yaml/v2"
 )
 
 // The panel's fixed rows and notice lines.
@@ -44,12 +42,6 @@ const (
 	configRowOpenLabel = "Open"
 	configRowDropLabel = "Delete this row"
 	configRowBackLabel = "Back"
-
-	// configFileOnlyNote is the amber note every forebrain.yaml section
-	// carries (plan 328 D1, prototype html:169): the panel must not look
-	// like an editor for a section it cannot write, and the sentence is the
-	// prototype's own.
-	configFileOnlyNote = "Edit forebrain.yaml manually. Restart the process to apply."
 
 	configBoolOnLabel  = "On"
 	configBoolOffLabel = "Off"
@@ -83,15 +75,13 @@ const (
 )
 
 // configPanelSnapshot is what the panel reads when it opens: the stored
-// runtime sections as their own JSON, the forebrain.yaml sections as the
-// YAML text a reader would edit by hand, whether this machine has Claude
+// runtime sections as their own JSON, whether this machine has Claude
 // Code — the condition the interop switch is shown under (owner 2026-10-30) —
 // and the install-wide model table, which is state rather than a section and
 // is what turns a stored row id into the model name a reader recognises
 // (plan 313).
 type configPanelSnapshot struct {
 	Stored     map[string]json.RawMessage
-	File       map[string]string
 	ClaudeCode bool
 	Models     []appcfg.LLMModelConfig
 }
@@ -105,9 +95,9 @@ type configPanelSession interface {
 }
 
 // ConfigPanelSections reads the composed runtime configuration once: each
-// stored section as the JSON its fb_config row holds, and the file's startup
-// sections as YAML text. The panel keeps no subscription — a save updates its
-// own copy, and anything another surface wrote shows up on the next open.
+// stored section as the JSON its fb_config row holds. The panel keeps no
+// subscription — a save updates its own copy, and anything another surface
+// wrote shows up on the next open.
 func (s *ChatSession) ConfigPanelSections(ctx context.Context) (configPanelSnapshot, error) {
 	if s == nil || s.Env == nil {
 		return configPanelSnapshot{}, fmt.Errorf("the configuration panel is unavailable: no runtime environment")
@@ -126,21 +116,10 @@ func (s *ChatSession) ConfigPanelSections(ctx context.Context) (configPanelSnaps
 			stored[name] = raw
 		}
 	}
-	file := map[string]string{}
-	if body, err := yaml.Marshal(struct {
-		Gateway appcfg.Gateway `yaml:"gateway"`
-	}{Gateway: root.Gateway}); err == nil {
-		file["gateway"] = string(body)
-	}
-	if body, err := yaml.Marshal(struct {
-		Credentials appcfg.CredentialsSection `yaml:"credentials"`
-	}{Credentials: root.Credentials}); err == nil {
-		file["credentials"] = string(body)
-	}
 	// Judged once per open: the interop switch is shown only on a machine
 	// that has Claude Code's directory (plan 195 §3.7).
 	return configPanelSnapshot{
-		Stored: stored, File: file, ClaudeCode: process.ClaudeCodeDetected(),
+		Stored: stored, ClaudeCode: process.ClaudeCodeDetected(),
 		// The model table is state, not a section: the panel only names row
 		// ids with it (plan 313).
 		Models: root.LLMModels,
@@ -149,19 +128,13 @@ func (s *ChatSession) ConfigPanelSections(ctx context.Context) (configPanelSnaps
 
 // UpdateConfigSection stores one section's JSON as its fb_config row — nil
 // removes the row — through the state store, so the write is validated
-// against the rest of the installed configuration before it lands. A
-// forebrain.yaml section is refused: the panel only displays those, and a row
-// for one would be a second copy nothing reads.
+// against the rest of the installed configuration before it lands.
 func (s *ChatSession) UpdateConfigSection(ctx context.Context, section string, raw json.RawMessage) error {
 	if s == nil || s.Env == nil {
 		return fmt.Errorf("the configuration panel is unavailable: no runtime environment")
 	}
-	schema, ok := configSectionSchemaFor(section)
-	if !ok {
+	if _, ok := configSectionSchemaFor(section); !ok {
 		return fmt.Errorf("unknown configuration section %q", section)
-	}
-	if schema.YAMLOnly {
-		return fmt.Errorf("section %s is edited in forebrain.yaml by hand only", schema.Name)
 	}
 	store, err := s.Env.ConfigStore()
 	if err != nil {
@@ -180,7 +153,6 @@ type configPanel struct {
 	renderer *Renderer
 	session  configPanelSession
 	raw      map[string]json.RawMessage
-	file     map[string]string
 	// claudeCode is whether this machine has Claude Code, read when the
 	// panel opened: a ClaudeCodeOnly field is offered only while it holds.
 	claudeCode bool
@@ -200,7 +172,7 @@ type configPanel struct {
 }
 
 func newConfigPanel(sel Selector, renderer *Renderer, session configPanelSession) *configPanel {
-	return &configPanel{sel: sel, renderer: renderer, session: session, raw: map[string]json.RawMessage{}, file: map[string]string{}}
+	return &configPanel{sel: sel, renderer: renderer, session: session, raw: map[string]json.RawMessage{}}
 }
 
 // handleConfig opens the /config panel. With an argument it opens that
@@ -222,7 +194,6 @@ func (c *commandController) handleConfig(ctx context.Context, args []string) boo
 		return true
 	}
 	panel.raw = snapshot.Stored
-	panel.file = snapshot.File
 	panel.claudeCode = snapshot.ClaudeCode
 	panel.models = snapshot.Models
 	start := ""
@@ -277,10 +248,11 @@ func (p *configPanel) sectionRow(name string) int {
 }
 
 // chooseSection lists every section, tabbed by the group its descriptor names.
+// The page carries no title and no subtitle of its own (owner 2026-11-21): the
+// tab bar and the rows say everything, and a command panel stays bare.
 func (p *configPanel) chooseSection() (string, bool) {
 	items, names := p.sectionItems()
-	label := "Configuration\nOpen a section to see and change its settings."
-	idx, ok, err := selectRichTabbedPage(p.sel, label, items, TabbedSelectOptions{DefaultIdx: p.overviewRow})
+	idx, ok, err := selectRichTabbedPage(p.sel, "", items, TabbedSelectOptions{DefaultIdx: p.overviewRow})
 	if err != nil {
 		p.printError(err)
 		return "", false
@@ -349,7 +321,7 @@ func (p *configPanel) sectionItems() ([]SelectItem, []string) {
 // has no row for is the one reading its defaults, which is what the prototype's
 // own status column says. A section it holds says nothing.
 func (p *configPanel) sectionStatus(schema configSectionSchema) string {
-	if schema.YAMLOnly || len(p.raw[schema.storeSection()]) > 0 {
+	if len(p.raw[schema.storeSection()]) > 0 {
 		return ""
 	}
 	return configDefaultStatus
@@ -365,10 +337,6 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 	schema, ok := configSectionSchemaFor(name)
 	if !ok {
 		p.printError(fmt.Errorf("unknown configuration section %q", name))
-		return true
-	}
-	if schema.YAMLOnly {
-		p.showFileSection(schema)
 		return true
 	}
 	p.section = schema.storeSection()
@@ -629,9 +597,6 @@ func configFieldListed(field configField, claudeCode bool) bool {
 // what is missing instead of showing nothing at all.
 func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice string) string {
 	head := schema.Title + "\n" + schema.Summary
-	if len(schema.Fields) == 0 {
-		head += "\nThis section has no setting editable from the terminal."
-	}
 	if !p.claudeCode && len(schema.Fields) > 0 {
 		gated := true
 		for _, field := range schema.Fields {
@@ -648,141 +613,6 @@ func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice 
 		head += "\n" + notice
 	}
 	return head
-}
-
-// showFileSection shows a forebrain.yaml section the panel cannot write
-// (plan 328 D1, prototype html:169): the amber note under the title, the
-// prototype's two views as the page's own toggle rows — the one in force
-// carries the check — and the view's content as the rows under them. The page
-// is read-only: no editor opens from it, and Esc is the way out. A file with
-// nothing in it is the prototype's own empty state (plan 327 D4), shown under
-// the same toggle.
-func (p *configPanel) showFileSection(schema configSectionSchema) {
-	view := 0
-	for {
-		items := []SelectItem{
-			{Label: configFileReadableRow},
-			{Label: configFileYAMLRow},
-		}
-		items[view].Status = configChoiceCheckStatus
-		items = append(items, p.fileSectionRows(schema, view == 1)...)
-		idx, ok, err := selectRichPage(p.sel, schema.Title+"\n"+configFileOnlyNote, items, view)
-		if err != nil {
-			p.printError(err)
-			return
-		}
-		if !ok || idx < 0 || idx > 1 {
-			return
-		}
-		view = idx
-	}
-}
-
-// The file view's two toggle rows (plan 328 D1, prototype html:169).
-const (
-	configFileReadableRow = "Readable view"
-	configFileYAMLRow     = "YAML view"
-	// The facts both sections share: where the settings live and when they
-	// take effect.
-	configFileSourceFact   = "Source"
-	configFileAppliesFact  = "Applies after"
-	configFileSourceValue  = "forebrain.yaml"
-	configFileRestartValue = "Process restart"
-)
-
-// fileSectionRows is the file view's content rows: the readable view's facts
-// as name-and-value rows, or the YAML as numbered lines. Nothing here opens
-// an editor; the rows are the section's own text.
-func (p *configPanel) fileSectionRows(schema configSectionSchema, yamlView bool) []SelectItem {
-	body := strings.TrimSpace(p.file[schema.Name])
-	if body == "" {
-		return []SelectItem{
-			{Label: "Not configured"},
-			{Label: "This section has no explicit values in forebrain.yaml."},
-		}
-	}
-	if yamlView {
-		return configFileYAMLRows(p.file[schema.Name])
-	}
-	return p.configFileFactRows(schema)
-}
-
-// configFileYAMLRows is the YAML view: the file's own lines, numbered, with
-// every value a secret's key holds redacted before it is shown (plan 328 D1
-// and D3: the token reads [redacted], never as it is).
-func configFileYAMLRows(text string) []SelectItem {
-	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	items := make([]SelectItem, 0, len(lines))
-	for i, line := range lines {
-		shown := line
-		if m := configYAMLKeyLine.FindStringSubmatch(line); m != nil && strings.TrimSpace(m[3]) != "" && configIsSecretPath(m[2]) {
-			shown = m[1] + m[2] + ": [redacted]"
-		}
-		items = append(items, SelectItem{Label: strconv.Itoa(i + 1), Description: shown})
-	}
-	return items
-}
-
-// configYAMLKeyLine matches one YAML mapping line's key, so the YAML view can
-// redact a value without re-writing the file's own text.
-var configYAMLKeyLine = regexp.MustCompile(`^(\s*)([A-Za-z_][A-Za-z0-9_-]*):(.*)$`)
-
-// configFileFactRows is the readable view's facts grid (plan 328 D1,
-// prototype html:169): what the section holds in the words a reader needs,
-// then the two facts every file section shares.
-func (p *configPanel) configFileFactRows(schema configSectionSchema) []SelectItem {
-	facts := make([]SelectItem, 0, 5)
-	switch schema.Name {
-	case "gateway":
-		var section struct {
-			Gateway appcfg.Gateway `yaml:"gateway"`
-		}
-		if err := yaml.Unmarshal([]byte(p.file[schema.Name]), &section); err == nil {
-			token := configFileText(section.Gateway.Auth.Token)
-			if token != configSecretUnsetStatus {
-				// The file views redact rather than hide (prototype
-				// html:169): the word says a value is there without
-				// saying anything about it.
-				token = "[redacted]"
-			}
-			facts = append(facts,
-				configFileFact("Listen address", configFileText(section.Gateway.HTTPAddr)),
-				configFileFact("Authentication", "Token authentication"),
-				configFileFact("Token", token),
-			)
-		}
-	case "credentials":
-		var section struct {
-			Credentials appcfg.CredentialsSection `yaml:"credentials"`
-		}
-		if err := yaml.Unmarshal([]byte(p.file[schema.Name]), &section); err == nil {
-			facts = append(facts,
-				configFileFact("ChatGPT sign-in", configFileText(section.Credentials.ChatGPT)),
-				configFileFact("Relative paths", "Resolved from FOREBRAIN_HOME"),
-				configFileFact("Default", "FOREBRAIN_HOME/auth.json"),
-			)
-		}
-	}
-	facts = append(facts,
-		configFileFact(configFileSourceFact, configFileSourceValue),
-		configFileFact(configFileAppliesFact, configFileRestartValue),
-	)
-	return facts
-}
-
-// configFileFact is one fact row: the name in the label column, the value in
-// the row's own right-hand track.
-func configFileFact(label, value string) SelectItem {
-	return SelectItem{Label: label, Value: value}
-}
-
-// configFileText is a fact's value when the section does not say: the
-// prototype's own two words for an absent setting.
-func configFileText(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return configSecretUnsetStatus
-	}
-	return value
 }
 
 // save writes the open page's document as its section's row — the one write

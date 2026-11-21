@@ -194,10 +194,6 @@ type configSectionSchema struct {
 	Summary string
 	// Tab groups the sections the picker lists, in the tabs' own order.
 	Tab string
-	// YAMLOnly marks a section the panel shows but never writes: it is a
-	// startup section of forebrain.yaml, and it takes effect when the
-	// process restarts (plan 187 §1.1).
-	YAMLOnly bool
 	// StoreSection, when non-empty, marks this section a PROJECTION: it presents
 	// a curated view of another stored section's document and saves back to that
 	// section. The panel reads and writes p.raw[StoreSection]; Name is only what
@@ -218,17 +214,16 @@ func (s configSectionSchema) storeSection() string {
 	return s.Name
 }
 
-// The picker's tabs. A terminal is wide enough for four short headings, and
-// four is what keeps the 11 stored sections reachable without a filter.
+// The picker's tabs. A terminal is wide enough for three short headings, and
+// three is what keeps the 11 stored sections reachable without a filter.
 const (
 	configTabApproval = "Approval & sandbox"
 	configTabSession  = "Session & memory"
 	configTabAgents   = "Agents & tools"
-	configTabFile     = "File only"
 )
 
 // configSectionSchemas lists every section of the runtime configuration: the
-// 11 the state database stores, then the two forebrain.yaml keeps. The order
+// 11 the state database stores. The order
 // inside a tab is the order a user tunes these settings in, roughly: the
 // switch that decides everything else first.
 var configSectionSchemas = []configSectionSchema{
@@ -381,16 +376,6 @@ var configSectionSchemas = []configSectionSchema{
 			Path: "claude_code", Label: "Claude Code interop", Kind: configFieldBool3, DefaultValue: "false", ClaudeCodeOnly: true,
 			Hint: "Processes with different interop settings cannot see each other.",
 		}},
-	},
-	{
-		Name: "gateway", Title: "Gateway", Tab: configTabFile,
-		Summary:  "Inspect the listening address and authentication.",
-		YAMLOnly: true,
-	},
-	{
-		Name: "credentials", Title: "Credential files", Tab: configTabFile,
-		Summary:  "Inspect external sign-in file locations.",
-		YAMLOnly: true,
 	},
 }
 

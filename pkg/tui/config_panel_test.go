@@ -42,9 +42,6 @@ func (s *configPanelTestSession) ConfigPanelSections(context.Context) (configPan
 	if s.snapshot.Stored == nil {
 		s.snapshot.Stored = map[string]json.RawMessage{}
 	}
-	if s.snapshot.File == nil {
-		s.snapshot.File = map[string]string{}
-	}
 	return s.snapshot, nil
 }
 
@@ -56,30 +53,12 @@ func (s *configPanelTestSession) UpdateConfigSection(_ context.Context, section 
 	return nil
 }
 
-// infoPanelSelector is a scripted selector that can also show the read-only
-// overlay a forebrain.yaml section opens in.
-type infoPanelSelector struct {
-	*scriptedSelector
-	titles []string
-	bodies []string
-}
-
-func (s *infoPanelSelector) ShowInfo(label, body string) error {
-	s.titles = append(s.titles, label)
-	s.bodies = append(s.bodies, body)
-	return nil
-}
-
-func (s *infoPanelSelector) ConfirmInfo(label, body, _ string) (bool, error) {
-	return false, s.ShowInfo(label, body)
-}
-
 // newConfigPanelSession builds a panel double holding the stored sections given as
 // section name → its JSON.
 func newConfigPanelSession(stored map[string]string) *configPanelTestSession {
 	session := &configPanelTestSession{
 		fakeSession: &fakeSession{},
-		snapshot:    configPanelSnapshot{Stored: map[string]json.RawMessage{}, File: map[string]string{}},
+		snapshot:    configPanelSnapshot{Stored: map[string]json.RawMessage{}},
 	}
 	for name, raw := range stored {
 		session.snapshot.Stored[name] = json.RawMessage(raw)
@@ -98,10 +77,7 @@ func runConfigPanel(t *testing.T, session *configPanelTestSession, selector Sele
 // panel against the store's own validator instead of a double.
 func runConfigPanelOn(t *testing.T, session Session, selector Selector, steps []richStep, inputs []selectorInput, args ...string) *Renderer {
 	t.Helper()
-	scripted, ok := selector.(*scriptedSelector)
-	if !ok {
-		scripted = selector.(*infoPanelSelector).scriptedSelector
-	}
+	scripted := selector.(*scriptedSelector)
 	scripted.richSteps = steps
 	scripted.inputs = inputs
 	var out bytes.Buffer
@@ -277,10 +253,8 @@ func TestConfigPanelListsEverySection(t *testing.T) {
 		if item.Description != schema.Summary {
 			t.Errorf("段 %q 的说明 = %q, want %q", schema.Title, item.Description, schema.Summary)
 		}
-		if want := configDefaultStatus; schema.YAMLOnly && item.Status != "" {
-			t.Errorf("只读段 %q 带了状态 %q", schema.Title, item.Status)
-		} else if !schema.YAMLOnly && item.Status != want {
-			t.Errorf("段 %q 的状态 = %q, want %q", schema.Title, item.Status, want)
+		if item.Status != configDefaultStatus {
+			t.Errorf("段 %q 的状态 = %q, want %q", schema.Title, item.Status, configDefaultStatus)
 		}
 	}
 	// A section the database holds stops reading as the default.
@@ -295,7 +269,7 @@ func TestConfigPanelListsEverySection(t *testing.T) {
 			t.Fatalf("a configured section carries %q, want no status", item.Status)
 		}
 	}
-	for _, tab := range []string{configTabApproval, configTabSession, configTabAgents, configTabFile} {
+	for _, tab := range []string{configTabApproval, configTabSession, configTabAgents} {
 		if !tabs[tab] {
 			t.Errorf("缺少页签 %q", tab)
 		}
@@ -945,103 +919,6 @@ func TestConfigPanelRejectsAnUnknownSectionName(t *testing.T) {
 	}
 }
 
-// A forebrain.yaml section is shown, never edited, the prototype's way (plan
-// 328 D1, html:169): the amber note under the title, the Readable/YAML toggle
-// as the page's own rows, the readable view's facts, the YAML view's numbered
-// lines — and the gateway token redacted in both. No editor opens from the
-// page, so nothing is ever typed into it.
-func TestConfigPanelFileViewReadableAndYaml(t *testing.T) {
-	session := newConfigPanelSession(nil)
-	session.snapshot.File["gateway"] = "gateway:\n  http_addr: 127.0.0.1:8080\n  auth:\n    token: hunter2-gateway-token\n"
-	selector := &scriptedSelector{}
-	runConfigPanel(t, session, selector, []richStep{
-		{label: "Gateway", ok: true},
-		{label: configFileYAMLRow, ok: true},
-		{ok: false},
-	}, nil)
-
-	if len(selector.richItems) < 3 {
-		t.Fatalf("the view pages never opened: %v", selector.richLabels)
-	}
-	// The readable view's facts (prototype html:169), as the page's rows.
-	readable := selector.richItems[1]
-	facts := map[string]string{}
-	for _, item := range readable {
-		facts[item.Label] = item.Value
-	}
-	for label, want := range map[string]string{
-		"Listen address": "127.0.0.1:8080",
-		"Authentication": "Token authentication",
-		"Token":          "[redacted]",
-		"Source":         "forebrain.yaml",
-		"Applies after":  "Process restart",
-	} {
-		if facts[label] != want {
-			t.Fatalf("readable fact %q = %q, want %q; facts: %v", label, facts[label], want, facts)
-		}
-	}
-	// The YAML view: the file's own lines, numbered, with the token's value
-	// redacted. The two toggle rows ride above them.
-	yamlRows := selector.richItems[2]
-	if len(yamlRows) != 6 || yamlRows[0].Label != configFileReadableRow || yamlRows[1].Label != configFileYAMLRow {
-		t.Fatalf("the YAML view numbers its lines; rows: %+v", yamlRows)
-	}
-	if yamlRows[2].Label != "1" || yamlRows[5].Label != "4" {
-		t.Fatalf("the YAML view numbers its lines; rows: %+v", yamlRows)
-	}
-	if yamlRows[5].Description != "    token: [redacted]" {
-		t.Fatalf("the token line = %q, want it redacted", yamlRows[5].Description)
-	}
-	// The note says where the section is edited, and no editor ever opened.
-	if !strings.Contains(pageLabels(selector), configFileOnlyNote) {
-		t.Fatalf("the amber note must head the view: %s", pageLabels(selector))
-	}
-	if selector.inputIdx != 0 {
-		t.Fatalf("a file section has no inputs, got %d", selector.inputIdx)
-	}
-	// The stored token is never on any page, either view.
-	for _, items := range selector.richItems {
-		for _, item := range items {
-			for _, text := range []string{item.Label, item.Description, item.Value, item.Status} {
-				if strings.Contains(text, "hunter2-gateway-token") {
-					t.Fatalf("the gateway token reached the page: %q", text)
-				}
-			}
-		}
-	}
-	for _, label := range selector.richLabels {
-		if strings.Contains(label, "hunter2-gateway-token") {
-			t.Fatalf("the gateway token reached a heading: %q", label)
-		}
-	}
-	if len(session.writes) != 0 {
-		t.Fatalf("a file section must never be written, got %+v", session.writes)
-	}
-}
-
-// An empty forebrain.yaml section keeps the toggle and says the prototype's
-// two lines under it (plan 327 D4, plan 328 D1).
-func TestConfigPanelFileViewEmptySection(t *testing.T) {
-	session := newConfigPanelSession(nil)
-	session.snapshot.File["credentials"] = ""
-	selector := &scriptedSelector{}
-	runConfigPanel(t, session, selector, []richStep{
-		{label: "Credential files", ok: true},
-		{ok: false},
-	}, nil)
-
-	if len(selector.richItems) < 2 {
-		t.Fatalf("the view page never opened: %v", selector.richLabels)
-	}
-	rows := selector.richItems[1]
-	if len(rows) < 4 || rows[0].Label != configFileReadableRow || rows[1].Label != configFileYAMLRow {
-		t.Fatalf("the toggle must head the page: %+v", rows)
-	}
-	if rows[2].Label != "Not configured" || rows[3].Label != "This section has no explicit values in forebrain.yaml." {
-		t.Fatalf("the empty state = %+v", rows[2:])
-	}
-}
-
 // Secrets never reach a page (plan 328 D3, prototype html:106/118): a value
 // at a masked path — an MCP server's header values, the oauth tokens — reads
 // [hidden] or Not set in every column, the delete preview hides it whole, and
@@ -1449,9 +1326,11 @@ func jsonFieldNames(typ reflect.Type) []string {
 	return names
 }
 
-// Every Root section has a descriptor, every descriptor names a Root section,
-// and the two kinds line up with the store's own section table: the 11 rows
-// fb_config holds are editable, gateway and credentials are not.
+// Every section fb_config stores has a descriptor, every descriptor names a
+// Root section, and the table lines up with the store's own: the 11 rows
+// fb_config holds are the ones the panel shows. The two Root sections only
+// forebrain.yaml carries — gateway and credentials — are deliberately outside
+// the table: the terminal panel does not show them (owner 2026-11-21).
 //
 // This is the panel's one hard constraint on new work: add a section to Root
 // without adding a descriptor and the panel silently loses it, so the loss
@@ -1469,8 +1348,7 @@ func TestConfigPanelSchemaCoversEveryRootSection(t *testing.T) {
 // configSchemaCoverageProblems is the guard above as a function, so its new
 // projection rules can be proved against a table that is wrong on purpose
 // (plan 314). Every Root section needs a descriptor; every descriptor names a
-// Root section or projects one that is stored; and the read-only/editable split
-// lines up with the store's own section list.
+// Root section or projects one that is stored.
 func configSchemaCoverageProblems(types map[string]reflect.Type, schemas []configSectionSchema, stored map[string]bool) []string {
 	var problems []string
 	byName := make(map[string]configSectionSchema, len(schemas))
@@ -1480,9 +1358,9 @@ func configSchemaCoverageProblems(types map[string]reflect.Type, schemas []confi
 		}
 		byName[schema.Name] = schema
 	}
-	for name := range types {
+	for name := range stored {
 		if _, ok := byName[name]; !ok {
-			problems = append(problems, "Root 的段 "+name+" 没有描述符，/config 面板里看不到它")
+			problems = append(problems, "fb_config 的段 "+name+" 没有描述符，/config 面板里看不到它")
 		}
 	}
 	for name, schema := range byName {
@@ -1503,15 +1381,6 @@ func configSchemaCoverageProblems(types map[string]reflect.Type, schemas []confi
 		// The section whose row the descriptor reads and writes: itself, or the
 		// one a projection presents.
 		store := schema.storeSection()
-		if schema.YAMLOnly {
-			if stored[store] {
-				problems = append(problems, name+" 标了只读，却在 fb_config 的段表里")
-			}
-			if schema.Tab != configTabFile {
-				problems = append(problems, "只读段 "+name+" 必须归到 "+configTabFile+" 页签")
-			}
-			continue
-		}
 		if !stored[store] {
 			problems = append(problems, name+" 可编辑，但不在 process.RootConfigSections() 里")
 		}
@@ -1578,12 +1447,6 @@ func TestConfigPanelSchemaFieldsMatchTheirSection(t *testing.T) {
 		typ, ok := types[schema.Name]
 		if !ok {
 			continue // a projection: checked by its own test and the coverage guard
-		}
-		if schema.YAMLOnly {
-			if len(schema.Fields) != 0 {
-				t.Errorf("只读段 %q 不应有编辑字段", schema.Name)
-			}
-			continue
 		}
 		if len(schema.Fields) == 0 {
 			t.Errorf("段 %q 没有任何可编辑字段", schema.Name)
@@ -1767,7 +1630,6 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 		"configRowEditLabel":       configRowEditLabel,
 		"configRowOpenLabel":       configRowOpenLabel,
 		"configRowDropLabel":       configRowDropLabel,
-		"configFileOnlyNote":       configFileOnlyNote,
 		"configBoolOnLabel":        configBoolOnLabel,
 		"configBoolOffLabel":       configBoolOffLabel,
 		"configDefaultActionLabel": configDefaultActionLabel,
@@ -1781,8 +1643,6 @@ func TestConfigPanelSaysEverythingInEnglish(t *testing.T) {
 		"configSecretHiddenStatus": configSecretHiddenStatus,
 		"configSecretUnsetStatus":  configSecretUnsetStatus,
 		"configSecretLineNotice":   configSecretLineNotice,
-		"configFileReadableRow":    configFileReadableRow,
-		"configFileYAMLRow":        configFileYAMLRow,
 	}
 	for name, text := range chrome {
 		check(name, text)
@@ -1861,19 +1721,17 @@ func TestConfigPanelRendersEveryTab(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		tab      string
-		titles   []string
-		readOnly bool
+		tab    string
+		titles []string
 	}{
 		{tab: configTabApproval, titles: []string{"Approval preset", "Workspace sandbox", "Batch projects"}},
 		{tab: configTabSession, titles: []string{"Context compaction", "Memory", "Scheduled tasks", "Feature switches"}},
 		{tab: configTabAgents, titles: []string{"Agents", "Hooks", "Language servers", "Peer messaging"}},
-		{tab: configTabFile, titles: []string{"Gateway", "Credential files"}, readOnly: true},
 	} {
 		t.Run(tc.tab, func(t *testing.T) {
 			lines := renderTabbedPage(items, first[tc.tab], 120)
 			// The tab bar carries every tab and its row count, so a reader
-			// always sees where the four groups are.
+			// always sees where the three groups are.
 			bar := strings.Join(stripANSIAll(lines), "\n")
 			if chip := tc.tab + " " + strconv.Itoa(len(sectionsOfTab(tc.tab))); !strings.Contains(bar, chip) {
 				t.Fatalf("the tab bar is missing %q:\n%s", chip, bar)
@@ -1888,14 +1746,8 @@ func TestConfigPanelRendersEveryTab(t *testing.T) {
 				}
 				row := renderedRow(t, lines, title)
 				// A section with no stored row reads Default, at the right
-				// edge of the panel. A file section is a read-only view with
-				// no marker of its own.
-				switch {
-				case tc.readOnly:
-					if strings.HasSuffix(row, configDefaultStatus) {
-						t.Fatalf("%s's row = %q, want no status", title, row)
-					}
-				case !strings.HasSuffix(row, configDefaultStatus):
+				// edge of the panel.
+				if !strings.HasSuffix(row, configDefaultStatus) {
 					t.Fatalf("%s's row = %q, want the status at its right edge", title, row)
 				}
 				// A row with a right-hand track is drawn to the panel's edge;
@@ -2141,12 +1993,24 @@ func TestConfigPanelAirySpacing(t *testing.T) {
 	if tabBar < 0 || tabBar >= len(overview)-1 || strings.TrimSpace(overview[tabBar+1]) != "" {
 		t.Fatalf("the overview's tab bar is not followed by one blank line:\n%s", strings.Join(overview, "\n"))
 	}
+	// No title and no subtitle above it (owner 2026-11-21 「删掉 Configuration
+	// 标题行和 Open a section ... 副标题行」): the tab bar is the first line,
+	// and the read-only File only tab is gone with the sections it listed.
+	if tabBar != 0 {
+		t.Fatalf("the overview carries %d lines above its tab bar:\n%s", tabBar, strings.Join(overview, "\n"))
+	}
+	whole := strings.Join(overview, "\n")
+	for _, gone := range []string{"Configuration", "Open a section", "File only"} {
+		if strings.Contains(whole, gone) {
+			t.Fatalf("the overview still reads %q:\n%s", gone, whole)
+		}
+	}
 
 	// At 68 columns the focused row and the footer stay reachable.
 	state := newTabbedPickerState(sectionItems, TabbedSelectOptions{DefaultIdx: 4}, false, "")
 	state.configPage = true
 	state.noFilter = true
-	narrow := state.panel("Configuration\nOpen a section to see and change its settings.").layout(68, 14, 0, true)
+	narrow := state.panel("").layout(68, 14, 0, true)
 	joined := strings.Join(stripANSIAll(narrow.lines), "\n")
 	if !strings.Contains(joined, selectorCursorGlyph) {
 		t.Fatalf("the focused row is not reachable at 68 columns:\n%s", joined)
@@ -2216,18 +2080,18 @@ func sectionPanel(stored map[string]string) *configPanel {
 		panic(err)
 	}
 	panel.raw = snapshot.Stored
-	panel.file = snapshot.File
 	return panel
 }
 
 // renderTabbedPage lays the config overview out at width, opened on the tab
 // that holds items[start]: the tabbed picker as the panel's own page draws it
-// (plan 325) — blank line under the tab bar, airier rows, no filter box.
+// (plan 325) — no title and no subtitle above the tab bar (owner 2026-11-21),
+// a blank line under it, airier rows, no filter box.
 func renderTabbedPage(items []SelectItem, start, width int) []string {
 	p := newTabbedPickerState(items, TabbedSelectOptions{DefaultIdx: start}, false, "")
 	p.configPage = true
 	p.noFilter = true
-	return p.panel("Configuration").layout(width, 0, 0, false).lines
+	return p.panel("").layout(width, 0, 0, false).lines
 }
 
 // renderRichPage lays one /config list page out at width, the way the panel's
@@ -2773,21 +2637,6 @@ func TestConfigPanelEmptyStateCopy(t *testing.T) {
 			t.Fatalf("the gated peers page is missing %q: %q", want, peersPrompt)
 		}
 	}
-
-	// A forebrain.yaml section with nothing in it.
-	session = newConfigPanelSession(nil)
-	session.snapshot.File = map[string]string{"gateway": ""}
-	info := &scriptedSelector{}
-	runConfigPanel(t, session, info, []richStep{{label: "Gateway", ok: true}, {ok: false}}, nil)
-	if len(info.richItems) < 2 {
-		t.Fatal("the gateway section never opened")
-	}
-	empty := rowLabels(info.richItems[1])
-	for _, want := range []string{"Not configured", "This section has no explicit values in forebrain.yaml."} {
-		if !slices.Contains(empty, want) {
-			t.Fatalf("the empty file section is missing %q: %v", want, empty)
-		}
-	}
 }
 
 // The prototype's copy contract, pinned verbatim (plan 327 D5): the section
@@ -2806,8 +2655,6 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 		"hooks":                   "Run configured actions at lifecycle events.",
 		"lsp":                     "Manage servers, timeouts and diagnostic delivery.",
 		"peers":                   "Coordinate with other agent processes on this machine.",
-		"gateway":                 "Inspect the listening address and authentication.",
-		"credentials":             "Inspect external sign-in file locations.",
 	}
 	for name, want := range summaries {
 		schema, ok := configSectionSchemaFor(name)
@@ -4568,7 +4415,7 @@ func TestConfigPanelSubPagesHaveNoBreadcrumbOrTabs(t *testing.T) {
 		if trail := strings.TrimSpace(line); strings.HasPrefix(trail, "Configuration") && strings.Contains(trail, " / ") {
 			t.Errorf("a breadcrumb line survived: %q", line)
 		}
-		for _, tab := range []string{configTabApproval, configTabSession, configTabAgents, configTabFile} {
+		for _, tab := range []string{configTabApproval, configTabSession, configTabAgents} {
 			if strings.HasPrefix(strings.TrimSpace(line), tab+" ") {
 				t.Errorf("the sub-page carries the persistent tab bar: %q", line)
 			}
@@ -4580,7 +4427,7 @@ func TestConfigPanelSubPagesHaveNoBreadcrumbOrTabs(t *testing.T) {
 	sectionItems, _ := panel.sectionItems()
 	overview := renderTabbedPage(sectionItems, 0, 120)
 	bar := strings.Join(stripANSIAll(overview), "\n")
-	for _, tab := range []string{configTabApproval, configTabSession, configTabAgents, configTabFile} {
+	for _, tab := range []string{configTabApproval, configTabSession, configTabAgents} {
 		count := strconv.Itoa(len(sectionsOfTab(tab)))
 		if !strings.Contains(bar, tab+" "+count) {
 			t.Errorf("the overview's tab bar is missing %q:\n%s", tab+" "+count, bar)
