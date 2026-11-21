@@ -222,13 +222,59 @@ test('the default model cannot be deleted, and the page names the agent that hol
   await expect(row.locator('[data-testid="models-cell-default"]')).toBeVisible()
 
   await row.locator('[data-testid^="models-remove-"]').click()
+  // The dialog states what a delete really does (plan 345): a conversation that
+  // used the row must re-choose, and the rows a setting keeps cannot be deleted
+  // at all — it no longer promises a fallback that never happened.
+  await expect(page.locator('.forebrain-confirm-message')).toHaveText(
+    '删除后，用过它的会话下一条消息会被拒绝，需要用 /model 重新选。被主代理默认、子代理、计划评审或目标评估引用的模型不能删除，请先改掉那些引用。',
+  )
   await shot(page, 'models-delete-confirm')
   await page.click('[data-testid="confirm-ok"]')
 
-  // The refusal is the server's own list of agents, shown as badges.
+  // The refusal is the server's own list of owners, shown as badges.
   await expect(page.getByText('不能删除')).toBeVisible()
+  await expect(page.locator('.forebrain-modal')).toContainText(
+    '它仍被下列设置引用，先把这些引用改成别的再删。',
+  )
   await expect(page.locator('[data-testid="models-refused-agent"]').first()).toBeVisible()
   await shot(page, 'models-delete-refused')
+  await page.click('[data-testid="models-refused-ok"]')
+  await expect(row).toBeVisible()
+})
+
+test('a model the plan review pins cannot be deleted either', async ({ page }) => {
+  // The pin lives in the configuration, not in the row: the plan review runs on
+  // the row by id and the loader requires that reference to resolve, so the
+  // delete is refused instead of leaving a configuration nothing can compose —
+  // the defect this case pins (plan 345).
+  await preferChinese(page)
+  await signIn(page)
+  const id = await seedModel(page, {
+    provider: 'custom',
+    model: 'e2e-pinned-model',
+    base_url: 'https://gateway.e2e.test/pinned',
+    api_path: '/chat/completions',
+    api_key: 'sk-e2e-pinned-8822',
+  })
+  const pinned = await page.request.patch('/api/settings', {
+    data: { values: { 'agents.plan_reviewer.model': id } },
+  })
+  expect(pinned.ok(), await pinned.text()).toBeTruthy()
+
+  await page.goto(MODELS, { waitUntil: 'networkidle' })
+  const row = rowOf(page, 'e2e-pinned-model')
+  await expect(row).toBeVisible()
+
+  await row.locator('[data-testid^="models-remove-"]').click()
+  await page.click('[data-testid="confirm-ok"]')
+
+  // The refusal names the setting the way the terminal and the API do.
+  await expect(page.getByText('不能删除')).toBeVisible()
+  await expect(page.locator('.forebrain-modal')).toContainText(
+    '它仍被下列设置引用，先把这些引用改成别的再删。',
+  )
+  await expect(page.locator('[data-testid="models-refused-agent"]')).toHaveText(['plan review'])
+  await shot(page, 'models-delete-refused-pin')
   await page.click('[data-testid="models-refused-ok"]')
   await expect(row).toBeVisible()
 })

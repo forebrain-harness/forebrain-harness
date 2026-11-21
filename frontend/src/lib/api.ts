@@ -2597,9 +2597,10 @@ async function gatewayErrorText(res: Response): Promise<string> {
 /**
  * One write over native fetch, answered as the gateway's camelCased JSON. This
  * exists for the writes whose refusals a page reads as data — a duplicate names
- * its row, a delete names the agents that still default to it, a plan asks
- * which key — because axios unwraps a refusal into an AxiosError whose body the
- * page cannot smell: here the body is parsed into `GatewayHttpError.payload`.
+ * its row, a delete names the agents that still default to a model and the
+ * settings that pin it, a plan asks which key — because axios unwraps a refusal
+ * into an AxiosError whose body the page cannot smell: here the body is parsed
+ * into `GatewayHttpError.payload`.
  * A 204 answer (a delete) is `undefined`.
  */
 async function sendJSON<T>(method: 'POST' | 'PUT' | 'DELETE', url: string, body?: unknown): Promise<T> {
@@ -4702,8 +4703,9 @@ export const forebrainApi = {
     return sendJSON<LlmModelRow>('PUT', `/llm-models/${encodeURIComponent(id)}`, body)
   },
 
-  /** Removes one row. A model an agent defaults to is refused with the agents
-   * it belongs to (the refusal's `defaultFor`). */
+  /** Removes one row. A model an agent defaults to, or one a subagent, the
+   * plan review or the goal check pins by id, is refused with every owner it
+   * has (the refusal's `defaultFor` and `pinnedBy`). */
   deleteLlmModel(id: string) {
     return sendJSON<void>('DELETE', `/llm-models/${encodeURIComponent(id)}`)
   },

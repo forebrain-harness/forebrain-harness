@@ -84,8 +84,11 @@
       @confirm="confirmRemove"
     />
 
-    <!-- A default model cannot be deleted: the row names the agents that would
-         lose their default, and the page says which instead of a bare refusal. -->
+    <!-- Not every model can be deleted: a row an agent defaults to keeps that
+         agent's explicit choice, and a row a subagent, the plan review or the
+         goal check pins by id is one the loader requires to resolve — deleting
+         it would leave the configuration refusing to compose. The page names
+         every owner instead of a bare refusal. -->
     <ForebrainModal :open="refusedFor.length > 0" size="sm" :title="t('models.deleteRefusedTitle')" @close="refusedFor = []">
       <p class="text-[13px] text-[var(--forebrain-text-2)]">{{ t('models.deleteRefusedMessage') }}</p>
       <div class="mt-2 flex flex-wrap gap-1.5">
@@ -252,8 +255,15 @@ async function confirmRemove(): Promise<void> {
     await reload()
   } catch (cause) {
     if (cause instanceof GatewayHttpError && cause.status === 409) {
-      const agents = cause.payload?.defaultFor
-      refusedFor.value = Array.isArray(agents) ? agents.map(String) : []
+      // Both kinds of owner: the agents that default to the row and the
+      // settings that pin it by id (plan 345). One list, so the badges name
+      // every refusal the same way.
+      const defaults = cause.payload?.defaultFor
+      const pins = cause.payload?.pinnedBy
+      refusedFor.value = [
+        ...(Array.isArray(defaults) ? defaults.map(String) : []),
+        ...(Array.isArray(pins) ? pins.map(String) : []),
+      ]
       return
     }
     error.value = getErrorMessage(cause)
