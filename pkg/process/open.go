@@ -677,6 +677,9 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// built once and outlives the registration, exactly as it does for the peer
 	// tools, which read it again on every call.
 	env.deps().Peers = env.peerDirectory()
+	// The display port beside it: a delivered peer message is read for the
+	// surface here, once, so the run package never derives a mark itself.
+	env.deps().PeerDisplay = env.peerDisplay()
 	runner := &run.Runner{Deps: env.Deps, Control: env.Control, SkillCommands: run.SkillCommandHooks{
 		Refresh:   turn.RefreshSkills,
 		IsBuiltin: turn.IsBuiltinName,

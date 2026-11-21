@@ -560,6 +560,18 @@ type SubagentInputDeliveredPayload struct {
 	// surface has to draw it as such rather than as the person's own words.
 	// Empty for everything the person typed.
 	Origin string `json:"origin,omitempty"`
+	// FromName, PeerMark and PeerTone identify the peer who wrote it, derived
+	// by the engine so no surface hashes a name itself. They travel only for a
+	// peer origin, and only when the message was one envelope — the same
+	// contract InputDeliveredPayload carries for the conversation's own view.
+	FromName string `json:"from_name,omitempty"`
+	PeerMark string `json:"peer_mark,omitempty"`
+	PeerTone int    `json:"peer_tone,omitempty"`
+	// PeerBody is the words inside a peer envelope: what the letter shows.
+	// Text keeps the envelope the model read, so a page that drew Text would
+	// paint the transport's own markup at the reader. It is empty when the
+	// content was not one envelope, and the page then shows Text.
+	PeerBody string `json:"peer_body,omitempty"`
 }
 
 // SubagentPausedPayload names the subagent whose execution the user

@@ -10224,12 +10224,40 @@ func TestSubagentEffortAloneFallsBackToTheStoredSessionRow(t *testing.T) {
 	}
 }
 
+// subagentDisplayPortStub stands in for the composition root's display port:
+// one fixed identity for envelope-shaped text, a refusal for everything else,
+// and a record of what it was asked. The derivation itself is the process
+// package's own test's business — here it is the plumbing that is pinned:
+// which messages reach the port, and what the payload carries back.
+type subagentDisplayPortStub struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (p *subagentDisplayPortStub) Describe(content string) (fromName, body, mark string, tone int, ok bool) {
+	p.mu.Lock()
+	p.calls = append(p.calls, content)
+	p.mu.Unlock()
+	if !strings.HasPrefix(content, "<") || !strings.HasSuffix(content, ">") {
+		return "", "", "", 0, false
+	}
+	return "builder", "please review a.go\nsecond line", "bu", 2, true
+}
+
+func (p *subagentDisplayPortStub) asked() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.calls...)
+}
+
 // A letter another session wrote, handed to a running subagent, reaches that
 // subagent's view as the letter it is: the delivered event keeps the origin
 // that says so, and the words as the sender wrote them, newlines included. The
 // surface draws its card from the first and its body from the second, so a
 // flattened or unmarked payload is what made a peer message read as the
-// person's own typed line.
+// person's own typed line. With no display port installed — a bare runner, a
+// root that provides no derivation — the identity fields stay empty and the
+// surface falls back to the text, never deriving a sender itself.
 func TestSubagentDeliveredPayloadKeepsPeerOriginAndNewlines(t *testing.T) {
 	fix := newPersistenceFixture(t, "worker system")
 	owner := fix.fac.Owner
@@ -10282,16 +10310,24 @@ func TestSubagentDeliveredPayloadKeepsPeerOriginAndNewlines(t *testing.T) {
 	if !strings.Contains(delivered[0].Text, "please review a.go\nsecond line") {
 		t.Fatalf("delivered payload text = %q, want its newlines kept: a flattened body reads as one run-on line", delivered[0].Text)
 	}
+	if delivered[0].FromName != "" || delivered[0].PeerMark != "" || delivered[0].PeerTone != 0 || delivered[0].PeerBody != "" {
+		t.Fatalf("delivered payload identity = (%q, %q, %d, %q), want all empty with no display port: the surface falls back to the text",
+			delivered[0].FromName, delivered[0].PeerMark, delivered[0].PeerTone, delivered[0].PeerBody)
+	}
 }
 
 // The person's own message to a running subagent keeps no origin: their words
-// are drawn as theirs, and only another agent's letter is marked.
+// are drawn as theirs, and only another agent's letter is marked. The display
+// port is installed here and never asked — a typed line is not an envelope to
+// read, whatever it says.
 func TestSubagentDeliveredPayloadLeavesTheUsersOwnMessageUnmarked(t *testing.T) {
 	fix := newPersistenceFixture(t, "worker system")
 	owner := fix.fac.Owner
 	owner.Control = NewController()
 	probe := &channelEventProbe{}
 	owner.Events = probe
+	display := &subagentDisplayPortStub{}
+	owner.Deps.PeerDisplay = display
 	release := make(chan struct{})
 	ex := &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "continued"}
 	owner.SubagentExecutor = ex
@@ -10332,5 +10368,126 @@ func TestSubagentDeliveredPayloadLeavesTheUsersOwnMessageUnmarked(t *testing.T) 
 	}
 	if !strings.Contains(delivered[0].Text, "go on\ntake your time") {
 		t.Fatalf("delivered payload text = %q, want the person's own line breaks kept", delivered[0].Text)
+	}
+	if delivered[0].FromName != "" || delivered[0].PeerMark != "" || delivered[0].PeerTone != 0 || delivered[0].PeerBody != "" {
+		t.Fatalf("delivered payload identity = (%q, %q, %d, %q), want all empty for the person's own message",
+			delivered[0].FromName, delivered[0].PeerMark, delivered[0].PeerTone, delivered[0].PeerBody)
+	}
+	if calls := display.asked(); len(calls) != 0 {
+		t.Fatalf("display port asked %d times for the person's own message, want 0: %q", len(calls), calls)
+	}
+}
+
+// With the display port installed, a peer letter's delivered event carries the
+// identity the port derived — the sender, the identity block and the words
+// inside the envelope — beside the verbatim text, the same contract the
+// conversation's own input_delivered events carry for the main view.
+func TestSubagentDeliveredPayloadDerivesPeerFieldsThroughThePort(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	probe := &channelEventProbe{}
+	owner.Events = probe
+	display := &subagentDisplayPortStub{}
+	owner.Deps.PeerDisplay = display
+	release := make(chan struct{})
+	ex := &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "continued"}
+	owner.SubagentExecutor = ex
+	conv := "conv-peer-display"
+	worker := "main:conv-peer-display:worker:00000000-0000-0000-0000-0000000004f2"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-peer-display", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
+		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-peer-display", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
+	waitSubagentBusy(t, owner, conv, "task-peer-display")
+	if !PauseSubagent(owner, conv, "task-peer-display") {
+		t.Fatal("PauseSubagent = false on a running subagent")
+	}
+	waitProbeEvent(t, probe, event.RunEventSubagentPaused, 1)
+	envelope := peer.Build(peer.Envelope{From: "uds:/tmp/a.sock", FromName: "builder", Body: "please review a.go\nsecond line"})
+	close(release)
+	if _, err := SteerLiveSubagent(owner, conv, "task-peer-display", Input{
+		Parts:  []llm.ContentPart{llm.Text(envelope)},
+		Origin: state.MessageOriginPeer,
+	}); err != nil {
+		t.Fatalf("peer message to the paused subagent: %v", err)
+	}
+	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 1)
+	waitSubagentIdle(t, owner, conv, "task-peer-display")
+
+	delivered := probe.inputDelivered()
+	if len(delivered) != 1 {
+		t.Fatalf("subagent_input_delivered published %d times, want 1: %#v", len(delivered), delivered)
+	}
+	if delivered[0].FromName != "builder" || delivered[0].PeerMark != "bu" || delivered[0].PeerTone != 2 || delivered[0].PeerBody != "please review a.go\nsecond line" {
+		t.Fatalf("delivered payload identity = (%q, %q, %d, %q), want what the port derived (builder, bu, 2, the body)",
+			delivered[0].FromName, delivered[0].PeerMark, delivered[0].PeerTone, delivered[0].PeerBody)
+	}
+	if delivered[0].Text != envelope {
+		t.Fatalf("delivered payload text = %q, want the envelope verbatim (%q): the identity rides beside it, never instead of it", delivered[0].Text, envelope)
+	}
+	if calls := display.asked(); len(calls) != 1 || calls[0] != envelope {
+		t.Fatalf("display port asked %q, want exactly the delivered text once", calls)
+	}
+}
+
+// A peer-origin message that is not one envelope keeps its origin and its text
+// and no identity: the port was asked and refused, and the surface draws the
+// letter from the text alone rather than inventing a sender.
+func TestSubagentDeliveredPayloadKeepsNonEnvelopePeerTextPlain(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	probe := &channelEventProbe{}
+	owner.Events = probe
+	display := &subagentDisplayPortStub{}
+	owner.Deps.PeerDisplay = display
+	release := make(chan struct{})
+	ex := &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "continued"}
+	owner.SubagentExecutor = ex
+	conv := "conv-peer-plain"
+	worker := "main:conv-peer-plain:worker:00000000-0000-0000-0000-0000000004f3"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-peer-plain", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
+		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	if err := StartSubagentAutoContinue(context.Background(), owner, SubagentSurface{}, conv, "task-peer-plain", Input{Text: "start"}); err != nil {
+		t.Fatalf("StartSubagentAutoContinue: %v", err)
+	}
+	waitSubagentBusy(t, owner, conv, "task-peer-plain")
+	if !PauseSubagent(owner, conv, "task-peer-plain") {
+		t.Fatal("PauseSubagent = false on a running subagent")
+	}
+	waitProbeEvent(t, probe, event.RunEventSubagentPaused, 1)
+	close(release)
+	if _, err := SteerLiveSubagent(owner, conv, "task-peer-plain", Input{
+		Parts:  []llm.ContentPart{llm.Text("a plain interjection, no envelope")},
+		Origin: state.MessageOriginPeer,
+	}); err != nil {
+		t.Fatalf("peer message to the paused subagent: %v", err)
+	}
+	waitProbeEvent(t, probe, event.RunEventSubagentEnded, 1)
+	waitSubagentIdle(t, owner, conv, "task-peer-plain")
+
+	delivered := probe.inputDelivered()
+	if len(delivered) != 1 {
+		t.Fatalf("subagent_input_delivered published %d times, want 1: %#v", len(delivered), delivered)
+	}
+	if delivered[0].Origin != state.MessageOriginPeer || delivered[0].Text != "a plain interjection, no envelope" {
+		t.Fatalf("delivered payload = (%q, %q), want the origin and the text kept", delivered[0].Origin, delivered[0].Text)
+	}
+	if delivered[0].FromName != "" || delivered[0].PeerMark != "" || delivered[0].PeerTone != 0 || delivered[0].PeerBody != "" {
+		t.Fatalf("delivered payload identity = (%q, %q, %d, %q), want all empty for text the port refused",
+			delivered[0].FromName, delivered[0].PeerMark, delivered[0].PeerTone, delivered[0].PeerBody)
+	}
+	if calls := display.asked(); len(calls) != 1 {
+		t.Fatalf("display port asked %d times, want 1: the port decides, not the publisher", len(calls))
 	}
 }

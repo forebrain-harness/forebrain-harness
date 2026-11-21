@@ -1726,6 +1726,15 @@ export type TimelineBlock =
    * message rather than the agent's instruction.
    */
   | { kind: 'user'; id?: string; text: string }
+  /**
+   * A letter another agent wrote to this subagent, handed to it at a tool
+   * boundary: the same card the conversation draws for its own letters, on
+   * the activity line with the sender's identity block as its node. The
+   * engine derived fromName/mark/tone and read the body out of the envelope;
+   * content keeps the text as delivered, which the card shows when the engine
+   * read no envelope. A surface never parses an envelope itself.
+   */
+  | { kind: 'letter'; id?: string; fromName?: string; mark?: string; tone?: number; body?: string; content: string; createdAt?: number }
   | { kind: 'assistant'; id?: string; text: string; open: boolean }
   | { kind: 'thinking'; id?: string; text: string; open: boolean; startedAt: number; durationMs?: number }
   | { kind: 'tool'; id?: string; step: SubagentToolStep }
@@ -4616,15 +4625,35 @@ export function useChatStream() {
         return true
       }
       case 'subagent_input_delivered': {
-        // A steer the runtime handed this subagent is the user's own message in
-        // its transcript, the way the terminal draws it. It is also what
-        // resumes an execution the user paused.
+        // A steer the runtime handed this subagent: the person's own message
+        // is their words in its transcript, the way the terminal draws it; a
+        // peer's letter is another agent's letter, drawn as the same card the
+        // conversation draws, with the sender identity the engine derived. It
+        // is also what resumes an execution the user paused. An old event with
+        // no origin stays the user's block — nothing here sniffs an envelope.
         const text = String(payload.text ?? '').trim()
         if (text) {
+          const origin = String(payload.origin ?? '').trim()
+          const peerFromName = String(payload.fromName ?? payload.from_name ?? '').trim()
+          const peerMark = String(payload.peerMark ?? payload.peer_mark ?? '').trim()
+          const peerTone = Number(payload.peerTone ?? payload.peer_tone ?? 0) || 0
+          const peerBody = String(payload.peerBody ?? payload.peer_body ?? '').trim()
+          const delivered: TimelineBlock = origin === 'peer'
+            ? {
+                kind: 'letter' as const,
+                id: evt.id,
+                content: text,
+                createdAt: eventTimestamp(evt.createdAt),
+                ...(peerFromName ? { fromName: peerFromName } : {}),
+                ...(peerMark ? { mark: peerMark } : {}),
+                ...(peerFromName ? { tone: peerTone } : {}),
+                ...(peerBody ? { body: peerBody } : {}),
+              }
+            : { kind: 'user' as const, id: evt.id, text }
           updateSubagent(agentId, (entry) => ({
             ...entry,
             status: entry.status === 'waiting_input' ? 'running' : entry.status,
-            blocks: [...closeStreamedBlocks(entry.blocks, ['assistant', 'thinking'], evt.createdAt), { kind: 'user' as const, id: evt.id, text }],
+            blocks: [...closeStreamedBlocks(entry.blocks, ['assistant', 'thinking'], evt.createdAt), delivered],
           }))
           setSubagentCallTaskPaused(agentId, false)
         }

@@ -212,6 +212,18 @@ func (f Factory) peerDirectory() PeerDirectory {
 	return nil
 }
 
+// peerDisplay hands the delivered-event publisher the port that reads a peer
+// message for the surface: the owning runner's, because a subagent's letters
+// are read the same way its dispatcher's are, and a nil port (a root that
+// provides no derivation) must stay nil rather than become a nil-interface
+// call in the child.
+func (f Factory) peerDisplay() PeerDisplay {
+	if f.Owner != nil && f.Owner.Deps != nil && f.Owner.PeerDisplay != nil {
+		return f.Owner.PeerDisplay
+	}
+	return nil
+}
+
 // peerTargetsStayInConversation reports whether this conversation may only
 // reach its own agents: a batch task runs unattended for a business system, so
 // it talks to its own agents and to nobody outside the conversation.

@@ -1029,12 +1029,30 @@ func (ch *subagentChannel) publishInputDelivered(fac Factory, ex *subagentExecut
 		if text == "" {
 			continue
 		}
-		publishEvent(context.Background(), own.Events, ch.runID, ch.sessionID, event.RunEventSubagentInputDelivered, event.SubagentInputDeliveredPayload{
+		origin := strings.TrimSpace(entry.Origin)
+		payload := event.SubagentInputDeliveredPayload{
 			AgentID:     ch.agentKey,
 			ExecutionID: ex.executionID,
 			Text:        text,
-			Origin:      strings.TrimSpace(entry.Origin),
-		})
+			Origin:      origin,
+		}
+		// A peer message delivered into a running subagent is that agent's
+		// letter, and the view draws it as one — which needs the sender, the
+		// identity block and the words inside the envelope, not just the
+		// envelope itself. The derivation is the composition root's, through
+		// the display port, the same read the conversation's own delivered
+		// events carry; a nil port leaves the origin and text alone.
+		if state.IsPeerOrigin(origin) {
+			if display := fac.peerDisplay(); display != nil {
+				if fromName, body, mark, tone, ok := display.Describe(text); ok {
+					payload.FromName = fromName
+					payload.PeerMark = mark
+					payload.PeerTone = tone
+					payload.PeerBody = body
+				}
+			}
+		}
+		publishEvent(context.Background(), own.Events, ch.runID, ch.sessionID, event.RunEventSubagentInputDelivered, payload)
 	}
 }
 

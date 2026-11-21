@@ -57,6 +57,35 @@
             <ActivityStep v-else-if="block.kind === 'approval'" :node="null">
               <ApprovalCard :block="block" />
             </ActivityStep>
+            <!-- A letter another agent wrote to this subagent: a step on the
+                 line whose node is the sender's identity block (the
+                 prototype's .step>.pm), carrying the same card the
+                 conversation draws for its own letters. The step is the
+                 library's own — ActivityStep's node vocabulary has no peer
+                 block — under the activity-step class so the line runs
+                 through it. A subagent sender is outlined in its parent's
+                 tone, the name's own shape saying so, as the drawer's rows
+                 read it. -->
+            <ChainOfThoughtStep v-else-if="block.kind === 'letter'" class="activity-step letter-step">
+              <template #icon>
+                <PeerMark
+                  :mark="block.mark ?? ''"
+                  :tone="block.tone ?? 0"
+                  :name="block.fromName"
+                  :kind="(block.fromName ?? '').includes('.') ? 'sub' : 'agent'"
+                />
+              </template>
+              <PeerMessageCard
+                :from-name="block.fromName"
+                :mark="block.mark"
+                :tone="block.tone"
+                :body="block.body"
+                :content="block.content"
+                :kind="peerKindOf(peerDirectory, block.fromName)"
+                :same-tree="peerSameTreeOf(peerDirectory, block.fromName)"
+                :created-at="block.createdAt"
+              />
+            </ChainOfThoughtStep>
           </template>
         </ActivityLine>
 
@@ -158,9 +187,12 @@
 import { computed } from 'vue'
 import { ChevronDown, ChevronUp, User } from 'lucide-vue-next'
 import { Message, MessageContent, MessageResponse } from '@repo/elements/message'
+import { ChainOfThoughtStep } from '@repo/elements/chain-of-thought'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
 import ActivityLine from '@/components/chat/ActivityLine.vue'
 import ActivityStep from '@/components/chat/ActivityStep.vue'
+import PeerMark from '@/components/chat/PeerMark.vue'
+import PeerMessageCard from '@/components/chat/PeerMessageCard.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import RunPausedLine from '@/components/chat/RunPausedLine.vue'
 import RunStoppedLine from '@/components/chat/RunStoppedLine.vue'
@@ -174,6 +206,7 @@ import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import { formatWorkedDurationLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { injectPendingActions } from '@/composables/providePendingActions'
+import { injectPeerDirectory, peerKindOf, peerSameTreeOf } from '@/composables/providePeerDirectory'
 import type { ActionRow } from '@/composables/usePendingActions'
 import type { DocTab } from '@/composables/useDocTabs'
 import { groupActivityRuns, blockOnActivityLine } from '@/lib/activityRuns'
@@ -221,10 +254,12 @@ const drawnBlocks = computed(() => props.record.blocks.filter((block) => blockVi
 
 /** The turn's cards folded into activity-line runs, each run carrying where
  *  it starts in the drawn list so a block's fold id stays the one its
- *  persisted state was written under. */
+ *  persisted state was written under. A letter hangs on the line too — a step
+ *  whose node is its sender — and only a subagent's transcript produces one,
+ *  so the shared line table does not know it. */
 const runs = computed(() => {
   let offset = 0
-  return groupActivityRuns(drawnBlocks.value, blockOnActivityLine).map((run) => {
+  return groupActivityRuns(drawnBlocks.value, (block) => block.kind === 'letter' || blockOnActivityLine(block)).map((run) => {
     const start = offset
     offset += run.line ? run.items.length : 1
     return { ...run, start }
@@ -236,6 +271,11 @@ const isRunning = computed(() => subagentPhase(props.record.status) === 'active'
 /** The conversation's own pending-actions store: a gate this subagent raised
  *  hangs on its own call's card here, the same way the conversation's do. */
 const pending = injectPendingActions()
+
+/** The conversation's peer directory, for a letter's sender labels: the same
+ *  directory the conversation's own letters read. Outside a provider the
+ *  lookups answer nothing, and the card simply carries no label. */
+const peerDirectory = injectPeerDirectory()
 
 /** This transcript's approval blocks: the gate records that name a call. */
 const approvalBlocks = computed(() => props.record.blocks.filter(
@@ -293,6 +333,36 @@ function toggleTask(block: TimelineBlock, index: number) {
   font-size: 14px;
   line-height: 1.75;
   color: var(--forebrain-text);
+}
+
+/* A letter's step (the prototype's .step>.pm + .step .letter, :87 and
+   :115-116): the sender's identity block is the node, so the card's own
+   header block steps out and the body's rule starts at the column. The step
+   metrics are the activity step's own (ActivityStep.vue) — this step is the
+   library's ChainOfThoughtStep under the same class, because a peer block is
+   not one of ActivityStep's nodes. */
+.letter-step {
+  gap: 12px;
+  animation: none;
+  min-width: 0;
+}
+
+.letter-step :deep(.flex-1) {
+  min-width: 0;
+}
+
+.letter-step :deep(.peer-letter) {
+  margin: 0;
+}
+
+.letter-step :deep(.peer-letter .who .peer-mark) {
+  display: none;
+}
+
+.letter-step :deep(.peer-letter .text) {
+  margin-left: 0;
+  padding-left: 14px;
+  font-size: 14px;
 }
 </style>
 

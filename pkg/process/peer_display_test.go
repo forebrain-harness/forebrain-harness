@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -140,5 +141,55 @@ func TestPeerPreviewShowsTheEnvelopeBody(t *testing.T) {
 	}
 	if got := peerDisplayName(held); got != "" {
 		t.Fatalf("peerDisplayName of the wrapped interjection = %q, want empty", got)
+	}
+}
+
+// TestPeerDisplayPortComposesTheOneReadAndTheOneDerivation pins the port the
+// run package fills a delivered peer event through: the sender and body are
+// what PeerEnvelopeDisplay reads, the mark and tone what PeerMark derives from
+// that name — composed once here, so neither the run package nor a surface
+// derives them again.
+func TestPeerDisplayPortComposesTheOneReadAndTheOneDerivation(t *testing.T) {
+	port := peerDisplayPort{}
+	envelope := peer.Build(peer.Envelope{From: "uds:/tmp/a.sock", FromName: "builder", Body: "please review a.go\nsecond line"})
+	fromName, body, mark, tone, ok := port.Describe(envelope)
+	if !ok {
+		t.Fatalf("Describe(%q) reported false", envelope)
+	}
+	wantName, wantBody, _ := PeerEnvelopeDisplay(envelope)
+	wantMark, wantTone := PeerMark(wantName, "")
+	if fromName != wantName || body != wantBody || mark != wantMark || tone != wantTone {
+		t.Fatalf("Describe = (%q, %q, %q, %d), want the one read and the one derivation (%q, %q, %q, %d)",
+			fromName, body, mark, tone, wantName, wantBody, wantMark, wantTone)
+	}
+
+	// The in-process interjection names its sender in from itself: the port
+	// reads that name and derives its block the same way.
+	interjection := `<agent-message from="main">check pkg/peer too</agent-message>`
+	fromName, body, mark, tone, ok = port.Describe(interjection)
+	if !ok || fromName != "main" || body != "check pkg/peer too" {
+		t.Fatalf("Describe of the interjection = (%q, %q, %v), want main and the words inside", fromName, body, ok)
+	}
+	if wantMark, wantTone := PeerMark("main", ""); mark != wantMark || tone != wantTone {
+		t.Fatalf("interjection block = (%q, %d), want PeerMark(main) = (%q, %d)", mark, tone, wantMark, wantTone)
+	}
+
+	// Text that is not one envelope: refused, with zero answers — the caller
+	// keeps the text and draws no sender.
+	if fromName, body, mark, tone, ok := port.Describe("just a message"); ok || fromName != "" || body != "" || mark != "" || tone != 0 {
+		t.Fatalf("Describe of plain text = (%q, %q, %q, %d, %v), want a refusal with zero answers", fromName, body, mark, tone, ok)
+	}
+}
+
+// TestStartPeersInstallsTheDisplayPort pins the wiring beside the tools'
+// directory: the port is installed before the service decides whether it can
+// run, so a delivered peer letter carries its sender identity even on a
+// platform whose cross-process protocol cannot start.
+func TestStartPeersInstallsTheDisplayPort(t *testing.T) {
+	env := &Environment{}
+	stop := env.StartPeers(context.Background(), PeerSurface{Kind: "tui"})
+	defer stop()
+	if env.deps().PeerDisplay == nil {
+		t.Fatal("StartPeers installed no display port: a delivered peer letter would carry no sender identity")
 	}
 }

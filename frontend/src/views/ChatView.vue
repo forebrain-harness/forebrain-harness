@@ -211,8 +211,8 @@
                         :tone="msg.peerTone"
                         :body="msg.peerBody"
                         :content="msg.content"
-                        :kind="peerKindOf(msg.peerFromName)"
-                        :same-tree="peerSameTreeOf(msg.peerFromName)"
+                        :kind="peerKindOf(peerDirectory, msg.peerFromName)"
+                        :same-tree="peerSameTreeOf(peerDirectory, msg.peerFromName)"
                         :created-at="msg.createdAt"
                       />
                       <PeerDeliveryCard
@@ -916,6 +916,7 @@ import { docTabFor } from '@/composables/useDocTabs'
 import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, stepHoldsNoCard, timelineBlockKey, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript, type TimelineBlock } from '@/composables/useChatStream'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { providePendingActions } from '@/composables/providePendingActions'
+import { peerKindOf, peerSameTreeOf, providePeerDirectory } from '@/composables/providePeerDirectory'
 import type { DocTab } from '@/composables/useDocTabs'
 import { blockOnActivityLine, groupActivityRuns } from '@/lib/activityRuns'
 import { subagentPhase } from '@/lib/subagentStatus'
@@ -1709,6 +1710,10 @@ const {
   resetForNewChat,
   rebindSessionObserver,
 } = useChatStream()
+
+// The peer directory, shared down the tree: a subagent's letter cards ask the
+// same two lookups of it the conversation's own letters do.
+providePeerDirectory(peerDirectory)
 
 /**
  * The file view this page's composer and workbench address: the open
@@ -2821,21 +2826,6 @@ function closePeerDrawer() {
 
 function changePeerPage(page: number) {
   void refreshPeerDirectory(page)
-}
-
-/** What the drawer knows about a letter's sender, for the header's own labels.
- *  A sender the directory has not listed yet simply carries no label. */
-function peerKindOf(name?: string): string {
-  const agent = String(name ?? '').trim()
-  if (!agent) return ''
-  return peerDirectory.value.sameTree.find((row) => row.name === agent)?.kind
-    ?? peerDirectory.value.other.find((row) => row.name === agent)?.kind
-    ?? ''
-}
-
-function peerSameTreeOf(name?: string): boolean {
-  const agent = String(name ?? '').trim()
-  return Boolean(agent) && peerDirectory.value.sameTree.some((row) => row.name === agent)
 }
 
 /** The held message the banner is showing: the oldest one waiting. */

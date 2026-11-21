@@ -2563,6 +2563,45 @@ describe('useChatStream helpers', () => {
     }
   })
 
+  // A letter replays as the letter it was live: the persisted delivery event
+  // carries the origin and the identity the engine derived, so a reloaded tab
+  // draws the same card — and an old event with no origin still replays as the
+  // user's own block, never sniffed into a letter.
+  it('replays a delivered peer letter as a letter block and an old delivery as the user’s', async () => {
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'user-1', role: 'user', content: 'first', runId: '' },
+      { id: 'assistant-1', role: 'assistant', content: 'first answer', runId: 'parent-1' },
+    ])
+    const envelope = '<cross-session-message from="uds:/tmp/a.sock" from-name="builder">please review a.go</cross-session-message>'
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 'session-1', nextCursor: 4, highWater: 4, hasMore: false, schemaVersion: 1,
+      events: [
+        { id: 'spawn-1', sequence: 1, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_spawned', createdAt: '2026-09-06T00:00:01Z', payload: { agentId: 'agent-1', agentType: 'explore', taskId: 'task-1', task: 'inspect history', parentRunId: 'parent-1', executionId: 'exec-1' } },
+        { id: 'letter-1', sequence: 2, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_input_delivered', createdAt: '2026-09-06T00:00:02Z', payload: { agentId: 'agent-1', executionId: 'exec-1', text: envelope, origin: 'peer', fromName: 'builder', peerMark: 'bu', peerTone: 2, peerBody: 'please review a.go' } },
+        { id: 'user-1', sequence: 3, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_input_delivered', createdAt: '2026-09-06T00:00:03Z', payload: { agentId: 'agent-1', executionId: 'exec-1', text: 'keep going' } },
+        { id: 'ended-1', sequence: 4, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_ended', createdAt: '2026-09-06T00:00:04Z', payload: { agentId: 'agent-1', agentType: 'explore', taskId: 'task-1', parentRunId: 'parent-1', executionId: 'exec-1', status: 'ok' } },
+      ],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'session-1', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 'session-1'
+      await stream.loadMessages('session-1')
+
+      const agent = stream.subagents.value.find((record) => record.agentId === 'agent-1')
+      expect(agent?.blocks.map((block) => block.kind)).toEqual(['prompt', 'letter', 'user', 'worked'])
+      expect(agent?.blocks.find((block) => block.kind === 'letter')).toMatchObject({
+        id: 'letter-1',
+        fromName: 'builder', mark: 'bu', tone: 2, body: 'please review a.go',
+        content: envelope, createdAt: Date.parse('2026-09-06T00:00:02Z'),
+      })
+      expect(agent?.blocks.find((block) => block.kind === 'user')).toMatchObject({ id: 'user-1', text: 'keep going' })
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
   // Plan 017: a reloaded subagent's words come from its own worker session's
   // transcript, not from replaying its per-token deltas. The rows the runtime
   // wrote there are the same blocks the event stream carries, so the view is
@@ -5943,6 +5982,97 @@ describe('a subagent talked to from its own view', () => {
       const promptEntry = stream.subagents.value.find((row) => row.agentId === 'task-2')
       expect((promptEntry?.blocks ?? []).some((block) => block.kind === 'prompt')).toBe(true)
       expect((promptEntry?.blocks ?? []).some((block) => block.kind === 'user')).toBe(false)
+
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
+      await pending
+    } finally {
+      restore()
+    }
+  })
+
+  // A peer message handed to a running subagent is another agent's letter, not
+  // the reader's own words: the delivered event's origin routes it to a letter
+  // block carrying the identity the engine derived, and the envelope text stays
+  // verbatim as the card's fallback. The person's own interjection — marked or
+  // unmarked — keeps the user block.
+  it('routes a delivered peer letter to a letter block and the person’s words to a user block', async () => {
+    const restore = installFakeSocket()
+    try {
+      const stream = useChatStream()
+      const pending = stream.send('kick off')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      let seq = 0
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { id: `evt-${++seq}`, type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+      runEvent('subagent_spawned', {
+        agent_id: 'task-1', agent_type: 'general-purpose', task_id: 'task-1',
+        task: 'probe the network', execution_id: 'exec-1',
+      })
+      const envelope = '<cross-session-message from="uds:/tmp/a.sock" from-name="builder">please review a.go</cross-session-message>'
+      runEvent('subagent_input_delivered', {
+        agent_id: 'task-1', execution_id: 'exec-1', text: envelope, origin: 'peer',
+        from_name: 'builder', peer_mark: 'bu', peer_tone: 2, peer_body: 'please review a.go',
+      })
+      // The gateway's camelCase spelling of the same contract reads the same.
+      runEvent('subagent_input_delivered', {
+        agentId: 'task-1', executionId: 'exec-1', text: envelope, origin: 'peer',
+        fromName: 'builder', peerMark: 'bu', peerTone: 2, peerBody: 'please review a.go',
+      })
+      runEvent('subagent_input_delivered', { agent_id: 'task-1', execution_id: 'exec-1', text: 'my own words', origin: 'user' })
+
+      const entry = stream.subagents.value.find((row) => row.agentId === 'task-1')
+      const letters = (entry?.blocks ?? []).filter((block) => block.kind === 'letter') as Extract<TimelineBlock, { kind: 'letter' }>[]
+      expect(letters).toHaveLength(2)
+      for (const letter of letters) {
+        expect(letter).toMatchObject({
+          fromName: 'builder', mark: 'bu', tone: 2, body: 'please review a.go',
+          content: envelope, createdAt: Date.parse('2026-06-14T00:00:00.000Z'),
+        })
+      }
+      const userBlocks = (entry?.blocks ?? []).filter((block) => block.kind === 'user') as Extract<TimelineBlock, { kind: 'user' }>[]
+      expect(userBlocks.map((block) => block.text)).toEqual(['my own words'])
+
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
+      await pending
+    } finally {
+      restore()
+    }
+  })
+
+  // A peer letter whose envelope the engine could not read — or whose event
+  // predates the identity fields — still arrives as a letter: the origin alone
+  // routes it, and the card falls back to the text with no sender invented.
+  it('keeps a nameless peer delivery a letter with the text as its body', async () => {
+    const restore = installFakeSocket()
+    try {
+      const stream = useChatStream()
+      const pending = stream.send('kick off')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      const runEvent = (type: string, payload: Record<string, unknown>) => socket.message({
+        op: 'run_event',
+        request_id: sent.request_id,
+        data: { id: `evt-${type}`, type, run_id: 'run-1', session_id: 's1', created_at: '2026-06-14T00:00:00.000Z', payload },
+      })
+      runEvent('subagent_spawned', {
+        agent_id: 'task-1', agent_type: 'general-purpose', task_id: 'task-1',
+        task: 'probe', execution_id: 'exec-1',
+      })
+      runEvent('subagent_input_delivered', { agent_id: 'task-1', execution_id: 'exec-1', text: 'a plain interjection', origin: 'peer' })
+
+      const entry = stream.subagents.value.find((row) => row.agentId === 'task-1')
+      const letters = (entry?.blocks ?? []).filter((block) => block.kind === 'letter') as Extract<TimelineBlock, { kind: 'letter' }>[]
+      expect(letters).toHaveLength(1)
+      expect(letters[0]).toMatchObject({ content: 'a plain interjection' })
+      expect(letters[0].fromName).toBeUndefined()
+      expect(letters[0].body).toBeUndefined()
+      expect((entry?.blocks ?? []).some((block) => block.kind === 'user')).toBe(false)
 
       socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
       await pending

@@ -143,7 +143,14 @@ type Deps struct {
 	// the life of the process, because the tool table sits in the prompt
 	// prefix and may not follow a peer service starting or stopping. Subagents
 	// inherit it through the factory that built them.
-	Peers       PeerDirectory
+	Peers PeerDirectory
+	// PeerDisplay reads a delivered peer message for the surface that draws
+	// it: the sender, the words inside the envelope and the identity block,
+	// derived once by the composition root so no surface hashes a name or
+	// parses an envelope itself. Nil when the root provides none; the
+	// delivered event then carries the origin and text alone. Subagents
+	// inherit it through the factory that built them.
+	PeerDisplay PeerDisplay
 	MemoryStore *memory.Store
 	// appCfg holds the live configuration root. It is published by config
 	// applications (Runner.LoadConfig under mu.load, Environment.AdoptConfig

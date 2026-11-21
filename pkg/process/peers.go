@@ -289,6 +289,7 @@ func (env *Environment) StartPeers(ctx context.Context, s PeerSurface) (stop fun
 	// service is between modes answers that messaging is not available.
 	if env != nil {
 		env.deps().Peers = env.peerDirectory()
+		env.deps().PeerDisplay = env.peerDisplay()
 	}
 	svc := &peerService{
 		env:          env,

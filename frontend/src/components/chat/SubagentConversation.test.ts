@@ -1,11 +1,14 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { ref } from 'vue'
 
 import { setLocale } from '@/locales'
-import type { SubagentTranscript } from '@/composables/useChatStream'
+import type { SubagentTranscript, PeerDirectoryView } from '@/composables/useChatStream'
+import { PeerDirectoryKey } from '@/composables/providePeerDirectory'
 import RunWorkedLine from './RunWorkedLine.vue'
 import ActivityLine from './ActivityLine.vue'
 import ActivityStep from './ActivityStep.vue'
+import PeerMessageCard from './PeerMessageCard.vue'
 import SubagentConversation from './SubagentConversation.vue'
 import SubagentCallCard from './SubagentCallCard.vue'
 
@@ -189,6 +192,80 @@ describe('SubagentConversation', () => {
     })
     const user = wrapper.get('[data-testid="subagent-user-message"]')
     expect(user.text()).toContain('continue')
+  })
+
+  // A letter another agent wrote is a step on the activity line, never a
+  // bubble of the reader's own words: the sender's identity block is the
+  // node, and the card is the conversation's own PeerMessageCard, with the
+  // directory's labels when the conversation has provided one.
+  it('draws a peer letter on the activity line with the sender as its node', () => {
+    const directory = ref<PeerDirectoryView>({
+      files: [],
+      sameTree: [{ name: 'forebrain-harness-28', kind: 'terminal', mark: '28', tone: 1, self: false }],
+      other: [],
+      otherTotal: 0,
+    })
+    const wrapper = mount(SubagentConversation, {
+      props: {
+        record: record({
+          blocks: [
+            { kind: 'prompt', text: 'probe the network' },
+            { kind: 'tool', step: { stepId: 'c1', toolName: 'shell', summary: 'ran ls', header: 'Ran ls', status: 'completed' } },
+            {
+              kind: 'letter', id: 'l1', fromName: 'forebrain-harness-28', mark: '28', tone: 1,
+              body: 'do not touch liveness.go',
+              content: '<cross-session-message from="uds:/tmp/a.sock" from-name="forebrain-harness-28">do not touch liveness.go</cross-session-message>',
+              createdAt: Date.parse('2026-09-06T00:00:02Z'),
+            },
+            { kind: 'assistant', text: 'understood', open: false },
+          ],
+        }),
+      },
+      global: { provide: { [PeerDirectoryKey as symbol]: directory } },
+    })
+    // The call, the letter and the answer hang on one line together.
+    expect(wrapper.findAllComponents(ActivityLine)).toHaveLength(1)
+    const card = wrapper.getComponent(PeerMessageCard)
+    expect(card.props('fromName')).toBe('forebrain-harness-28')
+    expect(card.props('kind')).toBe('terminal')
+    expect(card.props('sameTree')).toBe(true)
+    // The body the engine read, with the envelope kept only as the fallback:
+    // the card's own rendering is its own test's contract.
+    expect(card.props('body')).toBe('do not touch liveness.go')
+    expect(card.props('content')).toBe('<cross-session-message from="uds:/tmp/a.sock" from-name="forebrain-harness-28">do not touch liveness.go</cross-session-message>')
+    expect(card.text()).toContain('forebrain-harness-28')
+    expect(card.text()).toContain('Terminal')
+    expect(card.text()).toContain('Same directory')
+    // The sender's block is the step's node, in the icon column.
+    const step = wrapper.find('.letter-step')
+    expect(step.exists()).toBe(true)
+    const node = step.find('.relative > [data-testid="peer-mark"]')
+    expect(node.exists()).toBe(true)
+    expect(node.text()).toBe('28')
+    // Another agent's words never take the reader's bubble.
+    expect(wrapper.find('[data-testid="subagent-user-message"]').exists()).toBe(false)
+  })
+
+  // A letter the engine read no sender for — and a tab outside a directory
+  // provider — still draws the card: the text is the body, the name falls
+  // back to the unknown agent, and no label is invented.
+  it('draws a nameless letter with the fallback name and no directory labels', () => {
+    const wrapper = mount(SubagentConversation, {
+      props: {
+        record: record({
+          blocks: [
+            { kind: 'prompt', text: 'probe the network' },
+            { kind: 'letter', id: 'l1', content: 'a plain interjection', createdAt: Date.parse('2026-09-06T00:00:02Z') },
+          ],
+        }),
+      },
+    })
+    const card = wrapper.getComponent(PeerMessageCard)
+    expect(card.props('kind')).toBe('')
+    expect(card.props('sameTree')).toBe(false)
+    expect(card.props('content')).toBe('a plain interjection')
+    expect(card.text()).toContain('Unknown agent')
+    expect(wrapper.find('[data-testid="subagent-user-message"]').exists()).toBe(false)
   })
 
   it('marks the nested dispatch the drawer has open', () => {
