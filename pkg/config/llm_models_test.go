@@ -305,13 +305,21 @@ func TestModelPinnedByNamesTheSettingsThatMustResolve(t *testing.T) {
 		t.Fatalf("ModelPinnedBy(row-2) = %v, want [subagent notes]", got)
 	}
 	// A subagent role definition's own model is judged by the loader like a
-	// per-agent entry's (validateDefinitionRoles), so it pins the row too.
+	// per-agent entry's (validateDefinitionRoles), so it pins the row too — a
+	// primary definition's model field is never read there, so it pins nothing.
 	role := &Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
 		"main":         {Primary: true},
 		"code-auditor": {SystemPrompt: "audit the repo", Model: "row-1"},
 	}}}
 	if got := ModelPinnedBy(role, "row-1"); len(got) != 1 || got[0] != "subagent code-auditor" {
 		t.Fatalf("ModelPinnedBy(role's own model) = %v, want [subagent code-auditor]", got)
+	}
+	primaryOwn := &Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+		"main":   {Primary: true, Model: "row-1"},
+		"worker": {Primary: true, Model: "row-1"},
+	}}}
+	if got := ModelPinnedBy(primaryOwn, "row-1"); len(got) != 0 {
+		t.Fatalf("ModelPinnedBy(a primary's own model) = %v, want nothing: the loader never reads it", got)
 	}
 	if got := ModelPinnedBy(nil, "row-1"); got != nil {
 		t.Fatalf("nil root = %v, want nil", got)
@@ -379,6 +387,15 @@ func TestDanglingReferencesTheLoaderRefusesAreExactlyThePinnedOnes(t *testing.T)
 			doc:  "agents:\n  definitions:\n    main:\n      primary: true\n      default_model: " + dangling + "\n",
 			root: Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
 				"main": {Primary: true, DefaultModel: dangling},
+			}}},
+		},
+		{
+			// validateDefinitionRoles skips every effective primary before it
+			// judges the body, so a primary's own model field is never read.
+			name: "a primary agent's own model is skipped, not refused",
+			doc:  "agents:\n  definitions:\n    main:\n      primary: true\n      model: " + dangling + "\n",
+			root: Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+				"main": {Primary: true, Model: dangling},
 			}}},
 		},
 		{

@@ -143,9 +143,10 @@ func EffectiveDefaultLLMFor(root *Root, agentName string) *AgentLLMProviderConfi
 // ModelDefaultAgents names the agents whose default_model is this row, by
 // display name (the definition key when no display name is set), sorted. The
 // reference is an explicit choice, so a row one of them runs on cannot be
-// deleted behind its back. A subagent definition's own Model is not a default
-// and this helper does not look at it: nothing falls back to that row when it
-// goes, the subagent simply follows the conversation's model.
+// deleted behind its back. This helper answers the default_model field alone —
+// a subagent definition's own Model is not a default; ModelPinnedBy names the
+// settings whose reference the loader refuses to lose, and their delete is
+// refused rather than resolved.
 func ModelDefaultAgents(root *Root, id string) []string {
 	if root == nil || strings.TrimSpace(id) == "" {
 		return nil
@@ -199,8 +200,9 @@ func ModelPinnedBy(root *Root, id string) []string {
 	}
 	for key, def := range root.Agents.Definitions {
 		// The role's own model is judged like a per-agent entry's
-		// (validateDefinitionRoles), so it pins the row the same way.
-		if strings.TrimSpace(def.Model) == id {
+		// (validateDefinitionRoles), which skips every effective primary:
+		// a primary definition's model field is never read, so it pins nothing.
+		if !IsEffectivePrimaryAgent(key, def) && strings.TrimSpace(def.Model) == id {
 			add("subagent", key)
 		}
 		for _, entry := range def.Subagents {
