@@ -625,6 +625,27 @@ func TestGoalCheckDispatchesTheEvaluatorSubagent(t *testing.T) {
 	}
 }
 
+// The goal check is a blocking dispatch too: the goal loop calls the evaluator
+// and takes the verdict from that call, so the end says it was awaited and no
+// peer report of the same verdict follows the loop into the conversation.
+func TestGoalCheckEndIsAwaitedByDispatcher(t *testing.T) {
+	executor := &awaitedRecordingSubagentExecutor{fixedSubagentExecutor: &fixedSubagentExecutor{
+		output: "I ran the tests; all 42 pass.\n{\"status\": \"done\", \"why\": \"all 42 tests pass\"}",
+	}}
+	runner := &Runner{Deps: &Deps{Home: t.TempDir()}, Events: &dispatchProbe{}, SubagentExecutor: executor}
+
+	if _, err := (goalCheck{runner: runner}).Evaluate(dispatchTestCtx(), "make the tests pass", nil); err != nil {
+		t.Fatalf("Evaluate error: %v", err)
+	}
+	ends := executor.recordedEnds()
+	if len(ends) != 1 {
+		t.Fatalf("end notifications = %d, want exactly 1", len(ends))
+	}
+	if !ends[0].AwaitedByDispatcher {
+		t.Fatal("a goal check's end is awaited: the goal loop read the verdict from the blocking call")
+	}
+}
+
 func TestGoalCheckWithoutAVerdictIsAnError(t *testing.T) {
 	executor := &fixedSubagentExecutor{output: "I could not decide."}
 	runner := &Runner{Deps: &Deps{Home: t.TempDir()}, Events: &dispatchProbe{}, SubagentExecutor: executor}

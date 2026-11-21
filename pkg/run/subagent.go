@@ -5542,7 +5542,9 @@ func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID
 		resolve: agent.ResolveSubtype,
 		run: func(runCtx context.Context, fac Factory, prep preparedSubagent) (string, error) {
 			approve := tool.SubagentApprovalHookFromContext(runCtx, factoryToolsState(fac))
-			return runSubagentExecution(subagentExecContext(prep), fac, prep.entry, func(execCtx context.Context) (string, error) {
+			// Blocking dispatch: the goal loop reads the verdict from this call
+			// and owns what follows it (same as execGeneralSubagent).
+			return runSubagentExecution(withSubagentAwaited(subagentExecContext(prep)), fac, prep.entry, func(execCtx context.Context) (string, error) {
 				return runAcrossApprovals(execCtx, approve, prep.superviseRunID, "Goal Evaluator",
 					func(attemptCtx context.Context, superviseRunID string) (string, error) {
 						return executeSubagent(
@@ -5564,7 +5566,10 @@ func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID
 func (r *Runner) runPlanReviewAcrossApprovals(
 	ctx context.Context, fac Factory, prep preparedSubagent, approve PlanReviewApprovalFunc,
 ) (string, error) {
-	return runSubagentExecution(ctx, fac, prep.entry, func(execCtx context.Context) (string, error) {
+	// Blocking dispatch: the approval that asked for the review reads it from
+	// this call, so it receives the report and owns what follows (same as
+	// execGeneralSubagent).
+	return runSubagentExecution(withSubagentAwaited(ctx), fac, prep.entry, func(execCtx context.Context) (string, error) {
 		return runAcrossApprovals(execCtx, approve, prep.superviseRunID, "plan review",
 			func(runCtx context.Context, superviseRunID string) (string, error) {
 				return executeSubagent(

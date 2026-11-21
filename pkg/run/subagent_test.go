@@ -423,6 +423,54 @@ func TestRunPlanReviewSubagentRunsWithSubagentsDisabled(t *testing.T) {
 	}
 }
 
+// awaitedRecordingSubagentExecutor keeps every execution end it was told about,
+// so a test can read the flag the composition root decides delivery on.
+type awaitedRecordingSubagentExecutor struct {
+	*fixedSubagentExecutor
+	mu   sync.Mutex
+	ends []SubagentExecutionEnd
+}
+
+func (e *awaitedRecordingSubagentExecutor) SubagentExecutionEnded(_ context.Context, end SubagentExecutionEnd) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ends = append(e.ends, end)
+}
+
+func (e *awaitedRecordingSubagentExecutor) recordedEnds() []SubagentExecutionEnd {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]SubagentExecutionEnd(nil), e.ends...)
+}
+
+// A plan review is a blocking dispatch: the exit-plan approval's call waits for
+// the review and its verdict is that call's result. The end therefore says it
+// was awaited, which is what keeps the same report from being sent into the
+// dispatcher's conversation a second time as a peer message.
+func TestPlanReviewEndIsAwaitedByDispatcher(t *testing.T) {
+	cfg := &appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o", APIKey: "key", BaseURL: "https://example.invalid"}), Agents: appcfg.AgentsSection{
+		Definitions: map[string]appcfg.AgentDefinition{
+			"main": {DefaultModel: "llm-1"},
+		},
+	}}
+	executor := &awaitedRecordingSubagentExecutor{fixedSubagentExecutor: &fixedSubagentExecutor{output: "verdict"}}
+	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg), SubagentExecutor: executor}
+
+	out, err := runner.RunPlanReviewSubagent(dispatchTestCtx(), "review the plan", SubagentModelOverride{
+		Provider: "openai", Model: "gpt-4o",
+	}, nil)
+	if err != nil || out != "verdict" {
+		t.Fatalf("plan review must return its report to the blocking call: out=%q err=%v", out, err)
+	}
+	ends := executor.recordedEnds()
+	if len(ends) != 1 {
+		t.Fatalf("end notifications = %d, want exactly 1", len(ends))
+	}
+	if !ends[0].AwaitedByDispatcher {
+		t.Fatal("a plan review's end is awaited: its dispatcher read the report from the blocking call")
+	}
+}
+
 // The model a plan review runs on is a property of its execution: the user
 // picked it in the approval overlay, so it is neither the reviewer type's
 // configuration (it has none) nor the conversation's. The spawn announces it

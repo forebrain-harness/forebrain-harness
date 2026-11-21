@@ -1423,6 +1423,81 @@ func TestSubagentEndSteersTheRunningDispatcher(t *testing.T) {
 	}
 }
 
+// planReviewOnceExecutor runs one plan review and reports its end to the
+// service's environment, which is where a finished execution's report is
+// delivered from — the leg under test.
+type planReviewOnceExecutor struct {
+	env    *peerTestEnv
+	output string
+}
+
+func (e *planReviewOnceExecutor) RunSubagentExec(context.Context, run.SubagentExecRequest) (string, error) {
+	return e.output, nil
+}
+
+func (e *planReviewOnceExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn) {}
+
+func (e *planReviewOnceExecutor) SubagentExecutionStarting(context.Context, string) {}
+
+func (e *planReviewOnceExecutor) SubagentExecutionEnded(ctx context.Context, end run.SubagentExecutionEnd) {
+	e.env.SubagentExecutionEnded(ctx, end)
+}
+
+// planReviewRunner is the engine a plan review is dispatched from here: a bare
+// runner on its own home with the recording executor wired, the shape pkg/run's
+// own plan review tests build.
+func planReviewRunner(t *testing.T, executor run.SubagentExecutor) *run.Runner {
+	t.Helper()
+	cfg := &appcfg.Root{
+		LLMModels: []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-4o", APIKey: "key", BaseURL: "https://example.invalid"}},
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {DefaultModel: "llm-1"},
+		}},
+	}
+	return &run.Runner{Deps: (&run.Deps{Home: t.TempDir()}).WithConfig(cfg), SubagentExecutor: executor}
+}
+
+// The plan review's verdict is the blocking call's result: the approval that
+// dispatched it reads the review and hands it to the dispatching agent. The
+// same report must not then wake the idle conversation as a peer message.
+func TestPlanReviewBlockingDispatchDoesNotRedeliverItsReport(t *testing.T) {
+	view := &peerTestView{}
+	svc := startPeerTestService(t, "tui", "cli-plan-review-once", view, nil)
+	runner := planReviewRunner(t, &planReviewOnceExecutor{env: svc.env, output: "the review verdict"})
+
+	out, err := runner.RunPlanReviewSubagent(llm.WithAgentSessionID(context.Background(), "cli-plan-review-once"), "review the plan", run.SubagentModelOverride{Provider: "openai", Model: "gpt-4o"}, nil)
+	if err != nil || out != "the review verdict" {
+		t.Fatalf("blocking review must return its report: out=%q err=%v", out, err)
+	}
+	if n := view.wakeCount(); n != 0 {
+		t.Fatalf("peer wakes = %d, want 0: the blocking call already delivered the report (%v)", n, view.texts())
+	}
+}
+
+// And with its dispatcher still working: the report would reach the model as a
+// steer at its next tool boundary, words it already has.
+func TestPlanReviewRunningDispatcherIsNotSteeredWithTheReport(t *testing.T) {
+	view := &peerTestView{}
+	svc := startPeerTestService(t, "tui", "cli-plan-review-steer", view, nil)
+	queue := svc.env.Control.SessionQueue("cli-plan-review-steer")
+	queue.Attach(run.NewTurnInputRuntime())
+	if !svc.env.Control.TrackRuntime("run-review", "cli-plan-review-steer", func() {}, queue.Runtime()) {
+		t.Fatal("the test run was not tracked")
+	}
+	runner := planReviewRunner(t, &planReviewOnceExecutor{env: svc.env, output: "the review verdict"})
+
+	out, err := runner.RunPlanReviewSubagent(llm.WithAgentSessionID(context.Background(), "cli-plan-review-steer"), "review the plan", run.SubagentModelOverride{Provider: "openai", Model: "gpt-4o"}, nil)
+	if err != nil || out != "the review verdict" {
+		t.Fatalf("blocking review must return its report: out=%q err=%v", out, err)
+	}
+	if entries := queue.Runtime().Snapshot(); len(entries) != 0 {
+		t.Fatalf("steers = %d, want 0: the report must not steer the running dispatcher", len(entries))
+	}
+	if n := view.wakeCount(); n != 0 {
+		t.Fatalf("wakes = %d, want 0", n)
+	}
+}
+
 // Three ends are nobody's news. An awaited execution's dispatcher read the
 // report from the call that was waiting for it. A user's cancellation is the
 // user's own decision. A usage limit with a stated reset is the subagent's own
