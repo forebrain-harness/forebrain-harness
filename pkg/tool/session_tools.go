@@ -101,7 +101,7 @@ func registerSessionAndMemoryTools(a ToolAdder, st *State, rt *AgentToolRuntime)
 			"memories_list":            {"Use when listing what memory files exist", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true}},
 			"memories_read":            {"Use when reading a specific memory file", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true}},
 			"memories_search":          {"Use when searching memories for a substring", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true}},
-			"memories_add_ad_hoc_note": {"Use when the user asks Forebrain Harness to remember, forget, or update something, or states a rule that must outlive this session", event.ToolMeta{}},
+			"memories_add_ad_hoc_note": {"Use when the user asks Forebrain Harness to remember, forget, or update something, or states a standing rule about how to work that outlives the current task", event.ToolMeta{}},
 		}
 		for _, t := range tools {
 			if meta, ok := memoryMeta[t.Name()]; ok {
@@ -343,7 +343,7 @@ type enterPlanModeInput struct {
 // memoriesAddAdHocNoteDescription carries where a note lands: the tool
 // returns that path, and reading the note back by the bare filename it was
 // written with fails, so the read-back rule lives here with the tool.
-const memoriesAddAdHocNoteDescription = "Save one append-only memory note when the user asks to remember, forget or update something, or states a durable rule or preference for future sessions. It is stored under " + memory.AdHocNotesDir + "/ in the chosen scope; pass the returned path, relative to the memories root, verbatim to memories_read."
+const memoriesAddAdHocNoteDescription = "Save one append-only memory note when the user asks to remember, forget or update something, or states a standing rule about how to work that outlives the current task. Decisions about what to build (product behavior, UI, prototype or plan content) are not memory; they belong to the artifact that records them. It is stored under " + memory.AdHocNotesDir + "/ in the chosen scope; pass the returned path, relative to the memories root, verbatim to memories_read."
 
 const enterPlanModeDescription = `Use proactively before a non-trivial implementation: plan mode lets you explore and get the user's sign-off on an approach before writing code, which prevents wasted effort. Entering it requires the user's consent.
 

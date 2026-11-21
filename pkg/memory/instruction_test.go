@@ -135,6 +135,49 @@ func TestCaptureInstructionRendersBeforeAnyMemoryExists(t *testing.T) {
 	}
 }
 
+// Capture defaults to writing nothing: the exception is a rule the user states
+// about how to work, while a decision about what to build belongs to the
+// artifact that records it. The obligations the old wording carried ("Before
+// every reply", "the note is due now", "Doing what the user asked does not
+// discharge the note") made every design ruling look like a standing rule, and
+// the notes became a second, stale copy of the work itself.
+func TestCaptureInstructionDefaultsToNoCapture(t *testing.T) {
+	roots, projectKey := newInstructionRoots(t)
+
+	withTools, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Capture: true, MemoryTools: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"writing nothing is the normal, correct outcome",
+		"Decisions about what to build or change are not memory",
+		"corrections to the artifact",
+		"Never implementation mechanics",
+		"a path or command the rule itself names",
+		"does not replace the note",
+		"An explicit request to remember, forget or update something always qualifies",
+	} {
+		if !strings.Contains(withTools, want) {
+			t.Fatalf("capture instruction missing %q:\n%s", want, withTools)
+		}
+	}
+
+	// The same negative contract on both variants: without the dedicated tools
+	// the capture rules are the only thing telling the model what to note.
+	withoutTools, err := RenderTurnInstruction(roots, projectKey, InstructionOptions{Capture: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldObligations := []string{"Before every reply", "the note is due now", "Doing what the user asked", "past decisions"}
+	for _, rendered := range []string{withTools, withoutTools} {
+		for _, unwanted := range oldObligations {
+			if strings.Contains(rendered, unwanted) {
+				t.Fatalf("capture instruction still carries %q:\n%s", unwanted, rendered)
+			}
+		}
+	}
+}
+
 // Nothing in the instruction may describe a capability the settings withhold: a
 // turn told to capture with the memory switch off would write notes the user
 // disabled, and a turn told to recall would surface memory they asked not to
