@@ -760,6 +760,56 @@ func SetAgentDefaultModel(ctx context.Context, db *sql.DB, agentName, modelID st
 	})
 }
 
+// LLMModelRefusal reports a delete the guards refused: Defaults lists the
+// agents whose default_model is the row, Pins the settings whose reference the
+// loader requires to resolve — both by a reader-facing label, sorted. The
+// web models page answers it as a 409 with both lists; the terminal says the
+// same sentence.
+type LLMModelRefusal struct {
+	Defaults []string
+	Pins     []string
+}
+
+func (e *LLMModelRefusal) Error() string {
+	if len(e.Defaults) > 0 {
+		return "it is the default model of " + strings.Join(e.Defaults, ", ") + "; choose another default first"
+	}
+	return "it is still used by " + strings.Join(e.Pins, ", ") + "; point those settings elsewhere first"
+}
+
+// DeleteLLMModel removes one configured row — the one delete semantics both
+// surfaces share (plan 345). Two kinds of reference refuse it, because neither
+// may be rewritten behind the user's back:
+//
+//   - a row some agent names as its default_model (the reference is an explicit
+//     choice; deleting through it would move that agent to another model);
+//   - a row a subagent type, the plan reviewer, the goal check or a subagent
+//     definition pins by id. The loader requires those references to resolve,
+//     so deleting the row would leave the composed configuration invalid and
+//     fail every later turn (see plan 345's reproduction).
+//
+// Sessions, subagents' conversations and memory settings that merely named the
+// row are not rewritten — the runtime refuses that turn with a re-choose
+// diagnosis or skips the stale value (plans 260/261/315). A missing row reports
+// state.ErrLLMModelNotFound. Adoption is the caller's: the surface that wrote
+// re-reads through Environment.SyncConfigFromDB, the turn boundary's own path.
+func DeleteLLMModel(ctx context.Context, db *sql.DB, cfg *appcfg.Root, id string) error {
+	if db == nil {
+		return fmt.Errorf("no state database")
+	}
+	store := &state.LLMModelStore{DB: db}
+	stored, err := store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	defaults := appcfg.ModelDefaultAgents(cfg, stored.ID)
+	pins := appcfg.ModelPinnedBy(cfg, stored.ID)
+	if len(defaults) > 0 || len(pins) > 0 {
+		return &LLMModelRefusal{Defaults: defaults, Pins: pins}
+	}
+	return store.Delete(ctx, stored.ID)
+}
+
 // probeTimeout bounds one connection test. It is longer than a request's
 // patience on purpose: a reasoning model may spend seconds before its first
 // token, and the person is watching a button they just pressed.

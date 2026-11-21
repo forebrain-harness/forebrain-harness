@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -528,6 +529,106 @@ func TestSetAgentDefaultModelCreatesMainAndRefusesAnUnknownAgent(t *testing.T) {
 	}
 	if err := SetAgentDefaultModel(ctx, store.DB, "typo", id); err == nil {
 		t.Fatal("an unknown agent name must be refused")
+	}
+}
+
+// deleteEnvForTest is the fixture every delete test shares: a scratch home with
+// the section validator installed, and one row the store just made.
+func deleteEnvForTest(t *testing.T) (*Environment, context.Context, state.LLMModel) {
+	t.Helper()
+	env, ctx := migrateEnvForTest(t, "", "")
+	row, err := (&state.LLMModelStore{DB: env.SQL}).Create(ctx, state.LLMModel{
+		Provider: "openai", Model: "gpt-x", BaseURL: "https://api.openai.com", APIPath: "/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("create the row: %v", err)
+	}
+	return env, ctx, row
+}
+
+// TestDeleteLLMModelRemovesARowNothingReferences pins the happy path: a row no
+// configuration names is deleted, and a second read reports it gone.
+func TestDeleteLLMModelRemovesARowNothingReferences(t *testing.T) {
+	env, ctx, row := deleteEnvForTest(t)
+	cfg, err := env.ComposedPersistedConfig(ctx)
+	if err != nil {
+		t.Fatalf("read the stored configuration: %v", err)
+	}
+	if err := DeleteLLMModel(ctx, env.SQL, &cfg, row.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := (&state.LLMModelStore{DB: env.SQL}).Get(ctx, row.ID); !errors.Is(err, state.ErrLLMModelNotFound) {
+		t.Fatalf("the row after the delete = %v, want ErrLLMModelNotFound", err)
+	}
+}
+
+// TestDeleteLLMModelRefusesTheDefaultModel pins the guard the web page has
+// always had (plan 345): the row an agent defaults to stays, and the refusal
+// names that agent.
+func TestDeleteLLMModelRefusesTheDefaultModel(t *testing.T) {
+	env, ctx, row := deleteEnvForTest(t)
+	if err := SetAgentDefaultModel(ctx, env.SQL, "main", row.ID); err != nil {
+		t.Fatalf("set main's default: %v", err)
+	}
+	cfg, err := env.ComposedPersistedConfig(ctx)
+	if err != nil {
+		t.Fatalf("read the stored configuration: %v", err)
+	}
+	err = DeleteLLMModel(ctx, env.SQL, &cfg, row.ID)
+	var refusal *LLMModelRefusal
+	if !errors.As(err, &refusal) {
+		t.Fatalf("delete = %v, want a refusal", err)
+	}
+	if len(refusal.Defaults) != 1 || refusal.Defaults[0] != "main" || len(refusal.Pins) != 0 {
+		t.Fatalf("refusal = %+v, want the default list alone", refusal)
+	}
+	if _, err := (&state.LLMModelStore{DB: env.SQL}).Get(ctx, row.ID); err != nil {
+		t.Fatalf("the refused row must survive: %v", err)
+	}
+}
+
+// TestDeleteLLMModelRefusesAPinnedRow is plan 345's reproduction as a test: a
+// row a built-in subagent type pins by id is refused, because deleting it would
+// leave the composed configuration refused by the loader and fail every later
+// turn. The row survives, so the configuration keeps composing.
+func TestDeleteLLMModelRefusesAPinnedRow(t *testing.T) {
+	env, ctx, row := deleteEnvForTest(t)
+	if err := env.UpdateRootSection(ctx, "agents", func(cfg *appcfg.Root) error {
+		cfg.Agents.SubagentModels = map[string]appcfg.SubagentConfig{"explore": {Model: row.ID}}
+		return nil
+	}); err != nil {
+		t.Fatalf("pin the row: %v", err)
+	}
+	cfg, err := env.ComposedPersistedConfig(ctx)
+	if err != nil {
+		t.Fatalf("read the stored configuration: %v", err)
+	}
+	err = DeleteLLMModel(ctx, env.SQL, &cfg, row.ID)
+	var refusal *LLMModelRefusal
+	if !errors.As(err, &refusal) {
+		t.Fatalf("delete = %v, want a refusal", err)
+	}
+	if len(refusal.Pins) != 1 || refusal.Pins[0] != "subagent explore" || len(refusal.Defaults) != 0 {
+		t.Fatalf("refusal = %+v, want the pin list alone", refusal)
+	}
+	if _, err := (&state.LLMModelStore{DB: env.SQL}).Get(ctx, row.ID); err != nil {
+		t.Fatalf("the refused row must survive: %v", err)
+	}
+	if _, err := composeConfig(ctx, env); err != nil {
+		t.Fatalf("the configuration must still compose: %v", err)
+	}
+}
+
+// TestDeleteLLMModelReportsAMissingRow pins the not-found answer a surface
+// turns into its "no longer configured" sentence.
+func TestDeleteLLMModelReportsAMissingRow(t *testing.T) {
+	env, ctx, _ := deleteEnvForTest(t)
+	cfg, err := env.ComposedPersistedConfig(ctx)
+	if err != nil {
+		t.Fatalf("read the stored configuration: %v", err)
+	}
+	if err := DeleteLLMModel(ctx, env.SQL, &cfg, "llm-nope"); !errors.Is(err, state.ErrLLMModelNotFound) {
+		t.Fatalf("delete of a missing row = %v, want ErrLLMModelNotFound", err)
 	}
 }
 
