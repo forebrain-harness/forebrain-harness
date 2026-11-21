@@ -589,6 +589,23 @@ func TestAuditSkillCoversEveryWorkflow(t *testing.T) {
 		"handoff bar":          "every plan meets the handoff plan quality bar",
 		"unattended selection": "select the top 3–5 by the same rule and record that this non-interactive default was used",
 		"sensitive skip":       "skip sensitive publication and record the reason instead of asking or publishing anyway",
+
+		"plan":                         "- plan: skip the audit - the user already described what they want.",
+		"review-plan":                  "- review-plan: critique an existing plan against the handoff bar and the plan template",
+		"execute":                      "- execute: dispatch one executor subagent on a single plan in an isolated workspace",
+		"effort composition":           "quick or deep may precede any variant to set its effort",
+		"issues modifier":              "As the --issues modifier on a planning variant, publish each plan this run writes instead.",
+		"aliases":                      "features and roadmap mean next; perf means performance.",
+		"decline implementation":       "When asked to implement directly, decline and point at the plan",
+		"read-only analysis":           "Run only read-only analysis in the user's workspace",
+		"playbook pointer":             "references/audit-playbook.md",
+		"template pointer":             "references/plan-template.md",
+		"loop pointer":                 "references/closing-the-loop.md",
+		"branch light budget":          "Light recon, all categories, usually no investigators.",
+		"out-of-scope rejection":       "reject any out-of-scope change, however plausible",
+		"issues on bare invocation":    "--issues may follow any planning variant to publish each plan written, and may also follow a bare or effort-only invocation.",
+		"effort on non-audit variants": "On plan and review-plan the effort word scales investigation depth; execute's review is never reduced.",
+		"plan directory alignment":     "Otherwise write under plans/ at the project root, creating it if absent, with numbered plans plus a README index",
 	} {
 		if !strings.Contains(sk.Body, sentence) {
 			t.Errorf("audit skill does not describe the %s workflow: missing %q", name, sentence)
@@ -612,9 +629,12 @@ func TestAuditSkillCoversEveryWorkflow(t *testing.T) {
 }
 
 // TestAuditSkillVariantsAreSingleWords pins the owner's rule for the skill's
-// argument: one word per variant, never a combination such as "quick
-// security". The argument-hint the surfaces show after /audit lists exactly
-// the variants the body defines.
+// argument: the variant keyword itself is one word. The keyword may be
+// preceded by an effort word (quick or deep), plan, review-plan and execute
+// take their input after it, and --issues may follow a planning variant -
+// owner ruling 2026-11-21, which replaces the 2026-11-07 no-combination rule
+// for this skill alone. The argument-hint the surfaces show after /audit lists
+// exactly the keywords the body defines.
 func TestAuditSkillVariantsAreSingleWords(t *testing.T) {
 	sk := auditSkill(t)
 	hint := strings.TrimSpace(sk.ArgumentHint)
@@ -622,7 +642,7 @@ func TestAuditSkillVariantsAreSingleWords(t *testing.T) {
 		t.Fatalf("argument-hint = %q, want an optional [a|b|...] list", hint)
 	}
 	variants := strings.Split(strings.Trim(hint, "[]"), "|")
-	want := []string{"quick", "deep", "branch", "next", "reconcile", "issues",
+	want := []string{"quick", "deep", "branch", "next", "reconcile", "issues", "plan", "review-plan", "execute",
 		"correctness", "security", "performance", "tests", "architecture", "dependencies", "tooling", "docs"}
 	if strings.Join(variants, "|") != strings.Join(want, "|") {
 		t.Errorf("argument-hint variants = %v, want %v", variants, want)
@@ -630,7 +650,9 @@ func TestAuditSkillVariantsAreSingleWords(t *testing.T) {
 	section := sk.Body[strings.Index(sk.Body, "## Variants"):]
 	section = section[:strings.Index(section, "\n## ")]
 	for _, variant := range variants {
-		if variant == "" || strings.ContainsAny(variant, " \t-") {
+		// A hyphen is part of a keyword (review-plan); whitespace would make it
+		// a combination, which stays out of the hint.
+		if variant == "" || strings.ContainsAny(variant, " \t") {
 			t.Errorf("variant %q is not a single word", variant)
 		}
 		if !regexp.MustCompile(`\b` + regexp.QuoteMeta(variant) + `\b`).MatchString(section) {
@@ -656,6 +678,48 @@ func TestAuditSkillIsSelfContainedAndSourceNeutral(t *testing.T) {
 	} {
 		if strings.Contains(text, word) {
 			t.Errorf("audit skill names %q", word)
+		}
+	}
+}
+
+// TestAuditSkillReferencesShip pins the three reference files the skill's body
+// points at: each one is embedded, reaches disk byte for byte through Install,
+// and carries no trace of the skill it was ported from. The neutrality gate in
+// TestAuditSkillIsSelfContainedAndSourceNeutral covers SKILL.md only - that is
+// the surface every office or batch conversation loads. A reference is read on
+// demand and carries the coding mechanics (version control commands,
+// disposable workspaces, tool names), but it must not smuggle in the
+// vocabulary of the skill it replaces.
+func TestAuditSkillReferencesShip(t *testing.T) {
+	home := t.TempDir()
+	if err := Install(home); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	sk := auditSkill(t)
+	installed := filepath.Join(home, "skills", ".system", "audit", "references")
+	for _, name := range []string{"audit-playbook.md", "plan-template.md", "closing-the-loop.md"} {
+		embedded, err := assetsFS.ReadFile("system_assets/audit/references/" + name)
+		if err != nil {
+			t.Fatalf("read embedded references/%s: %v", name, err)
+		}
+		if !strings.Contains(sk.Body, "references/"+name) {
+			t.Errorf("the skill body never points at references/%s", name)
+		}
+		onDisk, err := os.ReadFile(filepath.Join(installed, name))
+		if err != nil {
+			t.Fatalf("read installed references/%s: %v", name, err)
+		}
+		if !bytes.Equal(onDisk, embedded) {
+			t.Errorf("installed references/%s differs from the embedded copy", name)
+		}
+		text := strings.ToLower(string(embedded))
+		for _, trace := range []string{
+			"improve skill", "/improve", ".claude", "claude", "shadcn",
+			"anthropic", "openai", "sonnet", "haiku", "sendmessage",
+		} {
+			if strings.Contains(text, trace) {
+				t.Errorf("references/%s names %q", name, trace)
+			}
 		}
 	}
 }
