@@ -144,7 +144,7 @@ func EffectiveDefaultLLMFor(root *Root, agentName string) *AgentLLMProviderConfi
 // display name (the definition key when no display name is set), sorted. The
 // reference is an explicit choice, so a row one of them runs on cannot be
 // deleted behind its back. This helper answers the default_model field alone —
-// a subagent definition's own Model is not a default; ModelPinnedBy names the
+// a subagent definition's own Model is not a default; ModelPins names the
 // settings whose reference the loader refuses to lose, and their delete is
 // refused rather than resolved.
 func ModelDefaultAgents(root *Root, id string) []string {
@@ -166,7 +166,38 @@ func ModelDefaultAgents(root *Root, id string) []string {
 	return names
 }
 
-// ModelPinnedBy names the settings that reference this row where the loader
+// ModelPin is one setting whose reference the loader requires to resolve: the
+// row cannot be deleted behind it (plan 345). Kind is a machine word a surface
+// localizes; Name is the subagent's name and empty for the two install-wide
+// rows.
+type ModelPin struct {
+	Kind string
+	Name string
+}
+
+const (
+	ModelPinSubagent   = "subagent"
+	ModelPinPlanReview = "plan_review"
+	ModelPinGoalCheck  = "goal_check"
+)
+
+// English is the label every English surface shows — the terminal, the API's
+// English sentence, this package's tests. It is the only English rendering.
+func (p ModelPin) English() string {
+	switch p.Kind {
+	case ModelPinPlanReview:
+		return "plan review"
+	case ModelPinGoalCheck:
+		return "goal check"
+	default:
+		if name := strings.TrimSpace(p.Name); name != "" {
+			return "subagent " + name
+		}
+		return "subagent"
+	}
+}
+
+// ModelPins names the settings that reference this row where the loader
 // requires the reference to resolve — a built-in subagent type's install-wide
 // row, the plan reviewer, the goal check, or a subagent definition's own model.
 // Deleting such a row would leave the composed configuration invalid (the
@@ -174,45 +205,44 @@ func ModelDefaultAgents(root *Root, id string) []string {
 // row cannot be deleted behind those settings. A conversation's own selection
 // and an agent's default_model are not listed: the runtime refuses that turn
 // with a re-choose diagnosis, or skips the stale default (plans 260/261/315).
-func ModelPinnedBy(root *Root, id string) []string {
+// The list is sorted by the English label, which is the order every sentence
+// names the settings in.
+func ModelPins(root *Root, id string) []ModelPin {
 	if root == nil || strings.TrimSpace(id) == "" {
 		return nil
 	}
 	id = strings.TrimSpace(id)
-	var owners []string
+	var pins []ModelPin
 	add := func(kind, name string) {
-		if name = strings.TrimSpace(name); name == "" {
-			owners = append(owners, kind)
-			return
-		}
-		owners = append(owners, kind+" "+name)
+		name = strings.TrimSpace(name)
+		pins = append(pins, ModelPin{Kind: kind, Name: name})
 	}
 	for name, entry := range root.Agents.SubagentModels {
 		if strings.TrimSpace(entry.Model) == id {
-			add("subagent", name)
+			add(ModelPinSubagent, name)
 		}
 	}
 	if strings.TrimSpace(root.Agents.PlanReviewer.Model) == id {
-		add("plan review", "")
+		add(ModelPinPlanReview, "")
 	}
 	if strings.TrimSpace(root.Agents.GoalEvaluator.Model) == id {
-		add("goal check", "")
+		add(ModelPinGoalCheck, "")
 	}
 	for key, def := range root.Agents.Definitions {
 		// The role's own model is judged like a per-agent entry's
 		// (validateDefinitionRoles), which skips every effective primary:
 		// a primary definition's model field is never read, so it pins nothing.
 		if !IsEffectivePrimaryAgent(key, def) && strings.TrimSpace(def.Model) == id {
-			add("subagent", key)
+			add(ModelPinSubagent, key)
 		}
 		for _, entry := range def.Subagents {
 			if strings.TrimSpace(entry.Model) == id {
-				add("subagent", entry.Name)
+				add(ModelPinSubagent, entry.Name)
 			}
 		}
 	}
-	sort.Strings(owners)
-	return owners
+	sort.Slice(pins, func(i, j int) bool { return pins[i].English() < pins[j].English() })
+	return pins
 }
 
 // HasOwnModelChoice reports whether a key picks its own model: a built-in
