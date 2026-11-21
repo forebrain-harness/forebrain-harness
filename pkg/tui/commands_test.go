@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -5167,4 +5168,195 @@ func TestReplayPeerRowAgentMessageNamesSenderAndDropsMarkup(t *testing.T) {
 	if !card.MarkdownBody || card.Marker != "↘" {
 		t.Fatalf("agent-message row marker=%q markdown=%v want the peer card's own mark and Markdown", card.Marker, card.MarkdownBody)
 	}
+}
+
+// modelRemoveTestSession carries the /model Remove capability over the
+// fakeSession base, the way configPanelTestSession carries /config's.
+type modelRemoveTestSession struct {
+	*fakeSession
+	removes      []string
+	reply        string
+	err          error
+	nextPicker   *turn.Picker // answered once by ExecuteSurfaceSlash("/model")
+	nextReply    string
+	executeCalls int
+}
+
+func (s *modelRemoveTestSession) DeleteConfiguredModel(_ context.Context, id string) (string, error) {
+	s.removes = append(s.removes, id)
+	return s.reply, s.err
+}
+
+func (s *modelRemoveTestSession) ExecuteSurfaceSlash(ctx context.Context, sid, line string) (SlashOutcome, bool) {
+	s.executeCalls++
+	if line == "/model" {
+		if p := s.nextPicker; p != nil {
+			s.nextPicker = nil
+			return SlashOutcome{Handled: true, Picker: p}, true
+		}
+		return SlashOutcome{Handled: true, Reply: s.nextReply}, true
+	}
+	return s.fakeSession.ExecuteSurfaceSlash(ctx, sid, line)
+}
+
+// modelPickerForRemove is the two-row /model list the Remove cases drive: both
+// rows configured, the first one the row in force.
+func modelPickerForRemove() *turn.Picker {
+	return &turn.Picker{Command: "model", Title: "Model", Hint: "The model this agent runs on", Items: []turn.PickerItem{
+		{Value: "llm-1", Label: "deepseek/deepseek-v4", Description: "https://api.deepseek.com/chat/completions", EndpointTail: "/chat/completions", Current: true},
+		{Value: "llm-2", Label: "openai/gpt-5", Description: "https://api.openai.com/v1/chat/completions", EndpointTail: "/v1/chat/completions"},
+	}}
+}
+
+// Keep on the removal confirmation changes nothing (plan 345): no delete, no
+// choice applied, and the list comes back — the confirmation asks with Keep
+// preselected, so Enter alone is not a deletion.
+func TestModelPickerRemoveKeepChangesNothing(t *testing.T) {
+	session := &modelRemoveTestSession{fakeSession: &fakeSession{}}
+	renderer := NewRenderer(nil, nil)
+	selector := &actionPanelSelector{
+		scriptedSelector: &scriptedSelector{richSteps: []richStep{{label: "Keep item", ok: true}}},
+		actionSteps:      []actionStep{{action: FooterActionRemove, row: 0, ok: true}},
+	}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	handled, _, _, _ := runSlashPicker(context.Background(), ctrl, renderer, nil, &streamState{sessionID: "s1"}, modelPickerForRemove())
+
+	require.True(t, handled)
+	require.Empty(t, session.removes)
+	require.Empty(t, session.choices)
+	require.Equal(t, 0, session.executeCalls)
+	// Keep is the preselected row, and Remove item is the danger row.
+	require.Equal(t, []int{1}, selector.defaults)
+	require.Len(t, selector.richItems, 1)
+	require.Equal(t, "Remove item", selector.richItems[0][0].Label)
+	require.True(t, selector.richItems[0][0].Danger)
+	require.Equal(t, "Keep item", selector.richItems[0][1].Label)
+	// The list re-opened on the same rows, and the exhausted script closed it.
+	require.Len(t, selector.labels, 2)
+	require.Len(t, selector.items[1], 2)
+}
+
+// Remove deletes the row under the cursor, says the reply, and re-opens the
+// list on the table as it now stands (plan 345).
+func TestModelPickerRemoveDeletesAndReopensTheList(t *testing.T) {
+	session := &modelRemoveTestSession{
+		fakeSession: &fakeSession{},
+		reply:       "Removed deepseek/r1.",
+		nextPicker: &turn.Picker{Command: "model", Title: "Model", Items: []turn.PickerItem{
+			{Value: "llm-2", Label: "openai/gpt-5", Description: "https://api.openai.com/v1/chat/completions", EndpointTail: "/v1/chat/completions", Current: true},
+		}},
+	}
+	renderer := NewRenderer(nil, nil)
+	selector := &actionPanelSelector{
+		scriptedSelector: &scriptedSelector{richSteps: []richStep{{label: "Remove item", ok: true}}},
+		actionSteps:      []actionStep{{action: FooterActionRemove, row: 0, ok: true}},
+	}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	runSlashPicker(context.Background(), ctrl, renderer, nil, &streamState{sessionID: "s1"}, modelPickerForRemove())
+
+	require.Equal(t, []string{"llm-1"}, session.removes)
+	require.Contains(t, frameText(renderer), "Removed deepseek/r1.")
+	require.Equal(t, 1, session.executeCalls)
+	// Deleting is not selecting: no model choice reached the engine.
+	require.Empty(t, session.choices)
+	require.Len(t, selector.labels, 2)
+	require.Len(t, selector.items[1], 1)
+	require.Equal(t, "openai/gpt-5", selector.items[1][0].Label)
+	// The footer names the key that works with and without the filter, and
+	// the action serves rows — fireAction reports them only then.
+	require.Equal(t, "Remove", selector.opts[0].FooterActions[0].Label)
+	require.Equal(t, "Ctrl+D", selector.opts[0].FooterActions[0].Key)
+	require.NotNil(t, selector.opts[0].FooterActions[0].RowActive)
+}
+
+// A refused delete is a sentence the terminal says, and the list stays where
+// the person left it (plan 345).
+func TestModelPickerRemoveRefusalKeepsTheList(t *testing.T) {
+	session := &modelRemoveTestSession{
+		fakeSession: &fakeSession{},
+		reply:       "It is the default model of main; choose another default first.",
+		nextPicker:  modelPickerForRemove(),
+	}
+	renderer := NewRenderer(nil, nil)
+	selector := &actionPanelSelector{
+		scriptedSelector: &scriptedSelector{richSteps: []richStep{{label: "Remove item", ok: true}}},
+		actionSteps:      []actionStep{{action: FooterActionRemove, row: 0, ok: true}},
+	}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	runSlashPicker(context.Background(), ctrl, renderer, nil, &streamState{sessionID: "s1"}, modelPickerForRemove())
+
+	require.Equal(t, []string{"llm-1"}, session.removes)
+	require.Contains(t, frameText(renderer), "It is the default model of main; choose another default first.")
+	require.Equal(t, 1, session.executeCalls)
+	require.Empty(t, session.choices)
+	// The refused row is still listed: the list re-opened with both rows.
+	require.Len(t, selector.labels, 2)
+	require.Len(t, selector.items[1], 2)
+}
+
+// A delete that fails is an error, not a sentence: it is printed and the
+// picker closes (plan 345).
+func TestModelPickerRemoveErrorExits(t *testing.T) {
+	session := &modelRemoveTestSession{fakeSession: &fakeSession{}, err: errors.New("boom")}
+	renderer := NewRenderer(nil, nil)
+	selector := &actionPanelSelector{
+		scriptedSelector: &scriptedSelector{richSteps: []richStep{{label: "Remove item", ok: true}}},
+		actionSteps:      []actionStep{{action: FooterActionRemove, row: 0, ok: true}},
+	}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	handled, _, _, _ := runSlashPicker(context.Background(), ctrl, renderer, nil, &streamState{sessionID: "s1"}, modelPickerForRemove())
+
+	require.True(t, handled)
+	require.Equal(t, []string{"llm-1"}, session.removes)
+	require.Equal(t, 0, session.executeCalls)
+	require.Empty(t, session.choices)
+	require.Contains(t, frameText(renderer), "boom")
+	// The failed delete closed the picker rather than re-opening it.
+	require.Len(t, selector.labels, 1)
+}
+
+// Deleting the last row says the engine's own empty-table sentence and closes
+// (plan 345): there is no list left to re-open.
+func TestModelPickerRemoveLastRowSaysTheListIsEmpty(t *testing.T) {
+	session := &modelRemoveTestSession{
+		fakeSession: &fakeSession{},
+		reply:       "Removed openai/gpt-5.",
+		nextReply:   "This agent has no models configured.",
+	}
+	renderer := NewRenderer(nil, nil)
+	selector := &actionPanelSelector{
+		scriptedSelector: &scriptedSelector{richSteps: []richStep{{label: "Remove item", ok: true}}},
+		actionSteps:      []actionStep{{action: FooterActionRemove, row: 0, ok: true}},
+	}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	picker := &turn.Picker{Command: "model", Title: "Model", Items: []turn.PickerItem{
+		{Value: "llm-2", Label: "openai/gpt-5", Description: "https://api.openai.com/v1/chat/completions", EndpointTail: "/v1/chat/completions", Current: true},
+	}}
+	runSlashPicker(context.Background(), ctrl, renderer, nil, &streamState{sessionID: "s1"}, picker)
+
+	text := frameText(renderer)
+	require.Contains(t, text, "Removed openai/gpt-5.")
+	require.Contains(t, text, "This agent has no models configured.")
+	require.Equal(t, 1, session.executeCalls)
+	require.Empty(t, session.choices)
+	require.Len(t, selector.labels, 1)
+}
+
+// Only the model list carries Remove: the effort list a chosen model offers in
+// turn keeps the plain path (plan 345).
+func TestModelPickerEffortListArmsNoRemove(t *testing.T) {
+	session := &modelRemoveTestSession{fakeSession: &fakeSession{}}
+	renderer := NewRenderer(nil, nil)
+	selector := &actionPanelSelector{
+		scriptedSelector: &scriptedSelector{richSteps: []richStep{{label: "high", ok: true}}},
+	}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	picker := &turn.Picker{Command: "model-effort", Title: "Thinking level", Items: []turn.PickerItem{
+		{Value: "high", Label: "high"},
+		{Value: "low", Label: "low"},
+	}}
+	runSlashPicker(context.Background(), ctrl, renderer, nil, &streamState{sessionID: "s1"}, picker)
+
+	require.Empty(t, selector.labels)
+	require.Equal(t, []turn.SlashChoice{{Command: "model-effort", Value: "high"}}, session.choices)
 }

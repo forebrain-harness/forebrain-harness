@@ -5539,54 +5539,134 @@ func handleActiveRunSlash(ctx context.Context, session Session, renderer *Render
 
 // runSlashPicker shows the picker a slash command offered and applies what
 // is picked through the engine — the same choices, from the same data, the
-// web shows as a card — following any picker the choice offers in turn.
+// web shows as a card — following any picker the choice offers in turn. The
+// model list also carries Ctrl+D Remove, which deletes the row under the
+// cursor after a confirmation (plan 345).
 func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, picker *turn.Picker) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
-	// The picker opens on the item in force.
-	items := make([]SelectItem, len(picker.Items))
-	current := -1
-	for i, item := range picker.Items {
-		items[i] = SelectItem{Label: item.Label, Description: item.Description}
-		if picker.Command == "model" {
-			// The model list names a request URL, and a narrow column must not
-			// cut its path off the end: the path is what tells two rows of one
-			// provider apart (plan 267).
-			items[i].ElideTail = item.EndpointTail
-		}
-		// The effort list draws what the web's effort chip draws: the level's
-		// English name alone — never the raw level id beside it (owner
-		// 2026-11-18: "Off none" is verbose) — and the gear on the level the
-		// model row is configured with, against the name, never out in the
-		// description column (owner 2026-11-15). An item drawn before the list
-		// carried a display name keeps its plain label.
-		if item.ValueLabel != "" {
-			items[i].Label = item.ValueLabel
-			items[i].Description = ""
-			if item.FromSetting {
-				items[i].Mark = selectorGearGlyph
+	for {
+		// The picker opens on the item in force.
+		items := make([]SelectItem, len(picker.Items))
+		current := -1
+		for i, item := range picker.Items {
+			items[i] = SelectItem{Label: item.Label, Description: item.Description}
+			if picker.Command == "model" {
+				// The model list names a request URL, and a narrow column must not
+				// cut its path off the end: the path is what tells two rows of one
+				// provider apart (plan 267).
+				items[i].ElideTail = item.EndpointTail
+			}
+			// The effort list draws what the web's effort chip draws: the level's
+			// English name alone — never the raw level id beside it (owner
+			// 2026-11-18: "Off none" is verbose) — and the gear on the level the
+			// model row is configured with, against the name, never out in the
+			// description column (owner 2026-11-15). An item drawn before the list
+			// carried a display name keeps its plain label.
+			if item.ValueLabel != "" {
+				items[i].Label = item.ValueLabel
+				items[i].Description = ""
+				if item.FromSetting {
+					items[i].Mark = selectorGearGlyph
+				}
+			}
+			if item.Current {
+				current = i
 			}
 		}
-		if item.Current {
-			current = i
+		label := picker.Title
+		if hint := strings.TrimSpace(picker.Hint); hint != "" {
+			label += "\n" + hint
 		}
+		idx, ok := -1, false
+		picked := false
+		if picker.Command == "model" {
+			remover, canRemove := cmds.session.(modelRemoveSession)
+			actions, hasActions := cmds.selector.(ActionRichSelector)
+			if canRemove && hasActions {
+				res, err := actions.SelectRichActions(label, items, current, ActionOptions{
+					FooterActions: []FooterAction{{
+						Label: configRemoveActionLabel,
+						// The list shows a filter from 8 rows on, where a bare
+						// 'd' types into it; Ctrl+D fires in both modes, so the
+						// footer names the key that always works (plan 345).
+						Key:  "Ctrl+D",
+						Kind: FooterActionRemove,
+						// Every row is a configured model — all removable.
+						// RowActive must be set: fireAction reports the cursor's
+						// row only for an action that serves rows.
+						RowActive: func(i int) bool { return i >= 0 && i < len(items) },
+					}},
+				})
+				if err != nil {
+					renderer.PrintError(err)
+					return true, false, ComposerSubmission{}, false
+				}
+				if res.Action == FooterActionRemove {
+					if res.Row < 0 || res.Row >= len(picker.Items) {
+						continue
+					}
+					if !confirmModelRemove(cmds.selector, renderer, items[res.Row]) {
+						continue
+					}
+					reply, err := remover.DeleteConfiguredModel(ctx, picker.Items[res.Row].Value)
+					if err != nil {
+						renderer.PrintError(err)
+						return true, false, ComposerSubmission{}, false
+					}
+					renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "model", Content: reply, Final: true})
+					refreshSessionFooter(renderer, cmds.session, state.sessionID)
+					// Re-open the list on the table as it now stands; an empty
+					// table answers as the engine's own reply and closes.
+					outcome, reran := cmds.session.ExecuteSurfaceSlash(ctx, state.sessionID, "/model")
+					if reran && outcome.Picker != nil {
+						picker = outcome.Picker
+						continue
+					}
+					if text := strings.TrimSpace(outcome.Reply); text != "" {
+						renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "model", Content: text, Final: true})
+					}
+					return true, false, ComposerSubmission{}, false
+				}
+				if !res.OK || res.Row < 0 || res.Row >= len(picker.Items) {
+					return true, false, ComposerSubmission{}, false
+				}
+				idx, ok, picked = res.Row, true, true
+			}
+		}
+		if !picked {
+			var err error
+			idx, ok, err = cmds.selector.SelectRich(label, items, current)
+			if err != nil {
+				renderer.PrintError(err)
+				return true, false, ComposerSubmission{}, false
+			}
+			if !ok || idx < 0 || idx >= len(picker.Items) {
+				return true, false, ComposerSubmission{}, false
+			}
+		}
+		outcome := cmds.session.ChooseSurfaceSlash(ctx, state.sessionID, turn.SlashChoice{Command: picker.Command, Value: picker.Items[idx].Value})
+		// A model, an effort or an agent may have changed under the footer.
+		refreshSessionFooter(renderer, cmds.session, state.sessionID)
+		// A picker choice authors a turn of its own: it has no draft, so nothing
+		// is attached to it.
+		return applySlashOutcome(ctx, cmds, renderer, tracker, state, strings.TrimSuffix(picker.Command, "-effort"), "", ComposerSubmission{}, outcome)
 	}
-	label := picker.Title
-	if hint := strings.TrimSpace(picker.Hint); hint != "" {
-		label += "\n" + hint
+}
+
+// confirmModelRemove asks before a configured model is deleted (plan 345),
+// the /config removal confirmation's shape (plan 326 D5): the heading names
+// the row and where its requests go, Keep item is preselected so Enter alone
+// changes nothing, and Esc keeps the row too. Remove item is the danger row.
+func confirmModelRemove(sel Selector, renderer *Renderer, item SelectItem) bool {
+	items := []SelectItem{
+		{Label: configRemoveConfirmLabel, Danger: true},
+		{Label: configKeepConfirmLabel},
 	}
-	idx, ok, err := cmds.selector.SelectRich(label, items, current)
+	idx, ok, err := selectRichPage(sel, "Remove "+item.Label+"?\n"+strings.TrimSpace(item.Description), items, 1)
 	if err != nil {
 		renderer.PrintError(err)
-		return true, false, ComposerSubmission{}, false
+		return false
 	}
-	if !ok || idx < 0 || idx >= len(picker.Items) {
-		return true, false, ComposerSubmission{}, false
-	}
-	outcome := cmds.session.ChooseSurfaceSlash(ctx, state.sessionID, turn.SlashChoice{Command: picker.Command, Value: picker.Items[idx].Value})
-	// A model, an effort or an agent may have changed under the footer.
-	refreshSessionFooter(renderer, cmds.session, state.sessionID)
-	// A picker choice authors a turn of its own: it has no draft, so nothing
-	// is attached to it.
-	return applySlashOutcome(ctx, cmds, renderer, tracker, state, strings.TrimSuffix(picker.Command, "-effort"), "", ComposerSubmission{}, outcome)
+	return ok && idx == 0
 }
 
 // refreshSessionFooter redraws what the footer says about the session: its
