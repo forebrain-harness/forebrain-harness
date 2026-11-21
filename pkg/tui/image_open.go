@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,12 +11,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
-// imagePreviewOpener launches a file with the viewer that fits it: text files
+// imagePreviewOpener launches a file with the viewer that fits it: HTML files
+// go to the default browser (the rendered page is the deliverable), text files
 // go to VS Code (Source Control diff when git tracks them), everything else to
 // the operating system's viewer. It is a variable so a test can inject a fake
 // and assert whether (and what) it was asked to open. An error it returns is a
@@ -120,6 +124,77 @@ func openInBrowser(url string, failed func(error)) error {
 		return fmt.Errorf("no system browser is available on this platform")
 	}
 	return startDetached(failed, name, args...)
+}
+
+// openHTMLInBrowser opens a local HTML file in the desktop's default browser:
+// the click wants the rendered page, not the source an editor would show. On
+// macOS the file type's own default application may be an editor, so the
+// browser is named explicitly — the handler LaunchServices keeps for https.
+// Elsewhere the platform's html handler is what the OS settings call the
+// default browser, so the plain viewer command already lands there.
+func openHTMLInBrowser(path string, failed func(error)) error {
+	name, args := imageViewerCommand(path)
+	if runtime.GOOS == "darwin" {
+		name, args = "open", []string{"-b", defaultBrowserBundleID(), path}
+	}
+	if name == "" {
+		return fmt.Errorf("no system browser is available on this platform")
+	}
+	return startDetached(failed, name, args...)
+}
+
+// defaultBrowserBundleID is a variable so a test can name a browser without
+// touching the machine's LaunchServices database.
+var defaultBrowserBundleID = findDefaultBrowserBundleID
+
+// findDefaultBrowserBundleID reads the handler macOS keeps for https (then
+// http) — the system's default browser. A machine that never changed it has no
+// entry in the database, and Safari is the factory default.
+func findDefaultBrowserBundleID() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "com.apple.Safari"
+	}
+	plist := filepath.Join(home, "Library", "Preferences", "com.apple.LaunchServices", "com.apple.launchservices.secure.plist")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "plutil", "-convert", "json", "-o", "-", plist).Output()
+	if err != nil {
+		return "com.apple.Safari"
+	}
+	return browserBundleIDFromLSHandlers(out)
+}
+
+// browserBundleIDFromLSHandlers picks the https handler, then the http one,
+// from the LaunchServices JSON plutil produces. The public.html content-type
+// handler is deliberately not consulted: it names the file type's default
+// application, which is exactly the editor an HTML click must not land in.
+func browserBundleIDFromLSHandlers(data []byte) string {
+	var doc struct {
+		LSHandlers []struct {
+			LSHandlerURLScheme string `json:"LSHandlerURLScheme"`
+			LSHandlerRoleAll   string `json:"LSHandlerRoleAll"`
+		} `json:"LSHandlers"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return "com.apple.Safari"
+	}
+	httpID := ""
+	for _, h := range doc.LSHandlers {
+		if h.LSHandlerRoleAll == "" {
+			continue
+		}
+		switch h.LSHandlerURLScheme {
+		case "https":
+			return h.LSHandlerRoleAll
+		case "http":
+			httpID = h.LSHandlerRoleAll
+		}
+	}
+	if httpID != "" {
+		return httpID
+	}
+	return "com.apple.Safari"
 }
 
 // openImagePreview hands one already-resolved file to the system viewer. A

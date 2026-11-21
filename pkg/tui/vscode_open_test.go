@@ -465,3 +465,46 @@ func TestIsTextFileSniffMatrix(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenDeliveredFileHTMLOpensTheDefaultBrowser pins the HTML route: the
+// rendered page is what an HTML deliverable is for, so the click names the
+// default browser and never starts the editor ladder.
+func TestOpenDeliveredFileHTMLOpensTheDefaultBrowser(t *testing.T) {
+	for _, ext := range []string{".html", ".htm", ".HTML"} {
+		t.Run(ext, func(t *testing.T) {
+			viewerDir := fakeViewer(t, "printf '%s\\n' \"$@\" > \"$0.argv\"\n")
+			_, argv := fakeCodeCLI(t, "", "0")
+			prev := defaultBrowserBundleID
+			defaultBrowserBundleID = func() string { return "com.example.browser" }
+			t.Cleanup(func() { defaultBrowserBundleID = prev })
+
+			path := filepath.Join(t.TempDir(), "page"+ext)
+			if err := os.WriteFile(path, []byte("<html><body>hi</body></html>\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := openDeliveredFile(path, nil); err != nil {
+				t.Fatalf("open %s: %v", path, err)
+			}
+			program, _ := imageViewerCommand(path)
+			marker := filepath.Join(viewerDir, program+".argv")
+			got := ""
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+				if data, err := os.ReadFile(marker); err == nil {
+					got = strings.TrimSuffix(string(data), "\n")
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			want := []string{path}
+			if runtime.GOOS == "darwin" {
+				want = []string{"-b", "com.example.browser", path}
+			}
+			if got != strings.Join(want, "\n") {
+				t.Fatalf("browser launch argv = %q, want %q", got, want)
+			}
+			if inv := codeInvocations(t, argv); len(inv) != 0 {
+				t.Fatalf("HTML must not start the text route; got %v", inv)
+			}
+		})
+	}
+}

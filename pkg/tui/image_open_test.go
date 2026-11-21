@@ -919,3 +919,27 @@ func TestALauncherThatRefusesTheFileIsReported(t *testing.T) {
 	}
 	t.Fatalf("hint rows = %q, want %q", strings.Join(hintRowsFor(r, 80), "\n"), want)
 }
+
+// TestBrowserBundleIDFromLSHandlers pins the default-browser pick: the https
+// handler wins over http, a machine with only an http entry still names a
+// browser, and the public.html content-type handler — which may be an editor —
+// is never consulted. A database with no scheme entry falls back to Safari,
+// the factory default browser.
+func TestBrowserBundleIDFromLSHandlers(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"https wins over http", `{"LSHandlers":[{"LSHandlerURLScheme":"http","LSHandlerRoleAll":"com.http.browser"},{"LSHandlerURLScheme":"https","LSHandlerRoleAll":"com.https.browser"}]}`, "com.https.browser"},
+		{"http only", `{"LSHandlers":[{"LSHandlerURLScheme":"http","LSHandlerRoleAll":"com.http.browser"}]}`, "com.http.browser"},
+		{"html handler is not the browser", `{"LSHandlers":[{"LSHandlerContentType":"public.html","LSHandlerRoleAll":"com.microsoft.VSCode"}]}`, "com.apple.Safari"},
+		{"no handlers", `{}`, "com.apple.Safari"},
+		{"malformed", `not json`, "com.apple.Safari"},
+	}
+	for _, c := range cases {
+		if got := browserBundleIDFromLSHandlers([]byte(c.doc)); got != c.want {
+			t.Errorf("%s: browserBundleIDFromLSHandlers = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

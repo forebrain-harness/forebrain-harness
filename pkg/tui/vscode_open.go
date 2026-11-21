@@ -48,7 +48,8 @@ func findVSCodeCLI() string {
 	return ""
 }
 
-// openDeliveredFile is the default imagePreviewOpener: text files go to VS
+// openDeliveredFile is the default imagePreviewOpener: HTML files go to the
+// default browser (the rendered page is the deliverable), text files go to VS
 // Code (Source Control diff when the project is a git repo and the file is not
 // ignored), everything else keeps the platform viewer. The stat and the sniff
 // run here; the git probes and CLI calls run in a goroutine because the click
@@ -60,6 +61,15 @@ func openDeliveredFile(path string, failed func(error)) error {
 			return errors.New("file no longer exists")
 		}
 		return err
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".html", ".htm":
+		go func() {
+			if err := openHTMLInBrowser(path, failed); err != nil && failed != nil {
+				failed(err)
+			}
+		}()
+		return nil
 	}
 	if !isTextFile(path) {
 		return openWithSystemViewer(path, failed)
