@@ -6,6 +6,7 @@ package config
 
 import (
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -137,6 +138,79 @@ func EffectiveDefaultLLMFor(root *Root, agentName string) *AgentLLMProviderConfi
 		return &entry
 	}
 	return nil
+}
+
+// ModelDefaultAgents names the agents whose default_model is this row, by
+// display name (the definition key when no display name is set), sorted. The
+// reference is an explicit choice, so a row one of them runs on cannot be
+// deleted behind its back. A subagent definition's own Model is not a default
+// and this helper does not look at it: nothing falls back to that row when it
+// goes, the subagent simply follows the conversation's model.
+func ModelDefaultAgents(root *Root, id string) []string {
+	if root == nil || strings.TrimSpace(id) == "" {
+		return nil
+	}
+	names := make([]string, 0, 1)
+	for key, def := range root.Agents.Definitions {
+		if strings.TrimSpace(def.DefaultModel) != id {
+			continue
+		}
+		if name := strings.TrimSpace(def.DisplayName); name != "" {
+			names = append(names, name)
+			continue
+		}
+		names = append(names, key)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ModelPinnedBy names the settings that reference this row where the loader
+// requires the reference to resolve — a built-in subagent type's install-wide
+// row, the plan reviewer, the goal check, or a subagent definition's own model.
+// Deleting such a row would leave the composed configuration invalid (the
+// loader refuses a dangling row id: `model %q must be provider/model`), so the
+// row cannot be deleted behind those settings. A conversation's own selection
+// and an agent's default_model are not listed: the runtime refuses that turn
+// with a re-choose diagnosis, or skips the stale default (plans 260/261/315).
+func ModelPinnedBy(root *Root, id string) []string {
+	if root == nil || strings.TrimSpace(id) == "" {
+		return nil
+	}
+	id = strings.TrimSpace(id)
+	var owners []string
+	add := func(kind, name string) {
+		if name = strings.TrimSpace(name); name == "" {
+			owners = append(owners, kind)
+			return
+		}
+		owners = append(owners, kind+" "+name)
+	}
+	for name, entry := range root.Agents.SubagentModels {
+		if strings.TrimSpace(entry.Model) == id {
+			add("subagent", name)
+		}
+	}
+	if strings.TrimSpace(root.Agents.PlanReviewer.Model) == id {
+		add("plan review", "")
+	}
+	if strings.TrimSpace(root.Agents.GoalEvaluator.Model) == id {
+		add("goal check", "")
+	}
+	for key, def := range root.Agents.Definitions {
+		// The role's own model is judged like a per-agent entry's
+		// (validateDefinitionRoles), so it pins the row the same way.
+		if strings.TrimSpace(def.Model) == id {
+			add("subagent", key)
+		}
+		for _, entry := range def.Subagents {
+			if strings.TrimSpace(entry.Model) == id {
+				add("subagent", entry.Name)
+			}
+		}
+	}
+	sort.Strings(owners)
+	return owners
 }
 
 // HasOwnModelChoice reports whether a key picks its own model: a built-in

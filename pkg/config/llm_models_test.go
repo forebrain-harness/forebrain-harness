@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"slices"
+	"strings"
+	"testing"
+)
 
 // TestNormalizeLLMModelIdentity pins the one identity form the table's unique
 // index and every lookup share, including the protocol default an empty
@@ -239,6 +243,170 @@ func TestValidateSubagentModels(t *testing.T) {
 			err := ValidateSubagentModels(c.models, resolves)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("ValidateSubagentModels(%v) err = %v, want error %v", c.models, err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestModelDefaultAgentsNamesTheAgentsThatRunOnTheRow pins the projection the
+// delete guard reads (plan 345): a display name when the definition carries
+// one, its key otherwise, sorted, and nothing for a reference that is not a
+// default_model — a subagent's own model never makes a row a default.
+func TestModelDefaultAgentsNamesTheAgentsThatRunOnTheRow(t *testing.T) {
+	t.Parallel()
+	root := &Root{Agents: AgentsSection{
+		Definitions: map[string]AgentDefinition{
+			"main":   {Primary: true, DisplayName: "Main agent", DefaultModel: "row-1"},
+			"worker": {DefaultModel: "row-1"},
+			"other":  {DefaultModel: "row-2"},
+			"scout":  {Subagents: []SubagentConfig{{Name: "scout", Model: "row-1"}}},
+		},
+	}}
+	got := ModelDefaultAgents(root, "row-1")
+	if len(got) != 2 || got[0] != "Main agent" || got[1] != "worker" {
+		t.Fatalf("ModelDefaultAgents(row-1) = %v, want [Main agent worker]", got)
+	}
+	if got := ModelDefaultAgents(root, "row-2"); len(got) != 1 || got[0] != "other" {
+		t.Fatalf("ModelDefaultAgents(row-2) = %v, want [other]", got)
+	}
+	if got := ModelDefaultAgents(root, "row-3"); len(got) != 0 {
+		t.Fatalf("ModelDefaultAgents(row-3) = %v, want nothing", got)
+	}
+	if got := ModelDefaultAgents(nil, "row-1"); got != nil {
+		t.Fatalf("nil root = %v, want nil", got)
+	}
+	if got := ModelDefaultAgents(root, "   "); got != nil {
+		t.Fatalf("blank id = %v, want nil", got)
+	}
+}
+
+// TestModelPinnedByNamesTheSettingsThatMustResolve pins the pin projection that
+// refines the delete guard (plan 345): every reference the loader requires to
+// resolve is named by a reader-facing label, sorted, and an agent's
+// default_model — the runtime skips it — is not a pin.
+func TestModelPinnedByNamesTheSettingsThatMustResolve(t *testing.T) {
+	t.Parallel()
+	root := &Root{Agents: AgentsSection{
+		Definitions: map[string]AgentDefinition{
+			"main": {Primary: true, DefaultModel: "row-1", Subagents: []SubagentConfig{
+				{Name: "repo-auditor", SystemPrompt: "audit", Model: "row-1"},
+				{Name: "notes", SystemPrompt: "keep notes", Model: "row-2"},
+			}},
+		},
+		SubagentModels: map[string]SubagentConfig{"explore": {Model: "row-1"}},
+		PlanReviewer:   SubagentConfig{Model: "row-1"},
+		GoalEvaluator:  SubagentConfig{Model: "row-1"},
+	}}
+	want := []string{"goal check", "plan review", "subagent explore", "subagent repo-auditor"}
+	if got := ModelPinnedBy(root, "row-1"); !slices.Equal(got, want) {
+		t.Fatalf("ModelPinnedBy(row-1) = %v, want %v", got, want)
+	}
+	if got := ModelPinnedBy(root, "row-2"); len(got) != 1 || got[0] != "subagent notes" {
+		t.Fatalf("ModelPinnedBy(row-2) = %v, want [subagent notes]", got)
+	}
+	// A subagent role definition's own model is judged by the loader like a
+	// per-agent entry's (validateDefinitionRoles), so it pins the row too.
+	role := &Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+		"main":         {Primary: true},
+		"code-auditor": {SystemPrompt: "audit the repo", Model: "row-1"},
+	}}}
+	if got := ModelPinnedBy(role, "row-1"); len(got) != 1 || got[0] != "subagent code-auditor" {
+		t.Fatalf("ModelPinnedBy(role's own model) = %v, want [subagent code-auditor]", got)
+	}
+	if got := ModelPinnedBy(nil, "row-1"); got != nil {
+		t.Fatalf("nil root = %v, want nil", got)
+	}
+	if got := ModelPinnedBy(root, "  "); got != nil {
+		t.Fatalf("blank id = %v, want nil", got)
+	}
+}
+
+// TestDanglingReferencesTheLoaderRefusesAreExactlyThePinnedOnes is the
+// characterization test that keeps the two lists honest (plan 345): every
+// reference ModelPinnedBy names is one the loader refuses once the row is gone,
+// and every reference the loader tolerates — an agent's default_model, a memory
+// stage's model — is one ModelPinnedBy leaves alone. A new strict reference in
+// pkg/config has to add its shape here, not widen the guard by guesswork.
+func TestDanglingReferencesTheLoaderRefusesAreExactlyThePinnedOnes(t *testing.T) {
+	t.Parallel()
+	dangling := "llm-deleted-row"
+	cases := []struct {
+		name string
+		doc  string
+		root Root
+		pin  bool
+	}{
+		{
+			name: "subagent type row",
+			doc: "agents:\n  definitions:\n    main:\n      primary: true\n" +
+				"  subagent_models:\n    explore:\n      model: " + dangling + "\n",
+			root: Root{Agents: AgentsSection{SubagentModels: map[string]SubagentConfig{"explore": {Model: dangling}}}},
+			pin:  true,
+		},
+		{
+			name: "plan review",
+			doc:  "agents:\n  plan_reviewer:\n    model: " + dangling + "\n",
+			root: Root{Agents: AgentsSection{PlanReviewer: SubagentConfig{Model: dangling}}},
+			pin:  true,
+		},
+		{
+			name: "goal check",
+			doc:  "agents:\n  goal_evaluator:\n    model: " + dangling + "\n",
+			root: Root{Agents: AgentsSection{GoalEvaluator: SubagentConfig{Model: dangling}}},
+			pin:  true,
+		},
+		{
+			name: "custom subagent pin",
+			doc: "agents:\n  definitions:\n    main:\n      primary: true\n      subagents:\n" +
+				"        - name: repo-auditor\n          system_prompt: audit\n          model: " + dangling + "\n",
+			root: Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+				"main": {Primary: true, Subagents: []SubagentConfig{{Name: "repo-auditor", SystemPrompt: "audit", Model: dangling}}},
+			}}},
+			pin: true,
+		},
+		{
+			name: "subagent role's own model",
+			doc: "agents:\n  definitions:\n    main:\n      primary: true\n" +
+				"    code-auditor:\n      system_prompt: audit\n      model: " + dangling + "\n",
+			root: Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+				"main":         {Primary: true},
+				"code-auditor": {SystemPrompt: "audit", Model: dangling},
+			}}},
+			pin: true,
+		},
+		{
+			name: "agent default_model is skipped, not refused",
+			doc:  "agents:\n  definitions:\n    main:\n      primary: true\n      default_model: " + dangling + "\n",
+			root: Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
+				"main": {Primary: true, DefaultModel: dangling},
+			}}},
+		},
+		{
+			name: "a memory stage's model is skipped, not refused",
+			doc:  "memories:\n  extract_model: " + dangling + "\n  consolidation_model: " + dangling + "\n",
+			root: Root{Memories: MemorySection{ExtractModel: dangling, ConsolidationModel: dangling}},
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			owners := ModelPinnedBy(&c.root, dangling)
+			if c.pin != (len(owners) > 0) {
+				t.Fatalf("ModelPinnedBy = %v, want a pin: %v", owners, c.pin)
+			}
+			_, err := ParseRootYAML([]byte(c.doc))
+			if c.pin {
+				if err == nil {
+					t.Fatalf("the loader accepted a dangling reference ModelPinnedBy names: %s", c.doc)
+				}
+				if !strings.Contains(err.Error(), "must be provider/model") {
+					t.Fatalf("loader refused with %q, want a provider/model sentence", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the loader refused a dangling reference ModelPinnedBy leaves alone: %v\n%s", err, c.doc)
 			}
 		})
 	}
