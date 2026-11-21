@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
@@ -118,7 +117,12 @@ type llmModelRow struct {
 	IsDefault    bool         `json:"is_default"`
 	// DefaultFor names the agents that name this row as their default model.
 	DefaultFor []string `json:"default_for,omitempty"`
-	CreatedAt  int64    `json:"created_at"`
+	// PinnedBy names the settings whose reference the loader requires to
+	// resolve: a subagent type's row, the plan reviewer, the goal check, a
+	// subagent definition's own model (plan 345). Such a row cannot be
+	// deleted either — the composed configuration would stop loading.
+	PinnedBy  []string `json:"pinned_by,omitempty"`
+	CreatedAt int64    `json:"created_at"`
 }
 
 // llmModelWrite is one create, update or connection-test body. A nil pointer
@@ -387,30 +391,6 @@ func llmModelApplyLiveCaps(rowID, provider, model, apiPath string, caps *llmMode
 	caps.DefaultEffort = info.DefaultEffort
 }
 
-// llmModelDefaultFor names the agents whose default_model is this row, by
-// display name. The reference is an explicit choice, so a row one of them runs
-// on cannot be deleted behind its back. A subagent definition's own Model is not
-// a default and this helper does not look at it: nothing falls back to that row
-// when it goes, the subagent simply follows the conversation's model.
-func llmModelDefaultFor(cfg *config.Root, id string) []string {
-	if cfg == nil || strings.TrimSpace(id) == "" {
-		return nil
-	}
-	names := make([]string, 0, 1)
-	for key, def := range cfg.Agents.Definitions {
-		if strings.TrimSpace(def.DefaultModel) != id {
-			continue
-		}
-		if name := strings.TrimSpace(def.DisplayName); name != "" {
-			names = append(names, name)
-			continue
-		}
-		names = append(names, key)
-	}
-	sort.Strings(names)
-	return names
-}
-
 // llmModelScope is one models-page request's surroundings: the table it reads
 // or writes, the configuration as stored, and the primary agent the page marks
 // as the row that runs today.
@@ -498,7 +478,8 @@ func (s *Server) llmModelRowOf(r *http.Request, scope llmModelScope, row state.L
 		Caps:            llmModelCapsOfRow(row),
 		CatalogProvider: row.CatalogProvider,
 		IsDefault:       row.ID == scope.defaultID,
-		DefaultFor:      llmModelDefaultFor(scope.cfg, row.ID),
+		DefaultFor:      config.ModelDefaultAgents(scope.cfg, row.ID),
+		PinnedBy:        config.ModelPinnedBy(scope.cfg, row.ID),
 		CreatedAt:       row.CreatedAt,
 	}
 	out.CatalogCaps, out.CatalogID = llmModelCatalogCaps(row.Provider, row.Model, row.CatalogProvider, row.APIPath)
@@ -681,32 +662,32 @@ func (s *Server) updateLLMModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.llmModelRowOf(r, scope, updated, states))
 }
 
-// deleteLLMModel removes one row. A model an agent names as its default is
-// refused: the reference is an explicit choice, and deleting through it would
-// move that agent to another model without saying so. Sessions, subagents and
-// memory settings that name the row are not rewritten — the runtime falls back
-// (plans 260/261).
+// deleteLLMModel removes one row through the shared delete semantics
+// (process.DeleteLLMModel, plan 345). Two kinds of reference refuse it: a row
+// an agent names as its default_model — the reference is an explicit choice,
+// and deleting through it would move that agent to another model without
+// saying so — and a row a subagent type, the plan reviewer, the goal check or a
+// subagent definition pins by id, which the loader requires to resolve.
+// Sessions and memory settings that named the row are not rewritten; the
+// runtime refuses that turn with a re-choose diagnosis or skips the stale value
+// (plans 260/261/315). The refusal carries both lists so the page can name every
+// owner at once.
 func (s *Server) deleteLLMModel(w http.ResponseWriter, r *http.Request) {
 	scope, ok := s.llmModelScope(w, r)
 	if !ok {
 		return
 	}
-	stored, err := scope.store.Get(r.Context(), pathParam(r, "id"))
-	if err != nil {
-		s.failLLMModelWrite(w, r, err)
-		return
-	}
-	if names := llmModelDefaultFor(scope.cfg, stored.ID); len(names) > 0 {
-		joined := strings.Join(names, "、")
+	err := process.DeleteLLMModel(r.Context(), s.Env.SQL, scope.cfg, pathParam(r, "id"))
+	var refusal *process.LLMModelRefusal
+	if errors.As(err, &refusal) {
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
-			"error": llmText(r,
-				"它是「"+joined+"」的默认模型，请先把默认改成别的",
-				"it is the default model of "+strings.Join(names, ", ")+"; choose another default first"),
-			"default_for": names,
+			"error":       llmRefusalSentence(r, refusal),
+			"default_for": refusal.Defaults,
+			"pinned_by":   refusal.Pins,
 		})
 		return
 	}
-	if err := scope.store.Delete(r.Context(), stored.ID); err != nil {
+	if err != nil {
 		s.failLLMModelWrite(w, r, err)
 		return
 	}
@@ -715,6 +696,26 @@ func (s *Server) deleteLLMModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// llmRefusalSentence words a refusal in the request's language: the default
+// case names the agents (the sentence the page has always shown), the pin case
+// names the settings, and a row that is both names both.
+func llmRefusalSentence(r *http.Request, refusal *process.LLMModelRefusal) string {
+	switch {
+	case len(refusal.Defaults) > 0 && len(refusal.Pins) > 0:
+		return llmText(r,
+			"它是「"+strings.Join(refusal.Defaults, "、")+"」的默认模型，也被「"+strings.Join(refusal.Pins, "、")+"」引用；先把这些引用改成别的",
+			"it is the default model of "+strings.Join(refusal.Defaults, ", ")+" and is referenced by "+strings.Join(refusal.Pins, ", ")+"; point those settings elsewhere first")
+	case len(refusal.Pins) > 0:
+		return llmText(r,
+			"它仍被「"+strings.Join(refusal.Pins, "、")+"」引用；先把这些引用改成别的",
+			"it is still referenced by "+strings.Join(refusal.Pins, ", ")+"; point those settings elsewhere first")
+	default:
+		return llmText(r,
+			"它是「"+strings.Join(refusal.Defaults, "、")+"」的默认模型，请先把默认改成别的",
+			"it is the default model of "+strings.Join(refusal.Defaults, ", ")+"; choose another default first")
+	}
 }
 
 // handleLLMModelChoices serves the one list every model picker reads: the

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -1094,4 +1095,32 @@ func TestModelsAPIAcceptsProviderTheBuildDoesNotKnow(t *testing.T) {
 	// The level vocabulary still refuses, whatever the catalog knows.
 	rec = do(http.MethodPut, "/api/llm-models/"+id, `{"caps":{"efforts":["ultra"]}}`)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+// A row a setting the loader requires to resolve pins by id is refused exactly
+// like a default (plan 345): the delete would leave the composed configuration
+// refused, so every later turn would fail. The refusal names the setting, says
+// nothing about a default, and the row stays listed.
+func TestLLMModelsAPIDeleteRefusesAPinnedRow(t *testing.T) {
+	s, do := modelsPageServer(t)
+	pinned := createModel(t, do, `{"provider":"deepseek","model":"deepseek-v4","base_url":"https://api.deepseek.com","api_key":"sk-first"}`)
+	require.NoError(t, s.Env.UpdateRootSection(context.Background(), "agents", func(cfg *appcfg.Root) error {
+		cfg.Agents.SubagentModels = map[string]appcfg.SubagentConfig{"explore": {Model: pinned}}
+		return nil
+	}))
+
+	rec := do(http.MethodDelete, "/api/llm-models/"+pinned)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var conflict struct {
+		Error      string   `json:"error"`
+		DefaultFor []string `json:"default_for"`
+		PinnedBy   []string `json:"pinned_by"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &conflict))
+	require.Equal(t, []string{"subagent explore"}, conflict.PinnedBy)
+	require.Empty(t, conflict.DefaultFor)
+	require.Contains(t, conflict.Error, "subagent explore")
+
+	rows, _ := llmModelRows(t, do)
+	llmModelByID(t, rows, pinned)
 }
