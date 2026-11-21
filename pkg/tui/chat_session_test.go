@@ -32968,3 +32968,107 @@ func TestQueuePreviewUnwrapsAgentMessageSteer(t *testing.T) {
 		t.Fatalf("queue preview dropped the letter's words:\n%s", rendered)
 	}
 }
+
+// TestDeleteConfiguredModelRefusesTheDefaultAndRemovesTheRest drives /model's
+// Remove capability against a real model table (plan 345): the row an agent
+// defaults to and the row a setting pins are both refused with a sentence the
+// surface says, the rows survive, the configuration keeps composing either
+// way, an unreferenced row is removed, and a second Remove of the same id says
+// it is gone.
+func TestDeleteConfiguredModelRefusesTheDefaultAndRemovesTheRest(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte("gateway:\n  http_addr: 127.0.0.1:9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state", "forebrain.state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	models := &state.LLMModelStore{DB: db}
+	kept, err := models.Create(ctx, state.LLMModel{Provider: "openai", Model: "gpt-main", BaseURL: "https://api.openai.com", APIPath: "/v1/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := models.Create(ctx, state.LLMModel{Provider: "deepseek", Model: "r1", BaseURL: "https://api.deepseek.com", APIPath: "/v1/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	process.InstallConfigSectionValidator(cfgPath, db)
+	t.Cleanup(func() { state.SetSectionValidator(nil) })
+	env := &process.Environment{Root: home, SQL: db}
+	env.ConfigPath = cfgPath
+	session := &ChatSession{Env: env}
+
+	defaultSeed := json.RawMessage(`{"definitions":{"main":{"primary":true,"default_model":"` + kept.ID + `"}}}`)
+	if err := session.UpdateConfigSection(ctx, "agents", defaultSeed); err != nil {
+		t.Fatalf("the seed must be a definition the loader accepts: %v", err)
+	}
+
+	// The row main runs on is refused, and stays.
+	reply, err := session.DeleteConfiguredModel(ctx, kept.ID)
+	if err != nil {
+		t.Fatalf("a refused delete is a reply, not an error: %v", err)
+	}
+	if want := "It is the default model of main; choose another default first."; reply != want {
+		t.Fatalf("reply = %q, want %q", reply, want)
+	}
+	if _, err := models.Get(ctx, kept.ID); err != nil {
+		t.Fatalf("the refused row must survive: %v", err)
+	}
+
+	// A row a built-in subagent type pins is refused too: the loader requires
+	// that reference to resolve, so removing the row would leave the composed
+	// configuration refused.
+	pinnedSeed := json.RawMessage(`{"definitions":{"main":{"primary":true,"default_model":"` + kept.ID + `"}},"subagent_models":{"explore":{"model":"` + other.ID + `"}}}`)
+	if err := session.UpdateConfigSection(ctx, "agents", pinnedSeed); err != nil {
+		t.Fatalf("the pin must be a row the loader resolves: %v", err)
+	}
+	reply, err = session.DeleteConfiguredModel(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("a refused delete is a reply, not an error: %v", err)
+	}
+	if want := "It is still referenced by subagent explore; point those settings elsewhere first."; reply != want {
+		t.Fatalf("reply = %q, want %q", reply, want)
+	}
+	if _, err := models.Get(ctx, other.ID); err != nil {
+		t.Fatalf("the refused row must survive: %v", err)
+	}
+	if _, err := env.ComposedPersistedConfig(ctx); err != nil {
+		t.Fatalf("the configuration must still compose: %v", err)
+	}
+	if err := session.UpdateConfigSection(ctx, "agents", defaultSeed); err != nil {
+		t.Fatalf("clear the pin: %v", err)
+	}
+
+	// A row nothing references is removed, and the reply names it the way the
+	// picker had.
+	third, err := models.Create(ctx, state.LLMModel{Provider: "anthropic", Model: "claude-x", BaseURL: "https://api.anthropic.com", APIPath: "/v1/messages"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err = session.DeleteConfiguredModel(ctx, third.ID)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if want := "Removed " + llm.FormatProviderModelDisplay(third.Provider, third.Model) + "."; reply != want {
+		t.Fatalf("reply = %q, want %q", reply, want)
+	}
+	if _, err := models.Get(ctx, third.ID); !errors.Is(err, state.ErrLLMModelNotFound) {
+		t.Fatalf("the row after the delete = %v, want ErrLLMModelNotFound", err)
+	}
+
+	// The same Remove again reports the row as gone rather than failing.
+	reply, err = session.DeleteConfiguredModel(ctx, third.ID)
+	if err != nil {
+		t.Fatalf("an already-gone row is a reply, not an error: %v", err)
+	}
+	if want := "This model is no longer configured."; reply != want {
+		t.Fatalf("reply = %q, want %q", reply, want)
+	}
+}

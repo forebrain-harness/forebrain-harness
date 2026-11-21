@@ -709,6 +709,65 @@ func (s *ChatSession) restoreRunnerSelection(_ context.Context, r *run.Runner, p
 // selectModelTimeout bounds the persistence half of a live selection.
 const selectModelTimeout = 30 * time.Second
 
+// modelRemoveSession is what /model's Remove action needs from a session —
+// an optional capability, the way configPanelSession is, so a session double
+// with no model table behind it keeps compiling and the picker keeps its
+// select-only behavior.
+type modelRemoveSession interface {
+	// DeleteConfiguredModel removes one row of the install-wide model table
+	// and adopts the change, returning the sentence the surface says. A
+	// refusal (the row is some agent's default, or a setting pins it) and an
+	// already-gone row are replies, not errors; error is reserved for a write
+	// that failed.
+	DeleteConfiguredModel(ctx context.Context, modelID string) (string, error)
+}
+
+// DeleteConfiguredModel removes one configured row through the shared delete
+// semantics (process.DeleteLLMModel, plan 345) and adopts the result the way
+// /connect does (SyncConfig, the turn boundary's own path) — without adoption
+// the re-opened /model list would read the live snapshot and still show the
+// deleted row. The stored selection of a conversation that ran on the row is
+// left as written: its next message is refused at turn entry with the
+// existing re-choose diagnosis, exactly as after a web delete.
+func (s *ChatSession) DeleteConfiguredModel(ctx context.Context, modelID string) (string, error) {
+	if s == nil || s.Env == nil || s.Env.SQL == nil {
+		return "", fmt.Errorf("the model table is unavailable: no runtime environment")
+	}
+	ctx, cancel := context.WithTimeout(ctx, selectModelTimeout)
+	defer cancel()
+	cfg, err := s.Env.ComposedPersistedConfig(ctx)
+	if err != nil {
+		return "", err
+	}
+	label := strings.TrimSpace(modelID)
+	if entry, ok := appcfg.ResolveModelRef(&cfg, "main", label); ok {
+		label = llm.FormatProviderModelDisplay(entry.Provider, entry.Model)
+	}
+	err = process.DeleteLLMModel(ctx, s.Env.SQL, &cfg, modelID)
+	var refusal *process.LLMModelRefusal
+	if errors.As(err, &refusal) {
+		switch {
+		case len(refusal.Defaults) > 0 && len(refusal.Pins) > 0:
+			return "It is the default model of " + strings.Join(refusal.Defaults, ", ") +
+				" and is referenced by " + strings.Join(refusal.Pins, ", ") + "; point those settings elsewhere first.", nil
+		case len(refusal.Pins) > 0:
+			return "It is still referenced by " + strings.Join(refusal.Pins, ", ") + "; point those settings elsewhere first.", nil
+		default:
+			return "It is the default model of " + strings.Join(refusal.Defaults, ", ") + "; choose another default first.", nil
+		}
+	}
+	if errors.Is(err, state.ErrLLMModelNotFound) {
+		return "This model is no longer configured.", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if err := s.Env.SyncConfigFromDB(ctx); err != nil {
+		return "", err
+	}
+	return "Removed " + label + ".", nil
+}
+
 func (s *ChatSession) AgentRosterSnapshot(sessionID string) AgentRosterSnapshot {
 	if s == nil {
 		return AgentRosterSnapshot{}
