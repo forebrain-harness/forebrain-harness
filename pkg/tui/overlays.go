@@ -6463,6 +6463,10 @@ func (p *richPickerState) fireAction(kind rawKey, r rune) (ActionResult, bool) {
 			if kind != rawKeyCtrlU {
 				continue
 			}
+		case FooterActionSave:
+			if kind != rawKeyRune || !p.noFilter || a.Key == "" || string(r) != a.Key {
+				continue
+			}
 		default:
 			continue
 		}
@@ -6506,6 +6510,11 @@ const (
 	// FooterActionDefault restores a setting's own default — the edit view's
 	// one action.
 	FooterActionDefault
+	// FooterActionSave submits a form: it writes the whole of what the page
+	// held in one go (owner 2026-11-22). Unlike the others, its key is the
+	// action's own — the create forms say s, and a second create page may say
+	// something else.
+	FooterActionSave
 )
 
 // FooterAction is one action a picker's or an editor's footer offers beyond

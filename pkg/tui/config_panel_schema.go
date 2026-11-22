@@ -443,7 +443,7 @@ var configTemplates = map[string][]configField{
 	// this page's fields flat.
 	configTemplateAgent: {
 		{Path: "name", Label: "Name", Kind: configFieldText, KeyName: true,
-			Hint: "Lowercase letters, numbers and hyphens. This is the configuration key."},
+			Hint: "Lowercase letters, numbers, hyphens or underscores. This is the configuration key."},
 		{Path: "display_name", Label: "Display name", Kind: configFieldText},
 		{Path: "description", Label: "Description", Kind: configFieldText, Multiline: true, Hint: "Describe the role of this agent."},
 		{Path: "primary", Label: "Primary", Kind: configFieldBool3, DefaultValue: "false", CreateEditable: true,
