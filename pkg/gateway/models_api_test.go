@@ -1128,3 +1128,85 @@ func TestLLMModelsAPIDeleteRefusesAPinnedRow(t *testing.T) {
 	rows, _ := llmModelRows(t, do)
 	llmModelByID(t, rows, pinned)
 }
+
+// A row that is both an agent's default and a setting the loader requires to
+// resolve names both owners (plan 347): the sentence carries both clauses, and
+// the payload keeps the two lists apart so the page can show them as their own
+// badges.
+func TestLLMModelsAPIDeleteRefusesARowThatIsBoth(t *testing.T) {
+	s, do := modelsPageServer(t)
+	both := createModel(t, do, `{"provider":"deepseek","model":"deepseek-v4","base_url":"https://api.deepseek.com","api_key":"sk-first"}`)
+	require.Equal(t, http.StatusOK, do(http.MethodPut, "/api/llm-models/"+both+"/default").Code)
+	require.NoError(t, s.Env.UpdateRootSection(context.Background(), "agents", func(cfg *appcfg.Root) error {
+		cfg.Agents.PlanReviewer = appcfg.SubagentConfig{Model: both}
+		return nil
+	}))
+
+	rec := do(http.MethodDelete, "/api/llm-models/"+both)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var conflict struct {
+		Error      string                        `json:"error"`
+		DefaultFor []string                      `json:"default_for"`
+		PinnedBy   []struct{ Kind, Name string } `json:"pinned_by"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &conflict))
+	require.Equal(t, []string{"main"}, conflict.DefaultFor)
+	require.Len(t, conflict.PinnedBy, 1)
+	require.Equal(t, "plan_review", conflict.PinnedBy[0].Kind)
+	require.Equal(t, "", conflict.PinnedBy[0].Name)
+	require.Contains(t, conflict.Error, "main")
+	require.Contains(t, conflict.Error, "计划评审")
+
+	// The English branch is the one sentence every English surface says, not a
+	// fourth wording written here.
+	en := httptest.NewRequest(http.MethodDelete, "/api/llm-models/"+both, nil)
+	en.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	shared := &process.LLMModelRefusal{
+		Defaults: []string{"main"},
+		Pins:     []appcfg.ModelPin{{Kind: appcfg.ModelPinPlanReview}},
+	}
+	require.Equal(t, shared.Error(), llmRefusalSentence(en, shared))
+
+	rows, _ := llmModelRows(t, do)
+	llmModelByID(t, rows, both)
+}
+
+// The list names the settings that pin a row as a machine kind (plan 347), on
+// the row that has one and on no other, in either language: the page's language
+// lives in localStorage and never reaches Accept-Language, so the server never
+// bakes a label into the row.
+func TestLLMModelsAPIListNamesTheSettingsThatPinARow(t *testing.T) {
+	s, do := modelsPageServer(t)
+	pinned := createModel(t, do, `{"provider":"deepseek","model":"deepseek-v4","base_url":"https://api.deepseek.com","api_key":"sk-first"}`)
+	unpinned := createModel(t, do, `{"provider":"deepseek","model":"deepseek-v4-flash","base_url":"https://api.deepseek.com","api_key":"sk-first"}`)
+	require.NoError(t, s.Env.UpdateRootSection(context.Background(), "agents", func(cfg *appcfg.Root) error {
+		cfg.Agents.PlanReviewer = appcfg.SubagentConfig{Model: pinned}
+		return nil
+	}))
+
+	for _, language := range []string{"", "zh-CN", "en-US,en;q=0.9"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/llm-models?page=1&page_size=100", nil)
+		if language != "" {
+			req.Header.Set("Accept-Language", language)
+		}
+		rec := httptest.NewRecorder()
+		s.listLLMModels(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body struct {
+			Models []map[string]any `json:"models"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+
+		row := llmModelByID(t, body.Models, pinned)
+		pins, ok := row["pinned_by"].([]any)
+		require.True(t, ok, "%q: pinned_by = %v, want one entry", language, row["pinned_by"])
+		require.Len(t, pins, 1)
+		pin, ok := pins[0].(map[string]any)
+		require.True(t, ok, "%q: pin = %v", language, pins[0])
+		require.Equal(t, "plan_review", pin["kind"])
+		// The two install-wide kinds omit the name: an empty one would read as a
+		// subagent nobody named.
+		require.NotContains(t, pin, "name")
+		require.NotContains(t, llmModelByID(t, body.Models, unpinned), "pinned_by")
+	}
+}
