@@ -746,15 +746,7 @@ func (s *ChatSession) DeleteConfiguredModel(ctx context.Context, modelID string)
 	err = process.DeleteLLMModel(ctx, s.Env.SQL, &cfg, modelID)
 	var refusal *process.LLMModelRefusal
 	if errors.As(err, &refusal) {
-		switch {
-		case len(refusal.Defaults) > 0 && len(refusal.Pins) > 0:
-			return "It is the default model of " + strings.Join(refusal.Defaults, ", ") +
-				" and is referenced by " + strings.Join(refusal.Pins, ", ") + "; point those settings elsewhere first.", nil
-		case len(refusal.Pins) > 0:
-			return "It is still referenced by " + strings.Join(refusal.Pins, ", ") + "; point those settings elsewhere first.", nil
-		default:
-			return "It is the default model of " + strings.Join(refusal.Defaults, ", ") + "; choose another default first.", nil
-		}
+		return refusal.Error(), nil
 	}
 	if errors.Is(err, state.ErrLLMModelNotFound) {
 		return "This model is no longer configured.", nil

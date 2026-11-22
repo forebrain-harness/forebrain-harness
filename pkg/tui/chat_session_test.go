@@ -33015,7 +33015,25 @@ func TestDeleteConfiguredModelRefusesTheDefaultAndRemovesTheRest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a refused delete is a reply, not an error: %v", err)
 	}
-	if want := "It is the default model of main; choose another default first."; reply != want {
+	if want := "it is the default model of main; choose another default first"; reply != want {
+		t.Fatalf("reply = %q, want %q", reply, want)
+	}
+	if _, err := models.Get(ctx, kept.ID); err != nil {
+		t.Fatalf("the refused row must survive: %v", err)
+	}
+
+	// A row that is both an agent's default and a pinned setting says both
+	// clauses in one sentence — the case the branch audit found Error()
+	// dropping the pins from.
+	bothSeed := json.RawMessage(`{"definitions":{"main":{"primary":true,"default_model":"` + kept.ID + `"}},"plan_reviewer":{"model":"` + kept.ID + `"}}`)
+	if err := session.UpdateConfigSection(ctx, "agents", bothSeed); err != nil {
+		t.Fatalf("the both-case seed must be a configuration the loader accepts: %v", err)
+	}
+	reply, err = session.DeleteConfiguredModel(ctx, kept.ID)
+	if err != nil {
+		t.Fatalf("a refused delete is a reply, not an error: %v", err)
+	}
+	if want := "it is the default model of main and is referenced by plan review; point those settings elsewhere first"; reply != want {
 		t.Fatalf("reply = %q, want %q", reply, want)
 	}
 	if _, err := models.Get(ctx, kept.ID); err != nil {
@@ -33033,7 +33051,7 @@ func TestDeleteConfiguredModelRefusesTheDefaultAndRemovesTheRest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a refused delete is a reply, not an error: %v", err)
 	}
-	if want := "It is still referenced by subagent explore; point those settings elsewhere first."; reply != want {
+	if want := "it is still referenced by subagent explore; point those settings elsewhere first"; reply != want {
 		t.Fatalf("reply = %q, want %q", reply, want)
 	}
 	if _, err := models.Get(ctx, other.ID); err != nil {
