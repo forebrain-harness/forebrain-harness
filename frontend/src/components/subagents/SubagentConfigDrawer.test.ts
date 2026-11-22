@@ -285,6 +285,27 @@ describe('SubagentConfigDrawer', () => {
     expect(wrapper.find('[data-testid="subagent-save"]').attributes('disabled')).toBeUndefined()
   })
 
+  // A name means two different things (owner 2026-11-22): this agent's own
+  // entry is a subagent_type the model dispatches (dashes only), while a shared
+  // definition is a definition id and follows the primary agent's rule, so an
+  // underscore is legal there and nowhere else.
+  it('judges a name by the scope it is written to', async () => {
+    const agentScope = await openDrawer({ mode: 'create', name: undefined })
+    await agentScope.find('[data-testid="subagent-name"]').setValue('my_agent')
+    expect(agentScope.find('[data-testid="subagent-name-invalid"]').exists()).toBe(true)
+    expect(agentScope.find('[data-testid="subagent-save"]').attributes('disabled')).toBeDefined()
+
+    vi.spyOn(forebrainApi, 'fetchSharedSubagents').mockResolvedValue({ rows: [], types: [] })
+    const sharedScope = await openDrawer({ scope: 'global', agentId: undefined, name: undefined, mode: 'create' })
+    await sharedScope.find('[data-testid="subagent-name"]').setValue('my_agent')
+    expect(sharedScope.find('[data-testid="subagent-name-invalid"]').exists()).toBe(false)
+    expect(sharedScope.find('[data-testid="subagent-save"]').attributes('disabled')).toBeUndefined()
+    // Each scope names its own rule, so the help a reader sees matches the
+    // check that judged the name.
+    expect(sharedScope.find('[data-testid="subagent-name"]').attributes('placeholder')).toContain('repo_scout')
+    expect(agentScope.find('[data-testid="subagent-name"]').attributes('placeholder')).toContain('db-migrator')
+  })
+
   it('writes an empty effort tier as the empty string, not the select’s marker', async () => {
     vi.mocked(forebrainApi.subagentConfig).mockResolvedValue(
       detail({ modelProvider: 'deepseek', model: 'm-deepseek', reasoningEffort: 'high', modelSource: 'agent' }),

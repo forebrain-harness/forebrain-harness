@@ -11,12 +11,12 @@
             v-model="form.name"
             class="forebrain-field h-[34px] font-mono"
             :readonly="!creating"
-            :placeholder="creating ? t('subagents.namePlaceholder') : ''"
+            :placeholder="creating ? t(namePlaceholderKey) : ''"
             autocomplete="off"
             data-testid="subagent-name"
           />
           <span v-if="creating && form.name !== '' && !nameValid" class="sa-hint sa-hint-bad" data-testid="subagent-name-invalid">
-            {{ t('subagents.nameInvalid') }}
+            {{ t(nameInvalidKey) }}
           </span>
         </label>
         <!-- The label is its own element rather than a wrapper: the control is
@@ -320,8 +320,15 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 
-/** A subagent's name, exactly as the server's own validator reads it. */
-const NAME_PATTERN = /^[a-z][a-z0-9-]{1,62}$/
+/**
+ * A subagent's name, exactly as the server's own validator reads it — one
+ * pattern per scope, because a name means two different things: a custom entry
+ * is this agent's own dispatch name (dashes only, at least two characters),
+ * while a shared definition is a definition id and follows the primary agent's
+ * rule, underscores included (owner 2026-11-22).
+ */
+const AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,62}$/
+const SHARED_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,62}$/
 
 interface SubagentForm {
   name: string
@@ -394,7 +401,16 @@ const title = computed(() => {
   return t('subagents.drawerEdit', { name: subject.value })
 })
 
-const nameValid = computed(() => NAME_PATTERN.test(form.name.trim()))
+const namePattern = computed(() => (globalScope.value ? SHARED_NAME_PATTERN : AGENT_NAME_PATTERN))
+const nameValid = computed(() => namePattern.value.test(form.name.trim()))
+/** Where the name field's help comes from: the two scopes judge a name
+ *  differently, so each one says its own rule. */
+const namePlaceholderKey = computed(() =>
+  globalScope.value ? 'subagents.sharedNamePlaceholder' : 'subagents.namePlaceholder',
+)
+const nameInvalidKey = computed(() =>
+  globalScope.value ? 'subagents.sharedNameInvalid' : 'subagents.nameInvalid',
+)
 
 /** The value a model option carries: the configured row's id, never the pair.
  *  Two rows may serve one provider and model, so only the id names the one a

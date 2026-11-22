@@ -804,6 +804,10 @@ const zh = {
   'subagents.fieldPrompt': '系统提示词',
   'subagents.namePlaceholder': '小写字母、数字与短横线，如 db-migrator',
   'subagents.nameInvalid': '只能用 a–z、0–9 与短横线，以字母开头，2 到 63 个字符',
+  // 共享子代理是一份定义（不是某个主代理自己的条目），名字跟主代理的 agent id
+  // 同一条规则，允许下划线（owner 2026-11-22）。
+  'subagents.sharedNamePlaceholder': '小写字母、数字、短横线或下划线，如 repo_scout',
+  'subagents.sharedNameInvalid': '只能用 a–z、0–9、短横线与下划线，以字母开头，最长 63 个字符',
   'subagents.descriptionPlaceholder': '主代理靠这句话决定什么时候派它，写清用途',
   'subagents.promptPlaceholder': '这个子代理的角色、做事方式和交付格式',
   'subagents.modelFollowPrimary': '跟随主代理（{model}）',
@@ -3383,6 +3387,10 @@ const en: Record<keyof typeof zh, string> = {
   'subagents.fieldPrompt': 'System prompt',
   'subagents.namePlaceholder': 'Lowercase letters, digits and hyphens, e.g. db-migrator',
   'subagents.nameInvalid': 'Use a–z, 0–9 and hyphens, starting with a letter, 2 to 63 characters',
+  // A shared subagent is a definition, not this agent's own entry, so its name
+  // follows the primary agent's id rule — underscores included (owner 2026-11-22).
+  'subagents.sharedNamePlaceholder': 'Lowercase letters, digits, hyphens or underscores, e.g. repo_scout',
+  'subagents.sharedNameInvalid': 'Use a–z, 0–9, hyphens or underscores, starting with a letter, up to 63 characters',
   'subagents.descriptionPlaceholder': 'The primary agent dispatches it by this sentence: say what it is for',
   'subagents.promptPlaceholder': 'This subagent\'s role, how it works and what it delivers',
   'subagents.modelFollowPrimary': 'Follow the primary agent ({model})',
