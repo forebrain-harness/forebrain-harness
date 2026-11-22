@@ -97,6 +97,39 @@ func TestTabbedPickerFilterMovesToATabWithMatches(t *testing.T) {
 	}
 }
 
+// ← and → step through the tabs while the keyboard is on the rows, the way
+// /status's own tabs answer them: on a /config page, which shows no filter box
+// at all, the arrows were a no-op on every key (plan 350). Tab and Shift+Tab
+// keep switching, and while the keyboard is in a filter the arrows still move
+// its caret.
+func TestTabbedPickerArrowsSwitchTabs(t *testing.T) {
+	items := []SelectItem{
+		{Label: "alpha", Category: "Project"},
+		{Label: "gamma", Category: "Shared"},
+	}
+	// → lands on the other tab's first row, ← steps back to this one's.
+	sel := pickerKeys(t, "\x1b[C"+keyEnter)
+	if idx, ok, err := sel.SelectRichTabbed("pick", items, TabbedSelectOptions{}); err != nil || !ok || idx != 1 {
+		t.Fatalf("→ then Enter = %d, %v, %v; want Shared's row 1", idx, ok, err)
+	}
+	sel = pickerKeys(t, "\x1b[C\x1b[D"+keyEnter)
+	if idx, ok, err := sel.SelectRichTabbed("pick", items, TabbedSelectOptions{}); err != nil || !ok || idx != 0 {
+		t.Fatalf("→ ← then Enter = %d, %v, %v; want Project's row 0", idx, ok, err)
+	}
+
+	// In a filter the arrow belongs to the caret: the picker keeps its tab
+	// even though the other tab matches the same query.
+	var many []SelectItem
+	for i := 0; i < pickerFilterMinRows; i++ {
+		many = append(many, SelectItem{Label: fmt.Sprintf("get-%d", i), Category: "Project"})
+	}
+	many = append(many, SelectItem{Label: "shared-ethos", Category: "Shared"})
+	sel = pickerKeys(t, "et\x1b[D"+keyEnter)
+	if idx, ok, err := sel.SelectRichTabbed("pick", many, TabbedSelectOptions{}); err != nil || !ok || idx != 0 {
+		t.Fatalf("← inside the filter = %d, %v, %v; want Project's row 0, the tab unmoved", idx, ok, err)
+	}
+}
+
 // Tab switching wraps around the tab bar in both directions, landing on the
 // first row every time.
 func TestTabbedPickerSwitchWrapsAround(t *testing.T) {

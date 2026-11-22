@@ -265,6 +265,12 @@ func (p *tabbedPickerState) checkedIndices() []int {
 	return out
 }
 
+// tabStepKey reports whether a key is one of the two arrows that step through
+// a picker's tabs while the keyboard is on its rows: /status answers them the
+// same way, and a /config page — which shows no filter box to move a caret in —
+// answers nothing else with them (plan 350).
+func tabStepKey(k rawKey) bool { return k == rawKeyLeft || k == rawKeyRight }
+
 // panel lays the tabbed picker out as a slash panel: the label and the filter
 // in the head, the tab bar under them when there is more than one tab, the
 // shown tab's rows in two columns, and the keys.
@@ -407,7 +413,10 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 			return nil, false, err
 		}
 		p.filter.selection = s.fieldSelection(key.kind, p.panel(label), p.filter.runes())
-		if p.noFilter && editsFilter(key.kind) {
+		// A picker with no filter box ignores the keys that would edit one —
+		// except ←/→, which step through the tabs while the keyboard is on
+		// the rows (plan 350).
+		if p.noFilter && editsFilter(key.kind) && !tabStepKey(key.kind) {
 			continue
 		}
 		switch key.kind {
@@ -452,12 +461,19 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 			}
 		case rawKeyLeft:
 			if !p.inFilter {
-				continue
+				// On the rows ← steps back a tab, as /status's own tabs do
+				// (plan 350): a picker with no filter box — every /config
+				// page — has no caret for the arrow to move, and one with a
+				// filter keeps the arrow for the caret while the keyboard
+				// is in it.
+				p.switchTab(-1)
+				break
 			}
 			p.filter.move(-1)
 		case rawKeyRight:
 			if !p.inFilter {
-				continue
+				p.switchTab(1)
+				break
 			}
 			p.filter.move(1)
 		case rawKeyHome:
