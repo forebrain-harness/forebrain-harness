@@ -2451,6 +2451,10 @@ const zh = {
   'models.pinSubagent': '子代理 {name}',
   'models.pinPlanReview': '计划评审',
   'models.pinGoalEvaluator': '目标评估',
+  // The row itself says it is pinned (plan 348), and the title separates the
+  // owners in the reader's own language.
+  'models.pinnedBadge': '被引用',
+  'models.pinJoin': '、',
   'models.drawerAdd': '添加模型',
   'models.drawerEdit': '编辑模型',
   'models.provider': '服务商',
@@ -5012,6 +5016,8 @@ const en: Record<keyof typeof zh, string> = {
   'models.pinSubagent': 'subagent {name}',
   'models.pinPlanReview': 'plan review',
   'models.pinGoalEvaluator': 'goal evaluator',
+  'models.pinnedBadge': 'Referenced',
+  'models.pinJoin': ', ',
   'models.drawerAdd': 'Add model',
   'models.drawerEdit': 'Edit model',
   'models.provider': 'Provider',

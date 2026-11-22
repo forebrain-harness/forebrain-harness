@@ -59,4 +59,17 @@ describe('ModelsTable', () => {
     const wrapper = mountTable([row()])
     expect(wrapper.get('[data-testid="models-cell-model"]').text()).toBe('gfmodel')
   })
+
+  it('marks a row a setting pins, and names the owners in the title', () => {
+    const wrapper = mountTable([
+      row({ id: 'pinned', model: 'pinned-model', pinnedBy: [{ kind: 'plan_review' }, { kind: 'subagent', name: 'explore' }] }),
+      row({ id: 'plain', model: 'plain-model' }),
+    ])
+    const badge = wrapper.find('[data-testid="models-cell-pinned"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text()).toBe('Referenced')
+    expect(badge.attributes('title')).toBe('plan review, subagent explore')
+    // The plain row draws no badge.
+    expect(wrapper.findAll('[data-testid="models-cell-pinned"]')).toHaveLength(1)
+  })
 })

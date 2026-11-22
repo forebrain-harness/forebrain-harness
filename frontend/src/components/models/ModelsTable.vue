@@ -9,6 +9,14 @@
     <template #cell-model="{ row }">
       <span class="mname" data-testid="models-cell-model">{{ row.modelName || row.model }}</span>
       <BadgeComponent v-if="row.isDefault" class="ml-1.5" data-testid="models-cell-default">{{ t('models.defaultBadge') }}</BadgeComponent>
+      <BadgeComponent
+        v-if="row.pinnedBy?.length"
+        class="ml-1.5"
+        variant="gray"
+        :title="pinnedTitle(row)"
+        data-testid="models-cell-pinned"
+        >{{ t('models.pinnedBadge') }}</BadgeComponent
+      >
       <span class="mprov">{{ providerLine(row) }}</span>
     </template>
 
@@ -93,6 +101,7 @@ import RowAction from '@/components/common/RowAction.vue'
 import RowActionSlot from '@/components/common/RowActionSlot.vue'
 import RowActions from '@/components/common/RowActions.vue'
 import type { LlmModelRow } from '@/lib/api'
+import { modelPinLabels } from '@/lib/modelPins'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{
@@ -138,6 +147,11 @@ function providerLine(row: LlmModelRow): string {
   })()
   if (!row.subagentAllowed) return line
   return `${line} ${t('models.subagentAllowedMark')}`
+}
+
+/** The owners a pinned row's badge names, in the reader's language. */
+function pinnedTitle(row: LlmModelRow): string {
+  return modelPinLabels(t, row.pinnedBy).join(t('models.pinJoin'))
 }
 
 /** The path a row's requests really take. A row that stores none is the engine's

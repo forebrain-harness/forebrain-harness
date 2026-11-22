@@ -265,6 +265,12 @@ test('a model the plan review pins cannot be deleted either', async ({ page }) =
   const row = rowOf(page, 'e2e-pinned-model')
   await expect(row).toBeVisible()
 
+  // The row says it is pinned before anyone clicks: the badge names the
+  // setting in the tooltip, and the refusal dialog then explains the remedy.
+  const pinnedBadge = row.locator('[data-testid="models-cell-pinned"]')
+  await expect(pinnedBadge).toBeVisible()
+  await expect(pinnedBadge).toHaveAttribute('title', '计划评审')
+
   await row.locator('[data-testid^="models-remove-"]').click()
   await page.click('[data-testid="confirm-ok"]')
 
