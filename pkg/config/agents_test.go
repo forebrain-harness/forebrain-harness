@@ -514,9 +514,9 @@ func TestLoadRejectsInvalidAgentSubagents(t *testing.T) {
 			want:  "duplicate subagent name",
 		},
 		{
-			name:  "system subagent",
+			name:  "system subagent with a body",
 			entry: "        - name: goal-evaluator\n          system_prompt: p\n",
-			want:  "cannot be configured",
+			want:  "is a built-in",
 		},
 		{
 			name:  "built-in with a description",
@@ -610,6 +610,55 @@ func TestValidateAgentSubagentsAcceptsAResolvableModelReference(t *testing.T) {
 	effort := AgentDefinition{Subagents: []SubagentConfig{{Name: "explore", ReasoningEffort: "low"}}}
 	if err := ValidateAgentSubagents("main", effort, builtInPublicSubagentNames, builtInSystemSubagentNames, nil, resolves); err == nil || !strings.Contains(err.Error(), "thinking level requires a model") {
 		t.Fatalf("err = %v, want the effort rule", err)
+	}
+}
+
+// A system type (plan-reviewer, goal-evaluator) runs on its own prompt and
+// tools — the system starts it, so the only thing an agent can choose is which
+// model it runs on and how hard it thinks (owner 2026-11-22). The verdict is
+// the built-in one, sentence and all, so the two roles of built-in cannot drift
+// apart in what they accept.
+func TestValidateAgentSubagentsSystemEntriesTakeAModelAndALevel(t *testing.T) {
+	resolves := func(ref string) bool { return ref == "llm-plan-reviewer" }
+	validate := func(entry SubagentConfig) error {
+		def := AgentDefinition{Subagents: []SubagentConfig{entry}}
+		return ValidateAgentSubagents("main", def, builtInPublicSubagentNames, builtInSystemSubagentNames, nil, resolves)
+	}
+
+	// The bare name, a pin, and a pin with a level are the three accepted
+	// shapes — the same ones a public built-in takes.
+	accepted := []SubagentConfig{
+		{Name: "plan-reviewer"},
+		{Name: "plan-reviewer", Model: "llm-plan-reviewer"},
+		{Name: "goal-evaluator", Model: "llm-plan-reviewer", ReasoningEffort: "high"},
+	}
+	for _, entry := range accepted {
+		if err := validate(entry); err != nil {
+			t.Fatalf("a system pin %#v was refused: %v", entry, err)
+		}
+	}
+
+	// Everything else the entry could carry is a body, and a system type has
+	// none to give.
+	refused := []SubagentConfig{
+		{Name: "plan-reviewer", SystemPrompt: "p"},
+		{Name: "plan-reviewer", Description: "d"},
+		{Name: "plan-reviewer", Enabled: BoolPtr(false)},
+		{Name: "goal-evaluator", Tools: SubagentToolsReadOnly},
+		{Name: "goal-evaluator", AllowedTools: []string{"read_file"}},
+		{Name: "goal-evaluator", Continuable: BoolPtr(true)},
+	}
+	for _, entry := range refused {
+		err := validate(entry)
+		want := `is a built-in: it takes a model and a reasoning effort, nothing else.`
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("a system entry with a body %#v: err = %v, want %q", entry, err, want)
+		}
+	}
+
+	// The level rule is the shared one: it needs a model next to it.
+	if err := validate(SubagentConfig{Name: "plan-reviewer", ReasoningEffort: "high"}); err == nil || !strings.Contains(err.Error(), "thinking level requires a model") {
+		t.Fatalf("err = %v, want the effort rule for a system entry too", err)
 	}
 }
 

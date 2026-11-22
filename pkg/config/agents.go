@@ -355,8 +355,9 @@ var subagentConfigNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
 
 // ValidateAgentSubagents checks one primary agent's subagent entries.
 // publicBuiltins are the built-in types an entry of that name overrides;
-// systemBuiltins are the types the system dispatches, which a configuration
-// must not touch; sharedNames are the install-wide subagent definitions
+// systemBuiltins are the types the system dispatches itself, which an entry of
+// that name pins a model and a level for and nothing else; sharedNames are the
+// install-wide subagent definitions
 // (agents.definitions, a definition whose key plays the subagent role) this
 // agent may enable. Names are passed in rather than imported so the loader can
 // report the rule without depending on the package that defines the
@@ -400,10 +401,8 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 			return fmt.Errorf("%s: duplicate subagent name %q", where, name)
 		}
 		seen[name] = struct{}{}
-		if _, ok := system[name]; ok {
-			return fmt.Errorf("%s: %q is dispatched by the system and cannot be configured.", where, name)
-		}
 		_, publicBuiltin := public[name]
+		_, systemBuiltin := system[name]
 		// The reference that enables an install-wide definition carries the
 		// definition's name, which follows the primary agent's id rule rather
 		// than this entry's (owner 2026-11-22) — a name like my_agent has to be
@@ -413,11 +412,14 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 			return fmt.Errorf("%s: invalid name %q: use lower-case letters, digits and dashes, starting with a letter", where, entry.Name)
 		}
 		switch {
-		case publicBuiltin:
+		case publicBuiltin, systemBuiltin:
 			// A built-in's pin is a model and a level (P5): the prompt
 			// rewrite and the switch it once carried are retired — normalize
 			// drops the stored ones, and a write that carries either is
-			// refused here.
+			// refused here. A system type (plan-reviewer, goal-evaluator)
+			// takes the same pin and nothing more (owner 2026-11-22): the
+			// system starts it on its own prompt and tools, so the model it
+			// runs on and the level it thinks at are all an agent can choose.
 			if strings.TrimSpace(entry.Description) != "" || strings.TrimSpace(entry.SystemPrompt) != "" ||
 				strings.TrimSpace(entry.Tools) != "" || len(entry.AllowedTools) > 0 || entry.Continuable != nil || entry.Enabled != nil {
 				return fmt.Errorf("%s: %q is a built-in: it takes a model and a reasoning effort, nothing else.", where, name)

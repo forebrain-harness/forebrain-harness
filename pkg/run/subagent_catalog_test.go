@@ -227,6 +227,73 @@ func withSubagentModel(def appcfg.AgentDefinition, name, model string) appcfg.Ag
 	return def
 }
 
+// A system type — plan-reviewer, goal-evaluator — runs on its own prompt and
+// tools, so the only thing an agent's entry can say is which model it runs on
+// and how hard it thinks (owner 2026-11-22). The pin answers Model, and it
+// stays out of everything that decides what may be dispatched: the system
+// starts those types, so a pin that made one dispatchable would put the plan
+// reviewer in the enum the model chooses from.
+func TestSubagentCatalogSystemPinsArePinsOnly(t *testing.T) {
+	cfg := catalogTestConfig()
+	cfg.LLMModels = []appcfg.LLMModelConfig{
+		{ID: "llm-deepseek-flash", Provider: "deepseek", Model: "deepseek-v4-flash", BaseURL: "http://flash.test/v1", APIKey: "key"},
+		{ID: "llm-reviewer", Provider: "openai", Model: "gpt-5", BaseURL: "http://review.test/v1", APIKey: "key"},
+	}
+	pin := func(entry appcfg.SubagentConfig) {
+		def := cfg.Agents.Definitions["main"]
+		kept := make([]appcfg.SubagentConfig, 0, len(def.Subagents))
+		for _, existing := range def.Subagents {
+			if subagentKey(existing.Name) != entry.Name {
+				kept = append(kept, existing)
+			}
+		}
+		def.Subagents = append(kept, entry)
+		cfg.Agents.Definitions["main"] = def
+	}
+
+	pin(appcfg.SubagentConfig{Name: "plan-reviewer", Model: "llm-reviewer", ReasoningEffort: "high"})
+	catalog := SubagentCatalogFor(cfg, "main")
+	modelID, provider, model, effort, ok := catalog.Model("plan-reviewer")
+	if !ok || modelID != "llm-reviewer" || provider != "openai" || model != "gpt-5" || effort != "high" {
+		t.Fatalf("Model(plan-reviewer) = %q %q %q %q %v", modelID, provider, model, effort, ok)
+	}
+	for _, def := range catalog.Public() {
+		if def.Name == "plan-reviewer" {
+			t.Fatal("a system pin leaked into the types the model may dispatch")
+		}
+	}
+	if _, err := catalog.ResolvePublic("plan-reviewer"); err == nil {
+		t.Fatal("a system pin resolved as a type the model may dispatch")
+	}
+	if _, ok := catalog.ToolPolicy("plan-reviewer"); ok {
+		t.Fatal("a system pin answered with a tool policy")
+	}
+
+	// The goal evaluator's global row is the fallback the pin sits in front
+	// of, and only a pin that resolves sits in front of it: the pin never
+	// widens into "this agent configured the goal evaluator", so a bare name
+	// and a reference nothing resolves keep the configured row answering.
+	cfg.Agents.GoalEvaluator = appcfg.SubagentConfig{Model: "llm-deepseek-flash", ReasoningEffort: "low"}
+	answersGlobalRow := func(t *testing.T) {
+		t.Helper()
+		modelID, _, _, effort, ok := SubagentCatalogFor(cfg, "main").Model(GoalEvaluatorSubagentType)
+		if !ok || modelID != "llm-deepseek-flash" || effort != "low" {
+			t.Fatalf("Model(goal-evaluator) = %q %q %v, want the global row", modelID, effort, ok)
+		}
+	}
+	pin(appcfg.SubagentConfig{Name: GoalEvaluatorSubagentType})
+	answersGlobalRow(t)
+	pin(appcfg.SubagentConfig{Name: GoalEvaluatorSubagentType, Model: "llm-no-such-row"})
+	answersGlobalRow(t)
+
+	// A pin that resolves is what the run uses.
+	pin(appcfg.SubagentConfig{Name: GoalEvaluatorSubagentType, Model: "llm-reviewer", ReasoningEffort: "high"})
+	modelID, _, _, effort, ok = SubagentCatalogFor(cfg, "main").Model(GoalEvaluatorSubagentType)
+	if !ok || modelID != "llm-reviewer" || effort != "high" {
+		t.Fatalf("Model(goal-evaluator) = %q %q %v, want the agent's pin", modelID, effort, ok)
+	}
+}
+
 func mustSystemPrompt(t *testing.T, name string) string {
 	t.Helper()
 	prompt, ok := agent.SystemPromptForSubtype(name)

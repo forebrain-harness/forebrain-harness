@@ -2293,66 +2293,546 @@ func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
 	}
 }
 
-// One agent's subagents read the way dispatch resolves them (plan 313): this
-// agent's own entry first, then the install-wide row of that type, then the
-// conversation's model — and an entry naming a system-dispatched type opens
-// read-only, every row marked System, and refuses to open any of them.
-func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
+// subagentRowsPageAt is where one agent's Subagents rows page sits in the
+// scripted selector's page log: the page drawn straight after the agent's own
+// template page, the one carrying the Subagents row. Locating it that way is
+// what keeps these tests off the global Built-in subagents page, whose six rows
+// read the same (plan 352).
+func subagentRowsPageAt(t *testing.T, selector *scriptedSelector) int {
+	t.Helper()
+	for i := 1; i < len(selector.richItems); i++ {
+		if slices.Contains(rowLabels(selector.richItems[i-1]), "Subagents") {
+			return i
+		}
+	}
+	t.Fatalf("the agent's Subagents rows page never opened: %v", selector.richLabels)
+	return -1
+}
+
+// subagentRowsPage is that page's rows.
+func subagentRowsPage(t *testing.T, selector *scriptedSelector) []SelectItem {
+	t.Helper()
+	return pageFields(selector.richItems[subagentRowsPageAt(t, selector)])
+}
+
+// lastSubagentRowsPage is the most recent page listing the subagent rows — the
+// one carrying the built-in types — so a test reads the list as the last write
+// left it.
+func lastSubagentRowsPage(t *testing.T, selector *scriptedSelector) []SelectItem {
+	t.Helper()
+	for i := len(selector.richItems) - 1; i >= 0; i-- {
+		if slices.Contains(rowLabels(selector.richItems[i]), "general-purpose") {
+			return pageFields(selector.richItems[i])
+		}
+	}
+	t.Fatalf("the subagent rows page never opened: %v", selector.richLabels)
+	return nil
+}
+
+// pageFields is a page's rows without the plain picker's tail rows — Add and Up
+// — which a selector with footer actions carries instead.
+func pageFields(items []SelectItem) []SelectItem {
+	out := make([]SelectItem, 0, len(items))
+	for _, item := range items {
+		if item.Label == configAddRowLabel || item.Label == configUpRowLabel {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// One agent's subagent list is names alone (plan 352, owner 2026-11-22): every
+// stored entry by its own name, then the built-in types nothing pins yet — all
+// six of them, whether or not this agent ever configured one — and no row says
+// anything else, because what a subagent runs on is read on the page that opens
+// it. A shared subagent keeps the status and the summary its definition gives
+// it (plan 314).
+func TestConfigPanelSubagentRowsAreNamesOnly(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"agents": `{
 		"definitions":{"main":{"primary":true,"subagents":[
 			{"name":"explore","model":"openai/gpt-sub"},
-			{"name":"plan"},
-			{"name":"verification"},
 			{"name":"db-migrator","description":"d","system_prompt":"p"},
-			{"name":"goal-evaluator"}
+			{"name":"plan-reviewer","model":"llm-1"}
 		]}},
 		"subagent_models":{"plan":{"model":"llm-1","reasoning_effort":"xhigh"}}
 	}`})
 	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
 	selector := &scriptedSelector{}
-	runConfigPanel(t, session, selector, []richStep{
-		{label: "Agent definitions", ok: true},
-		{label: "main", ok: true},
-		{label: "Subagents", ok: true},
-		// The system entry opens read-only: every row System, and opening
-		// any of them says why (plan 329, prototype html:128).
-		{label: "#5", ok: true},
-		{label: "Enabled", ok: true},
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
 		{ok: false},
-		{ok: false},
-		{ok: false},
-		{ok: false},
-		{ok: false},
-	}, nil, "agents")
+	}), nil, "agents")
 
-	if len(selector.richItems) < 5 {
-		t.Fatalf("expected the subagent rows page, got %d pages", len(selector.richItems))
+	rows := subagentRowsPage(t, selector)
+	want := []string{"explore", "db-migrator", "plan-reviewer", "general-purpose", "plan", "verification", "goal-evaluator"}
+	if got := rowLabels(rows); !slices.Equal(got, want) {
+		t.Fatalf("rows = %v, want %v", got, want)
 	}
-	rows := selector.richItems[3]
-	// The entries the panel knows more about carry their fact as the
-	// description; the custom entry — a plain container — counts what it
-	// holds in the value column (plan 325 D4).
-	cases := map[string]string{
-		"#1": "agent override: openai/gpt-sub",
-		"#2": "global default: openai/gpt-main / xHigh",
-		"#3": configFollowConversation,
-		"#5": configSystemSubagentNotice,
-	}
-	for label, want := range cases {
-		if row := findRow(t, rows, label); row.Description != want {
-			t.Errorf("%s = %q, want %q", label, row.Description, want)
+	for _, row := range rows {
+		if row.Description != "" || row.Value != "" || row.Status != "" {
+			t.Errorf("%s = %q / %q / %q, want a name alone", row.Label, row.Description, row.Value, row.Status)
 		}
-	}
-	custom := findRow(t, rows, "#4")
-	if custom.Value != "" || custom.Description != "" {
-		t.Errorf("#4 = %q / %q, want a container row to hold no value of its own (plan 350)", custom.Value, custom.Description)
-	}
-	if !strings.Contains(pageLabels(selector), configSystemSubagentNotice) {
-		t.Fatalf("the refusal must reach the page: %s", pageLabels(selector))
 	}
 	if len(session.writes) != 0 {
 		t.Fatalf("nothing here writes, got %+v", session.writes)
 	}
+}
+
+// The list of an agent that configured nothing is the six built-in types
+// (plan 352, 裁决 1): each is a place to pin a model and a level, so the empty
+// state is six rows rather than the collection's "Nothing configured yet".
+func TestConfigPanelSubagentRowsListEveryBuiltInType(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{ok: false},
+	}), nil, "agents")
+
+	rows := subagentRowsPage(t, selector)
+	want := subagentTypeNames()
+	if got := rowLabels(rows); !slices.Equal(got, want) {
+		t.Fatalf("rows = %v, want the six built-in types %v", got, want)
+	}
+	for _, row := range rows {
+		if row.Description != "" || row.Value != "" || row.Status != "" {
+			t.Errorf("%s = %q / %q / %q, want a name alone", row.Label, row.Description, row.Value, row.Status)
+		}
+	}
+	if strings.Contains(pageLabels(selector), "Nothing configured yet") {
+		t.Fatal("the page must not call itself empty: its six types are rows")
+	}
+	if len(session.writes) != 0 {
+		t.Fatalf("nothing here writes, got %+v", session.writes)
+	}
+}
+
+// Opening a built-in type's row is a model and a level, nothing else (plan 352,
+// 裁决 1 and 3): no name row, no prompt, no switch, no status — and a type
+// nothing pinned yet is exactly that, drawn from the placeholder rather than
+// from an entry, so closing it writes nothing.
+func TestConfigPanelBuiltinSubagentRowOpensModelAndLevelOnly(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "explore", ok: true},
+		{ok: false},
+	}), nil, "agents")
+
+	page := pageFields(selector.richItems[subagentRowsPageAt(t, selector)+1])
+	if got, want := rowLabels(page), []string{"Model", "Thinking level"}; !slices.Equal(got, want) {
+		t.Fatalf("the built-in's page = %v, want %v", got, want)
+	}
+	for _, row := range page {
+		if row.Status != "" {
+			t.Errorf("%s carries the status %q; a pin is this agent's and says nothing else", row.Label, row.Status)
+		}
+	}
+	for _, gone := range []string{"Name", "Type name", "System prompt", "Enabled", "Description", "Tool access", "Allowed tools", "Allow continuation"} {
+		if slices.Contains(rowLabels(page), gone) {
+			t.Errorf("the built-in's page still lists %q", gone)
+		}
+	}
+	if len(session.writes) != 0 {
+		t.Fatalf("opening an unpinned type must write nothing, got %+v", session.writes)
+	}
+}
+
+// Picking a model on an unpinned built-in type writes it once, as a real entry
+// at the row's numeric place in the list (plan 352): the type's name keys the
+// row on screen, but configAssign reads a list by index, so the write carries
+// the index and the entry carries the name.
+func TestConfigPanelBuiltinSubagentRowWritesThePin(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "explore", ok: true},
+		{label: "Model", ok: true},
+		{label: "openai/gpt-main", ok: true},
+		{ok: false},
+	}), nil, "agents")
+
+	if len(session.writes) != 1 {
+		t.Fatalf("expected exactly one write, got %d: %+v", len(session.writes), session.writes)
+	}
+	entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+	if len(entries) != 1 {
+		t.Fatalf("saved subagents = %+v, want the one pin", entries)
+	}
+	if entries[0]["name"] != "explore" || entries[0]["model"] != "llm-1" {
+		t.Fatalf("pin = %+v, want the type's name and the picked row", entries[0])
+	}
+	// The row list redraws from the store, so the pin is the row it was.
+	rows := subagentRowsPage(t, selector)
+	if !slices.Contains(rowLabels(rows), "explore") {
+		t.Fatalf("the row list lost the pinned type: %v", rowLabels(rows))
+	}
+}
+
+// The empty option on a type nothing pinned has nothing to unset (plan 352):
+// the page closes with the document it opened on and not one write.
+func TestConfigPanelBuiltinSubagentRowEmptyPickWritesNothing(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "explore", ok: true},
+		{label: "Model", ok: true},
+		{label: "Follow primary agent", ok: true},
+		{ok: false},
+	}), nil, "agents")
+
+	if len(session.writes) != 0 {
+		t.Fatalf("an empty pick on an unpinned type must write nothing, got %+v", session.writes)
+	}
+}
+
+// Clearing a pin that exists removes the model and the level chosen for it in
+// one write (plan 324 D5, still the rule on a built-in's page): the stored entry
+// goes, so the row is the type again.
+func TestConfigPanelBuiltinSubagentRowClearDropsTheLevel(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{
+		"definitions":{"main":{"primary":true,"subagents":[
+			{"name":"explore","model":"llm-1","reasoning_effort":"high"}
+		]}}
+	}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "explore", ok: true},
+		{label: "Model", ok: true},
+		{label: "Follow primary agent", ok: true},
+		{ok: false},
+	}), nil, "agents")
+
+	if len(session.writes) != 1 {
+		t.Fatalf("expected exactly one write, got %d: %+v", len(session.writes), session.writes)
+	}
+	entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+	if len(entries) != 1 {
+		t.Fatalf("saved subagents = %+v, want the bare name the clear leaves", entries)
+	}
+	for _, gone := range []string{"model", "reasoning_effort"} {
+		if _, ok := entries[0][gone]; ok {
+			t.Fatalf("the cleared pin still carries %q: %+v", gone, entries[0])
+		}
+	}
+}
+
+// A system type is this agent's pin now, exactly as a public built-in is
+// (plan 352, 裁决 1 and 4): its page opens writable on the model and the level,
+// and picking one stores the entry.
+func TestConfigPanelSystemSubagentPinIsWritable(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+	session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "openai", Model: "gpt-main"}}
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+		{label: "plan-reviewer", ok: true},
+		{label: "Model", ok: true},
+		{label: "openai/gpt-main", ok: true},
+		{ok: false},
+	}), nil, "agents")
+
+	page := pageFields(selector.richItems[subagentRowsPageAt(t, selector)+1])
+	if got, want := rowLabels(page), []string{"Model", "Thinking level"}; !slices.Equal(got, want) {
+		t.Fatalf("the system type's page = %v, want %v", got, want)
+	}
+	if strings.Contains(pageLabels(selector), "Not configurable per agent") {
+		t.Fatal("the page must not refuse a system type any more")
+	}
+	entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+	if len(entries) != 1 || entries[0]["name"] != "plan-reviewer" || entries[0]["model"] != "llm-1" {
+		t.Fatalf("saved subagents = %+v, want the system type's pin", entries)
+	}
+}
+
+// A row filled in from the type list is not an entry, so the footer offers no
+// removal for it (plan 352): there is nothing stored to remove. The rows the
+// agent did store keep theirs.
+func TestConfigPanelSubagentRowsRemoveOnlyStoredEntries(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{
+		"definitions":{"main":{"primary":true,"subagents":[
+			{"name":"db-migrator","description":"d","system_prompt":"p"}
+		]}}
+	}`})
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	runActionConfigPanel(t, session, selector,
+		[]richStep{{label: "Subagents", ok: true}, {ok: false}},
+		[]actionStep{{label: "Agent definitions", ok: true}, {label: "main", ok: true}, {ok: false}},
+		nil, "agents")
+
+	// The third action page is the subagent rows: the section's, the
+	// definitions', then this one.
+	if len(selector.opts) < 3 {
+		t.Fatalf("the subagent rows page never opened: %v", selector.labels)
+	}
+	rows := pageFields(selector.items[2])
+	var removeAction FooterAction
+	for _, action := range selector.opts[2].FooterActions {
+		if action.Kind == FooterActionRemove {
+			removeAction = action
+		}
+	}
+	if removeAction.RowActive == nil {
+		t.Fatalf("the rows page carries no removal gate: %+v", selector.opts[2].FooterActions)
+	}
+	for _, tc := range []struct {
+		label string
+		want  bool
+	}{
+		{"db-migrator", true},
+		{"explore", false},
+		{"general-purpose", false},
+		{"plan-reviewer", false},
+	} {
+		idx := slices.Index(rowLabels(rows), tc.label)
+		if idx < 0 {
+			t.Fatalf("%s is not a row: %v", tc.label, rowLabels(rows))
+		}
+		if got := removeAction.RowActive(idx); got != tc.want {
+			t.Errorf("%s: removable = %v, want %v", tc.label, got, tc.want)
+		}
+	}
+}
+
+// The subagent page creates its entry with the same one-form shape the agent
+// create has (plan 352, owner 2026-11-22): `a` draws every field the saved page
+// draws with nothing written, each row is an ordinary edit held in the section
+// document, and one save lands the whole entry. Esc leaves nothing behind, a
+// refusal keeps every value and the form whole.
+func TestConfigPanelCreatesASubagentEntry(t *testing.T) {
+	const storedMain = `{"definitions":{"main":{"primary":true}}}`
+	addRow := richStep{label: configAddRowLabel, ok: true}
+	save := richStep{label: configCreateSaveLabel, ok: true}
+	openForm := func(stored string) []richStep {
+		return agentSubagentsSteps([]richStep{addRow})
+	}
+	// The create form is the only page carrying the subagent template's own
+	// "Allow continuation" row: an agent's saved page draws neither it nor the
+	// tool policy.
+	formPage := func(t *testing.T, selector *scriptedSelector) []SelectItem {
+		t.Helper()
+		for i := len(selector.richItems) - 1; i >= 0; i-- {
+			if slices.Contains(rowLabels(selector.richItems[i]), "Allow continuation") {
+				return pageFields(selector.richItems[i])
+			}
+		}
+		t.Fatalf("the create form never drew a whole subagent: %v", selector.richLabels)
+		return nil
+	}
+
+	t.Run("the form draws every field and writes nothing", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, append(openForm(storedMain), richStep{ok: false}), nil, "agents")
+
+		page := formPage(t, selector)
+		for _, want := range []string{"Name", "Model", "Thinking level", "System prompt", "Description", "Tool access", "Allowed tools", "Allow continuation"} {
+			if !slices.Contains(rowLabels(page), want) {
+				t.Errorf("the form is missing %q: %v", want, rowLabels(page))
+			}
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("opening the form must write nothing, got %+v", session.writes)
+		}
+	})
+
+	t.Run("one save lands the entry and the list shows it", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector,
+			append(openForm(storedMain),
+				richStep{label: "Name", ok: true},
+				richStep{label: "System prompt", ok: true},
+				save,
+				richStep{ok: false},
+			),
+			[]selectorInput{{value: "repo-scout", ok: true}, {value: "You scout repositories.", ok: true}}, "agents")
+
+		if len(session.writes) != 1 {
+			t.Fatalf("expected exactly one write, got %d: %+v", len(session.writes), session.writes)
+		}
+		entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+		if len(entries) != 1 || entries[0]["name"] != "repo-scout" || entries[0]["system_prompt"] != "You scout repositories." {
+			t.Fatalf("saved subagents = %+v, want the one entry", entries)
+		}
+		// The rows above redraw from the document the submit returned, so the
+		// new entry is a row the moment the form closes.
+		rows := lastSubagentRowsPage(t, selector)
+		if !slices.Contains(rowLabels(rows), "repo-scout") {
+			t.Fatalf("the list lost the entry it just wrote: %v", rowLabels(rows))
+		}
+		// A success says nothing (the panel's long-standing rule for /config).
+		if label := selector.richLabels[len(selector.richItems)-1]; label != "" {
+			t.Fatalf("the list came back carrying %q, want no announcement", label)
+		}
+	})
+
+	t.Run("the footer's save lands it too", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		runActionConfigPanel(t, session, selector,
+			[]richStep{{label: "Subagents", ok: true}, {ok: false}},
+			[]actionStep{
+				{label: "Agent definitions", ok: true},
+				{label: "main", ok: true},
+				{action: FooterActionAdd, ok: true},
+				{label: "Name", ok: true},
+				{label: "System prompt", ok: true},
+				{action: FooterActionSave, ok: true},
+				{ok: false},
+			},
+			[]inputActionStep{{value: "repo-scout", ok: true}, {value: "You scout repositories.", ok: true}}, "agents")
+
+		if len(session.writes) != 1 {
+			t.Fatalf("expected exactly one write, got %d: %+v", len(session.writes), session.writes)
+		}
+		entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+		if len(entries) != 1 || entries[0]["name"] != "repo-scout" {
+			t.Fatalf("saved subagents = %+v, want the one entry", entries)
+		}
+		// The form's footer offers the submit under its own key.
+		found := false
+		for _, opts := range selector.opts {
+			for _, action := range opts.FooterActions {
+				if action.Kind == FooterActionSave && action.Label == configCreateSaveLabel && action.Key == configCreateSaveKey {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("the create form's footer must carry %s %s: %+v", configCreateSaveKey, configCreateSaveLabel, selector.opts)
+		}
+	})
+
+	t.Run("a built-in's name is refused and the form stays whole", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector,
+			append(openForm(storedMain),
+				richStep{label: "Name", ok: true},
+				richStep{ok: false},
+			),
+			[]selectorInput{{value: "explore", ok: true}}, "agents")
+
+		if len(session.writes) != 0 {
+			t.Fatalf("nothing here writes, got %+v", session.writes)
+		}
+		want := "Those names are the 6 built-in subagents. Choose a different name."
+		if !strings.Contains(pageLabels(selector), want) {
+			t.Fatalf("the refusal must reach the page as %q: %s", want, pageLabels(selector))
+		}
+		// The name never reached the draft entry, so the rows it filters are
+		// all still there — the form did not collapse under the refusal.
+		page := formPage(t, selector)
+		for _, still := range []string{"Name", "System prompt", "Tool access", "Allowed tools"} {
+			if !slices.Contains(rowLabels(page), still) {
+				t.Fatalf("the refused form lost %q: %v", still, rowLabels(page))
+			}
+		}
+		if row, _ := findRowLoose(page, "Name"); row.Value != "explore" {
+			t.Fatalf("the refused form lost what was typed: %+v", row)
+		}
+	})
+
+	t.Run("the other three rules answer with their own sentence", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			value string
+			want  string
+		}{
+			{name: "empty", value: "", want: "A name is required."},
+			{name: "not lower-case", value: "Repo_Scout", want: "Use a lowercase name with letters, numbers and hyphens."},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				session := newConfigPanelSession(map[string]string{"agents": storedMain})
+				selector := &scriptedSelector{}
+				runConfigPanel(t, session, selector,
+					append(openForm(storedMain),
+						richStep{label: "Name", ok: true},
+						richStep{ok: false},
+					),
+					[]selectorInput{{value: tc.value, ok: true}}, "agents")
+				if !strings.Contains(pageLabels(selector), tc.want) {
+					t.Fatalf("want %q on the page: %s", tc.want, pageLabels(selector))
+				}
+				if len(session.writes) != 0 {
+					t.Fatalf("nothing here writes, got %+v", session.writes)
+				}
+			})
+		}
+
+		// A sibling entry already carries the name.
+		session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"subagents":[
+			{"name":"repo-scout","system_prompt":"p"}
+		]}}}`})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector,
+			append(openForm(storedMain),
+				richStep{label: "Name", ok: true},
+				richStep{ok: false},
+			),
+			[]selectorInput{{value: "repo-scout", ok: true}}, "agents")
+		if want := "That name already exists. Choose a different one."; !strings.Contains(pageLabels(selector), want) {
+			t.Fatalf("want %q on the page: %s", want, pageLabels(selector))
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("nothing here writes, got %+v", session.writes)
+		}
+	})
+
+	t.Run("the store's refusal keeps the form and every value", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		session.writeErr = errors.New("agents.definitions.main.subagents[0]: system_prompt required")
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector,
+			append(openForm(storedMain),
+				richStep{label: "Name", ok: true},
+				save,
+				richStep{ok: false},
+			),
+			[]selectorInput{{value: "repo-scout", ok: true}}, "agents")
+
+		if want := "system_prompt required"; !strings.Contains(pageLabels(selector), want) {
+			t.Fatalf("the loader's own words must reach the page (%q): %s", want, pageLabels(selector))
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("the refused write must not be recorded, got %+v", session.writes)
+		}
+		page := formPage(t, selector)
+		if row, _ := findRowLoose(page, "Name"); row.Value != "repo-scout" {
+			t.Fatalf("the refused form lost its name: %+v", row)
+		}
+	})
+
+	t.Run("Esc discards, and the next edit still writes", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"subagents":[
+			{"name":"db-migrator","description":"d","system_prompt":"p"}
+		]}}}`})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector,
+			agentSubagentsSteps([]richStep{
+				addRow,
+				{label: "Name", ok: true},
+				{ok: false},
+				{label: "db-migrator", ok: true},
+				{label: "Description", ok: true},
+			}),
+			[]selectorInput{{value: "note-taker", ok: true}, {value: "Runs the migrations.", ok: true}}, "agents")
+
+		if len(session.writes) != 1 {
+			t.Fatalf("expected the later edit to write once, got %d: %+v", len(session.writes), session.writes)
+		}
+		entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+		if len(entries) != 1 || entries[0]["name"] != "db-migrator" {
+			t.Fatalf("saved subagents = %+v, want the discarded draft absent", entries)
+		}
+		if entries[0]["description"] != "Runs the migrations." {
+			t.Fatalf("the later edit did not land: %+v", entries[0])
+		}
+	})
 }
 
 // The unified create is one form, and it writes once (owner 2026-11-22): `a`
@@ -3862,9 +4342,9 @@ func TestConfigPanelEffortPickerOnASubagentEntry(t *testing.T) {
 	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
-		// A per-agent entry is named by its place in the list, not by the type
-		// it overrides, and its page is the template's fixed fields (plan 329).
-		{label: configRowLabel("", 0, true), ok: true},
+		// A per-agent entry is named by its subagent name (plan 352), and its
+		// page is the pin's two rows.
+		{label: "explore", ok: true},
 		{label: "Thinking level", ok: true},
 		{label: "xHigh", ok: true},
 		{label: configUpRowLabel, ok: true},
@@ -4424,57 +4904,36 @@ func TestConfigPanelNestedTemplateExploreTypePage(t *testing.T) {
 	}
 }
 
-// A system-name subagent entry opens read-only: every row carries the System
-// status and the verdict in place of its hint, opening any of them is
-// refused with the prototype's sentence, and nothing is written (plan 329
-// D3, prototype html:128).
-func TestConfigPanelSystemSubagentReadonly(t *testing.T) {
+// A stored system pin's page is the model and the level, both writable, and no
+// row carries a status (plan 352, 裁决 3): the entry is this agent's pin, and
+// the "Agent"/"Global" words said nothing about it. Opening a field writes
+// through the same one-write path every row uses.
+func TestConfigPanelSystemSubagentPinEditsInPlace(t *testing.T) {
+	useSetupCatalogWith(t, configEffortCatalog)
 	session := newConfigPanelSession(map[string]string{"agents": `{
-		"definitions":{"main":{"primary":true,"subagents":[{"name":"goal-evaluator","model":"llm-1","description":"no"}]}}
+		"definitions":{"main":{"primary":true,"subagents":[{"name":"goal-evaluator","model":"llm-grok","reasoning_effort":"low"}]}}
 	}`})
+	session.snapshot.Models = configEffortModels()
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
-		{label: "#1", ok: true},
-		{label: "Enabled", ok: true},
-		{label: "Model", ok: true},
-		{ok: false},
+		{label: "goal-evaluator", ok: true},
+		{label: "Thinking level", ok: true},
+		{label: "xHigh", ok: true},
 		{ok: false},
 	}), nil, "agents")
 
-	var page []SelectItem
-	for _, items := range selector.richItems {
-		if slices.Contains(rowLabels(items), "Type name") && slices.Contains(rowLabels(items), "Enabled") {
-			page = items
+	page := pageFields(selector.richItems[subagentRowsPageAt(t, selector)+1])
+	if got, want := rowLabels(page), []string{"Model", "Thinking level"}; !slices.Equal(got, want) {
+		t.Fatalf("the system pin's page = %v, want %v", got, want)
+	}
+	for _, row := range page {
+		if row.Status != "" {
+			t.Errorf("%s carries the status %q, want none", row.Label, row.Status)
 		}
 	}
-	if page == nil {
-		t.Fatalf("the system entry's page never opened: %v", selector.richLabels)
-	}
-	// customOnly hides the fields a system entry cannot carry, and every
-	// row left is read-only with the System status.
-	for _, item := range page {
-		if item.Label == configUpRowLabel {
-			continue
-		}
-		if item.Status != configSystemStatus {
-			t.Errorf("%s's status = %q, want %q", item.Label, item.Status, configSystemStatus)
-		}
-		// The field's help belongs to its editor, never to the row (plan
-		// 350): a read-only page says what it is with its status alone.
-		if item.Description != "" {
-			t.Errorf("%s's row carries %q; a row names the setting and its value alone", item.Label, item.Description)
-		}
-	}
-	for _, gone := range []string{"Description", "Tool access", "Allowed tools", "Allow continuation"} {
-		if slices.Contains(rowLabels(page), gone) {
-			t.Errorf("the system entry's page still lists %q", gone)
-		}
-	}
-	if !strings.Contains(pageLabels(selector), configSystemSubagentNotice) {
-		t.Fatalf("opening a row must state the refusal: %s", pageLabels(selector))
-	}
-	if len(session.writes) != 0 {
-		t.Fatalf("a read-only page must write nothing, got %+v", session.writes)
+	entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+	if len(entries) != 1 || entries[0]["reasoning_effort"] != "xhigh" {
+		t.Fatalf("saved subagents = %+v, want the picked level on the pin", entries)
 	}
 }
 
@@ -4539,7 +4998,7 @@ func TestConfigPanelHookShowFor(t *testing.T) {
 
 // A built-in override keeps to what the loader lets it hold: the custom-only
 // fields are hidden on it, and shown on a custom entry beside it (plan 329
-// D3, customOnly).
+// D3, customOnly, and the six built-in types are the same page, plan 352).
 func TestConfigPanelCustomOnlyHidden(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"agents": `{
 		"definitions":{"main":{"primary":true,"subagents":[
@@ -4549,32 +5008,28 @@ func TestConfigPanelCustomOnlyHidden(t *testing.T) {
 	}`})
 	selector := &scriptedSelector{}
 	runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
-		{label: "#1", ok: true},
+		{label: "explore", ok: true},
 		{ok: false},
-		{label: "#2", ok: true},
+		{label: "db-migrator", ok: true},
 		{ok: false},
 	}), nil, "agents")
 
-	pages := map[int][]SelectItem{}
-	for _, items := range selector.richItems {
-		if slices.Contains(rowLabels(items), "Type name") {
-			if slices.Contains(rowLabels(items), "Tool access") {
-				pages[2] = items
-			} else {
-				pages[1] = items
-			}
-		}
-	}
-	if pages[1] == nil || pages[2] == nil {
-		t.Fatalf("both entries' pages must open: %v", selector.richLabels)
+	// The built-in's page is the pin and nothing else, so the custom-only
+	// fields are absent from it by construction; the custom entry's page is
+	// the fixed-field template, where they all arrive.
+	base := subagentRowsPageAt(t, selector)
+	builtin := pageFields(selector.richItems[base+1])
+	custom := pageFields(selector.richItems[base+3])
+	if got, want := rowLabels(builtin), []string{"Model", "Thinking level"}; !slices.Equal(got, want) {
+		t.Fatalf("the built-in's page = %v, want %v", got, want)
 	}
 	for _, gone := range []string{"Description", "Tool access", "Allowed tools", "Allow continuation"} {
-		if slices.Contains(rowLabels(pages[1]), gone) {
-			t.Errorf("the built-in override's page still lists %q", gone)
+		if !slices.Contains(rowLabels(custom), gone) {
+			t.Errorf("the custom entry's page is missing %q: %v", gone, rowLabels(custom))
 		}
-		if !slices.Contains(rowLabels(pages[2]), gone) {
-			t.Errorf("the custom entry's page is missing %q", gone)
-		}
+	}
+	if !slices.Contains(rowLabels(custom), "System prompt") {
+		t.Errorf("the custom entry's page is missing its prompt: %v", rowLabels(custom))
 	}
 }
 

@@ -953,6 +953,63 @@ func TestPlanReviewModelOptionsMarkNothingWithoutAConfiguredRow(t *testing.T) {
 	require.Empty(t, PlanReviewModelOptions(&appcfg.Root{}, "main", "", "", ""))
 }
 
+// planReviewerConfigWithAgentPin is planReviewerConfig with one primary agent
+// that pinned the reviewer with a subagent entry of its own.
+func planReviewerConfigWithAgentPin(t *testing.T, globalRef, agentName string, entry appcfg.SubagentConfig) *appcfg.Root {
+	t.Helper()
+	cfg := planReviewerConfig(t, globalRef)
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
+		agentName: {Primary: true, Subagents: []appcfg.SubagentConfig{entry}},
+	}
+	return cfg
+}
+
+// The reviewer runs per agent, so an agent's own pin is the reviewer that agent
+// gets (plan 352): it is the offer the picker opens on, and its level is what
+// the second screen opens on — the level belongs to the same choice the row
+// does, so marking the row without it would show a level the run never uses.
+func TestPlanReviewModelOptionsPreferTheAgentsOwnPin(t *testing.T) {
+	cfg := planReviewerConfigWithAgentPin(t, "", "scout", appcfg.SubagentConfig{
+		Name: "plan-reviewer", Model: "row-glm", ReasoningEffort: "high",
+	})
+	options := PlanReviewModelOptions(cfg, "scout", "row-gpt", "openai", "gpt-5.1")
+	require.Len(t, options, 3)
+	require.Equal(t, []string{"row-glm"}, preferredOptionIDs(options))
+	for _, option := range options {
+		if option.ID == "row-glm" {
+			require.Equal(t, "high", option.DefaultEffort, "the pin's level is what the second screen opens on")
+		}
+	}
+
+	// The install-wide row is the fallback, and its level is now read too: it
+	// was a setting nothing consumed until the pin chain claimed it (plan 352).
+	global := planReviewerConfig(t, "row-ds")
+	global.Agents.PlanReviewer.ReasoningEffort = "low"
+	options = PlanReviewModelOptions(global, "scout", "row-gpt", "openai", "gpt-5.1")
+	require.Equal(t, []string{"row-ds"}, preferredOptionIDs(options))
+	for _, option := range options {
+		if option.ID == "row-ds" {
+			require.Equal(t, "low", option.DefaultEffort)
+		}
+	}
+
+	// A pin nothing resolves falls back to the install-wide row, and a pin with
+	// no model of its own does the same: neither may move the cursor off it.
+	for _, entry := range []appcfg.SubagentConfig{
+		{Name: "plan-reviewer", Model: "row-gone"},
+		{Name: "plan-reviewer", ReasoningEffort: "high"},
+	} {
+		cfg := planReviewerConfigWithAgentPin(t, "row-glm", "scout", entry)
+		require.Equal(t, []string{"row-glm"}, preferredOptionIDs(PlanReviewModelOptions(cfg, "scout", "row-gpt", "openai", "gpt-5.1")),
+			"entry %#v must leave the install-wide row where it was", entry)
+	}
+
+	// Nothing configured anywhere still marks nothing, and marks it without
+	// panicking on the definition lookup.
+	cfg = planReviewerConfigWithAgentPin(t, "", "scout", appcfg.SubagentConfig{Name: "plan-reviewer"})
+	require.Empty(t, preferredOptionIDs(PlanReviewModelOptions(cfg, "scout", "row-gpt", "openai", "gpt-5.1")))
+}
+
 // The row the picker opens on is the row the review records, so a decided
 // approval replays the reviewer it actually ran on — the options list, the
 // review request it produces and the started event's record are one row, not

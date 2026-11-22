@@ -54,6 +54,13 @@ type SubagentCatalog struct {
 	// and ToolPolicy read as "this agent configures that type", and the goal
 	// check must stay undispatchable from a primary agent.
 	goalEvaluator appcfg.SubagentConfig
+	// systemPins are this agent's pins on the types the system dispatches
+	// itself (plan-reviewer, goal-evaluator): the model the run uses and the
+	// level it thinks at, nothing else (owner 2026-11-22). They are kept out of
+	// entries for the same reason goalEvaluator is — the system starts those
+	// types, so a pin must never make one dispatchable — and Model reads them
+	// in front of the global row.
+	systemPins map[string]appcfg.SubagentConfig
 }
 
 // SubagentCatalogFor reads one primary agent's subagent configuration. An
@@ -70,7 +77,7 @@ type SubagentCatalog struct {
 // (pkg/config's ValidateAgentSubagents draws the same line), and the agent's own
 // definition wins at dispatch the way an override of a built-in does.
 func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
-	catalog := SubagentCatalog{cfg: cfg, agentName: agentName, entries: map[string]appcfg.SubagentConfig{}}
+	catalog := SubagentCatalog{cfg: cfg, agentName: agentName, entries: map[string]appcfg.SubagentConfig{}, systemPins: map[string]appcfg.SubagentConfig{}}
 	if cfg == nil {
 		return catalog
 	}
@@ -86,6 +93,14 @@ func SubagentCatalogFor(cfg *appcfg.Root, agentName string) SubagentCatalog {
 	enabledShared := make(map[string]struct{}, len(shared))
 	for _, entry := range def.Subagents {
 		entry.Name = subagentKey(entry.Name)
+		// A system type's entry is a pin, not a configuration of that type:
+		// the system starts it, so the entry only says which model it runs on.
+		// It has its own map because a pin here is exactly what an entry in
+		// entries must not be — something ResolvePublic would dispatch.
+		if isSystemSubagentName(entry.Name) {
+			catalog.systemPins[entry.Name] = entry
+			continue
+		}
 		if slices.Contains(shared, entry.Name) && !appcfg.SubagentEntryCarriesBody(entry) {
 			// A reference entry is the enable marker, never a definition.
 			if entry.Enabled != nil && *entry.Enabled {
@@ -212,10 +227,26 @@ func (c SubagentCatalog) Prompt(name string) (string, bool) {
 // The /goal evaluator is the one type whose row does not come from this agent's
 // entries but from the settings page's global field (plan 299): its model is
 // the same for every primary agent, and no primary agent configures it.
+//
+// A system type's pin answers before that global row (plan 352), and only once
+// it resolves: a pin naming a model this agent cannot build is a pin that
+// answers nothing, and the row behind it still has the last word — a dangling
+// pin must not take the run's model away from it.
 func (c SubagentCatalog) Model(name string) (modelID, provider, model, effort string, ok bool) {
-	entry, found := c.entries[subagentKey(name)]
-	if !found && subagentKey(name) == GoalEvaluatorSubagentType {
-		entry, found = c.goalEvaluator, true
+	key := subagentKey(name)
+	entry, found := c.entries[key]
+	if !found {
+		if pin, pinned := c.systemPins[key]; pinned && strings.TrimSpace(pin.Model) != "" {
+			if resolved, resolvedOK := appcfg.ResolveModelRef(c.cfg, c.agentName, strings.TrimSpace(pin.Model)); resolvedOK {
+				return strings.TrimSpace(resolved.ID),
+					strings.TrimSpace(resolved.Provider),
+					strings.TrimSpace(resolved.Model),
+					strings.TrimSpace(pin.ReasoningEffort), true
+			}
+		}
+		if key == GoalEvaluatorSubagentType {
+			entry, found = c.goalEvaluator, true
+		}
 	}
 	if !found {
 		return "", "", "", "", false
@@ -358,6 +389,18 @@ func subagentKey(name string) string {
 func isPublicSubagentName(name string) bool {
 	for _, public := range agent.PublicSubagentNames {
 		if subagentKey(name) == public {
+			return true
+		}
+	}
+	return false
+}
+
+// isSystemSubagentName reports whether name is a type the system dispatches
+// itself. Such a type is never in the set the model may choose from; an agent
+// entry of that name only pins the model it runs on.
+func isSystemSubagentName(name string) bool {
+	for _, system := range agent.SystemSubagentNames {
+		if subagentKey(name) == system {
 			return true
 		}
 	}

@@ -1308,7 +1308,7 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvi
 	if len(entries) == 0 {
 		return nil
 	}
-	preferred := preferredPlanReviewerRow(cfg)
+	preferred, preferredEffort := preferredPlanReviewerRow(cfg, agentName)
 	seen := make(map[string]struct{}, len(entries))
 	out := make([]PlanReviewModelOption, 0, len(entries))
 	for _, entry := range entries {
@@ -1339,13 +1339,22 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvi
 			current = strings.EqualFold(provider, strings.TrimSpace(currentProvider)) &&
 				strings.EqualFold(model, strings.TrimSpace(currentModel))
 		}
+		preferredRow := preferred != "" && strings.EqualFold(strings.TrimSpace(entry.ID), preferred)
+		// The level the second screen opens on: the row's own default, unless
+		// the configuration named this very row and a level with it — the
+		// reviewer's configured level is the one its run thinks at, so it wins
+		// over the row's default (plan 352).
+		effort := strings.TrimSpace(entry.ConfiguredEffort)
+		if preferredRow && preferredEffort != "" {
+			effort = preferredEffort
+		}
 		out = append(out, PlanReviewModelOption{
 			ID:           strings.TrimSpace(entry.ID),
 			Provider:     provider,
 			Model:        model,
 			ModelName:    llm.ListingDisplayName(provider, model),
 			Current:      current,
-			Preferred:    preferred != "" && strings.EqualFold(strings.TrimSpace(entry.ID), preferred),
+			Preferred:    preferredRow,
 			Endpoint:     ModelEndpointLabel(entry.BaseURL, entry.APIPath, entry.URLVerbatim),
 			EndpointTail: endpointTail(entry),
 			// The offer carries the row's thinking levels so picking a model
@@ -1353,26 +1362,52 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvi
 			// the one order every picker draws, and the one the row is
 			// configured with (what that screen opens on).
 			Efforts:       OrderedEfforts(entry.ReasoningEfforts),
-			DefaultEffort: strings.TrimSpace(entry.ConfiguredEffort),
+			DefaultEffort: effort,
 		})
 	}
 	return out
 }
 
-// preferredPlanReviewerRow is the row id agents.plan_reviewer names, resolved
-// the way the reviewer resolves a reference itself: a row id, or a legacy
+// planReviewerSubagentName is the subagent type the exit-plan approval hands a
+// plan to. pkg/run exports it as PlanReviewSubagentType and is not a dependency
+// of this package, so the name is spelled here too.
+const planReviewerSubagentName = "plan-reviewer"
+
+// preferredPlanReviewerRow is the row id the reviewer setting names, resolved// the way the reviewer resolves a reference itself: a row id, or a legacy
 // "provider/model" label split on its first slash. Empty when the setting is
 // empty or names nothing the table holds — a dangling reference behaves as
 // unset (plan 315), and an unset one must not move the cursor.
-func preferredPlanReviewerRow(cfg *appcfg.Root) string {
+//
+// The agent's own pin comes first (plan 352): the reviewer runs per agent, so
+// an agent whose subagents entry of that name names a model means that model.
+// The install-wide agents.plan_reviewer row is the fallback — the shape a fresh
+// install has, and the one every agent without a pin of its own reads.
+//
+// The level comes back with the row because it is part of the same choice: a
+// pin sets the model and the effort together, and the install-wide row has
+// carried a reasoning_effort since plan 311 that nothing read until here. A
+// level named without a row to run on marks nothing either way.
+func preferredPlanReviewerRow(cfg *appcfg.Root, agentName string) (rowID, effort string) {
 	if cfg == nil {
-		return ""
+		return "", ""
 	}
-	row, ok := appcfg.ResolveModelRef(cfg, "main", strings.TrimSpace(cfg.Agents.PlanReviewer.Model))
+	agentName = strings.ToLower(strings.TrimSpace(agentName))
+	if def, ok := cfg.Agents.Definitions[agentName]; ok {
+		for _, entry := range def.Subagents {
+			if !strings.EqualFold(strings.TrimSpace(entry.Name), planReviewerSubagentName) {
+				continue
+			}
+			if row, ok := appcfg.ResolveModelRef(cfg, agentName, strings.TrimSpace(entry.Model)); ok {
+				return strings.TrimSpace(row.ID), strings.TrimSpace(entry.ReasoningEffort)
+			}
+			break
+		}
+	}
+	row, ok := appcfg.ResolveModelRef(cfg, agentName, strings.TrimSpace(cfg.Agents.PlanReviewer.Model))
 	if !ok {
-		return ""
+		return "", ""
 	}
-	return strings.TrimSpace(row.ID)
+	return strings.TrimSpace(row.ID), strings.TrimSpace(cfg.Agents.PlanReviewer.ReasoningEffort)
 }
 
 // PlanReviewLog is where a conversation's plan-review records are read from:

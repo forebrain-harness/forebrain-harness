@@ -624,9 +624,7 @@ func refOfRow(doc any, path ...string) string {
 // types under subagent_models, the plan reviewer under plan_reviewer, and the
 // goal evaluator under goal_evaluator.
 func (p *configPanel) editBuiltinSubagents(doc any, field configField) (any, string) {
-	names := make([]string, 0, len(agent.PublicSubagentNames)+len(agent.SystemSubagentNames))
-	names = append(names, agent.PublicSubagentNames...)
-	names = append(names, agent.SystemSubagentNames...)
+	names := subagentTypeNames()
 	tailRows := p.configActionSelector() == nil
 	for {
 		items := p.builtinSubagentItems(doc)
@@ -671,15 +669,29 @@ func (p *configPanel) editBuiltinSubagents(doc any, field configField) (any, str
 	}
 }
 
+// subagentTypeNames is the six built-in subagent types in the prototype's
+// order: the four the model may dispatch, then the two the system dispatches.
+// It is the one source both pages that list them read — the install-wide
+// Built-in subagents page and an agent's own Subagents page (plan 352) — so a
+// new built-in joins both by being added to pkg/agent.
+func subagentTypeNames() []string {
+	names := make([]string, 0, len(agent.PublicSubagentNames)+len(agent.SystemSubagentNames))
+	names = append(names, agent.PublicSubagentNames...)
+	return append(names, agent.SystemSubagentNames...)
+}
+
+// isSubagentTypeName reports whether name is one of the six built-in types.
+func isSubagentTypeName(name string) bool {
+	return configTemplateNameIsBuiltinOrSystem(strings.ToLower(strings.TrimSpace(name)))
+}
+
 // builtinSubagentItems is the entry page's six rows (P4): one per built-in
 // type, in the prototype's order — the four the model may dispatch, then the
 // two the system dispatches — each naming the model row its pin stores and
 // the thinking level in force, with the prototype's help sentence beside the
 // name.
 func (p *configPanel) builtinSubagentItems(doc any) []SelectItem {
-	names := make([]string, 0, len(agent.PublicSubagentNames)+len(agent.SystemSubagentNames))
-	names = append(names, agent.PublicSubagentNames...)
-	names = append(names, agent.SystemSubagentNames...)
+	names := subagentTypeNames()
 	items := make([]SelectItem, 0, len(names))
 	for _, name := range names {
 		description, value, status := p.configTypePinRow(doc, configField{Hint: ""}, configBuiltinRowPath(name))
@@ -1098,15 +1110,18 @@ func (p *configPanel) editPath(doc any, rowPath []string, field configField, cur
 // configRoleHelp is a template field's help sentence on the row it is opened
 // on. The system prompt is the one field both roles carry, and the prototype
 // gives each its own sentence (helpPrimary/helpSubagent): a primary agent's is
-// appended to the built-in prompt, a subagent's replaces it whole.
-func configRoleHelp(field configField, settings map[string]any) string {
+// appended to the built-in prompt, a subagent's replaces it whole. A subagent
+// entry is the subagent role whichever page opened it — it has no primary flag
+// to read, and an entry's prompt is the whole prompt its run starts on — so the
+// template answers that question before the definition's role does (plan 352).
+func configRoleHelp(field configField, template string, settings map[string]any) string {
 	if field.Path != "system_prompt" {
 		return configFieldHint(field)
 	}
-	if configAgentRolePrimary(settings) {
-		return "Appended to the end of the built-in system prompt. It never replaces it."
+	if template == configTemplateSubagent || !configAgentRolePrimary(settings) {
+		return "Replaces the built-in system prompt whole."
 	}
-	return "Replaces the built-in system prompt whole."
+	return "Appended to the end of the built-in system prompt. It never replaces it."
 }
 
 // configAbsolutePath reports whether a path is one the loader takes whole: a
@@ -1350,6 +1365,15 @@ func (p *configPanel) editModel(doc any, path []string, field configField, cur a
 	if !res.OK || res.Row < 0 || res.Row >= len(items) {
 		return doc, ""
 	}
+	// The empty option on a reference the document does not hold has nothing
+	// to unset: a row filled in from a list rather than from the document — a
+	// built-in subagent type with no pin yet (plan 352) — must come out of its
+	// page exactly as it went in, rather than writing an empty key for it.
+	if picked := ids[res.Row]; picked == "" {
+		if _, exists := configLookupValue(doc, path); !exists {
+			return doc, ""
+		}
+	}
 	return p.assignModel(doc, path, field, stored, ids[res.Row])
 }
 
@@ -1518,8 +1542,11 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 		list := configContainerIsList(field, container)
 		// An agent's subagent list carries a row for every shared subagent, the
 		// ones it has not enabled included: this page is where they are switched
-		// on (plan 314). Those rows have no entry in the document yet.
+		// on (plan 314). Those rows have no entry in the document yet, and
+		// neither have the six built-in types: each is a place to pin a model
+		// and a level (plan 352).
 		if list && agentSubagentsPath(path) {
+			keys = append(keys, missingSubagentTypeKeys(container)...)
 			keys = append(keys, missingSharedSubagentKeys(doc, container)...)
 		}
 		label := rowsNotice(keys, notice)
@@ -1589,10 +1616,13 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 // agent definition, an MCP server, a subagent — as much as the scalar rows a
 // template opens straight into an editor (plan 350, the prototype's rowField
 // marks every collection row entry). A shared subagent's row is its switch,
-// not an entry: removing the definition is not this agent's to do.
+// not an entry: removing the definition is not this agent's to do. Neither is
+// a row filled in from the type list rather than from the document — a built-in
+// type with no entry, and a shared definition this agent has not enabled —
+// because there is nothing stored to remove (plan 352).
 func (p *configPanel) configRowIsEntry(doc any, path []string, key string) bool {
-	value, _ := configLookupValue(doc, configJoinPath(path, key))
-	if agentSubagentsPath(path) && sharedRowName(doc, key, value) != "" {
+	value, exists := configLookupValue(doc, configJoinPath(path, key))
+	if agentSubagentsPath(path) && (sharedRowName(doc, key, value) != "" || !exists) {
 		return false
 	}
 	return true
@@ -1611,10 +1641,15 @@ func (p *configPanel) rowItems(doc any, path []string, container any, keys []str
 	for i, key := range keys {
 		value, exists := configLookupValue(container, []string{key})
 		if !exists && list {
-			// A shared subagent this agent has not enabled has no entry: the row
-			// stands for the placeholder that says so, and nothing is written
-			// until the switch is turned on (plan 314).
-			if isSharedSubagentName(doc, key) {
+			// A row with no entry stands for what turning it into one would
+			// write: a built-in type reads as its own name and nothing else —
+			// the pin it is a place for is unset (plan 352) — and a shared
+			// subagent this agent has not enabled is the switched-off
+			// reference (plan 314). Neither is written until the user acts.
+			switch {
+			case isSubagentTypeName(key):
+				value = map[string]any{"name": strings.ToLower(strings.TrimSpace(key))}
+			case isSharedSubagentName(doc, key):
 				value = map[string]any{"name": strings.ToLower(strings.TrimSpace(key)), "enabled": false}
 			}
 		}
@@ -1677,14 +1712,18 @@ func configRowLabel(key string, index int, list bool) string {
 	return key
 }
 
-// configRowLabelAt names one stored row of a page. On an agent's subagent list a
-// shared subagent is named by the name it carries: that is its identity in the
-// definitions map, and a list of "#1, #2" would say nothing about which subagent
-// is which (plan 314).
+// configRowLabelAt names one stored row of a page. On an agent's subagent list
+// every row is named by its entry — a shared definition by the name it
+// carries (its identity in the definitions map, plan 314), a built-in type by
+// its own, a custom subagent by the name it was given — because a list of
+// "#1, #2" would say nothing about which subagent is which (plan 352, owner
+// 2026-11-22). A row whose entry has no name yet keeps its place.
 func (p *configPanel) configRowLabelAt(doc any, path []string, key string, index int, list bool, value any) string {
 	if agentSubagentsPath(path) {
-		if name := sharedRowName(doc, key, value); name != "" {
-			return name
+		if entry, ok := value.(map[string]any); ok {
+			if name := strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))); name != "" {
+				return name
+			}
 		}
 	}
 	return configRowLabel(key, index, list)
@@ -1767,10 +1806,6 @@ const (
 	// beside it names none: the level is the model's, and the loader refuses a
 	// pair whose level names no model at all.
 	configEffortNeedsModelNotice = "Choose a model before setting its thinking level."
-	// configSystemSubagentNotice is the prototype's refusal, word for word
-	// (plan 313, scene system-stray-entry): the panel says why before the
-	// loader does, and the loader still judges the save on its own.
-	configSystemSubagentNotice = "Dispatched by the system. Not configurable per agent; remove this entry."
 	// The secret column's two words (plan 328 D3, prototype html:118): a set
 	// value is hidden and an unset one says so.
 	configSecretHiddenStatus = "[hidden]"
@@ -1797,11 +1832,6 @@ const (
 	// own runs on, in the prototype's words (plan 313; plan 324 D7 keeps the
 	// sentence and drops the trailing word).
 	configFollowConversation = "Follow conversation"
-	// configAgentOverridePrefix and configGlobalDefaultPrefix name where a
-	// subagent entry's model comes from. The prototype draws the same fact in a
-	// status column; the panel keeps it in the row's description.
-	configAgentOverridePrefix = "agent override: "
-	configGlobalDefaultPrefix = "global default: "
 	// The hooks section's own words (plan 321): the event a matcher list
 	// belongs to, the matcher that starts one, the action a matcher runs, and
 	// the key a matcher's actions are stored under.
@@ -1823,10 +1853,6 @@ const (
 	// template does not name: they stay listed, editable through the generic
 	// editor, and the save writes them back untouched (no data loss).
 	configAdditionalFieldsGroup = "Additional fields"
-	// configSystemStatus is the right-edge word every row of a system
-	// entry's page carries (prototype html:128): the entry is dispatched by
-	// the system, so nothing on the page is this agent's to set.
-	configSystemStatus = "System"
 	// configSharedSubagentNotice is what a read-only shared row answers when one
 	// of its definition's fields is opened: the definition is edited on the
 	// "Subagents" page, never here (plan 314).
@@ -1962,6 +1988,27 @@ func sharedRowName(doc any, key string, value any) string {
 	return ""
 }
 
+// missingSubagentTypeKeys names the built-in types one agent's list has no entry
+// for: all six are rows whether or not anything is stored, because each is a
+// place to pin a model and a level (plan 352, owner 2026-11-22). An entry of
+// that name — the pin itself — is the row, in the position it holds in the
+// list.
+func missingSubagentTypeKeys(container any) []string {
+	rows, _ := container.([]any)
+	present := make([]string, 0, len(rows))
+	for _, row := range rows {
+		entry, _ := row.(map[string]any)
+		present = append(present, strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))))
+	}
+	missing := make([]string, 0, len(agent.PublicSubagentNames)+len(agent.SystemSubagentNames))
+	for _, name := range subagentTypeNames() {
+		if !slices.Contains(present, name) {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
 // missingSharedSubagentKeys names the registry's subagents one agent's list has
 // no entry for: they are rows all the same, because a disabled shared subagent
 // is a row that says so with its switch off (owner 2026-11-16, plan 314).
@@ -1999,36 +2046,10 @@ func (p *configPanel) configRowColumns(doc any, path []string, key string, value
 	if shared := sharedRowName(doc, key, value); shared != "" {
 		return configSharedRowSummary(doc, shared), ""
 	}
-	row, ok := value.(map[string]any)
-	if !ok {
-		return "", configRowDescription(value)
-	}
-	name := strings.ToLower(strings.TrimSpace(configStringField(row, "name")))
-	if name == "" {
-		return "", configRowDescription(value)
-	}
-	if slices.Contains(agent.SystemSubagentNames, name) {
-		return configSystemSubagentNotice, ""
-	}
-	if !slices.Contains(agent.PublicSubagentNames, name) {
-		return "", configRowDescription(value)
-	}
-	// The order run.SubagentOwnModel answers with, read from the same section:
-	// this agent's entry, then the install-wide row of that type, then the
-	// conversation's model.
-	if ref := strings.TrimSpace(configStringField(row, "model")); ref != "" {
-		return configAgentOverridePrefix + ref, ""
-	}
-	sectionRoot, _ := doc.(map[string]any)
-	typeRow, _ := configLookupValue(sectionRoot, []string{configSubagentModelsKey, name})
-	typeMap, _ := typeRow.(map[string]any)
-	if typeRef := strings.TrimSpace(configStringField(typeMap, "model")); typeRef != "" {
-		effort := configStringField(typeMap, "reasoning_effort")
-		// The level reads through effortLabel (plan 327 D1): an unset
-		// install-wide level is the row's own default, not a bare Default.
-		return configGlobalDefaultPrefix + p.configModelLabel(typeRef) + " / " + configEffortSummary(effort), ""
-	}
-	return configFollowConversation, ""
+	// No other row of this list says anything here (plan 352, owner 2026-11-22):
+	// the list is names alone, and what a subagent runs on is read on the page
+	// that opens it.
+	return "", ""
 }
 
 // configModelLabel names a stored model reference the way the pickers do: the
@@ -2062,22 +2083,6 @@ func (p *configPanel) configModelRowLabel(ref string) string {
 		return ref
 	}
 	return llm.FormatProviderModelDisplay(entry.Provider, entry.Model)
-}
-
-// configSystemSubagentRow reports whether a row is one of an agent's subagent
-// entries naming a type the system dispatches. Its path is the guard's other
-// half: the same field descriptor travels into every agent definition, so
-// only the real path says which rows these are.
-func configSystemSubagentRow(path []string, value any) bool {
-	if len(path) != 3 || path[0] != configDefinitionsPath || path[2] != configSubagentsKey {
-		return false
-	}
-	row, ok := value.(map[string]any)
-	if !ok {
-		return false
-	}
-	name := strings.ToLower(strings.TrimSpace(configStringField(row, "name")))
-	return name != "" && slices.Contains(agent.SystemSubagentNames, name)
 }
 
 // configStringField reads one string field of a stored row.
@@ -2122,6 +2127,9 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 		if name := sharedRowName(doc, key, value); name != "" {
 			container, _ := configLookupValue(doc, path)
 			return p.editSharedSubagentRow(doc, path, container, name, field)
+		}
+		if name := subagentTypeNameFor(key, value); name != "" {
+			return p.editBuiltinSubagentRow(doc, path, name, field)
 		}
 	}
 	container := configIsContainer(value)
@@ -2337,9 +2345,7 @@ type configTemplateRow struct {
 // not name under an additional-fields group — opened through the generic
 // editor and preserved on save, because the write is the section's whole row
 // (no data loss). Enter opens a field's editor directly; nothing on this
-// page deletes the row (that is the footer's action, plan 326). A subagent
-// entry naming a system type renders every row read-only with the System
-// status and refuses to open any of them (prototype html:128).
+// page deletes the row (that is the footer's action, plan 326).
 func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, title string, initialNotice ...string) (any, string) {
 	notice := ""
 	if len(initialNotice) > 0 {
@@ -2353,7 +2359,7 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 			settings = map[string]any{}
 		}
 		items, rows := p.templateItems(template, configRowKey(rowPath), settings, tailRows, false)
-		idx, ok, err := p.page(p.templateNotice(template, settings, notice), configFieldKeys, items, -1)
+		idx, ok, err := p.page(notice, configFieldKeys, items, -1)
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -2365,12 +2371,6 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 		row := rows[idx]
 		if row.up {
 			return doc, ""
-		}
-		if configTemplateRowIsSystem(template, settings) {
-			// The page stays open under the verdict: it is a refusal, not a way
-			// out of the page (plan 350).
-			notice = configSystemSubagentNotice
-			continue
 		}
 		// The two fields a create decides (the prototype's keyName and
 		// createEditable): opening either on a saved definition answers with
@@ -2384,29 +2384,8 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 			doc, notice = p.openUnknownTemplateKey(doc, rowPath, row.unknown)
 			continue
 		}
-		doc, notice = p.openTemplateField(doc, rowPath, row.field)
+		doc, notice = p.openTemplateField(doc, rowPath, row.field, template)
 	}
-}
-
-// templateNotice is what a template page carries under its tab bar: the system
-// verdict when the whole page is read-only, and the last outcome. The row's own
-// title is gone with every other heading (plan 350; the rows list the user came
-// from named it, and the tab bar says where they are).
-func (p *configPanel) templateNotice(template string, settings map[string]any, notice string) string {
-	if configTemplateRowIsSystem(template, settings) {
-		return joinNotice(notice, configSystemSubagentNotice)
-	}
-	return notice
-}
-
-// configTemplateRowIsSystem reports whether the whole page renders read-only:
-// a subagent entry naming a type the system dispatches (prototype html:128).
-func configTemplateRowIsSystem(template string, settings map[string]any) bool {
-	if template != configTemplateSubagent {
-		return false
-	}
-	name := strings.ToLower(strings.TrimSpace(configStringField(settings, "name")))
-	return name != "" && slices.Contains(agent.SystemSubagentNames, name)
 }
 
 // configTemplateNameIsBuiltinOrSystem reports whether a subagent entry's name
@@ -2440,14 +2419,13 @@ func configHookActionType(settings map[string]any) string {
 // additional-fields group, then the way up when the page keeps its tail rows
 // (plan 326 D2: the Esc ladder carries it on a selector with footer
 // actions). customOnly hides the fields a built-in or system entry cannot
-// carry; showFor hides the fields another action type owns; a system entry's
-// every row carries the System status and the verdict in place of its hint.
-// creating is the create form's page: there the two fields the create decides
-// are still open, because nothing exists to lock them yet (owner 2026-11-22).
+// carry; hideOnBuiltin hides the ones a built-in's pin retires; showFor hides
+// the fields another action type owns. creating is the create form's page:
+// there the two fields the create decides are still open, because nothing
+// exists to lock them yet (owner 2026-11-22).
 func (p *configPanel) templateItems(template, key string, settings map[string]any, tailRows, creating bool) ([]SelectItem, []configTemplateRow) {
 	fields := configTemplates[template]
 	name := strings.ToLower(strings.TrimSpace(configStringField(settings, "name")))
-	system := configTemplateRowIsSystem(template, settings)
 	hookType := configHookActionType(settings)
 	rolePrimary := configAgentRolePrimary(settings)
 	known := make(map[string]bool, len(fields))
@@ -2458,9 +2436,12 @@ func (p *configPanel) templateItems(template, key string, settings map[string]an
 		if field.CustomOnly && configTemplateNameIsBuiltinOrSystem(name) {
 			continue
 		}
-		// A built-in's pin retires the prompt rewrite and the switch (P5):
-		// hidden on its entry, dropped from the stored row on load.
-		if field.HideOnBuiltin && slices.Contains(agent.PublicSubagentNames, name) {
+		// A built-in's page — one of the four the model dispatches or one of
+		// the two the system does — is a model-and-level pin and nothing more
+		// (P5, plan 352): the prompt rewrite and the switch it once carried are
+		// retired, and the row that names the type is the list's, not the
+		// page's.
+		if field.HideOnBuiltin && configTemplateNameIsBuiltinOrSystem(name) {
 			continue
 		}
 		// The unified definition renders one role's fields (P3): the flags
@@ -2481,22 +2462,16 @@ func (p *configPanel) templateItems(template, key string, settings map[string]an
 			// inside it (plan 350): a row still unnamed reads as nothing.
 			value, exists = key, key != ""
 		}
-		// A template row is a label, its value and — on a read-only page —
-		// the system verdict: the field's help belongs to its editor, never to
-		// the row (plan 350, the prototype's fields view setting help, not
-		// desc), and an unset field carries no status at all.
-		status := ""
-		if system {
-			status = configSystemStatus
-		}
+		// A template row is a label and its value: the field's help belongs to
+		// its editor, never to the row (plan 350, the prototype's fields view
+		// setting help, not desc), and no row carries a status of its own.
 		// The two fields a create decides are read-only once the definition
 		// exists: the page draws them as the prototype's locked rows. A create
 		// form has nothing to lock yet (owner 2026-11-22).
-		locked := !configTemplateRowIsSystem(template, settings) && (field.KeyName || field.CreateEditable) && key != "" && !creating
+		locked := (field.KeyName || field.CreateEditable) && key != "" && !creating
 		items = append(items, SelectItem{
 			Label:    field.Label,
 			Value:    p.configTemplateValueText(field, value, exists),
-			Status:   status,
 			Category: field.Group,
 			Locked:   locked,
 		})
@@ -2543,7 +2518,7 @@ func (p *configPanel) configTemplateValueText(field configField, value any, exis
 // D3): the widget is the field's own kind, at the field's real path inside
 // the row — a dispatch that mirrors editField without rooting a dotted path
 // through stored keys.
-func (p *configPanel) openTemplateField(doc any, rowPath []string, field configField) (any, string) {
+func (p *configPanel) openTemplateField(doc any, rowPath []string, field configField, template string) (any, string) {
 	path := configJoinPath(rowPath, field.Path)
 	cur, _ := configLookupValue(doc, path)
 	// The one field both roles carry says something different about each: the
@@ -2551,7 +2526,7 @@ func (p *configPanel) openTemplateField(doc any, rowPath []string, field configF
 	// prototype's editor-help sits (plan 350) — never on the row it came from.
 	row, _ := configLookupValue(doc, rowPath)
 	settings, _ := row.(map[string]any)
-	field.Hint = configRoleHelp(field, settings)
+	field.Hint = configRoleHelp(field, template, settings)
 	if field.Kind == configFieldRows || configIsContainer(cur) {
 		return p.editRows(doc, path, field)
 	}
@@ -2646,6 +2621,110 @@ func (p *configPanel) setSharedReference(doc any, path []string, container any, 
 		next = append(next, map[string]any{"name": name, "enabled": true})
 	}
 	return p.assign(doc, path, next, false, label)
+}
+
+// subagentTypeNameFor names the built-in type one row of an agent's subagent
+// list stands for: the type list fills a row keyed by the name itself, and a
+// stored pin carries it. Anything else is not a built-in's row.
+func subagentTypeNameFor(key string, value any) string {
+	name := key
+	if entry, ok := value.(map[string]any); ok {
+		if named := strings.TrimSpace(configStringField(entry, "name")); named != "" {
+			name = named
+		}
+	}
+	if isSubagentTypeName(name) {
+		return strings.ToLower(strings.TrimSpace(name))
+	}
+	return ""
+}
+
+// editBuiltinSubagentRow is what an agent's page may set on one built-in type —
+// the four the model dispatches and the two the system does (plan 352, owner
+// 2026-11-22): the model the type runs on for this agent and the level it
+// thinks at, and nothing else. The page draws those two rows alone; the prompt
+// and the switch a public built-in's pin once carried are retired, and a system
+// type never had them to set.
+//
+// The row is written under its numeric place in the list, never under the type
+// name: configAssign and configLookupValue read a list by index, so the name is
+// the row's label and nothing more. A type with no entry yet gets one appended —
+// the row it is a place for — when the pick lands.
+//
+// The page is drawn on a copy of the section carrying that placeholder, so
+// opening a type and pressing Esc leaves the caller's document exactly as it
+// was. A write through the page lands in the store (`assignModel` writes once),
+// and then the store's document — not the copy with its placeholder — is what
+// the rows above must redraw from.
+func (p *configPanel) editBuiltinSubagentRow(doc any, path []string, name string, field configField) (any, string) {
+	before := string(p.raw[p.section])
+	draft, rowPath, ok := p.placeSubagentPinRow(doc, path, name, field.Label)
+	if !ok {
+		return doc, ""
+	}
+	tailRows := p.configActionSelector() == nil
+	for {
+		settings, _ := configLookupValue(draft, rowPath)
+		entry, _ := settings.(map[string]any)
+		if entry == nil {
+			entry = map[string]any{"name": name}
+		}
+		items, rows := p.templateItems(configTemplateSubagent, "", entry, tailRows, false)
+		idx, opened, err := p.page("", configFieldKeys, items, -1)
+		if err != nil {
+			p.printError(err)
+			return p.settledBuiltinRow(doc, before), ""
+		}
+		if !opened || idx < 0 || idx >= len(rows) || rows[idx].up {
+			return p.settledBuiltinRow(doc, before), ""
+		}
+		draft, _ = p.openTemplateField(draft, rowPath, rows[idx].field, configTemplateSubagent)
+	}
+}
+
+// settledBuiltinRow is what the page above hands back when it closes: the
+// store's document once a write landed on it, and the caller's own otherwise —
+// never the copy the page drew its placeholder on.
+func (p *configPanel) settledBuiltinRow(doc any, before string) any {
+	if string(p.raw[p.section]) == before {
+		return doc
+	}
+	return p.sectionDoc(p.section)
+}
+
+// placeSubagentPinRow stages one built-in type's row for its page: the copy of
+// the section the page edits, and the numeric path into it. An entry of that
+// name keeps its place; a type with no entry gets the placeholder appended, so
+// the page has a real path to open its two fields on.
+func (p *configPanel) placeSubagentPinRow(doc any, path []string, name, label string) (any, []string, bool) {
+	raw, err := configMarshalDoc(doc)
+	if err != nil {
+		p.printError(err)
+		return doc, nil, false
+	}
+	var draft any
+	if err := json.Unmarshal(raw, &draft); err != nil {
+		p.printError(err)
+		return doc, nil, false
+	}
+	rows, _ := configLookupValue(draft, path)
+	list, _ := rows.([]any)
+	index := len(list)
+	for i, row := range list {
+		entry, _ := row.(map[string]any)
+		if strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))) == name {
+			index = i
+			break
+		}
+	}
+	if index == len(list) {
+		next := append(append(make([]any, 0, len(list)+1), list...), map[string]any{"name": name})
+		if draft, err = configAssign(draft, path, next, false, label); err != nil {
+			p.printError(err)
+			return doc, nil, false
+		}
+	}
+	return draft, configJoinPath(path, strconv.Itoa(index)), true
 }
 
 // sharedReferenceEnabled reports whether this agent's list switches one shared
@@ -2830,6 +2909,12 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		childPath = configJoinPath(path, strconv.Itoa(len(rows)))
 		key = strconv.Itoa(len(rows))
 	}
+	// An agent's subagent list does not add a value: a subagent is a typed
+	// entry the loader refuses to guess at, so the row opens the whole form and
+	// one Save writes it (plan 352, owner 2026-11-22).
+	if list && agentSubagentsPath(path) {
+		return p.addSubagentEntry(doc, path, field)
+	}
 	if template := configTemplateFor(p.section, childPath); template == configTemplatePath || (template == "" && configScalarRowTemplate(p.section, childPath) == configTemplateString) {
 		// A new row at a secret's place is asked for the private way (plan
 		// 328 D3): the value typed into a plain field would read back off
@@ -2905,9 +2990,6 @@ func configPrimaryCreationPath(field configField, path []string) bool {
 // The unified create's own copy (P3; every sentence is the prototype's or the
 // panel's existing wording, never an invented one).
 const (
-	// configKeyNameHint is the name field's own help (the prototype's keyName
-	// field, word for word).
-	configKeyNameHint = "Lowercase letters, numbers and hyphens. This is the configuration key."
 	// configReservedIDRefusal is the six-name refusal (the prototype's
 	// renameDefinition, word for word); the loader refuses them too, but the
 	// form owes the sentence before the write.
@@ -3021,7 +3103,7 @@ func (p *configPanel) addAgentDefinition(doc any, path []string, field configFie
 			case row.field.CreateEditable:
 				notice = p.editAgentDraftPrimary(draft)
 			default:
-				doc, notice = p.openTemplateField(doc, configJoinPath(path, ""), row.field)
+				doc, notice = p.openTemplateField(doc, configJoinPath(path, ""), row.field, configTemplateAgent)
 			}
 		default:
 			// Esc (or the plain page's back-up row): nothing was written.
@@ -3181,8 +3263,195 @@ func (p *configPanel) submitAgentDraft(doc any, path []string, draft map[string]
 	return p.stageAgentDraft(p.reloadSection(), path, draft), note, false
 }
 
+// subagentEntryNamePattern is the name a custom subagent entry may carry —
+// pkg/config's subagentConfigNamePattern, which is what the loader judges the
+// write by. Names are what the model passes as subagent_type, so they are
+// lower-case and never collide with a built-in's spelling; the loader is the
+// authority and this is the form's copy of its rule, not a second rule.
+var subagentEntryNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
+
+// addSubagentEntry is the subagent page's create (plan 352, owner 2026-11-22):
+// the same one-form shape the agent create has — every field the saved page
+// draws, nothing written until the footer's Save, Esc leaving nothing behind,
+// a refusal keeping what was typed — with two things this list forces.
+//
+// The name is held beside the entry, never inside it. templateItems filters a
+// subagent's rows by the entry's own name (a built-in's name hides the prompt
+// and the tool policy), so a draft that carried the name would collapse the
+// form the moment the user typed "explore" — the one name the four rules then
+// refuse. The name reaches the entry at the submit, after the rules pass.
+//
+// The entry is a real element of the list in a copy of the section: every
+// editor the saved page opens works on a real path inside the document, and
+// the copy dies with the page, so the submit is the only write.
+func (p *configPanel) addSubagentEntry(doc any, path []string, field configField) (any, string) {
+	raw, err := configMarshalDoc(doc)
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	var draft any
+	if err := json.Unmarshal(raw, &draft); err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	rows, _ := configLookupValue(draft, path)
+	list, _ := rows.([]any)
+	// The draft entry starts empty: an empty value is what unsets a key
+	// everywhere in this panel, so seeding one would write noise into the
+	// configuration.
+	next := append(append(make([]any, 0, len(list)+1), list...), map[string]any{})
+	index := len(next) - 1
+	if draft, err = configAssign(draft, path, next, false, field.Label); err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	rowPath := configJoinPath(path, strconv.Itoa(index))
+	p.staged = true
+	defer func() { p.staged = false }()
+	actions := p.configActionSelector()
+	name, notice := "", ""
+	for {
+		entry := subagentDraftEntry(draft, rowPath)
+		items, templateRows := p.templateItems(configTemplateSubagent, "", entry, false, true)
+		// The name belongs to the form, not to the entry it will be written
+		// into: the row shows what the form holds.
+		for i := range templateRows {
+			if templateRows[i].field.Path == "name" {
+				items[i].Value = name
+			}
+		}
+		saveRow := -1
+		if actions == nil {
+			// A picker without footer actions: the submit and the way out are
+			// rows, the way the plain rows pages carry them.
+			saveRow = len(templateRows)
+			items = append(items,
+				SelectItem{Label: configCreateSaveLabel, Description: configCreateSaveDesc},
+				SelectItem{Label: configUpRowLabel, Description: "Back up one level"})
+		}
+		// Only an arrow this page takes counts: a nested page (rows/editor)
+		// may leave its own tab step behind, and that must not read as the
+		// user leaving the form.
+		p.tabStep = 0
+		var res ActionResult
+		if actions == nil {
+			var idx int
+			var ok bool
+			idx, ok, err = p.page(notice, configCreateFormKeys, items, -1)
+			res = ActionResult{Row: idx, OK: ok}
+		} else {
+			res, err = p.actionPage(notice, configCreateFormKeys, items, -1,
+				FooterAction{Label: configCreateSaveLabel, Key: configCreateSaveKey, Kind: FooterActionSave})
+		}
+		if err != nil {
+			p.printError(err)
+			return doc, ""
+		}
+		notice = ""
+		if p.tabStep != 0 {
+			// A tab arrow must not throw a filled form away unasked.
+			if p.subagentDraftUntouched(draft, rowPath, name) || p.confirmDiscardAgentDraft() {
+				return doc, "" // p.tabStep stays set: the panel steps
+			}
+			p.tabStep = 0 // Keep editing: stay on the form
+			continue
+		}
+		switch {
+		case res.Action == FooterActionSave || (saveRow >= 0 && res.OK && res.Row == saveRow):
+			if refusal := subagentNameRefusal(draft, path, name); refusal != "" {
+				notice = refusal
+				continue
+			}
+			subagentDraftEntry(draft, rowPath)["name"] = name
+			if err := p.save(draft); err != nil {
+				// p.save leaves the panel's copy alone on a refusal, so the
+				// form keeps every value the user typed.
+				notice = err.Error()
+				continue
+			}
+			// The rows above redraw from the store: the new entry is a row
+			// only once the document they read carries it.
+			return p.sectionDoc(p.section), ""
+		case res.OK && res.Row >= 0 && res.Row < len(templateRows):
+			if templateRows[res.Row].field.Path == "name" {
+				name, notice = p.holdSubagentName(draft, path, templateRows[res.Row].field, name)
+				continue
+			}
+			draft, notice = p.openTemplateField(draft, rowPath, templateRows[res.Row].field, configTemplateSubagent)
+		default:
+			// Esc (or the plain page's back-up row): nothing was written.
+			return doc, ""
+		}
+	}
+}
+
+// subagentDraftEntry reads the entry one subagent create is filling.
+func subagentDraftEntry(draft any, rowPath []string) map[string]any {
+	value, _ := configLookupValue(draft, rowPath)
+	entry, _ := value.(map[string]any)
+	if entry == nil {
+		entry = map[string]any{}
+	}
+	return entry
+}
+
+// subagentDraftUntouched reports a subagent create nobody typed into: no name
+// and an empty entry. The agent create counts its seed key; this form has no
+// seed, so the entry itself is the measure.
+func (p *configPanel) subagentDraftUntouched(draft any, rowPath []string, name string) bool {
+	return name == "" && len(subagentDraftEntry(draft, rowPath)) == 0
+}
+
+// subagentNameRefusal is the one place a subagent create's name is judged — the
+// Name row and the submit read the same verdict (plan 352, the prototype's four
+// sentences word for word): a name has to be there, it follows the entry rule,
+// it may not be one of the six built-in types, and it may not repeat a sibling
+// entry. Only this list's entries are compared: the loader lets a custom
+// subagent carry a shared definition's name, and the agent's own entry wins at
+// dispatch (pkg/config's ValidateAgentSubagents).
+func subagentNameRefusal(draft any, path []string, name string) string {
+	if name == "" {
+		return "A name is required."
+	}
+	if !subagentEntryNamePattern.MatchString(name) {
+		return "Use a lowercase name with letters, numbers and hyphens."
+	}
+	if isSubagentTypeName(name) {
+		return "Those names are the 6 built-in subagents. Choose a different name."
+	}
+	rows, _ := configLookupValue(draft, path)
+	list, _ := rows.([]any)
+	for _, row := range list {
+		entry, _ := row.(map[string]any)
+		if strings.ToLower(strings.TrimSpace(configStringField(entry, "name"))) == name {
+			return "That name already exists. Choose a different one."
+		}
+	}
+	return ""
+}
+
+// holdSubagentName asks for a subagent's name and holds it with the form — no
+// write. The editor opens on the name the form already holds, so re-opening it
+// is how the name is changed, and a refusal keeps what was typed: the form is
+// still whole, because the name never reached the entry (plan 352).
+func (p *configPanel) holdSubagentName(draft any, path []string, field configField, name string) (string, string) {
+	text, ok, _, err := p.editScalar(field, name)
+	if err != nil {
+		p.printError(err)
+		return name, ""
+	}
+	if !ok {
+		return name, ""
+	}
+	next := strings.TrimSpace(text)
+	if refusal := subagentNameRefusal(draft, path, next); refusal != "" {
+		return next, refusal
+	}
+	return next, ""
+}
+
 // hookRowsPage reports whether a row page is the hooks section's own tree. Its
-// single descriptor is the only rows field the schema gives no path of its own,
 // and editRows hands that same descriptor down at every level, so the path is
 // what says which level a row is being added to (plan 321).
 func hookRowsPage(field configField) bool {

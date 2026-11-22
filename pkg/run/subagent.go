@@ -2092,7 +2092,10 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	// a dispatch-time pin is a caller's choice, and the check is not the
 	// caller's. Every other type keeps the three-level chain untouched — the
 	// plan reviewer's pin is the user's pick in the approval card and stays
-	// first for it (plan 283).
+	// first for it (plan 283). Behind that pick sits the agent's own pin
+	// (plan 352): the approval card offers it as the preferred row, and a run
+	// started without a card — headless, gateway — reaches the same entry here
+	// through cat.Model, so one chain answers both.
 	if override, ok := SubagentModelOverrideFromContext(baseCtx); ok && agentType != GoalEvaluatorSubagentType {
 		pin = override
 		modelLive = pin.Entry != nil

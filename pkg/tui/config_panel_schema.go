@@ -132,10 +132,11 @@ type configField struct {
 	// a prompt and a switch, nothing else — the loader's own rule, read
 	// ahead of the save.
 	CustomOnly bool
-	// HideOnBuiltin hides the field on an agent's entry naming one of the
-	// four public built-in types (P5): such an entry is a model-and-level
-	// pin, so the prompt rewrite and the switch it once carried are retired
-	// — hidden here, and dropped from the stored row on load.
+	// HideOnBuiltin hides the field on an agent's entry naming one of the six
+	// built-in types — the four the model dispatches and the two the system
+	// does (plan 352): such an entry is a model-and-level pin, so the name it
+	// already carries, the prompt rewrite and the switch it once carried are
+	// all retired — hidden here, and dropped from the stored row on load.
 	HideOnBuiltin bool
 	// The unified agent definition's role flags (P3, the prototype's agent
 	// template). The two are mutually exclusive — a page renders one role's
@@ -498,7 +499,9 @@ var configTemplates = map[string][]configField{
 		{Path: "reasoning_effort", Label: "Thinking level", Kind: configFieldEffort, Requires: "model"},
 	},
 	configTemplateSubagent: {
-		{Path: "name", Label: "Type name", Kind: configFieldText, Hint: "Built-in overrides: general-purpose, explore, plan, verification."},
+		// The name is a built-in's row label and nothing the page sets: a
+		// built-in type's page draws its model and level alone (plan 352).
+		{Path: "name", Label: "Name", Kind: configFieldText, HideOnBuiltin: true, Hint: "Lowercase letters, numbers and hyphens."},
 		{
 			Path: "model", Label: "Model", Kind: configFieldModel, ModelFlavor: configModelFlavorSubagent,
 			Hint:            "This agent's override. Empty follows the install-wide type default, then the conversation.",
