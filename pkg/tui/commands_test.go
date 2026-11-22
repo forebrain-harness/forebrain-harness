@@ -73,6 +73,9 @@ type scriptedSelector struct {
 	multiOptions []string
 	richLabels   []string
 	richItems    [][]SelectItem
+	// inputHeads are the editor pages' head lines, in the order they were
+	// asked for: pageLabels reads them beside richLabels.
+	inputHeads []string
 	// reviewSteps scripts Review, one per call; the recordings let a test see
 	// the facts, actions and default the panel showed.
 	reviewSteps    []richStep
@@ -111,7 +114,13 @@ func (s *scriptedSelector) MultiSelect(_ string, options []string, _ []string) (
 	return s.multi, s.multiOK, nil
 }
 
-func (s *scriptedSelector) Input(string, string) (string, bool, error) {
+// Input records the page head it was handed: an editor is one of the panel's
+// pages (plan 350), and its head line carries the field's help sentence, so a
+// test asserting a field's hint is on the page has to be able to read it. It is
+// kept apart from richLabels, whose order is the row pages' own — a test that
+// indexes it must not have an editor slip into the sequence.
+func (s *scriptedSelector) Input(label, _ string) (string, bool, error) {
+	s.inputHeads = append(s.inputHeads, label)
 	if s.inputIdx >= len(s.inputs) {
 		return "", false, nil
 	}

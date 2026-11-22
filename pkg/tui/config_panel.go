@@ -3263,13 +3263,6 @@ func (p *configPanel) submitAgentDraft(doc any, path []string, draft map[string]
 	return p.stageAgentDraft(p.reloadSection(), path, draft), note, false
 }
 
-// subagentEntryNamePattern is the name a custom subagent entry may carry —
-// pkg/config's subagentConfigNamePattern, which is what the loader judges the
-// write by. Names are what the model passes as subagent_type, so they are
-// lower-case and never collide with a built-in's spelling; the loader is the
-// authority and this is the form's copy of its rule, not a second rule.
-var subagentEntryNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
-
 // addSubagentEntry is the subagent page's create (plan 352, owner 2026-11-22):
 // the same one-form shape the agent create has — every field the saved page
 // draws, nothing written until the footer's Save, Esc leaving nothing behind,
@@ -3414,7 +3407,7 @@ func subagentNameRefusal(draft any, path []string, name string) string {
 	if name == "" {
 		return "A name is required."
 	}
-	if !subagentEntryNamePattern.MatchString(name) {
+	if !appcfg.ValidSubagentEntryName(name) {
 		return "Use a lowercase name with letters, numbers and hyphens."
 	}
 	if isSubagentTypeName(name) {

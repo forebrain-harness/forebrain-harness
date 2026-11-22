@@ -353,6 +353,18 @@ func SubagentsEnabledFor(cfg *Root, agentName string) bool {
 // collide with the built-in spelling.
 var subagentConfigNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
 
+// ValidSubagentEntryName reports whether name is what a custom subagent entry
+// may be called — the rule below. A shared definition's reference entry is the
+// one entry the rule does not judge: it carries the definition's name, which
+// follows the primary agent's id rule instead (owner 2026-11-22), so that
+// exemption sits at that call site rather than in here. The loader judges every
+// write by this predicate, and a form that refuses a name before the write asks
+// it too — one rule, so the copy on a page and the refusal on a save can never
+// disagree about which names exist.
+func ValidSubagentEntryName(name string) bool {
+	return subagentConfigNamePattern.MatchString(name)
+}
+
 // ValidateAgentSubagents checks one primary agent's subagent entries.
 // publicBuiltins are the built-in types an entry of that name overrides;
 // systemBuiltins are the types the system dispatches itself, which an entry of
@@ -408,7 +420,7 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 		// than this entry's (owner 2026-11-22) — a name like my_agent has to be
 		// enableable by some agent, or the definition could never be used.
 		sharedReference := slices.Contains(sharedNames, name) && !SubagentEntryCarriesBody(entry)
-		if !sharedReference && !subagentConfigNamePattern.MatchString(name) {
+		if !sharedReference && !ValidSubagentEntryName(name) {
 			return fmt.Errorf("%s: invalid name %q: use lower-case letters, digits and dashes, starting with a letter", where, entry.Name)
 		}
 		switch {

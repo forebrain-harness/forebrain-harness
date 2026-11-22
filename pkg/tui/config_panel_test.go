@@ -1899,8 +1899,11 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 
 // pageLabels joins every page's heading the panel showed, so a refusal or a
 // notice can be read where the user read it.
+// pageLabels is every page head the selector was handed, row pages and editor
+// pages alike: a field's help sentence lives on its editor's head line (plan
+// 350), so an assertion about what a page says has to see both.
 func pageLabels(selector *scriptedSelector) string {
-	return strings.Join(selector.richLabels, "\n")
+	return strings.Join(append(append([]string(nil), selector.richLabels...), selector.inputHeads...), "\n")
 }
 
 // endsAt is the cell column a row's last value ends at: byte offsets would
@@ -2831,6 +2834,62 @@ func TestConfigPanelCreatesASubagentEntry(t *testing.T) {
 		}
 		if entries[0]["description"] != "Runs the migrations." {
 			t.Fatalf("the later edit did not land: %+v", entries[0])
+		}
+	})
+}
+
+// The name row says the same thing wherever it is drawn — the create form and a
+// stored custom entry share one descriptor (plan 352, 裁决 10): the label is
+// Name and the help is the prototype's sentence, which belongs to the editor's
+// head line and not to the row it came from (plan 350).
+func TestConfigPanelSubagentNameRowCarriesItsHint(t *testing.T) {
+	const hint = "Lowercase letters, numbers and hyphens."
+
+	t.Run("on a stored custom entry", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": `{
+			"definitions":{"main":{"primary":true,"subagents":[
+				{"name":"db-migrator","description":"runs migrations","system_prompt":"You migrate."}
+			]}}
+		}`})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+			{label: "db-migrator", ok: true},
+			{label: "Name", ok: true},
+			{ok: false},
+			{ok: false},
+		}), nil, "agents")
+
+		page := pageFields(selector.richItems[subagentRowsPageAt(t, selector)+1])
+		if !slices.Contains(rowLabels(page), "Name") {
+			t.Fatalf("the stored entry's row is not labelled Name: %v", rowLabels(page))
+		}
+		if slices.Contains(rowLabels(page), "Type name") {
+			t.Fatalf("the stored entry's page still says Type name: %v", rowLabels(page))
+		}
+		if !strings.Contains(pageLabels(selector), hint) {
+			t.Fatalf("the name editor must carry its hint on the page: %s", pageLabels(selector))
+		}
+	})
+
+	t.Run("on the create form", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, agentSubagentsSteps([]richStep{
+			{label: configAddRowLabel, ok: true},
+			{label: "Name", ok: true},
+			{ok: false},
+			{ok: false},
+		}), nil, "agents")
+
+		form := pageFields(selector.richItems[subagentRowsPageAt(t, selector)+1])
+		if !slices.Contains(rowLabels(form), "Name") {
+			t.Fatalf("the create form's row is not labelled Name: %v", rowLabels(form))
+		}
+		if slices.Contains(rowLabels(form), "Type name") {
+			t.Fatalf("the create form still says Type name: %v", rowLabels(form))
+		}
+		if !strings.Contains(pageLabels(selector), hint) {
+			t.Fatalf("the create form's name editor must carry its hint on the page: %s", pageLabels(selector))
 		}
 	})
 }

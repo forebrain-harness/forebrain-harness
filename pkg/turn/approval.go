@@ -1373,7 +1373,8 @@ func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentID, currentProvi
 // of this package, so the name is spelled here too.
 const planReviewerSubagentName = "plan-reviewer"
 
-// preferredPlanReviewerRow is the row id the reviewer setting names, resolved// the way the reviewer resolves a reference itself: a row id, or a legacy
+// preferredPlanReviewerRow is the row id the reviewer setting names, resolved
+// the way the reviewer resolves a reference itself: a row id, or a legacy
 // "provider/model" label split on its first slash. Empty when the setting is
 // empty or names nothing the table holds — a dangling reference behaves as
 // unset (plan 315), and an unset one must not move the cursor.

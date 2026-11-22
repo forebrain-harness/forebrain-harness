@@ -662,6 +662,42 @@ func TestValidateAgentSubagentsSystemEntriesTakeAModelAndALevel(t *testing.T) {
 	}
 }
 
+// A custom subagent's name is one rule, exported so the settings form refuses a
+// name with the same predicate a save is judged by (plan 352): two characters at
+// least, no more than 63, lower-case letters, digits and dashes, starting with a
+// letter. The boundaries are the whole point — the pattern is what the model
+// passes as subagent_type, and a shared definition's reference entry is the one
+// exempt case, judged by the definition's own id rule instead.
+func TestValidSubagentEntryName(t *testing.T) {
+	valid := []string{
+		"ab",
+		"a1",
+		"my-agent",
+		"repo-scout",
+		strings.Repeat("a", 63),
+	}
+	for _, name := range valid {
+		if !ValidSubagentEntryName(name) {
+			t.Errorf("ValidSubagentEntryName(%q) = false, want true", name)
+		}
+	}
+	invalid := []string{
+		"",
+		"a",
+		strings.Repeat("a", 64),
+		"Repo_Scout",
+		"my_agent",
+		"1agent",
+		"-ab",
+		"aB",
+	}
+	for _, name := range invalid {
+		if ValidSubagentEntryName(name) {
+			t.Errorf("ValidSubagentEntryName(%q) = true, want false", name)
+		}
+	}
+}
+
 // The settings page's goal-evaluator row is global, so it has no per-agent entry
 // to be validated with: this is the one exported verdict it gets, and it is
 // the same rule every per-agent entry gets (plan 299). The second half pins
