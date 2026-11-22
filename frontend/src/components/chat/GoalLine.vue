@@ -7,7 +7,7 @@
       <button
         v-if="goal.checkAgentId"
         type="button"
-        class="goal-check"
+        class="goal-evaluator"
         @click="emit('open-check', goal.checkAgentId)"
       >
         {{ t('chat.goal.openCheck') }}
@@ -155,7 +155,7 @@ function formatGoalDuration(ms: number): string {
   font-variant-numeric: tabular-nums;
 }
 
-.goal-check {
+.goal-evaluator {
   margin-left: auto;
   flex-shrink: 0;
   border-radius: 6px;
@@ -167,7 +167,7 @@ function formatGoalDuration(ms: number): string {
   transition: background 0.15s ease;
 }
 
-.goal-check:hover {
+.goal-evaluator:hover {
   background: color-mix(in srgb, var(--goal-accent) 10%, transparent);
 }
 

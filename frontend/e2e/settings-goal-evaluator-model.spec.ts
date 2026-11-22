@@ -50,7 +50,7 @@ async function openBlock(page: Page): Promise<void> {
   await preferChinese(page)
   await signIn(page)
   await page.goto(SUBAGENTS, { waitUntil: 'networkidle' })
-  await expect(page.locator('[data-group="goal-check-model"]')).toBeVisible()
+  await expect(page.locator('[data-group="goal-evaluator-model"]')).toBeVisible()
 }
 
 /**
@@ -59,7 +59,7 @@ async function openBlock(page: Page): Promise<void> {
  * Escape closes it, and the level row under it is only reachable afterwards.
  */
 async function dismissMenu(page: Page): Promise<void> {
-  const block = page.locator('[data-group="goal-check-model"]')
+  const block = page.locator('[data-group="goal-evaluator-model"]')
   if (await block.locator('.gcs__menu').isVisible()) await page.keyboard.press('Escape')
   await expect(block.locator('.gcs__menu')).toHaveCount(0)
 }
@@ -67,19 +67,19 @@ async function dismissMenu(page: Page): Promise<void> {
 /** Chooses one candidate. The menu opens on mount (the prototype's state), so
  *  only a closed one has to be opened first. */
 async function pickRow(page: Page, id: string): Promise<void> {
-  const block = page.locator('[data-group="goal-check-model"]')
+  const block = page.locator('[data-group="goal-evaluator-model"]')
   if (!(await block.locator('.gcs__menu').isVisible())) {
-    await block.locator('[data-goal-check-model]').click()
+    await block.locator('[data-goal-evaluator-model]').click()
   }
-  await block.locator(`[data-goal-check-option="${id}"]`).click()
+  await block.locator(`[data-goal-evaluator-option="${id}"]`).click()
 }
 
 test.describe.configure({ mode: 'serial' })
 
-test('the goal-check block is the subagents tab’s last group and opens unconfigured', async ({ page }) => {
+test('the goal-evaluator block is the subagents tab’s last group and opens unconfigured', async ({ page }) => {
   await openBlock(page)
 
-  const block = page.locator('[data-group="goal-check-model"]')
+  const block = page.locator('[data-group="goal-evaluator-model"]')
   await expect(block.locator('h3')).toHaveCount(0)
   await expect(page.locator('[data-group="builtin-subagents"] h3')).toHaveText('内置子代理')
   // §2: the title carries no explanation under it.
@@ -90,7 +90,7 @@ test('the goal-check block is the subagents tab’s last group and opens unconfi
   const order = await page.evaluate(() => {
     const sa = document.querySelector('[data-group="sa"]')
     const peers = document.querySelector('[data-group="peers"]')
-    const goal = document.querySelector('[data-group="goal-check-model"]')
+    const goal = document.querySelector('[data-group="goal-evaluator-model"]')
     if (!sa || !goal) return { saBeforeGoal: false, peersBetween: false }
     const saBefore = (sa.compareDocumentPosition(goal) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
     const peersBetween =
@@ -103,12 +103,12 @@ test('the goal-check block is the subagents tab’s last group and opens unconfi
   expect(order.peersBetween).toBe(true)
 
   // Nothing configured: both controls say 跟随主代理, and the level is disabled.
-  await expect(block.locator('[data-goal-check-model]')).toContainText('跟随主代理')
-  await expect(block.locator('[data-goal-check-effort]')).toBeDisabled()
-  await expect(block.locator('[data-goal-check-effort]')).toHaveValue('')
+  await expect(block.locator('[data-goal-evaluator-model]')).toContainText('跟随主代理')
+  await expect(block.locator('[data-goal-evaluator-effort]')).toBeDisabled()
+  await expect(block.locator('[data-goal-evaluator-effort]')).toHaveValue('')
   // The block explains what an unconfigured level needs: pick a model first.
-  await expect(block.locator('[data-goal-check-hint]')).toHaveCount(1)
-  await shot(page, 'settings-goal-check-unconfigured')
+  await expect(block.locator('[data-goal-evaluator-hint]')).toHaveCount(1)
+  await shot(page, 'settings-goal-evaluator-unconfigured')
 })
 
 test('picks a row, stores its id and the live level, then overrides and clears', async ({ page }) => {
@@ -118,27 +118,27 @@ test('picks a row, stores its id and the live level, then overrides and clears',
     provider: 'deepseek',
     model: 'deepseek-e2e-goal',
     base_url: 'https://api.deepseek.com',
-    api_key: 'sk-e2e-goal-check-0001',
+    api_key: 'sk-e2e-goal-evaluator-0001',
     caps: { efforts: ['low', 'high'], default_effort: 'high' },
   })
   await page.reload({ waitUntil: 'networkidle' })
   await dismissMenu(page)
 
-  const block = page.locator('[data-group="goal-check-model"]')
+  const block = page.locator('[data-group="goal-evaluator-model"]')
   await pickRow(page, id)
 
   // The echo is the model and its provider, and the level follows the row.
-  await expect(block.locator('[data-goal-check-model]')).toContainText('deepseek-e2e-goal')
-  await expect(block.locator('[data-goal-check-model]')).not.toContainText('https://api.deepseek.com')
-  await expect(block.locator('[data-goal-check-effort]')).toHaveValue('high')
-  await expect(block.locator('[data-goal-check-effort]')).toBeEnabled()
-  await expect(block.locator('[data-goal-check-hint]')).toHaveText('模型页配置的默认强度：高 high')
-  await expect(block.locator('[data-goal-check-reset]')).toHaveCount(0)
+  await expect(block.locator('[data-goal-evaluator-model]')).toContainText('deepseek-e2e-goal')
+  await expect(block.locator('[data-goal-evaluator-model]')).not.toContainText('https://api.deepseek.com')
+  await expect(block.locator('[data-goal-evaluator-effort]')).toHaveValue('high')
+  await expect(block.locator('[data-goal-evaluator-effort]')).toBeEnabled()
+  await expect(block.locator('[data-goal-evaluator-hint]')).toHaveText('模型页配置的默认强度：高 high')
+  await expect(block.locator('[data-goal-evaluator-reset]')).toHaveCount(0)
 
   // Saving the row while the level equals its default stores "" — the live
   // reading — and the page says so.
-  await block.locator('[data-goal-check-save]').click()
-  await expect(block.locator('[data-goal-check-saved]')).toHaveText('✓ 已保存，下一轮对话生效')
+  await block.locator('[data-goal-evaluator-save]').click()
+  await expect(block.locator('[data-goal-evaluator-saved]')).toHaveText('✓ 已保存，下一轮对话生效')
   let values = await storedSettings(page)
   expect(values['agents.goal_evaluator.model']).toBe(id)
   expect(values['agents.goal_evaluator.reasoning_effort']).toBe('')
@@ -146,16 +146,16 @@ test('picks a row, stores its id and the live level, then overrides and clears',
   // Reopened, the block comes back on exactly that.
   await page.reload({ waitUntil: 'networkidle' })
   await dismissMenu(page)
-  await expect(block.locator('[data-goal-check-model]')).toContainText('deepseek-e2e-goal')
-  await expect(block.locator('[data-goal-check-effort]')).toHaveValue('high')
-  await expect(block.locator('[data-goal-check-hint]')).toHaveText('模型页配置的默认强度：高 high')
+  await expect(block.locator('[data-goal-evaluator-model]')).toContainText('deepseek-e2e-goal')
+  await expect(block.locator('[data-goal-evaluator-effort]')).toHaveValue('high')
+  await expect(block.locator('[data-goal-evaluator-hint]')).toHaveText('模型页配置的默认强度：高 high')
 
   // An override is stored as itself, and the hint and the reset link say so.
-  await block.locator('[data-goal-check-effort]').selectOption('low')
-  await expect(block.locator('[data-goal-check-hint]')).toHaveText('已改为 低 low，仅影响目标评估子代理')
-  await expect(block.locator('[data-goal-check-reset]')).toHaveText('恢复为模型默认')
-  await block.locator('[data-goal-check-save]').click()
-  await expect(block.locator('[data-goal-check-saved]')).toHaveText('✓ 已保存，下一轮对话生效')
+  await block.locator('[data-goal-evaluator-effort]').selectOption('low')
+  await expect(block.locator('[data-goal-evaluator-hint]')).toHaveText('已改为 低 low，仅影响目标评估子代理')
+  await expect(block.locator('[data-goal-evaluator-reset]')).toHaveText('恢复为模型默认')
+  await block.locator('[data-goal-evaluator-save]').click()
+  await expect(block.locator('[data-goal-evaluator-saved]')).toHaveText('✓ 已保存，下一轮对话生效')
   values = await storedSettings(page)
   expect(values['agents.goal_evaluator.model']).toBe(id)
   expect(values['agents.goal_evaluator.reasoning_effort']).toBe('low')
@@ -164,36 +164,36 @@ test('picks a row, stores its id and the live level, then overrides and clears',
   // to the live level — stored as "" again, not as a snapshot of it.
   await page.reload({ waitUntil: 'networkidle' })
   await dismissMenu(page)
-  await expect(block.locator('[data-goal-check-effort]')).toHaveValue('low')
-  await expect(block.locator('[data-goal-check-hint]')).toHaveText('已改为 低 low，仅影响目标评估子代理')
-  await block.locator('[data-goal-check-reset]').click()
-  await expect(block.locator('[data-goal-check-effort]')).toHaveValue('high')
-  await expect(block.locator('[data-goal-check-hint]')).toHaveText('模型页配置的默认强度：高 high')
-  await block.locator('[data-goal-check-save]').click()
-  await expect(block.locator('[data-goal-check-saved]')).toHaveText('✓ 已保存，下一轮对话生效')
+  await expect(block.locator('[data-goal-evaluator-effort]')).toHaveValue('low')
+  await expect(block.locator('[data-goal-evaluator-hint]')).toHaveText('已改为 低 low，仅影响目标评估子代理')
+  await block.locator('[data-goal-evaluator-reset]').click()
+  await expect(block.locator('[data-goal-evaluator-effort]')).toHaveValue('high')
+  await expect(block.locator('[data-goal-evaluator-hint]')).toHaveText('模型页配置的默认强度：高 high')
+  await block.locator('[data-goal-evaluator-save]').click()
+  await expect(block.locator('[data-goal-evaluator-saved]')).toHaveText('✓ 已保存，下一轮对话生效')
   values = await storedSettings(page)
   expect(values['agents.goal_evaluator.reasoning_effort']).toBe('')
 
   // The caret turns into a clear x on hover, and the x empties both controls.
   await block.locator('.gcs__caret-zone').hover()
-  await expect(block.locator('[data-goal-check-clear]')).toBeVisible()
-  await block.locator('[data-goal-check-clear]').click()
-  await expect(block.locator('[data-goal-check-model]')).toContainText('跟随主代理')
-  await expect(block.locator('[data-goal-check-effort]')).toBeDisabled()
-  await expect(block.locator('[data-goal-check-effort]')).toHaveValue('')
+  await expect(block.locator('[data-goal-evaluator-clear]')).toBeVisible()
+  await block.locator('[data-goal-evaluator-clear]').click()
+  await expect(block.locator('[data-goal-evaluator-model]')).toContainText('跟随主代理')
+  await expect(block.locator('[data-goal-evaluator-effort]')).toBeDisabled()
+  await expect(block.locator('[data-goal-evaluator-effort]')).toHaveValue('')
   // The block explains what an unconfigured level needs: pick a model first.
-  await expect(block.locator('[data-goal-check-hint]')).toHaveCount(1)
+  await expect(block.locator('[data-goal-evaluator-hint]')).toHaveCount(1)
 
-  await block.locator('[data-goal-check-save]').click()
-  await expect(block.locator('[data-goal-check-saved]')).toHaveText('✓ 已保存，下一轮对话生效')
+  await block.locator('[data-goal-evaluator-save]').click()
+  await expect(block.locator('[data-goal-evaluator-saved]')).toHaveText('✓ 已保存，下一轮对话生效')
   values = await storedSettings(page)
   expect(values['agents.goal_evaluator.model']).toBe('')
   expect(values['agents.goal_evaluator.reasoning_effort']).toBe('')
-  await shot(page, 'settings-goal-check-cleared')
+  await shot(page, 'settings-goal-evaluator-cleared')
 
   // And a reload agrees: the block is unconfigured again.
   await page.reload({ waitUntil: 'networkidle' })
   await dismissMenu(page)
-  await expect(block.locator('[data-goal-check-model]')).toContainText('跟随主代理')
-  await expect(block.locator('[data-goal-check-effort]')).toBeDisabled()
+  await expect(block.locator('[data-goal-evaluator-model]')).toContainText('跟随主代理')
+  await expect(block.locator('[data-goal-evaluator-effort]')).toBeDisabled()
 })

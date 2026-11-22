@@ -1,5 +1,5 @@
 <template>
-  <!-- 设置 · 常规/子代理 · 「/goal 检查模型」(plan 299 §2). Hand-written rather
+  <!-- 设置 · 常规/子代理 · 「/goal 评估模型」(plan 299 §2). Hand-written rather
        than schema-driven on purpose: the page's 「子代理」tab is otherwise built
        from SETTINGS_FORMS, and this block is exactly the shape that form cannot
        express — a two-line model signature, a caret that becomes a clear x, an
@@ -11,18 +11,18 @@
        holds a configured row's id, `agents.goal_evaluator.reasoning_effort` holds
        "" while the level equals that row's own default (a live reading of the
        model page) and the level only when it overrides it. -->
-  <div :class="bare ? 'gc gc--bare' : 'gc'" data-group="goal-check-model">
+  <div :class="bare ? 'gc gc--bare' : 'gc'" data-group="goal-evaluator-model">
     <header v-if="!bare" class="gc__head">
-      <h3>{{ t('subagents.goalCheck.title') }}</h3>
+      <h3>{{ t('subagents.goalEvaluator.title') }}</h3>
     </header>
 
     <div class="gc__rows">
       <div class="gc__row" :class="{ 'gc__row--dirty': dirty }">
         <div class="gc__lab">
-          <b>{{ t('subagents.goalCheck.modelLabel') }}</b>
+          <b>{{ t('subagents.goalEvaluator.modelLabel') }}</b>
         </div>
         <div class="gc__ctl">
-          <GoalCheckModelSelect
+          <GoalEvaluatorModelSelect
             :model-value="modelId"
             :choices="choices"
             @update:model-value="onModel"
@@ -32,24 +32,24 @@
 
       <div class="gc__row" :class="{ 'gc__row--dirty': dirty }">
         <div class="gc__lab">
-          <b>{{ t('subagents.goalCheck.effortLabel') }}</b>
-          <span v-if="hint" class="gc__hint" data-goal-check-hint>{{ hint }}</span>
+          <b>{{ t('subagents.goalEvaluator.effortLabel') }}</b>
+          <span v-if="hint" class="gc__hint" data-goal-evaluator-hint>{{ hint }}</span>
           <span
             v-if="showReset"
             class="gc__link"
             role="button"
             tabindex="0"
-            data-goal-check-reset
+            data-goal-evaluator-reset
             @click="resetEffort"
             @keydown.enter.prevent="resetEffort"
             @keydown.space.prevent="resetEffort"
-          >{{ t('subagents.goalCheck.effortReset') }}</span>
+          >{{ t('subagents.goalEvaluator.effortReset') }}</span>
         </div>
         <div class="gc__ctl">
           <select
             class="gc__select"
             :class="{ 'gc__select--unset': !selected }"
-            data-goal-check-effort
+            data-goal-evaluator-effort
             :disabled="!selected"
             :value="effectiveEffort"
             @change="onEffortChange"
@@ -65,19 +65,19 @@
     <div class="gc__tray" :class="{ 'gc__tray--open': trayOpen }">
       <div class="gc__tray-in">
         <div class="gc__tray-bar">
-          <span v-if="savedNotice" class="gc__ok" data-goal-check-saved>✓ {{ t('subagents.goalCheck.saved') }}</span>
+          <span v-if="savedNotice" class="gc__ok" data-goal-evaluator-saved>✓ {{ t('subagents.goalEvaluator.saved') }}</span>
           <span v-if="refusal?.message" class="gc__err" role="alert">{{ refusal.message }}</span>
-          <button type="button" class="gc__btn" data-goal-check-discard @click="discard">
-            {{ t('subagents.goalCheck.discard') }}
+          <button type="button" class="gc__btn" data-goal-evaluator-discard @click="discard">
+            {{ t('subagents.goalEvaluator.discard') }}
           </button>
           <button
             type="button"
             class="gc__btn gc__btn--pri"
-            data-goal-check-save
+            data-goal-evaluator-save
             :disabled="saving"
             @click="save"
           >
-            {{ t('subagents.goalCheck.save') }}
+            {{ t('subagents.goalEvaluator.save') }}
           </button>
         </div>
       </div>
@@ -87,14 +87,14 @@
 
 <script setup lang="ts">
 /**
- * The /goal check's settings block (plan 299): one global row for every primary
+ * The /goal evaluator's settings block (plan 299): one global row for every primary
  * agent, because the check is dispatched by the system rather than by a primary
  * agent. Only two things are configurable — the model and the thinking level —
  * and both live in the page's own form, one group save each.
  */
 import { computed, onBeforeUnmount, ref } from 'vue'
 
-import GoalCheckModelSelect from '@/components/settings/GoalCheckModelSelect.vue'
+import GoalEvaluatorModelSelect from '@/components/settings/GoalEvaluatorModelSelect.vue'
 import type { SettingsGroup } from '@/lib/settingsSchema'
 import { effortLevelLabel } from '@/lib/effortLabel'
 import { useModelChoices } from '@/composables/useModelChoices'
@@ -113,8 +113,8 @@ ensureChoices()
 
 /** The group the page's own save/dirty machinery reads: two fields, one save. */
 const group: SettingsGroup = {
-  id: 'goal-check-model',
-  titleKey: 'subagents.goalCheck.title',
+  id: 'goal-evaluator-model',
+  titleKey: 'subagents.goalEvaluator.title',
   fields: [
     { path: MODEL_PATH, kind: 'model' },
     { path: EFFORT_PATH, kind: 'effort' },
@@ -134,7 +134,7 @@ const effortText = (level: string): string => `${effortLevelLabel(level)} ${leve
 
 const effortOptions = computed(() => {
   if (!selected.value) return [{ value: '', label: t('subagents.followPrimary') }]
-  const options = [{ value: '', label: t('subagents.goalCheck.effortFollowRow') }]
+  const options = [{ value: '', label: t('subagents.goalEvaluator.effortFollowRow') }]
   for (const level of selected.value.efforts ?? []) {
     options.push({ value: level, label: effortText(level) })
   }
@@ -154,10 +154,10 @@ const hint = computed(() => {
   if (!row) return t('subagents.effortNeedsModel')
   if (effectiveEffort.value === rowDefault.value) {
     return rowDefault.value
-      ? t('subagents.goalCheck.hintRowDefault', { effort: effortText(rowDefault.value) })
-      : t('subagents.goalCheck.hintRowNone')
+      ? t('subagents.goalEvaluator.hintRowDefault', { effort: effortText(rowDefault.value) })
+      : t('subagents.goalEvaluator.hintRowNone')
   }
-  return t('subagents.goalCheck.hintOverridden', { effort: effortText(effectiveEffort.value) })
+  return t('subagents.goalEvaluator.hintOverridden', { effort: effortText(effectiveEffort.value) })
 })
 
 /** An override is on when a level is stored: equal-to-default is stored as "". */

@@ -379,7 +379,7 @@ select.fld.unset{color:var(--quiet)}
 .cmpbar select.fld:disabled{background-color:var(--alt);color:var(--quiet);border-color:var(--line);cursor:not-allowed;opacity:1}
 .cmpbtn{width:28px;height:28px;border-radius:7px;border:1px solid var(--line);background:#fff;display:grid;place-items:center;color:var(--ink-2)}
 .cmpsend{width:30px;height:30px;border-radius:8px;border:0;background:var(--brand);color:#fff;display:grid;place-items:center}
-/* 子代理 Tab 内的「/goal 检查模型」分组沿用 .grp / .row 版式 */
+/* 子代理 Tab 内的「/goal 评估模型」分组沿用 .grp / .row 版式 */
 /* 模型下拉：搜索框 + 两行模型签名 + 选中态 */
 .mrel{position:relative}
 .combo{display:flex;align-items:center;gap:8px;width:100%;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:#fff;font-size:13px;text-align:left}
@@ -640,7 +640,7 @@ const LSPM = G('lspm','参数','',[
 
 const GROUPS = {};
 
-/* 「/goal 检查模型」区块的数据 */
+/* 「/goal 评估模型」区块的数据 */
 const SS_ROWS = [
   {id:'goal-evaluator', when:'/goal 每轮结束后检查目标是否达成'},
 ];
@@ -695,12 +695,12 @@ function systemSubagentsHTML(){
   const effortOpts = ssEffortOptions(d.model);
   const effortHint = !m ? ''
     : d.effort === m.defaultEffort ? (m.defaultEffort ? `模型页配置的默认强度：${SS_LAB[m.defaultEffort] || m.defaultEffort}` : '该模型未配置默认强度')
-    : `已改为 ${SS_LAB[d.effort] || d.effort}，仅影响目标检查子代理`;
+    : `已改为 ${SS_LAB[d.effort] || d.effort}，仅影响目标评估子代理`;
   const effortReset = !!m && d.effort !== m.defaultEffort;
   const combo = `<button type="button" class="combo ss-combo${SS_OPEN ? ' open' : ''}" data-ss="combo" aria-haspopup="listbox" aria-expanded="${SS_OPEN}">${m ? ssSigShort(m) : '<span class="ph">跟随主代理</span>'}<span class="ss-caret-zone"><span class="ss-caret">${icon('down')}</span><span class="ss-x" data-ss="clear" role="button" tabindex="0" aria-label="清空选择" title="清空选择">${icon('x')}</span></span></button>${SS_OPEN ? `<div class="mmenu ss-menu">${ssModelMenu()}</div>` : ''}`;
 
-  return `<section class="grp ss-grp" data-grp="goal-check-model">
-    <header class="grp-h"><h3>/goal 检查模型</h3></header>
+  return `<section class="grp ss-grp" data-grp="goal-evaluator-model">
+    <header class="grp-h"><h3>/goal 评估模型</h3></header>
     <div class="rows">
       <div class="row ss-row${ssChanged(r.id) ? ' dirty' : ''}">
         <div class="lab">
@@ -730,7 +730,7 @@ function ssToast(text){
   document.body.insertAdjacentHTML('beforeend', `<div id="ss-toast" style="position:fixed;right:26px;bottom:26px;z-index:99;background:var(--ink);color:#fff;border-radius:9px;padding:10px 16px;font-size:12.5px;box-shadow:0 8px 24px rgba(16,24,40,.18)">${esc(text)}</div>`);
   setTimeout(() => { const n = document.getElementById('ss-toast'); if (n) n.remove(); }, 2600);
 }
-/* 「/goal 检查模型」区块的交互 */
+/* 「/goal 评估模型」区块的交互 */
 document.addEventListener('change', e => {
   const t = e.target.closest('[data-ss="effort"]');
   if (!t || !SS_DRAFT[t.dataset.id]) return;

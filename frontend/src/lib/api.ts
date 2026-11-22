@@ -4712,7 +4712,7 @@ export const forebrainApi = {
   },
 
   /** Removes one row. A model an agent defaults to, or one a subagent, the
-   * plan review or the goal check pins by id, is refused with every owner it
+   * plan review or the goal evaluator pins by id, is refused with every owner it
    * has (the refusal's `defaultFor` and `pinnedBy`). */
   deleteLlmModel(id: string) {
     return sendJSON<void>('DELETE', `/llm-models/${encodeURIComponent(id)}`)

@@ -195,7 +195,7 @@ describe('useChatStream helpers', () => {
   it('names the goal round on the working line', () => {
     const working = { kind: 'working' as const, startedAt: 0, elapsedMs: 5000 }
     expect(formatRuntimeStatusLabel({ ...working, goalRound: 2 }).label).toContain('round 2')
-    expect(formatRuntimeStatusLabel({ ...working, goalRound: 2, goalChecking: true }).label).toContain('after round 2')
+    expect(formatRuntimeStatusLabel({ ...working, goalRound: 2, goalEvaluating: true }).label).toContain('after round 2')
   })
 
   it('applies token budget metadata for assistant messages', () => {
@@ -3370,11 +3370,11 @@ describe('conversation tool and approval timeline', () => {
     runEvent(socket, 'evt-3', 3, 'run-goal', 'live-goal', 'subagent_spawned', {
       agent_id: 'check-1', agent_type: 'goal-evaluator', task_id: 'check-1', title: 'Goal Evaluator', task: 'Objective: make the tests pass', execution_id: 'exec-1',
     })
-    expect(stream.runtimeStatus.value.goalChecking).toBe(true)
+    expect(stream.runtimeStatus.value.goalEvaluating).toBe(true)
     runEvent(socket, 'evt-4', 4, 'run-goal', 'live-goal', 'subagent_ended', {
       agent_id: 'check-1', agent_type: 'goal-evaluator', task_id: 'check-1', status: 'ok', execution_id: 'exec-1',
     })
-    expect(stream.runtimeStatus.value.goalChecking).toBe(false)
+    expect(stream.runtimeStatus.value.goalEvaluating).toBe(false)
 
     runEvent(socket, 'evt-5', 5, 'run-goal', 'live-goal', 'goal_round_started', { round: 2, why: 'two tests fail', check_agent_id: 'check-1' })
     expect(stream.runtimeStatus.value.goalRound).toBe(2)

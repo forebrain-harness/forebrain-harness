@@ -23,11 +23,11 @@
  * failing test rather than as a review note.
  *
  * One block is deliberately outside this description (plan 299): 设置 · 子代理's
- * 「/goal 检查模型」. The prototype appends it from its own `systemSubagentsHTML()`
+ * 「/goal 评估模型」. The prototype appends it from its own `systemSubagentsHTML()`
  * rather than listing it in `FORMS`, and its two rows are controls this schema
  * cannot express — a two-line model signature, a caret that becomes a clear x,
  * and an effort list that depends on the chosen model row. It is hand-written in
- * `GoalCheckModelGroup.vue`, sits beside `SettingsTabForm` rather than in
+ * `GoalEvaluatorModelGroup.vue`, sits beside `SettingsTabForm` rather than in
  * `SETTINGS_FORMS`, and must not be added here: the block's shape is the reason
  * the tab's groups still match the prototype exactly.
  */

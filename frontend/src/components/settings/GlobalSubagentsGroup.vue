@@ -11,7 +11,7 @@
        the server holds rather than predicting it. -->
   <!-- The built-in subagent types' install-wide rows (P4): one card, the
        four public types' per-type rows and the two system types' model rows
-       (the /goal check and the exit-plan reviewer, whose groups fold in here
+       (the /goal evaluator and the exit-plan reviewer, whose groups fold in here
        bare). Same semantics as the panel's Built-in subagents page, on the
        settings surface this install uses. -->
   <section v-if="props.form" class="gs" data-group="builtin-subagents">
@@ -21,7 +21,7 @@
     <div class="gs__types" data-shared-types>
       <div v-for="entry in types" :key="entry.type" class="gs__type" :data-shared-type="entry.type">
         <span class="gs__typename font-mono">{{ entry.type }}</span>
-        <GoalCheckModelSelect
+        <GoalEvaluatorModelSelect
           :model-value="entry.model"
           :choices="choices"
           @update:model-value="(next: string) => onTypeModel(entry.type, next)"
@@ -52,7 +52,7 @@
           ✓ {{ t('subagents.shared.typeSaved') }}
         </span>
       </div>
-      <GoalCheckModelGroup v-if="props.form" bare :form="props.form" />
+      <GoalEvaluatorModelGroup v-if="props.form" bare :form="props.form" />
       <PlanReviewerModelGroup v-if="props.form" bare :form="props.form" />
     </div>
   </section>
@@ -152,8 +152,8 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import DataTable, { type DataColumn } from '@/components/common/DataTable.vue'
 import RowAction from '@/components/common/RowAction.vue'
 import RowActions from '@/components/common/RowActions.vue'
-import GoalCheckModelSelect from '@/components/settings/GoalCheckModelSelect.vue'
-import GoalCheckModelGroup from '@/components/settings/GoalCheckModelGroup.vue'
+import GoalEvaluatorModelSelect from '@/components/settings/GoalEvaluatorModelSelect.vue'
+import GoalEvaluatorModelGroup from '@/components/settings/GoalEvaluatorModelGroup.vue'
 import PlanReviewerModelGroup from '@/components/settings/PlanReviewerModelGroup.vue'
 import type { useSettingsForm } from '@/components/settings/form/useSettingsForm'
 import SubagentConfigDrawer from '@/components/subagents/SubagentConfigDrawer.vue'

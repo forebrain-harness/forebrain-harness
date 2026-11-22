@@ -911,7 +911,7 @@ import LspRecommendationCard from '@/components/chat/LspRecommendationCard.vue'
 import DiffView from '@/components/DiffView.vue'
 import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
-import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
+import { FOREBRAIN_GOAL_EVALUATOR_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
 import { artifactsOfPresentFiles, displayPathOf, planArtifactOf, turnDeliverables, turnDiffTotals, type ArtifactView } from '@/lib/artifacts'
 import { docTabFor } from '@/composables/useDocTabs'
@@ -1998,7 +1998,7 @@ const drawerActive = ref('')
 /** This conversation's subagents as the "+" menu lists them: a goal's checks
  *  only once opened. */
 const conversationSubagents = computed(() => subagents.value.filter((record) => (
-  record.agentType !== FOREBRAIN_GOAL_CHECK_AGENT_TYPE || drawerTabs.value.includes(record.agentId)
+  record.agentType !== FOREBRAIN_GOAL_EVALUATOR_AGENT_TYPE || drawerTabs.value.includes(record.agentId)
 )))
 const drawerRecords = computed(() => drawerTabs.value
   .map((id) => subagents.value.find((record) => record.agentId === id))

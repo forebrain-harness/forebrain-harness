@@ -90,7 +90,7 @@ describe('PlanReviewerModelGroup', () => {
     return wrapper
   }
 
-  it('draws the two rows, in the goal check\'s words one row down', async () => {
+  it('draws the two rows, in the goal evaluator\'s words one row down', async () => {
     const wrapper = await mountGroup()
     expect(wrapper.find('[data-group="plan-reviewer-model"] h3').text()).toBe('/plan 复核模型')
     expect(wrapper.text()).toContain('使用的模型')
@@ -110,11 +110,11 @@ describe('PlanReviewerModelGroup', () => {
     expect((wrapper.find('[data-plan-reviewer-effort]').element as HTMLSelectElement).value).toBe('high')
 
     // The clear x answers "" — the same event as choosing nothing.
-    await wrapper.find('[data-goal-check-clear]').trigger('click')
+    await wrapper.find('[data-goal-evaluator-clear]').trigger('click')
     expect((wrapper.find('[data-plan-reviewer-effort]').element as HTMLSelectElement).value).toBe('')
 
-    await wrapper.find('[data-goal-check-model]').trigger('click')
-    await wrapper.find('[data-goal-check-option="llm-row-1"]').trigger('click')
+    await wrapper.find('[data-goal-evaluator-model]').trigger('click')
+    await wrapper.find('[data-goal-evaluator-option="llm-row-1"]').trigger('click')
     expect((wrapper.find('[data-plan-reviewer-effort]').element as HTMLSelectElement).value).toBe('low')
   })
 
@@ -127,7 +127,7 @@ describe('PlanReviewerModelGroup', () => {
     })
     const wrapper = await mountGroup()
     // The menu opens on mount (the prototype's state), so the row is one click.
-    await wrapper.find('[data-goal-check-option="llm-row-1"]').trigger('click')
+    await wrapper.find('[data-goal-evaluator-option="llm-row-1"]').trigger('click')
     await wrapper.find('[data-plan-reviewer-effort]').setValue('high')
     await wrapper.find('[data-plan-reviewer-save]').trigger('click')
     await flushPromises()
@@ -181,12 +181,12 @@ describe('PlanReviewerModelGroup', () => {
     expect(effortValues(wrapper)).toEqual(['', 'low', 'high'])
 
     // The menu opens on mount (the prototype's state), so the row is one click.
-    await wrapper.find('[data-goal-check-option="llm-row-off"]').trigger('click')
+    await wrapper.find('[data-goal-evaluator-option="llm-row-off"]').trigger('click')
     // This row does list `none`: it is offered as one of its levels.
     expect(effortValues(wrapper)).toEqual(['', 'none', 'high', 'xhigh'])
 
-    await wrapper.find('[data-goal-check-model]').trigger('click')
-    await wrapper.find('[data-goal-check-option="llm-row-plain"]').trigger('click')
+    await wrapper.find('[data-goal-evaluator-model]').trigger('click')
+    await wrapper.find('[data-goal-evaluator-option="llm-row-plain"]').trigger('click')
     // A row with no levels answers an empty list: the follow-row value alone.
     expect(effortValues(wrapper)).toEqual([''])
   })

@@ -2058,7 +2058,7 @@ export interface RuntimeStatus {
   /** The round a running /goal is in. */
   goalRound?: number
   /** Set while the goal's check reads the workspace. */
-  goalChecking?: boolean
+  goalEvaluating?: boolean
   /** How long this run waited for the model's first output, once it arrived. */
   firstTokenMs?: number
   /**
@@ -2127,7 +2127,7 @@ import {
   goalFromHistoryRow,
   parseCompactionEvent,
   parseGoalEvent,
-  FOREBRAIN_GOAL_CHECK_AGENT_TYPE,
+  FOREBRAIN_GOAL_EVALUATOR_AGENT_TYPE,
   FOREBRAIN_GOAL_EVENT_TYPES,
   parseTokenBudgetPayload,
   FOREBRAIN_COMPACTION_EVENT_TYPES,
@@ -2880,7 +2880,7 @@ export function formatRuntimeStatusLabel(status: RuntimeStatus, tr: TranslateFn 
   // segment style the worked line uses, once it is known.
   const firstTokenDuration = formatFirstTokenDuration(status.firstTokenMs)
   const firstToken = firstTokenDuration ? ` ${tr('chat.firstToken', { duration: firstTokenDuration })}` : ''
-  if (status.kind === 'working' && status.goalChecking) {
+  if (status.kind === 'working' && status.goalEvaluating) {
     return { label: tr('chat.goal.runtimeChecking', { round: status.goalRound ?? 1, duration }) + firstToken, plan }
   }
   if (status.kind === 'working' && status.toolName === 'shell') {
@@ -3244,7 +3244,7 @@ export function useChatStream() {
     const agentId = String(payload.agentId ?? '').trim()
     const agentType = String(payload.agentType ?? '').trim()
     // A goal's check belongs to the goal: it draws no card of its own.
-    if (agentType === FOREBRAIN_GOAL_CHECK_AGENT_TYPE) return
+    if (agentType === FOREBRAIN_GOAL_EVALUATOR_AGENT_TYPE) return
     const title = String(payload.title ?? '').trim()
     const task = String(payload.task ?? '').trim()
     const executionId = String(payload.executionId ?? evt.runId ?? evt.id ?? '').trim()
@@ -3302,7 +3302,7 @@ export function useChatStream() {
     const agentId = String(payload.agentId ?? '').trim()
     const errText = String(payload.error ?? '').trim()
     // A goal's check never opened a card; its end closes none.
-    if (String(payload.agentType ?? '').trim() === FOREBRAIN_GOAL_CHECK_AGENT_TYPE) return
+    if (String(payload.agentType ?? '').trim() === FOREBRAIN_GOAL_EVALUATOR_AGENT_TYPE) return
     const status = subagentEndStatus(String(payload.status ?? '').trim().toLowerCase(), errText)
     const finishedAtRaw = Number(payload.finishedAtMs)
     const finishedAtMs = Number.isFinite(finishedAtRaw) && finishedAtRaw > 0 ? finishedAtRaw : eventTimestamp(evt.createdAt)
@@ -3508,9 +3508,9 @@ export function useChatStream() {
   }
 
   /** The working line says when a goal's check is reading the workspace. */
-  function setGoalChecking(checking: boolean) {
+  function setGoalEvaluating(checking: boolean) {
     if (runtimeStatus.value.kind === 'idle') return
-    runtimeStatus.value = { ...runtimeStatus.value, goalChecking: checking }
+    runtimeStatus.value = { ...runtimeStatus.value, goalEvaluating: checking }
   }
 
   function clearRuntimeStatus() {
@@ -5415,7 +5415,7 @@ export function useChatStream() {
     if (evt.type === 'subagent_spawned') {
       const agentId = String(payload.agentId ?? '').trim()
       const agentType = String(payload.agentType ?? '').trim()
-      if (agentType === FOREBRAIN_GOAL_CHECK_AGENT_TYPE) setGoalChecking(true)
+      if (agentType === FOREBRAIN_GOAL_EVALUATOR_AGENT_TYPE) setGoalEvaluating(true)
       const task = String(payload.task ?? '').trim()
       const title = String(payload.title ?? '').trim()
 	  const executionId = String(payload.executionId ?? evt.runId ?? evt.id ?? '').trim()
@@ -5463,7 +5463,7 @@ export function useChatStream() {
     if (evt.type === 'subagent_ended') {
       const agentId = String(payload.agentId ?? '').trim()
       const agentType = String(payload.agentType ?? '').trim()
-      if (agentType === FOREBRAIN_GOAL_CHECK_AGENT_TYPE) setGoalChecking(false)
+      if (agentType === FOREBRAIN_GOAL_EVALUATOR_AGENT_TYPE) setGoalEvaluating(false)
       const status = String(payload.status ?? '').trim()
       const errText = String(payload.error ?? '').trim()
 	  const normalizedStatus = status.toLowerCase()
@@ -5848,7 +5848,7 @@ export function useChatStream() {
           runtimeStatus.value = {
             ...runtimeStatus.value,
             goalRound: goal.phase === 'completed' ? undefined : goal.round ?? 1,
-            goalChecking: false,
+            goalEvaluating: false,
           }
         }
         return

@@ -303,7 +303,7 @@ export function compactionFromHistoryRow(record: Record<string, unknown> | null 
 export const FOREBRAIN_GOAL_EVENT_TYPES = new Set(['goal_started', 'goal_round_started', 'goal_completed'])
 
 /** The reserved subagent a /goal's check runs as. */
-export const FOREBRAIN_GOAL_CHECK_AGENT_TYPE = 'goal-evaluator'
+export const FOREBRAIN_GOAL_EVALUATOR_AGENT_TYPE = 'goal-evaluator'
 
 /**
  * One line of a /goal: how it opened, a continuation round, or how it ended.

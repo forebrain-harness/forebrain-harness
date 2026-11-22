@@ -93,7 +93,7 @@ function settingsWith(values: Record<string, unknown>) {
   }
 }
 
-describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
+describe('GoalEvaluatorModelSelect (设置 子代理 /goal 评估模型)', () => {
   beforeEach(() => {
     setLocale('zh')
     // The picker reads the one list every model picker reads.
@@ -113,14 +113,14 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
   }
 
   /** The block, so the tab's other rows never answer these questions. */
-  const block = (wrapper: VueWrapper) => wrapper.find('[data-group="goal-check-model"]')
-  const effort = (wrapper: VueWrapper) => block(wrapper).find('[data-goal-check-effort]')
-  const hint = (wrapper: VueWrapper) => block(wrapper).find('[data-goal-check-hint]')
-  const combo = (wrapper: VueWrapper) => block(wrapper).find('[data-goal-check-model]')
+  const block = (wrapper: VueWrapper) => wrapper.find('[data-group="goal-evaluator-model"]')
+  const effort = (wrapper: VueWrapper) => block(wrapper).find('[data-goal-evaluator-effort]')
+  const hint = (wrapper: VueWrapper) => block(wrapper).find('[data-goal-evaluator-hint]')
+  const combo = (wrapper: VueWrapper) => block(wrapper).find('[data-goal-evaluator-model]')
 
   async function pick(wrapper: VueWrapper, id: string): Promise<void> {
     if (!block(wrapper).find('.gcs__menu').exists()) await combo(wrapper).trigger('click')
-    await block(wrapper).find(`[data-goal-check-option="${id}"]`).trigger('click')
+    await block(wrapper).find(`[data-goal-evaluator-option="${id}"]`).trigger('click')
     await flushPromises()
   }
 
@@ -134,7 +134,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
   it('opens unconfigured: both dropdowns say 跟随主代理, the level is disabled and says why, no save bar', async () => {
     const wrapper = await open({})
 
-    expect(block(wrapper).attributes('data-group')).toBe('goal-check-model')
+    expect(block(wrapper).attributes('data-group')).toBe('goal-evaluator-model')
     // The block folds into the built-in card bare (P4): the card carries the
     // heading, the rows themselves carry none.
     expect(block(wrapper).find('h3').exists()).toBe(false)
@@ -153,7 +153,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
     // A level is the model row's, so the disabled control says which setting
     // comes first instead of explaining nothing (plan 319).
     expect(hint(wrapper).text()).toBe('先指定模型再选思考强度')
-    expect(block(wrapper).find('[data-goal-check-reset]').exists()).toBe(false)
+    expect(block(wrapper).find('[data-goal-evaluator-reset]').exists()).toBe(false)
     expect(block(wrapper).find('.gc__tray--open').exists()).toBe(false)
     // The frozen prototype draws the menu open.
     expect(block(wrapper).find('.gcs__menu').exists()).toBe(true)
@@ -161,18 +161,18 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
 
   it('searches the candidates, and offers every row with its own address', async () => {
     const wrapper = await open({})
-    const options = () => block(wrapper).findAll('[data-goal-check-option]')
+    const options = () => block(wrapper).findAll('[data-goal-evaluator-option]')
 
     expect(options()).toHaveLength(CHOICES.length)
     // The two twin rows are told apart by the second line, not by their name.
-    expect(block(wrapper).find('[data-goal-check-option="llm-a"]').text()).toContain('https://api.deepseek.com')
-    expect(block(wrapper).find('[data-goal-check-option="llm-a-twin"]').text()).toContain('https://llm-proxy.corp.example.com/deepseek')
+    expect(block(wrapper).find('[data-goal-evaluator-option="llm-a"]').text()).toContain('https://api.deepseek.com')
+    expect(block(wrapper).find('[data-goal-evaluator-option="llm-a-twin"]').text()).toContain('https://llm-proxy.corp.example.com/deepseek')
 
-    await block(wrapper).find('[data-goal-check-search]').setValue('火山')
+    await block(wrapper).find('[data-goal-evaluator-search]').setValue('火山')
     expect(options()).toHaveLength(1)
-    expect(options()[0].attributes('data-goal-check-option')).toBe('llm-max')
+    expect(options()[0].attributes('data-goal-evaluator-option')).toBe('llm-max')
 
-    await block(wrapper).find('[data-goal-check-search]').setValue('nothing matches this')
+    await block(wrapper).find('[data-goal-evaluator-search]').setValue('nothing matches this')
     expect(options()).toHaveLength(0)
     expect(block(wrapper).find('.gcs__empty').text()).toBe('没有匹配的模型')
   })
@@ -199,7 +199,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
       '高 high',
     ])
     expect(hint(wrapper).text()).toBe('模型页配置的默认强度：高 high')
-    expect(block(wrapper).find('[data-goal-check-reset]').exists()).toBe(false)
+    expect(block(wrapper).find('[data-goal-evaluator-reset]').exists()).toBe(false)
   })
 
   it('switches rows: the levels and the shown value move with the new row', async () => {
@@ -224,11 +224,11 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
 
     await chooseLevel(wrapper, 'low')
     expect(hint(wrapper).text()).toBe('已改为 低 low，仅影响目标评估子代理')
-    expect(block(wrapper).find('[data-goal-check-reset]').text()).toBe('恢复为模型默认')
+    expect(block(wrapper).find('[data-goal-evaluator-reset]').text()).toBe('恢复为模型默认')
     expect((effort(wrapper).element as HTMLSelectElement).value).toBe('low')
 
     // 保存 → the override is what is stored.
-    await block(wrapper).find('[data-goal-check-save]').trigger('click')
+    await block(wrapper).find('[data-goal-evaluator-save]').trigger('click')
     await flushPromises()
     expect(forebrainApi.saveSettings).toHaveBeenCalledWith(
       {
@@ -240,12 +240,12 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
 
     // 恢复为模型默认 → back to the live reading, and that is stored as "".
     vi.mocked(forebrainApi.saveSettings).mockClear()
-    await block(wrapper).find('[data-goal-check-reset]').trigger('click')
+    await block(wrapper).find('[data-goal-evaluator-reset]').trigger('click')
     await flushPromises()
     expect(hint(wrapper).text()).toBe('模型页配置的默认强度：高 high')
-    expect(block(wrapper).find('[data-goal-check-reset]').exists()).toBe(false)
+    expect(block(wrapper).find('[data-goal-evaluator-reset]').exists()).toBe(false)
 
-    await block(wrapper).find('[data-goal-check-save]').trigger('click')
+    await block(wrapper).find('[data-goal-evaluator-save]').trigger('click')
     await flushPromises()
     expect(forebrainApi.saveSettings).toHaveBeenCalledWith(
       { 'agents.goal_evaluator.reasoning_effort': '' },
@@ -263,7 +263,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
 
     // Choosing the default level explicitly is the same setting as "follow it".
     await chooseLevel(wrapper, 'high')
-    await block(wrapper).find('[data-goal-check-save]').trigger('click')
+    await block(wrapper).find('[data-goal-evaluator-save]').trigger('click')
     await flushPromises()
     expect(forebrainApi.saveSettings).toHaveBeenCalledWith(
       { 'agents.goal_evaluator.reasoning_effort': '' },
@@ -272,7 +272,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
 
     vi.mocked(forebrainApi.saveSettings).mockClear()
     await chooseLevel(wrapper, 'medium')
-    await block(wrapper).find('[data-goal-check-save]').trigger('click')
+    await block(wrapper).find('[data-goal-evaluator-save]').trigger('click')
     await flushPromises()
     expect(forebrainApi.saveSettings).toHaveBeenCalledWith(
       { 'agents.goal_evaluator.reasoning_effort': 'medium' },
@@ -288,20 +288,20 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
     expect((effort(wrapper).element as HTMLSelectElement).value).toBe('low')
     expect(block(wrapper).find('.gc__tray--open').exists()).toBe(false)
 
-    await block(wrapper).find('[data-goal-check-clear]').trigger('click')
+    await block(wrapper).find('[data-goal-evaluator-clear]').trigger('click')
     await flushPromises()
 
     expect(combo(wrapper).text()).toContain('跟随主代理')
-    expect(combo(wrapper).attributes('data-goal-check-model')).toBe('')
+    expect(combo(wrapper).attributes('data-goal-evaluator-model')).toBe('')
     expect(effort(wrapper).attributes('disabled')).toBeDefined()
     expect((effort(wrapper).element as HTMLSelectElement).value).toBe('')
     expect(hint(wrapper).text()).toBe('先指定模型再选思考强度')
-    expect(block(wrapper).find('[data-goal-check-reset]').exists()).toBe(false)
+    expect(block(wrapper).find('[data-goal-evaluator-reset]').exists()).toBe(false)
     expect(block(wrapper).find('.gcs__menu').exists()).toBe(false)
 
     // Clearing is a change: the bar offers to save it.
     expect(block(wrapper).find('.gc__tray--open').exists()).toBe(true)
-    await block(wrapper).find('[data-goal-check-save]').trigger('click')
+    await block(wrapper).find('[data-goal-evaluator-save]').trigger('click')
     await flushPromises()
     expect(forebrainApi.saveSettings).toHaveBeenCalledWith(
       {
@@ -315,15 +315,15 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
   it('saves, shows 已保存, and discards back to the stored values', async () => {
     const wrapper = await open({})
     await pick(wrapper, 'llm-a')
-    await block(wrapper).find('[data-goal-check-save]').trigger('click')
+    await block(wrapper).find('[data-goal-evaluator-save]').trigger('click')
     await flushPromises()
-    expect(block(wrapper).find('[data-goal-check-saved]').text()).toBe('✓ 已保存，下一轮对话生效')
+    expect(block(wrapper).find('[data-goal-evaluator-saved]').text()).toBe('✓ 已保存，下一轮对话生效')
     expect(block(wrapper).find('.gc__tray--open').exists()).toBe(true)
 
     // A second change, then 放弃更改: both the model and the level go back.
     await pick(wrapper, 'llm-max')
     await chooseLevel(wrapper, 'low')
-    await block(wrapper).find('[data-goal-check-discard]').trigger('click')
+    await block(wrapper).find('[data-goal-evaluator-discard]').trigger('click')
     await flushPromises()
     expect((effort(wrapper).element as HTMLSelectElement).value).toBe('high')
     expect(combo(wrapper).text()).toContain('deepseek-v4-flash')
@@ -337,14 +337,14 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
     expect(combo(wrapper).text()).toContain('glm-5.3')
     expect((effort(wrapper).element as HTMLSelectElement).value).toBe('low')
     expect(hint(wrapper).text()).toBe('已改为 低 low，仅影响目标评估子代理')
-    expect(block(wrapper).find('[data-goal-check-reset]').exists()).toBe(true)
+    expect(block(wrapper).find('[data-goal-evaluator-reset]').exists()).toBe(true)
     expect(block(wrapper).find('.gc__tray--open').exists()).toBe(false)
   })
 
   it('keeps twin rows apart: each stores its own row id', async () => {
     const first = await open({})
     await pick(first, 'llm-a')
-    await block(first).find('[data-goal-check-save]').trigger('click')
+    await block(first).find('[data-goal-evaluator-save]').trigger('click')
     await flushPromises()
     expect(forebrainApi.saveSettings).toHaveBeenLastCalledWith(
       { 'agents.goal_evaluator.model': 'llm-a' },
@@ -357,7 +357,7 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
     await pick(second, 'llm-a-twin')
     // The twin's own default level, which the echo follows.
     expect((effort(second).element as HTMLSelectElement).value).toBe('low')
-    await block(second).find('[data-goal-check-save]').trigger('click')
+    await block(second).find('[data-goal-evaluator-save]').trigger('click')
     await flushPromises()
     expect(forebrainApi.saveSettings).toHaveBeenLastCalledWith(
       { 'agents.goal_evaluator.model': 'llm-a-twin' },
@@ -384,6 +384,6 @@ describe('GoalCheckModelSelect (设置 子代理 /goal 评估模型)', () => {
     expect(effort(wrapper).findAll('option').map((option) => option.text())).toEqual(['跟随模型设置'])
     // 该模型未配置默认强度 — stated, not left blank and not an error.
     expect(hint(wrapper).text()).toBe('该模型未配置默认强度')
-    expect(block(wrapper).find('[data-goal-check-reset]').exists()).toBe(false)
+    expect(block(wrapper).find('[data-goal-evaluator-reset]').exists()).toBe(false)
   })
 })

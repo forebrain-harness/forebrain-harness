@@ -1,5 +1,5 @@
 <template>
-  <!-- 设置 · 子代理 · 「/plan 复核模型」(plan 313). The goal check's block one row
+  <!-- 设置 · 子代理 · 「/plan 复核模型」(plan 313). The goal evaluator's block one row
        down (plan 299), and hand-written for the same reason: a model signature,
        a caret that becomes a clear x, and a thinking level that belongs to the
        chosen row and is disabled without one are exactly what SETTINGS_FORMS
@@ -23,7 +23,7 @@
           <b>{{ t('subagents.planReviewer.modelLabel') }}</b>
         </div>
         <div class="pr__ctl">
-          <GoalCheckModelSelect
+          <GoalEvaluatorModelSelect
             :model-value="modelId"
             :choices="choices"
             @update:model-value="onModel"
@@ -98,9 +98,9 @@
  */
 import { computed, onBeforeUnmount, ref } from 'vue'
 
-// The goal check's clearable model picker, unchanged: it answers a configured
-// row's id and knows nothing about the goal check but its first caller.
-import GoalCheckModelSelect from '@/components/settings/GoalCheckModelSelect.vue'
+// The goal evaluator's clearable model picker, unchanged: it answers a configured
+// row's id and knows nothing about the goal evaluator but its first caller.
+import GoalEvaluatorModelSelect from '@/components/settings/GoalEvaluatorModelSelect.vue'
 import type { SettingsGroup } from '@/lib/settingsSchema'
 import { effortLevelLabel } from '@/lib/effortLabel'
 import { useModelChoices } from '@/composables/useModelChoices'
@@ -223,7 +223,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* The goal check's block, one row down: same rhythm, same tray. */
+/* The goal evaluator's block, one row down: same rhythm, same tray. */
 .pr {
   margin-top: 36px;
 }

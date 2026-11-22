@@ -1,5 +1,5 @@
 <template>
-  <!-- The clearable model picker of 设置 · 子代理's 「/goal 检查模型」 group
+  <!-- The clearable model picker of 设置 · 子代理's 「/goal 评估模型」 group
        (plan 299 §2). The component library has no arrow↔x swap
        (reka-ui's Select hard-codes its chevron and its ComboboxCancel clears
        an input, not a pair of controls), so this one is hand-built: a 32px
@@ -10,7 +10,7 @@
       type="button"
       class="gcs__combo"
       :class="{ 'gcs__combo--open': open }"
-      :data-goal-check-model="modelValue"
+      :data-goal-evaluator-model="modelValue"
       aria-haspopup="listbox"
       :aria-expanded="open"
       @click="open = !open"
@@ -28,9 +28,9 @@
           class="gcs__x"
           role="button"
           tabindex="0"
-          :aria-label="t('subagents.goalCheck.clear')"
-          :title="t('subagents.goalCheck.clear')"
-          data-goal-check-clear
+          :aria-label="t('subagents.goalEvaluator.clear')"
+          :title="t('subagents.goalEvaluator.clear')"
+          data-goal-evaluator-clear
           @click.stop="clear"
           @keydown.enter.stop.prevent="clear"
           @keydown.space.stop.prevent="clear"
@@ -46,9 +46,9 @@
         <input
           v-model="query"
           type="text"
-          :placeholder="t('subagents.goalCheck.search')"
-          :aria-label="t('subagents.goalCheck.searchLabel')"
-          data-goal-check-search
+          :placeholder="t('subagents.goalEvaluator.search')"
+          :aria-label="t('subagents.goalEvaluator.searchLabel')"
+          data-goal-evaluator-search
         >
       </label>
       <div class="gcs__list">
@@ -60,7 +60,7 @@
           :class="{ 'gcs__opt--on': choice.id === modelValue }"
           role="option"
           :aria-selected="choice.id === modelValue"
-          :data-goal-check-option="choice.id"
+          :data-goal-evaluator-option="choice.id"
           @click="pick(choice.id)"
         >
           <span class="gcs__lead">
@@ -74,7 +74,7 @@
             :api-path="choice.apiPath"
           />
         </button>
-        <p v-if="filtered.length === 0" class="gcs__empty">{{ t('subagents.goalCheck.empty') }}</p>
+        <p v-if="filtered.length === 0" class="gcs__empty">{{ t('subagents.goalEvaluator.empty') }}</p>
       </div>
     </div>
   </div>
@@ -82,7 +82,7 @@
 
 <script setup lang="ts">
 /**
- * The /goal check's model picker (plan 299 §2). It answers a configured row's
+ * The /goal evaluator's model picker (plan 299 §2). It answers a configured row's
  * id and nothing else: the same provider/model may be configured several times,
  * and only the id tells those rows apart, so the candidate list keeps the two
  * line signature (name + provider, then address + path) that distinguishes them

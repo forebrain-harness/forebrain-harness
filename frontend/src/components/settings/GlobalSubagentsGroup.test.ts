@@ -125,8 +125,8 @@ describe('GlobalSubagentsGroup', () => {
     ])
     // A type with a global row shows it; one without says nothing is set.
     const explore = wrapper.find('[data-shared-type="explore"]')
-    expect(explore.find('[data-goal-check-model="llm-row-1"]').exists()).toBe(true)
-    expect(wrapper.find('[data-shared-type="plan"] [data-goal-check-model=""]').exists()).toBe(true)
+    expect(explore.find('[data-goal-evaluator-model="llm-row-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-shared-type="plan"] [data-goal-evaluator-model=""]').exists()).toBe(true)
   })
 
   it('saves one type’s default row through the registry endpoint', async () => {
@@ -140,7 +140,7 @@ describe('GlobalSubagentsGroup', () => {
 
     // The picker is an inline one — its list stays open until a row is chosen —
     // so the choice is the option inside this type's own row.
-    await wrapper.find('[data-shared-type="general-purpose"] [data-goal-check-option="llm-row-1"]').trigger('click')
+    await wrapper.find('[data-shared-type="general-purpose"] [data-goal-evaluator-option="llm-row-1"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.find('[data-shared-type-save="general-purpose"]').attributes('disabled')).toBeUndefined()
