@@ -44,13 +44,17 @@ const panelStatusColumnMax = 16
 // happens in a terminal too narrow for any tab bar; it takes a row of its own,
 // hard-folded, rather than sharing one or disappearing.
 func (l panelLine) chipRows(width int) []string {
+	chips := l.chips
+	if width < panelNarrowWidth && len(l.chipsNarrow) > 0 {
+		chips = l.chipsNarrow
+	}
 	leadW := displayLineWidth(l.lead)
 	avail := maxInt(1, width-leadW)
 	lead := l.lead
 	hang := strings.Repeat(" ", leadW)
 	var rows []string
 	cur, curW := "", 0
-	for _, chip := range l.chips {
+	for _, chip := range chips {
 		w := displayLineWidth(chip)
 		switch {
 		case w > avail:

@@ -7766,6 +7766,10 @@ type panelLine struct {
 	// panelChipGap cells apart and wrapped whole, so a tab's name and its count
 	// never part across rows (the tab bar).
 	chips []string
+	// chipsNarrow, when set, is the chip set a narrow terminal takes in place
+	// of chips: the /config tab bar's short labels, without the counts a narrow
+	// row cannot hold (prototype .terminal.narrow .tab, plan 350).
+	chipsNarrow []string
 	// col, when colWidth > 0, is a column of its own between lead and text:
 	// the name of a two-column row. See columnRows.
 	col      string
@@ -8257,6 +8261,56 @@ func wrapPanelWords(text string, width int) []string {
 }
 
 func (b *panelBuilder) hint(text string) { b.hintText = text }
+
+// panelChrome is the /config panel's own header: the tab bar every page of the
+// panel carries, however deep the page sits (plan 350; the prototype draws the
+// tabs above every view). The pages below it carry no title and no subtitle of
+// their own — owner 2026-11-18 and 2026-11-21, the prototype's heading() and
+// breadcrumb() are empty — so the tab bar is the whole header.
+type panelChrome struct {
+	// Labels are the tabs' full labels, in the bar's order, and Short the label
+	// a narrow terminal takes for each of them: three short words are all 88
+	// columns hold (prototype .terminal.narrow .tab).
+	Labels []string
+	Short  []string
+	// Counts are the rows each tab holds, drawn beside its label. A narrow
+	// terminal drops them, as the prototype does; nil draws none at any width.
+	Counts []int
+	// Active is the index of the tab shown.
+	Active int
+}
+
+// chips lays the tab bar out twice: the full labels with their counts, and the
+// short labels alone for a narrow terminal.
+func (c *panelChrome) chips() (wide, narrow []string) {
+	wide = make([]string, len(c.Labels))
+	narrow = make([]string, len(c.Labels))
+	for i, label := range c.Labels {
+		text := label
+		if i < len(c.Counts) {
+			text = label + " " + strconv.Itoa(c.Counts[i])
+		}
+		short := label
+		if i < len(c.Short) && c.Short[i] != "" {
+			short = c.Short[i]
+		}
+		if i == c.Active {
+			text, short = panelTabStyle.Render(text), panelTabStyle.Render(short)
+		}
+		wide[i], narrow[i] = text, short
+	}
+	return wide, narrow
+}
+
+// chrome adds the panel's tab bar to the pinned head, one pre-styled chip per
+// tab (plan 350).
+func (b *panelBuilder) chrome(c *panelChrome) {
+	if c == nil || len(c.Labels) == 0 {
+		return
+	}
+	wide, narrow := c.chips()
+	b.head = append(b.head, panelLine{lead: panelIndent, chips: wide, chipsNarrow: narrow})
+}
 
 // facts renders "Label: value" rows with the values aligned in one column; a
 // long value wraps inside that column, never across the panel edge.

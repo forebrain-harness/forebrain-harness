@@ -43,8 +43,8 @@ const (
 	configRowDropLabel = "Delete this row"
 	configRowBackLabel = "Back"
 
-	configBoolOnLabel  = "On"
-	configBoolOffLabel = "Off"
+	configBoolOnLabel  = "True"
+	configBoolOffLabel = "False"
 	// configDefaultActionLabel is how the edit view's footer action reads
 	// (plan 326 D4): an action on the editor of a text or number setting,
 	// never a value among the real ones and never a row of a choice list
@@ -64,8 +64,8 @@ const (
 
 	configNewTextRow   = "Text"
 	configNewNumberRow = "Number"
-	configNewTrueRow   = "On"
-	configNewFalseRow  = "Off"
+	configNewTrueRow   = "True"
+	configNewFalseRow  = "False"
 	configNewListRow   = "List"
 	// configNewBooleanRow is the value-type toggle's boolean row (plan 328
 	// D4): the type is one row, and its value is picked as the two real
@@ -169,6 +169,13 @@ type configPanel struct {
 	// last had open, so backing out of a page returns to where they were
 	// without the panel keeping any chrome of its own (plan 325).
 	overviewRow int
+	// tab is the tab of the section page open. Every page of the panel draws it
+	// in the header — the tab bar stays however deep the page sits (plan 350).
+	tab string
+	// tabStep is the arrow a page of the open section asked to step with, taken
+	// by the section page that owns the list: a page's ←/→ steps the whole panel
+	// to the next tab, the way the prototype's goOverview does (plan 350).
+	tabStep int
 }
 
 func newConfigPanel(sel Selector, renderer *Renderer, session configPanelSession) *configPanel {
@@ -231,9 +238,159 @@ func (p *configPanel) run(ctx context.Context, start string) {
 		if !p.editSection(ctx, name) {
 			return
 		}
-		p.overviewRow = p.sectionRow(name)
+		p.leaveSection(name)
 		name = ""
 	}
+}
+
+// leaveSection is where the list reopens once one section's page closed: the
+// section the user left, or — when a page stepped with an arrow — the first
+// section of the tab it stepped to (plan 350, the prototype's goOverview).
+func (p *configPanel) leaveSection(name string) {
+	step, tab := p.tabStep, ""
+	p.tabStep = 0
+	if step != 0 {
+		tab = p.stepTab(step)
+	}
+	if tab != "" {
+		for i, schema := range panelSections() {
+			if schema.Tab == tab {
+				p.overviewRow = i
+				return
+			}
+		}
+	}
+	p.overviewRow = p.sectionRow(name)
+}
+
+// offeredTabs are the tabs this machine shows, in the bar's order: the whole
+// table, minus a tab whose every section the platform hid.
+func (p *configPanel) offeredTabs() []string {
+	tabs := make([]string, 0, len(configTabLabels))
+	for _, tab := range configTabLabels {
+		for _, schema := range panelSections() {
+			if schema.Tab == tab.Name {
+				tabs = append(tabs, tab.Name)
+				break
+			}
+		}
+	}
+	return tabs
+}
+
+// stepTab is the tab a step lands on, wrapping around the tabs this machine
+// offers; "" when the open page's tab is not one of them.
+func (p *configPanel) stepTab(step int) string {
+	tabs := p.offeredTabs()
+	at := -1
+	for i, tab := range tabs {
+		if tab == p.tab {
+			at = i
+		}
+	}
+	if at < 0 || len(tabs) == 0 {
+		return ""
+	}
+	n := len(tabs)
+	return tabs[((at+step)%n+n)%n]
+}
+
+// chrome is the header every page of the panel draws: the tab bar, each offered
+// tab carrying the number of sections it holds, with the tab of the open page
+// marked. The pages below it carry no title and no summary of their own (plan
+// 350; owner 2026-11-18/21 — a command panel stays bare).
+func (p *configPanel) chrome() *panelChrome {
+	labels := make([]string, 0, len(configTabLabels))
+	short := make([]string, 0, len(configTabLabels))
+	counts := make([]int, 0, len(configTabLabels))
+	active := 0
+	for _, tab := range configTabLabels {
+		sections := 0
+		for _, schema := range panelSections() {
+			if schema.Tab == tab.Name {
+				sections++
+			}
+		}
+		if sections == 0 {
+			continue
+		}
+		if tab.Name == p.tab {
+			active = len(labels)
+		}
+		labels = append(labels, tab.Name)
+		short = append(short, tab.Short)
+		counts = append(counts, sections)
+	}
+	return &panelChrome{Labels: labels, Short: short, Counts: counts, Active: active}
+}
+
+// How each kind of page names its two keys in the footer, word for word from
+// the prototype's footerHTML (plan 350): a section page's Enter opens a
+// setting and its Esc goes back, a choice or an editor saves, a removal
+// confirms.
+var (
+	configFieldKeys   = &configPageKeys{Enter: "open", Esc: "go back"}
+	configChoiceKeys  = &configPageKeys{Enter: "save", Esc: "cancel"}
+	configConfirmKeys = &configPageKeys{Enter: "confirm", Esc: "cancel"}
+)
+
+// page opens one of the panel's pages — the tab bar in its head and the page's
+// own rows — and answers the row Enter chose. A page's ←/→ is taken here and
+// held for the section page that owns the list, so one arrow steps the whole
+// panel to another tab however deep it sits (plan 350); every caller unwinds on
+// !ok, which is what that step reports.
+func (p *configPanel) page(label string, keys *configPageKeys, items []SelectItem, defaultIdx int) (int, bool, error) {
+	res, err := p.plainPage(label, keys, items, defaultIdx)
+	return res.Row, res.OK, err
+}
+
+// actionPage is page's action-aware form, for the pages that read which action
+// fired on which row. Only a page that carries footer actions takes the action
+// path; every other page draws as the panel's own page, so a selector with no
+// footer actions keeps reading the pages it always read.
+func (p *configPanel) actionPage(label string, keys *configPageKeys, items []SelectItem, defaultIdx int, actions ...FooterAction) (ActionResult, error) {
+	rich, ok := p.sel.(ActionRichSelector)
+	if !ok {
+		// A selector that draws no panel at all — piped stdin — reads the
+		// plain picker: no chrome, no keys, just the rows.
+		return p.plainPage(label, keys, items, defaultIdx)
+	}
+	res, err := rich.SelectRichActions(label, items, defaultIdx, ActionOptions{
+		Page: true, Chrome: p.chrome(), Keys: keys, FooterActions: actions,
+	})
+	if err != nil {
+		return ActionResult{Row: -1}, err
+	}
+	// An arrow steps to the tab beside this page's, held for the section page
+	// that owns the list (plan 350).
+	if res.TabStep != 0 {
+		p.tabStep = res.TabStep
+		return ActionResult{Row: -1}, nil
+	}
+	return res, nil
+}
+
+// plainPage opens one of the panel's pages that carries no footer actions: the
+// tab bar in its head, the page's rows and the keys it names. The selector's
+// own config page draws it when it has one, and the plain picker answers a
+// selector that draws no panel.
+func (p *configPanel) plainPage(label string, keys *configPageKeys, items []SelectItem, defaultIdx int) (ActionResult, error) {
+	if pages, ok := p.sel.(configPageSelector); ok {
+		res, err := pages.SelectConfigPage(label, items, defaultIdx, ActionOptions{Page: true, Chrome: p.chrome(), Keys: keys})
+		if err != nil {
+			return ActionResult{Row: -1}, err
+		}
+		if res.TabStep != 0 {
+			p.tabStep = res.TabStep
+			return ActionResult{Row: -1}, nil
+		}
+		return res, nil
+	}
+	idx, ok, err := p.sel.SelectRich(label, items, defaultIdx)
+	if err != nil {
+		return ActionResult{Row: -1}, err
+	}
+	return ActionResult{Row: idx, OK: ok}, nil
 }
 
 // sectionRow is the section list's row for one section, so the list reopens
@@ -252,7 +409,7 @@ func (p *configPanel) sectionRow(name string) int {
 // tab bar and the rows say everything, and a command panel stays bare.
 func (p *configPanel) chooseSection() (string, bool) {
 	items, names := p.sectionItems()
-	idx, ok, err := selectRichTabbedPage(p.sel, "", items, TabbedSelectOptions{DefaultIdx: p.overviewRow})
+	idx, ok, err := selectRichTabbedPage(p.sel, "", items, TabbedSelectOptions{DefaultIdx: p.overviewRow}, p.chrome())
 	if err != nil {
 		p.printError(err)
 		return "", false
@@ -340,34 +497,28 @@ func (p *configPanel) editSection(ctx context.Context, name string) bool {
 		return true
 	}
 	p.section = schema.storeSection()
+	p.tab = schema.Tab
 	p.write = func(raw json.RawMessage) error {
 		return p.session.UpdateConfigSection(ctx, p.section, raw)
 	}
 	defer func() {
-		p.section, p.write = "", nil
+		p.section, p.write, p.tab = "", nil, ""
 	}()
 	doc := p.sectionDoc(name)
 	notice := ""
-	actions := p.configActionSelector()
+	tailRows := p.configActionSelector() == nil
 	for {
-		items, owners := p.fieldItems(schema, doc, actions == nil)
-		prompt := p.sectionPrompt(schema, doc, notice)
-		var idx int
-		var ok bool
-		if actions != nil {
-			res, err := actions.SelectRichActions(prompt, items, -1, configPageActions())
-			if err != nil {
-				p.printError(err)
-				return false
-			}
-			idx, ok = res.Row, res.OK
-		} else {
-			var err error
-			idx, ok, err = selectRichPage(p.sel, prompt, items, -1)
-			if err != nil {
-				p.printError(err)
-				return false
-			}
+		items, owners := p.fieldItems(schema, doc, tailRows)
+		res, err := p.actionPage(p.sectionNotice(schema, notice), configFieldKeys, items, -1)
+		idx, ok := res.Row, res.OK
+		if err != nil {
+			p.printError(err)
+			return false
+		}
+		// An arrow on this page steps to the tab beside it: the list reopens
+		// there, on that tab's first section (plan 350).
+		if p.tabStep != 0 {
+			return true
 		}
 		notice = ""
 		if !ok || idx < 0 || idx >= len(owners) {
@@ -399,12 +550,6 @@ func (p *configPanel) configActionSelector() ActionRichSelector {
 	return nil
 }
 
-// configPageActions shapes one of the panel's action-aware pages: the
-// /config page style (plan 325) plus the footer actions given.
-func configPageActions(actions ...FooterAction) ActionOptions {
-	return ActionOptions{Page: true, FooterActions: actions}
-}
-
 // fieldItems is one section's page: its settings, each with the value it holds
 // in the row's value column and its hint beside the label, then the way back
 // when the page keeps its tail rows. A field's Group names the fixed page
@@ -416,8 +561,7 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any, tailRows b
 		if !configFieldListed(field, p.claudeCode) {
 			continue
 		}
-		description, value, status := p.configFieldRow(doc, schema, field)
-		items = append(items, SelectItem{Label: field.Label, Description: description, Value: value, Status: status, Category: field.Group})
+		items = append(items, SelectItem{Label: field.Label, Value: p.configFieldRow(doc, field), Category: field.Group})
 		owners = append(owners, i)
 	}
 	if tailRows {
@@ -428,44 +572,23 @@ func (p *configPanel) fieldItems(schema configSectionSchema, doc any, tailRows b
 }
 
 // configFieldRow is one setting's row on the section page: the value it holds
-// in the row's value column, the hint beside it, and the status a projection
-// carries. A projection's install-wide type pins read as what they resolve to
-// (plan 324 D7): the model row in the value column, the thinking level in
-// force as the status, and the prototype's help sentence as the description.
-func (p *configPanel) configFieldRow(doc any, schema configSectionSchema, field configField) (string, string, string) {
-	if field.Kind == configFieldBuiltinSubagents {
-		// The entry names what the page behind it holds: the count of the
-		// per-type rows someone pinned, out of the six types (P4).
-		pins, _ := configLookupValue(doc, configFieldPath(field))
-		rows, _ := pins.(map[string]any)
-		set := 0
-		for _, row := range rows {
-			if refOfRow(row) != "" {
-				set++
-			}
-		}
-		return configFieldHint(field), fmt.Sprintf("%d of 6 types pinned", set), ""
-	}
+// in the row's value column.
+func (p *configPanel) configFieldRow(doc any, field configField) string {
 	return p.configFieldDescription(doc, field)
 }
 
-// configTypePinRow is one install-wide type pin's row on the projection's
-// section page (plan 324 D7): the value column names the model row the pin
-// stores — or the sentence for a pin nobody set — the status names the
-// thinking level in force, and the description carries the field's own help
-// sentence.
+// configTypePinRow is one install-wide type pin's row (plan 324 D7): the value
+// column names the model row the pin stores — or the sentence for a pin nobody
+// set — and the status names the thinking level in force. The help sentence
+// belongs to the type's editor, not to its row (plan 350).
 func (p *configPanel) configTypePinRow(doc any, field configField, path []string) (string, string, string) {
-	description := configFieldHint(field)
-	if description == "" {
-		description = "Install-wide default model and thinking level; an agent's own override still wins."
-	}
 	ref := refOfRow(doc, path...)
 	if ref == "" {
-		return description, configFollowConversation, ""
+		return "", configFollowConversation, ""
 	}
 	row, _ := configLookupValue(doc, path)
 	settings, _ := row.(map[string]any)
-	return description, p.configModelRowLabel(ref), configEffortSummary(configStringField(settings, configEffortKey))
+	return "", p.configModelRowLabel(ref), configEffortSummary(configStringField(settings, configEffortKey))
 }
 
 // refOfRow is one stored row's model reference, empty when it names none.
@@ -516,7 +639,7 @@ func (p *configPanel) editBuiltinSubagents(doc any, field configField) (any, str
 				template string
 			}{})
 		}
-		idx, ok, err := selectRichPage(p.sel, p.fieldPrompt(field), items, -1)
+		idx, ok, err := p.page("", configFieldKeys, items, -1)
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -589,14 +712,13 @@ func configFieldListed(field configField, claudeCode bool) bool {
 	return true
 }
 
-// sectionPrompt is the section page's heading: what the section is, and the
-// last outcome — a value that did not land, or the row a page refused. The
-// section's own page names it by title, never by the key forebrain.yaml stores
-// it under (plan 321). A section whose every field the Claude Code gate hid is
-// the prototype's empty state (plan 327 D4, prototype html:157): the page says
-// what is missing instead of showing nothing at all.
-func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice string) string {
-	head := schema.Title + "\n" + schema.Summary
+// sectionNotice is what a section page carries under its tab bar: the last
+// outcome — a value that did not land, or the row a page refused — and nothing
+// else. The page's own title and summary are gone (owner 2026-11-18/21): the
+// tab bar above it and the rows below it say everything. A section whose every
+// field the Claude Code gate hid is the prototype's empty state (plan 327 D4,
+// prototype html:157): it says what is missing instead of showing nothing.
+func (p *configPanel) sectionNotice(schema configSectionSchema, notice string) string {
 	if !p.claudeCode && len(schema.Fields) > 0 {
 		gated := true
 		for _, field := range schema.Fields {
@@ -606,13 +728,23 @@ func (p *configPanel) sectionPrompt(schema configSectionSchema, doc any, notice 
 			}
 		}
 		if gated {
-			head += "\nNo compatible installation found\nClaude Code interop appears when a local installation is available."
+			return joinNotice(notice, "No compatible installation found\nClaude Code interop appears when a local installation is available.")
 		}
 	}
-	if notice != "" {
-		head += "\n" + notice
+	return notice
+}
+
+// joinNotice is a page's outcome and its state sentence as one label: the
+// outcome first, since it answers the key just pressed, and nothing left empty
+// when both are.
+func joinNotice(notice, state string) string {
+	switch {
+	case notice == "":
+		return state
+	case state == "":
+		return notice
 	}
-	return head
+	return notice + "\n" + state
 }
 
 // save writes the open page's document as its section's row — the one write
@@ -788,7 +920,7 @@ func (p *configPanel) editBool3(doc any, path []string, field configField, cur a
 		// an unset switch names neither On nor Off.
 		items[defaultIdx].Status = configChoiceCheckStatus
 	}
-	idx, ok, err := selectRichPage(p.sel, p.fieldPrompt(field), items, defaultIdx)
+	idx, ok, err := p.page("", configChoiceKeys, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -837,7 +969,7 @@ func (p *configPanel) editEnum(doc any, path []string, field configField, cur an
 	if current >= 0 {
 		items[current].Status = configChoiceCheckStatus
 	}
-	idx, ok, err := selectRichPage(p.sel, p.fieldPrompt(field), items, defaultIdx)
+	idx, ok, err := p.page("", configChoiceKeys, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -932,22 +1064,51 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 // no key to fire, and an empty input stands for it — the line mode's ladder.
 // A multiline field opens the textarea instead (plan 328 D2): plain Enter
 // starts a new line, Ctrl+Enter saves.
+//
+// The editor is one of the panel's own pages (plan 350): the tab bar above it,
+// the setting's help under its input where the prototype's editor-help sits,
+// and the footer's Default on Ctrl+U only where the setting has a default to
+// restore. An empty answer unsets the key, the way an empty field reads in the
+// prototype.
 func (p *configPanel) editScalar(field configField, value string) (text string, ok, unset bool, err error) {
 	actions := p.configActionSelector()
 	if actions == nil {
 		text, ok, err = p.sel.Input(p.fieldPrompt(field), value)
 		return text, ok, strings.TrimSpace(text) == "" && ok, err
 	}
-	opts := configEditActions()
-	opts.Multiline = field.Multiline
-	res, err := actions.InputActions(p.fieldPrompt(field), value, opts)
+	res, err := actions.InputActions("", value, p.editorOptions(field, false))
 	if err != nil || !res.OK {
 		return "", false, false, err
 	}
 	if res.Action == FooterActionDefault {
 		return "", true, true, nil
 	}
-	return res.Text, true, false, nil
+	return res.Text, true, strings.TrimSpace(res.Text) == "", nil
+}
+
+// editorOptions shapes one of the panel's editor pages: its header, the help
+// under the input, and the footer's Default where the setting has one (plan
+// 350). secret opens the masked editor.
+func (p *configPanel) editorOptions(field configField, secret bool) ActionOptions {
+	opts := ActionOptions{
+		Page: true, Chrome: p.chrome(), Keys: configChoiceKeys,
+		Help: configFieldHint(field), Multiline: field.Multiline, Secret: secret,
+	}
+	if secret {
+		opts.Help = configSecretReplacementLabel
+	}
+	if configFieldHasDefault(field) && !secret {
+		opts.FooterActions = []FooterAction{{Label: configDefaultActionLabel, Key: configDefaultActionKey, Kind: FooterActionDefault}}
+	}
+	return opts
+}
+
+// configFieldHasDefault reports whether a setting has a default of its own to
+// restore — the condition the prototype's editor shows its Ctrl+U hint under
+// (html:196, hasDefault). The descriptor's DefaultValue is that default: the
+// value the panel preselects when the setting holds none.
+func configFieldHasDefault(field configField) bool {
+	return strings.TrimSpace(field.DefaultValue) != ""
 }
 
 // editSecret replaces one secret (plan 328 D3, prototype html:106/118/159).
@@ -958,14 +1119,16 @@ func (p *configPanel) editScalar(field configField, value string) (text string, 
 // selector reads its answers in the clear, so on one of those the edit is
 // refused outright rather than echoed.
 func (p *configPanel) editSecret(doc any, path []string, field configField, cur any) (any, string) {
-	if p.configActionSelector() == nil {
+	actions := p.configActionSelector()
+	if actions == nil {
 		return doc, configSecretLineNotice
 	}
-	replacement, ok, err := p.sel.Secret(field.Label+"\n"+configSecretReplacementLabel, "")
+	res, err := actions.InputActions("", "", p.editorOptions(field, true))
 	if err != nil {
 		p.printError(err)
 		return doc, ""
 	}
+	replacement, ok := res.Text, res.OK
 	if !ok {
 		return doc, ""
 	}
@@ -973,15 +1136,6 @@ func (p *configPanel) editSecret(doc any, path []string, field configField, cur 
 		return doc, configSecretEmptyNotice
 	}
 	return p.assign(doc, path, replacement, false, field.Label)
-}
-
-// configEditActions is the edit view's footer: the one action the prototype
-// gives it, Default, on the key the editor reserves (plan 326 D1). The key is
-// carried on the action so the footer shows it beside the label — an action
-// whose key is empty reads as a bare word (owner 2026-11-19: show the key
-// whenever the action has one).
-func configEditActions() ActionOptions {
-	return ActionOptions{FooterActions: []FooterAction{{Label: configDefaultActionLabel, Key: configDefaultActionKey, Kind: FooterActionDefault}}}
 }
 
 // editEffort is one thinking level's picker (plan 319): the levels the model
@@ -1017,7 +1171,7 @@ func (p *configPanel) editEffort(doc any, path []string, field configField, prom
 		rowDefault.Status = configChoiceCheckStatus
 	}
 	items = append(items, rowDefault)
-	idx, ok, err := selectRichPage(p.sel, prompt, items, defaultIdx)
+	idx, ok, err := p.page("", configChoiceKeys, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1124,7 +1278,7 @@ func (p *configPanel) editModel(doc any, path []string, field configField, cur a
 	// The choice page is the option list alone (plan 327 D2, owner
 	// 2026-11-18): the field's own label heads it, with no instructional
 	// sub copy — the rows' descriptions already say where requests go.
-	idx, ok, err := selectRichPage(p.sel, field.Label, items, defaultIdx)
+	idx, ok, err := p.page("", configChoiceKeys, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1240,12 +1394,13 @@ func configFieldHint(field configField) string {
 	return ""
 }
 
-// configFieldDescription is a field's picker row: the hint that says what the
-// setting means beside the label, and the value it holds in the row's value
-// column — the panel's descriptions belong to settings, not to the values they
-// happen to hold right now (plan 321). A model reference names its row through
-// the install's table, the way the pickers do (plan 324 D6).
-func (p *configPanel) configFieldDescription(doc any, field configField) (string, string, string) {
+// configFieldDescription is a field's row: the label the page lists it under,
+// and the value it holds in the row's value column (plan 350). The field's help
+// is not part of the row — it belongs to the setting's editor, the one place
+// the prototype shows it — and a setting carries no status of its own: the
+// status column is reserved for the words a row is marked with (a definition's
+// role, a shared subagent's switch, a built-in type's effective model).
+func (p *configPanel) configFieldDescription(doc any, field configField) string {
 	value, exists := configLookupValue(doc, configFieldPath(field))
 	// A section that is its own setting (approval_preset, a bare string)
 	// reads the whole document at an empty path, which always answers
@@ -1253,17 +1408,10 @@ func (p *configPanel) configFieldDescription(doc any, field configField) (string
 	if doc == nil {
 		exists = false
 	}
-	// A row nobody set carries the prototype's Default status at its right
-	// edge (plan 327 D6, prototype html:150), beyond whatever its value
-	// column reads.
-	status := ""
-	if !exists {
-		status = configDefaultStatus
-	}
 	if field.Kind == configFieldModel {
-		return configFieldHint(field), p.configModelValueText(field, value), status
+		return p.configModelValueText(field, value)
 	}
-	return configFieldHint(field), configFieldValueText(field, value, exists), status
+	return configFieldValueText(field, value, exists)
 }
 
 // configRowAdd and configRowUp own the row page's two action rows; a row's
@@ -1300,11 +1448,11 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 		if list && agentSubagentsPath(path) {
 			keys = append(keys, missingSharedSubagentKeys(doc, container)...)
 		}
-		prompt := p.rowsPrompt(field, keys, notice)
+		label := rowsNotice(keys, notice)
 		notice = ""
 		if actions == nil {
 			items, owners := p.rowItems(doc, path, container, keys, list, true)
-			idx, ok, err := selectRichPage(p.sel, prompt, items, -1)
+			idx, ok, err := p.page(label, configFieldKeys, items, -1)
 			if err != nil {
 				p.printError(err)
 				return doc, ""
@@ -1323,20 +1471,20 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 			continue
 		}
 		items, _ := p.rowItems(doc, path, container, keys, list, false)
-		opts := configPageActions(
-			FooterAction{Label: configAddActionLabel, Key: "a", Kind: FooterActionAdd},
-			FooterAction{
+		pageActions := []FooterAction{
+			{Label: configAddActionLabel, Key: "a", Kind: FooterActionAdd},
+			{
 				Label: configRemoveActionLabel, Key: "d", Kind: FooterActionRemove,
-				// Remove serves the entry rows alone (plan 326 D2): the rows
-				// a template opens straight into an editor — a path, a
-				// string — never a container, a fixed field or a shared
-				// subagent's switch.
+				// Remove serves the collection's entry rows (plan 350): every
+				// row that stands for a stored entry, container rows
+				// included. A shared subagent's row is its switch, not an
+				// entry, and a row Add or Up owns is no entry either.
 				RowActive: func(itemIdx int) bool {
 					return itemIdx >= 0 && itemIdx < len(keys) && p.configRowIsEntry(doc, path, keys[itemIdx])
 				},
 			},
-		)
-		res, err := actions.SelectRichActions(prompt, items, -1, opts)
+		}
+		res, err := p.actionPage(label, configFieldKeys, items, -1, pageActions...)
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -1528,7 +1676,7 @@ const (
 	configSharedStatus = "Shared"
 	// configRowDefaultEffort is what an empty stored level means on a row that
 	// names a model: the model row's own default (plan 313's reading, kept).
-	configRowDefaultEffort = "Row default"
+	configRowDefaultEffort = "Follow the model default"
 	// configProviderDefaultEffort is what an effort key nobody has stored
 	// reads as (plan 327 D1, prototype html:117): the provider behind the
 	// model row decides. A frozen prototype quirk keeps it apart from
@@ -1885,21 +2033,16 @@ func configStringField(row map[string]any, field string) string {
 	return text
 }
 
-// rowsPrompt heads a row page: where the user is, how much is there, and the
-// last outcome. An empty collection is the prototype's empty state (plan 327
-// D4, prototype html:157): the two lines the page says, with the add action
-// the page's footer already carries.
-func (p *configPanel) rowsPrompt(field configField, keys []string, notice string) string {
-	head := configFieldHead(field)
+// rowsNotice is what a row page carries under its tab bar: the empty state a
+// collection with nothing in it needs — the footer's Add is the only thing the
+// page offers then — and the last outcome. The page's own title and its count
+// of rows are gone with every other heading (plan 350): the tab bar above and
+// the rows below say where the user is and what is there.
+func rowsNotice(keys []string, notice string) string {
 	if len(keys) == 0 {
-		head += "\nNothing configured yet\nAdd the first entry."
-	} else {
-		head += fmt.Sprintf("\n%d rows; open one to edit or delete it", len(keys))
+		return joinNotice(notice, "Nothing configured yet\nAdd the first entry.")
 	}
-	if notice != "" {
-		head += "\n" + notice
-	}
-	return head
+	return notice
 }
 
 // editRow opens one row of a container (plan 329 D3). A row whose real path
@@ -1953,7 +2096,7 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 	if p.configActionSelector() == nil {
 		items = append(items, SelectItem{Label: configRowBackLabel, Description: "Back to the row list"})
 	}
-	idx, ok, err := selectRichPage(p.sel, field.Label+" "+configRowLabel(key, 0, false), items, 0)
+	idx, ok, err := p.page(field.Label+" "+configRowLabel(key, 0, false), configFieldKeys, items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -1993,7 +2136,7 @@ func (p *configPanel) confirmRemoveRow(label string, doc any, rowPath []string, 
 		{Label: configRemoveConfirmLabel, Danger: true},
 		{Label: configKeepConfirmLabel},
 	}
-	idx, ok, err := selectRichPage(p.sel, "Remove "+label+"?\n"+preview, items, 1)
+	idx, ok, err := p.page("Remove "+label+"?\n"+preview, configConfirmKeys, items, 1)
 	if err != nil {
 		p.printError(err)
 		return false
@@ -2154,7 +2297,7 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 			settings = map[string]any{}
 		}
 		items, rows := p.templateItems(template, settings, tailRows)
-		idx, ok, err := selectRichPage(p.sel, p.templatePrompt(template, title, settings, notice), items, -1)
+		idx, ok, err := p.page(p.templateNotice(template, settings, notice), configFieldKeys, items, -1)
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -2184,17 +2327,15 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 	}
 }
 
-// templatePrompt heads a template page: the row's own title, the system
-// verdict when the whole page is read-only, and the last outcome.
-func (p *configPanel) templatePrompt(template, title string, settings map[string]any, notice string) string {
-	head := title
+// templateNotice is what a template page carries under its tab bar: the system
+// verdict when the whole page is read-only, and the last outcome. The row's own
+// title is gone with every other heading (plan 350; the rows list the user came
+// from named it, and the tab bar says where they are).
+func (p *configPanel) templateNotice(template string, settings map[string]any, notice string) string {
 	if configTemplateRowIsSystem(template, settings) {
-		head += "\n" + configSystemSubagentNotice
+		return joinNotice(notice, configSystemSubagentNotice)
 	}
-	if notice != "" {
-		head += "\n" + notice
-	}
-	return head
+	return notice
 }
 
 // configTemplateRowIsSystem reports whether the whole page renders read-only:
@@ -2272,30 +2413,19 @@ func (p *configPanel) templateItems(template string, settings map[string]any, ta
 			continue
 		}
 		value, exists := configLookupValue(settings, []string{field.Path})
-		description := configFieldHint(field)
-		if template == configTemplateAgent && field.Path == "system_prompt" {
-			// The one field both roles carry, saying something different
-			// about each (the prototype's helpPrimary/helpSubagent).
-			if rolePrimary {
-				description = "Appended to the end of the built-in system prompt. It never replaces it."
-			} else {
-				description = "Replaces the built-in system prompt whole."
-			}
-		}
+		// A template row is a label, its value and — on a read-only page —
+		// the system verdict: the field's help belongs to its editor, never to
+		// the row (plan 350, the prototype's fields view setting help, not
+		// desc), and an unset field carries no status at all.
 		status := ""
 		if system {
-			description, status = configSystemSubagentNotice, configSystemStatus
-		} else if !exists {
-			// A field nobody set carries the Default status (plan 327 D6,
-			// prototype html:150); a system entry's verdict wins over it.
-			status = configDefaultStatus
+			status = configSystemStatus
 		}
 		items = append(items, SelectItem{
-			Label:       field.Label,
-			Description: description,
-			Value:       p.configTemplateValueText(field, value, exists),
-			Status:      status,
-			Category:    field.Group,
+			Label:    field.Label,
+			Value:    p.configTemplateValueText(field, value, exists),
+			Status:   status,
+			Category: field.Group,
 		})
 		rows = append(rows, configTemplateRow{field: field})
 	}
@@ -2305,10 +2435,9 @@ func (p *configPanel) templateItems(template string, settings map[string]any, ta
 		}
 		value := settings[key]
 		items = append(items, SelectItem{
-			Label:       configTitleCase(key),
-			Description: "A key this page's template does not name; it is kept as it is",
-			Value:       configRowDescription(value),
-			Category:    configAdditionalFieldsGroup,
+			Label:    configTitleCase(key),
+			Value:    configRowDescription(value),
+			Category: configAdditionalFieldsGroup,
 		})
 		rows = append(rows, configTemplateRow{unknown: key})
 	}
@@ -2400,7 +2529,7 @@ func (p *configPanel) editSharedSubagentRow(doc any, path []string, container an
 	if p.configActionSelector() == nil {
 		items = append(items, SelectItem{Label: configRowBackLabel, Description: "Back to the row list"})
 	}
-	idx, ok, err := selectRichPage(p.sel, name+"\n"+configSharedSubagentNotice, items, 0)
+	idx, ok, err := p.page(configSharedSubagentNotice, configFieldKeys, items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -2744,7 +2873,7 @@ func (p *configPanel) addAgentDefinition(doc any, path []string, field configFie
 	notice := ""
 	for {
 		items, rows := p.templateItems(configTemplateAgent, draft, tailRows)
-		idx, ok, err := selectRichPage(p.sel, "New agent\n"+notice, items, -1)
+		idx, ok, err := p.page(notice, configFieldKeys, items, -1)
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -2790,7 +2919,7 @@ func (p *configPanel) addAgentDefinition(doc any, path []string, field configFie
 // the notice the form re-renders under, every held value intact. landed=true
 // hands back the updated document and the key that landed.
 func (p *configPanel) commitAgentName(doc any, path []string, field configField, container any, draft map[string]any) (any, string, bool, string) {
-	name, ok, err := p.sel.Input("New agent\nName\n"+configKeyNameHint, "")
+	name, ok, _, err := p.editScalar(field, "")
 	if err != nil {
 		p.printError(err)
 		return doc, "", false, ""
@@ -2836,7 +2965,7 @@ func (p *configPanel) editAgentDraftPrimary(draft map[string]any) bool {
 	} else {
 		items[1].Status = configChoiceCheckStatus
 	}
-	idx, ok, err := selectRichPage(p.sel, "New agent\nPrimary\n"+configCreatedFieldsNotice, items, 0)
+	idx, ok, err := p.page(configCreatedFieldsNotice, configChoiceKeys, items, 0)
 	if err != nil {
 		p.printError(err)
 		return false
@@ -2887,7 +3016,7 @@ func (p *configPanel) editAgentDraftField(draft map[string]any, field configFiel
 			}
 			items = append(items, item)
 		}
-		idx, ok, err := selectRichPage(p.sel, "New agent\n"+field.Label, items, 0)
+		idx, ok, err := p.page(field.Label, configChoiceKeys, items, 0)
 		if err != nil {
 			p.printError(err)
 			return false, ""
@@ -2910,7 +3039,7 @@ func (p *configPanel) editAgentDraftField(draft map[string]any, field configFiel
 			defaultIdx = 1
 		}
 		items[defaultIdx].Status = configChoiceCheckStatus
-		idx, ok, err := selectRichPage(p.sel, "New agent\n"+field.Label, items, defaultIdx)
+		idx, ok, err := p.page(field.Label, configChoiceKeys, items, defaultIdx)
 		if err != nil {
 			p.printError(err)
 			return false, ""
@@ -2974,7 +3103,7 @@ func (p *configPanel) addHookEvent(doc any, path []string, field configField, co
 	for _, event := range events {
 		items = append(items, SelectItem{Label: event})
 	}
-	idx, ok, err := selectRichPage(p.sel, configHookEventHeading, items, 0)
+	idx, ok, err := p.page(configHookEventHeading, configChoiceKeys, items, 0)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
@@ -3044,7 +3173,7 @@ func (p *configPanel) askHookAction() (map[string]any, string, bool) {
 			defaultIdx = len(items) - 1
 		}
 	}
-	idx, ok, err := selectRichPage(p.sel, configHookTypeHeading, items, defaultIdx)
+	idx, ok, err := p.page(configHookTypeHeading, configChoiceKeys, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
 		return nil, "", false
@@ -3152,7 +3281,7 @@ func (p *configPanel) chooseNewValue(label string, cur any) (any, bool, bool, er
 	case []any:
 		defaultIdx = 4
 	}
-	idx, ok, err := selectRichPage(p.sel, label+"\nValue type", items, defaultIdx)
+	idx, ok, err := p.page(label+"\nValue type", configChoiceKeys, items, defaultIdx)
 	if err != nil || !ok {
 		return nil, false, false, err
 	}
@@ -3185,7 +3314,7 @@ func (p *configPanel) chooseNewValue(label string, cur any) (any, bool, bool, er
 		if boolean, isBool := cur.(bool); isBool && !boolean {
 			boolIdx = 1
 		}
-		picked, ok, err := selectRichPage(p.sel, label+"\nValue", boolItems, boolIdx)
+		picked, ok, err := p.page(label+"\nValue", configChoiceKeys, boolItems, boolIdx)
 		if err != nil || !ok {
 			return nil, false, false, err
 		}
@@ -3419,11 +3548,12 @@ func configStoredEffort(value any) string {
 	return strings.ToLower(strings.TrimSpace(level))
 }
 
-// configFieldValueText is a field's value as the section page shows it in the
-// row's value column. An unset setting reads as the default it follows — the
-// prototype's own arrow naming which default (plan 327 D6, html:117), the
-// bare word alone when the prototype gives the field no default of its own —
-// and a stored number carries the unit it is counted in (html:118).
+// configFieldValueText is a field's value as a page shows it in the row's value
+// column: what the setting holds, and nothing at all when it holds nothing
+// (plan 350, prototype display() html:124 — an unset value is empty, never the
+// word "Default"). A boolean is the one exception: a switch with a default
+// reads as the value that default gives it. A stored number carries the unit it
+// is counted in (html:125).
 func configFieldValueText(field configField, value any, exists bool) string {
 	// A secret is never the value the column shows (plan 328 D3): the field's
 	// own flag, or its place in the document naming one, answers first —
@@ -3432,7 +3562,9 @@ func configFieldValueText(field configField, value any, exists bool) string {
 		return configSecretDisplay(value, exists)
 	}
 	if configIsContainer(value) {
-		return configContainerText(value)
+		// A table or a list holds no single value to print: the row opens the
+		// rows themselves (prototype display() on a container).
+		return ""
 	}
 	if field.Kind == configFieldBool3 {
 		boolean, ok := value.(bool)
@@ -3452,12 +3584,9 @@ func configFieldValueText(field configField, value any, exists bool) string {
 	if configEffortField(field) {
 		level, _ := value.(string)
 		if !exists {
-			return configProviderDefaultEffort
-		}
-		if strings.TrimSpace(level) == "" {
 			return configRowDefaultEffort
 		}
-		return turn.EffortEnglishLabel(level)
+		return configEffortSummary(level)
 	}
 	// A stored number carries its unit ("10 attempts", plan 327 D6).
 	if field.Kind == configFieldNumber && field.Unit != "" {
@@ -3474,36 +3603,22 @@ func configFieldValueText(field configField, value any, exists bool) string {
 	return configScalarText(value)
 }
 
-// configFieldDefaultText is an unset field's value column (plan 327 D6,
-// prototype html:117): a field the prototype gives a default of its own reads
-// as the arrow naming it, and every other field as the one bare word.
+// configFieldDefaultText is an unset field's value column (plan 350,
+// prototype display() html:124): a switch with a default of its own reads as the
+// value that default gives it, and every other unset setting reads as nothing
+// at all — the word "Default" belongs to a section the store holds no row for
+// (the overview's status), never to a setting's value.
 func configFieldDefaultText(field configField) string {
-	def := strings.TrimSpace(field.DefaultValue)
-	if def == "" {
-		return configDefaultStatus
+	if field.Kind != configFieldBool3 {
+		return ""
 	}
-	switch field.Kind {
-	case configFieldBool3:
-		switch def {
-		case "true":
-			return configDefaultArrow + configBoolOnLabel
-		case "false":
-			return configDefaultArrow + configBoolOffLabel
-		}
-		return configDefaultStatus
-	case configFieldEnum:
-		label := field.OptionLabels[def]
-		if label == "" {
-			label = configTitleCase(def)
-		}
-		return configDefaultArrow + label
-	case configFieldNumber:
-		if number, err := strconv.Atoi(def); err == nil {
-			return configDefaultArrow + configNumberUnitText(float64(number), field.Unit)
-		}
-		return configDefaultStatus
+	switch strings.TrimSpace(field.DefaultValue) {
+	case "true":
+		return configBoolOnLabel
+	case "false":
+		return configBoolOffLabel
 	}
-	return configDefaultArrow + def
+	return ""
 }
 
 // configNumberUnitText is a stored number with the unit its descriptor counts

@@ -103,6 +103,7 @@ type actionPanelSelector struct {
 	actionDefaults []int
 	opts           []ActionOptions
 	inputLabels    []string
+	inputDefaults  []string
 	inputOpts      []ActionOptions
 	// secretLabels and secretDefaults record the private editor's asks
 	// (plan 328 D3): the label it opened under and the initial value it
@@ -164,6 +165,7 @@ func (s *actionPanelSelector) SelectRichActions(label string, items []SelectItem
 
 func (s *actionPanelSelector) InputActions(label string, defaultValue string, opts ActionOptions) (InputResult, error) {
 	s.inputLabels = append(s.inputLabels, label)
+	s.inputDefaults = append(s.inputDefaults, defaultValue)
 	s.inputOpts = append(s.inputOpts, opts)
 	if s.inputIdx >= len(s.inputSteps) {
 		return InputResult{}, nil
@@ -878,13 +880,13 @@ func TestConfigPanelShowsTheValidatorsRefusal(t *testing.T) {
 		t.Fatalf("a refused write stores nothing, got %+v", session.writes)
 	}
 	// The value did not land, so the page drawn after the refusal still reads
-	// the default: the refusal is not a half-applied edit. The default an
-	// unset switch follows is the arrow's, per the prototype (plan 327 D6).
-	page := lastPageHeadlined(selector, "Feature switches")
+	// the default: the refusal is not a half-applied edit. An unset switch
+	// reads as the value its default gives it (plan 350).
+	page := lastPageListing(selector, "Next-step suggestions")
 	if page == nil {
 		t.Fatalf("the features page was never drawn after the refusal: %v", selector.richLabels)
 	}
-	if row := findRow(t, page, "Memory"); row.Value != configDefaultArrow+configBoolOnLabel {
+	if row := findRow(t, page, "Memory"); row.Value != configBoolOnLabel {
 		t.Fatalf("the refused value is on the page: %q", row.Value)
 	}
 }
@@ -898,8 +900,13 @@ func TestConfigPanelOpensASectionByName(t *testing.T) {
 	if len(selector.richLabels) == 0 {
 		t.Fatal("no page opened")
 	}
-	if !strings.HasPrefix(selector.richLabels[0], "Scheduled tasks") {
-		t.Fatalf("first page = %q, want the cron section page", selector.richLabels[0])
+	if _, ok := findRowLoose(selector.richItems[0], "Keep task records for"); !ok {
+		t.Fatalf("first page = %v, want the cron section page", rowLabels(selector.richItems[0]))
+	}
+	// The page carries no heading of its own (plan 350): the tab bar above it
+	// and its rows say everything.
+	if selector.richLabels[0] != "" {
+		t.Fatalf("the cron page's label = %q, want no heading", selector.richLabels[0])
 	}
 }
 
@@ -942,7 +949,7 @@ func TestConfigPanelMasksSecrets(t *testing.T) {
 
 		// The Headers field's own row on the server's page: a map at a
 		// masked path is hidden, not counted.
-		server := lastPageHeadlined(selector, "api")
+		server := lastPageListing(selector, "Headers")
 		if server == nil {
 			t.Fatalf("the server page never opened: %v", selector.richLabels)
 		}
@@ -950,7 +957,7 @@ func TestConfigPanelMasksSecrets(t *testing.T) {
 			t.Fatalf("the Headers row's value = %q, want %q", row.Value, configSecretHiddenStatus)
 		}
 		// The entries under it: each header's value column.
-		headers := lastPageHeadlined(selector, "Headers")
+		headers := lastPageListing(selector, "Authorization")
 		if headers == nil {
 			t.Fatalf("the headers page never opened: %v", selector.richLabels)
 		}
@@ -1019,21 +1026,22 @@ func TestConfigPanelMasksSecrets(t *testing.T) {
 			[]inputActionStep{{value: "Bearer sk-rotated-4242", ok: true}})
 
 		if len(session.writes) != 1 {
-			t.Fatalf("expected one write, got %d; secrets asked: %v", len(session.writes), selector.secretLabels)
+			t.Fatalf("expected one write, got %d; editors asked: %v", len(session.writes), selector.inputOpts)
 		}
 		if raw := string(session.writes[0].raw); !strings.Contains(raw, "sk-rotated-4242") {
 			t.Fatalf("the replacement must land, raw = %s", raw)
 		}
-		// The private editor opened empty-handed: the stored secret was
-		// never handed to a field, and neither secret reached a page.
-		if len(selector.secretLabels) != 1 {
-			t.Fatalf("the private editor never opened: %v", selector.richLabels)
+		// The private editor opened empty-handed and masked: the stored
+		// secret was never handed to a field, and neither secret reached a
+		// page.
+		if len(selector.inputOpts) != 1 || !selector.inputOpts[0].Secret {
+			t.Fatalf("the private editor never opened masked: %+v", selector.inputOpts)
 		}
-		if selector.secretDefaults[0] != "" {
-			t.Fatalf("the private editor must start empty, got %q", selector.secretDefaults[0])
+		if selector.inputDefaults[0] != "" {
+			t.Fatalf("the private editor must start empty, got %q", selector.inputDefaults[0])
 		}
-		if !strings.Contains(selector.secretLabels[0], configSecretReplacementLabel) {
-			t.Fatalf("the private editor's prompt = %q", selector.secretLabels[0])
+		if selector.inputOpts[0].Help != configSecretReplacementLabel {
+			t.Fatalf("the private editor's help = %q, want the replacement label", selector.inputOpts[0].Help)
 		}
 		for _, items := range selector.richItems {
 			for _, item := range items {
@@ -1698,9 +1706,12 @@ func findRow(t *testing.T, items []SelectItem, label string) SelectItem {
 
 // lastPageHeadlined is the last page the panel drew under one heading: the
 // state a refusal is read in, rather than a page that closed after it.
-func lastPageHeadlined(selector *scriptedSelector, headline string) []SelectItem {
+// lastPageListing is the last page that lists a row with this label: the
+// pages carry no headings to find them by any more (plan 350), so a test names
+// the page by a row only it lists.
+func lastPageListing(selector *scriptedSelector, row string) []SelectItem {
 	for i := len(selector.richItems) - 1; i >= 0; i-- {
-		if strings.HasPrefix(selector.richLabels[i], headline) {
+		if _, ok := findRowLoose(selector.richItems[i], row); ok {
 			return selector.richItems[i]
 		}
 	}
@@ -1791,9 +1802,9 @@ func (p *configPanel) sectionSchema(title string) configSectionSchema {
 	return configSectionSchema{}
 }
 
-// A section page paints each setting as name, value and status: the hint beside
-// the name, the value it holds in a right-aligned track, and the marker a
-// projection puts beyond it (plan 321).
+// A section page paints each setting as a label and the value it holds in a
+// right-aligned track — and nothing else: the field's help belongs to its
+// editor, and a setting carries no status of its own (plan 350).
 func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 	// A settings page: two switches, one set and one not, so the values differ.
 	panel := sectionPanel(map[string]string{"features": `{"memories":true}`})
@@ -1808,22 +1819,21 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 	if !strings.HasSuffix(memories, configBoolOnLabel) {
 		t.Fatalf("the Memory row = %q, want its value at the right edge", memories)
 	}
-	if !strings.Contains(memories, "Remember useful context across conversations.") {
-		t.Fatalf("the Memory row = %q, want its hint beside the name", memories)
+	if strings.Contains(memories, "Remember useful context across conversations.") {
+		t.Fatalf("the Memory row = %q, want no help sentence beside the name", memories)
 	}
-	// An unset switch reads as the default it follows through the prototype's
-	// arrow (plan 327 D6) and carries the Default status beyond it (html:150).
+	// An unset switch reads as the value its default gives it, and no setting
+	// carries a status of its own (plan 350, the prototype's display()).
 	servers := renderedRow(t, lines, "Language servers")
-	if !strings.HasSuffix(servers, configDefaultStatus) {
-		t.Fatalf("the Language servers row = %q, want the Default status at the right edge", servers)
+	if !strings.HasSuffix(servers, configBoolOnLabel) {
+		t.Fatalf("the Language servers row = %q, want the default's own value", servers)
 	}
-	if !strings.Contains(servers, configDefaultArrow+configBoolOnLabel) {
-		t.Fatalf("the Language servers row = %q, want the arrow naming the default", servers)
+	if strings.Contains(servers, configDefaultStatus) {
+		t.Fatalf("the Language servers row = %q, want no Default status", servers)
 	}
-	// Both rows end at the same column: the tracks are fixed, not pushed
-	// along — a row with a status narrows its value column to make room for
-	// it, so the status is what ends at the edge there.
-	if endsAt(memories, configBoolOnLabel) != endsAt(servers, configDefaultStatus) {
+	// Both values end at the same column: the track is fixed, not pushed along
+	// by the length of what a row holds.
+	if endsAt(memories, configBoolOnLabel) != endsAt(servers, configBoolOnLabel) {
 		t.Fatalf("the values are not aligned:\n%q\n%q", memories, servers)
 	}
 
@@ -1847,8 +1857,10 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 	items, _ = builtin.fieldItems(agentsSchema, builtin.sectionDoc("agents"), true)
 	lines = renderRichPage(items, "Agents", 120)
 	entry := renderedRow(t, lines, "Built-in subagents")
-	if !strings.Contains(entry, "2 of 6 types pinned") {
-		t.Fatalf("the entry row = %q, want the pin count", entry)
+	// The entry is a collection: it names itself and opens its rows, and
+	// counts nothing beside them (plan 350).
+	if strings.TrimSpace(entry) != "Built-in subagents" {
+		t.Fatalf("the entry row = %q, want the label alone", entry)
 	}
 	items = builtin.builtinSubagentItems(builtin.sectionDoc("agents"))
 	lines = renderRichPage(items, "Built-in subagents", 120)
@@ -1868,11 +1880,11 @@ func TestConfigPanelRendersTheValueColumn(t *testing.T) {
 			t.Fatalf("the %s row = %q, want the sentence it follows", label, unset)
 		}
 	}
-	// The description is the prototype's help sentence; the value column
-	// holds the named row whole, not elided.
+	// The help sentence belongs to the type's editor, never to its row (plan
+	// 350): the row carries the model row's label and the level in force.
 	plan := renderedRow(t, lines, "plan")
-	if !strings.Contains(plan, "Install-wide default model and thinking level") {
-		t.Fatalf("the plan row = %q, want the prototype's help sentence", plan)
+	if strings.Contains(plan, "Install-wide default model and thinking level") {
+		t.Fatalf("the plan row = %q, want no help sentence", plan)
 	}
 	if !strings.Contains(plan, "openai/gpt-main") || strings.Contains(plan, "openai/gp...") {
 		t.Fatalf("the plan row = %q, want the model row's label whole", plan)
@@ -2340,10 +2352,14 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"review-agent":{"primary":true}`) {
 			t.Fatalf("raw = %s", raw)
 		}
-		// The page the name opens is the saved definition's own, under the
-		// key it landed.
-		if !strings.Contains(pageLabels(selector), "review-agent") {
-			t.Fatalf("the saved page must open under the new key: %s", pageLabels(selector))
+		// The page the name opens lists the saved definition's own fields —
+		// the name row's value is the key it landed under (plan 350).
+		savedName, ok := findRowLoose(selector.richItems[len(selector.richItems)-1], "Name")
+		if !ok {
+			t.Fatalf("the saved page must open under the new key: %v", pageLabels(selector))
+		}
+		if savedName.Value != "review-agent" {
+			t.Fatalf("the saved page's Name row = %q, want the key it landed under", savedName.Value)
 		}
 		// One drawn page is the saved definition's own, and it is the only
 		// page whose rows include the locked Name field.
@@ -2734,21 +2750,21 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 	}
 }
 
-// An unset field reads as the default it follows through the prototype's
-// arrow, a stored number carries its unit, and an unset row carries the
-// Default status beyond its value (plan 327 D6, prototype html:117-118/150).
+// An unset setting reads as nothing at all, bar a switch, which reads as the
+// value its default gives it; a stored number carries its unit; and no setting
+// carries a status of its own (plan 350, the prototype's display()).
 func TestConfigPanelDefaultArrowUnitsAndStatus(t *testing.T) {
 	// A whole section nobody stored: every row is unset.
 	panel := sectionPanel(nil)
 	cases := []struct {
 		section, label, value string
 	}{
-		{"cron", "Keep task records for", "Default → 30 days"},
-		{"approval_preset", "Default approval mode", "Default → Workspace write"},
-		{"features", "Memory", "Default → On"},
-		{"agents", "Enable subagents", "Default → Off"},
-		{"compact", "Hand-off prompt", "Default → Built-in prompt"},
-		{"lsp", "Minimum severity", "Default → Warning"},
+		{"cron", "Keep task records for", ""},
+		{"approval_preset", "Default approval mode", ""},
+		{"features", "Memory", configBoolOnLabel},
+		{"agents", "Enable subagents", configBoolOffLabel},
+		{"compact", "Hand-off prompt", ""},
+		{"lsp", "Minimum severity", ""},
 	}
 	for _, tc := range cases {
 		schema, ok := configSectionSchemaFor(tc.section)
@@ -2760,8 +2776,8 @@ func TestConfigPanelDefaultArrowUnitsAndStatus(t *testing.T) {
 		if row.Value != tc.value {
 			t.Errorf("%s's value = %q, want %q", tc.label, row.Value, tc.value)
 		}
-		if row.Status != configDefaultStatus {
-			t.Errorf("%s's status = %q, want %q", tc.label, row.Status, configDefaultStatus)
+		if row.Status != "" {
+			t.Errorf("%s's status = %q, want none", tc.label, row.Status)
 		}
 	}
 
@@ -2961,8 +2977,10 @@ func TestConfigPanelBuiltinSubagentsEntryProjectsTheAgentsStore(t *testing.T) {
 	if explore.Value != "openai/gpt-main" || explore.Status != "High" {
 		t.Fatalf("explore's row = %q %q, want the named row and its level", explore.Value, explore.Status)
 	}
-	if explore.Description != "Install-wide default model and thinking level; an agent's own override still wins." {
-		t.Fatalf("explore's description = %q, want the prototype's help sentence", explore.Description)
+	// The help sentence belongs to the type's editor, not to its row (plan
+	// 350): the row is the name, the model row it holds and the level.
+	if explore.Description != "" {
+		t.Fatalf("explore's row carries %q; the help belongs to its editor", explore.Description)
 	}
 	// A type with no pin of its own follows the conversation, and marks nothing.
 	verification := findRow(t, page, "verification")
@@ -3514,8 +3532,8 @@ func TestConfigPanelEffortValueLabels(t *testing.T) {
 		t.Fatalf("the goal evaluator's page never opened: %v", selector.richLabels)
 	}
 	sectionLevel := findRow(t, goalPage, "Thinking level")
-	if sectionLevel.Value != configProviderDefaultEffort {
-		t.Fatalf("the unset frame level = %q, want %q", sectionLevel.Value, configProviderDefaultEffort)
+	if sectionLevel.Value != configRowDefaultEffort {
+		t.Fatalf("the unset frame level = %q, want %q", sectionLevel.Value, configRowDefaultEffort)
 	}
 
 	// Path (b) and the type frames, over the projection's own page.
@@ -3560,8 +3578,8 @@ func TestConfigPanelEffortValueLabels(t *testing.T) {
 	if got := findRow(t, planPage, "Thinking level").Value; got != configRowDefaultEffort {
 		t.Fatalf("the stored empty level = %q, want %q", got, configRowDefaultEffort)
 	}
-	if got := findRow(t, explorePage, "Thinking level").Value; got != configProviderDefaultEffort {
-		t.Fatalf("the unset frame level = %q, want %q", got, configProviderDefaultEffort)
+	if got := findRow(t, explorePage, "Thinking level").Value; got != configRowDefaultEffort {
+		t.Fatalf("the unset frame level = %q, want %q", got, configRowDefaultEffort)
 	}
 }
 
@@ -3612,13 +3630,15 @@ func TestConfigPanelChoiceHeadCopy(t *testing.T) {
 			}
 		}
 	}
-	// The effort picker's head is the field's label and help; the model
-	// picker's is the label alone (its rows' descriptions say the rest).
-	if !slices.Contains(selector.richLabels, withHint(effortField)) {
-		t.Fatalf("the effort picker's head = %q, want the field's own label and help: %v", withHint(effortField), selector.richLabels)
-	}
-	if !slices.Contains(selector.richLabels, modelField.Label) {
-		t.Fatalf("the model picker's head = %q, want the label alone: %v", modelField.Label, selector.richLabels)
+	// A choice page carries no head of its own (plan 350): the tab bar stays
+	// and the rows are the values alone, so neither the field's label nor its
+	// help reaches the page.
+	for _, label := range selector.richLabels {
+		for _, gone := range []string{effortField.Label, modelField.Label, withHint(effortField)} {
+			if strings.Contains(label, gone) {
+				t.Fatalf("a choice page still heads itself with %q: %q", gone, label)
+			}
+		}
 	}
 	// The stored choices carry the check, and only they do.
 	if row := findRow(t, effortPickerItems(t, selector), "Low"); row.Status != configChoiceCheckStatus {
@@ -4223,8 +4243,8 @@ func TestConfigPanelNestedTemplateExploreTypePage(t *testing.T) {
 	if model.Value != "openai/gpt-main" {
 		t.Fatalf("the Model row's value = %q, want the named row's label", model.Value)
 	}
-	if findRow(t, page, "Thinking level").Value != configProviderDefaultEffort {
-		t.Fatalf("the unset level must read as the provider's own default")
+	if findRow(t, page, "Thinking level").Value != configRowDefaultEffort {
+		t.Fatalf("the unset level must read %q, the model row's own default", configRowDefaultEffort)
 	}
 }
 
@@ -4263,8 +4283,10 @@ func TestConfigPanelSystemSubagentReadonly(t *testing.T) {
 		if item.Status != configSystemStatus {
 			t.Errorf("%s's status = %q, want %q", item.Label, item.Status, configSystemStatus)
 		}
-		if item.Description != configSystemSubagentNotice {
-			t.Errorf("%s's hint = %q, want the verdict", item.Label, item.Description)
+		// The field's help belongs to its editor, never to the row (plan
+		// 350): a read-only page says what it is with its status alone.
+		if item.Description != "" {
+			t.Errorf("%s's row carries %q; a row names the setting and its value alone", item.Label, item.Description)
 		}
 	}
 	for _, gone := range []string{"Description", "Tool access", "Allowed tools", "Allow continuation"} {

@@ -222,6 +222,16 @@ const (
 	configTabAgents   = "Agents & tools"
 )
 
+// configTabLabels names each tab as the bar shows it, in the bar's order: the
+// full label, and the short one a terminal under 100 columns takes — three
+// short words are all 88 columns hold (the prototype's tabs table and its
+// .terminal.narrow .tab rule, plan 350).
+var configTabLabels = []struct{ Name, Short string }{
+	{configTabApproval, "Safety"},
+	{configTabSession, "Session"},
+	{configTabAgents, "Agents"},
+}
+
 // configSectionSchemas lists every section of the runtime configuration: the
 // 11 the state database stores. The order
 // inside a tab is the order a user tunes these settings in, roughly: the

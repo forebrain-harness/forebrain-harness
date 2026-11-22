@@ -5742,7 +5742,7 @@ func (s *rawSelector) InputActions(label string, defaultValue string, opts Actio
 	if opts.Multiline {
 		return s.inputMultiline(label, defaultValue, opts)
 	}
-	return s.input(label, defaultValue, false, opts)
+	return s.input(label, defaultValue, opts.Secret, opts)
 }
 
 // inputMultiline is the editor a multiline setting opens (plan 328 D2, the
@@ -5761,7 +5761,7 @@ func (s *rawSelector) inputMultiline(label string, defaultValue string, opts Act
 	value := []rune(defaultValue)
 	cursor := len(value)
 	panel := func() slashPanel {
-		return multilinePanel(label, value, cursor, s.escHint(), opts.FooterActions)
+		return multilineEditorPanel(label, value, cursor, s.escHint(), opts)
 	}
 	s.showPanel(panel())
 	for {
@@ -5865,8 +5865,19 @@ func multilineLineEnd(value []rune, cursor int) int {
 // the lines above the caret under it, the caret's line as the field, the
 // lines below as the body, and the keys that answer it.
 func multilinePanel(title string, value []rune, cursor int, esc string, actions []FooterAction) slashPanel {
+	return multilineEditorPanel(title, value, cursor, esc, ActionOptions{FooterActions: actions})
+}
+
+// multilineEditorPanel is multilinePanel's body, shared with the /config
+// panel's textarea: the same page chrome, help and key wording as the one-line
+// editor (plan 350).
+func multilineEditorPanel(title string, value []rune, cursor int, esc string, opts ActionOptions) slashPanel {
 	b := newPanelBuilder()
-	pickerHead(b, title)
+	if opts.Chrome != nil {
+		b.chrome(opts.Chrome)
+	} else {
+		pickerHead(b, title)
+	}
 	start := multilineLineStart(value, cursor)
 	if start > 0 {
 		// Every finished line above the caret, the newline that closed the
@@ -5881,13 +5892,13 @@ func multilinePanel(title string, value []rune, cursor int, esc string, actions 
 			b.text(panelIndent, line, nil)
 		}
 	}
-	hint := "Ctrl+Enter to save Enter for a new line " + esc
-	for _, a := range actions {
-		if a.Key != "" {
-			hint += " " + a.Key + " " + a.Label
-		} else {
-			hint += " " + a.Label
-		}
+	if opts.Help != "" {
+		b.text(panelIndent, opts.Help, &panelHintStyle)
+	}
+	hint := "Ctrl+Enter to save" + footerActionKeys(opts.FooterActions) + " Enter for a new line " + esc
+	if opts.Keys != nil {
+		hint = "Ctrl+Enter to " + opts.Keys.Enter + footerActionKeys(opts.FooterActions) +
+			" Enter for a new line Esc to " + opts.Keys.Esc
 	}
 	b.hint(hint)
 	p := b.panel()
@@ -5903,7 +5914,7 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool, opts
 	defer release()
 	field := newTextField(defaultValue)
 	panel := func() slashPanel {
-		return inputPanel(label, field.runes(), field.cursor, secret, s.escHint(), opts.FooterActions)
+		return editorPanel(label, field.runes(), field.cursor, secret, s.escHint(), opts)
 	}
 	s.showPanel(panel())
 	// Clicks on the field row move the caret; the field's text starts after
@@ -5963,23 +5974,50 @@ func inputActionKey(actions []FooterAction, kind rawKey) (FooterActionKind, bool
 // the answer as its field — masked when it is a secret — the keys that answer
 // it, and any footer actions beside them.
 func inputPanel(title string, value []rune, cursor int, secret bool, esc string, actions []FooterAction) slashPanel {
+	return editorPanel(title, value, cursor, secret, esc, ActionOptions{FooterActions: actions})
+}
+
+// editorPanel is inputPanel's body, shared with the /config panel's editors: a
+// page that carries the panel's tab bar draws it instead of a heading, puts the
+// setting's help under the input rather than above it, and names its keys in
+// the prototype's own words (plan 350).
+func editorPanel(title string, value []rune, cursor int, secret bool, esc string, opts ActionOptions) slashPanel {
 	b := newPanelBuilder()
-	pickerHead(b, title)
-	hint := "Enter to confirm " + esc
-	for _, a := range actions {
-		if a.Key != "" {
-			hint += " " + a.Key + " " + a.Label
-		} else {
-			hint += " " + a.Label
-		}
+	if opts.Chrome != nil {
+		b.chrome(opts.Chrome)
+	} else {
+		pickerHead(b, title)
 	}
-	b.hint(hint)
+	if opts.Help != "" {
+		// The body already sits below the field's bar, which is where the
+		// prototype puts editor-help.
+		b.text(panelIndent, opts.Help, &panelHintStyle)
+	}
+	if opts.Keys != nil {
+		b.hint("Enter to " + opts.Keys.Enter + footerActionKeys(opts.FooterActions) + " Esc to " + opts.Keys.Esc)
+	} else {
+		b.hint("Enter to confirm " + esc + footerActionKeys(opts.FooterActions))
+	}
 	p := b.panel()
 	if secret {
 		value = maskSecret(value)
 	}
 	p.field = &panelField{text: value, cursor: cursor}
 	return p
+}
+
+// footerActionKeys is a page's footer actions as the key hint spells them, in
+// the order the page armed them.
+func footerActionKeys(actions []FooterAction) string {
+	hint := ""
+	for _, a := range actions {
+		if a.Key != "" {
+			hint += " " + a.Key + " " + a.Label
+			continue
+		}
+		hint += " " + a.Label
+	}
+	return hint
 }
 
 // maskSecret hides a secret behind dots, one per character so the caret
@@ -6222,6 +6260,14 @@ type richPickerState struct {
 	// actions are the footer actions the caller armed the picker with, if
 	// any (plan 326 D1); nil is the plain picker exactly as it was.
 	actions []FooterAction
+	// chrome is the /config panel's tab bar, drawn in the head of every page
+	// the panel opens (plan 350). With it set the page carries no title block
+	// of its own: what is left of its label is the outcome line under the
+	// bar. Nil on every other picker.
+	chrome *panelChrome
+	// keys is how a /config page names Enter and Esc in its footer (plan
+	// 350); nil keeps the pickers' own wording.
+	keys *configPageKeys
 }
 
 func (p *richPickerState) rebuildSelectable() {
@@ -6277,7 +6323,18 @@ func (s *rawSelector) renderRichPicker(p *richPickerState, label string) {
 func (p *richPickerState) panel(label string) slashPanel {
 	b := newPanelBuilder()
 	b.unmarked = p.inFilter
-	pickerHead(b, label)
+	if p.chrome != nil {
+		// The /config page's header is the tab bar alone (plan 350): the
+		// page's own title and summary are gone (owner 2026-11-18/21), and
+		// what the label still carries — the outcome an edit refused with —
+		// sits under the bar, where the prototype's notice bar does.
+		b.chrome(p.chrome)
+		for _, line := range compactNonEmpty(strings.Split(strings.ReplaceAll(label, "\r", ""), "\n")) {
+			b.subtitle(line)
+		}
+	} else {
+		pickerHead(b, label)
+	}
 	nameWidth := p.nameWidth()
 	category := ""
 	for ci, idx := range p.selectable {
@@ -6334,9 +6391,14 @@ func (p *richPickerState) panel(label string) slashPanel {
 // footerHint is the picker's keys plus its footer actions: each active action
 // drawn as its key and label, so the footer says what the keys do. An action
 // that serves particular rows is drawn only while the cursor is on one of
-// them.
+// them. A /config page names its own verbs (plan 350): the prototype spells
+// Enter and Esc out per view, and "Enter to open" on a section page is not
+// "Enter to confirm".
 func (p *richPickerState) footerHint() string {
 	hint := selectFooterHint(false, p.esc)
+	if p.keys != nil {
+		hint = "↑/↓ to navigate Enter to " + p.keys.Enter + " Esc to " + p.keys.Esc
+	}
 	for i := range p.actions {
 		if !p.actionServesRow(i) {
 			continue
@@ -6348,6 +6410,17 @@ func (p *richPickerState) footerHint() string {
 		}
 	}
 	return hint
+}
+
+// chromeStep is the tab an arrow steps to on one of the panel's pages,
+// wrapping around the tab bar; ok is false where there is no bar to step
+// through, which is every other picker.
+func (p *richPickerState) chromeStep(step int) (int, bool) {
+	if p.chrome == nil || len(p.chrome.Labels) == 0 {
+		return -1, false
+	}
+	n := len(p.chrome.Labels)
+	return ((p.chrome.Active+step)%n + n) % n, true
 }
 
 // actionServesRow reports whether the cursor is on a row the action serves;
@@ -6454,6 +6527,27 @@ type ActionOptions struct {
 	// setting's editor sets it; every other caller keeps the one-line field
 	// whose Enter confirms.
 	Multiline bool
+	// Chrome is the /config panel's tab bar, drawn above the page's own rows
+	// and below nothing: the pages carry no title block (plan 350). Nil on
+	// every other picker, which keeps the head it has always drawn.
+	Chrome *panelChrome
+	// Keys is how the page names its two keys in the footer, word for word
+	// from the prototype (plan 350). Nil keeps the pickers' own wording.
+	Keys *configPageKeys
+	// Help is an editor's help sentence, drawn under its input where the
+	// prototype's editor-help sits (plan 350) instead of above the field.
+	Help string
+	// Secret opens the masked editor: a private value's replacement is never
+	// shown as it is typed (plan 328 D3).
+	Secret bool
+}
+
+// configPageKeys names what Enter and Esc do on one /config page, in the
+// prototype's own words for that view: a section page's Enter opens a setting,
+// a choice's saves the value (plan 350, prototype footerHTML).
+type configPageKeys struct {
+	Enter string
+	Esc   string
 }
 
 // ActionResult is the outcome of an action-aware picker: the row Enter chose,
@@ -6463,6 +6557,12 @@ type ActionResult struct {
 	Row    int
 	Action FooterActionKind
 	OK     bool
+	// TabStep is the arrow that asked to switch tabs on a /config page — -1
+	// or 1 — and 0 when the page ended any other way, so a caller that does
+	// not read it sees nothing changed (plan 350). Tab is the tab it steps to,
+	// counted among the pages' own tabs.
+	TabStep int
+	Tab     int
 }
 
 // InputResult is ActionResult's form for an editor with footer actions: the
@@ -6533,6 +6633,34 @@ func (s *rawSelector) SelectRichPage(label string, items []SelectItem, defaultId
 	return res.Row, res.OK, err
 }
 
+// SelectConfigPage is SelectRichPage as one /config page draws it with the
+// panel's own header (plan 350): the tab bar the panel builds, the keys the
+// page names in its footer, and the outcome line under the bar. It is the
+// panel's capability the way SelectRichPage is — no other picker gains a
+// tab bar from it — and it answers the arrow that asks to step to another tab.
+func (s *rawSelector) SelectConfigPage(label string, items []SelectItem, defaultIdx int, opts ActionOptions) (ActionResult, error) {
+	p := &richPickerState{
+		items:      items,
+		selectable: make([]int, 0, len(items)),
+		esc:        s.escHint(),
+		configPage: true,
+		chrome:     opts.Chrome,
+		keys:       opts.Keys,
+		actions:    opts.FooterActions,
+	}
+	p.rebuildSelectable()
+	// The /config pages carry no filter box whatever their row count (plan
+	// 325 D6): the keyboard stays on the rows.
+	p.noFilter = true
+	for ci, idx := range p.selectable {
+		if idx == defaultIdx {
+			p.cursor = ci
+			break
+		}
+	}
+	return s.richKeyLoopResult(p, label, nil)
+}
+
 // SelectRichActions is SelectRich with footer actions (plan 326 D1), or as
 // one /config page draws it when opts.Page is set. With no actions and no
 // Page it is SelectRich exactly; an empty item list still opens when actions
@@ -6548,6 +6676,8 @@ func (s *rawSelector) SelectRichActions(label string, items []SelectItem, defaul
 		esc:        s.escHint(),
 		configPage: opts.Page,
 		actions:    opts.FooterActions,
+		chrome:     opts.Chrome,
+		keys:       opts.Keys,
 	}
 	p.rebuildSelectable()
 	if opts.Page {
@@ -6629,7 +6759,10 @@ func (s *rawSelector) richKeyLoopResult(p *richPickerState, label string, fetchM
 		if res, fired := p.fireAction(key.kind, key.r); fired {
 			return res, nil
 		}
-		if p.noFilter && editsFilter(key.kind) {
+		// A picker with no filter box ignores the keys that would edit one —
+		// except ←/→ on a /config page, which step through the tab bar the way
+		// /status's own tabs answer them (plan 350).
+		if p.noFilter && editsFilter(key.kind) && !(p.chrome != nil && tabStepKey(key.kind)) {
 			continue
 		}
 		switch key.kind {
@@ -6685,11 +6818,19 @@ func (s *rawSelector) richKeyLoopResult(p *richPickerState, label string, fetchM
 			}
 		case rawKeyLeft:
 			if !p.inFilter {
+				// ← steps back a tab on a /config page, and does nothing
+				// anywhere else (plan 350).
+				if tab, ok := p.chromeStep(-1); ok {
+					return ActionResult{Row: -1, TabStep: -1, Tab: tab}, nil
+				}
 				continue
 			}
 			p.filter.move(-1)
 		case rawKeyRight:
 			if !p.inFilter {
+				if tab, ok := p.chromeStep(1); ok {
+					return ActionResult{Row: -1, TabStep: 1, Tab: tab}, nil
+				}
 				continue
 			}
 			p.filter.move(1)
