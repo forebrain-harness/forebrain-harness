@@ -147,7 +147,8 @@ func (s *ChatSession) UpdateConfigSection(ctx context.Context, section string, r
 
 // configPanel is the open /config panel: the snapshot it read when it opened
 // and the selector it drives. An edit lands in the store as it is confirmed
-// (plan 321): the panel holds no draft of its own.
+// (plan 321): the panel holds no draft unless it is staging one, and the only
+// page that stages is the create form (staged).
 type configPanel struct {
 	sel      Selector
 	renderer *Renderer
@@ -176,6 +177,12 @@ type configPanel struct {
 	// by the section page that owns the list: a page's ←/→ steps the whole panel
 	// to the next tab, the way the prototype's goOverview does (plan 350).
 	tabStep int
+	// staged holds every write: the create form edits its whole definition in
+	// the section document and commits it in one write (owner 2026-11-22).
+	// While it is set, assign/assignModel stage the value in the document and
+	// never reach the store; the create form's submit clears it for that one
+	// write.
+	staged bool
 }
 
 func newConfigPanel(sel Selector, renderer *Renderer, session configPanelSession) *configPanel {
@@ -1367,6 +1374,9 @@ func (p *configPanel) assignModel(doc any, path []string, field configField, sto
 			return doc, err.Error()
 		}
 	}
+	if p.staged {
+		return updated, ""
+	}
 	if err := p.save(updated); err != nil {
 		return p.reloadSection(), err.Error()
 	}
@@ -1408,11 +1418,17 @@ func (p *configPanel) configModelValueText(field configField, value any) string 
 // names it rather than the configuration path it lives at (plan 313 Step 5b). A
 // candidate the store refuses is not applied — the page is read back from what
 // the database still holds — and the validator's own words become its next line.
+//
+// While the panel is staging a create form (staged) the edit is applied to the
+// section document alone: the form's submit is the one write.
 func (p *configPanel) assign(doc any, path []string, value any, remove bool, label string) (any, string) {
 	updated, err := configAssign(doc, path, value, remove, label)
 	if err != nil {
 		p.printError(err)
 		return doc, err.Error()
+	}
+	if p.staged {
+		return updated, ""
 	}
 	if err := p.save(updated); err != nil {
 		return p.reloadSection(), err.Error()
