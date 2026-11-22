@@ -3017,7 +3017,7 @@ func (p *configPanel) addAgentDefinition(doc any, path []string, field configFie
 			row := rows[res.Row]
 			switch {
 			case row.field.KeyName:
-				key, notice = p.holdAgentName(doc, path, row.field, draft, key)
+				key, notice = p.holdAgentName(doc, path, row.field, key)
 			case row.field.CreateEditable:
 				notice = p.editAgentDraftPrimary(draft)
 			default:
@@ -3078,8 +3078,10 @@ func (p *configPanel) confirmDiscardAgentDraft() bool {
 
 // agentNameRefusal is the one place a create's name is judged: the empty key,
 // the one id rule every definition id follows (the loader's own, owner
-// 2026-11-22), the six reserved names, and a duplicate.
-func (p *configPanel) agentNameRefusal(doc any, path []string, name string, draft map[string]any) string {
+// 2026-11-22), the six reserved names, and a duplicate. The rule is the same
+// for both roles — a definition's id has no second rule — so nothing here
+// reads the draft it is being typed into.
+func (p *configPanel) agentNameRefusal(doc any, path []string, name string) string {
 	if name == "" {
 		return "A key is required."
 	}
@@ -3101,7 +3103,7 @@ func (p *configPanel) agentNameRefusal(doc any, path []string, name string, draf
 // holdAgentName asks for the definition's name and holds it with the form —
 // no write (owner 2026-11-22). The editor opens on the key the form already
 // holds, so re-opening it is how a rename is made.
-func (p *configPanel) holdAgentName(doc any, path []string, field configField, draft map[string]any, key string) (string, string) {
+func (p *configPanel) holdAgentName(doc any, path []string, field configField, key string) (string, string) {
 	name, ok, _, err := p.editScalar(field, key)
 	if err != nil {
 		p.printError(err)
@@ -3111,7 +3113,7 @@ func (p *configPanel) holdAgentName(doc any, path []string, field configField, d
 		return key, ""
 	}
 	next := strings.TrimSpace(name)
-	if notice := p.agentNameRefusal(doc, path, next, draft); notice != "" {
+	if notice := p.agentNameRefusal(doc, path, next); notice != "" {
 		return key, notice
 	}
 	return next, ""
@@ -3159,7 +3161,7 @@ func (p *configPanel) editAgentDraftPrimary(draft map[string]any) string {
 // save lands every field together). A refusal from the loader puts the draft
 // back under its unnamed key, so the form keeps every value the user typed.
 func (p *configPanel) submitAgentDraft(doc any, path []string, draft map[string]any, key string) (any, string, bool) {
-	if notice := p.agentNameRefusal(doc, path, key, draft); notice != "" {
+	if notice := p.agentNameRefusal(doc, path, key); notice != "" {
 		return doc, notice, false
 	}
 	defs, _ := configLookupValue(doc, path)
