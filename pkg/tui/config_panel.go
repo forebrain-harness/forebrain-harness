@@ -2352,7 +2352,7 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 		if settings == nil {
 			settings = map[string]any{}
 		}
-		items, rows := p.templateItems(template, configRowKey(rowPath), settings, tailRows)
+		items, rows := p.templateItems(template, configRowKey(rowPath), settings, tailRows, false)
 		idx, ok, err := p.page(p.templateNotice(template, settings, notice), configFieldKeys, items, -1)
 		if err != nil {
 			p.printError(err)
@@ -2442,7 +2442,9 @@ func configHookActionType(settings map[string]any) string {
 // actions). customOnly hides the fields a built-in or system entry cannot
 // carry; showFor hides the fields another action type owns; a system entry's
 // every row carries the System status and the verdict in place of its hint.
-func (p *configPanel) templateItems(template, key string, settings map[string]any, tailRows bool) ([]SelectItem, []configTemplateRow) {
+// creating is the create form's page: there the two fields the create decides
+// are still open, because nothing exists to lock them yet (owner 2026-11-22).
+func (p *configPanel) templateItems(template, key string, settings map[string]any, tailRows, creating bool) ([]SelectItem, []configTemplateRow) {
 	fields := configTemplates[template]
 	name := strings.ToLower(strings.TrimSpace(configStringField(settings, "name")))
 	system := configTemplateRowIsSystem(template, settings)
@@ -2488,8 +2490,9 @@ func (p *configPanel) templateItems(template, key string, settings map[string]an
 			status = configSystemStatus
 		}
 		// The two fields a create decides are read-only once the definition
-		// exists: the page draws them as the prototype's locked rows.
-		locked := !configTemplateRowIsSystem(template, settings) && (field.KeyName || field.CreateEditable) && key != ""
+		// exists: the page draws them as the prototype's locked rows. A create
+		// form has nothing to lock yet (owner 2026-11-22).
+		locked := !configTemplateRowIsSystem(template, settings) && (field.KeyName || field.CreateEditable) && key != "" && !creating
 		items = append(items, SelectItem{
 			Label:    field.Label,
 			Value:    p.configTemplateValueText(field, value, exists),
@@ -2912,18 +2915,28 @@ const (
 	// configPrimaryIDRefusal is the primary id's rule, the loader's own
 	// (plan 328 D4): it takes underscores as well as the prototype's letters,
 	// numbers and hyphens, and the help says so — the loader is the authority.
+	// Both roles answer with this sentence: a definition's id has one rule
+	// (owner 2026-11-22).
 	configPrimaryIDRefusal = "Use a lowercase agent ID with letters, numbers, hyphens or underscores, starting with a letter."
-	// configCreateHeldNotice answers a value the create form holds while the
-	// name has not landed: the panel's Enter persists, and this says where the
-	// value went.
-	configCreateHeldNotice = "Held with the new agent; it saves when the name is confirmed."
-	// configCreateNameFirstNotice answers a field whose editor needs a saved
-	// section to read and write: the model rows and the collections.
-	configCreateNameFirstNotice = "Confirm the name first; the rest saves on the page that follows."
+	// configCreateSaveKey / configCreateSaveLabel are the create forms'
+	// submit: the footer shortcut that writes the whole definition in one go
+	// (owner 2026-11-22), and the plain picker's row for the same act. Both
+	// create forms (agent and subagent) share these.
+	configCreateSaveKey   = "s"
+	configCreateSaveLabel = "Save"
+	configCreateSaveDesc  = "Writes the new definition"
+	// configDiscardDraftLabel / configKeepEditingLabel answer a tab arrow on a
+	// filled create form.
+	configDiscardDraftLabel = "Discard"
+	configKeepEditingLabel  = "Keep editing"
 	// configCreateRoleNotice answers a role flip that cleared the other
 	// role's held values (owner ruling: 切角色时清掉对方的字段).
 	configCreateRoleNotice = "Role switched. The other role's held values were cleared."
 )
+
+// configCreateFormKeys is the create form's footer: Enter opens a row, Esc
+// discards the whole draft — nothing is written until Save.
+var configCreateFormKeys = &configPageKeys{Enter: "open", Esc: "cancel"}
 
 // The two roles' field keys, the sets a role flip clears (the prototype's
 // stageValue clears the primary-only keys on primary:false; the same rule
@@ -2934,227 +2947,236 @@ var (
 )
 
 // addAgentDefinition is the unified create (P3, the prototype's agent create
-// scene): one single-page form — the same fields a saved definition's page
-// renders — held as a draft until the name lands. The name and the primary
-// switch are the two fields the create decides; every other field the role's
-// page shows is held with the draft and saves with the name, after which the
-// panel's own Enter-persists-per-field rule takes over on the saved page.
-// Nothing writes until a valid name confirms, so backing out of an unnamed
-// draft discards silently, and a refused name keeps the form and every held
-// value.
+// scene): one form holding every field a saved definition's page renders, and
+// nothing written until the footer's Save lands it whole (owner 2026-11-22).
+// The draft sits under the map's unnamed key, the key the prototype's startAdd
+// stages its draft on, so every editor the saved page opens works here
+// unchanged — they read and write a real path inside the section document.
 //
 // The draft starts as a primary agent (the prototype's startAdd seed) and the
 // primary switch flips the role in place, clearing the other role's held
-// values. The refusals are the prototype's and the loader's: an empty key, a
-// key the role's pattern refuses (the primary's here, the subagent's through
-// the loader's own sentence on the write), one of the six reserved subagent
-// names, and a duplicate.
+// values. The name and the role are the form's own two fields; every other row
+// opens the editor the saved page opens. Esc discards the draft with nothing
+// written; a refusal from the name check or from the loader keeps the form and
+// every value the user typed. A tab arrow on a filled form asks first.
 func (p *configPanel) addAgentDefinition(doc any, path []string, field configField, container any) (any, string) {
+	_ = container // still carried by addRow's signature; the draft is read off the document
 	draft := map[string]any{"primary": true}
-	tailRows := p.configActionSelector() == nil
-	// The form opens on the name (plan 350, the prototype's startAdd →
-	// focusEditor): the `a` that got here already means "a new definition", so
-	// the first thing typed is its name, and it lands the definition at once.
-	// Esc leaves the form with nothing written and every other field empty.
-	updated, key, landed, notice := p.commitAgentName(doc, path, field, container, draft)
-	if landed {
-		return p.editTemplatePage(updated, configJoinPath(path, key), configTemplateAgent, key)
-	}
-	doc = updated
+	doc = p.stageAgentDraft(doc, path, draft)
+	p.staged = true
+	defer func() { p.staged = false }()
+	actions := p.configActionSelector()
+	key, notice := "", ""
 	for {
-		items, rows := p.templateItems(configTemplateAgent, "", draft, tailRows)
-		idx, ok, err := p.page(notice, configFieldKeys, items, -1)
+		items, rows := p.templateItems(configTemplateAgent, key, draft, false, true)
+		saveRow := -1
+		if actions == nil {
+			// A picker without footer actions: the submit and the way out
+			// are rows, the way the plain rows pages carry them.
+			saveRow = len(rows)
+			items = append(items,
+				SelectItem{Label: configCreateSaveLabel, Description: configCreateSaveDesc},
+				SelectItem{Label: configUpRowLabel, Description: "Back up one level"})
+		}
+		// Only an arrow this page takes counts: a nested page (rows/editor)
+		// may leave its own tab step behind, and that must not read as the
+		// user leaving the form.
+		p.tabStep = 0
+		var res ActionResult
+		var err error
+		if actions == nil {
+			var idx int
+			var ok bool
+			idx, ok, err = p.page(notice, configCreateFormKeys, items, -1)
+			res = ActionResult{Row: idx, OK: ok}
+		} else {
+			res, err = p.actionPage(notice, configCreateFormKeys, items, -1,
+				FooterAction{Label: configCreateSaveLabel, Key: configCreateSaveKey, Kind: FooterActionSave})
+		}
 		if err != nil {
 			p.printError(err)
-			return doc, ""
+			return p.discardAgentDraft()
 		}
 		notice = ""
-		if !ok || idx < 0 || idx >= len(rows) {
-			// Back out of an unnamed draft: nothing was written, so nothing
-			// is discarded but the held values.
-			return doc, ""
+		if p.tabStep != 0 {
+			// A tab arrow must not throw a filled form away unasked.
+			if p.agentDraftUntouched(draft, key) || p.confirmDiscardAgentDraft() {
+				return p.discardAgentDraft() // p.tabStep stays set: the panel steps
+			}
+			p.tabStep = 0 // Keep editing: stay on the form
+			continue
 		}
-		row := rows[idx]
 		switch {
-		case row.up:
-			return doc, ""
-		case row.field.KeyName:
-			updated, key, landed, held := p.commitAgentName(doc, path, field, container, draft)
-			if !landed {
-				notice = held
-				continue
+		case res.Action == FooterActionSave || (saveRow >= 0 && res.OK && res.Row == saveRow):
+			var landed bool
+			doc, notice, landed = p.submitAgentDraft(doc, path, draft, key)
+			if landed {
+				return doc, "" // back to the Agent definitions list (owner 2026-11-22)
 			}
-			// The name landed: the definition exists, and the page it opens
-			// is the saved definition's own, where every further confirm
-			// persists per field.
-			return p.editTemplatePage(updated, configJoinPath(path, key), configTemplateAgent, key)
-		case row.field.CreateEditable:
-			if !p.editAgentDraftPrimary(draft) {
-				return doc, ""
+		case res.OK && res.Row >= 0 && res.Row < len(rows):
+			row := rows[res.Row]
+			switch {
+			case row.field.KeyName:
+				key, notice = p.holdAgentName(doc, path, row.field, draft, key)
+			case row.field.CreateEditable:
+				notice = p.editAgentDraftPrimary(draft)
+			default:
+				doc, notice = p.openTemplateField(doc, configJoinPath(path, ""), row.field)
 			}
-			notice = configCreateRoleNotice
 		default:
-			held, fieldNotice := p.editAgentDraftField(draft, row.field)
-			if !held {
-				return doc, ""
-			}
-			notice = fieldNotice
+			// Esc (or the plain page's back-up row): nothing was written.
+			return p.discardAgentDraft()
 		}
 	}
 }
 
-// commitAgentName validates the name the create form holds and, on the first
-// good one, writes the definition whole — the draft under its real key, the
-// one store write that materialises it. A refusal returns landed=false with
-// the notice the form re-renders under, every held value intact. landed=true
-// hands back the updated document and the key that landed.
-func (p *configPanel) commitAgentName(doc any, path []string, field configField, container any, draft map[string]any) (any, string, bool, string) {
-	name, ok, _, err := p.editScalar(field, "")
+// stageAgentDraft puts the create draft under the unnamed key, the one the
+// prototype's startAdd stages its draft on, without a write: every editor then
+// works on a real path inside the document, and the submit is the only write.
+func (p *configPanel) stageAgentDraft(doc any, path []string, draft map[string]any) any {
+	defs, _ := configLookupValue(doc, path)
+	rows, _ := defs.(map[string]any)
+	if rows == nil {
+		rows = map[string]any{}
+	}
+	rows[""] = draft
+	updated, err := configAssign(doc, path, rows, false, "Agent definitions")
 	if err != nil {
 		p.printError(err)
-		return doc, "", false, ""
+		return doc
 	}
-	if !ok {
-		return doc, "", false, ""
-	}
-	key := strings.TrimSpace(name)
-	if key == "" {
-		return doc, "", false, "A key is required."
-	}
-	if configAgentRolePrimary(draft) && !appcfg.ValidPrimaryAgentID(key) {
-		return doc, "", false, configPrimaryIDRefusal
-	}
-	if appcfg.IsReservedDefinitionID(key) {
-		return doc, "", false, configReservedIDRefusal
-	}
-	if rows, isMap := container.(map[string]any); isMap {
-		if _, dup := rows[key]; dup {
-			return doc, "", false, "That key already exists. Choose a different key."
-		}
-	}
-	rows, isMap := container.(map[string]any)
-	if !isMap || rows == nil {
-		rows = make(map[string]any, 1)
-	}
-	rows[key] = draft
-	updated, note := p.assign(doc, path, rows, false, field.Label)
-	if note != "" {
-		// The loader refused the shape (a subagent id its pattern refuses, a
-		// body it will not take): the form stays with every held value.
-		return doc, "", false, note
-	}
-	return updated, key, true, ""
+	return updated
 }
 
-// editAgentDraftPrimary flips the create draft's role and clears the other
-// role's held values. It reports false to leave the form, true to re-render it.
-func (p *configPanel) editAgentDraftPrimary(draft map[string]any) bool {
+// discardAgentDraft leaves the create with nothing written: the section is
+// read back from the store, so the unnamed draft never reaches a page.
+func (p *configPanel) discardAgentDraft() (any, string) {
+	return p.sectionDoc(p.section), ""
+}
+
+// agentDraftUntouched reports a form nobody typed into: no name and the seed
+// alone. A role flip on its own counts as untouched — it costs one keystroke
+// to redo, and an accidental arrow must not raise a dialog.
+func (p *configPanel) agentDraftUntouched(draft map[string]any, key string) bool {
+	return key == "" && len(draft) == 1
+}
+
+// confirmDiscardAgentDraft asks before a tab arrow throws a filled create form
+// away; Keep editing (preselected) stays on the page (owner 2026-11-22).
+func (p *configPanel) confirmDiscardAgentDraft() bool {
+	items := []SelectItem{
+		{Label: configDiscardDraftLabel, Danger: true},
+		{Label: configKeepEditingLabel},
+	}
+	idx, ok, err := p.page("Discard the new definition?\nNothing was written.", configConfirmKeys, items, 1)
+	if err != nil {
+		p.printError(err)
+		return false
+	}
+	return ok && idx == 0
+}
+
+// agentNameRefusal is the one place a create's name is judged: the empty key,
+// the one id rule every definition id follows (the loader's own, owner
+// 2026-11-22), the six reserved names, and a duplicate.
+func (p *configPanel) agentNameRefusal(doc any, path []string, name string, draft map[string]any) string {
+	if name == "" {
+		return "A key is required."
+	}
+	if !appcfg.ValidPrimaryAgentID(name) {
+		return configPrimaryIDRefusal
+	}
+	if appcfg.IsReservedDefinitionID(name) {
+		return configReservedIDRefusal
+	}
+	defs, _ := configLookupValue(doc, path)
+	if rows, ok := defs.(map[string]any); ok {
+		if _, dup := rows[name]; dup {
+			return "That key already exists. Choose a different key."
+		}
+	}
+	return ""
+}
+
+// holdAgentName asks for the definition's name and holds it with the form —
+// no write (owner 2026-11-22). The editor opens on the key the form already
+// holds, so re-opening it is how a rename is made.
+func (p *configPanel) holdAgentName(doc any, path []string, field configField, draft map[string]any, key string) (string, string) {
+	name, ok, _, err := p.editScalar(field, key)
+	if err != nil {
+		p.printError(err)
+		return key, ""
+	}
+	if !ok {
+		return key, ""
+	}
+	next := strings.TrimSpace(name)
+	if notice := p.agentNameRefusal(doc, path, next, draft); notice != "" {
+		return key, notice
+	}
+	return next, ""
+}
+
+// editAgentDraftPrimary flips the draft's role in place and clears the other
+// role's values (the prototype's stageValue): held with the form, no write.
+func (p *configPanel) editAgentDraftPrimary(draft map[string]any) string {
+	primary := configAgentRolePrimary(draft)
 	items := []SelectItem{{Label: configBoolOnLabel}, {Label: configBoolOffLabel}}
-	if configAgentRolePrimary(draft) {
+	defaultIdx := 1
+	if primary {
 		items[0].Status = configChoiceCheckStatus
+		defaultIdx = 0
 	} else {
 		items[1].Status = configChoiceCheckStatus
 	}
-	idx, ok, err := p.page(configCreatedFieldsNotice, configChoiceKeys, items, 0)
+	idx, ok, err := p.page("", configChoiceKeys, items, defaultIdx)
 	if err != nil {
 		p.printError(err)
-		return false
+		return ""
 	}
 	if !ok || idx < 0 || idx > 1 {
-		return false
+		return ""
 	}
 	next := idx == 0
-	if next == configAgentRolePrimary(draft) {
-		return true
+	if next == primary {
+		return ""
 	}
 	draft["primary"] = next
-	for _, key := range configPrimaryOnlyKeys {
+	for _, k := range configPrimaryOnlyKeys {
 		if !next {
-			delete(draft, key)
+			delete(draft, k)
 		}
 	}
-	for _, key := range configSubagentOnlyKeys {
+	for _, k := range configSubagentOnlyKeys {
 		if next {
-			delete(draft, key)
+			delete(draft, k)
 		}
 	}
-	return true
+	return configCreateRoleNotice
 }
 
-// editAgentDraftField holds one non-deciding field's value with the draft.
-// Simple values type or pick straight into the draft; the fields whose
-// editors need a stored row or a saved section to read and write — the model
-// rows and the collections — ask for the name first instead. It reports
-// false to leave the form, true to re-render it under the notice it names.
-func (p *configPanel) editAgentDraftField(draft map[string]any, field configField) (bool, string) {
-	switch field.Kind {
-	case configFieldModel, configFieldEffort, configFieldRows:
-		return true, configCreateNameFirstNotice
-	case configFieldEnum:
-		items := make([]SelectItem, 0, len(field.Options))
-		current := strings.TrimSpace(configStringField(draft, field.Path))
-		if current == "" {
-			current = field.DefaultValue
-		}
-		for _, option := range field.Options {
-			item := SelectItem{Label: option}
-			if label, ok := field.OptionLabels[option]; ok {
-				item.Label = label
-			}
-			if option == current {
-				item.Status = configChoiceCheckStatus
-			}
-			items = append(items, item)
-		}
-		idx, ok, err := p.page(field.Label, configChoiceKeys, items, 0)
-		if err != nil {
-			p.printError(err)
-			return false, ""
-		}
-		if !ok || idx < 0 || idx >= len(field.Options) {
-			return false, ""
-		}
-		draft[field.Path] = field.Options[idx]
-		return true, configCreateHeldNotice
-	case configFieldBool3:
-		items := []SelectItem{{Label: configBoolOnLabel}, {Label: configBoolOffLabel}}
-		current := true
-		if value, isBool := draft[field.Path].(bool); isBool {
-			current = value
-		} else if field.DefaultValue == "false" {
-			current = false
-		}
-		defaultIdx := 0
-		if !current {
-			defaultIdx = 1
-		}
-		items[defaultIdx].Status = configChoiceCheckStatus
-		idx, ok, err := p.page(field.Label, configChoiceKeys, items, defaultIdx)
-		if err != nil {
-			p.printError(err)
-			return false, ""
-		}
-		if !ok || idx < 0 || idx > 1 {
-			return false, ""
-		}
-		draft[field.Path] = idx == 0
-		return true, configCreateHeldNotice
-	default:
-		text, ok, err := p.sel.Input("New agent\n"+field.Label, configStringField(draft, field.Path))
-		if err != nil {
-			p.printError(err)
-			return false, ""
-		}
-		if !ok {
-			return false, ""
-		}
-		if strings.TrimSpace(text) == "" {
-			delete(draft, field.Path)
-			return true, configCreateHeldNotice
-		}
-		draft[field.Path] = text
-		return true, configCreateHeldNotice
+// submitAgentDraft is the create's one write (owner 2026-11-22: the footer's
+// save lands every field together). A refusal from the loader puts the draft
+// back under its unnamed key, so the form keeps every value the user typed.
+func (p *configPanel) submitAgentDraft(doc any, path []string, draft map[string]any, key string) (any, string, bool) {
+	if notice := p.agentNameRefusal(doc, path, key, draft); notice != "" {
+		return doc, notice, false
 	}
+	defs, _ := configLookupValue(doc, path)
+	rows, _ := defs.(map[string]any)
+	delete(rows, "")
+	rows[key] = draft
+	previous := p.staged
+	p.staged = false
+	updated, note := p.assign(doc, path, rows, false, "Agent definitions")
+	p.staged = previous
+	if note == "" {
+		return updated, "", true
+	}
+	// Reload first: a configAssign failure (never for a map path) would have
+	// left the old tree half-moved, and re-staging on top of it would keep
+	// both keys.
+	return p.stageAgentDraft(p.reloadSection(), path, draft), note, false
 }
 
 // hookRowsPage reports whether a row page is the hooks section's own tree. Its

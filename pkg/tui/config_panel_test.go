@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -114,13 +115,15 @@ type actionPanelSelector struct {
 }
 
 // An action step answers a footer action when its kind is set, and a row
-// otherwise — by label when set, else by index.
+// otherwise — by label when set, else by index. tabStep is the arrow a page
+// answered with instead of a row (the /config panel's tab switch).
 type actionStep struct {
-	action FooterActionKind
-	row    int
-	label  string
-	ok     bool
-	err    error
+	action  FooterActionKind
+	row     int
+	label   string
+	ok      bool
+	err     error
+	tabStep int
 }
 
 // An input step answers an action-bearing editor: the action when its kind
@@ -151,6 +154,9 @@ func (s *actionPanelSelector) SelectRichActions(label string, items []SelectItem
 	s.actionIdx++
 	if step.action != footerActionNone {
 		return ActionResult{Row: step.row, Action: step.action, OK: step.ok}, step.err
+	}
+	if step.tabStep != 0 {
+		return ActionResult{Row: -1, OK: step.ok, TabStep: step.tabStep}, step.err
 	}
 	if step.label != "" {
 		for i, item := range items {
@@ -1940,7 +1946,7 @@ func TestConfigPanelValueColumnNotElided(t *testing.T) {
 	// The type page: its Model row carries the value right-aligned (D4).
 	explore, _ := configLookupValue(doc, []string{"subagent_models", "explore"})
 	exploreSettings, _ := explore.(map[string]any)
-	typeItems, _ := panel.templateItems(configTemplateTypeDef, "explore", exploreSettings, false)
+	typeItems, _ := panel.templateItems(configTemplateTypeDef, "explore", exploreSettings, false, false)
 	typeLines := renderRichPage(typeItems, "explore", 120)
 	// The value names the row the way every picker does: the bare
 	// provider/model label, the endpoint drawn beside it (owner 2026-11-22).
@@ -2349,14 +2355,10 @@ func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
 	}
 }
 
-// Creating a primary agent is a guided flow, not a type menu (plan 313): an id,
-// an optional display name, the prototype's seed, and the new agent's own page
-// opened with the guidance that says what to do next.
-// The unified create (P3, the prototype's agent create scene): one single-page
-// form held as a draft until the name lands — the name and the primary switch
-// are the two fields the create decides, the rest of the role's fields hold
-// their values with the draft and save with the name, and a refusal keeps the
-// form and every held value.
+// The unified create is one form, and it writes once (owner 2026-11-22): `a`
+// draws every field the saved page draws with nothing written, each row is an
+// ordinary edit held in the section document, and the footer's Save lands the
+// whole definition. Esc leaves nothing behind; a refusal keeps every value.
 func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 	newCase := func(t *testing.T, steps []richStep, inputs []selectorInput, stored string) (*configPanelTestSession, *scriptedSelector) {
 		t.Helper()
@@ -2367,109 +2369,97 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 	}
 	openDefinitions := richStep{label: "Agent definitions", ok: true}
 	addRow := richStep{label: configAddRowLabel, ok: true}
-
-	t.Run("the name lands the draft as the definition", func(t *testing.T) {
-		// `a` opens the name editor itself: the first key typed is the
-		// definition's name, with no step on the form between (plan 350, the
-		// prototype's startAdd → focusEditor).
-		session, selector := newCase(t,
-			[]richStep{
-				openDefinitions, addRow,
-				{ok: false}, {ok: false}, {ok: false},
-			},
-			[]selectorInput{{value: "review-agent", ok: true}},
-			`{"definitions":{"main":{"primary":true}}}`,
-		)
-		if len(session.writes) != 1 {
-			t.Fatalf("expected one write, got %d", len(session.writes))
-		}
-		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"review-agent":{"primary":true}`) {
-			t.Fatalf("raw = %s", raw)
-		}
-		// The page the name opens lists the saved definition's own fields —
-		// the name row's value is the key it landed under (plan 350).
-		namedKey := false
+	const storedMain = `{"definitions":{"main":{"primary":true}}}`
+	// The create's submit on a picker without footer actions: the form's own
+	// last row.
+	save := richStep{label: configCreateSaveLabel, ok: true}
+	// The form's page carries no locked rows: a create has nothing locked yet.
+	createPage := func(t *testing.T, selector *scriptedSelector) []SelectItem {
+		t.Helper()
 		for _, items := range selector.richItems {
-			if row, ok := findRowLoose(items, "Name"); ok && row.Value == "review-agent" {
-				namedKey = true
+			if row, ok := findRowLoose(items, "Primary"); ok {
+				if row.Locked {
+					t.Fatalf("a create form must not lock its Primary row: %v", rowLabels(items))
+				}
+				return items
 			}
 		}
-		if !namedKey {
-			t.Fatalf("the saved page must open under the new key: %v", pageLabels(selector))
+		t.Fatalf("no create form was drawn: %v", pageLabels(selector))
+		return nil
+	}
+
+	t.Run("the create form comes first", func(t *testing.T) {
+		// `a` draws the whole form at once — no name editor between (owner
+		// 2026-11-22, the prototype's startAdd).
+		session, selector := newCase(t,
+			[]richStep{openDefinitions, addRow, {ok: false}, {ok: false}},
+			nil, storedMain,
+		)
+		items := createPage(t, selector)
+		name, ok := findRowLoose(items, "Name")
+		if !ok {
+			t.Fatalf("the create form must show its Name row: %v", rowLabels(items))
 		}
-		// One drawn page is the saved definition's own, and it is the only
-		// page whose rows include the locked Name field.
-		saved := -1
-		for i, items := range selector.richItems {
-			if _, ok := findRowLoose(items, "Name"); ok {
-				saved = i
-				break
-			}
+		if name.Value != "" || name.Locked {
+			t.Fatalf("the Name row = %+v, want empty and unlocked", name)
 		}
-		if saved < 0 {
-			t.Fatalf("no drawn page shows the saved definition's fields: %v", pageLabels(selector))
+		if len(session.writes) != 0 {
+			t.Fatalf("opening the form writes nothing, got %+v", session.writes)
 		}
 	})
 
-	t.Run("a definition created through the subagent role carries its body alone", func(t *testing.T) {
+	t.Run("the save writes it whole", func(t *testing.T) {
+		// Every field is held, then the one submit lands them together.
 		session, _ := newCase(t,
 			[]richStep{
 				openDefinitions, addRow,
-				// The create draft starts as a primary agent; Primary false
-				// is the install-wide subagent role.
+				{label: "Name", ok: true},
 				{label: "Primary", ok: true},
 				{label: configBoolOffLabel, ok: true},
-				// The role's body is held with the draft...
+				{label: "Description", ok: true},
 				{label: "System prompt", ok: true},
-				// ...and the name lands it, definition and all.
-				{label: "Name", ok: true},
-				{ok: false}, {ok: false}, {ok: false},
+				save,
 			},
 			[]selectorInput{
-				// The form opens on the name; Esc leaves it and holds the
-				// form open (plan 350).
-				{ok: false},
-				{value: "You audit repositories.", ok: true},
 				{value: "repo-auditor", ok: true},
+				{value: "Audits repos.", ok: true},
+				{value: "You audit repositories.", ok: true},
 			},
-			`{"definitions":{"main":{"primary":true}}}`,
+			storedMain,
 		)
 		if len(session.writes) != 1 {
-			t.Fatalf("expected one write, got %d", len(session.writes))
+			t.Fatalf("expected exactly one write, got %d: %+v", len(session.writes), session.writes)
 		}
-		// The body after the key is the whole definition: no primary-only key
-		// travels with it.
-		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"repo-auditor":{"primary":false,"system_prompt":"You audit repositories."}`) {
+		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"repo-auditor":{"description":"Audits repos.","primary":false,"system_prompt":"You audit repositories."}`) {
 			t.Fatalf("raw = %s", raw)
 		}
 	})
 
-	t.Run("flipping the role clears the other role's held values", func(t *testing.T) {
+	t.Run("Primary flips the role in memory", func(t *testing.T) {
+		// A subagent-role value is held, then the role flips back and the
+		// cleared value never reaches the store.
 		session, selector := newCase(t,
 			[]richStep{
 				openDefinitions, addRow,
-				// A subagent-role value is held...
+				{label: "Name", ok: true},
 				{label: "Primary", ok: true},
 				{label: configBoolOffLabel, ok: true},
 				{label: "Tool access", ok: true},
 				{label: "Pick", ok: true},
-				// ...then the role flips back, which clears it...
 				{label: "Primary", ok: true},
 				{label: configBoolOnLabel, ok: true},
-				// ...and the name lands the definition without it.
-				{label: "Name", ok: true},
-				{ok: false}, {ok: false}, {ok: false},
+				save,
 			},
-			[]selectorInput{{ok: false}, {value: "review-agent", ok: true}},
-			`{"definitions":{"main":{"primary":true}}}`,
+			[]selectorInput{{value: "review-agent", ok: true}},
+			storedMain,
 		)
 		if !strings.Contains(pageLabels(selector), configCreateRoleNotice) {
 			t.Fatalf("the role flip must say what it cleared: %s", pageLabels(selector))
 		}
-		raw := ""
-		if len(session.writes) == 1 {
-			raw = string(session.writes[0].raw)
+		if len(session.writes) != 1 {
+			t.Fatalf("expected exactly one write, got %d: %+v", len(session.writes), session.writes)
 		}
+		raw := string(session.writes[0].raw)
 		if !strings.Contains(raw, `"review-agent":{"primary":true}`) {
 			t.Fatalf("raw = %s", raw)
 		}
@@ -2478,69 +2468,56 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 		}
 	})
 
-	t.Run("a field held before the name says where it went", func(t *testing.T) {
-		_, selector := newCase(t,
-			[]richStep{
-				openDefinitions, addRow,
-				{label: "Description", ok: true},
-				{ok: false}, {ok: false}, {ok: false},
-			},
-			[]selectorInput{{ok: false}, {value: "held text", ok: true}},
-			`{"definitions":{"main":{"primary":true}}}`,
-		)
-		if !strings.Contains(pageLabels(selector), configCreateHeldNotice) {
-			t.Fatalf("the held value must be named: %s", pageLabels(selector))
-		}
-	})
-
-	t.Run("a field that needs the saved section asks for the name first", func(t *testing.T) {
-		_, selector := newCase(t,
-			[]richStep{
-				openDefinitions, addRow,
-				{label: "Model", ok: true},
-				{ok: false}, {ok: false}, {ok: false},
-			},
-			[]selectorInput{{ok: false}},
-			`{"definitions":{"main":{"primary":true}}}`,
-		)
-		if !strings.Contains(pageLabels(selector), configCreateNameFirstNotice) {
-			t.Fatalf("the model row must ask for the name first: %s", pageLabels(selector))
-		}
-	})
-
-	t.Run("an empty name writes nothing", func(t *testing.T) {
+	t.Run("a name is required to save", func(t *testing.T) {
 		session, selector := newCase(t,
-			[]richStep{
-				openDefinitions, addRow,
-				{label: "Name", ok: true},
-				{ok: false}, {ok: false}, {ok: false},
-			},
-			[]selectorInput{{value: "", ok: true}},
-			`{"definitions":{"main":{"primary":true}}}`,
+			[]richStep{openDefinitions, addRow, save, {ok: false}, {ok: false}},
+			nil, storedMain,
 		)
 		if !strings.Contains(pageLabels(selector), "A key is required.") {
 			t.Fatalf("the empty-name refusal must be stated: %s", pageLabels(selector))
 		}
 		if len(session.writes) != 0 {
-			t.Fatalf("a refused name writes nothing, got %+v", session.writes)
+			t.Fatalf("a refused submit writes nothing, got %+v", session.writes)
 		}
 	})
 
-	t.Run("an id the loader would refuse is refused here", func(t *testing.T) {
+	t.Run("an id the loader refuses is refused here", func(t *testing.T) {
 		session, selector := newCase(t,
 			[]richStep{
 				openDefinitions, addRow,
 				{label: "Name", ok: true},
-				{ok: false}, {ok: false}, {ok: false},
+				save, {ok: false}, {ok: false},
 			},
 			[]selectorInput{{value: "Bad ID", ok: true}},
-			`{"definitions":{"main":{"primary":true}}}`,
+			storedMain,
 		)
 		if !strings.Contains(pageLabels(selector), configPrimaryIDRefusal) {
 			t.Fatalf("the id rule must be stated: %s", pageLabels(selector))
 		}
 		if len(session.writes) != 0 {
 			t.Fatalf("a refused id writes nothing, got %+v", session.writes)
+		}
+	})
+
+	t.Run("a subagent definition takes an underscore in its id", func(t *testing.T) {
+		// The two roles have one id rule (owner 2026-11-22): the same name the
+		// custom subagent entry's pattern would refuse is a definition's key.
+		session, _ := newCase(t,
+			[]richStep{
+				openDefinitions, addRow,
+				{label: "Primary", ok: true},
+				{label: configBoolOffLabel, ok: true},
+				{label: "Name", ok: true},
+				save,
+			},
+			[]selectorInput{{value: "my_agent", ok: true}},
+			storedMain,
+		)
+		if len(session.writes) != 1 {
+			t.Fatalf("expected exactly one write, got %d: %+v", len(session.writes), session.writes)
+		}
+		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"my_agent":{"primary":false}`) {
+			t.Fatalf("raw = %s", raw)
 		}
 	})
 
@@ -2557,13 +2534,10 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 		} {
 			t.Run(role.name, func(t *testing.T) {
 				steps := append([]richStep{openDefinitions, addRow}, role.steps...)
-				steps = append(steps,
-					richStep{label: "Name", ok: true},
-					richStep{ok: false}, richStep{ok: false}, richStep{ok: false},
-				)
+				steps = append(steps, richStep{label: "Name", ok: true}, save, richStep{ok: false}, richStep{ok: false})
 				session, selector := newCase(t, steps,
 					[]selectorInput{{value: "explore", ok: true}},
-					`{"definitions":{"main":{"primary":true}}}`,
+					storedMain,
 				)
 				if !strings.Contains(pageLabels(selector), configReservedIDRefusal) {
 					t.Fatalf("the reserved-name refusal must be stated: %s", pageLabels(selector))
@@ -2576,52 +2550,189 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 	})
 
 	t.Run("a duplicate key is refused", func(t *testing.T) {
-		_, selector := newCase(t,
+		session, selector := newCase(t,
 			[]richStep{
 				openDefinitions, addRow,
 				{label: "Name", ok: true},
-				{ok: false}, {ok: false}, {ok: false},
+				save, {ok: false}, {ok: false},
 			},
 			[]selectorInput{{value: "main", ok: true}},
-			`{"definitions":{"main":{"primary":true}}}`,
+			storedMain,
 		)
 		if !strings.Contains(pageLabels(selector), "That key already exists. Choose a different key.") {
 			t.Fatalf("the duplicate refusal must be stated: %s", pageLabels(selector))
 		}
+		if len(session.writes) != 0 {
+			t.Fatalf("a duplicate key writes nothing, got %+v", session.writes)
+		}
 	})
 
-	// A subagent id the loader refuses is not pre-checked here: the panel
-	// attempts the write and the store's verdict is the notice, which is the
-	// one surface TestConfigPanelSurfacesTheLoadersSystemEntryRefusal already
-	// pins for this page family. The rule itself is pkg/config's
-	// validateDefinitionRoles.
-
-	t.Run("adding a key inside a definition keeps the ordinary type menu", func(t *testing.T) {
+	t.Run("Esc discards without a write", func(t *testing.T) {
+		// The form's rows page counts the definitions it lists, so the same
+		// count after Esc is the proof nothing landed.
 		session, selector := newCase(t,
+			[]richStep{openDefinitions, addRow, {ok: false}, {ok: false}, {ok: false}},
+			nil, storedMain,
+		)
+		if len(session.writes) != 0 {
+			t.Fatalf("Esc writes nothing, got %+v", session.writes)
+		}
+		if got := len(selector.richItems); got == 0 {
+			t.Fatal("the list must be drawn again after the form closed")
+		}
+		definitions := selector.richItems[len(selector.richItems)-1]
+		for _, item := range definitions {
+			if item.Label == "" || item.Label == configAddRowLabel || item.Label == configUpRowLabel {
+				continue
+			}
+			if strings.HasPrefix(item.Label, "New") && !strings.Contains(item.Label, "main") {
+				t.Fatalf("the discarded draft reached the list: %v", rowLabels(definitions))
+			}
+		}
+	})
+
+	t.Run("a rejected submit keeps the form and every value", func(t *testing.T) {
+		// The store's own refusal (a shape the loader will not take) leaves
+		// the form open with what the user typed: the draft goes back under
+		// its unnamed key and the loader's words become the page's notice.
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		session.writeErr = errors.New("agents.definitions.worker: invalid agent id")
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, []richStep{
+			{label: "Agent definitions", ok: true},
+			addRow,
+			{label: "Name", ok: true},
+			{label: "Description", ok: true},
+			{label: configCreateSaveLabel, ok: true},
+			{ok: false}, {ok: false},
+		}, []selectorInput{
+			{value: "worker", ok: true},
+			{value: "Audits repos.", ok: true},
+		}, "agents")
+
+		if len(session.writes) != 0 {
+			t.Fatalf("the refused write must not be recorded, got %+v", session.writes)
+		}
+		if !strings.Contains(pageLabels(selector), "agents.definitions.worker: invalid agent id") {
+			t.Fatalf("the loader's own sentence must be shown: %s", pageLabels(selector))
+		}
+		// The page after the refusal still holds what was typed.
+		var kept []SelectItem
+		for _, items := range selector.richItems {
+			if row, ok := findRowLoose(items, "Name"); ok && !row.Locked {
+				kept = items
+			}
+		}
+		if kept == nil {
+			t.Fatalf("the form must stay open after a refusal: %v", pageLabels(selector))
+		}
+		if row, _ := findRowLoose(kept, "Name"); row.Value != "worker" {
+			t.Fatalf("the refused form lost its name: %+v", row)
+		}
+		if row, _ := findRowLoose(kept, "Description"); row.Value != "Audits repos." {
+			t.Fatalf("the refused form lost its description: %+v", row)
+		}
+	})
+
+	t.Run("a tab arrow asks before discarding a filled form", func(t *testing.T) {
+		// ←/→ on a filled form asks first (owner 2026-11-22); Keep editing
+		// stays on the form, and the submit still lands it.
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		runActionConfigPanel(t, session, selector,
 			[]richStep{
-				openDefinitions,
-				{label: "main", ok: true},
-				// A key the agent template does not name stays reachable:
-				// its own generic rows page, under the additional fields.
-				{label: "Scratch", ok: true},
-				addRow,
-				{label: configNewTextRow, ok: true},
-				{ok: false},
-				{ok: false},
+				{label: "Agent definitions", ok: true},
+				// The discard question, answered Keep editing.
+				{label: configKeepEditingLabel, ok: true},
 				{ok: false},
 			},
-			[]selectorInput{{value: "note", ok: true}, {value: "hello", ok: true}},
-			`{"definitions":{"main":{"primary":true,"scratch":{}}}}`,
-		)
-		// The guard is keyed on the real path, so the nested add still asks what
-		// type the value is — never for an agent id.
-		if !strings.Contains(pageLabels(selector), "Value type") {
-			t.Fatalf("the nested add must keep the type menu: %s", pageLabels(selector))
+			[]actionStep{
+				{label: "Agent definitions", ok: true},
+				{action: FooterActionAdd, ok: true},
+				{label: "Name", ok: true},
+				{tabStep: 1, ok: true},
+				{action: FooterActionSave, ok: true},
+				{ok: false},
+			},
+			[]inputActionStep{{value: "worker", ok: true}},
+			"agents")
+
+		if !strings.Contains(pageLabels(selector.scriptedSelector), "Discard the new definition?") {
+			t.Fatalf("a tab arrow on a filled form must ask: %v", selector.richLabels)
 		}
-		if len(session.writes) != 1 || !strings.Contains(string(session.writes[0].raw), `"note":"hello"`) {
-			t.Fatalf("writes = %+v", session.writes)
+		if len(session.writes) != 1 {
+			t.Fatalf("expected one write after Keep editing, got %d: %+v", len(session.writes), session.writes)
+		}
+		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"worker":{"primary":true}`) {
+			t.Fatalf("raw = %s", raw)
 		}
 	})
+
+	t.Run("the footer's s Save submits the form", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		runActionConfigPanel(t, session, selector,
+			[]richStep{
+				{label: "Agent definitions", ok: true},
+				{ok: false},
+			},
+			[]actionStep{
+				{label: "Agent definitions", ok: true},
+				{action: FooterActionAdd, ok: true},
+				{label: "Name", ok: true},
+				{action: FooterActionSave, ok: true},
+				{ok: false},
+			},
+			[]inputActionStep{{value: "worker", ok: true}},
+			"agents")
+
+		if len(session.writes) != 1 {
+			t.Fatalf("expected exactly one write, got %d: %+v", len(session.writes), session.writes)
+		}
+		if raw := string(session.writes[0].raw); !strings.Contains(raw, `"worker":{"primary":true}`) {
+			t.Fatalf("raw = %s", raw)
+		}
+		// The form's footer offers the submit under its own key.
+		found := false
+		for _, opts := range selector.opts {
+			for _, action := range opts.FooterActions {
+				if action.Kind == FooterActionSave && action.Label == configCreateSaveLabel && action.Key == configCreateSaveKey {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("the create form's footer must carry %s %s: %+v", configCreateSaveKey, configCreateSaveLabel, selector.opts)
+		}
+	})
+}
+
+// The create form's rows carry no lock: templateItems' creating flag is what
+// tells a create page from a saved one (owner 2026-11-22).
+func TestConfigPanelCreateFormLeavesTheCreatedFieldsOpen(t *testing.T) {
+	panel := sectionPanel(map[string]string{"agents": `{"definitions":{"worker":{"primary":true}}}`})
+	draft := map[string]any{"primary": true}
+	items, _ := panel.templateItems(configTemplateAgent, "worker", draft, false, true)
+	for _, label := range []string{"Name", "Primary"} {
+		row, ok := findRowLoose(items, label)
+		if !ok {
+			t.Fatalf("the create page must show its %s row: %v", label, rowLabels(items))
+		}
+		if row.Locked {
+			t.Fatalf("%s is locked on a create page: %+v", label, row)
+		}
+	}
+	// The saved page keeps the lock: nothing exists to decide any more.
+	items, _ = panel.templateItems(configTemplateAgent, "worker", draft, false, false)
+	for _, label := range []string{"Name", "Primary"} {
+		row, ok := findRowLoose(items, label)
+		if !ok {
+			t.Fatalf("the saved page must show its %s row: %v", label, rowLabels(items))
+		}
+		if !row.Locked {
+			t.Fatalf("%s is open on a saved page: %+v", label, row)
+		}
+	}
 }
 
 // The two fields a create decides are locked on a saved definition's page
