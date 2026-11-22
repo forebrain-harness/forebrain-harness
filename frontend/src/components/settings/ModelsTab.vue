@@ -86,9 +86,11 @@
 
     <!-- Not every model can be deleted: a row an agent defaults to keeps that
          agent's explicit choice, and a row a subagent, the plan review or the
-         goal check pins by id is one the loader requires to resolve — deleting
-         it would leave the configuration refusing to compose. The page names
-         every owner instead of a bare refusal. -->
+         goal evaluator pins by id is one the loader requires to resolve —
+         deleting it would leave the configuration refusing to compose. The page
+         names every owner instead of a bare refusal — the agents the API names,
+         and the pins it sends as kinds, which the page writes in its own
+         language (plan 347). -->
     <ForebrainModal :open="refusedFor.length > 0" size="sm" :title="t('models.deleteRefusedTitle')" @close="refusedFor = []">
       <p class="text-[13px] text-[var(--forebrain-text-2)]">{{ t('models.deleteRefusedMessage') }}</p>
       <div class="mt-2 flex flex-wrap gap-1.5">
