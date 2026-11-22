@@ -196,7 +196,7 @@ func validateLoadedRoot(r *Root) error {
 	if err := ValidateCronSection(r.Cron); err != nil {
 		return err
 	}
-	// The settings page's goal-check row is global, so it has no per-agent
+	// The settings page's goal-evaluator row is global, so it has no per-agent
 	// entry to be validated with: this one call is its whole verdict, and it
 	// sits here rather than in validatePrimaryAgents because that function
 	// returns early for an install with no definitions at all — the shape a

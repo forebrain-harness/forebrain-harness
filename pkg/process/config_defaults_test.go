@@ -43,7 +43,7 @@ var zeroIsTheDefault = map[string]string{
 	// switch's own off, so the row never carries a default to hand the
 	// settings surfaces.
 	"peers.claude_code": "nil is the interop switch off",
-	// The /goal check's global row (plan 299) starts unconfigured, and its
+	// The /goal evaluator's global row (plan 299) starts unconfigured, and its
 	// empty value is the setting: no model is "follow the primary agent", and
 	// no effort is "follow the model row's own default". The rest are a custom
 	// subagent's fields, which this row never carries — the check's prompt,

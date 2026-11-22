@@ -194,8 +194,8 @@ type Counters struct {
 	PlanActive   string
 	// GoalRound is the round a running /goal is in, 0 when none is running.
 	GoalRound int
-	// GoalChecking is set while the goal's check reads the workspace.
-	GoalChecking bool
+	// GoalEvaluating is set while the goal's check reads the workspace.
+	GoalEvaluating bool
 	// FirstToken is how long the run waited for the model's first output, 0
 	// while it has not arrived and for a run that never measured one. Read by
 	// the live "Working" line and, once the run ends, the "Worked for" line.
@@ -1916,9 +1916,9 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		frames := r.subagentPromptFrames(m)
 		// A goal's check belongs to the goal: the round or closing line it
 		// produces opens its view, so it draws no card of its own.
-		if strings.TrimSpace(m.AgentType) == run.GoalCheckSubagentType {
+		if strings.TrimSpace(m.AgentType) == run.GoalEvaluatorSubagentType {
 			if r.tracker != nil {
-				r.tracker.ObserveGoalCheck(true)
+				r.tracker.ObserveGoalEvaluator(true)
 			}
 			return EventResult{Frames: frames}
 		}
@@ -1998,9 +1998,9 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		}
 		closing := r.subagentClosingFrames(agentID, m)
 		closing = append(closing, r.subagentWorkedFrames(agentID)...)
-		if strings.TrimSpace(m.AgentType) == run.GoalCheckSubagentType {
+		if strings.TrimSpace(m.AgentType) == run.GoalEvaluatorSubagentType {
 			if r.tracker != nil {
-				r.tracker.ObserveGoalCheck(false)
+				r.tracker.ObserveGoalEvaluator(false)
 			}
 			return EventResult{Frames: append(flushed, closing...)}
 		}
@@ -8762,21 +8762,21 @@ func sortRows(a, b int) (int, int) {
 //
 // Concurrency: sync.RWMutex. SnapshotSession takes RLock; writers take Lock.
 type Tracker struct {
-	mu           sync.RWMutex
-	agents       int                 // Phase 3b: incremented by ObserveAgent (locked by 2C); de-duped via agentIDs.
-	agentIDs     map[string]struct{} // Phase 3b: subagent identifiers seen; dedup so re-spawn of same id doesn't double-count.
-	tools        int
-	toolStepIDs  map[string]struct{}
-	inputTokens  int
-	outputTokens int
-	runUsage     map[string]Counters
-	planDone     int
-	planTotal    int
-	planActive   string
-	goalRound    int
-	goalChecking bool
-	activeRunID  string
-	runAgentIDs  map[string]map[string]struct{} // per-run agent dedup
+	mu             sync.RWMutex
+	agents         int                 // Phase 3b: incremented by ObserveAgent (locked by 2C); de-duped via agentIDs.
+	agentIDs       map[string]struct{} // Phase 3b: subagent identifiers seen; dedup so re-spawn of same id doesn't double-count.
+	tools          int
+	toolStepIDs    map[string]struct{}
+	inputTokens    int
+	outputTokens   int
+	runUsage       map[string]Counters
+	planDone       int
+	planTotal      int
+	planActive     string
+	goalRound      int
+	goalEvaluating bool
+	activeRunID    string
+	runAgentIDs    map[string]map[string]struct{} // per-run agent dedup
 
 	// Subagent token usage lives in dedicated accumulators, separate from the
 	// primary runUsage map. The primary run's authoritative Summary.Usage
@@ -8868,7 +8868,7 @@ func (t *Tracker) Reset() {
 	t.planTotal = 0
 	t.planActive = ""
 	t.goalRound = 0
-	t.goalChecking = false
+	t.goalEvaluating = false
 	t.activeRunID = ""
 	t.runAgentIDs = make(map[string]map[string]struct{})
 	t.subagentIn = 0
@@ -8914,7 +8914,7 @@ func (t *Tracker) EndRun(runID string) {
 	// run parked on an approval resumes in the same round, and a goal is only
 	// over when its completion says so (ObserveGoalRound(0)), which every way
 	// a goal ends reports.
-	t.goalChecking = false
+	t.goalEvaluating = false
 	t.mu.Unlock()
 }
 
@@ -9272,7 +9272,7 @@ func (t *Tracker) SnapshotActiveRun() Counters {
 	c.PlanTotal = t.planTotal
 	c.PlanActive = t.planActive
 	c.GoalRound = t.goalRound
-	c.GoalChecking = t.goalChecking
+	c.GoalEvaluating = t.goalEvaluating
 	c.Retry = t.retries[""]
 	return c
 }
@@ -9357,17 +9357,17 @@ func (t *Tracker) ObserveGoalRound(round int) {
 	}
 	t.mu.Lock()
 	t.goalRound = max(round, 0)
-	t.goalChecking = false
+	t.goalEvaluating = false
 	t.mu.Unlock()
 }
 
-// ObserveGoalCheck records whether the goal's check is running.
-func (t *Tracker) ObserveGoalCheck(running bool) {
+// ObserveGoalEvaluator records whether the goal's check is running.
+func (t *Tracker) ObserveGoalEvaluator(running bool) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
-	t.goalChecking = running
+	t.goalEvaluating = running
 	t.mu.Unlock()
 }
 
@@ -9428,7 +9428,7 @@ func goalStartedFrame(runID, objective string) Frame {
 }
 
 func goalRoundFrame(runID string, round int, why, checkAgentID string) Frame {
-	return withGoalCheck(Frame{
+	return withGoalEvaluator(Frame{
 		Kind: FrameGoal, StepID: fmt.Sprintf("goal:%s:round:%d", strings.TrimSpace(runID), round), RunID: runID, Final: true,
 		Title:   fmt.Sprintf("Round %d", round),
 		Summary: "not met yet",
@@ -9436,10 +9436,10 @@ func goalRoundFrame(runID string, round int, why, checkAgentID string) Frame {
 	}, checkAgentID)
 }
 
-// withGoalCheck lets a goal line open the view of the check that decided it:
+// withGoalEvaluator lets a goal line open the view of the check that decided it:
 // the line is the conversation's account of that check, the way a subagent's
 // card is the account of the subagent.
-func withGoalCheck(f Frame, checkAgentID string) Frame {
+func withGoalEvaluator(f Frame, checkAgentID string) Frame {
 	if checkAgentID = strings.TrimSpace(checkAgentID); checkAgentID == "" {
 		return f
 	}
@@ -9477,5 +9477,5 @@ func goalCompletedFrame(runID string, p event.GoalCompletedPayload) Frame {
 			f.Summary = fmt.Sprintf("round %d failed", max(p.Rounds, 1))
 		}
 	}
-	return withGoalCheck(f, p.CheckAgentID)
+	return withGoalEvaluator(f, p.CheckAgentID)
 }

@@ -528,7 +528,7 @@ func TestSharedSubagentCatalogKeepsAnAgentsOwnCollision(t *testing.T) {
 
 // TestSharedSubagentModelResolvesGlobally pins that a shared subagent's model is
 // the install-wide row it stores, resolved the same way for every agent that
-// enabled it — the goal check's precedent (plans 299, 314).
+// enabled it — the goal evaluator's precedent (plans 299, 314).
 func TestSharedSubagentModelResolvesGlobally(t *testing.T) {
 	on := appcfg.SubagentConfig{Name: "repo-auditor", Enabled: subagentCatalogTestBool(true)}
 	cfg := sharedCatalogTestConfig(&on)

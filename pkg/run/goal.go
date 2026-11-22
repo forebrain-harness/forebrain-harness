@@ -21,10 +21,11 @@ import (
 // regardless of what the check finds.
 const MaxGoalRounds = 100
 
-// goalCheckRecentRounds is how many of the latest rounds the check is told
-// about. The check reads the workspace itself; the rounds are only a lead, so
-// the oldest are left out rather than growing its prompt with every round.
-const goalCheckRecentRounds = 3
+// goalEvaluatorRecentRounds is how many of the latest rounds the evaluator is
+// told about. The evaluator reads the workspace itself; the rounds are only a
+// lead, so the oldest are left out rather than growing its prompt with every
+// round.
+const goalEvaluatorRecentRounds = 3
 
 // Status is the check's verdict on the round just completed.
 type Status string
@@ -77,13 +78,13 @@ type RoundOutcome struct {
 }
 
 // Evaluator judges whether an objective has been met. The production one is
-// the goal check subagent; tests script verdicts.
+// the goal evaluator subagent; tests script verdicts.
 type Evaluator interface {
 	Evaluate(ctx context.Context, objective string, rounds []RoundOutcome) (Verdict, error)
 }
 
 // ContinuationPrompt builds the goal-framed nudge for the next round. It
-// carries the objective and the check's reasoning, never a token count.
+// carries the objective and the evaluator's reasoning, never a token count.
 func ContinuationPrompt(objective, why string) string {
 	var b strings.Builder
 	b.WriteString("Continue working toward this objective:\n")
@@ -96,23 +97,23 @@ func ContinuationPrompt(objective, why string) string {
 	return b.String()
 }
 
-// GoalCheckSubagentType is the reserved definition the goal check runs as.
-const GoalCheckSubagentType = "goal-evaluator"
+// GoalEvaluatorSubagentType is the reserved definition the goal evaluator runs as.
+const GoalEvaluatorSubagentType = "goal-evaluator"
 
-// goalCheck judges a goal by dispatching the goal check subagent. The check
-// reads the workspace with read-only tools rather than taking the agent's
-// word for it; it is a subagent of the turn working toward the goal, so it is
-// on the roster with a view of its own while it runs, and any tool it wants
-// approved is put to the user in place.
-type goalCheck struct {
+// goalEvaluator judges a goal by dispatching the goal evaluator subagent. The
+// evaluator reads the workspace with read-only tools rather than taking the
+// agent's word for it; it is a subagent of the turn working toward the goal, so
+// it is on the roster with a view of its own while it runs, and any tool it
+// wants approved is put to the user in place.
+type goalEvaluator struct {
 	runner *Runner
 }
 
-func (c goalCheck) Evaluate(ctx context.Context, objective string, rounds []RoundOutcome) (Verdict, error) {
+func (c goalEvaluator) Evaluate(ctx context.Context, objective string, rounds []RoundOutcome) (Verdict, error) {
 	if c.runner == nil {
-		return Verdict{}, errors.New("the goal check needs a runner")
+		return Verdict{}, errors.New("the goal evaluator needs a runner")
 	}
-	output, agentID, err := c.runner.runGoalCheck(ctx, goalCheckTask(objective, rounds))
+	output, agentID, err := c.runner.runGoalEvaluator(ctx, goalEvaluatorTask(objective, rounds))
 	if err != nil {
 		return Verdict{CheckAgentID: agentID}, err
 	}
@@ -121,11 +122,11 @@ func (c goalCheck) Evaluate(ctx context.Context, objective string, rounds []Roun
 	return verdict, err
 }
 
-// goalCheckTask is what the check is asked: the objective, and the latest
-// rounds as a lead to what changed.
-func goalCheckTask(objective string, rounds []RoundOutcome) string {
-	if len(rounds) > goalCheckRecentRounds {
-		rounds = rounds[len(rounds)-goalCheckRecentRounds:]
+// goalEvaluatorTask is what the evaluator is asked: the objective, and the
+// latest rounds as a lead to what changed.
+func goalEvaluatorTask(objective string, rounds []RoundOutcome) string {
+	if len(rounds) > goalEvaluatorRecentRounds {
+		rounds = rounds[len(rounds)-goalEvaluatorRecentRounds:]
 	}
 	var b strings.Builder
 	b.WriteString("Objective:\n")
@@ -143,20 +144,20 @@ func goalCheckTask(objective string, rounds []RoundOutcome) string {
 func parseGoalVerdict(output string) (Verdict, error) {
 	raw, ok := lastJSONObject(output)
 	if !ok {
-		return Verdict{}, fmt.Errorf("the goal check ended without a verdict: %s", llm.TruncateRunes(strings.TrimSpace(output), 300))
+		return Verdict{}, fmt.Errorf("the goal evaluator ended without a verdict: %s", llm.TruncateRunes(strings.TrimSpace(output), 300))
 	}
 	var verdict struct {
 		Status string `json:"status"`
 		Why    string `json:"why"`
 	}
 	if err := json.Unmarshal([]byte(raw), &verdict); err != nil {
-		return Verdict{}, fmt.Errorf("the goal check's verdict is not valid JSON: %w", err)
+		return Verdict{}, fmt.Errorf("the goal evaluator's verdict is not valid JSON: %w", err)
 	}
 	status := Status(strings.ToLower(strings.TrimSpace(verdict.Status)))
 	switch status {
 	case StatusDone, StatusContinue, StatusStuck:
 	default:
-		return Verdict{}, fmt.Errorf("the goal check's verdict has no status it can act on: %q", verdict.Status)
+		return Verdict{}, fmt.Errorf("the goal evaluator's verdict has no status it can act on: %q", verdict.Status)
 	}
 	return Verdict{Status: status, Why: strings.TrimSpace(verdict.Why)}, nil
 }

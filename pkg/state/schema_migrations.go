@@ -346,7 +346,7 @@ func deniedRowUserFeedbackV7(content string) string {
 // run_id is the execution id of the subagent it started, so an event whose
 // execution_id names that run answers that call. Used as a scalar it yields
 // the call's step_id; its EXISTS form says whether there is one at all.
-// Executions no send call answers — a goal check, a plan reviewer, a
+// Executions no send call answers — a goal evaluator, a plan reviewer, a
 // subagent the user started directly — match nothing and keep their empty
 // parent_tool_call_id.
 const sendCallOfSubagentEventV8 = `SELECT json_extract(s.payload_json, '$.step_id') FROM fb_session_events s

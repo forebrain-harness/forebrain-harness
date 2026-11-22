@@ -803,7 +803,7 @@ func modelPinLabels(pins []appcfg.ModelPin) string {
 //
 //   - a row some agent names as its default_model (the reference is an explicit
 //     choice; deleting through it would move that agent to another model);
-//   - a row a subagent type, the plan reviewer, the goal check or a subagent
+//   - a row a subagent type, the plan reviewer, the goal evaluator or a subagent
 //     definition pins by id. The loader requires those references to resolve,
 //     so deleting the row would leave the composed configuration invalid and
 //     fail every later turn (see plan 345's reproduction).

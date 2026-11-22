@@ -17,11 +17,11 @@ type AgentsSection struct {
 	Definitions map[string]AgentDefinition `yaml:"definitions,omitempty" json:"definitions,omitempty"`
 	// GoalEvaluator is the one system subagent the settings page configures:
 	// the /goal round's check. It is global on purpose — every primary agent's
-	// goal check runs on the same row — which is why it sits beside Defaults
+	// goal evaluator runs on the same row — which is why it sits beside Defaults
 	// and Definitions rather than inside them (plan 299).
 	GoalEvaluator SubagentConfig `yaml:"goal_evaluator,omitempty" json:"goal_evaluator,omitempty"`
 	// PlanReviewer is the exit-plan approval's reviewer, configured the same
-	// way the goal check is: one global row, because the system dispatches
+	// way the goal evaluator is: one global row, because the system dispatches
 	// that subagent and no primary agent owns it (plan 313). It supplies the
 	// approval picker's default pre-selection only — the reviewer chosen on
 	// the approval card still wins — and an empty row leaves that default as
@@ -454,10 +454,10 @@ func SubagentEntryCarriesBody(entry SubagentConfig) bool {
 // anything else keeps the shape error, so a bare model name is still refused.
 // The effort refusal is the settings page's own words — thinking level, the
 // label every surface gives reasoning_effort — because one shared rule serves
-// every row that carries the pair (goal check, plan reviewer, type row,
+// every row that carries the pair (goal evaluator, plan reviewer, type row,
 // per-agent entry). levelNeedsModel is that refusal for the row being judged:
-// every row but the goal check's is the where prefix plus the shared sentence,
-// while the goal check's names the model it waits for with no prefix.
+// every row but the goal evaluator's is the where prefix plus the shared sentence,
+// while the goal evaluator's names the model it waits for with no prefix.
 func validateSubagentModel(where, levelNeedsModel string, entry SubagentConfig, refResolves func(string) bool) error {
 	model := strings.TrimSpace(entry.Model)
 	if model == "" {
@@ -477,7 +477,7 @@ func validateSubagentModel(where, levelNeedsModel string, entry SubagentConfig, 
 
 // ValidateGoalEvaluatorModel puts the settings page's one global subagent row
 // under the same rule every per-agent entry gets: validateSubagentModel, with
-// the goal check's own effort sentence — the prototype's words, naming the
+// the goal evaluator's own effort sentence — the prototype's words, naming the
 // model the row waits for, with no path prefix. The where string stays the
 // configuration path the settings page writes, so a shape refusal still names
 // the row the user was editing.
@@ -486,7 +486,7 @@ func ValidateGoalEvaluatorModel(entry SubagentConfig, refResolves func(string) b
 }
 
 // ValidatePlanReviewerModel is the same verdict for the exit-plan approval's
-// reviewer row (plan 313): the goal check's precedent one field over, with the
+// reviewer row (plan 313): the goal evaluator's precedent one field over, with the
 // row's own configuration path as the where string.
 func ValidatePlanReviewerModel(entry SubagentConfig, refResolves func(string) bool) error {
 	return validateSubagentModel("agents.plan_reviewer", "agents.plan_reviewer: thinking level requires a model.", entry, refResolves)

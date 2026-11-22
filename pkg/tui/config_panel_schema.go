@@ -56,7 +56,7 @@ const (
 // configModelFlavor is which empty a model picker offers and what picking it
 // stores (plan 324 D1) — the four shapes the prototype fixes. global and
 // subagent draw the same list (the empty option's own label is the field's
-// metadata); model is the goal check's, whose empty option carries the
+// metadata); model is the goal evaluator's, whose empty option carries the
 // conversation sentence and keeps no stored reference that resolves to no
 // row; memory stores the explicit "current".
 type configModelFlavor int

@@ -20,8 +20,8 @@ type Definition struct {
 var PublicSubagentNames = []string{"general-purpose", "explore", "plan", "verification"}
 
 // SystemSubagentNames are the built-in subagents the system itself dispatches
-// (plan review, /goal checks); their configuration is not the user's to set, so
-// the subagent page shows them read-only.
+// (plan review, /goal evaluations); their configuration is not the user's to
+// set, so the subagent page shows them read-only.
 var SystemSubagentNames = []string{"plan-reviewer", "goal-evaluator"}
 
 var builtins = map[string]Definition{

@@ -599,25 +599,25 @@ func TestGoalContinuationInputIsSentAsMeta(t *testing.T) {
 // The check is the read-only goal-evaluator subagent, dispatched even with
 // agents.defaults.enable_subagent off because the user asked for the goal; its
 // roster key comes back with the verdict so a surface can open its view.
-func TestGoalCheckDispatchesTheEvaluatorSubagent(t *testing.T) {
+func TestGoalEvaluatorDispatchesTheEvaluatorSubagent(t *testing.T) {
 	probe := &dispatchProbe{}
 	executor := &fixedSubagentExecutor{output: "I ran the tests; all 42 pass.\n{\"status\": \"done\", \"why\": \"all 42 tests pass\"}"}
 	runner := &Runner{Deps: &Deps{Home: t.TempDir()}, Events: probe, SubagentExecutor: executor}
 
-	verdict, err := goalCheck{runner: runner}.Evaluate(dispatchTestCtx(), "make the tests pass", []RoundOutcome{{Index: 0, Text: "fixed the parser"}})
+	verdict, err := goalEvaluator{runner: runner}.Evaluate(dispatchTestCtx(), "make the tests pass", []RoundOutcome{{Index: 0, Text: "fixed the parser"}})
 	if err != nil {
 		t.Fatalf("Evaluate error: %v", err)
 	}
 	if verdict.Status != StatusDone || verdict.Why != "all 42 tests pass" {
 		t.Fatalf("verdict = %+v", verdict)
 	}
-	if executor.subagentType != GoalCheckSubagentType {
+	if executor.subagentType != GoalEvaluatorSubagentType {
 		t.Fatalf("check ran as %q", executor.subagentType)
 	}
 	if !strings.Contains(executor.task, "make the tests pass") || !strings.Contains(executor.task, "fixed the parser") {
 		t.Fatalf("check task = %q", executor.task)
 	}
-	if len(probe.spawned) != 1 || probe.spawned[0].AgentType != GoalCheckSubagentType {
+	if len(probe.spawned) != 1 || probe.spawned[0].AgentType != GoalEvaluatorSubagentType {
 		t.Fatalf("spawned = %+v", probe.spawned)
 	}
 	if verdict.CheckAgentID == "" || verdict.CheckAgentID != probe.spawned[0].AgentID {
@@ -625,16 +625,17 @@ func TestGoalCheckDispatchesTheEvaluatorSubagent(t *testing.T) {
 	}
 }
 
-// The goal check is a blocking dispatch too: the goal loop calls the evaluator
-// and takes the verdict from that call, so the end says it was awaited and no
-// peer report of the same verdict follows the loop into the conversation.
-func TestGoalCheckEndIsAwaitedByDispatcher(t *testing.T) {
+// The goal evaluator is a blocking dispatch too: the goal loop calls the
+// evaluator and takes the verdict from that call, so the end says it was
+// awaited and no peer report of the same verdict follows the loop into the
+// conversation.
+func TestGoalEvaluatorEndIsAwaitedByDispatcher(t *testing.T) {
 	executor := &awaitedRecordingSubagentExecutor{fixedSubagentExecutor: &fixedSubagentExecutor{
 		output: "I ran the tests; all 42 pass.\n{\"status\": \"done\", \"why\": \"all 42 tests pass\"}",
 	}}
 	runner := &Runner{Deps: &Deps{Home: t.TempDir()}, Events: &dispatchProbe{}, SubagentExecutor: executor}
 
-	if _, err := (goalCheck{runner: runner}).Evaluate(dispatchTestCtx(), "make the tests pass", nil); err != nil {
+	if _, err := (goalEvaluator{runner: runner}).Evaluate(dispatchTestCtx(), "make the tests pass", nil); err != nil {
 		t.Fatalf("Evaluate error: %v", err)
 	}
 	ends := executor.recordedEnds()
@@ -642,14 +643,14 @@ func TestGoalCheckEndIsAwaitedByDispatcher(t *testing.T) {
 		t.Fatalf("end notifications = %d, want exactly 1", len(ends))
 	}
 	if !ends[0].AwaitedByDispatcher {
-		t.Fatal("a goal check's end is awaited: the goal loop read the verdict from the blocking call")
+		t.Fatal("a goal evaluator's end is awaited: the goal loop read the verdict from the blocking call")
 	}
 }
 
-func TestGoalCheckWithoutAVerdictIsAnError(t *testing.T) {
+func TestGoalEvaluatorWithoutAVerdictIsAnError(t *testing.T) {
 	executor := &fixedSubagentExecutor{output: "I could not decide."}
 	runner := &Runner{Deps: &Deps{Home: t.TempDir()}, Events: &dispatchProbe{}, SubagentExecutor: executor}
-	verdict, err := goalCheck{runner: runner}.Evaluate(dispatchTestCtx(), "ship", nil)
+	verdict, err := goalEvaluator{runner: runner}.Evaluate(dispatchTestCtx(), "ship", nil)
 	if err == nil || !strings.Contains(err.Error(), "I could not decide.") {
 		t.Fatalf("error = %v, want the check's own words", err)
 	}
@@ -658,12 +659,12 @@ func TestGoalCheckWithoutAVerdictIsAnError(t *testing.T) {
 	}
 }
 
-func TestGoalCheckTaskTellsOnlyTheLatestRounds(t *testing.T) {
+func TestGoalEvaluatorTaskTellsOnlyTheLatestRounds(t *testing.T) {
 	var rounds []RoundOutcome
 	for i := range 5 {
 		rounds = append(rounds, RoundOutcome{Index: i, Text: "work of round " + string(rune('A'+i))})
 	}
-	task := goalCheckTask("ship", rounds)
+	task := goalEvaluatorTask("ship", rounds)
 	for _, gone := range []string{"round A", "round B"} {
 		if strings.Contains(task, gone) {
 			t.Fatalf("task still tells %q: %s", gone, task)
@@ -756,26 +757,26 @@ func TestContinuationPromptWithoutWhy(t *testing.T) {
 	}
 }
 
-// The /goal check's row in the tests below: one configured model whose own
+// The /goal evaluator's row in the tests below: one configured model whose own
 // default effort is "high", chosen on the settings page for every primary
 // agent. The primary agent's own model is a different one on purpose — see
-// goalCheckConfig.
+// goalEvaluatorConfig.
 const (
-	goalCheckRowID       = "llm-goal-check-row"
-	goalCheckRowProvider = "deepseek"
-	goalCheckRowModel    = "deepseek-v4-flash"
-	goalCheckRowEffort   = "high"
+	goalEvaluatorRowID       = "llm-goal-evaluator-row"
+	goalEvaluatorRowProvider = "deepseek"
+	goalEvaluatorRowModel    = "deepseek-v4-flash"
+	goalEvaluatorRowEffort   = "high"
 	// goalPrimaryRowID is the primary agent's own row: present so the fixture has
 	// a model the check must not use.
 	goalPrimaryRowID = "llm-primary-row"
 )
 
-// goalCheckConfig is an install whose settings page configured the goal
+// goalEvaluatorConfig is an install whose settings page configured the goal
 // check's row. The primary agent's own model (glm-5.3) is deliberately
 // different, and so is the first row in the install's model table: what the
 // check runs on has to come from the settings field, never from the
 // conversation and never from "whichever row is first".
-func goalCheckConfig() *appcfg.Root {
+func goalEvaluatorConfig() *appcfg.Root {
 	return &appcfg.Root{
 		LLMModels: []appcfg.LLMModelConfig{
 			{
@@ -783,13 +784,13 @@ func goalCheckConfig() *appcfg.Root {
 				BaseURL: "https://api.openai.invalid/v1", APIPath: "/chat/completions", APIKey: "sk-session-row",
 			},
 			{
-				ID:       goalCheckRowID,
-				Provider: goalCheckRowProvider,
-				Model:    goalCheckRowModel,
+				ID:       goalEvaluatorRowID,
+				Provider: goalEvaluatorRowProvider,
+				Model:    goalEvaluatorRowModel,
 				BaseURL:  "https://api.deepseek.invalid",
 				APIPath:  "/chat/completions",
-				APIKey:   "sk-goal-check",
-				Caps:     appcfg.LLMModelCaps{DefaultEffort: goalCheckRowEffort},
+				APIKey:   "sk-goal-evaluator",
+				Caps:     appcfg.LLMModelCaps{DefaultEffort: goalEvaluatorRowEffort},
 			},
 			{
 				ID: goalPrimaryRowID, Provider: "zhipuai", Model: "glm-5.3",
@@ -804,20 +805,20 @@ func goalCheckConfig() *appcfg.Root {
 					DefaultModel: goalPrimaryRowID,
 				},
 			},
-			GoalEvaluator: appcfg.SubagentConfig{Model: goalCheckRowID},
+			GoalEvaluator: appcfg.SubagentConfig{Model: goalEvaluatorRowID},
 		},
 	}
 }
 
-// The goal check's model comes from the settings page and nowhere else: one
+// The goal evaluator's model comes from the settings page and nowhere else: one
 // global row for every primary agent, so the check takes the row id, provider
 // and model the configuration names (plan 299, two-level semantics).
-func TestGoalCheckRunsOnTheConfiguredRow(t *testing.T) {
+func TestGoalEvaluatorRunsOnTheConfiguredRow(t *testing.T) {
 	probe := &dispatchProbe{}
 	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "configured"}`}
-	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(goalCheckConfig()), Events: probe, SubagentExecutor: executor}
+	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(goalEvaluatorConfig()), Events: probe, SubagentExecutor: executor}
 
-	verdict, err := goalCheck{runner: runner}.Evaluate(dispatchTestCtx(), "make the tests pass", []RoundOutcome{{Index: 0, Text: "fixed the parser"}})
+	verdict, err := goalEvaluator{runner: runner}.Evaluate(dispatchTestCtx(), "make the tests pass", []RoundOutcome{{Index: 0, Text: "fixed the parser"}})
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
@@ -829,69 +830,69 @@ func TestGoalCheckRunsOnTheConfiguredRow(t *testing.T) {
 	// records two distinct facts: `model` = req.Model (what the record says) and
 	// `pinnedModel` = the model on the execution's context (what its requests
 	// are routed to). Both are the configured row.
-	if executor.pinnedModel != goalCheckRowModel {
-		t.Fatalf("goal check pinnedModel = %q, want the configured row %q", executor.pinnedModel, goalCheckRowModel)
+	if executor.pinnedModel != goalEvaluatorRowModel {
+		t.Fatalf("goal evaluator pinnedModel = %q, want the configured row %q", executor.pinnedModel, goalEvaluatorRowModel)
 	}
-	if executor.model != goalCheckRowModel {
-		t.Fatalf("goal check req model = %q, want the configured row %q", executor.model, goalCheckRowModel)
+	if executor.model != goalEvaluatorRowModel {
+		t.Fatalf("goal evaluator req model = %q, want the configured row %q", executor.model, goalEvaluatorRowModel)
 	}
 	// The spawn announcement carries the same fact, plus the effort the row's
 	// own default gives it (the settings page stores "" for "follow the row").
 	if len(probe.spawned) != 1 {
-		t.Fatalf("spawned = %+v, want exactly one goal check", probe.spawned)
+		t.Fatalf("spawned = %+v, want exactly one goal evaluator", probe.spawned)
 	}
-	if got := probe.spawned[0]; got.AgentType != GoalCheckSubagentType ||
-		got.Provider != goalCheckRowProvider || got.Model != goalCheckRowModel || got.Effort != goalCheckRowEffort {
+	if got := probe.spawned[0]; got.AgentType != GoalEvaluatorSubagentType ||
+		got.Provider != goalEvaluatorRowProvider || got.Model != goalEvaluatorRowModel || got.Effort != goalEvaluatorRowEffort {
 		t.Fatalf("spawned %#v, want %s/%s effort %s as %s",
-			got, goalCheckRowProvider, goalCheckRowModel, goalCheckRowEffort, GoalCheckSubagentType)
+			got, goalEvaluatorRowProvider, goalEvaluatorRowModel, goalEvaluatorRowEffort, GoalEvaluatorSubagentType)
 	}
 }
 
-// A dispatch-time pin is a caller's choice, and the goal check is not the
+// A dispatch-time pin is a caller's choice, and the goal evaluator is not the
 // caller's: /goal takes its model from the settings page, so a pin another
 // caller put on the context (plan 283's approval-card pick, or anything else)
-// reaches no goal check. This is the direct assertion of the owner's two-level
+// reaches no goal evaluator. This is the direct assertion of the owner's two-level
 // decision (plan 299 §1).
-func TestGoalCheckIgnoresADispatchTimeModelPin(t *testing.T) {
+func TestGoalEvaluatorIgnoresADispatchTimeModelPin(t *testing.T) {
 	probe := &dispatchProbe{}
 	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "configured"}`}
-	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(goalCheckConfig()), Events: probe, SubagentExecutor: executor}
+	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(goalEvaluatorConfig()), Events: probe, SubagentExecutor: executor}
 	// Another configured row, pinned the way the plan review's approval card
 	// pins the user's pick.
 	ctx := WithSubagentModelOverride(dispatchTestCtx(), SubagentModelOverride{
 		ModelID: "llm-approval-card", Provider: "zhipuai", Model: "glm-5.3", Effort: "max",
 	})
 
-	if _, err := (goalCheck{runner: runner}).Evaluate(ctx, "make the tests pass", nil); err != nil {
+	if _, err := (goalEvaluator{runner: runner}).Evaluate(ctx, "make the tests pass", nil); err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if executor.pinnedModel != goalCheckRowModel {
-		t.Fatalf("goal check pinnedModel = %q, want the configured row %q, not the dispatch-time pin",
-			executor.pinnedModel, goalCheckRowModel)
+	if executor.pinnedModel != goalEvaluatorRowModel {
+		t.Fatalf("goal evaluator pinnedModel = %q, want the configured row %q, not the dispatch-time pin",
+			executor.pinnedModel, goalEvaluatorRowModel)
 	}
-	if executor.model != goalCheckRowModel {
-		t.Fatalf("goal check req model = %q, want the configured row %q", executor.model, goalCheckRowModel)
+	if executor.model != goalEvaluatorRowModel {
+		t.Fatalf("goal evaluator req model = %q, want the configured row %q", executor.model, goalEvaluatorRowModel)
 	}
-	if len(probe.spawned) != 1 || probe.spawned[0].Model != goalCheckRowModel {
-		t.Fatalf("spawned = %+v, want the configured row %q", probe.spawned, goalCheckRowModel)
+	if len(probe.spawned) != 1 || probe.spawned[0].Model != goalEvaluatorRowModel {
+		t.Fatalf("spawned = %+v, want the configured row %q", probe.spawned, goalEvaluatorRowModel)
 	}
 }
 
 // With nothing configured the check keeps the behaviour it has always had: it
 // runs on the conversation's model, resolved through AgentModel ->
 // PrimaryModelStateForSession.
-func TestGoalCheckFollowsTheSessionModelWhenUnconfigured(t *testing.T) {
+func TestGoalEvaluatorFollowsTheSessionModelWhenUnconfigured(t *testing.T) {
 	probe := &dispatchProbe{}
 	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "unconfigured"}`}
-	cfg := goalCheckConfig()
+	cfg := goalEvaluatorConfig()
 	cfg.Agents.GoalEvaluator = appcfg.SubagentConfig{}
 	runner := &Runner{Deps: (&Deps{Home: t.TempDir()}).WithConfig(cfg), Events: probe, SubagentExecutor: executor}
 
-	if _, err := (goalCheck{runner: runner}).Evaluate(dispatchTestCtx(), "ship", nil); err != nil {
+	if _, err := (goalEvaluator{runner: runner}).Evaluate(dispatchTestCtx(), "ship", nil); err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
 	if executor.model != "glm-5.3" {
-		t.Fatalf("goal check req model = %q, want the session's own model glm-5.3", executor.model)
+		t.Fatalf("goal evaluator req model = %q, want the session's own model glm-5.3", executor.model)
 	}
 	if len(probe.spawned) != 1 || probe.spawned[0].Model != "glm-5.3" {
 		t.Fatalf("spawned = %+v, want the session's own model", probe.spawned)
@@ -901,29 +902,29 @@ func TestGoalCheckFollowsTheSessionModelWhenUnconfigured(t *testing.T) {
 // The settings page's row is global, so it must survive the two early returns
 // in SubagentCatalogFor: cfg == nil is covered by leaving it nil, and a
 // primary agent with no definition of its own — a fresh install's shape — must
-// still run its goal check on the configured row (plan 299 §4 pitfall ①).
-func TestGoalCheckConfigAppliesToAgentsWithoutDefinitions(t *testing.T) {
+// still run its goal evaluator on the configured row (plan 299 §4 pitfall ①).
+func TestGoalEvaluatorConfigAppliesToAgentsWithoutDefinitions(t *testing.T) {
 	probe := &dispatchProbe{}
 	executor := &fixedSubagentExecutor{output: `{"status": "done", "why": "no definitions"}`}
-	cfg := goalCheckConfig()
+	cfg := goalEvaluatorConfig()
 	cfg.Agents.Definitions = nil
 	runner := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main"}).WithConfig(cfg), Events: probe, SubagentExecutor: executor}
 
-	if _, err := (goalCheck{runner: runner}).Evaluate(dispatchTestCtx(), "ship", nil); err != nil {
+	if _, err := (goalEvaluator{runner: runner}).Evaluate(dispatchTestCtx(), "ship", nil); err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if executor.model != goalCheckRowModel {
-		t.Fatalf("goal check req model = %q, want the configured row %q", executor.model, goalCheckRowModel)
+	if executor.model != goalEvaluatorRowModel {
+		t.Fatalf("goal evaluator req model = %q, want the configured row %q", executor.model, goalEvaluatorRowModel)
 	}
-	if len(probe.spawned) != 1 || probe.spawned[0].Model != goalCheckRowModel {
-		t.Fatalf("spawned = %+v, want the configured row %q", probe.spawned, goalCheckRowModel)
+	if len(probe.spawned) != 1 || probe.spawned[0].Model != goalEvaluatorRowModel {
+		t.Fatalf("spawned = %+v, want the configured row %q", probe.spawned, goalEvaluatorRowModel)
 	}
 }
 
-// dispatchGoalCheckPin runs one real goal-check dispatch through fac and
+// dispatchGoalEvaluatorPin runs one real goal-evaluator dispatch through fac and
 // answers the pin it decided on — the one place the settings page's row becomes
 // the execution's model — with the record the dispatch wrote.
-func dispatchGoalCheckPin(t *testing.T, fac Factory, taskID string) (SubagentModelOverride, agent.HistoryEntry) {
+func dispatchGoalEvaluatorPin(t *testing.T, fac Factory, taskID string) (SubagentModelOverride, agent.HistoryEntry) {
 	t.Helper()
 	var pin SubagentModelOverride
 	var record agent.HistoryEntry
@@ -931,7 +932,7 @@ func dispatchGoalCheckPin(t *testing.T, fac Factory, taskID string) (SubagentMod
 	if _, _, err := dispatchSubagent(dispatchTestCtx(), fac, subagentDispatch{
 		taskID:  taskID,
 		task:    "judge the objective",
-		subtype: GoalCheckSubagentType,
+		subtype: GoalEvaluatorSubagentType,
 		resolve: agent.ResolveSubtype,
 		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
 			pin, pinned = SubagentModelOverrideFromContext(prep.ctx)
@@ -942,7 +943,7 @@ func dispatchGoalCheckPin(t *testing.T, fac Factory, taskID string) (SubagentMod
 		t.Fatalf("dispatchSubagent: %v", err)
 	}
 	if !pinned {
-		t.Fatal("the goal check dispatched without a model pin")
+		t.Fatal("the goal evaluator dispatched without a model pin")
 	}
 	return pin, record
 }
@@ -959,7 +960,7 @@ func dispatchGoalCheckPin(t *testing.T, fac Factory, taskID string) (SubagentMod
 // the engine folds a model's default level into a request that names none. The
 // request goes through the wrapper the runner installs and the runner's own
 // client builder, so the client cache under test is the one a real run uses.
-func TestGoalCheckEffortFollowsTheRowDefaultUntilOverridden(t *testing.T) {
+func TestGoalEvaluatorEffortFollowsTheRowDefaultUntilOverridden(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -1008,14 +1009,14 @@ func TestGoalCheckEffortFollowsTheRowDefaultUntilOverridden(t *testing.T) {
 	// runner builds once per load, over the runner's own builder.
 	clients := wrapSubagentModelOverrideLLM(&noopLLM{}, fix.fac.Owner.subagentOverrideClient).(*subagentModelOverrideLLM)
 
-	// dispatch runs one real goal-check dispatch and answers the pin it decided
+	// dispatch runs one real goal-evaluator dispatch and answers the pin it decided
 	// on. Every round goes through the same runner and the same client cache:
 	// no reload, no rebuilt cache, between the level changes below.
 	rounds := 0
 	dispatch := func(t *testing.T) SubagentModelOverride {
 		t.Helper()
 		rounds++
-		pin, _ := dispatchGoalCheckPin(t, fix.fac, fmt.Sprintf("task-goal-effort-%d", rounds))
+		pin, _ := dispatchGoalEvaluatorPin(t, fix.fac, fmt.Sprintf("task-goal-effort-%d", rounds))
 		return pin
 	}
 
@@ -1105,7 +1106,7 @@ func TestConfiguredRowPinCarriesTheRowsVersion(t *testing.T) {
 		CapDefaultEffort: "high",
 	})
 
-	pin, record := dispatchGoalCheckPin(t, fix.fac, "task-row-version")
+	pin, record := dispatchGoalEvaluatorPin(t, fix.fac, "task-row-version")
 	if pin.Entry == nil {
 		t.Fatal("the configured row's pin carries no entry: the client would come from the snapshot, not the row")
 	}
@@ -1134,7 +1135,7 @@ func TestConfiguredRowPinCarriesTheRowsVersion(t *testing.T) {
 	if err := fix.store.Delete(context.Background(), rowID); err != nil {
 		t.Fatalf("delete row: %v", err)
 	}
-	pin, record = dispatchGoalCheckPin(t, fix.fac, "task-row-version-gone")
+	pin, record = dispatchGoalEvaluatorPin(t, fix.fac, "task-row-version-gone")
 	if pin.Entry != nil || pin.Version != 0 {
 		t.Fatalf("pin = %#v, want no live entry once the row is gone", pin)
 	}

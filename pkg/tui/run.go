@@ -4970,7 +4970,7 @@ func workingStatusFormatter(counterSnapshot func() Counters) transientStatusForm
 		}
 		working := "Working"
 		switch {
-		case counters.GoalChecking:
+		case counters.GoalEvaluating:
 			working = fmt.Sprintf("Checking whether the goal is met after round %d", counters.GoalRound)
 		case counters.GoalRound > 0:
 			working = fmt.Sprintf("Working toward the goal round %d", counters.GoalRound)

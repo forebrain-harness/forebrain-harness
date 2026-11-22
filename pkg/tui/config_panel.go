@@ -1072,7 +1072,7 @@ func (p *configPanel) configModelEfforts(ref string) []string {
 // editModel is one model reference's picker (plan 324): the field's own empty
 // value first — what empty means is a property of where the reference sits —
 // then the install's global model rows, each naming where its requests go. A
-// stored reference that names no row stays on the list (the goal check's
+// stored reference that names no row stays on the list (the goal evaluator's
 // flavor keeps none), so a pin whose row was deleted reads as what it is
 // until it is re-picked. Changing or clearing the reference takes the
 // thinking level beside it in the same write (D5).
@@ -1501,7 +1501,7 @@ const (
 	// reviewer's global row. The shared subagent definitions live in the
 	// definitions map like every other definition (P3).
 	configPlanReviewerKey = "plan_reviewer"
-	// configGoalEvaluatorKey is the /goal check's global row (plan 299), the
+	// configGoalEvaluatorKey is the /goal evaluator's global row (plan 299), the
 	// plan reviewer's sibling one type over (P4's Built-in subagents page).
 	configGoalEvaluatorKey = "goal_evaluator"
 	configPrimaryStatus    = "Primary"
@@ -1549,7 +1549,7 @@ const (
 	// the option list alone (owner 2026-11-18: no "Choose one" filler sub),
 	// so the head is the field's own label and help, nothing more.
 	configChoiceCheckStatus = "✓"
-	// configModelConversationDesc is the goal check's empty option (plan 324
+	// configModelConversationDesc is the goal evaluator's empty option (plan 324
 	// D1): its empty value is not an unset key read as a default, it is the
 	// conversation's own model.
 	configModelConversationDesc = "Use the model of the current conversation."

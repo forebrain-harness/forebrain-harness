@@ -2088,12 +2088,12 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	// that authorization in the record (ModelAuthorizedAsCurrent), so a
 	// continuation does not re-judge it against a later selection (plan 334).
 	modelLive := false
-	// The /goal check takes its model from the settings page alone (plan 299):
+	// The /goal evaluator takes its model from the settings page alone (plan 299):
 	// a dispatch-time pin is a caller's choice, and the check is not the
 	// caller's. Every other type keeps the three-level chain untouched — the
 	// plan reviewer's pin is the user's pick in the approval card and stays
 	// first for it (plan 283).
-	if override, ok := SubagentModelOverrideFromContext(baseCtx); ok && agentType != GoalCheckSubagentType {
+	if override, ok := SubagentModelOverrideFromContext(baseCtx); ok && agentType != GoalEvaluatorSubagentType {
 		pin = override
 		modelLive = pin.Entry != nil
 	} else if modelID, provider, model, effort, ok := cat.Model(agentType); ok {
@@ -4295,7 +4295,7 @@ func subagentStoppedBy(ctx context.Context) bool {
 // subagentStopped is an awaited subagent execution that was stopped before it
 // finished, as the call that awaited it receives it. It unwraps to the
 // execution's error, so a caller that only passes it on — plan review, the
-// goal check — reads a cancellation as before; the dispatching tools answer
+// goal evaluator — reads a cancellation as before; the dispatching tools answer
 // the model with the stop and subagentStoppedAdvice instead of a bare "context canceled",
 // which a model read as a transient error and retried, restarting the
 // subagent the user had just stopped.
@@ -4332,7 +4332,7 @@ func subagentStoppedRunResult(record agent.HistoryEntry) string {
 // subagentFailure is a subagent execution that started and then failed, as
 // the call that awaited it receives it: the execution's record as it ended,
 // how long it ran, and the error it stopped on. Error() is that error's own
-// text, so a caller that only passes it on — plan review, the goal check —
+// text, so a caller that only passes it on — plan review, the goal evaluator —
 // reads what it always read; the dispatching tools turn it into the account
 // the model needs to pick the task up again (subagentFailureForModel).
 type subagentFailure struct {
@@ -5524,13 +5524,13 @@ func planReviewWorkspaceBrief(scope *tool.ReviewWriteScope) string {
 	return b.String()
 }
 
-// runGoalCheck dispatches a goal's check as a subagent of the turn working
+// runGoalEvaluator dispatches a goal's check as a subagent of the turn working
 // toward it, and returns the check's final answer. It is dispatched the way
 // the subagent_run tool dispatches one — on the roster, with a view of its own,
 // its tool approvals answered in place — except that it is reserved (absent
 // from the enum the model sees) and runs whether or not the model may spawn
 // subagents, because the user asked for it with /goal.
-func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID string, err error) {
+func (r *Runner) runGoalEvaluator(ctx context.Context, task string) (output, agentID string, err error) {
 	if r.SubagentExecutor == nil {
 		return "", "", fmt.Errorf("the Goal Evaluator requires the in-process subagent executor")
 	}
@@ -5538,7 +5538,7 @@ func (r *Runner) runGoalCheck(ctx context.Context, task string) (output, agentID
 		taskID:  newSubagentTaskID(),
 		title:   "Goal Evaluator",
 		task:    task,
-		subtype: GoalCheckSubagentType,
+		subtype: GoalEvaluatorSubagentType,
 		resolve: agent.ResolveSubtype,
 		run: func(runCtx context.Context, fac Factory, prep preparedSubagent) (string, error) {
 			approve := tool.SubagentApprovalHookFromContext(runCtx, factoryToolsState(fac))

@@ -688,7 +688,7 @@ func (s *Server) updateLLMModel(w http.ResponseWriter, r *http.Request) {
 // (process.DeleteLLMModel, plan 345). Two kinds of reference refuse it: a row
 // an agent names as its default_model — the reference is an explicit choice,
 // and deleting through it would move that agent to another model without
-// saying so — and a row a subagent type, the plan reviewer, the goal check or a
+// saying so — and a row a subagent type, the plan reviewer, the goal evaluator or a
 // subagent definition pins by id, which the loader requires to resolve.
 // Sessions and memory settings that named the row are not rewritten; the
 // runtime refuses that turn with a re-choose diagnosis or skips the stale value

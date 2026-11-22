@@ -2186,7 +2186,7 @@ func stripANSIAll(lines []string) []string {
 }
 
 // The agents section reaches the plan reviewer's two global settings beside the
-// goal check's, and the definitions page marks a primary agent the way the
+// goal evaluator's, and the definitions page marks a primary agent the way the
 // prototype does — a status at the row's right edge, with the description left
 // as the value it holds (plan 313).
 func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
@@ -2836,9 +2836,9 @@ func TestConfigPanelValidationMessages(t *testing.T) {
 			want:    `is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else.`,
 		},
 		{
-			name:    "a goal check level without a model",
+			name:    "a goal evaluator level without a model",
 			stored:  map[string]string{"agents": `{"definitions":{"main":{"primary":true}},"goal_evaluator":{"reasoning_effort":"high"}}`},
-			err:     stubGoalCheckEffortError{},
+			err:     stubGoalEvaluatorEffortError{},
 			steps:   []richStep{{label: "Network retries", ok: true}, {ok: false}},
 			inputs:  []selectorInput{{value: "5", ok: true}},
 			section: "agents",
@@ -2889,12 +2889,12 @@ func (e stubEffortNeedsModelError) Error() string {
 	return e.where + ": thinking level requires a model."
 }
 
-// stubGoalCheckEffortError stands in for the loader's own sentence about a
-// goal check thinking level that names no model: the goal row's own words,
+// stubGoalEvaluatorEffortError stands in for the loader's own sentence about a
+// goal evaluator thinking level that names no model: the goal row's own words,
 // with no where prefix.
-type stubGoalCheckEffortError struct{}
+type stubGoalEvaluatorEffortError struct{}
 
-func (stubGoalCheckEffortError) Error() string {
+func (stubGoalEvaluatorEffortError) Error() string {
 	return "Thinking level requires a Goal Evaluator model."
 }
 
@@ -3370,12 +3370,12 @@ func TestConfigPanelEffortPickerWritesTheChosenLevel(t *testing.T) {
 				t.Fatalf("expected one write, got %+v", session.writes)
 			}
 			var saved struct {
-				GoalCheck map[string]any `json:"goal_evaluator"`
+				GoalEvaluator map[string]any `json:"goal_evaluator"`
 			}
 			if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
 				t.Fatalf("the saved document does not parse: %v", err)
 			}
-			level, ok := saved.GoalCheck["reasoning_effort"]
+			level, ok := saved.GoalEvaluator["reasoning_effort"]
 			if !ok {
 				t.Fatalf("row default dropped the key, want the empty level stored")
 			}
@@ -3709,7 +3709,7 @@ func modelPickerPage(t *testing.T, selector *scriptedSelector) []SelectItem {
 // (plan 324): the picker's first row is the field's own empty value — the goal
 // check's carries the conversation sentence — and every row after it names a
 // model row and where its requests go. A stored reference the table does not
-// carry is not kept on the goal check's list.
+// carry is not kept on the goal evaluator's list.
 func TestConfigPanelModelPickerListsGlobalRows(t *testing.T) {
 	session := newConfigPanelSession(map[string]string{"agents": `{"goal_evaluator":{"model":"llm-gone"}}`})
 	session.snapshot.Models = []appcfg.LLMModelConfig{
@@ -3732,7 +3732,7 @@ func TestConfigPanelModelPickerListsGlobalRows(t *testing.T) {
 	}
 	empty := findRow(t, page, "Follow conversation")
 	if empty.Description != "No global pin; the system chooses at dispatch." {
-		t.Fatalf("the goal check's empty option = %q, want the system row's sentence", empty.Description)
+		t.Fatalf("the goal evaluator's empty option = %q, want the system row's sentence", empty.Description)
 	}
 	row := findRow(t, page, "openai/gpt-main")
 	if row.Description != "https://api.openai.com/v1/chat/completions" {
@@ -3930,16 +3930,16 @@ func TestConfigPanelModelChangeClearsEffort(t *testing.T) {
 		t.Fatalf("the change is one write, got %+v", session.writes)
 	}
 	var saved struct {
-		GoalCheck map[string]any `json:"goal_evaluator"`
+		GoalEvaluator map[string]any `json:"goal_evaluator"`
 	}
 	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
 		t.Fatalf("the saved document does not parse: %v", err)
 	}
-	if got, _ := saved.GoalCheck["model"].(string); got != "llm-2" {
+	if got, _ := saved.GoalEvaluator["model"].(string); got != "llm-2" {
 		t.Fatalf("goal_evaluator.model = %q, want the picked row", got)
 	}
-	if _, kept := saved.GoalCheck["reasoning_effort"]; kept {
-		t.Fatalf("goal_evaluator.reasoning_effort = %v, want the old model's level gone", saved.GoalCheck["reasoning_effort"])
+	if _, kept := saved.GoalEvaluator["reasoning_effort"]; kept {
+		t.Fatalf("goal_evaluator.reasoning_effort = %v, want the old model's level gone", saved.GoalEvaluator["reasoning_effort"])
 	}
 }
 
@@ -3960,15 +3960,15 @@ func TestConfigPanelModelSameRowKeepsEffort(t *testing.T) {
 		t.Fatalf("expected one write, got %+v", session.writes)
 	}
 	var saved struct {
-		GoalCheck map[string]any `json:"goal_evaluator"`
+		GoalEvaluator map[string]any `json:"goal_evaluator"`
 	}
 	if err := json.Unmarshal(session.writes[0].raw, &saved); err != nil {
 		t.Fatalf("the saved document does not parse: %v", err)
 	}
-	if got, _ := saved.GoalCheck["model"].(string); got != "llm-1" {
+	if got, _ := saved.GoalEvaluator["model"].(string); got != "llm-1" {
 		t.Fatalf("goal_evaluator.model = %q, want the same row", got)
 	}
-	if got, _ := saved.GoalCheck["reasoning_effort"].(string); got != "high" {
+	if got, _ := saved.GoalEvaluator["reasoning_effort"].(string); got != "high" {
 		t.Fatalf("goal_evaluator.reasoning_effort = %q, want the level it was chosen for", got)
 	}
 }

@@ -13,8 +13,8 @@
 //     the drawer describe the same subagent. Whether it runs is a runtime fact,
 //     not this surface's business.
 //   - A system subagent is visible and read-only. The system dispatches it at
-//     its own occasions (plan review, /goal checks, automatic approval), so a
-//     switch or a prompt there would be a promise the runtime does not keep.
+//     its own occasions (plan review, /goal evaluations, automatic approval), so
+//     a switch or a prompt there would be a promise the runtime does not keep.
 //   - A write validates the definition the way the loader would, stores the
 //     section and rebinds the agent's runners. Rebuilding is what "the next
 //     session uses it" means for a process that already has runners.
@@ -346,7 +346,7 @@ func sharedSubagentRow(cfg *config.Root, name string, entry config.SubagentConfi
 	if ref := strings.TrimSpace(shared.Model); ref != "" {
 		row.ReasoningEffort = strings.TrimSpace(shared.ReasoningEffort)
 		// Resolved as main's row: the id branch ignores the agent name, which is
-		// exactly what makes a shared subagent's model global (the goal check's
+		// exactly what makes a shared subagent's model global (the goal evaluator's
 		// precedent, plans 299 and 314).
 		if resolved, found := config.ResolveModelRef(cfg, "main", ref); found {
 			subagentRowModelFields(&row, resolved)

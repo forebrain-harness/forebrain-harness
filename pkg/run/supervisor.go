@@ -95,7 +95,7 @@ func (o Options) finishSupervisedRun(runCtx context.Context, runID, sid string, 
 		runID:     runID,
 		sessionID: sid,
 		goal:      goal,
-		eval:      goalCheck{runner: o.Runner},
+		eval:      goalEvaluator{runner: o.Runner},
 		result:    res,
 	}
 	tagRAEWithRunID(err, runID)

@@ -613,13 +613,13 @@ func TestValidateAgentSubagentsAcceptsAResolvableModelReference(t *testing.T) {
 	}
 }
 
-// The settings page's goal-check row is global, so it has no per-agent entry
+// The settings page's goal-evaluator row is global, so it has no per-agent entry
 // to be validated with: this is the one exported verdict it gets, and it is
 // the same rule every per-agent entry gets (plan 299). The second half pins
 // the mount point: the loader judges the row even for an install with no
 // agents.definitions at all, which is what validatePrimaryAgents skips.
 func TestValidateGoalEvaluatorModel(t *testing.T) {
-	resolves := func(ref string) bool { return ref == "llm-goal-check" }
+	resolves := func(ref string) bool { return ref == "llm-goal-evaluator" }
 
 	// An effort needs a model next to it, and the goal row says so in its own
 	// words: the sentence names the model it waits for and carries no path
@@ -637,7 +637,7 @@ func TestValidateGoalEvaluatorModel(t *testing.T) {
 	}
 
 	// A configured row id is the accepted form.
-	if err := ValidateGoalEvaluatorModel(SubagentConfig{Model: "llm-goal-check", ReasoningEffort: "low"}, resolves); err != nil {
+	if err := ValidateGoalEvaluatorModel(SubagentConfig{Model: "llm-goal-evaluator", ReasoningEffort: "low"}, resolves); err != nil {
 		t.Fatalf("a resolvable row id was refused: %v", err)
 	}
 
@@ -649,13 +649,13 @@ func TestValidateGoalEvaluatorModel(t *testing.T) {
 	// The loader runs it with no definitions present: the fresh install's
 	// shape, where validatePrimaryAgents has already returned.
 	root := Root{
-		LLMModels: []LLMModelConfig{{ID: "llm-goal-check", Provider: "deepseek", Model: "deepseek-v4-flash"}},
+		LLMModels: []LLMModelConfig{{ID: "llm-goal-evaluator", Provider: "deepseek", Model: "deepseek-v4-flash"}},
 		Agents: AgentsSection{
-			GoalEvaluator: SubagentConfig{Model: "llm-goal-check", ReasoningEffort: "high"},
+			GoalEvaluator: SubagentConfig{Model: "llm-goal-evaluator", ReasoningEffort: "high"},
 		},
 	}
 	if err := FinishLoad(&root); err != nil {
-		t.Fatalf("a configured goal-check row was refused on an install with no definitions: %v", err)
+		t.Fatalf("a configured goal-evaluator row was refused on an install with no definitions: %v", err)
 	}
 	root.Agents.GoalEvaluator = SubagentConfig{ReasoningEffort: "high"}
 	if err := FinishLoad(&root); err == nil || err.Error() != "Thinking level requires a Goal Evaluator model." {
@@ -676,7 +676,7 @@ func TestBuiltInSubagentNameCopiesMatchAgentPackage(t *testing.T) {
 	}
 }
 
-// The exit-plan approval's reviewer row is the goal check's sibling: global,
+// The exit-plan approval's reviewer row is the goal evaluator's sibling: global,
 // system-dispatched, and judged by the same rule — so the same table of cases,
 // with the refusal naming the row the settings page writes instead (plan 313).
 // The second half pins the loader's mount point for it, on an install with no

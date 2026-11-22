@@ -10024,7 +10024,7 @@ func TestSettingsPatchKeepsMemoryModelsOnConfiguredRows(t *testing.T) {
 	require.Equal(t, other.ID, stored(t).Memories.ExtractModel, "a refused write must not move the stored model")
 }
 
-// The goal check's model is one global row (plan 299), so the settings write
+// The goal evaluator's model is one global row (plan 299), so the settings write
 // path stores the id of a configured row and nothing else: a "provider/model"
 // label resolves against a primary agent's own model list, which would turn a
 // global choice into a per-agent one. The effort keeps its own rule — it needs
@@ -10090,7 +10090,7 @@ func TestSettingsPatchNormalizesGoalEvaluatorModelToRowID(t *testing.T) {
 	require.Equal(t, pro.ID, stored(t).Agents.GoalEvaluator.Model, "a refused write must not move the stored row")
 }
 
-// The exit-plan reviewer's row is the goal check's sibling (plan 313): the same
+// The exit-plan reviewer's row is the goal evaluator's sibling (plan 313): the same
 // normalization on its model, the same refusal, and the same two paths accepted
 // by the write path — nothing else on that row is a setting at all.
 func TestSettingsPatchNormalizesPlanReviewerModelToRowID(t *testing.T) {
@@ -10139,7 +10139,7 @@ func TestSettingsPatchNormalizesPlanReviewerModelToRowID(t *testing.T) {
 	require.Equal(t, http.StatusOK, saved.Code, saved.Body.String())
 	require.Equal(t, pro.ID, stored(t).Agents.PlanReviewer.Model)
 
-	// A value no row carries is refused with the goal check's sentence, naming
+	// A value no row carries is refused with the goal evaluator's sentence, naming
 	// the field, and the stored row does not move.
 	saved = settingsPatch(t, s, map[string]any{"agents.plan_reviewer.model": "deepseek/no-such-model"}, nil)
 	require.Equal(t, http.StatusBadRequest, saved.Code, saved.Body.String())

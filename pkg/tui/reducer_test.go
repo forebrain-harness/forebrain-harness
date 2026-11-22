@@ -4667,7 +4667,7 @@ func TestReducerDrawsAGoalsLines(t *testing.T) {
 	if f := started.Frames[0]; f.Kind != FrameGoal || !f.Final || f.Title != goalTitleStarted || f.Content != "make the tests pass" || !strings.Contains(f.Summary, "esc stops") || f.AgentID != "" {
 		t.Fatalf("started frame = %#v", f)
 	}
-	if c := tracker.SnapshotActiveRun(); c.GoalRound != 1 || c.GoalChecking {
+	if c := tracker.SnapshotActiveRun(); c.GoalRound != 1 || c.GoalEvaluating {
 		t.Fatalf("counters after the goal started = %+v", c)
 	}
 
@@ -4678,7 +4678,7 @@ func TestReducerDrawsAGoalsLines(t *testing.T) {
 			t.Fatalf("the goal's check drew a card of its own: %#v", f)
 		}
 	}
-	if c := tracker.SnapshotActiveRun(); !c.GoalChecking || c.GoalRound != 1 {
+	if c := tracker.SnapshotActiveRun(); !c.GoalEvaluating || c.GoalRound != 1 {
 		t.Fatalf("counters while the check runs = %+v", c)
 	}
 	ended := r.Reduce(SubagentEndedMsg{AgentID: "check-1", AgentType: "goal-evaluator", Status: "ok", Output: `{"status":"continue"}`})
@@ -4687,7 +4687,7 @@ func TestReducerDrawsAGoalsLines(t *testing.T) {
 			t.Fatalf("the goal's check drew a closing card: %#v", f)
 		}
 	}
-	if c := tracker.SnapshotActiveRun(); c.GoalChecking {
+	if c := tracker.SnapshotActiveRun(); c.GoalEvaluating {
 		t.Fatalf("counters after the check = %+v", c)
 	}
 
@@ -4710,7 +4710,7 @@ func TestReducerDrawsAGoalsLines(t *testing.T) {
 	if f := done.Frames[1]; f.Title != goalTitleDone || f.Summary != "2 rounds 7s click to see the check" || f.Content != "42 tests pass" || f.AgentID != "check-2" {
 		t.Fatalf("done frame = %#v", f)
 	}
-	if c := tracker.SnapshotActiveRun(); c.GoalRound != 0 || c.GoalChecking {
+	if c := tracker.SnapshotActiveRun(); c.GoalRound != 0 || c.GoalEvaluating {
 		t.Fatalf("counters after the goal ended = %+v", c)
 	}
 }
@@ -4783,7 +4783,7 @@ func TestWorkingLineNamesTheGoalsRound(t *testing.T) {
 	}{
 		{Counters{}, " Working ("},
 		{Counters{GoalRound: 3}, " Working toward the goal round 3 ("},
-		{Counters{GoalRound: 3, GoalChecking: true}, " Checking whether the goal is met after round 3 ("},
+		{Counters{GoalRound: 3, GoalEvaluating: true}, " Checking whether the goal is met after round 3 ("},
 	} {
 		counters := tt.counters
 		status := workingStatusFormatter(func() Counters { return counters })

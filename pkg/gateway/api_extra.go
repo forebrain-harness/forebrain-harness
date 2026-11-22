@@ -9283,7 +9283,7 @@ var settingsFieldList = []settingsField{
 	{path: "agents.defaults.enable_subagent", section: "agents", kind: settingsBool, def: false},
 	{path: "agents.defaults.execution.max_parallel_subagents", section: "agents", kind: settingsNumber,
 		def: config.DefaultMaxParallelSubagents()},
-	// The /goal check's own model and reasoning effort (plan 299): one global
+	// The /goal evaluator's own model and reasoning effort (plan 299): one global
 	// row, not a per-agent entry, so it is registered here beside the two
 	// subagent defaults rather than on the sidebar's subagent page.
 	{path: "agents.goal_evaluator.model", section: "agents", kind: settingsText},
@@ -9783,7 +9783,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			writeSettingsJSON(w, http.StatusBadRequest, settingsPatchError{Path: path, Message: err.Error()})
 			return
 		}
-		// The two system subagents' model rows — the /goal check's and the
+		// The two system subagents' model rows — the /goal evaluator's and the
 		// exit-plan reviewer's — are the same kind of choice one step
 		// narrower: a configured row and nothing else, because the engine
 		// resolves each globally (plans 299, 313).
@@ -9863,7 +9863,7 @@ func normalizeMemoryModelPath(cfg *config.Root, path string) error {
 	return nil
 }
 
-// The system subagents' model rows: the /goal check's (plan 299) and the
+// The system subagents' model rows: the /goal evaluator's (plan 299) and the
 // exit-plan approval's reviewer (plan 313). Each is one global row, chosen on
 // the settings page's subagent tab.
 const (

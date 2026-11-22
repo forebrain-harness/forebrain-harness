@@ -2167,7 +2167,7 @@ func TestStateV6UpgradesToV7GivesDeniedToolRowsTheirDisplay(t *testing.T) {
 // TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents builds a
 // database that is really at v7 and holds the shapes the backfill has to
 // tell apart: a subagent_send call whose result named the execution it
-// started, that execution's spawned/ended pair, a goal check's pair no send
+// started, that execution's spawned/ended pair, a goal evaluator's pair no send
 // call answers, and an event that already names its call. Opening it links
 // the first pair to the send call and touches nothing else — not the goal
 // check's empty link, not the already-named one, and not a single other byte
@@ -2206,7 +2206,7 @@ func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testin
 		strconv.Quote(sendResult)))
 	insertEvent("evt-spawn", "subagent_spawned", `{"agent_id":"task-1","agent_type":"general-purpose","task_id":"task-1","title":"Legacy send","task_index":0,"execution_id":"exec-1"}`)
 	insertEvent("evt-end", "subagent_ended", `{"agent_id":"task-1","agent_type":"general-purpose","task_id":"task-1","status":"ok","task_index":0,"execution_id":"exec-1"}`)
-	// A goal check's execution: no send call ever answered it.
+	// A goal evaluator's execution: no send call ever answered it.
 	insertEvent("evt-goal-spawn", "subagent_spawned", `{"agent_id":"goal-1","task_id":"goal-1","task_index":0,"execution_id":"exec-goal"}`)
 	insertEvent("evt-goal-end", "subagent_ended", `{"agent_id":"goal-1","task_id":"goal-1","status":"ok","task_index":0,"execution_id":"exec-goal"}`)
 	// An event that already names its call keeps it.
@@ -2258,7 +2258,7 @@ func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testin
 	for _, eventID := range []string{"evt-goal-spawn", "evt-goal-end"} {
 		after := payloadAfter(eventID)
 		if got := parentOf(after); got != "" {
-			t.Fatalf("%s parent_tool_call_id = %q, want still empty: no send call answers a goal check", eventID, got)
+			t.Fatalf("%s parent_tool_call_id = %q, want still empty: no send call answers a goal evaluator", eventID, got)
 		}
 		if after != payloads[eventID] {
 			t.Fatalf("%s payload must be byte-identical, got %s want %s", eventID, after, payloads[eventID])

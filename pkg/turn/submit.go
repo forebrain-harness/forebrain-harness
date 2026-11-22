@@ -210,7 +210,7 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 	}
 	// The turn's first output, measured once per run: the moment the model
 	// began answering this turn. The sink only fires for the foreground
-	// response — an internal call (compaction, a goal check) is muted through
+	// response — an internal call (compaction, a goal evaluator) is muted through
 	// WithMutedForegroundStream and never reaches this wrapper — so the wait is
 	// the user's, not the plumbing's. A turn with no streaming sink is not
 	// measured: there is no first output to observe.
