@@ -280,11 +280,11 @@ func TestModelDefaultAgentsNamesTheAgentsThatRunOnTheRow(t *testing.T) {
 	}
 }
 
-// TestModelPinnedByNamesTheSettingsThatMustResolve pins the pin projection that
+// TestModelPinsNamesTheSettingsThatMustResolve pins the pin projection that
 // refines the delete guard (plan 345): every reference the loader requires to
-// resolve is named by a reader-facing label, sorted, and an agent's
-// default_model — the runtime skips it — is not a pin.
-func TestModelPinnedByNamesTheSettingsThatMustResolve(t *testing.T) {
+// resolve is named as a kind and the name it applies to, sorted by the English
+// label, and an agent's default_model — the runtime skips it — is not a pin.
+func TestModelPinsNamesTheSettingsThatMustResolve(t *testing.T) {
 	t.Parallel()
 	root := &Root{Agents: AgentsSection{
 		Definitions: map[string]AgentDefinition{
@@ -297,12 +297,17 @@ func TestModelPinnedByNamesTheSettingsThatMustResolve(t *testing.T) {
 		PlanReviewer:   SubagentConfig{Model: "row-1"},
 		GoalEvaluator:  SubagentConfig{Model: "row-1"},
 	}}
-	want := []string{"goal check", "plan review", "subagent explore", "subagent repo-auditor"}
-	if got := ModelPinnedBy(root, "row-1"); !slices.Equal(got, want) {
-		t.Fatalf("ModelPinnedBy(row-1) = %v, want %v", got, want)
+	want := []ModelPin{
+		{Kind: ModelPinGoalEvaluator},
+		{Kind: ModelPinPlanReview},
+		{Kind: ModelPinSubagent, Name: "explore"},
+		{Kind: ModelPinSubagent, Name: "repo-auditor"},
 	}
-	if got := ModelPinnedBy(root, "row-2"); len(got) != 1 || got[0] != "subagent notes" {
-		t.Fatalf("ModelPinnedBy(row-2) = %v, want [subagent notes]", got)
+	if got := ModelPins(root, "row-1"); !slices.Equal(got, want) {
+		t.Fatalf("ModelPins(row-1) = %v, want %v", got, want)
+	}
+	if got := ModelPins(root, "row-2"); len(got) != 1 || got[0] != (ModelPin{Kind: ModelPinSubagent, Name: "notes"}) {
+		t.Fatalf("ModelPins(row-2) = %v, want [subagent notes]", got)
 	}
 	// A subagent role definition's own model is judged by the loader like a
 	// per-agent entry's (validateDefinitionRoles), so it pins the row too — a
@@ -311,29 +316,51 @@ func TestModelPinnedByNamesTheSettingsThatMustResolve(t *testing.T) {
 		"main":         {Primary: true},
 		"code-auditor": {SystemPrompt: "audit the repo", Model: "row-1"},
 	}}}
-	if got := ModelPinnedBy(role, "row-1"); len(got) != 1 || got[0] != "subagent code-auditor" {
-		t.Fatalf("ModelPinnedBy(role's own model) = %v, want [subagent code-auditor]", got)
+	if got := ModelPins(role, "row-1"); len(got) != 1 || got[0] != (ModelPin{Kind: ModelPinSubagent, Name: "code-auditor"}) {
+		t.Fatalf("ModelPins(role's own model) = %v, want [subagent code-auditor]", got)
 	}
 	primaryOwn := &Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
 		"main":   {Primary: true, Model: "row-1"},
 		"worker": {Primary: true, Model: "row-1"},
 	}}}
-	if got := ModelPinnedBy(primaryOwn, "row-1"); len(got) != 0 {
-		t.Fatalf("ModelPinnedBy(a primary's own model) = %v, want nothing: the loader never reads it", got)
+	if got := ModelPins(primaryOwn, "row-1"); len(got) != 0 {
+		t.Fatalf("ModelPins(a primary's own model) = %v, want nothing: the loader never reads it", got)
 	}
-	if got := ModelPinnedBy(nil, "row-1"); got != nil {
+	if got := ModelPins(nil, "row-1"); got != nil {
 		t.Fatalf("nil root = %v, want nil", got)
 	}
-	if got := ModelPinnedBy(root, "  "); got != nil {
+	if got := ModelPins(root, "  "); got != nil {
 		t.Fatalf("blank id = %v, want nil", got)
+	}
+}
+
+// TestModelPinEnglish pins the one English rendering of a pin (plan 347): the
+// terminal and the API's English sentence both say this label, so a surface
+// cannot spell the facts a third way.
+func TestModelPinEnglish(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		pin  ModelPin
+		want string
+	}{
+		{ModelPin{Kind: ModelPinPlanReview}, "plan review"},
+		{ModelPin{Kind: ModelPinGoalEvaluator}, "goal evaluator"},
+		{ModelPin{Kind: ModelPinSubagent, Name: "explore"}, "subagent explore"},
+		{ModelPin{Kind: ModelPinSubagent, Name: "  explore  "}, "subagent explore"},
+		{ModelPin{Kind: ModelPinSubagent}, "subagent"},
+	}
+	for _, c := range cases {
+		if got := c.pin.English(); got != c.want {
+			t.Fatalf("ModelPin%+v.English() = %q, want %q", c.pin, got, c.want)
+		}
 	}
 }
 
 // TestDanglingReferencesTheLoaderRefusesAreExactlyThePinnedOnes is the
 // characterization test that keeps the two lists honest (plan 345): every
-// reference ModelPinnedBy names is one the loader refuses once the row is gone,
+// reference ModelPins names is one the loader refuses once the row is gone,
 // and every reference the loader tolerates — an agent's default_model, a memory
-// stage's model — is one ModelPinnedBy leaves alone. A new strict reference in
+// stage's model — is one ModelPins leaves alone. A new strict reference in
 // pkg/config has to add its shape here, not widen the guard by guesswork.
 func TestDanglingReferencesTheLoaderRefusesAreExactlyThePinnedOnes(t *testing.T) {
 	t.Parallel()
@@ -358,7 +385,7 @@ func TestDanglingReferencesTheLoaderRefusesAreExactlyThePinnedOnes(t *testing.T)
 			pin:  true,
 		},
 		{
-			name: "goal check",
+			name: "goal evaluator",
 			doc:  "agents:\n  goal_evaluator:\n    model: " + dangling + "\n",
 			root: Root{Agents: AgentsSection{GoalEvaluator: SubagentConfig{Model: dangling}}},
 			pin:  true,
@@ -408,14 +435,14 @@ func TestDanglingReferencesTheLoaderRefusesAreExactlyThePinnedOnes(t *testing.T)
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			owners := ModelPinnedBy(&c.root, dangling)
-			if c.pin != (len(owners) > 0) {
-				t.Fatalf("ModelPinnedBy = %v, want a pin: %v", owners, c.pin)
+			pins := ModelPins(&c.root, dangling)
+			if c.pin != (len(pins) > 0) {
+				t.Fatalf("ModelPins = %v, want a pin: %v", pins, c.pin)
 			}
 			_, err := ParseRootYAML([]byte(c.doc))
 			if c.pin {
 				if err == nil {
-					t.Fatalf("the loader accepted a dangling reference ModelPinnedBy names: %s", c.doc)
+					t.Fatalf("the loader accepted a dangling reference ModelPins names: %s", c.doc)
 				}
 				if !strings.Contains(err.Error(), "must be provider/model") {
 					t.Fatalf("loader refused with %q, want a provider/model sentence", err)
@@ -423,7 +450,7 @@ func TestDanglingReferencesTheLoaderRefusesAreExactlyThePinnedOnes(t *testing.T)
 				return
 			}
 			if err != nil {
-				t.Fatalf("the loader refused a dangling reference ModelPinnedBy leaves alone: %v\n%s", err, c.doc)
+				t.Fatalf("the loader refused a dangling reference ModelPins leaves alone: %v\n%s", err, c.doc)
 			}
 		})
 	}

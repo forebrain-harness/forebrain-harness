@@ -608,7 +608,7 @@ func TestDeleteLLMModelRefusesAPinnedRow(t *testing.T) {
 	if !errors.As(err, &refusal) {
 		t.Fatalf("delete = %v, want a refusal", err)
 	}
-	if len(refusal.Pins) != 1 || refusal.Pins[0] != "subagent explore" || len(refusal.Defaults) != 0 {
+	if len(refusal.Pins) != 1 || refusal.Pins[0] != (appcfg.ModelPin{Kind: appcfg.ModelPinSubagent, Name: "explore"}) || len(refusal.Defaults) != 0 {
 		t.Fatalf("refusal = %+v, want the pin list alone", refusal)
 	}
 	if _, err := (&state.LLMModelStore{DB: env.SQL}).Get(ctx, row.ID); err != nil {

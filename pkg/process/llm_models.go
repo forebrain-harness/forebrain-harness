@@ -767,14 +767,34 @@ func SetAgentDefaultModel(ctx context.Context, db *sql.DB, agentName, modelID st
 // same sentence.
 type LLMModelRefusal struct {
 	Defaults []string
-	Pins     []string
+	Pins     []appcfg.ModelPin
 }
 
+// Error words a refusal once for every English surface (plan 347): the default
+// clause, the pin clause, or both. The terminal prints this sentence verbatim
+// and the gateway's English branch returns it; only the gateway's Chinese
+// wording is its own (llmRefusalSentence).
 func (e *LLMModelRefusal) Error() string {
-	if len(e.Defaults) > 0 {
-		return "it is the default model of " + strings.Join(e.Defaults, ", ") + "; choose another default first"
+	defaults := strings.Join(e.Defaults, ", ")
+	pins := modelPinLabels(e.Pins)
+	switch {
+	case len(e.Defaults) > 0 && len(e.Pins) > 0:
+		return "it is the default model of " + defaults + " and is referenced by " + pins + "; point those settings elsewhere first"
+	case len(e.Pins) > 0:
+		return "it is still referenced by " + pins + "; point those settings elsewhere first"
+	default:
+		return "it is the default model of " + defaults + "; choose another default first"
 	}
-	return "it is still used by " + strings.Join(e.Pins, ", ") + "; point those settings elsewhere first"
+}
+
+// modelPinLabels joins the pins' English labels the way every sentence lists
+// them.
+func modelPinLabels(pins []appcfg.ModelPin) string {
+	out := make([]string, 0, len(pins))
+	for _, pin := range pins {
+		out = append(out, pin.English())
+	}
+	return strings.Join(out, ", ")
 }
 
 // DeleteLLMModel removes one configured row — the one delete semantics both
@@ -803,7 +823,7 @@ func DeleteLLMModel(ctx context.Context, db *sql.DB, cfg *appcfg.Root, id string
 		return err
 	}
 	defaults := appcfg.ModelDefaultAgents(cfg, stored.ID)
-	pins := appcfg.ModelPinnedBy(cfg, stored.ID)
+	pins := appcfg.ModelPins(cfg, stored.ID)
 	if len(defaults) > 0 || len(pins) > 0 {
 		return &LLMModelRefusal{Defaults: defaults, Pins: pins}
 	}
