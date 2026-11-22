@@ -268,15 +268,29 @@ test('a model the plan review pins cannot be deleted either', async ({ page }) =
   await row.locator('[data-testid^="models-remove-"]').click()
   await page.click('[data-testid="confirm-ok"]')
 
-  // The refusal names the setting the way the terminal and the API do.
+  // The refusal names the setting the way the terminal and the API do — in the
+  // page's own language, because the page writes the words from the kind the
+  // API sends (plan 347).
   await expect(page.getByText('不能删除')).toBeVisible()
   await expect(page.locator('.forebrain-modal')).toContainText(
     '它仍被下列设置引用，先把这些引用改成别的再删。',
   )
-  await expect(page.locator('[data-testid="models-refused-agent"]')).toHaveText(['plan review'])
+  await expect(page.locator('[data-testid="models-refused-agent"]')).toHaveText(['计划评审'])
   await shot(page, 'models-delete-refused-pin')
   await page.click('[data-testid="models-refused-ok"]')
   await expect(row).toBeVisible()
+
+  // The refusal was the pin, not the row: clearing it lets the same DELETE
+  // land. The pin is install-wide and this run shares one home, so leaving it
+  // would outlive this spec (plan 347).
+  const cleared = await page.request.patch('/api/settings', {
+    data: { values: { 'agents.plan_reviewer.model': '' } },
+  })
+  expect(cleared.ok(), await cleared.text()).toBeTruthy()
+  const removed = await page.request.delete(`/api/llm-models/${id}`)
+  expect(removed.ok(), await removed.text()).toBeTruthy()
+  await page.goto(MODELS, { waitUntil: 'networkidle' })
+  await expect(rowOf(page, 'e2e-pinned-model')).toHaveCount(0)
 })
 
 test('a model stored on the page appears in the conversation’s model menu, twins and all', async ({
