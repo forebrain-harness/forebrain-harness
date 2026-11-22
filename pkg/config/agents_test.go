@@ -835,6 +835,21 @@ func TestValidateAgentSubagentsSharedReferenceEntries(t *testing.T) {
 		t.Fatalf("err = %v, want a per-agent custom to keep its own body", err)
 	}
 
+	// A definition's id follows the primary agent's rule, underscores
+	// included, so the reference enabling one carries a name the custom
+	// entry's pattern refuses (owner 2026-11-22). The same name on an entry
+	// carrying a body is still this agent's custom subagent, held to that
+	// pattern.
+	underscored := []string{"my_agent"}
+	reference := AgentDefinition{Subagents: []SubagentConfig{{Name: "my_agent", Enabled: BoolPtr(true)}}}
+	if err := ValidateAgentSubagents("main", reference, builtInPublicSubagentNames, builtInSystemSubagentNames, underscored, resolves); err != nil {
+		t.Fatalf("a reference to an underscore-named definition was refused: %v", err)
+	}
+	customUnderscored := AgentDefinition{Subagents: []SubagentConfig{{Name: "my_agent", SystemPrompt: "you are mine"}}}
+	if err := ValidateAgentSubagents("main", customUnderscored, builtInPublicSubagentNames, builtInSystemSubagentNames, underscored, resolves); err == nil || !strings.Contains(err.Error(), "invalid name") {
+		t.Fatalf("err = %v, want a custom entry to keep the dashes-only rule", err)
+	}
+
 	// A built-in's pin is a model and a level (P5): the prompt rewrite and
 	// the switch it once carried are refused on the write path — normalize
 	// strips the stored ones, so the refusal is the write's alone.
@@ -976,9 +991,20 @@ func TestValidateDefinitionRoles(t *testing.T) {
 			want: "agents.definitions.repo-auditor: thinking level requires a model.",
 		},
 		{
-			name: "an id a subagent name cannot carry is refused",
-			body: "    repo_auditor:\n      primary: false\n      system_prompt: p\n",
-			want: "agents.definitions.repo_auditor: invalid subagent id",
+			name: "a subagent definition's id follows the primary's rule",
+			body: "    my_agent:\n      primary: false\n      system_prompt: p\n",
+			check: func(t *testing.T, cfg Root) {
+				t.Helper()
+				def := cfg.Agents.Definitions["my_agent"]
+				if def.Primary || def.SystemPrompt != "p" {
+					t.Fatalf("definition = %+v, want the underscore-named subagent kept", def)
+				}
+			},
+		},
+		{
+			name: "an id neither rule can carry is refused",
+			body: "    Repo_Auditor:\n      primary: false\n      system_prompt: p\n",
+			want: "agents.definitions.Repo_Auditor: invalid agent id",
 		},
 	}
 	for _, tc := range cases {

@@ -396,9 +396,6 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 	for i, entry := range def.Subagents {
 		where := fmt.Sprintf("agents.definitions.%s.subagents[%d]", agentID, i)
 		name := strings.ToLower(strings.TrimSpace(entry.Name))
-		if !subagentConfigNamePattern.MatchString(name) {
-			return fmt.Errorf("%s: invalid name %q: use lower-case letters, digits and dashes, starting with a letter", where, entry.Name)
-		}
 		if _, dup := seen[name]; dup {
 			return fmt.Errorf("%s: duplicate subagent name %q", where, name)
 		}
@@ -407,6 +404,14 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 			return fmt.Errorf("%s: %q is dispatched by the system and cannot be configured.", where, name)
 		}
 		_, publicBuiltin := public[name]
+		// The reference that enables an install-wide definition carries the
+		// definition's name, which follows the primary agent's id rule rather
+		// than this entry's (owner 2026-11-22) — a name like my_agent has to be
+		// enableable by some agent, or the definition could never be used.
+		sharedReference := slices.Contains(sharedNames, name) && !SubagentEntryCarriesBody(entry)
+		if !sharedReference && !subagentConfigNamePattern.MatchString(name) {
+			return fmt.Errorf("%s: invalid name %q: use lower-case letters, digits and dashes, starting with a letter", where, entry.Name)
+		}
 		switch {
 		case publicBuiltin:
 			// A built-in's pin is a model and a level (P5): the prompt
@@ -417,7 +422,7 @@ func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins,
 				strings.TrimSpace(entry.Tools) != "" || len(entry.AllowedTools) > 0 || entry.Continuable != nil || entry.Enabled != nil {
 				return fmt.Errorf("%s: %q is a built-in: it takes a model and a reasoning effort, nothing else.", where, name)
 			}
-		case slices.Contains(sharedNames, name) && !SubagentEntryCarriesBody(entry):
+		case sharedReference:
 			// The reference that enables an install-wide definition: the name
 			// and the switch, so there is no body to judge.
 		default:

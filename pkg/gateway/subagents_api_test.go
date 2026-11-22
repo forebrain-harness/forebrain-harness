@@ -1225,9 +1225,9 @@ func TestSharedSubagentCreateRefusals(t *testing.T) {
 		},
 		{
 			name:   "a name the loader rejects",
-			body:   map[string]any{"name": "repo_scout", "description": "d", "system_prompt": "p"},
+			body:   map[string]any{"name": "repo.scout", "description": "d", "system_prompt": "p"},
 			status: http.StatusBadRequest,
-			want:   "invalid subagent id",
+			want:   "invalid agent id",
 		},
 		{
 			name:   "enabled",

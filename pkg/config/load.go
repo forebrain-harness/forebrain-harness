@@ -1005,9 +1005,13 @@ func definitionCarriesSubagentBody(def AgentDefinition) bool {
 // body: a bare `{primary: false}` and a built-in key's shell keep loading
 // exactly as they did before, which is what makes this change invisible to the
 // configurations already stored (the loader must never refuse a configuration it
-// accepted). When it does carry the body, its id is held to the subagent name
-// pattern and its body to the same rules a custom subagent entry gets, minus the
-// description.
+// accepted). When it does carry the body, its body is held to the same rules a
+// custom subagent entry gets, minus the description.
+//
+// The definition id itself is not judged here: validatePrimaryAgents already
+// holds every key of agents.definitions to primaryAgentIDPattern, and the two
+// roles have no second rule (owner 2026-11-22: a subagent definition's name
+// follows the primary's).
 func validateDefinitionRoles(r *Root) error {
 	if r == nil || r.Agents.Definitions == nil {
 		return nil
@@ -1018,9 +1022,6 @@ func validateDefinitionRoles(r *Root) error {
 			continue
 		}
 		where := fmt.Sprintf("agents.definitions.%s", id)
-		if !subagentConfigNamePattern.MatchString(id) {
-			return fmt.Errorf("%s: invalid subagent id %q: use lower-case letters, digits and dashes, starting with a letter", where, id)
-		}
 		// The body the two rules below judge. The description is not part of it
 		// (both roles carry one, and neither has to), and neither Name nor
 		// Continuable is judged here.
@@ -1088,8 +1089,8 @@ func ParseRootYAML(b []byte) (Root, error) {
 	return r, nil
 }
 
-// ValidPrimaryAgentID reports whether id is a legal tenant key: the same
-// pattern the loader enforces on agents.definitions keys.
+// ValidPrimaryAgentID reports whether id is a legal tenant key: the one id rule
+// agents.definitions keys follow, primary and subagent role alike.
 func ValidPrimaryAgentID(id string) bool {
 	return primaryAgentIDPattern.MatchString(id)
 }
