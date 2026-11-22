@@ -6375,6 +6375,11 @@ func (p *richPickerState) panel(label string) slashPanel {
 		if item.Danger {
 			name = panelFailStyle.Render(name)
 		}
+		if item.Locked {
+			// A locked row reads as the prototype's .item.locked: quiet, not
+			// gone — Enter still answers why it will not open (plan 350).
+			name = panelHintStyle.Render(name)
+		}
 		b.selectableColumnsValue(ci == p.cursor, "", name, nameWidth, strings.TrimSpace(item.Description), item.ElideTail, item.Value, item.Status, mark)
 	}
 	if len(p.selectable) == 0 && !p.configPage {

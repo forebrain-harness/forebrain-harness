@@ -300,6 +300,13 @@ func (p *tabbedPickerState) panel(label string) slashPanel {
 			// blank under the tab bar sets the first row off the bar.
 			b.breathe()
 		}
+		if p.configPage {
+			// A /config overview row is the prototype's two-line block: the
+			// section's title, its summary under it, and the one status word
+			// a section nobody stored carries (plan 350).
+			b.selectableBlock(ci == p.cursor, p.items[idx].Label, strings.TrimSpace(p.items[idx].Description), p.items[idx].Value, p.items[idx].Status)
+			continue
+		}
 		lead := ""
 		if p.multi {
 			lead = selectorUncheckedGlyph + " "
@@ -367,7 +374,7 @@ func tabbedFooterHint(switchable, multi bool, esc string) string {
 // SelectRichTabbed opens the tabbed picker and returns the index into items
 // of the row chosen.
 func (s *rawSelector) SelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error) {
-	p, ok, err := s.tabbedKeyLoop(label, items, opts, false, false)
+	p, ok, err := s.tabbedKeyLoop(label, items, opts, false, false, nil)
 	if err != nil || !ok || p.current() < 0 {
 		return -1, false, err
 	}
@@ -380,12 +387,7 @@ func (s *rawSelector) SelectRichTabbed(label string, items []SelectItem, opts Ta
 // chrome is that bar as the panel draws it on every page; its active tab is
 // the picker's, which owns the switching (plan 350).
 func (s *rawSelector) SelectRichTabbedPage(label string, items []SelectItem, opts TabbedSelectOptions, chrome *panelChrome) (int, bool, error) {
-	p, ok, err := s.tabbedKeyLoop(label, items, opts, false, true)
-	if p != nil {
-		// The panel's own bar, its active tab the picker's: the picker owns
-		// the switching, the panel owns the wording and the counts.
-		p.chrome = chrome
-	}
+	p, ok, err := s.tabbedKeyLoop(label, items, opts, false, true, chrome)
 	if err != nil || !ok || p.current() < 0 {
 		return -1, false, err
 	}
@@ -395,7 +397,7 @@ func (s *rawSelector) SelectRichTabbedPage(label string, items []SelectItem, opt
 // MultiSelectRichTabbed opens the tabbed picker with check boxes and returns
 // the indices into items checked on confirm, ascending.
 func (s *rawSelector) MultiSelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
-	p, ok, err := s.tabbedKeyLoop(label, items, opts, true, false)
+	p, ok, err := s.tabbedKeyLoop(label, items, opts, true, false, nil)
 	if err != nil || !ok {
 		return nil, false, err
 	}
@@ -406,7 +408,7 @@ func (s *rawSelector) MultiSelectRichTabbed(label string, items []SelectItem, op
 // after selectRichPaged: it renders the panel, then reads keys until the user
 // confirms or cancels, reporting ok only for a confirmation. configPage draws
 // the loop's pages the /config panel's way (plan 325).
-func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts TabbedSelectOptions, multi, configPage bool) (*tabbedPickerState, bool, error) {
+func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts TabbedSelectOptions, multi, configPage bool, chrome *panelChrome) (*tabbedPickerState, bool, error) {
 	if len(items) == 0 {
 		return nil, false, nil
 	}
@@ -418,6 +420,9 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 
 	p := newTabbedPickerState(items, opts, multi, s.escHint())
 	p.configPage = configPage
+	// The panel's own bar, its active tab the picker's: the picker owns the
+	// switching, the panel owns the wording and the counts (plan 350).
+	p.chrome = chrome
 	if configPage {
 		// The /config pages carry no filter box whatever their row count
 		// (plan 325 D6): the keyboard stays on the rows.

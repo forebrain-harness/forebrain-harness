@@ -1940,10 +1940,13 @@ func TestConfigPanelValueColumnNotElided(t *testing.T) {
 	// The type page: its Model row carries the value right-aligned (D4).
 	explore, _ := configLookupValue(doc, []string{"subagent_models", "explore"})
 	exploreSettings, _ := explore.(map[string]any)
-	typeItems, _ := panel.templateItems(configTemplateTypeDef, exploreSettings, false)
+	typeItems, _ := panel.templateItems(configTemplateTypeDef, "explore", exploreSettings, false)
 	typeLines := renderRichPage(typeItems, "explore", 120)
+	// The value names the row the way every picker does: the two rows of one
+	// provider and model are told apart by the host they send to (plan 324
+	// D2, the prototype's own rowLabel).
 	modelRow := renderedRow(t, typeLines, "Model")
-	if !strings.HasSuffix(modelRow, "openai/gpt-main") || strings.Contains(modelRow, "…") {
+	if !strings.HasSuffix(modelRow, "openai/gpt-main (api.two.example.com)") || strings.Contains(modelRow, "…") {
 		t.Fatalf("the type page's Model row = %q, want its value right-aligned", modelRow)
 	}
 }
@@ -2132,11 +2135,13 @@ func renderedRow(t *testing.T, lines []string, name string) string {
 	return ""
 }
 
-// renderedRowText is one row's whole description: the description column of
-// its line plus the wrapped continuations under it. The fixed status track
-// narrows the column (plan 325 D3), so a long summary folds across lines, and
-// the track itself sits at the line's right edge — two or more spaces off the
-// text, which is what tells it from the description's own single spaces.
+// renderedRowText is one row's whole text: the description column of its line
+// plus the wrapped continuations under it, or — for one of the /config
+// overview's two-line blocks (plan 350) — the summary hanging on the line under
+// the title. The fixed status track narrows a two-column row's description
+// (plan 325 D3), so a long summary folds across lines, and the track itself
+// sits at the line's right edge — two or more spaces off the text, which is
+// what tells it from the description's own single spaces.
 func renderedRowText(t *testing.T, lines []string, name string) string {
 	t.Helper()
 	for i, line := range lines {
@@ -2146,18 +2151,24 @@ func renderedRowText(t *testing.T, lines []string, name string) string {
 			continue
 		}
 		parts := splitRowColumns(stripANSI(line))
-		if len(parts) < 2 {
-			t.Fatalf("row %q carries no description column: %q", name, stripANSI(line))
-		}
-		text := parts[1]
+		var cont []string
 		for _, next := range lines[i+1:] {
 			plain := stripANSI(next)
-			if !strings.HasPrefix(plain, "    ") {
+			// A continuation hangs at the panel's own indent and a block's
+			// summary does too, two cells in from the row above it; a blank
+			// line ends either, and so does the next row's title.
+			if !strings.HasPrefix(plain, panelIndent) || strings.HasPrefix(plain, panelIndent+" ") || strings.TrimSpace(plain) == "" {
 				break
 			}
-			text += " " + strings.TrimSpace(plain)
+			cont = append(cont, strings.TrimSpace(plain))
 		}
-		return text
+		if len(cont) > 0 {
+			return strings.Join(cont, " ")
+		}
+		if len(parts) > 1 {
+			return parts[1]
+		}
+		t.Fatalf("row %q carries no text: %q", name, stripANSI(line))
 	}
 	t.Fatalf("no row %q among:\n%s", name, strings.Join(stripANSIAll(lines), "\n"))
 	return ""
@@ -2245,13 +2256,10 @@ func TestConfigPanelAgentsListsThePlanReviewerAndMarksPrimary(t *testing.T) {
 	if shell.Status != configAgentStatus {
 		t.Fatalf("shell-agent's status = %q, want %q", shell.Status, configAgentStatus)
 	}
-	// A generic container row counts what it holds in the value column (plan
-	// 325 D4), not the description.
-	if main.Value != "2 entries" {
-		t.Fatalf("main's value = %q, want the count alone", main.Value)
-	}
-	if main.Description != "" {
-		t.Fatalf("main's description = %q, want none", main.Description)
+	// A container row holds no value of its own: it opens the rows beneath it
+	// (plan 350, the prototype's display() on a container).
+	if main.Value != "" || main.Description != "" {
+		t.Fatalf("main's row = %q / %q, want a label alone", main.Value, main.Description)
 	}
 }
 
@@ -2306,8 +2314,8 @@ func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
 		}
 	}
 	custom := findRow(t, rows, "#4")
-	if custom.Value != "3 entries" || custom.Description != "" {
-		t.Errorf("#4 = %q / %q, want the count in the value column alone", custom.Value, custom.Description)
+	if custom.Value != "" || custom.Description != "" {
+		t.Errorf("#4 = %q / %q, want a container row to hold no value of its own (plan 350)", custom.Value, custom.Description)
 	}
 	if !strings.Contains(pageLabels(selector), configSystemSubagentNotice) {
 		t.Fatalf("the refusal must reach the page: %s", pageLabels(selector))
@@ -2337,10 +2345,12 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 	addRow := richStep{label: configAddRowLabel, ok: true}
 
 	t.Run("the name lands the draft as the definition", func(t *testing.T) {
+		// `a` opens the name editor itself: the first key typed is the
+		// definition's name, with no step on the form between (plan 350, the
+		// prototype's startAdd → focusEditor).
 		session, selector := newCase(t,
 			[]richStep{
 				openDefinitions, addRow,
-				{label: "Name", ok: true},
 				{ok: false}, {ok: false}, {ok: false},
 			},
 			[]selectorInput{{value: "review-agent", ok: true}},
@@ -2354,12 +2364,14 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 		}
 		// The page the name opens lists the saved definition's own fields —
 		// the name row's value is the key it landed under (plan 350).
-		savedName, ok := findRowLoose(selector.richItems[len(selector.richItems)-1], "Name")
-		if !ok {
-			t.Fatalf("the saved page must open under the new key: %v", pageLabels(selector))
+		namedKey := false
+		for _, items := range selector.richItems {
+			if row, ok := findRowLoose(items, "Name"); ok && row.Value == "review-agent" {
+				namedKey = true
+			}
 		}
-		if savedName.Value != "review-agent" {
-			t.Fatalf("the saved page's Name row = %q, want the key it landed under", savedName.Value)
+		if !namedKey {
+			t.Fatalf("the saved page must open under the new key: %v", pageLabels(selector))
 		}
 		// One drawn page is the saved definition's own, and it is the only
 		// page whose rows include the locked Name field.
@@ -2390,6 +2402,9 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 				{ok: false}, {ok: false}, {ok: false},
 			},
 			[]selectorInput{
+				// The form opens on the name; Esc leaves it and holds the
+				// form open (plan 350).
+				{ok: false},
 				{value: "You audit repositories.", ok: true},
 				{value: "repo-auditor", ok: true},
 			},
@@ -2421,7 +2436,7 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 				{label: "Name", ok: true},
 				{ok: false}, {ok: false}, {ok: false},
 			},
-			[]selectorInput{{value: "review-agent", ok: true}},
+			[]selectorInput{{ok: false}, {value: "review-agent", ok: true}},
 			`{"definitions":{"main":{"primary":true}}}`,
 		)
 		if !strings.Contains(pageLabels(selector), configCreateRoleNotice) {
@@ -2446,7 +2461,7 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 				{label: "Description", ok: true},
 				{ok: false}, {ok: false}, {ok: false},
 			},
-			[]selectorInput{{value: "held text", ok: true}},
+			[]selectorInput{{ok: false}, {value: "held text", ok: true}},
 			`{"definitions":{"main":{"primary":true}}}`,
 		)
 		if !strings.Contains(pageLabels(selector), configCreateHeldNotice) {
@@ -2461,7 +2476,7 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 				{label: "Model", ok: true},
 				{ok: false}, {ok: false}, {ok: false},
 			},
-			nil,
+			[]selectorInput{{ok: false}},
 			`{"definitions":{"main":{"primary":true}}}`,
 		)
 		if !strings.Contains(pageLabels(selector), configCreateNameFirstNotice) {

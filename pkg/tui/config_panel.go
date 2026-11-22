@@ -591,6 +591,15 @@ func (p *configPanel) configTypePinRow(doc any, field configField, path []string
 	return "", p.configModelRowLabel(ref), configEffortSummary(configStringField(settings, configEffortKey))
 }
 
+// configRowKey is the key a row's path ends at — a definition's own name in the
+// map it sits in, "" for a path that names none.
+func configRowKey(path []string) string {
+	if len(path) == 0 {
+		return ""
+	}
+	return path[len(path)-1]
+}
+
 // refOfRow is one stored row's model reference, empty when it names none.
 func refOfRow(doc any, path ...string) string {
 	row, _ := configLookupValue(doc, path)
@@ -1058,6 +1067,37 @@ func (p *configPanel) editText(doc any, path []string, field configField, cur an
 	return p.assign(doc, path, text, false, field.Label)
 }
 
+// editPath edits one row at a path's place: the panel's editor, then the
+// prototype's absolute check before anything is stored (html:149) — a relative
+// path is refused in the field's own words and nothing is written.
+func (p *configPanel) editPath(doc any, rowPath []string, field configField, cur any) (any, string) {
+	text, ok, unset, err := p.editScalar(field, configScalarInput(cur))
+	if err != nil {
+		p.printError(err)
+		return doc, ""
+	}
+	if !ok {
+		return doc, ""
+	}
+	if unset {
+		return p.assign(doc, rowPath, nil, true, field.Label)
+	}
+	if !configAbsolutePath(text) {
+		return doc, configPathRefusal
+	}
+	return p.assign(doc, rowPath, text, false, field.Label)
+}
+
+// configAbsolutePath reports whether a path is one the loader takes whole: a
+// rooted path, or a Windows drive path (the prototype's absolute rule).
+func configAbsolutePath(path string) bool {
+	path = strings.TrimSpace(path)
+	if strings.HasPrefix(path, "/") {
+		return true
+	}
+	return len(path) > 2 && path[1] == ':' && (path[2] == '\\' || path[2] == '/')
+}
+
 // editScalar opens a text or number setting's editor and reports what it
 // ended with: the text Enter saved, or the Default action having been fired
 // (plan 326 D4). On a selector without footer actions the Default action has
@@ -1332,14 +1372,15 @@ func configDropSiblingEffort(doc any, path []string, label string) (any, error) 
 }
 
 // configModelValueText is a model reference as every value column shows it
-// (plan 324 D6): the row's label through the install's table, or the sentence
-// the field gives its empty value — the memory flavor's explicit "current"
-// reads the same as an unset key.
+// (plan 324 D6): the row's label through the install's table, and nothing at
+// all when the setting names no row — an unset value is empty in the
+// prototype's display(), and the empty option's own label belongs to the
+// picker that offers it, not to a row nobody set (plan 350).
 func (p *configPanel) configModelValueText(field configField, value any) string {
 	ref, _ := value.(string)
 	ref = strings.TrimSpace(ref)
 	if ref == "" || (field.ModelEmptyValue != "" && ref == field.ModelEmptyValue) {
-		return field.ModelEmpty
+		return ""
 	}
 	return p.configModelRowLabel(ref)
 }
@@ -1511,22 +1552,17 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 }
 
 // configRowIsEntry reports whether one stored row is an entry of a removable
-// collection (plan 326 D2): a row the generic editor dispatches straight to
-// its text editor — a path row or a string row, the rows a template names —
-// and nothing else. A shared subagent's row is its switch, not an entry.
+// collection: every row that stands for a stored entry, a container row — an
+// agent definition, an MCP server, a subagent — as much as the scalar rows a
+// template opens straight into an editor (plan 350, the prototype's rowField
+// marks every collection row entry). A shared subagent's row is its switch,
+// not an entry: removing the definition is not this agent's to do.
 func (p *configPanel) configRowIsEntry(doc any, path []string, key string) bool {
-	rowPath := configJoinPath(path, key)
-	value, _ := configLookupValue(doc, rowPath)
+	value, _ := configLookupValue(doc, configJoinPath(path, key))
 	if agentSubagentsPath(path) && sharedRowName(doc, key, value) != "" {
 		return false
 	}
-	if configIsContainer(value) {
-		return false
-	}
-	if configTemplateFor(p.section, rowPath) == configTemplatePath {
-		return true
-	}
-	return configScalarRowTemplate(p.section, rowPath) == configTemplateString
+	return true
 }
 
 // rowItems is one container's rows: every entry, then add and back when the
@@ -1622,12 +1658,11 @@ func (p *configPanel) configRowLabelAt(doc any, path []string, key string, index
 }
 
 // configRowDescription is a row's second column: what it holds right now. A
-// container is counted in the prototype's own words and carries no arrow — the
-// row opens because it is a container, and a glyph promising it only decorates
-// the row (plan 321).
+// container holds no single value to print — the row opens the rows
+// themselves (plan 350, the prototype's display() on a container).
 func configRowDescription(value any) string {
 	if configIsContainer(value) {
-		return configContainerText(value)
+		return ""
 	}
 	if value == nil {
 		return "(empty)"
@@ -1719,6 +1754,10 @@ const (
 	// configSecretEmptyNotice answers an empty replacement (plan 328 D3):
 	// nothing was asked for, so nothing is written.
 	configSecretEmptyNotice = "no replacement was given; nothing was written"
+	// configPathRefusal is the prototype's own words for a path that is not
+	// absolute (html:149): the editor keeps what was typed and nothing is
+	// stored.
+	configPathRefusal = "Enter an absolute path."
 	// configSecretLineNotice refuses the private edit on a selector that
 	// reads its answers in the clear (plan 328 D3): a piped line has no
 	// screen to hide a secret on, so the edit is refused rather than echoed.
@@ -2077,7 +2116,7 @@ func (p *configPanel) editRow(doc any, path []string, key string, field configFi
 		// opens directly, the way the prototype's hook-event scene does.
 		return p.editRows(doc, rowPath, field)
 	case !container && template == configTemplatePath:
-		return p.editText(doc, rowPath, configTemplateFields(configTemplatePath)[0], value)
+		return p.editPath(doc, rowPath, configTemplateFields(configTemplatePath)[0], value)
 	case !container && configScalarRowTemplate(p.section, rowPath) == configTemplateString:
 		return p.editText(doc, rowPath, field, value)
 	}
@@ -2296,7 +2335,7 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 		if settings == nil {
 			settings = map[string]any{}
 		}
-		items, rows := p.templateItems(template, settings, tailRows)
+		items, rows := p.templateItems(template, configRowKey(rowPath), settings, tailRows)
 		idx, ok, err := p.page(p.templateNotice(template, settings, notice), configFieldKeys, items, -1)
 		if err != nil {
 			p.printError(err)
@@ -2311,13 +2350,18 @@ func (p *configPanel) editTemplatePage(doc any, rowPath []string, template, titl
 			return doc, ""
 		}
 		if configTemplateRowIsSystem(template, settings) {
-			return doc, configSystemSubagentNotice
+			// The page stays open under the verdict: it is a refusal, not a way
+			// out of the page (plan 350).
+			notice = configSystemSubagentNotice
+			continue
 		}
 		// The two fields a create decides (the prototype's keyName and
 		// createEditable): opening either on a saved definition answers with
-		// the created-fields sentence instead of an editor.
+		// the created-fields sentence instead of an editor, and the page stays
+		// where it was.
 		if template == configTemplateAgent && (row.field.KeyName || row.field.CreateEditable) {
-			return doc, configCreatedFieldsNotice
+			notice = configCreatedFieldsNotice
+			continue
 		}
 		if row.unknown != "" {
 			doc, notice = p.openUnknownTemplateKey(doc, rowPath, row.unknown)
@@ -2381,7 +2425,7 @@ func configHookActionType(settings map[string]any) string {
 // actions). customOnly hides the fields a built-in or system entry cannot
 // carry; showFor hides the fields another action type owns; a system entry's
 // every row carries the System status and the verdict in place of its hint.
-func (p *configPanel) templateItems(template string, settings map[string]any, tailRows bool) ([]SelectItem, []configTemplateRow) {
+func (p *configPanel) templateItems(template, key string, settings map[string]any, tailRows bool) ([]SelectItem, []configTemplateRow) {
 	fields := configTemplates[template]
 	name := strings.ToLower(strings.TrimSpace(configStringField(settings, "name")))
 	system := configTemplateRowIsSystem(template, settings)
@@ -2413,6 +2457,11 @@ func (p *configPanel) templateItems(template string, settings map[string]any, ta
 			continue
 		}
 		value, exists := configLookupValue(settings, []string{field.Path})
+		if field.KeyName {
+			// The name of a definition is its own key in the map, not a value
+			// inside it (plan 350): a row still unnamed reads as nothing.
+			value, exists = key, key != ""
+		}
 		// A template row is a label, its value and — on a read-only page —
 		// the system verdict: the field's help belongs to its editor, never to
 		// the row (plan 350, the prototype's fields view setting help, not
@@ -2421,11 +2470,15 @@ func (p *configPanel) templateItems(template string, settings map[string]any, ta
 		if system {
 			status = configSystemStatus
 		}
+		// The two fields a create decides are read-only once the definition
+		// exists: the page draws them as the prototype's locked rows.
+		locked := !configTemplateRowIsSystem(template, settings) && (field.KeyName || field.CreateEditable) && key != ""
 		items = append(items, SelectItem{
 			Label:    field.Label,
 			Value:    p.configTemplateValueText(field, value, exists),
 			Status:   status,
 			Category: field.Group,
+			Locked:   locked,
 		})
 		rows = append(rows, configTemplateRow{field: field})
 	}
@@ -2454,11 +2507,14 @@ func (p *configPanel) templateItems(template string, settings map[string]any, ta
 // option, plan 324); everything else keeps the panel's one value wording.
 func (p *configPanel) configTemplateValueText(field configField, value any, exists bool) string {
 	if field.ModelEmpty != "" {
+		// A model row nobody pinned reads as nothing (plan 350, the
+		// prototype's display()): the empty option's own label belongs to the
+		// picker it opens, not to the row it was never set on.
 		ref, _ := value.(string)
 		if strings.TrimSpace(ref) == "" {
-			return field.ModelEmpty
+			return ""
 		}
-		return p.configModelLabel(ref)
+		return p.configModelRowLabel(ref)
 	}
 	return configFieldValueText(field, value, exists)
 }
@@ -2755,7 +2811,7 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		if !list && configIsSecretPath(childPath...) {
 			return p.editSecret(doc, childPath, field, nil)
 		}
-		text, ok, err := p.sel.Input(p.fieldPrompt(field), "")
+		text, ok, unset, err := p.editScalar(field, "")
 		if err != nil {
 			p.printError(err)
 			return doc, ""
@@ -2763,8 +2819,11 @@ func (p *configPanel) addRow(doc any, path []string, field configField) (any, st
 		if !ok {
 			return doc, ""
 		}
-		if strings.TrimSpace(text) == "" {
+		if unset {
 			return doc, "the value may not be empty; nothing was written"
+		}
+		if template == configTemplatePath && !configAbsolutePath(text) {
+			return doc, configPathRefusal
 		}
 		if list {
 			rows, _ := container.([]any)
@@ -2870,9 +2929,17 @@ var (
 func (p *configPanel) addAgentDefinition(doc any, path []string, field configField, container any) (any, string) {
 	draft := map[string]any{"primary": true}
 	tailRows := p.configActionSelector() == nil
-	notice := ""
+	// The form opens on the name (plan 350, the prototype's startAdd →
+	// focusEditor): the `a` that got here already means "a new definition", so
+	// the first thing typed is its name, and it lands the definition at once.
+	// Esc leaves the form with nothing written and every other field empty.
+	updated, key, landed, notice := p.commitAgentName(doc, path, field, container, draft)
+	if landed {
+		return p.editTemplatePage(updated, configJoinPath(path, key), configTemplateAgent, key)
+	}
+	doc = updated
 	for {
-		items, rows := p.templateItems(configTemplateAgent, draft, tailRows)
+		items, rows := p.templateItems(configTemplateAgent, "", draft, tailRows)
 		idx, ok, err := p.page(notice, configFieldKeys, items, -1)
 		if err != nil {
 			p.printError(err)
@@ -3629,16 +3696,6 @@ func configNumberUnitText(value float64, unit string) string {
 		return text
 	}
 	return text + " " + unit
-}
-
-// configContainerText is a table or list as a row's value column counts it: a
-// list's items, a map's entries — the prototype's two words for the two shapes.
-func configContainerText(value any) string {
-	n := strconv.Itoa(configContainerLen(value))
-	if _, isList := value.([]any); isList {
-		return n + " items"
-	}
-	return n + " entries"
 }
 
 // configScalarText renders one scalar the way a row shows it.

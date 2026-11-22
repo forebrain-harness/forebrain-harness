@@ -8330,6 +8330,34 @@ func (b *panelBuilder) facts(facts []turn.StatusFact, styled map[string]string) 
 	}
 }
 
+// selectableBlock adds one row of the /config overview (plan 350, the
+// prototype's .item.overview): the title in the panel's strong style with the
+// row's value and status at the right edge of that line, and the summary on the
+// line under it in the quiet style, so a section reads as a block of two lines
+// rather than one crowded one. The cursor covers both lines: a block brought
+// into view is never half off screen.
+func (b *panelBuilder) selectableBlock(selected bool, title, description, value, status string) {
+	margin := panelIndent
+	if selected {
+		b.focusStart, b.focusEnd = len(b.body), len(b.body)+1
+		if b.heading >= 0 && b.grouped == 0 {
+			b.focusStart = b.heading
+		}
+		if !b.unmarked {
+			margin = panelCursor
+		}
+	}
+	b.body = append(b.body, panelLine{
+		lead: margin, col: panelTitleStyle.Render(title), colWidth: displayLineWidth(title),
+		value: value, status: status,
+	})
+	if description != "" {
+		b.body = append(b.body, panelLine{lead: panelIndent, text: description, style: &panelHintStyle})
+		b.focusEnd = len(b.body)
+	}
+	b.grouped++
+}
+
 // selectable adds one cursor-addressable row, marking it and making it the
 // focus when it is the selected one. lead follows the marker's margin: a check
 // box, a name column. The first row of a group takes the group's heading into

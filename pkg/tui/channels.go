@@ -643,6 +643,12 @@ type SelectItem struct {
 	// discards work reads as the risky one. Like the mark it carries no style:
 	// the renderer owns the colour, and no other list sets it.
 	Danger bool
+	// Locked marks a row whose value was set when it was created and cannot be
+	// changed afterwards — a saved definition's Name and Primary (plan 350,
+	// prototype .item.locked). The row stays on screen and stays reachable so
+	// Enter can answer why it will not open; it is drawn muted. Nothing else
+	// sets it.
+	Locked bool
 }
 
 type Selector interface {
