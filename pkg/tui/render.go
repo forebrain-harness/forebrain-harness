@@ -8048,6 +8048,13 @@ func (p slashPanel) layout(width, rows, top int, follow bool) panelLayout {
 		if l.colWidth <= 0 || l.col == "" {
 			continue
 		}
+		// A row with no description has no second column to fall back to: its
+		// label, value and status share the one line whatever the label's
+		// length, so it never decides the list's rhythm (plan 350 — a /config
+		// field row keeps its value at 68 columns).
+		if strings.TrimSpace(l.text) == "" {
+			continue
+		}
 		leadW := displayLineWidth(l.lead)
 		colW := min(l.colWidth, maxInt(1, (width-leadW)*2/5))
 		if displayLineWidth(l.col) > colW {
