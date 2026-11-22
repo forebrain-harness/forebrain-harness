@@ -619,6 +619,47 @@ func TestDeleteLLMModelRefusesAPinnedRow(t *testing.T) {
 	}
 }
 
+// TestLLMModelRefusalSentences pins the one English wording of a refusal (plan
+// 347): the default clause, the pin clause, and both at once. The both case is
+// the one the branch audit found missing — Error() printed the default sentence
+// and dropped the pins, so a row nobody could delete named half its owners.
+func TestLLMModelRefusalSentences(t *testing.T) {
+	cases := []struct {
+		name    string
+		refusal LLMModelRefusal
+		want    string
+	}{
+		{
+			name:    "default only",
+			refusal: LLMModelRefusal{Defaults: []string{"main"}},
+			want:    "it is the default model of main; choose another default first",
+		},
+		{
+			name: "pin only",
+			refusal: LLMModelRefusal{Pins: []appcfg.ModelPin{
+				{Kind: appcfg.ModelPinSubagent, Name: "explore"},
+			}},
+			want: "it is still referenced by subagent explore; point those settings elsewhere first",
+		},
+		{
+			name: "both",
+			refusal: LLMModelRefusal{
+				Defaults: []string{"main"},
+				Pins: []appcfg.ModelPin{
+					{Kind: appcfg.ModelPinPlanReview},
+					{Kind: appcfg.ModelPinSubagent, Name: "explore"},
+				},
+			},
+			want: "it is the default model of main and is referenced by plan review, subagent explore; point those settings elsewhere first",
+		},
+	}
+	for _, c := range cases {
+		if got := c.refusal.Error(); got != c.want {
+			t.Fatalf("%s: Error() = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // TestDeleteLLMModelReportsAMissingRow pins the not-found answer a surface
 // turns into its "no longer configured" sentence.
 func TestDeleteLLMModelReportsAMissingRow(t *testing.T) {
