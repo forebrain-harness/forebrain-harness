@@ -1112,14 +1112,18 @@ func TestLLMModelsAPIDeleteRefusesAPinnedRow(t *testing.T) {
 	rec := do(http.MethodDelete, "/api/llm-models/"+pinned)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	var conflict struct {
-		Error      string   `json:"error"`
-		DefaultFor []string `json:"default_for"`
-		PinnedBy   []string `json:"pinned_by"`
+		Error      string                        `json:"error"`
+		DefaultFor []string                      `json:"default_for"`
+		PinnedBy   []struct{ Kind, Name string } `json:"pinned_by"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &conflict))
-	require.Equal(t, []string{"subagent explore"}, conflict.PinnedBy)
+	require.Len(t, conflict.PinnedBy, 1)
+	require.Equal(t, "subagent", conflict.PinnedBy[0].Kind)
+	require.Equal(t, "explore", conflict.PinnedBy[0].Name)
 	require.Empty(t, conflict.DefaultFor)
-	require.Contains(t, conflict.Error, "subagent explore")
+	// The page is Chinese-first, so the sentence names the setting in Chinese
+	// while the payload keeps the machine kind (plan 347).
+	require.Contains(t, conflict.Error, "子代理 explore")
 
 	rows, _ := llmModelRows(t, do)
 	llmModelByID(t, rows, pinned)

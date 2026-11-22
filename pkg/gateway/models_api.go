@@ -118,11 +118,33 @@ type llmModelRow struct {
 	// DefaultFor names the agents that name this row as their default model.
 	DefaultFor []string `json:"default_for,omitempty"`
 	// PinnedBy names the settings whose reference the loader requires to
-	// resolve: a subagent type's row, the plan reviewer, the goal check, a
+	// resolve: a subagent type's row, the plan reviewer, the goal evaluator, a
 	// subagent definition's own model (plan 345). Such a row cannot be
-	// deleted either — the composed configuration would stop loading.
-	PinnedBy  []string `json:"pinned_by,omitempty"`
-	CreatedAt int64    `json:"created_at"`
+	// deleted either — the composed configuration would stop loading. A machine
+	// kind plus the name it applies to, so each surface writes its own
+	// language (plan 347).
+	PinnedBy  []llmModelPin `json:"pinned_by,omitempty"`
+	CreatedAt int64         `json:"created_at"`
+}
+
+// llmModelPin is one pin on the wire: the machine kind of the setting that
+// pins the row, and the name it applies to (empty for the two install-wide
+// rows, which omit it).
+type llmModelPin struct {
+	Kind string `json:"kind"`
+	Name string `json:"name,omitempty"`
+}
+
+// llmModelPins projects the config pins into the wire shape; nil in, nil out.
+func llmModelPins(pins []config.ModelPin) []llmModelPin {
+	if len(pins) == 0 {
+		return nil
+	}
+	out := make([]llmModelPin, 0, len(pins))
+	for _, pin := range pins {
+		out = append(out, llmModelPin{Kind: pin.Kind, Name: pin.Name})
+	}
+	return out
 }
 
 // llmModelWrite is one create, update or connection-test body. A nil pointer
@@ -479,7 +501,7 @@ func (s *Server) llmModelRowOf(r *http.Request, scope llmModelScope, row state.L
 		CatalogProvider: row.CatalogProvider,
 		IsDefault:       row.ID == scope.defaultID,
 		DefaultFor:      config.ModelDefaultAgents(scope.cfg, row.ID),
-		PinnedBy:        config.ModelPinnedBy(scope.cfg, row.ID),
+		PinnedBy:        llmModelPins(config.ModelPins(scope.cfg, row.ID)),
 		CreatedAt:       row.CreatedAt,
 	}
 	out.CatalogCaps, out.CatalogID = llmModelCatalogCaps(row.Provider, row.Model, row.CatalogProvider, row.APIPath)
@@ -683,7 +705,7 @@ func (s *Server) deleteLLMModel(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusConflict, map[string]any{
 			"error":       llmRefusalSentence(r, refusal),
 			"default_for": refusal.Defaults,
-			"pinned_by":   refusal.Pins,
+			"pinned_by":   llmModelPins(refusal.Pins),
 		})
 		return
 	}
@@ -700,22 +722,50 @@ func (s *Server) deleteLLMModel(w http.ResponseWriter, r *http.Request) {
 
 // llmRefusalSentence words a refusal in the request's language: the default
 // case names the agents (the sentence the page has always shown), the pin case
-// names the settings, and a row that is both names both.
+// names the settings, and a row that is both names both. The English branch is
+// the one sentence every English surface says (process.LLMModelRefusal.Error);
+// only the Chinese wording is written here (plan 347).
 func llmRefusalSentence(r *http.Request, refusal *process.LLMModelRefusal) string {
 	switch {
 	case len(refusal.Defaults) > 0 && len(refusal.Pins) > 0:
 		return llmText(r,
-			"它是「"+strings.Join(refusal.Defaults, "、")+"」的默认模型，也被「"+strings.Join(refusal.Pins, "、")+"」引用；先把这些引用改成别的",
-			"it is the default model of "+strings.Join(refusal.Defaults, ", ")+" and is referenced by "+strings.Join(refusal.Pins, ", ")+"; point those settings elsewhere first")
+			"它是「"+strings.Join(refusal.Defaults, "、")+"」的默认模型，也被「"+strings.Join(modelPinLabelsZH(refusal.Pins), "、")+"」引用；先把这些引用改成别的",
+			refusal.Error())
 	case len(refusal.Pins) > 0:
 		return llmText(r,
-			"它仍被「"+strings.Join(refusal.Pins, "、")+"」引用；先把这些引用改成别的",
-			"it is still referenced by "+strings.Join(refusal.Pins, ", ")+"; point those settings elsewhere first")
+			"它仍被「"+strings.Join(modelPinLabelsZH(refusal.Pins), "、")+"」引用；先把这些引用改成别的",
+			refusal.Error())
 	default:
 		return llmText(r,
 			"它是「"+strings.Join(refusal.Defaults, "、")+"」的默认模型，请先把默认改成别的",
-			"it is the default model of "+strings.Join(refusal.Defaults, ", ")+"; choose another default first")
+			refusal.Error())
 	}
+}
+
+// modelPinLabelZH is the Chinese label for one pin (plan 347). The page
+// localizes from the payload with its own copy; this is for the API's Chinese
+// sentence alone.
+func modelPinLabelZH(pin config.ModelPin) string {
+	switch pin.Kind {
+	case config.ModelPinPlanReview:
+		return "计划评审"
+	case config.ModelPinGoalEvaluator:
+		return "目标评估"
+	default:
+		if name := strings.TrimSpace(pin.Name); name != "" {
+			return "子代理 " + name
+		}
+		return "子代理"
+	}
+}
+
+// modelPinLabelsZH is modelPinLabelZH over a list, in the payload's order.
+func modelPinLabelsZH(pins []config.ModelPin) []string {
+	out := make([]string, 0, len(pins))
+	for _, pin := range pins {
+		out = append(out, modelPinLabelZH(pin))
+	}
+	return out
 }
 
 // handleLLMModelChoices serves the one list every model picker reads: the
