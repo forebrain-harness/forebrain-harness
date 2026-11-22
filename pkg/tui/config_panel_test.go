@@ -4629,3 +4629,324 @@ func TestConfigPanelNestedFieldTransitionsReachable(t *testing.T) {
 		t.Fatalf("nested-field transitions = %d, want more than 130", reachable)
 	}
 }
+
+// A container row is an entry like any other (plan 350, the prototype's
+// rowField marks every collection row entry): the footer offers Remove on an
+// agent definition, the confirmation names the row, Keep is preselected, and
+// confirming takes the definition out of the map beside it.
+func TestConfigPanelRemovesAContainerCollectionRow(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true},"spare":{"primary":false}}}`})
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	runActionConfigPanel(t, session, selector,
+		[]richStep{
+			{label: "Agent definitions", ok: true},
+			{label: "Agent definitions", ok: true},
+			{label: configRemoveConfirmLabel, ok: true},
+			{ok: false}, {ok: false},
+		},
+		[]actionStep{
+			{label: "Agent definitions", ok: true},
+			{action: FooterActionRemove, row: 0, ok: true},
+			{label: "spare", ok: true},
+			{action: FooterActionRemove, row: 1, ok: true},
+			{ok: false},
+			{ok: false},
+		},
+		nil, "agents")
+
+	confirmation := ""
+	for _, label := range selector.richLabels {
+		if strings.HasPrefix(label, "Remove ") {
+			confirmation = label
+		}
+	}
+	if !strings.HasPrefix(confirmation, "Remove spare?") {
+		t.Fatalf("the confirmation = %q, want the row it removes named", confirmation)
+	}
+	if !slices.Contains(selector.defaults, 1) {
+		t.Fatalf("the confirmation opened on %v, want Keep (row 1) preselected", selector.defaults)
+	}
+	if len(session.writes) != 1 {
+		t.Fatalf("expected one write, got %d", len(session.writes))
+	}
+	raw := string(session.writes[0].raw)
+	if strings.Contains(raw, "spare") || !strings.Contains(raw, "main") {
+		t.Fatalf("the removed definition is still there, raw = %s", raw)
+	}
+}
+
+// A saved definition's Name is the key it lives under, and the two fields a
+// create decides are locked: the page draws them muted and opening either
+// answers the created-fields sentence without leaving the page (plan 350).
+func TestConfigPanelNamesAndLocksTheCreatedFields(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+	selector := &scriptedSelector{}
+	runConfigPanel(t, session, selector, []richStep{
+		{label: "Agent definitions", ok: true},
+		{label: "main", ok: true},
+		{label: "Name", ok: true},
+		{ok: false}, {ok: false}, {ok: false},
+	}, nil, "agents")
+
+	var page []SelectItem
+	for _, items := range selector.richItems {
+		if row, ok := findRowLoose(items, "Name"); ok && row.Value == "main" {
+			page = items
+		}
+	}
+	if page == nil {
+		t.Fatalf("no page shows the definition's own key: %v", pageLabels(selector))
+	}
+	for _, tc := range []struct {
+		label, value string
+		locked       bool
+	}{
+		{"Name", "main", true},
+		{"Primary", configBoolOnLabel, true},
+		{"Display name", "", false},
+	} {
+		row := findRow(t, page, tc.label)
+		if row.Value != tc.value {
+			t.Errorf("%s's value = %q, want %q", tc.label, row.Value, tc.value)
+		}
+		if row.Locked != tc.locked {
+			t.Errorf("%s's locked = %v, want %v", tc.label, row.Locked, tc.locked)
+		}
+	}
+	if !strings.Contains(pageLabels(selector), configCreatedFieldsNotice) {
+		t.Fatalf("opening a locked field must answer the created-fields sentence: %s", pageLabels(selector))
+	}
+	if len(session.writes) != 0 {
+		t.Fatalf("nothing here writes, got %+v", session.writes)
+	}
+}
+
+// The /config panel's header is the tab bar and nothing else, on every page and
+// at every depth (plan 350, the prototype's render() emitting the tabs above
+// every view and its empty heading()/breadcrumb()). At 120 columns a tab reads
+// its full label and the number of sections it holds; under 100 columns the
+// short label alone, as the prototype's narrow rule has it.
+func TestConfigPanelChromeIsTheTabBarOnEveryPage(t *testing.T) {
+	chrome := &panelChrome{
+		Labels: []string{configTabApproval, configTabSession, configTabAgents},
+		Short:  []string{"Safety", "Session", "Agents"},
+		Counts: []int{3, 4, 4},
+		Active: 2,
+	}
+	items := []SelectItem{{Label: "Agent definitions"}, {Label: "Hooks"}}
+
+	for _, tc := range []struct {
+		name string
+		keys *configPageKeys
+	}{
+		{"section page", configFieldKeys},
+		{"choice page", configChoiceKeys},
+		{"confirm page", configConfirmKeys},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &richPickerState{
+				items: items, selectable: []int{0, 1}, configPage: true, noFilter: true,
+				chrome: chrome, keys: tc.keys,
+			}
+			lines := stripANSIAll(p.panel("").layout(120, 0, 0, false).lines)
+			head := strings.Join(lines[:2], "\n")
+			for _, want := range []string{configTabApproval, configTabSession, configTabAgents} {
+				if !strings.Contains(head, want) {
+					t.Fatalf("the page's header is missing the %q tab:\n%s", want, head)
+				}
+			}
+			if !strings.Contains(head, configTabAgents+" 4") {
+				t.Fatalf("the tab bar carries no counts:\n%s", head)
+			}
+			// The page carries no title block under the bar: one blank row
+			// sets the bar off the body, and the body starts with the page's
+			// own first row.
+			if blank := strings.TrimSpace(lines[1]); blank != "" {
+				t.Fatalf("the page heads itself with %q; the bar is the header (plan 350)", blank)
+			}
+			if first := strings.TrimSpace(lines[2]); !strings.Contains(first, "Agent definitions") {
+				t.Fatalf("the body's first row = %q, want the page's own first row", first)
+			}
+
+			narrow := stripANSIAll(p.panel("").layout(88, 0, 0, false).lines)
+			short := strings.Join(narrow[:2], "\n")
+			for _, want := range []string{"Safety", "Session", "Agents"} {
+				if !strings.Contains(short, want) {
+					t.Fatalf("the narrow tab bar is missing %q:\n%s", want, short)
+				}
+			}
+			if strings.Contains(short, configTabApproval) {
+				t.Fatalf("a narrow bar keeps the full labels:\n%s", short)
+			}
+		})
+	}
+}
+
+// A page's footer names its keys in the prototype's words, and the page's label
+// — the outcome line under the bar — is drawn under the bar rather than as a
+// heading (plan 350).
+func TestConfigPanelPageKeysAndNoticeLine(t *testing.T) {
+	chrome := &panelChrome{Labels: []string{configTabAgents}, Short: []string{"Agents"}, Counts: []int{4}}
+	p := &richPickerState{
+		items: []SelectItem{{Label: "Agent definitions"}}, selectable: []int{0},
+		configPage: true, noFilter: true, chrome: chrome, keys: configFieldKeys,
+		actions: []FooterAction{{Label: configAddActionLabel, Key: "a", Kind: FooterActionAdd}},
+	}
+	lines := stripANSIAll(p.panel("A value that did not land").layout(120, 0, 0, false).lines)
+	if !strings.Contains(lines[1], "A value that did not land") {
+		t.Fatalf("the page's outcome line is not under the bar:\n%s", strings.Join(lines, "\n"))
+	}
+	hint := lines[len(lines)-1]
+	if want := "↑/↓ to navigate Enter to open Esc to go back a Add"; !strings.Contains(hint, want) {
+		t.Fatalf("the footer = %q, want %q", hint, want)
+	}
+}
+
+// An overview row is the prototype's two-line block: the section's title with
+// its status at the right edge, and its summary on the line under it — never
+// one crowded line, and never the summary glued to the title (plan 350).
+func TestConfigPanelOverviewRowsAreTwoLineBlocks(t *testing.T) {
+	panel := sectionPanel(nil)
+	items, _ := panel.sectionItems()
+	lines := stripANSIAll(renderTabbedPage(items, 0, 120))
+	var block []string
+	for _, line := range lines {
+		if strings.HasSuffix(line, configDefaultStatus) {
+			block = append(block, line)
+			continue
+		}
+		if len(block) == 1 && strings.HasPrefix(line, panelIndent) && !strings.HasPrefix(line, panelIndent+" ") {
+			block = append(block, line)
+			break
+		}
+	}
+	if len(block) != 2 {
+		t.Fatalf("an overview row is not a two-line block:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(block[0], "Approval preset") || !strings.HasSuffix(block[0], configDefaultStatus) {
+		t.Fatalf("the block's first line = %q, want the section's title and its status", block[0])
+	}
+	if strings.Contains(block[0], "Choose what new sessions may do.") {
+		t.Fatalf("the title line carries the summary too: %q", block[0])
+	}
+	if strings.TrimSpace(block[1]) != "Choose what new sessions may do." {
+		t.Fatalf("the block's second line = %q, want the section's summary", block[1])
+	}
+}
+
+// A field row is its label and the value it holds, right-aligned, with the
+// field's help nowhere near it: the help belongs to the setting's editor (plan
+// 350, the prototype's fields view setting `help`, never `desc`).
+func TestConfigPanelFieldRowsCarryNoHelp(t *testing.T) {
+	panel := sectionPanel(map[string]string{"features": `{"memories":true}`})
+	features, ok := configSectionSchemaFor("features")
+	if !ok {
+		t.Fatal("no features section")
+	}
+	items, _ := panel.fieldItems(features, panel.sectionDoc("features"), false)
+	lines := stripANSIAll(renderRichPage(items, "", 120))
+	for _, field := range features.Fields {
+		row, ok := findRowLoose(items, field.Label)
+		if !ok {
+			t.Fatalf("no row for %q", field.Label)
+		}
+		if row.Description != "" {
+			t.Fatalf("%s's row carries %q; the help belongs to its editor", field.Label, row.Description)
+		}
+	}
+	joined := strings.Join(lines, "\n")
+	for _, hint := range []string{
+		"Remember useful context across conversations.",
+		"Enable code intelligence and language diagnostics.",
+	} {
+		if strings.Contains(joined, hint) {
+			t.Fatalf("a field's help reached the page: %q", hint)
+		}
+	}
+	if !strings.Contains(joined, configBoolOnLabel) {
+		t.Fatalf("the page does not show the switch's value:\n%s", joined)
+	}
+}
+
+// The overview's tab bar answers its arrows the way /status's own tabs do, and
+// Tab keeps switching: three ways to move, one tab shown (plan 350).
+func TestConfigPanelOverviewArrowsAndTabAgree(t *testing.T) {
+	panel := sectionPanel(nil)
+	items, names := panel.sectionItems()
+	chrome := panel.chrome()
+	// The first section of the tab beside the one the overview opens on: a step
+	// lands on the first row of the adjacent tab, not the next row of this one.
+	firstOf := func(tab string) int {
+		for i, name := range names {
+			if schema, ok := configSectionSchemaFor(name); ok && schema.Tab == tab {
+				return i
+			}
+		}
+		t.Fatalf("no section on the %q tab", tab)
+		return -1
+	}
+	for _, tc := range []struct {
+		name string
+		keys string
+		want int
+	}{
+		{"→", "\x1b[C", firstOf(configTabSession)},
+		{"←", "\x1b[D", firstOf(configTabAgents)},
+		{"Tab", "\t", firstOf(configTabSession)},
+		{"Shift+Tab", "\x1b[Z", firstOf(configTabAgents)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sel := pickerKeys(t, tc.keys+keyEnter)
+			idx, ok, err := sel.SelectRichTabbedPage("", items, TabbedSelectOptions{}, chrome)
+			if err != nil || !ok {
+				t.Fatalf("%s then Enter = %d, %v, %v", tc.name, idx, ok, err)
+			}
+			if idx != tc.want {
+				t.Fatalf("%s lands on row %d (%q), want %q", tc.name, idx, names[idx], names[tc.want])
+			}
+		})
+	}
+}
+
+// An arrow on a section page steps the whole panel to the tab beside it, and
+// the list reopens on that tab's first section — however deep the page that
+// took the arrow sat (plan 350, the prototype's goOverview).
+func TestConfigPanelSectionArrowStepsTabs(t *testing.T) {
+	panel := sectionPanel(nil)
+	panel.tab = configTabAgents
+	if got := panel.stepTab(1); got != configTabApproval {
+		t.Fatalf("→ from the last tab lands on %q, want %q", got, configTabApproval)
+	}
+	if got := panel.stepTab(-1); got != configTabSession {
+		t.Fatalf("← from the agents tab lands on %q, want %q", got, configTabSession)
+	}
+
+	// A page that took one leaves the list on that tab's first section.
+	panel.overviewRow = 0
+	panel.tabStep = -1
+	panel.leaveSection("agents")
+	sections := panelSections()
+	if got := sections[panel.overviewRow]; got.Tab != configTabSession {
+		t.Fatalf("the list reopened on %q, want the session tab's first section", got.Tab)
+	}
+	if panel.tabStep != 0 {
+		t.Fatalf("the step was not taken: %d", panel.tabStep)
+	}
+}
+
+// The tabs a machine offers are the tabs its sections carry: a platform with no
+// sandbox loses the first one, and the bar counts what is left (plan 215 §3.4,
+// plan 350).
+func TestConfigPanelChromeFollowsTheOfferedTabs(t *testing.T) {
+	panel := sectionPanel(nil)
+	chrome := panel.chrome()
+	if !slices.Equal(chrome.Labels, []string{configTabApproval, configTabSession, configTabAgents}) {
+		t.Fatalf("the bar = %v", chrome.Labels)
+	}
+	if len(chrome.Counts) != len(chrome.Labels) || chrome.Counts[0] != 3 || chrome.Counts[1] != 4 || chrome.Counts[2] != 4 {
+		t.Fatalf("the bar's counts = %v, want the prototype's 3/4/4", chrome.Counts)
+	}
+	if !slices.Equal(chrome.Short, []string{"Safety", "Session", "Agents"}) {
+		t.Fatalf("the narrow labels = %v", chrome.Short)
+	}
+}
