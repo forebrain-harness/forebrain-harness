@@ -176,9 +176,9 @@ type ModelPin struct {
 }
 
 const (
-	ModelPinSubagent   = "subagent"
-	ModelPinPlanReview = "plan_review"
-	ModelPinGoalCheck  = "goal_check"
+	ModelPinSubagent      = "subagent"
+	ModelPinPlanReview    = "plan_review"
+	ModelPinGoalEvaluator = "goal_evaluator"
 )
 
 // English is the label every English surface shows — the terminal, the API's
@@ -187,8 +187,8 @@ func (p ModelPin) English() string {
 	switch p.Kind {
 	case ModelPinPlanReview:
 		return "plan review"
-	case ModelPinGoalCheck:
-		return "goal check"
+	case ModelPinGoalEvaluator:
+		return "goal evaluator"
 	default:
 		if name := strings.TrimSpace(p.Name); name != "" {
 			return "subagent " + name
@@ -199,7 +199,8 @@ func (p ModelPin) English() string {
 
 // ModelPins names the settings that reference this row where the loader
 // requires the reference to resolve — a built-in subagent type's install-wide
-// row, the plan reviewer, the goal check, or a subagent definition's own model.
+// row, the plan reviewer, the goal evaluator, or a subagent definition's own
+// model.
 // Deleting such a row would leave the composed configuration invalid (the
 // loader refuses a dangling row id: `model %q must be provider/model`), so the
 // row cannot be deleted behind those settings. A conversation's own selection
@@ -226,7 +227,7 @@ func ModelPins(root *Root, id string) []ModelPin {
 		add(ModelPinPlanReview, "")
 	}
 	if strings.TrimSpace(root.Agents.GoalEvaluator.Model) == id {
-		add(ModelPinGoalCheck, "")
+		add(ModelPinGoalEvaluator, "")
 	}
 	for key, def := range root.Agents.Definitions {
 		// The role's own model is judged like a per-agent entry's
