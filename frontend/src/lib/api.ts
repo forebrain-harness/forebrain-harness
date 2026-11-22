@@ -1431,6 +1431,12 @@ export interface LlmModelCatalogCaps extends LlmModelCaps {
   catalogId?: string
 }
 
+/** One pin the API sends: a machine kind, and the name it applies to. */
+export interface LlmModelPinRef {
+  kind: string
+  name?: string
+}
+
 /** One row of the install-wide models table (plan 265). */
 export interface LlmModelRow {
   id: string
@@ -1478,6 +1484,8 @@ export interface LlmModelRow {
   isDefault: boolean
   /** The agents that name this row as their default model. */
   defaultFor?: string[]
+  /** The settings that pin this row by id — a kind plus a name. */
+  pinnedBy?: LlmModelPinRef[]
   createdAt: number
 }
 

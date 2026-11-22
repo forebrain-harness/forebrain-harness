@@ -133,9 +133,11 @@ import {
   forebrainApi,
   GatewayHttpError,
   getErrorMessage,
+  type LlmModelPinRef,
   type LlmModelRow,
   type LlmProviderOption,
 } from '@/lib/api'
+import { modelPinLabels } from '@/lib/modelPins'
 import { useI18n } from '@/locales'
 
 const { t } = useI18n()
@@ -256,13 +258,14 @@ async function confirmRemove(): Promise<void> {
   } catch (cause) {
     if (cause instanceof GatewayHttpError && cause.status === 409) {
       // Both kinds of owner: the agents that default to the row and the
-      // settings that pin it by id (plan 345). One list, so the badges name
-      // every refusal the same way.
+      // settings that pin it by id (plan 345). The API sends the pins as a
+      // machine kind and the page writes the words (plan 347), because this
+      // page's language lives in localStorage and never reaches the request.
       const defaults = cause.payload?.defaultFor
       const pins = cause.payload?.pinnedBy
       refusedFor.value = [
         ...(Array.isArray(defaults) ? defaults.map(String) : []),
-        ...(Array.isArray(pins) ? pins.map(String) : []),
+        ...modelPinLabels(t, Array.isArray(pins) ? (pins as LlmModelPinRef[]) : []),
       ]
       return
     }

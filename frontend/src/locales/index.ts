@@ -729,7 +729,7 @@ const zh = {
   'subagents.goalCheck.discard': '放弃更改',
   'subagents.goalCheck.save': '保存',
   'subagents.goalCheck.saved': '已保存，下一轮对话生效',
-  // /plan 复核模型（plan 313）：目标检查那一块的姊妹行，同样只有两项设置。
+  // /plan 复核模型（plan 313）：目标评估那一块的姊妹行，同样只有两项设置。
   'subagents.planReviewer.title': '/plan 复核模型',
   'subagents.planReviewer.modelLabel': '使用的模型',
   'subagents.planReviewer.effortLabel': '思考强度',
@@ -2446,6 +2446,11 @@ const zh = {
   'models.deleteRefusedTitle': '不能删除',
   'models.deleteRefusedMessage': '它仍被下列设置引用，先把这些引用改成别的再删。',
   'models.deleteRefusedOk': '知道了',
+  // The pins the refusal names, in the page's own words (plan 347): the API
+  // sends a machine kind and the page writes the label.
+  'models.pinSubagent': '子代理 {name}',
+  'models.pinPlanReview': '计划评审',
+  'models.pinGoalEvaluator': '目标评估',
   'models.drawerAdd': '添加模型',
   'models.drawerEdit': '编辑模型',
   'models.provider': '服务商',
@@ -3303,7 +3308,7 @@ const en: Record<keyof typeof zh, string> = {
   'subagents.goalCheck.discard': 'Discard changes',
   'subagents.goalCheck.save': 'Save',
   'subagents.goalCheck.saved': 'Saved, applies to the next turn',
-  // The exit-plan reviewer's row (plan 313): the goal check's sibling.
+  // The exit-plan reviewer's row (plan 313): the goal evaluator's sibling.
   'subagents.planReviewer.title': 'Plan review model',
   'subagents.planReviewer.modelLabel': 'Model in use',
   'subagents.planReviewer.effortLabel': 'Thinking level',
@@ -5000,10 +5005,13 @@ const en: Record<keyof typeof zh, string> = {
   'models.sourceLineWithPlan': ' subscription sign-in {plan}',
   'models.deleteTitle': 'Delete this model?',
   'models.deleteMessage':
-    'A conversation that used it must re-choose with /model, or its next message is refused. A model an agent defaults to, or one a subagent, plan review or goal check references, cannot be deleted — point those settings elsewhere first.',
+    'A conversation that used it must re-choose with /model, or its next message is refused. A model an agent defaults to, or one a subagent, plan review or goal evaluator references, cannot be deleted — point those settings elsewhere first.',
   'models.deleteRefusedTitle': 'Cannot delete',
   'models.deleteRefusedMessage': 'These settings still reference it. Point them elsewhere first.',
   'models.deleteRefusedOk': 'Got it',
+  'models.pinSubagent': 'subagent {name}',
+  'models.pinPlanReview': 'plan review',
+  'models.pinGoalEvaluator': 'goal evaluator',
   'models.drawerAdd': 'Add model',
   'models.drawerEdit': 'Edit model',
   'models.provider': 'Provider',
