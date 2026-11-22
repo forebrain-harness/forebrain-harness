@@ -1040,8 +1040,8 @@ func TestConfigPanelMasksSecrets(t *testing.T) {
 		if selector.inputDefaults[0] != "" {
 			t.Fatalf("the private editor must start empty, got %q", selector.inputDefaults[0])
 		}
-		if selector.inputOpts[0].Help != configSecretReplacementLabel {
-			t.Fatalf("the private editor's help = %q, want the replacement label", selector.inputOpts[0].Help)
+		if selector.inputOpts[0].Label != configSecretReplacementLabel {
+			t.Fatalf("the private editor's label = %q, want the replacement label", selector.inputOpts[0].Label)
 		}
 		for _, items := range selector.richItems {
 			for _, item := range items {

@@ -5892,6 +5892,9 @@ func multilineEditorPanel(title string, value []rune, cursor int, esc string, op
 			b.text(panelIndent, line, nil)
 		}
 	}
+	if opts.Label != "" {
+		b.subtitle(opts.Label)
+	}
 	if opts.Help != "" {
 		b.text(panelIndent, opts.Help, &panelHintStyle)
 	}
@@ -5987,6 +5990,9 @@ func editorPanel(title string, value []rune, cursor int, secret bool, esc string
 		b.chrome(opts.Chrome)
 	} else {
 		pickerHead(b, title)
+	}
+	if opts.Label != "" {
+		b.subtitle(opts.Label)
 	}
 	if opts.Help != "" {
 		// The body already sits below the field's bar, which is where the
@@ -6539,6 +6545,9 @@ type ActionOptions struct {
 	// Keys is how the page names its two keys in the footer, word for word
 	// from the prototype (plan 350). Nil keeps the pickers' own wording.
 	Keys *configPageKeys
+	// Label names the editor's input box above it, in the prototype's own
+	// words for what it holds ("New value", "Replacement value", plan 350).
+	Label string
 	// Help is an editor's help sentence, drawn under its input where the
 	// prototype's editor-help sits (plan 350) instead of above the field.
 	Help string

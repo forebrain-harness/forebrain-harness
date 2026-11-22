@@ -1088,6 +1088,20 @@ func (p *configPanel) editPath(doc any, rowPath []string, field configField, cur
 	return p.assign(doc, rowPath, text, false, field.Label)
 }
 
+// configRoleHelp is a template field's help sentence on the row it is opened
+// on. The system prompt is the one field both roles carry, and the prototype
+// gives each its own sentence (helpPrimary/helpSubagent): a primary agent's is
+// appended to the built-in prompt, a subagent's replaces it whole.
+func configRoleHelp(field configField, settings map[string]any) string {
+	if field.Path != "system_prompt" {
+		return configFieldHint(field)
+	}
+	if configAgentRolePrimary(settings) {
+		return "Appended to the end of the built-in system prompt. It never replaces it."
+	}
+	return "Replaces the built-in system prompt whole."
+}
+
 // configAbsolutePath reports whether a path is one the loader takes whole: a
 // rooted path, or a Windows drive path (the prototype's absolute rule).
 func configAbsolutePath(path string) bool {
@@ -1132,10 +1146,11 @@ func (p *configPanel) editScalar(field configField, value string) (text string, 
 func (p *configPanel) editorOptions(field configField, secret bool) ActionOptions {
 	opts := ActionOptions{
 		Page: true, Chrome: p.chrome(), Keys: configChoiceKeys,
-		Help: configFieldHint(field), Multiline: field.Multiline, Secret: secret,
+		Label: configEditorLabel, Help: configFieldHint(field),
+		Multiline: field.Multiline, Secret: secret,
 	}
 	if secret {
-		opts.Help = configSecretReplacementLabel
+		opts.Label = configSecretReplacementLabel
 	}
 	if configFieldHasDefault(field) && !secret {
 		opts.FooterActions = []FooterAction{{Label: configDefaultActionLabel, Key: configDefaultActionKey, Kind: FooterActionDefault}}
@@ -1712,12 +1727,6 @@ const (
 	// configRowDefaultEffort is what an empty stored level means on a row that
 	// names a model: the model row's own default (plan 313's reading, kept).
 	configRowDefaultEffort = "Follow the model default"
-	// configProviderDefaultEffort is what an effort key nobody has stored
-	// reads as (plan 327 D1, prototype html:117): the provider behind the
-	// model row decides. A frozen prototype quirk keeps it apart from
-	// configRowDefaultEffort — a stored empty level is a choice (follow the
-	// row's own default); an absent key is no choice at all.
-	configProviderDefaultEffort = "Provider default"
 	// configEffortKey is the field every thinking level is stored under, and
 	// configEffortModelKey the sibling it belongs to: the two are keys of one
 	// stored map at every level of the agents section (plan 319).
@@ -1758,6 +1767,10 @@ const (
 	// absolute (html:149): the editor keeps what was typed and nothing is
 	// stored.
 	configPathRefusal = "Enter an absolute path."
+	// configEditorLabel names the value an editor asks for, in the prototype's
+	// own words for the box (html:173, editor-label): the value typed replaces
+	// what the setting holds (plan 350).
+	configEditorLabel = "New value"
 	// configSecretLineNotice refuses the private edit on a selector that
 	// reads its answers in the clear (plan 328 D3): a piped line has no
 	// screen to hide a secret on, so the edit is refused rather than echoed.
@@ -2526,6 +2539,12 @@ func (p *configPanel) configTemplateValueText(field configField, value any, exis
 func (p *configPanel) openTemplateField(doc any, rowPath []string, field configField) (any, string) {
 	path := configJoinPath(rowPath, field.Path)
 	cur, _ := configLookupValue(doc, path)
+	// The one field both roles carry says something different about each: the
+	// page that opened it shows that sentence under its editor, where the
+	// prototype's editor-help sits (plan 350) — never on the row it came from.
+	row, _ := configLookupValue(doc, rowPath)
+	settings, _ := row.(map[string]any)
+	field.Hint = configRoleHelp(field, settings)
 	if field.Kind == configFieldRows || configIsContainer(cur) {
 		return p.editRows(doc, path, field)
 	}
