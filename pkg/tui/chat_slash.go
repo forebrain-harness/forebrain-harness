@@ -1646,10 +1646,6 @@ type skillsOutcome struct {
 	submission ComposerSubmission
 	submitted  bool
 	done       bool
-	// notice, when set, is a success line the /skills list shows at its top
-	// on the next render — the "Published X v3 new sessions use it" line a
-	// publish leaves behind.
-	notice string
 }
 
 func skillsBack() skillsOutcome { return skillsOutcome{} }
@@ -1657,7 +1653,6 @@ func skillsDone() skillsOutcome { return skillsOutcome{done: true} }
 func skillsSubmit(sub ComposerSubmission) skillsOutcome {
 	return skillsOutcome{submission: sub, submitted: true, done: true}
 }
-func skillsNotice(text string) skillsOutcome { return skillsOutcome{notice: text} }
 
 // handleSkills renders the single /skills turn. It returns a submission
 // when the chosen action is one the model carries out (running a skill, or
@@ -1668,7 +1663,6 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 		return ComposerSubmission{}, false
 	}
 	defaultIdx := 0
-	notice := ""
 	for {
 		entries := c.session.AvailableSkillToggleOptions()
 		entries = append(entries, c.session.DraftOnlySkills()...)
@@ -1679,11 +1673,10 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 		memorySkills := c.session.MemorySkillOptions()
 		origins := skillOriginsByPath(entries)
 		items, rows := buildSkillsMenu(entries, origins, statuses, len(memorySkills) > 0)
-		label := "Skills\nRun an installed skill, or add, create, and tune skills"
-		if notice != "" {
-			label = "Skills\n" + notice
-		}
-		idx, ok, err := selectRichTabbed(c.selector, label, items, TabbedSelectOptions{DefaultIdx: defaultIdx, Uncounted: []string{skillsManageTab}})
+		// The panel keeps the minimal slash-panel chrome (owner 2026-11-22):
+		// no "Skills" title, no descriptive subtitle and no success notice —
+		// the tab bar is the head, and a successful action returns silently.
+		idx, ok, err := selectRichTabbed(c.selector, "", items, TabbedSelectOptions{DefaultIdx: defaultIdx, Uncounted: []string{skillsManageTab}})
 		if err != nil {
 			c.renderer.PrintError(err)
 			return ComposerSubmission{}, false
@@ -1710,9 +1703,6 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 			}
 		case skillsActionOpenSkill:
 			outcome = c.handleSkillEntry(ctx, row.entry, origins)
-		}
-		if outcome.notice != "" {
-			notice = outcome.notice
 		}
 		if outcome.done {
 			return outcome.submission, outcome.submitted

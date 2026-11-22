@@ -1908,9 +1908,9 @@ func endsAt(row, value string) int {
 }
 
 // The value column holds a model row's whole label (plan 325 D3): the cap is
-// 44 cells now, so a disambiguated label — the same provider and model on two
-// endpoints — reads whole where the old 24-cell cap elided it, and a type
-// page's Model row carries its value right-aligned the same way (D4).
+// 44 cells now, so a long provider/model label reads whole where the old
+// 24-cell cap elided it, and a type page's Model row carries its value
+// right-aligned the same way (D4).
 func TestConfigPanelValueColumnNotElided(t *testing.T) {
 	panel := sectionPanel(map[string]string{"agents": `{
 		"subagent_models":{
@@ -1920,18 +1920,18 @@ func TestConfigPanelValueColumnNotElided(t *testing.T) {
 	}`})
 	panel.models = []appcfg.LLMModelConfig{
 		{ID: "row-1", Provider: "openai", Model: "gpt-main", BaseURL: "https://api.one.example.com"},
-		{ID: "row-2", Provider: "openai", Model: "gpt-main", BaseURL: "https://api.two.example.com"},
+		{ID: "row-2", Provider: "openai", Model: "gpt-main-extended-preview", BaseURL: "https://api.two.example.com"},
 	}
 	doc := panel.sectionDoc("agents")
 	items := panel.builtinSubagentItems(doc)
 	lines := renderRichPage(items, "Built-in subagents", 120)
-	label := "openai/gpt-main (api.two.example.com)"
+	label := "openai/gpt-main-extended-preview"
 	if displayLineWidth(label) <= panelNarrowValueColumnMax {
 		t.Fatalf("the fixture's label must outgrow the old cap: %q", label)
 	}
 	plan := renderedRow(t, lines, "plan")
 	if !strings.Contains(plan, label) || strings.Contains(plan, "…") {
-		t.Fatalf("the plan row = %q, want the whole disambiguated label in the value track", plan)
+		t.Fatalf("the plan row = %q, want the whole label in the value track", plan)
 	}
 	if !strings.HasSuffix(plan, "High") {
 		t.Fatalf("the plan row = %q, want the level's status beyond the value", plan)
@@ -1942,11 +1942,10 @@ func TestConfigPanelValueColumnNotElided(t *testing.T) {
 	exploreSettings, _ := explore.(map[string]any)
 	typeItems, _ := panel.templateItems(configTemplateTypeDef, "explore", exploreSettings, false)
 	typeLines := renderRichPage(typeItems, "explore", 120)
-	// The value names the row the way every picker does: the two rows of one
-	// provider and model are told apart by the host they send to (plan 324
-	// D2, the prototype's own rowLabel).
+	// The value names the row the way every picker does: the bare
+	// provider/model label, the endpoint drawn beside it (owner 2026-11-22).
 	modelRow := renderedRow(t, typeLines, "Model")
-	if !strings.HasSuffix(modelRow, "openai/gpt-main (api.two.example.com)") || strings.Contains(modelRow, "…") {
+	if !strings.HasSuffix(modelRow, label) || strings.Contains(modelRow, "…") {
 		t.Fatalf("the type page's Model row = %q, want its value right-aligned", modelRow)
 	}
 }
@@ -2081,6 +2080,31 @@ func TestConfigPanelNoFilterBox(t *testing.T) {
 	other.noFilter = !pickerShowsFilter(len(other.selectable))
 	if field := other.panel("Memory").field; field == nil {
 		t.Fatal("a plain picker lost its filter")
+	}
+}
+
+// The model picker opts into the filter (owner 2026-11-22): a /config page
+// that otherwise carries no filter box narrows its rows like /model's own
+// list, and Enter still picks the cursor's row in the FULL list — while a
+// page without the opt-in ignores the typing and keeps the opening row.
+func TestConfigPanelModelPickerFilters(t *testing.T) {
+	items := make([]SelectItem, 0, 10)
+	for i := 0; i < 10; i++ {
+		items = append(items, SelectItem{Label: "provider/model-" + strconv.Itoa(i), Description: "https://example.com/v1"})
+	}
+	sel := pickerKeys(t, "model-7"+keyEnter)
+	res, err := sel.SelectConfigPage("Model", items, 0, ActionOptions{Page: true, Filter: true})
+	if err != nil || !res.OK {
+		t.Fatalf("filtered pick = %+v, %v; want ok", res, err)
+	}
+	if res.Row != 7 {
+		t.Fatalf("filtered Enter picked row %d, want absolute row 7", res.Row)
+	}
+
+	sel = pickerKeys(t, "model-7"+keyEnter)
+	res, err = sel.SelectConfigPage("Model", items, 0, ActionOptions{Page: true})
+	if err != nil || !res.OK || res.Row != 0 {
+		t.Fatalf("no-filter pick = %+v, %v; want the opening row 0", res, err)
 	}
 }
 
@@ -3818,22 +3842,22 @@ func TestConfigPanelModelPickerKeepsDanglingPin(t *testing.T) {
 	}
 }
 
-// Two rows of the install's table that share a provider and model are told
-// apart by their host (plan 324 D2): the label carries the base URL without
-// its scheme, and a row whose pair is unique stays bare. A reference nothing
-// carries is shown as written.
-func TestConfigPanelModelRowLabelDisambiguatesHost(t *testing.T) {
+// The model row label is the bare provider/model display name (owner
+// 2026-11-22: no host suffix): two rows of one provider and model read the
+// same name, told apart by the endpoint the picker draws beside them, and a
+// reference nothing carries is shown as written.
+func TestConfigPanelModelRowLabelIsProviderModel(t *testing.T) {
 	panel := &configPanel{models: []appcfg.LLMModelConfig{
 		{ID: "llm-main", Provider: "example", Model: "reasoner-pro", BaseURL: "https://models.example.com"},
 		{ID: "llm-eu", Provider: "example", Model: "reasoner-pro", BaseURL: "https://eu.models.example.com"},
 		{ID: "llm-fast", Provider: "example", Model: "fast-small", BaseURL: "https://models.example.com"},
 	}}
 	for _, tc := range []struct{ ref, want string }{
-		{"llm-main", "example/reasoner-pro (models.example.com)"},
-		{"llm-eu", "example/reasoner-pro (eu.models.example.com)"},
+		{"llm-main", "example/reasoner-pro"},
+		{"llm-eu", "example/reasoner-pro"},
 		{"llm-fast", "example/fast-small"},
 		{"llm-gone", "llm-gone"},
-		{"example/reasoner-pro", "example/reasoner-pro (models.example.com)"},
+		{"example/reasoner-pro", "example/reasoner-pro"},
 	} {
 		if got := panel.configModelRowLabel(tc.ref); got != tc.want {
 			t.Errorf("rowLabel(%q) = %q, want %q", tc.ref, got, tc.want)

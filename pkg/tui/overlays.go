@@ -6554,6 +6554,11 @@ type ActionOptions struct {
 	// Secret opens the masked editor: a private value's replacement is never
 	// shown as it is typed (plan 328 D3).
 	Secret bool
+	// Filter shows the filter box on a /config page that would otherwise carry
+	// none (owner 2026-11-22): the model picker lists hundreds of rows and needs
+	// narrowing, the way /model's own picker does. Every other config page keeps
+	// the keyboard on its rows.
+	Filter bool
 }
 
 // configPageKeys names what Enter and Esc do on one /config page, in the
@@ -6664,8 +6669,12 @@ func (s *rawSelector) SelectConfigPage(label string, items []SelectItem, default
 	}
 	p.rebuildSelectable()
 	// The /config pages carry no filter box whatever their row count (plan
-	// 325 D6): the keyboard stays on the rows.
+	// 325 D6): the keyboard stays on the rows. The model picker opts into the
+	// filter (owner 2026-11-22) and narrows like /model's own list.
 	p.noFilter = true
+	if opts.Filter {
+		p.noFilter = !pickerShowsFilter(len(p.selectable))
+	}
 	for ci, idx := range p.selectable {
 		if idx == defaultIdx {
 			p.cursor = ci
@@ -6696,8 +6705,12 @@ func (s *rawSelector) SelectRichActions(label string, items []SelectItem, defaul
 	p.rebuildSelectable()
 	if opts.Page {
 		// The /config pages carry no filter box whatever their row count
-		// (plan 325 D6): the keyboard stays on the rows.
+		// (plan 325 D6): the keyboard stays on the rows. The model picker opts
+		// into the filter (owner 2026-11-22) and narrows like /model's own list.
 		p.noFilter = true
+		if opts.Filter {
+			p.noFilter = !pickerShowsFilter(len(p.selectable))
+		}
 	} else {
 		p.noFilter = !pickerShowsFilter(len(p.selectable))
 	}

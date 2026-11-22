@@ -838,13 +838,14 @@ func (c *commandController) publishSkillFlow(entry skill.Entry, st skillStatus) 
 			if !entered {
 				continue
 			}
-			version, perr := c.session.PublishSkill(entry, note)
+			_, perr := c.session.PublishSkill(entry, note)
 			if perr != nil {
 				c.renderer.PrintError(perr)
 				return skillsDone(), true
 			}
-			line := panelOKStyle.Render(fmt.Sprintf("Published %s v%d new sessions use it", name, version))
-			return skillsNotice(line), true
+			// Success is silent (owner 2026-11-22): the list returns with no
+			// notice line above its tab bar.
+			return skillsBack(), true
 		case 1:
 			c.showSkillChanges(entry, from, "draft")
 		default:

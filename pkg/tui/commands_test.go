@@ -4558,7 +4558,7 @@ func TestSkillsListStatusSegments(t *testing.T) {
 }
 
 // A pending skill publishes through the confirm page and its release note, and
-// the list returns with the success line.
+// the list returns silently — success shows no notice (owner 2026-11-22).
 func TestSkillsPublishFlow(t *testing.T) {
 	session := &fakeSession{
 		skillToggleOpts: []skill.Entry{{Name: "repo", Description: "inspect repo", Origin: skill.OriginProject, Path: "/skills/repo", Enabled: true}},
@@ -4581,9 +4581,9 @@ func TestSkillsPublishFlow(t *testing.T) {
 	// The confirm page opened on Publish and listed the change.
 	require.Equal(t, "Publish v4", selector.reviewActions[0][0])
 	require.Equal(t, "Publish repo v4?\nNew sessions use v4; sessions already running keep v3.", selector.reviewLabels[0])
-	// The list came back with the success line.
-	if len(selector.richLabels) < 3 || !strings.Contains(stripANSI(selector.richLabels[2]), "Published repo v4 new sessions use it") {
-		t.Fatalf("list notice missing: %#v", selector.richLabels)
+	// The list came back silently: no notice line above the tab bar.
+	if len(selector.richLabels) < 3 || stripANSI(selector.richLabels[2]) != "" {
+		t.Fatalf("list must return with no notice line: %#v", selector.richLabels)
 	}
 }
 
@@ -4745,9 +4745,8 @@ func TestSkillPullUpdateFlow(t *testing.T) {
 	require.Equal(t, "Pull the update into a draft", menu[0].label)
 	require.Equal(t, "d41c8e0", menu[0].desc)
 
-	out, leave := ctrl.pullUpdateFlow(entry, st)
+	_, leave := ctrl.pullUpdateFlow(entry, st)
 	require.False(t, leave, "a successful pull stays on the sheet")
-	require.Equal(t, "", out.notice)
 	require.Equal(t, "gateway-ops", session.pulledSkill)
 	require.True(t, session.pulledReplace)
 	require.Contains(t, selector.reviewLabels[0], "Pull the update into a draft?")

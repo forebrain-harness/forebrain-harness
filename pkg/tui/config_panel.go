@@ -340,7 +340,7 @@ var (
 // panel to another tab however deep it sits (plan 350); every caller unwinds on
 // !ok, which is what that step reports.
 func (p *configPanel) page(label string, keys *configPageKeys, items []SelectItem, defaultIdx int) (int, bool, error) {
-	res, err := p.plainPage(label, keys, items, defaultIdx)
+	res, err := p.plainPage(label, keys, items, defaultIdx, false)
 	return res.Row, res.OK, err
 }
 
@@ -353,7 +353,7 @@ func (p *configPanel) actionPage(label string, keys *configPageKeys, items []Sel
 	if !ok {
 		// A selector that draws no panel at all — piped stdin — reads the
 		// plain picker: no chrome, no keys, just the rows.
-		return p.plainPage(label, keys, items, defaultIdx)
+		return p.plainPage(label, keys, items, defaultIdx, false)
 	}
 	res, err := rich.SelectRichActions(label, items, defaultIdx, ActionOptions{
 		Page: true, Chrome: p.chrome(), Keys: keys, FooterActions: actions,
@@ -374,9 +374,9 @@ func (p *configPanel) actionPage(label string, keys *configPageKeys, items []Sel
 // tab bar in its head, the page's rows and the keys it names. The selector's
 // own config page draws it when it has one, and the plain picker answers a
 // selector that draws no panel.
-func (p *configPanel) plainPage(label string, keys *configPageKeys, items []SelectItem, defaultIdx int) (ActionResult, error) {
+func (p *configPanel) plainPage(label string, keys *configPageKeys, items []SelectItem, defaultIdx int, filter bool) (ActionResult, error) {
 	if pages, ok := p.sel.(configPageSelector); ok {
-		res, err := pages.SelectConfigPage(label, items, defaultIdx, ActionOptions{Page: true, Chrome: p.chrome(), Keys: keys})
+		res, err := pages.SelectConfigPage(label, items, defaultIdx, ActionOptions{Page: true, Chrome: p.chrome(), Keys: keys, Filter: filter})
 		if err != nil {
 			return ActionResult{Row: -1}, err
 		}
@@ -1332,16 +1332,18 @@ func (p *configPanel) editModel(doc any, path []string, field configField, cur a
 	}
 	// The choice page is the option list alone (plan 327 D2, owner
 	// 2026-11-18): the field's own label heads it, with no instructional
-	// sub copy — the rows' descriptions already say where requests go.
-	idx, ok, err := p.page("", configChoiceKeys, items, defaultIdx)
+	// sub copy — the rows' descriptions already say where requests go. The
+	// model picker carries a filter box (owner 2026-11-22): hundreds of rows
+	// narrow like /model's own list.
+	res, err := p.plainPage("", configChoiceKeys, items, defaultIdx, true)
 	if err != nil {
 		p.printError(err)
 		return doc, ""
 	}
-	if !ok || idx < 0 || idx >= len(items) {
+	if !res.OK || res.Row < 0 || res.Row >= len(items) {
 		return doc, ""
 	}
-	return p.assignModel(doc, path, field, stored, ids[idx])
+	return p.assignModel(doc, path, field, stored, ids[res.Row])
 }
 
 // assignModel stores one picked model reference and writes the section once
@@ -2027,12 +2029,12 @@ func (p *configPanel) configModelLabel(ref string) string {
 }
 
 // configModelRowLabel names a stored model reference the way the model
-// pickers' rows do (plan 324 D2): the display label every picker names a row
-// by, with the row's host appended when more than one row of the install's
-// table carries the same provider and model — two endpoints of one model are
-// the same name otherwise, and the base URL is the only thing that tells them
-// apart. A reference the table does not carry is shown as written, so a pin
-// whose row was deleted stays readable until it is re-picked.
+// pickers' rows do (owner 2026-11-22: no host suffix): the bare provider/model
+// display label, the endpoint carried by the picker's description column rather
+// than appended to the name. Two rows of one provider and model read the same
+// name and are told apart by the endpoint beside them. A reference the table
+// does not carry is shown as written, so a pin whose row was deleted stays
+// readable until it is re-picked.
 func (p *configPanel) configModelRowLabel(ref string) string {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -2043,21 +2045,7 @@ func (p *configPanel) configModelRowLabel(ref string) string {
 	if !ok {
 		return ref
 	}
-	label := llm.FormatProviderModelDisplay(entry.Provider, entry.Model)
-	shared := 0
-	for _, row := range p.models {
-		if strings.EqualFold(strings.TrimSpace(row.Provider), entry.Provider) && strings.TrimSpace(row.Model) == entry.Model {
-			shared++
-		}
-	}
-	if shared < 2 {
-		return label
-	}
-	host := strings.TrimPrefix(strings.TrimPrefix(entry.BaseURL, "https://"), "http://")
-	if host == "" {
-		return label
-	}
-	return label + " (" + host + ")"
+	return llm.FormatProviderModelDisplay(entry.Provider, entry.Model)
 }
 
 // configSystemSubagentRow reports whether a row is one of an agent's subagent

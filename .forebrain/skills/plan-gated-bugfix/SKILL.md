@@ -1,6 +1,6 @@
 ---
 name: plan-gated-bugfix
-description: 修复 bug 的标准工作流：bug 报告 → enter_plan_mode → improve 计划文件（docs/plan/）→ exit_plan_mode 审批 → 当前源码实施 → -tags fts5 测试 + tmux 真机验收。收到 bug/缺陷报告、需要定位根因并彻底修复时使用。
+description: 修复 bug 的标准工作流：bug 报告 → enter_plan_mode → audit 计划（plans/ backlog）→ exit_plan_mode 审批 → 当前源码实施 → -tags fts5 测试 + tmux 真机验收。收到 bug/缺陷报告、需要定位根因并彻底修复时使用。
 ---
 
 # Plan-gated bugfix：审批门控的 bug 修复工作流
@@ -8,9 +8,11 @@ description: 修复 bug 的标准工作流：bug 报告 → enter_plan_mode → 
 owner 指定的流程（原话）："bug → enter_plan_mode → improve 计划 → exit_plan_mode →
 当前源码实施 → tmux 真机验收"。核心纪律：**计划未经 owner 批准，不得改任何源码**。
 
+（improve 已退役；计划步骤改用内置 audit 技能，计划目录按 owner 2026-11-21 裁决与 improve 对齐为 plans/。）
+
 ## 前置条件
 
-- improve skill 可用（`<project>/.claude/skills/improve/`，含 `references/plan-template.md`）。
+- 内置 audit 技能可用（随 forebrain 二进制安装于 `$FOREBRAIN_HOME/skills/.system/audit/`，含 `references/plan-template.md`）。
 - CGO 工具链可用（CGO 是本仓库硬性要求：silk、sqlite、fts5）。
 - tmux 可用（真机验收需要 pty）。
 - 快速记忆检索：先搜项目 MEMORY.md（本仓库裁决多、检索词 tulkun/forebrain 都要试）。
@@ -30,13 +32,11 @@ owner 指定的流程（原话）："bug → enter_plan_mode → improve 计划 
 - 收到 bug 后进入实施前，先 `enter_plan_mode`；计划模式内只做只读调查和写计划文件。
 - 风险点、方案取舍类问题在计划模式内用 user_interaction 停下来问；明确的 bug 直接修。
 
-### 3. 写 improve 计划文件
+### 3. 写 audit 计划（plans/ backlog）
 
-加载 improve skill，用其 **`plan <description>` 变体**（问题已明确，跳过全库审计，
-只做定点调查），按其 `references/plan-template.md` 规范写**自包含**计划（执行者零上下文）。
+加载内置 audit 技能，用其 **`plan <description>` 变体**（问题已明确，跳过全库审计，只做定点调查），按其 `references/plan-template.md` 规范写**自包含**计划（执行者零上下文）。
 
-落盘位置：`docs/plan/<大写蛇形>_PLAN.md`（本仓库惯例，**不是** improve 默认的 `plans/`；
-参照既有计划如 `docs/plan/SKILL_MESSAGE_CARD_UI_PLAN.md` 的结构）。
+落盘位置（owner 2026-11-21 裁决，与 improve 对齐，**不再引用和使用 docs/plan/**）：计划模式内写**会话计划文件**（audit 写边界，GuardWrite 强制，走 exit_plan_mode 原生评审链）；批准后落盘 **`plans/NNN-<slug>.md`**——先读 `plans/README.md`，单调编号、reconcile 不重复，写完更新索引行（状态 TODO）。结构参照既有 plans/ 计划（如 `plans/344-prompt-suggestion-next-step.md`）。
 
 必含章节：
 
@@ -62,7 +62,7 @@ drift 检查以计划内 file:line 对照代替 SHA diff。
 
 - owner 裁决（原话"直接在当前项目源码上实施计划"）：**不用 git worktree、不用快照**；
   改动留工作区由 owner 审阅；计划文件本身禁止 commit。
-- 与 improve skill 的 closing-the-loop worktree 隔离流程冲突时，以 owner 裁决为准。
+- 与 audit 技能 closing-the-loop 的 worktree 隔离流程冲突时，以 owner 裁决为准（本工作流直接在当前源码实施，不用 worktree）。
 - 实施中发现新 bug（含既有缺陷）：owner 裁决"必须定位根因并彻底修复"——并入当前计划
   继续修，并在计划文件补记；方案取舍类仍停下来问。
 - 为不可达状态不写防御代码；覆盖取值用白名单收尾（仓库既有裁决）。
@@ -109,6 +109,7 @@ tmux capture-pane -t fbt -p     # 取证屏幕
 
 - 计划文件回填：状态行改"已实施并真机验收通过（日期）"，新增"验收记录"章节
   （场景→证据，含验收中踩过的工具链坑）。
+- 同步更新 plans/README.md 索引状态行（DONE + 验收日期）。
 - 清理验收环境（tmux kill-session、临时目录）。
 - 报告：根因链、最小改动清单、验证证据、遗留限制；改动留工作区不 commit。
 - 若用户消息中沉淀了新的工作方式裁决，用 memories_add_ad_hoc_note 记忆。
@@ -128,6 +129,6 @@ tmux capture-pane -t fbt -p     # 取证屏幕
 ## 成功判据
 
 - 根因有 file:line 证据链 + 现场证据，修复归一到既有语义而非新造判定。
-- 计划文件完整、经 `exit_plan_mode` 批准、事后回填验收记录。
+- 计划落盘 plans/ 且索引同步、经 `exit_plan_mode` 批准、事后回填验收记录。
 - 定点测试 + 包级回归 + `go vet` 全绿；tmux 真机四场景（按 bug 裁剪）取证通过。
 - `git status` 改动范围与计划 Scope 一致，留在工作区未 commit。
