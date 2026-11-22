@@ -2634,6 +2634,32 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 		}
 	})
 
+	t.Run("a tab arrow leaves an empty form unasked", func(t *testing.T) {
+		// Nobody typed anything, so there is nothing to confirm (owner
+		// 2026-11-22): the arrow steps the panel at once, with no write.
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		runActionConfigPanel(t, session, selector,
+			[]richStep{
+				{label: "Agent definitions", ok: true},
+				{ok: false},
+			},
+			[]actionStep{
+				{label: "Agent definitions", ok: true},
+				{action: FooterActionAdd, ok: true},
+				{tabStep: 1, ok: true},
+				{ok: false},
+			},
+			nil, "agents")
+
+		if strings.Contains(pageLabels(selector.scriptedSelector), "Discard the new definition?") {
+			t.Fatalf("an empty form must leave without asking: %v", selector.richLabels)
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("an empty form leaves nothing behind, got %+v", session.writes)
+		}
+	})
+
 	t.Run("a tab arrow asks before discarding a filled form", func(t *testing.T) {
 		// ←/→ on a filled form asks first (owner 2026-11-22); Keep editing
 		// stays on the form, and the submit still lands it.
