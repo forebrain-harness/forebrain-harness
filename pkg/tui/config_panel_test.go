@@ -2035,7 +2035,7 @@ func TestConfigPanelAirySpacing(t *testing.T) {
 	if !strings.Contains(joined, selectorCursorGlyph) {
 		t.Fatalf("the focused row is not reachable at 68 columns:\n%s", joined)
 	}
-	if !strings.Contains(joined, "Esc to cancel") {
+	if !strings.Contains(joined, "esc to cancel") {
 		t.Fatalf("the footer keys are not reachable at 68 columns:\n%s", joined)
 	}
 	for _, line := range narrow.lines {
@@ -2357,7 +2357,7 @@ func TestConfigPanelSubagentRowsNameTheirModelSource(t *testing.T) {
 
 // The unified create is one form, and it writes once (owner 2026-11-22): `a`
 // draws every field the saved page draws with nothing written, each row is an
-// ordinary edit held in the section document, and the footer's Save lands the
+// ordinary edit held in the section document, and the footer's to save lands the
 // whole definition. Esc leaves nothing behind; a refusal keeps every value.
 func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 	newCase := func(t *testing.T, steps []richStep, inputs []selectorInput, stored string) (*configPanelTestSession, *scriptedSelector) {
@@ -2694,7 +2694,7 @@ func TestConfigPanelCreatesAnAgentDefinition(t *testing.T) {
 		}
 	})
 
-	t.Run("the footer's s Save submits the form", func(t *testing.T) {
+	t.Run("the footer's s to save submits the form", func(t *testing.T) {
 		session := newConfigPanelSession(map[string]string{"agents": storedMain})
 		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
 		runActionConfigPanel(t, session, selector,
@@ -4958,7 +4958,7 @@ func TestConfigPanelPageKeysAndNoticeLine(t *testing.T) {
 		t.Fatalf("the page's outcome line is not under the bar:\n%s", strings.Join(lines, "\n"))
 	}
 	hint := lines[len(lines)-1]
-	if want := "↑/↓ to navigate Enter to open Esc to go back a Add"; !strings.Contains(hint, want) {
+	if want := "↑/↓ to navigate enter to open esc to go back a to add"; !strings.Contains(hint, want) {
 		t.Fatalf("the footer = %q, want %q", hint, want)
 	}
 }

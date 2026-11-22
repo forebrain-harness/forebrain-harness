@@ -5224,7 +5224,7 @@ func TestModelPickerRemoveKeepChangesNothing(t *testing.T) {
 	require.Empty(t, session.removes)
 	require.Empty(t, session.choices)
 	require.Equal(t, 0, session.executeCalls)
-	// Keep is the preselected row, and Remove item is the danger row.
+	// Keep is the preselected row, and to remove item is the danger row.
 	require.Equal(t, []int{1}, selector.defaults)
 	require.Len(t, selector.richItems, 1)
 	require.Equal(t, "Remove item", selector.richItems[0][0].Label)

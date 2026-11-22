@@ -2598,8 +2598,8 @@ func waitForPanelText(r *Renderer, needle string) string {
 // page happens to carry gets that page back instead of the sign-in page — and
 // then asserts on the wrong one. It is a race, so it only shows up sometimes.
 var confirmPageHints = []string{
-	"Y to confirm N or Enter to decline",
-	"Y or Enter to confirm N to decline",
+	"y to confirm n or enter to decline",
+	"y or enter to confirm n to decline",
 }
 
 // waitForSignInPage is waitForPanelText for a page that comes after that
@@ -4539,7 +4539,7 @@ func TestConnectDefaultEffortRendersSingleChoice(t *testing.T) {
 	answer := startConnectSetup(t, cfg, sub)
 
 	models := waitForPanelText(panel.render, "Choose the model to add")
-	for _, want := range []string{"ChatGPT", "ChatGPT plan 1", "ChatGPT team 1", "gpt-future", "Enter to confirm", "Esc to go back"} {
+	for _, want := range []string{"ChatGPT", "ChatGPT plan 1", "ChatGPT team 1", "gpt-future", "enter to confirm", "esc to go back"} {
 		if !strings.Contains(models, want) {
 			t.Fatalf("model page = %q, want it to carry %q", models, want)
 		}
@@ -4552,7 +4552,7 @@ func TestConnectDefaultEffortRendersSingleChoice(t *testing.T) {
 	}
 	panel.typeKeys(t, "\t")
 	waitForPanelText(panel.render, "gpt-future")
-	if strings.Contains(models, "Space to select") {
+	if strings.Contains(models, "space to select") {
 		t.Fatalf("model page = %q, one model is chosen, not ticked", models)
 	}
 	if strings.ContainsAny(models, selectorCheckedGlyph+selectorUncheckedGlyph) {
@@ -4566,7 +4566,7 @@ func TestConnectDefaultEffortRendersSingleChoice(t *testing.T) {
 	for _, want := range []string{
 		"Choose the default for chatgpt/gpt-future.",
 		"Low", "Medium", "High", "Provider default",
-		"Enter to confirm", "Esc to go back",
+		"enter to confirm", "esc to go back",
 	} {
 		if !strings.Contains(effort, want) {
 			t.Fatalf("effort page = %q, want it to carry %q", effort, want)

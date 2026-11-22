@@ -5748,8 +5748,8 @@ func limitVisualLines(text string, maxLines int) string {
 // differ by row kind: the primary row can still move focus (so it advertises
 // both arrows), while a focused subagent row advertises view/stop instead.
 const (
-	agentRosterPrimaryHint  = "↑/↓ to select Enter to view"
-	agentRosterSubagentHint = "Enter to view x to stop"
+	agentRosterPrimaryHint  = "↑/↓ to select enter to view"
+	agentRosterSubagentHint = "enter to view x to stop"
 )
 
 // agentRosterRowLabel is the readable name for a roster row: the subagent's
@@ -8267,7 +8267,11 @@ func wrapPanelWords(text string, width int) []string {
 	return lines
 }
 
-func (b *panelBuilder) hint(text string) { b.hintText = text }
+// hint is the panel's footer line. Footer copy is lowercase everywhere
+// (owner 2026-11-22) — keys, verbs and the action labels — so the one place
+// a footer is stored lowercases it, rather than every caller restating the
+// convention.
+func (b *panelBuilder) hint(text string) { b.hintText = strings.ToLower(text) }
 
 // panelChrome is the /config panel's own header: the tab bar every page of the
 // panel carries, however deep the page sits (plan 350; the prototype draws the

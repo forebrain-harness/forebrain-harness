@@ -4690,7 +4690,7 @@ func TestPlanReviewPickerKeepsTheSelectionOnScreen(t *testing.T) {
 			t.Fatalf("model %d selected but not on screen:\n%s", i, screen)
 		}
 	}
-	const hint = "Esc to go back Enter to request the review"
+	const hint = "esc to go back enter to request the review"
 	if strings.Contains(screen, question) || !strings.Contains(screen, hint) {
 		t.Fatalf("the last model must scroll the question away and bring the key hint along:\n%s", screen)
 	}
@@ -11213,7 +11213,7 @@ func TestExitPlanOverlayRendersPickerAndCollectedReviews(t *testing.T) {
 		"Which model should review this plan?",
 		"anthropic/claude-opus-4-1 ●",
 		"openai/gpt-5.1",
-		"Enter to request the review",
+		"enter to request the review",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("reviewer picker missing %q:\n%s", want, plain)
@@ -16660,7 +16660,7 @@ func TestRawSelectorSelectRendersPanel(t *testing.T) {
 		"  two",
 		"  three",
 		"",
-		"  ↑/↓ to navigate Enter to confirm Esc",
+		"  ↑/↓ to navigate enter to confirm esc",
 		"  to cancel",
 	}, filterBarPlain(40, "⌕", "Type to filter"))
 	if strings.Join(plain, "\n") != strings.Join(want, "\n") {
@@ -16980,12 +16980,12 @@ func TestRawSelectorInputEditsBracketedPasteAtCursor(t *testing.T) {
 // An input is a panel: the question, the field, and the keys that answer it.
 // The caret sits at the logical cursor, measured in display cells.
 func TestInputPanelShowsQuestionFieldAndKeys(t *testing.T) {
-	layout := inputPanel("Base URL", []rune("A界B"), 2, false, "Esc to cancel", nil).layout(60, 0, 0, false)
+	layout := inputPanel("Base URL", []rune("A界B"), 2, false, "esc to cancel", nil).layout(60, 0, 0, false)
 	var plain []string
 	for _, line := range layout.lines {
 		plain = append(plain, stripANSI(line))
 	}
-	want := withFilterBar(1, []string{"  Base URL", "", "", "  Enter to confirm Esc to cancel"}, filterBarPlain(60, "›", "A界B"))
+	want := withFilterBar(1, []string{"  Base URL", "", "", "  enter to confirm esc to cancel"}, filterBarPlain(60, "›", "A界B"))
 	if strings.Join(plain, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("panel = %q, want %q", plain, want)
 	}
@@ -17010,7 +17010,7 @@ func TestStandalonePromptPaintsASetupPage(t *testing.T) {
 	sel.showPanel(inputPanel("URL", []rune("A界B"), 2, false, sel.escHint(), nil))
 
 	got := out.String()
-	for _, want := range []string{"Forebrain Harness", "Step 2 of 5", "━", "  URL", "›  A界B", "Esc to go back"} {
+	for _, want := range []string{"Forebrain Harness", "Step 2 of 5", "━", "  URL", "›  A界B", "esc to go back"} {
 		if !strings.Contains(stripANSI(got), want) {
 			t.Fatalf("page is missing %q:\n%s", want, stripANSI(got))
 		}
@@ -17032,7 +17032,7 @@ func TestSecretFieldIsMasked(t *testing.T) {
 		{"sk-1", "••••"},
 		{"sk-proj-abcdef1234", "••••••••••••••1234"},
 	} {
-		layout := inputPanel("OpenAI API key", []rune(tc.value), len(tc.value), true, "Esc to go back", nil).layout(60, 0, 0, false)
+		layout := inputPanel("OpenAI API key", []rune(tc.value), len(tc.value), true, "esc to go back", nil).layout(60, 0, 0, false)
 		if got := strings.TrimRight(stripANSI(layout.lines[layout.caretRow]), " "); got != "    ›  "+tc.want {
 			t.Fatalf("secret %q shows %q, want %q", tc.value, got, "    ›  "+tc.want)
 		}
@@ -22300,13 +22300,13 @@ func TestInfoPanelFramesTheReport(t *testing.T) {
 		"    - backend: a seatbelt profile that is long enough to",
 		"      wrap",
 		"",
-		"  ↑/↓ PgUp/PgDn to scroll Enter or Esc to close",
+		"  ↑/↓ pgup/pgdn to scroll enter or esc to close",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("report panel = %q, want %q", got, want)
 	}
 	decision := plain(infoPanel("Migration preview", "From Codex", "import"))
-	if decision[0] != "  Migration preview" || decision[len(decision)-1] != "  Enter to import Esc to cancel ↑/↓ PgUp/PgDn to scroll" {
+	if decision[0] != "  Migration preview" || decision[len(decision)-1] != "  enter to import esc to cancel ↑/↓ pgup/pgdn to scroll" {
 		t.Fatalf("decision panel = %q", decision)
 	}
 }
@@ -23040,7 +23040,7 @@ func TestSlashMenuPanelGroupsCommandsAndSkills(t *testing.T) {
 		"  Skills",
 		"  /caveman  talk less",
 		"",
-		"  ↑/↓ to navigate Tab to complete Enter to run Esc to close",
+		"  ↑/↓ to navigate tab to complete enter to run esc to close",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("menu = %q, want %q", got, want)
@@ -23073,7 +23073,7 @@ func TestSlashMenuPanelScrollsTheSelectionIntoView(t *testing.T) {
 		{Name: "connect", Description: "configure or switch LLM provider"},
 		{Name: "golang-continuous-integration", Description: "GitHub Actions CI/CD pipeline configuration for Golang projects with workflow files for test, lint and coverage jobs", Category: turn.SkillCategory},
 	}}
-	const hint = "  ↑/↓ to navigate Tab to complete Enter to run Esc to close"
+	const hint = "  ↑/↓ to navigate tab to complete enter to run esc to close"
 	got, layout := slashMenuPlain(slashMenuPanel(o), 80, 8, 0)
 	want := []string{
 		"",
@@ -30528,31 +30528,31 @@ func TestApprovalOverlayEscapeRefusesTheWayTheRequestDoes(t *testing.T) {
 			name:     "memory note",
 			req:      turn.ToolApprovalRequest{ToolName: "memories_add_ad_hoc_note", ToolInputJSON: `{"filename":"2026-09-11T08-54-34-note.md","note":"# Note"}`},
 			wantDeny: true,
-			wantHint: "Esc to decline",
+			wantHint: "esc to decline",
 		},
 		{
 			name:     "memory read",
 			req:      turn.ToolApprovalRequest{ToolName: "memories_read", ToolInputJSON: `{"path":"MEMORY.md"}`},
 			wantDeny: true,
-			wantHint: "Esc to decline",
+			wantHint: "esc to decline",
 		},
 		{
 			name:     "request_permissions",
 			req:      turn.ToolApprovalRequest{ToolName: "request_permissions", ActionKind: "request_permissions", ToolInputJSON: `{"reason":"inspect"}`},
 			wantDeny: true,
-			wantHint: "Esc to decline",
+			wantHint: "esc to decline",
 		},
 		{
 			name:     "shell",
 			req:      turn.ToolApprovalRequest{ToolName: "shell", ToolInputJSON: `{"command":"ls"}`},
 			wantDeny: false,
-			wantHint: "Esc to cancel",
+			wantHint: "esc to cancel",
 		},
 		{
 			name:     "exit_plan_mode",
 			req:      turn.ToolApprovalRequest{ToolName: "exit_plan_mode", ActionKind: "exit_plan_mode", ToolInputJSON: `{"action":"exit"}`},
 			wantDeny: false,
-			wantHint: "Esc to cancel",
+			wantHint: "esc to cancel",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -32973,7 +32973,7 @@ func TestQueuePreviewUnwrapsAgentMessageSteer(t *testing.T) {
 // Remove capability against a real model table (plan 345): the row an agent
 // defaults to and the row a setting pins are both refused with a sentence the
 // surface says, the rows survive, the configuration keeps composing either
-// way, an unreferenced row is removed, and a second Remove of the same id says
+// way, an unreferenced row is removed, and a second to remove of the same id says
 // it is gone.
 func TestDeleteConfiguredModelRefusesTheDefaultAndRemovesTheRest(t *testing.T) {
 	ctx := context.Background()

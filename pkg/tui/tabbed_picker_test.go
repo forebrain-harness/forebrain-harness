@@ -36,7 +36,7 @@ func TestTabbedPickerPanelGolden(t *testing.T) {
 		"  beta-long-name  A description long enough to wrap onto a second row at this",
 		strings.Repeat(" ", 18) + "width.",
 		"",
-		"  Tab to switch ↑/↓ to navigate Enter to confirm Esc to cancel",
+		"  tab to switch ↑/↓ to navigate enter to confirm esc to cancel",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("panel =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -176,7 +176,7 @@ func TestTabbedPickerMultiSelectChecksAcrossTabs(t *testing.T) {
 	if !strings.HasPrefix(joined, "  Skills\n") || !strings.Contains(joined, "❯ ● alpha") || !strings.Contains(joined, "  ○ beta-long-name") {
 		t.Fatalf("multi rows missing their check boxes:\n%s", joined)
 	}
-	if !strings.Contains(joined, "Space to select") {
+	if !strings.Contains(joined, "space to select") {
 		t.Fatalf("multi hint missing Space: %q", joined)
 	}
 	if !reflect.DeepEqual(p.checkedIndices(), []int{0, 2}) {
@@ -247,7 +247,7 @@ func TestTabbedPickerSingleTabHasNoTabBar(t *testing.T) {
 		t.Fatalf("line 7 = %q, want the list's first row", got)
 	}
 	for _, line := range lines {
-		if got := stripANSI(line); strings.Contains(got, "Tab to switch") || strings.Contains(got, "Memory "+fmt.Sprint(len(items))) {
+		if got := stripANSI(line); strings.Contains(got, "tab to switch") || strings.Contains(got, "Memory "+fmt.Sprint(len(items))) {
 			t.Fatalf("single tab shows a tab bar or advertises switching: %q", got)
 		}
 	}

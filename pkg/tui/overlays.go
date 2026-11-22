@@ -964,17 +964,17 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 	writeLine("")
 	switch {
 	case o.feedback != feedbackClosed:
-		writeLine("\x1b[2mEsc to refuse without words Ctrl+J/Alt+Enter for newline Enter to submit\x1b[0m")
+		writeLine("\x1b[2mesc to refuse without words ctrl+j/alt+enter for newline enter to submit\x1b[0m")
 	case o.planEffortPicking:
-		writeLine("\x1b[2mEsc to go back Enter to confirm\x1b[0m")
+		writeLine("\x1b[2mesc to go back enter to confirm\x1b[0m")
 	case o.planReviewPicking && o.planPickerPurpose == pickHandOff:
-		writeLine("\x1b[2mEsc to go back Enter to hand off\x1b[0m")
+		writeLine("\x1b[2mesc to go back enter to hand off\x1b[0m")
 	case o.planReviewPicking:
-		writeLine("\x1b[2mEsc to go back Enter to request the review\x1b[0m")
+		writeLine("\x1b[2mesc to go back enter to request the review\x1b[0m")
 	default:
-		dismiss := "Esc to cancel"
+		dismiss := "esc to cancel"
 		if o.dismissDecision().Denied {
-			dismiss = "Esc to decline"
+			dismiss = "esc to decline"
 		}
 		writeLine("\x1b[2m%s ctrl+e to explain ? for keys\x1b[0m", dismiss)
 	}
@@ -3258,17 +3258,17 @@ func (o *questionOverlay) renderQuestionView() {
 
 	// Help line
 	c.writeLine("")
-	helpNav := "Tab/Arrow keys to navigate"
+	helpNav := "tab/arrow keys to navigate"
 	if len(o.form.Questions) == 1 {
 		helpNav = "↑/↓ to navigate"
 	}
 	// The overlay is soft-wrapped at paint, so the hint wraps whole.
 	if o.editingOther {
-		c.writeLine("\x1b[2mEnter to confirm ←/→ to move cursor ↑/↓ to leave the field Esc to discard\x1b[0m")
+		c.writeLine("\x1b[2menter to confirm ←/→ to move cursor ↑/↓ to leave the field esc to discard\x1b[0m")
 	} else if q.AllowMultiple {
-		c.writeLinef("\x1b[2mEnter to select %s Space to toggle Esc to cancel\x1b[0m", helpNav)
+		c.writeLinef("\x1b[2menter to select %s space to toggle esc to cancel\x1b[0m", helpNav)
 	} else {
-		c.writeLinef("\x1b[2mEnter to select %s Esc to cancel\x1b[0m", helpNav)
+		c.writeLinef("\x1b[2menter to select %s esc to cancel\x1b[0m", helpNav)
 	}
 
 	if o.showHelp {
@@ -3369,7 +3369,7 @@ func (o *questionOverlay) renderOtherRow(c *qlineCollector, q *state.AskQuestion
 		o.otherRow = len(c.lines)
 		o.otherPrefixWidth = lipgloss.Width(prefix)
 		c.writeLine(prefix + before + otherCaretCell + after)
-		c.writeLinef("%s\x1b[2mEnter to confirm Esc to discard ←/→ to move cursor click to place the cursor\x1b[0m", strings.Repeat(" ", idxWidth+4))
+		c.writeLinef("%s\x1b[2menter to confirm esc to discard ←/→ to move cursor click to place the cursor\x1b[0m", strings.Repeat(" ", idxWidth+4))
 		return
 	}
 	o.otherRow = -1
@@ -3494,7 +3494,7 @@ func (o *questionOverlay) renderSubmitView() {
 	}
 
 	c.writeLine("")
-	c.writeLine("\x1b[2mEnter to confirm ↑/↓ to choose Esc to cancel\x1b[0m")
+	c.writeLine("\x1b[2menter to confirm ↑/↓ to choose esc to cancel\x1b[0m")
 
 	o.finishCollector(c)
 }
@@ -6018,7 +6018,7 @@ func footerActionKeys(actions []FooterAction) string {
 	hint := ""
 	for _, a := range actions {
 		if a.Key != "" {
-			hint += " " + a.Key + " " + a.Label
+			hint += " " + a.Key + " to " + a.Label
 			continue
 		}
 		hint += " " + a.Label
@@ -6415,7 +6415,7 @@ func (p *richPickerState) footerHint() string {
 			continue
 		}
 		if key := p.actions[i].Key; key != "" {
-			hint += " " + key + " " + p.actions[i].Label
+			hint += " " + key + " to " + p.actions[i].Label
 		} else {
 			hint += " " + p.actions[i].Label
 		}

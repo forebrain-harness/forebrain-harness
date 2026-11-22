@@ -4616,7 +4616,7 @@ func TestComposerVariantsStayWithinOnePhysicalRow(t *testing.T) {
 				{lead: panelCursor + "/x    ", text: "a description with\ttab long enough to wrap under its own column"},
 			},
 			focusStart: 0, focusEnd: 2,
-			hint: "↑/↓ to navigate Tab to complete Enter to run Esc to close",
+			hint: "↑/↓ to navigate tab to complete enter to run esc to close",
 		}}},
 		{"queued preview", ComposerRenderState{Text: "", Cursor: &cursor, PendingInput: ComposerPendingInputPreview{QueuedMessages: []string{"queued\tfollow-up"}}}},
 	}
@@ -4878,7 +4878,7 @@ func TestSlashOverlaysShareOneHeight(t *testing.T) {
 	r.mu.Lock()
 	painted := append([]string(nil), r.vpPainted[height-want:]...)
 	r.mu.Unlock()
-	if !strings.Contains(stripAnsi(painted[1]), "Migration preview") || !strings.Contains(stripAnsi(painted[len(painted)-1]), "Enter to import") {
+	if !strings.Contains(stripAnsi(painted[1]), "Migration preview") || !strings.Contains(stripAnsi(painted[len(painted)-1]), "enter to import") {
 		t.Fatalf("head or hint scrolled away: %q", painted)
 	}
 	if !r.ViewportScrollOverlay(5) {

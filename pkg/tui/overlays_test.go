@@ -1082,7 +1082,7 @@ func TestApprovalFeedbackRowsFitTheViewportWidth(t *testing.T) {
 		t.Fatalf("the row above the field is not the whole title, so the title wrapped: %q", title)
 	}
 	footer := stripANSI(lines[len(lines)-1])
-	if !strings.Contains(footer, "newline") || !strings.Contains(footer, "Enter to submit") {
+	if !strings.Contains(footer, "newline") || !strings.Contains(footer, "enter to submit") {
 		t.Fatalf("the footer must carry the newline and submit hints on one row, got %q", footer)
 	}
 }
@@ -1690,7 +1690,7 @@ func TestRichPickerLaysRowsInTwoColumns(t *testing.T) {
 		"❯ Default    Asks before edits and commands outside the workspace.",
 		"  Read only  Never writes.",
 		"",
-		"  ↑/↓ to navigate Enter to confirm Esc to cancel",
+		"  ↑/↓ to navigate enter to confirm esc to cancel",
 	}, filterBarPlain(80, "⌕", "Type to filter")))
 	for _, line := range richPickerPanelLines(t, p, "Permissions\nWhat may run without asking", 80) {
 		if strings.Contains(stripANSI(line), " — ") {
@@ -1716,7 +1716,7 @@ func TestRichPickerAlignsDescriptionsAcrossGroups(t *testing.T) {
 		"  DeepSeek",
 		"  deepseek-chat  fast and cheap",
 		"",
-		"  ↑/↓ to navigate Enter to confirm Esc to cancel",
+		"  ↑/↓ to navigate enter to confirm esc to cancel",
 	}, filterBarPlain(80, "⌕", "Type to filter")))
 }
 
@@ -2286,8 +2286,8 @@ func TestEveryPanelFieldIsThreeRows(t *testing.T) {
 		{"select", sel.panel(), false},
 		{"rich picker", rich.panel("pick"), false},
 		{"tabbed picker", tabbed.panel("Skills"), false},
-		{"form answer", inputPanel("Base URL", []rune("abc"), 3, false, "Esc to cancel", nil), false},
-		{"form secret", inputPanel("API key", []rune("sk-1"), 4, true, "Esc to cancel", nil), true},
+		{"form answer", inputPanel("Base URL", []rune("abc"), 3, false, "esc to cancel", nil), false},
+		{"form secret", inputPanel("API key", []rune("sk-1"), 4, true, "esc to cancel", nil), true},
 	} {
 		if tc.panel.field == nil {
 			t.Fatalf("%s: the panel has no field to lay out", tc.name)
@@ -3674,7 +3674,7 @@ func TestExitPlanOverlayPicksHandOffModel(t *testing.T) {
 	rendered := out.String()
 	for _, want := range []string{
 		"Which model should carry out this plan? (Esc to go back)",
-		"Enter to hand off",
+		"enter to hand off",
 		"deepseek/deepseek-v4-flash",
 	} {
 		if !strings.Contains(rendered, want) {
@@ -4093,7 +4093,7 @@ func TestExitPlanEffortPickerConfirmsWithThePickedLevel(t *testing.T) {
 		"❯ Low ⚙",
 		"  Off",
 		"  xHigh",
-		"Esc to go back Enter to confirm",
+		"esc to go back enter to confirm",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("second screen missing %q:\n%s", want, joined)
@@ -4564,7 +4564,7 @@ func devicePage(body string) ConnectPanelPage {
 	return ConnectPanelPage{
 		Title: "Sign in with OpenCode",
 		Body:  body,
-		Hint:  "Enter when signed in Esc to cancel",
+		Hint:  "enter when signed in esc to cancel",
 	}
 }
 
@@ -4594,7 +4594,7 @@ func TestConnectPanelShowsThePageAndLeavesTheTranscript(t *testing.T) {
 	result := box.start(ctx, page, done, nil)
 
 	text := paintedPanel(t, box.r, "QK7M-2PLX")
-	for _, want := range []string{"Sign in with OpenCode", "https://opencode.ai/auth", "Code: QK7M-2PLX", "Enter when signed in Esc to cancel"} {
+	for _, want := range []string{"Sign in with OpenCode", "https://opencode.ai/auth", "Code: QK7M-2PLX", "enter when signed in esc to cancel"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("panel = %q, want it to carry %q", text, want)
 		}
@@ -4709,7 +4709,7 @@ func TestConnectPanelEditsTheCallbackField(t *testing.T) {
 		return ConnectPanelPage{
 			Title:      "Sign in with ChatGPT",
 			Body:       "Open this URL on any device: https://auth.openai.com/authorize?state=synthetic\n\nSign in, then paste the address your browser ended on.",
-			Hint:       "Enter to submit Esc to cancel",
+			Hint:       "enter to submit esc to cancel",
 			InputLabel: "Paste callback URL",
 		}
 	}
@@ -4764,7 +4764,7 @@ func TestConnectPanelRejectionKeepsTheFieldAndHidesTheError(t *testing.T) {
 		return ConnectPanelPage{
 			Title:      "Sign in with ChatGPT",
 			Body:       "https://auth.openai.com/authorize?state=synthetic",
-			Hint:       "Enter to submit Esc to cancel",
+			Hint:       "enter to submit esc to cancel",
 			InputLabel: "Paste callback URL",
 		}
 	}
@@ -4825,7 +4825,7 @@ func TestConnectPanelEscapeAndContextReleaseTheStage(t *testing.T) {
 				return ConnectPanelPage{
 					Title:      "Sign in with ChatGPT",
 					Body:       "https://auth.openai.com/authorize?state=synthetic",
-					Hint:       "Enter to submit Esc to cancel",
+					Hint:       "enter to submit esc to cancel",
 					InputLabel: "Paste callback URL",
 				}
 			}
@@ -4873,7 +4873,7 @@ func TestConnectPanelSubmitsOnceWhileItIsInFlight(t *testing.T) {
 	var calls atomic.Int64
 	release := make(chan struct{})
 	result := box.start(ctx, func() ConnectPanelPage {
-		return ConnectPanelPage{Title: "Sign in with ChatGPT", Hint: "Enter to submit Esc to cancel", InputLabel: "Paste callback URL"}
+		return ConnectPanelPage{Title: "Sign in with ChatGPT", Hint: "enter to submit esc to cancel", InputLabel: "Paste callback URL"}
 	}, done, func(context.Context, string) error {
 		calls.Add(1)
 		<-release
@@ -5062,7 +5062,7 @@ func connectPanelPreviewFixture(mode string) (func() ConnectPanelPage, func(cont
 			return ConnectPanelPage{
 				Title: "OpenCode",
 				Body:  "Fetching this account's available models…",
-				Hint:  "Esc to cancel",
+				Hint:  "esc to cancel",
 			}
 		}, nil
 	}
