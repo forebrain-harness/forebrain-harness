@@ -240,13 +240,20 @@ func (b Backend) resolve(path *string) (string, error) {
 		rel = within
 	}
 	components := strings.FieldsFunc(filepath.ToSlash(rel), func(r rune) bool { return r == '/' })
+	// Every ".." is refused before the walk starts. Past a missing component
+	// the walk stops and joins the rest as-is, and filepath.Join collapses
+	// ".." — so a check that only runs on the components the walk reaches lets
+	// a tail like "zzz/../../../projects/other/MEMORY.md" name another scope's
+	// memory.
+	for _, component := range components {
+		if component == ".." {
+			return "", fmt.Errorf("path '%s' must stay within the memories root", raw)
+		}
+	}
 	current := b.Root
 	for index, component := range components {
 		if component == "." {
 			continue
-		}
-		if component == ".." {
-			return "", fmt.Errorf("path '%s' must stay within the memories root", raw)
 		}
 		if strings.HasPrefix(component, ".") {
 			return "", notFoundError(raw)

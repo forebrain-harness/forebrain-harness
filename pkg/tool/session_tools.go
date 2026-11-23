@@ -343,7 +343,7 @@ type enterPlanModeInput struct {
 // memoriesAddAdHocNoteDescription carries where a note lands: the tool
 // returns that path, and reading the note back by the bare filename it was
 // written with fails, so the read-back rule lives here with the tool.
-const memoriesAddAdHocNoteDescription = "Save one append-only memory note when the user asks to remember, forget or update something, or states a standing rule about how to work that outlives the current task. Decisions about what to build (product behavior, UI, prototype or plan content) are not memory; they belong to the artifact that records them. It is stored under " + memory.AdHocNotesDir + "/ in the chosen scope; pass the returned path, relative to the memories root, verbatim to memories_read."
+const memoriesAddAdHocNoteDescription = "Save one append-only memory note when the user asks to remember, forget or update something, or states a standing rule about how to work that outlives the current task. Decisions about what to build (product behavior, UI, prototype or plan content) are not memory; they belong to the artifact that records them. It is stored under " + memory.AdHocNotesDir + "/ in the chosen scope; pass the returned path verbatim to memories_read."
 
 const enterPlanModeDescription = `Use proactively before a non-trivial implementation: plan mode lets you explore and get the user's sign-off on an approach before writing code, which prevents wasted effort. Entering it requires the user's consent.
 
@@ -870,20 +870,20 @@ type memoriesAddAdHocNoteInput struct {
 // "no cursor" string is `""`, which the backend then rejects as not a
 // non-negative integer.
 type memoriesListInput struct {
-	Path       *string `json:"path,omitempty" jsonschema_description:"Directory or file path relative to the memories root, e.g. extensions/ad_hoc/notes for the ad-hoc notes. Omit to list the root."`
+	Path       *string `json:"path,omitempty" jsonschema_description:"Directory or file path relative to this project's memory root (the base path shown in the memory instructions), e.g. extensions/ad_hoc/notes for the ad-hoc notes. Never include a memories/ or projects/<key>/ prefix. Omit to list the root."`
 	Cursor     *string `json:"cursor,omitempty" jsonschema_description:"Verbatim next_cursor from a previous memories_list response. Omit to start at the first page."`
 	MaxResults *int    `json:"max_results,omitempty" jsonschema:"minimum=1" jsonschema_description:"Maximum entries to return. Omit for the default page size."`
 }
 
 type memoriesReadInput struct {
-	Path       string `json:"path" jsonschema_description:"File path relative to the memories root, e.g. extensions/ad_hoc/notes/<filename>.md for an ad-hoc note."`
+	Path       string `json:"path" jsonschema_description:"File path relative to this project's memory root (the base path shown in the memory instructions), e.g. extensions/ad_hoc/notes/<filename>.md for an ad-hoc note. Never include a memories/ or projects/<key>/ prefix."`
 	LineOffset *int   `json:"line_offset,omitempty" jsonschema:"minimum=1" jsonschema_description:"1-indexed line to start reading from. Omit to read from the first line."`
 	MaxLines   *int   `json:"max_lines,omitempty" jsonschema:"minimum=1" jsonschema_description:"Maximum lines to return. Omit to read to the end of the file."`
 }
 
 type memoriesSearchInput struct {
 	Queries []string `json:"queries" jsonschema:"minItems=1" jsonschema_description:"Words to search memories for. Each is split into terms, and a memory is recalled when it shares one."`
-	Path    *string  `json:"path,omitempty" jsonschema_description:"Directory or file path relative to the memories root to restrict the search to, e.g. extensions/ad_hoc/notes for the ad-hoc notes. Omit to search all memory."`
+	Path    *string  `json:"path,omitempty" jsonschema_description:"Directory or file path relative to this project's memory root to restrict the search to, e.g. extensions/ad_hoc/notes for the ad-hoc notes. Never include a memories/ or projects/<key>/ prefix. Omit to search this project's memory; prefix global/ to search the user's cross-project preferences."`
 }
 
 // addAdHocNoteResponse hands the model back the path the note actually landed
@@ -899,6 +899,9 @@ func newDedicatedMemoryTools(_ *State, runtime *AgentToolRuntime) ([]*llm.Tool, 
 	if err != nil {
 		return nil, err
 	}
+	// Empty for a session with no project identity, which keeps the scope
+	// prefix fallback out of play rather than guessing a project.
+	projectKey := strings.TrimSpace(runtime.ProjectKey)
 	add, err := llm.NewTool("memories_add_ad_hoc_note", memoriesAddAdHocNoteDescription, func(ctx context.Context, input *memoriesAddAdHocNoteInput) (addAdHocNoteResponse, error) {
 		if input == nil {
 			return addAdHocNoteResponse{}, fmt.Errorf("input is required")
@@ -938,11 +941,11 @@ func newDedicatedMemoryTools(_ *State, runtime *AgentToolRuntime) ([]*llm.Tool, 
 		scope := memoryToolOptionalScope(input.Path, "root")
 		if input.Path != nil {
 			var path string
-			path, response, err = retryInAdHocNotes(*input.Path, response, err, listAt)
+			path, response, err = retryMemoryPath(*input.Path, projectKey, response, err, listAt)
 			scope = memoryToolScope(path)
 		}
 		recordMemoryToolCall("list", scope, err == nil, memoryTruncatedTag(response.Truncated, err == nil))
-		return response, err
+		return response, memoryNotFoundHint(err)
 	})
 	if err != nil {
 		return nil, err
@@ -966,9 +969,9 @@ func newDedicatedMemoryTools(_ *State, runtime *AgentToolRuntime) ([]*llm.Tool, 
 			return backend.Read(memory.ReadRequest{Path: path, LineOffset: lineOffset, MaxLines: input.MaxLines, MaxTokens: memory.DefaultReadMaxTokens})
 		}
 		response, err := readAt(input.Path)
-		path, response, err := retryInAdHocNotes(input.Path, response, err, readAt)
+		path, response, err := retryMemoryPath(input.Path, projectKey, response, err, readAt)
 		recordMemoryToolCall("read", memoryToolScope(path), err == nil, memoryTruncatedTag(response.Truncated, err == nil))
-		return response, err
+		return response, memoryNotFoundHint(err)
 	})
 	if err != nil {
 		return nil, err
@@ -991,14 +994,14 @@ func newDedicatedMemoryTools(_ *State, runtime *AgentToolRuntime) ([]*llm.Tool, 
 		scope := memoryToolOptionalScope(input.Path, "all")
 		if input.Path != nil {
 			var path string
-			path, response, err = retryInAdHocNotes(*input.Path, response, err, func(candidate string) (memory.SearchResponse, error) {
+			path, response, err = retryMemoryPath(*input.Path, projectKey, response, err, func(candidate string) (memory.SearchResponse, error) {
 				return searchAt(&candidate)
 			})
 			scope = memoryToolScope(path)
 		}
 		// A search is never truncated now: it returns its whole top K.
 		recordMemoryToolCall("search", scope, err == nil, memoryTruncatedTag(false, err == nil))
-		return response, err
+		return response, memoryNotFoundHint(err)
 	})
 	if err != nil {
 		return nil, err
@@ -1007,27 +1010,65 @@ func newDedicatedMemoryTools(_ *State, runtime *AgentToolRuntime) ([]*llm.Tool, 
 	return []*llm.Tool{add, list, read, search}, nil
 }
 
-// retryInAdHocNotes re-runs a memory lookup against the ad-hoc notes directory
-// when a bare note filename missed at the root. memories_add_ad_hoc_note takes
-// the filename alone but stores the note one directory down, so the name the
-// model just used to write is otherwise unusable for reading, listing, or
-// searching. It returns the path the answer actually came from, so telemetry
-// and the response echo the stored location.
+// retryMemoryPath re-runs a memory lookup against the paths a missed one could
+// have meant. Two anchor mistakes are common enough to answer inside the call
+// rather than with an error the model has to interpret:
+//
+//   - a bare ad-hoc note filename, which memories_add_ad_hoc_note takes but
+//     stores one directory down;
+//   - a path anchored at the memories base rather than this session's project
+//     root, so it starts with projects/<this session's key>/ or
+//     memories/projects/<this session's key>/.
+//
+// It returns the path the answer actually came from, so telemetry and the
+// response echo the stored location.
 //
 // Only a missing path is retried: answering a symlink, non-UTF-8, or I/O
 // refusal with a different file would turn a deliberate rejection into a
 // silently wrong success.
-func retryInAdHocNotes[T any](path string, response T, err error, call func(string) (T, error)) (string, T, error) {
+func retryMemoryPath[T any](path, projectKey string, response T, err error, call func(string) (T, error)) (string, T, error) {
 	if !errors.Is(err, memory.ErrNotFound) {
 		return path, response, err
 	}
-	for _, candidate := range adHocNoteFallbackPaths(path) {
+	for _, candidate := range append(adHocNoteFallbackPaths(path), scopePrefixFallbackPaths(path, projectKey)...) {
 		retried, retryErr := call(candidate)
 		if retryErr == nil {
 			return candidate, retried, nil
 		}
 	}
 	return path, response, err
+}
+
+// scopePrefixFallbackPaths maps a path the model anchored at the memories base
+// (projects/<key>/… or memories/projects/<key>/…) back onto this session's own
+// project root. Only the session's own key is stripped: another project's key
+// must keep failing, or the per-project isolation becomes a matter of prompt
+// discipline again.
+func scopePrefixFallbackPaths(path, projectKey string) []string {
+	if projectKey == "" {
+		return nil
+	}
+	trimmed := strings.TrimPrefix(strings.TrimSpace(path), "./")
+	var candidates []string
+	for _, prefix := range []string{"projects/" + projectKey, "memories/projects/" + projectKey} {
+		if trimmed == prefix {
+			candidates = append(candidates, "")
+		} else if rest, ok := strings.CutPrefix(trimmed, prefix+"/"); ok {
+			candidates = append(candidates, rest)
+		}
+	}
+	return candidates
+}
+
+// memoryNotFoundHint tells the model the correct anchor when a memory path
+// missed, so one failure is enough to correct the next call instead of
+// repeating the same wrong anchor. It wraps rather than replaces the error, so
+// errors.Is(err, memory.ErrNotFound) still identifies a miss.
+func memoryNotFoundHint(err error) error {
+	if !errors.Is(err, memory.ErrNotFound) {
+		return err
+	}
+	return fmt.Errorf("%w; memory paths are relative to this project's memory root (e.g. MEMORY.md, rollout_summaries/<file>.md), never prefixed with memories/ or projects/<key>/; prefix global/ for the global scope", err)
 }
 
 // adHocNoteFallbackPaths maps a bare ad-hoc note filename to the stored paths

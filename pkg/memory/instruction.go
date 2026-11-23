@@ -65,7 +65,7 @@ func (o InstructionOptions) Empty() bool { return !o.Recall && !o.Capture }
 // writes lands is the memories_add_ad_hoc_note description's to say, since
 // that tool returns the path.
 const readPathToolGuidance = `Reading memory with the memories_* tools: ` + "`memories_read`" + `, ` + "`memories_list`" + ` and ` + "`memories_search`" + ` take a path relative to the
-  project memory base path above (` + "`MEMORY.md`" + `, ` + "`rollout_summaries/<file>.md`" + `, ` + "`skills/<skill-name>/SKILL.md`" + `); prefix ` + "`global/`" + ` for the global scope. An absolute path inside either base path also resolves.
+  project memory base path above (` + "`MEMORY.md`" + `, ` + "`rollout_summaries/<file>.md`" + `, ` + "`skills/<skill-name>/SKILL.md`" + `); prefix ` + "`global/`" + ` for the global scope. An absolute path inside either base path also resolves. Paths never include the memories/ or projects/<key>/ components of the base path.
 `
 
 // noteWriteGuidanceWithTools and noteWriteGuidanceWithFiles say how to write a

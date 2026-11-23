@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -196,6 +197,59 @@ func TestHiddenAndEscapingPathsAreRejected(t *testing.T) {
 	for _, path := range []string{"../outside.md", ".git/config", "a/.hidden"} {
 		if _, err := backend.Read(ReadRequest{Path: path, LineOffset: 1}); err == nil {
 			t.Fatalf("path %q accepted", path)
+		}
+	}
+}
+
+// A ".." past a component that does not exist used to be collapsed by
+// filepath.Join instead of refused, so `zzz/../../../<other scope>/MEMORY.md`
+// named another project's memory. The root below is shaped like a real
+// per-project scope so the traversal lands where it would in production.
+func TestTraversalBelowAMissingComponentStaysInsideTheRoot(t *testing.T) {
+	base := t.TempDir()
+	mine := filepath.Join(base, "memories", "projects", "-Scope-A")
+	theirs := filepath.Join(base, "memories", "projects", "-Scope-B")
+	for dir, body := range map[string]string{mine: "my memory\n", theirs: "OTHER SCOPE SECRET\n"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backend := New(mine).WithSearchIndex(testSearchIndexDB(t))
+	for _, path := range []string{
+		"zzz/../../../projects/-Scope-B/MEMORY.md",
+		"missing/../MEMORY.md",
+		"a/b/c/../../../../projects/-Scope-B/MEMORY.md",
+	} {
+		read, err := backend.Read(ReadRequest{Path: path, LineOffset: 1})
+		if err == nil {
+			t.Fatalf("read %q accepted, content = %q", path, read.Content)
+		}
+		if strings.Contains(read.Content, "OTHER SCOPE SECRET") {
+			t.Fatalf("read %q returned another scope's memory: %q", path, read.Content)
+		}
+		for _, call := range []struct {
+			name string
+			run  func() (string, error)
+		}{
+			{"list", func() (string, error) {
+				response, err := backend.List(ListRequest{Path: &path, MaxResults: 10})
+				return fmt.Sprint(response.Entries), err
+			}},
+			{"search", func() (string, error) {
+				response, err := backend.Search(SearchRequest{Queries: []string{"SECRET"}, Path: &path, TopK: 5})
+				return fmt.Sprint(response.Matches), err
+			}},
+		} {
+			got, err := call.run()
+			if err == nil {
+				t.Fatalf("%s %q accepted: %s", call.name, path, got)
+			}
+			if strings.Contains(got, "OTHER SCOPE SECRET") {
+				t.Fatalf("%s %q leaked: %s", call.name, path, got)
+			}
 		}
 	}
 }

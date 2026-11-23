@@ -1326,6 +1326,267 @@ func TestMemoryToolsCannotReachAnotherProjectsMemory(t *testing.T) {
 	}
 }
 
+// seedDeployMemory writes a MEMORY.md a search can rank: lines that answer the
+// query, plus filler that shares none of its words.
+func seedDeployMemory(t *testing.T, root memory.Root) {
+	t.Helper()
+	if err := os.MkdirAll(root.MemoryRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for index := 0; index < 30; index++ {
+		lines = append(lines, fmt.Sprintf("- deploy note %d", index))
+	}
+	body := strings.Join(lines, "\n") + "\n" + strings.Repeat(memoryFiller, 200)
+	if err := os.WriteFile(filepath.Join(root.MemoryRoot, "MEMORY.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The reported failure: the tool's root already is projects/<this session's
+// key>, and the model anchored at the memories base instead, so every call
+// failed with "path 'projects/<key>' was not found" and memory recall never got
+// off the ground. One call has to succeed whatever anchor the model picked.
+func TestMemoriesSearchAcceptsOwnScopePrefix(t *testing.T) {
+	home := t.TempDir()
+	seedDeployMemory(t, testMemoryScopeRoot(t, home))
+	handlers := memoryToolHandlers(t, home)
+	for _, path := range []string{
+		"projects/" + testMemoryProjectKey,
+		"memories/projects/" + testMemoryProjectKey,
+		"projects/" + testMemoryProjectKey + "/MEMORY.md",
+	} {
+		result, err := handlers["memories_search"](context.Background(), `{"queries":["deploy"],"path":"`+path+`"}`)
+		if err != nil {
+			t.Fatalf("search %q: first call must succeed: %v", path, err)
+		}
+		response, ok := result.(memory.SearchResponse)
+		if !ok {
+			t.Fatalf("search %q response = %#v", path, result)
+		}
+		if len(response.Matches) == 0 {
+			t.Fatalf("search %q returned no matches", path)
+		}
+	}
+}
+
+func TestMemoriesReadAcceptsOwnScopePrefix(t *testing.T) {
+	home := t.TempDir()
+	root := testMemoryScopeRoot(t, home)
+	if err := os.MkdirAll(root.MemoryRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root.MemoryRoot, "MEMORY.md"), []byte("alpha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handlers := memoryToolHandlers(t, home)
+	for _, path := range []string{
+		"projects/" + testMemoryProjectKey + "/MEMORY.md",
+		"memories/projects/" + testMemoryProjectKey + "/MEMORY.md",
+	} {
+		result, err := handlers["memories_read"](context.Background(), `{"path":"`+path+`"}`)
+		if err != nil {
+			t.Fatalf("read %q: first call must succeed: %v", path, err)
+		}
+		response, ok := result.(memory.ReadResponse)
+		if !ok {
+			t.Fatalf("read %q response = %#v", path, result)
+		}
+		if response.Content != "alpha\n" {
+			t.Fatalf("read %q content = %q", path, response.Content)
+		}
+		if response.Path != "MEMORY.md" {
+			t.Fatalf("read %q reported path = %q, want the normalized path", path, response.Path)
+		}
+	}
+}
+
+func TestMemoriesListAcceptsOwnScopePrefix(t *testing.T) {
+	home := t.TempDir()
+	root := testMemoryScopeRoot(t, home)
+	if err := os.MkdirAll(root.MemoryRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root.MemoryRoot, "MEMORY.md"), []byte("alpha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handlers := memoryToolHandlers(t, home)
+	for _, path := range []string{
+		"projects/" + testMemoryProjectKey,
+		"memories/projects/" + testMemoryProjectKey,
+	} {
+		result, err := handlers["memories_list"](context.Background(), `{"path":"`+path+`"}`)
+		if err != nil {
+			t.Fatalf("list %q: first call must succeed: %v", path, err)
+		}
+		response, ok := result.(memory.ListResponse)
+		if !ok {
+			t.Fatalf("list %q response = %#v", path, result)
+		}
+		names := make([]string, 0, len(response.Entries))
+		for _, entry := range response.Entries {
+			names = append(names, entry.Path)
+		}
+		if !slices.Contains(names, "MEMORY.md") {
+			t.Fatalf("list %q entries = %v, want MEMORY.md", path, names)
+		}
+	}
+}
+
+// The fallback that maps an over-anchored path back onto this session's own
+// root must not do the same for another project's key: the per-project
+// directories are what makes cross-project leakage structural rather than a
+// matter of prompt discipline.
+func TestMemoriesScopePrefixFallbackRefusesOtherProject(t *testing.T) {
+	home := t.TempDir()
+	roots, err := memory.ResolveRootsForAgent(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const otherKey = "-Other-project"
+	mine := roots.Scope(memory.Scope{Kind: memory.ScopeProject, Key: testMemoryProjectKey})
+	theirs := roots.Scope(memory.Scope{Kind: memory.ScopeProject, Key: otherKey})
+	for root, body := range map[string]string{
+		mine.MemoryRoot:   "my project memory\n",
+		theirs.MemoryRoot: "OTHER PROJECT SECRET\n",
+	} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "MEMORY.md"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handlers := memoryToolHandlers(t, home)
+	paths := []string{
+		"projects/" + otherKey,
+		"projects/" + otherKey + "/MEMORY.md",
+		"memories/projects/" + otherKey + "/MEMORY.md",
+	}
+	for _, path := range paths {
+		if result, err := handlers["memories_read"](context.Background(), `{"path":"`+path+`"}`); err == nil {
+			t.Fatalf("read %q reached another project: %#v", path, result)
+		}
+		if result, err := handlers["memories_list"](context.Background(), `{"path":"`+path+`"}`); err == nil {
+			t.Fatalf("list %q reached another project: %#v", path, result)
+		}
+		if result, err := handlers["memories_search"](context.Background(), `{"queries":["SECRET"],"path":"`+path+`"}`); err == nil {
+			t.Fatalf("search %q reached another project: %#v", path, result)
+		}
+	}
+}
+
+// The tool layer's own guard for the same shape: a path whose first component
+// does not exist and whose tail walks back out with ".." must not reach another
+// project's memory, whichever memory tool asks.
+func TestMemoryToolsMissingComponentTraversalCannotReachAnotherProject(t *testing.T) {
+	home := t.TempDir()
+	roots, err := memory.ResolveRootsForAgent(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const otherKey = "-Other-project"
+	mine := roots.Scope(memory.Scope{Kind: memory.ScopeProject, Key: testMemoryProjectKey})
+	theirs := roots.Scope(memory.Scope{Kind: memory.ScopeProject, Key: otherKey})
+	for root, body := range map[string]string{mine.MemoryRoot: "my memory\n", theirs.MemoryRoot: "OTHER PROJECT SECRET\n"} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "MEMORY.md"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handlers := memoryToolHandlers(t, home)
+	for _, path := range []string{
+		"zzz/../../../projects/" + otherKey + "/MEMORY.md",
+		"zzz/../../../../projects/" + otherKey + "/MEMORY.md",
+	} {
+		for _, call := range []struct {
+			name string
+			args string
+		}{
+			{"memories_read", `{"path":"` + path + `"}`},
+			{"memories_list", `{"path":"` + path + `"}`},
+			{"memories_search", `{"queries":["SECRET"],"path":"` + path + `"}`},
+		} {
+			result, err := handlers[call.name](context.Background(), call.args)
+			if err == nil {
+				t.Fatalf("%s %q reached another project: %#v", call.name, path, result)
+			}
+			if strings.Contains(fmt.Sprintf("%#v", result), "OTHER PROJECT SECRET") {
+				t.Fatalf("%s %q leaked in the response: %#v", call.name, path, result)
+			}
+		}
+	}
+}
+
+// A miss that no fallback covers still has to teach the model the anchor it
+// missed, or the next call repeats the same wrong one.
+func TestMemoriesNotFoundCarriesAnchorHint(t *testing.T) {
+	home := t.TempDir()
+	handlers := memoryToolHandlers(t, home)
+	// A slash keeps this out of the bare-filename ad-hoc fallback, and it does
+	// not carry this session's scope prefix either, so nothing normalizes it.
+	_, err := handlers["memories_read"](context.Background(), `{"path":"no/such-file.md"}`)
+	if err == nil {
+		t.Fatal("missing path read accepted")
+	}
+	if !errors.Is(err, memory.ErrNotFound) {
+		t.Fatalf("error = %v, want a not-found error", err)
+	}
+	for _, want := range []string{"relative to this project's memory root", "'no/such-file.md'"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %v is missing %q", err, want)
+		}
+	}
+}
+
+// The anchor is only unambiguous if the schema every model reads says it: the
+// path descriptions live in struct tags, so this pins them through the
+// reflected schema rather than through string constants.
+func TestMemoriesPathDescriptionsAnchorAtProjectRoot(t *testing.T) {
+	home := t.TempDir()
+	tools, err := newDedicatedMemoryTools(NewState(home), memorySearchRuntime(t, &AgentToolRuntime{
+		Home: home, WorkspaceRoot: home, Cfg: &appcfg.Root{},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools {
+		if tool.Name() != "memories_list" && tool.Name() != "memories_read" && tool.Name() != "memories_search" {
+			continue
+		}
+		b, err := json.Marshal(tool.InputSchema())
+		if err != nil {
+			t.Fatalf("Marshal %s schema: %v", tool.Name(), err)
+		}
+		schema := string(b)
+		if !strings.Contains(schema, "this project's memory root") {
+			t.Fatalf("%s schema does not anchor at the project memory root: %s", tool.Name(), schema)
+		}
+		if strings.Contains(schema, "relative to the memories root") || !strings.Contains(schema, "Never include a memories/") {
+			t.Fatalf("%s schema still admits the memories-base anchor: %s", tool.Name(), schema)
+		}
+		if tool.Name() != "memories_search" {
+			continue
+		}
+		if !strings.Contains(schema, "Omit to search this project's memory") {
+			t.Fatalf("memories_search schema does not scope the default search: %s", schema)
+		}
+		if strings.Contains(schema, "search all memory") {
+			t.Fatalf("memories_search schema still implies a multi-project root: %s", schema)
+		}
+	}
+	for _, tool := range tools {
+		if tool.Name() != "memories_add_ad_hoc_note" {
+			continue
+		}
+		if strings.Contains(tool.Description(), "relative to the memories root") {
+			t.Fatalf("memories_add_ad_hoc_note description still names the memories root: %q", tool.Description())
+		}
+	}
+}
+
 // TestMemoryReadRootsCoverOnlyThisProjectAndGlobal covers the other way into
 // memory: plain read_file, whose no-approval allowlist is widened to the memory
 // folder so the model can open what the instructions describe. That widening
