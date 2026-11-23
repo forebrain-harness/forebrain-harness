@@ -2177,6 +2177,21 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 // rebuild a session switch performs before the surface moves.
 const sessionModelActivationTimeout = 30 * time.Second
 
+// The two lines that say a run was stopped, split by who stopped it. Both are
+// what the conversation says in place of a card the stop left nothing in, so
+// the words matter: the first names the person, the second does not, because
+// nothing on that path is theirs.
+const (
+	// userStoppedRunLine is what the conversation says where the user stopped
+	// the run: /stop, Esc, Ctrl+C.
+	userStoppedRunLine = "You stopped this run"
+	// interruptStoppedRunLine is the same ending when it was not the user's
+	// doing: the process context closed, or an OS interrupt (SIGINT) arrived —
+	// which may come from a supervisor rather than a person, so it must not
+	// claim to be one.
+	interruptStoppedRunLine = "Run stopped"
+)
+
 func persistSurfaceBrowseState(session Session, renderer *Renderer, sessionID string) {
 	if session == nil || renderer == nil || strings.TrimSpace(sessionID) == "" {
 		return
@@ -2308,7 +2323,7 @@ func (s *streamState) handleAgentRosterLineInput(session Session, renderer *Rend
 			return true
 		case "primary":
 			if session.CancelActiveRun() {
-				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: userStoppedRunLine})
 			} else {
 				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "agent", Content: "no cancellable run"})
 			}
@@ -4321,7 +4336,7 @@ func runTurnWithDispatch(ctx context.Context, sigCh <-chan os.Signal, events <-c
 			}
 			signalInterrupted = true
 			if session.CancelActiveRun() {
-				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: interruptStoppedRunLine})
 			}
 			continue
 		case <-sigCh:
@@ -4333,7 +4348,7 @@ func runTurnWithDispatch(ctx context.Context, sigCh <-chan os.Signal, events <-c
 						state.markSubmitPendingSteersAfterInterrupt()
 					}
 				}
-				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: interruptStoppedRunLine})
 			}
 			// As with keyboard Esc/Ctrl+C, wait for DispatchSurfaceTurn to
 			// finish its durable cancellation cleanup before returning.
@@ -5297,10 +5312,10 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				return
 			}
 			// Esc before the model has produced anything withdraws the
-			// submission instead of cancelling around it: no "cancelling run",
-			// no user card left behind, and the text back in the composer to
-			// edit. A repeated press while cleanup drains is a no-op rather
-			// than a second recovery or a noisy cancel.
+			// submission instead of cancelling around it: no
+			// userStoppedRunLine, no user card left behind, and the text back
+			// in the composer to edit. A repeated press while cleanup drains is
+			// a no-op rather than a second recovery or a noisy cancel.
 			if foreground := state.activeForeground; foreground.withdraw() {
 				withdrawSubmittedMessage(session, renderer, state, foreground)
 				// withdraw() already cancelled this turn's own context, which
@@ -5323,8 +5338,8 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 			// Esc with a steer waiting is one operation the engine owns: the
 			// call in flight is abandoned and this same turn goes on carrying
 			// the steer — the meaning Esc already has in a subagent's view.
-			// The run does not end, so there is no "cancelling run" line and
-			// no "Worked for" closing it, and the working clock keeps counting.
+			// The run does not end, so there is no userStoppedRunLine and no
+			// "Worked for" closing it, and the working clock keeps counting.
 			// The two flags below stay untouched here on purpose: a set
 			// userInterrupted makes the turn's end read as an interrupt
 			// boundary that hands the queue back to the composer, and a set
@@ -5350,14 +5365,14 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 					state.userInterrupted = false
 					return
 				}
-				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: userStoppedRunLine})
 				return
 			}
 			if !session.CancelActiveRun() {
 				state.userInterrupted = false
 				return
 			}
-			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: userStoppedRunLine})
 			return
 		}
 		if ev.hotkey == hotkeyInterrupt {
@@ -5386,7 +5401,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				state.armActiveRunCtrlCExit()
 				state.markActiveRunCtrlCCancelNoReplay()
 				if session.CancelActiveRun() {
-					renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+					renderer.RenderFrame(Frame{Kind: FrameStatus, Title: userStoppedRunLine})
 				}
 				return
 			}
@@ -5398,7 +5413,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				// the run already cancelling ignores a second cancel.
 				if session.CancelActiveRun() {
 					state.markActiveRunCtrlCCancelNoReplay()
-					renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+					renderer.RenderFrame(Frame{Kind: FrameStatus, Title: userStoppedRunLine})
 				}
 				state.confirmCtrlCExit(renderer)
 				if state.quitRequested {
@@ -5409,7 +5424,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 			state.armActiveRunCtrlCExit()
 			state.markActiveRunCtrlCCancelNoReplay()
 			if session.CancelActiveRun() {
-				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: userStoppedRunLine})
 			}
 			return
 		}
@@ -5922,7 +5937,7 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 			return true
 		}
 		if session.CancelActiveRun() {
-			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "cancelling run"})
+			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: userStoppedRunLine})
 			return true
 		}
 		if state.clearComposer() {

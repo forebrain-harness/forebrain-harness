@@ -254,6 +254,11 @@ type StepEvent struct {
 	// whose reason is the engine's clarify text for the model and rides in the
 	// denial result's content alone, never on the card.
 	DenyFeedback string `json:"deny_feedback,omitempty"`
+	// Canceled marks a call that ended because the run was stopped, not
+	// because it failed: the executor reports the stop as its error, and this
+	// flag is what tells a surface the difference. It is display-only — the
+	// error text stays on the event for the audit and for the model.
+	Canceled bool `json:"canceled,omitempty"`
 }
 
 type ToolCompletionPayload struct {

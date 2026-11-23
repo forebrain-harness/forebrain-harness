@@ -1207,7 +1207,7 @@ func TestReplayDeniedToolRowShowsItsDisplayHalf(t *testing.T) {
 	denial := llm.ToolResultMessage("call-exit-1", llm.Text(denialText))
 	denial.ToolDisplay = &llm.ToolDisplayState{
 		Body:         "改成先写测试",
-		ToolMetaJSON: `{"tool_name":"exit_plan_mode","status":"denied"}`,
+		ToolMetaJSON: `{"tool_name":"exit_plan_mode","status":"denied","deny_feedback":"改成先写测试"}`,
 	}
 	toolParts := state.MessagePartsJSON(denial, denialText)
 
@@ -1657,6 +1657,64 @@ func TestReplaySubagentFromWorkerTranscriptMatchesEventReplay(t *testing.T) {
 	distinctView := strings.Join(frames(map[string][]state.Message{"worker-1": distinct}), "\n")
 	require.Contains(t, distinctView, "answer from the worker transcript")
 	require.NotContains(t, distinctView, "all checks passed")
+}
+
+// A subagent stopped while it waited for an approval ends with only its stop
+// line: the card that wait drew names no call and carries no output, so its own
+// ending settles it away — exactly what the live loop's ending does
+// (Renderer.FinalizeAgentPendingTools). Replay has no dispatch loop of its own,
+// so this is where that ending is applied; without it the reload drew a
+// subagent that had been stopped as still waiting for the reader.
+func TestReplaySettlesAStoppedSubagentsWaitingCardAway(t *testing.T) {
+	const agentID = "subagent-ask-1"
+	parent := state.Message{RowID: 1, Role: "user", Content: "dispatch a probe", CreatedAt: 99}
+	issued := assistantToolCallRow("delegating the probe", "call-spawn", "subagent_run",
+		`{"task":"probe","subagent_type":"general-purpose"}`)
+	at := time.Unix(100, 0).UTC()
+	spawn := event.NewRunEvent("spawn-1", "exec-1", "s1", event.RunEventSubagentSpawned, event.SubagentSpawnedPayload{
+		AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Task: "probe",
+		ParentRunID: "run-1", ParentToolCallID: "call-spawn", TaskIndex: 0, ExecutionID: "exec-1",
+	}, at)
+	started := event.NewRunEvent("ask-start", "exec-1", "s1", event.RunEventToolStarted, event.ToolCallStartedPayload{
+		Kind: event.RunEventToolStarted, StepID: "call-ask", ToolName: "user_interaction", Summary: "asking user",
+		ToolMeta: event.ToolCallMeta{ToolName: "user_interaction", AgentID: agentID, Status: "running"},
+	}, at.Add(time.Second))
+	completed := event.NewRunEvent("ask-done", "exec-1", "s1", event.RunEventToolCompleted, event.ToolCallCompletedPayload{
+		Kind: event.RunEventToolCompleted, StepID: "call-ask", ToolName: "user_interaction", Summary: "asking user",
+		ToolMeta: event.ToolCallMeta{ToolName: "user_interaction", AgentID: agentID, Status: "awaiting approval"},
+	}, at.Add(2*time.Second))
+	ended := event.NewRunEvent("ended", "exec-1", "s1", event.RunEventSubagentEnded, event.SubagentEndedPayload{
+		AgentID: agentID, AgentType: "general-purpose", TaskID: agentID, Status: "cancelled", Error: "cancelled",
+		ParentRunID: "run-1", ParentToolCallID: "call-spawn", TaskIndex: 0, ExecutionID: "exec-1",
+	}, at.Add(3*time.Second))
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithReducer(renderer, []state.Message{parent, issued},
+		[]event.RunEvent{spawn, started, completed, ended}, &Reducer{}, nil)
+
+	vm := renderer.perAgentVM[agentID]
+	if vm == nil {
+		t.Fatalf("the subagent's view was never rebuilt: %#v", renderer.perAgentVM)
+	}
+	for _, b := range vm.blocks {
+		if b.frame.Kind == FrameTool {
+			t.Fatalf("a stopped subagent replays still waiting for the reader: %#v", b.frame)
+		}
+	}
+	stops := 0
+	for _, b := range vm.blocks {
+		if b.frame.Kind == FrameStatus && b.frame.Title == "Cancelled" {
+			stops++
+			if b.frame.Content != "" {
+				t.Fatalf("the stop line says its status word twice: %q", b.frame.Content)
+			}
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("stop lines = %d, want the one the ending draws: %#v", stops, vm.blocks)
+	}
 }
 
 // A block's words live once: in the worker transcript, written as each block
@@ -2943,19 +3001,27 @@ func TestReplayDropsCanceledExitGateSettledRow(t *testing.T) {
 	callArgs := `{"plan":"do the thing"}`
 	for _, tc := range []struct {
 		name     string
+		body     string
 		metaJSON string
 		wantCard bool
 		wantText string
+		wantBody string
 	}{
-		{name: "canceled row holds no card", metaJSON: `{"tool_name":"exit_plan_mode","status":"canceled"}`},
-		{name: "denied row keeps its card", metaJSON: `{"tool_name":"exit_plan_mode","status":"denied"}`, wantCard: true, wantText: "Kept planning"},
-		{name: "approved row keeps its card", metaJSON: `{"tool_name":"exit_plan_mode","status":"completed"}`, wantCard: true, wantText: "Exited plan mode"},
+		{name: "canceled row holds no card", body: "plan review closed the gate", metaJSON: `{"tool_name":"exit_plan_mode","status":"canceled"}`},
+		// A refusal carries a card only when it carries the user's own words:
+		// without them the surface already printed the confirmation line.
+		{name: "denied row without the user's words holds no card", body: "(no output)", metaJSON: `{"tool_name":"exit_plan_mode","status":"denied"}`},
+		// The user's words are the whole reason the card is drawn, so they must
+		// survive the replay's own meta rebuild (replayToolStepMeta) and the
+		// reducer's second pass over the message it returns.
+		{name: "denied row in the user's words keeps its card", body: "split the milestones first", metaJSON: `{"tool_name":"exit_plan_mode","status":"denied","deny_feedback":"split the milestones first"}`, wantCard: true, wantText: "Kept planning", wantBody: "split the milestones first"},
+		{name: "approved row keeps its card", body: "plan review closed the gate", metaJSON: `{"tool_name":"exit_plan_mode","status":"completed"}`, wantCard: true, wantText: "Exited plan mode"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			turns := []state.Message{
 				{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 99},
 				assistantToolCallRow("here is the plan", "call-exit", "exit_plan_mode", callArgs),
-				toolRowWithDisplay(3, "call-exit", "plan review closed the gate", tc.metaJSON),
+				toolRowWithDisplay(3, "call-exit", tc.body, tc.metaJSON),
 			}
 
 			renderer := NewRenderer(nil, nil)
@@ -2985,6 +3051,9 @@ func TestReplayDropsCanceledExitGateSettledRow(t *testing.T) {
 			action, _, _ := toolDisplayParts(*card, card.Summary, "")
 			if action != tc.wantText {
 				t.Fatalf("settled card reads %q, want %q", action, tc.wantText)
+			}
+			if tc.wantBody != "" && card.Content != tc.wantBody {
+				t.Fatalf("settled card body = %q, want the user's own words %q", card.Content, tc.wantBody)
 			}
 		})
 	}
@@ -3067,8 +3136,10 @@ func TestReplayCardlessGateDecisionPrecedesItsSettledCard(t *testing.T) {
 			wantAction:   "Exited plan mode",
 		},
 		{
+			// A modern refusal row: the user's words ride on the stored meta,
+			// which is what makes the card draw at all.
 			name: "denied", decision: "denied",
-			metaJSON:     `{"tool_name":"exit_plan_mode","status":"denied"}`,
+			metaJSON:     `{"tool_name":"exit_plan_mode","status":"denied","deny_feedback":"split the milestones first"}`,
 			body:         "split the milestones first",
 			confirmation: "✗ You did not approve forebrain to exit plan mode",
 			wantAction:   "Kept planning",

@@ -2416,7 +2416,23 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		// place the rule is applied. The call still ends the response that
 		// preceded it, so the streamed text is sealed exactly as a drawn card
 		// would have sealed it.
-		if tool.ToolStepHoldsNoCard(firstNonEmpty(msg.ToolName, msg.ToolMeta.ToolName), msg.ToolMeta.Status) {
+		if tool.ToolStepHoldsNoCard(firstNonEmpty(msg.ToolName, msg.ToolMeta.ToolName), msg.ToolMeta.Status, msg.ToolMeta.DenyFeedback) {
+			return r.flushBufferedText(r.agentBuf(strings.TrimSpace(msg.AgentID)), msg.Timestamp)
+		}
+		// A call a stop settled as canceled with nothing to say draws no card
+		// either (tool.StoppedCardSaysNothing): the surface's own stop line
+		// already said it. Two messages that reach this funnel are not this
+		// rule's business and name no subject by design — a subagent_* call,
+		// whose card is the task row built below from the facts on its meta,
+		// and an approval, which moves the roster row and draws nothing.
+		if msg.ToolMeta.SubagentCall == nil &&
+			!strings.EqualFold(strings.TrimSpace(msg.ToolMeta.Category), "approval") &&
+			tool.StoppedCardSaysNothing(tool.DisplayFrame{
+				Title:   firstNonEmpty(msg.ToolName, msg.ToolMeta.ToolName),
+				Summary: msg.Summary,
+				Meta:    msg.ToolMeta,
+				Content: msg.Content,
+			}) {
 			return r.flushBufferedText(r.agentBuf(strings.TrimSpace(msg.AgentID)), msg.Timestamp)
 		}
 		stepID := strings.TrimSpace(msg.StepID)
@@ -2526,13 +2542,20 @@ func (r *Reducer) subagentClosingFrames(agentID string, m SubagentEndedMsg) []Fr
 	// It is a status, not an error — nothing went wrong that the user must fix.
 	if status == "cancelled" || status == "interrupted" {
 		title := "Cancelled"
+		content := errText
 		if status == "interrupted" {
 			title = "Interrupted"
+		} else {
+			// A cancelled run's error field carries the status word itself
+			// ("cancelled"), which the line's title already says. The web
+			// drawer draws the same stop with no reason (RunStoppedLine), and a
+			// reason belongs on this line only when there is a real one.
+			content = ""
 		}
 		return []Frame{{
 			Kind:    FrameStatus,
 			Title:   title,
-			Content: errText,
+			Content: content,
 			RunID:   r.activeRunID,
 			AgentID: agentID,
 			Final:   true,

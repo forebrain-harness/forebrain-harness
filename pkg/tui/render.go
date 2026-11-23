@@ -882,7 +882,7 @@ func (r *Renderer) PrintError(err error) {
 // asked for, have no parked card to sit above, so they keep the order they
 // were produced in: right after the response that issued the call.
 func approvalGateHoldsNoCard(actionKind string) bool {
-	return tool.ToolStepHoldsNoCard(actionKind, "awaiting approval")
+	return tool.ToolStepHoldsNoCard(actionKind, "awaiting approval", "")
 }
 
 // PrintApprovalConfirmation writes the finished "✔ You approved …" line into
@@ -939,9 +939,18 @@ func (r *Renderer) FinalizePendingTools() {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.finalizePendingToolsVM(&r.vm) {
-		r.paintViewportLocked()
+	if !r.finalizePendingToolsVM(&r.vm) {
+		return
 	}
+	// The primary transcript is what is drawn when no agent's view is on
+	// screen; a removal anywhere else must leave the reader's own pointers
+	// alone (see WithdrawDeadStreamBlocks).
+	if r.activeView != "" {
+		return
+	}
+	r.vpHoverRow = -1
+	r.selectClearLocked()
+	r.paintViewportLocked()
 }
 
 // FinalizeAgentPendingTools is FinalizePendingTools for one subagent's view,
@@ -957,13 +966,29 @@ func (r *Renderer) FinalizeAgentPendingTools(agentID string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if vm := r.perAgentVM[agentID]; vm != nil && r.finalizePendingToolsVM(vm) {
-		r.paintViewportLocked()
+	vm := r.perAgentVM[agentID]
+	if vm == nil || !r.finalizePendingToolsVM(vm) {
+		return
 	}
+	// Only the view on screen has a pointer to move: a removal in a view the
+	// reader is not looking at must not clear the hover row or the selection
+	// they made in this one.
+	if strings.TrimSpace(r.activeView) != agentID {
+		return
+	}
+	r.vpHoverRow = -1
+	r.selectClearLocked()
+	r.paintViewportLocked()
 }
 
+// finalizePendingToolsVM settles every card of one view that a stop left in
+// flight, and removes the ones the stop left with nothing to say: a stopped ask
+// names no subject and carries no output, so "Canceled / (no output)" would only
+// repeat the run's own stop line (owner 2026-11-23). A card that names its call
+// — "Canceled sleep 30" — is settled in place and stays.
 func (r *Renderer) finalizePendingToolsVM(vm *viewModel) bool {
 	changed := false
+	kept := vm.blocks[:0]
 	for _, b := range vm.blocks {
 		if b.frame.Kind == FrameTool && toolStatusPending(b.frame) {
 			b.frame.ToolMeta.Status = "canceled"
@@ -971,7 +996,16 @@ func (r *Renderer) finalizePendingToolsVM(vm *viewModel) bool {
 			b.cache.valid = false
 			changed = true
 		}
+		if b.frame.Kind == FrameTool && tool.StoppedCardSaysNothing(displayFrameOf(b.frame, b.frame.Summary)) {
+			changed = true
+			continue
+		}
+		kept = append(kept, b)
 	}
+	for i := len(kept); i < len(vm.blocks); i++ {
+		vm.blocks[i] = nil
+	}
+	vm.blocks = kept
 	return changed
 }
 

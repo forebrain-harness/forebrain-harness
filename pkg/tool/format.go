@@ -147,6 +147,13 @@ func FormatToolStepResult(evt StepEvent, maxBytes int) (formatted string, trunca
 	if evt.Denied {
 		return DeniedToolDisplayBody(toolName, evt.Input, evt.DenyFeedback), false
 	}
+	// A stopped call ended early: it says that, not the executor's error,
+	// which rides on the event for the audit alone. This branch sits ahead of
+	// the skill and error bodies below for that reason — a cancelled skill
+	// load and a cancelled shell call are the same stop to the reader.
+	if evt.Canceled {
+		return StoppedCallDisplayBody, false
+	}
 	if stepRequiresApproval(evt) {
 		return "", false
 	}
@@ -2685,9 +2692,11 @@ func subagentElapsedLabel(startedAt, finishedAt int64) string {
 // debug — and the exit-plan gate's wait, which lives entirely in its approval
 // prompt, so no surface paints a card while the call runs, awaits the
 // decision, or was abandoned to that wait — waiting, abandoned and canceled
-// hold no card. Only the gate's settled answers draw: the user's denial, a
-// failure, the exit itself.
-func ToolStepHoldsNoCard(toolName, status string) bool {
+// hold no card. Of the gate's settled answers only the ones with something to
+// say draw: a denial in the user's own words (denyFeedback), a failure, the
+// exit itself. A wordless denial is the answer a surface already stated in its
+// own line, so it holds no card either.
+func ToolStepHoldsNoCard(toolName, status, denyFeedback string) bool {
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
 	case "present_files":
 		return true
@@ -2695,6 +2704,14 @@ func ToolStepHoldsNoCard(toolName, status string) bool {
 		switch strings.TrimSpace(status) {
 		case "running", "awaiting approval", "canceled":
 			return true
+		case "denied":
+			// A refusal is worth a card only when it carries the user's own
+			// words. Every surface that refuses a gate in its own overlay has
+			// already printed the line saying so ("✗ You did not approve …"),
+			// and a refusal answered through the API or the web composable
+			// carries no words at all: with the plan already in the transcript
+			// and the refusal stated, a wordless card only repeats it.
+			return strings.TrimSpace(denyFeedback) == ""
 		default:
 			return false
 		}
@@ -2703,7 +2720,18 @@ func ToolStepHoldsNoCard(toolName, status string) bool {
 	}
 }
 
+// StoppedCallDisplayBody is what a call the user stopped says as its card body.
+// The executor's own error for an interrupted call is Go plumbing
+// ("tool shell: context canceled"); the reader needs to know the call ended
+// early because the run was stopped, which is what this says.
+const StoppedCallDisplayBody = "You stopped this call before it finished."
+
 func stepStatusLabel(evt StepEvent) string {
+	// A stop outranks the executor's error: a cancelled call reports its error
+	// too (the audit keeps it), but it did not fail.
+	if evt.Canceled {
+		return "canceled"
+	}
 	if strings.TrimSpace(evt.Error) != "" {
 		return "failed"
 	}

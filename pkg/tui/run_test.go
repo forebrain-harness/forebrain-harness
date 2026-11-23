@@ -3271,8 +3271,8 @@ func TestHandleIdleHotkeyInterruptQuitsWithAlreadyFinishingController(t *testing
 	if !state.quitRequested {
 		t.Fatal("empty idle composer should quit on a second ctrl+c when no new cancellation work starts")
 	}
-	if strings.Contains(out.String(), "cancelling run") {
-		t.Fatalf("stale controller must not render another cancelling status: %q", out.String())
+	if strings.Contains(out.String(), userStoppedRunLine) || strings.Contains(out.String(), interruptStoppedRunLine) {
+		t.Fatalf("stale controller must not render another stop status: %q", out.String())
 	}
 }
 
@@ -3692,7 +3692,7 @@ func TestRunTurnCtrlCCancelDoesNotReplayPendingSteers(t *testing.T) {
 
 // TestExecuteComposerSubmissionPreservesCtrlCEscalationAcrossAutoContinuation
 // guards the fix for a TUI hang: mashing Ctrl+C during an active run printed
-// "cancelling run" over and over and the process never exited, because every
+// the stop line over and over and the process never exited, because every
 // automatically chained continuation (a queued/pending submission
 // nextAutomaticSubmission replays right after a turn ends) reset the
 // cancel/quit escalation sequence back to its start. A user whose Ctrl+C had
@@ -6806,7 +6806,7 @@ func TestEscInTheMainViewActsOnTheQueueBeforeCancellingTheRun(t *testing.T) {
 		t.Fatalf("main-view Esc must still withdraw (withdrawn=%v draft=%q)", foreground.isWithdrawn(), state.composer.DraftText)
 	}
 
-	// Interrupt to send pending steers: one run, no cancel, no "cancelling run".
+	// Interrupt to send pending steers: one run, no cancel, no stop line.
 	steer := &fakeSession{cancelActive: true, interruptSendMain: true}
 	steerState := &streamState{sessionID: "s1", session: steer}
 	steer.enqueueSteer("s1", mustComposerSubmission("keep going"))
@@ -6823,8 +6823,8 @@ func TestEscInTheMainViewActsOnTheQueueBeforeCancellingTheRun(t *testing.T) {
 		t.Fatalf("the interrupt path set an interrupt-boundary flag (interrupted=%v submit=%v): the turn would end on one",
 			steerState.userInterrupted, steerState.submitPendingSteersAfterInterrupt)
 	}
-	if got := mainViewStatusLines(steerRenderer); strings.Contains(got, "cancelling run") {
-		t.Fatalf("the interrupt path rendered the cancel line: %q", got)
+	if got := mainViewStatusLines(steerRenderer); strings.Contains(got, userStoppedRunLine) || strings.Contains(got, interruptStoppedRunLine) {
+		t.Fatalf("the interrupt path rendered a stop line: %q", got)
 	}
 
 	// The engine refuses (nothing it can abandon): the old cancel stands.
@@ -6838,8 +6838,8 @@ func TestEscInTheMainViewActsOnTheQueueBeforeCancellingTheRun(t *testing.T) {
 		t.Fatalf("main-view Esc must fall back to cancel (cancels=%d interrupted=%v submit=%v)",
 			cancel.cancelCalls, cancelState.userInterrupted, cancelState.submitPendingSteersAfterInterrupt)
 	}
-	if got := mainViewStatusLines(cancelRenderer); !strings.Contains(got, "cancelling run") {
-		t.Fatalf("the fallback must render the cancel line, got %q", got)
+	if got := mainViewStatusLines(cancelRenderer); !strings.Contains(got, userStoppedRunLine) {
+		t.Fatalf("the fallback must render the stop line, got %q", got)
 	}
 }
 
@@ -6881,8 +6881,8 @@ func TestEscInTheMainViewWithoutSteersStillCancelsTheRun(t *testing.T) {
 				t.Fatalf("Esc with an empty queue (%s) must cancel the run (cancels=%d interrupted=%v)",
 					tc.during, session.cancelCalls, state.userInterrupted)
 			}
-			if got := mainViewStatusLines(renderer); !strings.Contains(got, "cancelling run") {
-				t.Fatalf("Esc with an empty queue (%s) must render the cancel line, got %q", tc.during, got)
+			if got := mainViewStatusLines(renderer); !strings.Contains(got, userStoppedRunLine) {
+				t.Fatalf("Esc with an empty queue (%s) must render the stop line, got %q", tc.during, got)
 			}
 		})
 	}

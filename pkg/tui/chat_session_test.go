@@ -10935,11 +10935,13 @@ func TestExitPlanModeDeniedToolFrameStandsAlone(t *testing.T) {
 	// The gate's wait paints no card on any surface, so the denial the user
 	// made is the first and only frame the step produces: it stands alone.
 	denied := reducer.Reduce(NewMessageMsg{Msg: Message{
-		Kind:      MsgKindTool,
-		StepID:    "exit-call-1",
-		ToolName:  "exit_plan_mode",
-		Content:   "Please split the plan into milestones.",
-		ToolMeta:  tool.ToolMeta{ToolName: "exit_plan_mode", Status: "denied"},
+		Kind:     MsgKindTool,
+		StepID:   "exit-call-1",
+		ToolName: "exit_plan_mode",
+		Content:  "Please split the plan into milestones.",
+		// The words are what makes the card draw: a wordless refusal is the
+		// answer the surface already stated in its own confirmation line.
+		ToolMeta:  tool.ToolMeta{ToolName: "exit_plan_mode", Status: "denied", DenyFeedback: "Please split the plan into milestones."},
 		ToolPhase: "tool_call_completed",
 		Timestamp: time.Now(),
 	}}).Frames
@@ -33052,5 +33054,139 @@ func TestDeleteConfiguredModelRefusesTheDefaultAndRemovesTheRest(t *testing.T) {
 	}
 	if want := "This model is no longer configured."; reply != want {
 		t.Fatalf("reply = %q, want %q", reply, want)
+	}
+}
+
+// A gate the user cancelled is a cancel, not a refusal: the action's own status
+// says so, and the reason the cancel wrote ("cancelled") is the engine's
+// fallback word, never the user's. Recording it as a denial with that word as
+// feedback is what made the card outlive the confirmation line that already
+// said the same thing.
+func TestCancelledApprovalCardIsACancelWithNoWords(t *testing.T) {
+	ctx := context.Background()
+	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{})
+	if _, err := actions.Cancel(ctx, actionID, "cancelled"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	p := &chatApprovalResume{
+		ActionID: actionID, RunID: "run-1", SessionID: "session-1",
+		ToolName: "exit_plan_mode", SessionSnapshot: resumeSnapshotFixture(),
+	}
+	toolCards := make(chan Message, 4)
+	cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			toolCards <- m.Msg
+		}
+	})
+	t.Cleanup(cs.stopUINotificationDispatcher)
+	cs.notifyToolApprovalDenied(p, actionID)
+	select {
+	case got := <-toolCards:
+		if got.ToolMeta.Status != "canceled" {
+			t.Fatalf("cancelled gate card status = %q, want canceled", got.ToolMeta.Status)
+		}
+		if got.ToolMeta.DenyFeedback != "" {
+			t.Fatalf("the cancel's fallback word leaked into the card as the user's words: %q", got.ToolMeta.DenyFeedback)
+		}
+		if got.Content != "" {
+			t.Fatalf("a cancelled card carries no body, got %q", got.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the cancelled card")
+	}
+}
+
+// When the action cannot be read the verdict is unknown, and the card keeps the
+// shape it has always had — a denial with no words — rather than guessing. It
+// draws nothing (the gate rule drops a wordless refusal), which loses nothing:
+// this card never carried anything but "(no output)", and the confirmation line
+// is drawn from its own record, not from this read.
+func TestUnreadableApprovalKeepsTheWordlessDenial(t *testing.T) {
+	cs, _, _ := newPlanReviewSession(t, &stubReviewer{})
+	p := &chatApprovalResume{
+		ActionID: "no-such-action", RunID: "run-1", SessionID: "session-1",
+		ToolName: "exit_plan_mode", SessionSnapshot: resumeSnapshotFixture(),
+	}
+	toolCards := make(chan Message, 4)
+	cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			toolCards <- m.Msg
+		}
+	})
+	t.Cleanup(cs.stopUINotificationDispatcher)
+	cs.notifyToolApprovalDenied(p, "no-such-action")
+	select {
+	case got := <-toolCards:
+		if got.ToolMeta.Status != "denied" {
+			t.Fatalf("unreadable action card status = %q, want denied", got.ToolMeta.Status)
+		}
+		if got.ToolMeta.DenyFeedback != "" {
+			t.Fatalf("an unreadable action must not invent the user's words: %q", got.ToolMeta.DenyFeedback)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the card")
+	}
+}
+
+// A subagent's ending settles what it left pending, and a settled card with
+// nothing to say is removed rather than left on screen as "Canceled / (no
+// output)". A card that names its call is settled in place: it is the record of
+// what that agent was doing when it stopped.
+func TestFinalizeAgentPendingToolsDropsTheCardThatSaysNothing(t *testing.T) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+
+	const agentID = "agent-empty"
+	r.RenderFrame(Frame{
+		Kind: FrameTool, Title: "user_interaction", StepID: "ask-1", AgentID: agentID,
+		ToolMeta: tool.ToolMeta{ToolName: "user_interaction", Status: "running", AgentID: agentID},
+	})
+	r.RenderFrame(Frame{
+		Kind: FrameTool, Title: "shell", StepID: "shell-1", AgentID: agentID,
+		ToolMeta: tool.ToolMeta{ToolName: "shell", Status: "running", AgentID: agentID, Input: map[string]any{"command": "sleep 30"}},
+	})
+
+	r.FinalizeAgentPendingTools(agentID)
+
+	vm := r.perAgentVM[agentID]
+	if vm == nil || len(vm.blocks) != 1 {
+		t.Fatalf("the agent's view must keep only the card that names its call: %#v", vm)
+	}
+	if got := vm.blocks[0].frame.ToolMeta.Status; got != "canceled" {
+		t.Fatalf("the named card status = %q, want canceled", got)
+	}
+	if !strings.Contains(ToolDisplayHeader(vm.blocks[0].frame, vm.blocks[0].frame.Summary), "sleep 30") {
+		t.Fatalf("the card must still name its call: %#v", vm.blocks[0].frame)
+	}
+}
+
+// Settling another agent's view removes a block there; it must not drop the
+// hover row or the selection the reader has in the view they are looking at.
+func TestSettlingAnotherAgentsViewKeepsTheActiveViewsPointerState(t *testing.T) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+
+	const agentID = "agent-behind"
+	r.RenderFrame(Frame{
+		Kind: FrameTool, Title: "user_interaction", StepID: "ask-1", AgentID: agentID,
+		ToolMeta: tool.ToolMeta{ToolName: "user_interaction", Status: "running", AgentID: agentID},
+	})
+	r.activeView = ""
+	r.vpHoverRow = 7
+	r.selectStartRow, r.selectEndRow = 3, 5
+	r.selectStartCol, r.selectEndCol = 1, 2
+
+	r.FinalizeAgentPendingTools(agentID)
+
+	if vm := r.perAgentVM[agentID]; vm == nil || len(vm.blocks) != 0 {
+		t.Fatalf("the settled empty card must be gone: %#v", vm)
+	}
+	if r.vpHoverRow != 7 || r.selectStartRow != 3 || r.selectEndRow != 5 {
+		t.Fatalf("a removal in another view cleared the reader's own pointer state: hover=%d sel=%d-%d",
+			r.vpHoverRow, r.selectStartRow, r.selectEndRow)
 	}
 }

@@ -104,6 +104,26 @@ func toolStatesOwnDeniedLabel(lower string) bool {
 	}
 }
 
+// StoppedCardSaysNothing reports whether a call a stop settled as canceled
+// would draw a card with nothing in it: a head that names no subject and a body
+// with no output. The surface already says the run was stopped — the
+// conversation's "You stopped this run" / "Run stopped" line, a subagent's
+// "Cancelled" line — so such a card only repeats it (owner 2026-11-23). A card
+// that names its call ("Canceled sleep 30") or carries real output stays.
+func StoppedCardSaysNothing(f DisplayFrame) bool {
+	if !strings.EqualFold(strings.TrimSpace(f.Meta.Status), "canceled") {
+		return false
+	}
+	// Every stopped call carries the same generic sentence (P4). That sentence
+	// is about the stop, not about this call, so it is not content: a card that
+	// names no subject and holds only it still says nothing (owner rule ①).
+	if body := strings.TrimSpace(f.Content); body != "" && body != StoppedCallDisplayBody {
+		return false
+	}
+	_, target, suffix := DisplayParts(f, "")
+	return strings.TrimSpace(target) == "" && strings.TrimSpace(suffix) == ""
+}
+
 func defaultToolInvocationTarget(title string, meta ToolMeta) string {
 	invocation := strings.TrimSpace(meta.Invocation)
 	if invocation == "" {

@@ -1226,12 +1226,30 @@ func (s *ChatSession) notifyToolApprovalDenied(p *chatApprovalResume, actionID s
 	// The card says what the user said — the one sentence the denial's
 	// display half carries, from the same place the persisted tool result's
 	// tool_display body comes — never the guidance composed for the model.
+	//
+	// The action's own verdict outranks the shape of the parked call: a gate
+	// the user cancelled ended as a cancel, and the reason a cancel records
+	// ("cancelled") is the engine's fallback word, not something the user
+	// said. Reading it as a denial made the card repeat the confirmation line
+	// that had already been printed — and, because that word made the refusal
+	// look like it carried feedback, kept a "Kept planning / cancelled" card
+	// beside a line that said the same thing.
+	//
+	// A read that fails leaves the verdict unknown, so the card keeps the shape
+	// it always had: a denial with no words on it. That draws nothing under the
+	// gate rule, which loses nothing — this card never held anything but
+	// "(no output)" — and the confirmation line is drawn from its own record,
+	// not from this read.
 	feedback := ""
 	deliveredReview := false
 	if status == "denied" && s.actionSvc() != nil {
 		if act, err := s.actionSvc().Get(context.Background(), actionID); err == nil && act != nil {
-			feedback = act.Error
-			deliveredReview = turn.ActionIsReviewDelivered(act)
+			if act.Status == state.ActionCancelled {
+				status = "canceled"
+			} else {
+				feedback = act.Error
+				deliveredReview = turn.ActionIsReviewDelivered(act)
+			}
 		}
 	}
 	// A delivered review closed this gate, not the user: the handoff is
@@ -1240,13 +1258,16 @@ func (s *ChatSession) notifyToolApprovalDenied(p *chatApprovalResume, actionID s
 	if status == "denied" && deliveredReview {
 		return
 	}
-	content := tool.DeniedToolDisplayBody(toolName, input, feedback)
+	content := ""
 	if status == "denied" {
+		content = tool.DeniedToolDisplayBody(toolName, input, feedback)
 		// The refused call's card comes from the same constructor the runtime's
 		// own denied step and the in-place answer's card use, so the live card,
 		// a reload and the web all carry the user's words on the meta (plan 154).
 		meta = tool.BuildToolMeta(tool.DeniedToolStep(stepID, toolName, input, feedback))
 	} else {
+		// A cancelled call never ran and says nothing of its own: the stop
+		// line is the surface's account of it.
 		meta.Status = status
 	}
 	s.notifyUI(NewMessageMsg{Msg: Message{

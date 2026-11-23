@@ -4405,6 +4405,128 @@ func TestCancelledRunKeepsQueuedSteerInsteadOfDrainingAtToolBoundary(t *testing.
 	}
 }
 
+// shellCallLLM asks for one shell call on its first sampling and answers
+// plainly after it, so a test can drive the real executor through a stop or a
+// timeout and read the step events it produced.
+type shellCallLLM struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *shellCallLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	m.calls++
+	n := m.calls
+	m.mu.Unlock()
+	if n == 1 {
+		msg := llm.AssistantMessage(nil, llm.ToolCall{
+			ID:       "call-shell",
+			Type:     llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"sleep 30"}`},
+		})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("after")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+}
+
+// A call the user stopped ended early; it did not fail. The completion event
+// says so (StepEvent.Canceled) so every surface can word it as the stop it was,
+// while the executor's own error text stays on the event for the audit and the
+// model.
+func TestCancelledToolCallReportsTheStopNotAFailure(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	var mu sync.Mutex
+	var steps []toolpkg.StepEvent
+	st.SetStepHook(func(_ context.Context, evt toolpkg.StepEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		steps = append(steps, evt)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Esc lands while the command runs: the tool returns the run's context
+	// error, which executeToolHandler wraps as "tool shell: …".
+	shellTool, err := llm.NewTool("shell", "run", func(ctx context.Context, _ *struct{}) (string, error) {
+		cancel()
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+
+	_, _ = wrapToolOrchestrationLLM(&shellCallLLM{}, st).Execute(
+		ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("run it"))},
+		[]*llm.Tool{shellTool},
+	)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var completed *toolpkg.StepEvent
+	for i := range steps {
+		if steps[i].Kind == toolpkg.StepKindToolCompleted && steps[i].ToolName == "shell" {
+			completed = &steps[i]
+		}
+	}
+	if completed == nil {
+		t.Fatalf("no completed step for the cancelled call: %#v", steps)
+	}
+	if !completed.Canceled {
+		t.Fatalf("a cancelled call must report the stop: %#v", *completed)
+	}
+	if !strings.Contains(completed.Error, "context canceled") {
+		t.Fatalf("the executor's own error stays on the event for the audit, got %q", completed.Error)
+	}
+}
+
+// A timeout is not a stop: nothing the user did ended it, the call failed, and
+// it keeps the failure's own words.
+func TestTimedOutToolCallStillReportsAFailure(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	var mu sync.Mutex
+	var steps []toolpkg.StepEvent
+	st.SetStepHook(func(_ context.Context, evt toolpkg.StepEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		steps = append(steps, evt)
+	})
+
+	shellTool, err := llm.NewTool("shell", "run", func(context.Context, *struct{}) (string, error) {
+		return "", context.DeadlineExceeded
+	})
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+
+	_, _ = wrapToolOrchestrationLLM(&shellCallLLM{}, st).Execute(
+		context.Background(),
+		[]llm.Message{llm.UserMessage(llm.Text("run it"))},
+		[]*llm.Tool{shellTool},
+	)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var completed *toolpkg.StepEvent
+	for i := range steps {
+		if steps[i].Kind == toolpkg.StepKindToolCompleted && steps[i].ToolName == "shell" {
+			completed = &steps[i]
+		}
+	}
+	if completed == nil {
+		t.Fatalf("no completed step: %#v", steps)
+	}
+	if completed.Canceled {
+		t.Fatalf("a timeout must not be called a stop: %#v", *completed)
+	}
+}
+
 // cancelAtFinalAnswerLLM cancels the run as it returns a tool-call-free answer,
 // reproducing an esc that lands just as the turn was about to end.
 type cancelAtFinalAnswerLLM struct {

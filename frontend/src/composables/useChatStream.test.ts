@@ -18,6 +18,7 @@ import {
   emptyContextRuntimeSignals,
   emptyPendingInputPreview,
   applyPlanUpdateToMessage,
+  cancelPendingToolBlocks,
   computeWorkedDurationMs,
   formatRetryCountdown,
   formatRuntimeStatusLabel,
@@ -35,6 +36,9 @@ import {
   workedLineText,
   skillCardTitle,
   thinkingBlockLabel,
+  stepHoldsNoCard,
+  stoppedCardSaysNothing,
+  STOPPED_CALL_BODY,
   timelineBlockKey,
   toolStepFromPayload,
   toolStepFromRow,
@@ -3528,9 +3532,9 @@ describe('conversation tool and approval timeline', () => {
   }))
 
   it('draws nothing for a delivered gate and its card for a user denial', () => {
-    const denialParts = (body: string) => JSON.stringify([
+    const denialParts = (body: string, denyFeedback?: string) => JSON.stringify([
       { type: 'tool_result_meta', tool_call_id: 'call-exit' },
-      { type: 'tool_display', body, summary: 'kept planning', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'denied' }) },
+      { type: 'tool_display', body, summary: 'kept planning', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'denied', ...(denyFeedback ? { deny_feedback: denyFeedback } : {}) }) },
     ])
     const assistantParts = JSON.stringify([
       { type: 'text', text: '' },
@@ -3548,7 +3552,7 @@ describe('conversation tool and approval timeline', () => {
     // The user's own denial keeps its card — their words are history.
     const denied = conversationFromTranscript([
       { id: 'a1', rowId: 1, role: 'assistant', content: '', partsJson: assistantParts },
-      { id: 't1', rowId: 2, role: 'tool', content: '{}', toolStepId: 'call-exit', partsJson: denialParts('Please split the plan into milestones.') },
+      { id: 't1', rowId: 2, role: 'tool', content: '{}', toolStepId: 'call-exit', partsJson: denialParts('Please split the plan into milestones.', 'Please split the plan into milestones.') },
     ] as unknown as Parameters<typeof conversationFromTranscript>[0])
     expect(denied.flatMap((message) => (message.blocks ?? []).filter((block) => block.kind === 'tool'))).toHaveLength(1)
   })
@@ -3670,11 +3674,11 @@ describe('conversation tool and approval timeline', () => {
   })
 
   it('anchors every exit gate call on reload, drawing only its settled answers', () => {
-    const gateRow = (status: string, body: string) => ({
+    const gateRow = (status: string, body: string, denyFeedback?: string) => ({
       id: 't1', rowId: 3, role: 'tool', content: '{}', toolStepId: 'call-exit',
       partsJson: JSON.stringify([
         { type: 'tool_result_meta', tool_call_id: 'call-exit' },
-        { type: 'tool_display', body, summary: '', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status }) },
+        { type: 'tool_display', body, summary: '', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status, ...(denyFeedback ? { deny_feedback: denyFeedback } : {}) }) },
       ]),
     })
     const issuedCall = (name: string) => JSON.stringify([
@@ -3694,9 +3698,13 @@ describe('conversation tool and approval timeline', () => {
     // A delivered review closed the gate: the handoff row draws nothing.
     expect(kinds([assistantRow(issuedCall('exit_plan_mode')), gateRow('denied', 'Plan review delivered — the planner is revising the plan.')]))
       .toEqual(['assistant', 'gate'])
-    // A settled answer draws, right after the anchor.
-    expect(kinds([assistantRow(issuedCall('exit_plan_mode')), gateRow('denied', 'Please split the plan into milestones.')]))
+    // A settled answer draws, right after the anchor — but only when it carries
+    // the user's own words: a refusal without them is the answer the page
+    // already stated in its line, so it holds no card.
+    expect(kinds([assistantRow(issuedCall('exit_plan_mode')), gateRow('denied', 'Please split the plan into milestones.', 'Please split the plan into milestones.')]))
       .toEqual(['assistant', 'gate', 'tool'])
+    expect(kinds([assistantRow(issuedCall('exit_plan_mode')), gateRow('denied', '(no output)')]))
+      .toEqual(['assistant', 'gate'])
     expect(kinds([assistantRow(issuedCall('exit_plan_mode')), gateRow('completed', 'Exited plan mode.')]))
       .toEqual(['assistant', 'gate', 'tool'])
     // A call that draws its own card is untouched.
@@ -3762,7 +3770,7 @@ describe('conversation tool and approval timeline', () => {
         id: 't1', rowId: 3, role: 'tool', content: '{}', toolStepId: 'call-exit',
         partsJson: JSON.stringify([
           { type: 'tool_result_meta', tool_call_id: 'call-exit' },
-          { type: 'tool_display', body: 'Please split the plan into milestones.', summary: 'kept planning', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'denied' }) },
+          { type: 'tool_display', body: 'Please split the plan into milestones.', summary: 'kept planning', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'denied', deny_feedback: 'Please split the plan into milestones.' }) },
         ]),
       },
     ] as never)
@@ -3785,6 +3793,55 @@ describe('conversation tool and approval timeline', () => {
       sessionEventsSpy.mockRestore()
       legacySpy.mockRestore()
     }
+  })
+
+  it('words a stopped call once: its card draws only when it has something to say', () => {
+    const step = (over: Partial<SubagentToolStep>): SubagentToolStep => ({
+      stepId: 'call-1',
+      toolName: 'user_interaction',
+      summary: 'user interaction',
+      status: 'canceled',
+      headerParts: { action: 'Canceled' },
+      ...over,
+    })
+
+    // Bound to the runtime's tool.StoppedCallDisplayBody: the sentence is the
+    // engine's, so this literal and that constant change together.
+    expect(STOPPED_CALL_BODY).toBe('You stopped this call before it finished.')
+
+    // A canceled ask names no subject and carries no output: the page's own
+    // stop line is the one account of it.
+    expect(stoppedCardSaysNothing(step({}))).toBe(true)
+    expect(stoppedCardSaysNothing(step({ output: STOPPED_CALL_BODY }))).toBe(true)
+    // A card that names its call, or carries real output, stays.
+    expect(stoppedCardSaysNothing(step({ toolName: 'shell', headerParts: { action: 'Canceled', target: 'sleep 30' }, output: STOPPED_CALL_BODY }))).toBe(false)
+    expect(stoppedCardSaysNothing(step({ output: 'Which database?' }))).toBe(false)
+    // Only a canceled call is this rule's business.
+    expect(stoppedCardSaysNothing(step({ status: 'completed' }))).toBe(false)
+    expect(stoppedCardSaysNothing(step({ status: 'failed' }))).toBe(false)
+    // An older payload carries no parts to judge by: keep its card.
+    expect(stoppedCardSaysNothing(step({ headerParts: undefined }))).toBe(false)
+  })
+
+  it('withholds a wordless exit-gate refusal and keeps one carrying the user words', () => {
+    expect(stepHoldsNoCard({ toolName: 'exit_plan_mode', status: 'denied' })).toBe(true)
+    expect(stepHoldsNoCard({ toolName: 'exit_plan_mode', status: 'denied', denyFeedback: '   ' })).toBe(true)
+    expect(stepHoldsNoCard({ toolName: 'exit_plan_mode', status: 'denied', denyFeedback: 'split the milestones first' })).toBe(false)
+    expect(stepHoldsNoCard({ toolName: 'exit_plan_mode', status: 'canceled' })).toBe(true)
+    expect(stepHoldsNoCard({ toolName: 'exit_plan_mode', status: 'completed' })).toBe(false)
+    expect(stepHoldsNoCard({ toolName: 'shell', status: 'running' })).toBe(false)
+  })
+
+  it('drops the card a stop left with nothing to say, and settles the one that names its call', () => {
+    const blocks: TimelineBlock[] = [
+      { kind: 'assistant', text: 'asking before continuing', open: false },
+      { kind: 'tool', step: { stepId: 'ask-1', toolName: 'user_interaction', summary: 'ask', status: 'awaiting approval', headerParts: { action: 'Asking user' } } },
+      { kind: 'tool', step: { stepId: 'shell-1', toolName: 'shell', summary: 'sleep 30', status: 'running', headerParts: { action: 'Running', target: 'sleep 30' } } },
+    ]
+    const after = cancelPendingToolBlocks(blocks)
+    expect(after.map((block) => block.kind === 'tool' ? block.step.stepId : block.kind)).toEqual(['assistant', 'shell-1'])
+    const shell = after[1]
+    expect(shell.kind === 'tool' && shell.step.status).toBe('canceled')
   })
 
   it('keeps a subagent approval out of the conversation timeline', withFakeWebSocket(async () => {
@@ -5834,7 +5891,9 @@ describe('subagent_* call cards', () => {
     // status denied, no summary.
     runEvent('tool_call_completed', {
       tool_name: 'exit_plan_mode', step_id: 'call-a', display_body: 'split milestones',
-      tool_meta: { tool_name: 'exit_plan_mode', status: 'denied', invocation: 'exit_plan_mode' },
+      // A modern refusal row: the user's own words ride the meta, which is
+      // what makes the card draw at all.
+      tool_meta: { tool_name: 'exit_plan_mode', status: 'denied', invocation: 'exit_plan_mode', deny_feedback: 'split milestones' },
     })
     runEvent('assistant_delta', { text: 'ok, splitting' })
 
@@ -5854,7 +5913,7 @@ describe('subagent_* call cards', () => {
           { type: 'tool_result_meta', tool_call_id: 'call-a' },
           {
             type: 'tool_display', body: 'split milestones', summary: '',
-            tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'denied', invocation: 'exit_plan_mode' }),
+            tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'denied', invocation: 'exit_plan_mode', deny_feedback: 'split milestones' }),
           },
         ]),
       },
@@ -5878,7 +5937,7 @@ describe('subagent_* call cards', () => {
           id: 'evt-4', sequence: 4, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'tool_call_completed',
           payload: {
             toolName: 'exit_plan_mode', stepId: 'call-a', displayBody: 'split milestones',
-            toolMeta: { toolName: 'exit_plan_mode', status: 'denied', invocation: 'exit_plan_mode' },
+            toolMeta: { toolName: 'exit_plan_mode', status: 'denied', invocation: 'exit_plan_mode', deny_feedback: 'split milestones' },
           },
         },
       ],

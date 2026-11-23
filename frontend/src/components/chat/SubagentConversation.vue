@@ -204,7 +204,7 @@ import ToolCallCard, { statusOf } from '@/components/chat/ToolCallCard.vue'
 import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
-import { formatWorkedDurationLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
+import { formatWorkedDurationLabel, stoppedCardSaysNothing, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { injectPendingActions } from '@/composables/providePendingActions'
 import { injectPeerDirectory, peerKindOf, peerSameTreeOf } from '@/composables/providePeerDirectory'
 import type { ActionRow } from '@/composables/usePendingActions'
@@ -247,10 +247,14 @@ const hasAnswer = computed(() => props.record.blocks.some((block) => block.kind 
 
 /**
  * drawnBlocks is what this tab draws under its reading mode: the transcript
- * minus the cards concise withholds. The record itself is untouched — the
- * drawer, the workbench and the terminal still hold the whole run.
+ * minus the cards concise withholds, minus a stopped call's card that says
+ * nothing - this view's own stop line is the one account of it, the way the
+ * conversation's is in the main view (stoppedCardSaysNothing). The record
+ * itself is untouched — the drawer, the workbench and the terminal still hold
+ * the whole run.
  */
-const drawnBlocks = computed(() => props.record.blocks.filter((block) => blockVisibleIn(props.viewMode, block.kind)))
+const drawnBlocks = computed(() => props.record.blocks.filter((block) => blockVisibleIn(props.viewMode, block.kind)
+  && !(block.kind === 'tool' && stoppedCardSaysNothing(block.step))))
 
 /** The turn's cards folded into activity-line runs, each run carrying where
  *  it starts in the drawn list so a block's fold id stays the one its

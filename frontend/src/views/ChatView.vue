@@ -915,7 +915,7 @@ import { FOREBRAIN_GOAL_EVALUATOR_AGENT_TYPE } from '@/lib/forebrainGatewayRunti
 import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
 import { artifactsOfPresentFiles, displayPathOf, planArtifactOf, turnDeliverables, turnDiffTotals, type ArtifactView } from '@/lib/artifacts'
 import { docTabFor } from '@/composables/useDocTabs'
-import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, stepHoldsNoCard, timelineBlockKey, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript, type TimelineBlock } from '@/composables/useChatStream'
+import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, stepHoldsNoCard, stoppedCardSaysNothing, timelineBlockKey, formatFirstTokenDuration, formatRuntimeStatusLabel, formatTransportRetryLine, type ChatMessage, type PlanBlock, type SubagentTranscript, type TimelineBlock } from '@/composables/useChatStream'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { providePendingActions } from '@/composables/providePendingActions'
 import { peerKindOf, peerSameTreeOf, providePeerDirectory } from '@/composables/providePeerDirectory'
@@ -1754,7 +1754,7 @@ const { viewMode } = useViewMode(() => String(sessionId.value ?? ''))
  */
 function drawnBlocks(blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['blocks']> {
   return (blocks ?? []).filter((block) => blockVisibleIn(viewMode.value, block.kind)
-    && !(block.kind === 'tool' && stepHoldsNoCard(block.step)))
+    && !(block.kind === 'tool' && (stepHoldsNoCard(block.step) || stoppedCardSaysNothing(block.step))))
 }
 
 /**

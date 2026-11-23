@@ -2050,6 +2050,10 @@ func TestStoppedSubagentClosesItsViewQuietly(t *testing.T) {
 		want   string
 	}{
 		{name: "cancelled without a reason", status: "cancelled", title: "Cancelled"},
+		// The engine names the status word in the run's error field, so a
+		// cancelled subagent always arrives with one. It is the same word the
+		// line's own title already says: the line is drawn once.
+		{name: "cancelled with the status word as its reason", status: "cancelled", err: "cancelled", title: "Cancelled"},
 		{name: "interrupted with its reason", status: "interrupted", err: reason, title: "Interrupted", want: reason},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2656,13 +2660,18 @@ func TestReducerHoldsNoCardForTheExitGateWait(t *testing.T) {
 		name     string
 		tool     string
 		status   string
+		feedback string
 		wantCard bool
 	}{
 		{name: "running", tool: "exit_plan_mode", status: "running"},
 		{name: "awaiting approval", tool: "exit_plan_mode", status: "awaiting approval"},
 		{name: "canceled", tool: "exit_plan_mode", status: "canceled"},
 		{name: "completed", tool: "exit_plan_mode", status: "completed", wantCard: true},
-		{name: "denied", tool: "exit_plan_mode", status: "denied", wantCard: true},
+		// A refusal the surface already answered in words of its own — the
+		// TUI's "✗ You canceled …" line — leaves no card behind; only the
+		// user's own words are worth drawing.
+		{name: "denied without the user's words", tool: "exit_plan_mode", status: "denied"},
+		{name: "denied in the user's words", tool: "exit_plan_mode", status: "denied", feedback: "split the milestones first", wantCard: true},
 		{name: "failed", tool: "exit_plan_mode", status: "failed", wantCard: true},
 		{name: "other tools keep their running card", tool: "shell", status: "running", wantCard: true},
 	} {
@@ -2672,7 +2681,7 @@ func TestReducerHoldsNoCardForTheExitGateWait(t *testing.T) {
 				Kind:     MsgKindTool,
 				StepID:   "call-exit",
 				ToolName: tc.tool,
-				ToolMeta: tool.ToolMeta{ToolName: tc.tool, Status: tc.status},
+				ToolMeta: tool.ToolMeta{ToolName: tc.tool, Status: tc.status, DenyFeedback: tc.feedback},
 			}}).Frames
 			cards := 0
 			for _, f := range got {
@@ -2705,9 +2714,177 @@ func TestReducerHoldsNoCardForTheExitGateWait(t *testing.T) {
 	}
 }
 
-// Canceling the exit gate leaves only its confirmation line. The wait held no
-// card, so the abort's finalize has nothing to stamp canceled, and the line
-// keeps the order it was produced in: right after the response that asked.
+// A call a stop settled as canceled whose card would name no subject and carry
+// no output is not drawn at all: the surface already says the run stopped (the
+// conversation's "You stopped this run", a subagent's "Cancelled"), so such a
+// card repeats it (owner 2026-11-23). A card that names its call or carries
+// real output stays. The call still ends the response that issued it, exactly
+// as a held gate does.
+func TestReducerHoldsAStoppedCardThatSaysNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		tool     string
+		status   string
+		content  string
+		input    map[string]any
+		wantCard bool
+	}{
+		{name: "a canceled ask has nothing to say", tool: "user_interaction", status: "canceled"},
+		{name: "a canceled ask carrying only the stop sentence says nothing", tool: "user_interaction", status: "canceled", content: tool.StoppedCallDisplayBody},
+		{name: "a canceled todo has nothing to say", tool: "session_todo", status: "canceled"},
+		{name: "a canceled shell names its command", tool: "shell", status: "canceled", input: map[string]any{"command": "sleep 30"}, wantCard: true},
+		{name: "a canceled ask still carrying its questions keeps them", tool: "user_interaction", status: "canceled", content: "Which database?", wantCard: true},
+		{name: "a completed ask is the record of what was asked", tool: "user_interaction", status: "completed", wantCard: true},
+		{name: "a failed ask is the record of what went wrong", tool: "user_interaction", status: "failed", wantCard: true},
+		{name: "an ask that is still waiting keeps its card", tool: "user_interaction", status: "awaiting approval", wantCard: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var r Reducer
+			got := r.Reduce(NewMessageMsg{Msg: Message{
+				Kind:      MsgKindTool,
+				StepID:    "call-1",
+				ToolName:  tc.tool,
+				Content:   tc.content,
+				ToolMeta:  tool.ToolMeta{ToolName: tc.tool, Status: tc.status, Input: tc.input},
+				ToolPhase: tool.StepKindToolCompleted,
+			}}).Frames
+			cards := 0
+			for _, f := range got {
+				if f.Kind == FrameTool {
+					cards++
+				}
+			}
+			if tc.wantCard && cards != 1 {
+				t.Fatalf("card count = %d, want the call's one card: %#v", cards, got)
+			}
+			if !tc.wantCard && cards != 0 {
+				t.Fatalf("a stopped card that says nothing was drawn: %#v", got)
+			}
+		})
+	}
+
+	// Held back, it still seals the response that issued it — the same contract
+	// the gate's wait keeps, so streamed text never runs into the next frame.
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindAssistant, Content: "asking before continuing"}})
+	got := r.Reduce(NewMessageMsg{Msg: Message{
+		Kind:     MsgKindTool,
+		StepID:   "ask-1",
+		ToolName: "user_interaction",
+		ToolMeta: tool.ToolMeta{ToolName: "user_interaction", Status: "canceled"},
+	}}).Frames
+	if len(got) != 1 || got[0].Kind != FrameAssistant || got[0].Content != "asking before continuing" || !got[0].Final {
+		t.Fatalf("the held call must seal the streamed text as one final assistant frame, got %#v", got)
+	}
+}
+
+// The rule above is about a tool card and only a tool card: a subagent_* call
+// is a card of its own built from the facts on its meta (before it becomes a
+// task row), and an approval moves the roster and draws nothing. Neither may be
+// swallowed by the "says nothing" test on the way to its own branch.
+func TestReducerHoldsAStoppedCardOnlyForToolCards(t *testing.T) {
+	// A query call carries no target worth drawing, so the "says nothing" test
+	// alone would drop it — but its card is the task row the call settles.
+	t.Run("a subagent call still reaches its own card", func(t *testing.T) {
+		var r Reducer
+		_ = r.Reduce(RunStartedMsg{RunID: "run-w"})
+		msg := subagentStepMessage("wait-canceled", tool.StepEvent{
+			Kind:     tool.StepKindToolCompleted,
+			ToolName: "subagent_wait",
+			Input:    map[string]any{"task_id": "subagent-6e5c"},
+		})
+		if msg.ToolMeta.SubagentCall == nil {
+			t.Fatalf("this test needs a subagent call meta: %#v", msg.ToolMeta)
+		}
+		msg.ToolMeta.Status = "canceled"
+		msg.Content = ""
+		frames := r.Reduce(NewMessageMsg{Msg: msg}).Frames
+		fanout := false
+		for _, f := range frames {
+			if f.Kind == FrameFanout {
+				fanout = true
+			}
+		}
+		if !fanout {
+			t.Fatalf("the subagent call never reached its card: %#v", frames)
+		}
+	})
+
+	// An approval is not a call: it moves the roster row and draws nothing. It
+	// must not be read as a stopped tool card, whose branch would seal the
+	// streamed text instead.
+	t.Run("an approval moves the roster and seals nothing", func(t *testing.T) {
+		var r Reducer
+		r.upsertSubagentRoster("agent-a", "general-purpose", "", "", "waiting_approval")
+		_ = r.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindAssistant, Content: "answering the gate"}})
+		frames := r.Reduce(NewMessageMsg{Msg: Message{
+			Kind:     MsgKindTool,
+			StepID:   "approval-1",
+			ToolName: "shell",
+			AgentID:  "agent-a",
+			ToolMeta: tool.ToolMeta{ToolName: "shell", Status: "canceled", Category: "approval"},
+		}}).Frames
+		if len(frames) != 0 {
+			t.Fatalf("an approval must draw nothing, got %#v", frames)
+		}
+		if got := r.agentRoster["agent-a"].Status; got == "waiting_approval" {
+			t.Fatalf("the approval never reached its own branch: roster status = %q", got)
+		}
+	})
+}
+
+// The two halves of one stopped ask must both hold, and neither alone is
+// enough: the pending card the call drew while it waited is settled away by the
+// ending, and the completion the stop published drew no card of its own. A fix
+// that only taught one of them to skip would leave the other on screen.
+func TestStoppedAskLeavesNeitherStaleNorEmptyCard(t *testing.T) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+
+	const agentID = "subagent-ask-1"
+	var reducer Reducer
+	live := func(msg Message) {
+		for _, f := range reducer.Reduce(NewMessageMsg{Msg: msg}).Frames {
+			r.RenderFrame(f)
+		}
+	}
+	// The call starts: its pending card is drawn, the way live draws it.
+	startedMsg := Message{
+		Kind:      MsgKindTool,
+		StepID:    "ask-1",
+		ToolName:  "user_interaction",
+		AgentID:   agentID,
+		ToolMeta:  tool.BuildToolMeta(tool.StepEvent{Kind: tool.StepKindToolStarted, StepID: "ask-1", ToolName: "user_interaction"}),
+		ToolPhase: tool.StepKindToolStarted,
+	}
+	live(startedMsg)
+	if vm := r.perAgentVM[agentID]; vm == nil || len(vm.blocks) != 1 || !toolStatusPending(vm.blocks[0].frame) {
+		t.Fatalf("the ask's pending card must be on screen while it waits: %#v", vm)
+	}
+
+	// The stop settles the same call as canceled with nothing to say: the
+	// reducer draws no card for that completion.
+	live(Message{
+		Kind:      MsgKindTool,
+		StepID:    "ask-1",
+		ToolName:  "user_interaction",
+		AgentID:   agentID,
+		ToolMeta:  tool.ToolMeta{ToolName: "user_interaction", Status: "canceled"},
+		ToolPhase: tool.StepKindToolCompleted,
+	})
+	if vm := r.perAgentVM[agentID]; len(vm.blocks) != 1 {
+		t.Fatalf("the dropped completion must not add a card: %#v", vm.blocks)
+	}
+
+	// The ending settles whatever was still pending in that view.
+	r.FinalizeAgentPendingTools(agentID)
+	vm := r.perAgentVM[agentID]
+	if len(vm.blocks) != 0 {
+		t.Fatalf("a stopped ask must leave no card behind, got %#v", vm.blocks)
+	}
+}
 func TestCanceledExitGateLeavesOnlyItsConfirmationLine(t *testing.T) {
 	r := newComposerRenderer(t, 100, 40)
 	reducer := &Reducer{}

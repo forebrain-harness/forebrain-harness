@@ -62,3 +62,37 @@ func TestDisplayHeaderIsTheTerminalsWording(t *testing.T) {
 	denied := frame("shell", ToolMeta{Status: "denied", Input: map[string]any{"command": "rm -rf x"}})
 	require.Equal(t, "Denied rm -rf x", header(denied))
 }
+
+// TestStoppedCardSaysNothing pins the second of the three card rules: a call a
+// stop settled as canceled whose head names no subject and whose body carries
+// no output of its own would repeat the surface's "You stopped this run" line
+// and nothing else, so no surface draws it. A card that names its call
+// ("Canceled sleep 30") or carries real output stays.
+func TestStoppedCardSaysNothing(t *testing.T) {
+	frame := func(title string, meta ToolMeta, content string) DisplayFrame {
+		meta.ToolName = title
+		return DisplayFrame{Title: title, Meta: meta, Content: content, Final: true, Duration: 1200 * time.Millisecond}
+	}
+
+	// user_interaction's head carries the verb alone; a canceled ask has no
+	// body, so the card would say only what the run's stop line already said.
+	require.True(t, StoppedCardSaysNothing(frame("user_interaction", ToolMeta{Status: "canceled"}, "")))
+	require.True(t, StoppedCardSaysNothing(frame("session_todo", ToolMeta{Status: "canceled"}, "   ")))
+
+	// The generic stop sentence is about the stop, not about this call: a head
+	// that names no subject carrying only it still says nothing.
+	require.True(t, StoppedCardSaysNothing(frame("user_interaction", ToolMeta{Status: "canceled"}, StoppedCallDisplayBody)))
+
+	// A card that names its call keeps standing, with or without a body.
+	require.False(t, StoppedCardSaysNothing(frame("shell", ToolMeta{Status: "canceled", Input: map[string]any{"command": "sleep 30"}}, StoppedCallDisplayBody)))
+	require.False(t, StoppedCardSaysNothing(frame("shell", ToolMeta{Status: "canceled", Input: map[string]any{"command": "sleep 30"}}, "")))
+
+	// Real output is content, whatever the head says.
+	require.False(t, StoppedCardSaysNothing(frame("user_interaction", ToolMeta{Status: "canceled"}, "Which database?")))
+
+	// Only a canceled call is this rule's business: a completed or failed ask
+	// is a record of what the user was asked, not a repeat of the stop.
+	require.False(t, StoppedCardSaysNothing(frame("user_interaction", ToolMeta{Status: "completed"}, "")))
+	require.False(t, StoppedCardSaysNothing(frame("user_interaction", ToolMeta{Status: "failed"}, "")))
+	require.False(t, StoppedCardSaysNothing(frame("user_interaction", ToolMeta{Status: "awaiting approval"}, "")))
+}

@@ -680,6 +680,16 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 						renderer.RenderFrame(frame)
 					}
 				}
+				// A subagent's ending settles the cards it left in flight in its
+				// own view, the way the live loop does when the same message
+				// arrives there (Renderer.FinalizeAgentPendingTools). Replay has
+				// no dispatch loop to do it for it, so a call stopped while it
+				// waited for an approval — recorded as a completed step and
+				// never answered — would otherwise be drawn as still waiting for
+				// the user on a run that ended, and live drew no such card.
+				if msg, ok := item.message.(SubagentEndedMsg); ok {
+					renderer.FinalizeAgentPendingTools(firstNonEmpty(strings.TrimSpace(msg.AgentID), strings.TrimSpace(msg.TaskID)))
+				}
 			}
 			if item.tool != nil {
 				msg, toolName, ok := replayOrphanToolCallMessage(item.toolStepID, *item.tool)
@@ -1268,7 +1278,7 @@ func orphanToolCalls(callIndex map[string]replayToolCall, callRow, resultRow map
 			continue
 		}
 		call, ok := callIndex[callID]
-		if !ok || isSubagentDispatchTool(call.name) || tool.ToolStepHoldsNoCard(call.name, "canceled") {
+		if !ok || isSubagentDispatchTool(call.name) || tool.ToolStepHoldsNoCard(call.name, "canceled", "") {
 			continue
 		}
 		orphans = append(orphans, orphanToolCall{callID: callID, row: row, call: call})
@@ -1334,7 +1344,7 @@ func heldGateCallsByRow(callIndex map[string]replayToolCall, callRow map[string]
 	out := make(map[int][]heldGateCall)
 	for callID, row := range callRow {
 		call, ok := callIndex[callID]
-		if !ok || !tool.ToolStepHoldsNoCard(call.name, "running") {
+		if !ok || !tool.ToolStepHoldsNoCard(call.name, "running", "") {
 			continue
 		}
 		out[row] = append(out[row], heldGateCall{callID: callID, name: call.name, order: call.order})
@@ -2092,7 +2102,7 @@ func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[str
 	// must still reach the reducer, which hides its card and collects them.
 	// A legacy present record without rows drew a card that said nothing the
 	// group does not; it draws nothing now.
-	if tool.ToolStepHoldsNoCard(toolName, meta.Status) && len(meta.Deliverables) == 0 {
+	if tool.ToolStepHoldsNoCard(toolName, meta.Status, meta.DenyFeedback) && len(meta.Deliverables) == 0 {
 		return Message{}, "", false
 	}
 	summary := strings.TrimSpace(transcriptToolSummaryWithMeta(body, meta))
@@ -2333,6 +2343,10 @@ func replayToolStepMeta(toolName string, argsJSON string, meta tool.ToolMeta, ki
 	// The replayed card's delivered rows come from the stored meta alone: pkg/tool
 	// cannot re-derive them from a text result, and an old row has none to lose.
 	base.Deliverables = meta.Deliverables
+	// Nor can it re-derive the user's own words from a refusal: they are what
+	// makes a refused gate draw its card at all, so a rebuild that dropped them
+	// would hide a card the live surface drew (plan 154).
+	base.DenyFeedback = meta.DenyFeedback
 	return base
 }
 

@@ -3159,35 +3159,87 @@ func TestAskClarifyReasonSpeaksClaudeCodeWords(t *testing.T) {
 // settled states still paint.
 func TestToolStepHoldsNoCard(t *testing.T) {
 	for _, status := range []string{"running", "awaiting approval", "canceled"} {
-		if !ToolStepHoldsNoCard("exit_plan_mode", status) {
+		if !ToolStepHoldsNoCard("exit_plan_mode", status, "") {
 			t.Fatalf("exit_plan_mode/%q must hold no card", status)
 		}
+	}
+	// A refused gate draws its card only when the refusal carried the user's
+	// own words: without them the surface already printed the confirmation
+	// line ("✗ You canceled …") and a card would only repeat it.
+	if !ToolStepHoldsNoCard("exit_plan_mode", "denied", "") {
+		t.Fatal("an exit gate denied without words must hold no card")
+	}
+	if !ToolStepHoldsNoCard("exit_plan_mode", "denied", "   ") {
+		t.Fatal("whitespace is not the user's words")
+	}
+	if ToolStepHoldsNoCard("exit_plan_mode", "denied", "split the milestones first") {
+		t.Fatal("a gate refused in the user's own words keeps its card")
 	}
 	// present_files is delivery plumbing, not conversation: whatever state its
 	// call is in — running, settled, failed or abandoned — no surface paints a
 	// card for it. The turn's deliverables group is the one account of the
 	// files, so a card would always be a second one.
 	for _, status := range []string{"running", "awaiting approval", "completed", "failed", "cancelled", "canceled", ""} {
-		if !ToolStepHoldsNoCard("present_files", status) {
+		if !ToolStepHoldsNoCard("present_files", status, "") {
 			t.Fatalf("present_files/%q must hold no card", status)
 		}
 	}
 	for _, name := range []string{"Present_Files", "  PRESENT_FILES  ", "\tpresent_files\n"} {
-		if !ToolStepHoldsNoCard(name, "running") {
+		if !ToolStepHoldsNoCard(name, "running", "") {
 			t.Fatalf("%q must hold no card: the name is normalized", name)
 		}
 	}
 	for _, tc := range []struct{ tool, status string }{
-		{"exit_plan_mode", "denied"},
 		{"exit_plan_mode", "completed"},
 		{"exit_plan_mode", "failed"},
 		{"shell", "running"},
 		{"shell", "awaiting approval"},
 		{"", "running"},
 	} {
-		if ToolStepHoldsNoCard(tc.tool, tc.status) {
+		if ToolStepHoldsNoCard(tc.tool, tc.status, "") {
 			t.Fatalf("%s/%q paints its card", tc.tool, tc.status)
 		}
+	}
+}
+
+// TestCanceledStepSaysItWasStopped pins the third rule: a call a stop settled
+// as canceled reports "canceled" and says a sentence about the stop, never the
+// executor's error text. Its Error field is untouched — the audit and the model
+// still see what the tool reported.
+func TestCanceledStepSaysItWasStopped(t *testing.T) {
+	for _, toolName := range []string{"shell", "read_file", "skill"} {
+		evt := StepEvent{
+			Kind:     StepKindToolCompleted,
+			ToolName: toolName,
+			Input:    map[string]any{"command": "sleep 30", "file_path": "/tmp/x.go", "name": "plan"},
+			Error:    "tool " + toolName + ": context canceled",
+			Canceled: true,
+		}
+		if got := stepStatusLabel(evt); got != "canceled" {
+			t.Fatalf("%s: status = %q, want canceled", toolName, got)
+		}
+		body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+		if body != StoppedCallDisplayBody {
+			t.Fatalf("%s: body = %q, want %q", toolName, body, StoppedCallDisplayBody)
+		}
+		if strings.Contains(body, "context canceled") {
+			t.Fatalf("%s: the body must not hand the executor's error text to the reader: %q", toolName, body)
+		}
+	}
+
+	// A timeout is not a stop: it stays a failure, with its own text.
+	timedOut := StepEvent{
+		Kind:     StepKindToolCompleted,
+		ToolName: "shell",
+		Input:    map[string]any{"command": "sleep 30"},
+		Error:    "tool shell: context deadline exceeded",
+	}
+	if got := stepStatusLabel(timedOut); got != "failed" {
+		t.Fatalf("a timeout = %q, want failed", got)
+	}
+	body, _ := FormatToolStepResult(timedOut, DefaultMaxFormattedBody)
+	if !strings.Contains(body, "context deadline exceeded") {
+		t.Fatalf("a timeout keeps its own reason: %q", body)
 	}
 }
 

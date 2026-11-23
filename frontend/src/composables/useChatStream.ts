@@ -455,14 +455,20 @@ export function isHiddenRunRow(row: { partsJson?: string | null }): boolean {
 }
 
 /**
- * isCanceledExitRow reports whether a stored tool row is the settled answer a
- * canceled exit-plan gate left behind. The gate's wait holds no card on any
- * surface, and the walk-away's only record is the approval confirmation line —
- * so like a delivered review's row, this one draws nothing whole.
+ * isCardlessExitRow reports whether a stored tool row is a settled answer a
+ * cardless exit-plan gate left behind. The gate's wait holds no card on any
+ * surface, and neither does an answer the surface already stated in its own
+ * line: a walk-away's only record is the approval confirmation line, and a
+ * refusal without words has none either — so like a delivered review's row,
+ * these draw nothing whole.
  */
-function isCanceledExitRow(row: { partsJson?: string | null }): boolean {
+function isCardlessExitRow(row: { partsJson?: string | null }): boolean {
   const meta = toolMetaRecord(parseToolDisplayPart(row.partsJson).toolMetaJson)
-  return isExitPlanGate(metaString(meta, 'tool_name')) && metaString(meta, 'status').toLowerCase() === 'canceled'
+  return stepHoldsNoCard({
+    toolName: metaString(meta, 'tool_name'),
+    status: metaString(meta, 'status'),
+    denyFeedback: metaString(meta, 'deny_feedback'),
+  })
 }
 
 /**
@@ -1113,13 +1119,51 @@ function isExitPlanGate(toolName: string): boolean {
  * state: it is the delivery pipeline's own machinery, the turn's delivery
  * group is the one account of the files, and its failures are not the
  * user's to debug. The exit-plan gate's wait is withheld while the call runs,
- * awaits the decision, or was abandoned to it - only its settled answers
- * draw: the user's denial, a failure, the exit itself.
+ * awaits the decision, or was abandoned to it - and of its settled answers
+ * only the ones with something to say draw: a refusal in the user's own words
+ * (denyFeedback), a failure, the exit itself. A wordless refusal is the answer
+ * the page already stated in its own line, so it holds no card either.
  */
-export function stepHoldsNoCard(step: { toolName: string; status: string }): boolean {
+export function stepHoldsNoCard(step: { toolName: string; status: string; denyFeedback?: string }): boolean {
   const name = String(step.toolName ?? '').trim().toLowerCase()
   if (name === 'present_files') return true
-  return isExitPlanGate(name) && ['running', 'awaiting approval', 'canceled'].includes(String(step.status ?? '').trim().toLowerCase())
+  if (!isExitPlanGate(name)) return false
+  const status = String(step.status ?? '').trim().toLowerCase()
+  if (status === 'denied') return !String(step.denyFeedback ?? '').trim()
+  return ['running', 'awaiting approval', 'canceled'].includes(status)
+}
+
+/**
+ * STOPPED_CALL_BODY is what a call the user stopped says as its card body.
+ * Bound to the runtime's tool.StoppedCallDisplayBody: the sentence is the
+ * engine's, so changing it in one place means changing it in both.
+ */
+export const STOPPED_CALL_BODY = 'You stopped this call before it finished.'
+
+/**
+ * stoppedCardSaysNothing reports whether a call a stop settled as canceled
+ * would draw a card with nothing in it: a head that names no subject and a body
+ * with no output. The page already says the run was stopped - the
+ * conversation's own stop line, a subagent's own one - so such a card only
+ * repeats it (owner 2026-11-23). Bound to the runtime's
+ * tool.StoppedCardSaysNothing.
+ *
+ * A payload with no headerParts keeps its card: an older row carries nothing to
+ * judge by, and dropping a record we cannot read loses information. The parts
+ * the page holds are the started phase's - the runtime recomputes them from the
+ * canceled step - so an edge-case tool can keep its card here while the
+ * terminal drops it.
+ */
+export function stoppedCardSaysNothing(step: SubagentToolStep): boolean {
+  if (String(step.status ?? '').trim().toLowerCase() !== 'canceled') return false
+  // The generic stop sentence is about the stop, not about this call, so it is
+  // not content: a card that names no subject and holds only it still says
+  // nothing.
+  const body = String(step.output ?? '').trim()
+  if (body && body !== STOPPED_CALL_BODY) return false
+  const parts = step.headerParts
+  if (!parts) return false
+  return !String(parts.target ?? '').trim() && !String(parts.suffix ?? '').trim()
 }
 
 /**
@@ -1299,7 +1343,7 @@ export function conversationFromTranscript(
       // settled row draws nothing either — the wait's only record is the
       // approval confirmation line.
       if (isPlanReviewDeliveredRow(row)) return
-      if (isCanceledExitRow(row)) return
+      if (isCardlessExitRow(row)) return
       // A call a queued user message took the turn from never ran: the row's
       // body is the drop key, so the row draws nothing.
       if (isHiddenRunRow(row)) return
@@ -1355,7 +1399,7 @@ export function conversationFromTranscript(
       if (isExitPlanGate(String(call.name ?? ''))) {
         drawn.add(call.id)
         current.blocks = [...(current.blocks ?? []), { kind: 'gate', id: gateAnchorId(call.id), stepId: call.id }]
-        if (answer && !isPlanReviewDeliveredRow(answer) && !isCanceledExitRow(answer)) {
+        if (answer && !isPlanReviewDeliveredRow(answer) && !isCardlessExitRow(answer)) {
           current.blocks = [...current.blocks, { kind: 'tool', step: toolStepFromRow(answer, call) }]
         }
         continue
@@ -1528,11 +1572,16 @@ function toolStepPending(step: SubagentToolStep): boolean {
  * row and is rebuilt as canceled - disagreed with what was on screen.
  */
 export function cancelPendingToolBlocks(blocks: TimelineBlock[]): TimelineBlock[] {
-  return blocks.map((block) => (
-    block.kind === 'tool' && toolStepPending(block.step)
-      ? { ...block, step: { ...block.step, status: 'canceled' } }
-      : block
-  ))
+  return blocks
+    .map((block) => (
+      block.kind === 'tool' && toolStepPending(block.step)
+        ? { ...block, step: { ...block.step, status: 'canceled' } }
+        : block
+    ))
+    // A card the stop left with nothing to say is dropped rather than re-badged
+    // as "Canceled / (no output)": the turn's own stop line is the one account
+    // of it (tool.StoppedCardSaysNothing).
+    .filter((block) => !(block.kind === 'tool' && stoppedCardSaysNothing(block.step)))
 }
 
 /**

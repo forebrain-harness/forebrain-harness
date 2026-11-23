@@ -2206,6 +2206,11 @@ func (w *toolOrchestrationLLM) executeOneToolCall(
 		SkillPath:       skillPath,
 		Category:        skillCategory,
 		Origin:          skillStepOrigin(skillCategory),
+		// A call the run's own context stopped ended early; it did not fail.
+		// executeToolHandler wraps the handler's error with %w, so the stop is
+		// still reachable through errors.Is. A deadline is a timeout, not a
+		// stop, and stays a failure.
+		Canceled: errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded),
 	}
 	if completedEvent.ExternalContext {
 		llm.NotifyExternalContext(ctx)

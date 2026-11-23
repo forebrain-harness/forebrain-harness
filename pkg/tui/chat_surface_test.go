@@ -1677,6 +1677,32 @@ func TestInlineApprovalRefusedCardCarriesTheUsersWords(t *testing.T) {
 	require.Equal(t, "改成移到 trash/", card.Msg.ToolMeta.DenyFeedback)
 }
 
+// Cancelling an in-place gate is not refusing it: the call never ran, so its
+// card reads as canceled with no words on it — the same card the finalize and
+// the orphan rebuild draw, and the one the gate rule then leaves undrawn when it
+// has nothing to say.
+func TestInlineApprovalCancelledCardIsACancel(t *testing.T) {
+	cs, _, _, runID, rae := inlineGateSession(t, "shell")
+	cards := make(chan NewMessageMsg, 4)
+	cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			cards <- m
+		}
+	})
+
+	gate, ok := turn.SubagentApprovalGateFromError(rae)
+	require.True(t, ok)
+	cs.notifyInPlaceRefusedCard(gate, turn.ToolApprovalRequest{
+		SessionID: "s1", RunID: runID, ToolName: "shell",
+		ToolStepID: "call-inline", ToolInputJSON: `{"command":"echo hi"}`,
+	}, turn.ToolApprovalDecision{Cancelled: true})
+
+	card := requireUIMessage(t, cards)
+	require.Equal(t, "canceled", card.Msg.ToolMeta.Status)
+	require.Empty(t, card.Msg.ToolMeta.DenyFeedback)
+	require.Empty(t, card.Msg.Content)
+}
+
 // A user_interaction question answered in place records the answer on the
 // action and dispatches no resume: the waiting call reads it on its re-run.
 func TestInlineApprovalAnswersAUserInteractionInPlace(t *testing.T) {

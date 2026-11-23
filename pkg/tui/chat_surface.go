@@ -1660,7 +1660,23 @@ func (s *ChatSession) notifyInPlaceRefusedCard(gate turn.SubagentApprovalGate, r
 			input = map[string]any{"raw": raw}
 		}
 	}
-	refused := tool.DeniedToolStep(stepID, toolName, input, decision.DenyReason)
+	var refused tool.StepEvent
+	body := ""
+	if decision.Cancelled {
+		// Cancelling and refusing are different decisions: the call never ran
+		// either way, but a cancel is the run being stopped, not the user
+		// answering this call with words. Its card reads as canceled with no
+		// words on it — the same card the finalize and the orphan rebuild draw.
+		refused = tool.StepEvent{
+			Kind:     tool.StepKindToolCompleted,
+			StepID:   stepID,
+			ToolName: toolName,
+			Input:    input,
+		}
+	} else {
+		refused = tool.DeniedToolStep(stepID, toolName, input, decision.DenyReason)
+		body = tool.DeniedToolDisplayBody(toolName, input, strings.TrimSpace(decision.DenyReason))
+	}
 	meta := tool.BuildToolMeta(refused)
 	// BuildToolMeta reads Denied/DenyFeedback off the event, so the card and
 	// its meta are the same refusal the runtime draws on the parked path —
@@ -1668,12 +1684,15 @@ func (s *ChatSession) notifyInPlaceRefusedCard(gate turn.SubagentApprovalGate, r
 	if meta.Status == "" {
 		meta.Status = "denied"
 	}
+	if decision.Cancelled {
+		meta.Status = "canceled"
+	}
 	s.notifyUI(NewMessageMsg{Msg: Message{
 		Kind:      MsgKindTool,
 		StepID:    stepID,
 		ToolName:  toolName,
 		FilePath:  extractFilePathFromInput(input),
-		Content:   tool.DeniedToolDisplayBody(toolName, input, strings.TrimSpace(decision.DenyReason)),
+		Content:   body,
 		ToolMeta:  meta,
 		ToolPhase: event.RunEventToolCompleted,
 		RunID:     gate.RunID,
