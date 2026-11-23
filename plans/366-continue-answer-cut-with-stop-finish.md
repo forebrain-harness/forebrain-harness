@@ -5,9 +5,10 @@
 - 基线：`git rev-parse HEAD` = `4c387a94ad26658b33dba929544f5f4672036e92`，调查时 `git status --porcelain` 为空。
   **注意**：同树 agent forebrain-harness-db 已回话确认：其 11 份计划全部在独立 worktree 分支
   （exec-skills/exec-runtime/exec-363/exec-364/exec-final），**主树一棵文件未动**；唯一重叠是
-  plan 364 改 `pkg/llm/google/agent_llm.go`（+其测试），已提交在 `exec-364`（`7ef6472d`，并入 exec-final）、
-  **尚未进主树**。本计划在该文件只改 Execute 续写循环的 `ShouldContinue` 调用行（约 :164），
-  不碰 buildRequest/toolResponse/allToolResults/trailingImageTurns 段——合并时冲突面仅该行级改动。
+  plan 364 改 `pkg/llm/google/agent_llm.go`（+其测试），已提交在 `exec-364`（`7ef6472d`，并入 exec-final），
+  **已随 `exec-final` 落 dev `653f3785`**。本计划在该文件只改 Execute 续写循环的 `ShouldContinue` 调用行（约 :164），
+  不碰 buildRequest/toolResponse/allToolResults/trailingImageTurns 段——合并结果：两处改动自动合并共存，
+  无冲突（`answer.String()` 调用行与该批的 image-turn 投影同时在树里）。
   drift check 以**内容**为准（行号漂移不算漂移）。
 
 ## 1. 目标（Why this matters）
