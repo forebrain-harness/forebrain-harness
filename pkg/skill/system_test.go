@@ -335,6 +335,7 @@ func TestInstall_AllSkillDirsExtracted(t *testing.T) {
 		"pdf",
 		"pptx",
 		"xlsx",
+		"verify",
 	}
 	for _, dir := range topLevelDirs {
 		skillFile := filepath.Join(dest, dir, "SKILL.md")
@@ -558,6 +559,144 @@ func TestRunSkillDrivesTheAppAndOffersToCaptureIt(t *testing.T) {
 	for _, unwanted := range []string{"driver.sh start hang", "brew install tmux", "term_live", "paint_dump"} {
 		if strings.Contains(content, unwanted) {
 			t.Fatalf("run skill carries this repository's own recipe %q", unwanted)
+		}
+	}
+}
+
+// The verify skill is a judgment skill, and judgment is what a future editor
+// softens first: a verdict vocabulary, two rules that stop a model grading its
+// own work on a curve, and the forebrain semantics (a process that outlives the
+// turn, a trust gate, a rebuild before driving) that make the advice true in
+// this harness rather than somewhere else. Each is pinned by its exact words,
+// and the reference doc is pinned by the sections a reviewer needs to reopen
+// the evidence.
+func TestVerifySkillDrivesTheAppAndRendersAVerdict(t *testing.T) {
+	home := t.TempDir()
+	if err := Install(home); err != nil {
+		t.Fatalf("install system skills: %v", err)
+	}
+	systemRoot := filepath.Join(home, "skills", ".system")
+	dir := filepath.Join(systemRoot, "verify")
+	if err := ValidateSkillDir(dir); err != nil {
+		t.Fatalf("verify skill does not validate: %v", err)
+	}
+	// 1. Both files ship, and the bundled one is discoverable rather than
+	// merely present: the activation lists it, which is how the model learns
+	// the path exists.
+	if _, err := os.Stat(filepath.Join(dir, "references", "evidence.md")); err != nil {
+		t.Fatalf("references/evidence.md was not installed: %v", err)
+	}
+	_, files, _ := listSkillResources(dir)
+	resource := false
+	for _, name := range files {
+		if name == "references/evidence.md" {
+			resource = true
+		}
+	}
+	if !resource {
+		t.Fatalf("references/evidence.md is not reachable through the activation: %v", files)
+	}
+
+	activation, err := LoadActivation(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("load verify skill: %v", err)
+	}
+	if activation.Name != "verify" {
+		t.Fatalf("name=%q want verify", activation.Name)
+	}
+	// 2. /verify exists, and the model may reach for it on its own — the
+	// opposite of run-skill-generator: this one is what a model should pick up
+	// after changing code.
+	if !activation.SlashCommand {
+		t.Fatal("/verify is an entry point: the skill must derive a slash command")
+	}
+	if !activation.ModelInvocation {
+		t.Fatal("the verify skill must stay model-invocable")
+	}
+	// 3. The catalog is what the model reads, so this is the end-to-end proof.
+	entries, err := CatalogEntries([]string{systemRoot}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogued := false
+	for _, entry := range entries {
+		if entry.Name == "verify" {
+			catalogued = true
+		}
+	}
+	if !catalogued {
+		t.Fatalf("verify skill missing from the catalog: %+v", entries)
+	}
+
+	content := activation.Content
+	// 4. The verdict vocabulary. Four words, one meaning each.
+	for _, verdict := range []string{"PASS", "FAIL", "BLOCKED", "SKIP"} {
+		if !strings.Contains(content, verdict) {
+			t.Fatalf("the verify skill lost the %s verdict:\n%s", verdict, content)
+		}
+	}
+	// 5. The two rules that stop a model grading itself on a curve.
+	for _, want := range []string{"no partial pass", "the verdict is FAIL"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("the verify skill lost %q:\n%s", want, content)
+		}
+	}
+	// 6. The forebrain facts: the tool that holds the app across turns, the
+	// readiness wait it offers, and the gate that decides whether a project
+	// skill is visible at all.
+	for _, want := range []string{"process", "wait: tcp", "trusted", "Rebuild before you drive"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("the verify skill lost %q:\n%s", want, content)
+		}
+	}
+	// 7 and 8. The no-leaked-server rule. The asset also names the `process
+	// list` check, but that phrase wraps across a line, so the two sentences
+	// that do not are the ones asserted.
+	for _, want := range []string{"Leave nothing running", "kill what you started"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("the verify skill lost %q:\n%s", want, content)
+		}
+	}
+	// 9. Two sites, two different acts: the BLOCKED prompt a user can paste,
+	// and the recommendation gated on cold-start + PASS. Collapsing them loses
+	// the case where verification never reached the app. And publishing stays
+	// the user's decision.
+	if got := strings.Count(content, "/run-skill-generator"); got != 2 {
+		t.Fatalf("/run-skill-generator named %d times, want 2 (blocked prompt, PASS-gated recommendation)", got)
+	}
+	if got := strings.Count(content, "Never publish a skill yourself"); got != 1 {
+		t.Fatalf("the publish boundary appears %d times, want 1", got)
+	}
+	// 10. No third-party product: the skill is about this harness. A headless
+	// browser may be named generically, never by product.
+	for _, unwanted := range []string{"Claude", "Anthropic", "chromium-cli", "playwright"} {
+		if strings.Contains(content, unwanted) {
+			t.Fatalf("the verify skill names a third-party product %q", unwanted)
+		}
+	}
+
+	// 11. The reference doc is what makes the verdict checkable.
+	evidence, err := os.ReadFile(filepath.Join(dir, "references", "evidence.md"))
+	if err != nil {
+		t.Fatalf("read evidence reference: %v", err)
+	}
+	body := string(evidence)
+	for _, section := range []string{
+		"## Where evidence goes",
+		"## What to keep per surface",
+		"## Naming",
+		"## Handing it over",
+		"## Retention",
+		"## What is not evidence",
+		"## When you could not keep any",
+	} {
+		if !strings.Contains(body, section) {
+			t.Fatalf("evidence reference lost %q", section)
+		}
+	}
+	for _, want := range []string{"state/verify", "present_files", ".forebrain"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("evidence reference lost %q", want)
 		}
 	}
 }
