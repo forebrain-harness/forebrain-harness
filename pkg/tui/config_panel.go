@@ -147,8 +147,9 @@ func (s *ChatSession) UpdateConfigSection(ctx context.Context, section string, r
 
 // configPanel is the open /config panel: the snapshot it read when it opened
 // and the selector it drives. An edit lands in the store as it is confirmed
-// (plan 321): the panel holds no draft unless it is staging one, and the only
-// page that stages is the create form (staged).
+// (plan 321): the panel holds no draft unless it is staging one, and the pages
+// that stage are the two creates — an agent definition and a subagent entry
+// (staged).
 type configPanel struct {
 	sel      Selector
 	renderer *Renderer
@@ -177,12 +178,34 @@ type configPanel struct {
 	// by the section page that owns the list: a page's ←/→ steps the whole panel
 	// to the next tab, the way the prototype's goOverview does (plan 350).
 	tabStep int
-	// staged holds every write: the create form edits its whole definition in
-	// the section document and commits it in one write (owner 2026-11-22).
-	// While it is set, assign/assignModel stage the value in the document and
-	// never reach the store; the create form's submit clears it for that one
-	// write.
-	staged bool
+	// staged counts the staged pages open: a create form edits its whole
+	// definition in the section document and commits it in one write (owner
+	// 2026-11-22). While it is non-zero, assign/assignModel stage the value in
+	// the document and never reach the store; a create form's submit spends its
+	// own hold for that one write. It counts rather than switches because one
+	// create form can open inside another (an agent's Subagents row, inside the
+	// agent create form): the inner page's end must leave the outer form staged,
+	// or the outer form's next edit would write the unnamed draft key and the
+	// loader would refuse the whole section (agents.definitions.: invalid agent
+	// id).
+	staged int
+}
+
+// stage holds the panel's writes for one staged page and answers the function
+// that gives the hold back. Every page that stages takes its own hold, so a
+// page opened inside another (an agent's Subagents row, inside the agent create
+// form) hands back only its own.
+func (p *configPanel) stage() func() {
+	p.staged++
+	return func() { p.staged-- }
+}
+
+// unstage spends the open page's own hold for the one write its submit makes,
+// and answers the function that gives it back. A page sitting inside another
+// keeps the outer hold, which is what leaves the outer create form staged.
+func (p *configPanel) unstage() func() {
+	p.staged--
+	return func() { p.staged++ }
 }
 
 func newConfigPanel(sel Selector, renderer *Renderer, session configPanelSession) *configPanel {
@@ -1398,7 +1421,7 @@ func (p *configPanel) assignModel(doc any, path []string, field configField, sto
 			return doc, err.Error()
 		}
 	}
-	if p.staged {
+	if p.staged > 0 {
 		return updated, ""
 	}
 	if err := p.save(updated); err != nil {
@@ -1451,7 +1474,7 @@ func (p *configPanel) assign(doc any, path []string, value any, remove bool, lab
 		p.printError(err)
 		return doc, err.Error()
 	}
-	if p.staged {
+	if p.staged > 0 {
 		return updated, ""
 	}
 	if err := p.save(updated); err != nil {
@@ -3040,8 +3063,7 @@ func (p *configPanel) addAgentDefinition(doc any, path []string, field configFie
 	_ = container // still carried by addRow's signature; the draft is read off the document
 	draft := map[string]any{"primary": true}
 	doc = p.stageAgentDraft(doc, path, draft)
-	p.staged = true
-	defer func() { p.staged = false }()
+	defer p.stage()()
 	actions := p.configActionSelector()
 	key, notice := "", ""
 	for {
@@ -3245,10 +3267,9 @@ func (p *configPanel) submitAgentDraft(doc any, path []string, draft map[string]
 	rows, _ := defs.(map[string]any)
 	delete(rows, "")
 	rows[key] = draft
-	previous := p.staged
-	p.staged = false
+	restore := p.unstage()
 	updated, note := p.assign(doc, path, rows, false, "Agent definitions")
-	p.staged = previous
+	restore()
 	if note == "" {
 		return updated, "", true
 	}
@@ -3271,7 +3292,10 @@ func (p *configPanel) submitAgentDraft(doc any, path []string, draft map[string]
 //
 // The entry is a real element of the list in a copy of the section: every
 // editor the saved page opens works on a real path inside the document, and
-// the copy dies with the page, so the submit is the only write.
+// the copy dies with the page, so the submit is the only write. The submit
+// applies the entry to the document the caller holds, through the panel's one
+// write path; whether that write reaches the store is the panel's gate to
+// decide.
 func (p *configPanel) addSubagentEntry(doc any, path []string, field configField) (any, string) {
 	raw, err := configMarshalDoc(doc)
 	if err != nil {
@@ -3295,8 +3319,7 @@ func (p *configPanel) addSubagentEntry(doc any, path []string, field configField
 		return doc, ""
 	}
 	rowPath := configJoinPath(path, strconv.Itoa(index))
-	p.staged = true
-	defer func() { p.staged = false }()
+	defer p.stage()()
 	actions := p.configActionSelector()
 	name, notice := "", ""
 	for {
@@ -3352,15 +3375,25 @@ func (p *configPanel) addSubagentEntry(doc any, path []string, field configField
 				continue
 			}
 			subagentDraftEntry(draft, rowPath)["name"] = name
-			if err := p.save(draft); err != nil {
-				// p.save leaves the panel's copy alone on a refusal, so the
-				// form keeps every value the user typed.
-				notice = err.Error()
+			// The entry is the form's own element in a copy of the section; the
+			// submit applies it to the document the caller holds, through the
+			// panel's one write path. This form's own hold is spent first, so a
+			// create form this one sits inside (an agent's Subagents row, inside
+			// the agent create form) keeps its hold: there the entry lands in
+			// that form's document and that form's one write carries it.
+			entries, _ := configLookupValue(draft, path)
+			restore := p.unstage()
+			updated, note := p.assign(doc, path, entries, false, field.Label)
+			restore()
+			if note != "" {
+				// The panel's copy is left alone on a refusal, so the form
+				// keeps every value the user typed.
+				notice = note
 				continue
 			}
-			// The rows above redraw from the store: the new entry is a row
-			// only once the document they read carries it.
-			return p.sectionDoc(p.section), ""
+			// The rows above redraw from the document the submit returned, so
+			// the new entry is a row the moment the form closes (plan 352).
+			return updated, ""
 		case res.OK && res.Row >= 0 && res.Row < len(templateRows):
 			if templateRows[res.Row].field.Path == "name" {
 				name, notice = p.holdSubagentName(draft, path, templateRows[res.Row].field, name)

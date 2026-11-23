@@ -5625,3 +5625,174 @@ func TestConfigPanelChromeFollowsTheOfferedTabs(t *testing.T) {
 		t.Fatalf("the narrow labels = %v", chrome.Short)
 	}
 }
+
+// --- Plan 370: a create form opened inside another one ---
+
+// nestedSubagentCreateUntilInnerSave walks the agent create form down to the
+// subagent create opened inside its Subagents row, and submits that inner form:
+// the point where the section still carries the outer form's unnamed draft key,
+// so a write here would be refused as agents.definitions.: invalid agent id.
+func nestedSubagentCreateUntilInnerSave() []richStep {
+	return []richStep{
+		{label: "Agent definitions", ok: true},
+		{label: configAddRowLabel, ok: true}, // the agent create form
+		{label: "Name", ok: true},            // frontend-expert
+		{label: "Subagents", ok: true},       // the draft agent's subagent list
+		{label: configAddRowLabel, ok: true}, // the subagent create form
+		{label: "Name", ok: true},            // helper
+		{label: "System prompt", ok: true},   // You help.
+		{label: configCreateSaveLabel, ok: true},
+	}
+}
+
+// nestedSubagentCreateSteps continues past the inner submit: the subagent list
+// the entry landed in, then the outer form's Model and its one Save.
+func nestedSubagentCreateSteps(modelLabel string) []richStep {
+	return append(nestedSubagentCreateUntilInnerSave(),
+		richStep{ok: false}, // the subagent list, back to the agent create form
+		richStep{label: "Model", ok: true},
+		richStep{label: modelLabel, ok: true},
+		richStep{label: configCreateSaveLabel, ok: true},
+		richStep{ok: false},
+		richStep{ok: false},
+	)
+}
+
+// nestedSubagentCreateInputs are the three fields those steps type, in the
+// order the forms ask for them.
+func nestedSubagentCreateInputs() []selectorInput {
+	return []selectorInput{
+		{value: "frontend-expert", ok: true},
+		{value: "helper", ok: true},
+		{value: "You help.", ok: true},
+	}
+}
+
+// An agent create form with a subagent create opened inside it (plan 370): the
+// inner submit writes nothing, because the section it would write still carries
+// the outer form's unnamed draft key and the loader refuses the whole section
+// (agents.definitions.: invalid agent id) — the bug the owner saw, and one the
+// panel's double cannot see, since it never validates. The outer form's Save is
+// the section's one write, and it carries both the agent and the entry the inner
+// form landed in its document.
+func TestConfigPanelSubagentInsideAgentCreateStaysStaged(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte("gateway:\n  http_addr: 127.0.0.1:9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state", "forebrain.state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	models := &state.LLMModelStore{DB: db}
+	row, err := models.Create(ctx, state.LLMModel{Provider: "deepseek", Model: "deepseek-flash", BaseURL: "https://api.deepseek.com", APIPath: "/v1/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	process.InstallConfigSectionValidator(cfgPath, db)
+	t.Cleanup(func() { state.SetSectionValidator(nil) })
+	env := &process.Environment{Root: home, SQL: db}
+	env.ConfigPath = cfgPath
+	session := &ChatSession{Env: env}
+	if err := session.UpdateConfigSection(ctx, "agents", json.RawMessage(`{"definitions":{"main":{"primary":true}}}`)); err != nil {
+		t.Fatalf("the seed must be a section the loader accepts: %v", err)
+	}
+
+	selector := &scriptedSelector{}
+	// The picker's row label is the install table's own (llm.FormatProviderModelDisplay).
+	renderer := runConfigPanelOn(t, session, selector, nestedSubagentCreateSteps("deepseek/deepseek-flash"), nestedSubagentCreateInputs(), "agents")
+
+	// No refusal reached the page, at either submit.
+	for _, text := range []string{pageLabels(selector), frameText(renderer)} {
+		for _, refused := range []string{"invalid agent id", "system_prompt required"} {
+			if strings.Contains(text, refused) {
+				t.Fatalf("%q reached the page, so a write was refused:\n%s", refused, text)
+			}
+		}
+	}
+
+	snapshot, err := session.ConfigPanelSections(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(snapshot.Stored["agents"], &stored); err != nil {
+		t.Fatalf("the stored agents section does not parse: %v", err)
+	}
+	definitions, _ := stored["definitions"].(map[string]any)
+	if _, draft := definitions[""]; draft {
+		t.Fatalf(`the unnamed draft key reached the store: %v`, definitions[""])
+	}
+	agent, ok := definitions["frontend-expert"].(map[string]any)
+	if !ok {
+		t.Fatalf("the agent the form saved is not in the store: %v", definitions)
+	}
+	if _, kept := definitions["main"]; !kept {
+		t.Fatalf("the section lost the agent it already held: %v", definitions)
+	}
+	// The Model step really reached the outer form: a silent miss there would
+	// leave every other assertion green while the outer form stayed untested.
+	if got, _ := agent["default_model"].(string); got != row.ID {
+		t.Fatalf("frontend-expert.default_model = %q, want the picked row's id %q", got, row.ID)
+	}
+	entries, _ := agent["subagents"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("frontend-expert.subagents = %v, want the one entry the inner form saved", agent["subagents"])
+	}
+	entry, _ := entries[0].(map[string]any)
+	if entry["name"] != "helper" || entry["system_prompt"] != "You help." {
+		t.Fatalf("frontend-expert.subagents[0] = %v, want the entry the inner form typed", entry)
+	}
+}
+
+// The same path over the panel's double, where the write count is visible
+// (plan 370): the inner submit stages and writes nothing, the outer submit is
+// the one write, and the document it writes holds both the agent — its model
+// included — and the entry the inner form landed in it, with no unnamed key.
+func TestConfigPanelNestedSubagentCreateWritesOnce(t *testing.T) {
+	const storedMain = `{"definitions":{"main":{"primary":true}}}`
+	newSession := func() *configPanelTestSession {
+		session := newConfigPanelSession(map[string]string{"agents": storedMain})
+		// The picker reads the snapshot's model table (config_panel.go:212):
+		// with no row the Model step misses silently (the scripted selector
+		// answers (-1,false) for a label it cannot find) and the outer form's
+		// staging would go untested.
+		session.snapshot.Models = []appcfg.LLMModelConfig{{ID: "llm-1", Provider: "deepseek", Model: "deepseek-flash"}}
+		return session
+	}
+
+	t.Run("the inner submit writes nothing", func(t *testing.T) {
+		session := newSession()
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, nestedSubagentCreateUntilInnerSave(), nestedSubagentCreateInputs(), "agents")
+
+		if len(session.writes) != 0 {
+			t.Fatalf("the inner create must stage only, got %+v", session.writes)
+		}
+	})
+
+	t.Run("the outer submit writes the whole form once", func(t *testing.T) {
+		session := newSession()
+		selector := &scriptedSelector{}
+		runConfigPanel(t, session, selector, nestedSubagentCreateSteps("deepseek/deepseek-flash"), nestedSubagentCreateInputs(), "agents")
+
+		if len(session.writes) != 1 {
+			t.Fatalf("expected exactly one write, got %d: %+v", len(session.writes), session.writes)
+		}
+		raw := string(session.writes[0].raw)
+		for _, want := range []string{`"frontend-expert":{`, `"subagents":[{`, `"name":"helper"`, `"default_model":"llm-1"`} {
+			if !strings.Contains(raw, want) {
+				t.Errorf("the saved document is missing %s: %s", want, raw)
+			}
+		}
+		if strings.Contains(raw, `"":`) {
+			t.Fatalf("the unnamed draft key was written: %s", raw)
+		}
+	})
+}
