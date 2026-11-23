@@ -1,0 +1,44 @@
+
+╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮
+┆                                                                                              ┆
+┆                         Forebrain Harness              v0.1.2-0.20261122015002-fb4fd2945ca7  ┆
+┆                         ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  ┆
+┆                         /private/var/folders/kw/mf8l2_c564b0m8qzhj073s940000gn/T/fb350/proj  ┆
+┆                                                                                              ┆
+┆                         / commands        @ mention                                          ┆
+┆                         esc interrupt     ctrl+j newline                                     ┆
+┆                                                                                              ┆
+╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯
+
+
+
+
+
+
+
+
+
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Approval & sandbox 3   Session & memory 4   Agents & tools 4
+
+❯ Follow conversation     No default; the type follows the conversation model.                                       ✓
+
+  deepseek/deepseek-chat  http://127.0.0.1:8763
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ↑/↓ to navigate Enter to save Esc to cancel

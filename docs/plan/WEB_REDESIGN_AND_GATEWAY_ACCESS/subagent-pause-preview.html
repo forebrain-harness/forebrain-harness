@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>子代理先中断再停止</title>
+<style>
+  /* Frame: always light (owner 2026-10-17). The app parts reuse the product's
+     own tokens from frontend/src/assets/main.css verbatim. */
+  :root {
+    --frame-bg: #F7F8FA;
+    --frame-ink: #101828;
+    --frame-ink-2: #475467;
+    --frame-rule: #E4E7EC;
+    --frame-mark: #1F4A9E;
+    --frame-mark-soft: #F5F8FF;
+
+    --forebrain-bg: #FFFFFF;
+    --forebrain-page-bg: #FFFFFF;
+    --forebrain-surface: #FFFFFF;
+    --forebrain-bg-alt: #F7F8FA;
+    --forebrain-button-alt-bg: #F2F4F7;
+    --forebrain-divider: #E4E7EC;
+    --forebrain-divider-strong: #D0D5DD;
+    --forebrain-text: #101828;
+    --forebrain-text-2: #475467;
+    --forebrain-muted-text: #667085;
+    --forebrain-danger: #B42318;
+    --forebrain-success: #067647;
+    --forebrain-brand-1: #1F4A9E;
+    --forebrain-brand-soft: #EBF0F9;
+    --forebrain-brand-border: #C3D2EC;
+    --forebrain-focus-border: #1F4A9E;
+    --forebrain-shadow-pop: 0 8px 24px rgba(16, 24, 40, 0.08);
+    --forebrain-ui-font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --forebrain-mono-font: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; }
+  body {
+    background: var(--frame-bg);
+    color: var(--frame-ink);
+    font-family: var(--forebrain-ui-font);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  code { font-family: var(--forebrain-mono-font); font-size: 0.92em; }
+
+  .page { max-width: 1120px; margin: 0 auto; padding: 56px 32px 80px; }
+  h1 { margin: 0; font-size: 30px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.25; }
+  .lede { margin: 10px 0 0; max-width: 60ch; color: var(--frame-ink-2); font-size: 15px; }
+  h2 { margin: 0 0 16px; font-size: 17px; font-weight: 600; }
+  section { margin-top: 56px; }
+
+  /* ---- Hero: the live tab beside the three states it moves through ---- */
+  .stage {
+    margin-top: 36px;
+    display: grid;
+    grid-template-columns: minmax(0, 460px) minmax(0, 1fr);
+    gap: 40px;
+    align-items: start;
+  }
+  .stage-hint { margin: 0 0 10px; font-size: 13px; color: var(--frame-ink-2); }
+
+  .rail { position: relative; margin: 30px 0 0; padding: 0; list-style: none; }
+  .rail::before {
+    content: "";
+    position: absolute;
+    left: 21px; top: 26px; bottom: 26px;
+    width: 1px;
+    background: var(--frame-rule);
+  }
+  .rail-step {
+    position: relative;
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 14px;
+    padding: 14px 16px 14px 0;
+    border-radius: 12px;
+    transition: background-color 160ms ease;
+  }
+  .rail-step + .rail-step { margin-top: 6px; }
+  .rail-step.is-now { background: #FFFFFF; box-shadow: 0 0 0 1.5px var(--frame-mark); }
+  .rail-glyph {
+    position: relative;
+    z-index: 1;
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+  }
+  .rail-glyph .btn-demo { pointer-events: none; }
+  .rail-name { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.4; }
+  .rail-step.is-now .rail-name { color: var(--frame-mark); }
+  .rail-text { margin: 4px 0 0; color: var(--frame-ink-2); font-size: 13.5px; }
+  .rail-text + .rail-text { margin-top: 2px; }
+  .rail-reset {
+    margin: 18px 0 0 58px;
+    height: 32px; padding: 0 14px;
+    border: 1px solid var(--frame-rule); border-radius: 8px;
+    background: #FFFFFF; color: var(--frame-ink-2);
+    font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .rail-reset:hover { color: var(--frame-ink); }
+
+  /* ---- App: subagent drawer (SubagentDrawer.vue + SubagentTab.vue) ---- */
+  .drawer {
+    display: flex; flex-direction: column;
+    height: 620px;
+    border: 1px solid var(--forebrain-divider);
+    border-radius: 12px;
+    background: var(--forebrain-bg);
+    overflow: hidden;
+    font-family: var(--forebrain-ui-font);
+  }
+  .drawer-head {
+    display: flex; align-items: center; gap: 2px;
+    height: 44px; flex: none;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--forebrain-divider);
+  }
+  .tab {
+    display: flex; align-items: center; min-width: 0; max-width: 260px;
+    height: 30px; padding: 0 2px 0 8px;
+    border-radius: 7px;
+    background: var(--forebrain-button-alt-bg); color: var(--forebrain-text);
+  }
+  .tab-main { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; }
+  .tab-main svg { width: 14px; height: 14px; flex: none; }
+  .tab-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; flex: none; padding: 0;
+    border: 0; border-radius: 5px; background: transparent;
+    color: var(--forebrain-muted-text); cursor: pointer;
+  }
+  .icon-btn svg { width: 12px; height: 12px; }
+  .icon-btn.lg { width: 28px; height: 28px; border-radius: 7px; }
+  .icon-btn.lg svg { width: 16px; height: 16px; }
+  .icon-btn:hover { background: var(--forebrain-button-alt-bg); color: var(--forebrain-text); }
+  .spacer { flex: 1; }
+
+  .transcript { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 18px 12px; }
+  .task-card {
+    border: 1px solid var(--forebrain-divider);
+    border-radius: 10px;
+    background: var(--forebrain-bg-alt);
+    padding: 8px 12px;
+  }
+  .task-cap { font-size: 11.5px; color: var(--forebrain-muted-text); }
+  .task-body { margin: 2px 0 0; font-size: 13px; color: var(--forebrain-text); }
+
+  .line { position: relative; margin-top: 16px; display: grid; gap: 14px; }
+  .line::before {
+    content: ""; position: absolute; left: 9.5px; top: 10px; bottom: 10px;
+    width: 1px; background: var(--forebrain-divider);
+  }
+  .step { position: relative; display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 12px; align-items: start; }
+  .node {
+    position: relative; z-index: 1;
+    width: 20px; height: 20px; border-radius: 50%;
+    display: grid; place-items: center;
+  }
+  .node svg { width: 12px; height: 12px; stroke-width: 2.4; }
+  .node--sub { background: var(--forebrain-brand-soft); box-shadow: inset 0 0 0 1.5px var(--forebrain-brand-border); color: var(--forebrain-brand-1); }
+  .node--run { background: var(--forebrain-brand-soft); box-shadow: inset 0 0 0 1.5px var(--forebrain-brand-border); color: var(--forebrain-brand-1); }
+  .node--canceled { background: #F2F4F7; color: var(--forebrain-muted-text); }
+  .node--done { background: #ECFDF3; box-shadow: inset 0 0 0 1.5px #ABEFC6; color: var(--forebrain-success); }
+  .say { font-size: 13.5px; color: var(--forebrain-text); padding-top: 1px; }
+  .tool-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding-top: 1px; font-size: 13px; }
+  .tool-verb { color: var(--forebrain-text); font-weight: 600; }
+  .tool-arg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--forebrain-mono-font); font-size: 12.5px; color: var(--forebrain-text-2); }
+  .tool-meta { margin-left: auto; flex: none; font-size: 12px; color: var(--forebrain-muted-text); font-variant-numeric: tabular-nums; }
+
+  /* The new transcript line: where the user interrupted it, ruled the way the
+     worked line is, so the two read as one family of run boundaries. */
+  .paused-line, .worked-line {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: 14px;
+    font-size: 11.5px; color: var(--forebrain-muted-text);
+  }
+  .paused-line .rule, .worked-line .rule { height: 1px; background: var(--forebrain-divider-strong); }
+  .paused-line .rule:first-child, .worked-line .rule:first-child { width: 12px; flex: none; }
+  .paused-line .rule:last-child, .worked-line .rule:last-child { flex: 1; }
+  .paused-line svg { width: 13px; height: 13px; flex: none; color: var(--forebrain-text-2); }
+  .paused-line b { font-weight: 500; color: var(--forebrain-text-2); }
+  .worked-line span { font-family: var(--forebrain-mono-font); white-space: nowrap; }
+  .ended-line { margin-top: 10px; font-size: 12.5px; color: var(--forebrain-muted-text); }
+
+  .user-msg { display: flex; justify-content: flex-end; align-items: flex-start; gap: 10px; margin-top: 14px; }
+  .user-bubble {
+    max-width: 78%;
+    padding: 8px 12px; border-radius: 12px;
+    background: var(--forebrain-button-alt-bg);
+    font-size: 13.5px; color: var(--forebrain-text);
+  }
+  .avatar {
+    width: 32px; height: 32px; flex: none; border-radius: 50%;
+    display: grid; place-items: center;
+    background: #F2F4F7; box-shadow: 0 0 0 1px var(--forebrain-divider);
+    color: var(--forebrain-muted-text);
+  }
+  .avatar svg { width: 16px; height: 16px; }
+
+  .status-line {
+    display: flex; align-items: center; gap: 6px;
+    padding: 0 18px 6px; flex: none;
+    font-size: 12px; color: var(--forebrain-muted-text);
+  }
+  .status-line svg { width: 13px; height: 13px; color: var(--forebrain-brand-1); }
+  .status-line span { font-family: var(--forebrain-mono-font); }
+
+  .composer-wrap { flex: none; margin: 0 12px 12px; }
+  .composer {
+    border: 1px solid var(--forebrain-divider-strong);
+    border-radius: 10px;
+    background: var(--forebrain-surface);
+  }
+  .composer:focus-within { border-color: var(--forebrain-focus-border); }
+  .composer textarea {
+    display: block; width: 100%; min-height: 44px; max-height: 120px;
+    padding: 10px 12px 4px;
+    border: 0; outline: none; resize: none;
+    background: transparent; color: var(--forebrain-text);
+    font: inherit; font-size: 13.5px; line-height: 1.5;
+  }
+  .composer textarea::placeholder { color: var(--forebrain-muted-text); }
+  .composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 8px 8px; }
+  .foot-left, .foot-right { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 30px; padding: 0 10px;
+    border: 1px solid var(--forebrain-divider); border-radius: 6px;
+    background: var(--forebrain-surface); color: var(--forebrain-text-2);
+    font-size: 12px; white-space: nowrap;
+    flex: none;
+  }
+  .chip svg { width: 14px; height: 14px; }
+  .chip .caret { width: 12px; height: 12px; color: var(--forebrain-muted-text); }
+  .plus { width: 30px; padding: 0; justify-content: center; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 28px; padding: 0 9px 0 7px;
+    border: 1px solid var(--forebrain-divider); border-radius: 999px;
+    background: var(--forebrain-surface); color: var(--forebrain-text-2);
+    font-size: 12px; white-space: nowrap;
+  }
+  .pill { min-width: 0; overflow: hidden; }
+  .pill svg { width: 14px; height: 14px; flex: none; }
+  .pill .model { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .pill .pc { font-variant-numeric: tabular-nums; }
+  .pill .dv { width: 1px; height: 12px; background: var(--forebrain-divider); }
+
+  /* The control this page is about. Running: interrupt, a quiet button —
+     nothing is lost by pressing it. Waiting for you: stop, the red square the
+     tab already uses today. */
+  .run-btn {
+    width: 28px; height: 28px; flex: none;
+    display: grid; place-items: center;
+    border: 1px solid var(--forebrain-divider); border-radius: 7px;
+    background: var(--forebrain-surface);
+    cursor: pointer;
+    transition: color 140ms ease, border-color 140ms ease;
+  }
+  .run-btn svg { width: 13px; height: 13px; }
+  .run-btn:hover { background: var(--forebrain-button-alt-bg); }
+  .run-btn--interrupt { color: var(--forebrain-text-2); }
+  .run-btn--stop { color: var(--forebrain-danger); }
+  .send-btn {
+    width: 28px; height: 28px; flex: none;
+    display: grid; place-items: center;
+    border: 0; border-radius: 7px;
+    background: var(--forebrain-brand-1); color: #FFFFFF; cursor: pointer;
+  }
+  .send-btn svg { width: 15px; height: 15px; }
+  .idle-bar { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 0 12px 12px; flex: none; }
+
+  /* Tooltip, as v-tip:top draws it. */
+  [data-tip] { position: relative; }
+  [data-tip]:hover::after, [data-tip]:focus-visible::after {
+    content: attr(data-tip);
+    position: absolute; bottom: calc(100% + 6px); right: 0;
+    padding: 4px 8px; border-radius: 6px;
+    background: #101828; color: #FFFFFF;
+    font-size: 12px; line-height: 1.4; white-space: nowrap;
+    pointer-events: none; z-index: 10;
+  }
+
+  .is-run { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .enter { animation: enter 220ms ease-out; }
+  @keyframes enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  /* ---- Static comparisons ---- */
+  .pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .cap { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; font-size: 13px; color: var(--frame-ink-2); }
+  .cap strong { color: var(--frame-ink); font-weight: 600; }
+  .cap.is-new strong { color: var(--frame-mark); }
+
+  /* SubagentCallCard on the activity line: bare head, rows in one panel. */
+  .card-head { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; font-weight: 600; color: var(--forebrain-text); }
+  .card-head .dur { margin-left: auto; font-size: 12px; font-weight: 400; color: var(--forebrain-muted-text); }
+  .card-panel { border: 1px solid var(--forebrain-divider); border-radius: 10px; background: var(--forebrain-page-bg); }
+  .card-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 12px; }
+  .card-row svg.st { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+  .card-row .body { min-width: 0; flex: 1; }
+  .card-title { font-size: 13px; color: var(--forebrain-text); }
+  .card-clock { font-size: 12px; color: var(--forebrain-muted-text); font-variant-numeric: tabular-nums; }
+  .card-detail { display: block; margin-top: 2px; font-size: 12px; color: var(--forebrain-muted-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-detail.is-new { color: var(--forebrain-text-2); }
+  .card-open { align-self: center; flex: none; font-size: 12px; color: var(--forebrain-brand-1); }
+  .card-frame { padding: 14px 16px; border: 1px solid var(--frame-rule); border-radius: 12px; background: #FFFFFF; }
+
+  .icons {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    border: 1px solid var(--frame-rule); border-radius: 12px;
+    background: #FFFFFF; overflow: hidden;
+  }
+  .icons > div {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+    min-height: 116px; padding: 12px 8px;
+    border-left: 1px solid var(--frame-rule);
+    font-size: 12.5px; color: var(--frame-ink-2); text-align: center;
+  }
+  .icons > div:first-child { border-left: 0; }
+  .icons svg { width: 22px; height: 22px; }
+  .icons .is-new { position: relative; background: var(--frame-mark-soft); color: var(--frame-mark); font-weight: 600; }
+  .icons .is-new::after { content: ""; position: absolute; inset: 8px; border: 1.5px solid var(--frame-mark); border-radius: 10px; pointer-events: none; }
+  .c-run { color: var(--forebrain-brand-1); }
+  .c-ok { color: var(--forebrain-success); }
+  .c-bad { color: var(--forebrain-danger); }
+  .c-off { color: var(--forebrain-muted-text); }
+  .c-wait { color: var(--forebrain-brand-1); }
+
+  .notes { margin: 0; padding-left: 20px; max-width: 70ch; color: var(--frame-ink-2); }
+  .notes li + li { margin-top: 6px; }
+  .notes b { color: var(--frame-ink); font-weight: 600; }
+
+  /* The composer's own border is its focus mark, as in the product. */
+  button:focus-visible { outline: 2px solid var(--frame-mark); outline-offset: 1px; }
+  @media (prefers-reduced-motion: reduce) {
+    .is-run, .enter { animation: none; }
+    .rail-step, .run-btn { transition: none; }
+  }
+  @media (max-width: 860px) {
+    .page { padding: 32px 16px 56px; }
+    h1 { font-size: 24px; }
+    .stage { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    .drawer { height: 560px; }
+    .pair { grid-template-columns: minmax(0, 1fr); }
+    .icons { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .icons > div:nth-child(4) { border-left: 0; }
+    .icons > div:nth-child(n+4) { border-top: 1px solid var(--frame-rule); }
+  }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-run" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></symbol>
+    <symbol id="i-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-bad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></symbol>
+    <symbol id="i-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/></symbol>
+    <symbol id="i-wait" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="10" x2="10" y1="15" y2="9"/><line x1="14" x2="14" y1="15" y2="9"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+    <symbol id="i-square" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
+    <symbol id="i-slash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="9" x2="15" y1="15" y2="9"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-bot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+    <symbol id="i-collapse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/><path d="m8 9 3 3-3 3"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+  </defs>
+</svg>
+
+<main class="page">
+  <h1>子代理先中断，再停止</h1>
+  <p class="lede">终端的子代理视图里，Ctrl+C 已经只作用于这个子代理：按一次打断当前这一步、等你发话，再按一次才停止它，主代理都不受影响。网页的子代理标签照同一规则改：停止按钮拆成先“中断”、再“停止”两段。</p>
+
+  <div class="stage">
+    <div>
+      <p class="stage-hint">真实尺寸，可以点：中断、输入后发送、或中断后再点停止。</p>
+      <div class="drawer" id="drawer" aria-label="子代理抽屉（方案）">
+        <div class="drawer-head">
+          <div class="tab">
+            <span class="tab-main">
+              <svg id="tab-icon" class="c-run is-run" aria-hidden="true"><use href="#i-run"/></svg>
+              <span class="tab-label">general-purpose · 网络探测</span>
+            </span>
+            <button type="button" class="icon-btn" aria-label="关闭 general-purpose · 网络探测"><svg><use href="#i-x"/></svg></button>
+          </div>
+          <span class="spacer"></span>
+          <button type="button" class="icon-btn lg" aria-label="打开其他子代理"><svg><use href="#i-plus"/></svg></button>
+          <button type="button" class="icon-btn lg" aria-label="收起"><svg><use href="#i-collapse"/></svg></button>
+        </div>
+
+        <div class="transcript" id="transcript">
+          <div class="task-card">
+            <div class="task-cap">交给它的任务</div>
+            <p class="task-body">检查到 api.example.com 的网络是否通畅，回答简短一些。</p>
+          </div>
+          <div class="line">
+            <div class="step">
+              <span class="node node--sub" aria-hidden="true"><svg><use href="#i-bot"/></svg></span>
+              <div class="say">先跑一个慢一点的探测。</div>
+            </div>
+            <div class="step">
+              <span class="node node--run" id="tool-node" role="img" aria-label="运行中"><svg class="is-run"><use href="#i-run"/></svg></span>
+              <div class="tool-head">
+                <span class="tool-verb">Ran</span>
+                <span class="tool-arg">ping -c 20 api.example.com</span>
+                <span class="tool-meta" id="tool-meta">运行中</span>
+              </div>
+            </div>
+          </div>
+          <div id="after"></div>
+        </div>
+
+        <div class="status-line" id="status-line" role="status">
+          <svg class="is-run" aria-hidden="true"><use href="#i-run"/></svg>
+          <span id="working">工作中（8s）</span>
+        </div>
+
+        <div class="composer-wrap" id="composer-wrap">
+          <div class="composer">
+            <textarea id="input" rows="1" placeholder="给这个子代理发消息，/ 调出命令，@ 引用文件" aria-label="给这个子代理发消息"></textarea>
+            <div class="composer-foot">
+              <div class="foot-left">
+                <span class="chip plus" aria-hidden="true"><svg><use href="#i-plus"/></svg></span>
+                <span class="chip"><svg><use href="#i-eye"/></svg>默认<svg class="caret"><use href="#i-down"/></svg></span>
+              </div>
+              <div class="foot-right">
+                <span class="pill"><svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="7" fill="none" stroke="#D0D5DD" stroke-width="2.2"/><circle cx="9" cy="9" r="7" fill="none" stroke="#1F4A9E" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="5.3 44" transform="rotate(-90 9 9)"/></svg><span class="pc">12%</span><span class="dv"></span><span class="model">deepseek-v4-flash</span></span>
+                <button type="button" class="run-btn run-btn--interrupt" id="run-btn" data-tip="中断这个子代理" aria-label="中断这个子代理"><svg id="run-btn-icon"><use href="#i-pause"/></svg></button>
+                <button type="button" class="send-btn" id="send-btn" aria-label="发送"><svg><use href="#i-up"/></svg></button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="idle-bar" id="idle-bar" hidden>
+          <span class="chip"><svg><use href="#i-eye"/></svg>默认<svg class="caret"><use href="#i-down"/></svg></span>
+          <span class="pill"><span class="pc">12%</span><span class="dv"></span><span class="model">deepseek-v4-flash</span></span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <ol class="rail" id="rail" aria-label="子代理的三个状态">
+        <li class="rail-step is-now" data-state="running">
+          <span class="rail-glyph"><span class="run-btn run-btn--interrupt btn-demo" aria-hidden="true"><svg><use href="#i-pause"/></svg></span></span>
+          <div>
+            <p class="rail-name">运行中</p>
+            <p class="rail-text">按钮是“中断”。点它停在这一步，什么都不丢。</p>
+          </div>
+        </li>
+        <li class="rail-step" data-state="paused">
+          <span class="rail-glyph"><span class="run-btn run-btn--stop btn-demo" aria-hidden="true"><svg><use href="#i-square"/></svg></span></span>
+          <div>
+            <p class="rail-name">已中断 · 等你发话</p>
+            <p class="rail-text">输入框保留。发消息，它在同一次派发里接着做，结果仍交给主代理。</p>
+            <p class="rail-text">按钮变成“停止”。主代理这段时间一直在等它。</p>
+          </div>
+        </li>
+        <li class="rail-step" data-state="stopped">
+          <span class="rail-glyph"><svg class="c-off" width="22" height="22" aria-hidden="true"><use href="#i-off"/></svg></span>
+          <div>
+            <p class="rail-name">已停止</p>
+            <p class="rail-text">输入框收起。主代理收到“用户停止了它”，接着跑自己这一轮。</p>
+          </div>
+        </li>
+      </ol>
+      <button type="button" class="rail-reset" id="reset">从头再来</button>
+    </div>
+  </div>
+
+  <section>
+    <h2>对话里的子代理卡片</h2>
+    <div class="pair">
+      <div>
+        <p class="cap"><strong>现状</strong>中断后仍写着被打断的那条命令</p>
+        <div class="card-frame">
+          <div class="card-head">正在运行 1 个 general-purpose 任务…<span class="dur">25s</span></div>
+          <div class="card-panel">
+            <div class="card-row">
+              <svg class="st c-run is-run" aria-hidden="true"><use href="#i-run"/></svg>
+              <span class="body"><span class="card-title">网络探测</span> <span class="card-clock">· 25s</span><span class="card-detail">最近：ping -c 20 api.example.com</span></span>
+              <span class="card-open">打开</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p class="cap is-new"><strong>方案</strong>换成暂停图标，说明在等你</p>
+        <div class="card-frame">
+          <div class="card-head">正在运行 1 个 general-purpose 任务…<span class="dur">25s</span></div>
+          <div class="card-panel">
+            <div class="card-row">
+              <svg class="st c-wait" aria-hidden="true"><use href="#i-wait"/></svg>
+              <span class="body"><span class="card-title">网络探测</span> <span class="card-clock">· 25s</span><span class="card-detail is-new">已中断 · 等你发话</span></span>
+              <span class="card-open">打开</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>抽屉标签与“打开其他子代理”菜单的图标</h2>
+    <div class="icons" role="list">
+      <div role="listitem"><svg class="c-run is-run" aria-hidden="true"><use href="#i-run"/></svg>运行中</div>
+      <div role="listitem" class="is-new"><svg class="c-wait" aria-hidden="true"><use href="#i-wait"/></svg>等你发话</div>
+      <div role="listitem"><svg class="c-ok" aria-hidden="true"><use href="#i-ok"/></svg>已完成</div>
+      <div role="listitem"><svg class="c-bad" aria-hidden="true"><use href="#i-bad"/></svg>失败</div>
+      <div role="listitem"><svg class="c-off" aria-hidden="true"><use href="#i-off"/></svg>已取消</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>规则</h2>
+    <ul class="notes">
+      <li><b>按钮</b>：运行中是“中断”（两竖线，灰色）；中断后同一位置换成“停止”（红色方块，即现在的停止按钮）。不再一下就停掉。</li>
+      <li><b>等你发话</b>：对话里加一行“已中断 · 等你发话”，和收尾的“已工作”线同一样式；状态行“工作中”隐藏；计时不停，因为这次派发还没结束。</li>
+      <li><b>恢复</b>：你的消息一送达，图标、卡片、状态行都回到运行中。别的会话发来的消息也会让它继续，和主对话被打断后收到消息一致。</li>
+      <li><b>文案</b>：现有但没用上的状态词“等待输入”改为“等你发话”，标签、菜单、卡片三处一致。</li>
+      <li><b>不变</b>：Esc 的含义、停止后的收尾样式、跑批会话只读（不显示输入框与按钮）。</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+  // The live tab walks the same three states the terminal does: running, paused
+  // waiting for the user, stopped. Nothing here talks to a server.
+  const $ = (id) => document.getElementById(id)
+  const drawer = {
+    tabIcon: $('tab-icon'), toolNode: $('tool-node'), toolMeta: $('tool-meta'),
+    after: $('after'), status: $('status-line'), working: $('working'),
+    composer: $('composer-wrap'), idle: $('idle-bar'), input: $('input'),
+    runBtn: $('run-btn'), runIcon: $('run-btn-icon'), send: $('send-btn'),
+  }
+  let state = 'running'
+  let started = Date.now() - 8000
+  let timers = []
+
+  function use(el, id) { el.querySelector('use')?.setAttribute('href', id) }
+  function setTabIcon(id, cls) {
+    drawer.tabIcon.setAttribute('class', cls)
+    use(drawer.tabIcon, id)
+  }
+  function markRail(name) {
+    for (const step of document.querySelectorAll('.rail-step')) {
+      step.classList.toggle('is-now', step.dataset.state === name)
+    }
+  }
+  function append(html) {
+    const wrap = document.createElement('div')
+    wrap.className = 'enter'
+    wrap.innerHTML = html
+    drawer.after.appendChild(wrap)
+    $('transcript').scrollTop = $('transcript').scrollHeight
+    return wrap
+  }
+  function elapsed() { return Math.round((Date.now() - started) / 1000) }
+  function setButton(kind) {
+    const stop = kind === 'stop'
+    drawer.runBtn.className = 'run-btn ' + (stop ? 'run-btn--stop' : 'run-btn--interrupt')
+    const label = stop ? '停止这个子代理' : '中断这个子代理'
+    drawer.runBtn.dataset.tip = label
+    drawer.runBtn.setAttribute('aria-label', label)
+    use(drawer.runIcon, stop ? '#i-square' : '#i-pause')
+  }
+
+  function pause() {
+    state = 'paused'
+    drawer.toolNode.className = 'node node--canceled'
+    drawer.toolNode.setAttribute('aria-label', '已取消')
+    drawer.toolNode.innerHTML = '<svg><use href="#i-slash"/></svg>'
+    if (drawer.toolMeta.textContent === '运行中') drawer.toolMeta.textContent = '已取消'
+    append('<div class="paused-line" role="note"><span class="rule"></span><svg aria-hidden="true"><use href="#i-wait"/></svg><b>已中断 · 等你发话</b><span class="rule"></span></div>')
+    drawer.status.hidden = true
+    setTabIcon('#i-wait', 'c-wait')
+    setButton('stop')
+    markRail('paused')
+    drawer.input.focus()
+  }
+
+  function stop() {
+    state = 'stopped'
+    append('<p class="ended-line">已取消</p><div class="worked-line"><span class="rule"></span><span>已工作 ' + elapsed() + 's</span><span class="rule"></span></div>')
+    drawer.composer.hidden = true
+    drawer.idle.hidden = false
+    setTabIcon('#i-off', 'c-off')
+    markRail('stopped')
+  }
+
+  function resume(text) {
+    state = 'running'
+    append('<div class="user-msg"><div class="user-bubble"></div><span class="avatar" aria-hidden="true"><svg><use href="#i-user"/></svg></span></div>')
+      .querySelector('.user-bubble').textContent = text
+    drawer.status.hidden = false
+    setTabIcon('#i-run', 'c-run is-run')
+    setButton('interrupt')
+    markRail('running')
+    timers.push(setTimeout(() => {
+      if (state !== 'running') return
+      append('<div class="line"><div class="step"><span class="node node--sub" aria-hidden="true"><svg><use href="#i-bot"/></svg></span><div class="say">好，只看前 5 个包：通，平均 38ms。</div></div></div><div class="worked-line"><span class="rule"></span><span>已工作 ' + elapsed() + 's</span><span class="rule"></span></div>')
+      state = 'done'
+      drawer.status.hidden = true
+      drawer.composer.hidden = true
+      drawer.idle.hidden = false
+      setTabIcon('#i-ok', 'c-ok')
+      markRail('')
+    }, 2200))
+  }
+
+  drawer.runBtn.addEventListener('click', () => {
+    if (state === 'running') pause()
+    else if (state === 'paused') stop()
+  })
+  function submit() {
+    const text = drawer.input.value.trim()
+    if (!text || state === 'stopped' || state === 'done') return
+    drawer.input.value = ''
+    if (state === 'paused') resume(text)
+  }
+  drawer.send.addEventListener('click', submit)
+  drawer.input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit() }
+  })
+
+  $('reset').addEventListener('click', () => {
+    for (const t of timers) clearTimeout(t)
+    timers = []
+    state = 'running'
+    started = Date.now() - 8000
+    drawer.after.innerHTML = ''
+    drawer.toolNode.className = 'node node--run'
+    drawer.toolNode.setAttribute('aria-label', '运行中')
+    drawer.toolNode.innerHTML = '<svg class="is-run"><use href="#i-run"/></svg>'
+    drawer.toolMeta.textContent = '运行中'
+    drawer.status.hidden = false
+    drawer.composer.hidden = false
+    drawer.idle.hidden = true
+    drawer.input.value = ''
+    setTabIcon('#i-run', 'c-run is-run')
+    setButton('interrupt')
+    markRail('running')
+  })
+
+  setInterval(() => {
+    if (state === 'running') drawer.working.textContent = '工作中（' + elapsed() + 's）'
+  }, 1000)
+</script>
+</body>
+</html>

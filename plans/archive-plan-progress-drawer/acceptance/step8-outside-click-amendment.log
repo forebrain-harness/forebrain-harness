@@ -1,0 +1,31 @@
+=== Amendment (owner ruling 2026-10-30): a click outside the drawer no longer closes it ===
+date: 2026-10-30T07:42:06Z   instance: tmux fb-plan-drawer 120x40, fake provider, temp home
+
+--- 1. drawer open (token click at the measured column) ---
+                                                                                │ ● Updated Plan                     ×
+● calling session_todo                                                          │
+                                                                                │
+
+--- 2. click OUTSIDE it: composer text row -> caret moves, drawer stays open ---
+caret after typing:      x3
+caret after outside click: x4
+row 1 still the drawer title:                                                                                 │ ● Updated Plan                     ×
+
+--- 3. close control still closes ---
+row 1 after ×: []
+
+--- 4. Esc closes, the run keeps going ---
+reopened: │ ● Updated Plan                     ×
+row 1 after Esc: []
+working line still live: 1
+
+--- 5. the token still toggles both ways ---
+after token click: │ ● Updated Plan                     ×
+after token click again: []
+
+--- 6. row edges with the drawer open: every divider row exactly 120 columns ---
+rows carrying the divider: 0; wrong width: 0 []
+note: rows without a divider and without content are left unpadded by the
+      baseline painter (the same is true with the drawer closed), which is
+      why the raw row-bytes report lists short blank rows either way.
+rows carrying the divider (drawer open): 33; wrong width: 0 []

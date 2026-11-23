@@ -1,0 +1,72 @@
+
+=== Step 7 check 4 — an outside click only dismisses: no fold, no caret, no jump ===
+
+--- before: drawer open, tool card collapsed, rows 18-20 of the left column:
+                                                            
+● calling session_todo                                      
+                                                            
+--- click the tool card's body row (10,20) — a fold target — with the drawer open:
+--- after: row 1 has no divider/drawer title (closed); rows 18-20 show the card still collapsed:
+
+● Updated Plan
+  修改 pkg/tui/input_events.go 的鼠标交互并验证 hover
+  ✓ 归档计划并保留完整中文长路径，验证历史与抽屉都自动软换行而不截断
+  ✓ 构建修复前二进制
+  ✓ 新增回归测试
+
+=== Step 7 check 5 — ×, Esc and the token itself close it; the run survives Esc ===
+
+1) click the token (39,35):
+   drawer: closed   run live
+2) click × (118,1):
+   drawer: closed   run live
+3) reopen, then press Escape:
+   before Esc: drawer closed
+   after Esc:  drawer closed   run ended
+   Working line: 
+4) reopen, then click the token again:
+   before: drawer closed
+   after:  drawer closed   run ended
+
+5) Esc with no drawer open still interrupts the run (the original behaviour, unchanged):
+   screen tail:
+
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+›
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+deepseek/deepseek-v4-flash                                                                                       100%/1M
+
+=== Step 7 check 5 (redo with the token column measured before each click — the ☑N/M token moves right as the elapsed clock gains digits) — ×, Esc and the token itself close it; the run survives Esc ===
+
+1) click the token (col 39,35):
+   drawer: closed   run live
+2) click × (118,1):
+   drawer: closed   run live
+3) reopen (token at col 39), then press Escape:
+   before Esc: drawer open   run live
+   after Esc:  drawer closed   run live
+   Working line still on screen: - Working (46s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input
+4) reopen, then click the token again:
+   before: drawer open
+   after:  drawer closed   run live
+
+--- correction to the sequence above: step 1 started from a drawer that was already open (opened before the block), so it toggled CLOSED and step 2's × hit an already-closed drawer. The clean × proof follows.
+
+5) × alone: open, then click × (118,1);
+   start: drawer closed
+   after opening with the token: drawer open
+   after clicking ×:            drawer closed   run live
+   row 1: ┆                                       
+
+=== Step 7 check 8 — stop and clean up ===
+--- messages written by the acceptance runs (the tool result is the plan):
+1|user|visible|建立七项待办并保留足够长的历史消息用于分栏重排验收
+2|user|visible|<forebrain_environment_context>
+<forebrain_rules>
+## AGENTS.
+3|assistant|visible|calling session_todo
+4|tool|visible|{
+
+--- stop:
+stopped

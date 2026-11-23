@@ -1,0 +1,852 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>计划审批：交给其他模型执行</title>
+<style>
+  /* Frame: always light (owner 2026-10-17). The app parts reuse the product's
+     own tokens from frontend/src/assets/main.css and the dock's own CSS from
+     frontend/src/components/chat/PlanApprovalDock.vue verbatim. */
+  :root {
+    --frame-bg: #F7F8FA;
+    --frame-ink: #101828;
+    --frame-ink-2: #475467;
+    --frame-rule: #E4E7EC;
+    --frame-mark: #1F4A9E;
+    --frame-mark-soft: #F5F8FF;
+
+    --forebrain-bg: #FFFFFF;
+    --forebrain-page-bg: #FFFFFF;
+    --forebrain-surface: #FFFFFF;
+    --forebrain-bg-alt: #F7F8FA;
+    --forebrain-button-alt-bg: #F2F4F7;
+    --forebrain-divider: #E4E7EC;
+    --forebrain-divider-strong: #D0D5DD;
+    --forebrain-text: #101828;
+    --forebrain-text-2: #475467;
+    --forebrain-muted-text: #667085;
+    --forebrain-danger: #B42318;
+    --forebrain-success: #067647;
+    --forebrain-brand-1: #1F4A9E;
+    --forebrain-brand-hover: #173B80;
+    --forebrain-brand-soft: #EBF0F9;
+    --forebrain-brand-border: #C3D2EC;
+    --forebrain-focus-border: #1F4A9E;
+    --forebrain-ui-font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --forebrain-mono-font: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; }
+  body {
+    background: var(--frame-bg);
+    color: var(--frame-ink);
+    font-family: var(--forebrain-ui-font);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  code { font-family: var(--forebrain-mono-font); font-size: 0.92em; }
+
+  .page { max-width: 1160px; margin: 0 auto; padding: 56px 32px 80px; }
+  h1 { margin: 0; font-size: 30px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.25; }
+  .lede { margin: 10px 0 0; max-width: 64ch; color: var(--frame-ink-2); font-size: 15px; }
+  h2 { margin: 0 0 16px; font-size: 17px; font-weight: 600; }
+  section { margin-top: 56px; }
+
+  .ask {
+    margin-top: 28px; max-width: 760px;
+    padding: 14px 18px 14px 16px;
+    border: 1px solid var(--frame-rule); border-left: 3px solid var(--frame-mark);
+    border-radius: 10px; background: #FFFFFF;
+  }
+  .ask h2 { margin: 0 0 6px; font-size: 14px; }
+  .ask ol { margin: 0; padding-left: 20px; color: var(--frame-ink-2); font-size: 13.5px; }
+  .ask li + li { margin-top: 4px; }
+  .ask b { color: var(--frame-ink); font-weight: 600; }
+
+  /* ---- Stage: where the dock is, beside the state it is in ---- */
+  .stage {
+    margin-top: 36px;
+    display: grid;
+    grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+    gap: 36px;
+    align-items: start;
+  }
+  .stage-hint { margin: 0 0 10px; font-size: 13px; color: var(--frame-ink-2); }
+
+  .rail { position: relative; margin: 30px 0 0; padding: 0; list-style: none; }
+  .rail::before {
+    content: ""; position: absolute;
+    left: 21px; top: 26px; bottom: 26px; width: 1px;
+    background: var(--frame-rule);
+  }
+  .rail-step {
+    position: relative;
+    display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 12px;
+    padding: 12px 14px 12px 0;
+    border-radius: 12px;
+    transition: background-color 160ms ease, box-shadow 160ms ease;
+  }
+  .rail-step + .rail-step { margin-top: 6px; }
+  .rail-step.is-now { background: #FFFFFF; box-shadow: 0 0 0 1.5px var(--frame-mark); }
+  .rail-glyph {
+    position: relative; z-index: 1;
+    width: 44px; height: 44px; display: grid; place-items: center;
+  }
+  .rail-glyph span {
+    width: 28px; height: 28px; border-radius: 8px;
+    display: grid; place-items: center;
+    background: #FFFFFF; box-shadow: inset 0 0 0 1px var(--frame-rule);
+    color: var(--frame-ink-2);
+  }
+  .rail-step.is-now .rail-glyph span { background: var(--frame-mark-soft); box-shadow: inset 0 0 0 1px var(--forebrain-brand-border); color: var(--frame-mark); }
+  .rail-glyph svg { width: 15px; height: 15px; }
+  .rail-name { margin: 0; font-size: 14.5px; font-weight: 600; line-height: 1.4; }
+  .rail-step.is-now .rail-name { color: var(--frame-mark); }
+  .rail-text { margin: 3px 0 0; color: var(--frame-ink-2); font-size: 13px; }
+  .rail-reset {
+    margin: 18px 0 0 56px;
+    height: 32px; padding: 0 14px;
+    border: 1px solid var(--frame-rule); border-radius: 8px;
+    background: #FFFFFF; color: var(--frame-ink-2);
+    font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .rail-reset:hover { color: var(--frame-ink); }
+
+  /* ---- App: the conversation column ---- */
+  .chat {
+    display: flex; flex-direction: column;
+    min-height: 700px;
+    border: 1px solid var(--forebrain-divider);
+    border-radius: 12px;
+    background: var(--forebrain-bg);
+    overflow: hidden;
+  }
+  .thread { flex: 1; padding: 22px 24px 18px; }
+  .thread-inner { width: min(760px, 100%); margin: 0 auto; }
+
+  .user-msg { display: flex; justify-content: flex-end; }
+  .user-bubble {
+    max-width: 78%;
+    padding: 8px 12px; border-radius: 12px;
+    background: var(--forebrain-button-alt-bg);
+    font-size: 13.5px; color: var(--forebrain-text);
+  }
+
+  .line { position: relative; margin-top: 18px; display: grid; gap: 14px; }
+  .line::before {
+    content: ""; position: absolute; left: 9.5px; top: 10px; bottom: 10px;
+    width: 1px; background: var(--forebrain-divider);
+  }
+  .step { position: relative; display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 12px; align-items: start; }
+  .node {
+    position: relative; z-index: 1;
+    width: 20px; height: 20px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: var(--forebrain-page-bg);
+  }
+  .node svg { width: 12px; height: 12px; stroke-width: 2.4; }
+  .node--say { box-shadow: inset 0 0 0 1.5px var(--forebrain-divider-strong); }
+  .node--say::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--forebrain-text-2); }
+  .node--done { background: #ECFDF3; box-shadow: inset 0 0 0 1.5px #ABEFC6; color: var(--forebrain-success); }
+  .node--run { background: var(--forebrain-brand-soft); box-shadow: inset 0 0 0 1.5px var(--forebrain-brand-border); color: var(--forebrain-brand-1); }
+  .say { font-size: 13.5px; color: var(--forebrain-text); padding-top: 0; }
+  .say code { font-size: 12.5px; color: var(--forebrain-text-2); }
+  .tool-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 13px; }
+  .tool-verb { color: var(--forebrain-text); font-weight: 600; }
+  .tool-arg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--forebrain-mono-font); font-size: 12.5px; color: var(--forebrain-text-2); }
+
+  /* SubagentCallCard on the activity line: bare head, rows in one panel. */
+  .card-head { display: flex; align-items: center; gap: 10px; padding: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--forebrain-text); }
+  .card-panel { border: 1px solid var(--forebrain-divider); border-radius: 10px; background: var(--forebrain-page-bg); }
+  .card-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 12px; }
+  .card-row svg.st { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+  .card-row .body { min-width: 0; flex: 1; }
+  .card-title { font-size: 13px; color: var(--forebrain-text); }
+  .card-clock { font-size: 12px; color: var(--forebrain-muted-text); font-variant-numeric: tabular-nums; }
+  .card-detail { display: block; margin-top: 2px; font-size: 12px; color: var(--forebrain-muted-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-open { align-self: center; flex: none; font-size: 12px; color: var(--forebrain-brand-1); }
+
+  .status-line {
+    display: flex; align-items: center; gap: 6px;
+    width: min(760px, 100% - 48px); margin: 0 auto 6px;
+    font-size: 12px; color: var(--forebrain-muted-text);
+  }
+  .status-line svg { width: 13px; height: 13px; color: var(--forebrain-brand-1); }
+  .status-line span { font-family: var(--forebrain-mono-font); }
+  .composer {
+    width: min(760px, 100% - 48px); margin: 0 auto 16px;
+    border: 1px solid var(--forebrain-divider-strong); border-radius: 12px;
+    background: var(--forebrain-surface);
+  }
+  .composer textarea {
+    display: block; width: 100%; min-height: 48px; padding: 12px 14px 4px;
+    border: 0; outline: none; resize: none; background: transparent;
+    font: inherit; font-size: 13.5px; color: var(--forebrain-text);
+  }
+  .composer textarea::placeholder { color: var(--forebrain-muted-text); }
+  .composer-foot { display: flex; justify-content: flex-end; padding: 6px 8px 8px; }
+  .send-btn {
+    width: 28px; height: 28px; display: grid; place-items: center;
+    border: 0; border-radius: 7px; background: var(--forebrain-brand-1); color: #FFFFFF;
+  }
+  .send-btn svg { width: 15px; height: 15px; }
+
+  /* ---- The dock (PlanApprovalDock.vue, verbatim) ---- */
+  .xp-dock {
+    flex: none;
+    width: min(760px, 100% - 48px);
+    margin: 0 auto 16px;
+    border: 1px solid var(--forebrain-brand-border);
+    border-radius: 12px;
+    background: var(--forebrain-page-bg);
+    overflow: hidden;
+    display: grid;
+    box-shadow: 0 -8px 24px rgba(16, 24, 40, 0.06);
+  }
+  .xp-dock.is-static { margin: 0; width: 100%; }
+  .xp-dock-h {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
+    padding: 8px 10px 8px 14px;
+    border-bottom: 1px solid var(--forebrain-divider);
+    font-size: 13px; color: var(--forebrain-text);
+  }
+  .xp-dock-h b { font-weight: 600; flex: none; }
+  .xp-dock-h .mono {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: var(--forebrain-mono-font); font-size: 12px; color: var(--forebrain-muted-text);
+  }
+  .xp-dock-h .grow { flex: 1; }
+  .xp-dock-h > svg { width: 14px; height: 14px; flex: none; color: var(--forebrain-brand-1); }
+  .xp-eye {
+    all: unset; flex: none; box-sizing: border-box;
+    width: 24px; height: 24px; border-radius: 6px;
+    display: grid; place-items: center; cursor: pointer;
+    color: var(--forebrain-muted-text);
+  }
+  .xp-eye svg { width: 15px; height: 15px; }
+  .xp-eye:hover { background: var(--forebrain-brand-soft); color: var(--forebrain-brand-1); }
+  .xp-doc {
+    padding: 12px 14px;
+    max-height: min(220px, 30vh); overflow: auto;
+    -webkit-mask-image: linear-gradient(#000 calc(100% - 20px), transparent);
+    mask-image: linear-gradient(#000 calc(100% - 20px), transparent);
+    font-size: 13px; line-height: 1.7; color: var(--forebrain-text);
+  }
+  .xp-doc h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+  .xp-doc h4 { margin: 10px 0 2px; font-size: 13px; font-weight: 600; }
+  .xp-doc p, .xp-doc ol { margin: 0; }
+  .xp-doc ol { padding-left: 20px; }
+  .gate-ask {
+    display: grid; gap: 9px;
+    padding: 10px 12px 11px;
+    background: var(--forebrain-brand-soft);
+    border-top: 1px solid var(--forebrain-brand-border);
+  }
+  .gate-ask .q { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; color: var(--forebrain-text); }
+  .gate-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .gate-btn {
+    flex: none; height: 26px; padding: 0 9px;
+    border-radius: 6px; border: 1px solid var(--forebrain-divider-strong);
+    background: var(--forebrain-page-bg); color: var(--forebrain-text);
+    font: inherit; font-size: 12px; font-weight: 500;
+    white-space: nowrap; cursor: pointer;
+  }
+  .gate-btn:hover { background: var(--forebrain-bg-alt); }
+  .gate-btn-pri { border-color: var(--forebrain-brand-1); background: var(--forebrain-brand-1); color: #f5ffff; }
+  .gate-btn-pri:hover { background: var(--forebrain-brand-hover); border-color: var(--forebrain-brand-hover); }
+  .gate-btn-on { border-color: var(--forebrain-brand-1); color: var(--forebrain-brand-1); box-shadow: inset 0 0 0 1px var(--forebrain-brand-1); }
+  .gate-btn .mono { font-family: var(--forebrain-mono-font); font-size: 11.5px; }
+  .gate-btn.trunc { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  .gate-fb { display: flex; align-items: center; gap: 6px; }
+  .gate-fb-input {
+    flex: 1; min-width: 0; height: 28px;
+    border: 1px solid var(--forebrain-divider-strong); border-radius: 6px;
+    padding: 0 9px; background: var(--forebrain-page-bg);
+    font: inherit; font-size: 12.5px; color: var(--forebrain-text);
+  }
+  .gate-fb-input:focus-visible { outline: 2px solid var(--forebrain-brand-1); outline-offset: 1px; }
+  .gate-fb .esc { flex: none; font-size: 11.5px; color: var(--forebrain-muted-text); white-space: nowrap; }
+  kbd {
+    font-family: var(--forebrain-mono-font); font-size: 10.5px; line-height: 1.6;
+    padding: 0 4px; margin-right: 4px;
+    border: 1px solid var(--forebrain-divider-strong); border-radius: 4px;
+    background: var(--forebrain-page-bg); color: var(--forebrain-text-2);
+  }
+  .xp-run { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--forebrain-text); }
+  .xp-run .grow { flex: 1; }
+  .xp-run > svg { width: 14px; height: 14px; flex: none; color: var(--forebrain-brand-1); }
+  .xp-pick { display: grid; gap: 4px; }
+  .xp-pick .cap { font-size: 12.5px; color: var(--forebrain-text-2); }
+  .xp-pick .sub { margin: -2px 0 2px; font-size: 12px; color: var(--forebrain-muted-text); }
+  .xp-model {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    border: 1px solid var(--forebrain-divider); border-radius: 6px;
+    padding: 5px 9px; background: var(--forebrain-page-bg);
+    font: inherit; font-size: 12.5px; color: var(--forebrain-text);
+    text-align: left; cursor: pointer;
+  }
+  .xp-model:hover { background: var(--forebrain-bg-alt); }
+  .xp-model .ml { display: flex; flex-direction: column; min-width: 0; }
+  .xp-model .m { font-family: var(--forebrain-mono-font); font-size: 12px; }
+  .xp-model .ep { font-family: var(--forebrain-mono-font); font-size: 11px; color: var(--forebrain-muted-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .xp-model .cur { flex: none; font-size: 11.5px; color: var(--forebrain-muted-text); }
+  /* 思考强度第二屏（计划 310）：沿用 .xp-model 的卡片视觉，左侧勾选 + 显示名 +
+     双写档位 id，右侧齿轮图标（模型设置），照 EffortChip 的菜单行。 */
+  .xp-effort .eleft { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .xp-effort .echk { width: 13px; height: 13px; flex: none; color: var(--forebrain-brand-1); }
+  .xp-effort .elabel { font-weight: 600; font-size: 12.5px; }
+  .xp-effort .ev { font-family: var(--forebrain-mono-font); font-size: 11px; color: var(--forebrain-muted-text); }
+  .xp-effort .etag { flex: none; display: inline-flex; align-items: center; color: var(--forebrain-brand-1); }
+  .xp-effort .etag svg { width: 14px; height: 14px; }
+  .xp-effort.is-on { border-color: var(--forebrain-brand-1); background: var(--forebrain-bg-alt); }
+  .xp-back { justify-self: start; display: inline-flex; align-items: center; gap: 5px;
+    border: 0; background: none; padding: 2px 0; margin-bottom: 2px;
+    font: inherit; font-size: 12px; color: var(--forebrain-text-2); cursor: pointer; }
+  .xp-back:hover { color: var(--forebrain-brand-1); }
+  .xp-back svg { width: 13px; height: 13px; }
+
+  .is-run { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .enter { animation: enter 260ms cubic-bezier(.2,.7,.2,1) both; }
+  @keyframes enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .fold { animation: fold 240ms ease-in both; }
+  @keyframes fold { to { opacity: 0; transform: translateY(10px); } }
+
+  /* ---- Static comparisons ---- */
+  .pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .cap-line { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; font-size: 13px; color: var(--frame-ink-2); }
+  .cap-line strong { color: var(--frame-ink); font-weight: 600; }
+  .frame-card { padding: 16px; border: 1px solid var(--frame-rule); border-radius: 12px; background: #FFFFFF; }
+
+  .term {
+    margin: 0; padding: 14px 16px;
+    border-radius: 10px; background: #1C1C1C; color: #D0D0D0;
+    font-family: "Fira Code", var(--forebrain-mono-font); font-size: 12.5px; line-height: 1.55;
+    white-space: pre; overflow-x: auto;
+  }
+  .term .b { color: #FFFFFF; font-weight: 700; }
+  .term .acc { color: #87AFD7; }
+  .term .dim { color: #808080; }
+  .term .new { color: #FFFFFF; background: rgba(135, 175, 215, 0.18); }
+
+  .notes { margin: 0; padding-left: 20px; max-width: 76ch; color: var(--frame-ink-2); }
+  .notes li + li { margin-top: 6px; }
+  .notes b { color: var(--frame-ink); font-weight: 600; }
+
+  button:focus-visible { outline: 2px solid var(--frame-mark); outline-offset: 1px; }
+  @media (prefers-reduced-motion: reduce) {
+    .is-run, .enter, .fold { animation: none; }
+    .rail-step { transition: none; }
+  }
+  @media (max-width: 900px) {
+    .page { padding: 32px 16px 56px; }
+    h1 { font-size: 24px; }
+    .stage { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    .rail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .rail::before { display: none; }
+    .rail-step + .rail-step { margin-top: 0; }
+    .rail-reset { margin-left: 0; }
+    .thread { padding: 18px 14px 14px; }
+    .xp-dock, .composer, .status-line { width: calc(100% - 24px); }
+    .pair { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-map" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z"/><path d="M15 5.764v15"/><path d="M9 3.236v15"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-run" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></symbol>
+    <symbol id="i-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-ban" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+    <symbol id="i-q" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h.01"/><path d="M3 18h.01"/><path d="M3 6h.01"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M8 6h13"/></symbol>
+    <symbol id="i-redo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  </defs>
+</svg>
+
+<main class="page">
+  <h1>计划审批：交给其他模型执行</h1>
+  <p class="lede">计划审批多两个选择。「交给其他模型执行」：你挑一个模型，主代理让它在独立的 git worktree 里按计划实施，自己做验收，你的分支一行不动。「请 <code>glm-5.3</code> 再评审」：不新开评审，上一次那个评审子代理在原来的会话里接着看修订版，前后两轮在一个对话里。</p>
+
+  <div class="ask">
+    <h2>请你确认</h2>
+    <ol>
+      <li>网页按钮顺序<b>跟终端一致</b>：同意类在前 → 继续规划 → 评审类。今天网页的「请其他模型评审」排在「继续规划」前面，会挪到它后面。</li>
+      <li>挑执行模型时，问题下面那行灰字「在新的 worktree 里实施，不动当前分支」<b>留不留</b>。</li>
+      <li>「再评审」按钮直接写模型全名（<code>provider/model</code>），太长截断、悬停看全名。</li>
+    </ol>
+  </div>
+
+  <div class="ask">
+    <h2>请你确认（思考强度第二屏 · 计划 310）</h2>
+    <ol>
+      <li>选完模型<b>不立即决定</b>，先问一档思考强度；模型一档都没配（<code>anthropic/claude-opus-4-1</code>）时<b>跳过</b>这一屏，选完直接决定。</li>
+      <li>第二屏标题「这个模型用哪档思考强度？」+「返回选模型」入口；<kbd>Esc</kbd> 回到模型列表（选中的模型不丢），再 <kbd>Esc</kbd> 才收回审批。</li>
+      <li>档位与排序照聊天里的 <code>EffortChip</code>：关闭思考 / 极低 / 低 / 中 / 高 / 最高 / 极致。行配了默认档时光标落在它上面并标齿轮图标（悬停提示「模型设置」）；没配默认档（<code>zhipuai/glm-5.3</code>）时首项是「默认」。</li>
+      <li>显示名与档位 id 不同时双写 id（中文全双写，英文只有 <code>Off none</code>）；左侧「思考强度屏：中 / EN」按钮切英文界面，请一并确认英文文案。</li>
+      <li>「请 X 再评审」<b>不进</b>第二屏（沿用上一次评审，不新挑模型/档位）。</li>
+    </ol>
+  </div>
+
+  <div class="stage" id="stage">
+    <div>
+      <p class="stage-hint">右边是真实尺寸的对话页，可以点。</p>
+      <ol class="rail" id="rail">
+        <li class="rail-step is-now" data-state="ask">
+          <div class="rail-glyph"><span><svg><use href="#i-q"/></svg></span></div>
+          <div><p class="rail-name">等你决定</p><p class="rail-text">计划占着输入框的位置，六个按钮。</p></div>
+        </li>
+        <li class="rail-step" data-state="pick">
+          <div class="rail-glyph"><span><svg><use href="#i-list"/></svg></span></div>
+          <div><p class="rail-name">挑执行模型</p><p class="rail-text">和评审用同一个模型列表；Esc 收回。</p></div>
+        </li>
+        <li class="rail-step" data-state="effort">
+          <div class="rail-glyph"><span><svg><use href="#i-q"/></svg></span></div>
+          <div><p class="rail-name">挑思考强度</p><p class="rail-text">选完模型再问一档思考强度，和聊天里的 EffortChip 同一套；Esc 回到模型列表。</p></div>
+        </li>
+        <li class="rail-step" data-state="handed">
+          <div class="rail-glyph"><span><svg><use href="#i-branch"/></svg></span></div>
+          <div><p class="rail-name">已交接</p><p class="rail-text">计划已批准。执行子代理用你挑的模型，在 <code>.worktrees/</code> 下自己的分支上实施；主代理等它交回再验收。</p></div>
+        </li>
+        <li class="rail-step" data-state="review">
+          <div class="rail-glyph"><span><svg><use href="#i-redo"/></svg></span></div>
+          <div><p class="rail-name">评审中</p><p class="rail-text">「再评审」不再挑模型：上次那个评审子代理在原会话里续聊，先逐条核对上轮意见改了没有，再看新改动；点「查看」能看到前后两轮。评审完照旧交回规划模型修订。</p></div>
+        </li>
+      </ol>
+      <button type="button" class="rail-reset" id="reset">从头再看</button>
+      <button type="button" class="rail-reset" id="lang" title="切换思考强度第二屏的中/英文案">思考强度屏：中 / EN</button>
+    </div>
+
+    <div class="chat" aria-label="对话页（方案）">
+      <div class="thread">
+        <div class="thread-inner">
+          <div class="user-msg"><div class="user-bubble">评审模型选择器的问题挪到「要开始执行吗？」那一行，窄屏也要能选中每一项。</div></div>
+          <div class="line" id="line">
+            <div class="step">
+              <span class="node node--done" aria-hidden="true"><svg><use href="#i-check"/></svg></span>
+              <div class="tool-head"><span class="tool-verb">已运行 1 个 plan-reviewer 任务</span></div>
+            </div>
+            <div class="step">
+              <span class="node node--say" aria-hidden="true"></span>
+              <div class="say">按评审意见改好了：问题行与模型列表之间空一行，窄屏下列表整体堆叠。修订后的计划提交给你。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="dockSlot">
+        <div class="xp-dock" id="dock" role="region" aria-label="计划审批">
+          <div class="xp-dock-h">
+            <svg aria-hidden="true"><use href="#i-map"/></svg>
+            <b>计划</b>
+            <span class="mono">~/.forebrain/workspace/plans/forebrain-harness/cli-388c/review-picker-question.md</span>
+            <span class="grow"></span>
+            <button type="button" class="xp-eye" aria-label="查看全部"><svg><use href="#i-eye"/></svg></button>
+          </div>
+          <div class="xp-doc">
+            <h3>评审模型选择器的问题行顶替 verdict 问题行</h3>
+            <p>选择器打开时只问一个问题：「Which model should review this plan?」占「Would you like to proceed?」那一行，下面空一行再列模型。</p>
+            <h4>步骤</h4>
+            <ol><li>问题行在 picker 状态下替换 verdict 问题行</li><li>问题与模型列表之间留空行</li><li>补测试 <code>TestExitPlanReviewPickerQuestionTakesTheVerdictLine</code></li></ol>
+            <h4>验收</h4>
+            <p><code>go test ./pkg/tui</code> 通过</p>
+          </div>
+          <div class="gate-ask" id="foot"></div>
+        </div>
+      </div>
+
+      <div id="afterSlot" hidden>
+        <div class="status-line"><svg class="is-run" aria-hidden="true"><use href="#i-run"/></svg>工作中 · <span id="workClock">0:00</span></div>
+        <div class="composer">
+          <textarea rows="1" placeholder="主代理在等执行子代理，有话可以先打好" aria-label="输入框"></textarea>
+          <div class="composer-foot"><span class="send-btn" aria-hidden="true"><svg><use href="#i-up"/></svg></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2>办公项目</h2>
+    <p class="stage-hint" style="max-width:70ch">同样两项都加，位置照「同意类在前」。办公不清上下文，所以交接也不清；项目文件夹不是 git 仓库时，「交给其他模型执行」不出现。</p>
+    <div class="frame-card" style="max-width:820px">
+      <div class="xp-dock is-static" aria-label="办公计划审批（静态）">
+        <div class="gate-ask" style="border-top:0">
+          <p class="q">计划写好了，怎么处理？</p>
+          <div class="gate-acts">
+            <button type="button" class="gate-btn gate-btn-pri">按计划执行</button>
+            <button type="button" class="gate-btn">交给其他模型执行</button>
+            <button type="button" class="gate-btn">修改计划</button>
+            <button type="button" class="gate-btn">只要计划，先不执行</button>
+            <button type="button" class="gate-btn">请其他模型评审</button>
+            <button type="button" class="gate-btn trunc" title="请 zhipuai/glm-5.3 再评审">请 <span class="mono">zhipuai/glm-5.3</span> 再评审</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>终端（标准）</h2>
+    <p class="stage-hint" style="max-width:70ch">网页跟终端走。终端的六行按同一个顺序排，高亮的是新增的两行；第 3 行回车打开模型列表。</p>
+    <div class="pair">
+      <div>
+        <p class="cap-line"><strong>审批面板</strong>编码项目，评审过一次之后</p>
+<pre class="term">Would you like to proceed?
+
+<span class="b">&gt; </span>1. Yes, clear context (37% used) and proceed
+  2. Yes, proceed
+  <span class="new">3. Yes, hand off to another model</span>
+  4. No, keep planning
+  5. Ask another model to review this plan
+  <span class="new">6. Ask zhipuai/glm-5.3 to review it again</span>
+
+<span class="dim">Esc to decline · ctrl+e to explain · ? for keys</span></pre>
+      </div>
+      <div>
+        <p class="cap-line"><strong>第 3 行的模型列表</strong>问题占 verdict 那一行</p>
+<pre class="term">Which model should carry out this plan? (Esc to go back)
+
+  deepseek/deepseek-v4-flash <span class="acc">●</span>  https://api.deepseek.com/chat/completions
+<span class="acc">❯</span> zhipuai/glm-5.3              https://open.bigmodel.cn/api/anthropic/v1/messages
+  anthropic/claude-opus-4-1    https://api.anthropic.com/v1/messages
+  openai/gpt-5.5               https://api.openai.com/v1/chat/completions
+
+<span class="dim">Esc to go back · Enter to hand off</span></pre>
+      </div>
+    </div>
+    <p class="cap-line" style="margin-top:18px"><strong>选完模型的第二屏</strong>思考强度，单列 ❯ 光标；行默认档标齿轮 ⚙，显示名与 id 不同时双写（英文只有 Off none）</p>
+<pre class="term">Which reasoning effort should deepseek/deepseek-v4-flash use? (Esc to go back)
+
+  Minimal
+  Low
+  Medium
+<span class="acc">❯</span> High <span class="acc">⚙</span>
+  xHigh
+  Max
+
+<span class="dim">Esc to go back · Enter to confirm</span></pre>
+  </section>
+
+  <section>
+    <h2>规则</h2>
+    <ul class="notes">
+      <li><b>交给其他模型执行</b>只在项目根是 git 仓库、且至少有一个不是当前模型的已配置模型时出现。它不清上下文。</li>
+      <li>挑好模型就是批准计划。主代理继续用当前模型，当技术负责人：用你挑的模型派<b>一个</b> <code>general-purpose</code> 执行子代理；子代理在 <code>.worktrees/&lt;名字&gt;</code> 从当前 HEAD 新建 worktree 和分支，在里面按计划实施并提交到自己的分支。</li>
+      <li>子代理交回后，主代理在 worktree 里重跑每条验收、核对改动范围、读完整 diff 和新测试，给出<b>通过 / 返工（最多两轮）/ 卡住</b>。它不合并、不推送、不动你的分支；要不要合并由你决定。</li>
+      <li>主分支上没提交的改动不会进 worktree。计划涉及的文件有未提交改动时，主代理先停下来问你。</li>
+      <li><b>请 X 再评审</b>：不新开评审子代理，而是让上一次的那个评审子代理在它原来的会话里续聊——发给它修订后的计划全文和上次评审之后你说过的话，请它先逐条核对上轮意见是否改到位，再看新增改动。X 是它的模型；它的会话还在、模型还在列表里才出现。评审期间底栏和今天一样，只剩进度和「停止」；「查看」打开的是同一个评审对话。</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+(() => {
+  const MODELS = [
+    { name: 'deepseek/deepseek-v4-flash', ep: 'https://api.deepseek.com/chat/completions', current: true,
+      efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
+    { name: 'zhipuai/glm-5.3', ep: 'https://open.bigmodel.cn/api/anthropic/v1/messages',
+      efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: '' },
+    { name: 'anthropic/claude-opus-4-1', ep: 'https://api.anthropic.com/v1/messages',
+      efforts: [], defaultEffort: '' },
+    { name: 'openai/gpt-5.5', ep: 'https://api.openai.com/v1/chat/completions',
+      efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
+    { name: 'volcengine/doubao-seed-2.1-pro', ep: 'https://ark.cn-beijing.volces.com/api/coding/v1/messages',
+      efforts: ['low', 'medium', 'high'], defaultEffort: 'high' },
+  ];
+  const PREVIOUS = 'zhipuai/glm-5.3';
+  // 思考强度第二屏（计划 310）：文案逐字对齐 frontend/src/locales/index.ts 的
+  // chat.effort* 与 lib/effortLabel.ts。LANG 只切第二屏（及模型列表问句）的中/英，
+  // 供 owner 一并确认英文界面；verdict 六按钮是 283 的既有文案，不在本期改动里。
+  let LANG = 'zh';
+  const I18N = {
+    zh: {
+      pickCapHandoff: '交给哪个模型执行？', pickCapReview: '用哪个模型评审这份计划？',
+      pickSub: '在新的 worktree 里实施，不动当前分支', current: '当前',
+      effortCap: '{model} 用哪档思考强度？', effortBack: '返回选模型', settingTag: '模型设置',
+      effortDefault: '默认',
+      efforts: { none: '关闭思考', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '最高', max: '极致' },
+    },
+    en: {
+      pickCapHandoff: 'Which model should carry out this plan?', pickCapReview: 'Which model should review this plan?',
+      pickSub: 'Implements in a new worktree; your branch is untouched', current: 'Current',
+      effortCap: 'Which reasoning effort should {model} use?', effortBack: 'Back to models', settingTag: 'Model setting',
+      effortDefault: 'Default',
+      efforts: { none: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'xHigh', max: 'Max' },
+    },
+  };
+  const tr = () => I18N[LANG];
+  const effortLabel = id => id === '' ? tr().effortDefault : (tr().efforts[id] || id);
+  const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  // 与 EffortChip.vue 的 optionsList 同构：known 按 EFFORT_LEVELS 排，源后加的档位
+  // 排在后面；value 只在显示名与档位 id 大小写无关地不同时双写（中文全双写，英文
+  // 只有 Off↔none）；fromSetting 标在行配置的那一档。审批面板没有会话存档位，
+  // showDefault 只看行有没有配默认档。
+  function effortOptions(model) {
+    const efforts = model.efforts || [];
+    const known = EFFORT_LEVELS.filter(l => efforts.includes(l));
+    const extra = efforts.filter(l => !EFFORT_LEVELS.includes(l));
+    const configured = model.defaultEffort || '';
+    const ids = configured === '' ? ['', ...known, ...extra] : [...known, ...extra];
+    return ids.map(id => {
+      const label = effortLabel(id);
+      return { id, label,
+        value: id !== '' && label.toLowerCase() !== id.toLowerCase() ? id : '',
+        fromSetting: id !== '' && id === configured };
+    });
+  }
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const foot = document.getElementById('foot');
+  const dock = document.getElementById('dock');
+  const dockSlot = document.getElementById('dockSlot');
+  const afterSlot = document.getElementById('afterSlot');
+  const line = document.getElementById('line');
+  const rail = document.getElementById('rail');
+  const baseLine = line.innerHTML;
+  let timers = [];
+
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const later = (fn, ms) => timers.push(setTimeout(fn, reduce ? 0 : ms));
+  const tick = (fn, ms) => timers.push(setInterval(fn, ms));
+  const clearTimers = () => { timers.forEach(t => { clearTimeout(t); clearInterval(t); }); timers = []; };
+
+  function setRail(state) {
+    rail.querySelectorAll('.rail-step').forEach(s => s.classList.toggle('is-now', s.dataset.state === state));
+  }
+
+  function verdicts() {
+    setRail('ask');
+    foot.innerHTML = `
+      <p class="q">要开始执行吗？</p>
+      <div class="gate-acts">
+        <button type="button" class="gate-btn gate-btn-pri" data-act="approve">批准并清空上下文（已用 37%）</button>
+        <button type="button" class="gate-btn" data-act="approve">批准</button>
+        <button type="button" class="gate-btn" data-act="handoff">交给其他模型执行</button>
+        <button type="button" class="gate-btn" data-act="keep">继续规划</button>
+        <button type="button" class="gate-btn" data-act="review">请其他模型评审</button>
+        <button type="button" class="gate-btn trunc" data-act="again" title="请 ${esc(PREVIOUS)} 再评审">请 <span class="mono">${esc(PREVIOUS)}</span> 再评审</button>
+      </div>`;
+  }
+
+  function picker(kind) {
+    curKind = kind;
+    setRail(kind === 'handoff' ? 'pick' : 'ask');
+    const cap = kind === 'handoff' ? tr().pickCapHandoff : tr().pickCapReview;
+    const sub = kind === 'handoff' ? `<p class="sub">${tr().pickSub}</p>` : '';
+    foot.innerHTML = `<div class="xp-pick">
+      <span class="cap">${cap}</span>${sub}
+      ${MODELS.map(m => `<button type="button" class="xp-model" data-pick="${kind}" data-model="${esc(m.name)}">
+        <span class="ml"><span class="m">${esc(m.name)}</span><span class="ep">${esc(m.ep)}</span></span>
+        ${m.current ? `<span class="cur">${tr().current}</span>` : ''}
+      </button>`).join('')}
+    </div>`;
+    const first = foot.querySelector('.xp-model:not(:first-child)') || foot.querySelector('.xp-model');
+    if (first) first.focus({ preventScroll: true });
+  }
+
+  // 选中模型后：行配了档位才进第二屏；一档都没配（efforts:[]）直接决定。
+  // 跳过与否看原始档位数，不是 effortOptions 的长度（后者没配默认档时会补 Default）。
+  let pending = null, curKind = 'handoff';
+  function chooseModel(kind, name) {
+    const model = MODELS.find(m => m.name === name);
+    if (!model) return;
+    if (!(model.efforts || []).length) return kind === 'handoff' ? handOff(name) : reviewing(name);
+    pending = { kind, model };
+    effortScreen();
+  }
+  function effortScreen() {
+    const { model } = pending;
+    setRail('effort');
+    const opts = effortOptions(model);
+    const selectedId = model.defaultEffort || '';
+    const chk = '<svg class="echk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+    foot.innerHTML = `<div class="xp-pick">
+      <button type="button" class="xp-back" data-back="${pending.kind}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>${tr().effortBack}
+      </button>
+      <span class="cap">${tr().effortCap.replace('{model}', esc(model.name))}</span>
+      ${opts.map(o => `<button type="button" class="xp-model xp-effort${o.id === selectedId ? ' is-on' : ''}" data-effort="${esc(o.id)}">
+        <span class="eleft">${o.id === selectedId ? chk : ''}<b class="elabel">${esc(o.label)}</b>${o.value ? `<code class="ev">${esc(o.value)}</code>` : ''}${o.fromSetting ? `<span class="etag" title="${tr().settingTag}" aria-label="${tr().settingTag}"><svg aria-hidden="true"><use href="#i-gear"/></svg></span>` : ''}</span>
+      </button>`).join('')}
+    </div>`;
+    const on = foot.querySelector('.xp-effort.is-on') || foot.querySelector('.xp-effort');
+    if (on) on.focus({ preventScroll: true });
+  }
+
+  function feedback() {
+    foot.innerHTML = `
+      <p class="q">要开始执行吗？</p>
+      <div class="gate-acts">
+        <button type="button" class="gate-btn gate-btn-pri" data-act="approve">批准并清空上下文（已用 37%）</button>
+        <button type="button" class="gate-btn" data-act="approve">批准</button>
+        <button type="button" class="gate-btn" data-act="handoff">交给其他模型执行</button>
+        <button type="button" class="gate-btn gate-btn-on" aria-expanded="true" data-act="keep-close">继续规划</button>
+        <button type="button" class="gate-btn" data-act="review">请其他模型评审</button>
+        <button type="button" class="gate-btn trunc" data-act="again" title="请 ${esc(PREVIOUS)} 再评审">请 <span class="mono">${esc(PREVIOUS)}</span> 再评审</button>
+      </div>
+      <div class="gate-fb">
+        <input class="gate-fb-input" type="text" placeholder="告诉规划模型要改什么" aria-label="告诉规划模型要改什么">
+        <button type="button" class="gate-btn gate-btn-pri" disabled>发送给规划模型</button>
+        <span class="esc"><kbd>Esc</kbd>拒绝并停下</span>
+      </div>`;
+    const input = foot.querySelector('.gate-fb-input');
+    const send = input.nextElementSibling;
+    input.addEventListener('input', () => { send.disabled = !input.value.trim(); });
+    input.focus();
+  }
+
+  function addStep(html) {
+    const step = document.createElement('div');
+    step.className = 'step enter';
+    step.innerHTML = html;
+    line.appendChild(step);
+    return step;
+  }
+
+  function reviewing(model, effort) {
+    setRail('review');
+    const effortTxt = effort ? `（思考强度：${esc(effortLabel(effort))}）` : '';
+    foot.innerHTML = `<div class="xp-run">
+      <svg class="is-run" aria-hidden="true"><use href="#i-run"/></svg>
+      <span>${esc(model)} 正在评审这份计划…${effortTxt}</span><span class="grow"></span>
+      <button type="button" class="gate-btn" data-act="stop">停止</button>
+    </div>`;
+    const card = addStep(`
+      <span class="node node--run" aria-hidden="true"><svg class="is-run"><use href="#i-run"/></svg></span>
+      <div>
+        <div class="card-head">正在运行 1 个 plan-reviewer 任务…</div>
+        <div class="card-panel"><div class="card-row">
+          <svg class="st is-run" style="color:var(--forebrain-brand-1)" aria-hidden="true"><use href="#i-run"/></svg>
+          <div class="body"><span class="card-title">评审计划</span> <span class="card-clock" data-clock>· 0:00</span>
+            <span class="card-detail">最近：已读取 pkg/tui/overlays.go</span></div>
+          <span class="card-open">查看</span>
+        </div></div>
+      </div>`);
+    card.dataset.review = '1';
+    runClock(card.querySelector('[data-clock]'), '· ');
+  }
+
+  function stopReview() {
+    clearTimers();
+    const card = line.querySelector('[data-review]');
+    if (card) {
+      card.querySelector('.node').outerHTML = '<span class="node" style="background:#F2F4F7;color:var(--forebrain-muted-text)" aria-hidden="true"><svg><use href="#i-ban"/></svg></span>';
+      card.querySelector('.card-head').textContent = '已停止 1 个 plan-reviewer 任务';
+      card.querySelector('.st').outerHTML = '<svg class="st" style="color:var(--forebrain-muted-text)" aria-hidden="true"><use href="#i-ban"/></svg>';
+      delete card.dataset.review;
+    }
+    verdicts();
+  }
+
+  function runClock(el, prefix) {
+    if (!el) return;
+    const t0 = Date.now();
+    tick(() => {
+      const s = Math.floor((Date.now() - t0) / 1000);
+      el.textContent = `${prefix}${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    }, 1000);
+  }
+
+  // The one orchestrated moment: the dock folds away, the composer comes
+  // back, and the thread shows the approval landing, the primary's handoff
+  // and the executor starting in its worktree — in that order.
+  function handOff(model, effort) {
+    setRail('handed');
+    const effortTxt = effort ? `（思考强度：${esc(effortLabel(effort))}）` : '';
+    dock.classList.add('fold');
+    later(() => {
+      dockSlot.hidden = true;
+      dock.classList.remove('fold');
+      afterSlot.hidden = false;
+      runClock(document.getElementById('workClock'), '');
+      addStep(`
+        <span class="node node--done" aria-hidden="true"><svg><use href="#i-check"/></svg></span>
+        <div class="tool-head"><span class="tool-verb">已退出计划模式</span></div>`);
+    }, 240);
+    later(() => addStep(`
+      <span class="node node--say" aria-hidden="true"></span>
+      <div class="say">交给 <code>${esc(model)}</code>${effortTxt} 在独立的 worktree 里按计划实施，它交回后我来验收。</div>`), 520);
+    later(() => {
+      const card = addStep(`
+        <span class="node node--run" aria-hidden="true"><svg class="is-run"><use href="#i-run"/></svg></span>
+        <div>
+          <div class="card-head">正在运行 1 个 general-purpose 任务…</div>
+          <div class="card-panel"><div class="card-row">
+            <svg class="st is-run" style="color:var(--forebrain-brand-1)" aria-hidden="true"><use href="#i-run"/></svg>
+            <div class="body"><span class="card-title">按计划实施：评审选择器问题行</span> <span class="card-clock" data-clock>· 0:00</span>
+              <span class="card-detail" data-detail>最近：已运行 git worktree add -b handoff/review-picker-question .worktrees/review-picker-question HEAD</span></div>
+            <span class="card-open">查看</span>
+          </div></div>
+        </div>`);
+      runClock(card.querySelector('[data-clock]'), '· ');
+      later(() => { card.querySelector('[data-detail]').textContent = '最近：已编辑 pkg/tui/overlays.go · 另 3 次工具调用'; }, 3200);
+    }, 820);
+  }
+
+  function approvedPlain() {
+    setRail('ask');
+    dockSlot.hidden = true;
+    afterSlot.hidden = false;
+    runClock(document.getElementById('workClock'), '');
+    addStep(`
+      <span class="node node--done" aria-hidden="true"><svg><use href="#i-check"/></svg></span>
+      <div class="tool-head"><span class="tool-verb">已退出计划模式</span><span class="tool-arg">原有行为，不变</span></div>`);
+  }
+
+  foot.addEventListener('click', e => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    if ('effort' in btn.dataset) {
+      const id = btn.dataset.effort;
+      return pending.kind === 'handoff' ? handOff(pending.model.name, id) : reviewing(pending.model.name, id);
+    }
+    if (btn.dataset.back) return picker(btn.dataset.back);
+    if (btn.dataset.pick) return chooseModel(btn.dataset.pick, btn.dataset.model);
+    if (act === 'handoff') return picker('handoff');
+    if (act === 'review') return picker('review');
+    if (act === 'again') return reviewing(PREVIOUS);
+    if (act === 'keep') return feedback();
+    if (act === 'keep-close') return verdicts();
+    if (act === 'stop') return stopReview();
+    if (act === 'approve') return approvedPlain();
+  });
+
+  dock.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    // Esc 逐层返回：第二屏 → 模型列表（选中模型不丢）→ 收回审批。
+    if (foot.querySelector('.xp-effort')) { e.preventDefault(); picker(pending.kind); return; }
+    if (foot.querySelector('.xp-pick') || foot.querySelector('.gate-fb')) { e.preventDefault(); verdicts(); }
+  });
+
+  function reset() {
+    clearTimers();
+    line.innerHTML = baseLine;
+    dockSlot.hidden = false;
+    afterSlot.hidden = true;
+    dock.classList.remove('fold');
+    verdicts();
+  }
+  document.getElementById('reset').addEventListener('click', reset);
+  document.getElementById('lang').addEventListener('click', () => {
+    LANG = LANG === 'zh' ? 'en' : 'zh';
+    document.getElementById('lang').textContent = LANG === 'zh' ? '思考强度屏：中 / EN' : 'Effort screen: 中 / EN';
+    if (foot.querySelector('.xp-effort')) effortScreen();
+    else if (foot.querySelector('.xp-pick')) picker(curKind);
+  });
+  verdicts();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,63 @@
+=== Step 7 check 2 — hover: only the ☑3/7 cells take 48;5;236, no underline ===
+date: 2026-10-30T07:09:37Z
+
+--- row 35 (SGR) before any pointer report:
+[2m- Working (12s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input_events.go 的鼠标交互并验证 hover · first token 0.1s[0m      
+
+--- after one no-button move [<35;39;35M (pointer on the token):
+[2m/ Working (13s • esc to interrupt) · [48;5;236m☑3/7[49m · 修改 pkg/tui/input_events.go 的鼠标交互并验证 hover · first token 0.1s[0m      
+
+--- after moving the pointer away [<35;1;2M:
+[2m\ Working (13s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input_events.go 的鼠标交互并验证 hover · first token 0.1s[0m      
+
+--- 20 repeated reports on the same cell: bytes written by the pointer reports themselves are not captured here; the screen must stay identical:
+CHANGED after 20 same-cell reports
+[2m/ Working (13s • esc to interrupt) · [48;5;236m☑3/7[49m · 修改 pkg/tui/input_events.go 的鼠标交互并验证 hover · first token 0.1s[0m      
+[2m/ Working (14s • esc to interrupt) · [48;5;236m☑3/7[49m · 修改 pkg/tui/input_events.go 的鼠标交互并验证 hover · first token 0.1s[0m      
+--- note: the two captures above differ only in the Working line's elapsed second (13s -> 14s), which the status clock rewrites every second; the highlight on ☑3/7 is identical in both. Per-report byte dedupe is pinned by TestPlanDrawerHoverHighlightsOnlyTheToken (20 same-cell moves write 0 bytes).
+
+=== Step 7 check 1 — click the progress token: the drawer opens beside the history ===
+
+--- click [<0;39;35M + release, then capture:
+     1	                                                                                │ ● Updated Plan                     ×
+     2	╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮  │ ✓ 归档计划并保留完整中文长路径，验证
+     3	┆                                                                            ┆  │   历史与抽屉都自动软换行而不截断
+     4	┆                         Forebrain Harness                         (devel)  ┆  │ ✓ 构建修复前二进制
+     5	┆                         ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  ┆  │ ✓ 新增回归测试
+     6	┆                         /private/var/folders/kw                            ┆  │ ▣ 修改 pkg/tui/input_events.go 的鼠标
+     7	┆                         /mf8l2_c564b0m8qzhj073s940000gn/T                  ┆  │   交互并验证 hover
+     8	┆                         /forebrain-run-plan-drawer/proj                    ┆  │ □ 验证中文、路径和很长的事项正文在右
+     9	┆                                                                            ┆  │   侧抽屉中完整换行显示，不出现省略号
+    10	┆                         / commands        @ mention                        ┆  │ □ tmux 真机 A/B 验收
+    11	┆                         esc interrupt     ctrl+j newline                   ┆  │ □ 收口并清理临时环境
+    12	┆                                                                            ┆  │
+    13	╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯  │
+    14	                                                                                │
+    15	─────────────────────────────────────────────────────────────────────────────── │
+    16	› 建立七项待办并保留足够长的历史消息用于分栏重排验收                            │
+    17	─────────────────────────────────────────────────────────────────────────────── │
+    18	                                                                                │
+    19	● calling session_todo                                                          │
+    20	                                                                                │
+    21	● Updated Plan                                                                  │
+    22	  修改 pkg/tui/input_events.go 的鼠标交互并验证 hover                           │
+    23	  ✓ 归档计划并保留完整中文长路径，验证历史与抽屉都自动软换行而不截断            │
+    24	  ✓ 构建修复前二进制                                                            │
+    25	  ✓ 新增回归测试                                                                │
+    26	  ▣ 修改 pkg/tui/input_events.go 的鼠标交互并验证 hover                         │
+    27	  □ 验证中文、路径和很长的事项正文在右侧抽屉中完整换行显示，不出现省略号        │
+    28	  □ tmux 真机 A/B 验收                                                          │
+    29	  □ 收口并清理临时环境                                                          │
+    30	                                                                                │
+    31	                                                                                │
+    32	                                                                                │
+    33	                                                                                │
+    35	/ Working (28s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input_events.go 的鼠标交互并验证 hover · first token 0.1s
+    36	                                                                                    Image in clipboard · ctrl+v to paste
+    37	───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    38	›
+    39	───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    40	deepseek/deepseek-v4-flash                                                                                       100%/1M
+
+--- hover the token WITH the drawer open [<35;40;35M:
+[2m| Working (28s • esc to interrupt) · [48;5;236m☑3/7[49m · 修改 pkg/tui/input_events.go 的鼠标交互并验证 hover · first token 0.1s[0m      

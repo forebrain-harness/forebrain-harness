@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>跨进程协同原型</title>
+<style>
+/* 外框固定浅色（owner 2026-10-17）：不写任何深色覆盖 */
+:root{
+  --bg:#FFFFFF; --bg-alt:#F7F8FA; --hover:#F2F4F7; --soft:#F2F4F7;
+  --line:#E4E7EC; --line-2:#D0D5DD;
+  --ink:#101828; --ink-2:#475467; --muted:#667085; --quiet:#98A2B3;
+  --brand:#1F4A9E; --brand-hover:#173B80; --brand-soft:#EBF0F9; --brand-line:#C3D2EC;
+  --ok:#067647; --ok-soft:#ECFDF3; --ok-line:#ABEFC6;
+  --warn:#B54708; --warn-soft:#FFFAEB; --warn-line:#FEDF89;
+  --no:#B42318; --no-soft:#FEF3F2;
+  /* 代理身份色：四个低饱和色调，与海军蓝同一明度带 */
+  --p-teal:#0E6E7E; --p-plum:#6B4C9A; --p-steel:#45607D; --p-moss:#4F6B3A;
+  --ui:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI","Microsoft YaHei","Noto Sans SC",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --ease:cubic-bezier(.2,.7,.2,1);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:#F3F4F6;color:var(--ink);font:14px/1.6 var(--ui);-webkit-font-smoothing:antialiased}
+code{font-family:var(--mono);font-size:.9em;background:var(--soft);border-radius:4px;padding:1px 4px}
+
+/* ---------- 外框 ---------- */
+.frame{max-width:1340px;margin:0 auto;padding:32px 24px 56px}
+.frame h1{font-size:22px;line-height:1.3;margin:0;font-weight:650;letter-spacing:-.01em}
+.frame .sub{margin:4px 0 0;color:var(--muted);font-size:13px}
+.notes{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;margin:18px 0 20px}
+.note{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 18px}
+.note h2{font-size:14px;margin:0 0 6px;font-weight:600}
+.note ul{margin:0;padding-left:18px;color:var(--ink-2);font-size:13px;line-height:1.7}
+.note p{margin:0;color:var(--ink-2);font-size:13px;line-height:1.7}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
+.seg{display:inline-flex;background:#fff;border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px}
+.seg button{border:0;background:transparent;color:var(--ink-2);font:500 13px/1 var(--ui);padding:8px 12px;border-radius:7px;cursor:pointer;transition:background .15s,color .15s}
+.seg button:hover{color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--brand-soft);color:var(--brand)}
+.seg button:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+.caption{margin:12px 2px 0;color:var(--muted);font-size:13px;max-width:72ch}
+.stage{display:flex;justify-content:center}
+
+/* ---------- 应用 ---------- */
+.app{--rail-bg:#0F1D38;--rail-fg:#E7ECF5;--rail-fg-2:#9FB0CC;--rail-on:#1D3563;--rail-mark:#7EA2EA;
+  position:relative;display:grid;grid-template-columns:56px minmax(0,1fr) auto;width:100%;height:780px;
+  background:var(--bg);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 10px 30px rgba(16,24,40,.07)}
+.app[data-rail="light"]{--rail-bg:#F3F5F9;--rail-fg:#101828;--rail-fg-2:#475467;--rail-on:#E1E8F5;--rail-mark:#1F4A9E}
+.stage.narrow .app{width:390px;grid-template-columns:minmax(0,1fr)}
+.stage.narrow .rail{display:none}
+
+.rail{background:var(--rail-bg);display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 0}
+.rail .logo{width:30px;height:30px;border-radius:8px;background:var(--rail-mark);display:grid;place-items:center;margin-bottom:10px;color:#fff}
+.rail .logo svg{width:16px;height:16px}
+.app .rail-btn{width:38px;height:38px;border-radius:9px;display:grid;place-items:center;color:var(--rail-fg-2);border:0;background:transparent;cursor:pointer}
+.app .rail-btn.on{background:var(--rail-on);color:var(--rail-fg)}
+.rail-btn svg{width:18px;height:18px}
+
+.main{display:flex;flex-direction:column;min-width:0;position:relative}
+.top{height:52px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid var(--line)}
+.proj{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--line);border-radius:999px;font-size:12.5px;color:var(--ink-2);white-space:nowrap}
+.proj svg{width:14px;height:14px}
+.title{font-weight:600;font-size:14px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+
+/* 顶栏的同目录代理：身份块叠放，数量写进无障碍名 */
+.app .crowd{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px 0 6px;border:1px solid var(--line);background:#fff;border-radius:999px;cursor:pointer;color:var(--ink-2);font:500 12.5px/1 var(--ui);transition:background .15s,border-color .15s}
+.app .crowd:hover{background:var(--bg-alt)}
+.app .crowd[aria-expanded="true"]{border-color:var(--brand-line);background:var(--brand-soft);color:var(--brand)}
+.crowd .stack{display:inline-flex}
+.crowd .stack .pm{position:relative;box-shadow:0 0 0 2px #fff}
+.crowd .stack .pm:first-child{z-index:2}
+.crowd .stack .pm+.pm{margin-left:-2px;z-index:1}
+.app .crowd:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+
+/* ---------- 身份块：方形＝别的代理；圆形节点留给本会话自己的步骤 ---------- */
+.pm{--t:var(--p-steel);flex:none;display:inline-grid;place-items:center;width:20px;height:20px;border-radius:6px;background:var(--t);color:#fff;
+  font:700 9.5px/1 var(--ui);letter-spacing:.02em;text-transform:lowercase}
+.pm.lg{width:28px;height:28px;border-radius:8px;font-size:11.5px}
+.pm.sub{background:#fff;color:var(--t);box-shadow:inset 0 0 0 1.5px var(--t)}
+.pm.me{background:var(--brand);border-radius:50%}
+.t-teal{--t:var(--p-teal)} .t-plum{--t:var(--p-plum)} .t-steel{--t:var(--p-steel)} .t-moss{--t:var(--p-moss)}
+
+/* ---------- 对话流 ---------- */
+.thread{flex:1;overflow:auto;padding:24px 0 12px;scroll-behavior:smooth}
+.col{max-width:740px;margin:0 auto;padding:0 24px}
+.stage.narrow .col{padding:0 14px}
+
+.you{display:flex;justify-content:flex-end;margin:6px 0 20px}
+.you div{max-width:80%;background:var(--bg-alt);border:1px solid var(--line);border-radius:14px 14px 4px 14px;padding:9px 13px;font-size:14px}
+
+/* 活动线 */
+.line{position:relative;padding-left:32px;margin:0 0 4px}
+.line::before{content:"";position:absolute;left:9.5px;top:12px;bottom:12px;width:1px;background:var(--line)}
+.step{position:relative;margin:0 0 12px}
+.step>.node{position:absolute;left:-32px;top:5px}
+.node{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#fff}
+.node svg{width:12px;height:12px;stroke-width:2.2}
+.node.say{background:var(--brand);color:#fff}
+.node.done{background:var(--ok-soft);color:var(--ok);box-shadow:inset 0 0 0 1.5px var(--ok-line)}
+.node.wait{background:var(--brand-soft);color:var(--brand);box-shadow:inset 0 0 0 1.5px var(--brand-line)}
+.node.busy{box-shadow:inset 0 0 0 1.5px var(--brand-line)}
+.node.mail{color:var(--muted);box-shadow:inset 0 0 0 1.5px var(--line)}
+.step>.pm{position:absolute;left:-32px;top:5px}
+.say-text{font-size:15px;line-height:1.7;padding-top:1px}
+.say-text p{margin:0 0 6px}
+
+/* 工具卡：卡头不套框；动作灰、对象深色等宽、时长右侧 */
+.head{display:flex;align-items:center;gap:10px;min-width:0;padding:4px 0}
+.head .txt{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13.5px}
+.head .verb{color:var(--quiet)}
+.head .obj{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+.head .plain{color:var(--ink)}
+.head .dur{color:var(--quiet);font-size:12px;font-variant-numeric:tabular-nums}
+.head .chev{width:14px;height:14px;color:var(--quiet);flex:none}
+.panel{margin-top:2px;border:1px solid var(--line);border-radius:10px;background:#fff;overflow:hidden}
+.panel.waiting{border-color:var(--brand-line)}
+.panel .body{padding:10px 12px;font-size:13.5px;line-height:1.7}
+.panel .body p{margin:0}
+.panel .foot{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid var(--line);background:var(--bg-alt);font-size:12.5px;color:var(--ink-2)}
+
+/* 来信：不套框，对方色调的竖线引出正文 */
+.letter{margin:4px 0 16px}
+.letter .who{display:flex;align-items:center;gap:8px;min-width:0}
+.letter .name{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.letter .kind{color:var(--muted);font-size:12.5px;white-space:nowrap}
+.letter .when{margin-left:auto;color:var(--quiet);font-size:12px;font-variant-numeric:tabular-nums}
+.letter .text{margin:6px 0 0 9px;padding:1px 0 1px 18px;border-left:2px solid var(--t,var(--line));font-size:14.5px;line-height:1.75;color:var(--ink)}
+.step .letter{margin:0}
+.step .letter .text{margin-left:0;padding-left:14px;font-size:14px}
+.near{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:999px;font-size:11.5px;color:var(--ink-2);background:var(--soft);white-space:nowrap}
+
+/* 投递状态 */
+.receipts{list-style:none;margin:0;padding:4px 0}
+.receipts li{display:grid;grid-template-columns:20px auto auto minmax(0,1fr);align-items:center;gap:10px;padding:7px 12px}
+.receipts li+li{border-top:1px solid var(--line)}
+.receipts .n{font-weight:600;font-size:13px;white-space:nowrap}
+.receipts .why{color:var(--muted);font-size:12.5px;min-width:0}
+.state{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;font-size:12px;font-weight:500;white-space:nowrap}
+.s-held{background:var(--warn-soft);color:var(--warn);box-shadow:inset 0 0 0 1px var(--warn-line)}
+.s-ok{background:var(--ok-soft);color:var(--ok);box-shadow:inset 0 0 0 1px var(--ok-line)}
+.s-drop{background:var(--soft);color:var(--ink-2);box-shadow:inset 0 0 0 1px var(--line)}
+
+/* 审批（沿用现有底栏） */
+.facts{padding:12px;display:grid;gap:10px;font-size:13.5px}
+.facts .lead{margin:0;color:var(--ink)}
+.facts .who-row{display:grid;grid-template-columns:20px minmax(0,1fr);gap:10px;align-items:start}
+.facts .who-row b{font-weight:600}
+.facts .who-row .what{color:var(--ink-2)}
+.gate{display:grid;gap:9px;padding:10px 12px 11px;background:var(--brand-soft);border-top:1px solid var(--brand-line)}
+.gate .q{margin:0;font-size:13px;font-weight:600}
+.acts{display:flex;flex-wrap:wrap;gap:6px}
+.app .btn{height:28px;padding:0 11px;border-radius:7px;border:1px solid var(--line-2);background:#fff;color:var(--ink);font:500 12.5px/1 var(--ui);cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s}
+.app .btn:hover{background:var(--bg-alt)}
+.app .btn.pri{background:var(--brand);border-color:var(--brand);color:#F5FFFF}
+.app .btn.pri:hover{background:var(--brand-hover);border-color:var(--brand-hover)}
+.app .btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+
+.worked{font-size:12px;color:var(--quiet);margin:0 0 22px 32px}
+.event{display:flex;align-items:center;gap:8px;margin:2px 0 14px 32px;font-size:12.5px;color:var(--muted)}
+.event svg{width:14px;height:14px}
+
+/* ---------- 输入区 ---------- */
+.dock{flex:none;padding:0 24px 16px}
+.stage.narrow .dock{padding:0 14px 14px}
+.dock .col{padding:0}
+.running{display:flex;align-items:center;gap:8px;margin:0 0 8px 4px;font-size:12.5px;color:var(--ink-2)}
+.spin{width:12px;height:12px;border-radius:50%;border:2px solid var(--brand-line);border-top-color:var(--brand);animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* 等你放行：同审批一族，正文用对方色调的竖线 */
+.hold{margin:0 0 10px;border:1px solid var(--brand-line);border-radius:12px;background:#fff;overflow:hidden;
+  display:grid;grid-template-rows:1fr;transition:grid-template-rows .26s var(--ease),opacity .2s,margin .26s var(--ease)}
+.hold.gone{grid-template-rows:0fr;opacity:0;margin-bottom:0;border-width:0}
+.hold>.in{min-height:0;overflow:hidden}
+.hold .top-row{display:flex;align-items:center;gap:8px;padding:10px 12px 0}
+.hold .top-row .lead{font-size:13.5px}
+.hold .top-row .lead b{font-weight:600}
+.hold .reason{margin-left:auto;color:var(--muted);font-size:12px;white-space:nowrap}
+.hold .text{margin:8px 12px 12px 21px;padding-left:15px;border-left:2px solid var(--t);color:var(--ink-2);font-size:13.5px;line-height:1.7;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.hold .gate{padding:9px 12px}
+.stage.narrow .hold .reason{display:none}
+
+.compose{border:1px solid var(--line-2);border-radius:14px;background:#fff;padding:11px 12px 9px;transition:border-color .15s}
+.compose:focus-within{border-color:var(--brand-line)}
+.compose .ph{color:var(--quiet);font-size:14px;min-height:40px}
+.compose .bar{display:flex;align-items:center;gap:8px}
+.chip{display:inline-flex;align-items:center;height:26px;padding:0 9px;border:1px solid var(--line);border-radius:999px;font-size:12px;color:var(--ink-2)}
+.app .send{margin-left:auto;width:30px;height:30px;border-radius:9px;border:0;background:var(--brand);color:#fff;display:grid;place-items:center;cursor:pointer}
+.send svg{width:15px;height:15px}
+
+/* ---------- 抽屉 ---------- */
+.drawer{width:0;overflow:hidden;border-left:1px solid var(--line);background:#fff;display:flex;flex-direction:column;transition:width .24s var(--ease)}
+.app.open .drawer{width:440px}
+.stage.narrow .app .drawer{position:absolute;top:0;right:0;bottom:0;width:100%;z-index:4;border-left:0;transform:translateX(100%);transition:transform .24s var(--ease)}
+.stage.narrow .app.open .drawer{transform:none}
+.drawer-in{width:440px;max-width:100%;display:flex;flex-direction:column;height:100%}
+.stage.narrow .drawer-in{width:100%}
+.d-head{height:52px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px 0 16px;border-bottom:1px solid var(--line)}
+.d-head h3{margin:0;font-size:14px;font-weight:600}
+.app .x{margin-left:auto;width:30px;height:30px;border-radius:8px;border:0;background:transparent;color:var(--muted);display:grid;place-items:center;cursor:pointer}
+.app .x:hover{background:var(--hover)}
+.app .x:focus-visible{outline:2px solid var(--brand)}
+.x svg{width:16px;height:16px}
+.d-body{flex:1;overflow:auto;padding:6px 16px 20px}
+.d-sec{padding:14px 0 6px}
+.d-sec+.d-sec{border-top:1px solid var(--line)}
+.d-sec h4{margin:0 0 10px;font-size:13px;font-weight:600;display:flex;align-items:baseline;gap:6px}
+.d-sec h4 .c{color:var(--quiet);font-weight:500;font-variant-numeric:tabular-nums}
+
+/* 占用图：这个目录正在改的文件，谁在改 */
+.tree{font-size:13px}
+.tree .dir{color:var(--muted);font-family:var(--mono);font-size:12px;margin:8px 0 4px}
+.tree .dir:first-child{margin-top:0}
+.file{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:5px 8px 5px 14px;margin:0 -8px;border-radius:8px;position:relative}
+.file::before{content:"";position:absolute;left:5px;top:50%;width:5px;height:1px;background:var(--line-2)}
+.file .fn{font-family:var(--mono);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file .marks{display:inline-flex;gap:3px}
+.file .ago{color:var(--quiet);font-size:12px;font-variant-numeric:tabular-nums;min-width:52px;text-align:right}
+.file.clash{background:var(--warn-soft)}
+.file.clash .ago{color:var(--warn);font-weight:500}
+
+.peer{display:grid;grid-template-columns:28px minmax(0,1fr);gap:2px 10px;padding:9px 0}
+.peer+.peer{border-top:1px dashed var(--line)}
+.peer .pm{grid-row:span 3}
+.peer .l1{display:flex;align-items:center;gap:8px;min-width:0}
+.peer .nm{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.peer .kd{color:var(--muted);font-size:12px;white-space:nowrap}
+.peer .st{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2);white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--line-2)}
+.dot.busy{background:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.dot.wait{background:var(--warn);box-shadow:0 0 0 3px var(--warn-soft)}
+.peer .l2{font-size:13px;color:var(--ink-2);min-width:0}
+.peer .l3{font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pager{display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:8px 0 0;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.app .pg{width:28px;height:28px;border-radius:7px;border:1px solid var(--line);background:#fff;color:var(--ink-2);display:grid;place-items:center;cursor:pointer}
+.pg svg{width:14px;height:14px}
+.pg[disabled]{opacity:.4;cursor:default}
+.waiting-msg{border:1px solid var(--brand-line);border-radius:10px;overflow:hidden}
+.waiting-msg .top-row{display:flex;align-items:center;gap:8px;padding:9px 12px 0}
+.waiting-msg .top-row b{font-weight:600;font-size:13px}
+.waiting-msg .top-row .why{margin-left:auto;color:var(--muted);font-size:12px}
+.waiting-msg .text{margin:6px 12px 10px 21px;padding-left:15px;border-left:2px solid var(--t);color:var(--ink-2);font-size:13px;line-height:1.65;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.waiting-msg .gate{padding:8px 12px}
+.none{font-size:13px;color:var(--quiet);padding:2px 0 6px}
+
+/* 飞行中的那条来信（放行动效） */
+.flyer{position:fixed;z-index:20;pointer-events:none;background:#fff;border-radius:10px;box-shadow:0 12px 28px rgba(16,24,40,.12)}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}
+}
+@media (max-width:900px){.notes{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="frame">
+  <h1>跨进程协同：网页原型</h1>
+  <p class="sub">plans/200，基线 dev 202ed4f2，2026-10-30 重建。视觉沿用当前实现：活动线、三段卡头、审批底栏、右侧抽屉。</p>
+
+  <div class="notes">
+    <section class="note">
+      <h2>本轮迭代</h2>
+      <ul>
+        <li>别的代理（另一个终端或网页会话）发来的消息，左对齐、不套框，用对方的身份色竖线引出。</li>
+        <li>每个代理一枚方形身份块：两个字符取名字最后一段，颜色由名字固定；子代理是父代理同色的空心块。圆形节点只属于本会话自己的步骤。</li>
+        <li>回合进行中收到的消息，成为活动线上的一个节点；自己发出的消息有了结果，汇总成「投递状态」。</li>
+        <li>权限模式不同的来信先等你放行。放行后它落进对话，再由它开始新的一轮。</li>
+        <li>抽屉顶部是这个目录正在改的文件，以及谁在改；我和别人同时在改的文件会标出来。</li>
+        <li>这个目录还有别的代理时，<code>git stash</code> 这类命令要你批准，卡片里写明会影响谁。</li>
+      </ul>
+    </section>
+    <section class="note">
+      <h2>请你确认</h2>
+      <p>等你放行的消息用品牌色（与审批同一族），不用自动续跑那种琥珀色。抽屉里不放「发消息」入口，发消息只由代理来做。「正在改的文件」来自文件工具的写入记录，终端命令改的文件不在内。</p>
+    </section>
+  </div>
+
+  <div class="toolbar">
+    <div class="seg" role="group" aria-label="场景">
+      <button type="button" data-scene="wake" aria-pressed="true">来信唤醒</button>
+      <button type="button" data-scene="midturn" aria-pressed="false">回合中来信</button>
+      <button type="button" data-scene="hold" aria-pressed="false">等你放行</button>
+      <button type="button" data-scene="crowd" aria-pressed="false">同目录代理</button>
+      <button type="button" data-scene="git" aria-pressed="false">git 审批</button>
+    </div>
+    <div class="seg" role="group" aria-label="菜单栏">
+      <button type="button" data-rail="dark" aria-pressed="true">菜单栏深色</button>
+      <button type="button" data-rail="light" aria-pressed="false">菜单栏浅色</button>
+    </div>
+    <div class="seg" role="group" aria-label="宽度">
+      <button type="button" data-width="wide" aria-pressed="true">桌面</button>
+      <button type="button" data-width="narrow" aria-pressed="false">手机</button>
+    </div>
+  </div>
+
+  <div class="stage" id="stage">
+    <div class="app" id="app" data-rail="dark">
+      <nav class="rail" aria-label="主导航">
+        <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M8 18V6h8M8 12h6"/></svg></div>
+        <button type="button" class="rail-btn on" aria-label="对话"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+        <button type="button" class="rail-btn" aria-label="项目"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+        <button type="button" class="rail-btn" aria-label="技能"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 2.5 5 5.5.8-4 3.9.9 5.5L12 15.6 7.1 18.2l.9-5.5-4-3.9 5.5-.8z"/></svg></button>
+        <button type="button" class="rail-btn" aria-label="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"/></svg></button>
+      </nav>
+
+      <div class="main">
+        <header class="top">
+          <span class="proj"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>forebrain-harness</span>
+          <span class="title">理顺 Close() 的退出顺序</span>
+          <button type="button" class="crowd" id="crowdBtn" aria-expanded="false" aria-label="这个目录还有 2 个代理，查看">
+            <span class="stack"><span class="pm t-teal">a3</span><span class="pm t-plum">28</span></span><span>2</span>
+          </button>
+        </header>
+
+        <div class="thread" id="thread">
+          <div class="col" id="col">
+            <div class="you"><div>把 <code>Environment.Close()</code> 的退出顺序理一下：先停后台循环，再关状态库。</div></div>
+            <div class="line">
+              <div class="step"><span class="node say"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 17V7h7M8 12h5"/></svg></span>
+                <div class="say-text"><p>先看现在的关闭顺序，再改。</p></div></div>
+              <div class="step"><span class="node done"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg></span>
+                <div class="head"><span class="txt"><span class="verb">已编辑 </span><span class="obj">pkg/process/open.go</span></span><span class="dur">0.3s</span></div></div>
+            </div>
+            <div class="worked">已工作 1 分 12 秒</div>
+
+            <!-- 来信唤醒 -->
+            <div data-scenes="wake">
+              <article class="letter t-plum" style="--t:var(--p-plum)">
+                <div class="who"><span class="pm t-plum">28</span><span class="name">forebrain-harness-28</span><span class="kind">终端</span><span class="near">同目录</span><time class="when">14:32</time></div>
+                <div class="text">我要改 <code>pkg/process/open.go</code> 的启动顺序，把状态库提前打开。你那边还在改这个文件吗？哪几段别碰？</div>
+              </article>
+              <div class="line">
+                <div class="step"><span class="node say"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 17V7h7M8 12h5"/></svg></span>
+                  <div class="say-text"><p>我还在改 <code>Close()</code>，启动那段不碰。先回复它。</p></div></div>
+                <div class="step"><span class="node done"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg></span>
+                  <div class="head"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg><span class="txt"><span class="verb">已发消息 </span><span class="obj">forebrain-harness-28</span></span><span class="dur">0.1s</span></div>
+                  <div class="panel"><div class="body"><p>还在改 open.go 第 146 行附近的 Close()，大约 10 分钟。Open 到 RunStore 创建之间那段我不碰，你可以先改；改完告诉我，我再合我的部分。</p></div>
+                    <div class="foot"><span class="pm t-plum">28</span>对方正忙，会在下一步读到</div></div></div>
+              </div>
+              <div class="worked">已工作 18 秒</div>
+            </div>
+
+            <!-- 回合中来信 -->
+            <div data-scenes="midturn">
+              <div class="you"><div>顺手把 <code>pkg/peer</code> 的存活判定也测一下。</div></div>
+              <div class="line">
+                <div class="step"><span class="node done"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg></span>
+                  <div class="head"><span class="txt"><span class="verb">已运行 </span><span class="obj">go test ./pkg/process -run Peer</span></span><span class="dur">6.2s</span></div></div>
+                <div class="step"><span class="pm t-teal">a3</span>
+                  <article class="letter" style="--t:var(--p-teal)">
+                    <div class="who"><span class="name">forebrain-harness-a3</span><span class="kind">终端</span><span class="near">同目录</span><time class="when">14:36</time></div>
+                    <div class="text" style="margin-top:4px">我刚给 <code>pkg/peer/liveness.go</code> 加了 pidDomain 分支，测试还没跑完，先别改这个文件。</div>
+                  </article></div>
+                <div class="step"><span class="node mail"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4z"/></svg></span>
+                  <div class="head"><span class="txt"><span class="plain">投递状态</span></span></div>
+                  <div class="panel"><ul class="receipts">
+                    <li><span class="pm t-plum">28</span><span class="n">forebrain-harness-28</span><span class="state s-held">等对方放行</span><span class="why">对方在完全访问模式，还没看到</span></li>
+                    <li><span class="pm t-steel">3c</span><span class="n">forebrain-gw-3c1a</span><span class="state s-ok">已送达</span><span class="why">对方的用户放行了</span></li>
+                    <li><span class="pm t-teal">a3</span><span class="n">forebrain-harness-a3</span><span class="state s-drop">没送出</span><span class="why">一分钟内发得太多，合成一条再发</span></li>
+                  </ul></div></div>
+                <div class="step"><span class="node busy"><span class="spin" aria-hidden="true"></span></span>
+                  <div class="head"><span class="txt"><span class="verb">正在运行 </span><span class="obj">go vet ./pkg/peer</span></span><span class="dur">2s</span></div></div>
+              </div>
+            </div>
+
+            <!-- 等你放行：放行或拒绝后在这里落下结果 -->
+            <div data-scenes="hold" id="landing"></div>
+
+            <!-- git 审批 -->
+            <div data-scenes="git">
+              <div class="you"><div>提交前先 stash 一下，看看干净的基线测试能不能过。</div></div>
+              <div class="line">
+                <div class="step"><span class="node wait"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+                  <div class="head"><span class="txt"><span class="verb">正在运行 </span><span class="obj">git stash</span></span></div>
+                  <div class="panel waiting">
+                    <div class="facts">
+                      <p class="lead">这个目录还有两个代理没提交改动，stash 会把它们一起收走。</p>
+                      <div class="who-row"><span class="pm t-teal">a3</span><div><b>forebrain-harness-a3</b> <span class="what">在改 <code>pkg/peer/liveness.go</code> 等 2 个文件</span></div></div>
+                      <div class="who-row"><span class="pm t-plum">28</span><div><b>forebrain-harness-28</b> <span class="what">在改 <code>pkg/process/open.go</code></span></div></div>
+                    </div>
+                    <div class="gate"><p class="q">要运行这条命令吗？</p>
+                      <div class="acts"><button type="button" class="btn pri">运行</button><button type="button" class="btn">不要运行</button></div></div>
+                  </div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="dock"><div class="col">
+          <div class="running" data-scenes="midturn"><span class="spin" aria-hidden="true"></span>工作中 34 秒</div>
+          <section class="hold" id="hold" data-scenes="hold" aria-label="等你放行的消息" style="--t:var(--p-plum)">
+            <div class="in">
+              <div class="top-row"><span class="pm t-plum">28</span><span class="lead"><b>forebrain-harness-28</b> 的消息在等你放行</span><span class="reason">你在完全访问模式，对方不是</span></div>
+              <div class="text" id="holdText">你把 git 里没提交的那几个 migrate 测试文件先处理一下，我这边要跑全量测试，它们会让 <code>pkg/migrate</code> 编译不过。可以的话直接删掉重写。</div>
+              <div class="gate"><div class="acts"><button type="button" class="btn pri" data-decide="release">放行</button><button type="button" class="btn" data-decide="deny">拒绝</button></div></div>
+            </div>
+          </section>
+          <div class="compose">
+            <div class="ph">输入消息，/ 调出命令，@ 引用文件</div>
+            <div class="bar"><span class="chip">glm-5.3 高</span><span class="chip" id="modeChip">默认权限</span>
+              <button type="button" class="send" aria-label="发送"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></button></div>
+          </div>
+        </div></div>
+      </div>
+
+      <aside class="drawer" aria-label="同目录代理">
+        <div class="drawer-in">
+          <div class="d-head"><h3>可联系的代理</h3>
+            <button type="button" class="x" id="closeDrawer" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+          <div class="d-body">
+            <section class="d-sec" id="drawerHoldSec">
+              <h4>等你放行 <span class="c" id="holdCount">1</span></h4>
+              <div class="waiting-msg" id="drawerHold" style="--t:var(--p-plum)">
+                <div class="top-row"><span class="pm t-plum">28</span><b>forebrain-harness-28</b><span class="why">权限模式不同</span></div>
+                <div class="text">你把 git 里没提交的那几个 migrate 测试文件先处理一下，我这边要跑全量测试……</div>
+                <div class="gate"><div class="acts"><button type="button" class="btn pri" data-decide="release">放行</button><button type="button" class="btn" data-decide="deny">拒绝</button></div></div>
+              </div>
+              <p class="none" id="holdNone" hidden>没有等你放行的消息</p>
+            </section>
+
+            <section class="d-sec">
+              <h4>这个目录正在改的文件</h4>
+              <div class="tree">
+                <div class="dir">pkg/process/</div>
+                <div class="file clash"><span class="fn">open.go</span><span class="marks"><span class="pm me" title="本会话">我</span><span class="pm t-plum" title="forebrain-harness-28">28</span></span><span class="ago">都在改</span></div>
+                <div class="file"><span class="fn">runner_pool.go</span><span class="marks"><span class="pm t-teal" title="forebrain-harness-a3">a3</span></span><span class="ago">6 分钟前</span></div>
+                <div class="dir">pkg/peer/</div>
+                <div class="file"><span class="fn">liveness.go</span><span class="marks"><span class="pm t-teal" title="forebrain-harness-a3">a3</span></span><span class="ago">2 分钟前</span></div>
+                <div class="file"><span class="fn">record.go</span><span class="marks"><span class="pm t-teal" title="forebrain-harness-a3">a3</span></span><span class="ago">9 分钟前</span></div>
+              </div>
+            </section>
+
+            <section class="d-sec">
+              <h4>这个目录 <span class="c">2</span></h4>
+              <div class="peer"><span class="pm lg t-teal">a3</span>
+                <div class="l1"><span class="nm">forebrain-harness-a3</span><span class="kd">终端</span><span class="st"><i class="dot busy"></i>工作中</span></div>
+                <div class="l2">给存活判定补 pidDomain 分支</div></div>
+              <div class="peer"><span class="pm lg t-plum">28</span>
+                <div class="l1"><span class="nm">forebrain-harness-28</span><span class="kd">终端</span><span class="st"><i class="dot"></i>空闲</span></div>
+                <div class="l2">3 分钟前活跃</div></div>
+            </section>
+
+            <section class="d-sec">
+              <h4>其他目录 <span class="c">4</span></h4>
+              <div class="peer"><span class="pm lg t-steel">3c</span>
+                <div class="l1"><span class="nm">forebrain-gw-3c1a</span><span class="kd">网页会话</span><span class="st"><i class="dot wait"></i>等批准</span></div>
+                <div class="l2">核对账单导出的字段</div><div class="l3">~/work/billing</div></div>
+              <div class="peer"><span class="pm lg sub t-steel">ra</span>
+                <div class="l1"><span class="nm">forebrain-gw-3c1a.review-auth</span><span class="kd">子代理</span><span class="st"><i class="dot busy"></i>工作中</span></div>
+                <div class="l2">审查登录流程</div><div class="l3">~/work/billing</div></div>
+              <div class="peer"><span class="pm lg t-moss">7f</span>
+                <div class="l1"><span class="nm">docs-site-7f</span><span class="kd">终端</span><span class="st"><i class="dot"></i>空闲</span></div>
+                <div class="l3">~/work/docs-site</div></div>
+              <div class="pager">1–3，共 4<button type="button" class="pg" disabled aria-label="上一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button><button type="button" class="pg" aria-label="下一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg></button></div>
+            </section>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+  <p class="caption" id="caption"></p>
+</div>
+
+<script>
+(function(){
+  var app=document.getElementById('app'),stage=document.getElementById('stage'),thread=document.getElementById('thread');
+  var reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var captions={
+    wake:'同目录的代理在你空闲时发来消息：来信落在对话里，它开始的这一轮紧跟其后；回复是一张「已发消息」卡，底部写着对方此刻的状态。',
+    midturn:'本轮进行中收到的消息，成为活动线上的一个节点，节点就是对方的身份块。自己发出的消息有了结果，汇总成「投递状态」。',
+    hold:'你在完全访问模式，对方不是，这条消息先等你放行。点「放行」，它落进对话并开始新的一轮；点「拒绝」，对方会收到「已拒绝」。',
+    crowd:'顶栏的身份块打开抽屉：先处理等你放行的消息，再看这个目录里谁在改哪些文件。我和别人同时在改的文件标成琥珀色。',
+    git:'这个目录还有别的代理没提交改动时，git stash 这类命令要你批准，卡片写明会影响谁。完全访问模式下也一样要你批准。'
+  };
+  function press(group,attr,val){group.querySelectorAll('button').forEach(function(b){b.setAttribute('aria-pressed',String(b.getAttribute(attr)===val));});}
+  function setDrawer(open){app.classList.toggle('open',open);document.getElementById('crowdBtn').setAttribute('aria-expanded',String(open));}
+  function resetHold(){
+    var h=document.getElementById('hold');h.classList.remove('gone');h.hidden=false;
+    document.getElementById('drawerHold').hidden=false;document.getElementById('holdNone').hidden=true;
+    document.getElementById('holdCount').textContent='1';document.getElementById('landing').innerHTML='';
+    document.getElementById('modeChip').textContent='完全访问';
+  }
+  function show(scene){
+    document.getElementById('modeChip').textContent='默认权限';
+    if(scene==='hold')resetHold();
+    document.querySelectorAll('[data-scenes]').forEach(function(el){el.style.display=el.dataset.scenes.split(' ').indexOf(scene)>=0?'':'none';});
+    setDrawer(scene==='crowd');
+    document.getElementById('caption').textContent=captions[scene];
+    thread.scrollTop=thread.scrollHeight;
+    if((location.hash||'').slice(1).split(':')[0]!==scene)location.replace('#'+scene);
+  }
+
+  var I={
+    say:'<span class="node say"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 17V7h7M8 12h5"/></svg></span>',
+    busy:'<span class="node busy"><span class="spin" aria-hidden="true"></span></span>',
+    ok:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>',
+    no:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>'
+  };
+  function decide(release){
+    var hold=document.getElementById('hold'),landing=document.getElementById('landing');
+    document.getElementById('drawerHold').hidden=true;document.getElementById('holdNone').hidden=false;document.getElementById('holdCount').textContent='0';
+    if(!release){
+      landing.innerHTML='<div class="event">'+I.no+'已拒绝 forebrain-harness-28 的消息</div>';
+      hold.classList.add('gone');return;
+    }
+    landing.innerHTML='<div class="event">'+I.ok+'已放行 forebrain-harness-28 的消息</div>'
+      +'<article class="letter" id="landed" style="--t:var(--p-plum)"><div class="who"><span class="pm t-plum">28</span><span class="name">forebrain-harness-28</span><span class="kind">终端</span><span class="near">同目录</span><time class="when">14:41</time></div>'
+      +'<div class="text">'+document.getElementById('holdText').innerHTML+'</div></article>'
+      +'<div class="line" id="woke" style="opacity:0"><div class="step">'+I.say+'<div class="say-text"><p>那几个文件不是我改的，删掉会冲掉别人的工作。先看看是谁在改。</p></div></div>'
+      +'<div class="step">'+I.busy+'<div class="head"><span class="txt"><span class="plain">正在列出代理</span></span></div></div></div>';
+    var landed=document.getElementById('landed'),woke=document.getElementById('woke');
+    thread.scrollTop=thread.scrollHeight;
+    if(reduce){hold.classList.add('gone');woke.style.opacity='';return;}
+    // 放行：等待中的那段正文飞进对话，落成来信
+    var src=document.getElementById('holdText').getBoundingClientRect(),dst=landed.getBoundingClientRect();
+    landed.style.visibility='hidden';
+    var fly=landed.cloneNode(true);fly.removeAttribute('id');fly.classList.add('flyer');fly.style.visibility='visible';
+    fly.style.left=dst.left+'px';fly.style.top=dst.top+'px';fly.style.width=dst.width+'px';fly.style.padding='8px 10px';fly.style.margin='-8px -10px';
+    document.body.appendChild(fly);
+    var dx=src.left-dst.left,dy=src.top-dst.top;
+    var a=fly.animate([{transform:'translate('+dx+'px,'+dy+'px) scale(.97)',opacity:.6},{transform:'none',opacity:1,boxShadow:'0 0 0 rgba(0,0,0,0)'}],{duration:420,easing:'cubic-bezier(.2,.7,.2,1)'});
+    hold.classList.add('gone');
+    a.onfinish=function(){fly.remove();landed.style.visibility='';woke.animate([{opacity:0,transform:'translateY(4px)'},{opacity:1,transform:'none'}],{duration:220,easing:'ease-out',fill:'forwards'});};
+  }
+
+  document.querySelectorAll('button[data-scene]').forEach(function(b){b.addEventListener('click',function(){press(b.parentNode,'data-scene',b.dataset.scene);show(b.dataset.scene);});});
+  document.querySelectorAll('button[data-rail]').forEach(function(b){b.addEventListener('click',function(){app.dataset.rail=b.dataset.rail;press(b.parentNode,'data-rail',b.dataset.rail);});});
+  document.querySelectorAll('button[data-width]').forEach(function(b){b.addEventListener('click',function(){stage.classList.toggle('narrow',b.dataset.width==='narrow');press(b.parentNode,'data-width',b.dataset.width);});});
+  document.getElementById('crowdBtn').addEventListener('click',function(){setDrawer(!app.classList.contains('open'));});
+  document.getElementById('closeDrawer').addEventListener('click',function(){setDrawer(false);});
+  app.addEventListener('keydown',function(e){if(e.key==='Escape'&&app.classList.contains('open'))setDrawer(false);});
+  document.querySelectorAll('[data-decide]').forEach(function(b){b.addEventListener('click',function(){decide(b.dataset.decide==='release');});});
+
+  var hash=(location.hash||'').slice(1).split(':'),first=hash[0];if(!captions[first])first='wake';
+  var flags=hash.slice(1);
+  if(flags.indexOf('m')>=0){stage.classList.add('narrow');press(document.querySelectorAll('.seg')[2],'data-width','narrow');}
+  press(document.querySelector('.seg'),'data-scene',first);show(first);
+  if(first==='hold'&&flags.indexOf('release')>=0)setTimeout(function(){decide(true);},200);
+  if(first==='hold'&&flags.indexOf('deny')>=0)setTimeout(function(){decide(false);},200);
+})();
+</script>
+</body>
+</html>

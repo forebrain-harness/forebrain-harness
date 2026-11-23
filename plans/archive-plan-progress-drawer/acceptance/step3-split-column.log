@@ -1,0 +1,62 @@
+# github.com/forebrain-harness/forebrain-harness/pkg/tui.test
+ld: warning: ignoring duplicate libraries: '-lm'
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[81](0602fb52cb66f316-esaxx.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[229](a445302c6d3dcb51-regexec.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[230](a445302c6d3dcb51-regerror.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[231](a445302c6d3dcb51-regparse.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[233](a445302c6d3dcb51-regcomp.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[235](a445302c6d3dcb51-regenc.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[236](a445302c6d3dcb51-regsyntax.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[238](a445302c6d3dcb51-regversion.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[239](a445302c6d3dcb51-st.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[241](a445302c6d3dcb51-unicode.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[242](a445302c6d3dcb51-ascii.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[243](a445302c6d3dcb51-utf8.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[273](a445302c6d3dcb51-unicode_unfold_key.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[274](a445302c6d3dcb51-unicode_fold1_key.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[275](a445302c6d3dcb51-unicode_fold2_key.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+ld: warning: object file (/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/libtokenizers/darwin_arm64/libtokenizers.a[276](a445302c6d3dcb51-unicode_fold3_key.o)) was built for newer 'macOS' version (15.5) than being linked (15.0)
+=== RUN   TestViewportComposerKeepsSingleSpacingAroundWorkingAndPendingQueue
+=== RUN   TestViewportComposerKeepsSingleSpacingAroundWorkingAndPendingQueue/normal_composer
+=== RUN   TestViewportComposerKeepsSingleSpacingAroundWorkingAndPendingQueue/slash_composer
+--- PASS: TestViewportComposerKeepsSingleSpacingAroundWorkingAndPendingQueue (0.00s)
+    --- PASS: TestViewportComposerKeepsSingleSpacingAroundWorkingAndPendingQueue/normal_composer (0.00s)
+    --- PASS: TestViewportComposerKeepsSingleSpacingAroundWorkingAndPendingQueue/slash_composer (0.00s)
+=== RUN   TestPlanDrawerWidth
+--- PASS: TestPlanDrawerWidth (0.00s)
+=== RUN   TestPlanDrawerLayoutRowsFillTheTerminalWidth
+--- PASS: TestPlanDrawerLayoutRowsFillTheTerminalWidth (0.00s)
+=== RUN   TestPlanDrawerLayoutTitleAndCloseSpan
+--- PASS: TestPlanDrawerLayoutTitleAndCloseSpan (0.00s)
+=== RUN   TestPlanDrawerLayoutLongTitleKeepsTheCloseControl
+--- PASS: TestPlanDrawerLayoutLongTitleKeepsTheCloseControl (0.00s)
+=== RUN   TestPlanDrawerLatestFrame
+--- PASS: TestPlanDrawerLatestFrame (0.00s)
+=== RUN   TestPlanDrawerContent
+--- PASS: TestPlanDrawerContent (0.00s)
+=== RUN   TestPlanDrawerContentWrapsCJKLines
+--- PASS: TestPlanDrawerContentWrapsCJKLines (0.00s)
+=== RUN   TestPlanDrawerScroll
+--- PASS: TestPlanDrawerScroll (0.00s)
+=== RUN   TestPlanDrawerScrollHintRowBudget
+--- PASS: TestPlanDrawerScrollHintRowBudget (0.00s)
+=== RUN   TestPlanDrawerSplitNarrowsTheHistoryAndKeepsTheComposer
+--- PASS: TestPlanDrawerSplitNarrowsTheHistoryAndKeepsTheComposer (0.00s)
+=== RUN   TestPlanDrawerSplitReflowsTheHistory
+--- PASS: TestPlanDrawerSplitReflowsTheHistory (0.00s)
+=== RUN   TestPlanDrawerSplitKeepsTheReaderPosition
+--- PASS: TestPlanDrawerSplitKeepsTheReaderPosition (0.00s)
+=== RUN   TestPlanDrawerSplitSurvivesAnOverlay
+--- PASS: TestPlanDrawerSplitSurvivesAnOverlay (0.00s)
+=== RUN   TestPlanDrawerSplitJumpStaysLeft
+--- PASS: TestPlanDrawerSplitJumpStaysLeft (0.00s)
+=== RUN   TestPlanDrawerSplitUserCardReachesTheDivider
+--- PASS: TestPlanDrawerSplitUserCardReachesTheDivider (0.00s)
+=== RUN   TestPlanDrawerSplitCloseRestoresTheLayout
+--- PASS: TestPlanDrawerSplitCloseRestoresTheLayout (0.00s)
+=== RUN   TestPlanDrawerSplitClosedByViewSwitchAndSessionReset
+--- PASS: TestPlanDrawerSplitClosedByViewSwitchAndSessionReset (0.00s)
+=== RUN   TestComposerStatusLineIsOneControlFreeRow
+--- PASS: TestComposerStatusLineIsOneControlFreeRow (0.00s)
+PASS
+ok  	github.com/forebrain-harness/forebrain-harness/pkg/tui	1.587s

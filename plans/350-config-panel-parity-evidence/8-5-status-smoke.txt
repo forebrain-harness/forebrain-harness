@@ -1,0 +1,16 @@
+  Agent:         main
+  Model:         deepseek/deepseek-chat
+  Endpoint:      http://127.0.0.1:8763
+  Permissions:   Workspace write
+  Sandbox:       workspace-write seatbelt
+  Instructions:  AGENTS.md, SOUL.md, USER.md
+
+
+
+
+
+
+
+
+
+  Esc to close Tab to switch PgUp/PgDn to scroll

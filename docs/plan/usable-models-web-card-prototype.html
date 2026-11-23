@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>list_usable_models · web 卡片设计稿（plan 337）</title>
+<style>
+  /* Product tokens — frontend/src/assets/main.css (light, default brand). */
+  :root{
+    --bg:#FFFFFF; --bg-alt:#F7F8FA; --divider:#E4E7EC; --divider-strong:#D0D5DD;
+    --text:#101828; --text-2:#475467; --muted:#667085;
+    --brand-1:#1F4A9E; --brand-soft:#EBF0F9; --brand-border:#C3D2EC;
+    --success:#067647; --success-soft:#ECFDF3; --warning:#B54708; --warning-soft:#FFFAEB;
+    --ui:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI","Microsoft YaHei","Noto Sans SC",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg-alt);color:var(--text);font-family:var(--ui);font-size:14px;line-height:1.6;}
+  .sheet{max-width:1180px;margin:0 auto;padding:32px 24px 64px;}
+  header.top{margin-bottom:24px;}
+  header.top h1{font-size:20px;font-weight:650;margin:0 0 6px;letter-spacing:-.01em;}
+  header.top p{margin:0;color:var(--text-2);font-size:13.5px;max-width:72ch;}
+  .meta{margin-top:10px;font-size:12px;color:var(--muted);font-family:var(--mono);}
+
+  .layout{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:28px;align-items:start;}
+  @media(max-width:900px){.layout{grid-template-columns:1fr;}}
+
+  /* A variant block: label + the two scenario frames. */
+  .variant{margin-bottom:30px;}
+  .variant > .vhead{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;}
+  .variant > .vhead .tag{font-size:12px;font-weight:650;color:var(--brand-1);background:var(--brand-soft);border:1px solid var(--brand-border);border-radius:6px;padding:1px 8px;}
+  .variant > .vhead h2{font-size:15px;font-weight:600;margin:0;}
+  .variant > .vhead .sub{font-size:12.5px;color:var(--muted);}
+  .frames{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;}
+  @media(max-width:640px){.frames{grid-template-columns:1fr;}}
+  .scene{min-width:0;}
+  .scene > .cap{font-size:11.5px;color:var(--muted);margin:0 0 6px;}
+
+  /* The chat tool-card frame (Tool + ToolHeader + ToolContent). */
+  .card{background:var(--bg);border:1px solid var(--divider);border-radius:10px;overflow:hidden;}
+  .head{display:flex;align-items:center;gap:8px;padding:7px 11px;border-bottom:1px solid var(--divider);background:var(--bg);}
+  .head .glyph{width:15px;height:15px;flex:none;color:var(--muted);}
+  .head .ttl{font-size:13px;color:var(--text-2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .head .dur{margin-left:auto;font-size:12px;color:var(--muted);font-family:var(--mono);flex:none;}
+  .body{padding:9px 11px;font-size:13px;line-height:1.6;color:var(--text);max-height:360px;overflow:auto;}
+
+  /* ---- Variant A: structured roster ---- */
+  .um .grp + .grp{margin-top:12px;}
+  .um .prov{font-size:12px;font-weight:600;color:var(--text-2);margin:0 0 3px;}
+  .um .row{padding:4px 0;}
+  .um .l1{display:flex;align-items:center;gap:8px;min-width:0;}
+  .um .nm{font-size:13px;font-weight:550;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .flag{flex:none;font-size:11px;line-height:1.5;border-radius:999px;padding:0 7px;border:1px solid transparent;}
+  .flag.cur{color:var(--brand-1);background:var(--brand-soft);border-color:var(--brand-border);}
+  .flag.ho{color:var(--text-2);background:var(--bg);border-color:var(--divider-strong);}
+  .um .l2{margin-top:2px;font-size:12px;color:var(--muted);}
+  .um .l2 .def{color:var(--text-2);}
+  /* chips sub-variant */
+  .chips{display:flex;flex-wrap:wrap;gap:5px;align-items:center;}
+  .chip{font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--text-2);background:var(--bg-alt);border:1px solid var(--divider);border-radius:6px;padding:0 7px;}
+  .chip.def{color:var(--brand-1);background:var(--brand-soft);border-color:var(--brand-border);}
+  .chip .dtag{font-family:var(--ui);font-size:10.5px;color:var(--brand-1);opacity:.8;margin-left:4px;}
+  .um .empty{margin:0;color:var(--text-2);}
+  .um .empty .hint{display:block;margin-top:3px;font-size:12px;color:var(--muted);}
+
+  /* ---- Variant B: markdown reuse ---- */
+  .md{font-size:13px;line-height:1.7;color:var(--text);}
+  .md p{margin:0 0 8px;}
+  .md p:last-child{margin-bottom:0;}
+  .md strong{font-weight:650;color:var(--text);}
+  .md ul{margin:0 0 8px;padding-left:18px;}
+  .md li{margin:1px 0;color:var(--text-2);}
+  .md li::marker{color:var(--divider-strong);}
+  .md em{font-style:italic;color:var(--muted);}
+  .md .note{color:var(--text-2);}
+
+  /* ---- Notes column ---- */
+  aside.notes{position:sticky;top:24px;background:var(--bg);border:1px solid var(--divider);border-radius:10px;padding:16px 16px 18px;font-size:12.5px;line-height:1.65;color:var(--text-2);}
+  aside.notes h3{font-size:13px;font-weight:650;color:var(--text);margin:0 0 8px;}
+  aside.notes h4{font-size:12px;font-weight:650;color:var(--text);margin:14px 0 4px;}
+  aside.notes p{margin:0 0 6px;}
+  aside.notes ul{margin:0 0 6px;padding-left:16px;}
+  aside.notes li{margin:2px 0;}
+  aside.notes code{font-family:var(--mono);font-size:11.5px;background:var(--bg-alt);border:1px solid var(--divider);border-radius:4px;padding:0 4px;color:var(--text);}
+  aside.notes .q{color:var(--brand-1);font-weight:600;}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:0 0 22px;font-size:12px;color:var(--text-2);align-items:center;}
+  .legend .item{display:inline-flex;align-items:center;gap:6px;}
+</style>
+</head>
+<body>
+<div class="sheet">
+  <header class="top">
+    <h1>list_usable_models · web 卡片设计稿</h1>
+    <p>为 web 聊天里的 <code>list_usable_models</code> 应答做专属分组卡，对齐 TUI（plan 332）已确认的形态：按 provider 分组、每模型一行 label／思考档位／默认档，<strong>行 id 绝不向用户显示</strong>。下面是三个候选视觉（A1 结构化·纯文本档位、A2 结构化·档位 chip、B Markdown 复用），同一组场景并排，供 owner 选定后冻结哈希再实施。</p>
+    <div class="meta">plan 337 · baseline 9a3fba8c · 引擎 JSON 契约不动 · 展示侧 ReadableAnswer.Models DTO</div>
+  </header>
+
+  <div class="legend">
+    <span class="item"><span class="flag cur">当前</span> 会话当前模型（current）</span>
+    <span class="item"><span class="flag ho">交接</span> 已批准 hand-off 钉住的行（handed off）</span>
+    <span class="item"><span class="chip def">medium<span class="dtag">默认</span></span> 默认思考档位高亮</span>
+  </div>
+
+  <div class="layout">
+    <main>
+      <!-- ============ A1 ============ -->
+      <section class="variant">
+        <div class="vhead"><span class="tag">A1</span><h2>结构化卡 · 档位纯文本</h2><span class="sub">与 TUI 逐字同义，web 设计语言排版</span></div>
+        <div class="frames">
+          <div class="scene">
+            <p class="cap">完整 roster（zhipuai / qodercn 两组）</p>
+            <div class="card">
+              <div class="head">
+                <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+                <span class="ttl">Listed usable models</span><span class="dur">0.2s</span>
+              </div>
+              <div class="body">
+                <div class="um">
+                  <div class="grp">
+                    <div class="prov">zhipuai</div>
+                    <div class="row">
+                      <div class="l1"><span class="nm">glm-5.3</span><span class="flag cur">当前</span></div>
+                      <div class="l2">思考：low、medium、high <span class="def">（默认 medium）</span></div>
+                    </div>
+                    <div class="row">
+                      <div class="l1"><span class="nm">glm-5.3-air</span></div>
+                      <div class="l2">思考：low、medium <span class="def">（默认 low）</span></div>
+                    </div>
+                  </div>
+                  <div class="grp">
+                    <div class="prov">qodercn</div>
+                    <div class="row">
+                      <div class="l1"><span class="nm">DeepSeek-Flash</span><span class="flag ho">交接</span></div>
+                    </div>
+                    <div class="row">
+                      <div class="l1"><span class="nm">DeepSeek-R1</span></div>
+                      <div class="l2">思考：low、medium、high <span class="def">（默认 high）</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="scene">
+            <p class="cap">空 roster（note 场景）</p>
+            <div class="card">
+              <div class="head">
+                <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+                <span class="ttl">Listed usable models</span><span class="dur">0.1s</span>
+              </div>
+              <div class="body">
+                <div class="um"><p class="empty">没有可派发给子代理的模型。<span class="hint">省略 model 参数即可使用会话当前模型。</span></p></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ A2 ============ -->
+      <section class="variant">
+        <div class="vhead"><span class="tag">A2</span><h2>结构化卡 · 档位 chip</h2><span class="sub">档位做成 chip，默认档高亮</span></div>
+        <div class="frames">
+          <div class="scene">
+            <p class="cap">完整 roster（zhipuai / qodercn 两组）</p>
+            <div class="card">
+              <div class="head">
+                <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+                <span class="ttl">Listed usable models</span><span class="dur">0.2s</span>
+              </div>
+              <div class="body">
+                <div class="um">
+                  <div class="grp">
+                    <div class="prov">zhipuai</div>
+                    <div class="row">
+                      <div class="l1"><span class="nm">glm-5.3</span><span class="flag cur">当前</span></div>
+                      <div class="l2 chips"><span class="chip">low</span><span class="chip def">medium<span class="dtag">默认</span></span><span class="chip">high</span></div>
+                    </div>
+                    <div class="row">
+                      <div class="l1"><span class="nm">glm-5.3-air</span></div>
+                      <div class="l2 chips"><span class="chip def">low<span class="dtag">默认</span></span><span class="chip">medium</span></div>
+                    </div>
+                  </div>
+                  <div class="grp">
+                    <div class="prov">qodercn</div>
+                    <div class="row">
+                      <div class="l1"><span class="nm">DeepSeek-Flash</span><span class="flag ho">交接</span></div>
+                    </div>
+                    <div class="row">
+                      <div class="l1"><span class="nm">DeepSeek-R1</span></div>
+                      <div class="l2 chips"><span class="chip">low</span><span class="chip">medium</span><span class="chip def">high<span class="dtag">默认</span></span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="scene">
+            <p class="cap">空 roster（note 场景）</p>
+            <div class="card">
+              <div class="head">
+                <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+                <span class="ttl">Listed usable models</span><span class="dur">0.1s</span>
+              </div>
+              <div class="body">
+                <div class="um"><p class="empty">没有可派发给子代理的模型。<span class="hint">省略 model 参数即可使用会话当前模型。</span></p></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ B ============ -->
+      <section class="variant">
+        <div class="vhead"><span class="tag">B</span><h2>Markdown 复用</h2><span class="sub">gateway 下发 FormatUsableModelsMarkdown 文本，vue-stream-markdown 渲染</span></div>
+        <div class="frames">
+          <div class="scene">
+            <p class="cap">完整 roster（与 TUI 逐字同源）</p>
+            <div class="card">
+              <div class="head">
+                <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+                <span class="ttl">Listed usable models</span><span class="dur">0.2s</span>
+              </div>
+              <div class="body">
+                <div class="md">
+                  <p><strong>zhipuai</strong></p>
+                  <ul>
+                    <li>glm-5.3 — thinking: low, medium, high (default medium) <em>(current)</em></li>
+                    <li>glm-5.3-air — thinking: low, medium (default low)</li>
+                  </ul>
+                  <p><strong>qodercn</strong></p>
+                  <ul>
+                    <li>DeepSeek-Flash <em>(handed off)</em></li>
+                    <li>DeepSeek-R1 — thinking: low, medium, high (default high)</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="scene">
+            <p class="cap">空 roster（engine note 原句）</p>
+            <div class="card">
+              <div class="head">
+                <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+                <span class="ttl">Listed usable models</span><span class="dur">0.1s</span>
+              </div>
+              <div class="body">
+                <div class="md"><p class="note">No model is allowed for subagents you pick. Omit model to run on the conversation's model.</p></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="notes">
+      <h3>说明栏</h3>
+      <p>三个候选共用同一数据与场景；差异只在展示层。引擎应答 JSON（<code>models[]{id,provider,model,efforts,default_effort,current,handed_off}</code>＋<code>note</code>）是 331 的 owner 裁决，<strong>不动</strong>。</p>
+
+      <h4>数据流（方案 A）</h4>
+      <ul>
+        <li><code>pkg/tool</code> ReadableAnswer 加展示侧 <code>Models []ReadableModel</code>，<code>readUsableModels</code> 填充（旧格式回放兼容照 332）。</li>
+        <li>gateway <code>readableAnswerFor</code> 透传，空判定认新字段。</li>
+        <li>前端 <code>UsableModelsCard.vue</code> 新组件，ToolCallCard 加 computed＋v-else-if（照 PeerRosterCard）。</li>
+      </ul>
+
+      <h4>不变式</h4>
+      <ul>
+        <li><strong>id 零显示</strong>：id 只是发给 LLM 的派发参数，对用户无意义（TUI 裁决延伸到 web）。</li>
+        <li>current＝会话当前行；handed off＝已批准交接钉住的行；无档位行不画档位线。</li>
+        <li>卡片是「又一条工具结果」：同 PeerRosterCard 的 padding/字号/滚动 bound，不新造盒子。</li>
+      </ul>
+
+      <h4>locales 键提议（zh / en）</h4>
+      <ul>
+        <li><code>chat.usableModelsCurrent</code>：当前 / current</li>
+        <li><code>chat.usableModelsHandedOff</code>：交接 / handed off</li>
+        <li><code>chat.usableModelsThinking</code>：思考 / thinking</li>
+        <li><code>chat.usableModelsDefault</code>：默认 / default</li>
+        <li><code>chat.usableModelsEmpty</code>：没有可派发给子代理的模型。/ No model can be dispatched to a subagent.</li>
+        <li><code>chat.usableModelsEmptyHint</code>：省略 model 参数即可使用会话当前模型。/ Omit model to run on the conversation's model.</li>
+      </ul>
+
+      <h4>待 owner 裁决</h4>
+      <ul>
+        <li><span class="q">Q1</span> 方案 A（结构化，推荐）vs B（Markdown 复用）。</li>
+        <li><span class="q">Q2</span> id 在 web 同样绝不显示？（推荐：是）</li>
+        <li><span class="q">Q3</span> 若选 A：档位纯文本（A1）vs chip（A2）。</li>
+        <li><span class="q">Q4</span> 空 roster：本地化空态句＋引导（A，照 PeerRosterCard 先例）vs engine note 原句（B）。</li>
+      </ul>
+
+      <h4>取舍</h4>
+      <p>A 是 web 原生设计语言、与 peer 卡同级、档位可做 chip；成本是引擎 DTO＋组件＋locales。B 几乎零引擎改动、两端逐字同源；成本是 Markdown 样式在卡片内未必合设计体系、分组标题只是粗体文本。推荐 A。</p>
+    </aside>
+  </div>
+</div>
+</body>
+</html>

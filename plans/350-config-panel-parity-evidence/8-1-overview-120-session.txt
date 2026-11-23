@@ -1,0 +1,44 @@
+
+╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮
+┆                                                                                              ┆
+┆                         Forebrain Harness              v0.1.2-0.20261122015002-fb4fd2945ca7  ┆
+┆                         ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  ┆
+┆                         /private/var/folders/kw/mf8l2_c564b0m8qzhj073s940000gn/T/fb350/proj  ┆
+┆                                                                                              ┆
+┆                         / commands        @ mention                                          ┆
+┆                         esc interrupt     ctrl+j newline                                     ┆
+┆                                                                                              ┆
+╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯
+
+
+
+
+
+
+
+
+
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Approval & sandbox 3   Session & memory 4   Agents & tools 4
+
+❯ Context compaction
+  Keep long conversations within their context window.
+
+  Memory
+  Tune retrieval, retention and background processing.
+
+  Scheduled tasks
+  Choose how long task records are retained.
+
+  Feature switches
+  Enable memory, language intelligence and next-step suggestions.
+
+
+
+
+
+
+
+  ↑/↓ to navigate Enter to open Esc to close

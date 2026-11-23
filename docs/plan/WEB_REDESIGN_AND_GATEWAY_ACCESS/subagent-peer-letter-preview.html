@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>子代理视图 peer 来信卡原型</title>
+<style>
+/* 外框固定浅色（owner 2026-10-17）：不写任何深色覆盖。视觉沿用 peer-coordination-preview.html
+   与已实现的 PeerMessageCard.vue（plan 200 §3）——同一张来信卡，主视图与子代理视图一致。 */
+:root{
+  --bg:#FFFFFF; --bg-alt:#F7F8FA; --hover:#F2F4F7; --soft:#F2F4F7;
+  --line:#E4E7EC; --line-2:#D0D5DD;
+  --ink:#101828; --ink-2:#475467; --muted:#667085; --quiet:#98A2B3;
+  --brand:#1F4A9E; --brand-hover:#173B80; --brand-soft:#EBF0F9; --brand-line:#C3D2EC;
+  --ok:#067647; --ok-soft:#ECFDF3; --ok-line:#ABEFC6;
+  --p-teal:#0E6E7E; --p-plum:#6B4C9A; --p-steel:#45607D; --p-moss:#4F6B3A;
+  --ui:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI","Microsoft YaHei","Noto Sans SC",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --ease:cubic-bezier(.2,.7,.2,1);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:#F3F4F6;color:var(--ink);font:14px/1.6 var(--ui);-webkit-font-smoothing:antialiased}
+code{font-family:var(--mono);font-size:.9em;background:var(--soft);border-radius:4px;padding:1px 4px}
+
+/* ---------- 外框 ---------- */
+.frame{max-width:1180px;margin:0 auto;padding:32px 24px 56px}
+.frame h1{font-size:22px;line-height:1.3;margin:0;font-weight:650;letter-spacing:-.01em}
+.frame .sub{margin:4px 0 0;color:var(--muted);font-size:13px}
+.notes{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;margin:18px 0 20px}
+.note{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 18px}
+.note h2{font-size:14px;margin:0 0 6px;font-weight:600}
+.note ul{margin:0;padding-left:18px;color:var(--ink-2);font-size:13px;line-height:1.7}
+.note p{margin:0;color:var(--ink-2);font-size:13px;line-height:1.7}
+.note p+p{margin-top:6px}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
+.seg{display:inline-flex;background:#fff;border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px;flex-wrap:wrap}
+.seg button{border:0;background:transparent;color:var(--ink-2);font:500 13px/1 var(--ui);padding:8px 12px;border-radius:7px;cursor:pointer;transition:background .15s,color .15s}
+.seg button:hover{color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--brand-soft);color:var(--brand)}
+.seg button:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+.caption{margin:12px 2px 0;color:var(--muted);font-size:13px;max-width:72ch}
+.stage{display:flex;justify-content:center}
+
+/* ---------- 应用外框：左主视图缩略 + 右子代理抽屉 ---------- */
+.app{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 440px;width:100%;height:760px;
+  background:var(--bg);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 10px 30px rgba(16,24,40,.07)}
+.main{display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--line);background:var(--bg-alt)}
+.main .top{height:52px;flex:none;display:flex;align-items:center;gap:10px;padding:0 16px;border-bottom:1px solid var(--line);background:#fff}
+.main .title{font-weight:600;font-size:14px}
+.main .hint{margin:auto auto 0;padding:0 28px 28px;color:var(--quiet);font-size:12.5px;text-align:center;max-width:46ch}
+.main .ghost{flex:1;display:flex;flex-direction:column;gap:14px;padding:22px 28px;opacity:.5}
+.main .ghost .g-line{height:10px;border-radius:5px;background:var(--line)}
+.main .ghost .g-line.short{width:62%}
+.main .ghost .g-card{height:64px;border-radius:10px;border:1px solid var(--line);background:#fff}
+
+/* ---------- 子代理抽屉 ---------- */
+.drawer{display:flex;flex-direction:column;min-width:0;background:#fff}
+.d-top{flex:none;display:flex;align-items:center;gap:10px;height:52px;padding:0 14px;border-bottom:1px solid var(--line)}
+.d-top .pm{width:24px;height:24px;border-radius:7px;font-size:10.5px}
+.d-top .who{min-width:0;flex:1}
+.d-top .nm{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d-top .kd{color:var(--muted);font-size:12px}
+.d-top .state{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2);white-space:nowrap}
+.d-top .state .dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+.d-top .x{width:30px;height:30px;border-radius:8px;border:0;background:transparent;color:var(--muted);display:grid;place-items:center;cursor:pointer}
+.d-top .x:hover{background:var(--hover);color:var(--ink)}
+.d-top .x svg{width:16px;height:16px}
+
+.thread{flex:1;overflow:auto;padding:18px 0 10px;scroll-behavior:smooth}
+.col{padding:0 18px}
+
+/* 用户自己的插话：右对齐气泡（与主视图一致，不变） */
+.you{display:flex;justify-content:flex-end;margin:6px 0 18px}
+.you div{max-width:82%;background:var(--bg-alt);border:1px solid var(--line);border-radius:14px 14px 4px 14px;padding:9px 13px;font-size:14px;overflow-wrap:anywhere}
+.you .raw{font-family:var(--mono);font-size:12px;color:var(--ink-2);white-space:pre-wrap}
+
+/* 活动线（与主视图同一种；子代理说话节点是机器人） */
+.line{position:relative;padding-left:32px;margin:0 0 4px}
+.line::before{content:"";position:absolute;left:9.5px;top:12px;bottom:12px;width:1px;background:var(--line)}
+.step{position:relative;margin:0 0 12px}
+.step>.node{position:absolute;left:-32px;top:5px}
+.node{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#fff}
+.node svg{width:12px;height:12px;stroke-width:2.2}
+.node.say{background:var(--brand);color:#fff}
+.node.done{background:var(--ok-soft);color:var(--ok);box-shadow:inset 0 0 0 1.5px var(--ok-line)}
+.node.busy{box-shadow:inset 0 0 0 1.5px var(--brand-line)}
+.step>.pm{position:absolute;left:-32px;top:5px}
+.say-text{font-size:15px;line-height:1.7;padding-top:1px}
+.say-text p{margin:0 0 6px}
+
+/* 身份块：方形＝别的代理；子代理空心；圆形节点留给本会话自己的步骤 */
+.pm{--t:var(--p-steel);flex:none;display:inline-grid;place-items:center;width:20px;height:20px;border-radius:6px;background:var(--t);color:#fff;
+  font:700 9.5px/1 var(--ui);letter-spacing:.02em;text-transform:lowercase}
+.pm.sub{background:#fff;color:var(--t);box-shadow:inset 0 0 0 1.5px var(--t)}
+.pm.me{background:var(--brand);color:#fff}
+.t-teal{--t:var(--p-teal)} .t-plum{--t:var(--p-plum)} .t-steel{--t:var(--p-steel)} .t-moss{--t:var(--p-moss)}
+
+/* 工具卡：卡头不套框；动作灰、对象深色等宽、时长右侧 */
+.head{display:flex;align-items:center;gap:10px;min-width:0;padding:4px 0}
+.head .txt{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13.5px}
+.head .verb{color:var(--quiet)}
+.head .obj{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+.head .dur{color:var(--quiet);font-size:12px;font-variant-numeric:tabular-nums}
+
+/* 来信卡：与主视图 PeerMessageCard.vue 逐字同一种（不套框，发送方色竖线引出正文） */
+.letter{margin:4px 0 16px;min-width:0}
+.letter .who{display:flex;align-items:center;gap:8px;min-width:0}
+.letter .name{font-weight:600;font-size:13.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.letter .kind{color:var(--muted);font-size:12.5px;white-space:nowrap}
+.letter .near{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:999px;font-size:11.5px;color:var(--ink-2);background:var(--soft);white-space:nowrap}
+.letter .when{margin-left:auto;color:var(--quiet);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.letter .text{margin:6px 0 0 9px;padding:1px 0 1px 18px;border-left:2px solid var(--t,var(--line));font-size:14.5px;line-height:1.75;color:var(--ink);min-width:0;overflow-wrap:anywhere}
+.letter .text p{margin:0 0 6px}
+.letter .text p:last-child{margin:0}
+.step .letter{margin:0}
+.step .letter .text{margin-left:0;padding-left:14px;font-size:14px}
+
+.worked{margin:2px 0 14px;color:var(--quiet);font-size:12px}
+
+/* 工作中状态行 + 输入框 */
+.dock{flex:none;border-top:1px solid var(--line);padding:10px 14px 14px;background:#fff}
+.running{display:flex;align-items:center;gap:8px;color:var(--ink-2);font-size:12.5px;margin:0 2px 9px}
+.spin{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--brand-line);border-top-color:var(--brand);animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.compose{display:flex;align-items:flex-end;gap:8px;border:1px solid var(--line-2);border-radius:12px;background:#fff;padding:8px 8px 8px 12px}
+.compose .ph{flex:1;color:var(--quiet);font-size:13.5px;padding:5px 0}
+.compose .send{width:32px;height:32px;border-radius:9px;border:0;background:var(--brand);color:#fff;display:grid;place-items:center;cursor:pointer}
+.compose .send svg{width:16px;height:16px}
+
+[data-scenes]{display:none}
+[data-scenes].on{display:block}
+
+@media (prefers-reduced-motion:reduce){.spin{animation:none}.thread{scroll-behavior:auto}}
+@media (max-width:820px){.app{grid-template-columns:minmax(0,1fr);height:720px}.main{display:none}.notes{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="frame">
+  <h1>子代理视图收到的 peer 来信，画成与主视图同一张卡</h1>
+  <p class="sub">web 端同缺陷原型 · 基线 dev 329790da · 2026-11-20 · 视觉沿用 peer-coordination-preview.html 与已实现的 PeerMessageCard.vue（plan 200 §3）。待 owner 确认。</p>
+
+  <div class="notes">
+    <div class="note">
+      <h2>改什么</h2>
+      <ul>
+        <li>子代理视图收到 peer 来信（主代理插话、同目录会话来信、同伴子代理来信），从「右对齐用户气泡 + 原样 <code>&lt;agent-message&gt;</code>/<code>&lt;cross-session-message&gt;</code> 信封」改为活动线上的一张<b>来信卡</b>：发送方身份块作节点，名字 + 类别 + 同目录 + 时间，正文由发送方色竖线引出。</li>
+        <li>这张卡与主视图<b>同一个组件</b> <code>PeerMessageCard.vue</code>，不新造样式；实时与回放一致。</li>
+        <li>用户亲手发的插话仍是右对齐用户气泡；旧事件（payload 无 origin）仍按用户气泡回放，向后兼容。</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h2>为什么这样画</h2>
+      <p>来信不是读者自己说的话，不套用户气泡；发送方色竖线让两个代理的来信不会读成一段对话。引擎送达事件已带 origin（TUI 修复 ac09eb14 / 329790da 已落 dev），web 只需按 origin 把 <code>subagent_input_delivered</code> 路由到来信卡，而非用户块。</p>
+      <p>「现状对照」页签是当前缺陷的样子，供对比；其余页签是改后。新增按产品样式画，说明都在本栏。</p>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="seg" role="group" aria-label="场景">
+      <button type="button" data-scene="parent" aria-pressed="true">主代理插话</button>
+      <button type="button" data-scene="peer" aria-pressed="false">同目录来信</button>
+      <button type="button" data-scene="sibling" aria-pressed="false">同伴子代理</button>
+      <button type="button" data-scene="user" aria-pressed="false">用户插话</button>
+      <button type="button" data-scene="before" aria-pressed="false">现状对照</button>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="app">
+      <!-- 左：主视图缩略（来信卡在主视图已是这样） -->
+      <div class="main" aria-hidden="true">
+        <div class="top"><span class="title">forebrain-harness</span></div>
+        <div class="ghost">
+          <div class="g-line"></div><div class="g-line short"></div><div class="g-card"></div>
+          <div class="g-line"></div><div class="g-line short"></div>
+        </div>
+        <p class="hint">主视图里这封来信已是右侧抽屉中的样子：不套框、发送方色竖线引出正文。子代理视图复用同一张卡。</p>
+      </div>
+
+      <!-- 右：子代理抽屉 -->
+      <aside class="drawer" aria-label="子代理 network probe">
+        <div class="d-top">
+          <span class="pm t-steel sub">np</span>
+          <div class="who"><div class="nm">network probe</div><div class="kd">general-purpose</div></div>
+          <span class="state"><span class="dot"></span>运行中</span>
+          <button type="button" class="x" aria-label="关闭子代理视图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+        </div>
+
+        <div class="thread">
+          <div class="col">
+            <!-- 主代理插话 -->
+            <div data-scenes="parent" class="on">
+              <div class="line">
+                <div class="step"><span class="node done"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg></span>
+                  <div class="head"><span class="txt"><span class="verb">已运行 </span><span class="obj">grep -rn "peer_send" pkg/run</span></span><span class="dur">1.2s</span></div></div>
+                <div class="step"><span class="pm me">主</span>
+                  <article class="letter" style="--t:var(--brand)">
+                    <div class="who"><span class="name">主代理</span><span class="kind">派发者</span><time class="when">14:36</time></div>
+                    <div class="text"><p>顺手把 <code>pkg/peer</code> 的存活判定也测一下，别只跑 <code>pkg/run</code>。</p></div>
+                  </article></div>
+                <div class="step"><span class="node say"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 8V5M9 13h.01M15 13h.01"/></svg></span>
+                  <div class="say-text"><p>收到，我把存活判定一起测。</p></div></div>
+                <div class="step"><span class="node busy"><span class="spin" aria-hidden="true"></span></span>
+                  <div class="head"><span class="txt"><span class="verb">正在运行 </span><span class="obj">go test ./pkg/peer ./pkg/run</span></span><span class="dur">3s</span></div></div>
+              </div>
+            </div>
+
+            <!-- 同目录来信 -->
+            <div data-scenes="peer">
+              <div class="line">
+                <div class="step"><span class="node done"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg></span>
+                  <div class="head"><span class="txt"><span class="verb">已运行 </span><span class="obj">go test ./pkg/run -run Peer</span></span><span class="dur">6.2s</span></div></div>
+                <div class="step"><span class="pm t-plum">28</span>
+                  <article class="letter" style="--t:var(--p-plum)">
+                    <div class="who"><span class="name">forebrain-harness-28</span><span class="kind">终端</span><span class="near">同目录</span><time class="when">14:38</time></div>
+                    <div class="text"><p>我刚给 <code>pkg/peer/liveness.go</code> 加了 pidDomain 分支，测试还没跑完，先别改这个文件。</p></div>
+                  </article></div>
+                <div class="step"><span class="node say"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 8V5M9 13h.01M15 13h.01"/></svg></span>
+                  <div class="say-text"><p>好，我避开 liveness.go，先测存活判定的其余部分。</p></div></div>
+              </div>
+            </div>
+
+            <!-- 同伴子代理 -->
+            <div data-scenes="sibling">
+              <div class="line">
+                <div class="step"><span class="node busy"><span class="spin" aria-hidden="true"></span></span>
+                  <div class="head"><span class="txt"><span class="verb">正在运行 </span><span class="obj">go vet ./pkg/peer</span></span><span class="dur">2s</span></div></div>
+                <div class="step"><span class="pm t-teal sub">e1</span>
+                  <article class="letter" style="--t:var(--p-teal)">
+                    <div class="who"><span class="name">router map</span><span class="kind">子代理</span><time class="when">14:40</time></div>
+                    <div class="text"><p>路由表我整理完了，落在 <code>pkg/run/router.go</code>。你测存活判定时可以直接引用，不用重读。</p></div>
+                  </article></div>
+                <div class="step"><span class="node say"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 8V5M9 13h.01M15 13h.01"/></svg></span>
+                  <div class="say-text"><p>谢谢，我引用 router.go 的结果。</p></div></div>
+              </div>
+            </div>
+
+            <!-- 用户插话（不变） -->
+            <div data-scenes="user">
+              <div class="line">
+                <div class="step"><span class="node done"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg></span>
+                  <div class="head"><span class="txt"><span class="verb">已运行 </span><span class="obj">go test ./pkg/run -run Peer</span></span><span class="dur">6.2s</span></div></div>
+              </div>
+              <div class="you"><div>测完把结果贴给我，顺便看看有没有 flake。</div></div>
+              <div class="line">
+                <div class="step"><span class="node say"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 8V5M9 13h.01M15 13h.01"/></svg></span>
+                  <div class="say-text"><p>好，测完贴结果。</p></div></div>
+              </div>
+            </div>
+
+            <!-- 现状对照（当前缺陷） -->
+            <div data-scenes="before">
+              <div class="line">
+                <div class="step"><span class="node done"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg></span>
+                  <div class="head"><span class="txt"><span class="verb">已运行 </span><span class="obj">grep -rn "peer_send" pkg/run</span></span><span class="dur">1.2s</span></div></div>
+              </div>
+              <div class="you"><div class="raw">&lt;agent-message from="parent"&gt;
+顺手把 pkg/peer 的存活判定也测一下，别只跑 pkg/run。
+&lt;/agent-message&gt;</div></div>
+              <div class="line">
+                <div class="step"><span class="node say"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 8V5M9 13h.01M15 13h.01"/></svg></span>
+                  <div class="say-text"><p>收到，我把存活判定一起测。</p></div></div>
+              </div>
+            </div>
+
+            <div class="worked">已工作 1 分 12 秒</div>
+          </div>
+        </div>
+
+        <div class="dock">
+          <div class="running"><span class="spin" aria-hidden="true"></span>工作中 34 秒</div>
+          <div class="compose">
+            <span class="ph">给这个子代理发消息</span>
+            <button type="button" class="send" aria-label="发送"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg></button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <p class="caption" data-cap="parent">主代理运行中插话（进程内 peer_send）：来信卡挂在子代理活动线上，发送方是派发者「主代理」，品牌色竖线引出正文；子代理继续工作。</p>
+  <p class="caption" data-cap="peer" hidden>同目录另一会话来信（跨进程 cross-session-message）：方形身份块 + 名字 + 类别「终端」+「同目录」中性 chip + 时间，与主视图逐字同一种卡。</p>
+  <p class="caption" data-cap="sibling" hidden>同伴子代理来信：空心身份块（子代理）+ 名字 + 类别「子代理」，发送方色竖线引出正文。</p>
+  <p class="caption" data-cap="user" hidden>用户亲手发的插话：仍是右对齐用户气泡，不进来信卡——只有别的代理写的信才画来信卡。</p>
+  <p class="caption" data-cap="before" hidden>现状（缺陷）：来信被当成用户自己的消息，右对齐气泡里铺着原样 <code>&lt;agent-message&gt;</code> 信封。改后见「主代理插话」页签。</p>
+</div>
+
+<script>
+(function(){
+  var btns=document.querySelectorAll('.seg button');
+  var scenes=document.querySelectorAll('[data-scenes]');
+  var caps=document.querySelectorAll('[data-cap]');
+  function show(name){
+    btns.forEach(function(b){b.setAttribute('aria-pressed', b.getAttribute('data-scene')===name ? 'true':'false');});
+    scenes.forEach(function(s){s.classList.toggle('on', s.getAttribute('data-scenes')===name);});
+    caps.forEach(function(c){c.hidden = c.getAttribute('data-cap')!==name;});
+  }
+  btns.forEach(function(b){b.addEventListener('click',function(){show(b.getAttribute('data-scene'));});});
+})();
+</script>
+</body>
+</html>

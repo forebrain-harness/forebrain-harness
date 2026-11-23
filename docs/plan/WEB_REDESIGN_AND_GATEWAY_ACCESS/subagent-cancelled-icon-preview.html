@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>子代理已取消图标</title>
+<style>
+  /* Frame: always light (owner 2026-10-17). The app panels below reuse the
+     product's own tokens from frontend/src/assets/main.css verbatim. */
+  :root {
+    --frame-bg: #F7F8FA;
+    --frame-ink: #101828;
+    --frame-ink-2: #475467;
+    --frame-rule: #E4E7EC;
+    --frame-mark: #1F4A9E;
+
+    --forebrain-bg: #FFFFFF;
+    --forebrain-surface: #FFFFFF;
+    --forebrain-button-alt-bg: #F2F4F7;
+    --forebrain-divider: #E4E7EC;
+    --forebrain-divider-strong: #D0D5DD;
+    --forebrain-text: #101828;
+    --forebrain-text-2: #475467;
+    --forebrain-muted-text: #667085;
+    --forebrain-danger: #B42318;
+    --forebrain-success: #067647;
+    --forebrain-brand-1: #1F4A9E;
+    --forebrain-shadow-pop: 0 8px 24px rgba(16, 24, 40, 0.08);
+    --forebrain-ui-font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --forebrain-mono-font: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--frame-bg);
+    color: var(--frame-ink);
+    font-family: var(--forebrain-ui-font);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 56px 32px 80px;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    line-height: 1.25;
+  }
+  .lede {
+    margin: 10px 0 0;
+    max-width: 62ch;
+    color: var(--frame-ink-2);
+    font-size: 15px;
+  }
+
+  h2 {
+    margin: 0 0 16px;
+    font-size: 17px;
+    font-weight: 600;
+  }
+  section { margin-top: 56px; }
+
+  /* The one bold element: the four states, magnified, current over proposed. */
+  .loupe {
+    margin-top: 40px;
+    display: grid;
+    grid-template-columns: 88px repeat(4, minmax(0, 1fr));
+    border: 1px solid var(--frame-rule);
+    border-radius: 14px;
+    background: #FFFFFF;
+    overflow: hidden;
+  }
+  .loupe > div {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 132px;
+    border-top: 1px solid var(--frame-rule);
+    border-left: 1px solid var(--frame-rule);
+  }
+  .loupe > .head {
+    min-height: 44px;
+    border-top: 0;
+    color: var(--frame-ink-2);
+    font-size: 13px;
+  }
+  .loupe > .row-name {
+    border-left: 0;
+    justify-content: flex-start;
+    padding-left: 20px;
+    color: var(--frame-ink-2);
+    font-size: 13px;
+  }
+  .loupe > .corner { border-left: 0; }
+  .loupe svg { width: 56px; height: 56px; }
+  .loupe .cell-new {
+    position: relative;
+    background: #F5F8FF;
+  }
+  .loupe .cell-new::after {
+    content: "";
+    position: absolute;
+    inset: 10px;
+    border: 1.5px solid var(--frame-mark);
+    border-radius: 10px;
+    pointer-events: none;
+  }
+  .loupe .row-name.is-new { color: var(--frame-mark); font-weight: 600; }
+
+  .pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 24px;
+  }
+  .panel-cap {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0 0 10px;
+    font-size: 13px;
+    color: var(--frame-ink-2);
+  }
+  .panel-cap strong { color: var(--frame-ink); font-weight: 600; }
+  .panel-cap.is-new strong { color: var(--frame-mark); }
+
+  /* ---- App: subagent drawer header + menu (SubagentDrawer.vue, 1:1) ---- */
+  .drawer {
+    position: relative;
+    height: 264px;
+    border: 1px solid var(--forebrain-divider);
+    border-radius: 12px;
+    background: var(--forebrain-bg);
+    overflow: hidden;
+    font-family: var(--forebrain-ui-font);
+  }
+  .drawer-head {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 44px;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--forebrain-divider);
+  }
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .tab {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    max-width: 200px;
+    height: 30px;
+    padding: 0 2px 0 8px;
+    border-radius: 7px;
+    color: var(--forebrain-text-2);
+  }
+  .tab.is-on {
+    background: var(--forebrain-button-alt-bg);
+    color: var(--forebrain-text);
+  }
+  .tab-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .tab-main svg, .menu-row svg { width: 14px; height: 14px; flex: none; }
+  .tab-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tab-close, .head-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    flex: none;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--forebrain-muted-text);
+    cursor: pointer;
+  }
+  .tab-close svg { width: 12px; height: 12px; }
+  .head-icon { width: 28px; height: 28px; border-radius: 7px; }
+  .head-icon svg { width: 16px; height: 16px; }
+  .tab-close:hover, .head-icon:hover { background: var(--forebrain-button-alt-bg); color: var(--forebrain-text); }
+  .spacer { flex: 1; }
+
+  .menu {
+    position: absolute;
+    top: 40px;
+    left: 8px;
+    width: 320px;
+    z-index: 5;
+    display: grid;
+    gap: 2px;
+    padding: 6px;
+    border: 1px solid var(--forebrain-divider);
+    border-radius: 10px;
+    background: var(--forebrain-surface);
+    box-shadow: var(--forebrain-shadow-pop);
+  }
+  .menu-cap {
+    padding: 4px 8px 2px;
+    font-size: 11.5px;
+    color: var(--forebrain-muted-text);
+  }
+  .menu-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--forebrain-text);
+    font: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .menu-row:hover { background: var(--forebrain-button-alt-bg); }
+  .menu-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .menu-side {
+    margin-left: auto;
+    flex: none;
+    font-family: var(--forebrain-mono-font);
+    font-size: 11px;
+    color: var(--forebrain-muted-text);
+  }
+
+  .is-run { color: var(--forebrain-brand-1); animation: spin 1s linear infinite; }
+  .is-ok { color: var(--forebrain-success); }
+  .is-bad { color: var(--forebrain-danger); }
+  /* The proposal: a stopped subagent reads the way its card row already does. */
+  .is-off { color: var(--forebrain-muted-text); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- App: the conversation card's task row (SubagentCallCard.vue) ---- */
+  .card {
+    max-width: 520px;
+    border: 1px solid var(--forebrain-divider);
+    border-left: 3px solid var(--forebrain-brand-1);
+    border-radius: 8px;
+    background: #F5F8FF;
+    font-family: var(--forebrain-ui-font);
+  }
+  .card-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 12px;
+  }
+  .card-row + .card-row { border-top: 1px solid var(--forebrain-divider); }
+  .card-row svg { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+  .card-title { font-size: 13px; color: var(--forebrain-text); }
+  .card-meta { color: var(--forebrain-muted-text); font-size: 12px; }
+  .card-err { display: block; font-size: 12px; color: var(--forebrain-danger); }
+  .card-open { margin-left: auto; font-size: 12px; color: var(--forebrain-brand-1); }
+
+  .notes {
+    margin: 0;
+    padding-left: 20px;
+    max-width: 66ch;
+    color: var(--frame-ink-2);
+  }
+  .notes li + li { margin-top: 6px; }
+  .notes b { color: var(--frame-ink); font-weight: 600; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .is-run { animation: none; }
+  }
+  @media (max-width: 760px) {
+    .page { padding: 32px 16px 56px; }
+    h1 { font-size: 24px; }
+    .pair { grid-template-columns: minmax(0, 1fr); }
+    .loupe { grid-template-columns: 64px repeat(4, minmax(0, 1fr)); }
+    .loupe svg { width: 36px; height: 36px; }
+    .loupe > div { min-height: 88px; }
+    .loupe > .row-name { padding-left: 10px; }
+  }
+  button:focus-visible { outline: 2px solid var(--frame-mark); outline-offset: 1px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-run" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></symbol>
+    <symbol id="i-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-bad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></symbol>
+    <symbol id="i-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+    <symbol id="i-collapse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/><path d="m8 9 3 3-3 3"/></symbol>
+    <symbol id="i-bot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></symbol>
+  </defs>
+</svg>
+
+<main class="page">
+  <h1>子代理已取消，用自己的图标</h1>
+  <p class="lede">抽屉标签页和“打开其他子代理”菜单里，被停止的子代理现在和失败的一样画成红色叉号。改为对话卡片里已经在用的灰色禁止号，一眼就能分清“停掉了”和“出错了”。</p>
+
+  <div class="loupe" role="table" aria-label="四种状态的图标，放大对照">
+    <div class="head corner" role="columnheader"></div>
+    <div class="head" role="columnheader">运行中</div>
+    <div class="head" role="columnheader">已完成</div>
+    <div class="head" role="columnheader">失败</div>
+    <div class="head" role="columnheader">已取消</div>
+
+    <div class="row-name" role="rowheader">现状</div>
+    <div><svg class="is-run"><use href="#i-run"/></svg></div>
+    <div><svg class="is-ok"><use href="#i-ok"/></svg></div>
+    <div><svg class="is-bad"><use href="#i-bad"/></svg></div>
+    <div><svg class="is-bad"><use href="#i-bad"/></svg></div>
+
+    <div class="row-name is-new" role="rowheader">方案</div>
+    <div><svg class="is-run"><use href="#i-run"/></svg></div>
+    <div><svg class="is-ok"><use href="#i-ok"/></svg></div>
+    <div><svg class="is-bad"><use href="#i-bad"/></svg></div>
+    <div class="cell-new"><svg class="is-off"><use href="#i-off"/></svg></div>
+  </div>
+
+  <section>
+    <h2>实际大小</h2>
+    <div class="pair">
+      <div>
+        <p class="panel-cap"><strong>现状</strong>已取消与失败同为红色叉号</p>
+        <div class="drawer" data-variant="now"></div>
+      </div>
+      <div>
+        <p class="panel-cap is-new"><strong>方案</strong>已取消改为灰色禁止号</p>
+        <div class="drawer" data-variant="new"></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>与对话卡片一致</h2>
+    <div class="card" aria-label="对话中的子代理卡片（不改）">
+      <div class="card-row">
+        <svg class="is-ok"><use href="#i-ok"/></svg>
+        <span><span class="card-title">梳理依赖</span> <span class="card-meta">· 10s</span></span>
+        <span class="card-open">打开</span>
+      </div>
+      <div class="card-row">
+        <svg class="is-off"><use href="#i-off"/></svg>
+        <span><span class="card-title">运行测试</span> <span class="card-meta">· 11s</span><span class="card-err">已取消</span></span>
+        <span class="card-open">打开</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>范围</h2>
+    <ul class="notes">
+      <li><b>改动处</b>：抽屉标签页、“打开其他子代理”菜单的行，两处图标同步。</li>
+      <li><b>颜色</b>：灰色取 <code>--forebrain-muted-text</code>，与卡片任务行相同，不新增颜色。</li>
+      <li><b>已中断</b>（进程退出被回收）不是用户停止的，仍用失败图标。</li>
+      <li><b>不变</b>：卡片、标签文案、菜单右栏“已取消”文字。</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+  // Both panels are the same drawer; only the cancelled icon differs.
+  // The drawer's "+" lists every subagent of the conversation; an open one
+  // says so on the right, the others how they ended.
+  const tabs = [
+    { label: 'explore · 梳理依赖', state: 'run', side: '1m 12s' },
+    { label: 'general-purpose · 修复构建', state: 'ok', side: '已完成' },
+    { label: 'general-purpose · 定位崩溃', state: 'bad', side: '失败', open: true },
+    { label: 'general-purpose · 运行测试', state: 'off', side: '已取消', open: true },
+    { label: 'explore · 查找调用方', state: 'off', side: '已取消' },
+  ]
+  const icon = (state, variant) => {
+    const id = state === 'off' ? (variant === 'new' ? 'off' : 'bad') : state
+    const cls = state === 'off' ? (variant === 'new' ? 'is-off' : 'is-bad') : `is-${state}`
+    return `<svg class="${cls}" aria-hidden="true"><use href="#i-${id}"/></svg>`
+  }
+  const render = (el) => {
+    const variant = el.dataset.variant
+    let active = 3
+    const draw = () => {
+      el.innerHTML = `
+        <header class="drawer-head">
+          <div class="tabs" role="tablist">
+            ${tabs.map((t, index) => {
+              if (!t.open) return ''
+              return `<div class="tab ${index === active ? 'is-on' : ''}">
+                <button type="button" role="tab" class="tab-main" aria-selected="${index === active}" data-index="${index}">
+                  ${icon(t.state, variant)}<span class="tab-label">${t.label}</span>
+                </button>
+                <button type="button" class="tab-close" aria-label="关闭"><svg><use href="#i-x"/></svg></button>
+              </div>`
+            }).join('')}
+          </div>
+          <button type="button" class="head-icon" aria-label="打开其他子代理"><svg><use href="#i-plus"/></svg></button>
+          <span class="spacer"></span>
+          <button type="button" class="head-icon" aria-label="收起"><svg><use href="#i-collapse"/></svg></button>
+          <div class="menu" role="menu">
+            <div class="menu-cap">本对话的子代理 · ${tabs.length}</div>
+            ${tabs.map((t, i) => `<button type="button" role="menuitem" class="menu-row" data-index="${i}">
+              ${icon(t.state, variant)}<span class="menu-label">${t.label}</span>
+              <span class="menu-side">${t.open ? '已打开' : t.side}</span>
+            </button>`).join('')}
+          </div>
+        </header>`
+      el.querySelectorAll('.tab-main').forEach((b) => b.addEventListener('click', () => {
+        active = Number(b.dataset.index)
+        draw()
+      }))
+    }
+    draw()
+  }
+  document.querySelectorAll('.drawer').forEach(render)
+</script>
+</body>
+</html>

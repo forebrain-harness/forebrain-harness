@@ -1,0 +1,39 @@
+=== Step 7 — real-machine acceptance summary (fake provider, tmux) ===
+date: 2026-10-30T07:15:52Z
+
+Instance: FOREBRAIN_RUN_WORK=$TMPDIR/forebrain-run-plan-drawer, tmux session fb-plan-drawer,
+  port 8764, 120x40 (resized to 80x40 and 80x18 during checks 6-7), throwaway FOREBRAIN_HOME.
+  Provider: driver 'tool' mode (first turn answers with the seven-item session_todo call, later
+  turns answer with text), FAKE_REPLY_DELAY=900 so the Working line — the drawer's only entry —
+  stays on screen for the whole run. Model in the TEMP config only: 'model: deepseek-v4-flash'
+  (patched in $WORK/home/forebrain.yaml after 'serve'; the repo driver and real ~/.forebrain
+  were never touched). The footer read 'deepseek/deepseek-v4-flash 100%/1M' throughout.
+
+Ordered checks (§Step 7):
+  1. click the ☑N/M token -> drawer opens; title row '● Updated Plan ... ×', left history
+     narrowed to 80 and reflowed, composer/rule/footer still full width  ... step7-hover.log
+  2. no-button move ([<35;C;RM) -> only the token's cells take 48;5;236, no underline;
+     moving away restores the faint line; same-cell reports repaint nothing ... step7-hover.log
+  3. click inside the drawer -> stays open; wheel over the drawer scrolls the LIST (one notch =
+     3 display rows, footer '3 above · 1 below' at 80x18) and never the transcript; with the
+     list fitting the body the notch falls through instead  ............... step7-checks.log
+  4. click outside on a tool card's fold row -> drawer closes, card still collapsed, no caret,
+     no jump, run still live ............................................. step7-close.log
+  5. token click toggles; × closes; Esc closes and the Working line stays (run live);
+     token click again closes ............................................ step7-close.log
+  6. resize to 80 while open -> drawer 32 (left 48, divider the 49th cell), resize back to 120;
+     composer, footer and list state intact ............................ step7-checks.log
+  7. row-edge: every non-empty row exactly 120 (and exactly 80) display columns, no trailing
+     [K on any row .................................................... step7-row-edge.log
+  8. $D stop, temp workload removed ................................... step7-close.log
+
+Observation for the reviewer: the token's screen column moves as the Working line's elapsed
+clock gains digits ('0s' -> '10s' -> '1m 06s'), so an acceptance click must re-measure the
+column ('$D col'/'sed -n 35p') instead of reusing a fixed one. Two earlier attempts missed
+the token for exactly that reason; every result recorded above was taken with the column
+measured immediately before the click.
+
+Observation 2: the entry exists only while a turn is in flight (plan 'Current state' accepted
+this): after '● done' the Working line is replaced by the static 'Worked for … · ☑3/7'
+history row, which is deliberately NOT a hit target, so the drawer can no longer be opened
+until the next run. Observed at 15:06 on this instance.

@@ -1,0 +1,1784 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forebrain Harness · TUI 面板原型（/model · /connect · 计划审批）</title>
+<style>
+:root{
+  --page:#0c1015; --card:#11161d; --line:#222b37; --ink:#d6dee8; --mut:#8794a5;
+  --acc:#87afd7; --acc-dim:#5c7a99; --ok:#5faf00; --warn:#ffaf00; --bad:#ff5f5f;
+  --tbg:#101318; --cw:8.4px; --lh:20px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);
+  font:14px/1.65 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;}
+a{color:var(--acc);text-decoration:none}
+.wrap{max-width:1460px;margin:0 auto;padding:34px 30px 70px}
+header.top{margin-bottom:24px}
+h1{font-size:23px;line-height:1.3;margin:0 0 8px;letter-spacing:.2px}
+.sub{color:var(--mut);max-width:960px}
+.sub code{color:var(--acc);background:#161d27;padding:1px 5px;border-radius:4px}
+.layout{display:grid;grid-template-columns:262px minmax(0,1fr);gap:22px;align-items:start}
+nav{position:sticky;top:20px;background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:12px 10px;max-height:calc(100vh - 40px);overflow:auto}
+nav .g{color:var(--acc-dim);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  margin:14px 8px 6px}
+nav .g:first-child{margin-top:2px}
+nav button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--ink);
+  font:inherit;font-size:13px;padding:7px 9px;border-radius:7px;cursor:pointer;line-height:1.4}
+nav button:hover{background:#18202b}
+nav button.on{background:#1b2634;color:#fff;box-shadow:inset 2px 0 0 var(--acc)}
+nav button .n{color:var(--acc-dim);font-variant-numeric:tabular-nums;margin-right:7px;font-size:12px}
+.stage{min-width:0}
+.bar{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+.bar h2{font-size:16px;margin:0;font-weight:600}
+.bar .dims{margin-left:auto;display:flex;gap:6px;align-items:center;color:var(--mut);font-size:12px}
+.bar .dims button{background:var(--card);border:1px solid var(--line);color:var(--mut);
+  border-radius:6px;padding:3px 9px;font:inherit;font-size:12px;cursor:pointer}
+.bar .dims button.on{color:var(--acc);border-color:var(--acc-dim)}
+.term{background:var(--tbg);border:1px solid #26303d;border-radius:12px;overflow:hidden;
+  box-shadow:0 18px 50px #0007}
+.thead{display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid #1e2631;
+  color:var(--mut);font-size:12px;background:#0e1218}
+.thead .dot{width:9px;height:9px;border-radius:50%;background:#2c3745}
+.thead .tt{margin-left:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.thead .kb{margin-left:auto;color:var(--acc-dim)}
+.screen{padding:14px 0 16px;overflow-x:auto}
+.grid{font-family:ui-monospace,SFMono-Regular,"SF Mono","Fira Code",Menlo,Consolas,monospace;
+  font-size:13px;line-height:var(--lh);width:max-content;margin:0 auto}
+.row{white-space:pre;height:var(--lh)}
+.fg110{color:#87afd7}.fg45{color:#00d7ff}.fg74{color:#5fafd7}.fg70{color:#5faf00}
+.fg203{color:#ff5f5f}.fg214{color:#ffaf00}.fg245{color:#8a8a8a}.fg244{color:#808080}
+.fg249{color:#b2b2b2}.fg252{color:#d0d0d0}.fg90{color:#808080}
+.fgbrand{color:#87c3ea}.fgmute{color:#7d93a6}.fgpath{color:#cfd9e2}.fgborder{color:#345069}
+.bg238{background:#444444}.bgblue{background:#5fafd7}.b{font-weight:700}.ft{opacity:.52}
+.rev{background:#d0d0d0;color:#444444;opacity:1}
+.cap{margin-top:12px;color:var(--mut);font-size:13px;max-width:1000px}
+.cap b{color:var(--ink);font-weight:600}
+.cap code{color:var(--acc);background:#161d27;padding:1px 5px;border-radius:4px}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:26px}
+.note{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+.note h3{margin:0 0 10px;font-size:14px;color:var(--acc)}
+.note ul{margin:0;padding-left:19px;color:var(--mut);font-size:13px}
+.note li{margin:6px 0}
+.note code{color:var(--acc);background:#161d27;padding:1px 5px;border-radius:4px;font-size:12px}
+.note table{width:100%;border-collapse:collapse;font-size:12px;color:var(--mut)}
+.note td{padding:4px 6px;border-bottom:1px solid #1b232e;vertical-align:top}
+.note td:first-child{white-space:nowrap;color:var(--ink)}
+.sw{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:-1px;margin-right:6px}
+.keys{margin-top:10px;color:var(--acc-dim);font-size:12px}
+kbd{background:#18202b;border:1px solid #2a3542;border-bottom-width:2px;border-radius:4px;
+  padding:0 5px;font:11px ui-monospace,Menlo,monospace;color:var(--ink)}
+@media(max-width:980px){.layout{grid-template-columns:1fr}nav{position:static;max-height:300px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <h1>Forebrain Harness · 终端面板原型</h1>
+  <div class="sub">plans/259–269 的 <code>/model</code> 与 <code>/connect</code> 可交互仿真终端，2026-11-07；
+  计划审批面板（<code>exit_plan_mode</code>，含评审模型选择器）2026-11-09 补齐。
+  渲染器移植自 <code>pkg/tui/render.go</code> 的 slashPanel 布局与 <code>pkg/tui/panel_columns.go</code> 的两列规则，
+  审批面板取自 <code>pkg/tui/overlays.go</code> 的 <code>buildExitPlanChoices</code> / <code>buildApprovalContent</code>，
+  配色、字形、提示语取自同文件与真机抓屏（tmux capture-pane，120×40）。左侧选场景；终端里直接按键。
+  语义与已确认的 <code>llm-models-preview.html</code>（网页版）对齐。</div>
+</header>
+<div class="layout">
+<nav id="nav"></nav>
+<main class="stage">
+  <div class="bar"><h2 id="sceneTitle"></h2>
+    <div class="dims">宽度
+      <button data-w="120" class="on">120 列</button><button data-w="88">88 列</button><button data-w="68">68 列</button>
+    </div>
+  </div>
+  <div class="term">
+    <div class="thead"><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span class="tt" id="termTitle">forebrain</span><span class="kb" id="termKeys"></span></div>
+    <div class="screen"><div class="grid" id="grid"></div></div>
+  </div>
+  <div class="cap" id="cap"></div>
+  <div class="keys">终端按键：<kbd>↑</kbd><kbd>↓</kbd> 移动 · <kbd>Enter</kbd> 确认 · <kbd>Esc</kbd> 返回 ·
+    列表 ≥8 项时直接打字过滤 · 多选用 <kbd>Space</kbd> · 确认页用 <kbd>Y</kbd>/<kbd>N</kbd> ·
+    计划审批用 <kbd>1</kbd>–<kbd>4</kbd> 选行、<kbd>m</kbd> 进评审模型、<kbd>PgUp</kbd>/<kbd>PgDn</kbd>/<kbd>Home</kbd>/<kbd>End</kbd> 翻计划 ·
+    选模型后回车进思考强度第二屏（<kbd>Esc</kbd> 逐层返回）</div>
+</main>
+</div>
+
+<div class="notes">
+<div class="note"><h3>渲染契约（执行时照这个，不要自由发挥）</h3><ul>
+  <li>面板 = 顶部标题/副标题 + 可选 <code>⌕</code> 过滤条 + 滚动 body + 底部 faint 按键提示；面板上方一条 <code>\x1b[90m─</code> 分隔线，高度恒为终端一半。</li>
+  <li>行首两格缩进；选中行用 <code>❯</code>（accent 110）占掉缩进。<b>键盘在过滤条时 ❯ 消失、caret 出现，两者永不同屏。</b></li>
+  <li>过滤条三行（空 pad / 文本 / 空 pad），底色 <code>48;5;238</code>；glyph 聚焦 110、失焦 245，文本聚焦 252、失焦 249，占位 244，placeholder 固定 <code>Type to filter</code>；<b>可选行 &lt;8 不显示过滤条</b>；问句与过滤条之间、过滤条与列表之间各空一行（反馈 E，与 <code>/model</code> layout 一致）。</li>
+  <li>两列：名字列宽 = 全量最长 label（上限 40，且不超行宽 2/5），说明列隔 2 格；任一名字超列宽则<b>整列表</b>改为上下堆叠，不混排。</li>
+  <li>滚动提示 faint，形如 <code>↑ 1 more · ↓ 4 more</code>；过滤命中排序 = 完全相等 → 前缀 → 词首 → 包含 → 说明列包含，分组标题随最佳命中保留。</li>
+  <li>密钥输入：<code>›</code> glyph，<code>•</code> 掩码，仅长度 &gt;8 时末 4 位明文；复核页 facts 标签 accent + 冒号、值列对齐。</li>
+  <li><b>审批面板不是 slash panel</b>：它顶掉 composer（没有 draft、没有 footer），顶部一条常驻分隔线，内容区 = 终端行数 − ⌊行数/3⌋ − 1（40 行 → 26 行）。内容超出时默认<b>贴底</b>，verdict 行永远在视野里；<code>PgUp</code>/<code>PgDn</code>/<code>Home</code>/<code>End</code> 翻。</li>
+  <li>审批面板的选中行是加粗 <code>&gt; </code>（不是 <code>❯</code>），没有缩进：选项写成 <code>1.</code> 编号，计划正文与分隔线从第 0 列开始。分隔线 faint。</li>
+  <li>评审选择器在同一 overlay 里展开：整段选项行换成问句 + 模型列表，按键提示同时换成 <code>Esc to go back · Enter to request the review</code>。首帧把问句带到视野顶端（问句与选中行同屏），之后按键只把选中行带进视野。</li>
+  <li>模型列表照 <code>01</code> 页 <code>/model</code> 的分栏：<code>❯</code>（110）后跟 <code>provider/model</code>，<b>行首没有序号</b>，名字列按最长名字定宽（上限 40、不超行宽 2/5），说明列隔 2 格、是完整请求 URL，过窄时从 base 中部省略但保住路径，任一名字超列宽则整列表堆叠；<b>列表只放已配置的模型，不提供新增入口</b>。当前会话模型在名字后面标 <code>●</code>（110）：图标连同前面一格空格吃进名字列与说明列之间的 2 格间距，说明列的对齐不变，也不撑宽名字列。</li>
+  <li>请求评审只印一行 <code>✔ You asked provider/model to review the plan</code>（✔ 绿 70、正文 244），审批仍是 pending。</li>
+</ul></div>
+<div class="note"><h3>本期的语义（原型里已全部体现）</h3><ul>
+  <li><code>/connect</code> 第一页三组：<code>Sign in with a subscription</code> / <code>Use an API key</code> / <code>Custom</code>。订阅组只放真能登录的三个：ChatGPT、OpenCode Go、Volcengine Ark。</li>
+  <li>每个模型选项都带完整请求 URL：<code>provider/model</code> + <code>base_url</code> 直接拼 <code>api_path</code>；自定义协议不追路径，只显示 <code>base_url</code>。同一 provider/model 可有多行，<b>选中值是行 id，不是名字</b>。</li>
+  <li><code>/model</code> 只列这个会话已配置的模型，<b>没有新增/自定义模型的入口</b>——添加模型（含自定义端点）统一走 <code>/connect</code>；说明列过窄时从 base 中部省略，<b>路径必须保住</b>。</li>
+  <li>订阅登录 = 选订阅 → 登录 → 按套餐勾选模型 → 写库；Key 池多把则单选一把，空池经确认创建 <code>forebrain-…</code>。</li>
+  <li>自定义模型不问 provider（恒为 <code>custom</code>），协议必选；模型名原样发送，可自带 <code>vendor/</code> 前缀。</li>
+  <li>保存前查重：四元组相同则询问是否替换 Key，不静默覆盖。</li>
+  <li>选完模型后单独一页问<b>子代理授权</b>（是否允许主代理自己挑这个模型派子代理），单选、默认 No；订阅流程勾完模型后用<b>多选页</b>问同一件事。确认页多一行显示结果。</li>
+</ul></div>
+<div class="note"><h3>计划审批（<code>exit_plan_mode</code>）的语义</h3><ul>
+  <li>标题 <code>Tool approval</code> + <code>Tool: exit_plan_mode</code>，下面是计划、<code>Would you like to proceed?</code> 和 verdict 行。行的顺序规则是<b>同意类在前 → No → 评审类</b>（owner 2026-11-10）：数字键跟随可见行变化，<code>y</code>/<code>n</code>/<code>m</code> 仍按语义跳行。</li>
+  <li>交接行 <code>Yes, hand off to another model</code> 只在会话项目根在 git 仓库内<b>且</b>有其他已配置模型时出现；不出现时 No 紧跟在同意类之后，行号随可见行变化。</li>
+  <li>交接语义：主代理用你选中的模型派一个执行子代理，在 <code>.worktrees/</code> 下的独立 worktree 里按计划实施并提交到它自己的分支；主代理在 worktree 里重跑验收、给出结论，<b>不碰你当前的分支</b>。</li>
+  <li>评审行 <code>Ask another model to review this plan</code> 只在该会话有可用模型时出现；没模型时不出现，<b>不是灰掉、不是点了报错</b>。工具 <code>m</code> 直接进选择器。</li>
+  <li>再评审行 <code>Ask provider/model to review it again</code> 只在本会话上一次评审仍可续聊（它派出过评审子代理且模型仍配置）时出现：回车不新派评审，而是让上一次那个 plan-reviewer 在它自己的会话里续聊修订版。</li>
+  <li>选评审行/交接行都不是决定：审批保持 pending，选择器在同一个 overlay 里展开，transcript 一个字都不变；<code>Esc</code> 回到 verdict 行，选中项不丢。交接选择器与评审选择器是同一个列表组件，只是问句与提示不同（<code>Which model should carry out this plan?</code> · <code>Enter to hand off</code>）。</li>
+  <li>选择器默认预选<b>第一个非当前模型</b>（第二意见与换手都是这一行的意义），当前模型在名字后面标 <code>●</code>。<code>↑/↓</code>、<code>j/k</code> 移动，<code>Enter</code> 请求评审/交接；<code>Esc</code> 回到 verdict 行、选中项留在原来的行。</li>
+  <li><b>思考强度第二屏（计划 310）</b>：在模型选择器里选中一个配了档位的模型回车，不立即决定，而是进第二屏问 <code>Which reasoning effort should provider/model use? (Esc to go back)</code>。单列 <code>❯</code> 光标，每行 = 英文显示名 + 可选双写档位 id（仅显示名与 id 大小写无关地不同时才写，英文里只有 <code>Off none</code>）+ 可选齿轮图标 <code>⚙</code>（标在行配置的那一档，即「模型设置」）。</li>
+  <li>第二屏的档位与排序照 Web 的 <code>EffortChip</code>：<code>none/minimal/low/medium/high/xhigh/max</code>（<code>none</code> 在前），显示名 <code>Off/Minimal/Low/Medium/High/xHigh/Max</code>（<code>xhigh</code> 显示成 <code>xHigh</code>，与引擎 <code>EffortEnglishLabel</code> 一致）。行没配默认档时首项是 <code>Default</code>（不钉任何档）；审批第二屏没有会话存档位，光标落在<b>行的默认档</b>。</li>
+  <li>第二屏 <code>↑/↓</code>、<code>j/k</code> 移动，<code>Enter</code> 才决定（评审仍 pending、交接即批准，确认行带上选中档位）；<code>Esc</code> 回到模型列表、选中的模型不丢，再 <code>Esc</code> 才回 verdict 行。模型一档都没配（<code>efforts:[]</code>）时<b>跳过第二屏</b>，选完模型直接决定。</li>
+  <li><code>/model</code> 第二步（<code>01</code> 页 <code>model-effort</code>）与第二屏同语义，但用两列分栏（名字列 = 显示名，说明列 = 双写 id + 齿轮图标 <code>⚙</code>），光标落在<b>会话钉值</b>而非行默认档；会话没钉值或行没配默认档时首项 <code>Default</code>。</li>
+  <li>评审跑在 plan-reviewer 子代理里，结果只作为审批材料：它不产生 verdict，也不关闭审批，评审行仍在（可以再换一个模型）。</li>
+  <li><code>Esc</code> 在审批面板上是<b>拒绝</b>（<code>Esc to decline</code>），不是取消整个回合；只有 <code>Ctrl+C</code> 是取消。</li>
+</ul></div>
+<div class="note"><h3>配色（256 色，与源码一致）</h3>
+<table>
+<tr><td><span class="sw" style="background:#87afd7"></span>110</td><td>标题（加粗）、分组标题、❯、facts 标签、聚焦 glyph</td></tr>
+<tr><td><span class="sw" style="background:#444444"></span>238 bg</td><td>输入条 / 用户消息卡 / composer 底色</td></tr>
+<tr><td><span class="sw" style="background:#d0d0d0"></span>252 / 249</td><td>条内文本（聚焦 / 失焦）</td></tr>
+<tr><td><span class="sw" style="background:#8a8a8a"></span>245 / 244</td><td>失焦 glyph / 占位与次要文本</td></tr>
+<tr><td><span class="sw" style="background:#5fafd7"></span>74</td><td>composer 与用户卡的 <code>›</code></td></tr>
+<tr><td><span class="sw" style="background:#00d7ff"></span>45 bold</td><td>assistant 的 <code>●</code></td></tr>
+<tr><td><span class="sw" style="background:#5faf00"></span>70 · <span class="sw" style="background:#ffaf00"></span>214 · <span class="sw" style="background:#ff5f5f"></span>203</td><td>成功 / 警告 / 失败</td></tr>
+<tr><td>faint（无前景色）</td><td>按键提示、滚动提示、footer</td></tr>
+</table></div>
+<div class="note"><h3>文案规则</h3><ul>
+  <li>TUI 文案以英文为主，沿用现有字符串；订阅/套餐名跟随注册表 Label。</li>
+  <li>只说当前事实。<b>不提被移除的配置位置与旧写法，不做「以前 / 不再」式对照</b>——按全新产品设计。</li>
+  <li>Key 只露末四位；登录类行显示 <code>Account sign-in</code>；错误短句，不带响应体、不带任何密钥。</li>
+  <li>界面不暴露内部数据文件名；模型自带能力叫 <code>Provider default</code>。</li>
+  <li>原型是设计稿：示例模型名、地址、账号与 Key 均为虚构。</li>
+</ul></div>
+</div>
+</div>
+
+<script>
+'use strict';
+/* =====================================================================
+ * 一个最小的单元格终端 + pkg/tui 的 slashPanel 布局移植。
+ * 不是截图：每个场景都由同一份布局代码实时算出，可改列宽、可按键。
+ * ===================================================================== */
+const $=s=>document.querySelector(s);
+const ESC=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const W=ch=>/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/.test(ch)?2:1;
+const sw=s=>{let w=0;for(const ch of s)w+=W(ch);return w;};
+const rep=(s,n)=>s.repeat(Math.max(0,n));
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+/* ---- 样式 ---- */
+const S={};
+const sty=(fg,bg,extra)=>Object.assign({fg:fg||null,bg:bg||null,b:0,f:0,rev:0},extra||{});
+const ACC=sty('110'), TITLE=Object.assign(sty('110'),{b:1}), HINT=sty(null,null,{f:1});
+const TXT=sty(null), DIM=sty('244'), OK=sty('70'), WARN=sty('214'), BAD=sty('203');
+const BAR=sty(null,'238');
+const barGlyph=f=>sty(f?'110':'245','238'), barText=f=>sty(f?'252':'249','238');
+const barPh=()=>sty('244','238');
+
+/* ---- 行构造：片段 + 显示宽度 ---- */
+class LB{
+  constructor(){this.parts=[];this.w=0;}
+  add(s,st){if(!s)return this;const w=sw(s);this.parts.push({s,st:st||TXT,w});this.w+=w;return this;}
+  pad(w,st){if(this.w<w)this.add(rep(' ',w-this.w),st||TXT);return this;}
+  static of(s,st){return new LB().add(s,st);}
+}
+const IND=()=>LB.of('  ');
+const CUR=()=>LB.of('❯',ACC).add(' ');
+const cat=(a,b)=>{const l=new LB();l.parts=a.parts.concat(b.parts);l.w=a.w+b.w;return l;};
+
+/* ---- 折行：wrapPanelWords / wrapCardLine 的移植 ---- */
+function hardWrap(word,width){
+  const out=[];let cur='',w=0;
+  for(const ch of word){const cw=W(ch);
+    if(w+cw>width&&cur){out.push(cur);cur='';w=0;}
+    cur+=ch;w+=cw;}
+  if(cur)out.push(cur);
+  return out.length?out:[''];
+}
+function wrapWords(text,width){
+  width=Math.max(1,width);
+  const lines=[];let cur='',cw=0;
+  for(const word of String(text).split(' ')){
+    if(!word)continue;
+    const w=sw(word);
+    if(w>width){
+      if(cur){lines.push(cur);cur='';cw=0;}
+      const chunks=hardWrap(word,width);
+      lines.push(...chunks.slice(0,-1));
+      cur=chunks[chunks.length-1];cw=sw(cur);
+      continue;
+    }
+    if(!cur){cur=word;cw=w;}
+    else if(cw+1+w<=width){cur+=' '+word;cw+=1+w;}
+    else{lines.push(cur);cur=word;cw=w;}
+  }
+  if(cur||!lines.length)lines.push(cur);
+  return lines;
+}
+
+/* ---- panelLine 的 rows / columnRows / columnRowsStacked ---- */
+function plainRows(l,width){
+  const lw=l.lead.w, chunks=wrapWords(l.text,Math.max(1,width-lw));
+  return chunks.map((c,i)=>{
+    const lead=i?LB.of(rep(' ',lw)):l.lead;
+    return cat(lead,LB.of(c,l.style||TXT));
+  });
+}
+function colWidthOf(l,width){return Math.min(l.colWidth,Math.max(1,Math.floor((width-l.lead.w)*2/5)));}
+/* /model 专用：说明列中部省略，api_path 永远保住（plan 267 Step 5）。 */
+function elideEndpoint(url,path,width){
+  if(sw(url)<=width)return [url];
+  const tail=path||'';                             // 自定义协议行没有 api_path，整条 URL 参与省略
+  if(sw(tail)+1>=width)return [hardWrap(tail||url,width)[0]];
+  const room=width-sw(tail)-1,base=url.slice(0,url.length-tail.length);
+  let front='';
+  for(const ch of base){if(sw(front+ch)>room)break;front+=ch;}
+  return [front+'…'+tail];
+}
+function columnRows(l,width,stack){
+  if(!String(l.text).trim()){
+    // 没有说明列时：无 mark 走纯文本折行；有 mark（思考强度档位的齿轮 ⚙）则
+    // 把图标紧贴在名字后面一格，与审批第二屏的「High ⚙」一致，不撑到第二列。
+    if(!l.mark)return plainRows({lead:l.lead,text:l.col,style:l.style},width);
+    return [cat(l.lead,LB.of(l.col,l.style||TXT)).add(' ').add(l.mark.glyph,l.mark.style)];
+  }
+  const lw=l.lead.w, colW=colWidthOf(l,width), nameW=sw(l.col);
+  if(nameW>colW||stack)return stackedRows(l,width);
+  const avail=Math.max(1,width-lw-colW-2);
+  const texts=l.elide?elideEndpoint(String(l.text).trim(),l.path,avail):wrapWords(String(l.text).trim(),avail);
+  return texts.map((t,i)=>{
+    let lead;
+    if(i){
+      lead=LB.of(rep(' ',lw+colW+2));
+    }else{
+      // mark 是名字后面的单格图标（当前模型）：它和前面一格空格一起吃进
+      // 名字列与说明列之间的 2 格间距，所以说明列的对齐不受影响。
+      lead=cat(l.lead,LB.of(l.col));
+      const used=l.mark?2:0;
+      if(l.mark)lead.add(' ').add(l.mark.glyph,l.mark.style);
+      lead.add(rep(' ',Math.max(0,colW-nameW-used+2)));
+    }
+    return cat(lead,LB.of(t,l.style||TXT));
+  });
+}
+function stackedRows(l,width){
+  const lw=l.lead.w,hang=rep(' ',lw),out=[];
+  const names=wrapWords(l.col,Math.max(1,width-lw)).map((c,i)=>
+    cat(i?LB.of(hang):l.lead,LB.of(c,l.style||TXT)));
+  if(l.mark){
+    const row=names[names.length-1];
+    if(row.w+2<=width)row.add(' ').add(l.mark.glyph,l.mark.style);
+    else names.push(cat(LB.of(hang),LB.of(l.mark.glyph,l.mark.style)));
+  }
+  out.push(...names);
+  wrapWords(String(l.text).trim(),Math.max(1,width-lw)).forEach(c=>
+    out.push(LB.of(hang).add(c,l.style||TXT)));
+  return out;
+}
+function lineRows(l,width,stack){
+  if(l.colWidth>0)return columnRows(l,width,stack);
+  return plainRows(l,width);
+}
+
+/* ---- panelBuilder ---- */
+class PB{
+  constructor(){this.head=[];this.body=[];this.focusStart=0;this.focusEnd=0;
+    this.hintText='';this.heading=-1;this.grouped=0;this.unmarked=false;this.field=null;}
+  title(t){this.head.push({lead:IND(),text:t,style:TITLE});}
+  subtitle(t){this.head.push({lead:IND(),text:t,style:TXT});}
+  headLabel(label){
+    const lines=String(label).replace(/\r/g,'').split('\n').map(s=>s.trim()).filter(Boolean);
+    if(!lines.length)return;
+    this.title(lines[0]);
+    if(lines.length>1)this.subtitle(lines.slice(1).join(' '));
+  }
+  text(prefix,t,st){this.body.push({lead:prefix,text:t,style:st||TXT});}
+  blank(){this.body.push({lead:LB.of(''),text:'',style:TXT});}
+  group(h){if(this.body.length)this.blank();this.heading=this.body.length;this.grouped=0;
+    this.text(IND(),h,ACC);}
+  selectable(sel,lead,t){this.addSelectable(sel,{lead,text:t,style:TXT});}
+  columns(sel,lead,name,nw,desc,elide,path,mark){
+    this.addSelectable(sel,{lead,col:name,colWidth:nw,text:desc,style:TXT,elide:!!elide,path,mark});
+  }
+  addSelectable(sel,l){
+    let margin=IND();
+    if(sel){
+      this.focusStart=this.body.length;this.focusEnd=this.body.length+1;
+      if(this.heading>=0&&this.grouped===0)this.focusStart=this.heading;
+      if(!this.unmarked)margin=CUR();
+    }
+    l.lead=cat(margin,l.lead);this.body.push(l);this.grouped++;
+  }
+  facts(facts){
+    let lw=0;for(const f of facts)lw=Math.max(lw,sw(f[0])+1);
+    for(const [k,v] of facts){
+      const lead=IND().add(k+':',ACC).add(rep(' ',lw-sw(k)-1+2));
+      this.body.push({lead,text:v,style:TXT});
+    }
+  }
+  hint(t){this.hintText=t;}
+  panel(){return{head:this.head,body:this.body,focusStart:this.focusStart,
+    focusEnd:this.focusEnd,hint:this.hintText,field:this.field};}
+}
+
+/* ---- panelField：三行条 + 反显 caret ---- */
+const GLYPH_FILTER='⌕', GLYPH_ANSWER='›';
+function maskSecret(v){return [...v].map((c,i,a)=>a.length>8&&i>=a.length-4?c:'•').join('');}
+function fieldTextCol(glyph){return 2+2+sw(glyph)+2;}
+function fieldRow(f,width){
+  const glyph=f.glyph||GLYPH_ANSWER, focused=!f.blurred;
+  const raw=f.secret?maskSecret(f.text):f.text;
+  const cur=clamp(f.cursor,0,[...raw].length);
+  const chars=[...raw];
+  const l=IND();
+  l.add('  ',BAR).add(glyph,barGlyph(focused)).add('  ',BAR);
+  if(!chars.length&&f.placeholder){
+    l.add(f.placeholder,barPh());
+  }else{
+    l.add(chars.slice(0,cur).join(''),barText(focused));
+    if(focused)l.add(chars[cur]||' ',Object.assign(sty(null,null,{rev:1}),{}));
+    l.add(chars.slice(cur+(focused?1:0)).join(''),barText(focused));
+  }
+  l.pad(width,BAR);
+  return l;
+}
+function fieldPad(width){return IND().pad(width,BAR);}
+
+/* ---- slashPanel.layout ---- */
+function scrollNote(above,below){
+  const p=[];
+  if(above>0)p.push('↑ '+above+' more');
+  if(below>0)p.push('↓ '+below+' more');
+  return p.length?IND().add(p.join(' · '),HINT):null;
+}
+function layout(p,width,rows,top,follow){
+  const out=[];let caretRow=-1,caretCol=-1;
+  for(const l of p.head)out.push(...lineRows(l,width,false));
+  if(p.field){
+    out.push(LB.of(''));
+    if(!p.field.blurred){caretRow=out.length+1;caretCol=fieldTextCol(p.field.glyph||GLYPH_ANSWER)+sw([...(p.field.secret?maskSecret(p.field.text):p.field.text)].slice(0,p.field.cursor).join(''));}
+    out.push(fieldPad(width),fieldRow(p.field,width),fieldPad(width));
+  }
+  out.push(LB.of(''));
+  let stack=false;
+  for(const l of p.body){
+    if(!l.colWidth||!l.col)continue;
+    if(sw(l.col)>colWidthOf(l,width)){stack=true;break;}
+  }
+  const body=[];let fs=0,fe=0;
+  p.body.forEach((l,i)=>{
+    if(i===p.focusStart)fs=body.length;
+    body.push(...lineRows(l,width,stack));
+    if(i===p.focusEnd-1)fe=body.length;
+  });
+  const hint=p.hint?plainRows({lead:IND(),text:p.hint,style:HINT},width):[];
+  if(rows<=0){out.push(...body,LB.of(''),...hint);return{lines:out,caretRow,caretCol,top:0,maxTop:0};}
+  const room=Math.max(1,rows-out.length-1-hint.length);
+  const maxTop=Math.max(0,body.length-room);
+  if(follow&&p.focusEnd>p.focusStart){
+    if(fe>top+room)top=fe-room;
+    if(fs<top)top=fs;
+  }
+  top=clamp(top,0,maxTop);
+  const shown=body.slice(top,top+room);
+  out.push(...shown);
+  for(let i=shown.length;i<room;i++)out.push(LB.of(''));
+  const note=scrollNote(top,body.length-top-shown.length);
+  if(note)out.push(note);
+  out.push(...hint);
+  return{lines:out,caretRow,caretCol,top,maxTop};
+}
+
+/* ---- 单元格终端 ---- */
+function paint(lines,cols){
+  const grid=lines.map(()=>new Array(cols).fill(null));
+  lines.forEach((l,r)=>{
+    let c=0;
+    for(const part of l.parts){
+      for(const ch of part.s){
+        if(c>=cols)break;
+        const w=W(ch);
+        grid[r][c]={ch,st:part.st};
+        if(w===2&&c+1<cols)grid[r][c+1]={cont:1,st:part.st};
+        c+=w;
+      }
+    }
+  });
+  return grid;
+}
+function cellClass(st){
+  if(!st)return'';
+  const c=[];
+  if(st.rev)return'rev';
+  if(st.fg)c.push('fg'+st.fg);
+  if(st.bg)c.push('bg'+st.bg);
+  if(st.b)c.push('b');
+  if(st.f)c.push('ft');
+  return c.join(' ');
+}
+function gridHTML(grid,caret){
+  return grid.map((row,r)=>{
+    let html='',span='',cls=null;
+    const flush=()=>{if(span){html+=cls?`<span class="${cls}">${span}</span>`:span;span='';}};
+    row.forEach((cell,c)=>{
+      const ch=caret&&caret[0]===r&&caret[1]===c?' ':null;
+      const st=ch!==null?{rev:1}:(cell?cell.st:null);
+      const cl=cellClass(st);
+      const text=ch!==null?ch:(cell?(cell.cont?'':ESC(cell.ch)):' ');
+      if(cl!==cls){flush();cls=cl;}
+      span+=text;
+    });
+    flush();
+    return`<div class="row">${html}</div>`;
+  }).join('');
+}
+
+/* =====================================================================
+ * 终端外壳：会话 transcript + 面板 + composer（overlay），或首启整页。
+ * ===================================================================== */
+const MODEL_FOOT='deepseek/deepseek-v4-flash';
+function transcriptLines(cols){
+  const L=[LB.of('')];
+  // 用户卡（238 底 + 245 分隔线 + 74 的 ›），assistant 回答与 Worked 分隔线。
+  const rule=()=>{const l=LB.of('',sty('245','238'));l.pad(cols-1,sty('245','238'));return l;};
+  L.push(rule());
+  L.push((()=>{const l=LB.of('› ',sty('74','238')).add('把这周合入 dev 的改动整理成发布清单',sty('252','238'));
+    l.pad(cols-1,sty(null,'238'));return l;})());
+  L.push(rule());
+  L.push(LB.of(''));
+  L.push(LB.of('● ',Object.assign(sty('45'),{b:1})).add('好的，我先列出 dev 上本周的提交，再按模块归类。'));
+  L.push(LB.of(''));
+  const w='─ Worked for 1s · first token 0.0s · 08:46 ';
+  L.push(LB.of(w+rep('─',Math.max(0,cols-1-sw(w))),DIM));
+  return L;
+}
+function composerLines(cols,draft){
+  const rule=()=>{const l=LB.of('',sty('245','238'));l.pad(cols-1,sty('245','238'));return l;};
+  const d=LB.of('› ',sty('74','238')).add(draft||'',sty('252','238'));
+  d.pad(cols-1,sty(null,'238'));
+  const foot=LB.of(MODEL_FOOT,HINT);
+  foot.pad(Math.max(0,cols-1-sw('100%/1M')),HINT).add('100%/1M',HINT);
+  return[rule(),d,rule(),foot];
+}
+const RULE=cols=>LB.of(rep('─',cols-1),sty('90'));
+
+function overlayScreen(panel,cols,draft){
+  const H=40, panelRows=Math.floor(H/2)-1;
+  const lay=layout(panel,cols-2,panelRows,0,true);
+  const trans=transcriptLines(cols);
+  const roomForTrans=H-(panelRows+1)-composerLines(cols).length-1;
+  const visible=trans.slice(Math.max(0,trans.length-roomForTrans));
+  const lines=[...visible,RULE(cols),...lay.lines,LB.of(''),...composerLines(cols,draft)];
+  const caret=lay.caretRow>=0?[visible.length+1+lay.caretRow,lay.caretCol]:null;
+  return{lines,caret};
+}
+function standaloneScreen(panel,cols,page,pages){
+  const H=40;
+  const head=LB.of('  ').add('Forebrain Harness',Object.assign(sty('brand'),{b:1}));
+  const right='Step '+page+' of '+pages;
+  head.pad(Math.max(2,cols-2-head.w-sw(right))).add(right,TXT);
+  const filled=Math.floor((cols-2)*page/pages);
+  const prog=LB.of(rep('━',filled),ACC).add(rep('─',cols-2-filled),sty('90'));
+  const lay=layout(panel,cols-2,H-4,0,true);
+  const lines=[LB.of(''),head,LB.of(''),prog,...lay.lines];
+  const caret=lay.caretRow>=0?[4+lay.caretRow,lay.caretCol]:null;
+  return{lines,caret};
+}
+function plainScreen(lines,cols){return{lines,caret:null};}
+
+/* =====================================================================
+ * 选择器：richPickerState 的过滤、排序、分组、两列、focus 规则。
+ * ===================================================================== */
+function rank(label,desc,q){
+  if(!q)return 0;
+  label=label.toLowerCase();
+  const at=label.indexOf(q);
+  if(label===q)return 0;
+  if(at===0)return 1;
+  if(at>0){
+    const prev=label[at-1];
+    if(!/[a-z0-9]/i.test(prev))return 2;
+    return 3;
+  }
+  if(desc.toLowerCase().includes(q))return 4;
+  return-1;
+}
+function newPick(items,opts){
+  opts=opts||{};
+  const p={items,cursor:0,filter:'',fc:0,inFilter:false,
+    multi:!!opts.multi,selected:new Set(opts.selected||[]),
+    esc:opts.esc||'Esc to cancel',view:[],elide:!!opts.elide,
+    noFilter:items.filter(i=>!i.disabled).length<8};
+  if(opts.default!=null)p.cursor=opts.default;
+  rebuild(p,opts.default!=null);
+  if(opts.filter){p.filter=opts.filter;p.inFilter=true;rebuild(p);}
+  return p;
+}
+function rebuild(p,keepCursor){
+  const q=p.filter.trim().toLowerCase();
+  const ranks={},catRank={};p.view=[];
+  p.items.forEach((it,i)=>{
+    if(it.disabled)return;
+    const r=rank(it.label,it.desc||'',q);
+    if(r<0)return;
+    p.view.push(i);ranks[i]=r;
+    const c=it.cat||'';
+    if(!(c in catRank)||r<catRank[c])catRank[c]=r;
+  });
+  p.view.sort((a,b)=>{
+    const ca=p.items[a].cat||'',cb=p.items[b].cat||'';
+    if(ca!==cb)return catRank[ca]-catRank[cb];
+    return ranks[a]-ranks[b];
+  });
+  p.cursor=keepCursor?clamp(p.cursor,0,Math.max(0,p.view.length-1)):0;
+}
+function pickNameWidth(p){
+  let w=0;
+  for(const it of p.items)if(!it.disabled)w=Math.max(w,sw(it.label));
+  return Math.min(w,40);
+}
+function pickPanel(label,p){
+  const b=new PB();b.unmarked=p.inFilter;b.headLabel(label);
+  const nw=pickNameWidth(p);let cat='';
+  p.view.forEach((idx,ci)=>{
+    const it=p.items[idx];
+    if((it.cat||'')!==cat&&it.cat){b.group(it.cat);cat=it.cat;}
+    const lead=p.multi?LB.of((p.selected.has(idx)?'● ':'○ '),p.selected.has(idx)?ACC:TXT):LB.of('');
+    b.columns(ci===p.cursor,lead,it.label,nw,(it.desc||'').trim(),p.elide,it.path,it.mark);
+  });
+  if(!p.view.length)b.text(IND(),'No matches');
+  b.hint(p.multi?'↑/↓ to navigate · Space to select · Enter to confirm · '+p.esc
+                :'↑/↓ to navigate · Enter to confirm · '+p.esc);
+  if(!p.noFilter)b.field={text:p.filter,cursor:p.fc,placeholder:'Type to filter',
+    glyph:GLYPH_FILTER,blurred:!p.inFilter};
+  return b.panel();
+}
+function pickKey(p,k){
+  if(k==='Up'||k==='Down'){
+    const d=k==='Up'?-1:1;
+    if(p.inFilter){if(d>0&&p.view.length){p.inFilter=false;p.cursor=0;}}
+    else if(d<0&&p.cursor<=0&&!p.noFilter){p.inFilter=true;p.cursor=0;}
+    else p.cursor=clamp(p.cursor+d,0,Math.max(0,p.view.length-1));
+    return null;
+  }
+  if(k==='Enter'){
+    if(p.multi)return{done:[...p.selected]};
+    if(!p.view.length)return{cancel:true};
+    return{done:p.view[p.cursor]};
+  }
+  if(k===' ') {
+    if(p.multi&&!p.inFilter){
+      const idx=p.view[p.cursor];
+      if(idx!=null){p.selected.has(idx)?p.selected.delete(idx):p.selected.add(idx);}
+      return null;
+    }
+  }
+  if(k==='Esc')return{cancel:true};
+  if(p.noFilter)return null;
+  if(k==='Backspace'){
+    if(!p.inFilter&&!p.filter)return null;
+    p.inFilter=true;
+    const a=[...p.filter];
+    if(p.fc>0){a.splice(p.fc-1,1);p.fc--;p.filter=a.join('');rebuild(p);}
+    return null;
+  }
+  if(k==='Left'){p.fc=Math.max(0,p.fc-1);return null;}
+  if(k==='Right'){p.fc=Math.min([...p.filter].length,p.fc+1);return null;}
+  if(k.length===1){
+    p.inFilter=true;
+    const a=[...p.filter];a.splice(p.fc,0,k);p.fc++;p.filter=a.join('');
+    rebuild(p);return null;
+  }
+  return null;
+}
+
+/* =====================================================================
+ * 通用流程执行器：picker / input / secret / confirm / review / info。
+ * ===================================================================== */
+class Flow{
+  constructor(steps,onDone){this.steps=steps;this.i=0;this.ans={};this.onDone=onDone;
+    this.done=false;this.cancelled=false;this.init();}
+  get s(){return this.steps[this.i];}
+  val(id){return this.ans[id];}
+  init(){
+    const s=this.s;if(!s){this.done=true;return;}
+    if(s.kind==='picker'){
+      const items=typeof s.items==='function'?s.items(this.ans):s.items;
+      this.st=newPick(items,{multi:s.multi,selected:s.preselect? s.preselect(this.ans):[],
+        esc:this.i>0?'Esc to go back':'Esc to cancel',elide:s.elide,
+        filter:s.filter,default:s.default});
+    }else if(s.kind==='input'||s.kind==='secret'){
+      const v=typeof s.value==='function'?s.value(this.ans):(s.value||'');
+      this.st={text:v,cursor:[...v].length};
+    }else if(s.kind==='review'){
+      this.st={cursor:0};
+    }else this.st={};
+  }
+  title(){return typeof this.s.title==='function'?this.s.title(this.ans):this.s.title;}
+  panel(){
+    const s=this.s;
+    if(this.done||this.cancelled)return this.endPanel();
+    if(s.kind==='picker')return pickPanel(this.title(),this.st);
+    if(s.kind==='input'||s.kind==='secret'){
+      const b=new PB();b.headLabel(this.title());
+      b.hint('Enter to confirm · '+(this.i>0?'Esc to go back':'Esc to cancel'));
+      b.field={text:this.st.text,cursor:this.st.cursor,placeholder:s.placeholder||'',
+        glyph:s.glyph||GLYPH_ANSWER,blurred:false,secret:s.kind==='secret'};
+      return b.panel();
+    }
+    if(s.kind==='confirm'){
+      const b=new PB();b.headLabel(this.title());
+      const def=s.default!==false;
+      b.hint((def?'Y or Enter to confirm · N to decline · ':'Y to confirm · N or Enter to decline · ')
+        +(this.i>0?'Esc to go back':'Esc to cancel'));
+      return b.panel();
+    }
+    if(s.kind==='review'){
+      const b=new PB();b.headLabel(this.title());
+      b.facts(typeof s.facts==='function'?s.facts(this.ans):s.facts);
+      b.blank();
+      const acts=typeof s.actions==='function'?s.actions(this.ans):s.actions;
+      acts.forEach((a,i)=>b.selectable(i===this.st.cursor,LB.of(''),a));
+      b.hint('↑/↓ to navigate · Enter to confirm · Esc to go back');
+      return b.panel();
+    }
+    // info
+    const b=new PB();b.headLabel(this.title());
+    const body=typeof s.body==='function'?s.body(this.ans):s.body||[];
+    body.forEach(row=>{
+      if(row===''){b.blank();return;}
+      b.text(IND(),row,row.startsWith('!')?BAD:TXT);
+    });
+    b.hint(s.hint||'Enter or Esc to close');
+    return b.panel();
+  }
+  endPanel(){
+    const b=new PB();
+    if(this.cancelled){b.headLabel('Connect a model\nClosed. Nothing was saved.');}
+    else b.headLabel(this.endTitle||'Done');
+    b.hint('Enter or Esc to close');
+    return b.panel();
+  }
+  next(id){
+    if(id==='done'){this.finish();return;}
+    if(id==null)this.i++;
+    else{
+      const j=this.steps.findIndex(s=>s.id===id);
+      this.i=j>=0?j:this.i+1;
+    }
+    if(this.i>=this.steps.length){this.finish();return;}
+    this.init();
+  }
+  finish(){
+    this.done=true;
+    if(this.onDone)this.onDone(this.ans,this);
+  }
+  key(k){
+    if(this.done||this.cancelled){return null;}
+    const s=this.s;
+    if(s.kind==='picker'){
+      const r=pickKey(this.st,k);
+      if(!r)return null;
+      if(r.cancel){this.back();return null;}
+      this.ans[s.id+'Index']=r.done;
+      if(s.multi)this.ans[s.id]=r.done;
+      else{
+        const item=this.st.items[r.done];
+        this.ans[s.id]=item&&item.value!==undefined?item.value:r.done;
+      }
+      if(s.onPick)s.onPick(this.ans,this);
+      this.next(s.next? s.next(this.ans):null);
+      return null;
+    }
+    if(s.kind==='input'||s.kind==='secret'){
+      const st=this.st;
+      if(k==='Esc'){this.back();return null;}
+      if(k==='Enter'){
+        const v=st.text.trim();
+        if(s.required&&!v)return null;
+        if(s.validate&&!s.validate(v))return null;
+        this.ans[s.id]=v;
+        this.next(s.next?s.next(this.ans):null);
+        return null;
+      }
+      if(k==='Backspace'){const a=[...st.text];if(st.cursor>0){a.splice(st.cursor-1,1);st.cursor--;st.text=a.join('');}return null;}
+      if(k==='Left'){st.cursor=Math.max(0,st.cursor-1);return null;}
+      if(k==='Right'){st.cursor=Math.min([...st.text].length,st.cursor+1);return null;}
+      if(k.length===1){const a=[...st.text];a.splice(st.cursor,0,k);st.cursor++;st.text=a.join('');return null;}
+      return null;
+    }
+    if(s.kind==='confirm'){
+      const def=s.default!==false;
+      if(k==='y'||k==='Y'||(k==='Enter'&&def)){this.ans[s.id]=true;this.next(s.next?s.next(this.ans):null);}
+      else if(k==='n'||k==='N'||(k==='Enter'&&!def)){
+        this.ans[s.id]=false;
+        if(s.noNext==='cancel'){this.cancelled=true;}
+        else this.next(s.noNext||null);
+      }
+      else if(k==='Esc')this.back();
+      return null;
+    }
+    if(s.kind==='review'){
+      const acts=typeof s.actions==='function'?s.actions(this.ans):s.actions;
+      if(k==='Up')this.st.cursor=Math.max(0,this.st.cursor-1);
+      else if(k==='Down')this.st.cursor=Math.min(acts.length-1,this.st.cursor+1);
+      else if(k==='Enter'){
+        const a=acts[this.st.cursor];
+        this.ans[s.id]=a;
+        this.next(s.next?s.next(a,this.ans):null);
+      }else if(k==='Esc')this.back();
+      return null;
+    }
+    // info：Enter 前进，Esc 与其它页一样返回上一页。
+    if(k==='Esc'){this.back();return null;}
+    if(k==='Enter'){
+      if(s.next)this.next(s.next(this.ans));
+      else this.finish();
+    }
+    return null;
+  }
+  back(){
+    if(this.i===0){this.cancelled=true;return;}
+    this.i--;this.init();
+  }
+}
+
+/* =====================================================================
+ * 数据：plans/263 注册表顺序与端点、plans/264 订阅注册表、plans/261 标签。
+ * ===================================================================== */
+/* 端点显示 = 完整请求 URL：自定义协议（verb）不追 api_path，只有 base_url。 */
+const endpoint=(base,path,verb)=>verb||!path?(base||''):base+path;
+const PROVIDERS=[
+  {id:'openai',label:'OpenAI',hint:'GPT models via OpenAI API',key:'OpenAI API key',
+   eps:[['','https://api.openai.com/v1','/chat/completions']]},
+  {id:'anthropic',label:'Anthropic',hint:'Claude models via Anthropic API',key:'Anthropic API key',
+   eps:[['','https://api.anthropic.com','/v1/messages']]},
+  {id:'alibaba',label:'Qwen Cloud',hint:'4 plans by region and billing',key:'Qwen API key',
+   eps:[['Standard · China','https://dashscope.aliyuncs.com/compatible-mode/v1','/chat/completions'],
+        ['Standard · Global','https://dashscope-intl.aliyuncs.com/compatible-mode/v1','/chat/completions'],
+        ['Coding Plan · China','https://coding.dashscope.aliyuncs.com/v1','/chat/completions'],
+        ['Coding Plan · Global','https://coding-intl.dashscope.aliyuncs.com/v1','/chat/completions']]},
+  {id:'google',label:'Google',hint:'Gemini via OpenAI-compatible endpoint',key:'Google Gemini API key',
+   eps:[['','https://generativelanguage.googleapis.com/v1beta/openai','/chat/completions']]},
+  {id:'deepseek',label:'DeepSeek',hint:'DeepSeek chat/reasoner models',key:'DeepSeek API key',
+   eps:[['','https://api.deepseek.com','/chat/completions']]},
+  {id:'xai',label:'xAI',hint:'Grok via OpenAI-compatible endpoint',key:'xAI API key',
+   eps:[['','https://api.x.ai/v1','/chat/completions']]},
+  {id:'mistral',label:'Mistral AI',hint:'Mistral via OpenAI-compatible endpoint',key:'Mistral API key',
+   eps:[['','https://api.mistral.ai/v1','/chat/completions']]},
+  {id:'moonshotai',label:'Moonshot AI',hint:'Moonshot/Kimi OpenAI-compatible endpoint',key:'Kimi API key',
+   eps:[['','https://api.moonshot.ai/v1','/chat/completions']]},
+  {id:'zhipuai',label:'Z.AI',hint:'6 plans by region and billing',key:'Z.AI API key',
+   eps:[['Standard · Global','https://api.z.ai/api/paas/v4','/chat/completions'],
+        ['Coding Plan · Global','https://api.z.ai/api/anthropic','/v1/messages'],
+        ['Coding Plan · Global (OpenAI)','https://api.z.ai/api/coding/paas/v4','/chat/completions'],
+        ['Coding Plan · China','https://open.bigmodel.cn/api/anthropic','/v1/messages'],
+        ['Coding Plan · China (OpenAI)','https://open.bigmodel.cn/api/coding/paas/v4','/chat/completions'],
+        ['Standard · China','https://open.bigmodel.cn/api/paas/v4','/chat/completions']]},
+  {id:'minimax',label:'MiniMax',hint:'2 plans by region',key:'MiniMax API key',
+   eps:[['Global','https://api.minimax.io/anthropic','/v1/messages'],
+        ['CN','https://api.minimaxi.com/anthropic','/v1/messages']]},
+  {id:'meituan',label:'Meituan LongCat',hint:'OpenAI- and Anthropic-compatible endpoints',key:'LongCat API key',
+   eps:[['OpenAI compatible','https://api.longcat.chat/openai/v1','/chat/completions'],
+        ['Anthropic compatible','https://api.longcat.chat/anthropic','/v1/messages']]},
+  {id:'tencent',label:'Tencent Cloud TokenHub',hint:'2 plans by region',key:'TokenHub API key',
+   eps:[['China','https://tokenhub.tencentmaas.com/v1','/chat/completions'],
+        ['Global','https://tokenhub-intl.tencentmaas.com/v1','/chat/completions']]},
+  {id:'volcengine',label:'Volcengine Ark',hint:'5 plans and protocols',key:'Volcengine Ark API key',
+   eps:[['Coding Plan','https://ark.cn-beijing.volces.com/api/coding','/v1/messages'],
+        ['Agent Plan','https://ark.cn-beijing.volces.com/api/plan','/v1/messages'],
+        ['Coding Plan · OpenAI','https://ark.cn-beijing.volces.com/api/coding/v3','/chat/completions'],
+        ['Agent Plan · OpenAI','https://ark.cn-beijing.volces.com/api/plan/v3','/chat/completions'],
+        ['Pay as you go','https://ark.cn-beijing.volces.com/api/v3','/chat/completions']]},
+  {id:'byteplus',label:'BytePlus ModelArk',hint:'Coding Plan, OpenAI-compatible endpoint',key:'BytePlus API key',
+   eps:[['Coding Plan','https://ark.ap-southeast.bytepluses.com/api/coding','/v1/messages']]},
+];
+const SUBS=[
+  {id:'chatgpt',label:'ChatGPT',hint:'Use Codex included with your ChatGPT plan',signed:true},
+  {id:'opencode-go',label:'OpenCode Go',hint:'Device-code login; use your Go/Go Plus quota',signed:false},
+  {id:'volcengine',label:'Volcengine Ark',hint:'Coding Plan and Agent Plan, personal and team seats',signed:false},
+];
+const MODEL_ROWS=[
+  {id:'llm_01',label:'deepseek/deepseek-v4-flash',base:'https://api.deepseek.com',path:'/chat/completions',current:true},
+  {id:'llm_02',label:'deepseek/deepseek-v4-flash',base:'https://llm-proxy.corp.example.com/deepseek',path:'/chat/completions'},
+  {id:'llm_03',label:'volcengine/doubao-seed-2.1-pro',base:'https://ark.cn-beijing.volces.com/api/coding',path:'/v1/messages'},
+  {id:'llm_04',label:'volcengine/glm-5.3',base:'https://ark.cn-beijing.volces.com/api/plan',path:'/v1/messages'},
+  {id:'llm_05',label:'zhipuai/glm-5.3',base:'https://open.bigmodel.cn/api/anthropic',path:'/v1/messages'},
+  {id:'llm_06',label:'meituan/LongCat-2.5',base:'https://api.longcat.chat/openai/v1',path:'/chat/completions'},
+  {id:'llm_07',label:'tencent/hy3',base:'https://tokenhub.tencentmaas.com/v1',path:'/chat/completions'},
+  {id:'llm_08',label:'chatgpt/gpt-5.5',base:'https://chatgpt.com/backend-api/codex',path:'/responses'},
+  {id:'llm_09',label:'custom/openai/gpt-4o',base:'https://api.openai.com/v1',path:'/chat/completions'},
+  {id:'llm_10',label:'custom/qwen3-coder',base:'http://127.0.0.1:8731/v1',path:'/chat/completions',verb:true},
+];
+const modelItems=()=>MODEL_ROWS.map(r=>({label:r.label,desc:endpoint(r.base,r.path,r.verb),value:r.id,current:r.current,path:r.verb?null:r.path}));
+const OFFER_GROUPS=[
+  {plan:'Coding Plan · Personal',base:'https://ark.cn-beijing.volces.com/api/coding',path:'/v1/messages',
+   models:[['doubao-seed-2.1-pro','256K · images'],['glm-5.3','1M'],['deepseek-v4-pro','1M'],['minimax-m3','1M · images']]},
+  {plan:'Agent Plan · Personal',base:'https://ark.cn-beijing.volces.com/api/plan',path:'/v1/messages',
+   models:[['doubao-seed-evolving','1M · images'],['kimi-k3','1M · images']]},
+];
+const offerItems=()=>OFFER_GROUPS.flatMap(g=>g.models.map(([m])=>({
+  label:m,cat:g.plan,desc:endpoint(g.base,g.path)})));
+const PROTO_ITEMS=[
+  {label:'Anthropic Messages',desc:'/v1/messages',path:'/v1/messages'},
+  {label:'OpenAI Chat Completions',desc:'/chat/completions',path:'/chat/completions'},
+  {label:'OpenAI Responses',desc:'/responses',path:'/responses'},
+  {label:'Custom protocol',desc:'Send to the URL as is',path:'/chat/completions',verb:true},
+];
+const LEVELS=[['minimal','Minimal','极低'],['low','Low','低'],['medium','Medium','中'],
+  ['high','High','高'],['xhigh','xHigh','最高'],['max','Max','极致']];
+
+/* =====================================================================
+ * 场景定义
+ * ===================================================================== */
+const SCENES=[];
+const scene=(group,id,title,cap,make)=>SCENES.push({group,id,title,cap,make});
+
+/* ---- A. /model ---- */
+function modelScene(preset){
+  return()=>{
+    const st=newPick(modelItems(),{default:0,elide:true,filter:preset||''});
+    return{
+      key(k){
+        const r=pickKey(st,k);
+        if(r&&r.done!=null&&!st.multi)st.current=r.done;
+      },
+      panel:()=>pickPanel('Model\nThe model this agent runs on',st),
+      note:()=>st.current!=null?'已选中 '+st.items[st.current].label+'（提交的是行 id）':'',
+    };
+  };
+}
+scene('A · /model 选择器','model','/model：两列模型列表（名字 + 完整请求 URL）',
+  '名字列 <code>provider/model</code>，说明列是完整请求 URL（<code>base_url</code> 直接拼 <code>api_path</code>）；自定义协议行只有 <code>base_url</code>。'
+  +'两条 <code>deepseek/deepseek-v4-flash</code> 同名不同端点，靠行 id 区分。列表里只有这个会话已配置的模型——'
+  +'新增模型（含自定义端点）是 <code>/connect</code> 的事，<code>/model</code> 只负责切换。'
+  +'试试输入 <code>ark</code> 过滤；88 列看说明列的中部省略，68 列看整列表上下堆叠。',modelScene(''));
+scene('A · /model 选择器','model-filter','/model：过滤中（❯ 与 caret 互斥）',
+  '键盘在过滤条时：glyph 变 accent、文本变亮、caret 反显，列表里的 ❯ 消失。命中排序让 Coding Plan 的两条排在前面，'
+  +'分组语义不变；说明列同样参与搜索。',modelScene('ark'));
+// /model 第二步：选完模型后问思考强度，与 Web 的 EffortChip 同语义（计划 310）。
+// 单列紧贴：名字 = 英文显示名 + 双写档位 id（仅显示名与 id 不同才写，两格间距），
+// 行配置的那一档名字后一格紧接齿轮图标 ⚙（accent）——与审批第二屏的「High ⚙」
+// 完全一致，不把齿轮甩到第二列。光标落在<b>会话钉值</b>（不是行默认档）；会话没
+// 钉值或行没配默认档时首项是 Default。Esc 回到模型列表。模型在工厂里按下标取
+// （GATE_MODELS 在 E 段才定义，场景注册时还不能引用）。
+function modelEffortScene(modelIndex,sessionEffort){
+  return()=>{
+    const model=GATE_MODELS[modelIndex];
+    const opts=effortOptions(model,sessionEffort);
+    const items=opts.map(o=>({label:o.label+(o.value?'  '+o.value:''),value:o.id,
+      mark:o.fromSetting?{glyph:'⚙',style:ACC}:null,desc:''}));
+    let def=opts.findIndex(o=>o.id===sessionEffort);
+    if(def<0)def=opts.findIndex(o=>o.fromSetting);
+    if(def<0)def=0;
+    const st=newPick(items,{default:def,esc:'Esc to go back'});
+    return{
+      key(k){const r=pickKey(st,k);if(r&&r.done!=null)st.current=r.done;},
+      panel:()=>pickPanel('Reasoning effort\nHow hard '+modelLabel(model)+' thinks this turn',st),
+      note:()=>st.current!=null?'已选 '+items[st.current].label+'（提交的是档位 id：'+(items[st.current].value||'default')+'）':'',
+    };
+  };
+}
+scene('A · /model 选择器','model-effort','/model 第二步：思考强度（光标在会话钉值，标记在行默认档）',
+  '选完模型不立即生效，先问这一档思考强度——和 Web 聊天里的 <code>EffortChip</code> 同一套语义。'
+  +'每行是英文显示名（<code>Off/Minimal/Low/Medium/High/xHigh/Max</code>，<code>xhigh</code> 显示成 <code>xHigh</code>），'
+  +'显示名与档位 id 不同时紧跟双写 id（英文里只有 <code>Off  none</code>），<b>行配置的那一档</b>名字后一格紧接齿轮图标 <code>⚙</code>（accent）——'
+  +'与审批第二屏的「<code>High ⚙</code>」一样紧贴，不甩到第二列。'
+  +'这个演示里会话钉的是 <code>medium</code>、行默认档是 <code>high</code>：光标落在 <code>Medium</code>（会话钉值），'
+  +'<code>⚙</code> 标在 <code>High</code>（行默认档）——两者可以不在同一行。回车把光标这一档钉进会话（不改也钉具体值）。',
+  modelEffortScene(0,'medium'));
+scene('A · /model 选择器','model-effort-default','/model 第二步：行没配默认档 → 首项 Default',
+  '这一行模型（<code>zhipuai/glm-5.3</code>）没配默认档，会话也没钉值：列表首项是 <code>Default</code>（不钉任何档、'
+  +'交给 provider 自己决定），光标落在它上面。只要会话钉了值或行配了默认档，<code>Default</code> 这一项就不出现。',
+  modelEffortScene(1,''));
+
+/* ---- B. /connect ---- */
+function connectFlow(startAt){
+  return()=>{
+    const steps=[
+      {id:'provider',kind:'picker',title:'Connect a model\nChoose how Forebrain Harness reaches a model; /connect changes it any time.',
+        items:()=>[
+          ...SUBS.map(s=>({label:s.label,cat:'Sign in with a subscription',
+            desc:s.hint+(s.signed?'  · Signed in':''),value:'sub:'+s.id})),
+          ...PROVIDERS.map(p=>({label:p.label,cat:'Use an API key',desc:p.hint,value:'key:'+p.id})),
+          {label:'Custom model',cat:'Custom',desc:'OpenAI- or Anthropic-compatible, or custom protocol',value:'custom'},
+        ],
+        next:a=>a.provider==='custom'?'custom-base':(a.provider.startsWith('sub:')?'sub-login':'endpoint')},
+      {id:'endpoint',kind:'picker',
+        title:a=>{
+          const p=PROVIDERS.find(x=>'key:'+x.id===a.provider);
+          return p.label;
+        },
+        items:a=>{
+          const p=PROVIDERS.find(x=>'key:'+x.id===a.provider);
+          return p.eps.map(([l,b,path])=>({label:l||p.label,desc:endpoint(b,path),value:l}));
+        },
+        next:()=> 'apikey'},
+      {id:'apikey',kind:'secret',required:true,value:a=>a.apikey||'',
+        title:a=>{
+          const p=PROVIDERS.find(x=>'key:'+x.id===a.provider);
+          return p.key+'\nSaved on this machine only.';
+        },
+        next:a=>a.provider==='custom'?'custom-model':'model'},
+      {id:'model',kind:'picker',title:'Model\nThe model Forebrain Harness runs on.',
+        items:a=>{
+          const p=PROVIDERS.find(x=>'key:'+x.id===a.provider)||{id:'custom'};
+          const suggestions={
+            deepseek:['deepseek-v4-pro','deepseek-v4-flash','deepseek-reasoner'],
+            alibaba:['qwen3.8-max','qwen3.8-flash','qwq-plus'],
+            volcengine:['doubao-seed-2.1-pro','doubao-seed-2.1-turbo','glm-5.3','kimi-k3','deepseek-v4-pro'],
+            zhipuai:['glm-5.3','glm-5.3-flash','glm-5.3-air'],
+            meituan:['LongCat-2.5','LongCat-2.0'],
+            tencent:['hy3','hy3-preview','hy4-preview'],
+          }[p.id]||['gpt-5.5','gpt-5.5-mini','gpt-5.5-nano'];
+          return suggestions.map(m=>({label:m,desc:'',value:m}))
+            .concat([{label:'Enter a model ID…',desc:'Type a model the list does not offer',value:'__manual__'}]);
+        },
+        next:a=>a.model==='__manual__'?'model-manual':'effort'},
+      {id:'model-manual',kind:'input',required:true,placeholder:'Model ID',
+        title:'Model ID\nType the exact model identifier the endpoint expects.',
+        next:()=> 'effort'},
+      {id:'effort',kind:'picker',title:a=>'Reasoning effort\nHow hard '+a.model+' thinks before it answers.',
+        items:()=>LEVELS.map(([v])=>({label:v,desc:''}))
+          .concat([{label:'Provider default',desc:''}]),
+        next:()=> 'review'},
+      {id:'sub-login',kind:'info',
+        title:a=>{
+          const id=a.provider.slice(4);
+          if(id==='chatgpt')return 'Sign in with ChatGPT\nYour browser opens for sign-in; the callback returns here.';
+          if(id==='opencode-go')return 'Sign in with OpenCode\nOpen https://opencode.ai/auth and confirm the code below.';
+          return 'Sign in with Volcengine Ark\nYour browser opens so you can confirm the code below.';
+        },
+        body:a=>{
+          const id=a.provider.slice(4);
+          if(id==='opencode-go')return['','Code: QK7M-2PLX','','Waiting for you to confirm the code in OpenCode…'];
+          if(id==='volcengine')return['','Code:  QK7M-2PLX','','Waiting for you to confirm in the browser · expires in 9:41'];
+          return['','Opening your browser…','Waiting for the sign-in callback on 127.0.0.1…'];
+        },
+        hint:'Enter when signed in · Esc to go back',
+        next:()=> 'offers'},
+      {id:'offers',kind:'picker',multi:true,preselect:()=>[0,1],
+        title:a=>{
+          const id=a.provider.slice(4);
+          const s=SUBS.find(x=>x.id===id);
+          return s.label+'\nChoose the models to add; each row shows where requests go.';
+        },
+        items:()=>offerItems(),
+        next:a=>a.provider==='sub:volcengine'?'key-choice':'review-sub'},
+      {id:'key-choice',kind:'picker',
+        title:'Coding Plan has two active keys\nPick the one these models use.',
+        items:()=>[{label:'api-key-20261102',desc:'••••d410'},{label:'team-ci',desc:'••••7b03'}],
+        next:()=> 'review-sub'},
+      {id:'review-sub',kind:'review',
+        title:a=>'Review\n'+(a.offers?a.offers.length:0)+' models from '+(SUBS.find(x=>x.id===a.provider.slice(4))||{}).label+'.',
+        facts:a=>[
+          ['Source',(SUBS.find(x=>x.id===a.provider.slice(4))||{}).label+' · subscription'],
+          ['Models',String((a.offers||[]).length)],
+          ['Key',a.provider==='sub:chatgpt'?'Account sign-in':(a['key-choice']!=null?['api-key-20261102 · ••••d410','team-ci · ••••7b03'][a['key-choice']]:'Plan key · ••••d410')],
+          ['First model',(offerItems()[((a.offers||[0])[0])]||{}).label||'—'],
+        ],
+        actions:()=>['Add these models','Start over'],
+        next:a=>a==='Start over'?'provider':'done'},
+      {id:'review',kind:'review',title:'Review\nCheck the details, then save.',
+        facts:a=>{
+          const p=PROVIDERS.find(x=>'key:'+x.id===a.provider)||{label:'Custom'};
+          const ep=p.eps?p.eps.find(e=>e[0]===a.endpoint)||p.eps[0]:null;
+          return[['Provider',p.label+(a.endpoint?' · '+a.endpoint:'')],
+            ['Model',a.model||''],
+            ['Reasoning',a.effort!=null?(LEVELS.map(x=>x[0])[a.effort]||'Provider default'):'Provider default'],
+            ['Endpoint',ep?endpoint(ep[1],ep[2]):(a['custom-base']||'')]];
+        },
+        actions:()=>['Save','Change endpoint…','Start over'],
+        next:a=>a==='Change endpoint…'?'endpoint':(a==='Start over'?'provider':'duplicate')},
+      {id:'duplicate',kind:'confirm',default:false,
+        title:'Already configured\nThis provider, model, base URL and path are already configured. Replace its key?',
+        next:()=> 'done',noNext:()=> 'review'},
+      /* ---- 自定义模型（plan 267 Step 3） ---- */
+      {id:'custom-base',kind:'input',required:true,placeholder:'https://api.example.com/v1',
+        title:'Custom model · Base URL\nThe address requests go to; the protocol you pick next decides whether a path is appended.',
+        validate:v=>/^https?:\/\//.test(v),next:()=> 'custom-proto'},
+      {id:'custom-proto',kind:'picker',
+        title:'Custom model · Protocol\nRequired. It decides the request format and whether a path is appended to the base URL.',
+        items:()=>PROTO_ITEMS,next:()=> 'custom-key'},
+      {id:'custom-key',kind:'secret',required:true,
+        title:a=>{
+          const p=PROTO_ITEMS[a['custom-proto']];
+          const url=endpoint(a['custom-base'],p.path,p.verb);
+          return 'API key\nRequests go to '+url+'\nSaved on this machine only.';
+        },
+        next:()=> 'custom-model'},
+      {id:'custom-model',kind:'input',required:true,placeholder:'e.g. gpt-4o or openai/gpt-4o',
+        title:'Model name\nSent verbatim as the request’s model parameter; a vendor/ prefix is fine.',
+        next:()=> 'custom-levels'},
+      {id:'custom-levels',kind:'picker',multi:true,
+        title:'Thinking levels this model supports\nNo official levels found for this model, so tick the ones it takes. Leave empty to skip.',
+        items:()=>LEVELS.map(([v,l,zh])=>({label:v+' · '+zh,desc:l})),
+        next:()=> 'custom-test'},
+      {id:'custom-test',kind:'confirm',default:true,
+        title:a=>{
+          const p=PROTO_ITEMS[a['custom-proto']];
+          const url=endpoint(a['custom-base'],p.path,p.verb);
+          return 'Test connection?\nSends one short request to '+url+' before saving.';
+        },
+        next:()=> 'custom-test-result',noNext:()=> 'custom-review'},
+      {id:'custom-test-result',kind:'info',
+        title:a=>'Connection OK\n'+(a['custom-model']||'The model')+' answered in 0.4s.',
+        body:()=>[],hint:'Enter to continue · Esc to go back',next:()=> 'custom-review'},
+      {id:'custom-review',kind:'review',title:'Review\nCheck the details, then save.',
+        facts:a=>{
+          const p=PROTO_ITEMS[a['custom-proto']];
+          return[['Provider','custom'],
+            ['Model',a['custom-model']||''],
+            ['Protocol',p.label],
+            ['Endpoint',endpoint(a['custom-base'],p.path,p.verb)],
+            ['Thinking',(a['custom-levels']||[]).length? a['custom-levels'].map(i=>LEVELS[i][0]).join(', '):'Not set']];
+        },
+        actions:()=>['Save','Start over'],
+        next:a=>a==='Start over'?'provider':'duplicate'},
+    ];
+    const f=new Flow(steps,(ans,fl)=>{
+      fl.endTitle=ans.provider==='custom'
+        ? 'Saved\n'+(ans['custom-model']||'The model')+' is ready. /model switches to it any time.'
+        : 'Connected\nThe first model is now this session’s model. /model switches any time.';
+    });
+    if(startAt){
+      // 预设场景：直接落到某一页，前面答案填好。
+      Object.assign(f.ans,{
+        provider:startAt.startsWith('custom')?'custom':'key:volcengine',
+        endpoint:'Coding Plan',apikey:'sk-demo-volcengine-9f3ad410',
+        model:'doubao-seed-2.1-pro',effort:3,
+      });
+      const idx=steps.findIndex(s=>s.id===startAt);
+      if(idx>0){f.i=idx;f.init();}
+    }
+    return{flow:f,key:k=>f.key(k),panel:()=>f.panel()};
+  };
+}
+scene('B · /connect','connect','/connect：第一页三组',
+  '三组 = <code>Sign in with a subscription</code>（只放 ChatGPT / OpenCode Go / Volcengine Ark，已登录带 <code>· Signed in</code>）、'
+  +'<code>Use an API key</code>（注册表顺序，含美团 LongCat、腾讯 TokenHub、火山方舟、BytePlus；智谱 Coding Plan 在这里手填 Key，不进订阅组）、'
+  +'<code>Custom</code>。回车往下走，Esc 逐页返回；选 Volcengine Ark 能看到完整链路。',connectFlow(null));
+scene('B · /connect','connect-endpoint','/connect：接入点子页（端点全量显示）',
+  '标题只写 provider 组名，不挂账期口径副标题（2026-11-16 owner 判定冗余删除）；每行说明列是 <code>ModelEndpointLabel(base, path)</code>，不再只显示主机名。'
+  +'火山方舟默认协议 Anthropic Messages，OpenAI 兼容 <code>/v3</code> 作为备选端点。',connectFlow('endpoint'));
+scene('B · /connect','connect-key','/connect：API Key（掩码 + 存放说明）',
+  '密钥框沿用 <code>Secret</code>：<code>›</code> glyph、<code>•</code> 掩码、长度 &gt;8 时只露末四位。'
+  +'副标题只讲当前事实：<code>Saved on this machine only.</code>。',connectFlow('apikey'));
+scene('B · /connect','connect-effort','/connect：思考强度',
+  '沿用现有 <code>Reasoning effort</code> 选择页；档位来自官方接口或官方文档，查不到时才让用户在自定义流程里勾选。'
+  +'末项 <code>Provider default</code> 表示不覆盖模型自带值。',connectFlow('effort'));
+scene('B · /connect','connect-review','/connect：复核页',
+  'facts 标签 accent、值列对齐；<code>Change endpoint…</code> 回到接入点页，<code>Start over</code> 回到第一页。'
+  +'保存时若四元组已存在，进入下一页的「替换 Key」确认，不静默覆盖。',connectFlow('review'));
+
+/* ---- C. 订阅登录 ---- */
+scene('C · 订阅登录','sub-chatgpt','订阅登录：ChatGPT（browser_callback）',
+  '沿用现有 opt-in 确认：打开浏览器前先问一次。TUI 能驱动本机回环回调；'
+  +'检测不到图形环境（DISPLAY/WAYLAND_DISPLAY 为空或存在 SSH_CONNECTION）时改用粘贴回调地址的流程。',
+  ()=>{
+    const f=new Flow([
+      {id:'c',kind:'confirm',default:false,noNext:'cancel',
+        title:'Sign in with ChatGPT\nForebrain Harness opens your browser to sign in, then offers the models your ChatGPT plan includes.'},
+      {id:'wait',kind:'info',title:'Sign in with ChatGPT',
+        body:['','Opening your browser…','','Waiting for the sign-in callback on 127.0.0.1:54623…'],
+        hint:'Enter when signed in · Esc to cancel'},
+      {id:'offers',kind:'picker',multi:true,preselect:()=>[0],
+        title:'ChatGPT\nChoose the models to add; each row shows where requests go.',
+        items:()=>[{label:'gpt-5.5',cat:'ChatGPT plan',desc:endpoint('https://chatgpt.com/backend-api/codex','/responses')},
+                   {label:'gpt-5.5-mini',cat:'ChatGPT plan',desc:endpoint('https://chatgpt.com/backend-api/codex','/responses')}],
+        next:()=> 'review'},
+      {id:'review',kind:'review',title:'Review\n2 models from ChatGPT.',
+        facts:()=>[['Source','ChatGPT · subscription'],['Models','2'],['Key','Account sign-in'],['First model','gpt-5.5']],
+        actions:()=>['Add these models','Start over']},
+    ],(a,fl)=>{fl.endTitle='Connected\ngpt-5.5 is now this session’s model.';});
+    return{flow:f,key:k=>f.key(k),panel:()=>f.panel()};
+  });
+scene('C · 订阅登录','sub-opencode','订阅登录：OpenCode Go（device_code）',
+  '设备码流程：显示验证码与授权地址，后台轮询；进度行走 <code>ConnectProgress</code> 的实时行。'
+  +'码不是密钥，明文显示。',()=>{
+    const b=new PB();
+    b.headLabel('Sign in with OpenCode\nOpen https://opencode.ai/auth and enter this code.');
+    b.blank();b.text(IND(),'QK7M-2PLX',Object.assign(sty('252'),{b:1}));b.blank();
+    b.text(IND(),'Waiting for you to confirm the code in OpenCode…',DIM);
+    b.hint('Esc to cancel');
+    const p=b.panel();
+    return{key:()=>{},panel:()=>p};
+  });
+scene('C · 订阅登录','sub-volcengine','订阅登录：火山方舟（设备码 + 自动打开浏览器）',
+  '选中订阅后先确认一次，然后<b>自动打开浏览器</b>：打开的就是 <code>verification_uri_complete</code>，code 已预填。'
+  +'面板只显示 URL、code 与倒计时，<b>没有粘码框</b>；浏览器里确认后轮询自动完成（同一 client_id 的 STS 进库）。',()=>{
+    const f=new Flow([
+      {id:'c',kind:'confirm',default:false,noNext:'cancel',
+        title:'Sign in with Volcengine Ark\nForebrain Harness opens your browser to sign in, then offers the models your plan includes.'},
+      {id:'wait',kind:'info',title:'Sign in with Volcengine Ark',
+        body:['','Opening your browser…','','If it did not open, visit: https://signin.volcengine.com/authorize/oauth/authorize',
+          '','Code:  QK7M-2PLX','','Waiting for you to confirm in the browser · expires in 9:41'],
+        hint:'Enter when signed in · Esc to cancel',next:()=> 'offers'},
+      {id:'offers',kind:'picker',multi:true,preselect:()=>[0,1],
+        title:'Volcengine Ark\nChoose the models to add; each row shows where requests go.',
+        items:()=>offerItems(),next:()=> 'key'},
+      {id:'key',kind:'picker',title:'Coding Plan has two active keys\nPick the one these models use.',
+        items:()=>[{label:'api-key-20261102',desc:'••••d410'},{label:'team-ci',desc:'••••7b03'}],next:()=> 'review'},
+      {id:'review',kind:'review',title:'Review\nModels from Volcengine Ark.',
+        facts:a=>[['Source','Volcengine Ark · subscription'],['Plans','Coding Plan · Personal, Agent Plan · Personal'],
+          ['Models',String((a.offers||[]).length)],['Coding Plan key',a.key===1?'team-ci · ••••7b03':'api-key-20261102 · ••••d410']],
+        actions:()=>['Add these models','Start over']},
+    ],(a,fl)=>{fl.endTitle='Connected\nThe first selected model is now this session’s model.';});
+    return{flow:f,key:k=>f.key(k),panel:()=>f.panel()};
+  });
+scene('C · 订阅登录','sub-volcengine-headless','订阅登录：火山方舟（无图形环境，同一套设备码）',
+  'SSH 会话或 <code>DISPLAY</code>/<code>WAYLAND_DISPLAY</code> 都为空：不尝试打开浏览器，URL 与 code 照常显示，仍在任意设备确认后自动完成——<b>不是粘码流程</b>。',()=>{
+    const f=new Flow([
+      {id:'wait',kind:'info',title:'Sign in with Volcengine Ark',
+        body:['','Open this URL on any device: https://signin.volcengine.com/authorize/oauth/authorize',
+          '','Code:  QK7M-2PLX','','Waiting for you to confirm · expires in 9:41'],
+        hint:'Enter when signed in · Esc to cancel',next:()=> 'offers'},
+      {id:'offers',kind:'picker',multi:true,preselect:()=>[0,1],
+        title:'Volcengine Ark\nChoose the models to add; each row shows where requests go.',
+        items:()=>offerItems(),next:()=> 'done'},
+    ],(a,fl)=>{fl.endTitle='Connected\nThe first selected model is now this session’s model.';});
+    return{flow:f,key:k=>f.key(k),panel:()=>f.panel()};
+  });
+scene('C · 订阅登录','sub-offers','订阅登录：按套餐勾选模型（Offers 多选）',
+  '每个套餐一个分组标题，行首 <code>●</code>/<code>○</code>，说明列是该 Plan 的 Anthropic 端点。'
+  +'Coding Plan 个人版 Key 池有两把 Active Key 时，下一步单选一把；Agent Plan 个人版用专属 Key，团队版用席位 Key，都不问用户。',
+  ()=>{
+    const st=newPick(offerItems(),{multi:true,selected:[0,1]});
+    return{key:k=>pickKey(st,k),panel:()=>pickPanel('Volcengine Ark\nChoose the models to add; each row shows where requests go.',st)};
+  });
+scene('C · 订阅登录','sub-createkey','订阅登录：空 Key 池 → 确认创建一把',
+  '只有用户明确同意才创建；名称 <code>forebrain-YYYYMMDDHHmmss</code>。'
+  +'面板同时说明这把 Key 会出现在方舟控制台（链接按 cn-beijing），拒绝不写任何模型行、可去控制台自建后重新登录。',()=>{
+    const b=new PB();
+    b.headLabel('This plan has no API key\nCreate one key named forebrain-20261107153000?');
+    b.blank();
+    b.text(IND(),'The key is created in your Volcengine Ark account. See it in the console:',DIM);
+    b.text(IND(),'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',DIM);
+    b.blank();
+    b.text(IND(),'If you decline, nothing is saved. Create one there yourself, then sign in again — the flow will use it.',DIM);
+    b.hint('Y to confirm · N or Enter to decline · Esc to go back');
+    const p=b.panel();return{key:()=>{},panel:()=>p};
+  });
+
+/* ---- D. 自定义模型 ---- */
+scene('D · 自定义模型','custom','自定义模型：完整流程',
+  '顺序：Base URL → 协议（必选，第四项 Custom protocol = 原样请求地址）→ 显示 <code>Requests go to …</code> → API Key → 模型名 → '
+  +'查不到官方档位时才出现的 Thinking levels 多选 → Test connection → 复核 → 查重。'
+  +'全程不问 provider（恒为 <code>custom</code>）；模型名原样发送。',connectFlow('custom-base'));
+scene('D · 自定义模型','custom-test-fail','自定义模型：测试连接失败',
+  '失败只给短句，不带响应体、不带密钥；可以返回改地址或 Key，也可以选择不测试直接保存。',()=>{
+    const b=new PB();
+    b.headLabel('Connection failed\n401 unauthorized — check the API key and the base URL.');
+    b.blank();b.text(IND(),'Nothing was saved.',DIM);
+    b.hint('Enter to go back and edit · Esc to cancel');
+    const p=b.panel();return{key:()=>{},panel:()=>p};
+  });
+scene('D · 自定义模型','custom-duplicate','保存前查重：替换 Key？',
+  '四元组（provider / model / base URL / api path）相同即命中；<code>Y</code> 只更新这一行的 Key，'
+  +'<code>N</code> 或 Enter 回到复核页。默认是否，防止误覆盖。',()=>{
+    const b=new PB();
+    b.headLabel('Already configured\nThis provider, model, base URL and path are already configured. Replace its key?');
+    b.hint('Y to confirm · N or Enter to decline · Esc to go back');
+    const p=b.panel();return{key:()=>{},panel:()=>p};
+  });
+
+/* ---- E. 计划审批（exit_plan_mode） ---- */
+const BOLD=Object.assign(sty(null),{b:1});
+const FAINT=Object.assign(sty(null),{f:1});
+
+// 候选模型 = turn.PlanReviewModelOptions(cfg, agent)：配置顺序、去重，每行带
+// 自己的请求端点（provider/model 可重复，端点才是区分它们的东西）。当前会话
+// 模型是 deepseek/deepseek-v4-flash（见 MODEL_FOOT），列表里在名字后面标 ●。
+// efforts/defaultEffort = 这一行模型在模型页配的思考强度档位与默认档（计划 310）：
+// 演示数据刻意覆盖三种行——① 有默认档 + 多档（deepseek/openai/volcengine）；
+// ② 一档都没配（anthropic，efforts:[]，选完模型直接提交、不进第二屏）；
+// ③ 没配默认档但有多档（zhipuai，defaultEffort:''，第二屏首项是 Default）。
+const GATE_MODELS=[
+  {provider:'deepseek',model:'deepseek-v4-flash',current:true,
+    base:'https://api.deepseek.com',path:'/chat/completions',
+    efforts:['minimal','low','medium','high','xhigh','max'],defaultEffort:'high'},
+  {provider:'zhipuai',model:'glm-5.3',
+    base:'https://open.bigmodel.cn/api/anthropic',path:'/v1/messages',
+    efforts:['low','medium','high','xhigh'],defaultEffort:''},
+  {provider:'anthropic',model:'claude-opus-4-1',
+    base:'https://api.anthropic.com',path:'/v1/messages',
+    efforts:[],defaultEffort:''},
+  {provider:'openai',model:'gpt-5.5',
+    base:'https://api.openai.com/v1',path:'/chat/completions',
+    efforts:['none','minimal','low','medium','high','xhigh','max'],defaultEffort:'medium'},
+  {provider:'volcengine',model:'doubao-seed-2.1-pro',
+    base:'https://ark.cn-beijing.volces.com/api/coding',path:'/v1/messages',
+    efforts:['low','medium','high'],defaultEffort:'high'},
+  {provider:'moonshot',model:'kimi-k2',
+    base:'https://api.moonshot.cn/v1',path:'/chat/completions',
+    efforts:['low','medium','high'],defaultEffort:'medium'},
+  {provider:'qwen',model:'qwen3-max',
+    base:'https://dashscope.aliyuncs.com/compatible-mode/v1',path:'/chat/completions',
+    efforts:['minimal','low','medium','high','xhigh'],defaultEffort:''},
+  {provider:'google',model:'gemini-3-pro',
+    base:'https://generativelanguage.googleapis.com/v1beta',path:'/models/gemini-3-pro:generateContent',
+    efforts:['low','medium','high'],defaultEffort:'high'},
+  {provider:'minimax',model:'minimax-m2',
+    base:'https://api.minimax.chat/v1',path:'/chat/completions',
+    efforts:['low','medium','high','xhigh'],defaultEffort:'high'},
+];
+const modelLabel=m=>m.provider+'/'+m.model;
+// 思考强度第二屏（计划 310）：英文显示名逐字对齐 frontend/src/locales 的 en 表
+// 与 lib/effortLabel.ts，排序对齐 EFFORT_LEVELS（none 在前）。注意 /connect 向导
+// 用的 LEVELS（末项 Provider default，无 none/Default）是另一套选项集合，这里不复用；标签表已按 2026-11-17 审计统一（xhigh→xHigh）。
+const EFFORT_LEVELS=['none','minimal','low','medium','high','xhigh','max'];
+const EFFORT_EN={none:'Off',minimal:'Minimal',low:'Low',medium:'Medium',high:'High',xhigh:'xHigh',max:'Max'};
+const effortEn=id=>id===''?'Default':(EFFORT_EN[id]||id);
+// effortOptions 与 EffortChip.vue 的 optionsList 同构：known 按 EFFORT_LEVELS 排，
+// 源后加的档位排在 known 之后；value 只在显示名与档位 id 大小写无关地不同时双写
+// （英文里只有 Off↔none 会双写）；fromSetting 标在行配置的那一档。showDefault：
+// 审批第二屏没有会话存档位，只看行有没有配默认档；/model 第二步另看会话钉值
+// （传入 sessionEffort：'' 表示会话没钉值）。
+function effortOptions(model,sessionEffort){
+  const efforts=model.efforts||[];
+  const known=EFFORT_LEVELS.filter(l=>efforts.includes(l));
+  const extra=efforts.filter(l=>!EFFORT_LEVELS.includes(l));
+  const configured=model.defaultEffort||'';
+  const showDefault=(sessionEffort!==undefined&&sessionEffort==='')||configured==='';
+  const ids=showDefault?['',...known,...extra]:[...known,...extra];
+  return ids.map(id=>{
+    const label=effortEn(id);
+    return {id,label,
+      value:id!==''&&label.toLowerCase()!==id.toLowerCase()?id:'',
+      fromSetting:id!==''&&id===configured};
+  });
+}
+const GATE_PLAN=[
+  '# 计划审批面板的评审模型选择器',
+  '',
+  '窄屏下评审列表折行后选中项会被截掉，问句和列表也不再对齐；先改成两段布局再谈样式。',
+  '',
+  '## 步骤',
+  '1. 每项改成「模型名 + 端点」两段布局',
+  '2. 68 列下仍能选中每一项',
+  '',
+  '## 验收',
+  '`go test ./pkg/tui` 通过',
+];
+// 计划正文是 markdown：`code` 段用 214，其余按行折。原文字里的空格照抄
+// （中文和 code 段之间没有空格就不插空格），折行只在空格处断；超宽的长句
+// （中文）按列硬折。
+function richRows(text,width){
+  width=Math.max(1,width);
+  const rows=[];let cur=new LB(),pending='';
+  const place=(word,st)=>{
+    const w=sw(word);
+    if(w>width){
+      if(cur.w){rows.push(cur);cur=new LB();}
+      pending='';
+      const chunks=hardWrap(word,width);
+      chunks.slice(0,-1).forEach(c=>rows.push(LB.of(c,st||TXT)));
+      cur=LB.of(chunks[chunks.length-1],st||TXT);
+      return;
+    }
+    const sep=pending&&cur.w?sw(pending):0;
+    if(cur.w>0&&cur.w+sep+w>width){rows.push(cur);cur=new LB();pending='';}
+    if(pending&&cur.w)cur.add(pending);
+    cur.add(word,st||TXT);
+    pending='';
+  };
+  String(text).split('`').forEach((seg,i)=>{
+    const st=i%2?WARN:null;
+    (seg.match(/\s+|\S+/g)||[]).forEach(tok=>{
+      if(/^\s+$/.test(tok)){pending=tok;return;}
+      place(tok,st);
+    });
+  });
+  if(cur.w)rows.push(cur);
+  return rows.length?rows:[LB.of('')];
+}
+
+// buildApprovalContent 的 exit_plan_mode 分支：标题 → 计划 →
+// Would you like to proceed? → verdict 行 / 评审模型选择器 → 按键提示。
+function gateContent(st,cols){
+  const width=cols-2, rows=[];
+  const push=l=>{rows.push(l);return rows.length-1;};
+  const blank=()=>push(LB.of(''));
+  const rule=()=>push(LB.of(rep('─',width),FAINT));
+  const text=(s,style)=>{
+    richRows(s,width).forEach(l=>{
+      if(style)l.parts.forEach(p=>{p.st=style;});
+      push(l);
+    });
+  };
+  push(LB.of('Tool approval',BOLD));
+  push(LB.of('Tool: exit_plan_mode'));
+  blank();
+  push(LB.of('Here is the plan:'));
+  rule();
+  GATE_PLAN.forEach(row=>{
+    if(!row){blank();return;}
+    if(row.startsWith('# ')){text(row.slice(2),BOLD);return;}
+    if(row.startsWith('## ')){text(row.slice(3),BOLD);return;}
+    text(row);
+  });
+  rule();
+  // 选择器展开时，问句顶掉「Would you like to proceed?」（面板一次只问一件事，
+  // 模型列表占着按键时 proceed 无法回答）——与 overlays.go 的问句 switch 一致。
+  if(!st.picking&&!st.effortPicking){
+    push(LB.of('Would you like to proceed?'));
+    blank();
+  }
+  const sel=[];let questionRow=-1,caretRow=-1,caretCol=-1;
+  if(st.effortPicking){
+    // 第二屏：问句带上选中的模型名，单列 ❯ 光标（不是模型列表那套分栏）。
+    // 每行 = 英文显示名 + 可选双写档位 id（仅显示名与 id 不同才写）+ 可选
+    // 齿轮图标 ⚙ 标记（标在行配置的那一档）。问句过窄时按列折行。
+    // 问句与档位列表之间空一行（owner 反馈 F；评审/交接/无默认档三场景共用此分支）。
+    questionRow=rows.length;
+    text('Which reasoning effort should '+modelLabel(st.effortModel)+' use? (Esc to go back)');
+    blank();
+    st.effortOptions.forEach((o,i)=>{
+      const on=i===st.effortCursor;
+      const line=LB.of(on?'❯ ':'  ',on?ACC:TXT).add(o.label,TXT);
+      if(o.value)line.add('  '+o.value,DIM);
+      if(o.fromSetting)line.add(' ⚙',ACC);
+      push(line);
+      if(on)sel.push(rows.length-1);
+    });
+    blank();
+    push(LB.of('Esc to go back · Enter to confirm',FAINT));
+  }else if(st.picking){
+    questionRow=push(LB.of(st.purpose==='handoff'
+      ?'Which model should carry out this plan? (Esc to go back)'
+      :'Which model should review this plan? (Esc to go back)'));
+    // 过滤条：可选行 ≥8 才出现（pickerFilterMinRows），与 /model 同一套三行条
+    // （空 pad / 文本 / 空 pad）；问句与过滤条之间、过滤条与列表之间各空一行
+    // （owner 反馈 E，与 /model layout 的 head→blank→field→blank→body 一致）。
+    // 键盘在过滤条时硬件 caret 反显、列表的 ❯ 消失（一个选择器要么显示光标要么显示 ❯，不同时）。
+    const visible=st.filtered.map(i=>st.models[i]);
+    const showsFilter=st.models.length>=8;
+    if(showsFilter){
+      blank();
+      push(fieldPad(width));
+      const fidx=push(fieldRow({text:st.filter,cursor:st.fc,placeholder:'Type to filter',
+        glyph:GLYPH_FILTER,blurred:!st.inFilter},width));
+      push(fieldPad(width));
+      blank();
+      if(st.inFilter){
+        caretRow=fidx;
+        caretCol=fieldTextCol(GLYPH_FILTER)+sw([...st.filter].slice(0,st.fc).join(''));
+        sel.push(fidx);
+      }
+    }
+    // 与 01 页的 /model 选择器同一套分栏：名字列按最长模型名定宽（上限 40、
+    // 且不超行宽 2/5），说明列隔 2 格、是完整请求 URL，过窄时从 base 中部
+    // 省略但保住路径；任一名字超列宽则整列表上下堆叠。行首只有 ❯ 与名字，
+    // 没有序号；当前会话模型在名字后面标 ●。
+    const nameW=Math.min(40,visible.reduce((w,m)=>Math.max(w,sw(modelLabel(m))),0));
+    const nameRoom=Math.max(1,Math.floor((width-(2+2))*2/5));
+    const stack=visible.some(m=>sw(modelLabel(m))>Math.min(nameW,nameRoom));
+    if(!visible.length)push(LB.of('  No matches'));
+    visible.forEach((m,i)=>{
+      const on=i===st.pickCursor;
+      const mark=on&&!st.inFilter;
+      const start=rows.length;
+      lineRows({lead:LB.of(mark?'❯ ':'  ',mark?ACC:TXT),col:modelLabel(m),colWidth:nameW,
+        text:endpoint(m.base,m.path),style:TXT,elide:true,path:m.path,
+        mark:m.current?{glyph:'●',style:ACC}:null},width,stack).forEach(l=>rows.push(l));
+      if(on)sel.push(start);
+    });
+    blank();
+    push(LB.of(st.purpose==='handoff'
+      ?'Esc to go back · Enter to hand off'
+      :'Esc to go back · Enter to request the review',FAINT));
+  }else{
+    gateOptions(st).forEach((label,i)=>{
+      const on=i===st.cursor;
+      push(LB.of(on?'> ':'  ',on?BOLD:null).add((i+1)+'. '+label));
+      if(on)sel.push(rows.length-1);
+    });
+    blank();
+    push(LB.of('Esc to decline · ctrl+e to explain · ? for keys',FAINT));
+  }
+  return{rows,questionRow,sel,caretRow,caretCol};
+}
+
+// buildExitPlanChoices：行的顺序规则是「同意类在前 → No → 评审类」
+// （owner 2026-11-10）。数字键跟随可见行变化；y/n/m 仍按语义跳行。
+// handOff = 会话项目根在 git 仓库内且有其他模型；previous = 上一次
+// 可续聊的评审模型（display 名）。
+function gateOptions(st){
+  const opts=[
+    'Yes, clear context (37% used) and proceed',
+    'Yes, proceed',
+  ];
+  if(st.handOff&&st.models.length)opts.push('Yes, hand off to another model');
+  opts.push('No, keep planning');
+  if(st.models.length){
+    opts.push('Ask another model to review this plan');
+    if(st.previous)opts.push('Ask '+st.previous+' to review it again');
+  }
+  return opts;
+}
+// 行号随条件变化，跳行键按下标找而不是写死。
+const gateReviewRow=st=>gateOptions(st).indexOf('Ask another model to review this plan');
+const gateHandOffRow=st=>gateOptions(st).indexOf('Yes, hand off to another model');
+const gateAgainRow=st=>gateOptions(st).findIndex(l=>l.startsWith('Ask ')&&l.endsWith(' to review it again'));
+
+// exit gate 的工具步骤不画卡（tool.ToolStepHoldsNoCard）：transcript 里只有
+// assistant 的调用行，审批面板直接接在它下面。
+function gateTranscript(cols){
+  const rule=()=>{const l=LB.of('',sty('245','238'));l.pad(cols-1,sty('245','238'));return l;};
+  return [rule(),
+    (()=>{const l=LB.of('› ',sty('74','238'))
+      .add('把计划审批的评审模型选择器补进原型，窄屏也要能选中每一项',sty('252','238'));
+      l.pad(cols-1,sty(null,'238'));return l;})(),
+    rule(),LB.of(''),
+    LB.of('● ',Object.assign(sty('45'),{b:1})).add('计划已经写好，提交给你决定。'),
+    LB.of(''),
+    LB.of('● calling exit_plan_mode')];
+}
+
+// 审批 overlay 顶掉 composer：上方分隔线常驻，内容区 = 行数 − ⌊行数/3⌋ − 1。
+// 默认贴底（verdict 行永远可见）；选择器首帧从问句行起画，之后只把选中行
+// 带进视野（移动最小距离）。
+function gateScreen(st,cols){
+  const H=40, maxContent=H-Math.floor(H/3)-1;
+  const c=gateContent(st,cols);
+  const maxTop=Math.max(0,c.rows.length-maxContent);
+  st.lastRows=c.rows.length;st.lastRoom=maxContent;
+  let top;
+  if(st.freeScroll){
+    top=clamp(st.scrollTop,0,maxTop);
+  }else if(st.picking||st.effortPicking){
+    top=st.shown?clamp(st.scrollTop,0,maxTop):(c.questionRow>=0?c.questionRow:0);
+  }else{
+    top=maxTop;
+  }
+  if(!st.freeScroll&&c.sel.length){
+    const s=c.sel[0];
+    if(s+1>top+maxContent)top=s+1-maxContent;
+    if(s<top)top=s;
+  }
+  top=clamp(top,0,maxTop);
+  if(!st.freeScroll)st.scrollTop=top;
+  if(st.picking||st.effortPicking)st.shown=true;
+  const visible=c.rows.slice(top,top+maxContent);
+  const trans=gateTranscript(cols);
+  const room=H-(visible.length+1);
+  const shown=trans.slice(Math.max(0,trans.length-room));
+  const lines=[...shown];
+  // 会话短于可见区时，空行落在正文下方、分隔线上方（显示区顶对齐）。
+  for(let i=shown.length;i<room;i++)lines.push(LB.of(''));
+  lines.push(RULE(cols),...visible);
+  // 过滤条聚焦时把硬件 caret 落到过滤文本行（网格坐标 = transcript + 分隔线 + 内容行）。
+  let caret=null;
+  if(c.caretRow>=0&&c.caretRow>=top&&c.caretRow<top+maxContent)
+    caret=[shown.length+1+(c.caretRow-top),c.caretCol];
+  return{lines,caret};
+}
+
+function gateState(opts){
+  opts=opts||{};
+  const firstOther=()=>{
+    for(let i=0;i<GATE_MODELS.length;i++)if(!GATE_MODELS[i].current)return i;
+    return 0;
+  };
+  const state={
+    models:opts.models?opts.models.slice():GATE_MODELS.slice(),
+    // 两个演示状态：handOff = 项目在 git 仓库内且有其他模型；
+    // previous = 上一次可续聊的评审模型（display 名）。
+    handOff:opts.handOff!==false,
+    previous:opts.previous!==undefined?opts.previous:'zhipuai/glm-5.3',
+    cursor:0,pickCursor:firstOther(),picking:!!opts.picking,purpose:'review',
+    effortPicking:false,effortCursor:0,effortModel:null,effortOptions:[],
+    filter:'',fc:0,inFilter:false,filtered:[],
+    shown:false,freeScroll:false,scrollTop:0,lastRows:0,lastRoom:1,
+    requested:'',handed:'',decidedEffort:'',
+    scrollKeys:true,   // PgUp/PgDn/Home/End 归审批面板，不留给页面滚动
+    screen(cols){return gateScreen(state,cols);},
+    note(){
+      if(state.effortPicking)return '为 '+modelLabel(state.effortModel)+' 选思考强度 · Esc 回到模型列表';
+      if(state.picking)return state.purpose==='handoff'
+        ?'选择执行模型 · Esc 回到 verdict 行'
+        :'选择评审模型 · Esc 回到 verdict 行';
+      const eff=state.decidedEffort?' · effort: '+state.decidedEffort:'';
+      if(state.requested)return '已请求 '+state.requested+' 评审'+eff;
+      if(state.handed)return '已交给 '+state.handed+' 执行'+eff;
+      const reviewRow=gateReviewRow(state);
+      if(reviewRow>=0&&state.cursor===reviewRow)return '评审行 · Enter 选择评审模型';
+      return '';
+    },
+    key(k){
+      // 滚动键先把面板从"自动跟随"里摘出来，避免下一次重绘把翻页撤销。
+      // 过滤条聚焦时 Home/End 归 caret 移动（见 picking 分支），不滚动面板。
+      if(k==='PgUp'||k==='PgDn'||((k==='Home'||k==='End')&&!(state.picking&&state.inFilter))){
+        const maxTop=Math.max(0,state.lastRows-state.lastRoom);
+        if(k==='PgUp')state.scrollTop=Math.max(0,state.scrollTop-10);
+        else if(k==='PgDn')state.scrollTop=Math.min(maxTop,state.scrollTop+10);
+        else if(k==='Home')state.scrollTop=0;
+        else state.scrollTop=maxTop;
+        state.freeScroll=true;
+        return;
+      }
+      state.freeScroll=false;
+      // 第二屏（思考强度）：Esc 回到模型列表（选中的模型不丢），Enter 才决定。
+      if(state.effortPicking){
+        if(k==='Esc'){state.effortPicking=false;state.picking=true;state.shown=false;return;}
+        if(k==='Enter'){
+          const m=state.effortModel,o=state.effortOptions[state.effortCursor];
+          state.decidedEffort=o&&o.id!==''?effortEn(o.id):'';
+          if(state.purpose==='handoff'){if(m)state.handed=modelLabel(m);}
+          else{if(m)state.requested=modelLabel(m);}
+          state.effortPicking=false;state.picking=false;state.shown=false;
+          return;
+        }
+        if(k==='Up'||k==='k')state.effortCursor=Math.max(0,state.effortCursor-1);
+        else if(k==='Down'||k==='j')state.effortCursor=Math.min(state.effortOptions.length-1,state.effortCursor+1);
+        return;
+      }
+      if(state.picking){
+        const showsFilter=state.models.length>=8;
+        const visible=state.filtered;
+        if(k==='Esc'){state.picking=false;state.shown=false;state.inFilter=false;return;}
+        if(k==='Enter'){
+          // 过滤后一个都不命中不是答案：选择器停在原处，不提交没看见的模型。
+          if(!visible.length)return;
+          const m=state.models[visible[state.pickCursor]];
+          const levels=(m&&m.efforts)||[];
+          // 行配了档位才进第二屏；一档都没配（efforts:[]）选完模型直接提交。
+          // 跳过与否看原始档位数，不是 effortOptions 的长度——后者在行没配默认
+          // 档时总会补一个 Default 项。
+          if(levels.length){
+            const opts=effortOptions(m);
+            state.effortModel=m;state.effortOptions=opts;
+            let c=opts.findIndex(o=>o.fromSetting);if(c<0)c=0;
+            state.effortCursor=c;state.effortPicking=true;state.shown=false;
+            return;
+          }
+          // 评审请求不是 verdict：审批仍挂着，面板回到 verdict 行，选中项留在原行。
+          // 交接选择是批准：选中的行就是这次审批的答案（确认行由真机打出）。
+          state.decidedEffort='';
+          if(state.purpose==='handoff'){if(m)state.handed=modelLabel(m);}
+          else{if(m)state.requested=modelLabel(m);}
+          state.picking=false;state.shown=false;
+          return;
+        }
+        if(k==='Up'||k==='Down'){
+          const d=k==='Up'?-1:1;
+          if(state.inFilter){if(d>0&&visible.length){state.inFilter=false;state.pickCursor=0;}}
+          else if(d<0&&state.pickCursor<=0&&showsFilter){state.inFilter=true;state.pickCursor=0;}
+          else state.pickCursor=clamp(state.pickCursor+d,0,Math.max(0,visible.length-1));
+          return;
+        }
+        // 有过滤条时 printable 字符（含 j/k、空格）一律进过滤条，与 /model 一致；
+        // 短列表（<8）没有过滤条才保留 j/k 单键导航。
+        if(!showsFilter){
+          if(k==='k')state.pickCursor=Math.max(0,state.pickCursor-1);
+          else if(k==='j')state.pickCursor=Math.min(visible.length-1,state.pickCursor+1);
+          return;
+        }
+        if(k==='Backspace'){
+          if(!state.inFilter&&!state.filter)return;
+          state.inFilter=true;
+          const a=[...state.filter];
+          if(state.fc>0){a.splice(state.fc-1,1);state.fc--;state.filter=a.join('');rebuildFilter();}
+          return;
+        }
+        if(k==='Left'){if(state.inFilter)state.fc=Math.max(0,state.fc-1);return;}
+        if(k==='Right'){if(state.inFilter)state.fc=Math.min([...state.filter].length,state.fc+1);return;}
+        if(k==='Home'){if(state.inFilter)state.fc=0;return;}
+        if(k==='End'){if(state.inFilter)state.fc=[...state.filter].length;return;}
+        if(k.length===1){
+          state.inFilter=true;
+          const a=[...state.filter];a.splice(state.fc,0,k);state.fc++;state.filter=a.join('');
+          rebuildFilter();return;
+        }
+        return;
+      }
+      const open=(purpose)=>{
+        if(!state.models.length)return;
+        state.cursor=purpose==='handoff'?gateHandOffRow(state):gateReviewRow(state);
+        state.picking=true;state.purpose=purpose;state.shown=false;
+        state.filter='';state.fc=0;state.inFilter=false;rebuildFilter();
+        state.pickCursor=firstOther();
+      };
+      if(k==='m'||k==='M'){open('review');return;}
+      const max=gateOptions(state).length-1;
+      if(k==='Enter'){
+        // 评审行与交接行都不是 verdict：它们展开选择器，审批继续挂着
+        // （交接的选择回来时才决定）。再评审行直接续聊，不展开选择器。
+        if(state.models.length&&state.cursor===gateReviewRow(state))open('review');
+        else if(state.cursor===gateHandOffRow(state))open('handoff');
+        else if(state.cursor===gateAgainRow(state))state.requested=state.previous+'（续聊）';
+        return;
+      }
+      if(k==='Up'||k==='k')state.cursor=Math.max(0,state.cursor-1);
+      else if(k==='Down'||k==='j')state.cursor=Math.min(max,state.cursor+1);
+      else if(/^[1-9]$/.test(k)){
+        const i=+k-1;
+        if(i<=max)state.cursor=i;
+      }
+    },
+  };
+  // 过滤：名字或端点命中即留下，最佳匹配在前，光标重锚到首项（与 applyPlanReviewFilter 一致）。
+  const rebuildFilter=()=>{
+    const q=state.filter.trim().toLowerCase();
+    const ranks={};state.filtered=[];
+    state.models.forEach((m,i)=>{
+      const r=rank(modelLabel(m),endpoint(m.base,m.path),q);
+      if(r<0)return;
+      state.filtered.push(i);ranks[i]=r;
+    });
+    state.filtered.sort((a,b)=>ranks[a]-ranks[b]);
+    state.pickCursor=0;
+  };
+  rebuildFilter();
+  if(opts.picking){state.cursor=gateReviewRow(state);state.pickCursor=firstOther();}
+  return state;
+}
+
+scene('E · 计划审批','exit-plan','exit_plan_mode：审批面板（计划 + 六行 verdict）',
+  '面板 = <code>Tool approval</code> + <code>Tool: exit_plan_mode</code> + 计划 + <code>Would you like to proceed?</code> + verdict 行；'
+  +'40 行终端里内容区 26 行；这份计划在三种宽度下都放得下（<code>68</code> 列看正文折行，面板高度不变），'
+  +'计划更长时内容贴底、verdict 行永远可见。'
+  +'行的顺序是<b>同意类在前 → No → 评审类</b>：清空上下文 / 直接执行 / 交接（只在 git 仓库且有其他模型时）/ 继续规划 / 请其他模型评审 / 请上一次的模型再评审（只在有可续聊的上一次评审时）。'
+  +'数字键 <code>1..9</code> 跟随可见行；按 <code>3</code> 回车进交接选择器，按 <code>5</code> 回车进评审选择器，按 <code>6</code> 回车直接续聊上一次的评审。',
+  ()=>gateState({}));
+scene('E · 计划审批','exit-plan-pick','选评审模型：/model 的分栏列表 + 过滤条',
+  '选择器不是新面板：问句<b>顶掉</b>「Would you like to proceed?」（面板一次只问一件事，模型列表占着按键时 proceed 无法回答），transcript 一个字都不变，审批仍是 pending。'
+  +'列表用 <code>01</code> 页 <code>/model</code> 的同一套分栏：<code>❯</code> 之后直接是 <code>provider/model</code>（<b>行首没有序号</b>），'
+  +'说明列隔 2 格、是<b>完整请求 URL</b>（过窄时从 base 中部省略，路径保住）；列表里只有这个会话已配置的模型，不提供新增入口。'
+  +'可选行 <b>≥8</b> 时问句下<b>空一行</b>出现<b>过滤条</b>（与 <code>/model</code> 同一套三行条：<code>⌕ Type to filter</code>，过滤条后再空一行接列表）；输入即按名字或端点过滤、最佳匹配在前、光标重锚首项。'
+  +'当前会话模型在名字后面标 <code>●</code>（accent 110）：图标连同前面一格空格正好填进名字列与说明列之间的 2 格间距，说明列照样对齐。'
+  +'默认预选<b>第一个非当前模型</b>；<code>↑/↓</code> 移动（光标在首行再按 <code>↑</code> 进过滤条），有过滤条时字母键一律进过滤条（<code>j/k</code> 也是输入）；'
+  +'<code>Esc</code> 回到 verdict 行、选中项留在评审行，<code>Enter</code> 请求评审。首帧把问句带到视野顶端，之后按键只把选中行带进视野。',
+  ()=>gateState({picking:true}));
+scene('E · 计划审批','exit-plan-filter','选评审模型：过滤中（❯ 与 caret 互斥）',
+  '键盘在过滤条时：glyph 变 accent、文本变亮、caret 反显，列表里的 <code>❯</code> 消失（一个选择器要么显示光标要么显示 ❯，不同时）。'
+  +'这里输入了 <code>ark</code>：只有端点含 ark 的火山方舟行命中，光标重锚到首项；过滤条按<b>打开时的行数</b>判定是否显示，不会随列表变窄而消失。'
+  +'<code>↓</code> 把键盘交回列表（❯ 回来），<code>Backspace</code> 删字、<code>←/→</code> 移 caret，<code>Esc</code> 直接回 verdict 行。',
+  ()=>{const st=gateState({picking:true});st.key('a');st.key('r');st.key('k');return st;});
+scene('E · 计划审批','exit-plan-handoff','交接：同一个选择器，问句与提示不同',
+  '交接行打开的是<b>同一个</b>模型选择器（同一套分栏、同一套光标规则，当前模型也照选）：问句换成 '
+  +'<code>Which model should carry out this plan? (Esc to go back)</code>，提示换成 <code>Esc to go back · Enter to hand off</code>。'
+  +'选中回车即批准并把计划交给该模型执行：主代理当技术负责人，派一个执行子代理在 <code>.worktrees/</code> 下的独立 worktree 里实施、自己验收，不碰当前分支。',
+  ()=>{const st=gateState({});st.cursor=gateHandOffRow(st);st.picking=true;st.purpose='handoff';return st;});
+scene('E · 计划审批','exit-plan-no-review','空配置：只有三行 verdict',
+  '该会话没有任何已配置模型时，交接行与评审行整行都不出现——不是灰掉，也不是点了报错；<code>j/k</code> 只在这三行之间走，'
+  +'<code>m</code> 不响应。',
+  ()=>gateState({models:[],handOff:false,previous:''}));
+scene('E · 计划审批','exit-plan-effort','评审第二屏：选思考强度（光标在行默认档）',
+  '在评审选择器里选中一个<b>配了档位</b>的模型回车，不立即请求评审，而是进第二屏问思考强度。'
+  +'问句带上模型名：<code>Which reasoning effort should deepseek/deepseek-v4-flash use? (Esc to go back)</code>。'
+  +'单列 <code>❯</code> 光标（不是模型列表那套分栏）：每行是英文显示名，显示名与档位 id 不同时双写 id（英文里只有 <code>Off none</code>），'
+  +'行配置的那一档标齿轮图标 <code>⚙</code>。审批第二屏没有会话存档位，光标落在<b>行的默认档</b>（这里是 <code>High</code>）。'
+  +'<code>↑/↓</code>、<code>j/k</code> 移动，<code>Enter</code> 请求评审（审批仍 pending），<code>Esc</code> 回到模型列表、选中的模型不丢，再 <code>Esc</code> 才回 verdict 行。',
+  ()=>{const st=gateState({picking:true});st.pickCursor=0;st.key('Enter');return st;});
+scene('E · 计划审批','exit-plan-effort-handoff','交接第二屏：同一个思考强度选择器，提示不同',
+  '交接行打开的模型选择器选中模型回车后，进的是<b>同一个</b>思考强度第二屏：问句、单列光标、双写与齿轮图标 <code>⚙</code> 标记都与评审第二屏一致，'
+  +'底部提示同样是 <code>Esc to go back · Enter to confirm</code>。回车即批准并把计划交给该模型执行（确认行由真机打出，会带上选中的档位）；'
+  +'<code>Esc</code> 回到模型列表、再 <code>Esc</code> 回 verdict 行。',
+  ()=>{const st=gateState({});st.cursor=gateHandOffRow(st);st.picking=true;st.purpose='handoff';st.pickCursor=0;st.key('Enter');return st;});
+scene('E · 计划审批','exit-plan-effort-default','第二屏：行没配默认档 → 首项 Default',
+  '选中的模型（<code>zhipuai/glm-5.3</code>）没配默认档：第二屏首项是 <code>Default</code>（不钉任何档、交给 provider 自己决定），光标落在它上面，'
+  +'没有齿轮图标 <code>⚙</code>。若选中的模型一档都没配（如 <code>anthropic/claude-opus-4-1</code>，<code>efforts:[]</code>），'
+  +'则<b>不进第二屏</b>，选完模型直接请求评审/交接。',
+  ()=>{const st=gateState({picking:true});st.pickCursor=1;st.key('Enter');return st;});
+
+/* ---- F. 边界 ---- */
+scene('F · 边界','onboarding','首次启动：同一套面板 + Step 头',
+  '首次设置是整页（standalone）：品牌行 + 右侧 <code>Step n of 4</code> + accent 进度条；'
+  +'面板、过滤条、两组/三组规则与 <code>/connect</code> 完全一致，只有标题换成欢迎语。',
+  ()=>{
+    const st=newPick([
+      ...SUBS.map(s=>({label:s.label,cat:'Sign in with a subscription',desc:s.hint})),
+      ...PROVIDERS.map(p=>({label:p.label,cat:'Use an API key',desc:p.hint})),
+      {label:'Custom model',cat:'Custom',desc:'OpenAI- or Anthropic-compatible, or custom protocol'},
+    ],{});
+    return{standalone:true,page:1,pages:4,
+      key:k=>pickKey(st,k),
+      panel:()=>pickPanel('Welcome to Forebrain Harness\nFirst, connect the model it runs on. /connect changes it any time.',st)};
+  });
+scene('F · 边界','empty','空态：没有配置任何模型',
+  '没有模型时不开选择器，直接回复并指向入口；过滤无命中时列表位置显示 <code>No matches</code>。',()=>{
+    const lines=[
+      LB.of('$ /model',TXT),LB.of(''),
+      LB.of('This agent has no models configured.',TXT),LB.of(''),
+      LB.of('Add a model with /connect, or on the web Models page.',TXT),
+    ];
+    return{key:()=>{},panel:()=>null,plain:lines};
+  });
+
+/* =====================================================================
+ * 驱动
+ * ===================================================================== */
+let CUR_SCENE=null, CUR_STATE=null, COLS=120;
+function buildNav(){
+  const nav=$('#nav');let g='';
+  nav.innerHTML=SCENES.map((s,i)=>{
+    const gh=s.group!==g?`<div class="g">${s.group}</div>`:'';
+    g=s.group;
+    return gh+`<button data-i="${i}" class="${i===0?'on':''}"><span class="n">${String(i+1).padStart(2,'0')}</span>${s.title}</button>`;
+  }).join('');
+  nav.addEventListener('click',e=>{
+    const b=e.target.closest('button[data-i]');if(!b)return;
+    go(SCENES[+b.dataset.i].id);
+  });
+}
+function go(id){
+  const i=SCENES.findIndex(s=>s.id===id);if(i<0)return;
+  CUR_SCENE=SCENES[i];CUR_STATE=CUR_SCENE.make();
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',SCENES[+b.dataset.i].id===id));
+  $('#sceneTitle').textContent=CUR_SCENE.title;
+  $('#cap').innerHTML=CUR_SCENE.cap;
+  render();
+}
+function render(){
+  if(!CUR_SCENE)return;
+  let scr;
+  if(CUR_STATE.plain)scr=plainScreen(CUR_STATE.plain,COLS);
+  else if(CUR_STATE.screen)scr=CUR_STATE.screen(COLS);
+  else{
+    const panel=CUR_STATE.panel();
+    scr=CUR_STATE.standalone?standaloneScreen(panel,COLS,CUR_STATE.page,CUR_STATE.pages)
+      :overlayScreen(panel,COLS,'');
+  }
+  const grid=paint(scr.lines,COLS);
+  $('#grid').innerHTML=gridHTML(grid,scr.caret);
+  $('#termTitle').textContent='forebrain — '+COLS+'×40 · '+CUR_SCENE.id;
+  $('#termKeys').textContent=CUR_STATE.note?CUR_STATE.note():'';
+}
+document.addEventListener('keydown',e=>{
+  if(!CUR_STATE||!CUR_STATE.key)return;
+  if(e.metaKey||e.ctrlKey||e.altKey)return;
+  let k=e.key;
+  if(k==='ArrowUp')k='Up';else if(k==='ArrowDown')k='Down';
+  else if(k==='ArrowLeft')k='Left';else if(k==='ArrowRight')k='Right';
+  else if(k==='Escape')k='Esc';
+  else if(k==='PageUp')k='PgUp';else if(k==='PageDown')k='PgDn';
+  else if(k==='Home')k='Home';else if(k==='End')k='End';
+  // 翻页键只在计划审批里被面板吃掉；其它场景留给浏览器滚动页面。
+  if(['PgUp','PgDn','Home','End'].includes(k)&&!CUR_STATE.scrollKeys)return;
+  if(['Up','Down','Left','Right','Enter','Esc','Backspace',' ','PgUp','PgDn','Home','End'].includes(k)||k.length===1){
+    e.preventDefault();
+    CUR_STATE.key(k);
+    render();
+  }
+});
+document.querySelectorAll('.dims button').forEach(b=>b.addEventListener('click',()=>{
+  COLS=+b.dataset.w;
+  document.querySelectorAll('.dims button').forEach(x=>x.classList.toggle('on',x===b));
+  render();
+}));
+buildNav();go('model');
+</script>
+</body>
+</html>

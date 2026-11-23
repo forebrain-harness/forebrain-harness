@@ -73,8 +73,8 @@ manifest-report.md
 pkg/migrate/testdata/**/.DS_Store
 
 # Plan documents are owner-local, never committed:
-docs/plan/
-plans/
+# docs/plan/
+# plans/
 .workbuddy/
 # Subscription plugins (qodercn, workbuddy, …) are in-tree source, and the two
 # import bridges generated from them (cmd/forebrain/plugins_local_gen.go,

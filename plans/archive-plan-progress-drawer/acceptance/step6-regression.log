@@ -1,0 +1,57 @@
+=== Step 6 — package regression + vet ===
+date: 2026-10-30T06:48:32Z
+
+NOTE: the worktree has no third_party/pdfium; every command here exports the repo Makefile's own cgo wiring:
+  PKG_CONFIG_PATH=/Users/doudou/workspace/unionj-cloud/forebrain-harness/third_party/pdfium/darwin_arm64
+  CGO_CFLAGS=-I$dir/include CGO_LDFLAGS=-L$dir/lib -lpdfium
+
+$ FOREBRAIN_HOME="$(mktemp -d)" CGO_ENABLED=1 go test -tags fts5 ./pkg/tui -count=1
+
+--- FAIL: TestOnboardConfiguresLLMWhenMissing (0.06s)
+--- FAIL: TestOnboardEscGoesBackAPage (0.06s)
+--- FAIL: TestConfigureOpenCodeGoOffersPerModelEffortLevels (0.04s)
+FAIL
+FAIL	github.com/forebrain-harness/forebrain-harness/pkg/tui	79.695s
+FAIL
+
+exit 1. Every FAIL is a pre-existing baseline failure, attributed below:
+--- FAIL: TestOnboardConfiguresLLMWhenMissing (0.06s)
+    chat_session_test.go:28825: run error: open state database: unable to open database file: no such file or directory
+--- FAIL: TestOnboardEscGoesBackAPage (0.06s)
+    chat_session_test.go:28938: run error: open state database: unable to open database file: no such file or directory
+INFO agent load skills=1 mcp_generation=981e9500a88f mcp_pending=false
+--
+--- FAIL: TestConfigureOpenCodeGoOffersPerModelEffortLevels (0.04s)
+    setup_test.go:1072: save the OpenCode Go setup: open state database: unable to open database file: no such file or directory
+WARN model catalog seed failed err="models.json is missing beside the binary (/private/var/folders/kw/mf8l2_c564b0m8qzhj073s940000gn/T/go-build3059737656/b001); install it with scripts/install-assets.sh /private/var/folders/kw/mf8l2_c564b0m8qzhj073s940000gn/T/go-build3059737656/b001"
+
+-- attribution: the SAME three tests, run on a pristine tree of the baseline commit
+   (git archive 202ed4f2 -> /tmp/fb-baseline-202ed4f2; it contains none of this feature's code):
+# github.com/forebrain-harness/forebrain-harness/pkg/tui.test
+--- FAIL: TestOnboardConfiguresLLMWhenMissing (0.08s)
+    chat_session_test.go:28817: run error: open state database: unable to open database file: no such file or directory
+--- FAIL: TestOnboardEscGoesBackAPage (0.07s)
+    chat_session_test.go:28930: run error: open state database: unable to open database file: no such file or directory
+--- FAIL: TestConfigureOpenCodeGoOffersPerModelEffortLevels (0.04s)
+    setup_test.go:1072: save the OpenCode Go setup: open state database: unable to open database file: no such file or directory
+FAIL
+FAIL	github.com/forebrain-harness/forebrain-harness/pkg/tui	1.677s
+FAIL
+
+   Root cause (out of scope: pkg/process + pkg/state): 202ed4f2 moved runtime config into the state DB,
+   process.SaveConfig opens <home>/state/forebrain.state.sqlite, and state.Open never creates the
+   parent directory, so a fresh temp home fails. The owner is already fixing exactly these files
+   (uncommitted edits to pkg/process/runtime.go, pkg/tui/setup_test.go, deleted pkg/process/config_io_test.go).
+
+$ CGO_ENABLED=1 go vet ./...
+
+# github.com/forebrain-harness/forebrain-harness/pkg/process
+# [github.com/forebrain-harness/forebrain-harness/pkg/process]
+vet: pkg/process/config_io_test.go:15:14: undefined: ProviderAPIKeyConfigReference
+exit 1 — pre-existing too: the pristine baseline fails identically:
+# github.com/forebrain-harness/forebrain-harness/pkg/process
+# [github.com/forebrain-harness/forebrain-harness/pkg/process]
+vet: pkg/process/config_io_test.go:15:14: undefined: ProviderAPIKeyConfigReference
+
+$ CGO_ENABLED=1 go vet ./pkg/tui   # the package this feature changes
+exit 0

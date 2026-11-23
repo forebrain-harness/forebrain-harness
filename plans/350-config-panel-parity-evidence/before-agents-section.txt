@@ -1,0 +1,44 @@
+
+╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮
+┆                                                                                              ┆
+┆                         Forebrain Harness              v0.1.2-0.20261122015002-fb4fd2945ca7  ┆
+┆                         ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  ┆
+┆                         /private/var/folders/kw/mf8l2_c564b0m8qzhj073s940000gn/T/fb350/proj  ┆
+┆                                                                                              ┆
+┆                         / commands        @ mention                                          ┆
+┆                         esc interrupt     ctrl+j newline                                     ┆
+┆                                                                                              ┆
+╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯
+
+
+
+
+
+
+
+
+
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Agents
+  Manage definitions, shared defaults.
+
+  DEFINITIONS ────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Agent definitions             Manage each primary agent and its own configuration.                         1 entries
+
+  DEFAULTS ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Built-in subagents            The 6 built-in subagent types, always on. Each carries an          0 of 6 types pinned
+                                install-wide model and thinking level; an agent may override
+                                them.
+
+  Network retries               Zero disables network retries.                                             10 attempts
+
+  Stream idle timeout           Zero disables the watchdog. Positive values below 10 run as 10.            300 seconds
+
+  Enable subagents              Allow the primary agent to delegate work.                                          Off
+
+  Warn below remaining context  Allowed range: 1–50 %.                                                            12 %
+
+  ↓ 3 more
+  ↑/↓ to navigate Enter to confirm Esc to cancel

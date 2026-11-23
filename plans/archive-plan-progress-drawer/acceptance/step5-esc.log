@@ -1,0 +1,76 @@
+=== Step 5 — Esc priority + lifecycle (run.go, three insertion points) ===
+date: 2026-10-30T06:21:35Z
+
+$ FOREBRAIN_HOME="$(mktemp -d)" CGO_ENABLED=1 go test -tags fts5 ./pkg/tui -run 'TestPlanDrawer.*|TestWorkingStatusFormatterIncludesSpinnerElapsedAndEscapeInterruptHint' -count=1 -v
+
+# github.com/forebrain-harness/forebrain-harness/pkg/tui.test
+=== RUN   TestPlanDrawerWidth
+--- PASS: TestPlanDrawerWidth (0.00s)
+=== RUN   TestPlanDrawerLayoutRowsFillTheTerminalWidth
+--- PASS: TestPlanDrawerLayoutRowsFillTheTerminalWidth (0.00s)
+=== RUN   TestPlanDrawerLayoutTitleAndCloseSpan
+--- PASS: TestPlanDrawerLayoutTitleAndCloseSpan (0.00s)
+=== RUN   TestPlanDrawerLayoutLongTitleKeepsTheCloseControl
+--- PASS: TestPlanDrawerLayoutLongTitleKeepsTheCloseControl (0.00s)
+=== RUN   TestPlanDrawerLatestFrame
+--- PASS: TestPlanDrawerLatestFrame (0.00s)
+=== RUN   TestPlanDrawerContent
+--- PASS: TestPlanDrawerContent (0.00s)
+=== RUN   TestPlanDrawerContentWrapsCJKLines
+--- PASS: TestPlanDrawerContentWrapsCJKLines (0.00s)
+=== RUN   TestPlanDrawerScroll
+--- PASS: TestPlanDrawerScroll (0.00s)
+=== RUN   TestPlanDrawerScrollHintRowBudget
+--- PASS: TestPlanDrawerScrollHintRowBudget (0.00s)
+=== RUN   TestPlanDrawerSplitNarrowsTheHistoryAndKeepsTheComposer
+--- PASS: TestPlanDrawerSplitNarrowsTheHistoryAndKeepsTheComposer (0.00s)
+=== RUN   TestPlanDrawerSplitReflowsTheHistory
+--- PASS: TestPlanDrawerSplitReflowsTheHistory (0.00s)
+=== RUN   TestPlanDrawerSplitKeepsTheReaderPosition
+--- PASS: TestPlanDrawerSplitKeepsTheReaderPosition (0.00s)
+=== RUN   TestPlanDrawerSplitSurvivesAnOverlay
+--- PASS: TestPlanDrawerSplitSurvivesAnOverlay (0.00s)
+=== RUN   TestPlanDrawerSplitJumpStaysLeft
+--- PASS: TestPlanDrawerSplitJumpStaysLeft (0.00s)
+=== RUN   TestPlanDrawerSplitUserCardReachesTheDivider
+--- PASS: TestPlanDrawerSplitUserCardReachesTheDivider (0.00s)
+=== RUN   TestPlanDrawerSplitCloseRestoresTheLayout
+--- PASS: TestPlanDrawerSplitCloseRestoresTheLayout (0.00s)
+=== RUN   TestPlanDrawerSplitClosedByViewSwitchAndSessionReset
+--- PASS: TestPlanDrawerSplitClosedByViewSwitchAndSessionReset (0.00s)
+=== RUN   TestPlanDrawerProgressTokenIsTheEntry
+--- PASS: TestPlanDrawerProgressTokenIsTheEntry (0.00s)
+=== RUN   TestPlanDrawerTruncatedTokenHasNoHotZone
+--- PASS: TestPlanDrawerTruncatedTokenHasNoHotZone (0.00s)
+=== RUN   TestPlanDrawerCloseControlClosesIt
+--- PASS: TestPlanDrawerCloseControlClosesIt (0.00s)
+=== RUN   TestPlanDrawerClickInsideIsConsumed
+--- PASS: TestPlanDrawerClickInsideIsConsumed (0.00s)
+=== RUN   TestPlanDrawerOutsideClickOnlyCloses
+--- PASS: TestPlanDrawerOutsideClickOnlyCloses (0.00s)
+=== RUN   TestPlanDrawerWheelScrollsTheList
+--- PASS: TestPlanDrawerWheelScrollsTheList (0.00s)
+=== RUN   TestPlanDrawerHoverHighlightsOnlyTheToken
+--- PASS: TestPlanDrawerHoverHighlightsOnlyTheToken (0.00s)
+=== RUN   TestPlanDrawerHoverCloseControl
+--- PASS: TestPlanDrawerHoverCloseControl (0.00s)
+=== RUN   TestPlanDrawerSelectionDoesNotReachUnderIt
+--- PASS: TestPlanDrawerSelectionDoesNotReachUnderIt (0.00s)
+=== RUN   TestPlanDrawerEscClosesItBeforeTheCancelPaths
+=== RUN   TestPlanDrawerEscClosesItBeforeTheCancelPaths/active_run
+=== RUN   TestPlanDrawerEscClosesItBeforeTheCancelPaths/idle
+=== RUN   TestPlanDrawerEscClosesItBeforeTheCancelPaths/blocking_slash
+=== RUN   TestPlanDrawerEscClosesItBeforeTheCancelPaths/roster_first
+--- PASS: TestPlanDrawerEscClosesItBeforeTheCancelPaths (0.00s)
+    --- PASS: TestPlanDrawerEscClosesItBeforeTheCancelPaths/active_run (0.00s)
+    --- PASS: TestPlanDrawerEscClosesItBeforeTheCancelPaths/idle (0.00s)
+    --- PASS: TestPlanDrawerEscClosesItBeforeTheCancelPaths/blocking_slash (0.00s)
+    --- PASS: TestPlanDrawerEscClosesItBeforeTheCancelPaths/roster_first (0.00s)
+=== RUN   TestWorkingStatusFormatterIncludesSpinnerElapsedAndEscapeInterruptHint
+--- PASS: TestWorkingStatusFormatterIncludesSpinnerElapsedAndEscapeInterruptHint (0.00s)
+PASS
+ok  	github.com/forebrain-harness/forebrain-harness/pkg/tui	1.316s
+
+exit 0; --- PASS count = 28 (incl. subtests); --- FAIL count = 0
+
+--- re-run after the hover-test extension: --- PASS count = 28; --- FAIL count = 0; exit 0

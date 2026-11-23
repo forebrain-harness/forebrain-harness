@@ -1,0 +1,151 @@
+
+=== Step 7 check 3 — a click inside the drawer keeps it open; the wheel scrolls the list, not the transcript ===
+
+--- click inside the list at (100,10):
+                                                                                │ ● Updated Plan                     ×
+┆                         / commands        @ mention                        ┆  │ □ tmux 真机 A/B 验收
+(row 1 still carries the drawer title + ×: the drawer is still open)
+
+--- transcript offset before/after a wheel notch over the drawer at (100,10):
+╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮  │ ✓ 归档计划并保留完整中文长路径，验证
+╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮  │ ✓ 归档计划并保留完整中文长路径，验证
+(the 7-item list is shorter than the 33-row body, so it cannot scroll and the notch falls through to the transcript — the transcript start is unchanged, which is the fall-through rule)
+
+=== Step 7 check 6 — resize to 80 columns with the drawer open (drawer 32, W/2 cap), then back to 120 ===
+
+--- tmux resize-window -x 80 -y 40 while the drawer is open:
+     1	╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮  │ ● Updated Plan             ×
+     2	┆                                            ┆  │ ✓ 归档计划并保留完整中文长路
+     3	┆  Forebrain Harness                (devel)  ┆  │   径，验证历史与抽屉都自动软
+     4	┆  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄  ┆  │   换行而不截断
+     5	┆  /private/var/folders/kw                   ┆  │ ✓ 构建修复前二进制
+     6	┆  /mf8l2_c564b0m8qzhj073s940000gn/T         ┆  │ ✓ 新增回归测试
+     7	┆  /forebrain-run-plan-drawer/proj           ┆  │ ▣ 修改
+     8	┆                                            ┆  │   pkg/tui/input_events.go 的
+     9	┆  / commands        @ mention               ┆  │   鼠标交互并验证 hover
+    10	┆  esc interrupt     ctrl+j newline          ┆  │ □ 验证中文、路径和很长的事项
+    11	┆                                            ┆  │   正文在右侧抽屉中完整换行显
+    12	╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯  │   示，不出现省略号
+    13	                                                │ □ tmux 真机 A/B 验收
+    14	─────────────────────────────────────────────── │ □ 收口并清理临时环境
+    15	› 建立七项待办并保留足够长的历史消息用于分栏重  │
+    16	  排验收                                        │
+    17	─────────────────────────────────────────────── │
+    18	                                                │
+    19	● calling session_todo                          │
+    20	                                                │
+    21	● Updated Plan                                  │
+    22	  修改 pkg/tui/input_events.go 的鼠标交互       │
+    23	  并验证 hover                                  │
+    24	  ✓ 归档计划并保留完整中文长路径，验证历史      │
+    25	  与抽屉都自动软换行而不截断                    │
+    26	  ✓ 构建修复前二进制                            │
+    27	  ✓ 新增回归测试                                │
+    28	  ▣ 修改 pkg/tui/input_events.go 的鼠标交       │
+    29	  互并验证 hover                                │
+    30	  □ 验证中文、路径和很长的事项正文在右侧抽      │
+    31	  屉中完整换行显示，不出现省略号                │
+    32	  □ tmux 真机 A/B 验收                          │
+    33	  □ 收口并清理临时环境                          │
+    35	\ Working (59s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input_events.go 的鼠…
+    36	                                            Image in clipboard · ctrl+v to paste
+    37	───────────────────────────────────────────────────────────────────────────────
+    38	›
+    39	───────────────────────────────────────────────────────────────────────────────
+    40	deepseek/deepseek-v4-flash                                               100%/1M
+
+--- row widths at 80 (display columns per non-empty row, tmux already trimmed trailing blanks):
+1: 175
+2: 99
+3: 97
+4: 156
+5: 84
+6: 78
+7: 66
+8: 85
+9: 85
+10: 99
+11: 97
+12: 170
+13: 78
+14: 177
+15: 75
+16: 54
+17: 145
+18: 51
+19: 53
+20: 51
+
+--- the list fits the 33-row body at 120x40, so the list's own scrolling needs a shorter window: 80x18 makes the 32-column list overflow.
+--- 80x18, drawer open, before any notch:
+     1	  并验证 hover                                  │ ● Updated Plan             ×
+     2	  ✓ 归档计划并保留完整中文长路径，验证历史      │ ✓ 归档计划并保留完整中文长路
+     3	  与抽屉都自动软换行而不截断                    │   径，验证历史与抽屉都自动软
+     4	  ✓ 构建修复前二进制                            │   换行而不截断
+     5	  ✓ 新增回归测试                                │ ✓ 构建修复前二进制
+     6	  ▣ 修改 pkg/tui/input_events.go 的鼠标交       │ ✓ 新增回归测试
+     7	  互并验证 hover                                │ ▣ 修改
+     8	  □ 验证中文、路径和很长的事项正文在右侧抽      │   pkg/tui/input_events.go 的
+     9	  屉中完整换行显示，不出现省略号                │   鼠标交互并验证 hover
+    10	  □ tmux 真机 A/B 验收                          │ □ 验证中文、路径和很长的事项
+    11	  □ 收口并清理临时环境                          │ 4 below
+    13	| Working (1m 22s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input_events.go 的…
+    14	                                            Image in clipboard · ctrl+v to paste
+    15	───────────────────────────────────────────────────────────────────────────────
+    16	›
+    17	───────────────────────────────────────────────────────────────────────────────
+    18	deepseek/deepseek-v4-flash                                               100%/1M
+
+--- one wheel notch DOWN over the drawer [<65;60;5M:
+     1	  并验证 hover                                  │ ● Updated Plan             ×
+     2	  ✓ 归档计划并保留完整中文长路径，验证历史      │ ✓ 构建修复前二进制
+     3	  与抽屉都自动软换行而不截断                    │ ✓ 新增回归测试
+     4	  ✓ 构建修复前二进制                            │ ▣ 修改
+     5	  ✓ 新增回归测试                                │   pkg/tui/input_events.go 的
+     6	  ▣ 修改 pkg/tui/input_events.go 的鼠标交       │   鼠标交互并验证 hover
+     7	  互并验证 hover                                │ □ 验证中文、路径和很长的事项
+     8	  □ 验证中文、路径和很长的事项正文在右侧抽      │   正文在右侧抽屉中完整换行显
+     9	  屉中完整换行显示，不出现省略号                │   示，不出现省略号
+    10	  □ tmux 真机 A/B 验收                          │ □ tmux 真机 A/B 验收
+    11	  □ 收口并清理临时环境                          │ 3 above · 1 below
+    13	| Working (1m 23s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input_events.go 的…
+    14	                                            Image in clipboard · ctrl+v to paste
+    15	───────────────────────────────────────────────────────────────────────────────
+    16	›
+    17	───────────────────────────────────────────────────────────────────────────────
+    18	deepseek/deepseek-v4-flash                                               100%/1M
+
+--- restore 80x40 with the drawer still open:
+     1	╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮  │ ● Updated Plan             ×
+     2	┆                                            ┆  │ ✓ 归档计划并保留完整中文长路
+    12	╰┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╯  │   示，不出现省略号
+    13	                                                │ □ tmux 真机 A/B 验收
+    14	─────────────────────────────────────────────── │ □ 收口并清理临时环境
+    15	› 建立七项待办并保留足够长的历史消息用于分栏重  │
+    16	  排验收                                        │
+    17	─────────────────────────────────────────────── │
+    18	                                                │
+    19	● calling session_todo                          │
+    20	                                                │
+    35	- Working (1m 37s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input_events.go 的…
+    36	
+    37	───────────────────────────────────────────────────────────────────────────────
+    38	›
+    39	───────────────────────────────────────────────────────────────────────────────
+    40	deepseek/deepseek-v4-flash                                               100%/1M
+
+--- restore 120x40:
+     1	                                                                                │ ● Updated Plan                     ×
+     2	╭┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄╮  │ ✓ 归档计划并保留完整中文长路径，验证
+     3	┆                                                                            ┆  │   历史与抽屉都自动软换行而不截断
+    28	  □ tmux 真机 A/B 验收                                                          │
+    29	  □ 收口并清理临时环境                                                          │
+    30	                                                                                │
+    31	                                                                                │
+    32	                                                                                │
+    33	                                                                                │
+    35	| Working (1m 38s • esc to interrupt) · ☑3/7 · 修改 pkg/tui/input_events.go 的鼠标交互并验证 hover · first token 0.1s
+    37	───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    38	›
+    39	───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    40	deepseek/deepseek-v4-flash                                                                                       100%/1M

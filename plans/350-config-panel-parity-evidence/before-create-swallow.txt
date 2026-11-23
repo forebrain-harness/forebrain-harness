@@ -1,0 +1,18 @@
+
+  Display name                                                                               Default           Default
+
+  Description       Describe the role of this agent.                                         Default           Default
+
+  Primary           Set when the definition was created; it cannot be changed afterwards.                           On
+
+  System prompt     Appended to the end of the built-in system prompt. It never replaces     Default           Default
+                    it.
+
+  Model             Pick a row from the global model table (/connect or        Follow global default           Default
+                    Settings → Models). A primary agent has no provider list
+                    of its own.
+
+  MCP servers       Agent-specific entries augment or override shared servers.               Default           Default
+
+  ↓ 3 more
+  ↑/↓ to navigate Enter to confirm Esc to cancel

@@ -1,0 +1,22 @@
+=== Step 1 verification: hover input protocol
+$ FOREBRAIN_HOME=$(mktemp -d) CGO_ENABLED=1 go test -tags fts5 ./pkg/tui -run Test(MouseTracking|MouseEventFromSGR|MouseSequences|ReaderKeepsAPending|SanitizeTerminalDraft|StreamStateAppendPasteSanitizesTerminalControls) -count=1
+=== RUN   TestSanitizeTerminalDraftAdjustsCursor
+--- PASS: TestSanitizeTerminalDraftAdjustsCursor (0.00s)
+=== RUN   TestMouseTrackingEnablesAllMotionForHover
+--- PASS: TestMouseTrackingEnablesAllMotionForHover (0.00s)
+=== RUN   TestMouseEventFromSGRDecodesNoButtonMotionAsHover
+--- PASS: TestMouseEventFromSGRDecodesNoButtonMotionAsHover (0.00s)
+=== RUN   TestStreamStateAppendPasteSanitizesTerminalControls
+--- PASS: TestStreamStateAppendPasteSanitizesTerminalControls (0.00s)
+=== RUN   TestReaderKeepsAPendingEscapeAcrossASeed
+--- PASS: TestReaderKeepsAPendingEscapeAcrossASeed (0.36s)
+=== RUN   TestReaderKeepsAPendingHoverReportAcrossASeed
+--- PASS: TestReaderKeepsAPendingHoverReportAcrossASeed (0.36s)
+=== RUN   TestMouseSequencesEnableHoverAndTurnItOffOnExit
+--- PASS: TestMouseSequencesEnableHoverAndTurnItOffOnExit (0.00s)
+=== RUN   TestReaderKeepsAPendingRuneAcrossASeed
+--- PASS: TestReaderKeepsAPendingRuneAcrossASeed (0.36s)
+=== RUN   TestReaderKeepsAPendingEscapeAcrossASeedForKnownKeys
+--- PASS: TestReaderKeepsAPendingEscapeAcrossASeedForKnownKeys (0.39s)
+PASS
+ok  	github.com/forebrain-harness/forebrain-harness/pkg/tui	2.338s

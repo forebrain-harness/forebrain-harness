@@ -1,0 +1,37 @@
+=== Step 7 check 7 — row-edge report with the drawer open, at 120 and at 80 columns ===
+date: 2026-10-30T07:12:27Z
+
+Both captures are 'tmux capture-pane -p -e -N' (SGR kept, trailing spaces kept) and
+measured with an East-Asian-width count after the SGR state machine is applied.
+
+--- 120 columns:
+   rows captured: 38; rows whose display width != 120: none; rows ending in a trailing [K: none
+
+--- 80 columns (drawer 32, left 48):
+   rows captured: 38; rows whose display width != 80: none; rows ending in a trailing [K: none
+
+--- raw row-bytes.py output at 120 (kept for the record):
+   NOTE: the script's "cols" column is a RUNE count, so rows carrying CJK glyphs come out
+   "short of 120 by N" even though their display width is exactly 120 (verified above:
+   row 1 = 103 runes / 120 columns, row 2 = 105 runes / 120 columns). Read those warnings
+   as a table artifact of the script for wide glyphs, not as a gap in the row.
+   row   0 cols=120 last-sgr[39 fg=141]  tail='                     ×  '
+   row   1 cols=103 last-sgr[]  tail='\x1b[0m 归档计划并保留完整中文长路径，验证  '
+         ^ short of 120 columns by 17
+   row   2 cols=105 last-sgr[]  tail='   历史与抽屉都自动软换行而不截断      '
+         ^ short of 120 columns by 15
+   row   3 cols=112 last-sgr[]  tail='前二进制                    '
+         ^ short of 120 columns by 8
+   row   4 cols=114 last-sgr[]  tail='                        '
+         ^ short of 120 columns by 6
+   row   5 cols=115 last-sgr[39 fg=141]  tail='tui/input_events.go 的鼠标 '
+         ^ short of 120 columns by 5
+   row   6 cols=115 last-sgr[]  tail='over                    '
+         ^ short of 120 columns by 5
+   row   7 cols=103 last-sgr[]  tail='\x1b[0m 验证中文、路径和很长的事项正文在右  '
+         ^ short of 120 columns by 17
+   row   8 cols=103 last-sgr[]  tail='0m   侧抽屉中完整换行显示，不出现省略号  '
+         ^ short of 120 columns by 17
+   row   9 cols=116 last-sgr[]  tail='A/B 验收                  '
+         ^ short of 120 columns by 4
+   row  10 cols=111 last-sgr[]  tail='清理临时环境                  '

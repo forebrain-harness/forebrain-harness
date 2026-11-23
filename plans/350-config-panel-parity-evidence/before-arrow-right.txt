@@ -1,0 +1,24 @@
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Approval & sandbox 3   Session & memory 4   Agents & tools 4
+
+❯ Approval preset     Choose what new sessions may do.
+
+  Workspace sandbox   Control writable paths and network access.
+
+  Batch projects      Set the starting policy for new batch projects.
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Tab to switch ↑/↓ to navigate Enter to confirm Esc to cancel
