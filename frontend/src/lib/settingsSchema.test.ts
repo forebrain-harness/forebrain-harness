@@ -8,12 +8,12 @@ import { beforeAll, describe, expect, it } from 'vitest'
 // and visibility rules. A deviation anywhere is a failing test, not a review
 // note.
 //
-// The source read here is a tracked copy under frontend/, because the owner's
-// prototype lives under docs/plan/, which is gitignored: a fresh checkout has
-// no docs/plan, and a gate CI cannot run does not gate anything. The prototype
-// stays docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/config-db-settings-preview.html;
-// every change to it must land in this copy in the same commit, and the schema
-// change follows both.
+// Both copies of the prototype are tracked, and kept byte-identical: the
+// owner's file under docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/ and the copy
+// read here. The test reads the testdata copy, which needs no path outside
+// frontend/ and so runs wherever the gate runs; every change to the prototype
+// must land in both copies in the same commit, and the schema change follows
+// both.
 import prototypeSource from './testdata/config-db-settings-preview.html?raw'
 
 import {
