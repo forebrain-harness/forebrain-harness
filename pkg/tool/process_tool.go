@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -296,10 +297,37 @@ func processStart(ctx context.Context, st *State, rt *AgentToolRuntime, in *Proc
 	defer manager.Close()
 	runtimeCfg := manager.UpdateConfig(cfg, shellToolSettingsSources(rt, cfg), snap, workDir, workDir, os.TempDir(), sandboxAdditionalDirs(ctx, st))
 	env := append(planModeShellEnv(ctx, rt), agentRuntimeEnv(rt)...)
+	var outputEmitter *shellOutputEmitter
+	if step := StepHookFromContext(ctx, st); step != nil {
+		stepID := ToolStepIDFromContext(ctx)
+		startedAt := ToolStepStartedAtFromContext(ctx)
+		outputEmitter = newShellOutputEmitter(func(stream safety.OutputStream, chunk []byte) {
+			if len(chunk) == 0 {
+				return
+			}
+			step(ctx, StepEvent{
+				Kind:      StepKindToolOutputDelta,
+				StepID:    stepID,
+				ToolName:  "process",
+				StartedAt: startedAt,
+				Input: map[string]any{
+					"command": command,
+					"id":      id,
+				},
+				Output: map[string]any{
+					"stream": string(stream),
+					"chunk":  string(chunk),
+				},
+			})
+		})
+	}
+	defer outputEmitter.Close()
+	// The log keeps every byte; the emitter is the lossy live preview beside it.
 	// Writes go straight to the spool file: the callback runs on the command's
 	// own pipe readers and must return quickly, so it formats nothing.
-	onOutput := func(_ safety.OutputStream, chunk []byte) {
+	onOutput := func(stream safety.OutputStream, chunk []byte) {
 		_, _ = logFile.Write(chunk)
+		outputEmitter.Push(stream, chunk)
 	}
 	req := safety.CommandRequest{
 		ToolKind:       safety.ToolKindShell,
@@ -444,6 +472,105 @@ func processRecordFor(st *State, in *ProcessInput) (*processRecord, error) {
 	return rec, nil
 }
 
+// processLiveTailInterval is how often a blocking wait reads what its process
+// appended to the log since the last read.
+const processLiveTailInterval = 250 * time.Millisecond
+
+// processLogTailer streams a log file forward from the moment a wait starts:
+// the live card is a preview of what is happening now, and the output that
+// predates the call belongs to `log`.
+type processLogTailer struct {
+	path   string
+	offset int64
+	seen   bool
+}
+
+// delta returns the bytes appended since the previous call, bounded per tick so
+// a noisy process cannot make one read unbounded. The first call seeds the
+// offset at the current end and returns nothing.
+func (t *processLogTailer) delta() []byte {
+	f, err := os.Open(t.path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	if !t.seen {
+		t.seen = true
+		t.offset = info.Size()
+		return nil
+	}
+	if info.Size() <= t.offset {
+		return nil
+	}
+	if _, err := f.Seek(t.offset, io.SeekStart); err != nil {
+		return nil
+	}
+	limit := info.Size() - t.offset
+	if limit > liveOutputPendingBytes {
+		limit = liveOutputPendingBytes
+	}
+	buf := make([]byte, limit)
+	n, _ := io.ReadFull(f, buf)
+	if n <= 0 {
+		return nil
+	}
+	t.offset += int64(n)
+	return buf[:n]
+}
+
+// startProcessLiveTail streams rec's log into the live card while a wait polls.
+// The caller defers the returned stop. With no step hook it is a no-op, so a
+// hookless wait behaves exactly as before.
+func startProcessLiveTail(ctx context.Context, st *State, rec *processRecord) func() {
+	step := StepHookFromContext(ctx, st)
+	if step == nil {
+		return func() {}
+	}
+	stepID := ToolStepIDFromContext(ctx)
+	startedAt := ToolStepStartedAtFromContext(ctx)
+	emitter := newShellOutputEmitter(func(stream safety.OutputStream, chunk []byte) {
+		if len(chunk) == 0 {
+			return
+		}
+		step(ctx, StepEvent{
+			Kind:      StepKindToolOutputDelta,
+			StepID:    stepID,
+			ToolName:  "process",
+			StartedAt: startedAt,
+			Input:     map[string]any{"id": rec.id},
+			Output: map[string]any{
+				"stream": string(stream),
+				"chunk":  string(chunk),
+			},
+		})
+	})
+	tailer := &processLogTailer{path: rec.logPath}
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(processLiveTailInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if d := tailer.delta(); len(d) > 0 {
+					// The log interleaves both streams; the card shows one preview.
+					emitter.Push(safety.OutputStreamStdout, d)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		emitter.Close()
+	}
+}
+
 // processWait polls readiness until it holds, the deadline passes or the
 // process exits. A failed wait carries the log tail: it is the only evidence of
 // why the server did not come up.
@@ -459,6 +586,8 @@ func processWait(ctx context.Context, st *State, in *ProcessInput) (string, erro
 			"tail": logTail(rec.logPath, defaultProcessTail), "elapsed_ms": 0,
 		})
 	}
+	stopTail := startProcessLiveTail(ctx, st, rec)
+	defer stopTail()
 	readiness, err := processReadiness(ctx, rec, in)
 	if err != nil {
 		return "", err

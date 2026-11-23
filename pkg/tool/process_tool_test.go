@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -507,6 +508,88 @@ func TestReapOrphanProcessesSurvivesAMalformedLedger(t *testing.T) {
 	// A missing ledger is the ordinary case on a first launch.
 	if killed := ReapOrphanProcesses(t.TempDir()); len(killed) != 0 {
 		t.Fatalf("a missing ledger produced kills: %v", killed)
+	}
+}
+
+// A blocking start+wait must stream the command's output into the live card:
+// the owner stared at an empty output area for the whole wait.
+func TestProcessStartWithWaitStreamsOutputDeltas(t *testing.T) {
+	st, tl, _, projectDir := newProcessToolForTest(t)
+	var deltas []StepEvent
+	st.SetStepHook(func(_ context.Context, evt StepEvent) {
+		if evt.Kind == StepKindToolOutputDelta {
+			deltas = append(deltas, evt)
+		}
+	})
+	ctx := WithToolStepID(processTestContext(projectDir), "process-step-1")
+	started, err := callProcess(t, tl, ctx, ProcessInput{
+		Action: "start", Command: "echo live-process-output", WorkDir: projectDir,
+		Wait: "log", Pattern: "NEVER-READY-MARK", TimeoutMs: 5000,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if len(deltas) == 0 {
+		t.Fatal("a blocking start+wait emitted no output deltas")
+	}
+	var combined strings.Builder
+	for _, evt := range deltas {
+		if evt.StepID != "process-step-1" {
+			t.Fatalf("delta StepID = %q, want process-step-1", evt.StepID)
+		}
+		if evt.ToolName != "process" {
+			t.Fatalf("delta ToolName = %q, want process", evt.ToolName)
+		}
+		chunk, _ := evt.Output["chunk"].(string)
+		combined.WriteString(chunk)
+	}
+	if !strings.Contains(combined.String(), "live-process-output") {
+		t.Fatalf("deltas never carried the command's output: %q", combined.String())
+	}
+	// Await the exit watcher's ledger write so it cannot land during t.TempDir's
+	// RemoveAll (the flake waitForProcessSettled's comment documents); the echo
+	// already exited via the readiness wait's exit branch.
+	waitForProcessSettled(t, processRecordForTest(t, st, processTestID(t, started)))
+}
+
+// A blocking wait on a process an earlier call started must stream what the
+// process appends to its log while the wait polls.
+func TestProcessWaitStreamsLogDeltasWhilePolling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the ticking command is a POSIX shell loop")
+	}
+	st, tl, _, projectDir := newProcessToolForTest(t)
+	ctx := processTestContext(projectDir)
+	started, err := callProcess(t, tl, ctx, ProcessInput{
+		Action: "start", WorkDir: projectDir,
+		Command: `sh -c 'i=0; while [ $i -lt 20 ]; do echo tick-$i; i=$((i+1)); sleep 0.2; done'`,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	id := processTestID(t, started)
+	var deltas []StepEvent
+	st.SetStepHook(func(_ context.Context, evt StepEvent) {
+		if evt.Kind == StepKindToolOutputDelta {
+			deltas = append(deltas, evt)
+		}
+	})
+	waitCtx := WithToolStepID(ctx, "process-step-2")
+	if _, err := callProcess(t, tl, waitCtx, ProcessInput{
+		Action: "wait", ID: id, Wait: "tcp", Address: "127.0.0.1:1", TimeoutMs: 3000,
+	}); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	var combined strings.Builder
+	for _, evt := range deltas {
+		if evt.StepID != "process-step-2" {
+			t.Fatalf("delta StepID = %q, want process-step-2", evt.StepID)
+		}
+		chunk, _ := evt.Output["chunk"].(string)
+		combined.WriteString(chunk)
+	}
+	if !strings.Contains(combined.String(), "tick-") {
+		t.Fatalf("the wait streamed none of the log it tailed: %q", combined.String())
 	}
 }
 
