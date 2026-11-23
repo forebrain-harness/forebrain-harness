@@ -43,9 +43,9 @@ func TestInstall_FirstRun(t *testing.T) {
 	}
 
 	// At least one SKILL.md should exist
-	reviewSkill := filepath.Join(dest, "review", "SKILL.md")
-	if _, err := os.Stat(reviewSkill); err != nil {
-		t.Fatalf("review/SKILL.md not extracted: %v", err)
+	auditSkillFile := filepath.Join(dest, "audit", "SKILL.md")
+	if _, err := os.Stat(auditSkillFile); err != nil {
+		t.Fatalf("audit/SKILL.md not extracted: %v", err)
 	}
 }
 
@@ -279,12 +279,12 @@ func TestExtractEmbedFS_FileContents(t *testing.T) {
 	}
 
 	// Read a known file from embed and from disk, compare
-	embedData, err := assetsFS.ReadFile("system_assets/review/SKILL.md")
+	embedData, err := assetsFS.ReadFile("system_assets/audit/SKILL.md")
 	if err != nil {
 		t.Fatalf("read from embed: %v", err)
 	}
 
-	diskData, err := os.ReadFile(filepath.Join(tmp, "review", "SKILL.md"))
+	diskData, err := os.ReadFile(filepath.Join(tmp, "audit", "SKILL.md"))
 	if err != nil {
 		t.Fatalf("read from disk: %v", err)
 	}
@@ -322,7 +322,6 @@ func TestInstall_AllSkillDirsExtracted(t *testing.T) {
 	// Top-level skills (SKILL.md directly under .system/<name>/).
 	topLevelDirs := []string{
 		"audit",
-		"review",
 		"run",
 		"run-skill-generator",
 		"context-save",
