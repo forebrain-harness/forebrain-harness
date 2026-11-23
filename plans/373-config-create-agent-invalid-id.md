@@ -606,5 +606,18 @@ Esc 后键集不变（无半条定义）。
 5. 本机 env：fresh worktree 需软链 `third_party/{pdfium,libtokenizers}`，且 `CGO_LDFLAGS` 要带
    `-Wl,-rpath,<PDFIUM_DIR>/lib`，否则 `pkg/config` 测试二进制 dyld 起不来（与本次改动无关）。
 
-**未做 / 待 owner**：合并该分支（连同 worktree 的删除）由 owner 决定；`plans/` 落盘与
-`plans/README.md` 索引行由评审方在合并前补。
+**落地（2026-11-23，owner 指令「合并回主树dev分支」）**
+
+- rebase 到 `d3bf8eaf` 后 `--ff-only` 落入 dev：`d3bf8eaf..09a01c80`，提交
+  `09a01c80 fix(tui): stage the subagent create through the panel's one write path`（2 文件 +229/−25，未 push）。
+  patch 指纹 `git diff <base> <head> | shasum -a 256` = `06bf6fbf…`，与评审时逐字节一致；
+  `git diff --stat 09a01c80 dev` 空 ⇒ landed == tested。
+- 首次 ff 曾失败：落盘期间 dev 前进了一条（`a0b049cb → d3bf8eaf fix`，那条把 `plans/370-373` 与
+  `pkg/tui/zz_repro{,2,3}_test.go` 的删除一并提交），rebase 后第二次 ff 成功。
+- **落地后主树亲跑**（dev `09a01c80`）：`go build -tags fts5 ./...` ok；`gofmt -l pkg/tui` 无输出；
+  `go vet -tags fts5 ./pkg/tui` 0；五条 /config 定点用例全 PASS；`pkg/tui` `ok 200.286s`、
+  `pkg/config` `ok 1.435s`。
+- 之后 95 把 `plan-368-explicit-skill-gate` ff 到 `5d400975`（`pkg/run` 四文件，与本计划零交集）。
+- 已知**先前存在**的红（不是本计划引入）：`pkg/architecture TestTestFilesCorrespondToProductionFiles`
+  在 dev 上因 `pkg/tui/deliverables_outcome_test.go`（`80bb73b4` 提交）无同名生产文件而红。
+- worktree `.worktrees/config-agent-create-invalid-id` 与分支按惯例保留，删除由 owner 决定。

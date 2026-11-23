@@ -691,9 +691,9 @@ Stop and report back (do not improvise) if:
 
 ## Implementation Status
 
-状态：**已执行并通过评审（APPROVE）**，2026-11-23。执行器在独立 worktree 落一笔提交，**未合并**（合不合并、何时合并由 owner 决定）。
+状态：**已执行、评审 APPROVE、并 ff-only 落到 `dev`**（2026-11-23，dev `09a01c80..5d400975`，未 push）。
 
-- 落地位置：`.worktrees/plan-368-explicit-skill-gate`，分支 `plan-368-explicit-skill-gate`，基线 `e1abd2f4`（`dev` 尖），提交 `7ccfd239 fix(run): an explicit skill turn is not offered plan mode`（含 DCO `Signed-off-by`）。
+- 落地位置：`.worktrees/plan-368-explicit-skill-gate`，分支 `plan-368-explicit-skill-gate`；基线曾是 `e1abd2f4`，落地前 rebase 两次（`a0b049cb` → `d3bf8eaf` → `09a01c80`，均为他人已评审分支/owner 落盘提交，与 `pkg/run` 零交集、零冲突），最终提交 `5d400975 fix(run): an explicit skill turn is not offered plan mode`（含 DCO `Signed-off-by`）。落地后 `git diff 5d400975` 为空＝landed == tested，`go build -tags fts5 ./...` ok。
 - 漂移检查（派发前由 advisor 亲跑）：`git diff --stat 80bb73b4..HEAD -- pkg/run/{config,skills,config_test,skills_test}.go` **为空**；工作树当时干净。
 
 ### 复现与根因（advisor 自测，先于任何改动）
@@ -741,5 +741,6 @@ Stop and report back (do not improvise) if:
 
 ### 后续（reviewer 需知道）
 
-- 分支与 worktree **保留**：合并（或删除）由 owner 决定，本会话未 push、未合并、未碰 `dev`。
+- 已合并（`git merge --ff-only`，未 push）。分支 `plan-368-explicit-skill-gate` 与 worktree `.worktrees/plan-368-explicit-skill-gate` 仍**保留**，删除是 owner 的决定；worktree 里的 `third_party` 软链与 `pkg/gateway/dist` 复制件都是 gitignore 的环境补齐，删 worktree 时一并消失。
+- rebase 落地后我在最终 tip 上重跑：定点 7 条 PASS、`pkg/run` 整包 `ok 46.340s`、`vet` 0、`gofmt` 净；`pkg/architecture` 的既有红当时只剩 `pkg/tui/deliverables_outcome_test.go`（`80bb73b4` 提交、无同名生产文件，不属本计划）。
 - 若要真机验证，可跑 `/run-forebrain` 以 `/audit` 开一轮，确认不再出现 `enter_plan_mode` 审批卡，且技能能把计划写到项目根 `plans/`。
