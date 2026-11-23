@@ -509,3 +509,34 @@ func TestReapOrphanProcessesSurvivesAMalformedLedger(t *testing.T) {
 		t.Fatalf("a missing ledger produced kills: %v", killed)
 	}
 }
+
+// A start whose readiness wait ends on the process's own exit must not carry
+// the pre-wait running snapshot: exited and running are mutually exclusive.
+func TestProcessStartWithWaitEndingOnExitReportsNotRunning(t *testing.T) {
+	st, tl, _, projectDir := newProcessToolForTest(t)
+	ctx := processTestContext(projectDir)
+	started, err := callProcess(t, tl, ctx, ProcessInput{
+		Action: "start", Command: "echo hi", WorkDir: projectDir,
+		Wait: "log", Pattern: "NEVER-READY-MARK", TimeoutMs: 15000,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if exited, _ := started["exited"].(bool); !exited {
+		t.Fatalf("the readiness wait did not end on the process's exit: %+v", started)
+	}
+	if ready, _ := started["ready"].(bool); ready {
+		t.Fatalf("a process that exited was reported ready: %+v", started)
+	}
+	if running, _ := started["running"].(bool); running {
+		t.Fatalf("an exited process still reports running: %+v", started)
+	}
+	if code, _ := started["exit_code"].(float64); code != 0 {
+		t.Fatalf("exit_code = %v, want 0: %+v", started["exit_code"], started)
+	}
+	// The exit watcher writes the ledger after handle.Done(); await it so that
+	// write cannot land during t.TempDir's RemoveAll (the flake waitForProcessSettled's
+	// comment documents). KillProcesses only reaps still-running processes, so an
+	// already-exited one must be awaited here, exactly like the :101-126 precedent.
+	waitForProcessSettled(t, processRecordForTest(t, st, processTestID(t, started)))
+}

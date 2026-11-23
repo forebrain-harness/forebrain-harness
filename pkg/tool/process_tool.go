@@ -344,6 +344,8 @@ func processStart(ctx context.Context, st *State, rt *AgentToolRuntime, in *Proc
 	for key, value := range readiness {
 		payload[key] = value
 	}
+	// The wait can end on the process's exit; running was snapshotted before it.
+	payload["running"] = !handle.Exited()
 	return marshalProcessResult(payload)
 }
 
