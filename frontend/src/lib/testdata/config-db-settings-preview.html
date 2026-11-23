@@ -533,6 +533,7 @@ const FORMS = {
     G('sww','沙箱可写工作区','',[
       F('sandbox_workspace_write.writable_roots','额外可写目录','list',{ph:'/绝对/路径',add:'添加目录'}),
       F('sandbox_workspace_write.network_access','允许联网','bool',{def:true}),
+      F('sandbox_workspace_write.network_loopback','允许回环访问','bool',{def:true,hint:'断网时仍允许沙箱命令访问 127.0.0.1（沙箱自己启动的服务）'}),
     ],{when:d => d['@preset'] === 'workspace_write'}),
     G('batch','跑批项目','',[F('batch.sandbox_default','启用沙箱','bool',{def:true})],{keepLabel:true}),
   ],

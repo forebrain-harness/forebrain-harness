@@ -17,6 +17,7 @@ describe('SettingsApprovalTab', () => {
         approval_preset: 'workspace_write',
         'sandbox_workspace_write.writable_roots': ['/Users/doudou/.cache/pnpm'],
         'sandbox_workspace_write.network_access': true,
+        'sandbox_workspace_write.network_loopback': true,
         'batch.sandbox_default': true,
       },
       secrets: {},
@@ -68,6 +69,7 @@ describe('SettingsApprovalTab', () => {
     expect(wrapper.find('[data-group="sww"]').exists()).toBe(true)
     expect(wrapper.find('[data-group="sww"]').find('h3').text()).toBe('沙箱可写工作区')
     expect(wrapper.find('[data-field="sandbox_workspace_write.network_access"]').exists()).toBe(true)
+    expect(wrapper.find('[data-field="sandbox_workspace_write.network_loopback"]').exists()).toBe(true)
 
     // The fold follows the form's own value, not the stored one (§0.12).
     await wrapper.findAll('[role="radio"]')[1].trigger('click')

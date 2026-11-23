@@ -168,6 +168,7 @@ export const SETTINGS_FORMS: Record<string, SettingsGroup[]> = {
           addLabelKey: 'settings.addDirectory',
         }),
         field('sandbox_workspace_write.network_access', 'bool', { def: true }),
+        field('sandbox_workspace_write.network_loopback', 'bool', { def: true }),
       ],
       when: (draft) => draft['approval_preset'] === 'workspace_write',
     },
