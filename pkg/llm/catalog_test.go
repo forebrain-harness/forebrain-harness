@@ -188,18 +188,6 @@ func TestReasoningEffortsMergesEffortsInOrder(t *testing.T) {
 	}
 }
 
-// requireRepoAssets points the shipped-catalog lookup at the repository's
-// assets/ directory and restores the environment afterwards.
-func requireRepoAssets(t *testing.T) string {
-	t.Helper()
-	assets, err := RepoAssetsDirForTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(AssetsDirEnv, assets)
-	return assets
-}
-
 // writeShippedCatalog writes a catalog beside a binary — the one place the
 // runtime reads — and points the lookup at it.
 func writeShippedCatalog(t *testing.T, content []byte) string {
@@ -1085,7 +1073,7 @@ func TestCatalogModalitiesFeedTheMediaCapabilities(t *testing.T) {
 }
 
 // stubPluginLLM is the client a test factory hands back.
-type stubPluginLLM struct{ request ProviderLLMRequest }
+type stubPluginLLM struct{}
 
 func (stubPluginLLM) Execute(context.Context, []Message, []*Tool) (*Result, error) { return nil, nil }
 

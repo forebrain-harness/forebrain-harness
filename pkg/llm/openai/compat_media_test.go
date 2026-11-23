@@ -13,8 +13,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
-const compatTestPDF = "%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
-
 // captureCompatBody runs one non-streaming Execute against a fake server and
 // returns the request body it received.
 func captureCompatBody(t *testing.T, messages []llm.Message) ([]byte, error) {
