@@ -1039,6 +1039,16 @@ func windowsEnvironmentBlock(env []string) ([]uint16, error) {
 // PowerShell and cmd are offered for environments without Git Bash or when the
 // user explicitly selects them.
 func hostShellCommand(ctx context.Context, command string, pref string) *exec.Cmd {
+	cmd := selectHostShell(command, pref)
+	// A descendant may inherit the output pipes and outlive the shell; without a
+	// bound, cmd.Wait reads them until every holder exits (DefaultWaitTimeout).
+	cmd.WaitDelay = DefaultWaitTimeout
+	return cmd
+}
+
+// selectHostShell picks the shell one command runs in; hostShellCommand is what
+// bounds the wait for it.
+func selectHostShell(command string, pref string) *exec.Cmd {
 	switch strings.ToLower(strings.TrimSpace(pref)) {
 	case "gitbash", "bash", "sh":
 		if sh := posixShellPath(); sh != "" {
@@ -1153,6 +1163,13 @@ func killProcessGroup(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
+// killCommandGroup ends a command's process tree. Windows has no process-group
+// signal to repeat: taskkill /T walks the tree from the leader's PID once, and
+// there is no group ID that could be recycled, so reaped is not consulted.
+func killCommandGroup(cmd *exec.Cmd, _ <-chan struct{}) {
+	killProcessGroup(cmd)
+}
+
 // waitWithTimeout calls cmd.Wait() but returns after d if Wait has not
 // completed. This prevents descendant processes that inherited our stdout/
 // stderr pipes from causing Wait to block forever after the process group
@@ -1164,6 +1181,11 @@ func waitWithTimeout(cmd *exec.Cmd, d time.Duration) error {
 	}()
 	select {
 	case err := <-errc:
+		// The command ended and a descendant left holding its pipes past
+		// WaitDelay is not a failure of the command (see finalizeExec).
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return nil
+		}
 		return err
 	case <-time.After(d):
 		return nil

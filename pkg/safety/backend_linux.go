@@ -33,6 +33,9 @@ func startBubblewrapCommand(ctx context.Context, cfg *appcfg.Root, req CommandRe
 		req.DeniedReadablePaths = appendUniquePath(req.DeniedReadablePaths, marker.path)
 	}
 	cmd := exec.Command(bwrapPath, buildBubblewrapArgs(cfg, req, workDir)...)
+	// A descendant may inherit the output pipes and outlive the sandbox; without
+	// a bound, cmd.Wait reads them until every holder exits (DefaultWaitTimeout).
+	cmd.WaitDelay = DefaultWaitTimeout
 	cmd.Env = home.SafeSubprocessEnv(nil, home.Options{ExplicitEnv: explicitCommandEnv(req.Env, nil)})
 	capture := newCommandCapture(req)
 	cmd.Stdout = capture.writer(OutputStreamStdout)

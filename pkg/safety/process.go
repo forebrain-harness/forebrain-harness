@@ -208,18 +208,23 @@ func minInt(a, b int) int {
 
 // waitForCommandContext makes process completion and cancellation mutually
 // exclusive. In particular, it prevents a cancellation watcher from killing a
-// recycled process-group ID after Wait has already returned.
+// recycled process-group ID after Wait has already returned: reaped is closed by
+// the waiting goroutine as soon as Wait returns, and that is what withholds the
+// second group signal killCommandGroup sends.
 func waitForCommandContext(ctx context.Context, cmd *exec.Cmd) (processErr, stopErr error) {
+	reaped := make(chan struct{})
 	waitCh := make(chan error, 1)
 	go func() {
-		waitCh <- cmd.Wait()
+		err := cmd.Wait()
+		close(reaped)
+		waitCh <- err
 	}()
 	select {
 	case processErr = <-waitCh:
 		return processErr, nil
 	case <-ctx.Done():
 		stopErr = ctx.Err()
-		killProcessGroup(cmd)
+		killCommandGroup(cmd, reaped)
 		return <-waitCh, stopErr
 	}
 }
@@ -298,7 +303,10 @@ func (s *startedCommand) wait(ctx context.Context) (CommandResult, error) {
 	return finalizeExec(res, waitErr, stopErr)
 }
 
-func (s *startedCommand) kill() {
+// kill ends the command's process tree. reaped is closed once the command has
+// been waited for, which is what stops the second signal from reaching a
+// process-group ID the kernel has already recycled (see killCommandGroup).
+func (s *startedCommand) kill(reaped <-chan struct{}) {
 	if s == nil {
 		return
 	}
@@ -309,7 +317,7 @@ func (s *startedCommand) kill() {
 	if s.cmd == nil {
 		return
 	}
-	killProcessGroup(s.cmd)
+	killCommandGroup(s.cmd, reaped)
 }
 
 // ProcessHandle is a command that was started and not waited for. Holding it is
@@ -382,7 +390,7 @@ func (h *ProcessHandle) Kill() error {
 		return nil
 	default:
 	}
-	h.started.kill()
+	h.started.kill(h.done)
 	return nil
 }
 
@@ -432,7 +440,8 @@ func (h *ProcessHandle) Result() (CommandResult, bool) {
 
 // finalizeExec turns a finished wait into the result the caller sees: a
 // cancelled or timed-out command keeps that shape rather than the signal its
-// own kill produced, and an exit code is what a plain failure reports.
+// own kill produced, an abandoned pipe is the success the command had, and an
+// exit code is what a plain failure reports.
 func finalizeExec(res CommandResult, err, stopErr error) (CommandResult, error) {
 	res.ExitCode = 0
 	if err == nil {
@@ -445,6 +454,13 @@ func finalizeExec(res CommandResult, err, stopErr error) (CommandResult, error) 
 		}
 		res.ExitCode = 1
 		return res, context.Canceled
+	}
+	// ErrWaitDelay is not a failure: it says the command ended and a descendant
+	// it left behind still held the output pipes past WaitDelay, so os/exec
+	// abandoned them. It is only raised when the command itself exited with
+	// status 0, so the command's own outcome is the clean one it had.
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return res, nil
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {

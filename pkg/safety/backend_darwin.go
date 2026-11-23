@@ -37,6 +37,9 @@ func startSeatbeltCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequ
 	_ = profFile.Close()
 
 	cmd := exec.Command("sandbox-exec", "-f", profPath, "/bin/sh", "-lc", req.Command)
+	// A descendant may inherit the output pipes and outlive the sandbox; without
+	// a bound, cmd.Wait reads them until every holder exits (DefaultWaitTimeout).
+	cmd.WaitDelay = DefaultWaitTimeout
 	cmd.Dir = workDir
 	cmd.Env = home.SafeSubprocessEnv(nil, home.Options{ExplicitEnv: explicitCommandEnv(req.Env, nil)})
 	capture := newCommandCapture(req)
