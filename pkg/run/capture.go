@@ -38,9 +38,9 @@ import (
 // modes, not three tools: the tool array renders ahead of the system prompt and
 // sits in the cached prefix, so every entry costs every request.
 type CaptureInput struct {
-	Mode   string `json:"mode" jsonschema:"description=screen captures the whole display, region a rectangle of it, browser loads a URL in a headless browser and captures the page."`
+	Mode   string `json:"mode" jsonschema_description:"screen captures the whole display, region a rectangle of it, browser loads a URL in a headless browser and captures the page."`
 	Path   string `json:"path,omitempty" jsonschema:"description=Where to write the PNG. Default <state root>/state/capture/<id>.png."`
-	Rect   string `json:"rect,omitempty" jsonschema:"description=region: x,y,w,h in pixels."`
+	Rect   string `json:"rect,omitempty" jsonschema_description:"region: x,y,w,h in pixels."`
 	URL    string `json:"url,omitempty" jsonschema:"description=browser: the page to load."`
 	WaitMs int    `json:"wait_ms,omitempty" jsonschema:"description=browser: how long the page may settle before the shot. Default 1500."`
 	Width  int    `json:"width,omitempty" jsonschema:"description=browser: viewport width. Default 1280."`

@@ -25,8 +25,8 @@ import (
 // not five tools: the tool array renders ahead of the system prompt and sits in
 // the cached prefix, so every entry costs every request.
 type ProcessInput struct {
-	Action       string `json:"action" jsonschema:"description=start a command in the background, read its log, wait for it to be ready, kill it, or list what is running."`
-	ID           int    `json:"id,omitempty" jsonschema:"description=The id start returned; required by log, wait and kill."`
+	Action       string `json:"action" jsonschema_description:"start a command in the background, read its log, wait for it to be ready, kill it, or list what is running."`
+	ID           int    `json:"id,omitempty" jsonschema_description:"The id start returned; required by log, wait and kill."`
 	Command      string `json:"command,omitempty" jsonschema:"description=start: the command to run."`
 	WorkDir      string `json:"work_dir,omitempty" jsonschema:"description=start: the directory to run it in. Defaults to the session's project directory."`
 	TimeoutMs    int    `json:"timeout_ms,omitempty" jsonschema:"description=start with wait: give up on readiness after this long. wait: give up after this long. Default 120000."`

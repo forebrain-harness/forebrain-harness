@@ -255,6 +255,7 @@ var configSectionSchemas = []configSectionSchema{
 		Fields: []configField{
 			{Path: "writable_roots", Label: "Extra writable roots", Kind: configFieldRows, List: true, Hint: "Add absolute paths outside the current workspace."},
 			{Path: "network_access", Label: "Network access", Kind: configFieldBool3, DefaultValue: "true", Group: "Network", Hint: "Allow sandboxed commands to access the network."},
+			{Path: "network_loopback", Label: "Loopback access", Kind: configFieldBool3, DefaultValue: "true", Group: "Network", Hint: "Let sandboxed commands reach 127.0.0.1 - a server they started - even with network access off."},
 		},
 	},
 	{
