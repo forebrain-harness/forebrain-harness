@@ -79,6 +79,24 @@ func processRecordForTest(t *testing.T, st *State, id int) *processRecord {
 	return rec
 }
 
+// waitForProcessSettled blocks until the process's exit watcher has run: its log
+// is closed and its ledger entry gone. Waiting for handle.Done() is not enough,
+// because the watcher writes the ledger after it, and that write landing during
+// t.TempDir's RemoveAll is what made this file flaky under load.
+//
+// The tests whose process is still running when they end kill it with the
+// tool's own `kill` instead: that wait is bounded and belongs to the product
+// (processKill), so the assertion here stays about a process that already
+// exited.
+func waitForProcessSettled(t *testing.T, rec *processRecord) {
+	t.Helper()
+	select {
+	case <-rec.settled:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("process %d never settled: its exit watcher has not written the ledger", rec.id)
+	}
+}
+
 // 1. A trivial command runs to completion and its output is the log.
 func TestProcessStartWaitsForExitAndLogs(t *testing.T) {
 	st, tl, _, projectDir := newProcessToolForTest(t)
@@ -94,6 +112,7 @@ func TestProcessStartWaitsForExitAndLogs(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the command never exited")
 	}
+	waitForProcessSettled(t, rec)
 	logged, err := callProcess(t, tl, ctx, ProcessInput{Action: "log", ID: id})
 	if err != nil {
 		t.Fatalf("log: %v", err)
@@ -123,7 +142,7 @@ func TestProcessWaitTCPReportsReadyWhileRunning(t *testing.T) {
 	}
 	id := processTestID(t, started)
 	rec := processRecordForTest(t, st, id)
-	defer func() { _ = rec.handle.Kill() }()
+	defer func() { _, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: rec.id}) }()
 	waited, err := callProcess(t, tl, ctx, ProcessInput{
 		Action: "wait", ID: id, Wait: "tcp", Address: listener.Addr().String(), TimeoutMs: 5000,
 	})
@@ -185,6 +204,7 @@ func TestProcessWaitOnAnExitedProcessReturnsImmediately(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the command never exited")
 	}
+	waitForProcessSettled(t, rec)
 	begin := time.Now()
 	waited, err := callProcess(t, tl, ctx, ProcessInput{Action: "wait", ID: id, Wait: "tcp", Address: "127.0.0.1:1", TimeoutMs: 5000})
 	if err != nil {
@@ -249,6 +269,7 @@ func TestProcessListReflectsStartAndKill(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the second command never exited")
 	}
+	waitForProcessSettled(t, rec)
 
 	listed, err := callProcess(t, tl, ctx, ProcessInput{Action: "list"})
 	if err != nil {
@@ -363,7 +384,7 @@ func TestProcessLogSpoolGrowsUnderTheStateRoot(t *testing.T) {
 	}
 	id := processTestID(t, started)
 	rec := processRecordForTest(t, st, id)
-	defer func() { _ = rec.handle.Kill() }()
+	defer func() { _, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: rec.id}) }()
 	want := filepath.Join(rt.StateRoot(), "state", "process")
 	if filepath.Dir(rec.logPath) != want {
 		t.Fatalf("log path = %q, want a file under %q", rec.logPath, want)
@@ -434,6 +455,7 @@ func TestReapOrphanProcessesKillsAMatchingOrphan(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatalf("process %d survived the reap", pid)
 	}
+	waitForProcessSettled(t, rec)
 	for _, record := range readProcessLedger(processStateDir(rt.StateRoot())) {
 		if record.ID == 99 {
 			t.Fatalf("the reaped record is still in the ledger: %+v", record)
@@ -451,7 +473,7 @@ func TestReapOrphanProcessesSparesARecycledPID(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	rec := processRecordForTest(t, st, processTestID(t, started))
-	defer func() { _ = rec.handle.Kill() }()
+	defer func() { _, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: rec.id}) }()
 	pid := rec.handle.PID()
 	token, ok := safety.ProcessStartToken(pid)
 	if !ok {

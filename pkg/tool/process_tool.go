@@ -59,6 +59,8 @@ func processStateDir(stateRoot string) string {
 }
 
 // processRecord is one process this State started and has not forgotten.
+// settled closes once the exit watcher has run: the process is completely over,
+// its log closed and its ledger entry gone.
 type processRecord struct {
 	id        int
 	handle    *safety.ProcessHandle
@@ -67,6 +69,7 @@ type processRecord struct {
 	sessionID string
 	logPath   string
 	startedAt time.Time
+	settled   chan struct{}
 }
 
 // processRegistry is the per-State list of processes, so the tool can name them
@@ -198,6 +201,7 @@ func (s *State) KillProcesses() {
 		slog.Info("killed background process on teardown", "id", rec.id, "pid", rec.handle.PID(), "command", redactForLog(rec.command))
 		removeLedgerRecord(processStateDir(s.stateRootForProcess()), rec.id)
 		registry.release(rec.id)
+		awaitProcessSettled(rec, processKillSettleTimeout)
 	}
 }
 
@@ -314,7 +318,7 @@ func processStart(ctx context.Context, st *State, rt *AgentToolRuntime, in *Proc
 		return "", err
 	}
 	sessionID := ConversationSessionIDFromContext(ctx)
-	rec := &processRecord{id: id, handle: handle, command: command, workDir: workDir, sessionID: sessionID, logPath: logPath, startedAt: time.Now()}
+	rec := &processRecord{id: id, handle: handle, command: command, workDir: workDir, sessionID: sessionID, logPath: logPath, startedAt: time.Now(), settled: make(chan struct{})}
 	registry.add(rec)
 	addLedgerRecord(dir, processLedgerRecord{
 		ID: id, PID: handle.PID(), Command: command, SessionID: sessionID,
@@ -326,6 +330,7 @@ func processStart(ctx context.Context, st *State, rt *AgentToolRuntime, in *Proc
 		<-handle.Done()
 		registry.release(id)
 		removeLedgerRecord(dir, id)
+		close(rec.settled)
 	}()
 
 	payload := map[string]any{"id": id, "pid": handle.PID(), "log": logPath, "command": command, "running": !handle.Exited()}
@@ -386,11 +391,23 @@ func processKill(st *State, in *ProcessInput) (string, error) {
 	for !rec.handle.Exited() && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
+	awaitProcessSettled(rec, processKillSettleTimeout)
 	res, _ := rec.handle.Result()
 	return marshalProcessResult(map[string]any{
 		"id": rec.id, "pid": rec.handle.PID(), "killed": !alreadyExited,
 		"running": !rec.handle.Exited(), "exit_code": res.ExitCode,
 	})
+}
+
+// awaitProcessSettled waits until the exit watcher of rec has run, so a caller
+// that ended the process returns with the ledger already free of it. The bound
+// keeps a process that ignores its kill from hanging the caller: the watcher
+// only takes the registry mutex and the ledger mutex and never waits on us.
+func awaitProcessSettled(rec *processRecord, timeout time.Duration) {
+	select {
+	case <-rec.settled:
+	case <-time.After(timeout):
+	}
 }
 
 func processList(st *State) (string, error) {
