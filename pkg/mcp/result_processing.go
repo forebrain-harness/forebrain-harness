@@ -92,10 +92,29 @@ func ToolResultContent(ctx context.Context, resultsDir, serverName, toolName, ra
 	return parts, nil
 }
 
+// sendableImageMIME reports whether mime is one of the four image types a
+// provider accepts inline — the set this pass can turn into pixels, and the
+// only set an embedded image resource is taken over for.
+func sendableImageMIME(mime string) bool {
+	switch mime {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
 // extractResultImageParts persists every image block in an MCP tool result and
 // returns the result JSON with each block replaced by a saved-path text line,
 // one image part per sendable block, and the surface-facing map of the first
 // image (nil when the result has none).
+//
+// An image reaches the model two ways: its own image block, or an embedded
+// resource whose blob carries a sendable image MIME — the same object to the
+// model, handled by the same pass, budget and degrade path. A resource of any
+// other kind is not this function's: it stays for
+// persistBinaryResourceContent, which runs after this pass and keeps today's
+// saved-path line and mcp-<server>-blob-<n> file name for it.
 //
 // The replacement keeps the text envelope free of base64 — a block's data is
 // hundreds of kilobytes that must never reach the model as text nor a surface
@@ -130,14 +149,46 @@ func extractResultImageParts(resultsDir, serverName, raw string, wantParts bool)
 		if !ok {
 			continue
 		}
-		if typ, _ := m["type"].(string); !strings.EqualFold(strings.TrimSpace(typ), "image") {
+		// A server may deliver an image either as its own image block or as an
+		// embedded resource whose blob carries an image MIME. Both are the same
+		// object to the model, so both go through the one budget, the one
+		// degrade path and the one refusal gate below. Only the four sendable
+		// types are taken over: every other resource — a PDF, a text blob,
+		// image/tiff — is left exactly as it is for persistBinaryResourceContent,
+		// which runs after this pass (a block rewritten here is a text block by
+		// the time it does, so nothing is persisted twice).
+		data, declaredMIME := "", ""
+		fromResource := false
+		if typ, _ := m["type"].(string); strings.EqualFold(strings.TrimSpace(typ), "image") {
+			data, _ = m["data"].(string)
+			mime, _ := m["mimeType"].(string)
+			declaredMIME = strings.TrimSpace(mime)
+		} else if resource, ok := m["resource"].(map[string]any); ok {
+			// The blob and its MIME live on the nested resource object; the
+			// image block's own data/mimeType fields are empty here, which is
+			// why relaxing the type guard alone would take over nothing.
+			fromResource = true
+			data, _ = resource["blob"].(string)
+			mime, _ := resource["mimeType"].(string)
+			declaredMIME = strings.TrimSpace(mime)
+			if declaredMIME != "" && !sendableImageMIME(declaredMIME) {
+				continue
+			}
+		} else {
 			continue
 		}
-		data, _ := m["data"].(string)
 		if strings.TrimSpace(data) == "" {
 			continue
 		}
+		// sniffResource is an embedded resource with no MIME to go on: it can
+		// only be classified by decoding it, so every failure below leaves the
+		// block untouched for persistBinaryResourceContent, which reaches the
+		// same verdict and writes the same line.
+		sniffResource := fromResource && declaredMIME == ""
 		if !decodedSizeWithin(data) {
+			if sniffResource {
+				continue
+			}
 			content[i] = map[string]any{
 				"type": "text",
 				"text": oversizeBlockLine(data),
@@ -147,10 +198,12 @@ func extractResultImageParts(resultsDir, serverName, raw string, wantParts bool)
 		}
 		// The declared MIME is read before the decode so the decode-failure
 		// degrade below can name it.
-		mimeType, _ := m["mimeType"].(string)
-		mimeType = strings.TrimSpace(mimeType)
+		mimeType := declaredMIME
 		decoded, err := base64.StdEncoding.DecodeString(data)
 		if err != nil {
+			if sniffResource {
+				continue
+			}
 			// The block can be neither persisted nor sent; degrade to the
 			// same kind of text line the other failure paths leave, so the
 			// envelope never carries the block's raw data as text (the
@@ -164,6 +217,11 @@ func extractResultImageParts(resultsDir, serverName, raw string, wantParts bool)
 		}
 		if mimeType == "" {
 			mimeType = llm.ImageMIMEType("", decoded)
+			if sniffResource && mimeType == "" {
+				// Unlabelled and no sendable image inside: still
+				// persistBinaryResourceContent's block.
+				continue
+			}
 		}
 		path, err := persistMCPResult(resultsDir, serverName, "image", extensionForMIME(mimeType), decoded)
 		if err != nil {
@@ -189,8 +247,7 @@ func extractResultImageParts(resultsDir, serverName, raw string, wantParts bool)
 			}
 			continue
 		}
-		switch mimeType {
-		case "image/jpeg", "image/png", "image/gif", "image/webp":
+		if sendableImageMIME(mimeType) {
 			// 0 = DefaultMaxImageBytes + $FOREBRAIN_IMAGE_MAX_BYTES, the
 			// documented operator knob (llm.resolveImageBudget), so an MCP
 			// image block follows the same budget as a read_file image.

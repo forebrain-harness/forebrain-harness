@@ -2669,6 +2669,266 @@ func TestFileReadRefusesImageWhenGateRefuses(t *testing.T) {
 	}
 }
 
+// listTestPNG writes one PNG into its own directory under root, so a single
+// `paths` call can be given several distinct images (writeTestPNG always writes
+// shot.png in the directory it is handed).
+func listTestPNG(t *testing.T, root, name string, w, h int) (string, []byte) {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	return writeTestPNG(t, dir, w, h)
+}
+
+// pathsInput renders a read_file call that names several images.
+func pathsInput(paths ...string) string {
+	quoted := make([]string, 0, len(paths))
+	for _, p := range paths {
+		quoted = append(quoted, `"`+escapeJSONPath(p)+`"`)
+	}
+	return `{"paths":[` + strings.Join(quoted, ",") + `]}`
+}
+
+// TestFileReadTakesAListOfImagePaths pins the list form itself: one text part
+// carrying a note per image, then one pixel part per image in the model's
+// order, each part being the file's own bytes. The surface capture is the first
+// image's facts, because a card draws one thumbnail.
+func TestFileReadTakesAListOfImagePaths(t *testing.T) {
+	tmp := t.TempDir()
+	first, firstRaw := listTestPNG(t, tmp, "one", 4, 4)
+	second, secondRaw := listTestPNG(t, tmp, "two", 3, 2)
+	readTool, err := NewFileReadTool(NewState(tmp))
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	ctx := WithToolCompletionCapture(context.Background())
+	got, err := readTool.Handle(ctx, pathsInput(first, second))
+	if err != nil {
+		t.Fatalf("read image list: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok {
+		t.Fatalf("read_file returned %T, want []llm.ContentPart", got)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("parts=%d want 3 (one note part + two images)", len(parts))
+	}
+	if parts[0].Type != llm.ContentTypeText {
+		t.Fatalf("first part = %#v, want the notes as one text part", parts[0])
+	}
+	for _, want := range []string{first, "image 4x4", second, "image 3x2"} {
+		if !strings.Contains(parts[0].Text, want) {
+			t.Fatalf("note %q does not name %q", parts[0].Text, want)
+		}
+	}
+	for i, want := range [][]byte{firstRaw, secondRaw} {
+		part := parts[i+1]
+		if part.Type != llm.ContentTypeImageBase64 || part.MIMEType != "image/png" {
+			t.Fatalf("part %d = %#v, want image/png image_base64", i+1, part)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(part.ImageBase64)
+		if err != nil {
+			t.Fatalf("decode part %d: %v", i+1, err)
+		}
+		if !bytes.Equal(decoded, want) {
+			t.Fatalf("part %d bytes differ from its file", i+1)
+		}
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok || completion.Output == nil {
+		t.Fatal("expected the list read's surface output")
+	}
+	if completion.Output["image_width"] != 4 || completion.Output["image_height"] != 4 {
+		t.Fatalf("surface dims = %vx%v want the first image's 4x4",
+			completion.Output["image_width"], completion.Output["image_height"])
+	}
+}
+
+// TestFileReadImageListDeduplicates pins that a repeated path costs one read
+// and one image part, not two, and yields one note line.
+func TestFileReadImageListDeduplicates(t *testing.T) {
+	tmp := t.TempDir()
+	path, _ := listTestPNG(t, tmp, "one", 4, 4)
+	readTool, err := NewFileReadTool(NewState(tmp))
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	got, err := readTool.Handle(context.Background(), pathsInput(path, path))
+	if err != nil {
+		t.Fatalf("read image list: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("read_file returned %#v, want a note part + one image part", got)
+	}
+	if n := strings.Count(parts[0].Text, path); n != 1 {
+		t.Fatalf("note %q names the path %d times, want 1", parts[0].Text, n)
+	}
+}
+
+// TestFileReadImageListRefusesTextPaths pins that `paths` is images only: a
+// text path comes back as a line pointing at file_path, and — the load-bearing
+// half — it is NOT entered in the read ledger, so a later write_file/edit_file
+// still reports the file as unread.
+func TestFileReadImageListRefusesTextPaths(t *testing.T) {
+	tmp := t.TempDir()
+	imgPath, _ := listTestPNG(t, tmp, "one", 4, 4)
+	srcPath := filepath.Join(tmp, "main.go")
+	if err := os.WriteFile(srcPath, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	st := NewState(tmp)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	got, err := readTool.Handle(context.Background(), pathsInput(imgPath, srcPath))
+	if err != nil {
+		t.Fatalf("read image list: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("read_file returned %#v, want a note part + one image part", got)
+	}
+	if parts[1].Type != llm.ContentTypeImageBase64 {
+		t.Fatalf("part 1 = %#v, want the image", parts[1])
+	}
+	if !strings.Contains(parts[0].Text, srcPath+": not an image; read it with file_path") {
+		t.Fatalf("note %q does not send the text path to file_path", parts[0].Text)
+	}
+	if _, ok := st.GetReadState(srcPath); ok {
+		t.Fatal("a text path in `paths` must not enter the read ledger")
+	}
+	if _, ok := st.GetReadState(imgPath); ok {
+		t.Fatal("an image read must not enter the read ledger")
+	}
+}
+
+// TestFileReadImageListIsBounded pins the count cap: over it the call is
+// refused with the number and the way forward, never silently truncated.
+func TestFileReadImageListIsBounded(t *testing.T) {
+	tmp := t.TempDir()
+	var paths []string
+	for i := 0; i < maxReadImagePaths+1; i++ {
+		p, _ := listTestPNG(t, tmp, fmt.Sprintf("img%d", i), 2, 2)
+		paths = append(paths, p)
+	}
+	readTool, err := NewFileReadTool(NewState(tmp))
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	got, err := readTool.Handle(context.Background(), pathsInput(paths...))
+	if err == nil {
+		t.Fatalf("expected a cap error, got output %#v", got)
+	}
+	if got != nil {
+		t.Fatalf("a refused list must return no parts, got %#v", got)
+	}
+	for _, want := range []string{"at most 5", "call again with the rest"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("cap error %q does not say %q", err, want)
+		}
+	}
+}
+
+// TestFileReadImageListHonoursTheImageGate pins that a session model which
+// cannot take pixels is refused for the whole list, before any file is opened —
+// the same rule the single-path image read applies.
+func TestFileReadImageListHonoursTheImageGate(t *testing.T) {
+	tmp := t.TempDir()
+	imgPath, _ := listTestPNG(t, tmp, "one", 4, 4)
+	refusal := "the session model text-only does not accept image input; switch model with /model, then read the image again"
+	st := NewState(tmp)
+	st.SetImageInputGate(func(context.Context) string { return refusal })
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	// The second path cannot resolve, so a run that opened files would report
+	// that instead: the gate's own sentence proves nothing was touched.
+	missing := filepath.Join(tmp, "not-here.png")
+	got, err := readTool.Handle(context.Background(), pathsInput(imgPath, missing))
+	if err == nil {
+		t.Fatalf("gate refusal expected, got output %#v", got)
+	}
+	if err.Error() != refusal {
+		t.Fatalf("err = %q, want the gate's refusal sentence unchanged", err)
+	}
+}
+
+// TestFileReadImageListDegradesOneBadImage pins the batch's resilience: a path
+// whose bytes are not the image its extension promises becomes a line naming it
+// and the reason, and the other images still arrive.
+func TestFileReadImageListDegradesOneBadImage(t *testing.T) {
+	tmp := t.TempDir()
+	goodPath, _ := listTestPNG(t, tmp, "good", 4, 4)
+	badPath := filepath.Join(tmp, "fake.png")
+	if err := os.WriteFile(badPath, []byte("this is not an image at all, just words"), 0o644); err != nil {
+		t.Fatalf("write fake png: %v", err)
+	}
+	readTool, err := NewFileReadTool(NewState(tmp))
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	got, err := readTool.Handle(context.Background(), pathsInput(goodPath, badPath))
+	if err != nil {
+		t.Fatalf("one bad image must not fail the batch: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("read_file returned %#v, want a note part + the good image", got)
+	}
+	if parts[1].Type != llm.ContentTypeImageBase64 {
+		t.Fatalf("part 1 = %#v, want the good image", parts[1])
+	}
+	note := parts[0].Text
+	if !strings.Contains(note, badPath) {
+		t.Fatalf("note %q does not name the degraded path", note)
+	}
+	if !strings.Contains(note, "misnamed") || !strings.Contains(note, "corrupted") {
+		t.Fatalf("note %q does not carry the real reason", note)
+	}
+	if !strings.Contains(note, goodPath) {
+		t.Fatalf("note %q does not name the image that did arrive", note)
+	}
+}
+
+// TestFileReadImageListStillAsksInsideHome is the approval regression: a list
+// that names a path inside FOREBRAIN_HOME but outside the workspace returns the
+// *RequiresActionError unchanged — no parts, no text line. Degrading it instead
+// would delete the approval the user has to answer.
+func TestFileReadImageListStillAsksInsideHome(t *testing.T) {
+	st, _, home := readMCPResultFixture(t, nil)
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		return "act-1", true, nil
+	})
+	imgPath, _ := writeTestPNG(t, t.TempDir(), 4, 4)
+	secretPath := filepath.Join(home, "auth.json")
+	if err := os.WriteFile(secretPath, []byte("secret\n"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	got, err := readTool.Handle(context.Background(), pathsInput(imgPath, secretPath))
+	var req *RequiresActionError
+	if !errors.As(err, &req) {
+		t.Fatalf("err = %v, want RequiresActionError for the path inside FOREBRAIN_HOME", err)
+	}
+	if got != nil {
+		t.Fatalf("an approval must return no parts and no text line, got %#v", got)
+	}
+}
+
 // readMCPResultFixture builds a State whose allowed roots are one project, with
 // the primary agent workspace set as a distinct read-exempt boundary — the
 // production shape of a project session (Step 5b). It writes one result file

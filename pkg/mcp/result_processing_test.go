@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -283,6 +284,183 @@ func TestToolResultContentDegradesUnsendableImageBlock(t *testing.T) {
 	}
 	if got := captured.Output["image_width"]; got != 0 {
 		t.Fatalf("surface image_width = %v, want 0 (fake webp header does not parse)", got)
+	}
+}
+
+// TestToolResultContentReturnsPartsForEmbeddedImageResource pins the second way
+// a server can deliver pixels: an embedded resource whose blob carries a
+// sendable image MIME reaches the model as an image part, exactly like an image
+// block, and its base64 is replaced by the saved-path line. The saved file is
+// this pass's (mcp-<server>-image-<n>.png), because extraction owns the block.
+func TestToolResultContentReturnsPartsForEmbeddedImageResource(t *testing.T) {
+	home := t.TempDir()
+	dir := resultsDirFor(home)
+	png := onePixelPNG(t)
+	raw := `{"content":[{"type":"resource","resource":{"uri":"file://shot.png","mimeType":"image/png","blob":"` +
+		base64.StdEncoding.EncodeToString(png) + `"}}]}`
+
+	ctx := tool.WithToolCompletionCapture(context.Background())
+	parts, err := ToolResultContent(ctx, dir, "shots", "screenshot", raw, accounting{}, "")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	images := 0
+	for _, p := range parts {
+		if p.Type != llm.ContentTypeImageBase64 {
+			continue
+		}
+		images++
+		if p.MIMEType != "image/png" {
+			t.Fatalf("image mime = %q want image/png", p.MIMEType)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(p.ImageBase64)
+		if err != nil {
+			t.Fatalf("decode image part: %v", err)
+		}
+		if !bytes.Equal(decoded, png) {
+			t.Fatal("image part does not carry the resource's bytes")
+		}
+	}
+	if images != 1 {
+		t.Fatalf("expected one image part, got %d in %#v", images, parts)
+	}
+	text := llm.TextContent(parts...)
+	if !strings.Contains(text, "Binary content saved to") || !strings.Contains(text, dir) {
+		t.Fatalf("text envelope missing the saved-path line under %q: %q", dir, text)
+	}
+	if strings.Contains(text, base64.StdEncoding.EncodeToString(png)) {
+		t.Fatalf("base64 leaked into the text envelope")
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "mcp-shots-image-*.png"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected the extraction pass to save one image, got %v", files)
+	}
+	saved, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatalf("read saved image: %v", err)
+	}
+	if !bytes.Equal(saved, png) {
+		t.Fatal("saved file is not the resource's bytes")
+	}
+	captured, ok := tool.ToolCompletionFromContext(ctx)
+	if !ok || captured.Output == nil {
+		t.Fatalf("surface output not captured onto ctx")
+	}
+	if captured.Output["preview_kind"] != "image" {
+		t.Fatalf("captured preview_kind = %v, want image", captured.Output["preview_kind"])
+	}
+}
+
+// TestToolResultContentSniffsAnUnlabelledImageResource pins the MIME fallback:
+// a resource with no mimeType is sniffed after decoding, and a sendable image
+// still arrives as pixels.
+func TestToolResultContentSniffsAnUnlabelledImageResource(t *testing.T) {
+	dir := resultsDirFor(t.TempDir())
+	png := onePixelPNG(t)
+	raw := `{"content":[{"type":"resource","resource":{"uri":"file://shot.png","blob":"` +
+		base64.StdEncoding.EncodeToString(png) + `"}}]}`
+
+	parts, err := ToolResultContent(context.Background(), dir, "shots", "screenshot", raw, accounting{}, "")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	images := 0
+	for _, p := range parts {
+		if p.Type != llm.ContentTypeImageBase64 {
+			continue
+		}
+		images++
+		if p.MIMEType != "image/png" {
+			t.Fatalf("sniffed mime = %q want image/png", p.MIMEType)
+		}
+	}
+	if images != 1 {
+		t.Fatalf("expected the sniffed image as one part, got %d in %#v", images, parts)
+	}
+	if text := llm.TextContent(parts...); !strings.Contains(text, "Binary content saved to") {
+		t.Fatalf("text envelope missing the saved-path line: %q", text)
+	}
+}
+
+// TestToolResultContentRefusalGivesTextForImageResource is the resource twin of
+// the refusal gate: a session model that takes no image input gets the
+// saved-path line and the file facts, never a part and never an error.
+func TestToolResultContentRefusalGivesTextForImageResource(t *testing.T) {
+	dir := resultsDirFor(t.TempDir())
+	png := onePixelPNG(t)
+	raw := `{"content":[{"type":"resource","resource":{"uri":"file://shot.png","mimeType":"image/png","blob":"` +
+		base64.StdEncoding.EncodeToString(png) + `"}}]}`
+
+	ctx := tool.WithToolCompletionCapture(context.Background())
+	parts, err := ToolResultContent(ctx, dir, "shots", "screenshot", raw, accounting{}, "the session model does not accept image input")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	for _, p := range parts {
+		if p.Type == llm.ContentTypeImageBase64 {
+			t.Fatalf("refused result still carried an image part: %#v", parts)
+		}
+	}
+	if !strings.Contains(llm.TextContent(parts...), "Binary content saved to") {
+		t.Fatalf("refused result lost its saved-path line: %q", llm.TextContent(parts...))
+	}
+	captured, ok := tool.ToolCompletionFromContext(ctx)
+	if !ok || captured.Output == nil {
+		t.Fatalf("surface output not captured onto ctx")
+	}
+	if got := captured.Output["image_width"]; got != 1 {
+		t.Fatalf("surface image_width = %v, want the parsed header width 1", got)
+	}
+}
+
+// TestToolResultContentDegradesUnsendableImageResource pins the boundary: a
+// resource whose MIME is not one of the four sendable types is not this pass's
+// block at all. It keeps persistBinaryResourceContent's saved-path line — no
+// "but was not sent" suffix — and its mcp-<server>-blob-<n> file name, yields
+// no part and no error.
+func TestToolResultContentDegradesUnsendableImageResource(t *testing.T) {
+	home := t.TempDir()
+	dir := resultsDirFor(home)
+	tiff := []byte("II*\x00not-a-sendable-image")
+	raw := `{"content":[{"type":"resource","resource":{"uri":"file://scan.tiff","mimeType":"image/tiff","blob":"` +
+		base64.StdEncoding.EncodeToString(tiff) + `"}}]}`
+
+	parts, err := ToolResultContent(context.Background(), dir, "files", "read", raw, accounting{}, "")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	for _, p := range parts {
+		if p.Type == llm.ContentTypeImageBase64 {
+			t.Fatalf("an unsendable resource produced an image part: %#v", parts)
+		}
+	}
+	text := llm.TextContent(parts...)
+	want := "Binary content saved to "
+	if !strings.Contains(text, want) {
+		t.Fatalf("envelope missing the saved-path line: %q", text)
+	}
+	if strings.Contains(text, "but was not sent") {
+		t.Fatalf("envelope took the image-block degrade path: %q", text)
+	}
+	if !strings.Contains(text, fmt.Sprintf("(image/tiff, %d bytes).", len(tiff))) {
+		t.Fatalf("envelope does not state the declared MIME and size: %q", text)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "mcp-files-blob-*.tiff"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected the resource path's own saved file name, got %v", files)
+	}
+	saved, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatalf("read saved blob: %v", err)
+	}
+	if !bytes.Equal(saved, tiff) {
+		t.Fatal("saved blob is not the resource's bytes")
 	}
 }
 

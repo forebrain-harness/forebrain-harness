@@ -66,6 +66,11 @@ type FileReadInput struct {
 	Offset   int    `json:"offset,omitempty" jsonschema:"minimum=0" jsonschema_description:"Text: 0-based start line; omit for the first line. Past the end returns no content and names the file's line count."`
 	Limit    int    `json:"limit,omitempty" jsonschema:"minimum=1" jsonschema_description:"Text: max lines, at most 200; a window past the end returns through the last line. Ignored for PDFs - use pages."`
 	Pages    string `json:"pages,omitempty" jsonschema_description:"PDF only: 1-based page or range (\"7\", \"9-11\"), at most 5 pages per call; an end past the last page returns through the last page, a start past it returns no pages and names the document's page count. Omit for the first 5 pages."`
+	// Paths reads several images in one call: the shape a search hit list
+	// needs. Images only — a text path here is refused with a line pointing at
+	// file_path, because a text read owns the read-baseline ledger and this
+	// branch must not touch it. Order is the model's order; duplicates collapse.
+	Paths []string `json:"paths,omitempty" jsonschema_description:"Several images in one call (images only, at most 5). For text use file_path."`
 }
 
 func NewFileReadTool(st *State) (*llm.Tool, error) {
@@ -78,6 +83,16 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 			}
 			if in == nil {
 				in = &FileReadInput{}
+			}
+			if len(in.Paths) > 0 {
+				// The nil on the error path is untyped on purpose: the
+				// handler's result is an any, and a typed nil slice would
+				// read as a returned (empty) part list.
+				parts, err := readImageList(ctx, st, in.Paths)
+				if err != nil {
+					return nil, err
+				}
+				return parts, nil
 			}
 			resolution, err := authorizeRead(ctx, st, "read_file", in.FilePath)
 			if err != nil {
@@ -387,6 +402,110 @@ func validateTextReadableFile(abs string, raw []byte) error {
 		return fmt.Errorf("read_file cannot read binary %s files", ext)
 	}
 	return nil
+}
+
+// maxReadImagePaths caps how many images one `paths` call may name. It is the
+// count the PDF branch already renders (pdf.DefaultMaxPages), so a list read
+// cannot cost more context than a single document read does. A cost knob, not
+// a correctness one: over the cap the call is refused with the number, never
+// silently truncated.
+const maxReadImagePaths = 5
+
+// readImageList reads several images in one call — the "I just searched and
+// found five screenshots" shape — and answers the way a single read does: one
+// text part of per-file notes, then one pixel part per image, in the model's
+// order.
+//
+// It is images only. A text path gets a line pointing at file_path, because a
+// text read owns the read-baseline ledger (RememberReadForSession, consumed by
+// readStateForEdit for write_file/edit_file) and this branch must not enter a
+// text file there.
+//
+// Two rules it shares with the single-path branch, because they are the whole
+// safety story: every path is settled by authorizeRead (a list must not be a
+// way around the workspace boundary), and a session whose model takes no image
+// input is refused before any file is opened. One rule is its own: a path that
+// cannot be read or encoded degrades to a line naming it and the reason, so one
+// bad image never costs the batch the others — the same rule
+// extractResultImageParts applies to MCP blocks. An approval request is the one
+// exception: it is returned unchanged.
+func readImageList(ctx context.Context, st *State, paths []string) ([]llm.ContentPart, error) {
+	if refusal := st.ImageInputRefusal(ctx); refusal != "" {
+		return nil, errors.New(refusal)
+	}
+	distinct := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		distinct = append(distinct, p)
+	}
+	if len(distinct) > maxReadImagePaths {
+		return nil, fmt.Errorf("read_file reads at most %d images per call; call again with the rest (%d distinct paths given)", maxReadImagePaths, len(distinct))
+	}
+	var lines []string
+	var parts []llm.ContentPart
+	var surfaceAbs, surfacePath string
+	var surfaceRes llm.ImageReadResult
+	for _, p := range distinct {
+		resolution, err := authorizeRead(ctx, st, "read_file", p)
+		if err != nil {
+			var req *RequiresActionError
+			if errors.As(err, &req) {
+				// An approval, not a degrade: folding this into a text line
+				// would delete the question the user has to answer.
+				return nil, err
+			}
+			lines = append(lines, fmt.Sprintf("%s: %v", p, err))
+			continue
+		}
+		abs := resolution.Abs
+		raw, err := os.ReadFile(abs)
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("%s: %v", p, err))
+			continue
+		}
+		if llm.ImageMIMEType(abs, raw) == "" && !isImageFileExtension(strings.ToLower(filepath.Ext(abs))) {
+			lines = append(lines, fmt.Sprintf("%s: not an image; read it with file_path", p))
+			continue
+		}
+		// 0 = DefaultMaxImageBytes + $FOREBRAIN_IMAGE_MAX_BYTES, the same budget
+		// every other image read follows.
+		part, res, err := imageReadPart(abs, raw, 0)
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("%s: %v", p, err))
+			continue
+		}
+		lines = append(lines, imageReadNote(abs, res))
+		parts = append(parts, part)
+		if surfaceAbs == "" {
+			surfaceAbs, surfacePath, surfaceRes = abs, p, res
+		}
+	}
+	if len(parts) == 0 {
+		// Nothing readable is an error, not an empty part list: the model asked
+		// for pixels and must be told, in the same call, why it got none.
+		if len(lines) == 0 {
+			lines = append(lines, "no path given")
+		}
+		return nil, fmt.Errorf("read_file read no image from paths: %s", strings.Join(lines, "\n"))
+	}
+	// Captured after the loop so it is the step's last word: authorizeRead
+	// captures an error whenever it refuses a path, and the step must not stay
+	// marked failed while the call returns pixels. One thumbnail — the first
+	// image — is what a surface draws, the same rule extractResultImageParts
+	// follows.
+	CaptureToolOutput(ctx, ImageReadOutput(surfaceAbs, surfacePath, surfaceRes))
+	out := make([]llm.ContentPart, 0, len(parts)+1)
+	out = append(out, llm.Text(strings.Join(lines, "\n")))
+	out = append(out, parts...)
+	return out, nil
 }
 
 // imageReadPart decides what read_file does with a file that might be an image.
