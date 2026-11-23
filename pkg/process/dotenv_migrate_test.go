@@ -69,12 +69,6 @@ func storedVariableForTest(t *testing.T, db *sql.DB, name string) (string, bool)
 // The token a home kept in .env becomes the file's own plaintext value, with
 // the file's comments and every other key left as they were.
 func TestDotEnvMigrateMovesGatewayTokenIntoTheConfig(t *testing.T) {
-	const body = `# a hand-written comment the migration must not lose
-gateway:
-  http_addr: "127.0.0.1:6060"
-  auth:
-    token: "${FOREBRAIN_GATEWAY_TOKEN}"
-`
 	// The name the process environment supplies wins: a container sets it, and
 	// the reference is what such a deployment wants to keep.
 	t.Run("process environment supplies the token", func(t *testing.T) {

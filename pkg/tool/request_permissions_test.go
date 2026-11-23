@@ -1057,8 +1057,6 @@ const memoryFiller = "部署 流水线 构建 缓存 产物 校验 回滚 发布
 	"日志 追踪 采样 告警 阈值 容量 扩缩 降级 熔断 限流\n" +
 	"账号 权限 角色 策略 审计 密钥 轮换 证书 网关 路由\n"
 
-func paddedMemory(body string) string { return body + strings.Repeat(memoryFiller, 25) }
-
 func memoryToolHandlers(t *testing.T, home string) map[string]func(context.Context, string) (any, error) {
 	t.Helper()
 	// Search is entirely index-backed, and the index lives in the state

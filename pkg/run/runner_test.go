@@ -512,16 +512,6 @@ func waitMCPLoad(t *testing.T, r *Runner, ld *mcpLoad) {
 	}
 }
 
-// mcpTestRunner builds a Runner whose MCP half is wired the way process.Open
-// wires it: a tool state to register into and the server list under test.
-func mcpTestRunner(t *testing.T, servers ...appcfg.MCPServerConfig) *Runner {
-	t.Helper()
-	r := &Runner{Deps: &Deps{Home: t.TempDir(), MCPServers: servers}}
-	r.tools = tool.NewState()
-	r.mcpReg = mcp.NewRegistry()
-	return r
-}
-
 // TestLoadMCPSegmentReplaysCachedToolsWhenFingerprintUnchanged pins the
 // reload contract: a Load whose effective MCP list and project directory did
 // not change must neither tear down the live registry nor contact any server —
@@ -2009,15 +1999,6 @@ func requireSelection(t *testing.T, r *Runner, provider, model, effort string) {
 	if !got.Set || got.Provider != provider || got.Model != model || got.Effort != effort {
 		t.Fatalf("selection = %+v, want %s/%s effort %q", got, provider, model, effort)
 	}
-}
-
-// stubPrimaryModelLLM answers one plain text result, so a recovered runner can
-// serve a turn offline.
-type stubPrimaryModelLLM struct{}
-
-func (stubPrimaryModelLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
-	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("ok")})
-	return &llm.Result{Message: &msg}, nil
 }
 
 func TestFirstLoadPinsFirstResolvedEntry(t *testing.T) {

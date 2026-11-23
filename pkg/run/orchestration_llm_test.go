@@ -6576,15 +6576,6 @@ func TestToolOrchestrationEmitsGroupedLifecycleForSameParallelTool(t *testing.T)
 	}
 }
 
-type endlessToolLLM struct{}
-
-func (endlessToolLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
-	msg := llm.AssistantMessage(nil,
-		llm.ToolCall{ID: "call-read", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "read_one", Arguments: `{}`}},
-	)
-	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
-}
-
 type singleWriteToolLLM struct{}
 
 func (singleWriteToolLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {

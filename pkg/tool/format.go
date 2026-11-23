@@ -3778,16 +3778,6 @@ func extractLSPDiagnosticsSummary(v any) (event.LSPDiagnosticsSummary, bool) {
 	}
 }
 
-func outputWithoutTurnDiff(output map[string]any) map[string]any {
-	if len(output) == 0 {
-		return output
-	}
-	if _, ok := extractTurnDiff(output["turn_diff"]); !ok {
-		return output
-	}
-	return outputWithout(output, "turn_diff")
-}
-
 // outputWithout returns a copy of output without the given keys — the original
 // map when none of them are present, so an untouched output is never copied.
 func outputWithout(output map[string]any, keys ...string) map[string]any {

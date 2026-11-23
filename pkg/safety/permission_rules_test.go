@@ -807,12 +807,6 @@ func okLLM(text string) *stubLLM {
 	}}
 }
 
-func errLLM(err error) *stubLLM {
-	return &stubLLM{fn: func(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
-		return nil, err
-	}}
-}
-
 func TestRunInputRules(t *testing.T) {
 	r := StrictDefaults()
 	r.InputMaxRunes = 10

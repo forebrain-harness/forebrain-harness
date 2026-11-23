@@ -13,12 +13,6 @@ import (
 	yamlv2 "go.yaml.in/yaml/v2"
 )
 
-type badYAMLValue struct{}
-
-func (badYAMLValue) MarshalYAML() (interface{}, error) {
-	return nil, errors.New("boom")
-}
-
 func TestLoadAndSaveJSONYAML(t *testing.T) {
 	dir := t.TempDir()
 

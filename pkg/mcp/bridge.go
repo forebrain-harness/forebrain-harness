@@ -150,26 +150,16 @@ func (s *Session) liveSession() *mcp.ClientSession {
 	return s.session
 }
 
-// requireSession returns the live connection, or an error when the session was
-// never connected (or has been closed).
-func (s *Session) requireSession() (*mcp.ClientSession, error) {
-	sess := s.liveSession()
-	if sess == nil {
-		return nil, fmt.Errorf("nil session")
-	}
-	return sess, nil
-}
-
 // ensureSession returns the live connection, rebuilding it first when this
 // session has none but can grow one.
 //
 // A released session (see Release) is exactly that: its connection was torn
 // down because the Runner that owns it went idle, and the session object stayed
 // behind as the handle that knows how to bring the connection back. Every
-// request path goes through here rather than requireSession, so "the server was
-// idle long enough to lose its child process" costs one bounded reconnect on
-// the first request and nothing after — the callers do not have to know that
-// the connection is a cache.
+// request path goes through here, so "the server was idle long enough to lose
+// its child process" costs one bounded reconnect on the first request and
+// nothing after — the callers do not have to know that the connection is a
+// cache.
 func (s *Session) ensureSession() (*mcp.ClientSession, error) {
 	if sess := s.liveSession(); sess != nil {
 		return sess, nil

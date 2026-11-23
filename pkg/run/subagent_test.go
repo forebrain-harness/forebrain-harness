@@ -9216,19 +9216,6 @@ func TestModelLiveContinuationRereadsTheRow(t *testing.T) {
 	}
 }
 
-func mustConfigRow(t *testing.T, fix *modelArgumentFixture, id string) appcfg.LLMModelConfig {
-	t.Helper()
-	row, err := fix.store.Get(context.Background(), id)
-	if err != nil {
-		t.Fatalf("get row: %v", err)
-	}
-	cfg, err := row.ConfigRow()
-	if err != nil {
-		t.Fatalf("ConfigRow: %v", err)
-	}
-	return cfg
-}
-
 // The three input schemas carry the model argument's description as fixed
 // text: it names no model and no tool, so adding a row, flipping a switch or
 // list_usable_models appearing and disappearing (it rides a request only

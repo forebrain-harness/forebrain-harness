@@ -3,9 +3,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"net"
-	"sort"
-	"strings"
 )
 
 type NetworkAccess string
@@ -153,57 +150,4 @@ func rejectUnknownFieldNames(raw map[string]any, context string, allowed []strin
 		}
 	}
 	return nil
-}
-
-func boolPointer(value bool) *bool { return &value }
-
-func mergeNetworkAccessMap(parent, child map[string]NetworkAccess) map[string]NetworkAccess {
-	out := make(map[string]NetworkAccess, len(parent)+len(child))
-	for k, v := range parent {
-		out[k] = v
-	}
-	for k, v := range child {
-		out[k] = v
-	}
-	return out
-}
-
-// normalizeNetworkDomainMap keys a domain table by comparable host names, in
-// sorted order so a merged table and the text written back out read the same
-// way twice.
-func normalizeNetworkDomainMap(in map[string]NetworkAccess) map[string]NetworkAccess {
-	if in == nil {
-		return nil
-	}
-	keys := make([]string, 0, len(in))
-	for key := range in {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	out := make(map[string]NetworkAccess, len(in))
-	for _, key := range keys {
-		out[normalizeNetworkHost(key)] = in[key]
-	}
-	return out
-}
-
-func normalizeNetworkHost(host string) string {
-	host = strings.TrimSpace(host)
-	if strings.HasPrefix(host, "[") {
-		if end := strings.IndexByte(host, ']'); end >= 0 {
-			return normalizeNetworkHostValue(host[1:end])
-		}
-	}
-	if strings.Count(host, ":") == 1 {
-		host = strings.SplitN(host, ":", 2)[0]
-	}
-	return normalizeNetworkHostValue(host)
-}
-
-func normalizeNetworkHostValue(host string) string {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	if ip, scope, ok := strings.Cut(host, "%25"); ok && net.ParseIP(ip) != nil {
-		return ip + "%" + scope
-	}
-	return host
 }

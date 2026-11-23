@@ -87,26 +87,6 @@ func storedDefinitionForTest(t *testing.T, env *Environment, ctx context.Context
 	return agents.Definitions[agent]
 }
 
-func storedMemoriesForTest(t *testing.T, env *Environment, ctx context.Context) appcfg.MemorySection {
-	t.Helper()
-	var memories appcfg.MemorySection
-	if err := json.Unmarshal([]byte(storedSectionForTest(t, env, ctx, "memories")), &memories); err != nil {
-		t.Fatalf("read memories section: %v", err)
-	}
-	return memories
-}
-
-func modelRowForTest(t *testing.T, rows []state.LLMModel, provider, model, baseURL string) state.LLMModel {
-	t.Helper()
-	for _, row := range rows {
-		if row.Provider == provider && row.Model == model && row.BaseURL == baseURL {
-			return row
-		}
-	}
-	t.Fatalf("no row for %s/%s at %q in %+v", provider, model, baseURL, rows)
-	return state.LLMModel{}
-}
-
 // A stored reference written before the model table existed is a
 // "provider/model" label. The migration rewrites the ones a row carries into
 // that row's id — the reference half of plan 262, which survives plan 315 —
@@ -176,17 +156,6 @@ func TestLLMModelsMigrateRewritesASubagentDefinitionsLabel(t *testing.T) {
 	if got := storedDefinitionForTest(t, env, ctx, "helper").Model; got != "openai/gpt-x" {
 		t.Fatalf("helper model = %q, want a primary-role definition's field left alone", got)
 	}
-}
-
-func modelForTest(t *testing.T, rows []state.LLMModel, provider, model string) state.LLMModel {
-	t.Helper()
-	for _, row := range rows {
-		if row.Provider == provider && row.Model == model {
-			return row
-		}
-	}
-	t.Fatalf("no row for %s/%s in %+v", provider, model, rows)
-	return state.LLMModel{}
 }
 
 // upsertEnvForTest is a state database of its own: UpsertLLMModel needs

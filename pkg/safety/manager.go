@@ -409,35 +409,6 @@ func startSandboxedCommand(ctx context.Context, timeout time.Duration, cfg *appc
 	return sc, nil
 }
 
-func (m *Manager) permissionSnapshot() Snapshot {
-	if m == nil {
-		return Snapshot{}
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return clonePermissionSnapshot(m.snapshot)
-}
-
-func (m *Manager) approvalPolicy() ApprovalPolicy {
-	if m == nil {
-		return ApprovalPolicy{Mode: ApprovalOnRequest}
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.snapshot.ApprovalPolicy
-}
-
-func appendOrReplaceEnv(env []string, key, value string) []string {
-	prefix := key + "="
-	for index, item := range env {
-		if strings.HasPrefix(item, prefix) {
-			env[index] = prefix + value
-			return env
-		}
-	}
-	return append(env, prefix+value)
-}
-
 func applyRuntimeConfigToRequest(req CommandRequest, runtimeCfg RuntimeConfig, cwd string) (CommandRequest, error) {
 	// A request that resolved its own write set keeps exactly that set. The
 	// configured roots are the workspace's ambient policy, and such a request

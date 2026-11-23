@@ -270,21 +270,6 @@ func (s *Store) sandboxAvailableForSession(sessionID string) bool {
 	return s.sandboxAvailable
 }
 
-// sessionSandboxMode is the sandbox mode one conversation picked for itself,
-// or empty when it runs under the configured mode.
-func (s *Store) sessionSandboxMode(sessionID string) appcfg.SandboxMode {
-	if s == nil {
-		return ""
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return ""
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.sessionSandbox[sessionID].mode
-}
-
 // setSessionSandboxMode records one conversation's own sandbox mode. Only the
 // three modes a preset can pick are accepted; containment for it is unknown —
 // and so fails closed — until the runtime refreshes availability, which it
