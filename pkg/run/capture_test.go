@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -64,10 +65,6 @@ func authorizeWithoutAsking(st *tool.State) {
 	st.SetActionHook(func(context.Context, string, any) (string, bool, error) { return "", false, nil })
 }
 
-func refuseEscalation(st *tool.State) {
-	st.SetActionHook(func(context.Context, string, any) (string, bool, error) { return "act-1", true, nil })
-}
-
 func captureResult(t *testing.T, tl *llm.Tool, ctx context.Context, in CaptureInput) ([]llm.ContentPart, error) {
 	t.Helper()
 	raw, err := json.Marshal(in)
@@ -122,10 +119,40 @@ func pngDimensions(t *testing.T, path string) (int, int) {
 	return cfg.Width, cfg.Height
 }
 
+// assertCaptureNote pins what a capture's note promises whatever the screen
+// produced: the path, the mode, the bytes the file holds, and a dimension line
+// that describes that file — its own dimensions when the capture fits the image
+// budget, and as the "downscaled from" source when it does not. Whether this
+// display's capture is big enough to be downscaled is the environment's
+// business, not the test's.
+func assertCaptureNote(t *testing.T, note, mode, path string, width, height int) {
+	t.Helper()
+	if !strings.HasPrefix(note, path+"\n"+mode+" capture ") {
+		t.Fatalf("the note does not open with the path and the mode %q:\n%s", mode, note)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("the note names %s but nothing is there: %v", path, err)
+	}
+	if !strings.Contains(note, fmt.Sprintf(", %d bytes on disk", info.Size())) {
+		t.Fatalf("the note does not carry the %d bytes the file holds:\n%s", info.Size(), note)
+	}
+	if strings.Contains(note, "downscaled from") {
+		want := fmt.Sprintf("(downscaled from %dx%d to fit the image budget)", width, height)
+		if !strings.Contains(note, want) {
+			t.Fatalf("the note's downscale clause does not name the file's %dx%d:\n%s", width, height, note)
+		}
+		return
+	}
+	if want := fmt.Sprintf("%s capture %dx%d,", mode, width, height); !strings.Contains(note, want) {
+		t.Fatalf("the note does not describe a %dx%d capture:\n%s", width, height, note)
+	}
+}
+
 // 1. mode screen: the capture exists, decodes, and comes back as pixels plus a
-// note. On macOS this also pins the owner's 2026-11-23 ruling end to end — the
-// seatbelt profile refuses the display service, the escalation is asked about,
-// and the approved replay captures on the host.
+// note that describes it. On macOS this also pins the owner's 2026-11-23 ruling
+// end to end — the seatbelt profile refuses the display service, the escalation
+// is asked about, and the approved replay captures on the host.
 func TestCaptureScreenReturnsAPngAndItsPixels(t *testing.T) {
 	if _, err := exec.LookPath("/usr/sbin/screencapture"); err != nil && runtime.GOOS == "darwin" {
 		t.Skip("no screencapture on this machine, so a screen capture cannot be produced")
@@ -146,15 +173,16 @@ func TestCaptureScreenReturnsAPngAndItsPixels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("screen capture: %v", err)
 	}
-	note, _ := captureShares(t, parts, filepath.Join(r.captureDir(), ""))
+	note, part := captureShares(t, parts, filepath.Join(r.captureDir(), ""))
+	if part.Type != llm.ContentTypeImageBase64 || part.ImageBase64 == "" {
+		t.Fatalf("the capture came back as %+v, want base64 png pixels", part)
+	}
 	path := strings.SplitN(note, "\n", 2)[0]
 	width, height := pngDimensions(t, path)
 	if width <= 0 || height <= 0 {
 		t.Fatalf("capture decoded to %dx%d", width, height)
 	}
-	if !strings.Contains(note, "image") {
-		t.Fatalf("the note does not describe the image:\n%s", note)
-	}
+	assertCaptureNote(t, note, "screen", path, width, height)
 }
 
 // 2. mode region: the rectangle is honoured. A Retina display doubles it, so
@@ -324,6 +352,33 @@ func TestCaptureToolAddsNoToolPackageFile(t *testing.T) {
 	if count != 34 {
 		t.Fatalf("pkg/tool has %d production files, want 34 (the cap, with the process tool taking the last slot)", count)
 	}
+}
+
+// 9. The downscale clause in the note, pinned without the screen's cooperation:
+// the budget is the product's own knob, so setting it low is what makes a
+// modest frame oversized. This is the clause the screen case used to depend on
+// by accident — its verdict flipped with the size of the display.
+func TestCaptureNoteNamesTheDownscaleUnderATightBudget(t *testing.T) {
+	t.Setenv(llm.ImageMaxBytesEnv, "40000")
+	r, st, _ := newCaptureRunnerForTest(t, &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess})
+	authorizeWithoutAsking(st)
+	path := filepath.Join(r.captureDir(), "oversized.png")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writePatternPNG(t, path, 2400, 1600)
+	parts, err := r.captureParts(context.Background(), st, path, "screen", captureCaptured)
+	if err != nil {
+		t.Fatalf("an oversized capture must downscale, not fail: %v", err)
+	}
+	note, part := captureShares(t, parts, path)
+	if part.Type != llm.ContentTypeImageBase64 || part.ImageBase64 == "" {
+		t.Fatalf("the downscaled capture came back as %+v, want base64 png pixels", part)
+	}
+	if !strings.Contains(note, "downscaled from 2400x1600") {
+		t.Fatalf("the note does not say the frame was downscaled:\n%s", note)
+	}
+	assertCaptureNote(t, note, "screen", path, 2400, 1600)
 }
 
 func writeUniformPNG(t *testing.T, path string, width, height int, fill color.RGBA) {
