@@ -700,6 +700,101 @@ func TestVerifySkillDrivesTheAppAndRendersAVerdict(t *testing.T) {
 	}
 }
 
+// The built-in review skill is gone and audit does the work instead, so the one
+// place a session doing static work can be told how to reach the running app is
+// audit's report. This test pins both halves: the removal, through the catalog
+// the model actually reads, and the recommendation, by the three triggers one
+// sentence carries (cold start, restraint, stale) plus the two forebrain facts
+// that make the advice true here.
+func TestAuditSkillCarriesTheRunSkillRecommendation(t *testing.T) {
+	home := t.TempDir()
+	if err := Install(home); err != nil {
+		t.Fatalf("install system skills: %v", err)
+	}
+	systemRoot := filepath.Join(home, "skills", ".system")
+	// 1. The removal, end to end: neither the directory nor a catalog entry.
+	if _, err := os.Stat(filepath.Join(systemRoot, "review")); err == nil {
+		t.Fatal("the review skill was still installed")
+	}
+	entries, err := CatalogEntries([]string{systemRoot}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogued := map[string]bool{}
+	for _, entry := range entries {
+		catalogued[entry.Name] = true
+	}
+	if catalogued["review"] {
+		t.Fatalf("the removed review skill is still in the catalog: %+v", entries)
+	}
+	// 2. audit survives, and stays both user- and model-invocable - unlike the
+	// generator, this is the skill a model should reach for on its own.
+	if !catalogued["audit"] {
+		t.Fatalf("audit is missing from the catalog: %+v", entries)
+	}
+	activation, err := LoadActivation(filepath.Join(systemRoot, "audit", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("load audit skill: %v", err)
+	}
+	if !activation.SlashCommand || !activation.ModelInvocation {
+		t.Fatalf("audit must stay slash- and model-invocable: slash=%t model=%t", activation.SlashCommand, activation.ModelInvocation)
+	}
+
+	content := activation.Content
+	// 3. The recommendation and the restraint that keeps it rare: A2 and A3
+	// share one line, so the two occurrences are two different triggers.
+	if got := strings.Count(content, "/run-skill-generator"); got != 2 {
+		t.Fatalf("/run-skill-generator named %d times, want 2 (blocked prompt, recommendation)", got)
+	}
+	if got := strings.Count(content, "run-*"); got != 1 {
+		t.Fatalf("the run-skill probe named %d times, want 1", got)
+	}
+	if got := strings.Count(content, "just worked"); got != 1 {
+		t.Fatalf("the restraint phrase appears %d times, want 1", got)
+	}
+	// 4. The two forebrain clauses: the trust gate, and the handle these
+	// projects most often need.
+	for _, want := range []string{"trusted project", "stub provider"} {
+		if got := strings.Count(content, want); got != 1 {
+			t.Fatalf("%q appears %d times, want 1", want, got)
+		}
+	}
+	// 5. audit reaches the runtime-verification skill by name and never by
+	// vocabulary: a verdict word here would imply the other three exist, and
+	// they belong to that skill's own asset.
+	if got := strings.Count(content, "/verify"); got != 1 {
+		t.Fatalf("/verify named %d times, want 1", got)
+	}
+	if got := strings.Count(content, "BLOCKED"); got != 1 {
+		t.Fatalf("BLOCKED appears %d times, want 1 (the backlog status, untouched)", got)
+	}
+	// 6. The edits were surgical: the reference pointer, audit's own use of
+	// "review" as a verb, and its recorded-verdict sentence all survive.
+	for _, want := range []string{"references/audit-playbook.md", "review-plan", "\u201cNot worth doing\u201d"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("the audit skill lost %q:\n%s", want, content)
+		}
+	}
+	// 7. The mechanism lives in the playbook, in the neutral form this asset is
+	// allowed to carry.
+	playbook, err := os.ReadFile(filepath.Join(systemRoot, "audit", "references", "audit-playbook.md"))
+	if err != nil {
+		t.Fatalf("read the playbook: %v", err)
+	}
+	probe := "grep -Hm1 '^description:' .*/skills/*/SKILL.md"
+	if !strings.Contains(string(playbook), probe) {
+		t.Fatalf("the playbook lost the discovery probe:\n%s", playbook)
+	}
+	if strings.Contains(strings.ToLower(string(playbook)), "claude") {
+		t.Fatal("the playbook names a third-party product directory")
+	}
+	// 8. The deletion took the review skill and nothing else: the caveman
+	// bundle's own review-flavoured skill is still there.
+	if !catalogued["caveman-review"] {
+		t.Fatalf("caveman-review did not survive the deletion: %+v", entries)
+	}
+}
+
 // TestRunSkillGeneratorIsUserInvocableOnly pins the two properties that make this
 // skill safe to ship. Its deliverable is committed files in the user's
 // repository, so the model must never pick it up on its own initiative — the

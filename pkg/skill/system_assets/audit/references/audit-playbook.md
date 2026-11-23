@@ -131,6 +131,16 @@ Every finding, from every category and every subagent, comes back in this shape:
 - **Fix sketch**: 1–3 sentences. Not the plan — just enough to judge effort honestly.
 ```
 
+Two things about a finding belong here rather than in the compressed workflow text. The first is the handle: a project that already records how it builds, launches and is driven has a run skill — a `run-*` skill in one of the four directories the harness discovers at the session's project root, listed in priority order by `pkg/skill/roots.go:21-26` — and that record is worth more than a fresh attempt to work the build out. Find it before starting:
+
+```bash
+grep -Hm1 '^description:' .*/skills/*/SKILL.md 2>/dev/null
+```
+
+The glob covers those four directories without naming any of them, so a fifth would be picked up for free. Resolution is the session's project root and nothing else: no walk up to the checkout root, no descent into subdirectories, and anything under `.drafts/` is inert until the user publishes it. A run skill that fails on mechanics unrelated to the audit is a finding against the skill, not against the code under audit, and never a reason to distrust the change.
+
+The second is the recommendation's audience. `/run-skill-generator` carries `model-invocation: false`: it is deliberately absent from the skills catalog, so no model can load it on its own initiative. Naming it in the report is the only way it ever runs — which is why the report line matters, and why the restraint around it matters just as much.
+
 ## Prioritization rubric
 
 Order findings by **leverage = impact ÷ effort, discounted by confidence and fix-risk**. Tiebreakers:
