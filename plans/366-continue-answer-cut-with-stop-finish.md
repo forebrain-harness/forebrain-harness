@@ -1,7 +1,7 @@
 # 修复：上游谎报 `finish_reason:"stop"` 时，半句最终回答被当成完整答案
 
-- 状态：待 owner 审批（plan-gated-bugfix 工作流；批准前零源码改动）
-- 计划目录落盘（批准后）：`plans/366-continue-answer-cut-with-stop-finish.md` + `plans/README.md` 索引行
+- 状态：**已落地**（2026-11-23：tech lead 评审 APPROVE，owner 令 ff-only 落 dev `00e451a8`；14 文件、零新增生产文件；真机四场景＋overlay 反证＋全量 37 ok）
+- 计划目录：本文件 + `plans/README.md` 索引行（均已提交）
 - 基线：`git rev-parse HEAD` = `4c387a94ad26658b33dba929544f5f4672036e92`，调查时 `git status --porcelain` 为空。
   **注意**：同树 agent forebrain-harness-db 已回话确认：其 11 份计划全部在独立 worktree 分支
   （exec-skills/exec-runtime/exec-363/exec-364/exec-final），**主树一棵文件未动**；唯一重叠是
