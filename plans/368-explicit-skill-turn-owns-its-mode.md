@@ -688,3 +688,58 @@ Stop and report back (do not improvise) if:
   `pkg/run/skills.go` in scope, so 368 can be executed in any order relative to
   them; if a sibling lands first and moves `Execute`'s early returns, re-run
   the drift check rather than assuming the excerpts.
+
+## Implementation Status
+
+状态：**已执行并通过评审（APPROVE）**，2026-11-23。执行器在独立 worktree 落一笔提交，**未合并**（合不合并、何时合并由 owner 决定）。
+
+- 落地位置：`.worktrees/plan-368-explicit-skill-gate`，分支 `plan-368-explicit-skill-gate`，基线 `e1abd2f4`（`dev` 尖），提交 `7ccfd239 fix(run): an explicit skill turn is not offered plan mode`（含 DCO `Signed-off-by`）。
+- 漂移检查（派发前由 advisor 亲跑）：`git diff --stat 80bb73b4..HEAD -- pkg/run/{config,skills,config_test,skills_test}.go` **为空**；工作树当时干净。
+
+### 复现与根因（advisor 自测，先于任何改动）
+
+在一次性 worktree（已删除）里写 4 条对照测试跑未修改的树，`CGO_ENABLED=1 go test -tags fts5 ./pkg/run/ -count=1 -run 'TestZZRepro368'`：
+
+- `TestZZRepro368ExplicitSkillTurnHidesEnterPlanMode` **FAIL** — `tools offered: [write_file enter_plan_mode]`
+- `TestZZRepro368ExplicitSkillGateAppliesWhenModeStateIsUnreadable` **FAIL** — 同上
+- 普通轮次对照 PASS、plan 模式提醒用例 PASS
+
+即症状＝显式技能轮次仍向模型提供 `enter_plan_mode`。六环因果链在 `e1abd2f4` 上逐环读过并经此跑验证：`session_tools.go:46-56` 为 coding 运行时装该工具 → `runner.go:1631` 的 `preloadExplicitSkills(ctx)` 返回的是 **ctx** 并交给 `main.Run(preloaded, parts...)`（:1637）→ `agent.go:206` 的 `Run` → `agent.go:333` 每轮 `tracedLLM.Execute(ctx, session, a.tools)` → `runner.go:1023` 把 `planModeLLM` 套在最内层，故激活 ctx 与完整工具数组同时到达。竞争解释已排除：`pkg/assembly` 等系统提示来源里没有第二处 \"plan mode\" 文本，邀请只随工具本身走。
+
+### 落点
+
+| Step | 落点 | 结果 |
+|---|---|---|
+| 0（编排偏差，见下） | 先写 Step 3/4 的五条测试取红 | 红：test 1、test 4、`…NamesTheTurnContract`；test 2、test 3、原 `…CarriesNoToolVocabulary` 绿 |
+| 1 | `pkg/run/config.go` `planModeLLM.Execute` 第一条语句：`if _, ok := explicitSkillActivationFromContext(ctx); ok { tools = withoutTool(tools, "enter_plan_mode") }`，连同 10 行 why 注释；三个 fail-closed 早退与 office 摘除原样未动 | done |
+| 2 | `pkg/run/skills.go` `explicitSkillActivationMessage`：加 \"The workflow those instructions describe is this turn's contract…\" 一句；doc 注释补 mode-contract 从句 | done |
+| 3 | `pkg/run/config_test.go`：`TestExplicitSkillTurnHidesEnterPlanMode`、`TestOrdinaryTurnKeepsEnterPlanMode`、`TestExplicitSkillTurnInPlanModeStillGetsTheReminder`、`TestExplicitSkillGateAppliesWhenModeStateIsUnreadable`（`// --- explicit skill turns (plan 368) ---` 分组，紧跟 office 族） | done |
+| 4 | `pkg/run/skills_test.go`：`TestExplicitSkillActivationMessageNamesTheTurnContract`（断言 `this turn's contract`、`session's current mode` 与技能正文逐字仍在）；原禁词测试未改 | done |
+| 5 | 门禁复核 | 见下 |
+| 6 | `plans/README.md` | 由 advisor 完成（执行器按派发指示跳过） |
+
+### 评审亲跑的门禁（advisor 在 worktree 内自己跑，不采信执行器的报告）
+
+| 命令 | 结果 |
+|---|---|
+| `-run 'TestExplicitSkillTurn\|TestOrdinaryTurnKeeps\|TestExplicitSkillGate\|TestExplicitSkillActivationMessage' -v` | 七条 `--- PASS`（含原 `IsEphemeral`／`CarriesNoToolVocabulary`），无 `[no tests to run]` |
+| `./pkg/run/ -count=1` | `ok … 45.755s` |
+| `go vet -tags fts5 ./pkg/run/` | exit 0，无输出 |
+| `gofmt -l` 四个 in-scope 文件 | 无输出 |
+| `./pkg/tool/ ./pkg/agent/ ./pkg/skill/ -count=1` | `ok` 19.658s／0.303s／13.376s |
+| `git diff --stat e1abd2f4..HEAD` | 仅 4 个 in-scope 文件（+134/−2）；`git status --porcelain` 空 |
+| `git diff --stat … pkg/tool/ pkg/agent/ pkg/skill/ pkg/state/` | 空；`enterPlanModeDescription` 仍在 `session_tools.go:348` 未改 |
+| **变异检查** | 注释掉闸门那行 → test 1、test 4 红、test 2 绿；`git checkout` 还原 → 全绿、树干净 |
+| `./... -timeout 30m`（`FOREBRAIN_HOME=$(mktemp -d)`） | 唯一红＝`pkg/architecture` 的 `TestTestFilesCorrespondToProductionFiles`，点名**与本计划无关的**四个既有 `pkg/tui` 探针测试文件（`deliverables_outcome_test.go` 由 `80bb73b4`、`zz_repro{,2,3}_test.go` 由 `e1abd2f4` 提交，均无同名生产文件）；其余全 `ok` |
+
+### 偏差与判断（评审已接受）
+
+1. **Step 0 与 Step 3/4 前移**：派发时授权先写测试取红再改生产代码，用红证据当 reproduction；原计划的 Step 1→3 顺序会先落修复、丢掉\"改前必红\"的证据。
+2. **`pkg/architecture` 的既有红**：上述四个 `pkg/tui` 探针测试文件在基线 `e1abd2f4` 就已让该测试红，非本改动引入，也不在本计划 scope 内（同目录另一会话正在清理）。因此 done criteria 的这一条以\"唯一红、且红因在范围外\"结案。
+3. **环境补齐（不改源码，均被 gitignore）**：worktree 的 `third_party/libtokenizers`、`third_party/pdfium` 软链到主检出；`pkg/gateway/dist` 只有 `.gitkeep`，`TestWebBuildLoadsNoExternalAsset` 需要构建产物，故从主检出复制。
+4. **普通轮次的 pkg/run flake**：执行器第一次全量遇到 `TestSubagentToolResultsKeepTheirShape` 的 `t.TempDir` 清理竞态（`unlinkat … directory not empty`，无断言失败），隔离 `-count=10` 绿、advisor 复核整包绿，记为已知 macOS flake，未改任何代码。
+
+### 后续（reviewer 需知道）
+
+- 分支与 worktree **保留**：合并（或删除）由 owner 决定，本会话未 push、未合并、未碰 `dev`。
+- 若要真机验证，可跑 `/run-forebrain` 以 `/audit` 开一轮，确认不再出现 `enter_plan_mode` 审批卡，且技能能把计划写到项目根 `plans/`。
