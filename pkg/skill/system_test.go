@@ -324,6 +324,7 @@ func TestInstall_AllSkillDirsExtracted(t *testing.T) {
 		"audit",
 		"review",
 		"run",
+		"run-skill-generator",
 		"context-save",
 		"context-restore",
 		"skill-workshop",
@@ -557,6 +558,111 @@ func TestRunSkillDrivesTheAppAndOffersToCaptureIt(t *testing.T) {
 	for _, unwanted := range []string{"driver.sh start hang", "brew install tmux", "term_live", "paint_dump"} {
 		if strings.Contains(content, unwanted) {
 			t.Fatalf("run skill carries this repository's own recipe %q", unwanted)
+		}
+	}
+}
+
+// TestRunSkillGeneratorIsUserInvocableOnly pins the two properties that make this
+// skill safe to ship. Its deliverable is committed files in the user's
+// repository, so the model must never pick it up on its own initiative — the
+// catalog it reads never names this skill, while the run skill that recommends it
+// stays there. And /run-skill-generator must exist, because plan 353's run skill
+// tells the user to run it.
+func TestRunSkillGeneratorIsUserInvocableOnly(t *testing.T) {
+	home := t.TempDir()
+	if err := Install(home); err != nil {
+		t.Fatalf("install system skills: %v", err)
+	}
+	systemRoot := filepath.Join(home, "skills", ".system")
+	dir := filepath.Join(systemRoot, "run-skill-generator")
+	if err := ValidateSkillDir(dir); err != nil {
+		t.Fatalf("run-skill-generator does not validate: %v", err)
+	}
+	activation, err := LoadActivation(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("load run-skill-generator: %v", err)
+	}
+	if activation.Name != "run-skill-generator" {
+		t.Fatalf("name=%q want run-skill-generator", activation.Name)
+	}
+	if !activation.SlashCommand {
+		t.Fatal("/run-skill-generator is the only entry point: it must derive a slash command")
+	}
+	if activation.ModelInvocation {
+		t.Fatal("the generator must be user-invocable only: its deliverable is committed files")
+	}
+
+	// The end-to-end proof: the model is offered the consumer and never the
+	// generator.
+	entries, err := CatalogEntries([]string{systemRoot}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	offeredRun := false
+	for _, entry := range entries {
+		switch entry.Name {
+		case "run":
+			offeredRun = true
+		case "run-skill-generator":
+			t.Fatalf("the generator reached the model's catalog: %+v", entries)
+		}
+	}
+	if !offeredRun {
+		t.Fatalf("the run skill that recommends this one is missing from the catalog: %+v", entries)
+	}
+
+	content := activation.Content
+	// The bundled files are reachable with no registration: the activation names
+	// them, so the model can open them by a path relative to the skill directory.
+	for _, want := range []string{
+		"template.md",
+		"references/drivers.md",
+		// The draft/publish contract: a draft, publishing left to the user.
+		".forebrain/skills/.drafts",
+		"Never publish it yourself",
+		"publish",
+		// The path trap: paths written into the generated skill must be the
+		// published ones, not the draft it is being written into.
+		"published path",
+		".drafts/",
+		// The forebrain semantics that make this advice true here.
+		"trusted",
+		"scripts/acceptance",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("run-skill-generator lost %q:\n%s", want, content)
+		}
+	}
+
+	// One probe, shared with the run skill: the two must not drift apart.
+	const probe = "for d in .forebrain .agents .claude .codex"
+	if !strings.Contains(content, probe) {
+		t.Fatalf("the generator lost the shared discovery probe:\n%s", content)
+	}
+	runActivation, err := LoadActivation(filepath.Join(systemRoot, "run", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("load run skill: %v", err)
+	}
+	if !strings.Contains(runActivation.Content, probe) {
+		t.Fatalf("the run skill lost the shared discovery probe:\n%s", runActivation.Content)
+	}
+
+	// This repository's own instance is not the shipped asset: its forebrain-only
+	// invocation recipes must not travel to every project.
+	for _, unwanted := range []string{"brew install tmux", "term_live", "paint_dump", "driver.sh start hang"} {
+		if strings.Contains(content, unwanted) {
+			t.Fatalf("the generator carries this repository's own recipe %q", unwanted)
+		}
+	}
+
+	// The reference doc survived the embed and carries the isolation guidance.
+	drivers, err := os.ReadFile(filepath.Join(dir, "references", "drivers.md"))
+	if err != nil {
+		t.Fatalf("read drivers reference: %v", err)
+	}
+	for _, want := range []string{"FOREBRAIN_HOME", "scripts/acceptance"} {
+		if !strings.Contains(string(drivers), want) {
+			t.Fatalf("references/drivers.md lost %q", want)
 		}
 	}
 }
