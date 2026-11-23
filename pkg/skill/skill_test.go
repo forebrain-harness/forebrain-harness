@@ -124,3 +124,54 @@ func TestParse_AllowedToolsAbsentStaysEmpty(t *testing.T) {
 		t.Fatalf("AllowedTools: expected empty, got %#v", s.AllowedTools)
 	}
 }
+
+// TestParse_ModelInvocationFalseIsAnExplicitNo pins the pointer: the key
+// present and false must be distinguishable from the key absent, because absent
+// is what keeps every skill already installed behaving exactly as before.
+func TestParse_ModelInvocationFalseIsAnExplicitNo(t *testing.T) {
+	s, err := skill.Parse(strings.NewReader("---\nname: x\ndescription: y\nmodel-invocation: false\n---\nBODY"))
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if s.ModelInvocation == nil || *s.ModelInvocation {
+		t.Fatalf("ModelInvocation: expected a non-nil false, got %#v", s.ModelInvocation)
+	}
+}
+
+// TestParse_ModelInvocationTrueIsAnExplicitYes covers the other spelling: the
+// key may be written out, and it must mean the ordinary behavior.
+func TestParse_ModelInvocationTrueIsAnExplicitYes(t *testing.T) {
+	s, err := skill.Parse(strings.NewReader("---\nname: x\ndescription: y\nmodel-invocation: true\n---\nBODY"))
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if s.ModelInvocation == nil || !*s.ModelInvocation {
+		t.Fatalf("ModelInvocation: expected a non-nil true, got %#v", s.ModelInvocation)
+	}
+}
+
+func TestParse_ModelInvocationAbsentStaysNil(t *testing.T) {
+	s, err := skill.Parse(strings.NewReader("---\nname: x\ndescription: y\n---\nBODY"))
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if s.ModelInvocation != nil {
+		t.Fatalf("ModelInvocation: expected nil, got %#v", s.ModelInvocation)
+	}
+}
+
+// TestParse_ModelInvocationAndSlashCommandAreIndependent pins that the two keys
+// are two axes, not one: a skill can hide its catalog entry and its slash
+// command at the same time, and each must survive the other.
+func TestParse_ModelInvocationAndSlashCommandAreIndependent(t *testing.T) {
+	s, err := skill.Parse(strings.NewReader("---\nname: x\ndescription: y\nslash-command: false\nmodel-invocation: false\n---\nBODY"))
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if s.SlashCommand == nil || *s.SlashCommand {
+		t.Fatalf("SlashCommand: expected a non-nil false, got %#v", s.SlashCommand)
+	}
+	if s.ModelInvocation == nil || *s.ModelInvocation {
+		t.Fatalf("ModelInvocation: expected a non-nil false, got %#v", s.ModelInvocation)
+	}
+}

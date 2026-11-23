@@ -197,6 +197,15 @@ func RegisterSkillTool(a tool.ToolAdder, st *tool.State) error {
 			if err != nil {
 				return "", err
 			}
+			// The two refusals are deliberately identical. This one is not a
+			// missing skill but a skill the user invokes only, and a distinct
+			// message would tell the model the skill exists and is reachable by
+			// another route — exactly what the catalog filter that keeps it out
+			// of the prompt is hiding. A user-only skill must be
+			// indistinguishable from a name that was never installed.
+			if !activation.ModelInvocation {
+				return "", fmt.Errorf("no skill named %q is available in this session", name)
+			}
 			tool.CaptureToolOutput(ctx, map[string]any{
 				"preview_kind": "skill",
 				"skill_name":   activation.Name,

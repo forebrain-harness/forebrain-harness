@@ -114,9 +114,21 @@ func Catalog(roots []string, stateRoot string) (string, error) {
 
 // CatalogEntries discovers the enabled skills under roots.
 //
+// A skill that declares `model-invocation: false` is left out entirely, so it is
+// not described to the model at all: this catalog is the model's only view of
+// the skill set, and the protocol rendered above it tells the model to load
+// anything whose description matches the task. It keeps its slash command and
+// its bundled files stay readable, because both come from
+// Loader.Discover — the toggle-and-command walk in pkg/turn and the loaded
+// skill catalog in pkg/run — not from here.
+//
 // Ordering is by lowercased name and then by path, which the parser already
 // applies for the name; the path tiebreak is added here so two skills sharing a
 // name cannot swap places between runs and silently invalidate the prefix.
+// This section sits in the cached prompt prefix and must render identically for
+// a whole session (see RenderCatalog), and the flag is read from disk with the
+// rest of the entry, so it inherits that freeze-once-per-session guarantee
+// rather than needing one of its own.
 func CatalogEntries(roots []string, stateRoot string) ([]CatalogEntry, error) {
 	parser := newMergedSkillParser(roots, strings.TrimSpace(stateRoot))
 	entries, err := parser.collect()
@@ -127,6 +139,9 @@ func CatalogEntries(roots []string, stateRoot string) ([]CatalogEntry, error) {
 	for _, entry := range entries {
 		name := strings.TrimSpace(entry.name)
 		if name == "" {
+			continue
+		}
+		if !entry.modelInvocation {
 			continue
 		}
 		root := canonicalSkillPath(entry.rootPath)

@@ -59,6 +59,16 @@ type Skill struct {
 	// through a builtin command instead set it to false so the command palette
 	// does not offer two entry points for one capability.
 	SlashCommand *bool `yaml:"slash-command,omitempty"`
+	// ModelInvocation controls whether the model may load this skill on its own
+	// initiative. Nil (the frontmatter key absent) means yes, which is what
+	// every ordinary skill wants. A skill that writes and commits files into the
+	// repository sets it to false: the user reaches it through its slash
+	// command, and the model is never offered it, so a description that happens
+	// to match the current task cannot pull a repository-writing skill into the
+	// middle of an unrelated turn. This is the other axis from SlashCommand —
+	// that one hides the command and keeps the catalog entry, this one keeps the
+	// command and hides the catalog entry.
+	ModelInvocation *bool `yaml:"model-invocation,omitempty"`
 	// ArgumentHint is what the skill's slash command takes, the frontmatter
 	// key Claude Code uses for the same thing. Surfaces show it dimmed after
 	// the command while its argument is still empty; empty means the generic

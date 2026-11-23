@@ -958,3 +958,89 @@ func TestSkillCatalogBytesIgnoreVersions(t *testing.T) {
 		t.Fatalf("catalog leaks version storage:\n%s", after)
 	}
 }
+
+// writeUserOnlySkill installs a skill whose SKILL.md declares
+// `model-invocation: false`: the user reaches it through its slash command, the
+// model is never offered it.
+func writeUserOnlySkill(t *testing.T, root, name, desc string) {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: " + desc + "\nmodel-invocation: false\n---\n\nbody\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSkillToolRefusesAUserOnlySkillByName pins that a user-only skill is
+// indistinguishable, through the skill tool, from a name that was never
+// installed. The identical wording is the requirement: a distinct "that skill
+// is user-invocable only" message would confirm to the model that the skill
+// exists and is reachable by another route, which is exactly what the catalog
+// filter that keeps it out of the prompt is hiding.
+func TestSkillToolRefusesAUserOnlySkillByName(t *testing.T) {
+	root := t.TempDir()
+	writeCatalogSkill(t, root, "ordinary", "an ordinary skill")
+	writeUserOnlySkill(t, root, "repo-writer", "writes files into the repository")
+
+	st := tool.NewState(root)
+	st.ReplaceLoadedSkillCatalog([]tool.LoadedSkill{
+		{Name: "ordinary", RootDir: filepath.Join(root, "ordinary")},
+		{Name: "repo-writer", RootDir: filepath.Join(root, "repo-writer")},
+	})
+	collector := &toolCollector{}
+	if err := RegisterSkillTool(collector, st); err != nil {
+		t.Fatal(err)
+	}
+	exec := collector.byName("skill")
+
+	if _, err := exec.Execute(context.Background(), `{"name":"ordinary"}`); err != nil {
+		t.Fatalf("an ordinary skill must still load: %v", err)
+	}
+	_, presentErr := exec.Execute(context.Background(), `{"name":"repo-writer"}`)
+	if presentErr == nil {
+		t.Fatal("a user-only skill loaded through the skill tool")
+	}
+	_, absentErr := exec.Execute(context.Background(), `{"name":"never-installed"}`)
+	if absentErr == nil {
+		t.Fatal("an unknown name must be refused")
+	}
+	// The message embeds the name that was asked for, so the two refusals are
+	// compared with the name blanked out: one wording, one sentence, no hint
+	// that the skill exists.
+	blankName := func(err error, name string) string {
+		return strings.Replace(err.Error(), `"`+name+`"`, `"<name>"`, 1)
+	}
+	got := blankName(presentErr, "repo-writer")
+	if want := blankName(absentErr, "never-installed"); got != want {
+		t.Fatalf("the two refusals differ, which tells the model the skill exists:\nuser-only: %q\nunknown:   %q", got, want)
+	}
+	if got != `no skill named "<name>" is available in this session` {
+		t.Fatalf("the user-only refusal is not the unknown-name message: %q", got)
+	}
+}
+
+// TestLoadActivationKeepsTheUserPathForAUserOnlySkill pins that
+// `model-invocation: false` hides the skill from the model and from nothing
+// else: the explicit slash invocation injects Content directly and never
+// consults the flag, so the command must survive.
+func TestLoadActivationKeepsTheUserPathForAUserOnlySkill(t *testing.T) {
+	root := t.TempDir()
+	writeUserOnlySkill(t, root, "repo-writer", "writes files into the repository")
+
+	activation, err := skill.LoadActivation(filepath.Join(root, "repo-writer", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("LoadActivation: %v", err)
+	}
+	if !activation.SlashCommand {
+		t.Fatal("a user-only skill must keep its slash command")
+	}
+	if activation.ModelInvocation {
+		t.Fatal("model-invocation: false must reach the activation")
+	}
+	if !strings.Contains(activation.Content, filepath.Join(root, "repo-writer", "SKILL.md")) {
+		t.Fatalf("the explicit invocation lost its context:\n%s", activation.Content)
+	}
+}

@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -97,4 +98,46 @@ func catalogBody(t *testing.T, catalog string) string {
 		t.Fatalf("catalog is missing its skill list:\n%s", catalog)
 	}
 	return catalog[from+len(start):]
+}
+
+// TestCatalogEntriesHidesUserInvocableSkills pins the whole point of
+// `model-invocation: false`: the catalog is the model's only view of the skill
+// set, so a skill that is never named here is never chosen by a description
+// that happened to match. It keeps its slash command and its bundled files —
+// both read through Loader.Discover, not through this function.
+func TestCatalogEntriesHidesUserInvocableSkills(t *testing.T) {
+	root := t.TempDir()
+	writeDiscoverySkill(t, filepath.Join(root, "always"), "name: always\ndescription: Model may load this", "body")
+	writeDiscoverySkill(t, filepath.Join(root, "user-only"), "name: user-only\ndescription: User only\nmodel-invocation: false", "body")
+
+	entries, err := CatalogEntries([]string{root}, "")
+	if err != nil {
+		t.Fatalf("CatalogEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly the one model-invocable skill, got %#v", entries)
+	}
+	if entries[0].Name != "always" {
+		t.Fatalf("the wrong skill survived the filter: %#v", entries)
+	}
+	if rendered := RenderCatalog(entries); strings.Contains(rendered, "user-only") {
+		t.Fatalf("a user-only skill reached the prompt catalog:\n%s", rendered)
+	}
+}
+
+// TestCatalogEntriesKeepsSkillsThatNeverMentionTheKey is the regression guard on
+// the nil-means-yes default: every SKILL.md already installed says nothing about
+// `model-invocation`, and all of them must stay model-visible.
+func TestCatalogEntriesKeepsSkillsThatNeverMentionTheKey(t *testing.T) {
+	root := t.TempDir()
+	writeDiscoverySkill(t, filepath.Join(root, "one"), "name: one\ndescription: First skill", "body")
+	writeDiscoverySkill(t, filepath.Join(root, "two"), "name: two\ndescription: Second skill", "body")
+
+	entries, err := CatalogEntries([]string{root}, "")
+	if err != nil {
+		t.Fatalf("CatalogEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("an absent key must mean yes, got %#v", entries)
+	}
 }

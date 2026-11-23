@@ -82,6 +82,10 @@ type mergedSkillEntry struct {
 	description string
 	body        string
 	metadata    map[string]any
+	// modelInvocation carries the skill's `model-invocation` frontmatter flag
+	// with nil already resolved to yes, since the entry only ever exists to be
+	// rendered.
+	modelInvocation bool
 }
 
 func newMergedSkillParser(roots []string, stateRoot string) *mergedSkillParser {
@@ -125,6 +129,8 @@ func (p *mergedSkillParser) collect() ([]mergedSkillEntry, error) {
 			description: strings.TrimSpace(found.Skill.Description),
 			body:        strings.TrimSpace(found.Skill.Body),
 			metadata:    found.Skill.Metadata,
+			modelInvocation: found.Skill.ModelInvocation == nil ||
+				*found.Skill.ModelInvocation,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {

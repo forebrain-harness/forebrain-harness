@@ -37,6 +37,10 @@ type Activation struct {
 	// SlashCommand reports whether this skill wants its own auto-derived
 	// slash command. False only when SKILL.md sets `slash-command: false`.
 	SlashCommand bool
+	// ModelInvocation reports whether the model may load this skill itself.
+	// False only when SKILL.md sets `model-invocation: false`. The user's own
+	// slash invocation does not consult it — that path injects Content directly.
+	ModelInvocation bool
 	// ArgumentHint is the skill's declared argument-hint, "" when it has none.
 	ArgumentHint string
 }
@@ -73,24 +77,34 @@ func LoadActivation(skillFile string) (Activation, error) {
 		return Activation{}, fmt.Errorf("skill name required")
 	}
 	root := canonicalSkillPath(filepath.Dir(skillFile))
-	entry := mergedSkillEntry{
-		rootPath:    root,
-		name:        name,
-		description: strings.TrimSpace(sk.Description),
-		body:        strings.TrimSpace(sk.Body),
-		metadata:    sk.Metadata,
-	}
 	slashCommand := true
 	if sk.SlashCommand != nil {
 		slashCommand = *sk.SlashCommand
 	}
+	// Resolved next to the other frontmatter flags, and carried on the entry as
+	// well as on the returned value: an entry left at its zero value is a
+	// false, and false is the restrictive answer, so a later caller rendering
+	// from the entry would silently treat an ordinary skill as user-only.
+	modelInvocation := true
+	if sk.ModelInvocation != nil {
+		modelInvocation = *sk.ModelInvocation
+	}
+	entry := mergedSkillEntry{
+		rootPath:        root,
+		name:            name,
+		description:     strings.TrimSpace(sk.Description),
+		body:            strings.TrimSpace(sk.Body),
+		metadata:        sk.Metadata,
+		modelInvocation: modelInvocation,
+	}
 	return Activation{
-		Name:         name,
-		Slug:         agent.SanitizeToolName(name),
-		Description:  strings.TrimSpace(sk.Description),
-		Content:      renderSkillActivation(entry),
-		SlashCommand: slashCommand,
-		ArgumentHint: strings.TrimSpace(sk.ArgumentHint),
+		Name:            name,
+		Slug:            agent.SanitizeToolName(name),
+		Description:     strings.TrimSpace(sk.Description),
+		Content:         renderSkillActivation(entry),
+		SlashCommand:    slashCommand,
+		ModelInvocation: modelInvocation,
+		ArgumentHint:    strings.TrimSpace(sk.ArgumentHint),
 	}, nil
 }
 
