@@ -43,6 +43,23 @@ describe('the card head vocabulary', () => {
     expect(headerActionWord('Failed to clear notes', 'zh')).toBe('清空笔记失败')
   })
 
+  it('words each process action and its wait suffix', () => {
+    expect(headerActionWord('Started', 'zh')).toBe('已启动')
+    expect(headerActionWord('Starting', 'zh')).toBe('正在启动')
+    expect(headerActionWord('Failed to start', 'zh')).toBe('启动失败')
+    expect(headerActionWord('Waited for', 'zh')).toBe('已等待')
+    expect(headerActionWord('Waiting for', 'zh')).toBe('正在等待')
+    expect(headerActionWord('Failed to wait for', 'zh')).toBe('等待失败')
+    expect(headerActionWord('Killed', 'zh')).toBe('已终止')
+    expect(headerActionWord('Killing', 'zh')).toBe('正在终止')
+    expect(headerActionWord('Failed to kill', 'zh')).toBe('终止失败')
+    expect(headerActionWord('Listed processes', 'zh')).toBe('已列出进程')
+    expect(headerActionWord('Listing processes', 'zh')).toBe('正在列出进程')
+    expect(headerActionWord('Failed to list processes', 'zh')).toBe('列出进程失败')
+    expect(headerSuffixWords('wait log', 'zh')).toBe('等待 log')
+    expect(headerSuffixWords('wait tcp', 'zh')).toBe('等待 tcp')
+  })
+
   it('words the three suffix shapes and leaves everything else alone', () => {
     expect(headerSuffixWords('lines 15-20', 'zh')).toBe('第 15-20 行')
     // The engine words a search's suffix as `matching “query”` (header_parts.go).

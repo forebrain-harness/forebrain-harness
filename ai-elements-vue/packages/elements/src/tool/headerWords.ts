@@ -15,6 +15,20 @@ export const HEADER_ACTION_ZH: Record<string, string> = {
   'Ran': '已运行',
   'Running': '正在运行',
   'Failed to run': '运行失败',
+  // The process tool (pkg/tool/header_parts.go): a background command's start,
+  // readiness wait, log read and kill, each naming the command or the id.
+  'Started': '已启动',
+  'Starting': '正在启动',
+  'Failed to start': '启动失败',
+  'Waited for': '已等待',
+  'Waiting for': '正在等待',
+  'Failed to wait for': '等待失败',
+  'Killed': '已终止',
+  'Killing': '正在终止',
+  'Failed to kill': '终止失败',
+  'Listed processes': '已列出进程',
+  'Listing processes': '正在列出进程',
+  'Failed to list processes': '列出进程失败',
   'Read': '已读取',
   'Reading': '正在读取',
   'Failed to read': '读取失败',
@@ -167,6 +181,8 @@ export function headerSuffixWords(suffix: string, lang: 'zh' | 'en'): string {
   if (match) return `第 ${match[1]} 行`
   match = suffix.match(/^matching (“.*”)$/)
   if (match) return `匹配 ${match[1]}`
+  match = suffix.match(/^wait (.+)$/)
+  if (match) return `等待 ${match[1]}`
   match = suffix.match(/^in (.+)$/)
   if (match) return `在 ${match[1]} 中`
   return suffix

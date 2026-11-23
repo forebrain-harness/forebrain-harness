@@ -271,6 +271,17 @@ func TestHeaderActionsCoverEveryKnownTool(t *testing.T) {
 			}})
 		}
 	}
+	// The process tool words each action; every verb it can produce belongs to
+	// the table, including the generic fallback for an action it does not name.
+	for _, act := range []string{"start", "wait", "log", "kill", "list", ""} {
+		for _, status := range statuses {
+			check(t, DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{
+				ToolName: "process", Status: status, Input: map[string]any{
+					"action": act, "command": "go test ./pkg/tool", "id": 7, "wait": "log",
+				},
+			}})
+		}
+	}
 	// A skill card owns three headers of its own.
 	for _, status := range []string{"loading", "completed", "failed"} {
 		frameStatus := status

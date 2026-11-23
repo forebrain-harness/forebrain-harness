@@ -96,3 +96,62 @@ func TestStoppedCardSaysNothing(t *testing.T) {
 	require.False(t, StoppedCardSaysNothing(frame("user_interaction", ToolMeta{Status: "failed"}, "")))
 	require.False(t, StoppedCardSaysNothing(frame("user_interaction", ToolMeta{Status: "awaiting approval"}, "")))
 }
+
+// TestDisplayPartsNamesTheProcessCommandAndID pins the second of the card
+// rules for the process tool: the head names what the call acts on — the
+// command a start runs, the id a wait/log/kill drives, the registry a list
+// reads — instead of a head that named only the tool and left the user
+// watching a timer for minutes.
+func TestDisplayPartsNamesTheProcessCommandAndID(t *testing.T) {
+	startRunning := DisplayFrame{Title: "process", Meta: ToolMeta{Status: "running", Input: map[string]any{
+		"action": "start", "command": "go test ./pkg/tool", "wait": "log",
+	}}}
+	action, target, suffix := DisplayParts(startRunning, t.TempDir())
+	require.Equal(t, "Starting", action)
+	require.Equal(t, "go test ./pkg/tool", target)
+	require.Equal(t, "wait log", suffix)
+
+	startDone := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
+		"action": "start", "command": "go test ./pkg/tool",
+	}}}
+	action, target, _ = DisplayParts(startDone, t.TempDir())
+	require.Equal(t, "Started", action)
+	require.Equal(t, "go test ./pkg/tool", target)
+
+	waitRunning := DisplayFrame{Title: "process", Meta: ToolMeta{Status: "running", Input: map[string]any{
+		"action": "wait", "id": float64(7),
+	}}}
+	action, target, _ = DisplayParts(waitRunning, t.TempDir())
+	require.Equal(t, "Waiting for", action)
+	require.Equal(t, "process #7", target)
+
+	killDone := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
+		"action": "kill", "id": float64(7),
+	}}}
+	action, target, _ = DisplayParts(killDone, t.TempDir())
+	require.Equal(t, "Killed", action)
+	require.Equal(t, "process #7", target)
+
+	listRunning := DisplayFrame{Title: "process", Meta: ToolMeta{Status: "running", Input: map[string]any{
+		"action": "list",
+	}}}
+	action, target, _ = DisplayParts(listRunning, t.TempDir())
+	require.Equal(t, "Listing processes", action)
+	require.Equal(t, "", target)
+
+	// A failed start words the failure; an action this build does not name keeps
+	// the generic verb (never a guessed one).
+	startFailed := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "failed", Input: map[string]any{
+		"action": "start", "command": "go test ./pkg/tool",
+	}}}
+	action, target, _ = DisplayParts(startFailed, t.TempDir())
+	require.Equal(t, "Failed to start", action)
+	require.Equal(t, "go test ./pkg/tool", target)
+
+	unknown := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
+		"action": "teleport", "id": float64(7),
+	}}}
+	action, target, _ = DisplayParts(unknown, t.TempDir())
+	require.Equal(t, "Called", action)
+	require.Equal(t, "process #7", target)
+}

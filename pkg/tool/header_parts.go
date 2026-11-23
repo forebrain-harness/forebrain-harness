@@ -140,6 +140,86 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 			target = extractShellCommand(summary)
 		}
 
+	// --- Process ---
+	// The header names what the call acts on: the command a start runs, the
+	// process id a wait/log/kill drives, the registry a list reads. A head that
+	// named only the tool left the user watching a timer for minutes, unable to
+	// tell which command it ran.
+	case lower == "process":
+		act := strings.ToLower(strings.TrimSpace(InputString(meta, "action")))
+		// id is a JSON number in Input (wait/log/kill require it). ToolMeta has
+		// no Output field, so Input is the only source the header can read.
+		id := intFromAny(meta.Input["id"])
+		proc := "process"
+		if id > 0 {
+			proc = fmt.Sprintf("process #%d", id)
+		}
+		switch act {
+		case "start":
+			if isFailed {
+				action = "Failed to start"
+			} else if isRunning || isPending {
+				action = "Starting"
+			} else {
+				action = "Started"
+			}
+			target = InputString(meta, "command")
+			if target == "" {
+				target = strings.TrimSpace(meta.Invocation)
+			}
+			if w := strings.TrimSpace(InputString(meta, "wait")); w != "" {
+				suffix = "wait " + w
+			}
+		case "wait":
+			if isFailed {
+				action = "Failed to wait for"
+			} else if isRunning || isPending {
+				action = "Waiting for"
+			} else {
+				action = "Waited for"
+			}
+			target = proc
+		case "log":
+			if isFailed {
+				action = "Failed to read"
+			} else if isRunning || isPending {
+				action = "Reading"
+			} else {
+				action = "Read"
+			}
+			target = proc + " log"
+		case "kill":
+			if isFailed {
+				action = "Failed to kill"
+			} else if isRunning || isPending {
+				action = "Killing"
+			} else {
+				action = "Killed"
+			}
+			target = proc
+		case "list":
+			// The verb carries the object (like peer_list's "Listed agents"), so
+			// the Chinese head reads "已列出进程" instead of "已列出 processes".
+			if isFailed {
+				action = "Failed to list processes"
+			} else if isRunning || isPending {
+				action = "Listing processes"
+			} else {
+				action = "Listed processes"
+			}
+		default:
+			// An action this build does not name keeps the generic wording
+			// rather than guessing a verb.
+			if isFailed {
+				action = "Failed to call"
+			} else if isRunning || isPending {
+				action = "Calling"
+			} else {
+				action = "Called"
+			}
+			target = proc
+		}
+
 	// --- Web ---
 	case lower == "web_fetch" || lower == "webfetch":
 		if isFailed {
@@ -531,6 +611,11 @@ func HeaderActions() []string {
 		"Permission request denied", "Permission request canceled",
 		// Shell
 		"Ran", "Running", "Failed to run",
+		// Process
+		"Started", "Starting", "Failed to start",
+		"Waited for", "Waiting for", "Failed to wait for",
+		"Killed", "Killing", "Failed to kill",
+		"Listed processes", "Listing processes", "Failed to list processes",
 		// Web
 		"Fetched", "Fetching", "Failed to fetch",
 		"Searched", "Searching", "Failed to search",
