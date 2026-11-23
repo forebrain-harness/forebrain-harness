@@ -1458,11 +1458,15 @@ func TestFileNamesHaveAtMostTwoUnderscores(t *testing.T) {
 	}
 }
 
-// TestPackagesStayUnderThirtyProductionFiles enforces the owner's cap of 30
-// production files per package (raised from 20 on 2026-10-07, when pkg/tui's
-// panel and picker primitives crossed the old number). A package that
-// outgrows it has stopped being one domain, and the fix is to merge files
-// that belong together or to split the package.
+// TestPackagesStayUnderThirtyProductionFiles enforces the owner's cap on
+// production files per package. maxProductionFilesPerPackage is the number --
+// 34 -- and the constant's own comment records why it moved (20, then 30 on
+// 2026-10-07 when pkg/tui's panel and picker primitives crossed the old
+// number, then 31 for pkg/gateway's web sign-in endpoints, then 34 for plan
+// 265's three endpoint families; pkg/tool then filled the full 34 with the
+// `process` tool). Read the constant, not this comment, which is history. A
+// package that outgrows that number has stopped being one domain, and the fix
+// is to merge files that belong together or to split the package.
 func TestPackagesStayUnderThirtyProductionFiles(t *testing.T) {
 	root := findRepoRoot(t)
 	counts := map[string]int{}

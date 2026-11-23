@@ -9277,6 +9277,10 @@ var settingsFieldList = []settingsField{
 		def: string(config.ApprovalPresetWorkspaceWrite), rule: "默认，或完全访问"},
 	{path: "sandbox_workspace_write.writable_roots", section: "sandbox_workspace_write", kind: settingsStrings},
 	{path: "sandbox_workspace_write.network_access", section: "sandbox_workspace_write", kind: settingsBool, def: true},
+	// Loopback is its own row because it is its own switch (plan 357): a
+	// sandboxed command still reaches 127.0.0.1 — a server it started — with
+	// network access off, and unset keeps that on (EffectiveNetworkLoopback).
+	{path: "sandbox_workspace_write.network_loopback", section: "sandbox_workspace_write", kind: settingsBool, def: true},
 	{path: "batch.sandbox_default", section: "batch", kind: settingsBool, def: true},
 
 	// 子代理

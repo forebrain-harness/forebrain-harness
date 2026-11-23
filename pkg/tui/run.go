@@ -1459,7 +1459,7 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		}
 	}
 	outcome, ok := cmds.session.ExecuteSurfaceSlash(ctx, state.sessionID, line)
-	// Inject-prompt commands (/init, /review, /plan <desc>) report
+	// Inject-prompt commands (/init, /plan <desc>, /goal <objective>) report
 	// Handled:false with ShouldContinueRun:true — the built prompt is fed to
 	// the model rather than answered inline. Gate on both so they are not
 	// mistaken for unhandled input and sent to the LLM verbatim (mirrors the

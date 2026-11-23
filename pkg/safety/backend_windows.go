@@ -1170,28 +1170,6 @@ func killCommandGroup(cmd *exec.Cmd, _ <-chan struct{}) {
 	killProcessGroup(cmd)
 }
 
-// waitWithTimeout calls cmd.Wait() but returns after d if Wait has not
-// completed. This prevents descendant processes that inherited our stdout/
-// stderr pipes from causing Wait to block forever after the process group
-// has been killed.
-func waitWithTimeout(cmd *exec.Cmd, d time.Duration) error {
-	errc := make(chan error, 1)
-	go func() {
-		errc <- cmd.Wait()
-	}()
-	select {
-	case err := <-errc:
-		// The command ended and a descendant left holding its pipes past
-		// WaitDelay is not a failure of the command (see finalizeExec).
-		if errors.Is(err, exec.ErrWaitDelay) {
-			return nil
-		}
-		return err
-	case <-time.After(d):
-		return nil
-	}
-}
-
 // DefaultWaitTimeout is the maximum time to wait for a killed process
 // group's pipes to drain before the caller stops waiting.
 const DefaultWaitTimeout = 3 * time.Second

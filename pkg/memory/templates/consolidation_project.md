@@ -781,12 +781,11 @@ SKILL.md frontmatter (YAML between --- markers):
 - argument-hint: optional; e.g. "[branch]" or "[path] [mode]"
 - model-invocation: false for workflows with side effects (push/deploy/delete/etc.)
 - slash-command: false for background/reference-only skills
-- allowed-tools: optional; list what the skill needs (e.g., Read, Grep, Glob, Bash)
-- context / agent / model: optional; use only when truly needed (e.g., context: fork)
+- allowed-tools: optional; list what the skill needs, by this repository's own tool names (e.g., read_file, edit_file, shell)
 
 SKILL.md content expectations:
 
-- Use $ARGUMENTS, $ARGUMENTS[N], or $N (e.g., $0, $1) for user-provided arguments.
+- There is no argument placeholder syntax to write: whatever the user types after the command arrives as their message, so the procedure reads the request from the conversation.
 - Distinguish two content types:
   - Reference: conventions/context to apply inline (keep very short).
   - Task: step-by-step procedure (preferred for this memory system).
