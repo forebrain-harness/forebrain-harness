@@ -5861,16 +5861,11 @@ func multilineLineEnd(value []rune, cursor int) int {
 	return len(value)
 }
 
-// multilinePanel lays the multiline editor out: the question in the head,
-// the lines above the caret under it, the caret's line as the field, the
-// lines below as the body, and the keys that answer it.
-func multilinePanel(title string, value []rune, cursor int, esc string, actions []FooterAction) slashPanel {
-	return multilineEditorPanel(title, value, cursor, esc, ActionOptions{FooterActions: actions})
-}
-
-// multilineEditorPanel is multilinePanel's body, shared with the /config
-// panel's textarea: the same page chrome, help and key wording as the one-line
-// editor (plan 350).
+// multilineEditorPanel lays the multiline editor out: the question in the
+// head, the lines above the caret under it, the caret's line as the field, the
+// lines below as the body, and the keys that answer it. It is the same page
+// chrome, help and key wording as the one-line editor, shared with the /config
+// panel's textarea (plan 350).
 func multilineEditorPanel(title string, value []rune, cursor int, esc string, opts ActionOptions) slashPanel {
 	b := newPanelBuilder()
 	if opts.Chrome != nil {
@@ -6195,10 +6190,6 @@ func pickerWordStartsWith(s, query string) bool {
 func isPickerWordRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
-
-// pickerRightPad keeps a picker's rows off the terminal's last columns, where
-// a row would reach the autowrap threshold.
-const pickerRightPad = 2
 
 // wrapMenuText wraps a menu row's text at width: whole, word-wrapped, a word
 // longer than the width broken — never cut short.
@@ -6758,18 +6749,10 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 	return res.Row, res.OK, err
 }
 
-// richKeyLoop is the rich picker's one key loop: it renders the state's panel
-// and reads keys until the user confirms or cancels, reporting ok only for a
-// confirmation. The state carries everything the page draws, its config-page
-// style included (plan 325).
-func (s *rawSelector) richKeyLoop(p *richPickerState, label string, fetchMore func() []SelectItem) (int, bool, error) {
-	res, err := s.richKeyLoopResult(p, label, fetchMore)
-	return res.Row, res.OK, err
-}
-
-// richKeyLoopResult is richKeyLoop's action-aware core (plan 326 D1): a
-// footer action's key ends the picker with the action it fires instead of a
-// row, before any key the filter could take.
+// richKeyLoopResult is the rich picker's one key loop (plan 326 D1): it renders
+// the state's panel and reads keys until the user confirms, cancels, or fires a
+// footer action — a footer action's key ends the picker with the action it
+// fires instead of a row, before any key the filter could take.
 func (s *rawSelector) richKeyLoopResult(p *richPickerState, label string, fetchMore func() []SelectItem) (ActionResult, error) {
 	release, err := s.acquireComposerInput()
 	if err != nil {

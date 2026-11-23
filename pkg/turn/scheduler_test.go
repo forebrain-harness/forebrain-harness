@@ -30,7 +30,6 @@ type recorder struct {
 	sessions   []string
 	delivered  []string
 	output     string
-	errText    string
 	deliverErr error
 	startErr   error
 }

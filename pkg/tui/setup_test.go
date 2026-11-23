@@ -608,29 +608,6 @@ func runSubscriptionSetup(t *testing.T, cfg PromptConfig, sub *fakeSubscription)
 	return setup.run()
 }
 
-// dismissingSelector hands the first multi-select page one dismissal — the Esc
-// a person presses to step back — and answers everything after it like the plain
-// fake.
-type dismissingSelector struct {
-	*fakeSelector
-	dismissed bool
-}
-
-func (s *dismissingSelector) MultiSelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
-	if s.dismissed {
-		return s.fakeSelector.MultiSelectRichTabbed(label, items, opts)
-	}
-	s.dismissed = true
-	s.multiLabels = append(s.multiLabels, label)
-	options := make([]string, len(items))
-	for i, item := range items {
-		options[i] = item.Label
-	}
-	s.multiOptions = append(s.multiOptions, options)
-	s.multiDefaults = append(s.multiDefaults, append([]int(nil), opts.Checked...))
-	return nil, false, nil
-}
-
 // indexSelector answers the provider page by row index and records the row the
 // page opened on, which is what a label cannot say when two rows share one.
 type indexSelector struct {

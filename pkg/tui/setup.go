@@ -32,12 +32,11 @@ import (
 )
 
 type Wizard struct {
-	rt          process.Context
-	out         io.Writer
-	selector    Selector
-	readLine    func(context.Context) (string, error)
-	interactive bool
-	rawInput    bool
+	rt       process.Context
+	out      io.Writer
+	selector Selector
+	readLine func(context.Context) (string, error)
+	rawInput bool
 }
 
 func RunOnboarding(ctx context.Context, in io.Reader, out io.Writer) error {
@@ -639,11 +638,6 @@ func (s *llmSetup) step(pages []int, dir int) int {
 	return pages[at]
 }
 
-// resumeAt reopens the setup at page, keeping every answer given.
-func (s *llmSetup) resumeAt(page int) {
-	s.page, s.back = page, true
-}
-
 // options are the answers as what the setup saves. All three ways in name the
 // model's default thinking level, so the row is configured by the one save the
 // review confirmed; a subscription's row is written by its own Provision just
@@ -895,18 +889,6 @@ func (s *llmSetup) pickProvider() (bool, error) {
 			return true, nil
 		}
 		// Esc on the endpoints goes back to the providers.
-	}
-}
-
-// categoryOf is the group a choice is listed under.
-func categoryOf(choice providerChoice) string {
-	switch {
-	case choice.Custom:
-		return providerCustomCategory
-	case choice.Subscription != "":
-		return providerSignInCategory
-	default:
-		return providerAPIKeyCategory
 	}
 }
 

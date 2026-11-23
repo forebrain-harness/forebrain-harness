@@ -120,8 +120,6 @@ func TaskWorkspaceDir(projectRoot, taskID string, seq int) string {
 
 const taskColumns = `id, agent_id, project_id, title, input_text, input_set, external_ref, origin, origin_ref, created_at, updated_at`
 
-const taskColumnCount = 11
-
 func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	var t Task
 	var inputSet int

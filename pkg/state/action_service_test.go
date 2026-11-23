@@ -1504,10 +1504,6 @@ func sessionAgentID(t *testing.T, s *SessionStore, id string) string {
 	return agentID
 }
 
-func assistantMessage(messageID, usageJSON string) Message {
-	return Message{Role: "assistant", MessageID: messageID, RunID: "run-1", UsageJSON: usageJSON}
-}
-
 func TestTokenCountFromLastAPIResponseAndTailEstimate(t *testing.T) {
 	turns := []Message{
 		{Role: "user", Content: "first"},

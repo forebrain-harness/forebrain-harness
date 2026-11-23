@@ -118,12 +118,6 @@ func renderAssistantMarkdown(raw string) string {
 	return renderAssistantMarkdownWithWidth(raw, 0, DiffThemeUnknown)
 }
 
-// formatToolContent transforms raw tool output into human-friendly display text
-// based on the tool type. Returns empty string when there is nothing to show.
-func formatToolContent(title, content, cwd string) string {
-	return formatToolContentWithInput(title, content, cwd, nil)
-}
-
 // A refusal with words draws them as the card's body: a refused call never
 // ran, so its Content is empty (the shell-refusal reality) and the words
 // riding the meta are the only sentence the card has. A refusal without

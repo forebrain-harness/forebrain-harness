@@ -8973,46 +8973,6 @@ func TestWithConfigSectionSerialisesWriters(t *testing.T) {
 		"every writer's increment must have landed")
 }
 
-// providerOrder lists the model table's providers, in storage order.
-func providerOrder(t *testing.T, cfg appcfg.Root) []string {
-	t.Helper()
-	out := []string{}
-	for _, item := range cfg.LLMModels {
-		out = append(out, item.Provider)
-	}
-	return out
-}
-
-func providerOrderInYAML(t *testing.T, cfg appcfg.Root) []string {
-	t.Helper()
-	out := []string{}
-	for _, item := range cfg.LLMModels {
-		out = append(out, item.Provider)
-	}
-	return out
-}
-
-// providerModelOrderInYAML is the expanded provider/model order the table holds,
-// one item per row.
-func providerModelOrderInYAML(t *testing.T, cfg appcfg.Root) []string {
-	t.Helper()
-	out := []string{}
-	for _, item := range cfg.LLMModels {
-		out = append(out, item.Provider+"/"+item.Model)
-	}
-	return out
-}
-
-func providerBaseURLInYAML(t *testing.T, cfg appcfg.Root, provider string) string {
-	t.Helper()
-	for _, item := range cfg.LLMModels {
-		if strings.EqualFold(strings.TrimSpace(item.Provider), provider) {
-			return strings.TrimSpace(item.BaseURL)
-		}
-	}
-	return ""
-}
-
 // TestChatSessionsFiltersTheDrawerListByProject pins the drawer's project
 // filter: project_id narrows the list — and the total the pages are counted
 // from — to one project's conversations, on the server; an empty filter is

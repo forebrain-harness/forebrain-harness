@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -67,15 +66,4 @@ func migrateSectionRow(t *testing.T, db *sql.DB, section string) string {
 		t.Fatalf("section %s is not stored", section)
 	}
 	return string(raw)
-}
-
-// openMigrateStateDB opens the scratch state database an import test uses.
-func openMigrateStateDB(t *testing.T, home string) *sql.DB {
-	t.Helper()
-	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
 }

@@ -215,9 +215,8 @@ type ChatSession struct {
 	tuiTurnRunMu sync.Mutex
 	tuiTurnRunID string
 
-	toolApprovalMu    sync.Mutex
-	toolApprovalSink  turn.ToolApprovalDecisionSink
-	networkApprovalMu sync.Mutex
+	toolApprovalMu   sync.Mutex
+	toolApprovalSink turn.ToolApprovalDecisionSink
 	// subagentApprovalMu keeps the overlay single-file while several subagents
 	// run at once: subagent_fanout dispatches its children concurrently, so two
 	// of them can reach an approval gate in the same instant and the user must

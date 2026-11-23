@@ -96,14 +96,6 @@ func toolCallResult(toolName, callID, arguments string) *llm.Result {
 	}
 }
 
-type recordingTracer struct {
-	events []agent.Event
-}
-
-func (t *recordingTracer) Trace(event agent.Event) {
-	t.events = append(t.events, event)
-}
-
 // -- helpers -----------------------------------------------------------------
 
 func mustNew(t *testing.T, client llm.LLM, name, desc string) *agent.Agent {

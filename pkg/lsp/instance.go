@@ -245,16 +245,16 @@ type Instance struct {
 	log     *serverLog
 	stderrW *stderrLogWriter
 
-	mu           sync.Mutex
-	state        InstanceState
-	stateCh      chan struct{} // closed and replaced on every state or progress change
-	lastError    string
-	progress     map[string]*int // active work-done tokens → percentage (nil = none reported)
-	caps         ServerCapabilities
-	encoding     Encoding
-	folders      []WorkspaceFolder
-	regs         map[string]Registration
-	pullStale    bool // a workspace/diagnostic/refresh arrived; task 07 re-pulls
+	mu        sync.Mutex
+	state     InstanceState
+	stateCh   chan struct{} // closed and replaced on every state or progress change
+	lastError string
+	progress  map[string]*int // active work-done tokens → percentage (nil = none reported)
+	caps      ServerCapabilities
+	encoding  Encoding
+	folders   []WorkspaceFolder
+	regs      map[string]Registration
+
 	pid          int
 	crashes      []time.Time // crash times inside the sliding window
 	restartSeq   int         // index into restartBackoff
@@ -651,11 +651,6 @@ func (i *Instance) handleServerRequest(ctx context.Context, method string, param
 		folders := append([]WorkspaceFolder(nil), i.folders...)
 		i.mu.Unlock()
 		return folders, nil
-	case "workspace/diagnostic/refresh":
-		i.mu.Lock()
-		i.pullStale = true
-		i.mu.Unlock()
-		return nil, nil
 	}
 	if strings.HasSuffix(method, "/refresh") {
 		return nil, nil
@@ -1346,17 +1341,6 @@ func (i *Instance) Encoding() Encoding {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.encoding
-}
-
-// consumePullStale reports whether a workspace/diagnostic/refresh arrived
-// since the last call and clears the flag: the diagnostics layer re-pulls
-// pull-model servers when it returns true.
-func (i *Instance) consumePullStale() bool {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	stale := i.pullStale
-	i.pullStale = false
-	return stale
 }
 
 func (i *Instance) State() InstanceState {

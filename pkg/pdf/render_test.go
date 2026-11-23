@@ -21,11 +21,6 @@ import (
 	"github.com/klippa-app/go-pdfium/responses"
 )
 
-// zhLine is the text on both committed fixtures' single page. The ten
-// ideographs after the fullwidth colon are what the non-tofu test renders,
-// slices by PDFium's own rectangles, and measures.
-const zhLine = "中文渲染测试：甲乙丙丁戊己庚辛壬癸"
-
 // minDistinctGlyphSignatures is how many of the ten glyphs must have a
 // different ink profile. A fallback font that is missing draws every glyph as
 // the same .notdef box, which collapses the count to 1; real glyphs differ.

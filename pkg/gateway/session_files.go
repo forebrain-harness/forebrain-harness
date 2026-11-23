@@ -554,10 +554,6 @@ func listArtifactEntries(path string) ([]artifactEntry, bool, error) {
 // conversion would be a denial of service rather than a preview.
 const artifactPreviewMaxSource = 200 << 20
 
-// artifactPreviewSlots bounds concurrent LibreOffice processes: two is a
-// whole conversion audience on a laptop and a rounding error on a server.
-var artifactPreviewSlots = make(chan struct{}, 2)
-
 // artifactPreviewWaits deduplicates concurrent conversions of the same
 // content: one request converts, the rest wait and read the cache. The map
 // entry is removed by whoever created it, so a later request for the same

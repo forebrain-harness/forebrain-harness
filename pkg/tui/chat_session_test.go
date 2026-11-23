@@ -3142,21 +3142,6 @@ func TestNotifyUIKeepsQueuedEventsWhenSinkChanges(t *testing.T) {
 	s.stopUINotificationDispatcher()
 }
 
-// captureNotify collects all UI notifications dispatched by the session by
-// recording at the UI-notify callback.
-func captureNotify(s *ChatSession) *[]string {
-	var mu sync.Mutex
-	var got []string
-	s.PrependUINotify(func(msg any) {
-		mu.Lock()
-		defer mu.Unlock()
-		if m, ok := msg.(NewMessageMsg); ok {
-			got = append(got, string(m.Msg.Kind)+":"+m.Msg.Content)
-		}
-	})
-	return &got
-}
-
 func TestSlashExecutionSurfaceRejectsUnsupportedChannel(t *testing.T) {
 	s := &ChatSession{}
 
@@ -9501,8 +9486,6 @@ func seedConnectModelRow(t *testing.T, home, model string) {
 	}
 	require.NoError(t, err)
 }
-
-func strPtr(v string) *string { return &v }
 
 // storeStoredSectionForTest writes one stored section the way a surface does:
 // the runtime settings live in the database, and the file keeps only its
@@ -19765,8 +19748,9 @@ func TestCompactPlainLineSkipsFencedJSONBrace(t *testing.T) {
 }
 
 func TestReadFileToolNoBlankLines(t *testing.T) {
-	// Simulate read_file content after formatToolContent/stripToolMetadataSections
-	// has extracted the fenced body with line numbers.
+	// Simulate read_file content after
+	// formatToolContentWithInput/stripToolMetadataSections has extracted the
+	// fenced body with line numbers.
 	content := "1|# Forebrain Harness build/release chain.\n2|#\n3|#   make ui       build the Vue frontend\n4|\n5|VERSION      := $(shell cat VERSION)"
 
 	// Log the input
@@ -22698,9 +22682,6 @@ func TestStatusMarkdownRendersMCPCountsAndTokens(t *testing.T) {
 		}
 	}
 }
-func pickerModelID(version string) string {
-	return "gpt-" + version + "-co" + "dex"
-}
 
 func testConfig() appcfg.Root {
 	return appcfg.Root{LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
@@ -22717,15 +22698,6 @@ func testConfig() appcfg.Root {
 			},
 		},
 	}
-}
-
-func writeConfig(t *testing.T, content string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(strings.TrimSpace(content)+"\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	return path
 }
 
 func TestNewSlashOverlay_StartsActiveAndEmpty(t *testing.T) {
@@ -23443,10 +23415,6 @@ func startsWithLower(s, prefix string) bool {
 		}
 	}
 	return true
-}
-
-func containsAll(s, needle string) bool {
-	return len(needle) == 0 || (len(s) >= len(needle) && strings.Contains(s, needle))
 }
 
 func TestAcceptSlashSelection(t *testing.T) {
@@ -32007,15 +31975,6 @@ func TestCrossProcessAgentSwitchDropsOldPin(t *testing.T) {
 }
 
 var _ = os.Setenv
-
-// tuiStubLLM answers one plain text result, so a rolled-back runner can be
-// observed without provider credentials.
-type tuiStubLLM struct{}
-
-func (tuiStubLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
-	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("ok")})
-	return &llm.Result{Message: &msg}, nil
-}
 
 // The three model/config rollback invariants the process reload path pins in
 // pkg/run, mirrored here for the TUI's own reload seam: a failed reload

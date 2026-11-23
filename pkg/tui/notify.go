@@ -561,33 +561,7 @@ type PlanReviewReviewedMsg struct {
 	Error    string
 }
 
-type SendMsgFunc func(content string)
 type ApproveFn func(ApprovalSubmit)
-
-const DefaultNotificationTimeout = 8 * time.Second
-
-type NotificationPriority string
-
-const (
-	NotificationLow       NotificationPriority = "low"
-	NotificationMedium    NotificationPriority = "medium"
-	NotificationHigh      NotificationPriority = "high"
-	NotificationImmediate NotificationPriority = "immediate"
-)
-
-type Notification struct {
-	Key         string
-	Text        string
-	Priority    NotificationPriority
-	Invalidates []string
-	Timeout     time.Duration
-	Fold        func(current Notification, incoming Notification) Notification
-}
-
-type NotificationQueue struct {
-	current *Notification
-	queue   []Notification
-}
 
 type toolDisplayMode int
 

@@ -14,9 +14,6 @@ const envelopeTag = "cross-session-message"
 // maxEnvelopeName is the length an attribute name is cut to, in runes.
 const maxEnvelopeName = 64
 
-// maxFromAddress is the longest sender address an attribute carries.
-const maxFromAddress = 300
-
 // maxHopChain is the longest hop chain an attribute carries.
 const maxHopChain = 32
 

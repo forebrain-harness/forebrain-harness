@@ -474,17 +474,6 @@ func (r *Renderer) latestPlanFrameLocked() (Frame, bool) {
 	return Frame{}, false
 }
 
-// planDrawerOpenLocked reports whether the drawer is currently on screen: open,
-// opened for the view being shown, and still backed by a plan frame.
-// Caller holds r.mu.
-func (r *Renderer) planDrawerOpenLocked() bool {
-	if !r.planDrawer.open || r.planDrawer.view != r.activeView {
-		return false
-	}
-	_, ok := r.latestPlanFrameLocked()
-	return ok
-}
-
 // planDrawerLayoutLocked lays the open drawer out for the current terminal
 // width and history body height. ok is false when there is nothing to lay out
 // (the drawer is closed, or the view it belonged to is gone).

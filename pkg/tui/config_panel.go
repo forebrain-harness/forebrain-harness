@@ -1773,11 +1773,6 @@ const (
 	// holds no row for the section, so it reads its built-in defaults — the
 	// prototype's own marker (plan 321).
 	configDefaultStatus = "Default"
-	// configDefaultArrow is how an unset field with a default of its own
-	// reads in the value column (plan 327 D6, prototype html:117): the word
-	// and the default it names, for a bool, a number with its unit, an
-	// enum's option or a prompt's built-in text.
-	configDefaultArrow = "Default → "
 	// A shared custom subagent is marked on an agent's page, where the switch
 	// beside it is the agent's.
 	configSharedStatus = "Shared"
@@ -3788,16 +3783,6 @@ func configContainerKeys(container any) []string {
 		return keys
 	}
 	return nil
-}
-
-func configContainerLen(value any) int {
-	switch node := value.(type) {
-	case map[string]any:
-		return len(node)
-	case []any:
-		return len(node)
-	}
-	return 0
 }
 
 // configAssign returns the document with the value at path replaced — making

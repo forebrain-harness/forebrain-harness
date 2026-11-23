@@ -411,8 +411,6 @@ func (s *ProjectStore) AgentID() string {
 
 const projectColumns = `id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, last_attach_dir, project_type, created_at, updated_at, task_notify_json, batch_sandbox`
 
-const projectColumnCount = 17
-
 // The project store's statements. Each SQLite arm is the text this file
 // carried before multi-database support. MySQL turns the two upserts into ON
 // DUPLICATE KEY UPDATE — the root conflict is the unique index over SHA2(root),

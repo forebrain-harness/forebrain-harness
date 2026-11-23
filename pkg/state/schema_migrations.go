@@ -3790,7 +3790,6 @@ ORDER BY e.sequence`)
 		eventType string
 		toolName  string
 		errText   string
-		hasPlan   bool
 		planAgent string
 		occurred  int64
 	}

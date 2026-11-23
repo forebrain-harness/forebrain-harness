@@ -1001,23 +1001,6 @@ func TestModelPickerMarksTheDefaultModelEntry(t *testing.T) {
 
 // test-only readers for a whole configuration document.
 
-// loadDocumentForTest reads a whole configuration document — stored sections
-// included — the way appcfg.Load read one before plan 207 narrowed forebrain.yaml
-// to its supported keys: parse and normalize, then Load's tail (.env merge,
-// ${ENV} expansion, validation). A test that assembles a runtime configuration
-// in a file goes through here, because the file itself no longer carries those
-// sections.
-func loadDocumentForTest(path string) (appcfg.Root, error) {
-	root, err := loadPersistedDocumentForTest(path)
-	if err != nil {
-		return appcfg.Root{}, err
-	}
-	if err := appcfg.FinishLoad(&root); err != nil {
-		return appcfg.Root{}, err
-	}
-	return root, nil
-}
-
 // loadPersistedDocumentForTest is the same read without Load's tail: a ${ENV}
 // reference stays a reference, as appcfg.LoadPersisted left it.
 func loadPersistedDocumentForTest(path string) (appcfg.Root, error) {

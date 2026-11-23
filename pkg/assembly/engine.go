@@ -169,21 +169,3 @@ func contextPressureForInjectedContext(projected, limit int) string {
 	}
 	return "ok"
 }
-
-func normalizedSet(items []string) []string {
-	seen := make(map[string]struct{}, len(items))
-	out := make([]string, 0, len(items))
-	for _, x := range items {
-		v := strings.TrimSpace(x)
-		if v == "" {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	sort.Strings(out)
-	return out
-}

@@ -640,8 +640,6 @@ type fakeSession struct {
 	shellCommands            []string
 	dispatchedDisplay        []string
 	dispatchedAttachments    []InputAttachment
-	steered                  []string
-	queuedFollowUps          []string
 	sessionIDs               []string
 	approvalRecoverySessions []string
 	approvalSet              bool
@@ -660,21 +658,17 @@ type fakeSession struct {
 	modelRowID               string
 	rowWindows               map[string]int64
 	skills                   string
-	models                   []string
 	skillToggleOpts          []skill.Entry
 	memorySkillOpts          []MemorySkillOption
 	promotedMemorySkills     []string
 	promoteMemoryErr         error
 	chooseFn                 func(turn.SlashChoice) SlashOutcome
 	choices                  []turn.SlashChoice
-	subagentOpts             []string
 	currentReasoningEffort   string
-	appliedModel             string
 	syncedConfig             int
 	sandboxReply             string
 	sandboxArgs              [][]string
 	syncConfigErr            error
-	appliedReasoning         string
 	appliedSkill             string
 	appliedEnabledPaths      []string
 	installedSkill           string
@@ -699,7 +693,6 @@ type fakeSession struct {
 	pulledSkill              string
 	pulledReplace            bool
 	pullErr                  error
-	switchedPrimaryQuery     string
 	statusReply              string
 	mcpReply                 string
 	lspReply                 string
@@ -719,10 +712,7 @@ type fakeSession struct {
 	cancelAllAgentsCalls int
 	cancelSubagentQuery  SubagentControlQuery
 	steerAccepted        bool
-	queueAccepted        bool
 	steerRetracted       bool
-	retractCalls         int
-	pendingSteerCount    int
 	pendingSteerCountOK  bool
 	inputQueues          map[string]*runpkg.InputQueue
 	cancelled            chan struct{}

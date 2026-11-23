@@ -52,11 +52,6 @@ func stringField(m map[string]any, key string) string {
 	return v
 }
 
-type toolCallPart struct {
-	Type      string           `json:"type"`
-	ToolCalls []storedToolCall `json:"tool_calls,omitempty"`
-}
-
 type storedToolCall struct {
 	ID       string             `json:"id,omitempty"`
 	Type     string             `json:"type,omitempty"`
@@ -68,26 +63,11 @@ type storedFunctionCall struct {
 	Arguments string `json:"arguments,omitempty"`
 }
 
-type toolResultMetaPart struct {
-	Type       string `json:"type"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
-}
-
 type toolDisplayPart struct {
 	Type         string `json:"type"`
 	Body         string `json:"body,omitempty"`
 	Summary      string `json:"summary,omitempty"`
 	ToolMetaJSON string `json:"tool_meta_json,omitempty"`
-}
-
-type attachmentParsePart struct {
-	Type      string `json:"type"`
-	FileID    string `json:"file_id,omitempty"`
-	Label     string `json:"label,omitempty"`
-	MIMEType  string `json:"mime_type,omitempty"`
-	Parser    string `json:"parser,omitempty"`
-	TextBytes int    `json:"text_bytes,omitempty"`
-	Summary   string `json:"summary,omitempty"`
 }
 
 // ExtractReasoningText scans a message list for reasoning/thinking content.

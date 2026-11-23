@@ -65,16 +65,6 @@ func onlyResponse(t *testing.T, root string) Record {
 	return records[0]
 }
 
-// onlyRequest is the one request record of a single call.
-func onlyRequest(t *testing.T, root string) Record {
-	t.Helper()
-	records := recordsWithMsg(t, root, "llm request")
-	if len(records) != 1 {
-		t.Fatalf("request records = %+v, want exactly one", records)
-	}
-	return records[0]
-}
-
 // payloadPath locates one payload file of the home's day directories.
 func payloadPath(t *testing.T, root, name string) string {
 	t.Helper()

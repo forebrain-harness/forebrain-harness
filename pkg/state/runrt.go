@@ -218,14 +218,6 @@ const (
 	RunOwnerKindTerminal = "tui"
 )
 
-// livePrimaryRunCondition is the one definition of "this session has a live
-// primary run": one parked on an approval, or one running under an owner
-// whose lease is still fresh. CreateRun's atomic INSERT and
-// SessionHasLiveRun read the same predicate, so the writer's rule and the
-// reader's rule cannot drift apart. %s takes the fb_runs alias.
-const livePrimaryRunCondition = `(status = ? OR (status = ? AND EXISTS (
-  SELECT 1 FROM fb_run_owners o WHERE o.owner = %s.owner AND o.heartbeat_at_ms >= ?)))`
-
 // liveRunArgs binds the condition's parameters in order, with the lease
 // cutoff computed from now.
 func liveRunArgs(now time.Time) []any {
@@ -233,9 +225,13 @@ func liveRunArgs(now time.Time) []any {
 		now.UnixMilli() - RunOwnerLease.Milliseconds()}
 }
 
-// livePrimaryRunConditionFor is livePrimaryRunCondition with the dialect's
-// placeholders: SQLite and MySQL write '?', PostgreSQL numbers its parameters
-// from start. The alias is the fb_runs alias the predicate qualifies.
+// livePrimaryRunConditionFor is the one definition of "this session has a live
+// primary run": one parked on an approval, or one running under an owner whose
+// lease is still fresh. CreateRun's atomic INSERT and SessionHasLiveRun both
+// read it, so the writer's rule and the reader's rule cannot drift apart. The
+// predicate takes the dialect's placeholders — SQLite and MySQL write '?',
+// PostgreSQL numbers its parameters from start — and the fb_runs alias it
+// qualifies.
 func livePrimaryRunConditionFor(d dbx.Dialect, alias string, start int) string {
 	ph := func(n int) string { return dbx.Placeholder(d, start+n) }
 	return `(status = ` + ph(0) + ` OR (status = ` + ph(1) + ` AND EXISTS (
@@ -800,7 +796,7 @@ WHERE NOT EXISTS (
 func (s *RunStore) liveRunRefusal(ctx context.Context, sessionID string, now time.Time) (refusal error, err error) {
 	// Parked or running, and whether this process is the one holding it. A
 	// running blocker counts as live only while its owner renews its lease
-	// (livePrimaryRunCondition), so a running row found here is always another
+	// (livePrimaryRunConditionFor), so a running row found here is always another
 	// live surface's; a parked one blocks whatever its owner's lease says, so
 	// the lease is read too, to tell a surface that is still there from one
 	// that is gone.

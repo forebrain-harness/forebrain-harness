@@ -27,7 +27,6 @@ type fixtureHome struct {
 	root        string // ~/.claude
 	projectDir  string // projects/<encoded>
 	projectPath string // the real project directory on disk
-	dbPath      string
 }
 
 func buildFixtureHome(t *testing.T) *fixtureHome {

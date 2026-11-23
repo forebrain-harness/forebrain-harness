@@ -3188,23 +3188,6 @@ func rejectedQueueInput(submission ComposerSubmission) run.Input {
 	return in
 }
 
-// queuedSubmissions pulls the surface's submissions back out of the queue's
-// inputs, in the order the queue listed them. An input the person did not type
-// carries no submission — a peer message and a delivery note are written by
-// another agent — so those are skipped rather than asserted: a caller that
-// renders such a message has nothing composer-shaped to render, and a caller
-// that releases one must park it instead (releasedSubmissions and
-// parkQueuedPeerTurns are the release-path pair).
-func queuedSubmissions(inputs []run.Input) []ComposerSubmission {
-	out := make([]ComposerSubmission, 0, len(inputs))
-	for _, in := range inputs {
-		if submission, ok := in.Payload.(ComposerSubmission); ok {
-			out = append(out, submission)
-		}
-	}
-	return out
-}
-
 // releasedSubmissions turns the entries a boundary released into the messages
 // the person's next turn runs on: the ones the surface recorded, and a message
 // an agent of this conversation queued with no surface record of its own, which

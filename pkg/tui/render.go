@@ -224,8 +224,7 @@ type Renderer struct {
 	mu  sync.Mutex
 	// transientActive is whether any source holds a live status line.
 	transientActive bool
-	// transientSources holds one live status line per producer, keyed by source,
-	// and transientOrder is which of them wins when several are live at once.
+	// transientSources holds one live status line per producer, keyed by source.
 	//
 	// One slot was not enough for more than one producer: an MCP startup and a
 	// conversation turn are both true at the same time, and with a single slot
@@ -233,11 +232,8 @@ type Renderer struct {
 	// truths and each producer's own "finish" call cleared a line that was not
 	// its own.
 	transientSources map[string]func(view string) string
-	// transientOrder is highest priority first: the first live source in this
-	// order is the one on screen.
-	transientOrder []string
-	composerState  ComposerRenderState
-	footer         ComposerFooter
+	composerState    ComposerRenderState
+	footer           ComposerFooter
 	// planMode is whether the conversation is in Plan mode; the footer says so
 	// for as long as it lasts.
 	planMode bool
@@ -2370,9 +2366,9 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		// MCP tool results carry their payload as a JSON transport envelope whose
 		// text blocks are Markdown. Extract every text block from the RAW frame
 		// content once and render it as Markdown here, before the generic
-		// summaryToolBody/formatToolContent pipeline runs. That pipeline strips
-		// standalone "**bold**" lines (treating them as metadata labels) and
-		// would delete the codegraph section headers ("**Exploration:**",
+		// summaryToolBody/formatToolContentWithInput pipeline runs. That pipeline
+		// strips standalone "**bold**" lines (treating them as metadata labels)
+		// and would delete the codegraph section headers ("**Exploration:**",
 		// "**calls:**", …), leaving a flattened, unreadable blob. The viewport's
 		// foldBlock collapses anything over 3 rows behind a click-to-expand
 		// disclosure header (toolPreviewUsesRenderedBody keeps this rich body).
@@ -3369,9 +3365,10 @@ func summaryToolBody(f Frame, title string) string {
 	if strings.EqualFold(title, "web_fetch") || strings.EqualFold(title, "webfetch") {
 		return webFetchMarkdownBody(content)
 	}
-	// enter_plan_mode and user_interaction need formatToolContent to inspect the
-	// raw result (the plan reason or structured answers respectively), so do not
-	// strip their notification envelopes in the generic summary path.
+	// enter_plan_mode and user_interaction need formatToolContentWithInput to
+	// inspect the raw result (the plan reason or structured answers
+	// respectively), so do not strip their notification envelopes in the
+	// generic summary path.
 	if strings.EqualFold(title, "enter_plan_mode") || strings.EqualFold(title, "user_interaction") {
 		return content
 	}
@@ -3497,7 +3494,6 @@ type peerListCardRow struct {
 	kind   string
 	place  string
 	path   bool
-	nameW  int
 	stateW int
 }
 
@@ -7987,14 +7983,6 @@ func (p slashPanel) headRows(width int) int {
 		n += len(l.rows(width))
 	}
 	return n
-}
-
-// hintRows is how many screen rows the key hint takes at width.
-func (p slashPanel) hintRows(width int) int {
-	if p.hint == "" {
-		return 0
-	}
-	return len(panelLine{lead: panelIndent, text: p.hint, style: &panelHintStyle}.rows(width))
 }
 
 // fieldRow is the row the field's text sits on at width: one blank row and the

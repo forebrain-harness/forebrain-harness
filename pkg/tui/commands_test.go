@@ -732,51 +732,6 @@ func (s *sequenceSelector) Review(string, []turn.StatusFact, []string, int) (int
 	return -1, false, nil
 }
 
-type dualInputSequenceSelector struct {
-	selectSteps []selectorStep
-	selectIdx   int
-	inputs      []selectorInput
-	inputIdx    int
-}
-
-func (s *dualInputSequenceSelector) Select(string, []string, string) (string, bool, error) {
-	if s.selectIdx >= len(s.selectSteps) {
-		return "", false, nil
-	}
-	step := s.selectSteps[s.selectIdx]
-	s.selectIdx++
-	return step.value, step.ok, step.err
-}
-
-func (s *dualInputSequenceSelector) MultiSelect(string, []string, []string) ([]string, bool, error) {
-	return nil, false, nil
-}
-
-func (s *dualInputSequenceSelector) Input(string, string) (string, bool, error) {
-	if s.inputIdx >= len(s.inputs) {
-		return "", false, nil
-	}
-	step := s.inputs[s.inputIdx]
-	s.inputIdx++
-	return step.value, step.ok, step.err
-}
-
-func (s *dualInputSequenceSelector) Confirm(string, bool) (bool, bool, error) {
-	return false, false, nil
-}
-
-func (s *dualInputSequenceSelector) SelectRich(string, []SelectItem, int) (int, bool, error) {
-	return -1, false, nil
-}
-
-func (s *dualInputSequenceSelector) Secret(label string, defaultValue string) (string, bool, error) {
-	return s.Input(label, defaultValue)
-}
-
-func (s *dualInputSequenceSelector) Review(string, []turn.StatusFact, []string, int) (int, bool, error) {
-	return -1, false, nil
-}
-
 func TestCommandControllerHandleResumeReturnsSelection(t *testing.T) {
 	session := &fakeSession{
 		recent: []SessionSummary{
