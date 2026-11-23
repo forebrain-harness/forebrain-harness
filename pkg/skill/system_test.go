@@ -323,6 +323,7 @@ func TestInstall_AllSkillDirsExtracted(t *testing.T) {
 	topLevelDirs := []string{
 		"audit",
 		"review",
+		"run",
 		"context-save",
 		"context-restore",
 		"skill-workshop",
@@ -474,6 +475,89 @@ func TestSystemAssetsCarryTheGeneratorSkill(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("generator skill missing from discovery: %+v", entries)
+	}
+}
+
+// The run skill is the one built-in skill the model is meant to reach on its own
+// initiative: it turns "the tests pass" into "the app was seen working". Its
+// contract is a handful of sentences a future editor would happily tighten away —
+// the restraint clause that keeps the recommendation rare, and the forebrain
+// semantics that make the advice true here rather than anywhere — so each is
+// pinned by its exact words.
+func TestRunSkillDrivesTheAppAndOffersToCaptureIt(t *testing.T) {
+	home := t.TempDir()
+	if err := Install(home); err != nil {
+		t.Fatalf("install system skills: %v", err)
+	}
+	systemRoot := filepath.Join(home, "skills", ".system")
+	dir := filepath.Join(systemRoot, "run")
+	if err := ValidateSkillDir(dir); err != nil {
+		t.Fatalf("run skill does not validate: %v", err)
+	}
+	activation, err := LoadActivation(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("load run skill: %v", err)
+	}
+	if activation.Name != "run" {
+		t.Fatalf("name=%q want run", activation.Name)
+	}
+	if !activation.SlashCommand {
+		t.Fatal("/run is an entry point: the skill must derive a slash command")
+	}
+	// The opposite of plan 354's generator: this one is meant to be picked up by
+	// the model when a change needs to be seen working.
+	if !activation.ModelInvocation {
+		t.Fatal("the run skill must stay model-invocable")
+	}
+
+	// The catalog is what the model reads, so this is the end-to-end proof.
+	entries, err := CatalogEntries([]string{systemRoot}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogued := false
+	for _, entry := range entries {
+		if entry.Name != "run" {
+			continue
+		}
+		catalogued = true
+		if !strings.Contains(entry.Description, "drive") && !strings.Contains(entry.Description, "launch") {
+			t.Fatalf("the catalog description must say what the skill does: %q", entry.Description)
+		}
+	}
+	if !catalogued {
+		t.Fatalf("run skill missing from the catalog: %+v", entries)
+	}
+
+	content := activation.Content
+	for _, want := range []string{
+		// The probe that finds a project's own run skill before rediscovering it.
+		"for d in .forebrain .agents .claude .codex",
+		// The restraint clause: without it the recommendation becomes noise.
+		"just ran, recommend nothing",
+		// The forebrain semantics that make this advice true in this product.
+		"trusted project",
+		"FOREBRAIN_HOME",
+		"scripts/acceptance",
+		// The draft/publish boundary, the same one skill-generator states.
+		".drafts",
+		"Never write or publish a skill on your own initiative",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("run skill lost %q:\n%s", want, content)
+		}
+	}
+	// Three distinct sites: the stale-skill bullet, the closing recommendation and
+	// the closing publish paragraph.
+	if got := strings.Count(content, "run-skill-generator"); got < 3 {
+		t.Fatalf("run-skill-generator named %d times, want at least 3 (stale, recommend, publish)", got)
+	}
+	// This repository's own instance is not the shipped asset: its forebrain-only
+	// invocation recipes must not travel to every project.
+	for _, unwanted := range []string{"driver.sh start hang", "brew install tmux", "term_live", "paint_dump"} {
+		if strings.Contains(content, unwanted) {
+			t.Fatalf("run skill carries this repository's own recipe %q", unwanted)
+		}
 	}
 }
 
