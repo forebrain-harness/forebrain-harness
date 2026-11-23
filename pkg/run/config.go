@@ -760,6 +760,19 @@ func withoutTool(tools []*llm.Tool, name string) []*llm.Tool {
 }
 
 func (w *planModeLLM) Execute(ctx context.Context, msgs []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	// An explicitly invoked skill is the user's own choice of workflow for this
+	// turn, so the sign-off plan mode exists to obtain has already been given.
+	// Offering it here costs an approval round-trip and then rewrites the
+	// skill's deliverable: plan mode confines every write to the session plan
+	// directory under the state root (WithAllowedPlanPath below), so a skill
+	// specified to write a numbered backlog at the project root can only ever
+	// produce one file. The gate is per-request and the activation lives on
+	// this turn alone, so the next turn offers the tool again, and the user who
+	// does want plan mode still has the hotkey and /plan. Subagents never
+	// inherit it: withoutExplicitSkills clears the activation before dispatch.
+	if _, ok := explicitSkillActivationFromContext(ctx); ok {
+		tools = withoutTool(tools, "enter_plan_mode")
+	}
 	if w.stateRoot == "" {
 		// Office hides exit_plan_mode unless plan mode is proven; every early
 		// exit below fails closed the same way.

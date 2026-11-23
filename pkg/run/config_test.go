@@ -1982,6 +1982,103 @@ func TestOfficeEmptySessionIDHidesExitPlanMode(t *testing.T) {
 	}
 }
 
+// --- explicit skill turns (plan 368) --------------------------------------
+
+// A turn that carries an explicit skill activation must not be offered
+// enter_plan_mode: the user already chose the workflow, and plan mode would
+// confine the skill's deliverable to one file under the state root.
+func TestExplicitSkillTurnHidesEnterPlanMode(t *testing.T) {
+	home := t.TempDir()
+	sid := "skill-agent"
+	setMode(t, home, sid, state.ModeAgent, 0)
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLM(inner, home, "")
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	ctx = WithExplicitSkillActivation(ctx, "audit", "<skill>body</skill>")
+	tools := []*llm.Tool{newPlanToolForTest(t, "write_file"), newPlanToolForTest(t, "enter_plan_mode")}
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hello"))}, tools); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if hasToolNamed(inner.gotTools, "enter_plan_mode") {
+		t.Fatalf("an explicit skill turn must not offer enter_plan_mode, tools offered: %v", toolNames(inner.gotTools))
+	}
+	if !hasToolNamed(inner.gotTools, "write_file") {
+		t.Fatalf("unrelated tool dropped: %v", toolNames(inner.gotTools))
+	}
+}
+
+// The negative control: an ordinary turn keeps the tool, so the test above
+// cannot pass by the wrapper dropping the whole array.
+func TestOrdinaryTurnKeepsEnterPlanMode(t *testing.T) {
+	home := t.TempDir()
+	sid := "ordinary-agent"
+	setMode(t, home, sid, state.ModeAgent, 0)
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLM(inner, home, "")
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	tools := []*llm.Tool{newPlanToolForTest(t, "write_file"), newPlanToolForTest(t, "enter_plan_mode")}
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hello"))}, tools); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !hasToolNamed(inner.gotTools, "enter_plan_mode") {
+		t.Fatalf("an ordinary turn must keep enter_plan_mode, tools offered: %v", toolNames(inner.gotTools))
+	}
+}
+
+// A user who switched to plan mode and then invoked a skill still gets plan
+// mode: the gate only closes the way in, never the way on.
+func TestExplicitSkillTurnInPlanModeStillGetsTheReminder(t *testing.T) {
+	home := t.TempDir()
+	sid := "skill-plan"
+	setMode(t, home, sid, state.ModePlan, 0)
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLM(inner, home, "")
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	ctx = WithExplicitSkillActivation(ctx, "audit", "<skill>body</skill>")
+	tools := []*llm.Tool{
+		newPlanToolForTest(t, "write_file"),
+		newPlanToolForTest(t, "enter_plan_mode"),
+		newPlanToolForTest(t, "exit_plan_mode"),
+	}
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("plan it"))}, tools); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(allReminderText(inner.gotMsgs), "PLAN MODE ACTIVE") {
+		t.Fatalf("plan mode must still get its reminder on an explicit skill turn, got:\n%s", allReminderText(inner.gotMsgs))
+	}
+	if !hasToolNamed(inner.gotTools, "exit_plan_mode") {
+		t.Fatalf("plan mode must still offer exit_plan_mode, tools offered: %v", toolNames(inner.gotTools))
+	}
+}
+
+// The gate sits above the fail-closed early returns, so it fires even when the
+// mode state cannot be read. Placing it inside executeImplementationPhase
+// instead would leave this path offering the tool.
+func TestExplicitSkillGateAppliesWhenModeStateIsUnreadable(t *testing.T) {
+	home := t.TempDir()
+	sid := "skill-broken"
+	// A directory where the mode file should be makes state.Get fail with a
+	// read error rather than not-exist.
+	if err := os.MkdirAll(filepath.Join(home, "state", "modes", sid+".json"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLM(inner, home, "")
+	ctx := llm.WithAgentSessionID(context.Background(), sid)
+	ctx = WithExplicitSkillActivation(ctx, "audit", "<skill>body</skill>")
+	tools := []*llm.Tool{newPlanToolForTest(t, "write_file"), newPlanToolForTest(t, "enter_plan_mode")}
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hello"))}, tools); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if hasToolNamed(inner.gotTools, "enter_plan_mode") {
+		t.Fatalf("unreadable mode state on an explicit skill turn must not offer enter_plan_mode, tools offered: %v", toolNames(inner.gotTools))
+	}
+}
+
 func TestOfficePlanPromptsGolden(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "office_plan_prompts.golden.json"))
 	if err != nil {

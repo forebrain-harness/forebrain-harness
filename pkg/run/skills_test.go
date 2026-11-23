@@ -319,6 +319,24 @@ func TestExplicitSkillActivationMessageCarriesNoToolVocabulary(t *testing.T) {
 	}
 }
 
+// The activation message fixes what this turn is for. A skill whose own
+// workflow produces plans otherwise loses its deliverable to a plan-mode turn
+// the model asked for on its own.
+func TestExplicitSkillActivationMessageNamesTheTurnContract(t *testing.T) {
+	body := "<skill>\n<name>review</name>\n<path>/skills/review/SKILL.md</path>\nReview carefully.\n</skill>"
+	msg := explicitSkillActivationMessage(explicitSkillActivation{SkillName: "review", Content: body})
+
+	text := msg.TextContent()
+	for _, want := range []string{"this turn's contract", "session's current mode"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("message does not name the turn contract (%q):\n%s", want, text)
+		}
+	}
+	if !strings.Contains(text, body) {
+		t.Fatalf("message no longer carries the skill body verbatim:\n%s", text)
+	}
+}
+
 // toolCollector stands in for the agent when a test only needs the tools a
 // registration produced.
 type toolCollector struct{ tools []*llm.Tool }

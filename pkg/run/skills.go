@@ -650,10 +650,14 @@ func explicitSkillActivationMessage(activation explicitSkillActivation) llm.Mess
 	// The skills catalog tells the model to read a skill's SKILL.md before
 	// acting on it. Here the user picked the skill by name and its body is
 	// already inlined, so this says exactly that and nothing more — the model
-	// needs no extra protocol for a skill it did not have to find.
+	// needs no extra protocol for a skill it did not have to find. It also
+	// fixes the turn's mode contract: the instructions govern this turn and
+	// name where their deliverables go, which is what keeps a workflow that
+	// produces plans from being rewritten into a single-file plan-mode turn.
 	text := "The user selected the `" + activation.SkillName + "` skill for this request. " +
 		"Its full instructions are included below; follow them for this turn. " +
-		"You do not need to read its SKILL.md again.\n\n" +
+		"You do not need to read its SKILL.md again. " +
+		"The workflow those instructions describe is this turn's contract: run it in the session's current mode, and produce the deliverables it names where it names them.\n\n" +
 		strings.TrimSpace(activation.Content)
 	msg := llm.UserMessage(llm.Text(text))
 	msg.IsMeta = true
