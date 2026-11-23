@@ -159,6 +159,8 @@ func seatbeltProfile(cfg *appcfg.Root, req CommandRequest, workDir string) (stri
 	if req.AllowNetwork {
 		b.WriteString("(allow network-outbound)\n(allow network-inbound)\n")
 		b.WriteString(seatbeltNetworkSupportPolicy)
+	} else if req.AllowLoopback {
+		b.WriteString(seatbeltLoopbackPolicy)
 	}
 	return b.String(), nil
 }
@@ -642,4 +644,21 @@ const seatbeltNetworkSupportPolicy = `; platform services required by network cl
   (global-name "com.apple.SystemConfiguration.DNSConfiguration")
   (global-name "com.apple.SystemConfiguration.configd"))
 (allow sysctl-read (sysctl-name-regex #"^net.routetable"))
+`
+
+// A command that may reach the host's loopback interface but not the internet
+// gets this policy: a server may bind and a client may connect, and nothing
+// outside 127.0.0.1/::1 is reachable. These rules shipped once (2a3f4b2f^) and
+// were dropped in the sandbox redesign; they were re-probed on macOS 15.6
+// before being wired in again — an http.server bound to 127.0.0.1 under this
+// profile answered 200 while a connect outside the host was denied. The bind
+// filter names the address being bound, and a server may bind 0.0.0.0, so it
+// is "*:*" rather than "localhost:*".
+//
+// The network-support policy below is deliberately not appended: a literal
+// 127.0.0.1 resolves nothing, so no DNS and no networkd is involved.
+const seatbeltLoopbackPolicy = `; loopback only: bind and local traffic, no internet.
+(allow network-bind (local ip "*:*"))
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
 `

@@ -84,6 +84,11 @@ func bubblewrapBaseArgs(cfg *appcfg.Root, req CommandRequest, workDir string) []
 		"--unshare-uts",
 		"--unshare-ipc",
 	}
+	// Loopback does not change anything here: the network namespace is the unit
+	// of isolation and there is no per-interface switch, so AllowLoopback is
+	// honored on macOS/Windows only. The behaviour below is deliberately
+	// unchanged until a Linux probe settles whether a fresh --unshare-net
+	// namespace has a working lo (plans/357).
 	if !req.AllowNetwork {
 		args = append(args, "--unshare-net")
 	}

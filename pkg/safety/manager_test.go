@@ -501,3 +501,40 @@ func containsPath(paths []string, want string) bool {
 	}
 	return false
 }
+
+// Loopback arrives through the same single resolution point as the network
+// setting, so no backend has to reason about precedence (plans/357).
+func TestApplyRuntimeConfigToRequestCarriesLoopback(t *testing.T) {
+	root := t.TempDir()
+	req, err := applyRuntimeConfigToRequest(CommandRequest{}, RuntimeConfig{NetworkLoopback: true}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !req.AllowLoopback || req.AllowNetwork {
+		t.Fatalf("request=%+v, want loopback only", req)
+	}
+	// A request that already asked for it keeps it.
+	kept, err := applyRuntimeConfigToRequest(CommandRequest{AllowLoopback: true}, RuntimeConfig{}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !kept.AllowLoopback {
+		t.Fatalf("request=%+v, want the request's own loopback grant kept", kept)
+	}
+}
+
+// Full network access implies loopback, so turning the loopback setting off
+// cannot take localhost away from a command that may reach the internet.
+func TestApplyRuntimeConfigToRequestNetworkEnabledSurvivesLoopbackOff(t *testing.T) {
+	root := t.TempDir()
+	req, err := applyRuntimeConfigToRequest(CommandRequest{}, RuntimeConfig{
+		NetworkEnabled:  true,
+		NetworkLoopback: false,
+	}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !req.AllowNetwork {
+		t.Fatalf("request=%+v, want the network to stay on", req)
+	}
+}

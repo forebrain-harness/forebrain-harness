@@ -390,6 +390,7 @@ func applyRuntimeConfigToRequest(req CommandRequest, runtimeCfg RuntimeConfig, c
 	}
 	req.IncludePlatformDefaults = req.IncludePlatformDefaults || runtimeCfg.Filesystem.IncludePlatformDefaults
 	req.AllowNetwork = req.AllowNetwork || runtimeCfg.NetworkEnabled
+	req.AllowLoopback = req.AllowLoopback || runtimeCfg.NetworkLoopback
 	return req, nil
 }
 

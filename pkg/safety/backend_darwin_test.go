@@ -363,3 +363,59 @@ func TestBatchSeatbeltWorkspaceUnderTmpRemainsWritable(t *testing.T) {
 		t.Fatalf("an ordinary workspace-write profile keeps its /tmp write grant:\n%s", ordinary)
 	}
 }
+
+// Full network access already includes localhost, so the loopback rules must
+// never be emitted beside it (plans/357).
+func TestSeatbeltProfileAllowsNetworkWithoutLoopbackRules(t *testing.T) {
+	profile, err := seatbeltProfile(&appcfg.Root{}, CommandRequest{
+		Profile:       ProfileWorkspaceWrite,
+		AllowNetwork:  true,
+		AllowLoopback: true,
+	}, t.TempDir())
+	if err != nil {
+		t.Fatalf("seatbeltProfile: %v", err)
+	}
+	if !strings.Contains(profile, "(allow network-outbound)") {
+		t.Fatalf("expected full network access:\n%s", profile)
+	}
+	if strings.Contains(profile, seatbeltLoopbackPolicy) {
+		t.Fatalf("loopback rules were emitted beside full network access:\n%s", profile)
+	}
+}
+
+// A command that may not reach the internet may still reach a server the same
+// sandbox started (plans/357): the profile grants binding and local traffic and
+// nothing else.
+func TestSeatbeltProfileAllowsLoopbackWithoutInternet(t *testing.T) {
+	profile, err := seatbeltProfile(&appcfg.Root{}, CommandRequest{
+		Profile:       ProfileWorkspaceWrite,
+		AllowLoopback: true,
+	}, t.TempDir())
+	if err != nil {
+		t.Fatalf("seatbeltProfile: %v", err)
+	}
+	if !strings.Contains(profile, seatbeltLoopbackPolicy) {
+		t.Fatalf("expected the loopback rules:\n%s", profile)
+	}
+	if strings.Contains(profile, "(allow network-outbound)\n") {
+		t.Fatalf("an unfiltered outbound grant reached a loopback-only profile:\n%s", profile)
+	}
+	// The rules a network client needs to resolve names must not come with it:
+	// a literal 127.0.0.1 resolves nothing, and these grants are what reaching
+	// the internet needs.
+	if strings.Contains(profile, "com.apple.networkd") || strings.Contains(profile, "DNSConfiguration") {
+		t.Fatalf("platform network services reached a loopback-only profile:\n%s", profile)
+	}
+}
+
+func TestSeatbeltProfileDeniesBothNetworks(t *testing.T) {
+	profile, err := seatbeltProfile(&appcfg.Root{}, CommandRequest{Profile: ProfileWorkspaceWrite}, t.TempDir())
+	if err != nil {
+		t.Fatalf("seatbeltProfile: %v", err)
+	}
+	for _, rule := range []string{"(allow network-outbound)\n", "local ip", "remote ip"} {
+		if strings.Contains(profile, rule) {
+			t.Fatalf("a no-network profile granted %q:\n%s", rule, profile)
+		}
+	}
+}

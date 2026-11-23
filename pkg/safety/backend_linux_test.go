@@ -376,3 +376,12 @@ func TestMissingDenyMarkerDirectoryStaysTraversableForTheNextEntry(t *testing.T)
 		t.Fatalf("marker survived cleanup: %v", err)
 	}
 }
+
+// The Linux branch is deliberately unchanged by plans/357: a fresh --unshare-net
+// namespace isolates interfaces, so a loopback-only request still gets
+// --unshare-net until a probe settles whether lo comes up inside the namespace.
+func TestBuildBubblewrapArgsKeepsUnsharedNetworkForLoopbackOnlyRequest(t *testing.T) {
+	args := buildBubblewrapArgs(&appcfg.Root{}, CommandRequest{Command: "true", AllowLoopback: true}, "/workspace")
+
+	assertContains(t, args, "--unshare-net")
+}

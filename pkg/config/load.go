@@ -946,6 +946,7 @@ func materializeOptionalDefaults(r *Root) {
 	r.Memories.MinRolloutIdleHours = intPtr(memories.MinRolloutIdleHours)
 
 	r.SandboxWorkspaceWrite.NetworkAccess = BoolPtr(r.SandboxWorkspaceWrite.EffectiveNetworkAccess())
+	r.SandboxWorkspaceWrite.NetworkLoopback = BoolPtr(r.SandboxWorkspaceWrite.EffectiveNetworkLoopback())
 }
 
 func IsEffectivePrimaryAgent(id string, def AgentDefinition) bool {

@@ -28,12 +28,26 @@ type SandboxWorkspaceWrite struct {
 	// selects the default (true) rather than false. Read the resolved value
 	// through EffectiveNetworkAccess.
 	NetworkAccess *bool `yaml:"network_access,omitempty" json:"network_access,omitempty"`
+	// NetworkLoopback controls whether sandboxed workspace-write commands may
+	// reach 127.0.0.1/::1 when NetworkAccess is off. It is an optional boolean:
+	// nil means "unset" and selects the default (true) rather than false, so a
+	// command can reach a server the same sandbox started without reaching the
+	// internet. Read the resolved value through EffectiveNetworkLoopback.
+	NetworkLoopback *bool `yaml:"network_loopback,omitempty" json:"network_loopback,omitempty"`
 }
 
 // EffectiveNetworkAccess resolves whether sandboxed workspace-write commands
 // may reach the network. Unset (nil) defaults to true.
 func (s SandboxWorkspaceWrite) EffectiveNetworkAccess() bool {
 	return boolValue(s.NetworkAccess, true)
+}
+
+// EffectiveNetworkLoopback resolves whether sandboxed workspace-write commands
+// may reach the host's loopback interface. Unset (nil) defaults to true:
+// loopback is not an escalation, it is what reaching the project's own server
+// takes.
+func (s SandboxWorkspaceWrite) EffectiveNetworkLoopback() bool {
+	return boolValue(s.NetworkLoopback, true)
 }
 
 // Auto-compaction triggers at a share of the model's effective input window.

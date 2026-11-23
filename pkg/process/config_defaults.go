@@ -38,7 +38,8 @@ func defaultStoredRoot() appcfg.Root {
 
 	root.ApprovalPreset = root.ApprovalPreset.Effective()
 	root.SandboxWorkspaceWrite = appcfg.SandboxWorkspaceWrite{
-		NetworkAccess: appcfg.BoolPtr(root.SandboxWorkspaceWrite.EffectiveNetworkAccess()),
+		NetworkAccess:   appcfg.BoolPtr(root.SandboxWorkspaceWrite.EffectiveNetworkAccess()),
+		NetworkLoopback: appcfg.BoolPtr(root.SandboxWorkspaceWrite.EffectiveNetworkLoopback()),
 	}
 	root.Compact = appcfg.CompactSection{
 		Prompt:             assembly.DefaultPrompt,

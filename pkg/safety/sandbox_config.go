@@ -170,7 +170,12 @@ type CommandRequest struct {
 	DeniedReadablePatterns  []string
 	IncludePlatformDefaults bool
 	AllowNetwork            bool
-	Env                     []string
+	// AllowLoopback permits traffic to and from 127.0.0.1/::1 only. It is the
+	// setting a command needs to reach a server another sandboxed command
+	// started, and it is not an escalation: nothing outside the host's loopback
+	// becomes reachable. Ignored when AllowNetwork is already true.
+	AllowLoopback bool
+	Env           []string
 	// OutputSpoolDir is a Forebrain-owned directory used to preserve large output
 	// without retaining it in memory. Empty falls back to the OS temp dir.
 	OutputSpoolDir string
@@ -261,8 +266,9 @@ type FilesystemConfig struct {
 }
 
 type RuntimeConfig struct {
-	Filesystem     FilesystemConfig
-	NetworkEnabled bool
+	Filesystem      FilesystemConfig
+	NetworkEnabled  bool
+	NetworkLoopback bool
 }
 
 func ConvertToRuntimeConfig(sources []SourceSettings, snap Snapshot, cwd, originalCwd, tempDir string, additionalDirs []string) RuntimeConfig {
@@ -294,6 +300,7 @@ func ConvertToRuntimeConfig(sources []SourceSettings, snap Snapshot, cwd, origin
 			out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, resolveSandboxPath(src.RootPath, p))
 		}
 		out.NetworkEnabled = out.NetworkEnabled || src.SandboxWorkspaceWrite.EffectiveNetworkAccess()
+		out.NetworkLoopback = out.NetworkLoopback || src.SandboxWorkspaceWrite.EffectiveNetworkLoopback()
 	}
 
 	for _, grant := range snap.FileSystemGrants {

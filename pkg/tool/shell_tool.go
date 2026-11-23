@@ -417,6 +417,10 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	denyReadPatterns := append([]string(nil), runtimeCfg.Filesystem.DenyReadPatterns...)
 	globScanMaxDepth := cloneIntPointer(runtimeCfg.Filesystem.GlobScanMaxDepth)
 	allowNetwork := runtimeCfg.NetworkEnabled
+	// Loopback is a config property, never a per-call switch: a command that
+	// may not reach the internet may still reach a server the sandbox started
+	// (plans/357). Full network access already includes it.
+	allowLoopback := runtimeCfg.NetworkLoopback
 	for _, grant := range snap.NetworkGrants {
 		if grant.Enabled {
 			allowNetwork = true
@@ -602,9 +606,10 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 			AdditionalReadablePaths: allowRead, DeniedReadablePaths: denyRead,
 			DeniedReadableRoots: boundary.Denied, ReadableExceptions: boundary.Readable,
 			DeniedReadablePatterns: denyReadPatterns, IncludePlatformDefaults: includePlatformDefaults,
-			AllowNetwork: allowNetwork,
-			Env:          shellAttemptEnv(shellEnv, goCache.Env, contained(sandboxPermissions)),
-			OnOutput:     onOutput, OutputSpoolDir: spoolDir,
+			AllowNetwork:  allowNetwork,
+			AllowLoopback: allowLoopback,
+			Env:           shellAttemptEnv(shellEnv, goCache.Env, contained(sandboxPermissions)),
+			OnOutput:      onOutput, OutputSpoolDir: spoolDir,
 		}
 	}
 	// A machine with no sandbox runs a batch task's command the way it runs
