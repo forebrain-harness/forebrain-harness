@@ -880,3 +880,20 @@ func TestPresentFilesDescriptionKeepsThePromptPhrases(t *testing.T) {
 		}
 	}
 }
+
+// PrimaryOnlyToolName is the one list of actions that speak for the whole
+// conversation: it withholds them from a subagent's tool table and GuardTool
+// refuses a call to them inside one, so every name it holds needs a reason that
+// belongs to the user rather than to the child.
+func TestPrimaryOnlyToolNameList(t *testing.T) {
+	for _, name := range []string{"present_files", "skill_publish", "  skill_publish  "} {
+		if !PrimaryOnlyToolName(name) {
+			t.Fatalf("%q must be primary only", name)
+		}
+	}
+	for _, name := range []string{"", "skill", "read_file", "write_file", "present_files_x"} {
+		if PrimaryOnlyToolName(name) {
+			t.Fatalf("%q must stay available to a subagent", name)
+		}
+	}
+}

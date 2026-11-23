@@ -405,13 +405,15 @@ description: Deck helper`, "Cold body")
 			t.Fatalf("system skill %q appeared in the tool table; skills belong to the prompt catalog", name)
 		}
 	}
-	// The only skill-category tool metadata is the loader itself.
+	// The only skill-category tool metadata is the loader and the publish gate:
+	// both act on the skill set and neither is a skill.
 	skillMetas := []string{}
 	for _, meta := range r.Tools().ToolMetas() {
 		if strings.EqualFold(strings.TrimSpace(meta.Category), "skill") {
 			skillMetas = append(skillMetas, strings.TrimSpace(meta.Name))
 		}
 	}
+	sort.Strings(skillMetas)
 	// And the tool table is byte-identical to one built with no skills at all.
 	//
 	// That is the property the cached prefix depends on — installing, renaming
@@ -429,8 +431,8 @@ description: Deck helper`, "Cold body")
 	if got != want {
 		t.Fatalf("installed skills changed the tool table, which the whole cached prefix sits behind:\n with skills: %s\n without:     %s", got, want)
 	}
-	if len(skillMetas) != 1 || skillMetas[0] != "skill" {
-		t.Fatalf("skill-category tool metadata = %v, want exactly the skill loader", skillMetas)
+	if len(skillMetas) != 2 || skillMetas[0] != "skill" || skillMetas[1] != "skill_publish" {
+		t.Fatalf("skill-category tool metadata = %v, want exactly the skill loader and the publish gate", skillMetas)
 	}
 	// Every discovered skill is in the runtime catalog, which is what grants
 	// read access to its directory. There is no always/deferred split any more:

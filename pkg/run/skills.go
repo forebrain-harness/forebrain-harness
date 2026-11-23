@@ -237,6 +237,181 @@ func RegisterSkillTool(a tool.ToolAdder, st *tool.State) error {
 	return nil
 }
 
+// SkillPublishInput names one draft and the line its version history will
+// carry. It holds a single name and a single note by construction: publishing is
+// a question about one skill, and a batch form would put a set of skills in
+// front of the user as one answer.
+type SkillPublishInput struct {
+	Name string `json:"name" jsonschema_description:"The exact skill name whose draft to publish"`
+	Note string `json:"note" jsonschema_description:"One line for the version history, shown to the user in the approval"`
+}
+
+// skillPublishToolDescription is a compile-time constant for the same reason
+// skillToolDescription is: this text is part of the cached prefix.
+const skillPublishToolDescription = "Ask the user to publish one skill draft as its next version. " +
+	"Raises an approval the user answers in place; nothing is written if they refuse. " +
+	"A published skill takes effect in the next session, not this one."
+
+// RegisterSkillPublishTool gives the model a way to ask for the publish every
+// skill-authoring flow otherwise ends without: the draft is written, the
+// generator says it is inert, and the user has to leave the conversation to
+// release it.
+//
+// The tool asks and never decides. The sandbox denies every write under the
+// Forebrain home, where skills live, so this is the only path by which a model
+// can change a repository's skill tree — and it is the versioned, validated one:
+// PublishSkill applies the content gate the skills panel applies and cuts a
+// version carrying the note the user just read.
+//
+// svc is the service Runner.Load already builds for this session. The tool is
+// registered from there, after the service exists, rather than beside
+// RegisterSkillTool, whose registration point is above it.
+func RegisterSkillPublishTool(a tool.ToolAdder, st *tool.State, svc *skill.Service) error {
+	if a == nil {
+		return nil
+	}
+	t, err := llm.NewTool(
+		"skill_publish",
+		skillPublishToolDescription,
+		func(ctx context.Context, in *SkillPublishInput) (string, error) {
+			if err := st.GuardTool(ctx, "skill_publish"); err != nil {
+				return "", err
+			}
+			name, note := "", ""
+			if in != nil {
+				name = strings.TrimSpace(in.Name)
+				note = strings.TrimSpace(in.Note)
+			}
+			if name == "" {
+				return "", fmt.Errorf("name is required: the exact skill name whose draft to publish")
+			}
+			// The note is what the user reads in the approval, so an empty one
+			// is refused rather than defaulted: a history of placeholders tells
+			// nobody why the skill changed.
+			if note == "" {
+				return "", fmt.Errorf("note is required: it is the line the user reads when asked to publish %q", name)
+			}
+			// A missing service and a missing draft are one refusal: there is
+			// nothing the model can do differently about either, and asking the
+			// user to approve a publish that validateDraftForPublish would then
+			// refuse wastes the answer it is teaching them to give.
+			draft := ""
+			if svc != nil {
+				draft = skillPublishDraftFile(svc, name)
+			}
+			if draft == "" {
+				return "", fmt.Errorf("no skill named %q is available in this session", name)
+			}
+			// The question comes before the write, always: no configuration
+			// publishes without an answer, and there is no "--yes" equivalent.
+			// A surface that answers nothing asked nobody — an approvals-bypassed
+			// conversation, an allow rule, a runtime with no action service — and
+			// an unanswered publish is refused rather than assumed, which is the
+			// fail-closed rule exit_plan_mode follows for its own gate.
+			if tool.ApprovedActionIDFromContext(ctx) == "" {
+				hook := st.ActionHook()
+				if hook == nil {
+					return "", fmt.Errorf("publishing %q needs an approval and this session has no one to ask", name)
+				}
+				payload := map[string]any{
+					"name":          name,
+					"note":          note,
+					"draft_path":    draft,
+					"justification": fmt.Sprintf("Publish %q as its next version? It takes effect next session: this conversation keeps loading the copy it started with.", name),
+				}
+				id, pending, err := hook(ctx, "skill_publish", payload)
+				if err != nil {
+					return "", err
+				}
+				if !pending || strings.TrimSpace(id) == "" {
+					return "", fmt.Errorf("publishing %q needs an approval and none was asked; nothing was written", name)
+				}
+				tool.CaptureToolRequiresAction(ctx, id, "skill_publish", map[string]any{
+					"requires_action": true,
+					"skill_name":      name,
+					"draft_path":      draft,
+				})
+				return "", &tool.RequiresActionError{
+					RunID:        tool.RunIDFromContext(ctx),
+					AgentID:      tool.HookAgentIDFromContext(ctx),
+					SubagentType: tool.SubagentTypeFromContext(ctx),
+					ActionID:     id,
+					ActionKind:   "skill_publish",
+					ToolName:     "skill_publish",
+					ToolInput:    payload,
+				}
+			}
+			version, err := svc.PublishSkill(name, note)
+			if err != nil {
+				return "", err
+			}
+			tool.CaptureToolOutput(ctx, map[string]any{
+				"preview_kind":  "skill_publish",
+				"skill_name":    name,
+				"skill_version": version,
+				"skill_path":    filepath.Dir(draft),
+			})
+			// The version and the delay in one sentence: a bare "published"
+			// teaches the model to say the skill is usable now, and this
+			// conversation's catalog is frozen and its copies are pinned.
+			return fmt.Sprintf("Published %q as v%d (%s). It takes effect in the next session, not this one: this conversation keeps loading the copy it started with.", name, version, note), nil
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if err := st.Register(a, t); err != nil {
+		return err
+	}
+	if st != nil {
+		meta := event.ToolMeta{
+			Name:        "skill_publish",
+			Description: skillPublishToolDescription,
+			Category:    "skill",
+		}
+		if schema, err := json.Marshal(t.InputSchema()); err == nil {
+			meta.InputSchema = schema
+		}
+		st.RegisterToolMeta(meta)
+	}
+	return nil
+}
+
+// skillPublishDraftFile resolves the draft SKILL.md a publish of name would
+// release, without creating one. The layer is the one PublishSkill itself
+// resolves — the first versioned root holding the skill's formal directory, its
+// draft, or its history — so the file named here is the file that would publish.
+//
+// It walks the roots instead of asking the versioned listing
+// (Service.SkillVersionDetail), because that listing probes each installed
+// skill's upstream to fill its update marker: a gate must not wait on a network
+// round-trip to ask its question.
+func skillPublishDraftFile(svc *skill.Service, name string) string {
+	for _, root := range skill.VersionedSkillRoots(svc.Home, svc.Workspace(), svc.ProjectRoot) {
+		st, err := skill.VersionStore{Root: root}.State(name)
+		if err != nil {
+			continue
+		}
+		if st.Current == 0 && !st.HasDraft {
+			if info, statErr := os.Stat(filepath.Join(root, name)); statErr != nil || !info.IsDir() {
+				continue
+			}
+		}
+		// This root owns the name, so its draft is the one that publishes —
+		// and a skill with no draft has nothing to publish, wherever else a
+		// copy of the same name happens to sit.
+		if !st.HasDraft {
+			return ""
+		}
+		draft := filepath.Join(st.DraftDir, "SKILL.md")
+		if info, err := os.Stat(draft); err != nil || info.IsDir() {
+			return ""
+		}
+		return draft
+	}
+	return ""
+}
+
 // loadedSkillByName resolves a model-supplied name against the skills this
 // agent actually discovered. Matching goes through skill.NormalizeToken so the
 // spelling the model echoes back — case folded, an underscore for a hyphen —

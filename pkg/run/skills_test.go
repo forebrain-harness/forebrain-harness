@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1043,4 +1044,352 @@ func TestLoadActivationKeepsTheUserPathForAUserOnlySkill(t *testing.T) {
 	if !strings.Contains(activation.Content, filepath.Join(root, "repo-writer", "SKILL.md")) {
 		t.Fatalf("the explicit invocation lost its context:\n%s", activation.Content)
 	}
+}
+
+// skillPublishFixture is a service over a fresh home holding one draft, plus the
+// versioned root the draft sits in, so a test can both drive the tool and see
+// whether a publish reached the disk.
+func skillPublishFixture(t *testing.T, name string) (*skill.Service, string) {
+	t.Helper()
+	home := t.TempDir()
+	workspace := filepath.Join(home, "workspace")
+	root := filepath.Join(workspace, "skills")
+	dir := filepath.Join(root, ".drafts", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: A skill the model drafted\n---\n\nbody\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := skill.NewServiceForWorkspace(home, workspace)
+	if err := svc.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	return svc, root
+}
+
+// skillPublishState is the skill's version state as the disk holds it.
+func skillPublishState(t *testing.T, root, name string) skill.SkillVersionState {
+	t.Helper()
+	state, err := skill.VersionStore{Root: root}.State(name)
+	if err != nil {
+		t.Fatalf("version state: %v", err)
+	}
+	return state
+}
+
+// registerSkillPublishToolForTest registers the tool against a collector and a
+// state whose action hook is hook (nil leaves the state without one).
+func registerSkillPublishToolForTest(t *testing.T, svc *skill.Service, hook func(ctx context.Context, kind string, payload any) (string, bool, error)) (*llm.Tool, *tool.State) {
+	t.Helper()
+	st := tool.NewState()
+	if hook != nil {
+		st.SetActionHook(hook)
+	}
+	collector := &toolCollector{}
+	if err := RegisterSkillPublishTool(collector, st, svc); err != nil {
+		t.Fatalf("RegisterSkillPublishTool: %v", err)
+	}
+	publishTool := collector.byName("skill_publish")
+	if publishTool == nil {
+		t.Fatal("skill_publish was not registered")
+	}
+	return publishTool, st
+}
+
+// approvalRaisingHook counts the questions it was asked and answers each with a
+// pending action id.
+type approvalRaisingHook struct {
+	asked  int
+	kind   string
+	last   map[string]any
+	action string
+}
+
+func (h *approvalRaisingHook) hook(_ context.Context, kind string, payload any) (string, bool, error) {
+	h.asked++
+	h.kind = kind
+	h.last, _ = payload.(map[string]any)
+	if h.action == "" {
+		h.action = "action-skill-publish"
+	}
+	return h.action, true, nil
+}
+
+func (h *approvalRaisingHook) called() int { return h.asked }
+
+// A name no draft stands behind is refused before anyone is asked: the question
+// would be about a publish validateDraftForPublish then refuses, and the answer
+// it teaches the user to give is "no".
+func TestSkillPublishRefusesANameWithNoDraft(t *testing.T) {
+	svc, root := skillPublishFixture(t, "publish-me")
+	hook := &approvalRaisingHook{}
+	publishTool, _ := registerSkillPublishToolForTest(t, svc, hook.hook)
+
+	exec, err := publishTool.Execute(context.Background(), `{"name":"never-drafted","note":"first release"}`)
+	if err == nil {
+		t.Fatalf("publishing a skill with no draft must fail: %#v", exec.Result)
+	}
+	if got := err.Error(); got != `no skill named "never-drafted" is available in this session` {
+		t.Fatalf("refusal = %q, want the missing-skill register", got)
+	}
+	if hook.called() != 0 {
+		t.Fatalf("the hook was asked %d times; nothing may be asked before the draft exists", hook.called())
+	}
+	if state := skillPublishState(t, root, "never-drafted"); state.Current != 0 {
+		t.Fatalf("version state = %+v, want nothing published", state)
+	}
+}
+
+// The approval is the tool's substance: it names the skill, the note the user is
+// accepting, the draft that would release, and the fact that the release is the
+// next session's. Approving it publishes exactly that, and the answer says when
+// the skill becomes usable.
+func TestSkillPublishAsksThenPublishesOnApproval(t *testing.T) {
+	svc, root := skillPublishFixture(t, "publish-me")
+	hook := &approvalRaisingHook{}
+	publishTool, _ := registerSkillPublishToolForTest(t, svc, hook.hook)
+
+	_, err := publishTool.Execute(context.Background(), `{"name":"publish-me","note":"first release"}`)
+	var rae *tool.RequiresActionError
+	if !errors.As(err, &rae) || rae == nil {
+		t.Fatalf("err = %v, want the approval gate", err)
+	}
+	if rae.ActionKind != "skill_publish" || rae.ToolName != "skill_publish" || rae.ActionID != hook.action {
+		t.Fatalf("gate = %+v, want one skill_publish gate carrying %q", rae, hook.action)
+	}
+	if hook.kind != "skill_publish" {
+		t.Fatalf("hook kind = %q, want skill_publish", hook.kind)
+	}
+	for _, field := range []string{"name", "note", "draft_path", "justification"} {
+		if strings.TrimSpace(stringFromTestAny(hook.last[field])) == "" {
+			t.Fatalf("approval payload has no %s: %+v", field, hook.last)
+		}
+	}
+	if !strings.Contains(stringFromTestAny(hook.last["justification"]), "next session") {
+		t.Fatalf("the question does not say when the skill takes effect: %v", hook.last["justification"])
+	}
+	if !strings.HasSuffix(stringFromTestAny(hook.last["draft_path"]), filepath.Join(".drafts", "publish-me", "SKILL.md")) {
+		t.Fatalf("draft_path = %q, want the draft that would publish", hook.last["draft_path"])
+	}
+	if state := skillPublishState(t, root, "publish-me"); state.Current != 0 {
+		t.Fatalf("asking published something: %+v", state)
+	}
+
+	// The approved replay is the same call, answered.
+	exec, err := publishTool.Execute(tool.WithApprovedActionID(context.Background(), rae.ActionID), `{"name":"publish-me","note":"first release"}`)
+	if err != nil {
+		t.Fatalf("approved replay: %v", err)
+	}
+	out, _ := exec.Result.(string)
+	if !strings.Contains(out, "v1") {
+		t.Fatalf("result does not name the version it published:\n%s", out)
+	}
+	if !strings.Contains(out, "next session") {
+		t.Fatalf("result does not say when the skill takes effect:\n%s", out)
+	}
+	state := skillPublishState(t, root, "publish-me")
+	if state.Current != 1 || len(state.Versions) != 1 || state.Versions[0].Note != "first release" {
+		t.Fatalf("published state = %+v, want v1 with the note the user accepted", state)
+	}
+	if state.HasDraft {
+		t.Fatal("the draft must be consumed by the publish")
+	}
+}
+
+// A refusal without words has one answer, and it is not "publish anyway": the
+// gate reaches the in-place approval dispatcher, the refusal stops the turn, and
+// nothing was written.
+func TestSkillPublishRefusalWithoutWordsStopsTheTurnAndWritesNothing(t *testing.T) {
+	const sid = "skill-publish-refused"
+	svc, root := skillPublishFixture(t, "publish-me")
+	st := tool.NewState()
+	streamHookRunner(t, sid, st)
+	collector := &toolCollector{}
+	if err := RegisterSkillPublishTool(collector, st, svc); err != nil {
+		t.Fatalf("RegisterSkillPublishTool: %v", err)
+	}
+	publishTool := collector.byName("skill_publish")
+	refuse := func(context.Context, *tool.RequiresActionError) (context.Context, error) {
+		return nil, tool.ErrApprovalRejectedStop
+	}
+	inner := &inlineHookLLM{attempts: []func(ctx context.Context) (*llm.Result, error){
+		func(context.Context) (*llm.Result, error) {
+			call := llm.ToolCall{ID: "call-publish", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{
+				Name: "skill_publish", Arguments: `{"name":"publish-me","note":"first release"}`,
+			}}
+			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("publishing")}, call)
+			return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+		},
+	}}
+	w := wrapToolOrchestrationLLM(inner, st)
+	capture := NewPartialSessionCapture()
+	_, err := w.Execute(WithPartialSessionCapture(inlineApprovalCtx(sid, "run-skill-publish", refuse), capture),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{publishTool})
+	if !errors.Is(err, ErrTurnStoppedByRejection) {
+		t.Fatalf("execute err = %v, want ErrTurnStoppedByRejection", err)
+	}
+	if inner.callCount() != 1 {
+		t.Fatalf("model calls = %d, want 1: a wordless refusal ends the turn", inner.callCount())
+	}
+	snap := capture.Snapshot()
+	if len(snap) == 0 || snap[len(snap)-1].TextContent() != tool.RejectedStopText {
+		t.Fatalf("the refused call's result is not the stop sentence: %#v", snap)
+	}
+	if state := skillPublishState(t, root, "publish-me"); state.Current != 0 {
+		t.Fatalf("a refused publish wrote v%d", state.Current)
+	}
+}
+
+// With no action hook there is nobody to ask, and the tool refuses rather than
+// publishing unattended: an embedder with no approval path gets a refusal, the
+// same answer the protected-read gate gives.
+func TestSkillPublishRefusesWhenNothingCanBeAsked(t *testing.T) {
+	svc, root := skillPublishFixture(t, "publish-me")
+	publishTool, _ := registerSkillPublishToolForTest(t, svc, nil)
+
+	_, err := publishTool.Execute(context.Background(), `{"name":"publish-me","note":"first release"}`)
+	if err == nil {
+		t.Fatal("an approval nobody can be asked must refuse the call")
+	}
+	if !strings.Contains(err.Error(), "no one to ask") {
+		t.Fatalf("refusal = %q, want it to say there is nobody to ask", err)
+	}
+	if state := skillPublishState(t, root, "publish-me"); state.Current != 0 {
+		t.Fatalf("an unasked publish wrote v%d", state.Current)
+	}
+}
+
+// The note is the line the user reads in the approval, so it is required: a
+// version history of empty notes tells nobody why a skill changed.
+func TestSkillPublishRefusesAnEmptyNoteBeforeAsking(t *testing.T) {
+	svc, root := skillPublishFixture(t, "publish-me")
+	hook := &approvalRaisingHook{}
+	publishTool, _ := registerSkillPublishToolForTest(t, svc, hook.hook)
+
+	for _, args := range []string{`{"name":"publish-me"}`, `{"name":"publish-me","note":"   "}`} {
+		if _, err := publishTool.Execute(context.Background(), args); err == nil {
+			t.Fatalf("%s: an empty note must refuse the call", args)
+		} else if !strings.Contains(err.Error(), "note is required") {
+			t.Fatalf("%s: refusal = %q, want it to name the note", args, err)
+		}
+	}
+	if hook.called() != 0 {
+		t.Fatalf("the hook was asked %d times; an empty note is refused before asking", hook.called())
+	}
+	if state := skillPublishState(t, root, "publish-me"); state.Current != 0 {
+		t.Fatalf("an empty note published v%d", state.Current)
+	}
+}
+
+// A runtime with no skill service and a name with no draft refuse in one voice:
+// the model can do nothing different about either, and a distinct message would
+// describe the machine's wiring to a model that cannot act on it.
+func TestSkillPublishWithoutAServiceRefusesLikeAMissingSkill(t *testing.T) {
+	hook := &approvalRaisingHook{}
+	publishTool, _ := registerSkillPublishToolForTest(t, nil, hook.hook)
+
+	_, err := publishTool.Execute(context.Background(), `{"name":"publish-me","note":"first release"}`)
+	if err == nil {
+		t.Fatal("a missing skill service must refuse the call")
+	}
+	if got, want := err.Error(), `no skill named "publish-me" is available in this session`; got != want {
+		t.Fatalf("refusal = %q, want %q", got, want)
+	}
+	if hook.called() != 0 {
+		t.Fatalf("the hook was asked %d times with no service to publish through", hook.called())
+	}
+}
+
+// A batch conversation runs unattended, so it is never offered the tool that
+// exists to ask a person a question; a coding conversation is.
+func TestSkillPublishIsNotRegisteredForABatchConversation(t *testing.T) {
+	cfg := &appcfg.Root{
+		LLMModels: modelRowsForTest(appcfg.AgentLLMProviderConfig{
+			Provider: "openai", Model: "qwen-test", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1",
+		}),
+		Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+			"main": {DefaultModel: "llm-1"},
+		}},
+	}
+	loaded := func(projectType string) map[string]bool {
+		r := &Runner{Deps: (&Deps{Home: t.TempDir(), AgentName: "main", ProjectType: projectType}).WithConfig(cfg)}
+		if err := r.Load(); err != nil {
+			t.Fatalf("Load(%s): %v", projectType, err)
+		}
+		names := map[string]bool{}
+		for _, entry := range r.LoadedTools() {
+			if entry != nil {
+				names[entry.Name()] = true
+			}
+		}
+		return names
+	}
+	if coding := loaded(state.ProjectTypeCoding); !coding["skill_publish"] {
+		t.Fatalf("a coding conversation must offer skill_publish; it has %v", coding)
+	}
+	if batch := loaded(state.ProjectTypeBatch); batch["skill_publish"] {
+		t.Fatalf("a batch conversation must not offer skill_publish; it has %v", batch)
+	}
+}
+
+// A subagent never sees the tool and is refused if it calls it anyway: the
+// approval a publish needs belongs to the user, and a subagent's approval
+// surface is the parent agent.
+func TestSkillPublishIsWithheldFromSubagents(t *testing.T) {
+	svc, _ := skillPublishFixture(t, "publish-me")
+	hook := &approvalRaisingHook{}
+	publishTool, st := registerSkillPublishToolForTest(t, svc, hook.hook)
+
+	plain, err := llm.NewTool("read_only_probe", "reads", func(context.Context, *struct{}) (string, error) { return "ok", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	subCtx := tool.WithSubagentRun(context.Background(), true)
+	kept := dropSubagentManagementTools(subCtx, []*llm.Tool{publishTool, plain})
+	if len(kept) != 1 || kept[0].Name() != "read_only_probe" {
+		t.Fatalf("a subagent's tool set kept %v, want only the ordinary tool", toolNamesForPublishTest(kept))
+	}
+	if err := st.GuardTool(subCtx, "skill_publish"); err == nil {
+		t.Fatal("GuardTool must refuse a primary-only tool inside a subagent")
+	}
+}
+
+// The replay already carries the user's answer, so it must not put the question
+// a second time.
+func TestSkillPublishDoesNotAskTwiceOnAnApprovedReplay(t *testing.T) {
+	svc, root := skillPublishFixture(t, "publish-me")
+	hook := &approvalRaisingHook{}
+	publishTool, _ := registerSkillPublishToolForTest(t, svc, hook.hook)
+
+	ctx := tool.WithApprovedActionID(context.Background(), "action-skill-publish")
+	exec, err := publishTool.Execute(ctx, `{"name":"publish-me","note":"first release"}`)
+	if err != nil {
+		t.Fatalf("approved replay: %v", err)
+	}
+	if hook.called() != 0 {
+		t.Fatalf("the approved replay asked %d times, want 0", hook.called())
+	}
+	if out, _ := exec.Result.(string); !strings.Contains(out, "v1") {
+		t.Fatalf("replay result = %q, want the published version", out)
+	}
+	if state := skillPublishState(t, root, "publish-me"); state.Current != 1 {
+		t.Fatalf("version state = %+v, want v1", state)
+	}
+}
+
+func toolNamesForPublishTest(tools []*llm.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, entry := range tools {
+		if entry != nil {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
+func stringFromTestAny(value any) string {
+	text, _ := value.(string)
+	return text
 }

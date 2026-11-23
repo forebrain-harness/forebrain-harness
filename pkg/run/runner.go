@@ -1355,6 +1355,12 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	if err := svc.Refresh(); err != nil {
 		slog.Warn("skill refresh", "err", err)
 	}
+	// Publishing is a question, so an unattended batch conversation is never
+	// offered the tool that asks it: same fact as batchProject's, one layer up
+	// where the service being asked about exists.
+	if r.ProjectType() != state.ProjectTypeBatch {
+		_ = RegisterSkillPublishTool(a, r.tools, svc)
+	}
 	a.SetTracer(pickUserTracer(r.userTracer))
 	r.mainCfg = cfg
 	if pendingMCP == nil {

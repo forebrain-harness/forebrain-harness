@@ -476,9 +476,16 @@ func hashAndClassifyFile(path string) (sum, kind, mimeType, preview string, err 
 
 // PrimaryOnlyToolName reports whether a tool may never run inside a subagent:
 // the deliverable action speaks for the conversation, and a subagent's files
-// are the primary agent's to present.
+// are the primary agent's to present; publishing a skill writes into the user's
+// own skill tree, and the approval it needs is the user's — a subagent's
+// approval surface is its parent agent, which cannot give one.
 func PrimaryOnlyToolName(name string) bool {
-	return strings.TrimSpace(name) == presentFilesToolName
+	switch strings.TrimSpace(name) {
+	case presentFilesToolName, "skill_publish":
+		return true
+	default:
+		return false
+	}
 }
 
 // formatPresentFilesStep draws the deliverable card's body: one line per

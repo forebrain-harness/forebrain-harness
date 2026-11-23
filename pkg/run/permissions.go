@@ -444,6 +444,13 @@ func toolOwnsApprovalProtocol(name string) bool {
 		return true
 	case "user_interaction", "enter_plan_mode", "exit_plan_mode":
 		return true
+	case "skill_publish":
+		// Publishing a draft asks its own question, and the question is the
+		// tool's substance: the skill name, the version note the user is
+		// accepting, the draft that would release, and the fact that it takes
+		// effect next session. A prompt raised here would carry the call's raw
+		// arguments instead, without any of them.
+		return true
 	default:
 		return false
 	}
