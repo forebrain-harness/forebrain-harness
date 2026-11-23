@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -254,15 +253,27 @@ func (m *Manager) Doctor(cfg *appcfg.Root) DoctorReport {
 	return rep
 }
 
-func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest) (result CommandResult, decision SandboxDecision, err error) {
-	startedAt := time.Now()
-	defer func() {
-		result.ExecutionTiming = llm.NewExecutionTiming(startedAt, time.Now())
-	}()
+// preparedCommand is one command after the policy that governs it has been
+// resolved: the config merged in, the sandbox decision made, the working
+// directory absolute. RunCommand waits on what it describes and StartCommand
+// keeps a handle to it, and both must be governed by the same resolution.
+type preparedCommand struct {
+	cfg      *appcfg.Root
+	req      CommandRequest
+	decision SandboxDecision
+	workDir  string
+}
 
+// sandboxStarter is this platform's spawn half — the very spawn its backend's
+// waiting function performs, reached without the wait. Each backend file names
+// it; a platform whose sandbox is a stub leaves it nil, and a background start
+// is then refused exactly as a foreground one is.
+var sandboxStarter func(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (*startedCommand, error)
+
+func (m *Manager) prepareCommand(cfg *appcfg.Root, req CommandRequest) (preparedCommand, error) {
 	cfg = m.cfgOrCached(cfg)
 	if strings.TrimSpace(req.Command) == "" {
-		return CommandResult{}, SandboxDecision{}, nil
+		return preparedCommand{cfg: cfg, req: req}, nil
 	}
 	if req.Timeout <= 0 {
 		req.Timeout = 10 * time.Second
@@ -270,15 +281,15 @@ func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandR
 	if strings.TrimSpace(req.WorkDir) == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return CommandResult{}, SandboxDecision{}, err
+			return preparedCommand{}, err
 		}
 		req.WorkDir = wd
 	}
 	workDirAbs, err := filepath.Abs(strings.TrimSpace(req.WorkDir))
 	if err != nil {
-		return CommandResult{}, SandboxDecision{}, err
+		return preparedCommand{}, err
 	}
-	decision = m.Decide(cfg, req.ToolKind)
+	decision := m.Decide(cfg, req.ToolKind)
 	if req.ToolKind == ToolKindShell {
 		decision = m.DecideShellCommand(cfg, req.Command, req.SandboxPermissions, req.Profile, req.AllowNetwork)
 		req.Profile = decision.Profile
@@ -292,15 +303,13 @@ func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandR
 		// an unattended batch task is still confined to its own workspace.
 		decision.UseSandbox = false
 	}
-	runtimeCfg := m.runtimeConfigForCommand(cfg, workDirAbs, req)
 	if !decision.UseSandbox {
-		res, err := runHostCommand(ctx, workDirAbs, req.Timeout, req.Command, req.Env, "", req.OnOutput, req.OutputSpoolDir)
-		finalized, finalizeErr := finalizeCommandResult(res, err)
-		return finalized, decision, finalizeErr
+		return preparedCommand{cfg: cfg, req: req, decision: decision, workDir: workDirAbs}, nil
 	}
+	runtimeCfg := m.runtimeConfigForCommand(cfg, workDirAbs, req)
 	req, err = applyRuntimeConfigToRequest(req, runtimeCfg, workDirAbs)
 	if err != nil {
-		return CommandResult{}, decision, err
+		return preparedCommand{decision: decision}, err
 	}
 	req = constrainRequestToFilesystemProfile(req, workDirAbs)
 	// The network decision is final at this point: the runtime config has been
@@ -309,6 +318,29 @@ func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandR
 	// on the host — a command that could not resolve a name inside a sandbox
 	// that has no network has no other explanation.
 	decision.NetworkBlocked = !req.AllowNetwork
+	return preparedCommand{cfg: cfg, req: req, decision: decision, workDir: workDirAbs}, nil
+}
+
+func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest) (result CommandResult, decision SandboxDecision, err error) {
+	startedAt := time.Now()
+	defer func() {
+		result.ExecutionTiming = llm.NewExecutionTiming(startedAt, time.Now())
+	}()
+
+	prepared, err := m.prepareCommand(cfg, req)
+	if err != nil {
+		return CommandResult{}, prepared.decision, err
+	}
+	if strings.TrimSpace(prepared.req.Command) == "" {
+		return CommandResult{}, SandboxDecision{}, nil
+	}
+	cfg, req, decision = prepared.cfg, prepared.req, prepared.decision
+	workDirAbs := prepared.workDir
+	if !decision.UseSandbox {
+		res, err := runHostCommand(ctx, workDirAbs, req.Timeout, req.Command, req.Env, "", req.OnOutput, req.OutputSpoolDir)
+		finalized, finalizeErr := finalizeCommandResult(res, err)
+		return finalized, decision, finalizeErr
+	}
 	res, err := runSandboxCommand(ctx, decision.Backend, cfg, req, workDirAbs)
 	finalized, finalizeErr := finalizeCommandResult(res, err)
 	if finalizeErr != nil {
@@ -318,6 +350,63 @@ func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandR
 		return finalized, decision, &DeniedError{Result: finalized}
 	}
 	return finalized, decision, nil
+}
+
+// StartCommand starts a command and hands back the handle that owns it, before
+// the command has finished: it is what a server needs, where RunCommand's
+// deadline turns one into a timeout. The policy is the same one RunCommand
+// resolves — same config, same sandbox decision, same backend, same request —
+// because a background process is not a reason to weaken containment.
+//
+// The handle outlives this call, so the command must not inherit the caller's
+// cancellation: the tool call that starts a server returns long before the
+// server does. Ending it is the handle's Kill, its runner's teardown, or the
+// next launch's orphan reap.
+func (m *Manager) StartCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest) (*ProcessHandle, error) {
+	prepared, err := m.prepareCommand(cfg, req)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(prepared.req.Command) == "" {
+		return nil, errors.New("command is required")
+	}
+	req, decision, workDirAbs := prepared.req, prepared.decision, prepared.workDir
+	lifetime := context.WithoutCancel(ctx)
+	if !decision.UseSandbox {
+		sc, err := startHostCommand(lifetime, workDirAbs, 0, req.Command, req.Env, "", req.OnOutput, req.OutputSpoolDir)
+		if err != nil {
+			return nil, err
+		}
+		return newProcessHandle(sc), nil
+	}
+	sc, err := startSandboxedCommand(lifetime, 0, cfg, req, workDirAbs)
+	if err != nil {
+		return nil, err
+	}
+	return newProcessHandle(sc), nil
+}
+
+// startSandboxedCommand spawns a sandboxed command through this platform's
+// spawn half. A non-zero timeout bounds the command's life; zero means it runs
+// until something ends it, which is what a background start asks for.
+func startSandboxedCommand(ctx context.Context, timeout time.Duration, cfg *appcfg.Root, req CommandRequest, workDir string) (*startedCommand, error) {
+	if sandboxStarter == nil {
+		return nil, &UnavailableError{Reason: "sandbox_backend_unsupported"}
+	}
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		runCtx, cancel = context.WithCancel(ctx)
+	}
+	sc, err := sandboxStarter(runCtx, cfg, req, workDir)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	sc.ctx, sc.cancel = runCtx, cancel
+	return sc, nil
 }
 
 func (m *Manager) permissionSnapshot() Snapshot {
@@ -522,12 +611,20 @@ func originalCwdOr(workDir, original string) string {
 	return workDir
 }
 
-func runHostCommand(ctx context.Context, workDir string, timeout time.Duration, command string, explicitEnv []string, shellPref string, onOutput func(OutputStream, []byte), spoolDirs ...string) (CommandResult, error) {
+// startHostCommand spawns a command with no sandbox around it. It owns the
+// context that bounds the command, so the waiting path and the background path
+// differ only in whether anybody waits.
+func startHostCommand(ctx context.Context, workDir string, timeout time.Duration, command string, explicitEnv []string, shellPref string, onOutput func(OutputStream, []byte), spoolDirs ...string) (*startedCommand, error) {
 	if ctx.Err() != nil {
-		return CommandResult{ExitCode: 1}, ctx.Err()
+		return nil, ctx.Err()
 	}
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		runCtx, cancel = context.WithCancel(ctx)
+	}
 	cmd := hostShellCommand(runCtx, command, shellPref)
 	cmd.Dir = workDir
 	cmd.Env = home.SafeSubprocessEnv(nil, home.Options{ExplicitEnv: explicitCommandEnv(explicitEnv, nil)})
@@ -542,34 +639,19 @@ func runHostCommand(ctx context.Context, workDir string, timeout time.Duration, 
 	setupProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = capture.result()
+		cancel()
+		return nil, err
+	}
+	sc := &startedCommand{ctx: runCtx, cancel: cancel, cmd: cmd, capture: capture, pid: cmd.Process.Pid}
+	return sc, nil
+}
+
+func runHostCommand(ctx context.Context, workDir string, timeout time.Duration, command string, explicitEnv []string, shellPref string, onOutput func(OutputStream, []byte), spoolDirs ...string) (CommandResult, error) {
+	sc, err := startHostCommand(ctx, workDir, timeout, command, explicitEnv, shellPref, onOutput, spoolDirs...)
+	if err != nil {
 		return CommandResult{ExitCode: 1}, err
 	}
-	err, stopErr := waitForCommandContext(runCtx, cmd)
-	res := capture.result()
-	res.ExitCode = 0
-	if err != nil {
-		// If the context was cancelled or timed out, return that
-		// error rather than the SIGKILL exit error.
-		if errors.Is(stopErr, context.Canceled) || errors.Is(stopErr, context.DeadlineExceeded) {
-			if errors.Is(stopErr, context.DeadlineExceeded) {
-				res.ExitCode = 124
-				return res, &TimeoutError{Result: res}
-			}
-			res.ExitCode = 1
-			return res, context.Canceled
-		}
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			if signal, ok := processSignal(exitErr); ok {
-				res.ExitCode = 128 + signal
-				return res, &SignalError{Signal: signal}
-			}
-			res.ExitCode = exitErr.ExitCode()
-			return res, nil
-		}
-		res.ExitCode = 1
-		return res, err
-	}
-	return res, nil
+	return newProcessHandle(sc).Wait(ctx)
 }
 
 func explicitCommandEnv(explicitEnv []string, extra map[string]string) map[string]string {

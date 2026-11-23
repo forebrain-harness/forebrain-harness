@@ -4,7 +4,6 @@ package safety
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,26 +15,27 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 )
 
-func runSeatbeltCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (CommandResult, error) {
+func startSeatbeltCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (*startedCommand, error) {
 	profile, err := seatbeltProfile(cfg, req, workDir)
 	if err != nil {
-		return CommandResult{}, err
+		return nil, err
 	}
 	profFile, err := os.CreateTemp("", "forebrain-seatbelt-*.sb")
 	if err != nil {
-		return CommandResult{}, err
+		return nil, err
 	}
 	profPath := profFile.Name()
+	sc := &startedCommand{ctx: ctx}
+	// sandbox-exec reads the profile for as long as the command runs, so the
+	// file goes when the command is done with, not when this call returns.
+	sc.deferClose(func() { _ = os.Remove(profPath) })
 	if _, err := profFile.WriteString(profile); err != nil {
 		_ = profFile.Close()
-		_ = os.Remove(profPath)
-		return CommandResult{}, err
+		sc.close()
+		return nil, err
 	}
 	_ = profFile.Close()
-	defer os.Remove(profPath)
 
-	runCtx, cancel := context.WithTimeout(ctx, req.Timeout)
-	defer cancel()
 	cmd := exec.Command("sandbox-exec", "-f", profPath, "/bin/sh", "-lc", req.Command)
 	cmd.Dir = workDir
 	cmd.Env = home.SafeSubprocessEnv(nil, home.Options{ExplicitEnv: explicitCommandEnv(req.Env, nil)})
@@ -45,33 +45,35 @@ func runSeatbeltCommand(ctx context.Context, cfg *appcfg.Root, req CommandReques
 	setupProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = capture.result()
+		sc.close()
+		return nil, err
+	}
+	sc.cmd, sc.capture, sc.pid = cmd, capture, cmd.Process.Pid
+	return sc, nil
+}
+
+func runSeatbeltCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (CommandResult, error) {
+	sc, err := startSeatbeltCommand(ctx, cfg, req, workDir)
+	if err != nil {
 		return CommandResult{ExitCode: 1}, err
 	}
-	err, stopErr := waitForCommandContext(runCtx, cmd)
-	res := capture.result()
-	res.ExitCode = 0
-	if err != nil {
-		if errors.Is(stopErr, context.Canceled) || errors.Is(stopErr, context.DeadlineExceeded) {
-			if errors.Is(stopErr, context.DeadlineExceeded) {
-				res.ExitCode = 124
-				return res, &TimeoutError{Result: res}
-			}
-			res.ExitCode = 1
-			return res, context.Canceled
-		}
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-				signal := int(status.Signal())
-				res.ExitCode = 128 + signal
-				return res, &SignalError{Signal: signal}
-			}
-			res.ExitCode = exitErr.ExitCode()
-			return res, nil
-		}
-		res.ExitCode = 1
-		return res, err
+	return newProcessHandle(sc).Wait(ctx)
+}
+
+// Init names this platform's spawn half for the background path, which reaches
+// the same spawn without the wait (plans/358).
+func init() {
+	sandboxStarter = startSeatbeltCommand
+}
+
+// KillProcessGroupByPID terminates pid's process group, which is what a PID
+// ledger record for an orphaned command names: the process the sandbox spawned
+// is the leader of the group its children inherit (plans/358).
+func KillProcessGroupByPID(pid int) error {
+	if pid <= 0 {
+		return nil
 	}
-	return res, nil
+	return syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 func seatbeltProfile(cfg *appcfg.Root, req CommandRequest, workDir string) (string, error) {

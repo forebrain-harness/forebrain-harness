@@ -450,6 +450,12 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 			slog.Warn("project trust lookup failed; using read-only sandbox", "err", trustErr)
 		}
 	}
+	// Background processes an earlier harness left behind are this launch's to
+	// clean up (owner 2026-11-23, plans/358): a SIGKILL runs no teardown, and
+	// only Linux's --die-with-parent ties a sandboxed child to the process that
+	// started it. Best effort by contract — a missing or malformed ledger must
+	// never stop an install from starting.
+	tool.ReapOrphanProcesses(appcfg.ActiveStateRoot(root, &loaded))
 	// The state database opens before anything consumes the runtime
 	// configuration: the composed configuration reads every runtime section
 	// from it (plan 187). Where the database is comes from the file's own

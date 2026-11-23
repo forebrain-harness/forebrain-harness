@@ -4,7 +4,6 @@ package safety
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,16 +16,19 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 )
 
-func runBubblewrapCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (CommandResult, error) {
+func startBubblewrapCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (*startedCommand, error) {
 	bwrapPath, err := lookBubblewrap()
 	if err != nil {
-		return CommandResult{}, &UnavailableError{Reason: "bubblewrap_not_found"}
+		return nil, &UnavailableError{Reason: "bubblewrap_not_found"}
 	}
 	markers, err := prepareLinuxMissingDenyMarkers(req)
 	if err != nil {
-		return CommandResult{}, err
+		return nil, err
 	}
-	defer cleanupLinuxMissingDenyMarkers(markers)
+	sc := &startedCommand{ctx: ctx}
+	// The markers are bind-mount targets the running sandbox still needs, so
+	// they outlive this call and go when the command is done with.
+	sc.deferClose(func() { cleanupLinuxMissingDenyMarkers(markers) })
 	for _, marker := range markers {
 		req.DeniedReadablePaths = appendUniquePath(req.DeniedReadablePaths, marker.path)
 	}
@@ -38,36 +40,35 @@ func runBubblewrapCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequ
 	setupProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = capture.result()
-		return CommandResult{ExitCode: 1}, err
+		sc.close()
+		return nil, err
 	}
-	err, stopErr := waitForCommandContext(ctx, cmd)
-	return finalizeExec(capture.result(), err, stopErr)
+	sc.cmd, sc.capture, sc.pid = cmd, capture, cmd.Process.Pid
+	return sc, nil
 }
 
-func finalizeExec(res CommandResult, err, stopErr error) (CommandResult, error) {
-	res.ExitCode = 0
-	if err == nil {
-		return res, nil
+func runBubblewrapCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (CommandResult, error) {
+	sc, err := startBubblewrapCommand(ctx, cfg, req, workDir)
+	if err != nil {
+		return CommandResult{ExitCode: 1}, err
 	}
-	if errors.Is(stopErr, context.Canceled) || errors.Is(stopErr, context.DeadlineExceeded) {
-		if errors.Is(stopErr, context.DeadlineExceeded) {
-			res.ExitCode = 124
-			return res, &TimeoutError{Result: res}
-		}
-		res.ExitCode = 1
-		return res, context.Canceled
+	return newProcessHandle(sc).Wait(ctx)
+}
+
+// Init names this platform's spawn half for the background path, which reaches
+// the same spawn without the wait (plans/358).
+func init() {
+	sandboxStarter = startBubblewrapCommand
+}
+
+// KillProcessGroupByPID terminates pid's process group, which is what a PID
+// ledger record for an orphaned command names: the process the sandbox spawned
+// is the leader of the group its children inherit (plans/358).
+func KillProcessGroupByPID(pid int) error {
+	if pid <= 0 {
+		return nil
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			signal := int(status.Signal())
-			res.ExitCode = 128 + signal
-			return res, &SignalError{Signal: signal}
-		}
-		res.ExitCode = exitErr.ExitCode()
-		return res, nil
-	}
-	res.ExitCode = 1
-	return res, err
+	return syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 func buildBubblewrapArgs(cfg *appcfg.Root, req CommandRequest, workDir string) []string {

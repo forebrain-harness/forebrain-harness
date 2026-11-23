@@ -3568,6 +3568,13 @@ func (r *Runner) Close() error {
 	r.mcpReg = nil
 	r.main = nil
 	r.mu.load.Unlock()
+	// Background processes this Runner started are children of this process and
+	// are tied to nothing that shuts down with it, so their teardown is the
+	// Runner's (owner 2026-11-23, plans/358). Several sessions share one Runner,
+	// which makes this the last moment that owns all of them.
+	if r.tools != nil {
+		r.tools.KillProcesses()
+	}
 	r.mcpHub.close()
 	if ld != nil {
 		ld.abandon()

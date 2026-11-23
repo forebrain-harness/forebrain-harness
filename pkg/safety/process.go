@@ -3,14 +3,17 @@ package safety
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
@@ -219,6 +222,285 @@ func waitForCommandContext(ctx context.Context, cmd *exec.Cmd) (processErr, stop
 		killProcessGroup(cmd)
 		return <-waitCh, stopErr
 	}
+}
+
+// startedCommand is a command a backend has spawned and nobody has waited for
+// yet. It exists because spawn and wait were one function body in every
+// backend: everything the defers owned there — the seatbelt profile on disk,
+// the Linux deny markers, the Windows token and pipe handles, the context that
+// bounded the command — has to stay alive for as long as the command does once
+// the wait is a separate call.
+type startedCommand struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	cmd     *exec.Cmd
+	capture *commandCapture
+	pid     int
+	// waitFn lets a backend that does not spawn a *exec.Cmd own its wait: the
+	// Windows sandbox creates its process through CreateProcessAsUser and
+	// returns the exit code the OS gave it. A nil waitFn is the ordinary path —
+	// wait on cmd, finalize the capture.
+	waitFn func(ctx context.Context) (CommandResult, error)
+	// killFn is how a backend without an *exec.Cmd ends its process tree.
+	killFn  func()
+	closers []func()
+	once    sync.Once
+}
+
+// deferClose records cleanup to run when the command is done with. It stands
+// in for a defer in a spawn body: close runs the recorded functions
+// last-in-first-out, the order the defers they replace would have fired in.
+func (s *startedCommand) deferClose(f func()) {
+	if s == nil || f == nil {
+		return
+	}
+	s.closers = append(s.closers, f)
+}
+
+// close releases what the spawn half opened for this command, once. The
+// process must already have been waited for: the seatbelt profile and the deny
+// markers are what the running sandbox is still reading.
+func (s *startedCommand) close() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		for i := len(s.closers) - 1; i >= 0; i-- {
+			s.closers[i]()
+		}
+		if s.cancel != nil {
+			s.cancel()
+		}
+	})
+}
+
+// wait waits for the command's exit and finalizes its result, once. ctx ending
+// first kills the process group and still reports a cancelled or timed-out
+// command, which is what the waiting path has always done.
+func (s *startedCommand) wait(ctx context.Context) (CommandResult, error) {
+	if s == nil {
+		return CommandResult{ExitCode: 1}, nil
+	}
+	if s.waitFn != nil {
+		res, err := s.waitFn(ctx)
+		s.close()
+		return res, err
+	}
+	var waitErr, stopErr error
+	if s.cmd != nil && s.cmd.Process != nil {
+		waitErr, stopErr = waitForCommandContext(ctx, s.cmd)
+	}
+	res := CommandResult{ExitCode: 1}
+	if s.capture != nil {
+		res = s.capture.result()
+	}
+	s.close()
+	return finalizeExec(res, waitErr, stopErr)
+}
+
+func (s *startedCommand) kill() {
+	if s == nil {
+		return
+	}
+	if s.killFn != nil {
+		s.killFn()
+		return
+	}
+	if s.cmd == nil {
+		return
+	}
+	killProcessGroup(s.cmd)
+}
+
+// ProcessHandle is a command that was started and not waited for. Holding it is
+// what lets a long-lived process outlive the call that started it: the handle
+// owns the process, the one wait that reaps it, and the kill.
+type ProcessHandle struct {
+	started *startedCommand
+	pid     int
+	done    chan struct{}
+
+	mu      sync.Mutex
+	exited  bool
+	result  CommandResult
+	waitErr error
+}
+
+func newProcessHandle(sc *startedCommand) *ProcessHandle {
+	h := &ProcessHandle{started: sc, done: make(chan struct{})}
+	if sc != nil {
+		h.pid = sc.pid
+	}
+	go h.reap()
+	return h
+}
+
+// reap is the one goroutine that waits for the command, and it belongs to the
+// command rather than to the call that started it: the pipe readers feeding the
+// capture belong to the command too, so output keeps being recorded after the
+// start call has returned.
+func (h *ProcessHandle) reap() {
+	res, err := h.started.wait(h.started.ctx)
+	h.mu.Lock()
+	h.waitErr = err
+	h.result = res
+	h.exited = true
+	h.mu.Unlock()
+	close(h.done)
+}
+
+// Wait blocks until the command exits, or until ctx ends — in which case the
+// process group is killed and its exit is still waited for, exactly as the
+// waiting path always did.
+func (h *ProcessHandle) Wait(ctx context.Context) (CommandResult, error) {
+	if h == nil {
+		return CommandResult{ExitCode: 1}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-h.done:
+	case <-ctx.Done():
+		_ = h.Kill()
+		<-h.done
+	}
+	h.mu.Lock()
+	res, waitErr := h.result, h.waitErr
+	h.mu.Unlock()
+	return res, waitErr
+}
+
+// Kill terminates the command's whole process group. Killing a process that has
+// already exited is a success: the caller asked for a state, not an event.
+func (h *ProcessHandle) Kill() error {
+	if h == nil || h.started == nil {
+		return nil
+	}
+	select {
+	case <-h.done:
+		return nil
+	default:
+	}
+	h.started.kill()
+	return nil
+}
+
+// PID is the process the sandbox spawned, which is the leader of the group its
+// children inherit.
+func (h *ProcessHandle) PID() int {
+	if h == nil {
+		return 0
+	}
+	return h.pid
+}
+
+// Done is closed when the command has exited and been reaped: a watcher that
+// only cares that it ended waits on it instead of polling Exited.
+func (h *ProcessHandle) Done() <-chan struct{} {
+	if h == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	return h.done
+}
+
+func (h *ProcessHandle) Exited() bool {
+	if h == nil {
+		return true
+	}
+	select {
+	case <-h.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// Result is the reaped result, and whether the command has been reaped at all.
+// A caller that must not kill the process it is watching — a readiness poll —
+// reads this instead of calling Wait.
+func (h *ProcessHandle) Result() (CommandResult, bool) {
+	if h == nil {
+		return CommandResult{}, true
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.result, h.exited
+}
+
+// finalizeExec turns a finished wait into the result the caller sees: a
+// cancelled or timed-out command keeps that shape rather than the signal its
+// own kill produced, and an exit code is what a plain failure reports.
+func finalizeExec(res CommandResult, err, stopErr error) (CommandResult, error) {
+	res.ExitCode = 0
+	if err == nil {
+		return res, nil
+	}
+	if errors.Is(stopErr, context.Canceled) || errors.Is(stopErr, context.DeadlineExceeded) {
+		if errors.Is(stopErr, context.DeadlineExceeded) {
+			res.ExitCode = 124
+			return res, &TimeoutError{Result: res}
+		}
+		res.ExitCode = 1
+		return res, context.Canceled
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			signal := int(status.Signal())
+			res.ExitCode = 128 + signal
+			return res, &SignalError{Signal: signal}
+		}
+		res.ExitCode = exitErr.ExitCode()
+		return res, nil
+	}
+	res.ExitCode = 1
+	return res, err
+}
+
+// ProcessStartToken identifies when a process started, in a form a later
+// reading can be compared with. It is how the PID ledger tells a live process
+// from one whose PID the OS has recycled, and a recycled PID must never be
+// killed.
+//
+// Linux reads field 22 of /proc/<pid>/stat (clock ticks since boot) and macOS
+// asks ps for lstart. Windows has no cheap equivalent here, so it reports none
+// and the reap is skipped there (plans/358).
+func ProcessStartToken(pid int) (string, bool) {
+	if pid <= 0 {
+		return "", false
+	}
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return "", false
+		}
+		// The command name is parenthesised and may itself hold spaces and
+		// parentheses, so the fields are counted from the last ')'.
+		end := strings.LastIndex(string(data), ")")
+		if end < 0 {
+			return "", false
+		}
+		fields := strings.Fields(string(data[end+1:]))
+		// fields[0] is field 3 (state), so the start time (field 22) is fields[19].
+		if len(fields) < 20 {
+			return "", false
+		}
+		return fields[19], true
+	case "darwin":
+		out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+		if err != nil {
+			return "", false
+		}
+		token := strings.TrimSpace(string(out))
+		if token == "" {
+			return "", false
+		}
+		return token, true
+	}
+	return "", false
 }
 
 var sandboxDeniedKeywords = []string{

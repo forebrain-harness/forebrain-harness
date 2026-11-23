@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 )
 
 // A sandbox the presence check can see but cannot run is the case a bare
@@ -223,5 +225,72 @@ func TestSandboxAvailableReadsTheProbe(t *testing.T) {
 		if got := probeSandbox(PlatformDarwin); got != "" {
 			t.Fatalf("probeSandbox(PlatformDarwin) = %q on macOS", got)
 		}
+	}
+}
+
+// A background command has to survive the call that started it: the seatbelt
+// profile on disk, the context that bounds the command and the capture the pipe
+// readers write into all belong to the handle now, not to the start call
+// (plans/358). Before the split they were defers, and returning cancelled the
+// process.
+func TestProcessHandleKeepsAProcessAliveAfterStartReturns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Unix handle path is what this pins; Windows has its own spawn")
+	}
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}
+	handle, err := NewManager().StartCommand(context.Background(), cfg, CommandRequest{
+		ToolKind: ToolKindShell,
+		Command:  "echo started; sleep 30",
+		WorkDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("StartCommand: %v", err)
+	}
+	if handle.PID() <= 0 {
+		t.Fatalf("handle has no pid")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if handle.Exited() {
+		res, _ := handle.Result()
+		t.Fatalf("the process exited after the start call returned: exit=%d out=%q", res.ExitCode, res.AggregatedOutput)
+	}
+	if err := handle.Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	res, err := handle.Wait(context.Background())
+	select {
+	case <-handle.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the killed process was never reaped")
+	}
+	if res.AggregatedOutput == "" || !strings.Contains(res.AggregatedOutput, "started") {
+		t.Fatalf("output captured across the start boundary = %q, err=%v", res.AggregatedOutput, err)
+	}
+	if !handle.Exited() {
+		t.Fatal("handle still reports a running process after its kill")
+	}
+}
+
+// Killing something that has already exited is the state the caller asked for,
+// and waiting on it must not hang.
+func TestProcessHandleKillAfterExitIsSuccessful(t *testing.T) {
+	handle, err := NewManager().StartCommand(context.Background(), &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}, CommandRequest{
+		ToolKind: ToolKindShell,
+		Command:  "true",
+		WorkDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("StartCommand: %v", err)
+	}
+	select {
+	case <-handle.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the command never exited")
+	}
+	if err := handle.Kill(); err != nil {
+		t.Fatalf("killing an exited process must succeed, got %v", err)
+	}
+	if res, err := handle.Wait(context.Background()); err != nil || res.ExitCode != 0 {
+		t.Fatalf("wait after exit: exit=%d err=%v", res.ExitCode, err)
 	}
 }

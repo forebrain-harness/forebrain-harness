@@ -65,33 +65,88 @@ func windowsSandboxUnavailableReason() string {
 // because a restricted token cannot hold an exclusive read set, and the network
 // is reachable because the token cannot take it away. cfg is the dispatch
 // signature's, unused here: no setting on it changes what the sandbox does.
-func runWindowsSandboxCommand(ctx context.Context, _ *appcfg.Root, req CommandRequest, workDir string) (CommandResult, error) {
+func runWindowsSandboxCommand(ctx context.Context, cfg *appcfg.Root, req CommandRequest, workDir string) (CommandResult, error) {
+	sc, err := startWindowsSandboxCommand(ctx, cfg, req, workDir)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	return newProcessHandle(sc).Wait(ctx)
+}
+
+// Init names this platform's spawn half for the background path, which reaches
+// the same spawn without the wait (plans/358).
+func init() {
+	sandboxStarter = startWindowsSandboxCommand
+}
+
+// KillProcessGroupByPID terminates pid's process tree, which is what a PID
+// ledger record would name. Windows has no reap in plans/358 — there is no
+// cheap start-time check to guard a recycled PID — so nothing calls this today;
+// it exists so the compiled surface matches the other backends.
+func KillProcessGroupByPID(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	return exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid)).Run()
+}
+
+// startWindowsSandboxCommand starts one command in the restricted-token sandbox
+// and returns without waiting for it. The sandbox body owns the process for its
+// whole life — the pipes, the job object and the restricted token all live
+// inside it — so the handle waits on that body and ends the process by
+// cancelling the context the body selects on, which is the one termination path
+// the body has.
+func startWindowsSandboxCommand(ctx context.Context, _ *appcfg.Root, req CommandRequest, workDir string) (*startedCommand, error) {
 	req = constrainRequestToFilesystemProfile(req, workDir)
 
 	baseToken, err := windowsSandboxBaseToken()
 	if err != nil {
-		return CommandResult{}, err
+		return nil, err
 	}
-	defer baseToken.Close()
-
 	restrictedToken, logonSID, cleanupMarkers, err := prepareWindowsSandboxToken(baseToken, req, workDir)
 	if err != nil {
-		return CommandResult{}, err
+		_ = baseToken.Close()
+		return nil, err
 	}
-	defer restrictedToken.Close()
-	defer cleanupMarkers()
+	runCtx, cancel := context.WithCancel(ctx)
+	sc := &startedCommand{ctx: runCtx, cancel: cancel, killFn: func() { cancel() }}
+	// The token, the deny markers and the base token outlive this call: the
+	// sandboxed process runs under them.
+	sc.deferClose(func() { _ = restrictedToken.Close() })
+	sc.deferClose(func() { cleanupMarkers() })
+	sc.deferClose(func() { _ = baseToken.Close() })
 
 	env := home.SafeSubprocessEnv(nil, home.Options{ExplicitEnv: explicitCommandEnv(req.Env, nil)})
-	runCtx, cancel := context.WithTimeout(ctx, req.Timeout)
-	defer cancel()
-	return spawnWindowsSandboxProcess(
-		runCtx,
-		restrictedToken,
-		logonSID,
-		req,
-		workDir,
-		env,
-	)
+	pidCh := make(chan int, 1)
+	type outcome struct {
+		res CommandResult
+		err error
+	}
+	outCh := make(chan outcome, 1)
+	go func() {
+		res, err := spawnWindowsSandboxProcess(runCtx, restrictedToken, logonSID, req, workDir, env, func(pid int) {
+			pidCh <- pid
+		})
+		outCh <- outcome{res: res, err: err}
+	}()
+	select {
+	case pid := <-pidCh:
+		sc.pid = pid
+	case out := <-outCh:
+		// The body returned before the process existed, so nothing is running
+		// and the cleanups are safe to run now: it is a start failure, not a
+		// command anybody can wait for.
+		sc.close()
+		if out.err != nil {
+			return nil, out.err
+		}
+		return nil, errors.New("windows sandbox process exited before it started")
+	}
+	sc.waitFn = func(context.Context) (CommandResult, error) {
+		out := <-outCh
+		return out.res, out.err
+	}
+	return sc, nil
 }
 
 func windowsSandboxBaseToken() (windows.Token, error) {
@@ -708,6 +763,7 @@ func spawnWindowsSandboxProcess(
 	req CommandRequest,
 	workDir string,
 	env []string,
+	onStarted func(pid int),
 ) (CommandResult, error) {
 	shell := hostShellCommand(ctx, req.Command, "")
 	appName, err := windows.UTF16PtrFromString(shell.Path)
@@ -838,6 +894,9 @@ func spawnWindowsSandboxProcess(
 	if _, err := windows.ResumeThread(process.Thread); err != nil {
 		windows.TerminateJobObject(job, 1)
 		return CommandResult{ExitCode: 1}, fmt.Errorf("resume Windows sandbox process: %w", err)
+	}
+	if onStarted != nil {
+		onStarted(int(process.ProcessId))
 	}
 
 	// Only the child retains the inheritable write handles from this point.

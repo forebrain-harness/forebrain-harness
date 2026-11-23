@@ -147,6 +147,14 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 		return err
 	}
 	registerMeta(tRetrieve, retrieveOutputToolDescription, "shell", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
+	// One tool with five actions, registered unconditionally like
+	// retrieve_output: a tool array whose shape depends on the project type
+	// re-bills every cached prefix, and `start`/`kill` change the machine.
+	tProcess, err := NewProcessTool(st, rt)
+	if err != nil {
+		return err
+	}
+	registerMeta(tProcess, processToolDescription, "shell", event.ToolMeta{Destructive: true, InterruptBehavior: "interrupt"})
 	t16, err := NewWebFetchTool(st, rt)
 	if err != nil {
 		return err
@@ -194,6 +202,7 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 	}
 	_ = st.Register(a, t7)
 	_ = st.Register(a, tRetrieve)
+	_ = st.Register(a, tProcess)
 	_ = st.Register(a, t16)
 	_ = st.Register(a, t17)
 	if t21 != nil {

@@ -134,11 +134,15 @@ type State struct {
 	fileChangeRecorder           FileChangeRecorder
 	readStateStore               ReadStateStore
 	runtimeValues                map[string]any
-	actionHook                   func(ctx context.Context, kind string, payload any) (actionID string, ok bool, err error)
-	subagentApprovalHook         SubagentApprovalHook
-	inlineApprovalHook           InlineApprovalHook
-	stepHook                     func(ctx context.Context, evt StepEvent)
-	readObservers                map[string]func(ctx context.Context, absPath string, content []byte)
+	// processes is this state's background processes (plans/358): the handles
+	// the process tool owns, so its runner's teardown can kill what is left.
+	processes            *processRegistry
+	processStateRoot     string
+	actionHook           func(ctx context.Context, kind string, payload any) (actionID string, ok bool, err error)
+	subagentApprovalHook SubagentApprovalHook
+	inlineApprovalHook   InlineApprovalHook
+	stepHook             func(ctx context.Context, evt StepEvent)
+	readObservers        map[string]func(ctx context.Context, absPath string, content []byte)
 	// imageInputGate answers whether this session's model may be handed
 	// pixels. It is nil unless a runtime installs one; a nil gate allows
 	// every image (see ImageInputRefusal).
