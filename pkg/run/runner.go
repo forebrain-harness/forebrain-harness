@@ -1299,6 +1299,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig, sessionOpe
 	}
 	_ = tool.RegisterDefaultTools(a, r.tools, rt)
 	_ = RegisterSkillTool(a, r.tools)
+	_ = RegisterCaptureTool(a, r.tools, r)
 	_ = RegisterSubagentTool(a, r.subagentFactory())
 	// This agent's workspace skills and its trusted project skill root are
 	// listed in the catalog; user, ~/.agents, and system roots are listed too but
