@@ -11876,6 +11876,53 @@ func TestFragmentAfterOutputLimitEndsTurnWithNotice(t *testing.T) {
 	}
 }
 
+// outputLimitFragmentAfterStopLLM is what an adapter hands back when the
+// upstream kept calling a cut stream complete: the half answer, under the
+// provider's own stop reason, with the continuation budget already spent.
+type outputLimitFragmentAfterStopLLM struct{ calls int }
+
+func (m *outputLimitFragmentAfterStopLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("未评审范围：`sql/x.sql` 的 SQL 语义（那属于执")})
+	return &llm.Result{Message: &msg, StopReason: "stop", Usage: &llm.Usage{}}, nil
+}
+
+// A half answer the provider called complete ends the turn with the same notice
+// an honest length cut gets: the text is kept, and the user is told it is a
+// prefix instead of reading half a sentence as the whole answer. The wording
+// names no cause, because this response never named one.
+func TestFragmentClaimedCompleteEndsTurnWithIncompleteNotice(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	var notices []llm.ResponseNotice
+	ctx := llm.WithStreamSink(context.Background(), &llm.StreamSink{
+		OnResponseNotice: func(n llm.ResponseNotice) { notices = append(notices, n) },
+	})
+	res, err := wrapToolOrchestrationLLM(&outputLimitFragmentAfterStopLLM{}, st).Execute(
+		ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("go"))},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("a fragment the provider called complete must end the turn, got error: %v", err)
+	}
+	if want := "未评审范围：`sql/x.sql` 的 SQL 语义（那属于执"; res == nil || res.Message == nil || res.Message.TextContent() != want {
+		t.Fatalf("result = %#v, want the fragment as the turn's answer", res)
+	}
+	incomplete := 0
+	for _, n := range notices {
+		if n.Kind != llm.ResponseNoticeIncomplete {
+			continue
+		}
+		incomplete++
+		if n.Text != llm.OutputLimitExhaustedNotice {
+			t.Fatalf("notice text = %q, want the exhausted notice", n.Text)
+		}
+	}
+	if incomplete != 1 {
+		t.Fatalf("notices = %#v, want exactly one incomplete notice", notices)
+	}
+}
+
 // interruptWithCarryLLM is interruptDuringCallLLM with reasoning: the call Esc
 // abandons publishes the thinking it had completed before the interrupt.
 type interruptWithCarryLLM struct {

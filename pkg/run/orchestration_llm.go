@@ -854,20 +854,29 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				}
 				return nil, &responseIncompleteError{sentence: llm.IncompleteSentence(incomplete.Cause, shown), err: incomplete.Err}
 			}
-			if res != nil && llm.OutputLimitReached(res.StopReason) {
-				// The response is what the output budget left: possibly a prefix of
-				// the answer, possibly nothing at all (a reasoning model can spend
-				// the whole budget thinking). Either way it is the model's budget
-				// that ran out, not the model saying nothing — saying "empty
-				// response" here was the bug that threw a whole turn away.
+			text := ""
+			if res != nil && res.Message != nil {
+				text = strings.TrimSpace(res.Message.TextContent())
+			}
+			// The stop reason is the provider's claim; the text is what it
+			// actually produced. Half a sentence behind a "stop" is the same
+			// failure as an honest length cut, and without this the turn ends
+			// on an answer the user has no reason to doubt. A response that is
+			// only the thinking fence is not one of them: nothing was ever
+			// continued from it, so announcing a recovery that never ran would
+			// be a lie of its own.
+			cutByStructure := res != nil && res.Message != nil &&
+				!llm.ThinkingFenceOnly(*res.Message) && llm.AnswerCutOff(text)
+			if res != nil && (llm.OutputLimitReached(res.StopReason) || cutByStructure) {
+				// The response is what the cut left: possibly a prefix of
+				// the answer, possibly nothing at all (a reasoning model can
+				// spend the whole budget thinking). Either way the answer is
+				// unfinished — saying "empty response" here was the bug that
+				// threw a whole turn away.
 				// The enclosing branch's guard is `res == nil || res.Message ==
 				// nil || len(res.Message.ToolCalls) == 0`, so both are checked
 				// before use; a nil res falls through to the empty-response error
 				// below, which is the right outcome for "no response at all".
-				text := ""
-				if res.Message != nil {
-					text = strings.TrimSpace(res.Message.TextContent())
-				}
 				if text != "" {
 					if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnResponseNotice != nil {
 						sink.OnResponseNotice(llm.ResponseNotice{Kind: llm.ResponseNoticeIncomplete, Text: llm.OutputLimitExhaustedNotice})

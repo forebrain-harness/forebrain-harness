@@ -796,17 +796,19 @@ message_stop|{"type":"message_stop"}`
 	}
 }
 
-// Three continuations, then the fragment is handed back with the output-limit
-// stop reason. Every round's request carries exactly one assistant message —
-// the accumulated answer, replaced per round, never stacked.
-func TestAnthropicGivesUpAfterThree(t *testing.T) {
+// Every continuation the budget allows, then the fragment is handed back with
+// the output-limit stop reason. Every round's request carries exactly one
+// assistant message — the accumulated answer, replaced per round, never stacked.
+func TestAnthropicGivesUpAfterContinuationBudget(t *testing.T) {
 	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
 
-	scripts := []string{
-		anthropicRoundScript("Part one.", "max_tokens", 10, 50),
-		anthropicRoundScript("Part two.", "max_tokens", 20, 50),
-		anthropicRoundScript("Part three.", "max_tokens", 30, 50),
-		anthropicRoundScript("Part four.", "max_tokens", 40, 50),
+	rounds := 1 + llm.OutputLimitContinuations
+	scripts := make([]string, 0, rounds)
+	var want strings.Builder
+	for i := 1; i <= rounds; i++ {
+		part := fmt.Sprintf("Part %d.", i)
+		scripts = append(scripts, anthropicRoundScript(part, "max_tokens", 10*i, 50))
+		want.WriteString(part)
 	}
 	var bodies []map[string]any
 	server := anthropicLimitScriptServer(t, scripts, &bodies)
@@ -817,13 +819,13 @@ func TestAnthropicGivesUpAfterThree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
-	if len(bodies) != 4 {
-		t.Fatalf("requests = %d, want 4 (first round plus three continuations)", len(bodies))
+	if len(bodies) != rounds {
+		t.Fatalf("requests = %d, want %d (first round plus %d continuations)", len(bodies), rounds, llm.OutputLimitContinuations)
 	}
 	if res.StopReason != llm.StopReasonOutputLimit {
 		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
 	}
-	msgs, _ := bodies[3]["messages"].([]any)
+	msgs, _ := bodies[len(bodies)-1]["messages"].([]any)
 	assistant := 0
 	for _, m := range msgs {
 		msg, _ := m.(map[string]any)
@@ -832,10 +834,10 @@ func TestAnthropicGivesUpAfterThree(t *testing.T) {
 		}
 	}
 	if assistant != 1 {
-		t.Fatalf("fourth request carries %d assistant messages, want exactly 1 (the accumulated answer)", assistant)
+		t.Fatalf("the last request carries %d assistant messages, want exactly 1 (the accumulated answer)", assistant)
 	}
-	if text := res.Message.TextContent(); text != "Part one.Part two.Part three.Part four." {
-		t.Fatalf("joined text = %q", text)
+	if text := res.Message.TextContent(); text != want.String() {
+		t.Fatalf("joined text = %q, want every round's part", text)
 	}
 }
 
@@ -1282,19 +1284,33 @@ func TestAnthropicContinuationCarriesLastRoundThinking(t *testing.T) {
 func TestAnthropicExhaustedCutCarriesNoThinking(t *testing.T) {
 	t.Setenv("FOREBRAIN_LLM_HTTP_DEBUG", "0")
 
+	// Every round the budget allows answers "max_tokens": the script has to be
+	// as long as the budget, or the server's fallback (an end_turn with no
+	// text) would settle the call before the budget ran out and the fragment
+	// would never come back under the output-limit reason.
+	rounds := 1 + llm.OutputLimitContinuations
+	scripts := make([]string, 0, rounds)
+	for i := 1; i <= rounds; i++ {
+		signature := ""
+		if i == 1 {
+			// Only the first cut round still had its signature when the cut
+			// landed; the rounds after it did not.
+			signature = "sig-one=="
+		}
+		scripts = append(scripts, anthropicThinkingRoundScript(
+			fmt.Sprintf("cut %d", i), signature, fmt.Sprintf("Part %d.", i), "max_tokens", 10*i, 50))
+	}
 	var bodies []map[string]any
-	server := anthropicLimitScriptServer(t, []string{
-		anthropicThinkingRoundScript("cut one", "sig-one==", "Part one.", "max_tokens", 10, 50),
-		anthropicThinkingRoundScript("cut two", "", "Part two.", "max_tokens", 20, 50),
-		anthropicThinkingRoundScript("cut three", "", "Part three.", "max_tokens", 30, 50),
-		anthropicThinkingRoundScript("cut four", "", "Part four.", "max_tokens", 40, 50),
-	}, &bodies)
+	server := anthropicLimitScriptServer(t, scripts, &bodies)
 	defer server.Close()
 
 	client := NewAgentLLM("test-key", server.URL, "claude-opus-4-6", 64_000)
 	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
+	}
+	if len(bodies) != rounds {
+		t.Fatalf("requests = %d, want %d (first round plus %d continuations)", len(bodies), rounds, llm.OutputLimitContinuations)
 	}
 	if res.StopReason != llm.StopReasonOutputLimit {
 		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)

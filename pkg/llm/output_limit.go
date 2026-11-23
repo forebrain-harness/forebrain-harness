@@ -1,6 +1,10 @@
 package llm
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 // DefaultOutputTokenCap is the output budget when neither the model's row nor
 // the catalog names one. Claude Code uses the same number for models its table
@@ -45,17 +49,161 @@ func OutputLimitReached(stopReason string) bool {
 	return NormalizeStopReason(stopReason) == StopReasonOutputLimit
 }
 
-// OutputLimitContinuations is how many times one call re-asks after the output
-// budget ran out. Three is what Claude Code uses: enough for a long answer that
-// was cut mid-sentence, small enough that a model stuck in a thinking loop
-// cannot spend an unbounded budget.
-const OutputLimitContinuations = 3
+// AnswerCutOff reports whether text the provider called complete stops inside a
+// structure it never closed. It is the second half of "the answer was cut":
+// providers do report the output budget as the reason, and some upstreams end
+// the stream mid-sentence while reporting a normal finish, which is
+// indistinguishable from a whole answer unless the text itself is inspected.
+//
+// Three conditions must all hold, and the shape is deliberate: the tail allowed
+// list alone is far too loose (a Chinese list often ends on a bare noun), and an
+// unbalanced bracket anywhere in the body is too loose as well (a good answer
+// quoting a fragment inside a code span). Only the last non-empty line is
+// scanned, and only its unpaired structures count.
+func AnswerCutOff(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	if last, _ := utf8.DecodeLastRuneInString(trimmed); strings.ContainsRune(answerTailAllowed, last) {
+		return false
+	}
+	line := lastNonEmptyLine(trimmed)
+	return cutInsideOpenMark(line) || cutInsideCodeSpan(line)
+}
+
+const (
+	// answerTailAllowed are the characters an answer that simply ended may stop
+	// on. Most are sentence-final punctuation, but the set deliberately also
+	// carries mid-sentence marks and a few symbols: the cost of a false
+	// negative here is a half answer passing as a whole one, the cost of a
+	// false positive is one extra round of continuation.
+	answerTailAllowed = "。.！!？?；;：:，,、）)」』》”’】…~✓|>*_-"
+	// answerOpenMarks and answerCloseMarks are the paired structures whose
+	// unclosed half means the sentence continues.
+	answerOpenMarks  = "（【「『《“‘"
+	answerCloseMarks = "）】」』》”’"
+)
+
+// lastNonEmptyLine is the answer's last line that carries visible text, with
+// trailing blanks dropped so "the end of the line" is where a reader sees it.
+func lastNonEmptyLine(text string) string {
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimRight(lines[i], " \t\r"); strings.TrimSpace(line) != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+// cutInsideOpenMark reports whether the line ends inside a Chinese bracket or
+// quotation mark that was opened and never closed. Paired backtick spans are
+// literal text, not prose structure, so they are removed first: otherwise a
+// complete sentence that quotes a bracket ("用 `（` 转义") reads as a cut. An
+// unpaired backtick is left in place, so a cut that lands inside a span is still
+// seen. Scanning backwards means the first mark found decides.
+func cutInsideOpenMark(line string) bool {
+	stripped := stripCodeSpans(line)
+	for i := len(stripped); i > 0; {
+		r, size := utf8.DecodeLastRuneInString(stripped[:i])
+		i -= size
+		if strings.ContainsRune(answerOpenMarks, r) {
+			return true
+		}
+		if strings.ContainsRune(answerCloseMarks, r) {
+			return false
+		}
+	}
+	return false
+}
+
+// stripCodeSpans drops every paired `…` span from line. A backtick with no
+// closing partner keeps itself and everything after it: an unterminated span is
+// exactly the cut this check exists for. Written as an IndexByte loop rather
+// than a compiled regexp because it runs on every tool-call-free response.
+func stripCodeSpans(line string) string {
+	var out strings.Builder
+	rest := line
+	for {
+		open := strings.IndexByte(rest, '`')
+		if open < 0 {
+			out.WriteString(rest)
+			return out.String()
+		}
+		shut := strings.IndexByte(rest[open+1:], '`')
+		if shut < 0 {
+			out.WriteString(rest)
+			return out.String()
+		}
+		out.WriteString(rest[:open])
+		rest = rest[open+shut+2:]
+	}
+}
+
+// cutInsideCodeSpan reports whether the line ends inside a backtick span it just
+// opened. Odd backticks mean the last one has no partner; it still has to open a
+// span rather than name the character, so the character after it must be text or
+// the line's end ("用 ` 包裹代码" and "反引号是 ` 这个符号" both finish). A line
+// made only of backticks and tildes is a code fence, which closes what the answer
+// opened higher up and is not itself a cut.
+func cutInsideCodeSpan(line string) bool {
+	if isFenceLine(line) {
+		return false
+	}
+	if strings.Count(line, "`")%2 == 0 {
+		return false
+	}
+	last := strings.LastIndexByte(line, '`')
+	if last == len(line)-1 {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(line[last+1:])
+	return !unicode.IsSpace(r)
+}
+
+// isFenceLine reports whether the line is a code fence (``` or ~~~) and nothing
+// else.
+func isFenceLine(line string) bool {
+	for _, r := range strings.TrimSpace(line) {
+		if r != '`' && r != '~' {
+			return false
+		}
+	}
+	return true
+}
+
+// claimsCompleteButCut is AnswerCutOff behind the provider's own words: only a
+// stop reason that asserts the answer is whole can be contradicted by the text.
+// NormalizeStopReason returns anything it does not recognize unchanged, and
+// Gemini reports STOP in upper case, so the comparison is case-insensitive. A
+// response cut by the content filter or by a stop sequence is deliberately not
+// here: re-asking one of those is wrong (see NormalizeStopReason).
+func claimsCompleteButCut(stopReason, fragment string) bool {
+	switch strings.ToLower(NormalizeStopReason(stopReason)) {
+	case "stop", "end_turn", "completed":
+		return AnswerCutOff(fragment)
+	}
+	return false
+}
+
+// OutputLimitContinuations is how many times one call re-asks after its answer
+// was cut. The owner's 2026-11-23 ruling raised it from three to a hundred: an
+// upstream that ends the stream mid-sentence — whether it admits it or not — has
+// to be given room to finish a long answer. The cost is bounded but real: every
+// round re-sends the whole conversation plus the answer so far, so the request
+// behind the incident this was raised for (225k prompt tokens) can cost ~22.7M
+// input tokens and ~17 minutes inside one Execute if all 100 rounds run. Most of
+// that input hits the prompt cache, so the bill is far below face value.
+// Cancelling is not checked between rounds; the next round's request observes
+// the cancelled context, so a cancel lands at the end of the current round.
+const OutputLimitContinuations = 100
 
 const (
 	// outputLimitResumePrompt is the message the model is asked to continue on.
 	// The wording is deliberately blunt and provider-neutral: an apology or a
 	// recap costs exactly the tokens this recovery is trying to buy back.
-	outputLimitResumePrompt = "Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces."
+	outputLimitResumePrompt = "Your previous answer was cut off before it finished. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces."
 	// outputLimitThinkingOnlyPrompt is the resume message when the cut happened
 	// before any answer text existed. There is nothing to continue from, so the
 	// model is told that and asked to spend less on thinking.
@@ -71,10 +219,17 @@ type OutputLimitRecovery struct{ rounds int }
 
 // ShouldContinue decides whether the response just received is re-asked. Calls
 // are never continued: they are work the model already decided to do, and
-// re-asking would duplicate them. A response that produced nothing and was not
-// cut off is not a continuation case either.
-func (r *OutputLimitRecovery) ShouldContinue(stopReason string, producedChars, toolCalls int) bool {
-	if toolCalls > 0 || !OutputLimitReached(stopReason) {
+// re-asking would duplicate them. Neither is a response that produced nothing
+// and was not cut off. An answer is continued on the provider's own report (the
+// output budget ran out), and also when the report says the answer is whole
+// while the text plainly is not — an upstream that ends the stream mid-sentence
+// and still sends "stop" is the same failure as an honest length cut, and
+// trusting the report recorded half a sentence as a finished answer.
+func (r *OutputLimitRecovery) ShouldContinue(stopReason, fragment string, toolCalls int) bool {
+	if toolCalls > 0 {
+		return false
+	}
+	if !OutputLimitReached(stopReason) && !claimsCompleteButCut(stopReason, fragment) {
 		return false
 	}
 	return r.rounds < OutputLimitContinuations
@@ -104,8 +259,10 @@ func (r *OutputLimitRecovery) Resume(fragment string) []Message {
 func (r *OutputLimitRecovery) Exhausted() bool { return r.rounds >= OutputLimitContinuations }
 
 // OutputLimitExhaustedNotice is shown when a turn ends on a cut-off answer: the
-// text is kept, but the user has to know it is a prefix.
-const OutputLimitExhaustedNotice = "The answer was cut off by this model's output limit and could not be continued further. Raise the model's output limit, lower its reasoning effort, or ask for a smaller piece of work."
+// text is kept, but the user has to know it is a prefix. The wording names no
+// cause because there are two — a budget that really ran out and an upstream
+// that cut the stream and called it a completion — and the advice fits both.
+const OutputLimitExhaustedNotice = "The answer was cut off before it finished and could not be continued further. Raise the model's output limit, lower its reasoning effort, or ask for a smaller piece of work."
 
 // OutputLimitEmptyAnswerError is the terminal error when the budget ran out
 // before any answer text existed at all (thinking consumed it). It replaces the

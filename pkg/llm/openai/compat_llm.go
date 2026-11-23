@@ -1268,7 +1268,7 @@ func (c *openAICompatLLM) executeChatCompletionStream(ctx context.Context, req o
 		// cover (a provider that ends [DONE] with zero output) is ready now.
 		emitCompatToolReady(sink, &toolBuf, &readyCount, len(toolBuf))
 
-		if !recovery.ShouldContinue(llm.NormalizeStopReason(string(lastFinish)), contentAcc.Len(), len(toolBuf)) {
+		if !recovery.ShouldContinue(llm.NormalizeStopReason(string(lastFinish)), contentAcc.String(), len(toolBuf)) {
 			break
 		}
 		roundMsgs = append(append([]openaiclient.ChatCompletionMessage(nil), baseMsgs...), compatMessagesToOpenAI(recovery.Resume(contentAcc.String()), c.model, ex)...)
@@ -1613,7 +1613,7 @@ func (c *openAICompatLLM) executeChatCompletionUnaryParts(ctx context.Context, r
 		tokOut += resp.Usage.CompletionTokens
 		tokCached += settledCached
 
-		if !continueOnLimit || !recovery.ShouldContinue(llm.NormalizeStopReason(string(lastFinish)), contentAcc.Len(), len(toolBuf)) {
+		if !continueOnLimit || !recovery.ShouldContinue(llm.NormalizeStopReason(string(lastFinish)), contentAcc.String(), len(toolBuf)) {
 			break
 		}
 		// The same resume pair the streaming loop sends: the accumulated

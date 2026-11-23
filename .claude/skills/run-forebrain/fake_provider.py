@@ -218,6 +218,18 @@ TOOL_SCRIPTS = {
 # the two behind it unstarted.
 MULTISHELL_COMMANDS = ["sleep 3; echo one", "echo two", "echo three"]
 MULTISHELL_REPLY = "steer received"
+# The "stopcut" mode reproduces the shape of an upstream fault: the SSE stream
+# ends mid-sentence and still reports finish_reason "stop", so an answer that
+# was cut off looks finished. The first turn request answers STOPCUT_FRAGMENT —
+# a sentence left open inside a Chinese parenthesis AND inside a code span. A
+# resuming round is recognised by the resume instruction in its last message
+# (the marker is the same before and after that prompt's first sentence was
+# made cause-neutral) and finishes the sentence; FAKE_STOPCUT_ALWAYS=1 keeps
+# cutting every round instead, which is the exhaustion scenario: one request
+# per round, 1 + llm.OutputLimitContinuations in total.
+STOPCUT_FRAGMENT = "未评审范围：`sql/x.sql` 的 SQL 语义（那属于执"
+STOPCUT_TAIL = "行阶段的事）。"
+STOPCUT_RESUME_MARK = "Resume directly — no apology"
 # The "streamtools" mode proves a tool call runs before its response ends: the
 # first call touches $FAKE_MARKER, the provider waits for the file to appear
 # before it sends the second call, and swaps that call for "echo MARKER
@@ -584,6 +596,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if MODE == "lengthcontinue" and self.serve_lengthcontinue(next(REQUESTS) + 1):
             return
 
+        if MODE == "stopcut" and self.serve_stopcut(body):
+            return
+
         if MODE == "hang":
             # Never answer. The socket stays open, so forebrain keeps the turn in
             # flight and the withdrawal window stays open until Esc closes it.
@@ -684,6 +699,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.write_event(chunk(delta={"role": "assistant", "content": "second turn"}))
             self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+        return True
+
+    def serve_stopcut(self, body):
+        """End a stream mid-sentence and call it a normal completion.
+
+        This is the upstream fault the recovery for an honest length cut cannot
+        see: `finish_reason` is "stop", the stream terminates with `[DONE]` the
+        way a complete answer does, and the text stops inside a Chinese
+        parenthesis and inside a code span. Nothing about the response says
+        "cut", so a client that only believes `finish_reason` records half a
+        sentence as the whole answer and ends the turn.
+
+        A resuming round is the one whose last message carries the resume
+        instruction, so the turn's own first request and every later round are
+        told apart by the body, not by a request counter. FAKE_STOPCUT_ALWAYS=1
+        cuts those rounds too, which is how the exhaustion path is reached.
+        """
+        if not _is_turn_request(body):
+            self.serve_background(body)
+            return
+        resuming = STOPCUT_RESUME_MARK in _request_last_text(body)
+        text = STOPCUT_FRAGMENT
+        if resuming and not os.environ.get("FAKE_STOPCUT_ALWAYS"):
+            text = STOPCUT_TAIL
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.write_event(chunk(delta={"role": "assistant", "content": text}))
+        final = chunk(finish="stop")
+        final["usage"] = {"prompt_tokens": 1200, "completion_tokens": 40, "total_tokens": 1240}
+        self.write_event(final)
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
         return True

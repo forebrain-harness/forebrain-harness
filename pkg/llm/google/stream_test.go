@@ -351,7 +351,7 @@ func TestGoogleStreamingMaxTokensContinues(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(bodies) != 1+llm.OutputLimitContinuations {
-		t.Fatalf("requests = %d, want %d (first round plus three continuations)", len(bodies), 1+llm.OutputLimitContinuations)
+		t.Fatalf("requests = %d, want %d (first round plus %d continuations)", len(bodies), 1+llm.OutputLimitContinuations, llm.OutputLimitContinuations)
 	}
 	// The first round produced no text, so the second request carries only
 	// the caller's turn and the thinking-only resume prompt — no model turn.
@@ -363,11 +363,80 @@ func TestGoogleStreamingMaxTokensContinues(t *testing.T) {
 			t.Fatalf("second request content %d is a model turn; the thinking-only resume carries none", i)
 		}
 	}
-	if text := res.Message.TextContent(); text != "part2 part3 part4 " {
+	// Rounds 2 and 3 answer their own part; every round past them answers
+	// "part4 ", because the budget — not a fixed script — decides how many
+	// rounds there are.
+	var want strings.Builder
+	want.WriteString("part2 part3 ")
+	for round := 4; round <= 1+llm.OutputLimitContinuations; round++ {
+		want.WriteString("part4 ")
+	}
+	if text := res.Message.TextContent(); text != want.String() {
 		t.Fatalf("fragment = %q", text)
 	}
 	if res.StopReason != llm.StopReasonOutputLimit {
 		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
+	}
+}
+
+// Gemini spells a normal finish "STOP", in upper case, and NormalizeStopReason
+// returns anything it does not recognize unchanged — so a comparison that did not
+// fold case would leave this protocol's new recovery dead. The answer here stops
+// inside a parenthesis that was never closed, so the continuation must go out.
+func TestGoogleStreamingStopWithCutAnswerContinues(t *testing.T) {
+	const (
+		fragment = "未评审范围：`sql/x.sql` 的 SQL 语义（那属于执"
+		tail     = "行阶段的事）。"
+	)
+	type wireContent struct {
+		Role  string `json:"role"`
+		Parts []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	}
+	type wireReq struct {
+		Contents []wireContent `json:"contents"`
+	}
+	var mu sync.Mutex
+	var bodies []wireReq
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req wireReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		round := len(bodies) + 1
+		bodies = append(bodies, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		text := fragment
+		if round > 1 {
+			text = tail
+		}
+		serveSSE(w, fmt.Sprintf(`{"candidates":[{"content":{"role":"model","parts":[{"text":%q}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":%d,"candidatesTokenCount":5}}`, text, 10*round))
+	}))
+	defer server.Close()
+
+	client := NewAgentLLM("", server.URL, "gemini-3.5-pro", 0, nil).(*agentLLM)
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2 (the cut answer and the continuation)", len(bodies))
+	}
+	if n := len(bodies[1].Contents); n != 3 {
+		t.Fatalf("continuation carried %d contents, want 3 (caller, accumulated answer, resume prompt)", n)
+	}
+	if got := res.Message.TextContent(); got != fragment+tail {
+		t.Fatalf("joined text = %q, want the fragment plus the continuation", got)
+	}
+	if res.StopReason != "STOP" {
+		t.Fatalf("StopReason = %q, want the provider's own STOP", res.StopReason)
 	}
 }
 

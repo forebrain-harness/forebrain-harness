@@ -654,7 +654,15 @@ func TestGoogleMaxTokensContinues(t *testing.T) {
 	if requests != 1+llm.OutputLimitContinuations {
 		t.Fatalf("requests = %d, want %d", requests, 1+llm.OutputLimitContinuations)
 	}
-	if text := res.Message.TextContent(); text != "part2 part3 part4 " {
+	// Rounds 2 and 3 answer their own part; every round past them answers
+	// "part4 ", because the budget — not a fixed script — decides how many
+	// rounds there are.
+	var want strings.Builder
+	want.WriteString("part2 part3 ")
+	for round := 4; round <= 1+llm.OutputLimitContinuations; round++ {
+		want.WriteString("part4 ")
+	}
+	if text := res.Message.TextContent(); text != want.String() {
 		t.Fatalf("fragment = %q", text)
 	}
 	if res.StopReason != llm.StopReasonOutputLimit {

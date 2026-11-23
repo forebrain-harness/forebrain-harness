@@ -731,7 +731,7 @@ func (c *openAIResponsesLLM) execute(ctx context.Context, messages []llm.Message
 			reasoningModel = res.Message.ReasoningModel
 		}
 		stopReason = res.StopReason
-		if !recovery.ShouldContinue(stopReason, answer.Len(), len(lastToolCalls)) {
+		if !recovery.ShouldContinue(stopReason, answer.String(), len(lastToolCalls)) {
 			break
 		}
 		conversation = append(append([]llm.Message(nil), messages...), recovery.Resume(answer.String())...)

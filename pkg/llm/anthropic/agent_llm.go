@@ -232,7 +232,7 @@ func (c *anthropicAgentLLM) Execute(ctx context.Context, messages []llm.Message,
 			lastToolCalls = res.Message.ToolCalls
 		}
 		stopReason = res.StopReason
-		if !recovery.ShouldContinue(stopReason, answer.Len(), len(lastToolCalls)) {
+		if !recovery.ShouldContinue(stopReason, answer.String(), len(lastToolCalls)) {
 			break
 		}
 		conversation = append(append([]llm.Message(nil), messages...), recovery.Resume(answer.String())...)

@@ -852,9 +852,9 @@ func TestLengthContinueCarriesOneAnswerPerRound(t *testing.T) {
 }
 
 // The recovery asks at most OutputLimitContinuations times: a provider that
-// keeps answering "length" gets one request plus three continuations, then the
-// fragment comes back with the output-limit stop reason.
-func TestCompatLengthContinueUsesThreeRounds(t *testing.T) {
+// keeps answering "length" gets one request plus that many continuations, then
+// the fragment comes back with the output-limit stop reason.
+func TestCompatLengthContinueUsesContinuationBudget(t *testing.T) {
 	t.Parallel()
 
 	type wireMsg struct {
@@ -894,7 +894,7 @@ func TestCompatLengthContinueUsesThreeRounds(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1+llm.OutputLimitContinuations {
-		t.Fatalf("physical requests = %d, want %d (the first round plus three continuations)", len(got), 1+llm.OutputLimitContinuations)
+		t.Fatalf("physical requests = %d, want %d (the first round plus %d continuations)", len(got), 1+llm.OutputLimitContinuations, llm.OutputLimitContinuations)
 	}
 	for i := 1; i < len(got); i++ {
 		msgs := got[i].Messages
@@ -911,8 +911,167 @@ func TestCompatLengthContinueUsesThreeRounds(t *testing.T) {
 	if res.StopReason != llm.StopReasonOutputLimit {
 		t.Fatalf("StopReason = %q, want %q", res.StopReason, llm.StopReasonOutputLimit)
 	}
-	if text := res.Message.TextContent(); text != "part1 part2 part3 part4 " {
+	// Every round answered "partN ", so the answer is the whole ladder of
+	// them — built from the constant, because the budget is what decides how
+	// many rounds there are.
+	var want strings.Builder
+	for i := 1; i <= 1+llm.OutputLimitContinuations; i++ {
+		want.WriteString(fmt.Sprintf("part%d ", i))
+	}
+	if text := res.Message.TextContent(); text != want.String() {
 		t.Fatalf("joined text = %q", text)
+	}
+}
+
+// A provider that ends the stream mid-sentence and still reports "stop" has cut
+// the answer just as an honest length finish does. The report is not evidence of
+// completeness; the text is. So the same resume pair goes out, and the two
+// rounds are one answer, still finished "stop".
+func TestCompatStopFinishWithCutAnswerContinues(t *testing.T) {
+	t.Parallel()
+
+	const (
+		fragment = "未评审范围：`sql/x.sql` 的 SQL 语义（那属于执"
+		tail     = "行阶段的事）。"
+	)
+	type wireMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	type wireReq struct {
+		Messages []wireMsg `json:"messages"`
+	}
+	var mu sync.Mutex
+	var got []wireReq
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req wireReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		round := len(got) + 1
+		got = append(got, req)
+		mu.Unlock()
+		text := fragment
+		if round > 1 {
+			text = tail
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		var body bytes.Buffer
+		body.WriteString(fmt.Sprintf(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":%q},"finish_reason":null}]}`, text) + "\n\n")
+		body.WriteString(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n")
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = w.Write(body.Bytes())
+	}))
+	t.Cleanup(server.Close)
+
+	client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "m", 0, 16, "", []byte(`{"stream":true}`))
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("physical requests = %d, want 2 (the cut answer and the continuation)", len(got))
+	}
+	msgs := got[1].Messages
+	if n := len(msgs); n != 3 {
+		t.Fatalf("continuation carried %d messages, want 3 (caller, accumulated answer, resume prompt)", n)
+	}
+	if carried := msgs[len(msgs)-2]; carried.Role != "assistant" || carried.Content != fragment {
+		t.Fatalf("continuation's carried answer = %q (%s), want the cut fragment as an assistant turn", carried.Content, carried.Role)
+	}
+	prompt := msgs[len(msgs)-1]
+	if prompt.Role != "user" || !strings.Contains(prompt.Content, "Resume directly — no apology") {
+		t.Fatalf("continuation's last message = %q (%s), want the resume prompt", prompt.Content, prompt.Role)
+	}
+	if text := res.Message.TextContent(); text != fragment+tail {
+		t.Fatalf("joined text = %q, want the fragment plus the continuation", text)
+	}
+	if res.StopReason != "stop" {
+		t.Fatalf("StopReason = %q, want the provider's own stop (the adapter never rewrites it)", res.StopReason)
+	}
+}
+
+// The other side of the same rule: a claimed-complete answer that really is
+// complete costs exactly one request.
+func TestCompatStopFinishWithCompleteAnswerDoesNotContinue(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		var body bytes.Buffer
+		body.WriteString(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"完整的一句话。"},"finish_reason":null}]}` + "\n\n")
+		body.WriteString(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n")
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = w.Write(body.Bytes())
+	}))
+	t.Cleanup(server.Close)
+
+	client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "m", 0, 16, "", []byte(`{"stream":true}`))
+	res, err := client.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("physical requests = %d, want 1 (a complete answer is not continued)", requests)
+	}
+	if text := res.Message.TextContent(); text != "完整的一句话。" {
+		t.Fatalf("answer = %q", text)
+	}
+}
+
+// The raised budget must not outrun the user. A provider that keeps cutting the
+// answer is re-asked until the context is cancelled, and the very next request
+// observes that cancellation instead of waiting for the rounds to run out — an
+// instantaneous fake finishes a hundred rounds in milliseconds, so the cancel
+// has to land inside the loop to prove anything.
+func TestCompatStopCutCancelAbortsPromptly(t *testing.T) {
+	t.Parallel()
+
+	const cut = "未评审范围：`sql/x.sql` 的 SQL 语义（那属于执"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		mu.Unlock()
+		if n == 2 {
+			cancel()
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		var body bytes.Buffer
+		body.WriteString(fmt.Sprintf(`data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":%q},"finish_reason":null}]}`, cut) + "\n\n")
+		body.WriteString(`data: {"id":"2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n")
+		body.WriteString("data: [DONE]\n\n")
+		_, _ = w.Write(body.Bytes())
+	}))
+	t.Cleanup(server.Close)
+
+	client := newOpenAICompatLLM("sk-test", server.URL+"/v1", "m", 0, 16, "", []byte(`{"stream":true}`))
+	res, err := client.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("hi"))}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute = (%#v, %v), want the cancellation to end the continuation loop", res, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests > 3 {
+		t.Fatalf("physical requests = %d after the cancel, want at most 3; the loop kept re-asking", requests)
 	}
 }
 
