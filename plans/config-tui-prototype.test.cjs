@@ -386,7 +386,7 @@ assert(!html.includes('\u00b7'), 'Middle-dot separators are forbidden');
       assert.deepEqual(inv.fields.cron, ['retention_days']);
       assert.deepEqual(inv.fields.features.slice().sort(), ['lsp', 'memories']);
       assert.deepEqual(inv.fields.peers, ['claude_code']);
-      assert.deepEqual(inv.fields.sandbox_workspace_write.slice().sort(), ['network_access', 'writable_roots']);
+      assert.deepEqual(inv.fields.sandbox_workspace_write.slice().sort(), ['network_access', 'network_loopback', 'writable_roots']);
       assert(!inv.templates.includes('provider'), 'provider template must stay deleted');
       assert(!inv.saved.includes('llm_providers'), 'llm_providers must stay deleted');
     });
@@ -448,7 +448,9 @@ assert(!html.includes('\u00b7'), 'Middle-dot separators are forbidden');
     });
     await check('Conditional platform fields', async () => {
       await scene('state-windows');
-      assert.equal(await page.locator('#panel .item').count(), 1);
+      // Windows drops the network-access switch alone (configFieldListed): the
+      // writable roots and the loopback switch stay, so the page keeps two rows.
+      assert.equal(await page.locator('#panel .item').count(), 2);
       assert.equal((await state()).draft.network_access, true);
       await scene('state-no-sandbox');
       assert.equal(await page.getByRole('tab').count(), 2);
