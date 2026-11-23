@@ -135,6 +135,14 @@ export interface ChatMessage {
    * drops what a `present_files` card already drew.
    */
   artifacts?: ArtifactView[]
+  /**
+   * Whether the run that closed this turn finished its work. The delivery
+   * group is what a finished turn hands over: a turn that failed or was
+   * stopped draws none (owner 2026-11-23). Absent means the turn recorded no
+   * run-end at all — a transcript older than the event log — and its files
+   * are drawn as they always were.
+   */
+  completedNormally?: boolean
   /** A choice a slash command asked for, on its notice. */
   picker?: SlashPicker
   /** The value picked from it; a picked notice offers nothing more. */
@@ -2555,9 +2563,10 @@ export function workedLineText(line: WorkedLine): string {
 
 /**
  * What a run's end records on its answer, whatever ended it — finished, failed
- * or stopped: when it finished and how long it worked.
+ * or stopped: when it finished, how long it worked, and whether it finished
+ * its work at all (the delivery group is drawn only then).
  */
-function runEndPatch(finishedAt: string | undefined, elapsedMs: unknown, runStartedAt: string | undefined, plan?: WorkedPlanProgress, artifacts?: ArtifactView[]): Partial<ChatMessage> {
+function runEndPatch(finishedAt: string | undefined, elapsedMs: unknown, runStartedAt: string | undefined, plan: WorkedPlanProgress | undefined, artifacts: ArtifactView[] | undefined, completedNormally: boolean): Partial<ChatMessage> {
   const elapsed = Number(elapsedMs)
   const workedDurationMs = elapsedMs != null && Number.isFinite(elapsed) && elapsed >= 0
     ? elapsed
@@ -2567,6 +2576,7 @@ function runEndPatch(finishedAt: string | undefined, elapsedMs: unknown, runStar
     ...(workedDurationMs != null ? { workedDurationMs } : {}),
     ...(plan && plan.total > 0 ? { workedPlanDone: plan.done, workedPlanTotal: plan.total, workedPlanActive: plan.active } : {}),
     ...(artifacts?.length ? { artifacts } : {}),
+    completedNormally,
   }
 }
 
@@ -6003,7 +6013,7 @@ export function useChatStream() {
         }
         updateMessageById(assistantMessageId, (message) => ({
           ...withSettledTurnText(message, finalText, evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload), true),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined, retry: undefined }
         isStreaming.value = false
@@ -6014,7 +6024,7 @@ export function useChatStream() {
         const msg = String(payload.error ?? payload.message ?? 'Request failed')
         updateMessageById(assistantMessageId, (message) => ({
           ...withRunError(message, evt.runId, msg, parseProviderErrorDetail(payload.detail), evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload), false),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined, retry: undefined }
         isStreaming.value = false
@@ -6093,7 +6103,7 @@ export function useChatStream() {
         state.completedRunId = String(evt.runId ?? activeRunId ?? '').trim() || state.completedRunId || null
         updateMessageById(assistantMessageId, (message) => ({
           ...withCancelledTurn(message, evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload), false),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined, retry: undefined }
         isStreaming.value = false
@@ -6445,7 +6455,7 @@ export function useChatStream() {
             : payload
           updateMessageById(answerId(), (message) => ({
             ...withSettledTurnText(message, finalText, finishedAt),
-            ...runEndPatch(finishedAt, data.elapsedMs, eventState.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
+            ...runEndPatch(finishedAt, data.elapsedMs, eventState.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload), true),
           }))
           if (streamAbortController === myController) {
             isStreaming.value = false
@@ -6462,7 +6472,7 @@ export function useChatStream() {
           const finishedAt = String(payload.createdAt ?? payload.finishedAt ?? new Date().toISOString()).trim()
           updateMessageById(answerId(), (message) => ({
             ...withRunError(message, String(payload.runId ?? activeRunId ?? '').trim(), msg, parseProviderErrorDetail(payload.data), finishedAt),
-            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
+            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload), false),
           }))
           if (streamAbortController === myController) {
             isStreaming.value = false
@@ -6530,7 +6540,7 @@ export function useChatStream() {
           const finishedAt = String(payload.createdAt ?? payload.finishedAt ?? new Date().toISOString()).trim()
           updateMessageById(answerId(), (message) => ({
             ...withCancelledTurn(message, finishedAt),
-            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload)),
+            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload), artifactsOfRunEnd(payload), false),
           }))
           if (streamAbortController === myController) {
             isStreaming.value = false

@@ -730,7 +730,7 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 		// were already taken above and this draws nothing.
 		if i+1 == len(turns) || isUserTranscriptRow(turns[i+1]) {
 			flushReplayReducer(renderer, reducer)
-			renderReplayDeliverables(renderer, reducer, nil)
+			renderReplayDeliverables(renderer, reducer, replayDelivery{})
 		}
 	}
 	flush(len(turns))
@@ -771,17 +771,31 @@ func lastWorkedLinePerTurn(turns []state.Message, workedLines map[int]turn.RunWo
 // renderReplayDeliverables draws the turn's deliverables group from the rows
 // the replayed transcript accumulated plus the artifact rows the closing
 // run-end carried, and clears the accumulator. Nothing presented and nothing
-// framed means no group at all.
-func renderReplayDeliverables(renderer *Renderer, reducer *Reducer, frameRows []tool.Deliverable) {
+// framed means no group at all — and a closing run-end that was cancelled or
+// failed draws none whatever was presented: the turn delivers nothing.
+func renderReplayDeliverables(renderer *Renderer, reducer *Reducer, delivery replayDelivery) {
 	rows := reducer.takePendingDeliverables()
 	// Taken at the turn boundary whether or not a group is drawn: counts the
 	// turn earned cannot leak into the next one.
 	diffs := reducer.takePendingTurnDiffs()
-	rows = appendDeliverables(rows, frameRows)
+	if delivery.withheld {
+		return
+	}
+	rows = appendDeliverables(rows, delivery.rows)
 	if len(rows) == 0 {
 		return
 	}
 	renderer.RenderFrame(Frame{Kind: FrameDeliverables, Deliverables: rows, TurnDiffs: diffs, Final: true})
+}
+
+// replayDelivery is one replayed run's delivery: the artifact rows its
+// completed ending carried, and whether that ending hands them over at all.
+// A run that was cancelled or failed keeps its rows in the log as the record
+// of what it wrote, but the turn delivers nothing (owner 2026-11-23) — the
+// same rule the live turn close draws by.
+type replayDelivery struct {
+	rows     []tool.Deliverable
+	withheld bool
 }
 
 // replayFrameDeliverables collects the artifact rows the conversation's
@@ -790,36 +804,38 @@ func renderReplayDeliverables(renderer *Renderer, reducer *Reducer, frameRows []
 // and never re-fires the live union, so without this the frame's rows — a
 // file only the engine's turn-end top-up registered, above all — would be
 // missing from a resumed conversation's group.
-func replayFrameDeliverables(events []event.RunEvent) map[string][]tool.Deliverable {
-	out := map[string][]tool.Deliverable{}
+//
+// Only a completed ending delivers. A run that also carries an error or
+// cancel event beside its completed one (a reap's guess superseded by the
+// real ending, a transient failure it recovered from) still finished its
+// work, so its rows are delivered whatever order the log holds them in.
+func replayFrameDeliverables(events []event.RunEvent) map[string]replayDelivery {
+	out := map[string]replayDelivery{}
+	completed := make(map[string]bool)
 	for _, evt := range events {
 		runID := strings.TrimSpace(evt.RunID)
 		if runID == "" {
 			continue
 		}
-		var rows event.RunArtifacts
+		delivery := out[runID]
 		switch evt.Type {
 		case event.RunEventTurnCompleted:
+			completed[runID] = true
+			delivery.withheld = false
 			var p event.TurnCompletedPayload
 			if json.Unmarshal(evt.Payload, &p) == nil {
-				rows = p.RunArtifacts
+				for _, artifact := range p.RunArtifacts.Artifacts {
+					delivery.rows = appendDeliverables(delivery.rows, []tool.Deliverable{frameDeliverable(artifact)})
+				}
 			}
-		case event.RunEventTurnCancelled:
-			var p event.TurnCancelledPayload
-			if json.Unmarshal(evt.Payload, &p) == nil {
-				rows = p.RunArtifacts
-			}
-		case event.RunEventTurnError:
-			var p event.TurnErrorPayload
-			if json.Unmarshal(evt.Payload, &p) == nil {
-				rows = p.RunArtifacts
+		case event.RunEventTurnCancelled, event.RunEventTurnError:
+			if !completed[runID] {
+				delivery.withheld = true
 			}
 		default:
 			continue
 		}
-		for _, artifact := range rows.Artifacts {
-			out[runID] = appendDeliverables(out[runID], []tool.Deliverable{frameDeliverable(artifact)})
-		}
+		out[runID] = delivery
 	}
 	return out
 }

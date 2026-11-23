@@ -1314,11 +1314,13 @@ func deliveredRelPaths(artifacts event.RunArtifacts) []string {
 	return out
 }
 
-// TestAbortPendingApprovalDeliversWrittenFiles pins the parked-cancel frame:
-// the gated run will never reach a turn end, so the surface settles its
-// deliverables before it writes the cancel frame — which therefore lists the
-// file the turn wrote, not only what the model presented.
-func TestAbortPendingApprovalDeliversWrittenFiles(t *testing.T) {
+// TestAbortPendingApprovalSettlesWrittenFilesButDeliversNothing pins the
+// parked-cancel close: the gated run will never reach a turn end, so the
+// surface settles its deliverables into the record — the artifact rows and the
+// turn_cancelled event still carry the file the turn wrote. The cancel itself
+// delivers nothing (owner 2026-11-23): the run-end that closes the turn says
+// the run did not finish its work and carries no rows to draw.
+func TestAbortPendingApprovalSettlesWrittenFilesButDeliversNothing(t *testing.T) {
 	ctx := context.Background()
 	env := newCodingDeliverableSession(t)
 	run, err := env.runs.CreateRun(ctx, "s1", "work")
@@ -1356,8 +1358,11 @@ func TestAbortPendingApprovalDeliversWrittenFiles(t *testing.T) {
 		t.Fatalf("turn_cancelled frame lists %v, want the parked turn's write", got)
 	}
 	msg := requireUIMessage(t, ended)
-	if got := deliveredRelPaths(msg.RunArtifacts); len(got) != 1 || got[0] != ".worktrees/demo/src/a.go" {
-		t.Fatalf("run-ended frame lists %v, want the parked turn's write", got)
+	if msg.EndedNormally {
+		t.Fatal("a cancelled gate ended the run normally")
+	}
+	if got := deliveredRelPaths(msg.RunArtifacts); len(got) != 0 {
+		t.Fatalf("run-ended frame lists %v, want no delivery from a cancelled turn", got)
 	}
 }
 

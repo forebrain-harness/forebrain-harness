@@ -5983,7 +5983,7 @@ func TestPresentFilesHoldsNoCardButKeepsDeliverables(t *testing.T) {
 	// both files.
 	r := &Reducer{}
 	r.Reduce(deliverableToolMessage(deliverableRows(), "completed", ""))
-	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true})
 	if len(ev.Frames) != 1 || ev.Frames[0].Kind != FrameDeliverables || len(ev.Frames[0].Deliverables) != 2 {
 		t.Fatalf("closing frames = %#v, want the hidden call's two rows in one group", ev.Frames)
 	}
@@ -5993,7 +5993,7 @@ func TestPresentFilesHoldsNoCardButKeepsDeliverables(t *testing.T) {
 	if frames := r2.Reduce(deliverableToolMessage(nil, "completed", "Presented files.")).Frames; len(frames) != 0 {
 		t.Fatalf("legacy rowless card = %#v, want nothing drawn", frames)
 	}
-	if got := r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true}).Frames; len(got) != 0 {
+	if got := r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true}).Frames; len(got) != 0 {
 		t.Fatalf("a turn that presented no rows drew %#v", got)
 	}
 }
@@ -6010,7 +6010,7 @@ func TestDeliverablesGroupClosesTheTurnOnce(t *testing.T) {
 	}
 	// The resumed run presents the second file and closes the turn.
 	r.Reduce(deliverableToolMessage(deliverableRows()[1:], "completed", ""))
-	ev := r.Reduce(RunEndedMsg{RunID: "run-2", ClosesTurn: true})
+	ev := r.Reduce(RunEndedMsg{RunID: "run-2", ClosesTurn: true, EndedNormally: true})
 	if len(ev.Frames) != 1 || ev.Frames[0].Kind != FrameDeliverables {
 		t.Fatalf("closing frames = %#v, want one deliverables group", ev.Frames)
 	}
@@ -6025,7 +6025,7 @@ func TestDeliverablesGroupClosesTheTurnOnce(t *testing.T) {
 		t.Fatal("the closing run drew no Worked for line")
 	}
 	// The rows are taken, not copied: a second close cannot draw them again.
-	if got := r.Reduce(RunEndedMsg{RunID: "run-3", ClosesTurn: true}).Frames; len(got) != 0 {
+	if got := r.Reduce(RunEndedMsg{RunID: "run-3", ClosesTurn: true, EndedNormally: true}).Frames; len(got) != 0 {
 		t.Fatalf("the same turn's rows were drawn twice: %#v", got)
 	}
 }
@@ -6036,7 +6036,7 @@ func TestDeliverablesGroupDedupesRows(t *testing.T) {
 	r := &Reducer{}
 	r.Reduce(deliverableToolMessage(deliverableRows(), "completed", ""))
 	r.Reduce(deliverableToolMessage(deliverableRows(), "completed", ""))
-	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true})
 	if len(ev.Frames) != 1 || len(ev.Frames[0].Deliverables) != 2 {
 		t.Fatalf("group = %#v, want the two files once each", ev.Frames)
 	}
@@ -6053,7 +6053,7 @@ func TestDeliverablesGroupOneRowPerFile(t *testing.T) {
 	other := tool.Deliverable{ID: "art-3", Title: "logo.png", Name: "logo.png", Kind: "image", RelPath: "assets/logo.png", Size: 521}
 	r := &Reducer{}
 	r.Reduce(deliverableToolMessage([]tool.Deliverable{v1, other, v2}, "completed", ""))
-	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true})
 	rows := ev.Frames[0].Deliverables
 	if len(rows) != 2 {
 		t.Fatalf("group rows = %#v, want one row per file", rows)
@@ -6064,7 +6064,7 @@ func TestDeliverablesGroupOneRowPerFile(t *testing.T) {
 	// The same row reaching the reducer twice (a republished step) is one row.
 	r2 := &Reducer{}
 	r2.Reduce(deliverableToolMessage([]tool.Deliverable{v1, v1}, "completed", ""))
-	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true})
 	if rows := ev.Frames[0].Deliverables; len(rows) != 1 || rows[0].ID != "art-1" {
 		t.Fatalf("republished rows = %#v, want one", rows)
 	}
@@ -6074,7 +6074,7 @@ func TestDeliverablesGroupOneRowPerFile(t *testing.T) {
 	legacyLater := tool.Deliverable{Title: "q3.md", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 4096}
 	r3 := &Reducer{}
 	r3.Reduce(deliverableToolMessage([]tool.Deliverable{legacy, legacyLater}, "completed", ""))
-	ev = r3.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	ev = r3.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true})
 	if rows := ev.Frames[0].Deliverables; len(rows) != 1 || rows[0].Size != 4096 {
 		t.Fatalf("legacy path rows = %#v, want one holding the later version", rows)
 	}
@@ -6083,7 +6083,7 @@ func TestDeliverablesGroupOneRowPerFile(t *testing.T) {
 	second := tool.Deliverable{ID: "art-5", Title: "report.md", Name: "report.md", Kind: "markdown", RelPath: "archive/report.md"}
 	r4 := &Reducer{}
 	r4.Reduce(deliverableToolMessage([]tool.Deliverable{first, second}, "completed", ""))
-	ev = r4.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	ev = r4.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true})
 	if rows := ev.Frames[0].Deliverables; len(rows) != 2 {
 		t.Fatalf("one name in two directories = %#v, want two rows", rows)
 	}
@@ -6098,7 +6098,7 @@ func TestDeliverablesGroupUnionsFrameArtifacts(t *testing.T) {
 	presented := tool.Deliverable{ID: "art-1", Title: "2026 Q3 review", Name: "q3.md", Kind: "markdown", RelPath: "out/q3.md", Size: 2048}
 	r := &Reducer{}
 	r.Reduce(deliverableToolMessage([]tool.Deliverable{presented}, "completed", ""))
-	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, RunArtifacts: event.RunArtifacts{Artifacts: []event.Artifact{
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true, RunArtifacts: event.RunArtifacts{Artifacts: []event.Artifact{
 		// The same file the step presented: same id, one row.
 		{ID: "art-1", Name: "q3.md", Title: "2026 Q3 review", Kind: "markdown", RelPath: "out/q3.md", Size: 2048},
 		// A file only the top-up registered: frame-only, after the presented.
@@ -6116,7 +6116,7 @@ func TestDeliverablesGroupUnionsFrameArtifacts(t *testing.T) {
 	}
 	// A turn that presented nothing still closes with the frame's rows.
 	r2 := &Reducer{}
-	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, RunArtifacts: event.RunArtifacts{Artifacts: []event.Artifact{
+	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true, RunArtifacts: event.RunArtifacts{Artifacts: []event.Artifact{
 		{ID: "art-2", Name: "logo.png", Title: "logo.png", Kind: "image", RelPath: "assets/logo.png", Size: 521},
 	}}})
 	if len(ev.Frames) != 1 || len(ev.Frames[0].Deliverables) != 1 || ev.Frames[0].Deliverables[0].ID != "art-2" {
@@ -6134,7 +6134,7 @@ func TestDeliverablesGroupLiveReplayParity(t *testing.T) {
 		RelPath: "assets/logo.png", Size: 521, Origin: state.ArtifactOriginFallback,
 	}}}
 	// Live: the closing run-end carries the rows; the turn presented nothing.
-	live := (&Reducer{}).Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, RunArtifacts: artifacts})
+	live := (&Reducer{}).Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true, RunArtifacts: artifacts})
 	if len(live.Frames) != 1 || live.Frames[0].Kind != FrameDeliverables {
 		t.Fatalf("live frames = %#v, want the top-up group", live.Frames)
 	}
@@ -6146,7 +6146,7 @@ func TestDeliverablesGroupLiveReplayParity(t *testing.T) {
 	// them, unioned exactly the way the replay group draws them.
 	evt := event.NewRunEvent("", "run-1", "s-1", event.RunEventTurnCompleted,
 		event.TurnCompletedPayload{RunArtifacts: artifacts}, time.Unix(1700000000, 0))
-	replayRows := replayFrameDeliverables([]event.RunEvent{evt})["run-1"]
+	replayRows := replayFrameDeliverables([]event.RunEvent{evt})["run-1"].rows
 	if len(replayRows) != 1 || replayRows[0].ID != "art-9" {
 		t.Fatalf("replay frame rows = %#v", replayRows)
 	}
@@ -6165,11 +6165,11 @@ func TestWithdrawnTurnDropsItsDeliverables(t *testing.T) {
 	r := &Reducer{}
 	r.Reduce(RunStartedMsg{RunID: "run-1", turn: live})
 	r.Reduce(deliverableToolMessage(deliverableRows(), "completed", ""))
-	if ev := r.Reduce(RunEndedMsg{RunID: "run-1", turn: withdrawn, ClosesTurn: true}); len(ev.Frames) != 0 {
+	if ev := r.Reduce(RunEndedMsg{RunID: "run-1", turn: withdrawn, ClosesTurn: true, EndedNormally: true}); len(ev.Frames) != 0 {
 		t.Fatalf("a withdrawn turn drew %#v", ev.Frames)
 	}
 	// The next turn presents nothing of its own: it inherits nothing either.
-	ev := r.Reduce(RunEndedMsg{RunID: "run-2", turn: &foregroundTurn{}, ClosesTurn: true})
+	ev := r.Reduce(RunEndedMsg{RunID: "run-2", turn: &foregroundTurn{}, ClosesTurn: true, EndedNormally: true})
 	if len(ev.Frames) != 0 {
 		t.Fatalf("a later turn inherited %#v", ev.Frames)
 	}
@@ -6521,7 +6521,7 @@ func TestDeliverableGroupDropsOutOfProjectRows(t *testing.T) {
 
 	ev := (&Reducer{}).Reduce(RunEndedMsg{
 		RunID:      "run-1",
-		ClosesTurn: true,
+		ClosesTurn: true, EndedNormally: true,
 		RunArtifacts: event.RunArtifacts{Artifacts: []event.Artifact{
 			{ID: "p1", Path: "/outside/plans/plan.md", Name: "plan.md", Kind: "markdown", Origin: "plan"},
 			{ID: "a1", Path: inside, Name: "report.md", Kind: "markdown"},
@@ -6688,7 +6688,7 @@ func TestReplayFrameDeliverablesOneRowPerFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal turn-completed payload: %v", err)
 	}
-	rows := replayFrameDeliverables([]event.RunEvent{{Type: event.RunEventTurnCompleted, RunID: "run-1", Payload: payload}})["run-1"]
+	rows := replayFrameDeliverables([]event.RunEvent{{Type: event.RunEventTurnCompleted, RunID: "run-1", Payload: payload}})["run-1"].rows
 	if len(rows) != 2 {
 		t.Fatalf("replayed frame rows = %#v, want one row per file", rows)
 	}
@@ -6739,7 +6739,7 @@ func TestTurnDiffRowsCollectFromMainAgentToolBodies(t *testing.T) {
 	r.Reduce(shellToolDiffMessage("call_s", [3]any{"docs/result.md", 3, 1}, [3]any{"other.txt", 9, 9}))
 	// The same step republished with new counts replaces its own row.
 	r.Reduce(fileToolDiffMessage("call_w", "docs/result.md", 4, 2))
-	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true})
 	var group *Frame
 	for i := range ev.Frames {
 		if ev.Frames[i].Kind == FrameDeliverables {
@@ -6756,7 +6756,7 @@ func TestTurnDiffRowsCollectFromMainAgentToolBodies(t *testing.T) {
 	r2.Reduce(fileToolDiffMessage("call_w", "docs/result.md", 4, 2))
 	r2.Reduce(shellToolDiffMessage("call_s", [3]any{"docs/result.md", 3, 1}, [3]any{"other.txt", 9, 9}))
 	r2.Reduce(deliverableToolMessage([]tool.Deliverable{{Title: "result", Name: "result.md", Kind: "markdown", RelPath: "docs/result.md"}}, "completed", ""))
-	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	ev = r2.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true})
 	if len(ev.Frames) != 1 || ev.Frames[0].Kind != FrameDeliverables {
 		t.Fatalf("frames = %#v, want the deliverables group", ev.Frames)
 	}
@@ -6784,7 +6784,7 @@ func TestTurnDiffRowsCollectFromMainAgentToolBodies(t *testing.T) {
 		t.Fatalf("other.txt counts = +%d/-%d (seen %v), want +9/-9", otherAdded, otherDeleted, seenOther)
 	}
 	// The close took them: a second close draws nothing.
-	if ev := r2.Reduce(RunEndedMsg{RunID: "run-2", ClosesTurn: true}); len(ev.Frames) != 0 {
+	if ev := r2.Reduce(RunEndedMsg{RunID: "run-2", ClosesTurn: true, EndedNormally: true}); len(ev.Frames) != 0 {
 		t.Fatalf("counts survived the close: %#v", ev.Frames)
 	}
 }
@@ -6801,7 +6801,7 @@ func TestTurnDiffRowsNeedSettledBodies(t *testing.T) {
 	sub.Msg.AgentID = "agent-1"
 	r.Reduce(sub)
 	r.Reduce(deliverableToolMessage([]tool.Deliverable{{Name: "a.md", Kind: "markdown", RelPath: "docs/a.md"}}, "completed", ""))
-	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true})
+	ev := r.Reduce(RunEndedMsg{RunID: "run-1", ClosesTurn: true, EndedNormally: true})
 	if len(ev.Frames) != 1 || len(ev.Frames[0].TurnDiffs) != 0 {
 		t.Fatalf("turn diffs = %#v, want none from deltas or subagent calls", ev.Frames[0].TurnDiffs)
 	}
@@ -6816,11 +6816,11 @@ func TestWithdrawnTurnDropsItsTurnDiffs(t *testing.T) {
 	r := &Reducer{}
 	r.Reduce(RunStartedMsg{RunID: "run-1", turn: live})
 	r.Reduce(fileToolDiffMessage("call_w", "docs/result.md", 2, 0))
-	if ev := r.Reduce(RunEndedMsg{RunID: "run-1", turn: withdrawn, ClosesTurn: true}); len(ev.Frames) != 0 {
+	if ev := r.Reduce(RunEndedMsg{RunID: "run-1", turn: withdrawn, ClosesTurn: true, EndedNormally: true}); len(ev.Frames) != 0 {
 		t.Fatalf("a withdrawn turn drew %#v", ev.Frames)
 	}
 	r.Reduce(deliverableToolMessage([]tool.Deliverable{{Name: "result.md", Kind: "markdown", RelPath: "docs/result.md"}}, "completed", ""))
-	ev := r.Reduce(RunEndedMsg{RunID: "run-2", turn: &foregroundTurn{}, ClosesTurn: true})
+	ev := r.Reduce(RunEndedMsg{RunID: "run-2", turn: &foregroundTurn{}, ClosesTurn: true, EndedNormally: true})
 	if len(ev.Frames) != 1 || len(ev.Frames[0].TurnDiffs) != 0 {
 		t.Fatalf("the next turn inherited counts: %#v", ev.Frames[0].TurnDiffs)
 	}

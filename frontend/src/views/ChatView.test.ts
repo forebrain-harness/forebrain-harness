@@ -1908,6 +1908,59 @@ describe('ChatView delivers a turn once', () => {
     wrapper.unmount()
   })
 
+  it('draws no group for a failed or cancelled turn, even from the artifact list', async () => {
+    // The turn presented its files and the engine registered them, then the
+    // request failed or the user stopped it (owner 2026-11-23): no half of the
+    // group — the card's rows, the end frame's, the session artifact list's —
+    // is a delivery. The finished turn beside them still delivers.
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      {
+        id: 'm-failed',
+        role: 'assistant',
+        content: '',
+        runId: 'run-failed',
+        completedNormally: false,
+        blocks: [
+          { kind: 'tool', step: presentFilesCard() },
+          { kind: 'error', id: 'error:run-failed', text: 'Allocated quota exceeded (HTTP 429 Too Many Requests)' },
+        ],
+        artifacts: [
+          { id: 'a1', sessionId: 's1', name: 'Q3 报告.docx', kind: 'document', preview: 'docx', size: 253952 },
+        ],
+      },
+      {
+        id: 'm-cancelled',
+        role: 'assistant',
+        content: '',
+        runId: 'run-cancelled',
+        completedNormally: false,
+        blocks: [{ kind: 'tool', step: presentFilesCard() }],
+      },
+      {
+        id: 'm-done',
+        role: 'assistant',
+        content: '',
+        runId: 'run-done',
+        completedNormally: true,
+        blocks: [
+          { kind: 'tool', step: presentFilesCard() },
+          { kind: 'assistant', text: '材料都做好了。', open: false },
+        ],
+      },
+    ]
+    listArtifacts([
+      { id: 'a1', sessionId: 's1', runId: 'run-failed', origin: 'model', name: 'Q3 报告.docx', kind: 'document', preview: 'docx', size: 253952 },
+      { id: 'a2', sessionId: 's1', runId: 'run-cancelled', origin: 'fallback', name: '毛利.xlsx', kind: 'spreadsheet', preview: 'sheet', size: 80896 },
+    ])
+    const wrapper = await mountView()
+    await flushPromises()
+
+    const groups = wrapper.findAll('[data-testid="artifact-list"]')
+    expect(groups).toHaveLength(1)
+    expect(groups[0].findAll('[data-testid="artifact-card"]')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
   it('closes a kept-plan turn with the plan file, named as a plan', async () => {
     setLocale('zh')
     ;(fake as { messages: { value: unknown[] } }).messages.value = [

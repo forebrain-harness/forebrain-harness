@@ -2282,9 +2282,11 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			OutputTokens:   runUsage.out,
 			// The run's delivered rows — presented and engine-topped-up alike
 			// — close the turn's group together with what the steps showed
-			// live; the same rows the web's frame carries.
-			RunArtifacts: s.runArtifacts(context.Background(), runUsage.runID),
-			ClosesTurn:   true,
+			// live; the same rows the web's frame carries. Only a run that
+			// finished its work draws them.
+			RunArtifacts:  s.runArtifacts(context.Background(), runUsage.runID),
+			ClosesTurn:    true,
+			EndedNormally: s.runEndedNormally(context.Background(), runUsage.runID),
 		})
 	}()
 	// This runs before RunEnded and before either ownership lock is released.

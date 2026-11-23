@@ -1639,6 +1639,8 @@ describe('useChatStream helpers', () => {
 
         const turn = stream.messages.value[1]
         expect(turn).toMatchObject({ role: 'assistant', workedDurationMs: expect.any(Number) })
+        // Only the finished run hands its files over (owner 2026-11-23).
+        expect(turn?.completedNormally).toBe(ending === 'run_completed')
         expect(String(turn?.content ?? '').trim()).not.toBe('...')
         if (ending === 'run_error') {
           // The failure is the turn's last word, above its worked line — not
@@ -1674,9 +1676,36 @@ describe('useChatStream helpers', () => {
       await stream.loadMessages('s-failed')
 
       expect(stream.messages.value.map((m) => m.role)).toEqual(['user', 'assistant'])
-      expect(stream.messages.value[1]).toMatchObject({ runId: 'r-failed', workedDurationMs: expect.any(Number) })
+      expect(stream.messages.value[1]).toMatchObject({ runId: 'r-failed', workedDurationMs: expect.any(Number), completedNormally: false })
       expect(stream.messages.value[1]?.blocks).toEqual([{ kind: 'error', id: 'error:r-failed', text: 'the provider refused the request' }])
       expect(stream.error.value).toBeNull()
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
+  it('reloads a finished turn as one that delivers its files', async () => {
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', role: 'user', content: 'hello', runId: 'r-done' },
+      { id: 'worked-r-done', role: 'worked', content: '', runId: 'r-done', runStartedAt: '2026-10-03T09:00:00Z', runFinishedAt: '2026-10-03T09:00:02Z', workedDurationMs: 2000 },
+    ])
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 's-done', nextCursor: 2, highWater: 2, hasMore: false, schemaVersion: 1,
+      events: [
+        { id: 'e1', sequence: 1, schemaVersion: 1, sessionId: 's-done', runId: 'r-done', type: 'turn_started', createdAt: '2026-10-03T09:00:00Z', payload: {} },
+        { id: 'e2', sequence: 2, schemaVersion: 1, sessionId: 's-done', runId: 'r-done', type: 'turn_completed', createdAt: '2026-10-03T09:00:02Z', payload: { artifacts: [{ id: 'a1', name: 'report.md', relPath: 'report.md', kind: 'markdown' }] } },
+      ],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's-done', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 's-done'
+      await stream.loadMessages('s-done')
+
+      expect(stream.messages.value[1]).toMatchObject({ runId: 'r-done', completedNormally: true })
+      expect(stream.messages.value[1]?.artifacts).toHaveLength(1)
     } finally {
       chatMessagesSpy.mockRestore()
       sessionEventsSpy.mockRestore()

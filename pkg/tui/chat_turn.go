@@ -947,9 +947,11 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 			InputTokens:    runUsage.in,
 			OutputTokens:   runUsage.out,
 			// The resumed run's delivered rows close the turn's group the way
-			// the dispatch that started it would have.
-			RunArtifacts: s.runArtifacts(context.Background(), runUsage.runID),
-			ClosesTurn:   true,
+			// the dispatch that started it would have — when the resume
+			// finished its work; a stopped or failed one delivers nothing.
+			RunArtifacts:  s.runArtifacts(context.Background(), runUsage.runID),
+			ClosesTurn:    true,
+			EndedNormally: s.runEndedNormally(context.Background(), runID),
 		})
 	}()
 	// Kept here rather than sunk into the engine (plan 307): "resumed" is the
@@ -1285,8 +1287,10 @@ func (s *ChatSession) abortPendingApproval(sessionID, actionID string) bool {
 	scopedToSubagent := p != nil && (strings.TrimSpace(p.AgentID) != "" || strings.TrimSpace(p.SubagentType) != "")
 	// A parked primary run will never reach a turn end: its Submit returned at
 	// the gate. The engine therefore never tops its deliverables up, so this
-	// surface settles them now, before it reads the rows for the cancel frame
-	// below — the frame otherwise lists only what the model presented.
+	// surface settles them now: the rows are the durable record of what the
+	// run wrote, which the next turn's version comparison reads. The cancel
+	// itself draws no group — a cancelled turn delivers nothing (owner
+	// 2026-11-23).
 	//
 	// A subagent's gate belongs to that child inside the still-running parent
 	// turn: settling here would register a mid-write snapshot of the parent's
@@ -1370,11 +1374,9 @@ func (s *ChatSession) abortPendingApproval(sessionID, actionID string) bool {
 				InputTokens:    runUsage.in,
 				OutputTokens:   runUsage.out,
 				// Cancelling the gate ends the turn the parked dispatch
-				// suppressed its own run-end for.
+				// suppressed its own run-end for. A cancelled turn delivers
+				// nothing, so this ending carries no artifact rows.
 				ClosesTurn: true,
-				// Whatever the run delivered before the gate is still the
-				// turn's to show: the cancelled group closes complete.
-				RunArtifacts: s.runArtifacts(context.Background(), runID),
 			})
 		}
 	}

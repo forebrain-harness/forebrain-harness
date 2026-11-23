@@ -1813,9 +1813,14 @@ const artifactsByRun = computed(() => {
  * merged by file path (one row per file, the later version's content in the
  * first place). The cards themselves draw no files: this group is the one
  * place they are met, under the turn's last words.
+ *
+ * The group is what a finished turn hands over: a turn that failed or was
+ * stopped delivers nothing (owner 2026-11-23), whatever it presented or
+ * registered on the way. A turn that recorded no run-end keeps its files.
  */
 function deliverablesOf(msg: ChatMessage): ArtifactView[] {
   if (msg.role !== 'assistant') return []
+  if (msg.completedNormally === false) return []
   const sid = String(sessionId.value ?? '').trim()
   const presented: ArtifactView[] = []
   const plan: ArtifactView[] = []

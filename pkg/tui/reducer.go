@@ -1672,11 +1672,18 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		if m.ClosesTurn {
 			rows := r.takePendingDeliverables()
 			diffs := r.takePendingTurnDiffs()
-			for _, artifact := range m.RunArtifacts.Artifacts {
-				rows = appendDeliverables(rows, []tool.Deliverable{frameDeliverable(artifact)})
-			}
-			if len(rows) > 0 {
-				out = append(out, Frame{Kind: FrameDeliverables, Deliverables: rows, TurnDiffs: diffs, RunID: runID, Final: true})
+			// The group is what a finished turn hands over. A turn the user
+			// stopped or a request that failed wrote what it wrote, but it
+			// delivers nothing (owner 2026-11-23): the rows are taken either way
+			// so they cannot leak into the next turn's group, and only a normal
+			// ending draws them.
+			if m.EndedNormally {
+				for _, artifact := range m.RunArtifacts.Artifacts {
+					rows = appendDeliverables(rows, []tool.Deliverable{frameDeliverable(artifact)})
+				}
+				if len(rows) > 0 {
+					out = append(out, Frame{Kind: FrameDeliverables, Deliverables: rows, TurnDiffs: diffs, RunID: runID, Final: true})
+				}
 			}
 		}
 		return EventResult{Frames: out, WorkedStatus: worked}

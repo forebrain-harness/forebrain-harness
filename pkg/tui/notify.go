@@ -189,6 +189,11 @@ type RunEndedMsg struct {
 	// run-ends and leaves this false: replay draws the group from the stored
 	// rows at the turn's end instead.
 	ClosesTurn bool
+	// EndedNormally says the run finished its work. The deliverables group is
+	// what a finished turn hands over, so a turn the user stopped or a request
+	// that failed draws none (owner 2026-11-23): its files are still on disk
+	// and still recorded, but the turn says nothing about them.
+	EndedNormally bool
 }
 
 // InputQueueChangedMsg is emitted when the conversation's input queue changes
@@ -1260,6 +1265,20 @@ func (s *ChatSession) runArtifacts(ctx context.Context, runID string) event.RunA
 		}
 	}
 	return turn.RunArtifactsOf(ctx, lister, runID)
+}
+
+// runEndedNormally reports whether the run finished its work, read from the
+// terminal status the engine settled before the run-end notification goes out
+// (pkg/run/supervisor.go): done is the one ending that hands its files over.
+// A run the user stopped, a request that failed, and a run whose status cannot
+// be read all answer no — the deliverables group is the result of work that
+// finished, not of work that was interrupted (owner 2026-11-23).
+func (s *ChatSession) runEndedNormally(ctx context.Context, runID string) bool {
+	if s == nil || s.runSvc() == nil || strings.TrimSpace(runID) == "" {
+		return false
+	}
+	run, err := s.runSvc().GetRun(ctx, runID)
+	return err == nil && run != nil && run.Status == state.RunStatusDone
 }
 
 // publishTUIRunEvent records one lifecycle transition the terminal surface
