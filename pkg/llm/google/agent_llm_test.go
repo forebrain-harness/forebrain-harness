@@ -1169,6 +1169,203 @@ func TestGoogleGatewayAcceptsOneToolRoundAsOneUserContent(t *testing.T) {
 	}
 }
 
+// wireContents is a marshalled request's turns, as the endpoint receives them.
+type wireContents []struct {
+	Role  string           `json:"role"`
+	Parts []map[string]any `json:"parts"`
+}
+
+// marshalContents marshals a built request and decodes its turns, so a test
+// asserts the bytes Gemini is handed rather than the Go struct that produced
+// them.
+func marshalContents(t *testing.T, req *generateContentRequest) (wireContents, []byte) {
+	t.Helper()
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var body struct {
+		Contents wireContents `json:"contents"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return body.Contents, raw
+}
+
+// inlineDataTurns lists the turn indexes that carry inline data.
+func inlineDataTurns(contents wireContents) []int {
+	var turns []int
+	for i, c := range contents {
+		for _, p := range c.Parts {
+			if _, ok := p["inlineData"]; ok {
+				turns = append(turns, i)
+				break
+			}
+		}
+	}
+	return turns
+}
+
+// A tool result's image does not fit in functionResponse, which is a JSON
+// object: the model would be told "image 64x64" and handed no pixels, so it
+// answers from the note. The image follows as its own user turn instead, the
+// same shape the Responses adapter projects for the same reason, and the
+// result's own turn stays text-only so the functionResponse count that Gemini
+// checks is untouched.
+func TestBuildRequestProjectsToolResultImagesAsAUserTurn(t *testing.T) {
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("read it")),
+		llm.AssistantMessage(nil, llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_file", Arguments: `{}`}}),
+		llm.ToolResultMessage("call-1", llm.Text("image 64x64"),
+			llm.ImageBase64("image/png", "iVBORw0KGgo=")),
+	}
+	req, err := buildRequest(history, nil, 0, "gemini-3.5-pro")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	contents, raw := marshalContents(t, req)
+	if len(contents) != 4 {
+		t.Fatalf("contents = %s, want four turns: the prompt, the call, the result and the result's image", raw)
+	}
+	if got, want := []string{contents[0].Role, contents[1].Role, contents[2].Role, contents[3].Role}, []string{roleUser, roleModel, roleUser, roleUser}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("roles = %v, want %v: %s", got, want, raw)
+	}
+
+	resultParts := contents[2].Parts
+	if len(resultParts) != 1 {
+		t.Fatalf("result turn parts = %#v, want the one functionResponse", resultParts)
+	}
+	response, _ := resultParts[0]["functionResponse"].(map[string]any)
+	if response["name"] != "read_file" {
+		t.Fatalf("functionResponse = %#v, want the call's name", response)
+	}
+	payload, _ := response["response"].(map[string]any)
+	if !reflect.DeepEqual(payload, map[string]any{"result": "image 64x64"}) {
+		t.Fatalf("functionResponse.response = %#v, want the text only: the pixels belong to the following turn", payload)
+	}
+
+	imageParts := contents[3].Parts
+	if len(imageParts) != 2 {
+		t.Fatalf("image turn parts = %#v, want the lead line and the image", imageParts)
+	}
+	if text, _ := imageParts[0]["text"].(string); text != "image read from tool result" {
+		t.Fatalf("image turn parts[0] = %#v, want the lead line", imageParts[0])
+	}
+	inline, _ := imageParts[1]["inlineData"].(map[string]any)
+	if inline["mimeType"] != "image/png" || inline["data"] != "iVBORw0KGgo=" {
+		t.Fatalf("inlineData = %#v, want the tool result's bytes", inline)
+	}
+	if got, want := inlineDataTurns(contents), []int{3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("inline data appears in turns %v, want %v: %s", got, want, raw)
+	}
+}
+
+// A tool result without an image projects exactly as it did before the image
+// turn existed: no inline data, no lead line, and the round still one content.
+// This is the guard that the new branch never fires for a text-only session.
+func TestBuildRequestKeepsTextOnlyToolResultsUnchanged(t *testing.T) {
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("read it")),
+		llm.AssistantMessage(nil, llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_file", Arguments: `{}`}}),
+		llm.ToolResultMessage("call-1", llm.Text("image 64x64")),
+	}
+	req, err := buildRequest(history, nil, 0, "gemini-3.5-pro")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	contents, raw := marshalContents(t, req)
+	if len(contents) != 3 {
+		t.Fatalf("contents = %s, want three turns: the prompt, the call and the result", raw)
+	}
+	if got := inlineDataTurns(contents); len(got) != 0 {
+		t.Fatalf("inline data appears in turns %v, want none: %s", got, raw)
+	}
+	if strings.Contains(string(raw), "image read from tool result") {
+		t.Fatalf("request carries the lead line for a result with no image: %s", raw)
+	}
+	response, _ := contents[2].Parts[0]["functionResponse"].(map[string]any)
+	payload, _ := response["response"].(map[string]any)
+	if !reflect.DeepEqual(payload, map[string]any{"result": "image 64x64"}) {
+		t.Fatalf("functionResponse.response = %#v, want the plain text result", payload)
+	}
+}
+
+// Parallel results that each carry an image keep one functionResponse content
+// for the round and put each image in its own following user turn, in arrival
+// order. Merging the images into the results' content would break the
+// functionResponse/functionCall count Gemini checks; opening a new result
+// content per image would split the round the same way.
+func TestBuildRequestGivesEachParallelToolResultItsOwnImageTurn(t *testing.T) {
+	call := func(id, name string) llm.ToolCall {
+		return llm.ToolCall{ID: id, Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: name}}
+	}
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("read both")),
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{call("call-a", "read_a"), call("call-b", "read_b")}},
+		{Role: llm.RoleTool, ToolCallID: "call-a", Parts: []llm.ContentPart{
+			llm.Text("image a"), llm.ImageBase64("image/png", "aW1nLWE=")}},
+		{Role: llm.RoleTool, ToolCallID: "call-b", Parts: []llm.ContentPart{
+			llm.Text("image b"), llm.ImageBase64("image/png", "aW1nLWI=")}},
+	}
+	req, err := buildRequest(history, nil, 0, "gemini-3.5-pro")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	contents, raw := marshalContents(t, req)
+	if len(contents) != 5 {
+		t.Fatalf("contents = %s, want five turns: the prompt, the two calls, one content of two results and one image turn per result", raw)
+	}
+	if got, want := []string{contents[0].Role, contents[1].Role, contents[2].Role, contents[3].Role, contents[4].Role},
+		[]string{roleUser, roleModel, roleUser, roleUser, roleUser}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("roles = %v, want %v: %s", got, want, raw)
+	}
+
+	// The round's results share one content, in the order the calls were made.
+	results := contents[2].Parts
+	if len(results) != 2 {
+		t.Fatalf("result turn holds %d parts, want the two functionResponses: %s", len(results), raw)
+	}
+	for i, wantName := range []string{"read_a", "read_b"} {
+		response, _ := results[i]["functionResponse"].(map[string]any)
+		if response["name"] != wantName {
+			t.Fatalf("result turn part %d = %#v, want the %s result", i, results[i], wantName)
+		}
+	}
+	var resultTurns []int
+	for i, c := range contents {
+		for _, p := range c.Parts {
+			if _, ok := p["functionResponse"]; ok {
+				resultTurns = append(resultTurns, i)
+				break
+			}
+		}
+	}
+	if want := []int{2}; !reflect.DeepEqual(resultTurns, want) {
+		t.Fatalf("functionResponse appears in turns %v, want %v: a round's results never split", resultTurns, want)
+	}
+
+	// Each result's image follows it as its own user turn, in arrival order.
+	for i, wantData := range []string{"aW1nLWE=", "aW1nLWI="} {
+		turn := contents[3+i].Parts
+		if len(turn) != 2 {
+			t.Fatalf("image turn %d parts = %#v, want the lead line and its image", 3+i, turn)
+		}
+		if text, _ := turn[0]["text"].(string); text != "image read from tool result" {
+			t.Fatalf("image turn %d parts[0] = %#v, want the lead line", 3+i, turn[0])
+		}
+		inline, _ := turn[1]["inlineData"].(map[string]any)
+		if inline["data"] != wantData {
+			t.Fatalf("image turn %d inlineData = %#v, want %q: the images keep the results' order", 3+i, inline, wantData)
+		}
+	}
+	if got, want := inlineDataTurns(contents), []int{3, 4}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("inline data appears in turns %v, want %v: %s", got, want, raw)
+	}
+}
+
 // A thought summary is never an answer: it is not answer text, it is not what a
 // surface renders as the reply, and another model never receives it.
 func TestGoogleThoughtSummaryIsNeverAnswer(t *testing.T) {

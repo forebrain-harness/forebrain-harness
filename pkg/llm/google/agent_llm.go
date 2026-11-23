@@ -390,6 +390,10 @@ func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64, mo
 	// validates thought signatures for the current turn only, and a turn begins
 	// with the most recent user message that is not a tool result.
 	turnStart := 0
+	// trailingImageTurns counts the image-only user contents this projection
+	// appended after the current round's functionResponse content. The merge
+	// below looks past them: a round's results must stay in ONE content.
+	trailingImageTurns := 0
 	for _, m := range messages {
 		switch m.Role {
 		case llm.RoleSystem, llm.RoleDeveloper:
@@ -403,6 +407,7 @@ func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64, mo
 			}
 			if len(parts) > 0 {
 				req.Contents = append(req.Contents, content{Role: roleUser, Parts: parts})
+				trailingImageTurns = 0
 			}
 			turnStart = len(req.Contents)
 		case llm.RoleAssistant:
@@ -428,12 +433,14 @@ func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64, mo
 				}
 				if len(parts) > 0 {
 					req.Contents = append(req.Contents, content{Role: roleModel, Parts: parts})
+					trailingImageTurns = 0
 				}
 				continue
 			}
 			parts := assistantParts(m, toolNames)
 			if len(parts) > 0 {
 				req.Contents = append(req.Contents, content{Role: roleModel, Parts: parts})
+				trailingImageTurns = 0
 			}
 		case llm.RoleTool:
 			resultPart, err := toolResultPart(m, toolNames)
@@ -448,11 +455,29 @@ func buildRequest(messages []llm.Message, tools []*llm.Tool, maxTokens int64, mo
 			// here as one message per result. Only a turn that holds nothing
 			// but results is extended; a user message with text of its own is
 			// never merged into.
-			if n := len(req.Contents); n > 0 && req.Contents[n-1].Role == roleUser && allToolResults(req.Contents[n-1].Parts) {
+			if n := len(req.Contents) - trailingImageTurns; n > 0 && req.Contents[n-1].Role == roleUser && allToolResults(req.Contents[n-1].Parts) {
 				req.Contents[n-1].Parts = append(req.Contents[n-1].Parts, resultPart)
 			} else {
 				// A tool result is a user turn in generateContent's model.
 				req.Contents = append(req.Contents, content{Role: roleUser, Parts: []part{resultPart}})
+				trailingImageTurns = 0
+			}
+			// A tool result's pixels do not fit in functionResponse, which is a
+			// JSON object: Gemini would receive the note and nothing else. They
+			// follow as their own user turn, the same shape the Responses
+			// adapter uses for the same reason. The round's functionResponse
+			// content stays the merge target for the next result — the counter
+			// above is what keeps this turn from hiding it.
+			if imageParts := toolResultImageParts(m.Parts); len(imageParts) > 0 {
+				projected := append([]llm.ContentPart{llm.Text("image read from tool result")}, imageParts...)
+				parts, err := userParts(projected)
+				if err != nil {
+					return nil, err
+				}
+				if len(parts) > 0 {
+					req.Contents = append(req.Contents, content{Role: roleUser, Parts: parts})
+					trailingImageTurns++
+				}
 			}
 		default:
 			return nil, fmt.Errorf("google: unsupported role %q", m.Role)
@@ -612,6 +637,18 @@ func toolResponse(parts []llm.ContentPart) map[string]any {
 		}
 	}
 	return map[string]any{"result": text}
+}
+
+// toolResultImageParts returns the non-text parts of a tool result: its pixels,
+// which functionResponse cannot carry.
+func toolResultImageParts(parts []llm.ContentPart) []llm.ContentPart {
+	var imageParts []llm.ContentPart
+	for _, part := range parts {
+		if part.Type != llm.ContentTypeText {
+			imageParts = append(imageParts, part)
+		}
+	}
+	return imageParts
 }
 
 // geminiSkipSignatureValidator is the placeholder signature Google's thought
