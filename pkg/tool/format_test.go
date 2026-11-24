@@ -3824,3 +3824,51 @@ func TestHandedOffExitPlanModeStepNamesTheModel(t *testing.T) {
 		t.Fatalf("hand-off body leaked the ordinary message: %q", body)
 	}
 }
+
+func TestReadableToolAnswerDropsTheRowTheHeadNames(t *testing.T) {
+	t.Parallel()
+	started := `{"command":"npm run dev","id":3,"log":"/state/process/3.log","pid":42,"running":true}`
+	startInput := map[string]any{"action": "start", "command": "npm run dev"}
+	answer, ok := ReadableToolAnswer("process", started, startInput)
+	require.True(t, ok)
+	body := answer.String()
+	require.NotContains(t, body, "npm run dev")
+	for _, want := range []string{"Id: 3", "Log: /state/process/3.log", "Pid: 42", "Running: true"} {
+		require.Contains(t, body, want)
+	}
+
+	// The generic formatter's envelope is the same card: the filter reads the
+	// rows ReadToolAnswer resolved, not the raw content.
+	enveloped := "output:\n```\n" + started + "\n```"
+	answer, ok = ReadableToolAnswer("process", enveloped, startInput)
+	require.True(t, ok)
+	require.NotContains(t, answer.String(), "npm run dev")
+	require.Contains(t, answer.String(), "Id: 3")
+
+	// A log card's head names the id, so the body keeps the command and drops
+	// the id.
+	logged := `{"bytes":12,"command":"npm run dev","id":3,"lines":1,"log":"/state/process/3.log","running":true,"tail":"hi"}`
+	answer, ok = ReadableToolAnswer("process", logged, map[string]any{"action": "log", "id": 3})
+	require.True(t, ok)
+	require.Contains(t, answer.String(), "Command: npm run dev")
+	require.NotContains(t, answer.String(), "Id: 3")
+	require.Contains(t, answer.String(), "Log: /state/process/3.log")
+
+	// kill names the id in its head too.
+	answer, ok = ReadableToolAnswer("process", `{"id":3,"killed":true,"pid":42,"running":false,"exit_code":0}`, map[string]any{"action": "kill", "id": 3})
+	require.True(t, ok)
+	require.NotContains(t, answer.String(), "Id: 3")
+	require.Contains(t, answer.String(), "Killed: true")
+
+	// wait names the id as well, and keeps the fields it alone can report.
+	answer, ok = ReadableToolAnswer("process", `{"address":"127.0.0.1:8080","command":"npm run dev","id":3,"ready":true,"elapsed_ms":12}`, map[string]any{"action": "wait", "id": 3})
+	require.True(t, ok)
+	require.NotContains(t, answer.String(), "Id: 3")
+	require.Contains(t, answer.String(), "Ready: true")
+
+	// An action this build does not name falls through to the whole payload:
+	// its head names the id, but nothing in the body is filtered by guess.
+	answer, ok = ReadableToolAnswer("process", `{"id":3,"note":"x"}`, map[string]any{"action": "attach", "id": 3})
+	require.True(t, ok)
+	require.Contains(t, answer.String(), "Id: 3")
+}

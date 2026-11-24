@@ -3002,6 +3002,14 @@ func formatToolContentWithInput(title, content, cwd string, input map[string]any
 		return formatShellOutput(content)
 	}
 
+	// process: the card's own answer with the row its head already names taken
+	// out — the command a start runs, the id a wait/log/kill drives.
+	if lower == "process" {
+		if answer, ok := tool.ReadableToolAnswer("process", content, input); ok {
+			return answer.String()
+		}
+	}
+
 	// All other tools (read, edit, write, webfetch, mcp, etc.). A body that is
 	// the tool's answer — the generic formatter's "output:" block on a live
 	// card, the answer verbatim on a replayed row — reads as its text or as

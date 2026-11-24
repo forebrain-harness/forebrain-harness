@@ -107,7 +107,7 @@ func TestDisplayPartsNamesTheProcessCommandAndID(t *testing.T) {
 		"action": "start", "command": "go test ./pkg/tool", "wait": "log",
 	}}}
 	action, target, suffix := DisplayParts(startRunning, t.TempDir())
-	require.Equal(t, "Starting", action)
+	require.Equal(t, "Starting background process", action)
 	require.Equal(t, "go test ./pkg/tool", target)
 	require.Equal(t, "wait log", suffix)
 
@@ -115,7 +115,7 @@ func TestDisplayPartsNamesTheProcessCommandAndID(t *testing.T) {
 		"action": "start", "command": "go test ./pkg/tool",
 	}}}
 	action, target, _ = DisplayParts(startDone, t.TempDir())
-	require.Equal(t, "Started", action)
+	require.Equal(t, "Started background process", action)
 	require.Equal(t, "go test ./pkg/tool", target)
 
 	waitRunning := DisplayFrame{Title: "process", Meta: ToolMeta{Status: "running", Input: map[string]any{
@@ -145,8 +145,15 @@ func TestDisplayPartsNamesTheProcessCommandAndID(t *testing.T) {
 		"action": "start", "command": "go test ./pkg/tool",
 	}}}
 	action, target, _ = DisplayParts(startFailed, t.TempDir())
-	require.Equal(t, "Failed to start", action)
+	require.Equal(t, "Failed to start background process", action)
 	require.Equal(t, "go test ./pkg/tool", target)
+
+	readLog := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
+		"action": "log", "id": float64(7),
+	}}}
+	action, target, _ = DisplayParts(readLog, t.TempDir())
+	require.Equal(t, "Read log of", action)
+	require.Equal(t, "process #7", target)
 
 	unknown := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
 		"action": "teleport", "id": float64(7),

@@ -44,9 +44,12 @@ describe('the card head vocabulary', () => {
   })
 
   it('words each process action and its wait suffix', () => {
-    expect(headerActionWord('Started', 'zh')).toBe('已启动')
-    expect(headerActionWord('Starting', 'zh')).toBe('正在启动')
-    expect(headerActionWord('Failed to start', 'zh')).toBe('启动失败')
+    expect(headerActionWord('Started background process', 'zh')).toBe('已在后台启动')
+    expect(headerActionWord('Starting background process', 'zh')).toBe('正在后台启动')
+    expect(headerActionWord('Failed to start background process', 'zh')).toBe('后台启动失败')
+    expect(headerActionWord('Read log of', 'zh')).toBe('已读取 … 的日志')
+    expect(headerActionWord('Reading log of', 'zh')).toBe('正在读取 … 的日志')
+    expect(headerActionWord('Failed to read log of', 'zh')).toBe('读取 … 的日志失败')
     expect(headerActionWord('Waited for', 'zh')).toBe('已等待')
     expect(headerActionWord('Waiting for', 'zh')).toBe('正在等待')
     expect(headerActionWord('Failed to wait for', 'zh')).toBe('等待失败')

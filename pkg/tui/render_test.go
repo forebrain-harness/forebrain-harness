@@ -2540,3 +2540,25 @@ func TestShellRawBodyDropsHistoricalUnavailableNote(t *testing.T) {
 		t.Fatalf("formatShellOutput = %q, want %q", got, want)
 	}
 }
+
+func TestProcessStartCardBodyDoesNotRepeatTheCommand(t *testing.T) {
+	content := `{"command":"npm run dev","id":3,"log":"/state/process/3.log","pid":42,"running":true}`
+	input := map[string]any{"action": "start", "command": "npm run dev"}
+	body := formatToolContentWithInput("process", content, "", input)
+	if strings.Contains(body, "npm run dev") {
+		t.Fatalf("the start body repeats the command the head already names:\n%s", body)
+	}
+	if !strings.Contains(body, "Id: 3") {
+		t.Fatalf("the start body lost the fields it owns:\n%s", body)
+	}
+	// The log card's head names the id, so its body keeps the command and drops
+	// the id.
+	logged := `{"bytes":12,"command":"npm run dev","id":3,"lines":1,"log":"/state/process/3.log","running":true,"tail":"hi"}`
+	got := formatToolContentWithInput("process", logged, "", map[string]any{"action": "log", "id": 3})
+	if !strings.Contains(got, "Command: npm run dev") {
+		t.Fatalf("the log body lost the command its head never names:\n%s", got)
+	}
+	if strings.Contains(got, "Id: 3") {
+		t.Fatalf("the log body repeats the id its head already names:\n%s", got)
+	}
+}

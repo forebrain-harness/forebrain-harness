@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -622,4 +623,141 @@ func TestProcessStartWithWaitEndingOnExitReportsNotRunning(t *testing.T) {
 	// comment documents). KillProcesses only reaps still-running processes, so an
 	// already-exited one must be awaited here, exactly like the :101-126 precedent.
 	waitForProcessSettled(t, processRecordForTest(t, st, processTestID(t, started)))
+}
+
+// TestProcessIDsAndLogsAreUniqueAcrossRunners pins the ledger's primary key:
+// several runners of one state root — the real product, where conversations
+// share one runner environment — never hand out the same id, never share a log,
+// and never overwrite each other's ledger record (owner 2026-11-24).
+func TestProcessIDsAndLogsAreUniqueAcrossRunners(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	projectDir := filepath.Join(root, "project")
+	for _, dir := range []string{workspace, projectDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newRunner := func() *llm.Tool {
+		rt := &AgentToolRuntime{Home: root, WorkspaceRoot: workspace, Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}}
+		st := NewState(projectDir)
+		t.Cleanup(st.KillProcesses)
+		tl, err := NewProcessTool(st, rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tl
+	}
+	start := func(tl *llm.Tool, command string) (int, string) {
+		t.Helper()
+		payload, err := callProcess(t, tl, processTestContext(projectDir), ProcessInput{Action: "start", Command: command, WorkDir: projectDir})
+		if err != nil {
+			t.Fatalf("start %q: %v", command, err)
+		}
+		logPath, _ := payload["log"].(string)
+		return processTestID(t, payload), logPath
+	}
+
+	firstID, firstLog := start(newRunner(), "sleep 30")
+	secondID, secondLog := start(newRunner(), "sleep 30")
+	if firstID == secondID {
+		t.Fatalf("two runners handed out the same process id %d", firstID)
+	}
+	if firstLog == secondLog {
+		t.Fatalf("two runners share the log file %s", firstLog)
+	}
+	records := readProcessLedger(filepath.Dir(firstLog))
+	if len(records) != 2 {
+		t.Fatalf("the ledger holds %d records for two live processes: %+v", len(records), records)
+	}
+
+	// A log left by an earlier run is never written into again, and its id is
+	// never handed out again.
+	stale := filepath.Join(filepath.Dir(firstLog), "7.log")
+	if err := os.WriteFile(stale, []byte("an earlier run\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleID, staleLog := start(newRunner(), "sleep 30")
+	if staleLog == stale {
+		t.Fatalf("a new process reused the existing log %s", stale)
+	}
+	if staleID <= secondID {
+		t.Fatalf("id %d was handed out without moving past the ids already in use (%d)", staleID, secondID)
+	}
+	if data, err := os.ReadFile(staleLog); err != nil || strings.Contains(string(data), "an earlier run") {
+		t.Fatalf("the new log %s carries another run's output: %q (%v)", staleLog, data, err)
+	}
+}
+
+// TestProcessIDsAreUniqueUnderConcurrentStarts pins the mechanism the allocator
+// rests on: eight runners starting at the same instant on one state root still
+// get eight distinct ids and eight distinct logs, because the candidate id is
+// arbitrated by O_EXCL rather than by a counter (owner 2026-11-24).
+func TestProcessIDsAreUniqueUnderConcurrentStarts(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	projectDir := filepath.Join(root, "project")
+	for _, dir := range []string{workspace, projectDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const runners = 8
+	tools := make([]*llm.Tool, runners)
+	for i := range tools {
+		rt := &AgentToolRuntime{Home: root, WorkspaceRoot: workspace, Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}}
+		st := NewState(projectDir)
+		t.Cleanup(st.KillProcesses)
+		tl, err := NewProcessTool(st, rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools[i] = tl
+	}
+	type outcome struct {
+		id  int
+		log string
+		err error
+	}
+	results := make([]outcome, runners)
+	var wg sync.WaitGroup
+	for i := range tools {
+		wg.Add(1)
+		// No t.Fatalf inside the goroutine: it is not goroutine-safe.
+		go func(i int) {
+			defer wg.Done()
+			raw, _ := json.Marshal(ProcessInput{Action: "start", Command: "sleep 30", WorkDir: projectDir})
+			out, err := tools[i].Handle(processTestContext(projectDir), string(raw))
+			if err != nil {
+				results[i] = outcome{err: err}
+				return
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(out.(string)), &payload); err != nil {
+				results[i] = outcome{err: err}
+				return
+			}
+			id, _ := payload["id"].(float64)
+			logPath, _ := payload["log"].(string)
+			results[i] = outcome{id: int(id), log: logPath}
+		}(i)
+	}
+	wg.Wait()
+	ids := make(map[int]bool, runners)
+	logs := make(map[string]bool, runners)
+	for i, res := range results {
+		if res.err != nil {
+			t.Fatalf("runner %d: %v", i, res.err)
+		}
+		if ids[res.id] {
+			t.Fatalf("id %d was handed out twice", res.id)
+		}
+		if logs[res.log] {
+			t.Fatalf("log %s was handed out twice", res.log)
+		}
+		ids[res.id], logs[res.log] = true, true
+	}
+	if records := readProcessLedger(filepath.Dir(results[0].log)); len(records) != runners {
+		t.Fatalf("the ledger holds %d records for %d live processes", len(records), runners)
+	}
 }

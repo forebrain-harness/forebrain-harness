@@ -5,8 +5,10 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -78,7 +81,6 @@ type processRecord struct {
 // wait polls while a kill may land.
 type processRegistry struct {
 	mu      sync.Mutex
-	next    int
 	records map[int]*processRecord
 	logs    map[int]*os.File
 }
@@ -87,26 +89,64 @@ func newProcessRegistry() *processRegistry {
 	return &processRegistry{records: map[int]*processRecord{}, logs: map[int]*os.File{}}
 }
 
-// reserve hands out the next id and the log file it owns. The id is taken
-// before the process exists so the log has a name the moment output arrives.
+// reserve hands out an id and the log file that id owns. The id is the log's
+// name and the ledger's primary key, so it is never reused — across the runners
+// of one state root and across harness restarts (owner 2026-11-24). A reused id
+// appended one session's output to another session's log and overwrote its
+// ledger record.
 func (r *processRegistry) reserve(dir string) (int, *os.File, string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.next == 0 {
-		r.next = 1
-	}
-	id := r.next
-	r.next++
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return 0, nil, "", err
 	}
-	logPath := filepath.Join(dir, fmt.Sprintf("%d.log", id))
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return 0, nil, "", err
+	// The candidate is read before taking r.mu: the directory scan is file I/O
+	// and the registry mutex guards in-memory lookups a wait polls under, so
+	// neither should wait on the other.
+	next := nextProcessID(dir)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id := next; ; id++ {
+		logPath := filepath.Join(dir, fmt.Sprintf("%d.log", id))
+		// O_EXCL is what makes the id exclusive: a directory two harness
+		// processes share is arbitrated by the filesystem, not by a mutex that
+		// only spans one of them.
+		file, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err == nil {
+			r.logs[id] = file
+			return id, file, logPath, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return 0, nil, "", err
+		}
 	}
-	r.logs[id] = file
-	return id, file, logPath, nil
+}
+
+// nextProcessID is the first id no process in dir has ever held: one past the
+// highest id the ledger records and the log files name. Logs outlive their
+// processes, so the directory's own files are the record of what was handed out
+// — if they ever start being cleaned up, this allocator needs another source.
+func nextProcessID(dir string) int {
+	next := 1
+	for _, rec := range readProcessLedger(dir) {
+		if rec.ID >= next {
+			next = rec.ID + 1
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return next
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		id, err := strconv.Atoi(strings.TrimSuffix(name, ".log"))
+		if err != nil || id < next {
+			continue
+		}
+		next = id + 1
+	}
+	return next
 }
 
 // abandon drops the id reserved for a start that failed.

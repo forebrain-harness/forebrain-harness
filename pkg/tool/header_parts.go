@@ -156,12 +156,16 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 		}
 		switch act {
 		case "start":
+			// The head has to say the command keeps running after the call:
+			// the shell tool's card is the foreground one ("Ran <cmd>"), and
+			// this word is the only thing that tells the two apart (owner
+			// 2026-11-24).
 			if isFailed {
-				action = "Failed to start"
+				action = "Failed to start background process"
 			} else if isRunning || isPending {
-				action = "Starting"
+				action = "Starting background process"
 			} else {
-				action = "Started"
+				action = "Started background process"
 			}
 			target = InputString(meta, "command")
 			if target == "" {
@@ -180,14 +184,18 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 			}
 			target = proc
 		case "log":
+			// A log card borrows no verb from another tool: "Read process #3
+			// log" is what a read_file card says, and the reader could not
+			// tell the two apart (owner 2026-11-24). The Chinese word puts the
+			// process inside the sentence through HEADER_TARGET_SLOT.
 			if isFailed {
-				action = "Failed to read"
+				action = "Failed to read log of"
 			} else if isRunning || isPending {
-				action = "Reading"
+				action = "Reading log of"
 			} else {
-				action = "Read"
+				action = "Read log of"
 			}
-			target = proc + " log"
+			target = proc
 		case "kill":
 			if isFailed {
 				action = "Failed to kill"
@@ -612,7 +620,8 @@ func HeaderActions() []string {
 		// Shell
 		"Ran", "Running", "Failed to run",
 		// Process
-		"Started", "Starting", "Failed to start",
+		"Started background process", "Starting background process", "Failed to start background process",
+		"Read log of", "Reading log of", "Failed to read log of",
 		"Waited for", "Waiting for", "Failed to wait for",
 		"Killed", "Killing", "Failed to kill",
 		"Listed processes", "Listing processes", "Failed to list processes",

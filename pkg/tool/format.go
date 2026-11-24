@@ -4292,6 +4292,8 @@ func ReadableToolAnswer(toolName, body string, input map[string]any) (ReadableAn
 		return readPeerSend(input, body)
 	case name == "list_usable_models":
 		return readUsableModels(body)
+	case name == "process":
+		return readProcessAnswer(input, body)
 	case name == "web_search" || name == "websearch":
 		if formatted, ok := FormatWebSearchResult(body); ok && formatted != strings.TrimSpace(body) {
 			return ReadableAnswer{Text: formatted}, true
@@ -4301,6 +4303,40 @@ func ReadableToolAnswer(toolName, body string, input map[string]any) (ReadableAn
 		return ReadableAnswer{}, false
 	}
 	return ReadToolAnswer(body)
+}
+
+// readProcessAnswer is a process card's body. The head names one row of it
+// already — the command a start runs, the id a wait, log or kill drives — so
+// the body drops exactly that row: the same long shell command twice, two lines
+// apart, reads as one sentence too many (owner 2026-11-24). Every other field
+// stays, including the command a log card names by id alone.
+func readProcessAnswer(input map[string]any, body string) (ReadableAnswer, bool) {
+	answer, ok := ReadToolAnswer(body)
+	if !ok {
+		return ReadableAnswer{}, false
+	}
+	repeated := ""
+	switch strings.ToLower(strings.TrimSpace(stringFromAny(input["action"]))) {
+	case "start":
+		repeated = readableFieldLabel("command")
+	case "wait", "log", "kill":
+		repeated = readableFieldLabel("id")
+	}
+	if repeated == "" {
+		return answer, true
+	}
+	rows := make([]ReadableRow, 0, len(answer.Rows))
+	for _, row := range answer.Rows {
+		// The label is derived from the payload's own key, so renaming the row
+		// label cannot leave this filter behind; depth 0 keeps a nested field
+		// of the same name.
+		if row.Depth == 0 && row.Label == repeated {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	answer.Rows = rows
+	return answer, true
 }
 
 // toolBodyHasOwnReading reports whether a tool's card body is read by a
