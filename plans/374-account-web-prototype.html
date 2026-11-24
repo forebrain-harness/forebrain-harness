@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Forebrain Harness 订阅账号与退出 · Web 原型 374</title>
+<style>
+/* 浅色令牌与组件样式整段取自 docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/llm-models-preview.html
+   （与 frontend/src/assets/main.css 同源）；374 新增的账号组件放在最后，沿用同一套令牌。 */
+:root{
+  --bg:#FFFFFF; --alt:#F7F8FA; --soft:#F2F4F7; --soft-2:#EAECF0;
+  --line:#E4E7EC; --line-2:#D0D5DD; --hair:#EEF0F3;
+  --ink:#101828; --ink-2:#475467; --muted:#667085; --quiet:#98A2B3;
+  --brand:#1F4A9E; --brand-hover:#173B80; --brand-soft:#EBF0F9; --brand-line:#C3D2EC; --brand-strong:#8FA9DA;
+  --ok:#067647; --ok-soft:#ECFDF3; --ok-line:#ABEFC6;
+  --warn:#B54708; --warn-soft:#FFFAEB; --warn-line:#FEDF89;
+  --danger:#B42318; --danger-soft:#FEF3F2; --danger-line:#FECDCA;
+  --rail-bg:#0F1D38; --rail-fg:#E7ECF5; --rail-fg-2:#9FB0CC; --rail-line:#1E3055; --rail-hover:#172A4D;
+  --rail-active:#1D3563; --rail-mark:#7EA2EA; --rail-btn:#3A67C6; --rail-field:#152646;
+  --ui:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI","Microsoft YaHei","Noto Sans SC",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --ease:cubic-bezier(.2,.7,.2,1);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:#F3F4F6;color:var(--ink);font:14px/1.6 var(--ui);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer}
+input,select,textarea{font:inherit;color:inherit}
+.ic{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+/* ---------- 外框 ---------- */
+.frame{max-width:1340px;margin:0 auto;padding:32px 24px 56px}
+.frame h1{font-size:22px;line-height:1.3;margin:0;font-weight:650;letter-spacing:-.01em}
+.frame .sub{margin:4px 0 0;color:var(--muted);font-size:13px;max-width:1000px}
+.frame .sub code{font-family:var(--mono);font-size:12px;background:var(--soft);border-radius:4px;padding:0 4px}
+.pbadge{display:inline-block;border:1px solid var(--warn-line);color:var(--warn);background:var(--warn-soft);border-radius:4px;font-size:11px;padding:2px 7px;margin-left:10px;vertical-align:3px;font-weight:500}
+.toolbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:16px 0 14px}
+.toolbar button{border:1px solid var(--line);background:#fff;color:var(--ink-2);font:500 12.5px/1 var(--ui);padding:8px 11px;border-radius:8px;transition:background .15s,color .15s,border-color .15s}
+.toolbar button:hover{color:var(--ink);border-color:var(--line-2)}
+.toolbar button[aria-pressed="true"]{background:var(--brand-soft);border-color:var(--brand-line);color:var(--brand)}
+.toolbar .sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+.toolbar .tlabel{font-size:12px;color:var(--muted);margin-right:2px}
+.caption{margin:12px 2px 0;color:var(--muted);font-size:13px;max-width:90ch;min-height:42px}
+.stage{display:flex;justify-content:center}
+.stage-wrap{overflow-x:auto;padding-bottom:4px}
+.stage-wrap .app{min-width:1180px}
+
+/* ---------- 应用外壳 ---------- */
+.app{position:relative;display:grid;grid-template-columns:264px minmax(0,1fr);width:100%;height:820px;background:var(--bg);
+  border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 10px 30px rgba(16,24,40,.07)}
+.rail{background:var(--rail-bg);display:flex;flex-direction:column;gap:14px;padding:14px 12px;border-right:1px solid var(--rail-line);min-height:0}
+.brand{display:flex;align-items:center;gap:10px;padding:2px 4px}
+.brand svg{width:28px;height:28px;flex:none}
+.wm{font-size:15px;line-height:1.2;color:var(--rail-fg);white-space:nowrap;letter-spacing:.01em}
+.wm b{font-weight:600}
+.ver{display:block;font-size:10px;letter-spacing:.06em;color:var(--rail-fg-2)}
+.tenant{display:flex;align-items:center;gap:8px;width:100%;padding:9px 10px;text-align:left;background:var(--rail-field);border:1px solid var(--rail-line);border-left:2px solid var(--rail-btn);border-radius:8px}
+.tenant .l{display:block;font-size:11px;color:var(--rail-fg-2)}
+.tenant .n{display:block;font-size:13.5px;font-weight:600;color:#fff}
+.tenant .ic{color:var(--rail-fg-2);margin-left:auto}
+.rnav{display:flex;flex-direction:column;gap:2px}
+.rl{display:flex;align-items:center;gap:9px;border:0;background:transparent;border-radius:8px;padding:7px 10px;font-size:13px;color:var(--rail-fg-2);text-align:left;transition:background .14s,color .14s}
+.rl:hover{background:var(--rail-hover);color:var(--rail-fg)}
+.rl.on{background:var(--rail-active);color:#fff;font-weight:500}
+.rl .ic{width:15px;height:15px}
+.rfoot{margin-top:auto;padding-top:10px;border-top:1px solid var(--rail-line);display:flex;align-items:center;gap:4px}
+.rfoot .rl{flex:1}
+.rcollapse{width:32px;height:32px;border:0;border-radius:8px;background:transparent;color:var(--rail-fg-2);display:grid;place-items:center}
+.work{display:flex;flex-direction:column;min-width:0;min-height:0;background:#fff}
+.top{height:48px;flex:none;display:flex;align-items:center;gap:10px;padding:0 20px;border-bottom:1px solid var(--line)}
+.top .t{font-weight:600;font-size:14px;white-space:nowrap}
+.top .sp{flex:1}
+.chipb{height:30px;display:inline-flex;align-items:center;gap:6px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:#fff;font-size:12px;color:var(--ink-2);white-space:nowrap}
+.chipb.sq{width:30px;padding:0;justify-content:center}
+.body{flex:1;overflow:auto;scroll-behavior:smooth}
+
+/* ---------- 设置页 ---------- */
+.set{display:grid;grid-template-columns:176px minmax(0,780px);gap:40px;padding:22px 28px 72px}
+.subnav{position:sticky;top:22px;align-self:start;display:flex;flex-direction:column;gap:2px}
+.subnav .gl{padding:10px 12px 4px;font-size:11px;letter-spacing:.04em;color:var(--muted)}
+.subnav .gl:first-child{padding-top:0}
+.subnav button{border:0;background:transparent;text-align:left;border-radius:8px;padding:7px 12px;font-size:13px;color:var(--ink-2);transition:background .14s,color .14s}
+.subnav button:hover{background:var(--soft);color:var(--ink)}
+.subnav button.on{background:var(--brand-soft);color:var(--brand);font-weight:500}
+.content{min-width:0}
+.page{max-width:1000px;margin:0 auto;padding:20px 24px 48px}
+.stub{display:grid;place-items:center;height:240px;color:var(--quiet);font-size:13px;border:1px dashed var(--line);border-radius:10px}
+
+/* ---------- 列表页：工具栏 + 表格 + 分页 ---------- */
+.tb{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.tb .grow{flex:1}
+.search{display:inline-flex;align-items:center;gap:7px;width:240px;height:32px;border:1px solid var(--line);border-radius:6px;padding:0 10px;color:var(--quiet);font-size:13px;background:#fff}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--soft);font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap;transition:background .15s,border-color .15s,opacity .15s}
+.btn:hover{background:var(--soft-2)}
+.btn.pri{background:var(--brand);border-color:var(--brand);color:#F5FFFF}
+.btn.pri:hover{background:var(--brand-hover);border-color:var(--brand-hover)}
+.btn.plain{background:#fff}
+.btn.plain:hover{background:var(--alt)}
+.btn.dgr{background:#fff;border-color:var(--danger);color:var(--danger)}
+.btn.dgr:hover{background:var(--danger-soft)}
+.btn.dgr-fill{background:var(--danger);border-color:var(--danger);color:#fff}
+.btn.dgr-fill:hover{background:#912018;border-color:#912018}
+.btn[disabled]{opacity:.55;cursor:default}
+.btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.btn .ic{width:13px;height:13px}
+.tbl{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:13px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.tbl th{height:38px;padding:0 12px;background:var(--alt);border-bottom:1px solid var(--line);font-size:12px;font-weight:500;color:var(--ink-2);text-align:left;white-space:nowrap}
+.tbl th.act,.tbl td.act{text-align:center}
+.tbl td{height:46px;padding:0 12px;border-bottom:1px solid var(--hair);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.tbl tr:last-child td{border-bottom:0}
+.tbl.models td{height:auto;padding-top:9px;padding-bottom:9px}
+.tbl.models td.wrap{white-space:normal}
+.mname{font-weight:500;font-size:13px;color:var(--ink)}
+.mprov{display:block;font-size:11.5px;color:var(--muted);line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mprov .subok{color:var(--brand)}
+.addr{font-family:var(--mono);font-size:12px;color:var(--ink-2);word-break:break-all;line-height:1.5}
+.pth{display:inline-block;font-family:var(--mono);font-size:11px;line-height:18px;padding:0 6px;border-radius:4px;background:var(--brand-soft);color:var(--brand);white-space:nowrap}
+.pth.na{background:var(--soft);color:var(--quiet);font-family:var(--ui)}
+.kmask{font-family:var(--mono);font-size:11.5px;color:var(--quiet);letter-spacing:-.02em;white-space:nowrap}
+.kmask b{color:var(--ink-2);font-weight:500}
+.key-none{font-size:12px;color:var(--muted)}
+.bdg{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:999px;font-size:11.5px;font-weight:500;white-space:nowrap;vertical-align:middle}
+.bdg.b{background:var(--brand-soft);color:var(--brand)}
+.bdg.ok{background:var(--ok-soft);color:var(--ok)}
+.bdg.wn{background:var(--warn-soft);color:var(--warn)}
+.bdg.g{background:var(--soft);color:var(--ink-2)}
+.acts{display:inline-flex;gap:2px;justify-content:center}
+.acts .icbtn{width:26px;height:26px}
+.icbtn{width:30px;height:30px;border:0;border-radius:6px;background:transparent;color:var(--muted);display:grid;place-items:center;transition:background .14s,color .14s}
+.icbtn:hover{background:var(--soft);color:var(--ink)}
+.icbtn.dgr:hover{color:var(--danger)}
+.icbtn:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+.icbtn.ph{visibility:hidden}
+.pager{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:10px;font-size:12px;color:var(--muted)}
+.pg{height:26px;min-width:26px;padding:0 7px;border:1px solid var(--line);border-radius:6px;background:#fff;font-size:12px;color:var(--ink-2);display:inline-grid;place-items:center}
+.pg.on{border-color:var(--brand-line);background:var(--brand-soft);color:var(--brand)}
+.pg[disabled]{color:var(--quiet);background:var(--alt)}
+.pgsel{height:26px;padding:0 24px 0 8px;border:1px solid var(--line);border-radius:6px;font-size:12px;color:var(--ink-2);background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 7px center;appearance:none}
+.listnote{margin:8px 0 0;font-size:12px;color:var(--muted)}
+tr.rowflash td{animation:flash 1.6s ease-out infinite}
+@keyframes flash{0%,25%{background:var(--brand-soft)}100%{background:transparent}}
+
+/* ---------- 弹窗与抽屉 ---------- */
+.mask{position:absolute;inset:0;z-index:20;background:rgba(16,24,40,.32);display:grid;place-items:center;animation:fadein .16s ease-out}
+.dlg{width:560px;max-width:calc(100% - 24px);max-height:88%;display:flex;flex-direction:column;background:#fff;border-radius:12px;box-shadow:0 22px 56px rgba(16,24,40,.22);animation:pop .2s var(--ease)}
+.dlg.wide{width:680px}
+.dlg-h{display:flex;align-items:center;gap:8px;padding:14px 12px 8px 20px}
+.dlg-h b{font-size:14px;font-weight:600;flex:1}
+.dlg-b{padding:4px 20px 18px;overflow:auto}
+.dlg-f{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+.stepl{padding:0 20px 4px;font-size:12px;color:var(--muted);margin:0}
+.dmask{position:absolute;inset:0;z-index:20;background:rgba(16,24,40,.18);animation:fadein .16s ease-out}
+.drawer{position:absolute;top:0;right:0;bottom:0;z-index:21;width:540px;max-width:100%;background:#fff;border-left:1px solid var(--line);box-shadow:-14px 0 34px rgba(16,24,40,.1);display:flex;flex-direction:column;animation:slide .26s var(--ease)}
+.dr-h{height:52px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px 0 20px;border-bottom:1px solid var(--line)}
+.dr-h b{flex:1;font-size:14px;font-weight:600}
+.dr-b{flex:1;overflow:auto;padding:6px 20px 20px}
+.drawer .row{position:relative;display:grid;grid-template-columns:96px minmax(0,1fr);column-gap:16px;align-items:center;padding:9px 0}
+.drawer .row+.row{border-top:1px solid var(--hair)}
+.lab b{font-size:12.5px;font-weight:400;color:var(--ink-2)}
+.ro{font-size:13px;color:var(--ink);word-break:break-all}
+.ro.mono{font-family:var(--mono);font-size:12.5px}
+.rolist{margin-top:14px}
+.subhint{display:flex;align-items:center;gap:6px;margin-top:10px;font-size:12px;color:var(--muted)}
+.subhint button{border:0;background:transparent;padding:0;color:var(--brand);font-size:12px;font-weight:500}
+.ff{display:grid;gap:6px;margin-top:14px;width:100%}
+.ff>span{font-size:12px;font-weight:500;color:var(--ink-2)}
+.fld{width:100%;height:32px;border:1px solid var(--line);border-radius:6px;padding:0 10px;background:#fff;font-size:13px;outline:none;transition:border-color .15s,box-shadow .15s}
+.fld::placeholder{color:var(--quiet)}
+.fld:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+.fld.mono{font-family:var(--mono);font-size:12px}
+.sw{position:relative;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--line-2);transition:background .18s}
+.sw i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.2);transition:transform .2s var(--ease)}
+.sw[aria-checked="true"]{background:var(--brand)}
+.sw[aria-checked="true"] i{transform:translateX(16px)}
+.sw:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.ck{display:inline-flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;white-space:nowrap}
+.ck input{appearance:none;width:16px;height:16px;margin:0;border:1px solid var(--line-2);border-radius:4px;background:#fff;display:grid;place-items:center;transition:background .15s,border-color .15s;flex:none}
+.ck input:checked{background:var(--brand);border-color:var(--brand);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");background-size:12px;background-repeat:no-repeat;background-position:center}
+.ck input:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+.ck input:disabled{opacity:.5}
+
+/* ---------- 订阅登录模态 ---------- */
+.subl{display:grid;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-top:6px}
+.subr{display:flex;align-items:center;gap:12px;padding:11px 14px;border:0;border-bottom:1px solid var(--hair);background:#fff;text-align:left}
+.subr:last-child{border-bottom:0}
+.subr:hover{background:var(--alt)}
+.subr .t{flex:1;min-width:0}
+.subr .t b{display:block;font-size:13px;font-weight:600}
+.subr .t span{font-size:12px;color:var(--muted)}
+.subr>.ic{color:var(--quiet)}
+.auth{display:grid;gap:12px;margin-top:6px;padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--alt)}
+.auth p{margin:0;font-size:12.5px;color:var(--ink-2)}
+.acts2{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.ucode{font:600 22px/1.2 var(--mono);letter-spacing:.16em;text-align:center;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff}
+.wait{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+.spin{width:13px;height:13px;border-radius:50%;border:2px solid var(--line-2);border-top-color:var(--brand);animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.paste{display:grid;gap:6px;font-size:12px;color:var(--muted)}
+.paste__row{display:flex;align-items:center;gap:8px}
+.bad{margin:0;font-size:12px;color:var(--danger)}
+.ogrp{margin-top:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.ogrp:first-child{margin-top:6px}
+.ogh{display:flex;align-items:center;gap:8px;height:36px;padding:0 12px;background:var(--alt);border-bottom:1px solid var(--line);font-size:12.5px;font-weight:600}
+.ogh span{margin-left:auto;font-weight:400;color:var(--muted);font-size:12px}
+.orow{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--hair)}
+.orow:last-child{border-bottom:0}
+.orow .ck{flex:1;min-width:0;align-items:flex-start}
+.orow .ck input{margin-top:3px}
+.orow small{font-size:11.5px;color:var(--muted);white-space:nowrap}
+.orow .osub{margin-left:auto;flex:none;font-size:12px;color:var(--ink-2);white-space:nowrap}
+.sig{display:block;min-width:0}
+.sig b{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:500;color:var(--ink);white-space:nowrap}
+.sig>span{display:block;font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.sig>span em{font-style:normal;color:var(--brand);background:var(--brand-soft);border-radius:3px;padding:0 3px;margin-left:1px}
+
+/* ---------- 抽屉来源卡 ---------- */
+.src{display:grid;gap:10px;margin-top:4px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--alt)}
+.src__head{display:flex;align-items:center;gap:8px;font-size:13px}
+.src__head b{font-weight:600}
+.src__head .ml-auto{margin-left:auto}
+.src p{margin:0;font-size:12px;line-height:1.5;color:var(--muted)}
+.src__acts{display:flex;flex-wrap:wrap;gap:8px}
+.src__switch{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--ink-2)}
+.src__switch .h{font-size:12px;color:var(--muted)}
+.dr-sec{margin-top:18px;padding-top:14px;border-top:1px solid var(--hair);font-size:12.5px;font-weight:600;color:var(--ink)}
+
+/* ---------- 374 新增：账号显示与退出（沿用上面的令牌与写法） ---------- */
+/* 模态第 1 步：有账号时副行显示账号，替代 flow 描述句 */
+.subr .t span.acctline{color:var(--ink-2)}
+.subr .t span.acctline i{font-style:normal;color:var(--muted)}
+/* 模态第 3 步：OfferPicker 上方的账号条 */
+.acct{display:flex;align-items:center;gap:12px;margin-top:6px;padding:11px 14px;border:1px solid var(--line);border-radius:10px;background:var(--alt)}
+.acct__t{flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.acct__t b{font-size:13px;font-weight:600;overflow-wrap:anywhere}
+.acct__t span{font-size:12px;color:var(--muted)}
+.acct__acts{display:flex;gap:8px;flex:none}
+.envhint{margin:8px 0 0;font-size:12px;color:var(--muted);line-height:1.6}
+.envhint code{font-family:var(--mono);font-size:11.5px;background:var(--soft);border-radius:4px;padding:0 4px}
+/* 退出结果提示：409 外部来源（警告）/ 失败（危险） */
+.noticebar{display:flex;gap:8px;align-items:flex-start;margin-top:10px;padding:9px 12px;border:1px solid var(--warn-line);border-radius:8px;background:var(--warn-soft);font-size:12.5px;color:var(--warn);line-height:1.55}
+.noticebar .ic{margin-top:2px}
+.noticebar.bad{border-color:var(--danger-line);background:var(--danger-soft);color:var(--danger)}
+/* 表格 key 列：账号登录下的小字账号名 */
+.keyacct{display:block;font-size:11px;color:var(--muted);line-height:1.3;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 抽屉来源卡：head 下的账号行 */
+.src__acct{display:flex;align-items:center;gap:8px;font-size:12.5px;flex-wrap:wrap}
+.src__acct .k{color:var(--muted);font-size:12px}
+.src__acct b{font-weight:600;font-size:12.5px;overflow-wrap:anywhere}
+.src__acct span{color:var(--muted);font-size:12px}
+
+/* ---------- 原型辅助区（不属于产品 Web） ---------- */
+.inspection{margin-top:18px;border:1px solid var(--line);border-radius:12px;background:#fff}
+.inspect-head{display:flex;gap:12px;align-items:center;padding:12px 16px;font-size:13px;border-bottom:1px solid var(--line)}
+.inspect-head strong{font-weight:600}
+.inspect-head span{color:var(--muted);font-size:12px}
+.inspect-head button{margin-left:auto}
+.inspect-body{display:grid;grid-template-columns:1fr 1fr;gap:22px;padding:15px 16px}
+.inspect-title{font-size:11px;letter-spacing:.04em;color:var(--muted);margin-bottom:8px}
+.kv{display:grid;grid-template-columns:108px minmax(0,1fr);gap:5px 8px;font-size:12px;margin:0}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;overflow-wrap:anywhere}
+.events{font:12px/1.7 var(--mono);color:var(--muted);max-height:152px;overflow:auto}
+.events div{padding-left:10px;border-left:2px solid var(--line);margin:4px 0}
+.events .good{color:var(--ok);border-color:var(--ok-line)}
+.events .warn{color:var(--warn);border-color:var(--warn-line)}
+.events .bad{color:var(--danger);border-color:var(--danger-line)}
+.inspection details{border-top:1px solid var(--line);padding:10px 16px;color:var(--muted);font-size:12px}
+.inspection summary{cursor:pointer}
+.inspection pre{font:12px/1.7 var(--mono);color:var(--ink);overflow:auto;max-height:260px;margin:12px 0 2px}
+.notes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:18px}
+.note{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 18px}
+.note h2{font-size:13px;margin:0 0 6px;font-weight:600;color:var(--brand)}
+.note p{margin:4px 0;font-size:12px;color:var(--ink-2);line-height:1.7}
+.note code{font-family:var(--mono);font-size:11.5px;background:var(--soft);border-radius:4px;padding:0 4px}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+@keyframes pop{from{opacity:0;transform:translateY(6px) scale(.985)}to{opacity:1;transform:none}}
+@keyframes slide{from{transform:translateX(24px);opacity:.4}to{transform:none;opacity:1}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+@media (max-width:900px){.inspect-body{grid-template-columns:1fr}.notes{grid-template-columns:1fr}.frame{padding:20px 12px 40px}}
+</style>
+</head>
+<body>
+<div class="frame">
+  <h1>订阅登录：显示当前账号 · 退出登录<span class="pbadge">待确认原型 · 未实施</span></h1>
+  <p class="sub">设置 · 模型页的 Web 端设计稿（计划 374）。视觉沿用 <code>frontend/src/assets/main.css</code> 浅色令牌与 <code>llm-models-preview.html</code> 框架。已登录订阅在表格 key 列、订阅登录模态与抽屉来源卡显示账号；退出只删本机凭据（DB 行 + 文件），模型行保留。登录 / 退出全部是页内内存模拟，不写真实数据库、不调用任何厂商；演示账号均为虚构 <code>example.test</code> 邮箱与掩码 ID，勿输入真实密钥。</p>
+  <div class="toolbar" id="scenes" role="group" aria-label="原型场景"><span class="tlabel">场景</span></div>
+  <div class="stage-wrap"><div class="stage"><div class="app" id="app"></div></div></div>
+  <p class="caption" id="cap"></p>
+  <section class="inspection" aria-label="模拟凭据观察器">
+    <div class="inspect-head"><strong>凭据与模型观察器</strong><span>原型辅助区 · 不属于产品 Web</span><button type="button" class="btn plain" id="reset">重置当前场景</button></div>
+    <div class="inspect-body">
+      <div><div class="inspect-title">当前登录 / 模型行</div><dl class="kv" id="facts"></dl></div>
+      <div><div class="inspect-title">凭据边界 · 事件记录</div><div class="events" id="events"></div></div>
+    </div>
+    <details><summary>查看模拟模型表（退出后行保留、源状态翻为未登录；只在本页内存，无密钥）</summary><pre id="database"></pre></details>
+  </section>
+  <div class="notes">
+    <div class="note"><h2>账号本地读，零厂商调用</h2><p>账号名来自本机存储的凭据（邮箱 / 昵称 / 掩码 ID），显示身份不发起网络请求。火山方舟只存 STS 凭据，显示掩码 AccessKeyID；读不出身份时降级为「登录有效，未存储账号名」。</p></div>
+    <div class="note"><h2>退出只删凭据，模型行保留</h2><p>退出删除 DB 凭据行与文件兜底两处；已添加的模型行不删，源状态翻为未登录，重新登录后恢复。确认框明示这一后果；退出成功返回 204，页面自行刷新。</p></div>
+    <div class="note"><h2>外部来源如实提示</h2><p><code>OPENCODE_API_KEY</code> 由环境提供，不提供退出按钮；Qoder CN 的 PAT / 官方客户端登录会在下次检查时重新导入，退出返回 409 并如实提示，不宣称已退出。</p></div>
+  </div>
+</div>
+<script>
+'use strict';
+/* ================= 图标（lucide，与 llm-models-preview.html 同一套） ================= */
+const I={
+  plus:'<path d="M5 12h14"/><path d="M12 5v14"/>',
+  x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  check:'<path d="M20 6 9 17l-5-5"/>',
+  refresh:'<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+  pencil:'<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+  trash:'<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+  down:'<path d="m6 9 6 6 6-6"/>',
+  left:'<path d="m15 18-6-6 6-6"/>',
+  right:'<path d="m9 18 6-6-6-6"/>',
+  search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  settings:'<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  chat:'<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  folder:'<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  scroll:'<path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>',
+  sparkles:'<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
+  plug:'<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
+  users:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  wrench:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  shield:'<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+  brain:'<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>',
+  langs:'<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/>',
+  moon:'<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  panel:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/>',
+  star:'<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.123 2.123 0 0 0 1.597-1.16z"/>',
+  alert:'<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
+  login:'<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/>',
+  ext:'<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  logout:'<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+};
+const icon=(n,c='')=>`<svg class="ic ${c}" viewBox="0 0 24 24" aria-hidden="true">${I[n]||''}</svg>`;
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const clone=x=>JSON.parse(JSON.stringify(x));
+const $=s=>document.querySelector(s);
+
+/* ================= 演示数据（全部虚构，仅本页内存） ================= */
+const SUBSCRIPTIONS=[
+  {id:'chatgpt',name:'ChatGPT',flow:'paste',account:{name:'doudou@example.test',detail:'plus'}},
+  {id:'opencode-go',name:'OpenCode Go',flow:'device',account:{name:'dev@example.test',detail:'Example Org'}},
+  {id:'volcengine',name:'火山方舟',flow:'device',account:{name:'AKLT…f3a9',detail:'STS'}},
+  {id:'qodercn',name:'Qoder CN',flow:'device',account:{name:'li@example.test',detail:''}},
+  {id:'workbuddy',name:'WorkBuddy',flow:'device',account:{name:'Wang Bin',detail:'pro'}}
+];
+const OFFERS={
+  'chatgpt':[{plan:'',label:'ChatGPT 订阅',base:'https://chatgpt.com/backend-api/codex',path:'',models:[['gpt-5.5','GPT-5.5','1M'],['gpt-5.5-mini','GPT-5.5 mini','256K'],['gpt-5.4','GPT-5.4','1M']]}],
+  'opencode-go':[{plan:'Go 订阅',base:'https://opencode.ai/zen/go/v1',path:'/chat/completions',models:[['glm-5.3','GLM 5.3','1M'],['kimi-k3','Kimi K3','1M']]},{plan:'Go Plus 订阅',base:'https://opencode.ai/zen/go/v1',path:'/chat/completions',models:[['deepseek-v4-pro','DeepSeek V4 Pro','1M']]}],
+  'volcengine':[{plan:'Coding Plan · 个人版',base:'https://ark.cn-beijing.volces.com/api/coding',path:'/v1/messages',models:[['doubao-seed-2.1-pro','Doubao Seed 2.1 Pro','256K · 图片'],['glm-5.3','GLM 5.3','1M']]},{plan:'Agent Plan · 个人版',base:'https://ark.cn-beijing.volces.com/api/plan',path:'/v1/messages',models:[['glm-5.3','GLM 5.3','1M']]}],
+  'qodercn':[{plan:'Account',base:'https://gateway.qoder.com.cn',path:'/algo/api/v2/service/pro/sse/agent_chat_generation',models:[['auto','Auto','']]}],
+  'workbuddy':[{plan:'Pro',base:'https://workbuddy.example.test',path:'/v1/chat/completions',models:[['hy4','Hy4','256K'],['hy3','Hy3','128K']]}]
+};
+const PROVIDER_NAMES={'chatgpt':'ChatGPT','opencode-go':'OpenCode Go','volcengine':'火山方舟','qodercn':'Qoder CN','workbuddy':'WorkBuddy'};
+const subOf=id=>SUBSCRIPTIONS.find(s=>s.id===id);
+const NAV=[['projects','项目','folder'],['rules','规则指令','scroll'],['skills','技能','sparkles'],['mcp','MCP','plug'],['subagents','子代理','users'],['tools','工具','wrench'],['permissions','权限','shield'],['memories','记忆','brain']];
+const TABS=[['模型与服务商',[['models','模型'],['providers','服务商']]],['运行与数据',[['memory','记忆'],['vars','变量'],['logs','日志']]]];
+const SCENES=[
+  {id:'table',title:'模型表格 · 账号行',desc:'设置 · 模型：账号登录行的 key 列在「账号登录」下显示账号名小字；火山方舟是套餐 Key 行，只显示掩码 Key。点「订阅登录」打开模态，点行尾编辑图标打开抽屉。'},
+  {id:'step1',title:'订阅登录 · 第 1 步',desc:'已登录订阅的副行显示账号名 + detail，替代原 flow 描述句；徽章不变（已登录 / 未登录）。点已登录订阅直接进第 3 步；未登录进第 2 步登录。'},
+  {id:'step3',title:'第 3 步 · 账号条',desc:'OfferPicker 上方新增账号条：账号名 + detail + 状态徽章 + 「退出登录」（danger）与「换个账号登录」。退出必须经过确认框。'},
+  {id:'confirm',title:'退出确认',desc:'ConfirmDialog（danger）：明示删除本机凭据、模型保留但重新登录前无法调用。取消不删任何东西；确认调 logout API，成功 204 后回第 1 步并刷新表格。凭据文件与别的客户端共用时（场景 9）把路径写进这句话。'},
+  {id:'after',title:'退出后 · 行保留',desc:'ChatGPT 已退出：表格 key 列账号名消失，模型行仍在；抽屉来源卡徽章翻为「未登录」，只剩「重新登录」。模拟模型表里 source_state 翻为 missing。'},
+  {id:'drawer',title:'抽屉 · 来源卡',desc:'编辑订阅来的模型：来源卡 head 下新增账号行（name + detail），acts 区加「退出登录」。退出后抽屉不关，表格与徽章就地刷新。'},
+  {id:'envkey',title:'环境变量 Key 边界',desc:'OpenCode 无存储凭据但 OPENCODE_API_KEY 非空：账号显示为变量名，detail 位显示「环境变量提供」；不提供退出与换号按钮，改为提示在启动终端 unset 后重启。'},
+  {id:'external',title:'外部来源 · 409',desc:'Qoder CN 官方客户端仍登录时退出：本机存储凭据已删，但下次检查会重新导入。API 返回 409 + external_login，界面如实提示并刷新为导入的账号，不宣称已退出。'},
+  {id:'shared',title:'共享凭据文件 · Codex CLI',desc:'credentials.chatgpt 指到 Codex CLI 的 ~/.codex/auth.json 时，退出删的是那个共用文件：确认框把路径写出来，明说 Codex CLI 也会退出登录。'}
+];
+let S,DB,LOGINS,EVENTS=[],sceneID='table',flashId='';
+function event(text,tone=''){EVENTS.push({text,tone});if(EVENTS.length>15)EVENTS.shift()}
+function seedLogins(){LOGINS=new Map(SUBSCRIPTIONS.map(p=>[p.id,clone(p.account)]))}
+function seedRows(){
+  DB=new Map();
+  DB.set('llm_demo_1',{id:'llm_demo_1',provider:'chatgpt',model:'gpt-5.5',name:'GPT-5.5',base:'https://chatgpt.com/backend-api/codex',path:'',source:'chatgpt',plan:'',login:true,key:'',sub:true,def:true});
+  DB.set('llm_demo_2',{id:'llm_demo_2',provider:'volcengine',model:'doubao-seed-2.1-pro',name:'Doubao Seed 2.1 Pro',base:'https://ark.cn-beijing.volces.com/api/coding',path:'/v1/messages',source:'volcengine',plan:'Coding Plan',login:false,key:'d410',sub:false,def:false});
+  DB.set('llm_demo_3',{id:'llm_demo_3',provider:'workbuddy',model:'hy4',name:'Hy4',base:'https://workbuddy.example.test',path:'/v1/chat/completions',source:'workbuddy',plan:'Pro',login:true,key:'',sub:false,def:false});
+}
+function loginOf(id){return LOGINS.get(id)||null}
+function accountOf(id){const a=LOGINS.get(id);return a&&a.name?a:null}
+function stateOf(id){if(!LOGINS.has(id))return 'missing';return S.dead===id?'dead':'usable'}
+function canLogout(id){return LOGINS.has(id)&&stateOf(id)!=='missing'&&!loginOf(id).envKey}
+function rowsView(){return [...DB.values()].map(r=>({...r,source_state:stateOf(r.source),source_account:accountOf(r.source),source_can_logout:canLogout(r.source)}))}
+function emptyState(){return {route:'settings',tab:'models',modal:null,drawer:null,confirm:null,dead:'',external:false,shared:false,pasteUrl:''}}
+/* ================= 场景 ================= */
+function goScene(id){
+  sceneID=id;EVENTS=[];seedLogins();seedRows();S=emptyState();flashId='';
+  const scene=SCENES.find(s=>s.id===id)||SCENES[0];
+  $('#cap').textContent=scene.desc;
+  document.querySelectorAll('#scenes [data-scene]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.scene===id)));
+  switch(id){
+    case 'step1':S.modal={step:1,id:'',notice:'',switching:false,chosen:new Set(),subOk:new Set()};break;
+    case 'step3':S.modal={step:3,id:'chatgpt',notice:'',switching:false,chosen:new Set(['0:0']),subOk:new Set()};break;
+    case 'confirm':S.modal={step:3,id:'chatgpt',notice:'',switching:false,chosen:new Set(['0:0']),subOk:new Set()};S.confirm={id:'chatgpt',origin:'modal'};break;
+    case 'after':LOGINS.delete('chatgpt');event('Signed out of ChatGPT · 存储凭据已删（DB 行 + 文件）','good');event('模型行保留 · source_state 翻为 missing');S.drawer={rowId:'llm_demo_1'};break;
+    case 'drawer':S.drawer={rowId:'llm_demo_1'};break;
+    case 'envkey':LOGINS.set('opencode-go',{name:'OPENCODE_API_KEY',detail:'',envKey:true});S.modal={step:3,id:'opencode-go',notice:'',switching:false,chosen:new Set(),subOk:new Set()};break;
+    case 'shared':S.shared=true;S.modal={step:3,id:'chatgpt',notice:'',switching:false,chosen:new Set(['0:0']),subOk:new Set()};S.confirm={id:'chatgpt',origin:'modal'};break;
+    case 'external':S.external=true;LOGINS.set('qodercn',{name:'adopted@official.example',detail:'官方客户端'});S.modal={step:3,id:'qodercn',notice:'external',switching:false,chosen:new Set(),subOk:new Set()};event('Logout 返回 409 · external_login=true','warn');event('官方客户端登录被重新导入','warn');break;
+    default:break;
+  }
+  render();
+}
+/* ================= 渲染 ================= */
+function railHTML(){
+  return `<aside class="rail">
+    <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#7EA2EA"/><path d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z" fill="#0F1D38"/><rect x="18.5" y="20.5" width="4" height="4" rx="0.6" fill="#0F1D38"/></svg>
+      <span><span class="wm"><b>Forebrain</b> Harness</span><span class="ver">v0.43.0</span></span></div>
+    <button type="button" class="tenant" aria-expanded="false"><span><span class="l">当前主代理（2）</span><span class="n">main</span></span>${icon('down')}</button>
+    <nav class="rnav" aria-label="导航">
+      <button type="button" class="rl${S.route==='chat'?' on':''}" data-act="route" data-v="chat">${icon('chat')}<span>对话</span></button>
+      ${NAV.map(([k,l,ic])=>`<button type="button" class="rl${S.route===k?' on':''}" data-act="route" data-v="${k}">${icon(ic)}<span>${l}</span></button>`).join('')}
+    </nav>
+    <div class="rfoot"><button type="button" class="rl${S.route==='settings'?' on':''}" data-act="route" data-v="settings">${icon('settings')}<span>设置</span></button><button type="button" class="rcollapse" aria-label="收起">${icon('panel')}</button></div>
+  </aside>`;
+}
+function topHTML(){
+  const t=S.route==='settings'?(S.tab==='models'?'设置 · 模型':'设置'):(S.route==='chat'?'对话':(NAV.find(n=>n[0]===S.route)||['',''])[1]);
+  return `<header class="top"><span class="t">${esc(t)}</span><span class="sp"></span>
+    <button type="button" class="chipb">${icon('plus')}新建主代理</button>
+    <button type="button" class="chipb">${icon('langs')}中文</button>
+    <button type="button" class="chipb sq" aria-label="深色">${icon('moon')}</button></header>`;
+}
+function badge(state){
+  if(state==='usable')return '<span class="bdg ok">已登录</span>';
+  if(state==='dead'||state==='unreachable')return '<span class="bdg wn">未登录</span>';
+  return '<span class="bdg g">未登录</span>';
+}
+function drawerBadge(state){
+  if(state==='usable')return '<span class="bdg ok">已登录</span>';
+  if(state==='dead')return '<span class="bdg wn">登录已失效</span>';
+  if(state==='unreachable')return '<span class="bdg wn">无法确认登录状态</span>';
+  return '<span class="bdg g">未登录</span>';
+}
+function acctText(acct){
+  if(!acct)return '';
+  const detail=acct.envKey?'环境变量提供':acct.detail;
+  return esc(acct.name)+(detail?` <i>· ${esc(detail)}</i>`:'');
+}
+function keyCell(r){
+  const view=rowsView().find(x=>x.id===r.id);
+  if(r.login){
+    const name=view.source_account&&view.source_state!=='missing'?`<span class="keyacct" data-testid="models-cell-account-name">${esc(view.source_account.name)}</span>`:'';
+    return `<span class="key-none" data-testid="models-cell-account">账号登录</span>${name}`;
+  }
+  if(r.key)return `<span class="kmask" data-testid="models-cell-key">••••<b>${esc(r.key)}</b></span>`;
+  return '<span class="bdg wn">未设置</span>';
+}
+function modelsTab(){
+  const rows=[...DB.values()].map(r=>{
+    const src=r.source?` 订阅登录${r.plan?' '+r.plan:''}`:'';
+    const subok=r.sub?' · <span class="subok">子代理可用</span>':'';
+    return `<tr data-model-row="${r.id}" class="${flashId===r.id?'rowflash':''}">
+      <td><span class="mname" data-testid="models-cell-model">${esc(r.name)}</span>${r.def?' <span class="bdg b">默认</span>':''}<span class="mprov">${esc(PROVIDER_NAMES[r.provider]||r.provider)}${src}${subok}</span></td>
+      <td class="wrap"><span class="addr">${esc(r.base)}</span></td>
+      <td>${r.path?`<span class="pth">${esc(r.path)}</span>`:'<span class="pth na">原生协议</span>'}</td>
+      <td>${keyCell(r)}</td>
+      <td class="act"><span class="acts">
+        <button type="button" class="icbtn${r.def?' ph':''}" data-act="default" data-v="${r.id}" aria-label="设为默认" title="设为默认">${icon('star')}</button>
+        <button type="button" class="icbtn" data-act="edit" data-v="${r.id}" aria-label="编辑" title="编辑">${icon('pencil')}</button>
+        <button type="button" class="icbtn dgr" data-act="del" data-v="${r.id}" aria-label="删除" title="删除">${icon('trash')}</button>
+      </span></td></tr>`;
+  }).join('');
+  return `<div class="page"><div class="tb">
+      <span class="search">${icon('search')}搜索模型、服务商或地址</span><span class="grow"></span>
+      <button type="button" class="btn pri" data-act="add-model">${icon('plus')}添加模型</button>
+      <button type="button" class="btn plain" data-act="sub-open" data-testid="models-subscribe">${icon('login')}订阅登录</button>
+      <button type="button" class="btn plain" data-act="reload">${icon('refresh')}刷新</button></div>
+    <table class="tbl models"><colgroup><col style="width:24%"><col><col style="width:160px"><col style="width:140px"><col style="width:112px"></colgroup>
+      <thead><tr><th>模型</th><th>接口地址</th><th>API 路径</th><th>API Key</th><th class="act">操作</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    <div class="pager"><span>共 ${DB.size} 条</span><select class="pgsel" aria-label="每页条数"><option>10 条/页</option></select><button type="button" class="pg" disabled aria-label="上一页">${icon('left')}</button><button type="button" class="pg on">1</button><button type="button" class="pg" disabled aria-label="下一页">${icon('right')}</button></div>
+    <p class="listnote">订阅登录的模型用账号调用，没有 Key；账号名显示在「账号登录」下方。退出登录只删本机凭据，模型行保留。</p></div>`;
+}
+function settingsHTML(){
+  const nav=TABS.map(([gl,items])=>`<div class="gl">${gl}</div>${items.map(([k,l])=>`<button type="button" class="${S.tab===k?'on':''}" role="tab" aria-selected="${S.tab===k}" data-act="tab" data-v="${k}">${l}</button>`).join('')}`).join('');
+  const content=S.tab==='models'?modelsTab():`<div class="stub">${esc((TABS.flatMap(([,x])=>x).find(([k])=>k===S.tab)||['',''])[1])}沿用现有页面</div>`;
+  return `<div class="set"><nav class="subnav" aria-label="设置">${nav}</nav><div class="content">${content}</div></div>`;
+}
+function sigHTML(base,path,model){
+  return `<span class="sig"><b>${esc(model)}</b><span>${esc(base)}${path?`<em>${esc(path)}</em>`:''}</span></span>`;
+}
+function accountBarHTML(id){
+  const acct=accountOf(id);const login=loginOf(id);const env=!!login?.envKey;
+  const name=acct?esc(acct.name):'登录有效，未存储账号名';
+  const detail=acct?(env?'环境变量提供':esc(acct.detail)):'';
+  const acts=env?'':`<div class="acct__acts">
+      ${canLogout(id)?`<button type="button" class="btn dgr" data-act="logout" data-v="${id}" data-origin="modal" data-testid="models-logout">${icon('logout')}退出登录</button>`:''}
+      <button type="button" class="btn plain" data-act="switch-account" data-v="${id}" data-testid="models-switch-account">${icon('login')}换个账号登录</button>
+    </div>`;
+  const hint=env?`<p class="envhint">这个登录由环境变量 <code>OPENCODE_API_KEY</code> 提供，无法在这里退出；请在启动 Forebrain Harness 的终端里 unset 后重启。</p>`:'';
+  return `<div class="acct" data-testid="models-login-account"><div class="acct__t"><b>${name}</b>${detail?`<span>${detail}</span>`:''}${badge(stateOf(id))}</div>${acts}</div>${hint}`;
+}
+function noticeHTML(kind){
+  if(kind==='external')return `<div class="noticebar" role="status" data-testid="models-logout-external">${icon('alert')}<span>本机保存的登录已删除，但环境变量或官方客户端仍会让这台机器重新登录。</span></div>`;
+  if(kind==='failed')return `<div class="noticebar bad" role="alert">${icon('alert')}<span>退出失败，请重试</span></div>`;
+  return '';
+}
+function subDialog(){
+  const st=S.modal;if(!st)return '';
+  const close=`<button type="button" class="icbtn" data-act="close-modal" aria-label="关闭">${icon('x')}</button>`;
+  let body='',foot='';
+  if(st.step===1){
+    body=`<div class="subl">${SUBSCRIPTIONS.map(s=>{
+      const acct=accountOf(s.id);
+      const sub=acct?`<span class="acctline" data-testid="models-sub-account-${s.id}">${acctText(acct)}</span>`:`<span>${s.flow==='paste'?'打开授权页完成授权；打不开时的地址可以粘贴回来。':'打开授权页，输入下面的验证码。'}</span>`;
+      return `<button type="button" class="subr" data-subscription="${s.id}" data-act="sub-pick" data-v="${s.id}"><span class="t"><b>${esc(s.name)}</b>${sub}</span>${badge(stateOf(s.id))}${icon('right')}</button>`;
+    }).join('')}</div>
+    <p class="listnote">只列能登录的订阅；只填 Key 的套餐（如智谱 Coding Plan）在「添加模型」里选对应接入点。</p>`;
+    foot=`<button type="button" class="btn plain" data-act="close-modal">关闭</button>`;
+  }else if(st.step===2){
+    const s=subOf(st.id);
+    const device=s.flow==='device';
+    body=`<div class="auth">
+      <p>${device?'打开授权页，输入下面的验证码。':'打开授权页完成授权；打不开时的地址可以粘贴回来。'}</p>
+      ${device?'<div class="ucode" data-testid="models-login-code">QK7M-2PLX</div>':''}
+      <div class="acts2"><button type="button" class="btn pri" data-act="open-auth">${icon('ext')}打开授权页</button><span class="wait"><span class="spin" aria-hidden="true"></span>等待授权</span></div>
+      ${device?'':`<div class="paste"><span>打不开页面？粘贴地址栏里的完整地址</span><div class="paste__row"><input class="fld mono" id="paste-url" placeholder="http://localhost:1455/auth/callback?code=…" value="${esc(S.pasteUrl)}" data-testid="models-login-paste"><button type="button" class="btn" data-act="paste-submit"${S.pasteUrl.trim()?'':' disabled'}>提交</button></div></div>`}
+    </div>`;
+    foot=`<button type="button" class="btn plain" data-act="sub-back">上一步</button><button type="button" class="btn pri" data-act="login-complete" data-testid="models-login-complete">完成登录</button>`;
+  }else{
+    const groups=OFFERS[st.id]||[];
+    body=noticeHTML(st.notice)+accountBarHTML(st.id)+groups.map((g,gi)=>`<div class="ogrp"><div class="ogh">${esc(g.label||g.plan)}<span>${g.models.filter((m,i)=>st.chosen.has(gi+':'+i)).length} 个已选</span></div>
+      ${g.models.map(([m,label,facts],i)=>`<div class="orow"><label class="ck"><input type="checkbox" ${st.chosen.has(gi+':'+i)?'checked':''} data-act="offer" data-v="${gi}:${i}">${sigHTML(g.base,g.path,label)}</label><small>${esc(facts)}</small><label class="ck osub"><input type="checkbox" ${st.subOk.has(gi+':'+i)?'checked':''}${st.chosen.has(gi+':'+i)?'':' disabled'} data-act="offer-sub" data-v="${gi}:${i}">子代理可用</label></div>`).join('')}</div>`).join('');
+    const n=st.chosen.size;
+    foot=`<button type="button" class="btn plain" data-act="sub-back">上一步</button><button type="button" class="btn pri" data-act="provision" data-testid="models-provision"${n?'':' disabled'}>添加 ${n} 个模型</button>`;
+  }
+  const stepTxt=st.step===1?'第 1 步，共 3 步：选择订阅':st.step===2?'第 2 步，共 3 步：登录':'第 3 步，共 3 步：选择模型';
+  return `<div class="mask" data-act="mask-modal"><div class="dlg wide" role="dialog" aria-modal="true" aria-label="订阅登录"><div class="dlg-h"><b>订阅登录</b>${close}</div><p class="stepl" data-testid="models-subscribe-step">${stepTxt}</p><div class="dlg-b">${body}</div><div class="dlg-f">${foot}</div></div></div>`;
+}
+function sourceCardHTML(r){
+  const state=stateOf(r.source);const acct=accountOf(r.source);const login=loginOf(r.source);
+  const acctRow=acct?`<div class="src__acct" data-testid="models-source-account"><span class="k">当前账号</span><b>${esc(acct.name)}</b>${acct.detail?`<span>${login?.envKey?'环境变量提供':esc(acct.detail)}</span>`:''}</div>`:'';
+  const hint=r.login?'用账号登录调用，没有 Key。登录失效时这个模型用不了，重新登录后恢复。':'接口地址、API 路径和 Key 由套餐决定。套餐的 Key 在控制台换过之后，点「重新获取 Key」。';
+  const acts=[
+    !r.login?`<button type="button" class="btn plain" data-act="refresh-key" data-v="${r.id}">${icon('refresh')}重新获取 Key</button>`:'',
+    `<button type="button" class="btn ${r.login?'pri':'plain'}" data-act="relogin" data-v="${r.source}" data-testid="models-relogin">${icon('login')}重新登录</button>`,
+    canLogout(r.source)?`<button type="button" class="btn dgr" data-act="logout" data-v="${r.source}" data-origin="drawer" data-testid="models-source-logout">${icon('logout')}退出登录</button>`:''
+  ].join('');
+  return `<div class="src" data-testid="models-source-card">
+    <div class="src__head"><b>来自订阅</b><span>${esc(PROVIDER_NAMES[r.source]||r.source)}${r.plan?' '+esc(r.plan):''}</span><span class="ml-auto">${drawerBadge(state)}</span></div>
+    ${acctRow}<p>${hint}</p><div class="src__acts">${acts}</div>
+    ${login?.envKey?'<p class="envhint">这个登录由环境变量 <code>OPENCODE_API_KEY</code> 提供，无法在这里退出；请在启动 Forebrain Harness 的终端里 unset 后重启。</p>':''}
+  </div>`;
+}
+function drawerHTML(){
+  const d=S.drawer;if(!d)return '';
+  const r=DB.get(d.rowId);if(!r)return '';
+  const close=`<button type="button" class="icbtn" data-act="close-drawer" aria-label="关闭">${icon('x')}</button>`;
+  const ro=(l,v,mono)=>`<div class="row"><div class="lab"><b>${l}</b></div><div><span class="ro${mono?' mono':''}">${v}</span></div></div>`;
+  const list=`<div class="rolist">${ro('服务商',esc(PROVIDER_NAMES[r.provider]||r.provider))}${ro('模型',esc(r.model),true)}${ro('接口地址',esc(r.base),true)}${ro('API 路径',r.path?`<span class="pth">${esc(r.path)}</span>`:'<span class="pth na">原生协议</span>')}${ro('API Key',r.login?'<span style="color:var(--quiet)">账号登录</span>':`<span class="kmask">••••<b>${esc(r.key)}</b></span> <span style="color:var(--muted);font-size:12px">套餐 Key</span>`)}</div>`;
+  return `<div class="dmask" data-act="mask-drawer"></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="编辑模型">
+    <div class="dr-h"><b>编辑模型</b>${close}</div>
+    <div class="dr-b">${sourceCardHTML(r)}${list}
+      <div class="subhint">要换模型或协议，在订阅登录里重新选择<button type="button" data-act="relogin" data-v="${r.source}">打开订阅登录</button></div>
+      <div class="src__switch"><button type="button" class="sw" role="switch" aria-checked="${r.sub}" data-act="sub-toggle" data-v="${r.id}" aria-label="主代理可用它派子代理"><i></i></button><span>主代理可用它派子代理</span><span class="h">只管子代理自己挑模型</span></div>
+      <div class="dr-sec">高级配置</div><p class="listnote">请求参数与能力沿用现有抽屉，本原型不展开。</p>
+    </div>
+    <div class="dlg-f"><button type="button" class="btn plain" data-act="close-drawer">取消</button><button type="button" class="btn pri" data-act="save-drawer">保存</button></div></aside>`;
+}
+function confirmHTML(){
+  const c=S.confirm;if(!c)return '';
+  return `<div class="mask" data-act="mask-confirm" style="z-index:30"><div class="dlg" style="width:400px" role="alertdialog" aria-modal="true" aria-label="退出登录？">
+    <div class="dlg-h"><b>退出登录？</b><button type="button" class="icbtn" data-act="confirm-cancel" aria-label="关闭">${icon('x')}</button></div>
+    <div class="dlg-b"><p style="margin:6px 0;font-size:13px;line-height:1.5;color:var(--ink-2)">将删除本机保存的登录凭据。${S.shared?'这份凭据与 Codex CLI 共用（<code>~/.codex/auth.json</code>），退出会同时让 Codex CLI 退出登录。':''}已添加的模型会保留，但在重新登录前无法调用。</p></div>
+    <div class="dlg-f"><button type="button" class="btn plain" data-act="confirm-cancel">取消</button><button type="button" class="btn dgr-fill" data-act="confirm-ok" data-testid="confirm-ok">退出登录</button></div>
+  </div></div>`;
+}
+function render(){
+  const content=S.route==='settings'?settingsHTML():`<div class="page"><div class="stub">${esc(S.route==='chat'?'对话':(NAV.find(n=>n[0]===S.route)||['',''])[1])}沿用现有页面</div></div>`;
+  $('#app').innerHTML=railHTML()+`<div class="work">${topHTML()}<div class="body">${content}</div></div>`+drawerHTML()+subDialog()+confirmHTML();
+  renderInspector();
+}
+function renderInspector(){
+  const id=S.modal?.id|| (S.drawer?DB.get(S.drawer.rowId)?.source:'')||'';
+  const acct=id?accountOf(id):null;const login=id?loginOf(id):null;
+  const facts=[
+    ['当前订阅',id?(subOf(id)?.name||id):'尚未选择'],
+    ['登录状态',id?stateOf(id):'—'],
+    ['账号',acct?acct.name+(acct.detail?' ('+(login?.envKey?'环境变量提供':acct.detail)+')':''):(id?'无账号名':'—')],
+    ['凭据来源',login?.envKey?'环境变量':id&&S.external&&id==='qodercn'?'官方客户端会重新导入':id&&LOGINS.has(id)?'本机存储（DB 行 + 文件）':'—'],
+    ['可退出',id?(canLogout(id)?'是':'否'):'—'],
+    ['模型行数',String(DB.size)],
+    ['退出后行保留','是 · 源状态翻为 missing']
+  ];
+  $('#facts').innerHTML=facts.map(([k,v])=>'<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>').join('');
+  $('#events').innerHTML=EVENTS.length?EVENTS.map(x=>'<div class="'+esc(x.tone)+'">'+esc(x.text)+'</div>').join(''):'<span>尚无凭据写入；浏览和选择不会保存配置。</span>';
+  $('#database').textContent=JSON.stringify(rowsView().map(r=>({id:r.id,provider:r.provider,model:r.model,base_url:r.base,api_path:r.path,source:r.source,source_plan:r.plan,source_state:r.source_state,source_account:r.source_account?{name:r.source_account.name,detail:r.source_account.detail,env_key:!!r.source_account.envKey}:null,source_can_logout:r.source_can_logout,login_backed:r.login,subagent_allowed:r.sub})),null,2);
+}
+/* ================= 交互 ================= */
+function openModal(id){
+  S.modal={step:1,id:'',notice:'',switching:false,chosen:new Set(),subOk:new Set()};
+  if(id)pickSubscription(id);else render();
+}
+function pickSubscription(id){
+  const st=S.modal;st.id=id;st.chosen=new Set();st.subOk=new Set();st.notice='';
+  if(stateOf(id)==='usable'){st.step=3}else{st.step=2;S.pasteUrl=''}
+  render();
+}
+function completeSignIn(){
+  const st=S.modal;const id=st.id;const s=subOf(id);
+  const fresh=st.switching?{name:'new.account@example.test',detail:id==='chatgpt'?'plus':id==='opencode-go'?'Example Org':''}:clone(s.account);
+  LOGINS.set(id,fresh);S.dead='';
+  event((st.switching?'换个账号 · ':'登录完成 · ')+fresh.name,'good');
+  st.switching=false;st.step=3;st.chosen=new Set();st.subOk=new Set();st.notice='';
+  render();
+}
+function doLogout(id,origin){
+  const s=subOf(id);
+  LOGINS.delete(id);
+  event('Signed out of '+s.name+' · 存储凭据已删（DB 行 + 文件）','good');
+  event('模型行保留 · source_state 翻为 missing');
+  if(S.external&&id==='qodercn'){
+    LOGINS.set(id,{name:'adopted@official.example',detail:'官方客户端'});
+    event('Logout 返回 409 · external_login=true','warn');
+    event('官方客户端登录被重新导入','warn');
+    if(origin==='modal'&&S.modal){S.modal.notice='external';S.modal.chosen=new Set();S.modal.subOk=new Set()}
+    render();return;
+  }
+  if(origin==='modal'&&S.modal){S.modal.step=1;S.modal.id='';S.modal.notice='';S.modal.chosen=new Set();S.modal.subOk=new Set()}
+  render();
+}
+function provision(){
+  const st=S.modal;const groups=OFFERS[st.id]||[];let n=0;
+  st.chosen.forEach(key=>{
+    const [gi,mi]=key.split(':').map(Number);const g=groups[gi];const m=g.models[mi];
+    const id='llm_demo_'+(DB.size+1+n);
+    DB.set(id,{id,provider:st.id,model:m[0],name:m[1],base:g.base,path:g.path,source:st.id,plan:g.plan,login:st.id!=='volcengine',key:st.id==='volcengine'?'d410':'',sub:st.subOk.has(key),def:false});
+    n++;flashId=id;
+  });
+  event('Provision · 已添加 '+n+' 个模型行（模拟）','good');
+  S.modal=null;render();
+}
+function handleAct(act,v,el,e){
+  switch(act){
+    case 'route':S.route=v;render();break;
+    case 'tab':S.tab=v;render();break;
+    case 'sub-open':openModal('');break;
+    case 'sub-pick':pickSubscription(v);break;
+    case 'close-modal':S.modal=null;render();break;
+    case 'mask-modal':if(!e.target.closest('.dlg')){S.modal=null;render()}break;
+    case 'sub-back':{const st=S.modal;if(st.step===3){st.step=stateOf(st.id)==='usable'?1:2;st.notice=''}else{st.step=1;st.switching=false}render();break}
+    case 'open-auth':event('打开授权页（模拟，未联网）');render();break;
+    case 'paste-submit':completeSignIn();break;
+    case 'login-complete':completeSignIn();break;
+    case 'switch-account':{const st=S.modal;st.switching=true;st.step=2;st.notice='';S.pasteUrl='';event('force=1 · 强制重新走登录流程');render();break}
+    case 'logout':S.confirm={id:v,origin:el.dataset.origin||'modal'};render();break;
+    case 'confirm-cancel':S.confirm=null;render();break;
+    case 'mask-confirm':if(!e.target.closest('.dlg')){S.confirm=null;render()}break;
+    case 'confirm-ok':{const c=S.confirm;S.confirm=null;doLogout(c.id,c.origin);break}
+    case 'offer':{const st=S.modal;if(st.chosen.has(v)){st.chosen.delete(v);st.subOk.delete(v)}else st.chosen.add(v);render();break}
+    case 'offer-sub':{const st=S.modal;if(st.subOk.has(v))st.subOk.delete(v);else st.subOk.add(v);render();break}
+    case 'provision':provision();break;
+    case 'edit':S.drawer={rowId:v};render();break;
+    case 'close-drawer':S.drawer=null;render();break;
+    case 'mask-drawer':if(!e.target.closest('.drawer')){S.drawer=null;render()}break;
+    case 'save-drawer':event('保存（模拟）· 模型行未变');S.drawer=null;render();break;
+    case 'sub-toggle':{const r=DB.get(v);r.sub=!r.sub;event('子代理可用 · '+(r.sub?'开':'关'));render();break}
+    case 'relogin':S.drawer=null;openModal(v);break;
+    case 'refresh-key':event('重新获取 Key（模拟，未联网）');render();break;
+    case 'reload':event('刷新列表（模拟）· 账号本地读，零厂商调用');render();break;
+    case 'default':{const r=DB.get(v);[...DB.values()].forEach(x=>x.def=false);r.def=true;flashId=v;event('设为默认 · '+r.name);render();break}
+    case 'del':event('删除模型不在本原型范围（计划 374 只动凭据，不动模型行）','warn');render();break;
+    case 'add-model':event('添加模型抽屉沿用现有实现，不在本原型范围');render();break;
+    default:break;
+  }
+}
+$('#app').addEventListener('click',e=>{
+  const el=e.target.closest('[data-act]');if(!el)return;
+  handleAct(el.dataset.act,el.dataset.v||'',el,e);
+});
+$('#app').addEventListener('input',e=>{
+  if(e.target.id==='paste-url'){S.pasteUrl=e.target.value;const btn=e.target.closest('.paste__row')?.querySelector('[data-act="paste-submit"]');if(btn)btn.disabled=!S.pasteUrl.trim()}
+});
+$('#app').addEventListener('change',e=>{
+  const el=e.target.closest('[data-act]');if(!el)return;
+  if(el.dataset.act==='offer'||el.dataset.act==='offer-sub')handleAct(el.dataset.act,el.dataset.v,el,e);
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape')return;
+  if(S.confirm){S.confirm=null;render()}
+  else if(S.modal){S.modal=null;render()}
+  else if(S.drawer){S.drawer=null;render()}
+});
+$('#reset').addEventListener('click',()=>goScene(sceneID));
+$('#scenes').innerHTML='<span class="tlabel">场景</span>'+SCENES.map(s=>`<button type="button" data-scene="${s.id}" aria-pressed="false">${esc(s.title)}</button>`).join('');
+$('#scenes').addEventListener('click',e=>{const b=e.target.closest('[data-scene]');if(b)goScene(b.dataset.scene)});
+window.accountWebPrototype={
+  scene:goScene,
+  snapshot:()=>({
+    scene:sceneID,route:S.route,tab:S.tab,
+    modal:S.modal?{step:S.modal.step,id:S.modal.id,notice:S.modal.notice,switching:S.modal.switching,chosen:[...S.modal.chosen]}:null,
+    drawer:S.drawer?{rowId:S.drawer.rowId}:null,
+    confirm:S.confirm?{id:S.confirm.id,origin:S.confirm.origin}:null,
+    dead:S.dead,external:S.external,
+    signed:[...LOGINS.keys()],
+    states:Object.fromEntries(SUBSCRIPTIONS.map(s=>[s.id,stateOf(s.id)])),
+    accounts:Object.fromEntries(SUBSCRIPTIONS.map(s=>[s.id,accountOf(s.id)])),
+    canLogout:Object.fromEntries(SUBSCRIPTIONS.map(s=>[s.id,canLogout(s.id)])),
+    rows:rowsView().map(r=>({id:r.id,provider:r.provider,model:r.model,source:r.source,source_state:r.source_state,source_account:r.source_account,source_can_logout:r.source_can_logout,login_backed:r.login,subagent_allowed:r.sub,default:r.def})),
+    events:clone(EVENTS)
+  })
+};
+goScene('table');
+</script>
+</body>
+</html>

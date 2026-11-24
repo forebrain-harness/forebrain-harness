@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Forebrain Harness 订阅账号与退出 · TUI 原型 374</title>
+<style>
+:root{--page:#0c1015;--card:#11161d;--line:#222b37;--ink:#d6dee8;--mut:#8794a5;--acc:#87afd7;--acc-dim:#5c7a99;--ok:#5faf00;--warn:#ffaf00;--bad:#ff5f5f;--tbg:#101318;--lh:20px}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:14px/1.65 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif}button,input{font:inherit}button{cursor:pointer}button:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:3px}a{color:var(--acc)}.wrap{max-width:1460px;margin:auto;padding:30px 30px 60px}header{margin-bottom:24px}.eyebrow{font-size:11px;letter-spacing:.14em;color:var(--acc-dim);margin-bottom:8px}h1{font-size:23px;line-height:1.3;margin:0 0 9px;letter-spacing:.2px}.sub{color:var(--mut);max-width:1000px}.sub code,code{color:var(--acc);background:#161d27;padding:1px 5px;border-radius:4px;font-size:.95em}.badge{display:inline-block;border:1px solid #624a27;color:#d9ae70;background:#292116;border-radius:4px;font-size:11px;letter-spacing:0;padding:2px 7px;margin-left:10px;vertical-align:3px}.layout{display:grid;grid-template-columns:252px minmax(0,1fr);gap:22px;align-items:start}nav{position:sticky;top:20px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 10px;max-height:calc(100vh - 40px);overflow:auto}.group{color:var(--acc-dim);font-size:11px;letter-spacing:.12em;margin:15px 8px 6px}.group:first-child{margin-top:2px}nav button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--ink);font-size:13px;padding:8px 9px;border-radius:7px;line-height:1.45}nav button:hover{background:#18202b}nav button.on{background:#1b2634;color:#fff;box-shadow:inset 2px 0 0 var(--acc)}nav .num{color:var(--acc-dim);font-size:12px;margin-right:8px;font-variant-numeric:tabular-nums}.nav-foot{border-top:1px solid var(--line);margin:15px 8px 0;padding-top:12px;font-size:12px;color:var(--mut)}.stage{min-width:0;overflow-x:auto}.bar{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}.bar h2{font-size:15px;margin:0;font-weight:600}.dims{margin-left:auto;display:flex;gap:6px;align-items:center;color:var(--mut);font-size:12px}.dims button,.small-button{background:var(--card);border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:3px 9px;font-size:12px}.dims button.on{color:var(--acc);border-color:var(--acc-dim)}.term{background:var(--tbg);border:1px solid #26303d;border-radius:12px;overflow:hidden;box-shadow:0 18px 50px #0007;outline:none}.term:focus-visible{border-color:#5c7a99}.thead{display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid #1e2631;color:var(--mut);font-size:12px;background:#0e1218}.dot{width:9px;height:9px;border-radius:50%;background:#2c3745}.tt{margin-left:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.kb{margin-left:auto;color:var(--acc-dim)}.screen{padding:12px 8px 14px;overflow-x:auto}.grid{font-family:ui-monospace,SFMono-Regular,"SF Mono","Fira Code",Menlo,Consolas,monospace;font-size:13px;line-height:var(--lh);width:max-content;margin:auto;font-variant-ligatures:none}.row{white-space:pre;height:var(--lh)}.row[data-hit]{cursor:pointer}.row[data-hit]:hover{background:#17202b}.fg110{color:#87afd7}.fg45{color:#00d7ff}.fg74{color:#5fafd7}.fg70{color:#5faf00}.fg203{color:#ff5f5f}.fg214{color:#ffaf00}.fg245{color:#8a8a8a}.fg244{color:#808080}.fg249{color:#b2b2b2}.fg252{color:#d0d0d0}.fg90{color:#808080}.bg238{background:#444}.b{font-weight:700}.ft{opacity:.52}.rev{background:#d0d0d0;color:#444;opacity:1}.cap{margin-top:12px;color:var(--mut);font-size:13px;min-height:43px}.cap b{color:var(--ink)}.keys{margin-top:9px;color:var(--acc-dim);font-size:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.key{background:#18202b;border:1px solid #2a3542;border-bottom-width:2px;border-radius:4px;padding:1px 8px;font:12px ui-monospace,Menlo,monospace;color:var(--ink)}.key:hover{border-color:var(--acc-dim)}.inspection{margin-top:20px;border:1px solid var(--line);border-radius:10px;background:var(--card)}.inspect-head{display:flex;gap:12px;align-items:center;padding:12px 15px;font-size:13px;border-bottom:1px solid var(--line)}.inspect-head strong{font-weight:500}.inspect-head span{color:var(--mut);font-size:12px}.inspect-head button{margin-left:auto}.inspect-body{display:grid;grid-template-columns:1fr 1fr;gap:22px;padding:15px}.inspect-title{font-size:11px;letter-spacing:.06em;color:var(--acc-dim);margin-bottom:8px}.kv{display:grid;grid-template-columns:108px minmax(0,1fr);gap:5px 8px;font-size:12px}.kv dt{color:var(--mut)}.kv dd{margin:0;overflow-wrap:anywhere}.events{font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--mut);max-height:152px;overflow:auto}.events div{padding-left:10px;border-left:1px solid #2a394a;margin:4px 0}.events .good{color:#91ac76}.events .bad{color:#e29288}.events .warn{color:#d9ae70}details{border-top:1px solid var(--line);padding:10px 15px;color:var(--mut);font-size:12px}summary{cursor:pointer}pre{font:12px/1.7 ui-monospace,Menlo,monospace;color:var(--ink);overflow:auto;max-height:260px;margin:12px 0 2px}.notes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:25px}.note{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:17px 18px}.note h3{font-size:13px;color:var(--acc);margin:0 0 8px}.note p{margin:6px 0;font-size:12px;color:var(--mut)}.legend{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--acc);margin-right:5px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}@media(max-width:1100px){.wrap{padding:22px 18px 40px}.layout{grid-template-columns:225px minmax(0,1fr)}.notes{grid-template-columns:1fr}.inspect-body{grid-template-columns:1fr}}@media(max-width:840px){.layout{grid-template-columns:1fr}nav{position:static;max-height:240px}.bar h2{width:100%}.dims{margin-left:0}.kb{display:none}.wrap{padding:20px 12px}.badge{display:block;width:max-content;margin:10px 0 0}.grid{margin:0}.inspect-head{flex-wrap:wrap}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><div class="eyebrow">FOREBRAIN HARNESS / DESIGN REVIEW 374</div><h1>订阅登录：显示当前账号 · 退出登录<span class="badge">待确认原型 · 未实施</span></h1><div class="sub">沿用 <code>311-connect-prototype.html</code> 的终端渲染规范。已登录订阅在供应商行显示账号，进入后先经过账号页（继续 / 换号 / 退出）；退出只删本机凭据，模型行保留。终端面板文案与真实 TUI 一致为英文。<br>点击终端直接按键，也可点击选项；下方实时检查模拟凭据与模型表。所有账号均为虚构演示数据，不登录、不发送请求、不写真实配置，勿输入真实密钥。</div></header>
+<div class="layout">
+<nav id="nav" aria-label="原型场景"></nav>
+<main class="stage">
+<div class="bar"><h2 id="scene-title"></h2><div class="dims" aria-label="终端宽度">宽度 <button class="on" data-width="120">120 列</button><button data-width="88">88 列</button><button data-width="68">68 列</button></div></div>
+<div class="term" id="terminal" tabindex="0" role="application" aria-label="可交互的 Forebrain 终端原型。方向键移动，回车确认，Esc 返回。">
+<div class="thead"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="tt" id="terminal-title">forebrain — 120×40</span><span class="kb" id="page-position"></span></div>
+<div class="screen"><div class="grid" id="grid"></div></div>
+</div>
+<div class="cap" id="caption"></div>
+<div class="keys"><span>终端按键</span><button class="key" data-key="ArrowUp" aria-label="向上">↑</button><button class="key" data-key="ArrowDown" aria-label="向下">↓</button><button class="key" data-key="Enter">Enter</button><button class="key" data-key="Escape">Esc</button><button class="key" data-key="Tab">Tab</button><button class="key" data-key="Home">Home</button><button class="key" data-key="End">End</button><span>供应商列表支持输入过滤；退出必须经过确认页。</span></div>
+<section class="inspection" aria-label="模拟凭据观察器"><div class="inspect-head"><strong>凭据与模型观察器</strong><span>原型辅助区 · 不属于产品 TUI</span><button class="small-button" id="reset">重置当前场景</button></div><div class="inspect-body"><div><div class="inspect-title">当前登录 / 模型行</div><dl class="kv" id="facts"></dl></div><div><div class="inspect-title">凭据边界 · 事件记录</div><div class="events" id="events"></div></div></div><details><summary>查看模拟模型表（退出后行保留；只在本页内存，无密钥）</summary><pre id="database"></pre></details></section>
+<div class="notes"><section class="note"><h3>账号本地读，零厂商调用</h3><p>账号名来自本机存储的凭据（邮箱 / 昵称 / 掩码 ID），显示身份不发起网络请求。火山方舟只存 STS 凭据，显示掩码 AccessKeyID；读不出身份时降级为状态徽章。</p></section><section class="note"><h3>退出只删凭据，模型行保留</h3><p>退出删除 DB 凭据行与文件兜底两处；已添加的模型行不删，源状态翻为未登录，重新登录后恢复。确认框明示这一后果；凭据文件与别的客户端共用时（例如 Codex CLI 的 ~/.codex/auth.json），确认框把该路径写出来，说明那个客户端也会退出登录。</p></section><section class="note"><h3>外部来源如实提示</h3><p>OpenCode 的 <code>OPENCODE_API_KEY</code> 由环境提供，不提供退出按钮；Qoder CN 的 PAT / 官方客户端登录会在下次检查时重新导入，退出后如实提示而非宣称已退出。</p></section></div>
+</main></div></div>
+<div id="announcement" class="sr-only" aria-live="polite"></div>
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const charWidth=c=>/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/.test(c)?2:1;
+const width=s=>[...String(s)].reduce((n,c)=>n+charWidth(c),0);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const rep=(s,n)=>s.repeat(Math.max(0,n));
+const style=(fg='',bg='',bold=false,faint=false)=>({fg,bg,bold,faint});
+const TXT=style(),ACC=style('110'),TITLE=style('110','',true),DIM=style('244'),HINT=style('','',false,true),OK=style('70'),BAD=style('203'),WARN=style('214');
+class Line{constructor(hit=null){this.parts=[];this.w=0;this.hit=hit}add(text,s=TXT){text=String(text);this.parts.push({text,s});this.w+=width(text);return this}pad(w,s=TXT){return this.add(rep(' ',w-this.w),s)}}
+const line=(text='',s=TXT,hit=null)=>new Line(hit).add(text,s);
+function wrap(text,max){max=Math.max(1,max);const out=[];let current='';for(const word of String(text).split(' ')){if(!word)continue;if(width(word)>max){if(current)out.push(current);current='';for(const c of word){if(width(current+c)>max){out.push(current);current=''}current+=c}}else if(width(current)+(current?1:0)+width(word)>max){out.push(current);current=word}else current+=(current?' ':'')+word}if(current||!out.length)out.push(current);return out}
+function textRows(text,s=TXT,prefix='  ',hit=null){return wrap(text,COLS-2-width(prefix)).map((chunk,i)=>line(i?rep(' ',width(prefix)):prefix,TXT,hit).add(chunk,s))}
+const clone=x=>JSON.parse(JSON.stringify(x));
+const levelLabel=e=>({none:'Off',low:'Low',medium:'Medium',high:'High',xhigh:'xHigh',max:'Max','':'Provider default'}[e]??e);
+const rankLevels=['none','low','medium','high','xhigh','max'];
+function ordered(values){const unique=[...new Set(values.map(x=>String(x).trim().toLowerCase()).filter(Boolean))];return [...rankLevels.filter(x=>unique.includes(x)),...unique.filter(x=>!rankLevels.includes(x))]}
+const offer=(provider,model,name,base,path,levels,official='',plan='')=>({provider,model,name,base,path,levels,official,plan});
+const endpoint=m=>m.base+(m.path||'');
+const identity=m=>[m.provider,m.model,m.base,m.path||''].join('\u0001');
+const SUBSCRIPTIONS=[
+ {id:'chatgpt',label:'ChatGPT',account:{name:'doudou@example.test',detail:'plus'}},
+ {id:'opencode-go',label:'OpenCode Go',account:{name:'dev@example.test',detail:'Example Org'}},
+ {id:'volcengine',label:'Volcengine Ark',account:{name:'AKLT…f3a9',detail:'STS'}},
+ {id:'qodercn',label:'Qoder CN',account:{name:'li@example.test',detail:''}},
+ {id:'workbuddy',label:'WorkBuddy',account:{name:'Wang Bin',detail:'pro'}}
+];
+const APIS=[{id:'openai',label:'OpenAI',desc:''},{id:'anthropic',label:'Anthropic',desc:''}];
+function subLabel(id){return SUBSCRIPTIONS.find(p=>p.id===id)?.label||id}
+function subscriptionModels(id){
+ if(id==='chatgpt')return [offer(id,'gpt-5.5','GPT-5.5','https://chatgpt.com/backend-api/codex','',['low','medium','high','xhigh'],'medium',''),offer(id,'gpt-5.5-mini','GPT-5.5 mini','https://chatgpt.com/backend-api/codex','',['low','medium','high'],'low',''),offer(id,'gpt-5.4','GPT-5.4','https://chatgpt.com/backend-api/codex','',['low','medium','high'],'medium','')];
+ if(id==='opencode-go')return [offer(id,'glm-5.3','GLM 5.3','https://opencode.ai/zen/go/v1','/chat/completions',['low','high','max'],'','Go'),offer(id,'kimi-k3','Kimi K3','https://opencode.ai/zen/go/v1','/chat/completions',[],'','Go'),offer(id,'deepseek-v4-pro','DeepSeek V4 Pro','https://opencode.ai/zen/go/v1','/chat/completions',['low','medium','high'],'','Go Plus')];
+ if(id==='qodercn')return [offer(id,'auto','Auto','https://gateway.qoder.com.cn','/algo/api/v2/service/pro/sse/agent_chat_generation',[],'','Account')];
+ if(id==='workbuddy')return [offer(id,'hy4','Hy4','https://workbuddy.example.test','/v1/chat/completions',['low','medium','high'],'medium','Pro'),offer(id,'hy3','Hy3','https://workbuddy.example.test','/v1/chat/completions',['low','high'],'','Pro')];
+ return [offer(id,'doubao-seed-2.1-pro','Doubao Seed 2.1 Pro','https://ark.cn-beijing.volces.com/api/coding','/v1/messages',['low','medium','high'],'medium','Coding Plan'),offer(id,'glm-5.3','GLM 5.3','https://ark.cn-beijing.volces.com/api/coding','/v1/messages',['low','high','max'],'high','Coding Plan'),offer(id,'glm-5.3','GLM 5.3','https://ark.cn-beijing.volces.com/api/plan','/v1/messages',['low','high','max'],'low','Agent Plan')];
+}
+const SCENES=[
+ {id:'start',group:'A · 完整流程',title:'供应商列表 · 账号行',desc:'已登录订阅在副行显示账号（邮箱 / 昵称 / 掩码 ID）；账号名即登录态信号，不再重复 Signed in 标记。选择已登录订阅进入账号页，未登录进入登录页。列表 ≥8 项，支持输入过滤。'},
+ {id:'account',group:'A · 完整流程',title:'账号页 · 继续 / 换号 / 退出',desc:'有存储登录的订阅（usable / unreachable / dead）走 Provider → Account → Models → Effort → Subagents → Review。usable/unreachable 三个选项：继续用这个账号、换个账号登录、退出（危险项，需确认）；dead 只有「Sign in again」与「Sign out」，见场景 10。'},
+ {id:'signout',group:'A · 完整流程',title:'退出确认',desc:'退出必须确认：明示删除本机凭据、模型保留但重新登录前无法调用。No 回到账号页且不删任何东西；Yes 删凭据后回供应商列表。'},
+ {id:'after-signout',group:'A · 完整流程',title:'退出后 · 行保留',desc:'ChatGPT 已退出：供应商行不再显示账号与 Signed in；模拟模型表里它的模型行仍在，源状态翻为 missing。重新选择该订阅会进入登录页而非账号页。'},
+ {id:'continue',group:'A · 完整流程',title:'继续 → 模型 → 保存',desc:'从账号页选 Continue 走完页序：单选模型 → 默认强度 → 授权 → 复核保存。账号页不改变 311 的后续页语义。'},
+ {id:'switch',group:'B · 关键设计帧',title:'换个账号登录',desc:'账号页选 Sign in with another account 复用既有登录流程（模拟浏览器授权，Enter 完成）。新登录替换旧凭据，成功后清缓存并进模型列表。'},
+ {id:'envkey',group:'B · 关键设计帧',title:'OpenCode · 环境变量 Key',desc:'无存储凭据但 OPENCODE_API_KEY 非空：账号显示为变量名，不提供退出按钮，改为提示在启动终端 unset。可以登录一个自己的账号，环境 Key 保持不动。'},
+ {id:'volcengine',group:'B · 关键设计帧',title:'火山方舟 · 掩码 STS',desc:'火山方舟只存 STS 临时凭据、没有身份字段：账号显示掩码 AccessKeyID（前 4 + … + 后 4）与 STS 标记，任何界面不显示全量。'},
+ {id:'external',group:'C · 边界与失败',title:'Qoder CN · 外部来源会重新登录',desc:'官方客户端仍登录时退出：本机存储凭据已删，但下次检查会重新导入。界面如实提示外部来源，不宣称已退出；账号页刷新为导入的账号。'},
+ {id:'dead',group:'C · 边界与失败',title:'登录已失效 · 供应商行',desc:'dead 不是 settled：供应商行仍显示存储凭据里的账号名，与 usable 行同形（列表不再放状态标记），状态在进入后分辨。dead 也进账号页——失效的登录恰恰最需要删掉，与 Web 的 can_logout 同一口径。'},
+ {id:'dead-account',group:'C · 边界与失败',title:'失效登录 · 账号页',desc:'dead 的账号页：标题写明这个登录已失效，选项只有「Sign in again」（默认）与「Sign out」，没有 Continue。重新登录清掉 dead 标记并进模型列表；退出回供应商列表、模型行保留。'},
+ {id:'shared',group:'C · 边界与失败',title:'共享凭据文件 · Codex CLI',desc:'credentials.chatgpt 指到 Codex CLI 的 ~/.codex/auth.json 时，退出删的是那个共用文件：确认页把路径写出来，明说 Codex CLI 也会退出登录。'},
+ {id:'no-account',group:'C · 边界与失败',title:'读不出账号名',desc:'凭据存在但身份字段全空（旧版本存储）：账号页降级为「登录有效，未存储账号名」，继续 / 换号 / 退出仍可用，不报错阻断。'}
+];
+let COLS=120,S,DB=new Map(),EVENTS=[],LOGINS=new Map(),timer=null,generation=0,sceneID='start',currentItems=[];
+function event(text,tone=''){EVENTS.push({text,tone});if(EVENTS.length>15)EVENTS.shift()}
+function emptyState(){return {page:'provider',provider:'',cursor:0,filter:'',filterFocus:false,notice:'',model:null,tab:'',effort:undefined,allowed:undefined,switching:false,external:false,dead:'',shared:false,phase:'draft',session:null,caret:0,draft:'',selectAll:false}}
+function accountOf(id){const a=LOGINS.get(id);return a&&a.name?a:null}
+function loginOf(id){return LOGINS.get(id)||null}
+function stateOf(id){if(!LOGINS.has(id))return 'missing';return S.dead===id?'dead':'usable'}
+function hasLogin(id=S.provider){return !!id&&stateOf(id)!=='missing'}
+function flow(){if(!S.provider)return ['provider'];return ['provider',...(hasLogin()?['account']:['signin']),'models','effort','subagents','review']}
+function models(){return subscriptionModels(S.provider)}
+function move(page,options={}){S.page=page;S.cursor=0;S.filter='';S.filterFocus=false;if(!options.keepNotice)S.notice='';if(page==='models'){const all=models();const m=all.find(m=>DB.has(identity(m)))||all[0];S.tab=m?.plan||'';S.cursor=all.filter(x=>x.plan===S.tab).indexOf(m);S.model=null}if(page==='effort'){const value=S.effort!==undefined?S.effort:(S.model?.official||'');S.cursor=[...levels(),''].indexOf(value)}if(page==='subagents')S.cursor=(S.allowed??false)?1:0;render()}
+function levels(){if(!S.model)return [];return ordered(S.model.levels||[])}
+function delayed(page,next){clearTimeout(timer);const ticket=++generation;move(page);timer=setTimeout(()=>{if(ticket===generation)next()},450)}
+function items(){switch(S.page){
+ case 'provider':return [...SUBSCRIPTIONS.map(p=>{const acct=accountOf(p.id);return {label:p.label,desc:acct?(acct.name+(acct.detail?' ('+acct.detail+')':'')):'',group:'Sign in with a subscription',value:'subscription:'+p.id}}),...APIS.map(p=>({label:p.label,desc:p.desc,group:'Use an API key',value:'api:'+p.id})),{label:'Custom model',desc:'',group:'Custom',value:'custom:custom'}];
+ case 'account':{const env=!!loginOf(S.provider)?.envKey;const dead=stateOf(S.provider)==='dead';const list=dead?[{label:'Sign in again',value:'switch'}]:[{label:'Continue with this account',value:'continue'},{label:env?'Sign in with an account':'Sign in with another account',value:'switch'}];if(!env)list.push({label:'Sign out',value:'signout',danger:true});return list}
+ case 'signout-confirm':return [{label:'No, go back',value:false},{label:'Yes, sign out',value:true,danger:true}];
+ case 'signin':return [{label:'Continue with browser sign-in',value:'signin'},{label:'Back',value:'back'}];
+ case 'models':return models().filter(m=>m.plan===S.tab).map(m=>({label:m.name,desc:endpoint(m),value:identity(m),model:m}));
+ case 'effort':return [...levels(),''].map(x=>({label:levelLabel(x),value:x,desc:''}));
+ case 'subagents':return [{label:'No, only when you pick it',value:false},{label:'Yes, the agent may use it',value:true}];
+ case 'review':return [{label:'Save',value:'save'},{label:'Start over',value:'restart'}];
+ case 'success':return [{label:'Connect another model',value:'another'}];
+ default:return []}}
+function filtered(){const all=items();const q=S.filter.trim().toLowerCase();return all.filter(i=>!q||(i.label+' '+(i.desc||'')).toLowerCase().includes(q))}
+function pickProvider(value){const [group,id]=value.split(':');if(group!=='subscription'){S.notice='This prototype covers subscription sign-ins only.';render();return}S.provider=id;S.model=null;S.effort=undefined;S.allowed=undefined;S.switching=false;if(hasLogin(id))move('account');else move('signin')}
+function activate(index=S.cursor){const list=filtered(),item=list[index];if(!item)return;S.cursor=index;switch(S.page){
+ case 'provider':pickProvider(item.value);break;
+ case 'account':
+  if(item.value==='continue')move('models');
+  else if(item.value==='switch'){S.switching=true;move('signin')}
+  else move('signout-confirm');
+  break;
+ case 'signout-confirm':
+  if(!item.value){move('account',{keepNotice:true})}
+  else doSignOut();
+  break;
+ case 'signin':if(item.value==='back')back();else move('authorizing');break;
+ case 'models':S.model=clone(item.model);S.effort=undefined;S.allowed=undefined;move('effort');break;
+ case 'effort':S.effort=item.value;move('subagents');break;
+ case 'subagents':S.allowed=item.value;move('review');break;
+ case 'review':if(item.value==='restart')move('provider');else save();break;
+ case 'success':S.provider='';S.model=null;move('provider');break;
+}}
+function doSignOut(){const id=S.provider;const label=subLabel(id);LOGINS.delete(id);event('Signed out of '+label+' · stored credential removed (DB row + file)','good');event('Model rows kept · source state now missing');if(S.external){const adopted={name:'adopted@official.example',detail:'official client'};LOGINS.set(id,adopted);S.notice='The saved login was removed. An external source provides this sign-in: the official Qoder CN client is signed in; its login will be imported again.';event('External source re-imported the official client login','warn');move('account',{keepNotice:true});return}S.provider='';move('provider')}
+function completeSignIn(){const id=S.provider;const fresh=S.switching?{name:'new.account@example.test',detail:'plus'}:clone(SUBSCRIPTIONS.find(p=>p.id===id)?.account||{name:'user@example.test',detail:''});LOGINS.set(id,fresh);S.dead='';event((S.switching?'Switched account · ':'Signed in · ')+fresh.name,'good');S.switching=false;S.notice='';move('models')}
+function save(){delayed('saving',()=>{const key=identity(S.model);const row=clone(DB.get(key)||{id:'llm_demo_'+(DB.size+1),provider:S.model.provider,model:S.model.model,base_url:S.model.base,api_path:S.model.path,source:S.provider,source_plan:S.model.plan,cap_default_effort:'',subagent_allowed:false});row.cap_default_effort=S.effort||'';row.subagent_allowed=!!S.allowed;DB.set(key,row);S.phase='saved';S.session={model:row.provider+'/'+row.model,effort:S.effort||''};event('Provision + Execute · saved 1 model row','good');move('success')})}
+function tabs(){return S.page==='models'?[...new Set(models().map(m=>m.plan))]:[]}
+function changeTab(index){const ts=tabs();if(!ts.length)return;S.tab=ts[(index+ts.length)%ts.length];S.cursor=0;S.filter='';S.filterFocus=false;render()}
+function inputPage(){return false}
+function back(){if(['saving','loading'].includes(S.page)){clearTimeout(timer);generation++;move('review');return}switch(S.page){
+ case 'provider':move('cancelled');return;
+ case 'account':S.provider='';move('provider');return;
+ case 'signout-confirm':move('account',{keepNotice:true});return;
+ case 'signin':if(S.switching){S.switching=false;move('account')}else{S.provider='';move('provider')}return;
+ case 'authorizing':move('signin');return;
+ case 'models':move(hasLogin()?'account':'signin');return;
+ case 'effort':move('models');return;
+ case 'subagents':move('effort');return;
+ case 'review':move('subagents');return;
+ case 'success':move('provider');return;
+ case 'cancelled':move('provider');return;
+ default:move('provider')}}
+function handleKey(eventOrKey){const e=typeof eventOrKey==='string'?{key:eventOrKey,preventDefault(){}}:eventOrKey;const k=e.key;if(e.altKey)return;if(e.metaKey||e.ctrlKey)return;const handled=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter','Escape','Backspace','Delete','Tab','Home','End',' '].includes(k)||k.length===1;if(!handled)return;e.preventDefault();
+ if(k==='Escape'){if(S.filterFocus&&S.filter){S.filter='';S.filterFocus=false;render()}else back();return}
+ if(['saving','loading'].includes(S.page))return;
+ if(S.page==='authorizing'&&k==='Enter'){completeSignIn();return}
+ if(S.page==='cancelled'&&k==='Enter'){move('provider');return}
+ if(k==='Tab'&&tabs().length){changeTab(tabs().indexOf(S.tab)+(e.shiftKey?-1:1));return}
+ const options=filtered();if(k==='ArrowDown'){S.filterFocus=false;S.cursor=clamp(S.cursor+1,0,Math.max(0,options.length-1))}else if(k==='ArrowUp'){if(S.cursor===0&&items().length>=8)S.filterFocus=true;else S.cursor=clamp(S.cursor-1,0,Math.max(0,options.length-1))}else if(k==='Home')S.cursor=0;else if(k==='End')S.cursor=Math.max(0,options.length-1);else if(k==='Enter'){if(S.filterFocus){S.filterFocus=false;render();return}activate();return}else if(items().length>=8&&k==='Backspace'){S.filter=S.filter.slice(0,-1);S.filterFocus=true;S.cursor=0}else if(items().length>=8&&k.length===1){S.filter+=k;S.filterFocus=true;S.cursor=0}render()}
+function accountTitle(){const label=subLabel(S.provider);const login=loginOf(S.provider);const acct=accountOf(S.provider);const dead=stateOf(S.provider)==='dead';if(login?.envKey)return [label,'Signed in with '+login.name+' from the environment.'];if(dead)return [label,(acct?'Signed in as '+acct.name+(acct.detail?' ('+acct.detail+')':'')+'. ':'')+'This sign-in no longer works; sign in again or sign out.'];if(acct)return [label,'Signed in as '+acct.name+(acct.detail?' ('+acct.detail+')':'')+'.'];return [label,'This sign-in stands; no account name is stored.']}
+function titles(){const label=subLabel(S.provider);const acct=accountOf(S.provider);switch(S.page){
+ case 'provider':return ['Connect a model','Choose how Forebrain Harness reaches a model; /connect changes it any time.'];
+ case 'account':return accountTitle();
+ case 'signout-confirm':return ['Sign out of '+label+'?','This removes the login saved on this machine.'+(S.shared?' It is the same file the Codex CLI signs in with (~/.codex/auth.json), so the Codex CLI is signed out too.':'')+' The models it added stay, but cannot call until you sign in again.'];
+ case 'signin':return ['Sign in with '+label,'Continue to authorize this account in your browser.'];
+ case 'authorizing':return ['Sign in with '+label,'Waiting for you to confirm in the browser.'];
+ case 'models':return [label,'Choose the model to add; each row shows where requests go.'];
+ case 'effort':return ['Default reasoning effort','Choose the default for '+S.model.provider+'/'+S.model.model+'.'];
+ case 'subagents':return ['Allow this model for subagents?','May the agent pick '+S.model.provider+'/'+S.model.model+' on its own?'];
+ case 'review':return ['Review','Check the details, then save.'];
+ case 'saving':return ['Saving model','Adding one model and saving its default reasoning effort…'];
+ case 'success':return ['Connected',S.session.model+' is now this session’s model.'];
+ case 'cancelled':return ['Connect a model','Setup closed. Previously saved models and sign-ins are kept.'];
+ default:return ['Connect a model','']}}
+function factRows(facts){const labelWidth=Math.max(...facts.map(([k])=>width(k)+1));return facts.flatMap(([k,v])=>{const chunks=wrap(String(v),Math.max(1,COLS-6-labelWidth));return chunks.map((text,i)=>line('  ').add(i?rep(' ',labelWidth):k+':',ACC).add(rep(' ',i?2:labelWidth-width(k)-1+2)).add(text))})}
+function listRows(list){const maxWidth=Math.min(32,Math.floor((COLS-4)*2/5));const nameWidth=Math.min(maxWidth,Math.max(1,...list.map(i=>width(i.label))));const rows=[];let group='';list.forEach((item,index)=>{if(item.group&&item.group!==group){if(rows.length)rows.push(line());rows.push(...textRows(item.group,ACC));group=item.group}const hit={type:'option',index};const focused=index===S.cursor&&!S.filterFocus;const prefix=focused?'❯ ':'  ';const base=item.danger?(focused?style('203','',true):BAD):(focused?ACC:TXT);const status=item.status||'';const statusW=status?width(status)+2:0;const desc=item.desc||'';const descWidth=Math.max(1,COLS-6-nameWidth-statusW);const stack=width(desc)>descWidth&&descWidth<16;const labelChunks=wrap(item.label,nameWidth);if(stack){labelChunks.forEach((t,i)=>{const row=line(i?'  ':prefix,base,hit).add(t);if(i===0&&status)row.pad(COLS-2-statusW,TXT).add(status,OK);rows.push(row)});wrap(desc,COLS-4).forEach(t=>rows.push(line('  ',TXT,hit).add(t,DIM)))}else{const descChunks=desc?wrap(desc,descWidth):[''];descChunks.forEach((t,i)=>{const row=line(i?'  ':prefix,base,hit);row.add(i?rep(' ',nameWidth):item.label);if(i===0){row.pad(nameWidth+4,TXT);row.add(t,DIM);if(status)row.pad(COLS-2-statusW,TXT).add(status,OK)}else{row.add(t,DIM)}rows.push(row)})}});return rows}
+function fieldRows(text,{placeholder='',focus=true}={}){const available=COLS-10;const chars=[...text];let start=Math.max(0,S.caret-available+1);let visible=chars.slice(start,start+available);const caret=clamp(S.caret-start,0,visible.length);const pad=line('  ').pad(COLS-2,style('','238'));const row=line('  ').add('  ',style('','238')).add('⌕',style(focus?'110':'245','238')).add('  ',style('','238'));if(!visible.length&&placeholder)row.add(placeholder.slice(0,available),style('244','238'));else{row.add(visible.slice(0,caret).join(''),style('252','238'));if(focus)row.add(visible[caret]||' ',{rev:true});row.add(visible.slice(caret+(focus?1:0)).join(''),style('252','238'))}row.pad(COLS-2,style('','238'));return [pad,row,pad]}
+function panel(){const [title,subtitle]=titles();const head=[...textRows(title,TITLE),...textRows(subtitle),line()];let body=[];const ts=tabs();if(ts.length>1){const tabRow=line('  ');ts.forEach((t,i)=>tabRow.add((i?'   ':'')+(t===S.tab?'['+t+']':t),t===S.tab?ACC:DIM));head.push(tabRow,line())}let hint='↑/↓ to navigate · Enter to confirm · '+(S.page==='provider'?'Esc to cancel':'Esc to go back');
+ if(['saving','loading'].includes(S.page)){body.push(...textRows('Working…',DIM));hint='Esc to go back'}
+ else if(S.page==='authorizing'){body.push(...textRows('Demo authorization is ready.',ACC),line(),...textRows('Press Enter to simulate completing sign-in.',DIM));hint='Enter when signed in · Esc to go back'}
+ else if(S.page==='cancelled'){body.push(...textRows('This draft was not saved.',DIM),line());currentItems=[]}
+ else{if(items().length>=8){const oldCaret=S.caret;S.caret=S.filter.length;head.push(...fieldRows(S.filter,{placeholder:'Type to filter',focus:S.filterFocus}),line());S.caret=oldCaret}
+  if(S.notice)body.push(...textRows(S.notice,WARN),line());
+  if(S.page==='account'&&loginOf(S.provider)?.envKey)body.push(...textRows('This sign-in comes from the OPENCODE_API_KEY environment variable; it cannot be removed here. Unset it in the shell that starts Forebrain Harness, then restart.',DIM),line());
+  if(S.page==='review')body.push(...factRows([['Provider',S.model.provider],['Model',S.model.model],['Endpoint',endpoint(S.model)],['Default reasoning effort',levelLabel(S.effort??'')],['Subagents',S.allowed?'Yes, the agent may use it':'No, only when you pick it']]),line());
+  if(S.page==='success')body.push(...factRows([['Default reasoning effort',levelLabel(S.effort??'')],['Saved model rows','1']]),line());
+  currentItems=filtered();S.cursor=clamp(S.cursor,0,Math.max(0,currentItems.length-1));body.push(...listRows(currentItems));if(!currentItems.length&&S.page!=='cancelled')body.push(...textRows('No matching items.',DIM));
+  if(ts.length>1)hint='Tab to switch · '+hint}
+ const hints=textRows(hint,HINT);const room=Math.max(1,19-head.length-hints.length-1);let focus=body.findIndex(r=>r.hit?.index===S.cursor);let focusEnd=focus;while(body[focusEnd+1]?.hit?.index===S.cursor)focusEnd++;let top=0;if(focus>=room)top=Math.max(0,Math.min(body.length-room,focusEnd-room+1));const visible=body.slice(top,top+room);while(visible.length<room)visible.push(line());const note=top||body.length>room?line('  ').add([top?'↑ '+top+' more':'',body.length-top-room>0?'↓ '+(body.length-top-room)+' more':''].filter(Boolean).join(' · '),HINT):line();return [...head,...visible,note,...hints]}
+function css(s){return [s.fg?'fg'+s.fg:'',s.bg?'bg'+s.bg:'',s.bold?'b':'',s.faint?'ft':'',s.rev?'rev':''].filter(Boolean).join(' ')}
+function rowHTML(row,index){let used=0,out='';for(const part of row.parts){let value='';for(const c of part.text){if(used+charWidth(c)>COLS)break;used+=charWidth(c);value+=c}if(value)out+='<span class="'+css(part.s)+'">'+esc(value)+'</span>'}out+=rep(' ',COLS-used);return '<div class="row"'+(row.hit?' data-hit="'+row.hit.index+'" role="button" aria-label="'+esc(currentItems[row.hit.index]?.label||'')+'"':'')+' data-row="'+index+'">'+out+'</div>'}
+function render(){if(!S)return;const trans=[line(),line().pad(COLS-1,style('','238')),line('› ',style('74','238')).add('Connect a model for this project.',style('252','238')).pad(COLS-1,style('','238')),line().pad(COLS-1,style('','238')),line(),line('● ',style('45','',true)).add('Show the signed-in account and manage the sign-in.'),line(),line('─ Worked for 1s · first token 0.0s '+rep('─',COLS-37),DIM)];while(trans.length<15)trans.push(line());const p=panel();const footer=S.session?.model||'deepseek/deepseek-v4-flash';const rows=[...trans,line(rep('─',COLS-1),style('90')),...p,line(),line().pad(COLS-1,style('','238')),line('› ',style('74','238')).pad(COLS-1,style('','238')),line().pad(COLS-1,style('','238')),line(footer,HINT).add(S.session?' · '+levelLabel(S.session.effort):' · High',HINT)];$('#grid').innerHTML=rows.map(rowHTML).join('');$('#terminal-title').textContent='forebrain — '+COLS+'×40 · /connect';const pages=flow();const pos=pages.indexOf(S.page);$('#page-position').textContent=pos>=0?'Step '+(pos+1)+' of '+pages.length:S.page==='success'?'Saved':'';$('#announcement').textContent=titles()[0]+'. '+titles()[1];renderInspector()}
+function rowsView(){return [...DB.values()].map(r=>({...r,source_state:LOGINS.has(r.source)?'usable':'missing'}))}
+function renderInspector(){const acct=accountOf(S.provider);const login=loginOf(S.provider);const facts=[['当前订阅',S.provider?subLabel(S.provider):'尚未选择'],['登录状态',S.provider?stateOf(S.provider):'—'],['账号',acct?acct.name+(acct.detail?' ('+acct.detail+')':''):(login?.envKey?login.name+' (environment key)':S.provider?'无账号名':'—')],['凭据来源',login?.envKey?'环境变量':S.external?'官方客户端会重新导入':S.provider&&LOGINS.has(S.provider)?'本机存储（DB 行 + 文件）':'—'],['模型行数',String(DB.size)],['退出后行保留','是 · 源状态翻为 missing'],['当前状态',({draft:'草稿 · 未提交',saved:'已保存 · 模拟'})[S.phase]]];$('#facts').innerHTML=facts.map(([k,v])=>'<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>').join('');$('#events').innerHTML=EVENTS.length?EVENTS.map(x=>'<div class="'+esc(x.tone)+'">'+esc(x.text)+'</div>').join(''):'<span>尚无凭据写入；浏览和选择不会保存配置。</span>';$('#database').textContent=JSON.stringify(rowsView(),null,2)}
+function seedLogins(){LOGINS=new Map(SUBSCRIPTIONS.map(p=>[p.id,clone(p.account)]))}
+function seedRows(){DB=new Map();const chatgpt=subscriptionModels('chatgpt')[0];DB.set(identity(chatgpt),{id:'llm_demo_1',provider:'chatgpt',model:'gpt-5.5',base_url:chatgpt.base,api_path:chatgpt.path,source:'chatgpt',source_plan:'',cap_default_effort:'medium',subagent_allowed:true});const ark=subscriptionModels('volcengine')[0];DB.set(identity(ark),{id:'llm_demo_2',provider:'volcengine',model:'doubao-seed-2.1-pro',base_url:ark.base,api_path:ark.path,source:'volcengine',source_plan:'Coding Plan',cap_default_effort:'medium',subagent_allowed:false})}
+function goScenario(id){clearTimeout(timer);generation++;sceneID=id;EVENTS=[];seedLogins();seedRows();S=emptyState();const scene=SCENES.find(s=>s.id===id)||SCENES[0];$('#scene-title').textContent=scene.title;$('#caption').textContent=scene.desc;document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.scene===id));switch(id){
+ case 'account':S.provider='chatgpt';move('account');break;
+ case 'signout':S.provider='chatgpt';move('signout-confirm');break;
+ case 'after-signout':LOGINS.delete('chatgpt');event('Signed out of ChatGPT · stored credential removed (DB row + file)','good');event('Model rows kept · source state now missing');move('provider');break;
+ case 'continue':S.provider='chatgpt';move('account');break;
+ case 'switch':S.provider='chatgpt';S.switching=true;move('authorizing');break;
+ case 'envkey':LOGINS.set('opencode-go',{name:'OPENCODE_API_KEY',detail:'',envKey:true});S.provider='opencode-go';move('account');break;
+ case 'volcengine':S.provider='volcengine';move('account');break;
+ case 'external':S.provider='qodercn';S.external=true;LOGINS.set('qodercn',{name:'adopted@official.example',detail:'official client'});S.notice='The saved login was removed. An external source provides this sign-in: the official Qoder CN client is signed in; its login will be imported again.';event('Signed out of Qoder CN · stored credential removed (DB row + file)','good');event('External source re-imported the official client login','warn');move('account',{keepNotice:true});break;
+ case 'dead':S.dead='chatgpt';move('provider');break;
+ case 'dead-account':S.dead='chatgpt';S.provider='chatgpt';move('account');break;
+ case 'shared':S.shared=true;S.provider='chatgpt';move('signout-confirm');break;
+ case 'no-account':LOGINS.set('workbuddy',{name:'',detail:''});S.provider='workbuddy';move('account');break;
+ default:move('provider')}}
+$('#nav').innerHTML=SCENES.map((s,i)=>((i===0||SCENES[i-1].group!==s.group)?'<div class="group">'+esc(s.group)+'</div>':'')+'<button data-scene="'+s.id+'"><span class="num">'+String(i+1).padStart(2,'0')+'</span>'+esc(s.title)+'</button>').join('')+'<div class="nav-foot"><span class="legend"></span>演示数据 · 仅本页内存<br>切换场景会重置模拟凭据与模型表。退出后观察模型行保留、源状态翻为 missing。</div>';
+$('#nav').addEventListener('click',e=>{const b=e.target.closest('[data-scene]');if(b){goScenario(b.dataset.scene);$('#terminal').focus({preventScroll:true})}});
+$('#terminal').addEventListener('keydown',handleKey);
+$('#terminal').addEventListener('click',e=>{$('#terminal').focus({preventScroll:true});const row=e.target.closest('[data-hit]');if(row)activate(Number(row.dataset.hit))});
+$('#terminal').addEventListener('wheel',e=>{if(!currentItems.length)return;e.preventDefault();S.cursor=clamp(S.cursor+(e.deltaY>0?1:-1),0,currentItems.length-1);S.filterFocus=false;render()},{passive:false});
+document.querySelectorAll('[data-key]').forEach(b=>b.addEventListener('click',()=>{$('#terminal').focus({preventScroll:true});handleKey(b.dataset.key)}));
+document.querySelectorAll('[data-width]').forEach(b=>b.addEventListener('click',()=>{COLS=Number(b.dataset.width);document.querySelectorAll('[data-width]').forEach(x=>x.classList.toggle('on',x===b));render()}));
+$('#reset').addEventListener('click',()=>goScenario(sceneID));
+window.accountTuiPrototype={scene:goScenario,snapshot:()=>({page:S.page,provider:S.provider,cursor:S.cursor,columns:COLS,notice:S.notice,switching:S.switching,external:S.external,dead:S.dead,phase:S.phase,account:clone(accountOf(S.provider)),login:clone(loginOf(S.provider)),state:S.provider?stateOf(S.provider):null,signed:[...LOGINS.keys()],rows:rowsView(),events:clone(EVENTS),options:filtered().map(i=>({label:i.label,desc:i.desc||'',value:i.value,danger:!!i.danger,status:i.status||''})),selectedLabel:filtered()[S.cursor]?.label||'',session:clone(S.session)})};
+goScenario('start');
+</script>
+</body>
+</html>
