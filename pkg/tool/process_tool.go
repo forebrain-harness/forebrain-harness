@@ -240,7 +240,7 @@ func (s *State) KillProcesses() {
 			continue
 		}
 		slog.Info("killed background process on teardown", "id", rec.id, "pid", rec.handle.PID(), "command", redactForLog(rec.command))
-		removeLedgerRecord(processStateDir(s.stateRootForProcess()), rec.id)
+		removeProcessLedgerRecord(processStateDir(s.stateRootForProcess()), rec.id)
 		registry.release(rec.id)
 		awaitProcessSettled(rec, processKillSettleTimeout)
 	}
@@ -388,16 +388,19 @@ func processStart(ctx context.Context, st *State, rt *AgentToolRuntime, in *Proc
 	sessionID := ConversationSessionIDFromContext(ctx)
 	rec := &processRecord{id: id, handle: handle, command: command, workDir: workDir, sessionID: sessionID, logPath: logPath, startedAt: time.Now(), settled: make(chan struct{})}
 	registry.add(rec)
-	addLedgerRecord(dir, processLedgerRecord{
+	if err := writeProcessLedgerRecord(dir, processLedgerRecord{
 		ID: id, PID: handle.PID(), Command: command, SessionID: sessionID,
 		HarnessPID: os.Getpid(), StartToken: processStartToken(handle.PID()),
-	})
+		HarnessStartToken: processStartToken(os.Getpid()),
+	}); err != nil {
+		slog.WarnContext(ctx, "process ledger record not written", "id", id, "err", err)
+	}
 	// The log closes and the ledger entry goes when the process exits, whether
 	// or not anybody is still watching it.
 	go func() {
 		<-handle.Done()
 		registry.release(id)
-		removeLedgerRecord(dir, id)
+		removeProcessLedgerRecord(dir, id)
 		close(rec.settled)
 	}()
 
@@ -792,56 +795,85 @@ func marshalProcessResult(payload map[string]any) (string, error) {
 }
 
 // processLedgerRecord is one live process as a later launch reads it: the PID,
-// the OS start time that guards against PID reuse, and who started it.
+// the OS start time that guards against PID reuse, who started it, and the
+// harness's own start time — so a launch can tell "the harness that started
+// this died" from "it is running right now" (owner 2026-11-24).
 type processLedgerRecord struct {
-	ID         int    `json:"id"`
-	PID        int    `json:"pid"`
-	StartToken string `json:"start_token,omitempty"`
-	Command    string `json:"command"`
-	SessionID  string `json:"session_id,omitempty"`
-	HarnessPID int    `json:"harness_pid"`
+	ID                int    `json:"id"`
+	PID               int    `json:"pid"`
+	StartToken        string `json:"start_token,omitempty"`
+	Command           string `json:"command"`
+	SessionID         string `json:"session_id,omitempty"`
+	HarnessPID        int    `json:"harness_pid"`
+	HarnessStartToken string `json:"harness_start_token,omitempty"`
 }
 
-// processLedgerFile is the on-disk shape: a crash mid-write must never leave a
-// half ledger, so the writer replaces the file whole.
+// processLedgerFile is the pre-<version> single document. Nothing writes it any
+// more; migrateLegacyProcessLedger reads it once and the writer for the new
+// shape is writeProcessLedgerRecord.
 type processLedgerFile struct {
 	Processes []processLedgerRecord `json:"processes"`
 }
 
-// processLedgerMu serializes the ledger's read-modify-write. Two Runners of one
-// project share a state root, so the file has one writer at a time across the
-// process.
-var processLedgerMu sync.Mutex
+// processLedgerDir holds one file per live process: no shared document, so two
+// harnesses on one state root never replace each other's record.
+func processLedgerDir(dir string) string { return filepath.Join(dir, "ledger") }
 
-func processLedgerPath(dir string) string { return filepath.Join(dir, "ledger.json") }
+// legacyProcessLedgerPath is the single document this version migrates away.
+func legacyProcessLedgerPath(dir string) string { return filepath.Join(dir, "ledger.json") }
 
-// readProcessLedger returns the ledger's records. A missing or malformed file is
-// no records: the ledger is a kill list, and a launch must never be stopped by
-// one it cannot read.
+// readProcessLedger returns every record in dir/ledger. A file that is not
+// "<id>.json" is not a record (temp files, strays); a record file that is torn
+// or not JSON is skipped and logged — it names one process, so one bad file can
+// no longer cost the whole kill list, which is what the old single document did.
 func readProcessLedger(dir string) []processLedgerRecord {
-	data, err := os.ReadFile(processLedgerPath(dir))
+	ledgerDir := processLedgerDir(dir)
+	entries, err := os.ReadDir(ledgerDir)
 	if err != nil {
 		return nil
 	}
-	var doc processLedgerFile
-	if err := json.Unmarshal(data, &doc); err != nil {
-		slog.Warn("process ledger unreadable; ignoring it", "path", processLedgerPath(dir), "err", err)
-		return nil
+	records := make([]processLedgerRecord, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if _, err := strconv.Atoi(strings.TrimSuffix(name, ".json")); err != nil {
+			continue
+		}
+		path := filepath.Join(ledgerDir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rec processLedgerRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			slog.Warn("process ledger record unreadable; ignoring it", "path", path, "err", err)
+			continue
+		}
+		records = append(records, rec)
 	}
-	return doc.Processes
+	return records
 }
 
-// writeProcessLedger replaces the ledger atomically: a temporary file in the
-// same directory, then a rename.
-func writeProcessLedger(dir string, records []processLedgerRecord) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+// writeProcessLedgerRecord writes rec as its own file, <id>.json. Nothing is
+// read back, so a harness writing at the same moment as another cannot replace
+// its record; the rename keeps a crash mid-write from leaving half a record.
+func writeProcessLedgerRecord(dir string, rec processLedgerRecord) error {
+	if rec.ID == 0 {
+		return nil
+	}
+	ledgerDir := processLedgerDir(dir)
+	if err := os.MkdirAll(ledgerDir, 0o700); err != nil {
 		return err
 	}
-	encoded, err := json.Marshal(processLedgerFile{Processes: records})
+	encoded, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, "ledger-*.json")
+	// The dot keeps an in-flight temp file out of the reader's way: it only
+	// accepts "<digits>.json".
+	tmp, err := os.CreateTemp(ledgerDir, ".record-*.json")
 	if err != nil {
 		return err
 	}
@@ -856,50 +888,61 @@ func writeProcessLedger(dir string, records []processLedgerRecord) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	if err := os.Rename(tmpPath, processLedgerPath(dir)); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
+	target := filepath.Join(ledgerDir, fmt.Sprintf("%d.json", rec.ID))
+	if err := os.Rename(tmpPath, target); err != nil {
+		// Windows refuses a rename onto an existing file. The only way one is
+		// there is this same id writing again, and replacing it is what the
+		// caller means.
+		_ = os.Remove(target)
+		if err := os.Rename(tmpPath, target); err != nil {
+			_ = os.Remove(tmpPath)
+			return err
+		}
 	}
 	return nil
 }
 
-func addLedgerRecord(dir string, rec processLedgerRecord) {
-	if rec.ID == 0 {
-		return
-	}
-	processLedgerMu.Lock()
-	defer processLedgerMu.Unlock()
-	records := readProcessLedger(dir)
-	for i, existing := range records {
-		if existing.ID == rec.ID {
-			records[i] = rec
-			_ = writeProcessLedger(dir, records)
-			return
-		}
-	}
-	_ = writeProcessLedger(dir, append(records, rec))
-}
-
-func removeLedgerRecord(dir string, id int) {
+// removeProcessLedgerRecord drops one record. A removal that fails (or a record
+// already gone) leaves the file for the next launch's reap to judge again: a
+// second kill attempt on a live process group is harmless.
+func removeProcessLedgerRecord(dir string, id int) {
 	if id == 0 {
 		return
 	}
-	processLedgerMu.Lock()
-	defer processLedgerMu.Unlock()
-	records := readProcessLedger(dir)
-	kept := records[:0]
-	found := false
-	for _, existing := range records {
-		if existing.ID == id {
-			found = true
-			continue
-		}
-		kept = append(kept, existing)
-	}
-	if !found {
+	_ = os.Remove(filepath.Join(processLedgerDir(dir), fmt.Sprintf("%d.json", id)))
+}
+
+// migrateLegacyProcessLedger rewrites a pre-<version> ledger.json — one document
+// for every live process — as the per-record files this version reads, and drops
+// the document only when every record made it. A document it cannot parse is
+// dropped (it names nothing anyone can kill); a record that fails to write keeps
+// the document, so the next launch retries instead of losing the last clue.
+//
+// Only ReapOrphanProcesses calls it, i.e. only a launch that goes through
+// pkg/process/open.go migrates; tests and other entry points read the new
+// directory only.
+func migrateLegacyProcessLedger(dir string) {
+	path := legacyProcessLedgerPath(dir)
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return
 	}
-	_ = writeProcessLedger(dir, kept)
+	var doc processLedgerFile
+	if err := json.Unmarshal(data, &doc); err != nil {
+		slog.Warn("legacy process ledger unreadable; dropping it", "path", path, "err", err)
+		_ = os.Remove(path)
+		return
+	}
+	migrated := true
+	for _, rec := range doc.Processes {
+		if err := writeProcessLedgerRecord(dir, rec); err != nil {
+			slog.Warn("legacy process ledger record not migrated", "id", rec.ID, "err", err)
+			migrated = false
+		}
+	}
+	if migrated {
+		_ = os.Remove(path)
+	}
 }
 
 // processStartToken is the OS start time of pid, or the empty string when the
@@ -922,44 +965,60 @@ func processStartToken(pid int) string {
 // belongs to a different process, whose start time does not match the record,
 // and that process is never touched.
 //
+// A record whose harness is still running is not an orphan either: its processes
+// belong to that harness, which ends them on its own teardown, so a second
+// harness starting on the same state root must leave them alone (owner
+// 2026-11-24).
+//
 // It is best effort by contract: a missing or malformed ledger, an unreadable
 // /proc, or a failed kill must never stop an install from starting.
 func ReapOrphanProcesses(stateRoot string) []int {
 	dir := processStateDir(stateRoot)
-	processLedgerMu.Lock()
-	defer processLedgerMu.Unlock()
+	migrateLegacyProcessLedger(dir)
 	records := readProcessLedger(dir)
 	if len(records) == 0 {
 		return nil
 	}
 	self := os.Getpid()
 	var killed []int
-	kept := make([]processLedgerRecord, 0, len(records))
 	for _, rec := range records {
 		if rec.HarnessPID == self {
 			// Nothing of this process is running yet, but a record that names
 			// this PID is not ours to judge; leave it where it is.
-			kept = append(kept, rec)
 			continue
 		}
+		if rec.HarnessPID > 0 {
+			// The harness that wrote this record may still be running: its
+			// processes are not orphans, whatever their PID says (owner
+			// 2026-11-24). A record from an older version carries no harness
+			// start time, so a live PID is all the evidence it can give — and a
+			// live PID also means "pid recycled, the writer died", which without
+			// the token cannot be told apart. Leave it: it becomes reapable the
+			// moment that PID is gone (owner 2026-11-24, 升级窗口的旧记录).
+			if token, ok := safety.ProcessStartToken(rec.HarnessPID); ok {
+				if rec.HarnessStartToken == "" || token == rec.HarnessStartToken {
+					continue
+				}
+			}
+		}
 		if rec.PID <= 0 || rec.StartToken == "" {
+			removeProcessLedgerRecord(dir, rec.ID)
 			continue
 		}
 		token, ok := safety.ProcessStartToken(rec.PID)
 		if !ok || token != rec.StartToken {
 			// Gone, or a recycled PID: never kill on the PID alone.
+			removeProcessLedgerRecord(dir, rec.ID)
 			continue
 		}
 		if err := safety.KillProcessGroupByPID(rec.PID); err != nil {
 			slog.Warn("orphaned process reap failed", "pid", rec.PID, "err", err)
 			continue
 		}
+		removeProcessLedgerRecord(dir, rec.ID)
 		killed = append(killed, rec.PID)
 		slog.Warn("reaped a background process an earlier harness left behind",
 			"pid", rec.PID, "command", redactForLog(rec.Command), "session", rec.SessionID)
-	}
-	if err := writeProcessLedger(dir, kept); err != nil {
-		slog.Warn("process ledger rewrite failed", "path", processLedgerPath(dir), "err", err)
 	}
 	return killed
 }

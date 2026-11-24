@@ -3,10 +3,13 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -422,9 +425,11 @@ func orphanLedgerRecord(t *testing.T, st *State, rt *AgentToolRuntime, id int, p
 	if token == "" {
 		return false
 	}
-	addLedgerRecord(processStateDir(rt.StateRoot()), processLedgerRecord{
+	if err := writeProcessLedgerRecord(processStateDir(rt.StateRoot()), processLedgerRecord{
 		ID: id, PID: pid, StartToken: token, Command: command, SessionID: "sess-gone", HarnessPID: os.Getpid() + 1,
-	})
+	}); err != nil {
+		t.Fatalf("write the orphan record: %v", err)
+	}
 	return true
 }
 
@@ -493,22 +498,55 @@ func TestReapOrphanProcessesSparesARecycledPID(t *testing.T) {
 	}
 }
 
-// 12. A ledger that cannot be read must never stop a launch.
+// 12. A ledger that cannot be read must never stop a launch. One bad record now
+// costs only its own record: the files are separate, so a torn one is skipped
+// and its neighbours are still judged.
 func TestReapOrphanProcessesSurvivesAMalformedLedger(t *testing.T) {
 	stateRoot := t.TempDir()
 	dir := processStateDir(stateRoot)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	ledgerDir := processLedgerDir(dir)
+	if err := os.MkdirAll(ledgerDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(processLedgerPath(dir), []byte("{not json"), 0o600); err != nil {
+	// A torn record names no process anyone can kill; a file that is not
+	// "<digits>.json" is not a record at all.
+	if err := os.WriteFile(filepath.Join(ledgerDir, "7.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ledgerDir, "notes.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The record beside them is still judged: this PID is alive but its start
+	// time does not match, so it is dropped without a kill.
+	if err := writeProcessLedgerRecord(dir, processLedgerRecord{
+		ID: 8, PID: os.Getpid(), StartToken: "not-this-process", Command: "sleep 30", HarnessPID: 0,
+	}); err != nil {
+		t.Fatalf("write the stale record: %v", err)
 	}
 	if killed := ReapOrphanProcesses(stateRoot); len(killed) != 0 {
 		t.Fatalf("a malformed ledger produced kills: %v", killed)
 	}
+	if _, err := os.Stat(filepath.Join(ledgerDir, "8.json")); !os.IsNotExist(err) {
+		t.Fatalf("the stale record survived a reap that dropped it: %v", err)
+	}
 	// A missing ledger is the ordinary case on a first launch.
 	if killed := ReapOrphanProcesses(t.TempDir()); len(killed) != 0 {
 		t.Fatalf("a missing ledger produced kills: %v", killed)
+	}
+	// The pre-<version> document is dropped whole: it names nothing readable.
+	legacyRoot := t.TempDir()
+	legacyDir := processStateDir(legacyRoot)
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyProcessLedgerPath(legacyDir), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if killed := ReapOrphanProcesses(legacyRoot); len(killed) != 0 {
+		t.Fatalf("a malformed legacy document produced kills: %v", killed)
+	}
+	if _, err := os.Stat(legacyProcessLedgerPath(legacyDir)); !os.IsNotExist(err) {
+		t.Fatalf("the unreadable legacy document was kept: %v", err)
 	}
 }
 
@@ -759,5 +797,234 @@ func TestProcessIDsAreUniqueUnderConcurrentStarts(t *testing.T) {
 	}
 	if records := readProcessLedger(filepath.Dir(results[0].log)); len(records) != runners {
 		t.Fatalf("the ledger holds %d records for %d live processes", len(records), runners)
+	}
+}
+
+// TestProcessLedgerRecordFileLivesWithTheProcess pins the new on-disk shape
+// through the tool's own actions: a started process has its own record file, and
+// killing it removes that file. (Before this change the ledger was one shared
+// document, so the directory did not exist at all.)
+func TestProcessLedgerRecordFileLivesWithTheProcess(t *testing.T) {
+	st, tl, rt, projectDir := newProcessToolForTest(t)
+	ctx := processTestContext(projectDir)
+	started, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: "sleep 30", WorkDir: projectDir})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	id := processTestID(t, started)
+	// The path is spelled out, not taken from the new processLedgerDir helper:
+	// this test must compile and run on the OLD tree too, so its failure is an
+	// assertion (no ledger/ directory) rather than a build error.
+	recordPath := filepath.Join(processStateDir(rt.StateRoot()), "ledger", fmt.Sprintf("%d.json", id))
+	if _, err := os.Stat(recordPath); err != nil {
+		t.Fatalf("the started process has no record file: %v", err)
+	}
+	rec := processRecordForTest(t, st, id)
+	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id}); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitForProcessSettled(t, rec)
+	if _, err := os.Stat(recordPath); !os.IsNotExist(err) {
+		t.Fatalf("the killed process left its record file behind: %v", err)
+	}
+}
+
+// processLedgerChildEnv points the child test below at the state directory it
+// writes into; without it, that test body does nothing.
+const processLedgerChildEnv = "FOREBRAIN_TEST_PROCESS_LEDGER_DIR"
+
+// TestProcessLedgerChildRecords is the second harness process of the
+// cross-harness test: its own OS process, writing its own share of the records
+// through the product's writer.
+func TestProcessLedgerChildRecords(t *testing.T) {
+	dir := os.Getenv(processLedgerChildEnv)
+	if dir == "" {
+		t.Skip("driven by TestProcessLedgerKeepsEveryRecordAcrossHarnesses")
+	}
+	offset, err := strconv.Atoi(os.Getenv("FOREBRAIN_TEST_PROCESS_LEDGER_OFFSET"))
+	if err != nil {
+		t.Fatalf("offset: %v", err)
+	}
+	count, err := strconv.Atoi(os.Getenv("FOREBRAIN_TEST_PROCESS_LEDGER_COUNT"))
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	for i := 0; i < count; i++ {
+		rec := processLedgerRecord{
+			ID: offset + i, PID: 1, Command: "sleep 1", SessionID: "sess-1", HarnessPID: os.Getpid(),
+		}
+		if err := writeProcessLedgerRecord(dir, rec); err != nil {
+			t.Fatalf("record %d: %v", rec.ID, err)
+		}
+	}
+}
+
+// TestProcessLedgerKeepsEveryRecordAcrossHarnesses is the lost update this
+// change removes: harnesses sharing one state root write the ledger at the same
+// moment, and every record must survive. With the pre-thread single document the
+// last writer replaced the whole file (measured: 84 and 163 of 300 kept).
+func TestProcessLedgerKeepsEveryRecordAcrossHarnesses(t *testing.T) {
+	dir := processStateDir(t.TempDir())
+	const harnesses = 6
+	const perHarness = 50
+	var wg sync.WaitGroup
+	failures := make([]error, harnesses)
+	for i := 0; i < harnesses; i++ {
+		wg.Add(1)
+		// No t.Fatalf inside the goroutine: it is not goroutine-safe.
+		go func(i int) {
+			defer wg.Done()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestProcessLedgerChildRecords$", "-test.timeout=2m")
+			cmd.Env = append(os.Environ(),
+				processLedgerChildEnv+"="+dir,
+				// Ids start at 1: id 0 names no process, so the writer drops it.
+				fmt.Sprintf("FOREBRAIN_TEST_PROCESS_LEDGER_OFFSET=%d", 1+i*perHarness),
+				fmt.Sprintf("FOREBRAIN_TEST_PROCESS_LEDGER_COUNT=%d", perHarness),
+			)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				failures[i] = fmt.Errorf("harness %d: %v: %s", i, err, out)
+			}
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range failures {
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+	}
+	want := harnesses * perHarness
+	if records := readProcessLedger(dir); len(records) != want {
+		t.Fatalf("the ledger holds %d records, want %d: lost %d", len(records), want, want-len(records))
+	}
+}
+
+// legacyProcessLedgerDocument writes the ledger.json an older version left, and
+// returns its path.
+func legacyProcessLedgerDocument(t *testing.T, dir string, records ...processLedgerRecord) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(processLedgerFile{Processes: records})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := legacyProcessLedgerPath(dir)
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestMigrateLegacyProcessLedgerKeepsEveryRecord covers the upgrade window: the
+// one-document ledger becomes one file per process, and the document goes only
+// after every record made it.
+func TestMigrateLegacyProcessLedgerKeepsEveryRecord(t *testing.T) {
+	dir := processStateDir(t.TempDir())
+	path := legacyProcessLedgerDocument(t, dir,
+		processLedgerRecord{ID: 1, PID: 111, StartToken: "t1", Command: "sleep 1", HarnessPID: 9001},
+		processLedgerRecord{ID: 2, PID: 112, StartToken: "t2", Command: "sleep 2", HarnessPID: 9002},
+	)
+	migrateLegacyProcessLedger(dir)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the legacy document survived a complete migration: %v", err)
+	}
+	records := readProcessLedger(dir)
+	if len(records) != 2 {
+		t.Fatalf("the migration left %d records, want 2: %+v", len(records), records)
+	}
+	byID := map[int]processLedgerRecord{}
+	for _, rec := range records {
+		byID[rec.ID] = rec
+	}
+	if got := byID[2]; got.PID != 112 || got.StartToken != "t2" || got.HarnessPID != 9002 {
+		t.Fatalf("migrated record 2 = %+v, want it whole", got)
+	}
+	// Migrating again is a no-op: the document is gone.
+	migrateLegacyProcessLedger(dir)
+	if records := readProcessLedger(dir); len(records) != 2 {
+		t.Fatalf("a second migration changed the ledger: %+v", records)
+	}
+}
+
+// TestReapOrphanProcessesMigratesTheLegacyDocument pins that the launch path
+// itself migrates: the next launch reads per-record files, not the document.
+func TestReapOrphanProcessesMigratesTheLegacyDocument(t *testing.T) {
+	stateRoot := t.TempDir()
+	dir := processStateDir(stateRoot)
+	// The record names this process as its harness, so the reap leaves it be:
+	// what is under test is the migration, not the kill.
+	path := legacyProcessLedgerDocument(t, dir,
+		processLedgerRecord{ID: 3, PID: 1, StartToken: "t3", Command: "sleep 3", HarnessPID: os.Getpid()},
+	)
+	if killed := ReapOrphanProcesses(stateRoot); len(killed) != 0 {
+		t.Fatalf("the launch-path migration produced kills: %v", killed)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the launch path kept the legacy document: %v", err)
+	}
+	records := readProcessLedger(dir)
+	if len(records) != 1 || records[0].ID != 3 {
+		t.Fatalf("the launch path left %+v, want record 3", records)
+	}
+}
+
+// TestReapOrphanProcessesSparesALiveHarness is the second half of the fix: a
+// harness that is still running owns its background processes, so a new launch
+// must not kill them. A record from an older version carries no harness start
+// time; a live harness PID is all the evidence it can give, and it is enough.
+func TestReapOrphanProcessesSparesALiveHarness(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		harnessTime bool
+	}{
+		{name: "record names the live harness", harnessTime: true},
+		{name: "legacy record has no harness start time", harnessTime: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, tl, rt, projectDir := newProcessToolForTest(t)
+			ctx := processTestContext(projectDir)
+			started, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: "sleep 30", WorkDir: projectDir})
+			if err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			rec := processRecordForTest(t, st, processTestID(t, started))
+			pid := rec.handle.PID()
+			token, ok := safety.ProcessStartToken(pid)
+			if !ok {
+				t.Skip("this platform reports no process start time, so there is no reap to test")
+			}
+			// A live process standing in for the other harness.
+			other := exec.Command("sleep", "30")
+			if err := other.Start(); err != nil {
+				t.Fatalf("start the stand-in harness: %v", err)
+			}
+			t.Cleanup(func() {
+				_ = other.Process.Kill()
+				_, _ = other.Process.Wait()
+			})
+			harnessToken, ok := safety.ProcessStartToken(other.Process.Pid)
+			if !ok {
+				t.Skip("this platform reports no process start time, so there is no reap to test")
+			}
+			written := processLedgerRecord{ID: rec.id, PID: pid, StartToken: token, Command: "sleep 30", SessionID: "sess-1", HarnessPID: other.Process.Pid}
+			if tc.harnessTime {
+				written.HarnessStartToken = harnessToken
+			}
+			if err := writeProcessLedgerRecord(processStateDir(rt.StateRoot()), written); err != nil {
+				t.Fatalf("write the record: %v", err)
+			}
+
+			if killed := ReapOrphanProcesses(rt.StateRoot()); len(killed) != 0 {
+				t.Fatalf("a live harness's process was killed: %v", killed)
+			}
+			if rec.handle.Exited() {
+				t.Fatal("the live harness's process was ended by the reap")
+			}
+			recordPath := filepath.Join(processLedgerDir(processStateDir(rt.StateRoot())), fmt.Sprintf("%d.json", rec.id))
+			if _, err := os.Stat(recordPath); err != nil {
+				t.Fatalf("the live harness's record was dropped: %v", err)
+			}
+		})
 	}
 }
