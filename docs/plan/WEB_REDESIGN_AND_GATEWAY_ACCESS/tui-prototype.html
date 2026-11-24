@@ -116,7 +116,7 @@ kbd{background:#18202b;border:1px solid #2a3542;border-bottom-width:2px;border-r
   <li><b>审批面板不是 slash panel</b>：它顶掉 composer（没有 draft、没有 footer），顶部一条常驻分隔线，内容区 = 终端行数 − ⌊行数/3⌋ − 1（40 行 → 26 行）。内容超出时默认<b>贴底</b>，verdict 行永远在视野里；<code>PgUp</code>/<code>PgDn</code>/<code>Home</code>/<code>End</code> 翻。</li>
   <li>审批面板的选中行是加粗 <code>&gt; </code>（不是 <code>❯</code>），没有缩进：选项写成 <code>1.</code> 编号，计划正文与分隔线从第 0 列开始。分隔线 faint。</li>
   <li>评审选择器在同一 overlay 里展开：整段选项行换成问句 + 模型列表，按键提示同时换成 <code>Esc to go back · Enter to request the review</code>。首帧把问句带到视野顶端（问句与选中行同屏），之后按键只把选中行带进视野。</li>
-  <li>模型列表照 <code>01</code> 页 <code>/model</code> 的分栏：<code>❯</code>（110）后跟 <code>provider/model</code>，<b>行首没有序号</b>，名字列按最长名字定宽（上限 40、不超行宽 2/5），说明列隔 2 格、是完整请求 URL，过窄时从 base 中部省略但保住路径，任一名字超列宽则整列表堆叠；<b>列表只放已配置的模型，不提供新增入口</b>。当前会话模型在名字后面标 <code>●</code>（110）：图标连同前面一格空格吃进名字列与说明列之间的 2 格间距，说明列的对齐不变，也不撑宽名字列。</li>
+  <li>模型列表照 <code>01</code> 页 <code>/model</code> 的分栏：<code>❯</code>（110）后跟 <code>provider/model</code>，<b>行首没有序号</b>，名字列按最长名字定宽（上限 40、不超行宽 2/5），说明列隔 2 格、是完整请求 URL，过窄时从 base 中部省略但保住路径，任一名字超列宽则整列表堆叠；<b>列表只放已配置的模型，不提供新增入口</b>。当前会话模型在名字后面标 <code>●</code>（110）：名字列不因它变宽；端点列在它后面恒定留 1 格，其余行仍与它同列对齐。</li>
   <li>请求评审只印一行 <code>✔ You asked provider/model to review the plan</code>（✔ 绿 70、正文 244），审批仍是 pending。</li>
 </ul></div>
 <div class="note"><h3>本期的语义（原型里已全部体现）</h3><ul>
@@ -254,20 +254,22 @@ function columnRows(l,width,stack){
     return [cat(l.lead,LB.of(l.col,l.style||TXT)).add(' ').add(l.mark.glyph,l.mark.style)];
   }
   const lw=l.lead.w, colW=colWidthOf(l,width), nameW=sw(l.col);
+  const endAt=(l.endsAt||colW+2);
   if(nameW>colW||stack)return stackedRows(l,width);
-  const avail=Math.max(1,width-lw-colW-2);
+  const avail=Math.max(1,width-lw-endAt);
   const texts=l.elide?elideEndpoint(String(l.text).trim(),l.path,avail):wrapWords(String(l.text).trim(),avail);
   return texts.map((t,i)=>{
     let lead;
     if(i){
-      lead=LB.of(rep(' ',lw+colW+2));
+      lead=LB.of(rep(' ',lw+endAt));
     }else{
-      // mark 是名字后面的单格图标（当前模型）：它和前面一格空格一起吃进
-      // 名字列与说明列之间的 2 格间距，所以说明列的对齐不受影响。
+      // mark 是名字后面的单格图标（当前模型）：名字列不因它变宽；端点列在它
+      // 后面恒定留 1 格，其余行仍与它同列对齐（列表把这条规则算成 endsAt
+      // 传进来，见 exit-plan-pick 页）。
       lead=cat(l.lead,LB.of(l.col));
       const used=l.mark?2:0;
       if(l.mark)lead.add(' ').add(l.mark.glyph,l.mark.style);
-      lead.add(rep(' ',Math.max(0,colW-nameW-used+2)));
+      lead.add(rep(' ',Math.max(0,endAt-nameW-used)));
     }
     return cat(lead,LB.of(t,l.style||TXT));
   });
@@ -1383,13 +1385,19 @@ function gateContent(st,cols){
     // 没有序号；当前会话模型在名字后面标 ●。
     const nameW=Math.min(40,visible.reduce((w,m)=>Math.max(w,sw(modelLabel(m))),0));
     const nameRoom=Math.max(1,Math.floor((width-(2+2))*2/5));
-    const stack=visible.some(m=>sw(modelLabel(m))>Math.min(nameW,nameRoom));
+    const colW=Math.min(nameW,nameRoom);
+    // 当前模型的 ● 收尾名字格：名字撑满列时它不能把 2 格间距吃光，端点列整体
+    // 右移一格，让 ● 后面恒定留 1 格（与 pkg/tui/overlays.go 的 planReviewList 同步）。
+    let endsAt=colW+2;
+    visible.forEach(m=>{if(m.current&&endpoint(m.base,m.path))
+      endsAt=Math.max(endsAt,Math.min(sw(modelLabel(m)),colW)+3);});
+    const stack=visible.some(m=>sw(modelLabel(m))>colW);
     if(!visible.length)push(LB.of('  No matches'));
     visible.forEach((m,i)=>{
       const on=i===st.pickCursor;
       const mark=on&&!st.inFilter;
       const start=rows.length;
-      lineRows({lead:LB.of(mark?'❯ ':'  ',mark?ACC:TXT),col:modelLabel(m),colWidth:nameW,
+      lineRows({lead:LB.of(mark?'❯ ':'  ',mark?ACC:TXT),col:modelLabel(m),colWidth:nameW,endsAt:endsAt,
         text:endpoint(m.base,m.path),style:TXT,elide:true,path:m.path,
         mark:m.current?{glyph:'●',style:ACC}:null},width,stack).forEach(l=>rows.push(l));
       if(on)sel.push(start);
@@ -1657,7 +1665,7 @@ scene('E · 计划审批','exit-plan-pick','选评审模型：/model 的分栏�
   +'列表用 <code>01</code> 页 <code>/model</code> 的同一套分栏：<code>❯</code> 之后直接是 <code>provider/model</code>（<b>行首没有序号</b>），'
   +'说明列隔 2 格、是<b>完整请求 URL</b>（过窄时从 base 中部省略，路径保住）；列表里只有这个会话已配置的模型，不提供新增入口。'
   +'可选行 <b>≥8</b> 时问句下<b>空一行</b>出现<b>过滤条</b>（与 <code>/model</code> 同一套三行条：<code>⌕ Type to filter</code>，过滤条后再空一行接列表）；输入即按名字或端点过滤、最佳匹配在前、光标重锚首项。'
-  +'当前会话模型在名字后面标 <code>●</code>（accent 110）：图标连同前面一格空格正好填进名字列与说明列之间的 2 格间距，说明列照样对齐。'
+  +'当前会话模型在名字后面标 <code>●</code>（accent 110）：名字列不因它变宽；端点列在它后面恒定留 1 格，其余行仍与它同列对齐。'
   +'默认预选<b>第一个非当前模型</b>；<code>↑/↓</code> 移动（光标在首行再按 <code>↑</code> 进过滤条），有过滤条时字母键一律进过滤条（<code>j/k</code> 也是输入）；'
   +'<code>Esc</code> 回到 verdict 行、选中项留在评审行，<code>Enter</code> 请求评审。首帧把问句带到视野顶端，之后按键只把选中行带进视野。',
   ()=>gateState({picking:true}));

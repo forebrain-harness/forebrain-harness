@@ -5131,3 +5131,40 @@ func TestConnectPanelInteractivePreview(t *testing.T) {
 	}
 	t.Logf("preview %q ended with %v", mode, panelErr)
 }
+
+// The endpoint column clears the ● by one cell, and only a marked row with an
+// endpoint widens it; the name column itself never grows.
+func TestPlanReviewListReservesOneCellAfterTheMark(t *testing.T) {
+	const marked = "deepseek/deepseek-flash" // 23 cells
+	models := []turn.PlanReviewModelOption{
+		{Provider: "deepseek", Model: "deepseek-flash", Current: true, Endpoint: "https://api.deepseek.com"},
+		{Provider: "qdercn", Model: "DeepSeek-Flash", Endpoint: "https://gateway.qoder.com.cn"},
+	}
+	list := newPlanReviewList(models, 120)
+	if list.colW != displayLineWidth(marked) {
+		t.Fatalf("colW = %d, want the widest name alone (%d)", list.colW, displayLineWidth(marked))
+	}
+	if want := displayLineWidth(marked) + panelColumnGap + 1; list.endsAt != want {
+		t.Fatalf("endsAt = %d, want %d (one cell after the ●)", list.endsAt, want)
+	}
+
+	// A marked row that is not the widest name leaves the column where it was.
+	const widest = "anthropic/claude-sonnet-4-6"
+	narrow := []turn.PlanReviewModelOption{
+		{Provider: "qdercn", Model: "DeepSeek-Flash", Current: true, Endpoint: "https://gateway.qoder.com.cn"},
+		{Provider: "anthropic", Model: "claude-sonnet-4-6", Endpoint: "https://api.anthropic.com"},
+	}
+	if got, want := newPlanReviewList(narrow, 120).endsAt, displayLineWidth(widest)+panelColumnGap; got != want {
+		t.Fatalf("endsAt = %d, want the name column plus the gap (%d)", got, want)
+	}
+
+	// A marked row without an endpoint draws nothing after its name, so it must
+	// not move anyone else's endpoint either.
+	noEndpoint := []turn.PlanReviewModelOption{
+		{Provider: "deepseek", Model: "deepseek-flash", Current: true},
+		{Provider: "qdercn", Model: "DeepSeek-Flash", Endpoint: "https://gateway.qoder.com.cn"},
+	}
+	if got, want := newPlanReviewList(noEndpoint, 120).endsAt, displayLineWidth(marked)+panelColumnGap; got != want {
+		t.Fatalf("endsAt = %d, want the name column plus the gap (%d)", got, want)
+	}
+}

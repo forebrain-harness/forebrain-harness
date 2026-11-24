@@ -1698,22 +1698,23 @@ func planReviewChoiceIndex(options []overlayChoice) int {
 }
 
 // planReviewList is the reviewer list laid out once for the width it is drawn
-// at: each row's name — the provider/model pair — and the name column they all
-// share. A name too wide for that column stacks the whole list (names on one
-// line, endpoints hung under them) rather than pushing one row's endpoint out
-// of line with the others. The mark the model in force carries is measured out
-// of this layout: it is drawn inside the gap between the columns, so it can
-// neither widen the name column nor move an endpoint.
+// at: each row's name — the provider/model pair — the name column they all
+// share, and the cell the endpoint column starts at. A name too wide for that
+// column stacks the whole list (names on one line, endpoints hung under them)
+// rather than pushing one row's endpoint out of line with the others. The mark
+// the model in force carries is measured out of this layout: it can neither
+// widen the name column nor move an endpoint away from the others.
 type planReviewList struct {
-	names []string
-	colW  int
-	stack bool
+	names  []string
+	colW   int // the name column itself: the names alone
+	endsAt int // cells from the lead to the endpoint column, marks included
+	stack  bool
 }
 
 // newPlanReviewList measures the list: the widest name, capped at
 // panelNameColumnMax and narrowed to two fifths of the row past the cursor
 // column — the two-column rule every list in this terminal shares
-// (panel_columns.go).
+// (panel_columns.go) — and the cell the endpoint column starts at.
 func newPlanReviewList(models []turn.PlanReviewModelOption, width int) planReviewList {
 	list := planReviewList{names: make([]string, len(models))}
 	widest := 0
@@ -1724,25 +1725,38 @@ func newPlanReviewList(models []turn.PlanReviewModelOption, width int) planRevie
 	room := (width - displayLineWidth(selectorCursorGlyph+" ")) * 2 / 5
 	list.colW = min(min(panelNameColumnMax, widest), maxInt(1, room))
 	list.stack = widest > list.colW
+	// The ● closes the name cell of the model in force, so a name that fills
+	// the column would hand it the whole gap and the endpoint would touch the
+	// glyph: the endpoint column starts one cell past that name cell instead,
+	// and every row — marked or not — keeps the one column.
+	list.endsAt = list.colW + panelColumnGap
+	for i, model := range models {
+		if model.Current && strings.TrimSpace(model.Endpoint) != "" {
+			list.endsAt = maxInt(list.endsAt, displayLineWidth(list.names[i])+planReviewMarkRoom()+1)
+		}
+	}
 	return list
 }
 
+// planReviewMarkRoom is the room the model-in-force mark takes: the space
+// before the glyph plus the glyph itself. Measured, never assumed — a locale
+// may draw the ● two cells wide.
+func planReviewMarkRoom() int { return displayLineWidth(" " + selectorCheckedGlyph) }
+
 // rows lays one row out: the cursor, the name, the mark the model in force
-// carries, then the endpoint panelColumnGap cells past the name column, cut
-// from the base of its URL so the api path a narrow column must keep stays
-// whole (elideEndpoint). The mark and the space before it fill that gap
-// instead of widening the name column, so a marked row's endpoint starts
-// exactly where every other row's does — flush after the ● when the name fills
-// its column. A stacked list keeps the mark on the name line and hangs the
-// endpoint under it, at the cursor's width.
+// carries, then the endpoint at the list's endpoint column — cut from the base
+// of its URL so the api path a narrow column must keep stays whole
+// (elideEndpoint). The mark widens the name cell it closes rather than the name
+// column, so a marked row's endpoint still starts where every other row's does,
+// with one cell between the ● and the URL. A stacked list keeps the mark on the
+// name line and hangs the endpoint under it, at the cursor's width.
 func (l planReviewList) rows(lead string, i int, model turn.PlanReviewModelOption, width int) []string {
 	leadW := displayLineWidth(selectorCursorGlyph + " ")
 	name := l.names[i]
 	mark, markW := "", 0
 	if model.Current {
 		mark = " " + panelAccentStyle.Render(selectorCheckedGlyph)
-		// Measured, never assumed: a locale may draw the ● two cells wide.
-		markW = displayLineWidth(" " + selectorCheckedGlyph)
+		markW = planReviewMarkRoom()
 	}
 	endpoint := strings.TrimSpace(model.Endpoint)
 	if l.stack {
@@ -1757,9 +1771,9 @@ func (l planReviewList) rows(lead string, i int, model turn.PlanReviewModelOptio
 	}
 	row := lead + name + mark
 	if endpoint != "" {
-		pad := maxInt(0, l.colW-displayLineWidth(name)-markW+panelColumnGap)
+		pad := maxInt(0, l.endsAt-displayLineWidth(name)-markW)
 		row += strings.Repeat(" ", pad) +
-			elideEndpoint(endpoint, model.EndpointTail, maxInt(1, width-leadW-l.colW-panelColumnGap))[0]
+			elideEndpoint(endpoint, model.EndpointTail, maxInt(1, width-leadW-l.endsAt))[0]
 	}
 	return []string{row}
 }

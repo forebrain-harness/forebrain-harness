@@ -537,3 +537,44 @@ func TestPlanReviewPickerFilterBarWidth(t *testing.T) {
 		}
 	}
 }
+
+// 9 models so the filter bar is shown (pickerFilterMinRows == 8); typing
+// "flash" leaves the two rows the owner's screenshot shows, and the marked row
+// is the widest of them — the case where the ● used to touch the endpoint.
+func TestPlanReviewPickerKeepsASpaceAfterTheMarkWhenTheFilterNarrowsToIt(t *testing.T) {
+	const (
+		currentEndpoint = "https://api.deepseek.com/chat/completions"
+		otherEndpoint   = "https://gateway.qoder.com.cn/algo/api/v2/service/pro/sse/agent_chat_generation"
+	)
+	models := planReviewFilterModels(7) // short opencode-go fillers
+	models = append(models,
+		turn.PlanReviewModelOption{ID: "current", Provider: "deepseek", Model: "deepseek-flash",
+			Current: true, Endpoint: currentEndpoint, EndpointTail: "/chat/completions"},
+		turn.PlanReviewModelOption{ID: "other", Provider: "qdercn", Model: "DeepSeek-Flash",
+			Endpoint: otherEndpoint},
+	)
+	overlay := planReviewFilterOpen(t, planReviewFilterRequest(t, models))
+	planReviewFilterType(t, overlay, "flash")
+	lines := planReviewFilterLines(t, overlay, 120)
+	marked, plain := "", ""
+	for _, line := range lines {
+		if strings.Contains(line, currentEndpoint) {
+			marked = line
+		}
+		if strings.Contains(line, otherEndpoint) {
+			plain = line
+		}
+	}
+	if marked == "" || plain == "" {
+		t.Fatalf("both filtered rows must render:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(marked, selectorCheckedGlyph+" "+currentEndpoint) {
+		t.Fatalf("the ● must clear the endpoint by at least one cell: %q", marked)
+	}
+	at := func(line, endpoint string) int {
+		return displayLineWidth(line[:strings.Index(line, endpoint)])
+	}
+	if a, b := at(marked, currentEndpoint), at(plain, otherEndpoint); a != b {
+		t.Fatalf("endpoint columns differ: %d and %d\n%s", a, b, strings.Join(lines, "\n"))
+	}
+}

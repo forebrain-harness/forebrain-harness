@@ -11308,16 +11308,17 @@ func TestExitPlanReviewPickerRendersTwoColumns(t *testing.T) {
 			t.Fatalf("endpoint columns differ: %d and %d\n%s", column, at, strings.Join(lines, "\n"))
 		}
 	}
-	// The name column is the names alone: the endpoint column is the lead plus
-	// the widest name plus the fixed gap. The model in force here carries the
-	// widest name, so a ● that widened the column would show up as this
-	// number moving.
+	// The name column is the names alone: the endpoint column clears the
+	// model-in-force mark by one cell — the lead, the widest name, the fixed
+	// gap and that one cell. A name that fills the column would otherwise hand
+	// the ● the whole gap.
 	longest := "anthropic/claude-opus-4-1"
-	if want := displayLineWidth(panelIndent) + displayLineWidth(longest) + panelColumnGap; column != want {
-		t.Fatalf("endpoint column = %d, want %d (lead + widest name + gap)\n%s", column, want, strings.Join(lines, "\n"))
+	if want := displayLineWidth(panelIndent) + displayLineWidth(longest) +
+		planReviewMarkRoom() + 1; column != want {
+		t.Fatalf("endpoint column = %d, want %d (lead + marked name cell + 1)\n%s", column, want, strings.Join(lines, "\n"))
 	}
-	// …and the mark fills that gap rather than pushing the endpoint away: on
-	// the row it marks, the URL follows the ● immediately.
+	// …and the ● keeps one cell of its own before the endpoint: the mark ends
+	// the name cell instead of eating the column gap.
 	marked := ""
 	for _, line := range lines {
 		if strings.Contains(line, longest+" "+selectorCheckedGlyph) && strings.Contains(line, "https://") {
@@ -11329,8 +11330,8 @@ func TestExitPlanReviewPickerRendersTwoColumns(t *testing.T) {
 	}
 	glyphAt := displayLineWidth(marked[:strings.Index(marked, selectorCheckedGlyph)])
 	urlAt := displayLineWidth(marked[:strings.Index(marked, "https://")])
-	if got := urlAt - glyphAt; got != displayLineWidth(selectorCheckedGlyph) {
-		t.Fatalf("%d cells stand between the ● and the URL, want the glyph's own width: %q", got, marked)
+	if gap := urlAt - glyphAt - displayLineWidth(selectorCheckedGlyph); gap < 1 {
+		t.Fatalf("%d cells stand between the ● and the URL, want at least 1: %q", gap, marked)
 	}
 }
 
