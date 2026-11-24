@@ -566,6 +566,22 @@ type configPageSelector interface {
 
 var _ configPageSelector = (*rawSelector)(nil)
 
+// configMultiPageSelector is what a /config page over a set needs of a
+// selector (plan 377): one page with a check box before every row, space
+// toggling the row under the cursor and Enter saving the whole set. It is a
+// capability of its own rather than a widening of configPageSelector, so every
+// selector that draws the panel's other pages — a scripted double included —
+// keeps compiling, and a selector without it falls back to the check-box list
+// every multi-select already had.
+type configMultiPageSelector interface {
+	Selector
+	// SelectConfigMultiPage is one multi-select page with the panel's own
+	// header, answered as the set it held when Enter saved it.
+	SelectConfigMultiPage(label string, items []SelectItem, opts ActionOptions) (ActionResult, error)
+}
+
+var _ configMultiPageSelector = (*rawSelector)(nil)
+
 // selectRichPage opens one /config list page when the selector can draw it
 // and the plain rich picker otherwise, so callers name the shape they want
 // without probing for the capability themselves (plan 325).

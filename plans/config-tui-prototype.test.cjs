@@ -87,7 +87,9 @@ assert(!html.includes('\u00b7'), 'Middle-dot separators are forbidden');
             if (!el || el.classList.contains('locked')) continue;
             const before = p.state.stack.length;
             el.click();
-            if (!['edit', 'choice'].includes(p.state.view) && p.state.stack.length <= before) failures.push(s.id + '/' + labels[i]);
+            // Allowed tools opens the tool chooser (plan 377): a page of its
+            // own, not a deeper frame.
+            if (!['edit', 'choice', 'toolPick'].includes(p.state.view) && p.state.stack.length <= before) failures.push(s.id + '/' + labels[i]);
             checked++;
           }
         }
@@ -507,6 +509,84 @@ assert(!html.includes('\u00b7'), 'Middle-dot separators are forbidden');
       await clickRow('Thinking level');
       items = await page.locator('#panel .item').evaluateAll(els => els.map(e => e.textContent.replace(/\s+/g, ' ').trim()));
       assert(items[0].includes('Off'), 'an off-capable chat row offers Off first');
+    });
+    // Allowed tools is a chooser over the run's tool table (plan 377), not a
+    // list of typed names: one page, a check box on every row, space to
+    // toggle, Enter to save the whole table, Esc to leave it alone.
+    const toolChecks = () => page.evaluate(() => window.prototype.visible().filter(r => r.check).map(r => r.label));
+    const savedTools = () => page.evaluate(() => window.prototype.state.saved.agents.definitions['repo-auditor'].allowed_tools);
+    await check('Allowed tools opens the tool chooser, checked as the entry is stored', async () => {
+      await scene('tool-pick');
+      assert.equal((await state()).view, 'toolPick');
+      assert.equal(await page.locator('#valueInput').count(), 0, 'the page asks for no text');
+      const labels = await page.locator('#panel .opt-label').allTextContents();
+      assert(labels.includes('read_file') && labels.includes('shell'), 'rows: ' + labels.join('|'));
+      assert(!labels.some(label => label.startsWith('subagent_')), 'the subagent dispatch tools are never offered');
+      assert(labels.includes('code_search'), 'a stored name the table no longer offers keeps its row');
+      assert.deepEqual((await toolChecks()).sort(), ['code_search', 'read_file']);
+      const footer = (await page.locator('.panel-footer').innerText()).trim();
+      assert.equal(footer, '↑/↓ to navigate space to toggle enter to save esc to cancel');
+    });
+    await check('Space toggles a row and Enter saves the whole table in one write', async () => {
+      await scene('tool-pick');
+      const before = await savedTools();
+      await page.keyboard.press(' ');
+      assert.deepEqual((await toolChecks()).sort(), ['code_search'], 'space unchecked the cursor row (read_file)');
+      await page.keyboard.press(' ');
+      assert.deepEqual((await toolChecks()).sort(), ['code_search', 'read_file'], 'space checked it again');
+      await clickRow('shell');
+      assert.deepEqual((await toolChecks()).sort(), ['code_search', 'read_file', 'shell']);
+      await page.keyboard.press('Enter');
+      assert.equal((await state()).view, 'fields', 'Enter saves and returns to the entry');
+      assert.deepEqual(await savedTools(), ['read_file', 'shell', 'code_search'], 'the list keeps the page order, the dropped name last');
+      assert.notDeepEqual(await savedTools(), before);
+      // Esc leaves the stored list as it was.
+      await scene('tool-pick');
+      const kept = await savedTools();
+      await clickRow('write_file');
+      await page.keyboard.press('Escape');
+      assert.equal((await state()).view, 'fields');
+      assert.deepEqual(await savedTools(), kept, 'Esc writes nothing');
+      assert.equal((await state()).changes.length, 0, 'Esc leaves no pending change');
+    });
+    await check('The filter narrows the page and the hidden checks survive it', async () => {
+      await scene('tool-pick-filter');
+      const labels = await page.locator('#panel .opt-label').allTextContents();
+      assert(labels.length > 0 && labels.every(label => /mem/.test(label)), 'filtered rows: ' + labels.join('|'));
+      await clickRow('memories_read');
+      await page.keyboard.press('Enter');
+      assert.deepEqual(await savedTools(), ['read_file', 'memories_read', 'code_search'], 'the rows the filter hid kept their checks');
+    });
+    await check('An empty table with tools: pick is refused in the validator own words', async () => {
+      await scene('tool-pick-empty-refused');
+      assert.equal((await state()).view, 'toolPick', 'the refusal keeps the page open');
+      assert.match(await page.locator('.notice').innerText(), /allowed_tools requires at least one tool with tools: pick/);
+      assert.deepEqual(await toolChecks(), [], 'the page keeps the set the user left');
+      assert.deepEqual(await savedTools(), ['read_file', 'code_search'], 'the refused write changed nothing');
+      assert.equal((await state()).changes.length, 0);
+      await page.keyboard.press('Escape');
+      assert.equal((await state()).view, 'fields');
+    });
+    await check('The create form holds the checks until its own save', async () => {
+      const entryNow = () => page.evaluate(() => {
+        const list = window.prototype.state.draft.definitions.main.subagents;
+        return list[list.length - 1];
+      });
+      await scene('tool-pick-create');
+      assert.equal((await state()).view, 'toolPick');
+      assert.deepEqual(await toolChecks(), ['read_file']);
+      assert(!Object.hasOwn(await entryNow(), 'allowed_tools'), 'nothing is written into the form entry before Enter');
+      await page.keyboard.press('Enter');
+      assert.equal((await state()).view, 'fields', 'Enter holds the set and returns to the form');
+      assert.deepEqual((await entryNow()).allowed_tools, ['read_file'], 'the picker holds its set in the form draft');
+      assert.equal(await page.evaluate(() => window.prototype.state.saved.agents.definitions.main.subagents.length), 3, 'nothing is saved yet');
+      await clickRow('Name');
+      await page.locator('#valueInput').fill('repo-scout');
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('s');
+      const saved = await page.evaluate(() => window.prototype.state.saved.agents.definitions.main.subagents);
+      assert.equal(saved[saved.length - 1].name, 'repo-scout');
+      assert.deepEqual(saved[saved.length - 1].allowed_tools, ['read_file'], 'the form save carries the held table');
     });
     for (const [id, file] of [
       ['overview-safety', 'config-tui-prototype-desktop.png'],

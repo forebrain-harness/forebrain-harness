@@ -24,6 +24,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -84,6 +85,18 @@ type configPanelSnapshot struct {
 	Stored     map[string]json.RawMessage
 	ClaudeCode bool
 	Models     []appcfg.LLMModelConfig
+	// Tools is the runtime tool table the installed harness registers,
+	// read the way the gateway's /tools and the web subagent drawer read it
+	// (plan 377): the one list an Allowed tools page offers.
+	Tools []configToolOption
+}
+
+// configToolOption is one row of that table as a chooser names it: the tool's
+// own name, which is what a definition stores, and the sentence the harness
+// gives for it.
+type configToolOption struct {
+	Name        string
+	Description string
 }
 
 // configPanelSession is what /config needs from a session — an optional
@@ -118,12 +131,38 @@ func (s *ChatSession) ConfigPanelSections(ctx context.Context) (configPanelSnaps
 	}
 	// Judged once per open: the interop switch is shown only on a machine
 	// that has Claude Code's directory (plan 195 §3.7).
+	// The runtime tool table is state too (plan 377): an Allowed tools page
+	// offers the tools this run registers, read here the way the gateway's
+	// /tools and the web subagent drawer read it. A session with no runner
+	// registers none.
+	var tools []configToolOption
+	if table := s.Env.Tools(); table != nil {
+		tools = configToolOptions(table.ToolMetas())
+	}
 	return configPanelSnapshot{
 		Stored: stored, ClaudeCode: process.ClaudeCodeDetected(),
 		// The model table is state, not a section: the panel only names row
 		// ids with it (plan 313).
 		Models: root.LLMModels,
+		Tools:  tools,
 	}, nil
+}
+
+// configToolOptions is the tool table as a chooser offers it: every tool the
+// run registers but the dispatch ones, in the table's own order. A subagent
+// never names subagent_run or subagent_send among its allowed tools — the
+// loader refuses the section for it, because a subagent cannot dispatch
+// subagents (pkg/config validateCustomSubagentBody) — so the chooser does not
+// offer what a save would be refused for.
+func configToolOptions(metas []event.ToolMeta) []configToolOption {
+	var out []configToolOption
+	for _, meta := range metas {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(meta.Name)), "subagent_") {
+			continue
+		}
+		out = append(out, configToolOption{Name: meta.Name, Description: meta.Description})
+	}
+	return out
 }
 
 // UpdateConfigSection stores one section's JSON as its fb_config row — nil
@@ -162,6 +201,11 @@ type configPanel struct {
 	// row id is named through it, since no section carries the names (plan
 	// 313).
 	models []appcfg.LLMModelConfig
+	// tools is the runtime tool table as the panel opened it (plan 377): the
+	// one list an Allowed tools page offers, the same the gateway's /tools
+	// serves. It follows the model table's contract — read once per open, so
+	// a tool registered by another surface shows up on the next open.
+	tools []configToolOption
 	// section is the stored section the open page writes — a projection
 	// writes the section it presents — and write is the call that stores it.
 	// Together they are the page's one write path (plan 321).
@@ -233,6 +277,7 @@ func (c *commandController) handleConfig(ctx context.Context, args []string) boo
 	panel.raw = snapshot.Stored
 	panel.claudeCode = snapshot.ClaudeCode
 	panel.models = snapshot.Models
+	panel.tools = snapshot.Tools
 	start := ""
 	if len(args) > 0 {
 		schema, known := panelSectionSchemaFor(args[0])
@@ -1558,6 +1603,14 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 	if len(initialNotice) > 0 {
 		notice = initialNotice[0]
 	}
+	// Allowed tools is a choice over the runtime tool table, not a list of
+	// typed names (plan 377, owner 2026-11-24): the page is one multi-select
+	// chooser, so no entry row and no text editor opens for it. Only this
+	// one field takes that page — every other string collection (writable
+	// roots, arguments, scopes) keeps its rows and their editor.
+	if toolsField, ok := configToolsFieldAt(p.section, path); ok {
+		return p.editAllowedTools(doc, path, toolsField)
+	}
 	actions := p.configActionSelector()
 	for {
 		container, _ := configLookupValue(doc, path)
@@ -1632,6 +1685,140 @@ func (p *configPanel) editRows(doc any, path []string, field configField, initia
 			return doc, ""
 		}
 	}
+}
+
+// configToolsFieldAt resolves the Allowed tools field at path — the field
+// whose page is the runtime tool chooser (plan 377). The path must end at the
+// key itself, and the template its parent resolves to must carry it as the
+// string collection it is: a subagent's own key and the one an agent template
+// declares are the same page, while an MCP server's tools map — a set of
+// per-tool approvals in a server's namespace, not a list of the run's tools —
+// resolves to a template that does not carry it.
+func configToolsFieldAt(section string, path []string) (configField, bool) {
+	if len(path) == 0 || path[len(path)-1] != configAllowedToolsKey {
+		return configField{}, false
+	}
+	template := configTemplateFor(section, path[:len(path)-1])
+	for _, field := range configTemplateFields(template) {
+		if field.Path == configAllowedToolsKey && field.Kind == configFieldRows && field.List {
+			return field, true
+		}
+	}
+	return configField{}, false
+}
+
+// editAllowedTools is Allowed tools' page (plan 377, owner 2026-11-24): one
+// list of every tool the run registers, the definition's own entries checked,
+// space to check or uncheck a row, Enter to save the whole list in one write,
+// Esc to leave it as it was. The names a definition already stores come first
+// as rows of their own when the table no longer offers them — a tool this
+// build dropped is still visible, and so still removable.
+func (p *configPanel) editAllowedTools(doc any, path []string, field configField) (any, string) {
+	cur, _ := configLookupValue(doc, path)
+	stored := make([]string, 0, configListLen(cur))
+	if rows, ok := cur.([]any); ok {
+		for _, row := range rows {
+			if name, ok := row.(string); ok && strings.TrimSpace(name) != "" {
+				stored = append(stored, strings.TrimSpace(name))
+			}
+		}
+	}
+	items, names := p.toolPickItems(stored)
+	checked := make([]int, 0, len(names))
+	for i, name := range names {
+		if slices.Contains(stored, name) {
+			checked = append(checked, i)
+		}
+	}
+	notice := ""
+	for {
+		res, err := p.multiPage(notice, items, checked)
+		if err != nil {
+			p.printError(err)
+			return doc, ""
+		}
+		if p.tabStep != 0 {
+			// An arrow steps the whole panel to the next tab (plan 350).
+			return doc, ""
+		}
+		if !res.OK {
+			return doc, ""
+		}
+		next := make([]string, 0, len(res.Checked))
+		for i, name := range names {
+			if slices.Contains(res.Checked, i) {
+				next = append(next, name)
+			}
+		}
+		var updated any
+		var note string
+		if len(next) == 0 {
+			// An empty set is the key gone, not an empty list: a stored []
+			// and an absent key read the same to the loader, and every other
+			// removal in the panel writes the key out (plan 377).
+			updated, note = p.assign(doc, path, nil, true, field.Label)
+		} else {
+			updated, note = p.assign(doc, path, next, false, field.Label)
+		}
+		if note != "" {
+			// The store refused the candidate — tools: pick with nothing
+			// checked — so the page reopens on the set the user just chose,
+			// under the validator's own words, and the section is untouched.
+			notice, checked = note, res.Checked
+			continue
+		}
+		return updated, ""
+	}
+}
+
+// toolPickItems is the chooser's rows and the names they stand for, in the
+// order a save writes them: the runtime tool table, then one row per stored
+// name the table does not offer. Names are matched exactly — a tool's name is
+// an identifier, not prose — while the dispatch prefix the loader refuses is
+// already gone from the table (configToolOptions).
+func (p *configPanel) toolPickItems(stored []string) ([]SelectItem, []string) {
+	items := make([]SelectItem, 0, len(p.tools)+len(stored))
+	names := make([]string, 0, len(p.tools)+len(stored))
+	offered := make(map[string]bool, len(p.tools)+len(stored))
+	for _, tool := range p.tools {
+		items = append(items, SelectItem{Label: tool.Name, Description: tool.Description})
+		names = append(names, tool.Name)
+		offered[tool.Name] = true
+	}
+	for _, name := range stored {
+		if offered[name] {
+			continue
+		}
+		offered[name] = true
+		items = append(items, SelectItem{Label: name})
+		names = append(names, name)
+	}
+	return items, names
+}
+
+// multiPage opens Allowed tools' page: the panel's own multi-select chooser
+// when the selector draws one, and the check-box list every multi-select
+// already had when it does not. label is the outcome line under the tab bar —
+// the validator's refusal, or nothing at all.
+func (p *configPanel) multiPage(label string, items []SelectItem, checked []int) (ActionResult, error) {
+	if pages, ok := p.sel.(configMultiPageSelector); ok {
+		res, err := pages.SelectConfigMultiPage(label, items, ActionOptions{
+			Page: true, Chrome: p.chrome(), Keys: configChoiceKeys, Filter: true, Checked: checked,
+		})
+		if err != nil {
+			return ActionResult{Row: -1}, err
+		}
+		if res.TabStep != 0 {
+			p.tabStep = res.TabStep
+			return ActionResult{Row: -1}, nil
+		}
+		return res, nil
+	}
+	picked, ok, err := multiSelectRichTabbed(p.sel, label, items, TabbedSelectOptions{Checked: checked})
+	if err != nil || !ok {
+		return ActionResult{Row: -1}, err
+	}
+	return ActionResult{Row: -1, OK: true, Checked: picked}, nil
 }
 
 // configRowIsEntry reports whether one stored row is an entry of a removable
@@ -1774,6 +1961,10 @@ const (
 	configDefinitionsPath   = "definitions"
 	configSubagentsKey      = "subagents"
 	configSubagentModelsKey = "subagent_models"
+	// configAllowedToolsKey is the list a subagent's tool policy names when
+	// it picks: the one field whose page is the runtime tool chooser
+	// (plan 377).
+	configAllowedToolsKey = "allowed_tools"
 	// configPlanReviewerKey is the other install-wide row in the agents
 	// section the "Subagents" page presents (plans 313, 314): the exit-plan
 	// reviewer's global row. The shared subagent definitions live in the

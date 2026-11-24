@@ -6279,6 +6279,27 @@ type richPickerState struct {
 	// keys is how a /config page names Enter and Esc in its footer (plan
 	// 350); nil keeps the pickers' own wording.
 	keys *configPageKeys
+	// multi draws the page as a multi-select chooser (plan 377): a check box
+	// before every row, space toggling the row under the cursor, and an
+	// Enter that answers the whole checked set. Only SelectConfigMultiPage
+	// sets it; every other picker picks one row.
+	multi bool
+	// checked is that set, by index into items, so a row checked before a
+	// filter narrowed the page stays checked while it is hidden.
+	checked map[int]bool
+}
+
+// checkedIndices is the checked set in row order — the order the page lists
+// its rows, which is the order a saved list keeps.
+func (p *richPickerState) checkedIndices() []int {
+	out := make([]int, 0, len(p.checked))
+	for idx, on := range p.checked {
+		if on {
+			out = append(out, idx)
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 func (p *richPickerState) rebuildSelectable() {
@@ -6391,7 +6412,16 @@ func (p *richPickerState) panel(label string) slashPanel {
 			// gone — Enter still answers why it will not open (plan 350).
 			name = panelHintStyle.Render(name)
 		}
-		b.selectableColumnsValue(ci == p.cursor, "", name, nameWidth, strings.TrimSpace(item.Description), item.ElideTail, item.Value, item.Status, mark)
+		// A multi-select page draws the check box before each row, ahead of
+		// the cursor, the way the plain multi-select always has (plan 377).
+		lead := ""
+		if p.multi {
+			lead = selectorUncheckedGlyph + " "
+			if p.checked[idx] {
+				lead = selectorCheckedGlyph + " "
+			}
+		}
+		b.selectableColumnsValue(ci == p.cursor, lead, name, nameWidth, strings.TrimSpace(item.Description), item.ElideTail, item.Value, item.Status, mark)
 	}
 	if len(p.selectable) == 0 && !p.configPage {
 		b.text(panelIndent, "No matches", nil)
@@ -6414,6 +6444,13 @@ func (p *richPickerState) footerHint() string {
 	hint := selectFooterHint(false, p.esc)
 	if p.keys != nil {
 		hint = "↑/↓ to navigate Enter to " + p.keys.Enter + " Esc to " + p.keys.Esc
+		if p.multi {
+			// A multi-select page names the toggle it adds, in the lower-case
+			// words every slash footer is moving to (owner 2026-11-24, plan
+			// 377): the check box is the one key this page has that no other
+			// page of the panel does.
+			hint = "↑/↓ to navigate space to toggle enter to " + p.keys.Enter + " esc to " + p.keys.Esc
+		}
 	}
 	for i := range p.actions {
 		if !p.actionServesRow(i) {
@@ -6573,6 +6610,10 @@ type ActionOptions struct {
 	// narrowing, the way /model's own picker does. Every other config page keeps
 	// the keyboard on its rows.
 	Filter bool
+	// Checked is the set a multi-select page opens with, by index into items
+	// (plan 377). No other page reads it: a page that picks one row has no
+	// set to open with.
+	Checked []int
 }
 
 // configPageKeys names what Enter and Esc do on one /config page, in the
@@ -6596,6 +6637,10 @@ type ActionResult struct {
 	// counted among the pages' own tabs.
 	TabStep int
 	Tab     int
+	// Checked is a multi-select page's answer (plan 377): the rows checked
+	// when Enter saved the page, in row order and regardless of any filter
+	// that was narrowing it. The pages that pick one row leave it nil.
+	Checked []int
 }
 
 // InputResult is ActionResult's form for an editor with footer actions: the
@@ -6695,6 +6740,34 @@ func (s *rawSelector) SelectConfigPage(label string, items []SelectItem, default
 			break
 		}
 	}
+	return s.richKeyLoopResult(p, label, nil)
+}
+
+// SelectConfigMultiPage is one /config page drawn as a chooser over a set
+// (plan 377): the panel's own header, a check box before every row, space
+// toggling the row under the cursor and Enter saving the whole checked set at
+// once. It is the panel's capability the way SelectConfigPage is — no other
+// picker grows a check box from it — and the set it answers with is the one on
+// screen, the rows a filter is hiding included.
+func (s *rawSelector) SelectConfigMultiPage(label string, items []SelectItem, opts ActionOptions) (ActionResult, error) {
+	p := &richPickerState{
+		items:      items,
+		selectable: make([]int, 0, len(items)),
+		esc:        s.escHint(),
+		configPage: true,
+		chrome:     opts.Chrome,
+		keys:       opts.Keys,
+		multi:      true,
+		checked:    make(map[int]bool, len(opts.Checked)),
+	}
+	for _, idx := range opts.Checked {
+		p.checked[idx] = true
+	}
+	p.rebuildSelectable()
+	// The list is longer than a page — the tool table is — so the filter
+	// narrows it below the picker's own row threshold, the way the model
+	// picker's does (owner 2026-11-22).
+	p.noFilter = !pickerShowsFilter(len(p.selectable))
 	return s.richKeyLoopResult(p, label, nil)
 }
 
@@ -6827,6 +6900,12 @@ func (s *rawSelector) richKeyLoopResult(p *richPickerState, label string, fetchM
 				}
 			}
 		case rawKeyEnter:
+			if p.multi {
+				// A multi-select page confirms the set, not the row: the
+				// rows checked are the answer even when a filter has
+				// narrowed the page to none (plan 377).
+				return ActionResult{Row: -1, OK: true, Checked: p.checkedIndices()}, nil
+			}
 			if len(p.selectable) == 0 {
 				return ActionResult{Row: -1}, nil
 			}
@@ -6886,12 +6965,25 @@ func (s *rawSelector) richKeyLoopResult(p *richPickerState, label string, fetchM
 			p.filter.insert(string(key.r))
 			p.rebuildSelectable()
 		case rawKeySpace:
-			if p.noFilter {
+			switch {
+			case p.multi && !p.inFilter:
+				// Space is the toggle on a multi-select page (plan 377): the
+				// row under the cursor is checked or unchecked where it
+				// stands. In the filter it stays the space it always was.
+				if idx := p.absoluteRow(); idx >= 0 {
+					if p.checked[idx] {
+						delete(p.checked, idx)
+					} else {
+						p.checked[idx] = true
+					}
+				}
+			case p.noFilter:
 				continue
+			default:
+				p.inFilter = true
+				p.filter.insert(" ")
+				p.rebuildSelectable()
 			}
-			p.inFilter = true
-			p.filter.insert(" ")
-			p.rebuildSelectable()
 		}
 		s.renderRichPicker(p, label)
 	}

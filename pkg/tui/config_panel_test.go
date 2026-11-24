@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -112,6 +113,26 @@ type actionPanelSelector struct {
 	// the stored secret.
 	secretLabels   []string
 	secretDefaults []string
+	// multiSteps answer the multi-select page's asks, one per call, and
+	// multiAsks records what each page was opened with (plan 377).
+	multiSteps []multiSelectStep
+	multiIdx   int
+	multiAsks  []configMultiAsk
+}
+
+// multiSelectStep is one answer of a multi-select page: confirmed with the
+// checked rows given, or cancelled when ok is false.
+type multiSelectStep struct {
+	ok      bool
+	checked []int
+}
+
+// configMultiAsk is one multi-select page as it was opened: the head it drew
+// its rows under, the rows, and the options it was armed with.
+type configMultiAsk struct {
+	label string
+	items []SelectItem
+	opts  ActionOptions
 }
 
 // An action step answers a footer action when its kind is set, and a row
@@ -167,6 +188,20 @@ func (s *actionPanelSelector) SelectRichActions(label string, items []SelectItem
 		return ActionResult{Row: -1}, step.err
 	}
 	return ActionResult{Row: step.row, OK: step.ok}, step.err
+}
+
+// SelectConfigMultiPage records the page it was opened with and answers it
+// from the multi steps, one per call: a refused save reopens the page, so a
+// fixed answer would answer the second ask too. A queue that runs out answers
+// Esc, the way the panel's other scripted pages run out.
+func (s *actionPanelSelector) SelectConfigMultiPage(label string, items []SelectItem, opts ActionOptions) (ActionResult, error) {
+	s.multiAsks = append(s.multiAsks, configMultiAsk{label: label, items: append([]SelectItem(nil), items...), opts: opts})
+	if s.multiIdx >= len(s.multiSteps) {
+		return ActionResult{Row: -1}, nil
+	}
+	step := s.multiSteps[s.multiIdx]
+	s.multiIdx++
+	return ActionResult{Row: -1, OK: step.ok, Checked: step.checked}, nil
 }
 
 func (s *actionPanelSelector) InputActions(label string, defaultValue string, opts ActionOptions) (InputResult, error) {
@@ -225,6 +260,446 @@ func frameText(r *Renderer) string {
 		parts = append(parts, block.frame.Title, block.frame.Content)
 	}
 	return strings.Join(parts, "\n")
+}
+
+// TestConfigPanelAllowedToolsOpensToolPicker is the reproduction of the
+// owner's screenshot (plan 377): Allowed tools is a chooser over the runtime
+// tool table, not a row list with a text editor behind its Add. It opens one
+// multi-select page with every registered tool but the subagent dispatch
+// tools — the ones the loader refuses — and asks for no text at all.
+func TestConfigPanelAllowedToolsOpensToolPicker(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"subagents":[
+		{"name":"db-migrator","description":"d","system_prompt":"p","tools":"pick","allowed_tools":["read_file"]}
+	]}}}`})
+	// The panel reads the run's table through configToolOptions, so the
+	// double's snapshot carries what that function answers — the dispatch
+	// tools included in the table it was handed, gone from the rows.
+	session.snapshot.Tools = configToolOptions([]event.ToolMeta{
+		{Name: "read_file", Description: "Read a file."},
+		{Name: "shell", Description: "Run a command."},
+		{Name: "subagent_run", Description: "Dispatch a subagent."},
+	})
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	runActionConfigPanel(t, session, selector,
+		[]richStep{{label: "Subagents", ok: true}, {label: "Allowed tools", ok: true}},
+		[]actionStep{{label: "Agent definitions", ok: true}, {label: "main", ok: true}, {label: "db-migrator", ok: true}},
+		nil, "agents")
+
+	if len(selector.multiAsks) != 1 {
+		t.Fatalf("the Allowed tools page opened %d tool pickers, want 1 (pages: %v)", len(selector.multiAsks), selector.richLabels)
+	}
+	var names []string
+	for _, item := range selector.multiAsks[0].items {
+		names = append(names, item.Label)
+	}
+	if want := []string{"read_file", "shell"}; !slices.Equal(names, want) {
+		t.Fatalf("the picker lists %v, want %v (the subagent dispatch tools are never offered)", names, want)
+	}
+	if len(selector.inputLabels) != 0 {
+		t.Fatalf("the page asked for text %v, want a picker alone", selector.inputLabels)
+	}
+}
+
+// allowedToolsSession stores one custom subagent entry under main, over a tool
+// table of three: two the run registers and one it does not offer at all (an
+// entry can name a tool this build dropped — plan 377's dangling row).
+func allowedToolsSession(entry string) *configPanelTestSession {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true,"subagents":[` + entry + `]}}}`})
+	session.snapshot.Tools = []configToolOption{
+		{Name: "read_file", Description: "Read a file."},
+		{Name: "shell", Description: "Run a command."},
+		{Name: "write_file", Description: "Write a file."},
+	}
+	return session
+}
+
+// allowedToolsWalk is the way to that entry's Allowed tools page: the
+// section's rows, one definition, the definition's template page (which is a
+// plain page), then the entry's own page and the field.
+func allowedToolsWalk() ([]richStep, []actionStep) {
+	return []richStep{{label: "Subagents", ok: true}, {label: "Allowed tools", ok: true}},
+		[]actionStep{{label: "Agent definitions", ok: true}, {label: "main", ok: true}, {label: "db-migrator", ok: true}}
+}
+
+// savedAllowedTools is the entry's allowed_tools as the last write left it.
+func savedAllowedTools(t *testing.T, session *configPanelTestSession) any {
+	t.Helper()
+	entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+	if len(entries) != 1 {
+		t.Fatalf("saved subagents = %+v, want the one entry", entries)
+	}
+	return entries[0]["allowed_tools"]
+}
+
+// Enter saves the whole checked set in one write, and the list is written in
+// the order the page lists its rows whatever order the set came in (plan
+// 377): the two are one confirmation, so there is one section write.
+func TestConfigPanelAllowedToolsSavesTheCheckedSet(t *testing.T) {
+	session := allowedToolsSession(`{"name":"db-migrator","description":"d","system_prompt":"p","tools":"pick","allowed_tools":["read_file"]}`)
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	selector.multiSteps = []multiSelectStep{{ok: true, checked: []int{2, 1}}}
+	steps, actions := allowedToolsWalk()
+	runActionConfigPanel(t, session, selector, steps, actions, nil, "agents")
+
+	if got, want := selector.multiAsks[0].opts.Checked, []int{0}; !slices.Equal(got, want) {
+		t.Fatalf("the page opened on %v, want the stored entry's row %v", got, want)
+	}
+	if len(session.writes) != 1 {
+		t.Fatalf("one confirmation is one write, got %d: %+v", len(session.writes), session.writes)
+	}
+	if got, want := savedAllowedTools(t, session), []any{"shell", "write_file"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("allowed_tools = %v, want %v in the page's own row order", got, want)
+	}
+}
+
+// Esc leaves the stored list exactly as it was: a chooser that writes on
+// Enter alone has nothing to undo.
+func TestConfigPanelAllowedToolsEscWritesNothing(t *testing.T) {
+	session := allowedToolsSession(`{"name":"db-migrator","description":"d","system_prompt":"p","tools":"pick","allowed_tools":["read_file"]}`)
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	selector.multiSteps = []multiSelectStep{{ok: false}}
+	steps, actions := allowedToolsWalk()
+	runActionConfigPanel(t, session, selector, steps, actions, nil, "agents")
+
+	if len(selector.multiAsks) != 1 {
+		t.Fatalf("the page opened %d times, want once", len(selector.multiAsks))
+	}
+	if len(session.writes) != 0 {
+		t.Fatalf("Esc must write nothing, got %+v", session.writes)
+	}
+}
+
+// An empty set is the key gone rather than an empty list, and the store's own
+// rule decides whether that is allowed: with the policy on anything but Pick
+// the removal lands, with Pick it is refused in the validator's words and the
+// page comes back holding the set the user chose (plan 377).
+func TestConfigPanelAllowedToolsSavesAnEmptySet(t *testing.T) {
+	t.Run("nothing checked removes the key", func(t *testing.T) {
+		session := allowedToolsSession(`{"name":"db-migrator","description":"d","system_prompt":"p","allowed_tools":["read_file"]}`)
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		selector.multiSteps = []multiSelectStep{{ok: true}}
+		steps, actions := allowedToolsWalk()
+		runActionConfigPanel(t, session, selector, steps, actions, nil, "agents")
+
+		if got := savedAllowedTools(t, session); got != nil {
+			t.Fatalf("allowed_tools = %v, want the key gone", got)
+		}
+	})
+
+	t.Run("pick refuses it and the page keeps the choice", func(t *testing.T) {
+		const refusal = "agents.definitions.main.subagents.0: allowed_tools requires at least one tool with tools: pick"
+		session := allowedToolsSession(`{"name":"db-migrator","description":"d","system_prompt":"p","tools":"pick","allowed_tools":["read_file"]}`)
+		session.writeErr = errors.New(refusal)
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		selector.multiSteps = []multiSelectStep{{ok: true}, {ok: false}}
+		steps, actions := allowedToolsWalk()
+		runActionConfigPanel(t, session, selector, steps, actions, nil, "agents")
+
+		if len(selector.multiAsks) != 2 {
+			t.Fatalf("the refused page opened %d times, want the refusal's page after it", len(selector.multiAsks))
+		}
+		if got := selector.multiAsks[1].label; !strings.Contains(got, "allowed_tools requires at least one tool with tools: pick") {
+			t.Fatalf("the page came back under %q, want the validator's own words", got)
+		}
+		// The set the user chose is the set it reopens on, never the stored
+		// one the refusal left untouched.
+		if got := selector.multiAsks[1].opts.Checked; len(got) != 0 {
+			t.Fatalf("the refused page reopens on %v, want the empty set the user left", got)
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("a refused write stores nothing, got %+v", session.writes)
+		}
+	})
+}
+
+// The refusal above in the store's own words: the page meets the validator the
+// application writes through, not a double (plan 377) — tools: pick with the
+// last tool unchecked is the one shape the loader will not compose, so it
+// reaches the page as the validator writes it and the section keeps the list
+// it held.
+func TestConfigPanelAllowedToolsRefusalIsTheStoreValidators(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	if err := os.WriteFile(cfgPath, []byte("gateway:\n  http_addr: 127.0.0.1:9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state", "forebrain.state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	process.InstallConfigSectionValidator(cfgPath, db)
+	t.Cleanup(func() { state.SetSectionValidator(nil) })
+	env := &process.Environment{Root: home, SQL: db}
+	env.ConfigPath = cfgPath
+	session := &ChatSession{Env: env}
+	if err := session.UpdateConfigSection(ctx, "agents", json.RawMessage(`{"definitions":{"main":{"primary":true,"subagents":[
+		{"name":"db-migrator","description":"d","system_prompt":"p","tools":"pick","allowed_tools":["read_file"]}
+	]}}}`)); err != nil {
+		t.Fatalf("the seed must be a section the loader accepts: %v", err)
+	}
+
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	selector.richSteps = []richStep{{label: "Subagents", ok: true}, {label: "Allowed tools", ok: true}}
+	selector.actionSteps = []actionStep{
+		{label: "Agent definitions", ok: true},
+		{label: "main", ok: true},
+		{label: "db-migrator", ok: true},
+	}
+	selector.multiSteps = []multiSelectStep{{ok: true}, {ok: false}}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	newCommandController(session, renderer, selector, nil, "").handleConfig(ctx, []string{"agents"})
+
+	if len(selector.multiAsks) != 2 {
+		t.Fatalf("the page opened %d times, want the refusal's page after it", len(selector.multiAsks))
+	}
+	if got := selector.multiAsks[1].label; !strings.Contains(got, "allowed_tools requires at least one tool with tools: pick") {
+		t.Fatalf("the page came back under %q, want the store validator's own words", got)
+	}
+	snapshot, err := session.ConfigPanelSections(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(snapshot.Stored["agents"], &doc); err != nil {
+		t.Fatalf("the stored agents section does not parse: %v", err)
+	}
+	entries := agentSubagentsOf(t, doc, "main")
+	if len(entries) != 1 {
+		t.Fatalf("stored subagents = %+v, want the one entry", entries)
+	}
+	if got, want := entries[0]["allowed_tools"], []any{"read_file"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the refused write changed the section: allowed_tools = %v, want %v", got, want)
+	}
+	if text := frameText(renderer); text != "" {
+		t.Fatalf("a refusal is the page's own line, not an error frame:\n%s", text)
+	}
+}
+
+// A name the definition stores and the table no longer offers is a row of its
+// own, checked, so what this build cannot offer is still visible and still
+// removable (plan 377).
+func TestConfigPanelAllowedToolsKeepsAnUnregisteredName(t *testing.T) {
+	session := allowedToolsSession(`{"name":"db-migrator","description":"d","system_prompt":"p","tools":"pick","allowed_tools":["read_file","code_search"]}`)
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	selector.multiSteps = []multiSelectStep{{ok: true, checked: []int{0}}}
+	steps, actions := allowedToolsWalk()
+	runActionConfigPanel(t, session, selector, steps, actions, nil, "agents")
+
+	var names []string
+	for _, item := range selector.multiAsks[0].items {
+		names = append(names, item.Label)
+	}
+	if want := []string{"read_file", "shell", "write_file", "code_search"}; !slices.Equal(names, want) {
+		t.Fatalf("the page lists %v, want the table then the dropped name %v", names, want)
+	}
+	if got, want := selector.multiAsks[0].opts.Checked, []int{0, 3}; !slices.Equal(got, want) {
+		t.Fatalf("the page opened on %v, want the two stored names %v", got, want)
+	}
+	if got, want := savedAllowedTools(t, session), []any{"read_file"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("allowed_tools = %v, want %v — the unregistration dropped", got, want)
+	}
+}
+
+// Both definitions that carry the field open the same page: a subagent-role
+// definition's own page, and a custom entry inside an agent's Subagents list.
+// A built-in type's page is its model and level, so it offers no tool policy
+// at all (plan 352's rule, unchanged).
+func TestConfigPanelAllowedToolsRoutesByTemplate(t *testing.T) {
+	t.Run("a subagent-role definition", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{
+			"main":{"primary":true},
+			"repo-auditor":{"primary":false,"system_prompt":"p","tools":"pick","allowed_tools":["read_file"]}
+		}}`})
+		session.snapshot.Tools = []configToolOption{{Name: "read_file"}, {Name: "shell"}}
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		selector.multiSteps = []multiSelectStep{{ok: false}}
+		runActionConfigPanel(t, session, selector,
+			[]richStep{{label: "Allowed tools", ok: true}},
+			[]actionStep{{label: "Agent definitions", ok: true}, {label: "repo-auditor", ok: true}},
+			nil, "agents")
+
+		if len(selector.multiAsks) != 1 {
+			t.Fatalf("the definition's page opened %d tool pickers, want 1 (pages: %v)", len(selector.multiAsks), selector.richLabels)
+		}
+		if got, want := selector.multiAsks[0].opts.Checked, []int{0}; !slices.Equal(got, want) {
+			t.Fatalf("the page opened on %v, want the stored row %v", got, want)
+		}
+	})
+
+	t.Run("a built-in type offers none", func(t *testing.T) {
+		session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+		session.snapshot.Tools = []configToolOption{{Name: "read_file"}}
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		runActionConfigPanel(t, session, selector,
+			[]richStep{{label: "Subagents", ok: true}},
+			[]actionStep{{label: "Agent definitions", ok: true}, {label: "main", ok: true}, {label: "explore", ok: true}},
+			nil, "agents")
+
+		if len(selector.multiAsks) != 0 {
+			t.Fatalf("a built-in type opened a tool picker: %+v", selector.multiAsks)
+		}
+	})
+}
+
+// Inside the subagent create form the chooser holds its set in the form and
+// writes nothing: the form's own save is the one write that carries the entry
+// and its tools together (owner 2026-11-22, plan 377).
+func TestConfigPanelAllowedToolsInTheCreateFormStages(t *testing.T) {
+	session := newConfigPanelSession(map[string]string{"agents": `{"definitions":{"main":{"primary":true}}}`})
+	session.snapshot.Tools = []configToolOption{{Name: "read_file"}, {Name: "shell"}}
+	selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+	selector.multiSteps = []multiSelectStep{{ok: true, checked: []int{0, 1}}}
+	runActionConfigPanel(t, session, selector,
+		[]richStep{{label: "Subagents", ok: true}},
+		[]actionStep{
+			{label: "Agent definitions", ok: true},
+			{label: "main", ok: true},
+			{action: FooterActionAdd, ok: true},
+			{label: "Name", ok: true},
+			{label: "Allowed tools", ok: true},
+			{action: FooterActionSave, ok: true},
+			{ok: false},
+		},
+		[]inputActionStep{{value: "repo-scout", ok: true}}, "agents")
+
+	if len(selector.multiAsks) != 1 {
+		t.Fatalf("the form's Allowed tools row opened %d pickers, want 1 (pages: %v)", len(selector.multiAsks), selector.richLabels)
+	}
+	if len(session.writes) != 1 {
+		t.Fatalf("the form's save is the one write, got %d: %+v", len(session.writes), session.writes)
+	}
+	entries := agentSubagentsOf(t, savedAgentsDoc(t, session), "main")
+	if len(entries) != 1 {
+		t.Fatalf("saved subagents = %+v, want the one entry", entries)
+	}
+	if entries[0]["name"] != "repo-scout" {
+		t.Fatalf("the entry's name = %v, want the form's own", entries[0]["name"])
+	}
+	if got, want := entries[0]["allowed_tools"], []any{"read_file", "shell"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("allowed_tools = %v, want the held set %v", got, want)
+	}
+}
+
+// configToolOptions is the whole of the dispatch rule: the run's table minus
+// the subagent tools, in the table's own order, and nothing at all from no
+// table (plan 377).
+func TestConfigToolOptions(t *testing.T) {
+	metas := []event.ToolMeta{
+		{Name: "read_file", Description: "Read a file."},
+		{Name: "subagent_run", Description: "Dispatch a subagent."},
+		{Name: "  SUBAGENT_Send ", Description: "Message a subagent."},
+		{Name: "shell", Description: "Run a command."},
+	}
+	got := configToolOptions(metas)
+	want := []configToolOption{
+		{Name: "read_file", Description: "Read a file."},
+		{Name: "shell", Description: "Run a command."},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("configToolOptions = %+v, want %+v", got, want)
+	}
+	if got := configToolOptions(nil); got != nil {
+		t.Fatalf("an empty table answers %+v, want nil", got)
+	}
+}
+
+// A run that registers no tool still opens the page: it lists what the
+// definition stores and nothing else, and either key leaves it safely — Esc
+// writing nothing, Enter saving the set it showed (an unset list, so the
+// write is the no-op removal of a key that is not there).
+func TestConfigPanelAllowedToolsWithNoToolTable(t *testing.T) {
+	t.Run("Esc writes nothing", func(t *testing.T) {
+		session := allowedToolsSession(`{"name":"db-migrator","description":"d","system_prompt":"p"}`)
+		session.snapshot.Tools = nil
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		selector.multiSteps = []multiSelectStep{{ok: false}}
+		steps, actions := allowedToolsWalk()
+		runActionConfigPanel(t, session, selector, steps, actions, nil, "agents")
+
+		if len(selector.multiAsks) != 1 {
+			t.Fatalf("the page opened %d times, want once", len(selector.multiAsks))
+		}
+		if len(selector.multiAsks[0].items) != 0 {
+			t.Fatalf("the page lists %v, want no rows from no table", selector.multiAsks[0].items)
+		}
+		if len(session.writes) != 0 {
+			t.Fatalf("Esc must write nothing, got %+v", session.writes)
+		}
+	})
+
+	t.Run("Enter answers the empty set", func(t *testing.T) {
+		session := allowedToolsSession(`{"name":"db-migrator","description":"d","system_prompt":"p"}`)
+		session.snapshot.Tools = nil
+		selector := &actionPanelSelector{scriptedSelector: &scriptedSelector{}}
+		selector.multiSteps = []multiSelectStep{{ok: true}, {ok: false}}
+		steps, actions := allowedToolsWalk()
+		runActionConfigPanel(t, session, selector, steps, actions, nil, "agents")
+
+		if len(session.writes) != 1 {
+			t.Fatalf("saving an unset list is one write, got %d: %+v", len(session.writes), session.writes)
+		}
+		if got := savedAllowedTools(t, session); got != nil {
+			t.Fatalf("allowed_tools = %v, want the key still absent", got)
+		}
+	})
+}
+
+// The picker itself, on an empty table: the page opens and answers Esc and
+// Enter — the rows being none is a page, not a refusal (plan 377).
+func TestSelectConfigMultiPageOnNoRows(t *testing.T) {
+	opts := ActionOptions{Page: true, Keys: configChoiceKeys, Filter: true}
+	if res, err := pickerKeys(t, "\x1b").SelectConfigMultiPage("", nil, opts); err != nil || res.OK {
+		t.Fatalf("Esc on an empty page = %+v, %v; want unset and no error", res, err)
+	}
+	res, err := pickerKeys(t, keyEnter).SelectConfigMultiPage("", nil, opts)
+	if err != nil || !res.OK {
+		t.Fatalf("Enter on an empty page = %+v, %v; want an empty set", res, err)
+	}
+	if len(res.Checked) != 0 {
+		t.Fatalf("Enter on an empty page answered %v, want nothing checked", res.Checked)
+	}
+}
+
+// The page as it paints: a check box before every row — the checked glyph on
+// the rows the set holds — and the footer in the prototype's own words, all
+// lower case (owner 2026-11-24, plan 377).
+func TestConfigPanelAllowedToolsPagePaintsCheckBoxes(t *testing.T) {
+	p := &richPickerState{
+		items: []SelectItem{
+			{Label: "read_file", Description: "Read a file."},
+			{Label: "shell", Description: "Run a command."},
+		},
+		configPage: true,
+		multi:      true,
+		keys:       configChoiceKeys,
+		checked:    map[int]bool{0: true},
+		noFilter:   true,
+	}
+	p.rebuildSelectable()
+	lines := p.panel("").layout(120, 0, 0, false).lines
+	plain := stripANSIAll(lines)
+
+	var footer string
+	for _, line := range plain {
+		if strings.Contains(line, "to navigate") {
+			footer = line
+		}
+	}
+	if want := "↑/↓ to navigate space to toggle enter to save esc to cancel"; !strings.Contains(footer, want) {
+		t.Fatalf("the footer reads %q, want the prototype's %q", strings.TrimSpace(footer), want)
+	}
+	if want := selectorCheckedGlyph + " read_file"; !strings.Contains(strings.Join(plain, "\n"), want) {
+		t.Fatalf("the checked row does not carry %q:\n%s", want, strings.Join(plain, "\n"))
+	}
+	if want := selectorUncheckedGlyph + " shell"; !strings.Contains(strings.Join(plain, "\n"), want) {
+		t.Fatalf("the unchecked row does not carry %q:\n%s", want, strings.Join(plain, "\n"))
+	}
 }
 
 // The panel opens on the section list, and that list is the whole stored
