@@ -5,9 +5,14 @@
 > "STOP conditions" section occurs, stop and report — do not improvise.
 >
 > **Drift check (run first)**:
-> `git diff --stat e1abd2f4..HEAD -- pkg/tool/process_tool.go pkg/tool/process_tool_test.go`
-> 两个 in-scope 文件若在基线 `e1abd2f4` 之后被改过，先逐段比对下文 "Current state" 摘录；
-> 内容不符 → STOP。行号漂移不算漂移，以内容为准。
+> `git status --porcelain -- pkg/tool/process_tool.go pkg/tool/process_tool_test.go`
+> `git diff --stat e1abd2f4 -- pkg/tool/process_tool.go pkg/tool/process_tool_test.go`
+> 用 `git diff <sha> -- <paths>` 对**工作树**比，**不要**用 `e1abd2f4..HEAD` 的两 commit 范围 diff——
+> 后者看不到未提交改动（本仓已踩过坑）。基线 `e1abd2f4` 之后 dev 已前进多个提交，下列漂移属**预期**，
+> 逐段比对下文 "Current state" 摘录、内容相符即继续，**不 STOP**：
+> - 兄弟计划 371 也改这两个文件（start 的 emitter 接线、wait 的日志尾读、新增两条测试）——其改动
+>   与本计划的一行重算落在不同代码段，互不覆盖；371 的新测试名以 `TestProcess` 开头，会被目标命令选中且应绿。
+> 摘录内容不符 → STOP。行号漂移不算漂移，以内容为准。
 
 ## Status
 
@@ -134,7 +139,8 @@ returning"，`start` 带 `wait` 就会阻塞到 ready／进程退出／timeout �
 
 ## Git workflow
 
-- Worktree／分支：`.worktrees/process-start-wait-stale-running`（同名分支），BASE = `e1abd2f4`。
+- Worktree／分支：`.worktrees/process-start-wait-stale-running`（同名分支），BASE = **派发时的 dev HEAD**
+  （`e1abd2f4` 是起草基线，dev 已前进；从旧 SHA 建分支会无法 ff-only 落 dev。漂移核对以内容为准，见顶部）。
 - 提交：一次逻辑提交，信息形如 `fix(tool): stop reporting a stale running flag after start's readiness wait ends on exit`。
 - 不 push、不开 PR；合并由 owner/reviewer ff-only 落 dev。
 
@@ -149,7 +155,7 @@ returning"，`start` 带 `wait` 就会阻塞到 ready／进程退出／timeout �
 // A start whose readiness wait ends on the process's own exit must not carry
 // the pre-wait running snapshot: exited and running are mutually exclusive.
 func TestProcessStartWithWaitEndingOnExitReportsNotRunning(t *testing.T) {
-	_, tl, _, projectDir := newProcessToolForTest(t)
+	st, tl, _, projectDir := newProcessToolForTest(t)
 	ctx := processTestContext(projectDir)
 	started, err := callProcess(t, tl, ctx, ProcessInput{
 		Action: "start", Command: "echo hi", WorkDir: projectDir,
@@ -170,11 +176,19 @@ func TestProcessStartWithWaitEndingOnExitReportsNotRunning(t *testing.T) {
 	if code, _ := started["exit_code"].(float64); code != 0 {
 		t.Fatalf("exit_code = %v, want 0: %+v", started["exit_code"], started)
 	}
+	// The exit watcher writes the ledger after handle.Done(); await it so that
+	// write cannot land during t.TempDir's RemoveAll (the flake waitForProcessSettled's
+	// comment documents). KillProcesses only reaps still-running processes, so an
+	// already-exited one must be awaited here, exactly like the :101-126 precedent.
+	waitForProcessSettled(t, processRecordForTest(t, st, processTestID(t, started)))
 }
 ```
 
 要点：`echo hi` 毫秒级退出、pattern 永不命中 ⇒ 轮询必以退出分支结束（首 tick 若赶上进程
-还活，100ms 后的第二 tick 必见退出），不依赖 sleep 或墙钟断言。
+还活，100ms 后的第二 tick 必见退出），不依赖 sleep 或墙钟断言。**收尾必须 `waitForProcessSettled`**：
+进程虽已退出，其退出 watcher（`registry.release`＋删 ledger＋`close(settled)`）仍在异步跑，
+不等它就结束测试会让 ledger 写撞 `t.TempDir` 的 RemoveAll——这正是本文件 :82-90 注释记载的 flake；
+`t.Cleanup(st.KillProcesses)` 只 reap `running()`（仍活着的进程），对已退出的进程不做任何事。
 
 **Verify**: 跑目标测试命令 → 该测试 FAIL，失败信息含 `an exited process still reports running`
 （这就是基线缺陷的 RED；若它居然 PASS → STOP，根因不在本计划描述处）。
@@ -222,7 +236,8 @@ func TestProcessStartWithWaitEndingOnExitReportsNotRunning(t *testing.T) {
   `TestProcessListReflectsStartAndKill`、`TestKillProcessesEndsEveryRunningProcess`、
   `TestProcessWaitAndKillDoNotRace`、`TestProcessLogSpoolGrowsUnderTheStateRoot`。
 - 结构先例：`pkg/tool/process_tool_test.go:101-126`。
-- Verification: 目标测试命令与整包测试命令均 `ok`。
+- Verification: 目标测试命令与整包测试命令均 `ok`。注意 `TestKillProcessesEndsEveryRunningProcess`
+  以 `TestKill` 开头、**不**被 `-run 'TestProcess'` 选中，它由整包测试覆盖——目标命令绿不代表它跑过。
 
 ## Done criteria
 
@@ -255,3 +270,38 @@ func TestProcessStartWithWaitEndingOnExitReportsNotRunning(t *testing.T) {
   2. `process_tool.go:457` 早退分支的 `"elapsed_ms": 0` 把"进程早已退出"报成 0 毫秒等待，属同一张卡的观感问题，与本 bug 独立。
 - 交互面：plans/358 的 teardown（`KillProcesses`）与 ledger reap 都直接读 `handle.Exited()`，
   不受本修复影响；反之本修复也不得改 `handle` 语义。
+
+## 评审修订记录（2026-11-23 review-plan，复核时 HEAD `3ff6b134`）
+
+根因经评审独立实跑证实（`go test -overlay`，仓库树零改动）：基线上新测试按
+`an exited process still reports running`（payload 同现 `exited:true` 与 `running:true`）变红；
+overlay 注入本计划那一行重算后，新测试与全部 8 个既有 `TestProcess*` 全 PASS。摘录 :336-347/:514-523、
+辅助函数 :21-98、`ProcessInput` 字段、先例 :101-126 均逐字核实。就地修订：
+1. **新测试补 `waitForProcessSettled`**（照抄即 flake）：已退出进程的退出 watcher 仍异步写 ledger，
+   不等它就结束测试会撞 `t.TempDir` RemoveAll（本文件 :82-90 注释自证）；`KillProcesses` 只 reap 仍活着的进程。
+2. **drift check 语义**：`e1abd2f4..HEAD` 范围 diff 看不到未提交改动 → 改 `git status --porcelain --` +
+   `git diff e1abd2f4 --`；并把兄弟计划 371 对同两文件的改动列为预期漂移（非 STOP）。
+3. **BASE 改派发时 dev HEAD**：dev 已前进，钉 `e1abd2f4` 建分支会破坏 ff-only 合并。
+4. **Test plan 注明** `TestKillProcesses*` 不被 `-run 'TestProcess'` 选中（整包覆盖）。
+结论：根因成立、修法最小且已验证，修订后可执行（P1/S/LOW，TODO）。与 371 共改两文件，建议执行序 370→371。
+
+## 执行记录（2026-11-23 `execute`，评审 APPROVE）
+
+- Worktree／分支：`.worktrees/process-start-wait-stale-running`（BASE `3ff6b134`＝派发时 dev HEAD），
+  commit `ba1f834a` `fix(tool): stop reporting a stale running flag after start's readiness wait ends on exit`；
+  未 push、未合并。
+- 改动：`pkg/tool/process_tool.go` +2（合并循环后 `payload["running"] = !handle.Exited()` 与一行 WHY 注释）；
+  `pkg/tool/process_tool_test.go` +31（`TestProcessStartWithWaitEndingOnExitReportsNotRunning`，放在文件末尾，
+  避开 `// 1.`–`// 12.` 的编号序列以免重编号 churn）。
+- 评审独立复跑（不采信执行器报告）：用 `go test -overlay` 把 `3ff6b134` 版 `process_tool.go` 覆盖回去跑新测试 →
+  按 `an exited process still reports running: map[… exited:true … running:true …]` 变红（RED 成立）；
+  工作树内 `-run 'TestProcess'` 9 条全 PASS；整包 `ok …/pkg/tool 17.0s`；
+  `CGO_ENABLED=1 go build -tags fts5 ./...` exit 0；`go vet -tags fts5 ./pkg/tool/` exit 0；
+  `gofmt -l pkg/tool` 无输出；`git diff --name-only 3ff6b134..HEAD` 恰为两个 in-scope 文件。
+- 偏差：代码零偏差。唯一环境偏差：新 worktree 缺 gitignored 的 `third_party/{pdfium,libtokenizers}`，
+  `make pdfium` 在本机网络下无输出挂起，改由评审方从主检出复制进去（未跟踪、未进提交）。
+- 非功能面：新增的 `handle.Exited()` 是对已关闭 channel 的非阻塞探测，无系统调用、无加锁；三个非退出分支
+  重算值与快照一致，行为不变（既有 8 条测试原样绿、未被修改）。
+- 落地：**已 ff-only 落主树 dev（`3ff6b134..ba1f834a`）**，未 push。落地后全量门禁唯一失败是 `pkg/architecture` 的
+  `TestTestFilesCorrespondToProductionFiles`（`pkg/tui/deliverables_outcome_test.go` 无配对产物，`3ff6b134` 起即存在、
+  由 `80bb73b4` 引入），本批三提交零 `pkg/tui` 改动，与本计划无关。

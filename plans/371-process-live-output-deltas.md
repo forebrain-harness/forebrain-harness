@@ -5,9 +5,16 @@
 > "STOP conditions" section occurs, stop and report — do not improvise.
 >
 > **Drift check (run first)**:
-> `git diff --stat e1abd2f4..HEAD -- pkg/tool/process_tool.go pkg/tool/process_tool_test.go pkg/tool/shell_tool.go pkg/tool/shell_output.go`
-> 前两个是本计划 in-scope 文件；后两个只读参照（若它们已漂移，先比对下文摘录再决定）。
-> 内容不符 → STOP。行号漂移不算漂移，以内容为准。
+> `git status --porcelain -- pkg/tool/process_tool.go pkg/tool/process_tool_test.go pkg/tool/shell_tool.go pkg/tool/shell_output.go`
+> `git diff --stat e1abd2f4 -- pkg/tool/process_tool.go pkg/tool/process_tool_test.go pkg/tool/shell_tool.go pkg/tool/shell_output.go`
+> 用 `git diff <sha> -- <paths>` 对**工作树**比，**不要**用 `e1abd2f4..HEAD` 的范围 diff（看不到未提交改动）。
+> 前两个是本计划 in-scope 文件；后两个只读参照。基线 `e1abd2f4` 之后 dev 已前进，下列漂移属**预期**，
+> 逐段比对下文摘录、内容相符即继续，**不 STOP**：
+> - 兄弟计划 370 也改这两个 in-scope 文件（`processStart` 合并循环后一行 `payload["running"]` 重算＋一条新测试）——
+>   与本计划的 emitter 接线/尾读落在不同代码段；370 的新测试以 `TestProcess` 开头、会被目标命令选中且应绿。
+> - `pkg/tool/state.go` 的 `StepEvent` 新增了 `Canceled` 字段（stop-display 工作），本计划引用的
+>   `WithStepHook`/`StepHookFromContext`/`WithToolStepID` 等内容不变。
+> 摘录内容不符 → STOP。行号漂移不算漂移，以内容为准。
 
 ## Status
 
@@ -120,10 +127,20 @@ danger-full-access 配置钉工具不钉沙箱（`process_tool_test.go:18-40`）
 |-----------|---------|---------------------|
 | Build | `CGO_ENABLED=1 go build -tags fts5 ./...` | exit 0 |
 | 目标测试 | `export PKG_CONFIG_PATH="$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)"; FOREBRAIN_HOME="$(mktemp -d)" CGO_ENABLED=1 go test -tags fts5 ./pkg/tool/ -run 'TestProcess' -count=1` | `ok …/pkg/tool` |
-| 抖动复核 | 同上但 `-run 'TestProcessStartWithWaitStreamsOutputDeltas|TestProcessWaitStreamsLogDeltasWhilePolling' -count=3` | 3 轮全 PASS |
+| 抖动复核 | 见下方代码块（含 `|` 的命令不放表格：GFM 表格会吞裸竖线、逼出 `\|` 转义假绿） | 3 轮全 PASS |
 | 整包测试 | 目标测试命令去掉 `-run` | `ok …/pkg/tool` |
 | Vet | `go vet -tags fts5 ./pkg/tool/` | exit 0 |
 | Fmt | `gofmt -l pkg/tool` | 无输出 |
+
+抖动复核命令（裸 `|` 是 Go regexp 的或；**不要**写成 `\|`，那会匹配零个测试并 exit 0 假绿）：
+
+```bash
+export PKG_CONFIG_PATH="$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)"
+FOREBRAIN_HOME="$(mktemp -d)" CGO_ENABLED=1 go test -tags fts5 ./pkg/tool/ \
+  -run 'TestProcessStartWithWaitStreamsOutputDeltas|TestProcessWaitStreamsLogDeltasWhilePolling' -count=3 -v
+```
+
+预期：3 轮里两条测试各 `--- PASS` 共 6 行（用 `-v` 数 `--- PASS` 证明真选中了测试，`-run` 零匹配也 exit 0）。
 
 ## Scope
 
@@ -140,7 +157,9 @@ danger-full-access 配置钉工具不钉沙箱（`process_tool_test.go:18-40`）
 
 ## Git workflow
 
-- Worktree／分支：`.worktrees/process-live-output-deltas`（同名分支），BASE = `e1abd2f4`。
+- Worktree／分支：`.worktrees/process-live-output-deltas`（同名分支），BASE = **派发时的 dev HEAD**
+  （`e1abd2f4` 是起草基线，dev 已前进；从旧 SHA 建分支会无法 ff-only 落 dev）。与 370 共改两文件，
+  建议 370 先落、本计划 rebase 到其后再落（漂移核对以内容为准，见顶部）。
 - 提交：一次逻辑提交，信息形如 `fix(tool): stream live output into the blocking process card`。
 - 不 push、不开 PR；合并由 owner/reviewer ff-only 落 dev。
 
@@ -238,32 +257,34 @@ func (t *processLogTailer) delta() []byte {
 		limit = liveOutputPendingBytes
 	}
 	buf := make([]byte, limit)
-	n, err := io.ReadFull(f, buf)
+	n, _ := io.ReadFull(f, buf)
 	if n <= 0 {
 		return nil
 	}
 	t.offset += int64(n)
-	if err != nil && err != io.ErrUnexpectedEOF {
-		return buf[:n]
-	}
 	return buf[:n]
 }
 ```
 
-（`io` 需加入 import。）然后在 `processWait` 的早退分支（`:453-459`）**之后**、
-`processReadiness` 调用之前插入：
+（`io` 需加入 import；`os`/`time`/`safety` 已在。）紧接着在同一文件新增启停辅助函数
+（**定死这种组织方式**，不要另选；它把尾读 goroutine 的启停包成一个返回 `stop func()` 的函数，
+无 hook 时返回 no-op，`processWait` 的主体一字不动）：
 
 ```go
+// startProcessLiveTail streams rec's log into the live card while a wait polls.
+// The caller defers the returned stop. With no step hook it is a no-op, so a
+// hookless wait behaves exactly as before.
+func startProcessLiveTail(ctx context.Context, st *State, rec *processRecord) func() {
 	step := StepHookFromContext(ctx, st)
 	if step == nil {
-		return processWaitPoll(ctx, rec, in, nil, nil)
+		return func() {}
 	}
 	stepID := ToolStepIDFromContext(ctx)
 	startedAt := ToolStepStartedAtFromContext(ctx)
 	emitter := newShellOutputEmitter(func(stream safety.OutputStream, chunk []byte) {
 		if len(chunk) == 0 {
 			return
-			}
+		}
 		step(ctx, StepEvent{
 			Kind:      StepKindToolOutputDelta,
 			StepID:    stepID,
@@ -276,7 +297,6 @@ func (t *processLogTailer) delta() []byte {
 			},
 		})
 	})
-	defer emitter.Close()
 	tailer := &processLogTailer{path: rec.logPath}
 	stop := make(chan struct{})
 	go func() {
@@ -294,16 +314,30 @@ func (t *processLogTailer) delta() []byte {
 			}
 		}
 	}()
-	defer close(stop)
-	return processWaitPoll(ctx, rec, in, nil, nil)
+	return func() {
+		close(stop)
+		emitter.Close()
+	}
+}
 ```
 
-**注意**：上文末行只是占位——**不要**改 `processReadiness` 的签名；把 `processWait` 现有
-`:460-465` 的剩余_body_（`readiness, err := processReadiness(ctx, rec, in)` 到 return）原样保留
-在 `defer close(stop)` 之后即可（即两个分支汇合到同一段收尾代码；实现时用一个
-`emitLive func()` 闭包变量或把尾读 goroutine 的启停包成一个返回 `stop func()` 的小辅助函数，
-二选一，选后者更干净：`startProcessLiveTail(ctx, st, rec) func()`，无 hook 时返回 no-op）。
-无论哪种组织方式，验收以 Done criteria 的 grep 与测试为准。
+然后在 `processWait` 的早退分支（`:453-459`）**之后**、`processReadiness` 调用（`:460`）之前插入两行：
+
+```go
+	stopTail := startProcessLiveTail(ctx, st, rec)
+	defer stopTail()
+```
+
+`processWait` 的其余 body（`readiness, err := processReadiness(ctx, rec, in)` 到 return）**一字不动**。
+**不要**改 `processReadiness` 的签名或轮询逻辑——尾读完全在独立 goroutine 里，由 `stopTail` 启停。
+
+要点：
+- 无 step hook 时返回 no-op，hookless wait 行为与今天完全一致。
+- `stopTail` 先 `close(stop)`（ticker goroutine 在下一个 select 退出，有界、无泄漏），再 `emitter.Close()`
+  flush 最后一批。goroutine 若在 `close(stop)` 瞬间正在 Push，那一批可能赶不上最终 flush 而丢——
+  活卡本就是**有损预览**，log 文件才是全量真相，可接受。
+- `emit` 回调只在 emitter 自己的 run goroutine 上跑；`emitter.Close()` 等 `done`（run 退出）后才返回，
+  故测试在 `callProcess` 返回后读 `deltas` 有 happens-before 保证，无数据竞争。
 
 **Verify**: build exit 0；既有 `TestProcess*` 全绿。
 
@@ -347,7 +381,10 @@ func TestProcessStartWithWaitStreamsOutputDeltas(t *testing.T) {
 	if !strings.Contains(combined.String(), "live-process-output") {
 		t.Fatalf("deltas never carried the command's output: %q", combined.String())
 	}
-	_ = started
+	// Await the exit watcher's ledger write so it cannot land during t.TempDir's
+	// RemoveAll (the flake waitForProcessSettled's comment documents); the echo
+	// already exited via the readiness wait's exit branch.
+	waitForProcessSettled(t, processRecordForTest(t, st, processTestID(t, started)))
 }
 
 // A blocking wait on a process an earlier call started must stream what the
@@ -393,7 +430,9 @@ func TestProcessWaitStreamsLogDeltasWhilePolling(t *testing.T) {
 ```
 
 （`runtime` 需加入测试文件 import。）第一条同时是 370 形状的旁证（exited 分支路径），
-但**不**替代 370 的断言。
+但**不**替代 370 的断言。第二条的 `sh` 循环在 wait 超时（3s）后仍在跑（约 4s 才自然结束），
+由 `t.Cleanup(st.KillProcesses)` 杀掉并 `awaitProcessSettled`，无需手动收尾；第一条的 echo 已退出，
+必须自己 `waitForProcessSettled`（`KillProcesses` 只 reap 仍活着的进程）。
 
 **Verify**: 目标测试命令 → 全 PASS；抖动复核命令（`-count=3`）→ 3 轮全 PASS。
 
@@ -421,7 +460,7 @@ func TestProcessWaitStreamsLogDeltasWhilePolling(t *testing.T) {
 
 - [ ] `grep -c 'newShellOutputEmitter' pkg/tool/process_tool.go` = 2（start 与 wait 各一）
 - [ ] `grep -c 'StepKindToolOutputDelta' pkg/tool/process_tool.go` = 2
-- [ ] `grep -n 'processLogTailer' pkg/tool/process_tool.go` ≥ 3（类型定义、delta 方法、wait 内实例化）
+- [ ] `grep -n 'processLogTailer' pkg/tool/process_tool.go` ≥ 3（类型定义、delta 方法、`startProcessLiveTail` 内实例化）
 - [ ] `grep -c 'SetStepHook' pkg/tool/process_tool_test.go` = 2（两条新测试）
 - [ ] 目标测试、整包测试、`-count=3` 抖动复核均 exit 0
 - [ ] build / vet / gofmt 干净
@@ -444,4 +483,47 @@ func TestProcessWaitStreamsLogDeltasWhilePolling(t *testing.T) {
 - 尾读刻意跳过 wait 开始前的历史（首 tick 播种 offset）；若日后 owner 要求"wait 也回放历史"，
   那是另一个决定（回放上限、与 start 卡的去重），不要在本计划里顺手做。
 - 尾读 delta 一律标 `stdout`：log 本身是混合流。若日后 log 分流存储，此处要 revisited。
-- 与 370 独立：370 修完成 payload 的陈旧 `running`，本计划加活卡事件；互不阻塞，可并行落。
+- 与 370 的关系：370 修完成 payload 的陈旧 `running`，本计划加活卡事件，语义互不依赖；但**两者改同两个文件**，
+  并行执行会互见对方改动（drift check 已列为预期），ff-only 合并须串行——建议 370 先落、本计划 rebase 后再落。
+
+## 评审修订记录（2026-11-23 review-plan，复核时 HEAD `3ff6b134`）
+
+缺口经评审独立实跑证实（`go test -overlay`，仓库树零改动）：基线上 `TestProcessStartWithWaitStreamsOutputDeltas`
+按 `a blocking start+wait emitted no output deltas` 变红；`grep -c StepKindToolOutputDelta process_tool.go`=0。
+shell 接线 :502-528 逐字、emitter nil-safe/Close flush、`ToolStepUserVisible` 无工具名白名单、消费端
+（notify.go:586-607／chat_turn.go:349-364／stream_parts_test.go:41-43）、Done 计数（`SetStepHook` 基线 0）均核实。就地修订：
+1. **Step 2 占位函数 `processWaitPoll` 不存在＋「二选一」**（照抄即编译失败）→ 定死 `startProcessLiveTail(ctx, st, rec) func()`
+   辅助函数（无 hook 返回 no-op），`processWait` 早退后插 `stopTail := …; defer stopTail()` 两行，主体一字不动；
+   给出完整可编译代码与启停顺序（close(stop)→emitter.Close）、有界退出与 happens-before 说明。
+2. **抖动命令含裸 `|` 却在 markdown 表格单元格内**（GFM 吞竖线／逼出 `\|` 假绿）→ 移出表格放 fenced block，并写明数 `--- PASS`。
+3. **start 测试补 `waitForProcessSettled`**（同 370 的 flake）；wait 测试的 sh 循环由 `KillProcesses` 收尾，已注明。
+4. **drift check 语义**（范围 diff→工作树 diff＋status）＋兄弟计划 370 白名单＋`state.go` Canceled 漂移说明；**BASE 改派发时 dev HEAD**。
+5. `tailer.delta()` 末尾两个 identical `return buf[:n]` 分支合并为一个（`n, _ := io.ReadFull`）。
+结论：缺口成立、修法渲染层零改动且接线已验证，修订后可执行（P1/M/LOW-MED，TODO）。
+
+## 执行记录（2026-11-23 `execute`，评审 APPROVE）
+
+- Worktree／分支：`.worktrees/process-live-output-deltas`（BASE `3ff6b134`＝派发时 dev HEAD，不含尚未合并的 370，
+  按计划属预期漂移），提交 `805228db`（评审的这版），**落地时 rebase 到 370＋372 之后为 `75d293f0`**；
+  未 push。
+- 落地（owner 指示「合并回主树 dev」）：rebase 到新 dev 时唯一冲突是 `process_tool_test.go` 末尾「两端各自追加测试」，
+  按事先验证的做法保留 370 的一条＋本计划的两条；rebase 后在该树跑 `TestProcess|TestDisplay|TestHeader` 13 条全 PASS，
+  再 `git merge --ff-only` 落 dev（`01b421c9..75d293f0`）。落地后全量门禁唯一失败是 `pkg/architecture` 的
+  `TestTestFilesCorrespondToProductionFiles`（`pkg/tui/deliverables_outcome_test.go` 无配对产物，`3ff6b134` 起即存在），
+  与本计划无关。
+- 改动：`pkg/tool/process_tool.go` +131/−1（`io` import；`processStart` 的 `shellOutputEmitter` 接线与
+  `onOutput` 双写 log＋Push；`processLiveTailInterval`／`processLogTailer.delta`／`startProcessLiveTail`；
+  `processWait` 早退后 `stopTail := …; defer stopTail()` 两行），`pkg/tool/process_tool_test.go` +83
+  （`runtime` import＋`TestProcessStartWithWaitStreamsOutputDeltas`、`TestProcessWaitStreamsLogDeltasWhilePolling`）。
+  `processReadiness` 签名与轮询逻辑一字未动；`shell_tool.go`／`shell_output.go` 零改动。
+- 评审独立复跑：`-overlay` 覆盖回 `3ff6b134` 版生产文件后两条新测试按
+  `a blocking start+wait emitted no output deltas` 与 `the wait streamed none of the log it tailed: ""` 变红；
+  工作树 `-run 'TestProcess'` 10 条全 PASS；抖动复核 `-count=3` 数到 6 个 `--- PASS`；补跑执行器因磁盘满
+  跳过的 `-race`（两条新测试＋`TestShellToolEmitsOutputDeltasWithToolStepID`，`-count=2`）`ok`；整包
+  `ok …/pkg/tool 19.3s`；build／vet／gofmt 干净；`git diff --name-only` 恰两个 in-scope 文件，
+  `pkg/tui`／`pkg/gateway`／`frontend/` 零改动。
+- 合成态验证（与 370 同改两文件）：`git merge-tree` 预演的唯一冲突是 `process_tool_test.go` 末尾「两边各自
+  追加测试」；在临时分支上合并并保留双方三个测试后，11 条 `TestProcess*`＋整包＋build/vet 全绿。
+- 落地建议：370 先 ff-only，本分支 rebase 到新 dev 后 ff-only；或直接解那一处纯追加冲突（保留全部测试）。
+- 已知边界（计划已裁定，非缺陷）：活卡是有损预览（32KB pending＋75ms 合并），log 文件是全量真相；尾读首个
+  tick 播种 offset、跳过 wait 开始前的历史；尾读 delta 一律标 `stdout`（log 本身混合两流）。
