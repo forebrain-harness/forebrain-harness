@@ -57,6 +57,11 @@ type Paths struct {
 	Home          string
 	WorkspaceRoot string
 	ProjectRoot   string
+	// ProjectTrusted is the caller's already-resolved answer for ProjectRoot —
+	// a batch project is trusted by its type and has no record to read (owner
+	// 2026-11-25). When set, the project's rules file is writable without a
+	// store read.
+	ProjectTrusted bool
 }
 
 // Store returns the underlying rule store, creating it if this is the first
@@ -293,6 +298,12 @@ func trustedProjectRoot(paths Paths) string {
 	dir := strings.TrimSpace(paths.ProjectRoot)
 	if dir == "" {
 		return ""
+	}
+	if paths.ProjectTrusted {
+		// The caller resolved the decision already, and its root is the boundary
+		// it resolved: skip both the store read and the re-canonicalization that
+		// ResolveRegisteredProject would do.
+		return filepath.Clean(dir)
 	}
 	project, err := ResolveRegisteredProject(dir)
 	if err != nil {

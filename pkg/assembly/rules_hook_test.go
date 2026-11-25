@@ -221,3 +221,45 @@ func TestTaskWorkspaceStillResolvesRulesFromTheProject(t *testing.T) {
 		t.Fatalf("a task workspace was resolved as an untrusted project: %q", out.SystemAddendum)
 	}
 }
+
+// TestBatchTurnLoadsProjectRulesWithoutATrustRecord pins the rule-injection half
+// of the batch exemption (owner 2026-11-25): a batch project's tasks run on the
+// project's own FOREBRAIN.md, and no trust record exists or is needed, so a
+// batch turn must not be refused the rules for the lack of one. A non-batch turn
+// in the same project is unchanged and still loads nothing.
+func TestBatchTurnLoadsProjectRulesWithoutATrustRecord(t *testing.T) {
+	home := t.TempDir()
+	wsRoot := t.TempDir()
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "FOREBRAIN.md"), []byte("PROJECT RULES"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPreHook(nil, home, wsRoot)
+
+	batch := tool.WithProjectRoot(context.Background(), project)
+	batch = tool.WithProjectType(batch, state.ProjectTypeBatch)
+	out, err := p.run(batch, "pre", hook.HookContext{Trigger: "user", SessionID: "s-batch"}, "count the rows")
+	if err != nil {
+		t.Fatalf("rules hook: %v", err)
+	}
+	if !strings.Contains(out.SystemAddendum, "PROJECT RULES") {
+		t.Fatalf("a batch turn lost the project rules with no trust record: %q", out.SystemAddendum)
+	}
+	if strings.Contains(out.SystemAddendum, "project not trusted") {
+		t.Fatalf("a batch turn recorded the project as untrusted: %q", out.SystemAddendum)
+	}
+
+	// The same project in a coding conversation: no record, so nothing loads.
+	coding := tool.WithProjectRoot(context.Background(), project)
+	coding = tool.WithProjectType(coding, state.ProjectTypeCoding)
+	out, err = p.run(coding, "pre", hook.HookContext{Trigger: "user", SessionID: "s-coding"}, "count the rows")
+	if err != nil {
+		t.Fatalf("rules hook (coding): %v", err)
+	}
+	if strings.Contains(out.SystemAddendum, "PROJECT RULES") {
+		t.Fatalf("an untrusted coding turn loaded the project rules: %q", out.SystemAddendum)
+	}
+}

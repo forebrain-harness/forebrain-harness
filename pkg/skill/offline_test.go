@@ -416,3 +416,21 @@ func TestSanitizeOfflineSkillDirName(t *testing.T) {
 	require.Equal(t, "etc", sanitizeOfflineSkillDirName("../../etc"))
 	require.Equal(t, "abc", sanitizeOfflineSkillDirName(".abc."))
 }
+
+// TestOfflineInstallProjectScopeHonorsTheCallersTrustDecision pins the install
+// half of the batch exemption (owner 2026-11-25): a project whose trust the
+// caller resolved installs project skills with no record, and a caller that did
+// not resolve it still needs the record.
+func TestOfflineInstallProjectScopeHonorsTheCallersTrustDecision(t *testing.T) {
+	home := t.TempDir()
+	projectRoot := t.TempDir()
+	svc := NewServiceForWorkspace(home, filepath.Join(home, "workspace"))
+	svc.ProjectRoot = projectRoot
+	svc.ProjectTrusted = true
+	data := zipEntries(t, map[string]string{"demo/SKILL.md": demoSkillMarkdown})
+
+	names, err := svc.InstallOfflineArchive("demo.zip", data, ScopeProject)
+	require.NoError(t, err)
+	require.Equal(t, []string{"demo"}, names)
+	require.FileExists(t, filepath.Join(projectRoot, ".forebrain", "skills", "demo", "SKILL.md"))
+}

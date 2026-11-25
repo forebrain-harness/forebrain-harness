@@ -966,6 +966,27 @@ func TestProjectsCreateTrustIsExplicitOperatorChoice(t *testing.T) {
 	if err != nil || !trusted {
 		t.Fatalf("trust decision missing: %v %v", trusted, err)
 	}
+
+	// A batch project that ALSO carries an explicit trust field: the decision is
+	// still the client's and is still recorded — the exemption steers the
+	// automatic record, never an explicit one (owner 2026-11-25).
+	batchTrustedRoot := t.TempDir()
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{
+		"name": "batch-trusted", "root": batchTrustedRoot, "project_type": "batch", "trust": true,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create batch trusted: %d %s", rec.Code, rec.Body.String())
+	}
+	row = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["trust_recorded"] != true {
+		t.Fatalf("an explicit decision on a batch project must be recorded: %v", row["trust_recorded"])
+	}
+	if trusted, err := safety.IsTrusted(home, safety.Project{Root: batchTrustedRoot}); err != nil || !trusted {
+		t.Fatalf("the explicit batch decision is missing: %v %v", trusted, err)
+	}
 }
 
 // TestProjectsCreateCarriesProjectType pins the create round trip: an explicit
@@ -1124,16 +1145,14 @@ func TestProjectsCreateRejectsUnknownProjectType(t *testing.T) {
 	}
 }
 
-// TestProjectsBatchRecordsTrustWithoutADecision pins the creation rule of plans
-// 216 §0.4: a batch project has no trust level, so creating one asks for no
-// trust decision and refuses nothing for the lack of it — the record the skill
-// and MCP loaders read is written as part of being a batch project.
-func TestProjectsBatchRecordsTrustWithoutADecision(t *testing.T) {
+// TestProjectsBatchNeedsNoTrustRecord pins the creation rule (owner 2026-11-25):
+// a batch project needs no trust record, and none is written for it — its
+// loaders read its type. Creating one asks for no decision, refuses nothing for
+// the lack of one, and never writes the store.
+func TestProjectsBatchNeedsNoTrustRecord(t *testing.T) {
 	s, store, home := newProjectsTestServer(t)
 	root := projectTempRoot(t)
 
-	// No `trust` field at all: the create succeeds and the project reads as
-	// trusted, which is what its loaders will consult.
 	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "batch", "root": root, "project_type": "batch"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("batch without a trust field: %d %s", rec.Code, rec.Body.String())
@@ -1142,16 +1161,14 @@ func TestProjectsBatchRecordsTrustWithoutADecision(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
 		t.Fatalf("decode the created project: %v", err)
 	}
-	if row["trust_recorded"] != true {
-		t.Fatalf("trust_recorded = %v, want true", row["trust_recorded"])
+	if row["trust_recorded"] != false {
+		t.Fatalf("trust_recorded = %v, want false: a batch project records nothing", row["trust_recorded"])
 	}
-	trusted, err := safety.IsTrusted(home, safety.Project{Root: root})
-	if err != nil || !trusted {
-		t.Fatalf("a created batch project must be recorded trusted: %v %v", trusted, err)
+	if trusted, err := safety.IsTrusted(home, safety.Project{Root: row["root"].(string)}); err != nil || trusted {
+		t.Fatalf("creating a batch project wrote a trust record: %v %v", trusted, err)
 	}
-	// The record is what the skill and MCP loaders read, so the detail read
-	// must report it too: an untrusted batch project would be force-sandboxed
-	// out of the very things its tasks run on.
+	// The project itself is fully readable: the exemption is the record, not the
+	// row.
 	id, _ := row["id"].(string)
 	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id, nil)
 	if rec.Code != http.StatusOK {
@@ -1161,20 +1178,8 @@ func TestProjectsBatchRecordsTrustWithoutADecision(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
 		t.Fatalf("decode the project detail: %v", err)
 	}
-	if detail["trusted"] != true {
-		t.Fatalf("the created batch project reads as trusted = %v, want true", detail["trusted"])
-	}
-
-	// The same creation with a client claiming trust is not a different
-	// request: the decision is not the client's to make either way.
-	otherRoot := projectTempRoot(t)
-	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "batch", "root": otherRoot, "project_type": "batch", "trust": true})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("batch with a trust field: %d %s", rec.Code, rec.Body.String())
-	}
-	projects, err := store.ListProjects(context.Background(), state.ListProjectsOptions{}, 50, 0)
-	if err != nil || len(projects) != 2 {
-		t.Fatalf("two created batch projects expected, got %v %+v", err, projects)
+	if detail["project_type"] != "batch" {
+		t.Fatalf("detail project_type = %v, want batch", detail["project_type"])
 	}
 
 	// A non-batch project is unchanged: its trust is still the caller's.
@@ -1185,6 +1190,10 @@ func TestProjectsBatchRecordsTrustWithoutADecision(t *testing.T) {
 	}
 	if trusted, err := safety.IsTrusted(home, safety.Project{Root: plainRoot}); err != nil || trusted {
 		t.Fatalf("a coding project must not be trusted on its own: %v %v", trusted, err)
+	}
+	projects, err := store.ListProjects(context.Background(), state.ListProjectsOptions{}, 50, 0)
+	if err != nil || len(projects) != 2 {
+		t.Fatalf("two created projects expected, got %v %+v", err, projects)
 	}
 }
 
@@ -1251,11 +1260,10 @@ func TestProjectPatchTypeReachesOnlyNewSessions(t *testing.T) {
 	}
 }
 
-// TestProjectPatchToBatchRecordsTrustWithoutADecision pins the PATCH half of the
-// same rule (plans/216 §0.4): switching a project to batch asks for no trust
-// decision — the switch succeeds on its own and records the trust its loaders
-// read.
-func TestProjectPatchToBatchRecordsTrustWithoutADecision(t *testing.T) {
+// TestProjectPatchToBatchRecordsNoTrust pins the PATCH half of the same rule
+// (owner 2026-11-25): switching a project to batch asks for no trust decision
+// and records none — the switch is the whole request.
+func TestProjectPatchToBatchRecordsNoTrust(t *testing.T) {
 	s, _, home := newProjectsTestServer(t)
 	root := projectTempRoot(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "switch", "root": root})
@@ -1271,10 +1279,9 @@ func TestProjectPatchToBatchRecordsTrustWithoutADecision(t *testing.T) {
 		t.Fatalf("a coding project must start untrusted: %v %v", trusted, err)
 	}
 
-	// No `trust` field in the request: the switch is the whole request.
 	rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, map[string]any{"project_type": "batch"})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("patch to batch without a trust field: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("patch to batch: %d %s", rec.Code, rec.Body.String())
 	}
 	patched := map[string]any{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil {
@@ -1283,8 +1290,26 @@ func TestProjectPatchToBatchRecordsTrustWithoutADecision(t *testing.T) {
 	if patched["project_type"] != "batch" {
 		t.Fatalf("patched project_type = %v, want batch", patched["project_type"])
 	}
-	if trusted, err := safety.IsTrusted(home, safety.Project{Root: root}); err != nil || !trusted {
-		t.Fatalf("a project that became batch must be recorded trusted: %v %v", trusted, err)
+	if trusted, err := safety.IsTrusted(home, safety.Project{Root: root}); err != nil || trusted {
+		t.Fatalf("a project that became batch recorded a trust decision: %v %v", trusted, err)
+	}
+
+	// An explicit decision in the same request is still recorded.
+	otherRoot := projectTempRoot(t)
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "switch-trusted", "root": otherRoot})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create other: %d %s", rec.Code, rec.Body.String())
+	}
+	other := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &other); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+other["id"].(string), map[string]any{"project_type": "batch", "trust": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch to batch with trust: %d %s", rec.Code, rec.Body.String())
+	}
+	if trusted, err := safety.IsTrusted(home, safety.Project{Root: otherRoot}); err != nil || !trusted {
+		t.Fatalf("an explicit decision must be recorded: %v %v", trusted, err)
 	}
 }
 
@@ -11044,4 +11069,114 @@ func storeBatchSandbox(t *testing.T, store *state.ProjectStore, id string) bool 
 		t.Fatalf("get: %v", err)
 	}
 	return p.BatchSandbox
+}
+
+// TestBatchProjectRoutesNeedNoTrustRecord pins the route half of the batch
+// exemption (owner 2026-11-25): every project-scoped route resolves its launch
+// context through process.ProjectLaunchContext, so a batch project with no trust
+// record still offers its MCP entries for confirmation and can toggle its own
+// skills — and the toggle is stored, which is what the old write path
+// (discovering from the record) silently failed to do.
+func TestBatchProjectRoutesNeedNoTrustRecord(t *testing.T) {
+	s, _, home := newProjectsTestServer(t)
+	root := projectTempRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srvPath := filepath.Join(root, ".forebrain", "mcp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(srvPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srvPath, []byte("mcp_servers:\n  - name: webtool\n    transport: stdio\n    command: /bin/true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(root, ".forebrain", "skills", "demo")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: demo\ndescription: a project skill\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{
+		"name": "batch", "root": root, "project_type": "batch",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	created := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created["id"].(string)
+	root = created["root"].(string)
+	if trusted, err := safety.IsTrusted(home, safety.Project{Root: root}); err != nil || trusted {
+		t.Fatalf("the fixture must have no trust record: %v %v", trusted, err)
+	}
+
+	// The MCP preview offers the entry for confirmation: the gate is open by
+	// type, so the entry is not refused for the lack of a record.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/mcp", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview: %d %s", rec.Code, rec.Body.String())
+	}
+	preview := map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := preview["pending_consent"].([]any)
+	if len(pending) != 1 || pending[0].(map[string]any)["name"] != "webtool" {
+		t.Fatalf("pending_consent = %+v, want the project's entry offered", preview["pending_consent"])
+	}
+
+	skillEnabled := func() (bool, bool) {
+		t.Helper()
+		rec := doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/skills", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("skills list: %d %s", rec.Code, rec.Body.String())
+		}
+		var overview struct {
+			Installed []map[string]any `json:"installed"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range overview.Installed {
+			if row["name"] == "demo" {
+				enabled, _ := row["enabled"].(bool)
+				return enabled, true
+			}
+		}
+		return false, false
+	}
+	if enabled, ok := skillEnabled(); !ok || !enabled {
+		t.Fatalf("the project skill is missing or disabled before the toggle: ok=%v enabled=%v", ok, enabled)
+	}
+
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/skills/toggle", map[string]any{"enabled_paths": []string{}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("toggle: %d %s", rec.Code, rec.Body.String())
+	}
+	toggled := struct {
+		Skills []map[string]any `json:"skills"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &toggled); err != nil {
+		t.Fatal(err)
+	}
+	written := false
+	for _, row := range toggled.Skills {
+		if row["name"] == "demo" {
+			enabled, _ := row["enabled"].(bool)
+			if enabled {
+				t.Fatalf("the toggle answered with an enabled row: %+v", row)
+			}
+			written = true
+		}
+	}
+	if !written {
+		t.Fatalf("the toggle answered without the project's skill: %+v", toggled.Skills)
+	}
+	if enabled, ok := skillEnabled(); !ok || enabled {
+		t.Fatalf("the toggle was not stored: ok=%v enabled=%v", ok, enabled)
+	}
 }

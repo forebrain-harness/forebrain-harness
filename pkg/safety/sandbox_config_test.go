@@ -167,3 +167,33 @@ func TestEffectiveConfigDerivesThePairFromThePreset(t *testing.T) {
 		})
 	}
 }
+
+// TestProjectSettingsPathTrustsABatchProjectByRule pins the rules-file half of the
+// batch exemption (owner 2026-11-25): a batch project has no trust record and
+// needs none, so a caller that already knows the type passes the decision and the
+// project's own rules file is reachable. The path is still that project's own —
+// the decision skips the store read, never the boundary.
+func TestProjectSettingsPathTrustsABatchProjectByRule(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	projectRoot, err := CanonicalPath(project)
+	if err != nil {
+		t.Fatalf("CanonicalPath: %v", err)
+	}
+
+	// Nothing is recorded, so the store's answer is "no rules file".
+	if path, ok := ProjectSettingsPath(Paths{Home: home, ProjectRoot: projectRoot}); ok {
+		t.Fatalf("an untrusted project answered %q", path)
+	}
+	path, ok := ProjectSettingsPath(Paths{Home: home, ProjectRoot: projectRoot, ProjectTrusted: true})
+	if !ok {
+		t.Fatal("a batch project's rules file must be reachable without a record")
+	}
+	if want := filepath.Join(projectRoot, ".forebrain", "safety.json"); path != want {
+		t.Fatalf("rules path = %q, want %q", path, want)
+	}
+	// No record was created by asking.
+	if trusted, err := IsTrusted(home, Project{Root: projectRoot}); err != nil || trusted {
+		t.Fatalf("asking for the path recorded a trust decision: %v %v", trusted, err)
+	}
+}

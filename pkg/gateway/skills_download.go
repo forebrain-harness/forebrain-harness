@@ -91,7 +91,7 @@ func (s *Server) decorateSkillList(ctx context.Context, launch safety.ProjectCon
 	base := skillDownloadBase(projectID)
 	// Shadow relations live on the discovery entries, not the managed DTO.
 	shadowsByPath := make(map[string]skill.Entry)
-	if entries, err := skill.DiscoverForWorkspace(svc.Home, svc.Workspace(), svc.ProjectRoot); err == nil {
+	if entries, err := svc.Discover(); err == nil {
 		for _, entry := range entries {
 			shadowsByPath[entry.Path] = entry
 		}
@@ -168,7 +168,7 @@ func (s *Server) decoratedSkillList(ctx context.Context, launch safety.ProjectCo
 // effective set. Names may repeat across layers; the row the user sees is the
 // unshadowed one, so that is the one downloads and deletes act on.
 func locateSkill(svc *skill.Service, name string) (skill.Entry, bool) {
-	entries, err := skill.DiscoverForWorkspace(svc.Home, svc.Workspace(), svc.ProjectRoot)
+	entries, err := svc.Discover()
 	if err != nil {
 		return skill.Entry{}, false
 	}

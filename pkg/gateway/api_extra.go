@@ -1137,12 +1137,17 @@ type permissionScope struct {
 	rt    *safety.Runtime
 }
 
-func (s *Server) loadPermissionScope(projectRoot string) (permissionScope, bool) {
+func (s *Server) loadPermissionScope(projectRoot, projectType string) (permissionScope, bool) {
 	cfg := s.liveCfg() // liveCfg: runtime snapshot (plan 217) — must not be persistedConfig
 	if cfg == nil {
 		return permissionScope{}, false
 	}
-	paths := safety.Paths{Home: strings.TrimSpace(s.Home), WorkspaceRoot: s.activeWorkspaceRoot(), ProjectRoot: projectRoot}
+	paths := safety.Paths{
+		Home: strings.TrimSpace(s.Home), WorkspaceRoot: s.activeWorkspaceRoot(), ProjectRoot: projectRoot,
+		// The caller's row decides: a batch project's rules file is readable
+		// with no trust record (owner 2026-11-25).
+		ProjectTrusted: state.NormalizeProjectType(projectType) == state.ProjectTypeBatch,
+	}
 	rt := safety.NewRuntime()
 	rt.LoadFromDisk(cfg, paths)
 	return permissionScope{paths: paths, cfg: cfg, rt: rt}, true
@@ -1153,7 +1158,7 @@ func (s *Server) loadPermissionScope(projectRoot string) (permissionScope, bool)
 // agent-level answer never comes from the runner of whichever project the
 // gateway process happened to be launched in.
 func (s *Server) agentPermissionScope() (permissionScope, bool) {
-	return s.loadPermissionScope("")
+	return s.loadPermissionScope("", "")
 }
 
 // liveRunners is every runner the agent's conversations run on: the gateway's
@@ -5657,6 +5662,10 @@ func (s *Server) skillLifecycleService(launch safety.ProjectContext) (*skill.Ser
 	// one from the process.
 	svc := skill.NewServiceForWorkspace(s.Home, active.WorkspaceRoot)
 	svc.ProjectRoot = strings.TrimSpace(launch.Project.Root)
+	// The route already resolved whether this project is trusted — a batch
+	// project is, by its type (owner 2026-11-25) — so the service reads that
+	// answer instead of the trust store.
+	svc.ProjectTrusted = launch.IsTrusted()
 	// What a page lists and what the running gateway loads are separate
 	// facts. The skill commands the runtime answers are one registry for this
 	// process, built for the gateway's own launch project; a page working in
@@ -5712,7 +5721,7 @@ func (s *Server) projectSkillLaunch(w http.ResponseWriter, r *http.Request) (saf
 	// A registered project's boundary is the path the user drew; resolving it
 	// as a launch directory would walk up to an enclosing .git and relocate
 	// this project's space onto the whole checkout.
-	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	launch, err := process.ProjectLaunchContext(s.Home, p)
 	if err != nil {
 		http.Error(w, "project could not be resolved", http.StatusBadRequest)
 		return safety.ProjectContext{}, false
@@ -7203,7 +7212,8 @@ func (s *Server) handleProjectDefaultType(w http.ResponseWriter, r *http.Request
 
 // handleProjectsCreate creates a project. The trust flag must be an explicit
 // operator choice: the request has to carry "trust": true to record one, and
-// the response says which decision was recorded.
+// the response says which decision was recorded. A batch project records none:
+// it needs none (owner 2026-11-25).
 func (s *Server) handleProjectsCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -7265,28 +7275,14 @@ func (s *Server) handleProjectsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// A batch project records its trust as part of being created, never as a
-	// decision the client made: a batch project has no trust level at all
-	// (owner 2026-10-31, plans/216 §0.4) — it is not set, not shown, and no
-	// judgement reads it. The record is still written because the loaders that
-	// read it are the same for every project: a batch task loads the project's
-	// skills and MCP servers, and those gates open on the trusted state.
+	// An explicit trust decision is the client's to record. A project created as
+	// a batch project records nothing: it needs no trust record, because its
+	// loaders read its type (owner 2026-11-25).
 	trustRecorded := false
-	if body.Trust || projectType == state.ProjectTypeBatch {
+	if body.Trust {
 		if err := safety.MarkTrusted(s.Home, safety.Project{Root: root}); err == nil {
 			trustRecorded = true
 		}
-	}
-	if projectType == state.ProjectTypeBatch && !trustRecorded {
-		// The record could not be written, and a batch project without it would
-		// be force-sandboxed out of the very skills and servers its tasks run
-		// on. Nobody can be asked to retry a decision that is not theirs, so
-		// the project does not survive.
-		_ = store.Delete(r.Context(), p.ID)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": "trust_not_recorded"})
-		return
 	}
 	row := s.projectRow(p)
 	row["trust_recorded"] = trustRecorded
@@ -7365,12 +7361,9 @@ func (s *Server) handleProjectOne(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// A batch project carries its trust record from the moment it is one,
-		// and takes it here when this edit is what turns it into one: the
-		// record is what its skill and MCP loaders read, and there is no user
-		// decision behind it (plans/216 §0.4) — a batch project has no trust
-		// level to set, show or judge.
-		if body.Trust || state.NormalizeProjectType(updated.ProjectType) == state.ProjectTypeBatch {
+		// An explicit trust decision is the client's to record; a project that
+		// merely became a batch project records nothing (owner 2026-11-25).
+		if body.Trust {
 			_ = safety.MarkTrusted(s.Home, safety.Project{Root: updated.Root})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -8492,7 +8485,7 @@ func (s *Server) loadProjectPermissionScope(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "project not found", http.StatusNotFound)
 		return projectPermissionScope{}, false
 	}
-	scope, ok := s.loadPermissionScope(p.Root)
+	scope, ok := s.loadPermissionScope(p.Root, p.ProjectType)
 	if !ok {
 		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return projectPermissionScope{}, false
@@ -8615,7 +8608,8 @@ func (s *Server) propagateProjectPermissionUpdate(scope projectPermissionScope, 
 		}
 	}
 	if s.Runner != nil {
-		own := safety.Paths{Home: scope.paths.Home, WorkspaceRoot: scope.paths.WorkspaceRoot, ProjectRoot: s.Runner.ProjectRoot}
+		own := safety.Paths{Home: scope.paths.Home, WorkspaceRoot: scope.paths.WorkspaceRoot, ProjectRoot: s.Runner.ProjectRoot,
+			ProjectTrusted: s.Runner.ProjectType() == state.ProjectTypeBatch}
 		if path, ok := safety.ProjectSettingsPath(own); ok && path == target {
 			runners = append(runners, s.Runner)
 		}
@@ -8925,7 +8919,7 @@ func (s *Server) handleProjectLSPPreview(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
-	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	launch, err := process.ProjectLaunchContext(s.Home, p)
 	if err != nil {
 		http.Error(w, "project could not be resolved", http.StatusBadRequest)
 		return
@@ -9045,7 +9039,7 @@ func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	launch, err := process.ProjectLaunchContext(s.Home, p)
 	if err != nil {
 		http.Error(w, "project could not be resolved", http.StatusBadRequest)
 		return

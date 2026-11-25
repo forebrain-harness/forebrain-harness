@@ -43,18 +43,18 @@ interface StartedTask {
 /** A batch project, a task made from its task list, and the page the create
  *  flow lands on: that task's first execution, running. */
 async function startTask(page: Page): Promise<StartedTask> {
-  // A batch project: a plain directory, trusted up front, because a batch
-  // project may not exist without that decision.
+  // A batch project: a plain directory, and no trust decision — a batch
+  // project needs none, because its skills, MCP servers and rules load from its
+  // type (owner 2026-11-25).
   const root = mkdtempSync(join(tmpdir(), 'fb-e2e-153-batch-'))
   mkdirSync(root, { recursive: true })
   scratch.push(root)
   const created = await page.request.post('/api/v1/projects', {
-    data: { name: `e2e-153-batch-${Date.now().toString(36)}`, root, project_type: 'batch', trust: true },
+    data: { name: `e2e-153-batch-${Date.now().toString(36)}`, root, project_type: 'batch' },
   })
   expect(created.ok(), await created.text()).toBeTruthy()
-  const project = (await created.json()) as { id: string; project_type?: string; trust_level?: string }
+  const project = (await created.json()) as { id: string; project_type?: string }
   expect(project.project_type).toBe('batch')
-  expect(project.trust_level).toBe('trusted')
 
   await page.goto(`/projects/${encodeURIComponent(project.id)}/tasks`, { waitUntil: 'networkidle' })
   // A batch project has no conversations to make: its space is its tasks.

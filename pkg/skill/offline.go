@@ -138,7 +138,9 @@ func (s *Service) offlineDestRoot(destScope Scope) (string, error) {
 		if root == "" {
 			return "", fmt.Errorf("project install unavailable: this session has no project root")
 		}
-		if len(TrustedProjectSkillRoots(s.Home, root)) == 0 {
+		// The caller's resolved decision wins: a batch project is trusted by
+		// its type and has no record (owner 2026-11-25).
+		if !s.ProjectTrusted && len(TrustedProjectSkillRoots(s.Home, root)) == 0 {
 			return "", fmt.Errorf("project install requires trusting the project first")
 		}
 		return filepath.Join(root, ".forebrain", "skills"), nil

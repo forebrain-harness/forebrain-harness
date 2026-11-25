@@ -211,3 +211,128 @@ func Discover(home string) ([]Entry, error) {
 	home = strings.TrimSpace(home)
 	return DiscoverForWorkspace(home, mainWorkspaceRoot(home), "")
 }
+
+// TestDiscoverForTrustedProjectListsTheProjectLayerWithoutARecord pins the
+// batch exemption on the discovery side (owner 2026-11-25): the caller resolved
+// that this project is trusted — a batch project is, by its type — so the
+// project layer is listed with no record in the store. The same project asked
+// through DiscoverForWorkspace, which reads the record, lists nothing.
+func TestDiscoverForTrustedProjectListsTheProjectLayerWithoutARecord(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	project := t.TempDir()
+	projectSkill := writeSkill(t, filepath.Join(project, ".forebrain", "skills", "batch-work"), "batch-work")
+
+	entries, err := DiscoverForTrustedProject(home, ws, project)
+	if err != nil {
+		t.Fatalf("DiscoverForTrustedProject: %v", err)
+	}
+	found := false
+	for _, entry := range entries {
+		if entry.Path == projectSkill {
+			found = true
+			if entry.Origin != OriginProject {
+				t.Fatalf("%s origin = %q, want project", entry.Path, entry.Origin)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the project layer is missing without a record: %+v", entries)
+	}
+
+	recorded, err := DiscoverForWorkspace(home, ws, project)
+	if err != nil {
+		t.Fatalf("DiscoverForWorkspace: %v", err)
+	}
+	for _, entry := range recorded {
+		if entry.Path == projectSkill {
+			t.Fatalf("an untrusted project's skill reached the listing: %+v", recorded)
+		}
+	}
+}
+
+// TestServiceDiscoverHonorsTheCallersTrustDecision pins that a Service carrying
+// the caller's answer lists the project layer without a record, and that the
+// same Service with the answer off does not fall back to anything else.
+func TestServiceDiscoverHonorsTheCallersTrustDecision(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	projectSkill := writeSkill(t, filepath.Join(project, ".forebrain", "skills", "batch-work"), "batch-work")
+
+	trusted := NewServiceForWorkspace(home, filepath.Join(home, "workspace"))
+	trusted.ProjectRoot = project
+	trusted.ProjectTrusted = true
+	entries, err := trusted.Discover()
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	found := false
+	for _, entry := range entries {
+		if entry.Path == projectSkill {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ProjectTrusted did not reach discovery: %+v", entries)
+	}
+
+	untrusted := NewServiceForWorkspace(home, filepath.Join(home, "workspace"))
+	untrusted.ProjectRoot = project
+	entries, err = untrusted.Discover()
+	if err != nil {
+		t.Fatalf("Discover (untrusted): %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Path == projectSkill {
+			t.Fatalf("the project skill reached an untrusted service: %+v", entries)
+		}
+	}
+}
+
+// TestServiceSetEnabledPathsWritesThroughTheCallersTrustDecision pins the write
+// half of the batch exemption (owner 2026-11-25): a project whose trust the
+// caller resolved can have its skills toggled with no record, and the toggle is
+// stored. The write path must discover through the service — discovering on its
+// own, from the record, would leave the project's skills out of the entries and
+// silently write nothing.
+func TestServiceSetEnabledPathsWritesThroughTheCallersTrustDecision(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	ws := filepath.Join(home, "workspace")
+	projectSkill := writeSkill(t, filepath.Join(project, ".forebrain", "skills", "batch-work"), "batch-work")
+	disabled := func() map[string]bool {
+		t.Helper()
+		st, err := Load(ws)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return st.Disabled
+	}
+
+	svc := NewServiceForWorkspace(home, ws)
+	svc.ProjectRoot = project
+	svc.ProjectTrusted = true
+	if err := svc.SetEnabledPaths(nil); err != nil {
+		t.Fatalf("SetEnabledPaths: %v", err)
+	}
+	if !disabled()[projectSkill] {
+		t.Fatalf("the project skill was not disabled: %+v", disabled())
+	}
+	if err := svc.SetEnabledPaths([]string{projectSkill}); err != nil {
+		t.Fatalf("SetEnabledPaths (enable): %v", err)
+	}
+	if disabled()[projectSkill] {
+		t.Fatalf("the project skill stayed disabled: %+v", disabled())
+	}
+
+	// The same service without the caller's answer writes nothing for it: the
+	// store does not trust this project.
+	other := NewServiceForWorkspace(home, ws)
+	other.ProjectRoot = project
+	if err := other.SetEnabledPaths(nil); err != nil {
+		t.Fatalf("SetEnabledPaths (untrusted): %v", err)
+	}
+	if disabled()[projectSkill] {
+		t.Fatalf("an untrusted service wrote the project skill: %+v", disabled())
+	}
+}

@@ -132,7 +132,13 @@ type Service struct {
 	// process working directory wrote one session's skills into whichever
 	// directory the process happened to start in. Empty fails every
 	// project-scope write; it never falls back to the process cwd.
-	ProjectRoot       string
+	ProjectRoot string
+	// ProjectTrusted is the caller's already-resolved answer to "is this
+	// project trusted" — true for a batch project, which needs no record
+	// (owner 2026-11-25). When set, the project layer is included without
+	// reading the trust store. Set it on a Service built for one call: a
+	// shared Service would then carry one project's decision to another's.
+	ProjectTrusted    bool
 	OnInstallProgress func(InstallProgress)
 	OnRefresh         func() error
 	IsBuiltin         func(string) bool
@@ -153,6 +159,18 @@ func NewServiceForWorkspace(home string, workspaceRoot string) *Service {
 
 func (s *Service) NewHub() *Hub {
 	return NewForWorkspace(s.Home, s.workspaceRoot(), s.ProjectRoot)
+}
+
+// Discover lists the skills this service's context sees. It honors
+// ProjectTrusted: the caller's resolved decision, not the trust store's.
+func (s *Service) Discover() ([]Entry, error) {
+	if s == nil {
+		return nil, fmt.Errorf("skill: nil service")
+	}
+	if s.ProjectTrusted {
+		return DiscoverForTrustedProject(s.Home, s.workspaceRoot(), s.ProjectRoot)
+	}
+	return DiscoverForWorkspace(s.Home, s.workspaceRoot(), s.ProjectRoot)
 }
 
 func (s *Service) List() ([]SkillDTO, error) {
@@ -542,7 +560,15 @@ func (s *Service) SetEnabledPaths(paths []string) error {
 			return fmt.Errorf("%w: %s", ErrDraftNotPublished, filepath.Join(root, name))
 		}
 	}
-	if err := SetEnabledPathsForWorkspace(strings.TrimSpace(s.Home), s.workspaceRoot(), s.ProjectRoot, paths); err != nil {
+	// The entries come from this service, not from a second discovery: a
+	// project whose trust the caller resolved (a batch project) is not in
+	// SetEnabledPathsForWorkspace's list, and a toggle on it would silently
+	// write nothing.
+	entries, err := s.Discover()
+	if err != nil {
+		return err
+	}
+	if err := setEnabledPathsForEntries(stateRootForWorkspace(strings.TrimSpace(s.Home), s.workspaceRoot()), entries, paths); err != nil {
 		return err
 	}
 	return s.Refresh()

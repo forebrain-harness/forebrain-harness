@@ -103,7 +103,7 @@ func TestLoadRulesMergesBootstrapAndForebrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := NewPreHook(nil, home, wsRoot)
-	out := p.loadRules(proj, hook.HookContext{}, true)
+	out := p.loadRules(proj, hook.HookContext{}, true, false)
 
 	if !strings.Contains(out, "AGENT GUIDANCE") {
 		t.Errorf("missing active-agent bootstrap content:\n%s", out)
@@ -144,7 +144,7 @@ func TestInstructionSourcesMatchMergedBody(t *testing.T) {
 	p := NewPreHook(nil, home, wsRoot)
 	// The report resolves the working directory exactly as the hook does.
 	t.Chdir(proj)
-	merged := p.loadRules(proj, hook.HookContext{}, true)
+	merged := p.loadRules(proj, hook.HookContext{}, true, false)
 	golden := "## AGENTS.md\n\nAGENT GUIDANCE\n\nPROJECT RULES"
 	if merged != golden {
 		t.Fatalf("merged body drifted:\n got  %q\n want %q", merged, golden)
@@ -189,7 +189,7 @@ func TestInstructionSourcesRecordWhereTheBodyLimitCuts(t *testing.T) {
 	cfg.Agents.Defaults.ContextInject.MaxPreHookRulesChars = 2080
 	p := NewPreHook(cfg, home, wsRoot)
 	t.Chdir(proj)
-	merged := p.loadRules(proj, hook.HookContext{}, true)
+	merged := p.loadRules(proj, hook.HookContext{}, true, false)
 	sources := p.InstructionSources()
 	if len(sources) != 3 {
 		t.Fatalf("sources = %+v", sources)
@@ -230,7 +230,7 @@ func TestInstructionSourcesUntrustedRecordsNotLoaded(t *testing.T) {
 	if len(sources) != 1 || sources[0].Name != "FOREBRAIN.md" || sources[0].Loaded || sources[0].NotLoadedReason != "project not trusted" {
 		t.Fatalf("sources = %+v, want an unloaded FOREBRAIN.md", sources)
 	}
-	if merged := p.loadRules(proj, hook.HookContext{}, true); strings.Contains(merged, "PROJECT RULES") {
+	if merged := p.loadRules(proj, hook.HookContext{}, true, false); strings.Contains(merged, "PROJECT RULES") {
 		t.Fatalf("untrusted body leaked: %q", merged)
 	}
 }
@@ -248,7 +248,7 @@ func TestLoadRulesUntrustedKeepsBootstrapAndOmitsProject(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(proj, "FOREBRAIN.md"), []byte("PROJECT RULES"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out := NewPreHook(nil, home, wsRoot).loadRules(proj, hook.HookContext{}, true)
+	out := NewPreHook(nil, home, wsRoot).loadRules(proj, hook.HookContext{}, true, false)
 	if !strings.Contains(out, "AGENT GUIDANCE") || strings.Contains(out, "PROJECT RULES") {
 		t.Fatalf("untrusted rules = %q", out)
 	}
@@ -288,7 +288,7 @@ func TestRulesPerFileBudgetCountsRunes(t *testing.T) {
 	}
 	p := NewPreHook(nil, home, wsRoot)
 	t.Chdir(proj)
-	if merged := p.loadRules(proj, hook.HookContext{}, true); merged != body {
+	if merged := p.loadRules(proj, hook.HookContext{}, true, false); merged != body {
 		t.Fatalf("merged body drifted: %d runes, want the whole 10000-rune file", utf8.RuneCountInString(merged))
 	}
 	sources := p.InstructionSources()
@@ -316,7 +316,7 @@ func TestRulesBodyLimitCountsRunes(t *testing.T) {
 	cfg.Agents.Defaults.ContextInject.MaxPreHookRulesChars = 100
 	p := NewPreHook(cfg, home, wsRoot)
 	t.Chdir(proj)
-	merged := p.loadRules(proj, hook.HookContext{}, true)
+	merged := p.loadRules(proj, hook.HookContext{}, true, false)
 	if !utf8.ValidString(merged) || strings.ContainsRune(merged, '\uFFFD') {
 		t.Fatalf("merged body is not clean UTF-8")
 	}

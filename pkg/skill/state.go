@@ -149,8 +149,32 @@ func stateRootForWorkspace(home, workspaceRoot string) string {
 	return mainWorkspaceRoot(home)
 }
 
+// DiscoverForWorkspace lists the skills this workspace sees, with the project
+// layer included only when the project is trusted by its recorded decision.
 func DiscoverForWorkspace(home string, workspaceRoot string, projectRoot string) ([]Entry, error) {
-	layers := skillLayers(home, workspaceRoot, TrustedProjectSkillRoots(home, projectRoot))
+	return discoverSkillEntries(home, workspaceRoot, projectRoot, false)
+}
+
+// DiscoverForTrustedProject is DiscoverForWorkspace for a caller that already
+// resolved the project's trust decision — a batch project is trusted by its
+// type and has no record (owner 2026-11-25). It includes the project layer
+// without reading the store; every other layer is identical.
+func DiscoverForTrustedProject(home string, workspaceRoot string, projectRoot string) ([]Entry, error) {
+	return discoverSkillEntries(home, workspaceRoot, projectRoot, true)
+}
+
+func discoverSkillEntries(home string, workspaceRoot string, projectRoot string, trusted bool) ([]Entry, error) {
+	projectRoots := TrustedProjectSkillRoots(home, projectRoot)
+	if trusted {
+		// The same normalization TrustedProjectSkillRoots does, minus the
+		// store read: the caller already has the decision.
+		root := CanonicalSkillPath(strings.TrimSpace(projectRoot))
+		if root == "" {
+			root = strings.TrimSpace(projectRoot)
+		}
+		projectRoots = projectSkillRootsForRoot(root)
+	}
+	layers := skillLayers(home, workspaceRoot, projectRoots)
 	origins := layerOrigins(layers)
 	stateRoot := stateRootForWorkspace(home, workspaceRoot)
 	st, err := Load(stateRoot)

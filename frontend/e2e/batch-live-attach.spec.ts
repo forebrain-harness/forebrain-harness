@@ -71,7 +71,7 @@ async function startTask(page: Page): Promise<StartedTask> {
   mkdirSync(root, { recursive: true })
   scratch.push(root)
   const created = await page.request.post('/api/v1/projects', {
-    data: { name: `e2e-184-live-${Date.now().toString(36)}`, root, project_type: 'batch', trust: true },
+    data: { name: `e2e-184-live-${Date.now().toString(36)}`, root, project_type: 'batch' },
   })
   expect(created.ok(), await created.text()).toBeTruthy()
   const project = (await created.json()) as { id: string }

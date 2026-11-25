@@ -1373,3 +1373,34 @@ func TestFullAccessBypassesForcedShellApproval(t *testing.T) {
 		t.Fatalf("pending=%v err=%v, want the call to run unasked under full access", pending, err)
 	}
 }
+
+// TestPermPathsCarryTheBatchTrustDecision pins that the permission paths a batch
+// conversation reads say what its type decides (owner 2026-11-25): a batch
+// project's rules file is reachable with no trust record, and every other type
+// asks the store as it always did.
+func TestPermPathsCarryTheBatchTrustDecision(t *testing.T) {
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{Deps: (&Deps{Home: t.TempDir(), ProjectRoot: project}).WithConfig(&appcfg.Root{})}
+
+	if got := r.permPaths(); got.ProjectTrusted {
+		t.Fatal("a coding conversation must not carry a batch trust decision")
+	}
+	if _, ok := safety.ProjectSettingsPath(r.permPaths()); ok {
+		t.Fatal("an untrusted coding conversation must have no project rules file")
+	}
+
+	r.Deps.ProjectType = state.ProjectTypeBatch
+	if got := r.permPaths(); !got.ProjectTrusted {
+		t.Fatal("a batch conversation must carry the trust its type decides")
+	}
+	path, ok := safety.ProjectSettingsPath(r.permPaths())
+	if !ok {
+		t.Fatal("a batch conversation's project rules file must be reachable without a record")
+	}
+	if want := filepath.Join(project, ".forebrain", "safety.json"); path != want {
+		t.Fatalf("rules path = %q, want %q", path, want)
+	}
+}

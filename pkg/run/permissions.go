@@ -788,7 +788,12 @@ func (r *Runner) permRuntimeGet() *safety.Runtime {
 }
 
 func (r *Runner) permPaths() safety.Paths {
-	return safety.Paths{Home: r.Home, WorkspaceRoot: r.workspaceRoot(), ProjectRoot: r.ProjectRoot}
+	return safety.Paths{
+		Home: r.Home, WorkspaceRoot: r.workspaceRoot(), ProjectRoot: r.ProjectRoot,
+		// A batch conversation runs on its project's own rules with no trust
+		// record: a batch project is trusted by its type (owner 2026-11-25).
+		ProjectTrusted: r.ProjectType() == state.ProjectTypeBatch,
+	}
 }
 
 // fullAccessEnabled reports whether this conversation runs with full access:

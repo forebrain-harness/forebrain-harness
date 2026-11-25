@@ -574,7 +574,7 @@ func (s *Server) mcpProjectWriteLayer(ctx context.Context, projectID string) (mc
 	if err != nil {
 		return mcpWriteLayer{}, mcpNotFound("project not found")
 	}
-	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	launch, err := process.ProjectLaunchContext(s.Home, p)
 	if err != nil {
 		return mcpWriteLayer{}, mcpBadRequest("project could not be resolved")
 	}

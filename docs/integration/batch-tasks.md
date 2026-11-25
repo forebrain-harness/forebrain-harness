@@ -14,7 +14,7 @@
 
 | 概念 | 说明 |
 |---|---|
-| **项目（project）** | 类型为 `batch` 的项目。它的根目录就是任务工作区的父目录；任务、执行、生成物都挂在它下面。一个 batch 项目用**信任（trust）**创建，因为跑批要在项目自己的技能与 MCP 上无人值守地运行。 |
+| **项目（project）** | 类型为 `batch` 的项目。它的根目录就是任务工作区的父目录；任务、执行、生成物都挂在它下面。跑批项目**不需要信任记录**：它的技能、MCP 与项目规则按类型直接加载（2026-11-25 起），建项目时无需也不写 `trust`。 |
 | **任务（task）** | 一条业务任务，`id` 形如 `tsk-…`。任务保存**任务内容**（首条消息固定下来的原始指令）、标题、业务方自己的 `external_ref`、来源（`api`/`web`/`cron`/`channel`）。 |
 | **执行（execution）** | 任务的一次运行：**一个执行 = 一个新会话 + 一个新工作区**。`seq` 从 1 开始递增，`session_id` 就是这次执行所用的会话 id。 |
 | **任务工作区** | `<项目根>/tasks/<任务ID>/<序号>/`，内含 `inputs/`（业务方上传的附件，重启执行时从上一次复制过来）、`outputs/`（交付物）、`.work/`（中间文件）。**执行期间模型的工作目录就是它**。 |
@@ -76,7 +76,7 @@ Host: 127.0.0.1:8787
 Authorization: Bearer <token>
 Content-Type: application/json
 
-{"name":"月度报表","root":"/srv/batch/monthly","trust":true,"project_type":"batch"}
+{"name":"月度报表","root":"/srv/batch/monthly","project_type":"batch"}
 ```
 
 ```json
@@ -85,13 +85,13 @@ Content-Type: application/json
   "name": "月度报表",
   "root": "/srv/batch/monthly",
   "project_type": "batch",
-  "trust_recorded": true,
+  "trust_recorded": false,
   "created_at": 1793000000,
   "updated_at": 1793000000
 }
 ```
 
-> 建 batch 项目必须带 `"trust": true`，否则返回 `409 {"error":"batch_requires_trust"}`。
+> 建 batch 项目不需要 `"trust"`：跑批项目按类型加载自己的技能与 MCP，不会被信任门拦住。请求里显式带 `"trust": true` 时，这条显式决定照旧写进信任存储（`trust_recorded` 随之为 `true`）。
 
 websocket 握手用同一个 token（浏览器会自动带上 cookie；服务端之间的调用请显式带 header）：
 
@@ -491,7 +491,6 @@ Authorization: Bearer <token>
 | `400 task_origin_invalid` | `origin` 不是 `api` / `web` |
 | `404 task_not_found` | 任务不存在或不属于本主代理 |
 | `409 batch_project_uses_tasks` | batch 项目不能在 `/api/chat/sessions` 建会话 |
-| `409 batch_requires_trust` | 建 batch 项目没带 `trust: true` |
 | `409 batch_takes_no_input` | 对跑批会话的 `POST /api/runs/{run_id}/input`（插话/排队） |
 
 **生成物（146）**：`artifact_not_found`（生成物不存在或不属于该会话）、

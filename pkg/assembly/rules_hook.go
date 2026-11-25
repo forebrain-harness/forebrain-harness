@@ -92,7 +92,10 @@ func (p *PreHook) run(ctx context.Context, phase string, hc hook.HookContext, te
 	// collaboration preferences; a batch conversation runs unattended, so it
 	// inherits the project rules alone.
 	agentFiles := tool.ProjectTypeFromContext(ctx) != state.ProjectTypeBatch
-	rules := p.loadRules(wd, hc, agentFiles)
+	// A batch turn runs on its project's own rules with no trust record: a
+	// batch project is trusted by its type (owner 2026-11-25).
+	trustByRule := tool.ProjectTypeFromContext(ctx) == state.ProjectTypeBatch
+	rules := p.loadRules(wd, hc, agentFiles, trustByRule)
 	if strings.TrimSpace(rules) == "" {
 		// No rules is not the same as no addendum: the task context still has
 		// to reach the model.
@@ -124,8 +127,8 @@ func (p *PreHook) workspaceRoot() string {
 	return home.WorkspaceDir(p.Home)
 }
 
-func (p *PreHook) loadRules(wd string, hc hook.HookContext, agentFiles bool) string {
-	return p.buildRules(wd, agentFiles).merged
+func (p *PreHook) loadRules(wd string, hc hook.HookContext, agentFiles, trustByRule bool) string {
+	return p.buildRules(wd, agentFiles, trustByRule).merged
 }
 
 // InstructionSources reports where the session's merged rules body comes from,
@@ -139,7 +142,10 @@ func (p *PreHook) InstructionSources() []RuleSource {
 	}
 	// /status-style views have no conversation context; they report the full
 	// source list the interactive injection would build.
-	return p.buildRules(wd, true).sources
+	// No conversation context here, so no type either: the report reads the
+	// recorded decision, and a batch project without one reports "project not
+	// trusted" even though a batch turn loads its rules (maintenance note).
+	return p.buildRules(wd, true, false).sources
 }
 
 // rulesWorkingDir is the directory the rules body is resolved against: the
@@ -168,8 +174,9 @@ func rulesWorkingDir(ctx context.Context) (string, bool) {
 // agentFiles is false for a batch conversation, which inherits the project
 // rules but not the workspace persona files (AGENTS/SOUL/USER.md): those are
 // personal collaboration preferences, and nobody is collaborating with a
-// batch task.
-func (p *PreHook) buildRules(wd string, agentFiles bool) rulesBuild {
+// batch task. trustByRule is true for a batch conversation, whose project is
+// trusted by its type: no record exists to read (owner 2026-11-25).
+func (p *PreHook) buildRules(wd string, agentFiles, trustByRule bool) rulesBuild {
 	maxBody := 120000
 	// Workspace rules always chain up the directory tree (git-root → CWD).
 	chain := true
@@ -179,8 +186,8 @@ func (p *PreHook) buildRules(wd string, agentFiles bool) rulesBuild {
 	}
 	root := p.workspaceRoot()
 	project, projectErr := safety.Resolve(wd)
-	trusted := false
-	if projectErr == nil {
+	trusted := trustByRule
+	if projectErr == nil && !trusted {
 		trusted, projectErr = safety.IsTrusted(p.Home, project)
 	}
 	projectKey := ""
