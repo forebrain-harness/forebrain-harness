@@ -174,16 +174,22 @@ export function headerTargetedWord(
 
 /**
  * The suffix word in the reader's language: a read's line span, a search's
- * quoted match, the scope a memory search ran in. Anything else — an MCP
- * tool's own `参数: 值 · …` summary, a field name of an outside tool — is
- * external wording and stays as it came.
+ * quoted match, the scope a memory search ran in, a readiness wait's goal.
+ * Anything else — an MCP tool's own `参数: 值 · …` summary, a field name of an
+ * outside tool — is external wording and stays as it came.
  */
 export function headerSuffixWords(suffix: string, lang: 'zh' | 'en'): string {
   if (lang === 'en' || !suffix) return suffix
+  // A process start that carries a readiness wait blocks the call, so its head
+  // reads "Waiting for <cmd> to be ready" (pkg/tool/header_parts.go): 直到就绪
+  // completes 正在等待 / 已等待 in both tenses.
+  if (suffix === 'to be ready') return '直到就绪'
   let match = suffix.match(/^lines (.+)$/)
   if (match) return `第 ${match[1]} 行`
   match = suffix.match(/^matching (“.*”)$/)
   if (match) return `匹配 ${match[1]}`
+  // The readiness wait a process card used to carry ("wait log"): still on rows
+  // stored before that head change, so the rule stays reachable.
   match = suffix.match(/^wait (.+)$/)
   if (match) return `等待 ${match[1]}`
   match = suffix.match(/^in (.+)$/)

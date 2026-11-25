@@ -35,6 +35,32 @@ describe('ToolHeader', () => {
     expect(wrapper.get('.ttl .sfx').text()).toBe('lines 1-9')
   })
 
+  it('composes a process readiness wait in Chinese: 正在等待 <cmd> 直到就绪', () => {
+    // A start that carries a readiness wait blocks the call, so its head reads
+    // "Waiting for <cmd> to be ready" (plan 380, pkg/tool/header_parts.go).
+    const waiting = head({
+      parts: { action: 'Waiting for', target: 'npm run dev', suffix: 'to be ready', duration: '4m 48s' },
+      lang: 'zh',
+      status: 'done',
+      statusLabel: 'done',
+    })
+    const ttl = waiting.get('.ttl')
+    expect(ttl.find('.verb').text()).toBe('正在等待')
+    expect(ttl.find('.tgt').text()).toBe('npm run dev')
+    expect(ttl.find('.sfx').text()).toBe('直到就绪')
+    expect(waiting.get('.dur').text()).toBe('4m 48s')
+
+    // The settled shape reads the same, in the past tense.
+    const waited = head({
+      parts: { action: 'Waited for', target: 'npm run dev', suffix: 'to be ready', duration: '15s' },
+      lang: 'zh',
+      status: 'done',
+      statusLabel: 'done',
+    })
+    expect(waited.get('.ttl .verb').text()).toBe('已等待')
+    expect(waited.get('.ttl .sfx').text()).toBe('直到就绪')
+  })
+
   it('draws a peer send head with the recipient inside the sentence in Chinese', () => {
     // Chinese puts the recipient before the verb (已向 X 发送消息), so the word
     // is split around the target instead of trailing it.

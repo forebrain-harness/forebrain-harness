@@ -61,6 +61,8 @@ describe('the card head vocabulary', () => {
     expect(headerActionWord('Failed to list processes', 'zh')).toBe('列出进程失败')
     expect(headerSuffixWords('wait log', 'zh')).toBe('等待 log')
     expect(headerSuffixWords('wait tcp', 'zh')).toBe('等待 tcp')
+    // A start that carries a readiness wait says what it waits for (plan 380).
+    expect(headerSuffixWords('to be ready', 'zh')).toBe('直到就绪')
   })
 
   it('words the three suffix shapes and leaves everything else alone', () => {
@@ -71,5 +73,6 @@ describe('the card head vocabulary', () => {
     // An MCP tool's own field summary is external wording — never translated.
     expect(headerSuffixWords('repo: forebrain-harness limit: 10', 'zh')).toBe('repo: forebrain-harness limit: 10')
     expect(headerSuffixWords('lines 15-20', 'en')).toBe('lines 15-20')
+    expect(headerSuffixWords('to be ready', 'en')).toBe('to be ready')
   })
 })
