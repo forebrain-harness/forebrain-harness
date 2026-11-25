@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -565,5 +567,194 @@ func TestOpenSucceedsWithoutASandbox(t *testing.T) {
 	defer env.Close()
 	if env.Runner == nil {
 		t.Fatal("Open without a sandbox produced no runner")
+	}
+}
+
+// seedProjectRow registers a project in the home's state database the way the
+// projects API does, before a process opens on that home. The row is written
+// through its own handle and closed, so the open below owns the database.
+func seedProjectRow(t *testing.T, home, agentID string, in state.CreateProjectInput) state.Project {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := state.OpenStateForTest(context.Background(), state.StateDBPath(home))
+	if err != nil {
+		t.Fatalf("open state for seeding: %v", err)
+	}
+	project := seedProjectRowOn(t, db, home, agentID, in)
+	if cerr := db.Close(); cerr != nil {
+		t.Fatalf("close seeding state: %v", cerr)
+	}
+	return project
+}
+
+// seedProjectRowOn is seedProjectRow for a database someone already holds open.
+func seedProjectRowOn(t *testing.T, db *sql.DB, home, agentID string, in state.CreateProjectInput) state.Project {
+	t.Helper()
+	root, err := state.ValidateProjectRoot(home, in.Root)
+	if err != nil {
+		t.Fatalf("validate project root: %v", err)
+	}
+	in.Root = root
+	in.ProjectKey = state.ProjectKeyForRoot(root)
+	project, err := state.NewProjectStore(db, agentID).Create(context.Background(), in)
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	return project
+}
+
+// TestBatchLaunchFolderKeepsItsBaseRuntimeTrusted pins the base-runtime half of
+// the batch exemption (owner 2026-11-25): the terminal started inside a
+// registered batch project reads as trusted without a record, so its sandbox is
+// writable and the project's skills load. Without it the process would fall back
+// to the undecided context — read-only, no project resources — which is the
+// state the exemption exists to prevent.
+func TestBatchLaunchFolderKeepsItsBaseRuntimeTrusted(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	home := t.TempDir()
+	projectDir := t.TempDir()
+	cfg := activeAgentTestConfig()
+	agentID := activePrimaryAgent(home, &cfg).ID
+	proj := seedProjectRow(t, home, agentID, state.CreateProjectInput{
+		Name: "batch-launch", Root: projectDir, ProjectType: state.ProjectTypeBatch,
+	})
+	if trusted, err := safety.IsTrusted(home, safety.Project{Root: proj.Root}); err != nil || trusted {
+		t.Fatalf("the fixture must start without a trust record: %v %v", trusted, err)
+	}
+	if err := os.MkdirAll(filepath.Join(proj.Root, ".forebrain", "skills", "demo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := Open(ctx, OpenOptions{
+		Home: home, LaunchDir: proj.Root, ExactLaunchRoot: true, Config: &cfg,
+		SessionSource: memory.SessionSourceTUI,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	resetProcessWideInstalls(t)
+	t.Cleanup(func() { env.Close() })
+
+	if !env.LaunchProject.IsTrusted() {
+		t.Fatalf("launch trust = %q, want trusted: a batch project needs no record", env.LaunchProject.TrustLevel)
+	}
+	if got := env.deps().Config().SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
+		t.Fatalf("sandbox = %q, want workspace-write rather than the undecided read-only", got)
+	}
+	roots := skill.AgentSkillRoots(home, env.deps().WorkspaceRoot, env.LaunchProject)
+	want := filepath.Join(proj.Root, ".forebrain", "skills")
+	found := false
+	for _, r := range roots {
+		if r == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("skill roots %v do not include the project's %v", roots, want)
+	}
+
+	// A plain undecided folder is unchanged: still read-only, still no trust.
+	plain := t.TempDir()
+	other, err := Open(ctx, OpenOptions{
+		Home: t.TempDir(), LaunchDir: plain, ExactLaunchRoot: true,
+		Config: &cfg, SessionSource: memory.SessionSourceTUI,
+	})
+	if err != nil {
+		t.Fatalf("Open (plain folder): %v", err)
+	}
+	resetProcessWideInstalls(t)
+	t.Cleanup(func() { other.Close() })
+	if got := other.deps().Config().SandboxMode; got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("an undecided folder's sandbox = %q, want read-only", got)
+	}
+}
+
+// TestBatchLaunchFolderSpelledThroughASymlinkTrusts pins the lookup the launch
+// exemption does: the rows hold canonical roots, and the terminal may have been
+// started through a link, so the row has to be found anyway.
+func TestBatchLaunchFolderSpelledThroughASymlinkTrusts(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	home := t.TempDir()
+	projectDir := t.TempDir()
+	cfg := activeAgentTestConfig()
+	agentID := activePrimaryAgent(home, &cfg).ID
+	proj := seedProjectRow(t, home, agentID, state.CreateProjectInput{
+		Name: "batch-link", Root: projectDir, ProjectType: state.ProjectTypeBatch,
+	})
+	link := filepath.Join(t.TempDir(), "spelled-differently")
+	if err := os.Symlink(proj.Root, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	env, err := Open(ctx, OpenOptions{
+		Home: home, LaunchDir: link, ExactLaunchRoot: true, Config: &cfg,
+		SessionSource: memory.SessionSourceTUI,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	resetProcessWideInstalls(t)
+	t.Cleanup(func() { env.Close() })
+
+	if !env.LaunchProject.IsTrusted() {
+		t.Fatalf("launch trust = %q, want trusted through the link", env.LaunchProject.TrustLevel)
+	}
+	if got := env.deps().Config().SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
+		t.Fatalf("sandbox = %q, want workspace-write", got)
+	}
+}
+
+// TestRegisteredInnerProjectKeepsTheLaunchBoundaryItHad is the guard beside the
+// exemption: a registered project that has no .git of its own and sits inside a
+// checkout keeps the boundary the launch resolution walked up to — the value it
+// resolved to before the batch exemption existed. Replacing the context with the
+// registered root would move the process's project space, so the substitution
+// only happens for a batch project.
+func TestRegisteredInnerProjectKeepsTheLaunchBoundaryItHad(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	home := t.TempDir()
+	checkout := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(checkout, "services", "api")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := activeAgentTestConfig()
+	agentID := activePrimaryAgent(home, &cfg).ID
+	proj := seedProjectRow(t, home, agentID, state.CreateProjectInput{
+		Name: "inner", Root: inner, ProjectType: state.ProjectTypeCoding,
+	})
+	// What the launch resolution produced before this change: the walk-up
+	// boundary, undecided.
+	before, err := safety.ResolveProjectContext(home, inner)
+	if err != nil {
+		t.Fatalf("ResolveProjectContext: %v", err)
+	}
+
+	env, err := Open(ctx, OpenOptions{
+		Home: home, LaunchDir: inner, ExactLaunchRoot: false, Config: &cfg,
+		SessionSource: memory.SessionSourceTUI,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	resetProcessWideInstalls(t)
+	t.Cleanup(func() { env.Close() })
+
+	if got := env.LaunchProject.Project.Root; got != before.Project.Root {
+		t.Fatalf("launch root = %q, want the boundary resolution gives it %q (row root %q)", got, before.Project.Root, proj.Root)
+	}
+	if got := env.LaunchProject.TrustLevel; got != before.TrustLevel {
+		t.Fatalf("launch trust = %q, want %q", got, before.TrustLevel)
+	}
+	if got := env.deps().Config().SandboxMode; got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("sandbox = %q, want read-only", got)
 	}
 }

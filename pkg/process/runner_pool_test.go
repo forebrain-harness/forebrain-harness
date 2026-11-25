@@ -14,6 +14,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -1195,6 +1196,85 @@ func TestEnvironmentBindConversationBuildsTheProjectRunner(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("project runner MCPServers = %+v, want the global entry", r.MCPServers)
+	}
+}
+
+// TestBatchProjectRunnerIsTrustedWithoutARecord pins the batch exemption (owner
+// 2026-11-25): a batch project's tasks run unattended on the project's own
+// skills, MCP servers and rules, so its launch context reads as trusted by its
+// type alone. Nothing wrote a trust record here — which is the point: the
+// exemption is a property of the type, not of a file.
+func TestBatchProjectRunnerIsTrustedWithoutARecord(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+
+	root := t.TempDir()
+	proj, err := projects.Create(ctx, state.CreateProjectInput{
+		Name: "batch", Root: root, ProjectKey: state.ProjectKeyForRoot(root),
+		ProjectType: state.ProjectTypeBatch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectMCP(t, root, "mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt\n")
+	if trusted, err := safety.IsTrusted(env.Root, safety.Project{Root: root}); err != nil || trusted {
+		t.Fatalf("the fixture must start without a trust record: %v %v", trusted, err)
+	}
+
+	// The project's entries run unconfirmed, which is what a batch task needs;
+	// the gate being open is what lets them be offered at all.
+	launch, err := ProjectLaunchContext(env.Root, proj)
+	if err != nil {
+		t.Fatalf("ProjectLaunchContext: %v", err)
+	}
+	if !launch.IsTrusted() {
+		t.Fatalf("a batch project's launch context reads as %q, want trusted", launch.TrustLevel)
+	}
+	ws := env.deps().WorkspaceRoot
+	if err := SetProjectServersAutoAllow(ws, launch, true); err != nil {
+		t.Fatalf("auto-allow: %v", err)
+	}
+
+	pool := NewRunnerPool(env, 4)
+	defer pool.Close()
+	// No session row: the entry follows the project's own type, which is the
+	// batch project a task belongs to.
+	if err := pool.BindSession(ctx, "sess-batch", proj.ID); err != nil {
+		t.Fatal(err)
+	}
+	runner, bound := pool.BoundRunnerForSession(ctx, "sess-batch")
+	if !bound || runner == nil || runner == env.Runner {
+		t.Fatalf("the batch project has no project runner (bound=%v runner=%p base=%p)", bound, runner, env.Runner)
+	}
+	if !runner.LaunchProject.IsTrusted() {
+		t.Fatalf("the runner's launch trust = %q, want trusted without a record", runner.LaunchProject.TrustLevel)
+	}
+	if got := runner.Config().SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
+		t.Fatalf("sandbox = %q, want workspace-write: a batch task writes inside its project", got)
+	}
+	found := false
+	for _, srv := range runner.MCPServers {
+		if strings.EqualFold(strings.TrimSpace(srv.Name), "projtool") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the project's MCP entry did not load: %+v", runner.MCPServers)
+	}
+	roots := skill.AgentSkillRoots(env.Root, ws, runner.LaunchProject)
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonicalRoot, ".forebrain", "skills")
+	hasSkillRoot := false
+	for _, r := range roots {
+		if r == want {
+			hasSkillRoot = true
+		}
+	}
+	if !hasSkillRoot {
+		t.Fatalf("skill roots %v do not include the project's %v", roots, want)
 	}
 }
 

@@ -585,6 +585,38 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// resolve it once here. It reads the composed configuration.
 	activeAgent := activePrimaryAgent(root, cfgRoot)
 
+	if !opts.NoLaunchProject {
+		// A launch folder that is a batch project needs no trust record (owner
+		// 2026-11-25). Any other folder keeps the context resolved above: its
+		// boundary may come from walking up to a .git marker, and a registered
+		// root never walks up, so replacing it would move the project.
+		projects := state.NewProjectStore(sqlDB, activeAgent.ID)
+		p, ok, perr := projects.GetByRoot(ctx, launchProject.Project.Root)
+		if perr == nil && !ok {
+			// The launch directory may be spelled through a symlink, and the rows
+			// hold canonical roots: look it up the way registration wrote it.
+			// GetByRoot only trims; CanonicalPath also resolves symlinks.
+			if registered, rerr := safety.ResolveRegisteredProject(launchDir); rerr == nil {
+				p, ok, perr = projects.GetByRoot(ctx, registered.Root)
+			}
+		}
+		if perr == nil && ok && state.NormalizeProjectType(p.ProjectType) == state.ProjectTypeBatch {
+			launch, lerr := ProjectLaunchContext(root, p)
+			if lerr != nil {
+				// Same handling as the launch-context resolution above: the
+				// startup continues on the context it has.
+				slog.Warn("batch project trust lookup failed; using the resolved launch context", "err", lerr)
+			} else {
+				launchProject = launch
+				// Everything derived from the launch project's trust decision —
+				// the base runner's sandbox and approval policy, the LSP tool
+				// decision, the session defaults — is derived again, or the
+				// process would start read-only and load no project resources.
+				cfgRoot = effectiveFor(loaded, launchProject)
+			}
+		}
+	}
+
 	var shutdownTel func(context.Context) error
 	if opts.EnableTelemetry {
 		shutdownTel, _ = telemetry.InitFromEnv("forebrain")

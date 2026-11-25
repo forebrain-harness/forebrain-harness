@@ -153,6 +153,18 @@ func (env *Environment) AdoptLaunchTrust() error {
 	if err != nil {
 		return err
 	}
+	// A launch folder that is a batch project reads as trusted by its type, the
+	// way the startup resolution decides it (owner 2026-11-25): it carries no
+	// trust record and needs none. Any other folder keeps the decision re-read
+	// above, unchanged.
+	if env.SQL != nil {
+		if p, ok, perr := state.NewProjectStore(env.SQL, env.deps().AgentName).GetByRoot(context.Background(), env.LaunchProject.Project.Root); perr == nil && ok &&
+			state.NormalizeProjectType(p.ProjectType) == state.ProjectTypeBatch {
+			if batch, berr := ProjectLaunchContext(env.Root, p); berr == nil {
+				launch = batch
+			}
+		}
+	}
 	env.LaunchProject = launch
 	env.deps().LaunchProject = launch
 	if env.Runner != nil && env.Runner.Deps != env.Deps {

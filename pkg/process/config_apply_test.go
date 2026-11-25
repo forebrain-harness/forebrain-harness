@@ -520,3 +520,81 @@ func TestProjectTypeInputRejectsAnUnknownType(t *testing.T) {
 		t.Fatal("an unknown project type must be refused")
 	}
 }
+
+// TestAdoptLaunchTrustResolvesABatchLaunchFolderByItsType pins the re-read half
+// of the batch exemption (owner 2026-11-25): AdoptLaunchTrust runs after a trust
+// answer inside the TUI, and for a launch folder whose project is a batch
+// project it must resolve by type — otherwise answering a question about an
+// unrelated folder would drop the process back to the undecided read-only
+// sandbox.
+func TestAdoptLaunchTrustResolvesABatchLaunchFolderByItsType(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	ctx := context.Background()
+	home := t.TempDir()
+	dir := t.TempDir()
+	cfg := activeAgentTestConfig()
+
+	env, err := Open(ctx, OpenOptions{
+		Home: home, LaunchDir: dir, ExactLaunchRoot: true, Config: &cfg,
+		SessionSource: memory.SessionSourceTUI,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	resetProcessWideInstalls(t)
+	defer env.Close()
+
+	if level := env.LaunchProject.TrustLevel; level != safety.LevelUnknown {
+		t.Fatalf("trust level after Open = %q, want undecided", level)
+	}
+	if got := env.deps().Config().SandboxMode; got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("sandbox after Open = %q, want read-only while undecided", got)
+	}
+
+	// The folder is registered as a batch project while the process runs.
+	seedProjectRowOn(t, env.SQL, home, activePrimaryAgent(home, &cfg).ID, state.CreateProjectInput{
+		Name: "batch-launch", Root: dir, ProjectType: state.ProjectTypeBatch,
+	})
+	if err := env.AdoptLaunchTrust(); err != nil {
+		t.Fatalf("AdoptLaunchTrust: %v", err)
+	}
+	if !env.LaunchProject.IsTrusted() {
+		t.Fatalf("trust level after AdoptLaunchTrust = %q, want trusted without a record", env.LaunchProject.TrustLevel)
+	}
+	if got := env.deps().Config().SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
+		t.Fatalf("sandbox after AdoptLaunchTrust = %q, want workspace-write", got)
+	}
+
+	// A launch folder that is a registered non-batch project keeps the trust it
+	// re-reads: the exemption does not reach it.
+	plainHome := t.TempDir()
+	checkout := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(checkout, "services", "api")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedProjectRow(t, plainHome, activePrimaryAgent(plainHome, &cfg).ID, state.CreateProjectInput{
+		Name: "inner", Root: inner, ProjectType: state.ProjectTypeCoding,
+	})
+	other, err := Open(ctx, OpenOptions{
+		Home: plainHome, LaunchDir: inner, ExactLaunchRoot: false, Config: &cfg,
+		SessionSource: memory.SessionSourceTUI,
+	})
+	if err != nil {
+		t.Fatalf("Open (inner project): %v", err)
+	}
+	resetProcessWideInstalls(t)
+	defer other.Close()
+	if err := safety.MarkTrusted(plainHome, safety.Project{Root: inner}); err != nil {
+		t.Fatalf("MarkTrusted: %v", err)
+	}
+	if err := other.AdoptLaunchTrust(); err != nil {
+		t.Fatalf("AdoptLaunchTrust (inner project): %v", err)
+	}
+	if other.LaunchProject.IsTrusted() {
+		t.Fatalf("the checkout is still undecided and must not become trusted: %q", other.LaunchProject.TrustLevel)
+	}
+}

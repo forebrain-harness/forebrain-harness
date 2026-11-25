@@ -208,6 +208,23 @@ func (env *Environment) BindConversation(ctx context.Context, sessionID, project
 	return r, nil
 }
 
+// ProjectLaunchContext resolves a registered project's launch context the way
+// its type needs (owner 2026-11-25): a batch project carries no trust decision
+// and needs none — its tasks run unattended on the project's skills, MCP
+// servers and rules — so it reads as trusted without a record. Any other
+// project reads its recorded decision. Callers freeze the result, as every
+// launch context is. A context that did not resolve is never trusted.
+func ProjectLaunchContext(home string, project state.Project) (safety.ProjectContext, error) {
+	launch, err := safety.ResolveRegisteredContext(home, project.Root)
+	if err != nil {
+		return launch, err
+	}
+	if state.NormalizeProjectType(project.ProjectType) == state.ProjectTypeBatch {
+		launch.TrustLevel = safety.LevelTrusted
+	}
+	return launch, nil
+}
+
 // RebindConversation binds sessionID to projectID again, dropping the binding it
 // already holds. It is for a conversation that has no session row yet: an
 // earlier binding followed the project's type at that moment, and a type edit
@@ -1023,7 +1040,7 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		// root, so the sessions run inside it too. Resolving it as a launch
 		// directory would walk up to an enclosing checkout and run a subdirectory
 		// project under the checkout's skills, MCP servers and trust decision.
-		resolved, err := safety.ResolveRegisteredContext(env.Root, project.Root)
+		resolved, err := ProjectLaunchContext(env.Root, project)
 		if err != nil {
 			return nil, fmt.Errorf("runner pool: resolve project %s: %w", project.Root, err)
 		}
