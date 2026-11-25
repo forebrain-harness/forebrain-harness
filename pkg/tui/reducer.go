@@ -5738,7 +5738,22 @@ func (r *Renderer) paintViewportLocked() {
 	}
 	r.vpIMERepairDue = false
 	repainted := make([]bool, len(rows))
-	for i, content := range rows {
+	// The rows go out bottom row first. macOS hands a write of more than
+	// 1024 bytes to the terminal in 1024-byte pieces and the terminal acts on
+	// each piece as it arrives, so between two pieces of one frame the
+	// hardware cursor rests where the first piece's last byte left it. An
+	// input method inserts its marked text at that cursor (see
+	// imeRepairStart), and on the screen's last row the insertion runs past
+	// the bottom of the screen and scrolls all of it. With the full-width
+	// footer written last, a frame whose 1024th byte fell in the footer's
+	// last cells parked the cursor exactly there, and a composition updated
+	// in that interval scrolled the screen — after which the repair from the
+	// caret down left the prompt row copied above the card. Written first,
+	// the footer ends well inside the first piece of a frame that starts on
+	// an idle tty, and the cursor can rest only where an insertion shifts a
+	// row without scrolling the screen.
+	for i := len(rows) - 1; i >= 0; i-- {
+		content := rows[i]
 		if i < len(r.vpPainted) && r.vpPainted[i] == content {
 			if !overdrawn[i] {
 				continue

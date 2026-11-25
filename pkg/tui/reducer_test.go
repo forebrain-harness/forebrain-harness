@@ -4043,6 +4043,19 @@ func addressedRows(paint string) map[int]bool {
 	return rows
 }
 
+// addressedRowsInOrder lists the rows a paint addresses at column 1, in the
+// order it addresses them, each once.
+func addressedRowsInOrder(paint string) []int {
+	var rows []int
+	for _, m := range regexp.MustCompile(`\x1b\[(\d+);1H`).FindAllStringSubmatch(paint, -1) {
+		n, _ := strconv.Atoi(m[1])
+		if !slices.Contains(rows, n) {
+			rows = append(rows, n)
+		}
+	}
+	return rows
+}
+
 // TestIMECommitRewritesTheRowsItsMarkedTextShifted is the square bitten out of
 // the composer card's bottom-right corner. In Terminal.app, pinyin typed with
 // the caret near the right edge is inserted into the terminal's own screen at
@@ -4069,6 +4082,9 @@ func TestIMECommitRewritesTheRowsItsMarkedTextShifted(t *testing.T) {
 	// grows a row upwards and the rule stays where it was, unchanged.
 	committed := text + "修复"
 	cursor = utf8.RuneCountInString(committed)
+	r.mu.Lock()
+	before := slices.Clone(r.vpPainted)
+	r.mu.Unlock()
 	out.Reset()
 	r.RenderComposerState(ComposerRenderState{Text: committed, Cursor: &cursor})
 	paint := out.String()
@@ -4087,6 +4103,29 @@ func TestIMECommitRewritesTheRowsItsMarkedTextShifted(t *testing.T) {
 	}
 	if slices.Contains(erasedRows(paint), rule) {
 		t.Fatalf("the unchanged bottom rule must be rewritten in place, not erased, got %q", paint)
+	}
+
+	// A commit is no whole-screen repaint. Above the caret only a row whose
+	// bytes changed is addressed — the composer grew, so its rule and first
+	// text row moved up one row — never a row that still shows its shadow.
+	r.mu.Lock()
+	caret := r.vpIMEAnchor + 1
+	var unchangedAbove, written []int
+	for i, had := range before {
+		if i+1 >= caret || i >= len(r.vpPainted) || r.vpPainted[i] != had {
+			continue
+		}
+		unchangedAbove = append(unchangedAbove, i+1)
+		if addressed[i+1] {
+			written = append(written, i+1)
+		}
+	}
+	r.mu.Unlock()
+	if len(unchangedAbove) == 0 {
+		t.Fatalf("the test needs a row above the caret that kept its bytes")
+	}
+	if len(written) != 0 {
+		t.Fatalf("rows %v above the caret still show their shadow bytes and must not be written, got %q", written, paint)
 	}
 }
 
@@ -4143,8 +4182,8 @@ func TestIMEAnchorWithoutACaretIsTheStartOfTheLastRow(t *testing.T) {
 	overlay.renderViewport()
 	paint := out.String()
 
-	// The park is the frame's last act: the last row is itself written from
-	// its first column, so only what follows the final write counts.
+	// The park is the frame's last act: every row goes out before it, so only
+	// what follows the final row write counts.
 	if !strings.HasSuffix(strings.TrimSuffix(paint, "\x1b[?2026l"), fmt.Sprintf("\x1b[%d;1H", height)) {
 		t.Fatalf("a frame without a caret must leave the hardware cursor at the start of row %d, got %q", height, paint)
 	}
@@ -4181,6 +4220,57 @@ func TestIMERepairStart(t *testing.T) {
 	}
 	if got := imeRepairStart(0, nil, painted, true); got != -1 {
 		t.Errorf("with no shadow the whole frame is written anyway, want -1, got %d", got)
+	}
+}
+
+// TestViewportWritesTheLastRowFirst is the composer's prompt row copied above
+// the card, once per scroll, while pinyin was being composed. macOS hands a
+// write of more than 1024 bytes to the terminal in 1024-byte pieces and the
+// terminal acts on each piece as it arrives, so between two pieces of one
+// frame the hardware cursor rests where the first piece's last byte left it.
+// An input method inserts its marked text at that cursor, and on the screen's
+// last row the insertion runs past the bottom of the screen and scrolls all of
+// it. The blink repair ended with the full-width footer, so in a layout whose
+// 1024th byte fell in the footer's last cells the cursor was parked exactly
+// there twice a second. The last row now goes out first, well inside the first
+// piece, and no frame ends its row writes on the last row.
+func TestViewportWritesTheLastRowFirst(t *testing.T) {
+	const height = 24
+	r := newComposerRenderer(t, 80, height)
+	out := r.out.(*bytes.Buffer)
+	cursor := len("hello")
+	out.Reset()
+	r.RenderComposerState(ComposerRenderState{Text: "hello", Cursor: &cursor})
+
+	// A frame that has forgotten the screen addresses every row, the last one
+	// first.
+	want := make([]int, 0, height)
+	for row := height; row >= 1; row-- {
+		want = append(want, row)
+	}
+	r.mu.Lock()
+	r.dropPaintShadowLocked()
+	r.mu.Unlock()
+	first := paintFrame(t, r, out)
+	if rows := addressedRowsInOrder(first); !slices.Equal(rows, want) {
+		t.Fatalf("a whole-screen frame must address every row from the last up, addressed %v\npaint: %q", rows, first)
+	}
+
+	// The blink repair is the frame that scrolled the screen: it rewrites the
+	// rows from the caret down, and the caret row is the last of its writes.
+	caret := composerTextRowScreen(r, 0) + 1
+	r.mu.Lock()
+	r.vpIMERepairDue = true
+	r.mu.Unlock()
+	if rows := addressedRowsInOrder(paintFrame(t, r, out)); !slices.Equal(rows, []int{height, height - 1, caret}) {
+		t.Fatalf("the blink repair must write the rows from the last one up to the caret row %d, addressed %v\npaint: %q", caret, rows, out.String())
+	}
+
+	// A frame that changes the transcript as well keeps that order.
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "an answer", Final: true})
+	paint := paintFrame(t, r, out)
+	if rows := addressedRowsInOrder(paint); !slices.IsSortedFunc(rows, func(a, b int) int { return b - a }) {
+		t.Fatalf("every frame must address rows from the last up, addressed %v\npaint: %q", rows, paint)
 	}
 }
 
@@ -4635,7 +4725,8 @@ func TestViewportRewritesTheRowsAReplacedBoxGlyphDrewOver(t *testing.T) {
 	if rows := erasedRows(paint); !slices.Equal(rows, []int{row + 1}) {
 		t.Fatalf("only the changed row %d may be erased, erased %v", row+1, rows)
 	}
-	if rows := rewrittenInPlace(paint); !slices.Equal(rows, []int{row, row + 2}) {
+	// Bottom row first, like every frame (see TestViewportWritesTheLastRowFirst).
+	if rows := rewrittenInPlace(paint); !slices.Equal(rows, []int{row + 2, row}) {
 		t.Fatalf("the rows around the replaced border (%d and %d) must be written again, rewrote %v\npaint: %q",
 			row, row+2, rows, paint)
 	}
