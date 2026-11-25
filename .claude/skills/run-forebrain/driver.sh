@@ -119,7 +119,7 @@ PY
   echo "serving: provider=$mode port=$PORT home=$HOME_DIR"
 }
 
-cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer|subagent-ask] [answer-text] [drip-delay]
+cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer|subagent-ask|plan-review] [answer-text] [drip-delay]
   local mode="${1:-hang}"
   cmd_serve "$@"
 
@@ -326,7 +326,7 @@ case "${1:-}" in
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
   build                  build the binary into $WORK
-  start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer|subagent-ask] [answer-text] [drip-delay]
+  start [hang|stream|reply|usage|drip|toolcall|ask|shell|multishell|streamtools|tool|limit|subagent-limit|subagent-steer|subagent-ask|plan-review] [answer-text] [drip-delay]
                          launch the TUI against a fake provider (default: hang)
                          drip = stream word by word; the only mode that proves
                          streaming actually renders
@@ -372,6 +372,12 @@ usage: driver.sh <command>
                         in the subagent's view; answering it (Enter) resumes the
                         subagent, which finishes with a fixed line (the
                         answer-text argument is unused)
+                        plan-review = the planner enters plan mode, submits a
+                        plan, a reviewer answers a verdict, the engine delivers
+                        that review back to the planner and it submits the plan
+                        again — the second approval is the one showing the
+                        review's conclusion line (plan 382); the answer-text
+                        argument is unused
                          RESUME_ID=<session> resumes that session instead of
                          starting a new one (does not reset the home)
                          ENABLE_SUBAGENT=1 enables the subagent tools

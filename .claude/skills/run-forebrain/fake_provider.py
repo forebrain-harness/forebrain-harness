@@ -241,6 +241,23 @@ STREAMTOOLS_MARKER_WAIT = float(os.environ.get("FAKE_MARKER_WAIT") or 10)
 # background passes (the memory pipeline's own agents) share this provider, and
 # a request counter would let one of them take the turn's scripted answer.
 MULTISHELL_TURNS = itertools.count()
+# The "plan-review" mode walks the flow a review delivered itself back to: the
+# planner enters plan mode, submits a plan, the reviewer answers a verdict, the
+# engine hands that review to the planner, and the planner resubmits — so the
+# second approval is the one that has a review to answer (plan 382). The
+# reviewer is told apart by its system prompt (pkg/agent's planReviewerOpening),
+# never by request order: its request carries a tool table like the
+# conversation's own, so it must be answered before any turn is counted.
+PLAN_REVIEW_TURNS = itertools.count()
+PLAN_REVIEWER_MARK = "You are reviewing a plan another agent wrote"
+# The reviewer prompt's format contract, as a real review writes it: the
+# verdict plus one sentence of justification on the first line, then the body.
+PLAN_REVIEW_VERDICT = (
+    "Verdict: approve with changes — the step order is sound; one verification "
+    "command needs its expected output pinned.\n\n"
+    "## Problems\n1. The step that runs the suite does not say what it expects.\n"
+)
+PLAN_REVIEW_DONE = "done"
 # The memory pipeline's phase-one extraction parses its answer as JSON with
 # exactly these three fields, so a background answer carries that shape.
 MEMORY_STAGE1_OUTPUT = '{"raw_memory":"","rollout_summary":"","rollout_slug":null}'
@@ -580,6 +597,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if MODE == "subagent-ask":
             self.serve_subagent_ask(body)
+            return
+
+        if MODE == "plan-review":
+            self.serve_plan_review(body)
             return
 
         if MODE == "overflow-usage":
@@ -1056,6 +1077,72 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.write_event(chunk(finish="tool_calls"))
         else:
             self.write_event(chunk(delta={"role": "assistant", "content": "primary done"}))
+            self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
+    def serve_plan_review(self, body):
+        """Walk a plan from its first approval to the one a review reopened.
+
+        The reviewer is recognised by its system prompt and answered first: its
+        request carries a tool table like the conversation's own, so counting it
+        as a turn would put the planner's scripted calls on the wrong request.
+        The planner's turns then walk the flow — plan mode, the first
+        exit_plan_mode (the approval the user asks a review from), and, once the
+        review has been delivered and the planner resumed, exit_plan_mode again:
+        that second approval is the one carrying the review's conclusion line,
+        and the turn after it is the planner's closing answer. Background
+        passes get the usual harmless answer.
+        """
+        system, _ = _system_and_last_user(body)
+        if PLAN_REVIEWER_MARK in system:
+            sys.stderr.write("PLAN-REVIEW reviewer answered the verdict\n")
+            sys.stderr.flush()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.write_event(chunk(delta={"role": "assistant", "content": PLAN_REVIEW_VERDICT}))
+            self.write_event(chunk(finish="stop"))
+            self.write_raw(b"data: [DONE]\n\n")
+            self.write_raw(b"")
+            return
+        if not _is_turn_request(body):
+            self.serve_background(body)
+            return
+        nth = next(PLAN_REVIEW_TURNS)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if nth == 0:
+            self.write_event(chunk(delta={
+                "role": "assistant",
+                "content": "planning the work",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_plan_0",
+                    "type": "function",
+                    "function": {"name": "enter_plan_mode", "arguments": json.dumps({"reason": "plan the work"})},
+                }],
+            }))
+            self.write_event(chunk(finish="tool_calls"))
+        elif nth in (1, 2):
+            sys.stderr.write("PLAN-REVIEW planner submits the plan (turn %d)\n" % nth)
+            sys.stderr.flush()
+            self.write_event(chunk(delta={
+                "role": "assistant",
+                "content": "here is the plan",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_plan_%d" % nth,
+                    "type": "function",
+                    "function": {"name": "exit_plan_mode", "arguments": "{}"},
+                }],
+            }))
+            self.write_event(chunk(finish="tool_calls"))
+        else:
+            self.write_event(chunk(delta={"role": "assistant", "content": PLAN_REVIEW_DONE}))
             self.write_event(chunk(finish="stop"))
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
