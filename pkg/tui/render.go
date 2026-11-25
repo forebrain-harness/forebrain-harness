@@ -218,6 +218,26 @@ var assistantMarkdown = goldmark.New(
 	goldmark.WithExtensions(extension.Table),
 )
 
+// softWrapCaret names the cell of a soft-wrapped overlay's editable field being
+// typed at: the line it sits on in the table the overlay installed, and its
+// display column in that line. Set is false when the overlay shows no caret.
+type softWrapCaret struct {
+	Set  bool
+	Line int
+	Col  int
+}
+
+// softWrapFocus is what a soft-wrapped overlay asks the paint to keep on
+// screen: the lines [Start, End) the pointer is on with whatever is read along
+// with it, and the field caret when there is one. The zero value asks for
+// nothing. The caret outranks the range — a field taller than the overlay
+// cannot show both its first row and its last, and what is being typed is what
+// must be seen.
+type softWrapFocus struct {
+	Start, End int
+	Caret      softWrapCaret
+}
+
 type Renderer struct {
 	out io.Writer
 	err io.Writer
@@ -420,9 +440,16 @@ type Renderer struct {
 	// scrolls it into view once, the way a modal's cursor row is kept visible.
 	// A modal's option list has no cursor row, so it names the rows
 	// [overlayFocusRow, overlayFocusEnd) to keep in view the same way.
+	// The range counts the lines the overlay installed — rows, or logical
+	// lines while overlaySoftWrap — and the paint maps it onto rows.
 	overlayFocusRow     int
 	overlayFocusEnd     int
 	overlayFocusPending bool
+	// overlayFocusCaret is the cell of an overlay's editable field being typed
+	// at. The paint keeps its row on screen on every paint, over the rest of
+	// the focus range: unlike the range it is not "followed once when it moved",
+	// because the text under it re-wraps whenever the width changes.
+	overlayFocusCaret softWrapCaret
 	// slashMenuTop is the first body row the composer's slash menu shows.
 	slashMenuTop int
 	// overlayNote is a line the renderer adds under any overlay: approvals
@@ -4605,6 +4632,9 @@ func (r *Renderer) BeginComposerOverlay() {
 	r.overlayScrollOffset = 0
 	r.overlaySoftWrap = false
 	r.overlayFocusRow, r.overlayFocusPending = -1, false
+	// A field's caret describes text this overlay owned: the composer's own
+	// text, or the next modal's, has no cell it names.
+	r.overlayFocusCaret = softWrapCaret{}
 }
 
 // IsViewportMode reports whether the renderer is in the interactive alt-screen
@@ -4627,7 +4657,7 @@ func (r *Renderer) IsViewportMode() bool {
 // position the hardware cursor within the block (0-based, excluding the
 // separator); pass cursorRow < 0 to hide the cursor.
 func (r *Renderer) SetOverlayComposer(lines []string, cursorRow, cursorCol int) {
-	r.setOverlayComposer(lines, cursorRow, cursorCol, false, overlayKeepScroll, 0, 0)
+	r.setOverlayComposer(lines, cursorRow, cursorCol, false, overlayKeepScroll, 0, 0, softWrapCaret{})
 }
 
 // overlayKeepScroll is the top row SetOverlayComposerAt takes to leave the
@@ -4649,19 +4679,23 @@ const overlayKeepScroll = -1
 // key, so a deliberate scroll up through the body is not undone by the repaint
 // that follows it.
 func (r *Renderer) SetOverlayComposerAt(lines []string, cursorRow, cursorCol, top, focusStart, focusEnd int) {
-	r.setOverlayComposer(lines, cursorRow, cursorCol, false, top, focusStart, focusEnd)
+	r.setOverlayComposer(lines, cursorRow, cursorCol, false, top, focusStart, focusEnd, softWrapCaret{})
 }
 
 // SetSoftWrappingOverlayComposer installs logical modal-overlay lines that are
 // reflowed to the current viewport width on every paint. This is intended for
 // user_interaction, whose prompts and option descriptions are arbitrary model
 // text. Keeping the unwrapped source here also makes terminal resize reflow the
-// overlay without waiting for another key event.
-func (r *Renderer) SetSoftWrappingOverlayComposer(lines []string, cursorRow, cursorCol int) {
-	r.setOverlayComposer(lines, cursorRow, cursorCol, true, overlayKeepScroll, 0, 0)
+// overlay without waiting for another key event. top and the focus range are
+// SetOverlayComposerAt's, only the focus counts the logical lines installed
+// here: the paint maps them onto the rows the reflow produced and keeps those
+// on screen, so a list taller than the overlay never scrolls its pointer out
+// of sight.
+func (r *Renderer) SetSoftWrappingOverlayComposer(lines []string, cursorRow, cursorCol, top int, focus softWrapFocus) {
+	r.setOverlayComposer(lines, cursorRow, cursorCol, true, top, focus.Start, focus.End, focus.Caret)
 }
 
-func (r *Renderer) setOverlayComposer(lines []string, cursorRow, cursorCol int, softWrap bool, top, focusStart, focusEnd int) {
+func (r *Renderer) setOverlayComposer(lines []string, cursorRow, cursorCol int, softWrap bool, top, focusStart, focusEnd int, caret softWrapCaret) {
 	if r == nil {
 		return
 	}
@@ -4678,6 +4712,7 @@ func (r *Renderer) setOverlayComposer(lines []string, cursorRow, cursorCol int, 
 	r.overlayPanel = nil
 	r.overlaySoftWrap = softWrap
 	r.overlayFocusRow, r.overlayFocusEnd = focusStart, focusEnd
+	r.overlayFocusCaret = caret
 	r.overlayFocusPending = focusStart >= 0 && focusEnd > focusStart
 	if top >= 0 {
 		// Clamped against the lines just installed, so the offset the paint
@@ -4766,6 +4801,7 @@ func (r *Renderer) EndOverlay() {
 	r.overlayPanel = nil
 	r.overlaySoftWrap = false
 	r.overlayFocusRow, r.overlayFocusPending = -1, false
+	r.overlayFocusCaret = softWrapCaret{}
 	r.paintViewportLocked()
 }
 

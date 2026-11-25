@@ -3746,7 +3746,7 @@ func TestOverlayClickPositionThroughSoftWrap(t *testing.T) {
 	r := newComposerRenderer(t, 40, 24)
 	long := strings.Repeat("word ", 12)
 	r.BeginComposerOverlay()
-	r.SetSoftWrappingOverlayComposer([]string{"header", long}, -1, 0)
+	r.SetSoftWrappingOverlayComposer([]string{"header", long}, -1, 0, overlayKeepScroll, softWrapFocus{})
 
 	// Find the second painted row of the wrapped logical line.
 	var rows []int
@@ -4296,7 +4296,7 @@ func TestViewportPaintedRowsAreSelfContained(t *testing.T) {
 		options = append(options, lipgloss.NewStyle().Foreground(lipgloss.Color("214")).
 			Render(fmt.Sprintf("option %d — a long enough description that it wraps onto more than one row of the overlay area at this width", i)))
 	}
-	r.SetSoftWrappingOverlayComposer(options, -1, 0)
+	r.SetSoftWrappingOverlayComposer(options, -1, 0, overlayKeepScroll, softWrapFocus{})
 	drainCaretRequest()
 	r.mu.Lock()
 	assertRowsDrawIndependently(t, r.vpPainted)
@@ -4308,6 +4308,98 @@ func TestViewportPaintedRowsAreSelfContained(t *testing.T) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	assertRowsDrawIndependently(t, r.vpPainted)
+}
+
+// A soft-wrapped overlay names its focus in logical lines, and the width
+// decides how many rows one line covers: the paint must bring those rows, not
+// the line's number, on screen — the way an unwrapped overlay's rows are
+// brought.
+func TestSoftWrappedOverlayFocusMapsLogicalLinesOntoRows(t *testing.T) {
+	r := newComposerRenderer(t, 40, 16)
+	// Each long line wraps onto two rows at this width (38 columns hold seven
+	// of its twelve words), so the table runs: the head at row 0, six long
+	// lines over rows 1-12, the focus line at row 13. Its number in the
+	// table, 7, is no row at all.
+	long := strings.Repeat("word ", 12)
+	lines := []string{"head", long, long, long, long, long, long, "focus line", "tail line", "tail line"}
+	painted := func() []string {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return append([]string(nil), r.vpPainted...)
+	}
+
+	// The window ends on the focused line's last row, whatever row that is.
+	r.BeginComposerOverlay()
+	r.SetSoftWrappingOverlayComposer(lines, -1, 0, overlayKeepScroll, softWrapFocus{Start: 7, End: 8})
+	rows := painted()
+	if screen := paintedScreen(r); !strings.Contains(screen, "focus line") {
+		t.Fatalf("the focused line is off screen:\n%s", screen)
+	}
+	if last := strings.TrimSpace(stripANSI(rows[len(rows)-1])); last != "focus line" {
+		t.Fatalf("the focused line must end the window (minimal scroll), got %q:\n%s", last, paintedScreen(r))
+	}
+
+	// A range taller than the window keeps its start, as a panel's does: line
+	// 1's first row opens the window and the head is scrolled away. Ten rows
+	// are the overlay area of a 16-row terminal, so the row ten from the end
+	// is the window's first.
+	r.SetSoftWrappingOverlayComposer(lines, -1, 0, overlayKeepScroll, softWrapFocus{Start: 1, End: 15})
+	rows = painted()
+	screen := paintedScreen(r)
+	if strings.Contains(screen, "head") {
+		t.Fatalf("a range taller than the window must scroll its start, not the head, to the top:\n%s", screen)
+	}
+	if first := strings.TrimSpace(stripANSI(rows[len(rows)-10])); !strings.HasPrefix(first, "word") {
+		t.Fatalf("the window must open on the focused range's first row, got %q:\n%s", first, screen)
+	}
+}
+
+// The queued-approval note is chrome, not content: it must stay under the
+// window however far the overlay scrolls, and a click on it belongs to no line.
+func TestQueuedApprovalNoteStaysOutOfTheScrolledWindow(t *testing.T) {
+	r := newComposerRenderer(t, 40, 16)
+	// Short enough to stay one row at this width: the note takes the rows it
+	// needs, and a wrapped one would split the very string being looked for.
+	const note = "approval waiting"
+	lines := make([]string, 40)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("row %02d", i)
+	}
+	r.BeginComposerOverlay()
+	r.SetOverlayNote(note)
+
+	// Following a focus at the top and at the bottom both keep the note.
+	r.SetSoftWrappingOverlayComposer(lines, -1, 0, overlayKeepScroll, softWrapFocus{Start: 0, End: 1})
+	if screen := paintedScreen(r); !strings.Contains(screen, note) || !strings.Contains(screen, "row 00") {
+		t.Fatalf("the note or the focused row scrolled away at the top:\n%s", screen)
+	}
+	r.SetSoftWrappingOverlayComposer(lines, -1, 0, overlayKeepScroll, softWrapFocus{Start: 39, End: 40})
+	screen := paintedScreen(r)
+	if !strings.Contains(screen, note) || !strings.Contains(screen, "row 39") {
+		t.Fatalf("the note or the focused row scrolled away at the bottom:\n%s", screen)
+	}
+
+	// The note's row is not part of the line table: nothing to click.
+	r.mu.Lock()
+	rows := append([]string(nil), r.vpPainted...)
+	r.mu.Unlock()
+	noteRow := -1
+	for i, row := range rows {
+		if strings.Contains(stripANSI(row), note) {
+			noteRow = i
+		}
+	}
+	if noteRow < 0 {
+		t.Fatalf("the note is not painted:\n%s", paintedScreen(r))
+	}
+	// The content row directly above the note resolves, so the probe below is
+	// measuring the note and not an empty screen.
+	if line, _, ok := r.liveScreenLocked().overlayPosition(2, noteRow-1); !ok || line != 39 {
+		t.Fatalf("the row above the note should be content line 39, got line %d ok=%v:\n%s", line, ok, paintedScreen(r))
+	}
+	if line, col, ok := r.liveScreenLocked().overlayPosition(2, noteRow); ok {
+		t.Fatalf("a click on the note mapped to line %d col %d", line, col)
+	}
 }
 
 // TestSlashComposerChipLeavesTheCardBackgroundOff is the slash command typed
@@ -5744,7 +5836,7 @@ func TestOverlaySelectionMapsToLogicalLines(t *testing.T) {
 	r := newComposerRenderer(t, 40, 24)
 	long := strings.Repeat("word ", 12)
 	r.BeginComposerOverlay()
-	r.SetSoftWrappingOverlayComposer([]string{"header", long}, -1, 0)
+	r.SetSoftWrappingOverlayComposer([]string{"header", long}, -1, 0, overlayKeepScroll, softWrapFocus{})
 
 	// Find the second painted row of the wrapped logical line.
 	var rows []int

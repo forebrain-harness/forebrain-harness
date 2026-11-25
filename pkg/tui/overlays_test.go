@@ -809,6 +809,398 @@ func TestQuestionOverlayReopenResetsScrollOffset(t *testing.T) {
 	}
 }
 
+// tallQuestionForm returns a single-select form whose option list is taller
+// than the overlay area of a 16-row terminal: n options, each a one-row label
+// over a one-row description. Numbers are zero-padded so no label is a prefix
+// of another.
+func tallQuestionForm(n int) state.AskForm {
+	opts := make([]state.AskOption, n)
+	for i := range opts {
+		opts[i] = state.AskOption{
+			ID:          fmt.Sprintf("opt-%d", i),
+			Label:       fmt.Sprintf("Option %02d", i),
+			Description: fmt.Sprintf("note %02d", i),
+		}
+	}
+	return state.AskForm{
+		Title: "Pick one",
+		Questions: []state.AskQuestion{{
+			ID: "q1", Prompt: "Choose one of the options below", Options: opts,
+		}},
+	}
+}
+
+// manyQuestionForm returns an n-question single-select form: once every
+// question is answered its review lists each prompt over its answer, which
+// for n of them is taller than the overlay area of a 16-row terminal.
+func manyQuestionForm(n int) state.AskForm {
+	questions := make([]state.AskQuestion, n)
+	for i := range questions {
+		questions[i] = state.AskQuestion{
+			ID:      fmt.Sprintf("q%d", i+1),
+			Prompt:  fmt.Sprintf("Question %d", i+1),
+			Options: []state.AskOption{{ID: "x", Label: "X"}, {ID: "y", Label: "Y"}},
+		}
+	}
+	return state.AskForm{Title: "Survey", Questions: questions}
+}
+
+// openQuestionOverlay wires a question overlay to a viewport renderer the way
+// Run does before its first key, and renders it once.
+func openQuestionOverlay(r *Renderer, form state.AskForm) *questionOverlay {
+	o := newTestOverlay(form)
+	o.rs = newRawSelector(nil, r)
+	o.resetFocusForOpen()
+	o.rs.resetOverlayViewportState()
+	o.render()
+	return o
+}
+
+// arrowRow is the painted row carrying the question overlay's pointer, or ""
+// when the pointer is off screen.
+func arrowRow(r *Renderer) string {
+	for _, row := range strings.Split(paintedScreen(r), "\n") {
+		if strings.Contains(row, "❯") {
+			return row
+		}
+	}
+	return ""
+}
+
+// flattenedScreen is a painted screen with its row breaks and repeated spaces
+// folded, so a phrase the overlay wrapped across rows is found whole.
+func flattenedScreen(screen string) string {
+	return strings.Join(strings.Fields(screen), " ")
+}
+
+// The reported bug: a user_interaction list taller than the overlay area kept
+// its window at the top while the pointer walked down, so the ❯ and the row it
+// was on left the screen. The window must follow the pointer, carrying the
+// focused option's description with it, and come back up with it.
+func TestQuestionOverlayArrowKeysKeepTheFocusedRowOnScreen(t *testing.T) {
+	r := newComposerRenderer(t, 40, 16)
+	o := openQuestionOverlay(r, tallQuestionForm(30))
+
+	press := func(key parsedKey) {
+		t.Helper()
+		if _, done := o.handleKey(key); done {
+			t.Fatalf("key %v ended the overlay", key.kind)
+		}
+		o.render()
+	}
+	// focused asserts the pointer is on screen on the row naming want, and
+	// that note — the focused option's description, "" for none — is on
+	// screen with it.
+	focused := func(step, want, note string) {
+		t.Helper()
+		if row := arrowRow(r); !strings.Contains(row, want) {
+			t.Fatalf("%s: the pointer is not on the row %q (pointer row %q):\n%s", step, want, row, paintedScreen(r))
+		}
+		if note != "" && !strings.Contains(paintedScreen(r), note) {
+			t.Fatalf("%s: the focused option's description %q is off screen:\n%s", step, note, paintedScreen(r))
+		}
+	}
+
+	focused("open", "Option 00", "note 00")
+	// A row already on screen moves nothing above it.
+	press(parsedKey{kind: rawKeyDown})
+	focused("Down to option 1", "Option 01", "note 01")
+	if screen := flattenedScreen(paintedScreen(r)); !strings.Contains(screen, "Choose one of the options below") {
+		t.Fatalf("Down to a row already on screen scrolled the question away:\n%s", screen)
+	}
+
+	// 9 jumps to the ninth option, far below the first screen; 1 comes back.
+	press(parsedKey{kind: rawKeyRune, r: '9'})
+	focused("9", "Option 08", "note 08")
+	press(parsedKey{kind: rawKeyRune, r: '1'})
+	focused("1", "Option 00", "note 00")
+	if screen := paintedScreen(r); !strings.Contains(screen, "q1") {
+		t.Fatalf("the first row must bring the tab bar back:\n%s", screen)
+	}
+
+	// Down through every option, then Other, then "Chat about this".
+	for i := 1; i < 30; i++ {
+		press(parsedKey{kind: rawKeyDown})
+		focused(fmt.Sprintf("Down to option %d", i), fmt.Sprintf("Option %02d", i), fmt.Sprintf("note %02d", i))
+	}
+	press(parsedKey{kind: rawKeyDown})
+	focused("Down to Other", "Other", "")
+	press(parsedKey{kind: rawKeyDown})
+	focused("Down to Chat about this", "Chat about this", "")
+	r.mu.Lock()
+	lowest := r.overlayScrollOffset
+	r.mu.Unlock()
+	if lowest == 0 {
+		t.Fatal("the list is taller than the overlay area, so following the pointer must have scrolled it")
+	}
+	// The form's last row carries its key hint along.
+	if screen := flattenedScreen(paintedScreen(r)); !strings.Contains(screen, "esc to cancel") {
+		t.Fatalf("the pointer on the last row left the key hint off screen:\n%s", screen)
+	}
+
+	// And back up: each row in turn, then the top of the form.
+	press(parsedKey{kind: rawKeyUp})
+	focused("Up to Other", "Other", "")
+	for i := 29; i >= 0; i-- {
+		press(parsedKey{kind: rawKeyUp})
+		focused(fmt.Sprintf("Up to option %d", i), fmt.Sprintf("Option %02d", i), fmt.Sprintf("note %02d", i))
+	}
+	if screen := paintedScreen(r); !strings.Contains(screen, "Choose one of the options below") {
+		t.Fatalf("the first row must bring the question back:\n%s", screen)
+	}
+	r.mu.Lock()
+	offset := r.overlayScrollOffset
+	r.mu.Unlock()
+	if offset != 0 {
+		t.Fatalf("the first row is the top of the form, offset=%d", offset)
+	}
+}
+
+// A narrower terminal wraps the overlay's long rows onto more of them, so the
+// pointer's rows move down under a selection that did not move: the window
+// must be aimed at them again on the repaint the resize causes.
+func TestQuestionOverlayFocusFollowsAcrossAResize(t *testing.T) {
+	r := newComposerRenderer(t, 40, 16)
+	form := tallQuestionForm(30)
+	// A question long enough to take more rows the narrower the terminal gets.
+	form.Questions[0].Prompt = strings.Repeat("Choose wisely ", 6)
+	o := openQuestionOverlay(r, form)
+	for i := 0; i < 12; i++ {
+		if _, done := o.handleKey(parsedKey{kind: rawKeyDown}); done {
+			t.Fatalf("Down %d ended the overlay", i)
+		}
+	}
+	o.render()
+	if row := arrowRow(r); !strings.Contains(row, "Option 12") {
+		t.Fatalf("Down to option 12 lost the pointer (pointer row %q):\n%s", row, paintedScreen(r))
+	}
+
+	setForcedTermSize(20, 16)
+	r.ViewportResize()
+	if row := arrowRow(r); !strings.Contains(row, "Option 12") {
+		t.Fatalf("after the resize the pointer is off screen (pointer row %q):\n%s", row, paintedScreen(r))
+	}
+	if screen := paintedScreen(r); !strings.Contains(screen, "note 12") {
+		t.Fatalf("after the resize the focused option's description is off screen:\n%s", screen)
+	}
+}
+
+// The wheel is the user's own scroll through the list: a repaint alone must
+// not pull the window back to the pointer over it, but the next key, which
+// re-renders the overlay, does re-anchor on the pointer.
+func TestQuestionOverlayWheelScrollHoldsUntilTheNextKey(t *testing.T) {
+	r := newComposerRenderer(t, 40, 16)
+	o := openQuestionOverlay(r, tallQuestionForm(30))
+	for i := 0; i < 12; i++ {
+		if _, done := o.handleKey(parsedKey{kind: rawKeyDown}); done {
+			t.Fatalf("Down %d ended the overlay", i)
+		}
+	}
+	o.render()
+	offset := func() int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.overlayScrollOffset
+	}
+	followed := offset()
+	if followed == 0 {
+		t.Fatal("following the pointer down to option 12 must have scrolled the overlay")
+	}
+
+	// Wheel up three rows to read what the pointer scrolled past.
+	if !r.ViewportScrollOverlay(-3) {
+		t.Fatal("the overlay had room to scroll up")
+	}
+	if got := offset(); got != followed-3 {
+		t.Fatalf("wheel up by 3 moved the overlay to %d, want %d", got, followed-3)
+	}
+	// A status tick repaints without re-installing the overlay: the user's
+	// scroll stands.
+	r.mu.Lock()
+	r.paintViewportLocked()
+	r.mu.Unlock()
+	if got := offset(); got != followed-3 {
+		t.Fatalf("a repaint snapped the window back over the user's scroll: offset=%d, want %d", got, followed-3)
+	}
+
+	// The next key moves the pointer, and the window returns to it.
+	if _, done := o.handleKey(parsedKey{kind: rawKeyDown}); done {
+		t.Fatal("Down ended the overlay")
+	}
+	o.render()
+	if row := arrowRow(r); !strings.Contains(row, "Option 13") {
+		t.Fatalf("Down after a wheel scroll lost the pointer (pointer row %q):\n%s", row, paintedScreen(r))
+	}
+	if got := offset(); got <= followed-3 {
+		t.Fatalf("the window did not come back down to the pointer: offset=%d", got)
+	}
+}
+
+// The review behind the Submit tab is the same list in another shape: with
+// enough questions its Submit/Cancel rows start below the overlay area, and
+// the pointer on them must still be seen.
+func TestQuestionOverlaySubmitViewKeepsTheChosenActionOnScreen(t *testing.T) {
+	r := newComposerRenderer(t, 60, 16)
+	o := openQuestionOverlay(r, manyQuestionForm(10))
+	// Enter picks each question's first option and advances; the last one
+	// opens the review.
+	for i := 0; i < 10; i++ {
+		if _, done := o.handleKey(parsedKey{kind: rawKeyEnter}); done {
+			t.Fatalf("Enter on question %d ended the overlay", i+1)
+		}
+	}
+	if !o.inSubmitView() {
+		t.Fatalf("expected the review after the last question, current=%d", o.current)
+	}
+	o.render()
+	if row := arrowRow(r); !strings.Contains(row, "Submit answers") {
+		t.Fatalf("the review opened with its pointer off screen (pointer row %q):\n%s", row, paintedScreen(r))
+	}
+	if _, done := o.handleKey(parsedKey{kind: rawKeyDown}); done {
+		t.Fatal("Down ended the overlay")
+	}
+	o.render()
+	if row := arrowRow(r); !strings.Contains(row, "Cancel") {
+		t.Fatalf("Down to Cancel lost the pointer (pointer row %q):\n%s", row, paintedScreen(r))
+	}
+	if screen := flattenedScreen(paintedScreen(r)); !strings.Contains(screen, "esc to cancel") {
+		t.Fatalf("the pointer on the last row left the key hint off screen:\n%s", screen)
+	}
+}
+
+// A question longer than the overlay area leaves no room above the first row
+// for the tab bar and the question: the pointer must still be seen there, so
+// the window opens on the row instead of the form's top.
+func TestQuestionOverlayLongQuestionKeepsTheFirstRowOnScreen(t *testing.T) {
+	r := newComposerRenderer(t, 40, 16)
+	form := tallQuestionForm(3)
+	// Twelve rows of question at this width, against ten rows of overlay area.
+	form.Questions[0].Prompt = strings.Repeat("Choose wisely ", 30)
+	openQuestionOverlay(r, form)
+	if row := arrowRow(r); !strings.Contains(row, "Option 00") {
+		t.Fatalf("the pointer on the first row is off screen under a long question (pointer row %q):\n%s", row, paintedScreen(r))
+	}
+	if screen := paintedScreen(r); !strings.Contains(screen, "note 00") {
+		t.Fatalf("the first option's description is off screen under a long question:\n%s", screen)
+	}
+}
+
+// The focused option's preview belongs to that option: it must sit under its
+// own row (where the paint can keep it on screen with the pointer) and travel
+// with the pointer, not sit after the whole list.
+func TestQuestionOverlayPreviewStaysWithItsOption(t *testing.T) {
+	// 20 rows, not 16: the option, its description and a two-line preview are
+	// six rows of focus, and at 16 rows the window's last row is the preview's
+	// — the option after it would be the first line cut, and the ordering this
+	// test is about would be unobservable there.
+	r := newComposerRenderer(t, 60, 20)
+	form := tallQuestionForm(12)
+	form.Questions[0].Options[0].Preview = "first preview line\nPREVIEW_LAST_LINE"
+	o := openQuestionOverlay(r, form)
+
+	rowOf := func(screen, want string) int {
+		for i, row := range strings.Split(screen, "\n") {
+			if strings.Contains(row, want) {
+				return i
+			}
+		}
+		return -1
+	}
+	screen := paintedScreen(r)
+	if got := arrowRow(r); !strings.Contains(got, "Option 00") {
+		t.Fatalf("the pointer is not on option 0 (pointer row %q):\n%s", got, screen)
+	}
+	if !strings.Contains(screen, "PREVIEW_LAST_LINE") {
+		t.Fatalf("the focused option's preview is off screen:\n%s", screen)
+	}
+	option, preview, next := rowOf(screen, "Option 00"), rowOf(screen, "PREVIEW_LAST_LINE"), rowOf(screen, "Option 01")
+	if !(option < preview && preview < next) {
+		t.Fatalf("the preview must sit between its option and the next one (option %d, preview %d, next %d):\n%s", option, preview, next, screen)
+	}
+
+	// Moving the pointer away from option 0 takes its preview with it.
+	for i := 0; i < 5; i++ {
+		if _, done := o.handleKey(parsedKey{kind: rawKeyDown}); done {
+			t.Fatalf("Down %d ended the overlay", i)
+		}
+	}
+	o.render()
+	if screen := paintedScreen(r); strings.Contains(screen, "PREVIEW_LAST_LINE") {
+		t.Fatalf("option 0's preview stayed after the pointer left it:\n%s", screen)
+	}
+}
+
+// The Other field draws its own caret cell rather than the hardware one, so a
+// text longer than the overlay used to type off the bottom of the screen: the
+// caret must be brought into view on its own row.
+func TestQuestionOverlayOtherCaretStaysOnScreenWhileTyping(t *testing.T) {
+	r := newComposerRenderer(t, 30, 16)
+	form := tallQuestionForm(6)
+	o := openQuestionOverlay(r, form)
+	// Down to the Other row, then type a text far longer than the overlay.
+	for i := 0; i < 6; i++ {
+		if _, done := o.handleKey(parsedKey{kind: rawKeyDown}); done {
+			t.Fatalf("Down %d ended the overlay", i)
+		}
+	}
+	if !o.editingOther {
+		t.Fatalf("the Other row must open its editor, cursor=%d otherIdx=%d", o.cursor, o.otherIdx())
+	}
+	// Three hundred characters rather than a shorter text: at this width the
+	// field wraps to 28 columns a row against a ten-row overlay area, so the
+	// field itself must be taller than the window before a head-preserving focus
+	// range can leave the caret — which sits at the end of the text — below it.
+	// A hundred and twenty characters wrap to ten rows here and would prove
+	// nothing.
+	for _, rn := range strings.Repeat("abcdefghij", 30) {
+		if _, done := o.handleKey(parsedKey{kind: rawKeyRune, r: rn}); done {
+			t.Fatalf("typing %q ended the overlay", rn)
+		}
+	}
+	o.render()
+
+	// The caret is the only reverse-video cell outside the tab chips.
+	// paintedScreen folds SGR away, so the caret cell is read from the raw
+	// painted rows instead.
+	r.mu.Lock()
+	rows := append([]string(nil), r.vpPainted...)
+	r.mu.Unlock()
+	caretRow := -1
+	for i, row := range rows {
+		if !strings.Contains(row, "\x1b[7m") || strings.Contains(row, "☐") || strings.Contains(row, "✔") {
+			continue
+		}
+		if caretRow >= 0 {
+			t.Fatalf("more than one caret row painted:\n%s", paintedScreen(r))
+		}
+		caretRow = i
+	}
+	if caretRow < 0 {
+		t.Fatalf("the Other caret is off screen after typing a long text:\n%s", paintedScreen(r))
+	}
+}
+
+// A narrow terminal wraps the held-message prompt onto more rows than the
+// overlay area holds: the two answers must still be seen, so the pointer can
+// be answered at all.
+func TestHeldPeerOverlayKeepsItsAnswersOnScreenInANarrowTerminal(t *testing.T) {
+	r := newComposerRenderer(t, 20, 16)
+	held := process.HeldPeerMessage{
+		FromName: "peer-a",
+		Preview:  strings.Repeat("a held message line that wraps onto more rows than fit ", 3),
+		Cause:    event.PeerHoldCauseHoldAll,
+	}
+	o := newHeldPeerOverlay(context.Background(), io.Discard, newRawSelector(nil, r), held)
+	o.render()
+	screen := paintedScreen(r)
+	if !strings.Contains(screen, "Release") || !strings.Contains(screen, "Deny") {
+		t.Fatalf("the answers are off screen in a narrow terminal:\n%s", screen)
+	}
+	if row := arrowRow(r); !strings.Contains(row, "Release") {
+		t.Fatalf("the pointer is not on the answered row (pointer row %q):\n%s", row, screen)
+	}
+}
+
 // A question header is arbitrary model text and the tab chip is the only place
 // the terminal shows it; that chip row is one logical overlay line, so the
 // paint must fold a header longer than the terminal — including one with no
@@ -3328,7 +3720,7 @@ func heldPeerExample() process.HeldPeerMessage {
 func TestHeldPeerOverlayShowsSenderPreviewAndCause(t *testing.T) {
 	overlay := newHeldPeerOverlay(context.Background(), io.Discard, nil, heldPeerExample())
 
-	lines := overlay.lines(80)
+	lines, _, _ := overlay.lines(80)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"Message from builder is held",
@@ -3396,7 +3788,8 @@ func TestHeldPeerOverlayWithoutPreviewOrName(t *testing.T) {
 	overlay := newHeldPeerOverlay(context.Background(), io.Discard, nil, process.HeldPeerMessage{
 		MsgID: "held-2", From: "uds:/tmp/b.sock", Cause: event.PeerHoldCauseHoldAll,
 	})
-	joined := strings.Join(overlay.lines(80), "\n")
+	heldLines, _, _ := overlay.lines(80)
+	joined := strings.Join(heldLines, "\n")
 	if !strings.Contains(joined, "Message from uds:/tmp/b.sock is held") {
 		t.Fatalf("held prompt without a name must use the address: %q", joined)
 	}

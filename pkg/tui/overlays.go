@@ -3239,11 +3239,26 @@ func (o *questionOverlay) renderQuestionView() {
 	maxIdx := len(q.Options)                     // for number width
 	idxWidth := len(fmt.Sprintf("%d", maxIdx+1)) // width of the largest option number (Other = maxIdx+1)
 	for i, opt := range q.Options {
+		focused := o.cursor == i
+		if focused {
+			c.markFocusStart()
+		}
 		o.renderOptionRow(c, i, opt, sel, q.AllowMultiple, idxWidth)
+		if focused {
+			o.renderFocusedPreview(c, opt)
+			c.markFocusEnd()
+		}
 	}
 
 	// Other row
+	otherFocused := o.cursor == o.otherIdx()
+	if otherFocused {
+		c.markFocusStart()
+	}
 	o.renderOtherRow(c, q, idxWidth)
+	if otherFocused {
+		c.markFocusEnd()
+	}
 
 	// Submit button (multi-select only)
 	if si := o.submitIdx(); si >= 0 {
@@ -3251,23 +3266,15 @@ func (o *questionOverlay) renderQuestionView() {
 		pointer := "  "
 		if btnFocused {
 			pointer = "\x1b[36m❯\x1b[0m "
+			c.markFocusStart()
 		}
 		label := "Next"
 		if o.current == len(o.form.Questions)-1 {
 			label = "Submit"
 		}
 		c.writeLinef("%s\x1b[1m%s\x1b[0m", pointer, label)
-	}
-
-	// Preview (below options, before divider) — forebrain renders previews inline
-	// rather than side-by-side; the focused option's preview is shown here.
-	if o.cursor < len(q.Options) {
-		if preview := strings.TrimSpace(q.Options[o.cursor].Preview); preview != "" {
-			c.writeLine("")
-			c.writeLine("\x1b[2m--- Preview ---\x1b[0m")
-			for _, line := range strings.Split(preview, "\n") {
-				c.writeLinef("%s", line)
-			}
+		if btnFocused {
+			c.markFocusEnd()
 		}
 	}
 
@@ -3286,6 +3293,7 @@ func (o *questionOverlay) renderQuestionView() {
 	if chatFocused {
 		chatPointer = "\x1b[36m❯\x1b[0m "
 		chatColor = "\x1b[36m"
+		c.markFocusStart()
 	}
 	c.writeLinef("%s%s%d. Chat about this\x1b[0m", chatPointer, chatColor, chatNum)
 
@@ -3317,7 +3325,36 @@ func (o *questionOverlay) renderQuestionView() {
 		c.writeLine("  ?                toggle this Keymap pane")
 	}
 
-	o.finishCollector(c)
+	// The pointer on the form's last row means its end, key hint included. On
+	// its first row it means its start: the window opens at the tab bar and the
+	// question when they fit above the row, and the focus below still brings
+	// the row on screen when a longer question does not.
+	top := overlayKeepScroll
+	if o.cursor == o.chatIdx() {
+		c.focusEnd = len(c.lines)
+	}
+	if o.cursor == 0 {
+		top = 0
+	}
+
+	o.finishCollector(c, top)
+}
+
+// renderFocusedPreview writes the focused option's preview under the option it
+// belongs to. Inline rather than side by side, as this form has always done it:
+// but attached to its own row, because the painter keeps one continuous range
+// on screen and a preview parked after the whole list could never be seen
+// beside the row it describes.
+func (o *questionOverlay) renderFocusedPreview(c *qlineCollector, opt state.AskOption) {
+	preview := strings.TrimSpace(opt.Preview)
+	if preview == "" {
+		return
+	}
+	c.writeLine("")
+	c.writeLine("\x1b[2m--- Preview ---\x1b[0m")
+	for _, line := range strings.Split(preview, "\n") {
+		c.writeLinef("%s", line)
+	}
 }
 
 // renderOptionRow renders a single option line (and its description) in the
@@ -3402,6 +3439,13 @@ func (o *questionOverlay) renderOtherRow(c *qlineCollector, q *state.AskQuestion
 		o.otherRow = len(c.lines)
 		o.otherPrefixWidth = lipgloss.Width(prefix)
 		c.writeLine(prefix + before + otherCaretCell + after)
+		// The field draws its own caret cell rather than the hardware one, so
+		// the paint is told where it is: the row is the one just written — the
+		// buffer holds no newline, since the only bulk insertion path folds one
+		// to a space and a typed rune below 0x20 is not a rune at all — and the
+		// column is the prefix plus the text before the caret in display cells,
+		// the unit the soft-wrap refs count in.
+		c.caret = softWrapCaret{Set: true, Line: o.otherRow, Col: o.otherPrefixWidth + lipgloss.Width(before)}
 		c.writeLinef("%s\x1b[2menter to confirm esc to discard ←/→ to move cursor click to place the cursor\x1b[0m", strings.Repeat(" ", idxWidth+4))
 		return
 	}
@@ -3522,14 +3566,23 @@ func (o *questionOverlay) renderSubmitView() {
 		if i == o.submitCursor {
 			pointer = "\x1b[36m❯\x1b[0m "
 			color = "\x1b[36m"
+			c.markFocusStart()
 		}
 		c.writeLinef("%s%s%s\x1b[0m", pointer, color, label)
+		if i == o.submitCursor {
+			c.markFocusEnd()
+		}
 	}
 
 	c.writeLine("")
 	c.writeLine("\x1b[2menter to confirm ↑/↓ to choose esc to cancel\x1b[0m")
+	// Cancel is the view's last row: the pointer there means the end of the
+	// form, its key hint included.
+	if o.submitCursor == len(labels)-1 {
+		c.focusEnd = len(c.lines)
+	}
 
-	o.finishCollector(c)
+	o.finishCollector(c, overlayKeepScroll)
 }
 
 // answerSummary builds a human-readable summary of a question's answer for the
@@ -3568,12 +3621,27 @@ func (o *questionOverlay) answerSummary(q state.AskQuestion) string {
 type qlineCollector struct {
 	lines []string
 	width int
+	// focusStart/focusEnd are the logical lines [start, end) the pointer is
+	// on with whatever is read along with it, focusStart -1 until a row
+	// claims them: what the painter keeps on screen, named in the lines the
+	// collector writes the way the approval overlay names its focus in rows.
+	focusStart int
+	focusEnd   int
+	// caret is the editable field's caret, when the form shows one: the
+	// painter brings its row on screen even when the field is taller than the
+	// overlay area, where the focus range above can only keep its start.
+	caret softWrapCaret
 }
 
 func (o *questionOverlay) newCollector() *qlineCollector {
 	width, _ := o.termSize()
-	return &qlineCollector{width: width}
+	return &qlineCollector{width: width, focusStart: -1}
 }
+
+// markFocusStart opens the focus range at the next line written;
+// markFocusEnd closes it after the row and whatever is read along with it.
+func (c *qlineCollector) markFocusStart() { c.focusStart = len(c.lines) }
+func (c *qlineCollector) markFocusEnd()   { c.focusEnd = len(c.lines) }
 
 func (c *qlineCollector) writeLinef(format string, args ...any) {
 	line := format
@@ -3591,9 +3659,12 @@ func (c *qlineCollector) writeLine(line string) {
 	c.lines = append(c.lines, line)
 }
 
-func (o *questionOverlay) finishCollector(c *qlineCollector) {
+// finishCollector installs what the collector wrote as the overlay: top is the
+// content row the window opens at (overlayKeepScroll to leave it), and the
+// collector's focus range travels with it for the paint to keep on screen.
+func (o *questionOverlay) finishCollector(c *qlineCollector, top int) {
 	if o.rs != nil && o.rs.inViewportOverlay() {
-		o.rs.setSoftWrappingOverlayComposer(c.lines, -1, 0)
+		o.rs.setSoftWrappingOverlayComposer(c.lines, -1, 0, top, softWrapFocus{Start: c.focusStart, End: c.focusEnd, Caret: c.caret})
 		return
 	}
 	// Non-viewport fallback: write lines directly.
@@ -3742,9 +3813,14 @@ func (o *heldPeerOverlay) handleKey(key parsedKey) (heldPeerChoice, bool) {
 }
 
 func (o *heldPeerOverlay) render() {
-	lines := o.lines(o.width())
+	lines, start, end := o.lines(o.width())
 	if o.rs != nil && o.rs.inViewportOverlay() {
-		o.rs.setOverlayComposer(lines, -1, 0)
+		// The answers are the row to answer on: a narrow terminal folds the
+		// preview onto more rows than the overlay area holds, and without this
+		// the row they are on would be the first thing scrolled away. Its rows
+		// are already visual, so the picker's own focus signature applies as it
+		// stands.
+		o.rs.setOverlayComposerAt(lines, -1, 0, overlayKeepScroll, start, end)
 		return
 	}
 	for _, line := range lines {
@@ -3766,9 +3842,9 @@ func (o *heldPeerOverlay) width() int {
 
 // lines is the question's content: who is waiting, the opening of what they
 // sent, why it was held, and the two answers, folded to width the way the
-// approval overlay folds its own content.
-func (o *heldPeerOverlay) lines(width int) []string {
-	var lines []string
+// approval overlay folds its own content. It also names the row the answers are
+// on, [focusStart, focusEnd), for the paint to keep on screen.
+func (o *heldPeerOverlay) lines(width int) (lines []string, focusStart, focusEnd int) {
 	write := func(style, text string) {
 		for _, visual := range approvalOverlayVisualLines(text, width) {
 			lines = append(lines, style+visual+"\x1b[0m")
@@ -3781,9 +3857,12 @@ func (o *heldPeerOverlay) lines(width int) []string {
 	if cause := heldPeerCauseLabel(o.held.Cause); cause != "" {
 		write("\x1b[2m", cause)
 	}
+	// One row, whatever the width: the answers are two words side by side.
+	focusStart = len(lines)
 	lines = append(lines, o.answersLine())
+	focusEnd = len(lines)
 	write("\x1b[2m", "←/→ to choose enter to answer esc to leave it held")
-	return lines
+	return lines, focusStart, focusEnd
 }
 
 // answersLine is the two answers on one row, the focused one marked: the
@@ -4339,12 +4418,13 @@ func (s *rawSelector) setOverlayComposerAt(lines []string, cursorRow, cursorCol,
 
 // setSoftWrappingOverlayComposer is the long-form text variant used by
 // user_interaction. The renderer retains logical rows and reflows them at the
-// current terminal width, including after resize events.
-func (s *rawSelector) setSoftWrappingOverlayComposer(lines []string, cursorRow, cursorCol int) {
+// current terminal width, including after resize events. top and the focus
+// range are setOverlayComposerAt's, the focus counted in logical lines.
+func (s *rawSelector) setSoftWrappingOverlayComposer(lines []string, cursorRow, cursorCol, top int, focus softWrapFocus) {
 	if !s.inViewportOverlay() {
 		return
 	}
-	s.renderer.SetSoftWrappingOverlayComposer(lines, cursorRow, cursorCol)
+	s.renderer.SetSoftWrappingOverlayComposer(lines, cursorRow, cursorCol, top, focus)
 }
 
 // resetOverlayViewportState clears per-overlay viewport state that can linger

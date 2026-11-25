@@ -5295,6 +5295,10 @@ func (r *Renderer) paintViewportLocked() {
 	} else if r.overlayActive {
 		sep := overlaySeparatorLine(contentWidth)
 		overlayLines, overlayRefs := r.overlayComposerLinesLocked(contentWidth)
+		// The queued note is chrome, not content: it keeps its own rows under
+		// the window however far the content scrolls, so an approval waiting
+		// behind this modal is never scrolled out of sight.
+		noteRows := r.overlayNoteRowsLocked(contentWidth)
 		r.vpOverlayRefs = overlayRefs
 		r.vpOverlayFirstRow = 0
 		cursorRow := r.overlayComposer.cursorRow
@@ -5314,7 +5318,7 @@ func (r *Renderer) paintViewportLocked() {
 		// down, leaving the modal visually fused to the conversation.
 		// One row of the composer area is therefore permanently the rule,
 		// which is why overlayMaxScrollLocked adds 1 to the content height.
-		maxContentHeight := maxComposerHeight - 1
+		maxContentHeight := maxComposerHeight - 1 - len(noteRows)
 		if maxContentHeight < 1 {
 			maxContentHeight = 1
 		}
@@ -5332,7 +5336,10 @@ func (r *Renderer) paintViewportLocked() {
 			// next paint.
 			focusStart, focusEnd := cursorRow, cursorRow+1
 			if cursorRow < 0 && r.overlayFocusPending {
-				focusStart, focusEnd = r.overlayFocusRow, r.overlayFocusEnd
+				// The focus names lines of the installed table, and a table
+				// that soft-wraps spreads one line over several rows: map it
+				// through the refs. An unwrapped table's refs are the identity.
+				focusStart, focusEnd = overlayFocusRows(overlayRefs, r.overlayFocusRow, r.overlayFocusEnd)
 			}
 			if focusStart >= 0 && focusEnd > focusStart {
 				// The end first and the start last, so a range taller than
@@ -5342,6 +5349,17 @@ func (r *Renderer) paintViewportLocked() {
 				}
 				if focusStart < r.overlayScrollOffset {
 					r.overlayScrollOffset = focusStart
+				}
+			}
+
+			// The caret outranks the range: a field taller than the overlay
+			// keeps the cell being typed at on screen, not its first row.
+			if row, ok := overlayCaretRow(overlayRefs, r.overlayFocusCaret); ok {
+				if row >= r.overlayScrollOffset+maxContentHeight {
+					r.overlayScrollOffset = row - maxContentHeight + 1
+				}
+				if row < r.overlayScrollOffset {
+					r.overlayScrollOffset = row
 				}
 			}
 
@@ -5364,9 +5382,12 @@ func (r *Renderer) paintViewportLocked() {
 			}
 		}
 		r.overlayFocusPending = false
-		lines := make([]string, 0, len(visible)+1)
+		lines := make([]string, 0, len(visible)+1+len(noteRows))
 		lines = append(lines, sep)
 		lines = append(lines, visible...)
+		// Below the window, at fixed rows: the note takes no part in
+		// overlayScrollOffset and has no ref, so a click on it names no line.
+		lines = append(lines, noteRows...)
 		// Shift past the pinned separator row.
 		if cursorRow >= 0 {
 			cursorRow++
@@ -6577,9 +6598,10 @@ func (r *Renderer) overlayMaxScrollLocked() int {
 	if width < 1 {
 		width = 1
 	}
-	// +1 for the separator rule pinned above the content at paint time.
+	// +1 for the separator rule pinned above the content at paint time, and one
+	// row per note row pinned below it: neither moves with the scroll.
 	overlayLines, _ := r.overlayComposerLinesLocked(width)
-	fullHeight := len(overlayLines) + 1
+	fullHeight := len(overlayLines) + 1 + len(r.overlayNoteRowsLocked(width))
 	if fullHeight > maxComposerHeight {
 		return fullHeight - maxComposerHeight
 	}
@@ -6597,14 +6619,56 @@ type overlayRowRef struct {
 	rowCol     int
 }
 
+// overlayFocusRows maps the focus range an overlay named in the lines it
+// installed onto the rows those lines occupy: first, and one past the last,
+// row whose line lies in [start, end), or (-1, -1) when no row's does. The
+// refs run in line order, so the scan stops at the first row past the range;
+// an unwrapped table's refs are the identity, and its range comes back as it
+// went in.
+func overlayFocusRows(refs []overlayRowRef, start, end int) (int, int) {
+	first, last := -1, -1
+	for i, ref := range refs {
+		if ref.line < start {
+			continue
+		}
+		if ref.line >= end {
+			break
+		}
+		if first < 0 {
+			first = i
+		}
+		last = i + 1
+	}
+	return first, last
+}
+
+// overlayCaretRow maps a soft-wrapped overlay's caret cell onto the row the
+// reflow put it on: the last row of the caret's line whose content starts at or
+// before the caret's column. ok is false when the overlay shows no caret, or
+// when no row of that line reaches back far enough.
+func overlayCaretRow(refs []overlayRowRef, caret softWrapCaret) (int, bool) {
+	if !caret.Set {
+		return 0, false
+	}
+	row, ok := 0, false
+	for i, ref := range refs {
+		if ref.line != caret.Line || ref.logicalCol > caret.Col {
+			continue
+		}
+		row, ok = i, true
+	}
+	return row, ok
+}
+
 // overlayComposerLinesLocked returns the visual overlay rows for the current
 // viewport width, together with the map from each row back to the logical line
 // it came from. Most modal overlays already produce visual rows and bypass the
 // wrap; user_interaction keeps logical rows so long model-provided text can
-// naturally reflow whenever the terminal is resized.
+// naturally reflow whenever the terminal is resized. Content only: the queued
+// note is pinned below the window at paint time, so scrolling the content never
+// takes it away.
 func (r *Renderer) overlayComposerLinesLocked(width int) ([]string, []overlayRowRef) {
-	lines, refs := r.overlayContentLinesLocked(width)
-	return append(lines, r.overlayNoteRowsLocked(width)...), refs
+	return r.overlayContentLinesLocked(width)
 }
 
 // overlayNoteRowsLocked is the queued-approval note: the renderer's own rows
@@ -6998,6 +7062,12 @@ func (r *Renderer) ViewportResize() {
 	// that reports the same size gets the same treatment, since the terminal
 	// may still have redrawn itself.
 	r.dropPaintShadowLocked()
+	// A soft-wrapped overlay reflows with the width, so the rows its focus
+	// covers move under a selection that did not: aim the window at them
+	// again, as the key that moved the selection would have.
+	if r.overlayActive && r.overlaySoftWrap {
+		r.overlayFocusPending = r.overlayFocusRow >= 0 && r.overlayFocusEnd > r.overlayFocusRow
+	}
 	r.paintViewportLocked()
 }
 
