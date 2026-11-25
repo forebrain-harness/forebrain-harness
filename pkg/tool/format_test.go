@@ -3845,26 +3845,66 @@ func TestReadableToolAnswerDropsTheRowTheHeadNames(t *testing.T) {
 	require.NotContains(t, answer.String(), "npm run dev")
 	require.Contains(t, answer.String(), "Id: 3")
 
-	// A log card's head names the id, so the body keeps the command and drops
+	// A log card's head names the command too, so the body keeps neither it nor
 	// the id.
 	logged := `{"bytes":12,"command":"npm run dev","id":3,"lines":1,"log":"/state/process/3.log","running":true,"tail":"hi"}`
 	answer, ok = ReadableToolAnswer("process", logged, map[string]any{"action": "log", "id": 3})
 	require.True(t, ok)
-	require.Contains(t, answer.String(), "Command: npm run dev")
+	require.NotContains(t, answer.String(), "Command:")
 	require.NotContains(t, answer.String(), "Id: 3")
 	require.Contains(t, answer.String(), "Log: /state/process/3.log")
 
-	// kill names the id in its head too.
-	answer, ok = ReadableToolAnswer("process", `{"id":3,"killed":true,"pid":42,"running":false,"exit_code":0}`, map[string]any{"action": "kill", "id": 3})
+	// A kill card drops what its head now names (the command, the id) and the
+	// mechanical booleans, and explains the signal-killed exit code; the reason
+	// the model gave leads.
+	killed := `{"command":"sleep 300","exit_code":137,"exit_signal":9,"id":3,"killed":true,"pid":42,"running":false}`
+	killInput := map[string]any{"action": "kill", "id": 3, "reason": "releasing port 8080"}
+	answer, ok = ReadableToolAnswer("process", killed, killInput)
 	require.True(t, ok)
-	require.NotContains(t, answer.String(), "Id: 3")
-	require.Contains(t, answer.String(), "Killed: true")
+	body = answer.String()
+	require.Equal(t, "Reason: releasing port 8080", strings.SplitN(body, "\n", 2)[0])
+	require.Contains(t, body, "Exit code: 137 — terminated by signal 9 (SIGKILL)")
+	require.Contains(t, body, "Pid: 42")
+	require.NotContains(t, body, "Command:")
+	require.NotContains(t, body, "Id: 3")
+	require.NotContains(t, body, "Killed: true")
+	require.NotContains(t, body, "Running: false")
+	require.NotContains(t, body, "Exit signal")
 
-	// wait names the id as well, and keeps the fields it alone can report.
-	answer, ok = ReadableToolAnswer("process", `{"address":"127.0.0.1:8080","command":"npm run dev","id":3,"ready":true,"elapsed_ms":12}`, map[string]any{"action": "wait", "id": 3})
+	// The shape a stored step really has: the tool answers with JSON text and the
+	// generic formatter wraps it once more. It reads the same.
+	storedEvent := StepEvent{Kind: StepKindToolCompleted, ToolName: "process", Input: killInput,
+		Output: map[string]any{"output": killed}}
+	storedBody, _ := FormatToolStepResult(storedEvent, DefaultMaxFormattedBody)
+	require.Contains(t, storedBody, "output:")
+	answer, ok = ReadableToolAnswer("process", storedBody, killInput)
 	require.True(t, ok)
+	require.Contains(t, answer.String(), "Exit code: 137 — terminated by signal 9 (SIGKILL)")
+
+	// An already-exited process: no signal, so the code says it exited itself.
+	already := `{"command":"sleep 300","exit_code":0,"id":3,"killed":false,"pid":42,"running":false}`
+	answer, ok = ReadableToolAnswer("process", already, map[string]any{"action": "kill", "id": 3, "reason": "tidying up"})
+	require.True(t, ok)
+	require.Contains(t, answer.String(), "Exit code: 0 — exited cleanly")
+
+	// A signal the table does not name keeps the number.
+	unnamed := `{"command":"sleep 300","exit_code":138,"exit_signal":10,"id":3,"killed":true,"pid":42,"running":false}`
+	answer, ok = ReadableToolAnswer("process", unnamed, map[string]any{"action": "kill", "id": 3, "reason": "x"})
+	require.True(t, ok)
+	require.Contains(t, answer.String(), "Exit code: 138 — terminated by signal 10")
+	require.NotContains(t, answer.String(), "SIGUSR1")
+
+	// A wait card drops the command and the id too — its head names the command.
+	waited := `{"address":"127.0.0.1:8080","command":"npm run dev","elapsed_ms":12,"id":3,"ready":true}`
+	answer, ok = ReadableToolAnswer("process", waited, map[string]any{"action": "wait", "id": 3})
+	require.True(t, ok)
+	require.Contains(t, answer.String(), "Address: 127.0.0.1:8080")
+	require.NotContains(t, answer.String(), "Command:")
 	require.NotContains(t, answer.String(), "Id: 3")
-	require.Contains(t, answer.String(), "Ready: true")
+
+	// A process step carries no summary line: its head says what it did.
+	require.Equal(t, "", SummarizeToolStep(StepEvent{Kind: StepKindToolCompleted, ToolName: "process",
+		Input: map[string]any{"action": "kill", "id": 3}, Output: map[string]any{"output": killed}}))
 
 	// An action this build does not name falls through to the whole payload:
 	// its head names the id, but nothing in the body is filtered by guess.

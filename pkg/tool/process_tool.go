@@ -31,6 +31,7 @@ import (
 type ProcessInput struct {
 	Action       string `json:"action" jsonschema_description:"start a command in the background, read its log, wait for it to be ready, kill it, or list what is running."`
 	ID           int    `json:"id,omitempty" jsonschema_description:"The id start returned; required by log, wait and kill."`
+	Reason       string `json:"reason,omitempty" jsonschema:"description=kill: one line saying why the process is being stopped."`
 	Command      string `json:"command,omitempty" jsonschema:"description=start: the command to run."`
 	WorkDir      string `json:"work_dir,omitempty" jsonschema:"description=start: the directory to run it in. Defaults to the session's project directory."`
 	TimeoutMs    int    `json:"timeout_ms,omitempty" jsonschema:"description=start with wait: give up on readiness after this long. wait: give up after this long. Default 120000."`
@@ -41,7 +42,7 @@ type ProcessInput struct {
 	Tail         int    `json:"tail,omitempty" jsonschema:"description=log: last N lines. Default 200."`
 }
 
-const processToolDescription = "Run a command that outlives this call, so a server or watcher can be started and driven: `start` returns immediately with an id and pid, `wait` blocks until a port, an HTTP status or a log line says it is ready, `log` reads what it printed, `kill` ends it, `list` shows what is still running. A process lives until it is killed, the runner that started it is closed, or the harness exits - NOT until the session ends, and several conversations share one runner, so a process you started is visible to (and killable from) another one. Its output goes to <state root>/state/process/<id>.log. Prefer this over `shell` for anything that does not finish: `shell` kills a command at its timeout (default 120s), which is a build or a test but never a dev server. A failed `wait` returns the log tail - read it first, it is the only evidence of why the server did not come up; a taken port shows up there as `address already in use`."
+const processToolDescription = "Run a command that outlives this call, so a server or watcher can be started and driven: `start` returns immediately with an id and pid, `wait` blocks until a port, an HTTP status or a log line says it is ready, `log` reads what it printed, `kill` ends it and takes a one-line `reason` saying why (the card shows it), `list` shows what is still running. A process lives until it is killed, the runner that started it is closed, or the harness exits - NOT until the session ends, and several conversations share one runner, so a process you started is visible to (and killable from) another one. Its output goes to <state root>/state/process/<id>.log. Prefer this over `shell` for anything that does not finish: `shell` kills a command at its timeout (default 120s), which is a build or a test but never a dev server. A failed `wait` returns the log tail - read it first, it is the only evidence of why the server did not come up; a taken port shows up there as `address already in use`."
 
 // defaultProcessWaitTimeout bounds a readiness wait when the caller names none,
 // and defaultProcessTail bounds the log lines a failed wait carries.
@@ -225,6 +226,28 @@ func (s *State) processRegistryFor() *processRegistry {
 	return s.processes
 }
 
+// ProcessStartedCommand is the command a process call acts on before it has a
+// result: the id a wait, kill or log drives, resolved in this state's registry.
+// "" for every other tool and action, and for an id this state does not hold — a
+// process another runner started stays a number rather than becoming a guess. A
+// record is kept after its process exits (so `list` can still say what ran), and a
+// wait on such a process names its command too.
+func (s *State) ProcessStartedCommand(toolName string, input map[string]any) string {
+	if s == nil || !strings.EqualFold(strings.TrimSpace(toolName), "process") {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(stringFromAny(input["action"]))) {
+	case "wait", "kill", "log":
+	default:
+		return ""
+	}
+	rec, ok := s.processRegistryFor().get(intFromAny(input["id"]))
+	if !ok {
+		return ""
+	}
+	return rec.command
+}
+
 // KillProcesses ends every process this State started that is still running,
 // newest first: a runner's teardown owns the background processes its sessions
 // started, because nothing else in the product does (owner 2026-11-23,
@@ -345,15 +368,24 @@ func processStart(ctx context.Context, st *State, rt *AgentToolRuntime, in *Proc
 			if len(chunk) == 0 {
 				return
 			}
+			input := map[string]any{
+				"action":  "start",
+				"command": command,
+				"id":      id,
+			}
+			// A start that carries a readiness wait keeps blocking this call, so
+			// every delta has to say so: without it the first streamed chunk
+			// redraws the card as a background start and the reader is told the
+			// call returned (owner 2026-11-24).
+			if waitMode := strings.TrimSpace(in.Wait); waitMode != "" {
+				input["wait"] = waitMode
+			}
 			step(ctx, StepEvent{
 				Kind:      StepKindToolOutputDelta,
 				StepID:    stepID,
 				ToolName:  "process",
 				StartedAt: startedAt,
-				Input: map[string]any{
-					"command": command,
-					"id":      id,
-				},
+				Input:     input,
 				Output: map[string]any{
 					"stream": string(stream),
 					"chunk":  string(chunk),
@@ -454,6 +486,12 @@ func processKill(st *State, in *ProcessInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The card can only say why this process is being stopped if the model says
+	// it: a killed server is a decision the reader has to be able to follow
+	// (owner 2026-11-24).
+	if strings.TrimSpace(in.Reason) == "" {
+		return "", fmt.Errorf("reason is required for kill: one line saying why the process is being stopped")
+	}
 	// Idempotent by design: killing a process that has already exited is the
 	// state the caller asked for, not an error.
 	alreadyExited := rec.handle.Exited()
@@ -466,10 +504,14 @@ func processKill(st *State, in *ProcessInput) (string, error) {
 	}
 	awaitProcessSettled(rec, processKillSettleTimeout)
 	res, _ := rec.handle.Result()
-	return marshalProcessResult(map[string]any{
-		"id": rec.id, "pid": rec.handle.PID(), "killed": !alreadyExited,
-		"running": !rec.handle.Exited(), "exit_code": res.ExitCode,
-	})
+	payload := map[string]any{
+		"id": rec.id, "command": rec.command, "pid": rec.handle.PID(),
+		"killed": !alreadyExited, "running": !rec.handle.Exited(), "exit_code": res.ExitCode,
+	}
+	if res.ExitSignal > 0 {
+		payload["exit_signal"] = res.ExitSignal
+	}
+	return marshalProcessResult(payload)
 }
 
 // awaitProcessSettled waits until the exit watcher of rec has run, so a caller
@@ -568,7 +610,7 @@ func (t *processLogTailer) delta() []byte {
 // startProcessLiveTail streams rec's log into the live card while a wait polls.
 // The caller defers the returned stop. With no step hook it is a no-op, so a
 // hookless wait behaves exactly as before.
-func startProcessLiveTail(ctx context.Context, st *State, rec *processRecord) func() {
+func startProcessLiveTail(ctx context.Context, st *State, rec *processRecord, action string) func() {
 	step := StepHookFromContext(ctx, st)
 	if step == nil {
 		return func() {}
@@ -584,7 +626,10 @@ func startProcessLiveTail(ctx context.Context, st *State, rec *processRecord) fu
 			StepID:    stepID,
 			ToolName:  "process",
 			StartedAt: startedAt,
-			Input:     map[string]any{"id": rec.id},
+			// The surfaces redraw a running card from each event's own
+			// facts, so a delta that carried only the id left the head
+			// saying "Calling process #1" over a wait (owner 2026-11-24).
+			Input: map[string]any{"id": rec.id, "action": action, "command": rec.command},
 			Output: map[string]any{
 				"stream": string(stream),
 				"chunk":  string(chunk),
@@ -624,18 +669,23 @@ func processWait(ctx context.Context, st *State, in *ProcessInput) (string, erro
 	}
 	if rec.handle.Exited() {
 		res, _ := rec.handle.Result()
-		return marshalProcessResult(map[string]any{
-			"id": rec.id, "ready": false, "exited": true, "exit_code": res.ExitCode,
-			"tail": logTail(rec.logPath, defaultProcessTail), "elapsed_ms": 0,
-		})
+		payload := map[string]any{
+			"id": rec.id, "command": rec.command, "ready": false, "exited": true,
+			"exit_code": res.ExitCode, "tail": logTail(rec.logPath, defaultProcessTail), "elapsed_ms": 0,
+		}
+		if res.ExitSignal > 0 {
+			payload["exit_signal"] = res.ExitSignal
+		}
+		return marshalProcessResult(payload)
 	}
-	stopTail := startProcessLiveTail(ctx, st, rec)
+	stopTail := startProcessLiveTail(ctx, st, rec, in.Action)
 	defer stopTail()
 	readiness, err := processReadiness(ctx, rec, in)
 	if err != nil {
 		return "", err
 	}
 	readiness["id"] = rec.id
+	readiness["command"] = rec.command
 	return marshalProcessResult(readiness)
 }
 
@@ -690,10 +740,14 @@ func processReadiness(ctx context.Context, rec *processRecord, in *ProcessInput)
 		}
 		if rec.handle.Exited() {
 			res, _ := rec.handle.Result()
-			return map[string]any{
+			result := map[string]any{
 				"ready": false, "exited": true, "exit_code": res.ExitCode,
 				"elapsed_ms": elapsed.Milliseconds(), "tail": logTail(rec.logPath, defaultProcessTail),
-			}, nil
+			}
+			if res.ExitSignal > 0 {
+				result["exit_signal"] = res.ExitSignal
+			}
+			return result, nil
 		}
 		if ctx != nil && ctx.Err() != nil {
 			return nil, ctx.Err()

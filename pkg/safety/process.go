@@ -465,6 +465,7 @@ func finalizeExec(res CommandResult, err, stopErr error) (CommandResult, error) 
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 			signal := int(status.Signal())
+			res.ExitSignal = signal
 			res.ExitCode = 128 + signal
 			return res, &SignalError{Signal: signal}
 		}

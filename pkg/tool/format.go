@@ -374,6 +374,12 @@ func SummarizeToolStep(evt StepEvent) string {
 	if evt.Denied {
 		return ""
 	}
+	// A process step carries no summary line of its own: its head already names
+	// the command it started, waited on or killed (owner 2026-11-24), and a line
+	// saying "ran <command>" beside that head repeats it.
+	if strings.EqualFold(toolName, "process") {
+		return ""
+	}
 	invocation := toolInvocationLabel(evt)
 	if invocation == "" {
 		invocation = toolName
@@ -4305,38 +4311,149 @@ func ReadableToolAnswer(toolName, body string, input map[string]any) (ReadableAn
 	return ReadToolAnswer(body)
 }
 
-// readProcessAnswer is a process card's body. The head names one row of it
-// already — the command a start runs, the id a wait, log or kill drives — so
-// the body drops exactly that row: the same long shell command twice, two lines
-// apart, reads as one sentence too many (owner 2026-11-24). Every other field
-// stays, including the command a log card names by id alone.
+// readProcessAnswer is a process card's body. The head names the command and the
+// process already — the command for every action that acts on one, start, wait,
+// kill and log alike — so the body drops the command row, and a wait, kill or log
+// drops the id as well: it is the model's handle on the process, not the reader's
+// (owner 2026-11-24). A kill card also states its outcome once, in the exit
+// code's own words, and leads with the reason the model gave for stopping the
+// process.
 func readProcessAnswer(input map[string]any, body string) (ReadableAnswer, bool) {
 	answer, ok := ReadToolAnswer(body)
 	if !ok {
 		return ReadableAnswer{}, false
 	}
+	action := strings.ToLower(strings.TrimSpace(stringFromAny(input["action"])))
 	repeated := ""
-	switch strings.ToLower(strings.TrimSpace(stringFromAny(input["action"]))) {
-	case "start":
+	switch action {
+	case "start", "wait", "kill", "log":
+		// The head names the command every one of these acts on: a start's from
+		// its own arguments, the others' from the facts the engine put on the
+		// call's events (header_parts.go).
 		repeated = readableFieldLabel("command")
-	case "wait", "log", "kill":
-		repeated = readableFieldLabel("id")
 	}
-	if repeated == "" {
-		return answer, true
+	// exit_signal is never a row of its own: the exit code's sentence already
+	// names the signal that produced it.
+	dropped := map[string]bool{readableFieldLabel("exit_signal"): true}
+	if repeated != "" {
+		dropped[repeated] = true
 	}
-	rows := make([]ReadableRow, 0, len(answer.Rows))
+	if action == "wait" || action == "kill" || action == "log" {
+		// The id is the model's handle on the process, not the reader's.
+		dropped[readableFieldLabel("id")] = true
+	}
+	if action == "kill" {
+		// A kill card states the outcome once, in the exit code's own words:
+		// "Killed: true / Running: false" beside that sentence only repeats it.
+		dropped[readableFieldLabel("killed")] = true
+		dropped[readableFieldLabel("running")] = true
+	}
+	signal := processExitSignal(body)
+	exitLabel := readableFieldLabel("exit_code")
+	rows := make([]ReadableRow, 0, len(answer.Rows)+1)
 	for _, row := range answer.Rows {
 		// The label is derived from the payload's own key, so renaming the row
-		// label cannot leave this filter behind; depth 0 keeps a nested field
-		// of the same name.
-		if row.Depth == 0 && row.Label == repeated {
+		// label cannot leave this filter behind; depth 0 keeps a nested field of
+		// the same name.
+		if row.Depth == 0 && dropped[row.Label] {
 			continue
+		}
+		if row.Depth == 0 && row.Label == exitLabel {
+			row.Value = explainProcessExitCode(row.Value, signal)
 		}
 		rows = append(rows, row)
 	}
+	// The reason the model gave leads a kill card: its head names the command, so
+	// this is the first line about it. A failed call carries no rows (its body is
+	// the error), which is why the row list gates it.
+	if action == "kill" && len(rows) > 0 {
+		if reason := strings.TrimSpace(stringFromAny(input["reason"])); reason != "" {
+			rows = append([]ReadableRow{{Label: readableFieldLabel("reason"), Value: reason}}, rows...)
+		}
+	}
 	answer.Rows = rows
 	return answer, true
+}
+
+// processFacts are the two facts a process card needs from the tool's own answer:
+// the command the call was about and the signal that ended the process.
+type processFacts struct {
+	Command    string `json:"command"`
+	ExitSignal int    `json:"exit_signal"`
+}
+
+// processAnswerFacts reads a process payload. The tool answers with the payload
+// as JSON *text*, and the runner wraps a text result once more as
+// {"output": "<that text>"} — so both shapes are read, and nothing else is
+// guessed at.
+func processAnswerFacts(text string) (processFacts, bool) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return processFacts{}, false
+	}
+	var envelope struct {
+		Output string `json:"output"`
+	}
+	if json.Unmarshal([]byte(trimmed), &envelope) == nil && strings.HasPrefix(strings.TrimSpace(envelope.Output), "{") {
+		trimmed = strings.TrimSpace(envelope.Output)
+	}
+	var facts processFacts
+	if json.Unmarshal([]byte(trimmed), &facts) != nil {
+		return processFacts{}, false
+	}
+	return facts, true
+}
+
+// processContentFacts reads the facts out of a card's body, which is the generic
+// formatter's envelope on every path (toolAnswerCandidates also yields the raw
+// answer, for a row that stored it unwrapped).
+func processContentFacts(content string) (processFacts, bool) {
+	for _, candidate := range toolAnswerCandidates(content) {
+		if facts, ok := processAnswerFacts(candidate); ok {
+			return facts, true
+		}
+	}
+	return processFacts{}, false
+}
+
+// processExitSignal is the signal the answer recorded as having ended the
+// command, 0 when it recorded none. It is never computed from the exit code: 137
+// is 128+9 only on a platform that has signals, and a program may exit 137 by
+// itself.
+func processExitSignal(body string) int {
+	facts, _ := processContentFacts(body)
+	return facts.ExitSignal
+}
+
+// processSignalNames names a signal death for a reader. A number outside this
+// table keeps the bare number: the same number is another signal (or no signal at
+// all) on another platform, and a wrong name is worse than none. Every entry here
+// carries the same number on Linux and macOS; the ones that do not (SIGBUS,
+// SIGUSR1/2, SIGCHLD, …) are left out on purpose.
+var processSignalNames = map[int]string{
+	1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 4: "SIGILL", 5: "SIGTRAP",
+	6: "SIGABRT", 8: "SIGFPE", 9: "SIGKILL", 11: "SIGSEGV", 13: "SIGPIPE",
+	14: "SIGALRM", 15: "SIGTERM",
+}
+
+// explainProcessExitCode says what an exit code means to a person: a signal death
+// names the signal that ended the process, a 0 says the command exited by itself,
+// and anything else keeps the plain number the command chose.
+func explainProcessExitCode(value string, signal int) string {
+	code := strings.TrimSpace(value)
+	if code == "" {
+		return value
+	}
+	if signal > 0 {
+		if name, ok := processSignalNames[signal]; ok {
+			return fmt.Sprintf("%s — terminated by signal %d (%s)", code, signal, name)
+		}
+		return fmt.Sprintf("%s — terminated by signal %d", code, signal)
+	}
+	if code == "0" {
+		return "0 — exited cleanly"
+	}
+	return value
 }
 
 // toolBodyHasOwnReading reports whether a tool's card body is read by a

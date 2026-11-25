@@ -142,13 +142,16 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 
 	// --- Process ---
 	// The header names what the call acts on: the command a start runs, the
-	// process id a wait/log/kill drives, the registry a list reads. A head that
-	// named only the tool left the user watching a timer for minutes, unable to
-	// tell which command it ran.
+	// command a wait or kill drives, the process id a log drives, the registry a
+	// list reads. A head that named only the tool left the user watching a timer
+	// for minutes, unable to tell which command it ran.
 	case lower == "process":
 		act := strings.ToLower(strings.TrimSpace(InputString(meta, "action")))
 		// id is a JSON number in Input (wait/log/kill require it). ToolMeta has
-		// no Output field, so Input is the only source the header can read.
+		// no Output field, so the facts a card needs ride Input: the engine
+		// resolves the id when it dispatches a wait or kill and every live delta
+		// repeats the action and the command, so the head can name them while
+		// the call still runs.
 		id := intFromAny(meta.Input["id"])
 		proc := "process"
 		if id > 0 {
@@ -156,23 +159,36 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 		}
 		switch act {
 		case "start":
-			// The head has to say the command keeps running after the call:
-			// the shell tool's card is the foreground one ("Ran <cmd>"), and
-			// this word is the only thing that tells the two apart (owner
-			// 2026-11-24).
-			if isFailed {
-				action = "Failed to start background process"
-			} else if isRunning || isPending {
-				action = "Starting background process"
-			} else {
-				action = "Started background process"
-			}
 			target = InputString(meta, "command")
 			if target == "" {
 				target = strings.TrimSpace(meta.Invocation)
 			}
-			if w := strings.TrimSpace(InputString(meta, "wait")); w != "" {
-				suffix = "wait " + w
+			// A start that carries a readiness wait blocks this call until the
+			// process is ready, so its head may not claim it returned at once:
+			// a 4m48s readiness poll read as "Started background process" and
+			// told the reader the opposite of what the call was doing (owner
+			// 2026-11-24). While it waits it says what it is waiting for.
+			if waitMode := strings.TrimSpace(InputString(meta, "wait")); waitMode != "" {
+				if isFailed {
+					action = "Failed to wait for"
+				} else if isRunning || isPending {
+					action = "Waiting for"
+				} else {
+					action = "Waited for"
+				}
+				suffix = "to be ready"
+			} else {
+				// The head has to say the command keeps running after the call:
+				// the shell tool's card is the foreground one ("Ran <cmd>"), and
+				// this word is the only thing that tells the two apart (owner
+				// 2026-11-24).
+				if isFailed {
+					action = "Failed to start background process"
+				} else if isRunning || isPending {
+					action = "Starting background process"
+				} else {
+					action = "Started background process"
+				}
 			}
 		case "wait":
 			if isFailed {
@@ -183,11 +199,20 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 				action = "Waited for"
 			}
 			target = proc
+			if cmd := InputString(meta, "command"); cmd != "" {
+				// The command this call drives: the engine resolves the id when
+				// it dispatches, and every live delta repeats the facts, so a
+				// running card names its command too. A call this state cannot
+				// resolve keeps its id rather than guessing.
+				target = cmd
+			}
 		case "log":
 			// A log card borrows no verb from another tool: "Read process #3
 			// log" is what a read_file card says, and the reader could not
 			// tell the two apart (owner 2026-11-24). The Chinese word puts the
-			// process inside the sentence through HEADER_TARGET_SLOT.
+			// process inside the sentence through HEADER_TARGET_SLOT. The
+			// command is what the reader is looking at the output of, so it
+			// names the target the way a wait or kill does.
 			if isFailed {
 				action = "Failed to read log of"
 			} else if isRunning || isPending {
@@ -196,6 +221,13 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 				action = "Read log of"
 			}
 			target = proc
+			if cmd := InputString(meta, "command"); cmd != "" {
+				// The engine resolves the id when it dispatches, and every live
+				// delta repeats the facts, so the head names the command too. A
+				// call this state cannot resolve keeps its id rather than
+				// guessing.
+				target = cmd
+			}
 		case "kill":
 			if isFailed {
 				action = "Failed to kill"
@@ -205,6 +237,13 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 				action = "Killed"
 			}
 			target = proc
+			if cmd := InputString(meta, "command"); cmd != "" {
+				// The command this call drives: the engine resolves the id when
+				// it dispatches, and every live delta repeats the facts, so a
+				// running card names its command too. A call this state cannot
+				// resolve keeps its id rather than guessing.
+				target = cmd
+			}
 		case "list":
 			// The verb carries the object (like peer_list's "Listed agents"), so
 			// the Chinese head reads "已列出进程" instead of "已列出 processes".
@@ -226,6 +265,12 @@ func DisplayHeaderParts(f DisplayFrame, cwd string) HeaderParts {
 				action = "Called"
 			}
 			target = proc
+			if cmd := InputString(meta, "command"); cmd != "" {
+				// The verb stays generic — this build has no word for the
+				// action — but the command is still what the reader is
+				// watching (owner 2026-11-24).
+				target = cmd
+			}
 		}
 
 	// --- Web ---

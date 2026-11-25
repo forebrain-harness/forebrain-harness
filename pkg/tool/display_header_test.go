@@ -99,24 +99,53 @@ func TestStoppedCardSaysNothing(t *testing.T) {
 
 // TestDisplayPartsNamesTheProcessCommandAndID pins the second of the card
 // rules for the process tool: the head names what the call acts on — the
-// command a start runs, the id a wait/log/kill drives, the registry a list
-// reads — instead of a head that named only the tool and left the user
-// watching a timer for minutes.
+// command a start runs, the command a wait or kill drives, the id a log drives,
+// the registry a list reads — instead of a head that named only the tool and left
+// the user watching a timer for minutes.
 func TestDisplayPartsNamesTheProcessCommandAndID(t *testing.T) {
-	startRunning := DisplayFrame{Title: "process", Meta: ToolMeta{Status: "running", Input: map[string]any{
+	// A start that carries a readiness wait blocks the call, so the head says what
+	// it waits for instead of claiming a background start.
+	startWaiting := DisplayFrame{Title: "process", Meta: ToolMeta{Status: "running", Input: map[string]any{
 		"action": "start", "command": "go test ./pkg/tool", "wait": "log",
 	}}}
-	action, target, suffix := DisplayParts(startRunning, t.TempDir())
+	action, target, suffix := DisplayParts(startWaiting, t.TempDir())
+	require.Equal(t, "Waiting for", action)
+	require.Equal(t, "go test ./pkg/tool", target)
+	require.Equal(t, "to be ready", suffix)
+
+	startWaitingDone := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
+		"action": "start", "command": "go test ./pkg/tool", "wait": "log",
+	}}}
+	action, target, suffix = DisplayParts(startWaitingDone, t.TempDir())
+	require.Equal(t, "Waited for", action)
+	require.Equal(t, "go test ./pkg/tool", target)
+	require.Equal(t, "to be ready", suffix)
+
+	startWaitingFailed := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "failed", Input: map[string]any{
+		"action": "start", "command": "go test ./pkg/tool", "wait": "log",
+	}}}
+	action, target, suffix = DisplayParts(startWaitingFailed, t.TempDir())
+	require.Equal(t, "Failed to wait for", action)
+	require.Equal(t, "go test ./pkg/tool", target)
+	require.Equal(t, "to be ready", suffix)
+
+	// A plain start returns at once, so it keeps the background wording and
+	// carries no suffix of its own.
+	startRunning := DisplayFrame{Title: "process", Meta: ToolMeta{Status: "running", Input: map[string]any{
+		"action": "start", "command": "go test ./pkg/tool",
+	}}}
+	action, target, suffix = DisplayParts(startRunning, t.TempDir())
 	require.Equal(t, "Starting background process", action)
 	require.Equal(t, "go test ./pkg/tool", target)
-	require.Equal(t, "wait log", suffix)
+	require.Equal(t, "", suffix)
 
 	startDone := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
 		"action": "start", "command": "go test ./pkg/tool",
 	}}}
-	action, target, _ = DisplayParts(startDone, t.TempDir())
+	action, target, suffix = DisplayParts(startDone, t.TempDir())
 	require.Equal(t, "Started background process", action)
 	require.Equal(t, "go test ./pkg/tool", target)
+	require.Equal(t, "", suffix)
 
 	waitRunning := DisplayFrame{Title: "process", Meta: ToolMeta{Status: "running", Input: map[string]any{
 		"action": "wait", "id": float64(7),
@@ -126,9 +155,35 @@ func TestDisplayPartsNamesTheProcessCommandAndID(t *testing.T) {
 	require.Equal(t, "process #7", target)
 
 	killDone := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
-		"action": "kill", "id": float64(7),
+		"action": "kill", "id": float64(7), "command": "sleep 300",
 	}}}
 	action, target, _ = DisplayParts(killDone, t.TempDir())
+	require.Equal(t, "Killed", action)
+	require.Equal(t, "sleep 300", target)
+
+	// A settled kill names the command its facts carry, and so does a wait while
+	// it runs: the engine resolves the id at dispatch and every delta repeats it.
+	killSettled := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{
+		Status: "completed",
+		Input:  map[string]any{"action": "kill", "id": float64(7), "reason": "x", "command": "while true; do date; sleep 1; done"},
+	}}
+	action, target, _ = DisplayParts(killSettled, t.TempDir())
+	require.Equal(t, "Killed", action)
+	require.Equal(t, "while true; do date; sleep 1; done", target)
+
+	waitStreaming := DisplayFrame{Title: "process", Meta: ToolMeta{
+		Status: "running",
+		Input:  map[string]any{"action": "wait", "id": float64(7), "command": "while true; do echo tick; sleep 1; done"},
+	}}
+	action, target, _ = DisplayParts(waitStreaming, t.TempDir())
+	require.Equal(t, "Waiting for", action)
+	require.Equal(t, "while true; do echo tick; sleep 1; done", target)
+
+	// A call this state cannot resolve keeps its id.
+	killUnresolved := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{
+		Status: "completed", Input: map[string]any{"action": "kill", "id": float64(7), "reason": "x"},
+	}}
+	action, target, _ = DisplayParts(killUnresolved, t.TempDir())
 	require.Equal(t, "Killed", action)
 	require.Equal(t, "process #7", target)
 
@@ -149,16 +204,33 @@ func TestDisplayPartsNamesTheProcessCommandAndID(t *testing.T) {
 	require.Equal(t, "go test ./pkg/tool", target)
 
 	readLog := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
-		"action": "log", "id": float64(7),
+		"action": "log", "id": float64(7), "command": "go test ./pkg/tool",
 	}}}
 	action, target, _ = DisplayParts(readLog, t.TempDir())
 	require.Equal(t, "Read log of", action)
+	require.Equal(t, "go test ./pkg/tool", target)
+
+	// A log call this state cannot resolve keeps its id.
+	readLogUnresolved := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
+		"action": "log", "id": float64(7),
+	}}}
+	action, target, _ = DisplayParts(readLogUnresolved, t.TempDir())
+	require.Equal(t, "Read log of", action)
 	require.Equal(t, "process #7", target)
 
+	// An action this build does not name keeps the generic verb, and still names
+	// the command the call carries; without one it keeps the id.
 	unknown := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
-		"action": "teleport", "id": float64(7),
+		"action": "teleport", "id": float64(7), "command": "go test ./pkg/tool",
 	}}}
 	action, target, _ = DisplayParts(unknown, t.TempDir())
+	require.Equal(t, "Called", action)
+	require.Equal(t, "go test ./pkg/tool", target)
+
+	unknownUnresolved := DisplayFrame{Title: "process", Final: true, Meta: ToolMeta{Status: "completed", Input: map[string]any{
+		"action": "teleport", "id": float64(7),
+	}}}
+	action, target, _ = DisplayParts(unknownUnresolved, t.TempDir())
 	require.Equal(t, "Called", action)
 	require.Equal(t, "process #7", target)
 }

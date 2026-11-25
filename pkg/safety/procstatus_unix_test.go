@@ -149,6 +149,9 @@ func TestKillIsBoundedWhenAPipeHolderEscapesTheGroup(t *testing.T) {
 	if want := 128 + int(syscall.SIGKILL); res.ExitCode != want {
 		t.Fatalf("exit=%d, want %d: a killed command keeps the exit its own signal produced", res.ExitCode, want)
 	}
+	if res.ExitSignal != int(syscall.SIGKILL) {
+		t.Fatalf("exit signal = %d, want %d: the card explains the code by the signal that produced it", res.ExitSignal, int(syscall.SIGKILL))
+	}
 	// The holder is out of the group on purpose: it survives the signal, so the
 	// bound — not the holder's exit — is what ended the wait.
 	holder, ok := readPID(pidFile)

@@ -207,6 +207,11 @@ type CommandResult struct {
 	OutputSpoolOmittedBytes int64
 	ExitCode                int
 	ExecutionTiming         llm.ExecutionTiming
+	// ExitSignal is the signal that ended the command, 0 when the command
+	// exited by itself. ExitCode is 128+ExitSignal for such a death, and only
+	// this field says which signal it was: the number alone is also a plain
+	// exit code on a platform with no signals, or one a program chose.
+	ExitSignal int
 }
 
 type UnavailableError struct {

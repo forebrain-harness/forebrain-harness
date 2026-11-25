@@ -2162,13 +2162,26 @@ func (w *toolOrchestrationLLM) executeOneToolCall(
 	// with the call's context: every event of this call — the start, the
 	// handler's output deltas, the completion — carries the same StartedAt.
 	startedAt := time.Now()
+	// A process wait or kill names its process by id, so its card can only name
+	// the command if the dispatch resolution rides the call's events — on a copy,
+	// because the arguments are what the model sent. The started event, every
+	// output delta (the tool's own, below) and the completion all carry it, so the
+	// head names the same command from the first frame to the last.
+	cardInput := stepInput
+	if cmd := w.state.ProcessStartedCommand(name, stepInput); cmd != "" {
+		cardInput = make(map[string]any, len(stepInput)+1)
+		for key, value := range stepInput {
+			cardInput[key] = value
+		}
+		cardInput["command"] = cmd
+	}
 	if step := tool.StepHookFromContext(ctx, w.state); step != nil {
 		step(ctx, tool.StepEvent{
 			Kind:            tool.StepKindToolStarted,
 			StepID:          stepID,
 			ToolName:        name,
 			ToolDescription: toolDescription,
-			Input:           stepInput,
+			Input:           cardInput,
 			StartedAt:       startedAt,
 			SuppressUI:      suppress.started,
 			SkillName:       skillName,
@@ -2193,7 +2206,7 @@ func (w *toolOrchestrationLLM) executeOneToolCall(
 		StepID:          stepID,
 		ToolName:        name,
 		ToolDescription: toolDescription,
-		Input:           stepInput,
+		Input:           cardInput,
 		Output:          output,
 		Error:           errText,
 		ActionID:        actionID,

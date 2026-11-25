@@ -147,7 +147,9 @@ func TestProcessWaitTCPReportsReadyWhileRunning(t *testing.T) {
 	}
 	id := processTestID(t, started)
 	rec := processRecordForTest(t, st, id)
-	defer func() { _, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: rec.id}) }()
+	defer func() {
+		_, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: rec.id, Reason: "test cleanup"})
+	}()
 	waited, err := callProcess(t, tl, ctx, ProcessInput{
 		Action: "wait", ID: id, Wait: "tcp", Address: listener.Addr().String(), TimeoutMs: 5000,
 	})
@@ -156,6 +158,11 @@ func TestProcessWaitTCPReportsReadyWhileRunning(t *testing.T) {
 	}
 	if ready, _ := waited["ready"].(bool); !ready {
 		t.Fatalf("wait did not see the listening port: %+v", waited)
+	}
+	// The card names the command it waited on, so the head can say what is being
+	// waited for instead of only which id (owner 2026-11-24).
+	if got, _ := waited["command"].(string); got != "sleep 30" {
+		t.Fatalf("a ready wait does not name the command: %+v", waited)
 	}
 	if rec.handle.Exited() {
 		t.Fatal("the process exited while the wait was ready")
@@ -186,6 +193,9 @@ func TestProcessWaitTCPTimesOutWithTheLogTail(t *testing.T) {
 	}
 	if ready, _ := waited["ready"].(bool); ready {
 		t.Fatalf("wait reported ready on a closed port: %+v", waited)
+	}
+	if got, _ := waited["command"].(string); got != "echo no-server-here; sleep 30" {
+		t.Fatalf("a timed-out wait does not name the command: %+v", waited)
 	}
 	tail, _ := waited["tail"].(string)
 	if !strings.Contains(tail, "no-server-here") {
@@ -224,6 +234,193 @@ func TestProcessWaitOnAnExitedProcessReturnsImmediately(t *testing.T) {
 	if ready, _ := waited["ready"].(bool); ready {
 		t.Fatalf("a dead process was reported ready: %+v", waited)
 	}
+	if got, _ := waited["command"].(string); got != "echo done" {
+		t.Fatalf("a wait on an exited process does not name the command: %+v", waited)
+	}
+}
+
+// A wait, kill or log card names the command before any result exists: the
+// engine resolves the id against this state's registry when it dispatches the
+// call.
+func TestProcessStartedCommandResolvesTheID(t *testing.T) {
+	st, tl, _, projectDir := newProcessToolForTest(t)
+	ctx := processTestContext(projectDir)
+	started, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: "sleep 30", WorkDir: projectDir})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	id := processTestID(t, started)
+	for _, action := range []string{"wait", "kill", "log"} {
+		if got := st.ProcessStartedCommand("process", map[string]any{"action": action, "id": float64(id)}); got != "sleep 30" {
+			t.Fatalf("%s resolved to %q, want the command", action, got)
+		}
+	}
+	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"}); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	// The record outlives the process (list can still say what ran), so a wait on
+	// an exited one still names it.
+	if got := st.ProcessStartedCommand("process", map[string]any{"action": "wait", "id": float64(id)}); got != "sleep 30" {
+		t.Fatalf("an exited process resolved to %q, want its command", got)
+	}
+	if got := st.ProcessStartedCommand("process", map[string]any{"action": "start", "command": "x"}); got != "" {
+		t.Fatalf("start resolved to %q, want nothing (its command is its own argument)", got)
+	}
+	if got := st.ProcessStartedCommand("shell", map[string]any{"action": "wait", "id": float64(id)}); got != "" {
+		t.Fatalf("another tool resolved to %q", got)
+	}
+	if got := st.ProcessStartedCommand("process", map[string]any{"action": "wait", "id": float64(999)}); got != "" {
+		t.Fatalf("an unknown id resolved to %q", got)
+	}
+}
+
+// A wait that streams output redraws its card from each delta's own facts: a
+// delta carrying only the id left the head saying "Calling process #1".
+func TestProcessWaitDeltasCarryTheActionAndCommand(t *testing.T) {
+	_, tl, _, projectDir := newProcessToolForTest(t)
+	command := "while true; do echo tick; sleep 0.2; done"
+	plainCtx := processTestContext(projectDir)
+	started, err := callProcess(t, tl, plainCtx, ProcessInput{Action: "start", Command: command, WorkDir: projectDir})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	id := processTestID(t, started)
+	defer func() {
+		_, _ = callProcess(t, tl, plainCtx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"})
+	}()
+	var mu sync.Mutex
+	var deltas []StepEvent
+	waitCtx := WithStepHook(plainCtx, func(_ context.Context, evt StepEvent) {
+		if evt.Kind != StepKindToolOutputDelta || evt.ToolName != "process" {
+			return
+		}
+		mu.Lock()
+		deltas = append(deltas, evt)
+		mu.Unlock()
+	})
+	if _, err := callProcess(t, tl, waitCtx, ProcessInput{Action: "wait", ID: id, Wait: "log", Pattern: "never-matches", TimeoutMs: 600}); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		got := append([]StepEvent(nil), deltas...)
+		mu.Unlock()
+		if len(got) > 0 {
+			for _, evt := range got {
+				if action, _ := evt.Input["action"].(string); action != "wait" {
+					t.Fatalf("a wait delta carries action %q, want wait: %+v", action, evt.Input)
+				}
+				if cmd, _ := evt.Input["command"].(string); cmd != command {
+					t.Fatalf("a wait delta carries command %q, want %q", cmd, command)
+				}
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the wait streamed no output delta to inspect")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A start that streams during its readiness wait keeps its verb: its emitter
+// carried the command but never the action, so the head fell to "Calling".
+func TestProcessStartDeltasCarryTheAction(t *testing.T) {
+	_, tl, _, projectDir := newProcessToolForTest(t)
+	command := "while true; do echo tick; sleep 0.2; done"
+	var mu sync.Mutex
+	var deltas []StepEvent
+	ctx := WithStepHook(processTestContext(projectDir), func(_ context.Context, evt StepEvent) {
+		if evt.Kind != StepKindToolOutputDelta || evt.ToolName != "process" {
+			return
+		}
+		mu.Lock()
+		deltas = append(deltas, evt)
+		mu.Unlock()
+	})
+	started, err := callProcess(t, tl, ctx, ProcessInput{
+		Action: "start", Command: command, WorkDir: projectDir,
+		Wait: "log", Pattern: "never-matches", TimeoutMs: 700,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	id := processTestID(t, started)
+	defer func() {
+		_, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"})
+	}()
+	mu.Lock()
+	got := append([]StepEvent(nil), deltas...)
+	mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("the start streamed no output delta to inspect")
+	}
+	for _, evt := range got {
+		if action, _ := evt.Input["action"].(string); action != "start" {
+			t.Fatalf("a start delta carries action %q, want start: %+v", action, evt.Input)
+		}
+		if cmd, _ := evt.Input["command"].(string); cmd != command {
+			t.Fatalf("a start delta carries command %q, want %q", cmd, command)
+		}
+		// This start waits for readiness, so the call blocks: every delta has to
+		// say so, or the card goes back to claiming a background start while the
+		// turn is stuck in the wait (owner 2026-11-24).
+		if waitMode, _ := evt.Input["wait"].(string); waitMode != "log" {
+			t.Fatalf("a waiting start delta carries wait %q, want log: %+v", waitMode, evt.Input)
+		}
+	}
+}
+
+// A plain start returns at once, so its deltas must not claim a wait the call
+// does not have.
+func TestProcessPlainStartDeltasCarryNoWait(t *testing.T) {
+	_, tl, _, projectDir := newProcessToolForTest(t)
+	command := "while true; do echo tick; sleep 0.2; done"
+	// A bare start returns in milliseconds and the emitter closes with the call,
+	// so the first chunk is raced against the shell's startup: retry until one
+	// lands instead of asserting on that timing.
+	for attempt := 0; attempt < 6; attempt++ {
+		var mu sync.Mutex
+		var deltas []StepEvent
+		ctx := WithStepHook(processTestContext(projectDir), func(_ context.Context, evt StepEvent) {
+			if evt.Kind != StepKindToolOutputDelta || evt.ToolName != "process" {
+				return
+			}
+			mu.Lock()
+			deltas = append(deltas, evt)
+			mu.Unlock()
+		})
+		started, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: command, WorkDir: projectDir})
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		id := processTestID(t, started)
+		deadline := time.Now().Add(400 * time.Millisecond)
+		for {
+			mu.Lock()
+			got := append([]StepEvent(nil), deltas...)
+			mu.Unlock()
+			if len(got) > 0 {
+				for _, evt := range got {
+					if waitMode, ok := evt.Input["wait"]; ok {
+						t.Fatalf("a plain start delta carries wait %v: %+v", waitMode, evt.Input)
+					}
+					if cmd, _ := evt.Input["command"].(string); cmd != command {
+						t.Fatalf("a plain start delta carries command %q, want %q", cmd, command)
+					}
+				}
+				_, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"})
+				return
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		_, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"})
+	}
+	t.Fatal("a plain start streamed no output delta to inspect in six attempts")
 }
 
 // 5. Killing is idempotent: the second kill is the state the caller asked for.
@@ -235,7 +432,7 @@ func TestProcessKillIsIdempotent(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	id := processTestID(t, started)
-	first, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id})
+	first, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"})
 	if err != nil {
 		t.Fatalf("first kill: %v", err)
 	}
@@ -245,12 +442,37 @@ func TestProcessKillIsIdempotent(t *testing.T) {
 	if running, _ := first["running"].(bool); running {
 		t.Fatalf("the process is still running after its kill: %+v", first)
 	}
-	second, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id})
+	if got, _ := first["command"].(string); got != "sleep 30" {
+		t.Fatalf("a kill card does not name the command it ended: %+v", first)
+	}
+	if runtime.GOOS != "windows" {
+		if got, _ := first["exit_signal"].(float64); int(got) != 9 {
+			t.Fatalf("a kill does not record the signal that ended the process: %+v", first)
+		}
+	}
+	second, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"})
 	if err != nil {
 		t.Fatalf("killing an exited process must succeed, got %v", err)
 	}
 	if running, _ := second["running"].(bool); running {
 		t.Fatalf("the process came back after its second kill: %+v", second)
+	}
+}
+
+// A kill without a reason is refused: the card has to be able to say why.
+func TestProcessKillRequiresAReason(t *testing.T) {
+	_, tl, _, projectDir := newProcessToolForTest(t)
+	ctx := processTestContext(projectDir)
+	started, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: "sleep 30", WorkDir: projectDir})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	id := processTestID(t, started)
+	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id}); err == nil || !strings.Contains(err.Error(), "reason is required for kill") {
+		t.Fatalf("a kill without a reason reported %v, want the reason error", err)
+	}
+	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"}); err != nil {
+		t.Fatalf("a kill with a reason failed: %v", err)
 	}
 }
 
@@ -299,7 +521,7 @@ func TestProcessListReflectsStartAndKill(t *testing.T) {
 		t.Fatalf("list lost the owning session: %+v", state[sleepID])
 	}
 
-	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: sleepID}); err != nil {
+	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: sleepID, Reason: "test cleanup"}); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 	after, err := callProcess(t, tl, ctx, ProcessInput{Action: "list"})
@@ -361,7 +583,7 @@ func TestProcessWaitAndKillDoNotRace(t *testing.T) {
 		_, _ = callProcess(t, tl, ctx, ProcessInput{Action: "wait", ID: id, Wait: "tcp", Address: "127.0.0.1:1", TimeoutMs: 10000})
 	}()
 	time.Sleep(100 * time.Millisecond)
-	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id}); err != nil {
+	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"}); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 	select {
@@ -389,7 +611,9 @@ func TestProcessLogSpoolGrowsUnderTheStateRoot(t *testing.T) {
 	}
 	id := processTestID(t, started)
 	rec := processRecordForTest(t, st, id)
-	defer func() { _, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: rec.id}) }()
+	defer func() {
+		_, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: rec.id, Reason: "test cleanup"})
+	}()
 	want := filepath.Join(rt.StateRoot(), "state", "process")
 	if filepath.Dir(rec.logPath) != want {
 		t.Fatalf("log path = %q, want a file under %q", rec.logPath, want)
@@ -480,7 +704,9 @@ func TestReapOrphanProcessesSparesARecycledPID(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	rec := processRecordForTest(t, st, processTestID(t, started))
-	defer func() { _, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: rec.id}) }()
+	defer func() {
+		_, _ = callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: rec.id, Reason: "test cleanup"})
+	}()
 	pid := rec.handle.PID()
 	token, ok := safety.ProcessStartToken(pid)
 	if !ok {
@@ -820,7 +1046,7 @@ func TestProcessLedgerRecordFileLivesWithTheProcess(t *testing.T) {
 		t.Fatalf("the started process has no record file: %v", err)
 	}
 	rec := processRecordForTest(t, st, id)
-	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id}); err != nil {
+	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "kill", ID: id, Reason: "test cleanup"}); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 	waitForProcessSettled(t, rec)
